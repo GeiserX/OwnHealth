@@ -1,0 +1,38 @@
+# OwnHealth: the app and its Postgres. `cp .env.example .env`, set the secrets, `docker compose up -d`.
+name: ownhealth
+
+services:
+  app:
+    image: drumsergio/ownhealth:0.1.0
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      OWNHEALTH_DATABASE_URL: postgresql://ownhealth@db:5432/ownhealth
+      OWNHEALTH_DATA_DIR: /data
+    ports:
+      - "127.0.0.1:${OWNHEALTH_HTTP_PORT:-8080}:8080"
+    volumes:
+      - ownhealth-data:/data
+
+  db:
+    image: postgres:17.11
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ownhealth
+      POSTGRES_DB: ownhealth
+      POSTGRES_PASSWORD: ${OWNHEALTH_DB_PASSWORD:?set OWNHEALTH_DB_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ownhealth -d ownhealth"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ownhealth-pg:/var/lib/postgresql/data
+
+volumes:
+  ownhealth-data:
+  ownhealth-pg:
