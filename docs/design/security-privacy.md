@@ -93,7 +93,7 @@ https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/
 
 | # | Mitigation | Where enforced | Phase |
 |---|---|---|---|
-| 1 | Every free-text field in an MCP response is wrapped as `{"trust": "untrusted_text", "origin": "<pdf_text_layer|ocr|email_subject|fhir_note|genome_facts|agent_note|person_note>", "text": "..."}`, exactly as defined in [mcp.md §9.1](mcp.md#91-untrusted-text). The citation stays in the fact's `src` id. Structured values (number, unit, range, code, date) are returned as typed fields, not text | MCP response serializer; one function, tested | v0.1 |
+| 1 | Every free-text field in an MCP response is wrapped as `{"trust": "untrusted_text", "origin": "<pdf_text_layer\|ocr\|email_subject\|fhir_note\|genome_facts\|agent_note\|person_note>", "text": "..."}`, exactly as defined in [mcp.md §9.1](mcp.md#91-untrusted-text). The citation stays in the fact's `src` id. Structured values (number, unit, range, code, date) are returned as typed fields, not text | MCP response serializer; one function, tested | v0.1 |
 | 2 | Raw document text sits behind scope `read:documents_text`, off by default on every new token. `get_source` without it returns structured fields, page, bbox and crop URL only | Scope check in `get_source`, `get_document_page` | v0.1 / v0.2 |
 | 3 | No MCP tool can create an outbound share, export, email or webhook. Sharing and export exist only in the UI, behind a human click and step-up auth | Tool registry; a test asserts the tool list | v0.1 |
 | 4 | Every agent write goes through `propose` into the review queue. The queue shows which documents and src ids the token read in the hour before the proposal (same window as [ingestion.md §7.2](ingestion.md#72-agent-assisted-extraction-v02)) (from the audit log), so the reviewer sees what was in the agent's context | Review queue | v0.1 |
@@ -249,7 +249,7 @@ Deleting a profile destroys its wrapped DEK. Its blobs become unreadable everywh
 
 - One command: `ownhealth backup` runs `pg_dump -Fc`, the blob directory and (v1.0) the wrapped-DEK table into restic (BSD-2-Clause) on any restic backend (S3-compatible, SFTP, local disk). Orthanc storage and index join the same run when the `imaging` profile is on.
 - The restic password and (from v1.0) the KEK are never inside the backup. The setup page refuses to mark backups "configured" until the user confirms the restic password is in a password manager; from v1.0, when profile keys exist, it asks the same for the KEK. Each is shown once.
-- **Restore test**, weekly by default: restore the latest snapshot into a throwaway compose project, then compare row counts per table, every blob hash, and each profile's `state_hash` against the values recorded in that backup's manifest ([architecture.md section 14](architecture.md#14-backup-and-restore)), not against the live instance, which may have changed since. A mismatch is an alert on the dashboard. We ship a broken-snapshot fixture so the test is seen to fail.
+- **Restore test**, weekly by default: restore the latest snapshot into a throwaway compose project, then compare row counts per table, every blob hash, each profile's `state_hash` and, when the `imaging` profile is on, the imaging inventory (Orthanc study, series and instance counts and each instance's hash, read from the restored Orthanc) against the values recorded in that backup's manifest ([architecture.md section 14](architecture.md#14-backup-and-restore)), not against the live instance, which may have changed since. A mismatch is an alert on the dashboard. We ship a broken-snapshot fixture so the test is seen to fail.
 - A backup that has never passed a restore test is shown as "untested", not as a backup.
 - Retention default: 7 daily, 4 weekly, 12 monthly. This retention is also the crypto-shredding window (section 7.3).
 
@@ -310,7 +310,7 @@ https://build.fhir.org/ig/HL7/smart-health-cards-and-links/links-specification.h
 | IPS summary | FHIR Bundle (`document`) per IPS, plus printable PDF (es/en) | UI | v0.3 |
 | Genome | FHIR Genomics Reporting IG resources inside the export; Phenopackets v2 is a moonshot | UI | v2 |
 | Delete one item | Soft delete with a reason: the row is hidden and derived state is recomputed, but the row and its blob stay, so `as_of` queries and old `state_hash` values still reproduce. Undo any time | UI | v0.1 |
-| Purge one item | Separate explicit action: removes the row, and its blob when no other row references it, and writes an audit event with the purged ids. Stored snapshots that could include the item are deleted ([architecture.md section 6.1](architecture.md#61-conventions)). One lab report is one blob holding many values, so purging one value leaves the original report, with that value printed in it, in place while other values still cite it; the purge screen says so and offers to purge the whole source document with every value read from it | UI, step-up | v0.1 |
+| Purge one item | Separate explicit action: removes the row, every extracted copy of its value (the candidate row it was read from and review items whose payload holds it), its `src` row when no other fact cites it, and its blob when no other row references it, and writes an audit event with the purged ids. Stored snapshots that could include the item are deleted ([architecture.md section 6.1](architecture.md#61-conventions)). Purging a whole source document also removes its pages (word layer, page image, full-text index), candidate rows and review items. Copies in older backups stay until those snapshots are pruned; the purge screen states the date the last one expires and offers "prune backups now" (section 7.3). One lab report is one blob holding many values, so purging one value leaves the original report, with that value printed in it, in place while other values still cite it; the purge screen says so and offers to purge the whole source document with every value read from it | UI, step-up | v0.1 |
 | Delete profile | Hard delete of rows and blobs; DEK destroyed from v1.0; backup window stated (section 7.3) | UI, step-up, typed confirmation | v0.1 / v1.0 |
 
 Export and deletion are never MCP tools.
@@ -448,7 +448,7 @@ Every release, before the tag:
 - [ ] App logs contain no health values, names or document text (same marker grep over app logs).
 - [ ] Backup and restore test passes on a fresh instance; broken-snapshot fixture fails it.
 - [ ] Full export round-trips to the same `state_hash` per profile.
-- [ ] Soft delete keeps `as_of` reproducible; purge removes row and blob and is audited.
+- [ ] Soft delete keeps `as_of` reproducible; purge removes the row, its candidate row and review payloads, its unshared `src` row and blob, and is audited.
 - [ ] Passkey, recovery code, step-up and token expiry paths tested.
 - [ ] OAuth (v0.2+): audience check rejects a token minted for another resource; PKCE without S256 rejected; CIMD fetch has size and timeout limits and blocks private-address SSRF.
 - [ ] Parser limits: oversized PDF, zip bomb, zip-slip path, malformed DICOM and XML entity fixtures rejected.

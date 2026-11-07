@@ -125,7 +125,7 @@ flowchart LR
 | Area | Criterion |
 |---|---|
 | Lab import | A synthetic 3-page Spanish lab report in the Synlab layout imports with >=98% of rows auto-accepted (coded to LOINC, every check passed, no click needed) and 100% of rows linked to page + bbox; the false auto-accept rate on the eval set is 0. |
-| Nothing silent | Across the eval set, every ground-truth row has exactly one outcome, either accepted or in the review queue (never both, never twice), matched by row identity: 0 dropped, 0 duplicated. |
+| Nothing silent | Across the born-digital eval set, every ground-truth row has exactly one outcome, either accepted or in the review queue (never both, never twice), matched by row identity: 0 dropped, 0 duplicated. |
 | Eval set | >=30 synthetic layouts across es/en/de/fr; text-layer row F1 >=0.97. |
 | Status | `get_health_status` answers in <300 ms p95 and <2 KB for a profile with 5 years of labs; two runs give the same `state_hash`, and tokens with different language, unit and identity settings get the same hash. |
 | MCP budget | No tool response exceeds 15k tokens on the largest fixture; default responses stay under 4k. |
@@ -194,6 +194,7 @@ flowchart LR
 |---|---|
 | Email | A password-protected lab PDF from an allowlisted sender appears in the review queue in <2 min; 100% of mail from other senders lands in quarantine. |
 | OCR | Scanned and photographed eval pages reach row F1 >=0.90 on CPU; CPU throughput measured and published (target <60 s per page, unverified). |
+| Nothing silent, scans | With the `ocr` profile on, every ground-truth row of the scanned and photographed eval set has exactly one outcome, accepted or in the review queue: 0 dropped, 0 duplicated. With it off, every such page waits as pending and is listed by `list_pending_documents`. |
 | Agent extraction | A Claude Code session using only MCP extracts a scanned page; 100% of proposals land in the queue; every ungrounded value is flagged. |
 | OAuth | claude.ai connects as a remote connector through CIMD with no DCR; audience mismatch is rejected in tests. |
 | Phone push | 7 days of 15-min Health Auto Export pushes import with 0 duplicate samples. |

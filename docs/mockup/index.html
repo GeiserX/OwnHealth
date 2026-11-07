@@ -170,7 +170,7 @@ blockquote{margin:8px 0;padding:8px 12px;border-left:3px solid var(--accent);bac
 .bar>i{display:block;height:100%;background:var(--accent)}
 /* imaging */
 .img{display:grid;grid-template-columns:250px 1fr 330px;gap:12px;height:calc(100vh - 52px - 40px - 52px)}
-.study{padding:9px 10px;border-radius:8px;border:1px solid transparent;cursor:pointer}
+.study{padding:9px 10px;border-radius:8px;border:1px solid transparent}
 .study.on{background:var(--raised);border-color:var(--line2)}
 .viewer{background:#000;border:1px solid var(--line);border-radius:var(--r);display:flex;flex-direction:column;overflow:hidden}
 .vtool{display:flex;gap:4px;padding:6px 8px;background:#0b0c0f;border-bottom:1px solid #1d2028}
@@ -254,7 +254,7 @@ pre.code{background:#0b0d11;border:1px solid var(--line);border-radius:8px;paddi
 <script>
 "use strict";
 /* ---------- state ---------- */
-const S={lang:"en",profile:"alex",unit:"mg",showApoe:false,tlTypes:new Set(),tlCountries:new Set()};
+const S={lang:"en",profile:"alex",unit:"mg",showApoe:false,tlTypes:new Set(),tlCountries:new Set(),sw:{}};
 const C={ok:"#3fb68b",watch:"#e0a84a",out:"#ef6b73",stale:"#9aa3b2",accent:"#6ea8fe",grid:"#232833",axis:"#7a8394"};
 const PROFILES=[
   {id:"alex",name:"Alex Rivera",role:"r_owner|47",av:"AR",col:"#6ea8fe",flags:4},
@@ -668,9 +668,9 @@ function imaging(){
   <div class="ph"><div><h1>Imaging</h1><div class="sub">Alex Rivera · 3 studies · stored in Orthanc · viewed in OHIF</div></div><div class="right"><span class="phase">imaging profile v1.0</span><button class="btn">Import DICOM folder / CD</button></div></div>
   <div class="img">
    <div class="card" style="padding:8px;overflow:auto">
-    <div class="study on" role="button" tabindex="0" aria-pressed="true"><div style="display:flex;gap:8px;align-items:center"><b>MRI right knee</b><span class="flag" style="margin-left:auto">MR</span></div><div class="dim" style="font-size:11.5px">2025-11-18 · 3 series · 412 images</div><div class="dim" style="font-size:11.5px">Imaging centre Madrid-Norte · ES</div><div style="margin-top:4px">${pill("watch","Finding")}</div></div>
-    <div class="study" role="button" tabindex="0" aria-pressed="false"><div style="display:flex;gap:8px;align-items:center"><b>Chest X-ray PA + lateral</b><span class="flag" style="margin-left:auto">CR</span></div><div class="dim" style="font-size:11.5px">2024-02-07 · 2 series · 2 images</div><div class="dim" style="font-size:11.5px">Praxis Berlin-Mitte · DE</div><div style="margin-top:4px">${pill("ok","No acute findings")}</div></div>
-    <div class="study" role="button" tabindex="0" aria-pressed="false"><div style="display:flex;gap:8px;align-items:center"><b>Abdominal ultrasound</b><span class="flag" style="margin-left:auto">US</span></div><div class="dim" style="font-size:11.5px">2022-07-01 · report only (no DICOM)</div><div class="dim" style="font-size:11.5px">LabNorte Diagnóstico · ES</div><div style="margin-top:4px">${pill("stale","Report only")}</div></div>
+    <div class="study on" aria-current="true"><div style="display:flex;gap:8px;align-items:center"><b>MRI right knee</b><span class="flag" style="margin-left:auto">MR</span></div><div class="dim" style="font-size:11.5px">2025-11-18 · 3 series · 412 images</div><div class="dim" style="font-size:11.5px">Imaging centre Madrid-Norte · ES</div><div style="margin-top:4px">${pill("watch","Finding")}</div></div>
+    <div class="study"><div style="display:flex;gap:8px;align-items:center"><b>Chest X-ray PA + lateral</b><span class="flag" style="margin-left:auto">CR</span></div><div class="dim" style="font-size:11.5px">2024-02-07 · 2 series · 2 images</div><div class="dim" style="font-size:11.5px">Praxis Berlin-Mitte · DE</div><div style="margin-top:4px">${pill("ok","No acute findings")}</div></div>
+    <div class="study"><div style="display:flex;gap:8px;align-items:center"><b>Abdominal ultrasound</b><span class="flag" style="margin-left:auto">US</span></div><div class="dim" style="font-size:11.5px">2022-07-01 · report only (no DICOM)</div><div class="dim" style="font-size:11.5px">LabNorte Diagnóstico · ES</div><div style="margin-top:4px">${pill("stale","Report only")}</div></div>
     <div class="note" style="margin-top:10px;padding:0 6px">Studies are de-identified copies. Pixel data never leaves Orthanc; MCP sees only the report text (untrusted) and study metadata.</div>
    </div>
    <div class="viewer">
@@ -885,8 +885,8 @@ function wire(){
   const svg=document.getElementById("ldl");
   if(svg)svg.querySelectorAll(".pt").forEach(p=>{const r=LDL[+p.dataset.i];p.onmousemove=e=>tip(e,`<b>${cv(r[1])} ${U()}</b> · ${pill(ldlStatus(r[1],r[4]))}<br>${r[0]} · ${r[2]} (${r[3]}) · ${r[7]}<br><span class="dim">printed range ${r[4]} mg/dL · LOINC ${r[5]}</span><br><span style="color:#6ea8fe">open source page ${r[6]} →</span>`);p.onmouseleave=e=>tip(e,null);p.onfocus=()=>{const b=p.getBoundingClientRect();p.onmousemove({clientX:b.right,clientY:b.bottom})};p.onblur=e=>tip(e,null)});
   const key=f=>e=>{if(e.key===" "||e.key==="Enter"){e.preventDefault();f()}};
-  document.querySelectorAll(".sw[role=switch]").forEach(w=>{const t=()=>{const off=w.classList.toggle("off");w.setAttribute("aria-checked",String(!off))};w.onclick=t;w.onkeydown=key(t);const l=w.nextElementSibling&&w.nextElementSibling.querySelector("div");if(l)w.setAttribute("aria-label",l.textContent)});
-  document.querySelectorAll(".study").forEach(st=>{const pick=()=>document.querySelectorAll(".study").forEach(o=>{o.classList.toggle("on",o===st);o.setAttribute("aria-pressed",String(o===st))});st.onclick=pick;st.onkeydown=key(pick)});
+  const rt=location.hash.slice(1)||"dashboard";
+  document.querySelectorAll(".sw[role=switch]").forEach((w,i)=>{const k=rt+":"+i;if(k in S.sw){w.classList.toggle("off",!S.sw[k]);w.setAttribute("aria-checked",String(S.sw[k]))}const t=()=>{const off=w.classList.toggle("off");w.setAttribute("aria-checked",String(!off));S.sw[k]=!off};w.onclick=t;w.onkeydown=key(t);const l=w.nextElementSibling&&w.nextElementSibling.querySelector("div");if(l)w.setAttribute("aria-label",l.textContent)});
 }
 document.getElementById("profiles").addEventListener("click",e=>{const b=e.target.closest(".prof");if(b){S.profile=b.dataset.p;render()}});
 document.getElementById("lang").addEventListener("click",e=>{const b=e.target.closest("button");if(b){S.lang=b.dataset.l;render()}});

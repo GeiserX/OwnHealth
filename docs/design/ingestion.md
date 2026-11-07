@@ -117,7 +117,7 @@ Structured inputs skip OCR and extraction. They go straight to normalization and
 - Dedup levels:
   1. **Exact:** same sha256 for the same profile. The new arrival becomes an extra `document_source` row (channel, ref, received_at) on the existing document. Processing stops.
   2. **Near-duplicate:** per-page perceptual hash of the rasterized page (Hamming distance <= 6 on a 64-bit pHash) plus a simhash of normalized text. Catches a portal re-download with a new footer timestamp, or a scan of a printout we already hold. A near-duplicate is processed, then shown in review as "probably the same as document X" with a link-instead-of-import action.
-  3. **Observation level:** same profile + `alias_group` + `effective_at` within 1 day + equal canonical value = one logical fact with two provenance links. Trends count it once.
+  3. **Observation level:** same profile + `alias_group` + equal canonical value + same comparator + same collection time, from two sources = one logical fact with two provenance links. Trends count it once. A missing collection time on either side, or a different comparator, sends the row to review instead ([architecture.md section 10](architecture.md#10-normalizer)).
 
 ## 5. Classification
 
@@ -263,7 +263,7 @@ sequenceDiagram
 }
 ```
 
-`bbox` is optional. Grounding runs on every row either way. A page with no word layer (a scan while the `ocr` profile is off) gives grounding nothing to check against; its agent rows go to the review queue marked `ungrounded_no_word_layer`, shown next to the page image so the person compares each digit, and they never count as grounded. A row whose value is not on the page is returned as `rejected: not_grounded` and also stored in the review queue as rejected, so the person sees what the agent claimed. Proposals never auto-accept. The review item records the agent's token id and, from the audit log, which documents and src ids that token read in the 30 minutes before the proposal ([security-privacy.md](security-privacy.md)).
+`bbox` is optional. Grounding runs on every row either way. A page with no word layer (a scan while the `ocr` profile is off) gives grounding nothing to check against; its agent rows go to the review queue marked `ungrounded_no_word_layer`, shown next to the page image so the person compares each digit, and they never count as grounded. Such a row is stored as a candidate row like any other; when the agent sent no `bbox`, its `bbox` is null and the review shows the whole page. A row whose value is not on the page is returned as `rejected: not_grounded` and also stored in the review queue as rejected, so the person sees what the agent claimed. Proposals never auto-accept. The review item records the agent's token id and, from the audit log, which documents and src ids that token read in the hour before the proposal ([security-privacy.md](security-privacy.md)).
 
 ## 8. Normalization
 

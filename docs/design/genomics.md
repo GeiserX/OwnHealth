@@ -73,8 +73,8 @@ Versioning: within v1, producers may add optional fields and new `db_versions` k
 
 - `call_state` is required on every finding that rests on a genotype. Values: `ref`, `alt`, `no_call`, `not_on_array`, `not_covered`. Imputation is not a call_state; it is `genotype.imputed: true` with `r2`.
 - `coverage[]` must list every gene of the fixed panels (ACMG SF v3.3, CPIC genes, the carrier gene list) and every hard gene the run could not read. The importer checks it against the versioned panel lists shipped with the schema and rejects a file that leaves out any panel gene, so an empty or partial map never passes. "No finding" in a gene marked `not_assessed` is never shown as negative.
-- `id` is deterministic: `f_` followed by the first 16 hex characters of `sha256("v1|" + category + "|" + gene + "|" + key)`, where `key` is the VRS ID for a variant finding, the gene for a diplotype or HLA finding, the PGS ID for a PRS and the rule name for a multi-site rule (APOE). The id holds no sample id, so two sources of one person (a 2019 chip and a 2025 genome) produce the same id for the same finding, and a re-run diffs by id.
-- Free-text fields (`summary`, `drug_guidance[].recommendation`, `limitations[]`) are capped at 2,000 characters, must not contain control characters, and are returned over MCP as `trust: untrusted_text`, because a facts file is an imported file like any PDF.
+- `id` is deterministic: `f_` followed by the first 16 hex characters of `sha256("v1|" + category + "|" + gene + "|" + key)`, where `key` is the VRS ID for a variant finding, the gene for a diplotype, the tested allele (`value.marker`, for example `HLA-B*58:01`) for an HLA finding, the PGS ID for a PRS and the rule name for a multi-site rule (APOE). A finding without a gene (a PRS) hashes `gene` as the empty string: `"v1|prs||PGS000018"`. The id holds no sample id, so two sources of one person (a 2019 chip and a 2025 genome) produce the same id for the same finding, and a re-run diffs by id.
+- Free-text fields (`summary`, `evidence.native`, `confidence.basis`, `drug_guidance[].recommendation`, `limitations[]`) are capped at 2,000 characters, must not contain control characters, and are returned over MCP as `trust: untrusted_text`, because a facts file is an imported file like any PDF.
 - The file carries no person names. OwnHealth maps `subject.sample_id` to a profile at import.
 - `subject.fingerprint` uses a defined marker panel (`ownhealth-fp-v1`, a fixed list of common SNPs shipped with the schema; its exact size is still to choose). One character per marker: `0`, `1`, `2` alternate-allele count, `.` no call. The string length must equal the panel size, and at least 90% of markers must be called.
 
@@ -356,7 +356,7 @@ Genome answers use the common response envelope of [mcp.md section 3](mcp.md#3-r
   "data": { "findings": [ { "id": "f_2b3c4d5e6f708192", "category": "pgx", "gene": "SLCO1B1",
               "summary": { "trust": "untrusted_text", "origin": "genome_facts", "text": "Reduced hepatic uptake of some statins." },
               "diplotype": "*1/*5", "phenotype": "Decreased Function",
-              "evidence": "E1", "evidence_native": "CPIC A", "confidence": "high",
+              "evidence": "E1", "evidence_native": { "trust": "untrusted_text", "origin": "genome_facts", "text": "CPIC A" }, "confidence": "high",
               "confidence_basis": { "trust": "untrusted_text", "origin": "genome_facts", "text": "single SNV, GQ 58" },
               "call_state": "alt", "status": "current", "verification": "provisional", "src": "src_g_2b3c4d5e" } ] },
   "evidence": ["E1-E3 shown; E4 hidden"],
@@ -370,10 +370,10 @@ Genome answers use the common response envelope of [mcp.md section 3](mcp.md#3-r
 
 Safety envelope, enforced in the server, not left to prompts:
 
-- **Sensitive gating covers lookups too.** With sensitive sharing off, `lookup_variant` on a site or region inside a sensitive gene (APOE, SF cancer and cardiac genes, HTT and other predictive repeat loci) returns `withheld_sensitive` and no genotype. Otherwise an agent could read APOE through rs429358 and bypass the opt-in. Regions overlapping such a gene are clipped and the clip is reported.
+- **Sensitive gating covers lookups too.** With sensitive sharing off, `lookup_variant` on a site or region inside a sensitive gene (APOE, SF cancer and cardiac genes, HTT and other predictive repeat loci) returns `withheld_sensitive` and no genotype. Otherwise an agent could read APOE through rs429358 and bypass the opt-in. The same holds for any position a withheld sensitive finding cites in its `variants[]`, inside a gene or not. Regions overlapping such a gene or position are clipped and the clip is reported.
 - **No silent negatives.** Absence is answered with a call_state or a coverage state.
 - **No write or delete.** No MCP tool imports, edits or deletes genome data or creates an export. The only agent write is `propose(kind=finding_status)`, which lands in the review queue (for example, a clinical report confirms a chip variant).
-- **Untrusted text.** Every free-text field from the facts file (`summary`, `confidence.basis`, `limitations[]`, coverage `note`, guidance text) is returned in the wrapper of [mcp.md section 9.1](mcp.md#91-untrusted-text) with `origin: genome_facts`.
+- **Untrusted text.** Every free-text field from the facts file (`summary`, `evidence.native`, `confidence.basis`, `limitations[]`, coverage `note`, guidance text) is returned in the wrapper of [mcp.md section 9.1](mcp.md#91-untrusted-text) with `origin: genome_facts`.
 - **Audit.** Every genome call logs token, tool, profile, the query (rsID, gene or region) and the fact ids returned, never genotypes. The profile's access history shows it.
 - **Budget.** Genome answers obey the 4k default and 15k maximum token budget; `get_genome_findings` without filters returns category counts plus E1 and E2 facts first.
 
@@ -395,7 +395,8 @@ Minors (profile age under 18 by birth date):
 
 - Withheld from the UI and MCP until the person turns 18: `adult_onset` facts, `sensitive` facts, carrier status, PRS for adult-onset conditions. They are stored (the file holds them) but not served.
 - Shown to guardians: PGx (it guides children's prescriptions, for example TPMT/NUDT15 with thiopurines, CYP2C19 with PPIs), childhood-onset actionable findings, HLA, traits.
-- Raw lookups follow the same line: `lookup_variant` on a minor's position or region inside a gene with a withheld finding, or an adult-onset or carrier-panel gene, returns `withheld_minor` and no genotype ([mcp.md section 9.7](mcp.md#97-sensitive-categories-genome-gating-minors)).
+- Where a PGx result also implies carrier status (a nonfunctional `DPYD` allele), the PGx finding is shown as a drug response and the carrier finding stays withheld; no answer names the inherited condition or a carrier state ([mcp.md section 9.7](mcp.md#97-sensitive-categories-genome-gating-minors)).
+- Raw lookups follow the same line: `lookup_variant` on a minor's position or region inside a gene with a withheld finding, inside an adult-onset or carrier-panel gene, or covering a position a withheld finding cites in its `variants[]` (with or without a gene), returns `withheld_minor` and no genotype ([mcp.md section 9.7](mcp.md#97-sensitive-categories-genome-gating-minors)).
 - At 18, the person gets a notice that withheld results exist and decides about each reveal. Guardian access ends unless the person grants it again.
 
 ## 8. `check_drug`: PGx joined with meds and labs
