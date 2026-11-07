@@ -95,7 +95,7 @@ https://github.com/paperless-ngx/paperless-ngx/pull/14559
 
 ### 3.2 Email-in
 
-- **Allowlist only.** A sender rule is `{address or domain, profile, doc_type_hint, pdf_password_ref}`. We match on the `From` address and require `Authentication-Results` to show DKIM or SPF pass for that domain, because `From` alone is trivial to forge. If the receiving server adds no `Authentication-Results`, the rule must say `trust_unauthenticated: true` explicitly.
+- **Allowlist only.** A sender rule is `{address or domain, profile, doc_type_hint, pdf_password_ref}`. We match on the `From` address and require `Authentication-Results` to show DKIM or SPF pass for that domain, because `From` alone is trivial to forge. Only a header stamped by the receiving server counts: the inbox setting `trusted_authserv_id` names it, and any `Authentication-Results` with another authserv-id is ignored, because a sender can write that header too. The setup guide asks the user to confirm their mail server strips incoming headers that claim its own authserv-id (RFC 8601 section 5); most do. If the receiving server adds no `Authentication-Results`, the rule must say `trust_unauthenticated: true` explicitly.
 - **Quarantine.** Mail from anyone else is stored as a blob with `status: quarantined` and is not classified, extracted or indexed. The UI shows the quarantine list with sender, subject and attachment names. Actions: release once, release and add sender, delete.
 - **Per-sender PDF passwords.** Many Spanish portals mail PDFs encrypted with a password derived from the patient's ID document number. The password lives in the secrets table, encrypted at rest, referenced by id from the sender rule. We try only that sender's passwords, never a global list. Passwords never appear in logs, job payloads, audit rows or error messages. A PDF that will not open goes to review as `encrypted_unknown_password`.
 - We store the decrypted PDF as a second blob linked to the encrypted original (`derived_from`), so the original bytes stay intact.
@@ -263,7 +263,7 @@ sequenceDiagram
 }
 ```
 
-`bbox` is optional. Grounding runs on every row either way. A row whose value is not on the page is returned as `rejected: not_grounded` and also stored in the review queue as rejected, so the person sees what the agent claimed. Proposals never auto-accept. The review item records the agent's token id and, from the audit log, which documents and src ids that token read in the 30 minutes before the proposal ([security-privacy.md](security-privacy.md)).
+`bbox` is optional. Grounding runs on every row either way. A page with no word layer (a scan while the `ocr` profile is off) gives grounding nothing to check against; its agent rows go to the review queue marked `ungrounded_no_word_layer`, shown next to the page image so the person compares each digit, and they never count as grounded. A row whose value is not on the page is returned as `rejected: not_grounded` and also stored in the review queue as rejected, so the person sees what the agent claimed. Proposals never auto-accept. The review item records the agent's token id and, from the audit log, which documents and src ids that token read in the 30 minutes before the proposal ([security-privacy.md](security-privacy.md)).
 
 ## 8. Normalization
 
@@ -334,7 +334,7 @@ https://loinc.org/4548-4
 ### 8.3 Units and UCUM
 
 - Store the unit **exactly as printed**, the parsed UCUM code, and a canonical value in one canonical unit per `alias_group`. Conversion is derived and never destructive.
-- Printed-unit synonyms map to UCUM: `mg/dl`, `mg%` to `mg/dL`; `x10^3/µL`, `10^9/L`, `x10E3/uL`, `miles/µL`, `/mm3` to `10*3/uL` or `10*9/L`; `UI/L`, `IE/l` to `[IU]/L`; `U/l` to `U/L`; `mUI/mL`, `µUI/mL`, `µIU/mL` to `m[IU]/mL` or `u[IU]/mL`. `[IU]` and `U` are not interchangeable.
+- Printed-unit synonyms map to UCUM: `mg/dl`, `mg%` to `mg/dL`; `x10^3/µL`, `10^9/L`, `x10E3/uL`, `miles/µL` to `10*3/uL` or `10*9/L`; `/mm3` and `/µL` to `/uL` (a count per microlitre, so converting to `10*3/uL` divides the value by 1,000); `UI/L`, `IE/l` to `[IU]/L`; `U/l` to `U/L`; `mUI/mL`, `µUI/mL`, `µIU/mL` to `m[IU]/mL` or `u[IU]/mL`. `[IU]` and `U` are not interchangeable.
 - **Unit dimension vs LOINC property:** the parsed unit's dimension must match the resolved code's property (MCnc = mass/volume, SCnc = substance/volume, ACnc = arbitrary units/volume, CCnc = catalytic/volume, NCnc = count/volume, MFr/SFr = fraction, ArVRat = volume rate/area). A mismatch sends the row to review. This one check catches most column shifts.
 - **Mass to molar** needs a molar mass per analyte. UCUM cannot infer it and wrong molar masses are a documented failure. We keep `data/terminology/conversions.yaml`, one entry per analyte, with a citation and a unit test per entry:
 
@@ -395,8 +395,8 @@ Every candidate row, from any source, runs the same validators. Each failure add
 | Plausibility | Within hard physiological limits per `alias_group` (`data/terminology/limits/labs.tsv`, e.g. glucose 10-1000 mg/dL, sodium 90-200 mmol/L, HbA1c 3-20 %) | `implausible` |
 | Factor 1000 | Value out of limits but value x1000 or /1000 is inside | `suspect_separator` |
 | Range sanity | low < high; value not equal to a range bound text token in the same row | `range_parse`, `value_is_range` |
-| Grounding | Value token (separator-tolerant) found in the page word layer, inside the row bbox +/- 4 pt for rule extractors, anywhere on the page for agent rows; name tokens on the same line band | `not_grounded`, `name_not_on_line` |
-| Identity | Patient name and birth date on the page match the target profile (fuzzy, accent-insensitive) | `identity_mismatch`, `identity_missing` |
+| Grounding | Value token (separator-tolerant) found in the page word layer, inside the row bbox +/- 4 pt for rule extractors, anywhere on the page for agent rows; name tokens on the same line band. For a structured import (FHIR, Apple Health) the value must be the one at the row's `json_pointer` or record in the stored blob | `not_grounded`, `name_not_on_line` |
+| Identity | Patient name and birth date on the page match the target profile (fuzzy, accent-insensitive). For a structured import, the resource's linked `Patient` (name, birth date, identifiers) matches the profile; an Apple Health export is bound to the profile chosen at upload | `identity_mismatch`, `identity_missing` |
 | Dates | Collection date not in the future, not before birth, not after report date | `date_invalid` |
 | Duplicate | Same fact already accepted from another source | `duplicate` (link, not import) |
 | Conflict | Same `alias_group` + date, different value, already accepted | `conflict` |
@@ -407,7 +407,7 @@ A row is committed without a click only when all of these hold:
 - every check in the table above passes;
 - `row_conf >= 0.95` (instance setting `ingest.auto_accept_threshold`, never below 0.90);
 - the source allows it: a known vendor template or generic rules on a native text layer; OCR with a matching vendor template at `row_conf >= 0.98`; or a structured import with a valid code and unit;
-- identity is matched, not just hinted: the Identity check passed on the page itself, not only the inbox's profile hint.
+- identity is matched, not just hinted: the Identity check passed on the page itself (or on the linked `Patient` for a structured import), not only the inbox's profile hint.
 
 An auto-accepted row is labelled `accepted_by: auto` and stays one click away from correction in the UI. Agent proposals and any row with a reason code always go to review. A document whose rows all passed the checks but missed the threshold can be bulk-accepted in the UI with one action; those rows are labelled `accepted_by: person`.
 

@@ -235,7 +235,8 @@ Input:
 ```json
 {"type":"object","properties":{
   "profile":{"type":"string"},
-  "as_of":{"type":"string","format":"date"}},
+  "as_of":{"type":"string","format":"date"},
+  "cursor":{"type":"string"}},
  "additionalProperties":false}
 ```
 
@@ -415,7 +416,7 @@ Example:
       {"id": "f_a402", "category": "carrier", "gene": "HFE", "hgvs": "NM_000410.4:c.845G>A",
        "rsid": "rs1800562", "zygosity": "het", "clinvar": {"variation_id": 9, "stars": 3, "significance": "Pathogenic"},
        "evidence": "E1", "confidence": "high", "call_state": "alt",
-       "text": "One copy of HFE C282Y. Relevant for family testing.", "src": "src_g44"}
+       "text": {"trust": "untrusted_text", "origin": "genome_facts", "text": "One copy of HFE C282Y. Relevant for family testing."}, "src": "src_g44"}
     ]
   },
   "not_assessed": [
@@ -580,9 +581,10 @@ Output:
 ```
 
 - `status` is the lifecycle: `provisional` (still in the review queue), `current`, `superseded` (with `superseded_by`) or `retracted` (with reason); `gone` means deleted in the UI. An id the token's profiles do not own returns `unknown`, the same as an id that never existed, so ids do not leak existence.
+- `location` and `crop_url` exist only for values read from a document. Other sources fill `import` instead and set `location` to null: for FHIR the resource type and id plus a JSON pointer, for Apple Health the record type and start time in `export.xml`, for genome facts the facts file and finding id, for manual entries the user and time of entry (architecture.md `src.kind`).
 - `crop_url` is a UI deep link that needs a logged-in session. It is not a bearer capability and gives nothing to whoever holds the URL alone.
 - `extraction.accepted` is `auto` when the row met the auto-accept rule (ingestion.md section 9: every check passed, row confidence at least 0.95, the source allows it, the identity matches) or `person` with `confirmed_at` when someone confirmed it in the queue.
-- With `include_text: true` and `read:documents_text`, `text` is `{"trust": "untrusted_text", "origin": "pdf_text_layer", "text": "…"}` for the cited page only.
+- With `include_text: true` and `read:documents_text`, `text` is `{"trust": "untrusted_text", "origin": "pdf_text_layer", "text": "…"}` for the cited page only. A page can hold more than the cited fact, so its text comes back only when the token can read every category of fact extracted from that page and every sensitivity label on the document. Otherwise `text` stays null and the missing scopes are named in `withheld.by_scope`. v0.1 does not redact part of a page.
 
 ### 5.8 `propose`
 
@@ -590,7 +592,7 @@ Purpose: the only write tool. The agent proposes; OwnHealth validates; a person 
 
 | Field | Value |
 |---|---|
-| Annotations | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: true` (same payload hash returns the same proposal), `openWorldHint: false` |
+| Annotations | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: true` (the same resolved profile, `kind` and payload hash return the same proposal; the authorization check runs first), `openWorldHint: false` |
 | Budget | 1k |
 | Limits | Per-day and per-call caps in section 9.4 |
 
@@ -651,7 +653,7 @@ Purpose: one page for the agent to read. Scopes `read:documents_text` and `write
 
 Input `{"doc_id": string, "page": integer, "include": ["words","image"]}` (default `["words"]`).
 
-Output: `words` as lines with bboxes `{text, bbox}` wrapped in one `untrusted_text` block, plus an `image` content block (PNG, 150 dpi, max 1600 px) when asked. The agent then calls `propose` with `kind: "observations"`; grounding against the same word layer happens server-side.
+Output: `words` as lines with bboxes `{text, bbox}` wrapped in one `untrusted_text` block, plus an `image` content block (PNG, 150 dpi, max 1600 px) when asked. The page rule of `get_source` applies to words and image alike: a page from a document with a sensitivity label the token cannot read, or with facts already extracted in categories outside its scopes, is not returned. The agent then calls `propose` with `kind: "observations"`; grounding against the same word layer happens server-side.
 
 ```mermaid
 flowchart LR
@@ -696,7 +698,7 @@ User-invoked templates. The server runs no model; a prompt only returns messages
 
 Imported text is data, not instructions. A PDF from the email inbox can carry hidden text aimed at the agent, and the agent holds private data and its own outbound tools at the same time.
 
-- Every free-text field that did not come from our own templates is returned as `{"trust": "untrusted_text", "origin": "<pdf_text_layer|ocr|email_subject|fhir_note|agent_note|person_note>", "text": "…"}`.
+- Every free-text field that did not come from our own templates is returned as `{"trust": "untrusted_text", "origin": "<pdf_text_layer|ocr|email_subject|fhir_note|genome_facts|agent_note|person_note>", "text": "…"}`.
 - Structured values are preferred. Most tools return no free text at all.
 - Raw document text is only reachable with `read:documents_text`, off by default.
 - Document text never goes into tool names, tool descriptions, prompt templates or resource names. Titles are stripped of control characters and capped at 120 chars.
@@ -767,7 +769,7 @@ Trends survive every mode because intervals are kept. The docs say plainly: what
 - **Genome sensitive findings:** APOE e4, ACMG SF cancer and cardiac genes, predictive repeat-expansion loci (the list in genomics.md section 7). The profile has two separate switches, `genome.sensitive.ui` and `genome.sensitive.agents`, both off by default; only the agents switch matters here. An agent sees a sensitive genome finding only when that switch is on and the token holds both `read:genome` and `read:sensitive`. Otherwise the finding is counted in `withheld.sensitive` and never described.
 - **Lookups follow the same gate.** `lookup_variant` on a position or region inside a sensitive gene returns `withheld_sensitive` and no genotype unless the gate above is open, so a raw lookup (for example rs429358 for APOE) cannot bypass it. Regions that overlap such a gene are clipped and the clip is reported.
 - **Raw genome:** `read:genome_raw` only, daily cap, every lookup audited with the position queried.
-- **Minors:** a profile with a birth date under the configured age of majority (default 18, configurable; per household or per profile is open, genomics.md open decision 3) is managed through `guardian` grants. Adult-onset findings, sensitive findings, carrier status and PRS for adult-onset conditions are withheld for minors whatever the scopes and switches, and counted in `withheld.minor_rule`. PGx and childhood-onset actionable findings are shown, because they guide a child's prescriptions and care. On reaching the age, the profile asks its person to claim it; guardian grants then need the person's approval.
+- **Minors:** a profile with a birth date under the configured age of majority (default 18, configurable; per household or per profile is open, genomics.md open decision 3) is managed through `guardian` grants. Adult-onset findings, sensitive findings, carrier status and PRS for adult-onset conditions are withheld for minors whatever the scopes and switches, and counted in `withheld.minor_rule`. PGx and childhood-onset actionable findings are shown, because they guide a child's prescriptions and care. `lookup_variant` follows the same rule for a minor: a position or region inside a gene with a withheld finding, or inside an adult-onset or carrier-panel gene, returns `withheld_minor` and no genotype, and regions are clipped the same way as for sensitive genes. Positions in PGx genes and genes with childhood-onset actionable findings are answered as usual. On reaching the age, the profile asks its person to claim it; guardian grants then need the person's approval.
 
 ## 10. Client setup
 

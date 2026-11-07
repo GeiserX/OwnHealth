@@ -249,7 +249,7 @@ SNOMED CT and WHO ATC content are never in the repo. Codes that arrive inside im
 - `recorded_at` is when the fact entered OwnHealth as accepted (auto-accepted or confirmed by a person, section 8). A query `as_of T` sees rows with `recorded_at <= T` and (`superseded_at` is null or `superseded_at > T`).
 - `sensitivity text[]` takes `mental_health`, `reproductive`, `sexual_health`. Rows with any label need `read:sensitive`.
 - `src` is the provenance table. Every fact points to one `src` row, and the MCP `src` citation id is its public id.
-- **Delete and purge.** Deleting an item in the UI is a soft delete: the row becomes `retracted` with a reason, disappears from current views at once and can be restored for 30 days. Nothing is removed from disk automatically. A hard purge is a separate, explicit action by the owner (step-up auth): it removes the rows, their `src` rows and any blob no other row references, and writes a `purge` audit event with ids only. Snapshots in `state_snapshot` whose inputs included purged rows get `inputs_purged = true`; they stay readable, but their `state_hash` can no longer be reproduced with `as_of`, and the restore check skips them.
+- **Delete and purge.** Deleting an item in the UI is a soft delete: the row becomes `retracted` with a reason, disappears from current views at once and can be restored for 30 days. Nothing is removed from disk automatically. A hard purge is a separate, explicit action by the owner (step-up auth): it removes the rows, their `src` rows and any blob no other row references, and writes a `purge` audit event with ids only. A snapshot body can hold the purged values, so the purge also deletes from `state_snapshot`, in the same transaction, every snapshot of that profile with `as_of` at or after the earliest `recorded_at` of the purged rows (those are the snapshots that could include them), then queues a `state.rebuild`. Their hashes are gone with them: no later `as_of` check or restore check expects them. Copies in older backups stay until restic prunes those snapshots, which the purge screen says.
 
 ### 6.2 DDL sketch
 
@@ -286,7 +286,7 @@ create table profile (              -- a person whose data we hold
 create table "grant" (              -- one row per user and profile; roles in the table below
   user_id uuid not null references app_user, profile_id uuid not null references profile,
   role text not null check (role in ('owner','guardian','caregiver','viewer')),
-  categories text[] not null,       -- read:* scope names: the most this user may read here
+  categories text[] not null,       -- read:* scope names: the most this user may read here (write scopes come from the role)
   break_glass boolean not null default false,       -- v1.0: time-boxed, read-only, owner notified
   expires_at timestamptz,           -- required when break_glass
   granted_by uuid references app_user, granted_at timestamptz not null default now(),
@@ -467,6 +467,8 @@ create table genome_finding (
   confidence text not null check (confidence in ('high','medium','low','unconfirmed')),
   call_state text not null check (call_state in ('ref','alt','no_call','not_on_array','not_covered')),
   sensitive boolean not null, adult_onset boolean not null,
+  effective_at timestamptz not null,                     -- generated_utc of the facts file
+  recorded_at timestamptz not null default now(),        -- when OwnHealth accepted it; a reclassified row gets its own
   status text not null default 'current'                 -- a reclassification supersedes the row
     check (status in ('provisional','current','superseded','retracted')),
   src_id text not null references src, supersedes uuid references genome_finding, superseded_at timestamptz,
@@ -530,7 +532,6 @@ create table state_snapshot (
   profile_id uuid not null references profile, as_of timestamptz not null,
   rules_version text not null, rules_sha256 bytea not null, derivation_version text not null,
   state_hash bytea not null, body jsonb not null,
-  inputs_purged boolean not null default false,      -- set when a hard purge removed an input row
   created_at timestamptz not null default now(),
   primary key (profile_id, as_of, rules_sha256));
 ```
@@ -543,6 +544,8 @@ effective = token.scopes ∩ grant(user, profile).categories − profile.locks
 
 The browser session counts as a token with all scopes. A user with no `grant` row on a profile cannot reach it, whatever a token says. The owner's own grant ignores `locks`; locks restrict everyone else.
 
+`categories` holds read scopes only, so the formula above decides reads. A write scope (`write:propose`) works on a profile when the token holds it and the user's role there allows writing: `owner`, `guardian` and `caregiver` may propose, `viewer` may not.
+
 | Role | Can | Cannot | Default `categories` |
 |---|---|---|---|
 | `owner` | Everything on the profile: read, import, confirm reviews, manage grants, export, delete, purge | | all |
@@ -552,7 +555,7 @@ The browser session counts as a token with all scopes. A user with no `grant` ro
 
 A profile without a login (a child, an elderly parent) is managed through guardian or caregiver grants until its person claims it. Break-glass (v1.0) adds no role: it creates a time-boxed, read-only `grant` row with `break_glass = true`, and the owner is notified. Detail: [security-privacy.md section 6](security-privacy.md) and [mcp.md section 2.4](mcp.md).
 
-Reason codes on `candidate_row.reasons` and `review_item.reasons`, one list for every importer: `loinc_unknown`, `loinc_deprecated`, `unmapped`, `unit_dimension_mismatch`, `unit_unconvertible`, `implausible`, `suspect_separator`, `range_parse`, `value_is_range`, `not_grounded`, `name_not_on_line`, `identity_mismatch`, `identity_missing`, `date_invalid`, `duplicate`, `conflict`, `amended_value`, `possible_injection`. The meaning of each is in [ingestion.md section 9](ingestion.md#9-validation-and-acceptance).
+Reason codes on `candidate_row.reasons` and `review_item.reasons`, one list for every importer: `loinc_unknown`, `loinc_deprecated`, `unmapped`, `unit_dimension_mismatch`, `unit_unconvertible`, `implausible`, `suspect_separator`, `range_parse`, `value_is_range`, `not_grounded`, `ungrounded_no_word_layer`, `name_not_on_line`, `identity_mismatch`, `identity_missing`, `date_invalid`, `duplicate`, `conflict`, `amended_value`, `possible_injection`. The meaning of each is in [ingestion.md section 9](ingestion.md#9-validation-and-acceptance).
 
 The `job` table is in section 8. Terminology tables (`loinc_term`, `analyte_alias`, `unit_alias`) load from `data/terminology/` at migration time and are read-only to the app.
 
@@ -598,7 +601,7 @@ create table job (
   locked_by text, locked_until timestamptz,
   last_error text,                  -- exception class and message, no payload content
   created_at timestamptz not null default now(), finished_at timestamptz);
-create unique index job_dedupe on job (dedupe_key) where state in ('queued','running');
+create unique index job_dedupe on job (dedupe_key) where state = 'queued';
 create index job_ready on job (queue, priority, id) where state = 'queued';
 ```
 
@@ -619,7 +622,7 @@ returning job.*;
 - **Wake-up:** inserting a job sends `NOTIFY ownhealth_job`. Idle workers `LISTEN` and also poll every 5 seconds.
 - **Leases:** a running job extends `locked_until` every minute. A reaper moves expired `running` jobs back to `queued`. Every job kind is idempotent: a job may run twice after a crash, and a second run gives the same rows (unique keys, `on conflict do nothing`).
 - **Retries:** exponential backoff, `run_after = now() + 2^attempts * 30 s`. After `max_attempts` the job becomes `dead` and a `review_item(kind='job_failed')` appears in the UI. Nothing fails silently.
-- **Dedupe:** `state.rebuild` for a profile is enqueued with a dedupe key, so ten imports in a row cause one rebuild after the last.
+- **Dedupe:** `state.rebuild` for a profile is enqueued with a dedupe key, so ten imports in a row cause one rebuild after the last. The key is unique among queued jobs only, so an import that lands while a rebuild runs queues a fresh one, which reads the new data. A worker takes a `state.rebuild` only under a per-profile advisory lock, so two rebuilds of one profile never run at once.
 - **Retention:** `done` jobs are deleted after 30 days; `dead` jobs stay until their review item is closed.
 
 v0.1 job kinds: `import.pdf` (text layer, vendor and generic table rules), `import.fhir_bundle`, `import.apple_health`, `import.genome_facts`, `normalize.rederive`, `state.rebuild`, `wearables.rollup`, `blob.gc`, `backup.run`, `backup.verify_restore`. v0.2 adds `ocr.document` on the `ocr` queue and the inbox pollers; v0.3 adds `genome.clinvar_diff`.
@@ -683,7 +686,7 @@ Sources: https://hl7.org/fhir/R4/ https://hl7.org/fhir/uv/ips/en/ https://build.
 - Units: a printed-unit synonym table (`mg/dl`, `mg%`, `x10^3/µL`, `UI/L` ...) to UCUM; then one canonical unit per `alias_group`. Molar conversions depend on the analyte; each molar mass is a row in `units/molar_mass.tsv` with a citation and a unit test. `IU` and `U` are never interchanged.
 - Dimension check: if the LOINC property (MCnc, SCnc, CCnc...) does not match the unit's dimension, the row goes to review as `unit_dimension_mismatch`; a value we cannot convert gets `unit_unconvertible`. Unconvertible values keep their printed form and still chart under their own unit.
 - Ranges and flags come from the report that produced the value, converted with it. The printed lab flag is kept apart from our computed `interpretation`.
-- Dedup: same profile, same `alias_group`, `effective_at` within one day and equal canonical value means one fact from two sources. We keep both `src` links and count it once in trends.
+- Dedup: same profile, same `alias_group`, equal canonical value, from two different sources (documents or imports), with the same collection time when both sources give one, means one fact from two sources. We keep both `src` links and count it once in trends. Two rows from the same source are never merged. When the values and the day match but a collection time is missing on either side, the row goes to review as `duplicate` and the person decides.
 - `derivation_version` names the normalizer code version and the versions of the alias, resolver, unit and molar mass tables. Section 13 covers re-derivation.
 
 ## 11. Current state: the deterministic rule pack
@@ -789,12 +792,13 @@ A benchmark job in CI runs the synthetic family and fails if a target regresses 
 - Before any pending migration the app writes a `pg_dump -Fc` into `/data/backups/pre-migrate-<version>.dump` (its own volume) and refuses to migrate if that fails.
 - The app refuses to start against a schema newer than its code.
 - Large table rewrites (the wearable partitioning) run as a job with progress, not inside the startup migration.
-- Derived data: when the normalizer or alias version changes, a `normalize.rederive` job recomputes derived columns (`loinc`, `unit_ucum`, `value_canonical`, `interpretation`, `derivation_version`) from the truth layer. Truth columns are never touched. The job writes one `rederive_diff` review item that lists changed rows, and a `state.rebuild` per profile. Old snapshots stay with their own `derivation_version`, so a past hash remains explainable.
+- Derived data: when the normalizer or alias version changes, a `normalize.rederive` job recomputes derived columns (`loinc`, `unit_ucum`, `value_canonical`, `interpretation`, `derivation_version`) from the truth layer. Truth columns are never touched. The job writes one `rederive_diff` review item that lists changed rows, and a `state.rebuild` per profile. Derived columns are overwritten, not versioned, so an `as_of` rebuild reproduces a past hash only under the same `derivation_version`. Across a re-derivation the stored snapshot body is the record of what the state said then, and its `derivation_version` and the `rederive_diff` item explain why a new rebuild differs.
 - Releases follow semver; the changelog lists migrations and rule pack changes.
 
 ## 14. Backup and restore
 
 - `ownhealth backup` (also the `backup.run` job, nightly by default): `pg_dump -Fc`, the blob directory, the rule overrides and a manifest (app version, schema revision, rule pack hash, per-table row counts, latest `state_hash` per profile) into a restic repository. restic and the Postgres client ship in the app image.
+- One consistent cut: the job opens a `repeatable read` transaction, exports its snapshot (`pg_export_snapshot()`), reads the manifest counts and hashes inside it and runs `pg_dump --snapshot=<id>`, so the dump and the manifest see the same rows. While the job runs it holds an advisory lock that `blob.gc` and the blob step of a hard purge also take, so no blob the dump references is deleted before restic has read it.
 - The restic password is not in the backup. The docs say so on the setup screen: keep it in a password manager, or the backup is useless.
 - `ownhealth verify-restore` (weekly job `backup.verify_restore`): restores the latest snapshot into a scratch database `ownhealth_restore_check` and a temp blob directory, then compares row counts with the manifest, re-hashes every restored blob, rebuilds state for each profile and compares `state_hash` with the manifest. Any difference creates a `restore_check_failed` review item and sets the metric. A backup that was never restored is treated as missing.
 - `ownhealth restore --snapshot <id>` restores into an empty instance.
