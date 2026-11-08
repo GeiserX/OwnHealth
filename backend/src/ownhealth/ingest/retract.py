@@ -2,7 +2,8 @@
 
 A document reaches the current view three ways: observations carry `document_id`; records,
 encounters, notes and genome findings link through their `src.document_id`; wearable samples carry
-`document_id` (0200). The facts are retracted (kept, out of the current view); samples have no
+`document_id` (0200); child documents (an export's ECGs) carry `flags.parent_document` and are
+retracted with it. The facts are retracted (kept, out of the current view); samples have no
 lifecycle, so they are deleted and the rollups they fed rebuilt. The document's import flags are
 cleared, so importing it again runs the import instead of returning the old summary.
 
@@ -23,8 +24,24 @@ _LIVE = "('current', 'provisional')"
 
 
 def retract_document_facts(conn: Connection, document_id: UUID, reason: str) -> dict:
-    """Returns {"observations": [ids], "records": {table: [ids]}, "wearable_samples": n}."""
-    out: dict = {"observations": [], "records": {}, "wearable_samples": 0}
+    """Returns {"observations": [ids], "records": {table: [ids]}, "wearable_samples": n, "documents": [ids]}.
+    `documents` are the child documents the import created (an Apple Health export's ECGs), retracted
+    with it."""
+    out: dict = {"observations": [], "records": {}, "wearable_samples": 0, "documents": []}
+    children = (
+        conn.execute(
+            text(
+                "update document set status = 'retracted', status_reason = :r where flags->>'parent_document' = :d"
+                " and status = 'active' returning id"
+            ),
+            {"d": str(document_id), "r": reason},
+        )
+        .scalars()
+        .all()
+    )
+    for child in children:
+        out["documents"].append(child)
+        retract_document_facts(conn, child, reason)
     for table in sorted(lifecycle.LIFECYCLE_TABLES):
         direct = " or f.document_id = :d" if table == "observation" else ""
         ids = (

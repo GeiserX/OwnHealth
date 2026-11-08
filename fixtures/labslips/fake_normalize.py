@@ -75,6 +75,7 @@ def normalize_row(
     lang,
     specimen=None,
     provider=None,
+    document_id=None,  # the real normalizer skips duplicates within one source; the stand-in has no check
 ) -> Normalized:
     checks: list[Check] = []
     key = _BY_NAME.get((_fold(printed_name), "urine" if specimen == "urine" else "other"))

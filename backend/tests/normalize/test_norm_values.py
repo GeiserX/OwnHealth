@@ -128,3 +128,26 @@ def test_interpret_from_the_printed_range_only():
     assert interpret(None, "negative", neg) == "N"
     assert interpret(None, "not_detected", neg) == "N"
     assert interpret(None, "positive", neg) == "A"
+
+
+def test_line_breaks_separate_range_entries():
+    by_age = parse_range("0-17 años: 5-10\n18-99 años: 3-8", locale="es")
+    assert [(r.low, r.high) for r in by_age] == [(D("5"), D("10")), (D("3"), D("8"))]
+    assert pick_range(by_age, sex="male", age_years=40).high == D("8")  # an adult gets the adult range
+    two = parse_range("10-20\n30-40", locale="es")
+    assert len(two) == 2 and pick_range(two, sex="male", age_years=40) is None  # disagreement seen
+    wrapped = parse_range("Hombres:\n13-17\nMujeres:\n12-16", locale="es")  # a label continues below
+    assert [(r.applies_to, r.high) for r in wrapped] == [({"sex": "male"}, D("17")), ({"sex": "female"}, D("16"))]
+    [age] = parse_range("0-17 años:\n5-10", locale="es")
+    assert age.applies_to == {"age_min": 0, "age_max": 17} and age.high == D("10")
+
+
+def test_a_censored_value_at_an_exclusive_bound_is_inside():
+    [lt] = parse_range("< 5", locale="es")
+    assert interpret(D("5"), None, lt, comparator="<") == "N"  # "<5" against "<5": below 5
+    assert interpret(D("5"), None, lt, comparator="<=") is None  # "<=5" may be 5, which "<5" excludes
+    [gt] = parse_range("> 60", locale="es")
+    assert interpret(D("60"), None, gt, comparator=">") == "N"
+    assert interpret(D("60"), None, gt, comparator=">=") is None
+    [le] = parse_range("<= 5", locale="es")
+    assert interpret(D("5"), None, le, comparator="<=") == "N"

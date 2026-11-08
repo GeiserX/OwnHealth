@@ -127,7 +127,7 @@ def import_apple_health(conn: Connection, blobs: BlobStore, *, document_id: UUID
                 summary.reasons[k] = summary.reasons.get(k, 0) + v
 
         for name in ecg:
-            _store_ecg(conn, blobs, doc["household_id"], profile.id, name, z.read(name))
+            _store_ecg(conn, blobs, doc["household_id"], profile.id, name, z.read(name), parent=document_id)
 
     details = {
         "samples": inserted,
@@ -206,7 +206,12 @@ def _commit_samples(conn: Connection, profile_id: UUID, document_id: UUID) -> in
 # ---------------------------------------------------------- clinical, ECG ----
 
 
-def _store_ecg(conn: Connection, blobs: BlobStore, household_id, profile_id, name: str, data: bytes) -> None:
+def _store_ecg(
+    conn: Connection, blobs: BlobStore, household_id, profile_id, name: str, data: bytes, *, parent: UUID
+) -> None:
+    """One ECG CSV as its own document, owned by the export that brought it (`flags.parent_document`),
+    so retracting or moving the export takes it along. An ECG document that already existed on its
+    own stays its own."""
     sha = blobs.put_bytes(data)
     ref = create_document(
         conn,
@@ -219,6 +224,14 @@ def _store_ecg(conn: Connection, blobs: BlobStore, household_id, profile_id, nam
         channel="apple_health",
         doc_type="ecg",
     )
+    if ref.created or ref.reactivated:
+        conn.execute(
+            text(
+                "update document set flags = flags || jsonb_build_object('parent_document', cast(:p as text))"
+                " where id = :d"
+            ),
+            {"p": str(parent), "d": ref.id},
+        )
     recorded = None
     for line in data.decode("utf-8", "replace").splitlines()[:20]:
         key, _, value = line.partition(",")

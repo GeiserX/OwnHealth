@@ -72,6 +72,7 @@ def add_manual_observation(
             printed_flag=None,
             effective_at=effective_at,
             lang=lang,
+            loinc=loinc,  # a typed code drives the alias group and canonical unit, not only the column
         ).observation
     except NotImplementedError:
         obs = _fallback(profile_id, name, value, unit, effective_at, loinc)

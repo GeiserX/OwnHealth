@@ -102,6 +102,54 @@ def test_moving_an_apple_export_takes_its_samples_off_the_old_profile(conn, fami
     assert _job(conn, job).kind == "import.apple_health"
 
 
+def _ecgs(conn, profile):
+    return conn.execute(
+        text("select count(*) from document where profile_id = :p and doc_type = 'ecg' and status = 'active'"),
+        {"p": profile},
+    ).scalar()
+
+
+def _ecg_export(conn, family, store_doc, blobs, tmp_path):
+    spec = ExportSpec(days=2, end=date(2026, 11, 7), birth_date=date(1979, 5, 14), ecg_count=2)
+    doc = store_doc(conn, family, "alex", write_export(tmp_path / "ecg.zip", spec).read_bytes(), "e.zip", ZIP)
+    import_apple_health(conn, blobs, document_id=doc)
+    assert _ecgs(conn, family.profiles["alex"]) == 2
+    return doc
+
+
+def test_retracting_an_apple_export_retracts_its_ecg_documents(conn, family, blobs, store_doc, tmp_path):
+    alex = family.profiles["alex"]
+    doc = _ecg_export(conn, family, store_doc, blobs, tmp_path)
+    out = retract_document_facts(conn, doc, "document retracted: not mine")
+    assert _ecgs(conn, alex) == 0 and len(out["documents"]) == 2
+    import_apple_health(conn, blobs, document_id=doc)  # the same export again brings them back
+    assert _ecgs(conn, alex) == 2
+
+
+def test_moving_an_apple_export_takes_its_ecgs_off_the_old_profile(conn, family, blobs, store_doc, tmp_path):
+    alex, sam = family.profiles["alex"], family.profiles["sam"]
+    doc = _ecg_export(conn, family, store_doc, blobs, tmp_path)
+    assign_document(conn, doc, sam, user_id=family.users["alex"])
+    assert _ecgs(conn, alex) == 0
+
+
+def test_an_ecg_the_person_uploaded_on_its_own_stays(conn, family, blobs, store_doc, tmp_path):
+    """An ECG document that existed before the export is not the export's: it stays when the export goes."""
+    import zipfile
+
+    spec = ExportSpec(days=2, end=date(2026, 11, 7), birth_date=date(1979, 5, 14), ecg_count=1)
+    path = write_export(tmp_path / "one.zip", spec)
+    with zipfile.ZipFile(path) as z:
+        name = next(n for n in z.namelist() if "electrocardiograms/" in n)
+        data = z.read(name)
+    own = store_doc(conn, family, "alex", data, "ecg.csv", "text/csv")
+    doc = store_doc(conn, family, "alex", path.read_bytes(), "e.zip", ZIP)
+    import_apple_health(conn, blobs, document_id=doc)
+    retract_document_facts(conn, doc, "document retracted: not mine")
+    status = conn.execute(text("select status from document where id = :d"), {"d": own}).scalar()
+    assert status == "active"
+
+
 def test_a_genome_facts_file_does_not_move(conn, family, blobs):
     data = b'{"schema": "ownhealth.genome-facts/v1"}'
     doc = create_document(

@@ -400,16 +400,20 @@ class _Run:
         if row.interpretation:
             received["interpretation"] = row.interpretation
         try:
+            # the received LOINC and UCUM code are truth like the printed text: they drive the derived
+            # layer (alias group, canonical value), not only the columns they land in
             n = normalize.normalize_row(
                 self.conn,
                 profile_id=self.profile.id,
                 printed_name=row.printed_name,
                 printed_value=row.printed_value,
-                printed_unit=row.printed_unit,
+                printed_unit=row.unit_ucum or row.printed_unit,
                 printed_range=row.printed_ref_range,
                 printed_flag=row.interpretation,
                 effective_at=when,
                 lang="es" if (resource.get("language") or "").startswith("es") else "en",
+                loinc=row.loinc if mapping.loinc_valid(row.loinc) else None,
+                document_id=self.document_id,
             )
         except NotImplementedError:  # lane A not landed: keep the received codes as the derived layer
             group = (

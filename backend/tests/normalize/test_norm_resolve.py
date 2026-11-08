@@ -114,6 +114,16 @@ def test_a_method_word_is_kept_when_the_name_is_reduced(name, lang, loinc):
     assert (r.loinc, r.reasons) == (loinc, [])
 
 
+@pytest.mark.parametrize(("name", "lang"), [("Bilirubin, direkt", "de"), ("Bilirubin direct", "en")])
+def test_a_method_word_that_names_another_analyte_is_not_stripped_silently(name, lang):
+    """Direct bilirubin is its own analyte, not a method of total bilirubin: a name read as total only
+    after dropping "direkt" is a partial match, never auto-accepted."""
+    r = resolve_analyte(None, name, lang=lang, unit="mg/dL")
+    assert r.alias_group != "bilirubin_total" or "name_partial" in r.reasons
+    exact = resolve_analyte(None, "Bilirubin direkt", lang="de", unit="mg/dL")
+    assert (exact.alias_group, exact.reasons, exact.method) == ("bilirubin_direct", [], None)
+
+
 def test_a_name_matched_only_in_part_is_marked():
     r = resolve_analyte(None, "Cortisol (tarde)", lang="es", unit="ug/dL")
     assert r.alias_group == "cortisol" and "name_partial" in r.reasons

@@ -173,28 +173,38 @@ def _squash(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip(" ,-()")
 
 
-def name_keys(folded: str) -> list[tuple[str, float]]:
-    """The name as printed; then without specimen or method words and with parentheses unwrapped
-    (still exact); then, as partial matches that never auto-accept, without a parenthesis or the
-    parenthesis alone."""
-    keys = [(folded, 1.0)]
+_METHOD_RE = re.compile(rf"\(?\b(?:{'|'.join(_METHOD_WORDS.values())})(?:\b|$)\)?")
+
+
+def group_methods(group: str) -> set[str]:
+    """The methods a group's LOINC codes tell apart (LDL: calculated, direct); empty for most groups."""
+    return {c.method for c in T.codes_by_group().get(group, []) if c.method}
+
+
+def name_keys(folded: str) -> list[tuple[str, float, str | None]]:
+    """(key, confidence, stripped method). The name as printed; then without specimen or method words
+    and with parentheses unwrapped (still exact); then, as partial matches that never auto-accept,
+    without a parenthesis or the parenthesis alone. A key with a method word stripped names that
+    method: it is exact only for a group whose codes have it (LDL direct), never for "Bilirubin,
+    direkt", where the word names another analyte."""
+    keys: list[tuple[str, float, str | None]] = [(folded, 1.0, None)]
     unwrapped = _squash(re.sub(r"[()]", " ", folded))
-    keys.append((unwrapped, 0.98))
+    keys.append((unwrapped, 0.98, None))
     no_spec = _squash(_SPECIMEN_WORDS.sub(" ", folded))
-    keys.append((no_spec, EXACT))
-    words = "|".join(_METHOD_WORDS.values())
+    keys.append((no_spec, EXACT, None))
     for base in (unwrapped, no_spec):
-        keys.append((_squash(re.sub(rf"\(?\b(?:{words})(?:\b|$)\)?", " ", base)), EXACT))
+        stripped = _squash(_METHOD_RE.sub(" ", base))
+        keys.append((stripped, EXACT, method_from_name(base) if stripped != base else None))
     for base, conf in ((folded, 0.9), (no_spec, 0.88)):  # partial: below EXACT
         outside = re.sub(r"\([^)]*\)", " ", base)
-        keys.append((re.sub(r"\s+", " ", outside).strip(" ,-"), conf))
+        keys.append((re.sub(r"\s+", " ", outside).strip(" ,-"), conf, None))
         for inner in re.findall(r"\(([^)]*)\)", base):
-            keys.append((inner.strip(), conf - 0.05))
+            keys.append((inner.strip(), conf - 0.05, None))
     seen, out = set(), []
-    for k, c in keys:
+    for k, c, m in keys:
         if k and k not in seen:
             seen.add(k)
-            out.append((k, c))
+            out.append((k, c, m))
     return out
 
 
@@ -291,11 +301,12 @@ def resolve(
     dims = U.dims_of(unit_ucum)
     named_method = method_from_name(folded)
     found: dict[str, Candidate] = {}
-    for key, name_conf in name_keys(folded):
+    for key, name_conf, stripped in name_keys(folded):
         rows = [*user_aliases(conn, household_id, key), *T.aliases().get(key, [])]
         for a in rows:
             group = _twin(a.alias_group, spec, dims, text_result)
-            m = method or a.method or named_method
+            valid = group_methods(group)
+            m = next((x for x in (method, a.method, named_method) if x and x in valid), None)
             code, unit_ok, spec_ok = pick_code(group, unit_ucum, spec, m, text_result)
             conf = name_conf * (1.0 if a.lang in (lang, "") else 0.9) * (1.0 if a.source == "user" else 0.99)
             conf *= 1.0 if unit_ok else 0.5
@@ -309,11 +320,11 @@ def resolve(
                 a.alias,
                 unit_ok,
                 spec_ok,
-                name_conf < EXACT,
+                name_conf < EXACT or (stripped is not None and stripped not in valid),
             )
             if group not in found or found[group].confidence < cand.confidence:
                 found[group] = cand
-        if found and name_conf >= EXACT and any(c.unit_ok and c.specimen_ok for c in found.values()):
+        if found and name_conf >= EXACT and any(c.unit_ok and c.specimen_ok and not c.partial for c in found.values()):
             break
     for group, cand in list(found.items()):
         if cand.partial and _glossed(conn, household_id, folded, group, spec, dims, text_result):

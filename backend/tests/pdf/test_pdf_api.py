@@ -115,7 +115,7 @@ def test_assign_and_retract(app_for, engine, imported):
             ).scalar()
             == 0
         )
-    viewer = app_for(fam.users["sam"])  # Sam is guardian of Lucía: may write, may not retract without a reason
+    viewer = app_for(fam.users["sam"])  # Sam, Lucía's guardian: a blank reason is refused
     assert viewer.post(f"/api/documents/{doc}/retract", json={"reason": " "}).status_code == 422
     r = client.post(f"/api/documents/{doc}/retract", json={"reason": "wrong patient"})
     assert r.status_code == 200 and r.json()["status"] == "retracted"
