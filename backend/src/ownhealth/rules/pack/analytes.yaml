@@ -1,0 +1,29 @@
+# Display names (en, es) and the codes that identify each series. alias_group is the series key the
+# normalizer (lane A) writes; a LOINC listed here also matches an observation with another alias_group.
+analytes:
+  ldl_c:          {en: LDL-C, es: Colesterol LDL, loinc: [13457-7, 18262-6, 2089-1]}
+  lpa:            {en: Lp(a), es: Lp(a), loinc: [43583-4, 10835-7]}
+  apob:           {en: ApoB, es: ApoB, loinc: [1884-6]}
+  hba1c:          {en: HbA1c, es: HbA1c, loinc: [4548-4, 17856-6]}
+  glucose:        {en: Glucose, es: Glucosa, loinc: [2345-7, 1558-6]}
+  alt:            {en: ALT, es: ALT, loinc: [1742-6, 1743-4]}
+  ast:            {en: AST, es: AST, loinc: [1920-8]}
+  ggt:            {en: GGT, es: GGT, loinc: [2324-2]}
+  ck:             {en: CK, es: CK, loinc: [2157-6]}
+  egfr:           {en: eGFR, es: FG estimado, loinc: [98979-8, 62238-1, 33914-3]}
+  creatinine:     {en: Creatinine, es: Creatinina, loinc: [2160-0]}
+  urine_acr:      {en: Urine ACR, es: Cociente alb/creat, loinc: [9318-7, 14959-1]}
+  tsh:            {en: TSH, es: TSH, loinc: [3016-3, 11580-8]}
+  ft4:            {en: Free T4, es: T4 libre, loinc: [3024-7]}
+  hemoglobin:     {en: Haemoglobin, es: Hemoglobina, loinc: [718-7]}
+  platelets:      {en: Platelets, es: Plaquetas, loinc: [777-3, 26515-7]}
+  mcv:            {en: MCV, es: VCM, loinc: [787-2]}
+  wbc:            {en: White cells, es: Leucocitos, loinc: [6690-2, 26464-8]}
+  crp_hs:         {en: hs-CRP, es: PCR ultrasensible, loinc: [30522-7]}
+  vitamin_d_25oh: {en: Vitamin D 25-OH, es: Vitamina D 25-OH, loinc: [62292-8, 1989-3]}
+  ferritin:       {en: Ferritin, es: Ferritina, loinc: [2276-4]}
+  vitamin_b12:    {en: Vitamin B12, es: Vitamina B12, loinc: [2132-9]}
+  magnesium:      {en: Magnesium, es: Magnesio, loinc: [19123-9, 2601-3]}
+  sodium:         {en: Sodium, es: Sodio, loinc: [2951-2, 2947-0]}
+  inr:            {en: INR, es: INR, loinc: [6301-6, 34714-6]}
+  hcv_ab:         {en: Hepatitis C antibody, es: Anticuerpos hepatitis C, loinc: [16128-1, 13955-0]}

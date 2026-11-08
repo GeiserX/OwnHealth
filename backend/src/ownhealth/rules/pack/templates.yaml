@@ -1,0 +1,159 @@
+# Text templates, rendered after hashing. Information, never advice: no "you should", "take", "stop",
+# "avoid" in our own words (tests/state/test_wording.py lints every rendered string). CPIC text is
+# quoted verbatim in check_drug and is the only exception, always attributed.
+templates:
+  status.ok:            {en: In range, es: En rango}
+  status.watch:         {en: Borderline, es: Límite}
+  status.out:           {en: Out of range, es: Fuera de rango}
+  status.stale:         {en: Stale, es: Desactualizado}
+  status.nodata:        {en: No data, es: Sin datos}
+  LAB_HIGH:
+    en: "{name} {value} {unit} (H, lab range {ref}) {when}."
+    es: "{name} {value} {unit} (H, rango del laboratorio {ref}) {when}."
+  LAB_LOW:
+    en: "{name} {value} {unit} (L, lab range {ref}) {when}."
+    es: "{name} {value} {unit} (L, rango del laboratorio {ref}) {when}."
+  LAB_ABNORMAL:
+    en: "{name} {value} {unit} flagged {flag} by the lab {when}."
+    es: "{name} {value} {unit} marcado {flag} por el laboratorio {when}."
+  RCV_CHANGE:
+    en: "{name} went from {prev} to {value} {unit} ({change_pct}%) since {prev_date}, more than the reference change value of {rcv_pct}%."
+    es: "{name} pasó de {prev} a {value} {unit} ({change_pct} %) desde el {prev_date}, más que el valor de referencia del cambio ({rcv_pct} %)."
+  TREND_UP:
+    en: "{name} rose over the last {n} results ({slope} {unit} per year) to {value} {unit} {when}."
+    es: "{name} subió en los últimos {n} resultados ({slope} {unit} al año) hasta {value} {unit} {when}."
+  TREND_DOWN:
+    en: "{name} fell over the last {n} results ({slope} {unit} per year) to {value} {unit} {when}."
+    es: "{name} bajó en los últimos {n} resultados ({slope} {unit} al año) hasta {value} {unit} {when}."
+  STALE:
+    en: "{name}: last result {last}, older than the {window_months}-month window."
+    es: "{name}: último resultado {last}, fuera de la ventana de {window_months} meses."
+  NEVER_MEASURED:
+    en: "{name}: no result on record (rule {rule})."
+    es: "{name}: ningún resultado registrado (regla {rule})."
+  GENE_DRUG:
+    en: "Current {drug} with {gene} {phenotype}: CPIC lists this pair as actionable. To discuss with your prescriber."
+    es: "{drug} actual con {gene} {phenotype}: CPIC considera accionable esta combinación. Para comentar con quien lo prescribe."
+  GENE_LAB_NEVER:
+    en: "{gene} finding linked to {name}; no {name} result on record (rule {rule})."
+    es: "Hallazgo en {gene} ligado a {name}; ningún resultado de {name} registrado (regla {rule})."
+  GENE_LAB_STALE:
+    en: "{gene} finding linked to {name}; last result {last}, older than {window_days} days (rule {rule})."
+    es: "Hallazgo en {gene} ligado a {name}; último resultado {last}, de hace más de {window_days} días (regla {rule})."
+  notice:
+    en: Information from your records, not a diagnosis.
+    es: Información de tus registros, no un diagnóstico.
+  FLAGS_USE_LAB_RANGE:
+    en: Flags use each lab's own printed range.
+    es: Los avisos usan el rango impreso por cada laboratorio.
+  GENOME_RESEARCH_GRADE:
+    en: Genome findings are research-grade unless a clinical lab confirmed them.
+    es: Los hallazgos genómicos son de investigación salvo que un laboratorio clínico los haya confirmado.
+  SENSITIVE_EXCLUDED:
+    en: "{n} facts in sensitive categories are not part of this summary."
+    es: "{n} datos de categorías sensibles no forman parte de este resumen."
+  on_date:
+    en: "on {date}"
+    es: "el {date}"
+  days_ago:
+    en: "{n} days ago"
+    es: "hace {n} días"
+  days_ago.one:
+    en: "{n} day ago"
+    es: "hace {n} día"
+  # dashboard
+  subtitle.lab:
+    en: "latest lab {n} days ago"
+    es: "última analítica hace {n} días"
+  subtitle.lab.one:
+    en: "latest lab {n} day ago"
+    es: "última analítica hace {n} día"
+  subtitle.wearables:
+    en: "wearables synced {n} days ago"
+    es: "wearables sincronizados hace {n} días"
+  subtitle.wearables.one:
+    en: "wearables synced {n} day ago"
+    es: "wearables sincronizados hace {n} día"
+  sex.female:           {en: Female, es: Mujer}
+  sex.male:             {en: Male, es: Hombre}
+  due.stale:
+    en: "overdue · rule {rule} ({window_months} months)"
+    es: "pendiente · regla {rule} ({window_months} meses)"
+  due.never:
+    en: "never measured · rule {rule}"
+    es: "nunca medido · regla {rule}"
+  due.retest:
+    en: "{name} retest"
+    es: "Control de {name}"
+  # the genome summary is three counts joined with " · "; `.one` is the singular
+  genome.summary.pgx:
+    en: "{n} actionable PGx"
+    es: "{n} PGx accionables"
+  genome.summary.pgx.one:
+    en: "{n} actionable PGx"
+    es: "{n} PGx accionable"
+  genome.summary.carrier:
+    en: "{n} carrier findings"
+    es: "{n} hallazgos de portador"
+  genome.summary.carrier.one:
+    en: "{n} carrier finding"
+    es: "{n} hallazgo de portador"
+  genome.summary.hidden:
+    en: "{n} sensitive hidden"
+    es: "{n} sensibles ocultos"
+  genome.summary.hidden.one:
+    en: "{n} sensitive hidden"
+    es: "{n} sensible oculto"
+  pgx.badge:
+    en: "{gene} {phenotype} · CPIC {level} · to discuss with your prescriber"
+    es: "{gene} {phenotype} · CPIC {level} · para comentar con quien lo prescribe"
+  # check_drug
+  drug.notice:
+    en: Information from your records, not medical advice. To discuss with your prescriber.
+    es: Información de tus registros, no un consejo médico. Para comentar con quien lo prescribe.
+  drug.applies.genotype:
+    en: "{phenotype} (genotype)"
+    es: "{phenotype} (genotipo)"
+  drug.applies.functional:
+    en: "{phenotype} (functional, via phenoconversion)"
+    es: "{phenotype} (funcional, por fenoconversión)"
+  drug.pheno.computed:
+    en: "{by} is a {strength} CYP2D6 inhibitor: activity score {score} becomes {score_functional}, {functional_phenotype} (functional). The genotype phenotype stays {phenotype}."
+    es: "{by} es un inhibidor {strength} de CYP2D6: la puntuación de actividad {score} pasa a {score_functional}, {functional_phenotype} (funcional). El fenotipo por genotipo sigue siendo {phenotype}."
+  drug.pheno.no_score:
+    en: "{by} is a {strength} CYP2D6 inhibitor. The finding has no activity score, so the effect is not computed."
+    es: "{by} es un inhibidor {strength} de CYP2D6. El hallazgo no trae puntuación de actividad, así que el efecto no se calcula."
+  drug.pheno.not_computed:
+    en: "{by} is a {strength} {gene} inhibitor. CPIC publishes no conversion rule for {gene}, so the effect on the phenotype is not computed; the genotype phenotype stays as called."
+    es: "{by} es un inhibidor {strength} de {gene}. CPIC no publica una regla de conversión para {gene}, así que el efecto sobre el fenotipo no se calcula; el fenotipo por genotipo se mantiene."
+  strength.strong:      {en: strong, es: potente}
+  strength.moderate:    {en: moderate, es: moderado}
+  drug.relation.same:   {en: this drug, es: este fármaco}
+  drug.relation.inhibitor:
+    en: "{gene} inhibitor ({strength})"
+    es: "inhibidor de {gene} ({strength})"
+  drug.relation.not_assessed: {en: Not assessed, es: No evaluado}
+  drug.na.ddi:
+    en: drug-drug interactions (no open-licence source configured)
+    es: interacciones entre fármacos (sin fuente de licencia abierta configurada)
+  drug.na.no_pair:
+    en: "no CPIC level A gene pair for {drug} in the bundled table"
+    es: "ningún par gen-fármaco de nivel A de CPIC para {drug} en la tabla incluida"
+  drug.na.gene:
+    en: "{gene}: no genome finding on record"
+    es: "{gene}: ningún hallazgo genómico registrado"
+  drug.na.no_rec:
+    en: "{gene}: no CPIC recommendation text in the snapshot matches {phenotype}"
+    es: "{gene}: ningún texto de recomendación de CPIC en la instantánea corresponde a {phenotype}"
+  drug.na.warfarin:
+    en: CPIC gives warfarin dosing as an algorithm, not as text per phenotype; the bundled snapshot quotes none
+    es: CPIC da la dosis de warfarina como un algoritmo, no como texto por fenotipo; la instantánea incluida no cita ninguno
+  drug.lim.phenoconversion:
+    en: Phenoconversion is derived from the medication list as recorded; CPIC tables are written for genotype.
+    es: La fenoconversión se deriva de la lista de medicación registrada; las tablas de CPIC se escriben para el genotipo.
+  drug.lim.snapshot:
+    en: "Guidance is quoted verbatim from the CPIC snapshot of {date} (CC0)."
+    es: "Las recomendaciones se citan literalmente de la instantánea de CPIC del {date} (CC0)."
+  drug.lim.indication:
+    en: The indication decides which recommendation applies; the record does not hold it, so every matching population is shown.
+    es: La indicación decide qué recomendación aplica; el registro no la recoge, así que se muestran todas las poblaciones que coinciden.

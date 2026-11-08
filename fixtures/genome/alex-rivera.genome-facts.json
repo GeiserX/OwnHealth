@@ -1,0 +1,937 @@
+{
+  "schema": "ownhealth.genome-facts/v1",
+  "subject": {
+    "sample_id": "AR-01",
+    "declared_sex": "male",
+    "fingerprint": {
+      "panel": "ownhealth-fp-v1",
+      "genotypes": "0121012001201210120120012012102101201"
+    },
+    "inferred_karyotype": "XY"
+  },
+  "assay": {
+    "build": "GRCh38",
+    "type": "wgs",
+    "platform": "Illumina 30x",
+    "mean_depth": 33.8,
+    "callable_fraction": 0.94
+  },
+  "provenance": {
+    "pipeline": "OwnGenome",
+    "version": "1.4.2",
+    "commit": "abc1234",
+    "generated_utc": "2026-10-01T09:15:00Z",
+    "db_versions": {
+      "clinvar": "2026-09-28",
+      "pharmcat": "3.1.0",
+      "cpic": "2026-09",
+      "ipd_imgt_hla": "3.62",
+      "pgs_catalog": "2026-08",
+      "acmg_sf": "v3.3"
+    }
+  },
+  "files": [],
+  "coverage": [
+    {
+      "scope": "gene",
+      "id": "CYP2C19",
+      "panel": "cpic",
+      "state": "assessed",
+      "fraction_callable": 0.999
+    },
+    {
+      "scope": "gene",
+      "id": "CYP2D6",
+      "panel": "cpic",
+      "state": "assessed",
+      "fraction_callable": 0.999,
+      "note": "pypgx and Cyrius agree"
+    },
+    {
+      "scope": "gene",
+      "id": "CYP2C9",
+      "panel": "cpic",
+      "state": "assessed",
+      "fraction_callable": 0.999
+    },
+    {
+      "scope": "gene",
+      "id": "CYP3A5",
+      "panel": "cpic",
+      "state": "assessed",
+      "fraction_callable": 0.999
+    },
+    {
+      "scope": "gene",
+      "id": "SLCO1B1",
+      "panel": "cpic",
+      "state": "assessed",
+      "fraction_callable": 0.999
+    },
+    {
+      "scope": "gene",
+      "id": "DPYD",
+      "panel": "cpic",
+      "state": "assessed",
+      "fraction_callable": 0.999
+    },
+    {
+      "scope": "gene",
+      "id": "TPMT",
+      "panel": "cpic",
+      "state": "assessed",
+      "fraction_callable": 0.999
+    },
+    {
+      "scope": "gene",
+      "id": "NUDT15",
+      "panel": "cpic",
+      "state": "assessed",
+      "fraction_callable": 0.999
+    },
+    {
+      "scope": "gene",
+      "id": "VKORC1",
+      "panel": "cpic",
+      "state": "assessed",
+      "fraction_callable": 0.999
+    },
+    {
+      "scope": "gene",
+      "id": "HLA-B",
+      "panel": "cpic",
+      "state": "assessed",
+      "fraction_callable": 0.999
+    },
+    {
+      "scope": "gene",
+      "id": "UGT1A1",
+      "panel": "cpic",
+      "state": "assessed",
+      "fraction_callable": 0.999
+    },
+    {
+      "scope": "gene",
+      "id": "BRCA1",
+      "panel": "acmg_sf_v3.3",
+      "state": "assessed",
+      "fraction_callable": 0.997
+    },
+    {
+      "scope": "gene",
+      "id": "BRCA2",
+      "panel": "acmg_sf_v3.3",
+      "state": "assessed",
+      "fraction_callable": 0.998
+    },
+    {
+      "scope": "gene",
+      "id": "PMS2",
+      "panel": "acmg_sf_v3.3",
+      "state": "partial",
+      "reason": "paralog",
+      "fraction_callable": 0.81
+    },
+    {
+      "scope": "gene",
+      "id": "CFTR",
+      "panel": "carrier",
+      "state": "assessed",
+      "fraction_callable": 0.996
+    },
+    {
+      "scope": "gene",
+      "id": "FMR1",
+      "panel": "carrier",
+      "state": "not_assessed",
+      "reason": "not_run"
+    },
+    {
+      "scope": "gene",
+      "id": "SMN1",
+      "panel": "carrier",
+      "state": "not_assessed",
+      "reason": "paralog"
+    },
+    {
+      "scope": "panel",
+      "id": "repeat_expansions",
+      "panel": "other",
+      "state": "not_assessed",
+      "reason": "not_run"
+    }
+  ],
+  "facts": [
+    {
+      "id": "f_ea014b238101d928",
+      "category": "pgx",
+      "gene": "CYP2C19",
+      "variants": [
+        {
+          "chrom": "chr10",
+          "pos": 94781859,
+          "ref": "G",
+          "alt": "A",
+          "rsid": "rs4244285",
+          "vrs_id": "ga4gh:VA.KAB4qQsnPYolyqKLD_xXE73kfHXCCNDk",
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "diplotype": "*1/*2",
+        "phenotype": "Intermediate Metabolizer"
+      },
+      "summary": "CYP2C19 *1/*2: Intermediate Metabolizer.",
+      "drug_guidance": [
+        {
+          "drug": "clopidogrel",
+          "rxnorm": "32968",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Intermediate Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for clopidogrel with Intermediate Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        },
+        {
+          "drug": "omeprazole",
+          "rxnorm": "7646",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Intermediate Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for omeprazole with Intermediate Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        }
+      ],
+      "evidence": {
+        "level": "E1",
+        "native": "CPIC A",
+        "tools": [
+          "PharmCAT",
+          "pypgx"
+        ]
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "two callers agree"
+      },
+      "sensitivity": {
+        "level": "normal"
+      },
+      "origin": {
+        "step": "pharmcat",
+        "file": "pharmcat/report.json"
+      }
+    },
+    {
+      "id": "f_82d40df5307709f2",
+      "category": "pgx",
+      "gene": "CYP2D6",
+      "variants": [
+        {
+          "chrom": "chr22",
+          "pos": 42127803,
+          "ref": "C",
+          "alt": "T",
+          "rsid": "rs28371725",
+          "vrs_id": "ga4gh:VA.fdVcsW_8sgWE69C1d2QNTiK1MEWYNUTs",
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "diplotype": "*1/*41",
+        "phenotype": "Normal Metabolizer",
+        "activity_score": 1.5
+      },
+      "summary": "CYP2D6 *1/*41: Normal Metabolizer.",
+      "drug_guidance": [
+        {
+          "drug": "codeine",
+          "rxnorm": "2670",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Normal Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for codeine with Normal Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        }
+      ],
+      "evidence": {
+        "level": "E1",
+        "native": "CPIC A",
+        "tools": [
+          "PharmCAT",
+          "pypgx"
+        ]
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "pypgx and Cyrius from reads agree"
+      },
+      "sensitivity": {
+        "level": "normal"
+      },
+      "origin": {
+        "step": "pharmcat",
+        "file": "pharmcat/report.json"
+      }
+    },
+    {
+      "id": "f_912274647c478e78",
+      "category": "pgx",
+      "gene": "SLCO1B1",
+      "variants": [
+        {
+          "chrom": "chr12",
+          "pos": 21178615,
+          "ref": "T",
+          "alt": "C",
+          "rsid": "rs4149056",
+          "vrs_id": "ga4gh:VA.gZL_43vmQNeAEC_scIBNnO3qHquJyhaD",
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "diplotype": "*1/*5",
+        "phenotype": "Decreased Function"
+      },
+      "summary": "SLCO1B1 *1/*5: Decreased Function.",
+      "drug_guidance": [
+        {
+          "drug": "atorvastatin",
+          "rxnorm": "83367",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Decreased Function",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for atorvastatin with Decreased Function.",
+          "url": "https://cpicpgx.org/guidelines/"
+        },
+        {
+          "drug": "simvastatin",
+          "rxnorm": "36567",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Decreased Function",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for simvastatin with Decreased Function.",
+          "url": "https://cpicpgx.org/guidelines/"
+        }
+      ],
+      "evidence": {
+        "level": "E1",
+        "native": "CPIC A",
+        "tools": [
+          "PharmCAT",
+          "pypgx"
+        ]
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "single SNV, GQ 58"
+      },
+      "sensitivity": {
+        "level": "normal"
+      },
+      "origin": {
+        "step": "pharmcat",
+        "file": "pharmcat/report.json"
+      },
+      "related_loinc": [
+        "2157-6",
+        "1742-6"
+      ]
+    },
+    {
+      "id": "f_c71372b962587250",
+      "category": "pgx",
+      "gene": "DPYD",
+      "variants": [
+        {
+          "chrom": "chr1",
+          "pos": 97450058,
+          "ref": "C",
+          "alt": "T",
+          "rsid": "rs3918290",
+          "vrs_id": "ga4gh:VA.SXFnkjlqPXIYlD8CEZOLK5Cu8dSvXNgR",
+          "genotype": {
+            "call_state": "ref",
+            "gt": "0/0",
+            "zygosity": "ref",
+            "dp": 31,
+            "gq": 60
+          }
+        },
+        {
+          "chrom": "chr1",
+          "pos": 97082391,
+          "ref": "T",
+          "alt": "A",
+          "rsid": "rs67376798",
+          "vrs_id": "ga4gh:VA.rgSbPX3XKhFnu-LjJtUoR7-tR2GXpyCK",
+          "genotype": {
+            "call_state": "ref",
+            "gt": "0/0",
+            "zygosity": "ref",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "diplotype": "*1/*1",
+        "phenotype": "Normal Metabolizer",
+        "activity_score": 2.0
+      },
+      "summary": "DPYD *1/*1: Normal Metabolizer.",
+      "drug_guidance": [
+        {
+          "drug": "fluorouracil",
+          "rxnorm": "4492",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Normal Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for fluorouracil with Normal Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        },
+        {
+          "drug": "capecitabine",
+          "rxnorm": "194000",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Normal Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for capecitabine with Normal Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        }
+      ],
+      "evidence": {
+        "level": "E1",
+        "native": "CPIC A",
+        "tools": [
+          "PharmCAT",
+          "pypgx"
+        ]
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "two callers agree"
+      },
+      "sensitivity": {
+        "level": "normal"
+      },
+      "origin": {
+        "step": "pharmcat",
+        "file": "pharmcat/report.json"
+      }
+    },
+    {
+      "id": "f_b425118a15fa6c1b",
+      "category": "pgx",
+      "gene": "TPMT",
+      "variants": [
+        {
+          "chrom": "chr6",
+          "pos": 18130687,
+          "ref": "T",
+          "alt": "C",
+          "rsid": "rs1142345",
+          "vrs_id": "ga4gh:VA.7xwkoV2paw7Q3WwYzj5RYXQlqlVZbVHA",
+          "genotype": {
+            "call_state": "ref",
+            "gt": "0/0",
+            "zygosity": "ref",
+            "dp": 31,
+            "gq": 60
+          }
+        },
+        {
+          "chrom": "chr6",
+          "pos": 18138997,
+          "ref": "C",
+          "alt": "T",
+          "rsid": "rs1800460",
+          "vrs_id": "ga4gh:VA.AEpdmUo2cgKI4-VBwmdh2o5cBCriAdtp",
+          "genotype": {
+            "call_state": "ref",
+            "gt": "0/0",
+            "zygosity": "ref",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "diplotype": "*1/*1",
+        "phenotype": "Normal Metabolizer"
+      },
+      "summary": "TPMT *1/*1: Normal Metabolizer.",
+      "drug_guidance": [
+        {
+          "drug": "azathioprine",
+          "rxnorm": "1256",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Normal Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for azathioprine with Normal Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        }
+      ],
+      "evidence": {
+        "level": "E1",
+        "native": "CPIC A",
+        "tools": [
+          "PharmCAT",
+          "pypgx"
+        ]
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "two callers agree"
+      },
+      "sensitivity": {
+        "level": "normal"
+      },
+      "origin": {
+        "step": "pharmcat",
+        "file": "pharmcat/report.json"
+      }
+    },
+    {
+      "id": "f_eb85a9bc19d31286",
+      "category": "pgx",
+      "gene": "VKORC1",
+      "variants": [
+        {
+          "chrom": "chr16",
+          "pos": 31096368,
+          "ref": "C",
+          "alt": "T",
+          "rsid": "rs9923231",
+          "vrs_id": "ga4gh:VA._0LRmMdjaXr4S2GkhQ33_RIrzZmdXqHn",
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "diplotype": "-1639G>A het",
+        "phenotype": null
+      },
+      "summary": "VKORC1 -1639G>A het: None.",
+      "drug_guidance": [
+        {
+          "drug": "warfarin",
+          "rxnorm": "11289",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "VKORC1 -1639 G/A",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for warfarin with VKORC1 -1639 G/A.",
+          "url": "https://cpicpgx.org/guidelines/"
+        }
+      ],
+      "evidence": {
+        "level": "E1",
+        "native": "CPIC A",
+        "tools": [
+          "PharmCAT",
+          "pypgx"
+        ]
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "two callers agree"
+      },
+      "sensitivity": {
+        "level": "normal"
+      },
+      "origin": {
+        "step": "pharmcat",
+        "file": "pharmcat/report.json"
+      }
+    },
+    {
+      "id": "f_fb979c3a30101ed0",
+      "category": "pgx",
+      "gene": "CYP2C9",
+      "variants": [
+        {
+          "chrom": "chr10",
+          "pos": 94942290,
+          "ref": "C",
+          "alt": "T",
+          "rsid": "rs1799853",
+          "vrs_id": "ga4gh:VA.ZlrWL9HkY_zbBRf5e-5Rc8kQN_DGqYVm",
+          "genotype": {
+            "call_state": "ref",
+            "gt": "0/0",
+            "zygosity": "ref",
+            "dp": 31,
+            "gq": 60
+          }
+        },
+        {
+          "chrom": "chr10",
+          "pos": 94981296,
+          "ref": "A",
+          "alt": "C",
+          "rsid": "rs1057910",
+          "vrs_id": "ga4gh:VA.RHCiwrzUCagjE5DWFraXMXn8UJ7lyIPr",
+          "genotype": {
+            "call_state": "ref",
+            "gt": "0/0",
+            "zygosity": "ref",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "diplotype": "*1/*1",
+        "phenotype": "Normal Metabolizer",
+        "activity_score": 2.0
+      },
+      "summary": "CYP2C9 *1/*1: Normal Metabolizer.",
+      "drug_guidance": [
+        {
+          "drug": "warfarin",
+          "rxnorm": "11289",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Normal Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for warfarin with Normal Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        },
+        {
+          "drug": "celecoxib",
+          "rxnorm": "140587",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Normal Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for celecoxib with Normal Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        }
+      ],
+      "evidence": {
+        "level": "E1",
+        "native": "CPIC A",
+        "tools": [
+          "PharmCAT",
+          "pypgx"
+        ]
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "two callers agree"
+      },
+      "sensitivity": {
+        "level": "normal"
+      },
+      "origin": {
+        "step": "pharmcat",
+        "file": "pharmcat/report.json"
+      }
+    },
+    {
+      "id": "f_c1c7a5535ca89bb6",
+      "category": "hla",
+      "gene": "HLA-B",
+      "value": {
+        "alleles": [
+          "HLA-B*07:02",
+          "HLA-B*44:02"
+        ],
+        "marker": "HLA-B*58:01",
+        "present": false
+      },
+      "summary": "HLA-B*58:01 not detected. CPIC ties this allele to severe skin reactions with allopurinol.",
+      "drug_guidance": [
+        {
+          "drug": "allopurinol",
+          "rxnorm": "519",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "HLA-B*58:01 negative",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for allopurinol with HLA-B*58:01 negative.",
+          "url": "https://cpicpgx.org/guidelines/"
+        }
+      ],
+      "evidence": {
+        "level": "E1",
+        "native": "CPIC A"
+      },
+      "confidence": {
+        "level": "medium",
+        "basis": "T1K 2-field typing from reads"
+      },
+      "sensitivity": {
+        "level": "normal"
+      }
+    },
+    {
+      "id": "f_df3d7678552e89cd",
+      "category": "risk_marker",
+      "gene": "APOE",
+      "variants": [
+        {
+          "chrom": "chr19",
+          "pos": 44908684,
+          "ref": "T",
+          "alt": "C",
+          "rsid": "rs429358",
+          "vrs_id": "ga4gh:VA._iYYMzJJ5zvSkDm1r6AKt51PkEdgdPvs",
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        },
+        {
+          "chrom": "chr19",
+          "pos": 44908822,
+          "ref": "C",
+          "alt": "T",
+          "rsid": "rs7412",
+          "vrs_id": "ga4gh:VA.o9nLJiG_0oOCvm3cFniCPcpe32K47R2B",
+          "genotype": {
+            "call_state": "ref",
+            "gt": "0/0",
+            "zygosity": "ref",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "haplotype": "e3/e4"
+      },
+      "summary": "APOE e3/e4. Linked to a higher average Alzheimer's disease risk than e3/e3; it is not a diagnosis.",
+      "evidence": {
+        "level": "E2",
+        "native": "replicated association with effect size"
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "both sites called, GQ > 50"
+      },
+      "sensitivity": {
+        "level": "adult_onset",
+        "reason": "APOE e4"
+      }
+    },
+    {
+      "id": "f_aa643d897bb5fa7b",
+      "category": "risk_marker",
+      "gene": "LPA",
+      "variants": [
+        {
+          "chrom": "chr6",
+          "pos": 160589086,
+          "ref": "A",
+          "alt": "G",
+          "rsid": "rs10455872",
+          "vrs_id": "ga4gh:VA.8mW-BZVxJnD7TjvMQ4SfCtEKSb-MHlK0",
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "kiv2_copies": 18,
+        "kiv2_ci95": [
+          15,
+          22
+        ]
+      },
+      "summary": "LPA risk allele and a low KIV-2 copy estimate, both linked to higher Lp(a). A blood Lp(a) value is the measurement that counts.",
+      "evidence": {
+        "level": "E2",
+        "native": "replicated association"
+      },
+      "confidence": {
+        "level": "medium",
+        "basis": "depth estimate, experimental step"
+      },
+      "limitations": [
+        "The SNPs were found in European cohorts."
+      ],
+      "sensitivity": {
+        "level": "normal"
+      },
+      "related_loinc": [
+        "43583-4"
+      ]
+    },
+    {
+      "id": "f_b304e096d05a0791",
+      "category": "carrier",
+      "gene": "CFTR",
+      "variants": [
+        {
+          "chrom": "chr7",
+          "pos": 117559590,
+          "ref": "ATCT",
+          "alt": "A",
+          "rsid": "rs113993960",
+          "vrs_id": "ga4gh:VA.x-F00rRyHj2IINyPA3ghPWWfQ8ueQPE_",
+          "hgvs_p": "p.Phe508del",
+          "clinvar_variation_id": 7105,
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "condition": {
+        "name": "Cystic fibrosis",
+        "inheritance": "AR"
+      },
+      "summary": "Heterozygous carrier of a pathogenic CFTR variant. Carriers are not affected; it matters for a partner's testing.",
+      "evidence": {
+        "level": "E1",
+        "native": "ClinVar Pathogenic, 3 stars",
+        "clinvar_stars": 3
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "GQ 99, DP 35"
+      },
+      "sensitivity": {
+        "level": "normal"
+      }
+    },
+    {
+      "id": "f_82d73a20f79851e8",
+      "category": "prs",
+      "value": {
+        "condition": "coronary artery disease",
+        "pgs_id": "PGS000018",
+        "percentile": 86,
+        "matched_pct": 97.2,
+        "reference": "HGDP+1kGP",
+        "most_similar_pop": "EUR",
+        "evaluated_in": [
+          "EUR"
+        ]
+      },
+      "summary": "Higher than 86% of the EUR reference group for this score.",
+      "evidence": {
+        "level": "E3",
+        "native": "PGS Catalog score with published evaluation"
+      },
+      "confidence": {
+        "level": "medium",
+        "basis": "matched 97% of variants; ancestry inside evaluation set"
+      },
+      "limitations": [
+        "Percentile relative to the EUR reference group; not an absolute risk."
+      ],
+      "sensitivity": {
+        "level": "normal"
+      }
+    },
+    {
+      "id": "f_09c5c115cc88a651",
+      "category": "trait",
+      "gene": "LCT",
+      "variants": [
+        {
+          "chrom": "chr2",
+          "pos": 135851076,
+          "ref": "G",
+          "alt": "A",
+          "rsid": "rs4988235",
+          "vrs_id": "ga4gh:VA.kvzABlgjqSu6T9wCcvsJEuOK-JQGGwdt",
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "trait": "lactase persistence",
+        "call": "likely"
+      },
+      "summary": "LCT -13910 C/T: lactase persistence likely.",
+      "evidence": {
+        "level": "E2",
+        "native": "replicated association"
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "GQ 60"
+      },
+      "sensitivity": {
+        "level": "normal"
+      }
+    },
+    {
+      "id": "f_3f3c1d5a4b5f5f9a",
+      "category": "trait",
+      "gene": "MTHFR",
+      "variants": [
+        {
+          "chrom": "chr1",
+          "pos": 11796321,
+          "ref": "G",
+          "alt": "A",
+          "rsid": "rs1801133",
+          "vrs_id": "ga4gh:VA.3G9nQpKNtCceO5OH8XRhJ_Cyk6-xGvRI",
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "summary": "MTHFR C677T heterozygous: enzyme note only.",
+      "evidence": {
+        "level": "E4",
+        "native": "not supported as health advice (PMID 23288205)"
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "GQ 60"
+      },
+      "sensitivity": {
+        "level": "normal"
+      },
+      "hidden_by_default": true
+    }
+  ],
+  "qc": {
+    "sex_check": "pass",
+    "contamination": 0.002
+  }
+}

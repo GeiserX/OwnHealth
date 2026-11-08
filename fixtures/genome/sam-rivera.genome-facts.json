@@ -1,0 +1,141 @@
+{
+  "schema": "ownhealth.genome-facts/v1",
+  "subject": {
+    "sample_id": "SR-01",
+    "declared_sex": "female",
+    "fingerprint": {
+      "panel": "ownhealth-fp-v1",
+      "genotypes": "1020120120102012021012012001202102012"
+    }
+  },
+  "assay": {
+    "build": "GRCh38",
+    "type": "vcf_only",
+    "platform": "clinical exome VCF"
+  },
+  "provenance": {
+    "pipeline": "OwnGenome",
+    "version": "1.4.2",
+    "commit": "abc1234",
+    "generated_utc": "2026-08-19T10:00:00Z",
+    "db_versions": {
+      "clinvar": "2026-09-28",
+      "pharmcat": "3.1.0",
+      "cpic": "2026-09",
+      "ipd_imgt_hla": "3.62",
+      "pgs_catalog": "2026-08",
+      "acmg_sf": "v3.3"
+    }
+  },
+  "files": [],
+  "coverage": [
+    {
+      "scope": "gene",
+      "id": "CYP2C19",
+      "panel": "cpic",
+      "state": "assessed"
+    },
+    {
+      "scope": "gene",
+      "id": "CYP2D6",
+      "panel": "cpic",
+      "state": "assessed"
+    },
+    {
+      "scope": "gene",
+      "id": "CYP2D6-SV",
+      "panel": "cpic",
+      "state": "not_assessed",
+      "reason": "no_bam"
+    }
+  ],
+  "facts": [
+    {
+      "id": "f_82d40df5307709f2",
+      "category": "pgx",
+      "gene": "CYP2D6",
+      "variants": [],
+      "value": {
+        "diplotype": "*1/*1",
+        "phenotype": "Normal Metabolizer",
+        "activity_score": 2.0
+      },
+      "summary": "CYP2D6 *1/*1: Normal Metabolizer.",
+      "drug_guidance": [
+        {
+          "drug": "codeine",
+          "rxnorm": "2670",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Normal Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for codeine with Normal Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        }
+      ],
+      "evidence": {
+        "level": "E1",
+        "native": "CPIC A",
+        "tools": [
+          "PharmCAT",
+          "pypgx"
+        ]
+      },
+      "confidence": {
+        "level": "medium",
+        "basis": "single caller; SVs not assessed"
+      },
+      "sensitivity": {
+        "level": "normal"
+      },
+      "origin": {
+        "step": "pharmcat",
+        "file": "pharmcat/report.json"
+      }
+    },
+    {
+      "id": "f_ea014b238101d928",
+      "category": "pgx",
+      "gene": "CYP2C19",
+      "variants": [],
+      "value": {
+        "diplotype": "*1/*1",
+        "phenotype": "Normal Metabolizer"
+      },
+      "summary": "CYP2C19 *1/*1: Normal Metabolizer.",
+      "drug_guidance": [
+        {
+          "drug": "clopidogrel",
+          "rxnorm": "32968",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Normal Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for clopidogrel with Normal Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        }
+      ],
+      "evidence": {
+        "level": "E1",
+        "native": "CPIC A",
+        "tools": [
+          "PharmCAT",
+          "pypgx"
+        ]
+      },
+      "confidence": {
+        "level": "medium",
+        "basis": "single caller"
+      },
+      "sensitivity": {
+        "level": "normal"
+      },
+      "origin": {
+        "step": "pharmcat",
+        "file": "pharmcat/report.json"
+      }
+    }
+  ],
+  "qc": {
+    "sex_check": "pass",
+    "contamination": 0.002
+  }
+}

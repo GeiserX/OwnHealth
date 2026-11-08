@@ -1,0 +1,46 @@
+system: cardiometabolic
+order: 1
+names: {en: Cardiometabolic, es: Cardiometabólico}
+markers: [ldl_c, lpa, apob, hba1c, glucose]
+rules:
+  - id: recency.lipids
+    kind: recency
+    match: [ldl_c, apob]
+    window_days: 365
+    cite: https://doi.org/10.1093/eurheartj/ehz455
+    note: ESC/EAS 2019 dyslipidaemia guideline, monitoring of lipids; the 12-month window is the pack's reading of it.
+  - id: recency.hba1c
+    kind: recency
+    match: [hba1c]
+    window_days: 183
+    cite: https://diabetesjournals.org/care/issue/49/Supplement_1
+    note: ADA Standards of Care, A1C at least twice a year.
+  - id: recency.glucose
+    kind: recency
+    match: [glucose]
+    window_days: 365
+    cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack
+    basis: pack_default
+  # Lp(a) is largely genetic and measured once in adult life, so it has no recency window.
+  - id: rcv.ldl_c
+    kind: rcv
+    match: [ldl_c]
+    cv_i: "8.3"
+    cv_a: "2.0"
+    cite: https://biologicalvariation.eu/
+    verify: CV values to confirm against the EFLM database
+  - id: rcv.hba1c
+    kind: rcv
+    match: [hba1c]
+    cv_i: "1.9"
+    cv_a: "1.5"
+    cite: https://biologicalvariation.eu/
+    verify: CV values to confirm against the EFLM database
+  - id: trend.hba1c.rise
+    kind: trend
+    match: [hba1c]
+    points: 3
+    direction: up
+    min_slope_per_year: "0.1"
+    cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack
+    basis: pack_default

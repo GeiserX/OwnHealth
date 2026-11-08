@@ -51,7 +51,7 @@ flowchart LR
 - [ ] Content-addressed immutable blob store (`blobs/sha256/ab/cd/...`); dedupe by file hash.
 - [ ] PDF text layer extraction with pdfplumber / pypdfium2 (words + bboxes + font attributes).
 - [ ] Document classifier: lab report / imaging report / discharge / prescription / genomics / other; profile, date and provider guessed, user confirms.
-- [ ] Lab table extraction: vendor templates first (Synlab, Eurofins Megalab, Unilabs, Quest, Labcorp layouts), generic table rules second.
+- [ ] Lab table extraction: generic table rules plus the fictional LabNorte template in v0.1. Real lab layouts (Synlab, Eurofins Megalab, Unilabs, Quest, Labcorp) arrive as contributed YAML templates under `ingest/pdf/vendors/<country>/`; we cannot test real-brand layouts under the synthetic-only fixture rule, so auto-accept is measured on synthetic layouts only.
 - [ ] Draw/report grouping, including "ordered but missing from this draw" and amended reports that supersede an earlier edition.
 - [ ] Apple Health `export.zip`: streaming `iterparse` of `export.xml` (never DOM), `clinical-records/*.json` as FHIR R4, ECG CSVs stored as documents, source-priority rule per metric to stop Watch + iPhone double counting, UTC plus original offset.
 - [ ] Apple Health Medications from the export zip.
@@ -61,7 +61,7 @@ flowchart LR
 - [ ] Auto-accept: a row is committed without a click only when every check passes, `row_conf >= 0.95`, the source allows it (known vendor template or generic rules on a native text layer, or a structured import with a valid code and unit) and identity matches. Everything else goes to the review queue ([ingestion.md section 9](design/ingestion.md#9-validation-and-acceptance)).
 
 **Normalization**
-- [ ] LOINC/UCUM resolver seeded from Mirobody's resolver bundle: its Apache-2.0 overlays (`resolver_overrides.tsv`, `recall_synonyms.tsv`) plus LOINC 2.83 content under the LOINC License and UCUM under the UCUM License, each shipped with its own notice.
+- [ ] LOINC/UCUM resolver: v0.1 ships a curated 202-code LOINC 2.83 subset (`normalize/terminology/loinc/loinc_subset.tsv`, under the LOINC License with its notice) and a hand-written UCUM unit subset (`normalize/_units.py`). An analyte outside the subset lands in review as `loinc_unknown`. Mirobody's resolver overlays and a wider LOINC set move to a later phase.
 - [ ] Multilingual alias table (es/en/de/fr first) as a reviewed data file in the repo; "add alias" action from the review queue.
 - [ ] Resolution from name + unit + specimen, never name alone.
 - [ ] Mass-to-molar conversion from a curated, cited molar-mass table per analyte.

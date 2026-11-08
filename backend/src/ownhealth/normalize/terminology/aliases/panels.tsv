@@ -1,0 +1,90 @@
+# Panel, section and category names (ingestion.md 8.2 step 4): refused, never coded as an analyte.
+# Matched on the folded name (lower case, no accents, single spaces).
+name	lang
+Perfil lipídico	es
+Perfil lipidico	es
+Perfil hepático	es
+Perfil renal	es
+Perfil tiroideo	es
+Perfil férrico	es
+Metabolismo del hierro	es
+Hemograma	es
+Hemograma completo	es
+Serie roja	es
+Serie blanca	es
+Serie plaquetar	es
+Serie plaquetaria	es
+Fórmula leucocitaria	es
+Bioquímica	es
+Bioquímica general	es
+Bioquímica sanguínea	es
+Hematología	es
+Coagulación	es
+Hormonas	es
+Iones	es
+Electrolitos	es
+Orina	es
+Sistemático de orina	es
+Orina sistemático	es
+Sedimento urinario	es
+Sedimento	es
+Marcadores tumorales	es
+Inmunología	es
+Serología	es
+Vitaminas	es
+Lipid panel	en
+Lipid profile	en
+Complete blood count	en
+CBC	en
+CBC with differential	en
+Differential	en
+Basic metabolic panel	en
+Comprehensive metabolic panel	en
+Liver function tests	en
+Liver panel	en
+Renal panel	en
+Thyroid panel	en
+Iron studies	en
+Iron panel	en
+Urinalysis	en
+Hematology	en
+Chemistry	en
+Coagulation	en
+Electrolytes	en
+Tumor markers	en
+Blutbild	de
+Kleines Blutbild	de
+Großes Blutbild	de
+Differentialblutbild	de
+Lipidprofil	de
+Lipidstatus	de
+Fettstoffwechsel	de
+Leberwerte	de
+Nierenwerte	de
+Schilddrüse	de
+Schilddrüsenwerte	de
+Elektrolyte	de
+Urinstatus	de
+Urinsediment	de
+Gerinnung	de
+Klinische Chemie	de
+Hämatologie	de
+Eisenstoffwechsel	de
+Tumormarker	de
+Hémogramme	fr
+Numération formule sanguine	fr
+NFS	fr
+Bilan lipidique	fr
+Exploration d'une anomalie lipidique	fr
+Bilan hépatique	fr
+Bilan rénal	fr
+Bilan thyroïdien	fr
+Bilan martial	fr
+Ionogramme	fr
+Ionogramme sanguin	fr
+Examen cytobactériologique des urines	fr
+ECBU	fr
+Biochimie	fr
+Hématologie	fr
+Hémostase	fr
+Marqueurs tumoraux	fr

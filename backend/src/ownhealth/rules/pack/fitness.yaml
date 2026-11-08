@@ -1,0 +1,21 @@
+system: fitness
+order: 9
+source: wearables
+names: {en: Fitness, es: Forma física}
+markers:
+  - {metric: vo2max, en: VO₂max, es: VO₂máx, unit: mL/kg/min, agg: latest}
+  - {metric: hr_resting, en: Resting HR, es: FC en reposo, unit: bpm, agg: avg30}
+  - {metric: steps, en: "Steps, daily avg", es: "Pasos, media diaria", unit: "", agg: sum30}
+rules:
+  - id: recency.fitness
+    kind: recency
+    match: [hr_resting, steps]
+    window_days: 7
+    cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack
+    basis: pack_default
+  - id: recency.vo2max
+    kind: recency
+    match: [vo2max]
+    window_days: 30
+    cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack
+    basis: pack_default

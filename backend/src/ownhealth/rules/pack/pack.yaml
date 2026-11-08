@@ -1,0 +1,28 @@
+# OwnHealth rule pack v1: the deterministic current state (docs/design/architecture.md section 11).
+# Semver: a rule change that alters output for any fixture bumps the minor; a new rule kind bumps the major.
+# Every rule has an id, a kind, a reason code, a severity and a `cite`. `basis: pack_default` marks a
+# threshold we chose ourselves (no external guideline sets it); its cite points at the design that says so.
+pack: ownhealth-rules
+version: 0.1.0
+
+# Flags, fixed order (mcp.md section 4). Inside the list: severity desc, then date desc, then code.
+order: [lab_range, rcv, trend, gene_drug, gene_lab]
+
+rules:
+  - id: range.lab
+    kind: lab_range
+    reason: {H: LAB_HIGH, HH: LAB_HIGH, L: LAB_LOW, LL: LAB_LOW, A: LAB_ABNORMAL}
+    severity: {HH: 4, LL: 4, H: 3, A: 3, L: 2}
+    # The lab's own printed range and flag; no "optimal" range by default (ROADMAP v0.1, Normalization).
+    cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/ingestion.md#8-normalisation
+    basis: lab_printed_range
+
+dashboard:
+  # "Changed since last draw" lists a marker when its status is not OK or it moved by at least this much.
+  changes_min_pct: 15
+  max_markers_per_card: 3
+  spark_points: 9
+
+limitations:
+  - FLAGS_USE_LAB_RANGE
+  - GENOME_RESEARCH_GRADE

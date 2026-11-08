@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      OWNHEALTH_TEST_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:55432/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.29"
+          enable-cache: true
+      - name: PostgreSQL 17 client and restic 0.18.0, the versions the image ships (tests/ops)
+        working-directory: .
+        run: |
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          curl -fsSL -o /tmp/restic.bz2 https://github.com/restic/restic/releases/download/v0.18.0/restic_0.18.0_linux_amd64.bz2
+          echo "98f6dd8bf5b59058d04bfd8dab58e196cc2a680666ccee90275a3b722374438e  /tmp/restic.bz2" | sha256sum -c -
+          bunzip2 /tmp/restic.bz2 && sudo install -m 0755 /tmp/restic /usr/local/bin/restic
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests ../deploy/tests
+      - run: uv run ruff format --check src tests ../deploy/tests
+      - run: uv run pytest -q
+      - name: Deploy checks (app database role, compose files)
+        run: uv run pytest -q ../deploy/tests
+
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.2"
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check
+      - run: pnpm build
+      - run: test -f ../backend/src/ownhealth/static/index.html
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the image (no push)
+        run: docker build -t drumsergio/ownhealth:ci .
+      - name: Image starts its CLI as the non-root user
+        run: |
+          test "$(docker run --rm --entrypoint id drumsergio/ownhealth:ci -u)" = "10001"
+          docker run --rm drumsergio/ownhealth:ci python -c "import pysam, ownhealth; print(pysam.__version__)"
+          docker run --rm drumsergio/ownhealth:ci test -f /app/.venv/lib/python3.13/site-packages/ownhealth/static/index.html
+          docker run --rm drumsergio/ownhealth:ci pg_dump --version | grep -q "PostgreSQL) 17\."
+          docker run --rm drumsergio/ownhealth:ci restic version
