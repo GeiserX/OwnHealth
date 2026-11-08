@@ -61,7 +61,7 @@
 			]);
 			if (app.me) app.me.review_open = r.open;
 			return { items: r.items, docs: d.items, jobs: j.jobs };
-		});
+		}, slug);
 	}
 	$effect(() => {
 		void prof?.slug;
@@ -84,7 +84,7 @@
 		selected = itemParam;
 		checked = {};
 		pageNo = Number(page.url.searchParams.get('page')) || 1;
-		doc.run(() => getDocument(id));
+		doc.run(() => getDocument(id), id);
 	});
 	const rows = $derived(items.filter((i) => i.kind === 'candidate_row' && i.document_id === docId));
 	const others = $derived(items.filter((i) => !(i.kind === 'candidate_row' && i.document_id === docId)));
@@ -130,11 +130,12 @@
 		actionError = null;
 		try {
 			await fn();
-			load();
 		} catch (e) {
 			actionError = e instanceof Error ? e.message : String(e);
 		} finally {
 			busy = false;
+			// Also after a failure: a batch that failed at row N already accepted rows 1 to N-1.
+			load();
 		}
 	}
 	const acceptPicked = () => act(async () => { for (const id of picked) await acceptReview(id); });

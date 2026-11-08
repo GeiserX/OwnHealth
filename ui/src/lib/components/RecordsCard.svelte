@@ -23,7 +23,7 @@
 	function load() {
 		const p = profile;
 		const k = kind;
-		recs.run(async () => (await listRecords(p, k)).items);
+		recs.run(async () => (await listRecords(p, k)).items, `${p}/${k}`);
 	}
 	$effect(load);
 	function changed() {

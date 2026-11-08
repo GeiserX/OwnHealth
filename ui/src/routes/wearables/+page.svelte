@@ -10,6 +10,7 @@
 	import TrendChart from '#lib/components/TrendChart.svelte';
 	import { axisTicks } from '#lib/logic/axis';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
+	import { hoursMinutes } from '#lib/logic/duration';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	// How each known metric draws, as in the mockup. Unknown metrics get a plain line.
@@ -30,7 +31,7 @@
 	function load() {
 		const slug = profile?.slug;
 		const lang = i18n.lang;
-		if (slug) w.run(() => getWearables(slug, lang));
+		if (slug) w.run(() => getWearables(slug, lang), slug);
 	}
 	$effect(load);
 
@@ -70,7 +71,7 @@
 	const fmtVal = (m: WearableMetric, v: number | null, k: number, unit: string) => {
 		if (v == null) return '—';
 		const x = v * k;
-		if (unit === 'h') return `${Math.floor(x)} h ${Math.round((x % 1) * 60)} min`;
+		if (unit === 'h') return hoursMinutes(x);
 		const whole = m.metric === 'steps' || unit === 'count' || unit === 'bpm' || unit === 'ms';
 		return `${whole ? fmtNum(Math.round(x), 0) : fmtNum(x, 1)}${unit === 'count' ? '' : ' ' + unit}`;
 	};

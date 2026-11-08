@@ -25,8 +25,8 @@
 		const slug = profile?.slug;
 		const lang = i18n.lang;
 		if (!slug) return;
-		dash.run(() => getDashboard(slug, lang));
-		queue.run(() => listReview({ status: 'open', profile: slug }));
+		dash.run(() => getDashboard(slug, lang), slug);
+		queue.run(() => listReview({ status: 'open', profile: slug }), slug);
 	}
 	$effect(load);
 

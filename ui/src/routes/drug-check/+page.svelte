@@ -31,12 +31,12 @@
 		const d = drug.trim();
 		void i18n.lang;
 		if (!slug || !d) return;
-		check.run(() => getDrugCheckView(slug, d, i18n.lang));
+		check.run(() => getDrugCheckView(slug, d, i18n.lang), `${slug}/${d}`);
 	});
 	$effect(() => {
 		const slug = prof?.slug;
 		if (!slug) return;
-		allergies.run(async () => (await listRecords(slug, 'allergy')).items);
+		allergies.run(async () => (await listRecords(slug, 'allergy')).items, slug);
 	});
 
 	function submit(e: SubmitEvent) {
@@ -155,7 +155,7 @@
 				{#if c.current_medications_relevant.length}
 					<table class="t">
 						<tbody>
-							{#each c.current_medications_relevant as m (m.src)}
+							{#each c.current_medications_relevant as m (m.src + m.name)}
 								<tr>
 									<td style="white-space:nowrap"><b>{m.name}</b></td>
 									<td><StatusChip status={relTone(m.relation)} label={m.relation_text} /></td>

@@ -70,7 +70,7 @@
 		{/each}
 	</fieldset>
 	<div class="p2row">
-		<label>{t('i2_tok_days')}<input class="p2in num" type="number" min="1" max="365" bind:value={days} style="width:90px" /></label>
+		<label>{t('i2_tok_days')}<input class="p2in num" type="number" min="1" max="365" required bind:value={days} style="width:90px" /></label>
 		<label
 			>{t('i2_tok_identity')}
 			<select class="p2in" bind:value={identity}>

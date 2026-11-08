@@ -94,3 +94,132 @@ test('plural keys pick the singular form for one', () => {
 	assert.equal(pluralKey('en', 2, 'n_days', has), 'n_days');
 	assert.equal(pluralKey('en', 0, 'n_days', has), 'n_days');
 });
+
+// ---- review fixes (CodeRabbit on the v0.1 ui slice) ----
+import { latestRunner, type LoadState } from '../src/lib/logic/loader.ts';
+import { poller } from '../src/lib/logic/poll.ts';
+import { isTypingTarget } from '../src/lib/logic/keys.ts';
+import { hoursMinutes } from '../src/lib/logic/duration.ts';
+
+const deferred = <T>() => {
+	let resolve!: (v: T) => void;
+	let reject!: (e: unknown) => void;
+	const promise = new Promise<T>((a, b) => ((resolve = a), (reject = b)));
+	return { promise, resolve, reject };
+};
+
+test('loader clears the previous profile data as soon as the key changes', async () => {
+	const s: LoadState<string> = { data: null, error: null, loading: false };
+	const run = latestRunner(s);
+	await run(async () => 'ana-data', 'ana');
+	assert.equal(s.data, 'ana-data');
+	const next = deferred<string>();
+	const p = run(() => next.promise, 'ben');
+	assert.equal(s.data, null, 'old profile data still on screen while the new one loads');
+	assert.equal(s.loading, true);
+	next.resolve('ben-data');
+	await p;
+	assert.equal(s.data, 'ben-data');
+});
+
+test('loader keeps data on a reload with the same key or no key', async () => {
+	const s: LoadState<string> = { data: null, error: null, loading: false };
+	const run = latestRunner(s);
+	await run(async () => 'v1', 'ana');
+	const again = deferred<string>();
+	const p = run(() => again.promise, 'ana');
+	assert.equal(s.data, 'v1');
+	again.resolve('v2');
+	await p;
+	const plain = deferred<string>();
+	const q = run(() => plain.promise);
+	assert.equal(s.data, 'v2');
+	plain.resolve('v3');
+	await q;
+	assert.equal(s.data, 'v3');
+});
+
+test('loader drops an answer that arrives after a newer call', async () => {
+	const s: LoadState<string> = { data: null, error: null, loading: false };
+	const run = latestRunner(s);
+	const a = deferred<string>();
+	const pa = run(() => a.promise, 'ana');
+	const pb = run(async () => 'ben-data', 'ben');
+	await pb;
+	a.resolve('ana-data');
+	await pa;
+	assert.equal(s.data, 'ben-data');
+	assert.equal(s.loading, false);
+});
+
+const fakeTimers = () => {
+	const q: (() => void)[] = [];
+	return {
+		q,
+		timers: { set: (f: () => void) => (q.push(f), q.length - 1), clear: (h: unknown) => void (q[h as number] = () => {}) },
+		// Runs scheduled steps; a loop that never ends stops at 50 steps so the test fails instead of hanging.
+		async flush() {
+			for (let i = 0; q.length && i < 50; i++) {
+				q.shift()!();
+				await new Promise((r) => setImmediate(r));
+			}
+		}
+	};
+};
+const settle = () => new Promise((r) => setImmediate(r));
+
+test('poller stops when stopped (unmount), even with an answer in flight', async () => {
+	const ft = fakeTimers();
+	let ticks = 0;
+	let done = 0;
+	const inflight = deferred<boolean>();
+	const p = poller({ tick: () => (ticks++, inflight.promise), ondone: () => done++, onfail: () => {}, timers: ft.timers });
+	p.start();
+	p.stop();
+	inflight.resolve(true);
+	await settle();
+	assert.equal(done, 0, 'ondone after stop');
+	assert.equal(ft.q.length, 0, 'a timer was scheduled after stop');
+	assert.equal(ticks, 1);
+});
+
+test('poller: a new start ends the previous loop, so ondone fires once', async () => {
+	const ft = fakeTimers();
+	let done = 0;
+	let n = 0;
+	const p = poller({ tick: async () => ++n >= 4, ondone: () => done++, onfail: () => {}, timers: ft.timers });
+	p.start();
+	await settle();
+	p.start();
+	await settle();
+	await ft.flush();
+	assert.equal(done, 1);
+});
+
+test('poller gives up after repeated failures instead of polling forever', async () => {
+	const ft = fakeTimers();
+	let ticks = 0;
+	let failed: unknown = null;
+	const p = poller({ tick: async () => { ticks++; throw new Error('HTTP 401'); }, ondone: () => {}, onfail: (e) => (failed = e), maxFails: 3, timers: ft.timers });
+	p.start();
+	await settle();
+	await ft.flush();
+	assert.equal(ticks, 3);
+	assert.ok(failed instanceof Error);
+});
+
+test('the / shortcut leaves every kind of text field alone', () => {
+	for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT', 'textarea']) assert.equal(isTypingTarget({ tagName }), true, tagName);
+	assert.equal(isTypingTarget({ tagName: 'DIV', isContentEditable: true }), true);
+	assert.equal(isTypingTarget({ tagName: 'BODY', isContentEditable: false }), false);
+	assert.equal(isTypingTarget({ tagName: 'BUTTON' }), false);
+	assert.equal(isTypingTarget(null), false);
+});
+
+test('hours never read 60 min', () => {
+	assert.equal(hoursMinutes(479.7 / 60), '8 h 0 min');
+	assert.equal(hoursMinutes(7.9999), '8 h 0 min');
+	assert.equal(hoursMinutes(7.5), '7 h 30 min');
+	assert.equal(hoursMinutes(6.6), '6 h 36 min');
+	assert.equal(hoursMinutes(0), '0 h 0 min');
+});

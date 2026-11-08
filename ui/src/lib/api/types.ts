@@ -272,21 +272,6 @@ export interface GenomeFinding {
 	src: string;
 }
 
-export interface GenomeOverview {
-	dataset: {
-		assay: string;
-		build: string;
-		source_tool: string;
-		imported_at: IsoDateTime;
-		db_versions: Record<string, string>;
-	} | null;
-	tiles: { key: string; value: string; detail: string; actionable?: number; genes?: string; hidden?: number }[];
-	findings: GenomeFinding[];
-	coverage: { target: string; panel: string | null; state: 'assessed' | 'partial' | 'not_assessed'; reason: string | null }[];
-	withheld: { sensitive: number; minor_rule: number };
-	limitations: string[];
-}
-
 // GET /profiles/{p}/genome/variant?rsid=|hgvs=|region= (read:genome_raw)
 export interface VariantCall {
 	source: string;
@@ -314,22 +299,6 @@ export interface VariantLookup {
 	next_cursor?: string | null;
 	limitations: string[];
 	notice: string;
-}
-
-// --------------------------------------------------- lane E: drug check ----
-
-export interface DrugCheck {
-	drug: { name: string; cpic_drug_id: string | null; currently_taking: boolean };
-	pgx: { gene: string; diplotype: string | null; phenotype: string | null; evidence: string; call_state: CallState; src: string }[];
-	phenoconversion: { gene: string; by: string; inhibitor_strength: string; computed: boolean; functional_phenotype: string | null; src: string }[];
-	current_medications_relevant: { name: string; since: IsoDate | null; src: string }[];
-	relevant_labs: { name: string; value: string; unit: string; date: IsoDate; src: string }[];
-	guidance: { source: string; strength: string; applies_to: string; quote: string; url: string }[];
-	not_assessed: string[];
-	limitations: string[];
-	notice: string;
-	withheld?: { by_scope: string[] };
-	db_versions?: { cpic: string };
 }
 
 // ---------------------------------------------------- lane C: wearables, records ----
@@ -539,7 +508,7 @@ export interface InviteOut {
 }
 
 // ------------------------------------------- lane I-ui-2: shapes as the backend sends them ----
-// New types only; the older GenomeOverview / DrugCheck above stay for their readers.
+// The genome and drug-check responses as the backend sends them: GenomeView, DrugCheckView.
 
 export interface GenomeFindingFull extends Omit<GenomeFinding, 'call_state'> {
 	call_state: CallState | null;

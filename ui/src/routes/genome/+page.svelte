@@ -33,8 +33,8 @@
 	function load() {
 		const slug = prof?.slug;
 		if (!slug) return;
-		gen.run(() => getGenomeView(slug, i18n.lang));
-		alerts.run(async () => (await listReview({ status: 'open', profile: slug, kind: 'genome_reinterpretation' })).items);
+		gen.run(() => getGenomeView(slug, i18n.lang), slug);
+		alerts.run(async () => (await listReview({ status: 'open', profile: slug, kind: 'genome_reinterpretation' })).items, slug);
 	}
 	$effect(() => {
 		void prof?.slug;
@@ -49,6 +49,16 @@
 		actionError = null;
 		try {
 			await withStepUp(() => setGenomeConsent(slug, { ui }));
+			load();
+		} catch (e) {
+			actionError = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	async function markRead(id: string) {
+		actionError = null;
+		try {
+			await dismissReview(id, 'read');
 			load();
 		} catch (e) {
 			actionError = e instanceof Error ? e.message : String(e);
@@ -121,7 +131,7 @@
 	<div class="banner" role="status">
 		<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e0a84a" stroke-width="2" aria-hidden="true"><path d="M12 3 2 20h20zM12 10v4M12 17v.5" /></svg>
 		<div><b>{t('i2_reinterp')}</b><div class="muted" style="font-size:12px">{p.summary ?? p.text ?? [p.gene, p.from, '→', p.to].filter(Boolean).join(' ')}</div></div>
-		<button class="btn sm" style="margin-left:auto" onclick={() => dismissReview(a.id, 'read').then(load)}>{t('i2_mark_read')}</button>
+		<button class="btn sm" style="margin-left:auto" onclick={() => markRead(a.id)}>{t('i2_mark_read')}</button>
 	</div>
 {/each}
 
