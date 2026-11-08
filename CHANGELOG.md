@@ -4,6 +4,16 @@
 
 - **Homelab backups.** The restic repository and its S3 keys move from `.env` to `restic.env`, which only the `admin` service reads, so the app container no longer holds the keys to the backups. An install that keeps them in `.env` still works; move the lines to take them away from the app ([deploy/README.md](deploy/README.md#homelab-setup)).
 
+## 0.1.1 (2026-11-08)
+
+Fixes from a full CodeRabbit review of 0.1.0, plus places where the code disagreed with the design docs. No migrations; an existing 0.1.0 install upgrades in place.
+
+- **Security.** Adding a passkey or linking an OIDC provider needs a fresh login; the OIDC callback only counts in the browser that started it; a caregiver can no longer take over a managed profile with a claim invite; document search no longer matches or quotes sensitive pages without `read:sensitive`; document bytes are sent `no-store`; a fact can no longer create a source on another profile.
+- **Genome.** Lookups no longer reveal that a withheld finding sits at a position; minors are also shielded from carrier-panel genes; the importer recomputes fact ids, caps confidence per assay, checks imputed sites and keeps sensitive facts inside their gene spans; drug guidance comes from the newest CPIC version.
+- **Drug check and status.** CYP2D6 phenoconversion bands follow CPIC's open bounds, so no activity score is left without a phenotype; medication matching uses whole words; `get_health_status` stays under 2 KB with long notes; `check_drug` accepts its own paging cursor.
+- **Data.** Duplicate detection considers method, comparator and source; the received UCUM unit is kept like the received LOINC code; trend statistics never mix units.
+- **Robustness and UI.** Oversized limits and windows answer 422 instead of 500; a failed export leaves no file behind; browser reads are audited as `ui`; a relative's profile always has a guardian; UI fixes across the review queue, genome, settings and charts.
+
 ## 0.1.0 (2026-11-08)
 
 The first release you can run: `docker compose up` with one app image and Postgres 17.
