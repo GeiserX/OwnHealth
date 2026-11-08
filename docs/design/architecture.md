@@ -103,7 +103,7 @@ Tags are pinned semver at release time and never `:latest`. The version numbers 
 name: ownhealth
 services:
   app:
-    image: geiserx/ownhealth:0.1.0
+    image: drumsergio/ownhealth:0.1.1
     restart: unless-stopped
     depends_on: { db: { condition: service_healthy } }
     environment:

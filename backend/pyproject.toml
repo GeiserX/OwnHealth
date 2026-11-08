@@ -1,6 +1,6 @@
 [project]
 name = "ownhealth"
-version = "0.1.0"
+version = "0.1.1"
 description = "The health data layer you own: one store, a web page and an MCP server."
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.13,<3.14"
