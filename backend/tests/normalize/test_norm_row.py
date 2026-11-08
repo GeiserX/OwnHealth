@@ -124,6 +124,10 @@ def test_flag_mismatch(conn, family):
     assert _failed(_row(conn, family, "Glucosa", "120", "mg/dL", "70 - 110", flag="H")) == []
     hh = _row(conn, family, "Potasio", "7,1", "mmol/L", "3,5 - 5,1", flag="HH")
     assert hh.observation.interpretation == "HH"  # critical only because the lab printed it
+    assert "flag_mismatch" not in _failed(hh)  # HH agrees with a value above the range
+    ll = _row(conn, family, "Potasio", "2,1", "mmol/L", "3,5 - 5,1", flag="LL")
+    assert ll.observation.interpretation == "LL" and "flag_mismatch" not in _failed(ll)
+    assert "flag_mismatch" in _failed(_row(conn, family, "Potasio", "4,0", "mmol/L", "3,5 - 5,1", flag="HH"))
 
 
 def test_separator_and_factor_1000(conn, family):
@@ -224,3 +228,42 @@ def test_a_partial_name_and_a_text_on_a_quantity_go_to_review(conn, family):
     assert "implausible" in _failed(neg)
     strip = _row(conn, family, "Proteínas en orina", "Negativo", None, "Negativo")
     assert _failed(strip) == [] and strip.observation.loinc == "20454-5"
+
+
+def _commit(conn, n, document_id=None):
+    obs = n.observation.model_copy(update={"document_id": document_id}) if document_id else n.observation
+    commit_observation(conn, obs, src=SrcIn(kind="manual", actor_kind="user"), accepted_by="person")
+
+
+def test_duplicate_needs_the_same_method_and_comparator(conn, family):
+    """A direct and a Friedewald LDL never merge; `<5` beside `5` is a conflict, not one fact."""
+    _commit(conn, _row(conn, family, "Colesterol LDL (calculado)", "97", "mg/dL", "< 130"))
+    direct = _row(conn, family, "Colesterol LDL directo", "97", "mg/dL", "< 130")
+    assert direct.observation.method == "direct"
+    assert "duplicate" not in _failed(direct) and "conflict" not in _failed(direct)
+    _commit(conn, _row(conn, family, "PCR", "5", "mg/L", "< 5"))
+    censored = _row(conn, family, "PCR", "<5", "mg/L", "< 5")
+    assert "conflict" in _failed(censored) and "duplicate" not in _failed(censored)
+
+
+def test_rows_of_one_source_are_never_duplicates(conn, family):
+    doc = _document(conn, family)
+    _commit(conn, _row(conn, family, "Glucosa", "92", "mg/dL", "70 - 110"), document_id=doc)
+    again = _row(conn, family, "Glucosa", "92", "mg/dL", "70 - 110", document_id=doc)
+    assert "duplicate" not in _failed(again)
+    other = _row(conn, family, "Glucosa", "92", "mg/dL", "70 - 110", document_id=_document(conn, family, b"2"))
+    assert "duplicate" in _failed(other)
+
+
+def _document(conn, family, data=b"1"):
+    from ownhealth.core.documents import create_document
+
+    return create_document(
+        conn,
+        household_id=family.household_id,
+        profile_id=family.profiles["alex"],
+        blob_sha256=f"{int.from_bytes(data, 'big'):064x}",
+        mime="application/pdf",
+        size_bytes=1,
+        filename="r.pdf",
+    ).id

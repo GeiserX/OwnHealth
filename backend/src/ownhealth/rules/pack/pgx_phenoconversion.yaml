@@ -10,12 +10,13 @@ rule:
   note: >-
     Caudle KE et al. 2020, CPIC/DPWG CYP2D6 genotype to phenotype consensus (activity score bands and
     the inhibitor adjustment). Exact CPIC wording of the adjustment to verify.
-  # Activity score to phenotype, CPIC 2020 bands (lower bound inclusive).
+  # Activity score to phenotype, CPIC 2020: 0 poor; above 0 and below 1.25 intermediate; 1.25 to 2.25
+  # normal; above 2.25 ultrarapid. Open bounds, so a converted score (0.125, 1.125) falls in a band.
   bands:
     - {min: "0", max: "0", phenotype: Poor Metabolizer}
-    - {min: "0.25", max: "1", phenotype: Intermediate Metabolizer}
+    - {above: "0", below: "1.25", phenotype: Intermediate Metabolizer}
     - {min: "1.25", max: "2.25", phenotype: Normal Metabolizer}
-    - {min: "2.5", max: null, phenotype: Ultrarapid Metabolizer}
+    - {above: "2.25", max: null, phenotype: Ultrarapid Metabolizer}
 
 # Clinical inhibitors from the FDA table of CYP enzyme interactions (strong and moderate only).
 inhibitors_cite: https://www.fda.gov/drugs/drug-interactions-labeling/healthcare-professionals-fdas-examples-drugs-interact-cyp-enzymes-and-transporter-systems

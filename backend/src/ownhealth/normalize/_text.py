@@ -178,26 +178,32 @@ def parse_range(printed: str, locale: str, ucum: str | None = None) -> list[RefR
     count = is_count_unit(ucum)
     out: list[RefRange] = []
     single = len(re.split(r"[;\n|]", printed.strip())) == 1
-    for chunk in re.split(r"[;\n|]", fold(printed)):
-        labels = list(_LABEL.finditer(chunk))
-        pieces: list[tuple[dict, str]] = []
-        if not labels:
-            pieces.append(({}, chunk))
-        else:
-            if chunk[: labels[0].start()].strip(" ,"):
-                pieces.append(({}, chunk[: labels[0].start()]))
-            for i, m in enumerate(labels):
-                end = labels[i + 1].start() if i + 1 < len(labels) else len(chunk)
-                pieces.append((_label_applies(m), chunk[m.end() : end]))
-        for applies, text in pieces:
-            r = _one_range(text, applies, locale, count)
-            if r is not None:
-                out.append(r)
+    carry = ""  # a line with a label and no value of its own ("Hombres:") continues on the next line
+    # split before folding: fold turns line breaks into spaces, and a line break separates entries
+    for line in re.split(r"[;\n|]", printed):
+        chunk = f"{carry} {fold(line)}".strip() if carry else fold(line)
+        found = _chunk_ranges(chunk, locale, count)
+        carry = "" if found else chunk
+        out.extend(found)
     if single and len(out) == 1 and not out[0].applies_to:
         out[0] = RefRange(
             out[0].low, out[0].high, printed.strip(), {}, out[0].low_inclusive, out[0].high_inclusive, out[0].text_code
         )
     return out
+
+
+def _chunk_ranges(chunk: str, locale: str, count: bool) -> list[RefRange]:
+    labels = list(_LABEL.finditer(chunk))
+    pieces: list[tuple[dict, str]] = []
+    if not labels:
+        pieces.append(({}, chunk))
+    else:
+        if chunk[: labels[0].start()].strip(" ,"):
+            pieces.append(({}, chunk[: labels[0].start()]))
+        for i, m in enumerate(labels):
+            end = labels[i + 1].start() if i + 1 < len(labels) else len(chunk)
+            pieces.append((_label_applies(m), chunk[m.end() : end]))
+    return [r for applies, text in pieces if (r := _one_range(text, applies, locale, count)) is not None]
 
 
 def _label_applies(m: re.Match) -> dict:
@@ -287,16 +293,19 @@ def interpret(value: Decimal | None, text_code: str | None, ref: RefRange | None
     lo, hi = ref.low, ref.high
     below = lo is not None and (value < lo or (value == lo and not ref.low_inclusive))
     above = hi is not None and (value > hi or (value == hi and not ref.high_inclusive))
-    if comparator in ("<", "<="):  # the true value is at most `value`
+    if comparator in ("<", "<="):  # the true value is at most `value` (below it for "<")
         if below or (lo is not None and value == lo and comparator == "<"):
             return "L"
-        if lo is None and not above:
+        # "<5" against a range "<5" is inside it: the endpoint is the comparator's, not the range's
+        under_hi = hi is None or value < hi or (value == hi and (comparator == "<" or ref.high_inclusive))
+        if lo is None and under_hi:
             return "N"
         return None
-    if comparator in (">", ">="):  # the true value is at least `value`
+    if comparator in (">", ">="):  # the true value is at least `value` (above it for ">")
         if above or (hi is not None and value == hi and comparator == ">"):
             return "H"
-        if hi is None and not below:
+        over_lo = lo is None or value > lo or (value == lo and (comparator == ">" or ref.low_inclusive))
+        if hi is None and over_lo:
             return "N"
         return None
     return "L" if below else "H" if above else "N"
@@ -323,9 +332,9 @@ def flag_disagrees(printed: str | None, computed: str | None) -> bool:
     if printed is None or computed is None:
         return False
     if printed in ("H", "HH"):
-        return computed != "H"
+        return computed not in ("H", "HH")
     if printed in ("L", "LL"):
-        return computed != "L"
+        return computed not in ("L", "LL")
     if printed == "A":
         return computed == "N"
     return printed == "N" and computed != "N"

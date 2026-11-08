@@ -18,4 +18,4 @@ def new_src_id() -> str:
 
 
 def is_src_id(value: str) -> bool:
-    return bool(SRC_ID.match(value))
+    return bool(SRC_ID.fullmatch(value))  # match() lets "src_x\n" through: $ matches before \n

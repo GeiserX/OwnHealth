@@ -26,15 +26,11 @@ from ownhealth.blobs import BlobStore
 from ownhealth.core.documents import create_document
 from ownhealth.genome.ingest import import_genome_facts
 from ownhealth.genome.model import FACTS_SCHEMA
+from ownhealth.genome.schema import fact_id
 from ownhealth.ingest import ImportSummary
 
 CONTIGS = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY", "chrM"]
 CPIC_URL = "https://cpicpgx.org/guidelines/"
-
-
-def fact_id(category: str, gene: str, key: str) -> str:
-    """The deterministic id of genomics.md 2.1: sha256("v1|category|gene|key"), first 16 hex."""
-    return "f_" + hashlib.sha256(f"v1|{category}|{gene}|{key}".encode()).hexdigest()[:16]
 
 
 def vrs_id(chrom: str, pos: int, ref: str, alt: str) -> str:
@@ -284,7 +280,7 @@ def alex_facts() -> dict:
             score=2.0,
         ),
         {
-            "id": fact_id("hla", "HLA-B", "HLA-B"),
+            "id": fact_id("hla", "HLA-B", "HLA-B*58:01"),
             "category": "hla",
             "gene": "HLA-B",
             "value": {"alleles": ["HLA-B*07:02", "HLA-B*44:02"], "marker": "HLA-B*58:01", "present": False},
@@ -296,7 +292,7 @@ def alex_facts() -> dict:
         },
         _apoe("alt", "0/1"),
         {
-            "id": fact_id("risk_marker", "LPA", "rs10455872"),
+            "id": fact_id("risk_marker", "LPA", vrs_id("chr6", 160589086, "A", "G")),
             "category": "risk_marker",
             "gene": "LPA",
             "variants": [_variant("chr6", 160589086, "A", "G", "rs10455872", "alt", "0/1")],
@@ -314,7 +310,7 @@ def alex_facts() -> dict:
         _cftr_carrier(),
         _prs(86),
         {
-            "id": fact_id("trait", "LCT", "rs4988235"),
+            "id": fact_id("trait", "LCT", vrs_id("chr2", 135851076, "G", "A")),
             "category": "trait",
             "gene": "LCT",
             "variants": [_variant("chr2", 135851076, "G", "A", "rs4988235", "alt", "0/1")],
@@ -325,7 +321,7 @@ def alex_facts() -> dict:
             "sensitivity": {"level": "normal"},
         },
         {
-            "id": fact_id("trait", "MTHFR", "rs1801133"),
+            "id": fact_id("trait", "MTHFR", vrs_id("chr1", 11796321, "G", "A")),
             "category": "trait",
             "gene": "MTHFR",
             "variants": [_variant("chr1", 11796321, "G", "A", "rs1801133", "alt", "0/1")],

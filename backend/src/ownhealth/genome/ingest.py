@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import contextmanager
 from datetime import datetime
 from uuid import UUID
 
@@ -21,8 +22,8 @@ from ownhealth.blobs import BlobStore, sha256_hex_to_bytes
 from ownhealth.core.ids import short
 from ownhealth.core.provenance import SrcIn, ensure_src
 from ownhealth.genome.model import GenomeImportError
-from ownhealth.genome.schema import validate_facts
-from ownhealth.genome.sensitive import is_sensitive_gene
+from ownhealth.genome.schema import DEFER_CHIP_SITES, chip_site_errors, validate_facts
+from ownhealth.genome.sensitive import is_sensitive_gene, norm_chrom
 from ownhealth.ingest import ImportSummary
 
 RAW_ROLES = {
@@ -137,6 +138,27 @@ def _raw_files(
     return columns, missing
 
 
+@contextmanager
+def _chip_sites(blobs: BlobStore, doc: dict, raw: dict[str, bytes]):
+    """A (chrom, pos) -> probed predicate over the checked chip_sites file, or None when it is not on hand."""
+    f = next((f for f in doc["files"] if f["role"] == "chip_sites"), None)
+    if f is None or "sites_blob" not in raw:
+        yield None
+        return
+    with pysam.VariantFile(str(blobs.path(f["sha256"])), index_filename=str(blobs.path(f["index_sha256"]))) as vf:
+
+        def probed(chrom: str, pos: int) -> bool:
+            c = norm_chrom(chrom)
+            for name in (c, c[3:]):
+                try:
+                    return any(r.pos == pos for r in vf.fetch(name, pos - 1, pos))
+                except ValueError:
+                    continue
+            return False
+
+        yield probed
+
+
 def _finding_src_id(conn: Connection, fact_id: str) -> str:
     sid = "src_g_" + fact_id[2:12]
     if conn.execute(text("select 1 from src where id = :s"), {"s": sid}).first():
@@ -180,7 +202,7 @@ def import_genome_facts(
         doc = json.loads(blobs.get_bytes(sha))
     except (ValueError, UnicodeDecodeError) as exc:
         raise GenomeImportError(f"{filename}: not valid JSON ({exc})") from exc
-    errors = validate_facts(doc)
+    errors = validate_facts(doc, chip_sites=DEFER_CHIP_SITES)
     if errors:
         raise GenomeImportError(f"{filename} is not a valid genome-facts file:\n- " + "\n- ".join(errors))
 
@@ -230,6 +252,10 @@ def import_genome_facts(
     raw, missing = _raw_files(conn, blobs, doc, dict(attachments or {}), profile_id)
     if missing:
         summary.reasons["raw_file_missing"] = len(missing)
+    with _chip_sites(blobs, doc, raw) as probed:
+        errors = chip_site_errors(doc, probed)
+    if errors:
+        raise GenomeImportError(f"{filename} is not a valid genome-facts file:\n- " + "\n- ".join(errors))
 
     prov = doc["provenance"]
     old = (

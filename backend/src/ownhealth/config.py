@@ -36,18 +36,31 @@ def sqlalchemy_url(url: str) -> str:
     return url
 
 
+QUEUES = ("core", "ocr")  # the job.queue check constraint in 0001_foundation.sql
+
+
+def _queues(value: str) -> tuple[str, ...]:
+    """Parse OWNHEALTH_QUEUES: trim entries, drop empty ones, refuse a name no job row can carry."""
+    names = tuple(dict.fromkeys(q.strip() for q in value.split(",") if q.strip()))
+    unknown = [q for q in names if q not in QUEUES]
+    if not names or unknown:
+        raise ValueError(f"OWNHEALTH_QUEUES must name some of {', '.join(QUEUES)}; got {value!r}")
+    return names
+
+
 DEV_SECRET_KEY = "dev-insecure-secret-change-me"  # public: create_app refuses it outside dev_auth and demo
 
 
 @dataclass(frozen=True)
 class Settings:
-    database_url: str = "postgresql://ownhealth:ownhealth@127.0.0.1:5432/ownhealth"
+    # repr=False: a logged or printed Settings must not carry the database password or the secret key
+    database_url: str = field(default="postgresql://ownhealth:ownhealth@127.0.0.1:5432/ownhealth", repr=False)
     data_dir: Path = Path("./data")
     blob_dir: Path | None = None
     static_dir: Path = PACKAGE_DIR / "static"
     base_url: str = "http://127.0.0.1:8080"
     default_locale: str = "es"
-    secret_key: str = DEV_SECRET_KEY
+    secret_key: str = field(default=DEV_SECRET_KEY, repr=False)
     demo: bool = False
     # Unauthenticated requests act as the first owner user. Never on a real install.
     dev_auth: bool = False
@@ -95,7 +108,7 @@ class Settings:
             run_jobs=_flag("RUN_JOBS", True),
             job_workers=int(_env("JOB_WORKERS") or d.job_workers),
             job_poll_seconds=float(_env("JOB_POLL_SECONDS") or d.job_poll_seconds),
-            queues=tuple((_env("QUEUES") or "core").split(",")),
+            queues=_queues(_env("QUEUES") or "core"),
             auto_accept_threshold=max(0.90, float(_env("AUTO_ACCEPT_THRESHOLD") or d.auto_accept_threshold)),
             age_of_majority=int(_env("AGE_OF_MAJORITY") or d.age_of_majority),
             host=_env("HOST") or d.host,

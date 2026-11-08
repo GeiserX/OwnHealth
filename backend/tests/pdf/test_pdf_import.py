@@ -265,6 +265,8 @@ def test_import_pdf_job_runs_through_the_queue(engine, settings, blobs, committe
     for _ in range(20):
         if jobs.run_one(ctx, kinds=["import.pdf"]) is None:
             break
+    else:
+        pytest.fail("the import.pdf queue did not drain in 20 runs")
     with engine.connect() as c:
         state, result = c.execute(text("select state, result from job where id = :j"), {"j": item["job_id"]}).one()
         n = c.execute(

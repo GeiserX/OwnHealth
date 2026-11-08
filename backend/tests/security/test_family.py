@@ -160,3 +160,41 @@ def test_guardian_stops_managing_once_claimed(client_for, committed_family, engi
     assert _perm(engine, f.users["alex"], kid["id"]).role == "guardian"  # the grant stays
     assert alex.put(f"/api/profiles/{kid['slug']}/locks", json={"locks": []}).status_code == 403
     assert alex.post(f"/api/profiles/{kid['slug']}/export", json={"fmt": "zip"}).status_code == 403
+
+
+def test_a_relatives_profile_always_has_a_manager(client_for, committed_family):
+    alex = client_for(committed_family.users["alex"])
+    r = alex.post("/api/household/profiles", json={"display_name": "Pilar Ortega", "role": "caregiver"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_input", r.text
+
+
+def test_a_caregiver_cannot_take_over_a_managed_profile_with_a_claim_invite(client_for, committed_family, engine):
+    f = committed_family
+    alex, sam = client_for(f.users["alex"]), client_for(f.users["sam"])
+    # Alex is Lucía's guardian and makes Sam her caregiver: Sam may not send the claim invite
+    grant = {"user_id": str(f.users["sam"]), "profile": "lucia", "role": "caregiver"}
+    assert alex.put("/api/grants", json=grant).status_code == 200
+    r = sam.post("/api/household/invites", json={"display_name": "Lucía Rivera", "claim_profile": "lucia"})
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "forbidden", r.text
+    # the guardian may
+    assert (
+        alex.post("/api/household/invites", json={"display_name": "Lucía Rivera", "claim_profile": "lucia"}).status_code
+        == 201
+    )
+    # a caregiver's invite for a profile nobody manages stops working once someone does
+    inv = alex.post("/api/household/invites", json={"display_name": "Carmen Ortega", "claim_profile": "carmen"})
+    assert inv.status_code == 201, inv.text
+    with engine.begin() as c:
+        c.execute(
+            text(  # Sam becomes Carmen's guardian after Alex (her caregiver) sent the invite
+                "insert into profile_grant (user_id, profile_id, role, categories)"
+                " select :u, :p, 'guardian', categories from profile_grant where user_id = :a and profile_id = :p"
+            ),
+            {"u": f.users["sam"], "p": f.profiles["carmen"], "a": f.users["alex"]},
+        )
+    carmen = client_for(eng=engine)
+    key = SoftKey()
+    opts = carmen.post("/api/auth/enroll/begin", json={"code": inv.json()["code"]}).json()
+    r = carmen.post("/api/auth/enroll/finish", json={"code": inv.json()["code"], "credential": key.create(opts)})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "invite_invalid", r.text
+    assert _perm(engine, f.users["sam"], f.profiles["carmen"]).role == "guardian"

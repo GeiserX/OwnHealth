@@ -153,6 +153,7 @@ def import_pdf(
             lang=ext.locale,
             specimen=row.specimen,
             provider=provider,
+            document_id=document_id,
         )
         obs = n.observation.model_copy(update={"report_key": report_key, "document_id": document_id})
         checks = [*n.checks, *_row_checks(row, pages[row.page_no]), date_check]

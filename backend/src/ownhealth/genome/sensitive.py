@@ -1,7 +1,8 @@
 """OwnHealth's own sensitive gene list (genomics.md 7), applied on top of the producer's tag.
 
 APOE, the ACMG SF cancer and cardiovascular genes, HTT and other predictive repeat loci. Lookups use
-the GRCh38 spans so a raw lookup (rs429358 for APOE) cannot bypass the opt-in.
+the GRCh38 spans so a raw lookup (rs429358 for APOE) cannot bypass the opt-in. The carrier-panel spans
+sit beside them for the minor rule. Both lists are fixed, the same for every profile.
 """
 
 from __future__ import annotations
@@ -22,16 +23,29 @@ class GeneSpan:
     group: str
 
 
-@cache
-def _spans() -> tuple[GeneSpan, ...]:
+def _load(name: str, group: str | None) -> tuple[GeneSpan, ...]:
+    """gene, chrom, start, end[, group, ...] rows of a data file; `group` overrides the fifth column."""
     rows = []
-    text = resources.files("ownhealth.genome").joinpath("data/sensitive_genes.tsv").read_text()
+    text = resources.files("ownhealth.genome").joinpath(f"data/{name}").read_text()
     for line in text.splitlines():
         if not line or line.startswith(("#", "gene\t")):
             continue
-        gene, chrom, start, end, group = line.split("\t")
-        rows.append(GeneSpan(gene, chrom, max(1, int(start) - SPAN_PAD_BP), int(end) + SPAN_PAD_BP, group))
+        gene, chrom, start, end, *rest = line.split("\t")
+        span_group = group or rest[0]
+        rows.append(GeneSpan(gene, chrom, max(1, int(start) - SPAN_PAD_BP), int(end) + SPAN_PAD_BP, span_group))
     return tuple(rows)
+
+
+@cache
+def _spans() -> tuple[GeneSpan, ...]:
+    return _load("sensitive_genes.tsv", None)
+
+
+@cache
+def _carrier_spans() -> tuple[GeneSpan, ...]:
+    """The carrier-panel genes (data/carrier_genes.tsv): carrier facts sit inside them (importer rule 9),
+    and a minor's raw lookups inside them are withheld (genomics.md 7)."""
+    return _load("carrier_genes.tsv", "carrier")
 
 
 @cache
@@ -54,6 +68,11 @@ def norm_chrom(chrom: str) -> str:
 def spans_overlapping(chrom: str, start: int, end: int) -> list[GeneSpan]:
     c = norm_chrom(chrom)
     return [s for s in _spans() if s.chrom == c and s.start <= end and s.end >= start]
+
+
+def carrier_spans_overlapping(chrom: str, start: int, end: int) -> list[GeneSpan]:
+    c = norm_chrom(chrom)
+    return [s for s in _carrier_spans() if s.chrom == c and s.start <= end and s.end >= start]
 
 
 def sensitive_gene_at(chrom: str, pos: int) -> str | None:

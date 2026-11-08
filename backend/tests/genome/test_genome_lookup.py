@@ -60,6 +60,9 @@ def test_not_assessed_gene_answers_not_covered(conn, family, blobs, alex_genome)
 
 def test_sensitive_gene_lookup_is_gated(conn, family, blobs, alex_genome):
     alex = family.profiles["alex"]
+    # a withheld finding never resolves an rsID (that would say it exists), so the curated index does
+    sites = [("rs429358", "chr19", 44908684, "T"), ("rs113993960", "chr7", 117559590, "ATCT")]
+    load_ref_sites(conn, [{"rsid": r, "chrom": c, "pos": p, "ref": ref} for r, c, p, ref in sites], source="t")
     closed = _look(conn, blobs, alex, rsid="rs429358")
     assert closed["withheld"] == "withheld_sensitive" and closed["calls"] == []
     assert "0/1" not in str(closed) and "T/C" not in str(closed)
@@ -73,6 +76,37 @@ def test_sensitive_gene_lookup_is_gated(conn, family, blobs, alex_genome):
     assert _look(conn, blobs, alex, gate=minor, rsid="rs429358")["withheld"] == "withheld_minor"
     assert _look(conn, blobs, alex, gate=minor, rsid="rs113993960")["withheld"] == "withheld_minor"
     assert _state(_look(conn, blobs, alex, gate=minor, rsid="rs4244285")) == "alt"  # PGx stays visible
+
+
+def test_minor_lookups_are_gated_by_the_carrier_panel_spans(conn, family, blobs, alex_genome):
+    """A position in a carrier-panel gene that no finding cites is withheld for a minor, and a region
+    over it is clipped: the fixed list gates, not the person's own findings (genomics.md 7)."""
+    alex = family.profiles["alex"]
+    minor = Gate(include_sensitive=True, minor=True)
+    uncited = _look(conn, blobs, alex, gate=minor, hgvs="NC_000007.14:g.117560000A>G")
+    assert uncited["withheld"] == "withheld_minor" and uncited["calls"] == []
+    assert _look(conn, blobs, alex, gate=OPEN, hgvs="NC_000007.14:g.117560000A>G")["withheld"] is None
+    region = _look(conn, blobs, alex, gate=minor, region="chr7:117559000-117560000")
+    assert region["records"] == [] and [c["gene"] for c in region["clipped"]] == ["CFTR"]
+    assert region["clipped"][0]["reason"] == "withheld_minor"
+
+
+def test_a_withheld_answer_does_not_depend_on_the_persons_findings(conn, family, blobs, alex_genome):
+    """Lucía's CFTR carrier finding is withheld by the minor rule. Asking for its rsID must answer the
+    way it does for Sam, who has no such finding, and a region answer carries no count of hidden rows."""
+    for slug, facts in (("lucia", synthetic.lucia_facts()), ("sam", synthetic.sam_facts())):
+        synthetic.seed_genome(
+            conn, blobs, household_id=family.household_id, profile_id=family.profiles[slug], facts=facts
+        )
+    minor = Gate(include_sensitive=False, minor=True)
+    codes = []
+    for slug in ("lucia", "sam"):
+        with pytest.raises(GenomeQueryError) as e:
+            _look(conn, blobs, family.profiles[slug], gate=minor, rsid="rs113993960")
+        codes.append(e.value.code)
+    assert codes == ["rsid_unknown", "rsid_unknown"]
+    out = _look(conn, blobs, family.profiles["alex"], gate=minor, region="chr10:94781000-94782000")
+    assert "withheld_records" not in out and [r["pos"] for r in out["records"]] == [94781859]
 
 
 def test_region_clips_sensitive_genes_and_pages(conn, family, blobs, alex_genome):
@@ -143,6 +177,9 @@ def _facts(sample, assay, fp):
     doc["subject"]["sample_id"] = sample
     doc["subject"]["fingerprint"]["genotypes"] = fp
     doc["assay"] = {"type": assay, "build": "GRCh38"}
+    if assay == "chip":  # the chip confidence caps (importer rule 6)
+        for f in doc["facts"]:
+            f["confidence"]["level"] = "low" if f["gene"] == "CYP2D6" else "medium"
     return doc
 
 

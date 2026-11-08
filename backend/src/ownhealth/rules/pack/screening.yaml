@@ -1,6 +1,6 @@
 # never_measured: a relevant analyte with no value at all for this profile, ever (as of the date asked).
 # Conditions: min_age (years at as_of), sex (female|male), taking (medication or supplement names,
-# matched on name or ingredient, case-insensitive substring).
+# matched as whole words on name or ingredient, case-insensitive).
 rules:
   - id: infect.hcv.once_adult
     kind: never_measured

@@ -7,6 +7,7 @@
 	import { ApiError, getMe } from '#lib/api/core';
 	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
 	import { NAV } from '#lib/nav';
+	import { isTypingTarget } from '#lib/logic/keys';
 	import { searchTarget } from '#lib/logic/search';
 	import LoginScreen from '#lib/components/pages2/LoginScreen.svelte';
 	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
@@ -38,7 +39,7 @@
 		document.documentElement.lang = i18n.lang;
 		load();
 		const onKey = (e: KeyboardEvent) => {
-			if (e.key === '/' && document.activeElement?.tagName !== 'INPUT') {
+			if (e.key === '/' && !isTypingTarget(document.activeElement as HTMLElement | null)) {
 				e.preventDefault();
 				searchEl?.focus();
 			}

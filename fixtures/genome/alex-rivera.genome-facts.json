@@ -650,7 +650,7 @@
       }
     },
     {
-      "id": "f_c1c7a5535ca89bb6",
+      "id": "f_725f101b73a48577",
       "category": "hla",
       "gene": "HLA-B",
       "value": {
@@ -739,7 +739,7 @@
       }
     },
     {
-      "id": "f_aa643d897bb5fa7b",
+      "id": "f_e00385fd892a5f36",
       "category": "risk_marker",
       "gene": "LPA",
       "variants": [
@@ -857,7 +857,7 @@
       }
     },
     {
-      "id": "f_09c5c115cc88a651",
+      "id": "f_76a7f852eafae3c4",
       "category": "trait",
       "gene": "LCT",
       "variants": [
@@ -895,7 +895,7 @@
       }
     },
     {
-      "id": "f_3f3c1d5a4b5f5f9a",
+      "id": "f_0ecec0e58610b838",
       "category": "trait",
       "gene": "MTHFR",
       "variants": [

@@ -86,8 +86,13 @@
 		});
 	}
 	async function copy(text: string) {
-		await navigator.clipboard?.writeText(text).catch(() => null);
-		copied = true;
+		// No clipboard on a plain-HTTP LAN address: only a write that succeeded says "Copied".
+		try {
+			await navigator.clipboard.writeText(text);
+			copied = true;
+		} catch {
+			copied = false;
+		}
 	}
 	const manages = (slug: string) => !!hh.data?.profiles.find((p) => p.slug === slug)?.can_manage;
 </script>
@@ -118,7 +123,7 @@
 			</label>
 			<label>{t('fm_your_role')}
 				<select class="p2in" bind:value={nr.role}>
-					<option value="guardian">{t('r_guardian')}</option><option value="caregiver">{t('r_caregiver')}</option>
+					<option value="guardian">{t('r_guardian')}</option>
 				</select>
 			</label>
 		</div>

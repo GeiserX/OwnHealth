@@ -78,12 +78,21 @@ def create_src(conn: Connection, src: SrcIn) -> str:
     return sid
 
 
-def ensure_src(conn: Connection, src: SrcIn | str) -> str:
-    """Accept an existing src id or create one from a SrcIn."""
+def ensure_src(conn: Connection, src: SrcIn | str, profile_id: UUID | None = None) -> str:
+    """Accept an existing src id or create one from a SrcIn.
+
+    With `profile_id` (the citing fact's profile), an existing src scoped to another profile is
+    refused, so a fact never cites, and resolve_src never lists it under, someone else's source.
+    """
     if isinstance(src, str):
-        if not conn.execute(text("select 1 from src where id = :id"), {"id": src}).first():
+        row = conn.execute(text("select profile_id from src where id = :id"), {"id": src}).first()
+        if row is None:
             raise ProvenanceError(f"unknown src {src}")
+        if profile_id is not None and row.profile_id is not None and row.profile_id != profile_id:
+            raise ProvenanceError(f"src {src} belongs to another profile")
         return src
+    if profile_id is not None and src.profile_id is not None and src.profile_id != profile_id:
+        raise ProvenanceError("a new src belongs to the profile of the fact that cites it")
     return create_src(conn, src)
 
 

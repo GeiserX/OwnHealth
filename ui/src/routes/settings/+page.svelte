@@ -55,6 +55,8 @@
 			if (reload) loadAll();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
+			// The grant select shows what was picked, not g.role; reload so it matches the server again.
+			if (reload) loadAll();
 		} finally {
 			busy = false;
 		}

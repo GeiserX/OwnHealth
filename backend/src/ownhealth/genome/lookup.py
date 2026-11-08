@@ -26,7 +26,7 @@ from sqlalchemy import Connection, text
 from ownhealth.blobs import BlobStore
 from ownhealth.genome.findings import coverage_rows, current_datasets, visible_rows, withheld_reason
 from ownhealth.genome.model import CALL_STATES, Gate, GenomeQueryError
-from ownhealth.genome.sensitive import norm_chrom, spans_overlapping
+from ownhealth.genome.sensitive import GeneSpan, carrier_spans_overlapping, norm_chrom, spans_overlapping
 
 RSID = re.compile(r"^rs\d+$")
 REGION = re.compile(r"^(chr[0-9XYM]+):(\d+)-(\d+)$", re.I)
@@ -209,20 +209,23 @@ def _resolve(conn: Connection, rows: list[dict], *, rsid: str | None, hgvs: str 
     )
 
 
-def _withheld_positions(rows: list[dict], gate: Gate) -> dict[tuple[str, int], str]:
-    out: dict[tuple[str, int], str] = {}
-    for r in rows:
-        why = withheld_reason(r, gate)
-        if why:
-            for v in r["fact"].get("variants") or []:
-                out.setdefault((norm_chrom(v["chrom"]), int(v["pos"])), why)
-    return out
-
-
 def _span_reason(gate: Gate) -> str | None:
     if gate.minor:
         return "minor"
     return None if gate.include_sensitive else "sensitive"
+
+
+def _gated_spans(gate: Gate, chrom: str, start: int, end: int) -> list[GeneSpan]:
+    """The fixed spans this gate withholds around [start, end]: the sensitive genes, and for a minor the
+    carrier-panel genes too. Never the person's own findings (genomics.md 6, 7): an answer that depended
+    on them would say what this person carries. Importer rule 9 keeps every gated finding inside them."""
+    why = _span_reason(gate)
+    if why is None:
+        return []
+    hits = spans_overlapping(chrom, start, end)
+    if why == "minor":
+        hits += carrier_spans_overlapping(chrom, start, end)
+    return hits
 
 
 def lookup_variant(
@@ -253,18 +256,17 @@ def lookup_variant(
         )
     rows = visible_rows(conn, profile_id)
     current_ids = {d["id"] for d in datasets}
-    rows = [r for r in rows if r["dataset_id"] in current_ids]
+    # findings the gate withholds never shape an answer: not the site resolution, not cited_by_findings
+    rows = [r for r in rows if r["dataset_id"] in current_ids and withheld_reason(r, gate) is None]
     if region is not None:
-        return _region(blobs, datasets, rows, gate, region, cursor)
+        return _region(blobs, datasets, gate, region, cursor)
 
     site = _resolve(conn, rows, rsid=rsid, hgvs=hgvs)
     query = rsid or hgvs
     span_hits = spans_overlapping(site["chrom"], site["pos"], site["pos"])
     gene = site.get("gene") or (span_hits[0].gene if span_hits else None)
     variant = {k: site.get(k) for k in ("chrom", "pos", "ref", "alt", "rsid", "hgvs_c", "hgvs_p")} | {"gene": gene}
-    why = _withheld_positions(rows, gate).get((site["chrom"], site["pos"]))
-    if span_hits and _span_reason(gate):
-        why = _span_reason(gate)
+    why = _span_reason(gate) if _gated_spans(gate, site["chrom"], site["pos"], site["pos"]) else None
     if why:
         return {
             "query": query,
@@ -345,7 +347,7 @@ def _subtract(start: int, end: int, cuts: list[tuple[int, int]]) -> list[tuple[i
     return parts
 
 
-def _region(blobs: BlobStore, datasets: list[dict], rows: list[dict], gate: Gate, region: str, cursor: str | None):
+def _region(blobs: BlobStore, datasets: list[dict], gate: Gate, region: str, cursor: str | None):
     m = REGION.match(region)
     if not m:
         raise GenomeQueryError(
@@ -362,7 +364,7 @@ def _region(blobs: BlobStore, datasets: list[dict], rows: list[dict], gate: Gate
         raise GenomeQueryError("bad_input", "Unknown cursor.") from None
     clipped = []
     if _span_reason(gate):
-        for s in spans_overlapping(chrom, start, end):
+        for s in _gated_spans(gate, chrom, start, end):
             clipped.append(
                 {
                     "gene": s.gene,
@@ -372,8 +374,7 @@ def _region(blobs: BlobStore, datasets: list[dict], rows: list[dict], gate: Gate
                 }
             )
     parts = _subtract(start, end, [(c["start"], c["end"]) for c in clipped])
-    hidden = _withheld_positions(rows, gate)
-    records, withheld = [], 0
+    records = []
     with ExitStack() as stack:
         for ds in datasets:
             if not ds["vcf"]:
@@ -382,9 +383,6 @@ def _region(blobs: BlobStore, datasets: list[dict], rows: list[dict], gate: Gate
             for s, e in parts:
                 for rec in _fetch(vf, chrom, s, e):
                     if _is_block(rec) or not (s <= rec.pos <= e):
-                        continue
-                    if (chrom, rec.pos) in hidden:
-                        withheld += 1
                         continue
                     records.append(
                         {"chrom": chrom, "pos": rec.pos, "id": rec.id, "ref": rec.ref, "alts": list(rec.alts or ())}
@@ -402,7 +400,6 @@ def _region(blobs: BlobStore, datasets: list[dict], rows: list[dict], gate: Gate
         "region": {"chrom": chrom, "start": start, "end": end},
         "records": page,
         "clipped": clipped,
-        "withheld_records": withheld,
         "next_cursor": str(offset + PAGE) if offset + PAGE < len(records) else None,
         "limitations": limitations,
     }

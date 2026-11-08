@@ -186,8 +186,27 @@ def redeem_invite(conn: Connection, code: str) -> UUID:
         raise HouseholdError("invite_invalid", "This invite link expired or was already used.") from exc
     claim = ch.data.get("claim_profile_id")
     if claim:
+        if not claim_invite_allowed(conn, UUID(claim), UUID(ch.data["invited_by"])):
+            raise HouseholdError("invite_invalid", "Someone else manages this profile now. Ask them for a new invite.")
         claim_profile(conn, UUID(claim), ch.user_id, granted_by=UUID(ch.data["invited_by"]))
     return ch.user_id
+
+
+def claim_invite_allowed(conn: Connection, profile_id: UUID, inviter: UUID) -> bool:
+    """A claim invite counts when its sender manages the profile (owner, or guardian of an unclaimed
+    one), or when nobody does. A caregiver's own invite must not turn a login they hold into the
+    owner of a profile its guardians manage."""
+    return bool(
+        conn.execute(
+            text(
+                "select exists (select 1 from profile_grant where profile_id = :p and user_id = :u"
+                " and role in ('owner', 'guardian') and (expires_at is null or expires_at > now()))"
+                " or not exists (select 1 from profile_grant where profile_id = :p"
+                " and role in ('owner', 'guardian') and (expires_at is null or expires_at > now()))"
+            ),
+            {"p": profile_id, "u": inviter},
+        ).scalar()
+    )
 
 
 def claim_profile(conn: Connection, profile_id: UUID, user_id: UUID, *, granted_by: UUID | None = None) -> None:
@@ -216,9 +235,12 @@ def add_relative(
     country: str | None = None,
     slug: str | None = None,
 ) -> tuple[UUID, str]:
-    """A profile without a login (a child, a parent), managed by its creator as guardian or caregiver."""
-    if role not in ("guardian", "caregiver"):
-        raise HouseholdError("bad_input", "The creator of a relative's profile is its guardian or caregiver.")
+    """A profile without a login (a child, a parent), managed by its creator as guardian.
+
+    Only guardian: a caregiver cannot manage, so a profile with only a caregiver grant would have
+    nobody to grant access, delete it or let its creator close their account."""
+    if role != "guardian":
+        raise HouseholdError("bad_input", "The creator of a relative's profile is its guardian.")
     display_name = display_name.strip()[:80]
     if not display_name:
         raise HouseholdError("bad_input", "A name is needed.")

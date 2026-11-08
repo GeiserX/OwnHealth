@@ -118,6 +118,8 @@ def test_delete_profile(client_for, committed_family, https_settings, engine):
     blobs = BlobStore(https_settings.blobs_path)
     _, sha, _ = _seed(engine, f, blobs)
     assert blobs.exists(sha)
+    with engine.begin() as c:  # Sam's own value, which deleting Alex must leave alone
+        sams = commit_observation(c, obs(f.profiles["sam"], "55"), src=manual_src(f.users["sam"]), accepted_by="person")
     alex = client_for(f.users["alex"])
     assert alex.delete("/api/profiles/alex", params={"confirm": "Alex"}).status_code == 422
     assert client_for(f.users["sam"]).delete("/api/profiles/alex", params={"confirm": "alex"}).status_code == 403
@@ -139,6 +141,9 @@ def test_delete_profile(client_for, committed_family, https_settings, engine):
     assert not blobs.exists(sha)
     # Sam's data is untouched
     assert {p["slug"] for p in client_for(f.users["sam"]).get("/api/profiles").json()} == {"sam", "lucia"}
+    with engine.connect() as c:
+        owner = c.execute(text("select profile_id from observation where id = :i"), {"i": sams.id}).scalar()
+    assert owner == f.profiles["sam"]
 
 
 def test_shared_blob_survives(client_for, committed_family, https_settings, engine):
@@ -189,3 +194,34 @@ def test_delete_account_checks_before_deleting(client_for, committed_family, eng
     assert r.status_code == 409 and r.json()["detail"]["profiles"] == ["mateo"]
     with engine.connect() as c:
         assert c.execute(text("select count(*) from profile where id = :p"), {"p": f.profiles["sam"]}).scalar() == 1
+
+
+def test_a_missing_blob_is_listed_in_the_manifest(conn, family, blobs):
+    from ownhealth.export import export_profile
+
+    doc_id, _ = lab_document(conn, blobs, family, rows=_rows())
+    sha = conn.execute(text("select encode(blob_sha256, 'hex') from document where id = :d"), {"d": doc_id}).scalar()
+    blobs.path(sha).unlink()  # the row survives, the file is gone
+    out = io.BytesIO()
+    manifest = export_profile(conn, blobs, family.profiles["alex"], out)
+    z = zipfile.ZipFile(out)
+    assert z.testzip() is None and not any(n.startswith(f"files/{sha}/") for n in z.namelist())
+    assert [m["source_blob"] for m in manifest["missing_blobs"]] == [sha]
+    assert json.loads(z.read("export-manifest.json"))["missing_blobs"][0]["path"].startswith(f"files/{sha}/")
+
+
+def test_a_failed_export_audit_leaves_no_zip_behind(client_for, committed_family, https_settings, monkeypatch):
+    import pytest
+
+    from ownhealth.api import export as export_api
+
+    def broken_audit(*a, **k):
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(export_api, "write_audit", broken_audit)
+    client = client_for(committed_family.users["alex"])
+    tmp = https_settings.data_dir / "tmp"
+    before = set(tmp.glob("export-*")) if tmp.exists() else set()
+    with pytest.raises(RuntimeError, match="audit store down"):
+        client.post("/api/profiles/alex/export", json={"fmt": "zip"})
+    assert set(tmp.glob("export-*")) == before

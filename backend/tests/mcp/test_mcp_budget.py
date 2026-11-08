@@ -170,3 +170,45 @@ async def test_demo_alex_status_pages_stay_under_2kb_whole(engine, settings, con
                 break
     assert [f["rank"] for f in flags] == list(range(1, len(flags) + 1)) and len(flags) >= 5
     assert all(set(f) <= {"rank", "kind", "rule", "code", "text", "src"} for f in flags)
+
+
+async def test_long_notes_do_not_push_the_status_past_2kb(world, make_token, connect, fakes, monkeypatch):
+    """A note may hold 4000 characters; the status quotes its start, marked cut, with the src to read it whole."""
+    from ownhealth import state
+
+    def noted(conn, profile_id, *, as_of):
+        notes = [
+            {"author_kind": "person", "date": "2026-10-0" + str(i), "text": "x" * 4000, "src": f"src_n{i}"}
+            for i in range(1, 4)
+        ]
+        flags = [{"rank": 1, "kind": "lab_range", "rule": "r", "code": "LOINC:1-0", "text": "t", "src": "src_f"}]
+        return {"rules": "ownhealth-rules 0.1.0", "flags": flags, "notes": notes, "state_hash": "sha256:abc"}
+
+    monkeypatch.setattr(state, "build_state", noted)
+    monkeypatch.setattr(state, "render", lambda body, **kw: {**body, "rules_version": body["rules"]})
+    async with connect(make_token(profiles=("carmen",), user="alex")) as c:
+        env = sc(await c.call_tool("get_health_status", {"profile": "carmen"}))
+    assert len(json.dumps(env, ensure_ascii=False, separators=(",", ":")).encode()) < 2048
+    notes = env["data"]["notes"]
+    assert [n["src"] for n in notes] == ["src_n1", "src_n2", "src_n3"]
+    assert all(n["text"]["truncated"] and n["text"]["trust"] == "untrusted_text" for n in notes)
+    assert env["data"]["state_hash"] == "sha256:abc"
+
+
+async def test_check_drug_takes_back_its_own_cursor(world, make_token, connect, fakes, monkeypatch):
+    """check_drug pages relevant_labs, so the cursor it hands out must be accepted on the next call."""
+    from ownhealth import state
+
+    def many_labs(conn, profile_id, drug, *, scopes, lang, as_of):
+        labs = [{"group": f"analyte_{i:03d}", "name": "Analito " * 20, "src": f"src_l{i}"} for i in range(300)]
+        return {"drug": {"name": drug, "query": drug}, "pgx": [], "relevant_labs": labs}
+
+    monkeypatch.setattr(state, "check_drug", many_labs)
+    async with connect(make_token(scopes=ALL_SCOPES)) as c:
+        first = sc(await c.call_tool("check_drug", {"profile": "alex", "drug": "atorvastatin"}))
+        assert first["next_cursor"]
+        second = sc(
+            await c.call_tool("check_drug", {"profile": "alex", "drug": "atorvastatin", "cursor": first["next_cursor"]})
+        )
+    seen = [lab["src"] for lab in first["data"]["relevant_labs"]]
+    assert second["data"]["relevant_labs"][0]["src"] == f"src_l{len(seen)}"

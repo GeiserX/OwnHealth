@@ -1,6 +1,6 @@
 """Job kind `import.pdf` (lane B): one stored PDF or image -> pages, guesses, candidate rows.
 
-Payload: {document_id, profile_id, household_id, force?}. The whole import runs in one transaction,
+Payload: {document_id, force?}; the profile comes from the document. The whole import runs in one transaction,
 so a crash leaves nothing behind and the retry starts clean; a document already imported is skipped
 unless `force` is set (re-import after the document moved to another profile).
 """

@@ -42,3 +42,60 @@ def test_caregiver_cannot_fetch_a_sensitive_document(client_for, engine, committ
     assert r.status_code == 403 and r.json()["detail"]["code"] == "insufficient_scope", r.text
     assert alex.get(f"/api/documents/{sensitive}/pages/1.png").status_code == 403
     assert alex.get(f"/api/documents/{plain}/file").status_code == 200
+
+
+def test_search_without_read_sensitive_neither_matches_nor_quotes_a_sensitive_page(
+    client_for, engine, committed_family
+):
+    from sqlalchemy import text
+
+    fam = committed_family
+    alex = client_for(fam.users["alex"])  # caregiver on carmen; given read:documents_text, not read:sensitive
+    blobs = alex.app.state.runtime.blobs
+    sensitive = _doc_with(engine, blobs, fam, "carmen", ["sexual_health"])
+    plain = _doc_with(engine, blobs, fam, "carmen", [])
+    with engine.begin() as c:
+        for d in (sensitive, plain):
+            c.execute(
+                text(
+                    "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok,"
+                    " text_content, fts) values (:d, 1, 595, 842, true, :t, to_tsvector('simple', :t))"
+                ),
+                {"d": d, "t": "LabNorte serologia VIH resultado reactivo"},
+            )
+        c.execute(
+            text(
+                "update profile_grant set categories = array_append(categories, 'read:documents_text')"
+                " where user_id = :u and profile_id = :p"
+            ),
+            {"u": fam.users["alex"], "p": fam.profiles["carmen"]},
+        )
+    items = alex.get("/api/profiles/carmen/documents", params={"q": "serologia"}).json()["items"]
+    assert [i["id"] for i in items] == [str(plain)]
+    assert "serologia" in items[0]["snippet"]["text"].lower()
+    # the filename still matches for every document, without a snippet from the sensitive one
+    items = alex.get("/api/profiles/carmen/documents", params={"q": "labnorte"}).json()["items"]
+    by_id = {i["id"]: i for i in items}
+    assert set(by_id) == {str(sensitive), str(plain)}
+    assert by_id[str(sensitive)]["snippet"] is None
+    # the owner of the data (Alex on his own profile has read:sensitive) is unaffected
+    mine = _doc_with(engine, blobs, fam, "alex", ["sexual_health"])
+    with engine.begin() as c:
+        c.execute(
+            text(
+                "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok,"
+                " text_content, fts) values (:d, 1, 595, 842, true, :t, to_tsvector('simple', :t))"
+            ),
+            {"d": mine, "t": "LabNorte serologia VIH"},
+        )
+    items = alex.get("/api/profiles/alex/documents", params={"q": "serologia"}).json()["items"]
+    assert [i["id"] for i in items] == [str(mine)] and items[0]["snippet"] is not None
+
+
+def test_document_bytes_are_never_kept_in_the_browser_cache(client_for, engine, committed_family):
+    fam = committed_family
+    alex = client_for(fam.users["alex"])
+    doc = _doc_with(engine, alex.app.state.runtime.blobs, fam, "alex", [])
+    r = alex.get(f"/api/documents/{doc}/file")
+    assert r.status_code == 200
+    assert "no-store" in r.headers["cache-control"], r.headers["cache-control"]

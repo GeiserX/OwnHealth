@@ -188,3 +188,26 @@ def test_lab_reasons_follow_the_language(sconn, seeded):
     es = state.check_drug(sconn, seeded.pid("alex"), "Plavix", scopes=ALL_SCOPES, as_of=AS_OF, lang="es")
     reasons = lambda out: {lab["alias_group"]: lab["reason"] for lab in out["relevant_labs"]}  # noqa: E731
     assert reasons(en)["egfr"] == "kidney function" and reasons(es)["egfr"] == "función renal"
+
+
+@pytest.mark.parametrize(
+    ("score", "phenotype"),
+    [
+        ("0", "Poor Metabolizer"),
+        ("0.125", "Intermediate Metabolizer"),  # a moderate inhibitor on activity score 0.25
+        ("1", "Intermediate Metabolizer"),
+        ("1.125", "Intermediate Metabolizer"),  # a moderate inhibitor on activity score 2.25
+        ("1.25", "Normal Metabolizer"),
+        ("2.25", "Normal Metabolizer"),
+        ("2.375", "Ultrarapid Metabolizer"),
+        ("3", "Ultrarapid Metabolizer"),
+    ],
+)
+def test_every_converted_activity_score_falls_in_a_cpic_band(score, phenotype):
+    """CPIC 2020: 0 poor, above 0 and below 1.25 intermediate, 1.25 to 2.25 normal, above 2.25 ultrarapid."""
+    from decimal import Decimal
+
+    from ownhealth.state.drugs import _band
+    from ownhealth.state.pack import load_pack
+
+    assert _band(load_pack(), Decimal(score)) == phenotype

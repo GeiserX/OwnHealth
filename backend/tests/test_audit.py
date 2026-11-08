@@ -30,3 +30,10 @@ def test_audit_is_append_only(conn, family):
 def test_hash_arg_hides_search_terms():
     h = hash_arg("HIV test")
     assert "HIV" not in h and h == hash_arg("HIV test")
+
+
+def test_a_bad_ip_is_stored_as_null_and_does_not_abort_the_write(conn, family):
+    for raw, stored in (("testclient", None), ("1.2.3.4, 5.6.7.8", None), (" 10.0.0.1 ", "10.0.0.1"), ("::1", "::1")):
+        eid = write_audit(conn, AuditEvent(actor_kind="user", via="api", action="read", ip=raw))
+        got = conn.execute(text("select host(ip) from audit_event where id = :id"), {"id": eid}).scalar()
+        assert got == stored

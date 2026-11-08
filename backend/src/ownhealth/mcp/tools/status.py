@@ -30,6 +30,7 @@ FRESHNESS_SCOPE = {
 # says; a stale or never-measured gap keeps its structured fields and drops the text that repeats them.
 FLAG_FIELDS = ("rank", "kind", "rule", "code", "text", "src")
 GAP_DROP = {"stale": ("text",), "never_measured": ("text",)}
+NOTE_CHARS = 200  # each person note is quoted this far in the status; the whole note stays under its src
 GENOME_FLAG_KINDS = {"gene_drug", "gene_lab", "GENE_DRUG", "GENE_LAB"}
 
 DESCRIPTION = (
@@ -64,6 +65,10 @@ def status_data(call: Call) -> tuple[dict, dict]:
     for key in ("medications", "supplements", "active_conditions"):
         wrap_plain(rendered.get(key), "name", "fhir_note")
     wrap_plain(rendered.get("notes"), "text", "person_note")
+    for note in rendered.get("notes") or []:  # a note holds up to 4000 chars; the page must stay under 2 KB
+        t = note.get("text") if isinstance(note, dict) else None
+        if isinstance(t, dict) and isinstance(t.get("text"), str) and len(t["text"]) > NOTE_CHARS:
+            note["text"] = {**t, "text": t["text"][:NOTE_CHARS] + "…", "truncated": True}
     rendered.setdefault("state_hash", body.get("state_hash"))
     rendered.setdefault("rules_version", body.get("rules_version") or body.get("rules"))
 

@@ -108,6 +108,11 @@ def build_pack(files: dict[str, dict], overridden: bool) -> Pack:
     head = files.get("pack.yaml") or {}
     if head.get("pack") != "ownhealth-rules" or not head.get("version"):
         raise PackError("pack.yaml must name pack ownhealth-rules and a version")
+    for name, doc in files.items():  # floats never enter the hash: say which file, not a bare TypeError
+        try:
+            canonical_json(doc)
+        except TypeError as exc:
+            raise PackError(f'{name}: write decimal numbers as quoted strings (cv_i: "5.6"), not floats') from exc
     sha = hashlib.sha256(canonical_json(files)).hexdigest()
     version = f"ownhealth-rules {head['version']}" + (f"+local.{sha[:8]}" if overridden else "")
     systems: list[System] = []

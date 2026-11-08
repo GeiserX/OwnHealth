@@ -3,7 +3,7 @@
 An id on a profile the token cannot read answers `unknown`, the same as an id that never existed,
 so ids leak nothing. Genome and sensitive facts the token cannot see answer `unknown` too; other
 facts outside the token's scopes answer `scope_missing`. Raw page text needs read:documents_text
-and is always untrusted text.
+and the page rule of mcp.md 5.7 (gate.page_refusal), and is always untrusted text.
 """
 
 from __future__ import annotations
@@ -165,6 +165,10 @@ def source_data(call: Call, src_id: str, *, include_text: bool) -> Result:
 
     data["text"] = None
     by_scope = []
+    withheld: dict = {}
+    refusal = None
+    if include_text and perm.has("read:documents_text") and doc and src.get("page_no") is not None:
+        refusal = gate_mod.page_refusal(call.conn, perm, call.gate(), doc["id"], src["page_no"])
     if include_text:
         if not perm.has("read:documents_text"):
             by_scope.append("documents_text")
@@ -173,6 +177,16 @@ def source_data(call: Call, src_id: str, *, include_text: bool) -> Result:
             by_scope.append("sensitive")
             data.pop("crop_url", None)
             limitations.append("Page text withheld: the document holds sensitive results.")
+        elif refusal is not None:
+            # mcp.md 5.7: the page text only when every fact on the page is readable, or, for a page still
+            # waiting for extraction, every category plus the section 9.7 genome switch and minor rule
+            if refusal[0] == "scope":
+                by_scope.extend(refusal[1])
+            elif refusal[0] == "sensitive":
+                withheld["sensitive"] = 1
+            elif refusal[0] == "minor":
+                withheld["minor_rule"] = 1
+            limitations.append("Page text withheld: the page may hold facts this token cannot read.")
         elif doc and src.get("page_no") is not None:
             try:
                 from ownhealth.ingest.pdf import page_words
@@ -193,7 +207,7 @@ def source_data(call: Call, src_id: str, *, include_text: bool) -> Result:
         data=data,
         budget=4000 if include_text else 800,
         limitations=limitations,
-        withheld={"by_scope": by_scope},
+        withheld={"by_scope": by_scope, **withheld},
         prune=False,
         audit_profile_id=perm.profile.id,
     )

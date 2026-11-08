@@ -56,9 +56,12 @@ def sniff(filename: str, head: bytes, blob_path=None) -> UploadKind:
         return "image"
     if head.startswith(b"PK\x03\x04"):
         if blob_path is not None:
-            with zipfile.ZipFile(blob_path) as z:
-                if any(n.endswith("export.xml") for n in z.namelist()):
-                    return "apple_health_zip"
+            try:
+                with zipfile.ZipFile(blob_path) as z:
+                    if any(n.endswith("export.xml") for n in z.namelist()):
+                        return "apple_health_zip"
+            except zipfile.BadZipFile:  # truncated or corrupt: refused like any unknown file
+                return "unknown"
         return "unknown"
     if name.endswith(".tbi"):
         return "tbi"
@@ -231,25 +234,26 @@ _SENSITIVE_FACT_TABLES = (
 )
 
 
+def sensitive_document_sql(doc: str) -> str:
+    """The rule of `document_is_sensitive` as a SQL boolean over `doc` (a bind like `:d` or a column
+    like `d.id`), for queries that must leave sensitive documents out."""
+    via_src = " or ".join(
+        f"exists (select 1 from {t} f join src s on s.id = f.src_id where s.document_id = {doc}"
+        " and cardinality(f.sensitivity) > 0)"
+        for t in _SENSITIVE_FACT_TABLES
+    )
+    return (
+        "(exists (select 1 from observation o left join src s on s.id = o.src_id"
+        f" where (o.document_id = {doc} or s.document_id = {doc}) and cardinality(o.sensitivity) > 0)"
+        f" or exists (select 1 from review_item r where r.document_id = {doc}"
+        " and jsonb_typeof(r.payload->'observation'->'sensitivity') = 'array'"
+        " and jsonb_array_length(r.payload->'observation'->'sensitivity') > 0)"
+        f" or {via_src})"
+    )
+
+
 def document_is_sensitive(conn: Connection, document_id: UUID) -> bool:
     """True when any value read from this document is sensitive (mental health, reproductive, sexual
     health), whatever its status: the original file and its page text still hold it. Held review
     rows count too. Without read:sensitive the file, the page renders and the words stay closed."""
-    via_src = " or ".join(
-        f"exists (select 1 from {t} f join src s on s.id = f.src_id where s.document_id = :d"
-        " and cardinality(f.sensitivity) > 0)"
-        for t in _SENSITIVE_FACT_TABLES
-    )
-    return bool(
-        conn.execute(
-            text(
-                "select exists (select 1 from observation o left join src s on s.id = o.src_id"
-                " where (o.document_id = :d or s.document_id = :d) and cardinality(o.sensitivity) > 0)"
-                " or exists (select 1 from review_item r where r.document_id = :d"
-                " and jsonb_typeof(r.payload->'observation'->'sensitivity') = 'array'"
-                " and jsonb_array_length(r.payload->'observation'->'sensitivity') > 0)"
-                f" or {via_src}"
-            ),
-            {"d": document_id},
-        ).scalar()
-    )
+    return bool(conn.execute(text(f"select {sensitive_document_sql(':d')}"), {"d": document_id}).scalar())

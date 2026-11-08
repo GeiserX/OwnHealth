@@ -89,3 +89,23 @@ def test_me_and_actions(conn, family):
     with pytest.raises(AccessDenied):
         require(conn, alex, "sam", action="import")  # viewer
     assert require(conn, alex, "carmen", action="import").role == "caregiver"
+
+
+def test_an_ungranted_uuid_reads_like_an_unknown_one(conn, family):
+    from uuid import uuid4
+
+    sam = session(family, "sam")
+    token = Principal(
+        kind="token",
+        user_id=family.users["alex"],
+        household_id=family.household_id,
+        scopes=ALL_SCOPES,
+        profile_ids=frozenset({family.profiles["alex"]}),
+    )
+    messages = set()
+    for who, pid in ((sam, family.profiles["carmen"]), (token, family.profiles["sam"]), (sam, uuid4())):
+        with pytest.raises(AccessDenied) as e:
+            effective_permission(conn, who, pid)
+        assert e.value.code == "profile_not_granted"
+        messages.add(str(e.value))
+    assert len(messages) == 1 and "carmen" not in messages.pop()

@@ -277,6 +277,7 @@ def test_a_facts_file_cannot_attach_raw_files_another_profile_uploaded(conn, fam
     ).one()
     assert blobs_row == (None, None)
     answer = lookup_variant(conn, blobs, profile, gate=Gate(include_sensitive=True, minor=False), rsid="rs4244285")
+    assert answer["calls"]  # a positive control: the check below must not pass on an empty list
     assert all(c.get("basis") != "vcf" for c in answer["calls"])
 
 
@@ -295,3 +296,42 @@ def test_a_reimport_on_the_same_profile_keeps_its_raw_files(conn, family, blobs,
         {"p": family.profiles["alex"]},
     ).scalar()
     assert vcf is not None
+
+
+def _imputed_chip_with_typed_carrier():
+    """Lucía's facts as a chip_imputed file whose CFTR carrier site the array typed (imputed: false)."""
+    doc = synthetic.lucia_facts()
+    doc["subject"]["sample_id"] = "LR-CHIP"
+    doc["assay"] = {"type": "chip_imputed", "build": "GRCh38", "platform": "synthetic array"}
+    doc["facts"] = [f for f in doc["facts"] if f["category"] in ("pgx", "carrier")]
+    for f in doc["facts"]:
+        f["confidence"]["level"] = "unconfirmed" if f["category"] == "carrier" else "medium"
+        for v in f["variants"]:
+            v["genotype"]["imputed"] = False
+    return doc
+
+
+@pytest.mark.parametrize("probed", [True, False, None])
+def test_chip_imputed_typed_sites_are_checked_against_the_site_list(conn, family, blobs, tmp_path, probed):
+    """Rule 7: a site marked imputed: false must be in the chip_sites file; without that file a carrier
+    fact from chip_imputed is rejected."""
+    doc = _imputed_chip_with_typed_carrier()
+    sites = [
+        synthetic.VcfRow(v["chrom"], v["pos"], v["ref"], v["alt"], "0/0") for f in doc["facts"] for v in f["variants"]
+    ]
+    if probed is False:
+        sites = [s for s in sites if s.pos != 117559590]
+    raw = {"calls_vcf": synthetic.write_vcf(tmp_path / "c.vcf.gz", sites)}
+    if probed is not None:
+        raw["chip_sites"] = synthetic.write_vcf(tmp_path / "s.vcf.gz", sites)
+    facts, att = synthetic.with_files(doc, blobs, raw)
+    seed = dict(household_id=family.household_id, profile_id=family.profiles["lucia"], facts=facts, attachments=att)
+    if probed:
+        _doc, summary = synthetic.seed_genome(conn, blobs, **seed)
+        assert summary.accepted == len(doc["facts"])
+        return
+    with pytest.raises(GenomeImportError) as e:
+        synthetic.seed_genome(conn, blobs, **seed)
+    want = "not in the chip_sites list" if probed is False else "needs the chip_sites list on hand"
+    assert want in str(e.value)
+    assert _count(conn, "genome_finding", family.profiles["lucia"]) == 0

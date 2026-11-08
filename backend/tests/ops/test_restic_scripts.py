@@ -22,6 +22,12 @@ DEPLOY = Path(__file__).resolve().parents[3] / "deploy" / "restic"
 pytestmark = pytest.mark.skipif(RESTIC is None and not os.environ.get("CI"), reason="restic not on PATH")
 
 
+@pytest.fixture(autouse=True)
+def _restic_on_path_in_ci():
+    if RESTIC is None:  # only reached in CI, where a missing restic is a broken runner, not a skip
+        pytest.fail("restic is not on PATH: CI must install the version the image ships")
+
+
 @pytest.fixture
 def env_for(tmp_path):
     repo = tmp_path / "repo"

@@ -242,6 +242,23 @@ def _value(src: dict) -> dict:
     return {}
 
 
+def received_ucum(resource: dict | None, loinc: str | None = None) -> str | None:
+    """The UCUM code a stored Observation sent (valueQuantity.code with the UCUM system): on the resource,
+    or on the component coded `loinc`. Truth like the received LOINC, so `rederive` keeps it."""
+    if not isinstance(resource, dict):
+        return None
+    parts = [resource, *(c for c in resource.get("component") or [] if isinstance(c, dict))]
+    found = []
+    for part in parts:
+        q = part.get("valueQuantity") or {}
+        if q.get("system") == UCUM and q.get("code") and q.get("value") is not None:
+            found.append((loinc_of(part.get("code")), q["code"]))
+    coded = [u for code, u in found if loinc and code == loinc]
+    if coded:
+        return coded[0]
+    return found[0][1] if len(found) == 1 else None
+
+
 def _ref_range(src: dict) -> tuple[str | None, Decimal | None, Decimal | None]:
     rr = (src.get("referenceRange") or [None])[0]
     if not rr:

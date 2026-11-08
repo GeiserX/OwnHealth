@@ -385,10 +385,12 @@ def normalize_row(
     provider: str | None = None,
     loinc: str | None = None,
     method: str | None = None,
+    document_id: UUID | None = None,
 ) -> Normalized:
     """One printed lab row to an ObservationIn plus every validator result (dimension, plausibility,
     flag mismatch, range parse, duplicate, conflict). The caller adds grounding and identity checks and
-    routes the row through `core.review.route_fact`. `loinc` is a code a structured source sent."""
+    routes the row through `core.review.route_fact`. `loinc` is a code a structured source sent.
+    `document_id` is the source the row comes from: rows of one source are never duplicates."""
     prof = _profile(conn, profile_id)
     pv = parse_value(printed_value, locale=lang, unit=printed_unit)
     checks: list[Check] = []
@@ -430,7 +432,7 @@ def normalize_row(
         household_id=prof["household_id"],
     )
     checks.extend(dchecks)
-    checks.extend(_duplicates(conn, profile_id, derived, pv, effective_at))
+    checks.extend(_duplicates(conn, profile_id, derived, pv, effective_at, document_id))
     obs = ObservationIn(
         profile_id=profile_id,
         printed_name=printed_name,
@@ -459,15 +461,21 @@ def normalize_row(
     return Normalized(observation=obs, checks=checks)
 
 
-def _duplicates(conn: Connection, profile_id, derived: dict, pv: ParsedValue, effective_at) -> list[Check]:
+def _duplicates(
+    conn: Connection, profile_id, derived: dict, pv: ParsedValue, effective_at, document_id: UUID | None = None
+) -> list[Check]:
+    """One fact from two sources (architecture.md, dedup): same alias group and day, equal value, the
+    same comparator and the same method (both empty counts as equal), from another source. A direct
+    and a calculated LDL are two analytes, not a conflict; `<5` beside `5` is a conflict; rows of one
+    source are never merged."""
     if not isinstance(effective_at, datetime):
         return []
     rows = (
         conn.execute(
             text(
-                "select id, value_canonical, value_num, value_code from observation where profile_id = :p"
-                " and alias_group = :g and status in ('current', 'provisional') and superseded_at is null"
-                " and effective_at between :a and :b"
+                "select id, value_canonical, value_num, value_code, value_cmp, method, document_id from observation"
+                " where profile_id = :p and alias_group = :g and status in ('current', 'provisional')"
+                " and superseded_at is null and effective_at between :a and :b order by effective_at, id"
             ),
             {
                 "p": profile_id,
@@ -479,19 +487,26 @@ def _duplicates(conn: Connection, profile_id, derived: dict, pv: ParsedValue, ef
         .mappings()
         .all()
     )
+    rows = [r for r in rows if (r["method"] or None) == (derived["method"] or None)]
     if not rows:
         return []
     mine = derived["value_canonical"] if derived["value_canonical"] is not None else pv.value
+    conflict = None
     for r in rows:
         theirs = r["value_canonical"] if r["value_canonical"] is not None else r["value_num"]
-        same = (
+        same_value = (
             mine is not None
             and theirs is not None
             and abs(Decimal(mine) - Decimal(theirs)) <= abs(Decimal(theirs)) * Decimal("1e-6")
-        ) or (pv.text_code and pv.text_code == r["value_code"])
-        if same:
+        ) or bool(pv.text_code and pv.text_code == r["value_code"])
+        if same_value and (r["value_cmp"] or None) == (pv.comparator or None):
+            if document_id is not None and r["document_id"] == document_id:
+                continue  # the same source twice: never merged
             return [_fail("duplicate", "duplicate", f"the same value is already accepted as observation {r['id']}")]
-    return [_fail("conflict", "conflict", f"another value for this analyte and day is accepted ({rows[0]['id']})")]
+        conflict = conflict or r["id"]
+    if conflict is None:
+        return []
+    return [_fail("conflict", "conflict", f"another value for this analyte and day is accepted ({conflict})")]
 
 
 # ---------------------------------------------------------------- aliases ----
@@ -558,6 +573,7 @@ def rederive(conn: Connection, *, profile_id=None, since: date | None = None) ->
     """
     from ownhealth.core.observations import supersede_observation
     from ownhealth.core.review import ReviewItemIn, create_item
+    from ownhealth.ingest.fhir.mapping import received_ucum
     from ownhealth.jobs import enqueue
 
     where = ["o.status = 'current'", "o.superseded_at is null", "o.category = 'laboratory'"]
@@ -572,7 +588,8 @@ def rederive(conn: Connection, *, profile_id=None, since: date | None = None) ->
         conn.execute(
             text(
                 "select o.*, d.language as doc_lang, d.provider_name, p.household_id as household_id,"
-                " p.sex_at_birth, p.birth_date from observation o join profile p on p.id = o.profile_id"
+                " p.sex_at_birth, p.birth_date, s.kind as src_kind from observation o"
+                " join profile p on p.id = o.profile_id left join src s on s.id = o.src_id"
                 f" left join document d on d.id = o.document_id where {' and '.join(where)}"
                 " order by o.profile_id, o.effective_at, o.id for update of o"
             ),
@@ -602,10 +619,13 @@ def rederive(conn: Connection, *, profile_id=None, since: date | None = None) ->
                 sex=r["sex_at_birth"],
                 age_years=_age(r["birth_date"], r["effective_at"].date()),
             )
-        keep_code = r["loinc"] if r["accepted_by"] == "import" and r["loinc"] in _tables.loinc_codes() else None
+        # a structured source's LOINC and UCUM code are truth: keep them, whoever accepted the row
+        received = r["accepted_by"] == "import" or r["src_kind"] == "fhir_import"
+        keep_code = r["loinc"] if received and r["loinc"] in _tables.loinc_codes() else None
+        keep_unit = received_ucum(r["fhir"], r["loinc"]) if r["src_kind"] == "fhir_import" else None
         derived, _res, _ = derive(
             printed_name=r["printed_name"],
-            printed_unit=r["printed_unit"],
+            printed_unit=keep_unit or r["printed_unit"],
             value=r["value_num"],
             comparator=r["value_cmp"],
             text_code=r["value_code"],
@@ -634,7 +654,7 @@ def rederive(conn: Connection, *, profile_id=None, since: date | None = None) ->
             specimen=r["specimen"],
             ref_applies=r["ref_applies"],
             derivation_version=DERIVATION_VERSION,
-            fhir=r["fhir"] if r["accepted_by"] == "import" else None,
+            fhir=r["fhir"] if received else None,
         )
         committed = supersede_observation(
             conn,

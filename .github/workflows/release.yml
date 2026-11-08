@@ -40,7 +40,10 @@ jobs:
           grep -qx "version = \"$v\"" backend/pyproject.toml || { echo "::error::backend/pyproject.toml is not $v"; fail=1; }
           grep -qx "__version__ = \"$v\"" backend/src/ownhealth/__init__.py || { echo "::error::ownhealth/__init__.py is not $v"; fail=1; }
           grep -q "\"version\": \"$v\"" ui/package.json || { echo "::error::ui/package.json is not $v"; fail=1; }
-          grep -q "image: $IMAGE:$v\$" compose.yaml || { echo "::error::compose.yaml does not pin $IMAGE:$v"; fail=1; }
+          for f in compose.yaml deploy/compose.homelab.yaml; do
+            grep -q "image: $IMAGE:$v\$" "$f" || { echo "::error::$f does not pin $IMAGE:$v"; fail=1; }
+            if grep "image: $IMAGE:" "$f" | grep -v "image: $IMAGE:$v\$"; then echo "::error::$f pins another $IMAGE tag"; fail=1; fi
+          done
           exit $fail
 
       - id: meta

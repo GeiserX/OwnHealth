@@ -10,6 +10,7 @@ adult-onset, sensitive and carrier genome findings are not inputs (the genome ga
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -77,6 +78,10 @@ class Point:
 
     def comparable(self) -> Decimal | None:
         return self.canonical if self.canonical is not None else self.value
+
+    def comparable_unit(self) -> str | None:
+        """The unit `comparable()` is in: two points compare only when these match."""
+        return self.canonical_unit if self.canonical is not None else self.unit
 
 
 @dataclass
@@ -282,7 +287,7 @@ def _rcv(rule: dict, pts: list[Point]) -> dict | None:
         return None
     a, b = pts[-2], pts[-1]
     va, vb = a.comparable(), b.comparable()
-    if va is None or vb is None or va == 0 or (a.canonical_unit or a.unit) != (b.canonical_unit or b.unit):
+    if va is None or vb is None or va == 0 or a.comparable_unit() != b.comparable_unit():
         return None
     rcv = _rcv_value(rule)
     change = (vb - va) / va * 100
@@ -306,7 +311,9 @@ def _rcv(rule: dict, pts: list[Point]) -> dict | None:
 
 def _trend(rule: dict, pts: list[Point]) -> dict | None:
     n = int(rule.get("points", 3))
-    tail = [p for p in pts if p.comparable() is not None][-n:]
+    usable = [p for p in pts if p.comparable() is not None]
+    # one unit per series: a point the normalizer could not convert must not read as a jump
+    tail = [p for p in usable if p.comparable_unit() == usable[-1].comparable_unit()][-n:] if usable else []
     if len(tail) < n or len({p.date for p in tail}) < n:
         return None
     vals = [p.comparable() for p in tail]
@@ -526,7 +533,8 @@ def evaluate(
         if "taking" in when:
             words = [w.casefold() for w in when["taking"]]
             names = [f"{m['name']} {m.get('ingredient') or ''}".casefold() for m in meds_all]
-            if not any(w in n for w in words for n in names):
+            # whole words: "iron" must not fire on "Environ"
+            if not any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", n) for w in words for n in names):
                 continue
         for group in rule["match"]:
             never_add(group, rule["id"])

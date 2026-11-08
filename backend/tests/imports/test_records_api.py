@@ -176,3 +176,19 @@ def test_wearables_summary_and_series(app_for, committed_family, engine, blobs, 
             {"p": fam.profiles["lucia"]},
         ).scalar()
         assert n == 4  # the refused hourly request read nothing
+
+
+def test_manual_observation_refuses_a_blank_name_or_value(app_for, committed_family):
+    client = app_for(committed_family.users["alex"])
+    body = {"name": "Peso", "value": "81,4", "unit": "kg", "effective_at": "2026-11-06T08:00:00+01:00"}
+    for blank in ({"name": "   "}, {"value": "  "}):
+        r = client.post("/api/profiles/alex/manual-observations", json={**body, **blank})
+        assert r.status_code == 422, (blank, r.text)
+
+
+def test_a_wearables_window_too_large_for_the_calendar_is_capped(app_for, committed_family):
+    client = app_for(committed_family.users["sam"])
+    r = client.get("/api/profiles/lucia/wearables/steps", params={"window": "P9999Y", "as_of": "2026-11-07"})
+    assert r.status_code == 200, r.text
+    r = client.get("/api/profiles/lucia/wearables/steps", params={"window": "P30D", "as_of": "0001-01-02"})
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "bad_input", r.text

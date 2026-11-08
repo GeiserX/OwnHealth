@@ -102,9 +102,11 @@ def _pairs(snap: dict, key: str) -> list[dict]:
 
 
 def _band(pack: Pack, score: Decimal) -> str | None:
-    for b in pack.phenoconversion["rule"]["bands"]:
-        lo, hi = Decimal(b["min"]), dec(b["max"])
-        if score >= lo and (hi is None or score <= hi):
+    for b in pack.phenoconversion["rule"]["bands"]:  # min/max are inclusive, above/below exclusive
+        lo_ok = score > Decimal(b["above"]) if "above" in b else score >= Decimal(b["min"])
+        hi = dec(b["below"]) if "below" in b else dec(b.get("max"))
+        hi_ok = hi is None or (score < hi if "below" in b else score <= hi)
+        if lo_ok and hi_ok:
             return b["phenotype"]
     return None
 

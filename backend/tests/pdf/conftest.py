@@ -10,7 +10,7 @@ import pytest
 from ownhealth.core.documents import create_document
 
 LABSLIPS = Path(__file__).resolve().parents[3] / "fixtures" / "labslips"
-sys.path.insert(0, str(LABSLIPS))
+sys.path.append(str(LABSLIPS))  # appended: a module there must not shadow another
 
 import generate  # noqa: E402
 

@@ -95,7 +95,8 @@ def auto_accept(
     else:
         needed = None
         why_not.append(f"source {source} never auto-accepts")
-    if needed is not None and row_conf < needed:
+    # A positive range check, so a NaN or an out-of-range confidence fails closed.
+    if needed is not None and not (needed <= row_conf <= 1.0):
         why_not.append(f"row confidence {row_conf:.2f} below {needed:.2f}")
     if identity != "matched":
         why_not.append(f"identity {identity}")

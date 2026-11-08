@@ -100,3 +100,20 @@ def test_effective_at_must_be_aware(conn, family):
     o = obs(family.profiles["alex"]).model_copy(update={"effective_at": datetime(2026, 1, 1)})
     with pytest.raises(ValueError):
         commit_observation(conn, o, src=manual_src(), accepted_by="person")
+
+
+def test_a_fact_cannot_cite_another_profiles_src(conn, family):
+    alex, sam = family.profiles["alex"], family.profiles["sam"]
+    first = commit_observation(conn, obs(alex, "97"), src=manual_src(), accepted_by="person")
+    with pytest.raises(ProvenanceError, match="another profile"), conn.begin_nested():
+        commit_observation(conn, obs(sam, "98"), src=first.src_id, accepted_by="person")
+    again = commit_observation(conn, obs(alex, "99", day="2026-10-01"), src=first.src_id, accepted_by="person")
+    assert again.src_id == first.src_id
+
+
+def test_a_fact_cannot_mint_a_src_on_another_profile(conn, family):
+    """The mirror of a cited src: a new SrcIn scoped to another profile is refused too."""
+    alex, sam = family.profiles["alex"], family.profiles["sam"]
+    foreign = manual_src().model_copy(update={"profile_id": alex})
+    with pytest.raises(ProvenanceError, match="belongs to the profile"), conn.begin_nested():
+        commit_observation(conn, obs(sam, "98"), src=foreign, accepted_by="person")

@@ -21,9 +21,14 @@
 		if (!dialog.open) dialog.showModal();
 		src.run(async () => {
 			const s = await getSource(id);
-			if (s.document && s.location) getDocument(s.document.id).then((d) => (doc = d)).catch(() => (doc = null));
+			// The page size comes from the document; drop it if another source was opened meanwhile.
+			const current = () => sourcePanel.src === id;
+			if (s.document && s.location)
+				getDocument(s.document.id)
+					.then((d) => current() && (doc = d))
+					.catch(() => current() && (doc = null));
 			return s;
-		});
+		}, id);
 	});
 
 	function close() {

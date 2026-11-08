@@ -51,27 +51,27 @@ def export(
     try:
         with os.fdopen(fd, "wb") as out:
             manifest = export_profile(conn, blobs, perm.profile.id, out, fmt=body.fmt)
-    except BaseException:
+        size = os.path.getsize(path)
+        write_audit(
+            conn,
+            AuditEvent(
+                actor_kind="user",
+                actor_id=principal.user_id,
+                via="export",
+                action="export",
+                tool="POST /api/profiles/export",
+                profile_id=perm.profile.id,
+                resource_type="profile",
+                resource_ids=[str(perm.profile.id)],
+                rows_out=sum(v for v in manifest["counts"].values()),
+                bytes_out=size,
+                args_summary=f"fmt={body.fmt};files={len(manifest['files'])}",
+                ip=client_ip(request),
+            ),
+        )
+    except BaseException:  # nothing of a failed export stays on the server
         os.unlink(path)
         raise
-    size = os.path.getsize(path)
-    write_audit(
-        conn,
-        AuditEvent(
-            actor_kind="user",
-            actor_id=principal.user_id,
-            via="export",
-            action="export",
-            tool="POST /api/profiles/export",
-            profile_id=perm.profile.id,
-            resource_type="profile",
-            resource_ids=[str(perm.profile.id)],
-            rows_out=sum(v for v in manifest["counts"].values()),
-            bytes_out=size,
-            args_summary=f"fmt={body.fmt};files={len(manifest['files'])}",
-            ip=client_ip(request),
-        ),
-    )
     return FileResponse(
         path,
         media_type="application/zip",

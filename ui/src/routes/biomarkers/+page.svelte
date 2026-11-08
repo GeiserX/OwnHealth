@@ -44,7 +44,7 @@
 		if (!slug) return;
 		if (!code) {
 			const q = query || undefined;
-			obs.run(() => searchObservations(slug, { category: 'laboratory', lang, q }));
+			obs.run(() => searchObservations(slug, { category: 'laboratory', lang, q }), slug);
 			return;
 		}
 		unitIdx = 0;
@@ -54,8 +54,8 @@
 			const ok = all.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
 			if (!ok.length) throw (all[0] as PromiseRejectedResult).reason;
 			return ok.filter((tr, i) => ok.findIndex((o) => o.unit === tr.unit) === i);
-		});
-		dash.run(() => getDashboard(slug, lang));
+		}, `${slug}/${c}`);
+		dash.run(() => getDashboard(slug, lang), slug);
 	}
 	$effect(load);
 
@@ -294,7 +294,11 @@
 								}}
 								onblur={() => (tip = null)}
 								onclick={() => openSource(p.src)}
-								onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openSource(p.src)}
+								onkeydown={(e) => {
+									if (e.key !== 'Enter' && e.key !== ' ') return;
+									e.preventDefault();
+									openSource(p.src);
+								}}
 							>
 								{#if shape === 'circle'}<circle cx={x} cy={y} r="5.5" />
 								{:else if shape === 'square'}<rect x={x - 5} y={y - 5} width="10" height="10" rx="1.5" />

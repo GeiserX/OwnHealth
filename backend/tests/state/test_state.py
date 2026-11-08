@@ -192,6 +192,19 @@ def test_never_measured_ferritin_on_an_iron_supplement(sconn, seeded):
     assert body["supplements"][0]["name"] == "Hierro (sulfato ferroso)"
 
 
+def test_an_iron_term_inside_another_word_is_not_an_iron_supplement(sconn, seeded):
+    """`taking` matches whole words: "Environ" holds "iron" and is not an iron supplement."""
+    pid = seeded.pid("carmen")
+    add_record(
+        sconn,
+        MedicationIn(profile_id=pid, kind="supplement", name="Environ skin cream", started=date(2026, 9, 1)),
+        src=SrcIn(kind="manual", actor_kind="system"),
+        accepted_by="person",
+    )
+    body = state.build_state(sconn, pid, as_of=AS_OF)
+    assert {"group": "ferritin", "rule": "iron.ferritin.on_iron"} not in body["never_measured"]
+
+
 def test_gene_lab_lpa_never_measured(sconn, seeded):
     pid = seeded.pid("sam")
     seeded.findings[pid].append({"category": "risk_marker", "gene": "LPA", "call_state": "alt", "src": "src_g90"})

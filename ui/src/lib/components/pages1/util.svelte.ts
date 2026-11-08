@@ -2,6 +2,7 @@
 import { ApiError } from '#lib/api/core';
 import { i18n, t } from '#lib/i18n/index.svelte';
 import { dict } from '#lib/i18n/dict';
+import { latestRunner } from '#lib/logic/loader';
 import { pluralKey } from '#lib/logic/plural';
 
 /** t() with {name} placeholders. */
@@ -15,30 +16,18 @@ export function tp(key: string, n: number, vars: Record<string, string | number>
 }
 
 /**
- * One fetch on screen: data, error, loading. `run` ignores answers that arrive after a newer call,
- * so switching profile or language fast never shows the previous profile's data.
+ * One fetch on screen: data, error, loading. `run` ignores answers that arrive after a newer call, and
+ * a call with a new `key` (pass the profile slug, the drug, the id) clears the previous data at once,
+ * so switching profile never shows the previous profile's data. Logic in #lib/logic/loader.
  */
 export class Loader<T> {
 	data = $state<T | null>(null);
 	error = $state<ApiError | Error | null>(null);
 	loading = $state(false);
-	#seq = 0;
+	#run = latestRunner<T>(this);
 
-	async run(fn: () => Promise<T>): Promise<void> {
-		const seq = ++this.#seq;
-		this.loading = true;
-		this.error = null;
-		try {
-			const d = await fn();
-			if (seq === this.#seq) this.data = d;
-		} catch (e) {
-			if (seq === this.#seq) {
-				this.data = null;
-				this.error = e instanceof Error ? e : new Error(String(e));
-			}
-		} finally {
-			if (seq === this.#seq) this.loading = false;
-		}
+	run(fn: () => Promise<T>, key?: string): Promise<void> {
+		return this.#run(fn, key);
 	}
 }
 

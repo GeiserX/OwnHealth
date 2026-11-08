@@ -177,7 +177,7 @@ async def test_check_drug(world, make_token, connect, fakes):
     assert any("drug-drug" in str(x) for x in env["not_assessed"])
     async with connect(make_token(scopes={"read:labs"})) as c:
         env = sc(await call(c, "check_drug", {"profile": "alex", "drug": "atorvastatin"}))
-    assert set(env["data"]) == {"drug", "relevant_labs", "not_assessed"} - {"not_assessed"}
+    assert set(env["data"]) == {"drug", "relevant_labs"}
     assert env["withheld"]["by_scope"] == ["genome", "records"]
 
 
@@ -255,3 +255,95 @@ async def test_get_source_withholds_page_text_of_a_sensitive_document(world, mak
     async with connect(make_token(scopes=ALL_SCOPES)) as c:
         env = sc(await call(c, "get_source", {"src_id": world.src["vitd"], "include_text": True}))
     assert env["data"]["text"]["text"] == "Colesterol LDL"
+
+
+async def test_get_source_page_text_needs_every_category_on_the_page(world, make_token, engine, connect, fakes):
+    from ownhealth.core.provenance import SrcIn
+
+    with engine.begin() as conn:  # a vital sign read from the same page as the vitamin D value
+        region = SrcIn(
+            kind="document_region", profile_id=world.pid("alex"), document_id=world.doc_id, page_no=1,
+            bbox=world.boxes[0],
+        )  # fmt: skip
+        add_obs(
+            conn, world.pid("alex"), "Peso", "80", "kg", "body_weight", "29463-7", "2026-09-14",
+            category="vital-signs", src=region, document_id=world.doc_id,
+        )  # fmt: skip
+    labs_only = {"read:summary", "read:labs", "read:documents_text"}
+    async with connect(make_token(scopes=labs_only)) as c:
+        env = sc(await call(c, "get_source", {"src_id": world.src["vitd"], "include_text": True}))
+    assert env["data"]["text"] is None and env["withheld"]["by_scope"] == ["vitals"]
+    async with connect(make_token(scopes=labs_only | {"read:vitals"})) as c:
+        env = sc(await call(c, "get_source", {"src_id": world.src["vitd"], "include_text": True}))
+    assert env["data"]["text"]["text"] == "Colesterol LDL"
+
+
+async def test_get_source_text_of_a_pending_page_needs_every_category_and_the_genome_switch(
+    world, make_token, engine, connect, fakes
+):
+    with engine.begin() as conn:  # page 1 also waits for an agent: it can hold anything
+        conn.execute(
+            text(
+                "insert into review_item (household_id, profile_id, kind, payload, document_id)"
+                " values (:h, :p, 'pending_document', cast(:pl as jsonb), :d)"
+            ),
+            {"h": world.family.household_id, "p": world.pid("alex"), "d": world.doc_id, "pl": '{"pages": [1]}'},
+        )
+    async with connect(make_token(scopes=ALL_SCOPES - {"read:genome"})) as c:
+        env = sc(await call(c, "get_source", {"src_id": world.src["vitd"], "include_text": True}))
+    assert env["data"]["text"] is None and "genome" in env["withheld"]["by_scope"]
+    async with connect(make_token(scopes=ALL_SCOPES)) as c:  # every scope, but the agents switch is off
+        env = sc(await call(c, "get_source", {"src_id": world.src["vitd"], "include_text": True}))
+    assert env["data"]["text"] is None and env["withheld"]["sensitive"] == 1
+    with engine.begin() as conn:
+        conn.execute(text("update profile set genome_sensitive_agents = true where id = :p"), {"p": world.pid("alex")})
+    async with connect(make_token(scopes=ALL_SCOPES)) as c:
+        env = sc(await call(c, "get_source", {"src_id": world.src["vitd"], "include_text": True}))
+    assert env["data"]["text"]["text"] == "Colesterol LDL"
+
+
+async def test_get_source_text_of_a_minors_pending_page_is_withheld(world, make_token, engine, connect, fakes):
+    from ownhealth.core.provenance import SrcIn
+
+    lucia = world.pid("lucia")
+    with engine.begin() as conn:
+        conn.execute(text("update document set profile_id = :p where id = :d"), {"p": lucia, "d": world.doc_id})
+        conn.execute(text("update profile set genome_sensitive_agents = true where id = :p"), {"p": lucia})
+        sid = add_obs(
+            conn, lucia, "Hemoglobina", "13", "g/dL", "hemoglobin", "718-7", "2026-09-14",
+            src=SrcIn(kind="document_region", profile_id=lucia, document_id=world.doc_id, page_no=1,
+                      bbox=world.boxes[0]),
+            document_id=world.doc_id,
+        )  # fmt: skip
+        conn.execute(
+            text(
+                "insert into review_item (household_id, profile_id, kind, payload, document_id)"
+                " values (:h, :p, 'pending_document', '{}'::jsonb, :d)"
+            ),
+            {"h": world.family.household_id, "p": lucia, "d": world.doc_id},
+        )
+    async with connect(make_token(scopes=ALL_SCOPES, profiles=("lucia",))) as c:
+        env = sc(await call(c, "get_source", {"src_id": sid, "include_text": True}))
+    assert env["data"]["text"] is None and env["withheld"]["minor_rule"] == 1
+
+
+async def test_trend_stats_never_mix_a_point_without_a_canonical_value(world, engine, make_token, connect, fakes):
+    with engine.begin() as conn:  # a newer LDL whose unit could not be converted: no canonical value
+        add_obs(
+            conn,
+            world.family.profiles["alex"],
+            "Colesterol LDL",
+            "9999",
+            "mg/dL",
+            "ldl_c",
+            "13457-7",
+            "2026-10-20",
+            printed={"value_canonical": None, "unit_canonical": None},
+        )
+    async with connect(make_token()) as c:
+        env = sc(await call(c, "get_trend", {"profile": "alex", "code": "LOINC:13457-7", "window": "P6Y"}))
+    d = env["data"]
+    assert d["resolution"] == "raw" and len(d["points"]) == 9
+    s = d["stats"]
+    assert s["n"] == 8, s  # the stats use canonical values only, in canonical_unit
+    assert s["last_vs_previous_pct"] == round((97 - 118) / 118 * 100), s

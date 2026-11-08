@@ -105,3 +105,36 @@ def test_identity_hint_is_not_enough_and_agent_items_need_a_handler(conn, family
         review.accept(conn, item, family.users["alex"])
     review.dismiss(conn, item, family.users["alex"], "seen")
     assert review.get_item(conn, item)["status"] == "dismissed"
+
+
+def test_an_edit_keeps_the_received_resource_in_step_with_the_columns(conn, family):
+    from factories import manual_src
+
+    received = {
+        "resourceType": "Observation",
+        "id": "upstream-1",
+        "status": "final",
+        "code": {"coding": [{"system": "http://loinc.org", "code": "13457-7"}], "text": "LDL"},
+        "valueQuantity": {"value": 97, "unit": "mg/dL"},
+        "meta": {"source": "synthetic"},
+    }
+    o = obs(family.profiles["alex"], "97").model_copy(update={"fhir": received})
+    res = review.route_fact(
+        conn,
+        observation=o,
+        src=manual_src(),
+        checks=[Check(name="units", ok=False, reason="unit_dimension_mismatch")],
+        row_conf=0.99,
+        allowance="structured_valid",
+        identity="matched",
+    )
+    created = review.accept(
+        conn,
+        res.review_item_id,
+        family.users["alex"],
+        edits={"value_num": "79", "printed_value": "79", "fhir": {"resourceType": "Observation", "valueString": "x"}},
+    )
+    resource = conn.exec_driver_sql("select fhir from observation where id = %s", (created[0],)).scalar()
+    assert resource["valueQuantity"]["value"] == 79 and "valueString" not in resource
+    assert resource["id"] == "upstream-1" and resource["meta"] == {"source": "synthetic"}  # the rest is kept
+    assert resource["code"] == received["code"]  # an unedited part stays as received

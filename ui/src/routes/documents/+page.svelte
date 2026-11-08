@@ -32,7 +32,7 @@
 	function load() {
 		const slug = prof?.slug;
 		if (!slug) return;
-		docs.run(async () => (await listDocuments(slug, { q: applied || undefined, type: type || undefined })).items);
+		docs.run(async () => (await listDocuments(slug, { q: applied || undefined, type: type || undefined })).items, slug);
 		listJobs()
 			.then((r) => {
 				const m: Record<string, JobInfo> = {};
@@ -69,7 +69,10 @@
 		}
 		return out;
 	});
+	let retractBusy = $state(false);
 	async function retract(id: string) {
+		if (retractBusy) return;
+		retractBusy = true;
 		actionError = null;
 		try {
 			await retractDocument(id, reason.trim());
@@ -78,6 +81,8 @@
 			load();
 		} catch (e) {
 			actionError = e instanceof Error ? e.message : String(e);
+		} finally {
+			retractBusy = false;
 		}
 	}
 	const flagWords = (f: Record<string, unknown>) => Object.keys(f).filter((k) => k === 'possible_injection' || k === 'hidden_text');
@@ -154,7 +159,7 @@
 									<form class="p2row" onsubmit={(e) => { e.preventDefault(); retract(d.id); }}>
 										<span class="muted" style="font-size:12px">{t('i2_retract_d')}</span>
 										<input class="p2in" style="flex:1" bind:value={reason} required placeholder={t('i2_reject_reason')} aria-label={t('i2_reject_reason')} />
-										<button class="btn sm no" type="submit">{t('i2_retract')}</button>
+										<button class="btn sm no" type="submit" disabled={retractBusy}>{t('i2_retract')}</button>
 										<button class="btn sm" type="button" onclick={() => (retracting = null)}>{t('i2_cancel')}</button>
 									</form>
 								</td>

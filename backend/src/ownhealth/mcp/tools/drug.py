@@ -30,6 +30,7 @@ SCHEMA = {
             "description": "Generic or brand name in es/en, or a CPIC drug id",
         },
         "as_of": {"type": "string"},
+        "cursor": {"type": "string", "description": "next_cursor of the previous answer: more relevant_labs"},
     },
     "required": ["drug"],
     "additionalProperties": False,

@@ -6,6 +6,7 @@
 	import type { ImportItem, JobInfo } from '#lib/api/types';
 	import { t } from '#lib/i18n/index.svelte';
 	import { tf } from '#lib/components/pages1/util.svelte';
+	import { poller } from '#lib/logic/poll';
 
 	let { profile, profileName, ondone }: { profile: string; profileName: string; ondone: () => void } = $props();
 
@@ -23,6 +24,8 @@
 	const TERMINAL = new Set(['done', 'failed', 'dead']);
 
 	async function send(list: File[], fromFolder = false) {
+		// A drop does not go through the disabled buttons, so a second upload is refused here.
+		if (busy) return;
 		const files = fromFolder ? list.filter((f) => GENOME_FILE.test(f.name)) : list;
 		skipped = list.length - files.length;
 		error = null;
@@ -42,14 +45,20 @@
 		}
 	}
 
-	async function poll() {
-		const ids = items.map((i) => i.job_id).filter((x): x is number => typeof x === 'number');
-		if (!ids.length) return ondone();
-		const res = await listJobs(ids).catch(() => null);
-		for (const j of res?.jobs ?? []) jobs[j.id] = j;
-		if (ids.every((id) => jobs[id] && TERMINAL.has(jobs[id].state))) ondone();
-		else setTimeout(poll, 2000);
-	}
+	// One polling loop at a time; it ends when the jobs finish, the panel unmounts, or listJobs keeps failing.
+	const jobPoll = poller({
+		tick: async () => {
+			const ids = items.map((i) => i.job_id).filter((x): x is number => typeof x === 'number');
+			if (!ids.length) return true;
+			const res = await listJobs(ids);
+			for (const j of res.jobs) jobs[j.id] = j;
+			return ids.every((id) => jobs[id] && TERMINAL.has(jobs[id].state));
+		},
+		ondone: () => ondone(),
+		onfail: (e) => (error = e instanceof Error ? e.message : String(e))
+	});
+	const poll = () => jobPoll.start();
+	$effect(() => jobPoll.stop);
 
 	function stateOf(i: ImportItem): { word: string; cls: string } {
 		if (i.duplicate) return { word: t('i2_up_dup'), cls: 'p-stale' };

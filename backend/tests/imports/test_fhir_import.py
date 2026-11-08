@@ -271,3 +271,52 @@ def test_match_patient_rules():
 )
 def test_loinc_check_digit(code, ok):
     assert loinc_valid(code) is ok
+
+
+def _ferritin_bundle(fhir_file, *, display: str, unit_text: str) -> dict:
+    """One Observation with a valid LOINC (2276-4, ferritin), a vendor display no alias table knows, and a
+    printed unit text beside its UCUM code."""
+    ips = json.loads(fhir_file("ips-alex.json"))
+    patient = next(e for e in ips["entry"] if e["resource"]["resourceType"] == "Patient")
+    obs = {
+        "resourceType": "Observation",
+        "id": "vendor-ferritin-1",
+        "status": "final",
+        "category": [
+            {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}
+        ],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "2276-4", "display": display}]},
+        "subject": {"reference": "Patient/alex-rivera"},
+        "effectiveDateTime": "2026-06-02T09:00:00+02:00",
+        "valueQuantity": {"value": 85, "unit": unit_text, "system": "http://unitsofmeasure.org", "code": "ng/mL"},
+    }
+    return {"resourceType": "Bundle", "id": "vendor-1", "type": "collection", "entry": [patient, {"resource": obs}]}
+
+
+def _ferritin(conn, family, blobs, store_doc, fhir_file, display):
+    data = _ferritin_bundle(fhir_file, display=display, unit_text="nanogram per millilitre")
+    import_fhir(conn, blobs, document_id=store_doc(conn, family, "alex", json.dumps(data).encode(), "v.json", JSON))
+    return [o for o in _obs(conn, family.profiles["alex"]) if o["loinc"] == "2276-4" and o["status"] == "current"]
+
+
+def test_received_loinc_and_ucum_drive_the_derived_layer(conn, family, blobs, store_doc, fhir_file):
+    """A valid received LOINC sets the alias group and a received UCUM code sets the unit, even when the
+    printed name and unit text are unknown to the tables."""
+    [o] = _ferritin(conn, family, blobs, store_doc, fhir_file, "VNDR-FERR serum assay")
+    assert o["alias_group"] == "ferritin" and o["unit_ucum"] == "ng/mL"
+    assert o["value_canonical"] is not None and o["unit_canonical"] is not None
+    assert o["printed_unit"] == "nanogram per millilitre"  # the printed text stays the truth layer
+
+
+def test_rederive_keeps_the_received_ucum_code(conn, family, blobs, store_doc, fhir_file):
+    from ownhealth.normalize import rederive
+
+    [o] = _ferritin(conn, family, blobs, store_doc, fhir_file, "Ferritin")
+    assert o["unit_ucum"] == "ng/mL" and o["value_canonical"] is not None
+    rederive(conn, profile_id=family.profiles["alex"])
+    [again] = [x for x in _obs(conn, family.profiles["alex"]) if x["loinc"] == "2276-4" and x["status"] == "current"]
+    assert (again["unit_ucum"], again["value_canonical"], again["alias_group"]) == (
+        o["unit_ucum"],
+        o["value_canonical"],
+        o["alias_group"],
+    )

@@ -119,7 +119,7 @@ def add_record(
     table = TABLES[kind]
     if isinstance(src, SrcIn) and src.profile_id is None:
         src = src.model_copy(update={"profile_id": record.profile_id})
-    src_id = ensure_src(conn, src)
+    src_id = ensure_src(conn, src, record.profile_id)
     data = record.model_dump(exclude={"fhir"})
     resource = record.fhir or fhir.BUILDERS[table](data)
     cols = list(data) + ["src_id", "accepted_by", "status", "supersedes", "fhir"]

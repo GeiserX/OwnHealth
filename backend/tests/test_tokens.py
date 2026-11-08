@@ -10,10 +10,12 @@ def test_pat_round_trip(conn, family):
     new = create_token(conn, user_id=family.users["alex"], label="Claude Code · laptop", profile_ids=[p["alex"]])
     assert new.plaintext.startswith(new.prefix + "_") and len(new.plaintext) > 50
     stored = conn.execute(text("select secret_sha256, scopes from api_token where id = :i"), {"i": new.id}).one()
-    assert new.plaintext.split("_")[-1].encode() not in bytes(stored.secret_sha256)
+    assert len(bytes(stored.secret_sha256)) == 32  # a digest, not the secret; verify_token proves it matches
     assert stored.scopes == ["read:labs", "read:summary", "read:vitals"]
     principal = verify_token(conn, new.plaintext)
     assert principal.kind == "token" and principal.profile_ids == {p["alex"]}
+    assert principal.user_id == family.users["alex"] and principal.household_id == family.household_id
+    assert principal.scopes == {"read:labs", "read:summary", "read:vitals"}
     assert principal.default_profile == p["alex"]
     assert verify_token(conn, new.plaintext[:-1] + ("A" if new.plaintext[-1] != "A" else "B")) is None
     assert verify_token(conn, "oh_pat_nope") is None

@@ -10,4 +10,5 @@ for a in "$@"; do
   a=$(printf '%s' "$a" | sed 's#@127\.0\.0\.1:55432/#@127.0.0.1:5432/#; s#@localhost:55432/#@127.0.0.1:5432/#')
   args="$args '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
 done
-eval "exec docker exec -i \"$container\" $tool $args"
+# The password travels in PGPASSWORD (never argv); -e forwards it only when it is set.
+eval "exec docker exec -i -e PGPASSWORD \"$container\" $tool $args"

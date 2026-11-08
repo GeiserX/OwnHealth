@@ -19,7 +19,7 @@ from ownhealth.api._deps import get_blobs, get_conn, get_principal
 from ownhealth.blobs import BlobStore
 from ownhealth.core.access import AccessDenied, Permission, Principal, effective_permission, require
 from ownhealth.core.audit import AuditEvent, write_audit
-from ownhealth.core.documents import document_is_sensitive
+from ownhealth.core.documents import document_is_sensitive, sensitive_document_sql
 from ownhealth.core.review import dismiss
 from ownhealth.ingest.pdf import assign_document, page_words, render_page_png
 from ownhealth.ingest.retract import retract_document_facts
@@ -130,19 +130,22 @@ def list_documents(
         where.append("d.doc_type = :t")
         params["t"] = type
     with_text = bool(q) and "read:documents_text" in perm.scopes
+    # without read:sensitive, the page text of a sensitive document neither matches nor is quoted,
+    # the rule _doc applies to its file, renders and words
+    text_ok = "true" if perm.has("read:sensitive") else f"not {sensitive_document_sql('d.id')}"
     if q:
         params["q"] = q
         # page text is searchable only with read:documents_text; the filename always is
         where.append(
-            f"(d.filename ilike '%' || :q || '%' or exists (select 1 from document_page pg where pg.document_id = d.id"
-            f" and pg.fts @@ websearch_to_tsquery({_FTS_CFG}, :q)))"
+            f"(d.filename ilike '%' || :q || '%' or ({text_ok} and exists (select 1 from document_page pg"
+            f" where pg.document_id = d.id and pg.fts @@ websearch_to_tsquery({_FTS_CFG}, :q))))"
             if with_text
             else "d.filename ilike '%' || :q || '%'"
         )
     snippet = (
-        f", (select ts_headline({_FTS_CFG}, pg.text_content, websearch_to_tsquery({_FTS_CFG}, :q),"
-        " 'MaxWords=18, MinWords=6') from document_page pg where pg.document_id = d.id order by pg.page_no limit 1)"
-        " as snippet"
+        f", case when {text_ok} then (select ts_headline({_FTS_CFG}, pg.text_content,"
+        f" websearch_to_tsquery({_FTS_CFG}, :q), 'MaxWords=18, MinWords=6') from document_page pg"
+        " where pg.document_id = d.id order by pg.page_no limit 1) end as snippet"
         if with_text
         else ""
     )
@@ -209,7 +212,11 @@ def get_document(
     }
 
 
-_FILE_HEADERS = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox", "Cache-Control": "private"}
+_FILE_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "sandbox",
+    "Cache-Control": "private, no-store",
+}
 
 
 @router.get("/documents/{document_id}/file")

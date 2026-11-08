@@ -60,7 +60,7 @@ def test_a_rule_without_cite_is_refused(tmp_path):
         shutil.copy(f, tmp_path / f.name)
     text = (tmp_path / "liver.yaml").read_text()
     (tmp_path / "liver.yaml").write_text(text.replace("cite: https://", "cite: http://", 1))
-    with pytest.raises(PackError, match="cite"):
+    with pytest.raises(PackError, match=r"rule recency\.liver: .*cite"):  # the first cite in liver.yaml
         build_pack(_read_dir(tmp_path), True)
 
 
@@ -93,3 +93,10 @@ def test_a_count_of_one_reads_singular():
     assert p.text("subtitle.wearables", "en", n=3) == "wearables synced 3 days ago"
     assert p.text("genome.summary.carrier", "es", n=1) == "1 hallazgo de portador"
     assert p.text("genome.summary.carrier", "en", n=2) == "2 carrier findings"
+
+
+def test_an_unquoted_decimal_in_a_pack_file_is_a_pack_error():
+    files = _read_dir(PACK_DIR)
+    files["kidney.yaml"]["rules"][0]["cv_i"] = 4.5  # what `cv_i: 4.5` loads as
+    with pytest.raises(PackError, match=r"kidney\.yaml: .*quoted"):
+        build_pack(files, True)

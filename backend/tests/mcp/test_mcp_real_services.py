@@ -58,6 +58,7 @@ async def test_genome_gate_control_check_drug_shows_the_phenotype_with_read_geno
 
 async def test_lookup_of_a_withheld_sensitive_site_is_counted_not_crashed(world, make_token, connect):
     async with connect(make_token(scopes=ALL_SCOPES)) as c:  # the agents switch is off: APOE stays back
-        env = sc(await c.call_tool("lookup_variant", {"profile": "alex", "rsid": "rs429358"}))
+        # by position: a withheld finding never resolves an rsID (that would say it exists)
+        env = sc(await c.call_tool("lookup_variant", {"profile": "alex", "hgvs": "NC_000019.10:g.44908684T>C"}))
     assert env["data"]["withheld"] == "withheld_sensitive" and env["data"]["calls"] == []
     assert env["withheld"]["sensitive"] >= 1

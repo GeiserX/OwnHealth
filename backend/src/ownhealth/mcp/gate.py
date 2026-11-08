@@ -195,3 +195,69 @@ def prune(obj, hidden: dict[str, tuple], withheld: Withheld):
         return node
 
     return go(obj)
+
+
+# Every category a document can carry: an unextracted page can hold any of them (mcp.md 5.7).
+PAGE_ALL_SCOPES = ("read:labs", "read:vitals", "read:records", "read:genome", "read:sensitive")
+
+
+def page_pending(conn: Connection, document_id, page_no: int) -> bool:
+    """The page still waits for extraction: an open pending_document item lists it (or lists no pages)."""
+    return bool(
+        conn.execute(
+            text(
+                "select exists (select 1 from review_item where document_id = :d and kind = 'pending_document'"
+                " and status = 'open' and (jsonb_typeof(payload->'pages') is distinct from 'array'"
+                " or payload->'pages' @> to_jsonb(:n)))"
+            ),
+            {"d": document_id, "n": page_no},
+        ).scalar()
+    )
+
+
+def page_refusal(conn: Connection, perm: Permission, gate: Gate, document_id, page_no: int) -> tuple | None:
+    """Why the caller may not read one page's text, words or image (mcp.md 5.7, 9.7), or None.
+
+    ('scope', [labels]) | ('sensitive',) | ('minor',) | ('foreign',). A finished page is permitted when the caller can
+    read every fact extracted from it (committed, or still in the review queue); a pending page can hold
+    anything, so it needs every category, the agents genome switch, and a profile that is not a minor.
+    The document-wide sensitivity label is checked by the caller (core.documents.document_is_sensitive).
+    """
+    if page_pending(conn, document_id, page_no):
+        missing = [scope_label(s) for s in PAGE_ALL_SCOPES if s not in perm.scopes]
+        if missing:
+            return ("scope", missing)
+        if gate.minor:
+            return ("minor",)
+        if not gate.include_sensitive:
+            return ("sensitive",)
+        return None
+    src_ids = list(
+        conn.execute(
+            text("select id from src where document_id = :d and page_no = :n"), {"d": document_id, "n": page_no}
+        ).scalars()
+    )
+    reasons = list(hidden_reasons(conn, perm, gate, src_ids).values())
+    # rows read from the page that wait in the review queue are on the page too
+    for obs in conn.execute(
+        text(
+            "select payload->'observation' from review_item where document_id = :d and status = 'open'"
+            " and kind = 'candidate_row' and coalesce(payload->>'page_no', payload->'src'->>'page_no') = :n"
+        ),
+        {"d": document_id, "n": str(page_no)},
+    ).scalars():
+        obs = obs or {}
+        scope = OBS_CATEGORY_SCOPE.get(obs.get("category"), "read:labs")
+        if scope not in perm.scopes:
+            reasons.append(("scope", scope_label(scope)))
+        if obs.get("sensitivity") and "read:sensitive" not in perm.scopes:
+            reasons.append(("sensitive",))
+    if ("foreign",) in reasons:
+        return ("foreign",)  # a page citing another profile's fact is never shown, and not counted
+    scopes = sorted({r[1] for r in reasons if r[0] == "scope"})
+    if scopes:
+        return ("scope", scopes)
+    for kind in ("sensitive", "minor"):
+        if (kind,) in reasons:
+            return (kind,)
+    return None

@@ -85,6 +85,9 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        oidc_http = getattr(app.state, "oidc_http", None)  # made on the first OIDC request (api/auth.py)
+        if oidc_http is not None:
+            oidc_http.close()
 
     app = FastAPI(
         title="OwnHealth",

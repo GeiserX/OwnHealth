@@ -60,7 +60,7 @@ export const getHousehold = () => get<Household>('/household');
 // People (backend api/family.py): a profile without a login, an invite for a new login, deleting a profile.
 export type RelativeIn = {
 	display_name: string;
-	role: 'guardian' | 'caregiver';
+	role: 'guardian';
 	relationship?: 'partner' | 'child' | 'parent' | 'other' | null;
 	birth_date?: string | null;
 	sex_at_birth?: 'female' | 'male' | 'unknown' | null;

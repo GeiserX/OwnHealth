@@ -87,7 +87,7 @@ def commit_observation(
         raise ValueError("effective_at must be timezone-aware")
     if isinstance(src, SrcIn) and src.profile_id is None:
         src = src.model_copy(update={"profile_id": obs.profile_id})
-    src_id = ensure_src(conn, src)
+    src_id = ensure_src(conn, src, obs.profile_id)
     data = obs.model_dump(exclude={"fhir"})
     resource = obs.fhir or fhir.observation({**data, "status": status})
     params = {

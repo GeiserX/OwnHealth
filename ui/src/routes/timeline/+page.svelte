@@ -34,7 +34,7 @@
 	function load() {
 		const slug = profile?.slug;
 		const lang = i18n.lang;
-		if (slug) tl.run(() => getTimeline(slug, { lang }));
+		if (slug) tl.run(() => getTimeline(slug, { lang }), slug);
 	}
 	$effect(load);
 

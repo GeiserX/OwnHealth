@@ -158,3 +158,81 @@ def test_enroll_by_invite_and_step_up(client_for, committed_family, engine):
     r, _ = _go(stale, idp, f"sub-carmen-{code[:6]}", mode="step_up")
     assert r.headers["location"] == "/"
     assert stale.get("/api/auth/state").json()["step_up_fresh"] is True
+
+
+def test_the_provider_client_is_shared_and_closed_with_the_app(https_settings, engine):
+    from fastapi.testclient import TestClient
+    from starlette.requests import Request
+
+    from ownhealth.api.auth import _oidc_http
+    from ownhealth.app import create_app
+
+    app = create_app(https_settings, engine)
+    with TestClient(app):
+        req = Request({"type": "http", "app": app})
+        first = _oidc_http(req)
+        assert _oidc_http(req) is first
+    assert first.is_closed
+
+
+def test_the_callback_only_counts_in_the_browser_that_started_it(client_for, fresh_engine):
+    idp = FakeIdP()
+    owner = _wire(client_for(eng=fresh_engine), idp)
+    assert _go(owner, idp, "sub-sam")[0].headers["location"] == "/"
+    with fresh_engine.connect() as c:
+        uid = c.execute(text("select id from app_user")).scalar()
+
+    # link CSRF: the attacker (logged in as the owner here) starts a link and sends the URL to a victim
+    attacker = _wire(client_for(uid, eng=fresh_engine, method="oidc"), idp)
+    r = attacker.get("/api/auth/oidc/login", params={"mode": "link"}, follow_redirects=False)
+    cb = idp.authorize(r.headers["location"], "sub-victim")
+    cb.pop("_q")
+    victim = _wire(client_for(eng=fresh_engine), idp)
+    r = victim.get("/api/auth/oidc/callback", params=cb, follow_redirects=False)
+    assert "auth_error=oidc_failed" in r.headers["location"], r.headers["location"]
+    with fresh_engine.connect() as c:
+        assert (
+            c.execute(text("select oidc_subject from app_user where id = :u"), {"u": uid}).scalar().endswith("#sub-sam")
+        )
+
+    # login CSRF: an unused callback URL for the attacker's account does not log a victim in
+    r = attacker.get("/api/auth/oidc/login", follow_redirects=False)
+    cb = idp.authorize(r.headers["location"], "sub-sam")
+    cb.pop("_q")
+    victim = _wire(client_for(eng=fresh_engine), idp)
+    r = victim.get("/api/auth/oidc/callback", params=cb, follow_redirects=False)
+    assert "auth_error=oidc_failed" in r.headers["location"], r.headers["location"]
+    assert victim.get("/api/me").status_code == 401
+
+    # a step-up started by one session does not mark another session of the same browser
+    stale = _wire(client_for(uid, eng=fresh_engine, step_up=False, method="oidc"), idp)
+    r = stale.get("/api/auth/oidc/login", params={"mode": "step_up"}, follow_redirects=False)
+    cb = idp.authorize(r.headers["location"], "sub-sam")
+    cb.pop("_q")
+    other = client_for(uid, eng=fresh_engine, step_up=False, method="oidc")
+    stale.cookies.set("oh_session", other.cookies.get("oh_session"))
+    r = stale.get("/api/auth/oidc/callback", params=cb, follow_redirects=False)
+    assert "auth_error=oidc_wrong_user" in r.headers["location"], r.headers["location"]
+    assert other.get("/api/auth/state").json()["step_up_fresh"] is False
+
+
+def test_step_up_needs_proof_of_a_fresh_provider_login(client_for, fresh_engine):
+    idp = FakeIdP()
+    owner = _wire(client_for(eng=fresh_engine), idp)
+    assert _go(owner, idp, "sub-sam")[0].headers["location"] == "/"
+    with fresh_engine.connect() as c:
+        uid = c.execute(text("select id from app_user")).scalar()
+    stale = _wire(client_for(uid, eng=fresh_engine, step_up=False, method="oidc"), idp)
+    idp.override = {"auth_time": None}  # a provider that reused an old SSO session and says nothing
+    r, _ = _go(stale, idp, "sub-sam", mode="step_up")
+    assert "auth_error=oidc_not_fresh" in r.headers["location"], r.headers["location"]
+    assert stale.get("/api/auth/state").json()["step_up_fresh"] is False
+
+
+def test_linking_a_provider_needs_a_fresh_login(client_for, committed_family):
+    idp = FakeIdP()
+    stale = _wire(client_for(committed_family.users["alex"], step_up=False), idp)
+    r = stale.get("/api/auth/oidc/login", params={"mode": "link"}, follow_redirects=False)
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "step_up_required", r.text
+    fresh = _wire(client_for(committed_family.users["alex"]), idp)
+    assert fresh.get("/api/auth/oidc/login", params={"mode": "link"}, follow_redirects=False).status_code == 302
