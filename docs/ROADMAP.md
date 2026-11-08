@@ -31,7 +31,7 @@ flowchart LR
 
 ### Rules that hold in every phase
 
-- Provenance on every value: source document, page, bounding box. The printed value, unit and range are the truth layer; LOINC, UCUM and canonical values are derived and recomputable.
+- Provenance on every value: source document, page, bounding box. The printed value, unit and range are the truth layer; LOINC, UCUM and canonical values are derived and recomputable, except a LOINC code or UCUM unit the source itself sent, which is kept.
 - Nothing silent: rejected rows, unconvertible units and low-confidence extractions go to the review queue.
 - Imported text is untrusted. Free text over MCP carries `trust: untrusted_text`. No MCP tool creates an outbound share or export. Every agent write lands in the review queue.
 - Information, not diagnosis. PGx quotes CPIC/DPWG and says "discuss with your prescriber".
