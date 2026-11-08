@@ -7,10 +7,11 @@ Write the event in the same transaction as the read it records. Free-text argume
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import Connection, text
 
 ActorKind = Literal["user", "token", "share", "system"]
@@ -37,6 +38,15 @@ class AuditEvent(BaseModel):
     protocol_version: str | None = None
     ip: str | None = None
     user_agent: str | None = None
+
+    @field_validator("ip", mode="before")
+    @classmethod
+    def _ip_or_none(cls, v: object) -> str | None:
+        """Keep only a parseable address: the column is inet, and a bad cast would abort the read."""
+        try:
+            return str(ipaddress.ip_address(str(v).strip())) if v else None
+        except ValueError:
+            return None
 
 
 def hash_arg(value: str) -> str:

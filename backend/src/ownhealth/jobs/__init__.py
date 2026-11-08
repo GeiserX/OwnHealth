@@ -217,43 +217,51 @@ def _record_failure(conn: Connection, job: Job, exc: BaseException, guard: str, 
     return "dead"
 
 
+def _existing_id(conn: Connection, table: str, value: object) -> UUID | None:
+    """`value` when it is a uuid of a row in `table`, else None: a payload is not trusted for an FK."""
+    if value is None:
+        return None
+    try:
+        uid = UUID(str(value))
+    except ValueError:
+        return None
+    return conn.execute(text(f"select id from {table} where id = :i"), {"i": uid}).scalar()
+
+
 def _job_failed_item(conn: Connection, job: Job, exc: BaseException) -> None:
     from ownhealth.core.review import ReviewItemIn, create_item
 
     p = job.payload
-    profile_id = p.get("profile_id")
-    household_id = p.get("household_id")
-    document_id = p.get("document_id")
-    # a payload may name a document that is gone or is not a uuid: keep it in the payload, never in the FK
-    if document_id is not None:
-        try:
-            document_id = conn.execute(
-                text("select id from document where id = :d"), {"d": str(UUID(str(document_id)))}
-            ).scalar()
-        except ValueError:
-            document_id = None
+    # a payload may name a row that is gone or is not a uuid: keep it in the payload, never in the FK
+    profile_id = _existing_id(conn, "profile", p.get("profile_id"))
+    household_id = _existing_id(conn, "household", p.get("household_id"))
+    document_id = _existing_id(conn, "document", p.get("document_id"))
     if household_id is None and profile_id:
         household_id = conn.execute(text("select household_id from profile where id = :p"), {"p": profile_id}).scalar()
     if household_id is None and document_id:
         household_id = conn.execute(
             text("select household_id from document where id = :d"), {"d": document_id}
         ).scalar()
-    create_item(
-        conn,
-        ReviewItemIn(
-            kind="job_failed",
-            household_id=household_id,
-            profile_id=profile_id,
-            document_id=document_id,
-            payload={
-                "job_id": job.id,
-                "kind": job.kind,
-                "attempts": job.attempts,
-                "error": _error_text(exc),
-                "payload_document_id": p.get("document_id"),
-            },
-        ),
+    item = ReviewItemIn(
+        kind="job_failed",
+        household_id=household_id,
+        profile_id=profile_id,
+        document_id=document_id,
+        payload={
+            "job_id": job.id,
+            "kind": job.kind,
+            "attempts": job.attempts,
+            "error": _error_text(exc),
+            "payload_document_id": p.get("document_id"),
+        },
     )
+    # In a savepoint: the job is dead either way, and in reap_expired one bad insert must not roll
+    # back the whole sweep and stall every other expired job.
+    try:
+        with conn.begin_nested():
+            create_item(conn, item)
+    except Exception:  # noqa: BLE001
+        log.exception("job %s: could not file its job_failed item", job.id)
 
 
 def reap_expired(engine: Engine) -> int:

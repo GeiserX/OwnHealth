@@ -30,7 +30,7 @@ from uuid import UUID
 from sqlalchemy import Connection, text
 
 from ownhealth import __version__
-from ownhealth.blobs import BlobStore
+from ownhealth.blobs import BlobNotFound, BlobStore
 
 ExportFormat = Literal["zip"]
 FORMAT = "ownhealth.export/v1"
@@ -103,19 +103,25 @@ class _Writer:
             self.files.append({"path": path, "sha256": h.hexdigest(), "bytes": size, "lines": n})
         self._open.clear()
 
-    def blob(self, path: str, blobs: BlobStore, sha: str) -> None:
+    def blob(self, path: str, blobs: BlobStore, sha: str) -> bool:
+        """Copy one blob in. False when the store does not have it (the caller records the gap)."""
         if path in self._paths:
-            return
+            return True
+        try:
+            src = blobs.open(sha)  # opened before the zip entry, so a vanished blob leaves no stub
+        except BlobNotFound:
+            return False
         self._paths.add(path)
         h, size = hashlib.sha256(), 0
         info = zipfile.ZipInfo(path, date_time=datetime.now(UTC).timetuple()[:6])
         info.compress_type = zipfile.ZIP_STORED
-        with self.zf.open(info, "w", force_zip64=True) as dst:
-            for chunk in blobs.iter_chunks(sha):
+        with src, self.zf.open(info, "w", force_zip64=True) as dst:
+            while chunk := src.read(1 << 20):
                 dst.write(chunk)
                 h.update(chunk)
                 size += len(chunk)
         self.files.append({"path": path, "sha256": h.hexdigest(), "bytes": size, "source_blob": sha})
+        return True
 
     def finish(self, manifest: dict) -> None:
         self.zf.writestr("export-manifest.json", json.dumps(manifest, default=_json_default, indent=2))
@@ -205,7 +211,8 @@ def export_profile(
                 res[ref_field] = patient_ref
             w.lines(f"fhir/{rtype}.ndjson")(res)
             counts[rtype] = counts.get(rtype, 0) + 1
-    # documents and their files
+    # documents and their files; a file the blob store lacks is listed in the manifest, never dropped quietly
+    missing: list[dict] = []
     doc_write = w.lines("fhir/DocumentReference.ndjson")
     docs = conn.execute(
         text(
@@ -230,8 +237,8 @@ def export_profile(
                 ],
             }
         )
-        if blobs.exists(sha):
-            w.blob(path, blobs, sha)
+        if not w.blob(path, blobs, sha):
+            missing.append({"path": path, "source_blob": sha})
     counts["DocumentReference"] = len(docs)
     # provenance: one per src id of the profile
     prov = w.lines("fhir/Provenance.ndjson")
@@ -255,8 +262,10 @@ def export_profile(
     # genome files
     for g in conn.execute(text("select * from genome_dataset where profile_id = :p"), {"p": profile_id}).mappings():
         for col, name in _GENOME_FILES.items():
-            if g.get(col) is not None and blobs.exists(bytes(g[col]).hex()):
-                w.blob(f"genome/{g['id']}/{name}", blobs, bytes(g[col]).hex())
+            if g.get(col) is not None:
+                gpath, gsha = f"genome/{g['id']}/{name}", bytes(g[col]).hex()
+                if not w.blob(gpath, blobs, gsha):
+                    missing.append({"path": gpath, "source_blob": gsha})
     # everything else, as stored
     for table in raw_tables:
         write = w.lines(f"ownhealth/{table}.ndjson")
@@ -276,6 +285,7 @@ def export_profile(
         "profile": {"id": str(prof.id), "slug": prof.slug, "display_name": prof.display_name},
         "counts": counts,
         "files": w.files,
+        "missing_blobs": missing,
     }
     w.finish(manifest)
     return manifest

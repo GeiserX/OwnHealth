@@ -20,6 +20,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from sqlalchemy import Connection, text
 
+from ownhealth.core import fhir
 from ownhealth.core.acceptance import DEFAULT_THRESHOLD, Check, Identity, SourceAllowance, auto_accept
 from ownhealth.core.lifecycle import LifecycleError
 from ownhealth.core.observations import ObservationIn, commit_observation, supersede_observation
@@ -279,10 +280,41 @@ def _lock_item(conn: Connection, item_id: UUID, want: str) -> dict:
     return dict(row)
 
 
+# Which parts of a FHIR Observation each column feeds (core.fhir.observation builds them).
+_VALUE_X = ("valueQuantity", "valueCodeableConcept", "valueString")
+_FHIR_PARTS: dict[str, tuple[str, ...]] = {
+    **dict.fromkeys(("value_num", "value_cmp", "value_code", "value_text", "printed_value"), _VALUE_X),
+    **dict.fromkeys(("printed_unit", "unit_ucum"), (*_VALUE_X, "referenceRange")),
+    **dict.fromkeys(("ref_low", "ref_high", "printed_ref_range"), ("referenceRange",)),
+    **dict.fromkeys(("loinc", "printed_name"), ("code",)),
+    "effective_at": ("effectiveDateTime",),
+    "interpretation": ("interpretation",),
+    "category": ("category",),
+}
+
+
+def _reconcile_fhir(obs: ObservationIn, edited: set[str]) -> ObservationIn:
+    """Keep a received resource, but rebuild the parts an edited column feeds, so the export never
+    disagrees with the stored columns."""
+    if obs.fhir is None:
+        return obs
+    parts = {part for col in edited for part in _FHIR_PARTS.get(col, ())}
+    if not parts:
+        return obs
+    built = fhir.observation(obs.model_dump(exclude={"fhir"}))
+    resource = {k: v for k, v in obs.fhir.items() if k not in parts}
+    resource.update({k: built[k] for k in parts if k in built})
+    return obs.model_copy(update={"fhir": resource})
+
+
 def _accept_candidate(conn: Connection, item: dict, user_id: UUID, edits: dict | None) -> list[UUID]:
     payload = item["payload"]
-    obs_data = {**payload["observation"], **(edits or {})}
+    # The resource is what arrived; a reviewer edits columns, never the resource itself.
+    edits = {k: v for k, v in (edits or {}).items() if k != "fhir"}
+    obs_data = {**payload["observation"], **edits}
     obs = ObservationIn.model_validate(obs_data)
+    received = payload["observation"]
+    obs = _reconcile_fhir(obs, {k for k, v in edits.items() if received.get(k) != v})
     src = SrcIn.model_validate({**payload["src"], "actor_kind": "user", "actor_id": str(user_id)})
     committed = None
     if payload.get("supersedes"):

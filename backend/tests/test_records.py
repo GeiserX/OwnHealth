@@ -93,3 +93,14 @@ def test_condition_correction_and_retraction(conn, family):
             accepted_by="person",
             reason="move",
         )
+
+
+def test_the_allergy_builder_carries_its_verification_status():
+    from ownhealth.core import fhir
+
+    refuted = fhir.allergy({"substance": "Penicillin", "verification_status": "refuted"})
+    assert refuted["verificationStatus"]["coding"][0]["code"] == "refuted"
+    assert fhir.allergy({"substance": "Penicillin"})["verificationStatus"]["coding"][0]["code"] == "confirmed"
+    erased = fhir.allergy({"substance": "Penicillin", "verification_status": "entered-in-error"})
+    assert "clinicalStatus" not in erased
+    assert "verificationStatus" not in fhir.allergy({"substance": "Penicillin", "verification_status": "maybe"})

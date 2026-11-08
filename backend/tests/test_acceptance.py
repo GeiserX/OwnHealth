@@ -31,3 +31,9 @@ def test_threshold_never_below_090_and_reasons_collected():
     assert auto_accept(0.91, OK, "rules_text", "matched", threshold=0.9).auto is True
     d = auto_accept(0.99, [Check(name="g", ok=False, reason="not_grounded")], "rules_text", "mismatch")
     assert d.reasons == ["identity_mismatch", "not_grounded"]
+
+
+@pytest.mark.parametrize("conf", [float("nan"), 1.5, float("inf")])
+def test_a_confidence_outside_0_1_fails_closed(conf):
+    d = auto_accept(conf, OK, "rules_text", "matched")
+    assert d.auto is False and d.why_not

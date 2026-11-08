@@ -145,11 +145,19 @@ def medication_statement(m: dict) -> dict:
     )
 
 
+ALLERGY_VERIFICATION = ("unconfirmed", "presumed", "confirmed", "refuted", "entered-in-error")
+
+
 def allergy(a: dict) -> dict:
+    ver = a.get("verification_status") or "confirmed"
+    ver = ver if ver in ALLERGY_VERIFICATION else None  # a free string: an unknown code is left out
     return _drop_none(
         {
             "resourceType": "AllergyIntolerance",
-            "clinicalStatus": {
+            # FHIR ait-1: no clinicalStatus on an entered-in-error allergy.
+            "clinicalStatus": None
+            if ver == "entered-in-error"
+            else {
                 "coding": [
                     {
                         "system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical",
@@ -157,6 +165,13 @@ def allergy(a: dict) -> dict:
                     }
                 ]
             },
+            "verificationStatus": {
+                "coding": [
+                    {"system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-verification", "code": ver}
+                ]
+            }
+            if ver
+            else None,
             "code": _code(system_url(a.get("code_system")), a.get("code"), a["substance"]),
             "criticality": a.get("criticality"),
             "reaction": [{"description": a["reaction_text"]}] if a.get("reaction_text") else None,

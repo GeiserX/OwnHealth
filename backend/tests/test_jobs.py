@@ -209,3 +209,74 @@ def test_job_that_keeps_killing_its_worker_ends_dead_with_an_item(engine, commit
             {"j": str(jid)},
         ).scalar()
     assert n == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"profile_id": "not-a-uuid"}, {"household_id": "00000000-0000-0000-0000-000000000000"}, {"household_id": 7}],
+)
+def test_dead_job_with_bad_scope_ids_still_files_its_item(engine, ctx, payload):
+    with engine.begin() as c:
+        jid = enqueue(c, "test.bad_input", payload)
+    run_one(ctx, kinds=["test.bad_input"])
+    assert _state(engine, jid)["state"] == "dead"
+    with engine.connect() as c:
+        item = (
+            c.execute(
+                text("select household_id, profile_id from review_item where payload->>'job_id' = :j"),
+                {"j": str(jid)},
+            )
+            .mappings()
+            .one()
+        )
+    assert item["household_id"] is None and item["profile_id"] is None
+
+
+def test_one_failing_item_does_not_stall_the_reaper(engine, monkeypatch):
+    from ownhealth.core import review
+
+    with engine.begin() as c:
+        a = enqueue(c, "test.crashloop", {"n": "a"}, max_attempts=1)
+        b = enqueue(c, "test.crashloop", {"n": "b"}, max_attempts=1)
+    for jid in (a, b):
+        with engine.begin() as c:
+            c.execute(text("update job set run_after = now() where id = :i"), {"i": jid})
+        claim(engine, "core", "w", ["test.crashloop"])
+        _expire(engine, jid)
+    real = review.create_item
+
+    def flaky(conn, item):
+        if item.payload["job_id"] == a:
+            conn.execute(text("select 1/0"))  # a database error inside the insert path
+        return real(conn, item)
+
+    monkeypatch.setattr(review, "create_item", flaky)
+    jobs.reap_expired(engine)
+    assert _state(engine, a)["state"] == "dead" and _state(engine, b)["state"] == "dead"
+
+
+def _job(kind, payload):
+    return Job(id=0, queue="core", kind=kind, payload=payload, attempts=1, max_attempts=5)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"household_id": "x", "profile_id": "y"},  # no blob_sha256
+        {"blob_sha256": "ab" * 32, "household_id": "x", "profile_id": "y"},  # not in the store
+        {"blob_sha256": "not-hex", "household_id": "x", "profile_id": "y"},
+    ],
+)
+def test_a_structured_import_with_no_stored_blob_fails_for_good(ctx, payload):
+    from ownhealth.jobs.kinds import fhir
+
+    with pytest.raises(PermanentJobError):
+        fhir.run(ctx, _job("import.fhir_bundle", payload))
+
+
+@pytest.mark.parametrize("payload", [{"as_of": "2026-13-40"}, {"profile_id": "not-a-uuid"}])
+def test_a_state_rebuild_with_a_malformed_payload_fails_for_good(ctx, payload):
+    from ownhealth.jobs.kinds import state
+
+    with pytest.raises(PermanentJobError):
+        state.rebuild(ctx, _job("state.rebuild", payload))

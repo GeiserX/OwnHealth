@@ -187,14 +187,16 @@ def _grant(conn: Connection, user_id: UUID, profile_id: UUID):
 
 def effective_permission(conn: Connection, principal: Principal, profile_id: UUID) -> Permission:
     """The permission `principal` has on one profile. Raises AccessDenied when there is none."""
+    # One message for an unknown id and an ungranted one: a uuid must not confirm a profile exists
+    # nor reveal its slug. (resolve_profile_ref echoes a slug only when the caller sent it.)
     profile = get_profile(conn, profile_id)
     if profile is None or principal.user_id is None:
         raise AccessDenied("profile_not_granted", "Profile not available.")
     if principal.profile_ids is not None and profile_id not in principal.profile_ids:
-        raise AccessDenied("profile_not_granted", f"Profile '{profile.slug}' is not available to this token.")
+        raise AccessDenied("profile_not_granted", "Profile not available.")
     grant = _grant(conn, principal.user_id, profile_id)
     if grant is None:
-        raise AccessDenied("profile_not_granted", f"Profile '{profile.slug}' is not available.")
+        raise AccessDenied("profile_not_granted", "Profile not available.")
     scopes = effective_scopes(principal.scopes, frozenset(grant.categories), profile.locks, grant.role)
     return Permission(profile=profile, role=grant.role, scopes=scopes)
 

@@ -56,9 +56,12 @@ def sniff(filename: str, head: bytes, blob_path=None) -> UploadKind:
         return "image"
     if head.startswith(b"PK\x03\x04"):
         if blob_path is not None:
-            with zipfile.ZipFile(blob_path) as z:
-                if any(n.endswith("export.xml") for n in z.namelist()):
-                    return "apple_health_zip"
+            try:
+                with zipfile.ZipFile(blob_path) as z:
+                    if any(n.endswith("export.xml") for n in z.namelist()):
+                        return "apple_health_zip"
+            except zipfile.BadZipFile:  # truncated or corrupt: refused like any unknown file
+                return "unknown"
         return "unknown"
     if name.endswith(".tbi"):
         return "tbi"
