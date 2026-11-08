@@ -1,0 +1,31 @@
+[package]
+name = "ownhealth-rules"
+description = "Lane E: the rule pack, the state body and state_hash, status words, dashboard and drug check."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ownhealth-core.workspace = true
+ownhealth-normalize.workspace = true
+ownhealth-genome.workspace = true
+chrono.workspace = true
+futures.workspace = true
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sqlx.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+ownhealth-core = { workspace = true, features = ["testing"] }
+anyhow.workspace = true
+tokio.workspace = true
+

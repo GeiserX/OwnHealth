@@ -35,7 +35,7 @@ UI (SvelteKit, pnpm), from `ui/`:
 pnpm install
 pnpm dev                        # proxies /api and /mcp to OWNHEALTH_BACKEND (default 127.0.0.1:8080)
 pnpm run check                  # svelte-check, warnings fail
-pnpm build                      # writes backend/src/ownhealth/static, served by FastAPI
+pnpm build                      # writes server/static (embedded by the Rust binary; FastAPI needs OWNHEALTH_STATIC_DIR)
 ```
 
 Container: `cp .env.example .env`, fill it in, `docker compose up -d`. The image is `drumsergio/ownhealth`; Postgres is pinned to a full 17.x version.

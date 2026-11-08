@@ -73,7 +73,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
       - run: pnpm build
-      - run: test -f ../backend/src/ownhealth/static/index.html
+      - run: test -f ../server/static/index.html
 
   docker:
     runs-on: ubuntu-latest

@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1
 # OwnHealth: one app image (FastAPI + MCP + built UI). Postgres runs beside it (compose.yaml).
 
-# 1. UI: SvelteKit static build, written into the Python package's static/ folder.
+# 1. UI: SvelteKit static build, written into server/static (vite.config.ts).
 FROM node:24.22.2-bookworm-slim AS ui
 WORKDIR /src/ui
 RUN corepack enable
 COPY ui/package.json ui/pnpm-lock.yaml ui/.npmrc ./
 RUN pnpm install --frozen-lockfile
 COPY ui/ ./
-RUN mkdir -p ../backend/src/ownhealth/static && pnpm build
+RUN mkdir -p ../server/static && pnpm build
 
 # 2. Python: locked dependencies and the app into /app/.venv, non-editable.
 FROM python:3.13.18-slim-trixie AS build
@@ -18,7 +18,7 @@ WORKDIR /app
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY backend/src ./src
-COPY --from=ui /src/backend/src/ownhealth/static ./src/ownhealth/static
+COPY --from=ui /src/server/static ./src/ownhealth/static
 RUN uv sync --frozen --no-dev --no-editable \
  && /app/.venv/bin/python -c "import pysam, pdfplumber, pypdfium2, webauthn, ownhealth"
 

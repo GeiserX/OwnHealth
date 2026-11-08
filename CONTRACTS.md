@@ -392,5 +392,5 @@ components; a page that needs a new shared look adds it to a component, not a on
 - i18n: `t(key)` from `#lib/i18n/index.svelte`, es and en, every key in both (`_esComplete` check).
 - State: `app.profile` (current slug) from `#lib/state/app.svelte`; pages read it and refetch.
 - Imports use `#lib/...` (SvelteKit 3 subpath imports, `package.json` `imports`).
-- `pnpm run check` (svelte-check, warnings fail) and `pnpm build` (into `backend/src/ownhealth/static`)
+- `pnpm run check` (svelte-check, warnings fail) and `pnpm build` (into `server/static`)
   must pass.

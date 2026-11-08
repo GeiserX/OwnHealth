@@ -9,3 +9,6 @@ data
 docs
 .git
 .env
+server/static
+server/target
+server/vendor
