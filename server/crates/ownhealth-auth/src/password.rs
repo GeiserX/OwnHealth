@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn verifies_a_hash_python_made() {
         // password.hash_password("carmen-ortega-labnorte-2026") in 0.1.1 (tests/auth_python_rows.json)
-        let py = "scrypt$16384$8$1$o6t1Snlqx1uVDsfAsT5IYw==$zga3nP2cXIHg25UMEBiPbNtrH/wCHSBcOYZhHZMaytA=";
+        let py = "scrypt$16384$8$1$o6t1Snlqx1uVDsfAsT5IYw==$zga3nP2cXIHg25UMEBiPbNtrH/wCHSBcOYZhHZMaytA="; // ggignore: synthetic test hash
         assert!(check_password("carmen-ortega-labnorte-2026", Some(py)));
         assert!(!check_password("carmen-ortega-labnorte-2025", Some(py)));
     }

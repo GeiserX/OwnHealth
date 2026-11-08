@@ -60,7 +60,7 @@ async fn missing_bad_and_revoked_tokens_are_401() -> R {
     assert!(m.get("authorization_servers").is_none());
     let r = send(
         &app,
-        post(&body, &[hdrs[0], ("authorization", "Bearer oh_pat_AAAAAAAA_nope")])?,
+        post(&body, &[hdrs[0], ("authorization", "Bearer oh_pat_AAAAAAAA_nope")])?, // ggignore: deliberately invalid token
     )
     .await?;
     assert_eq!(r.status, 401);
