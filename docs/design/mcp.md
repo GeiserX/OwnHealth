@@ -228,7 +228,7 @@ Purpose: the deterministic snapshot of one profile. Scope `read:summary`; sectio
 | Field | Value |
 |---|---|
 | Annotations | `readOnlyHint: true`, `idempotentHint: true` |
-| Budget | Under 2 KB for the whole `structuredContent`, envelope included. Past that, the lowest-ranked flags move behind `next_cursor` and `truncated: true` is set |
+| Budget | Under 2 KB for the whole `structuredContent`, envelope included. Past that, the lowest-ranked flags move behind `next_cursor` and `truncated: true` is set. A page keeps at least one flag. `flags[]` is the only paged section: the others are capped by count (`notes[]` holds the newest three). Each note's text is cut to its first 200 characters, marked `truncated: true`, and keeps its `src`, so three long notes still fit |
 
 Input:
 
