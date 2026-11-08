@@ -1,0 +1,36 @@
+{
+  "clinicalStatus": {
+    "coding": {
+      "[]": {
+        "code": "string",
+        "system": "string"
+      }
+    }
+  },
+  "code": {
+    "text": "string"
+  },
+  "id": "uuid",
+  "meta": {
+    "source": "string",
+    "tag": {
+      "[]": {
+        "code": "string",
+        "system": "string"
+      }
+    }
+  },
+  "onsetDateTime": "date",
+  "resourceType": "string",
+  "subject": {
+    "reference": "string"
+  },
+  "verificationStatus": {
+    "coding": {
+      "[]": {
+        "code": "string",
+        "system": "string"
+      }
+    }
+  }
+}

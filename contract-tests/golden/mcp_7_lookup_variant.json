@@ -1,0 +1,70 @@
+{
+  "as_of": "date",
+  "budget": {
+    "tokens_est": "int",
+    "truncated": "bool"
+  },
+  "data": {
+    "annotations": {},
+    "calls": {
+      "[]": {
+        "assay": "=wgs",
+        "basis": "string",
+        "call_state": "=alt",
+        "dp": "int",
+        "genotype": "string",
+        "gq": "int",
+        "gt": "string",
+        "source": "string",
+        "src": "src_id",
+        "zygosity": "=het"
+      }
+    },
+    "cited_by_findings": {
+      "[]": "string"
+    },
+    "coverage": {
+      "fraction_callable": "float",
+      "reason": "null",
+      "state": "string"
+    },
+    "query": "string",
+    "quota": {
+      "daily_cap": "int",
+      "used_today": "int"
+    },
+    "variant": {
+      "alt": "string",
+      "chrom": "string",
+      "gene": "string",
+      "hgvs_c": "null",
+      "hgvs_p": "null",
+      "pos": "int",
+      "ref": "string",
+      "rsid": "string"
+    }
+  },
+  "db_versions": {},
+  "evidence": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "string"
+  },
+  "next_cursor": "null",
+  "not_assessed": {
+    "[]": "empty"
+  },
+  "notice": "string",
+  "profile": "string",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

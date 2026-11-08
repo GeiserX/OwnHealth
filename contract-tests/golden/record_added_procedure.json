@@ -1,0 +1,21 @@
+{
+  "detail": {
+    "accepted_by": "=person",
+    "code": "null",
+    "code_system": "null",
+    "effective_at": "null",
+    "performed": "date",
+    "sensitivity": {
+      "[]": "empty"
+    },
+    "text": "string"
+  },
+  "id": "uuid",
+  "kind": "=procedure",
+  "recorded_at": "datetime_Z",
+  "src": "src_id",
+  "status": "=current",
+  "status_reason": "null",
+  "supersedes": "null",
+  "title": "string"
+}

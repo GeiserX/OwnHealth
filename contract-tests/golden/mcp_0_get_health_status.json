@@ -1,0 +1,108 @@
+{
+  "as_of": "date",
+  "budget": {
+    "tokens_est": "int",
+    "truncated": "bool"
+  },
+  "data": {
+    "active_conditions": {
+      "[]": {
+        "name": {
+          "origin": "=fhir_note",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "since": "date",
+        "src": "src_id",
+        "verification": "=confirmed"
+      }
+    },
+    "corrections": {
+      "[]": "empty"
+    },
+    "data_freshness": {
+      "genome": "date",
+      "labs": "date",
+      "wearables": "date"
+    },
+    "flags": {
+      "[]": {
+        "code": "string",
+        "kind": "=out_of_range",
+        "rank": "int",
+        "rule": "string",
+        "src": "src_id",
+        "text": "string"
+      }
+    },
+    "medications": {
+      "[]": {
+        "name": {
+          "origin": "=fhir_note",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "since": "date",
+        "src": "src_id"
+      }
+    },
+    "never_measured": {
+      "[]": {
+        "name": "string",
+        "rule": "string"
+      }
+    },
+    "notes": {
+      "[]": {
+        "author_kind": "string",
+        "date": "date",
+        "src": "src_id",
+        "text": {
+          "origin": "=person_note",
+          "text": "string",
+          "trust": "=untrusted_text"
+        }
+      }
+    },
+    "pending": {
+      "[]": "empty"
+    },
+    "rules_version": "string",
+    "stale": {
+      "[]": {
+        "last": "date",
+        "name": "string",
+        "rule": "string",
+        "src": "src_id",
+        "window_months": "int"
+      }
+    },
+    "state_hash": "sha256_tagged",
+    "supplements": {
+      "[]": "empty"
+    }
+  },
+  "db_versions": {},
+  "evidence": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "empty"
+  },
+  "next_cursor": "string",
+  "not_assessed": {
+    "[]": "empty"
+  },
+  "notice": "string",
+  "profile": "string",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

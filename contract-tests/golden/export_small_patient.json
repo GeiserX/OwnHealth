@@ -1,0 +1,16 @@
+{
+  "address": {
+    "[]": {
+      "country": "string"
+    }
+  },
+  "birthDate": "date",
+  "gender": "string",
+  "id": "uuid",
+  "name": {
+    "[]": {
+      "text": "string"
+    }
+  },
+  "resourceType": "string"
+}

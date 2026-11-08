@@ -1,0 +1,24 @@
+{
+  "detail": {
+    "abatement": "null",
+    "accepted_by": "=person",
+    "clinical_status": "string",
+    "code": "null",
+    "code_system": "null",
+    "effective_at": "null",
+    "onset": "date",
+    "sensitivity": {
+      "[]": "empty"
+    },
+    "text": "string",
+    "verification_status": "string"
+  },
+  "id": "uuid",
+  "kind": "=condition",
+  "recorded_at": "datetime_Z",
+  "src": "src_id",
+  "status": "=current",
+  "status_reason": "null",
+  "supersedes": "null",
+  "title": "string"
+}

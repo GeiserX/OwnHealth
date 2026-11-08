@@ -1,0 +1,12 @@
+{
+  "items": {
+    "[]": {
+      "document_id": "uuid",
+      "duplicate": "bool",
+      "filename": "string",
+      "job_id": "int",
+      "kind": "=pdf",
+      "sha256": "sha256_hex"
+    }
+  }
+}

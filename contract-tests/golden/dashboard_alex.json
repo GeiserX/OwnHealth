@@ -1,0 +1,129 @@
+{
+  "as_of": "date",
+  "changes": {
+    "[]": {
+      "direction": "string",
+      "from": "string",
+      "name": "string",
+      "src": "src_id",
+      "status": {
+        "|": [
+          "=ok",
+          "=out",
+          "=watch"
+        ]
+      },
+      "to": "string",
+      "unit": "string"
+    }
+  },
+  "changes_vs": "date",
+  "due": {
+    "[]": {
+      "kind": "=lab",
+      "phase": "null",
+      "rule": "string",
+      "status": {
+        "|": [
+          "=stale",
+          "=watch"
+        ]
+      },
+      "title": "string",
+      "why": "string"
+    }
+  },
+  "generated_at": "datetime_Z",
+  "genome": {
+    "chips": {
+      "[]": "string"
+    },
+    "hidden": "int",
+    "source": "string",
+    "summary": "string"
+  },
+  "medications": {
+    "[]": {
+      "name": "string",
+      "pgx": {
+        "gene": "string",
+        "label": "string",
+        "level": "string",
+        "phenotype": "string",
+        "src": "src_id",
+        "text": "string"
+      },
+      "since": "date",
+      "src": "src_id",
+      "strength": "string"
+    }
+  },
+  "not_measured_this_time": {
+    "[]": "string"
+  },
+  "profile": "string",
+  "review_open": "int",
+  "rules_version": "string",
+  "state_hash": "sha256_tagged",
+  "subtitle": "string",
+  "systems": {
+    "[]": {
+      "key": "string",
+      "markers": {
+        "[]": {
+          "<src>": "string",
+          "alias_group": "string",
+          "band": {
+            "|": [
+              "null",
+              {
+                "[]": "float"
+              }
+            ]
+          },
+          "date": "date",
+          "name": "string",
+          "rule": {
+            "|": [
+              "null",
+              "string"
+            ]
+          },
+          "spark": {
+            "[]": "float"
+          },
+          "src": {
+            "|": [
+              "null",
+              "src_id"
+            ]
+          },
+          "stale": "bool",
+          "status": {
+            "|": [
+              "=ok",
+              "=out",
+              "=stale",
+              "=watch"
+            ]
+          },
+          "unit": "string",
+          "value": "string"
+        }
+      },
+      "name": "string",
+      "newest": "date",
+      "rule": "string",
+      "rule_file": "string",
+      "status": {
+        "|": [
+          "=ok",
+          "=out",
+          "=stale",
+          "=watch"
+        ]
+      },
+      "withheld": "bool"
+    }
+  }
+}

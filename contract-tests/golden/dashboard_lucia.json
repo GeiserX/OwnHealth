@@ -1,0 +1,81 @@
+{
+  "as_of": "date",
+  "changes": {
+    "[]": "empty"
+  },
+  "changes_vs": "null",
+  "due": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "genome": {
+    "chips": {
+      "[]": "string"
+    },
+    "hidden": "int",
+    "source": "string",
+    "summary": "string"
+  },
+  "medications": {
+    "[]": "empty"
+  },
+  "not_measured_this_time": {
+    "[]": "empty"
+  },
+  "profile": "string",
+  "review_open": "int",
+  "rules_version": "string",
+  "state_hash": "sha256_tagged",
+  "subtitle": "string",
+  "systems": {
+    "[]": {
+      "key": "string",
+      "markers": {
+        "[]": {
+          "<src>": "string",
+          "alias_group": "string",
+          "band": {
+            "|": [
+              "null",
+              {
+                "[]": "float"
+              }
+            ]
+          },
+          "date": "date",
+          "name": "string",
+          "rule": "null",
+          "spark": {
+            "[]": "float"
+          },
+          "src": {
+            "|": [
+              "null",
+              "src_id"
+            ]
+          },
+          "stale": "bool",
+          "status": "=ok",
+          "unit": "string",
+          "value": "string"
+        }
+      },
+      "name": "string",
+      "newest": {
+        "|": [
+          "date",
+          "null"
+        ]
+      },
+      "rule": "string",
+      "rule_file": "string",
+      "status": {
+        "|": [
+          "=nodata",
+          "=ok"
+        ]
+      },
+      "withheld": "bool"
+    }
+  }
+}

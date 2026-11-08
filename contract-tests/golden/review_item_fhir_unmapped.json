@@ -1,0 +1,43 @@
+{
+  "candidate_row_id": "null",
+  "context_src_ids": "null",
+  "created_at": "datetime_Z",
+  "decided_at": "null",
+  "decided_by": "null",
+  "decision_reason": "null",
+  "document_id": "uuid",
+  "id": "uuid",
+  "kind": "=fhir_unmapped",
+  "observation_id": "null",
+  "payload": {
+    "json_pointer": "string",
+    "note": "string",
+    "projection": "null",
+    "resource": {
+      "class": {
+        "code": "string"
+      },
+      "id": "string",
+      "period": {
+        "start": "datetime_offset"
+      },
+      "resourceType": "string",
+      "status": "=finished",
+      "subject": {
+        "reference": "string"
+      }
+    },
+    "resource_type": "string",
+    "src": {
+      "import_ref": "string"
+    }
+  },
+  "profile_id": "uuid",
+  "proposed_by_token": "null",
+  "reasons": {
+    "[]": "=unmapped"
+  },
+  "result_ids": "null",
+  "row_conf": "null",
+  "status": "=open"
+}

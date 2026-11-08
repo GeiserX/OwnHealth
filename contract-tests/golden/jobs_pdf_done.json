@@ -1,0 +1,27 @@
+{
+  "jobs": {
+    "[]": {
+      "attempts": "int",
+      "created_at": "datetime_Z",
+      "document_id": "uuid",
+      "filename": "null",
+      "finished_at": "datetime_Z",
+      "id": "int",
+      "kind": "=import.pdf",
+      "last_error": "null",
+      "max_attempts": "int",
+      "profile_id": "uuid",
+      "result": {
+        "accepted": "int",
+        "document_id": "uuid",
+        "queued": "int",
+        "reasons": {
+          "implausible": "int",
+          "suspect_separator": "int"
+        },
+        "skipped": "int"
+      },
+      "state": "string"
+    }
+  }
+}

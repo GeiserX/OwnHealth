@@ -1,0 +1,306 @@
+{
+  "items": {
+    "[]": {
+      "candidate_row_id": {
+        "|": [
+          "null",
+          "uuid"
+        ]
+      },
+      "context_src_ids": {
+        "|": [
+          "null",
+          {
+            "[]": "src_id"
+          }
+        ]
+      },
+      "created_at": "datetime_Z",
+      "decided_at": "null",
+      "decided_by": "null",
+      "decision_reason": "null",
+      "document_id": {
+        "|": [
+          "null",
+          "uuid"
+        ]
+      },
+      "id": "uuid",
+      "kind": {
+        "|": [
+          "=agent_proposal",
+          "=candidate_row",
+          "=rederive_diff"
+        ]
+      },
+      "observation_id": "null",
+      "payload": {
+        "allowance": {
+          "|": [
+            "=rules_text",
+            "absent"
+          ]
+        },
+        "based_on": {
+          "|": [
+            "absent",
+            {
+              "[]": "src_id"
+            }
+          ]
+        },
+        "bbox": {
+          "|": [
+            "absent",
+            {
+              "[]": "float"
+            }
+          ]
+        },
+        "cells": {
+          "|": [
+            "absent",
+            {
+              "name": {
+                "conf": "float",
+                "text": "string"
+              },
+              "ref_range": {
+                "conf": "float",
+                "text": "string"
+              },
+              "unit": {
+                "conf": "float",
+                "text": "string"
+              },
+              "value": {
+                "conf": "float",
+                "text": "string"
+              }
+            }
+          ]
+        },
+        "checks": {
+          "|": [
+            "absent",
+            {
+              "[]": {
+                "detail": "string",
+                "name": "string",
+                "ok": "bool",
+                "reason": {
+                  "|": [
+                    "=implausible",
+                    "=loinc_unknown",
+                    "=not_grounded",
+                    "=range_parse",
+                    "=suspect_separator"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "derivation_version": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "identity": {
+          "|": [
+            "=matched",
+            "absent"
+          ]
+        },
+        "kind": {
+          "|": [
+            "=note",
+            "absent"
+          ]
+        },
+        "observation": {
+          "|": [
+            "absent",
+            {
+              "alias_group": "string",
+              "candidate_row_id": "uuid",
+              "category": "=laboratory",
+              "derivation_version": "string",
+              "document_id": "uuid",
+              "effective_at": "datetime_Z",
+              "fhir": "null",
+              "interpretation": "null",
+              "loinc": {
+                "|": [
+                  "null",
+                  "string"
+                ]
+              },
+              "method": "null",
+              "printed_flag": "null",
+              "printed_name": "string",
+              "printed_ref_range": "string",
+              "printed_unit": {
+                "|": [
+                  "null",
+                  "string"
+                ]
+              },
+              "printed_value": "string",
+              "profile_id": "uuid",
+              "ref_applies": "null",
+              "ref_high": "null",
+              "ref_low": "null",
+              "report_key": "null",
+              "sensitivity": {
+                "[]": "empty"
+              },
+              "source_kind": "string",
+              "specimen": "null",
+              "unit_canonical": "null",
+              "unit_ucum": {
+                "|": [
+                  "null",
+                  "string"
+                ]
+              },
+              "value_canonical": "null",
+              "value_cmp": "null",
+              "value_code": "null",
+              "value_num": "string",
+              "value_text": "null"
+            }
+          ]
+        },
+        "page_no": {
+          "|": [
+            "absent",
+            "int"
+          ]
+        },
+        "payload": {
+          "|": [
+            "absent",
+            {
+              "attach_to": "src_id",
+              "lang": "=en",
+              "text": "string"
+            }
+          ]
+        },
+        "provisional": {
+          "|": [
+            "absent",
+            "bool"
+          ]
+        },
+        "row_conf": {
+          "|": [
+            "absent",
+            "float"
+          ]
+        },
+        "rows": {
+          "|": [
+            "absent",
+            {
+              "[]": {
+                "changed": {
+                  "method": {
+                    "|": [
+                      "absent",
+                      {
+                        "[]": {
+                          "|": [
+                            "=ckd-epi-2021",
+                            "null"
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  "unit_canonical": {
+                    "|": [
+                      "absent",
+                      {
+                        "[]": "string"
+                      }
+                    ]
+                  }
+                },
+                "new": "uuid",
+                "old": "uuid",
+                "src": "src_id"
+              }
+            }
+          ]
+        },
+        "src": {
+          "|": [
+            "absent",
+            {
+              "actor_id": "null",
+              "actor_kind": "=system",
+              "bbox": {
+                "[]": "float"
+              },
+              "candidate_row_id": "uuid",
+              "document_id": "uuid",
+              "extraction_run_id": "uuid",
+              "id": "null",
+              "import_ref": "null",
+              "kind": "=document_region",
+              "label": "string",
+              "page_no": "int",
+              "profile_id": "uuid"
+            }
+          ]
+        },
+        "token_label": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "why_not": {
+          "|": [
+            "absent",
+            {
+              "[]": {
+                "|": [
+                  "=a check failed",
+                  "=row confidence 0.91 below 0.95",
+                  "=row confidence 0.93 below 0.95"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "profile_id": "uuid",
+      "proposed_by_token": "null",
+      "reasons": {
+        "[]": {
+          "|": [
+            "=implausible",
+            "=loinc_unknown",
+            "=not_grounded",
+            "=range_parse",
+            "=suspect_separator"
+          ]
+        }
+      },
+      "result_ids": "null",
+      "row_conf": {
+        "|": [
+          "float",
+          "null"
+        ]
+      },
+      "status": "=open"
+    }
+  },
+  "open": "int",
+  "withheld": "int"
+}

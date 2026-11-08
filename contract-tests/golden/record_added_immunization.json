@@ -1,0 +1,23 @@
+{
+  "detail": {
+    "accepted_by": "=person",
+    "code": "null",
+    "code_system": "null",
+    "dose_number": "int",
+    "effective_at": "null",
+    "lot": "null",
+    "occurred": "date",
+    "sensitivity": {
+      "[]": "empty"
+    },
+    "vaccine": "string"
+  },
+  "id": "uuid",
+  "kind": "=immunization",
+  "recorded_at": "datetime_Z",
+  "src": "src_id",
+  "status": "=current",
+  "status_reason": "null",
+  "supersedes": "null",
+  "title": "string"
+}

@@ -2,7 +2,7 @@
 # Run the contract tests against one backend on a fresh database:
 #   contract-tests/run.sh python     # backend/ (uv run ownhealth serve)
 #   contract-tests/run.sh rust       # server/ (cargo run -p ownhealth -- serve)
-# Extra arguments go to cargo test (e.g. a test name filter).
+# Extra arguments go to the test binaries (e.g. a test name filter). Every binary runs even when one fails.
 # The database lives in the shared test Postgres (scripts/test-db.sh) and is dropped on exit.
 set -euo pipefail
 
@@ -58,4 +58,4 @@ curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null || { echo "the $which backe
 
 export OWNHEALTH_CONTRACT_BASE_URL="http://127.0.0.1:$port" OWNHEALTH_CONTRACT_BACKEND="$which"
 cd "$root/server"
-cargo test -q -p ownhealth-contract-tests -- --include-ignored "$@"
+cargo test -q --no-fail-fast -p ownhealth-contract-tests -- --include-ignored "$@"

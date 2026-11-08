@@ -1,0 +1,45 @@
+{
+  "items": {
+    "[]": {
+      "<src>": "string",
+      "accepted_by": "=auto",
+      "alias_group": "string",
+      "date": "date",
+      "id": "uuid",
+      "interpretation": {
+        "|": [
+          "=H",
+          "=L",
+          "=N"
+        ]
+      },
+      "lab": "string",
+      "loinc": "string",
+      "method": {
+        "|": [
+          "=calculated",
+          "=ckd-epi-2021",
+          "=direct",
+          "null"
+        ]
+      },
+      "name": "string",
+      "printed": {
+        "flag": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "name": "string",
+        "range": "string",
+        "unit": "string",
+        "value": "string"
+      },
+      "src": "src_id",
+      "status": "=current",
+      "unit": "string",
+      "value": "float"
+    }
+  }
+}

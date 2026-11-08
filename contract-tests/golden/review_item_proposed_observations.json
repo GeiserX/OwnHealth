@@ -1,0 +1,153 @@
+{
+  "candidate_row_id": "null",
+  "context_src_ids": {
+    "[]": "src_id"
+  },
+  "created_at": "datetime_Z",
+  "decided_at": "null",
+  "decided_by": "null",
+  "decision_reason": "null",
+  "document_id": "uuid",
+  "id": "uuid",
+  "kind": "=agent_proposal",
+  "observation_id": "null",
+  "payload": {
+    "based_on": {
+      "[]": {
+        "|": [
+          "src_id",
+          "string"
+        ]
+      }
+    },
+    "document_id": "uuid",
+    "kind": "=observations",
+    "payload": {
+      "doc_id": "string",
+      "rows": {
+        "[]": {
+          "bbox": "null",
+          "date": "date",
+          "name": "string",
+          "page": "int",
+          "range": "null",
+          "unit": "string",
+          "value": {
+            "|": [
+              "float",
+              "int",
+              "string"
+            ]
+          }
+        }
+      }
+    },
+    "payload_hash": "sha256_hex",
+    "rows": {
+      "[]": {
+        "bbox": {
+          "|": [
+            "null",
+            {
+              "[]": "float"
+            }
+          ]
+        },
+        "checks": {
+          "[]": {
+            "detail": {
+              "|": [
+                "null",
+                "string"
+              ]
+            },
+            "name": "string",
+            "ok": "bool",
+            "reason": {
+              "|": [
+                "=date_invalid",
+                "=duplicate",
+                "=implausible",
+                "=not_grounded",
+                "=suspect_separator",
+                "null"
+              ]
+            }
+          }
+        },
+        "grounded": "bool",
+        "input": {
+          "bbox": "null",
+          "date": "date",
+          "name": "string",
+          "page": "int",
+          "range": "null",
+          "unit": "string",
+          "value": {
+            "|": [
+              "float",
+              "int",
+              "string"
+            ]
+          }
+        },
+        "observation": {
+          "alias_group": "string",
+          "candidate_row_id": "null",
+          "category": "=laboratory",
+          "derivation_version": "string",
+          "document_id": "uuid",
+          "effective_at": "datetime_Z",
+          "fhir": "null",
+          "interpretation": "null",
+          "loinc": "string",
+          "method": {
+            "|": [
+              "=calculated",
+              "null"
+            ]
+          },
+          "printed_flag": "null",
+          "printed_name": "string",
+          "printed_ref_range": "null",
+          "printed_unit": "string",
+          "printed_value": "string",
+          "profile_id": "uuid",
+          "ref_applies": "null",
+          "ref_high": "null",
+          "ref_low": "null",
+          "report_key": "null",
+          "sensitivity": {
+            "[]": "empty"
+          },
+          "source_kind": "string",
+          "specimen": "string",
+          "unit_canonical": "string",
+          "unit_ucum": "string",
+          "value_canonical": "string",
+          "value_cmp": "null",
+          "value_code": "null",
+          "value_num": "string",
+          "value_text": "null"
+        }
+      }
+    },
+    "token_label": "string"
+  },
+  "profile_id": "uuid",
+  "proposed_by_token": "uuid",
+  "reasons": {
+    "[]": {
+      "|": [
+        "=date_invalid",
+        "=duplicate",
+        "=implausible",
+        "=not_grounded",
+        "=suspect_separator"
+      ]
+    }
+  },
+  "result_ids": "null",
+  "row_conf": "float",
+  "status": "=open"
+}

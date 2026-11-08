@@ -1,0 +1,70 @@
+{
+  "as_of": "date",
+  "budget": {
+    "tokens_est": "int",
+    "truncated": "bool"
+  },
+  "data": {
+    "resolved": {
+      "alias_groups": {
+        "[]": "string"
+      },
+      "codes": {
+        "[]": "string"
+      },
+      "method": "=normalizer"
+    },
+    "results": {
+      "[]": {
+        "canonical": {
+          "unit": "string",
+          "value": "float"
+        },
+        "code": "string",
+        "date": "date",
+        "draw_id": "string",
+        "flag": "string",
+        "group": "string",
+        "lab": {
+          "origin": "=pdf_text_layer",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "name": {
+          "origin": "=pdf_text_layer",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "range": {
+          "high": "int"
+        },
+        "src": "src_id",
+        "unit": "string",
+        "value": "int"
+      }
+    }
+  },
+  "db_versions": {},
+  "evidence": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "string"
+  },
+  "next_cursor": "null",
+  "not_assessed": {
+    "[]": "empty"
+  },
+  "notice": "string",
+  "profile": "string",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

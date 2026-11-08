@@ -1,0 +1,52 @@
+{
+  "devices": {
+    "[]": {
+      "coverage_pct": "float",
+      "device": "string",
+      "last_sample": "datetime_Z",
+      "provider": "string",
+      "source_id": "int"
+    }
+  },
+  "metrics": {
+    "[]": {
+      "agg": {
+        "|": [
+          "=mean",
+          "=sum"
+        ]
+      },
+      "avg_30d": "float",
+      "coverage_pct": "float",
+      "label": "string",
+      "latest": "float",
+      "latest_date": "date",
+      "metric": "string",
+      "series": {
+        "[]": {
+          "date": "date",
+          "max": {
+            "|": [
+              "float",
+              "null"
+            ]
+          },
+          "min": {
+            "|": [
+              "float",
+              "null"
+            ]
+          },
+          "value": {
+            "|": [
+              "float",
+              "null"
+            ]
+          }
+        }
+      },
+      "source": "string",
+      "unit": "string"
+    }
+  }
+}

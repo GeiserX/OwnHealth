@@ -1,0 +1,41 @@
+{
+  "<src>": "src_id",
+  "created_at": "datetime_Z",
+  "document": {
+    "collected_at": "datetime_Z",
+    "doc_type": "=lab_report",
+    "id": "uuid",
+    "mime": "string",
+    "pages": "int",
+    "profile_id": "uuid",
+    "provider_name": "string",
+    "report_status": "string",
+    "reported_at": "datetime_Z",
+    "sha256": "sha256_hex",
+    "status": "=active"
+  },
+  "facts": {
+    "[]": {
+      "id": "uuid",
+      "status": "=current",
+      "status_reason": "null",
+      "table": "string"
+    }
+  },
+  "import_ref": "null",
+  "kind": "=document_region",
+  "label": "string",
+  "location": {
+    "bbox": {
+      "[]": "float"
+    },
+    "page": "int",
+    "units": "=pt"
+  },
+  "status": "=current",
+  "text": {
+    "origin": "=pdf_text_layer",
+    "text": "string",
+    "trust": "=untrusted_text"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "alias_group": "string",
+  "annotations": {
+    "[]": "empty"
+  },
+  "codes": {
+    "[]": "string"
+  },
+  "limitations": {
+    "[]": "string"
+  },
+  "name": "string",
+  "points": {
+    "[]": {
+      "<src>": "string",
+      "date": "date",
+      "flag": "null",
+      "lab": "null",
+      "loinc": "string",
+      "method": {
+        "|": [
+          "=calculated",
+          "null"
+        ]
+      },
+      "printed": "string",
+      "range": "null",
+      "ref_high": "null",
+      "ref_low": "null",
+      "src": "src_id",
+      "status": "=ok",
+      "unit": "string",
+      "value": "float"
+    }
+  },
+  "stats": {
+    "exceeds_rcv": "bool",
+    "last_vs_previous_pct": "float",
+    "n": "int",
+    "rcv_pct": "float"
+  },
+  "unit": "string",
+  "unit_options": {
+    "[]": "string"
+  }
+}

@@ -1,0 +1,394 @@
+{
+  "consent": {
+    "agents": "bool",
+    "can_change": "bool",
+    "ui": "bool"
+  },
+  "coverage": {
+    "[]": {
+      "fraction_callable": {
+        "|": [
+          "absent",
+          "float"
+        ]
+      },
+      "note": {
+        "|": [
+          "absent",
+          {
+            "origin": "=genome_facts",
+            "text": "string",
+            "trust": "=untrusted_text"
+          }
+        ]
+      },
+      "panel": "string",
+      "reason": {
+        "|": [
+          "=not_run",
+          "=paralog",
+          "null"
+        ]
+      },
+      "scope": "string",
+      "state": "string",
+      "target": "string"
+    }
+  },
+  "dataset": {
+    "assay": "=wgs",
+    "build": "string",
+    "db_versions": {
+      "acmg_sf": "string",
+      "clinvar": "date",
+      "cpic": "string",
+      "ipd_imgt_hla": "string",
+      "pgs_catalog": "string",
+      "pharmcat": "string"
+    },
+    "generated_utc": "datetime_Z",
+    "imported_at": "datetime_offset",
+    "mean_depth": "float",
+    "platform": "string",
+    "raw_files": {
+      "chip_sites": "bool",
+      "gvcf": "bool",
+      "vcf": "bool"
+    },
+    "source_tool": "string",
+    "src": "src_id"
+  },
+  "findings": {
+    "[]": {
+      "activity_score": {
+        "|": [
+          "float",
+          "null"
+        ]
+      },
+      "call_state": {
+        "|": [
+          "=alt",
+          "=ref",
+          "null"
+        ]
+      },
+      "category": {
+        "|": [
+          "=carrier",
+          "=hla",
+          "=pgx",
+          "=prs",
+          "=risk_marker",
+          "=trait"
+        ]
+      },
+      "clinvar": {
+        "|": [
+          "null",
+          {
+            "native": "string",
+            "stars": "int",
+            "variation_id": "int"
+          }
+        ]
+      },
+      "condition": {
+        "|": [
+          "null",
+          {
+            "inheritance": "string",
+            "name": "string"
+          }
+        ]
+      },
+      "confidence": "string",
+      "confidence_basis": "string",
+      "confirm_clinically": "bool",
+      "diplotype": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "drug_guidance": {
+        "[]": {
+          "drug": "string",
+          "level": "string",
+          "phenotype": "string",
+          "recommendation": {
+            "origin": "=genome_facts",
+            "text": "string",
+            "trust": "=untrusted_text"
+          },
+          "rxnorm": "string",
+          "source": "string",
+          "url": "string"
+        }
+      },
+      "drugs": {
+        "[]": "string"
+      },
+      "evidence": {
+        "|": [
+          "=E1",
+          "=E2",
+          "=E3"
+        ]
+      },
+      "evidence_native": "string",
+      "gene": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "guidance_cpic_version": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "hgvs": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "hidden_by_default": "bool",
+      "id": "string",
+      "limitations": {
+        "[]": {
+          "origin": "=genome_facts",
+          "text": "string",
+          "trust": "=untrusted_text"
+        }
+      },
+      "n_sources": "int",
+      "phenotype": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "related_loinc": {
+        "[]": "string"
+      },
+      "rsid": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "sensitive": "bool",
+      "source": {
+        "assay": "=wgs",
+        "sample_id": "string",
+        "tool": "string"
+      },
+      "src": "src_id",
+      "status": "=current",
+      "summary": {
+        "origin": "=genome_facts",
+        "text": "string",
+        "trust": "=untrusted_text"
+      },
+      "title": "string",
+      "value": {
+        "activity_score": {
+          "|": [
+            "absent",
+            "float"
+          ]
+        },
+        "alleles": {
+          "|": [
+            "absent",
+            {
+              "[]": "string"
+            }
+          ]
+        },
+        "call": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "condition": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "diplotype": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "evaluated_in": {
+          "|": [
+            "absent",
+            {
+              "[]": "string"
+            }
+          ]
+        },
+        "kiv2_ci95": {
+          "|": [
+            "absent",
+            {
+              "[]": "int"
+            }
+          ]
+        },
+        "kiv2_copies": {
+          "|": [
+            "absent",
+            "int"
+          ]
+        },
+        "marker": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "matched_pct": {
+          "|": [
+            "absent",
+            "float"
+          ]
+        },
+        "most_similar_pop": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "percentile": {
+          "|": [
+            "absent",
+            "int"
+          ]
+        },
+        "pgs_id": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "phenotype": {
+          "|": [
+            "absent",
+            "null",
+            "string"
+          ]
+        },
+        "present": {
+          "|": [
+            "absent",
+            "bool"
+          ]
+        },
+        "reference": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "trait": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        }
+      },
+      "variants": {
+        "[]": {
+          "alt": "string",
+          "call_state": {
+            "|": [
+              "=alt",
+              "=ref"
+            ]
+          },
+          "chrom": "string",
+          "clinvar_variation_id": {
+            "|": [
+              "absent",
+              "int"
+            ]
+          },
+          "gt": "string",
+          "hgvs_p": {
+            "|": [
+              "absent",
+              "string"
+            ]
+          },
+          "pos": "int",
+          "ref": "string",
+          "rsid": "string",
+          "zygosity": {
+            "|": [
+              "=het",
+              "=ref"
+            ]
+          }
+        }
+      },
+      "verification": "=provisional",
+      "zygosity": {
+        "|": [
+          "=het",
+          "=ref",
+          "null"
+        ]
+      }
+    }
+  },
+  "is_minor": "bool",
+  "limitations": {
+    "[]": "string"
+  },
+  "locked": {
+    "[]": {
+      "category": "=risk_marker",
+      "gene": "string"
+    }
+  },
+  "not_assessed": {
+    "[]": {
+      "gene": {
+        "|": [
+          "absent",
+          "string"
+        ]
+      },
+      "panel": "string",
+      "reason": {
+        "|": [
+          "=not_run",
+          "=paralog"
+        ]
+      }
+    }
+  },
+  "notice": "string",
+  "tiles": {
+    "[]": {
+      "actionable": "int",
+      "detail": "string",
+      "genes": "string",
+      "hidden": "int",
+      "key": "string",
+      "value": "string"
+    }
+  },
+  "withheld": {
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

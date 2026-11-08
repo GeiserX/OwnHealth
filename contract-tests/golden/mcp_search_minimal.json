@@ -1,0 +1,62 @@
+{
+  "as_of": "date",
+  "budget": {
+    "tokens_est": "int",
+    "truncated": "bool"
+  },
+  "data": {
+    "resolved": {
+      "alias_groups": {
+        "[]": "string"
+      },
+      "codes": {
+        "[]": "string"
+      },
+      "method": "=normalizer"
+    },
+    "results": {
+      "[]": {
+        "canonical": {
+          "unit": "string",
+          "value": "float"
+        },
+        "code": "string",
+        "date": "string",
+        "draw_id": "string",
+        "flag": "string",
+        "group": "string",
+        "lab": "string",
+        "name": "null",
+        "range": {
+          "high": "int"
+        },
+        "src": "src_id",
+        "unit": "string",
+        "value": "int"
+      }
+    }
+  },
+  "db_versions": {},
+  "evidence": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "identity_mode": "=minimal",
+  "lang": "=es",
+  "limitations": {
+    "[]": "string"
+  },
+  "next_cursor": "null",
+  "not_assessed": {
+    "[]": "empty"
+  },
+  "notice": "string",
+  "profile": "string",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

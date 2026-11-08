@@ -1,0 +1,42 @@
+{
+  "items": {
+    "[]": {
+      "detail": {
+        "accepted_by": "=person",
+        "code": "null",
+        "code_system": "null",
+        "dose_text": "string",
+        "effective_at": "null",
+        "ingredient": "string",
+        "kind": "=medication",
+        "med_status": "string",
+        "name": "string",
+        "reason_text": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "sensitivity": {
+          "[]": "empty"
+        },
+        "started": "date",
+        "stopped": {
+          "|": [
+            "date",
+            "null"
+          ]
+        },
+        "strength": "string"
+      },
+      "id": "uuid",
+      "kind": "=medication",
+      "recorded_at": "datetime_Z",
+      "src": "src_id",
+      "status": "=current",
+      "status_reason": "null",
+      "supersedes": "null",
+      "title": "string"
+    }
+  }
+}

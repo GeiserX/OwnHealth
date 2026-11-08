@@ -1,0 +1,35 @@
+{
+  "plaintext": "string",
+  "token": {
+    "created_at": "datetime_Z",
+    "default_profile": "string",
+    "expires_at": "datetime_Z",
+    "id": "uuid",
+    "identity_mode": "=pseudonymous",
+    "label": "string",
+    "lang": "=en",
+    "last_used_at": "null",
+    "limits": {
+      "document_pages_per_day": "int",
+      "egress_bytes_per_day": "int",
+      "egress_facts_per_day": "int",
+      "genome_raw_lookups_per_day": "int",
+      "proposals_per_day": "int",
+      "rate_per_min": "int"
+    },
+    "prefix": "string",
+    "profiles": {
+      "[]": "string"
+    },
+    "revoked_at": "null",
+    "scopes": {
+      "[]": {
+        "|": [
+          "=read:labs",
+          "=read:summary"
+        ]
+      }
+    },
+    "units": "=conventional"
+  }
+}

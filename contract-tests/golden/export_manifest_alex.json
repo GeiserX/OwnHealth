@@ -1,0 +1,56 @@
+{
+  "counts": {
+    "Condition": "int",
+    "DocumentReference": "int",
+    "Immunization": "int",
+    "MedicationStatement": "int",
+    "Observation": "int",
+    "Provenance": "int",
+    "ownhealth/audit_event": "int",
+    "ownhealth/document": "int",
+    "ownhealth/genome_dataset": "int",
+    "ownhealth/genome_finding": "int",
+    "ownhealth/note": "int",
+    "ownhealth/review_item": "int",
+    "ownhealth/source_priority": "int",
+    "ownhealth/src": "int",
+    "ownhealth/state_snapshot": "int",
+    "ownhealth/wearable_rollup": "int",
+    "ownhealth/wearable_sample": "int",
+    "ownhealth/wearable_source": "int"
+  },
+  "fhir_version": "string",
+  "files": {
+    "[]": {
+      "bytes": "int",
+      "lines": {
+        "|": [
+          "absent",
+          "int"
+        ]
+      },
+      "path": "string",
+      "sha256": "sha256_hex",
+      "source_blob": {
+        "|": [
+          "absent",
+          "sha256_hex"
+        ]
+      }
+    }
+  },
+  "format": "string",
+  "generated_at": "datetime_offset",
+  "missing_blobs": {
+    "[]": "empty"
+  },
+  "ownhealth_version": "string",
+  "profile": {
+    "display_name": "string",
+    "id": "uuid",
+    "slug": "string"
+  },
+  "schema_migrations": {
+    "[]": "int"
+  }
+}

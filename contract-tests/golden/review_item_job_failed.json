@@ -1,0 +1,27 @@
+{
+  "candidate_row_id": "null",
+  "context_src_ids": "null",
+  "created_at": "datetime_Z",
+  "decided_at": "null",
+  "decided_by": "null",
+  "decision_reason": "null",
+  "document_id": "null",
+  "id": "uuid",
+  "kind": "=job_failed",
+  "observation_id": "null",
+  "payload": {
+    "attempts": "int",
+    "error": "string",
+    "job_id": "int",
+    "kind": "=import.genome_facts",
+    "payload_document_id": "null"
+  },
+  "profile_id": "uuid",
+  "proposed_by_token": "null",
+  "reasons": {
+    "[]": "empty"
+  },
+  "result_ids": "null",
+  "row_conf": "null",
+  "status": "=open"
+}

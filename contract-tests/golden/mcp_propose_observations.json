@@ -1,0 +1,75 @@
+{
+  "as_of": "date",
+  "budget": {
+    "tokens_est": "int",
+    "truncated": "bool"
+  },
+  "data": {
+    "kind": "=observations",
+    "proposal_id": "string",
+    "review_url": "string",
+    "rows": {
+      "[]": {
+        "bbox": {
+          "|": [
+            "null",
+            {
+              "[]": "float"
+            }
+          ]
+        },
+        "check": "string",
+        "failed": {
+          "[]": "string"
+        },
+        "grounded": "bool",
+        "loinc": "string",
+        "name": {
+          "origin": "=agent_note",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "unit": {
+          "origin": "=agent_note",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "value": {
+          "|": [
+            "float",
+            "int",
+            {
+              "origin": "=agent_note",
+              "text": "string",
+              "trust": "=untrusted_text"
+            }
+          ]
+        }
+      }
+    },
+    "status": "=queued_for_review"
+  },
+  "db_versions": {},
+  "evidence": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "string"
+  },
+  "next_cursor": "null",
+  "not_assessed": {
+    "[]": "empty"
+  },
+  "notice": "string",
+  "profile": "string",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

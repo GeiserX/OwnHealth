@@ -1,0 +1,14 @@
+{
+  "agg": "=sum",
+  "label": "string",
+  "metric": "string",
+  "points": {
+    "[]": "empty"
+  },
+  "priority": {
+    "[]": "int"
+  },
+  "resolution": "=hour",
+  "unit": "string",
+  "window": "string"
+}

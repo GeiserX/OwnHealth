@@ -1,0 +1,62 @@
+{
+  "alias_group": "string",
+  "annotations": {
+    "[]": {
+      "date": "date",
+      "end": {
+        "|": [
+          "date",
+          "null"
+        ]
+      },
+      "label": "string",
+      "src": "src_id"
+    }
+  },
+  "codes": {
+    "[]": "string"
+  },
+  "limitations": {
+    "[]": "string"
+  },
+  "name": "string",
+  "points": {
+    "[]": {
+      "<src>": "string",
+      "date": "date",
+      "flag": "string",
+      "lab": "string",
+      "loinc": "string",
+      "method": {
+        "|": [
+          "=calculated",
+          "=direct"
+        ]
+      },
+      "printed": "string",
+      "range": "string",
+      "ref_high": "float",
+      "ref_low": "null",
+      "src": "src_id",
+      "status": {
+        "|": [
+          "=ok",
+          "=out",
+          "=watch"
+        ]
+      },
+      "unit": "string",
+      "value": "float"
+    }
+  },
+  "stats": {
+    "exceeds_rcv": "bool",
+    "last_vs_previous_pct": "float",
+    "n": "int",
+    "rcv_pct": "float"
+  },
+  "unit": "string",
+  "unit_options": {
+    "[]": "string"
+  }
+}

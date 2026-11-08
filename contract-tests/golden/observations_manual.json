@@ -1,0 +1,32 @@
+{
+  "items": {
+    "[]": {
+      "<src>": "string",
+      "accepted_by": "=person",
+      "alias_group": "string",
+      "date": "date",
+      "id": "uuid",
+      "interpretation": "null",
+      "lab": "null",
+      "loinc": "string",
+      "method": {
+        "|": [
+          "=calculated",
+          "null"
+        ]
+      },
+      "name": "string",
+      "printed": {
+        "flag": "null",
+        "name": "string",
+        "range": "null",
+        "unit": "string",
+        "value": "string"
+      },
+      "src": "src_id",
+      "status": "=current",
+      "unit": "string",
+      "value": "float"
+    }
+  }
+}

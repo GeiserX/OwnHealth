@@ -1,0 +1,198 @@
+{
+  "as_of": "date",
+  "data": {
+    "active_conditions": {
+      "[]": {
+        "name": "string",
+        "since": "date",
+        "src": "src_id",
+        "verification": "=confirmed"
+      }
+    },
+    "corrections": {
+      "[]": "empty"
+    },
+    "data_freshness": {
+      "genome": "date",
+      "labs": "date",
+      "wearables": "date"
+    },
+    "flags": {
+      "[]": {
+        "change_pct": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "code": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "date": {
+          "|": [
+            "absent",
+            "date"
+          ]
+        },
+        "drug": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "flag": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "gene": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "guideline": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "kind": {
+          "|": [
+            "=gene_drug",
+            "=out_of_range",
+            "=rcv",
+            "=trend"
+          ]
+        },
+        "name": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "phenotype": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "points": {
+          "|": [
+            "absent",
+            "int"
+          ]
+        },
+        "previous": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "range": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "rank": "int",
+        "rcv_pct": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "rule": "string",
+        "slope_per_year": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "src": {
+          "|": [
+            "src_id",
+            {
+              "[]": "src_id"
+            }
+          ]
+        },
+        "text": "string",
+        "unit": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        },
+        "value": {
+          "|": [
+            "absent",
+            "string"
+          ]
+        }
+      }
+    },
+    "medications": {
+      "[]": {
+        "name": "string",
+        "since": "date",
+        "src": "src_id"
+      }
+    },
+    "never_measured": {
+      "[]": {
+        "name": "string",
+        "rule": "string",
+        "text": "string"
+      }
+    },
+    "notes": {
+      "[]": {
+        "author_kind": "string",
+        "date": "date",
+        "src": "src_id",
+        "text": {
+          "origin": "=person_note",
+          "text": "string",
+          "trust": "=untrusted_text"
+        }
+      }
+    },
+    "pending": {
+      "[]": "empty"
+    },
+    "stale": {
+      "[]": {
+        "last": "date",
+        "name": "string",
+        "rule": "string",
+        "src": "src_id",
+        "text": "string",
+        "window_months": "int"
+      }
+    },
+    "supplements": {
+      "[]": "empty"
+    }
+  },
+  "identity_mode": "=full",
+  "lang": "=en",
+  "limitations": {
+    "[]": "string"
+  },
+  "notice": "string",
+  "profile": "string",
+  "rules_version": "string",
+  "state_hash": "sha256_tagged",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

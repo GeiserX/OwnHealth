@@ -1,0 +1,47 @@
+{
+  "category": {
+    "[]": {
+      "coding": {
+        "[]": {
+          "code": "string",
+          "system": "string"
+        }
+      }
+    }
+  },
+  "code": {
+    "text": "string"
+  },
+  "effectiveDateTime": "datetime_offset",
+  "id": "uuid",
+  "meta": {
+    "source": "string",
+    "tag": {
+      "[]": {
+        "code": "string",
+        "system": "string"
+      }
+    }
+  },
+  "referenceRange": {
+    "[]": {
+      "high": {
+        "unit": "string"
+      },
+      "low": {
+        "unit": "string"
+      }
+    }
+  },
+  "resourceType": "string",
+  "status": "=final",
+  "subject": {
+    "reference": "string"
+  },
+  "valueQuantity": {
+    "code": "string",
+    "system": "string",
+    "unit": "string",
+    "value": "float"
+  }
+}

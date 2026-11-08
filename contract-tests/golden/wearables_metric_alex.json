@@ -1,0 +1,27 @@
+{
+  "agg": "=sum",
+  "label": "string",
+  "metric": "string",
+  "points": {
+    "[]": {
+      "coverage": "float",
+      "device": "string",
+      "max": "float",
+      "mean": "float",
+      "median": "float",
+      "min": "float",
+      "n": "int",
+      "p10": "float",
+      "p90": "float",
+      "source_id": "int",
+      "t": "datetime_Z",
+      "value": "float"
+    }
+  },
+  "priority": {
+    "[]": "int"
+  },
+  "resolution": "=day",
+  "unit": "string",
+  "window": "string"
+}

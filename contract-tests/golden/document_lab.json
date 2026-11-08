@@ -1,0 +1,31 @@
+{
+  "collected_at": "datetime_Z",
+  "doc_type": "=lab_report",
+  "expected_tests": {
+    "[]": "empty"
+  },
+  "filename": {
+    "origin": "=filename",
+    "text": "string",
+    "trust": "=untrusted_text"
+  },
+  "flags": {},
+  "id": "uuid",
+  "mime": "string",
+  "open_review": "int",
+  "pages": "int",
+  "pages_info": {
+    "[]": {
+      "flags": {},
+      "height_pt": "float",
+      "page_no": "int",
+      "text_layer_ok": "bool",
+      "width_pt": "float"
+    }
+  },
+  "profile_id": "uuid",
+  "provider_name": "string",
+  "size_bytes": "int",
+  "snippet": "null",
+  "status": "=active"
+}

@@ -1,0 +1,40 @@
+{
+  "events": {
+    "[]": {
+      "<src>": "string",
+      "country": "null",
+      "date": "date",
+      "detail": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "flags": {
+        "[]": "empty"
+      },
+      "provider": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "src": "src_id",
+      "title": "string",
+      "type": {
+        "|": [
+          "=diagnosis",
+          "=genome",
+          "=lab",
+          "=medication",
+          "=vaccine"
+        ]
+      }
+    }
+  },
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    }
+  }
+}

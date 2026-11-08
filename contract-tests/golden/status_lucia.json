@@ -1,0 +1,53 @@
+{
+  "as_of": "date",
+  "data": {
+    "active_conditions": {
+      "[]": "empty"
+    },
+    "corrections": {
+      "[]": "empty"
+    },
+    "data_freshness": {
+      "genome": "date",
+      "labs": "date",
+      "wearables": "date"
+    },
+    "flags": {
+      "[]": "empty"
+    },
+    "medications": {
+      "[]": "empty"
+    },
+    "never_measured": {
+      "[]": "empty"
+    },
+    "notes": {
+      "[]": "empty"
+    },
+    "pending": {
+      "[]": "empty"
+    },
+    "stale": {
+      "[]": "empty"
+    },
+    "supplements": {
+      "[]": "empty"
+    }
+  },
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "string"
+  },
+  "notice": "string",
+  "profile": "string",
+  "rules_version": "string",
+  "state_hash": "sha256_tagged",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

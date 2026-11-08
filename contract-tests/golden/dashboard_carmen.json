@@ -1,0 +1,107 @@
+{
+  "as_of": "date",
+  "changes": {
+    "[]": {
+      "direction": "string",
+      "from": "string",
+      "name": "string",
+      "src": "src_id",
+      "status": "=out",
+      "to": "string",
+      "unit": "string"
+    }
+  },
+  "changes_vs": "date",
+  "due": {
+    "[]": {
+      "kind": "=lab",
+      "phase": "null",
+      "rule": "string",
+      "status": "=watch",
+      "title": "string",
+      "why": "string"
+    }
+  },
+  "generated_at": "datetime_Z",
+  "genome": "null",
+  "medications": {
+    "[]": {
+      "name": "string",
+      "pgx": "null",
+      "since": "date",
+      "src": "src_id",
+      "strength": {
+        "|": [
+          "null",
+          "string"
+        ]
+      }
+    }
+  },
+  "not_measured_this_time": {
+    "[]": "empty"
+  },
+  "profile": "string",
+  "review_open": "int",
+  "rules_version": "string",
+  "state_hash": "sha256_tagged",
+  "subtitle": "string",
+  "systems": {
+    "[]": {
+      "key": "string",
+      "markers": {
+        "[]": {
+          "<src>": "string",
+          "alias_group": "string",
+          "band": {
+            "[]": "float"
+          },
+          "date": "date",
+          "name": "string",
+          "rule": {
+            "|": [
+              "null",
+              "string"
+            ]
+          },
+          "spark": {
+            "[]": "float"
+          },
+          "src": "src_id",
+          "stale": "bool",
+          "status": {
+            "|": [
+              "=ok",
+              "=out"
+            ]
+          },
+          "unit": "string",
+          "value": "string"
+        }
+      },
+      "name": "string",
+      "needs": {
+        "|": [
+          "absent",
+          "string"
+        ]
+      },
+      "newest": {
+        "|": [
+          "date",
+          "null"
+        ]
+      },
+      "rule": "string",
+      "rule_file": "string",
+      "status": {
+        "|": [
+          "=nodata",
+          "=ok",
+          "=out"
+        ]
+      },
+      "withheld": "bool"
+    }
+  }
+}
