@@ -1,37 +1,22 @@
-//! Lane H: operations (`ops/`; architecture.md 13-15). Backups are a pg_dump plus hard links of
-//! the referenced blobs and a manifest (`ownhealth.backup/v1`); restore and verify-restore compare
-//! table counts and state hashes. Lane H also ports the base demo seed (`demo/base.py`) as the
-//! demo hook `base` with order 0, and `/metrics`.
+//! Lane H: operations (`ops/`, `export/`, `demo/base.py`; architecture.md 13-14).
 //!
-//! Every function below is a stub until lane H lands it: it returns `Error::NotImplemented`.
+//! - `backup`, `restore`, `verify_restore`: a backup is a pg_dump plus hard links of the blobs and a
+//!   manifest (`ownhealth.backup/v1`); restore and verify-restore compare table counts, blob hashes
+//!   and the state_hash of every profile.
+//! - `export::export_profile`: the full export of one profile (FHIR NDJSON plus the original files,
+//!   one zip), for the step-up-protected REST route.
+//! - the demo hook `base` (order 0), the port of `demo/base.py`.
 
-use std::path::{Path, PathBuf};
+mod backup;
+mod demo_base;
+pub mod export;
 
-use ownhealth_core::config::Settings;
-use ownhealth_core::{Error, Result};
-use serde_json::Value;
+pub use backup::{MANIFEST_SCHEMA, backup, restore, verify_restore};
+pub use demo_base::seed_base;
 
-pub const MANIFEST_SCHEMA: &str = "ownhealth.backup/v1";
+use ownhealth_core::demo;
 
-/// Write a backup under `dest`; returns the archive path.
-pub async fn backup(_settings: &Settings, _dest: &Path) -> Result<PathBuf> {
-    Err(Error::NotImplemented("lane H: ops::backup"))
+/// Register lane H's demo hook `base` (order 0, the port of `demo/base.py`).
+pub fn register() {
+    demo::register_demo_hook("base", 0, |conn, ctx| Box::pin(seed_base(conn, ctx)));
 }
-
-/// Restore into the configured (empty) database; the same report as `verify_restore`.
-pub async fn restore(_settings: &Settings, _archive: &Path) -> Result<Value> {
-    Err(Error::NotImplemented("lane H: ops::restore"))
-}
-
-/// Restore into a scratch database and compare; the report Python printed.
-pub async fn verify_restore(_settings: &Settings, _archive: &Path) -> Result<Value> {
-    Err(Error::NotImplemented("lane H: ops::verify_restore"))
-}
-
-/// Prometheus text for `GET /metrics`.
-pub async fn metrics(_rt: &ownhealth_core::Runtime) -> Result<String> {
-    Err(Error::NotImplemented("lane H: ops::metrics"))
-}
-
-/// Register lane H's demo hooks: `base` (order 0, the port of `demo/base.py`) and any of its own (900).
-pub fn register() {}
