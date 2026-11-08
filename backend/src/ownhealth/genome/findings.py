@@ -193,28 +193,48 @@ def finding_out(row: dict) -> dict:
         "limitations": [untrusted_fact_text(t) for t in fact.get("limitations") or []],
         "drugs": [g["drug"] for g in guidance],
         "drug_guidance": guidance,
+        "guidance_cpic_version": row.get("guidance_cpic_version", (row.get("db_versions") or {}).get("cpic")),
         "related_loinc": fact.get("related_loinc") or [],
         "source": {"assay": row["assay"], "tool": row["owngenome_version"], "sample_id": row["sample_id"]},
         "src": row["src_id"],
     }
 
 
+def _cpic_version(r: dict) -> str:
+    return str((r.get("db_versions") or {}).get("cpic") or "")
+
+
+def _same_phenotype(a: dict, b: dict) -> bool:
+    return (a["phenotype"] or "").casefold() == (b["phenotype"] or "").casefold()
+
+
 def _dedupe(rows: list[dict]) -> list[dict]:
-    """One row per fact id across sources: the higher confidence wins, the count of sources is kept."""
+    """One row per fact id across sources: the higher confidence wins the call, the count of sources is
+    kept. Drug guidance is quoted from the source with the newest CPIC version that carries guidance
+    for the winning phenotype (genomics.md 4), so an older call never brings older guidance with it."""
     best: dict[str, dict] = {}
-    count: dict[str, int] = {}
+    group: dict[str, list[dict]] = {}
     for r in rows:
         fid = r["fact_id"]
-        count[fid] = count.get(fid, 0) + 1
+        group.setdefault(fid, []).append(r)
         cur = best.get(fid)
         if cur is None or (_CONF_RANK[r["confidence"]], -r["imported_at"].timestamp()) < (
             _CONF_RANK[cur["confidence"]],
             -cur["imported_at"].timestamp(),
         ):
             best[fid] = r
+    out = []
     for fid, r in best.items():
-        r["n_sources"] = count[fid]
-    return list(best.values())
+        r = dict(r)
+        r["n_sources"] = len(group[fid])
+        # newest CPIC version first; on a tie the winning call's own guidance
+        quoted = [g for g in group[fid] if g["fact"].get("drug_guidance") and _same_phenotype(g, r)]
+        source = max(quoted, key=lambda g: (_cpic_version(g), g is best[fid]), default=None)
+        if source is not None and source is not best[fid]:
+            r["fact"] = dict(r["fact"]) | {"drug_guidance": source["fact"]["drug_guidance"]}
+        r["guidance_cpic_version"] = (_cpic_version(source) or None) if source is not None else None
+        out.append(r)
+    return out
 
 
 def _sort_key(r: dict):
@@ -347,6 +367,17 @@ def _guidance_matches(g: dict, cpic_drug_id: str, name: str | None) -> bool:
     )
 
 
+def _actionable(f: dict, guidance: list[dict]) -> bool:
+    """A result that changes the guidance: a positive HLA allele; a phenotype (the finding's, else the
+    matched guidance's) that is not normal; with neither, a non-reference call."""
+    if f["category"] == "hla":
+        return (f["value"] or {}).get("present") is True
+    phenotype = f["phenotype"] or next((g["phenotype"] for g in guidance if g.get("phenotype")), None)
+    if phenotype:
+        return not _NORMAL_PHENOTYPE.match(phenotype)
+    return f["call_state"] == "alt"
+
+
 def pgx_for_drug(
     conn: Connection,
     profile_id: UUID,
@@ -409,8 +440,9 @@ def pgx_for_drug(
                     "confidence": f["confidence"],
                     "confidence_basis": f["confidence_basis"],
                     "call_state": f["call_state"],
-                    "actionable": bool(f["phenotype"]) and not _NORMAL_PHENOTYPE.match(f["phenotype"] or ""),
+                    "actionable": _actionable(f, guidance),
                     "guidance": guidance,
+                    "guidance_cpic_version": f["guidance_cpic_version"],
                     "coverage": coverage,
                     "src": f["src"],
                 }

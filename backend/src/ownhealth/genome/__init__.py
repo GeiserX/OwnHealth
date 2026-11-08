@@ -55,10 +55,11 @@ __all__ = [
 ]
 
 
-def validate_facts(doc: dict) -> list[str]:
+def validate_facts(doc: dict, *, chip_sites=None) -> list[str]:
     """JSON Schema errors (plus the importer's own rules) for a genome-facts document; empty when valid.
-    An unknown `schema` version gives one clear error and nothing else."""
-    return _schema.validate_facts(doc)
+    An unknown `schema` version gives one clear error and nothing else. `chip_sites` is a
+    (chrom, pos) -> bool predicate over the chip's site list; None when the list is not on hand."""
+    return _schema.validate_facts(doc, chip_sites=chip_sites)
 
 
 def import_genome_facts(

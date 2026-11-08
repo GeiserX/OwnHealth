@@ -165,3 +165,42 @@ def test_pgx_for_drug(conn, family, blobs, alex_genome):
 def test_bad_filters(conn, family, bad):
     with pytest.raises(ValueError):
         list_findings(conn, family.profiles["alex"], gate=CLOSED, **bad)
+
+
+def test_actionable_without_a_phenotype(conn, family, blobs):
+    """HLA results carry `present`, VKORC1 results no phenotype: neither may read as no action needed."""
+    doc = synthetic.alex_facts()
+    hla = next(f for f in doc["facts"] if f["category"] == "hla")
+    hla["value"]["present"] = True
+    hla["drug_guidance"][0]["phenotype"] = "HLA-B*58:01 positive"
+    alex = family.profiles["alex"]
+    synthetic.seed_genome(conn, blobs, household_id=family.household_id, profile_id=alex, facts=doc)
+    allopurinol = next(e for e in pgx_for_drug(conn, alex, cpic_drug_id="RxNorm:519") if e["gene"] == "HLA-B")
+    assert allopurinol["status"] == "found" and allopurinol["actionable"]
+    warfarin = {e["gene"]: e for e in pgx_for_drug(conn, alex, cpic_drug_id="RxNorm:11289")}
+    assert warfarin["VKORC1"]["phenotype"] is None and warfarin["VKORC1"]["actionable"]
+    assert not warfarin["CYP2C9"]["actionable"]  # Normal Metabolizer stays not actionable
+
+
+def test_guidance_comes_from_the_newest_cpic_version(conn, family, blobs):
+    """Two sources of one person: the higher confidence wins the call, the guidance is quoted from the
+    source with the newest CPIC version for that phenotype (genomics.md 4)."""
+    alex = family.profiles["alex"]
+    seed = dict(household_id=family.household_id, profile_id=alex)
+    synthetic.seed_genome(conn, blobs, facts=synthetic.alex_facts(), **seed)  # cpic 2026-09, high confidence
+    newer = synthetic.alex_facts()
+    newer["subject"]["sample_id"] = "AR-02"
+    newer["provenance"]["db_versions"]["cpic"] = "2026-11"
+    newer["provenance"]["generated_utc"] = "2026-11-01T09:00:00Z"
+    cyp = next(f for f in newer["facts"] if f.get("gene") == "CYP2C19")
+    cyp["confidence"]["level"] = "medium"
+    for g in cyp["drug_guidance"]:
+        g["recommendation"] = f"Synthetic newer stand-in for {g['drug']}."
+    synthetic.seed_genome(conn, blobs, facts=newer, **seed)
+    entry = next(e for e in pgx_for_drug(conn, alex, cpic_drug_id="RxNorm:32968") if e["gene"] == "CYP2C19")
+    assert entry["confidence"] == "high"  # the call from the higher-confidence source
+    assert entry["guidance_cpic_version"] == "2026-11"
+    assert "newer stand-in" in json.dumps(entry["guidance"])
+    found = list_findings(conn, alex, gate=CLOSED)
+    f = next(x for x in found.findings if x["gene"] == "CYP2C19")
+    assert f["n_sources"] == 2 and f["guidance_cpic_version"] == "2026-11"

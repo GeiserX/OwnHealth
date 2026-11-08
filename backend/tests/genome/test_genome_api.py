@@ -10,6 +10,8 @@ from ownhealth.blobs import BlobStore
 from ownhealth.core.access import Principal
 from ownhealth.genome import synthetic
 
+APOE_SITE = "NC_000019.10:g.44908684T>C"
+
 
 @pytest.fixture
 def genome_family(engine, committed_family, settings, tmp_path):
@@ -118,12 +120,13 @@ def test_variant_lookup_scope_gating_and_audit(app_for, genome_family, engine):
     raw = app_for(principal=_token(fam, "read:genome_raw"))
     r = raw.get("/api/profiles/alex/genome/variant?rsid=rs4244285")
     assert r.status_code == 200 and r.json()["calls"][0]["call_state"] == "alt"
-    apoe = raw.get("/api/profiles/alex/genome/variant?rsid=rs429358").json()
+    # APOE rs429358 by position: a withheld finding never resolves an rsID (that would say it exists)
+    apoe = raw.get("/api/profiles/alex/genome/variant", params={"hgvs": APOE_SITE}).json()
     assert apoe["withheld"] == "withheld_sensitive" and apoe["calls"] == []
     bad = raw.get("/api/profiles/alex/genome/variant?rsid=rs123456789")
     assert bad.status_code == 400 and bad.json()["detail"]["code"] == "rsid_unknown"
     none = raw.get("/api/profiles/carmen/genome/variant?rsid=rs4244285")
     assert none.status_code in (403, 404)
     lookups = _audits(engine, fam.profiles["alex"], "lookup")
-    assert [a["args_summary"] for a in lookups] == ["rs4244285", "rs429358", "rs123456789"]
+    assert [a["args_summary"] for a in lookups] == ["rs4244285", APOE_SITE, "rs123456789"]
     assert all("0/1" not in str(a) for a in lookups)  # never a genotype in the log
