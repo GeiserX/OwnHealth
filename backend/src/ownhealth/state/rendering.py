@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 
 from ownhealth.mcp.envelope import untrusted
 from ownhealth.state.engine import rcv_percent
-from ownhealth.state.pack import Pack, load_pack
+from ownhealth.state.pack import Pack, PackError, load_pack
 
 # Which scope each section needs; a section whose scope is missing is left out and named in by_scope.
 LAB_KINDS = ("lab_range", "rcv", "trend")
@@ -82,7 +82,11 @@ def render_state(
 
     flags = []
     for f in body.get("flags", []):
-        f = {**f, "kind": KIND_OF[f["reason"]]}
+        # A pack override may map a lab flag to its own reason code: the rule's kind then says what it is.
+        kind = KIND_OF.get(f["reason"]) or (pack.rule(f["rule"]) or {}).get("kind")
+        if kind not in (*LAB_KINDS, "gene_drug"):
+            raise PackError(f"flag reason {f['reason']} of rule {f['rule']} has no known kind")
+        f = {**f, "kind": kind}
         domain_ok = allowed("labs") if f["kind"] in LAB_KINDS else allowed("genome") and allowed("records")
         if not domain_ok:
             missing = ["labs"] if f["kind"] in LAB_KINDS else [d for d in ("genome", "records") if not allowed(d)]

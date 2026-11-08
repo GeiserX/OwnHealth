@@ -175,7 +175,9 @@ def build_dashboard(
                 if m.stale:
                     not_this_time.append(pack.name(m.key, lang))
                 continue
-            prev = [x for x in m.points[:-1] if x.comparable() is not None]
+            prev = [
+                x for x in m.points[:-1] if x.comparable() is not None and x.comparable_unit() == p.comparable_unit()
+            ]
             if not prev or p.comparable() is None or prev[-1].comparable() == 0:
                 continue
             a, b = prev[-1].comparable(), p.comparable()

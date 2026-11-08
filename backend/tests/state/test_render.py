@@ -78,3 +78,20 @@ def test_scopes_leave_sections_out_and_name_them(sconn, seeded):
     full = state.render(body, lang="en", scopes=ALL_SCOPES)
     assert full["withheld"]["by_scope"] == [] and len(full["data"]["flags"]) == 5
     assert summary_only["state_hash"] == no_genome["state_hash"] == full["state_hash"]
+
+
+def test_a_pack_defined_lab_reason_renders(sconn, seeded, monkeypatch):
+    from ownhealth.state import rendering
+    from ownhealth.state.pack import PACK_DIR, _read_dir, build_pack
+
+    body = state.build_state(sconn, seeded.pid("alex"), as_of=AS_OF)
+    files = _read_dir(PACK_DIR)
+    files["templates.yaml"]["templates"]["LAB_CRITICAL_HIGH"] = {
+        "en": "{name} {value} {unit} (critical, lab range {ref}) {when}.",
+        "es": "{name} {value} {unit} (crítico, rango del laboratorio {ref}) {when}.",
+    }
+    monkeypatch.setattr(rendering, "load_pack", lambda: build_pack(files, True))
+    first = next(f for f in body["flags"] if f["rule"] == "range.lab")
+    body = {**body, "flags": [{**first, "reason": "LAB_CRITICAL_HIGH"}, *body["flags"][1:]]}
+    flag = rendering.render_state(body, lang="en")["data"]["flags"][0]
+    assert flag["kind"] == "out_of_range" and "(critical, lab range < 75)" in flag["text"]
