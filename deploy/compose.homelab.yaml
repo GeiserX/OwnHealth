@@ -1,7 +1,7 @@
 # OwnHealth for a homelab: the app and Postgres behind Caddy with HTTPS, secrets kept in files,
 # restic backups from a one-off admin container. Steps: deploy/README.md.
 #
-# Copy this file to compose.yaml in its own folder, next to Caddyfile, .env, secrets/ and deploy/.
+# Copy this file to compose.yaml in its own folder, next to Caddyfile, .env, restic.env, secrets/ and deploy/.
 name: ownhealth
 
 # Two database roles. `ownhealth` owns the tables: the one-shot `admin` service uses it to migrate, to
@@ -14,7 +14,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    env_file: .env # RESTIC_REPOSITORY, and S3 keys for restic if the repository needs them
+    env_file:
+      - .env
+      - path: restic.env # RESTIC_REPOSITORY, and S3 keys for restic: the admin service only
+        required: false # older installs keep them in .env
     environment:
       OWNHEALTH_DATABASE_URL: postgresql://ownhealth@db:5432/ownhealth
       OWNHEALTH_DB_PASSWORD_FILE: /run/secrets/db_password
@@ -40,7 +43,7 @@ services:
         condition: service_healthy
       admin:
         condition: service_completed_successfully
-    env_file: .env
+    env_file: .env # never restic.env: a compromised app must not reach the backups
     environment:
       OWNHEALTH_DATABASE_URL: postgresql://ownhealth_app@db:5432/ownhealth
       OWNHEALTH_DB_PASSWORD_FILE: /run/secrets/app_db_password

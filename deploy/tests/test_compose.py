@@ -26,9 +26,11 @@ pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="docker c
 IMAGE_ENV = {"OWNHEALTH_DATA_DIR": "/data", "OWNHEALTH_HOST": "0.0.0.0", "OWNHEALTH_PORT": "8080"}
 
 
-def _render(compose: Path, env_file: Path, tmp_path: Path, extra_env: str = "") -> dict:
+def _render(compose: Path, env_file: Path, tmp_path: Path, extra_env: str = "", files: dict | None = None) -> dict:
     (tmp_path / "compose.yaml").write_text(compose.read_text())
     (tmp_path / ".env").write_text(env_file.read_text() + extra_env)
+    for name, body in (files or {}).items():
+        (tmp_path / name).write_text(body)
     done = subprocess.run(
         ["docker", "compose", "config", "--format", "json"],
         cwd=tmp_path,
@@ -73,3 +75,25 @@ def test_app_runs_as_the_non_owner_role_and_admin_migrates_as_owner(case, tmp_pa
     assert app["depends_on"]["admin"]["condition"] == "service_completed_successfully"
     assert admin["environment"]["OWNHEALTH_DATABASE_URL"].startswith("postgresql://ownhealth@")
     assert "app-role.sh" in " ".join(admin["command"])
+
+
+def test_homelab_app_gets_no_backup_credentials(tmp_path):
+    """restic.env holds the backup repository and its S3 keys, for the admin service only. The app is
+    the network-facing process, so a compromise of it must not hand over the keys to the backups."""
+    compose, env_file, _ = CASES["homelab"]
+    restic_env = (ROOT / "deploy" / "restic.env.example").read_text()
+    restic_env += "AWS_ACCESS_KEY_ID=synthetic-key\nAWS_SECRET_ACCESS_KEY=synthetic-secret\n"
+    services = _render(compose, env_file, tmp_path, files={"restic.env": restic_env})
+    app_env, admin_env = services["app"]["environment"], services["admin"]["environment"]
+    assert sorted(k for k in app_env if k.startswith(("RESTIC_", "AWS_"))) == []
+    assert admin_env["AWS_ACCESS_KEY_ID"] == "synthetic-key"
+    assert admin_env["RESTIC_REPOSITORY"].startswith("s3:")
+    assert app_env["OWNHEALTH_DEFAULT_LOCALE"] == "es"
+
+
+def test_homelab_without_restic_env_still_renders(tmp_path):
+    """An install made before restic.env existed keeps RESTIC_REPOSITORY in .env; the admin service
+    must still get it, and compose must not fail on the missing file."""
+    compose, env_file, _ = CASES["homelab"]
+    services = _render(compose, env_file, tmp_path, "RESTIC_REPOSITORY=s3:https://s3.example.lan/old\n")
+    assert services["admin"]["environment"]["RESTIC_REPOSITORY"] == "s3:https://s3.example.lan/old"

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Homelab backups.** The restic repository and its S3 keys move from `.env` to `restic.env`, which only the `admin` service reads, so the app container no longer holds the keys to the backups. An install that keeps them in `.env` still works; move the lines to take them away from the app ([deploy/README.md](deploy/README.md#homelab-setup)).
+
 ## 0.1.0 (2026-11-08)
 
 The first release you can run: `docker compose up` with one app image and Postgres 17.

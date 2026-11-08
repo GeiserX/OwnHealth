@@ -2,7 +2,7 @@
 #
 # Every command runs in a one-off `admin` container: the app image, which ships restic and the
 # PostgreSQL 17 client, connected as the database owner, with RESTIC_REPOSITORY and
-# RESTIC_PASSWORD_FILE in its environment (.env). Run the scripts from
+# RESTIC_PASSWORD_FILE in its environment (restic.env, or .env on older installs). Run the scripts from
 # the folder that holds compose.yaml. OWNHEALTH_RUN replaces the `docker compose ...` prefix, for
 # example OWNHEALTH_RUN="" to run everything on this machine.
 

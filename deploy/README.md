@@ -8,6 +8,7 @@ This folder holds the homelab setup and the backup recipe. For a first look on o
 | [db/app-role.sh](db/app-role.sh) | Gives the app its own database role, which owns no table and cannot rewrite the audit log |
 | [Caddyfile](Caddyfile) | HTTPS for `OWNHEALTH_DOMAIN`, open to the LAN and a Tailscale tailnet only |
 | [env.homelab.example](env.homelab.example) | The `.env` for the homelab compose |
+| [restic.env.example](restic.env.example) | The `restic.env`: the backup repository and its keys, read by the `admin` service only |
 | [restic/backup.sh](restic/backup.sh) | Nightly backup into a restic repository, with retention |
 | [restic/restore-test.sh](restic/restore-test.sh) | Restores a snapshot into a scratch database and checks it |
 | [restic/restore.sh](restic/restore.sh) | Restores a snapshot into a fresh stack |
@@ -21,7 +22,8 @@ mkdir -p /opt/ownhealth && cd /opt/ownhealth
 git clone --depth 1 https://github.com/GeiserX/OwnHealth.git src
 cp src/deploy/compose.homelab.yaml compose.yaml
 cp src/deploy/Caddyfile Caddyfile
-cp src/deploy/env.homelab.example .env        # set OWNHEALTH_DOMAIN and RESTIC_REPOSITORY
+cp src/deploy/env.homelab.example .env        # set OWNHEALTH_DOMAIN
+cp src/deploy/restic.env.example restic.env   # set RESTIC_REPOSITORY, and the S3 keys if it needs them
 mkdir -p deploy && cp -r src/deploy/restic src/deploy/db deploy/
 
 mkdir -m 700 secrets
@@ -37,13 +39,13 @@ docker compose run --rm admin restic init     # once, creates the backup reposit
 
 Open `https://<OWNHEALTH_DOMAIN>` and create the first account with a passkey. Write down the recovery codes.
 
-**Two database roles.** `ownhealth` owns the tables. The one-shot `admin` service connects as it, runs the migrations, then runs `db/app-role.sh`, which creates `ownhealth_app` and grants it SELECT, INSERT, UPDATE and DELETE on every table except UPDATE, DELETE and TRUNCATE on the audit log. The app connects as `ownhealth_app` and waits for `admin` to finish. It owns nothing, so it cannot disable the audit log's trigger or alter a table. The backup scripts run in `admin` too, because a restore needs the owner.
+**Two database roles.** `ownhealth` owns the tables. The one-shot `admin` service connects as it, runs the migrations, then runs `db/app-role.sh`, which creates `ownhealth_app` and grants it SELECT, INSERT, UPDATE and DELETE on every table except UPDATE, DELETE and TRUNCATE on the audit log. The app connects as `ownhealth_app` and waits for `admin` to finish. It owns nothing, so it cannot disable the audit log's trigger or alter a table. The backup scripts run in `admin` too, because a restore needs the owner. Only `admin` reads `restic.env`, so the app, the process that faces the network, never holds the keys to the backups. An older install has `RESTIC_REPOSITORY` and the S3 keys in `.env`; it keeps working, and moving those lines into `restic.env` takes them away from the app.
 
 **Store the restic password in your password manager now.** The backup is encrypted with it and it is not inside the backup. Without it, the backup cannot be read.
 
 **HTTPS.** Caddy gets a certificate on its own when `OWNHEALTH_DOMAIN` is a public DNS name. For a name only your LAN knows, put `tls internal` in the site block of the Caddyfile and trust Caddy's root certificate on your devices, or use a Caddy build with your DNS provider's challenge plugin. Passkeys need HTTPS on a real name, so plain HTTP on an IP address does not work past the first look.
 
-**Who can connect.** The Caddyfile answers 403 to every address outside the private ranges and the Tailscale range `100.64.0.0/10`. Keep it that way unless you mean to put health data on the public internet.
+**Who can connect.** The Caddyfile answers 403 to every address outside the private ranges and the Tailscale range `100.64.0.0/10`. Keep it that way unless you mean to put health data on the public internet. The check works only if Caddy sees the real client address. Rootless Docker, and Docker's userland proxy for IPv6 clients when the compose network has no IPv6, hand Caddy a private gateway address instead, so every client passes. On such a host, or one with a public address, also close ports 80 and 443 (TCP and UDP) to the internet in the host firewall or the router, and check from outside that the name does not answer.
 
 **Your own reverse proxy.** If one already runs on the host, drop the `caddy` service, give `app` a port such as `127.0.0.1:8080:8080`, and point your proxy at it. Set `OWNHEALTH_BASE_URL` to the HTTPS address people open.
 

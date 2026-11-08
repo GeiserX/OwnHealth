@@ -4,6 +4,8 @@
 {$OWNHEALTH_DOMAIN} {
 	# Health data stays on your network: only the LAN and a Tailscale tailnet may connect.
 	# Remove these two lines only if you know you want OwnHealth on the public internet.
+	# This trusts the client address Caddy sees. Rootless Docker and Docker's IPv6 userland proxy replace
+	# it with a private one; there, close 80 and 443 at the firewall too (deploy/README.md, Who can connect).
 	@outside not remote_ip private_ranges 100.64.0.0/10
 	respond @outside 403
 
