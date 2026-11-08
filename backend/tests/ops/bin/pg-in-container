@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs pg_dump or pg_restore inside the shared test container, for boxes without a PostgreSQL 17
+# client. The tool name is this script's name (pg_dump and pg_restore link here). Only stdin and
+# stdout cross the boundary, which is all ownhealth.ops uses. The host port 55432 maps to 5432 inside.
+set -eu
+tool=$(basename "$0")
+container=${OWNHEALTH_TEST_PG_CONTAINER:-ownhealth-testpg}
+args=""
+for a in "$@"; do
+  a=$(printf '%s' "$a" | sed 's#@127\.0\.0\.1:55432/#@127.0.0.1:5432/#; s#@localhost:55432/#@127.0.0.1:5432/#')
+  args="$args '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
+done
+eval "exec docker exec -i \"$container\" $tool $args"
