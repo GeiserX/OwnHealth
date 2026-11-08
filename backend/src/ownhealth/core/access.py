@@ -290,8 +290,9 @@ def create_user(
 ) -> UUID:
     return conn.execute(
         text(
-            "insert into app_user (household_id, display_name, locale, oidc_subject)"
-            " values (:h, :n, :l, :o) returning id"
+            # clock_timestamp, not now(): users made in one transaction keep the order they were made in
+            "insert into app_user (household_id, display_name, locale, oidc_subject, created_at)"
+            " values (:h, :n, :l, :o, clock_timestamp()) returning id"
         ),
         {"h": household_id, "n": display_name, "l": locale, "o": oidc_subject},
     ).scalar_one()

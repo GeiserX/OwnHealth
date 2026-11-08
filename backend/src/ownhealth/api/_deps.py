@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy import Connection
 
+from ownhealth.auth import csrf
 from ownhealth.auth import principal as principal_mod
 from ownhealth.auth.sessions import COOKIE
 from ownhealth.blobs import BlobStore
@@ -43,6 +44,7 @@ def get_principal(request: Request, conn: Connection = Depends(get_conn)) -> Pri
     )
     if p is None:
         raise HTTPException(status_code=401, detail={"code": "unauthenticated", "message": "Log in first."})
+    csrf.check(request, p, request.app.state.runtime.settings.base_url)
     return p
 
 
