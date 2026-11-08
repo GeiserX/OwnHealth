@@ -1,0 +1,257 @@
+{
+  "schema": "ownhealth.genome-facts/v1",
+  "subject": {
+    "sample_id": "LR-01",
+    "declared_sex": "female",
+    "fingerprint": {
+      "panel": "ownhealth-fp-v1",
+      "genotypes": "0121010120120120120120102012012012010"
+    }
+  },
+  "assay": {
+    "build": "GRCh38",
+    "type": "wgs",
+    "platform": "Illumina 30x",
+    "mean_depth": 31.0
+  },
+  "provenance": {
+    "pipeline": "OwnGenome",
+    "version": "1.4.2",
+    "commit": "abc1234",
+    "generated_utc": "2026-09-30T08:00:00Z",
+    "db_versions": {
+      "clinvar": "2026-09-28",
+      "pharmcat": "3.1.0",
+      "cpic": "2026-09",
+      "ipd_imgt_hla": "3.62",
+      "pgs_catalog": "2026-08",
+      "acmg_sf": "v3.3"
+    }
+  },
+  "files": [],
+  "coverage": [
+    {
+      "scope": "gene",
+      "id": "TPMT",
+      "panel": "cpic",
+      "state": "assessed"
+    },
+    {
+      "scope": "gene",
+      "id": "NUDT15",
+      "panel": "cpic",
+      "state": "assessed"
+    }
+  ],
+  "facts": [
+    {
+      "id": "f_b425118a15fa6c1b",
+      "category": "pgx",
+      "gene": "TPMT",
+      "variants": [
+        {
+          "chrom": "chr6",
+          "pos": 18130687,
+          "ref": "T",
+          "alt": "C",
+          "rsid": "rs1142345",
+          "vrs_id": "ga4gh:VA.7xwkoV2paw7Q3WwYzj5RYXQlqlVZbVHA",
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        },
+        {
+          "chrom": "chr6",
+          "pos": 18138997,
+          "ref": "C",
+          "alt": "T",
+          "rsid": "rs1800460",
+          "vrs_id": "ga4gh:VA.AEpdmUo2cgKI4-VBwmdh2o5cBCriAdtp",
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "diplotype": "*1/*3A",
+        "phenotype": "Intermediate Metabolizer"
+      },
+      "summary": "TPMT *1/*3A: Intermediate Metabolizer.",
+      "drug_guidance": [
+        {
+          "drug": "mercaptopurine",
+          "rxnorm": "103",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Intermediate Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for mercaptopurine with Intermediate Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        },
+        {
+          "drug": "azathioprine",
+          "rxnorm": "1256",
+          "source": "CPIC",
+          "level": "A",
+          "phenotype": "Intermediate Metabolizer",
+          "recommendation": "Synthetic stand-in for the CPIC recommendation text for azathioprine with Intermediate Metabolizer.",
+          "url": "https://cpicpgx.org/guidelines/"
+        }
+      ],
+      "evidence": {
+        "level": "E1",
+        "native": "CPIC A",
+        "tools": [
+          "PharmCAT",
+          "pypgx"
+        ]
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "two callers agree"
+      },
+      "sensitivity": {
+        "level": "normal"
+      },
+      "origin": {
+        "step": "pharmcat",
+        "file": "pharmcat/report.json"
+      }
+    },
+    {
+      "id": "f_b304e096d05a0791",
+      "category": "carrier",
+      "gene": "CFTR",
+      "variants": [
+        {
+          "chrom": "chr7",
+          "pos": 117559590,
+          "ref": "ATCT",
+          "alt": "A",
+          "rsid": "rs113993960",
+          "vrs_id": "ga4gh:VA.x-F00rRyHj2IINyPA3ghPWWfQ8ueQPE_",
+          "hgvs_p": "p.Phe508del",
+          "clinvar_variation_id": 7105,
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "condition": {
+        "name": "Cystic fibrosis",
+        "inheritance": "AR"
+      },
+      "summary": "Heterozygous carrier of a pathogenic CFTR variant. Carriers are not affected; it matters for a partner's testing.",
+      "evidence": {
+        "level": "E1",
+        "native": "ClinVar Pathogenic, 3 stars",
+        "clinvar_stars": 3
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "GQ 99, DP 35"
+      },
+      "sensitivity": {
+        "level": "normal"
+      }
+    },
+    {
+      "id": "f_df3d7678552e89cd",
+      "category": "risk_marker",
+      "gene": "APOE",
+      "variants": [
+        {
+          "chrom": "chr19",
+          "pos": 44908684,
+          "ref": "T",
+          "alt": "C",
+          "rsid": "rs429358",
+          "vrs_id": "ga4gh:VA._iYYMzJJ5zvSkDm1r6AKt51PkEdgdPvs",
+          "genotype": {
+            "call_state": "alt",
+            "gt": "0/1",
+            "zygosity": "het",
+            "dp": 31,
+            "gq": 60
+          }
+        },
+        {
+          "chrom": "chr19",
+          "pos": 44908822,
+          "ref": "C",
+          "alt": "T",
+          "rsid": "rs7412",
+          "vrs_id": "ga4gh:VA.o9nLJiG_0oOCvm3cFniCPcpe32K47R2B",
+          "genotype": {
+            "call_state": "ref",
+            "gt": "0/0",
+            "zygosity": "ref",
+            "dp": 31,
+            "gq": 60
+          }
+        }
+      ],
+      "value": {
+        "haplotype": "e3/e4"
+      },
+      "summary": "APOE e3/e4. Linked to a higher average Alzheimer's disease risk than e3/e3; it is not a diagnosis.",
+      "evidence": {
+        "level": "E2",
+        "native": "replicated association with effect size"
+      },
+      "confidence": {
+        "level": "high",
+        "basis": "both sites called, GQ > 50"
+      },
+      "sensitivity": {
+        "level": "adult_onset",
+        "reason": "APOE e4"
+      }
+    },
+    {
+      "id": "f_82d73a20f79851e8",
+      "category": "prs",
+      "value": {
+        "condition": "coronary artery disease",
+        "pgs_id": "PGS000018",
+        "percentile": 64,
+        "matched_pct": 97.2,
+        "reference": "HGDP+1kGP",
+        "most_similar_pop": "EUR",
+        "evaluated_in": [
+          "EUR"
+        ]
+      },
+      "summary": "Higher than 64% of the EUR reference group for this score.",
+      "evidence": {
+        "level": "E3",
+        "native": "PGS Catalog score with published evaluation"
+      },
+      "confidence": {
+        "level": "medium",
+        "basis": "matched 97% of variants; ancestry inside evaluation set"
+      },
+      "limitations": [
+        "Percentile relative to the EUR reference group; not an absolute risk."
+      ],
+      "sensitivity": {
+        "level": "normal"
+      }
+    }
+  ],
+  "qc": {
+    "sex_check": "pass",
+    "contamination": 0.002
+  }
+}

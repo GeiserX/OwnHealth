@@ -1,0 +1,49 @@
+# Labs a prescriber looks at for a drug (genomics.md section 8, step 5). Latest value, date, the lab's own
+# flag and the status word, Stale when outside the recency window of its body system.
+cite_default: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/genomics.md#8-check_drug-pgx-joined-with-meds-and-labs
+drug_labs:
+  atorvastatin: &statin
+    - {lab: alt, reason: liver enzymes in the statin label}
+    - {lab: ck, reason: muscle enzyme in the statin label}
+    - {lab: ldl_c, reason: treatment target}
+  simvastatin: *statin
+  rosuvastatin: *statin
+  pravastatin: *statin
+  clopidogrel:
+    - {lab: platelets, reason: antiplatelet therapy}
+    - {lab: hemoglobin, reason: bleeding risk}
+    - {lab: egfr, reason: kidney function}
+    - {lab: alt, reason: liver function}
+  warfarin:
+    - {lab: inr, reason: anticoagulation monitoring}
+    - {lab: hemoglobin, reason: bleeding risk}
+    - {lab: platelets, reason: bleeding risk}
+  codeine: &opioid
+    - {lab: egfr, reason: kidney function}
+    - {lab: alt, reason: liver function}
+  tramadol: *opioid
+  azathioprine: &thiopurine
+    - {lab: wbc, reason: blood count in the thiopurine label}
+    - {lab: platelets, reason: blood count in the thiopurine label}
+    - {lab: hemoglobin, reason: blood count in the thiopurine label}
+    - {lab: alt, reason: liver function}
+  mercaptopurine: *thiopurine
+  thioguanine: *thiopurine
+  fluorouracil: &fluoropyrimidine
+    - {lab: wbc, reason: blood count}
+    - {lab: platelets, reason: blood count}
+    - {lab: egfr, reason: kidney function}
+  capecitabine: *fluoropyrimidine
+  tacrolimus:
+    - {lab: creatinine, reason: kidney function}
+    - {lab: egfr, reason: kidney function}
+  omeprazole: &ppi
+    - {lab: vitamin_b12, reason: long-term use in the PPI label}
+    - {lab: magnesium, reason: long-term use in the PPI label}
+  pantoprazole: *ppi
+  lansoprazole: *ppi
+  citalopram: &ssri
+    - {lab: sodium, reason: hyponatraemia in the SSRI label}
+  escitalopram: *ssri
+  sertraline: *ssri
+  paroxetine: *ssri

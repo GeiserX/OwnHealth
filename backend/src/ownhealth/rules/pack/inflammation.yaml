@@ -1,0 +1,18 @@
+system: inflammation
+order: 6
+names: {en: Inflammation, es: Inflamación}
+markers: [crp_hs]
+rules:
+  - id: recency.crp_hs
+    kind: recency
+    match: [crp_hs]
+    window_days: 365
+    cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack
+    basis: pack_default
+  - id: rcv.crp_hs
+    kind: rcv
+    match: [crp_hs]
+    cv_i: "42.2"
+    cv_a: "5.0"
+    cite: https://biologicalvariation.eu/
+    verify: CV values to confirm against the EFLM database

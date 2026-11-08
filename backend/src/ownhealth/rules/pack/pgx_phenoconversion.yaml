@@ -1,0 +1,31 @@
+# CYP2D6 phenoconversion (genomics.md section 8, step 3): a strong inhibitor among current medications
+# sets the activity score to 0, a moderate one multiplies it by 0.5. The functional phenotype is shown
+# beside the genotype phenotype, never in its place. Other genes: the inhibitor is named and the effect
+# is not computed (CPIC publishes no conversion rule for them).
+rule:
+  id: pgx.cyp2d6.phenoconversion
+  gene: CYP2D6
+  multipliers: {strong: "0", moderate: "0.5"}
+  cite: https://doi.org/10.1111/cts.12692
+  note: >-
+    Caudle KE et al. 2020, CPIC/DPWG CYP2D6 genotype to phenotype consensus (activity score bands and
+    the inhibitor adjustment). Exact CPIC wording of the adjustment to verify.
+  # Activity score to phenotype, CPIC 2020 bands (lower bound inclusive).
+  bands:
+    - {min: "0", max: "0", phenotype: Poor Metabolizer}
+    - {min: "0.25", max: "1", phenotype: Intermediate Metabolizer}
+    - {min: "1.25", max: "2.25", phenotype: Normal Metabolizer}
+    - {min: "2.5", max: null, phenotype: Ultrarapid Metabolizer}
+
+# Clinical inhibitors from the FDA table of CYP enzyme interactions (strong and moderate only).
+inhibitors_cite: https://www.fda.gov/drugs/drug-interactions-labeling/healthcare-professionals-fdas-examples-drugs-interact-cyp-enzymes-and-transporter-systems
+inhibitors_verify: class per drug to confirm against the current FDA table
+inhibitors:
+  CYP2D6:
+    strong: [bupropion, fluoxetine, paroxetine, quinidine, terbinafine]
+    moderate: [abiraterone, cinacalcet, duloxetine, mirabegron]
+  CYP2C19:
+    strong: [fluconazole, fluoxetine, fluvoxamine, ticlopidine]
+    moderate: [esomeprazole, felbamate, moclobemide, omeprazole]
+  CYP2C9:
+    moderate: [amiodarone, fluconazole, miconazole]

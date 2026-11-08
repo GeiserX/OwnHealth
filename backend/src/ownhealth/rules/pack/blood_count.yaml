@@ -1,0 +1,11 @@
+system: blood
+order: 5
+names: {en: Blood count, es: Hemograma}
+markers: [hemoglobin, platelets, mcv, wbc]
+rules:
+  - id: recency.blood_count
+    kind: recency
+    match: [hemoglobin, platelets, mcv, wbc]
+    window_days: 365
+    cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack
+    basis: pack_default

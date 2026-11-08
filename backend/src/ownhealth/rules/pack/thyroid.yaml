@@ -1,0 +1,19 @@
+system: thyroid
+order: 4
+names: {en: Thyroid, es: Tiroides}
+markers: [tsh, ft4]
+rules:
+  - id: recency.thyroid
+    kind: recency
+    match: [tsh, ft4]
+    window_days: 365
+    cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack
+    basis: pack_default
+    note: architecture.md section 16 fixes TSH at 12 months for the shipped pack.
+  - id: rcv.tsh
+    kind: rcv
+    match: [tsh]
+    cv_i: "17.7"
+    cv_a: "3.0"
+    cite: https://biologicalvariation.eu/
+    verify: CV values to confirm against the EFLM database
