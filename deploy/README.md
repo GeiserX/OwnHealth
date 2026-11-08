@@ -5,7 +5,8 @@ This folder holds the homelab setup and the backup recipe. For a first look on o
 | File | What it is |
 |---|---|
 | [compose.homelab.yaml](compose.homelab.yaml) | The app, Postgres 17 and Caddy with HTTPS. Secrets are files, the app container is read-only |
-| [Caddyfile](Caddyfile) | HTTPS for `OWNHEALTH_HOST`, open to the LAN and a Tailscale tailnet only |
+| [db/app-role.sh](db/app-role.sh) | Gives the app its own database role, which owns no table and cannot rewrite the audit log |
+| [Caddyfile](Caddyfile) | HTTPS for `OWNHEALTH_DOMAIN`, open to the LAN and a Tailscale tailnet only |
 | [env.homelab.example](env.homelab.example) | The `.env` for the homelab compose |
 | [restic/backup.sh](restic/backup.sh) | Nightly backup into a restic repository, with retention |
 | [restic/restore-test.sh](restic/restore-test.sh) | Restores a snapshot into a scratch database and checks it |
@@ -20,24 +21,27 @@ mkdir -p /opt/ownhealth && cd /opt/ownhealth
 git clone --depth 1 https://github.com/GeiserX/OwnHealth.git src
 cp src/deploy/compose.homelab.yaml compose.yaml
 cp src/deploy/Caddyfile Caddyfile
-cp src/deploy/env.homelab.example .env        # set OWNHEALTH_HOST and RESTIC_REPOSITORY
-mkdir -p deploy && cp -r src/deploy/restic deploy/
+cp src/deploy/env.homelab.example .env        # set OWNHEALTH_DOMAIN and RESTIC_REPOSITORY
+mkdir -p deploy && cp -r src/deploy/restic src/deploy/db deploy/
 
 mkdir -m 700 secrets
 openssl rand -base64 32 | tr -d '\n' > secrets/db_password
+openssl rand -base64 32 | tr -d '\n' > secrets/app_db_password
 openssl rand -base64 48 | tr -d '\n' > secrets/secret_key
 openssl rand -base64 32 | tr -d '\n' > secrets/restic_password
 chmod 644 secrets/*                           # the containers run as their own users; the folder stays 700
 
 docker compose up -d
-docker compose exec app restic init           # once, creates the backup repository
+docker compose run --rm admin restic init     # once, creates the backup repository
 ```
 
-Open `https://<OWNHEALTH_HOST>` and create the first account with a passkey. Write down the recovery codes.
+Open `https://<OWNHEALTH_DOMAIN>` and create the first account with a passkey. Write down the recovery codes.
+
+**Two database roles.** `ownhealth` owns the tables. The one-shot `admin` service connects as it, runs the migrations, then runs `db/app-role.sh`, which creates `ownhealth_app` and grants it SELECT, INSERT, UPDATE and DELETE on every table except UPDATE, DELETE and TRUNCATE on the audit log. The app connects as `ownhealth_app` and waits for `admin` to finish. It owns nothing, so it cannot disable the audit log's trigger or alter a table. The backup scripts run in `admin` too, because a restore needs the owner.
 
 **Store the restic password in your password manager now.** The backup is encrypted with it and it is not inside the backup. Without it, the backup cannot be read.
 
-**HTTPS.** Caddy gets a certificate on its own when `OWNHEALTH_HOST` is a public DNS name. For a name only your LAN knows, put `tls internal` in the site block of the Caddyfile and trust Caddy's root certificate on your devices, or use a Caddy build with your DNS provider's challenge plugin. Passkeys need HTTPS on a real name, so plain HTTP on an IP address does not work past the first look.
+**HTTPS.** Caddy gets a certificate on its own when `OWNHEALTH_DOMAIN` is a public DNS name. For a name only your LAN knows, put `tls internal` in the site block of the Caddyfile and trust Caddy's root certificate on your devices, or use a Caddy build with your DNS provider's challenge plugin. Passkeys need HTTPS on a real name, so plain HTTP on an IP address does not work past the first look.
 
 **Who can connect.** The Caddyfile answers 403 to every address outside the private ranges and the Tailscale range `100.64.0.0/10`. Keep it that way unless you mean to put health data on the public internet.
 
@@ -105,7 +109,7 @@ docker compose up -d db
 docker compose up -d
 ```
 
-`restore.sh` runs in a one-off app container before the app starts. It refuses a database that already has tables, so it cannot overwrite a running instance. After loading the dump and the blobs it rebuilds every profile's state and compares the `state_hash` with the manifest; the same hash means the restored data is the data you backed up. It exits 1 if anything differs.
+`restore.sh` runs in a one-off admin container before the app starts. It refuses a database that already has tables, so it cannot overwrite a running instance. After loading the dump and the blobs it rebuilds every profile's state and compares the `state_hash` with the manifest; the same hash means the restored data is the data you backed up. It exits 1 if anything differs.
 
 Restore with the OwnHealth version that made the backup (`app_version` in the manifest), then upgrade. A newer rule pack can change a `state_hash` on purpose, and the check would report it as a difference.
 
@@ -118,4 +122,4 @@ Change the image tag in `compose.yaml` to the new version, then:
 docker compose pull && docker compose up -d
 ```
 
-Migrations are forward-only and run at start. To go back to an older version, restore the backup you took before the upgrade.
+Migrations are forward-only and run at start, in the `admin` service, before the app comes up. To go back to an older version, restore the backup you took before the upgrade.

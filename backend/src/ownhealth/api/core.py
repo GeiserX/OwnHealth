@@ -18,7 +18,9 @@ from ownhealth.core.access import (
     effective_permission,
 )
 from ownhealth.core.audit import AuditEvent, write_audit
+from ownhealth.core.documents import document_is_sensitive
 from ownhealth.core.provenance import resolve_src
+from ownhealth.mcp import gate as gate_mod
 
 router = APIRouter(tags=["core"])
 
@@ -100,6 +102,7 @@ def source(
     src_id: str,
     conn: Connection = Depends(get_conn),
     principal: Principal = Depends(get_principal),
+    settings: Settings = Depends(get_settings),
     include_text: bool = Query(False),
 ) -> dict:
     """Provenance of one value: document, page, bbox, extraction, and the facts that cite it.
@@ -113,10 +116,26 @@ def source(
         perm = effective_permission(conn, principal, resolved["profile_id"])
     except AccessDenied:
         raise HTTPException(404, detail={"code": "unknown", "message": "Unknown source."}) from None
+    # the scope of the fact behind the source decides, as in MCP get_source (mcp.md 5.7)
+    unknown = HTTPException(404, detail={"code": "unknown", "message": "Unknown source."})
+    if not any(perm.has(sc) for sc in gate_mod.READ_SCOPES):
+        raise unknown
+    gate = gate_mod.genome_gate(perm, date.today(), settings.age_of_majority)
+    hidden = gate_mod.hidden_reasons(conn, perm, gate, [src_id]).get(src_id)
+    if hidden:
+        if hidden[0] == "scope" and hidden[1] != "genome":
+            raise AccessDenied("insufficient_scope", f"This needs read:{hidden[1]}.")
+        raise unknown
     s = resolved["src"]
     status = resolved["facts"][0]["status"] if resolved["facts"] else "gone"
     page_text = None
-    if include_text and s["document_id"] and s["page_no"] and "read:documents_text" in perm.scopes:
+    if (
+        include_text
+        and s["document_id"]
+        and s["page_no"]
+        and "read:documents_text" in perm.scopes
+        and (perm.has("read:sensitive") or not document_is_sensitive(conn, s["document_id"]))
+    ):
         page_text = conn.execute(
             text("select text_content from document_page where document_id = :d and page_no = :p"),
             {"d": s["document_id"], "p": s["page_no"]},

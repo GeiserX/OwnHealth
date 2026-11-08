@@ -11,7 +11,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-from conftest import add_obs, manual
+from conftest import add_dataset, add_finding, add_obs, fact_hex, manual
 from mcp_checks import marker_outside_tags, marker_outside_wrappers
 from sqlalchemy import text
 
@@ -296,3 +296,36 @@ def _fixture_marker(path: Path) -> str:
         if candidate.is_file():
             return candidate.read_text().strip()
     return "CANARY"
+
+
+async def test_genome_facts_prose_reaches_agents_only_wrapped(world, make_token, connect, engine):
+    """condition.name and value strings are prose from an imported file; phenotype, diplotype, gene and
+    drug are checked as vocabulary at import (tests/genome/test_genome_vocab.py)."""
+    with engine.begin() as conn:
+        ds = add_dataset(conn, world.pid("alex"))
+        add_finding(
+            conn,
+            world.pid("alex"),
+            ds,
+            fact_hex(),
+            "carrier",
+            "CFTR",
+            fact={"condition": {"name": f"Cystic fibrosis {MARKER}"}, "summary": "x"},
+        )
+        add_finding(
+            conn,
+            world.pid("alex"),
+            ds,
+            fact_hex(),
+            "prs",
+            None,
+            fact={"value": {"condition": f"coronary artery disease {MARKER}", "pgs_id": "PGS000018"}},
+        )
+    async with connect(make_token(scopes=ALL_SCOPES)) as c:
+        r = await c.call_tool("get_genome_findings", {"profile": "alex", "detail": "full", "category": "carrier"})
+        r2 = await c.call_tool("get_genome_findings", {"profile": "alex", "detail": "full", "category": "prs"})
+    for res in (r, r2):
+        assert MARKER[:11] in json.dumps(res.structured_content)  # it is there, so the check below can fail
+        assert marker_outside_wrappers(res.structured_content, MARKER[:11]) == []
+        txt = next(b.text for b in res.content if b.type == "text")
+        assert not marker_outside_tags(txt, MARKER[:11])

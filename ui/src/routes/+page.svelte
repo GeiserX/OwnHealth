@@ -2,12 +2,12 @@
 	// Health at a glance (mockup screen #dashboard). Everything shown comes from GET /profiles/{p}/dashboard
 	// (lane E): status words, markers, sparklines, changes, due items. The page never computes a status.
 	import { getDashboard, listReview } from '#lib/api';
-	import type { Dashboard, ReviewItem, Status } from '#lib/api/types';
+	import type { Dashboard, ReviewItem, Status, SystemCard } from '#lib/api/types';
 	import { C } from '#lib/components/colors';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
 	import { openSource } from '#lib/components/pages1/source.svelte';
-	import { Loader, shortHash, tf } from '#lib/components/pages1/util.svelte';
+	import { Loader, shortHash, tf, tp } from '#lib/components/pages1/util.svelte';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import Sparkline from '#lib/components/Sparkline.svelte';
@@ -15,7 +15,8 @@
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { currentProfile } from '#lib/state/app.svelte';
 
-	const RULES_URL = 'https://github.com/GeiserX/OwnHealth/blob/main/rules/ownhealth-rules/';
+	// The rule pack ships inside the package. The link names only the system's pack file, never the rule that fired.
+	const RULES_URL = 'https://github.com/GeiserX/OwnHealth/blob/main/backend/src/ownhealth/rules/pack/';
 	const dash = new Loader<Dashboard>();
 	const queue = new Loader<{ items: ReviewItem[]; open: number }>();
 	const profile = $derived(currentProfile());
@@ -42,6 +43,8 @@
 		const meds = dash.data?.medications ?? [];
 		return meds.length && meds.every((m) => m.src === meds[0].src) ? meds[0].src : null;
 	});
+	// The scope a withheld card needs: the backend's `needs` when sent, else by the card's source.
+	const needs = (s: SystemCard) => s.needs ?? (s.key === 'sleep' || s.key === 'fitness' ? 'read:wearables' : 'read:labs');
 	const statusColor = (s: Status) => (s === 'ok' ? 'inherit' : C[s]);
 	const DUE_ICON: Record<string, string> = {
 		lab: '<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/>',
@@ -93,7 +96,14 @@
 		<div class="sys">
 			{#each d.systems as s (s.key)}
 				<div class="sc">
-					<div class="hd"><b>{s.name}</b><StatusChip status={s.status} /></div>
+					<div class="hd">
+						<b>{s.name}</b>
+						<!-- A card the access does not cover is hidden, not empty: no status word. -->
+						{#if s.withheld}<span class="chip" title={tf('h1_withheld_sys', { scope: needs(s) })}>🔒 {t('h1_locked')}</span>{:else}<StatusChip status={s.status} />{/if}
+					</div>
+					{#if s.withheld}
+						<div class="dim" style="font-size:12px;padding:8px 0">{tf('h1_withheld_sys', { scope: needs(s) })}</div>
+					{:else}
 					{#each s.markers as m (m.alias_group)}
 						<div class="mk">
 							<div class="n">
@@ -102,15 +112,16 @@
 							<div class="v num" style="color:{statusColor(m.status)}">
 								{m.value}<small>{m.unit}</small><span class="sr-only"> · {t(m.status)}</span>
 							</div>
-							<div class="s"><SourceChip label={m.src_label} src={m.src} onopen={openSource} /></div>
+							<div class="s"><SourceChip label={m.src_label ?? m.src ?? ''} src={m.src} onopen={openSource} /></div>
 							<div class="g">{#if m.spark.length}<Sparkline values={m.spark} status={m.status} band={m.band} w={64} h={18} />{/if}</div>
 						</div>
 					{:else}
 						<div class="empty" style="padding:8px 0">{t('h1_nomark')}</div>
 					{/each}
+					{/if}
 					<div class="ft">
 						<span>{t('newest')} {s.newest ?? '—'}</span>
-						<a class="mono" style="font-size:10px;color:inherit" href="{RULES_URL}{s.rule}" target="_blank" rel="noopener" title={t('h1_rule_t')}>{s.rule}</a>
+						<a class="mono" style="font-size:10px;color:inherit" href="{RULES_URL}{s.rule_file ?? s.rule}" target="_blank" rel="noopener" title={t('h1_rule_t')}>{s.rule}</a>
 					</div>
 				</div>
 			{/each}
@@ -167,7 +178,7 @@
 					<div class="muted" style="font-size:12px">{d.genome.summary}</div>
 					<div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap">
 						{#each d.genome.chips as c (c)}<span class="chip">{c}</span>{/each}
-						{#if d.genome.hidden}<span class="chip">🔒 {tf('h1_hidden', { n: d.genome.hidden })}</span>{/if}
+						{#if d.genome.hidden}<span class="chip">🔒 {tp('h1_hidden', d.genome.hidden)}</span>{/if}
 					</div>
 				{:else}
 					<div class="dim" style="font-size:12px">{t('h1_nogen')}</div>

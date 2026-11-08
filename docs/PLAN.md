@@ -320,6 +320,7 @@ Final. Each one holds until we write a new decision here.
 - **Not a product:** no hosted tier, no paid tier, no company. OwnHealth is built for the common good.
 - **Genome:** [OwnGenome](https://github.com/GeiserX/OwnGenome) produces the genome findings, consumer-chip imputation included; OwnHealth only ingests them.
 - **MCP auth:** PATs first (enough for Claude Code); OAuth 2.1 with CIMD in v0.2.
+- **Lab coverage in v0.1:** generic table rules, the fictional LabNorte template, a curated 202-code LOINC subset with es/en/de/fr aliases and a hand-written UCUM subset. Real-vendor templates come as contributed YAML; Mirobody's resolver overlays and a wider LOINC set come later.
 - **`check_drug`:** ships in v0.1 with PGx, current medications from imports and manual entry, and relevant labs. v0.3 adds the full medication lane and supplements.
 
 ## Phases in one line each

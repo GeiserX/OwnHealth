@@ -95,9 +95,10 @@ def test_review_api_and_source_lookup(app_for, committed_family, engine, blobs):
         src_id = c.execute(text("select src_id from observation where id = :i"), {"i": out["result_ids"][0]}).scalar()
     src = alex.get(f"/api/sources/{src_id}").json()
     assert src["location"]["page"] == 1 and src["status"] == "current" and src["document"]["id"] == str(doc_id)
-    # Sam is a viewer of Alex: he may read the source, but not review; Carmen's id would be unknown to him.
+    # Sam is a viewer of Alex (read:summary only): a lab source needs read:labs, and he cannot review.
     sam = app_for(committed_family.users["sam"])
-    assert sam.get(f"/api/sources/{src_id}").status_code == 200
+    denied = sam.get(f"/api/sources/{src_id}")
+    assert denied.status_code == 403 and "document" not in denied.text
     assert alex.post(f"/api/review/{res.review_item_id}/accept", json={}).status_code == 409
     assert sam.get("/api/sources/src_doesnotexist").status_code == 404
     with engine.connect() as c:

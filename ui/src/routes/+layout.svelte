@@ -7,6 +7,7 @@
 	import { ApiError, getMe } from '#lib/api/core';
 	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
 	import { NAV } from '#lib/nav';
+	import { searchTarget } from '#lib/logic/search';
 	import LoginScreen from '#lib/components/pages2/LoginScreen.svelte';
 	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
 
@@ -48,16 +49,9 @@
 
 	function onSearch(e: KeyboardEvent) {
 		if (e.key !== 'Enter') return;
-		const v = search.toLowerCase();
-		// Until search lands (v0.2), route by keyword like the mockup does.
-		const to = /clopi|drug|warf|codein|fármaco|farmaco/.test(v)
-			? '/drug-check'
-			: /ldl|chol|colest/.test(v)
-				? '/biomarkers'
-				: /apoe|hfe|cyp|gen/.test(v)
-					? '/genome'
-					: '/timeline';
-		goto(to);
+		// Until full search lands (v0.2), route by keyword and carry the term to the page that filters by it.
+		const to = searchTarget(search);
+		if (to) goto(to);
 	}
 
 	const active = (path: string) => (path === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(path));
@@ -120,7 +114,10 @@
 			{#if me}<a class="av" href="/settings" style="background:#6ea8fe;text-decoration:none" title={me.user.display_name}>{me.user.display_name.split(' ').map((w) => w[0]).slice(0, 2).join('')}</a>{/if}
 		</header>
 		<main class="view" tabindex="-1">
-			{#if app.loading && !me}
+			{#if page.url.pathname === '/enroll'}
+				<!-- An invite link works before its person has a login. -->
+				{@render children()}
+			{:else if app.loading && !me}
 				<div class="empty">{t('loading')}</div>
 			{:else if app.unauthenticated}
 				<LoginScreen />

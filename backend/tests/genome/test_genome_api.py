@@ -62,6 +62,9 @@ def test_genome_page_for_the_owner(app_for, genome_family, engine):
     assert body["consent"] == {"ui": False, "agents": False, "can_change": True}
     tiles = {t["key"]: t for t in body["tiles"]}
     assert tiles["pgx"]["value"] == "7" and "1 hidden" in tiles["risk_marker"]["detail"]
+    # numbers go out for the UI to word; no English title words in the PRS tile
+    assert (tiles["pgx"]["actionable"], tiles["risk_marker"]["hidden"]) == (2, 1)
+    assert "percentile" not in tiles["prs"]["genes"] and "PGS" in tiles["prs"]["genes"]
     assert any(c["target"] == "FMR1" and c["state"] == "not_assessed" for c in body["coverage"])
     audit = _audits(engine, fam.profiles["alex"], "read")[-1]
     assert audit["tool"] == "GET /api/profiles/{p}/genome" and audit["withheld"] == {"sensitive": 1, "minor_rule": 0}

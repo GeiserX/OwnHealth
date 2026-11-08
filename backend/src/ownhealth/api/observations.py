@@ -23,6 +23,8 @@ from ownhealth.core.audit import AuditEvent, hash_arg, write_audit
 from ownhealth.core.observations import list_observations
 from ownhealth.core.records import list_records
 from ownhealth.normalize import _tables
+from ownhealth.state.engine import _rules_for, rcv_percent
+from ownhealth.state.pack import load_pack
 
 router = APIRouter(tags=["observations"])
 
@@ -294,6 +296,7 @@ def trend(
             }
         )
     codes = sorted({f"LOINC:{r['loinc']}" for r in rows if r["loinc"]})
+    es = lang == "es"
     limitations = []
     methods = {r["method"] for r in rows if r["method"]}
     if len(codes) > 1 or len(methods) > 1:
@@ -301,16 +304,39 @@ def trend(
             lc = _tables.loinc_codes().get(c.removeprefix("LOINC:"))
             dates = [pt["date"] for pt in points if pt["loinc"] == c.removeprefix("LOINC:")]
             if lc and dates:
-                limitations.append(f"{len(dates)} point(s) are {lc.long_name} ({c}).")
+                n = len(dates)
+                limitations.append(
+                    (f"{n} punto es" if n == 1 else f"{n} puntos son") + f" {lc.long_name} ({c})."
+                    if es
+                    else (f"{n} point is" if n == 1 else f"{n} points are") + f" {lc.long_name} ({c})."
+                )
     if len({r["printed_ref_range"] for r in rows if r["printed_ref_range"]}) > 1:
-        limitations.append("Labs use different reference ranges.")
+        limitations.append(
+            "Los laboratorios usan rangos de referencia distintos." if es else "Labs use different reference ranges."
+        )
     for u in sorted(converted):
         m = _tables.molar().get(group)
-        how = f" with the molar mass of {m.species} ({float(m.g_per_mol)} g/mol)" if m and m.g_per_mol else ""
-        limitations.append(f"Values printed in {pretty_unit(u)} are shown converted to {pretty_unit(target)}{how}.")
+        if es:
+            how = f" con la masa molar de {m.species} ({float(m.g_per_mol)} g/mol)" if m and m.g_per_mol else ""
+            limitations.append(
+                f"Los valores impresos en {pretty_unit(u)} se muestran convertidos a {pretty_unit(target)}{how}."
+            )
+        else:
+            how = f" with the molar mass of {m.species} ({float(m.g_per_mol)} g/mol)" if m and m.g_per_mol else ""
+            limitations.append(f"Values printed in {pretty_unit(u)} are shown converted to {pretty_unit(target)}{how}.")
     if skipped:
         limitations.append(
-            f"{skipped} value(s) in a unit that does not convert to {pretty_unit(target)} are not drawn."
+            (
+                f"{skipped} valor en una unidad que no se convierte a {pretty_unit(target)} no se dibuja."
+                if skipped == 1
+                else f"{skipped} valores en una unidad que no se convierte a {pretty_unit(target)} no se dibujan."
+            )
+            if es
+            else (
+                f"1 value in a unit that does not convert to {pretty_unit(target)} is not drawn."
+                if skipped == 1
+                else f"{skipped} values in a unit that does not convert to {pretty_unit(target)} are not drawn."
+            )
         )
     annotations = []
     if perm.has("read:records"):
@@ -326,9 +352,15 @@ def trend(
                     }
                 )
         annotations.sort(key=lambda a: a["date"])
-    last_vs_prev = None
+    last_vs_prev = rcv_pct = exceeds_rcv = None
+    rcv_rules = _rules_for(load_pack(), "rcv", group)
+    if rcv_rules:
+        rcv_pct = float(rcv_percent(rcv_rules[0]))
     if len(points) >= 2 and points[-2]["value"]:
-        last_vs_prev = round((points[-1]["value"] - points[-2]["value"]) / points[-2]["value"] * 100)
+        change = (points[-1]["value"] - points[-2]["value"]) / points[-2]["value"] * 100
+        last_vs_prev = round(change, 1)
+        if rcv_pct is not None:
+            exceeds_rcv = abs(change) > rcv_pct
     options = []
     for u in (g["canonical"], g["si"], g["conventional"]) if g else ():
         if pretty_unit(u) not in options:
@@ -342,7 +374,12 @@ def trend(
         "unit_options": options,
         "points": points,
         "annotations": annotations,
-        "stats": {"n": len(points), "last_vs_previous_pct": last_vs_prev, "rcv_pct": None, "exceeds_rcv": None},
+        "stats": {
+            "n": len(points),
+            "last_vs_previous_pct": last_vs_prev,
+            "rcv_pct": rcv_pct,
+            "exceeds_rcv": exceeds_rcv,
+        },
         "limitations": limitations,
     }
 

@@ -180,6 +180,32 @@ def test_rollup_statistics_local_day_and_sleep_on_waking(conn, family, blobs, st
     assert night["t"] == day and night["value"] == 450 and night["coverage"] == 1.0
 
 
+def _sleep(start, end, stage):
+    rec = _rec(
+        "HKCategoryTypeIdentifierSleepAnalysis", start, end, f"HKCategoryValueSleepAnalysis{stage}", "", "Apple Watch"
+    )
+    return rec.replace(' unit=""', "")
+
+
+def test_a_night_with_stages_before_midnight_counts_whole_on_the_waking_date(conn, family, blobs, store_doc):
+    """A Watch writes many short stages; those that end before 00:00 still belong to the night that
+    ends the next morning. Two nights more than 2 h apart stay two nights."""
+    p = family.profiles["alex"]
+    nights = (
+        _sleep("2026-11-05 22:45:00 +0100", "2026-11-05 23:40:00 +0100", "AsleepCore")
+        + _sleep("2026-11-05 23:40:00 +0100", "2026-11-06 00:30:00 +0100", "AsleepDeep")
+        + _sleep("2026-11-06 00:30:00 +0100", "2026-11-06 06:45:00 +0100", "AsleepREM")
+        + _sleep("2026-11-06 22:30:00 +0100", "2026-11-06 23:50:00 +0100", "AsleepCore")
+        + _sleep("2026-11-06 23:50:00 +0100", "2026-11-07 06:30:00 +0100", "AsleepREM")
+    )
+    doc = store_doc(conn, family, "alex", _handmade(nights), "e.zip", ZIP)
+    import_apple_health(conn, blobs, document_id=doc)
+    pts = wearables.series(
+        conn, p, "sleep_asleep", since=datetime(2026, 11, 1, tzinfo=UTC), until=datetime(2026, 11, 8, tzinfo=UTC)
+    )
+    assert {x["t"].date().isoformat(): x["value"] for x in pts} == {"2026-11-06": 480.0, "2026-11-07": 480.0}
+
+
 def test_reimport_is_idempotent_and_wrong_profile_is_refused(conn, family, blobs, store_doc, tmp_path):
     p = family.profiles["alex"]
     spec = ExportSpec(days=5, end=END, birth_date=ALEX_DOB)
@@ -265,3 +291,36 @@ def test_upload_dispatch_runs_the_job(committed_family, engine, settings, blobs,
             text("select count(*) from wearable_sample where profile_id = :p"), {"p": fam.profiles["sam"]}
         ).scalar()
         assert n == job.result["accepted"]
+
+
+def _bomb(member: str, size: int) -> bytes:
+    """A small zip holding one huge, highly compressible member (and a valid export.xml)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("apple_health_export/export.xml", _handmade_xml())
+        with z.open(member, "w", force_zip64=True) as out:
+            chunk = b"0" * (1024 * 1024)
+            for _ in range(size // len(chunk)):
+                out.write(chunk)
+    return buf.getvalue()
+
+
+def _handmade_xml() -> str:
+    with zipfile.ZipFile(io.BytesIO(_handmade(""))) as z:
+        return z.read("apple_health_export/export.xml").decode()
+
+
+@pytest.mark.parametrize(
+    "member",
+    ["apple_health_export/electrocardiograms/ecg_2026-11-01.csv", "apple_health_export/clinical-records/Big.json"],
+)
+def test_an_inflating_member_stops_the_import_without_being_read(conn, family, blobs, store_doc, member):
+    doc = store_doc(conn, family, "alex", _bomb(member, 50 * 1024 * 1024), "bomb.zip", ZIP)
+    tracemalloc.start()
+    try:
+        with pytest.raises(PermanentJobError, match="over 20 MB|over 5 MB"):
+            import_apple_health(conn, blobs, document_id=doc)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 30 * 1024 * 1024  # the 50 MB member was never read whole

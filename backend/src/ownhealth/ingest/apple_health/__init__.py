@@ -8,6 +8,8 @@
   (Apple's own clinical medications, conditions, labs and vaccines among them).
 - `electrocardiograms/*.csv` are stored as documents of type `ecg`.
 - The birth date in `<Me>` must match the profile: a different one stops the import (wrong profile).
+- Members read whole (clinical JSON, ECG CSV) are capped in size, and the zip in member count, so a
+  small zip that inflates to gigabytes stops the job instead of the process.
 """
 
 from __future__ import annotations
@@ -30,6 +32,9 @@ from ownhealth.jobs import PermanentJobError
 
 BATCH = 10_000
 PROVIDER = "apple_health"
+MAX_MEMBERS = 50_000
+MAX_CLINICAL_BYTES = 20 * 1024 * 1024  # one FHIR resource
+MAX_ECG_BYTES = 5 * 1024 * 1024  # one 30 s recording is a few hundred KB
 
 
 def _members(z: zipfile.ZipFile) -> tuple[str | None, list[str], list[str]]:
@@ -63,7 +68,15 @@ def import_apple_health(conn: Connection, blobs: BlobStore, *, document_id: UUID
     profile = get_profile(conn, doc["profile_id"])
     summary = ImportSummary(document_id=str(document_id))
     with zipfile.ZipFile(blobs.path(doc["sha"])) as z:
+        if len(z.infolist()) > MAX_MEMBERS:
+            raise PermanentJobError(f"the zip holds more than {MAX_MEMBERS} files: not an Apple Health export")
         export, clinical, ecg = _members(z)
+        # before anything is read or written. zipfile never reads past a member's declared size (a
+        # smaller lie fails its CRC), so the declared size bounds what `z.read` holds in memory.
+        for names, cap in ((clinical, MAX_CLINICAL_BYTES), (ecg, MAX_ECG_BYTES)):
+            for name in names:
+                if z.getinfo(name).file_size > cap:
+                    raise PermanentJobError(f"{name}: over {cap // (1024 * 1024)} MB, not an Apple Health export file")
         if export is None:
             raise PermanentJobError("no export.xml in the zip")
         with z.open(export) as stream:
@@ -75,7 +88,7 @@ def import_apple_health(conn: Connection, blobs: BlobStore, *, document_id: UUID
                 f"the export's birth date does not match profile '{profile.slug}': import it into the right profile"
             )
         identity = "matched" if dob and dob == profile.birth_date else "missing"
-        inserted = _commit_samples(conn, profile.id)
+        inserted = _commit_samples(conn, profile.id, document_id)
         if metrics:
             wearables.recompute_rollups(
                 conn, profile_id=profile.id, metrics=sorted(metrics), source_ids=sorted(set(sources.values()))
@@ -177,15 +190,16 @@ def _copy(conn: Connection, profile_id: UUID, batch: list[Sample], sources: dict
     return len(batch)
 
 
-def _commit_samples(conn: Connection, profile_id: UUID) -> int:
-    """Move staged rows into wearable_sample. A re-import of the same samples inserts nothing."""
+def _commit_samples(conn: Connection, profile_id: UUID, document_id: UUID) -> int:
+    """Move staged rows into wearable_sample, owned by this export. A re-import of the same samples
+    inserts nothing."""
     return conn.execute(
         text(
-            "insert into wearable_sample (profile_id, metric, t, t_end, v, tz_offset_min, source_id)"
-            " select distinct on (metric, source_id, t) :p, metric, t, t_end, v, tz, source_id from ah_stage"
+            "insert into wearable_sample (profile_id, metric, t, t_end, v, tz_offset_min, source_id, document_id)"
+            " select distinct on (metric, source_id, t) :p, metric, t, t_end, v, tz, source_id, :d from ah_stage"
             " order by metric, source_id, t on conflict do nothing"
         ),
-        {"p": profile_id},
+        {"p": profile_id, "d": document_id},
     ).rowcount
 
 

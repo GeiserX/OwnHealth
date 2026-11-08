@@ -16,3 +16,17 @@ def test_file_twin_wins(monkeypatch, tmp_path):
     monkeypatch.setenv("OWNHEALTH_SECRET_KEY", "from-env")
     monkeypatch.setenv("OWNHEALTH_SECRET_KEY_FILE", str(secret))
     assert Settings.from_env().secret_key == "from-file"
+
+
+def test_app_refuses_the_public_default_secret_key(settings, engine):
+    import dataclasses
+
+    import pytest
+
+    from ownhealth.app import create_app
+    from ownhealth.config import DEV_SECRET_KEY
+
+    weak = dataclasses.replace(settings, secret_key=DEV_SECRET_KEY, dev_auth=False, demo=False)
+    with pytest.raises(RuntimeError, match="OWNHEALTH_SECRET_KEY"):
+        create_app(weak, engine)
+    create_app(dataclasses.replace(weak, dev_auth=True), engine)  # a dev box may keep it

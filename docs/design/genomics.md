@@ -355,7 +355,7 @@ Response envelope for every genome answer (fixed field names):
   "not_assessed": [ { "gene": "FMR1", "reason": "not_run" } ],
   "sensitive_withheld": 1,
   "db_versions": { "clinvar": "2026-10-06", "pharmcat": "3.1.0", "cpic": "2026-09" },
-  "notice": "Information for personal records, not a diagnosis. Discuss findings with a clinician."
+  "notice": "Information for personal records, not a diagnosis."
 }
 ```
 

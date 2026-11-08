@@ -15,7 +15,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from sqlalchemy import Engine, text
 
 from ownhealth import __version__, runtime
-from ownhealth.config import Settings
+from ownhealth.config import DEV_SECRET_KEY, Settings
 from ownhealth.core.access import AccessDenied
 from ownhealth.core.lifecycle import LifecycleError
 from ownhealth.core.provenance import ProvenanceError
@@ -45,6 +45,9 @@ def _error(status: int, code: str, message: str, **extra) -> JSONResponse:
 
 def create_app(settings: Settings | None = None, engine: Engine | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    if settings.secret_key == DEV_SECRET_KEY and not (settings.dev_auth or settings.demo):
+        # it signs MCP cursors: a public key lets anyone forge offsets and as_of pins
+        raise RuntimeError("OWNHEALTH_SECRET_KEY is not set: generate one with `openssl rand -hex 48`.")
     rt = runtime.init(settings, engine)
 
     from ownhealth.mcp import build_server

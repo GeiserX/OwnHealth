@@ -7,6 +7,7 @@ The same bytes uploaded twice for one profile are one document with two `documen
 from __future__ import annotations
 
 import json
+import secrets
 import zipfile
 from dataclasses import dataclass
 from typing import Literal
@@ -78,6 +79,7 @@ def sniff(filename: str, head: bytes, blob_path=None) -> UploadKind:
 class DocumentRef:
     id: UUID
     created: bool
+    reactivated: bool = False
 
 
 def create_document(
@@ -96,13 +98,20 @@ def create_document(
 ) -> DocumentRef:
     """Insert a document or return the existing one for the same profile and bytes."""
     sha = sha256_hex_to_bytes(blob_sha256)
-    existing = conn.execute(
+    row = conn.execute(
         text(
-            "select id from document where coalesce(profile_id, household_id) = coalesce(:p, :h) and blob_sha256 = :b"
+            "select id, status from document"
+            " where coalesce(profile_id, household_id) = coalesce(:p, :h) and blob_sha256 = :b"
         ),
         {"p": profile_id, "h": household_id, "b": sha},
-    ).scalar()
+    ).first()
+    existing = row.id if row else None
     created = existing is None
+    # The same bytes uploaded again after a retraction bring the document back; its import runs
+    # again (the retraction cleared the import flags).
+    reactivated = row is not None and row.status == "retracted"
+    if reactivated:
+        conn.execute(text("update document set status = 'active', status_reason = null where id = :d"), {"d": existing})
     doc_id = (
         existing
         or conn.execute(
@@ -126,7 +135,7 @@ def create_document(
         text("insert into document_source (document_id, channel, source_ref) values (:d, :c, :r)"),
         {"d": doc_id, "c": channel, "r": source_ref},
     )
-    return DocumentRef(doc_id, created)
+    return DocumentRef(doc_id, created, reactivated)
 
 
 @dataclass(frozen=True)
@@ -180,14 +189,18 @@ def dispatch_upload(
                 filename=f.filename,
             )
             item["document_id"] = str(ref.id)
-            item["duplicate"] = not ref.created
-            if ref.created:  # images too: the PDF handler files them as pending_document items
-                item["job_id"] = enqueue(
-                    conn,
-                    JOB_KINDS["pdf"],
-                    {"document_id": str(ref.id), "profile_id": str(profile_id), "household_id": str(household_id)},
-                    dedupe_key=f"import.pdf:{ref.id}",
-                )
+            item["duplicate"] = not (ref.created or ref.reactivated)
+            if ref.created or ref.reactivated:  # images too: the PDF handler files them as pending_document items
+                job_payload: dict = {
+                    "document_id": str(ref.id),
+                    "profile_id": str(profile_id),
+                    "household_id": str(household_id),
+                }
+                key = f"import.pdf:{ref.id}"
+                if ref.reactivated:  # the earlier extraction run is done; import it again
+                    job_payload["force"] = True
+                    key = f"{key}:reupload:{secrets.token_hex(4)}"
+                item["job_id"] = enqueue(conn, JOB_KINDS["pdf"], job_payload, dedupe_key=key)
             items.append(item)
             continue
         payload: dict = {
@@ -205,3 +218,38 @@ def dispatch_upload(
         )
         items.append(item)
     return {"items": json.loads(json.dumps(items, default=str))}
+
+
+_SENSITIVE_FACT_TABLES = (
+    "condition",
+    "medication_statement",
+    "allergy",
+    "immunization",
+    "procedure",
+    "encounter",
+    "note",
+)
+
+
+def document_is_sensitive(conn: Connection, document_id: UUID) -> bool:
+    """True when any value read from this document is sensitive (mental health, reproductive, sexual
+    health), whatever its status: the original file and its page text still hold it. Held review
+    rows count too. Without read:sensitive the file, the page renders and the words stay closed."""
+    via_src = " or ".join(
+        f"exists (select 1 from {t} f join src s on s.id = f.src_id where s.document_id = :d"
+        " and cardinality(f.sensitivity) > 0)"
+        for t in _SENSITIVE_FACT_TABLES
+    )
+    return bool(
+        conn.execute(
+            text(
+                "select exists (select 1 from observation o left join src s on s.id = o.src_id"
+                " where (o.document_id = :d or s.document_id = :d) and cardinality(o.sensitivity) > 0)"
+                " or exists (select 1 from review_item r where r.document_id = :d"
+                " and jsonb_typeof(r.payload->'observation'->'sensitivity') = 'array'"
+                " and jsonb_array_length(r.payload->'observation'->'sensitivity') > 0)"
+                f" or {via_src}"
+            ),
+            {"d": document_id},
+        ).scalar()
+    )

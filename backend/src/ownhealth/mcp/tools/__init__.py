@@ -142,7 +142,7 @@ class Result:
     data: dict
     pageable: str | None = None  # key in data of the list the budget may cut and the cursor resumes
     budget: int = DEFAULT_BUDGET  # tokens for structuredContent plus the text block
-    max_data_bytes: int | None = None  # get_health_status: data under 2 KB
+    max_bytes: int | None = None  # get_health_status: the whole structuredContent under 2 KB
     limitations: list = field(default_factory=list)
     not_assessed: list = field(default_factory=list)
     evidence: list = field(default_factory=list)
@@ -497,7 +497,7 @@ def finish(call: Call, result: Result, qhash: str, secret: str) -> tuple[dict, s
         body_text = render_text(env, call.tool)
         tokens = estimate_tokens(env) + estimate_tokens(body_text)
         env["budget"]["tokens_est"] = tokens
-        fits = tokens <= budget and (result.max_data_bytes is None or len(dumps(d).encode()) <= result.max_data_bytes)
+        fits = tokens <= budget and (result.max_bytes is None or len(dumps(env).encode()) < result.max_bytes)
         return env, body_text, tokens, fits
 
     env, body_text, tokens, fits = build(len(items))

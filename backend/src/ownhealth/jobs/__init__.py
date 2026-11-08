@@ -23,6 +23,7 @@ import logging
 import os
 import pkgutil
 import socket
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -37,6 +38,7 @@ from ownhealth.config import Settings
 log = logging.getLogger("ownhealth.jobs")
 
 LEASE_SECONDS = 300
+HEARTBEAT_SECONDS = 60  # run_one renews the lease this often while a handler runs
 BACKOFF_BASE_SECONDS = 30
 
 
@@ -163,42 +165,55 @@ def claim(engine: Engine, queue: str, worker_id: str, kinds: list[str] | None = 
     return Job(**row) if row else None
 
 
-def complete(engine: Engine, job: Job, result: dict | None = None) -> None:
+def complete(engine: Engine, job: Job, worker_id: str, result: dict | None = None) -> bool:
+    """Mark the job done, only while `worker_id` still holds its lease. False when the lease was lost."""
     with engine.begin() as conn:
-        conn.execute(
+        n = conn.execute(
             text(
                 "update job set state = 'done', finished_at = now(), locked_by = null, locked_until = null,"
-                " result = cast(:r as jsonb), last_error = null where id = :id"
+                " result = cast(:r as jsonb), last_error = null where id = :id and locked_by = :w and state = 'running'"
             ),
-            {"id": job.id, "r": json.dumps(result, default=str) if result is not None else None},
-        )
+            {"id": job.id, "w": worker_id, "r": json.dumps(result, default=str) if result is not None else None},
+        ).rowcount
+    if not n:
+        log.warning("job %s (%s): lease lost before it finished, result dropped", job.id, job.kind)
+    return bool(n)
 
 
 def _error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:500]
 
 
-def fail(engine: Engine, job: Job, exc: BaseException) -> str:
-    """Record a failure. Returns the new state: 'queued' (retry later) or 'dead'."""
-    dead = job.attempts >= job.max_attempts or isinstance(exc, PermanentJobError)
+def fail(engine: Engine, job: Job, exc: BaseException, worker_id: str) -> str:
+    """Record a failure while `worker_id` holds the lease. Returns the new state: 'queued' (retry
+    later), 'dead', or 'lost' when another worker or the reaper has the job now."""
     with engine.begin() as conn:
-        if not dead:
-            conn.execute(
-                text(
-                    "update job set state = 'queued', locked_by = null, locked_until = null, last_error = :e,"
-                    " run_after = now() + make_interval(secs => :b) where id = :id"
-                ),
-                {"id": job.id, "e": _error_text(exc), "b": (2**job.attempts) * BACKOFF_BASE_SECONDS},
-            )
-            return "queued"
-        conn.execute(
+        return _record_failure(conn, job, exc, "locked_by = :w", {"w": worker_id})
+
+
+def _record_failure(conn: Connection, job: Job, exc: BaseException, guard: str, params: dict) -> str:
+    dead = job.attempts >= job.max_attempts or isinstance(exc, PermanentJobError)
+    where = f" where id = :id and state = 'running' and {guard}"
+    args = {"id": job.id, "e": _error_text(exc), **params}
+    if not dead:
+        n = conn.execute(
             text(
-                "update job set state = 'dead', finished_at = now(), locked_by = null, locked_until = null,"
-                " last_error = :e where id = :id"
+                "update job set state = 'queued', locked_by = null, locked_until = null, last_error = :e,"
+                " run_after = now() + make_interval(secs => :b)" + where
             ),
-            {"id": job.id, "e": _error_text(exc)},
-        )
-        _job_failed_item(conn, job, exc)
+            {**args, "b": (2**job.attempts) * BACKOFF_BASE_SECONDS},
+        ).rowcount
+        return "queued" if n else "lost"
+    n = conn.execute(
+        text(
+            "update job set state = 'dead', finished_at = now(), locked_by = null, locked_until = null,"
+            " last_error = :e" + where
+        ),
+        args,
+    ).rowcount
+    if not n:
+        return "lost"
+    _job_failed_item(conn, job, exc)
     return "dead"
 
 
@@ -242,14 +257,32 @@ def _job_failed_item(conn: Connection, job: Job, exc: BaseException) -> None:
 
 
 def reap_expired(engine: Engine) -> int:
-    """Move running jobs whose lease ran out back to queued (the worker died)."""
+    """Running jobs whose lease ran out (the worker died, e.g. OOM) count as a failed attempt, so a
+    job that keeps killing its worker ends dead with a job_failed item instead of looping forever."""
     with engine.begin() as conn:
-        return conn.execute(
-            text(
-                "update job set state = 'queued', locked_by = null, locked_until = null"
-                " where state = 'running' and locked_until < now()"
+        rows = (
+            conn.execute(
+                text(
+                    "select id, queue, kind, payload, attempts, max_attempts, dedupe_key from job"
+                    " where state = 'running' and locked_until < now() for update skip locked"
+                )
             )
-        ).rowcount
+            .mappings()
+            .all()
+        )
+        for r in rows:
+            _record_failure(
+                conn, Job(**r), JobError("lease expired: the worker died mid-job"), "locked_until < now()", {}
+            )
+    return len(rows)
+
+
+def _keep_lease(ctx: JobContext, job: Job, done: threading.Event) -> None:
+    while not done.wait(HEARTBEAT_SECONDS):
+        try:
+            ctx.heartbeat(job)
+        except Exception:  # noqa: BLE001 - a database hiccup must not kill the heartbeat
+            log.exception("job %s: heartbeat failed", job.id)
 
 
 def run_one(ctx: JobContext, queue: str = "core", kinds: list[str] | None = None) -> Job | None:
@@ -258,15 +291,20 @@ def run_one(ctx: JobContext, queue: str = "core", kinds: list[str] | None = None
     if job is None:
         return None
     fn = _HANDLERS.get(job.kind)
+    done = threading.Event()
+    threading.Thread(target=_keep_lease, args=(ctx, job, done), daemon=True, name=f"job-{job.id}-lease").start()
     try:
-        if fn is None:
-            raise PermanentJobError(f"no handler for job kind {job.kind}")
-        result = fn(ctx, job)
+        try:
+            if fn is None:
+                raise PermanentJobError(f"no handler for job kind {job.kind}")
+            result = fn(ctx, job)
+        finally:
+            done.set()
     except Exception as exc:  # noqa: BLE001 - every failure is recorded, never silent
-        state = fail(ctx.engine, job, exc)
+        state = fail(ctx.engine, job, exc, ctx.worker_id)
         log.warning("job %s (%s) failed, now %s: %s", job.id, job.kind, state, _error_text(exc))
         return job
-    complete(ctx.engine, job, result)
+    complete(ctx.engine, job, ctx.worker_id, result)
     return job
 
 

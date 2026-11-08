@@ -1,7 +1,7 @@
 // Endpoints the "manage" pages read (lane I owns this file): wearables, import & review, family, MCP & access.
 // Backends: lane C (wearables.py, records.py), lane B (documents.py), lane G (tokens.py, audit.py, family.py),
 // lane F (mcp_usage.py). Review and uploads are in core.ts.
-import { del, get, p, post, put, request } from './core';
+import { del, get, p, post, put, request, requestBlob } from './core';
 import type {
 	AuditOut,
 	AuthState,
@@ -30,6 +30,16 @@ export const documentFileUrl = (id: Uuid) => `/api/documents/${id}/file`;
 
 export const listRecords = (profile: string, kind: RecordOut['kind']) => get<{ items: RecordOut[] }>(`${p(profile)}/records/${kind}`);
 
+// Manual entry and corrections (backend api/records.py). A correction is a new version; the old one stays.
+export type ManualObservationIn = { name: string; value: string; unit?: string | null; effective_at: string; note?: string | null; loinc?: string | null; category?: string | null };
+export const addManualObservation = (profile: string, body: ManualObservationIn) =>
+	post<{ id: Uuid; src: string; status: string }>(`${p(profile)}/manual-observations`, body);
+export const createRecord = (profile: string, kind: RecordOut['kind'], body: Record<string, unknown>) => post<RecordOut>(`${p(profile)}/records/${kind}`, body);
+export const correctRecord = (profile: string, kind: RecordOut['kind'], id: Uuid, body: Record<string, unknown> & { reason: string }) =>
+	post<RecordOut>(`${p(profile)}/records/${kind}/${id}/correct`, body);
+export const retractRecord = (profile: string, kind: RecordOut['kind'], id: Uuid, reason: string) =>
+	post<RecordOut>(`${p(profile)}/records/${kind}/${id}/retract`, { reason });
+
 export const listTokens = () => get<{ items: TokenOut[] }>('/tokens');
 export const createToken = (body: {
 	label: string;
@@ -47,7 +57,24 @@ export const getTokenUsage = (id: Uuid) => get<TokenUsage>(`/tokens/${id}/usage`
 export const listAudit = (q: { profile?: string; limit?: number; before?: number } = {}) => get<{ items: AuditOut[] }>('/audit', q);
 
 export const getHousehold = () => get<Household>('/household');
-export const setGrant = (body: { user_id: Uuid; profile: string; role: string; categories?: Scope[] }) => put<{ ok: true }>('/grants', body);
+// People (backend api/family.py): a profile without a login, an invite for a new login, deleting a profile.
+export type RelativeIn = {
+	display_name: string;
+	role: 'guardian' | 'caregiver';
+	relationship?: 'partner' | 'child' | 'parent' | 'other' | null;
+	birth_date?: string | null;
+	sex_at_birth?: 'female' | 'male' | 'unknown' | null;
+	country?: string | null;
+	slug?: string | null;
+};
+export const addRelative = (body: RelativeIn) => post<{ id: Uuid; slug: string }>('/household/profiles', body);
+export const inviteMember = (body: { display_name: string; locale: 'es' | 'en'; claim_profile?: string | null }) =>
+	post<{ user_id: Uuid; code: string; url: string; expires_in_days: number }>('/household/invites', body);
+/** Needs a fresh step-up; `confirm` repeats the slug. */
+export const deleteProfile = (slug: string) =>
+	request<{ deleted: string; rows: number; blobs: number }>('DELETE', p(slug), { query: { confirm: slug } });
+/** Full export: FHIR R4 NDJSON plus the original files in one zip. Needs a fresh step-up. */
+export const exportProfile = (slug: string) => requestBlob('POST', `${p(slug)}/export`, { fmt: 'zip' }, `ownhealth-${slug}.zip`);
 export const setLocks = (profile: string, locks: Scope[]) => put<{ ok: true }>(`${p(profile)}/locks`, { locks });
 
 // ---- lane I-ui-2: genome, drug check, documents, review helpers, auth, settings ----
@@ -76,6 +103,14 @@ export const putSensitive = (profile: string, body: { ui?: boolean; agents?: boo
 type Json = Record<string, unknown>;
 type Setup = { household_name?: string; display_name: string; locale: 'es' | 'en'; birth_date?: string | null; sex_at_birth?: string | null; country?: string | null };
 export const getAuthState = () => get<AuthState>('/auth/state');
+// Enrolment from an invite link (/enroll?code=).
+export type InviteInfo = { display_name: string; household: string; claims_profile: boolean; passkeys_possible: boolean; password_allowed: boolean; oidc: boolean };
+export const getInvite = (code: string) => get<InviteInfo>(`/auth/invite/${encodeURIComponent(code)}`);
+export const enrollBegin = (code: string) => post<Json>('/auth/enroll/begin', { code });
+export const enrollFinish = (code: string, credential: Json, label?: string) =>
+	post<{ user_id: Uuid; recovery_codes: string[] }>('/auth/enroll/finish', { code, credential, label });
+export const enrollPassword = (code: string, password: string) =>
+	post<{ user_id: Uuid; recovery_codes: string[] }>('/auth/enroll/password', { code, password });
 export const setupBegin = (body: Setup) => post<Json>('/auth/setup/begin', body);
 export const setupFinish = (credential: Json, label?: string) =>
 	post<{ user_id: Uuid; profile: string; recovery_codes: string[] }>('/auth/setup/finish', { credential, label });

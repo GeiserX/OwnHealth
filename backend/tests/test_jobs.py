@@ -140,3 +140,72 @@ def test_reaper_requeues_expired_leases(engine):
         )
     assert jobs.reap_expired(engine) >= 1
     assert _state(engine, jid)["state"] == "queued"
+
+
+def _expire(engine, jid):
+    with engine.begin() as c:
+        c.execute(text("update job set locked_until = now() - interval '1 second' where id = :i"), {"i": jid})
+
+
+def test_late_worker_cannot_finish_a_job_another_worker_holds(engine):
+    with engine.begin() as c:
+        jid = enqueue(c, "test.lost_lease", {})
+    first = claim(engine, "core", "w0", ["test.lost_lease"])
+    _expire(engine, jid)
+    assert jobs.reap_expired(engine) == 1
+    with engine.begin() as c:  # skip the backoff the reaper set
+        c.execute(text("update job set run_after = now() where id = :i"), {"i": jid})
+    second = claim(engine, "core", "w1", ["test.lost_lease"])
+    assert second.id == first.id == jid
+    assert jobs.complete(engine, first, "w0", {"from": "w0"}) is False
+    assert jobs.fail(engine, first, RuntimeError("late"), "w0") == "lost"
+    with engine.connect() as c:
+        row = c.execute(text("select state, locked_by from job where id = :i"), {"i": jid}).mappings().one()
+    assert row["state"] == "running" and row["locked_by"] == "w1"
+    assert jobs.complete(engine, second, "w1", {"from": "w1"}) is True
+    assert _state(engine, jid)["state"] == "done"
+
+
+@handler("test.slow")
+def _slow(ctx: JobContext, job: Job) -> dict:
+    import time
+
+    time.sleep(0.6)
+    with ctx.engine.connect() as c:
+        return {
+            "left": c.execute(
+                text("select extract(epoch from locked_until - now()) from job where id = :i"), {"i": job.id}
+            ).scalar()
+        }
+
+
+def test_run_one_renews_the_lease_while_the_handler_runs(engine, ctx, monkeypatch):
+    monkeypatch.setattr(jobs, "LEASE_SECONDS", 1)
+    monkeypatch.setattr(jobs, "HEARTBEAT_SECONDS", 0.2)
+    with engine.begin() as c:
+        jid = enqueue(c, "test.slow", {})
+    run_one(ctx, kinds=["test.slow"])
+    s = _state(engine, jid)
+    # without renewal the 1 s lease would be about 0.4 s from expiry by the end of the handler
+    assert s["state"] == "done" and float(s["result"]["left"]) > 0.7
+
+
+def test_job_that_keeps_killing_its_worker_ends_dead_with_an_item(engine, committed_family):
+    pid = str(committed_family.profiles["alex"])
+    with engine.begin() as c:
+        jid = enqueue(c, "test.crashloop", {"profile_id": pid}, max_attempts=3)
+    for i in range(6):
+        with engine.begin() as c:
+            c.execute(text("update job set run_after = now() where id = :i"), {"i": jid})
+        if claim(engine, "core", f"w{i}", ["test.crashloop"]) is None:
+            break
+        _expire(engine, jid)  # the worker was OOM-killed: nobody calls fail()
+        jobs.reap_expired(engine)
+    s = _state(engine, jid)
+    assert s["state"] == "dead" and s["attempts"] == 3
+    with engine.connect() as c:
+        n = c.execute(
+            text("select count(*) from review_item where kind = 'job_failed' and payload->>'job_id' = :j"),
+            {"j": str(jid)},
+        ).scalar()
+    assert n == 1

@@ -69,6 +69,7 @@ class Point:
     src: str
     src_label: str | None
     derivation: str
+    unit_ucum: str | None = None  # the printed unit in UCUM, the unit ref_low and ref_high are in
 
     @property
     def shown(self) -> str:
@@ -154,7 +155,8 @@ def _load_points(
     rows = conn.execute(
         text(
             "select o.id, o.alias_group, o.loinc, o.effective_at, o.recorded_at, o.value_num, o.value_canonical,"
-            " o.unit_canonical, o.printed_value, o.printed_unit, o.printed_ref_range, o.ref_low, o.ref_high,"
+            " o.unit_canonical, o.printed_value, o.printed_unit, o.unit_ucum, o.printed_ref_range, o.ref_low,"
+            " o.ref_high,"
             " o.interpretation, o.printed_flag, o.method, o.src_id, o.derivation_version, o.sensitivity, s.label"
             " from observation o join src s on s.id = o.src_id"
             f" where {' and '.join(where)} order by o.effective_at, o.recorded_at, o.id"
@@ -181,6 +183,7 @@ def _load_points(
                 canonical_unit=r["unit_canonical"],
                 printed_value=r["printed_value"],
                 unit=r["printed_unit"],
+                unit_ucum=r["unit_ucum"],
                 ref=r["printed_ref_range"],
                 ref_low=r["ref_low"],
                 ref_high=r["ref_high"],

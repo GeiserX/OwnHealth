@@ -102,6 +102,7 @@ export interface ReviewItem {
 		| 'rederive_diff'
 		| 'genome_reinterpretation'
 		| 'job_failed'
+		| 'pending_document'
 		| 'restore_check_failed';
 	profile_id: Uuid | null;
 	status: 'open' | 'accepted' | 'rejected' | 'dismissed';
@@ -157,7 +158,7 @@ export interface MarkerRow {
 	stale: boolean;
 	date: IsoDate;
 	src: string; // src id
-	src_label: string; // 'LabNorte · 2026-09-14 · p2'
+	src_label: string | null; // 'LabNorte · 2026-09-14 · p2'; null until the importer labels the source
 	spark: number[];
 	band: [number, number] | null;
 	rule?: string | null; // rule id that set the status; src is null for wearable rows (no single source)
@@ -169,9 +170,10 @@ export interface SystemCard {
 	status: Status;
 	markers: MarkerRow[];
 	newest: IsoDate | null;
-	rule: string; // 'cardiometabolic.yaml'
-	rule_file?: string; // the pack file of the system
-	withheld?: boolean; // true when the token's scopes do not cover this card (status 'nodata', no markers)
+	rule: string; // the id of the rule that set the status; the pack file when the card is withheld
+	rule_file?: string; // the pack file of the system, e.g. 'cardiometabolic.yaml'
+	withheld?: boolean; // true when the access does not cover this card (status 'nodata' is a placeholder, no markers)
+	needs?: string; // the scope a withheld card needs, e.g. 'read:labs' (requested from lane E)
 }
 
 export interface MedChip {
@@ -278,7 +280,7 @@ export interface GenomeOverview {
 		imported_at: IsoDateTime;
 		db_versions: Record<string, string>;
 	} | null;
-	tiles: { key: string; value: string; detail: string }[];
+	tiles: { key: string; value: string; detail: string; actionable?: number; genes?: string; hidden?: number }[];
 	findings: GenomeFinding[];
 	coverage: { target: string; panel: string | null; state: 'assessed' | 'partial' | 'not_assessed'; reason: string | null }[];
 	withheld: { sensitive: number; minor_rule: number };
@@ -569,7 +571,7 @@ export interface GenomeView {
 		raw_files: Record<string, boolean>;
 		src: string;
 	} | null;
-	tiles: { key: string; value: string; detail: string }[];
+	tiles: { key: string; value: string; detail: string; actionable?: number; genes?: string; hidden?: number }[];
 	findings: GenomeFindingFull[];
 	coverage: { target: string; panel: string | null; state: 'assessed' | 'partial' | 'not_assessed'; reason: string | null }[];
 	not_assessed: { gene?: string; panel: string; reason: string }[];

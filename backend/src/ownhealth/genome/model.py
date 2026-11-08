@@ -22,7 +22,7 @@ CATEGORIES: tuple[str, ...] = (
 )
 EVIDENCE: tuple[str, ...] = ("E1", "E2", "E3", "E4")
 CONFIDENCE: tuple[str, ...] = ("high", "medium", "low", "unconfirmed")
-NOTICE = "Information for personal records, not a diagnosis. Discuss findings with a clinician."
+NOTICE = "Information for personal records, not a diagnosis."
 
 
 @dataclass(frozen=True)

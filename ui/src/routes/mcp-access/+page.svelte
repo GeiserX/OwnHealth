@@ -166,17 +166,18 @@
 			{:else}
 				<div style="overflow-x:auto">
 				<table class="t nw">
-					<thead><tr><th>{t('i2_a_time')}</th><th>{t('i2_a_who')}</th><th>{t('i2_a_tool')}</th><th>{t('profile')}</th><th>{t('i2_a_res')}</th><th style="text-align:right">{t('i2_a_out')}</th><th>{t('i2_a_result')}</th></tr></thead>
+					<thead><tr><th>{t('i2_a_time')}</th><th>{t('i2_a_who')}</th><th>{t('i2_a_tool')}</th><th>{t('profile')}</th><th>{t('i2_a_result')}</th><th style="text-align:right">{t('i2_a_out')}</th><th>{t('i2_a_res')}</th></tr></thead>
 					<tbody>
 						{#each audit.data ?? [] as a (a.id)}
 							<tr>
 								<td class="num muted" title={a.ts}>{stamp(a.ts)}</td>
-								<td>{a.actor}{a.via === 'mcp' ? '' : ` · ${a.via}`}</td>
-								<td class="mono clip" title={a.tool ?? a.action}>{toolName(a)}</td>
+								<td><div class="cl" style="max-width:160px" title={a.actor}>{a.actor}{a.via === 'mcp' ? '' : ` · ${a.via}`}</div></td>
+								<td class="mono"><div class="cl" style="max-width:170px" title={a.tool ?? a.action}>{toolName(a)}</div></td>
 								<td>{a.profile ?? '—'}</td>
-								<td class="muted" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">{resources(a)}</td>
-								<td class="num" style="text-align:right">{int(a.rows_out)}</td>
+								<!-- Result sits before the free-width columns so a denied call is never pushed off the card. -->
 								<td><span class="pill {resultTone(a.result_kind)}"><i aria-hidden="true"></i>{a.result_kind ?? 'ok'}</span></td>
+								<td class="num" style="text-align:right">{int(a.rows_out)}</td>
+								<td class="muted"><div class="cl" style="max-width:200px" title={resources(a)}>{resources(a)}</div></td>
 							</tr>
 						{:else}
 							<tr><td colspan="7"><div class="empty">{audit.loading ? t('loading') : t('i2_audit_none')}</div></td></tr>
@@ -248,9 +249,9 @@
 	td .chip {
 		margin: 1px 0;
 	}
-	td.clip {
-		max-width: 190px;
+	.cl {
 		overflow: hidden;
 		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 </style>

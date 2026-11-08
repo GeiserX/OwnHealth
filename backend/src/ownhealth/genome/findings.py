@@ -114,7 +114,7 @@ def _not_assessed(c: dict) -> dict:
 def _title(row: dict) -> str:
     fact = row["fact"]
     value = fact.get("value") or {}
-    head = row["gene"] or value.get("condition") or row["category"]
+    head = row["gene"] or row["category"]  # validated fields only: a facts file's prose never goes out bare
     parts = [p for p in (row["diplotype"], row["phenotype"]) if p]
     if not parts and value.get("pgs_id"):
         parts = [value["pgs_id"], f"{value['percentile']}th percentile" if "percentile" in value else ""]

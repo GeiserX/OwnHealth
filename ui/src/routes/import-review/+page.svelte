@@ -9,6 +9,7 @@
 		addAlias,
 		bulkAccept,
 		dismissReview,
+		documentFileUrl,
 		getDocument,
 		listDocuments,
 		listJobs,
@@ -24,6 +25,7 @@
 	import PageView, { type Box } from '#lib/components/pages2/PageView.svelte';
 	import ReviewRow from '#lib/components/pages2/ReviewRow.svelte';
 	import UploadPanel from '#lib/components/pages2/UploadPanel.svelte';
+	import ManualEntry from '#lib/components/ManualEntry.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { app, currentProfile } from '#lib/state/app.svelte';
@@ -41,6 +43,12 @@
 	let checked = $state<Record<string, boolean>>({});
 	let rejectingDoc = $state(false);
 	let docReason = $state('');
+	// A photo or scanned PDF (pending_document): its values are typed in by hand, then the item closes.
+	let entering = $state<string | null>(null);
+	const docName = (id: string | null) => {
+		const d = (queue.data?.docs ?? []).find((x) => x.id === id);
+		return d ? docLabel(d) : '';
+	};
 
 	function load() {
 		const slug = prof?.slug;
@@ -104,7 +112,10 @@
 	const duplicate = $derived(rows.flatMap((i) => ((i.payload as { checks?: { reason: string | null; detail: string | null }[] }).checks ?? []).filter((c) => c.reason === 'duplicate'))[0] ?? null);
 	const bulkable = $derived(rows.filter((i) => !i.reasons.length && (i.row_conf ?? 0) >= THRESHOLD).length);
 	const picked = $derived(rows.filter((i) => checked[i.id]).map((i) => i.id));
-	const agentCount = $derived(items.filter((i) => i.kind === 'agent_proposal').length);
+	// Only this document's rows: the footer must not claim an agent proposed rows a PDF import produced.
+	const agentCount = $derived(
+		rows.filter((i) => i.proposed_by_token != null).length + items.filter((i) => i.kind === 'agent_proposal' && i.document_id === docId).length
+	);
 
 	function pick(id: string) {
 		selected = id;
@@ -302,6 +313,10 @@
 						<td style="white-space:nowrap;text-align:right">
 							{#if it.kind === 'candidate_row' && it.document_id}
 								<a class="btn sm" href="?doc={it.document_id}">{t('i2_open_doc')}</a>
+							{:else if it.kind === 'pending_document' && prof}
+								{#if it.document_id}<a class="btn sm" href={documentFileUrl(it.document_id)} target="_blank" rel="noopener">{t('i2_open_doc')}</a>{/if}
+								<button class="btn sm pri" onclick={() => (entering = entering === it.id ? null : it.id)} aria-expanded={entering === it.id}>{t('me_enter')}</button>
+								<button class="btn sm" onclick={() => act(() => dismissReview(it.id, entering === it.id ? 'entered by hand' : undefined))} disabled={busy}>{entering === it.id ? t('me_done') : t('i2_dismiss')}</button>
 							{:else if it.kind === 'agent_proposal' || it.kind === 'fhir_unmapped'}
 								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
 								<button class="btn sm no" onclick={() => act(() => rejectReview(it.id, 'rejected in review'))} disabled={busy}>{t('i2_reject')}</button>
@@ -310,6 +325,11 @@
 							{/if}
 						</td>
 					</tr>
+					{#if entering === it.id && prof}
+						<tr><td colspan="4">
+							<ManualEntry profile={prof.slug} kinds={['observation', 'medication', 'immunization']} note={tf('me_from_doc', { doc: docName(it.document_id) || '—' })} onsaved={() => null} />
+						</td></tr>
+					{/if}
 				{/each}
 			</tbody>
 		</table>

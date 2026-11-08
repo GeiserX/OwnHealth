@@ -8,7 +8,7 @@
 # Retention: OWNHEALTH_RESTIC_KEEP (default 7 daily, 5 weekly, 12 monthly snapshots).
 set -eu
 . "$(dirname "$0")/common.sh"
-RUN=${OWNHEALTH_RUN-docker compose exec -T app}
+RUN=${OWNHEALTH_RUN-docker compose run --rm -T admin}
 KEEP=${OWNHEALTH_RESTIC_KEEP:---keep-daily 7 --keep-weekly 5 --keep-monthly 12}
 
 log "writing $STAGING"

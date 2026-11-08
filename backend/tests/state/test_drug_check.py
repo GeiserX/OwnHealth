@@ -181,3 +181,10 @@ def test_a_drug_without_a_level_a_pair(sconn, seeded):
     out = state.check_drug(sconn, seeded.pid("alex"), "fluoxetine", scopes=ALL_SCOPES, as_of=AS_OF)
     assert out["pgx"] == [] and out["guidance"] == []
     assert any("no CPIC level A gene pair" in n for n in out["not_assessed"])
+
+
+def test_lab_reasons_follow_the_language(sconn, seeded):
+    en = state.check_drug(sconn, seeded.pid("alex"), "Plavix", scopes=ALL_SCOPES, as_of=AS_OF)
+    es = state.check_drug(sconn, seeded.pid("alex"), "Plavix", scopes=ALL_SCOPES, as_of=AS_OF, lang="es")
+    reasons = lambda out: {lab["alias_group"]: lab["reason"] for lab in out["relevant_labs"]}  # noqa: E731
+    assert reasons(en)["egfr"] == "kidney function" and reasons(es)["egfr"] == "función renal"

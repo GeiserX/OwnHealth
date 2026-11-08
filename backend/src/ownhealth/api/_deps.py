@@ -13,7 +13,7 @@ from ownhealth.auth import principal as principal_mod
 from ownhealth.auth.sessions import COOKIE
 from ownhealth.blobs import BlobStore
 from ownhealth.config import Settings
-from ownhealth.core.access import Permission, Principal, require
+from ownhealth.core.access import AccessDenied, Permission, Principal, require
 from ownhealth.runtime import Runtime
 
 
@@ -44,6 +44,10 @@ def get_principal(request: Request, conn: Connection = Depends(get_conn)) -> Pri
     )
     if p is None:
         raise HTTPException(status_code=401, detail={"code": "unauthenticated", "message": "Log in first."})
+    if p.kind == "token":
+        # A PAT works only on /mcp (mcp/auth.py), where the review queue, the rate limit, the egress
+        # budget, the genome and page caps and the identity mode apply. REST is the person's web app.
+        raise AccessDenied("forbidden", "Access tokens work only on /mcp. Use the web app.")
     csrf.check(request, p, request.app.state.runtime.settings.base_url)
     return p
 

@@ -36,6 +36,9 @@ def sqlalchemy_url(url: str) -> str:
     return url
 
 
+DEV_SECRET_KEY = "dev-insecure-secret-change-me"  # public: create_app refuses it outside dev_auth and demo
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str = "postgresql://ownhealth:ownhealth@127.0.0.1:5432/ownhealth"
@@ -44,7 +47,7 @@ class Settings:
     static_dir: Path = PACKAGE_DIR / "static"
     base_url: str = "http://127.0.0.1:8080"
     default_locale: str = "es"
-    secret_key: str = "dev-insecure-secret-change-me"
+    secret_key: str = DEV_SECRET_KEY
     demo: bool = False
     # Unauthenticated requests act as the first owner user. Never on a real install.
     dev_auth: bool = False

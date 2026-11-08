@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import add_obs
 from mcp_checks import assert_envelope, err, facts, sc
 from sqlalchemy import text
 
@@ -71,7 +72,8 @@ async def test_trend_keeps_both_codes_stats_and_annotations(world, make_token, c
     async with connect(make_token()) as c:
         env = sc(await call(c, "get_trend", {"profile": "alex", "code": "LOINC:13457-7", "window": "P6Y"}))
     d = env["data"]
-    assert d["codes"] == ["LOINC:13457-7", "LOINC:18262-6"] and d["canonical_unit"] == "mg/dL", d
+    # tokens default to units=si, so the canonical block is in mmol/L (mcp.md 5.3)
+    assert d["codes"] == ["LOINC:13457-7", "LOINC:18262-6"] and d["canonical_unit"] == "mmol/L", d
     dates = [p["date"] for p in d["points"]]
     assert dates == sorted(dates) and len(dates) == 8 and d["resolution"] == "raw"
     assert d["stats"]["n"] == 8 and d["stats"]["trend"] in ("increasing", "decreasing", "no significant trend")
@@ -216,3 +218,40 @@ async def test_wearable_trend_uses_the_day_total_for_summed_metrics(world, make_
     async with connect(make_token(scopes=ALL_SCOPES)) as c:
         env = sc(await call(c, "get_trend", {"profile": "alex", "code": "sleep_asleep", "window": "all"}))
     assert [p["value"] for p in env["data"]["points"]] == [420]
+
+
+async def test_canonical_follows_the_token_unit_preference(world, make_token, connect, fakes):
+    args = {"profile": "alex", "loinc": "13457-7", "detail": "full"}
+    for units, unit in (("si", "mmol/L"), ("conventional", "mg/dL")):
+        async with connect(make_token(units=units)) as c:
+            found = sc(await call(c, "search_observations", args))["data"]["results"]
+            trend = sc(await call(c, "get_trend", {"profile": "alex", "code": "LOINC:13457-7", "window": "all"}))
+        assert found and {r["canonical"]["unit"] for r in found if r.get("canonical")} == {unit}, (units, found)
+        assert trend["data"]["canonical_unit"] == unit
+        assert all("canonical" in p for p in trend["data"]["points"])
+    async with connect(make_token(units="as_reported")) as c:
+        found = sc(await call(c, "search_observations", args))["data"]["results"]
+    assert found and all(r.get("canonical") is None for r in found)
+
+
+async def test_get_source_withholds_page_text_of_a_sensitive_document(world, make_token, engine, connect, fakes):
+    with engine.begin() as conn:
+        add_obs(
+            conn,
+            world.pid("alex"),
+            "VIH Ac",
+            "1",
+            "{index}",
+            "hiv_ab",
+            None,
+            "2026-09-14",
+            sensitivity=["sexual_health"],
+            document_id=world.doc_id,
+        )
+    async with connect(make_token(scopes=ALL_SCOPES - {"read:sensitive"})) as c:
+        env = sc(await call(c, "get_source", {"src_id": world.src["vitd"], "include_text": True}))
+    assert env["data"]["text"] is None and "sensitive" in env["withheld"]["by_scope"]
+    assert "crop_url" not in env["data"]
+    async with connect(make_token(scopes=ALL_SCOPES)) as c:
+        env = sc(await call(c, "get_source", {"src_id": world.src["vitd"], "include_text": True}))
+    assert env["data"]["text"]["text"] == "Colesterol LDL"

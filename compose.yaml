@@ -1,7 +1,28 @@
 # OwnHealth: the app and its Postgres. `cp .env.example .env`, set the secrets, `docker compose up -d`.
 name: ownhealth
 
+# Two database roles. `ownhealth` owns the tables: the one-shot `admin` service uses it to migrate and
+# then grants the app its rows (deploy/db/app-role.sql). The app connects as `ownhealth_app`, which owns
+# nothing, so it cannot ALTER a table, disable a trigger, or UPDATE, DELETE or TRUNCATE the audit log.
 services:
+  admin:
+    image: drumsergio/ownhealth:0.1.0
+    build: .
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      OWNHEALTH_DATABASE_URL: postgresql://ownhealth@db:5432/ownhealth
+      OWNHEALTH_DATA_DIR: /data
+    command: ["sh", "-c", "ownhealth migrate && sh /opt/ownhealth-db/app-role.sh"]
+    healthcheck:
+      disable: true
+    volumes:
+      - ownhealth-data:/data
+      - ./deploy/db:/opt/ownhealth-db:ro
+
   app:
     image: drumsergio/ownhealth:0.1.0
     build: .
@@ -9,9 +30,13 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      admin:
+        condition: service_completed_successfully
     env_file: .env
     environment:
-      OWNHEALTH_DATABASE_URL: postgresql://ownhealth@db:5432/ownhealth
+      OWNHEALTH_DATABASE_URL: postgresql://ownhealth_app@db:5432/ownhealth
+      OWNHEALTH_DB_PASSWORD: ${OWNHEALTH_APP_DB_PASSWORD:?set OWNHEALTH_APP_DB_PASSWORD in .env}
+      OWNHEALTH_RUN_MIGRATIONS: "0" # the admin service migrated as the owner
       OWNHEALTH_DATA_DIR: /data
       # Throwaway demo only (docs/quickstart.md step 5); empty means off.
       OWNHEALTH_DEMO: ${OWNHEALTH_DEMO:-}

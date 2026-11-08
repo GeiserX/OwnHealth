@@ -25,6 +25,11 @@ FRESHNESS_SCOPE = {
     "records": "read:records",
     "genome": "read:genome",
 }
+# Keep a 5-year profile under 2 KB whole (mcp.md 5.1) without paging: a flag keeps its template text
+# (the wording that is information, not diagnosis) and drops the structured copies of what the text
+# says; a stale or never-measured gap keeps its structured fields and drops the text that repeats them.
+FLAG_FIELDS = ("rank", "kind", "rule", "code", "text", "src")
+GAP_DROP = {"stale": ("text",), "never_measured": ("text",)}
 GENOME_FLAG_KINDS = {"gene_drug", "gene_lab", "GENE_DRUG", "GENE_LAB"}
 
 DESCRIPTION = (
@@ -83,6 +88,16 @@ def status_data(call: Call) -> tuple[dict, dict]:
             if k in fresh and scope not in scopes:
                 fresh.pop(k)
                 by_scope.add(k)
+    if isinstance(rendered.get("flags"), list):
+        rendered["flags"] = [
+            {k: f[k] for k in FLAG_FIELDS if k in f} if isinstance(f, dict) and f.get("text") else f
+            for f in rendered["flags"]
+        ]
+    for key, fields in GAP_DROP.items():
+        for item in rendered.get(key) or []:
+            if isinstance(item, dict) and item.get("name"):
+                for f in fields:
+                    item.pop(f, None)
     withheld = dict(extra.pop("withheld", None) or {})
     withheld["by_scope"] = sorted(set(withheld.get("by_scope") or []) | by_scope)
     extra["withheld"] = withheld
@@ -103,7 +118,7 @@ def get_health_status(call: Call) -> Result:
         data=data,
         pageable="flags" if isinstance(flags, list) else None,
         budget=2000,
-        max_data_bytes=state.MAX_STATE_BYTES,
+        max_bytes=state.MAX_STATE_BYTES,
         limitations=extra.get("limitations") or [],
         not_assessed=extra.get("not_assessed") or [],
         evidence=extra.get("evidence") or [],

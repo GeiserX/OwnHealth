@@ -10,7 +10,7 @@
 # The live database and blob store are only read. A backup that was never restored counts as missing.
 set -eu
 . "$(dirname "$0")/common.sh"
-RUN=${OWNHEALTH_RUN-docker compose exec -T app}
+RUN=${OWNHEALTH_RUN-docker compose run --rm -T admin}
 
 $RUN rm -rf "$SCRATCH"
 log "restic restore $SNAPSHOT"

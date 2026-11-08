@@ -18,6 +18,101 @@ CHIP_ASSAYS = ("chip", "chip_imputed")
 UNCONFIRMED_ON_CHIP = ("monogenic_pathogenic", "acmg_sf", "carrier")
 MAX_ERRORS = 20
 
+# Fields that reach agents bare (and templates such as the drug check) must be vocabulary, not prose:
+# an HGNC-shaped gene, a lower-case drug name, a MONDO id, and phenotype / diplotype terms made of
+# known phenotype words and allele-shaped tokens (each with a digit, *, /, > or :).
+GENE_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{0,19}$")
+DRUG_RE = re.compile(r"^[a-z][a-z0-9 ,/()-]{0,59}$")
+MONDO_RE = re.compile(r"^MONDO:\d{7}$")
+_CODE_TOKEN = re.compile(r"^[A-Za-z0-9*:./+()>_-]{1,24}$")
+_CODE_MARK = re.compile(r"[0-9*/>:]")
+TERM_WORDS = frozenset(
+    {
+        "poor",
+        "intermediate",
+        "normal",
+        "rapid",
+        "ultrarapid",
+        "extensive",
+        "indeterminate",
+        "metabolizer",
+        "metaboliser",
+        "function",
+        "decreased",
+        "increased",
+        "reduced",
+        "possible",
+        "likely",
+        "positive",
+        "negative",
+        "carrier",
+        "non-carrier",
+        "noncarrier",
+        "activity",
+        "uncertain",
+        "unknown",
+        "high",
+        "low",
+        "risk",
+        "deficient",
+        "deficiency",
+        "het",
+        "hom",
+        "homozygous",
+        "heterozygous",
+        "hemizygous",
+        "wild-type",
+        "wildtype",
+        "variant",
+        "allele",
+        "alleles",
+        "no",
+        "not",
+        "result",
+        "called",
+        "favorable",
+        "unfavorable",
+        "status",
+    }
+)
+MAX_TERM_TOKENS = 6
+
+
+def term_ok(value, gene: str | None = None, max_len: int = 60) -> bool:
+    """A phenotype or diplotype term: short, and every word a phenotype word, the gene, or allele-shaped."""
+    if not isinstance(value, str) or not 0 < len(value) <= max_len:
+        return False
+    tokens = value.split()
+    if not tokens or len(tokens) > MAX_TERM_TOKENS:
+        return False
+    for t in tokens:
+        if t.casefold() in TERM_WORDS or (gene and t == gene):
+            continue
+        if _CODE_TOKEN.match(t) and _CODE_MARK.search(t):
+            continue
+        return False
+    return True
+
+
+def _vocabulary_errors(where: str, fact: dict) -> list[str]:
+    errors = []
+    gene = fact.get("gene")
+    if gene is not None and not (isinstance(gene, str) and GENE_RE.match(gene)):
+        errors.append(f"{where}.gene: not an HGNC gene symbol")
+    value = fact.get("value") if isinstance(fact.get("value"), dict) else {}
+    for key in ("phenotype", "diplotype"):
+        if value.get(key) is not None and not term_ok(value[key], gene):
+            errors.append(f"{where}.value.{key}: not a phenotype or allele term")
+    for k, g in enumerate(fact.get("drug_guidance") or []):
+        if not (isinstance(g.get("drug"), str) and DRUG_RE.match(g["drug"])):
+            errors.append(f"{where}.drug_guidance[{k}].drug: not a drug name")
+        if g.get("phenotype") is not None and not term_ok(g["phenotype"], gene):
+            errors.append(f"{where}.drug_guidance[{k}].phenotype: not a phenotype term")
+    cond = fact.get("condition") if isinstance(fact.get("condition"), dict) else {}
+    if cond.get("mondo") is not None and not (isinstance(cond["mondo"], str) and MONDO_RE.match(cond["mondo"])):
+        errors.append(f"{where}.condition.mondo: not a MONDO id")
+    return errors
+
 
 @cache
 def schema_document() -> dict:
@@ -77,7 +172,12 @@ def validate_facts(doc: dict) -> list[str]:
                 errors.append(f"{where}.variants[{j}]: a variant needs genotype.call_state")
         if chip and fact["category"] in UNCONFIRMED_ON_CHIP and fact["confidence"]["level"] != "unconfirmed":
             errors.append(f"{where}.confidence.level: a {fact['category']} fact from a chip must be 'unconfirmed'")
+        errors += _vocabulary_errors(where, fact)
         texts = [("summary", fact.get("summary"))]
+        cond = fact.get("condition") if isinstance(fact.get("condition"), dict) else {}
+        texts += [("condition.name", cond.get("name"))]
+        value = fact.get("value") if isinstance(fact.get("value"), dict) else {}
+        texts += [("value.condition", value.get("condition"))]
         texts += [(f"limitations[{k}]", t) for k, t in enumerate(fact.get("limitations") or [])]
         texts += [
             (f"drug_guidance[{k}].recommendation", g.get("recommendation"))
@@ -86,6 +186,8 @@ def validate_facts(doc: dict) -> list[str]:
         for name, t in texts:
             if isinstance(t, str) and _CONTROL.search(t):
                 errors.append(f"{where}.{name}: control characters are not allowed in free text")
+            if isinstance(t, str) and len(t) > 2000:
+                errors.append(f"{where}.{name}: longer than 2000 characters")
     for i, f in enumerate(doc["files"]):
         if f["role"] in ("calls_vcf", "gvcf", "chip_sites") and not f.get("index_sha256"):
             errors.append(f"$.files[{i}]: a {f['role']} file needs its tabix index (index_path, index_sha256)")

@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from sqlalchemy import Connection, text
 
+from ownhealth import normalize
 from ownhealth.state.engine import Evaluation, Marker, med_drug
 from ownhealth.state.pack import Pack, cpic_snapshot
 from ownhealth.state.rendering import window_months
@@ -62,9 +63,19 @@ def _band(m: Marker) -> list[float] | None:
     p = m.latest
     if not p or (p.ref_low is None and p.ref_high is None):
         return None
+    low, high = p.ref_low, p.ref_high
+    # the range is printed in the report's unit; the spark is in the canonical unit
+    if p.canonical is not None and p.unit_ucum and p.canonical_unit and p.unit_ucum != p.canonical_unit:
+        conv = [
+            normalize.convert(b, p.unit_ucum, p.canonical_unit, alias_group=m.key) if b is not None else None
+            for b in (low, high)
+        ]
+        if any(c is None and b is not None for c, b in zip(conv, (low, high), strict=True)):
+            return None
+        low, high = conv
     vals = [x.comparable() for x in m.points if x.comparable() is not None]
-    low = p.ref_low if p.ref_low is not None else Decimal(0)
-    high = p.ref_high if p.ref_high is not None else max([low * Decimal("1.33"), *vals])
+    low = low if low is not None else Decimal(0)
+    high = high if high is not None else max([low * Decimal("1.33"), *vals])
     return [float(low), float(high)]
 
 
@@ -146,6 +157,7 @@ def build_dashboard(
                 "rule": s.rule if allowed else sys_def.file,
                 "rule_file": sys_def.file,
                 "withheld": not allowed,
+                **({} if allowed else {"needs": "read:labs" if sys_def.source == "labs" else "read:wearables"}),
             }
         )
 
@@ -254,7 +266,10 @@ def build_dashboard(
         hidden = ev.genome_withheld.get("sensitive", 0) + ev.genome_withheld.get("minor_rule", 0)
         assay = ev.genome_assay or {}
         genome = {
-            "summary": t("genome.summary", lang, pgx=len(pgx), carrier=len(carriers), hidden=hidden),
+            "summary": " · ".join(
+                t(f"genome.summary.{k}", lang, n=n)
+                for k, n in (("pgx", len(pgx)), ("carrier", len(carriers)), ("hidden", hidden))
+            ),
             "chips": chips,
             "hidden": hidden,
             "source": assay.get("source_tool") or assay.get("pipeline"),

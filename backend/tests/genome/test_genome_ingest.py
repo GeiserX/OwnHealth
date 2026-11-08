@@ -244,3 +244,54 @@ def test_upload_job_end_to_end(engine, committed_family, blobs, settings, alex_r
             text("select payload from review_item where kind = 'job_failed' and profile_id = :p"), {"p": lucia}
         ).scalar_one()
         assert "ownhealth.genome-facts/v9" in item["error"]
+
+
+def _copy_of_facts_without_files(facts):
+    """Someone holds only the shareable facts JSON (it names the raw files by sha256)."""
+    copied = copy.deepcopy(facts)
+    copied["provenance"]["generated_utc"] = "2026-11-02T09:00:00Z"  # other bytes than the original
+    return copied
+
+
+@pytest.mark.parametrize("where", ["other_household", "same_household"])
+def test_a_facts_file_cannot_attach_raw_files_another_profile_uploaded(conn, family, blobs, alex_genome, where):
+    """A sha256 on its own grants nothing: raw files already in the blob store are linked only when
+    they were uploaded with this import or already belong to this profile."""
+    from ownhealth.demo.family import create_rivera_family
+    from ownhealth.genome import Gate, lookup_variant
+
+    _doc, facts, _ = alex_genome
+    copied = _copy_of_facts_without_files(facts)
+    if where == "other_household":
+        other = create_rivera_family(conn, f"Rivera {secrets.token_hex(3)}")
+        household, profile = other.household_id, other.profiles["alex"]
+    else:  # Sam's profile in Alex's household, under another sample id so the sample guard does not fire
+        copied["subject"]["sample_id"] = "SR-COPY-1"
+        copied["subject"].pop("fingerprint", None)
+        household, profile = family.household_id, family.profiles["sam"]
+    _, summary = synthetic.seed_genome(conn, blobs, household_id=household, profile_id=profile, facts=copied)
+    assert summary.reasons.get("raw_file_missing") == 2
+    blobs_row = conn.execute(
+        text("select vcf_blob, gvcf_blob from genome_dataset where profile_id = :p and status = 'current'"),
+        {"p": profile},
+    ).one()
+    assert blobs_row == (None, None)
+    answer = lookup_variant(conn, blobs, profile, gate=Gate(include_sensitive=True, minor=False), rsid="rs4244285")
+    assert all(c.get("basis") != "vcf" for c in answer["calls"])
+
+
+def test_a_reimport_on_the_same_profile_keeps_its_raw_files(conn, family, blobs, alex_genome):
+    _doc, facts, _ = alex_genome
+    _, summary = synthetic.seed_genome(
+        conn,
+        blobs,
+        household_id=family.household_id,
+        profile_id=family.profiles["alex"],
+        facts=_copy_of_facts_without_files(facts),
+    )
+    assert "raw_file_missing" not in summary.reasons
+    vcf = conn.execute(
+        text("select vcf_blob from genome_dataset where profile_id = :p and status = 'current'"),
+        {"p": family.profiles["alex"]},
+    ).scalar()
+    assert vcf is not None

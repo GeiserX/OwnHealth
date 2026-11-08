@@ -72,3 +72,9 @@ def test_the_quotes_alone_would_fail_the_lint(sconn, seeded):
     out = state.check_drug(sconn, seeded.pid("sam"), "codeine", scopes=ALL_SCOPES, as_of=AS_OF)
     assert lint(out) == []
     assert lint(out, skip_keys=frozenset()) != []  # "Use codeine label recommended ..." is an imperative
+
+
+def test_the_genome_notice_is_information_not_advice():
+    from ownhealth.genome.model import NOTICE
+
+    assert imperative_phrases(NOTICE) == [], NOTICE

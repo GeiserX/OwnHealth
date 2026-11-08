@@ -29,6 +29,8 @@ In v0.1:
 - Passkeys, an append-only audit log, a full export, and restic backups with a scripted restore test
 - Dark theme, Spanish and English
 
+Limits in v0.1. Lab PDFs are read with generic table rules plus one template, for the fictional LabNorte lab. Real lab layouts come later as contributed templates. The LOINC set is a curated subset of 202 codes, so a test outside it waits in review.
+
 Later: email and folder inboxes, local OCR, imaging (DICOM), more wearables and US patient portals. See the [roadmap](docs/ROADMAP.md).
 
 ## Quick start

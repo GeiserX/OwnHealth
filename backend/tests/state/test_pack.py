@@ -42,6 +42,7 @@ def test_every_drug_in_rules_resolves_to_the_cpic_table():
     for drug, labs in p.drug_labs.items():
         assert drug in p.drugs
         assert all(lab["lab"] in p.analytes for lab in labs), drug
+        assert all(set(lab["reason"]) == {"en", "es"} for lab in labs), drug
 
 
 def test_override_changes_version_and_hash(tmp_path, monkeypatch):
@@ -83,3 +84,12 @@ def test_cpic_snapshot_is_cc0_and_complete():
                  ("warfarin", "CYP2C9"), ("warfarin", "VKORC1"), ("fluorouracil", "DPYD"), ("azathioprine", "TPMT"),
                  ("azathioprine", "NUDT15")]:  # fmt: skip
         assert pair in pairs
+
+
+def test_a_count_of_one_reads_singular():
+    p = load_pack()
+    assert p.text("subtitle.wearables", "en", n=1) == "wearables synced 1 day ago"
+    assert p.text("subtitle.wearables", "es", n=1) == "wearables sincronizados hace 1 día"
+    assert p.text("subtitle.wearables", "en", n=3) == "wearables synced 3 days ago"
+    assert p.text("genome.summary.carrier", "es", n=1) == "1 hallazgo de portador"
+    assert p.text("genome.summary.carrier", "en", n=2) == "2 carrier findings"

@@ -78,6 +78,7 @@ def test_a_viewer_gets_the_summary_but_no_drug_check(client_as):
     d = sam.get("/api/profiles/alex/dashboard", params={"as_of": "2026-11-07"})
     assert d.status_code == 200, d.text
     assert all(card["withheld"] for card in d.json()["systems"])  # read:summary only: no lab values
+    assert {c["needs"] for c in d.json()["systems"]} == {"read:labs", "read:wearables"}
     s = sam.get("/api/profiles/alex/status", params={"as_of": "2026-11-07"}).json()
     assert s["withheld"]["by_scope"]
 

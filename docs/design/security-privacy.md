@@ -171,7 +171,7 @@ Effective permission for any read, from any surface, the same formula as [mcp.md
 
 `token scopes ∩ grant categories for that profile − profile.locks`
 
-The browser session acts as a token with all scopes, so the same function decides UI, REST, MCP and export. `tools/list` returns only tools the token can call.
+The browser session acts as a token with all scopes, so the same function decides UI, REST, MCP and export. Personal access tokens reach `/mcp` only: every `/api` route answers 403 `forbidden` to a bearer token, so the review queue, rate limit, egress budget, page and genome caps and identity mode apply to every agent read. `tools/list` returns only tools the token can call.
 
 ### 6.2 Roles
 
@@ -266,7 +266,7 @@ https://restic.readthedocs.io/
 
 - Table `audit_event(ts, actor_kind[user|token|share|system], actor_id, client_id, token_id, profile_id, action, tool_or_route, resource_type, resource_ids[], src_ids[], fact_count, bytes, via[ui|rest|mcp|share|export], ip, user_agent, protocol_version)`.
 - No payloads, no argument values that carry health content. Search arguments are stored as a hash plus a category ("loinc lookup"), so the log does not itself say "searched HIV test".
-- The app's Postgres role has `INSERT` and `SELECT` only on this table; `UPDATE`, `DELETE` and `TRUNCATE` are revoked and a trigger rejects them.
+- The app's Postgres role has `INSERT` and `SELECT` only on this table; `UPDATE`, `DELETE` and `TRUNCATE` are revoked and a trigger rejects them. The app connects as `ownhealth_app`, which owns no table, so it cannot disable the trigger either; the owner role `ownhealth` only migrates and restores, in the one-shot `admin` compose service (`deploy/db/app-role.sql`).
 - User-visible per profile: "Claude Code (token `lab-review`) read 14 lab facts and 3 genome facts at 21:04".
 - Kept for the life of the profile. On profile deletion the profile's events keep ids only.
 

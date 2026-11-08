@@ -33,8 +33,8 @@ from sqlalchemy import Connection, text
 from ownhealth import normalize
 from ownhealth.blobs import BlobStore, sha256_hex_to_bytes
 from ownhealth.core.acceptance import DEFAULT_THRESHOLD, Check
-from ownhealth.core.observations import ObservationIn, confirm_observation, retract_observation, supersede_observation
-from ownhealth.core.provenance import SrcIn
+from ownhealth.core.observations import ObservationIn, confirm_observation, supersede_observation
+from ownhealth.core.provenance import SrcIn, region_label
 from ownhealth.core.review import (
     CandidateIn,
     ReviewItemIn,
@@ -50,6 +50,7 @@ from ownhealth.ingest.classify import fold, identity_match, name_tokens
 from ownhealth.ingest.pdf.extract import Extraction, extract
 from ownhealth.ingest.pdf.tables import Row, TableSpec
 from ownhealth.ingest.pdf.textlayer import ENGINE, ENGINE_VERSION, PageModel, injection_hits, read_pdf
+from ownhealth.ingest.retract import retract_document_facts
 
 FTS_CONFIG = {"es": "spanish", "en": "english", "de": "german", "fr": "french"}
 GROUND_PAD = 4.0
@@ -405,6 +406,7 @@ def _amended_item(conn: Connection, run_id: UUID, doc, cand: CandidateIn, old: d
         document_id=doc["id"],
         page_no=cand.page_no,
         bbox=cand.bbox,
+        label=region_label(conn, doc["id"], cand.page_no, obs.effective_at),
         extraction_run_id=run_id,
         candidate_row_id=row_id,
     )
@@ -467,11 +469,20 @@ def _accept_identity(conn: Connection, item: dict, user_id: UUID, edits: dict | 
     return []
 
 
+# Structured files run their own import again; everything else (PDF, image) the PDF one.
+_REIMPORT_KIND = {
+    "application/fhir+json": "import.fhir_bundle",
+    "application/fhir+ndjson": "import.fhir_bundle",
+    "application/zip": "import.apple_health",
+}
+
+
 def assign_document(
     conn: Connection, document_id: UUID, profile_id: UUID, *, user_id: UUID, skip_item: UUID | None = None
 ) -> int | None:
     """Confirm or change a document's profile. Open items of the old reading are dismissed, values
     already committed from it are retracted, and the import runs again for the new profile.
+    Everything the old reading brought in (observations, records, wearable samples) is withdrawn.
     Returns the new import job id (None when the profile did not change)."""
     from ownhealth.jobs import enqueue
 
@@ -502,25 +513,24 @@ def assign_document(
         {"d": document_id, "s": skip_item},
     ).scalars():
         dismiss(conn, item_id, user_id, "document moved to another profile")
-    for obs_id in conn.execute(
-        text("select id from observation where document_id = :d and status in ('current', 'provisional')"),
-        {"d": document_id},
-    ).scalars():
-        retract_observation(conn, obs_id, "document moved to another profile")
+    kind = _REIMPORT_KIND.get(doc["mime"], "import.pdf")
+    if doc["doc_type"] == "genomics":
+        raise ValueError("a genome-facts file cannot move; retract it and upload it to the right profile")
+    retract_document_facts(conn, document_id, "document moved to another profile")
     conn.execute(
         text("update document set profile_id = :p, identity_match = null where id = :d"),
         {"p": profile_id, "d": document_id},
     )
     return enqueue(
         conn,
-        "import.pdf",
+        kind,
         {
             "document_id": str(document_id),
             "profile_id": str(profile_id),
             "household_id": str(doc["household_id"]),
             "force": True,
         },
-        dedupe_key=f"import.pdf:{document_id}:{profile_id}",
+        dedupe_key=f"{kind}:{document_id}:{profile_id}",
     )
 
 

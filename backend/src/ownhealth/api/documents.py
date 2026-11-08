@@ -19,9 +19,10 @@ from ownhealth.api._deps import get_blobs, get_conn, get_principal
 from ownhealth.blobs import BlobStore
 from ownhealth.core.access import AccessDenied, Permission, Principal, effective_permission, require
 from ownhealth.core.audit import AuditEvent, write_audit
-from ownhealth.core.observations import retract_observation
+from ownhealth.core.documents import document_is_sensitive
 from ownhealth.core.review import dismiss
 from ownhealth.ingest.pdf import assign_document, page_words, render_page_png
+from ownhealth.ingest.retract import retract_document_facts
 
 router = APIRouter(tags=["documents"])
 
@@ -80,8 +81,12 @@ def _audit(conn, principal: Principal, profile_id, tool: str, ids: list[str], ac
     )
 
 
-def _doc(conn: Connection, principal: Principal, document_id: UUID, *, scope_extra: str | None = None):
-    """The document row and the caller's permission on its profile; 404 when it is not visible."""
+def _doc(
+    conn: Connection, principal: Principal, document_id: UUID, *, scope_extra: str | None = None, content: bool = False
+):
+    """The document row and the caller's permission on its profile; 404 when it is not visible.
+    `content` (the file, page renders, words) also needs read:sensitive when a value read from the
+    document is sensitive."""
     row = conn.execute(text(f"select {_COLS} from document d where d.id = :d"), {"d": document_id}).mappings().first()
     unknown = HTTPException(404, detail={"code": "unknown", "message": "Unknown document."})
     if row is None or row["profile_id"] is None:
@@ -93,6 +98,8 @@ def _doc(conn: Connection, principal: Principal, document_id: UUID, *, scope_ext
     for scope in (_scope_for(row["doc_type"]), scope_extra):
         if scope and scope not in perm.scopes:
             raise AccessDenied("insufficient_scope", f"This needs {scope}.")
+    if content and not perm.has("read:sensitive") and document_is_sensitive(conn, document_id):
+        raise AccessDenied("insufficient_scope", "This document holds sensitive results; it needs read:sensitive.")
     return row, perm
 
 
@@ -212,7 +219,7 @@ def document_file(
     principal: Principal = Depends(get_principal),
     blobs: BlobStore = Depends(get_blobs),
 ) -> Response:
-    row, perm = _doc(conn, principal, document_id)
+    row, perm = _doc(conn, principal, document_id, content=True)
     _audit(conn, principal, perm.profile.id, "GET /api/documents/{id}/file", [str(document_id)])
     return Response(
         blobs.get_bytes(bytes(row["blob_sha256"]).hex()),
@@ -230,7 +237,7 @@ def page_png(
     principal: Principal = Depends(get_principal),
     blobs: BlobStore = Depends(get_blobs),
 ) -> Response:
-    row, perm = _doc(conn, principal, document_id)
+    row, perm = _doc(conn, principal, document_id, content=True)
     if row["mime"] != "application/pdf" or not 1 <= page_no <= (row["pages"] or 0):
         raise HTTPException(404, detail={"code": "unknown", "message": "No such page."})
     png = render_page_png(blobs, blob_sha256=bytes(row["blob_sha256"]).hex(), page_no=page_no, scale=scale)
@@ -246,7 +253,7 @@ def page_word_layer(
     principal: Principal = Depends(get_principal),
     blobs: BlobStore = Depends(get_blobs),
 ) -> dict:
-    row, perm = _doc(conn, principal, document_id, scope_extra="read:documents_text")
+    row, perm = _doc(conn, principal, document_id, scope_extra="read:documents_text", content=True)
     page = (
         conn.execute(
             text("select width_pt, height_pt, flags from document_page where document_id = :d and page_no = :n"),
@@ -314,13 +321,7 @@ def retract(
         raise HTTPException(422, detail={"code": "bad_input", "message": "A retraction needs a reason."})
     if row["status"] == "retracted":
         raise HTTPException(409, detail={"code": "conflict", "message": "The document is already retracted."})
-    retracted = []
-    for obs_id in conn.execute(
-        text("select id from observation where document_id = :d and status in ('current', 'provisional')"),
-        {"d": document_id},
-    ).scalars():
-        retract_observation(conn, obs_id, f"document retracted: {reason}")
-        retracted.append(obs_id)
+    out = retract_document_facts(conn, document_id, f"document retracted: {reason}")
     for item_id in conn.execute(
         text("select id from review_item where document_id = :d and status = 'open'"), {"d": document_id}
     ).scalars():
@@ -330,4 +331,10 @@ def retract(
         {"r": reason, "d": document_id},
     )
     _audit(conn, principal, perm.profile.id, "POST /api/documents/{id}/retract", [str(document_id)], action="delete")
-    return {"document_id": document_id, "status": "retracted", "retracted_observations": retracted}
+    return {
+        "document_id": document_id,
+        "status": "retracted",
+        "retracted_observations": out["observations"],
+        "retracted_records": out["records"],
+        "deleted_wearable_samples": out["wearable_samples"],
+    }

@@ -6,6 +6,9 @@
 		addPasskeyBegin,
 		addPasskeyFinish,
 		deleteGrant,
+		deleteProfile,
+		exportProfile,
+		getMe,
 		getAuthState,
 		getHousehold,
 		listPasskeys,
@@ -25,6 +28,7 @@
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { createPasskey } from '#lib/components/pages2/webauthn';
 	import { t } from '#lib/i18n/index.svelte';
+	import { app, setProfile } from '#lib/state/app.svelte';
 
 	const LOCKABLE: Scope[] = ['read:labs', 'read:vitals', 'read:wearables', 'read:records', 'read:genome', 'read:genome_raw', 'read:sensitive', 'read:documents_text'];
 	const ROLES: Role[] = ['viewer', 'caregiver', 'guardian'];
@@ -65,6 +69,47 @@
 	const member = (id: string) => hh.data?.members.find((m) => m.user_id === id)?.display_name ?? id.slice(0, 8);
 	const me = $derived(hh.data?.members.find((m) => m.is_me)?.user_id);
 	const editableGrants = $derived((hh.data?.grants ?? []).filter((g) => g.role !== 'owner' && g.user_id !== me && managed.some((p) => p.slug === g.profile)));
+	// A new grant for a member who has none on that profile yet.
+	let ng = $state({ user_id: '', profile: '', role: 'viewer' as Role });
+	const others = $derived((hh.data?.members ?? []).filter((m) => !m.is_me));
+	const hasGrant = (u: string, slug: string) => (hh.data?.grants ?? []).some((g) => g.user_id === u && g.profile === slug);
+	const freeProfiles = $derived(managed.filter((p) => ng.user_id && !hasGrant(ng.user_id, p.slug)));
+	function addGrant(e: SubmitEvent) {
+		e.preventDefault();
+		const body = { ...ng };
+		act(async () => {
+			await putGrant(body);
+			ng = { user_id: '', profile: '', role: 'viewer' };
+		});
+	}
+	// Full export, saved through a temporary link so the browser downloads the zip.
+	const download = (slug: string) =>
+		act(async () => {
+			const { blob, filename } = await exportProfile(slug);
+			const a = document.createElement('a');
+			a.href = URL.createObjectURL(blob);
+			a.download = filename;
+			document.body.appendChild(a);
+			a.click();
+			a.remove();
+			setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+		}, false);
+	// Delete a profile: type its short name to confirm, then step-up.
+	let deleting = $state<string | null>(null);
+	let confirmSlug = $state('');
+	function removeProfile(e: SubmitEvent, slug: string) {
+		e.preventDefault();
+		act(async () => {
+			await deleteProfile(slug);
+			deleting = null;
+			confirmSlug = '';
+			app.me = await getMe();
+			if (app.profile === slug) {
+				const own = app.me.profiles.find((p) => p.is_self) ?? app.me.profiles[0];
+				if (own) setProfile(own.slug);
+			}
+		});
+	}
 	function toggleLock(slug: string, locks: Scope[], s: Scope, on: boolean) {
 		const next = on ? [...locks, s] : locks.filter((x) => x !== s);
 		act(() => putLocks(slug, next));
@@ -142,6 +187,23 @@
 						{/each}
 					</tbody>
 				</table>
+				{#if managed.length && others.length}
+					<form class="p2row" style="padding:8px" onsubmit={addGrant} aria-label={t('st_grant_new')}>
+						<b style="font-size:12px">{t('st_grant_new')}</b>
+						<select class="p2in" bind:value={ng.user_id} required aria-label={t('i2_person')} onchange={() => (ng.profile = '')}>
+							<option value="">{t('i2_person')}…</option>
+							{#each others as m (m.user_id)}<option value={m.user_id}>{m.display_name}</option>{/each}
+						</select>
+						<select class="p2in" bind:value={ng.profile} required aria-label={t('profile')} disabled={!ng.user_id}>
+							<option value="">{t('profile')}…</option>
+							{#each freeProfiles as p (p.slug)}<option value={p.slug}>{p.display_name}</option>{/each}
+						</select>
+						<select class="p2in" bind:value={ng.role} aria-label={t('i2_role')}>
+							{#each ROLES as r (r)}<option value={r}>{t('r_' + r)}</option>{/each}
+						</select>
+						<button class="btn sm pri" type="submit" disabled={busy || !ng.user_id || !ng.profile}>{t('st_grant_add')}</button>
+					</form>
+				{/if}
 				<div class="note" style="padding:6px 8px">{t('i2_grants_note')} <a href="/family">{t('nav_fam')}</a></div>
 			{/if}
 		</section>
@@ -171,6 +233,22 @@
 						<span class="dim" style="font-size:11px">{locked ? t('i2_locked_w') : ''}</span>
 					</div>
 				{/each}
+				<div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:10px 0 2px">{t('st_data')}</div>
+				<div class="set">
+					<div style="flex:1"><div>{t('st_export')}</div><div class="dim" style="font-size:11px">{t('st_export_d')}</div></div>
+					<button class="btn sm" disabled={busy} onclick={() => download(p.slug)} aria-label="{t('st_export')} · {p.display_name}">{t('st_export_btn')}</button>
+				</div>
+				<div class="set">
+					<div style="flex:1"><div>{t('st_delete')}</div><div class="dim" style="font-size:11px">{t('st_delete_d')}</div></div>
+					<button class="btn sm no" disabled={busy} onclick={() => ((deleting = deleting === p.slug ? null : p.slug), (confirmSlug = ''))} aria-expanded={deleting === p.slug}>{t('st_delete_btn')}</button>
+				</div>
+				{#if deleting === p.slug}
+					<form class="p2row" onsubmit={(e) => removeProfile(e, p.slug)}>
+						<span class="muted" style="font-size:12px">{t('st_delete_type')} <b class="mono">{p.slug}</b></span>
+						<input class="p2in mono" style="flex:1" bind:value={confirmSlug} required aria-label={t('st_delete_type')} />
+						<button class="btn sm no" type="submit" disabled={busy || confirmSlug !== p.slug}>{t('st_delete_btn')}</button>
+					</form>
+				{/if}
 			</section>
 		{:else}
 			{#if hh.data}<section class="card"><div class="empty">{t('i2_manage_none')}</div></section>{/if}

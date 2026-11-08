@@ -5,9 +5,10 @@
 	import type { WearableMetric, WearablesSummary } from '#lib/api/types';
 	import { C } from '#lib/components/colors';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
-	import { Loader, tf } from '#lib/components/pages1/util.svelte';
+	import { Loader, tf, tp } from '#lib/components/pages1/util.svelte';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import TrendChart from '#lib/components/TrendChart.svelte';
+	import { axisTicks } from '#lib/logic/axis';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
 	import { currentProfile } from '#lib/state/app.svelte';
 
@@ -47,14 +48,9 @@
 		const vals = ser.map((p) => (p.value == null ? null : +(p.value * k).toFixed(2)));
 		const nums = vals.filter((v): v is number => v != null);
 		if (!nums.length) return null;
-		let lo = Math.min(...nums);
-		let hi = Math.max(...nums);
-		const step = nice((hi - lo || Math.abs(hi) || 1) / 4);
-		lo = look.bars ? 0 : Math.floor((lo - step * 0.4) / step) * step;
-		hi = Math.ceil((hi + step * 0.2) / step) * step;
-		if (look.bars && m.metric === 'sleep_asleep') lo = Math.max(0, Math.floor(Math.min(...nums)) - 2);
-		const ticks: number[] = [];
-		for (let v = lo; v <= hi + 1e-9; v += step) ticks.push(+v.toFixed(4));
+		// Bars start at 0 (sleep a little below its shortest night); the step comes from that span.
+		const floor = !look.bars ? undefined : m.metric === 'sleep_asleep' ? Math.max(0, Math.floor(Math.min(...nums)) - 2) : 0;
+		const { lo, hi, ticks } = axisTicks(nums, floor);
 		const n = ser.length;
 		const idx = [...new Set([0, Math.round((n - 1) / 3), Math.round((2 * (n - 1)) / 3), n - 1])];
 		const fmt = (v: number) => (m.metric === 'steps' ? `${fmtNum(v / 1000)}k` : look.unit ? `${fmtNum(v)}${look.unit}` : fmtNum(v));
@@ -70,11 +66,6 @@
 			unit: look.unit ?? m.unit,
 			k
 		};
-	}
-	function nice(raw: number): number {
-		const p = 10 ** Math.floor(Math.log10(raw));
-		const r = raw / p;
-		return (r <= 1 ? 1 : r <= 2 ? 2 : r <= 2.5 ? 2.5 : r <= 5 ? 5 : 10) * p;
 	}
 	const fmtVal = (m: WearableMetric, v: number | null, k: number, unit: string) => {
 		if (v == null) return '—';
@@ -141,7 +132,7 @@
 				<div style="display:flex;justify-content:space-between;margin-top:2px">
 					<span class="src" style="cursor:default"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4" /></svg>{m.source}</span>
 					<span class="dim" style="font-size:11px">
-						{#if m.metric === 'vo2max'}{t('h1_estimate')}{:else if c?.missing}{tf('h1_missing', { n: c.missing })}{:else}{tf('h1_cov_pct', { n: fmtNum(m.coverage_pct, 0) })}{/if}
+						{#if m.metric === 'vo2max'}{t('h1_estimate')}{:else if c?.missing}{tp('h1_missing', c.missing)}{:else}{tf('h1_cov_pct', { n: fmtNum(m.coverage_pct, 0) })}{/if}
 					</span>
 				</div>
 			</div>

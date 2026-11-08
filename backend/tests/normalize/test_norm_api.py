@@ -66,14 +66,20 @@ def test_observations_as_reported_and_converted(app_for, committed_family, engin
 def test_trend(app_for, committed_family, engine):
     _seed(engine, committed_family)
     client = app_for(committed_family.users["alex"])
-    t = client.get("/api/profiles/alex/trend", params={"code": "LOINC:13457-7", "window": "P5Y"}).json()
+    t = client.get("/api/profiles/alex/trend", params={"code": "LOINC:13457-7", "window": "P5Y", "lang": "en"}).json()
     assert t["alias_group"] == "ldl_c" and t["unit"] == "mg/dL"
     assert [p["value"] for p in t["points"]][:2] == [118.0, 84.0]
     assert round(t["points"][-1]["value"], 1) == 131.5 and t["points"][-1]["printed"] == "3,4 mmol/L"
     assert t["codes"] == ["LOINC:13457-7", "LOINC:18262-6", "LOINC:39469-2"]
     assert any("Direct assay" in x for x in t["limitations"])
     assert any("molar mass of cholesterol" in x for x in t["limitations"])
-    assert t["stats"]["n"] == 3 and t["stats"]["last_vs_previous_pct"] == 57
+    es = client.get("/api/profiles/alex/trend", params={"code": "LOINC:13457-7", "window": "P5Y", "lang": "es"}).json()
+    assert any("masa molar de cholesterol" in x for x in es["limitations"]), es["limitations"]
+    assert not any("are " in x or "Labs " in x for x in es["limitations"]), es["limitations"]
+    s = t["stats"]
+    assert s["n"] == 3 and s["last_vs_previous_pct"] == round((t["points"][-1]["value"] - 84) / 84 * 100, 1)
+    assert s["last_vs_previous_pct"] != round(s["last_vs_previous_pct"])  # one decimal, not a whole number
+    assert s["rcv_pct"] and s["exceeds_rcv"] is (abs(s["last_vs_previous_pct"]) > s["rcv_pct"])
     statuses = [p["status"] for p in t["points"]]  # lane E's word as of each point's day
     assert statuses and all(x in ("ok", "watch", "out", "stale", "nodata") for x in statuses), statuses
     assert client.get("/api/profiles/alex/trend", params={"code": "ldl_c", "window": "P1Y"}).json()["stats"]["n"] == 1

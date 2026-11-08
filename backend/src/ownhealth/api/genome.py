@@ -66,13 +66,26 @@ def _tiles(findings: list[dict], locked: dict[str, int]) -> list[dict]:
         if not rows and not hidden:
             continue
         actionable = sum(1 for f in rows if f["phenotype"] and not f["phenotype"].lower().startswith("normal"))
-        genes = ", ".join(dict.fromkeys(f["gene"] or f["title"] for f in rows))[:120]
+        # a gene, else the score id or rsID: never the title, whose words are English
+        genes = ", ".join(
+            dict.fromkeys(str(f["gene"] or (f["value"] or {}).get("pgs_id") or f["rsid"] or f["title"]) for f in rows)
+        )[:120]
         detail = genes
         if cat == "pgx" and actionable:
             detail = f"{actionable} actionable · {genes}"
         if hidden:
             detail = f"{detail} · {hidden} hidden" if detail else f"{hidden} hidden"
-        tiles.append({"key": cat, "value": str(len(rows)), "detail": detail})
+        # The numbers go out too, so the UI words them in its own language.
+        tiles.append(
+            {
+                "key": cat,
+                "value": str(len(rows)),
+                "detail": detail,
+                "actionable": actionable if cat == "pgx" else 0,
+                "genes": genes,
+                "hidden": hidden,
+            }
+        )
     return tiles
 
 

@@ -109,6 +109,95 @@ def test_changed_resource_waits_in_review_and_accepting_supersedes(conn, family,
     assert cond["accepted_by"] == "person"
 
 
+def _a1c_values(conn, profile):
+    return conn.execute(
+        text(
+            "select printed_value, status from observation where profile_id = :p and loinc = '4548-4'"
+            " order by recorded_at"
+        ),
+        {"p": profile},
+    ).all()
+
+
+def _correct_a1c(data: dict) -> None:
+    for e in data["entry"]:
+        if e["resource"].get("id") == "alex-rivera-hba1c":
+            e["resource"]["valueQuantity"]["value"] = 6.4  # the lab corrected the value upstream
+    data["id"] = "ips-alex-2027"
+
+
+def test_a_corrected_observation_names_the_version_it_replaces(conn, family, blobs, store_doc, fhir_file):
+    p = family.profiles["alex"]
+    data = json.loads(fhir_file("ips-alex.json"))
+    import_fhir(conn, blobs, document_id=store_doc(conn, family, "alex", json.dumps(data).encode(), "a.json", JSON))
+    [(old_value, _)] = _a1c_values(conn, p)
+    old_id = conn.execute(
+        text("select id from observation where profile_id = :p and loinc = '4548-4'"), {"p": p}
+    ).scalar()
+    _correct_a1c(data)
+    doc2 = store_doc(conn, family, "alex", json.dumps(data).encode(), "b.json", JSON)
+    import_fhir(conn, blobs, document_id=doc2)
+    [item] = [i for i in _items(conn, doc2, "candidate_row") if "conflict" in i["reasons"]]
+    assert old_value == "5.9" and item["payload"]["supersedes"] == str(old_id)
+
+
+def test_accepting_a_corrected_observation_supersedes_the_old_value(conn, family, blobs, store_doc, fhir_file):
+    p = family.profiles["alex"]
+    data = json.loads(fhir_file("ips-alex.json"))
+    import_fhir(conn, blobs, document_id=store_doc(conn, family, "alex", json.dumps(data).encode(), "a.json", JSON))
+    _correct_a1c(data)
+    doc2 = store_doc(conn, family, "alex", json.dumps(data).encode(), "b.json", JSON)
+    import_fhir(conn, blobs, document_id=doc2)
+    [item] = [i for i in _items(conn, doc2, "candidate_row") if "conflict" in i["reasons"]]
+    review.accept(conn, item["id"], family.users["alex"])
+    assert sorted(_a1c_values(conn, p)) == [("5.9", "superseded"), ("6.4", "current")]
+
+
+def _asthma(rid: str, subject: str) -> dict:
+    return {
+        "resourceType": "Condition",
+        "id": rid,
+        "clinicalStatus": {
+            "coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]
+        },
+        "verificationStatus": {
+            "coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}]
+        },
+        "code": {"coding": [{"system": "http://snomed.info/sct", "code": "195967001", "display": "Asthma"}]},
+        "subject": {"reference": subject},
+    }
+
+
+OTHER_PATIENT = {
+    "resourceType": "Patient",
+    "id": "p-889",
+    "identifier": [{"system": "urn:oid:2.16.724.4.77", "value": "HN-889"}],
+    "name": [{"family": "Rivera", "given": ["Alex"]}],
+    "birthDate": "1979-05-14",
+}
+
+
+@pytest.mark.parametrize("with_patient", [False, True])
+def test_another_source_reusing_a_resource_id_is_a_separate_fact(
+    conn, family, blobs, store_doc, fhir_file, with_patient
+):
+    """FHIR ids are unique per server only: another provider's Condition/alex-rivera-htn is not a
+    new version of ours."""
+    p = family.profiles["alex"]
+    import_fhir(conn, blobs, document_id=store_doc(conn, family, "alex", fhir_file("ips-alex.json"), "a.json", JSON))
+    entries = [{"resource": _asthma("alex-rivera-htn", "Patient/p-889" if with_patient else "Patient/alex-rivera")}]
+    if with_patient:
+        entries.insert(0, {"fullUrl": "urn:uuid:p-889", "resource": OTHER_PATIENT})
+    other = {"resourceType": "Bundle", "id": "other-hospital-1", "type": "collection", "entry": entries}
+    doc2 = store_doc(conn, family, "alex", json.dumps(other).encode(), "o.json", JSON)
+    s = import_fhir(conn, blobs, document_id=doc2)
+    assert "conflict" not in s.reasons and "duplicate" not in s.reasons
+    for item in _items(conn, doc2):
+        assert not item["payload"].get("supersedes")
+        review.accept(conn, item["id"], family.users["alex"])
+    assert sorted(c["text"] for c in list_records(conn, "condition", p)) == ["Asthma", "Hypertensive disorder"]
+
+
 def test_patient_mismatch_holds_every_fact_for_review(conn, family, blobs, store_doc, fhir_file):
     p = family.profiles["sam"]
     doc = store_doc(conn, family, "sam", fhir_file("ips-alex.json"), "ips.json", JSON)  # Alex's file, Sam's profile

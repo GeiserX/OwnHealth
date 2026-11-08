@@ -10,7 +10,14 @@ from sqlalchemy import Connection
 
 from ownhealth.api._deps import get_conn, get_principal
 from ownhealth.core import review
-from ownhealth.core.access import AccessDenied, Principal, accessible_profiles, effective_permission
+from ownhealth.core.access import (
+    AccessDenied,
+    Permission,
+    Principal,
+    accessible_profiles,
+    effective_permission,
+    require,
+)
 from ownhealth.core.audit import AuditEvent, write_audit
 
 router = APIRouter(prefix="/review", tags=["review"])
@@ -54,6 +61,30 @@ def _item_out(item: dict) -> dict:
     }
 
 
+OBS_SCOPE = {
+    "laboratory": "read:labs",
+    "vital-signs": "read:vitals",
+    "survey": "read:vitals",
+    "exam": "read:vitals",
+    "activity": "read:wearables",
+}
+
+
+def _visible(item: dict, perm: Permission) -> bool:
+    """A held payload carries the values it would write: show it only to someone whose scopes would
+    show the committed fact (its category scope, and read:sensitive for a sensitive one)."""
+    p = item.get("payload") or {}
+    observations = [p.get("observation")] + [r.get("observation") for r in p.get("rows") or [] if isinstance(r, dict)]
+    observations = [o for o in observations if isinstance(o, dict)]
+    record = p.get("record") if isinstance(p.get("record"), dict) else None
+    for fact in [*observations, *([record] if record else [])]:
+        if fact.get("sensitivity") and not perm.has("read:sensitive"):
+            return False
+    if record is not None and not perm.has("read:records"):
+        return False
+    return all(perm.has(OBS_SCOPE.get(o.get("category") or "laboratory", "read:labs")) for o in observations)
+
+
 def _check(conn: Connection, principal: Principal, item: dict | None) -> dict:
     if item is None:
         raise HTTPException(404, detail={"code": "not_found", "message": "No such review item."})
@@ -67,6 +98,8 @@ def _check(conn: Connection, principal: Principal, item: dict | None) -> dict:
         raise HTTPException(404, detail={"code": "not_found", "message": "No such review item."}) from None
     if not perm.can("review"):
         raise AccessDenied("forbidden", f"The role {perm.role} cannot review on this profile.")
+    if not _visible(item, perm):
+        raise HTTPException(404, detail={"code": "not_found", "message": "No such review item."})
     return item
 
 
@@ -111,9 +144,12 @@ def list_items(
         limit=limit,
         offset=offset,
     )
+    by_profile = {p.profile.id: p for p in perms}
+    shown = [i for i in items if i["profile_id"] is None or _visible(i, by_profile[i["profile_id"]])]
     return {
-        "items": [_item_out(i) for i in items],
+        "items": [_item_out(i) for i in shown],
         "open": review.count_open(conn, household_id=principal.household_id, profile_ids=pids),
+        "withheld": len(items) - len(shown),
     }
 
 
@@ -127,6 +163,11 @@ def accept(
     item_id: UUID, body: AcceptIn, conn: Connection = Depends(get_conn), principal: Principal = Depends(get_principal)
 ) -> dict:
     item = _check(conn, principal, review.get_item(conn, item_id))
+    if item["kind"] == "document_identity":
+        # accepting moves the document: the target needs the same check as POST /documents/{id}/assign
+        target = (body.edits or {}).get("profile_id") or (item["payload"] or {}).get("suggested_profile_id")
+        if target:
+            require(conn, principal, str(target), action="import")
     created = review.accept(conn, item_id, principal.user_id, body.edits)
     _audit(conn, principal, item, "review_accept")
     return {"id": item_id, "status": "accepted", "result_ids": created}

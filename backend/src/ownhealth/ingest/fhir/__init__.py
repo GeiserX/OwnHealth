@@ -13,7 +13,11 @@ in `fhir` and gets `src(kind='fhir_import', import_ref='<Bundle.id>/<resourceTyp
 - Other resource types are stored as received (the bundle is the blob) and listed in review as
   `fhir_unmapped`, "stored, not projected". Nothing is dropped.
 - A resource already imported with the same JSON is skipped; one that changed upstream goes to review
-  with reason `conflict` (accepting a changed record supersedes the old version).
+  with reason `conflict`, and accepting it supersedes the old version (records and observations).
+  FHIR logical ids are unique only per server, so "the same resource" means the same type/id from the
+  same issuer: the Patient identifier, else the server base of absolute fullUrls, else the id of the
+  embedded Patient (`issuer_key`). A file with no issuer is matched only against itself; a resource
+  from another issuer that reuses an id is imported as a separate fact.
 """
 
 from __future__ import annotations
@@ -158,14 +162,40 @@ def import_resources(
                 if target and target.get("id"):
                     report_keys[f"Observation/{target['id']}"] = f"{bundle_key}/DiagnosticReport/{r.get('id')}"
 
-    run = _Run(conn, profile, document_id, bundle_key, identity, label, resolve, report_keys)
+    issuer = issuer_key(entries)
+    conn.execute(
+        text("update document set flags = flags || jsonb_build_object('fhir_issuer', cast(:i as text)) where id = :d"),
+        {"i": issuer, "d": document_id},
+    )
+    run = _Run(conn, profile, document_id, bundle_key, identity, label, resolve, report_keys, issuer)
     for e in entries:
         run.one(e)
     return run.summary, identity
 
 
+def issuer_key(entries: list[Entry]) -> str | None:
+    """Who issued these resource ids, as a short hash, or None when the file does not say."""
+    patient = next((e.resource for e in entries if e.resource.get("resourceType") == "Patient"), None)
+    key = None
+    for ident in (patient or {}).get("identifier") or []:
+        if isinstance(ident, dict) and ident.get("value"):
+            key = f"identifier:{ident.get('system') or ''}|{ident['value']}"
+            break
+    if key is None:
+        for e in entries:
+            url, r = e.full_url or "", e.resource
+            tail = f"/{r.get('resourceType')}/{r.get('id')}"
+            if url.startswith(("http://", "https://")) and url.endswith(tail):
+                key = "base:" + url[: -len(tail)].rstrip("/")
+                break
+    if key is None and patient and patient.get("id"):
+        key = f"patient:{patient['id']}"
+    return hashlib.sha256(key.encode()).hexdigest()[:16] if key else None
+
+
 class _Run:
-    def __init__(self, conn, profile, document_id, bundle_key, identity, label, resolve, report_keys):
+    def __init__(self, conn, profile, document_id, bundle_key, identity, label, resolve, report_keys, issuer=None):
+        self.issuer = issuer
         self.conn = conn
         self.profile = profile
         self.document_id = document_id
@@ -192,42 +222,57 @@ class _Run:
             label=f"{self.label} · {ref.split('/', 1)[-1].split('/')[0]} · {day}",
         )
 
+    @staticmethod
+    def _like(tail: str) -> str:
+        return "%/" + tail.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
     def _existing(self, table: str, tail: str) -> list[dict]:
-        """Visible facts of this profile imported before from a resource with the same type/id."""
-        like = "%/" + tail.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        """Visible facts of this profile imported before from a resource with the same type/id, with
+        whether they came from the same issuer (or this same file)."""
         return [
             dict(r)
             for r in self.conn.execute(
                 text(
-                    f"select f.id, f.fhir from {table} f join src s on s.id = f.src_id where f.profile_id = :p"
-                    " and s.kind = 'fhir_import' and f.status in ('current', 'provisional') and s.import_ref like :l"
+                    f"select f.id, f.fhir, (s.document_id = :doc or (cast(:iss as text) is not null"
+                    f" and d.flags->>'fhir_issuer' = :iss)) as same_issuer"
+                    f" from {table} f join src s on s.id = f.src_id left join document d on d.id = s.document_id"
+                    " where f.profile_id = :p and s.kind = 'fhir_import' and f.status in ('current', 'provisional')"
+                    " and s.import_ref like :l"
                 ),
-                {"p": self.profile.id, "l": like},
+                {"p": self.profile.id, "l": self._like(tail), "doc": self.document_id, "iss": self.issuer},
             ).mappings()
         ]
 
     def _pending(self, tail: str) -> bool:
-        like = "%/" + tail.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        """An open review item of the same issuer already holds this type/id."""
         return (
             self.conn.execute(
                 text(
-                    "select 1 from review_item where profile_id = :p and status = 'open'"
-                    " and kind in ('candidate_row', 'fhir_unmapped') and payload->'src'->>'import_ref' like :l limit 1"
+                    "select 1 from review_item ri left join document d on d.id = ri.document_id"
+                    " where ri.profile_id = :p and ri.status = 'open'"
+                    " and ri.kind in ('candidate_row', 'fhir_unmapped') and ri.payload->'src'->>'import_ref' like :l"
+                    " and (ri.document_id = :doc or (cast(:iss as text) is not null"
+                    " and d.flags->>'fhir_issuer' = :iss)) limit 1"
                 ),
-                {"p": self.profile.id, "l": like},
+                {"p": self.profile.id, "l": self._like(tail), "doc": self.document_id, "iss": self.issuer},
             ).first()
             is not None
         )
 
     def _dedupe(self, table: str, tail: str, resource: dict, checks: list[Check]) -> tuple[bool, UUID | None]:
-        """(skip, superseded candidate). Same JSON imported before: skip. Changed: a conflict check."""
+        """(skip, superseded candidate). Same JSON imported before: skip. Changed at the same issuer: a
+        conflict check naming the version it would replace. Another issuer's id: a separate fact."""
         if self._pending(tail):
             return True, None
-        for row in self._existing(table, tail):
-            if row["fhir"] == resource:
-                return True, None
-            checks.append(Check(name="upstream_version", ok=False, reason="conflict", detail="changed since import"))
-            return False, row["id"]
+        existing = self._existing(table, tail)
+        if any(row["fhir"] == resource for row in existing):
+            return True, None
+        for row in existing:
+            if row["same_issuer"]:
+                checks.append(
+                    Check(name="upstream_version", ok=False, reason="conflict", detail="changed since import")
+                )
+                return False, row["id"]
         return False, None
 
     def _queue_unmapped(self, e: Entry, note: str, ref: str) -> None:
@@ -299,7 +344,7 @@ class _Run:
 
     def _observation(self, e: Entry, row: mapping.ObsRow, tail: str, ref: str, resource: dict) -> None:
         checks = list(row.checks)
-        skip, _ = self._dedupe("observation", tail, resource, checks)
+        skip, previous = self._dedupe("observation", tail, resource, checks)
         if skip:
             self.summary.skipped += 1
             self._count(["duplicate"])
@@ -316,7 +361,11 @@ class _Run:
             allowance=allowance,
             identity=self.identity,
             provisional=resource.get("status") == "preliminary",
-            extra_payload={"json_pointer": e.pointer, "resource_type": "Observation"},
+            extra_payload={
+                "json_pointer": e.pointer,
+                "resource_type": "Observation",
+                "supersedes": str(previous) if previous else None,
+            },
         )
         if result.state == "auto_accepted":
             self.summary.accepted += 1

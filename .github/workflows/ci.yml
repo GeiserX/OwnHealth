@@ -49,9 +49,11 @@ jobs:
           echo "98f6dd8bf5b59058d04bfd8dab58e196cc2a680666ccee90275a3b722374438e  /tmp/restic.bz2" | sha256sum -c -
           bunzip2 /tmp/restic.bz2 && sudo install -m 0755 /tmp/restic /usr/local/bin/restic
       - run: uv sync --frozen
-      - run: uv run ruff check src tests
-      - run: uv run ruff format --check src tests
+      - run: uv run ruff check src tests ../deploy/tests
+      - run: uv run ruff format --check src tests ../deploy/tests
       - run: uv run pytest -q
+      - name: Deploy checks (app database role, compose files)
+        run: uv run pytest -q ../deploy/tests
 
   ui:
     runs-on: ubuntu-latest

@@ -58,13 +58,22 @@ templates:
   days_ago:
     en: "{n} days ago"
     es: "hace {n} días"
+  days_ago.one:
+    en: "{n} day ago"
+    es: "hace {n} día"
   # dashboard
   subtitle.lab:
     en: "latest lab {n} days ago"
     es: "última analítica hace {n} días"
+  subtitle.lab.one:
+    en: "latest lab {n} day ago"
+    es: "última analítica hace {n} día"
   subtitle.wearables:
     en: "wearables synced {n} days ago"
     es: "wearables sincronizados hace {n} días"
+  subtitle.wearables.one:
+    en: "wearables synced {n} day ago"
+    es: "wearables sincronizados hace {n} día"
   sex.female:           {en: Female, es: Mujer}
   sex.male:             {en: Male, es: Hombre}
   due.stale:
@@ -76,9 +85,25 @@ templates:
   due.retest:
     en: "{name} retest"
     es: "Control de {name}"
-  genome.summary:
-    en: "{pgx} actionable PGx · {carrier} carrier findings · {hidden} sensitive hidden"
-    es: "{pgx} PGx accionables · {carrier} hallazgos de portador · {hidden} sensibles ocultos"
+  # the genome summary is three counts joined with " · "; `.one` is the singular
+  genome.summary.pgx:
+    en: "{n} actionable PGx"
+    es: "{n} PGx accionables"
+  genome.summary.pgx.one:
+    en: "{n} actionable PGx"
+    es: "{n} PGx accionable"
+  genome.summary.carrier:
+    en: "{n} carrier findings"
+    es: "{n} hallazgos de portador"
+  genome.summary.carrier.one:
+    en: "{n} carrier finding"
+    es: "{n} hallazgo de portador"
+  genome.summary.hidden:
+    en: "{n} sensitive hidden"
+    es: "{n} sensibles ocultos"
+  genome.summary.hidden.one:
+    en: "{n} sensitive hidden"
+    es: "{n} sensible oculto"
   pgx.badge:
     en: "{gene} {phenotype} · CPIC {level} · to discuss with your prescriber"
     es: "{gene} {phenotype} · CPIC {level} · para comentar con quien lo prescribe"

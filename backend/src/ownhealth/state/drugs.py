@@ -333,7 +333,7 @@ def check_drug(
                     "flag": p.flag if p else None,
                     "status": marker.status if marker else "nodata",
                     "stale": marker.stale if marker else False,
-                    "reason": item["reason"],
+                    "reason": item["reason"][lang] if isinstance(item["reason"], dict) else item["reason"],
                     "src": p.src if p else None,
                 }
             )

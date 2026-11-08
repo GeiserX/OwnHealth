@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 
 from ownhealth import genome
-from ownhealth.genome.model import GenomeQueryError
+from ownhealth.genome.model import GenomeQueryError, untrusted_fact_text
 from ownhealth.mcp import limits
 from ownhealth.mcp.envelope import ToolError
 from ownhealth.mcp.tools import Call, Result, tool
@@ -38,6 +38,27 @@ SUMMARY_FIELDS = (
     "text",
     "src",
 )
+VALIDATED_VALUE_KEYS = ("phenotype", "diplotype")  # checked as vocabulary at import (genome/schema.py)
+
+
+def _wrap_strings(v):
+    if isinstance(v, str):
+        return untrusted_fact_text(v)
+    if isinstance(v, list):
+        return [_wrap_strings(x) for x in v]
+    return v
+
+
+def _full(f: dict) -> dict:
+    """The full finding for an agent: the facts file's prose (condition name, value strings) wrapped."""
+    out = dict(f)
+    if isinstance(f.get("condition"), dict):
+        out["condition"] = {**f["condition"], "name": untrusted_fact_text(f["condition"].get("name"))}
+    if isinstance(f.get("value"), dict):
+        out["value"] = {k: v if k in VALIDATED_VALUE_KEYS else _wrap_strings(v) for k, v in f["value"].items()}
+    return out
+
+
 REGION_RE = re.compile(r"^chr([0-9XYM]+):(\d+)-(\d+)$")
 
 FINDINGS_SCHEMA = {
@@ -98,6 +119,8 @@ def get_genome_findings(call: Call) -> Result:
         findings = [f for f in findings if f.get("category") != "trait"]
     if a.get("detail") != "full":
         findings = [{k: f[k] for k in SUMMARY_FIELDS if k in f} for f in findings]
+    else:
+        findings = [_full(f) for f in findings]
     data = {"assay": found.assay, "findings": findings}
     if not findings:
         data["no_findings"] = True

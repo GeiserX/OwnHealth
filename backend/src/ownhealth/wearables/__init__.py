@@ -2,7 +2,8 @@
 
 Samples keep UTC (`t`) plus the original offset (`tz_offset_min`). Rollups are stored per source:
 hourly buckets on the UTC hour, daily buckets on the local calendar date of the sample (stored as
-that date at 00:00 UTC). Sleep counts on the date of waking, so sleep buckets use `t_end`.
+that date at 00:00 UTC). Sleep counts on the date of waking: each stage is dated by the end of
+its night (`_samples`).
 
 Source priority applies at query time, never at ingest: every raw sample is kept, and a daily series
 takes, for each day, the highest-priority source that has data that day. That is what stops an
@@ -124,13 +125,38 @@ def set_priority(conn: Connection, profile_id: UUID, metric: str, source_ids: li
 
 # ------------------------------------------------------------------- rollups ----
 
-# The instant a sample counts at: sleep on waking, everything else at its start.
-_AT = "(case when s.metric = any(cast(:sleep as text[])) then coalesce(s.t_end, s.t) else s.t end)"
+# The instant a sample counts at (`s.at`, with its offset `s.off`): sleep on waking, everything else at
+# its start. A Watch writes a night as many short stages, so a sleep stage counts at the end of its
+# session, not its own end: stages less than SLEEP_GAP apart are one session (one night), and the
+# session is dated by the local date of its last stage's end.
+SLEEP_GAP = "2 hours"
 _LOCAL_DAY = (
-    f"(date_trunc('day', ({_AT} at time zone 'UTC') + make_interval(mins => coalesce(s.tz_offset_min, 0)))"
-    " at time zone 'UTC')"
+    "(date_trunc('day', (s.at at time zone 'UTC') + make_interval(mins => coalesce(s.off, 0))) at time zone 'UTC')"
 )
-_HOUR = f"(date_trunc('hour', {_AT} at time zone 'UTC') at time zone 'UTC')"
+_HOUR = "(date_trunc('hour', s.at at time zone 'UTC') at time zone 'UTC')"
+
+
+_COLS = "{a}.profile_id, {a}.metric, {a}.t, {a}.t_end, {a}.v, {a}.tz_offset_min, {a}.source_id"
+
+
+def _samples(sel: str) -> str:
+    """wearable_sample rows matching `sel` (on alias w), with `at` and `off` added."""
+    part = "partition by w.profile_id, w.metric, w.source_id"
+    return (
+        f"(select {_COLS.format(a='w')}, w.t as at, w.tz_offset_min as off from wearable_sample w where {sel}"
+        " and not w.metric = any(cast(:sleep as text[]))"
+        " union all"
+        f" select {_COLS.format(a='z')},"
+        f" max(coalesce(z.t_end, z.t)) over ({part.replace('w.', 'z.')}, z.sess),"
+        f" first_value(z.tz_offset_min) over ({part.replace('w.', 'z.')}, z.sess order by coalesce(z.t_end, z.t) desc)"
+        " from (select y.*, sum(y.brk) over (" + part.replace("w.", "y.") + " order by y.t rows unbounded preceding)"
+        f" as sess from (select {_COLS.format(a='w')}, case when w.t <= max(coalesce(w.t_end, w.t)) over"
+        f" ({part} order by w.t rows between unbounded preceding and 1 preceding)"
+        f" + interval '{SLEEP_GAP}' then 0 else 1 end as brk from wearable_sample w where {sel}"
+        " and w.metric = any(cast(:sleep as text[]))) y) z) s"
+    )
+
+
 _STATS = (
     "count(*), min(s.v), max(s.v), avg(s.v), sum(s.v), percentile_cont(0.1) within group (order by s.v),"
     " percentile_cont(0.5) within group (order by s.v), percentile_cont(0.9) within group (order by s.v)"
@@ -151,9 +177,10 @@ def recompute_rollups(
         "daily": DAILY_METRICS,
     }
     sel = (
-        "s.profile_id = :p and (cast(:metrics as text[]) is null or s.metric = any(cast(:metrics as text[])))"
-        " and (cast(:sources as smallint[]) is null or s.source_id = any(cast(:sources as smallint[])))"
+        "w.profile_id = :p and (cast(:metrics as text[]) is null or w.metric = any(cast(:metrics as text[])))"
+        " and (cast(:sources as smallint[]) is null or w.source_id = any(cast(:sources as smallint[])))"
     )
+    samples = _samples(sel)
     conn.execute(
         text(
             "delete from wearable_rollup where profile_id = :p"
@@ -168,7 +195,7 @@ def recompute_rollups(
             f" v_p10, v_p50, v_p90, coverage) select s.profile_id, s.metric, s.source_id, 'hour', {_HOUR}, {_STATS},"
             " case when s.metric = any(cast(:daily as text[])) then 1.0 else least(1.0, count(distinct"
             " floor(extract(minute from s.t at time zone 'UTC') / 5)) / 12.0) end"
-            f" from wearable_sample s where {sel} group by 1, 2, 3, 5"
+            f" from {samples} group by 1, 2, 3, 5"
         ),
         params,
     ).rowcount
@@ -177,7 +204,7 @@ def recompute_rollups(
             "insert into wearable_rollup (profile_id, metric, source_id, bucket, t, n, v_min, v_max, v_avg, v_sum,"
             f" v_p10, v_p50, v_p90, coverage) select s.profile_id, s.metric, s.source_id, 'day', {_LOCAL_DAY},"
             f" {_STATS}, case when s.metric = any(cast(:daily as text[])) then 1.0 else least(1.0, count(distinct"
-            f" {_HOUR}) / 24.0) end from wearable_sample s where {sel} group by 1, 2, 3, 5"
+            f" {_HOUR}) / 24.0) end from {samples} group by 1, 2, 3, 5"
         ),
         params,
     ).rowcount

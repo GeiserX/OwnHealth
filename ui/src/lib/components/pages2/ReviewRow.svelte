@@ -2,7 +2,7 @@
 	// One extracted row waiting in the review queue: the mockup's `.xr` grid, with accept, edit,
 	// reject (with a reason), "add alias" for unknown names, and quarantine for untrusted text.
 	import type { Check, ReviewItem } from '#lib/api/types';
-	import { t } from '#lib/i18n/index.svelte';
+	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { tf } from '#lib/components/pages1/util.svelte';
 
 	type Obs = Record<string, string | number | null | undefined>;
@@ -62,7 +62,16 @@
 		onaccept(Object.keys(edits).length ? edits : undefined);
 		mode = '';
 	}
-	const msg = (c: Check) => c.detail || t('i2_reason_' + c.reason);
+	// The translated reason is the line; the backend's detail (English, with specifics) is the tooltip,
+	// and in English a dim second part. A detail that is only a code never stands in for the reason.
+	const label = (c: Check) => {
+		const k = 'i2_reason_' + c.reason;
+		return t(k) !== k ? t(k) : null;
+	};
+	const isCode = (d: string) => /^[\w:.-]+$/.test(d.trim()) && !/\s/.test(d.trim());
+	const msg = (c: Check) => label(c) ?? (c.detail && !isCode(c.detail) ? c.detail : t('i2_reason_other'));
+	const extra = (c: Check) => (i18n.lang === 'en' && c.detail && label(c) && !isCode(c.detail) ? c.detail : '');
+	const agent = $derived(item.kind === 'agent_proposal' || item.proposed_by_token != null);
 	const id = $derived(`rr-${item.id.slice(0, 8)}`);
 </script>
 
@@ -97,8 +106,11 @@
 		{/if}
 	</div>
 	{#each failed as c, i (i)}
-		<div class="why" style="color:{quarantined ? 'var(--out)' : 'var(--watch)'}">{quarantined ? '⚠' : '●'} {msg(c)}</div>
+		<div class="why" style="color:{quarantined ? 'var(--out)' : 'var(--watch)'}" title={c.detail ?? undefined}>{quarantined ? '⚠' : '●'} {msg(c)}{#if extra(c)}<span class="dim"> · {extra(c)}</span>{/if}</div>
 	{/each}
+	{#if agent}
+		<div class="why" style="color:var(--accent)">◆ {t('i2_row_agent')}</div>
+	{/if}
 	{#if !failed.length && lowConf}
 		<div class="why" style="color:var(--watch)">● {tf('i2_low_conf', { c: conf.toFixed(2), t: threshold.toFixed(2) })}</div>
 	{/if}

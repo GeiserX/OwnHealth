@@ -99,7 +99,7 @@ async def test_trend_and_status_budgets(big, make_token, connect, fakes, monkeyp
     monkeypatch.setattr(state, "render", lambda body, **kw: {**body, "rules_version": body["rules"]})
     async with connect(make_token(profiles=("carmen",), user="alex")) as c:
         first = sc(await c.call_tool("get_health_status", {"profile": "carmen"}))
-        assert len(json.dumps(first["data"], ensure_ascii=False, separators=(",", ":")).encode()) <= 2048
+        assert len(json.dumps(first, ensure_ascii=False, separators=(",", ":")).encode()) < 2048
         assert first["budget"]["truncated"] and first["next_cursor"]
         ranks = [f["rank"] for f in first["data"]["flags"]]
         second = sc(await c.call_tool("get_health_status", {"profile": "carmen", "cursor": first["next_cursor"]}))
@@ -133,3 +133,40 @@ async def test_as_of_answers_what_the_store_knew(world, make_token, connect, fak
         later = sc(await c.call_tool("search_observations", {**args, "as_of": "2099-01-01"}))
     assert then["data"]["results"] == [] and then["data"]["not_measured"] is True and then["as_of"] == "2024-01-01"
     assert len(later["data"]["results"]) == 8
+
+
+async def test_demo_alex_status_pages_stay_under_2kb_whole(engine, settings, connect):
+    """ROADMAP v0.1: get_health_status under 2 KB of JSON for a profile with 5 years of labs (demo Alex)."""
+    from sqlalchemy import text
+
+    from ownhealth.auth.tokens import create_token
+    from ownhealth.blobs import BlobStore
+    from ownhealth.demo import DEMO_HOUSEHOLD, seed_demo
+
+    assert seed_demo(engine, settings, BlobStore(settings.blobs_path))
+    with engine.begin() as c:
+        u, p = c.execute(
+            text(
+                "select u.id, p.id from app_user u join household h on h.id = u.household_id"
+                " join profile p on p.household_id = h.id and p.slug = 'alex'"
+                " where h.name = :n order by u.created_at limit 1"
+            ),
+            {"n": DEMO_HOUSEHOLD},
+        ).one()
+        tok = create_token(
+            c, user_id=u, label="t", profile_ids=[p], scopes=sorted(ALL_SCOPES), lang="en", identity_mode="full"
+        ).plaintext
+    flags, cursor, pages = [], None, 0
+    async with connect(tok) as cl:
+        while True:
+            args = {"profile": "alex", **({"cursor": cursor} if cursor else {})}
+            env = sc(await cl.call_tool("get_health_status", args))
+            size = len(json.dumps(env, ensure_ascii=False, separators=(",", ":")).encode())
+            assert size < 2048, (pages, size)  # the whole structuredContent, not only data
+            flags += env["data"]["flags"]
+            pages += 1
+            cursor = env.get("next_cursor")
+            if not cursor:
+                break
+    assert [f["rank"] for f in flags] == list(range(1, len(flags) + 1)) and len(flags) >= 5
+    assert all(set(f) <= {"rank", "kind", "rule", "code", "text", "src"} for f in flags)

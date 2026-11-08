@@ -1,10 +1,17 @@
 // Small helpers shared by the lane H-ui-1 pages (dashboard, biomarkers, timeline, wearables, imaging, family).
 import { ApiError } from '#lib/api/core';
-import { t } from '#lib/i18n/index.svelte';
+import { i18n, t } from '#lib/i18n/index.svelte';
+import { dict } from '#lib/i18n/dict';
+import { pluralKey } from '#lib/logic/plural';
 
 /** t() with {name} placeholders. */
 export function tf(key: string, vars: Record<string, string | number>): string {
 	return t(key).replace(/\{(\w+)\}/g, (_, k) => (k in vars ? String(vars[k]) : `{${k}}`));
+}
+
+/** tf() for a count: uses `key_one` for one ("1 day missing", "falta 1 día"). `n` is also a placeholder. */
+export function tp(key: string, n: number, vars: Record<string, string | number> = {}): string {
+	return tf(pluralKey(i18n.lang, n, key, (k) => k in dict.en), { n, ...vars });
 }
 
 /**

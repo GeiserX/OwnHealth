@@ -15,6 +15,7 @@ git clone https://github.com/GeiserX/OwnHealth.git
 cd OwnHealth
 cp .env.example .env
 openssl rand -hex 32     # paste as OWNHEALTH_DB_PASSWORD in .env
+openssl rand -hex 32     # paste as OWNHEALTH_APP_DB_PASSWORD in .env
 openssl rand -hex 48     # paste as OWNHEALTH_SECRET_KEY in .env
 docker compose up -d
 ```
@@ -24,9 +25,11 @@ Compose pulls `drumsergio/ownhealth` and `postgres:17.11`. Before the first rele
 Check that it runs:
 
 ```sh
-docker compose ps                        # app and db: healthy
+docker compose ps -a                     # app and db: healthy; admin: exited (0)
 curl -s http://localhost:8080/healthz    # {"status":"ok","version":"..."}
 ```
+
+`admin` is a one-shot container: it runs the migrations as the database owner `ownhealth`, gives the app its own role `ownhealth_app`, and exits. The app connects as `ownhealth_app`, which can add to the audit log but not change or delete it.
 
 The app listens on `127.0.0.1:8080` only. Nothing on your network can reach it until you put a reverse proxy in front.
 

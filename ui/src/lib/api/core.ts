@@ -1,4 +1,5 @@
 // Typed fetch wrapper and the foundation endpoints. Same-origin; the session cookie rides along.
+import { filenameFromDisposition } from '#lib/logic/download';
 import type { ImportItem, JobInfo, Me, ProfileSummary, ReviewItem, SourceDetail, Uuid } from './types';
 
 export class ApiError extends Error {
@@ -22,8 +23,8 @@ function withQuery(path: string, query?: Query): string {
 	return s ? `${path}?${s}` : path;
 }
 
-export async function request<T>(method: string, path: string, opts: { query?: Query; body?: unknown } = {}): Promise<T> {
-	const init: RequestInit = { method, credentials: 'same-origin', headers: { Accept: 'application/json' } };
+async function send(method: string, path: string, opts: { query?: Query; body?: unknown; accept?: string } = {}): Promise<Response> {
+	const init: RequestInit = { method, credentials: 'same-origin', headers: { Accept: opts.accept ?? 'application/json' } };
 	if (opts.body instanceof FormData) init.body = opts.body;
 	else if (opts.body !== undefined) {
 		init.body = JSON.stringify(opts.body);
@@ -47,7 +48,18 @@ export async function request<T>(method: string, path: string, opts: { query?: Q
 		}
 		throw new ApiError(res.status, code, message, allowed);
 	}
+	return res;
+}
+
+export async function request<T>(method: string, path: string, opts: { query?: Query; body?: unknown } = {}): Promise<T> {
+	const res = await send(method, path, opts);
 	return (res.status === 204 ? undefined : await res.json()) as T;
+}
+
+/** A file download (the export zip). Errors map like request(), so step_up_required still reaches withStepUp. */
+export async function requestBlob(method: string, path: string, body: unknown, fallbackName: string): Promise<{ blob: Blob; filename: string }> {
+	const res = await send(method, path, { body, accept: 'application/zip, application/octet-stream' });
+	return { blob: await res.blob(), filename: filenameFromDisposition(res.headers.get('content-disposition'), fallbackName) };
 }
 
 export const get = <T>(path: string, query?: Query) => request<T>('GET', path, { query });
@@ -66,7 +78,7 @@ export const getSource = (srcId: string, includeText = false) =>
 	get<SourceDetail>(`/sources/${encodeURIComponent(srcId)}`, { include_text: includeText || undefined });
 
 export const listReview = (q: { status?: string; profile?: string; kind?: string; document_id?: Uuid } = {}) =>
-	get<{ items: ReviewItem[]; open: number }>('/review', q);
+	get<{ items: ReviewItem[]; open: number; withheld?: number }>('/review', q);
 export const getReviewItem = (id: Uuid) => get<ReviewItem>(`/review/${id}`);
 export const acceptReview = (id: Uuid, edits?: Record<string, unknown>) =>
 	post<{ id: Uuid; status: 'accepted'; result_ids: Uuid[] }>(`/review/${id}/accept`, { edits: edits ?? null });

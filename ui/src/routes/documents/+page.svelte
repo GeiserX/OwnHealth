@@ -2,6 +2,7 @@
 	// Documents vault: every file imported for the profile, newest first, by type, with full-text search
 	// over the page text (needs read:documents_text; filenames are always searchable).
 	import '#lib/components/pages2/pages2.css';
+	import { page } from '$app/state';
 	import { documentFileUrl, listDocuments, listJobs, retractDocument } from '#lib/api';
 	import type { DocumentSummary, JobInfo } from '#lib/api/types';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
@@ -18,6 +19,12 @@
 	let q = $state('');
 	let applied = $state('');
 	let type = $state('');
+	// ?q= from the top-bar search starts the search with that term.
+	const urlQ = $derived(page.url.searchParams.get('q') ?? '');
+	$effect(() => {
+		q = urlQ;
+		applied = urlQ;
+	});
 	let retracting = $state<string | null>(null);
 	let reason = $state('');
 	let actionError = $state<string | null>(null);

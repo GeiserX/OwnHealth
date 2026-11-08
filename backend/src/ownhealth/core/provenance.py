@@ -6,6 +6,7 @@ A document value needs document, page and bbox; an import needs its `import_ref`
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
@@ -84,6 +85,15 @@ def ensure_src(conn: Connection, src: SrcIn | str) -> str:
             raise ProvenanceError(f"unknown src {src}")
         return src
     return create_src(conn, src)
+
+
+def region_label(conn: Connection, document_id: UUID, page_no: int, effective_at: datetime | None) -> str:
+    """The provenance text of a document value: "LabNorte · 2026-09-14 · p1"."""
+    provider = conn.execute(text("select provider_name from document where id = :d"), {"d": document_id}).scalar()
+    parts = [provider or "Lab report"]
+    if effective_at is not None:
+        parts.append(effective_at.date().isoformat())
+    return " · ".join([*parts, f"p{page_no}"])
 
 
 def get_src(conn: Connection, src_id: str) -> dict | None:

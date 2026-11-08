@@ -78,7 +78,8 @@ class Pack:
         return (a.get(lang) or a.get("en")) if a else group
 
     def text(self, key: str, lang: str, **params) -> str:
-        t = self.templates.get(key)
+        # A count of one takes the `.one` template when there is one ("1 day ago", "hace 1 día").
+        t = (self.templates.get(f"{key}.one") if params.get("n") == 1 else None) or self.templates.get(key)
         if t is None:
             raise PackError(f"no template {key}")
         return (t.get(lang) or t["en"]).format(**params)

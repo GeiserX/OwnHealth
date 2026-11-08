@@ -21,8 +21,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Connection, text
 
 from ownhealth.core.acceptance import DEFAULT_THRESHOLD, Check, Identity, SourceAllowance, auto_accept
-from ownhealth.core.observations import ObservationIn, commit_observation
-from ownhealth.core.provenance import SrcIn
+from ownhealth.core.lifecycle import LifecycleError
+from ownhealth.core.observations import ObservationIn, commit_observation, supersede_observation
+from ownhealth.core.provenance import SrcIn, region_label
 
 ReviewKind = Literal[
     "candidate_row",
@@ -237,6 +238,7 @@ def submit_candidate(
         document_id=run.document_id,
         page_no=cand.page_no,
         bbox=cand.bbox,
+        label=region_label(conn, run.document_id, cand.page_no, obs.effective_at),
         extraction_run_id=run_id,
         candidate_row_id=row_id,
     )
@@ -282,14 +284,31 @@ def _accept_candidate(conn: Connection, item: dict, user_id: UUID, edits: dict |
     obs_data = {**payload["observation"], **(edits or {})}
     obs = ObservationIn.model_validate(obs_data)
     src = SrcIn.model_validate({**payload["src"], "actor_kind": "user", "actor_id": str(user_id)})
-    committed = commit_observation(
-        conn,
-        obs,
-        src=src,
-        accepted_by="person",
-        reviewed_by=user_id,
-        status="provisional" if payload.get("provisional") else "current",
-    )
+    committed = None
+    if payload.get("supersedes"):
+        # A changed upstream version replaces the value it corrects; if that one left the current
+        # view meanwhile (retracted), the correction is committed as a new fact.
+        try:
+            committed = supersede_observation(
+                conn,
+                UUID(str(payload["supersedes"])),
+                obs,
+                src=src,
+                accepted_by="person",
+                reviewed_by=user_id,
+                reason="updated at the source",
+            )
+        except LifecycleError:
+            committed = None
+    if committed is None:
+        committed = commit_observation(
+            conn,
+            obs,
+            src=src,
+            accepted_by="person",
+            reviewed_by=user_id,
+            status="provisional" if payload.get("provisional") else "current",
+        )
     if item["candidate_row_id"]:
         conn.execute(
             text("update candidate_row set state = 'confirmed', observation_id = :o where id = :id"),
@@ -301,12 +320,23 @@ def _accept_candidate(conn: Connection, item: dict, user_id: UUID, edits: dict |
 _ACCEPT_HANDLERS["candidate_row"] = _accept_candidate
 
 
+# Edits correct what was read; they never move a fact to another profile, household, document or
+# source. The result is always written where the item is (document_identity names its target and is
+# checked by the route).
+FIXED_EDIT_KEYS = frozenset({"profile_id", "household_id", "document_id", "src", "src_id"})
+
+
 def accept(conn: Connection, item_id: UUID, user_id: UUID, edits: dict | None = None) -> list[UUID]:
     """Accept an open item (with optional edits). Returns the ids of the rows it created."""
     item = _lock_item(conn, item_id, "open")
     handler = _ACCEPT_HANDLERS.get(item["kind"])
     if handler is None:
         raise ReviewError(f"items of kind {item['kind']} cannot be accepted; dismiss them instead")
+    if item["kind"] != "document_identity" and edits:
+        nested = edits.get("payload") if isinstance(edits.get("payload"), dict) else {}
+        fixed = sorted(FIXED_EDIT_KEYS & (set(edits) | set(nested)))
+        if fixed:
+            raise ReviewError(f"edits cannot change {', '.join(fixed)}")
     created = handler(conn, item, user_id, edits)
     conn.execute(
         text(

@@ -8,7 +8,7 @@
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
 	import { openSource } from '#lib/components/pages1/source.svelte';
-	import { Loader, tf } from '#lib/components/pages1/util.svelte';
+	import { Loader, tf, tp } from '#lib/components/pages1/util.svelte';
 	import StepUpDialog from '#lib/components/pages2/StepUpDialog.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
@@ -16,6 +16,12 @@
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const OWNGENOME = 'https://github.com/GeiserX/OwnGenome';
+
+	function tileDetail(tile: GenomeView['tiles'][number]): string {
+		if (tile.genes === undefined) return tile.detail;
+		const parts = [tile.actionable ? tp('i2_actionable', tile.actionable) : '', tile.genes, tile.hidden ? tp('h1_hidden', tile.hidden) : ''];
+		return parts.filter(Boolean).join(' · ');
+	}
 	const prof = $derived(currentProfile());
 	const gen = new Loader<GenomeView>();
 	const alerts = new Loader<ReviewItem[]>();
@@ -141,7 +147,7 @@
 			<div class="tile">
 				<div class="k">{t('i2_cat_' + tile.key)}</div>
 				<div class="n num">{tile.value}</div>
-				<div class="d">{tile.detail}</div>
+				<div class="d">{tileDetail(tile)}</div>
 			</div>
 		{/each}
 	</div>

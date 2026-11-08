@@ -1,7 +1,7 @@
-# HTTPS in front of OwnHealth. Caddy gets a certificate for OWNHEALTH_HOST by itself.
+# HTTPS in front of OwnHealth. Caddy gets a certificate for OWNHEALTH_DOMAIN by itself.
 # For a name that only exists on your LAN, replace the automatic certificate with `tls internal`
 # (Caddy's own CA; trust its root on your devices) or a DNS challenge plugin.
-{$OWNHEALTH_HOST} {
+{$OWNHEALTH_DOMAIN} {
 	# Health data stays on your network: only the LAN and a Tailscale tailnet may connect.
 	# Remove these two lines only if you know you want OwnHealth on the public internet.
 	@outside not remote_ip private_ranges 100.64.0.0/10

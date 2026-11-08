@@ -10,16 +10,25 @@
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
 	import { openSource } from '#lib/components/pages1/source.svelte';
 	import Tip from '#lib/components/pages1/Tip.svelte';
-	import { Loader, tf, yfrac } from '#lib/components/pages1/util.svelte';
+	import { Loader, tf, tp, yfrac } from '#lib/components/pages1/util.svelte';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
+	import ManualEntry from '#lib/components/ManualEntry.svelte';
 	import Sparkline from '#lib/components/Sparkline.svelte';
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
+	import { buildBars, niceStep } from '#lib/logic/axis';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const profile = $derived(currentProfile());
 	const code = $derived(page.url.searchParams.get('code'));
+	// ?q= from the top-bar search filters the list.
+	const query = $derived(page.url.searchParams.get('q') ?? '');
+	// 'direct' / 'calculated' and other method words, translated when the dict knows them.
+	const methodLabel = (m: string) => {
+		const k = 'h1_method_' + m.toLowerCase();
+		return t(k) === k ? m : t(k);
+	};
 
 	// ---- list ----
 	const obs = new Loader<{ items: ObservationOut[] }>();
@@ -27,13 +36,15 @@
 	const trends = new Loader<Trend[]>();
 	const dash = new Loader<Dashboard>();
 	let unitIdx = $state(0);
+	let adding = $state(false);
 
 	function load() {
 		const slug = profile?.slug;
 		const lang = i18n.lang;
 		if (!slug) return;
 		if (!code) {
-			obs.run(() => searchObservations(slug, { category: 'laboratory', lang }));
+			const q = query || undefined;
+			obs.run(() => searchObservations(slug, { category: 'laboratory', lang, q }));
 			return;
 		}
 		unitIdx = 0;
@@ -125,7 +136,7 @@
 			const b = pts[i];
 			const parts = [];
 			if ((a.lab ?? '') !== (b.lab ?? '')) parts.push(t('h1_lab_change'));
-			if ((a.loinc ?? '') !== (b.loinc ?? '') || (a.method ?? '') !== (b.method ?? '')) parts.push(b.method ?? t('h1_code_change'));
+			if ((a.loinc ?? '') !== (b.loinc ?? '') || (a.method ?? '') !== (b.method ?? '')) parts.push(b.method ? methodLabel(b.method) : t('h1_code_change'));
 			if (parts.length) marks.push({ x: (xy[i - 1][0] + xy[i][0]) / 2, label: parts.join(' · '), row: 0 });
 		}
 		// Each label takes the first row where it does not print over an earlier one (about 5.6 px per character).
@@ -138,20 +149,13 @@
 		}
 		const clampX = (d: string) => Math.min(sx(x1), Math.max(sx(x0), sx(yfrac(d))));
 		// Annotations with an end draw as a bar on the Meds row; one-day ones as a dot on the Events row.
-		const bars = tr.annotations.map((a) => ({
-			x: clampX(a.date),
-			x2: a.end ? clampX(a.end) : clampX(a.date),
-			span: !!a.end && a.end !== a.date,
-			label: a.label
-		}));
+		// A course with no end is still running and draws to today.
+		const bars = buildBars(tr.annotations, clampX, asOf);
 		return { x0, x1, y0, y1, sx, sy, ticks, years, xy, band, marks, bars };
 	});
-	function niceStep(raw: number): number {
-		const p = 10 ** Math.floor(Math.log10(raw));
-		const m = raw / p;
-		return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p;
-	}
 
+	// Extra Meds rows when courses overlap: each adds 14 px below the chart.
+	const extra = $derived(geo ? Math.max(0, ...geo.bars.filter((b) => b.span).map((b) => b.row)) * 14 : 0);
 	// Hover: the printed string and its provenance.
 	let tip = $state<{ i: number; x: number; y: number } | null>(null);
 	const fmt = (v: number) => fmtNum(v);
@@ -164,10 +168,20 @@
 	<div class="ph">
 		<div>
 			<h1>{t('nav_bio')}</h1>
-			{#if obs.data}<div class="sub">{tf('h1_bio_sub', { name: profile?.display_name ?? '', n: groups.length })}</div>{/if}
+			{#if obs.data}<div class="sub">{tp('h1_bio_sub', groups.length, { name: profile?.display_name ?? '' })}</div>{/if}
 		</div>
-		<div class="right"><PhaseChip phase="v0.1" /></div>
+		<div class="right">
+			{#if profile && profile.role !== 'viewer'}<button class="btn" onclick={() => (adding = !adding)} aria-expanded={adding}>{t('me_add_value')}</button>{/if}
+			<PhaseChip phase="v0.1" />
+		</div>
 	</div>
+	{#if adding && profile}
+		<div class="card" style="margin-bottom:12px">
+			<h3>{t('me_add_value')}</h3>
+			<ManualEntry profile={profile.slug} kinds={['observation']} onsaved={load} oncancel={() => (adding = false)} />
+		</div>
+	{/if}
+	{#if query}<div class="note" style="margin-bottom:6px">{t('me_filtered')} <b>{query}</b> · <a href="/biomarkers">{t('h1_clear')}</a></div>{/if}
 	<div class="card" style="padding:6px 6px 2px">
 		{#if obs.loading && !obs.data}
 			<div class="empty">{t('loading')}</div>
@@ -205,7 +219,7 @@
 			</h1>
 			<div class="sub">
 				{#if pts.length}
-					{profile?.display_name} · {tf('h1_meas', { n: pts.length, l: labs.length, from: pts[0].date.slice(0, 4), to: pts[pts.length - 1].date.slice(0, 4) })}
+					{profile?.display_name} · {tp('h1_meas', pts.length, { labs: tp('h1_labs', labs.length), from: pts[0].date.slice(0, 4), to: pts[pts.length - 1].date.slice(0, 4) })}
 				{:else}
 					<a href="/biomarkers">← {t('h1_back')}</a>
 				{/if}
@@ -243,7 +257,7 @@
 						<span class="dim">{t('h1_lg_shape')} {#each labs as l (l)}{GLYPH[shapeOf(l)]} {l}{' '}{/each}</span>
 						<span class="dim">{t('h1_lg_flags')}</span>
 					</div>
-					<svg width="100%" viewBox="0 0 {W} {H}" role="img" aria-label="{tr.name} · {pts.length}">
+					<svg width="100%" viewBox="0 0 {W} {H + extra}" role="img" aria-label="{tr.name} · {pts.length}">
 						{#each geo.ticks as v (v)}
 							<line x1={pl} x2={W - pr} y1={geo.sy(v)} y2={geo.sy(v)} stroke={C.grid} />
 							<text x={pl - 7} y={geo.sy(v) + 4} fill={C.axis} font-size="11" text-anchor="end">{fmt(v)}</text>
@@ -295,15 +309,16 @@
 							{@const my = pt + ih + 30}
 							<text x={pl - 7} y={my + 9} fill={C.axis} font-size="10.5" text-anchor="end">{t('h1_meds_row')}</text>
 							{#each geo.bars.filter((b) => b.span) as b, i (i)}
-								<rect x={b.x} y={my} width={Math.max(4, b.x2 - b.x)} height="12" rx="3" fill={C.accent} opacity=".55"><title>{b.label}</title></rect>
-								<text x={b.x + 6} y={my + 9.5} fill="#0c1222" font-size="10" font-weight="600">{b.x2 - b.x > 110 ? b.label : ''}</text>
+								<rect x={b.x} y={my + b.row * 14} width={Math.max(4, b.x2 - b.x)} height="12" rx="3" fill={C.accent} opacity=".55"><title>{b.label}{b.ongoing ? ' · ' + t('h1_ongoing') : ''}</title></rect>
+								{#if b.ongoing}<path d="M{b.x2 - 1} {my + b.row * 14 + 2}l5 4-5 4z" fill={C.accent} opacity=".8" />{/if}
+								<text x={b.x + 6} y={my + b.row * 14 + 9.5} fill="#0c1222" font-size="10" font-weight="600">{b.x2 - b.x > 110 ? b.label : ''}</text>
 							{/each}
-							<text x={pl - 7} y={my + 37} fill={C.axis} font-size="10.5" text-anchor="end">{t('h1_ev_row')}</text>
+							<text x={pl - 7} y={my + 37 + extra} fill={C.axis} font-size="10.5" text-anchor="end">{t('h1_ev_row')}</text>
 							{#each geo.bars.filter((b) => !b.span) as b, i (i)}
-								<circle cx={b.x} cy={my + 33} r="4" fill="#c39bd3"><title>{b.label}</title></circle>
+								<circle cx={b.x} cy={my + 33 + extra} r="4" fill="#c39bd3"><title>{b.label}</title></circle>
 								<!-- left of the dot, unless that would print over the row's own label -->
 								{@const left = b.x - pl > b.label.length * 5.6 + 14}
-								<text x={left ? b.x - 7 : b.x + 7} y={my + 37} fill="#8a93a5" font-size="10" text-anchor={left ? 'end' : 'start'}>{b.label}</text>
+								<text x={left ? b.x - 7 : b.x + 7} y={my + 37 + extra} fill="#8a93a5" font-size="10" text-anchor={left ? 'end' : 'start'}>{b.label}</text>
 							{/each}
 						{/if}
 					</svg>
@@ -349,7 +364,7 @@
 							{#if tr.stats.rcv_pct != null}
 								<div>
 									<div class="dim" style="font-size:11px">{t('h1_rcv')}</div>
-									<div style="font-size:18px;font-weight:650">±{fmtNum(tr.stats.rcv_pct, 0)}%</div>
+									<div style="font-size:18px;font-weight:650">±{fmtNum(tr.stats.rcv_pct, 1)}%</div>
 								</div>
 							{/if}
 						</div>
@@ -390,7 +405,7 @@
 	<Tip x={tip.x} y={tip.y}>
 		<b>{fmt(p.value)} {p.unit}</b>{#if p.status}&nbsp;·&nbsp;<StatusChip status={p.status} />{/if}<br />
 		<span class="mono">{p.printed}</span><br />
-		{p.date} · {p.lab ?? '—'}{p.method ? ' · ' + p.method : ''}<br />
+		{p.date} · {p.lab ?? '—'}{p.method ? ' · ' + methodLabel(p.method) : ''}<br />
 		<span class="dim">{t('h1_printed_range')} {rangeOf(p)}{p.loinc ? ' · LOINC ' + p.loinc : ''}</span><br />
 		<span style="color:#6ea8fe">{tf('h1_open_page', { p: p.src_label ?? p.src })}</span>
 	</Tip>

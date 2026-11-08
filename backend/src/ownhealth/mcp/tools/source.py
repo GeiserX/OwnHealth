@@ -11,6 +11,7 @@ from __future__ import annotations
 from sqlalchemy import text
 
 from ownhealth.core.access import AccessDenied, effective_permission
+from ownhealth.core.documents import document_is_sensitive
 from ownhealth.core.provenance import FACT_TABLES, resolve_src
 from ownhealth.mcp import gate as gate_mod
 from ownhealth.mcp.envelope import ToolError, untrusted
@@ -168,6 +169,10 @@ def source_data(call: Call, src_id: str, *, include_text: bool) -> Result:
         if not perm.has("read:documents_text"):
             by_scope.append("documents_text")
             limitations.append("Raw page text needs read:documents_text.")
+        elif doc and not perm.has("read:sensitive") and document_is_sensitive(call.conn, doc["id"]):
+            by_scope.append("sensitive")
+            data.pop("crop_url", None)
+            limitations.append("Page text withheld: the document holds sensitive results.")
         elif doc and src.get("page_no") is not None:
             try:
                 from ownhealth.ingest.pdf import page_words

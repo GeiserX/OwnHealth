@@ -101,6 +101,23 @@ def num(v):
     return v if v is None or isinstance(v, Decimal) else Decimal(str(v))
 
 
+def canonical_in(group, value_canon, unit_canon, units: str) -> dict | None:
+    """The stored canonical value in the token's unit preference (si or conventional), or None when
+    the preference is as_reported or the value cannot be converted."""
+    if units == "as_reported" or value_canon is None or not group or not unit_canon:
+        return None
+    gu = normalize.group_units(group)
+    target = gu and gu.get(units)
+    if not target:
+        return None
+    out = (
+        value_canon
+        if unit_canon == target
+        else normalize.convert(num(value_canon), unit_canon, target, alias_group=group)
+    )
+    return {"value": out, "unit": target} if out is not None else None
+
+
 def obs_row(r: dict, docs: dict, *, full: bool, units: str) -> dict:
     origin = origin_of(r)
     doc = docs.get(r.get("document_id"))
@@ -108,9 +125,7 @@ def obs_row(r: dict, docs: dict, *, full: bool, units: str) -> dict:
         value = r["value_num"]
     else:
         value = untrusted(r.get("value_text") or r.get("printed_value"), origin)
-    canonical = None
-    if units != "as_reported" and r.get("value_canonical") is not None:
-        canonical = {"value": r["value_canonical"], "unit": r.get("unit_canonical")}
+    canonical = canonical_in(r.get("alias_group"), r.get("value_canonical"), r.get("unit_canonical"), units)
     rng = None
     if r.get("ref_low") is not None or r.get("ref_high") is not None:
         rng = {k: v for k, v in (("low", r.get("ref_low")), ("high", r.get("ref_high"))) if v is not None}
@@ -538,16 +553,29 @@ def get_trend(call: Call) -> Result:
         since_dt = datetime.combine(since, datetime.min.time(), UTC) if since else None
         rows, withheld = visible_rows(call, groups, since=since_dt, categories={"lab", "vital"})
         rows.sort(key=lambda r: r["effective_at"])
-        units = {r.get("unit_canonical") for r in rows if r.get("value_canonical") is not None}
-        canonical_unit = max(units, key=lambda u: sum(r.get("unit_canonical") == u for r in rows)) if units else None
+        if call.units == "as_reported":
+            cans = [
+                (r["value_canonical"], r.get("unit_canonical")) if r.get("value_canonical") is not None else None
+                for r in rows
+            ]
+        else:
+            cans = [
+                (c["value"], c["unit"]) if c else None
+                for c in (
+                    canonical_in(r["alias_group"], r.get("value_canonical"), r.get("unit_canonical"), call.units)
+                    for r in rows
+                )
+            ]
+        units = [c[1] for c in cans if c]
+        canonical_unit = max(set(units), key=units.count) if units else None
         raw_points = []
-        for r in rows:
+        for r, c in zip(rows, cans, strict=True):
             p = obs_row(r, {}, full=False, units=call.units)
             point = {
                 "date": p["date"],
                 "value": p.get("value"),
                 "unit": p.get("unit"),
-                "canonical": r["value_canonical"] if r.get("unit_canonical") == canonical_unit else None,
+                "canonical": c[0] if c and c[1] == canonical_unit else None,
                 "range": p.get("range"),
                 "flag": p.get("flag"),
                 "method": r.get("method"),
@@ -555,7 +583,10 @@ def get_trend(call: Call) -> Result:
                 "src": r["src_id"],
             }
             raw_points.append({k: v for k, v in point.items() if v is not None})
-        if any(r.get("value_canonical") is not None and r.get("unit_canonical") != canonical_unit for r in rows):
+        if any(
+            r.get("value_canonical") is not None and not (c and c[1] == canonical_unit)
+            for r, c in zip(rows, cans, strict=True)
+        ):
             limitations.append("Some points are in a unit that could not be converted; their canonical is null.")
         if len({r.get("loinc") for r in rows if r.get("loinc")}) > 1:
             limitations.append(

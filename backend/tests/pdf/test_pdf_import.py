@@ -286,3 +286,18 @@ def test_bad_payload_is_a_permanent_job_failure(engine, settings, blobs):
             break
     with engine.connect() as c:
         assert c.execute(text("select state, attempts from job where id = :j"), {"j": jid}).one() == ("dead", 1)
+
+
+def test_lab_values_carry_a_provenance_label(conn, blobs, store, slips):
+    pdf, _ = slips["es-labnorte-3p"]
+    doc = store(pdf, filename="LabNorte_2026-09-14.pdf")
+    import_pdf(conn, blobs, document_id=doc)
+    labels = conn.execute(
+        text(
+            "select s.page_no, s.label from observation o join src s on s.id = o.src_id"
+            " where o.document_id = :d order by s.page_no"
+        ),
+        {"d": doc},
+    ).all()
+    assert labels and labels[0] == (1, "LabNorte · 2026-09-14 · p1")
+    assert all(label == f"LabNorte · 2026-09-14 · p{page}" for page, label in labels)

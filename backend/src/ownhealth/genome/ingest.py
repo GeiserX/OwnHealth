@@ -79,8 +79,28 @@ def _fingerprint_concordance(a: str, b: str) -> tuple[float, int] | None:
     return sum(x == y for x, y in pairs) / len(pairs), len(pairs)
 
 
-def _raw_files(blobs: BlobStore, doc: dict, attachments: dict[str, str]) -> tuple[dict[str, bytes], list[str]]:
-    """Columns -> blob sha (bytes) for every raw file the facts list and we hold, after a sha256 check."""
+def _owned(conn: Connection, profile_id: UUID, sha: str, attachments: dict[str, str]) -> bool:
+    """A raw file may be linked when it came with this upload or is already this profile's: the facts
+    file names raw files by sha256, and a hash on its own grants nothing."""
+    if sha in attachments.values():
+        return True
+    return (
+        conn.execute(
+            text(
+                "select 1 from genome_dataset where profile_id = :p and :s in"
+                " (vcf_blob, tbi_blob, gvcf_blob, gvcf_tbi_blob, sites_blob, sites_tbi_blob) limit 1"
+            ),
+            {"p": profile_id, "s": sha256_hex_to_bytes(sha)},
+        ).first()
+        is not None
+    )
+
+
+def _raw_files(
+    conn: Connection, blobs: BlobStore, doc: dict, attachments: dict[str, str], profile_id: UUID
+) -> tuple[dict[str, bytes], list[str]]:
+    """Columns -> blob sha (bytes) for every raw file the facts list, we hold and this profile may use
+    (uploaded with it, or already its own), after a sha256 check."""
     listed: dict[str, str] = {}
     for f in doc["files"]:
         listed[f["sha256"]] = f["path"]
@@ -101,7 +121,7 @@ def _raw_files(blobs: BlobStore, doc: dict, attachments: dict[str, str]) -> tupl
         if data_col in columns:
             raise GenomeImportError(f"the facts file lists two {f['role']} files; v1 takes one per role")
         sha, idx = f["sha256"], f["index_sha256"]
-        if not (blobs.exists(sha) and blobs.exists(idx)):
+        if not all(blobs.exists(h) and _owned(conn, profile_id, h, attachments) for h in (sha, idx)):
             missing.append(f"{f['role']} {f['path']}")
             continue
         for want, label in ((sha, f["path"]), (idx, f.get("index_path") or "index")):
@@ -136,7 +156,7 @@ def import_genome_facts(
     """Import the genome-facts.json stored as `document_id` (its profile must be set).
 
     `attachments` maps uploaded file names to their blob sha256 (the .vcf.gz and .tbi uploaded with it).
-    Raw files already in the blob store under the sha256 the facts file names are used too.
+    Raw files already linked to this profile under the sha256 the facts file names are used too.
     Re-importing the same bytes is a no-op; a new file for the same sample supersedes the old one.
     `imported_at` backdates the import (demo seed); default now.
     """
@@ -207,7 +227,7 @@ def import_genome_facts(
                     " It looks like a different person or a sample swap; nothing was imported."
                 )
 
-    raw, missing = _raw_files(blobs, doc, dict(attachments or {}))
+    raw, missing = _raw_files(conn, blobs, doc, dict(attachments or {}), profile_id)
     if missing:
         summary.reasons["raw_file_missing"] = len(missing)
 

@@ -51,9 +51,7 @@ def _convert(group: str | None, value: str | None, unit: str | None, units: str)
     try:
         from ownhealth import normalize
 
-        if units != "si":
-            return None
-        target = normalize.canonical_unit(group)
+        target = (normalize.group_units(group) or {}).get(units)
         source = normalize.to_ucum(unit)
         if not target or not source or target == source:
             return None
