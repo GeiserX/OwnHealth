@@ -16,6 +16,7 @@ ownhealth-auth.workspace = true
 ownhealth-genome.workspace = true
 ownhealth-ingest-pdf.workspace = true
 ownhealth-ingest-structured.workspace = true
+ownhealth-mcp.workspace = true
 ownhealth-normalize.workspace = true
 ownhealth-ops.workspace = true
 ownhealth-rules.workspace = true
@@ -26,10 +27,13 @@ http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+ownhealth-auth = { workspace = true, features = ["testing"] }
 ownhealth-core = { workspace = true, features = ["testing"] }
 anyhow.workspace = true
 tempfile.workspace = true

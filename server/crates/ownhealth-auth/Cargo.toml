@@ -1,6 +1,6 @@
 [package]
 name = "ownhealth-auth"
-description = "Lane G: passkeys, OIDC, passwords, sessions, step-up, PATs, CSRF, household management and export."
+description = "Lane G: passkeys, OIDC, passwords, sessions, step-up, PATs, CSRF and household management."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,10 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# a software passkey and an ES256 signer for other crates' tests
+testing = ["dep:p256", "dep:zip"]
 
 [dependencies]
 ownhealth-core.workspace = true
@@ -19,6 +23,7 @@ hex.workspace = true
 hmac.workspace = true
 http.workspace = true
 openidconnect.workspace = true
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"], optional = true }
 rand.workspace = true
 reqwest.workspace = true
 scrypt.workspace = true
@@ -28,12 +33,14 @@ serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
+unicode-normalization.workspace = true
 uuid.workspace = true
 webauthn-rs.workspace = true
 webauthn-rs-core = "0.6"
-zip.workspace = true
+zip = { workspace = true, optional = true }
 
 [dev-dependencies]
 ownhealth-core = { workspace = true, features = ["testing"] }
-tokio.workspace = true
