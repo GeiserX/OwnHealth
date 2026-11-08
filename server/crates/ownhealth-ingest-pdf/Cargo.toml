@@ -14,17 +14,27 @@ workspace = true
 ownhealth-core.workspace = true
 ownhealth-normalize.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
+flate2.workspace = true
 futures.workspace = true
+hex.workspace = true
 pdfium-render.workspace = true
+regex.workspace = true
+rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
+tokio.workspace = true
 tracing.workspace = true
+unicode-normalization.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 ownhealth-core = { workspace = true, features = ["testing"] }
+ownhealth-ingest-structured.workspace = true
 anyhow.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 
