@@ -15,17 +15,21 @@ ownhealth-core.workspace = true
 ownhealth-normalize.workspace = true
 chrono.workspace = true
 futures.workspace = true
+hex.workspace = true
 quick-xml.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
+tokio.workspace = true
 tracing.workspace = true
+unicode-normalization.workspace = true
 uuid.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
 ownhealth-core = { workspace = true, features = ["testing"] }
 anyhow.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
-
