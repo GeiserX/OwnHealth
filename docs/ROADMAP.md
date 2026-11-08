@@ -2,7 +2,7 @@
 
 OwnHealth is the health data layer you own: one store, two views. The web page shows health at a glance. The MCP server is the main interface for an outside agent such as Claude Code. There is no embedded chat agent and no built-in LLM.
 
-This roadmap is ordered, not dated. A phase ships when its exit criteria pass, not on a calendar. Every exit criterion below is a test we can run, and most of them run in CI against synthetic fixtures (people in fixtures: Alex Rivera, Sam Rivera, Lucía Rivera (child), Carmen Ortega (parent)). Acronyms (PGx, CPIC, LOINC, UCUM, IPS, RCV, PAT, CIMD, SHL, ICE, EHDS, MDR) are expanded in the [glossary in PLAN.md](PLAN.md#glossary). The final project decisions, including "no hosted or paid version", are in [PLAN.md](PLAN.md#decisions).
+This roadmap is ordered, not dated. A phase ships when its exit criteria pass, not on a calendar. Every exit criterion below is a test we can run, and most of them run in CI against synthetic fixtures (people in fixtures: Alex Rivera, Sam Rivera, Lucía Rivera (child), Carmen Ortega (parent)). Acronyms (PGx, CPIC, LOINC, UCUM, IPS, RCV, PAT, CIMD, SHL, ICE, EHDS, MDR) are expanded in the [glossary in PLAN.md](PLAN.md#glossary). The final project decisions are in [PLAN.md](PLAN.md#decisions).
 
 ## Overview
 
@@ -462,7 +462,6 @@ Not committed. Each needs a design doc and a spike before code reaches main.
 
 | Never | Reason |
 |---|---|
-| A hosted, paid or commercial version | OwnHealth is a common-good project, not a product: no hosted tier, no paid tier, no company. Staying non-commercial helps with the EU MDR "commercial activity" test but does not settle it: the Blue Guide judges that case by case, and free supply is not automatically outside it. The MDR status stays an open decision (below) and needs a regulatory assessment before the first release. |
 | A Strava API connector | Strava's API policy (June 2026) bans AI use, context-window ingestion and MCP exposure of API data. We import the user's own bulk export only. |
 | An embedded chat agent or built-in LLM | OwnHealth is the data layer; the user picks the agent. MCP Sampling is deprecated in 2026-07-28. An embedded agent adds cost, a model supply chain and a second place where data leaves. |
 | Shipped SNOMED CT or WHO ATC content | SNOMED CT needs an affiliate licence outside member countries; ATC is not redistributable. We store codes as received; bring your own terminology. |

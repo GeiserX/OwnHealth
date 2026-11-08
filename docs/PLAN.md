@@ -49,7 +49,6 @@ License: AGPL-3.0-or-later. Repo: https://github.com/GeiserX/OwnHealth
 8. **Build on, don't rebuild.** Open Wearables (MIT) sidecar for wearable OAuth. Orthanc + OHIF for imaging. Paperless-ngx as a document source. Nightscout for CGM. [OwnGenome](https://github.com/GeiserX/OwnGenome) for all genome compute, consumer chips included. OwnHealth only ingests.
 9. **Simple to run.** One app container plus Postgres. Heavy parts are opt-in compose profiles.
 10. **Dark theme by default.** Spanish and English from the first screen. SI and conventional units.
-11. **A common-good project, not a product.** No hosted tier, no paid tier, no company.
 
 ## What we beat and how
 
@@ -100,7 +99,7 @@ What we take from rivals:
 | PDF, FHIR R4, IPS, Apple Health zip, manual entry | Storing BAM/CRAM in OwnHealth | Shipped SNOMED CT or WHO ATC content |
 | Wearables via Open Wearables, Nightscout, Gadgetbridge, Health Auto Export | Our own wearable OAuth apps | An MCP tool that shares or exports outward |
 | Imaging via Orthanc + OHIF (opt-in) | Our own DICOM viewer | Diagnosis or treatment advice |
-| Calculators with citations (v0.3) | Drug-drug interactions until an open-licence source exists | A hosted, paid or commercial version |
+| Calculators with citations (v0.3) | Drug-drug interactions until an open-licence source exists | |
 | Family roles, break-glass (v1.0) | Multi-household sync (moonshot) | |
 
 ## Architecture at a glance
@@ -317,7 +316,6 @@ Final. Each one holds until we write a new decision here.
 - **Agent-assisted extraction:** yes, through MCP (`propose`), with every proposal landing in the review queue.
 - **Storage:** FHIR-shaped tables in plain Postgres; no FHIR server. Postgres only, no SQLite mode.
 - **Imports:** universal imports (PDF, FHIR/IPS, Apple Health) plus a connector SDK, instead of chasing every national portal.
-- **Not a product:** no hosted tier, no paid tier, no company. OwnHealth is built for the common good.
 - **Genome:** [OwnGenome](https://github.com/GeiserX/OwnGenome) produces the genome findings, consumer-chip imputation included; OwnHealth only ingests them.
 - **MCP auth:** PATs first (enough for Claude Code); OAuth 2.1 with CIMD in v0.2.
 - **Lab coverage in v0.1:** generic table rules, the fictional LabNorte template, a curated 202-code LOINC subset with es/en/de/fr aliases and a hand-written UCUM subset. Real-vendor templates come as contributed YAML; Mirobody's resolver overlays and a wider LOINC set come later.
