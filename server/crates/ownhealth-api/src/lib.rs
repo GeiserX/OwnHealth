@@ -18,6 +18,7 @@
 pub mod error;
 pub mod extract;
 pub mod routes;
+pub mod validate;
 
 use axum::Router;
 use ownhealth_core::Runtime;
