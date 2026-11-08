@@ -125,7 +125,7 @@ flowchart LR
 | Area | Criterion |
 |---|---|
 | Lab import | A synthetic 3-page Spanish lab report in the Synlab layout imports with >=98% of rows auto-accepted (coded to LOINC, every check passed, no click needed) and 100% of rows linked to page + bbox; the false auto-accept rate on the eval set is 0. |
-| Nothing silent | Across the eval set, rows extracted + rows in review queue = rows in ground truth (0 dropped). |
+| Nothing silent | Across the born-digital eval set, every ground-truth row has exactly one outcome, either accepted or in the review queue (never both, never twice), matched by row identity: 0 dropped, 0 duplicated. |
 | Eval set | >=30 synthetic layouts across es/en/de/fr; text-layer row F1 >=0.97. |
 | Status | `get_health_status` answers in <300 ms p95 and <2 KB for a profile with 5 years of labs; two runs give the same `state_hash`, and tokens with different language, unit and identity settings get the same hash. |
 | MCP budget | No tool response exceeds 15k tokens on the largest fixture; default responses stay under 4k. |
@@ -134,7 +134,7 @@ flowchart LR
 | Apple Health | A 2 GB `export.xml` imports in <10 min with peak RSS <1 GB on a 4-core box (target, to measure). |
 | FHIR/IPS | The HL7 IPS IG example bundles import with every resource either projected or queued. |
 | Genome | `lookup_variant` returns a `call_state` for 100% of a 1,000-rsID test list, including sites not on the array; a contract test rejects any `call_state` outside `ref`, `alt`, `no_call`, `not_on_array`, `not_covered`. |
-| Drug check | `check_drug` for the synthetic profiles quotes CPIC text verbatim with its level, lists current medications and relevant labs with `src` ids, and the wording lint finds 0 imperative phrases. |
+| Drug check | `check_drug` for the synthetic profiles quotes CPIC text verbatim with its level, lists current medications and relevant labs with `src` ids, and the wording lint finds 0 imperative phrases in text we write (quoted guideline text, attributed to its source, is exempt). |
 | Restore | A restic restore into a fresh stack yields an identical `state_hash` for every profile. |
 | Install | Fresh install to first imported lab in <10 min on a 4 GB RAM box. |
 
@@ -194,6 +194,7 @@ flowchart LR
 |---|---|
 | Email | A password-protected lab PDF from an allowlisted sender appears in the review queue in <2 min; 100% of mail from other senders lands in quarantine. |
 | OCR | Scanned and photographed eval pages reach row F1 >=0.90 on CPU; CPU throughput measured and published (target <60 s per page, unverified). |
+| Nothing silent, scans | With the `ocr` profile on, every ground-truth row of the scanned and photographed eval set has exactly one outcome, accepted or in the review queue: 0 dropped, 0 duplicated. With it off, every such page waits as pending and is listed by `list_pending_documents`. |
 | Agent extraction | A Claude Code session using only MCP extracts a scanned page; 100% of proposals land in the queue; every ungrounded value is flagged. |
 | OAuth | claude.ai connects as a remote connector through CIMD with no DCR; audience mismatch is rejected in tests. |
 | Phone push | 7 days of 15-min Health Auto Export pushes import with 0 duplicate samples. |
@@ -247,7 +248,7 @@ flowchart LR
 - [ ] Evaluate later candidates (`timeline`, `what_changed_since`, `list_conditions`, `get_medications`) against logged agent sessions; add only those with evidence (see "How we decide").
 
 **Security/Privacy**
-- [ ] Wording lint in CI: PGx and calculator outputs never contain imperative treatment advice ("do not take", "stop").
+- [ ] Wording lint in CI: PGx and calculator outputs never contain imperative treatment advice ("do not take", "stop") in text we write. A verbatim guideline quotation, attributed to its source, is exempt.
 - [ ] Per-relative consent for cross-profile hints; minors' data never feeds hints to non-guardians.
 
 **Docs/Community**
@@ -258,7 +259,7 @@ flowchart LR
 
 | Area | Criterion |
 |---|---|
-| Drug check | `check_drug` answers for 100% of CPIC level A gene-drug pairs present in fixtures, each with a guideline citation, supplements included in the medication join; the wording lint finds 0 imperative phrases. |
+| Drug check | `check_drug` answers for 100% of CPIC level A gene-drug pairs present in fixtures, each with a guideline citation, supplements included in the medication join; the wording lint finds 0 imperative phrases outside attributed guideline quotations. |
 | Calculators | Every calculator reproduces its published worked examples to the stated precision and refuses (with reason) when a validity rule fails. |
 | ClinVar diff | Weekly diff for a household of 4 genomes finishes in <5 min; alert-policy fixtures fire exactly on the 3 alert classes. |
 | Chips | A synthetic array with a planted rare P/LP shows it as "unconfirmed" with the PPV note, never as confirmed. |
@@ -461,7 +462,7 @@ Not committed. Each needs a design doc and a spike before code reaches main.
 
 | Never | Reason |
 |---|---|
-| A hosted, paid or commercial version | OwnHealth is a common-good project, not a product: no hosted tier, no paid tier, no company. This also keeps it clear of the EU MDR "commercial activity" test. |
+| A hosted, paid or commercial version | OwnHealth is a common-good project, not a product: no hosted tier, no paid tier, no company. Staying non-commercial helps with the EU MDR "commercial activity" test but does not settle it: the Blue Guide judges that case by case, and free supply is not automatically outside it. The MDR status stays an open decision (below) and needs a regulatory assessment before the first release. |
 | A Strava API connector | Strava's API policy (June 2026) bans AI use, context-window ingestion and MCP exposure of API data. We import the user's own bulk export only. |
 | An embedded chat agent or built-in LLM | OwnHealth is the data layer; the user picks the agent. MCP Sampling is deprecated in 2026-07-28. An embedded agent adds cost, a model supply chain and a second place where data leaves. |
 | Shipped SNOMED CT or WHO ATC content | SNOMED CT needs an affiliate licence outside member countries; ATC is not redistributable. We store codes as received; bring your own terminology. |

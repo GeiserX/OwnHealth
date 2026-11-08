@@ -171,7 +171,7 @@ Common fields:
 | Token budget | Default ~4k tokens, hard max 15k (under Claude Code's default 25k `MAX_MCP_OUTPUT_TOKENS`). The server estimates tokens as `len(json)/3.5` and stops adding rows before the cap, setting `truncated: true` and a `next_cursor` |
 | Citations | Every fact carries `src` (one id or a list). Ids match `^src_[a-z0-9_]+$` (for example `src_a12`, or `src_g_2b3c4d5e` for genome facts), resolve through `get_source` or `ownhealth://source/{src_id}`, and stay stable for the life of the row |
 | Pagination | Opaque `cursor` / `next_cursor`: base64url of `{query_hash, as_of, last_key}` with an HMAC. Stateless. A cursor from a different query or token is rejected |
-| `as_of` | ISO date or datetime. Means "what the store knew then": rows with `recorded_at <= as_of` and `effective_at <= as_of`, minus rows retracted or superseded before `as_of`. Same `as_of` and same rule pack give the same answer |
+| `as_of` | ISO date or datetime. Means "what the store knew then": rows with `recorded_at <= as_of` and `effective_at <= as_of`, minus rows retracted or superseded before `as_of`. Same `as_of`, same rule pack and same `derivation_version` give the same answer. Derived values (LOINC, canonical value and unit, interpretation) are not versioned: after a re-derivation, a past `as_of` returns the rows known then with today's derived values. The status snapshot stored at the time keeps what the state said then |
 | Lifecycle | Every fact has a lifecycle `status`: `provisional` (waiting in the review queue or not yet confirmed), `current`, `superseded` or `retracted`. Clinical verification (`provisional`, `confirmed`) is a separate field beside it. Tools return `current` facts by default; `provisional` ones appear only in `pending[]` |
 | Units | Every value carries the printed `value` and `unit` (the truth layer). A `canonical` block adds the converted value in the token's unit preference (`si`, `conventional` or `as_reported`). Unconvertible units are never dropped: they come back with `canonical: null` and a `limitations` entry |
 | Codes | LOINC for observations, UCUM for units, HGNC for genes, rsID/HGVS/VRS/ClinVar for variants. Drugs carry the CPIC drug id when our alias table knows the drug, and any code (ATC, RxNorm, SNOMED CT) only as it arrived in imported data; we ship no ATC or SNOMED content. Codes are optional enrichment; the printed name is always present |
@@ -235,7 +235,8 @@ Input:
 ```json
 {"type":"object","properties":{
   "profile":{"type":"string"},
-  "as_of":{"type":"string","format":"date"}},
+  "as_of":{"type":"string","anyOf":[{"format":"date"},{"format":"date-time"}]},
+  "cursor":{"type":"string"}},
  "additionalProperties":false}
 ```
 
@@ -403,8 +404,8 @@ Example:
     "assay": {"type": "wgs", "depth": "30x", "build": "GRCh38", "source_tool": "OwnGenome 1.4.2"},
     "findings": [
       {"id": "f_3be1", "category": "pgx", "gene": "CYP2C19", "diplotype": "*1/*2",
-       "phenotype": "Intermediate metabolizer", "evidence": "E1", "evidence_native": "CPIC A",
-       "confidence": "high", "confidence_basis": "two callers agree",
+       "phenotype": "Intermediate metabolizer", "evidence": "E1", "evidence_native": {"trust": "untrusted_text", "origin": "genome_facts", "text": "CPIC A"},
+       "confidence": "high", "confidence_basis": {"trust": "untrusted_text", "origin": "genome_facts", "text": "two callers agree"},
        "call_state": "alt", "drugs": ["clopidogrel", "citalopram", "omeprazole"], "src": "src_g07"},
       {"id": "f_77d0", "category": "pgx", "gene": "SLCO1B1", "diplotype": "*1/*5",
        "phenotype": "Decreased function", "evidence": "E1", "confidence": "high",
@@ -412,7 +413,7 @@ Example:
       {"id": "f_a402", "category": "carrier", "gene": "HFE", "hgvs": "NM_000410.4:c.845G>A",
        "rsid": "rs1800562", "zygosity": "het", "clinvar": {"variation_id": 9, "stars": 3, "significance": "Pathogenic"},
        "evidence": "E1", "confidence": "high", "call_state": "alt",
-       "text": "One copy of HFE C282Y. Relevant for family testing.", "src": "src_g44"}
+       "text": {"trust": "untrusted_text", "origin": "genome_facts", "text": "One copy of HFE C282Y. Relevant for family testing."}, "src": "src_g44"}
     ]
   },
   "not_assessed": [
@@ -511,7 +512,7 @@ Example 1 is PLAN.md's clopidogrel call for Alex (CYP2C19 *1/*2 with omeprazole,
     "drug": {"name": "Codeine", "cpic_drug_id": "RxNorm:2670", "codes_as_received": [], "currently_taking": false},
     "pgx": [{"gene": "CYP2D6", "diplotype": "*1/*1", "activity_score": 2.0,
              "phenotype": "Normal metabolizer", "evidence": "E1", "confidence": "medium",
-             "confidence_basis": "single caller; SVs not assessed", "call_state": "ref", "src": "src_g27"}],
+             "confidence_basis": {"trust": "untrusted_text", "origin": "genome_facts", "text": "single caller; SVs not assessed"}, "call_state": "ref", "src": "src_g27"}],
     "phenoconversion": [{"gene": "CYP2D6", "by": "Fluoxetine 20 mg", "inhibitor_strength": "strong",
                          "activity_score_functional": 0.0,
                          "functional_phenotype": "Poor metabolizer (functional)",
@@ -577,9 +578,10 @@ Output:
 ```
 
 - `status` is the lifecycle: `provisional` (still in the review queue), `current`, `superseded` (with `superseded_by`) or `retracted` (with reason); `gone` means deleted in the UI. An id the token's profiles do not own returns `unknown`, the same as an id that never existed, so ids do not leak existence.
+- `location` and `crop_url` exist only for values read from a document. Other sources fill `import` instead and set `location` to null: for FHIR the resource type and id plus a JSON pointer, for Apple Health the record type and start time in `export.xml`, for genome facts the facts file and finding id, for manual entries the user and time of entry (architecture.md `src.kind`).
 - `crop_url` is a UI deep link that needs a logged-in session. It is not a bearer capability and gives nothing to whoever holds the URL alone.
 - `extraction.accepted` is `auto` when the row met the auto-accept rule (ingestion.md section 9: every check passed, row confidence at least 0.95, the source allows it, the identity matches) or `person` with `confirmed_at` when someone confirmed it in the queue.
-- With `include_text: true` and `read:documents_text`, `text` is `{"trust": "untrusted_text", "origin": "pdf_text_layer", "text": "…"}` for the cited page only.
+- With `include_text: true` and `read:documents_text`, `text` is `{"trust": "untrusted_text", "origin": "pdf_text_layer", "text": "…"}` for the cited page only. A page can hold more than the cited fact, so its text comes back only when the server knows everything on it is permitted. A page whose extraction is finished (no longer in `pages_pending`, section 6.1) is permitted when the token can read every category of fact extracted from it and every sensitivity label on the document. A page that still holds unextracted content can hold anything, so it is permitted only to a token holding every category a document can carry: `read:labs`, `read:vitals`, `read:records`, `read:genome` and `read:sensitive`. Otherwise `text` stays null and the missing scopes are named in `withheld.by_scope`. v0.1 does not redact part of a page.
 
 ### 5.8 `propose`
 
@@ -587,7 +589,7 @@ Purpose: the only write tool. The agent proposes; OwnHealth validates; a person 
 
 | Field | Value |
 |---|---|
-| Annotations | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: true` (same payload hash returns the same proposal), `openWorldHint: false` |
+| Annotations | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: true` (a retry from the same token with the same resolved profile, `kind`, payload and `based_on` returns the same proposal; a call from another token, or with different `based_on`, creates its own review item; the authorization check runs first), `openWorldHint: false` |
 | Budget | 1k |
 | Limits | Per-day and per-call caps in section 9.4 |
 
@@ -607,9 +609,9 @@ Payload per kind:
 | Kind | Payload | Server checks |
 |---|---|---|
 | `observations` | `{doc_id, rows:[{name, value, unit, range?, date, page, bbox?}]}` | LOINC resolves; UCUM unit parses and converts; value within plausible bounds for the analyte; **value grounded in the page word layer** (fuzzy, decimal-separator tolerant; gives the bbox); date inside the document's date range |
-| `note` | `{text, attach_to?: src_id|"status", lang}` | Length cap 4k chars; stored as `author_kind: agent` |
-| `finding_status` | `{finding_id, verification?: "confirmed"|"provisional", lifecycle?: "retracted", reason, evidence_src?}` | Finding exists; transition allowed (verification is separate from the lifecycle, section 3) |
-| `medication` | `{action: "start"|"stop"|"change", name, dose?, schedule?, date, reason?}` | Drug name resolves or is kept as free text with a limitation |
+| `note` | `{text, attach_to?: src_id\|"status", lang}` | Length cap 4k chars; stored as `author_kind: agent` |
+| `finding_status` | `{finding_id, verification?: "confirmed"\|"provisional", lifecycle?: "retracted", reason, evidence_src?}` | Finding exists; transition allowed (verification is separate from the lifecycle, section 3) |
+| `medication` | `{action: "start"\|"stop"\|"change", name, dose?, schedule?, date, reason?}` | Drug name resolves or is kept as free text with a limitation |
 
 Example:
 
@@ -648,7 +650,7 @@ Purpose: one page for the agent to read. Scopes `read:documents_text` and `write
 
 Input `{"doc_id": string, "page": integer, "include": ["words","image"]}` (default `["words"]`).
 
-Output: `words` as lines with bboxes `{text, bbox}` wrapped in one `untrusted_text` block, plus an `image` content block (PNG, 150 dpi, max 1600 px) when asked. The agent then calls `propose` with `kind: "observations"`; grounding against the same word layer happens server-side.
+Output: `words` as lines with bboxes `{text, bbox}` wrapped in one `untrusted_text` block, plus an `image` content block (PNG, 150 dpi, max 1600 px) when asked. The page rule of `get_source` (section 5.7) applies to words and image alike. Pages waiting here are mostly unextracted, so an extraction token needs the full set of read categories named there; the token page in the UI says so when `write:propose` and `read:documents_text` are ticked together. A page the rule does not permit is not returned. The image follows the token's redaction mode (section 9.6): in `pseudonymous` and `minimal` mode no image is returned, because v0.1 cannot reliably remove names and identifiers from pixels, and the words pass through the same detectors as any other free text. The agent then calls `propose` with `kind: "observations"`; grounding against the same word layer happens server-side.
 
 ```mermaid
 flowchart LR
@@ -693,7 +695,7 @@ User-invoked templates. The server runs no model; a prompt only returns messages
 
 Imported text is data, not instructions. A PDF from the email inbox can carry hidden text aimed at the agent, and the agent holds private data and its own outbound tools at the same time.
 
-- Every free-text field that did not come from our own templates is returned as `{"trust": "untrusted_text", "origin": "<pdf_text_layer|ocr|email_subject|fhir_note|agent_note|person_note>", "text": "…"}`.
+- Every free-text field that did not come from our own templates is returned as `{"trust": "untrusted_text", "origin": "<pdf_text_layer|ocr|email_subject|fhir_note|genome_facts|agent_note|person_note>", "text": "…"}`.
 - Structured values are preferred. Most tools return no free text at all.
 - Raw document text is only reachable with `read:documents_text`, off by default.
 - Document text never goes into tool names, tool descriptions, prompt templates or resource names. Titles are stripped of control characters and capped at 120 chars.
@@ -762,9 +764,9 @@ Trends survive every mode because intervals are kept. The docs say plainly: what
 
 - **Sensitive categories:** mental health, reproductive health, sexual health. Facts are tagged at import (code lists per category plus manual tags). Without `read:sensitive` they are left out of every tool and counted in `withheld.sensitive`.
 - **Genome sensitive findings:** APOE e4, ACMG SF cancer and cardiac genes, predictive repeat-expansion loci (the list in genomics.md section 7). The profile has two separate switches, `genome.sensitive.ui` and `genome.sensitive.agents`, both off by default; only the agents switch matters here. An agent sees a sensitive genome finding only when that switch is on and the token holds both `read:genome` and `read:sensitive`. Otherwise the finding is counted in `withheld.sensitive` and never described.
-- **Lookups follow the same gate.** `lookup_variant` on a position or region inside a sensitive gene returns `withheld_sensitive` and no genotype unless the gate above is open, so a raw lookup (for example rs429358 for APOE) cannot bypass it. Regions that overlap such a gene are clipped and the clip is reported.
+- **Lookups follow the same gate.** `lookup_variant` on a position or region inside a sensitive gene, or covering a position a withheld sensitive finding cites in its `variants[]` (with or without a gene), returns `withheld_sensitive` and no genotype unless the gate above is open, so a raw lookup (for example rs429358 for APOE) cannot bypass it. Regions that overlap such a gene or position are clipped and the clip is reported.
 - **Raw genome:** `read:genome_raw` only, daily cap, every lookup audited with the position queried.
-- **Minors:** a profile with a birth date under the configured age of majority (default 18, configurable; per household or per profile is open, genomics.md open decision 3) is managed through `guardian` grants. Adult-onset findings, sensitive findings, carrier status and PRS for adult-onset conditions are withheld for minors whatever the scopes and switches, and counted in `withheld.minor_rule`. PGx and childhood-onset actionable findings are shown, because they guide a child's prescriptions and care. On reaching the age, the profile asks its person to claim it; guardian grants then need the person's approval.
+- **Minors:** a profile with a birth date under the configured age of majority (default 18, configurable; per household or per profile is open, genomics.md open decision 3) is managed through `guardian` grants. Adult-onset findings, sensitive findings, carrier status and PRS for adult-onset conditions are withheld for minors whatever the scopes and switches, and counted in `withheld.minor_rule`. PGx and childhood-onset actionable findings are shown, because they guide a child's prescriptions and care. Some PGx results also imply carrier status (a nonfunctional `DPYD` allele is both). That is a deliberate clinical exception: the PGx finding is shown with its diplotype, phenotype and drug guidance, and the carrier finding for the same variant stays withheld, so no answer names the inherited condition or a carrier state. `lookup_variant` follows the same rule for a minor: a position or region inside a gene with a withheld finding, inside an adult-onset or carrier-panel gene, or covering a position a withheld finding cites, returns `withheld_minor` and no genotype, and regions are clipped the same way as for sensitive genes. Withholding wins where a gene is both PGx and carrier-panel: the PGx answer then comes only from `get_genome_findings` and `check_drug`, never from a raw lookup. Positions in other PGx genes and in genes with childhood-onset actionable findings are answered as usual. On reaching the age, the profile asks its person to claim it; guardian grants then need the person's approval.
 
 ## 10. Client setup
 

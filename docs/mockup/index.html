@@ -170,7 +170,7 @@ blockquote{margin:8px 0;padding:8px 12px;border-left:3px solid var(--accent);bac
 .bar>i{display:block;height:100%;background:var(--accent)}
 /* imaging */
 .img{display:grid;grid-template-columns:250px 1fr 330px;gap:12px;height:calc(100vh - 52px - 40px - 52px)}
-.study{padding:9px 10px;border-radius:8px;border:1px solid transparent;cursor:pointer}
+.study{padding:9px 10px;border-radius:8px;border:1px solid transparent}
 .study.on{background:var(--raised);border-color:var(--line2)}
 .viewer{background:#000;border:1px solid var(--line);border-radius:var(--r);display:flex;flex-direction:column;overflow:hidden}
 .vtool{display:flex;gap:4px;padding:6px 8px;background:#0b0c0f;border-bottom:1px solid #1d2028}
@@ -254,7 +254,7 @@ pre.code{background:#0b0d11;border:1px solid var(--line);border-radius:8px;paddi
 <script>
 "use strict";
 /* ---------- state ---------- */
-const S={lang:"en",profile:"alex",unit:"mg",showApoe:false,tlTypes:new Set(),tlCountries:new Set()};
+const S={lang:"en",profile:"alex",unit:"mg",showApoe:false,tlTypes:new Set(),tlCountries:new Set(),sw:{}};
 const C={ok:"#3fb68b",watch:"#e0a84a",out:"#ef6b73",stale:"#9aa3b2",accent:"#6ea8fe",grid:"#232833",axis:"#7a8394"};
 const PROFILES=[
   {id:"alex",name:"Alex Rivera",role:"r_owner|47",av:"AR",col:"#6ea8fe",flags:4},
@@ -447,7 +447,7 @@ function ldlChart(){
   g+=`<polyline points="${pts.map(p=>p.join(",")).join(" ")}" fill="none" stroke="#8792a6" stroke-width="1.6"/>`;
   LDL.forEach((r,i)=>{const st=ldlStatus(r[1],r[4]);const [x,y]=pts[i];const c=C[st];
     const shape=r[2].startsWith("Quest")?`<circle cx="${x}" cy="${y}" r="5.5"/>`:r[2]==="LabNorte"?`<rect x="${x-5}" y="${y-5}" width="10" height="10" rx="1.5"/>`:r[2]==="Labor Berlin"?`<path d="M${x} ${y-7}L${x+7} ${y}L${x} ${y+7}L${x-7} ${y}Z"/>`:`<path d="M${x} ${y-6.5}L${x+6.5} ${y+5}L${x-6.5} ${y+5}Z"/>`;
-    g+=`<g fill="${c}" stroke="#0f1115" stroke-width="1.5" data-i="${i}" class="pt" style="cursor:pointer">${shape}</g>`;
+    g+=`<g fill="${c}" stroke="#0f1115" stroke-width="1.5" data-i="${i}" class="pt" style="cursor:pointer" tabindex="0" role="img" aria-label="${r[0]}: ${cv(r[1])} ${U()}">${shape}</g>`;
     if(i===LDL.length-1||i===10)g+=`<text x="${x}" y="${y-11}" fill="${C.text||"#e6e8ee"}" font-size="11" font-weight="600" text-anchor="middle">${cv(r[1])}</text>`;
   });
   // med bars
@@ -668,7 +668,7 @@ function imaging(){
   <div class="ph"><div><h1>Imaging</h1><div class="sub">Alex Rivera · 3 studies · stored in Orthanc · viewed in OHIF</div></div><div class="right"><span class="phase">imaging profile v1.0</span><button class="btn">Import DICOM folder / CD</button></div></div>
   <div class="img">
    <div class="card" style="padding:8px;overflow:auto">
-    <div class="study on"><div style="display:flex;gap:8px;align-items:center"><b>MRI right knee</b><span class="flag" style="margin-left:auto">MR</span></div><div class="dim" style="font-size:11.5px">2025-11-18 · 3 series · 412 images</div><div class="dim" style="font-size:11.5px">Imaging centre Madrid-Norte · ES</div><div style="margin-top:4px">${pill("watch","Finding")}</div></div>
+    <div class="study on" aria-current="true"><div style="display:flex;gap:8px;align-items:center"><b>MRI right knee</b><span class="flag" style="margin-left:auto">MR</span></div><div class="dim" style="font-size:11.5px">2025-11-18 · 3 series · 412 images</div><div class="dim" style="font-size:11.5px">Imaging centre Madrid-Norte · ES</div><div style="margin-top:4px">${pill("watch","Finding")}</div></div>
     <div class="study"><div style="display:flex;gap:8px;align-items:center"><b>Chest X-ray PA + lateral</b><span class="flag" style="margin-left:auto">CR</span></div><div class="dim" style="font-size:11.5px">2024-02-07 · 2 series · 2 images</div><div class="dim" style="font-size:11.5px">Praxis Berlin-Mitte · DE</div><div style="margin-top:4px">${pill("ok","No acute findings")}</div></div>
     <div class="study"><div style="display:flex;gap:8px;align-items:center"><b>Abdominal ultrasound</b><span class="flag" style="margin-left:auto">US</span></div><div class="dim" style="font-size:11.5px">2022-07-01 · report only (no DICOM)</div><div class="dim" style="font-size:11.5px">LabNorte Diagnóstico · ES</div><div style="margin-top:4px">${pill("stale","Report only")}</div></div>
     <div class="note" style="margin-top:10px;padding:0 6px">Studies are de-identified copies. Pixel data never leaves Orthanc; MCP sees only the report text (untrusted) and study metadata.</div>
@@ -812,10 +812,10 @@ function family(){
     </tbody></table>
     <div class="note" style="margin-top:6px">Roles: owner, guardian, caregiver, viewer. An agent token sees the token's scopes ∩ the grant's categories ∩ the profile's locks.</div></div>
    <div class="card"><h3>Break-glass<span class="r">emergency access</span></h3>
-    <div class="set"><span class="sw"></span><div style="flex:1"><div>Sam can open Alex's emergency view</div><div class="dim" style="font-size:11px">allergies, meds, conditions, blood group, ICE contacts</div></div></div>
-    <div class="set"><span class="sw"></span><div style="flex:1"><div>Waiting period 48 h</div><div class="dim" style="font-size:11px">Alex can reject during the wait; then read-only for 14 days</div></div></div>
-    <div class="set"><span class="sw"></span><div style="flex:1"><div>Notify Alex by email and ntfy</div><div class="dim" style="font-size:11px">every use lands in the audit log</div></div></div>
-    <div class="set"><span class="sw off"></span><div style="flex:1"><div>Include genome findings</div><div class="dim" style="font-size:11px">off: PGx summary only</div></div></div>
+    <div class="set"><span class="sw" role="switch" aria-checked="true" tabindex="0"></span><div style="flex:1"><div>Sam can open Alex's emergency view</div><div class="dim" style="font-size:11px">allergies, meds, conditions, blood group, ICE contacts</div></div></div>
+    <div class="set"><span class="sw" role="switch" aria-checked="true" tabindex="0"></span><div style="flex:1"><div>Waiting period 48 h</div><div class="dim" style="font-size:11px">Alex can reject during the wait; then read-only for 14 days</div></div></div>
+    <div class="set"><span class="sw" role="switch" aria-checked="true" tabindex="0"></span><div style="flex:1"><div>Notify Alex by email and ntfy</div><div class="dim" style="font-size:11px">every use lands in the audit log</div></div></div>
+    <div class="set"><span class="sw off" role="switch" aria-checked="false" tabindex="0"></span><div style="flex:1"><div>Include genome findings</div><div class="dim" style="font-size:11px">off: PGx summary only</div></div></div>
    </div>
   </div></div>`;
 }
@@ -883,7 +883,10 @@ function wire(){
   const hd=document.getElementById("hideapoe");if(hd)hd.onclick=e=>{e.preventDefault();S.showApoe=false;render()};
   const cp=document.getElementById("copy");if(cp)cp.onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText(document.getElementById("snip").textContent);cp.textContent="Copied"};
   const svg=document.getElementById("ldl");
-  if(svg)svg.querySelectorAll(".pt").forEach(p=>{const r=LDL[+p.dataset.i];p.onmousemove=e=>tip(e,`<b>${cv(r[1])} ${U()}</b> · ${pill(ldlStatus(r[1],r[4]))}<br>${r[0]} · ${r[2]} (${r[3]}) · ${r[7]}<br><span class="dim">printed range ${r[4]} mg/dL · LOINC ${r[5]}</span><br><span style="color:#6ea8fe">open source page ${r[6]} →</span>`);p.onmouseleave=e=>tip(e,null)});
+  if(svg)svg.querySelectorAll(".pt").forEach(p=>{const r=LDL[+p.dataset.i];p.onmousemove=e=>tip(e,`<b>${cv(r[1])} ${U()}</b> · ${pill(ldlStatus(r[1],r[4]))}<br>${r[0]} · ${r[2]} (${r[3]}) · ${r[7]}<br><span class="dim">printed range ${r[4]} mg/dL · LOINC ${r[5]}</span><br><span style="color:#6ea8fe">open source page ${r[6]} →</span>`);p.onmouseleave=e=>tip(e,null);p.onfocus=()=>{const b=p.getBoundingClientRect();p.onmousemove({clientX:b.right,clientY:b.bottom})};p.onblur=e=>tip(e,null)});
+  const key=f=>e=>{if(e.key===" "||e.key==="Enter"){e.preventDefault();f()}};
+  const rt=location.hash.slice(1)||"dashboard";
+  document.querySelectorAll(".sw[role=switch]").forEach((w,i)=>{const k=rt+":"+i;if(k in S.sw){w.classList.toggle("off",!S.sw[k]);w.setAttribute("aria-checked",String(S.sw[k]))}const t=()=>{const off=w.classList.toggle("off");w.setAttribute("aria-checked",String(!off));S.sw[k]=!off};w.onclick=t;w.onkeydown=key(t);const l=w.nextElementSibling&&w.nextElementSibling.querySelector("div");if(l)w.setAttribute("aria-label",l.textContent)});
 }
 document.getElementById("profiles").addEventListener("click",e=>{const b=e.target.closest(".prof");if(b){S.profile=b.dataset.p;render()}});
 document.getElementById("lang").addEventListener("click",e=>{const b=e.target.closest("button");if(b){S.lang=b.dataset.l;render()}});

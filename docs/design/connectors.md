@@ -83,7 +83,7 @@ Email-in and the watched folder carry the highest prompt-injection exposure: any
 | IPS (`Bundle.type = document` + `Composition`) | Cross-border summaries, some national portals | Same as above, with Composition sections mapped | v0.1 |
 | EU Patient Summary, HL7 Europe Laboratory Report | EHDS (2029 / 2031), MyHealth@EU | Profile-aware mapping (lab result grouping, specimen, EU value sets) | Readable as generic FHIR in v0.1; profile-specific mapping v2 |
 | Apple Health export zip | iPhone: Health → profile → Export All Health Data | Stream `export.xml` with `iterparse`; `clinical-records/*.json` as FHIR R4; ECG CSVs; workout GPX | v0.1 |
-| SMART Health Cards (JWS in QR) / SMART Health Links (encrypted manifest) | Vaccine and lab certificates, US "Kill the Clipboard" QR flows, IAS apps | Verify JWS, decrypt JWE with the key from the URL fragment, fetch manifest, import FHIR | Receive: v1.0. Share from the UI: v1.0, ciphertext on a host the user controls; we run no share host |
+| SMART Health Cards (JWS in QR) / SMART Health Links (encrypted manifest) | Vaccine and lab certificates, US "Kill the Clipboard" QR flows, IAS apps | SHC: verify the JWS, import FHIR. SHL: decode the link payload, POST to its manifest URL (plain JSON; for a link with the `P` flag the user types the passcode and it goes in that POST), decrypt each listed file (JWE) with the key from the payload, taking an `embedded` file as it is and fetching only entries that give a `location`, verify any SHC inside, import FHIR; a link with the `U` flag skips the manifest and GETs the single encrypted file directly | Receive: v1.0. Share from the UI: v1.0, ciphertext on a host the user controls; we run no share host |
 | C-CDA (CCD) | US portal "download my record", Australian MHR documents | CDA → FHIR mapper (candidate: Microsoft FHIR-Converter, MIT) (unverified fit) | v1.0 |
 | CDA2 inside a PAdES-signed PDF | Italy FSE 2.0 | Extract the embedded XML attachment before any OCR; structured labs with LOINC | v2 |
 | HL7 v2 ORU^R01 | Some LIS exports and lab portals | `python-hl7`-style segment parser, OBX → Observation | v2 |
@@ -301,13 +301,13 @@ sequenceDiagram
   loop each raw item
     C-->>J: RawItem(bytes, media_type, locator)
     J->>B: put(bytes) -> sha256
+    J->>C: map(raw_item)
+    C-->>N: MappedResource[] + Problems[]
+    N->>N: validate LOINC, UCUM, range, grounding
+    N-->>Q: anything doubtful, every Problem
+    N-->>J: committed ids
+    J->>J: save the item's cursor (same transaction)
   end
-  J->>C: map(raw_item)
-  C-->>N: MappedResource[] + Problems[]
-  N->>N: validate LOINC, UCUM, range, grounding
-  N-->>Q: anything doubtful, every Problem
-  N-->>J: committed ids
-  J->>J: save new cursor (same transaction)
 ```
 
 `pull` and `map` are separate on purpose. `pull` touches the network and stores bytes; `map` is a pure function of the stored bytes and the parser version. When a parser improves, a job re-runs `map` over stored blobs with no new network call. That is how "derived values are recomputable" holds for connectors.
@@ -416,12 +416,12 @@ class Connector(Protocol):
 ### 6.3 Contract rules
 
 1. **Bytes first.** The job loop stores every `RawItem` in the blob store before `map` runs. A connector never writes to Postgres.
-2. **Cursor after commit.** The new cursor is saved in the same transaction as the blob references, so a crash re-pulls rather than skips.
+2. **Cursor after commit.** Each item is stored, mapped and committed one at a time, and the cursor past it is saved in the same transaction as its blob reference and mapped rows, so a crash re-pulls rather than skips.
 3. **Nothing silent.** Every unparsed row, unknown code, unconvertible unit and low-confidence value becomes a `Problem` that lands in the review queue.
 4. **Printed values are the truth layer.** `map` keeps the printed value, unit and range verbatim. LOINC, UCUM and canonical values are added by the normalizer, not by the connector, so a better resolver re-derives them for every source at once.
 5. **Untrusted text is declared.** Any free text from outside (notes, narrative, PDF text) is listed in `untrusted_text` and returned over MCP with `trust: untrusted_text`.
 6. **No outbound sharing.** Connectors read. None can push data to a third party; SHL sharing lives in the UI only, and its ciphertext goes to a host the user controls (the instance behind a tunnel, or their own static or S3 host). We run no share host.
-7. **Hosts are declared.** A connector may call only the hosts in its manifest; the job loop enforces it with an egress allowlist per connector (proposed mechanism: an httpx transport that refuses other hosts).
+7. **Hosts are declared.** A connector lists the hosts it calls in its manifest. For core connectors the `httpx` client the job loop hands them refuses other hosts, which catches mistakes. Some hosts are only known per account: a person's own Nightscout, or the manifest and file hosts inside a SMART Health Link. The manifest marks those as account hosts; the person approves the exact host when adding the account (for an SHL, when importing it), and the approval is stored on that account only. The client applies the same list to every redirect, and resolves each approved name before connecting and refuses private, loopback and link-local addresses unless the person ticked "on my network" for that host (a Nightscout at home). An unapproved host is refused as before. That is not a sandbox: connector code runs in the app process and could open its own socket, so for a community plugin the host list is informational, shown to the user before install (6.4), and the real boundary is the trust decision to install it.
 8. **Secrets by reference.** Tokens and PDF passwords live in the secrets store; connectors see `secret_ref` resolved at call time and never log it.
 9. **Profile binding.** Every account belongs to one profile. Data for a family member needs that member's own account or an explicit proxy grant in the source system.
 10. **Fixtures.** Each connector ships synthetic fixtures (for example an Apple Health zip for Alex Rivera, a lab PDF for Carmen Ortega) and at least one prompt-injection fixture where it accepts free text.

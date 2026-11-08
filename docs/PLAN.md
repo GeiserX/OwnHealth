@@ -39,7 +39,7 @@ License: AGPL-3.0-or-later. Repo: https://github.com/GeiserX/OwnHealth
 
 ## Principles
 
-1. **Provenance on every value.** Each value points to its source document, page and bounding box. The printed value, unit and range are the truth layer. LOINC code, UCUM unit and canonical value are derived and recomputable.
+1. **Provenance on every value.** Each value points to where it came from: a value read from a document points to the document, page and bounding box; an imported value points to its import (the FHIR resource, the Apple Health record, the genome facts file and finding); a typed-in value points to the person and time that entered it. The printed value, unit and range are the truth layer. LOINC code, UCUM unit and canonical value are derived and recomputable.
 2. **Nothing silent.** Unconvertible units, rejected rows and low-confidence extractions go to a visible review queue. Nothing is dropped.
 3. **Deterministic current state.** A versioned rule pack builds each person's status. Same data, same rules, same bytes, with a `state_hash`. Narrative text comes only from a human or an agent, labelled with its author.
 4. **Agent-assisted extraction without an embedded agent.** The outside agent reads pending pages over MCP and calls `propose`. OwnHealth validates (LOINC exists, UCUM converts, plausible range, value grounded in the page's word layer) and queues for human confirmation.
