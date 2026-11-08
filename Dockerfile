@@ -35,6 +35,8 @@ RUN groupadd --system --gid 10001 ownhealth \
  && useradd --system --uid 10001 --gid ownhealth --home-dir /data --shell /usr/sbin/nologin ownhealth \
  && mkdir -p /data && chown ownhealth:ownhealth /data
 COPY --from=build /app/.venv /app/.venv
+# The admin service runs these after migrating; baked in so a stack needs no checkout.
+COPY deploy/db/ /opt/ownhealth-db/
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     OWNHEALTH_DATA_DIR=/data \

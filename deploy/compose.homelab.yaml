@@ -27,7 +27,6 @@ services:
     secrets: [db_password, app_db_password, secret_key, restic_password]
     volumes:
       - ownhealth-data:/data # blobs, and /data/backups for the restic staging directory
-      - ./deploy/db:/opt/ownhealth-db:ro
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]

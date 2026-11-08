@@ -21,7 +21,6 @@ services:
       disable: true
     volumes:
       - ownhealth-data:/data
-      - ./deploy/db:/opt/ownhealth-db:ro
 
   app:
     image: drumsergio/ownhealth:0.1.0
