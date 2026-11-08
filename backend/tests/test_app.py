@@ -10,6 +10,7 @@ def test_health_and_spa_fallback(app_for):
     assert client.get("/healthz").json()["status"] == "ok"
     assert client.get("/readyz").json() == {"status": "ready"}
     assert "OwnHealth" in client.get("/genome").text  # SPA fallback to index.html
+    assert "OwnHealth" in client.get("/mcp-access").text  # a UI route that starts with "mcp"
     assert client.get("/api/nope").status_code == 404
     assert client.get("/api/me").status_code == 401  # no session, no dev auth
 
@@ -108,7 +109,9 @@ def test_review_api_and_source_lookup(app_for, committed_family, engine, blobs):
     assert "review_accept" in actions and "read" in actions
 
 
-def test_mcp_mounted_at_mcp(app_for):
+def test_mcp_mounted_at_mcp(app_for, committed_family, engine):
+    from ownhealth.auth.tokens import create_token
+
     client = app_for()
     headers = {
         "Accept": "application/json, text/event-stream",
@@ -122,7 +125,17 @@ def test_mcp_mounted_at_mcp(app_for):
         "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}},
     }
     r = client.post("/mcp", content=json.dumps(init), headers=headers)
+    assert r.status_code == 401 and "Bearer" in r.headers["www-authenticate"]  # a PAT is required
+    with engine.begin() as c:
+        tok = create_token(
+            c,
+            user_id=committed_family.users["alex"],
+            label="test",
+            profile_ids=[committed_family.profiles["alex"]],
+        )
+    headers["Authorization"] = f"Bearer {tok.plaintext}"
+    r = client.post("/mcp", content=json.dumps(init), headers=headers)
     assert r.status_code == 200, r.text
     assert r.json()["result"]["serverInfo"]["name"] == "OwnHealth"
     r = client.post("/mcp", content=json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), headers=headers)
-    assert "ping" in [t["name"] for t in r.json()["result"]["tools"]]
+    assert "get_health_status" in [t["name"] for t in r.json()["result"]["tools"]]

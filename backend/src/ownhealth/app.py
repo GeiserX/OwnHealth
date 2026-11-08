@@ -141,7 +141,7 @@ def _mount_ui(app: FastAPI, static_dir: Path) -> None:
 
     @app.get("/{path:path}", include_in_schema=False)
     def ui(path: str):
-        if path.startswith(("api/", "mcp")) or path in ("api",):
+        if path in ("api", "mcp") or path.startswith(("api/", "mcp/")):
             return _error(404, "not_found", "Not found.")
         candidate = (root / path).resolve()
         if path and candidate.is_file() and candidate.is_relative_to(root):
