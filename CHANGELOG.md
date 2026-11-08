@@ -12,7 +12,7 @@ Fixes from a full CodeRabbit review of 0.1.0, plus places where the code disagre
 - **Genome.** Lookups no longer reveal that a withheld finding sits at a position; minors are also shielded from carrier-panel genes; the importer recomputes fact ids, caps confidence per assay, checks imputed sites and keeps sensitive facts inside their gene spans; drug guidance comes from the newest CPIC version.
 - **Drug check and status.** CYP2D6 phenoconversion bands follow CPIC's open bounds, so no activity score is left without a phenotype; medication matching uses whole words; `get_health_status` stays under 2 KB with long notes; `check_drug` accepts its own paging cursor.
 - **Data.** Duplicate detection considers method, comparator and source; the received UCUM unit is kept like the received LOINC code; trend statistics never mix units.
-- **Robustness and UI.** Oversized limits and windows answer 422 instead of 500; a failed export leaves no file behind; browser reads are audited as `ui`; a relative's profile always has a guardian; UI fixes across the review queue, genome, settings and charts.
+- **Robustness and UI.** Oversized limits and windows answer 422 instead of 500; a failed export leaves no file behind; browser reads are audited as `ui`; a new relative's profile starts with a guardian (profiles created on 0.1.0 may still have none); UI fixes across the review queue, genome, settings and charts.
 
 ## 0.1.0 (2026-11-08)
 
