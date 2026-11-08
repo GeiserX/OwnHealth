@@ -884,7 +884,7 @@ function wire(){
   const cp=document.getElementById("copy");if(cp)cp.onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText(document.getElementById("snip").textContent);cp.textContent="Copied"};
   const svg=document.getElementById("ldl");
   if(svg)svg.querySelectorAll(".pt").forEach(p=>{const r=LDL[+p.dataset.i];p.onmousemove=e=>tip(e,`<b>${cv(r[1])} ${U()}</b> · ${pill(ldlStatus(r[1],r[4]))}<br>${r[0]} · ${r[2]} (${r[3]}) · ${r[7]}<br><span class="dim">printed range ${r[4]} mg/dL · LOINC ${r[5]}</span><br><span style="color:#6ea8fe">open source page ${r[6]} →</span>`);p.onmouseleave=e=>tip(e,null);p.onfocus=()=>{const b=p.getBoundingClientRect();p.onmousemove({clientX:b.right,clientY:b.bottom})};p.onblur=e=>tip(e,null)});
-  const key=f=>e=>{if(e.key===" "||e.key==="Enter"){e.preventDefault();f()}};
+  const key=f=>e=>{if(e.key===" "||e.key==="Enter"){e.preventDefault();if(!e.repeat)f()}};
   const rt=location.hash.slice(1)||"dashboard";
   document.querySelectorAll(".sw[role=switch]").forEach((w,i)=>{const k=rt+":"+i;if(k in S.sw){w.classList.toggle("off",!S.sw[k]);w.setAttribute("aria-checked",String(S.sw[k]))}const t=()=>{const off=w.classList.toggle("off");w.setAttribute("aria-checked",String(!off));S.sw[k]=!off};w.onclick=t;w.onkeydown=key(t);const l=w.nextElementSibling&&w.nextElementSibling.querySelector("div");if(l)w.setAttribute("aria-label",l.textContent)});
 }

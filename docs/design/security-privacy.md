@@ -93,7 +93,7 @@ https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/
 
 | # | Mitigation | Where enforced | Phase |
 |---|---|---|---|
-| 1 | Every free-text field in an MCP response is wrapped as `{"trust": "untrusted_text", "origin": "<pdf_text_layer\|ocr\|email_subject\|fhir_note\|genome_facts\|agent_note\|person_note>", "text": "..."}`, exactly as defined in [mcp.md §9.1](mcp.md#91-untrusted-text). The citation stays in the fact's `src` id. Structured values (number, unit, range, code, date) are returned as typed fields, not text | MCP response serializer; one function, tested | v0.1 |
+| 1 | Every free-text field in an MCP response that did not come from our own templates is wrapped as `{"trust": "untrusted_text", "origin": "<pdf_text_layer\|ocr\|email_subject\|fhir_note\|genome_facts\|agent_note\|person_note>", "text": "..."}`, exactly as defined in [mcp.md §9.1](mcp.md#91-untrusted-text). The citation stays in the fact's `src` id. Structured values (number, unit, range, code, date) are returned as typed fields, not text | MCP response serializer; one function, tested | v0.1 |
 | 2 | Raw document text sits behind scope `read:documents_text`, off by default on every new token. `get_source` without it returns structured fields, page, bbox and crop URL only | Scope check in `get_source`, `get_document_page` | v0.1 / v0.2 |
 | 3 | No MCP tool can create an outbound share, export, email or webhook. Sharing and export exist only in the UI, behind a human click and step-up auth | Tool registry; a test asserts the tool list | v0.1 |
 | 4 | Every agent write goes through `propose` into the review queue. The queue shows which documents and src ids the token read in the hour before the proposal (same window as [ingestion.md §7.2](ingestion.md#72-agent-assisted-extraction-v02)) (from the audit log), so the reviewer sees what was in the agent's context | Review queue | v0.1 |
@@ -248,7 +248,7 @@ Sealed mode protects the blobs and sensitive free text on a seized running-then-
 
 ### 7.3 Crypto-shredding
 
-Deleting a profile destroys its wrapped DEK. Its blobs become unreadable everywhere, including in backups, once no retained backup still holds that wrapped DEK. Typed rows are deleted with SQL and stay in older Postgres dumps until those snapshots are pruned. The delete screen states the date at which the last backup holding the profile expires and offers "prune backups now".
+Deleting a profile destroys its wrapped DEK. Its blobs become unreadable everywhere, including in backups, once no retained backup still holds that wrapped DEK. Typed rows are deleted with SQL and stay in older Postgres dumps, pre-migration dumps included, until those are pruned. The delete screen states the date at which the last backup holding the profile expires and offers "prune backups now".
 
 ## 8. Backups
 
@@ -257,6 +257,7 @@ Deleting a profile destroys its wrapped DEK. Its blobs become unreadable everywh
 - **Restore test**, weekly by default: restore the latest snapshot into a throwaway compose project, then compare row counts per table, every blob hash, each profile's `state_hash` and, when the `imaging` profile is on, the imaging inventory (Orthanc study, series and instance counts and each instance's hash, read from the restored Orthanc) against the values recorded in that backup's manifest ([architecture.md section 14](architecture.md#14-backup-and-restore)), not against the live instance, which may have changed since. A mismatch is an alert on the dashboard. We ship a broken-snapshot fixture so the test is seen to fail.
 - A backup that has never passed a restore test is shown as "untested", not as a backup.
 - Retention default: 7 daily, 4 weekly, 12 monthly. This retention is also the crypto-shredding window (section 7.3).
+- Pre-migration dumps sit outside restic, on their own volume, and each is deleted 14 days after its migration succeeded ([architecture.md section 13](architecture.md#13-upgrades-and-migrations)). The expiry date a purge or profile delete shows counts them, and "prune backups now" deletes them along with the restic snapshots.
 
 https://restic.readthedocs.io/
 
@@ -315,7 +316,7 @@ https://build.fhir.org/ig/HL7/smart-health-cards-and-links/links-specification.h
 | IPS summary | FHIR Bundle (`document`) per IPS, plus printable PDF (es/en) | UI | v0.3 |
 | Genome | FHIR Genomics Reporting IG resources inside the export; Phenopackets v2 is a moonshot | UI | v2 |
 | Delete one item | Soft delete with a reason: the row is hidden and derived state is recomputed, but the row and its blob stay, so `as_of` queries and old `state_hash` values still reproduce. Undo any time | UI | v0.1 |
-| Purge one item | Separate explicit action: removes the row, every extracted copy of its value (the candidate row it was read from and review items whose payload holds it), its `src` row when no other fact cites it, and its blob when no other row references it, and writes an audit event with the purged ids. Stored snapshots that could include the item are deleted ([architecture.md section 6.1](architecture.md#61-conventions)). Purging a whole source document also removes its pages (word layer, page image, full-text index), candidate rows and review items. Copies in older backups stay until those snapshots are pruned; the purge screen states the date the last one expires and offers "prune backups now" (section 7.3). One lab report is one blob holding many values, so purging one value leaves the original report, with that value printed in it, in place while other values still cite it; the purge screen says so and offers to purge the whole source document with every value read from it | UI, step-up | v0.1 |
+| Purge one item | Separate explicit action: removes the row, every extracted copy of its value (the candidate row it was read from and review items whose payload holds it), its `src` row when no other fact cites it, and its blob when no other row references it, and writes an audit event with the purged ids. Stored snapshots that could include the item are deleted ([architecture.md section 6.1](architecture.md#61-conventions)). Purging a whole source document also removes its pages (word layer, page image, full-text index), candidate rows and review items. Copies in older backups and pre-migration dumps stay until those are pruned; the purge screen states the date the last one expires and offers "prune backups now" (section 8). One lab report is one blob holding many values, so purging one value leaves the original report, with that value printed in it, in place while other values still cite it; the purge screen says so and offers to purge the whole source document with every value read from it | UI, step-up | v0.1 |
 | Delete profile | Hard delete of rows and blobs; DEK destroyed from v1.0; backup window stated (section 7.3) | UI, step-up, typed confirmation | v0.1 / v1.0 |
 
 Export and deletion are never MCP tools.

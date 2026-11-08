@@ -73,7 +73,7 @@ Versioning: within v1, producers may add optional fields and new `db_versions` k
 
 - `call_state` is required on every finding that rests on a genotype. Values: `ref`, `alt`, `no_call`, `not_on_array`, `not_covered`. Imputation is not a call_state; it is `genotype.imputed: true` with `r2`.
 - `coverage[]` must list every gene of the fixed panels (ACMG SF v3.3, CPIC genes, the carrier gene list) and every hard gene the run could not read. The importer checks it against the versioned panel lists shipped with the schema and rejects a file that leaves out any panel gene, so an empty or partial map never passes. "No finding" in a gene marked `not_assessed` is never shown as negative.
-- `id` is deterministic: `f_` followed by the first 16 hex characters of `sha256("v1|" + category + "|" + gene + "|" + key)`, where `key` is the VRS ID for a variant finding, the gene for a diplotype, the tested allele (`value.marker`, for example `HLA-B*58:01`) for an HLA finding, the PGS ID for a PRS and the rule name for a multi-site rule (APOE). A finding without a gene (a PRS) hashes `gene` as the empty string: `"v1|prs||PGS000018"`. The id holds no sample id, so two sources of one person (a 2019 chip and a 2025 genome) produce the same id for the same finding, and a re-run diffs by id.
+- `id` is deterministic: `f_` followed by the first 16 hex characters of `sha256("v1|" + category + "|" + gene + "|" + key)`, where `key` is the VRS ID for a variant finding (a `monogenic_pathogenic`, `acmg_sf` or `carrier` fact, or a trait or risk marker that rests on one site; each variant it cites must carry `vrs_id`), the gene for a diplotype, the tested allele (`value.marker`, for example `HLA-B*58:01`) for an HLA finding, the PGS ID for a PRS and the rule name for a multi-site rule (APOE). A finding without a gene (a PRS) hashes `gene` as the empty string: `"v1|prs||PGS000018"`. The id holds no sample id, so two sources of one person (a 2019 chip and a 2025 genome) produce the same id for the same finding, and a re-run diffs by id. The importer recomputes every id (rule 5 below).
 - Free-text fields (`summary`, `evidence.native`, `confidence.basis`, `drug_guidance[].recommendation`, `limitations[]`) are capped at 2,000 characters, must not contain control characters, and are returned over MCP as `trust: untrusted_text`, because a facts file is an imported file like any PDF.
 - The file carries no person names. OwnHealth maps `subject.sample_id` to a profile at import.
 - `subject.fingerprint` uses a defined marker panel (`ownhealth-fp-v1`, a fixed list of common SNPs shipped with the schema; its exact size is still to choose). One character per marker: `0`, `1`, `2` alternate-allele count, `.` no call. The string length must equal the panel size, and at least 90% of markers must be called.
@@ -180,6 +180,11 @@ Rules the schema cannot express, enforced by the importer (a file that breaks on
 2. `confidence.level` must be `unconfirmed` for any `monogenic_pathogenic`, `acmg_sf` or `carrier` fact from `assay.type` `chip`. From `chip_imputed`, such a fact that rests on an imputed genotype (`genotype.imputed: true`) is not accepted at all (the table in section 4 says "never reported"); a site the array typed directly follows the `chip` rule.
 3. `coverage[]` names every gene of the panel lists for the schema version (section 2.1).
 4. `subject.fingerprint` follows the panel rule in section 2.1.
+5. Each `id` matches the hash of section 2.1 recomputed from the fact's category, gene and key. A mismatch, or a variant finding whose variant has no `vrs_id`, rejects the file.
+6. No `confidence.level` exceeds the cap of the table in section 4 for the file's assay: from `chip`, a common PGx call is at most `medium` and CYP2D6 or HLA at most `low`; from `chip_imputed`, a PGx call that rests on an imputed site is at most `low`, or `medium` when every imputed site has R2 >= 0.9, and one that rests only on typed sites follows the `chip` cap.
+7. From `chip_imputed`, every variant carries `genotype.imputed` (true or false); an omitted value is not read as a typed call. A site marked `imputed: false` must be in the `chip_sites` list. Without that list on hand, a `monogenic_pathogenic`, `acmg_sf` or `carrier` fact from `chip_imputed` is rejected, because nothing proves the array typed it.
+8. `value.phenotype`, `value.diplotype` and `drug_guidance[].phenotype` reach agents and templates as bare strings, so they must be vocabulary terms: at most 6 words and 60 characters, each word a known phenotype word (`poor`, `intermediate`, `metabolizer`, `decreased`, `function` and the like), the fact's gene, or an allele-shaped token holding a digit, `*`, `/`, `>` or `:`. `gene` must be an HGNC-shaped symbol and `drug_guidance[].drug` a lower-case drug name. A sentence in any of these fields rejects the file.
+9. A `sensitive` or `adult_onset` fact may cite only positions inside the sensitive gene spans, and a `carrier` fact only positions inside the carrier-panel gene spans (section 7). Lookups are gated by those fixed spans alone (section 6), so a fact outside them would leave its genotype open to a raw lookup. Such a file is rejected with the gene named; the fix is a list update in OwnHealth, which CI keeps in step with the producer's tags.
 
 ### 2.3 Synthetic example
 
@@ -236,7 +241,7 @@ Profile Alex Rivera, sample `AR-01`, 30x WGS. Every value is invented for illust
       "confidence": { "level": "high", "basis": "both sites called, GQ > 50" },
       "sensitivity": { "level": "adult_onset", "reason": "APOE e4" } },
     { "id": "f_5e6f708192031425", "category": "risk_marker", "gene": "LPA",
-      "variants": [ { "chrom": "chr6", "pos": 160589086, "ref": "A", "alt": "G", "rsid": "rs10455872", "genotype": { "call_state": "alt", "gt": "0/1", "zygosity": "het" } } ],
+      "variants": [ { "chrom": "chr6", "pos": 160589086, "ref": "A", "alt": "G", "rsid": "rs10455872", "vrs_id": "ga4gh:VA.…", "genotype": { "call_state": "alt", "gt": "0/1", "zygosity": "het" } } ],
       "value": { "kiv2_copies": 18, "kiv2_ci95": [15, 22] },
       "summary": "LPA risk allele and a low KIV-2 copy estimate, both linked to higher Lp(a). A single Lp(a) blood test is the measurement that counts.",
       "evidence": { "level": "E2", "native": "replicated association" },
@@ -244,7 +249,7 @@ Profile Alex Rivera, sample `AR-01`, 30x WGS. Every value is invented for illust
       "limitations": ["The SNPs were found in European cohorts."], "sensitivity": { "level": "normal" },
       "related_loinc": ["10835-7", "43583-4"] },
     { "id": "f_6f70819203142536", "category": "carrier", "gene": "CFTR",
-      "variants": [ { "chrom": "chr7", "pos": 117559590, "ref": "ATCT", "alt": "A", "rsid": "rs113993960", "hgvs_p": "p.Phe508del",
+      "variants": [ { "chrom": "chr7", "pos": 117559590, "ref": "ATCT", "alt": "A", "rsid": "rs113993960", "hgvs_p": "p.Phe508del", "vrs_id": "ga4gh:VA.…",
                       "clinvar_variation_id": 7105, "genotype": { "call_state": "alt", "gt": "0/1", "zygosity": "het", "dp": 35, "gq": 99 } } ],
       "condition": { "name": "Cystic fibrosis", "inheritance": "AR" },
       "summary": "Heterozygous carrier of a pathogenic CFTR variant. Carriers are not affected; it matters for a partner's testing.",
@@ -259,7 +264,7 @@ Profile Alex Rivera, sample `AR-01`, 30x WGS. Every value is invented for illust
       "limitations": ["Percentile is relative to the EUR reference group of HGDP+1kGP after pgsc_calc ancestry normalisation; it is not an absolute risk and is not valid for ancestries outside the evaluation set."],
       "sensitivity": { "level": "normal" } },
     { "id": "f_8192031425364a5b", "category": "trait", "gene": "MTHFR",
-      "variants": [ { "chrom": "chr1", "pos": 11796321, "ref": "G", "alt": "A", "rsid": "rs1801133", "genotype": { "call_state": "alt", "gt": "0/1" } } ],
+      "variants": [ { "chrom": "chr1", "pos": 11796321, "ref": "G", "alt": "A", "rsid": "rs1801133", "vrs_id": "ga4gh:VA.…", "genotype": { "call_state": "alt", "gt": "0/1" } } ],
       "summary": "MTHFR C677T heterozygous: enzyme note only.",
       "evidence": { "level": "E4", "native": "not supported as health advice (PMID 23288205)" },
       "confidence": { "level": "high", "basis": "GQ 60" }, "sensitivity": { "level": "normal" }, "hidden_by_default": true } ]
@@ -317,7 +322,7 @@ Confidence caps by assay:
 
 Never reported from chips: CYP2D6 deletions, duplications and hybrids (they are invisible on arrays; the CYP2D6 fact says so); HLA calls as prescribing input; PRS without imputation; repeat expansions, SVs, copy number (SMN1), mitochondrial heteroplasmy; imputed variants with MAF < 1%; and any "not detected" reassurance. A chip without BRCA hits says "3 founder variants probed; the rest of BRCA1 and BRCA2 not assessed", written into the fact, not a footnote. A rare P/LP from a chip shows as unconfirmed with "array calls of very rare variants are mostly false; a clinical-grade test is needed" (PPV about 16% for very rare variants in UK Biobank arrays, PMID 33589468).
 
-Two sources for one person (a chip and a genome): both are kept. Facts merge by `id`; the higher confidence wins the display; agreement shows "concordant across 2 assays"; disagreement at one site becomes a visible QC item. On import, OwnHealth compares the new source's `fingerprint` with the profile's existing sources over the markers both called. It needs at least 80% of the panel called in both; below that, or with no fingerprint, the source goes to the review queue instead of counting as a match. With enough overlap it blocks the import below 95% concordance, which catches sample swaps.
+Two sources for one person (a chip and a genome): both are kept. Facts merge by `id`; the higher confidence wins the display. That choice covers the call (genotype, diplotype, phenotype) only. Guidance is quoted from whichever source carries guidance for that phenotype with the newest CPIC version in `db_versions`, so an older WGS call does not bring older guidance with it, and the answer names the version quoted. Agreement shows "concordant across 2 assays"; disagreement at one site becomes a visible QC item. On import, OwnHealth compares the new source's `fingerprint` with the profile's existing sources over the markers both called. It needs at least 80% of the panel called in both; below that, or with no fingerprint, the source goes to the review queue instead of counting as a match. With enough overlap it blocks the import below 95% concordance, which catches sample swaps.
 
 ## 5. Raw data storage and lookups
 
@@ -370,7 +375,7 @@ Genome answers use the common response envelope of [mcp.md section 3](mcp.md#3-r
 
 Safety envelope, enforced in the server, not left to prompts:
 
-- **Sensitive gating covers lookups too.** With sensitive sharing off, `lookup_variant` on a site or region inside a sensitive gene (APOE, SF cancer and cardiac genes, HTT and other predictive repeat loci) returns `withheld_sensitive` and no genotype. Otherwise an agent could read APOE through rs429358 and bypass the opt-in. The same holds for any position a withheld sensitive finding cites in its `variants[]`, inside a gene or not. Regions overlapping such a gene or position are clipped and the clip is reported.
+- **Sensitive gating covers lookups too.** With sensitive sharing off, `lookup_variant` on a site or region inside a sensitive gene (APOE, SF cancer and cardiac genes, HTT and other predictive repeat loci; spans padded by 2 kb) returns `withheld_sensitive` and no genotype. Otherwise an agent could read APOE through rs429358 and bypass the opt-in. Regions overlapping such a gene are clipped and the clip is reported. The spans are one fixed list for every profile, never the person's own findings, so a withheld answer or a clip says nothing about what this person carries. Importer rule 9 (section 2.2) keeps that list sufficient.
 - **No silent negatives.** Absence is answered with a call_state or a coverage state.
 - **No write or delete.** No MCP tool imports, edits or deletes genome data or creates an export. The only agent write is `propose(kind=finding_status)`, which lands in the review queue (for example, a clinical report confirms a chip variant).
 - **Untrusted text.** Every free-text field from the facts file (`summary`, `evidence.native`, `confidence.basis`, `limitations[]`, coverage `note`, guidance text) is returned in the wrapper of [mcp.md section 9.1](mcp.md#91-untrusted-text) with `origin: genome_facts`.
@@ -396,7 +401,7 @@ Minors (profile age under 18 by birth date):
 - Withheld from the UI and MCP until the person turns 18: `adult_onset` facts, `sensitive` facts, carrier status, PRS for adult-onset conditions. They are stored (the file holds them) but not served.
 - Shown to guardians: PGx (it guides children's prescriptions, for example TPMT/NUDT15 with thiopurines, CYP2C19 with PPIs), childhood-onset actionable findings, HLA, traits.
 - Where a PGx result also implies carrier status (a nonfunctional `DPYD` allele), the PGx finding is shown as a drug response and the carrier finding stays withheld; no answer names the inherited condition or a carrier state ([mcp.md section 9.7](mcp.md#97-sensitive-categories-genome-gating-minors)).
-- Raw lookups follow the same line: `lookup_variant` on a minor's position or region inside a gene with a withheld finding, inside an adult-onset or carrier-panel gene, or covering a position a withheld finding cites in its `variants[]` (with or without a gene), returns `withheld_minor` and no genotype ([mcp.md section 9.7](mcp.md#97-sensitive-categories-genome-gating-minors)).
+- Raw lookups follow the same line: `lookup_variant` on a minor's position or region inside a sensitive gene (adult-onset facts sit there, rule 9 of section 2.2) or a carrier-panel gene returns `withheld_minor` and no genotype. These are fixed gene lists, the same for every minor, so the answer does not reveal which findings this child has ([mcp.md section 9.7](mcp.md#97-sensitive-categories-genome-gating-minors)).
 - At 18, the person gets a notice that withheld results exist and decides about each reveal. Guardian access ends unless the person grants it again.
 
 ## 8. `check_drug`: PGx joined with meds and labs
@@ -419,7 +424,7 @@ Steps:
 1. Normalise the drug against the CPIC drug list (names and RxNorm ids from the CPIC API snapshot) plus our alias table (es/en first: "omeprazol", "codeína"). No match returns `drug_unknown`, never "no interaction".
 2. Collect the PGx facts of the genes CPIC and DPWG tie to that drug, with confidence, and every gene the facts call `not_assessed`.
 3. Phenoconversion against the current medication list, with CPIC's published rule for CYP2D6 (v0.1): a strong inhibitor sets the activity score to 0 (poor metabolizer), a moderate inhibitor multiplies it by 0.5. The converted phenotype is shown beside the genotype phenotype, never in place of it. CYP2C19, CYP2C9 and CYP3A have no CPIC conversion rule: the answer says "phenoconversion not computed" in v0.1, and from v0.3 it also names the inhibitor per gene. The inhibitor table is our own cited YAML built from the FDA table of clinical CYP inhibitors; CI cross-checks it against OwnGenome's `assets/pgx_inhibitors.tsv` so the two never drift.
-4. Guidance text is quoted from the facts file for the genotype phenotype. When phenoconversion changes the phenotype, the CPIC recommendation for the converted phenotype comes from the bundled CPIC snapshot (CPIC content licence CC0, unverified), labelled as such.
+4. Guidance text is quoted from the facts file for the genotype phenotype, from the source with the newest CPIC version when two sources carry it (section 4). When phenoconversion changes the phenotype, the CPIC recommendation for the converted phenotype comes from the bundled CPIC snapshot (CPIC content licence CC0, unverified), labelled as such.
 5. Relevant labs from a cited YAML (`drug_labs.yaml`, drug to LOINC with reason): statins to CK and ALT, warfarin to INR. Latest value, date, the lab's own flag, and stale if outside the rule pack's recency window.
 6. Answer wording: CPIC text with level and URL (DPWG text beside it from v0.3), then "discuss with your prescriber". Never "do not take".
 
