@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import Connection, Engine, text
+from sqlalchemy.engine import URL, make_url
 
 from ownhealth import __version__
 from ownhealth.config import Settings
@@ -48,6 +49,15 @@ def _pg_tool(name: str) -> str:
 
 def _libpq_url(url: str) -> str:
     return url.replace("postgresql+psycopg://", "postgresql://", 1)
+
+
+def _pg_conn(url: str) -> tuple[str, dict[str, str] | None]:
+    """(the --dbname value without the password, the env that carries it): argv is world-readable."""
+    u = make_url(_libpq_url(url))
+    if u.password is None:
+        return u.render_as_string(hide_password=False), None
+    bare = URL.create(u.drivername, u.username, None, u.host, u.port, u.database, u.query)  # set() ignores None
+    return bare.render_as_string(hide_password=False), {**os.environ, "PGPASSWORD": u.password}
 
 
 def _with_db(url: str, db: str) -> str:
@@ -81,6 +91,20 @@ def _state_hashes(conn: Connection, as_of: str) -> dict[str, str]:
     return {str(pid): build_state(conn, pid, as_of=as_of)["state_hash"] for pid in ids}
 
 
+def _referenced_blobs(conn: Connection) -> list[str]:
+    """Every blob hash a document or genome dataset row points at, so verify can tell a blob the
+    live store had already lost from one the backup lost."""
+    cols = conn.execute(
+        text(
+            "select column_name from information_schema.columns where table_schema = 'public'"
+            " and table_name = 'genome_dataset' and data_type = 'bytea' and column_name like '%\\_blob'"
+        )
+    ).scalars()
+    parts = ["select blob_sha256 as h from document"] + [f'select "{c}" from genome_dataset' for c in cols]
+    rows = conn.execute(text(f"select distinct encode(h, 'hex') from ({' union '.join(parts)}) x where h is not null"))
+    return sorted(rows.scalars())
+
+
 def _link_or_copy(src: str, dst: str) -> None:
     try:
         os.link(src, dst)
@@ -102,18 +126,10 @@ def backup(settings: Settings, dest: Path) -> Path:
             # state hashes all describe the same instant even while the app keeps writing.
             snapshot = conn.execute(text("select pg_export_snapshot()")).scalar_one()
             with (dest / "db.dump").open("wb") as out:
-                cmd = [
-                    _pg_tool("pg_dump"),
-                    "-Fc",
-                    f"--snapshot={snapshot}",
-                    "--dbname",
-                    _libpq_url(settings.database_url),
-                ]
-                dump = subprocess.Popen(
-                    cmd,
-                    stdout=out,
-                    stderr=subprocess.PIPE,
-                )
+                dsn, env = _pg_conn(settings.database_url)
+                cmd = [_pg_tool("pg_dump"), "-Fc", f"--snapshot={snapshot}", "--dbname", dsn]
+                dump = subprocess.Popen(cmd, stdout=out, stderr=subprocess.PIPE, env=env)
+                referenced = _referenced_blobs(conn)
                 migrations = list(conn.execute(text("select version from schema_migrations order by 1")).scalars())
                 tables = _table_counts(conn)
                 as_of = datetime.now(UTC).date().isoformat()
@@ -141,7 +157,12 @@ def backup(settings: Settings, dest: Path) -> Path:
         "rules_version": rules_version(),
         "as_of": as_of,
         "tables": tables,
-        "blobs": {"count": len(files), "bytes": sum(p.stat().st_size for p in files.values()), "sha256": list(files)},
+        "blobs": {
+            "count": len(files),
+            "bytes": sum(p.stat().st_size for p in files.values()),
+            "sha256": list(files),
+            "referenced": referenced,
+        },
         "state_hash": states,
     }
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -159,6 +180,7 @@ def _read_manifest(archive: Path) -> dict:
 
 
 def _pg_restore(url: str, archive: Path) -> None:
+    dsn, env = _pg_conn(url)
     with (Path(archive) / "db.dump").open("rb") as dump:
         done = subprocess.run(
             [
@@ -168,10 +190,11 @@ def _pg_restore(url: str, archive: Path) -> None:
                 "--exit-on-error",
                 "--single-transaction",
                 "--dbname",
-                _libpq_url(url),
+                dsn,
             ],
             stdin=dump,
             capture_output=True,
+            env=env,
         )
     if done.returncode != 0:
         raise OpsError(f"pg_restore failed: {done.stderr.decode(errors='replace').strip()}")
@@ -179,8 +202,10 @@ def _pg_restore(url: str, archive: Path) -> None:
 
 def _check_blobs(manifest: dict, root: Path) -> dict:
     files = _blob_files(root)
-    missing = sorted(set(manifest["blobs"]["sha256"]) - set(files))
-    corrupt = sorted(sha for sha, p in files.items() if sha in manifest["blobs"]["sha256"] and _sha256_file(p) != sha)
+    listed = set(manifest["blobs"]["sha256"])
+    expected = listed | set(manifest["blobs"].get("referenced", ()))  # older manifests have no "referenced"
+    missing = sorted(expected - set(files))
+    corrupt = sorted(sha for sha, p in files.items() if sha in listed and _sha256_file(p) != sha)
     return {"checked": len(files), "missing": missing, "corrupt": corrupt}
 
 
@@ -219,15 +244,20 @@ def restore(settings: Settings, archive: Path) -> dict:
             raise OpsError(
                 "the target database is not empty: restore needs a fresh instance (new volume, app not started)"
             )
-        _pg_restore(settings.database_url, archive)
-        src = Path(archive) / "blobs"
-        for sha, path in _blob_files(src).items():
+        # Check every blob before the database is loaded: a corrupt one found after pg_restore would
+        # leave a populated database that a second attempt refuses as "not empty".
+        backup_blobs = _blob_files(Path(archive) / "blobs")
+        for sha, path in backup_blobs.items():
             if _sha256_file(path) != sha:
                 raise OpsError(f"blob {sha} in the backup is corrupt")
+        _pg_restore(settings.database_url, archive)
+        for sha, path in backup_blobs.items():
             target = settings.blobs_path / "sha256" / sha[:2] / sha[2:4] / sha
             if not target.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, target)
+                part = target.with_name(f".{sha}.part")  # copied whole, then renamed: never a truncated blob
+                shutil.copy2(path, part)
+                os.replace(part, target)
         return _compare(engine, manifest, settings.blobs_path)
     finally:
         engine.dispose()

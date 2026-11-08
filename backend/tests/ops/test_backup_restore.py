@@ -133,3 +133,67 @@ def test_cli_verify_restore_exits_non_zero_on_a_mismatch(archive, seeded, tmp_pa
     (bad / "manifest.json").write_text(json.dumps(m))
     assert main(["verify-restore", str(bad)]) == 1
     assert '"ok": false' in capsys.readouterr().out
+
+
+def test_the_password_stays_out_of_the_pg_tools_argv():
+    dsn, env = ops._pg_conn("postgresql+psycopg://oh:s3cr%2Ft@db:5432/ownhealth?sslmode=require")
+    assert "s3cr" not in dsn and dsn.startswith("postgresql://oh@db:5432/ownhealth") and "sslmode=require" in dsn
+    assert env["PGPASSWORD"] == "s3cr/t"
+    assert ops._pg_conn("postgresql://oh@db/ownhealth") == ("postgresql://oh@db/ownhealth", None)
+
+
+def test_backup_lists_the_blobs_rows_reference(archive):
+    m = json.loads((archive / "manifest.json").read_text())
+    assert m["blobs"]["referenced"] and set(m["blobs"]["referenced"]) <= set(m["blobs"]["sha256"])
+
+
+def test_verify_restore_fails_on_a_referenced_blob_the_backup_never_had(archive, seeded, tmp_path):
+    bad = _copy(archive, tmp_path)
+    m = json.loads((bad / "manifest.json").read_text())
+    victim = m["blobs"]["referenced"][0]
+    m["blobs"]["sha256"].remove(victim)  # as if the live store had already lost it at backup time
+    (bad / "manifest.json").write_text(json.dumps(m))
+    next(p for p in (bad / "blobs" / "sha256").rglob(victim)).unlink()
+    report = ops.verify_restore(seeded, bad)
+    assert not report["ok"] and report["blobs"]["missing"] == [victim]
+
+
+def test_restore_checks_blobs_before_it_loads_the_database(archive, fresh, tmp_path):
+    bad = _copy(archive, tmp_path)
+    victim = next(p for p in (bad / "blobs" / "sha256").rglob("*") if p.is_file())
+    victim.chmod(0o644)
+    victim.write_bytes(victim.read_bytes() + b"x")
+    with pytest.raises(ops.OpsError, match="corrupt"):
+        ops.restore(fresh, bad)
+    eng = make_engine(fresh.database_url)
+    try:
+        with eng.connect() as c:  # still empty, so a fixed backup can be restored into it
+            assert c.execute(text("select count(*) from pg_tables where schemaname = 'public'")).scalar_one() == 0
+    finally:
+        eng.dispose()
+    assert not list(fresh.blobs_path.rglob("*.part"))
+
+
+def test_backup_and_restore_never_put_the_password_on_a_command_line(seeded, fresh, tmp_path, monkeypatch):
+    """The pg tools get the password through PGPASSWORD; argv is readable by every user of the host."""
+    from sqlalchemy.engine import make_url
+
+    password = make_url(seeded.database_url).password
+    assert password  # the test database URL carries one, so the check can fail
+    seen: list[list[str]] = []
+    real_popen, real_run = ops.subprocess.Popen, ops.subprocess.run
+
+    def popen(cmd, *a, **kw):
+        seen.append(list(cmd))
+        return real_popen(cmd, *a, **kw)
+
+    def run(cmd, *a, **kw):
+        seen.append(list(cmd))
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(ops.subprocess, "Popen", popen)
+    monkeypatch.setattr(ops.subprocess, "run", run)
+    archive = ops.backup(seeded, tmp_path / "b")
+    assert ops.restore(fresh, archive)["ok"]
+    # the URL form of the password (user:password@); the user name may spell the same word
+    assert len(seen) >= 2 and not [c for c in seen if any(f":{password}@" in a for a in c)], seen
