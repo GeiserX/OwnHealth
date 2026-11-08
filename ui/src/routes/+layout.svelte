@@ -7,6 +7,7 @@
 	import { ApiError, getMe } from '#lib/api/core';
 	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
 	import { NAV } from '#lib/nav';
+	import LoginScreen from '#lib/components/pages2/LoginScreen.svelte';
 	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
 
 	let { children }: { children: Snippet } = $props();
@@ -93,7 +94,7 @@
 			{/each}
 		</nav>
 		<div class="foot">
-			{#if me?.demo}<span>{t('syn')}</span><br />{/if}<span>{t('nodx')}</span><br /><span class="mono" style="font-size:10.5px">{t('agpl')}</span>
+			{#if me?.demo}<span>{t('syn')}</span><br />{/if}<span>{t('nodx')}</span> <span>{t('purpose')}</span><br /><span class="mono" style="font-size:10.5px">{t('agpl')}</span>
 		</div>
 	</aside>
 	<div class="main">
@@ -116,13 +117,13 @@
 				<button class:on={i18n.lang === 'es'} onclick={() => setLang('es')}>ES</button>
 				<button class:on={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
 			</div>
-			{#if me}<div class="av" style="background:#6ea8fe" title={me.user.display_name}>{me.user.display_name.split(' ').map((w) => w[0]).slice(0, 2).join('')}</div>{/if}
+			{#if me}<a class="av" href="/settings" style="background:#6ea8fe;text-decoration:none" title={me.user.display_name}>{me.user.display_name.split(' ').map((w) => w[0]).slice(0, 2).join('')}</a>{/if}
 		</header>
 		<main class="view" tabindex="-1">
 			{#if app.loading && !me}
 				<div class="empty">{t('loading')}</div>
 			{:else if app.unauthenticated}
-				<div class="empty">{t('login')}</div>
+				<LoginScreen />
 			{:else if app.error && !me}
 				<div class="empty err">{t('error')}: {app.error} <button class="btn sm" onclick={load}>{t('retry')}</button></div>
 			{:else}
