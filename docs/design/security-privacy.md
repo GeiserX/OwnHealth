@@ -6,7 +6,7 @@ Phases follow the roadmap: v0.1 Foundation, v0.2 Inboxes, v0.3 Insight, v1.0 Con
 
 Nothing here is legal advice. Legal points we have not confirmed with a lawyer or a primary source are marked (unverified).
 
-OwnHealth is a non-commercial, common-good project. There is no hosted version, no paid tier and no company behind it, and there never will be. We publish AGPL software; each person runs it on hardware they control. This shapes the regulation section (13): it is the basis of our position that we are not a controller under the GDPR and that OwnHealth is not placed on the market "in the course of a commercial activity" under the EU MDR (unverified legal point).
+Today OwnHealth is non-commercial open-source software: there is no hosted version and no paid tier. We publish AGPL software; each person runs it on hardware they control. This shapes the regulation section (13): it is the basis of our position that we are not a controller under the GDPR and that OwnHealth is not placed on the market "in the course of a commercial activity" under the EU MDR (unverified legal point).
 
 ## 1. Trust boundaries
 
@@ -328,7 +328,7 @@ Export and deletion are never MCP tools.
 - Health and genetic data are special categories under Art. 9. That does not change because the software is self-hosted.
 - A person running OwnHealth for themselves and their family most likely falls under the household exemption, Art. 2(2)(c): processing "in the course of a purely personal or household activity". It is read narrowly; it ends where data is published or used professionally. A self-hoster who runs it for a clinic, a sports club or paying friends is a controller with the full set of duties.
 - We, as publishers of downloadable AGPL software, do not process anyone's data and are neither controller nor processor (unverified in case law; Recital 18 covers providers of the means for household processing only when they themselves process).
-- Running OwnHealth for other people would make the operator a controller: Art. 9(2)(a) explicit consent, a DPIA (Art. 35), likely a DPO, 72-hour breach notification (Art. 33). We never run it for anyone: there is no hosted or paid version, ever. That decision keeps us out of the controller role.
+- Today we run OwnHealth for nobody, so we hold no one's data and have no GDPR role. Running it for other people would need a fresh GDPR assessment first, to decide whether the operator is a controller (Art. 9(2)(a) explicit consent, a DPIA under Art. 35, possibly a DPO, 72-hour breach notification under Art. 33) or a processor acting on someone else's instructions (an Art. 28 agreement), and which duties follow.
 - Per-profile keys, audit, export and deletion still give each person in a household access, portability and erasure.
 
 https://gdprhub.eu/Article_2_GDPR
@@ -338,7 +338,7 @@ https://www.dataprotection.ie/en/faqs/general/what-household-exemption
 
 - MDR Rule 11 (Annex VIII) classifies software that provides information used to take decisions with diagnostic or therapeutic purposes as at least class IIa. MDCG 2019-11 explains how intended purpose decides qualification. Being free or open source does not exempt software; what matters is "placing on the market" and "making available" "in the course of a commercial activity" (MDR Art. 2(27)-(28)).
 - Our risk surfaces: `check_drug` output (PGx joined with current medications and labs, v0.1), status flags (v0.1), calculators (CKD-EPI 2021, PREVENT, SCORE2, FIB-4, HOMA-IR, PhenoAge, v0.3) and preventive screening rules (v0.3).
-- Our position: OwnHealth is a non-commercial, common-good project. No hosted version, no paid tier, no company, no CE claim. Software that is not made available in the course of a commercial activity is not placed on the market, so we believe the MDR does not apply to it (unverified; not tested in court; the Blue Guide's "commercial activity" definition is the next primary source to read). A hosted or paid version would be the clearest way to become commercial, which is one reason it is on the "never" list.
+- Our position today: OwnHealth is non-commercial open-source software. No hosted version, no paid tier, no CE claim. Software that is not made available in the course of a commercial activity is not placed on the market, so we believe the MDR does not apply to it (unverified; not tested in court; the Blue Guide's "commercial activity" definition is the next primary source to read). A hosted or paid version would be the clearest way to become commercial, so it would need a fresh regulatory assessment first.
 - The narrow intended purpose below is our second line: it aims to keep the software outside the medical-device definition even if the commercial test were read against us (unverified).
 - Wording decides qualification, so it is fixed in code and docs:
   - Intended purpose, stated in README and the app's About page: "personal record keeping, and display of values from the user's documents and of values computed with published formulas, with citations. Not for diagnosis or treatment decisions."

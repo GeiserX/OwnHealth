@@ -8,7 +8,7 @@ OwnHealth is a self-hosted health data layer you own. It keeps your lab results,
 
 There is no chat agent and no AI model inside OwnHealth. The agent is yours, and it sees only what its token allows.
 
-OwnHealth is a common-good project: no hosted or paid version, ever. You run it yourself.
+You run it yourself.
 
 <p align="center">
   <img src="docs/mockup/screenshots/01-dashboard.png" alt="OwnHealth: the family dashboard in the dark theme, with synthetic data" width="800">

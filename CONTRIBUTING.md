@@ -1,6 +1,6 @@
 # Contributing to OwnHealth
 
-Thank you for helping. OwnHealth is a common-good project: no hosted or paid version, ever. Contributions are licensed under [AGPL-3.0-or-later](LICENSE), like the rest of the code.
+Thank you for helping. Contributions are licensed under [AGPL-3.0-or-later](LICENSE), like the rest of the code.
 
 ## Ground rules
 
