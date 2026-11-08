@@ -57,8 +57,16 @@ def test_demo_seed_matches_the_alex_fixture(make_database, settings, blobs):
                 .all()
             )
             assert active == ["Atorvastatin", "Omeprazole"]
-            rollups = c.execute(text("select count(distinct metric) from wearable_rollup")).scalar()
-            assert rollups == 5
+            # Alex's five base metrics; lane C's Apple exports add their own (hrv_sdnn, sleep_in_bed)
+            alex_metrics = set(
+                c.execute(
+                    text(
+                        "select distinct r.metric from wearable_rollup r join profile p on p.id = r.profile_id"
+                        " where p.slug = 'alex'"
+                    )
+                ).scalars()
+            )
+            assert {"hr_resting", "hrv_rmssd", "steps", "sleep_asleep", "vo2max"} <= alex_metrics
             # every observation keeps provenance with a page and a bbox
             missing = c.execute(
                 text(
