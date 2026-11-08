@@ -124,7 +124,7 @@ flowchart LR
 
 | Area | Criterion |
 |---|---|
-| Lab import | A synthetic 3-page Spanish lab report in the Synlab layout imports with >=98% of rows auto-accepted (coded to LOINC, every check passed, no click needed) and 100% of rows linked to page + bbox; the false auto-accept rate on the eval set is 0. |
+| Lab import | A synthetic 3-page Spanish lab report in the fictional LabNorte layout imports with >=98% of rows auto-accepted (coded to LOINC, every check passed, no click needed) and 100% of rows linked to page + bbox; the false auto-accept rate on the eval set is 0. |
 | Nothing silent | Across the born-digital eval set, every ground-truth row has exactly one outcome, either accepted or in the review queue (never both, never twice), matched by row identity: 0 dropped, 0 duplicated. |
 | Eval set | >=30 synthetic layouts across es/en/de/fr; text-layer row F1 >=0.97. |
 | Status | `get_health_status` answers in <300 ms p95 and <2 KB for a profile with 5 years of labs; two runs give the same `state_hash`, and tokens with different language, unit and identity settings get the same hash. |

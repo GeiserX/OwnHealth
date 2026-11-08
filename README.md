@@ -42,6 +42,7 @@ git clone https://github.com/GeiserX/OwnHealth.git
 cd OwnHealth
 cp .env.example .env
 openssl rand -hex 32     # paste as OWNHEALTH_DB_PASSWORD in .env
+openssl rand -hex 32     # paste as OWNHEALTH_APP_DB_PASSWORD in .env
 openssl rand -hex 48     # paste as OWNHEALTH_SECRET_KEY in .env
 docker compose up -d
 ```
@@ -51,6 +52,7 @@ Open http://localhost:8080, create your account with a passkey, and import a lab
 Connect Claude Code with a token from **MCP & access**:
 
 ```sh
+export OWNHEALTH_PAT=oh_pat_...   # the token you copied
 claude mcp add --transport http ownhealth http://localhost:8080/mcp \
   --header "Authorization: Bearer ${OWNHEALTH_PAT}"
 ```
