@@ -110,17 +110,20 @@ pub(crate) fn pg_conn(url: &str) -> (String, Option<String>) {
 /// The same URL naming another database (query kept).
 fn with_db(url: &str, db: &str) -> String {
     let url = libpq_url(url);
-    let (base, rest) = url.rsplit_once('/').unwrap_or((&url, ""));
-    match rest.split_once('?') {
-        Some((_, query)) if !query.is_empty() => format!("{base}/{db}?{query}"),
-        _ => format!("{base}/{db}"),
+    // The query may hold a `/` (sslrootcert=/etc/ca.pem), so cut it off before finding the path.
+    let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+    let base = path.rsplit_once('/').map_or(path, |(b, _)| b);
+    if query.is_empty() {
+        format!("{base}/{db}")
+    } else {
+        format!("{base}/{db}?{query}")
     }
 }
 
 fn db_name(url: &str) -> String {
     let url = libpq_url(url);
-    let last = url.rsplit_once('/').map_or("", |(_, r)| r);
-    last.split_once('?').map_or(last, |(d, _)| d).to_string()
+    let path = url.split_once('?').map_or(url.as_str(), |(p, _)| p);
+    path.rsplit_once('/').map_or("", |(_, r)| r).to_string()
 }
 
 /// The argv after the tool name, and the password that goes in PGPASSWORD instead.
@@ -559,6 +562,17 @@ mod tests {
         );
         assert_eq!(with_db("postgresql+psycopg://u@h/live", "x"), "postgresql://u@h/x");
         assert_eq!(db_name("postgresql://u@h/live?a=b"), "live");
+    }
+
+    #[test]
+    fn with_db_ignores_a_slash_in_the_query() {
+        let url = "postgresql://u@h/live?sslrootcert=/etc/ca.pem";
+        assert_eq!(db_name(url), "live");
+        assert_eq!(with_db(url, "x"), "postgresql://u@h/x?sslrootcert=/etc/ca.pem");
+        assert_eq!(
+            with_db("postgresql://u@h/live?host=/var/run/postgresql", "x"),
+            "postgresql://u@h/x?host=/var/run/postgresql"
+        );
     }
 
     #[test]

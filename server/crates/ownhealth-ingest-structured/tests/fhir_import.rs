@@ -585,6 +585,22 @@ async fn ndjson_bulk_lines() -> R {
             .contains("not-done")
     );
     assert_eq!(held[0].payload["json_pointer"], "L4");
+    // a new export of the same lines (new bytes): the held not-done Immunization is not queued again
+    let mut data2 = data.clone();
+    data2.push(b'\n');
+    let doc2 = store_doc(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        "carmen",
+        &data2,
+        "y.ndjson",
+        "application/fhir+ndjson",
+    )
+    .await?;
+    let s2 = import_fhir(&mut tx, &env.blobs, doc2).await?;
+    assert_eq!((s2.accepted, s2.queued), (0, 0));
+    assert!(items(&mut tx, doc2, Some("fhir_unmapped")).await?.is_empty());
     Ok(())
 }
 

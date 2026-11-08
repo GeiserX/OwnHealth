@@ -233,3 +233,27 @@ async fn prompts_filtered_and_rendered() -> R {
     assert!(c.rpc("prompts/get", get("no-such-prompt", json!({}))).await.is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn a_throttled_read_is_counted_and_audited() -> R {
+    let w = world().await?;
+    let tok = w.tok().await?;
+    w.set_limit(&tok, "rate_per_min", 1).await?;
+    let c = w.connect(&tok).await?;
+    c.read_text("ownhealth://profiles").await?;
+    let e = c.read_resource("ownhealth://profiles").await.expect_err("throttled");
+    assert!(e.message.starts_with("rate_limited: retry in "), "{}", e.message);
+    let reads: Vec<(String, Option<String>)> = audited(&w, &tok[..15])
+        .await?
+        .into_iter()
+        .filter(|r| r.0 == "resources/read")
+        .collect();
+    let want = |k: &str| ("resources/read".to_string(), Some(k.to_string()));
+    assert_eq!(reads, vec![want("ok"), want("denied")]);
+    let calls: i32 = sqlx::query_scalar("select calls from mcp_usage where token_id = $1")
+        .bind(w.token_id(&tok).await?)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(calls, 2);
+    Ok(())
+}

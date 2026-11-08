@@ -527,6 +527,9 @@ fn opt_dec(s: Option<&str>) -> Result<Option<Decimal>> {
     s.map(dec).transpose()
 }
 
+/// The src id each documented literal (`src_a12`, ...) actually got in this seed.
+type Assigned = BTreeMap<&'static str, String>;
+
 /// Use a documented src id only once per database (a forced second seed gets generated ids).
 async fn free(conn: &mut PgConnection, sid: Option<&str>) -> Result<Option<String>> {
     let Some(sid) = sid else { return Ok(None) };
@@ -611,7 +614,8 @@ async fn seed_reports(
     ctx: &mut DemoContext,
     slug: &str,
     series: Series,
-    src_ids: &[((&str, &str), &str)],
+    src_ids: &[((&str, &str), &'static str)],
+    assigned: &mut Assigned,
 ) -> Result<()> {
     let profile_id = ctx.family.profile(slug);
     let value_of = |group: &str, day: &str| -> Option<&'static str> {
@@ -729,7 +733,10 @@ async fn seed_reports(
                     "document_id": doc,
                     "report_key": report_id,
                 }))?;
-                commit_observation(conn, &obs, &SrcRef::New(src), CommitOptions::new("auto")).await?;
+                let done = commit_observation(conn, &obs, &SrcRef::New(src), CommitOptions::new("auto")).await?;
+                if let Some(lit) = wanted {
+                    assigned.insert(lit, done.src_id);
+                }
             }
         }
     }
@@ -744,18 +751,18 @@ async fn manual(conn: &mut PgConnection, user: Uuid, sid: Option<&str>, label: &
     }))
 }
 
-async fn record(conn: &mut PgConnection, kind: &str, body: Value, src: SrcRef) -> Result<()> {
-    add_record(
+async fn record(conn: &mut PgConnection, kind: &str, body: Value, src: SrcRef) -> Result<String> {
+    let done = add_record(
         conn,
         &RecordIn::from_json(kind, body)?,
         &src,
         RecordOptions::new("person"),
     )
     .await?;
-    Ok(())
+    Ok(done.src_id)
 }
 
-async fn seed_records(conn: &mut PgConnection, ctx: &DemoContext) -> Result<()> {
+async fn seed_records(conn: &mut PgConnection, ctx: &DemoContext, assigned: &mut Assigned) -> Result<()> {
     let p = |slug: &str| ctx.family.profile(slug);
     let alex_user = ctx.family.user("alex");
     let entry = "manual entry";
@@ -771,13 +778,13 @@ async fn seed_records(conn: &mut PgConnection, ctx: &DemoContext) -> Result<()> 
         "profile_id": p("alex"), "name": "Atorvastatin", "ingredient": "atorvastatin", "strength": "20 mg",
         "dose_text": "1 tablet daily", "started": "2026-03-10",
     });
-    record(conn, "medication", body, src).await?;
+    assigned.insert("src_m02", record(conn, "medication", body, src).await?);
     let src = manual(conn, alex_user, Some("src_m05"), "Rx · 2026-04-01").await?;
     let body = json!({
         "profile_id": p("alex"), "name": "Omeprazole", "ingredient": "omeprazole", "strength": "20 mg",
         "dose_text": "1 capsule before breakfast", "started": "2026-04-01",
     });
-    record(conn, "medication", body, src).await?;
+    assigned.insert("src_m05", record(conn, "medication", body, src).await?);
     let src = manual(conn, alex_user, None, "Rx · 2024-02-01").await?;
     let body = json!({
         "profile_id": p("carmen"), "name": "Metformin", "ingredient": "metformin", "strength": "850 mg",
@@ -828,6 +835,7 @@ async fn seed_records(conn: &mut PgConnection, ctx: &DemoContext) -> Result<()> 
     .bind(&sid)
     .execute(&mut *conn)
     .await?;
+    assigned.insert("src_n41", sid);
     Ok(())
 }
 
@@ -910,7 +918,7 @@ fn failed(name: &str, reason: &str, detail: &str) -> Check {
 }
 
 /// A new LabNorte report whose rows wait for review, and one agent proposal: 7 open items.
-async fn seed_review_queue(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result<()> {
+async fn seed_review_queue(conn: &mut PgConnection, ctx: &mut DemoContext, vitamin_d: &str) -> Result<()> {
     let profile_id = ctx.family.profile("alex");
     let day = "2026-11-03";
     #[allow(clippy::type_complexity)]
@@ -1069,13 +1077,13 @@ async fn seed_review_queue(conn: &mut PgConnection, ctx: &mut DemoContext) -> Re
                 "kind": "note",
                 "payload": {
                     "text": "Ask about a winter vitamin D recheck at the next visit.",
-                    "attach_to": "src_a12",
+                    "attach_to": vitamin_d,
                     "lang": "en",
                 },
                 "token_label": "Claude Code · laptop",
-                "based_on": ["src_a12"],
+                "based_on": [vitamin_d],
             }),
-            context_src_ids: Some(vec!["src_a12".into()]),
+            context_src_ids: Some(vec![vitamin_d.into()]),
             ..ReviewItemIn::default()
         },
     )
@@ -1084,13 +1092,20 @@ async fn seed_review_queue(conn: &mut PgConnection, ctx: &mut DemoContext) -> Re
 }
 
 pub async fn seed_base(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result<()> {
-    seed_reports(conn, ctx, "alex", ALEX_SERIES, &ALEX_SRC_IDS).await?;
+    let mut assigned = Assigned::new();
+    seed_reports(conn, ctx, "alex", ALEX_SERIES, &ALEX_SRC_IDS, &mut assigned).await?;
     for (slug, series) in OTHER_SERIES {
-        seed_reports(conn, ctx, slug, series, &[]).await?;
+        seed_reports(conn, ctx, slug, series, &[], &mut assigned).await?;
     }
-    seed_records(conn, ctx).await?;
+    seed_records(conn, ctx, &mut assigned).await?;
     seed_wearables(conn, ctx).await?;
-    seed_review_queue(conn, ctx).await?;
+    let id = |lit: &str| {
+        assigned
+            .get(lit)
+            .cloned()
+            .ok_or_else(|| Error::Invalid(format!("demo: {lit} was never seeded")))
+    };
+    seed_review_queue(conn, ctx, &id("src_a12")?).await?;
     sqlx::query(
         "insert into household_setting (household_id, key, value) values ($1, 'age_of_majority', $2) \
          on conflict do nothing",
@@ -1107,7 +1122,7 @@ pub async fn seed_base(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result
         ("alex_omeprazole", "src_m05"),
         ("alex_note", "src_n41"),
     ] {
-        ctx.src_ids.insert(k.into(), v.into());
+        ctx.src_ids.insert(k.into(), id(v)?);
     }
     Ok(())
 }

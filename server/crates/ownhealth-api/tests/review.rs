@@ -243,6 +243,11 @@ async fn test_validation_answers_like_fastapi() -> R {
         .collect();
     assert_eq!(types, [json!("less_than_equal"), json!("uuid_parsing")]);
     assert_eq!(v["detail"][0]["ctx"], json!({"le": 500}));
+    // a negative limit or offset is a 422, not a database error (500)
+    let (s, v) = a.get("alex", "/review?limit=-1&offset=-5").await?;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert_eq!(v["detail"][0]["type"], "greater_than_equal");
+    assert_eq!(v["detail"][1]["loc"], json!(["query", "offset"]));
     let (s, v) = a
         .post(
             "alex",

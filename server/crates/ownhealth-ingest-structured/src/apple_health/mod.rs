@@ -8,8 +8,9 @@
 //! - `clinical-records/*.json` are FHIR R4 resources and go through `fhir::import_resources`.
 //! - `electrocardiograms/*.csv` are stored as documents of type `ecg`.
 //! - The birth date in `<Me>` must match the profile: a different one stops the import (wrong profile).
-//! - Members read whole (clinical JSON, ECG CSV) are capped in size, and the zip in member count, so a
-//!   small zip that inflates to gigabytes stops the job instead of the process.
+//! - Members read whole (clinical JSON, ECG CSV) are capped in size, each and per group in total, and
+//!   the zip in member count, so a small zip that inflates to gigabytes stops the job instead of the
+//!   process.
 //!
 //! Errors: `Error::Upload` is Python's `PermanentJobError` raised by the importer itself (the job
 //! fails for good with that message); `Error::Invalid` is a file that does not read (bad zip, XML or
@@ -46,6 +47,10 @@ pub const MAX_MEMBERS: usize = 50_000;
 pub const MAX_CLINICAL_BYTES: u64 = 20 * 1024 * 1024;
 /// One 30 s recording is a few hundred KB.
 pub const MAX_ECG_BYTES: u64 = 5 * 1024 * 1024;
+/// All clinical records together: they are held in memory at once.
+pub const MAX_CLINICAL_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+/// All ECG recordings together.
+pub const MAX_ECG_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 
 fn unreadable(e: impl std::fmt::Display) -> Error {
     Error::Invalid(e.to_string())
@@ -93,33 +98,61 @@ fn members(path: &Path) -> Result<Members> {
     }
     m.clinical.sort();
     m.ecg.sort();
-    for (names, cap) in [(&m.clinical, MAX_CLINICAL_BYTES), (&m.ecg, MAX_ECG_BYTES)] {
-        for name in names {
-            if sizes.get(name).copied().unwrap_or(0) > cap {
-                return Err(Error::Upload(format!(
-                    "{name}: over {} MB, not an Apple Health export file",
-                    cap / (1024 * 1024)
-                )));
-            }
-        }
-    }
+    check_sizes(&m.clinical, &sizes, MAX_CLINICAL_BYTES, MAX_CLINICAL_TOTAL_BYTES)?;
+    check_sizes(&m.ecg, &sizes, MAX_ECG_BYTES, MAX_ECG_TOTAL_BYTES)?;
     Ok(m)
 }
 
-/// Read whole members, never more than `cap` bytes each.
-fn read_members(path: &Path, names: &[String], cap: u64) -> Result<Vec<(String, Vec<u8>)>> {
+fn too_big(name: &str, cap: u64) -> Error {
+    Error::Upload(format!(
+        "{name}: over {} MB, not an Apple Health export file",
+        cap / (1024 * 1024)
+    ))
+}
+
+fn too_big_total(total: u64) -> Error {
+    Error::Upload(format!(
+        "these files are over {} MB together: not an Apple Health export",
+        total / (1024 * 1024)
+    ))
+}
+
+/// The declared size of each member against `cap`, and of all of them against `total`.
+fn check_sizes(names: &[String], sizes: &BTreeMap<String, u64>, cap: u64, total: u64) -> Result<()> {
+    let mut sum = 0u64;
+    for name in names {
+        let size = sizes.get(name).copied().unwrap_or(0);
+        if size > cap {
+            return Err(too_big(name, cap));
+        }
+        sum = sum.saturating_add(size);
+        if sum > total {
+            return Err(too_big_total(total));
+        }
+    }
+    Ok(())
+}
+
+/// Read whole members, never more than `cap` bytes each nor `total` bytes together: the bytes
+/// actually inflated count, since the declared sizes can lie.
+fn read_members(path: &Path, names: &[String], cap: u64, total: u64) -> Result<Vec<(String, Vec<u8>)>> {
     let mut z = open_zip(path)?;
     let mut out = Vec::with_capacity(names.len());
+    let mut left = total;
     for name in names {
         let f = z.by_name(name).map_err(unreadable)?;
+        let limit = cap.min(left);
         let mut data = Vec::new();
-        f.take(cap + 1).read_to_end(&mut data).map_err(unreadable)?;
-        if data.len() as u64 > cap {
-            return Err(Error::Upload(format!(
-                "{name}: over {} MB, not an Apple Health export file",
-                cap / (1024 * 1024)
-            )));
+        f.take(limit + 1).read_to_end(&mut data).map_err(unreadable)?;
+        let n = data.len() as u64;
+        if n > limit {
+            return Err(if n > cap {
+                too_big(name, cap)
+            } else {
+                too_big_total(total)
+            });
         }
+        left -= n;
         out.push((name.clone(), data));
     }
     Ok(out)
@@ -235,7 +268,7 @@ pub async fn import_apple_health(
 
     let clinical = {
         let (p, names) = (path.clone(), m.clinical.clone());
-        tokio::task::spawn_blocking(move || read_members(&p, &names, MAX_CLINICAL_BYTES))
+        tokio::task::spawn_blocking(move || read_members(&p, &names, MAX_CLINICAL_BYTES, MAX_CLINICAL_TOTAL_BYTES))
             .await
             .map_err(unreadable)??
     };
@@ -271,7 +304,7 @@ pub async fn import_apple_health(
 
     let ecgs = {
         let (p, names) = (path.clone(), m.ecg.clone());
-        tokio::task::spawn_blocking(move || read_members(&p, &names, MAX_ECG_BYTES))
+        tokio::task::spawn_blocking(move || read_members(&p, &names, MAX_ECG_BYTES, MAX_ECG_TOTAL_BYTES))
             .await
             .map_err(unreadable)??
     };
@@ -462,4 +495,59 @@ async fn store_ecg(
             .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    fn zip_of(files: &[(&str, usize)]) -> tempfile::NamedTempFile {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap_or_else(|e| panic!("{e}"));
+        {
+            let mut z = zip::ZipWriter::new(tmp.as_file_mut());
+            let opts = zip::write::SimpleFileOptions::default();
+            for (name, size) in files {
+                z.start_file(*name, opts).unwrap_or_else(|e| panic!("{e}"));
+                z.write_all(&vec![b'0'; *size]).unwrap_or_else(|e| panic!("{e}"));
+            }
+            z.finish().unwrap_or_else(|e| panic!("{e}"));
+        }
+        tmp
+    }
+
+    fn names(n: &[&str]) -> Vec<String> {
+        n.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn many_small_members_are_capped_in_total() {
+        let sizes: BTreeMap<String, u64> = [("a".to_string(), 6), ("b".to_string(), 6)].into();
+        assert!(check_sizes(&names(&["a", "b"]), &sizes, 10, 12).is_ok());
+        match check_sizes(&names(&["a", "b"]), &sizes, 10, 11) {
+            Err(Error::Upload(m)) => assert!(m.contains("together"), "{m}"),
+            other => panic!("expected the total refusal, got {other:?}"),
+        }
+        match check_sizes(&names(&["a", "b"]), &sizes, 5, 100) {
+            Err(Error::Upload(m)) => assert!(m.starts_with("a: over"), "{m}"),
+            other => panic!("expected the size refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reads_count_the_inflated_bytes_against_the_total() {
+        let tmp = zip_of(&[("a", 6), ("b", 6)]);
+        let n = names(&["a", "b"]);
+        let read = read_members(tmp.path(), &n, 10, 12).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(read.iter().map(|(_, d)| d.len()).sum::<usize>(), 12);
+        match read_members(tmp.path(), &n, 10, 11) {
+            Err(Error::Upload(m)) => assert!(m.contains("together"), "{m}"),
+            other => panic!("expected the total refusal, got {other:?}"),
+        }
+        match read_members(tmp.path(), &n, 5, 100) {
+            Err(Error::Upload(m)) => assert!(m.starts_with("a: over"), "{m}"),
+            other => panic!("expected the size refusal, got {other:?}"),
+        }
+    }
 }

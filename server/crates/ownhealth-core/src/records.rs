@@ -382,15 +382,17 @@ pub async fn supersede_record(
     reason: &str,
 ) -> Result<Committed> {
     let table = new.table();
-    let old = lifecycle::lock_current(&mut *conn, table, old_id).await?;
+    // One transaction (a savepoint inside the caller's), as in `supersede_observation`.
+    let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+    let old = lifecycle::lock_current(&mut tx, table, old_id).await?;
     if old.get("profile_id").and_then(Value::as_str) != Some(new.common().profile_id.to_string().as_str()) {
         return Err(Error::Lifecycle(
             "a correction cannot move a record to another profile".into(),
         ));
     }
-    lifecycle::mark_superseded(&mut *conn, table, old_id, Some(reason)).await?;
-    add_record(
-        conn,
+    lifecycle::mark_superseded(&mut tx, table, old_id, Some(reason)).await?;
+    let committed = add_record(
+        &mut tx,
         new,
         src,
         RecordOptions {
@@ -399,7 +401,9 @@ pub async fn supersede_record(
             supersedes: Some(old_id),
         },
     )
-    .await
+    .await?;
+    tx.commit().await?;
+    Ok(committed)
 }
 
 pub async fn retract_record(conn: &mut PgConnection, kind: &str, record_id: Uuid, reason: &str) -> Result<()> {

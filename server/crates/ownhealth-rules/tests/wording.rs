@@ -10,7 +10,8 @@ use ownhealth_rules::{build_state, check_drug, dashboard, load_pack, render};
 
 type R = anyhow::Result<()>;
 
-const BAD: [&str; 11] = [
+const BAD: [&str; 12] = [
+    "Don’t skip the dose.",
     "You should take vitamin D in winter.",
     "Take 1000 IU daily.",
     "Stop atorvastatin before the test.",

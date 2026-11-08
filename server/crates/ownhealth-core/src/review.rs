@@ -507,7 +507,9 @@ async fn accept_candidate(
         .filter(|s| !s.is_empty())
     {
         // A changed upstream version replaces the value it corrects; if that one left the current
-        // view meanwhile (retracted), the correction is committed as a new fact.
+        // view meanwhile (retracted), the correction is committed as a new fact. Any other refusal
+        // (superseded by another correction, missing, another profile) stands: falling back there
+        // would leave the fact with two current versions.
         let old = Uuid::parse_str(old).map_err(|e| Error::Invalid(e.to_string()))?;
         match supersede_observation(
             &mut *conn,
@@ -521,7 +523,15 @@ async fn accept_candidate(
         .await
         {
             Ok(c) => committed = Some(c),
-            Err(Error::Lifecycle(_)) => {}
+            Err(e @ Error::Lifecycle(_)) => {
+                let status: Option<String> = sqlx::query_scalar("select status from observation where id = $1")
+                    .bind(old)
+                    .fetch_optional(&mut *conn)
+                    .await?;
+                if status.as_deref() != Some("retracted") {
+                    return Err(e);
+                }
+            }
             Err(e) => return Err(e),
         }
     }

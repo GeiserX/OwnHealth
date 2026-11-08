@@ -439,7 +439,8 @@ fn window_start(window: &str, today: NaiveDate) -> ApiResult<Option<NaiveDate>> 
     let w = window.strip_suffix('\n').unwrap_or(window); // Python's `$` also matches before a final newline
     let bad = || bad_input("window is P<n>D, P<n>M, P<n>Y or all.");
     let body = w.strip_prefix('P').ok_or_else(bad)?;
-    let (digits, unit) = body.split_at(body.len().saturating_sub(1));
+    let cut = body.char_indices().last().map_or(0, |(i, _)| i); // a char boundary, never mid-UTF-8
+    let (digits, unit) = body.split_at(cut);
     let per = match unit {
         "D" => 1u64,
         "M" => 30,

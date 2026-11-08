@@ -109,5 +109,16 @@ async fn a_forced_second_seed_gets_generated_src_ids() -> anyhow::Result<()> {
         .fetch_one(&db.pool)
         .await?;
     assert_eq!(a12, 1);
+    // each household's vitamin D proposal cites its own household's source, not the first seed's src_a12
+    let own: Vec<(bool, bool)> = sqlx::query_as(
+        "select s.id = 'src_a12', p.household_id = r.household_id from review_item r \
+         join src s on s.id = r.context_src_ids[1] join profile p on p.id = s.profile_id \
+         where r.kind = 'agent_proposal' and r.payload->'payload'->>'text' like 'Ask about a winter vitamin D%' \
+         and r.payload->'payload'->>'attach_to' = s.id and r.payload->'based_on'->>0 = s.id \
+         order by r.created_at",
+    )
+    .fetch_all(&db.pool)
+    .await?;
+    assert_eq!(own, vec![(true, true), (false, true)]);
     Ok(())
 }

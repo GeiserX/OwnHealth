@@ -169,7 +169,7 @@ register_handler(kind, Handler); claim / complete / fail / reap_expired / run_on
 JobError::retry(msg) / ::permanent(msg) / ::typed(type_name, msg)    // last_error = "<Type>: <msg>"[:500]
 // ingest, text, demo
 ImportSummary { document_id, accepted, queued, skipped, reasons }; .count(&RouteResult)
-text::untrusted(Option<&str>, origin) -> Value      // final shape: {"trust": "untrusted_text", origin, text}
+text::untrusted(Option<&str>, origin) -> Result<Value>  // Invalid for an unknown origin; final shape: {"trust": "untrusted_text", origin, text}
 demo::create_rivera_family(conn, name) -> Family; demo::seed_demo(pool, settings, blobs, force) -> bool
 demo_pdf::lab_report_pdf(&LabReport) -> (Vec<u8>, Vec<Vec<BBox>>)   // byte-identical to demo/pdf.py
 testing::TestDb::new() / ::empty() / .settings(dir)  // feature "testing": a throwaway migrated database
@@ -246,7 +246,6 @@ Error mapping (`ApiError::from(core::Error)`), the same codes FastAPI answered:
 | `Upload` | 415 | `unsupported_upload` |
 | `Invalid` | 422 | `invalid` (a route that must match FastAPI's 422 body builds it itself) |
 | `NotFound` | 404 | `unknown` |
-| `NotImplemented` | 501 | `not_implemented` |
 | anything else | 500 | `internal` (logged) |
 | no caller | 401 | `unauthenticated` |
 | CSRF | 403 | `csrf_failed` |

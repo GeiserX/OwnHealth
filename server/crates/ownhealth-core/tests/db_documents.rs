@@ -87,3 +87,35 @@ async fn a_document_with_a_sensitive_value_is_sensitive() -> R {
     assert!(document_is_sensitive(&mut c, doc).await?);
     Ok(())
 }
+
+#[tokio::test]
+async fn concurrent_uploads_of_the_same_bytes_return_one_document() -> R {
+    use ownhealth_core::documents::{NewDocument, create_document};
+    use sqlx::Connection;
+    let db = TestDb::new().await?;
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    let (hh, p) = (f.household_id, f.profile("alex"));
+    let sha = "ab".repeat(32);
+    let mut a = db.pool.acquire().await?;
+    let mut tx = a.begin().await?;
+    let first = create_document(&mut tx, &NewDocument::upload(hh, Some(p), &sha, "application/pdf", 3)).await?;
+    // The second upload selects before the first commits, then meets its row on insert.
+    let pool = db.pool.clone();
+    let second = tokio::spawn(async move {
+        let mut b = pool.acquire().await?;
+        let sha = "ab".repeat(32);
+        anyhow::Ok(create_document(&mut b, &NewDocument::upload(hh, Some(p), &sha, "application/pdf", 3)).await?)
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tx.commit().await?;
+    let second = second.await??;
+    assert!(first.created && !second.created && !second.reactivated);
+    assert_eq!(second.id, first.id);
+    let sources: i64 = sqlx::query_scalar("select count(*) from document_source where document_id = $1")
+        .bind(first.id)
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(sources, 2);
+    Ok(())
+}

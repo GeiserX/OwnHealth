@@ -153,16 +153,22 @@ async fn missing_bad_and_revoked_tokens_are_401_with_the_metadata_url() -> anyho
         json!({"error": "invalid_token", "message": "Unknown, expired or revoked token."})
     );
 
-    // a browser session is no token: /mcp never accepts the cookie or dev auth
-    let raw = http
-        .post(&url)
-        .header("accept", "application/json, text/event-stream")
-        .header("content-type", "application/json")
-        .header("cookie", "oh_session=whatever")
-        .body(msg.to_string())
-        .send()
-        .await?;
-    assert_eq!(raw.status().as_u16(), 401);
+    // a browser session is no token: /mcp never accepts the cookie or dev auth, not even a live one
+    let member = c.enrolled_member(&format!("Mcp {}", uniq())).await?;
+    for cookie in [
+        format!("oh_session={}", member.session),
+        "oh_session=whatever".to_string(),
+    ] {
+        let raw = http
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .header("cookie", cookie)
+            .body(msg.to_string())
+            .send()
+            .await?;
+        assert_eq!(raw.status().as_u16(), 401);
+    }
 
     let (t, plain) = c.token(json!({})).await?;
     let ok = Mcp::new(&plain)?.post_raw(&msg, &[]).await?;

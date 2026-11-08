@@ -246,10 +246,28 @@ fn pow(f: &BigRational, exp: i64) -> BigRational {
     num_traits::Pow::pow(f, e)
 }
 
+/// The largest exponent a unit may carry, on an atom (`m3`) or a factor (`10*12`): a received unit
+/// like `10*999999999` would otherwise compute a rational of a billion digits.
+const MAX_EXPONENT: i64 = 100;
+/// The deepest parenthesis nesting a unit may carry: each level is one recursive call.
+const MAX_DEPTH: usize = 32;
+
+fn exponent(exp: i64, tok: &str, code: &str) -> Result<i64, UnitError> {
+    if exp.unsigned_abs() > MAX_EXPONENT.unsigned_abs() {
+        return Err(UnitError(format!(
+            "exponent {exp} of {} too large in {}",
+            py_repr(tok),
+            py_repr(code)
+        )));
+    }
+    Ok(exp)
+}
+
 struct Parser<'a> {
     code: &'a str,
     tokens: Vec<&'a str>,
     pos: usize,
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -307,7 +325,15 @@ impl<'a> Parser<'a> {
         };
         self.pos += 1;
         if tok == "(" {
+            self.depth += 1;
+            if self.depth > MAX_DEPTH {
+                return Err(UnitError(format!(
+                    "parentheses nested too deep in {}",
+                    py_repr(self.code)
+                )));
+            }
             let (f, d) = self.term()?;
+            self.depth -= 1;
             if self.peek() != Some(")") {
                 return Err(UnitError(format!("unbalanced parentheses in {}", py_repr(self.code))));
             }
@@ -323,6 +349,7 @@ impl<'a> Parser<'a> {
             if base.is_zero() && exp < 0 {
                 return Err(UnitError(format!("bad factor {tok}")));
             }
+            let exp = exponent(exp, tok, self.code)?;
             return Ok((pow(&BigRational::from_integer(base), exp), ZERO));
         }
         if INTEGER.is_match(tok) {
@@ -342,6 +369,7 @@ impl<'a> Parser<'a> {
                 .map_err(|_| UnitError(format!("bad exponent {next}")))?;
             self.pos += 1;
         }
+        let exp = exponent(exp, tok, self.code)?;
         let (f, d) = atom(tok, self.code)?;
         if self.peek().is_some_and(|t| t.starts_with('{')) {
             self.pos += 1; // an annotation glued to the atom: mg{FEU}
@@ -375,7 +403,12 @@ pub fn parse_ucum(code: &str) -> Result<Unit, UnitError> {
     if tokens.concat() != code {
         return Err(UnitError(format!("cannot read UCUM {}", py_repr(code))));
     }
-    let mut p = Parser { code, tokens, pos: 0 };
+    let mut p = Parser {
+        code,
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let (f, d) = p.term()?;
     if let Some(t) = p.peek() {
         return Err(UnitError(format!("unexpected {} in {}", py_repr(t), py_repr(code))));
@@ -585,5 +618,21 @@ mod tests {
     fn a_trailing_slash_parses_as_python_does() {
         assert_eq!(parse_ucum("mg/").map(|u| u.dims), Ok(D_MASS));
         assert!(parse_ucum("mg.(").is_err());
+    }
+
+    #[test]
+    fn huge_exponents_and_deep_nesting_are_refused() {
+        assert!(parse_ucum("10*25/L").is_ok());
+        assert!(parse_ucum("10*100/L").is_ok());
+        assert!(parse_ucum("10*999999999/L").is_err());
+        assert!(parse_ucum("10*-999999999/L").is_err());
+        assert!(parse_ucum("mg999999999").is_err());
+        assert!(parse_ucum("m-101").is_err());
+        assert!(parse_ucum("m-9223372036854775808").is_err()); // i64::MIN has no abs()
+        assert!(parse_ucum("m3").is_ok());
+        let ok = format!("{}mg{}", "(".repeat(MAX_DEPTH), ")".repeat(MAX_DEPTH));
+        assert_eq!(parse_ucum(&ok).map(|u| u.dims), Ok(D_MASS));
+        let deep = format!("{}mg{}", "(".repeat(100_000), ")".repeat(100_000));
+        assert!(parse_ucum(&deep).is_err());
     }
 }

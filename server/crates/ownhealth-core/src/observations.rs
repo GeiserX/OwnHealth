@@ -300,15 +300,18 @@ pub async fn supersede_observation(
     reason: &str,
     reviewed_by: Option<Uuid>,
 ) -> Result<Committed> {
-    let old = lifecycle::lock_current(&mut *conn, "observation", old_id).await?;
+    // One transaction (a savepoint inside the caller's): a failed insert must not leave the old
+    // row superseded with nothing replacing it, and the row lock must hold until the update.
+    let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+    let old = lifecycle::lock_current(&mut tx, "observation", old_id).await?;
     if old.get("profile_id").and_then(Value::as_str) != Some(new.profile_id.to_string().as_str()) {
         return Err(Error::Lifecycle(
             "a correction cannot move a fact to another profile".into(),
         ));
     }
-    lifecycle::mark_superseded(&mut *conn, "observation", old_id, Some(reason)).await?;
-    commit_observation(
-        conn,
+    lifecycle::mark_superseded(&mut tx, "observation", old_id, Some(reason)).await?;
+    let committed = commit_observation(
+        &mut tx,
         new,
         src,
         CommitOptions {
@@ -318,7 +321,9 @@ pub async fn supersede_observation(
             supersedes: Some(old_id),
         },
     )
-    .await
+    .await?;
+    tx.commit().await?;
+    Ok(committed)
 }
 
 pub async fn retract_observation(conn: &mut PgConnection, obs_id: Uuid, reason: &str) -> Result<()> {

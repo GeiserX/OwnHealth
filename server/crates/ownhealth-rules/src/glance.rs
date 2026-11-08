@@ -113,19 +113,18 @@ fn band(m: &Marker) -> Value {
         Some(h) => h,
         None => {
             let base = low.checked_mul(num::parse("1.33").unwrap_or_default()).unwrap_or(low);
-            m.points.iter().filter_map(|x| x.comparable()).fold(base, Decimal::max)
+            let unit = p.comparable_unit();
+            m.points
+                .iter()
+                .filter(|x| x.comparable_unit() == unit)
+                .filter_map(|x| x.comparable())
+                .fold(base, Decimal::max)
         }
     };
     json!([to_f64(&low), to_f64(&high)])
 }
 
-fn marker_row(
-    m: &Marker,
-    spec: &Map<String, Value>,
-    pack: &Pack,
-    lang: &str,
-    sources: &HashMap<String, String>,
-) -> Value {
+fn marker_row(m: &Marker, spec: &Map<String, Value>, pack: &Pack, lang: &str, sources: &HashMap<i16, String>) -> Value {
     let (value, unit) = value_of(m, spec);
     if m.source == "wearables" {
         let Some(w) = &m.wearable else { return Value::Null };
@@ -136,7 +135,7 @@ fn marker_row(
             .map_or_else(|| m.key.clone(), text);
         let newest = iso(w.newest);
         let label = [
-            sources.get(&m.key).map(String::as_str),
+            sources.get(&w.source).map(String::as_str),
             Some(newest.as_str()),
             Some("30 d"),
         ]
@@ -162,7 +161,12 @@ fn marker_row(
     }
     let Some(p) = m.latest() else { return Value::Null };
     let spark_n = usize::try_from(int(pack.dashboard.get("spark_points")).unwrap_or(9)).unwrap_or(9);
-    let points: Vec<_> = m.points.iter().filter(|x| x.comparable().is_some()).collect();
+    let spark_unit = p.comparable_unit();
+    let points: Vec<_> = m
+        .points
+        .iter()
+        .filter(|x| x.comparable().is_some() && x.comparable_unit() == spark_unit)
+        .collect();
     let points = &points[points.len().saturating_sub(spark_n)..];
     json!({
         "alias_group": m.key,
@@ -180,15 +184,14 @@ fn marker_row(
     })
 }
 
-async fn wearable_sources(conn: &mut PgConnection, profile_id: Uuid) -> Result<HashMap<String, String>> {
-    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-        "select distinct on (r.metric) r.metric, coalesce(s.device, s.provider) from wearable_rollup r \
-         join wearable_source s on s.id = r.source_id where r.profile_id = $1 order by r.metric, r.t desc",
-    )
-    .bind(profile_id)
-    .fetch_all(conn)
-    .await?;
-    Ok(rows.into_iter().filter_map(|(m, s)| s.map(|s| (m, s))).collect())
+/// Source id -> its label (device, else provider), for the wearable cards' provenance.
+async fn wearable_sources(conn: &mut PgConnection, profile_id: Uuid) -> Result<HashMap<i16, String>> {
+    let rows: Vec<(i16, Option<String>)> =
+        sqlx::query_as("select id, coalesce(device, provider) from wearable_source where profile_id = $1")
+            .bind(profile_id)
+            .fetch_all(conn)
+            .await?;
+    Ok(rows.into_iter().filter_map(|(id, s)| s.map(|s| (id, s))).collect())
 }
 
 pub async fn build_dashboard(

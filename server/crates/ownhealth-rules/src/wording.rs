@@ -12,7 +12,7 @@ const ANYWHERE: [&str; 9] = [
     r"\byou (?:should|must|need to|have to|ought to)\b",
     r"\b(?:should|must)\b",
     r"\bdo not\b",
-    r"\bdon'?t\b",
+    r"\bdon['’]?t\b",
     r"\bnever (?:take|use|stop|start)\b",
     r"\bdeb(?:e|es|en|ería|erías|erían)\b",
     r"\b(?:tiene|tienes|tienen) que\b",

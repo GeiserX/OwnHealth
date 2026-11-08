@@ -247,7 +247,8 @@ pub async fn list_for(
         format!(
             ", case when {text_ok} then (select ts_headline({FTS_CFG}, pg.text_content, \
              websearch_to_tsquery({FTS_CFG}, $4), 'MaxWords=18, MinWords=6') from document_page pg \
-             where pg.document_id = d.id order by pg.page_no limit 1) end as snippet"
+             where pg.document_id = d.id \
+             order by (pg.fts @@ websearch_to_tsquery({FTS_CFG}, $4)) desc, pg.page_no limit 1) end as snippet"
         )
     } else {
         String::new()

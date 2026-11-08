@@ -233,3 +233,21 @@ async fn another_profiles_src_is_unknown() -> R {
     assert_eq!(e["code"], "unknown");
     Ok(())
 }
+
+#[tokio::test]
+async fn without_read_records_check_drug_does_not_say_whether_the_drug_is_taken() -> R {
+    let w = world().await?;
+    let ask = json!({"profile": "alex", "drug": "atorvastatin"});
+    let full = w
+        .connect(&w.tok().await?)
+        .await?
+        .call_tool("check_drug", ask.clone())
+        .await?
+        .ok();
+    assert!(full["data"]["drug"]["currently_taking"].is_boolean(), "{full}");
+    let c = w.connect(&w.tok_scopes(without(&["read:records"])).await?).await?;
+    let drug = c.call_tool("check_drug", ask).await?.ok();
+    assert!(drug["data"]["drug"]["currently_taking"].is_null(), "{drug}");
+    assert!(drug["data"]["drug"]["name"].is_string(), "{drug}");
+    Ok(())
+}

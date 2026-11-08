@@ -482,7 +482,13 @@ impl Run<'_> {
                 }
             }
             Some(Mapped::Skip(reason)) => self.skipped(&format!("skip:{reason}")),
-            Some(Mapped::Unmapped(note)) => self.queue_unmapped(conn, e, &note, &reference).await?,
+            Some(Mapped::Unmapped(note)) => {
+                if self.pending(&mut *conn, &tail).await? {
+                    self.skipped("duplicate");
+                } else {
+                    self.queue_unmapped(conn, e, &note, &reference).await?;
+                }
+            }
             Some(Mapped::Observations(rows)) => {
                 for row in rows {
                     let (t, rf) = (format!("{tail}{}", row.suffix), format!("{reference}{}", row.suffix));

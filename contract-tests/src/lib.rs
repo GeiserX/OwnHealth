@@ -164,6 +164,7 @@ impl Client {
             base: base_url()?,
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(60))
                 .build()?,
             session: None,
         })
@@ -554,7 +555,9 @@ impl Mcp {
     pub fn new(token: &str) -> anyhow::Result<Mcp> {
         Ok(Mcp {
             base: base_url()?,
-            http: reqwest::Client::builder().build()?,
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()?,
             token: token.to_string(),
             version: LEGACY,
             next: AtomicU64::new(1),

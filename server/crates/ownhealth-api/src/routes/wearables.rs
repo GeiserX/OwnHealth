@@ -148,7 +148,8 @@ pub fn window_days(window: &str) -> Result<u64, ApiError> {
     let bad = || bad_input("window is P<n>D, P<n>M, P<n>Y or all.");
     let win = window.strip_suffix('\n').unwrap_or(window); // Python's `$` also matches before a final newline
     let body = win.strip_prefix('P').ok_or_else(bad)?;
-    let (digits, unit) = body.split_at(body.len().saturating_sub(1));
+    let cut = body.char_indices().last().map_or(0, |(i, _)| i); // a char boundary, never mid-UTF-8
+    let (digits, unit) = body.split_at(cut);
     let per = match unit {
         "D" => 1,
         "M" => 30,
@@ -360,5 +361,6 @@ mod tests {
         assert_eq!(window_days("P9999Y").ok(), Some(ALL_DAYS)); // no longer than "all"
         assert_eq!(window_days("all").ok(), Some(ALL_DAYS));
         assert!(window_days("P10000D").is_err() && window_days("30D").is_err() && window_days("P1W").is_err());
+        assert!(window_days("P5é").is_err() && window_days("Pé").is_err()); // refused, not a panic
     }
 }

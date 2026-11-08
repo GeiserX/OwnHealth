@@ -939,3 +939,100 @@ async fn edits_cannot_move_a_fact() -> R {
     assert!(matches!(&e, Err(Error::Review(m)) if m.contains("profile_id")), "{e:?}");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_failed_supersede_leaves_the_old_row_current() -> R {
+    let db = TestDb::new().await?;
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    let p = f.profile("alex");
+    let first = commit_observation(
+        &mut c,
+        &obs(p, "97"),
+        &manual_src().into(),
+        CommitOptions::new("person"),
+    )
+    .await?;
+    // The replacement cites a src that does not exist, so its insert fails after the old row was
+    // marked superseded; on an autocommit connection that must roll back too.
+    let bad = SrcRef::Id("src_missing".into());
+    let e = supersede_observation(&mut c, first.id, &obs(p, "98"), &bad, "person", "fix", None).await;
+    assert!(matches!(e, Err(Error::Provenance(_))), "{e:?}");
+    let old = get_observation(&mut c, first.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing"))?;
+    assert_eq!(old.status, "current");
+    Ok(())
+}
+
+/// An item correcting `old`: a candidate held for review whose payload names the row it replaces.
+async fn correction_item(c: &mut PgConnection, f: &Family, old: Uuid, value: &str) -> anyhow::Result<Uuid> {
+    let o = obs(f.profile("alex"), value);
+    let src = manual_src();
+    let checks = [Check::fail("g", "not_grounded")];
+    let mut extra = serde_json::Map::new();
+    extra.insert("supersedes".into(), json!(old.to_string()));
+    let res = review::route_fact(
+        c,
+        RouteFact {
+            extra_payload: Some(extra),
+            ..RouteFact::new(&o, &src, &checks, 0.99, "rules_text", "matched")
+        },
+    )
+    .await?;
+    res.review_item_id.ok_or_else(|| anyhow::anyhow!("not held"))
+}
+
+#[tokio::test]
+async fn a_correction_falls_back_to_a_new_fact_only_when_the_old_one_was_retracted() -> R {
+    let db = TestDb::new().await?;
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    let p = f.profile("alex");
+    let current = |s: &str| {
+        format!(
+            "select count(*) from observation where profile_id = '{p}' and status = 'current' and printed_value = '{s}'"
+        )
+    };
+    // Retracted meanwhile: the correction becomes a new current fact.
+    let gone = commit_observation(
+        &mut c,
+        &obs(p, "97"),
+        &manual_src().into(),
+        CommitOptions::new("person"),
+    )
+    .await?;
+    let item = correction_item(&mut c, &f, gone.id, "99").await?;
+    retract_observation(&mut c, gone.id, "entered in error").await?;
+    let created = review::accept(&mut c, item, f.user("alex"), None).await?;
+    let row = get_observation(&mut c, created[0])
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing"))?;
+    assert!(row.status == "current" && row.supersedes.is_none());
+    // Superseded by another correction meanwhile: accepting must not add a second current version.
+    let old = commit_observation(
+        &mut c,
+        &obs(p, "120"),
+        &manual_src().into(),
+        CommitOptions::new("person"),
+    )
+    .await?;
+    let item = correction_item(&mut c, &f, old.id, "121").await?;
+    supersede_observation(
+        &mut c,
+        old.id,
+        &obs(p, "122"),
+        &manual_src().into(),
+        "person",
+        "first",
+        None,
+    )
+    .await?;
+    let e = review::accept(&mut c, item, f.user("alex"), None).await;
+    assert!(matches!(e, Err(Error::Lifecycle(_))), "{e:?}");
+    let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(current("121")))
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(n, 0);
+    Ok(())
+}

@@ -189,7 +189,7 @@ async fn bad_token_requests() -> anyhow::Result<()> {
             .as_array()
             .is_some_and(|a| a.contains(&json!("alex")))
     );
-    // a session without a fresh login cannot make tokens; one with it can
+    // a fresh password session still cannot make a token for a profile the member has no grant on
     let m = c.enrolled_member(&format!("Tok {}", uniq())).await?;
     let r = m
         .client

@@ -200,7 +200,7 @@ async fn create_my_token(
                 "scopes={};profiles={};days={}",
                 scopes.join(","),
                 ids.len(),
-                body.days
+                days
             )),
             ip: meta.ip.clone(),
             ..AuditEvent::new("user", "ui", "token_create")

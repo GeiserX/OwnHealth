@@ -41,6 +41,8 @@ jobs:
       OWNHEALTH_TEST_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:55432/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Rust ${{ env.RUST_TOOLCHAIN }}
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
@@ -79,6 +81,8 @@ jobs:
         working-directory: ui
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           package_json_file: ui/package.json
@@ -98,6 +102,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Rust ${{ env.RUST_TOOLCHAIN }}
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
@@ -120,6 +126,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Build the image (no push)
         run: docker build -t drumsergio/ownhealth:ci .
       - name: Smoke test (non-root, tools, PDFium libraries, readyz, UI, healthcheck, backup, verify-restore)

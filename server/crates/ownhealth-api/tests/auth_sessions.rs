@@ -300,6 +300,20 @@ async fn tokens_api_create_list_revoke() -> R {
         args.as_deref(),
         Some("scopes=read:labs,read:summary;profiles=2;days=90")
     );
+    // a lax "30" is audited as the validated 30, not as the JSON string the client sent
+    let mut lax = body.clone();
+    lax["days"] = json!("30");
+    let r = c.post("/api/tokens", &lax).await?;
+    assert_eq!(r.status, StatusCode::CREATED, "{:?}", r.json);
+    let lax_args: Option<String> =
+        sqlx::query_scalar("select args_summary from audit_event where token_id = $1::text::uuid")
+            .bind(r.json["token"]["id"].as_str())
+            .fetch_one(&mut *conn)
+            .await?;
+    assert_eq!(
+        lax_args.as_deref(),
+        Some("scopes=read:labs,read:summary;profiles=2;days=30")
+    );
 
     // the token itself may not manage tokens, or read the audit log, or the household
     let mut as_token = env.anon();

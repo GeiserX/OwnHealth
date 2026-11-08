@@ -108,6 +108,8 @@ pub struct Wearable {
     pub newest: NaiveDate,
     pub spark: Vec<Option<Decimal>>,
     pub n_days: usize,
+    /// the wearable_source the value and spark came from
+    pub source: i16,
 }
 
 #[derive(Debug, Clone)]
@@ -332,7 +334,7 @@ async fn wearables(
     profile_id: Uuid,
     as_of: NaiveDate,
     metrics: &[String],
-) -> Result<HashMap<String, Vec<Day>>> {
+) -> Result<HashMap<String, (i16, Vec<Day>)>> {
     if metrics.is_empty() {
         return Ok(HashMap::new());
     }
@@ -383,8 +385,8 @@ async fn wearables(
                 .min_by_key(|(s, days)| (std::cmp::Reverse(days.len()), *s))
                 .map(|(s, _)| *s)
         });
-        if let Some(days) = sources.into_iter().find(|(s, _)| Some(*s) == chosen).map(|(_, d)| d) {
-            out.insert(metric, days);
+        if let Some(picked) = sources.into_iter().find(|(s, _)| Some(*s) == chosen) {
+            out.insert(metric, picked);
         }
     }
     Ok(out)
@@ -399,7 +401,7 @@ fn mean(vals: &[f64]) -> Option<f64> {
 }
 
 /// `_wearable_marker(spec, days, as_of)`.
-pub fn wearable_marker(spec: &Value, days: &[Day], as_of: NaiveDate) -> Option<Wearable> {
+pub fn wearable_marker(spec: &Value, source: i16, days: &[Day], as_of: NaiveDate) -> Option<Wearable> {
     let last = days.last()?;
     let since = as_of - Duration::days(29);
     let last30: Vec<&Day> = days.iter().filter(|d| d.0 >= since).collect();
@@ -437,6 +439,7 @@ pub fn wearable_marker(spec: &Value, days: &[Day], as_of: NaiveDate) -> Option<W
         newest: last.0,
         spark,
         n_days: last30.len(),
+        source,
     })
 }
 
@@ -757,7 +760,9 @@ pub async fn evaluate(
                 m.recency_rule = Some(rule_id(rec));
             }
             if system.source == "wearables" {
-                m.wearable = wearable_marker(spec, wdays.get(&key).map_or(&[][..], Vec::as_slice), as_of);
+                m.wearable = wdays
+                    .get(&key)
+                    .and_then(|(src, days)| wearable_marker(spec, *src, days, as_of));
                 if let Some(w) = &m.wearable {
                     m.status = "ok";
                     if m.window_days.is_some_and(|win| (as_of - w.newest).num_days() > win) {

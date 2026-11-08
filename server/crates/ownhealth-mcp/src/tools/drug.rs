@@ -106,6 +106,14 @@ pub async fn check_drug(call: &mut Call<'_>) -> ToolResult<Answer> {
             by_scope.extend(missing.iter().map(|s| crate::gate::scope_label(s)));
         }
     }
+    // whether the profile takes the drug comes from the medication records; lane E answers null
+    // without read:records, and so does this layer whatever the service returns
+    if !scopes.contains("read:records")
+        && let Some(Value::Object(d)) = raw.get_mut("drug")
+        && let Some(t) = d.get_mut("currently_taking")
+    {
+        *t = Value::Null;
+    }
     let mut withheld = match extra.get("withheld") {
         Some(Value::Object(m)) => m.clone(),
         _ => Map::new(),

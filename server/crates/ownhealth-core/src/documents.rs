@@ -170,9 +170,12 @@ pub async fn create_document(conn: &mut PgConnection, d: &NewDocument<'_>) -> Re
     let (id, created) = match row {
         Some((id, _)) => (id, false),
         None => {
-            let id: Uuid = sqlx::query_scalar(
+            // A concurrent upload of the same bytes can insert between the select and here: the
+            // conflict then yields no id and the row that won is the duplicate.
+            let id: Option<Uuid> = sqlx::query_scalar(
                 "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, pages, doc_type) \
-                 values ($1, $2, $3, $4, $5, $6, $7, $8) returning id",
+                 values ($1, $2, $3, $4, $5, $6, $7, $8) \
+                 on conflict ((coalesce(profile_id, household_id)), blob_sha256) do nothing returning id",
             )
             .bind(d.household_id)
             .bind(d.profile_id)
@@ -182,9 +185,22 @@ pub async fn create_document(conn: &mut PgConnection, d: &NewDocument<'_>) -> Re
             .bind(d.size_bytes)
             .bind(d.pages)
             .bind(d.doc_type)
-            .fetch_one(&mut *conn)
+            .fetch_optional(&mut *conn)
             .await?;
-            (id, true)
+            match id {
+                Some(id) => (id, true),
+                None => {
+                    let id: Uuid = sqlx::query_scalar(
+                        "select id from document where coalesce(profile_id, household_id) = coalesce($1, $2) and blob_sha256 = $3",
+                    )
+                    .bind(d.profile_id)
+                    .bind(d.household_id)
+                    .bind(&sha)
+                    .fetch_one(&mut *conn)
+                    .await?;
+                    (id, false)
+                }
+            }
         }
     };
     sqlx::query("insert into document_source (document_id, channel, source_ref) values ($1, $2, $3)")

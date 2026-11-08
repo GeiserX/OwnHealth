@@ -170,6 +170,22 @@ fn check_tabix_layout(raw: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// The longest decompressed VCF line we read (1 MiB). A personal VCF line is a few hundred bytes;
+/// the bound keeps a crafted BGZF that inflates into one huge line from exhausting memory.
+pub const MAX_LINE: u64 = 1 << 20;
+
+/// `read_line` that refuses a line longer than `MAX_LINE`.
+fn read_line_bounded<R: BufRead>(reader: &mut R, line: &mut String) -> io::Result<usize> {
+    let n = reader.by_ref().take(MAX_LINE + 1).read_line(line)?;
+    if n as u64 > MAX_LINE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a VCF line longer than 1 MiB",
+        ));
+    }
+    Ok(n)
+}
+
 /// A bgzipped VCF opened with its tabix index.
 pub struct VcfFile {
     reader: bgzf::io::Reader<File>,
@@ -191,7 +207,7 @@ impl VcfFile {
         let mut first = true;
         loop {
             line.clear();
-            if self.reader.read_line(&mut line)? == 0 {
+            if read_line_bounded(&mut self.reader, &mut line)? == 0 {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "no #CHROM header line"));
             }
             if first && !line.starts_with("##fileformat=VCF") {
@@ -232,7 +248,7 @@ impl VcfFile {
             self.reader.seek(chunk.start())?;
             while self.reader.virtual_position() < chunk.end() {
                 line.clear();
-                if self.reader.read_line(&mut line)? == 0 {
+                if read_line_bounded(&mut self.reader, &mut line)? == 0 {
                     break;
                 }
                 if line.starts_with('#') {
@@ -295,4 +311,22 @@ pub fn write_indexed(header: &[String], lines: &[String]) -> io::Result<(Vec<u8>
     index_writer.write_index(&indexer.build())?;
     let index = index_writer.into_inner().finish()?;
     Ok((data, index))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_LINE, read_line_bounded};
+
+    #[test]
+    fn a_line_past_the_bound_is_refused() {
+        let ok = format!("{}\n", "a".repeat(MAX_LINE as usize - 1));
+        let mut line = String::new();
+        assert_eq!(
+            read_line_bounded(&mut ok.as_bytes(), &mut line).ok(),
+            Some(MAX_LINE as usize)
+        );
+        let long = "a".repeat(MAX_LINE as usize + 10);
+        line.clear();
+        assert!(read_line_bounded(&mut long.as_bytes(), &mut line).is_err());
+    }
 }

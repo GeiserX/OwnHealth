@@ -187,7 +187,7 @@ async fn grants_give_a_member_a_profile_with_the_categories_asked() -> anyhow::R
         .await?;
     assert_eq!((r.status, r.code()), (403, Some("forbidden")));
 
-    // grants need step-up for a session; the member's own grant row shows in their household view
+    // a viewer cannot manage the profile's grants; the member's own grant row shows in their household view
     let r = m
         .client
         .put(
@@ -195,7 +195,12 @@ async fn grants_give_a_member_a_profile_with_the_categories_asked() -> anyhow::R
             &json!({"user_id": m.user_id, "profile": slug, "role": "guardian"}),
         )
         .await?;
-    assert!(r.status == 403, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(
+        (r.status, r.code()),
+        (403, Some("forbidden")),
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
     let hh = m.client.get("/api/household").await?.expect(200)?.json;
     assert!(
         hh["grants"]

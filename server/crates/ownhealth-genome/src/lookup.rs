@@ -666,7 +666,7 @@ fn py_int(text: &str) -> Option<i64> {
 fn py_page<T: Clone>(items: &[T], offset: i64) -> Vec<T> {
     let n = items.len() as i64;
     let norm = |i: i64| if i < 0 { (n + i).max(0) } else { i.min(n) };
-    let (a, b) = (norm(offset), norm(offset + PAGE as i64));
+    let (a, b) = (norm(offset), norm(offset.saturating_add(PAGE as i64)));
     if a >= b {
         return Vec::new();
     }
@@ -745,7 +745,7 @@ fn region_answer(
     records.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
     let all: Vec<Value> = records.into_iter().map(|(_, _, v)| v).collect();
     let page = py_page(&all, offset);
-    let next = offset + PAGE as i64;
+    let next = offset.saturating_add(PAGE as i64);
     let mut limitations =
         vec!["Region answers list the records in the VCF; a position with no record is not listed.".to_string()];
     if datasets.iter().any(|d| d.vcf.is_none()) {

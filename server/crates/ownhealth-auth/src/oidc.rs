@@ -282,8 +282,11 @@ pub async fn finish(
     };
     let jwks = get_json(meta["jwks_uri"].as_str().unwrap_or_default()).await?;
     let nonce = ch.text("nonce").unwrap_or_default().to_string();
-    let claims =
-        verify_id_token(cfg, id_token, jwks, &nonce).map_err(|e| failed(format!("The ID token is not valid: {e}")))?;
+    // `iss` must equal the issuer exactly as the provider publishes it (Authentik's ends in `/`);
+    // discovery already checked it against the configured one
+    let issuer = meta["issuer"].as_str().unwrap_or(&cfg.issuer);
+    let claims = verify_id_token(cfg, issuer, id_token, jwks, &nonce)
+        .map_err(|e| failed(format!("The ID token is not valid: {e}")))?;
     let name = ["name", "preferred_username", "email"]
         .iter()
         .find_map(|k| match &claims[*k] {
@@ -311,9 +314,9 @@ pub async fn finish(
 }
 
 /// Signature (JWKS), iss, aud, exp (60 s leeway), iat and nonce; returns the claims as JSON.
-fn verify_id_token(cfg: &OidcConfig, id_token: &str, jwks: Value, nonce: &str) -> Result<Value, String> {
+fn verify_id_token(cfg: &OidcConfig, issuer: &str, id_token: &str, jwks: Value, nonce: &str) -> Result<Value, String> {
     let keys: CoreJsonWebKeySet = serde_json::from_value(jwks).map_err(|e| e.to_string())?;
-    let issuer = IssuerUrl::new(cfg.issuer.clone()).map_err(|e| e.to_string())?;
+    let issuer = IssuerUrl::new(issuer.to_string()).map_err(|e| e.to_string())?;
     let client = ClientId::new(cfg.client_id.clone());
     let verifier = match &cfg.client_secret {
         Some(s) => CoreIdTokenVerifier::new_confidential_client(client, ClientSecret::new(s.clone()), issuer, keys),
@@ -355,5 +358,29 @@ mod tests {
         assert_eq!(quote_plus("a~b*c"), "a~b%2Ac");
         assert_eq!(s256("x").len(), 43);
         assert_eq!(binder_hash("b").len(), 64);
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn the_id_token_issuer_is_the_published_one_with_its_slash() {
+        use crate::testing::{es256_jwt, jwk, signing_key};
+        let published = "https://auth.example/application/o/ownhealth/";
+        let cfg = OidcConfig::new(published, "ownhealth");
+        assert_eq!(cfg.issuer, "https://auth.example/application/o/ownhealth");
+        let key = signing_key(None);
+        let now = Utc::now().timestamp();
+        let token = |iss: &str| {
+            es256_jwt(
+                &key,
+                "k1",
+                &json!({"iss": iss, "aud": "ownhealth", "sub": "s", "exp": now + 300, "iat": now, "nonce": "n"}),
+            )
+        };
+        let jwks = json!({"keys": [jwk(&key, "k1")]});
+        let claims = verify_id_token(&cfg, published, &token(published), jwks.clone(), "n");
+        assert_eq!(claims.ok().map(|c| c["sub"].clone()), Some(json!("s")));
+        // the trimmed config value is not what the provider signs
+        assert!(verify_id_token(&cfg, &cfg.issuer, &token(published), jwks.clone(), "n").is_err());
+        assert!(verify_id_token(&cfg, published, &token(&cfg.issuer), jwks, "n").is_err());
     }
 }

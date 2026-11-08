@@ -180,9 +180,17 @@ async fn list_search_and_detail() -> R {
         hit[0]["snippet"]["text"].as_str().is_some_and(|t| t.contains("<b>")),
         "{hit}"
     );
+    // the snippet comes from the page that matches (Glucosa is on page 2), not from page 1
+    let hit = get(&a, "alex", "/profiles/alex/documents?q=glucosa").await?.json()["items"].clone();
+    assert!(
+        hit[0]["snippet"]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("<b>Glucosa</b>")),
+        "{hit}"
+    );
     let miss = get(&a, "alex", "/profiles/alex/documents?q=colonoscopia").await?.json();
     assert_eq!(miss["items"], json!([]));
-    assert_eq!(audits(&a, tool).await?, before + 3);
+    assert_eq!(audits(&a, tool).await?, before + 4);
 
     let detail = get(&a, "alex", &format!("/documents/{doc}")).await?.json();
     let pages: Vec<Value> = detail["pages_info"]

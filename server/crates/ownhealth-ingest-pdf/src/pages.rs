@@ -70,8 +70,29 @@ pub async fn page_words(
     Ok(words.iter().filter_map(word_from).collect())
 }
 
-/// A PNG of one page, scale clamped to 0.5..4 (CPU work: call it from `spawn_blocking`). A page out
-/// of range is `Error::NotFound`.
+/// The most pixels one page render may hold (A3 at scale 4 is about 16 M): a page's own `MediaBox`
+/// can ask for a 57600 x 57600 render, which is gigabytes.
+pub const MAX_RENDER_PIXELS: f64 = 25_000_000.0;
+
+/// The pixel size of a `width` x `height` pt page at `scale` (clamped to 0.5..4; NaN is 0.5, as
+/// Python's `max(0.5, min(scale, 4.0))`), scaled down to fit `MAX_RENDER_PIXELS`.
+fn render_size(width: f64, height: f64, scale: f64) -> (i32, i32) {
+    let scale = if scale.is_nan() { 0.5 } else { scale.clamp(0.5, 4.0) };
+    // pypdfium2 rounded the pixel size up: ceil(points * scale)
+    let (w, h) = ((width * scale).ceil(), (height * scale).ceil());
+    if w * h <= MAX_RENDER_PIXELS {
+        return (w as i32, h as i32);
+    }
+    // rounded down, so the product stays under the cap
+    let k = scale * (MAX_RENDER_PIXELS / (w * h)).sqrt();
+    (
+        ((width * k).floor() as i32).max(1),
+        ((height * k).floor() as i32).max(1),
+    )
+}
+
+/// A PNG of one page, scale clamped to 0.5..4 and the size to `MAX_RENDER_PIXELS` (CPU work: call it
+/// from `spawn_blocking`). A page out of range is `Error::NotFound`.
 pub fn render_page_png(blobs: &BlobStore, blob_sha256: &str, page_no: i32, scale: f64) -> Result<Vec<u8>> {
     let data = blobs.get_bytes(blob_sha256)?;
     let doc = pdfium()?.load_pdf_from_byte_slice(&data, None).map_err(pdf_error)?;
@@ -80,10 +101,7 @@ pub fn render_page_png(blobs: &BlobStore, blob_sha256: &str, page_no: i32, scale
         return Err(Error::NotFound(format!("page {page_no} out of range")));
     }
     let page = doc.pages().get((page_no - 1) as _).map_err(pdf_error)?;
-    let scale = scale.clamp(0.5, 4.0);
-    // pypdfium2 rounded the pixel size up: ceil(points * scale)
-    let w = (page.width().value as f64 * scale).ceil() as i32;
-    let h = (page.height().value as f64 * scale).ceil() as i32;
+    let (w, h) = render_size(page.width().value as f64, page.height().value as f64, scale);
     let cfg = PdfRenderConfig::new().set_target_width(w).set_target_height(h);
     let bitmap = page.render_with_config(&cfg).map_err(pdf_error)?;
     let rgba = bitmap.as_rgba_bytes();
@@ -226,6 +244,20 @@ fn ground_in(words: &[Word], name: &str, value: &str) -> Option<[f64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_size_is_capped_and_nan_is_the_smallest_scale() {
+        assert_eq!(render_size(595.0, 842.0, 1.0), (595, 842));
+        assert_eq!(render_size(595.3, 841.9, 2.0), (1191, 1684));
+        assert_eq!(render_size(595.0, 842.0, 9.0), (2380, 3368));
+        assert_eq!(render_size(595.0, 842.0, f64::NAN), (298, 421));
+        assert_eq!(render_size(595.0, 842.0, f64::INFINITY), (2380, 3368));
+        let (w, h) = render_size(14400.0, 14400.0, 4.0);
+        assert!(f64::from(w) * f64::from(h) <= MAX_RENDER_PIXELS, "{w}x{h}");
+        assert!(w > 4900 && w == h, "{w}x{h}");
+        let (w, h) = render_size(14400.0, 3.0, 4.0);
+        assert!(f64::from(w) * f64::from(h) <= MAX_RENDER_PIXELS && h >= 1, "{w}x{h}");
+    }
 
     fn w(text: &str, x0: f64, x1: f64) -> Word {
         Word {

@@ -100,7 +100,7 @@ fn sleep_is_the_nightly_total_of_its_stages() -> R {
         .rev()
         .map(|i| (as_of - Duration::days(i), Some(140.0), Some(420.0)))
         .collect();
-    let w = wearable_marker(&spec, &days, as_of);
+    let w = wearable_marker(&spec, 1, &days, as_of);
     assert_eq!(w.and_then(|w| w.value), Some(Decimal::from(420)));
     Ok(())
 }

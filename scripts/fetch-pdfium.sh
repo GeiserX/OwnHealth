@@ -54,6 +54,6 @@ tar -xzf "$work/pdfium.tgz" -C "$work/x"
 rm -rf "$dest"
 mkdir -p "$dest"
 cp -R "$work/x/lib" "$work/x/LICENSE" "$dest/"
-[[ -d "$work/x/licenses" ]] && cp -R "$work/x/licenses" "$dest/"
+if [[ -d "$work/x/licenses" ]]; then cp -R "$work/x/licenses" "$dest/"; fi
 echo "chromium/$RELEASE $want" > "$dest/VERSION"
 echo "pdfium chromium/$RELEASE ($platform) -> $dest/lib"

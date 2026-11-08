@@ -290,9 +290,11 @@ pub fn parse_date(raw: &str) -> Result<chrono::NaiveDate, Refusal> {
         None => (time, ""),
     };
     let numeric = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    // the byte slices below need an ASCII zone: a multi-byte char there is refused, never cut
     let zone_ok = matches!(zone, "" | "Z" | "z")
-        || (zone.len() == 6 && numeric(&zone[1..3]) && &zone[3..4] == ":" && numeric(&zone[4..]))
-        || (zone.len() == 5 && numeric(&zone[1..]));
+        || (zone.is_ascii()
+            && ((zone.len() == 6 && numeric(&zone[1..3]) && &zone[3..4] == ":" && numeric(&zone[4..]))
+                || (zone.len() == 5 && numeric(&zone[1..]))));
     let fmt = if clock.len() == 5 { "%H:%M" } else { "%H:%M:%S%.f" };
     match chrono::NaiveTime::parse_from_str(clock, fmt) {
         Ok(t) if zone_ok && clock.len() >= 5 => {
@@ -432,5 +434,23 @@ pub fn pydantic_datetimes(v: &mut Value, keys: &[&str]) {
         {
             *s = ownhealth_core::pyjson::pydantic_datetime(&dt);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_date;
+
+    #[test]
+    fn a_multi_byte_zone_is_refused_not_cut() {
+        for raw in [
+            "2020-01-01T00:00+12\u{20ac}",
+            "2020-01-01T00:00+\u{20ac}0",
+            "2020-01-01T00:00-\u{e9}\u{e9}",
+        ] {
+            assert!(parse_date(raw).is_err(), "{raw}");
+        }
+        assert!(parse_date("2020-01-01T00:00+01:00").is_ok());
+        assert!(parse_date("2020-01-01T00:00+0100").is_ok());
     }
 }

@@ -176,8 +176,8 @@ async fn audit(conn: &mut PgConnection, principal: &Principal, item: &ReviewItem
 async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>) -> R<Json<Value>> {
     let principal = &caller.0;
     let mut e = Errors::new();
-    let limit = e.int("query", &q, "limit", 100, None, Some(500));
-    let offset = e.int("query", &q, "offset", 0, None, None);
+    let limit = e.int("query", &q, "limit", 100, Some(0), Some(500));
+    let offset = e.int("query", &q, "offset", 0, Some(0), None);
     let document_id = param(&q, "document_id").and_then(|d| e.uuid("query", "document_id", d));
     e.done()?;
     let status = param(&q, "status").unwrap_or("open");

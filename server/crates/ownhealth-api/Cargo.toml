@@ -35,6 +35,7 @@ uuid.workspace = true
 [dev-dependencies]
 ownhealth-auth = { workspace = true, features = ["testing"] }
 ownhealth-core = { workspace = true, features = ["testing"] }
+ownhealth-rules = { workspace = true, features = ["testing"] }
 anyhow.workspace = true
 regex.workspace = true
 tempfile.workspace = true

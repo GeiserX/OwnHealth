@@ -77,24 +77,28 @@ async fn readyz(State(rt): State<Runtime>) -> Response {
         let mut conn = rt.pool.acquire().await?;
         sqlx::query("select 1").execute(&mut *conn).await?;
         migrate::pending(&mut conn, &migrate::embedded()?).await
-    }
-    .await;
+    };
+    // A full pool or an unreachable database answers 503 within seconds, not after the pool's
+    // 30 s acquire timeout (the container healthcheck gives up after 5 s).
+    let pending = tokio::time::timeout(std::time::Duration::from_secs(3), pending).await;
     match pending {
         // The exception class name Python reported.
-        Err(_) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "db_unavailable", "OperationalError").into_response(),
-        Ok(todo) if !todo.is_empty() => ApiError::new(
+        Err(_) | Ok(Err(_)) => {
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "db_unavailable", "OperationalError").into_response()
+        }
+        Ok(Ok(todo)) if !todo.is_empty() => ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "migrations_pending",
             format!("pending: {todo:?}"),
         )
         .into_response(),
-        Ok(_) if !rt.blobs.root().is_dir() => ApiError::new(
+        Ok(Ok(_)) if !rt.blobs.root().is_dir() => ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "blob_dir_missing",
             rt.blobs.root().display().to_string(),
         )
         .into_response(),
-        Ok(_) => Json(json!({"status": "ready"})).into_response(),
+        Ok(Ok(_)) => Json(json!({"status": "ready"})).into_response(),
     }
 }
 

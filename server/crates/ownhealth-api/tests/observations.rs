@@ -247,16 +247,13 @@ async fn test_scopes_are_enforced() -> R {
             units: "si",
         },
     )
-    .await
-    .ok()
-    .map(|t| t.plaintext);
-    if let Some(token) = token {
-        for uri in ["/profiles/alex/observations", "/profiles/alex/trend?code=ldl_c"] {
-            let req = Request::get(uri)
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .body(Body::empty())?;
-            assert_eq!(send(&a, req).await?.0, StatusCode::FORBIDDEN, "{uri}");
-        }
+    .await?
+    .plaintext;
+    for uri in ["/profiles/alex/observations", "/profiles/alex/trend?code=ldl_c"] {
+        let req = Request::get(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())?;
+        assert_eq!(send(&a, req).await?.0, StatusCode::FORBIDDEN, "{uri}");
     }
     // a viewer on Alex: read:summary only
     let (s, _) = get(&a, "sam", "/profiles/alex/observations").await?;
@@ -315,7 +312,8 @@ async fn test_add_alias_relinks() -> R {
 async fn test_a_window_too_large_for_the_calendar_is_refused() -> R {
     let a = app().await?;
     seed(&a).await?;
-    for window in ["P99999Y", "P9999999D"] {
+    // a window ending in a multi-byte char is a 422, not a panic
+    for window in ["P99999Y", "P9999999D", "P1%C3%A9", "P%C3%A9"] {
         let (s, r) = get(&a, "alex", &format!("/profiles/alex/trend?code=ldl_c&window={window}")).await?;
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{window}");
         assert_eq!(r["detail"]["code"], "bad_input", "{window} {r}");

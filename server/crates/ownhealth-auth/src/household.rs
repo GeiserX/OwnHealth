@@ -130,7 +130,16 @@ pub struct OwnerIn<'a> {
 /// Create the household, its first login and that person's own profile, as owner.
 ///
 /// Only while the instance has no user at all; two racing setups serialise on an advisory lock.
+/// The lock lasts until the caller's transaction ends (a savepoint here inside one), or until the
+/// owner exists when `conn` is in autocommit (a transaction of its own here).
 pub async fn setup_owner(conn: &mut PgConnection, o: &OwnerIn<'_>) -> AuthResult<Owner> {
+    let mut tx = conn.begin().await?;
+    let owner = setup_owner_locked(&mut tx, o).await?;
+    tx.commit().await?;
+    Ok(owner)
+}
+
+async fn setup_owner_locked(conn: &mut PgConnection, o: &OwnerIn<'_>) -> AuthResult<Owner> {
     sqlx::query("select pg_advisory_xact_lock($1)")
         .bind(SETUP_LOCK)
         .execute(&mut *conn)
@@ -533,7 +542,8 @@ pub async fn orphaned_profiles(
         "select p.slug from profile_grant g join profile p on p.id = g.profile_id where g.user_id = $1 \
          and p.id is distinct from $2 and not exists \
          (select 1 from profile_grant o where o.profile_id = g.profile_id and o.user_id <> $1 \
-         and o.role in ('owner', 'guardian')) order by p.slug",
+         and o.role in ('owner', 'guardian') and (o.expires_at is null or o.expires_at > now())) \
+         order by p.slug",
     )
     .bind(user_id)
     .bind(except_profile)

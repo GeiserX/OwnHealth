@@ -275,8 +275,18 @@ fn bump(counts: &mut Map<String, Value>, key: &str, by: u64) {
     counts.insert(key.to_string(), json!(n + by));
 }
 
+/// A stored `resourceType` names a zip entry (`fhir/<type>.ndjson`), so only a plain FHIR type
+/// name (ASCII letters and digits) is used; anything else (`../../x`) exports as `Basic`.
+fn safe_resource_type(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 /// Write the full export of one profile into `out` and return the manifest. `out` is written to,
 /// never stored: the export does not land in the blob store or in backups.
+///
+/// The export runs several queries (FHIR tables, documents, sources). For a consistent archive
+/// the caller passes a connection inside a `repeatable read` transaction, so a concurrent import
+/// cannot add a source whose document the export already skipped.
 pub async fn export_profile<W: Write + Seek>(
     conn: &mut PgConnection,
     blobs: &BlobStore,
@@ -354,7 +364,7 @@ pub async fn export_profile<W: Write + Seek>(
             let rtype = res
                 .get("resourceType")
                 .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
+                .filter(|s| safe_resource_type(s))
                 .unwrap_or("Basic")
                 .to_string();
             res.insert("resourceType".into(), json!(rtype));
@@ -543,6 +553,15 @@ pub async fn export_profile<W: Write + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resource_type_with_a_path_is_not_a_zip_entry_name() {
+        assert!(safe_resource_type("Observation"));
+        assert!(safe_resource_type("MedicationStatement"));
+        for bad in ["", "../../x", "a/b", "a\\b", "x.ndjson", "Obs ervation"] {
+            assert!(!safe_resource_type(bad), "{bad:?}");
+        }
+    }
 
     #[test]
     fn safe_name_matches_python() {

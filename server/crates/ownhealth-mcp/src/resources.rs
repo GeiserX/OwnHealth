@@ -293,19 +293,23 @@ pub async fn read(
     }
     .await
     .map_err(internal)?;
-    if let Some(w) = wait {
-        return Err((INVALID_PARAMS, format!("rate_limited: retry in {} s", py_float(w))));
-    }
-    let outcome = async {
-        let mut tx = conn.begin().await?;
-        let r = read_in(&mut tx, rt, svc, uri, principal, meta, lim, day).await;
-        if r.is_ok() {
-            tx.commit().await?;
+    // a throttled read still counts as a call and leaves a denied audit row, as a throttled
+    // tools/call does; only its answer differs
+    let throttled = wait.map(|w| (INVALID_PARAMS, format!("rate_limited: retry in {} s", py_float(w))));
+    let outcome = if throttled.is_some() {
+        Err(tool_err("rate_limited", "Too many calls for this token."))
+    } else {
+        async {
+            let mut tx = conn.begin().await?;
+            let r = read_in(&mut tx, rt, svc, uri, principal, meta, lim, day).await;
+            if r.is_ok() {
+                tx.commit().await?;
+            }
+            Ok::<_, Error>(r)
         }
-        Ok::<_, Error>(r)
-    }
-    .await
-    .map_err(internal)?;
+        .await
+        .map_err(internal)?
+    };
     let code = match outcome {
         Ok(v) => return Ok(v),
         Err(Fail::Tool(t)) => t.code,
@@ -338,6 +342,9 @@ pub async fn read(
     }
     .await
     .map_err(internal)?;
+    if let Some(t) = throttled {
+        return Err(t);
+    }
     // one answer for every refusal, so a uri never tells whether its target exists
     Err((
         RESOURCE_NOT_FOUND,

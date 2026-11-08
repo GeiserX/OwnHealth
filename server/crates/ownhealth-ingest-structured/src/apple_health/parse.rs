@@ -405,17 +405,25 @@ mod tests {
     #[test]
     fn many_distinct_skipped_names_count_in_linear_time() {
         // Element names come from the uploaded file; counting them must stay O(1) per element.
+        // The bound is relative to the same number of elements under one repeated name, read in
+        // the same run: a wall-clock bound alone fails on a loaded box (20 s at load 30, 0.6 s idle).
         let n = 200_000;
-        let mut xml = String::from("<HealthData>");
-        for i in 0..n {
-            xml.push_str(&format!("<E{i}/>"));
-        }
-        xml.push_str("<E7/><E7/><E3/></HealthData>");
-        let started = std::time::Instant::now();
-        let mut r = ExportReader::new(xml.as_bytes());
-        while r.next_sample().expect("parses").is_some() {}
-        let top = r.most_common(3);
-        let elapsed = started.elapsed();
+        let doc = |name: &dyn Fn(usize) -> String| {
+            let mut xml = String::from("<HealthData>");
+            for i in 0..n {
+                xml.push_str(&format!("<{}/>", name(i)));
+            }
+            xml.push_str("<E7/><E7/><E3/></HealthData>");
+            xml
+        };
+        let read = |xml: &str| {
+            let started = std::time::Instant::now();
+            let mut r = ExportReader::new(xml.as_bytes());
+            while r.next_sample().expect("parses").is_some() {}
+            (r.most_common(3), started.elapsed())
+        };
+        let (_, baseline) = read(&doc(&|i| format!("E{}", "0".repeat(i.to_string().len()))));
+        let (top, elapsed) = read(&doc(&|i| format!("E{i}")));
         assert_eq!(
             top,
             vec![
@@ -424,6 +432,9 @@ mod tests {
                 ("skipped:E0".to_string(), 1)
             ]
         );
-        assert!(elapsed < std::time::Duration::from_secs(5), "took {elapsed:?}");
+        assert!(
+            elapsed < baseline * 5 + std::time::Duration::from_millis(500),
+            "took {elapsed:?}, one name {baseline:?}"
+        );
     }
 }

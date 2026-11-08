@@ -63,6 +63,10 @@ async fn export(
 ) -> R {
     Check::body().literal("fmt", Some(&body.fmt), &["zip"]).done()?;
     let mut tx = rt.pool.begin().await?;
+    // one snapshot for every query of the export (it must be set before the first query)
+    sqlx::query("set transaction isolation level repeatable read")
+        .execute(&mut *tx)
+        .await?;
     let perm = require_manage(Caller(p.clone()).require(&mut tx, &profile, None, None).await?)?;
     let tmp_dir = rt.settings.data_dir.join("tmp");
     let path = tmp_dir.join(format!("export-{}.zip", Uuid::new_v4().simple()));

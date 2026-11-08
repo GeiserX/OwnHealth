@@ -107,8 +107,10 @@ impl PyRandom {
 
     /// `randint(a, b)`: `a + _randbelow(b - a + 1)` by rejection on `getrandbits`.
     pub fn randint(&mut self, a: i64, b: i64) -> i64 {
+        // CPython raises ValueError for an empty range; a one-value range still draws (it calls
+        // getrandbits(1) until it gets 0), so only the empty range returns without drawing.
         let n = (b - a + 1) as u64;
-        if n <= 1 {
+        if n == 0 || b < a {
             return a;
         }
         let k = 64 - n.leading_zeros();
@@ -158,6 +160,11 @@ mod tests {
         let mut r = PyRandom::new(20_261_107);
         let got: Vec<f64> = (0..3).map(|_| round1(r.uniform(-1.5, 1.5))).collect();
         assert_eq!(got, [0.2, -0.4, 0.9]);
+        // a one-value range still consumes the stream:
+        // python3 -c "import random; r=random.Random(7); r.randint(3, 3); print(r.random())"
+        let mut r = PyRandom::new(7);
+        assert_eq!(r.randint(3, 3), 3);
+        assert_eq!(r.random(), 0.9478653606090632);
     }
 
     #[test]

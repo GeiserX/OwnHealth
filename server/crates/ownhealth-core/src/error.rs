@@ -28,7 +28,7 @@ pub enum Error {
     /// A value that fails validation (the Python ValueError / pydantic error). HTTP 422.
     #[error("{0}")]
     Invalid(String),
-    /// A row the caller named does not exist. HTTP 404 `not_found`.
+    /// A row the caller named does not exist. HTTP 404 `unknown` (the code the Python routes sent).
     #[error("{0}")]
     NotFound(String),
     #[error(transparent)]
