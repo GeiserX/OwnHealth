@@ -43,13 +43,13 @@ backend/
     jobs/kinds/apple_health.py             C   (import.apple_health)
     jobs/kinds/genome.py                   D   (import.genome_facts)
     jobs/kinds/state.py                    E   (state.rebuild)
-    jobs/kinds/ops.py                      J
+    jobs/kinds/normalize.py                A   (normalize.rederive)
     normalize/                             A
     ingest/__init__.py                     foundation (ImportSummary)
     ingest/pdf.py (or ingest/pdf/)         B
     ingest/fhir.py, apple_health.py, manual.py   C
     genome/                                D
-    state/                                 E   (rules/ownhealth-rules/ YAML lives at repo root, also E)
+    state/, rules/                         E   (rules/pack/*.yaml and rules/cpic/snapshot.json ship in the package)
     mcp/__init__.py                        F   (keeps build_server(settings) -> MCPServer)
     mcp/envelope.py                        F   (untrusted() is final; do not change its shape)
     mcp/tools/, mcp/resources.py, mcp/prompts.py   F
@@ -67,8 +67,8 @@ backend/
     test_*.py (present at foundation)      foundation
     <lane>/                                that lane: tests/normalize, tests/pdf, tests/imports, tests/genome,
                                            tests/state, tests/mcp, tests/security, tests/ops
-data/terminology/                          A (aliases, units, limits, conversions)
-templates/labs/                            B
+backend/src/ownhealth/normalize/terminology/   A (LOINC subset, aliases, molar masses; inside the package so it ships)
+backend/src/ownhealth/ingest/pdf/vendors/<country>/<provider>.yaml   B (vendor templates)
 fixtures/                                  every lane adds under fixtures/<lane>/; synthetic only
 ui/
   package.json, vite.config.ts, tsconfig.json   foundation
@@ -82,8 +82,9 @@ ui/
   src/lib/api/health.ts                    H
   src/lib/api/manage.ts                    I
   src/lib/nav.ts, src/routes/+layout.*     foundation
-  src/routes/+page.svelte, biomarkers/, timeline/, genome/, drug-check/      H
-  src/routes/wearables/, imaging/, import-review/, family/, mcp-access/      I
+  src/routes/+page.svelte, biomarkers/, timeline/, wearables/, imaging/, family/, lib/components/pages1/   H
+  src/routes/genome/, drug-check/, import-review/, mcp-access/, documents/, settings/, login/,
+    lib/components/pages2/                 I
 Dockerfile, compose.yaml, .env.example     foundation, then J
 .github/workflows/                         foundation, then J
 README.md, docs/                           J (design docs: the lane that changes the design)
@@ -123,7 +124,7 @@ Settings.from_env() -> Settings                      # OWNHEALTH_* and *_FILE tw
 runtime.get() -> Runtime(settings, engine, blobs)
 # blobs.py
 BlobStore(root).put_bytes(data) -> str               # sha256 hex; path blobs/sha256/ab/cd/<hash>
-BlobStore.put_stream(stream) -> (str, int); .put_file(path) -> str
+BlobStore.put_stream(stream) -> (str, int); .put_file(path) -> (str, int)
 BlobStore.open(sha) / .get_bytes(sha) / .iter_chunks(sha) / .exists(sha) / .path(sha)
 # db
 migrate.migrate(engine, directory=MIGRATIONS_DIR) -> list[int]       # forward-only, checksum-locked
@@ -204,7 +205,7 @@ ToolError(code, message, fix).as_dict()
 | `ingest.apple_health` | `import_apple_health(conn, blobs, *, document_id) -> ImportSummary` | C | job `import.apple_health` |
 | | `rebuild_rollups(conn, *, profile_id, metric=None) -> int` | C | J |
 | `ingest.manual` | `add_manual_observation(conn, *, profile_id, user_id, name, value, unit, effective_at, note=None) -> Committed` | C | API |
-| `genome` | `validate_facts(doc) -> list[str]` ; `import_genome_facts(conn, blobs, *, document_id) -> ImportSummary` | D | job `import.genome_facts` |
+| `genome` | `validate_facts(doc) -> list[str]` ; `import_genome_facts(conn, blobs, *, document_id, attachments=None, actor_user=None, imported_at=None) -> ImportSummary` | D | job `import.genome_facts` |
 | | `list_findings(conn, profile_id, *, gate, category=None, gene=None, min_evidence="E2", as_of=None) -> Findings` | D | E, F, API |
 | | `lookup_variant(conn, blobs, profile_id, *, gate, rsid=None, hgvs=None, region=None, cursor=None) -> dict` | D | F |
 | | `pgx_for_drug(conn, profile_id, *, cpic_drug_id, as_of=None) -> list[dict]` | D | E |
@@ -216,10 +217,34 @@ ToolError(code, message, fix).as_dict()
 | | `check_drug(conn, profile_id, drug, *, scopes, lang="en", as_of=None) -> dict` (mcp.md 5.6 `data`) | E | F, API |
 | | `resolve_drug(conn, name) -> {cpic_drug_id, name} \| None` | E | C, F |
 | `mcp.envelope` | `envelope(*, profile, as_of, lang, identity_mode, data, **fields) -> dict` ; `estimate_tokens(obj)` ; `encode_cursor` / `decode_cursor` | F | F |
-| `auth.sessions` | `resolve_session(conn, secret) -> Principal \| None` ; `create_session(conn, user_id, *, ip, user_agent) -> str` ; `require_step_up(conn, principal, max_age_seconds=300)` | G | foundation `principal.resolve`, G, export |
+| `auth.sessions` | `resolve_session(conn, secret) -> Principal \| None` ; `create_session(conn, user_id, *, ip, user_agent, method="passkey", step_up=None) -> str` ; `require_step_up(conn, principal, max_age_seconds=300)` | G | foundation `principal.resolve`, G, export |
 | `auth.passkeys` | `begin_registration` / `finish_registration` / `begin_login` / `finish_login` | G | G's API |
-| `export` | `export_profile(conn, blobs, profile_id, *, fmt) -> str` (blob sha256) | G | G's API |
-| `ops` | `backup(settings, dest) -> Path` ; `restore(settings, archive)` ; `verify_restore(settings, archive) -> dict` | J | CLI |
+| `export` | `export_profile(conn, blobs, profile_id, out: BinaryIO, *, fmt="zip") -> dict` (streams the zip, returns the manifest; no blob copy) | G | G's API |
+| `ops` | `backup(settings, dest) -> Path` ; `restore(settings, archive) -> dict` (same report as verify_restore) ; `verify_restore(settings, archive) -> dict` | J | CLI |
+
+Additive changes the lanes made (every row above still works as written):
+
+- **A** `Resolution` has `confidence` and `candidates[]` (`Candidate.partial`); reason `name_partial` (becomes a
+  failing `loinc` check, reason `unmapped`). `resolve_analyte(..., household_id=None, text_result=False)`;
+  `normalize_row(..., loinc=None, method=None)` keeps a received code when it is in the shipped cut;
+  `parse_range(..., unit=None)`; `interpret(..., comparator=None)`; `RefRange.low_inclusive/high_inclusive/
+  text_code`. New: `add_alias(conn, *, household_id, alias, alias_group, lang, added_by, unit=None,
+  specimen=None, loinc=None) -> UUID`, `AliasError`, `group_units(alias_group)`, `display_name(alias_group, lang)`.
+  `rederive` supersedes with `status_reason` `rederive <version>`; those rows are not corrections.
+- **B** `ingest/pdf` is a package; `Word` has optional `font`, `size`, `bold`, `hidden`. Review kinds
+  `candidate_row`, `amended_report`, `document_identity`, `pending_document` (images, scans, no table).
+- **C** `wearables.series(conn, profile_id, metric, *, since, until, resolution="day"|"hour")`,
+  `wearables.metric_info(key)`, `wearables.priority(...)`, `wearables.set_priority(...)`;
+  `add_manual_observation(..., category=None, loinc=None, corrects=None, reason=None)`.
+- **D** `pgx_for_drug(..., genes=None, drug_name=None)`; `gate_for(perm, *, surface, on, age_of_majority=18)`,
+  `load_ref_sites(conn, rows, *, source)`, `GenomeImportError`, `GenomeQueryError(code, message, fix)`;
+  `Findings.coverage`, `Findings.limitations`.
+- **E** `build_state(..., known_at=None)` (a knowledge cut, not part of the hash); `render(..., scopes=None)`
+  names left-out sections in `withheld.by_scope`; `state.dashboard(conn, pid, *, as_of, lang, scopes)`;
+  `state.UnknownDrug`; `state.wording.lint(obj)`.
+- **G** `begin_registration(..., user_name, purpose, data)`, `begin_login(..., user_id=None, session_id=None)`,
+  `finish_login(..., purpose="login")`; `auth.deps.ProfilePerm(scope=, action=, manage=)`, `SessionOnly`, `StepUp`.
+  `api/_deps.get_principal` runs `auth.csrf.check`, so every router gets the CSRF check.
 
 `tests/test_contracts.py` imports every stub module, so a renamed module fails CI at once.
 
@@ -245,7 +270,7 @@ it finds, so adding a file is the whole registration. Modules starting with `_` 
 | — | app.py | `GET /healthz`, `GET /readyz` (outside `/api`) | |
 | A | observations.py | `GET /profiles/{p}/observations?q=&loinc=&alias_group=&category=&from=&to=&units=&lang=` | `{items: ObservationOut[]}` |
 | A | observations.py | `GET /profiles/{p}/trend?code=&window=P3Y&units=&lang=` | `Trend` (mcp.md 5.3 shape) |
-| A | observations.py | `POST /aliases` | user-added analyte alias |
+| A | observations.py | `POST /aliases` | `{profile, alias, alias_group, lang?, loinc?, unit?, specimen?}`, action `review`; re-derives the household |
 | B | documents.py | `GET /profiles/{p}/documents?q=&type=` ; `GET /documents/{id}` | |
 | B | documents.py | `GET /documents/{id}/file` ; `/pages/{n}.png` ; `/pages/{n}/words` | words need `read:documents_text` for tokens |
 | B | documents.py | `POST /documents/{id}/assign` `{profile}` ; `POST /documents/{id}/retract` `{reason}` | |
@@ -259,8 +284,9 @@ it finds, so adding a file is the whole registration. Modules starting with `_` 
 | G | auth.py | passkey register/login, OIDC, `POST /auth/logout`, `POST /auth/step-up` | |
 | G | tokens.py | `GET /tokens` ; `POST /tokens` (returns plaintext once) ; `DELETE /tokens/{id}` | |
 | G | audit.py | `GET /audit?profile=&limit=&before=` | |
-| G | family.py | `GET /household` ; `PUT /grants` ; `PUT /profiles/{p}/locks` | |
-| G | export.py | `POST /profiles/{p}/export` `{fmt}` | step-up |
+| G | family.py | `GET /household` ; `PUT /grants` ; `DELETE /grants?user_id=&profile=` ; `PUT /profiles/{p}/locks` ; `PUT /profiles/{p}/sensitive` ; `POST /household/profiles` ; `POST /household/invites` ; `DELETE /profiles/{p}?confirm=<slug>` ; `DELETE /account?confirm=<name>&delete_profile=` | |
+| G | export.py | `POST /profiles/{p}/export` `{fmt}` | step-up; answers the zip itself |
+| G | auth.py | `/auth/state`, `/auth/setup/{begin,finish,password}`, `/auth/login/{begin,finish}`, `/auth/recovery`, `/auth/password/login`, `/auth/step-up/{begin,finish}`, `/auth/passkeys` (GET, `/begin`, `/finish`, `DELETE /{id}`), `/auth/recovery-codes`, `/auth/invite/{code}`, `/auth/enroll/{begin,finish,password}`, `/auth/oidc/{login,callback}` | 403 `step_up_required`, 403 `csrf_failed` |
 | H | timeline.py | `GET /profiles/{p}/timeline?types=&from=&to=&lang=` | |
 | J | app-level | `GET /metrics` (Prometheus, outside `/api`) | |
 
