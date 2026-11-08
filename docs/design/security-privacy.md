@@ -145,6 +145,11 @@ Rules:
 - PATs and OAuth tokens: default expiry 90 days, maximum 1 year, profile set and scope set fixed at creation, optional IP allowlist, revocable from the UI.
 - The OAuth consent screen lists each profile and each scope in plain words with checkboxes. Nothing implies "all profiles".
 - Header-trust forward auth is supported only when the app listens on an internal network and the proxy sends a shared secret header.
+- Passkeys need a secure context: `https`, or `http` on `localhost`. The relying party id is the host of `OWNHEALTH_BASE_URL`, so that variable must be the address people type, normally the HTTPS name behind the reverse proxy. On plain HTTP at a LAN address (`http://192.168.1.20:8080`) WebAuthn cannot run at all; there, and only there, the owner may use a password instead (scrypt). Behind HTTPS the password routes refuse.
+- Step-up is a fresh passkey assertion, or a fresh OIDC login (`prompt=login`, `max_age=0`) for an OIDC-only person, or the password where passkeys cannot run. A passkey, OIDC or password login counts as step-up for 5 minutes; a recovery-code login does not. Changes that only narrow access (adding a lock, turning a switch off, revoking a token) need no step-up.
+- CSRF: the cookie is `SameSite=Lax`, and every state-changing request carried by the cookie must come from our own origin (`Origin` or `Sec-Fetch-Site`). Bearer tokens are not ambient and skip the check.
+- A profile nobody has claimed (a child, an elderly parent) is managed by its `guardian`; a `caregiver` reads and imports, and may invite the person to claim their own profile, but never manages grants, export or deletion.
+- OIDC: `OWNHEALTH_OIDC_ISSUER`, `OWNHEALTH_OIDC_CLIENT_ID`, `OWNHEALTH_OIDC_CLIENT_SECRET` (or `_FILE`), optional `OWNHEALTH_OIDC_LABEL` and `OWNHEALTH_OIDC_SCOPES`; redirect URI `<OWNHEALTH_BASE_URL>/api/auth/oidc/callback`. Code flow with PKCE S256, state and nonce; the ID token is checked against the provider's JWKS. A subject logs in only once linked (an invite redeemed through OIDC, or a link from a logged-in session), except on first run. Mapping IdP groups to household roles is not in v0.1.
 
 https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization
 https://datatracker.ietf.org/doc/html/rfc9728
@@ -166,7 +171,7 @@ Effective permission for any read, from any surface, the same formula as [mcp.md
 
 `token scopes ∩ grant categories for that profile − profile.locks`
 
-The browser session acts as a token with all scopes, so the same function decides UI, REST, MCP and export. `tools/list` returns only tools the token can call.
+The browser session acts as a token with all scopes, so the same function decides UI, REST, MCP and export. Personal access tokens reach `/mcp` only: every `/api` route answers 403 `forbidden` to a bearer token, so the review queue, rate limit, egress budget, page and genome caps and identity mode apply to every agent read. `tools/list` returns only tools the token can call.
 
 ### 6.2 Roles
 
@@ -261,7 +266,7 @@ https://restic.readthedocs.io/
 
 - Table `audit_event(ts, actor_kind[user|token|share|system], actor_id, client_id, token_id, profile_id, action, tool_or_route, resource_type, resource_ids[], src_ids[], fact_count, bytes, via[ui|rest|mcp|share|export], ip, user_agent, protocol_version)`.
 - No payloads, no argument values that carry health content. Search arguments are stored as a hash plus a category ("loinc lookup"), so the log does not itself say "searched HIV test".
-- The app's Postgres role has `INSERT` and `SELECT` only on this table; `UPDATE`, `DELETE` and `TRUNCATE` are revoked and a trigger rejects them.
+- The app's Postgres role has `INSERT` and `SELECT` only on this table; `UPDATE`, `DELETE` and `TRUNCATE` are revoked and a trigger rejects them. The app connects as `ownhealth_app`, which owns no table, so it cannot disable the trigger either; the owner role `ownhealth` only migrates and restores, in the one-shot `admin` compose service (`deploy/db/app-role.sql`).
 - User-visible per profile: "Claude Code (token `lab-review`) read 14 lab facts and 3 genome facts at 21:04".
 - Kept for the life of the profile. On profile deletion the profile's events keep ids only.
 

@@ -1,0 +1,11 @@
+**/node_modules
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+ui/.svelte-kit
+backend/src/ownhealth/static
+data
+docs
+.git
+.env

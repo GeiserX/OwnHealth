@@ -364,7 +364,7 @@ Genome answers use the common response envelope of [mcp.md section 3](mcp.md#3-r
   "not_assessed": [ { "gene": "FMR1", "reason": "not_run" } ],
   "withheld": { "sensitive": 1, "by_scope": [], "minor_rule": 0 },
   "db_versions": { "clinvar": "2026-10-06", "pharmcat": "3.1.0", "cpic": "2026-09" },
-  "notice": "Information from your records, not a diagnosis."
+  "notice": "Information for personal records, not a diagnosis."
 }
 ```
 

@@ -228,7 +228,7 @@ Purpose: the deterministic snapshot of one profile. Scope `read:summary`; sectio
 | Field | Value |
 |---|---|
 | Annotations | `readOnlyHint: true`, `idempotentHint: true` |
-| Budget | Under 2 KB of JSON. Past that, the lowest-ranked flags move behind `next_cursor` and `truncated: true` is set |
+| Budget | Under 2 KB for the whole `structuredContent`, envelope included. Past that, the lowest-ranked flags move behind `next_cursor` and `truncated: true` is set |
 
 Input:
 
@@ -242,6 +242,8 @@ Input:
 
 Output: `rules_version`, `state_hash`, `flags[]`, `medications[]`, `supplements[]`, `active_conditions[]`, `never_measured[]`, `stale[]`, `pending[]`, `corrections[]`, `notes[]`, `data_freshness{}`.
 
+A flag carries only `rank`, `kind`, `rule`, `code`, `text` and `src`: the text already says the value, unit, range and date, so the structured copies are left out to fit 2 KB. `stale[]` and `never_measured[]` carry their structured fields and no `text`. `get_trend` and `search_observations` return the values themselves.
+
 Example (synthetic fixture for Alex Rivera, the same one PLAN.md uses; scopes `read:summary read:labs read:records read:genome`):
 
 ```json
@@ -250,18 +252,13 @@ Example (synthetic fixture for Alex Rivera, the same one PLAN.md uses; scopes `r
   "rules_version": "ownhealth-rules 0.1.0", "state_hash": "sha256:4be1...",
   "data": {
     "flags": [
-      {"rank": 1, "kind": "out_of_range", "code": "LOINC:43583-4", "name": "Lp(a)",
-       "value": 142, "unit": "nmol/L", "range": "<75", "flag": "H", "date": "2025-09-08",
+      {"rank": 1, "kind": "out_of_range", "rule": "range.lab", "code": "LOINC:43583-4",
        "text": "Lp(a) 142 nmol/L (H, lab range <75) on 2025-09-08.", "src": "src_a07"},
-      {"rank": 2, "kind": "out_of_range", "code": "LOINC:62292-8", "name": "Vitamin D 25-OH",
-       "value": 24, "unit": "ng/mL", "range": "30-100", "flag": "L", "date": "2026-09-14",
+      {"rank": 2, "kind": "out_of_range", "rule": "range.lab", "code": "LOINC:62292-8",
        "text": "Vitamin D 24 ng/mL (L, lab range 30-100) on 2026-09-14.", "src": "src_a12"},
-      {"rank": 3, "kind": "gene_drug", "drug": "Atorvastatin", "gene": "SLCO1B1",
-       "phenotype": "Decreased function", "guideline": "CPIC",
-       "text": "Current statin has a CPIC actionable phenotype. Discuss with your prescriber.",
-       "src": ["src_g31", "src_m02"]},
-      {"rank": 4, "kind": "stale", "code": "LOINC:3016-3", "name": "TSH",
-       "last": "2025-01-20", "window_months": 12, "src": "src_a05"}
+      {"rank": 3, "kind": "gene_drug", "rule": "pgx.slco1b1.statin", "code": "SLCO1B1",
+       "text": "Current statin has a CPIC actionable phenotype (SLCO1B1 decreased function).",
+       "src": ["src_g31", "src_m02"]}
     ],
     "medications": [{"name": "Atorvastatin 20 mg", "since": "2026-03-10", "src": "src_m02"},
                     {"name": "Omeprazole 20 mg", "since": "2026-04-01", "src": "src_m05"}],

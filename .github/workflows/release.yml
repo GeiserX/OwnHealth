@@ -1,0 +1,89 @@
+name: Release
+
+# On a v* tag: build the app image for amd64 and arm64, push drumsergio/ownhealth:<version> and
+# :<major>.<minor> (never :latest), attach an SBOM and build provenance, sign the image with cosign
+# keyless, and copy README.md to the Docker Hub description. GitHub-hosted runners: public repo.
+#
+# Verify a published image:
+#   cosign verify drumsergio/ownhealth:<version> \
+#     --certificate-identity-regexp '^https://github.com/GeiserX/OwnHealth/.github/workflows/release.yml@refs/tags/v' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#   docker buildx imagetools inspect drumsergio/ownhealth:<version> --format '{{ json .SBOM }}'
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: drumsergio/ownhealth
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # cosign keyless signing through the GitHub OIDC token
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: The tag matches every version declaration
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          fail=0
+          grep -qx "version = \"$v\"" backend/pyproject.toml || { echo "::error::backend/pyproject.toml is not $v"; fail=1; }
+          grep -qx "__version__ = \"$v\"" backend/src/ownhealth/__init__.py || { echo "::error::ownhealth/__init__.py is not $v"; fail=1; }
+          grep -q "\"version\": \"$v\"" ui/package.json || { echo "::error::ui/package.json is not $v"; fail=1; }
+          grep -q "image: $IMAGE:$v\$" compose.yaml || { echo "::error::compose.yaml does not pin $IMAGE:$v"; fail=1; }
+          exit $fail
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Sign the image (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+
+      - name: Docker Hub description from README.md
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.IMAGE }}
+          short-description: "Self-hosted health data layer you own: labs, records, genome, MCP server. AGPL."
+          readme-filepath: README.md
+          enable-url-completion: true
