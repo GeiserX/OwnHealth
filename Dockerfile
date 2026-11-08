@@ -27,6 +27,10 @@ FROM python:3.13.18-slim-trixie
 LABEL org.opencontainers.image.title="OwnHealth" \
       org.opencontainers.image.source="https://github.com/GeiserX/OwnHealth" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later"
+# pg_dump/pg_restore 17 and restic for `ownhealth backup | restore | verify-restore` (deploy/restic/).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates postgresql-client-17 restic \
+ && rm -rf /var/lib/apt/lists/*
 RUN groupadd --system --gid 10001 ownhealth \
  && useradd --system --uid 10001 --gid ownhealth --home-dir /data --shell /usr/sbin/nologin ownhealth \
  && mkdir -p /data && chown ownhealth:ownhealth /data

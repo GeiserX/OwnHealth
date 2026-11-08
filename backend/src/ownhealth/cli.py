@@ -1,4 +1,4 @@
-"""`ownhealth serve | migrate | demo-seed | worker | healthcheck`."""
+"""`ownhealth serve | migrate | demo-seed | worker | healthcheck | backup | restore | verify-restore`."""
 
 from __future__ import annotations
 
@@ -20,6 +20,12 @@ def main(argv: list[str] | None = None) -> int:
     seed.add_argument("--force", action="store_true", help="seed even if the demo household exists")
     sub.add_parser("worker", help="run only the job loop (OWNHEALTH_QUEUES)")
     sub.add_parser("healthcheck", help="exit 0 when /healthz answers")
+    for name, what in (
+        ("backup", "write a consistent backup directory (database dump, blobs, manifest) for restic"),
+        ("restore", "load a backup directory into this empty instance and check every state_hash"),
+        ("verify-restore", "restore a backup into a scratch database, compare with its manifest, drop it"),
+    ):
+        sub.add_parser(name, help=what).add_argument("path", help="the backup directory")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = Settings.from_env()
@@ -38,6 +44,24 @@ def main(argv: list[str] | None = None) -> int:
             log_level="info",
         )
         return 0
+
+    if args.cmd in ("backup", "restore", "verify-restore"):
+        import json
+        from pathlib import Path
+
+        from ownhealth import ops
+
+        try:
+            if args.cmd == "backup":
+                print(ops.backup(settings, Path(args.path)))
+                return 0
+            fn = ops.restore if args.cmd == "restore" else ops.verify_restore
+            report = fn(settings, Path(args.path))
+        except ops.OpsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(report, indent=2))
+        return 0 if report["ok"] else 1
 
     from ownhealth import runtime
 

@@ -1,0 +1,73 @@
+# OwnHealth for a homelab: the app and Postgres behind Caddy with HTTPS, secrets kept in files,
+# restic backups from inside the app container. Steps: deploy/README.md.
+#
+# Copy this file to compose.yaml in its own folder, next to Caddyfile, .env and secrets/.
+name: ownhealth
+
+services:
+  app:
+    image: drumsergio/ownhealth:0.1.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env # OWNHEALTH_HOST, RESTIC_REPOSITORY, and S3 keys for restic if the repository needs them
+    environment:
+      OWNHEALTH_DATABASE_URL: postgresql://ownhealth@db:5432/ownhealth
+      OWNHEALTH_DB_PASSWORD_FILE: /run/secrets/db_password
+      OWNHEALTH_SECRET_KEY_FILE: /run/secrets/secret_key
+      OWNHEALTH_BASE_URL: https://${OWNHEALTH_HOST:?set OWNHEALTH_HOST in .env}
+      RESTIC_PASSWORD_FILE: /run/secrets/restic_password
+    secrets: [db_password, secret_key, restic_password]
+    volumes:
+      - ownhealth-data:/data # blobs, and /data/backups for the restic staging directory
+    # No published port: only Caddy reaches the app, on the compose network.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  db:
+    image: postgres:17.11
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ownhealth
+      POSTGRES_DB: ownhealth
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ownhealth -d ownhealth"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ownhealth-pg:/var/lib/postgresql/data
+
+  caddy:
+    image: caddy:2.11.9
+    restart: unless-stopped
+    depends_on: [app]
+    environment:
+      OWNHEALTH_HOST: ${OWNHEALTH_HOST:?set OWNHEALTH_HOST in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  secret_key:
+    file: ./secrets/secret_key
+  restic_password:
+    file: ./secrets/restic_password # keep a copy in your password manager: without it the backup is useless
+
+volumes:
+  ownhealth-data:
+  ownhealth-pg:
+  caddy-data:
+  caddy-config:

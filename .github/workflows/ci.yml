@@ -39,6 +39,15 @@ jobs:
         with:
           version: "0.11.29"
           enable-cache: true
+      - name: PostgreSQL 17 client and restic 0.18.0, the versions the image ships (tests/ops)
+        working-directory: .
+        run: |
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          curl -fsSL -o /tmp/restic.bz2 https://github.com/restic/restic/releases/download/v0.18.0/restic_0.18.0_linux_amd64.bz2
+          echo "98f6dd8bf5b59058d04bfd8dab58e196cc2a680666ccee90275a3b722374438e  /tmp/restic.bz2" | sha256sum -c -
+          bunzip2 /tmp/restic.bz2 && sudo install -m 0755 /tmp/restic /usr/local/bin/restic
       - run: uv sync --frozen
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
@@ -75,3 +84,5 @@ jobs:
           test "$(docker run --rm --entrypoint id drumsergio/ownhealth:ci -u)" = "10001"
           docker run --rm drumsergio/ownhealth:ci python -c "import pysam, ownhealth; print(pysam.__version__)"
           docker run --rm drumsergio/ownhealth:ci test -f /app/.venv/lib/python3.13/site-packages/ownhealth/static/index.html
+          docker run --rm drumsergio/ownhealth:ci pg_dump --version | grep -q "PostgreSQL) 17\."
+          docker run --rm drumsergio/ownhealth:ci restic version

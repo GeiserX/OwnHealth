@@ -13,6 +13,9 @@ services:
     environment:
       OWNHEALTH_DATABASE_URL: postgresql://ownhealth@db:5432/ownhealth
       OWNHEALTH_DATA_DIR: /data
+      # Throwaway demo only (docs/quickstart.md step 5); empty means off.
+      OWNHEALTH_DEMO: ${OWNHEALTH_DEMO:-}
+      OWNHEALTH_DEV_AUTH: ${OWNHEALTH_DEV_AUTH:-}
     ports:
       - "127.0.0.1:${OWNHEALTH_HTTP_PORT:-8080}:8080"
     volumes:
