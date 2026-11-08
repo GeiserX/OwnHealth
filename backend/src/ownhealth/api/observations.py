@@ -36,7 +36,7 @@ CATEGORY_SCOPE = {
     "survey": "read:records",
     "exam": "read:records",
 }
-_WINDOW = re.compile(r"^P(\d+)([DMY])$")
+_WINDOW = re.compile(r"^P(\d{1,7})([DMY])$")
 
 
 def pretty_unit(ucum: str | None) -> str | None:
@@ -113,7 +113,7 @@ def _audit(conn: Connection, principal: Principal, perm: Permission, action: str
             actor_kind=principal.actor_kind,
             actor_id=principal.user_id,
             token_id=principal.token_id,
-            via="api",
+            via="api" if principal.kind == "token" else "ui",
             action=action,
             profile_id=perm.profile.id,
             resource_type="observation",
@@ -217,7 +217,10 @@ def _window_start(window: str, today: date) -> date | None:
         raise HTTPException(422, {"code": "bad_input", "message": "window is P<n>D, P<n>M, P<n>Y or all."})
     n, unit = int(m.group(1)), m.group(2)
     days = {"D": 1, "M": 30, "Y": 365}[unit] * n
-    return today - timedelta(days=days)
+    try:
+        return today - timedelta(days=days)
+    except OverflowError:  # before year 1: the calendar has no such day
+        raise HTTPException(422, {"code": "bad_input", "message": "window reaches before year 1."}) from None
 
 
 def _num(x: Decimal | None) -> float | None:
@@ -424,7 +427,7 @@ def add_alias(
             actor_kind=principal.actor_kind,
             actor_id=principal.user_id,
             token_id=principal.token_id,
-            via="api",
+            via="api" if principal.kind == "token" else "ui",
             action="alias_add",
             profile_id=perm.profile.id,
             resource_type="analyte_alias",

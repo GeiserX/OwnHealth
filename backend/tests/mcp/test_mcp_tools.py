@@ -325,3 +325,25 @@ async def test_get_source_text_of_a_minors_pending_page_is_withheld(world, make_
     async with connect(make_token(scopes=ALL_SCOPES, profiles=("lucia",))) as c:
         env = sc(await call(c, "get_source", {"src_id": sid, "include_text": True}))
     assert env["data"]["text"] is None and env["withheld"]["minor_rule"] == 1
+
+
+async def test_trend_stats_never_mix_a_point_without_a_canonical_value(world, engine, make_token, connect, fakes):
+    with engine.begin() as conn:  # a newer LDL whose unit could not be converted: no canonical value
+        add_obs(
+            conn,
+            world.family.profiles["alex"],
+            "Colesterol LDL",
+            "9999",
+            "mg/dL",
+            "ldl_c",
+            "13457-7",
+            "2026-10-20",
+            printed={"value_canonical": None, "unit_canonical": None},
+        )
+    async with connect(make_token()) as c:
+        env = sc(await call(c, "get_trend", {"profile": "alex", "code": "LOINC:13457-7", "window": "P6Y"}))
+    d = env["data"]
+    assert d["resolution"] == "raw" and len(d["points"]) == 9
+    s = d["stats"]
+    assert s["n"] == 8, s  # the stats use canonical values only, in canonical_unit
+    assert s["last_vs_previous_pct"] == round((97 - 118) / 118 * 100), s

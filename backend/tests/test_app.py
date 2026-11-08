@@ -140,3 +140,10 @@ def test_mcp_mounted_at_mcp(app_for, committed_family, engine):
     assert r.json()["result"]["serverInfo"]["name"] == "OwnHealth"
     r = client.post("/mcp", content=json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), headers=headers)
     assert "get_health_status" in [t["name"] for t in r.json()["result"]["tools"]]
+
+
+def test_jobs_limit_is_checked_at_the_edge(app_for, committed_family):
+    client = app_for(committed_family.users["alex"])
+    for bad in (-1, 0, 201):
+        assert client.get("/api/jobs", params={"limit": bad}).status_code == 422, bad
+    assert client.get("/api/jobs", params={"limit": 200}).status_code == 200

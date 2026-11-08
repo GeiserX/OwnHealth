@@ -6,7 +6,7 @@ of the lane that handles each kind. Progress is the job state.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import Connection, text
 
 from ownhealth.api._deps import get_blobs, get_conn, get_principal
@@ -61,13 +61,13 @@ def upload(
 @router.get("/jobs")
 def jobs(
     ids: str | None = None,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=200),
     conn: Connection = Depends(get_conn),
     principal: Principal = Depends(get_principal),
 ) -> dict:
     """Import jobs of the caller's profiles, newest first; `ids=1,2,3` to poll specific ones."""
     pids = [str(p.profile.id) for p in accessible_profiles(conn, principal)]
-    params: dict = {"pids": pids, "limit": min(limit, 200)}
+    params: dict = {"pids": pids, "limit": limit}
     where = "payload->>'profile_id' = any(:pids)"
     if ids:
         where += " and id = any(:ids)"

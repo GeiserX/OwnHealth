@@ -128,3 +128,31 @@ def test_add_alias_relinks(app_for, committed_family, engine):
     assert (
         viewer.post("/api/aliases", json={"profile": "alex", "alias": "y", "alias_group": "ldl_c"}).status_code == 403
     )
+
+
+def test_a_window_too_large_for_the_calendar_is_refused(app_for, committed_family, engine):
+    _seed(engine, committed_family)
+    client = app_for(committed_family.users["alex"])
+    for window in ("P99999Y", "P9999999D"):
+        r = client.get("/api/profiles/alex/trend", params={"code": "ldl_c", "window": window})
+        assert r.status_code == 422 and r.json()["detail"]["code"] == "bad_input", (window, r.text)
+
+
+def test_browser_reads_and_alias_additions_are_audited_as_ui(app_for, committed_family, engine):
+    _seed(engine, committed_family)
+    client = app_for(committed_family.users["alex"])
+    assert client.get("/api/profiles/alex/observations").status_code == 200
+    r = client.post("/api/aliases", json={"profile": "alex", "alias": "LDL directo", "alias_group": "ldl_c"})
+    assert r.status_code == 200, r.text
+    with engine.connect() as c:
+        vias = dict(
+            c.execute(
+                text(
+                    "select action, array_agg(distinct via) from audit_event where actor_id = :u"
+                    " and action in ('read', 'alias_add') and resource_type in ('observation', 'analyte_alias')"
+                    " group by action"
+                ),
+                {"u": committed_family.users["alex"]},
+            ).all()
+        )
+    assert vias == {"read": ["ui"], "alias_add": ["ui"]}, vias

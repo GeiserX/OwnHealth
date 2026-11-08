@@ -602,10 +602,12 @@ def get_trend(call: Call) -> Result:
             points = aggregate(
                 [{"date": p["date"], "v": p.get("canonical"), "src": p["src"]} for p in raw_points], resolution
             )
+        # stats only over values in canonical_unit: a raw point without one is printed in another unit
+        stat_key = "canonical" if resolution == "raw" else "value"
         series = [
-            (date.fromisoformat(p["date"]), float(p["canonical"] if "canonical" in p else p["value"]))
+            (date.fromisoformat(p["date"]), float(p[stat_key]))
             for p in points
-            if isinstance(p.get("canonical", p.get("value")), int | float | Decimal)
+            if isinstance(p.get(stat_key), int | float | Decimal)
         ]
         with_canonical = sum(1 for p in raw_points if p.get("canonical") is not None)
         data = {

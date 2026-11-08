@@ -7,6 +7,7 @@ The browser runs the WebAuthn ceremonies: `.../begin` returns the options JSON f
 
 from __future__ import annotations
 
+import secrets
 import time
 from datetime import date
 from urllib.parse import quote, urlsplit
@@ -110,7 +111,29 @@ def _oidc_config(request: Request) -> oidc.OIDCConfig | None:
 
 
 def _oidc_http(request: Request) -> httpx.Client:
-    return getattr(request.app.state, "oidc_http", None) or httpx.Client()
+    """One client per app (tests inject theirs); the app's lifespan closes it."""
+    client = getattr(request.app.state, "oidc_http", None)
+    if client is None:
+        client = request.app.state.oidc_http = httpx.Client()
+    return client
+
+
+def _require_fresh_to_add_login(conn: Connection, principal: Principal) -> None:
+    """A new way in (a passkey, an OIDC link) needs a fresh login: a session someone took over must
+    not plant one. A recovery-code login counts only right after it logged in, so the person can
+    replace a lost passkey; it never counts as step-up for anything else."""
+    sid = sessions.session_id(principal)
+    if principal.extra.get("method") == "recovery" and sid is not None:
+        just_in = conn.execute(
+            text(
+                "select 1 from user_session where id = :id and revoked_at is null"
+                " and created_at > now() - make_interval(secs => :age)"
+            ),
+            {"id": sid, "age": sessions.STEP_UP_SECONDS},
+        ).first()
+        if just_in is not None:
+            return
+    sessions.require_step_up(conn, principal)
 
 
 def _user(conn: Connection, user_id: UUID) -> dict:
@@ -433,8 +456,9 @@ def list_my_passkeys(conn: Connection = Depends(get_conn), principal: Principal 
 def add_passkey_begin(
     conn: Connection = Depends(get_conn), principal: Principal = SessionOnly, settings: Settings = Depends(get_settings)
 ) -> dict:
-    """Add a passkey (a second device, or a new one after a recovery-code login)."""
+    """Add a passkey (a second device, or a new one after a recovery-code login). Needs a fresh login."""
     _require_passkeys(settings)
+    _require_fresh_to_add_login(conn, principal)
     rp_id, origin = rp(settings)
     name = _user(conn, principal.user_id)["display_name"]
     return passkeys.begin_registration(conn, user_id=principal.user_id, rp_id=rp_id, origin=origin, user_name=name)
@@ -593,6 +617,9 @@ def enroll_password(
 # ---------------------------------------------------------------------- OIDC ----
 
 
+_OIDC_COOKIE = "oh_oidc"
+
+
 def _redirect_uri(settings: Settings) -> str:
     return f"{settings.base_url}/api/auth/oidc/callback"
 
@@ -617,12 +644,17 @@ def oidc_login(
         )
         if p is None or p.kind != "session":
             raise HTTPException(401, detail={"code": "unauthenticated", "message": "Log in first."})
+        if mode == "link":
+            _require_fresh_to_add_login(conn, p)
         user_id, session_id = p.user_id, sessions.session_id(p)
     elif mode == "enroll":
         ch = household.peek_invite(conn, invite or "")
         if ch is None:
             raise HTTPException(400, detail={"code": "invite_invalid", "message": "This invite expired or was used."})
         data["invite"] = invite
+    # the callback counts only in this browser: it must bring back the binder cookie set here
+    binder = secrets.token_urlsafe(32)
+    data["binder"] = oidc.binder_hash(binder)
     try:
         url = oidc.begin(
             conn,
@@ -636,7 +668,17 @@ def oidc_login(
         )
     except _ERRORS as exc:
         raise _fail(exc) from exc
-    return RedirectResponse(url, status_code=302)
+    resp = RedirectResponse(url, status_code=302)
+    resp.set_cookie(
+        _OIDC_COOKIE,
+        binder,
+        max_age=int((challenges.TTL * 2).total_seconds()),
+        httponly=True,
+        secure=settings.base_url.startswith("https://"),
+        samesite="lax",  # sent on the provider's top-level redirect back to the callback
+        path="/api/auth/oidc",
+    )
+    return resp
 
 
 def _back(path: str = "/", error: str | None = None) -> RedirectResponse:
@@ -658,9 +700,23 @@ def oidc_callback(
     if error or not state or not code:
         return _back("/login", "oidc_" + (error or "failed")[:40])
     try:
-        res = oidc.finish(conn, cfg, _oidc_http(request), state=state, code=code, redirect_uri=_redirect_uri(settings))
+        res = oidc.finish(
+            conn,
+            cfg,
+            _oidc_http(request),
+            state=state,
+            code=code,
+            redirect_uri=_redirect_uri(settings),
+            binder=request.cookies.get(_OIDC_COOKIE, ""),
+        )
     except _ERRORS as exc:
         return _back("/login", getattr(exc, "code", "oidc_failed"))
+    if res.mode in ("link", "step_up"):  # and in the session that started it
+        p = principal_mod.resolve(
+            conn, settings, authorization=None, session_secret=request.cookies.get(sessions.COOKIE)
+        )
+        if p is None or res.challenge.session_id is None or sessions.session_id(p) != res.challenge.session_id:
+            return _back("/", "oidc_wrong_user")
     owner = conn.execute(
         text("select id from app_user where oidc_subject = :s and disabled_at is null"), {"s": res.subject}
     ).scalar()
@@ -694,7 +750,7 @@ def oidc_callback(
     # step_up: the same person at the provider, and a login the provider just asked for
     if owner is None or owner != res.challenge.user_id or res.challenge.session_id is None:
         return _back("/", "oidc_wrong_user")
-    if res.auth_time is not None and time.time() - res.auth_time > sessions.STEP_UP_SECONDS:
+    if res.auth_time is None or time.time() - res.auth_time > sessions.STEP_UP_SECONDS:
         return _back("/", "oidc_not_fresh")
     sessions.mark_step_up(conn, res.challenge.session_id)
     return resp

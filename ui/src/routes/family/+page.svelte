@@ -123,7 +123,7 @@
 			</label>
 			<label>{t('fm_your_role')}
 				<select class="p2in" bind:value={nr.role}>
-					<option value="guardian">{t('r_guardian')}</option><option value="caregiver">{t('r_caregiver')}</option>
+					<option value="guardian">{t('r_guardian')}</option>
 				</select>
 			</label>
 		</div>

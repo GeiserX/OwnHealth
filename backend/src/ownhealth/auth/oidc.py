@@ -146,11 +146,28 @@ def begin(
     return f"{meta['authorization_endpoint']}?{urlencode(params)}"
 
 
+def binder_hash(binder: str) -> str:
+    """What the challenge keeps of the browser binder cookie set when the flow began."""
+    return hashlib.sha256(binder.encode()).hexdigest()
+
+
 def finish(
-    conn: Connection, cfg: OIDCConfig, http: httpx.Client, *, state: str, code: str, redirect_uri: str
+    conn: Connection,
+    cfg: OIDCConfig,
+    http: httpx.Client,
+    *,
+    state: str,
+    code: str,
+    redirect_uri: str,
+    binder: str,
 ) -> Result:
-    """Exchange the code, verify the ID token. Consumes the state."""
+    """Exchange the code, verify the ID token. Consumes the state.
+
+    `binder` is the cookie the browser got when the flow began: a callback opened in another
+    browser (a link or login URL someone else started and sent) is refused."""
     ch = challenges.consume(conn, state.encode(), ("oidc",))
+    if not binder or not secrets.compare_digest(ch.data.get("binder") or "", binder_hash(binder)):
+        raise OIDCError("oidc_failed", "This sign-in was started in another browser. Start again.")
     meta = discover(cfg, http)
     form = {
         "grant_type": "authorization_code",

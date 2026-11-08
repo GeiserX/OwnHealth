@@ -208,3 +208,20 @@ def test_a_missing_blob_is_listed_in_the_manifest(conn, family, blobs):
     assert z.testzip() is None and not any(n.startswith(f"files/{sha}/") for n in z.namelist())
     assert [m["source_blob"] for m in manifest["missing_blobs"]] == [sha]
     assert json.loads(z.read("export-manifest.json"))["missing_blobs"][0]["path"].startswith(f"files/{sha}/")
+
+
+def test_a_failed_export_audit_leaves_no_zip_behind(client_for, committed_family, https_settings, monkeypatch):
+    import pytest
+
+    from ownhealth.api import export as export_api
+
+    def broken_audit(*a, **k):
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(export_api, "write_audit", broken_audit)
+    client = client_for(committed_family.users["alex"])
+    tmp = https_settings.data_dir / "tmp"
+    before = set(tmp.glob("export-*")) if tmp.exists() else set()
+    with pytest.raises(RuntimeError, match="audit store down"):
+        client.post("/api/profiles/alex/export", json={"fmt": "zip"})
+    assert set(tmp.glob("export-*")) == before

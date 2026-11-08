@@ -142,7 +142,7 @@ class RelativeIn(BaseModel):
 
 @router.post("/household/profiles", status_code=201)
 def add_relative(body: RelativeIn, conn: Connection = Depends(get_conn), principal: Principal = SessionOnly) -> dict:
-    """A profile without a login (a child, a parent). Its creator is guardian or caregiver."""
+    """A profile without a login (a child, a parent). Its creator is its guardian."""
     try:
         pid, slug = household.add_relative(
             conn, household_id=principal.household_id, created_by=principal.user_id, **body.model_dump()
@@ -176,6 +176,10 @@ def invite(
         perm = require(conn, principal, body.claim_profile)
         if not (household.can_manage(perm) or perm.role == "caregiver"):
             raise HTTPException(403, detail={"code": "forbidden", "message": "You do not manage this profile."})
+        if not household.claim_invite_allowed(conn, perm.profile.id, principal.user_id):
+            raise HTTPException(
+                403, detail={"code": "forbidden", "message": "A guardian manages this profile: they send the invite."}
+            )
         claim_id = perm.profile.id
     elif not any(p.role == "owner" for p in perms):
         raise HTTPException(403, detail={"code": "forbidden", "message": "Only an owner can invite a member."})

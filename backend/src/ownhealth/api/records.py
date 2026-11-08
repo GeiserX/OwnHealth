@@ -8,11 +8,11 @@ session: a personal access token writes only through MCP `propose`, into the rev
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, StringConstraints, ValidationError
 from sqlalchemy import Connection
 
 import ownhealth.ingest.fhir  # noqa: F401 - registers the accept handler for held FHIR records
@@ -184,8 +184,8 @@ def retract(
 
 
 class ManualObservationIn(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    value: str = Field(min_length=1, max_length=100)
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    value: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
     unit: str | None = Field(default=None, max_length=50)
     effective_at: datetime
     note: str | None = Field(default=None, max_length=4000)

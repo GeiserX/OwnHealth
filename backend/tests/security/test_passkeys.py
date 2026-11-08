@@ -102,10 +102,11 @@ def test_step_up_rejects_another_users_passkey(client_for, fresh_engine):
         sam = c.execute(
             text("insert into app_user (household_id, display_name) values (:h, 'Sam Rivera') returning id"), {"h": hh}
         ).scalar()
+    sam_key = SoftKey()  # added from a fresh session (adding a passkey needs one), then used from a stale one
+    sam_fresh = client_for(sam, eng=fresh_engine)
+    opts = sam_fresh.post("/api/auth/passkeys/begin").json()
+    assert sam_fresh.post("/api/auth/passkeys/finish", json={"credential": sam_key.create(opts)}).status_code == 200
     sam_client = client_for(sam, step_up=False, eng=fresh_engine)
-    sam_key = SoftKey()
-    opts = sam_client.post("/api/auth/passkeys/begin").json()
-    assert sam_client.post("/api/auth/passkeys/finish", json={"credential": sam_key.create(opts)}).status_code == 200
     begin = sam_client.post("/api/auth/step-up/begin").json()
     # Alex's key answering Sam's step-up challenge: refused, and the session stays not fresh
     key.user_handle = key.user_handle
@@ -146,3 +147,25 @@ def test_step_up_challenge_is_bound_to_its_user(client_for, fresh_engine):
             passkeys.finish_login(
                 c, credential=alex_key.get(opts), rp_id="testserver", origin="https://testserver", purpose="step_up"
             )
+
+
+def test_adding_a_passkey_needs_a_fresh_login(client_for, committed_family, engine):
+    alex = committed_family.users["alex"]
+    # a session without a fresh login cannot plant a passkey it could later step up with
+    stale = client_for(alex, step_up=False)
+    r = stale.post("/api/auth/passkeys/begin")
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "step_up_required", r.text
+    assert client_for(alex).post("/api/auth/passkeys/begin").status_code == 200
+    # a recovery-code login may add one right after it logs in, not for the rest of the session
+    recovered = client_for(alex, step_up=False, method="recovery")
+    assert recovered.post("/api/auth/passkeys/begin").status_code == 200
+    with engine.begin() as c:
+        c.execute(
+            text(
+                "update user_session set created_at = now() - interval '6 minutes'"
+                " where user_id = :u and method = 'recovery'"
+            ),
+            {"u": alex},
+        )
+    r = recovered.post("/api/auth/passkeys/begin")
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "step_up_required", r.text

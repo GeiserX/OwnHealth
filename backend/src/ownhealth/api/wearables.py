@@ -29,7 +29,7 @@ def window_days(window: str) -> int:
     m = _WINDOW.match(window)
     if not m:
         raise HTTPException(422, detail={"code": "bad_input", "message": "window is P<n>D, P<n>M, P<n>Y or all."})
-    return int(m.group(1)) * {"D": 1, "M": 30, "Y": 365}[m.group(2)]
+    return min(int(m.group(1)) * {"D": 1, "M": 30, "Y": 365}[m.group(2)], 365 * 30)  # no longer than "all"
 
 
 def _audit(conn: Connection, principal: Principal, perm: Permission, tool: str, metrics: list[str]) -> None:
@@ -126,7 +126,10 @@ def metric_series(
     if resolution == "hour" and days > 14:
         raise HTTPException(422, detail={"code": "bad_input", "message": "Hourly series go up to P14D."})
     end = as_of or datetime.now(UTC).date()
-    since, until = w.day_start(end - timedelta(days=days - 1)), w.day_start(end) + timedelta(days=1, seconds=-1)
+    try:
+        since, until = w.day_start(end - timedelta(days=days - 1)), w.day_start(end) + timedelta(days=1, seconds=-1)
+    except OverflowError:  # as_of so early the window reaches before year 1
+        raise HTTPException(422, detail={"code": "bad_input", "message": "The window reaches before year 1."}) from None
     info = w.metric_info(metric)
     points = w.series(conn, perm.profile.id, metric, since=since, until=until, resolution=resolution)
     _audit(conn, principal, perm, "wearables.series", [metric])
