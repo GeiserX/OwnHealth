@@ -328,7 +328,7 @@ Export and deletion are never MCP tools.
 - Health and genetic data are special categories under Art. 9. That does not change because the software is self-hosted.
 - A person running OwnHealth for themselves and their family most likely falls under the household exemption, Art. 2(2)(c): processing "in the course of a purely personal or household activity". It is read narrowly; it ends where data is published or used professionally. A self-hoster who runs it for a clinic, a sports club or paying friends is a controller with the full set of duties.
 - We, as publishers of downloadable AGPL software, do not process anyone's data and are neither controller nor processor (unverified in case law; Recital 18 covers providers of the means for household processing only when they themselves process).
-- Running OwnHealth for other people would make the operator a controller: Art. 9(2)(a) explicit consent, a DPIA (Art. 35), likely a DPO, 72-hour breach notification (Art. 33). Today we run it for nobody, which keeps us out of the controller role; a hosted version would need all of the above first.
+- Today we run OwnHealth for nobody, so we hold no one's data and have no GDPR role. Running it for other people would need a fresh GDPR assessment first, to decide whether the operator is a controller (Art. 9(2)(a) explicit consent, a DPIA under Art. 35, possibly a DPO, 72-hour breach notification under Art. 33) or a processor acting on someone else's instructions (an Art. 28 agreement), and which duties follow.
 - Per-profile keys, audit, export and deletion still give each person in a household access, portability and erasure.
 
 https://gdprhub.eu/Article_2_GDPR
