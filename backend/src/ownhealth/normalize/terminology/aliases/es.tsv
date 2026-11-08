@@ -1,0 +1,454 @@
+# Analyte aliases as labs print them (es). Name -> alias_group (+ method when the name says it).
+# The LOINC code is picked from the group by unit dimension, specimen and method (normalize/_resolve.py).
+# source: curated (this file), review: date of the last human review. Add rows, never reuse a group
+# for a different analyte; bump nothing by hand: DERIVATION_VERSION hashes these files.
+alias	alias_group	method	source	reviewed
+Leucocitos	wbc		curated	2026-11-08
+Leucocitos totales	wbc		curated	2026-11-08
+Recuento de leucocitos	wbc		curated	2026-11-08
+Glóbulos blancos	wbc		curated	2026-11-08
+WBC	wbc		curated	2026-11-08
+Hematíes	rbc		curated	2026-11-08
+Hematies	rbc		curated	2026-11-08
+Eritrocitos	rbc		curated	2026-11-08
+Recuento de hematíes	rbc		curated	2026-11-08
+Glóbulos rojos	rbc		curated	2026-11-08
+RBC	rbc		curated	2026-11-08
+Hemoglobina	hemoglobin		curated	2026-11-08
+Hb	hemoglobin		curated	2026-11-08
+HGB	hemoglobin		curated	2026-11-08
+Hematocrito	hematocrit		curated	2026-11-08
+Hto	hematocrit		curated	2026-11-08
+HCT	hematocrit		curated	2026-11-08
+VCM	mcv		curated	2026-11-08
+Volumen corpuscular medio	mcv		curated	2026-11-08
+V.C.M.	mcv		curated	2026-11-08
+HCM	mch		curated	2026-11-08
+Hemoglobina corpuscular media	mch		curated	2026-11-08
+H.C.M.	mch		curated	2026-11-08
+CHCM	mchc		curated	2026-11-08
+Concentración de hemoglobina corpuscular media	mchc		curated	2026-11-08
+C.H.C.M.	mchc		curated	2026-11-08
+ADE	rdw		curated	2026-11-08
+Amplitud de distribución eritrocitaria	rdw		curated	2026-11-08
+RDW	rdw		curated	2026-11-08
+RDW-CV	rdw		curated	2026-11-08
+Plaquetas	platelets		curated	2026-11-08
+Recuento de plaquetas	platelets		curated	2026-11-08
+PLT	platelets		curated	2026-11-08
+VPM	mpv		curated	2026-11-08
+Volumen plaquetar medio	mpv		curated	2026-11-08
+Volumen plaquetario medio	mpv		curated	2026-11-08
+Neutrófilos %	neutrophils_pct		curated	2026-11-08
+% Neutrófilos	neutrophils_pct		curated	2026-11-08
+Neutrófilos (%)	neutrophils_pct		curated	2026-11-08
+Segmentados %	neutrophils_pct		curated	2026-11-08
+Neutrófilos	neutrophils_abs		curated	2026-11-08
+Neutrófilos (abs)	neutrophils_abs		curated	2026-11-08
+Neutrófilos absolutos	neutrophils_abs		curated	2026-11-08
+Neutrófilos #	neutrophils_abs		curated	2026-11-08
+Linfocitos %	lymphocytes_pct		curated	2026-11-08
+% Linfocitos	lymphocytes_pct		curated	2026-11-08
+Linfocitos (%)	lymphocytes_pct		curated	2026-11-08
+Linfocitos	lymphocytes_abs		curated	2026-11-08
+Linfocitos (abs)	lymphocytes_abs		curated	2026-11-08
+Linfocitos absolutos	lymphocytes_abs		curated	2026-11-08
+Linfocitos #	lymphocytes_abs		curated	2026-11-08
+Monocitos %	monocytes_pct		curated	2026-11-08
+% Monocitos	monocytes_pct		curated	2026-11-08
+Monocitos (%)	monocytes_pct		curated	2026-11-08
+Monocitos	monocytes_abs		curated	2026-11-08
+Monocitos (abs)	monocytes_abs		curated	2026-11-08
+Monocitos absolutos	monocytes_abs		curated	2026-11-08
+Monocitos #	monocytes_abs		curated	2026-11-08
+Eosinófilos %	eosinophils_pct		curated	2026-11-08
+% Eosinófilos	eosinophils_pct		curated	2026-11-08
+Eosinófilos (%)	eosinophils_pct		curated	2026-11-08
+Eosinófilos	eosinophils_abs		curated	2026-11-08
+Eosinófilos (abs)	eosinophils_abs		curated	2026-11-08
+Eosinófilos absolutos	eosinophils_abs		curated	2026-11-08
+Eosinófilos #	eosinophils_abs		curated	2026-11-08
+Basófilos %	basophils_pct		curated	2026-11-08
+% Basófilos	basophils_pct		curated	2026-11-08
+Basófilos (%)	basophils_pct		curated	2026-11-08
+Basófilos	basophils_abs		curated	2026-11-08
+Basófilos (abs)	basophils_abs		curated	2026-11-08
+Basófilos absolutos	basophils_abs		curated	2026-11-08
+Basófilos #	basophils_abs		curated	2026-11-08
+Reticulocitos %	reticulocytes_pct		curated	2026-11-08
+% Reticulocitos	reticulocytes_pct		curated	2026-11-08
+Reticulocitos	reticulocytes_abs		curated	2026-11-08
+Reticulocitos (abs)	reticulocytes_abs		curated	2026-11-08
+Velocidad de sedimentación globular	esr		curated	2026-11-08
+VSG	esr		curated	2026-11-08
+Velocidad de sedimentación	esr		curated	2026-11-08
+VSG 1ª hora	esr	westergren	curated	2026-11-08
+Tiempo de protrombina	pt		curated	2026-11-08
+TP	pt		curated	2026-11-08
+Tiempo de Quick	pt		curated	2026-11-08
+INR	inr		curated	2026-11-08
+Ratio internacional normalizado	inr		curated	2026-11-08
+TTPA	aptt		curated	2026-11-08
+TTPa	aptt		curated	2026-11-08
+Tiempo de tromboplastina parcial activada	aptt		curated	2026-11-08
+Tiempo de cefalina	aptt		curated	2026-11-08
+Fibrinógeno	fibrinogen		curated	2026-11-08
+Fibrinógeno derivado	fibrinogen		curated	2026-11-08
+Fibrinógeno (Clauss)	fibrinogen		curated	2026-11-08
+Dímero D	d_dimer		curated	2026-11-08
+Dímero-D	d_dimer		curated	2026-11-08
+D-Dímero	d_dimer		curated	2026-11-08
+Glucosa	glucose		curated	2026-11-08
+Glucosa basal	glucose	fasting	curated	2026-11-08
+Glucosa en ayunas	glucose	fasting	curated	2026-11-08
+Glucemia	glucose		curated	2026-11-08
+Glucemia basal	glucose	fasting	curated	2026-11-08
+Glucosa capilar	glucose_blood		curated	2026-11-08
+Glucemia capilar	glucose_blood		curated	2026-11-08
+Hemoglobina glicada (HbA1c)	hba1c		curated	2026-11-08
+Hemoglobina glicada	hba1c		curated	2026-11-08
+Hemoglobina glicosilada	hba1c		curated	2026-11-08
+Hemoglobina glicosilada A1c	hba1c		curated	2026-11-08
+HbA1c	hba1c		curated	2026-11-08
+Hb A1c	hba1c		curated	2026-11-08
+HbA1c (DCCT/NGSP)	hba1c		curated	2026-11-08
+HbA1c (IFCC)	hba1c	ifcc	curated	2026-11-08
+Hemoglobina A1c	hba1c		curated	2026-11-08
+Creatinina	creatinine		curated	2026-11-08
+Creatinina sérica	creatinine		curated	2026-11-08
+Creatinina en suero	creatinine		curated	2026-11-08
+Nitrógeno ureico	bun		curated	2026-11-08
+BUN	bun		curated	2026-11-08
+Nitrógeno ureico en sangre	bun		curated	2026-11-08
+Urea	urea		curated	2026-11-08
+Ácido úrico	uric_acid		curated	2026-11-08
+Acido urico	uric_acid		curated	2026-11-08
+Urato	uric_acid		curated	2026-11-08
+Sodio	sodium		curated	2026-11-08
+Na	sodium		curated	2026-11-08
+Na+	sodium		curated	2026-11-08
+Potasio	potassium		curated	2026-11-08
+K	potassium		curated	2026-11-08
+K+	potassium		curated	2026-11-08
+Cloro	chloride		curated	2026-11-08
+Cloruro	chloride		curated	2026-11-08
+Cl	chloride		curated	2026-11-08
+Cl-	chloride		curated	2026-11-08
+Bicarbonato	bicarbonate		curated	2026-11-08
+HCO3	bicarbonate		curated	2026-11-08
+CO2 total	co2_total		curated	2026-11-08
+Dióxido de carbono total	co2_total		curated	2026-11-08
+Anión gap	anion_gap		curated	2026-11-08
+Hiato aniónico	anion_gap		curated	2026-11-08
+Brecha aniónica	anion_gap		curated	2026-11-08
+Calcio	calcium		curated	2026-11-08
+Calcio total	calcium		curated	2026-11-08
+Ca	calcium		curated	2026-11-08
+Calcio iónico	calcium_ionized		curated	2026-11-08
+Calcio ionizado	calcium_ionized		curated	2026-11-08
+Fósforo	phosphate		curated	2026-11-08
+Fosfato	phosphate		curated	2026-11-08
+Fósforo inorgánico	phosphate		curated	2026-11-08
+Magnesio	magnesium		curated	2026-11-08
+Mg	magnesium		curated	2026-11-08
+Proteínas totales	total_protein		curated	2026-11-08
+Proteína total	total_protein		curated	2026-11-08
+Albúmina	albumin		curated	2026-11-08
+Albúmina sérica	albumin		curated	2026-11-08
+Filtrado glomerular estimado (CKD-EPI)	egfr	ckd-epi	curated	2026-11-08
+Filtrado glomerular estimado	egfr	ckd-epi	curated	2026-11-08
+FGe	egfr	ckd-epi	curated	2026-11-08
+FGe (CKD-EPI)	egfr	ckd-epi	curated	2026-11-08
+Filtrado glomerular (CKD-EPI)	egfr	ckd-epi	curated	2026-11-08
+Filtrado glomerular (CKD-EPI 2021)	egfr	ckd-epi-2021	curated	2026-11-08
+Filtrado glomerular estimado (CKD-EPI 2021)	egfr	ckd-epi-2021	curated	2026-11-08
+FGe (CKD-EPI 2021)	egfr	ckd-epi-2021	curated	2026-11-08
+Filtrado glomerular (MDRD)	egfr	mdrd	curated	2026-11-08
+FGe (MDRD)	egfr	mdrd	curated	2026-11-08
+Aclaramiento de creatinina	creatinine_clearance		curated	2026-11-08
+Depuración de creatinina	creatinine_clearance		curated	2026-11-08
+Osmolalidad	osmolality		curated	2026-11-08
+Osmolalidad sérica	osmolality		curated	2026-11-08
+LDH	ldh		curated	2026-11-08
+Lactato deshidrogenasa	ldh		curated	2026-11-08
+LD	ldh		curated	2026-11-08
+Lactato	lactate		curated	2026-11-08
+Ácido láctico	lactate		curated	2026-11-08
+Proteína C reactiva	crp		curated	2026-11-08
+PCR	crp		curated	2026-11-08
+Proteína C reactiva (PCR)	crp		curated	2026-11-08
+Proteína C reactiva ultrasensible	crp_hs		curated	2026-11-08
+PCR ultrasensible	crp_hs		curated	2026-11-08
+PCR-us	crp_hs		curated	2026-11-08
+PCR de alta sensibilidad	crp_hs		curated	2026-11-08
+CK	ck		curated	2026-11-08
+Creatina quinasa	ck		curated	2026-11-08
+Creatinfosfoquinasa	ck		curated	2026-11-08
+CPK	ck		curated	2026-11-08
+Creatina cinasa	ck		curated	2026-11-08
+Amilasa	amylase		curated	2026-11-08
+Amilasa sérica	amylase		curated	2026-11-08
+Lipasa	lipase		curated	2026-11-08
+Ferritina	ferritin		curated	2026-11-08
+Hierro	iron		curated	2026-11-08
+Hierro sérico	iron		curated	2026-11-08
+Sideremia	iron		curated	2026-11-08
+Fe	iron		curated	2026-11-08
+Capacidad total de fijación del hierro	tibc		curated	2026-11-08
+CTFH	tibc		curated	2026-11-08
+TIBC	tibc		curated	2026-11-08
+Índice de saturación de transferrina	transferrin_saturation		curated	2026-11-08
+Saturación de transferrina	transferrin_saturation		curated	2026-11-08
+IST	transferrin_saturation		curated	2026-11-08
+% Saturación de transferrina	transferrin_saturation		curated	2026-11-08
+Transferrina	transferrin		curated	2026-11-08
+Ácido fólico	folate		curated	2026-11-08
+Folato	folate		curated	2026-11-08
+Folatos	folate		curated	2026-11-08
+Folato sérico	folate		curated	2026-11-08
+Vitamina B12	vitamin_b12		curated	2026-11-08
+Cobalamina	vitamin_b12		curated	2026-11-08
+Cianocobalamina	vitamin_b12		curated	2026-11-08
+Vitamina D (25-OH)	vitamin_d_25oh		curated	2026-11-08
+25-OH Vitamina D	vitamin_d_25oh		curated	2026-11-08
+25-Hidroxivitamina D	vitamin_d_25oh		curated	2026-11-08
+Calcidiol	vitamin_d_25oh		curated	2026-11-08
+Vitamina D	vitamin_d_25oh		curated	2026-11-08
+25(OH) Vitamina D	vitamin_d_25oh		curated	2026-11-08
+25-OH vitamina D3	vitamin_d_25oh	d3	curated	2026-11-08
+Vitamina D3 (25-OH)	vitamin_d_25oh	d3	curated	2026-11-08
+TSH	tsh		curated	2026-11-08
+Tirotropina	tsh		curated	2026-11-08
+TSH basal	tsh		curated	2026-11-08
+Hormona estimulante del tiroides	tsh		curated	2026-11-08
+TSH ultrasensible	tsh		curated	2026-11-08
+T4 libre	ft4		curated	2026-11-08
+Tiroxina libre	ft4		curated	2026-11-08
+FT4	ft4		curated	2026-11-08
+T4L	ft4		curated	2026-11-08
+T3 libre	ft3		curated	2026-11-08
+Triyodotironina libre	ft3		curated	2026-11-08
+FT3	ft3		curated	2026-11-08
+T3L	ft3		curated	2026-11-08
+T4 total	t4_total		curated	2026-11-08
+Tiroxina total	t4_total		curated	2026-11-08
+T3 total	t3_total		curated	2026-11-08
+Triyodotironina total	t3_total		curated	2026-11-08
+Anticuerpos antiperoxidasa (anti-TPO)	tpo_ab		curated	2026-11-08
+Anticuerpos anti-TPO	tpo_ab		curated	2026-11-08
+Anti-TPO	tpo_ab		curated	2026-11-08
+Anticuerpos antiperoxidasa tiroidea	tpo_ab		curated	2026-11-08
+Anticuerpos antitiroglobulina	tg_ab		curated	2026-11-08
+Anti-TG	tg_ab		curated	2026-11-08
+Anti-tiroglobulina	tg_ab		curated	2026-11-08
+Tiroglobulina	thyroglobulin		curated	2026-11-08
+Colesterol total	total_cholesterol		curated	2026-11-08
+Colesterol	total_cholesterol		curated	2026-11-08
+Colesterol HDL	hdl_c		curated	2026-11-08
+HDL colesterol	hdl_c		curated	2026-11-08
+c-HDL	hdl_c		curated	2026-11-08
+HDL-colesterol	hdl_c		curated	2026-11-08
+HDL	hdl_c		curated	2026-11-08
+Colesterol LDL	ldl_c	calculated	curated	2026-11-08
+c-LDL	ldl_c	calculated	curated	2026-11-08
+LDL colesterol	ldl_c	calculated	curated	2026-11-08
+LDL-colesterol	ldl_c	calculated	curated	2026-11-08
+Colesterol LDL (calculado)	ldl_c	calculated	curated	2026-11-08
+Colesterol LDL (Friedewald)	ldl_c	calculated	curated	2026-11-08
+Colesterol LDL directo	ldl_c	direct	curated	2026-11-08
+c-LDL directo	ldl_c	direct	curated	2026-11-08
+LDL	ldl_c		curated	2026-11-08
+Triglicéridos	triglycerides		curated	2026-11-08
+Trigliceridos	triglycerides		curated	2026-11-08
+TG	triglycerides		curated	2026-11-08
+Colesterol no HDL	non_hdl_c		curated	2026-11-08
+Colesterol no-HDL	non_hdl_c		curated	2026-11-08
+c-no-HDL	non_hdl_c		curated	2026-11-08
+Índice colesterol total/HDL	chol_hdl_ratio		curated	2026-11-08
+Cociente colesterol total/HDL	chol_hdl_ratio		curated	2026-11-08
+Índice de Castelli	chol_hdl_ratio		curated	2026-11-08
+Colesterol total/HDL	chol_hdl_ratio		curated	2026-11-08
+Colesterol VLDL	vldl_c	calculated	curated	2026-11-08
+c-VLDL	vldl_c	calculated	curated	2026-11-08
+VLDL colesterol	vldl_c	calculated	curated	2026-11-08
+Lipoproteína (a)	lpa		curated	2026-11-08
+Lipoproteína a	lpa		curated	2026-11-08
+Lp(a)	lpa		curated	2026-11-08
+Apolipoproteína B	apob		curated	2026-11-08
+Apo B	apob		curated	2026-11-08
+ApoB	apob		curated	2026-11-08
+Apolipoproteína A1	apoa1		curated	2026-11-08
+Apolipoproteína A-I	apoa1		curated	2026-11-08
+Apo A1	apoa1		curated	2026-11-08
+ApoA1	apoa1		curated	2026-11-08
+ALT (GPT)	alt		curated	2026-11-08
+ALT	alt		curated	2026-11-08
+GPT	alt		curated	2026-11-08
+Alanina aminotransferasa	alt		curated	2026-11-08
+GPT/ALT	alt		curated	2026-11-08
+ALT/GPT	alt		curated	2026-11-08
+AST (GOT)	ast		curated	2026-11-08
+AST	ast		curated	2026-11-08
+GOT	ast		curated	2026-11-08
+Aspartato aminotransferasa	ast		curated	2026-11-08
+GOT/AST	ast		curated	2026-11-08
+AST/GOT	ast		curated	2026-11-08
+GGT	ggt		curated	2026-11-08
+Gamma GT	ggt		curated	2026-11-08
+Gamma glutamil transferasa	ggt		curated	2026-11-08
+Gamma-glutamiltransferasa	ggt		curated	2026-11-08
+GGT (Gamma GT)	ggt		curated	2026-11-08
+Fosfatasa alcalina	alp		curated	2026-11-08
+FA	alp		curated	2026-11-08
+FAL	alp		curated	2026-11-08
+Bilirrubina total	bilirubin_total		curated	2026-11-08
+Bilirrubina	bilirubin_total		curated	2026-11-08
+Bilirrubina directa	bilirubin_direct		curated	2026-11-08
+Bilirrubina conjugada	bilirubin_direct		curated	2026-11-08
+Bilirrubina indirecta	bilirubin_indirect		curated	2026-11-08
+Bilirrubina no conjugada	bilirubin_indirect		curated	2026-11-08
+Cociente albúmina/creatinina	urine_acr		curated	2026-11-08
+Cociente albúmina/creatinina en orina	urine_acr		curated	2026-11-08
+Índice albúmina/creatinina	urine_acr		curated	2026-11-08
+Microalbuminuria (cociente)	urine_acr		curated	2026-11-08
+Cociente microalbúmina/creatinina	urine_acr		curated	2026-11-08
+CAC	urine_acr		curated	2026-11-08
+Creatinina en orina	urine_creatinine		curated	2026-11-08
+Creatinina orina	urine_creatinine		curated	2026-11-08
+Creatinina (orina)	urine_creatinine		curated	2026-11-08
+Albúmina en orina	urine_albumin		curated	2026-11-08
+Microalbúmina	urine_albumin		curated	2026-11-08
+Microalbuminuria	urine_albumin		curated	2026-11-08
+Albúmina (orina)	urine_albumin		curated	2026-11-08
+Proteínas en orina	urine_protein		curated	2026-11-08
+Proteinuria	urine_protein		curated	2026-11-08
+Proteínas (orina)	urine_protein		curated	2026-11-08
+Proteínas en orina de 24 horas	urine_protein_24h		curated	2026-11-08
+Proteinuria de 24 horas	urine_protein_24h		curated	2026-11-08
+Densidad	urine_sg		curated	2026-11-08
+Densidad urinaria	urine_sg		curated	2026-11-08
+Densidad (orina)	urine_sg		curated	2026-11-08
+pH (orina)	urine_ph		curated	2026-11-08
+pH urinario	urine_ph		curated	2026-11-08
+pH en orina	urine_ph		curated	2026-11-08
+Proteínas (tira)	urine_protein_strip		curated	2026-11-08
+Proteínas en orina (tira)	urine_protein_strip		curated	2026-11-08
+Glucosa (orina)	urine_glucose_strip		curated	2026-11-08
+Glucosa en orina	urine_glucose_strip		curated	2026-11-08
+Glucosuria	urine_glucose_strip		curated	2026-11-08
+Cuerpos cetónicos	urine_ketones_strip		curated	2026-11-08
+Cetonas	urine_ketones_strip		curated	2026-11-08
+Cuerpos cetónicos (orina)	urine_ketones_strip		curated	2026-11-08
+Sangre (orina)	urine_blood_strip		curated	2026-11-08
+Hemoglobina (orina)	urine_blood_strip		curated	2026-11-08
+Sangre en orina	urine_blood_strip		curated	2026-11-08
+Leucocitos (tira)	urine_leukocyte_esterase		curated	2026-11-08
+Leucocitos esterasa	urine_leukocyte_esterase		curated	2026-11-08
+Esterasa leucocitaria	urine_leukocyte_esterase		curated	2026-11-08
+Nitritos	urine_nitrite		curated	2026-11-08
+Nitritos (orina)	urine_nitrite		curated	2026-11-08
+Bilirrubina (orina)	urine_bilirubin_strip		curated	2026-11-08
+Bilirrubina en orina	urine_bilirubin_strip		curated	2026-11-08
+Urobilinógeno	urine_urobilinogen		curated	2026-11-08
+Leucocitos por campo	urine_wbc_hpf		curated	2026-11-08
+Leucocitos (sedimento)	urine_wbc_hpf		curated	2026-11-08
+Hematíes por campo	urine_rbc_hpf		curated	2026-11-08
+Hematíes (sedimento)	urine_rbc_hpf		curated	2026-11-08
+Sodio en orina	urine_sodium		curated	2026-11-08
+Sodio (orina)	urine_sodium		curated	2026-11-08
+Volumen de orina de 24 horas	urine_volume_24h		curated	2026-11-08
+Diuresis	urine_volume_24h		curated	2026-11-08
+Volumen (orina 24 h)	urine_volume_24h		curated	2026-11-08
+Testosterona	testosterone		curated	2026-11-08
+Testosterona total	testosterone		curated	2026-11-08
+Testosterona libre	testosterone_free		curated	2026-11-08
+Estradiol	estradiol		curated	2026-11-08
+17-beta estradiol	estradiol		curated	2026-11-08
+E2	estradiol		curated	2026-11-08
+Progesterona	progesterone		curated	2026-11-08
+FSH	fsh		curated	2026-11-08
+Hormona foliculoestimulante	fsh		curated	2026-11-08
+LH	lh		curated	2026-11-08
+Hormona luteinizante	lh		curated	2026-11-08
+Prolactina	prolactin		curated	2026-11-08
+PRL	prolactin		curated	2026-11-08
+Cortisol	cortisol		curated	2026-11-08
+Cortisol basal	cortisol		curated	2026-11-08
+DHEA sulfato	dhea_s		curated	2026-11-08
+DHEA-S	dhea_s		curated	2026-11-08
+Sulfato de dehidroepiandrosterona	dhea_s		curated	2026-11-08
+SHBG	shbg		curated	2026-11-08
+Globulina fijadora de hormonas sexuales	shbg		curated	2026-11-08
+Globulina transportadora de hormonas sexuales	shbg		curated	2026-11-08
+Insulina	insulin		curated	2026-11-08
+Insulina basal	insulin		curated	2026-11-08
+IGF-1	igf1		curated	2026-11-08
+IGF-I	igf1		curated	2026-11-08
+Somatomedina C	igf1		curated	2026-11-08
+Paratohormona (PTH)	pth		curated	2026-11-08
+PTH	pth		curated	2026-11-08
+PTH intacta	pth		curated	2026-11-08
+Parathormona	pth		curated	2026-11-08
+17-OH progesterona	hydroxyprogesterone_17		curated	2026-11-08
+17-hidroxiprogesterona	hydroxyprogesterone_17		curated	2026-11-08
+Beta-hCG	hcg_beta		curated	2026-11-08
+Beta HCG	hcg_beta		curated	2026-11-08
+Gonadotropina coriónica (beta)	hcg_beta		curated	2026-11-08
+Hormona antimülleriana	amh		curated	2026-11-08
+AMH	amh		curated	2026-11-08
+PSA	psa		curated	2026-11-08
+PSA total	psa		curated	2026-11-08
+Antígeno prostático específico	psa		curated	2026-11-08
+PSA libre	psa_free		curated	2026-11-08
+Homocisteína	homocysteine		curated	2026-11-08
+Procalcitonina	procalcitonin		curated	2026-11-08
+Factor reumatoide	rheumatoid_factor		curated	2026-11-08
+FR	rheumatoid_factor		curated	2026-11-08
+IgE total	ige_total		curated	2026-11-08
+Inmunoglobulina E	ige_total		curated	2026-11-08
+IgG	igg		curated	2026-11-08
+Inmunoglobulina G	igg		curated	2026-11-08
+IgA	iga		curated	2026-11-08
+Inmunoglobulina A	iga		curated	2026-11-08
+IgM	igm		curated	2026-11-08
+Inmunoglobulina M	igm		curated	2026-11-08
+NT-proBNP	nt_probnp		curated	2026-11-08
+Pro-BNP	nt_probnp		curated	2026-11-08
+BNP	bnp		curated	2026-11-08
+Péptido natriurético tipo B	bnp		curated	2026-11-08
+Troponina I ultrasensible	troponin_i_hs		curated	2026-11-08
+Troponina I hs	troponin_i_hs		curated	2026-11-08
+Troponina T ultrasensible	troponin_t_hs		curated	2026-11-08
+Troponina T hs	troponin_t_hs		curated	2026-11-08
+CEA	cea		curated	2026-11-08
+Antígeno carcinoembrionario	cea		curated	2026-11-08
+CA 125	ca125		curated	2026-11-08
+CA-125	ca125		curated	2026-11-08
+CA125	ca125		curated	2026-11-08
+CA 19-9	ca19_9		curated	2026-11-08
+CA 19.9	ca19_9		curated	2026-11-08
+CA19-9	ca19_9		curated	2026-11-08
+CA 15-3	ca15_3		curated	2026-11-08
+CA 15.3	ca15_3		curated	2026-11-08
+CA15-3	ca15_3		curated	2026-11-08
+Alfafetoproteína	afp		curated	2026-11-08
+AFP	afp		curated	2026-11-08
+Alfa-fetoproteína	afp		curated	2026-11-08
+HBsAg	hbsag		curated	2026-11-08
+Antígeno de superficie de la hepatitis B	hbsag		curated	2026-11-08
+Antígeno Australia	hbsag		curated	2026-11-08
+Anticuerpos anti-VHC	hcv_ab		curated	2026-11-08
+Anti-VHC	hcv_ab		curated	2026-11-08
+Anticuerpos frente a hepatitis C	hcv_ab		curated	2026-11-08
+pH arterial	ph_arterial		curated	2026-11-08
+pCO2 arterial	pco2_arterial		curated	2026-11-08
+pCO2	pco2_arterial		curated	2026-11-08
+pO2 arterial	po2_arterial		curated	2026-11-08
+pO2	po2_arterial		curated	2026-11-08
+Amonio	ammonia		curated	2026-11-08
+Amoniaco	ammonia		curated	2026-11-08
+Zinc	zinc		curated	2026-11-08
+Cinc	zinc		curated	2026-11-08
+Cobre	copper		curated	2026-11-08
+Proteínas	total_protein		curated	2026-11-08
+Proteína	total_protein		curated	2026-11-08

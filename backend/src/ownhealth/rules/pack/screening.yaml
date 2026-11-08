@@ -1,0 +1,23 @@
+# never_measured: a relevant analyte with no value at all for this profile, ever (as of the date asked).
+# Conditions: min_age (years at as_of), sex (female|male), taking (medication or supplement names,
+# matched on name or ingredient, case-insensitive substring).
+rules:
+  - id: infect.hcv.once_adult
+    kind: never_measured
+    match: [hcv_ab]
+    when: {min_age: 18}
+    cite: https://www.cdc.gov/mmwr/volumes/69/rr/rr6902a1.htm
+    note: CDC 2020, hepatitis C screening at least once in a lifetime for adults aged 18 years and older.
+  - id: lipid.lpa.once_adult
+    kind: never_measured
+    match: [lpa]
+    when: {min_age: 18}
+    cite: https://doi.org/10.1093/eurheartj/ehz455
+    note: ESC/EAS 2019, Lp(a) measurement considered at least once in each adult person's lifetime.
+  - id: iron.ferritin.on_iron
+    kind: never_measured
+    match: [ferritin]
+    when: {taking: [iron, hierro, ferrous, ferroso, ferric, férrico]}
+    cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack
+    basis: pack_default
+    note: architecture.md section 11 names ferritin for a person on an iron supplement.

@@ -1,0 +1,56 @@
+# Molar mass per alias_group for mass <-> substance conversion (ingestion.md 8.3). UCUM cannot infer it.
+# g_per_mol is the species the lab convention uses; valence converts eq <-> mol for ions.
+# side: numerator (the analyte is measured) or denominator (urine ratios per creatinine).
+# Each row has a citation and a unit test (tests/normalize/test_molar.py). Reviewed 2026-11-08, lane A.
+# Not here on purpose: lpa (mg/dL and nmol/L measure different things and never convert), proteins.
+alias_group	species	g_per_mol	valence	side	citation	trap
+glucose	D-glucose C6H12O6	180.156		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5793
+glucose_blood	D-glucose C6H12O6	180.156		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5793
+total_cholesterol	cholesterol C27H46O	386.654		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5997
+hdl_c	cholesterol C27H46O	386.654		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5997
+ldl_c	cholesterol C27H46O	386.654		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5997
+non_hdl_c	cholesterol C27H46O	386.654		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5997
+vldl_c	cholesterol C27H46O	386.654		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5997
+triglycerides	triolein C57H104O6	885.432		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5497163	Not a single molecule; triolein is the lab convention
+creatinine	creatinine C4H7N3O	113.120		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/588
+urine_creatinine	creatinine C4H7N3O	113.120		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/588
+urine_acr	creatinine C4H7N3O	113.120		denominator	https://pubchem.ncbi.nlm.nih.gov/compound/588	The molar mass is the creatinine in the denominator, not albumin
+urea	urea CH4N2O	60.056		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/1176	Urea and BUN differ by 2.14
+bun	urea nitrogen, 2 N per urea	28.014		numerator	https://www.ciaaw.org/atomic-weights.htm	mmol/L of urea from mg/dL of nitrogen: 2 x 14.007
+uric_acid	uric acid C5H4N4O3	168.110		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/1175
+bilirubin_total	bilirubin C33H36N4O6	584.673		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5280352
+bilirubin_direct	bilirubin C33H36N4O6	584.673		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5280352
+bilirubin_indirect	bilirubin C33H36N4O6	584.673		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5280352
+calcium	Ca	40.078	2	numerator	https://www.ciaaw.org/atomic-weights.htm	mEq/L is twice mmol/L
+calcium_ionized	Ca	40.078	2	numerator	https://www.ciaaw.org/atomic-weights.htm	mEq/L is twice mmol/L
+phosphate	P (as phosphorus)	30.974		numerator	https://www.ciaaw.org/atomic-weights.htm	Not PO4 (94.97)
+magnesium	Mg	24.305	2	numerator	https://www.ciaaw.org/atomic-weights.htm	mEq/L is twice mmol/L
+sodium	Na	22.990	1	numerator	https://www.ciaaw.org/atomic-weights.htm
+sodium_blood	Na	22.990	1	numerator	https://www.ciaaw.org/atomic-weights.htm
+urine_sodium	Na	22.990	1	numerator	https://www.ciaaw.org/atomic-weights.htm
+potassium	K	39.098	1	numerator	https://www.ciaaw.org/atomic-weights.htm
+potassium_blood	K	39.098	1	numerator	https://www.ciaaw.org/atomic-weights.htm
+chloride	Cl	35.45	1	numerator	https://www.ciaaw.org/atomic-weights.htm
+bicarbonate	HCO3-	61.017	1	numerator	https://www.ciaaw.org/atomic-weights.htm
+co2_total	CO2 as HCO3-	61.017	1	numerator	https://www.ciaaw.org/atomic-weights.htm
+anion_gap	monovalent ions		1	numerator	https://www.ciaaw.org/atomic-weights.htm	Only eq <-> mol; no mass form
+iron	Fe	55.845		numerator	https://www.ciaaw.org/atomic-weights.htm
+tibc	Fe	55.845		numerator	https://www.ciaaw.org/atomic-weights.htm	Capacity is expressed as iron
+zinc	Zn	65.38		numerator	https://www.ciaaw.org/atomic-weights.htm
+copper	Cu	63.546		numerator	https://www.ciaaw.org/atomic-weights.htm
+folate	folic acid C19H19N7O6	441.404		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/135398658
+vitamin_b12	cyanocobalamin C63H88CoN14O14P	1355.38		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5311498
+vitamin_d_25oh	calcidiol (25-OH D3) C27H44O2	400.646		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5283731	D2 is 412.66; labs convert D2+D3 with the D3 mass
+ft4	thyroxine C15H11I4NO4	776.87		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5819
+t4_total	thyroxine C15H11I4NO4	776.87		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5819
+ft3	liothyronine C15H12I3NO4	650.97		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5920
+t3_total	liothyronine C15H12I3NO4	650.97		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5920
+testosterone	testosterone C19H28O2	288.431		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/6013
+testosterone_free	testosterone C19H28O2	288.431		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/6013
+estradiol	estradiol C18H24O2	272.388		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5757
+progesterone	progesterone C21H30O2	314.469		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5994
+cortisol	cortisol C21H30O5	362.466		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/5754
+dhea_s	DHEA sulfate C19H28O5S	368.49		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/12594
+homocysteine	homocysteine C4H9NO2S	135.18		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/778
+lactate	lactic acid C3H6O3	90.078		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/612
+ammonia	ammonia NH3	17.031		numerator	https://pubchem.ncbi.nlm.nih.gov/compound/222

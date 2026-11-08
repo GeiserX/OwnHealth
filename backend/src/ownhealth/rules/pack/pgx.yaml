@@ -1,0 +1,94 @@
+# gene_drug: an active medication meets a PGx finding whose phenotype CPIC ties to an actionable
+# recommendation for that drug. Phenotypes are compared case-insensitively; "Likely" and "Possible"
+# forms are listed where CPIC lists them. The text quoted to people comes from the CPIC snapshot
+# (cpic/snapshot.json); these rules only decide what becomes a status flag.
+rules:
+  - id: pgx.slco1b1.statin
+    kind: gene_drug
+    gene: SLCO1B1
+    drugs: [atorvastatin, simvastatin, rosuvastatin, pravastatin, pitavastatin, lovastatin, fluvastatin]
+    phenotypes: [Decreased Function, Possible Decreased Function, Poor Function]
+    severity: 2
+    cite: https://cpicpgx.org/guidelines/cpic-guideline-for-statins/
+  - id: pgx.cyp2c19.clopidogrel
+    kind: gene_drug
+    gene: CYP2C19
+    drugs: [clopidogrel]
+    phenotypes: [Intermediate Metabolizer, Likely Intermediate Metabolizer, Poor Metabolizer, Likely Poor Metabolizer]
+    severity: 3
+    cite: https://cpicpgx.org/guidelines/guideline-for-clopidogrel-and-cyp2c19/
+  - id: pgx.cyp2c19.ppi
+    kind: gene_drug
+    gene: CYP2C19
+    drugs: [omeprazole, lansoprazole, pantoprazole]
+    phenotypes: [Rapid Metabolizer, Ultrarapid Metabolizer]
+    severity: 1
+    cite: https://cpicpgx.org/guidelines/cpic-guideline-for-proton-pump-inhibitors-and-cyp2c19/
+  - id: pgx.cyp2c19.ssri
+    kind: gene_drug
+    gene: CYP2C19
+    drugs: [citalopram, escitalopram, sertraline]
+    phenotypes: [Poor Metabolizer, Likely Poor Metabolizer, Ultrarapid Metabolizer]
+    severity: 2
+    cite: https://cpicpgx.org/guidelines/cpic-guideline-for-ssri-and-snri-antidepressants/
+  - id: pgx.cyp2d6.opioid
+    kind: gene_drug
+    gene: CYP2D6
+    drugs: [codeine, tramadol]
+    phenotypes: [Poor Metabolizer, Ultrarapid Metabolizer]
+    severity: 3
+    cite: https://cpicpgx.org/guidelines/guideline-for-codeine-and-cyp2d6/
+  - id: pgx.dpyd.fluoropyrimidine
+    kind: gene_drug
+    gene: DPYD
+    drugs: [fluorouracil, capecitabine]
+    phenotypes: [Intermediate Metabolizer, Poor Metabolizer]
+    severity: 4
+    cite: https://cpicpgx.org/guidelines/guideline-for-fluoropyrimidines-and-dpyd/
+  - id: pgx.tpmt.thiopurine
+    kind: gene_drug
+    gene: TPMT
+    drugs: [azathioprine, mercaptopurine, thioguanine]
+    phenotypes: [Intermediate Metabolizer, Possible Intermediate Metabolizer, Poor Metabolizer]
+    severity: 4
+    cite: https://cpicpgx.org/guidelines/guideline-for-thiopurines-and-tpmt/
+  - id: pgx.nudt15.thiopurine
+    kind: gene_drug
+    gene: NUDT15
+    drugs: [azathioprine, mercaptopurine, thioguanine]
+    phenotypes: [Intermediate Metabolizer, Possible Intermediate Metabolizer, Poor Metabolizer]
+    severity: 4
+    cite: https://cpicpgx.org/guidelines/guideline-for-thiopurines-and-tpmt/
+  - id: pgx.cyp2c9.warfarin
+    kind: gene_drug
+    gene: CYP2C9
+    drugs: [warfarin]
+    phenotypes: [Intermediate Metabolizer, Poor Metabolizer]
+    severity: 3
+    cite: https://cpicpgx.org/guidelines/guideline-for-warfarin-and-cyp2c9-and-vkorc1/
+  - id: pgx.cyp3a5.tacrolimus
+    kind: gene_drug
+    gene: CYP3A5
+    drugs: [tacrolimus]
+    phenotypes: [Normal Metabolizer, Intermediate Metabolizer, Possible Intermediate Metabolizer]
+    severity: 2
+    cite: https://cpicpgx.org/guidelines/guideline-for-tacrolimus-and-cyp3a5/
+
+  # gene_lab: a genotype paired with a lab (genomics.md section 8). With `drugs`, it applies only while
+  # one of them is active. A missing lab is a never_measured item; an old one is a stale item.
+  - id: genelab.lpa.lpa
+    kind: gene_lab
+    gene: LPA
+    categories: [risk_marker]
+    call_states: [alt]
+    labs: [lpa]
+    cite: https://doi.org/10.1093/eurheartj/ehac361
+    note: EAS 2022 Lp(a) consensus statement; a single Lp(a) blood test is the measurement that counts.
+  - id: genelab.thiopurine.blood_count
+    kind: gene_lab
+    gene: [TPMT, NUDT15]
+    phenotypes: [Intermediate Metabolizer, Possible Intermediate Metabolizer, Poor Metabolizer]
+    drugs: [azathioprine, mercaptopurine, thioguanine]
+    labs: [wbc, platelets, hemoglobin]
+    window_days: 90
+    cite: https://cpicpgx.org/guidelines/guideline-for-thiopurines-and-tpmt/

@@ -1,0 +1,16 @@
+# Wearable systems read the daily rollups (wearable_rollup). There is no range: the status is OK when
+# the newest day is inside the window, Stale when older, No data when there is none.
+system: sleep
+order: 8
+source: wearables
+names: {en: Sleep, es: Sueño}
+markers:
+  - {metric: sleep_asleep, en: "Sleep, 30-day avg", es: "Sueño, media 30 días", unit: h, agg: sum30, format: hm}
+  - {metric: hrv_rmssd, en: HRV (RMSSD), es: VFC (RMSSD), unit: ms, agg: avg30}
+rules:
+  - id: recency.sleep
+    kind: recency
+    match: [sleep_asleep, hrv_rmssd]
+    window_days: 7
+    cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack
+    basis: pack_default

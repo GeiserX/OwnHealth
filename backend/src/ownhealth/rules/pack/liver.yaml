@@ -1,0 +1,18 @@
+system: liver
+order: 2
+names: {en: Liver, es: Hígado}
+markers: [alt, ggt, ast]
+rules:
+  - id: recency.liver
+    kind: recency
+    match: [alt, ggt, ast]
+    window_days: 365
+    cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack
+    basis: pack_default
+  - id: rcv.alt
+    kind: rcv
+    match: [alt]
+    cv_i: "19.4"
+    cv_a: "3.0"
+    cite: https://biologicalvariation.eu/
+    verify: CV values to confirm against the EFLM database

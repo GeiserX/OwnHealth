@@ -1,0 +1,26 @@
+system: kidney
+order: 3
+names: {en: Kidney, es: Riñón}
+markers: [egfr, creatinine, urine_acr]
+rules:
+  - id: recency.kidney
+    kind: recency
+    match: [egfr, creatinine, urine_acr]
+    window_days: 365
+    cite: https://kdigo.org/guidelines/ckd-evaluation-and-management/
+    note: KDIGO 2024 CKD guideline, yearly eGFR and albuminuria in people at risk; the window is the pack's reading of it.
+  - id: rcv.creatinine
+    kind: rcv
+    match: [creatinine]
+    cv_i: "4.5"
+    cv_a: "2.0"
+    cite: https://biologicalvariation.eu/
+    verify: CV values to confirm against the EFLM database
+  - id: trend.egfr.decline
+    kind: trend
+    match: [egfr]
+    points: 3
+    direction: down
+    min_slope_per_year: "5"
+    cite: https://kdigo.org/guidelines/ckd-evaluation-and-management/
+    note: KDIGO 2024 describes a sustained eGFR decline above 5 mL/min/1.73 m2 per year as rapid progression.

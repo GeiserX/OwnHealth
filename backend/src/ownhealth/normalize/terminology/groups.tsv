@@ -1,0 +1,158 @@
+# One row per alias_group (series key). canonical: the unit every value of the group is also stored in.
+# si / conventional: the units the "units" preference shows. plaus_low / plaus_high: hard physiological
+# limits in the canonical unit (ingestion.md 9: outside them a value is "implausible"); blank = no check.
+# Reviewed 2026-11-08, lane A. Limits are deliberately wide: they catch parse errors, not disease.
+alias_group	canonical	si	conventional	plaus_low	plaus_high	name_en	name_es
+wbc	10*3/uL	10*9/L	10*3/uL	0.1	500	Leukocytes	Leucocitos
+rbc	10*6/uL	10*12/L	10*6/uL	0.5	10	Erythrocytes	Hematíes
+hemoglobin	g/dL	g/L	g/dL	2	25	Hemoglobin	Hemoglobina
+hematocrit	%	%	%	5	80	Hematocrit	Hematocrito
+mcv	fL	fL	fL	40	160	MCV	VCM
+mch	pg	pg	pg	10	60	MCH	HCM
+mchc	g/dL	g/L	g/dL	20	45	MCHC	CHCM
+rdw	%	%	%	5	40	RDW	ADE
+platelets	10*3/uL	10*9/L	10*3/uL	1	3000	Platelets	Plaquetas
+mpv	fL	fL	fL	4	20	Mean platelet volume	Volumen plaquetar medio
+neutrophils_pct	%	%	%	0	100	Neutrophils %	Neutrófilos %
+neutrophils_abs	10*3/uL	10*9/L	10*3/uL	0	300	Neutrophils	Neutrófilos
+lymphocytes_pct	%	%	%	0	100	Lymphocytes %	Linfocitos %
+lymphocytes_abs	10*3/uL	10*9/L	10*3/uL	0	300	Lymphocytes	Linfocitos
+monocytes_pct	%	%	%	0	100	Monocytes %	Monocitos %
+monocytes_abs	10*3/uL	10*9/L	10*3/uL	0	100	Monocytes	Monocitos
+eosinophils_pct	%	%	%	0	100	Eosinophils %	Eosinófilos %
+eosinophils_abs	10*3/uL	10*9/L	10*3/uL	0	100	Eosinophils	Eosinófilos
+basophils_pct	%	%	%	0	100	Basophils %	Basófilos %
+basophils_abs	10*3/uL	10*9/L	10*3/uL	0	50	Basophils	Basófilos
+reticulocytes_pct	%	%	%	0	50	Reticulocytes %	Reticulocitos %
+reticulocytes_abs	10*3/uL	10*9/L	10*3/uL	0	1000	Reticulocytes	Reticulocitos
+esr	mm/h	mm/h	mm/h	0	200	Erythrocyte sedimentation rate	Velocidad de sedimentación
+pt	s	s	s	5	200	Prothrombin time	Tiempo de protrombina
+inr	{INR}	{INR}	{INR}	0.5	20	INR	INR
+aptt	s	s	s	10	300	aPTT	TTPa
+fibrinogen	mg/dL	g/L	mg/dL	20	2000	Fibrinogen	Fibrinógeno
+d_dimer	ng/mL	ng/mL	ng/mL	0	100000	D-dimer	Dímero D
+glucose	mg/dL	mmol/L	mg/dL	10	1500	Glucose	Glucosa
+glucose_blood	mg/dL	mmol/L	mg/dL	10	1500	Glucose (whole blood)	Glucosa (sangre)
+hba1c	%	mmol/mol	%	3	20	HbA1c	Hemoglobina glicada (HbA1c)
+creatinine	mg/dL	umol/L	mg/dL	0.05	30	Creatinine	Creatinina
+bun	mg/dL	mmol/L	mg/dL	1	300	Urea nitrogen (BUN)	Nitrógeno ureico (BUN)
+urea	mg/dL	mmol/L	mg/dL	2	650	Urea	Urea
+uric_acid	mg/dL	umol/L	mg/dL	0.2	30	Uric acid	Ácido úrico
+sodium	mmol/L	mmol/L	mmol/L	90	200	Sodium	Sodio
+potassium	mmol/L	mmol/L	mmol/L	1	12	Potassium	Potasio
+chloride	mmol/L	mmol/L	mmol/L	50	160	Chloride	Cloro
+bicarbonate	mmol/L	mmol/L	mmol/L	2	60	Bicarbonate	Bicarbonato
+co2_total	mmol/L	mmol/L	mmol/L	2	60	Total CO2	CO2 total
+anion_gap	mmol/L	mmol/L	mmol/L	-10	60	Anion gap	Anión gap
+calcium	mg/dL	mmol/L	mg/dL	3	20	Calcium	Calcio
+calcium_ionized	mmol/L	mmol/L	mmol/L	0.3	3	Ionized calcium	Calcio iónico
+phosphate	mg/dL	mmol/L	mg/dL	0.3	20	Phosphate	Fósforo
+magnesium	mg/dL	mmol/L	mg/dL	0.3	10	Magnesium	Magnesio
+total_protein	g/dL	g/L	g/dL	2	15	Total protein	Proteínas totales
+albumin	g/dL	g/L	g/dL	0.5	7	Albumin	Albúmina
+egfr	mL/min/{1.73_m2}	mL/min/{1.73_m2}	mL/min/{1.73_m2}	1	200	eGFR	Filtrado glomerular estimado
+creatinine_clearance	mL/min	mL/min	mL/min	1	300	Creatinine clearance	Aclaramiento de creatinina
+osmolality	mosm/kg	mosm/kg	mosm/kg	180	450	Osmolality	Osmolalidad
+ldh	U/L	U/L	U/L	10	20000	LDH	LDH
+lactate	mmol/L	mmol/L	mmol/L	0.1	30	Lactate	Lactato
+crp	mg/L	mg/L	mg/L	0	700	C-reactive protein	Proteína C reactiva
+crp_hs	mg/L	mg/L	mg/L	0	700	hs C-reactive protein	PCR ultrasensible
+ck	U/L	U/L	U/L	5	200000	Creatine kinase	CK
+amylase	U/L	U/L	U/L	1	10000	Amylase	Amilasa
+lipase	U/L	U/L	U/L	1	20000	Lipase	Lipasa
+ferritin	ng/mL	ug/L	ng/mL	1	100000	Ferritin	Ferritina
+iron	ug/dL	umol/L	ug/dL	5	1000	Iron	Hierro
+tibc	ug/dL	umol/L	ug/dL	50	1000	Total iron binding capacity	Capacidad total de fijación del hierro
+transferrin_saturation	%	%	%	1	100	Transferrin saturation	Índice de saturación de transferrina
+transferrin	mg/dL	g/L	mg/dL	50	700	Transferrin	Transferrina
+folate	ng/mL	nmol/L	ng/mL	0.3	50	Folate	Ácido fólico
+vitamin_b12	pg/mL	pmol/L	pg/mL	30	10000	Vitamin B12	Vitamina B12
+vitamin_d_25oh	ng/mL	nmol/L	ng/mL	1	250	25-OH vitamin D	Vitamina D (25-OH)
+tsh	m[IU]/L	m[IU]/L	m[IU]/L	0.001	500	TSH	TSH
+ft4	ng/dL	pmol/L	ng/dL	0.05	10	Free T4	T4 libre
+ft3	pg/mL	pmol/L	pg/mL	0.3	30	Free T3	T3 libre
+t4_total	ug/dL	nmol/L	ug/dL	0.5	30	Total T4	T4 total
+t3_total	ng/dL	nmol/L	ng/dL	10	800	Total T3	T3 total
+tpo_ab	[IU]/mL	[IU]/mL	[IU]/mL	0	10000	Anti-TPO antibodies	Anticuerpos antiperoxidasa (anti-TPO)
+tg_ab	[IU]/mL	[IU]/mL	[IU]/mL	0	10000	Anti-thyroglobulin antibodies	Anticuerpos antitiroglobulina
+thyroglobulin	ng/mL	ug/L	ng/mL	0	100000	Thyroglobulin	Tiroglobulina
+total_cholesterol	mg/dL	mmol/L	mg/dL	40	1000	Total cholesterol	Colesterol total
+hdl_c	mg/dL	mmol/L	mg/dL	3	250	HDL cholesterol	Colesterol HDL
+ldl_c	mg/dL	mmol/L	mg/dL	5	800	LDL cholesterol	Colesterol LDL
+triglycerides	mg/dL	mmol/L	mg/dL	10	10000	Triglycerides	Triglicéridos
+non_hdl_c	mg/dL	mmol/L	mg/dL	10	900	Non-HDL cholesterol	Colesterol no HDL
+chol_hdl_ratio	{ratio}	{ratio}	{ratio}	0.5	30	Total/HDL cholesterol ratio	Índice colesterol total/HDL
+vldl_c	mg/dL	mmol/L	mg/dL	1	500	VLDL cholesterol	Colesterol VLDL
+lpa	nmol/L	nmol/L	nmol/L	0	1000	Lipoprotein(a)	Lipoproteína (a)
+apob	mg/dL	g/L	mg/dL	10	400	Apolipoprotein B	Apolipoproteína B
+apoa1	mg/dL	g/L	mg/dL	10	400	Apolipoprotein A-I	Apolipoproteína A1
+alt	U/L	U/L	U/L	1	20000	ALT	ALT (GPT)
+ast	U/L	U/L	U/L	1	20000	AST	AST (GOT)
+ggt	U/L	U/L	U/L	1	5000	GGT	GGT
+alp	U/L	U/L	U/L	5	5000	Alkaline phosphatase	Fosfatasa alcalina
+bilirubin_total	mg/dL	umol/L	mg/dL	0.05	50	Total bilirubin	Bilirrubina total
+bilirubin_direct	mg/dL	umol/L	mg/dL	0	40	Direct bilirubin	Bilirrubina directa
+bilirubin_indirect	mg/dL	umol/L	mg/dL	0	40	Indirect bilirubin	Bilirrubina indirecta
+urine_acr	mg/g	mg/mmol	mg/g	0	10000	Urine albumin/creatinine ratio	Cociente albúmina/creatinina
+urine_creatinine	mg/dL	mmol/L	mg/dL	1	1000	Urine creatinine	Creatinina en orina
+urine_albumin	mg/L	mg/L	mg/L	0	20000	Urine albumin	Albúmina en orina
+urine_protein	mg/dL	g/L	mg/dL	0	5000	Urine protein	Proteínas en orina
+urine_protein_24h	g/(24.h)	g/(24.h)	g/(24.h)	0	50	Urine protein (24 h)	Proteínas en orina de 24 h
+urine_sg	{Spec_grav}	{Spec_grav}	{Spec_grav}	1.000	1.060	Urine specific gravity	Densidad urinaria
+urine_ph	[pH]	[pH]	[pH]	4	9.5	Urine pH	pH en orina
+urine_protein_strip	mg/dL	mg/dL	mg/dL	0	2000	Urine protein (strip)	Proteínas en orina (tira)
+urine_glucose_strip	mg/dL	mg/dL	mg/dL	0	5000	Urine glucose (strip)	Glucosa en orina (tira)
+urine_ketones_strip	mg/dL	mg/dL	mg/dL	0	500	Urine ketones (strip)	Cuerpos cetónicos en orina
+urine_blood_strip						Blood in urine (strip)	Hemoglobina en orina (tira)
+urine_leukocyte_esterase						Leukocyte esterase	Leucocitos en orina (tira)
+urine_nitrite						Urine nitrite	Nitritos en orina
+urine_bilirubin_strip						Urine bilirubin	Bilirrubina en orina
+urine_urobilinogen	mg/dL	mg/dL	mg/dL	0	50	Urobilinogen	Urobilinógeno
+urine_wbc_hpf	/[HPF]	/[HPF]	/[HPF]	0	1000	Urine leukocytes per HPF	Leucocitos por campo
+urine_rbc_hpf	/[HPF]	/[HPF]	/[HPF]	0	1000	Urine erythrocytes per HPF	Hematíes por campo
+urine_sodium	mmol/L	mmol/L	mmol/L	1	400	Urine sodium	Sodio en orina
+urine_volume_24h	L	L	L	0.05	15	Urine volume (24 h)	Volumen de orina de 24 h
+testosterone	ng/dL	nmol/L	ng/dL	1	3000	Testosterone	Testosterona
+testosterone_free	pg/mL	pmol/L	pg/mL	0.01	1000	Free testosterone	Testosterona libre
+estradiol	pg/mL	pmol/L	pg/mL	1	20000	Estradiol	Estradiol
+progesterone	ng/mL	nmol/L	ng/mL	0.01	500	Progesterone	Progesterona
+fsh	m[IU]/mL	[IU]/L	m[IU]/mL	0.01	300	FSH	FSH
+lh	m[IU]/mL	[IU]/L	m[IU]/mL	0.01	300	LH	LH
+prolactin	ng/mL	ng/mL	ng/mL	0.1	10000	Prolactin	Prolactina
+cortisol	ug/dL	nmol/L	ug/dL	0.1	200	Cortisol	Cortisol
+dhea_s	ug/dL	umol/L	ug/dL	1	2000	DHEA sulfate	DHEA sulfato
+shbg	nmol/L	nmol/L	nmol/L	1	500	SHBG	SHBG
+insulin	u[IU]/mL	m[IU]/L	u[IU]/mL	0.1	3000	Insulin	Insulina
+igf1	ng/mL	ng/mL	ng/mL	5	2000	IGF-1	IGF-1
+pth	pg/mL	pg/mL	pg/mL	1	5000	Parathyroid hormone	Paratohormona (PTH)
+hydroxyprogesterone_17	ng/dL	ng/dL	ng/dL	1	50000	17-OH progesterone	17-OH progesterona
+hcg_beta	m[IU]/mL	[IU]/L	m[IU]/mL	0	1000000	Beta hCG	Beta-hCG
+amh	ng/mL	ng/mL	ng/mL	0	50	Anti-Müllerian hormone	Hormona antimülleriana
+psa	ng/mL	ng/mL	ng/mL	0	10000	PSA	PSA
+psa_free	ng/mL	ng/mL	ng/mL	0	1000	Free PSA	PSA libre
+homocysteine	umol/L	umol/L	umol/L	1	500	Homocysteine	Homocisteína
+procalcitonin	ng/mL	ng/mL	ng/mL	0	1000	Procalcitonin	Procalcitonina
+rheumatoid_factor	[IU]/mL	[IU]/mL	[IU]/mL	0	10000	Rheumatoid factor	Factor reumatoide
+ige_total	[IU]/mL	[IU]/mL	[IU]/mL	0	100000	Total IgE	IgE total
+igg	mg/dL	g/L	mg/dL	50	10000	IgG	IgG
+iga	mg/dL	g/L	mg/dL	1	5000	IgA	IgA
+igm	mg/dL	g/L	mg/dL	1	10000	IgM	IgM
+nt_probnp	pg/mL	ng/L	pg/mL	0	100000	NT-proBNP	NT-proBNP
+bnp	pg/mL	ng/L	pg/mL	0	10000	BNP	BNP
+troponin_i_hs	ng/L	ng/L	ng/L	0	1000000	hs troponin I	Troponina I ultrasensible
+troponin_t_hs	ng/L	ng/L	ng/L	0	1000000	hs troponin T	Troponina T ultrasensible
+cea	ng/mL	ug/L	ng/mL	0	100000	CEA	CEA
+ca125	[arb'U]/mL	[arb'U]/mL	[arb'U]/mL	0	100000	CA 125	CA 125
+ca19_9	[arb'U]/mL	[arb'U]/mL	[arb'U]/mL	0	1000000	CA 19-9	CA 19-9
+ca15_3	[arb'U]/mL	[arb'U]/mL	[arb'U]/mL	0	100000	CA 15-3	CA 15-3
+afp	ng/mL	ug/L	ng/mL	0	1000000	Alpha-fetoprotein	Alfafetoproteína
+hbsag						Hepatitis B surface antigen	Antígeno de superficie de la hepatitis B (HBsAg)
+hcv_ab						Hepatitis C antibodies	Anticuerpos frente a hepatitis C
+ph_arterial	[pH]	[pH]	[pH]	6.5	8	Arterial pH	pH arterial
+pco2_arterial	mm[Hg]	mm[Hg]	mm[Hg]	5	200	Arterial pCO2	pCO2 arterial
+po2_arterial	mm[Hg]	mm[Hg]	mm[Hg]	10	700	Arterial pO2	pO2 arterial
+ammonia	umol/L	umol/L	umol/L	1	2000	Ammonia	Amonio
+zinc	ug/dL	umol/L	ug/dL	10	1000	Zinc	Zinc
+copper	ug/dL	umol/L	ug/dL	5	1000	Copper	Cobre
+sodium_blood	mmol/L	mmol/L	mmol/L	90	200	Sodium (whole blood)	Sodio (sangre)
+potassium_blood	mmol/L	mmol/L	mmol/L	1	12	Potassium (whole blood)	Potasio (sangre)

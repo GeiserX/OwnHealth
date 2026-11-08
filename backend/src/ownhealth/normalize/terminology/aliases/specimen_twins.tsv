@@ -1,0 +1,18 @@
+# The same analyte name measured in another specimen is another series (ingestion.md 8.2: name +
+# unit + specimen, never name alone). A name that resolves to alias_group, read with this specimen
+# hint, moves to twin. Specimen values: Bld, Ser/Plas, Urine.
+alias_group	specimen	twin
+creatinine	Urine	urine_creatinine
+sodium	Urine	urine_sodium
+sodium	Bld	sodium_blood
+potassium	Bld	potassium_blood
+albumin	Urine	urine_albumin
+total_protein	Urine	urine_protein
+glucose	Urine	urine_glucose_strip
+glucose	Bld	glucose_blood
+bilirubin_total	Urine	urine_bilirubin_strip
+hemoglobin	Urine	urine_blood_strip
+wbc	Urine	urine_wbc_hpf
+rbc	Urine	urine_rbc_hpf
+ph_arterial	Urine	urine_ph
+urine_protein	text	urine_protein_strip

@@ -1,0 +1,50 @@
+# Labs a prescriber looks at for a drug (genomics.md section 8, step 5). Latest value, date, the lab's own
+# flag and the status word, Stale when outside the recency window of its body system. Each reason is
+# written in English and Spanish; check_drug picks the request's language.
+cite_default: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/genomics.md#8-check_drug-pgx-joined-with-meds-and-labs
+drug_labs:
+  atorvastatin: &statin
+    - {lab: alt, reason: {en: liver enzymes in the statin label, es: enzimas hepáticas en la ficha de la estatina}}
+    - {lab: ck, reason: {en: muscle enzyme in the statin label, es: enzima muscular en la ficha de la estatina}}
+    - {lab: ldl_c, reason: {en: treatment target, es: objetivo del tratamiento}}
+  simvastatin: *statin
+  rosuvastatin: *statin
+  pravastatin: *statin
+  clopidogrel:
+    - {lab: platelets, reason: {en: antiplatelet therapy, es: tratamiento antiagregante}}
+    - {lab: hemoglobin, reason: {en: bleeding risk, es: riesgo de sangrado}}
+    - {lab: egfr, reason: {en: kidney function, es: función renal}}
+    - {lab: alt, reason: {en: liver function, es: función hepática}}
+  warfarin:
+    - {lab: inr, reason: {en: anticoagulation monitoring, es: control de la anticoagulación}}
+    - {lab: hemoglobin, reason: {en: bleeding risk, es: riesgo de sangrado}}
+    - {lab: platelets, reason: {en: bleeding risk, es: riesgo de sangrado}}
+  codeine: &opioid
+    - {lab: egfr, reason: {en: kidney function, es: función renal}}
+    - {lab: alt, reason: {en: liver function, es: función hepática}}
+  tramadol: *opioid
+  azathioprine: &thiopurine
+    - {lab: wbc, reason: {en: blood count in the thiopurine label, es: hemograma en la ficha de la tiopurina}}
+    - {lab: platelets, reason: {en: blood count in the thiopurine label, es: hemograma en la ficha de la tiopurina}}
+    - {lab: hemoglobin, reason: {en: blood count in the thiopurine label, es: hemograma en la ficha de la tiopurina}}
+    - {lab: alt, reason: {en: liver function, es: función hepática}}
+  mercaptopurine: *thiopurine
+  thioguanine: *thiopurine
+  fluorouracil: &fluoropyrimidine
+    - {lab: wbc, reason: {en: blood count, es: hemograma}}
+    - {lab: platelets, reason: {en: blood count, es: hemograma}}
+    - {lab: egfr, reason: {en: kidney function, es: función renal}}
+  capecitabine: *fluoropyrimidine
+  tacrolimus:
+    - {lab: creatinine, reason: {en: kidney function, es: función renal}}
+    - {lab: egfr, reason: {en: kidney function, es: función renal}}
+  omeprazole: &ppi
+    - {lab: vitamin_b12, reason: {en: long-term use in the PPI label, es: uso prolongado en la ficha del IBP}}
+    - {lab: magnesium, reason: {en: long-term use in the PPI label, es: uso prolongado en la ficha del IBP}}
+  pantoprazole: *ppi
+  lansoprazole: *ppi
+  citalopram: &ssri
+    - {lab: sodium, reason: {en: hyponatraemia in the SSRI label, es: hiponatremia en la ficha del ISRS}}
+  escitalopram: *ssri
+  sertraline: *ssri
+  paroxetine: *ssri
