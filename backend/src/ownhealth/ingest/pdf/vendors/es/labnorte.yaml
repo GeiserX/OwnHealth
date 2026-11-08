@@ -1,0 +1,18 @@
+# LabNorte (fictional lab used by the synthetic fixtures and the demo). Anchors only: no values,
+# no patient block. See CONTRIBUTING "How to add a lab template".
+id: es/labnorte
+version: "1"
+provider_name: LabNorte
+locale: es
+fingerprint:
+  all: [labnorte]
+  any: [prueba, resultado, unidades, valores de referencia, fecha de toma]
+columns:
+  name: [prueba]
+  value: [resultado]
+  unit: [unidades]
+  ref_range: [valores de referencia]
+  flag: [indicador]
+flag_tokens: [H, L, "*"]
+stop: [documento sintetico, validado por]
+skip: [comentario]

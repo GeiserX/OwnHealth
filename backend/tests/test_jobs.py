@@ -84,6 +84,24 @@ def test_dead_job_creates_review_item(engine, ctx, committed_family):
     assert item["kind"] == "job_failed" and item["household_id"] == committed_family.household_id
 
 
+@pytest.mark.parametrize("doc", ["00000000-0000-0000-0000-000000000000", "not-a-uuid"])
+def test_dead_job_naming_a_missing_document_still_files_its_item(engine, ctx, committed_family, doc):
+    pid = str(committed_family.profiles["alex"])
+    with engine.begin() as c:
+        jid = enqueue(c, "test.bad_input", {"profile_id": pid, "document_id": doc})
+    run_one(ctx, kinds=["test.bad_input"])
+    assert _state(engine, jid)["state"] == "dead"
+    with engine.connect() as c:
+        item = (
+            c.execute(
+                text("select document_id, payload from review_item where payload->>'job_id' = :j"), {"j": str(jid)}
+            )
+            .mappings()
+            .one()
+        )
+    assert item["document_id"] is None and item["payload"]["payload_document_id"] == doc
+
+
 def test_skip_locked_gives_each_worker_its_own_job(engine):
     with engine.begin() as c:
         ids = {enqueue(c, "test.claim", {"n": i}) for i in range(2)}

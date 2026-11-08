@@ -276,18 +276,18 @@ sequenceDiagram
 
 ### 8.2 LOINC resolution
 
-We start from Mirobody's resolver bundle: Apache-2.0 overlays (`resolver_overrides.tsv`, `recall_synonyms.tsv`) plus LOINC 2.83 content under the LOINC License and UCUM under the UCUM License. Some of its files ship through Git LFS. We add our own multilingual alias table. LOINC ships with its notice and version number. Codes are optional enrichment: an uncoded row stays usable under its `alias_group`.
+v0.1 ships our own curated LOINC 2.83 subset (202 codes, checked on tx.fhir.org) under the LOINC License, and our own multilingual alias tables. Mirobody's resolver overlays are not imported. LOINC ships with its notice and version number. Codes are optional enrichment: an uncoded row stays usable under its `alias_group`.
 
 Resolution order:
 1. Normalize the printed name: lowercase, strip accents (matching only), drop specimen prefixes (`S-`, `P-`, `Suero`, `Sangre`, `Serum`), expand per-language abbreviations.
 2. Look up our alias table with (name, language, unit dimension, specimen hint, method hint). The unit dimension picks the code: LDL in mg/dL is a mass concentration code, in mmol/L a substance concentration code.
-3. Fall back to the Mirobody bundle aliases, then the LOINC linguistic variants (es-ES, de-DE, fr-FR), which are formal names and rarely match what labs print.
+3. Fall back to the LOINC linguistic variants (es-ES, de-DE, fr-FR), which are formal names and rarely match what labs print.
 4. Panel and category names ("Perfil lipídico", "Hemograma completo", "Blutbild") are refused, never coded as an analyte.
 5. No match: `loinc = null`, `alias_group` = normalized printed name scoped to the provider, and a review item `unmapped`. We never create a second series for an analyte that already has one: when the alias table grows, `ownhealth rederive` re-links history and recomputes the derived layer.
 
 Calculated and measured values keep separate codes and a visible marker in trends (Friedewald vs direct LDL; eGFR CKD-EPI 2009 vs 2021).
 
-Sample rows of `data/terminology/aliases/{es,en,de,fr}.tsv` (codes marked † still to be checked against the LOINC release we ship):
+Sample rows of `backend/src/ownhealth/normalize/terminology/aliases/{es,en,de,fr}.tsv` (codes marked † still to be checked against the LOINC release we ship):
 
 | alias (as printed) | lang | specimen | property | method | LOINC |
 |---|---|---|---|---|---|
@@ -336,7 +336,7 @@ https://loinc.org/4548-4
 - Store the unit **exactly as printed**, the parsed UCUM code, and a canonical value in one canonical unit per `alias_group`. Conversion is derived and never destructive.
 - Printed-unit synonyms map to UCUM: `mg/dl`, `mg%` to `mg/dL`; `x10^3/µL`, `10^9/L`, `x10E3/uL`, `miles/µL`, `/mm3` to `10*3/uL` or `10*9/L`; `UI/L`, `IE/l` to `[IU]/L`; `U/l` to `U/L`; `mUI/mL`, `µUI/mL`, `µIU/mL` to `m[IU]/mL` or `u[IU]/mL`. `[IU]` and `U` are not interchangeable.
 - **Unit dimension vs LOINC property:** the parsed unit's dimension must match the resolved code's property (MCnc = mass/volume, SCnc = substance/volume, ACnc = arbitrary units/volume, CCnc = catalytic/volume, NCnc = count/volume, MFr/SFr = fraction, ArVRat = volume rate/area). A mismatch sends the row to review. This one check catches most column shifts.
-- **Mass to molar** needs a molar mass per analyte. UCUM cannot infer it and wrong molar masses are a documented failure. We keep `data/terminology/conversions.yaml`, one entry per analyte, with a citation and a unit test per entry:
+- **Mass to molar** needs a molar mass per analyte. UCUM cannot infer it and wrong molar masses are a documented failure. We keep `normalize/terminology/molar/molar_mass.tsv`, one row per analyte, with a citation and a unit test per entry:
 
 | alias_group | Species used | g/mol | Conventional to SI | Trap |
 |---|---|---|---|---|
@@ -394,7 +394,7 @@ Every candidate row, from any source, runs the same validators. Each failure add
 | Converts | Canonical value computable | `unit_unconvertible` |
 | Plausibility | Within hard physiological limits per `alias_group` (`data/terminology/limits/labs.tsv`, e.g. glucose 10-1000 mg/dL, sodium 90-200 mmol/L, HbA1c 3-20 %) | `implausible` |
 | Factor 1000 | Value out of limits but value x1000 or /1000 is inside | `suspect_separator` |
-| Range sanity | low < high; value not equal to a range bound text token in the same row | `range_parse`, `value_is_range` |
+| Range sanity | low < high; the value cell does not itself look like a range (`70 - 110`). A value on a bound is real (HbA1c 5.6 with `4.0 - 5.6`) and passes | `range_parse`, `value_is_range` |
 | Grounding | Value token (separator-tolerant) found in the page word layer, inside the row bbox +/- 4 pt for rule extractors, anywhere on the page for agent rows; name tokens on the same line band | `not_grounded`, `name_not_on_line` |
 | Identity | Patient name and birth date on the page match the target profile (fuzzy, accent-insensitive) | `identity_mismatch`, `identity_missing` |
 | Dates | Collection date not in the future, not before birth, not after report date | `date_invalid` |

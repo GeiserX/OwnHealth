@@ -37,6 +37,8 @@ REASON_CODES: frozenset[str] = frozenset(
         "conflict",
         "amended_value",
         "possible_injection",
+        "flag_mismatch",
+        "ambiguous_separator",
     }
 )
 

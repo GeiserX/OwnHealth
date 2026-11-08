@@ -27,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import Connection, Engine, text
 
@@ -208,6 +209,14 @@ def _job_failed_item(conn: Connection, job: Job, exc: BaseException) -> None:
     profile_id = p.get("profile_id")
     household_id = p.get("household_id")
     document_id = p.get("document_id")
+    # a payload may name a document that is gone or is not a uuid: keep it in the payload, never in the FK
+    if document_id is not None:
+        try:
+            document_id = conn.execute(
+                text("select id from document where id = :d"), {"d": str(UUID(str(document_id)))}
+            ).scalar()
+        except ValueError:
+            document_id = None
     if household_id is None and profile_id:
         household_id = conn.execute(text("select household_id from profile where id = :p"), {"p": profile_id}).scalar()
     if household_id is None and document_id:
@@ -221,7 +230,13 @@ def _job_failed_item(conn: Connection, job: Job, exc: BaseException) -> None:
             household_id=household_id,
             profile_id=profile_id,
             document_id=document_id,
-            payload={"job_id": job.id, "kind": job.kind, "attempts": job.attempts, "error": _error_text(exc)},
+            payload={
+                "job_id": job.id,
+                "kind": job.kind,
+                "attempts": job.attempts,
+                "error": _error_text(exc),
+                "payload_document_id": p.get("document_id"),
+            },
         ),
     )
 

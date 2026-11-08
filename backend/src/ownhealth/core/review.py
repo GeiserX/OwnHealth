@@ -34,6 +34,7 @@ ReviewKind = Literal[
     "genome_reinterpretation",
     "job_failed",
     "restore_check_failed",
+    "pending_document",
 ]
 
 

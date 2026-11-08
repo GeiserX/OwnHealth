@@ -181,7 +181,7 @@ def dispatch_upload(
             )
             item["document_id"] = str(ref.id)
             item["duplicate"] = not ref.created
-            if kind == "pdf" and ref.created:
+            if ref.created:  # images too: the PDF handler files them as pending_document items
                 item["job_id"] = enqueue(
                     conn,
                     JOB_KINDS["pdf"],

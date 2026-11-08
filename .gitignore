@@ -12,5 +12,5 @@ ui/.svelte-kit/
 backend/src/ownhealth/static/
 
 # Runtime data and secrets
-data/
+/data/
 .env
