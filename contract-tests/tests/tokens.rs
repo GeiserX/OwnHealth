@@ -8,7 +8,7 @@ use ownhealth_contract_tests::{ALL_SCOPES, Client, Mcp, uniq};
 use serde_json::{Value, json};
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn create_list_and_revoke() -> anyhow::Result<()> {
     let c = Client::new()?;
     let label = format!("Claude Code · {}", uniq());
@@ -137,7 +137,7 @@ async fn create_list_and_revoke() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn bad_token_requests() -> anyhow::Result<()> {
     let c = Client::new()?;
     let bad = |b: Value| {
@@ -205,7 +205,7 @@ async fn bad_token_requests() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn usage_counts_calls_and_is_the_owners_only() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (t, plain) = c.token(json!({"scopes": ALL_SCOPES})).await?;
@@ -260,7 +260,7 @@ async fn usage_counts_calls_and_is_the_owners_only() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn a_member_makes_a_token_after_step_up() -> anyhow::Result<()> {
     let c = Client::new()?;
     let slug = c.new_relative().await?;

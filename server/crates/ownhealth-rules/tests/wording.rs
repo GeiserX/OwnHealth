@@ -1,4 +1,4 @@
-//! The wording lint (backend/tests/state/test_wording.py): 0 imperative phrases in everything lane E
+//! The wording lint (0.1.1 tests/state/test_wording.py): 0 imperative phrases in everything lane E
 //! writes, and proof that it can fail, on known-bad sentences and on the CPIC quotes themselves.
 
 mod common;

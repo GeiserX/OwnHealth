@@ -3,7 +3,7 @@
 use ownhealth_contract_tests::Client;
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn healthz_and_readyz() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (s, v) = c.get_json("/healthz").await?;
@@ -15,7 +15,7 @@ async fn healthz_and_readyz() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn unknown_api_paths_are_404_not_found() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (s, v) = c.get_json("/api/no-such-route").await?;

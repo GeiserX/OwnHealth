@@ -1,7 +1,7 @@
 """Spike (c): a software authenticator registers through py_webauthn (exactly as auth/passkeys.py
 stores it), then answers a login challenge from webauthn-rs (examples/spike_webauthn.rs).
 
-    cd backend && uv run python ../server/scripts/spike_webauthn.py ../server/target/debug/examples/spike_webauthn
+    uv run --with webauthn==3.0.1 --with cbor2==6.2.1 --with cryptography==50.0.2 python server/scripts/spike_webauthn.py server/target/debug/examples/spike_webauthn
 """
 
 import base64

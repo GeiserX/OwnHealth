@@ -1,4 +1,4 @@
-//! The rule pack (`state/pack.py`): the shipped YAML of `backend/src/ownhealth/rules/pack/`, read
+//! The rule pack (`state/pack.py`): the shipped YAML of `data/rules/pack/`, read
 //! unchanged, plus an optional override directory (`OWNHEALTH_RULES_OVERRIDE_DIR`).
 //!
 //! An override file replaces the shipped file with the same name (or adds a new body system). With any
@@ -37,7 +37,7 @@ const NON_SYSTEM_FILES: [&str; 8] = [
 
 macro_rules! shipped {
     ($($name:literal),* $(,)?) => {
-        [$(($name, include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../backend/src/ownhealth/rules/pack/", $name)))),*]
+        [$(($name, include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../data/rules/pack/", $name)))),*]
     };
 }
 
@@ -64,7 +64,7 @@ pub const SHIPPED: [(&str, &str); 17] = shipped!(
 
 const CPIC_SNAPSHOT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../backend/src/ownhealth/rules/cpic/snapshot.json"
+    "/../../../data/rules/cpic/snapshot.json"
 ));
 
 /// A broken pack (Python's `PackError`, a ValueError): HTTP 500.

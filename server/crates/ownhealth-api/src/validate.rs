@@ -156,16 +156,11 @@ impl Errors {
     /// `x: date | None = Query(None)`.
     pub fn date(&mut self, q: &[(String, String)], key: &str) -> Option<chrono::NaiveDate> {
         let raw = param(q, key)?;
-        match chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-            Ok(d) if raw.len() == 10 => Some(d),
-            _ => {
-                self.push(
-                    "date_from_datetime_parsing",
-                    vec![json!("query"), json!(key)],
-                    "Input should be a valid date or datetime, input is too short",
-                    json!(raw),
-                    Some(json!({"error": "input is too short"})),
-                );
+        match parse_date(raw) {
+            Ok(d) => Some(d),
+            Err((kind, msg, error)) => {
+                let ctx = error.map(|e| json!({"error": e}));
+                self.push(kind, vec![json!("query"), json!(key)], &msg, json!(raw), ctx);
                 None
             }
         }
@@ -188,15 +183,143 @@ impl Errors {
     }
 }
 
-/// pydantic's lax int from a string: optional sign, digits, surrounding whitespace.
+/// pydantic's lax int from a string: surrounding whitespace, a sign, digits with single
+/// underscores between them, and an optional fraction of zeros (`"1.0"`, never `"1."`).
 fn parse_int(raw: &str) -> Option<i64> {
     let t = raw.trim();
-    let t = t.strip_prefix('+').unwrap_or(t);
-    let digits = t.strip_prefix('-').unwrap_or(t);
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit() || b == b'_') {
+    let (int, frac) = t.split_once('.').map_or((t, None), |(i, f)| (i, Some(f)));
+    if frac.is_some_and(|f| f.is_empty() || !f.bytes().all(|b| b == b'0')) {
         return None;
     }
-    t.replace('_', "").parse().ok()
+    let digits = int.strip_prefix(['+', '-']).unwrap_or(int);
+    let grouped = !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit() || b == b'_')
+        && !digits.starts_with('_')
+        && !digits.ends_with('_')
+        && !digits.contains("__");
+    if !grouped {
+        return None;
+    }
+    int.replace('_', "").parse().ok()
+}
+
+/// A JSON value as pydantic's lax `int` reads it: an int, an integral float, a bool or an integer
+/// string. The error is (type, msg) of pydantic's entry.
+pub fn lax_int(v: &Value) -> Result<i64, (&'static str, &'static str)> {
+    let fraction = (
+        "int_from_float",
+        "Input should be a valid integer, got a number with a fractional part",
+    );
+    match v {
+        Value::Bool(b) => Ok(i64::from(*b)),
+        Value::Number(n) => match (n.as_i64(), n.as_f64()) {
+            (Some(i), _) => Ok(i),
+            // f64 -> i64 saturates; pydantic's own bound is i64 too
+            (None, Some(f)) if f.is_finite() && f.fract() == 0.0 => Ok(f as i64),
+            (None, Some(f)) if f.is_finite() => Err(fraction),
+            _ => Err((
+                "int_parsing_size",
+                "Unable to parse input string as an integer, exceeded maximum size",
+            )),
+        },
+        Value::String(s) => parse_int(s).ok_or((
+            "int_parsing",
+            "Input should be a valid integer, unable to parse string as an integer",
+        )),
+        _ => Err(("int_type", "Input should be a valid integer")),
+    }
+}
+
+/// The date part of a string as speedate (pydantic's parser) reads it, or its error text.
+fn date_part(raw: &str) -> Result<chrono::NaiveDate, &'static str> {
+    let b = raw.as_bytes();
+    if b.len() < 10 {
+        return Err("input is too short");
+    }
+    let digits = |r: std::ops::Range<usize>, what: &'static str| -> Result<u32, &'static str> {
+        let part = &b[r];
+        if part.iter().all(u8::is_ascii_digit) {
+            Ok(part.iter().fold(0, |n, d| n * 10 + u32::from(d - b'0')))
+        } else {
+            Err(what)
+        }
+    };
+    let year = digits(0..4, "invalid character in year")?;
+    if b[4] != b'-' {
+        return Err("invalid date separator, expected `-`");
+    }
+    let month = digits(5..7, "invalid character in month")?;
+    if b[7] != b'-' {
+        return Err("invalid date separator, expected `-`");
+    }
+    let day = digits(8..10, "invalid character in day")?;
+    if !(1..=12).contains(&month) {
+        return Err("month value is outside expected range of 1-12");
+    }
+    i32::try_from(year)
+        .ok()
+        .and_then(|y| chrono::NaiveDate::from_ymd_opt(y, month, day))
+        .ok_or("day value is outside expected range")
+}
+
+/// A pydantic error as (type, msg, ctx error).
+pub type Refusal = (&'static str, String, Option<String>);
+
+/// A string as pydantic reads a `date`: `YYYY-MM-DD`, or a datetime at exactly midnight (any
+/// offset). The words of a broken time part are approximate.
+pub fn parse_date(raw: &str) -> Result<chrono::NaiveDate, Refusal> {
+    let refuse = |e: &str| -> Refusal {
+        (
+            "date_from_datetime_parsing",
+            format!("Input should be a valid date or datetime, {e}"),
+            Some(e.to_string()),
+        )
+    };
+    let d = date_part(raw).map_err(refuse)?;
+    let rest = &raw[10..];
+    if rest.is_empty() {
+        return Ok(d);
+    }
+    let mut chars = rest.chars();
+    if !matches!(chars.next(), Some('T' | 't' | '_' | ' ')) {
+        return Err(refuse("invalid datetime separator, expected `T`, `t`, `_` or space"));
+    }
+    let time = chars.as_str();
+    let (clock, zone) = match time.find(['Z', 'z', '+', '-']) {
+        Some(i) => time.split_at(i),
+        None => (time, ""),
+    };
+    let numeric = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let zone_ok = matches!(zone, "" | "Z" | "z")
+        || (zone.len() == 6 && numeric(&zone[1..3]) && &zone[3..4] == ":" && numeric(&zone[4..]))
+        || (zone.len() == 5 && numeric(&zone[1..]));
+    let fmt = if clock.len() == 5 { "%H:%M" } else { "%H:%M:%S%.f" };
+    match chrono::NaiveTime::parse_from_str(clock, fmt) {
+        Ok(t) if zone_ok && clock.len() >= 5 => {
+            if t == chrono::NaiveTime::MIN {
+                Ok(d)
+            } else {
+                Err((
+                    "date_from_datetime_inexact",
+                    "Datetimes provided to dates should have zero time - e.g. be exact dates".into(),
+                    None,
+                ))
+            }
+        }
+        _ => Err(refuse("input is too short")),
+    }
+}
+
+/// The error pydantic gives a `datetime` string whose date part is broken (a broken time part is
+/// left to the model's own parse).
+pub fn datetime_date_refusal(raw: &str) -> Option<Refusal> {
+    date_part(raw).err().map(|e| {
+        (
+            "datetime_from_date_parsing",
+            format!("Input should be a valid datetime or date, {e}"),
+            Some(e.to_string()),
+        )
+    })
 }
 
 /// A UUID as pydantic reads it: hyphenated, simple, braced or `urn:uuid:`.

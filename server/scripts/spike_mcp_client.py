@@ -1,6 +1,6 @@
-"""Spike (a) client: the Python MCP SDK (backend/.venv) against a streamable-HTTP server.
+"""Spike (a) client: the Python MCP SDK (mcp 2.3.0) against a streamable-HTTP server.
 
-    cd backend && uv run python ../server/scripts/spike_mcp_client.py http://127.0.0.1:18765/mcp
+    uv run --with mcp==2.3.0 python server/scripts/spike_mcp_client.py http://127.0.0.1:18765/mcp
 """
 
 import asyncio

@@ -894,13 +894,15 @@ fn newest_first(mut points: Vec<Value>) -> Vec<Value> {
 }
 
 /// Points back to ascending after the budget cut (the newest survive the cut).
+/// Python's `{**data, "points": ...}` keeps the key where it was.
 pub fn ascending(mut data: Map<String, Value>) -> Map<String, Value> {
-    let mut points = match data.remove("points") {
-        Some(Value::Array(a)) => a,
-        _ => Vec::new(),
-    };
-    points.sort_by_key(date_of);
-    data.insert("points".into(), Value::Array(points));
+    match data.get_mut("points") {
+        Some(Value::Array(points)) => points.sort_by_key(date_of),
+        Some(other) => *other = Value::Array(Vec::new()),
+        None => {
+            data.insert("points".into(), Value::Array(Vec::new()));
+        }
+    }
     data
 }
 

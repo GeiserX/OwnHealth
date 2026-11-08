@@ -280,7 +280,6 @@ async fn raw_text_needs_documents_text() -> R {
 fn lane_b_fixtures() -> Vec<PathBuf> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let dirs = [
-        root.join("backend/tests/fixtures/injection"),
         root.join("fixtures/pdf/injection"),
         root.join("fixtures/labslips/injection"),
         root.join("fixtures/injection"),

@@ -198,6 +198,27 @@ impl Client {
                 .body(Body::from(serde_json::to_vec(b)?))?,
             None => req.body(Body::empty())?,
         };
+        self.dispatch(req).await
+    }
+
+    /// A request with a body of any type (a multipart upload).
+    pub async fn send_raw(
+        &mut self,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> anyhow::Result<Resp> {
+        let mut req = Request::builder().method(method).uri(path).header("host", &self.host);
+        if !self.cookies.is_empty() {
+            let jar: Vec<String> = self.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            req = req.header("cookie", jar.join("; "));
+        }
+        let req = req.header("content-type", content_type).body(Body::from(body))?;
+        self.dispatch(req).await
+    }
+
+    async fn dispatch(&mut self, req: Request<Body>) -> anyhow::Result<Resp> {
         let res = self.app.clone().oneshot(req).await?;
         let status = res.status();
         let headers = res.headers().clone();

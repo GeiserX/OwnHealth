@@ -1,6 +1,6 @@
 [package]
 name = "ownhealth-contract-tests"
-description = "Lane J: black-box HTTP and MCP tests that both backends (Python 0.1.1 and Rust 0.2.0) must pass."
+description = "Black-box HTTP and MCP tests, with goldens recorded from 0.1.1, that the server must pass."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

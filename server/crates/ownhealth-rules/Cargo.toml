@@ -10,6 +10,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The genome stand-in seam (`genome::set_genome_source`) for this crate's tests.
+testing = []
+
 [dependencies]
 ownhealth-core.workspace = true
 ownhealth-normalize.workspace = true
@@ -32,6 +36,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 ownhealth-core = { workspace = true, features = ["testing"] }
+ownhealth-rules = { path = ".", features = ["testing"] }
 anyhow.workspace = true
 tokio.workspace = true
 

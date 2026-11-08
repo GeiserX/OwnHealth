@@ -78,7 +78,7 @@ pub async fn status_data(call: &mut Call<'_>) -> ToolResult<(Map<String, Value>,
     let body = call.svc.build_state(&mut *call.conn, pid, call.as_of.day).await?;
     let rendered = call.svc.render(&body, &call.lang, &call.units, &call.mode)?;
     let mut rendered = match rendered {
-        Value::Object(mut m) => match m.remove("data") {
+        Value::Object(mut m) => match m.shift_remove("data") {
             Some(Value::Object(d)) => d,
             Some(_) => Map::new(),
             None => m,
@@ -87,12 +87,12 @@ pub async fn status_data(call: &mut Call<'_>) -> ToolResult<(Map<String, Value>,
     };
     let mut extra = Map::new();
     for k in ENVELOPE_FIELDS {
-        if let Some(v) = rendered.remove(k) {
+        if let Some(v) = rendered.shift_remove(k) {
             extra.insert(k.into(), v);
         }
     }
     for k in ["profile", "as_of", "lang", "identity_mode", "generated_at", "schema"] {
-        rendered.remove(k);
+        rendered.shift_remove(k);
     }
     for key in ["medications", "supplements", "active_conditions"] {
         wrap_plain(rendered.get_mut(key), "name", "fhir_note");
@@ -133,7 +133,7 @@ pub async fn status_data(call: &mut Call<'_>) -> ToolResult<(Map<String, Value>,
     let mut by_scope: BTreeSet<String> = BTreeSet::new();
     for (key, scope) in SECTION_SCOPE {
         if rendered.contains_key(key) && !scopes.contains(scope) {
-            rendered.remove(key);
+            rendered.shift_remove(key);
             by_scope.insert(crate::gate::scope_label(scope));
         }
     }
@@ -156,7 +156,7 @@ pub async fn status_data(call: &mut Call<'_>) -> ToolResult<(Map<String, Value>,
     if let Some(Value::Object(fresh)) = rendered.get_mut("data_freshness") {
         for (k, scope) in FRESHNESS_SCOPE {
             if fresh.contains_key(k) && !scopes.contains(scope) {
-                fresh.remove(k);
+                fresh.shift_remove(k);
                 by_scope.insert(k.into());
             }
         }
@@ -182,12 +182,12 @@ pub async fn status_data(call: &mut Call<'_>) -> ToolResult<(Map<String, Value>,
                 if let Some(m) = item.as_object_mut()
                     && m.get("name").is_some_and(truthy)
                 {
-                    m.remove("text");
+                    m.shift_remove("text");
                 }
             }
         }
     }
-    let mut withheld = match extra.remove("withheld") {
+    let mut withheld = match extra.shift_remove("withheld") {
         Some(Value::Object(m)) => m,
         _ => Map::new(),
     };

@@ -191,3 +191,45 @@ fn the_dev_secret_key_is_refused_outside_dev_and_demo() -> R {
     );
     Ok(())
 }
+
+/// A writer the access-log test reads back.
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if let Ok(mut v) = self.0.lock() {
+            v.extend_from_slice(b);
+        }
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn one_access_line_per_request_without_the_query() -> R {
+    let db = TestDb::empty().await?;
+    let dir = tempfile::tempdir()?;
+    let rt = runtime(&db, dir.path(), true).await?;
+    let app = build_app(rt);
+    let out = Captured::default();
+    let writer = out.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (s, _, _) = call(&app, get("/healthz?x=secret")?).await?;
+    assert_eq!(s, StatusCode::OK);
+    let text = String::from_utf8(out.0.lock().map(|v| v.clone()).unwrap_or_default())?;
+    let lines: Vec<&str> = text.lines().filter(|l| l.contains("ownhealth::access")).collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    for want in ["GET", "/healthz", "status=200", "latency_ms="] {
+        assert!(lines[0].contains(want), "{want} missing: {}", lines[0]);
+    }
+    assert!(!text.contains("secret"), "{text}");
+    Ok(())
+}

@@ -375,7 +375,7 @@ async fn a_facts_file_cannot_attach_raw_files_another_profile_uploaded() -> R {
         } else {
             // Sam's profile in Alex's household, under another sample id so the sample guard does not fire
             copied["subject"]["sample_id"] = json!("SR-COPY-1");
-            copied["subject"].as_object_mut().map(|s| s.remove("fingerprint"));
+            copied["subject"].as_object_mut().map(|s| s.shift_remove("fingerprint"));
             (e.fam.household_id, e.profile("sam"))
         };
         let (_, summary) = synthetic::seed_genome(

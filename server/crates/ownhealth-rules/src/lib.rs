@@ -1,5 +1,5 @@
 //! Lane E: rules and state (`state/`, `rules/`; architecture.md 11, mcp.md 4, 5.6). The rule pack
-//! (`backend/src/ownhealth/rules/pack/*.yaml`) and the CPIC snapshot are read unchanged. Canonical
+//! (`data/rules/pack/*.yaml`) and the CPIC snapshot are read unchanged. Canonical
 //! JSON and `state_hash` are in `ownhealth_core::canonical` (byte-identical to Python).
 //!
 //! ```text

@@ -1,5 +1,5 @@
 //! JSON shapes: the keys and value types of an answer, with ids, timestamps and values left out,
-//! compared against a golden file recorded from the Python backend (`golden/<name>.json`).
+//! compared against a golden file recorded from the Python 0.1.1 backend (`golden/<name>.json`).
 //!
 //! A shape keeps what the UI depends on and the backends must agree on: every key, whether a
 //! number prints as an integer or a float (Python prints a Decimal of scale 0 as an integer),
@@ -7,8 +7,8 @@
 //! shape (a key some elements lack is marked `absent` there). Object keys that are ids (uuids, src
 //! ids) collapse into `<uuid>` / `<src>` so the shape stays the same from one fresh database to the next.
 //!
-//! Record or refresh the goldens against the reference with
-//! `OWNHEALTH_CONTRACT_RECORD=1 contract-tests/run.sh python shapes`.
+//! The goldens were recorded from the Python 0.1.1 backend. Re-record them only for an intended API
+//! change, with `OWNHEALTH_CONTRACT_RECORD=1 contract-tests/run.sh rust shapes`.
 
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
@@ -250,15 +250,12 @@ fn golden_path(name: &str) -> std::path::PathBuf {
         .join(format!("{name}.json"))
 }
 
-/// Compare the shape of `v` with `golden/<name>.json`; with OWNHEALTH_CONTRACT_RECORD=1 on the
-/// python backend, write it instead.
+/// Compare the shape of `v` with `golden/<name>.json`; with OWNHEALTH_CONTRACT_RECORD=1, write it
+/// instead (only for an intended API change: the goldens were recorded from 0.1.1).
 pub fn assert_shape(name: &str, v: &Value) -> anyhow::Result<()> {
     let got = shape(v);
     let path = golden_path(name);
     if std::env::var("OWNHEALTH_CONTRACT_RECORD").is_ok_and(|x| x == "1") {
-        if crate::backend() != "python" {
-            bail!("goldens are recorded only from the python backend");
-        }
         std::fs::create_dir_all(path.parent().context("no parent")?)?;
         std::fs::write(&path, serde_json::to_string_pretty(&got)? + "\n")?;
         return Ok(());
@@ -303,9 +300,6 @@ fn diff(path: &str, want: &Value, got: &Value, out: &mut Vec<String>) {
 pub fn assert_exact(name: &str, v: &Value) -> anyhow::Result<()> {
     let path = golden_path(&format!("{name}.exact"));
     if std::env::var("OWNHEALTH_CONTRACT_RECORD").is_ok_and(|x| x == "1") {
-        if crate::backend() != "python" {
-            bail!("goldens are recorded only from the python backend");
-        }
         std::fs::create_dir_all(path.parent().context("no parent")?)?;
         std::fs::write(&path, serde_json::to_string_pretty(v)? + "\n")?;
         return Ok(());

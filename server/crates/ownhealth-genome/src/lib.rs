@@ -1,6 +1,6 @@
 //! Lane D: genome (`genome/`, genomics.md). OwnHealth ingests OwnGenome's
 //! `ownhealth.genome-facts/v1`; it never calls variants itself. Imports facts files (schema in
-//! `backend/src/ownhealth/genome/data/`, read unchanged), lists findings behind the gate, and reads
+//! `data/genome/`, read unchanged), lists findings behind the gate, and reads
 //! the uploaded .vcf.gz/.tbi with noodles for `lookup_variant`. Job kind `import.genome_facts`, demo
 //! hook `genome` (order 400). The constants are final.
 
@@ -27,6 +27,15 @@ use uuid::Uuid;
 pub use findings::{Findings, gate_for, withheld_reason};
 pub use lookup::{GenomeQueryError, RefSite, load_ref_sites};
 pub use schema::{ChipSites, fact_id};
+
+/// Runs file work (hashing, tabix reads) on a blocking thread, off the runtime HTTP and MCP share.
+pub(crate) async fn blocking<T, F>(f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.map_err(std::io::Error::other)?
+}
 
 pub const FACTS_SCHEMA: &str = "ownhealth.genome-facts/v1";
 /// Exactly five values, everywhere (mcp.md 5.5). A contract test rejects any other.

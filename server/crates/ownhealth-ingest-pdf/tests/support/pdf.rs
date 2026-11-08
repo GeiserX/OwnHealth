@@ -1,5 +1,5 @@
 //! A small PDF writer for the synthetic lab slips: the content reportlab's canvas wrote for
-//! `fixtures/labslips/generate.py` (one `BT .. Tm (..) Tj ET` per string, Helvetica as a standard
+//! 0.1.1's `fixtures/labslips/generate.py` (one `BT .. Tm (..) Tj ET` per string, Helvetica as a standard
 //! font, Bitstream Vera as an embedded TrueType font with a ToUnicode map and reportlab's code
 //! assignment), uncompressed. It measures strings with the same widths, so the truth boxes match.
 

@@ -1,4 +1,4 @@
-//! A thin stand-in for lane A's `normalize_row` (`fixtures/labslips/fake_normalize.py`).
+//! A thin stand-in for lane A's `normalize_row` (0.1.1's `fixtures/labslips/fake_normalize.py`).
 //!
 //! It knows the analytes of the catalog (names in es/en/de/fr, the units the slips print) and parses
 //! values and ranges by locale. Anything it does not know fails a check, so a wrong row can only reach

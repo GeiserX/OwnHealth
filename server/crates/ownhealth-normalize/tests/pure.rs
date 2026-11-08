@@ -434,7 +434,7 @@ fn test_loinc_subset_size_and_notice() {
     let codes = tables::loinc_codes();
     assert!(codes.len() >= 200);
     assert!(codes.values().all(|c| !c.status.is_empty()));
-    let notice = include_str!("../../../../backend/src/ownhealth/normalize/terminology/loinc/NOTICE.md");
+    let notice = include_str!("../../../../data/terminology/loinc/NOTICE.md");
     assert!(notice.contains("Regenstrief") && notice.contains("loinc.org/license"));
 }
 
@@ -537,8 +537,7 @@ fn test_derivation_version_names_code_and_tables() {
 /// embedded bytes are the files' bytes: a new or moved table cannot be left out of the hash.
 #[test]
 fn test_embedded_tables_are_the_shipped_files() {
-    let root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../backend/src/ownhealth/normalize/terminology");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/terminology");
     fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<Vec<String>>) {
         for e in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{e}")).flatten() {
             let p = e.path();
@@ -907,8 +906,7 @@ async fn test_candidates_are_scored() {
 /// An ignored table never reaches the image (the root .gitignore ignores data/).
 #[test]
 fn test_tables_are_not_git_ignored() {
-    let root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../backend/src/ownhealth/normalize/terminology");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/terminology");
     let files: Vec<String> = tables::FILES
         .iter()
         .map(|(p, _)| p.to_string())

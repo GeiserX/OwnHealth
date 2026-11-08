@@ -31,9 +31,6 @@ pub enum Error {
     /// A row the caller named does not exist. HTTP 404 `not_found`.
     #[error("{0}")]
     NotFound(String),
-    /// A cross-lane interface whose owner has not landed it yet. HTTP 501 `not_implemented`.
-    #[error("{0} is not implemented yet")]
-    NotImplemented(&'static str),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]

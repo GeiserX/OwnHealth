@@ -206,11 +206,74 @@ impl BlobStore {
         fs::remove_file(p)?;
         Ok(true)
     }
+
+    /// Remove upload spools a killed process left in `root/tmp`: regular files named `upload-*`
+    /// (the import route) or 32 hex characters (`put_reader`) last modified more than `older_than`
+    /// ago. The age bound leaves another process's live upload alone. Returns how many went.
+    pub fn sweep_tmp(&self, older_than: std::time::Duration) -> io::Result<usize> {
+        let dir = self.root.join("tmp");
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let now = std::time::SystemTime::now();
+        let mut removed = 0;
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let ours = name.starts_with("upload-") || (name.len() == 32 && name.bytes().all(|c| c.is_ascii_hexdigit()));
+            let meta = entry.metadata()?;
+            if !ours || !meta.is_file() {
+                continue;
+            }
+            let age = meta.modified().ok().and_then(|m| now.duration_since(m).ok());
+            if age.is_some_and(|a| a > older_than) {
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => removed += 1,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sweep_tmp_removes_only_old_spools() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = BlobStore::new(dir.path())?;
+        let tmp = dir.path().join("tmp");
+        fs::create_dir_all(&tmp)?;
+        let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        for (name, old) in [
+            ("upload-0123abcd".to_string(), true),
+            ("a".repeat(32), true),
+            ("upload-fresh".to_string(), false),
+            ("notes.txt".to_string(), true),
+        ] {
+            let f = File::create(tmp.join(name))?;
+            if old {
+                f.set_modified(two_hours_ago)?;
+            }
+        }
+        let one_hour = std::time::Duration::from_secs(3600);
+        assert_eq!(store.sweep_tmp(one_hour)?, 2);
+        let mut left = Vec::new();
+        for e in fs::read_dir(&tmp)? {
+            left.push(e?.file_name().to_string_lossy().into_owned());
+        }
+        left.sort();
+        assert_eq!(left, ["notes.txt", "upload-fresh"]);
+        assert_eq!(store.sweep_tmp(one_hour)?, 0);
+        Ok(())
+    }
 
     #[test]
     fn put_dedupes_and_uses_sharded_path() {

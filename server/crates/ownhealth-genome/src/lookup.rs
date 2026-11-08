@@ -32,7 +32,7 @@ use crate::findings::{
 use crate::schema::{int_of, py_repr};
 use crate::sensitive::{GeneSpan, carrier_spans_overlapping, norm_chrom, spans_overlapping};
 use crate::vcf::{Record, VcfFile};
-use crate::{CALL_STATES, Gate, VariantQuery};
+use crate::{CALL_STATES, Gate, VariantQuery, blocking};
 
 pub const MAX_REGION_BP: i64 = 1_000_000;
 pub const PAGE: usize = 50;
@@ -501,7 +501,13 @@ pub async fn lookup(
         .filter(|r| current.contains(&r.dataset_id) && withheld_reason(r, gate).is_none())
         .collect();
     if let Some(region) = region {
-        return region_answer(blobs, &datasets, gate, region, cursor);
+        let (store, gate, region, cursor) = (
+            blobs.clone(),
+            gate.clone(),
+            region.to_string(),
+            cursor.map(str::to_string),
+        );
+        return blocking(move || region_answer(&store, &datasets, &gate, &region, cursor.as_deref())).await;
     }
     let site = match resolve(&mut *conn, &rows, rsid, hgvs).await? {
         Ok(s) => s,
@@ -555,10 +561,26 @@ pub async fn lookup(
             }
         }
     }
+    let per_source: Vec<(DatasetRow, Option<Value>, Option<CoverageRow>)> = datasets
+        .iter()
+        .map(|ds| {
+            let cited = cited_rows
+                .iter()
+                .find(|(r, _)| r.dataset_id == ds.id)
+                .map(|(_, v)| (*v).clone());
+            (ds.clone(), cited, cov_by_ds.get(&ds.id).cloned())
+        })
+        .collect();
+    let (store, at) = (blobs.clone(), site.clone());
+    let answers = blocking(move || {
+        per_source
+            .iter()
+            .map(|(ds, cited, cov)| call_at(&store, ds, &at, cited.as_ref(), cov.as_ref()))
+            .collect::<Result<Vec<_>>>()
+    })
+    .await?;
     let mut calls = Vec::new();
-    for ds in &datasets {
-        let cited = cited_rows.iter().find(|(r, _)| r.dataset_id == ds.id).map(|(_, v)| *v);
-        let call = call_at(blobs, ds, &site, cited, cov_by_ds.get(&ds.id))?;
+    for (ds, call) in datasets.iter().zip(answers) {
         check_call_state(&call)?;
         let mut entry = Map::new();
         insert(&mut entry, "source", json!(source_label(ds)));

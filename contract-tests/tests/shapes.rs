@@ -27,7 +27,7 @@ async fn check(c: &Client, name: &str, path: &str) -> anyhow::Result<Value> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn me_profiles_household_and_auth_state() -> anyhow::Result<()> {
     let c = Client::new()?;
     // other tests add relatives and members; the shapes are of the demo family
@@ -60,7 +60,7 @@ async fn me_profiles_household_and_auth_state() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn status_and_dashboard_of_every_demo_profile() -> anyhow::Result<()> {
     let c = Client::new()?;
     for p in ["alex", "sam", "lucia", "carmen"] {
@@ -93,7 +93,7 @@ async fn status_and_dashboard_of_every_demo_profile() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn observations_and_trends() -> anyhow::Result<()> {
     let c = Client::new()?;
     check(&c, "observations_alex", "/api/profiles/alex/observations").await?;
@@ -121,7 +121,7 @@ async fn observations_and_trends() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn records_wearables_and_timeline() -> anyhow::Result<()> {
     let c = Client::new()?;
     for kind in [
@@ -192,7 +192,7 @@ fn first_metric(summary: &Value) -> Option<String> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn documents_pages_and_sources() -> anyhow::Result<()> {
     let c = Client::new()?;
     let docs = check(&c, "documents_alex", "/api/profiles/alex/documents").await?;
@@ -231,7 +231,7 @@ async fn documents_pages_and_sources() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn genome_and_drug_check() -> anyhow::Result<()> {
     let c = Client::new()?;
     check(&c, "genome_alex", "/api/profiles/alex/genome").await?;
@@ -272,7 +272,7 @@ async fn genome_and_drug_check() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn review_queue_of_the_demo() -> anyhow::Result<()> {
     let c = Client::new()?;
     let list = check(&c, "review_alex", "/api/review?profile=alex").await?;

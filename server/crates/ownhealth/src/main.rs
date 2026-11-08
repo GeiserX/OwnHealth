@@ -110,6 +110,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
         }
         Cmd::Worker => {
             let rt = Runtime::new(settings)?;
+            app::sweep_spools(&rt);
             let (stop, rx) = tokio::sync::watch::channel(false);
             let workers = jobs::start_workers(&rt.job_context(), rx);
             app::shutdown_signal().await;

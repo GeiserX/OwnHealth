@@ -132,6 +132,31 @@ async fn test_upload_needs_both_fields() -> R {
 }
 
 #[tokio::test]
+async fn test_upload_form_limits_match_starlette() -> R {
+    let a = app().await?;
+    let bad = json!({"detail": {"code": "bad_request", "message": "There was an error parsing the body"}});
+    let pdf = glucose_pdf("LN-LIMIT");
+    // a 2 MiB `profile` field is refused before anything reads it, and is never echoed back
+    let big = "a".repeat(2 * 1024 * 1024);
+    let (s, v) = a.upload("alex", &[("profile", &big)], &[("x.pdf", &pdf)]).await?;
+    assert_eq!((s, &v), (StatusCode::BAD_REQUEST, &bad));
+    // so is a large unknown field
+    let (s, v) = a
+        .upload("alex", &[("profile", "alex"), ("note", &big)], &[("x.pdf", &pdf)])
+        .await?;
+    assert_eq!((s, &v), (StatusCode::BAD_REQUEST, &bad));
+    // 1000 non-file parts pass the parser, 1001 do not
+    let mut fields = vec![("profile", "alex")];
+    fields.extend(std::iter::repeat_n(("note", "x"), 999));
+    let (s, v) = a.upload("alex", &fields, &[("x.pdf", &pdf)]).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    fields.push(("note", "x"));
+    let (s, v) = a.upload("alex", &fields, &[("x.pdf", &pdf)]).await?;
+    assert_eq!((s, &v), (StatusCode::BAD_REQUEST, &bad));
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_jobs_limit_is_checked_at_the_edge() -> R {
     let a = app().await?;
     for bad in ["-1", "0", "201"] {

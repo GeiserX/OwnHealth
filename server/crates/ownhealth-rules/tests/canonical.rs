@@ -1,4 +1,4 @@
-//! RFC 8785 canonical JSON, the bytes the state hash is taken over (backend/tests/state/test_canonical.py).
+//! RFC 8785 canonical JSON, the bytes the state hash is taken over (0.1.1 tests/state/test_canonical.py).
 //! Dates, UUIDs and decimals are strings by the time they reach JSON in Rust; floats are refused.
 
 use ownhealth_rules::{canonical_json, state_hash};

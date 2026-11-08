@@ -49,7 +49,7 @@ fn ndjson(entries: &[(String, Vec<u8>)], name: &str) -> anyhow::Result<Vec<Value
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn the_demo_export_of_alex() -> anyhow::Result<()> {
     let c = Client::new()?;
     let r = c
@@ -155,7 +155,7 @@ async fn the_demo_export_of_alex() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn a_small_export_holds_exactly_what_was_written() -> anyhow::Result<()> {
     let c = Client::new()?;
     let p = c.new_relative().await?;
@@ -197,7 +197,7 @@ async fn a_small_export_holds_exactly_what_was_written() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn export_needs_management_and_a_fresh_login() -> anyhow::Result<()> {
     let c = Client::new()?;
     let r = c.post("/api/profiles/sam/export", &json!({})).await?;

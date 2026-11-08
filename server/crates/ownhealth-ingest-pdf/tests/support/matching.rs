@@ -1,4 +1,4 @@
-//! Match extracted rows against ground truth: row F1 and dropped rows (`fixtures/labslips/match.py`).
+//! Match extracted rows against ground truth: row F1 and dropped rows (0.1.1's `fixtures/labslips/match.py`).
 
 use std::collections::BTreeMap;
 

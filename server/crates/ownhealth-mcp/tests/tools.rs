@@ -364,19 +364,6 @@ async fn check_drug() -> R {
     Ok(())
 }
 
-#[tokio::test]
-async fn not_available_lane_is_a_tool_error() -> R {
-    let w = world().await?;
-    w.fakes.set_state(StateMode::Stub);
-    let c = w.connect(&w.tok().await?).await?;
-    let e = c
-        .call_tool("get_health_status", json!({"profile": "alex"}))
-        .await?
-        .err();
-    assert_eq!(e["code"], "not_available");
-    Ok(())
-}
-
 #[test]
 fn tool_error_shape() {
     assert_eq!(

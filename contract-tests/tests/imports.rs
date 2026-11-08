@@ -89,7 +89,7 @@ pub fn genome_facts_for(slug: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn a_labnorte_pdf_auto_accepts_clean_rows_and_queues_the_rest() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (p, name) = c.new_patient().await?;
@@ -258,7 +258,7 @@ async fn a_labnorte_pdf_auto_accepts_clean_rows_and_queues_the_rest() -> anyhow:
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn a_lab_slip_for_someone_else_is_held_for_identity() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (p, _) = c.new_patient().await?;
@@ -304,7 +304,7 @@ async fn a_lab_slip_for_someone_else_is_held_for_identity() -> anyhow::Result<()
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn a_fhir_ips_bundle_projects_records_and_queues_the_rest() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (p, name) = c.new_patient().await?;
@@ -487,7 +487,7 @@ async fn a_fhir_ips_bundle_projects_records_and_queues_the_rest() -> anyhow::Res
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn an_apple_health_export_becomes_daily_wearable_values() -> anyhow::Result<()> {
     let c = Client::new()?;
     let p = c.new_relative().await?;
@@ -564,7 +564,7 @@ async fn an_apple_health_export_becomes_daily_wearable_values() -> anyhow::Resul
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn genome_facts_import_and_a_bad_file_becomes_a_job_failed_item() -> anyhow::Result<()> {
     let c = Client::new()?;
     let p = c.new_relative().await?;
@@ -658,7 +658,7 @@ async fn genome_facts_import_and_a_bad_file_becomes_a_job_failed_item() -> anyho
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn uploads_that_are_refused() -> anyhow::Result<()> {
     let c = Client::new()?;
     let p = c.new_relative().await?;

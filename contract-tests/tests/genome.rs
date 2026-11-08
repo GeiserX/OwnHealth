@@ -36,7 +36,7 @@ fn genes(v: &Value) -> Vec<String> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn sensitive_findings_follow_the_two_switches() -> anyhow::Result<()> {
     let c = Client::new()?;
     let p = with_genome(&c).await?;
@@ -152,7 +152,7 @@ async fn sensitive_findings_follow_the_two_switches() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn a_minors_genome_and_consent() -> anyhow::Result<()> {
     let c = Client::new()?;
     let g = c.get("/api/profiles/lucia/genome").await?.expect(200)?.json;

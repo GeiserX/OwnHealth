@@ -6,6 +6,7 @@
 //! Principal in the request extensions; rmcp hands the handlers the request's `http::request::Parts`.
 
 pub mod auth;
+pub mod edge;
 pub mod envelope;
 pub mod gate;
 pub mod limits;
@@ -25,10 +26,10 @@ use ownhealth_core::access::Principal;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, DiscoverResult, ErrorCode, GetPromptRequestParams,
-        GetPromptResponse, GetPromptResult, Implementation, ListPromptsResult, ListResourceTemplatesResult,
-        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-        ReadResourceResult, ServerCapabilities, ServerConfig,
+        CallToolRequestParams, CallToolResponse, CallToolResult, CustomRequest, CustomResult, DiscoverResult,
+        ErrorCode, GetPromptRequestParams, GetPromptResponse, GetPromptResult, Implementation, ListPromptsResult,
+        ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+        ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     transport::streamable_http_server::{
@@ -97,8 +98,8 @@ fn modern(ctx: &RequestContext<RoleServer>) -> bool {
 /// of a result for a legacy peer, so this does too.
 fn hinted<T: serde::de::DeserializeOwned>(mut v: Value, modern: bool) -> Result<T, ErrorData> {
     if !modern && let Some(m) = v.as_object_mut() {
-        m.remove("ttlMs");
-        m.remove("cacheScope");
+        m.shift_remove("ttlMs");
+        m.shift_remove("cacheScope");
     }
     complete(v)
 }
@@ -262,6 +263,14 @@ impl ServerHandler for OwnHealthMcp {
         let r: GetPromptResult = complete(v)?;
         Ok(r.into())
     }
+
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, ErrorData> {
+        Err(edge::unrouted(&request.method))
+    }
 }
 
 /// The `/mcp` route behind the PAT guard, and the protected-resource metadata it points at.
@@ -284,6 +293,7 @@ pub fn router_with(rt: Runtime, svc: Arc<dyn Services>) -> Router {
     // Exactly /mcp, as Python mounted it; /mcp/<anything> falls through to the 404 of the UI handler.
     let mcp = Router::new()
         .route_service("/mcp", service)
+        .route_layer(axum::middleware::from_fn(edge::json_rpc_edge))
         .route_layer(axum::middleware::from_fn_with_state(rt.clone(), auth::pat_guard));
     let meta = Router::new()
         .route(

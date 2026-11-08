@@ -347,6 +347,45 @@ async fn a_job_that_keeps_killing_its_worker_ends_dead_with_one_item() -> R {
 }
 
 #[tokio::test]
+async fn one_failing_item_does_not_stall_the_reaper() -> R {
+    let (db, _ctx, _dir) = setup().await?;
+    let opts = || EnqueueOptions {
+        max_attempts: 1,
+        ..Default::default()
+    };
+    let a = add(&db.pool, "test.crashloop", json!({"n": "a"}), opts())
+        .await?
+        .unwrap_or_default();
+    let b = add(&db.pool, "test.crashloop", json!({"n": "b"}), opts())
+        .await?
+        .unwrap_or_default();
+    for jid in [a, b] {
+        ready(&db.pool, jid).await?;
+        claim(&db.pool, "core", "w", Some(&only("test.crashloop"))).await?;
+        expire(&db.pool, jid).await?;
+    }
+    // a database error inside the insert path of a's item (Python monkeypatches create_item)
+    let fail_a = format!(
+        "create function fail_a() returns trigger language plpgsql as $$ begin \
+         if new.payload->>'job_id' = '{a}' then perform 1/0; end if; return new; end $$"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(fail_a)).execute(&db.pool).await?;
+    sqlx::query("create trigger fail_a before insert on review_item for each row execute function fail_a()")
+        .execute(&db.pool)
+        .await?;
+    jobs::reap_expired(&db.pool).await?;
+    assert_eq!(
+        (state(&db.pool, a).await?.state, state(&db.pool, b).await?.state),
+        ("dead".into(), "dead".into())
+    );
+    let items: Vec<String> = sqlx::query_scalar("select payload->>'job_id' from review_item where kind = 'job_failed'")
+        .fetch_all(&db.pool)
+        .await?;
+    assert_eq!(items, [b.to_string()]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn heartbeat_renews_the_lease() -> R {
     let (db, ctx, _dir) = setup().await?;
     let jid = add(&db.pool, "test.hb", json!({}), EnqueueOptions::default())

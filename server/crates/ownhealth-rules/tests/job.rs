@@ -1,4 +1,4 @@
-//! Job `state.rebuild` (backend/tests/state/test_job.py): rebuilds and stores the state; a second
+//! Job `state.rebuild` (0.1.1 tests/state/test_job.py): rebuilds and stores the state; a second
 //! run with the same data writes nothing.
 
 mod common;

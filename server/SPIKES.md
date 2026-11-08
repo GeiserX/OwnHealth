@@ -13,11 +13,11 @@ bump.
 ## a. rmcp 3.9.0 against the Python MCP SDK 2.3.0
 
 Code: `crates/ownhealth-mcp/examples/spike_rmcp.rs` (one `ping` tool inside axum at `/mcp`) and
-`scripts/spike_mcp_client.py` (the Python SDK client from `backend/.venv`).
+`scripts/spike_mcp_client.py` (the Python SDK client, mcp 2.3.0).
 
 ```sh
 cargo run -p ownhealth-mcp --example spike_rmcp -- 127.0.0.1:18765
-cd backend && uv run python ../server/scripts/spike_mcp_client.py http://127.0.0.1:18765/mcp
+uv run --with mcp==2.3.0 python server/scripts/spike_mcp_client.py http://127.0.0.1:18765/mcp
 ```
 
 What we saw:
@@ -94,7 +94,7 @@ authenticator: P-256 key from `cryptography`, CBOR from `cbor2`).
 
 ```sh
 cargo build -p ownhealth-auth --example spike_webauthn
-cd backend && uv run python ../server/scripts/spike_webauthn.py ../server/target/debug/examples/spike_webauthn
+uv run --with webauthn==3.0.1 --with cbor2==6.2.1 --with cryptography==50.0.2 python server/scripts/spike_webauthn.py server/target/debug/examples/spike_webauthn
 ```
 
 The Python side registers through `py_webauthn.verify_registration_response` (attestation `none`) and

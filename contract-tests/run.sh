@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Run the contract tests against one backend on a fresh database:
-#   contract-tests/run.sh python     # backend/ (uv run ownhealth serve)
+# Run the contract tests against the server on a fresh database (the goldens were recorded from the
+# Python 0.1.1 backend, which passed the same suite before it was removed in 0.2.0):
 #   contract-tests/run.sh rust       # server/ (cargo run -p ownhealth -- serve)
 # Extra arguments go to the test binaries (e.g. a test name filter). Every binary runs even when one fails.
 # The database lives in the shared test Postgres (scripts/test-db.sh) and is dropped on exit.
 set -euo pipefail
 
-which=${1:?usage: run.sh python|rust [cargo test args]}
+which=${1:?usage: run.sh rust [cargo test args]}
 shift
 root=$(cd "$(dirname "$0")/.." && pwd)
 admin=${OWNHEALTH_TEST_ADMIN_URL:-postgresql://postgres:postgres@127.0.0.1:55432/postgres}
@@ -36,16 +36,11 @@ export OWNHEALTH_BASE_URL="http://127.0.0.1:$port"
 export OWNHEALTH_SECRET_KEY="$(openssl rand -hex 48)"
 
 case "$which" in
-  python)
-    mkdir -p "$data/static"
-    [ -f "$root/server/static/index.html" ] && export OWNHEALTH_STATIC_DIR="$root/server/static" || export OWNHEALTH_STATIC_DIR="$data/static"
-    (cd "$root/backend" && exec uv run ownhealth serve) &
-    ;;
   rust)
     (cd "$root/server" && cargo build -q -p ownhealth)
     "$root/server/target/debug/ownhealth" serve &
     ;;
-  *) echo "usage: run.sh python|rust" >&2; exit 2 ;;
+  *) echo "usage: run.sh rust" >&2; exit 2 ;;
 esac
 pid=$!
 
@@ -56,6 +51,6 @@ for _ in $(seq 1 240); do
 done
 curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null || { echo "the $which backend never became ready" >&2; exit 1; }
 
-export OWNHEALTH_CONTRACT_BASE_URL="http://127.0.0.1:$port" OWNHEALTH_CONTRACT_BACKEND="$which"
+export OWNHEALTH_CONTRACT_BASE_URL="http://127.0.0.1:$port"
 cd "$root/server"
 cargo test -q --no-fail-fast -p ownhealth-contract-tests -- --include-ignored "$@"

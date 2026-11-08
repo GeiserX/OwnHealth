@@ -4,7 +4,7 @@
 //! recomputable. Importers (lanes B and C) and `propose` (lane F) call these functions; nobody
 //! else parses units.
 //!
-//! Tables (`backend/src/ownhealth/normalize/terminology`, embedded unchanged at build time): a LOINC
+//! Tables (`data/terminology`, embedded unchanged at build time): a LOINC
 //! 2.83 subset (NOTICE.md, LOINC License), the alias groups with canonical units and plausibility
 //! limits, aliases in es/en/de/fr, refused panel names, specimen twins and a cited molar-mass table.
 //! `derivation_version()` carries a hash of every table, so a table edit changes it and `rederive`

@@ -1,6 +1,8 @@
-//! The two genome reads lane E makes, through lane D (`ownhealth_genome`), with a seam tests use in
-//! place of Python's monkeypatched `genome.list_findings` / `genome.pgx_for_drug`.
+//! The two genome reads lane E makes, through lane D (`ownhealth_genome`). With the `testing`
+//! feature, tests can install a stand-in in place of Python's monkeypatched `genome.list_findings` /
+//! `genome.pgx_for_drug`; release builds have no seam.
 
+#[cfg(feature = "testing")]
 use std::sync::{Arc, RwLock};
 
 use chrono::NaiveDate;
@@ -34,22 +36,25 @@ pub trait GenomeSource: Send + Sync {
     ) -> GenomeFuture<'a, Vec<Value>>;
 }
 
+#[cfg(feature = "testing")]
 static SOURCE: RwLock<Option<Arc<dyn GenomeSource>>> = RwLock::new(None);
 
 /// Test seam: replace lane D's reads (None restores them).
-#[doc(hidden)]
+#[cfg(feature = "testing")]
 pub fn set_genome_source(source: Option<Arc<dyn GenomeSource>>) {
     if let Ok(mut s) = SOURCE.write() {
         *s = source;
     }
 }
 
+#[cfg(feature = "testing")]
 fn installed() -> Option<Arc<dyn GenomeSource>> {
     SOURCE.read().ok().and_then(|s| s.clone())
 }
 
 /// `genome.list_findings(gate=Gate(include_sensitive=False, minor=minor), min_evidence="E2", as_of=...)`.
 pub async fn list_findings(conn: &mut PgConnection, profile_id: Uuid, minor: bool, as_of: NaiveDate) -> Result<Value> {
+    #[cfg(feature = "testing")]
     if let Some(s) = installed() {
         return s.list_findings(conn, profile_id, minor, as_of).await;
     }
@@ -68,6 +73,7 @@ pub async fn pgx_for_drug(
     cpic_drug_id: &str,
     as_of: NaiveDate,
 ) -> Result<Vec<Value>> {
+    #[cfg(feature = "testing")]
     if let Some(s) = installed() {
         return s.pgx_for_drug(conn, profile_id, cpic_drug_id, as_of).await;
     }

@@ -1,5 +1,5 @@
 //! The shipped terminology tables (`normalize/_tables.py`), read once from the files embedded at
-//! build time. The files live unchanged in `backend/src/ownhealth/normalize/terminology/`:
+//! build time. The files live unchanged in `data/terminology/`:
 //!
 //! ```text
 //! loinc/loinc_subset.tsv      LOINC 2.83 subset (loinc/build_subset.py from loinc/codes.tsv), LOINC License
@@ -27,13 +27,7 @@ pub const LANGS: [&str; 4] = ["es", "en", "de", "fr"];
 
 macro_rules! table {
     ($path:literal) => {
-        (
-            $path,
-            include_str!(concat!(
-                "../../../../backend/src/ownhealth/normalize/terminology/",
-                $path
-            )),
-        )
+        ($path, include_str!(concat!("../../../../data/terminology/", $path)))
     };
 }
 

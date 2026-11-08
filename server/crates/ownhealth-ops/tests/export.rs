@@ -288,3 +288,66 @@ async fn an_unknown_format_is_refused() -> R {
     assert!(matches!(err, Err(ownhealth_core::Error::Invalid(_))));
     Ok(())
 }
+
+/// The export copies blobs and deflates on the runtime: with one worker, a big blob must not stall
+/// the other tasks on it (`serve` shares the runtime with the job workers and the MCP server).
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_large_export_does_not_stall_the_runtime() -> R {
+    use std::io::Read as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let blobs = BlobStore::new(dir.path())?;
+    let mut c = db.pool.acquire().await?;
+    let f = create_rivera_family(&mut c, "Rivera (export)").await?;
+    let size = 128u64 << 20;
+    let bytes = ownhealth_core::ids::token_hex(8).into_bytes();
+    let (sha, n) = blobs.put_reader(bytes.as_slice().chain(std::io::repeat(7).take(size)))?;
+    create_document(
+        &mut c,
+        &NewDocument {
+            filename: Some("apple-health-export.zip"),
+            ..NewDocument::upload(
+                f.household_id,
+                Some(f.profile("alex")),
+                &sha,
+                "application/zip",
+                n as i64,
+            )
+        },
+    )
+    .await?;
+    let pid = f.profile("alex");
+    let done = Arc::new(AtomicBool::new(false));
+    let ticker = tokio::spawn({
+        let done = done.clone();
+        async move {
+            let mut worst = Duration::ZERO;
+            while !done.load(Ordering::Relaxed) {
+                let t = Instant::now();
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                worst = worst.max(t.elapsed());
+            }
+            worst
+        }
+    });
+    let export = tokio::spawn(async move {
+        let out = tempfile::tempfile()?;
+        let started = Instant::now();
+        export_profile(&mut c, &blobs, pid, out, "zip").await?;
+        anyhow::Ok(started.elapsed())
+    });
+    let took = export.await??;
+    done.store(true, Ordering::Relaxed);
+    let worst = ticker.await?;
+    // blocked, the sleep lasts about as long as the whole copy; the bound is relative so a busy
+    // box does not make it flaky
+    assert!(
+        worst * 4 < took,
+        "a 2 ms sleep took {worst:?} while a {took:?} export ran"
+    );
+    Ok(())
+}

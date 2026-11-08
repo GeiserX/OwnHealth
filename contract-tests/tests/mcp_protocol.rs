@@ -30,7 +30,7 @@ fn without_version(mut v: Value) -> Value {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn both_protocol_versions_on_one_stateless_endpoint() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (_, plain) = c.token(json!({"scopes": ALL_SCOPES})).await?;
@@ -94,7 +94,7 @@ async fn both_protocol_versions_on_one_stateless_endpoint() -> anyhow::Result<()
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn missing_bad_and_revoked_tokens_are_401_with_the_metadata_url() -> anyhow::Result<()> {
     let c = Client::new()?;
     let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
@@ -175,7 +175,7 @@ async fn missing_bad_and_revoked_tokens_are_401_with_the_metadata_url() -> anyho
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn origin_must_match_the_public_url() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (_, plain) = c.token(json!({})).await?;
@@ -201,7 +201,7 @@ async fn origin_must_match_the_public_url() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn tools_list_is_sorted_annotated_and_exactly_as_shipped() -> anyhow::Result<()> {
     let c = Client::new()?;
     let m = c.mcp(&ALL_SCOPES, &["alex"]).await?;
@@ -243,7 +243,7 @@ async fn tools_list_is_sorted_annotated_and_exactly_as_shipped() -> anyhow::Resu
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn tools_list_follows_the_token_scopes() -> anyhow::Result<()> {
     let c = Client::new()?;
     let cases: [(&[&str], &[&str]); 6] = [
@@ -301,7 +301,7 @@ async fn tools_list_follows_the_token_scopes() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn tools_list_follows_the_grant_not_only_the_token() -> anyhow::Result<()> {
     let c = Client::new()?;
     let slug = c.new_relative().await?;
@@ -342,7 +342,7 @@ async fn tools_list_follows_the_grant_not_only_the_token() -> anyhow::Result<()>
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn resources_templates_and_prompts() -> anyhow::Result<()> {
     let c = Client::new()?;
     let m = c.mcp(&ALL_SCOPES, &["alex"]).await?;

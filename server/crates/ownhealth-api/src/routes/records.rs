@@ -209,8 +209,151 @@ fn model(kind: &str, profile_id: Uuid, body: &Map<String, Value>) -> Result<Reco
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     data.insert("profile_id".into(), json!(profile_id.to_string()));
-    RecordIn::from_json(kind, Value::Object(data))
-        .map_err(|e| Failure::Api(bad_input("Invalid record.").with("errors", json!([{"msg": e.to_string()}]))))
+    let refused = |errors: Vec<Value>| Failure::Api(bad_input("Invalid record.").with("errors", json!(errors)));
+    lax_record(kind, &mut data).map_err(refused)?;
+    RecordIn::from_json(kind, Value::Object(data)).map_err(|e| refused(vec![json!({"msg": e.to_string()})]))
+}
+
+/// A field of a record model as pydantic types it.
+#[derive(Clone, Copy)]
+enum Field {
+    Str,
+    OptStr,
+    OptDate,
+    OptDatetime,
+    OptInt,
+    Literal(&'static [&'static str]),
+    OptLiteral(&'static [&'static str]),
+    Sensitivity,
+}
+
+const COMMON: [(&str, Field, bool); 2] = [
+    ("effective_at", Field::OptDatetime, false),
+    ("sensitivity", Field::Sensitivity, false),
+];
+
+/// The fields of `core/records.py`'s models after `_Common`, in model order: (name, type, required).
+fn record_fields(kind: &str) -> &'static [(&'static str, Field, bool)] {
+    use Field::*;
+    const CODED: [(&str, Field, bool); 2] = [("code_system", OptStr, false), ("code", OptStr, false)];
+    match kind {
+        "condition" => &[
+            ("text", Str, true),
+            CODED[0],
+            CODED[1],
+            ("clinical_status", Str, false),
+            (
+                "verification_status",
+                Literal(&[
+                    "provisional",
+                    "confirmed",
+                    "refuted",
+                    "unconfirmed",
+                    "differential",
+                    "entered-in-error",
+                ]),
+                false,
+            ),
+            ("onset", OptDate, false),
+            ("abatement", OptDate, false),
+        ],
+        "medication" => &[
+            ("kind", Literal(&["medication", "supplement"]), false),
+            ("name", Str, true),
+            ("ingredient", OptStr, false),
+            ("strength", OptStr, false),
+            ("dose_text", OptStr, false),
+            CODED[0],
+            CODED[1],
+            ("started", OptDate, false),
+            ("stopped", OptDate, false),
+            ("med_status", Literal(&["active", "stopped", "on_hold"]), false),
+            ("reason_text", OptStr, false),
+        ],
+        "allergy" => &[
+            ("substance", Str, true),
+            CODED[0],
+            CODED[1],
+            ("criticality", OptLiteral(&["low", "high", "unable-to-assess"]), false),
+            ("reaction_text", OptStr, false),
+            ("clinical_status", Str, false),
+            ("verification_status", Str, false),
+        ],
+        "immunization" => &[
+            ("vaccine", Str, true),
+            CODED[0],
+            CODED[1],
+            ("occurred", OptDate, false),
+            ("dose_number", OptInt, false),
+            ("lot", OptStr, false),
+        ],
+        "procedure" => &[("text", Str, true), CODED[0], CODED[1], ("performed", OptDate, false)],
+        _ => &[],
+    }
+}
+
+/// pydantic's lax validation of a record body: every failing field as `{type, loc, msg}` (what
+/// 0.1.1 sent, without input and ctx), in model order. A valid body has its lax values made exact
+/// (`"2"` -> 2, a midnight datetime -> its date) for the model's own parse.
+fn lax_record(kind: &str, data: &mut Map<String, Value>) -> Result<(), Vec<Value>> {
+    let mut errors = Vec::new();
+    let mut fail = |loc: Vec<Value>, kind: &str, msg: &str| errors.push(json!({"type": kind, "loc": loc, "msg": msg}));
+    for (name, field, required) in COMMON.iter().chain(record_fields(kind)) {
+        let loc = vec![json!(name)];
+        let Some(v) = data.get_mut(*name) else {
+            if *required {
+                fail(loc, "missing", "Field required");
+            }
+            continue;
+        };
+        let optional = matches!(
+            field,
+            Field::OptStr | Field::OptDate | Field::OptDatetime | Field::OptInt | Field::OptLiteral(_)
+        );
+        if v.is_null() && optional {
+            continue;
+        }
+        match field {
+            Field::Str | Field::OptStr => {
+                if !v.is_string() {
+                    fail(loc, "string_type", "Input should be a valid string");
+                }
+            }
+            Field::Literal(allowed) | Field::OptLiteral(allowed) => {
+                if !v.as_str().is_some_and(|s| allowed.contains(&s)) {
+                    let msg = format!("Input should be {}", super::auth::literal_expected(allowed));
+                    fail(loc, "literal_error", &msg);
+                }
+            }
+            Field::OptDate => match v.as_str().map(crate::validate::parse_date) {
+                Some(Ok(d)) => *v = json!(d.format("%Y-%m-%d").to_string()),
+                Some(Err((kind, msg, _))) => fail(loc, kind, &msg),
+                None => fail(loc, "date_type", "Input should be a valid date"),
+            },
+            Field::OptDatetime => match v.as_str().map(crate::validate::datetime_date_refusal) {
+                Some(None) => {}
+                Some(Some((kind, msg, _))) => fail(loc, kind, &msg),
+                None => fail(loc, "datetime_type", "Input should be a valid datetime"),
+            },
+            Field::OptInt => match crate::validate::lax_int(v) {
+                Ok(n) => *v = json!(n),
+                Err((kind, msg)) => fail(loc, kind, msg),
+            },
+            Field::Sensitivity => match v.as_array() {
+                None => fail(loc, "list_type", "Input should be a valid list"),
+                Some(items) => {
+                    let allowed = &ownhealth_core::observations::SENSITIVITY;
+                    for (i, s) in items.iter().enumerate() {
+                        if !s.as_str().is_some_and(|s| allowed.contains(&s)) {
+                            let msg = format!("Input should be {}", super::auth::literal_expected(allowed));
+                            fail(vec![json!(name), json!(i)], "literal_error", &msg);
+                        }
+                    }
+                }
+            },
+        }
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
 fn src(principal: &Principal, profile_id: Uuid) -> SrcRef {

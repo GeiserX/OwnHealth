@@ -16,7 +16,7 @@ fn set_limit(plain: &str, column: &str, value: i64) -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn the_rate_bucket_is_per_token() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (_, slow) = c.token(json!({"scopes": ["read:summary"]})).await?;
@@ -63,7 +63,7 @@ async fn the_rate_bucket_is_per_token() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn the_daily_egress_budget_refuses_and_delivers_nothing() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (t, plain) = c.token(json!({"scopes": ALL_SCOPES})).await?;
@@ -97,7 +97,7 @@ async fn the_daily_egress_budget_refuses_and_delivers_nothing() -> anyhow::Resul
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn the_lookup_cap() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (_, plain) = c.token(json!({"scopes": ALL_SCOPES})).await?;
@@ -124,7 +124,7 @@ async fn the_lookup_cap() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn the_proposal_cap_and_duplicates() -> anyhow::Result<()> {
     let c = Client::new()?;
     let p = c.new_relative().await?;
@@ -159,7 +159,7 @@ async fn the_proposal_cap_and_duplicates() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn every_call_is_audited_without_payloads() -> anyhow::Result<()> {
     let c = Client::new()?;
     let label = format!("Claude Code · {}", uniq());

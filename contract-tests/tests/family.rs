@@ -14,7 +14,7 @@ fn profile<'a>(list: &'a Value, slug: &str) -> Option<&'a Value> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn relatives_get_slugs_and_a_guardian_grant() -> anyhow::Result<()> {
     let c = Client::new()?;
     let u = uniq();
@@ -131,7 +131,7 @@ async fn relatives_get_slugs_and_a_guardian_grant() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn grants_give_a_member_a_profile_with_the_categories_asked() -> anyhow::Result<()> {
     let c = Client::new()?;
     let slug = c.new_relative().await?;
@@ -250,7 +250,7 @@ async fn grants_give_a_member_a_profile_with_the_categories_asked() -> anyhow::R
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn locks_and_sensitive_switches() -> anyhow::Result<()> {
     let c = Client::new()?;
     let slug = c.new_relative().await?;
@@ -335,7 +335,7 @@ async fn locks_and_sensitive_switches() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn deleting_a_profile_needs_its_slug_and_removes_it() -> anyhow::Result<()> {
     let c = Client::new()?;
     let slug = c.new_relative().await?;
@@ -375,7 +375,7 @@ async fn deleting_a_profile_needs_its_slug_and_removes_it() -> anyhow::Result<()
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn a_member_closes_their_account() -> anyhow::Result<()> {
     let c = Client::new()?;
     let m = c.enrolled_member(&format!("Leaving {}", uniq())).await?;
@@ -414,7 +414,7 @@ async fn a_member_closes_their_account() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn invites_that_claim_a_profile() -> anyhow::Result<()> {
     let c = Client::new()?;
     let slug = c.new_relative().await?;

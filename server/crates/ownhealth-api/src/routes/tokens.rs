@@ -90,8 +90,9 @@ struct TokenIn {
     profiles: Vec<String>,
     #[serde(default)]
     default_profile: Option<String>,
+    /// pydantic's lax `int`: `"30"`, `30.0` and `true` are accepted as 0.1.1 did.
     #[serde(default = "default_days")]
-    days: i64,
+    days: Value,
     #[serde(default = "full")]
     identity_mode: String,
     #[serde(default)]
@@ -104,8 +105,8 @@ fn default_scopes() -> Vec<String> {
     PAT_DEFAULT_SCOPES.iter().map(|s| s.to_string()).collect()
 }
 
-fn default_days() -> i64 {
-    DEFAULT_DAYS
+fn default_days() -> Value {
+    json!(DEFAULT_DAYS)
 }
 
 fn full() -> String {
@@ -123,11 +124,22 @@ async fn create_my_token(
     meta: Meta,
     Body(body): Body<TokenIn>,
 ) -> R {
-    Check::body()
+    let mut check = Check::body();
+    check
         .len("label", Some(&body.label), 1, 80)
         .items("scopes", body.scopes.len(), 1, usize::MAX)
-        .items("profiles", body.profiles.len(), 1, 20)
-        .range("days", body.days, 1, MAX_DAYS)
+        .items("profiles", body.profiles.len(), 1, 20);
+    let days = match crate::validate::lax_int(&body.days) {
+        Ok(d) => {
+            check.range("days", d, body.days.clone(), 1, MAX_DAYS);
+            d
+        }
+        Err((kind, msg)) => {
+            check.push(kind, "days", msg, body.days.clone());
+            DEFAULT_DAYS
+        }
+    };
+    check
         .literal(
             "identity_mode",
             Some(&body.identity_mode),
@@ -162,7 +174,7 @@ async fn create_my_token(
             profile_ids: unique,
             scopes: body.scopes.clone(),
             default_profile: default,
-            days: body.days,
+            days,
             identity_mode: &body.identity_mode,
             lang: &lang,
             units: &body.units,

@@ -6,7 +6,7 @@
 //! are parsed from the text line.
 
 use std::fs::File;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
 
 use noodles::bgzf;
@@ -95,6 +95,81 @@ impl Record {
     }
 }
 
+/// The largest .tbi we read, compressed or not. A whole-genome gVCF index is tens of MiB.
+pub const MAX_INDEX_BYTES: u64 = 256 << 20;
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("not a tabix index: {message}"))
+}
+
+/// Reads a .tbi after checking its layout in memory, so no count in an uploaded index can make
+/// noodles allocate more than the file holds (a huge n_bin aborted the process on allocation).
+/// htslib refuses such files too ("could not open index").
+pub fn read_tabix(path: &Path) -> io::Result<tabix::Index> {
+    let mut compressed = Vec::new();
+    File::open(path)?
+        .take(MAX_INDEX_BYTES + 1)
+        .read_to_end(&mut compressed)?;
+    let mut raw = Vec::new();
+    bgzf::io::Reader::new(&compressed[..])
+        .take(MAX_INDEX_BYTES + 1)
+        .read_to_end(&mut raw)?;
+    if compressed.len() as u64 > MAX_INDEX_BYTES || raw.len() as u64 > MAX_INDEX_BYTES {
+        return Err(invalid("larger than 256 MiB"));
+    }
+    check_tabix_layout(&raw)?;
+    tabix::io::Reader::new(&compressed[..]).read_index()
+}
+
+/// Walks the uncompressed tabix layout and fails when a count needs more bytes than are left:
+/// n_ref, l_nm, each n_bin (8 bytes a bin at least), n_chunk (16), n_intv (8).
+fn check_tabix_layout(raw: &[u8]) -> io::Result<()> {
+    struct Cursor<'a>(&'a [u8]);
+    impl Cursor<'_> {
+        fn skip(&mut self, n: usize) -> io::Result<()> {
+            if n > self.0.len() {
+                return Err(invalid("truncated"));
+            }
+            self.0 = &self.0[n..];
+            Ok(())
+        }
+        fn i32(&mut self) -> io::Result<i32> {
+            let b = self.0.get(..4).ok_or_else(|| invalid("truncated"))?;
+            let v = i32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            self.0 = &self.0[4..];
+            Ok(v)
+        }
+        /// A count of items of `size` bytes each that must fit in what is left.
+        fn count(&mut self, size: usize, what: &str) -> io::Result<usize> {
+            let n = usize::try_from(self.i32()?).map_err(|_| invalid(&format!("negative {what}")))?;
+            if n.checked_mul(size).is_none_or(|need| need > self.0.len()) {
+                return Err(invalid(&format!("{what} {n} is more than the file holds")));
+            }
+            Ok(n)
+        }
+    }
+    let mut c = Cursor(raw);
+    if c.0.get(..4) != Some(&b"TBI\x01"[..]) {
+        return Err(invalid("no TBI magic"));
+    }
+    c.skip(4)?;
+    let n_ref = c.count(8, "n_ref")?;
+    c.skip(24)?; // format, col_seq, col_beg, col_end, meta, skip
+    let l_nm = c.count(1, "l_nm")?;
+    c.skip(l_nm)?;
+    for _ in 0..n_ref {
+        let n_bin = c.count(8, "n_bin")?;
+        for _ in 0..n_bin {
+            c.skip(4)?; // bin
+            let n_chunk = c.count(16, "n_chunk")?;
+            c.skip(n_chunk * 16)?;
+        }
+        let n_intv = c.count(8, "n_intv")?;
+        c.skip(n_intv * 8)?;
+    }
+    Ok(())
+}
+
 /// A bgzipped VCF opened with its tabix index.
 pub struct VcfFile {
     reader: bgzf::io::Reader<File>,
@@ -103,7 +178,7 @@ pub struct VcfFile {
 
 impl VcfFile {
     pub fn open(data: &Path, index: &Path) -> io::Result<VcfFile> {
-        let index = File::open(index).map(tabix::io::Reader::new)?.read_index()?;
+        let index = read_tabix(index)?;
         let reader = bgzf::io::Reader::new(File::open(data)?);
         Ok(VcfFile { reader, index })
     }

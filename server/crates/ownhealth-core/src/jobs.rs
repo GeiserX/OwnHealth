@@ -166,7 +166,6 @@ impl From<crate::Error> for JobError {
             E::Upload(_) => "UploadError",
             E::Invalid(_) => "ValueError",
             E::NotFound(_) => "LookupError",
-            E::NotImplemented(_) => "NotImplementedError",
             E::Db(_) => "DBAPIError",
             E::Io(_) => "OSError",
             E::Json(_) => "JSONDecodeError",

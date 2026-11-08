@@ -617,15 +617,6 @@ async fn observations(call: &mut Call<'_>, p: &ObservationsPayload) -> ToolResul
                 }
                 observation = Some(obs);
             }
-            Err(Error::NotImplemented(_)) => {
-                sp.rollback().await?;
-                checks.push(check(
-                    "normalize",
-                    false,
-                    "unmapped",
-                    Some("the normalizer is not available"),
-                ));
-            }
             Err(e) => {
                 sp.rollback().await?;
                 tracing::warn!(error = %e, "propose: normalizer failed on one row");
@@ -673,15 +664,6 @@ async fn observations(call: &mut Call<'_>, p: &ObservationsPayload) -> ToolResul
                             } else {
                                 Some("value not found on the page word layer")
                             },
-                        ));
-                    }
-                    Err(Error::NotImplemented(_)) => {
-                        sp.rollback().await?;
-                        checks.push(check(
-                            "grounding",
-                            false,
-                            "not_grounded",
-                            Some("the page word layer is not available"),
                         ));
                     }
                     Err(e) => {
@@ -853,11 +835,7 @@ async fn finding_status(call: &mut Call<'_>, p: &FindingStatusPayload) -> ToolRe
 async fn medication(call: &mut Call<'_>, p: &MedicationPayload) -> ToolResult<Outcome> {
     let mut checks = Vec::new();
     let mut limitations = Vec::new();
-    let drug = match call.svc.resolve_drug(&mut *call.conn, &p.name).await {
-        Ok(d) => d,
-        Err(Error::NotImplemented(_)) => None,
-        Err(e) => return Err(e.into()),
-    };
+    let drug = call.svc.resolve_drug(&mut *call.conn, &p.name).await?;
     if drug.is_none() {
         limitations.push("The drug name did not resolve; it is kept as free text.".to_string());
     }

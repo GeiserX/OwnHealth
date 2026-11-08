@@ -1,5 +1,5 @@
 //! REST: status, dashboard, rules and drug-check, with scopes, the 404 for an unknown drug, FastAPI's
-//! 422s and the audit rows (`backend/tests/state/test_api.py`). The database is lane E's seeded demo;
+//! 422s and the audit rows (`0.1.1 tests/state/test_api.py`). The database is lane E's seeded demo;
 //! Alex calls over HTTP through dev auth, and Sam (a viewer of Alex) calls the route functions with a
 //! session principal, as Python's tests did by overriding `get_principal`.
 

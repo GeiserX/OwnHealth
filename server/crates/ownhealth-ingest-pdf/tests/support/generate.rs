@@ -1,4 +1,4 @@
-//! Synthetic lab-slip generator (`fixtures/labslips/generate.py`): PDFs plus row-level ground truth
+//! Synthetic lab-slip generator (0.1.1's `fixtures/labslips/generate.py`): PDFs plus row-level ground truth
 //! (ingestion.md 13). Synthetic only: the Rivera family and Carmen Ortega; LabNorte and
 //! "Laboratorio Ejemplo"-style labs.
 //!

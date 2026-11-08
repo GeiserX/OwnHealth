@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::{StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use ownhealth_api::ApiError;
@@ -40,6 +41,31 @@ pub fn build_app(rt: Runtime) -> Router {
         })
         .with_state(rt.clone());
     web.merge(ownhealth_mcp::router(rt))
+        .layer(middleware::from_fn(access_log))
+}
+
+/// One INFO line per response: method, matched route, status, latency. Never the query string,
+/// headers or bodies. `RUST_LOG=info,ownhealth::access=off` switches it off.
+async fn access_log(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or_else(|| req.uri().path().to_string(), |m| m.as_str().to_string());
+    let start = std::time::Instant::now();
+    let res = next.run(req).await;
+    let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    tracing::info!(target: "ownhealth::access", %method, %path, status = res.status().as_u16(), latency_ms, "request");
+    res
+}
+
+/// Remove upload spools older than an hour that a killed process left behind.
+pub fn sweep_spools(rt: &Runtime) {
+    match rt.blobs.sweep_tmp(std::time::Duration::from_secs(3600)) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(removed = n, "removed stale upload spools"),
+        Err(e) => tracing::warn!(error = %e, "could not sweep upload spools"),
+    }
 }
 
 async fn healthz() -> Json<serde_json::Value> {
@@ -95,6 +121,7 @@ pub async fn start(rt: &Runtime) -> Result<Background, Error> {
             tracing::info!(?applied, "applied migrations");
         }
     }
+    sweep_spools(rt);
     if rt.settings.demo {
         demo::seed_demo(&rt.pool, &rt.settings, &rt.blobs, false).await?;
     }

@@ -58,9 +58,6 @@ impl From<Error> for ApiError {
             Error::Upload(m) => ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_upload", m),
             Error::Invalid(m) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid", m),
             Error::NotFound(m) => ApiError::new(StatusCode::NOT_FOUND, "unknown", m),
-            e @ Error::NotImplemented(_) => {
-                ApiError::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", e.to_string())
-            }
             other => {
                 tracing::error!(error = %other, "request failed");
                 ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "Internal error.")

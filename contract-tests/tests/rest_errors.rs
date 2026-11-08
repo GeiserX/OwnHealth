@@ -10,7 +10,7 @@ async fn body(c: &Client, path: &str) -> anyhow::Result<(u16, Value)> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn error_bodies_of_the_reads() -> anyhow::Result<()> {
     let c = Client::new()?;
     let cases: Vec<(&str, u16, Value)> = vec![
@@ -111,7 +111,7 @@ async fn error_bodies_of_the_reads() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn profile_references_slug_me_and_uuid() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (s, me) = body(&c, "/api/profiles/me/status").await?;
@@ -129,7 +129,7 @@ async fn profile_references_slug_me_and_uuid() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn filters_of_the_list_reads() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (_, v) = body(&c, "/api/profiles/alex/observations?category=vital-signs").await?;

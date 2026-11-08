@@ -4,9 +4,7 @@
 
 use anyhow::Context;
 use ownhealth_contract_tests::shape::assert_shape;
-use ownhealth_contract_tests::{
-    ALL_SCOPES, Client, ENVELOPE_KEYS, Mcp, assert_envelope, backend, src_ids,
-};
+use ownhealth_contract_tests::{ALL_SCOPES, Client, ENVELOPE_KEYS, Mcp, assert_envelope, src_ids};
 use serde_json::{Value, json};
 
 const NO_GENOME: [&str; 8] = [
@@ -52,7 +50,7 @@ fn calls() -> Vec<(&'static str, Value)> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn every_tool_answers_in_the_envelope_with_its_shape() -> anyhow::Result<()> {
     let c = Client::new()?;
     let m = c.mcp(&ALL_SCOPES, &["alex"]).await?;
@@ -99,7 +97,7 @@ async fn every_tool_answers_in_the_envelope_with_its_shape() -> anyhow::Result<(
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn the_status_pages_stay_under_2kb_whole() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (_, plain) = c.token(json!({"scopes": ALL_SCOPES, "lang": "en"})).await?;
@@ -138,7 +136,7 @@ async fn the_status_pages_stay_under_2kb_whole() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn state_hash_is_the_same_for_every_token_language_unit_and_mode() -> anyhow::Result<()> {
     let c = Client::new()?;
     let today = c.get("/api/profiles/alex/status").await?.expect(200)?.json;
@@ -201,7 +199,7 @@ async fn state_hash_is_the_same_for_every_token_language_unit_and_mode() -> anyh
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn without_read_genome_no_genome_fact_appears_anywhere() -> anyhow::Result<()> {
     let c = Client::new()?;
     let all = c.mcp(&ALL_SCOPES, &["alex"]).await?;
@@ -257,7 +255,7 @@ async fn without_read_genome_no_genome_fact_appears_anywhere() -> anyhow::Result
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn lookups_hold_the_sensitive_gate_and_count_against_the_quota() -> anyhow::Result<()> {
     let c = Client::new()?;
     let m = c.mcp(&ALL_SCOPES, &["alex"]).await?;
@@ -314,7 +312,7 @@ async fn lookups_hold_the_sensitive_gate_and_count_against_the_quota() -> anyhow
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn tool_errors_have_one_shape() -> anyhow::Result<()> {
     let c = Client::new()?;
     let m = c.mcp(&ALL_SCOPES, &["alex"]).await?;
@@ -381,14 +379,11 @@ async fn tool_errors_have_one_shape() -> anyhow::Result<()> {
         )
         .await?;
     assert!(r.is_error);
-    if backend() == "python" {
-        assert_eq!(r.code(), Some("internal_error"));
-    }
     Ok(())
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn get_source_text_needs_documents_text_and_other_profiles_are_unknown() -> anyhow::Result<()>
 {
     let c = Client::new()?;
@@ -438,7 +433,7 @@ async fn get_source_text_needs_documents_text_and_other_profiles_are_unknown() -
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn pseudonymous_and_minimal_modes_hide_names() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (_, plain) = c
@@ -495,7 +490,7 @@ async fn pseudonymous_and_minimal_modes_hide_names() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn cursors_are_bound_to_the_query_and_the_token() -> anyhow::Result<()> {
     let c = Client::new()?;
     let m1 = c.mcp(&ALL_SCOPES, &["alex"]).await?;
@@ -543,7 +538,7 @@ async fn cursors_are_bound_to_the_query_and_the_token() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn as_of_answers_what_the_store_knew() -> anyhow::Result<()> {
     let c = Client::new()?;
     let m = c.mcp(&ALL_SCOPES, &["alex"]).await?;
@@ -568,7 +563,7 @@ async fn as_of_answers_what_the_store_knew() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn category_scopes_split_one_search() -> anyhow::Result<()> {
     let c = Client::new()?;
     let labs = c.mcp(&["read:labs"], &["alex"]).await?;

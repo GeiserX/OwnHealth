@@ -20,7 +20,7 @@ fn is_recovery_code(v: &Value) -> bool {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn state_as_the_dev_user_and_methods_on_plain_http() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (s, v) = c.get_json("/api/auth/state").await?;
@@ -61,7 +61,7 @@ async fn state_as_the_dev_user_and_methods_on_plain_http() -> anyhow::Result<()>
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn invite_enrol_with_password_and_the_session_cookie() -> anyhow::Result<()> {
     let c = Client::new()?;
     let name = format!("Invited {}", uniq());
@@ -184,7 +184,7 @@ async fn invite_enrol_with_password_and_the_session_cookie() -> anyhow::Result<(
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn password_login_logout_and_wrong_passwords() -> anyhow::Result<()> {
     let c = Client::new()?;
     let m = c.enrolled_member(&format!("Login {}", uniq())).await?;
@@ -240,7 +240,7 @@ async fn password_login_logout_and_wrong_passwords() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn recovery_codes_log_in_once_without_step_up() -> anyhow::Result<()> {
     let c = Client::new()?;
     let m = c.enrolled_member(&format!("Recover {}", uniq())).await?;
@@ -324,7 +324,7 @@ async fn recovery_codes_log_in_once_without_step_up() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn passkey_management_on_plain_http() -> anyhow::Result<()> {
     let c = Client::new()?;
     let m = c.enrolled_member(&format!("Keys {}", uniq())).await?;
@@ -349,7 +349,7 @@ async fn passkey_management_on_plain_http() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn csrf_refuses_cross_site_writes_on_cookies_and_dev_auth() -> anyhow::Result<()> {
     let c = Client::new()?;
     let body = json!({"display_name": format!("Csrf {}", uniq()), "role": "guardian"});
@@ -417,7 +417,7 @@ async fn csrf_refuses_cross_site_writes_on_cookies_and_dev_auth() -> anyhow::Res
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn access_tokens_do_not_work_on_rest() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (_, pat) = c.token(json!({"scopes": ["read:summary"]})).await?;

@@ -61,16 +61,12 @@ pub async fn list_resources(
             "Profiles this token may read: slug, relationship, age band, data freshness.",
         ));
     }
-    match svc.rules_version() {
-        Ok(version) => out.push(resource(
-            format!("ownhealth://rules/{version}"),
-            "rules".into(),
-            "application/json",
-            "The rule pack in force, to explain a flag by rule id.",
-        )),
-        Err(Error::NotImplemented(_)) => {}
-        Err(e) => return Err(e),
-    }
+    out.push(resource(
+        format!("ownhealth://rules/{}", svc.rules_version()?),
+        "rules".into(),
+        "application/json",
+        "The rule pack in force, to explain a flag by rule id.",
+    ));
     for perm in accessible_profiles(&mut *conn, principal).await? {
         let slug = &perm.profile.slug;
         if perm.has("read:summary") {

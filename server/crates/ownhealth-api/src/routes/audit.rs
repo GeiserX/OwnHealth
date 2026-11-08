@@ -16,25 +16,9 @@ use ownhealth_core::pyjson::pydantic_datetime_utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::auth::{Check, Params, R, ok};
+use super::auth::{R, ok};
 use crate::extract::{Caller, SessionCaller};
-
-/// A query integer as FastAPI reads it, or the 422 entry.
-pub fn int_param(check: &mut Check, field: &str, value: Option<&String>) -> Option<i64> {
-    let v = value?;
-    match v.trim().parse::<i64>() {
-        Ok(n) => Some(n),
-        Err(_) => {
-            check.push(
-                "int_parsing",
-                field,
-                "Input should be a valid integer, unable to parse string as an integer",
-                json!(v),
-            );
-            None
-        }
-    }
-}
+use crate::validate;
 
 #[derive(sqlx::FromRow)]
 struct Row {
@@ -57,19 +41,11 @@ struct Row {
     profile_slug: Option<String>,
 }
 
-async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Query(q): Params) -> R {
-    let mut c = Check::query();
-    let limit = int_param(&mut c, "limit", q.get("limit")).unwrap_or(100);
-    if q.contains_key("limit") {
-        c.range("limit", limit, 1, 500);
-    }
-    let before = int_param(&mut c, "before", q.get("before"));
-    if let Some(b) = before
-        && b < 1
-    {
-        c.range("before", b, 1, i64::MAX);
-    }
-    c.done()?;
+async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Query(q): Query<validate::Params>) -> R {
+    let mut e = validate::Errors::new();
+    let limit = e.int("query", &q, "limit", 100, Some(1), Some(500));
+    let before = validate::param(&q, "before").map(|_| e.int("query", &q, "before", 0, Some(1), None));
+    e.done()?;
     let mut tx = rt.pool.begin().await?;
     let managed: Vec<Uuid> = accessible_profiles(&mut tx, &p)
         .await?
@@ -77,7 +53,7 @@ async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Q
         .filter(|perm| can_manage(perm))
         .map(|perm| perm.profile.id)
         .collect();
-    let profile = q.get("profile").filter(|s| !s.is_empty());
+    let profile = validate::param(&q, "profile").filter(|s| !s.is_empty());
     let pid = match profile {
         Some(r) => Some(Caller(p.clone()).require(&mut tx, r, None, None).await?.profile.id),
         None => None,

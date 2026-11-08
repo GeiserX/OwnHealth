@@ -17,7 +17,7 @@ use axum::routing::post;
 use ownhealth_auth::household::require_manage;
 use ownhealth_core::Runtime;
 use ownhealth_core::audit::{AuditEvent, write_audit};
-use ownhealth_ops::export::export_profile;
+use ownhealth_ops::export::{blocking, export_profile};
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -65,18 +65,17 @@ async fn export(
     let mut tx = rt.pool.begin().await?;
     let perm = require_manage(Caller(p.clone()).require(&mut tx, &profile, None, None).await?)?;
     let tmp_dir = rt.settings.data_dir.join("tmp");
-    std::fs::create_dir_all(&tmp_dir).map_err(internal)?;
     let path = tmp_dir.join(format!("export-{}.zip", Uuid::new_v4().simple()));
     let tmp = TmpFile(path.clone());
-    let out = OpenOptions::new()
-        .create_new(true)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .map_err(internal)?;
+    // file IO runs off the async worker (`blocking`), as export_profile's own blob copies do
+    let out = blocking(|| {
+        std::fs::create_dir_all(&tmp_dir)?;
+        OpenOptions::new().create_new(true).read(true).write(true).open(&path)
+    })
+    .map_err(internal)?;
     let manifest = export_profile(&mut tx, &rt.blobs, perm.profile.id, &out, &body.fmt).await?;
     drop(out);
-    let size = std::fs::metadata(&path).map_err(internal)?.len();
+    let size = blocking(|| std::fs::metadata(&path)).map_err(internal)?.len();
     let rows: u64 = manifest
         .get("counts")
         .and_then(Value::as_object)
@@ -100,7 +99,7 @@ async fn export(
     .await?;
     tx.commit().await?;
     // open for sending, then unlink: the data lives only in the open file until the body is sent
-    let file = File::open(&path).map_err(internal)?;
+    let file = blocking(|| File::open(&path)).map_err(internal)?;
     drop(tmp);
     let filename = format!(
         "ownhealth-{}-{}.zip",

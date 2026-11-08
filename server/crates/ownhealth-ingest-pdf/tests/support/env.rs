@@ -1,4 +1,4 @@
-//! Database fixtures for the import tests (`backend/tests/pdf/conftest.py`): a throwaway database with
+//! Database fixtures for the import tests (`0.1.1 tests/pdf/conftest.py`): a throwaway database with
 //! the Rivera family, a blob store in a temp dir, the stand-in normalizer and lane C's retract.
 
 use std::sync::Arc;
@@ -23,10 +23,9 @@ pub struct Env {
     pub settings: Settings,
 }
 
-/// Lane B's hooks: the job and accept handlers, and lane C's retract for `assign_document`.
+/// Lane B's hooks: the job and accept handlers.
 pub fn hooks() {
     ownhealth_ingest_pdf::register();
-    ownhealth_ingest_pdf::set_document_retract(ownhealth_ingest_structured::retract::retract_document_facts);
 }
 
 /// The stand-in normalizer on (lane B's pipeline alone), as the Python `fake_normalizer` fixture.

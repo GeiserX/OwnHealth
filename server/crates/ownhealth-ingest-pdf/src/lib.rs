@@ -36,9 +36,7 @@ use ownhealth_core::review::register_accept_handler;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use import::{
-    DocumentRetract, Normalizer, assign_document, import_pdf, import_pdf_with, set_document_retract, use_normalizer,
-};
+pub use import::{Normalizer, assign_document, import_pdf, import_pdf_with, use_normalizer};
 pub use pages::{ground_value, page_words, render_page_png};
 
 /// One word of a page's stored text layer. bbox is `[x0, top, x1, bottom]` in PDF points, origin

@@ -141,6 +141,8 @@ pub struct ExportReader<R: BufRead> {
     pub clinical_paths: Vec<String>,
     /// What was skipped, by kind, in first-seen order.
     pub counts: Vec<(String, i64)>,
+    /// Where each kind sits in `counts`, so a bump is O(1) like Python's `Counter`.
+    count_index: HashMap<String, usize>,
 }
 
 impl<R: BufRead> ExportReader<R> {
@@ -157,6 +159,7 @@ impl<R: BufRead> ExportReader<R> {
             export_date: None,
             clinical_paths: Vec::new(),
             counts: Vec::new(),
+            count_index: HashMap::new(),
         }
     }
 
@@ -171,9 +174,12 @@ impl<R: BufRead> ExportReader<R> {
     }
 
     fn bump(&mut self, key: String) {
-        match self.counts.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, n)) => *n += 1,
-            None => self.counts.push((key, 1)),
+        match self.count_index.get(&key) {
+            Some(&i) => self.counts[i].1 += 1,
+            None => {
+                self.count_index.insert(key.clone(), self.counts.len());
+                self.counts.push((key, 1));
+            }
         }
     }
 
@@ -394,5 +400,30 @@ mod tests {
         );
         let mut broken = ExportReader::new(&b"<HealthData><Record type=\"x\"></HealthData>"[..]);
         assert!(broken.next_sample().is_err());
+    }
+
+    #[test]
+    fn many_distinct_skipped_names_count_in_linear_time() {
+        // Element names come from the uploaded file; counting them must stay O(1) per element.
+        let n = 200_000;
+        let mut xml = String::from("<HealthData>");
+        for i in 0..n {
+            xml.push_str(&format!("<E{i}/>"));
+        }
+        xml.push_str("<E7/><E7/><E3/></HealthData>");
+        let started = std::time::Instant::now();
+        let mut r = ExportReader::new(xml.as_bytes());
+        while r.next_sample().expect("parses").is_some() {}
+        let top = r.most_common(3);
+        let elapsed = started.elapsed();
+        assert_eq!(
+            top,
+            vec![
+                ("skipped:E7".to_string(), 3),
+                ("skipped:E3".to_string(), 2),
+                ("skipped:E0".to_string(), 1)
+            ]
+        );
+        assert!(elapsed < std::time::Duration::from_secs(5), "took {elapsed:?}");
     }
 }

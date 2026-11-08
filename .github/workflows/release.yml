@@ -4,9 +4,9 @@ name: Release
 # :<major>.<minor> (never :latest), attach an SBOM and build provenance, sign the image with cosign
 # keyless, and copy README.md to the Docker Hub description. GitHub-hosted runners: public repo.
 #
-# Each platform builds natively on its own runner (compiling Rust under QEMU would take hours) and
-# pushes by digest with its SBOM and provenance; the merge job joins them into one tagged manifest
-# list and signs it.
+# Each platform builds natively on its own runner (compiling Rust under QEMU would take hours), pushes
+# by digest with its SBOM and provenance, and smoke-tests that digest (scripts/smoke-image.sh); the
+# merge job joins them into one tagged manifest list and signs it.
 #
 # Verify a published image:
 #   cosign verify drumsergio/ownhealth:<version> \
@@ -83,6 +83,12 @@ jobs:
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           sbom: true
           provenance: mode=max
+
+      # the image just pushed, on its own architecture, before the merge job tags and signs it
+      - name: Smoke test the pushed platform image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: bash scripts/smoke-image.sh "$IMAGE@$DIGEST"
 
       - name: Keep the digest for the merge job
         env:

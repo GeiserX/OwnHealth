@@ -1,4 +1,4 @@
-//! The YAML rule pack v1 (backend/tests/state/test_pack.py): loads, every rule cites, templates are
+//! The YAML rule pack v1 (0.1.1 tests/state/test_pack.py): loads, every rule cites, templates are
 //! bilingual, overrides change the id.
 
 use std::collections::BTreeSet;
@@ -282,5 +282,27 @@ fn an_unquoted_decimal_in_a_pack_file_is_a_pack_error() -> R {
     )?;
     let err = load(dir.0.to_str()).err().map(|e| e.to_string()).unwrap_or_default();
     assert!(err.starts_with("kidney.yaml: ") && err.contains("quoted"), "{err}");
+    Ok(())
+}
+
+/// SHIPPED lists the pack directory by hand; Python globs it. A file added there must not load in
+/// Python and be skipped here (it would change rules_version, the pack sha256 and state_hash).
+#[test]
+fn shipped_lists_every_yaml_in_the_pack_directory() -> R {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../data/rules/pack");
+    let mut on_disk: Vec<String> = std::fs::read_dir(&dir)?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|n| n.ends_with(".yaml"))
+        .collect();
+    on_disk.sort();
+    let listed: Vec<String> = SHIPPED.iter().map(|(n, _)| n.to_string()).collect();
+    assert_eq!(
+        listed,
+        on_disk,
+        "SHIPPED in src/pack.rs is out of step with {}",
+        dir.display()
+    );
     Ok(())
 }

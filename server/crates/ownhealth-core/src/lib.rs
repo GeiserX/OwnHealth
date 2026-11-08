@@ -1,5 +1,5 @@
 //! OwnHealth core: configuration, database, blobs, jobs and the domain services every lane uses.
-//! Ported from `backend/src/ownhealth/{config,blobs,runtime,db,jobs,core,state/canonical}.py`.
+//! Ported from 0.1.1 `ownhealth/{config,blobs,runtime,db,jobs,core,state/canonical}.py`.
 
 pub mod acceptance;
 pub mod access;

@@ -1,5 +1,5 @@
 //! Vendor templates (`ingest/pdf/templates.py`): YAML files in
-//! `backend/src/ownhealth/ingest/pdf/vendors/<country>/<provider>.yaml`, reviewed like code and read
+//! `data/vendors/<country>/<provider>.yaml`, reviewed like code and read
 //! unchanged (embedded at build time; a new file is one more line in `VENDOR_FILES`).
 //!
 //! A template names the provider, its fingerprint (words that must and may appear on the first page),
@@ -22,7 +22,7 @@ pub const MIN_SCORE: f64 = 0.8;
 /// `vendors/*/*.yaml`, sorted by path as Python's glob was.
 const VENDOR_FILES: [(&str, &str); 1] = [(
     "es/labnorte.yaml",
-    include_str!("../../../../backend/src/ownhealth/ingest/pdf/vendors/es/labnorte.yaml"),
+    include_str!("../../../../data/vendors/es/labnorte.yaml"),
 )];
 
 #[derive(Debug, Clone, PartialEq)]

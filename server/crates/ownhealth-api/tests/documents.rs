@@ -31,7 +31,6 @@ struct App {
 
 async fn app() -> anyhow::Result<App> {
     ownhealth_ingest_pdf::register();
-    ownhealth_ingest_pdf::set_document_retract(ownhealth_ingest_structured::retract::retract_document_facts);
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let rt = Runtime::with_pool(db.settings(dir.path())?, db.pool.clone())?;
@@ -437,5 +436,150 @@ async fn reupload_after_retract_brings_the_document_back() -> R {
     );
     drain(&a).await?;
     assert_eq!(state(&a, doc).await?, ("active".to_string(), imported));
+    Ok(())
+}
+
+// ------------------------------------------- sensitive documents (test_document_sensitive.py) ----
+
+const SLIP: &[u8] = b"%PDF-1.4\n% synthetic LabNorte slip\n%%EOF\n";
+
+/// A one-page LabNorte slip for `who` holding one result with `sensitivity`.
+async fn doc_with(a: &App, who: &str, sensitivity: &[&str]) -> anyhow::Result<Uuid> {
+    use ownhealth_core::observations::{CommitOptions, ObservationIn, commit_observation};
+    use ownhealth_core::provenance::{SrcIn, SrcRef};
+    let pid = a.fam.profile(who);
+    let bytes = [SLIP, format!("{sensitivity:?}").as_bytes()].concat();
+    let sha = a.rt.blobs.put_bytes(&bytes)?;
+    let mut tx = a.rt.pool.begin().await?;
+    let doc = create_document(
+        &mut tx,
+        &NewDocument {
+            filename: Some("labnorte.pdf"),
+            pages: Some(1),
+            doc_type: Some("lab_report"),
+            ..NewDocument::upload(
+                a.fam.household_id,
+                Some(pid),
+                &sha,
+                "application/pdf",
+                SLIP.len() as i64,
+            )
+        },
+    )
+    .await?
+    .id;
+    let obs = ObservationIn::from_json(json!({
+        "profile_id": pid, "printed_name": "VIH Ac", "printed_value": "97", "printed_unit": "mg/dL",
+        "printed_ref_range": "< 130", "value_num": "97", "ref_high": "130", "loinc": "13457-7",
+        "alias_group": "ldl_c", "unit_ucum": "mg/dL", "value_canonical": "97", "unit_canonical": "mg/dL",
+        "derivation_version": "test", "effective_at": "2026-09-14T08:00:00+00:00",
+        "document_id": doc, "sensitivity": sensitivity,
+    }))?;
+    let mut src = SrcIn::new("manual");
+    src.profile_id = Some(pid);
+    src.actor_kind = "system".into();
+    commit_observation(&mut tx, &obs, &SrcRef::New(src), CommitOptions::new("import")).await?;
+    tx.commit().await?;
+    Ok(doc)
+}
+
+async fn page_text(a: &App, doc: Uuid, text: &str) -> R {
+    sqlx::query(
+        "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok, text_content, fts) \
+         values ($1, 1, 595, 842, true, $2, to_tsvector('simple', $2))",
+    )
+    .bind(doc)
+    .bind(text)
+    .execute(&a.rt.pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn caregiver_cannot_fetch_a_sensitive_document() -> R {
+    let a = app().await?;
+    // Alex is caregiver on Carmen: read:labs, no read:sensitive
+    let sensitive = doc_with(&a, "carmen", &["sexual_health"]).await?;
+    let plain = doc_with(&a, "carmen", &[]).await?;
+    let mut c = a.rt.pool.acquire().await?;
+    assert!(ownhealth_core::documents::document_is_sensitive(&mut c, sensitive).await?);
+    assert!(!ownhealth_core::documents::document_is_sensitive(&mut c, plain).await?);
+    let r = get(&a, "alex", &format!("/documents/{sensitive}/file")).await?;
+    assert_eq!(
+        (r.status, &r.json()["detail"]["code"]),
+        (StatusCode::FORBIDDEN, &json!("insufficient_scope")),
+        "{}",
+        r.json()
+    );
+    let r = get(&a, "alex", &format!("/documents/{sensitive}/pages/1.png")).await?;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    let r = get(&a, "alex", &format!("/documents/{plain}/file")).await?;
+    assert_eq!(r.status, StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn search_without_read_sensitive_neither_matches_nor_quotes_a_sensitive_page() -> R {
+    let a = app().await?;
+    let sensitive = doc_with(&a, "carmen", &["sexual_health"]).await?;
+    let plain = doc_with(&a, "carmen", &[]).await?;
+    for d in [sensitive, plain] {
+        page_text(&a, d, "LabNorte serologia VIH resultado reactivo").await?;
+    }
+    // Alex, caregiver on Carmen, is given read:documents_text but not read:sensitive
+    sqlx::query(
+        "update profile_grant set categories = array_append(categories, 'read:documents_text') \
+         where user_id = $1 and profile_id = $2",
+    )
+    .bind(a.fam.user("alex"))
+    .bind(a.fam.profile("carmen"))
+    .execute(&a.rt.pool)
+    .await?;
+    let items = get(&a, "alex", "/profiles/carmen/documents?q=serologia").await?.json()["items"].clone();
+    assert_eq!(items.as_array().map(|i| i.len()), Some(1), "{items}");
+    assert_eq!(items[0]["id"], json!(plain.to_string()));
+    let snippet = items[0]["snippet"]["text"].as_str().unwrap_or_default().to_lowercase();
+    assert!(snippet.contains("serologia"), "{items}");
+    // the filename still matches every document, without a snippet from the sensitive one
+    let items = get(&a, "alex", "/profiles/carmen/documents?q=labnorte").await?.json()["items"].clone();
+    let by_id: std::collections::HashMap<String, Value> = items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|i| (i["id"].as_str().unwrap_or_default().to_string(), i.clone()))
+        .collect();
+    let ids: std::collections::BTreeSet<&String> = by_id.keys().collect();
+    assert_eq!(ids, [&sensitive.to_string(), &plain.to_string()].into_iter().collect());
+    assert_eq!(by_id[&sensitive.to_string()]["snippet"], Value::Null);
+    // the owner of the data (Alex on his own profile has read:sensitive) is unaffected
+    let mine = doc_with(&a, "alex", &["sexual_health"]).await?;
+    page_text(&a, mine, "LabNorte serologia VIH").await?;
+    let items = get(&a, "alex", "/profiles/alex/documents?q=serologia").await?.json()["items"].clone();
+    assert_eq!(items.as_array().map(|i| i.len()), Some(1), "{items}");
+    assert_eq!(items[0]["id"], json!(mine.to_string()));
+    assert_ne!(items[0]["snippet"], Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
+async fn document_bytes_are_never_kept_in_the_browser_cache() -> R {
+    let a = app().await?;
+    let doc = doc_with(&a, "alex", &[]).await?;
+    let r = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
+    assert_eq!(r.status, StatusCode::OK);
+    let cache = r
+        .headers
+        .get(header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(cache.contains("no-store"), "{cache}");
+    // the bytes stream from the blob with their length up front
+    let len = r
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert_eq!(len, r.bytes.len().to_string());
+    assert!(r.bytes.starts_with(SLIP));
     Ok(())
 }

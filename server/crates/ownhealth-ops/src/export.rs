@@ -260,6 +260,16 @@ fn location(document_id: Uuid, page: Option<i32>, bbox: Option<&[f32]>) -> Strin
     format!("{{\"document_id\": \"{document_id}\", \"page\": {page}, \"bbox\": {bbox}}}")
 }
 
+/// Run blocking file work (blob copies, deflate) without stalling the async runtime. On the
+/// multi-thread runtime `serve` uses, the worker hands its other tasks to another thread first;
+/// on a current-thread runtime (unit tests) `block_in_place` would panic, so it runs inline.
+pub fn blocking<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 fn bump(counts: &mut Map<String, Value>, key: &str, by: u64) {
     let n = counts.get(key).and_then(Value::as_u64).unwrap_or(0);
     counts.insert(key.to_string(), json!(n + by));
@@ -419,7 +429,7 @@ pub async fn export_profile<W: Write + Seek>(
             "content": [{"attachment": {"contentType": mime, "url": path, "title": filename, "size": size}}],
         });
         w.line("fhir/DocumentReference.ndjson", &doc)?;
-        if !w.blob(&path, blobs, &sha)? {
+        if !blocking(|| w.blob(&path, blobs, &sha))? {
             missing.push(json!({"path": path, "source_blob": sha}));
         }
     }
@@ -489,7 +499,7 @@ pub async fn export_profile<W: Write + Seek>(
         for ((_, name), sha) in GENOME_FILES.iter().zip(shas) {
             if let Some(sha) = sha {
                 let path = format!("genome/{gid}/{name}");
-                if !w.blob(&path, blobs, &sha)? {
+                if !blocking(|| w.blob(&path, blobs, &sha))? {
                     missing.push(json!({"path": path, "source_blob": sha}));
                 }
             }
@@ -511,7 +521,7 @@ pub async fn export_profile<W: Write + Seek>(
         }
         counts.insert(format!("ownhealth/{table}"), json!(n));
     }
-    w.close_lines()?;
+    blocking(|| w.close_lines())?;
     let versions: Vec<i32> = sqlx::query_scalar("select version from schema_migrations order by version")
         .fetch_all(&mut *conn)
         .await?;
@@ -526,7 +536,7 @@ pub async fn export_profile<W: Write + Seek>(
         "files": w.files,
         "missing_blobs": missing,
     });
-    w.finish(&manifest)?;
+    blocking(|| w.finish(&manifest))?;
     Ok(manifest)
 }
 

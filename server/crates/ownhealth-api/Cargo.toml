@@ -36,6 +36,7 @@ uuid.workspace = true
 ownhealth-auth = { workspace = true, features = ["testing"] }
 ownhealth-core = { workspace = true, features = ["testing"] }
 anyhow.workspace = true
+regex.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tower.workspace = true

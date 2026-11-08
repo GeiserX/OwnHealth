@@ -18,7 +18,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The Rust server (server/): format, lints, every crate's tests against a throwaway Postgres.
+  # The server (server/): format, lints, every crate's tests against a throwaway Postgres, and the
+  # deploy checks (crates/ownhealth/tests/deploy.rs: the app role, the compose files).
   server:
     runs-on: ubuntu-latest
     services:
@@ -59,52 +60,17 @@ jobs:
       - name: PDFium (pinned, sha256-checked)
         working-directory: .
         run: bash scripts/fetch-pdfium.sh linux-x64
-      - run: mkdir -p static # the UI build is embedded only in release builds; tests serve their own
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
-
-  # The Python 0.1.1 backend: the reference the contract suite holds the Rust server to.
-  backend:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17.11
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    defaults:
-      run:
-        working-directory: backend
-    env:
-      OWNHEALTH_TEST_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:55432/postgres
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # uv runs the official Python MCP SDK client (pinned in its lock file) that ownhealth-mcp's
+      # tests/python_client.rs drives against the server; the test fails in CI without it
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.11.29"
           enable-cache: true
-      - name: PostgreSQL 17 client and restic 0.18.0, the versions the image ships (tests/ops)
-        working-directory: .
-        run: |
-          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y --no-install-recommends postgresql-client-17
-          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
-          curl -fsSL -o /tmp/restic.bz2 https://github.com/restic/restic/releases/download/v0.18.0/restic_0.18.0_linux_amd64.bz2
-          echo "98f6dd8bf5b59058d04bfd8dab58e196cc2a680666ccee90275a3b722374438e  /tmp/restic.bz2" | sha256sum -c -
-          bunzip2 /tmp/restic.bz2 && sudo install -m 0755 /tmp/restic /usr/local/bin/restic
-      - run: uv sync --frozen
-      - run: uv run ruff check src tests ../deploy/tests
-      - run: uv run ruff format --check src tests ../deploy/tests
-      - run: uv run pytest -q
-      - name: Deploy checks (app database role, compose files)
-        run: uv run pytest -q ../deploy/tests
+          cache-dependency-glob: server/crates/ownhealth-mcp/tests/py/mcp_client.py.lock
+      - run: mkdir -p static # the UI build is embedded only in release builds; tests serve their own
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
 
   ui:
     runs-on: ubuntu-latest
@@ -126,14 +92,10 @@ jobs:
       - run: pnpm build
       - run: test -f ../server/static/index.html
 
-  # The black-box suite (contract-tests/): the same HTTP and MCP tests against both backends, each on a
+  # The black-box suite (contract-tests/): HTTP and MCP tests with goldens recorded from 0.1.1, on a
   # fresh demo database in the shared test Postgres that scripts/test-db.sh starts.
   contract:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        backend: [python, rust]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust ${{ env.RUST_TOOLCHAIN }}
@@ -143,52 +105,22 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        if: matrix.backend == 'python'
-        with:
-          version: "0.11.29"
-          enable-cache: true
-      - if: matrix.backend == 'python'
-        working-directory: backend
-        run: uv sync --frozen
       - name: PDFium (pinned, sha256-checked)
         run: bash scripts/fetch-pdfium.sh linux-x64
       - run: mkdir -p server/static
-      - run: bash contract-tests/run.sh ${{ matrix.backend }}
+      - run: bash contract-tests/run.sh rust
 
+  # Both platforms the release publishes, each on its own native runner: the arm64 PDFium build and
+  # its shared libraries are checked here, not only on a developer's machine.
   docker:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the image (no push)
         run: docker build -t drumsergio/ownhealth:ci .
-      - name: Image runs its CLI as the non-root user, with every tool the deploy recipes call
-        run: |
-          img=drumsergio/ownhealth:ci
-          test "$(docker run --rm --entrypoint id "$img" -u)" = "10001"
-          docker run --rm "$img" ownhealth --version | grep -qx "ownhealth $(sed -n 's/^version = "\(.*\)"$/\1/p' server/Cargo.toml | head -1)"
-          docker run --rm "$img" pg_dump --version | grep -q "PostgreSQL) 17\."
-          docker run --rm "$img" psql --version | grep -q "PostgreSQL) 17\."
-          docker run --rm "$img" restic version
-          docker run --rm "$img" test -f /opt/ownhealth-db/app-role.sh
-          # PDFium loads: every library it links against is in the image
-          if docker run --rm --entrypoint ldd "$img" /usr/local/lib/libpdfium.so | grep "not found"; then exit 1; fi
-      - name: The image serves the embedded UI and answers its own healthcheck
-        run: |
-          img=drumsergio/ownhealth:ci
-          docker network create oh-ci
-          docker run -d --name oh-ci-db --network oh-ci -e POSTGRES_PASSWORD=ci postgres:17.11
-          for _ in $(seq 1 60); do docker exec oh-ci-db pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-          docker run -d --name oh-ci-app --network oh-ci -p 127.0.0.1:18080:8080 \
-            -e OWNHEALTH_DATABASE_URL=postgresql://postgres:ci@oh-ci-db:5432/postgres \
-            -e OWNHEALTH_SECRET_KEY="$(openssl rand -hex 48)" \
-            -e OWNHEALTH_DEMO=1 "$img"
-          for _ in $(seq 1 90); do curl -fsS http://127.0.0.1:18080/readyz >/dev/null 2>&1 && break; sleep 1; done
-          curl -fsS http://127.0.0.1:18080/readyz
-          curl -fsS http://127.0.0.1:18080/ | grep -qi "<!doctype html"
-          docker exec oh-ci-app ownhealth healthcheck
-          docker exec oh-ci-app ownhealth backup /data/backups/ci >/dev/null
-          docker exec oh-ci-app ownhealth verify-restore /data/backups/ci | grep -q '"ok": true'
-      - name: Logs of the image run
-        if: failure()
-        run: docker logs oh-ci-app || true
+      - name: Smoke test (non-root, tools, PDFium libraries, readyz, UI, healthcheck, backup, verify-restore)
+        run: bash scripts/smoke-image.sh drumsergio/ownhealth:ci

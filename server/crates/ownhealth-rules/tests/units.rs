@@ -1,4 +1,4 @@
-//! Units and wearable values (backend/tests/state/test_mixed_units.py, test_wearable_markers.py,
+//! Units and wearable values (0.1.1 tests/state/test_mixed_units.py, test_wearable_markers.py,
 //! test_dashboard_band.py): never compare across units, sleep is the nightly total, and the
 //! dashboard band is drawn in the spark's unit.
 

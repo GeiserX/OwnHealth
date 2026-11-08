@@ -69,7 +69,7 @@ fn call_state_outside_the_five_is_rejected() {
 #[test]
 fn schema_errors_name_the_path() {
     let mut doc = synthetic::alex_facts();
-    doc.as_object_mut().map(|o| o.remove("coverage"));
+    doc.as_object_mut().map(|o| o.shift_remove("coverage"));
     doc["facts"][2]["confidence"]["level"] = json!("certain");
     let e = errors(&doc);
     assert!(any(&e, |e| e.starts_with("$:") && e.contains("coverage")), "{e:?}");
@@ -81,7 +81,7 @@ fn importer_rules_beyond_the_schema() {
     let mut doc = synthetic::alex_facts();
     doc["facts"][0]["variants"][0]
         .as_object_mut()
-        .map(|o| o.remove("genotype"));
+        .map(|o| o.shift_remove("genotype"));
     doc["facts"][1]["summary"] = json!("line\u{0}with a NUL");
     doc["facts"][3]["id"] = doc["facts"][4]["id"].clone();
     let e = errors(&doc);
@@ -130,10 +130,8 @@ fn read_json(rel: &str) -> Value {
 }
 
 #[test]
-fn schema_copies_agree() {
-    let package = read_json("backend/src/ownhealth/genome/data/genome-facts.v1.json");
-    assert_eq!(read_json("data/genome-facts/genome-facts.v1.json"), package);
-    assert_eq!(schema_document(), &package);
+fn embedded_schema_is_the_published_one() {
+    assert_eq!(schema_document(), &read_json("data/genome-facts/genome-facts.v1.json"));
 }
 
 #[test]
@@ -215,10 +213,10 @@ fn rule5_hla_keys_on_the_marker_and_variant_findings_need_vrs() {
     );
     fact_mut(&mut doc, "CFTR")["variants"][0]
         .as_object_mut()
-        .map(|o| o.remove("vrs_id"));
+        .map(|o| o.shift_remove("vrs_id"));
     fact_mut(&mut doc, "LCT")["variants"][0]
         .as_object_mut()
-        .map(|o| o.remove("vrs_id"));
+        .map(|o| o.shift_remove("vrs_id"));
     let e = errors(&doc);
     assert_eq!(
         e.iter().filter(|e| e.contains("needs vrs_id on every variant")).count(),

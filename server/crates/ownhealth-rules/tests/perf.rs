@@ -1,4 +1,4 @@
-//! Budget (backend/tests/state/test_perf.py): the status of a profile with 5 years of labs
+//! Budget (0.1.1 tests/state/test_perf.py): the status of a profile with 5 years of labs
 //! (40 analytes x 60 monthly draws, 2400 values) builds and renders in under 300 ms at p95.
 
 mod common;

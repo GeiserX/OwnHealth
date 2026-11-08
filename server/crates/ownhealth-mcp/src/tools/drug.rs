@@ -85,7 +85,7 @@ pub async fn check_drug(call: &mut Call<'_>) -> ToolResult<Answer> {
     };
     let mut extra = Map::new();
     for k in ENVELOPE_FIELDS {
-        if let Some(v) = raw.remove(k) {
+        if let Some(v) = raw.shift_remove(k) {
             extra.insert(k.into(), v);
         }
     }
@@ -102,7 +102,7 @@ pub async fn check_drug(call: &mut Call<'_>) -> ToolResult<Answer> {
     for (key, need) in PART_SCOPES {
         let missing: Vec<&str> = need.iter().copied().filter(|s| !scopes.contains(*s)).collect();
         if !missing.is_empty() {
-            raw.remove(key);
+            raw.shift_remove(key);
             by_scope.extend(missing.iter().map(|s| crate::gate::scope_label(s)));
         }
     }

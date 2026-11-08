@@ -1,16 +1,16 @@
 # RUST-CONTRACTS.md
 
-The working agreement between the lanes of the Rust port (OwnHealth 0.2.0). The Python backend 0.1.1 in
-`backend/` is the reference: the Rust server must behave the same from the outside. Same Postgres
+The working agreement between the lanes of the Rust port (OwnHealth 0.2.0). The Python backend 0.1.1
+(tag `v0.1.1`; removed from the tree in 0.2.0) is the reference: the Rust server behaves the same from
+the outside. Same Postgres
 schema and migrations, same environment variables, REST paths and JSON, cookies, MCP tools, schemas,
 scopes, envelopes and error codes, the same hashes for tokens, passwords, recovery codes and sessions,
-the same blob layout, job kinds, `state_hash` bytes and audit rows. `CONTRACTS.md` (the Python one) still
+the same blob layout, job kinds, `state_hash` bytes and audit rows. [CONTRACTS.md](../CONTRACTS.md)
 holds the behaviour; this file maps it onto crates and fixes the Rust names.
 
 The foundation shipped the shared core and every interface another lane calls as a typed stub; the
-lanes filled them in and the integration wired them together, so no stub is left. `Error::NotImplemented`
-(HTTP 501 `not_implemented`) stays for a hook nobody set (`ownhealth_ingest_pdf::set_document_retract`,
-set by the binary at start-up). No `todo!()` and no panics in request paths. Change a signature here only
+lanes filled them in and the integration wired them together, so no stub and no `NotImplemented` error is
+left. No `todo!()` and no panics in request paths. Change a signature here only
 in the same commit that changes the code, and say so in the PR.
 
 ## 1. Lanes and crates
@@ -33,9 +33,8 @@ in the same commit that changes the code, and say so in the PR.
 Dependency direction (no cycles): `core` <- `normalize` <- `ingest-pdf`, `ingest-structured`, `rules`
 (`rules` also uses `genome`); `auth` uses only `core`; `mcp` uses `auth`, `genome`, `ingest-pdf`,
 `ingest-structured`, `normalize`, `rules`; `api` uses every lane crate (`mcp` for `mcp.gate` and
-`mcp.limits`, as `api/core.py` and `api/mcp_usage.py` did); the binary uses all. `ingest-pdf` reaches
-lane C's `retract_document_facts` through the hook `set_document_retract`, which the binary sets in
-`register_lanes()`. Python's `random.Random` is `core::pyrandom`, shared by the demo seed and the
+`mcp.limits`, as `api/core.py` and `api/mcp_usage.py` did); the binary uses all. `ingest-pdf` calls
+lane C's `retract_document_facts` directly (`ingest-structured` depends only on `core` and `normalize`). Python's `random.Random` is `core::pyrandom`, shared by the demo seed and the
 synthetic fixtures. A lane that needs
 something from a crate it may not depend on asks the foundation to move it into `core` (as was done
 with `fhir::received_ucum`/`loinc_of`, `text::untrusted`, `ingest::ImportSummary` and the demo family).
@@ -69,20 +68,21 @@ server/
   SPIKES.md, RUST-CONTRACTS.md            foundation
 contract-tests/                           J (run.sh is foundation-grade: keep its arguments)
 scripts/fetch-pdfium.sh, scripts/test-db.sh   foundation
-backend/                                  the Python reference. Do not change behaviour there.
-backend/src/ownhealth/db/migrations/      shared by both backends; ranges as in CONTRACTS.md section 7
+migrations/                               numbered SQL, ranges as in CONTRACTS.md section 7
+data/                                     the shipped reference files below
 ```
 
-Data files are read in place, unchanged, from the Python tree (embed them with `rust-embed` or
-`include_str!` relative to the crate, as `core::migrate` embeds the migrations):
+Data files are the ones 0.1.1 shipped, byte for byte, moved out of the Python tree in 0.2.0. They are
+embedded at build time with `rust-embed` or `include_str!` relative to the crate, as `core::migrate`
+embeds the migrations:
 
 | Files | Lane |
 |---|---|
-| `backend/src/ownhealth/db/migrations/*.sql` | all (embedded by `core::migrate`) |
-| `backend/src/ownhealth/normalize/terminology/` (LOINC subset, aliases, molar masses) | A |
-| `backend/src/ownhealth/ingest/pdf/vendors/<country>/<provider>.yaml` | B |
-| `backend/src/ownhealth/rules/pack/*.yaml`, `rules/cpic/snapshot.json` | E |
-| `backend/src/ownhealth/genome/data/` (`genome-facts.v1.json`, `sensitive_genes.tsv`, `carrier_genes.tsv`), `data/genome-facts/` | D |
+| `migrations/*.sql` | all (embedded by `core::migrate`) |
+| `data/terminology/` (LOINC subset, aliases, molar masses) | A |
+| `data/vendors/<country>/<provider>.yaml` | B |
+| `data/rules/pack/*.yaml`, `data/rules/cpic/snapshot.json` | E |
+| `data/genome/` (`sensitive_genes.tsv`, `carrier_genes.tsv`), `data/genome-facts/genome-facts.v1.json` | D |
 | `fixtures/<lane>/` (synthetic only) | each lane's tests |
 
 ## 3. Rules every lane follows
@@ -306,10 +306,10 @@ failed attempt (`RuntimeError: handler panicked: ...`), never a dead worker.
   `ownhealth-testpg` on 127.0.0.1:55432, `OWNHEALTH_TEST_ADMIN_URL` to override) and drops it on exit.
 - Port the Python tests of your area into your crate. The core's are in `ownhealth-core/tests/`.
 - Run one crate at a time on the shared mini: `cargo test -p <crate>`. Use the shared `server/target`.
-- Contract tests: `contract-tests/run.sh python` and `contract-tests/run.sh rust` start that backend on a
-  fresh database with `OWNHEALTH_DEMO=1 OWNHEALTH_DEV_AUTH=1` and run `cargo test -p
-  ownhealth-contract-tests -- --include-ignored`. A test passes only when both backends pass it; a known
-  difference is written next to the test with `ownhealth_contract_tests::backend()`.
+- Contract tests: `contract-tests/run.sh rust` starts the server on a fresh database with
+  `OWNHEALTH_DEMO=1 OWNHEALTH_DEV_AUTH=1` and runs `cargo test -p ownhealth-contract-tests --
+  --include-ignored`. The goldens were recorded from 0.1.1, and 0.1.1 passed the whole suite (79 of 79)
+  before the Python tree was removed.
 
 ## 9. Known differences from 0.1.1
 

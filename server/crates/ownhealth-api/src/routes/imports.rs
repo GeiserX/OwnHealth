@@ -55,6 +55,23 @@ fn bad_body() -> Fail {
     ))
 }
 
+/// Starlette's MultiPartParser limits in 0.1.1: a non-file part holds at most 1 MiB, and a form has
+/// at most 1000 file parts and 1000 other parts. File parts have no size cap.
+const MAX_PART: usize = 1024 * 1024;
+const MAX_PARTS: usize = 1000;
+
+/// A non-file part's bytes, refused past [`MAX_PART`].
+async fn read_capped(field: &mut axum::extract::multipart::Field<'_>) -> R<Vec<u8>> {
+    let mut buf = Vec::new();
+    while let Some(c) = field.chunk().await.map_err(|_| bad_body())? {
+        if buf.len() + c.len() > MAX_PART {
+            return Err(bad_body());
+        }
+        buf.extend_from_slice(&c);
+    }
+    Ok(buf)
+}
+
 async fn spool(field: &mut axum::extract::multipart::Field<'_>, path: &std::path::Path) -> R<()> {
     let mut out = tokio::fs::File::create(path).await.map_err(Error::from)?;
     while let Some(chunk) = field.chunk().await.map_err(|_| bad_body())? {
@@ -70,9 +87,22 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     let mut files: Vec<Spool> = Vec::new();
     // a body that is not multipart has neither field, which FastAPI reports as two missing fields
     if let Ok(mut form) = Multipart::from_request(req, &rt).await {
+        let (mut file_parts, mut field_parts) = (0usize, 0usize);
         while let Some(mut field) = form.next_field().await.map_err(|_| bad_body())? {
+            let is_file = field.file_name().is_some();
+            if is_file {
+                file_parts += 1;
+            } else {
+                field_parts += 1;
+            }
+            if file_parts > MAX_PARTS || field_parts > MAX_PARTS {
+                return Err(bad_body());
+            }
             match field.name() {
-                Some("profile") => profile = Some(field.text().await.map_err(|_| bad_body())?),
+                Some("profile") => {
+                    let bytes = read_capped(&mut field).await?;
+                    profile = Some(String::from_utf8(bytes).map_err(|_| bad_body())?);
+                }
                 Some("files") => {
                     let filename = field
                         .file_name()
@@ -90,6 +120,9 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
                         path: path.clone(),
                     });
                     spool(&mut field, &path).await?;
+                }
+                _ if !is_file => {
+                    read_capped(&mut field).await?;
                 }
                 _ => {}
             }

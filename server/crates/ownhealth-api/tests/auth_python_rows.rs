@@ -1,7 +1,7 @@
 //! 0.1.1 to 0.2.0: login rows written by the Python release keep working. `auth_python_rows.json`
 //! holds the rows OwnHealth 0.1.1 wrote at first-run setup (a py_webauthn passkey, recovery codes),
 //! plus a password, a session and a PAT, with the plaintexts and the passkey's private key
-//! (`auth_python_rows.py` makes it). Synthetic data only.
+//! (its generator ran on the Python backend and left with it in 0.2.0; see git history). Synthetic data only.
 
 #[path = "auth_support.rs"]
 mod support;

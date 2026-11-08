@@ -1,4 +1,4 @@
-//! Synthetic LabNorte lab reports for upload tests: the layout of backend/src/ownhealth/demo/pdf.py
+//! Synthetic LabNorte lab reports for upload tests: the layout of 0.1.1 ownhealth/demo/pdf.py
 //! (A4, Helvetica, text layer only), so a test can print the name of the profile it made.
 
 const COLS: [f64; 5] = [56.0, 300.0, 352.0, 430.0, 515.0];

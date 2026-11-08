@@ -956,8 +956,6 @@ pub enum StateMode {
     ManyFlags,
     /// Three 4000-character notes.
     Noted,
-    /// Lane E not there: NotImplemented.
-    Stub,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1161,7 +1159,6 @@ impl Services for Fakes {
         Box::pin(async move {
             match mode {
                 StateMode::Normal => fake_build_state(conn, profile_id, as_of).await,
-                StateMode::Stub => Err(Error::NotImplemented("lane E")),
                 StateMode::ManyFlags => {
                     let flags: Vec<Value> = (1..80)
                         .map(|i| {

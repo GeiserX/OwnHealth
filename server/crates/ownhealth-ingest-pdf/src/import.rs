@@ -66,29 +66,8 @@ fn normalizer() -> Normalizer {
 
 // ---------------------------------------------------------------- retract ----
 
-/// `ingest/retract.py retract_document_facts(conn, document_id, reason)`: withdraw everything a
-/// document brought in; returns `{"observations": [...], "records": {...}, "wearable_samples": n,
-/// "documents": [...]}`. Lane C owns it; lane B cannot depend on lane C's crate, so the binary
-/// (or a test) hands it over with `set_document_retract`.
-pub type DocumentRetract = for<'c> fn(&'c mut PgConnection, Uuid, &'c str) -> BoxFuture<'c, Result<Value>>;
-
-static RETRACT: RwLock<Option<DocumentRetract>> = RwLock::new(None);
-
-pub fn set_document_retract(f: DocumentRetract) {
-    if let Ok(mut g) = RETRACT.write() {
-        *g = Some(f);
-    }
-}
-
-pub async fn retract_document_facts(conn: &mut PgConnection, document_id: Uuid, reason: &str) -> Result<Value> {
-    let f = RETRACT.read().ok().and_then(|g| *g);
-    match f {
-        Some(f) => f(conn, document_id, reason).await,
-        None => Err(Error::NotImplemented(
-            "lane C: retract_document_facts (set_document_retract)",
-        )),
-    }
-}
+/// `ingest/retract.py retract_document_facts(conn, document_id, reason)`, lane C's.
+pub use ownhealth_ingest_structured::retract::retract_document_facts;
 
 // ------------------------------------------------------------------ import ----
 

@@ -22,6 +22,7 @@ use sqlx::PgConnection;
 use sqlx::types::Json;
 use uuid::Uuid;
 
+use crate::blocking;
 use crate::schema::{ChipSites, chip_site_errors, validate_facts};
 use crate::sensitive::{is_sensitive_gene, norm_chrom};
 use crate::vcf::VcfFile;
@@ -193,30 +194,45 @@ async fn raw_files(
             continue;
         }
         let index_label = s(f, "index_path").filter(|p| !p.is_empty()).unwrap_or("index");
-        for (want, label) in [(sha, path), (idx, index_label)] {
-            if rehash(blobs, want)? != want {
-                let head: String = want.chars().take(12).collect();
-                return Err(import_error(format!(
-                    "{label}: stored bytes do not match sha256 {head}…"
-                )));
-            }
-        }
-        let opened = VcfFile::open(&blobs.path(sha)?, &blobs.path(idx)?).and_then(|mut vf| vf.check_header());
-        if let Err(e) = opened {
-            return Err(import_error(format!(
-                "{path}: not a bgzipped VCF with a tabix index ({e})"
-            )));
-        }
+        let (store, files) = (
+            blobs.clone(),
+            [
+                (sha.to_string(), path.to_string()),
+                (idx.to_string(), index_label.to_string()),
+            ],
+        );
+        blocking(move || check_raw_file(&store, &files)).await?;
         columns.insert(data_col, sha256_hex_to_bytes(sha)?);
         columns.insert(index_col, sha256_hex_to_bytes(idx)?);
     }
     Ok((columns, missing))
 }
 
+/// The stored bytes of a raw file and its index match their sha256, and they open as a bgzipped VCF
+/// with a tabix index. `files` is [(data sha, path), (index sha, index path)].
+fn check_raw_file(blobs: &BlobStore, files: &[(String, String); 2]) -> Result<()> {
+    for (want, label) in files {
+        if rehash(blobs, want)? != *want {
+            let head: String = want.chars().take(12).collect();
+            return Err(import_error(format!(
+                "{label}: stored bytes do not match sha256 {head}…"
+            )));
+        }
+    }
+    let [(sha, path), (idx, _)] = files;
+    let opened = VcfFile::open(&blobs.path(sha)?, &blobs.path(idx)?).and_then(|mut vf| vf.check_header());
+    if let Err(e) = opened {
+        return Err(import_error(format!(
+            "{path}: not a bgzipped VCF with a tabix index ({e})"
+        )));
+    }
+    Ok(())
+}
+
 /// Rule 7's site-list check, with the chip_sites file opened when it is on hand.
-fn chip_errors(blobs: &BlobStore, doc: &Value, raw: &HashMap<&'static str, Vec<u8>>) -> Result<Vec<String>> {
+fn chip_errors(blobs: &BlobStore, doc: &Value, has_sites: bool) -> Result<Vec<String>> {
     let file = arr(doc, "files").iter().find(|f| s(f, "role") == Some("chip_sites"));
-    let (Some(f), true) = (file, raw.contains_key("sites_blob")) else {
+    let (Some(f), true) = (file, has_sites) else {
         return Ok(chip_site_errors(doc, None));
     };
     let vf = VcfFile::open(
@@ -380,7 +396,10 @@ pub async fn import(
     if !missing.is_empty() {
         summary.reasons.insert("raw_file_missing".into(), missing.len() as i64);
     }
-    let errors = chip_errors(blobs, &doc, &raw)?;
+    let errors = {
+        let (store, doc, has_sites) = (blobs.clone(), doc.clone(), raw.contains_key("sites_blob"));
+        blocking(move || chip_errors(&store, &doc, has_sites)).await?
+    };
     if !errors.is_empty() {
         return Err(invalid(&filename, &errors));
     }

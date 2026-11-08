@@ -8,8 +8,8 @@ use std::sync::LazyLock;
 
 pub const SPAN_PAD_BP: i64 = 2_000;
 
-const SENSITIVE_TSV: &str = include_str!("../../../../backend/src/ownhealth/genome/data/sensitive_genes.tsv");
-const CARRIER_TSV: &str = include_str!("../../../../backend/src/ownhealth/genome/data/carrier_genes.tsv");
+const SENSITIVE_TSV: &str = include_str!("../../../../data/genome/sensitive_genes.tsv");
+const CARRIER_TSV: &str = include_str!("../../../../data/genome/carrier_genes.tsv");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneSpan {

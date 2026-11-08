@@ -338,7 +338,7 @@ pub async fn source_data(call: &mut Call<'_>, src_id: &str, include_text: bool) 
             limitations.push(json!("Raw page text needs read:documents_text."));
         } else if sensitive_doc {
             by_scope.push("sensitive".into());
-            data.remove("crop_url");
+            data.shift_remove("crop_url");
             limitations.push(json!("Page text withheld: the document holds sensitive results."));
         } else if let Some(r) = refusal {
             // mcp.md 5.7: the page text only when every fact on the page is readable, or, for a page
@@ -358,21 +358,12 @@ pub async fn source_data(call: &mut Call<'_>, src_id: &str, include_text: bool) 
             ));
         } else if let (Some(did), Some(p)) = (doc_id, page_no) {
             let blobs = call.rt.blobs.clone();
-            let body = match call.svc.page_words(&mut *call.conn, &blobs, did, p).await {
-                Ok(words) => Some(words.join(" ")),
-                Err(Error::NotImplemented(_)) => {
-                    limitations.push(json!("The page word layer is not available yet."));
-                    None
-                }
-                Err(e) => return Err(e.into()),
-            };
-            if let Some(mut body) = body {
-                if body.chars().count() > TEXT_MAX_CHARS {
-                    body = body.chars().take(TEXT_MAX_CHARS).collect();
-                    limitations.push(json!("Page text cut at 10 000 characters."));
-                }
-                data.insert("text".into(), untrusted(Some(&body), "pdf_text_layer")?);
+            let mut body = call.svc.page_words(&mut *call.conn, &blobs, did, p).await?.join(" ");
+            if body.chars().count() > TEXT_MAX_CHARS {
+                body = body.chars().take(TEXT_MAX_CHARS).collect();
+                limitations.push(json!("Page text cut at 10 000 characters."));
             }
+            data.insert("text".into(), untrusted(Some(&body), "pdf_text_layer")?);
         }
     }
     if facts.is_empty() {

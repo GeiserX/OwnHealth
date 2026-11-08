@@ -168,7 +168,7 @@ pub async fn visible_document(
     };
     let sha: Vec<u8> = row.try_get("blob_sha256")?;
     let mut json_row = row_to_json(&row)?;
-    json_row.remove("blob_sha256");
+    json_row.shift_remove("blob_sha256");
     let perm = match effective_permission(&mut *conn, principal, profile_id).await {
         Ok(p) => p,
         Err(Error::AccessDenied { .. }) => return Err(unknown_doc()),
@@ -387,13 +387,22 @@ async fn document_file(
         "read",
     )
     .await?;
-    let data = rt
-        .blobs
-        .get_bytes(&doc.blob_sha256)
-        .map_err(|e| Error::Other(e.into()))?;
+    // an Apple Health zip runs to hundreds of MB: stream it from disk, never hold it in memory
+    let path = rt.blobs.path(&doc.blob_sha256).map_err(|e| Error::Other(e.into()))?;
+    let file = tokio::fs::File::open(&path).await.map_err(|e| Error::Other(e.into()))?;
+    let size = file.metadata().await.map_err(|e| Error::Other(e.into()))?.len();
     tx.commit().await?;
     let mime = doc.str("mime").unwrap_or("application/octet-stream");
-    Ok((file_headers(mime), [(header::CONTENT_DISPOSITION, "inline")], data).into_response())
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
+    Ok((
+        file_headers(mime),
+        [
+            (header::CONTENT_DISPOSITION, "inline".to_string()),
+            (header::CONTENT_LENGTH, size.to_string()),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 /// FastAPI's `page_no: int` path parameter.

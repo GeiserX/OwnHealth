@@ -1,4 +1,4 @@
-//! The eval of the lab PDF import on the synthetic set (`fixtures/labslips/evaluate.py`; ingestion.md
+//! The eval of the lab PDF import on the synthetic set (0.1.1's `fixtures/labslips/evaluate.py`; ingestion.md
 //! 13, the ROADMAP v0.1 exit criteria). Each slip is imported end to end into its own synthetic
 //! household and scored:
 //!

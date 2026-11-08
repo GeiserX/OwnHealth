@@ -1,6 +1,7 @@
-//! The real-client contract: the Python MCP SDK client of 0.1.1 (`backend/.venv`, mcp 2.3) talks to
-//! the Rust server over a real socket in each mode (2026-07-28, legacy 2025-11-25, auto). Skipped
-//! when the venv is absent.
+//! The real-client contract: the official Python MCP SDK client (mcp 2.3, the version 0.1.1 shipped,
+//! pinned in `tests/py/mcp_client.py.lock`) talks to the Rust server over a real socket in each mode
+//! (2026-07-28, legacy 2025-11-25, auto). It runs through `uv run --script`; skipped when `uv` is not
+//! on PATH, except in CI.
 
 mod common;
 
@@ -13,9 +14,16 @@ use serde_json::Value;
 #[tokio::test]
 async fn python_sdk_client_in_every_mode() -> R {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let python = root.join("../../../backend/.venv/bin/python");
-    if !python.is_file() {
-        eprintln!("backend/.venv absent: skipping the Python client contract");
+    let has_uv = std::process::Command::new("uv")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !has_uv {
+        anyhow::ensure!(
+            std::env::var_os("CI").is_none(),
+            "uv absent in CI: the Python client contract cannot run"
+        );
+        eprintln!("uv absent: skipping the Python client contract");
         return Ok(());
     }
     let w = world().await?;
@@ -25,8 +33,8 @@ async fn python_sdk_client_in_every_mode() -> R {
     let addr = listener.local_addr()?;
     let app = w.app().into_make_service_with_connect_info::<SocketAddr>();
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let out = tokio::process::Command::new(python)
-        .arg("-I")
+    let out = tokio::process::Command::new("uv")
+        .args(["run", "--quiet", "--locked", "--script"])
         .arg(root.join("tests/py/mcp_client.py"))
         .arg(format!("http://{addr}"))
         .arg(&tok)

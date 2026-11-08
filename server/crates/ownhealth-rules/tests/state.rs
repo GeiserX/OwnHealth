@@ -1,4 +1,4 @@
-//! The deterministic state for the synthetic Rivera family on 2026-11-07 (backend/tests/state/
+//! The deterministic state for the synthetic Rivera family on 2026-11-07 (0.1.1 tests/state/
 //! test_state.py; architecture.md section 16, mockup screen 1): flags, gaps, the per-system status
 //! words, the hash and the snapshot.
 

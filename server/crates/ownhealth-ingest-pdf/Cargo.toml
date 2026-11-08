@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 ownhealth-core.workspace = true
 ownhealth-normalize.workspace = true
+ownhealth-ingest-structured.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 flate2.workspace = true
@@ -33,7 +34,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 ownhealth-core = { workspace = true, features = ["testing"] }
-ownhealth-ingest-structured.workspace = true
 anyhow.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

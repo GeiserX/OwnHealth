@@ -1,7 +1,7 @@
-//! Lane E test fixtures (backend/tests/state/conftest.py): a database of its own loaded with the rows
+//! Lane E test fixtures (0.1.1 tests/state/conftest.py): a database of its own loaded with the rows
 //! the Python base demo seed wrote (`fixtures/seed.sql`, synthetic Rivera family), the answers the
 //! Python code gave for them (`fixtures/expected.json`), and a stand-in for lane D's genome reads with
-//! the synthetic findings of architecture.md section 16. `fixtures/make_fixtures.py` writes both files.
+//! the synthetic findings of architecture.md section 16. The generator of both files left with the Python backend in 0.2.0 (see git history).
 #![allow(dead_code)]
 
 use std::collections::HashMap;

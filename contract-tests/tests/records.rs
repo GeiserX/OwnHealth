@@ -8,7 +8,7 @@ use ownhealth_contract_tests::{Client, src_ids};
 use serde_json::{Value, json};
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn add_correct_retract_and_history_of_each_record_kind() -> anyhow::Result<()> {
     let c = Client::new()?;
     let p = c.new_relative().await?;
@@ -187,7 +187,7 @@ async fn add_correct_retract_and_history_of_each_record_kind() -> anyhow::Result
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn manual_observations_resolve_and_show_everywhere() -> anyhow::Result<()> {
     let c = Client::new()?;
     let p = c.new_relative().await?;
@@ -323,7 +323,7 @@ async fn manual_observations_resolve_and_show_everywhere() -> anyhow::Result<()>
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn household_aliases_map_new_names() -> anyhow::Result<()> {
     let c = Client::new()?;
     let p = c.new_relative().await?;

@@ -13,8 +13,8 @@ RUN mkdir -p ../server/static && pnpm build
 
 # 2. Server: the release binary with the UI embedded (rust-embed reads server/static at build time),
 #    and the pinned PDFium build for this architecture (scripts/fetch-pdfium.sh checks its sha256).
-#    The data files (migrations, rule pack, CPIC, LOINC subset, vendor templates, genome schema) are
-#    compiled in from backend/src/ownhealth.
+#    The data files (migrations/, and data/: rule pack, CPIC, LOINC subset, vendor templates, genome
+#    schema) are compiled in.
 FROM rust:1.98.1-slim-trixie AS build
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates cmake curl \
@@ -29,7 +29,8 @@ RUN case "$TARGETARCH" in amd64) p=linux-x64 ;; arm64) p=linux-arm64 ;; *) echo 
  && cp "server/vendor/pdfium/$p/LICENSE" /out/pdfium-LICENSE
 COPY server/ server/
 COPY contract-tests/ contract-tests/
-COPY backend/src/ownhealth/ backend/src/ownhealth/
+COPY migrations/ migrations/
+COPY data/ data/
 COPY --from=ui /src/server/static server/static
 WORKDIR /src/server
 RUN --mount=type=cache,id=ownhealth-cargo-registry-$TARGETARCH,target=/usr/local/cargo/registry \

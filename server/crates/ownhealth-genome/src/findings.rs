@@ -25,7 +25,7 @@ use uuid::Uuid;
 use crate::schema::py_str;
 use crate::{CATEGORIES, CONFIDENCE, EVIDENCE, Gate};
 
-const CPIC_SNAPSHOT: &str = include_str!("../../../../backend/src/ownhealth/rules/cpic/snapshot.json");
+const CPIC_SNAPSHOT: &str = include_str!("../../../../data/rules/cpic/snapshot.json");
 
 #[allow(clippy::expect_used)]
 static NORMAL_PHENOTYPE: LazyLock<Regex> = LazyLock::new(|| {

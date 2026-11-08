@@ -50,7 +50,7 @@ fn count(v: &Value) -> usize {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn accept_with_an_edit_writes_the_corrected_fact() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (p, _, _, item) = held_row(&c).await?;
@@ -121,7 +121,7 @@ async fn accept_with_an_edit_writes_the_corrected_fact() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn reject_reopen_and_dismiss() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (p, _, _, item) = held_row(&c).await?;
@@ -226,7 +226,7 @@ async fn reject_reopen_and_dismiss() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn job_failed_items_are_dismissed_not_accepted() -> anyhow::Result<()> {
     let c = Client::new()?;
     let p = c.new_relative().await?;
@@ -260,7 +260,7 @@ async fn job_failed_items_are_dismissed_not_accepted() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn items_outside_the_callers_reach_are_404() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (_, _, _, item) = held_row(&c).await?;
@@ -295,7 +295,7 @@ async fn items_outside_the_callers_reach_are_404() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn bulk_accept_takes_only_clean_rows() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (p, _, d, item) = held_row(&c).await?;
@@ -329,7 +329,7 @@ async fn bulk_accept_takes_only_clean_rows() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn retracting_a_document_withdraws_its_facts_and_items() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (p, _, d, item) = held_row(&c).await?;
@@ -388,7 +388,7 @@ async fn retracting_a_document_withdraws_its_facts_and_items() -> anyhow::Result
 }
 
 #[tokio::test]
-#[ignore = "needs a running backend: contract-tests/run.sh python|rust"]
+#[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn assigning_a_document_moves_it_and_reimports() -> anyhow::Result<()> {
     let c = Client::new()?;
     let (p, _, d, _) = held_row(&c).await?;

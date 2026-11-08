@@ -1,5 +1,5 @@
 //! The Rust normalizer answers what the Python one (0.1.1) answers, for every input in
-//! `fixtures/python-reference.json` (written by `fixtures/gen_python.py` from the Python code).
+//! `fixtures/python-reference.json` (written from the Python code by a generator that left with the backend in 0.2.0; see git history).
 
 use std::str::FromStr;
 use std::sync::LazyLock;

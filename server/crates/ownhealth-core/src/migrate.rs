@@ -5,7 +5,7 @@
 //! A Postgres advisory lock keeps two processes from migrating at once. The runner refuses a
 //! database that has a migration this code does not know (a schema newer than the code) and a
 //! migration whose file changed after it was applied. The files are the Python ones, unchanged
-//! (`backend/src/ownhealth/db/migrations`), built into the binary, so a 0.1.1 database is up to date.
+//! (`migrations`), built into the binary, so a 0.1.1 database is up to date.
 
 use sqlx::AssertSqlSafe;
 use std::collections::BTreeMap;
@@ -21,7 +21,7 @@ use crate::error::{Error, Result};
 pub const LOCK_KEY: i64 = 0x0E7_4EA1;
 
 #[derive(RustEmbed)]
-#[folder = "../../../backend/src/ownhealth/db/migrations"]
+#[folder = "../../../migrations"]
 #[include = "*.sql"]
 struct Embedded;
 
@@ -226,11 +226,8 @@ mod tests {
         assert_eq!(versions[0], 1);
         // the checksum is of the bytes on disk, as Python's hashlib.sha256(path.read_bytes())
         let first = &ms[0];
-        let disk = std::fs::read(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../backend/src/ownhealth/db/migrations/0001_foundation.sql"),
-        )
-        .expect("read");
+        let disk = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../migrations/0001_foundation.sql"))
+            .expect("read");
         assert_eq!(first.checksum, hex::encode(Sha256::digest(&disk)));
         assert_eq!(first.name, "foundation");
     }

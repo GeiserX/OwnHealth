@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::FACTS_SCHEMA;
 use crate::sensitive::{carrier_spans_overlapping, is_sensitive_gene, spans_overlapping};
 
-pub const SCHEMA_JSON: &str = include_str!("../../../../backend/src/ownhealth/genome/data/genome-facts.v1.json");
+pub const SCHEMA_JSON: &str = include_str!("../../../../data/genome-facts/genome-facts.v1.json");
 pub const CHIP_ASSAYS: [&str; 2] = ["chip", "chip_imputed"];
 pub const UNCONFIRMED_ON_CHIP: [&str; 3] = ["monogenic_pathogenic", "acmg_sf", "carrier"];
 pub const MAX_ERRORS: usize = 20;

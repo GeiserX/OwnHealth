@@ -12,7 +12,7 @@ fn canonical_json_and_state_hash_match_python() -> anyhow::Result<()> {
     let input = &fx["input"];
     let mut body = input.clone();
     if let Some(m) = body.as_object_mut() {
-        m.remove("state_hash");
+        m.shift_remove("state_hash");
     }
     assert_eq!(
         String::from_utf8(canonical_json(&body)?)?,

@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.13,<3.14"
+# dependencies = ["mcp==2.3.0"]
+# ///
 """The Python MCP SDK client against the Rust server: connect in each mode, list, call, read.
 
 argv: base url, token. Prints one JSON object per mode on stdout.

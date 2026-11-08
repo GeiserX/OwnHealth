@@ -272,10 +272,10 @@ pub async fn lookup_variant(call: &mut Call<'_>) -> ToolResult<Answer> {
         Value::Object(m) => m,
         _ => Map::new(),
     };
-    let inner_next = data.remove("next_cursor").filter(|v| !v.is_null());
+    let inner_next = data.shift_remove("next_cursor").filter(|v| !v.is_null());
     let mut bits = Map::new();
     for k in ["limitations", "db_versions", "withheld", "not_assessed"] {
-        if let Some(v) = data.remove(k) {
+        if let Some(v) = data.shift_remove(k) {
             bits.insert(k.into(), v);
         }
     }

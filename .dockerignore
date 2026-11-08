@@ -1,11 +1,13 @@
 **/node_modules
 **/.venv
 **/__pycache__
-**/.pytest_cache
-**/.ruff_cache
 ui/.svelte-kit
-backend/src/ownhealth/static
-data
+data/*
+!data/genome-facts
+!data/genome
+!data/rules
+!data/terminology
+!data/vendors
 docs
 .git
 .env

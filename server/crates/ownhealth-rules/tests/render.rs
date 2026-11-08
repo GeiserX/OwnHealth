@@ -1,4 +1,4 @@
-//! Rendering happens after hashing (backend/tests/state/test_render.py, test_render_units.py):
+//! Rendering happens after hashing (0.1.1 tests/state/test_render.py, test_render_units.py):
 //! language, units, identity mode and scopes change the text, never the state_hash.
 
 mod common;

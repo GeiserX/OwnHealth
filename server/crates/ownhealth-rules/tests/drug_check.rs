@@ -1,4 +1,4 @@
-//! check_drug (backend/tests/state/test_drug_check.py): PGx, current medications, relevant labs and
+//! check_drug (0.1.1 tests/state/test_drug_check.py): PGx, current medications, relevant labs and
 //! CYP2D6 phenoconversion, with CPIC text quoted verbatim.
 
 mod common;

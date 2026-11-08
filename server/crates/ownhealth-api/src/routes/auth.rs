@@ -130,6 +130,15 @@ pub fn error_entry(kind: &str, loc: Vec<Value>, msg: &str, input: Value, ctx: Op
     Value::Object(e)
 }
 
+/// pydantic's wording of a Literal's choices: `'a', 'b' or 'c'`.
+pub fn literal_expected(allowed: &[&str]) -> String {
+    let quoted: Vec<String> = allowed.iter().map(|a| format!("'{a}'")).collect();
+    match quoted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+        _ => quoted.join(""),
+    }
+}
+
 /// Field checks with pydantic's error shapes; `done()` answers 422 when any failed.
 pub struct Check {
     place: &'static str,
@@ -191,11 +200,7 @@ impl Check {
         if let Some(v) = value
             && !allowed.contains(&v)
         {
-            let quoted: Vec<String> = allowed.iter().map(|a| format!("'{a}'")).collect();
-            let expected = match quoted.split_last() {
-                Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
-                _ => quoted.join(""),
-            };
+            let expected = literal_expected(allowed);
             self.errors.push(error_entry(
                 "literal_error",
                 self.loc(field),
@@ -207,13 +212,14 @@ impl Check {
         self
     }
 
-    pub fn range(&mut self, field: &str, value: i64, ge: i64, le: i64) -> &mut Check {
+    /// `input` is the value as sent (pydantic reports `"0"` for a string, `0` for a number).
+    pub fn range(&mut self, field: &str, value: i64, input: Value, ge: i64, le: i64) -> &mut Check {
         if value < ge {
             self.errors.push(error_entry(
                 "greater_than_equal",
                 self.loc(field),
                 &format!("Input should be greater than or equal to {ge}"),
-                json!(value),
+                input,
                 Some(json!({"ge": ge})),
             ));
         } else if value > le {
@@ -221,7 +227,7 @@ impl Check {
                 "less_than_equal",
                 self.loc(field),
                 &format!("Input should be less than or equal to {le}"),
-                json!(value),
+                input,
                 Some(json!({"le": le})),
             ));
         }

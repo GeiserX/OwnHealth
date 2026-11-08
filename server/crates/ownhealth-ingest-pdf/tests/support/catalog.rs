@@ -1,4 +1,4 @@
-//! The analytes the synthetic lab slips print (`fixtures/labslips/catalog.py`, the same data).
+//! The analytes the synthetic lab slips print (0.1.1's `fixtures/labslips/catalog.py`, the same data).
 //! Synthetic only.
 
 pub struct Analyte {

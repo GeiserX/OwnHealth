@@ -13,6 +13,7 @@ pub mod drug;
 pub mod genome;
 pub mod observations;
 pub mod propose;
+pub mod pyschema;
 pub mod source;
 pub mod status;
 
@@ -572,10 +573,6 @@ pub fn tool_error_of(f: Fail, tool: &str) -> ToolError {
             Fail::Tool(t) => *t,
             Fail::Core(_) => internal(),
         },
-        Fail::Core(Error::NotImplemented(what)) => {
-            tracing::warn!("tool {tool}: backing service not available: {what}");
-            ToolError::new("not_available", "This part of OwnHealth is not available yet.", None)
-        }
         Fail::Core(e) => {
             tracing::error!(error = %e, "tool {tool} failed");
             internal()
@@ -695,20 +692,24 @@ async fn run(
     if let Some(v) = VALIDATORS.get(spec.name) {
         let instance = Value::Object(args.clone());
         if let Some(e) = v.iter_errors(&instance).next() {
-            let path = e.instance_path().as_str();
-            let segs: Vec<String> = path
-                .split('/')
-                .skip(1)
-                .map(|s| s.replace("~1", "/").replace("~0", "~"))
-                .collect();
-            let place = if segs.is_empty() {
-                "arguments".to_string()
-            } else {
-                segs.join(".")
-            };
+            let (place, message) = pyschema::python_error(args, &(spec.input_schema)()).unwrap_or_else(|| {
+                let segs: Vec<String> = e
+                    .instance_path()
+                    .as_str()
+                    .split('/')
+                    .skip(1)
+                    .map(|s| s.replace("~1", "/").replace("~0", "~"))
+                    .collect();
+                let place = if segs.is_empty() {
+                    "arguments".to_string()
+                } else {
+                    segs.join(".")
+                };
+                (place, e.to_string())
+            });
             return Err(ToolError::fix(
                 "bad_input",
-                format!("Invalid {place}: {}", chars(&e.to_string(), 200)),
+                format!("Invalid {place}: {}", chars(&message, 200)),
                 "Check the tool's input schema.",
             )
             .into());

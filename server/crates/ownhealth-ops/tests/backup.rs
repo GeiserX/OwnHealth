@@ -2,7 +2,7 @@
 //!
 //! pg_dump and pg_restore 17 must be on PATH or in OWNHEALTH_PG_BINDIR. Without a local client, point
 //! it at the wrapper that runs them in the test container:
-//! `OWNHEALTH_PG_BINDIR=$PWD/../backend/tests/ops/bin cargo test -p ownhealth-ops`.
+//! `OWNHEALTH_PG_BINDIR=$PWD/../scripts/pg-bin cargo test -p ownhealth-ops`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
