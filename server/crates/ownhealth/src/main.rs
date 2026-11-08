@@ -42,8 +42,13 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Logs go to stderr, as Python's logging did: stdout carries the reports `verify-restore` and
+    // `restore` print, which deploy/restic/restore-test.sh and cron logs read as JSON.
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_writer(std::io::stderr)
+        // colour only on a terminal: container logs and cron mail get plain text
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
     let cli = Cli::parse();
     match run(cli.cmd).await {

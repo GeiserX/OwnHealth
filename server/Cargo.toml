@@ -50,6 +50,10 @@ jsonschema = { version = "0.60", default-features = false }
 regex = "1"
 indexmap = { version = "2", features = ["serde"] }
 ipnet = "2"
+num-bigint = "0.4"
+num-rational = "0.4"
+num-traits = "0.2"
+unicode-normalization = "0.1"
 
 # hashing and secrets
 sha2 = "0.11"
@@ -74,8 +78,10 @@ pdfium-render = { version = "0.9.5", default-features = false, features = ["thre
 quick-xml = "0.42"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 noodles = { version = "0.119", features = ["bgzf", "core", "csi", "tabix", "vcf"] }
+flate2 = "1.1"
 
 # tests
+proptest = { version = "1.8", default-features = false, features = ["std"] }
 tempfile = "3"
 
 # errors, cli, logs
@@ -96,6 +102,10 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# scrypt N=16384 takes about a second per hash unoptimised; the password tests spend most of their time there
+[profile.dev.package.scrypt]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

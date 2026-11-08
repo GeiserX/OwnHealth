@@ -92,11 +92,9 @@ async fn the_ui_falls_back_to_index_but_api_and_mcp_paths_do_not() -> R {
             "{path}"
         );
     }
-    let (s, b, _) = call(&app, get("/metrics")?).await?;
-    assert_eq!(
-        (s, json_of(&b)["detail"]["code"].clone()),
-        (StatusCode::NOT_IMPLEMENTED, json!("not_implemented"))
-    );
+    // 0.1.1 has no /metrics: the SPA answers it like any other non-API path
+    let (s, _, _) = call(&app, get("/metrics")?).await?;
+    assert_eq!(s, StatusCode::OK, "/metrics is the SPA");
 
     let bare = build_app(runtime(&db, tempfile::tempdir()?.path(), false).await?);
     let (s, b, _) = call(&bare, get("/")?).await?;
@@ -112,12 +110,32 @@ async fn mcp_answers_initialize_at_slash_mcp() -> R {
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let app = build_app(runtime(&db, dir.path(), true).await?);
+    // every /mcp request, initialize included, needs a PAT (test_mcp_protocol.py)
+    let mut conn = db.pool.acquire().await?;
+    let fam = ownhealth_core::demo::create_rivera_family(&mut conn, "Rivera").await?;
+    let tok = ownhealth_auth::tokens::create_token(
+        &mut conn,
+        &ownhealth_auth::tokens::TokenIn {
+            user_id: fam.user("alex"),
+            label: "t",
+            profile_ids: vec![fam.profile("alex")],
+            scopes: vec!["read:summary".into()],
+            default_profile: None,
+            days: 30,
+            identity_mode: "full",
+            lang: "en",
+            units: "si",
+        },
+    )
+    .await?;
+    drop(conn);
     let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}});
     let req = Request::post("/mcp")
         .header("host", "127.0.0.1")
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
+        .header("authorization", format!("Bearer {}", tok.plaintext))
         .body(Body::from(init.to_string()))?;
     let (s, b, _) = call(&app, req).await?;
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));

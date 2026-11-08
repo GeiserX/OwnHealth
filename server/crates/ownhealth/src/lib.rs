@@ -7,6 +7,7 @@ pub mod ui;
 pub fn register_lanes() {
     ownhealth_normalize::register();
     ownhealth_ingest_pdf::register();
+    ownhealth_ingest_pdf::set_document_retract(ownhealth_ingest_structured::retract::retract_document_facts);
     ownhealth_ingest_structured::register();
     ownhealth_genome::register();
     ownhealth_rules::register();

@@ -143,6 +143,10 @@ pub fn pydantic_datetime(dt: &DateTime<FixedOffset>) -> String {
     format!("{}{tail}", naive_iso(&dt.naive_local()))
 }
 
+pub fn pydantic_datetime_utc(dt: &DateTime<Utc>) -> String {
+    pydantic_datetime(&dt.with_timezone(&Utc.fix()))
+}
+
 fn decode<'r, T: sqlx::Decode<'r, sqlx::Postgres>>(v: PgValueRef<'r>) -> Result<T> {
     T::decode(v).map_err(|e| Error::Db(sqlx::Error::Decode(e)))
 }

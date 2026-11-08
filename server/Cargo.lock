@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
 name = "aead"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1315,6 +1321,8 @@ version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
+ "crc32fast",
+ "miniz_oxide",
  "zlib-rs",
 ]
 
@@ -2291,6 +2299,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "miniz_oxide"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
+
+[[package]]
 name = "mio"
 version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2668,6 +2686,7 @@ dependencies = [
  "ownhealth-genome",
  "ownhealth-ingest-pdf",
  "ownhealth-ingest-structured",
+ "ownhealth-mcp",
  "ownhealth-normalize",
  "ownhealth-ops",
  "ownhealth-rules",
@@ -2676,6 +2695,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "uuid",
@@ -2693,6 +2713,7 @@ dependencies = [
  "http",
  "openidconnect",
  "ownhealth-core",
+ "p256",
  "rand 0.10.3",
  "reqwest",
  "scrypt",
@@ -2702,8 +2723,10 @@ dependencies = [
  "sha2 0.11.1",
  "sqlx",
  "subtle",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "uuid",
  "webauthn-rs",
  "webauthn-rs-core",
@@ -2715,9 +2738,13 @@ name = "ownhealth-contract-tests"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "regex",
  "reqwest",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
+ "zip",
 ]
 
 [[package]]
@@ -2752,14 +2779,19 @@ name = "ownhealth-genome"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "futures",
+ "hex",
  "jsonschema",
  "noodles",
  "ownhealth-core",
+ "regex",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sqlx",
+ "tempfile",
  "tokio",
  "tracing",
  "uuid",
@@ -2770,16 +2802,25 @@ name = "ownhealth-ingest-pdf"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "flate2",
  "futures",
+ "hex",
  "ownhealth-core",
+ "ownhealth-ingest-structured",
  "ownhealth-normalize",
  "pdfium-render",
+ "regex",
+ "rust_decimal",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.11.1",
  "sqlx",
+ "tempfile",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -2790,15 +2831,19 @@ dependencies = [
  "anyhow",
  "chrono",
  "futures",
+ "hex",
  "ownhealth-core",
  "ownhealth-normalize",
  "quick-xml",
  "rust_decimal",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sqlx",
+ "tempfile",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "uuid",
  "zip",
 ]
@@ -2810,21 +2855,31 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "chrono",
+ "futures",
+ "hex",
  "hmac 0.13.0",
  "http",
+ "jsonschema",
  "ownhealth-auth",
  "ownhealth-core",
  "ownhealth-genome",
  "ownhealth-ingest-pdf",
+ "ownhealth-ingest-structured",
  "ownhealth-normalize",
+ "ownhealth-ops",
  "ownhealth-rules",
+ "regex",
  "rmcp",
+ "rust_decimal",
  "schemars 1.2.3",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "sqlx",
+ "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "uuid",
 ]
@@ -2836,14 +2891,22 @@ dependencies = [
  "anyhow",
  "chrono",
  "futures",
+ "hex",
+ "indexmap 2.14.2",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
  "ownhealth-core",
+ "proptest",
+ "regex",
  "rust_decimal",
  "serde",
  "serde_json",
- "serde_yaml",
+ "sha2 0.11.1",
  "sqlx",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -2852,13 +2915,21 @@ name = "ownhealth-ops"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "futures",
+ "hex",
  "ownhealth-core",
  "ownhealth-rules",
+ "regex",
+ "rust_decimal",
  "serde_json",
+ "sha2 0.11.1",
  "sqlx",
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -2868,16 +2939,21 @@ dependencies = [
  "anyhow",
  "chrono",
  "futures",
+ "hex",
  "ownhealth-core",
  "ownhealth-genome",
  "ownhealth-normalize",
+ "regex",
  "rust_decimal",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.11.1",
  "sqlx",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -3201,6 +3277,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "proptest"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8530004ccb15eae51c7e40009fbe317f341f804db54dc033eec1c50be28cfa0"
+dependencies = [
+ "bitflags",
+ "chacha20",
+ "core_detect",
+ "num-traits",
+ "rand 0.10.3",
+ "rand_xorshift",
+ "regex-syntax",
+ "unarray",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3378,6 +3470,15 @@ name = "rand_pcg"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
+dependencies = [
+ "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_xorshift"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
 dependencies = [
  "rand_core 0.10.1",
 ]
@@ -4927,6 +5028,12 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "unarray"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
 name = "unicase"

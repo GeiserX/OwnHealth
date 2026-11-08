@@ -20,6 +20,7 @@ pub mod migrate;
 pub mod observations;
 pub mod provenance;
 pub mod pyjson;
+pub mod pyrandom;
 pub mod records;
 pub mod review;
 pub mod runtime;

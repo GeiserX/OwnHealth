@@ -1,4 +1,4 @@
-//! App assembly (`app.py`): REST under /api, MCP at /mcp, health probes, metrics, the UI at /,
+//! App assembly (`app.py`): REST under /api, MCP at /mcp, health probes, the UI at /,
 //! and the startup steps (migrations, demo seed, job workers) with a graceful shutdown.
 
 use std::sync::Arc;
@@ -34,7 +34,6 @@ pub fn build_app(rt: Runtime) -> Router {
         .nest("/api", ownhealth_api::router())
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/metrics", get(metrics))
         .fallback(move |uri: Uri| {
             let ui = ui.clone();
             async move { ui.serve(&uri).await }
@@ -70,13 +69,6 @@ async fn readyz(State(rt): State<Runtime>) -> Response {
         )
         .into_response(),
         Ok(_) => Json(json!({"status": "ready"})).into_response(),
-    }
-}
-
-async fn metrics(State(rt): State<Runtime>) -> Response {
-    match ownhealth_ops::metrics(&rt).await {
-        Ok(text) => ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], text).into_response(),
-        Err(e) => ApiError::from(e).into_response(),
     }
 }
 

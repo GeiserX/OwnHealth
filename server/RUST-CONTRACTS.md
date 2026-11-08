@@ -7,10 +7,11 @@ scopes, envelopes and error codes, the same hashes for tokens, passwords, recove
 the same blob layout, job kinds, `state_hash` bytes and audit rows. `CONTRACTS.md` (the Python one) still
 holds the behaviour; this file maps it onto crates and fixes the Rust names.
 
-The foundation (this commit) ships the shared core, implemented and tested, and every interface another
-lane calls as a typed stub that returns `Error::NotImplemented("lane X: ...")` (HTTP 501
-`not_implemented`). No `todo!()` and no panics in request paths. Change a signature here only in the same
-commit that changes the code, and say so in the PR.
+The foundation shipped the shared core and every interface another lane calls as a typed stub; the
+lanes filled them in and the integration wired them together, so no stub is left. `Error::NotImplemented`
+(HTTP 501 `not_implemented`) stays for a hook nobody set (`ownhealth_ingest_pdf::set_document_retract`,
+set by the binary at start-up). No `todo!()` and no panics in request paths. Change a signature here only
+in the same commit that changes the code, and say so in the PR.
 
 ## 1. Lanes and crates
 
@@ -23,15 +24,19 @@ commit that changes the code, and say so in the PR.
 | D | `ownhealth-genome` | genome-facts import, findings, gating, tabix lookups (noodles) | `genome/`, `jobs/kinds/genome.py`, `demo/hooks/genome.py` |
 | E | `ownhealth-rules` | rule pack, state body, render, status words, dashboard, drug check | `state/`, `rules/`, `jobs/kinds/state.py` |
 | F | `ownhealth-mcp` | `/mcp`: the 8 tools, PAT guard, envelope, budgets, limits, resources, prompts | `mcp/` |
-| G | `ownhealth-auth` | passkeys, OIDC, passwords, recovery, sessions, step-up, PATs, household management, export | `auth/`, `export/` |
-| H | `ownhealth-ops` | backup, restore, verify-restore, metrics; the base demo seed | `ops/`, `demo/base.py` |
+| G | `ownhealth-auth` | passkeys, OIDC, passwords, recovery, sessions, step-up, PATs, household management | `auth/` |
+| H | `ownhealth-ops` | backup, restore, verify-restore, the profile export; the base demo seed | `ops/`, `export/`, `demo/base.py` |
 | I | `ownhealth-api` | `/api`: error mapping, extractors, the foundation routes, timeline | `api/_deps.py`, `api/core.py`, `api/review.py`, `api/imports.py`, `api/timeline.py`, `auth/deps.py` |
 | J | `contract-tests/` | black-box HTTP and MCP tests both backends must pass | `tests/` (as behaviour, not code) |
 | foundation | `ownhealth` (bin) | CLI, app assembly, UI serving, probes, startup and shutdown | `cli.py`, `app.py` |
 
 Dependency direction (no cycles): `core` <- `normalize` <- `ingest-pdf`, `ingest-structured`, `rules`
 (`rules` also uses `genome`); `auth` uses only `core`; `mcp` uses `auth`, `genome`, `ingest-pdf`,
-`normalize`, `rules`; `api` uses every lane crate except `mcp`; the binary uses all. A lane that needs
+`ingest-structured`, `normalize`, `rules`; `api` uses every lane crate (`mcp` for `mcp.gate` and
+`mcp.limits`, as `api/core.py` and `api/mcp_usage.py` did); the binary uses all. `ingest-pdf` reaches
+lane C's `retract_document_facts` through the hook `set_document_retract`, which the binary sets in
+`register_lanes()`. Python's `random.Random` is `core::pyrandom`, shared by the demo seed and the
+synthetic fixtures. A lane that needs
 something from a crate it may not depend on asks the foundation to move it into `core` (as was done
 with `fhir::received_ucum`/`loinc_of`, `text::untrusted`, `ingest::ImportSummary` and the demo family).
 
@@ -178,9 +183,9 @@ session_secret)` (Bearer PAT, then the `oh_session` cookie, then dev auth), `pri
 as in section 5), `Caller` (the extractor `get_principal` was: resolve, refuse PATs with 403
 `forbidden`, CSRF), `SessionCaller`, `caller.require(conn, p, scope, action)`.
 
-### 4.2 Lane stubs
+### 4.2 Lane interfaces
 
-The stubs are in each crate's `src/lib.rs` with doc comments. The shapes:
+Each crate's `src/lib.rs` documents them. The shapes:
 
 | Crate | Function (Rust) | Called by |
 |---|---|---|
@@ -191,7 +196,7 @@ The stubs are in each crate's `src/lib.rs` with doc comments. The shapes:
 | | `parse_range(printed, locale, unit) -> Result<Vec<RefRange>>`; `pick_range(&ranges, sex, age)` | B, C |
 | | `interpret(value, text_code, range, comparator) -> Option<&str>` | B, C |
 | | `normalize_row(conn, &RowIn) -> Result<Normalized { observation, checks }>` | B, C, F |
-| | `add_alias(conn, &AliasIn) -> Result<Uuid>`; `rederive(conn, profile, since) -> Result<i64>`; `derivation_version()` | I, H |
+| | `add_alias(conn, &AliasIn) -> Result<Uuid>`; `rederive(conn, profile, since) -> Result<i64>`; `derivation_version() -> String` | I, H |
 | ingest-pdf (B) | `import_pdf(conn, blobs, document_id, force) -> Result<ImportSummary>` | job `import.pdf` |
 | | `page_words(conn, blobs, document_id, page_no) -> Result<Vec<Word>>` | F, I |
 | | `render_page_png(blobs, sha, page_no, scale) -> Result<Vec<u8>>` (blocking) | I |
@@ -203,15 +208,15 @@ The stubs are in each crate's `src/lib.rs` with doc comments. The shapes:
 | genome (D) | `gate_for(&Permission, surface, on, age_of_majority) -> Result<Gate>` | E, F, I |
 | | `validate_facts(&Value) -> Result<Vec<String>>`; `import_genome_facts(conn, blobs, doc, attachments, actor)` | job |
 | | `list_findings(conn, profile, &Gate, &FindingsQuery) -> Result<Value>` | E, F, I |
-| | `lookup_variant(conn, blobs, profile, &Gate, &VariantQuery) -> Result<Value>` | F, I |
+| | `lookup_variant(conn, blobs, profile, &Gate, &VariantQuery) -> Result<Result<Value, GenomeQueryError>>` (inner: a query it cannot answer, `{code, message, fix}`) | F, I |
 | | `pgx_for_drug(conn, profile, cpic_drug_id, as_of) -> Result<Vec<Value>>`; `is_sensitive_gene(gene)`; `CALL_STATES`, `EVIDENCE`, `CONFIDENCE` (final) | E, F |
 | rules (E) | `rules_version()`; `build_state(conn, profile, as_of, known_at) -> Result<Value>` | F, H, I |
 | | `render(&body, lang, units, identity_mode, scopes) -> Result<Value>` | F, I |
 | | `status_word(conn, profile, group, as_of) -> Result<&str>`; `dashboard(conn, profile, as_of, lang, &scopes)` | I |
 | | `check_drug(conn, profile, drug, &scopes, lang, as_of) -> Result<Value>`; `resolve_drug(conn, name)` | F, I, C |
-| mcp (F) | `router(Runtime) -> Router` (exactly `/mcp`); `OwnHealthMcp` (placeholder: instructions, no tools) | bin |
-| auth (G) | `tokens::{create_token, verify_token, revoke_token}`; `sessions::{resolve_session, create_session, require_step_up}`; `export::export_profile` | foundation, F, I |
-| ops (H) | `backup(settings, dest) -> Result<PathBuf>`; `restore` / `verify_restore -> Result<Value>` (the report, `ok` decides the exit code); `metrics(&Runtime) -> Result<String>` | bin |
+| mcp (F) | `router(Runtime) -> Router` (`/mcp` behind the PAT guard, and `/.well-known/oauth-protected-resource`) | bin |
+| auth (G) | `tokens::{create_token, verify_token, revoke_token}`; `sessions::{resolve_session, create_session, require_step_up}` | foundation, F, I |
+| ops (H) | `backup(settings, dest) -> Result<PathBuf>`; `restore` / `verify_restore -> Result<Value>` (the report, `ok` decides the exit code); `export::export_profile(conn, blobs, profile, out: Write + Seek, fmt) -> Result<Value>` | bin, I |
 
 Python keyword arguments become a small options struct with `::new(...)` and `..Default::default()`
 when there are more than about four of them (`CommitOptions`, `RouteFact`, `EnqueueOptions`, `RowIn`).
@@ -229,7 +234,7 @@ them in module-name order and the app nests the result at `/api`. Unknown `/api/
 | `core.rs` | I | `observations.rs` | A | `genome.rs` | D |
 | `review.rs` | I | `documents.rs` | B | `status.rs`, `drug_check.rs` | E |
 | `imports.rs` | I | `records.rs`, `wearables.rs` | C | `mcp_usage.rs` | F |
-| `timeline.rs` | I | `auth.rs`, `tokens.rs`, `audit.rs`, `family.rs`, `export.rs` | G | `/metrics` (bin, `ops::metrics`) | H |
+| `timeline.rs` | I | `auth.rs`, `tokens.rs`, `audit.rs`, `family.rs`, `export.rs` | G | | |
 
 Error mapping (`ApiError::from(core::Error)`), the same codes FastAPI answered:
 
@@ -290,7 +295,8 @@ failed attempt (`RuntimeError: handler panicked: ...`), never a dead worker.
 | state_hash | `sha256:` + hex sha256 of RFC 8785 canonical JSON of the body without `state_hash` |
 | job | kinds in `jobs::JOB_KINDS`; backoff 2^attempts x 30 s; lease 300 s, heartbeat 60 s, reaper every 60 s; `last_error` `"<Type>: <message>"` cut at 500 chars; a dead job files one `job_failed` review item |
 | audit | one `audit_event` row per read; free-text arguments only as `hash_arg` |
-| JSON numbers | Decimal columns print as FastAPI did (`pyjson::decimal_json`: integer when the scale is 0, else float); datetimes as `pyjson::py_isoformat` (`+00:00`, micros only when non-zero); real (float4) columns with the shortest repr |
+| JSON numbers | Decimal columns print as FastAPI did (`pyjson::decimal_json`: integer when the scale is 0, else float); real (float4) columns with the shortest repr |
+| JSON datetimes | as the Python route sent them, field by field: a datetime object returned from a route annotated `-> dict` went through pydantic's JSON mode, `Z` for UTC (`pyjson::pydantic_datetime`, `validate::pydantic_datetimes`); one from an unannotated route, or a string Python built with `isoformat()`, is `+00:00` (`pyjson::py_isoformat`). Micros only when non-zero. The contract goldens record which field is which |
 
 ## 8. Tests
 
@@ -305,14 +311,9 @@ failed attempt (`RuntimeError: handler panicked: ...`), never a dead worker.
   ownhealth-contract-tests -- --include-ignored`. A test passes only when both backends pass it; a known
   difference is written next to the test with `ownhealth_contract_tests::backend()`.
 
-## 9. Known gaps in this foundation
+## 9. Known differences from 0.1.1
 
-- The base demo seed (`demo/base.py`: lab reports, records, 90 days of wearables, the 7 review items) is
-  lane H's port, registered as the demo hook `base` with order 0. Until then the Rust demo has only the
-  family and grants. Its wearable noise comes from Python's `random.Random(20261107).uniform`, so the port
-  needs Mersenne Twister with Python's seeding to match values.
-- MCP is a placeholder (no tools, no PAT guard): lane F.
-- Every REST route other than the probes is lane work, including the foundation's own `core.py`,
-  `review.py` and `imports.py` (lane I).
-- `jobs::run_one`'s lease renewal runs every 60 s; the Python test that shrank the lease to 1 s by
-  monkeypatching is replaced by a direct `heartbeat` test.
+Each lane's `.lanes/<lane>-requests.md` lists them; the release notes carry the ones a user can see.
+The ones that touch stored data: `extraction_run.engine` is `pdfium` (`chromium/8125`), so a forced
+re-import of a 0.1.1 document makes a new extraction run, and the PDF Info key `Trapped` is no longer in
+`flags.metadata_text`. FastAPI's 422 lists keep their status, `type` and `loc`; a message can differ.
