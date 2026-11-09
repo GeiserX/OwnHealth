@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone, Timelike, Utc};
 use common::{Env, R};
+use ownhealth_core::sources::{RunOutcome, RunProblem};
 use ownhealth_devices::hae;
 use serde_json::{Value, json};
 
@@ -58,7 +59,14 @@ fn push(now: DateTime<Utc>) -> Value {
         let done = ((now - h).num_seconds() as f64 / 3600.0).min(1.0);
         let v = (steps_total(hour) * done).floor();
         if v > 0.0 {
-            steps.push(json!({"date": fmt(h), "qty": v, "source": "iPhone de Alex|Apple Watch de Alex"}));
+            // the iPhone writes the open hour first; the watch's share syncs once the hour is over, and
+            // from then on the app sends the bucket with both sources
+            let source = if now - h < Duration::hours(1) {
+                "iPhone de Alex"
+            } else {
+                "iPhone de Alex|Apple Watch de Alex"
+            };
+            steps.push(json!({"date": fmt(h), "qty": v, "source": source}));
         }
         h += Duration::hours(1);
     }
@@ -155,16 +163,18 @@ async fn seven_days_of_overlapping_15_minute_pushes_give_no_duplicates() -> R {
             .fetch_all(&env.db.pool)
             .await?;
     assert!(sleep.iter().all(|v| (*v - 465.0).abs() < 0.01), "{sleep:?}");
-    // one device, linked to the inbox; the raw pushes are kept as blobs
-    let devices: Vec<(String, Option<String>)> =
-        sqlx::query_as("select provider, device from wearable_source where profile_id = $1 and source_id = $2")
-            .bind(alex)
-            .bind(source.id)
-            .fetch_all(&env.db.pool)
-            .await?;
+    // one wearable source for the inbox, whatever source strings the buckets carried; the raw pushes
+    // are kept as blobs
+    let devices: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "select provider, device, external_id from wearable_source where profile_id = $1 and source_id = $2",
+    )
+    .bind(alex)
+    .bind(source.id)
+    .fetch_all(&env.db.pool)
+    .await?;
     assert_eq!(
         devices,
-        vec![("health_auto_export".into(), Some("Apple Watch de Alex".into()))]
+        vec![("health_auto_export".into(), None, Some(source.id.to_string()))]
     );
     let kept: i64 =
         sqlx::query_scalar("select count(*) from source_item where source_id = $1 and external_id like 'push:%'")
@@ -213,5 +223,82 @@ async fn the_same_push_twice_adds_nothing_and_refused_pushes_write_nothing() -> 
         .count("select count(*) from wearable_sample where profile_id = $1", alex)
         .await?;
     assert_eq!(rows, i64::from(first.new));
+    Ok(())
+}
+
+fn import(
+    env: &Env,
+    source: &ownhealth_core::sources::Source,
+    body: &Value,
+) -> impl Future<Output = anyhow::Result<RunOutcome>> {
+    let body = serde_json::to_vec(body);
+    async move {
+        let mut c = env.db.pool.acquire().await?;
+        Ok(hae::import_push(&mut c, &env.blobs, source, &body?).await?)
+    }
+}
+
+#[tokio::test]
+async fn a_day_bucket_resent_after_the_phone_changed_time_zone_stays_one_sample() -> R {
+    let env = Env::new().await?;
+    let alex = env.fam.profile("alex");
+    let source = env.source("health_auto_export", Some("alex"), json!({}), None).await?;
+    let resting = |date: &str, v: i64| {
+        json!({"data": {"metrics": [{"name": "resting_heart_rate", "units": "count/min",
+            "data": [{"date": date, "qty": v, "source": "Apple Watch de Alex"}]}]}})
+    };
+    import(&env, &source, &resting("2026-11-02 00:00:00 +0100", 54)).await?;
+    // Alex flies east: the app re-sends the same day as local midnight at +02:00
+    let o = import(&env, &source, &resting("2026-11-02 00:00:00 +0200", 53)).await?;
+    assert_eq!(o.new, 0, "{o:?}");
+    let rows: Vec<(DateTime<Utc>, f32, Option<i16>)> = sqlx::query_as(
+        "select t, v, tz_offset_min from wearable_sample where profile_id = $1 and metric = 'hr_resting'",
+    )
+    .bind(alex)
+    .fetch_all(&env.db.pool)
+    .await?;
+    let day = Utc.with_ymd_and_hms(2026, 11, 2, 0, 0, 0).single();
+    assert_eq!(
+        rows.iter().map(|r| (Some(r.0), r.1, r.2)).collect::<Vec<_>>(),
+        vec![(day, 53.0, Some(120))]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn points_lost_to_an_unknown_unit_make_the_run_partial() -> R {
+    let env = Env::new().await?;
+    let alex = env.fam.profile("alex");
+    let source = env.source("health_auto_export", Some("alex"), json!({}), None).await?;
+    let weight = |units: &str, qty: f64| {
+        json!({"data": {"metrics": [{"name": "weight_body_mass", "units": units,
+            "data": [{"date": "2026-11-02 07:00:00 +0100", "qty": qty}, {"date": "2026-11-03 07:00:00 +0100", "qty": qty}]}]}})
+    };
+    // stone is not a unit we convert: both points are lost, and the run says so
+    let o = import(&env, &source, &weight("stone", 11.0)).await?;
+    assert_eq!(
+        o.problems,
+        vec![RunProblem {
+            code: "points_skipped".into(),
+            message: "unit:weight_body_mass x2".into()
+        }]
+    );
+    assert_eq!(o.new, 0);
+    // lb converts: imported, no problem
+    let o = import(&env, &source, &weight("lb", 150.0)).await?;
+    assert_eq!((o.new, o.problems.len()), (2, 0), "{o:?}");
+    // only metrics and sections we do not chart yet: nothing lost that we would show, the run is ok
+    let o = import(
+        &env,
+        &source,
+        &json!({"data": {"metrics": [{"name": "dietary_water", "units": "mL",
+            "data": [{"date": "2026-11-02 08:00:00 +0100", "qty": 250}]}], "workouts": [{"name": "Run"}]}}),
+    )
+    .await?;
+    assert_eq!((o.seen, o.problems.len()), (0, 0), "{o:?}");
+    let rows = env
+        .count("select count(*) from wearable_sample where profile_id = $1", alex)
+        .await?;
+    assert_eq!(rows, 2);
     Ok(())
 }

@@ -144,10 +144,40 @@ pub fn page_phashes(data: &[u8]) -> Result<Vec<Option<u64>>> {
     Ok(out)
 }
 
+/// The largest side of a stored image we decode, in pixels (a 12000 x 12000 photo is 144 Mpx).
+pub const MAX_IMAGE_SIDE: u32 = 12_000;
+/// The most memory one image decode may allocate.
+pub const MAX_IMAGE_ALLOC: u64 = 256 * 1024 * 1024;
+
+/// A photo or scan stored as an image (PNG or JPEG), decoded upright: the EXIF orientation a phone
+/// camera writes (pixels in sensor order, `Orientation = 6` for a portrait shot) is applied. Sizes past
+/// `MAX_IMAGE_SIDE` or `MAX_IMAGE_ALLOC` are refused before decoding. CPU work: call it off the async
+/// workers.
+pub fn decode_image(data: &[u8]) -> Result<image::DynamicImage> {
+    use image::ImageDecoder as _;
+    let bad = |e: image::ImageError| match e {
+        image::ImageError::Limits(_) => Error::Invalid("image too large".into()),
+        e => Error::Invalid(format!("unreadable image: {e}")),
+    };
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
+    limits.max_alloc = Some(MAX_IMAGE_ALLOC);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|e| Error::Invalid(format!("unreadable image: {e}")))?;
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().map_err(bad)?;
+    let orientation = decoder.orientation().map_err(bad)?;
+    let mut img = image::DynamicImage::from_decoder(decoder).map_err(bad)?;
+    img.apply_orientation(orientation);
+    Ok(img)
+}
+
 /// The pHash of a photo or scan stored as an image (PNG or JPEG), as one page: the same 256-pixel-wide
 /// grayscale the PDF pages are hashed from, so a photo of a report we hold matches its PDF page.
 pub fn image_phash(data: &[u8]) -> Result<Vec<Option<u64>>> {
-    let img = image::load_from_memory(data).map_err(|e| Error::Invalid(format!("unreadable image: {e}")))?;
+    let img = decode_image(data)?;
     let max_h = (PHASH_RENDER_WIDTH * 4) as u32;
     let gray = img
         .resize(PHASH_RENDER_WIDTH as u32, max_h, image::imageops::FilterType::Triangle)
@@ -337,5 +367,70 @@ mod tests {
             Some([56.0, 100.0, 316.0, 109.0])
         );
         assert_eq!(ground_in(&words, "Hemoglobina", "9999"), None);
+    }
+
+    /// A JPEG of `img` with an EXIF APP1 segment carrying `Orientation = orientation`, as a phone writes.
+    fn jpeg_with_orientation(img: &image::RgbImage, orientation: u16) -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95);
+        img.write_with_encoder(enc).unwrap_or_else(|e| panic!("encode: {e}"));
+        // TIFF, little endian: header, one IFD with one SHORT entry (0x0112), no next IFD
+        let mut tiff = b"II*\0".to_vec();
+        tiff.extend(8u32.to_le_bytes());
+        tiff.extend(1u16.to_le_bytes());
+        tiff.extend(0x0112u16.to_le_bytes());
+        tiff.extend(3u16.to_le_bytes());
+        tiff.extend(1u32.to_le_bytes());
+        tiff.extend(orientation.to_le_bytes());
+        tiff.extend([0, 0]);
+        tiff.extend(0u32.to_le_bytes());
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend(tiff);
+        let mut out = jpeg[..2].to_vec();
+        out.extend([0xFF, 0xE1]);
+        out.extend(((app1.len() + 2) as u16).to_be_bytes());
+        out.extend(app1);
+        out.extend(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn a_portrait_phone_photo_is_decoded_upright_and_hashes_like_the_upright_page() -> Result<()> {
+        // the upright page: 200 wide, 300 tall, a dark band across the top third
+        let upright = image::RgbImage::from_fn(200, 300, |_, y| {
+            if y < 100 {
+                image::Rgb([20, 20, 20])
+            } else {
+                image::Rgb([235, 235, 235])
+            }
+        });
+        // the camera stores it in sensor order (rotated 90 degrees counter-clockwise) with Orientation 6
+        let sensor = image::imageops::rotate270(&upright);
+        let photo = jpeg_with_orientation(&sensor, 6);
+        let img = decode_image(&photo)?;
+        assert_eq!((img.width(), img.height()), (200, 300));
+        let rgb = img.to_rgb8();
+        assert!(rgb.get_pixel(100, 20)[0] < 80 && rgb.get_pixel(100, 280)[0] > 180);
+        let straight = jpeg_with_orientation(&upright, 1);
+        assert_eq!(image_phash(&photo)?, image_phash(&straight)?);
+        Ok(())
+    }
+
+    #[test]
+    fn an_image_that_declares_a_huge_size_is_refused_before_decoding() {
+        // a valid PNG header for 40000 x 40000 RGB, no pixel data
+        let mut ihdr = Vec::new();
+        ihdr.extend(40_000u32.to_be_bytes());
+        ihdr.extend(40_000u32.to_be_bytes());
+        ihdr.extend([8, 2, 0, 0, 0]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        chunk(&mut png, b"IHDR", &ihdr);
+        chunk(&mut png, b"IEND", &[]);
+        let e = decode_image(&png);
+        assert!(
+            matches!(e, Err(Error::Invalid(ref m)) if m == "image too large"),
+            "{e:?}"
+        );
+        assert!(image_phash(&png).is_err());
     }
 }

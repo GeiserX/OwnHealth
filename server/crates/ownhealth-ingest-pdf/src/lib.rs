@@ -41,7 +41,7 @@ pub use import::{
     ImportOptions, Normalizer, OcrPages, OcrRowCheck, assign_document, import_ocr, import_pdf, import_pdf_opts,
     import_pdf_with, use_normalizer,
 };
-pub use pages::{ground_value, page_words, render_page_png};
+pub use pages::{decode_image, ground_value, page_words, render_page_png};
 
 /// One word of a page's stored text layer. bbox is `[x0, top, x1, bottom]` in PDF points, origin
 /// top-left. `hidden` is white_on_white | tiny | outside_page: never read as a value.

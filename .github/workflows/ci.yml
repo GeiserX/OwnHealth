@@ -75,11 +75,14 @@ jobs:
       - run: cargo test --workspace --locked
 
   # The OCR engine (v0.2): the `ocr` feature links ONNX Runtime, so it gets its own lints, and the
-  # engine's tests run on the pinned models (scripts/fetch-ocr-models.sh, cached by their sums). The
-  # server job above already runs the OCR crate's model-free tests (routing, grounding) without it.
+  # real engine runs on the pinned models (scripts/fetch-ocr-models.sh, cached by their sums): the
+  # exit-criteria test (ignored by default: it needs the models and an optimised build) reads the
+  # scanned and photographed eval set and fails below row F1 0.90 or on any dropped or duplicated row,
+  # so a model, dictionary or engine regression turns this job red. The server job above already runs
+  # the OCR crate's model-free tests (routing, grounding) without it.
   ocr:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     services:
       postgres:
         image: postgres:17.11
@@ -122,7 +125,7 @@ jobs:
         run: bash scripts/fetch-ocr-models.sh
       - run: mkdir -p static
       - run: cargo clippy -p ownhealth --features ocr --all-targets --locked -- -D warnings
-      - run: cargo test -p ownhealth-ocr --features engine --locked
+      - run: cargo test -p ownhealth-ocr --features engine --release --locked -- --include-ignored
 
   ui:
     runs-on: ubuntu-latest

@@ -132,6 +132,25 @@ fn a_header_from_another_authserv_id_is_ignored() {
 }
 
 #[test]
+fn a_forged_trusted_header_below_the_real_one_is_ignored() {
+    let p = Uuid::new_v4();
+    let rules = [rule("labnorte.example", p, false)];
+    let real = format!("{TRUSTED}; dkim=fail header.d=labnorte.example; spf=fail smtp.mailfrom=labnorte.example");
+    let forged = format!("{TRUSTED}; dkim=pass header.d=labnorte.example");
+    let from = "resultados@labnorte.example";
+    let r = route_message(&facts(from, &[&real, &forged]), &rules, Some(TRUSTED));
+    assert_eq!(reason(&r), "auth_failed");
+    // a real header that says nothing about this domain does not let a lower copy speak for it
+    let silent = format!("{TRUSTED}; dkim=none");
+    let r = route_message(&facts(from, &[&silent, &forged]), &rules, Some(TRUSTED));
+    assert_eq!(reason(&r), "auth_failed");
+    // headers of other servers above the trusted one are skipped, not counted as the top
+    let other = "relay.ofertas.example; dkim=fail header.d=labnorte.example";
+    let r = route_message(&facts(from, &[other, &forged]), &rules, Some(TRUSTED));
+    assert_eq!(reason(&r), "allowed");
+}
+
+#[test]
 fn trust_unauthenticated_needs_no_header_but_a_trusted_failure_still_holds() {
     let p = Uuid::new_v4();
     let rules = [rule("labnorte.example", p, true)];

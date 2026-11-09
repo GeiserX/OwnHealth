@@ -33,7 +33,7 @@ use ownhealth_core::jobs::{JobContext, JobError};
 use ownhealth_core::quarantine::{self, QuarantineIn, clean_header};
 use ownhealth_core::review::{ReviewItemIn, create_item};
 use ownhealth_core::secrets::{self, SecretBox, SecretString};
-use ownhealth_core::sources::{RunOutcome, Source};
+use ownhealth_core::sources::{RunOutcome, RunProblem, Source};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -336,17 +336,21 @@ enum AuthVerdict {
     None,
 }
 
-/// Read the `Authentication-Results` headers (RFC 8601) the trusted server stamped.
+/// Read the `Authentication-Results` header (RFC 8601) the trusted server stamped: only the topmost one
+/// with its authserv-id, which is the copy the receiving server prepended. A lower copy with the same
+/// id came with the message (a forgery the server did not strip) and is never read.
 fn auth_verdict(headers: &[String], trusted: &str, from_domain: &str) -> AuthVerdict {
     let mut verdict = AuthVerdict::None;
-    for h in headers {
-        let h = strip_comments(h);
-        let mut sections = h.split(';');
-        let authserv = sections.next().and_then(|s| s.split_whitespace().next()).unwrap_or("");
-        if !authserv.eq_ignore_ascii_case(trusted.trim()) {
-            continue;
-        }
-        for section in sections {
+    let trusted_header = headers.iter().map(|h| strip_comments(h)).find(|h| {
+        let authserv = h
+            .split(';')
+            .next()
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap_or("");
+        authserv.eq_ignore_ascii_case(trusted.trim())
+    });
+    if let Some(h) = trusted_header {
+        for section in h.split(';').skip(1) {
             let mut words = section.split_whitespace();
             let Some((method, result)) = words.next().and_then(|w| w.split_once('=')) else {
                 continue;
@@ -739,8 +743,8 @@ pub async fn poll_mailbox(ctx: JobContext, source: Source) -> std::result::Resul
 }
 
 /// Release a held message into `profile_id`; with `allow_sender`, also add its sender to the
-/// allowlist for that profile. Returns the documents it produced. Needs a person (the route checks
-/// the role and step-up).
+/// allowlist for that profile. Returns what the message produced (its documents, and the parts it
+/// skipped). Needs a person (the route checks the role and step-up).
 pub async fn release(
     conn: &mut PgConnection,
     blobs: &BlobStore,
@@ -749,8 +753,16 @@ pub async fn release(
     user_id: Uuid,
     profile_id: Uuid,
     allow_sender: bool,
-) -> Result<Vec<Uuid>> {
+) -> Result<MessageOutcome> {
     let item = quarantine::lock_held(&mut *conn, quarantine_id).await?;
+    if item.reason == "too_large" {
+        // only the header was downloaded: releasing it would import nothing and lose the message
+        return Err(Error::Review(
+            "This message was too large to download, so only its header was kept. It is in the mailbox's \
+             done folder: save the attachment from there and upload it by hand."
+                .into(),
+        ));
+    }
     let household: Option<Uuid> = sqlx::query_scalar("select household_id from profile where id = $1")
         .bind(profile_id)
         .fetch_optional(&mut *conn)
@@ -765,6 +777,21 @@ pub async fn release(
         .await?
         .ok_or_else(|| Error::Review("The mailbox this message came from was removed.".into()))?;
     if allow_sender {
+        // without a trusted authserv-id nothing authenticates, so a rule that requires it would hold
+        // this sender's next message again
+        let trusted = source
+            .config
+            .get("trusted_authserv_id")
+            .and_then(Value::as_str)
+            .is_some_and(|t| !t.trim().is_empty());
+        if !trusted {
+            return Err(Error::Invalid(
+                "this mailbox has no trusted receiving server (authserv-id), so the sender's next message \
+                 would be held again: set it in the mailbox settings, or add the sender with \
+                 'trust unauthenticated mail'"
+                    .into(),
+            ));
+        }
         let sender = item
             .sender
             .as_deref()
@@ -787,7 +814,33 @@ pub async fn release(
     let raw = blocking(move || b.get_bytes(&sha).map_err(Error::from)).await?;
     let out = ingest_message(&mut *conn, blobs, sb, &source, &raw, Some(profile_id)).await?;
     quarantine::mark_released(&mut *conn, quarantine_id, user_id, &out.document_ids).await?;
-    Ok(out.document_ids)
+    Ok(out)
+}
+
+/// What a person should see about a handled message that did not import everything: one problem per
+/// skipped part (never a file name), and one when nothing came of an allowed message at all. A part
+/// the message embeds in its text (`inline_image`, a logo) is not reported on its own, and a locked
+/// PDF already has its review item.
+pub fn problems(m: &MessageOutcome) -> Vec<RunProblem> {
+    if m.quarantine_id.is_some() || m.already_seen {
+        return Vec::new();
+    }
+    let mut out: Vec<RunProblem> = m
+        .skipped
+        .iter()
+        .filter(|s| !s.ends_with(": inline_image") && !s.ends_with(ENCRYPTED_UNKNOWN_PASSWORD))
+        .map(|s| RunProblem {
+            code: "attachment_skipped".into(),
+            message: s.clone(),
+        })
+        .collect();
+    if m.document_ids.is_empty() && m.duplicates == 0 {
+        out.push(RunProblem {
+            code: "no_importable_attachment".into(),
+            message: "an allowed message brought no file that could be imported".into(),
+        });
+    }
+    out
 }
 
 // ------------------------------------------------------------------- rules ----

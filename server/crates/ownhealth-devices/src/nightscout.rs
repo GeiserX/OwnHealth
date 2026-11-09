@@ -4,7 +4,14 @@
 //! when the site runs nightscout-connect (LibreLinkUp): its readings are ordinary `sgv` entries.
 //!
 //! Source `config` (kind `nightscout`): `{base_url (or url), allow_private?: bool, api?: "v1"|"v3",
-//! backfill_days?: int}`.
+//! backfill_days?: int, overlap_hours?: int}`.
+//!
+//! Each run reads from the cursor minus `overlap_hours` (default 24): uploaders (Dexcom, xDrip, AAPS)
+//! backfill readings missed in a Bluetooth or phone gap hours later, with their original dates, so a
+//! cursor-only read would skip them forever. Writes keep the first copy of a reading, so the overlap
+//! adds no duplicates. An entry dated more than `FUTURE_SLACK_MINUTES` ahead (an uploader with a wrong
+//! clock or time zone) is not imported and does not move the cursor: it is read again, and imported,
+//! once its date has come, and the readings after it keep arriving.
 //!
 //! - v1: `GET /api/v1/entries/sgv.json?find[date][$gt]=<cursor>&count=1000&token=<token>`. The v1 API
 //!   answers newest first, so a run pages backwards with `find[date][$lt]` until a page comes back short.
@@ -33,6 +40,10 @@ pub const PAGE: usize = 1000;
 pub const MAX_PAGES: usize = 300;
 /// How far back the first run reads.
 pub const DEFAULT_BACKFILL_DAYS: i64 = 90;
+/// How far behind the cursor each run reads again, for backfilled readings.
+pub const DEFAULT_OVERLAP_HOURS: i64 = 24;
+/// How far ahead of now an entry may be dated and still count (clock skew between phone and server).
+pub const FUTURE_SLACK_MINUTES: i64 = 5;
 /// Below this, `sgv` is a sensor status code (Dexcom's 1-38), not a reading.
 pub const MIN_SGV: f64 = 39.0;
 
@@ -47,6 +58,8 @@ pub struct Config {
     pub api: Option<String>,
     #[serde(default)]
     pub backfill_days: Option<i64>,
+    #[serde(default)]
+    pub overlap_hours: Option<i64>,
 }
 
 /// One reading from the site.
@@ -232,23 +245,31 @@ pub async fn poll_nightscout(ctx: JobContext, source: Source) -> Result<RunOutco
         None => None,
     };
     let backfill = cfg.backfill_days.unwrap_or(DEFAULT_BACKFILL_DAYS).clamp(1, 3650);
-    let since_ms = source
+    let overlap = cfg.overlap_hours.unwrap_or(DEFAULT_OVERLAP_HOURS).clamp(0, 24 * 14);
+    let latest_ok = (Utc::now() + Duration::minutes(FUTURE_SLACK_MINUTES)).timestamp_millis();
+    // a cursor a future-dated entry set before this rule existed is pulled back to now
+    let cursor = source
         .cursor
         .as_ref()
         .and_then(|c| c.get("date_ms"))
         .and_then(Value::as_i64)
-        .unwrap_or_else(|| (Utc::now() - Duration::days(backfill)).timestamp_millis());
-    let entries = match cfg.api.as_deref() {
+        .map(|c| c.min(latest_ok));
+    let since_ms = match cursor {
+        Some(c) => c - Duration::hours(overlap).num_milliseconds(),
+        None => (Utc::now() - Duration::days(backfill)).timestamp_millis(),
+    };
+    let mut entries = match cfg.api.as_deref() {
         None | Some("v1") => fetch_v1(&cfg, token.as_ref(), since_ms).await?,
         Some("v3") => fetch_v3(&cfg, token.as_ref(), since_ms).await?,
         Some(_) => return Err(JobError::permanent("nightscout: config.api must be v1 or v3")),
     };
+    entries.retain(|e| e.date_ms <= latest_ok);
     let newest = entries
         .iter()
         .map(|e| e.date_ms)
+        .chain(cursor)
         .max()
-        .unwrap_or(since_ms)
-        .max(since_ms);
+        .unwrap_or(since_ms);
     let mut tx = ctx.pool.begin().await?;
     let wsid = store::device_source(
         &mut tx,

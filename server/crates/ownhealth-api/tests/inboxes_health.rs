@@ -291,3 +291,114 @@ async fn a_source_token_reads_its_own_health_only() -> R {
     );
     Ok(())
 }
+
+fn problem(code: &str) -> sources::RunProblem {
+    sources::RunProblem {
+        code: code.into(),
+        message: "attachment 1: synthetic failure".into(),
+    }
+}
+
+#[tokio::test]
+async fn a_run_where_every_item_failed_is_not_a_successful_sync() -> R {
+    let env = Env::new(true).await?;
+    let mut c = env.pool().acquire().await?;
+    let h = env.fam().household_id;
+    let id = source(
+        &mut c,
+        h,
+        Some(env.profile("alex")),
+        "email",
+        "Correo de Alex",
+        Some(300),
+    )
+    .await?;
+    let ok = sources::begin_run(&mut c, id, "poll", None).await?;
+    let cursor = serde_json::json!({"uid": 7});
+    let first = RunOutcome {
+        cursor: Some(cursor.clone()),
+        ..RunOutcome::default()
+    };
+    sources::finish_run(&mut c, ok, Ok(&first)).await?;
+    // the last success is long ago
+    sqlx::query("update source set last_success_at = now() - interval '1 day' where id = $1")
+        .bind(id)
+        .execute(&mut *c)
+        .await?;
+    let before: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("select last_success_at from source where id = $1")
+            .bind(id)
+            .fetch_one(&mut *c)
+            .await?;
+    let failed = RunOutcome {
+        seen: 2,
+        problems: vec![problem("message_failed"), problem("message_failed")],
+        cursor: Some(serde_json::json!({"uid": 9})),
+        ..RunOutcome::default()
+    };
+    for n in 1..=2 {
+        let run = sources::begin_run(&mut c, id, "poll", None).await?;
+        sources::finish_run(&mut c, run, Ok(&failed)).await?;
+        let status: String = sqlx::query_scalar("select status from source_run where id = $1")
+            .bind(run)
+            .fetch_one(&mut *c)
+            .await?;
+        assert_eq!(status, "error");
+        let s = sources::get_source(&mut c, id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("gone"))?;
+        assert_eq!(s.consecutive_failures, n);
+        assert_eq!(s.last_success_at, before);
+        assert_eq!(s.cursor, Some(cursor.clone()), "the failed items are retried");
+        assert_eq!(
+            s.last_error.as_deref(),
+            Some("message_failed: attachment 1: synthetic failure")
+        );
+    }
+    let health = sources::source_health(&mut c, h).await?;
+    let me = health
+        .iter()
+        .find(|x| x.id == id)
+        .ok_or_else(|| anyhow::anyhow!("no row"))?;
+    assert!(me.stale, "{me:?}");
+    assert_eq!(
+        (me.last_run_status.as_deref(), me.last_run_problems),
+        (Some("error"), 2)
+    );
+
+    // something arrived: partial, a success, but the last run says so
+    let mixed = RunOutcome {
+        seen: 3,
+        new: 1,
+        problems: vec![problem("attachment_skipped")],
+        ..RunOutcome::default()
+    };
+    let run = sources::begin_run(&mut c, id, "poll", None).await?;
+    sources::finish_run(&mut c, run, Ok(&mixed)).await?;
+    let s = sources::get_source(&mut c, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("gone"))?;
+    assert_eq!(s.consecutive_failures, 0);
+    assert!(s.last_success_at > before);
+    drop(c);
+
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let r = alex.get("/api/inboxes").await?;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let row = row(&r.json, id);
+    assert_eq!(row["last_run_status"], "partial");
+    assert_eq!(row["last_run_problems"], 1);
+    assert_eq!(
+        row["last_run_problem"],
+        "attachment_skipped: attachment 1: synthetic failure"
+    );
+    let r = alex.get("/api/inboxes/health?format=prometheus").await?;
+    let text = String::from_utf8(r.bytes)?;
+    assert!(
+        text.contains(&format!(
+            "ownhealth_source_last_run_ok{{source=\"{id}\",kind=\"email\"}} 0"
+        )),
+        "{text}"
+    );
+    Ok(())
+}

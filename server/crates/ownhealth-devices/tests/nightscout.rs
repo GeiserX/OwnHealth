@@ -356,13 +356,16 @@ async fn polls_are_incremental_and_add_no_duplicates() -> R {
         f.requests.clear();
     }
     let second = poll(&env, source.id).await?;
+    // the run reads the day before the cursor again (backfilled readings): those are already stored
+    let overlap_from = newest_old - Duration::hours(nightscout::DEFAULT_OVERLAP_HOURS).num_milliseconds();
+    let reread = old.iter().filter(|r| r.0.timestamp_millis() > overlap_from).count();
     assert_eq!(
         (second["items_new"].clone(), second["items_duplicate"].clone()),
-        (json!(new.len()), json!(0))
+        (json!(new.len()), json!(reread))
     );
     let asked = fake.lock().unwrap_or_else(|e| e.into_inner()).requests.clone();
     assert!(
-        asked[0].contains(&format!("\"{newest_old}\"")),
+        asked[0].contains(&format!("\"{overlap_from}\"")),
         "the cursor was not used: {asked:?}"
     );
     // nothing new: a run that adds nothing
@@ -449,5 +452,80 @@ async fn a_wrong_token_or_a_private_address_fails_the_run_without_leaking_the_to
         .await?;
     assert_eq!(rows, 0);
     let _ = nightscout::DEFAULT_POLL_SECONDS;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_backfilled_reading_older_than_the_cursor_is_still_pulled() -> R {
+    let env = Env::new().await?;
+    let lucia = env.fam.profile("lucia");
+    let now = Utc::now().duration_trunc(Duration::minutes(5))?;
+    let readings = synthetic::cgm_readings(now - Duration::hours(12), 1, 5, 7);
+    let readings: Vec<_> = readings.into_iter().filter(|r| r.0 < now).collect();
+    // a Bluetooth gap: three readings two hours ago reach the site only after the first poll
+    let gap = now - Duration::hours(2);
+    let (late, on_time): (Vec<_>, Vec<_>) = readings
+        .iter()
+        .partition(|r| r.0 >= gap && r.0 < gap + Duration::minutes(15));
+    assert_eq!(late.len(), 3);
+    let fake = fake_with(&on_time, "xDrip-DexcomG6");
+    let base = serve(fake.clone()).await?;
+    let source = ns_source(&env, &base, "v1", Some(TOKEN), true).await?;
+    let first = poll(&env, source.id).await?;
+    assert_eq!(first["items_new"], json!(on_time.len()), "{first}");
+    fake.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entries
+        .extend(late.iter().map(|(t, v)| (t.timestamp_millis(), *v, "xDrip-DexcomG6")));
+    let second = poll(&env, source.id).await?;
+    assert_eq!(second["items_new"], json!(3), "{second}");
+    let rows = env
+        .count("select count(*) from wearable_sample where profile_id = $1", lucia)
+        .await?;
+    assert_eq!(rows, readings.len() as i64);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_future_dated_entry_does_not_stop_later_imports() -> R {
+    let env = Env::new().await?;
+    let lucia = env.fam.profile("lucia");
+    let now = Utc::now().duration_trunc(Duration::minutes(5))?;
+    let readings = synthetic::cgm_readings(now - Duration::hours(6), 1, 5, 9);
+    let (old, new): (Vec<_>, Vec<_>) = readings
+        .iter()
+        .filter(|r| r.0 < now + Duration::hours(1))
+        .partition(|r| r.0 < now - Duration::hours(1));
+    // an uploader with its clock a day ahead writes one reading dated tomorrow
+    let mut first_batch = old.clone();
+    first_batch.push((now + Duration::days(1), 140.0));
+    let fake = fake_with(&first_batch, "xDrip-DexcomG6");
+    let base = serve(fake.clone()).await?;
+    let source = ns_source(&env, &base, "v1", Some(TOKEN), true).await?;
+    let first = poll(&env, source.id).await?;
+    assert_eq!(
+        first["items_new"],
+        json!(old.len()),
+        "the future reading waits: {first}"
+    );
+    {
+        let mut f = fake.lock().unwrap_or_else(|e| e.into_inner());
+        f.entries.extend(
+            new.iter()
+                .filter(|r| r.0 <= Utc::now())
+                .map(|(t, v)| (t.timestamp_millis(), *v, "xDrip-DexcomG6")),
+        );
+    }
+    let arrived = new.iter().filter(|r| r.0 <= Utc::now()).count();
+    assert!(arrived > 0);
+    let second = poll(&env, source.id).await?;
+    assert_eq!(second["items_new"], json!(arrived), "{second}");
+    let future = env
+        .count(
+            "select count(*) from wearable_sample where profile_id = $1 and t > now() + interval '1 hour'",
+            lucia,
+        )
+        .await?;
+    assert_eq!(future, 0);
     Ok(())
 }

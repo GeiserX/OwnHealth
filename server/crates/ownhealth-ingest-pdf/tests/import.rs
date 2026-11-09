@@ -630,3 +630,101 @@ async fn a_locked_original_is_never_imported() -> R {
     assert_eq!(filed, 0, "a locked original was read");
     Ok(())
 }
+
+/// A one-page LabNorte report for alex (synthetic), with the collection date as printed.
+fn labnorte(report_id: &str, collected: &str, rows: &[(&str, &str, &str, &str)]) -> Vec<u8> {
+    use ownhealth_core::demo_pdf::{LabReport, LabRow, lab_report_pdf};
+    lab_report_pdf(&LabReport {
+        lab: "LabNorte",
+        title: "Informe de laboratorio",
+        patient: "RIVERA, ALEX",
+        birth: "14/05/1979",
+        collected,
+        report_id,
+        pages: vec![rows.iter().map(|(n, v, u, r)| LabRow::new(n, v, u, r)).collect()],
+    })
+    .0
+}
+
+const GLUCOSE: (&str, &str, &str, &str) = ("Glucosa", "102", "mg/dL", "70 - 110");
+const OTHERS: [(&str, &str, &str, &str); 2] = [
+    ("Creatinina", "0,9", "mg/dL", "0,7 - 1,3"),
+    ("Urea", "32", "mg/dL", "15 - 45"),
+];
+/// Other analytes again, so the date-only report is not read as an edition of an earlier one.
+const MORE: [(&str, &str, &str, &str); 2] = [
+    ("Hemoglobina", "14,8", "g/dL", "13,0 - 17,0"),
+    ("Hematocrito", "44", "%", "40 - 52"),
+];
+
+async fn glucose_rows(conn: &mut PgConnection) -> anyhow::Result<i64> {
+    Ok(
+        sqlx::query_scalar("select count(*) from observation where alias_group = 'glucose' and status = 'current'")
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
+#[tokio::test]
+async fn the_same_value_from_another_lab_on_the_same_day_is_kept() -> R {
+    fake_normalizer();
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    let a = e
+        .store_pdf(&mut c, &labnorte("LN-D1", "14/09/2026 08:15", &[GLUCOSE]), "a.pdf")
+        .await?;
+    let s = import_pdf(&mut c, &e.blobs, a, false).await?;
+    assert_eq!(s.accepted, 1, "{}", s.to_value());
+    // the first result came from another lab (fictional)
+    sqlx::query("update document set provider_name = 'Laboratorio Centro' where id = $1")
+        .bind(a)
+        .execute(&mut *c)
+        .await?;
+    let mut rows = vec![GLUCOSE];
+    rows.extend(OTHERS);
+    let b = e
+        .store_pdf(&mut c, &labnorte("LN-D2", "14/09/2026 08:15", &rows), "b.pdf")
+        .await?;
+    let s = import_pdf(&mut c, &e.blobs, b, false).await?;
+    assert_eq!(s.reasons.get("duplicate"), None, "{}", s.to_value());
+    assert_eq!(s.accepted, 3, "{}", s.to_value());
+    assert_eq!(glucose_rows(&mut c).await?, 2, "two labs, two facts");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_same_fact_again_is_linked_and_a_date_only_one_goes_to_review() -> R {
+    fake_normalizer();
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    let a = e
+        .store_pdf(&mut c, &labnorte("LN-D3", "14/09/2026 08:15", &[GLUCOSE]), "a.pdf")
+        .await?;
+    import_pdf(&mut c, &e.blobs, a, false).await?;
+    let mut rows = vec![GLUCOSE];
+    rows.extend(OTHERS);
+
+    // same lab, same time, same value: one fact, with a second provenance link
+    let b = e
+        .store_pdf(&mut c, &labnorte("LN-D4", "14/09/2026 08:15", &rows), "b.pdf")
+        .await?;
+    let s = import_pdf(&mut c, &e.blobs, b, false).await?;
+    assert_eq!(s.reasons.get("duplicate"), Some(&1), "{}", s.to_value());
+    assert_eq!(glucose_rows(&mut c).await?, 1);
+    let links: i64 = sqlx::query_scalar("select count(*) from observation_link where document_id = $1")
+        .bind(b)
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(links, 1);
+
+    // a date with no time: maybe the same draw, maybe another one; a person says
+    let mut rows = vec![GLUCOSE];
+    rows.extend(MORE);
+    let d = e
+        .store_pdf(&mut c, &labnorte("LN-D5", "14/09/2026", &rows), "d.pdf")
+        .await?;
+    let s = import_pdf(&mut c, &e.blobs, d, false).await?;
+    assert_eq!(s.reasons.get("collection_time_unknown"), Some(&1), "{}", s.to_value());
+    assert_eq!(glucose_rows(&mut c).await?, 1);
+    Ok(())
+}

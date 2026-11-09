@@ -7,7 +7,9 @@
 //! path, size and mtime, so a file that could not be moved is not imported twice.
 //!
 //! Hidden files, temporary downloads (`.part`, `.crdownload`, `.tmp`, `~$...`) and symlinks are
-//! skipped: a link could point anywhere the server can read. Source `config` (kind `folder`): `{}`
+//! skipped: a link could point anywhere the server can read. The file is opened once and checked on
+//! the open handle (same inode as the scan saw, same size and mtime), so a file swapped for a link
+//! between the scan and the read is refused, not followed. Source `config` (kind `folder`): `{}`
 //! (the root is OWNHEALTH_INBOX_DIR) or `{"subdir": "..."}`, a relative path below it.
 
 use std::path::{Component, Path, PathBuf};
@@ -68,6 +70,8 @@ struct Ready {
     slug: Option<String>,
     size: u64,
     mtime_ns: i128,
+    /// (device, inode) at scan time; the handle we read must be the same file.
+    id: (u64, u64),
 }
 
 impl Ready {
@@ -110,6 +114,34 @@ fn last_change(meta: &std::fs::Metadata) -> std::io::Result<SystemTime> {
     Ok(m)
 }
 
+#[cfg(unix)]
+fn file_id(meta: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (meta.dev(), meta.ino())
+}
+
+#[cfg(not(unix))]
+fn file_id(_meta: &std::fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+/// Read a scanned file into the blob store from one open handle. None when the handle is not the
+/// file the scan saw (swapped, for a link or anything else) or the file changed while we read it.
+fn read_stable(blobs: &BlobStore, f: &Ready) -> std::io::Result<Option<(String, u64)>> {
+    let file = std::fs::File::open(&f.path)?;
+    let same = |m: &std::fs::Metadata| -> std::io::Result<bool> {
+        Ok(m.is_file() && file_id(m) == f.id && m.len() == f.size && nanos(m.modified()?) == f.mtime_ns)
+    };
+    if !same(&file.metadata()?)? {
+        return Ok(None);
+    }
+    let (sha, size) = blobs.put_reader(&file).map_err(std::io::Error::other)?;
+    if size != f.size || !same(&file.metadata()?)? {
+        return Ok(None);
+    }
+    Ok(Some((sha, size)))
+}
+
 /// The files of `root` and its profile subfolders that have been still for `stable`, and how many
 /// are still being written.
 fn scan(root: &Path, stable: Duration) -> std::io::Result<(Vec<Ready>, i32)> {
@@ -146,6 +178,7 @@ fn scan(root: &Path, stable: Duration) -> std::io::Result<(Vec<Ready>, i32)> {
                     slug: slug.map(str::to_string),
                     size: meta.len(),
                     mtime_ns: nanos(meta.modified()?),
+                    id: file_id(&meta),
                 });
             }
             Ok(subdirs)
@@ -218,13 +251,10 @@ async fn profile_for(pool: &PgPool, source: &Source, slug: Option<&str>) -> Resu
 /// What happened to one file: arrived (or a file that changed while we read it: None, retried).
 async fn take(pool: &PgPool, blobs: &BlobStore, source: &Source, f: &Ready) -> Result<Option<Arrived>> {
     let profile_id = profile_for(pool, source, f.slug.as_deref()).await?;
-    let (b, path) = (blobs.clone(), f.path.clone());
-    let (sha, size) = blocking(move || b.put_file(&path).map_err(std::io::Error::other)).await?;
-    let path = f.path.clone();
-    let now = blocking(move || std::fs::symlink_metadata(&path)).await?;
-    if size != f.size || now.len() != f.size || nanos(now.modified()?) != f.mtime_ns {
+    let (b, g) = (blobs.clone(), f.clone());
+    let Some((sha, size)) = blocking(move || read_stable(&b, &g)).await? else {
         return Ok(None);
-    }
+    };
     let key = f.key();
     let mut tx = pool.begin().await?;
     let a = arrive(
@@ -250,7 +280,10 @@ async fn take(pool: &PgPool, blobs: &BlobStore, source: &Source, f: &Ready) -> R
 }
 
 /// One pass over a folder. `stable` is how long a file must be untouched (STABLE_SECONDS in
-/// production). Every file ends in `.done` or `.failed`, except one still being written.
+/// production). Every file ends in `.done` or `.failed`, except one still being written. When a
+/// handled file cannot be moved (the folder is not writable by the app), the run fails after the
+/// pass: its documents are committed and the per-source key stops a second import, but the source
+/// must not look healthy while it reads the stuck files again every poll.
 pub async fn poll_root(
     pool: &PgPool,
     blobs: &BlobStore,
@@ -267,6 +300,7 @@ pub async fn poll_root(
     let dir = root.to_path_buf();
     let (ready, _waiting) = blocking(move || scan(&dir, stable)).await?;
     let mut out = RunOutcome::default();
+    let mut stuck: Option<(usize, String)> = None;
     for f in ready {
         let failed = match take(pool, blobs, source, &f).await {
             Ok(None) => continue,
@@ -298,13 +332,17 @@ pub async fn poll_root(
         let (r, g) = (root.to_path_buf(), f.clone());
         let reason = failed.clone();
         if let Err(e) = blocking(move || file_away(&r, &g, reason.as_deref())).await {
-            out.problems.push(RunProblem {
-                code: "move_failed".into(),
-                message: format!("could not move a handled file out of the inbox: {e}"),
-            });
+            let n = stuck.as_ref().map_or(0, |(n, _)| *n);
+            stuck = Some((n + 1, stuck.map_or_else(|| e.to_string(), |(_, first)| first)));
         }
     }
-    Ok(out)
+    match stuck {
+        Some((n, first)) => Err(Error::Invalid(format!(
+            "{n} handled file(s) could not be moved out of the inbox folder ({first}); the app needs \
+             write access to it"
+        ))),
+        None => Ok(out),
+    }
 }
 
 /// The `folder` poller.
@@ -320,13 +358,14 @@ pub async fn poll_folder(ctx: JobContext, source: Source) -> std::result::Result
     .await?)
 }
 
-/// Demo data (RUST-CONTRACTS 10.6, order 1020): the household's scanner folder. It is polled only
-/// when OWNHEALTH_INBOX_DIR is set, so a demo without one shows the source idle, not failing.
+/// Demo data (RUST-CONTRACTS 10.6, order 1020): the household's scanner folder. It is never polled:
+/// the demo stack shares the checkout's `./inbox` with a real install, and a polling demo source
+/// would take the real household's files (and move them to `.failed`).
 async fn seed_demo(conn: &mut sqlx::PgConnection, ctx: &mut ownhealth_core::demo::DemoContext) -> Result<()> {
     ownhealth_core::sources::create_source(
         conn,
         &ownhealth_core::sources::NewSource {
-            poll_seconds: ctx.settings.inbox_dir.as_ref().map(|_| DEFAULT_POLL_SECONDS),
+            poll_seconds: None,
             ..ownhealth_core::sources::NewSource::new(ctx.family.household_id, "folder", "Escáner del salón")
         },
     )
@@ -365,6 +404,32 @@ mod tests {
         for n in ["scan.pdf", "informe LabNorte.PDF", "foto.jpg"] {
             assert!(!skipped_name(n), "{n}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_swapped_for_a_link_after_the_scan_is_not_read() -> std::io::Result<()> {
+        let d = tempfile::tempdir()?;
+        let blobs = BlobStore::new(d.path().join("blobs"))?;
+        let inbox = d.path().join("inbox");
+        std::fs::create_dir_all(&inbox)?;
+        // same length as the scanned file, so only the identity of the open file can tell them apart
+        let secret = d.path().join("secret.txt");
+        std::fs::write(&secret, b"clave-sintetica-0001")?;
+        std::fs::write(inbox.join("scan.pdf"), b"%PDF-1.7 informe-0001")?;
+        let (ready, _) = scan(&inbox, Duration::ZERO)?;
+        let mut f = ready
+            .into_iter()
+            .next()
+            .ok_or_else(|| std::io::Error::other("not scanned"))?;
+        std::fs::write(&secret, b"%PDF-1.7 informe-000")?;
+        let secret_mtime = nanos(std::fs::metadata(&secret)?.modified()?);
+        f.mtime_ns = secret_mtime; // even a matching mtime does not help
+        f.size = std::fs::metadata(&secret)?.len();
+        std::fs::remove_file(&f.path)?;
+        std::os::unix::fs::symlink(&secret, &f.path)?;
+        assert_eq!(read_stable(&blobs, &f)?, None);
+        Ok(())
     }
 
     #[test]

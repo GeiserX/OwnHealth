@@ -44,6 +44,7 @@ pub struct State {
     pub logins: u32,
     pub failed_logins: u32,
     pub has_move: bool,
+    pub has_uidplus: bool,
     /// Every command line received (LOGIN lines included), for the "no password in clear" checks.
     pub plain_lines: Vec<String>,
 }
@@ -65,6 +66,7 @@ impl FakeImap {
             logins: 0,
             failed_logins: 0,
             has_move: true,
+            has_uidplus: true,
             plain_lines: Vec::new(),
         }));
         let st = Arc::clone(&state);
@@ -223,8 +225,14 @@ async fn session(io: Box<dyn Io>, st: Arc<Mutex<State>>, greet: bool) -> std::io
         let ok = |out: &mut Vec<u8>, text: &str| out.extend_from_slice(format!("{tag} OK {text}\r\n").as_bytes());
         match cmd.as_str() {
             "CAPABILITY" => {
-                let mv = if lock(&st).has_move { " MOVE" } else { "" };
-                out.extend_from_slice(format!("* CAPABILITY IMAP4rev1{mv}\r\n").as_bytes());
+                let (mv, up) = {
+                    let s = lock(&st);
+                    (
+                        if s.has_move { " MOVE" } else { "" },
+                        if s.has_uidplus { " UIDPLUS" } else { "" },
+                    )
+                };
+                out.extend_from_slice(format!("* CAPABILITY IMAP4rev1{mv}{up}\r\n").as_bytes());
                 ok(&mut out, "CAPABILITY completed");
             }
             "NOOP" => ok(&mut out, "NOOP completed"),
@@ -306,7 +314,12 @@ fn uid_command(st: &Mutex<State>, selected: Option<&str>, tag: &str, a: &[String
     match sub.as_str() {
         "SEARCH" => {
             let f = s.folders.get(&folder).cloned().unwrap_or_default();
-            let uids: Vec<String> = f.iter().filter(|m| !m.deleted).map(|m| m.uid.to_string()).collect();
+            let undeleted = a[1..].iter().any(|w| w.eq_ignore_ascii_case("UNDELETED"));
+            let uids: Vec<String> = f
+                .iter()
+                .filter(|m| !(undeleted && m.deleted))
+                .map(|m| m.uid.to_string())
+                .collect();
             let sep = if uids.is_empty() { "" } else { " " };
             out.extend_from_slice(format!("* SEARCH{sep}{}\r\n", uids.join(" ")).as_bytes());
         }
@@ -371,6 +384,16 @@ fn uid_command(st: &Mutex<State>, selected: Option<&str>, tag: &str, a: &[String
             {
                 for i in (0..f.len()).rev() {
                     if in_set(&set, f[i].uid) {
+                        f.remove(i);
+                        out.extend_from_slice(format!("* {} EXPUNGE\r\n", i + 1).as_bytes());
+                    }
+                }
+            }
+        }
+        "EXPUNGE" if s.has_uidplus => {
+            if let Some(f) = s.folders.get_mut(&folder) {
+                for i in (0..f.len()).rev() {
+                    if f[i].deleted && in_set(&set, f[i].uid) {
                         f.remove(i);
                         out.extend_from_slice(format!("* {} EXPUNGE\r\n", i + 1).as_bytes());
                     }

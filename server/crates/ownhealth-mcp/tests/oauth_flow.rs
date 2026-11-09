@@ -297,6 +297,61 @@ async fn a_cimd_client_runs_the_whole_flow_and_calls_tools() -> R {
     Ok(())
 }
 
+/// Someone who intercepted a code but holds no PKCE verifier (the case PKCE exists for) can neither
+/// burn the code before the real client redeems it nor revoke the consent after it did.
+#[tokio::test]
+async fn a_code_thief_without_the_verifier_can_neither_burn_the_code_nor_revoke_the_consent() -> R {
+    let w = world().await?;
+    let app = app_at(&w, BASE);
+    let client_id = serve_cimd(&[CB]).await?;
+    let code = approved_code(&w, &app, &client_id, &["read:summary"]).await?;
+    let thief = |verifier: &'static str, client: String, redirect: &'static str| {
+        let (app, code) = (app.clone(), code.clone());
+        async move {
+            let r = token(
+                &app,
+                &[
+                    ("grant_type", "authorization_code"),
+                    ("code", &code),
+                    ("redirect_uri", redirect),
+                    ("client_id", &client),
+                    ("code_verifier", verifier),
+                    ("resource", MCP),
+                ],
+            )
+            .await?;
+            anyhow::Ok((r.status.as_u16(), r.json()["error"].clone()))
+        }
+    };
+    let garbage = "Zz9Zz9Zz9Zz9Zz9Zz9Zz9Zz9Zz9Zz9Zz9Zz9Zz9Zz9Zz9Zz9";
+    let refused = (400, json!("invalid_grant"));
+    // before the real client: a wrong verifier, a wrong redirect and a wrong client are refused ...
+    assert_eq!(thief(garbage, client_id.clone(), CB).await?, refused);
+    assert_eq!(
+        thief(VERIFIER, client_id.clone(), "https://evil.example/cb").await?,
+        refused
+    );
+    assert_eq!(
+        thief(VERIFIER, "https://evil.example/client.json".into(), CB).await?,
+        refused
+    );
+    // ... and the code still works for the client that holds the verifier
+    let r = exchange(&app, &client_id, &code).await?;
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    let access = r.json()["access_token"].as_str().unwrap_or_default().to_string();
+    assert_eq!(mcp_status(&app, &access).await?, 200);
+    // after it: the thief's replay is refused and the person's consent stays
+    assert_eq!(thief(garbage, client_id.clone(), CB).await?, refused);
+    assert_eq!(mcp_status(&app, &access).await?, 200);
+    // a replay that passes every check (the verifier leaked too) still revokes what the code issued
+    assert_eq!(
+        exchange(&app, &client_id, &code).await?.json()["error"],
+        "invalid_grant"
+    );
+    assert_eq!(mcp_status(&app, &access).await?, 401);
+    Ok(())
+}
+
 #[tokio::test]
 async fn tokens_for_another_audience_are_rejected() -> R {
     let w = world().await?;

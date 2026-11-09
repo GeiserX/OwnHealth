@@ -226,9 +226,15 @@ async fn poll_session(
     session: &mut Session<Stream>,
 ) -> Result<RunOutcome, JobError> {
     let mut run = RunOutcome::default();
-    let has_move = step("capability", session.capabilities()).await?.has_str("MOVE");
+    let caps = step("capability", session.capabilities()).await?;
+    let (has_move, has_uidplus) = (caps.has_str("MOVE"), caps.has_str("UIDPLUS"));
     step("select", session.select(&cfg.folder)).await?;
-    let mut uids: Vec<u32> = step("search", session.uid_search("ALL")).await?.into_iter().collect();
+    // UNDELETED: a message we copied and flagged on a server without UIDPLUS stays until the server
+    // expunges it, and must not be read again
+    let mut uids: Vec<u32> = step("search", session.uid_search("UNDELETED"))
+        .await?
+        .into_iter()
+        .collect();
     uids.sort_unstable();
     uids.truncate(MAX_MESSAGES_PER_POLL);
     if uids.is_empty() {
@@ -248,6 +254,7 @@ async fn poll_session(
         match handle(ctx, source, sb.as_ref(), session, uid, size).await {
             Ok(m) => {
                 count(&mut run, &m);
+                run.problems.extend(super::problems(&m));
                 handled.push(uid);
             }
             Err(e) => run.problems.push(RunProblem {
@@ -256,7 +263,7 @@ async fn poll_session(
             }),
         }
     }
-    if let Err(e) = move_done(session, cfg, &handled, has_move).await {
+    if let Err(e) = move_done(session, cfg, &handled, has_move, has_uidplus).await {
         run.problems.push(RunProblem {
             code: "move_failed".into(),
             message: e.text(),
@@ -271,6 +278,7 @@ async fn move_done(
     cfg: &MailboxConfig,
     uids: &[u32],
     has_move: bool,
+    has_uidplus: bool,
 ) -> Result<(), JobError> {
     if uids.is_empty() {
         return Ok(());
@@ -298,10 +306,14 @@ async fn move_done(
                 .await
         })
         .await?;
-        step("expunge", async {
-            session.expunge().await?.try_collect::<Vec<_>>().await
-        })
-        .await?;
+        // plain EXPUNGE would also remove what another client flagged \Deleted in a shared folder:
+        // only UID EXPUNGE of our own messages, else leave them for the server's own expunge
+        if has_uidplus {
+            step("expunge", async {
+                session.uid_expunge(&set).await?.try_collect::<Vec<_>>().await
+            })
+            .await?;
+        }
     }
     Ok(())
 }

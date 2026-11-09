@@ -903,18 +903,8 @@ pub async fn exchange_code(
     let Some((consent_id, c_client, c_redirect, challenge, c_resource, expires_at, used_at)) = row else {
         return grant("Unknown authorization code.");
     };
-    if used_at.is_some() {
-        // RFC 6749 4.1.2: a replayed code revokes what it issued
-        revoke_by_server(&mut *conn, consent_id).await?;
-        return grant("This authorization code was already used; its tokens are revoked.");
-    }
-    sqlx::query("update oauth_code set used_at = now() where code_sha256 = $1")
-        .bind(sha256(code))
-        .execute(&mut *conn)
-        .await?;
-    if expires_at <= Utc::now() {
-        return grant("The authorization code expired.");
-    }
+    // Who is asking comes first: a request that fails these changes nothing, so someone holding only
+    // the code (no verifier) can neither burn it nor trigger the replay revocation below.
     if c_client != client_id {
         return grant("The code was issued to another client.");
     }
@@ -924,6 +914,15 @@ pub async fn exchange_code(
     let computed = pkce_s256(verifier);
     if !bool::from(computed.as_bytes().ct_eq(challenge.as_bytes())) {
         return grant("The PKCE code_verifier does not match the code_challenge.");
+    }
+    if used_at.is_some() {
+        // RFC 6749 4.1.2: a replayed code revokes what it issued. `used_at` is set only by a
+        // redemption that issued tokens.
+        revoke_by_server(&mut *conn, consent_id).await?;
+        return grant("This authorization code was already used; its tokens are revoked.");
+    }
+    if expires_at <= Utc::now() {
+        return grant("The authorization code expired.");
     }
     if c_resource != canonical {
         return Ok(Err(OAuthError::new(
@@ -937,6 +936,10 @@ pub async fn exchange_code(
     let Some(c) = consent_row(&mut *conn, consent_id).await?.filter(live) else {
         return grant("The consent behind this code was revoked or expired.");
     };
+    sqlx::query("update oauth_code set used_at = now() where code_sha256 = $1")
+        .bind(sha256(code))
+        .execute(&mut *conn)
+        .await?;
     Ok(Ok(issue(conn, &c, canonical).await?))
 }
 

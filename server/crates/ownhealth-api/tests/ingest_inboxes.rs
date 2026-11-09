@@ -81,6 +81,8 @@ struct Fake {
     files: Arc<Mutex<HashMap<i64, Vec<u8>>>>,
     downloads: Arc<AtomicUsize>,
     down: Arc<AtomicBool>,
+    /// `/download/` answers 500, as a Paperless with a broken storage does.
+    broken_downloads: Arc<AtomicBool>,
     list_queries: Arc<Mutex<Vec<HashMap<String, String>>>>,
 }
 
@@ -126,6 +128,9 @@ async fn fake_download(
     // only the original is ever asked for
     if q.get("original").map(String::as_str) != Some("true") {
         return StatusCode::IM_A_TEAPOT.into_response();
+    }
+    if f.broken_downloads.load(Ordering::SeqCst) {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     f.downloads.fetch_add(1, Ordering::SeqCst);
     match f.files.lock().expect("lock").get(&id) {
@@ -497,6 +502,55 @@ async fn the_poller_backfills_by_tag_routes_by_tag_and_moves_its_cursor() -> R {
         Some("2026-09-15T09:00:00+02:00")
     );
     assert_eq!(fake.downloads.load(Ordering::SeqCst), 3);
+    Ok(())
+}
+
+/// A poll in which every pull fails is a failed sync, through the real job path: the source counts
+/// failed runs, keeps no last success and keeps its cursor, so the documents are tried again.
+#[tokio::test]
+async fn a_poll_where_every_pull_fails_is_not_a_successful_sync() -> R {
+    let a = app().await?;
+    let fake = Fake::default();
+    fake.add(meta(7, &[HEALTH_TAG], "2026-09-14T09:00:00+02:00"), report("LN-PL-F7"));
+    fake.add(meta(8, &[HEALTH_TAG], "2026-09-14T09:30:00+02:00"), report("LN-PL-F8"));
+    fake.broken_downloads.store(true, Ordering::SeqCst);
+    let base = serve(fake.clone()).await?;
+    let (source, _) = paperless_source(
+        &a,
+        json!({"base_url": base, "health_tag": "health", "allow_private": true}),
+        PL_TOKEN,
+    )
+    .await?;
+    sources::register();
+    paperless::register();
+    for expected in 1..=2 {
+        let mut c = a.conn().await?;
+        sources::enqueue_poll(&mut c, source.id).await?;
+        jobs::drain(&job_ctx(&a), "core", 10, None).await?;
+        let s = sources::get_source(&mut c, source.id).await?.expect("source");
+        assert_eq!(s.consecutive_failures, expected, "run {expected}");
+        assert!(s.last_success_at.is_none(), "run {expected}: {:?}", s.last_success_at);
+        assert!(
+            s.last_error.as_deref().is_some_and(|e| e.starts_with("pull_failed")),
+            "{:?}",
+            s.last_error
+        );
+        assert!(s.cursor.is_none(), "{:?}", s.cursor);
+        assert_eq!(last_run(&a, source.id).await?["status"], json!("error"));
+    }
+    let docs: i64 = sqlx::query_scalar("select count(*) from document_source where channel = 'paperless'")
+        .fetch_one(&a.rt.pool)
+        .await?;
+    assert_eq!(docs, 0);
+
+    // Paperless is fixed: the next poll brings both documents in and the source is healthy again
+    fake.broken_downloads.store(false, Ordering::SeqCst);
+    let mut c = a.conn().await?;
+    sources::enqueue_poll(&mut c, source.id).await?;
+    jobs::drain(&job_ctx(&a), "core", 10, None).await?;
+    let s = sources::get_source(&mut c, source.id).await?.expect("source");
+    assert_eq!((s.consecutive_failures, s.last_success_at.is_some()), (0, true));
+    assert_eq!(last_run(&a, source.id).await?["status"], json!("ok"));
     Ok(())
 }
 

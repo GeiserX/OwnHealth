@@ -371,3 +371,63 @@ async fn ocr_only_text_reaches_the_agent_only_inside_untrusted_text() -> R {
     assert_eq!(r.sc["data"]["rows"][0]["grounded"], false);
     Ok(())
 }
+
+/// A value grounds only where the agent says it is: under the analyte it names, inside the box it
+/// claims. The same number printed on another row of the page grounds nothing.
+#[tokio::test]
+async fn a_value_grounds_only_under_its_own_name_and_inside_its_own_box() -> R {
+    let w = world().await?;
+    w.set_switch("alex", true).await?;
+    let doc = scanned_page(&w).await?;
+    ocr_words(
+        &w,
+        doc,
+        &[
+            ("Glucosa", [56.0, 150.0, 100.0, 160.0]),
+            ("92", [300.0, 150.0, 312.0, 160.0]),
+            ("mg/dL", [330.0, 150.0, 360.0, 160.0]),
+            ("Leucocitos", [56.0, 166.0, 110.0, 176.0]),
+            ("5,8", [300.0, 166.0, 315.0, 176.0]),
+            ("x10^3/µL", [330.0, 166.0, 370.0, 176.0]),
+        ],
+    )
+    .await?;
+    let tok = w.token(extraction_token()).await?;
+    let c = w.connect_real(&tok).await?;
+    let glucosa_row = json!([50, 148, 380, 162]);
+    let leuco_row = json!([50, 164, 380, 178]);
+    let rows = json!([
+        // the right value under the wrong name: 5,8 is the leucocytes, not the glucose
+        {"name": "Glucosa", "value": "5,8", "unit": "mg/dL", "date": "2026-11-03", "page": 1},
+        // a box drawn around another row
+        {"name": "Leucocitos", "value": "5,8", "date": "2026-11-03", "page": 1, "bbox": glucosa_row},
+        // positive controls: the same values where they really are
+        {"name": "Leucocitos", "value": "5,8", "date": "2026-11-03", "page": 1},
+        {"name": "Leucocitos", "value": "5,8", "date": "2026-11-03", "page": 1, "bbox": leuco_row},
+        {"name": "Glucosa", "value": 92, "unit": "mg/dL", "date": "2026-11-03", "page": 1, "bbox": glucosa_row},
+    ]);
+    let r = c
+        .call(
+            "propose",
+            json!({"profile": "alex", "kind": "observations", "payload": {"doc_id": doc.to_string(), "rows": rows}}),
+        )
+        .await?;
+    assert!(!r.is_error, "{}", r.raw);
+    let got: Vec<Value> = r.sc["data"]["rows"]
+        .as_array()
+        .map(|a| a.iter().map(|x| x["grounded"].clone()).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        got,
+        [json!(false), json!(false), json!(true), json!(true), json!(true)],
+        "{}",
+        r.sc
+    );
+    let it = review_item(&w, r.sc["data"]["proposal_id"].as_str().unwrap_or_default()).await?;
+    let codes: Vec<Value> = it["payload"]["rows"]
+        .as_array()
+        .map(|a| a.iter().map(|s| s["grounding"].clone()).collect())
+        .unwrap_or_default();
+    assert_eq!(codes[..2], [json!("ungrounded"), json!("ungrounded")]);
+    Ok(())
+}

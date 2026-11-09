@@ -185,23 +185,28 @@ async fn a_file_still_being_written_waits_and_a_copy_is_one_document() -> R {
 }
 
 #[tokio::test]
-async fn a_file_that_cannot_be_moved_is_not_imported_twice() -> R {
+async fn a_file_that_cannot_be_moved_fails_the_run_and_is_not_imported_twice() -> R {
     let e = env(Some("alex")).await?;
     std::fs::write(e.inbox.join("informe.pdf"), pdf("LN-F8"))?;
-    // `.done` is a file, so the move fails
+    // `.done` is a file, so the move fails (as when the app cannot write to the folder)
     std::fs::write(e.inbox.join(".done"), b"")?;
-    let o = poll_root(&e.db.pool, &e.blobs, &e.source, &e.inbox, Duration::ZERO).await?;
-    assert_eq!(o.new, 1);
-    assert_eq!(
-        o.problems.iter().map(|p| p.code.as_str()).collect::<Vec<_>>(),
-        ["move_failed"]
+    // the run fails, so the source turns red instead of reading the stuck file every minute as healthy
+    let Err(err) = poll_root(&e.db.pool, &e.blobs, &e.source, &e.inbox, Duration::ZERO).await else {
+        panic!("a pass that could not move its files must fail");
+    };
+    assert!(err.to_string().contains("could not be moved"), "{err}");
+    assert!(
+        poll_root(&e.db.pool, &e.blobs, &e.source, &e.inbox, Duration::ZERO)
+            .await
+            .is_err()
     );
-    let o = poll_root(&e.db.pool, &e.blobs, &e.source, &e.inbox, Duration::ZERO).await?;
-    assert_eq!((o.seen, o.new, o.duplicate), (1, 0, 1), "{o:?}");
     let rows: i64 = sqlx::query_scalar("select count(*) from document_source")
         .fetch_one(&e.db.pool)
         .await?;
-    assert_eq!(rows, 1, "the source ledger stops a second document_source row");
+    assert_eq!(
+        rows, 1,
+        "the document committed once, and the source ledger stops a second row"
+    );
     Ok(())
 }
 
@@ -246,26 +251,24 @@ async fn the_poller_reads_the_inbox_dir_setting_and_records_the_run() -> R {
 }
 
 #[tokio::test]
-async fn the_demo_has_a_folder_source_that_runs_only_with_an_inbox_dir() -> R {
+async fn the_demo_folder_source_never_polls_even_with_an_inbox_dir() -> R {
+    // the demo stack shares ./inbox with a real install: a polling demo source would take its files
     folder::register();
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let blobs = BlobStore::new(dir.path().join("blobs"))?;
     let mut settings = db.settings(dir.path())?;
-    settings.inbox_dir = None;
-    assert!(ownhealth_core::demo::seed_demo(&db.pool, &settings, &blobs, false).await?);
     settings.inbox_dir = Some(dir.path().join("inbox"));
-    assert!(ownhealth_core::demo::seed_demo(&db.pool, &settings, &blobs, true).await?);
+    assert!(ownhealth_core::demo::seed_demo(&db.pool, &settings, &blobs, false).await?);
     let rows: Vec<(String, Option<i32>)> =
-        sqlx::query_as("select kind, poll_seconds from source where kind = 'folder' order by created_at")
+        sqlx::query_as("select kind, poll_seconds from source where kind = 'folder'")
             .fetch_all(&db.pool)
             .await?;
-    assert_eq!(
-        rows,
-        vec![
-            ("folder".into(), None),
-            ("folder".into(), Some(folder::DEFAULT_POLL_SECONDS))
-        ]
-    );
+    assert_eq!(rows, vec![("folder".into(), None)]);
+    let mut c = db.pool.acquire().await?;
+    let due: i64 = sqlx::query_scalar("select count(*) from source where poll_seconds is not null and kind = 'folder'")
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(due, 0);
     Ok(())
 }

@@ -192,6 +192,7 @@ fn not_allowed() -> anyhow::Result<Vec<(Vec<u8>, &'static str)>> {
     let mut v = vec![
         (fixture("inj-email-body-unknown-sender.eml")?, "sender_not_allowed"),
         (fixture("inj-email-forged-auth.eml")?, "auth_failed"),
+        (fixture("inj-email-forged-auth-below.eml")?, "auth_failed"),
         (fixture("inj-email-subject.eml")?, "sender_not_allowed"),
         (
             Mail::new("q1@labnorte.example", LAB)
@@ -481,7 +482,9 @@ async fn a_person_releases_a_held_message_once() -> R {
     let carmen = env.fam.profile("carmen");
     let user = env.fam.user("alex");
     let mut tx = env.db.pool.begin().await?;
-    let docs = email::release(&mut tx, &env.ctx.blobs, Some(&env.sb), qid, user, carmen, true).await?;
+    let docs = email::release(&mut tx, &env.ctx.blobs, Some(&env.sb), qid, user, carmen, true)
+        .await?
+        .document_ids;
     tx.commit().await?;
     assert_eq!(docs.len(), 1);
     let profile: Uuid = sqlx::query_scalar("select profile_id from document where id = $1")
@@ -527,6 +530,62 @@ async fn a_person_releases_a_held_message_once() -> R {
     assert!(matches!(r, Err(ownhealth_core::Error::Invalid(_))), "{r:?}");
     quarantine::mark_deleted(&mut c, q2, user).await?;
     assert_eq!(env.n("select count(*) from document").await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_too_large_message_is_never_released_as_empty() -> R {
+    let env = Env::new().await?;
+    let source = env.mailbox(json!({})).await?;
+    let header = b"Message-ID: <big-1@labnorte.example>\r\nFrom: resultados@labnorte.example\r\n\
+Subject: Informe escaneado\r\n\r\n";
+    let mut tx = env.db.pool.begin().await?;
+    let qid = email::hold_too_large(&mut tx, &env.ctx.blobs, &source, header)
+        .await?
+        .quarantine_id
+        .ok_or_else(|| anyhow::anyhow!("not held"))?;
+    tx.commit().await?;
+    let user = env.fam.user("alex");
+    let mut c = env.db.pool.acquire().await?;
+    let r = email::release(
+        &mut c,
+        &env.ctx.blobs,
+        Some(&env.sb),
+        qid,
+        user,
+        env.fam.profile("alex"),
+        false,
+    )
+    .await;
+    assert!(matches!(r, Err(ownhealth_core::Error::Review(_))), "{r:?}");
+    let item = quarantine::get_item(&mut c, qid)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("gone"))?;
+    assert_eq!(item.status, "held");
+    Ok(())
+}
+
+#[tokio::test]
+async fn allowing_a_sender_needs_a_trusted_receiving_server() -> R {
+    let env = Env::new().await?;
+    let source = env.mailbox(json!({"trusted_authserv_id": null})).await?;
+    let raw = Mail::new("allow-1@clinica-norte.example", "citas@clinica-norte.example")
+        .attach("informe.pdf", "application/pdf", slip())
+        .build();
+    let qid = env
+        .ingest(&source, &raw)
+        .await?
+        .quarantine_id
+        .ok_or_else(|| anyhow::anyhow!("not held"))?;
+    let (user, carmen) = (env.fam.user("alex"), env.fam.profile("carmen"));
+    let mut c = env.db.pool.acquire().await?;
+    // the rule it would add requires authentication nobody can give here: refused, nothing changed
+    let r = email::release(&mut c, &env.ctx.blobs, Some(&env.sb), qid, user, carmen, true).await;
+    assert!(matches!(r, Err(ownhealth_core::Error::Invalid(_))), "{r:?}");
+    assert!(email::list_rules(&mut c, source.id).await?.len() == 1);
+    // releasing just this one message still works
+    let out = email::release(&mut c, &env.ctx.blobs, Some(&env.sb), qid, user, carmen, false).await?;
+    assert_eq!(out.document_ids.len(), 1);
     Ok(())
 }
 
@@ -595,11 +654,22 @@ async fn rules_and_passwords_are_kept_per_mailbox() -> R {
 #[tokio::test]
 async fn a_poll_ingests_and_moves_mail_to_the_done_folder() -> R {
     let env = Env::new().await?;
-    for has_move in [true, false] {
+    for (has_move, has_uidplus) in [(true, true), (false, true), (false, false)] {
         let imap = FakeImap::start(IMAP_USER, IMAP_PASS, Mode::Plain).await?;
         imap.lock().has_move = has_move;
+        imap.lock().has_uidplus = has_uidplus;
         let source = env.mailbox(json!({"port": imap.addr.port()})).await?;
-        let id = |n| format!("poll-{has_move}-{n}@labnorte.example");
+        let id = |n| format!("poll-{has_move}-{has_uidplus}-{n}@labnorte.example");
+        // another client flagged this one \Deleted and chose not to expunge it: never ours to remove
+        let theirs = imap.deliver(Mail::new(&id(9), "amigo@correo-salud.example").build());
+        if let Some(m) = imap
+            .lock()
+            .folders
+            .get_mut("INBOX")
+            .and_then(|f| f.iter_mut().find(|m| m.uid == theirs))
+        {
+            m.deleted = true;
+        }
         imap.deliver(lab_mail(&id(1), slip()));
         imap.deliver(Mail::new("promo-poll@ofertas-salud.example", "promo@ofertas-salud.example").build());
         imap.deliver(lab_mail(&id(1), slip()));
@@ -611,11 +681,114 @@ async fn a_poll_ingests_and_moves_mail_to_the_done_folder() -> R {
             (3, new, 1, dup, 0),
             "{run:?}"
         );
-        assert_eq!((imap.count("INBOX"), imap.count(email::DEFAULT_DONE_FOLDER)), (0, 3));
+        // without UIDPLUS our copied messages wait, flagged, for the server's own expunge
+        let ours_left = if has_move || has_uidplus { 0 } else { 3 };
+        assert_eq!(
+            (imap.count("INBOX"), imap.count(email::DEFAULT_DONE_FOLDER)),
+            (1 + ours_left, 3)
+        );
+        assert!(imap.lock().folders["INBOX"].iter().any(|m| m.uid == theirs));
         assert!(imap.all_seen(email::DEFAULT_DONE_FOLDER));
         let run = email::poll_mailbox(env.ctx.clone(), source).await?;
         assert_eq!(run.seen, 0);
     }
+    Ok(())
+}
+
+/// An allowed message whose only part is a photo embedded in the text (iPhone Mail sends a photo of a
+/// paper report this way).
+fn inline_photo_mail(id: &str) -> Vec<u8> {
+    format!(
+        "Authentication-Results: {}\r\nMessage-ID: <{id}>\r\nFrom: {LAB}\r\nTo: salud.rivera@correo-salud.example\r\n\
+         Subject: Foto del informe\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"r1\"\r\n\r\n\
+         --r1\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<img src=\"cid:foto1\">\r\n\
+         --r1\r\nContent-Type: image/jpeg; name=\"foto.jpg\"\r\nContent-Disposition: inline; filename=\"foto.jpg\"\r\n\
+         Content-ID: <foto1>\r\nContent-Transfer-Encoding: base64\r\n\r\n/9j/4AAQSkZJRgABAQAAAQABAAD/2Q==\r\n--r1--\r\n",
+        auth_pass("labnorte.example")
+    )
+    .into_bytes()
+}
+
+#[tokio::test]
+async fn a_poll_reports_allowed_mail_that_imported_nothing() -> R {
+    let env = Env::new().await?;
+    let imap = FakeImap::start(IMAP_USER, IMAP_PASS, Mode::Plain).await?;
+    let source = env.mailbox(json!({"port": imap.addr.port()})).await?;
+    imap.deliver(inline_photo_mail("inline-1@labnorte.example"));
+    imap.deliver(
+        Mail::new("docx-1@labnorte.example", LAB)
+            .auth(auth_pass("labnorte.example"))
+            .attach(
+                "informe.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                b"PK".to_vec(),
+            )
+            .build(),
+    );
+    let run = email::poll_mailbox(env.ctx.clone(), source).await?;
+    assert_eq!((run.seen, run.new, run.duplicate), (2, 0, 0), "{run:?}");
+    let codes: Vec<&str> = run.problems.iter().map(|p| p.code.as_str()).collect();
+    assert_eq!(
+        codes,
+        [
+            "no_importable_attachment",
+            "attachment_skipped",
+            "no_importable_attachment"
+        ],
+        "{run:?}"
+    );
+    assert!(
+        run.problems
+            .iter()
+            .all(|p| !p.message.contains("informe") && !p.message.contains("foto"))
+    );
+    Ok(())
+}
+
+/// Set the mode of `dir` and every folder below it.
+#[cfg(unix)]
+fn chmod_tree(dir: &std::path::Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for e in std::fs::read_dir(dir)? {
+        let e = e?;
+        if e.file_type()?.is_dir() {
+            chmod_tree(&e.path(), mode)?;
+        }
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode))
+}
+
+/// A poll where every message fails (the blob store cannot be written) is a failed sync through the
+/// real job path: failed runs counted, no last success, and the mail stays in the inbox for the next
+/// poll.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_poll_where_every_message_fails_is_not_a_successful_sync() -> R {
+    let env = Env::new().await?;
+    let imap = FakeImap::start(IMAP_USER, IMAP_PASS, Mode::Plain).await?;
+    let source = env.mailbox(json!({"port": imap.addr.port()})).await?;
+    imap.deliver(lab_mail("fail-1@labnorte.example", slip()));
+    imap.deliver(lab_mail("fail-2@labnorte.example", slip()));
+    let blobs = env.ctx.settings.blobs_path();
+    chmod_tree(&blobs, 0o555)?;
+    sources::register();
+    email::register();
+    let mut checks = Vec::new();
+    for _ in 0..2 {
+        let mut c = env.db.pool.acquire().await?;
+        sources::enqueue_poll(&mut c, source.id).await?;
+        ownhealth_core::jobs::drain(&env.ctx, "core", 10, None).await?;
+        let s = sources::get_source(&mut c, source.id).await?.expect("source");
+        checks.push((
+            s.consecutive_failures,
+            s.last_success_at.is_some(),
+            s.last_error.is_some(),
+        ));
+    }
+    chmod_tree(&blobs, 0o755)?;
+    assert_eq!(checks, [(1, false, true), (2, false, true)]);
+    assert_eq!(imap.count("INBOX"), 2, "failed mail is left for the next poll");
+    assert_eq!(env.n("select count(*) from document").await?, 0);
     Ok(())
 }
 

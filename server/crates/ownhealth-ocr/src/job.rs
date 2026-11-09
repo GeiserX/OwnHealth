@@ -15,13 +15,13 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use ownhealth_core::Error;
 use ownhealth_core::acceptance::Check;
-use ownhealth_core::arrive::{OCR_JOB, set_ocr_state};
+use ownhealth_core::arrive::{OCR_JOB, enqueue_ocr, set_ocr_state};
 use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::config::Settings;
 use ownhealth_core::jobs::{self, Job, JobContext, JobError};
 use ownhealth_core::review::{ReviewItemIn, create_item};
 use ownhealth_ingest_pdf::textlayer::{PWord, PageModel, injection_hits};
-use ownhealth_ingest_pdf::{OcrPages, Word, import_ocr, render_page_png};
+use ownhealth_ingest_pdf::{OcrPages, Word, decode_image, import_ocr, render_page_png};
 use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, Row as _};
 use uuid::Uuid;
@@ -136,7 +136,8 @@ fn page_image(blobs: &BlobStore, doc_sha: &str, pdf: bool, page_no: i32) -> Resu
         (img, OCR_DPI)
     } else {
         let data = blobs.get_bytes(doc_sha).map_err(Error::from)?;
-        let img = image::load_from_memory(&data).map_err(|e| OcrError::Engine(format!("unreadable image: {e}")))?;
+        // upright (EXIF orientation applied) and size-capped, like the pHash of the same photo
+        let img = decode_image(&data)?;
         // a photo has no dpi worth trusting: scale it to an A4-wide page, which is what the table
         // reader's tolerances (in points) expect
         let dpi = (f64::from(img.width()) / 8.27).max(72.0);
@@ -449,6 +450,55 @@ pub async fn ocr_document(ctx: &JobContext, document_id: Uuid, pages: &[i32]) ->
     }))
 }
 
+/// Scans that waited while OCR was off: `ocr_state = 'off'`, or `not_needed` for a document from a
+/// 0.2.0 database (the migration's default), with an open `pending_document` item for pages without
+/// text. Each goes to the `ocr` queue with the item's pages that still need OCR. The item is dismissed
+/// when all its pages go, as an import with OCR on files none; a page OCR then cannot read, or reads
+/// without a table, gets its own item from the job, so nothing is dropped. A lab page whose text layer
+/// holds no table keeps the item open. Safe to repeat: a queued document leaves 'off' and 'not_needed',
+/// and the job's dedupe key holds one job per document. Returns how many documents were queued.
+pub async fn backfill(pool: &sqlx::PgPool) -> Result<usize, Error> {
+    let items: Vec<(Uuid, Uuid, Value)> = sqlx::query_as(
+        "select r.id, d.id, r.payload from document d join review_item r on r.document_id = d.id \
+         where r.kind = 'pending_document' and r.status = 'open' and d.ocr_state in ('off', 'not_needed') \
+         and (d.mime = 'application/pdf' or d.mime like 'image/%') \
+         and r.payload->>'why' in ('image', 'no_text_layer')",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut queued = 0;
+    for (item, document_id, payload) in items {
+        let pages: Vec<i32> = payload
+            .get("pages")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| p.as_i64().and_then(|n| i32::try_from(n).ok()))
+                    .filter(|p| *p >= 1)
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![1]);
+        let mut tx = pool.begin().await?;
+        let todo = pages_to_read(&mut tx, document_id, &pages).await?;
+        if todo.is_empty() {
+            continue;
+        }
+        enqueue_ocr(&mut tx, document_id, &todo, "backfill").await?;
+        if todo.len() == pages.len() {
+            sqlx::query(
+                "update review_item set status = 'dismissed', decided_at = now(), decision_reason = 'sent to OCR' \
+                 where id = $1 and status = 'open'",
+            )
+            .bind(item)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        queued += 1;
+    }
+    Ok(queued)
+}
+
 async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     let (document_id, pages) = payload(&job)?;
     Ok(Some(ocr_document(&ctx, document_id, &pages).await?))
@@ -547,5 +597,37 @@ mod tests {
             checks.iter().any(|c| c.reason.as_deref() == Some("possible_injection")),
             "{checks:?}"
         );
+    }
+
+    #[test]
+    fn a_portrait_phone_photo_reaches_the_reader_upright() -> Result<(), Box<dyn std::error::Error>> {
+        // a 300 x 200 sensor image with EXIF Orientation 6: the page is 200 wide and 300 tall
+        let sensor = image::RgbImage::from_pixel(300, 200, image::Rgb([200, 200, 200]));
+        let mut jpeg = Vec::new();
+        sensor.write_with_encoder(image::codecs::jpeg::JpegEncoder::new(&mut jpeg))?;
+        let mut tiff = b"II*\0".to_vec();
+        for part in [
+            &8u32.to_le_bytes()[..],
+            &1u16.to_le_bytes(),
+            &0x0112u16.to_le_bytes(),
+            &3u16.to_le_bytes(),
+        ] {
+            tiff.extend(part);
+        }
+        tiff.extend(1u32.to_le_bytes());
+        tiff.extend([6, 0, 0, 0]);
+        tiff.extend(0u32.to_le_bytes());
+        let mut photo = jpeg[..2].to_vec();
+        photo.extend([0xFF, 0xE1]);
+        photo.extend(u16::try_from(tiff.len() + 8)?.to_be_bytes());
+        photo.extend(b"Exif\0\0");
+        photo.extend(tiff);
+        photo.extend(&jpeg[2..]);
+        let dir = tempfile::tempdir()?;
+        let blobs = BlobStore::new(dir.path())?;
+        let sha = blobs.put_bytes(&photo)?;
+        let (rgb, w, h, _) = page_image(&blobs, &sha, false, 1)?;
+        assert_eq!((w, h, rgb.len()), (200, 300, 200 * 300 * 3));
+        Ok(())
     }
 }

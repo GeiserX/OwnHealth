@@ -442,3 +442,61 @@ async fn the_demo_has_one_scanned_page_waiting_for_ocr() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn turning_ocr_on_later_reads_the_scans_that_waited() -> anyhow::Result<()> {
+    let _turn = TURN.lock().await;
+    let e = setup().await?;
+    let mut c = e.conn().await?;
+    let ln = generate::labnorte_3p();
+    let (pdf, _) = generate::render(&ln, None);
+    let calls = reader_on(&pdf, 0.99);
+    // two scans that arrived while OCR was off: one imported by 0.3.0 (`off`), one by 0.2.0, whose
+    // documents the migration left at `not_needed`
+    let mut docs = Vec::new();
+    for (name, dpi) in [("scan-a.pdf", 36.0), ("scan-b.pdf", 40.0)] {
+        let bytes = generate::scanned(&pdf, dpi);
+        let doc = e.store(&mut c, &bytes, "alex", "application/pdf", name).await?;
+        let off = ImportOptions {
+            threshold: DEFAULT_THRESHOLD,
+            ocr: false,
+        };
+        import_pdf_opts(&mut c, &e.blobs, doc, false, off).await?;
+        assert_eq!(
+            (state(&mut c, doc).await?, open_pending(&mut c, doc).await?),
+            ("off".into(), 1)
+        );
+        docs.push(doc);
+    }
+    sqlx::query("update document set ocr_state = 'not_needed' where id = $1")
+        .bind(docs[1])
+        .execute(&mut *c)
+        .await?;
+    // the worker starts with OCR on: every waiting scan is queued once, however often it starts
+    assert_eq!(ownhealth_ocr::job::backfill(&e.db.pool).await?, 2);
+    assert_eq!(ownhealth_ocr::job::backfill(&e.db.pool).await?, 0);
+    let jobs: Vec<Value> = sqlx::query_scalar("select payload from job where queue = 'ocr' and kind = $1")
+        .bind(ownhealth_core::arrive::OCR_JOB)
+        .fetch_all(&mut *c)
+        .await?;
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    assert!(
+        jobs.iter().all(|j| j["pages"] == serde_json::json!([1, 2, 3])),
+        "{jobs:?}"
+    );
+    for doc in &docs {
+        assert_eq!(state(&mut c, *doc).await?, "queued");
+        assert_eq!(
+            open_pending(&mut c, *doc).await?,
+            0,
+            "the queued scan no longer waits for an agent"
+        );
+    }
+    run_ocr_queue(&e).await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    for doc in &docs {
+        assert_eq!(state(&mut c, *doc).await?, "done");
+    }
+    use_reader(None);
+    Ok(())
+}

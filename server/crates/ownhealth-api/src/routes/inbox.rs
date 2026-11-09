@@ -6,7 +6,7 @@
 //! | Route | What |
 //! |---|---|
 //! | `GET /inboxes/quarantine?status=held` | `[{id, source_id, sender, subject: untrusted, attachments, reason, status, received_at}]`; `status=all` lists every status |
-//! | `POST /inboxes/quarantine/{id}/release` | `{profile_id, allow_sender: bool}` -> `{document_ids}` |
+//! | `POST /inboxes/quarantine/{id}/release` | `{profile_id, allow_sender: bool}` -> `{document_ids, problems: [{code, message}]}`; a `too_large` message is refused |
 //! | `DELETE /inboxes/quarantine/{id}` | delete a held message |
 //! | `GET /inboxes/{id}/senders`, `POST /inboxes/{id}/senders` | sender rules of a mailbox (each with its password labels); `{pattern, profile_id, doc_type_hint?, trust_unauthenticated?}` |
 //! | `DELETE /senders/{id}` | one rule, and its passwords |
@@ -171,7 +171,7 @@ async fn release(State(rt): State<Runtime>, Caller(p): Caller, Path(id): Path<St
         .user_id
         .ok_or_else(|| Error::access_denied("forbidden", "A person releases mail."))?;
     let sb = SecretBox::from_settings(&rt.settings).ok();
-    let docs = email::release(&mut tx, &rt.blobs, sb.as_ref(), id, user, b.profile_id, b.allow_sender).await?;
+    let out = email::release(&mut tx, &rt.blobs, sb.as_ref(), id, user, b.profile_id, b.allow_sender).await?;
     let action = if b.allow_sender {
         "quarantine.release_and_allow"
     } else {
@@ -179,7 +179,8 @@ async fn release(State(rt): State<Runtime>, Caller(p): Caller, Path(id): Path<St
     };
     audit(&mut tx, &p, action, Some(b.profile_id), vec![id.to_string()]).await?;
     tx.commit().await?;
-    ok(json!({"document_ids": docs}))
+    let problems = email::problems(&out);
+    ok(json!({"document_ids": out.document_ids, "problems": problems}))
 }
 
 async fn delete_held(State(rt): State<Runtime>, Caller(p): Caller, Path(id): Path<String>) -> R {

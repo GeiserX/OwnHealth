@@ -310,15 +310,26 @@ pub async fn begin_run(conn: &mut PgConnection, source_id: Uuid, trigger: &str, 
 }
 
 /// Close a run with what it did, or with the error that stopped it (type and message only, cut at
-/// 500 characters). Updates the source's health columns. A run with problems but no error is
-/// `partial` and still counts as a success for "last successful sync".
+/// 500 characters). Updates the source's health columns. A run with problems where something still
+/// arrived is `partial` and counts as a success for "last successful sync"; a run where every item it
+/// saw failed is an `error` (nothing arrived, and the cursor stays so the items are retried).
 pub async fn finish_run(
     conn: &mut PgConnection,
     run_id: i64,
     result: std::result::Result<&RunOutcome, &str>,
 ) -> Result<()> {
+    let first_problem = |o: &RunOutcome| {
+        o.problems.first().map(|p| {
+            format!("{}: {}", p.code, p.message)
+                .chars()
+                .take(500)
+                .collect::<String>()
+        })
+    };
+    let all_failed = |o: &RunOutcome| o.seen > 0 && o.new + o.duplicate + o.quarantined == 0;
     let (status, outcome, error) = match result {
         Ok(o) if o.problems.is_empty() => ("ok", Some(o), None),
+        Ok(o) if all_failed(o) => ("error", Some(o), first_problem(o)),
         Ok(o) => ("partial", Some(o), None),
         Err(e) => ("error", None, Some(e.chars().take(500).collect::<String>())),
     };
@@ -389,15 +400,26 @@ pub struct SourceHealth {
     pub consecutive_failures: i32,
     /// Enabled, polled, and no success within STALE_INTERVALS poll intervals (or never).
     pub stale: bool,
+    /// The newest finished run: `ok`, `partial` or `error`; none before the first run ends.
+    pub last_run_status: Option<String>,
+    /// How many problems that run had, and the first one as `code: message` (no content), or the
+    /// error that stopped it.
+    pub last_run_problems: i32,
+    pub last_run_problem: Option<String>,
 }
 
 pub async fn source_health(conn: &mut PgConnection, household_id: Uuid) -> Result<Vec<SourceHealth>> {
     Ok(sqlx::query_as(
-        "select id, kind, label, profile_id, enabled, last_run_at, last_success_at, last_error_at, last_error, \
-         consecutive_failures, \
-         (enabled and poll_seconds is not null and (last_success_at is null or \
-           last_success_at < now() - make_interval(secs => poll_seconds * $2))) as stale \
-         from source where household_id = $1 order by kind, label",
+        "select s.id, s.kind, s.label, s.profile_id, s.enabled, s.last_run_at, s.last_success_at, s.last_error_at, \
+         s.last_error, s.consecutive_failures, \
+         (s.enabled and s.poll_seconds is not null and (s.last_success_at is null or \
+           s.last_success_at < now() - make_interval(secs => s.poll_seconds * $2))) as stale, \
+         r.status as last_run_status, coalesce(jsonb_array_length(r.errors), 0)::int4 as last_run_problems, \
+         left(coalesce((r.errors -> 0 ->> 'code') || ': ' || (r.errors -> 0 ->> 'message'), r.error), 500) \
+           as last_run_problem \
+         from source s left join lateral (select status, errors, error from source_run \
+           where source_id = s.id and finished_at is not null order by started_at desc, id desc limit 1) r on true \
+         where s.household_id = $1 order by s.kind, s.label",
     )
     .bind(household_id)
     .bind(STALE_INTERVALS)

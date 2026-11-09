@@ -18,13 +18,13 @@
 	import PageHeader from '#lib/components/PageHeader.svelte';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
-	import { Loader, tf } from '#lib/components/pages1/util.svelte';
+	import { Loader, tf, tp } from '#lib/components/pages1/util.svelte';
 	import { ago, plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import SourceCard from '#lib/components/inbox/SourceCard.svelte';
 	import SourceForm from '#lib/components/inbox/SourceForm.svelte';
 	import { t } from '#lib/i18n/index.svelte';
-	import { RECIPE, RECIPES_URL } from '#lib/logic/inbox';
+	import { RECIPE, RECIPES_URL, heldTotal } from '#lib/logic/inbox';
 	import { app, currentProfile } from '#lib/state/app.svelte';
 
 	const sources = new Loader<InboxSource[]>();
@@ -45,6 +45,8 @@
 	// Inline release form: which held message, into which profile.
 	let releasing = $state<string | null>(null);
 	let target = $state('');
+	// A held message waiting for "delete for good" (one click alone deletes nothing).
+	let deleting = $state<string | null>(null);
 
 	async function act(fn: () => Promise<unknown>, done?: string) {
 		busy = true;
@@ -66,6 +68,11 @@
 			fresh = { source: s, token: r.token };
 			copied = false;
 		});
+	const remove = (q: QuarantineOut) =>
+		act(async () => {
+			await deleteQuarantined(q.id);
+			deleting = null;
+		});
 	function startRelease(q: QuarantineOut) {
 		releasing = releasing === q.id ? null : q.id;
 		target = currentProfile()?.id ?? profiles[0]?.id ?? '';
@@ -75,6 +82,7 @@
 			const r = await releaseQuarantined(q.id, { profile_id: target, allow_sender: allow });
 			releasing = null;
 			notice = tf(allow ? 'fu_q_released_allowed' : 'fu_q_released', { n: r.document_ids.length, sender: plain(q.sender) });
+			if (r.problems?.length) notice += ' ' + tp('fu_q_released_skipped', r.problems.length);
 		});
 	async function copy() {
 		if (!fresh) return;
@@ -89,7 +97,10 @@
 	};
 	const origin = typeof location !== 'undefined' ? location.origin : '';
 	const sourceName = (id: string | null) => sources.data?.find((s) => s.id === id)?.label ?? '—';
+	const doneFolder = (id: string | null) => String(sources.data?.find((s) => s.id === id)?.config.done_folder ?? 'OwnHealth/Done');
 	const failing = $derived((sources.data ?? []).filter((s) => s.enabled && s.consecutive_failures > 0).length);
+	// the server's count, not the length of the first page of the list
+	const heldCount = $derived(heldTotal(sources.data));
 	const lastSync = $derived(
 		(sources.data ?? [])
 			.map((s) => s.last_success_at)
@@ -111,7 +122,7 @@
 <div class="inbox">
 	<div class="ib"><div><div class="k">{t('fu_sources')}</div><div class="dim d">{t('fu_sources_d')}</div></div><span class="c">{sources.data?.length ?? '—'}</span></div>
 	<div class="ib"><div><div class="k">{t('fu_failing')}</div><div class="dim d">{t('fu_failing_d')}</div></div><span class="c" style="color:{failing ? 'var(--out)' : 'var(--dim)'}">{sources.data ? failing : '—'}</span></div>
-	<div class="ib"><div><div class="k">{t('fu_quarantine')}</div><div class="dim d">{t('fu_quarantine_d')}</div></div><span class="c" style="color:{held.data?.length ? 'var(--watch)' : 'var(--dim)'}">{held.data?.length ?? '—'}</span></div>
+	<div class="ib"><div><div class="k">{t('fu_quarantine')}</div><div class="dim d">{t('fu_quarantine_d')}</div></div><span class="c" style="color:{heldCount ? 'var(--watch)' : 'var(--dim)'}">{heldCount ?? '—'}</span></div>
 	<div class="ib"><div><div class="k">{t('fu_last_ok')}</div><div class="dim d">{t('fu_last_ok_d')}</div></div><span class="c" style="font-size:12.5px;font-weight:560">{lastSync ? ago(lastSync) : t('i2_never')}</span></div>
 </div>
 
@@ -192,7 +203,7 @@
 						<tr>
 							<td class="dim num nw">{ago(q.received_at)}<div style="font-size:10.5px">{sourceName(q.source_id)}</div></td>
 							<td class="mono ut">{plain(q.sender) || '—'}</td>
-							<td class="ut"><span title="trust: untrusted_text">{plain(q.subject) || t('fu_q_nosubject')}</span></td>
+							<td class="ut"><span title={t('fu_untrusted_title')}>{plain(q.subject) || t('fu_q_nosubject')}</span></td>
 							<td>
 								{#each q.attachments as a, i (i)}
 									<div class="att"><span class="mono">{plain(a.filename)}</span> <span class="dim">{kb(a.size)}</span></div>
@@ -200,10 +211,22 @@
 							</td>
 							<td><span class="pill {q.reason === 'auth_failed' ? 'p-out' : 'p-watch'}"><i aria-hidden="true"></i>{t('fu_qr_' + q.reason)}</span></td>
 							<td class="nw" style="text-align:right">
-								<button class="btn sm" onclick={() => startRelease(q)} aria-expanded={releasing === q.id}>{t('fu_q_release')}</button>
-								<button class="btn sm no" disabled={busy} onclick={() => act(() => deleteQuarantined(q.id))}>{t('fu_delete')}</button>
+								{#if q.reason !== 'too_large'}
+									<button class="btn sm" onclick={() => startRelease(q)} aria-expanded={releasing === q.id}>{t('fu_q_release')}</button>
+								{/if}
+								{#if deleting === q.id}
+									<button class="btn sm no" disabled={busy} onclick={() => remove(q)}>{t('fu_delete_yes')}</button>
+									<button class="btn sm" onclick={() => (deleting = null)}>{t('i2_cancel')}</button>
+								{:else}
+									<button class="btn sm no" disabled={busy} onclick={() => (deleting = q.id)}>{t('fu_delete')}</button>
+								{/if}
 							</td>
 						</tr>
+						{#if q.reason === 'too_large'}
+							<tr class="rel">
+								<td colspan="6"><div class="note">{tf('fu_q_too_large_d', { folder: doneFolder(q.source_id) })}</div></td>
+							</tr>
+						{/if}
 						{#if releasing === q.id}
 							<tr class="rel">
 								<td colspan="6">
@@ -226,7 +249,7 @@
 		</div>
 	{/if}
 	<div class="note" style="margin-top:8px">
-		<span class="chip" style="color:var(--out);border-color:rgba(239,107,115,.5)">untrusted</span>
+		<span class="chip" style="color:var(--out);border-color:rgba(239,107,115,.5)" title={t('fu_untrusted_title')}>{t('fu_untrusted_chip')}</span>
 		{t('fu_q_note')}
 	</div>
 </section>

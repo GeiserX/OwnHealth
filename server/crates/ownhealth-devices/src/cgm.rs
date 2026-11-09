@@ -136,7 +136,15 @@ pub fn summarize(
     Ok(s)
 }
 
-/// The reading interval the data shows: the median gap between readings, in whole minutes, 1 to 15.
+/// The reading intervals sensors write at, in minutes: Libre 2/3 read through xDrip or LibreLinkUp's
+/// live feed (1), Dexcom, Medtronic and most others (5), LibreLinkUp's history (15).
+pub const SENSOR_INTERVALS: [f64; 3] = [1.0, 5.0, 15.0];
+
+/// The reading interval the data shows: the median gap between readings, snapped down to the nearest
+/// interval a sensor writes at (`SENSOR_INTERVALS`). Wear is measured against this interval, so it must
+/// not come from the gaps alone: a 5-minute sensor that loses every other reading has 10-minute gaps,
+/// and an interval of 10 would read as full wear. Evenly sparse data at a real sensor interval (a
+/// 5-minute sensor keeping one reading in three looks like a 15-minute one) cannot be told apart.
 pub fn infer_interval(readings: &[(DateTime<Utc>, f64)]) -> f64 {
     let mut ts: Vec<DateTime<Utc>> = readings.iter().map(|r| r.0).collect();
     ts.sort();
@@ -149,8 +157,12 @@ pub fn infer_interval(readings: &[(DateTime<Utc>, f64)]) -> f64 {
         return DEFAULT_INTERVAL_MINUTES;
     }
     gaps.sort_unstable();
-    let median = gaps[gaps.len() / 2] as f64 / 60.0;
-    median.round().clamp(1.0, 15.0)
+    let median = (gaps[gaps.len() / 2] as f64 / 60.0).round();
+    SENSOR_INTERVALS
+        .iter()
+        .copied()
+        .rfind(|i| *i <= median)
+        .unwrap_or(SENSOR_INTERVALS[0])
 }
 
 /// The summary of a profile's stored readings over the last `days` days before `end`.
@@ -269,10 +281,26 @@ mod tests {
     }
 
     #[test]
-    fn the_interval_is_the_median_gap() {
+    fn the_interval_is_the_median_gap_snapped_to_a_sensor_interval() {
         assert_eq!(infer_interval(&series(1, 5, |_| 1.0)), 5.0);
         assert_eq!(infer_interval(&series(1, 15, |_| 1.0)), 15.0);
         assert_eq!(infer_interval(&series(1, 1, |_| 1.0)), 1.0);
         assert_eq!(infer_interval(&[]), DEFAULT_INTERVAL_MINUTES);
+        assert_eq!(infer_interval(&series(1, 10, |_| 1.0)), 5.0);
+        assert_eq!(infer_interval(&series(1, 3, |_| 1.0)), 1.0);
+        assert_eq!(infer_interval(&series(1, 30, |_| 1.0)), 15.0);
+    }
+
+    #[test]
+    fn evenly_sparse_readings_do_not_look_like_full_wear() -> Result<()> {
+        // a 5-minute sensor that lost every other reading for 14 days: half the wear, not valid
+        let r: Vec<_> = series(14, 10, |_| 120.0);
+        let interval = infer_interval(&r);
+        assert_eq!(interval, 5.0);
+        let s = summarize(&r, at(0), at(14 * 1440), interval)?;
+        assert!((s.wear_fraction - 0.5).abs() < 0.001, "{s:?}");
+        assert!(!s.valid);
+        assert_eq!(s.invalid_reason.as_deref(), Some("insufficient_wear"));
+        Ok(())
     }
 }

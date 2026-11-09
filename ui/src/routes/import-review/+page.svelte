@@ -14,7 +14,6 @@
 		listDocuments,
 		listInboxes,
 		listJobs,
-		listQuarantine,
 		listReview,
 		rejectReview,
 		retractDocument
@@ -37,7 +36,9 @@
 
 	const THRESHOLD = 0.95;
 	const prof = $derived(currentProfile());
-	const queue = new Loader<{ items: ReviewItem[]; docs: DocumentSummary[]; jobs: JobInfo[]; sources: InboxSource[]; held: number }>();
+	const queue = new Loader<{ items: ReviewItem[]; docs: DocumentSummary[]; jobs: JobInfo[]; sources: InboxSource[] }>();
+	// "Not a duplicate? reject" waits for a second click: it retracts this document.
+	let confirmDup = $state(false);
 	const doc = new Loader<DocumentDetail>();
 	let showUpload = $state(false);
 	let busy = $state(false);
@@ -59,16 +60,15 @@
 		const slug = prof?.slug;
 		if (!slug) return;
 		queue.run(async () => {
-			const [r, d, j, s, q] = await Promise.all([
+			const [r, d, j, s] = await Promise.all([
 				listReview({ status: 'open', profile: slug }),
 				listDocuments(slug).catch(() => ({ items: [] as DocumentSummary[] })),
 				listJobs().catch(() => ({ jobs: [] as JobInfo[] })),
 				// The inbox tiles; a viewer who cannot manage sources (403) just sees the setup tile.
-				listInboxes().catch(() => ({ items: [] as InboxSource[] })),
-				listQuarantine('held').catch(() => ({ items: [] }))
+				listInboxes().catch(() => ({ items: [] as InboxSource[] }))
 			]);
 			if (app.me) app.me.review_open = r.open;
-			return { items: r.items, docs: d.items, jobs: j.jobs, sources: s.items, held: q.items.length };
+			return { items: r.items, docs: d.items, jobs: j.jobs, sources: s.items };
 		}, slug);
 	}
 	$effect(() => {
@@ -170,14 +170,19 @@
 		{ k: 'i2_in_genome', d: latest('import.genome_facts'), doc: latestDoc('genomics'), n: count('genome_reinterpretation') },
 		{ k: 'i2_in_agent', d: null, n: count('agent_proposal'), sub: 'write:propose' },
 	]);
-	// v0.2: one tile for every inbox (mail, folder, Paperless, devices); its count is the quarantine.
-	const inboxTile = $derived.by(() => {
-		const list = queue.data?.sources ?? [];
-		const bad = list.filter((s) => sourceStatus(s) === 'out').length;
-		const last = list.map((s) => s.last_success_at).filter((x): x is string => !!x).sort().at(-1) ?? null;
-		const sub = !list.length ? t('fu_tile_setup') : bad ? tf('fu_tile_failing', { n: bad }) : last ? tf('fu_tile_synced', { when: ago(last) }) : t('fu_st_nodata');
-		return { n: list.length, sub, bad, held: queue.data?.held ?? 0 };
-	});
+	// v0.2: one tile per configured inbox, so the one that brought items in or is failing shows at a
+	// glance; a mailbox counts its held mail (the server's count). No inbox yet: one setup tile.
+	const inboxTiles = $derived(
+		(queue.data?.sources ?? []).map((s) => {
+			const c = s.config as Record<string, unknown>;
+			const what =
+				s.kind === 'email' ? String(c.username ?? c.host ?? '') : s.kind === 'folder' ? `/${String(c.subdir ?? c.path ?? '')}` : s.kind === 'paperless' && c.tag ? `tag: ${String(c.tag)}` : '';
+			const st = sourceStatus(s);
+			const bad = st === 'out' || st === 'partial';
+			const state = st === 'out' ? tf('fu_tile_failing', { n: 1 }) : st === 'partial' ? t('fu_st_partial') : s.last_success_at ? tf('fu_tile_synced', { when: ago(s.last_success_at) }) : t('fu_st_nodata');
+			return { s, sub: [t('fu_k_' + s.kind), what, state].filter(Boolean).join(' · '), bad, held: s.kind === 'email' ? (s.quarantined ?? 0) : null };
+		})
+	);
 	function jobLine(j: JobInfo | null, d?: DocumentSummary | null): string {
 		const doc = j?.document_id ? (queue.data?.docs ?? []).find((x) => x.id === j.document_id) : d;
 		const name = j?.filename ?? (doc ? plain(doc.filename) : null);
@@ -226,13 +231,22 @@
 			{#if b.n != null}<span class="c" style="color:{b.n ? 'var(--watch)' : 'var(--dim)'}" aria-label="{b.n} {t('i2_open_items')}">{b.n}</span>{/if}
 		</div>
 	{/each}
-	<a class="ib lnkt" href="/inbox">
-		<div style="min-width:0">
-			<div style="font-weight:600;font-size:12.5px">{t('fu_inbox')}{#if !inboxTile.n} <PhaseChip phase="v0.2" />{/if}</div>
-			<div class="dim" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{inboxTile.bad ? 'color:var(--out)' : ''}">{inboxTile.sub}</div>
-		</div>
-		{#if inboxTile.n}<span class="c" style="color:{inboxTile.held ? 'var(--watch)' : 'var(--dim)'}" title={t('fu_quarantine')} aria-label="{inboxTile.held} {t('fu_quarantine')}">{inboxTile.held}</span>{/if}
-	</a>
+	{#each inboxTiles as b (b.s.id)}
+		<a class="ib lnkt" href="/inbox">
+			<div style="min-width:0">
+				<div style="font-weight:600;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{b.s.label}</div>
+				<div class="dim" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{b.bad ? 'color:var(--out)' : ''}">{b.sub}</div>
+			</div>
+			{#if b.held != null}<span class="c" style="color:{b.held ? 'var(--watch)' : 'var(--dim)'}" title={t('fu_quarantine')} aria-label="{b.held} {t('fu_quarantine')}">{b.held}</span>{/if}
+		</a>
+	{:else}
+		<a class="ib lnkt" href="/inbox">
+			<div style="min-width:0">
+				<div style="font-weight:600;font-size:12.5px">{t('fu_inbox')} <PhaseChip phase="v0.2" /></div>
+				<div class="dim" style="font-size:11px">{t('fu_tile_setup')}</div>
+			</div>
+		</a>
+	{/each}
 </div>
 
 {#if actionError}<div class="p2err" role="alert" style="margin-bottom:8px">{actionError}</div>{/if}
@@ -299,9 +313,15 @@
 					<span class="p2row" style="margin-left:auto;gap:6px">
 						{#if nearOf}<a class="btn sm" href="?doc={nearOf.id}">{t('fu_dup_compare')}</a>{/if}
 						<button class="btn sm" disabled={busy} onclick={() => near && act(() => dismissReview(near.id, 'kept both'))}>{t('fu_dup_keep')}</button>
-						<button class="btn sm no" disabled={busy} onclick={() => act(async () => { await retractDocument(docId, `duplicate of ${nearOf?.id ?? 'an earlier document'}`); if (near) await dismissReview(near.id, 'duplicate retracted'); })}>{t('fu_dup_reject')}</button>
+						{#if confirmDup}
+							<button class="btn sm no" disabled={busy} onclick={() => act(async () => { confirmDup = false; await retractDocument(docId, `duplicate of ${nearOf?.id ?? 'an earlier document'}`); if (near) await dismissReview(near.id, 'duplicate retracted'); })}>{t('fu_dup_reject_yes')}</button>
+							<button class="btn sm" onclick={() => (confirmDup = false)}>{t('i2_cancel')}</button>
+						{:else}
+							<button class="btn sm no" disabled={busy} onclick={() => (confirmDup = true)}>{t('fu_dup_reject')}</button>
+						{/if}
 					</span>
 				</div>
+				{#if confirmDup}<div class="note" style="margin:0 12px 8px">{t('fu_dup_reject_d')}</div>{/if}
 			{/if}
 			{#if duplicate}
 				<div class="banner" style="margin:10px 12px;padding:7px 10px;border-color:var(--line2);background:var(--raised)">

@@ -272,3 +272,144 @@ async fn only_managers_of_the_household_reach_its_sources() -> R {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn changing_where_a_secret_goes_needs_step_up_and_the_secret_again() -> R {
+    let env = env().await?;
+    let mut c = env.as_user(env.user("alex")).await?;
+    let r = c.post("/api/inboxes", &mailbox()).await?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.json);
+    let id = r.json["id"].as_str().unwrap_or_default().to_string();
+    let path = format!("/api/inboxes/{id}");
+    let cfg = |host: &str, authserv: Option<&str>| {
+        json!({"host": host, "port": 993, "tls": "implicit", "username": "salud.rivera",
+               "trusted_authserv_id": authserv})
+    };
+
+    // a session past its step-up window cannot point the password at another host, nor trust
+    // another receiving server's Authentication-Results
+    let mut stale = env.stale(env.user("alex")).await?;
+    for (config, why) in [
+        (cfg("imap.evil.example", None), "host"),
+        (cfg("imap.rivera.example", Some("evil.example")), "authserv-id"),
+    ] {
+        let r = stale
+            .send(
+                Method::PATCH,
+                &path,
+                Some(&json!({"config": config, "secret": "nueva"})),
+                &[],
+            )
+            .await?;
+        assert_eq!(
+            (r.status, r.code()),
+            (StatusCode::FORBIDDEN, "step_up_required"),
+            "{why}: {}",
+            r.json
+        );
+    }
+    // a label change needs no step-up
+    let r = stale
+        .send(Method::PATCH, &path, Some(&json!({"label": "Buzón"})), &[])
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+
+    // with step-up, a new host still needs the password typed again
+    let r = c
+        .send(
+            Method::PATCH,
+            &path,
+            Some(&json!({"config": cfg("imap.evil.example", None)})),
+            &[],
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.json);
+    let host: Option<String> = sqlx::query_scalar("select config->>'host' from source")
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(host.as_deref(), Some("imap.rivera.example"));
+    // the same host with a new authserv-id keeps the stored password
+    let r = c
+        .send(
+            Method::PATCH,
+            &path,
+            Some(&json!({"config": cfg("imap.rivera.example", Some("mx.rivera.example"))})),
+            &[],
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    let r = c
+        .send(
+            Method::PATCH,
+            &path,
+            Some(&json!({"config": cfg("imap2.rivera.example", None), "secret": "otra-clave"})),
+            &[],
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+
+    // the same for a Paperless token
+    let r = c
+        .post(
+            "/api/inboxes",
+            &json!({"kind": "paperless", "label": "Paperless", "secret": "pl-token",
+                    "config": {"base_url": "https://paperless.rivera.example", "health_tag": "health"}}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.json);
+    let pid = r.json["id"].as_str().unwrap_or_default().to_string();
+    let moved = json!({"config": {"base_url": "https://paperless.evil.example", "health_tag": "health"}});
+    let r = stale
+        .send(Method::PATCH, &format!("/api/inboxes/{pid}"), Some(&moved), &[])
+        .await?;
+    assert_eq!((r.status, r.code()), (StatusCode::FORBIDDEN, "step_up_required"));
+    let r = c
+        .send(Method::PATCH, &format!("/api/inboxes/{pid}"), Some(&moved), &[])
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.json);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_paperless_tag_cannot_route_into_a_profile_the_caller_does_not_manage() -> R {
+    let env = env().await?;
+    // alex owns his profile and guards lucía's, but is only a caregiver of carmen's
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let config = |profile: uuid::Uuid| {
+        json!({"base_url": "https://paperless.rivera.example", "health_tag": "health",
+               "profile_by_tag": {"7": profile}})
+    };
+    let r = alex
+        .post(
+            "/api/inboxes",
+            &json!({"kind": "paperless", "label": "Paperless", "secret": "pl-token",
+                    "config": config(env.profile("carmen"))}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.json);
+    assert_eq!(env.scalar_i64("select count(*) from source").await?, 0);
+
+    let r = alex
+        .post(
+            "/api/inboxes",
+            &json!({"kind": "paperless", "label": "Paperless", "secret": "pl-token",
+                    "config": config(env.profile("lucia"))}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.json);
+    let id = r.json["id"].as_str().unwrap_or_default().to_string();
+    let r = alex
+        .send(
+            Method::PATCH,
+            &format!("/api/inboxes/{id}"),
+            Some(&json!({"config": config(env.profile("carmen"))})),
+            &[],
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.json);
+    let mapped: Option<String> = sqlx::query_scalar("select config->'profile_by_tag'->>'7' from source")
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(mapped, Some(env.profile("lucia").to_string()));
+    Ok(())
+}

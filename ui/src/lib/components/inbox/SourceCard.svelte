@@ -1,5 +1,5 @@
 <script lang="ts">
-	// One inbox on the Inbox screen: its status (OK, Out, Stale, No data, Off), last run, last successful
+	// One inbox on the Inbox screen: its status (OK, Out, Partial, Stale, No data, Off), last run, last successful
 	// sync, the last error, and its actions. Push sources get a token (shown once by the parent).
 	import { listRuns, type InboxSource, type SourceRun } from '#lib/api/inbox';
 	import type { ProfileSummary } from '#lib/api/types';
@@ -32,7 +32,7 @@
 		onchange: () => void;
 	} = $props();
 
-	const PILL = { ok: 'p-ok', out: 'p-out', stale: 'p-stale', nodata: 'p-stale', off: 'p-stale' } as const;
+	const PILL = { ok: 'p-ok', out: 'p-out', partial: 'p-watch', stale: 'p-stale', nodata: 'p-stale', off: 'p-stale' } as const;
 	const status = $derived(sourceStatus(source));
 	const runs = new Loader<SourceRun[]>();
 	let open = $state<'' | 'runs' | 'senders'>('');
@@ -89,6 +89,11 @@
 	</dl>
 	{#if status === 'out' && source.last_error}
 		<div class="err" role="status">⚠ {tp('fu_failed_n', source.consecutive_failures)} <span class="mono">{source.last_error}</span></div>
+	{:else if status === 'partial'}
+		<div class="note" role="status" style="color:var(--watch);overflow-wrap:anywhere">
+			⚠ {tp('fu_partial_n', source.last_run_problems ?? 0)}
+			{#if source.last_run_problem}<span class="mono">{source.last_run_problem}</span>{/if}
+		</div>
 	{:else if status === 'stale'}
 		<div class="note" style="color:var(--stale)">{t('fu_stale_d')}</div>
 	{/if}

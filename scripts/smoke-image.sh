@@ -20,6 +20,9 @@ net=oh-smoke-$$
 db=oh-smoke-db-$$
 app=oh-smoke-app-$$
 worker=oh-smoke-ocr-$$
+# /data is shared by the app and the worker, as the compose volume shares it: the worker reads the
+# blobs the app stored
+vol=oh-smoke-data-$$
 port=${SMOKE_PORT:-18080}
 models=/opt/ownhealth/ocr-models
 case "$variant" in default | ocr) ;; *) echo "variant must be default or ocr, got $variant" >&2; exit 2 ;; esac
@@ -31,6 +34,7 @@ cleanup() {
     docker logs "$worker" 2>&1 | tail -50 || true
   fi
   docker rm -f "$worker" "$app" "$db" >/dev/null 2>&1 || true
+  docker volume rm "$vol" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
   exit "$status"
 }
@@ -69,7 +73,7 @@ for _ in $(seq 1 60); do docker exec "$db" pg_isready -U postgres >/dev/null 2>&
 db_url="postgresql://postgres:ci@$db:5432/postgres"
 ocr_flag=""
 if [ "$variant" = ocr ]; then ocr_flag=1; fi
-docker run -d --name "$app" --network "$net" -p "127.0.0.1:$port:8080" \
+docker run -d --name "$app" --network "$net" -v "$vol:/data" -p "127.0.0.1:$port:8080" \
   -e OWNHEALTH_DATABASE_URL="$db_url" \
   -e OWNHEALTH_SECRET_KEY="$(openssl rand -hex 48)" \
   -e OWNHEALTH_OCR="$ocr_flag" \
@@ -84,7 +88,7 @@ docker exec "$app" ownhealth healthcheck
 
 if [ "$variant" = ocr ]; then
   # the app migrated and seeded; the worker only runs `ocr` jobs
-  docker run -d --name "$worker" --network "$net" \
+  docker run -d --name "$worker" --network "$net" -v "$vol:/data" \
     -e OWNHEALTH_DATABASE_URL="$db_url" \
     -e OWNHEALTH_RUN_MIGRATIONS=0 \
     -e OWNHEALTH_QUEUES=ocr "$img" ownhealth worker >/dev/null

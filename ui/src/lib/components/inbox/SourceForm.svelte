@@ -7,7 +7,7 @@
 	import { tf } from '#lib/components/pages1/util.svelte';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { t } from '#lib/i18n/index.svelte';
-	import { ADDABLE, POLL_KINDS, PROFILE_KINDS, RECIPE, RECIPES_URL, SECRET_OF, TLS_MODES, emptyForm, formOf, sourceBody, type SourceForm } from '#lib/logic/inbox';
+	import { ADDABLE, POLL_KINDS, PROFILE_KINDS, RECIPE, RECIPES_URL, SECRET_OF, TLS_MODES, emptyForm, formOf, portForTls, sourceBody, type SourceForm, type TlsMode } from '#lib/logic/inbox';
 
 	let {
 		profiles,
@@ -83,7 +83,15 @@
 			<label>{t('fu_f_port')}<input class="p2in num" bind:value={f.port} inputmode="numeric" required style="max-width:100px" /></label>
 			<label
 				>{t('fu_f_tls')}
-				<select class="p2in" bind:value={f.tls}>
+				<select
+					class="p2in"
+					value={f.tls}
+					onchange={(e) => {
+						const to = e.currentTarget.value as TlsMode;
+						f.port = portForTls(f.tls, to, f.port);
+						f.tls = to;
+					}}
+				>
 					{#each TLS_MODES as m (m)}<option value={m}>{t('fu_tls_' + m)}</option>{/each}
 				</select>
 			</label>

@@ -32,7 +32,7 @@ export const DEFAULT_POLL_MIN: Partial<Record<Kind, number>> = { email: 1, folde
 export const TLS_MODES = ['implicit', 'starttls', 'none'] as const;
 export type TlsMode = (typeof TLS_MODES)[number];
 
-export type SourceStatus = 'off' | 'out' | 'stale' | 'ok' | 'nodata';
+export type SourceStatus = 'off' | 'out' | 'partial' | 'stale' | 'ok' | 'nodata';
 
 interface HealthLike {
 	enabled: boolean;
@@ -40,16 +40,20 @@ interface HealthLike {
 	last_error_at: string | null;
 	consecutive_failures: number;
 	stale: boolean;
+	/** The newest finished run: ok, partial or error. */
+	last_run_status?: string | null;
 }
 
 /**
  * The pill a source shows. Failing beats stale: a source whose last run failed is Out even if the
- * failure is recent. A source that never ran is No data, never OK.
+ * failure is recent. A last run that brought some items in but not others is Partial (Watch), so a
+ * stuck message or file never hides behind OK. A source that never ran is No data, never OK.
  */
 export function sourceStatus(s: HealthLike): SourceStatus {
 	if (!s.enabled) return 'off';
 	const failing = s.consecutive_failures > 0 && (!s.last_success_at || (s.last_error_at != null && s.last_error_at > s.last_success_at));
 	if (failing) return 'out';
+	if (s.last_run_status === 'partial') return 'partial';
 	if (s.stale) return 'stale';
 	if (!s.last_success_at) return 'nodata';
 	return 'ok';
@@ -73,6 +77,19 @@ export interface SourceForm {
 	tag: string;
 	allow_private: boolean;
 	poll_minutes: string;
+}
+
+const TLS_PORT: Record<TlsMode, string> = { implicit: '993', starttls: '143', none: '143' };
+
+/** The port after the TLS mode changes: the new mode's default when the port still holds the old one's. */
+export function portForTls(from: TlsMode, to: TlsMode, port: string): string {
+	return port.trim() === '' || port.trim() === TLS_PORT[from] ? TLS_PORT[to] : port;
+}
+
+/** Held messages across mailboxes, from each source's server-side count (the list itself is paged). */
+export function heldTotal(sources: { kind: string; quarantined?: number }[] | null | undefined): number | null {
+	if (!sources) return null;
+	return sources.reduce((n, s) => n + (s.kind === 'email' ? (s.quarantined ?? 0) : 0), 0);
 }
 
 export function emptyForm(kind: Kind): SourceForm {

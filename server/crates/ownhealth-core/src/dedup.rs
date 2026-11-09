@@ -390,11 +390,11 @@ pub async fn match_observation(
          o.method, o.effective_at, d.provider_name \
          from observation o left join document d on d.id = o.document_id \
          where o.profile_id = $1 and o.alias_group = $2 and o.status in ('current', 'provisional') \
-           and o.effective_at::date = $3::date order by o.recorded_at",
+           and (o.effective_at at time zone 'UTC')::date = ($3 at time zone 'UTC')::date order by o.recorded_at",
     )
     .bind(obs.profile_id)
     .bind(&obs.alias_group)
-    .bind(obs.effective_at.date_naive())
+    .bind(obs.effective_at)
     .fetch_all(conn)
     .await?;
     for r in &rows {

@@ -2,24 +2,31 @@
 //! (`{"data": {"metrics": [{name, units, data: [{date, qty, source, ...}]}], "workouts": [...]}}`) on a
 //! schedule, typically every 15 minutes with overlapping date ranges. Each push is stored as a blob
 //! first (connectors.md 6.3 rule 1, `source_item` `push:<sha256>`), mapped to wearable metrics, and
-//! written idempotently: the `wearable_sample` key is (profile, metric, device, time), and a bucket the
+//! written idempotently: the `wearable_sample` key is (profile, metric, inbox, time), and a bucket the
 //! app re-sends with a larger value (the hour that was still open at the last push) is refreshed in
 //! place, so overlapping pushes add 0 duplicate samples.
 //!
 //! Dates are `yyyy-MM-dd HH:mm:ss Z`; the offset is kept. Metrics we do not chart yet (workouts,
-//! nutrition, symptoms, ...) are skipped and logged by name only.
+//! nutrition, symptoms, ...) are skipped and logged by name only. Points of a metric we do chart that
+//! cannot be read (a unit we do not know, a point without a value or date) are reported as run problems,
+//! so the run reads `partial` in the Runs panel.
 //!
-//! The device is the sample's `source`. The app merges sources into `"Watch|iPhone"` for summarized
-//! buckets, and the same bucket can arrive with one source at one push and both at the next; the
-//! device is therefore the Watch when any part names a watch, else the iPhone, else the first part, so
-//! one bucket always lands on one device.
+//! Each inbox writes through one `wearable_source` (external id = the inbox id), whatever the sample's
+//! `source` string says. The app merges sources into `"iPhone|Watch"` for summarized buckets, and the
+//! same bucket can arrive as `"iPhone"` at one push (the phone wrote the hour first) and as
+//! `"iPhone|Watch"` at the next (the watch synced later); a key that held the device would store that
+//! bucket twice. `source` is still parsed (`Point::device`) but does not key the sample.
+//!
+//! Day-granularity metrics (resting heart rate) are keyed on the local calendar date at 00:00 UTC, not
+//! on the instant: the app writes a day bucket as local midnight in the phone's current time zone, so
+//! the same day re-sent after the phone changed offset (travel) would otherwise be a second sample.
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::error::{Error, Result};
-use ownhealth_core::sources::{RunOutcome, Source};
+use ownhealth_core::sources::{RunOutcome, RunProblem, Source};
 use ownhealth_ingest_structured::apple_health::parse::parse_time;
 use serde_json::Value;
 use sqlx::PgConnection;
@@ -63,7 +70,16 @@ const SIMPLE: [(&str, Spec); 9] = [
     ),
 ];
 
-/// One mapped point before its device is resolved.
+/// Metrics the app sends one bucket per local day for.
+const DAY_METRICS: [&str; 1] = ["hr_resting"];
+
+/// The key time of a day bucket: its local calendar date (`t` at offset `tz` minutes) at 00:00 UTC.
+fn day_key(t: DateTime<Utc>, tz: i16) -> DateTime<Utc> {
+    let local = (t + Duration::minutes(i64::from(tz))).date_naive();
+    local.and_time(chrono::NaiveTime::MIN).and_utc()
+}
+
+/// One mapped point of a push.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Point {
     pub device: Option<String>,
@@ -82,7 +98,8 @@ pub struct Parsed {
     pub skipped: BTreeMap<String, i64>,
 }
 
-/// The device of one HAE `source` string (see the module docs).
+/// The device named by one HAE `source` string: the Watch when any part names a watch, else the iPhone,
+/// else the first part. Informational only: it does not key the sample (see the module docs).
 pub fn device_of(source: Option<&str>) -> Option<String> {
     let parts: Vec<&str> = source?.split('|').map(str::trim).filter(|p| !p.is_empty()).collect();
     let has = |needle: &str| parts.iter().find(|p| p.to_lowercase().contains(needle)).copied();
@@ -183,6 +200,11 @@ pub fn parse(body: &[u8]) -> Result<Parsed> {
             };
             let t_end = time(item, "end").map(|e| e.0).filter(|e| *e > t);
             let mut point = |metric: &'static str, v: f64| {
+                let (t, t_end) = if DAY_METRICS.contains(&metric) {
+                    (day_key(t, tz), None)
+                } else {
+                    (t, t_end)
+                };
                 out.points.push(Point {
                     device: device.clone(),
                     metric,
@@ -255,44 +277,51 @@ pub async fn import_push(
     let parsed = tokio::task::spawn_blocking(move || parse(&raw))
         .await
         .map_err(|e| Error::Other(anyhow::anyhow!("push parse task failed: {e}")))??;
-    if !parsed.skipped.is_empty() {
-        let names: Vec<&String> = parsed.skipped.keys().collect();
-        tracing::debug!(source = %source.id, skipped = ?names, "health auto export: points not imported");
+    // unknown units and unreadable points of metrics we chart lose data: report them; metrics and
+    // sections we do not chart yet are expected on every push and only logged
+    let mut problems = Vec::new();
+    let mut not_charted = Vec::new();
+    for (key, count) in &parsed.skipped {
+        if key.starts_with("unit:") || key.starts_with("bad_point:") {
+            problems.push(RunProblem {
+                code: "points_skipped".into(),
+                message: format!("{key} x{count}"),
+            });
+        } else {
+            not_charted.push(key.as_str());
+        }
     }
-    let mut devices: BTreeMap<Option<String>, i16> = BTreeMap::new();
-    let mut samples = Vec::with_capacity(parsed.points.len());
-    for p in parsed.points {
-        let id = match devices.get(&p.device) {
-            Some(id) => *id,
-            None => {
-                let id = store::device_source(
-                    &mut *conn,
-                    profile_id,
-                    PROVIDER,
-                    p.device.as_deref(),
-                    None,
-                    Some(source.id),
-                )
-                .await?;
-                devices.insert(p.device.clone(), id);
-                id
-            }
-        };
-        samples.push(Sample {
+    if !not_charted.is_empty() {
+        tracing::debug!(source = %source.id, skipped = ?not_charted, "health auto export: metrics not imported");
+    }
+    let wsid = store::device_source(
+        &mut *conn,
+        profile_id,
+        PROVIDER,
+        None,
+        Some(&source.id.to_string()),
+        Some(source.id),
+    )
+    .await?;
+    let samples: Vec<Sample> = parsed
+        .points
+        .into_iter()
+        .map(|p| Sample {
             metric: p.metric,
             t: p.t,
             t_end: p.t_end,
             v: p.v,
             tz: Some(p.tz),
-            source: id,
-        });
-    }
+            source: wsid,
+        })
+        .collect();
     let w = store::write(&mut *conn, profile_id, None, samples, Conflict::Refresh).await?;
     let n = |x: i64| i32::try_from(x).unwrap_or(i32::MAX);
     Ok(RunOutcome {
         seen: n(w.seen),
         new: n(w.new),
         duplicate: n(w.duplicate()),
+        problems,
         ..RunOutcome::default()
     })
 }

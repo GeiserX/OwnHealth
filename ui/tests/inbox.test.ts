@@ -8,8 +8,10 @@ import {
 	consentProblem,
 	emptyForm,
 	formOf,
+	heldTotal,
 	nearDuplicateOf,
 	paperlessLink,
+	portForTls,
 	rowGrounding,
 	senderPattern,
 	sourceBody,
@@ -172,4 +174,37 @@ test('the Paperless link is shown only for an http(s) source_link of kind paperl
 	assert.equal(paperlessLink({ source_link: { kind: 'email', url } }), null);
 	assert.equal(paperlessLink({}), null);
 	assert.equal(paperlessLink(null), null);
+});
+
+test('source status: a partial last run shows Partial, below Out and above Stale', () => {
+	assert.equal(sourceStatus(h({ last_run_status: 'partial' })), 'partial');
+	assert.equal(sourceStatus(h({ last_run_status: 'partial', stale: true })), 'partial');
+	assert.equal(sourceStatus(h({ last_run_status: 'ok' })), 'ok');
+	assert.equal(
+		sourceStatus(h({ last_run_status: 'partial', consecutive_failures: 1, last_error_at: '2026-11-07T07:00:00Z' })),
+		'out'
+	);
+	assert.equal(sourceStatus(h({ last_run_status: 'partial', enabled: false })), 'off');
+});
+
+test('changing the TLS mode moves a default port, never one the person typed', () => {
+	assert.equal(portForTls('implicit', 'starttls', '993'), '143');
+	assert.equal(portForTls('starttls', 'implicit', '143'), '993');
+	assert.equal(portForTls('implicit', 'none', '993'), '143');
+	assert.equal(portForTls('starttls', 'none', '143'), '143');
+	assert.equal(portForTls('implicit', 'starttls', '1993'), '1993');
+	assert.equal(portForTls('implicit', 'starttls', ''), '143');
+});
+
+test('held mail is counted from the server counts, not the first page of the list', () => {
+	assert.equal(heldTotal(null), null);
+	assert.equal(
+		heldTotal([
+			{ kind: 'email', quarantined: 140 },
+			{ kind: 'email', quarantined: 3 },
+			{ kind: 'folder' },
+			{ kind: 'email' }
+		]),
+		143
+	);
 });

@@ -10,7 +10,7 @@
 //! | `GET /inboxes/{id}/runs?limit=` | recent runs and their errors |
 //! | `POST /inboxes/{id}/token` | a new push token, shown once (step-up) |
 //! | `POST /inboxes/{id}/sync` | poll now |
-//! | `GET /inboxes/health` | `[{id, kind, label, profile_id, enabled, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, stale}]` |
+//! | `GET /inboxes/health` | `[{id, kind, label, profile_id, enabled, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, stale, last_run_status, last_run_problems, last_run_problem}]` |
 //! | `GET /inboxes/{id}/health` | one source's row; a session, or that source's own `oh_ing_` token |
 //!
 //! Both health routes take `?format=prometheus` and answer in the Prometheus text format, so a
@@ -99,6 +99,39 @@ fn check_config(kind: &str, config: &Value) -> Result<(), Error> {
     }
 }
 
+/// The config fields that decide where a kind sends its stored secret. Changing one without typing the
+/// secret again would hand the sealed password or token to a host the person never gave it to.
+fn destination(kind: &str, config: &Value) -> Vec<Value> {
+    let field = |k: &str| config.get(k).cloned().unwrap_or(Value::Null);
+    match kind {
+        "email" => ["host", "port", "tls", "ca_file", "username"].map(field).to_vec(),
+        "paperless" | "nightscout" => {
+            let url = config
+                .get("base_url")
+                .filter(|v| !v.is_null())
+                .or_else(|| config.get("url"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let private = config.get("allow_private").and_then(Value::as_bool).unwrap_or(false);
+            vec![url, Value::Bool(private)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Paperless `config.profile_by_tag`: the profiles a tag routes documents into.
+fn tag_profiles(config: &Value) -> Vec<Uuid> {
+    config
+        .get("profile_by_tag")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.values()
+                .filter_map(|v| v.as_str().and_then(|s| Uuid::parse_str(s).ok()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// A field that may be absent (`None`), null (`Some(None)`) or set.
 fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
     Option::<T>::deserialize(d).map(Some)
@@ -163,13 +196,17 @@ async fn audit(conn: &mut PgConnection, p: &Principal, action: &str, s: &Source)
 }
 
 /// A source as the Inbox screen reads it: never the cursor, the secret id or the token hash.
-fn source_out(s: &Source, stale: bool, quarantined: Option<i64>) -> Value {
+fn source_out(s: &Source, h: Option<&SourceHealth>, quarantined: Option<i64>) -> Value {
+    let stale = h.is_some_and(|h| h.stale);
     let mut v = json!({
         "id": s.id, "kind": s.kind, "label": s.label, "profile_id": s.profile_id, "config": s.config,
         "enabled": s.enabled, "poll_seconds": s.poll_seconds, "token_prefix": s.token_prefix,
         "has_secret": s.secret_id.is_some(), "last_run_at": s.last_run_at,
         "last_success_at": s.last_success_at, "last_error_at": s.last_error_at, "last_error": s.last_error,
         "consecutive_failures": s.consecutive_failures, "stale": stale, "created_at": s.created_at,
+        "last_run_status": h.and_then(|h| h.last_run_status.as_deref()),
+        "last_run_problems": h.map_or(0, |h| h.last_run_problems),
+        "last_run_problem": h.and_then(|h| h.last_run_problem.as_deref()),
     });
     if let Some(n) = quarantined {
         v["quarantined"] = json!(n);
@@ -179,10 +216,10 @@ fn source_out(s: &Source, stale: bool, quarantined: Option<i64>) -> Value {
 
 /// The source with its health and, for a mailbox, its held messages.
 async fn out_one(conn: &mut PgConnection, s: &Source) -> R<Value> {
-    let stale = sources::source_health(conn, s.household_id)
+    let health = sources::source_health(conn, s.household_id)
         .await?
         .into_iter()
-        .any(|h| h.id == s.id && h.stale);
+        .find(|h| h.id == s.id);
     let quarantined = if s.kind == "email" {
         Some(
             sqlx::query_scalar("select count(*) from quarantine_item where source_id = $1 and status = 'held'")
@@ -193,7 +230,7 @@ async fn out_one(conn: &mut PgConnection, s: &Source) -> R<Value> {
     } else {
         None
     };
-    Ok(source_out(s, stale, quarantined))
+    Ok(source_out(s, health.as_ref(), quarantined))
 }
 
 /// The sources this person may see (the same rule as the health routes).
@@ -203,7 +240,7 @@ async fn list(State(rt): State<Runtime>, caller: Caller) -> R {
     let Some(household) = caller.0.household_id else {
         return Err(ApiError::unauthenticated().into());
     };
-    let stale: HashMap<Uuid, bool> = health.iter().map(|h| (h.id, h.stale)).collect();
+    let health: HashMap<Uuid, &SourceHealth> = health.iter().map(|h| (h.id, h)).collect();
     let held: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
         "select q.source_id, count(*) from quarantine_item q join source s on s.id = q.source_id          where s.household_id = $1 and q.status = 'held' group by q.source_id",
     )
@@ -216,9 +253,9 @@ async fn list(State(rt): State<Runtime>, caller: Caller) -> R {
         .await?
         .iter()
         .filter_map(|s| {
-            let stale = *stale.get(&s.id)?;
+            let h = *health.get(&s.id)?;
             let q = (s.kind == "email").then(|| held.get(&s.id).copied().unwrap_or(0));
-            Some(source_out(s, stale, q))
+            Some(source_out(s, Some(h), q))
         })
         .collect();
     ok(Value::Array(out))
@@ -277,6 +314,11 @@ async fn create(State(rt): State<Runtime>, Caller(p): Caller, Body(b): Body<Sour
     let household = manager(&mut tx, &p).await?;
     if let Some(profile) = b.profile_id {
         manages_profile(&mut tx, &p, profile).await?;
+    }
+    if b.kind == "paperless" {
+        for profile in tag_profiles(&config) {
+            manages_profile(&mut tx, &p, profile).await?;
+        }
     }
     let secret_id = match (purpose, b.secret.filter(|s| !s.is_empty())) {
         (Some(purpose), Some(value)) => {
@@ -340,6 +382,22 @@ async fn patch(State(rt): State<Runtime>, Caller(p): Caller, Path(id): Path<Stri
     let label = b.label.as_deref().map(check_label).transpose()?;
     if let Some(c) = &b.config {
         check_config(&s.kind, c)?;
+        // the config of a kind with a secret holds where it goes and, for mail, which
+        // Authentication-Results count: widening either is a step-up action, like a sender rule
+        if secret_purpose(&s.kind).is_some() {
+            sessions::require_step_up(&mut tx, &p, sessions::STEP_UP_SECONDS).await?;
+            let fresh_secret = b.secret.as_deref().is_some_and(|v| !v.is_empty());
+            if destination(&s.kind, c) != destination(&s.kind, &s.config) && !fresh_secret {
+                return Err(
+                    Error::Invalid("the server address changed: enter the password or token again".into()).into(),
+                );
+            }
+        }
+        if s.kind == "paperless" {
+            for profile in tag_profiles(c) {
+                manages_profile(&mut tx, &p, profile).await?;
+            }
+        }
     }
     if let Some(profile) = b.profile_id {
         match profile {
@@ -552,7 +610,7 @@ fn answer<T: serde::Serialize>(json: &T, rows: &[SourceHealth], q: &HealthQuery)
 /// the profile or the last error, which are the user's words (architecture.md section 15).
 pub fn prometheus(rows: &[SourceHealth]) -> String {
     type Metric = (&'static str, &'static str, fn(&SourceHealth) -> f64);
-    let metrics: [Metric; 5] = [
+    let metrics: [Metric; 6] = [
         ("ownhealth_source_enabled", "1 when the source is switched on.", |h| {
             f64::from(u8::from(h.enabled))
         }),
@@ -565,6 +623,11 @@ pub fn prometheus(rows: &[SourceHealth]) -> String {
             "ownhealth_source_consecutive_failures",
             "Failed runs since the last successful one.",
             |h| f64::from(h.consecutive_failures),
+        ),
+        (
+            "ownhealth_source_last_run_ok",
+            "1 when the newest finished run brought everything in (or no run has finished yet); 0 when it was partial or failed.",
+            |h| f64::from(u8::from(h.last_run_status.as_deref().is_none_or(|s| s == "ok"))),
         ),
         (
             "ownhealth_source_last_success_timestamp_seconds",
@@ -621,6 +684,9 @@ mod tests {
             last_error: Some("LOGIN failed for alex.rivera".into()),
             consecutive_failures: 2,
             stale: true,
+            last_run_status: Some("partial".into()),
+            last_run_problems: 1,
+            last_run_problem: Some("move_failed: could not move scan.pdf".into()),
         }
     }
 
@@ -630,12 +696,16 @@ mod tests {
         let labels = r#"{source="00000000-0000-0000-0000-000000000000",kind="email"}"#;
         assert!(text.contains(&format!("ownhealth_source_stale{labels} 1\n")), "{text}");
         assert!(text.contains(&format!("ownhealth_source_consecutive_failures{labels} 2\n")));
+        assert!(
+            text.contains(&format!("ownhealth_source_last_run_ok{labels} 0\n")),
+            "{text}"
+        );
         assert!(text.contains(&format!("ownhealth_source_last_success_timestamp_seconds{labels} 0\n")));
         assert!(text.contains(&format!(
             "ownhealth_source_last_run_timestamp_seconds{labels} 1762700000\n"
         )));
         assert!(text.contains("# TYPE ownhealth_source_enabled gauge\n"));
-        for private in ["Correo", "alex", "ffffffff"] {
+        for private in ["Correo", "alex", "ffffffff", "scan.pdf"] {
             assert!(!text.contains(private), "{private} leaked: {text}");
         }
         // every sample line is `name{labels} value`

@@ -2,8 +2,8 @@
 //! Paperless original (lane B), a Nightscout site (lane D). connectors.md 6.3 rule 7 and
 //! security-privacy.md 16: every name is resolved first and every address must be public, unless the
 //! person ticked "on my network" for that host (`allow_private`); the connection then goes to exactly
-//! the addresses we checked (no second lookup, so no DNS rebinding), redirects are not followed, and
-//! the body is capped in bytes and time.
+//! the addresses we checked (no second lookup, so no DNS rebinding, and no proxy from the environment),
+//! redirects are not followed, and the body is capped in bytes and time.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
@@ -167,6 +167,8 @@ pub async fn get(url: &str, egress: &Egress, headers: &[(&str, &str)]) -> Result
     };
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        // a proxy would look the name up again and connect past the addresses we checked
+        .no_proxy()
         .timeout(egress.timeout)
         .resolve_to_addrs(&host, &addrs)
         .build()
@@ -286,6 +288,53 @@ mod tests {
         assert_eq!(ok.content_type.as_deref(), Some("application/json"));
         assert_eq!(get(&url, &home, &[]).await, Err(NetError::TooLarge(1000)));
         assert_eq!(get(&url, &home, &[]).await?.status, 302);
+        Ok(())
+    }
+
+    /// A proxy from the environment would resolve the name again, past our checks (DNS rebinding,
+    /// private addresses). The proxy variables are process-wide, so the check runs in a child copy of
+    /// this test binary started with every proxy pointing at a closed port.
+    #[tokio::test]
+    async fn the_proxy_environment_is_ignored() -> anyhow::Result<()> {
+        const CHILD: &str = "OWNHEALTH_NET_PROXY_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let port = listener.local_addr()?.port();
+            tokio::spawn(async move {
+                if let Ok((mut s, _)) = listener.accept().await {
+                    let mut buf = [0u8; 2048];
+                    let _ = s.read(&mut buf).await;
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\ndirect").await;
+                }
+            });
+            let ok = get(&format!("http://127.0.0.1:{port}/"), &Egress::home_service(true), &[]).await?;
+            assert_eq!(ok.body, b"direct");
+            return Ok(());
+        }
+        let name = "net::tests::the_proxy_environment_is_ignored";
+        let mut cmd = std::process::Command::new(std::env::current_exe()?);
+        cmd.args(["--exact", name, "--test-threads=1"]).env(CHILD, "1");
+        for k in ["NO_PROXY", "no_proxy"] {
+            cmd.env_remove(k);
+        }
+        for k in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            cmd.env(k, "http://127.0.0.1:1");
+        }
+        let out = cmd.output()?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         Ok(())
     }
 }

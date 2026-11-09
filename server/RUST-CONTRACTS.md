@@ -558,8 +558,11 @@ they finished; `grep -rn NotImplemented server/crates` is empty at the end of th
 - Paperless (ingestion.md 3.1): no `ownhealth-imported` tag written back (it needs a token that may
   write; the recipe recommends a read-only one) and no pull of the archived PDF of a scan (local OCR
   or the agent reads the original).
-- Observation-level dedup (level 3) is import.pdf's same-analyte, same-day, same-value match; the
-  `core::dedup::match_observation` and `observation_link` path is not wired into import yet.
+- Observation-level dedup (level 3) in import.pdf is `core::dedup::match_observation` (analyte,
+  specimen time, value, comparator, method, lab when both are known): the same fact gets an
+  `observation_link` row, a date printed without a time goes to review (`collection_time_unknown`).
+  The lab is the vendor template's `provider_name`, so two documents without a template count as the
+  same lab. The structured importers (FHIR, Apple Health) keep their own duplicate match.
 - MCP (mcp.md 6.1, 2.2): `list_pending_documents` titles a document by provider, kind and date, never
   its file name (security-privacy.md 4.2 #9); a tool outside the token's scopes answers the 0.2.0
   tool error `scope_missing`, not an HTTP 403 `insufficient_scope` challenge; the built-in

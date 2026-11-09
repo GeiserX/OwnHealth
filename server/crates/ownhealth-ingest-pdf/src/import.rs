@@ -10,12 +10,13 @@ use ownhealth_core::acceptance::{Check, DEFAULT_THRESHOLD, failed_reasons};
 use ownhealth_core::arrive::{enqueue_ocr, set_ocr_state};
 use ownhealth_core::blobs::{BlobStore, sha256_hex_to_bytes};
 use ownhealth_core::dedup::{
-    NearDuplicate, find_near_duplicate, flag_near_duplicate, simhash64, store_page_fingerprint,
+    NearDuplicate, ObservationMatch, find_near_duplicate, flag_near_duplicate, link_observation, match_observation,
+    simhash64, store_page_fingerprint,
 };
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::jobs::{EnqueueOptions, enqueue};
 use ownhealth_core::observations::{ObservationIn, confirm_observation, supersede_observation};
-use ownhealth_core::provenance::{SrcIn, SrcRef, region_label};
+use ownhealth_core::provenance::{SrcIn, SrcRef, create_src, region_label};
 use ownhealth_core::review::{
     CandidateIn, ReviewItem, ReviewItemIn, create_extraction_run, create_item, dismiss, finish_extraction_run,
     submit_candidate,
@@ -354,6 +355,8 @@ async fn import_inner(
     let (effective_at, date_check) = effective_at(&ext, &profile);
     let report_key = report_key(&ext, sample_hash.as_deref(), document_id);
     let provider = ext.template.as_ref().map(|t| t.provider_name.clone());
+    // a collection date printed without a time reads as midnight: level 3 cannot tell two draws apart
+    let time_known = ext.cls.collected_at.is_some_and(|t| t.time() != chrono::NaiveTime::MIN);
     let pages: HashMap<i32, &PageModel> = ext.pdf.pages.iter().map(|p| (p.page_no, p)).collect();
     let normalize = normalizer();
 
@@ -447,14 +450,46 @@ async fn import_inner(
             }
             continue;
         }
-        let dup = duplicate(&mut *conn, &cand.observation, document_id).await?;
-        if let Some(d) = &dup {
-            if same_value(d, &cand.observation) {
-                insert_candidate(&mut *conn, run_id, &cand, "confirmed", Some(d.id)).await?;
+        // dedup level 3: the same fact (analyte, specimen time, value, lab) already stored is linked,
+        // not stored twice; a maybe-same fact goes to a person
+        match match_observation(&mut *conn, &cand.observation, provider.as_deref(), time_known).await? {
+            ObservationMatch::Same { observation_id } => {
+                let row_id = insert_candidate(&mut *conn, run_id, &cand, "confirmed", Some(observation_id)).await?;
+                let src = SrcIn {
+                    profile_id: Some(cand.observation.profile_id),
+                    document_id: Some(document_id),
+                    page_no: Some(cand.page_no),
+                    bbox: Some(cand.bbox),
+                    label: Some(
+                        region_label(
+                            &mut *conn,
+                            document_id,
+                            cand.page_no,
+                            Some(&cand.observation.effective_at),
+                        )
+                        .await?,
+                    ),
+                    extraction_run_id: Some(run_id),
+                    candidate_row_id: Some(row_id),
+                    ..SrcIn::new("document_region")
+                };
+                let src_id = create_src(&mut *conn, &src).await?;
+                link_observation(&mut *conn, observation_id, &src_id, Some(document_id)).await?;
                 summary.skipped += 1;
                 bump(&mut summary, "duplicate");
                 continue;
             }
+            ObservationMatch::Review { reason, .. } => cand.checks.push(Check {
+                name: "duplicate".into(),
+                ok: false,
+                detail: Some("maybe the same result as one already stored".into()),
+                reason: Some(reason),
+            }),
+            ObservationMatch::New => {}
+        }
+        // a different value for the same analyte and day, already stored: a person decides
+        let dup = duplicate(&mut *conn, &cand.observation, document_id).await?;
+        if let Some(d) = dup.as_ref().filter(|d| !same_value(d, &cand.observation)) {
             cand.checks.push(Check {
                 name: "conflict".into(),
                 ok: false,
@@ -1224,11 +1259,12 @@ async fn duplicate(conn: &mut PgConnection, obs: &ObservationIn, document_id: Uu
     let row = sqlx::query(
         "select id, alias_group, status, value_num, unit_ucum, printed_value, document_id from observation \
          where profile_id = $1 and alias_group = $2 and status in ('current', 'provisional') \
-         and effective_at::date = $3 and document_id is distinct from $4 order by recorded_at desc limit 1",
+         and (effective_at at time zone 'UTC')::date = ($3 at time zone 'UTC')::date \
+         and document_id is distinct from $4 order by recorded_at desc limit 1",
     )
     .bind(obs.profile_id)
     .bind(&obs.alias_group)
-    .bind(obs.effective_at.date_naive())
+    .bind(obs.effective_at)
     .bind(document_id)
     .fetch_optional(conn)
     .await?;

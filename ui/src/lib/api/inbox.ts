@@ -28,6 +28,10 @@ export interface InboxSource {
 	last_error: string | null;
 	consecutive_failures: number;
 	stale: boolean;
+	/** The newest finished run (ok, partial, error), its problem count and first problem (`code: message`). */
+	last_run_status?: 'ok' | 'partial' | 'error' | null;
+	last_run_problems?: number;
+	last_run_problem?: string | null;
 	/** Messages of this source waiting in quarantine (email only). */
 	quarantined?: number;
 	created_at?: IsoDateTime;
@@ -99,7 +103,7 @@ export const syncInbox = (id: Uuid) => post<{ job_id: number | null }>(`/inboxes
 export const listQuarantine = (status: 'held' | 'released' | 'deleted' = 'held') => list<QuarantineOut>('/inboxes/quarantine', { status });
 /** Release a held message into a profile; `allow_sender` also adds the sender to the allowlist. Step-up. */
 export const releaseQuarantined = (id: Uuid, body: { profile_id: Uuid; allow_sender: boolean }) =>
-	post<{ document_ids: Uuid[] }>(`/inboxes/quarantine/${id}/release`, body);
+	post<{ document_ids: Uuid[]; problems?: { code: string; message: string }[] }>(`/inboxes/quarantine/${id}/release`, body);
 export const deleteQuarantined = (id: Uuid) => del<{ ok: true }>(`/inboxes/quarantine/${id}`);
 
 export const listSenders = (sourceId: Uuid) => list<SenderRuleOut>(`/inboxes/${sourceId}/senders`);

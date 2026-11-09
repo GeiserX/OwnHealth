@@ -10,6 +10,7 @@ pub mod context;
 pub mod edge;
 pub mod envelope;
 pub mod gate;
+pub mod grounding;
 pub mod limits;
 pub mod oauth;
 pub mod prompts;

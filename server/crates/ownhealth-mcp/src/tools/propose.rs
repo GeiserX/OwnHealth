@@ -650,7 +650,16 @@ async fn observations(call: &mut Call<'_>, p: &ObservationsPayload) -> ToolResul
                 let mut sp = Connection::begin(&mut *call.conn).await?;
                 match call
                     .svc
-                    .ground_value(&mut sp, &blobs, d.id, page, &row.name, &row.value.text())
+                    .ground_value(
+                        &mut sp,
+                        &blobs,
+                        d.id,
+                        page,
+                        &row.name,
+                        &row.value.text(),
+                        row.unit.as_deref(),
+                        row.bbox,
+                    )
                     .await
                 {
                     Ok(b) => {
