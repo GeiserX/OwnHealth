@@ -18,11 +18,12 @@ engine = ["dep:oar-ocr"]
 [dependencies]
 ownhealth-core.workspace = true
 ownhealth-ingest-pdf.workspace = true
-ownhealth-normalize.workspace = true
 image.workspace = true
+hex.workspace = true
 oar-ocr = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -30,5 +31,23 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# the lab-slip generator and stand-in normalizer of ownhealth-ingest-pdf's tests (`#[path]`), and theirs
 ownhealth-core = { workspace = true, features = ["testing"] }
+ownhealth-normalize.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
+flate2.workspace = true
+futures.workspace = true
+pdfium-render.workspace = true
+regex.workspace = true
+rust_decimal.workspace = true
+tempfile.workspace = true
+unicode-normalization.workspace = true
+
+[[example]]
+name = "bench"
+required-features = ["engine"]
+
+[[test]]
+name = "exit_criteria"
+required-features = ["engine"]

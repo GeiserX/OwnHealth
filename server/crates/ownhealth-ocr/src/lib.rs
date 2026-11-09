@@ -15,13 +15,17 @@
 //! | `route` | which pages need OCR (no text layer, scans, photos, garbage glyphs) |
 //! | `job` | `ocr.document`: render, OCR, store the word layer (`document_page.word_layer = 'ocr'`), extract, route rows |
 //! | `grounding` | is an extracted value on the page's word layer (text layer or OCR)? |
-//! | `bench` | pages/s and row F1 per engine on the scanned eval set |
+//! | `bench` | pages/s and row F1 per engine on the scanned eval set (`docs/ocr-benchmark.md`) |
+//! | `demo` | the demo's one scanned page waiting for OCR |
 
 pub mod bench;
+pub mod demo;
 pub mod engine;
 pub mod grounding;
 pub mod job;
 pub mod route;
+
+pub use job::{Reader, ocr_document, use_reader};
 
 use serde::{Deserialize, Serialize};
 
@@ -70,4 +74,5 @@ pub enum OcrError {
 /// Register `ocr.document`. Called by `ownhealth::register_lanes`.
 pub fn register() {
     job::register();
+    ownhealth_core::demo::register_demo_hook("ocr", 1030, |conn, ctx| Box::pin(demo::seed_demo(conn, ctx)));
 }
