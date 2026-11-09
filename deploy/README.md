@@ -4,7 +4,7 @@ This folder holds the homelab setup and the backup recipe. For a first look on o
 
 | File | What it is |
 |---|---|
-| [compose.homelab.yaml](compose.homelab.yaml) | The app, Postgres 17 and Caddy with HTTPS. Secrets are files, the app container is read-only |
+| [compose.homelab.yaml](compose.homelab.yaml) | The app, Postgres 17 and Caddy with HTTPS, and the `ocr` worker when that profile is on. Secrets are files, the containers are read-only |
 | [db/app-role.sh](db/app-role.sh) | Gives the app its own database role, which owns no table and cannot rewrite the audit log |
 | [Caddyfile](Caddyfile) | HTTPS for `OWNHEALTH_DOMAIN`, open to the LAN and a Tailscale tailnet only |
 | [env.homelab.example](env.homelab.example) | The `.env` for the homelab compose |
@@ -26,11 +26,13 @@ cp src/deploy/env.homelab.example .env        # set OWNHEALTH_DOMAIN
 cp src/deploy/restic.env.example restic.env   # set RESTIC_REPOSITORY, and the S3 keys if it needs them
 mkdir -p deploy && cp -r src/deploy/restic src/deploy/db deploy/
 
+mkdir -p inbox && sudo chown 10001:10001 inbox   # the watched folder (docs/recipes/scanner-to-folder.md)
 mkdir -m 700 secrets
 openssl rand -base64 32 | tr -d '\n' > secrets/db_password
 openssl rand -base64 32 | tr -d '\n' > secrets/app_db_password
 openssl rand -base64 48 | tr -d '\n' > secrets/secret_key
 openssl rand -base64 32 | tr -d '\n' > secrets/restic_password
+openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key     # seals inbox passwords and tokens
 chmod 644 secrets/*                           # the containers run as their own users; the folder stays 700
 
 docker compose up -d
@@ -43,11 +45,69 @@ Open `https://<OWNHEALTH_DOMAIN>` and create the first account with a passkey. W
 
 **Store the restic password in your password manager now.** The backup is encrypted with it and it is not inside the backup. Without it, the backup cannot be read.
 
+**Store `secrets/secrets_key` there too.** It encrypts the passwords and tokens OwnHealth keeps for its inboxes (an IMAP password, a Paperless or Nightscout token, PDF passwords). The backup holds them only in encrypted form. Restored with another key, those inboxes stop until you enter their secrets again.
+
 **HTTPS.** Caddy gets a certificate on its own when `OWNHEALTH_DOMAIN` is a public DNS name. For a name only your LAN knows, put `tls internal` in the site block of the Caddyfile and trust Caddy's root certificate on your devices, or use a Caddy build with your DNS provider's challenge plugin. Passkeys need HTTPS on a real name, so plain HTTP on an IP address does not work past the first look.
 
-**Who can connect.** The Caddyfile answers 403 to every address outside the private ranges and the Tailscale range `100.64.0.0/10`. Keep it that way unless you mean to put health data on the public internet. The check works only if Caddy sees the real client address. Rootless Docker, and Docker's userland proxy for IPv6 clients when the compose network has no IPv6, hand Caddy a private gateway address instead, so every client passes. On such a host, or one with a public address, also close ports 80 and 443 (TCP and UDP) to the internet in the host firewall or the router, and check from outside that the name does not answer.
+**Who can connect.** The Caddyfile answers 403 to every address outside the private ranges and the Tailscale range `100.64.0.0/10`. Keep it that way unless you mean to put health data on the public internet. The check works only if Caddy sees the real client address. Rootless Docker, and Docker's userland proxy for IPv6 clients when the compose network has no IPv6, hand Caddy a private gateway address instead, so every client passes. On such a host, or one with a public address, also close ports 80 and 443 (TCP and UDP) to the internet in the host firewall or the router, and check from outside that the name does not answer. The claude.ai connector is the one case that needs a public endpoint: [its recipe](../docs/recipes/claude-connector.md) opens only the four paths it uses and keeps the rest behind a login.
 
 **Your own reverse proxy.** If one already runs on the host, drop the `caddy` service, give `app` a port such as `127.0.0.1:8080:8080`, and point your proxy at it. Set `OWNHEALTH_BASE_URL` to the HTTPS address people open.
+
+## Inboxes and OCR
+
+Since 0.3.0, documents and device data can arrive without an upload: a mailbox, a watched folder, Paperless-ngx, an iOS Shortcut, Health Auto Export, Nightscout. You add each one in the app, under **Inbox**. The setup for each is in [docs/recipes](../docs/recipes/README.md).
+
+**The watched folder** is `./inbox` next to `compose.yaml`, mounted as `/inbox`. A subfolder per profile slug (`inbox/alex/`) sends files to that person. The app runs as user 10001 and moves imported files to `inbox/.done/`, so the folder must be writable by that user.
+
+**OCR for scans and photos** is the `ocr` profile. Add two lines to `.env`:
+
+```sh
+COMPOSE_PROFILES=ocr   # starts the `ocr` worker, from drumsergio/ownhealth:<version>-ocr
+OWNHEALTH_OCR=1        # the app sends pages without a text layer to it
+```
+
+then `docker compose up -d`. The worker is the same program from the image variant that carries the OCR engine (PaddleOCR PP-OCRv5 on ONNX Runtime) and its models, about 15 MB of models on top of the default image. It serves no HTTP and only runs jobs on the `ocr` queue, on the CPU. Turn both lines on together. With only `OWNHEALTH_OCR=1`, scans queue for a worker that never starts. Without the profile, scans wait as pending documents for your own agent ([agent-assisted extraction](../docs/agent-extraction.md)) or for you.
+
+## Monitoring the inboxes
+
+`GET /api/inboxes/health` lists every inbox you can see with its last run, its last successful sync, its last error, the failed runs in a row, and `stale`: switched on, polled, and no success for three poll intervals. Add `?format=prometheus` for the Prometheus text format. Labels carry the source id and kind only, never names or error text:
+
+```text
+ownhealth_source_enabled{source="…",kind="email"} 1
+ownhealth_source_stale{source="…",kind="email"} 0
+ownhealth_source_consecutive_failures{source="…",kind="email"} 0
+ownhealth_source_last_success_timestamp_seconds{source="…",kind="email"} 1762700112.5
+ownhealth_source_last_run_timestamp_seconds{source="…",kind="email"} 1762700112.5
+```
+
+A monitor has no browser session, so it reads one inbox at a time with that inbox's own push token (`oh_ing_...`, created in **Inbox**): `GET /api/inboxes/<id>/health?format=prometheus` with `Authorization: Bearer oh_ing_...`. The token sees its own inbox and nothing else. For a push inbox (Paperless, Shortcut, Health Auto Export) it is the token the sender already uses. For a polled one (mailbox, folder, Nightscout), create a token just for the monitor.
+
+A Prometheus job per inbox:
+
+```yaml
+scrape_configs:
+  - job_name: ownhealth-mailbox
+    scheme: https
+    metrics_path: /api/inboxes/<source id>/health
+    params: { format: [prometheus] }
+    authorization: { credentials_file: /etc/prometheus/ownhealth-mailbox.token }
+    static_configs: [{ targets: ["health.example.lan"] }]
+```
+
+Alert rules that cover both kinds of inbox:
+
+```yaml
+groups:
+  - name: ownhealth-inboxes
+    rules:
+      - alert: OwnHealthInboxStale        # a polled inbox stopped syncing
+        expr: ownhealth_source_stale == 1
+        for: 30m
+      - alert: OwnHealthPushSilent        # nothing pushed for 6 hours
+        expr: ownhealth_source_enabled == 1 and time() - ownhealth_source_last_success_timestamp_seconds{kind=~"health_auto_export|paperless|shortcut"} > 6 * 3600
+```
+
+A push inbox has no schedule, so OwnHealth never marks it stale; the second rule alerts on silence instead. Pick the hours to match how often the sender pushes.
 
 ## Backups
 
@@ -117,7 +177,7 @@ Restore with the OwnHealth version that made the backup (`app_version` in the ma
 
 ## Upgrades
 
-Change the image tag in `compose.yaml` to the new version, then:
+Change the image tag in `compose.yaml` to the new version (and the `ocr` service's `<version>-ocr` tag with it), then:
 
 ```sh
 ./deploy/restic/backup.sh         # a fresh backup before every upgrade
@@ -125,3 +185,12 @@ docker compose pull && docker compose up -d
 ```
 
 Migrations are forward-only and run at start, in the `admin` service, before the app comes up. To go back to an older version, restore the backup you took before the upgrade.
+
+**To 0.3.0.** Take the new `compose.homelab.yaml` (it adds the `ocr` worker, the inbox folder and the `secrets_key` secret), then before `docker compose up -d`:
+
+```sh
+openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key && chmod 644 secrets/secrets_key
+mkdir -p inbox && sudo chown 10001:10001 inbox
+```
+
+Compose refuses to start without the secret file. Keep a copy of it with the restic password.

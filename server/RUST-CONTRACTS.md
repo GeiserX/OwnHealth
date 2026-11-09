@@ -505,8 +505,8 @@ tools::page::get_document_page(&mut Call) -> ToolResult<Answer>   // words with 
 context::agent_context(conn, token_id, at) -> Result<AgentContext>   // documents read in WINDOW_SECONDS before a proposal
 ```
 
-The two new tools are not in the tool list yet, so 0.2.0 clients and the contract goldens see the same
-eight tools; lane F adds them and their goldens together.
+Lane F added the two tools to the tool list together with their goldens (ten tools for a token with
+every scope); the eight 0.2.0 entries are unchanged.
 
 ### 10.6 Registration
 
@@ -551,3 +551,21 @@ they finished; `grep -rn NotImplemented server/crates` is empty at the end of th
   `/api/ingest/upload` (ingestion.md); the upload route stays as it is.
 - The source registry is `/api/inboxes`, not `/api/sources` (taken by provenance).
 - Remote LLM extraction is not a feature (ingestion.md lists it as an option); the agent path is MCP only.
+- Email (ingestion.md 3): polled every 60 s, not 5 min, and no IDLE; the body is not stored as a
+  document of its own (it stays in the `.eml` blob); `application/octet-stream` attachments are
+  accepted and sniffed; inline `cid:` images are skipped; `tls: none` only to a loopback or private
+  address; `ca_file` trusts a home server's own CA.
+- Paperless (ingestion.md 3.1): no `ownhealth-imported` tag written back (it needs a token that may
+  write; the recipe recommends a read-only one) and no pull of the archived PDF of a scan (local OCR
+  or the agent reads the original).
+- Observation-level dedup (level 3) is import.pdf's same-analyte, same-day, same-value match; the
+  `core::dedup::match_observation` and `observation_link` path is not wired into import yet.
+- MCP (mcp.md 6.1, 2.2): `list_pending_documents` titles a document by provider, kind and date, never
+  its file name (security-privacy.md 4.2 #9); a tool outside the token's scopes answers the 0.2.0
+  tool error `scope_missing`, not an HTTP 403 `insufficient_scope` challenge; the built-in
+  authorization server is on only when `OWNHEALTH_BASE_URL` is https; page images count against
+  the per-token `document_pages_per_day` cap (300), not the egress byte budget.
+- Wearables: `get_trend` cites Apple Health import sources only; samples from Health Auto Export,
+  Gadgetbridge and Nightscout carry their provenance in `wearable_source.source_id`.
+- HEIC images arriving through an inbox are stored as `image/heic` and not read (no decoder);
+  the Shortcut recipe converts photos to JPEG first.
