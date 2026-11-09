@@ -38,7 +38,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use import::{
-    ImportOptions, Normalizer, assign_document, import_pdf, import_pdf_opts, import_pdf_with, use_normalizer,
+    ImportOptions, Normalizer, OcrPages, OcrRowCheck, assign_document, import_ocr, import_pdf, import_pdf_opts,
+    import_pdf_with, use_normalizer,
 };
 pub use pages::{ground_value, page_words, render_page_png};
 

@@ -134,11 +134,7 @@ pub async fn arrive(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>)
     let kind = sniff_blob(blobs, a.sha256, filename.clone()).await?;
     match kind {
         "pdf" | "image" => {
-            let m = mime(kind).unwrap_or(if filename.to_lowercase().ends_with(".png") {
-                "image/png"
-            } else {
-                "image/jpeg"
-            });
+            let m = mime(kind).unwrap_or_else(|| image_mime(&filename));
             let r = create_document(
                 &mut *conn,
                 &NewDocument {
@@ -234,4 +230,30 @@ pub async fn set_ocr_state(conn: &mut PgConnection, document_id: Uuid, state: &s
         .execute(conn)
         .await?;
     Ok(())
+}
+
+/// The mime of an image by its name: PNG, HEIC/HEIF (iPhone photos), JPEG otherwise.
+fn image_mime(filename: &str) -> &'static str {
+    let name = filename.to_lowercase();
+    if name.ends_with(".png") {
+        "image/png"
+    } else if name.ends_with(".heic") || name.ends_with(".heif") {
+        "image/heic"
+    } else {
+        "image/jpeg"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::image_mime;
+
+    #[test]
+    fn images_are_labelled_by_their_name() {
+        assert_eq!(image_mime("IMG_0042.HEIC"), "image/heic");
+        assert_eq!(image_mime("scan.heif"), "image/heic");
+        assert_eq!(image_mime("page.PNG"), "image/png");
+        assert_eq!(image_mime("photo.jpg"), "image/jpeg");
+        assert_eq!(image_mime(""), "image/jpeg");
+    }
 }

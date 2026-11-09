@@ -109,6 +109,53 @@ pub fn render_page_png(blobs: &BlobStore, blob_sha256: &str, page_no: i32, scale
     png_rgb(&rgba, bw, bh)
 }
 
+/// The pixel width of the render a page's pHash is taken from (the hash itself reads 32x32).
+const PHASH_RENDER_WIDTH: i32 = 256;
+
+/// Dedup level 2: the 64-bit pHash of every page of a PDF, from a small grayscale render (CPU work:
+/// call it from `spawn_blocking`). A page that will not render is `None`.
+pub fn page_phashes(data: &[u8]) -> Result<Vec<Option<u64>>> {
+    let doc = pdfium()?.load_pdf_from_byte_slice(data, None).map_err(pdf_error)?;
+    let mut out = Vec::new();
+    for page in doc.pages().iter() {
+        let (w, h) = (page.width().value as f64, page.height().value as f64);
+        if !(w > 0.0 && h > 0.0) {
+            out.push(None);
+            continue;
+        }
+        let height = ((PHASH_RENDER_WIDTH as f64 * h / w).round() as i32).clamp(1, PHASH_RENDER_WIDTH * 4);
+        let cfg = PdfRenderConfig::new()
+            .set_target_width(PHASH_RENDER_WIDTH)
+            .set_target_height(height);
+        let Ok(bitmap) = page.render_with_config(&cfg) else {
+            out.push(None);
+            continue;
+        };
+        let rgba = bitmap.as_rgba_bytes();
+        let (bw, bh) = (bitmap.width() as usize, bitmap.height() as usize);
+        let gray: Vec<u8> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| ((u32::from(p[0]) * 299 + u32::from(p[1]) * 587 + u32::from(p[2]) * 114) / 1000) as u8)
+            .collect();
+        out.push(ownhealth_core::dedup::phash64(&gray, bw, bh));
+    }
+    Ok(out)
+}
+
+/// The pHash of a photo or scan stored as an image (PNG or JPEG), as one page: the same 256-pixel-wide
+/// grayscale the PDF pages are hashed from, so a photo of a report we hold matches its PDF page.
+pub fn image_phash(data: &[u8]) -> Result<Vec<Option<u64>>> {
+    let img = image::load_from_memory(data).map_err(|e| Error::Invalid(format!("unreadable image: {e}")))?;
+    let max_h = (PHASH_RENDER_WIDTH * 4) as u32;
+    let gray = img
+        .resize(PHASH_RENDER_WIDTH as u32, max_h, image::imageops::FilterType::Triangle)
+        .to_luma8();
+    let (w, h) = (gray.width() as usize, gray.height() as usize);
+    Ok(vec![ownhealth_core::dedup::phash64(gray.as_raw(), w, h)])
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for &b in data {

@@ -592,6 +592,41 @@ async fn with_ocr_on_scans_and_images_go_to_the_ocr_queue_not_to_review() -> R {
         .fetch_one(&mut *c)
         .await?;
     assert_eq!(state, "off");
-    assert_eq!(items(&mut c, other, None).await?.len(), 1);
+    assert_eq!(items(&mut c, other, Some("pending_document")).await?.len(), 1);
+    // the same scan with other bytes is also "probably the same as" the first (dedup level 2)
+    let near = items(&mut c, other, Some("near_duplicate")).await?;
+    assert_eq!(near.len(), 1);
+    assert_eq!(near[0]["payload"]["same_as"], json!(scan.to_string()));
+    assert_eq!(items(&mut c, other, None).await?.len(), 2);
+    Ok(())
+}
+
+/// The locked original of an email PDF is kept as received and never read: reprocessing it, or moving
+/// it to another profile, files nothing (its unlocked copy is the document that is imported).
+#[tokio::test]
+async fn a_locked_original_is_never_imported() -> R {
+    fake_normalizer();
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    let locked = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../fixtures/A-email/labnorte-locked-12345678Z.pdf"
+    ))?;
+    let doc = e.store_pdf(&mut c, &locked, "locked.pdf").await?;
+    sqlx::query("update document set flags = flags || '{\"encrypted\": true}'::jsonb where id = $1")
+        .bind(doc)
+        .execute(&mut *c)
+        .await?;
+    let summary = import_pdf(&mut c, &e.blobs, doc, true).await?.to_value();
+    assert_eq!(summary["reasons"]["encrypted_original"], 1, "{summary}");
+    let filed: i64 = sqlx::query_scalar(
+        "select (select count(*) from review_item where document_id = $1) \
+         + (select count(*) from extraction_run where document_id = $1) \
+         + (select count(*) from document_page where document_id = $1)",
+    )
+    .bind(doc)
+    .fetch_one(&mut *c)
+    .await?;
+    assert_eq!(filed, 0, "a locked original was read");
     Ok(())
 }
