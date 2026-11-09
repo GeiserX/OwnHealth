@@ -117,7 +117,7 @@ Structured inputs skip OCR and extraction. They go straight to normalization and
 - Dedup levels:
   1. **Exact:** same sha256 for the same profile. The new arrival becomes an extra `document_source` row (channel, ref, received_at) on the existing document. Processing stops.
   2. **Near-duplicate:** per-page perceptual hash of the rasterized page (Hamming distance <= 6 on a 64-bit pHash) plus a simhash of normalized text. Catches a portal re-download with a new footer timestamp, or a scan of a printout we already hold. A near-duplicate is processed, then shown in review as "probably the same as document X" with a link-instead-of-import action.
-  3. **Observation level:** same profile + `alias_group` + equal canonical value + same comparator + same method (direct or calculated) + same collection time, from two sources = one logical fact with two provenance links. Trends count it once. A missing collection time on either side, or a different comparator, sends the row to review instead ([architecture.md section 10](architecture.md#10-normalizer)).
+  3. **Observation level:** same profile + `alias_group` + equal canonical value + same comparator + same method (direct or calculated) + same collection time, from two sources = one logical fact with two provenance links. Trends count it once. A missing collection time on either side, or a different comparator, sends the row to review instead ([architecture.md section 10](architecture.md#10-normalizer)). A row that matches nothing still runs the Conflict check of section 9: the same analyte on the same day with a different value goes to review as `conflict`. The same value from another lab, or at another time of day, is kept as its own fact.
 
 ## 5. Classification
 

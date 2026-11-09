@@ -66,11 +66,13 @@ COMPOSE_PROFILES=ocr   # starts the `ocr` worker, from drumsergio/ownhealth:<ver
 OWNHEALTH_OCR=1        # the app sends pages without a text layer to it
 ```
 
-then `docker compose up -d`. The worker is the same program from the image variant that carries the OCR engine (PaddleOCR PP-OCRv5 on ONNX Runtime) and its models, about 15 MB of models on top of the default image. It serves no HTTP and only runs jobs on the `ocr` queue, on the CPU. Turn both lines on together. With only `OWNHEALTH_OCR=1`, scans queue for a worker that never starts. Without the profile, scans wait as pending documents for your own agent ([agent-assisted extraction](../docs/agent-extraction.md)) or for you.
+then `docker compose up -d`. The worker is the same program from the image variant that carries the OCR engine (PaddleOCR PP-OCRv5 on ONNX Runtime) and its models, about 75 MB more than the default image (the OCR engine and 13 MB of models). It serves no HTTP and only runs jobs on the `ocr` queue, on the CPU. Turn both lines on together. With only `OWNHEALTH_OCR=1`, scans queue for a worker that never starts. Without the profile, scans wait as pending documents for your own agent ([agent-assisted extraction](../docs/agent-extraction.md)) or for you.
+
+Scans that arrived while OCR was off are not lost: each time the `ocr` worker starts with `OWNHEALTH_OCR=1`, it queues every scan and photo still waiting as a pending document for pages without text, and takes it off the pending list. Pages OCR then cannot read go back on it.
 
 ## Monitoring the inboxes
 
-`GET /api/inboxes/health` lists every inbox you can see with its last run, its last successful sync, its last error, the failed runs in a row, and `stale`: switched on, polled, and no success for three poll intervals. Add `?format=prometheus` for the Prometheus text format. Labels carry the source id and kind only, never names or error text:
+`GET /api/inboxes/health` lists every inbox you can see with its last run, its last successful sync, its last error, the failed runs in a row, and `stale`: switched on, polled, and no success for three poll intervals. `last_run_status` is `ok`, `partial` (some items were skipped or failed) or `error`, with `last_run_problems` and the first problem as `last_run_problem` (a code and a short message, never the content of a mail or document). A run in which every item failed counts as an error: the failed-runs count goes up and the last successful sync stays where it was. Add `?format=prometheus` for the Prometheus text format. Labels carry the source id and kind only, never names or error text:
 
 ```text
 ownhealth_source_enabled{source="…",kind="email"} 1
@@ -78,7 +80,10 @@ ownhealth_source_stale{source="…",kind="email"} 0
 ownhealth_source_consecutive_failures{source="…",kind="email"} 0
 ownhealth_source_last_success_timestamp_seconds{source="…",kind="email"} 1762700112.5
 ownhealth_source_last_run_timestamp_seconds{source="…",kind="email"} 1762700112.5
+ownhealth_source_last_run_ok{source="…",kind="email"} 1
 ```
+
+`ownhealth_source_last_run_ok` is 1 when the newest finished run brought everything in (or no run has finished yet) and 0 when it was partial or failed.
 
 A monitor has no browser session, so it reads one inbox at a time with that inbox's own push token (`oh_ing_...`, created in **Inbox**): `GET /api/inboxes/<id>/health?format=prometheus` with `Authorization: Bearer oh_ing_...`. The token sees its own inbox and nothing else. For a push inbox (Paperless, Shortcut, Health Auto Export) it is the token the sender already uses. For a polled one (mailbox, folder, Nightscout), create a token just for the monitor.
 
@@ -105,6 +110,9 @@ groups:
         for: 30m
       - alert: OwnHealthPushSilent        # nothing pushed for 6 hours
         expr: ownhealth_source_enabled == 1 and time() - ownhealth_source_last_success_timestamp_seconds{kind=~"health_auto_export|paperless|shortcut"} > 6 * 3600
+      - alert: OwnHealthInboxPartial      # runs finish but skip items
+        expr: ownhealth_source_last_run_ok == 0
+        for: 3m                           # three runs of a mailbox polled every minute
 ```
 
 A push inbox has no schedule, so OwnHealth never marks it stale; the second rule alerts on silence instead. Pick the hours to match how often the sender pushes.
@@ -194,3 +202,5 @@ mkdir -p inbox && sudo chown 10001:10001 inbox
 ```
 
 Compose refuses to start without the secret file. Keep a copy of it with the restic password.
+
+Scans a 0.2.0 install kept as pending documents are read by OCR once you turn the `ocr` profile on: the worker queues them when it starts.

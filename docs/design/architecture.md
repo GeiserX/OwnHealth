@@ -89,7 +89,7 @@ Libraries in the core: axum, tower and tokio; sqlx for Postgres (queries checked
 | Profile | Services | Image size, RAM (estimates, unverified) | Ships in |
 |---|---|---|---|
 | (default) | `app`, `db` | app under 400 MB image; app plus Postgres about 0.5 GB RAM idle | v0.1 |
-| `ocr` | `ocr` worker: PaddleOCR PP-OCRv5 mobile detection and Latin recognition, ONNX on ONNX Runtime, CPU (an ONNX Runtime GPU provider is optional) | 436 MB unpacked against 363 MB for the default image (arm64, 0.3.0); RAM while working not measured yet | v0.2 (0.3.0) |
+| `ocr` | `ocr` worker: PaddleOCR PP-OCRv5 mobile detection and Latin recognition, ONNX on ONNX Runtime, CPU (an ONNX Runtime GPU provider is optional) | 436 MB unpacked against 364 MB for the default image (arm64, 0.3.0); worker peak RSS 240 MB reading the demo's scanned page (arm64) | v0.2 (0.3.0) |
 | `imaging` | `orthanc` with the DICOMweb and OHIF plugins | 100 to 300 MB RAM idle | v1.0 |
 | `wearables` | `open-wearables` plus its own Postgres and Redis | brings Redis and Celery, but only inside the profile | v1.0 |
 
