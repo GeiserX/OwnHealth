@@ -6,8 +6,8 @@ The iOS app Health Auto Export can push Apple Health data to a URL on a schedule
 
 - The app posts JSON (export version 2) to `POST /api/ingest/health-auto-export` with the source's push token.
 - Each push is stored as received, then mapped to wearable samples for the source's profile.
-- Pushes overlap on purpose, and the hour still running at one push is sent again, larger, at the next. OwnHealth keeps one sample per profile, metric, device and time, and updates a bucket that grew. Seven days of 15-minute pushes give zero duplicate samples.
-- A sample summed from Watch and iPhone is filed under the Watch, so the same bucket always lands on the same device.
+- Pushes overlap on purpose, and the hour still running at one push is sent again, larger, at the next. OwnHealth keeps one sample per profile, metric, source and time, and updates a bucket that grew. Seven days of 15-minute pushes give zero duplicate samples.
+- All samples of one source are filed under that source, whatever device the app names (iPhone, Watch or both). The same bucket can arrive as iPhone at one push and as iPhone and Watch at the next, and it is still one sample. OwnHealth does not keep the Watch and the iPhone apart.
 - Metrics OwnHealth does not chart yet (workouts, nutrition, symptoms) are skipped and named in the log, without values.
 
 ## You need
@@ -42,7 +42,7 @@ Run the automation once by hand from the app. The source in **Inbox** shows a su
 If the push fails:
 
 - `401`: the token is wrong, or the source is switched off.
-- `403 wrong_source`: the token belongs to another kind of source.
+- `403 wrong_inbox`: the token belongs to another kind of source.
 - No run at all: the phone cannot reach the server, or iOS did not let the app run. Open the app to push now.
 
 To be told when pushes stop, alert on the source's last successful sync: [Monitoring the inboxes](../../deploy/README.md#monitoring-the-inboxes). A push source is never marked stale by OwnHealth itself (it has no schedule), so alert on the time since the last success instead.

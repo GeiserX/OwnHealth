@@ -4,6 +4,7 @@ Step-by-step setups for the inboxes and connections added in 0.3.0.
 
 | Recipe | What it sets up |
 |---|---|
+| [Email](email.md) | Mail from senders you allow arrives in the review queue; the rest waits in quarantine |
 | [Paperless-ngx](paperless-ngx.md) | Documents tagged `health` in Paperless arrive in the review queue, linked back |
 | [Scanner to folder](scanner-to-folder.md) | A scanner or a synced phone folder drops files that are imported per profile |
 | [Health Auto Export](health-auto-export.md) | An iPhone pushes Apple Health data every 15 minutes |

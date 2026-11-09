@@ -23,6 +23,14 @@ In Paperless, create a user (for example `ownhealth`) with view permission on do
 
 Also create the `health` tag if you do not have one.
 
+**The user must also be allowed to see each document.** In Paperless a document that has an owner is visible only to its owner and to the users and groups it is shared with. The global view permission above does not change that. Documents you upload in the web UI or that arrive by a mail rule get an owner, so the `ownhealth` user cannot see them. The webhook then fails with a Paperless `404`, and the 15-minute pull finds nothing and still reports a successful run. Nothing is imported and no alert fires.
+
+Share the health documents with the `ownhealth` user (or with a group it belongs to):
+
+- New documents: the workflow in step 3 does it with an **Assignment** action.
+- Documents you already have: select them in the document list (filter on the `health` tag), open **Permissions** in the bulk editor and add `ownhealth` (or its group) under **View**.
+- The tag: if the `health` tag has an owner, give `ownhealth` view permission on it too, or set the tag's numeric id in OwnHealth instead of its name.
+
 ## 2. The Paperless inbox in OwnHealth
 
 In OwnHealth, open **Inbox**, add a source of kind **Paperless-ngx** and fill in:
@@ -43,8 +51,9 @@ Save, then create the source's push token. It starts with `oh_ing_` and is shown
 
 **Workflows**, add one:
 
-- Trigger: **Document Added**, filter on the tag `health`.
-- Action: **Webhook**.
+- Trigger: **Document Added**, filter on the tag `health`. Add a second trigger, **Document Updated**, with the same filter, so a document tagged later is also shared.
+- First action: **Assignment**, with the `ownhealth` user (or its group) under **Grant view permissions**. It must come before the webhook, or OwnHealth asks for a document it cannot see yet.
+- Second action: **Webhook**.
   - URL: `https://health.example.lan/api/ingest/paperless`
   - Body as JSON: one key `doc_url` with the value `{{doc_url}}`.
   - Header: `X-OwnHealth-Secret` with the `oh_ing_...` token from step 2.
@@ -60,8 +69,9 @@ Tag a lab PDF `health` in Paperless. Within a minute it shows in OwnHealth's rev
 If nothing arrives:
 
 - **Inbox** shows the source's last error. `401` from OwnHealth means the `X-OwnHealth-Secret` header is wrong or the source is switched off. `403 wrong_source` means the token belongs to another source.
-- An error naming the Paperless API means OwnHealth could not reach Paperless or the token cannot read the document.
-- A document tagged after the fact (not at "Document Added") arrives with the next 15-minute pull.
+- An error naming the Paperless API means OwnHealth could not reach Paperless or the token cannot read the document. A `404` for a document that exists means the `ownhealth` user cannot see it: share it as in step 1.
+- Runs that succeed but import nothing: log in to Paperless as `ownhealth` and look for the documents tagged `health`. If you see none, the user has no view permission on them (step 1).
+- A document tagged after the fact arrives through the **Document Updated** trigger, or at the latest with the next 15-minute pull.
 
 To alert on a stalled inbox, see [Monitoring the inboxes](../../deploy/README.md#monitoring-the-inboxes).
 
