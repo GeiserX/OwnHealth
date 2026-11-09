@@ -17,6 +17,7 @@ ownhealth-genome.workspace = true
 ownhealth-ingest-pdf.workspace = true
 ownhealth-ingest-structured.workspace = true
 ownhealth-normalize.workspace = true
+ownhealth-ocr.workspace = true
 ownhealth-rules.workspace = true
 anyhow.workspace = true
 axum.workspace = true

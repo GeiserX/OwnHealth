@@ -547,3 +547,51 @@ async fn lab_values_carry_a_provenance_label() -> R {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn with_ocr_on_scans_and_images_go_to_the_ocr_queue_not_to_review() -> R {
+    use ownhealth_core::acceptance::DEFAULT_THRESHOLD;
+    use ownhealth_ingest_pdf::{ImportOptions, import_pdf_opts};
+    fake_normalizer();
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    let on = ImportOptions {
+        threshold: DEFAULT_THRESHOLD,
+        ocr: true,
+    };
+    let (pdf, _) = slip("es-scan");
+    let scan = e.store_pdf(&mut c, &pdf, "report.pdf").await?;
+    import_pdf_opts(&mut c, &e.blobs, scan, false, on).await?;
+    let sha = e.blobs.put_bytes(&pdf)?;
+    let png = render_page_png(&e.blobs, &sha, 1, 0.5)?;
+    let img = e.store(&mut c, &png, "alex", "image/png", "photo.png").await?;
+    import_pdf_opts(&mut c, &e.blobs, img, false, on).await?;
+    for doc in [scan, img] {
+        assert!(
+            items(&mut c, doc, None).await?.is_empty(),
+            "a scan waits for OCR, not for a person"
+        );
+        let (queue, pages, state): (String, Value, String) = sqlx::query_as(
+            "select j.queue, j.payload->'pages', d.ocr_state from job j join document d on d.id::text = j.payload->>'document_id' \
+             where j.kind = 'ocr.document' and d.id = $1",
+        )
+        .bind(doc)
+        .fetch_one(&mut *c)
+        .await?;
+        assert_eq!((queue.as_str(), pages, state.as_str()), ("ocr", json!([1]), "queued"));
+    }
+
+    // off (the default): the pending item as before, and the document says why it waits
+    let (pdf2, _) = slip("es-scan");
+    let other = e
+        .store_pdf(&mut c, &[pdf2.as_slice(), b"\n%second copy"].concat(), "again.pdf")
+        .await?;
+    import_pdf(&mut c, &e.blobs, other, false).await?;
+    let state: String = sqlx::query_scalar("select ocr_state from document where id = $1")
+        .bind(other)
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(state, "off");
+    assert_eq!(items(&mut c, other, None).await?.len(), 1);
+    Ok(())
+}

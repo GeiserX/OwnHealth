@@ -7,7 +7,9 @@ use std::sync::RwLock;
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 use futures::future::BoxFuture;
 use ownhealth_core::acceptance::{Check, DEFAULT_THRESHOLD, failed_reasons};
+use ownhealth_core::arrive::{enqueue_ocr, set_ocr_state};
 use ownhealth_core::blobs::{BlobStore, sha256_hex_to_bytes};
+use ownhealth_core::dedup::simhash64;
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::jobs::{EnqueueOptions, enqueue};
 use ownhealth_core::observations::{ObservationIn, confirm_observation, supersede_observation};
@@ -122,8 +124,7 @@ pub async fn import_pdf(
     import_pdf_with(conn, blobs, document_id, force, DEFAULT_THRESHOLD).await
 }
 
-/// `import_pdf` with the auto-accept threshold of the settings. An unknown document is
-/// `Error::NotFound` (the job handler makes it a permanent failure).
+/// `import_pdf` with the auto-accept threshold of the settings (OCR off).
 pub async fn import_pdf_with(
     conn: &mut PgConnection,
     blobs: &BlobStore,
@@ -131,6 +132,28 @@ pub async fn import_pdf_with(
     force: bool,
     threshold: f64,
 ) -> Result<ImportSummary> {
+    import_pdf_opts(conn, blobs, document_id, force, ImportOptions { threshold, ocr: false }).await
+}
+
+/// How `import.pdf` runs: the auto-accept threshold, and whether the `ocr` compose profile is on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImportOptions {
+    pub threshold: f64,
+    /// On: pages without a text layer (and images) go to the `ocr` queue (`ocr.document`, lane C).
+    /// Off: they wait as one `pending_document` item, and `document.ocr_state` is `off`.
+    pub ocr: bool,
+}
+
+/// The import itself. An unknown document is `Error::NotFound` (the job handler makes it a permanent
+/// failure).
+pub async fn import_pdf_opts(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    document_id: Uuid,
+    force: bool,
+    opts: ImportOptions,
+) -> Result<ImportSummary> {
+    let threshold = opts.threshold;
     let doc = lock_document(&mut *conn, document_id)
         .await?
         .ok_or_else(|| Error::NotFound(format!("document {document_id} not found")))?;
@@ -153,6 +176,12 @@ pub async fn import_pdf_with(
     }
     let data = blobs.get_bytes(&hex::encode(&doc.blob_sha256))?;
     if doc.mime != "application/pdf" {
+        if opts.ocr {
+            enqueue_ocr(&mut *conn, doc.id, &[1], "image").await?;
+            summary.reasons.insert("ocr_queued".into(), 1);
+            return Ok(summary);
+        }
+        set_ocr_state(&mut *conn, doc.id, "off").await?;
         pending_document(&mut *conn, &doc, &[1], "image").await?;
         summary.queued += 1;
         summary.reasons.insert("pending_document".into(), 1);
@@ -197,12 +226,25 @@ pub async fn import_pdf_with(
 
     let lab = cls.doc_type == "lab_report";
     let results = if lab { ext.results() } else { Vec::new() };
-    let mut unread = ext.pending_pages.clone();
+    // Pages without a text layer go to OCR when the profile is on; otherwise they wait with the lab
+    // pages whose table nobody could read.
+    let ocr_pages = opts.ocr && !ext.pending_pages.is_empty();
+    if ocr_pages {
+        enqueue_ocr(&mut *conn, doc.id, &ext.pending_pages, "no_text_layer").await?;
+        summary.reasons.insert("ocr_queued".into(), 1);
+    } else if !ext.pending_pages.is_empty() {
+        set_ocr_state(&mut *conn, doc.id, "off").await?;
+    }
+    let mut unread = if ocr_pages {
+        Vec::new()
+    } else {
+        ext.pending_pages.clone()
+    };
     if lab {
         unread.extend(&ext.no_table_pages);
     }
     if !unread.is_empty() {
-        let why = if ext.pending_pages.is_empty() {
+        let why = if ocr_pages || ext.pending_pages.is_empty() {
             "no_table"
         } else {
             "no_text_layer"
@@ -387,11 +429,12 @@ async fn store_pages(conn: &mut PgConnection, blobs: &BlobStore, document_id: Uu
         let words_sha = blobs.put_bytes(&serde_json::to_vec(&layer)?)?;
         sqlx::query(
             "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok, words_blob, \
-             flags, text_content, fts) values ($1, $2, $3, $4, $5, $6, $7, $8, to_tsvector(cast($9 as regconfig), $10)) \
+             flags, text_content, fts, word_layer, text_simhash) values ($1, $2, $3, $4, $5, $6, $7, $8, \
+             to_tsvector(cast($9 as regconfig), $10), $11, $12) \
              on conflict (document_id, page_no) do update set width_pt = excluded.width_pt, \
              height_pt = excluded.height_pt, text_layer_ok = excluded.text_layer_ok, \
              words_blob = excluded.words_blob, flags = excluded.flags, text_content = excluded.text_content, \
-             fts = excluded.fts",
+             fts = excluded.fts, word_layer = excluded.word_layer, text_simhash = excluded.text_simhash",
         )
         .bind(document_id)
         .bind(page.page_no)
@@ -403,6 +446,13 @@ async fn store_pages(conn: &mut PgConnection, blobs: &BlobStore, document_id: Uu
         .bind(page.text(false))
         .bind(cfg)
         .bind(page.text(true))
+        .bind(if page.text_layer_ok { "text_layer" } else { "none" })
+        // dedup level 2: the simhash of the visible text (a scan has none until OCR)
+        .bind(
+            simhash64(&page.text(true))
+                .filter(|_| page.text_layer_ok)
+                .map(|h| h as i64),
+        )
         .execute(&mut *conn)
         .await?;
     }

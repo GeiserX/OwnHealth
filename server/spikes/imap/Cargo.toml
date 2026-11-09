@@ -1,0 +1,17 @@
+# The v0.2 IMAP spike (SPIKES-v0.2.md b): async-imap on tokio against a GreenMail container:
+# fetch, parse (mail-parser), flag and move. Standalone, not a workspace member.
+[package]
+name = "ownhealth-spike-imap"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+futures = "0.3"
+mail-parser = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

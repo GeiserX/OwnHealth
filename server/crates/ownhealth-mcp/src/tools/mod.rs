@@ -12,6 +12,8 @@
 pub mod drug;
 pub mod genome;
 pub mod observations;
+pub mod page;
+pub mod pending;
 pub mod propose;
 pub mod pyschema;
 pub mod source;
