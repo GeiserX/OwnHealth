@@ -1,0 +1,83 @@
+{
+  "as_of": "date",
+  "budget": {
+    "tokens_est": "int",
+    "truncated": "bool"
+  },
+  "data": {
+    "annotations": {
+      "[]": {
+        "date": "date",
+        "event": "string",
+        "name": {
+          "origin": "=person_note",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "src": "src_id"
+      }
+    },
+    "canonical_unit": "string",
+    "codes": {
+      "[]": "string"
+    },
+    "coverage_pct": "int",
+    "name": "string",
+    "points": {
+      "[]": {
+        "canonical": "float",
+        "code": "string",
+        "date": "date",
+        "flag": "string",
+        "method": {
+          "|": [
+            "=calculated",
+            "=direct"
+          ]
+        },
+        "range": {
+          "high": "int"
+        },
+        "src": "src_id",
+        "unit": "string",
+        "value": "int"
+      }
+    },
+    "resolution": "=raw",
+    "stats": {
+      "first": "date",
+      "last": "date",
+      "last_vs_previous_pct": "int",
+      "max": "float",
+      "method": "=Mann-Kendall (two-sided, p<0.05), Theil-Sen slope",
+      "min": "float",
+      "mk_z": "float",
+      "n": "int",
+      "slope_per_year": "float",
+      "trend": "string"
+    }
+  },
+  "db_versions": {},
+  "evidence": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "string"
+  },
+  "next_cursor": "null",
+  "not_assessed": {
+    "[]": "empty"
+  },
+  "notice": "string",
+  "profile": "string",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

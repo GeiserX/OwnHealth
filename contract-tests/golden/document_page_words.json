@@ -1,0 +1,18 @@
+{
+  "flags": {},
+  "height_pt": "float",
+  "origin": "=pdf_text_layer",
+  "page_no": "int",
+  "trust": "=untrusted_text",
+  "width_pt": "float",
+  "words": {
+    "[]": {
+      "bbox": {
+        "[]": "float"
+      },
+      "bold": "bool",
+      "hidden": "null",
+      "text": "string"
+    }
+  }
+}

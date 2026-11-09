@@ -1,0 +1,65 @@
+{
+  "prompts": [
+    {
+      "arguments": [
+        {
+          "description": "Profile slug or 'me'",
+          "name": "profile",
+          "required": true
+        },
+        {
+          "description": "Generic or brand name",
+          "name": "drug",
+          "required": true
+        },
+        {
+          "description": "es or en",
+          "name": "lang",
+          "required": false
+        }
+      ],
+      "description": "What the record says about one drug: PGx, current medications and labs, quoted with sources.",
+      "name": "check-before-new-drug",
+      "title": "Check before a new drug"
+    },
+    {
+      "arguments": [
+        {
+          "description": "Profile slug or 'me'",
+          "name": "profile",
+          "required": true
+        },
+        {
+          "description": "e.g. cardiology",
+          "name": "specialty",
+          "required": false
+        },
+        {
+          "description": "es or en",
+          "name": "lang",
+          "required": false
+        }
+      ],
+      "description": "Questions for the doctor and a one-page summary with src ids, for one profile and specialty.",
+      "name": "prepare-doctor-visit",
+      "title": "Prepare a doctor visit"
+    },
+    {
+      "arguments": [
+        {
+          "description": "Profile slug or 'me'",
+          "name": "profile",
+          "required": true
+        },
+        {
+          "description": "es or en",
+          "name": "lang",
+          "required": false
+        }
+      ],
+      "description": "Gaps and stale values from the status, ranked by the rule pack's order, with rule ids.",
+      "name": "what-to-measure-next",
+      "title": "What to measure next"
+    }
+  ]
+}

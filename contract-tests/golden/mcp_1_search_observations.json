@@ -1,0 +1,85 @@
+{
+  "as_of": "date",
+  "budget": {
+    "tokens_est": "int",
+    "truncated": "bool"
+  },
+  "data": {
+    "resolved": {
+      "alias_groups": {
+        "[]": "string"
+      },
+      "codes": {
+        "[]": "string"
+      },
+      "method": "=normalizer"
+    },
+    "results": {
+      "[]": {
+        "accepted_by": "=auto",
+        "canonical": {
+          "unit": "string",
+          "value": "float"
+        },
+        "category": "=laboratory",
+        "code": "string",
+        "date": "date",
+        "draw_id": "string",
+        "flag": "string",
+        "group": "string",
+        "lab": {
+          "origin": "=pdf_text_layer",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "method": {
+          "|": [
+            "=calculated",
+            "=direct"
+          ]
+        },
+        "name": {
+          "origin": "=pdf_text_layer",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "printed_range": {
+          "origin": "=pdf_text_layer",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "range": {
+          "high": "int"
+        },
+        "recorded_at": "datetime_Z",
+        "specimen": "string",
+        "src": "src_id",
+        "unit": "string",
+        "value": "int"
+      }
+    }
+  },
+  "db_versions": {},
+  "evidence": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "string"
+  },
+  "next_cursor": "null",
+  "not_assessed": {
+    "[]": "empty"
+  },
+  "notice": "string",
+  "profile": "string",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

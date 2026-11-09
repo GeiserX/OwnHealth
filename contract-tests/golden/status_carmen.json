@@ -1,0 +1,86 @@
+{
+  "as_of": "date",
+  "data": {
+    "active_conditions": {
+      "[]": {
+        "name": "string",
+        "since": "date",
+        "src": "src_id",
+        "verification": "=confirmed"
+      }
+    },
+    "corrections": {
+      "[]": "empty"
+    },
+    "data_freshness": {
+      "labs": "date"
+    },
+    "flags": {
+      "[]": {
+        "canonical": {
+          "|": [
+            "absent",
+            {
+              "unit": "string",
+              "value": "string"
+            }
+          ]
+        },
+        "code": "string",
+        "date": "date",
+        "flag": "string",
+        "kind": "=out_of_range",
+        "name": "string",
+        "range": "string",
+        "rank": "int",
+        "rule": "string",
+        "src": "src_id",
+        "text": "string",
+        "unit": "string",
+        "value": "string"
+      }
+    },
+    "medications": {
+      "[]": {
+        "name": "string",
+        "since": "date",
+        "src": "src_id"
+      }
+    },
+    "never_measured": {
+      "[]": {
+        "name": "string",
+        "rule": "string",
+        "text": "string"
+      }
+    },
+    "notes": {
+      "[]": "empty"
+    },
+    "pending": {
+      "[]": "empty"
+    },
+    "stale": {
+      "[]": "empty"
+    },
+    "supplements": {
+      "[]": "empty"
+    }
+  },
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "string"
+  },
+  "notice": "string",
+  "profile": "string",
+  "rules_version": "string",
+  "state_hash": "sha256_tagged",
+  "withheld": {
+    "by_scope": {
+      "[]": "string"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

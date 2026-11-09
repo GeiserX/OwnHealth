@@ -1,0 +1,28 @@
+{
+  "items": {
+    "[]": {
+      "detail": {
+        "abatement": "null",
+        "accepted_by": "=import",
+        "clinical_status": "string",
+        "code": "string",
+        "code_system": "string",
+        "effective_at": "datetime_Z",
+        "onset": "date",
+        "sensitivity": {
+          "[]": "empty"
+        },
+        "text": "string",
+        "verification_status": "string"
+      },
+      "id": "uuid",
+      "kind": "=condition",
+      "recorded_at": "datetime_Z",
+      "src": "src_id",
+      "status": "=current",
+      "status_reason": "null",
+      "supersedes": "null",
+      "title": "string"
+    }
+  }
+}

@@ -1,0 +1,143 @@
+{
+  "consent": {
+    "agents": "bool",
+    "can_change": "bool",
+    "ui": "bool"
+  },
+  "coverage": {
+    "[]": {
+      "panel": "string",
+      "reason": "null",
+      "scope": "string",
+      "state": "string",
+      "target": "string"
+    }
+  },
+  "dataset": {
+    "assay": "=wgs",
+    "build": "string",
+    "db_versions": {
+      "acmg_sf": "string",
+      "clinvar": "date",
+      "cpic": "string",
+      "ipd_imgt_hla": "string",
+      "pgs_catalog": "string",
+      "pharmcat": "string"
+    },
+    "generated_utc": "datetime_Z",
+    "imported_at": "datetime_offset",
+    "mean_depth": "float",
+    "platform": "string",
+    "raw_files": {
+      "chip_sites": "bool",
+      "gvcf": "bool",
+      "vcf": "bool"
+    },
+    "source_tool": "string",
+    "src": "src_id"
+  },
+  "findings": {
+    "[]": {
+      "activity_score": "null",
+      "call_state": "=alt",
+      "category": "=pgx",
+      "clinvar": "null",
+      "condition": "null",
+      "confidence": "string",
+      "confidence_basis": "string",
+      "confirm_clinically": "bool",
+      "diplotype": "string",
+      "drug_guidance": {
+        "[]": {
+          "drug": "string",
+          "level": "string",
+          "phenotype": "string",
+          "recommendation": {
+            "origin": "=genome_facts",
+            "text": "string",
+            "trust": "=untrusted_text"
+          },
+          "rxnorm": "string",
+          "source": "string",
+          "url": "string"
+        }
+      },
+      "drugs": {
+        "[]": "string"
+      },
+      "evidence": "=E1",
+      "evidence_native": "string",
+      "gene": "string",
+      "guidance_cpic_version": "string",
+      "hgvs": "null",
+      "hidden_by_default": "bool",
+      "id": "string",
+      "limitations": {
+        "[]": "empty"
+      },
+      "n_sources": "int",
+      "phenotype": "string",
+      "related_loinc": {
+        "[]": "empty"
+      },
+      "rsid": "string",
+      "sensitive": "bool",
+      "source": {
+        "assay": "=wgs",
+        "sample_id": "string",
+        "tool": "string"
+      },
+      "src": "src_id",
+      "status": "=current",
+      "summary": {
+        "origin": "=genome_facts",
+        "text": "string",
+        "trust": "=untrusted_text"
+      },
+      "title": "string",
+      "value": {
+        "diplotype": "string",
+        "phenotype": "string"
+      },
+      "variants": {
+        "[]": {
+          "alt": "string",
+          "call_state": "=alt",
+          "chrom": "string",
+          "gt": "string",
+          "pos": "int",
+          "ref": "string",
+          "rsid": "string",
+          "zygosity": "=het"
+        }
+      },
+      "verification": "=provisional",
+      "zygosity": "=het"
+    }
+  },
+  "is_minor": "bool",
+  "limitations": {
+    "[]": "string"
+  },
+  "locked": {
+    "[]": "empty"
+  },
+  "not_assessed": {
+    "[]": "empty"
+  },
+  "notice": "string",
+  "tiles": {
+    "[]": {
+      "actionable": "int",
+      "detail": "string",
+      "genes": "string",
+      "hidden": "int",
+      "key": "string",
+      "value": "string"
+    }
+  },
+  "withheld": {
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

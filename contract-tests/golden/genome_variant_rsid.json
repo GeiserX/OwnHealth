@@ -1,0 +1,41 @@
+{
+  "annotations": {},
+  "calls": {
+    "[]": {
+      "assay": "=wgs",
+      "basis": "string",
+      "call_state": "=alt",
+      "dp": "int",
+      "genotype": "string",
+      "gq": "int",
+      "gt": "string",
+      "source": "string",
+      "src": "src_id",
+      "zygosity": "=het"
+    }
+  },
+  "cited_by_findings": {
+    "[]": "string"
+  },
+  "coverage": {
+    "fraction_callable": "float",
+    "reason": "null",
+    "state": "string"
+  },
+  "limitations": {
+    "[]": "string"
+  },
+  "notice": "string",
+  "query": "string",
+  "variant": {
+    "alt": "string",
+    "chrom": "string",
+    "gene": "string",
+    "hgvs_c": "null",
+    "hgvs_p": "null",
+    "pos": "int",
+    "ref": "string",
+    "rsid": "string"
+  },
+  "withheld": "null"
+}

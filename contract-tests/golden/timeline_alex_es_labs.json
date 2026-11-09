@@ -1,0 +1,22 @@
+{
+  "events": {
+    "[]": {
+      "<src>": "string",
+      "country": "null",
+      "date": "date",
+      "detail": "string",
+      "flags": {
+        "[]": "empty"
+      },
+      "provider": "string",
+      "src": "src_id",
+      "title": "string",
+      "type": "=lab"
+    }
+  },
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    }
+  }
+}

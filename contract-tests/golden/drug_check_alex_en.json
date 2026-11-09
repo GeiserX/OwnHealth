@@ -1,0 +1,104 @@
+{
+  "current_medications_relevant": {
+    "[]": {
+      "name": "string",
+      "relation": "string",
+      "relation_text": "string",
+      "since": "date",
+      "src": "src_id"
+    }
+  },
+  "db_versions": {
+    "cpic": "date"
+  },
+  "drug": {
+    "codes_as_received": {
+      "[]": "empty"
+    },
+    "cpic_drug_id": "string",
+    "currently_taking": "bool",
+    "genes": {
+      "[]": "string"
+    },
+    "name": "string",
+    "query": "string"
+  },
+  "guidance": {
+    "[]": {
+      "applies_to": "string",
+      "based_on": {
+        "[]": "src_id"
+      },
+      "level": "string",
+      "license": "string",
+      "origin": "=cpic_snapshot",
+      "population": "string",
+      "quote": "string",
+      "recommendation_id": "int",
+      "source": "string",
+      "strength": "string",
+      "url": "string"
+    }
+  },
+  "limitations": {
+    "[]": "string"
+  },
+  "not_assessed": {
+    "[]": "string"
+  },
+  "notice": "string",
+  "pgx": {
+    "[]": {
+      "activity_score": "null",
+      "call_state": "=alt",
+      "confidence": "string",
+      "cpic_level": "string",
+      "diplotype": "string",
+      "evidence": "=E1",
+      "gene": "string",
+      "phenotype": "string",
+      "src": "src_id"
+    }
+  },
+  "phenoconversion": {
+    "[]": {
+      "activity_score": "null",
+      "activity_score_functional": "null",
+      "basis": "string",
+      "by": "string",
+      "computed": "bool",
+      "functional_phenotype": "null",
+      "gene": "string",
+      "inhibitor_strength": "string",
+      "rule": "null",
+      "src": "src_id",
+      "text": "string"
+    }
+  },
+  "relevant_labs": {
+    "[]": {
+      "alias_group": "string",
+      "date": "date",
+      "flag": "string",
+      "name": "string",
+      "reason": {
+        "|": [
+          "=antiplatelet therapy",
+          "=bleeding risk",
+          "=kidney function",
+          "=liver function"
+        ]
+      },
+      "src": "src_id",
+      "stale": "bool",
+      "status": "=ok",
+      "unit": "string",
+      "value": "string"
+    }
+  },
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    }
+  }
+}

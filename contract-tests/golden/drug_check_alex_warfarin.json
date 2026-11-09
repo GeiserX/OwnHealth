@@ -1,0 +1,142 @@
+{
+  "current_medications_relevant": {
+    "[]": {
+      "name": "string",
+      "relation": "string",
+      "relation_text": "string",
+      "since": "date",
+      "src": "src_id"
+    }
+  },
+  "db_versions": {
+    "cpic": "date"
+  },
+  "drug": {
+    "codes_as_received": {
+      "[]": "empty"
+    },
+    "cpic_drug_id": "string",
+    "currently_taking": "bool",
+    "genes": {
+      "[]": "string"
+    },
+    "name": "string",
+    "query": "string"
+  },
+  "guidance": {
+    "[]": "empty"
+  },
+  "limitations": {
+    "[]": "string"
+  },
+  "not_assessed": {
+    "[]": "string"
+  },
+  "notice": "string",
+  "pgx": {
+    "[]": {
+      "activity_score": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "call_state": {
+        "|": [
+          "=alt",
+          "=ref",
+          "null"
+        ]
+      },
+      "confidence": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "cpic_level": "string",
+      "diplotype": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "evidence": {
+        "|": [
+          "=E1",
+          "null"
+        ]
+      },
+      "gene": "string",
+      "phenotype": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "src": {
+        "|": [
+          "null",
+          "src_id"
+        ]
+      }
+    }
+  },
+  "phenoconversion": {
+    "[]": "empty"
+  },
+  "relevant_labs": {
+    "[]": {
+      "alias_group": "string",
+      "date": {
+        "|": [
+          "date",
+          "null"
+        ]
+      },
+      "flag": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "name": "string",
+      "reason": {
+        "|": [
+          "=control de la anticoagulación",
+          "=riesgo de sangrado"
+        ]
+      },
+      "src": {
+        "|": [
+          "null",
+          "src_id"
+        ]
+      },
+      "stale": "bool",
+      "status": {
+        "|": [
+          "=nodata",
+          "=ok"
+        ]
+      },
+      "unit": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "value": {
+        "|": [
+          "null",
+          "string"
+        ]
+      }
+    }
+  },
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    }
+  }
+}

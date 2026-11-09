@@ -1,0 +1,24 @@
+{
+  "detail": {
+    "accepted_by": "=person",
+    "clinical_status": "string",
+    "code": "null",
+    "code_system": "null",
+    "criticality": "string",
+    "effective_at": "null",
+    "reaction_text": "string",
+    "sensitivity": {
+      "[]": "empty"
+    },
+    "substance": "string",
+    "verification_status": "string"
+  },
+  "id": "uuid",
+  "kind": "=allergy",
+  "recorded_at": "datetime_Z",
+  "src": "src_id",
+  "status": "=current",
+  "status_reason": "null",
+  "supersedes": "null",
+  "title": "string"
+}

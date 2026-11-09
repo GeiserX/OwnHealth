@@ -1,0 +1,36 @@
+{
+  "[]": {
+    "candidate_row_id": "null",
+    "context_src_ids": {
+      "[]": "src_id"
+    },
+    "created_at": "datetime_offset",
+    "decided_at": "null",
+    "decided_by": "null",
+    "decision_reason": "null",
+    "document_id": "null",
+    "id": "uuid",
+    "kind": "=agent_proposal",
+    "observation_id": "null",
+    "payload": {
+      "based_on": {
+        "[]": "src_id"
+      },
+      "kind": "=note",
+      "payload": {
+        "attach_to": "src_id",
+        "lang": "=en",
+        "text": "string"
+      },
+      "token_label": "string"
+    },
+    "profile_id": "uuid",
+    "proposed_by_token": "null",
+    "reasons": {
+      "[]": "empty"
+    },
+    "result_ids": "null",
+    "row_conf": "null",
+    "status": "=open"
+  }
+}

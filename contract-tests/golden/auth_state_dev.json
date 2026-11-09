@@ -1,0 +1,21 @@
+{
+  "auth_kind": "=dev",
+  "method": "null",
+  "oidc": {
+    "enabled": "bool",
+    "label": "null"
+  },
+  "passkeys_possible": "bool",
+  "password_allowed": "bool",
+  "setup_needed": "bool",
+  "step_up_fresh": "bool",
+  "step_up_seconds": "int",
+  "user": {
+    "display_name": "string",
+    "id": "uuid",
+    "locale": "=es",
+    "oidc_linked": "bool",
+    "passkeys": "int",
+    "recovery_codes_left": "int"
+  }
+}

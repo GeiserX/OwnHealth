@@ -1,0 +1,308 @@
+{
+  "as_of": "date",
+  "budget": {
+    "tokens_est": "int",
+    "truncated": "bool"
+  },
+  "data": {
+    "assay": {
+      "build": "string",
+      "callable_fraction": "float",
+      "generated_utc": "datetime_Z",
+      "imported_at": "datetime_offset",
+      "mean_depth": "float",
+      "platform": "string",
+      "raw_files": {
+        "chip_sites": "bool",
+        "gvcf": "bool",
+        "vcf": "bool"
+      },
+      "source_tool": "string",
+      "src": "src_id",
+      "type": "=wgs"
+    },
+    "findings": {
+      "[]": {
+        "activity_score": {
+          "|": [
+            "float",
+            "null"
+          ]
+        },
+        "call_state": {
+          "|": [
+            "=alt",
+            "=ref",
+            "null"
+          ]
+        },
+        "category": {
+          "|": [
+            "=carrier",
+            "=hla",
+            "=pgx",
+            "=risk_marker"
+          ]
+        },
+        "clinvar": {
+          "|": [
+            "null",
+            {
+              "native": "string",
+              "stars": "int",
+              "variation_id": "int"
+            }
+          ]
+        },
+        "condition": {
+          "|": [
+            "null",
+            {
+              "inheritance": "string",
+              "name": {
+                "origin": "=genome_facts",
+                "text": "string",
+                "trust": "=untrusted_text"
+              }
+            }
+          ]
+        },
+        "confidence": "string",
+        "confidence_basis": "string",
+        "confirm_clinically": "bool",
+        "diplotype": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "drug_guidance": {
+          "[]": {
+            "drug": "string",
+            "level": "string",
+            "phenotype": "string",
+            "recommendation": {
+              "origin": "=genome_facts",
+              "text": "string",
+              "trust": "=untrusted_text"
+            },
+            "rxnorm": "string",
+            "source": "string",
+            "url": "string"
+          }
+        },
+        "drugs": {
+          "[]": "string"
+        },
+        "evidence": {
+          "|": [
+            "=E1",
+            "=E2"
+          ]
+        },
+        "evidence_native": "string",
+        "gene": "string",
+        "guidance_cpic_version": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "hgvs": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "hidden_by_default": "bool",
+        "id": "string",
+        "limitations": {
+          "[]": {
+            "origin": "=genome_facts",
+            "text": "string",
+            "trust": "=untrusted_text"
+          }
+        },
+        "n_sources": "int",
+        "phenotype": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "related_loinc": {
+          "[]": "string"
+        },
+        "rsid": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "sensitive": "bool",
+        "source": {
+          "assay": "=wgs",
+          "sample_id": "string",
+          "tool": "string"
+        },
+        "src": "src_id",
+        "status": "=current",
+        "summary": {
+          "origin": "=genome_facts",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "title": "string",
+        "value": {
+          "activity_score": {
+            "|": [
+              "absent",
+              "float"
+            ]
+          },
+          "alleles": {
+            "|": [
+              "absent",
+              {
+                "[]": {
+                  "origin": "=genome_facts",
+                  "text": "string",
+                  "trust": "=untrusted_text"
+                }
+              }
+            ]
+          },
+          "diplotype": {
+            "|": [
+              "absent",
+              "string"
+            ]
+          },
+          "kiv2_ci95": {
+            "|": [
+              "absent",
+              {
+                "[]": "int"
+              }
+            ]
+          },
+          "kiv2_copies": {
+            "|": [
+              "absent",
+              "int"
+            ]
+          },
+          "marker": {
+            "|": [
+              "absent",
+              {
+                "origin": "=genome_facts",
+                "text": "string",
+                "trust": "=untrusted_text"
+              }
+            ]
+          },
+          "phenotype": {
+            "|": [
+              "absent",
+              "null",
+              "string"
+            ]
+          },
+          "present": {
+            "|": [
+              "absent",
+              "bool"
+            ]
+          }
+        },
+        "variants": {
+          "[]": {
+            "alt": "string",
+            "call_state": {
+              "|": [
+                "=alt",
+                "=ref"
+              ]
+            },
+            "chrom": "string",
+            "clinvar_variation_id": {
+              "|": [
+                "absent",
+                "int"
+              ]
+            },
+            "gt": "string",
+            "hgvs_p": {
+              "|": [
+                "absent",
+                "string"
+              ]
+            },
+            "pos": "int",
+            "ref": "string",
+            "rsid": "string",
+            "zygosity": {
+              "|": [
+                "=het",
+                "=ref"
+              ]
+            }
+          }
+        },
+        "verification": "=provisional",
+        "zygosity": {
+          "|": [
+            "=het",
+            "=ref",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  "db_versions": {
+    "acmg_sf": "string",
+    "clinvar": "date",
+    "cpic": "string",
+    "ipd_imgt_hla": "string",
+    "pgs_catalog": "string",
+    "pharmcat": "string"
+  },
+  "evidence": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "string"
+  },
+  "next_cursor": "null",
+  "not_assessed": {
+    "[]": {
+      "gene": {
+        "|": [
+          "absent",
+          "string"
+        ]
+      },
+      "panel": "string",
+      "reason": {
+        "|": [
+          "=not_run",
+          "=paralog"
+        ]
+      }
+    }
+  },
+  "notice": "string",
+  "profile": "string",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "as_of": "date",
+  "changes": {
+    "[]": "empty"
+  },
+  "changes_vs": "null",
+  "due": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "genome": "null",
+  "medications": {
+    "[]": "empty"
+  },
+  "not_measured_this_time": {
+    "[]": "empty"
+  },
+  "profile": "string",
+  "review_open": "int",
+  "rules_version": "string",
+  "state_hash": "sha256_tagged",
+  "subtitle": "string",
+  "systems": {
+    "[]": {
+      "key": "string",
+      "markers": {
+        "[]": "empty"
+      },
+      "name": "string",
+      "needs": "string",
+      "newest": "null",
+      "rule": "string",
+      "rule_file": "string",
+      "status": "=nodata",
+      "withheld": "bool"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "code": "string",
+  "expires_in_days": "int",
+  "url": "string",
+  "user_id": "uuid"
+}

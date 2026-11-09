@@ -1,0 +1,71 @@
+{
+  "items": {
+    "[]": {
+      "collected_at": {
+        "|": [
+          "datetime_Z",
+          "null"
+        ]
+      },
+      "doc_type": {
+        "|": [
+          "=genomics",
+          "=lab_report",
+          "=other"
+        ]
+      },
+      "filename": {
+        "origin": "=filename",
+        "text": "string",
+        "trust": "=untrusted_text"
+      },
+      "flags": {
+        "apple_health": {
+          "|": [
+            "absent",
+            {
+              "clinical_records": "int",
+              "duplicates": "int",
+              "ecg_documents": "int",
+              "export_date": "string",
+              "metrics": {
+                "[]": "string"
+              },
+              "not_imported": {},
+              "samples": "int"
+            }
+          ]
+        },
+        "import": {
+          "|": [
+            "absent",
+            {
+              "accepted": "int",
+              "document_id": "uuid",
+              "queued": "int",
+              "reasons": {},
+              "skipped": "int"
+            }
+          ]
+        }
+      },
+      "id": "uuid",
+      "open_review": "int",
+      "pages": {
+        "|": [
+          "int",
+          "null"
+        ]
+      },
+      "profile_id": "uuid",
+      "provider_name": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "snippet": "null",
+      "status": "=active"
+    }
+  }
+}

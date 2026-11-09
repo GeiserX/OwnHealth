@@ -1,0 +1,113 @@
+{
+  "grants": {
+    "[]": {
+      "categories": {
+        "[]": {
+          "|": [
+            "=read:documents_text",
+            "=read:genome",
+            "=read:genome_raw",
+            "=read:labs",
+            "=read:records",
+            "=read:sensitive",
+            "=read:summary",
+            "=read:vitals",
+            "=read:wearables",
+            "=write:propose"
+          ]
+        }
+      },
+      "expires_at": "null",
+      "granted_at": "datetime_Z",
+      "profile": "string",
+      "role": {
+        "|": [
+          "=caregiver",
+          "=guardian",
+          "=owner",
+          "=viewer"
+        ]
+      },
+      "user_id": "uuid"
+    }
+  },
+  "members": {
+    "[]": {
+      "display_name": "string",
+      "enrolled": "bool",
+      "invite_pending": "bool",
+      "is_me": "bool",
+      "locale": {
+        "|": [
+          "=en",
+          "=es"
+        ]
+      },
+      "logins": {
+        "oidc": "bool",
+        "passkeys": "int",
+        "password": "bool"
+      },
+      "own_profile": "string",
+      "user_id": "uuid"
+    }
+  },
+  "profiles": {
+    "[]": {
+      "age": "int",
+      "can_manage": "bool",
+      "claimed": "bool",
+      "country": "string",
+      "display_name": "string",
+      "genome_sensitive_agents": "bool",
+      "genome_sensitive_ui": "bool",
+      "id": "uuid",
+      "initials": "string",
+      "is_minor": "bool",
+      "is_self": "bool",
+      "locks": {
+        "[]": "empty"
+      },
+      "relationship": {
+        "|": [
+          "=child",
+          "=parent",
+          "=partner",
+          "=self"
+        ]
+      },
+      "role": {
+        "|": [
+          "=caregiver",
+          "=guardian",
+          "=owner",
+          "=viewer"
+        ]
+      },
+      "scopes": {
+        "[]": {
+          "|": [
+            "=read:documents_text",
+            "=read:genome",
+            "=read:genome_raw",
+            "=read:labs",
+            "=read:records",
+            "=read:sensitive",
+            "=read:summary",
+            "=read:vitals",
+            "=read:wearables",
+            "=write:propose"
+          ]
+        }
+      },
+      "sex_at_birth": {
+        "|": [
+          "=female",
+          "=male"
+        ]
+      },
+      "slug": "string",
+      "unit_pref": "=si"
+    }
+  }
+}

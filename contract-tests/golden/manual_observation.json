@@ -1,0 +1,11 @@
+{
+  "alias_group": "string",
+  "effective_at": "datetime_Z",
+  "id": "uuid",
+  "printed_name": "string",
+  "printed_unit": "string",
+  "printed_value": "string",
+  "src": "src_id",
+  "status": "=current",
+  "supersedes": "null"
+}

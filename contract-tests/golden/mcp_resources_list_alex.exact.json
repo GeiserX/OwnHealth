@@ -1,0 +1,34 @@
+{
+  "resources": [
+    {
+      "description": "Profiles this token may read: slug, relationship, age band, data freshness.",
+      "mimeType": "application/json",
+      "name": "profiles",
+      "uri": "ownhealth://profiles"
+    },
+    {
+      "description": "The rule pack in force, to explain a flag by rule id.",
+      "mimeType": "application/json",
+      "name": "rules",
+      "uri": "ownhealth://rules/ownhealth-rules 0.1.0"
+    },
+    {
+      "description": "The health status of this profile.",
+      "mimeType": "application/json",
+      "name": "alex status",
+      "uri": "ownhealth://profile/alex/status"
+    },
+    {
+      "description": "The health status as markdown.",
+      "mimeType": "text/markdown",
+      "name": "alex status (text)",
+      "uri": "ownhealth://profile/alex/status.md"
+    },
+    {
+      "description": "Who read this profile, 30 days.",
+      "mimeType": "application/json",
+      "name": "alex access log",
+      "uri": "ownhealth://profile/alex/access-log"
+    }
+  ]
+}

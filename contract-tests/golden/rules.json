@@ -1,0 +1,76 @@
+{
+  "cpic": {
+    "license": "string",
+    "retrieved": "date",
+    "source": "string"
+  },
+  "rules": {
+    "[]": {
+      "basis": {
+        "|": [
+          "absent",
+          "string"
+        ]
+      },
+      "cite": "string",
+      "file": "string",
+      "id": "string",
+      "kind": {
+        "|": [
+          "=gene_drug",
+          "=gene_lab",
+          "=lab_range",
+          "=never_measured",
+          "=rcv",
+          "=recency",
+          "=trend"
+        ]
+      },
+      "match": {
+        "|": [
+          "absent",
+          {
+            "[]": "string"
+          }
+        ]
+      },
+      "note": {
+        "|": [
+          "absent",
+          "string"
+        ]
+      },
+      "system": {
+        "|": [
+          "absent",
+          "string"
+        ]
+      },
+      "verify": {
+        "|": [
+          "absent",
+          "string"
+        ]
+      },
+      "window_days": {
+        "|": [
+          "absent",
+          "int"
+        ]
+      }
+    }
+  },
+  "sha256": "sha256_hex",
+  "systems": {
+    "[]": {
+      "file": "string",
+      "key": "string",
+      "name": {
+        "en": "string",
+        "es": "string"
+      },
+      "source": "string"
+    }
+  },
+  "version": "string"
+}

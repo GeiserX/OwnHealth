@@ -1,0 +1,137 @@
+{
+  "candidate_row_id": "uuid",
+  "context_src_ids": "null",
+  "created_at": "datetime_Z",
+  "decided_at": "null",
+  "decided_by": "null",
+  "decision_reason": "null",
+  "document_id": "uuid",
+  "id": "uuid",
+  "kind": "=candidate_row",
+  "observation_id": "null",
+  "payload": {
+    "allowance": "=template_text",
+    "bbox": {
+      "[]": "float"
+    },
+    "cells": {
+      "name": {
+        "bbox": {
+          "[]": "float"
+        },
+        "conf": "float",
+        "text": "string"
+      },
+      "ref_range": {
+        "bbox": {
+          "[]": "float"
+        },
+        "conf": "float",
+        "text": "string"
+      },
+      "unit": {
+        "bbox": {
+          "[]": "float"
+        },
+        "conf": "float",
+        "text": "string"
+      },
+      "value": {
+        "bbox": {
+          "[]": "float"
+        },
+        "conf": "float",
+        "text": "string"
+      }
+    },
+    "checks": {
+      "[]": {
+        "detail": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "name": "string",
+        "ok": "bool",
+        "reason": {
+          "|": [
+            "=implausible",
+            "=suspect_separator",
+            "null"
+          ]
+        }
+      }
+    },
+    "identity": "=matched",
+    "observation": {
+      "alias_group": "string",
+      "candidate_row_id": "uuid",
+      "category": "=laboratory",
+      "derivation_version": "string",
+      "document_id": "uuid",
+      "effective_at": "datetime_Z",
+      "fhir": "null",
+      "interpretation": "=H",
+      "loinc": "string",
+      "method": "null",
+      "printed_flag": "null",
+      "printed_name": "string",
+      "printed_ref_range": "string",
+      "printed_unit": "string",
+      "printed_value": "string",
+      "profile_id": "uuid",
+      "ref_applies": "null",
+      "ref_high": "string",
+      "ref_low": "string",
+      "report_key": "string",
+      "sensitivity": {
+        "[]": "empty"
+      },
+      "source_kind": "string",
+      "specimen": "string",
+      "unit_canonical": "string",
+      "unit_ucum": "string",
+      "value_canonical": "string",
+      "value_cmp": "null",
+      "value_code": "null",
+      "value_num": "string",
+      "value_text": "null"
+    },
+    "page_no": "int",
+    "provisional": "bool",
+    "row_conf": "float",
+    "src": {
+      "actor_id": "null",
+      "actor_kind": "=system",
+      "bbox": {
+        "[]": "float"
+      },
+      "candidate_row_id": "uuid",
+      "document_id": "uuid",
+      "extraction_run_id": "uuid",
+      "id": "null",
+      "import_ref": "null",
+      "kind": "=document_region",
+      "label": "string",
+      "page_no": "int",
+      "profile_id": "uuid"
+    },
+    "why_not": {
+      "[]": "=a check failed"
+    }
+  },
+  "profile_id": "uuid",
+  "proposed_by_token": "null",
+  "reasons": {
+    "[]": {
+      "|": [
+        "=implausible",
+        "=suspect_separator"
+      ]
+    }
+  },
+  "result_ids": "null",
+  "row_conf": "float",
+  "status": "=open"
+}

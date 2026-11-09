@@ -1,0 +1,28 @@
+{
+  "resourceTemplates": [
+    {
+      "description": "Where a cited value came from (get_source without text).",
+      "mimeType": "application/json",
+      "name": "source",
+      "uriTemplate": "ownhealth://source/{src_id}"
+    },
+    {
+      "description": "The health status of one profile.",
+      "mimeType": "application/json",
+      "name": "status",
+      "uriTemplate": "ownhealth://profile/{id}/status"
+    },
+    {
+      "description": "The health status as markdown.",
+      "mimeType": "text/markdown",
+      "name": "status.md",
+      "uriTemplate": "ownhealth://profile/{id}/status.md"
+    },
+    {
+      "description": "This profile's audit entries, 30 days.",
+      "mimeType": "application/json",
+      "name": "access-log",
+      "uriTemplate": "ownhealth://profile/{id}/access-log"
+    }
+  ]
+}

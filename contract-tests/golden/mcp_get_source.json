@@ -1,0 +1,98 @@
+{
+  "as_of": "date",
+  "budget": {
+    "tokens_est": "int",
+    "truncated": "bool"
+  },
+  "data": {
+    "<src>": "src_id",
+    "crop_url": "string",
+    "derived": {
+      "alias_group": "string",
+      "canonical": "int",
+      "canonical_unit": "string",
+      "loinc": "string",
+      "ucum": "string"
+    },
+    "document": {
+      "id": "string",
+      "kind": "=lab_report",
+      "pages": "int",
+      "provider": {
+        "origin": "=pdf_text_layer",
+        "text": "string",
+        "trust": "=untrusted_text"
+      },
+      "received_via": "string",
+      "sha256": "sha256_hex",
+      "status": "=active"
+    },
+    "extraction": {
+      "accepted": "string",
+      "accepted_at": "datetime_Z"
+    },
+    "fact": {
+      "table": "string"
+    },
+    "kind": "=document_region",
+    "location": {
+      "bbox": {
+        "[]": "float"
+      },
+      "page": "int",
+      "units": "=pt"
+    },
+    "printed": {
+      "flag": {
+        "origin": "=pdf_text_layer",
+        "text": "string",
+        "trust": "=untrusted_text"
+      },
+      "name": {
+        "origin": "=pdf_text_layer",
+        "text": "string",
+        "trust": "=untrusted_text"
+      },
+      "range": {
+        "origin": "=pdf_text_layer",
+        "text": "string",
+        "trust": "=untrusted_text"
+      },
+      "unit": {
+        "origin": "=pdf_text_layer",
+        "text": "string",
+        "trust": "=untrusted_text"
+      },
+      "value": {
+        "origin": "=pdf_text_layer",
+        "text": "string",
+        "trust": "=untrusted_text"
+      }
+    },
+    "status": "=current",
+    "text": "null"
+  },
+  "db_versions": {},
+  "evidence": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "empty"
+  },
+  "next_cursor": "null",
+  "not_assessed": {
+    "[]": "empty"
+  },
+  "notice": "string",
+  "profile": "string",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

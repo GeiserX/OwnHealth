@@ -1,0 +1,28 @@
+{
+  "day": "date",
+  "history": {
+    "[]": {
+      "bytes": "int",
+      "calls": "int",
+      "day": "date",
+      "facts": "int",
+      "lookups": "int",
+      "proposals": "int"
+    }
+  },
+  "limits": {
+    "egress_bytes_per_day": "int",
+    "egress_facts_per_day": "int",
+    "genome_raw_lookups_per_day": "int",
+    "proposals_per_day": "int",
+    "rate_per_min": "int"
+  },
+  "today": {
+    "bytes": "int",
+    "calls": "int",
+    "facts": "int",
+    "lookups": "int",
+    "proposals": "int"
+  },
+  "token_id": "uuid"
+}

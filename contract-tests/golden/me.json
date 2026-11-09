@@ -1,0 +1,68 @@
+{
+  "auth": {
+    "kind": "=dev"
+  },
+  "demo": "bool",
+  "household": {
+    "id": "uuid",
+    "name": "string"
+  },
+  "profiles": {
+    "[]": {
+      "age": "int",
+      "country": "string",
+      "display_name": "string",
+      "genome_sensitive_ui": "bool",
+      "id": "uuid",
+      "initials": "string",
+      "is_minor": "bool",
+      "is_self": "bool",
+      "relationship": {
+        "|": [
+          "=child",
+          "=parent",
+          "=partner",
+          "=self"
+        ]
+      },
+      "role": {
+        "|": [
+          "=caregiver",
+          "=guardian",
+          "=owner",
+          "=viewer"
+        ]
+      },
+      "scopes": {
+        "[]": {
+          "|": [
+            "=read:documents_text",
+            "=read:genome",
+            "=read:genome_raw",
+            "=read:labs",
+            "=read:records",
+            "=read:sensitive",
+            "=read:summary",
+            "=read:vitals",
+            "=read:wearables",
+            "=write:propose"
+          ]
+        }
+      },
+      "sex_at_birth": {
+        "|": [
+          "=female",
+          "=male"
+        ]
+      },
+      "slug": "string",
+      "unit_pref": "=si"
+    }
+  },
+  "review_open": "int",
+  "user": {
+    "display_name": "string",
+    "id": "uuid",
+    "locale": "=es"
+  }
+}

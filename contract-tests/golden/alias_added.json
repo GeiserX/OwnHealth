@@ -1,0 +1,5 @@
+{
+  "alias_group": "string",
+  "id": "uuid",
+  "rederived": "int"
+}

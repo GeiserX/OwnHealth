@@ -1,0 +1,9 @@
+{
+  "deleted_wearable_samples": "int",
+  "document_id": "uuid",
+  "retracted_observations": {
+    "[]": "uuid"
+  },
+  "retracted_records": {},
+  "status": "=retracted"
+}

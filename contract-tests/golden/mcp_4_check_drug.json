@@ -1,0 +1,142 @@
+{
+  "as_of": "date",
+  "budget": {
+    "tokens_est": "int",
+    "truncated": "bool"
+  },
+  "data": {
+    "current_medications_relevant": {
+      "[]": {
+        "name": {
+          "origin": "=fhir_note",
+          "text": "string",
+          "trust": "=untrusted_text"
+        },
+        "relation": "string",
+        "relation_text": "string",
+        "since": "date",
+        "src": "src_id"
+      }
+    },
+    "drug": {
+      "codes_as_received": {
+        "[]": "empty"
+      },
+      "cpic_drug_id": "string",
+      "currently_taking": "bool",
+      "genes": {
+        "[]": "string"
+      },
+      "name": "string",
+      "query": "string"
+    },
+    "guidance": {
+      "[]": {
+        "applies_to": "string",
+        "based_on": {
+          "[]": "src_id"
+        },
+        "level": "string",
+        "license": "string",
+        "origin": "=cpic_snapshot",
+        "population": "string",
+        "quote": "string",
+        "recommendation_id": "int",
+        "source": "string",
+        "strength": "string",
+        "url": "string"
+      }
+    },
+    "pgx": {
+      "[]": {
+        "activity_score": "null",
+        "call_state": "=alt",
+        "confidence": "string",
+        "cpic_level": "string",
+        "diplotype": "string",
+        "evidence": "=E1",
+        "gene": "string",
+        "phenotype": "string",
+        "src": "src_id"
+      }
+    },
+    "phenoconversion": {
+      "[]": "empty"
+    },
+    "relevant_labs": {
+      "[]": {
+        "alias_group": "string",
+        "date": {
+          "|": [
+            "date",
+            "null"
+          ]
+        },
+        "flag": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "name": "string",
+        "reason": {
+          "|": [
+            "=enzima muscular en la ficha de la estatina",
+            "=enzimas hepáticas en la ficha de la estatina",
+            "=objetivo del tratamiento"
+          ]
+        },
+        "src": {
+          "|": [
+            "null",
+            "src_id"
+          ]
+        },
+        "stale": "bool",
+        "status": {
+          "|": [
+            "=nodata",
+            "=ok"
+          ]
+        },
+        "unit": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "value": {
+          "|": [
+            "null",
+            "string"
+          ]
+        }
+      }
+    }
+  },
+  "db_versions": {
+    "cpic": "date"
+  },
+  "evidence": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "string"
+  },
+  "next_cursor": "null",
+  "not_assessed": {
+    "[]": "string"
+  },
+  "notice": "string",
+  "profile": "string",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}

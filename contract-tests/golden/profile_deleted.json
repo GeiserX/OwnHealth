@@ -1,0 +1,8 @@
+{
+  "blobs": "int",
+  "deleted": "string",
+  "rows": {
+    "observation": "int",
+    "src": "int"
+  }
+}

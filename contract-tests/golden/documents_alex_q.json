@@ -1,0 +1,25 @@
+{
+  "items": {
+    "[]": {
+      "collected_at": "datetime_Z",
+      "doc_type": "=lab_report",
+      "filename": {
+        "origin": "=filename",
+        "text": "string",
+        "trust": "=untrusted_text"
+      },
+      "flags": {},
+      "id": "uuid",
+      "open_review": "int",
+      "pages": "int",
+      "profile_id": "uuid",
+      "provider_name": "string",
+      "snippet": {
+        "origin": "=pdf_text_layer",
+        "text": "string",
+        "trust": "=untrusted_text"
+      },
+      "status": "=active"
+    }
+  }
+}

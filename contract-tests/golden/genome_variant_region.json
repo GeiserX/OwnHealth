@@ -1,0 +1,37 @@
+{
+  "clipped": {
+    "[]": "empty"
+  },
+  "limitations": {
+    "[]": "string"
+  },
+  "next_cursor": "null",
+  "notice": "string",
+  "query": "string",
+  "records": {
+    "[]": {
+      "alts": {
+        "[]": "string"
+      },
+      "assay": "=wgs",
+      "basis": "string",
+      "call_state": "=alt",
+      "chrom": "string",
+      "dp": "int",
+      "genotype": "string",
+      "gq": "int",
+      "gt": "string",
+      "id": "string",
+      "pos": "int",
+      "ref": "string",
+      "source": "string",
+      "src": "src_id",
+      "zygosity": "=het"
+    }
+  },
+  "region": {
+    "chrom": "string",
+    "end": "int",
+    "start": "int"
+  }
+}

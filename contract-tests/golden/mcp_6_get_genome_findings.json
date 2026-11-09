@@ -1,0 +1,149 @@
+{
+  "as_of": "date",
+  "budget": {
+    "tokens_est": "int",
+    "truncated": "bool"
+  },
+  "data": {
+    "assay": {
+      "build": "string",
+      "callable_fraction": "float",
+      "generated_utc": "datetime_Z",
+      "imported_at": "datetime_offset",
+      "mean_depth": "float",
+      "platform": "string",
+      "raw_files": {
+        "chip_sites": "bool",
+        "gvcf": "bool",
+        "vcf": "bool"
+      },
+      "source_tool": "string",
+      "src": "src_id",
+      "type": "=wgs"
+    },
+    "findings": {
+      "[]": {
+        "activity_score": {
+          "|": [
+            "float",
+            "null"
+          ]
+        },
+        "call_state": {
+          "|": [
+            "=alt",
+            "=ref",
+            "null"
+          ]
+        },
+        "category": {
+          "|": [
+            "=carrier",
+            "=hla",
+            "=pgx",
+            "=risk_marker"
+          ]
+        },
+        "clinvar": {
+          "|": [
+            "null",
+            {
+              "native": "string",
+              "stars": "int",
+              "variation_id": "int"
+            }
+          ]
+        },
+        "confidence": "string",
+        "diplotype": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "drugs": {
+          "[]": "string"
+        },
+        "evidence": {
+          "|": [
+            "=E1",
+            "=E2"
+          ]
+        },
+        "gene": "string",
+        "hgvs": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "id": "string",
+        "phenotype": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "rsid": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "src": "src_id",
+        "verification": "=provisional",
+        "zygosity": {
+          "|": [
+            "=het",
+            "=ref",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  "db_versions": {
+    "acmg_sf": "string",
+    "clinvar": "date",
+    "cpic": "string",
+    "ipd_imgt_hla": "string",
+    "pgs_catalog": "string",
+    "pharmcat": "string"
+  },
+  "evidence": {
+    "[]": "empty"
+  },
+  "generated_at": "datetime_Z",
+  "identity_mode": "=full",
+  "lang": "=es",
+  "limitations": {
+    "[]": "string"
+  },
+  "next_cursor": "null",
+  "not_assessed": {
+    "[]": {
+      "gene": {
+        "|": [
+          "absent",
+          "string"
+        ]
+      },
+      "panel": "string",
+      "reason": {
+        "|": [
+          "=not_run",
+          "=paralog"
+        ]
+      }
+    }
+  },
+  "notice": "string",
+  "profile": "string",
+  "withheld": {
+    "by_scope": {
+      "[]": "empty"
+    },
+    "minor_rule": "int",
+    "sensitive": "int"
+  }
+}
