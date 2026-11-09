@@ -3,10 +3,10 @@
 # version, every tool the deploy recipes call, PDFium's shared libraries, then a demo run against
 # Postgres 17 (readyz, the embedded UI, healthcheck, backup, verify-restore).
 #
-# The `ocr` variant also gets: the pinned models with the sums scripts/fetch-ocr-models.sh pins, and
-# an `ocr` worker (`ownhealth worker`, OWNHEALTH_QUEUES=ocr) beside the app with OWNHEALTH_OCR=1, which
-# must read the demo's scanned page: every OCR job done, none failed. The default image must carry
-# no models.
+# The `ocr` variant also gets: the pinned models with the sums scripts/fetch-ocr-models.sh pins, the
+# licence texts of PaddleOCR and ONNX Runtime, and an `ocr` worker (`ownhealth worker`,
+# OWNHEALTH_QUEUES=ocr) beside the app with OWNHEALTH_OCR=1, which must read the demo's scanned page:
+# every OCR job done, none failed, none left open. The default image must carry no models.
 #
 #   scripts/smoke-image.sh drumsergio/ownhealth:ci                  # CI, after docker build
 #   scripts/smoke-image.sh drumsergio/ownhealth:ci-ocr ocr          # CI, after docker build --target ocr
@@ -60,6 +60,10 @@ if [ "$variant" = ocr ]; then
   got=$(docker run --rm --entrypoint sh "$img" -c "cd $models && sha256sum *")
   diff <(sort <<<"$pinned") <(sort <<<"$got")
   docker run --rm --entrypoint printenv "$img" OWNHEALTH_OCR_MODELS_DIR | grep -qx "$models"
+  # the licence texts of what the variant adds: PaddleOCR (the models), ONNX Runtime (linked in)
+  for f in paddleocr/LICENSE onnxruntime/LICENSE onnxruntime/ThirdPartyNotices.txt; do
+    docker run --rm --entrypoint test "$img" -s "/usr/share/doc/$f" || { echo "the ocr image lacks /usr/share/doc/$f" >&2; exit 1; }
+  done
 else
   if docker run --rm --entrypoint test "$img" -e "$models"; then
     echo "the default image carries OCR models" >&2
@@ -100,6 +104,8 @@ if [ "$variant" = ocr ]; then
     if [ "$open" = 0 ] && [ "$done_jobs" -gt 0 ]; then break; fi
     sleep 1
   done
+  # a job still queued or running after the wait is a hang, even when another one finished
+  test "$open" = 0 || { echo "OCR jobs still open after the wait" >&2; sql "select kind, state from job where queue = 'ocr'"; exit 1; }
   test "$(docker inspect -f '{{.State.Running}}' "$worker")" = true
   failed=$(sql "select count(*) from job where queue = 'ocr' and state not in ('queued', 'running', 'done')")
   test "$failed" = 0 || { sql "select kind, state, last_error from job where queue = 'ocr'"; exit 1; }

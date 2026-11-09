@@ -61,13 +61,14 @@ RUN --mount=type=cache,id=ownhealth-cargo-registry-$TARGETARCH,target=/usr/local
  && cp target/release/ownhealth /out/ownhealth \
  && /out/ownhealth --version
 
-# 3c. The OCR models, downloaded and sha256-checked at build time; never in the repository.
+# 3c. The OCR models, downloaded and sha256-checked at build time; never in the repository. With
+#     them, the licence texts of PaddleOCR (the models) and ONNX Runtime (linked into the binary).
 FROM debian:trixie-20261104-slim AS ocr-models
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 COPY scripts/fetch-ocr-models.sh /usr/local/bin/fetch-ocr-models.sh
-RUN bash /usr/local/bin/fetch-ocr-models.sh /opt/ownhealth/ocr-models
+RUN bash /usr/local/bin/fetch-ocr-models.sh /opt/ownhealth/ocr-models /opt/ownhealth/ocr-licenses
 
 # 4. Runtime: slim, non-root, no build tools. Shared by both targets; each adds its own binary.
 FROM debian:trixie-20261104-slim AS runtime
@@ -103,6 +104,7 @@ CMD ["ownhealth", "serve"]
 FROM runtime AS ocr
 LABEL org.opencontainers.image.title="OwnHealth (OCR)"
 COPY --from=ocr-models /opt/ownhealth/ocr-models /opt/ownhealth/ocr-models
+COPY --from=ocr-models /opt/ownhealth/ocr-licenses/ /usr/share/doc/
 COPY --from=build-ocr /out/ownhealth /usr/local/bin/ownhealth
 ENV OWNHEALTH_OCR_MODELS_DIR=/opt/ownhealth/ocr-models
 
