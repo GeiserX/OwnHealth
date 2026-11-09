@@ -5,8 +5,10 @@
 //! consensus); otherwise it says why it is not valid instead of a number. Information, not diagnosis.
 //!
 //! Percentages are shares of the readings, as the consensus and Nightscout's distribution report count
-//! them. Readings less than a minute apart count once (Nightscout's `uniqSgv`), so two uploaders
-//! writing the same reading, or two sources of one sensor, do not count twice.
+//! them. Readings closer than half the reading interval to the last one kept count once (as Nightscout's
+//! `uniqSgv`), so two uploaders writing the same reading, or two sources of one sensor, do not count
+//! twice, while a 1-minute sensor whose timestamps drift a few seconds keeps every reading. Wear is the
+//! readings kept over the readings the window holds at that interval, capped at 100%.
 
 use chrono::{DateTime, Duration, Utc};
 use ownhealth_core::error::{Error, Result};
@@ -47,8 +49,16 @@ fn round1(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
 }
 
-/// Sorted readings with repeats less than a minute after the last kept one dropped.
-fn uniq(readings: &[(DateTime<Utc>, f64)], start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<(DateTime<Utc>, f64)> {
+/// Readings closer than this are repeats whatever the interval: half the shortest sensor interval.
+const REPEAT_SECONDS: i64 = 30;
+
+/// Sorted readings with repeats less than `min_gap` after the last kept one dropped.
+fn uniq(
+    readings: &[(DateTime<Utc>, f64)],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    min_gap: Duration,
+) -> Vec<(DateTime<Utc>, f64)> {
     let mut r: Vec<(DateTime<Utc>, f64)> = readings
         .iter()
         .copied()
@@ -57,7 +67,7 @@ fn uniq(readings: &[(DateTime<Utc>, f64)], start: DateTime<Utc>, end: DateTime<U
     r.sort_by_key(|x| x.0);
     let mut out: Vec<(DateTime<Utc>, f64)> = Vec::with_capacity(r.len());
     for x in r {
-        if out.last().is_none_or(|last| x.0 - last.0 >= Duration::minutes(1)) {
+        if out.last().is_none_or(|last| x.0 - last.0 >= min_gap) {
             out.push(x);
         }
     }
@@ -85,15 +95,13 @@ pub fn summarize(
             "the reading interval must be at least one minute".into(),
         ));
     }
-    let r = uniq(readings, start, end);
+    // half the interval: a repeat sits seconds from the reading it repeats, the next reading a whole
+    // interval later, so jitter of a few seconds can never drop a reading or merge two
+    let min_gap = Duration::seconds(((interval_minutes * 30.0) as i64).max(REPEAT_SECONDS));
+    let r = uniq(readings, start, end, min_gap);
     let window_min = (end - start).num_seconds() as f64 / 60.0;
     let slots = (window_min / interval_minutes).ceil().max(1.0);
-    let mut covered: Vec<i64> = r
-        .iter()
-        .map(|(t, _)| ((*t - start).num_seconds() as f64 / 60.0 / interval_minutes).floor() as i64)
-        .collect();
-    covered.dedup();
-    let wear = (covered.len() as f64 / slots).min(1.0);
+    let wear = (r.len() as f64 / slots).min(1.0);
     let mut s = CgmSummary {
         start,
         end,
@@ -151,7 +159,7 @@ pub fn infer_interval(readings: &[(DateTime<Utc>, f64)]) -> f64 {
     let mut gaps: Vec<i64> = ts
         .windows(2)
         .map(|w| (w[1] - w[0]).num_seconds())
-        .filter(|g| *g >= 60)
+        .filter(|g| *g >= REPEAT_SECONDS)
         .collect();
     if gaps.is_empty() {
         return DEFAULT_INTERVAL_MINUTES;
@@ -186,7 +194,7 @@ pub async fn cgm_summary(
     .fetch_all(conn)
     .await?;
     let readings: Vec<(DateTime<Utc>, f64)> = rows.into_iter().map(|(t, v)| (t, f64::from(v))).collect();
-    let interval = infer_interval(&uniq(&readings, start, end));
+    let interval = infer_interval(&uniq(&readings, start, end, Duration::seconds(REPEAT_SECONDS)));
     summarize(&readings, start, end, interval)
 }
 
@@ -264,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn repeats_within_a_minute_count_once_and_wear_counts_slots() -> Result<()> {
+    fn repeats_within_half_an_interval_count_once_and_wear_counts_readings() -> Result<()> {
         let mut r = series(14, 5, |_| 100.0);
         // a second uploader writes every reading again 20 s later, all of them high
         let copies: Vec<_> = r.iter().map(|(t, _)| (*t + Duration::seconds(20), 300.0)).collect();
@@ -273,6 +281,12 @@ mod tests {
         assert_eq!(s.readings, 14 * 288);
         assert_eq!(s.in_range_pct, Some(100.0));
         assert_eq!(s.wear_fraction, 1.0);
+        // an uploader that stamps the same readings 90 s late, at a 5-minute interval: still repeats
+        let mut r = series(14, 5, |_| 100.0);
+        let late: Vec<_> = r.iter().map(|(t, _)| (*t + Duration::seconds(90), 300.0)).collect();
+        r.extend(late);
+        let s = summarize(&r, at(0), at(14 * 1440), 5.0)?;
+        assert_eq!((s.readings, s.in_range_pct), (14 * 288, Some(100.0)));
         // a 15-minute Libre setup read as 5-minute slots is a third of the wear
         let r = series(14, 15, |_| 100.0);
         assert!((summarize(&r, at(0), at(14 * 1440), 5.0)?.wear_fraction - 1.0 / 3.0).abs() < 0.001);
@@ -289,6 +303,34 @@ mod tests {
         assert_eq!(infer_interval(&series(1, 10, |_| 1.0)), 5.0);
         assert_eq!(infer_interval(&series(1, 3, |_| 1.0)), 1.0);
         assert_eq!(infer_interval(&series(1, 30, |_| 1.0)), 15.0);
+    }
+
+    /// `days` of readings every `every` minutes, each a few seconds off the minute, as uploaders write them.
+    fn jittered(days: i64, every: i64) -> Vec<(DateTime<Utc>, f64)> {
+        (0..days * 1440 / every)
+            .map(|i| {
+                (
+                    at(i * every) + Duration::seconds([2, -2, 1, -3, 0][(i % 5) as usize]),
+                    120.0,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_fully_worn_sensor_with_jittered_timestamps_is_full_wear() -> Result<()> {
+        for every in [1, 5, 15] {
+            let r = jittered(14, every);
+            let start = at(0) - Duration::seconds(30);
+            let end = start + Duration::days(14);
+            let interval = infer_interval(&uniq(&r, start, end, Duration::seconds(REPEAT_SECONDS)));
+            assert_eq!(interval, every as f64);
+            let s = summarize(&r, start, end, interval)?;
+            assert!(s.valid, "every {every} min: {s:?}");
+            assert_eq!(s.readings, 14 * 1440 / every, "every {every} min");
+            assert!(s.wear_fraction >= 0.999, "every {every} min: {s:?}");
+        }
+        Ok(())
     }
 
     #[test]
