@@ -3750,7 +3750,7 @@ dependencies = [
 
 [[package]]
 name = "ownhealth"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3783,7 +3783,7 @@ dependencies = [
 
 [[package]]
 name = "ownhealth-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3815,7 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "ownhealth-auth"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3839,6 +3839,7 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-normalization",
+ "url",
  "uuid",
  "webauthn-rs",
  "webauthn-rs-core",
@@ -3847,7 +3848,7 @@ dependencies = [
 
 [[package]]
 name = "ownhealth-contract-tests"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3861,7 +3862,7 @@ dependencies = [
 
 [[package]]
 name = "ownhealth-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3892,10 +3893,12 @@ dependencies = [
 
 [[package]]
 name = "ownhealth-devices"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
+ "futures",
  "ownhealth-core",
  "ownhealth-ingest-structured",
  "rusqlite",
@@ -3905,12 +3908,13 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
 [[package]]
 name = "ownhealth-genome"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3933,7 +3937,7 @@ dependencies = [
 
 [[package]]
 name = "ownhealth-inbox"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-imap",
@@ -3958,13 +3962,14 @@ dependencies = [
 
 [[package]]
 name = "ownhealth-ingest-pdf"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
  "flate2",
  "futures",
  "hex",
+ "image",
  "ownhealth-core",
  "ownhealth-ingest-structured",
  "ownhealth-normalize",
@@ -3985,7 +3990,7 @@ dependencies = [
 
 [[package]]
 name = "ownhealth-ingest-structured"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4009,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "ownhealth-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4019,6 +4024,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "http",
+ "image",
  "jsonschema",
  "ownhealth-auth",
  "ownhealth-core",
@@ -4041,12 +4047,13 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "url",
  "uuid",
 ]
 
 [[package]]
 name = "ownhealth-normalize"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4072,26 +4079,36 @@ dependencies = [
 
 [[package]]
 name = "ownhealth-ocr"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "flate2",
+ "futures",
+ "hex",
  "image",
  "oar-ocr",
  "ownhealth-core",
  "ownhealth-ingest-pdf",
  "ownhealth-normalize",
+ "pdfium-render",
+ "regex",
+ "rust_decimal",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "uuid",
 ]
 
 [[package]]
 name = "ownhealth-ops"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4113,7 +4130,7 @@ dependencies = [
 
 [[package]]
 name = "ownhealth-rules"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
