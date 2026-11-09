@@ -1,5 +1,5 @@
 //! v0.2 foundation: the push inboxes authenticate with their source token before anything else, and
-//! every unfinished route answers 501 `not_implemented` only to a caller it has resolved.
+//! the session routes answer only a caller they have resolved.
 
 #[path = "auth_support.rs"]
 mod support;
@@ -32,7 +32,8 @@ async fn push_routes_take_a_source_token_and_nothing_else() -> R {
     let r = c
         .send(Method::POST, push, Some(&body), &[("authorization", &bearer)])
         .await?;
-    assert_eq!((r.status, r.code()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.json["seen"], 0);
     let r = c
         .send(
             Method::POST,
@@ -41,7 +42,8 @@ async fn push_routes_take_a_source_token_and_nothing_else() -> R {
             &[("x-ownhealth-secret", &token)],
         )
         .await?;
-    assert_eq!(r.status, StatusCode::NOT_IMPLEMENTED);
+    // lane B: the Paperless route takes only a Paperless source's token
+    assert_eq!((r.status, r.code()), (StatusCode::FORBIDDEN, "wrong_source"));
 
     let mut wrong = token.clone();
     wrong.pop();
@@ -75,13 +77,18 @@ async fn push_routes_take_a_source_token_and_nothing_else() -> R {
 }
 
 #[tokio::test]
-async fn unfinished_session_routes_answer_501_after_the_login() -> R {
+async fn session_routes_answer_only_after_the_login() -> R {
     let env = Env::new(true).await?;
+    for path in ["/api/inboxes", "/api/profiles/alex/cgm/summary"] {
+        let r = env.anon().get(path).await?;
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{path}");
+    }
     let mut c = env.as_user(env.user("alex")).await?;
     let r = c.get("/api/inboxes").await?;
-    assert_eq!((r.status, r.code()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+    assert_eq!(r.status, StatusCode::OK);
     let r = c.get("/api/profiles/alex/cgm/summary").await?;
-    assert_eq!(r.status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.json["valid"], false);
     let r = c.get("/api/profiles/carmen/cgm/summary").await?;
     assert!(
         matches!(r.status, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN),

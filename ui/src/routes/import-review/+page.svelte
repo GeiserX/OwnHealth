@@ -12,12 +12,17 @@
 		documentFileUrl,
 		getDocument,
 		listDocuments,
+		listInboxes,
 		listJobs,
+		listQuarantine,
 		listReview,
 		rejectReview,
 		retractDocument
 	} from '#lib/api';
 	import type { DocumentDetail, DocumentSummary, JobInfo, ReviewItem } from '#lib/api/types';
+	import type { InboxSource } from '#lib/api/inbox';
+	import AgentContext from '#lib/components/inbox/AgentContext.svelte';
+	import { nearDuplicateOf, paperlessLink, rowGrounding, sourceStatus } from '#lib/logic/inbox';
 	import PageHeader from '#lib/components/PageHeader.svelte';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
@@ -26,13 +31,13 @@
 	import ReviewRow from '#lib/components/pages2/ReviewRow.svelte';
 	import UploadPanel from '#lib/components/pages2/UploadPanel.svelte';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
-	import { day, plain } from '#lib/components/pages2/fmt';
+	import { ago, day, plain } from '#lib/components/pages2/fmt';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { app, currentProfile } from '#lib/state/app.svelte';
 
 	const THRESHOLD = 0.95;
 	const prof = $derived(currentProfile());
-	const queue = new Loader<{ items: ReviewItem[]; docs: DocumentSummary[]; jobs: JobInfo[] }>();
+	const queue = new Loader<{ items: ReviewItem[]; docs: DocumentSummary[]; jobs: JobInfo[]; sources: InboxSource[]; held: number }>();
 	const doc = new Loader<DocumentDetail>();
 	let showUpload = $state(false);
 	let busy = $state(false);
@@ -54,13 +59,16 @@
 		const slug = prof?.slug;
 		if (!slug) return;
 		queue.run(async () => {
-			const [r, d, j] = await Promise.all([
+			const [r, d, j, s, q] = await Promise.all([
 				listReview({ status: 'open', profile: slug }),
 				listDocuments(slug).catch(() => ({ items: [] as DocumentSummary[] })),
-				listJobs().catch(() => ({ jobs: [] as JobInfo[] }))
+				listJobs().catch(() => ({ jobs: [] as JobInfo[] })),
+				// The inbox tiles; a viewer who cannot manage sources (403) just sees the setup tile.
+				listInboxes().catch(() => ({ items: [] as InboxSource[] })),
+				listQuarantine('held').catch(() => ({ items: [] }))
 			]);
 			if (app.me) app.me.review_open = r.open;
-			return { items: r.items, docs: d.items, jobs: j.jobs };
+			return { items: r.items, docs: d.items, jobs: j.jobs, sources: s.items, held: q.items.length };
 		}, slug);
 	}
 	$effect(() => {
@@ -87,7 +95,17 @@
 		doc.run(() => getDocument(id), id);
 	});
 	const rows = $derived(items.filter((i) => i.kind === 'candidate_row' && i.document_id === docId));
-	const others = $derived(items.filter((i) => !(i.kind === 'candidate_row' && i.document_id === docId)));
+	// v0.2: "probably the same as document X" (dedup level 2) is a banner over that document's rows.
+	const near = $derived(nearDuplicateOf(items, docId));
+	const others = $derived(items.filter((i) => !(i.kind === 'candidate_row' && i.document_id === docId) && i.id !== near?.id));
+	const nearOf = $derived.by(() => {
+		const id = (near?.payload as { same_as?: string } | undefined)?.same_as;
+		return id ? { id, doc: (queue.data?.docs ?? []).find((x) => x.id === id) ?? null } : null;
+	});
+	const docNameOf = (id: string) => {
+		const d = (queue.data?.docs ?? []).find((x) => x.id === id);
+		return d ? docLabel(d) : '';
+	};
 	const pg = (i: ReviewItem) => Number((i.payload as { page_no?: number }).page_no ?? 1);
 	const pinfo = $derived(doc.data?.pages_info.find((p) => p.page_no === pageNo) ?? null);
 	const boxes = $derived<Box[]>(
@@ -96,7 +114,7 @@
 			.map((i) => ({
 				id: i.id,
 				bbox: (i.payload as { bbox: number[] }).bbox,
-				tone: i.reasons.includes('possible_injection') ? 'bad' : i.reasons.length ? 'low' : '',
+				tone: i.reasons.includes('possible_injection') || rowGrounding(i) === 'ungrounded' ? 'bad' : i.reasons.length ? 'low' : '',
 				label: String(((i.payload as { observation?: { printed_name?: string } }).observation ?? {}).printed_name ?? '')
 			}))
 	);
@@ -108,6 +126,7 @@
 		for (const n of (d.flags?.hidden_text as number[] | undefined) ?? []) pages.add(n);
 		return [...pages].sort((a, b) => a - b);
 	});
+	const paperlessUrl = $derived(paperlessLink(doc.data?.flags));
 	const untrusted = $derived(!!doc.data?.flags?.possible_injection || flagged.length > 0 || rows.some((r) => r.reasons.includes('possible_injection')));
 	const duplicate = $derived(rows.flatMap((i) => ((i.payload as { checks?: { reason: string | null; detail: string | null }[] }).checks ?? []).filter((c) => c.reason === 'duplicate'))[0] ?? null);
 	const bulkable = $derived(rows.filter((i) => !i.reasons.length && (i.row_conf ?? 0) >= THRESHOLD).length);
@@ -150,8 +169,15 @@
 		{ k: 'i2_in_fhir', d: latest('import.fhir_bundle'), n: count('fhir_unmapped') },
 		{ k: 'i2_in_genome', d: latest('import.genome_facts'), doc: latestDoc('genomics'), n: count('genome_reinterpretation') },
 		{ k: 'i2_in_agent', d: null, n: count('agent_proposal'), sub: 'write:propose' },
-		{ k: 'i2_in_later', d: null, n: null, sub: t('i2_in_later_d'), phase: 'v0.2' }
 	]);
+	// v0.2: one tile for every inbox (mail, folder, Paperless, devices); its count is the quarantine.
+	const inboxTile = $derived.by(() => {
+		const list = queue.data?.sources ?? [];
+		const bad = list.filter((s) => sourceStatus(s) === 'out').length;
+		const last = list.map((s) => s.last_success_at).filter((x): x is string => !!x).sort().at(-1) ?? null;
+		const sub = !list.length ? t('fu_tile_setup') : bad ? tf('fu_tile_failing', { n: bad }) : last ? tf('fu_tile_synced', { when: ago(last) }) : t('fu_st_nodata');
+		return { n: list.length, sub, bad, held: queue.data?.held ?? 0 };
+	});
 	function jobLine(j: JobInfo | null, d?: DocumentSummary | null): string {
 		const doc = j?.document_id ? (queue.data?.docs ?? []).find((x) => x.id === j.document_id) : d;
 		const name = j?.filename ?? (doc ? plain(doc.filename) : null);
@@ -194,12 +220,19 @@
 	{#each tiles as b (b.k)}
 		<div class="ib">
 			<div style="min-width:0">
-				<div style="font-weight:600;font-size:12.5px">{t(b.k)} {#if b.phase}<PhaseChip phase={b.phase} />{/if}</div>
+				<div style="font-weight:600;font-size:12.5px">{t(b.k)}</div>
 				<div class="dim" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{b.sub ?? jobLine(b.d, b.doc)}</div>
 			</div>
 			{#if b.n != null}<span class="c" style="color:{b.n ? 'var(--watch)' : 'var(--dim)'}" aria-label="{b.n} {t('i2_open_items')}">{b.n}</span>{/if}
 		</div>
 	{/each}
+	<a class="ib lnkt" href="/inbox">
+		<div style="min-width:0">
+			<div style="font-weight:600;font-size:12.5px">{t('fu_inbox')}{#if !inboxTile.n} <PhaseChip phase="v0.2" />{/if}</div>
+			<div class="dim" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;{inboxTile.bad ? 'color:var(--out)' : ''}">{inboxTile.sub}</div>
+		</div>
+		{#if inboxTile.n}<span class="c" style="color:{inboxTile.held ? 'var(--watch)' : 'var(--dim)'}" title={t('fu_quarantine')} aria-label="{inboxTile.held} {t('fu_quarantine')}">{inboxTile.held}</span>{/if}
+	</a>
 </div>
 
 {#if actionError}<div class="p2err" role="alert" style="margin-bottom:8px">{actionError}</div>{/if}
@@ -247,6 +280,7 @@
 				<b style="white-space:nowrap">{t('i2_rows')}</b>
 				<span class="dim" style="font-size:12px;white-space:nowrap">{tf('i2_rows_need', { n: rows.length })}</span>
 				<span style="margin-left:auto;display:flex;gap:6px">
+					{#if paperlessUrl}<a class="btn sm" href={paperlessUrl} target="_blank" rel="noopener noreferrer">{t('fu_open_paperless')} ↗</a>{/if}
 					{#if picked.length}<button class="btn sm ok" onclick={acceptPicked} disabled={busy}>{tf('i2_accept_sel', { n: picked.length })}</button>{/if}
 					<button class="btn sm" onclick={() => docId && act(() => bulkAccept(docId, THRESHOLD))} disabled={busy || !bulkable} title={t('i2_bulk_d')}>{t('i2_bulk')} ≥ {THRESHOLD.toFixed(2)}</button>
 					<button class="btn sm no" onclick={() => (rejectingDoc = !rejectingDoc)} aria-expanded={rejectingDoc}>{t('i2_reject_doc')}</button>
@@ -258,6 +292,16 @@
 					<input class="p2in" style="flex:1" bind:value={docReason} required placeholder={t('i2_reject_reason')} aria-label={t('i2_reject_reason')} />
 					<button class="btn sm no" type="submit" disabled={busy}>{t('i2_reject_doc')}</button>
 				</form>
+			{/if}
+			{#if near && docId}
+				<div class="banner dupb" role="note" style="border-color:var(--line2);background:var(--raised)">
+					<span class="muted" style="font-size:12px">{t('i2_dup')} {nearOf?.doc ? tf('fu_dup_doc', { doc: docLabel(nearOf.doc), date: day(nearOf.doc.collected_at) }) : t('fu_dup_unknown')} {tf('fu_dup_pages', { n: Number((near.payload as { pages?: number }).pages ?? 0) })}</span>
+					<span class="p2row" style="margin-left:auto;gap:6px">
+						{#if nearOf}<a class="btn sm" href="?doc={nearOf.id}">{t('fu_dup_compare')}</a>{/if}
+						<button class="btn sm" disabled={busy} onclick={() => near && act(() => dismissReview(near.id, 'kept both'))}>{t('fu_dup_keep')}</button>
+						<button class="btn sm no" disabled={busy} onclick={() => act(async () => { await retractDocument(docId, `duplicate of ${nearOf?.id ?? 'an earlier document'}`); if (near) await dismissReview(near.id, 'duplicate retracted'); })}>{t('fu_dup_reject')}</button>
+					</span>
+				</div>
 			{/if}
 			{#if duplicate}
 				<div class="banner" style="margin:10px 12px;padding:7px 10px;border-color:var(--line2);background:var(--raised)">
@@ -273,6 +317,7 @@
 					checked={!!checked[it.id]}
 					oncheck={(on) => (checked[it.id] = on)}
 					{busy}
+					docName={docNameOf}
 					onselect={() => pick(it.id)}
 					onaccept={(edits) => act(() => acceptReview(it.id, edits))}
 					onreject={(reason) => act(() => rejectReview(it.id, reason))}
@@ -308,7 +353,7 @@
 						<td>
 							<div>{it.kind === 'agent_proposal' ? '◆ ' : ''}{otherTitle(it)}</div>
 							{#if otherText(it)}<pre class="p2untrusted" style="margin-top:4px">{otherText(it)}</pre>{/if}
-							{#if it.context_src_ids?.length}<div class="dim mono" style="font-size:10.5px">{t('i2_based_on')} {it.context_src_ids.join(', ')}</div>{/if}
+							{#if it.kind === 'agent_proposal'}<AgentContext item={it} docName={docNameOf} />{:else if it.context_src_ids?.length}<div class="dim mono" style="font-size:10.5px">{t('i2_based_on')} {it.context_src_ids.join(', ')}</div>{/if}
 						</td>
 						<td class="dim num" style="white-space:nowrap">{day(it.created_at)}</td>
 						<td style="white-space:nowrap;text-align:right">
@@ -347,5 +392,27 @@
 	.imp {
 		grid-template-columns: 430px minmax(0, 1fr);
 		align-items: start;
+	}
+	.dupb {
+		margin: 10px 12px;
+		padding: 7px 10px;
+		flex-wrap: wrap;
+	}
+	@media (max-width: 760px) {
+		.imp {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.inbox {
+			flex-wrap: wrap;
+		}
+		.inbox .ib {
+			flex: 1 1 45%;
+		}
+	}
+	a.lnkt {
+		color: inherit;
+	}
+	a.lnkt:hover {
+		border-color: var(--line2);
 	}
 </style>
