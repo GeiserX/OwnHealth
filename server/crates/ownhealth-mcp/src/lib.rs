@@ -302,6 +302,11 @@ pub fn router_with(rt: Runtime, svc: Arc<dyn Services>) -> Router {
             "/.well-known/oauth-protected-resource",
             get(auth::protected_resource_metadata),
         )
+        // RFC 9728 3.1: the metadata of the resource `/mcp` also lives at the path-suffixed address
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(auth::protected_resource_metadata),
+        )
         .merge(oauth::router())
         .with_state(rt);
     mcp.merge(meta)
