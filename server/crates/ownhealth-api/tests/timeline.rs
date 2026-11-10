@@ -156,7 +156,7 @@ async fn test_timeline_groups_draws_and_dates_records() -> R {
     assert_eq!(out["withheld"], json!({"by_scope": []}));
     let (_, es) = a.get("alex", "/profiles/alex/timeline?lang=es&types=lab").await?;
     assert_eq!(events(&es)[0]["title"], "Analítica · 2 resultados");
-    assert_eq!(events(&es)[0]["detail"], "1 marcados por el laboratorio");
+    assert_eq!(events(&es)[0]["detail"], "1 marcado por el laboratorio");
     Ok(())
 }
 

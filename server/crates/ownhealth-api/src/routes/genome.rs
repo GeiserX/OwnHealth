@@ -214,7 +214,9 @@ pub async fn overview(rt: &Runtime, principal: &Principal, p: &str, min_evidence
         "consent": {"ui": pr.genome_sensitive_ui, "agents": pr.genome_sensitive_agents, "can_change": can_consent},
         "is_minor": gate.minor,
         "limitations": found.limitations,
+        "limitation_codes": found.limitation_codes,
         "notice": NOTICE,
+        "notice_code": "notice",
     }))
 }
 

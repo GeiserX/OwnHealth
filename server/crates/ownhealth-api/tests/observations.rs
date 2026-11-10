@@ -201,7 +201,12 @@ async fn test_trend() -> R {
         .iter()
         .filter_map(|x| x.as_str().map(String::from))
         .collect();
-    assert!(es.iter().any(|x| x.contains("masa molar de cholesterol")), "{es:?}");
+    assert!(
+        es.iter().any(|x| x.contains("masa molar de C27H46O (386,654 g/mol)")),
+        "{es:?}"
+    );
+    assert!(es.iter().any(|x| x.contains("(LOINC 18262-6)")), "{es:?}");
+    assert!(!es.iter().any(|x| x.contains("Cholesterol in LDL")), "{es:?}");
     assert!(!es.iter().any(|x| x.contains("are ") || x.contains("Labs ")), "{es:?}");
     let st = &t["stats"];
     let last = values[2];

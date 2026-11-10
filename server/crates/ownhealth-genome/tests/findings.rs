@@ -398,3 +398,28 @@ async fn guidance_comes_from_the_newest_cpic_version() -> R {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_retracted_facts_file_drives_nothing() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    let (doc, _, _) = e.alex_genome(&mut c).await?;
+    let p = e.profile("alex");
+    assert!(!find(&mut c, p, &open(), ev("E3")).await?.findings.is_empty());
+    sqlx::query("update document set status = 'retracted' where id = $1")
+        .bind(doc)
+        .execute(&mut *c)
+        .await?;
+    let found = find(&mut c, p, &open(), ev("E3")).await?;
+    assert!(found.findings.is_empty() && found.assay.is_none(), "{:?}", found.assay);
+    assert_eq!(
+        found.limitation_codes,
+        vec![json!({"code": "no_genome", "assay": null})]
+    );
+    let pgx = pgx_for_drug(&mut c, p, "clopidogrel", Some(as_of())).await?;
+    assert!(
+        pgx.iter().all(|x| x["coverage"].is_null() && x["phenotype"].is_null()),
+        "{pgx:?}"
+    );
+    Ok(())
+}

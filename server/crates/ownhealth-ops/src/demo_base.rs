@@ -765,7 +765,7 @@ async fn record(conn: &mut PgConnection, kind: &str, body: Value, src: SrcRef) -
 async fn seed_records(conn: &mut PgConnection, ctx: &DemoContext, assigned: &mut Assigned) -> Result<()> {
     let p = |slug: &str| ctx.family.profile(slug);
     let alex_user = ctx.family.user("alex");
-    let entry = "manual entry";
+    let entry = "manual"; // the UI shows it as "entered by hand" in its language
     let src = manual(conn, alex_user, Some("src_m01"), "Rx · 2022-06-20").await?;
     let body = json!({
         "profile_id": p("alex"), "name": "Atorvastatin", "ingredient": "atorvastatin", "strength": "20 mg",
