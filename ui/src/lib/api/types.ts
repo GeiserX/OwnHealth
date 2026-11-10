@@ -553,7 +553,10 @@ export interface GenomeView {
 	consent: { ui: boolean; agents: boolean; can_change: boolean };
 	is_minor: boolean;
 	limitations: string[];
+	/** The same limitations as codes, in the same order, so the page can say them in its language. */
+	limitation_codes?: { code: string; assay: string | null }[];
 	notice: string;
+	notice_code?: string;
 }
 
 export interface DrugCheckView {

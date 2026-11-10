@@ -18,6 +18,7 @@
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
 	import { buildBars, niceStep } from '#lib/logic/axis';
+	import { sourceLabel } from '#lib/logic/format';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const profile = $derived(currentProfile());
@@ -413,7 +414,7 @@
 		<span class="mono">{p.printed}</span><br />
 		{p.date} · {p.lab ?? '—'}{p.method ? ' · ' + methodLabel(p.method) : ''}<br />
 		<span class="dim">{t('h1_printed_range')} {rangeOf(p)}{p.loinc ? ' · LOINC ' + p.loinc : ''}</span><br />
-		<span style="color:#6ea8fe">{tf('h1_open_page', { p: p.src_label ?? p.src })}</span>
+		<span style="color:#6ea8fe">{tf('h1_open_page', { p: sourceLabel(p.src_label ?? p.src, t('src_manual')) })}</span>
 	</Tip>
 {/if}
 

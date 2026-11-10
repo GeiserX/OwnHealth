@@ -12,6 +12,7 @@
 	import RecordsCard from '#lib/components/RecordsCard.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { currentProfile } from '#lib/state/app.svelte';
+	import { sourceLabel } from '#lib/logic/format';
 
 	type Ty = TimelineEvent['type'];
 	// Colours and glyphs from the mockup's TYPES table.
@@ -46,7 +47,7 @@
 	const sources = $derived.by(() => {
 		const m = new Map<string, { country: string | null; n: number }>();
 		for (const e of events) {
-			const key = e.provider ?? e.src_label?.split(' · ')[0] ?? t('h1_unknown_src');
+			const key = e.provider ?? (e.src_label ? sourceLabel(e.src_label.split(' · ')[0], t('src_manual')) : t('h1_unknown_src'));
 			const r = m.get(key) ?? { country: e.country, n: 0 };
 			r.n++;
 			m.set(key, r);

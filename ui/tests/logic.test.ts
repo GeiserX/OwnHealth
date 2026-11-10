@@ -234,7 +234,7 @@ test('hours never read 60 min', () => {
 });
 
 import { errKey, stripErrorName, validationDetail } from '../src/lib/logic/errors.ts';
-import { unitLabel } from '../src/lib/logic/format.ts';
+import { sourceLabel, unitLabel } from '../src/lib/logic/format.ts';
 
 const KEYS = new Set([
 	'err_insufficient_scope', 'err_recovery', 'err_login', 'err_stepup_pw', 'err_refused', 'err_dns', 'err_tls',
@@ -274,4 +274,12 @@ test('units print as people write them', () => {
 	assert.equal(unitLabel('mL/min/1.73m2'), 'mL/min/1.73m²');
 	assert.equal(unitLabel('mg/dL'), 'mg/dL');
 	assert.equal(unitLabel(null), '');
+});
+
+test('a manual source reads in the reader language, alone or with its date', () => {
+	assert.equal(sourceLabel('manual', 'introducido a mano'), 'introducido a mano');
+	assert.equal(sourceLabel('manual · 2026-09-14', 'entered by hand'), 'entered by hand · 2026-09-14');
+	assert.equal(sourceLabel('Entered by hand', 'introducido a mano'), 'introducido a mano');
+	assert.equal(sourceLabel('LabNorte · 2026-09-14 · p2', 'introducido a mano'), 'LabNorte · 2026-09-14 · p2');
+	assert.equal(sourceLabel(null, 'x'), '');
 });

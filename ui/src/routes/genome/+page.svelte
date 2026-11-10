@@ -12,7 +12,7 @@
 	import StepUpDialog from '#lib/components/pages2/StepUpDialog.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
-	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { i18n, t, type Key } from '#lib/i18n/index.svelte';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const OWNGENOME = 'https://github.com/GeiserX/OwnGenome';
@@ -92,6 +92,21 @@
 	});
 	const subTail = $derived(ds ? [...Object.entries(ds.db_versions).filter(([k]) => k === 'clinvar' || k === 'cpic').map(([k, val]) => `${k === 'clinvar' ? 'ClinVar' : 'CPIC'} ${val}`), `${t('i2_ingested')} ${day(ds.imported_at)}`].join(' · ') : '');
 	const sensitiveShown = $derived((g?.findings ?? []).filter((f) => f.sensitive));
+	// The server's limitation codes in the reader's language; an unknown code keeps the server's text.
+	const LIM: Record<string, Key> = {
+		no_genome: 'i2_lim_no_genome',
+		no_vcf: 'i2_lim_no_vcf',
+		variant_only_vcf: 'i2_lim_variant_only',
+		chip_unconfirmed: 'i2_lim_chip',
+		no_cram: 'i2_lim_no_cram'
+	};
+	const limits = $derived(
+		(g?.limitations ?? []).map((text, i) => {
+			const c = g?.limitation_codes?.[i];
+			const key = c && LIM[c.code];
+			return key ? tf(key, { kind: (c.assay ?? '').toUpperCase() }) : text;
+		})
+	);
 	const coverage = $derived.by(() => {
 		const c = g?.coverage ?? [];
 		return { assessed: c.filter((x) => x.state === 'assessed').length, partial: c.filter((x) => x.state === 'partial').map((x) => x.target), total: c.length };
@@ -214,11 +229,11 @@
 			<b style="color:var(--text)">{t('i2_coverage')}</b> · {tf('i2_cov_line', { a: coverage.assessed, n: coverage.total })}{#if coverage.partial.length} · {t('i2_cov_partial')}: {coverage.partial.join(', ')}{/if}
 			· call_state: ref / alt / no_call / not_on_array / not_covered; n/a {t('i2_cs_na')}
 			{#if g.not_assessed.length} · not_assessed: {g.not_assessed.map((x) => x.gene ?? x.panel).join(', ')}{/if}
-			{#each g.limitations as l (l)} · {l}{/each}
+			{#each limits as l (l)} · {l}{/each}
 		</span>
 		<span style="margin-left:auto">{t('i2_ev_legend')}</span>
 	</div>
-	<div class="note" style="margin-top:6px">{plain(g.notice)}</div>
+	<div class="note" style="margin-top:6px">{g.notice_code ? t('i2_gen_notice') : plain(g.notice)}</div>
 {/if}
 
 <SourcePanel />

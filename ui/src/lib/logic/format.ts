@@ -11,3 +11,13 @@ export function unitLabel(u: string | null | undefined): string {
 		.replace(/(?<![A-Za-z])m3(?![\w])/g, 'm³')
 		.replace(/\/uL\b/g, '/µL');
 }
+
+const MANUAL = new Set(['manual', 'manual entry', 'entered by hand']);
+
+/** A source label for people: the server's 'manual' code (and the older English words for it) in the
+ *  reader's language, whether alone or as the first part of 'manual · 2026-09-14'. */
+export function sourceLabel(label: string | null | undefined, manualWord: string): string {
+	if (!label) return '';
+	const [first, ...rest] = label.split(' · ');
+	return MANUAL.has(first.trim().toLowerCase()) ? [manualWord, ...rest].join(' · ') : label;
+}

@@ -17,6 +17,14 @@
 	const RISKY: Scope[] = ['read:genome_raw', 'read:sensitive'];
 	const req = new Loader<OAuthRequestOut>();
 	const id = $derived(page.url.searchParams.get('request') ?? '');
+	// The authorization server sends a person's browser here with ?error=<code>&detail=<text> when it
+	// refused the app's request. The detail is the app's own input echoed back: plain text only.
+	const REFUSED = ['invalid_client', 'invalid_scope', 'invalid_target', 'unsupported_response_type', 'bad_redirect', 'pkce', 'invalid_request'];
+	const refusedCode = $derived.by(() => {
+		const e = page.url.searchParams.get('error');
+		return e ? (REFUSED.includes(e) ? e : 'invalid_request') : null;
+	});
+	const refusedDetail = $derived(page.url.searchParams.get('detail') ?? '');
 	let scopes = $state<string[]>([]);
 	let profiles = $state<string[]>([]);
 	let days = $state(90);
@@ -98,7 +106,19 @@
 			<button class:on={i18n.lang === 'en'} aria-pressed={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
 		</div>
 	</div>
-	{#if !id}
+	{#if refusedCode}
+		<div class="card" role="alert">
+			<h1 style="font-size:17px;margin:0 0 8px">{t('fu_oa_refused')}</h1>
+			<p style="margin:0 0 6px">{t('fu_oa_err_' + refusedCode)}</p>
+			<p class="dim" style="margin:0">{t('fu_oa_refused_d')}</p>
+			{#if refusedDetail}
+				<details class="dim" style="margin-top:10px;font-size:12px">
+					<summary>{t('fu_oa_detail')}</summary>
+					<div class="mono" style="margin-top:4px;word-break:break-word">{refusedDetail}</div>
+				</details>
+			{/if}
+		</div>
+	{:else if !id}
 		<div class="card"><div class="empty">{t('fu_oa_missing')}</div></div>
 	{:else if req.error}
 		{#if 'status' in req.error && (req.error.status === 404 || req.error.status === 410)}

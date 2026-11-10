@@ -1,8 +1,10 @@
 <script lang="ts">
 	// A value's provenance: 'LabNorte · 2026-09-14 · p2'. Click opens the source (page + box).
 	import { t } from '#lib/i18n/index.svelte';
+	import { sourceLabel } from '#lib/logic/format';
 
-	let { label, src, onopen }: { label: string; src?: string | null; onopen?: (src: string) => void } = $props();
+	let { label: raw, src, onopen }: { label: string; src?: string | null; onopen?: (src: string) => void } = $props();
+	const label = $derived(sourceLabel(raw, t('src_manual')));
 </script>
 
 <button

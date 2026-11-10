@@ -232,7 +232,11 @@
 		const p = i.payload as Record<string, unknown>;
 		const inner = p.payload as Record<string, unknown> | undefined;
 		if (i.kind === 'agent_proposal') return String(inner?.text ?? JSON.stringify(inner ?? {}));
-		if (i.kind === 'job_failed') return String(p.error ?? p.last_error ?? '');
+		if (i.kind === 'job_failed') {
+			const err = String(p.error ?? p.last_error ?? '');
+			// the server's code for a locked PDF: say what to do in the reader's language
+			return err.includes('pdf_password:') ? t('ir_pdf_password') : err;
+		}
 		return '';
 	}
 </script>
