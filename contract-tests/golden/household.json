@@ -109,5 +109,8 @@
       "slug": "string",
       "unit_pref": "=si"
     }
+  },
+  "transfer_pending": {
+    "[]": "empty"
   }
 }

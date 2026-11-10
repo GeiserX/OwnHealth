@@ -14,7 +14,7 @@ use ownhealth_auth::{AuthError, sessions};
 use ownhealth_core::Runtime;
 use ownhealth_core::access::Scopes;
 use ownhealth_core::access::{
-    Permission, Principal, accessible_profiles, all_scopes, effective_permission, revoke_grant, scope_set,
+    Permission, Principal, accessible_profiles, all_scopes, effective_permission, majority, revoke_grant, scope_set,
     set_genome_switches, set_grant, set_locks,
 };
 use ownhealth_core::audit::{AuditEvent, write_audit};
@@ -27,7 +27,7 @@ use uuid::Uuid;
 use super::auth::{
     Body, Check, Fail, Params, R, answer, date_field, delete_cookie, detail, ok, person_fields, uuid_param,
 };
-use super::core::{local_today, summaries};
+use super::core::{household_majority, local_today, summaries};
 use crate::error::ApiError;
 use crate::extract::{Caller, SessionCaller};
 
@@ -154,8 +154,10 @@ async fn get_household(State(rt): State<Runtime>, SessionCaller(p): SessionCalle
     .bind(p.user_id)
     .fetch_all(&mut *tx)
     .await?;
+    let aom = household_majority(&mut tx, &perms).await?;
+    let transfer_pending = household::transfer_pending(&mut tx, &perms, local_today()).await?;
     tx.commit().await?;
-    let profiles: Vec<Value> = summaries(&perms, &p, &rt.settings)
+    let profiles: Vec<Value> = summaries(&perms, &p, aom)
         .into_iter()
         .map(|mut row| {
             let id = row["id"].as_str().and_then(|i| Uuid::parse_str(i).ok());
@@ -202,7 +204,53 @@ async fn get_household(State(rt): State<Runtime>, SessionCaller(p): SessionCalle
             })
         })
         .collect();
-    ok(json!({"members": members, "profiles": profiles, "grants": grants}))
+    ok(json!({"members": members, "profiles": profiles, "grants": grants, "transfer_pending": transfer_pending}))
+}
+
+#[derive(Debug, Deserialize)]
+struct SettingsIn {
+    age_of_majority: i32,
+}
+
+/// The household's age of majority. Only the household's owner changes it, with step-up: it decides
+/// who is a minor on every screen and for every agent.
+async fn put_settings(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Body(body): Body<SettingsIn>) -> R {
+    let years = body.age_of_majority;
+    if !household::MAJORITY_RANGE.contains(&years) {
+        let (lo, hi) = (household::MAJORITY_RANGE.start(), household::MAJORITY_RANGE.end());
+        Check::body()
+            .push(
+                "value_error",
+                "age_of_majority",
+                &format!("Between {lo} and {hi}"),
+                json!(years),
+            )
+            .done()?;
+    }
+    let (Some(household_id), Some(uid)) = (p.household_id, p.user_id) else {
+        return Err(ApiError::unauthenticated().into());
+    };
+    let mut tx = rt.pool.begin().await?;
+    if !household::is_household_owner(&mut tx, household_id, uid).await? {
+        return Err(detail(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Only the household's owner changes its settings.",
+        ));
+    }
+    step_up(&mut tx, &p).await?;
+    household::set_majority(&mut tx, household_id, years).await?;
+    audit(
+        &mut tx,
+        &p,
+        Audit {
+            args_summary: Some(format!("age_of_majority={years}")),
+            ..Audit::new("settings_change", "PUT /api/household/settings", None)
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    ok(json!({"age_of_majority": years}))
 }
 
 // ---------------------------------------------------------- people, invites ----
@@ -601,7 +649,10 @@ async fn put_sensitive(
     let turning_on = (body.ui == Some(true) && !perm.profile.genome_sensitive_ui)
         || (body.agents == Some(true) && !perm.profile.genome_sensitive_agents);
     if turning_on {
-        if perm.profile.is_minor(local_today(), rt.settings.age_of_majority) {
+        if perm
+            .profile
+            .is_minor(local_today(), majority(&mut tx, perm.profile.household_id).await?)
+        {
             return Err(detail(
                 StatusCode::CONFLICT,
                 "minor",
@@ -768,6 +819,7 @@ async fn delete_my_account(State(rt): State<Runtime>, SessionCaller(p): SessionC
 pub fn router() -> Router<Runtime> {
     Router::new()
         .route("/household", get(get_household))
+        .route("/household/settings", put(put_settings))
         .route("/household/profiles", post(add_relative))
         .route("/household/invites", post(invite))
         .route("/grants", put(put_grant).delete(delete_grant))

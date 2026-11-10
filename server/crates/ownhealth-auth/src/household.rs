@@ -9,7 +9,11 @@
 use std::collections::BTreeSet;
 
 use chrono::NaiveDate;
-use ownhealth_core::access::{Permission, ProfileIn, create_household, create_profile, set_grant};
+use ownhealth_core::access::{
+    Permission, Profile, ProfileIn, create_household, create_profile, get_profile, majority, set_genome_switches,
+    set_grant,
+};
+use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
 use sqlx::{AssertSqlSafe, Connection, PgConnection};
@@ -283,7 +287,7 @@ pub async fn redeem_invite(conn: &mut PgConnection, code: &str) -> AuthResult<Uu
                 "Someone else manages this profile now. Ask them for a new invite.",
             ));
         }
-        claim_profile(conn, claim, user_id, Some(inviter)).await?;
+        claim_profile(conn, claim, user_id, Some(inviter), chrono::Local::now().date_naive()).await?;
     }
     Ok(user_id)
 }
@@ -305,13 +309,39 @@ pub async fn claim_invite_allowed(conn: &mut PgConnection, profile_id: Uuid, inv
     Ok(ok.unwrap_or(false))
 }
 
+/// A child's profile whose person has reached the household's age of majority on `on`: she takes it
+/// over when she claims it. A relative with no birth date, or who is not the household's child (an
+/// elderly parent), is not.
+pub fn at_majority(profile: &Profile, majority: i32, on: NaiveDate) -> bool {
+    profile.relationship.as_deref() == Some("child") && profile.birth_date.is_some() && !profile.is_minor(on, majority)
+}
+
+/// The slugs among `perms` that wait for their person to take them over: managed by the caller as
+/// guardian, nobody's login yet, and past the age of majority.
+pub async fn transfer_pending(conn: &mut PgConnection, perms: &[Permission], on: NaiveDate) -> Result<Vec<String>> {
+    let Some(first) = perms.first() else {
+        return Ok(Vec::new());
+    };
+    let aom = majority(conn, first.profile.household_id).await?;
+    Ok(perms
+        .iter()
+        .filter(|p| p.role == "guardian" && p.profile.user_id.is_none() && at_majority(&p.profile, aom, on))
+        .map(|p| p.profile.slug.clone())
+        .collect())
+}
+
 /// The person takes over their own profile: it is linked to their login and they become owner.
-/// Existing guardian and caregiver grants stay until the new owner changes them.
+///
+/// A child past the age of majority on `on` takes it over whole: the guardians' grants end, each
+/// written to the audit log as a `grant_change` of hers so she sees who had access and can give it
+/// back, and both sensitive genome switches start off until she turns them on. Otherwise (a minor,
+/// an adult relative) guardian and caregiver grants stay until the new owner changes them.
 pub async fn claim_profile(
     conn: &mut PgConnection,
     profile_id: Uuid,
     user_id: Uuid,
     granted_by: Option<Uuid>,
+    on: NaiveDate,
 ) -> AuthResult<()> {
     let n = sqlx::query("update profile set user_id = $1 where id = $2 and user_id is null")
         .bind(user_id)
@@ -326,6 +356,65 @@ pub async fn claim_profile(
         ));
     }
     set_grant(conn, user_id, profile_id, "owner", None, granted_by, None).await?;
+    let Some(profile) = get_profile(&mut *conn, profile_id).await? else {
+        return Ok(());
+    };
+    if !at_majority(&profile, majority(&mut *conn, profile.household_id).await?, on) {
+        return Ok(());
+    }
+    let ended: Vec<(Uuid, Vec<String>)> = sqlx::query_as(
+        "delete from profile_grant where profile_id = $1 and role = 'guardian' and user_id <> $2 \
+         returning user_id, categories",
+    )
+    .bind(profile_id)
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    set_genome_switches(&mut *conn, profile_id, Some(false), Some(false)).await?;
+    for (guardian, mut categories) in ended {
+        categories.sort();
+        write_audit(
+            &mut *conn,
+            &AuditEvent {
+                actor_id: Some(user_id),
+                tool: Some("claim_profile".into()),
+                profile_id: Some(profile_id),
+                resource_type: Some("user".into()),
+                resource_ids: Some(vec![guardian.to_string()]),
+                args_summary: Some(format!("majority;role=guardian;categories={}", categories.join(","))),
+                ..AuditEvent::new("user", "ui", "grant_change")
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The household's founder: the login whose own profile is the household's `self`. Only they change
+/// household settings.
+pub async fn is_household_owner(conn: &mut PgConnection, household_id: Uuid, user_id: Uuid) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "select exists (select 1 from profile where household_id = $1 and user_id = $2 and relationship = 'self')",
+    )
+    .bind(household_id)
+    .bind(user_id)
+    .fetch_one(conn)
+    .await?)
+}
+
+/// The ages a household may set as its age of majority.
+pub const MAJORITY_RANGE: std::ops::RangeInclusive<i32> = 14..=21;
+
+/// Store the household's age of majority.
+pub async fn set_majority(conn: &mut PgConnection, household_id: Uuid, years: i32) -> Result<()> {
+    sqlx::query(
+        "insert into household_setting (household_id, key, value) values ($1, 'age_of_majority', $2) \
+         on conflict (household_id, key) do update set value = excluded.value",
+    )
+    .bind(household_id)
+    .bind(json!(years))
+    .execute(conn)
+    .await?;
     Ok(())
 }
 

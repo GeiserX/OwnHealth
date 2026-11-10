@@ -11,9 +11,10 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::NaiveDate;
-use ownhealth_core::access::{Permission, Principal, accessible_profiles, effective_permission};
+use ownhealth_core::access::{
+    Permission, Principal, accessible_profiles, effective_permission, env_majority, majority,
+};
 use ownhealth_core::audit::{AuditEvent, write_audit};
-use ownhealth_core::config::Settings;
 use ownhealth_core::documents::document_is_sensitive;
 use ownhealth_core::provenance::resolve_src;
 use ownhealth_core::{Error, Runtime, review};
@@ -78,13 +79,21 @@ fn relationship_rank(r: Option<&str>) -> u8 {
     }
 }
 
+/// The age of majority of the household these profiles belong to (a caller sees one household).
+pub async fn household_majority(conn: &mut sqlx::PgConnection, perms: &[Permission]) -> Result<i32, Error> {
+    match perms.first() {
+        Some(p) => majority(conn, p.profile.household_id).await,
+        None => Ok(env_majority()),
+    }
+}
+
 /// The caller first, then the household as the mockup lists it: partner, children, parents, others.
-pub fn summaries(perms: &[Permission], principal: &Principal, settings: &Settings) -> Vec<Value> {
+pub fn summaries(perms: &[Permission], principal: &Principal, age_of_majority: i32) -> Vec<Value> {
     let today = local_today();
     let mut rows: Vec<(bool, u8, String, Value)> = perms
         .iter()
         .map(|p| {
-            let v = profile_summary(p, principal, today, settings.age_of_majority);
+            let v = profile_summary(p, principal, today, age_of_majority);
             let is_self = v["is_self"].as_bool().unwrap_or(false);
             (
                 !is_self,
@@ -114,6 +123,7 @@ async fn me(State(rt): State<Runtime>, caller: crate::Caller) -> Result<Json<Val
     let perms = accessible_profiles(&mut tx, principal).await?;
     let pids: Vec<Uuid> = perms.iter().map(|p| p.profile.id).collect();
     let open = review::count_open(&mut tx, household_id, Some(&pids)).await?;
+    let aom = majority(&mut tx, household_id).await?;
     tx.commit().await?;
     Ok(Json(json!({
         "user": {
@@ -123,7 +133,7 @@ async fn me(State(rt): State<Runtime>, caller: crate::Caller) -> Result<Json<Val
         },
         "household": {"id": household_id, "name": user.try_get::<String, _>("household_name")?},
         "auth": {"kind": principal.kind},
-        "profiles": summaries(&perms, principal, &rt.settings),
+        "profiles": summaries(&perms, principal, aom),
         "review_open": open,
         "demo": rt.settings.demo,
     })))
@@ -132,8 +142,9 @@ async fn me(State(rt): State<Runtime>, caller: crate::Caller) -> Result<Json<Val
 async fn profiles(State(rt): State<Runtime>, caller: crate::Caller) -> Result<Json<Value>, ApiError> {
     let mut tx = rt.pool.begin().await?;
     let perms = accessible_profiles(&mut tx, &caller.0).await?;
+    let aom = household_majority(&mut tx, &perms).await?;
     tx.commit().await?;
-    Ok(Json(Value::Array(summaries(&perms, &caller.0, &rt.settings))))
+    Ok(Json(Value::Array(summaries(&perms, &caller.0, aom))))
 }
 
 fn unknown_source() -> Fail {
@@ -168,7 +179,11 @@ async fn source(
     if !gate::READ_SCOPES.iter().any(|s| perm.has(s)) {
         return Err(unknown_source());
     }
-    let g = gate::genome_gate(&perm, local_today(), rt.settings.age_of_majority);
+    let g = gate::genome_gate(
+        &perm,
+        local_today(),
+        majority(&mut tx, perm.profile.household_id).await?,
+    );
     let hidden = gate::hidden_reasons(&mut tx, &perm, g, std::slice::from_ref(&src_id)).await?;
     match hidden.get(&src_id) {
         Some(Why::Scope(label)) if label != "genome" => {

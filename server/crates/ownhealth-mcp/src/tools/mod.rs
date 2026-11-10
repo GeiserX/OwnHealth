@@ -158,6 +158,8 @@ pub struct Call<'c> {
     pub usage: Usage,
     pub limits: Limits,
     pub tool: String,
+    /// The profile household's age of majority (`access::majority`), read once per call.
+    pub majority: i32,
 }
 
 impl Call<'_> {
@@ -180,11 +182,7 @@ impl Call<'_> {
     }
 
     pub fn gate(&self) -> ToolResult<GenomeGate> {
-        Ok(gate::genome_gate(
-            self.perm()?,
-            self.as_of.day,
-            self.rt.settings.age_of_majority,
-        ))
+        Ok(gate::genome_gate(self.perm()?, self.as_of.day, self.majority))
     }
 
     pub fn arg_str(&self, key: &str) -> Option<&str> {
@@ -455,6 +453,14 @@ pub async fn parse_as_of(conn: &mut PgConnection, value: Option<&str>) -> ToolRe
 }
 
 /// The database's clock: `recorded_at` comes from it, so a cutoff must too.
+/// The age of majority for the call's profile; a call with no profile reads the environment's.
+pub async fn majority_of(conn: &mut PgConnection, perm: Option<&Permission>) -> Result<i32, Error> {
+    match perm {
+        Some(p) => access::majority(conn, p.profile.household_id).await,
+        None => Ok(access::env_majority()),
+    }
+}
+
 pub async fn db_now(conn: &mut PgConnection) -> ToolResult<DateTime<FixedOffset>> {
     let now: DateTime<Utc> = sqlx::query_scalar("select now()").fetch_one(conn).await?;
     Ok(now.fixed_offset())
@@ -823,6 +829,7 @@ async fn run(
     } else {
         "es".into()
     };
+    let majority = majority_of(&mut *conn, perm.as_ref()).await?;
     let mut call = Call {
         conn: &mut *conn,
         rt,
@@ -839,6 +846,7 @@ async fn run(
         usage,
         limits: lim,
         tool: spec.name.to_string(),
+        majority,
     };
     let answer = run_tool(&mut call).await?;
     let counters = answer.counters;
@@ -908,7 +916,7 @@ pub async fn finish(call: &mut Call<'_>, mut answer: Answer, qhash: &str, secret
     if let Some(perm) = call.perm.as_ref()
         && answer.prune
     {
-        let g = gate::genome_gate(perm, call.as_of.day, call.rt.settings.age_of_majority);
+        let g = gate::genome_gate(perm, call.as_of.day, call.majority);
         let ids = collect_src_ids(&data);
         let hidden = gate::hidden_reasons(&mut *call.conn, perm, g, &ids).await?;
         data = gate::prune(data, &hidden, &mut withheld);

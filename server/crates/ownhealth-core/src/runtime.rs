@@ -24,16 +24,12 @@ impl Runtime {
         let pool = PgPoolOptions::new()
             .max_connections(20)
             .connect_lazy(&settings.sqlx_url())?;
-        let blobs = BlobStore::new(settings.blobs_path())?;
-        Ok(Runtime {
-            settings: Arc::new(settings),
-            pool,
-            blobs,
-        })
+        Runtime::with_pool(settings, pool)
     }
 
     pub fn with_pool(settings: Settings, pool: PgPool) -> anyhow::Result<Runtime> {
         let blobs = BlobStore::new(settings.blobs_path())?;
+        crate::access::set_env_majority(settings.age_of_majority);
         Ok(Runtime {
             settings: Arc::new(settings),
             pool,
