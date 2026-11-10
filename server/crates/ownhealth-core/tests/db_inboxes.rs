@@ -523,3 +523,33 @@ async fn the_same_fact_from_a_second_source_is_one_observation_with_two_links() 
     assert_eq!(count(&mut c, "select count(*) from observation_link").await?, 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_date_only_fact_finds_the_same_value_stored_just_after_local_midnight() -> R {
+    let db = TestDb::new().await?;
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    let alex = f.profile("alex");
+    // a value entered for 14 September at 00:30 in Madrid: 13 September in UTC
+    let mut first = obs(alex, "131");
+    first.effective_at = chrono::DateTime::parse_from_rfc3339("2026-09-14T00:30:00+02:00")?;
+    let committed =
+        commit_observation(&mut c, &first, &SrcRef::New(manual_src()), CommitOptions::new("person")).await?;
+    // a PDF that printed only "14/09/2026": stored as midnight UTC of that date
+    let mut date_only = obs(alex, "131");
+    date_only.effective_at = chrono::DateTime::parse_from_rfc3339("2026-09-14T00:00:00+00:00")?;
+    assert_eq!(
+        match_observation(&mut c, &date_only, None, false).await?,
+        ObservationMatch::Review {
+            observation_id: committed.id,
+            reason: "collection_time_unknown".into()
+        }
+    );
+    // two days away is another draw
+    date_only.effective_at = chrono::DateTime::parse_from_rfc3339("2026-09-16T00:00:00+00:00")?;
+    assert_eq!(
+        match_observation(&mut c, &date_only, None, false).await?,
+        ObservationMatch::New
+    );
+    Ok(())
+}

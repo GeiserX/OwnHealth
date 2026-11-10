@@ -593,11 +593,10 @@ async fn with_ocr_on_scans_and_images_go_to_the_ocr_queue_not_to_review() -> R {
         .await?;
     assert_eq!(state, "off");
     assert_eq!(items(&mut c, other, Some("pending_document")).await?.len(), 1);
-    // the same scan with other bytes is also "probably the same as" the first (dedup level 2)
-    let near = items(&mut c, other, Some("near_duplicate")).await?;
-    assert_eq!(near.len(), 1);
-    assert_eq!(near[0]["payload"]["same_as"], json!(scan.to_string()));
-    assert_eq!(items(&mut c, other, None).await?.len(), 2);
+    // a scan has no words yet, and its pHash alone never decides "probably the same" (dedup level
+    // 2): every report from one lab template looks alike
+    assert!(items(&mut c, other, Some("near_duplicate")).await?.is_empty());
+    assert_eq!(items(&mut c, other, None).await?.len(), 1);
     Ok(())
 }
 

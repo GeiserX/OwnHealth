@@ -5,13 +5,14 @@
 //! 1. **File hash**: the same bytes for the same profile are one document with one more
 //!    `document_source` row (`documents::create_document` does it; [`existing_document`] asks).
 //! 2. **Document fingerprint**: per page a 64-bit pHash of the rendered page (Hamming <= 6) and a
-//!    64-bit simhash of the normalised text (Hamming <= 3). A near-duplicate is still processed, then
+//!    64-bit simhash of the normalised text (Hamming <= 4). Every page needs its simhash: a scan is
+//!    compared once OCR has read it, never on its pHash alone. A near-duplicate is still processed, then
 //!    shown in review as "probably the same as document X" ([`find_near_duplicate`],
 //!    [`flag_near_duplicate`]).
 //! 3. **Observation match**: same profile, analyte group, canonical value, comparator, method and
 //!    collection time, and not two different labs: one observation with one more provenance link
 //!    ([`match_observation`], [`link_observation`]). A missing collection time or a different
-//!    comparator is sent to review, never merged.
+//!    comparator is sent to review, never merged. A fact with no time looks one UTC day either side.
 
 use std::collections::HashMap;
 
@@ -242,8 +243,10 @@ fn prints_of(rows: &[sqlx::postgres::PgRow]) -> Result<HashMap<Uuid, Prints>> {
     Ok(out)
 }
 
-/// Compare two documents page by page: every page needs at least one fingerprint on both sides, and
-/// every fingerprint both sides have must be within its distance.
+/// Compare two documents page by page: every page needs its text simhash on both sides, and every
+/// fingerprint both sides have must be within its distance. The pHash alone never decides: a page of
+/// the same lab template looks the same whatever values it holds (0 to 2 bits apart), so a scan is
+/// compared once OCR has given it words.
 fn compare(a: &Prints, b: &Prints) -> Option<(Option<u32>, Option<u32>)> {
     if a.is_empty() || a.len() != b.len() {
         return None;
@@ -251,25 +254,17 @@ fn compare(a: &Prints, b: &Prints) -> Option<(Option<u32>, Option<u32>)> {
     let (mut max_p, mut max_s): (Option<u32>, Option<u32>) = (None, None);
     for (page, (pa, sa)) in a {
         let (pb, sb) = b.get(page)?;
-        let mut checked = false;
+        let d = hamming((*sa)?, (*sb)?);
+        if d > SIMHASH_MAX_DISTANCE {
+            return None;
+        }
+        max_s = Some(max_s.map_or(d, |m| m.max(d)));
         if let (Some(x), Some(y)) = (pa, pb) {
             let d = hamming(*x, *y);
             if d > PHASH_MAX_DISTANCE {
                 return None;
             }
             max_p = Some(max_p.map_or(d, |m| m.max(d)));
-            checked = true;
-        }
-        if let (Some(x), Some(y)) = (sa, sb) {
-            let d = hamming(*x, *y);
-            if d > SIMHASH_MAX_DISTANCE {
-                return None;
-            }
-            max_s = Some(max_s.map_or(d, |m| m.max(d)));
-            checked = true;
-        }
-        if !checked {
-            return None;
         }
     }
     Some((max_p, max_s))
@@ -390,11 +385,15 @@ pub async fn match_observation(
          o.method, o.effective_at, d.provider_name \
          from observation o left join document d on d.id = o.document_id \
          where o.profile_id = $1 and o.alias_group = $2 and o.status in ('current', 'provisional') \
-           and (o.effective_at at time zone 'UTC')::date = ($3 at time zone 'UTC')::date order by o.recorded_at",
+           and abs((o.effective_at at time zone 'UTC')::date - ($3 at time zone 'UTC')::date) <= $4 \
+         order by o.recorded_at",
     )
     .bind(obs.profile_id)
     .bind(&obs.alias_group)
     .bind(obs.effective_at)
+    // a date with no time is midnight UTC of the printed date, while the same draw entered elsewhere
+    // with its local time can fall on the UTC day before or after: look one day either side
+    .bind(if time_known { 0i32 } else { 1i32 })
     .fetch_all(conn)
     .await?;
     for r in &rows {
@@ -568,7 +567,10 @@ mod tests {
         let near: Prints = [(1, (Some(0b111u64), Some(0b1u64)))].into();
         let far_text: Prints = [(1, (Some(0u64), Some(0xffu64)))].into();
         let none: Prints = [(1, (None, None))].into();
+        let picture_only: Prints = [(1, (Some(0b1u64), None))].into();
         assert_eq!(compare(&a, &near), Some((Some(3), Some(1))));
+        assert_eq!(compare(&a, &picture_only), None, "the pHash alone never decides");
+        assert_eq!(compare(&picture_only, &picture_only), None);
         assert_eq!(compare(&a, &far_text), None);
         assert_eq!(compare(&a, &none), None);
         let two: Prints = [(1, (Some(0u64), None)), (2, (Some(0u64), None))].into();
