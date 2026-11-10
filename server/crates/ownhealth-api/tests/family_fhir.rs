@@ -12,6 +12,7 @@ use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::demo::{DEMO_HOUSEHOLD, seed_demo};
 use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::family::{self, FamilyCondition, LinkChange, Member, MemberIn};
+use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::provenance::{SrcIn, SrcRef};
 use ownhealth_core::testing::TestDb;
 use ownhealth_ingest_structured::fhir::{import_resources, read_entries};
@@ -41,13 +42,79 @@ fn essence(rows: &[Member]) -> Vec<String> {
         .iter()
         .map(|m| {
             format!(
-                "{} {:?} {:?} {:?} {} {:?} {:?}",
-                m.relationship, m.display_name, m.sex_at_birth, m.born_year, m.deceased, m.death_age, m.conditions.0
+                "{} {:?} {:?} {:?} {} {:?} {:?} {:?}",
+                m.relationship,
+                m.display_name,
+                m.sex_at_birth,
+                m.born_year,
+                m.deceased,
+                m.death_age,
+                m.conditions.0,
+                m.sensitivity
             )
         })
         .collect();
     out.sort();
     out
+}
+
+/// The profile's Patient and FamilyMemberHistory files from a real export.
+async fn export_family(db: &TestDb, blobs: &BlobStore, profile: Uuid) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    let mut tx = db.pool.begin().await?;
+    sqlx::query("set transaction isolation level repeatable read")
+        .execute(&mut *tx)
+        .await?;
+    let mut zip_bytes = Cursor::new(Vec::new());
+    export_profile(&mut tx, blobs, profile, &mut zip_bytes, "zip").await?;
+    tx.commit().await?;
+    let mut z = zip::ZipArchive::new(Cursor::new(zip_bytes.into_inner()))?;
+    let mut read = |name: &str| -> anyhow::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        z.by_name(name)?.read_to_end(&mut out)?;
+        Ok(out)
+    };
+    Ok((read("fhir/Patient.ndjson")?, read("fhir/FamilyMemberHistory.ndjson")?))
+}
+
+/// Imports the two files into a fresh profile of a new household, for the same person as `from`.
+async fn import_fresh(
+    c: &mut sqlx::PgConnection,
+    blobs: &BlobStore,
+    from: Uuid,
+    household: &str,
+    ndjson: &[u8],
+) -> anyhow::Result<(Uuid, ImportSummary)> {
+    let row = get_profile(&mut *c, from).await?.expect("profile");
+    let h = create_household(&mut *c, household).await?;
+    let fresh = create_profile(
+        &mut *c,
+        &ProfileIn {
+            household_id: h,
+            slug: row.slug.clone(),
+            display_name: row.display_name.clone(),
+            relationship: Some("self".into()),
+            birth_date: row.birth_date,
+            sex_at_birth: row.sex_at_birth.clone(),
+            country: Some("ES".into()),
+            user_id: None,
+            unit_pref: None,
+        },
+    )
+    .await?;
+    let sha = blobs.put_bytes(ndjson)?;
+    let doc = create_document(
+        &mut *c,
+        &NewDocument {
+            filename: Some("FamilyMemberHistory.ndjson"),
+            ..NewDocument::upload(h, Some(fresh), &sha, "application/fhir+ndjson", ndjson.len() as i64)
+        },
+    )
+    .await?;
+    let (_, entries) = read_entries(ndjson, true)?;
+    let profile = get_profile(&mut *c, fresh).await?.expect("fresh");
+    let (summary, identity) = import_resources(&mut *c, &entries, &profile, doc.id, "restore", None, "FHIR").await?;
+    assert_eq!(identity, "matched");
+    Ok((fresh, summary))
 }
 
 #[tokio::test]
@@ -94,25 +161,15 @@ async fn the_rivera_pedigree_exports_and_imports_back_with_nothing_dropped() -> 
         LinkChange::Keep,
     )
     .await?;
+    // a relative with sensitivity tags: they must come back as the same tags
+    let mut aunt = MemberIn::new(alex, "MAUNT");
+    aunt.sensitivity = vec!["mental_health".into(), "reproductive".into()];
+    family::add(&mut c, &aunt, &SrcRef::New(SrcIn::manual(None)), "person", None, None).await?;
     drop(c);
 
-    let mut tx = db.pool.begin().await?;
-    sqlx::query("set transaction isolation level repeatable read")
-        .execute(&mut *tx)
-        .await?;
-    let mut zip_bytes = Cursor::new(Vec::new());
-    export_profile(&mut tx, &blobs, alex, &mut zip_bytes, "zip").await?;
-    tx.commit().await?;
-    let mut z = zip::ZipArchive::new(Cursor::new(zip_bytes.into_inner()))?;
-    let mut read = |name: &str| -> anyhow::Result<Vec<u8>> {
-        let mut out = Vec::new();
-        z.by_name(name)?.read_to_end(&mut out)?;
-        Ok(out)
-    };
-    let fmh_bytes = read("fhir/FamilyMemberHistory.ndjson")?;
-    let patient_bytes = read("fhir/Patient.ndjson")?;
+    let (patient_bytes, fmh_bytes) = export_family(&db, &blobs, alex).await?;
     let fmh = lines(&fmh_bytes)?;
-    assert_eq!(fmh.len(), 8, "seven relatives and one superseded version");
+    assert_eq!(fmh.len(), 9, "eight relatives and one superseded version");
     let current = fmh
         .iter()
         .find(|r| r["id"] == v2.id.to_string())
@@ -145,41 +202,12 @@ async fn the_rivera_pedigree_exports_and_imports_back_with_nothing_dropped() -> 
 
     // import the two files into a fresh profile for the same person
     let mut c = db.pool.acquire().await?;
-    let alex_row = get_profile(&mut c, alex).await?.expect("alex");
-    let h = create_household(&mut c, "Restore test").await?;
-    let fresh = create_profile(
-        &mut c,
-        &ProfileIn {
-            household_id: h,
-            slug: "alex".into(),
-            display_name: alex_row.display_name.clone(),
-            relationship: Some("self".into()),
-            birth_date: alex_row.birth_date,
-            sex_at_birth: alex_row.sex_at_birth.clone(),
-            country: Some("ES".into()),
-            user_id: None,
-            unit_pref: None,
-        },
-    )
-    .await?;
     let mut ndjson = patient_bytes.clone();
     ndjson.extend_from_slice(&fmh_bytes);
-    let sha = blobs.put_bytes(&ndjson)?;
-    let doc = create_document(
-        &mut c,
-        &NewDocument {
-            filename: Some("FamilyMemberHistory.ndjson"),
-            ..NewDocument::upload(h, Some(fresh), &sha, "application/fhir+ndjson", ndjson.len() as i64)
-        },
-    )
-    .await?;
-    let (_, entries) = read_entries(&ndjson, true)?;
-    let profile = get_profile(&mut c, fresh).await?.expect("fresh");
-    let (summary, identity) = import_resources(&mut c, &entries, &profile, doc.id, "restore", None, "FHIR").await?;
-    assert_eq!(identity, "matched");
+    let (fresh, summary) = import_fresh(&mut c, &blobs, alex, "Restore test", &ndjson).await?;
     assert_eq!(
         (summary.accepted, summary.queued, summary.skipped),
-        (7, 0, 1),
+        (8, 0, 1),
         "{summary:?}"
     );
     let unmapped: i64 =
@@ -192,15 +220,40 @@ async fn the_rivera_pedigree_exports_and_imports_back_with_nothing_dropped() -> 
     let now = family::list(&mut c, alex, true).await?;
     assert_eq!(essence(&back), essence(&now));
     // importing the same file again adds nothing
+    let profile = get_profile(&mut c, fresh).await?.expect("fresh");
+    let sha = blobs.put_bytes(&ndjson)?;
     let doc2 = create_document(
         &mut c,
         &NewDocument {
             filename: Some("again.ndjson"),
-            ..NewDocument::upload(h, Some(fresh), &sha, "application/fhir+ndjson", ndjson.len() as i64)
+            ..NewDocument::upload(
+                profile.household_id,
+                Some(fresh),
+                &sha,
+                "application/fhir+ndjson",
+                ndjson.len() as i64,
+            )
         },
     )
     .await?;
+    let (_, entries) = read_entries(&ndjson, true)?;
     let (again, _) = import_resources(&mut c, &entries, &profile, doc2.id, "restore", None, "FHIR").await?;
     assert_eq!((again.accepted, again.queued), (0, 0), "{again:?}");
+
+    // a second hop: a relative removed in the restored profile stays removed in the next one
+    let sister = back.iter().find(|m| m.relationship == "SIS").expect("sister");
+    family::retract(&mut c, sister.id, "not my sister").await?;
+    drop(c);
+    let (patient2, fmh2) = export_family(&db, &blobs, fresh).await?;
+    let mut ndjson2 = patient2;
+    ndjson2.extend_from_slice(&fmh2);
+    let mut c = db.pool.acquire().await?;
+    let (third, _) = import_fresh(&mut c, &blobs, fresh, "Second restore", &ndjson2).await?;
+    let third_rows = family::list(&mut c, third, true).await?;
+    assert!(
+        third_rows.iter().all(|m| m.relationship != "SIS"),
+        "the removed sister came back"
+    );
+    assert_eq!(essence(&third_rows), essence(&family::list(&mut c, fresh, true).await?));
     Ok(())
 }

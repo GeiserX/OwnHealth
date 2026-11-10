@@ -398,7 +398,12 @@ pub fn fhir(m: &MemberIn) -> Result<Value> {
     let mut labels: Vec<&str> = m
         .sensitivity
         .iter()
-        .map(|s| if s == "mental_health" { "PSY" } else { "SEX" })
+        .filter_map(|s| match s.as_str() {
+            "mental_health" => Some("PSY"),
+            "sexual_health" => Some("SEX"),
+            "reproductive" => Some("SDV"),
+            _ => None,
+        })
         .collect();
     labels.sort_unstable();
     labels.dedup();

@@ -738,10 +738,11 @@ pub fn family_member_history(r: &Value, profile_id: Uuid) -> Mapped {
     if status(r).as_deref() == Some("entered-in-error") {
         return skip("status_entered-in-error");
     }
-    // our own export holds every version, tagged; only the current one is a fact
+    // our own export holds every version, tagged; only the current one is a fact. The export appends
+    // its tag after any it stored from an earlier import, so the last one is the authoritative one.
     let lifecycle = list(r.get("meta"), "tag")
         .iter()
-        .find(|t| t.get("system").and_then(Value::as_str) == Some("urn:ownhealth:lifecycle"))
+        .rfind(|t| t.get("system").and_then(Value::as_str) == Some("urn:ownhealth:lifecycle"))
         .and_then(|t| t.get("code").and_then(Value::as_str));
     if matches!(lifecycle, Some("superseded" | "retracted")) {
         return skip("lifecycle_not_current");
