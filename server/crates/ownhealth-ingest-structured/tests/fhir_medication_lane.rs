@@ -173,13 +173,23 @@ async fn a_patient_report_has_no_prescriber_and_a_blank_coding_is_dropped() -> R
         "effectivePeriod": {"start": "2025-03-01"},
         "informationSource": {"reference": "Practitioner/synthetic-1", "display": "Dra. Synthetic"},
     });
+    // IPS documents reference their entries by fullUrl: the Patient entry is urn:uuid:patient-carmen-ortega
+    let by_urn = json!({
+        "resourceType": "MedicationStatement",
+        "id": "carmen-ortega-omeprazole",
+        "status": "active",
+        "medicationCodeableConcept": {"coding": [{"system": ATC, "code": "A02BC01"}], "text": "Omeprazole 20 mg"},
+        "subject": {"reference": "urn:uuid:patient-carmen-ortega"},
+        "effectivePeriod": {"start": "2025-03-01"},
+        "informationSource": {"reference": "urn:uuid:patient-carmen-ortega", "display": "Carmen Ortega"},
+    });
     let bundle = ips_bundle(
         "carmen-self",
         "Carmen",
         "Ortega",
         NaiveDate::from_ymd_opt(1955, 1, 30).unwrap_or_default(),
         false,
-        &[statement, by_clinician],
+        &[statement, by_clinician, by_urn],
     );
     let doc = store_doc(
         &mut tx,
@@ -209,5 +219,10 @@ async fn a_patient_report_has_no_prescriber_and_a_blank_coding_is_dropped() -> R
         json!([{"system": RXNORM, "code": "617310", "display": "atorvastatin 20 MG Oral Tablet"}])
     );
     assert_eq!(find("Ramipril 5 mg")?["prescriber"], "Dra. Synthetic");
+    assert_eq!(
+        find("Omeprazole 20 mg")?["prescriber"],
+        Value::Null,
+        "a urn:uuid reference to the Patient entry is the patient too"
+    );
     Ok(())
 }

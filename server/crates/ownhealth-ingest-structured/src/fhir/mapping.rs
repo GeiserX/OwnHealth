@@ -708,14 +708,16 @@ pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&s
     };
     // informationSource is whoever reported the statement, often the patient; a requester can be
     // the patient too. A source that names a patient, relative or device is not a prescriber. A
-    // display with no reference and no type is kept: in practice it names the clinician.
+    // display with no reference and no type is kept: in practice it names the clinician. The
+    // referenced entry decides first, because IPS documents reference it by fullUrl (urn:uuid:...).
     let prescriber = r
         .get(who)
         .filter(|w| {
-            let kind = w
-                .get("reference")
+            let reference = w.get("reference").and_then(Value::as_str);
+            let kind = resolve(reference)
+                .and_then(|t| t.get("resourceType"))
                 .and_then(Value::as_str)
-                .and_then(|r| r.rsplit('/').nth(1))
+                .or_else(|| reference.and_then(|r| r.rsplit('/').nth(1)))
                 .or_else(|| w.get("type").and_then(Value::as_str));
             !matches!(kind, Some("Patient" | "RelatedPerson" | "Device"))
         })
