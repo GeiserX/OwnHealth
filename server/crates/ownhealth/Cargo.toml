@@ -47,5 +47,9 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 ownhealth-core = { workspace = true, features = ["testing"] }
+# tests/wording_all.rs reads the seeded demo through ownhealth-rules' test fixtures (tests/common)
+ownhealth-rules = { workspace = true, features = ["testing"] }
+chrono.workspace = true
 tempfile.workspace = true
 tower.workspace = true
+uuid.workspace = true

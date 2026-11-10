@@ -1,6 +1,7 @@
 //! Wording lint (`state/wording.py`): information, never advice. Finds imperative or prescriptive
-//! phrases (en, es) in any output we write ourselves. Verbatim CPIC quotes (`quote`) and wrapped
-//! untrusted text are not ours and are skipped by default; everything else must have 0 hits.
+//! phrases (en, es) in any output we write ourselves. A verbatim quote (`quote`) is not ours and is
+//! skipped only when its object names where it comes from (a non-empty `cite`, `url` or `source`);
+//! wrapped untrusted text is skipped by default; everything else must have 0 hits.
 
 use std::sync::LazyLock;
 
@@ -21,7 +22,7 @@ const ANYWHERE: [&str; 9] = [
 ];
 
 /// Imperative when a sentence starts with it.
-const START_VERBS: [&str; 76] = [
+const START_VERBS: [&str; 83] = [
     "take",
     "stop",
     "start",
@@ -98,6 +99,13 @@ const START_VERBS: [&str; 76] = [
     "vaya",
     "acuda",
     "llame",
+    "evitar",
+    "suspender",
+    "tomar",
+    "dejar de",
+    "no tomar",
+    "reducir",
+    "aumentar",
 ];
 
 static ANY: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(&format!("(?i){}", ANYWHERE.join("|"))).ok());
@@ -106,6 +114,9 @@ static START: LazyLock<Option<Regex>> =
 static SPLIT: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"(?:[.;:!?·()\n]|\s[-–—]\s)+").ok());
 
 pub const SKIP_KEYS: [&str; 1] = ["quote"];
+
+/// The keys that attribute a quote to its source.
+const ATTRIBUTION_KEYS: [&str; 3] = ["cite", "url", "source"];
 
 /// Every imperative phrase in one text.
 pub fn imperative_phrases(text: &str) -> Vec<String> {
@@ -126,6 +137,7 @@ pub fn imperative_phrases(text: &str) -> Vec<String> {
 }
 
 /// Every (json path, phrase) hit in the strings of `obj`; `skip_keys` empty also reads untrusted text.
+/// A `skip_keys` value is skipped only in an object with an attribution (`cite`, `url`, `source`).
 pub fn lint(obj: &Value, skip_keys: &[&str]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     walk(obj, skip_keys, "$", &mut out);
@@ -139,8 +151,11 @@ fn walk(obj: &Value, skip: &[&str], path: &str, out: &mut Vec<(String, String)>)
             if m.get("trust").and_then(Value::as_str) == Some("untrusted_text") && !skip.is_empty() {
                 return;
             }
+            let attributed = ATTRIBUTION_KEYS
+                .iter()
+                .any(|k| m.get(*k).and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty()));
             for (k, v) in m {
-                if !skip.contains(&k.as_str()) {
+                if !attributed || !skip.contains(&k.as_str()) {
                     walk(v, skip, &format!("{path}.{k}"), out);
                 }
             }

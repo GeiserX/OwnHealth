@@ -10,6 +10,7 @@ OwnHealth is a self-hosted personal health record: a web app that keeps a person
 - Dark theme by default; Spanish and English from the first screen.
 - `docs/mockup/index.html` is the visual spec for the UI; the real UI must match it (palette, type, cards, chips, sparklines, layout, copy, es/en).
 - Information, not diagnosis: no imperative medical advice. Status words are OK, Watch, Out, Stale and No data.
+- Every new user-facing text source adds itself to `server/crates/ownhealth/tests/wording_all.rs` (the CI step "Wording lint"). A new cited data file loads through `ownhealth_rules::cited`.
 - Free text sent over MCP is wrapped as `untrusted_text`.
 - Database changes are new numbered SQL files in `migrations/`. Never edit an applied migration.
 - Conventional commits. Every PR runs CI and is never opened as a draft.

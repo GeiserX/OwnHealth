@@ -3754,6 +3754,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
  "clap",
  "http",
  "mime_guess",
@@ -3779,6 +3780,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
