@@ -405,6 +405,149 @@ async fn wearable_trend_uses_the_day_total_for_summed_metrics() -> R {
     Ok(())
 }
 
+/// One wearable_source with daily `hr_resting` rollups on the given days of November 2026.
+async fn hr_days(w: &World, provider: &str, device: &str, days: &[u32], v: f32) -> anyhow::Result<i16> {
+    let pid = w.pid("alex");
+    let sid: i16 = sqlx::query_scalar(
+        "insert into wearable_source (profile_id, provider, device) values ($1, $2, $3) returning id",
+    )
+    .bind(pid)
+    .bind(provider)
+    .bind(device)
+    .fetch_one(&w.db.pool)
+    .await?;
+    for d in days {
+        sqlx::query(
+            "insert into wearable_rollup (profile_id, metric, source_id, bucket, t, n, v_min, v_max, v_avg, v_sum, \
+             v_p10, v_p50, v_p90, coverage) values ($1, 'hr_resting', $2, 'day', $3, 1, $4, $4, $4, $4, $4, $4, $4, 1)",
+        )
+        .bind(pid)
+        .bind(sid)
+        .bind(format!("2026-11-{d:02}T00:00:00Z").parse::<chrono::DateTime<chrono::Utc>>()?)
+        .bind(v)
+        .execute(&w.db.pool)
+        .await?;
+    }
+    Ok(sid)
+}
+
+#[tokio::test]
+async fn wearable_trend_fills_days_from_the_next_source() -> R {
+    // the watch stops on 7 Nov; a push source covers 7, 9 and 10 Nov. The person sees 5-10 Nov.
+    let w = world().await?;
+    hr_days(&w, "apple_health", "Apple Watch", &[5, 6, 7], 55.0).await?;
+    hr_days(&w, "health_auto_export", "Phone push", &[7, 9, 10], 60.0).await?;
+    let c = w.connect_real(&w.tok().await?).await?;
+    let env = c
+        .call(
+            "get_trend",
+            json!({"profile": "alex", "code": "hr_resting", "window": "P30D", "as_of": "2026-11-12"}),
+        )
+        .await?
+        .ok();
+    let dates = col(&env["data"]["points"], "date");
+    assert_eq!(
+        dates,
+        vec![
+            json!("2026-11-05"),
+            json!("2026-11-06"),
+            json!("2026-11-07"),
+            json!("2026-11-09"),
+            json!("2026-11-10")
+        ]
+    );
+    let values: Vec<Option<f64>> = col(&env["data"]["points"], "value").iter().map(Value::as_f64).collect();
+    // 7 Nov comes from the watch, the source first in priority
+    assert_eq!(values, vec![Some(55.0), Some(55.0), Some(55.0), Some(60.0), Some(60.0)]);
+    assert_eq!(env["data"]["unit"], "/min");
+    Ok(())
+}
+
+#[tokio::test]
+async fn trend_names_medication_annotations_it_withholds() -> R {
+    let w = world().await?;
+    let c = w
+        .connect(&w.tok_scopes(scopes(&["read:summary", "read:labs"])).await?)
+        .await?;
+    let env = c
+        .call(
+            "get_trend",
+            json!({"profile": "alex", "code": "LOINC:13457-7", "window": "all"}),
+        )
+        .await?
+        .ok();
+    assert!(strs(&env["withheld"]["by_scope"]).contains(&"records".to_string()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cgm_glucose_answers_to_its_names_and_loinc() -> R {
+    let w = world().await?;
+    let pid = w.pid("alex");
+    let sid: i16 = sqlx::query_scalar(
+        "insert into wearable_source (profile_id, provider, device) values ($1, 'nightscout', 'CGM') returning id",
+    )
+    .bind(pid)
+    .fetch_one(&w.db.pool)
+    .await?;
+    sqlx::query(
+        "insert into wearable_rollup (profile_id, metric, source_id, bucket, t, n, v_min, v_max, v_avg, v_sum, \
+         v_p10, v_p50, v_p90, coverage) values ($1, 'glucose_cgm', $2, 'day', '2026-11-01', 288, 70, 160, \
+         104, 29952, 80, 100, 140, 1)",
+    )
+    .bind(pid)
+    .bind(sid)
+    .execute(&w.db.pool)
+    .await?;
+    let c = w.connect_real(&w.tok().await?).await?;
+    for code in ["glucosa", "LOINC:99504-3"] {
+        let env = c
+            .call(
+                "get_trend",
+                json!({"profile": "alex", "code": code, "window": "all", "as_of": "2026-11-12"}),
+            )
+            .await?
+            .ok();
+        assert_eq!(env["data"]["name"], "glucose_cgm", "{code}");
+        assert_eq!(env["data"]["unit"], "mg/dL", "{code}");
+        assert_eq!(col(&env["data"]["points"], "value"), vec![json!(104.0)], "{code}");
+    }
+    let env = c
+        .call(
+            "search_observations",
+            json!({"profile": "alex", "loinc": "99504-3", "to": "2026-11-12"}),
+        )
+        .await?
+        .ok();
+    assert_eq!(env["data"]["resolved"]["metric"], "glucose_cgm");
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_counts_open_review_rows_it_may_read() -> R {
+    let w = world().await?;
+    let pid = w.pid("alex");
+    for kind in ["candidate_row", "candidate_row", "fhir_unmapped", "job_failed"] {
+        sqlx::query(
+            "insert into review_item (household_id, profile_id, kind, payload) \
+             select household_id, id, $2, '{}' from profile where id = $1",
+        )
+        .bind(pid)
+        .bind(kind)
+        .execute(&w.db.pool)
+        .await?;
+    }
+    let c = w.connect(&w.tok().await?).await?;
+    let env = c.call("get_health_status", json!({"profile": "alex"})).await?.ok();
+    assert_eq!(env["data"]["review_open"], json!(3));
+    let c = w
+        .connect(&w.tok_scopes(scopes(&["read:summary", "read:labs"])).await?)
+        .await?;
+    let env = c.call("get_health_status", json!({"profile": "alex"})).await?.ok();
+    assert_eq!(env["data"]["review_open"], json!(2));
+    Ok(())
+}
+
 #[tokio::test]
 async fn canonical_follows_the_token_unit_preference() -> R {
     let w = world().await?;

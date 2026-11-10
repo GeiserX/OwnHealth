@@ -518,20 +518,33 @@ async fn wearable_src(call: &mut Call<'_>) -> ToolResult<Option<String>> {
     .await?)
 }
 
+/// The wearable metric key a name or code asks for: the slug itself, or `glucose_cgm` for the CGM
+/// glucose names and its LOINC (99504-3).
+fn wearable_key(name: &str) -> String {
+    let slug = slug_of(name);
+    let bare = slug.strip_prefix("loinc_").unwrap_or(&slug);
+    if matches!(bare, "glucose" | "glucosa" | "99504_3") {
+        "glucose_cgm".into()
+    } else {
+        slug
+    }
+}
+
+/// Whether `name` asks for the CGM glucose by a general name ('glucose', 'glucosa'), which a lab
+/// glucose of the same name takes first.
+fn glucose_by_name(name: &str) -> bool {
+    matches!(slug_of(name).as_str(), "glucose" | "glucosa")
+}
+
 async fn wearable_metric(call: &mut Call<'_>, name: &str) -> ToolResult<Option<String>> {
     let pid = call.profile_id()?;
     Ok(
         sqlx::query_scalar("select metric from wearable_rollup where profile_id = $1 and metric = $2 limit 1")
             .bind(pid)
-            .bind(slug_of(name))
+            .bind(wearable_key(name))
             .fetch_optional(&mut *call.conn)
             .await?,
     )
-}
-
-/// A `real` column as Python reads it (the text form, then a float).
-fn real(v: Option<f32>) -> Option<f64> {
-    v.and_then(|x| format!("{x}").parse().ok())
 }
 
 #[derive(Debug, Clone)]
@@ -541,9 +554,12 @@ struct Day {
     v_min: Option<f64>,
     v_max: Option<f64>,
     v_day: Option<f64>,
+    /// The src the day came from: the profile's Apple Health import when the day's source is one.
+    src: Option<String>,
 }
 
-/// Daily rollups of one metric from its preferred source (source_priority, else the busiest one).
+/// Daily rollups of one metric, newest first, one source per day: the best source that has the day
+/// (source_priority, then the default order), as the REST summary picks them.
 async fn rollups(
     call: &mut Call<'_>,
     metric: &str,
@@ -551,58 +567,47 @@ async fn rollups(
     until: NaiveDate,
 ) -> ToolResult<Vec<Day>> {
     let pid = call.profile_id()?;
-    let pref: Option<Vec<i16>> =
-        sqlx::query_scalar("select source_ids from source_priority where profile_id = $1 and metric = $2")
-            .bind(pid)
-            .bind(metric)
-            .fetch_optional(&mut *call.conn)
-            .await?;
-    let source: Option<i16> = match pref.as_ref().and_then(|p| p.first()) {
-        Some(s) => Some(*s),
-        None => {
-            sqlx::query_scalar(
-                "select source_id from wearable_rollup where profile_id = $1 and metric = $2 and bucket = 'day' \
-             group by source_id order by count(*) desc, source_id limit 1",
-            )
-            .bind(pid)
-            .bind(metric)
-            .fetch_optional(&mut *call.conn)
-            .await?
-        }
-    };
-    type Row = (
-        DateTime<Utc>,
-        i32,
-        Option<f32>,
-        Option<f32>,
-        Option<f32>,
-        Option<f32>,
-        f32,
-    );
-    let rows: Vec<Row> = sqlx::query_as(
-        "select t, n, v_min, v_max, v_avg, v_sum, coverage from wearable_rollup \
-         where profile_id = $1 and metric = $2 and bucket = 'day' and source_id = $3 \
-         and ($4::timestamptz is null or t >= $4) and t <= $5 order by t desc",
+    // window "all": from year 1, which Postgres can store (chrono's minimum it cannot)
+    let first = NaiveDate::from_ymd_opt(1, 1, 1).unwrap_or(NaiveDate::MIN);
+    let since_t = start_of_day(since.unwrap_or(first)).with_timezone(&Utc);
+    let until_t = end_of_day(until).with_timezone(&Utc);
+    let points =
+        ownhealth_ingest_structured::wearables::points(&mut *call.conn, pid, metric, since_t, until_t, "day").await?;
+    let apple: HashSet<i16> = sqlx::query_scalar::<_, i16>(
+        "select id from wearable_source where profile_id = $1 and provider = 'apple_health'",
     )
     .bind(pid)
-    .bind(metric)
-    .bind(source)
-    .bind(since.map(|s| start_of_day(s).with_timezone(&Utc)))
-    .bind(end_of_day(until).with_timezone(&Utc))
     .fetch_all(&mut *call.conn)
-    .await?;
-    // the day value: a total for summed metrics (steps, sleep stages), else the mean
-    let total = ownhealth_ingest_structured::wearables::metric(metric).agg == "sum";
-    Ok(rows
+    .await?
+    .into_iter()
+    .collect();
+    let apple_src = if points.iter().any(|p| apple.contains(&p.source_id)) {
+        wearable_src(call).await?
+    } else {
+        None
+    };
+    Ok(points
         .into_iter()
-        .map(|(t, n, v_min, v_max, v_avg, v_sum, _)| Day {
-            t,
-            n,
-            v_min: real(v_min),
-            v_max: real(v_max),
-            v_day: real(if total { v_sum } else { v_avg }),
+        .rev()
+        .map(|p| Day {
+            t: p.t,
+            n: p.n,
+            v_min: p.min,
+            v_max: p.max,
+            v_day: p.value,
+            src: if apple.contains(&p.source_id) {
+                apple_src.clone()
+            } else {
+                None
+            },
         })
         .collect())
+}
+
+/// The metric's unit (`count`, `/min`, `min`, `ms`, `%` ...), null when the metric is unknown.
+fn metric_unit(metric: &str) -> Value {
+    let unit = ownhealth_ingest_structured::wearables::metric(metric).unit;
+    if unit.is_empty() { Value::Null } else { json!(unit) }
 }
 
 fn rnd(v: Option<f64>) -> Value {
@@ -650,8 +655,12 @@ pub async fn search_observations(call: &mut Call<'_>) -> ToolResult<Answer> {
         ));
     }
 
+    let wearable_query = query
+        .as_deref()
+        .filter(|q| !q.is_empty())
+        .or_else(|| loinc.as_deref().filter(|l| wearable_key(l) == "glucose_cgm"));
     if categories.contains(&"wearable")
-        && let Some(q) = query.as_deref().filter(|q| !q.is_empty())
+        && let Some(q) = wearable_query
     {
         let metric = wearable_metric(call, q).await?;
         if metric.is_some() && !call.has("read:wearables") {
@@ -661,7 +670,6 @@ pub async fn search_observations(call: &mut Call<'_>) -> ToolResult<Answer> {
                 *a = set.into_iter().map(Value::String).collect();
             }
         } else if let Some(metric) = metric {
-            let src = wearable_src(call).await?;
             let until_day = match until {
                 Some(u) => u.date_naive(),
                 None => call.as_of.at.map_or(call.as_of.day, |a| a.date_naive()),
@@ -675,9 +683,10 @@ pub async fn search_observations(call: &mut Call<'_>) -> ToolResult<Answer> {
                     "value": rnd(d.v_day),
                     "min": rnd(d.v_min),
                     "max": rnd(d.v_max),
+                    "unit": metric_unit(&metric),
                     "n": d.n,
                     "date": py_date(&d.t.date_naive()),
-                    "src": src,
+                    "src": d.src,
                 }));
             }
             resolved.insert("metric".into(), json!(metric));
@@ -962,11 +971,23 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
     let mut withheld = None;
     let is_loinc = LOINC_RE.is_match(&code);
 
-    let metric = if is_loinc {
+    let mut metric = if is_loinc && wearable_key(&code) != "glucose_cgm" {
         None
     } else {
         wearable_metric(call, &code).await?
     };
+    if metric.is_some() && glucose_by_name(&code) {
+        // a lab glucose of that name comes first; the CGM answers only when there is none
+        let (groups, _) = resolve(call, Some(&code), None).await?;
+        let since_dt = since.map(|s| start_of_day(s).with_timezone(&Utc));
+        if !visible_rows(call, &groups, since_dt, None, &["lab", "vital"])
+            .await?
+            .0
+            .is_empty()
+        {
+            metric = None;
+        }
+    }
     let mut data = Map::new();
     if let Some(metric) = metric {
         if !call.has("read:wearables") {
@@ -978,14 +999,13 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
             .into());
         }
         let days = rollups(call, &metric, since, until).await?;
-        let src = wearable_src(call).await?;
         let raw: Vec<Pt> = days
             .iter()
             .map(|d| Pt {
                 date: d.t.date_naive(),
                 v: d.v_day,
                 n: Some(i64::from(d.n)),
-                src: src.clone(),
+                src: d.src.clone(),
             })
             .collect();
         let span = match since {
@@ -1022,13 +1042,19 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
         data.insert("name".into(), json!(metric));
         data.insert("codes".into(), json!([metric]));
         data.insert("canonical_unit".into(), Value::Null);
+        data.insert("unit".into(), metric_unit(&metric));
         data.insert("resolution".into(), json!(resolution));
         data.insert("coverage_pct".into(), json!(coverage.min(100)));
         data.insert("points".into(), Value::Array(newest_first(points)));
         data.insert("stats".into(), stats_of(series));
         data.insert("annotations".into(), Value::Array(annotations));
-        if src.is_none() {
-            limitations.push(json!("These rollups have no import source recorded."));
+        if days.iter().any(|d| d.src.is_none()) {
+            limitations.push(json!(
+                "Some days come from a device or push source with no import record, so they carry no src id."
+            ));
+        }
+        if !call.has("read:records") {
+            withheld = Some(json!({"by_scope": ["records"]}));
         }
     } else {
         let (groups, resolved) = if is_loinc {
@@ -1037,7 +1063,14 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
             resolve(call, Some(&code), None).await?
         };
         let since_dt = since.map(|s| start_of_day(s).with_timezone(&Utc));
-        let (mut rows, w) = visible_rows(call, &groups, since_dt, None, &["lab", "vital"]).await?;
+        let (mut rows, mut w) = visible_rows(call, &groups, since_dt, None, &["lab", "vital"]).await?;
+        if !call.has("read:records")
+            && let Some(Value::Array(a)) = w.get_mut("by_scope")
+            && !a.iter().any(|v| v == "records")
+        {
+            // medication annotations need read:records
+            a.push(json!("records"));
+        }
         withheld = Some(w);
         rows.sort_by_key(|r| r.effective_at);
         let cans: Vec<Option<(Decimal, Option<String>)>> = if call.units == "as_reported" {

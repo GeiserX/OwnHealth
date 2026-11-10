@@ -173,7 +173,7 @@ Common fields:
 | Citations | Every fact carries `src` (one id or a list). Ids match `^src_[a-z0-9_]+$` (for example `src_a12`, or `src_g_2b3c4d5e` for genome facts), resolve through `get_source` or `ownhealth://source/{src_id}`, and stay stable for the life of the row |
 | Pagination | Opaque `cursor` / `next_cursor`: base64url of `{query_hash, as_of, last_key}` with an HMAC. Stateless. A cursor from a different query or token is rejected |
 | `as_of` | ISO date or datetime. Means "what the store knew then": rows with `recorded_at <= as_of` and `effective_at <= as_of`, minus rows retracted or superseded before `as_of`. A record with no `effective_at` (a condition or medication with an unknown start) counts once its `recorded_at <= as_of`, so current status and `check_drug` still see it. Same `as_of` and same rule pack give the same answer. A re-derivation supersedes the rows it changes ([architecture.md section 13](architecture.md#13-upgrades-and-migrations)), so a past `as_of` returns the derived values (LOINC, canonical value and unit, interpretation) known then |
-| Lifecycle | Every fact has a lifecycle `status`: `provisional` (waiting in the review queue or not yet confirmed), `current`, `superseded` or `retracted`. Clinical verification (`provisional`, `confirmed`) is a separate field beside it. Tools return `current` facts by default; `provisional` ones appear only in `pending[]` |
+| Lifecycle | Every fact has a lifecycle `status`: `provisional` (waiting in the review queue or not yet confirmed), `current`, `superseded` or `retracted`. Clinical verification (`provisional`, `confirmed`) is a separate field beside it. Tools return `current` facts by default; `provisional` ones appear only in `pending[]`. Rows open in the review queue are not facts: `get_health_status` only counts them, in `review_open` (the open rows of that profile whose kind the token's scopes would read), and no tool returns their values |
 | Units | Every value carries the printed `value` and `unit` (the truth layer). A `canonical` block adds the converted value in the token's unit preference (`si`, `conventional` or `as_reported`). Unconvertible units are never dropped: they come back with `canonical: null` and a `limitations` entry |
 | Codes | LOINC for observations, UCUM for units, HGNC for genes, rsID/HGVS/VRS/ClinVar for variants. Drugs carry the CPIC drug id when our alias table knows the drug, and any code (ATC, RxNorm, SNOMED CT) only as it arrived in imported data; we ship no ATC or SNOMED content. Codes are optional enrichment; the printed name is always present |
 | Language | `lang` from the token (es or en). Template text and labels are localized; codes, enums and keys are not |
@@ -241,7 +241,7 @@ Input:
  "additionalProperties":false}
 ```
 
-Output: `rules_version`, `state_hash`, `flags[]`, `medications[]`, `supplements[]`, `active_conditions[]`, `never_measured[]`, `stale[]`, `pending[]`, `corrections[]`, `notes[]`, `data_freshness{}`.
+Output: `rules_version`, `state_hash`, `flags[]`, `medications[]`, `supplements[]`, `active_conditions[]`, `never_measured[]`, `stale[]`, `pending[]`, `corrections[]`, `notes[]`, `data_freshness{}`, `review_open`.
 
 A flag carries only `rank`, `kind`, `rule`, `code`, `text` and `src`: the text already says the value, unit, range and date, so the structured copies are left out to fit 2 KB. `stale[]` and `never_measured[]` carry their structured fields and no `text`. `get_trend` and `search_observations` return the values themselves.
 
