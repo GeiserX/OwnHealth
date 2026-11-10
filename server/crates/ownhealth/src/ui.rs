@@ -46,13 +46,19 @@ impl Ui {
     pub async fn serve(&self, uri: &Uri) -> Response {
         let path = uri.path().trim_start_matches('/');
         if path == "api" || path == "mcp" || path.starts_with("api/") || path.starts_with("mcp/") {
-            return ApiError::not_found().into_response();
+            let mut r = ApiError::not_found().into_response();
+            r.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            return r;
         }
         if !path.is_empty()
             && let Some(data) = self.read(path)
         {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
-            return file(data, mime.as_ref(), None);
+            return file(data, mime.as_ref(), cache_for(path));
+        }
+        if is_asset(path) {
+            return ApiError::not_found().into_response();
         }
         match self.read("index.html") {
             Some(data) => file(data, "text/html; charset=utf-8", Some("no-cache")),
@@ -64,6 +70,25 @@ impl Ui {
             .into_response(),
         }
     }
+}
+
+/// Hashed build output never changes under its name, so a browser keeps it for a year. The service
+/// worker and the version file must be checked on every load, or a new release never reaches it.
+fn cache_for(path: &str) -> Option<&'static str> {
+    if path.starts_with("_app/immutable/") {
+        Some("public, max-age=31536000, immutable")
+    } else if path == "service-worker.js" || path == "_app/version.json" {
+        Some("no-cache")
+    } else {
+        None
+    }
+}
+
+/// A missing build file (a stale hashed chunk, a typo'd icon) answers 404, never the app's HTML:
+/// a script tag that gets index.html back fails with a confusing MIME error instead of a clear miss.
+/// Page routes have no extension in their last segment, so they still fall back to the app.
+fn is_asset(path: &str) -> bool {
+    path.starts_with("_app/") || path.rsplit('/').next().is_some_and(|last| last.contains('.'))
 }
 
 /// Every UI response refuses to be framed, so no other site (a sibling subdomain included, which the
@@ -80,9 +105,36 @@ fn file(data: Cow<'static, [u8]>, content_type: &str, cache: Option<&'static str
         HeaderValue::from_static("frame-ancestors 'none'"),
     );
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     if let Some(c) = cache {
         r.headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static(c));
     }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hashed_files_cache_forever_and_the_worker_never() {
+        assert_eq!(
+            cache_for("_app/immutable/chunks/a1b2.js"),
+            Some("public, max-age=31536000, immutable")
+        );
+        assert_eq!(cache_for("service-worker.js"), Some("no-cache"));
+        assert_eq!(cache_for("_app/version.json"), Some("no-cache"));
+        assert_eq!(cache_for("favicon.png"), None);
+    }
+
+    #[test]
+    fn missing_files_are_assets_and_pages_are_not() {
+        assert!(is_asset("_app/immutable/chunks/gone.js"));
+        assert!(is_asset("_app/whatever"));
+        assert!(is_asset("icons/missing.png"));
+        assert!(!is_asset("timeline"));
+        assert!(!is_asset("biomarkers/ldl"));
+        assert!(!is_asset(""));
+    }
 }

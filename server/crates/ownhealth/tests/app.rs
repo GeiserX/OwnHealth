@@ -38,6 +38,10 @@ async fn runtime(db: &TestDb, dir: &std::path::Path, ui: bool) -> anyhow::Result
         std::fs::write(static_dir.join("index.html"), "<!doctype html><title>OwnHealth</title>")?;
         std::fs::create_dir_all(static_dir.join("_app"))?;
         std::fs::write(static_dir.join("_app/app.js"), "console.log(1)")?;
+        std::fs::create_dir_all(static_dir.join("_app/immutable"))?;
+        std::fs::write(static_dir.join("_app/immutable/a1b2.js"), "x")?;
+        std::fs::write(static_dir.join("_app/version.json"), "{}")?;
+        std::fs::write(static_dir.join("service-worker.js"), "self")?;
     }
     s.static_dir = Some(static_dir);
     Runtime::with_pool(s, db.pool.clone())
@@ -92,6 +96,7 @@ async fn no_ui_page_can_be_framed() -> R {
             "{path}"
         );
         assert_eq!(h("x-frame-options").as_deref(), Some("DENY"), "{path}");
+        assert_eq!(h("x-content-type-options").as_deref(), Some("nosniff"), "{path}");
     }
     Ok(())
 }
@@ -128,6 +133,38 @@ async fn the_ui_falls_back_to_index_but_api_and_mcp_paths_do_not() -> R {
         (s, json_of(&b)["detail"]["code"].clone()),
         (StatusCode::SERVICE_UNAVAILABLE, json!("ui_not_built"))
     );
+    Ok(())
+}
+
+/// Hashed chunks stay cached for a year, the worker and version file are checked on every load, a
+/// missing build file is a plain 404 (never the app's HTML), and no API answer is kept by a cache.
+#[tokio::test]
+async fn files_carry_the_right_cache_and_missing_files_are_404() -> R {
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let app = build_app(runtime(&db, dir.path(), true).await?);
+    let (s, _, cache) = call(&app, get("/_app/immutable/a1b2.js")?).await?;
+    assert_eq!(
+        (s, cache.as_deref()),
+        (StatusCode::OK, Some("public, max-age=31536000, immutable"))
+    );
+    for path in ["/service-worker.js", "/_app/version.json"] {
+        let (s, _, cache) = call(&app, get(path)?).await?;
+        assert_eq!((s, cache.as_deref()), (StatusCode::OK, Some("no-cache")), "{path}");
+    }
+    for path in ["/_app/immutable/gone.js", "/_app/nothing", "/icons/missing.png"] {
+        let (s, b, _) = call(&app, get(path)?).await?;
+        assert!(
+            s == StatusCode::NOT_FOUND && !b.starts_with(b"<!doctype html>"),
+            "{path}"
+        );
+    }
+    let (s, _, cache) = call(&app, get("/timeline")?).await?;
+    assert_eq!((s, cache.as_deref()), (StatusCode::OK, Some("no-cache")));
+    for path in ["/api/me", "/api/nope"] {
+        let (_, _, cache) = call(&app, get(path)?).await?;
+        assert_eq!(cache.as_deref(), Some("no-store"), "{path}");
+    }
     Ok(())
 }
 
