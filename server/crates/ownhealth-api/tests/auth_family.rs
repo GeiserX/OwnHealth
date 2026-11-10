@@ -369,6 +369,34 @@ async fn audit_viewer_scope() -> R {
     Ok(())
 }
 
+// A server-side revocation (a replayed OAuth code) has no token row, only the app's name: the log names
+// the app that lost its access, not "deleted token".
+#[tokio::test]
+async fn audit_names_the_app_of_a_tokenless_row() -> R {
+    let env = Env::new(true).await?;
+    let mut c = env.pool().acquire().await?;
+    write_audit(
+        &mut c,
+        &AuditEvent {
+            actor_id: Some(env.user("alex")),
+            client: Some("Agente de ejemplo".into()),
+            ..AuditEvent::new("token", "mcp", "oauth_reuse_revoked")
+        },
+    )
+    .await?;
+    drop(c);
+    let log = env.as_user(env.user("alex")).await?.get("/api/audit").await?.json;
+    let row = log["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|e| e["action"] == "oauth_reuse_revoked")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(row["actor"], "Agente de ejemplo (token)");
+    Ok(())
+}
+
 // What agents did stays findable however many pages the person opened since: `via=mcp` filters on the
 // server, so a page of 60 is never all page views.
 #[tokio::test]

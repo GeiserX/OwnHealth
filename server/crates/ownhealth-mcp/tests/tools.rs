@@ -361,6 +361,14 @@ async fn check_drug() -> R {
         .unwrap_or_default();
     assert_eq!(keys, ["drug", "relevant_labs"].into_iter().collect());
     assert_eq!(env["withheld"]["by_scope"], json!(["genome", "records"]));
+    // an unknown name can never succeed, so the agent is told to change it, not to retry
+    let e = c
+        .call("check_drug", json!({"profile": "alex", "drug": "zzzzmab"}))
+        .await?
+        .err();
+    assert_eq!(e["code"], "drug_unknown");
+    assert!(e["message"].as_str().unwrap_or_default().contains("zzzzmab"));
+    assert!(e["fix"].as_str().unwrap_or_default().contains("generic name"));
     Ok(())
 }
 

@@ -1212,6 +1212,10 @@ impl Services for Fakes {
                     .collect();
                 return Ok(json!({"drug": {"name": drug, "query": drug}, "pgx": [], "relevant_labs": labs}));
             }
+            // the real lane answers a name outside the drug table this way (ownhealth-rules drugs.rs)
+            if drug.starts_with("zzz") {
+                return Err(Error::NotFound(format!("Unknown drug '{drug}'.")));
+            }
             let g: Option<String> =
                 sqlx::query_scalar("select src_id from genome_finding where profile_id = $1 and gene = 'SLCO1B1'")
                     .bind(profile_id)

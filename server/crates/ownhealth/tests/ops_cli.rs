@@ -66,6 +66,25 @@ async fn cli_verify_restore_exits_non_zero_on_a_mismatch() -> R {
     Ok(())
 }
 
+#[tokio::test]
+async fn cli_reads_the_database_url_from_its_file() -> R {
+    let dir = tempfile::tempdir()?;
+    let db = TestDb::new().await?;
+    let s = db.settings(&dir.path().join("live"))?;
+    let file = dir.path().join("database_url");
+    std::fs::write(&file, &s.database_url)?;
+    // only the _FILE variable, as a compose secret sets it
+    let out = Command::new(BIN)
+        .arg("migrate")
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("OWNHEALTH_DATABASE_URL_FILE", &file)
+        .env("OWNHEALTH_DATA_DIR", &s.data_dir)
+        .output()?;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    Ok(())
+}
+
 fn restic() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)

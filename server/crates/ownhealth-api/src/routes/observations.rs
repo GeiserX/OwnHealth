@@ -469,7 +469,6 @@ fn py_float(x: f64) -> String {
     }
 }
 
-/// Python's `round(x, 1)` for a float.
 /// The chemical formula of a molar-table species ('cholesterol C27H46O' -> 'C27H46O'), which reads
 /// the same in every language; the whole species when it has none.
 fn formula(species: &str) -> &str {
@@ -479,6 +478,7 @@ fn formula(species: &str) -> &str {
     }
 }
 
+/// Python's `round(x, 1)` for a float.
 fn round1(x: f64) -> f64 {
     format!("{x:.1}").parse().unwrap_or(x)
 }

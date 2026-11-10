@@ -52,12 +52,6 @@ enum Cmd {
     },
 }
 
-impl Cmd {
-    fn needs_database(&self) -> bool {
-        !matches!(self, Cmd::Healthcheck)
-    }
-}
-
 /// `host:port` of a database URL, for an error a person can act on (never the password).
 fn db_target(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
@@ -83,19 +77,17 @@ async fn main() -> ExitCode {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
     let cli = Cli::parse();
-    let set = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-    let url = set("OWNHEALTH_DATABASE_URL").or_else(|| set("DATABASE_URL"));
-    if cli.cmd.needs_database() && url.is_none() {
-        eprintln!("error: OWNHEALTH_DATABASE_URL is not set (see .env.example)");
-        return ExitCode::FAILURE;
-    }
     match run(cli.cmd).await {
         Ok(code) => code,
         Err(e) => {
             let text = format!("{e:#}");
             if text.contains("pool timed out") || text.contains("Connection refused") {
-                let at = db_target(url.as_deref().unwrap_or_default());
-                eprintln!("error: could not reach the database at {at} (OWNHEALTH_DATABASE_URL): {text}");
+                // the same source the command used: the variable, its _FILE, or the built-in default
+                let url = Settings::from_env().map(|s| s.database_url).unwrap_or_default();
+                eprintln!(
+                    "error: could not reach the database at {} (set OWNHEALTH_DATABASE_URL, see compose.yaml): {text}",
+                    db_target(&url)
+                );
             } else {
                 eprintln!("error: {text}");
             }
