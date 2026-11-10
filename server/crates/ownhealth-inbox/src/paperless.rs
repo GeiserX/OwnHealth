@@ -6,7 +6,9 @@
 //! (`Egress::home_service`). The Paperless id is `source_ref` and the per-source dedup key, and the
 //! document carries `flags.source_link = {kind: "paperless", id, url}`, the page in Paperless, so the
 //! review queue can link back. Polling fallback every 15 min:
-//! `tags__id__all=<health>&modified__gt=<cursor>`.
+//! `tags__id__all=<health>&modified__gt=<cursor>`, then a reconcile pass over the ids of every
+//! health-tagged document, which pulls any this source never handled. Paperless does not change
+//! `modified` when a tag or a permission is added in bulk, so the cursor alone would miss those.
 //!
 //! Only the id, tags, file name and `modified` of a Paperless document are read. Its title, content,
 //! notes and custom fields are free text anyone with Paperless access can write; they are never
@@ -42,6 +44,8 @@ pub const CHANNEL: &str = "paperless";
 const PAGE_SIZE: u32 = 25;
 /// At most this many list pages per poll (1000 documents); the cursor carries on next time.
 const MAX_PAGES: u32 = 40;
+/// The reconcile pass lists ids only, this many per page, up to MAX_PAGES pages.
+const RECONCILE_PAGE_SIZE: u32 = 100;
 
 #[derive(Debug, Clone, Deserialize)]
 struct Config {
@@ -103,6 +107,13 @@ fn parse_config(config: &Value) -> Result<Config> {
         url::Url::parse(&cfg.base_url).map_err(|_| Error::Invalid("the Paperless base_url is not a URL".into()))?;
     if !matches!(base.scheme(), "http" | "https") {
         return Err(Error::Invalid("the Paperless base_url must be http(s)".into()));
+    }
+    // the API token goes in every request: plain http only to a Paperless on the person's network
+    if base.scheme() == "http" && !cfg.allow_private {
+        return Err(Error::Invalid(
+            "the Paperless base_url must be https, unless Paperless is on your network (allow a private address)"
+                .into(),
+        ));
     }
     Ok(cfg)
 }
@@ -417,8 +428,69 @@ async fn poll(ctx: &JobContext, source: &Source) -> Result<RunOutcome> {
             break;
         }
     }
+    if since.is_some() && !failed {
+        reconcile(ctx, source, &cfg, &client, &tag, &mut out).await?;
+    }
     out.cursor = cursor.map(|m| json!({"modified": m}));
     Ok(out)
+}
+
+/// Pull every health-tagged document this source never handled, whatever its `modified`: a tag or a
+/// permission added with the bulk editor does not touch `modified`, so the cursor never sees it. The
+/// list asks for the few fields we read, and a document handled before costs one lookup, no download.
+async fn reconcile(
+    ctx: &JobContext,
+    source: &Source,
+    cfg: &Config,
+    client: &Client,
+    tag: &str,
+    out: &mut RunOutcome,
+) -> Result<()> {
+    let size = RECONCILE_PAGE_SIZE.to_string();
+    for page in 1..=MAX_PAGES {
+        let n = page.to_string();
+        let q = [
+            ("tags__id__all", tag),
+            ("ordering", "id"),
+            ("page_size", size.as_str()),
+            ("page", n.as_str()),
+            ("fields", "id,tags,original_file_name,modified"),
+        ];
+        let list = client
+            .json(&client.url("/api/documents/", &q)?, "the document list")
+            .await?;
+        let results: Vec<DocMeta> = list["results"]
+            .as_array()
+            .map(|r| {
+                r.iter()
+                    .filter_map(|d| serde_json::from_value(d.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ids: Vec<String> = results.iter().map(|m| m.id.to_string()).collect();
+        let handled: Vec<String> =
+            sqlx::query_scalar("select external_id from source_item where source_id = $1 and external_id = any($2)")
+                .bind(source.id)
+                .bind(&ids)
+                .fetch_all(&ctx.pool)
+                .await?;
+        for meta in results.iter().filter(|m| !handled.contains(&m.id.to_string())) {
+            match pull(&ctx.pool, &ctx.blobs, source, cfg, client, meta).await {
+                Ok(a) => count(out, &a),
+                Err(e) => {
+                    out.seen += 1;
+                    out.problems.push(RunProblem {
+                        code: "pull_failed".into(),
+                        message: format!("document {}: {e}", meta.id),
+                    });
+                }
+            }
+        }
+        if list["next"].is_null() || results.is_empty() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// The `paperless` poller (the fallback when Paperless cannot reach us).

@@ -441,7 +441,7 @@ async fn the_webhook_refuses_what_it_should_and_says_why_on_the_source() -> R {
     let (_, bad) = paperless_source(&a, cfg, "wrong-token").await?;
     assert!(webhook(&a, Some(&bad), &body(9)).await?.0.is_server_error());
     let (lan, lan_token) = paperless_source(&a, json!({"base_url": base, "health_tag": HEALTH_TAG}), PL_TOKEN).await?;
-    assert!(webhook(&a, Some(&lan_token), &body(9)).await?.0.is_server_error());
+    assert!(!webhook(&a, Some(&lan_token), &body(9)).await?.0.is_success());
     let run = last_run(&a, lan.id).await?;
     assert!(run["error"].as_str().is_some_and(|e| e.contains("private")), "{run}");
     assert_eq!(fake.downloads.load(Ordering::SeqCst), 1);
@@ -497,11 +497,44 @@ async fn the_poller_backfills_by_tag_routes_by_tag_and_moves_its_cursor() -> R {
     let o = paperless::poll_paperless(job_ctx(&a), source).await?;
     assert_eq!((o.seen, o.new), (1, 1), "{o:?}");
     let q = fake.list_queries.lock().expect("lock");
-    assert_eq!(
-        q.last().and_then(|q| q.get("modified__gt")).map(String::as_str),
-        Some("2026-09-15T09:00:00+02:00")
+    assert!(
+        q.iter()
+            .any(|q| q.get("modified__gt").map(String::as_str) == Some("2026-09-15T09:00:00+02:00")),
+        "{q:?}"
     );
+    // the reconcile pass lists every health document, and downloads none it already has
     assert_eq!(fake.downloads.load(Ordering::SeqCst), 3);
+    Ok(())
+}
+
+/// Paperless does not change `modified` when a tag is added with the bulk editor, so documents tagged
+/// `health` that way sit before the cursor. The poll still brings them in.
+#[tokio::test]
+async fn documents_tagged_in_bulk_before_the_cursor_still_arrive() -> R {
+    let a = app().await?;
+    let fake = Fake::default();
+    fake.add(meta(7, &[HEALTH_TAG], "2026-09-14T09:00:00+02:00"), report("LN-PL-B7"));
+    let base = serve(fake.clone()).await?;
+    let (source, _) = paperless_source(
+        &a,
+        json!({"base_url": base, "health_tag": HEALTH_TAG, "allow_private": true}),
+        PL_TOKEN,
+    )
+    .await?;
+    let o = paperless::poll_paperless(job_ctx(&a), source.clone()).await?;
+    assert_eq!(o.new, 1, "{o:?}");
+    let mut c = a.conn().await?;
+    sources::save_cursor(&mut c, source.id, o.cursor.as_ref().expect("cursor")).await?;
+    // last year's report, tagged health in bulk now: its modified stays in the past
+    fake.add(meta(3, &[HEALTH_TAG], "2025-10-01T09:00:00+02:00"), report("LN-PL-B3"));
+    let source = sources::get_source(&mut c, source.id).await?.expect("source");
+    let o = paperless::poll_paperless(job_ctx(&a), source.clone()).await?;
+    assert_eq!((o.seen, o.new, o.problems.len()), (1, 1, 0), "{o:?}");
+    assert_eq!(o.cursor, Some(json!({"modified": "2026-09-14T09:00:00+02:00"})));
+    // and the next poll has nothing more to do
+    let o = paperless::poll_paperless(job_ctx(&a), source).await?;
+    assert_eq!((o.seen, o.new), (0, 0), "{o:?}");
+    assert_eq!(fake.downloads.load(Ordering::SeqCst), 2);
     Ok(())
 }
 
@@ -837,7 +870,9 @@ async fn the_same_pdf_by_email_folder_and_paperless_is_one_document() -> R {
     assert!(out.quarantine_id.is_none(), "{out:?}");
 
     // 2. the watched folder
-    let (folder_src, _) = push_source(&a, "folder", None).await?;
+    let (mut folder_src, _) = push_source(&a, "folder", None).await?;
+    // a profile folder is read for profiles the source's creator manages
+    folder_src.created_by = Some(a.family.user("alex"));
     let inbox = a.dir.path().join("inbox");
     std::fs::create_dir_all(inbox.join("alex"))?;
     std::fs::write(inbox.join("alex").join("escaneo.pdf"), &pdf)?;

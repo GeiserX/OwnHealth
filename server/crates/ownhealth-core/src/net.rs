@@ -13,7 +13,8 @@ use std::time::Duration;
 pub struct Egress {
     /// Private, loopback and link-local addresses allowed (a Paperless or Nightscout at home).
     pub allow_private: bool,
-    /// Only `https://` (CIMD documents). Home services may be plain http on the LAN.
+    /// Only `https://` (CIMD documents, and a home service on a public address). Home services may
+    /// be plain http on the LAN.
     pub https_only: bool,
     pub timeout: Duration,
     pub max_bytes: usize,
@@ -30,11 +31,13 @@ impl Egress {
         }
     }
 
-    /// A service the person runs (Paperless, Nightscout): 30 s, 50 MiB.
+    /// A service the person runs (Paperless, Nightscout): 30 s, 50 MiB. Plain http only when it is
+    /// on the person's network (`allow_private`): its API token goes in every request, and on a
+    /// public address it would cross the internet in clear.
     pub fn home_service(allow_private: bool) -> Egress {
         Egress {
             allow_private,
-            https_only: false,
+            https_only: !allow_private,
             timeout: Duration::from_secs(30),
             max_bytes: 50 * 1024 * 1024,
         }
@@ -46,7 +49,7 @@ impl Egress {
 pub enum NetError {
     #[error("not a valid http(s) URL")]
     BadUrl,
-    #[error("only https URLs are allowed here")]
+    #[error("only https URLs are allowed here (plain http only for a service on a private address you allowed)")]
     NotHttps,
     #[error("{0} resolves to a private, loopback or link-local address")]
     PrivateAddress(String),
@@ -257,6 +260,22 @@ mod tests {
         );
         assert!(resolve_checked("127.0.0.1", 80, true).await.is_ok());
         assert!(resolve_checked("localhost", 80, false).await.is_err());
+    }
+
+    /// A token for a Paperless or Nightscout on a public address never goes out over plain http.
+    #[tokio::test]
+    async fn a_home_service_on_a_public_address_needs_https() {
+        let public = Egress::home_service(false);
+        assert_eq!(
+            get(
+                "http://paperless.example.com/api/",
+                &public,
+                &[("authorization", "Token t")]
+            )
+            .await,
+            Err(NetError::NotHttps)
+        );
+        assert!(Egress::home_service(true).https_only.eq(&false));
     }
 
     #[tokio::test]

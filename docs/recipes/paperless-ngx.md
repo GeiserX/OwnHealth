@@ -40,7 +40,7 @@ In OwnHealth, open **Inbox**, add a source of kind **Paperless-ngx** and fill in
 | Profile | Alex | Where documents go unless a tag says otherwise |
 | Paperless URL | `http://paperless.example.lan:8000` | The address OwnHealth uses to call the API |
 | Health tag | `health` | The tag name or its numeric id |
-| Allow a private address | on | Needed when Paperless is on your LAN. OwnHealth refuses private addresses unless the source allows them |
+| Allow a private address | on | Needed when Paperless is on your LAN. OwnHealth refuses private addresses unless the source allows them. Without it the URL must be `https://`, because the API token goes in every request |
 | API token | the token from step 1 | Stored encrypted, never shown again |
 
 Optionally route a tag to another profile (for example a `health-lucia` tag to Lucía's profile). The form has no field for it: set `profile_by_tag`, a map from the tag's numeric id to a profile id, with `PATCH /api/inboxes/<id>`. A PATCH replaces the whole `config`, so send the other keys with it: `{"config": {"base_url": "…", "health_tag": "health", "allow_private": true, "profile_by_tag": {"12": "<Lucía's profile id>"}}}`. Saving the source later in **Inbox** keeps the map.
@@ -71,7 +71,7 @@ If nothing arrives:
 - **Inbox** shows the source's last error. `401` from OwnHealth means the `X-OwnHealth-Secret` header is wrong or the source is switched off. `403 wrong_source` means the token belongs to another source.
 - An error naming the Paperless API means OwnHealth could not reach Paperless or the token cannot read the document. A `404` for a document that exists means the `ownhealth` user cannot see it: share it as in step 1.
 - Runs that succeed but import nothing: log in to Paperless as `ownhealth` and look for the documents tagged `health`. If you see none, the user has no view permission on them (step 1).
-- A document tagged after the fact arrives through the **Document Updated** trigger, or at the latest with the next 15-minute pull.
+- A document tagged after the fact arrives through the **Document Updated** trigger, or at the latest with the next 15-minute pull. That includes documents you tag or share with the bulk editor, which changes neither their modified date nor fires a trigger: each pull also lists the ids of every `health` document and fetches the ones OwnHealth has not seen.
 
 To alert on a stalled inbox, see [Monitoring the inboxes](../../deploy/README.md#monitoring-the-inboxes).
 
