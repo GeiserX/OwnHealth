@@ -106,10 +106,11 @@
 		{:else}
 			<span class="dim">{t('h1_nomeds')}</span>
 		{/each}
-		<span style="margin-left:auto">
+		<!-- The tail stays together and moves to its own line when the chips need the room. -->
+		<span class="tail">
 			{#if medSrc}<SourceChip label={d.medications[0].since ? `Rx · ${d.medications[0].since}` : 'Rx'} src={medSrc} onopen={openSource} />{/if}
+			<a class="btn sm" href="/drug-check">{t('chk')}</a><PhaseChip phase="v0.1" />
 		</span>
-		<a class="btn sm" href="/drug-check">{t('chk')}</a><PhaseChip phase="v0.1" />
 	</div>
 
 	<div class="dash">
@@ -203,6 +204,8 @@
 						{#each d.genome.chips as c (c)}<span class="chip">{c}</span>{/each}
 						{#if d.genome.hidden}<span class="chip">🔒 {tp('h1_hidden', d.genome.hidden)}</span>{/if}
 					</div>
+					<!-- The snapshot is the agents' one, so it holds sensitive findings back even after the owner shows them in the app. -->
+					{#if d.genome.hidden}<div class="dim" style="font-size:11.5px;margin-top:6px">{t('h1_hidden_why')} <a href="/genome">{t('h1_hidden_where')}</a></div>{/if}
 				{:else}
 					<div class="dim" style="font-size:12px">{t('h1_nogen')}</div>
 				{/if}

@@ -70,6 +70,7 @@
 		}
 	}
 	const addKey = () => act('pk', async () => addPasskeyFinish(await createPasskey(await addPasskeyBegin()), navigator.platform || undefined));
+	const noCodes = $derived(!codes && auth.data?.user?.recovery_codes_left === 0);
 	const regen = () => act('rc', async () => (codes = (await newRecoveryCodes()).recovery_codes), false);
 	async function signOut() {
 		await logout().catch(() => null);
@@ -193,9 +194,14 @@
 				<div class="note" style="margin-top:6px;color:var(--watch)">{t('i2_rc_once')}</div>
 			{/if}
 			<div class="p2row" style="margin-top:8px">
-				<button class="btn" onclick={() => (confirming = 'rc')} disabled={busy} aria-expanded={confirming === 'rc'}>{t('i2_rc_new')}</button>
+				<!-- With no code left there is nothing to replace, so the first set needs no warning. -->
+				{#if noCodes}
+					<button class="btn" onclick={regen} disabled={busy}>{t('i2_rc_create')}</button>
+				{:else}
+					<button class="btn" onclick={() => (confirming = 'rc')} disabled={busy} aria-expanded={confirming === 'rc'}>{t('i2_rc_new')}</button>
+				{/if}
 			</div>
-			{#if confirming === 'rc'}
+			{#if confirming === 'rc' && !noCodes}
 				<div style="margin-top:8px"><ConfirmRow text={t('i2_rc_new_d')} confirmLabel={t('i2_rc_new_yes')} {busy} onconfirm={regen} oncancel={() => (confirming = null)} /></div>
 			{/if}
 			{@render fail('rc')}
@@ -213,9 +219,9 @@
 						{#each editableGrants as g (g.user_id + g.profile)}
 							{@const key = 'g:' + g.user_id + ':' + g.profile}
 							<tr>
-								<td>{member(g.user_id)}</td>
-								<td>{profileName(g.profile)} <span class="dim mono" style="font-size:10.5px">{g.profile}</span></td>
-								<td>
+								<td data-label={t('i2_person')}>{member(g.user_id)}</td>
+								<td data-label={t('profile')}>{profileName(g.profile)} <span class="dim mono" style="font-size:10.5px">{g.profile}</span></td>
+								<td data-label={t('i2_role')}>
 									<select class="p2in" value={g.role} aria-label="{t('i2_role')} {member(g.user_id)} · {profileName(g.profile)}" disabled={busy} onchange={(e) => act('grants', () => putGrant({ user_id: g.user_id, profile: g.profile, role: (e.currentTarget as HTMLSelectElement).value as Role }))}>
 										{#each ROLES as r (r)}<option value={r}>{t('r_' + r)}</option>{/each}
 									</select>

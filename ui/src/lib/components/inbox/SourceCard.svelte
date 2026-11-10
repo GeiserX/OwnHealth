@@ -7,7 +7,8 @@
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import Switch from '#lib/components/pages2/Switch.svelte';
 	import { ago, stamp } from '#lib/components/pages2/fmt';
-	import { t } from '#lib/i18n/index.svelte';
+	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { afterColon } from '#lib/logic/format';
 	import { POLL_KINDS, PROFILE_KINDS, hasAuthserv, sourceStatus, sourceWhere, tokenButtonKey } from '#lib/logic/inbox';
 	import SenderRules from './SenderRules.svelte';
 
@@ -103,7 +104,7 @@
 	</dl>
 	{#if status === 'out' && source.last_error}
 		<div class="err" role="status">
-			⚠ {tp('fu_failed_n', source.consecutive_failures)} {lastErr}
+			⚠ {tp('fu_failed_n', source.consecutive_failures)} {afterColon(lastErr, i18n.lang)}
 			{#if lastErr !== source.last_error}<div class="mono dim raw">{source.last_error}</div>{/if}
 		</div>
 	{:else if status === 'partial'}

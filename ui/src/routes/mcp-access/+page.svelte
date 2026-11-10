@@ -14,7 +14,7 @@
 	import { ago, day, int, plain, stamp } from '#lib/components/pages2/fmt';
 	import { fmtNum, t } from '#lib/i18n/index.svelte';
 	import { copyText } from '#lib/logic/inbox';
-	import { auditActor, auditOut, auditResult, auditRows, auditWhat, liveConsents } from '#lib/logic/people';
+	import { auditActionKey, auditActor, auditDetail, auditOut, auditResult, auditRows, auditWhat, liveConsents } from '#lib/logic/people';
 	import { app } from '#lib/state/app.svelte';
 
 	// Each tool and the scopes it needs (docs/design/mcp.md 2.3). `any` lists alternatives, `note` adds
@@ -24,7 +24,7 @@
 		{ name: 'search_observations', scopes: ['read:labs', 'read:vitals', 'read:wearables'], any: true },
 		{ name: 'get_trend', scopes: ['read:labs', 'read:vitals', 'read:wearables'], any: true },
 		{ name: 'get_genome_findings', scopes: ['read:genome'] },
-		{ name: 'lookup_variant', scopes: ['read:genome_raw'], note: ['i2_tool_perday', { n: 200 }] },
+		{ name: 'lookup_variant', scopes: ['read:genome', 'read:genome_raw'], note: ['i2_tool_perday', { n: 200 }] },
 		{ name: 'check_drug', scopes: ['read:genome', 'read:records', 'read:labs'], any: true },
 		{ name: 'get_source', scopes: [], note: ['i2_tool_cited'] },
 		{ name: 'propose', scopes: ['write:propose'], note: ['i2_tool_queue'] },
@@ -94,10 +94,12 @@
 	}
 	const name = (slug: string) => app.me?.profiles.find((p) => p.slug === slug)?.display_name.split(' ')[0] ?? slug;
 	const tone = (s: string) => (s.startsWith('write') ? 'w' : s.includes('raw') || s.includes('sensitive') ? 'r' : '');
-	function resources(a: AuditOut): string {
-		if (a.args_summary && !a.args_summary.startsWith('h:')) return a.args_summary;
-		const n = a.resource_ids?.length ?? 0;
-		return [a.resource_type, n ? `×${n}` : null, a.src_ids?.length ? `src ×${a.src_ids.length}` : null].filter(Boolean).join(' · ') || '—';
+	const resources = (a: AuditOut): string => auditDetail(a, { t, scope: scopeText, n: (k, n) => tp(k, n) });
+	// A page or app action in plain words; an agent's tool keeps its name, which is what it called.
+	function what(a: AuditOut): { text: string; code: boolean } {
+		const k = auditActionKey(a);
+		const w = k ? t(k) : null;
+		return w && w !== k ? { text: w, code: false } : { text: auditWhat(a), code: true };
 	}
 	const pct = (n: number, of: number | undefined) => (of ? Math.min(100, (n / of) * 100) : 0);
 	const mb = (bytes: number, digits: number) => fmtNum(bytes / 1e6, digits);
@@ -148,15 +150,15 @@
 				<NotReady error={tokens.error} onretry={loadTokens} />
 			{:else}
 				<div class="tscroll">
-					<table class="t stack">
-						<thead><tr><th>{t('i2_t_token')}</th><th>{t('profile')}</th><th>{t('i2_t_scopes')}</th><th style="white-space:nowrap">{t('i2_t_last')}</th><th>{t('i2_t_exp')}</th><th></th></tr></thead>
+					<table class="t stack tok">
+						<thead><tr><th>{t('i2_t_token')}</th><th>{t('profile')}</th><th>{t('i2_t_scopes')}</th><th>{t('i2_t_last')}</th><th>{t('i2_t_exp')}</th><th></th></tr></thead>
 						<tbody>
 							{#each active as x (x.id)}
 								<tr>
 									<td><b>{x.label}</b><div class="dim mono" style="font-size:10.5px">{x.prefix}…</div></td>
 									<td>{x.profiles.map(name).join(', ')}</td>
 									<td>{#each x.scopes as s (s)}<span class="chip mono {tone(s)}" title={scopeText(s)}>{s}</span> {/each}</td>
-									<td data-label={t('i2_t_last')}><span class="num" style="white-space:nowrap">{ago(x.last_used_at)}</span></td>
+									<td data-label={t('i2_t_last')}><span class="num">{ago(x.last_used_at)}</span></td>
 									<td data-label={t('i2_t_exp')}><span class="num" style="white-space:nowrap">{x.expires_at ? day(x.expires_at) : t('i2_never')}</span></td>
 									<td class="acts-cell" style="text-align:right">
 										<button class="btn sm no" disabled={busy} aria-expanded={confirming === x.id} onclick={() => (confirming = x.id)} aria-label="{t('i2_revoke')} {x.label}">{t('i2_revoke')}</button>
@@ -200,7 +202,8 @@
 			<h3>{t('i2_add_cc')}<span class="r"><button class="btn sm" onclick={() => copy(snippet, 'snip', snippetEl)}>{copied?.what === 'snip' && copied.ok ? t('i2_copied') : t('i2_copy')}</button></span></h3>
 			<pre class="code mono" bind:this={snippetEl}>{snippet}</pre>
 			{@render copyHand('snip')}
-			<div class="note" style="margin-top:6px">{t('i2_cc_note')}</div>
+			<!-- The open token form already says this; once is enough on one screen. -->
+			{#if !creating}<div class="note" style="margin-top:6px">{t('i2_cc_note')}</div>{/if}
 		</section>
 		<section class="card" style="padding:8px 6px 2px">
 			<h3 style="padding:0 8px">
@@ -221,22 +224,23 @@
 				<NotReady error={audit.error} onretry={loadAudit} />
 			{:else}
 				<div class="tscroll">
-					<table class="t nw">
+					<table class="t nw stack">
 						<thead><tr><th>{t('i2_a_time')}</th><th>{t('i2_a_who')}</th><th>{t('i2_a_tool')}</th><th>{t('profile')}</th><th>{t('i2_a_result')}</th><th style="text-align:right">{t('i2_a_out')}</th><th>{t('i2_a_res')}</th></tr></thead>
 						<tbody>
 							{#each shownAudit as a (a.id)}
 								{@const who = auditActor(a.actor, appNames)}
 								{@const res = auditResult(a.result_kind)}
 								{@const out = auditOut(a)}
+								{@const w = what(a)}
 								<tr>
 									<td class="num muted" title={a.ts}>{stamp(a.ts)}</td>
-									<td><div class="cl" style="max-width:160px" title={who.raw}>{who.label}{a.via === 'mcp' ? '' : ` · ${a.via}`}</div></td>
-									<td class="mono"><div class="cl" style="max-width:170px" title={a.tool ?? a.action}>{auditWhat(a)}</div></td>
-									<td>{a.profile ?? '—'}</td>
+									<td data-label={t('i2_a_who')}><div class="cl" style="max-width:160px" title={who.raw}>{who.label}{a.via === 'mcp' ? '' : ` · ${a.via}`}</div></td>
+									<td data-label={t('i2_a_tool')}><div class="cl" class:mono={w.code} style="max-width:170px" title={a.tool ?? a.action}>{w.text}</div></td>
+									<td data-label={t('profile')}>{a.profile ?? '—'}</td>
 									<!-- Result sits before the free-width columns so a denied call is never pushed off the card. -->
-									<td><span class="pill {res.tone}" title={a.result_kind ?? 'ok'}><i aria-hidden="true"></i>{t(res.key) === res.key ? (a.result_kind ?? 'ok') : t(res.key)}</span></td>
-									<td class="num" style="text-align:right">{'kb' in out ? tf('i2_kb', { n: fmtNum(out.kb, 1) }) : int(out.rows)}</td>
-									<td class="muted"><div class="cl" style="max-width:200px" title={resources(a)}>{resources(a)}</div></td>
+									<td data-label={t('i2_a_result')}><span class="pill {res.tone}" title={a.result_kind ?? 'ok'}><i aria-hidden="true"></i>{t(res.key) === res.key ? (a.result_kind ?? 'ok') : t(res.key)}</span></td>
+									<td class="num" style="text-align:right" data-label={t('i2_a_out')}>{'kb' in out ? tf('i2_kb', { n: fmtNum(out.kb, 1) }) : int(out.rows)}</td>
+									<td class="muted" data-label={t('i2_a_res')}><div class="cl" style="max-width:200px" title={resources(a)}>{resources(a)}</div></td>
 								</tr>
 							{:else}
 								<tr><td colspan="7"><div class="empty">{audit.loading || !audit.data ? t('loading') : auditMode === 'agents' ? t('i2_audit_none_agents') : t('i2_audit_none')}</div></td></tr>
@@ -329,6 +333,21 @@
 		margin-left: auto;
 		font-size: 11px;
 		text-align: right;
+	}
+	/* Tablet: tighter cells keep Revocar inside the card. */
+	@media (max-width: 1100px) {
+		.tok td,
+		.tok th {
+			padding-left: 6px;
+			padding-right: 6px;
+		}
+	}
+	/* Phone: a stacked detail keeps its label on the same line. */
+	@media (max-width: 760px) {
+		td .cl {
+			display: inline-block;
+			vertical-align: bottom;
+		}
 	}
 	.cl {
 		overflow: hidden;

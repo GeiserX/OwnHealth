@@ -148,7 +148,7 @@
 					<option value="">—</option><option value="female">{t('i2_sex_f')}</option><option value="male">{t('i2_sex_m')}</option><option value="unknown">{t('i2_sex_u')}</option>
 				</select>
 			</label>
-			<label>{t('i2_country')}<input class="p2in" bind:value={nr.country} maxlength="2" pattern="[A-Za-z]{2}" title={t('i2_country_t')} style="width:56px" /></label>
+			<label>{t('i2_country')}<input class="p2in" bind:value={nr.country} maxlength="2" pattern={'[A-Za-z]{2}'} title={t('i2_country_t')} style="width:56px" /></label>
 		</div>
 		<div class="note">{t('fm_role_d')}</div>
 		{#if error?.where === 'relative'}<div class="p2err" role="alert" title={error.raw}>{error.text}</div>{/if}

@@ -69,6 +69,9 @@
 		if (kind === 'condition') out.clinical_status = val('abatement') ? 'resolved' : 'active';
 		return out;
 	}
+	// The timeline places a new medication on its start day, so a new one needs it. A correction keeps
+	// whatever the record already had.
+	const needsStart = (k: string) => kind === 'medication' && k === 'started' && !correcting;
 	// The value of an observation is a number: say so in the reader's language before anything is sent.
 	const isValue = (k: string) => kind === 'observation' && k === 'value';
 	function checkValue(e: Event) {
@@ -127,10 +130,11 @@
 						bind:value={f[k]}
 						required={req}
 						oninput={checkValue}
-					/>{:else}<input class="p2in" {type} bind:value={f[k]} required={req} max={kind === 'observation' && k === 'date' ? today : undefined} />{/if}</label
+					/>{:else}<input class="p2in" {type} bind:value={f[k]} required={req || needsStart(k)} max={kind === 'observation' && k === 'date' ? today : undefined} />{/if}</label
 			>
 		{/each}
 	</div>
+	{#if kind === 'medication' && !correcting}<div class="dim" style="font-size:11.5px">{t('me_start_why')}</div>{/if}
 	{#if kind === 'observation' && !correcting}
 		<label>{t('me_f_note')}<input class="p2in" bind:value={f.note} maxlength="4000" /></label>
 	{/if}

@@ -84,7 +84,8 @@
 						</tr>
 					{/if}
 					{#if s.document?.collected_at || labelDate(s.label)}
-						<tr><td class="dim">{t('h1_src_collected')}</td><td class="num" style="white-space:nowrap">{s.document?.collected_at ? day(s.document.collected_at) : labelDate(s.label)}</td></tr>
+						<!-- 'Collected' is the day a sample was taken: only a document's collection date says that. -->
+						<tr><td class="dim">{s.document?.collected_at ? t('h1_src_collected') : t('i2_date')}</td><td class="num" style="white-space:nowrap">{s.document?.collected_at ? day(s.document.collected_at) : labelDate(s.label)}</td></tr>
 					{/if}
 					{#if s.location}<tr><td class="dim">{t('h1_src_page')}</td><td class="num">{s.location.page}{s.document?.pages ? ' / ' + s.document.pages : ''}</td></tr>{/if}
 					{#if s.import_ref}<tr><td class="dim">{t('h1_src_ref')}</td><td class="mono" style="font-size:11px;word-break:break-all">{s.import_ref}</td></tr>{/if}

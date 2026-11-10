@@ -119,7 +119,8 @@
 						<div style="margin-left:auto;text-align:right">
 							{#if x.evidence}<span class="pgx ev-{x.evidence}">{x.evidence}</span>{/if}
 							{#if x.confidence}<span class="pill {x.confidence === 'high' ? 'p-ok' : x.confidence === 'medium' ? 'p-watch' : 'p-stale'}"><i aria-hidden="true"></i>{t('i2_conf_' + x.confidence)}</span>{/if}
-							{#if x.src}<div style="margin-top:4px"><SourceChip label={`OwnGenome · ${x.call_state ?? 'n/a'}`} src={x.src} onopen={openSource} /></div>{/if}
+							{#if x.src}<div style="margin-top:4px"><!-- The call state is a genome-page code; the chip names the source and its panel says the rest. -->
+								<SourceChip label="OwnGenome" src={x.src} onopen={openSource} /></div>{/if}
 						</div>
 					</div>
 					{/if}

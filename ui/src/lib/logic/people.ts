@@ -110,6 +110,8 @@ export function auditResult(kind: string | null): { key: string; tone: 'p-ok' | 
 	if (k === 'queued') return { key: 'i2_res_queued', tone: 'p-info' };
 	if (k === 'denied') return { key: 'i2_res_denied', tone: 'p-out' };
 	if (k === 'error') return { key: 'i2_res_error', tone: 'p-out' };
+	// A finding held back by the minor or sensitive rule is the rule working, not a failure.
+	if (k.startsWith('withheld_')) return { key: 'i2_res_' + k, tone: 'p-info' };
 	return { key: 'i2_res_' + k, tone: 'p-out' };
 }
 
@@ -127,6 +129,55 @@ export function auditActor(actor: string, apps: { client_id: string; name: strin
 /** What an MCP row did (its tool), or the action of any other row (token_create, oauth_approve). */
 export function auditWhat(a: { via: string; tool: string | null; action: string }): string {
 	return a.via === 'mcp' ? (a.tool ?? a.action) : a.action;
+}
+
+/** The dict key of what a page or app row did ('i2_act_consent_change'); null for an agent's tool name. */
+export function auditActionKey(a: { via: string; tool: string | null; action: string }): string | null {
+	if (a.via === 'mcp' && a.tool) return null;
+	return 'i2_act_' + a.action.replace(/[^a-z0-9]+/gi, '_');
+}
+
+type Words = { t: (key: string) => string; scope: (scope: string) => string; n: (key: string, n: number) => string };
+const word = (w: Words, key: string): string | null => {
+	const s = w.t(key);
+	return s === key ? null : s;
+};
+const yesNo = (v: string, w: Words) => (v === 'True' ? w.t('i2_on') : w.t('i2_off')).toLocaleLowerCase();
+
+/**
+ * The resources column in plain words: a consent change as 'Show in the app: on', a lock change as the
+ * locked categories, a new token or app as its counts, else what was touched ('Vaccine ×2'). Other
+ * summaries pass through; a hashed argument ('h:…') is never shown.
+ */
+export function auditDetail(
+	a: { action: string; args_summary?: string | null; resource_type?: string | null; resource_ids?: string[] | null },
+	w: Words
+): string {
+	const args = a.args_summary ?? '';
+	if (a.action === 'consent_change') {
+		const m = /^ui=(True|False|None)[ ;]agents=(True|False|None)$/.exec(args);
+		if (m) {
+			const parts = [m[1] !== 'None' ? `${w.t('i2_sens_ui')}: ${yesNo(m[1], w)}` : null, m[2] !== 'None' ? `${w.t('i2_sens_ag')}: ${yesNo(m[2], w)}` : null];
+			const s = parts.filter(Boolean).join(' · ');
+			if (s) return s;
+		}
+	}
+	if (a.action === 'lock_change') {
+		const locked = args.split(',').filter(Boolean);
+		return `${w.t('i2_lock_on')}: ${locked.length ? locked.map(w.scope).join(', ') : w.t('i2_ad_nothing')}`;
+	}
+	// A new token or an approved app: 'scopes=read:labs,read:vitals;profiles=2;days=30'.
+	const grant = /^scopes=([^;]*);profiles=(\d+);days=(\d+)$/.exec(args);
+	if (grant) {
+		const scopes = grant[1].split(',').filter(Boolean).length;
+		return [w.n('i2_ad_scopes', scopes), w.n('i2_ad_profiles', Number(grant[2])), w.n('i2_ad_days', Number(grant[3]))].join(' · ');
+	}
+	if (args && !args.startsWith('h:')) return args;
+	const type = a.resource_type;
+	if (!type) return '—';
+	const n = a.resource_ids?.length ?? 0;
+	const name = word(w, 'i2_rt_' + type) ?? word(w, 'me_k_' + type) ?? type;
+	return n > 1 ? `${name} ×${n}` : name;
 }
 
 /** What went out: rows when the tool counts rows, else the size when bytes left but no rows were counted. */

@@ -7,7 +7,7 @@
 	import AgentContext from '#lib/components/inbox/AgentContext.svelte';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { repeatsLabel, reviewChecks, rowGrounding } from '#lib/logic/inbox';
-	import { decimalText, unitLabel } from '#lib/logic/format';
+	import { decimalText, sameNumber, unitLabel } from '#lib/logic/format';
 	import { dict } from '#lib/i18n/dict';
 	import { day } from './fmt';
 
@@ -63,8 +63,11 @@
 	// The value as printed (its unit written the usual way), and the stored value in the reader's number
 	// format, shown only when it says something the printed one does not.
 	const printed = $derived([obs.printed_value, unitLabel(obs.printed_unit == null ? null : String(obs.printed_unit))].filter(Boolean).join(' '));
+	// '1,05 mg/dL → 1.05 mg/dL' only changes the notation, so the stored part is left out then.
+	const unitOf = (u: unknown) => unitLabel(u == null ? null : String(u));
+	const sameReading = $derived(sameNumber(obs.printed_value == null ? null : String(obs.printed_value), obs.value_canonical as string | number | null) && unitOf(obs.printed_unit) === unitOf(obs.unit_canonical));
 	const canonical = $derived(
-		obs.value_canonical != null && Number.isFinite(Number(obs.value_canonical))
+		!sameReading && obs.value_canonical != null && Number.isFinite(Number(obs.value_canonical))
 			? `${fmtNum(Number(obs.value_canonical))} ${unitLabel(obs.unit_canonical == null ? null : String(obs.unit_canonical))}`.trim()
 			: ''
 	);

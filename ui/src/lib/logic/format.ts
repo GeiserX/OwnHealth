@@ -35,3 +35,18 @@ export function decimalText(s: string): string | null {
 	const v = s.trim().replace('−', '-');
 	return /^-?(\d+([.,]\d+)?|[.,]\d+)$/.test(v) ? v.replace(',', '.') : null;
 }
+
+/** True when a printed value and a stored one are the same number written two ways ('1,05' and 1.05). */
+export function sameNumber(printed: string | null | undefined, stored: string | number | null | undefined): boolean {
+	const d = decimalText(printed ?? '');
+	return d != null && stored != null && Number(d) === Number(stored);
+}
+
+/**
+ * A sentence that follows a colon in running text. Spanish writes it in lowercase ('Ha fallado una
+ * vez: no se pudo conectar'); an acronym such as 'TLS' or 'IMAP' keeps its capitals.
+ */
+export function afterColon(s: string, lang: string): string {
+	if (lang !== 'es' || s.length < 2 || s[1] !== s[1].toLocaleLowerCase('es')) return s;
+	return s[0].toLocaleLowerCase('es') + s.slice(1);
+}
