@@ -252,11 +252,11 @@ Ships in 0.3.0. Measured exit criteria: [v0.2-exit-criteria.md](v0.2-exit-criter
 - [ ] Wording lint in CI: PGx and calculator outputs never contain imperative treatment advice ("do not take", "stop") in text we write. A verbatim guideline quotation, attributed to its source, is exempt.
 - [ ] Per-relative consent for cross-profile hints; minors' data never feeds hints to non-guardians.
 
-**Moved out of v0.3.** Each item now sits in a later phase, with its reason there: GEDCOM import (v1.0), the agent session report (v1.0), relatedness QC (v2), PhenoAge (v2) and critical-value alerts (v2).
-
 **Docs/Community**
 - [ ] One page per calculator: formula, version, citation, validity limits, worked example.
 - [ ] Guideline YAML contribution guide; a reviewer of record per country file.
+
+**Moved out of v0.3.** GEDCOM import and the agent session report move to v1.0, and relatedness QC moves to v2, each with its reason there. PhenoAge and critical-value alerts are cut, not planned, with their reasons under Never.
 
 ### Exit criteria
 
@@ -367,8 +367,6 @@ Ships in 0.3.0. Measured exit criteria: [v0.2-exit-criteria.md](v0.2-exit-criter
 **Insight**
 - [ ] n-of-1 experiments: hypothesis, baseline, intervention, washout, outcome with RCV, honest "inconclusive".
 - [ ] Correlation explorer with sample size shown and no automatic "top correlations".
-- [ ] PhenoAge, moved from v0.3: a research biological-age estimate with no use in a visit, which must never read as a single health score (see Never); a complete 9-analyte draw is rare in a routine Spanish panel.
-- [ ] Critical-value alerts, moved from v0.3: no openly licensed universal list of critical limits exists, limits vary by institution, and urgency logic is outside our intended purpose ([security-privacy.md](design/security-privacy.md)).
 - [ ] Pedigree-aware screening; more guideline sets (NHS, G-BA, one LatAm set).
 - [ ] Successor and inheritance of data: owner names a successor per profile; crypto-shredding otherwise.
 
@@ -476,7 +474,8 @@ Not committed. Each needs a design doc and a spike before code reaches main.
 | Shipped SNOMED CT or WHO ATC content | SNOMED CT needs an affiliate licence outside member countries; ATC is not redistributable. We store codes as received; bring your own terminology. |
 | Running genome engines inside the app | OwnGenome does all genome compute, including chips. Engines bring a JVM and heavy pipelines into a one-container app. |
 | An MCP tool that shares, exports or emails | Imported text is untrusted; an outbound tool completes the exfiltration path. Sharing is a human click in the UI. |
-| A single composite "health score" | One number hides everything and implies precision we do not have. Per-system cards with a "stale" state instead. |
+| A single composite "health score" | One number hides everything and implies precision we do not have. Per-system cards with a "stale" state instead. This also rules out a biological-age estimate such as PhenoAge: it is a research composite with no use in a visit, and a complete 9-analyte draw is rare in a routine Spanish panel. |
+| Critical-value alerts from a list we define | No openly licensed universal list of critical limits exists, and limits vary by institution. Alerting from our own list is urgency logic, which is outside our intended purpose ([security-privacy.md](design/security-privacy.md)). The lab's own printed critical flags (HH, LL) stay, labelled as the lab's. |
 | Central aggregation infrastructure for US endpoints | Running it is what pushed the open-source Fasten off live EHR pulls. Each instance connects for itself. |
 | openEHR or OMOP as a store | Out of scope; FHIR at the edges, our own tables inside. |
 | TimescaleDB, Redis or a JVM in core | Plain Postgres covers the load; compression needs the non-OSI TSL edition; fewer moving parts. |
