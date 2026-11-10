@@ -793,16 +793,7 @@ async fn accept_fhir_item(
         data.extend(e.clone());
     }
     let record = RecordIn::from_json(kind, Value::Object(data))?;
-    let mut src = payload
-        .get("src")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    src.insert("actor_kind".into(), json!("user"));
-    src.insert("actor_id".into(), json!(user_id.to_string()));
-    let src: SrcIn = serde_json::from_value::<SrcIn>(Value::Object(src))
-        .map_err(|e| Error::Invalid(e.to_string()))?
-        .validate()?;
+    let src = held_src(payload, user_id)?;
     let committed = match payload.get("supersedes").and_then(Value::as_str) {
         Some(old) => {
             let old = Uuid::parse_str(old).map_err(|e| Error::Invalid(e.to_string()))?;
@@ -840,6 +831,8 @@ async fn accept_family_item(
         .unwrap_or_default();
     if let Some(Value::Object(e)) = edits {
         data.extend(e.clone());
+        // the edited fields, not the received resource, are what the stored FHIR must say
+        data.shift_remove("fhir");
     }
     let member: MemberIn = serde_json::from_value(Value::Object(data)).map_err(|e| Error::Invalid(e.to_string()))?;
     let src = SrcRef::New(held_src(payload, user_id)?);

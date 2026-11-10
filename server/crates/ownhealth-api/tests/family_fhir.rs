@@ -257,3 +257,57 @@ async fn the_rivera_pedigree_exports_and_imports_back_with_nothing_dropped() -> 
     assert_eq!(essence(&third_rows), essence(&family::list(&mut c, fresh, true).await?));
     Ok(())
 }
+
+#[tokio::test]
+async fn an_edit_made_in_review_is_what_the_export_carries() -> anyhow::Result<()> {
+    ownhealth_ops::register();
+    ownhealth_ingest_structured::register();
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let settings = db.settings(dir.path())?;
+    let blobs = BlobStore::new(settings.blobs_path())?;
+    assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
+    let mut c = db.pool.acquire().await?;
+    let (alex, user): (Uuid, Uuid) = sqlx::query_as(
+        "select p.id, p.user_id from profile p join household h on h.id = p.household_id \
+         where h.name = $1 and p.slug = 'alex'",
+    )
+    .bind(DEMO_HOUSEHOLD)
+    .fetch_one(&mut *c)
+    .await?;
+    // no Patient in the file: the identity is not matched, so the relative waits in review
+    let fmh = br#"{"resourceType":"FamilyMemberHistory","id":"uncle-1","status":"completed","patient":{"reference":"Patient/x"},"relationship":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/v3-RoleCode","code":"PUNCLE"}]},"bornDate":"1948"}"#;
+    let profile = get_profile(&mut c, alex).await?.expect("alex");
+    let sha = blobs.put_bytes(fmh)?;
+    let doc = create_document(
+        &mut c,
+        &NewDocument {
+            filename: Some("uncle.ndjson"),
+            ..NewDocument::upload(
+                profile.household_id,
+                Some(alex),
+                &sha,
+                "application/fhir+ndjson",
+                fmh.len() as i64,
+            )
+        },
+    )
+    .await?;
+    let (_, entries) = read_entries(fmh, true)?;
+    let (summary, _) = import_resources(&mut c, &entries, &profile, doc.id, "upload", None, "FHIR").await?;
+    assert_eq!(summary.queued, 1, "{summary:?}");
+    let item: Uuid = sqlx::query_scalar(
+        "select id from review_item where profile_id = $1 and kind = 'fhir_unmapped' and status = 'open' \
+         and payload->>'projection' = 'family_member'",
+    )
+    .bind(alex)
+    .fetch_one(&mut *c)
+    .await?;
+    let ids = ownhealth_core::review::accept(&mut c, item, user, Some(&serde_json::json!({"born_year": 1950}))).await?;
+    let stored: Value = sqlx::query_scalar("select fhir from family_member where id = $1")
+        .bind(ids[0])
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(stored["bornDate"], "1950", "{stored}");
+    Ok(())
+}
