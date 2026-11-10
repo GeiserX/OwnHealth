@@ -7,7 +7,7 @@ import type { Pedigree, PedigreeNode } from '../src/lib/api/family.ts';
 
 const words: Words = {
 	proband: 'this profile',
-	masked: 'profile not shared',
+	masked: 'records not visible',
 	died: (a) => (a == null ? '†' : `† ${a}`),
 	more: (n) => `+${n} more`
 };
@@ -71,6 +71,14 @@ test('three generations in three rows, the proband under the parents and the chi
 	for (const a of l.nodes) for (const b of l.nodes) if (a !== b && a.y === b.y) assert.ok(Math.abs(a.x - b.x) >= 120, `${a.id} ${b.id}`);
 });
 
+test('the nodes come in reading order, generation by generation and left to right, for the Tab key', () => {
+	const l = layout(rivera, 'en', false, words);
+	for (let i = 1; i < l.nodes.length; i++) {
+		const [a, b] = [l.nodes[i - 1], l.nodes[i]];
+		assert.ok(a.y < b.y || (a.y === b.y && a.x < b.x), `${a.id} before ${b.id}`);
+	}
+});
+
 test('a single parent drawn: the line to the children starts under their text', () => {
 	const one: Pedigree = { ...rivera, nodes: rivera.nodes.filter((n) => n.id !== 'm') };
 	const l = layout(one, 'en', false, words);
@@ -90,7 +98,7 @@ test('names show when asked, and the toggle removes every name from the drawing 
 test('a relative linked to a profile the viewer cannot read shows no conditions or years', () => {
 	const masked: Pedigree = { ...rivera, nodes: [node({ id: 'm', relationship: 'MTH', generation: -1, slot: 35, union: 'parents', masked: true, linked: true })] };
 	const m = layout(masked, 'en', false, words).nodes.find((n) => n.id === 'm')!;
-	assert.deepEqual(m.lines, ['mth', 'profile not shared']);
+	assert.deepEqual(m.lines, ['mth', 'records not visible']);
 	assert.equal(m.affected, false);
 });
 

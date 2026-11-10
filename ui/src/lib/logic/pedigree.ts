@@ -186,7 +186,8 @@ export function layout(ped: Pedigree, lang: 'es' | 'en', hideNames: boolean, wor
 		width: maxX + 90,
 		height: yOf(gens[gens.length - 1]) + HALF + 14 + maxLines * 14,
 		gens: gens.map((g, i) => ({ y: yOf(g), label: ROMAN[i] ?? String(i + 1) })),
-		nodes,
+		// reading order, so the Tab key walks the tree generation by generation, left to right
+		nodes: [...nodes].sort((a, b) => a.y - b.y || a.x - b.x),
 		segs
 	};
 }

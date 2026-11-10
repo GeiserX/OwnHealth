@@ -22,6 +22,7 @@
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { fromHousehold, layout, type Box } from '#lib/logic/pedigree';
 	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { tick } from 'svelte';
 
 	let { profile, profiles }: { profile: ProfileSummary; profiles: ProfileSummary[] } = $props();
 
@@ -86,10 +87,20 @@
 		error = null;
 		confirming = false;
 	}
-	function openEdit(id: string | null) {
+	// The drawing's nodes are SVG, which focusOnOpen cannot give focus back to: we do it on close.
+	let opener = $state<string | null>(null);
+	function openEdit(id: string | null, fromNode = false) {
 		const m = items.find((i) => i.id === id);
-		if (!m || m.masked || !canWrite) return;
+		if (!m || !canWrite) return;
+		opener = fromNode ? m.id : null;
 		editing = m;
+		error = null;
+		confirming = false;
+		// linked to a profile the caller cannot read: it can only be removed
+		if (m.masked) {
+			draft = null;
+			return;
+		}
 		draft = {
 			relationship: m.relationship,
 			display_name: m.display_name ?? '',
@@ -109,6 +120,9 @@
 		editing = null;
 		error = null;
 		confirming = false;
+		const id = opener;
+		opener = null;
+		if (id) tick().then(() => svgwrap?.querySelector<SVGGElement>(`g[data-id="${id}"]`)?.focus());
 	}
 	async function act(fn: () => Promise<unknown>) {
 		busy = true;
@@ -169,10 +183,23 @@
 	function keyOpen(e: KeyboardEvent, b: Box) {
 		if (e.key === 'Enter' || e.key === ' ') {
 			e.preventDefault();
-			openEdit(b.id);
+			openEdit(b.id, true);
 		}
 	}
-	const editable = (b: Box) => canWrite && !b.proband && !b.masked;
+	const editable = (b: Box) => canWrite && !b.proband;
+	// On a narrow screen the drawing scrolls sideways: start with the proband in the middle, and say so.
+	let svgwrap = $state<HTMLDivElement | null>(null);
+	let wide = $state(false);
+	function centre() {
+		const w = svgwrap;
+		const me = drawing?.nodes.find((n) => n.proband);
+		if (!w || !drawing || !me) return;
+		wide = w.scrollWidth > w.clientWidth + 1;
+		if (wide) w.scrollLeft = (me.x * w.scrollWidth) / drawing.width - w.clientWidth / 2;
+	}
+	$effect(() => {
+		if (drawing && svgwrap) tick().then(centre);
+	});
 	const listLine = (m: FamilyMember) => {
 		const head = cap(relLabel(m.relationship)) + (!hideNames && m.name ? ` · ${m.name}` : '');
 		if (m.masked) return `${head} · ${t('fam_masked')}`;
@@ -198,6 +225,8 @@
 	{#each b.lines as line, i (i)}<text x={b.x} y={b.y + 36 + i * 14} class={i === 0 ? 'l1' : 'l2'}>{line}</text>{/each}
 {/snippet}
 
+<svelte:window onresize={centre} />
+
 <div class="card ped">
 	<h3>{t('h1_pedigree')}<span class="r">{t('fam_r')}</span></h3>
 	<div class="p2row tools">
@@ -215,13 +244,13 @@
 	{:else if !drawing}
 		<div class="empty">{t('loading')}</div>
 	{:else}
-		<div class="svgwrap">
+		<div class="svgwrap" bind:this={svgwrap}>
 			<svg viewBox="0 0 {drawing.width} {drawing.height}" width={drawing.width} style="min-width:{Math.min(560, drawing.width)}px" role="group" aria-label={t('h1_pedigree')} data-testid="pedigree">
 				{#each drawing.gens as g (g.label)}<text x="16" y={g.y + 4} class="gen">{g.label}</text>{/each}
 				{#each drawing.segs as s, i (i)}<line x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} class="ln" />{/each}
 				{#each drawing.nodes as b (b.id ?? 'proband')}
 					{#if editable(b)}
-						<g class="node edit" class:link={b.linked} class:aff={b.affected} role="button" tabindex="0" aria-label={b.title} onclick={() => openEdit(b.id)} onkeydown={(e) => keyOpen(e, b)}>
+						<g class="node edit" class:link={b.linked} class:masked={b.masked} class:aff={b.affected} role="button" tabindex="0" aria-label={b.title} data-id={b.id} onclick={() => openEdit(b.id, true)} onkeydown={(e) => keyOpen(e, b)}>
 							{@render symbol(b)}
 						</g>
 					{:else}
@@ -232,6 +261,7 @@
 				{/each}
 			</svg>
 		</div>
+		{#if wide}<div class="dim hint swipe">{t('fam_swipe')}</div>{/if}
 		{#if ped.data?.nodes.length}<div class="legend dim">
 			<span><svg width="14" height="14" aria-hidden="true"><rect x="1" y="1" width="12" height="12" class="sym aff" /></svg>{t('fam_lg_affected')}</span>
 			<span><svg width="14" height="14" aria-hidden="true"><rect x="2" y="2" width="10" height="10" class="sym" /><line x1="0" y1="14" x2="14" y2="0" class="dead" /></svg>{t('fam_lg_deceased')}</span>
@@ -244,8 +274,8 @@
 		<ul class="rel" aria-label={t('fam_list')}>
 			{#each items as m (m.id)}
 				<li>
-					{#if canWrite && !m.masked}
-						<button class="linkish" onclick={() => openEdit(m.id)} title={tf('fam_edit', { rel: relLabel(m.relationship) })}>{listLine(m)}</button>
+					{#if canWrite}
+						<button class="linkish" onclick={() => openEdit(m.id)} title={m.masked ? t('fam_masked_d') : tf('fam_edit', { rel: relLabel(m.relationship) })}>{listLine(m)}</button>
 					{:else}
 						<span title={m.masked ? t('fam_masked_d') : undefined}>{listLine(m)}</span>
 					{/if}
@@ -253,7 +283,7 @@
 			{/each}
 		</ul>
 	{/if}
-	{#if fam.error && !fam.data}<NotReady error={fam.error} onretry={load} />{/if}
+	{#if fam.error && !fam.data && !ped.error}<NotReady error={fam.error} onretry={load} />{/if}
 
 	{#if draft && catalog}
 		<form class="p2form drawer" onsubmit={save} aria-labelledby="fam-h" use:focusOnOpen={{ oncancel: close }}>
@@ -308,6 +338,20 @@
 				</div>
 			{/if}
 		</form>
+	{:else if editing?.masked}
+		<div class="p2form drawer" role="group" aria-labelledby="fam-h" use:focusOnOpen={{ oncancel: close }}>
+			<h3 id="fam-h">{cap(relLabel(editing.relationship))} · {t('fam_masked')}</h3>
+			<p class="dim">{t('fam_masked_d')} {t('fam_masked_rm')}</p>
+			{#if error}<div class="p2err" role="alert" title={error.raw}>{error.text}</div>{/if}
+			{#if confirming}
+				<ConfirmRow text={tf('fam_remove_q', { rel: cap(relLabel(editing.relationship)) })} confirmLabel={t('fam_remove_ok')} onconfirm={remove} oncancel={() => (confirming = false)} {busy} />
+			{:else}
+				<div class="p2row">
+					<button class="btn danger" type="button" onclick={() => (confirming = true)}>{t('fam_remove')}</button>
+					<button class="btn" type="button" onclick={close}>{t('i2_cancel')}</button>
+				</div>
+			{/if}
+		</div>
 	{:else if error}
 		<div class="p2err" role="alert" title={error.raw}>{error.text}</div>
 	{/if}
@@ -336,6 +380,9 @@
 	}
 	.svgwrap {
 		overflow-x: auto;
+	}
+	.swipe {
+		margin-top: 2px;
 	}
 	.svgwrap svg {
 		display: block;
