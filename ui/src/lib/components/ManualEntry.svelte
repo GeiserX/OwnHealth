@@ -9,6 +9,8 @@
 	import { untrack } from 'svelte';
 	import { addManualObservation, correctRecord, createRecord } from '#lib/api';
 	import type { RecordOut } from '#lib/api/types';
+	import { focusOnOpen } from '#lib/actions/focusOnOpen';
+	import { errText } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
 
 	type Fields = Record<string, string>;
@@ -86,14 +88,14 @@
 			if (!correcting) f = { ...fresh(k), ...(k === 'observation' ? { date: f.date } : {}) };
 			onsaved(k);
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = errText(err);
 		} finally {
 			busy = false;
 		}
 	}
 </script>
 
-<form class="p2form" onsubmit={save} aria-label={correcting ? t('me_correct') : t('me_add')}>
+<form class="p2form" onsubmit={save} use:focusOnOpen={{ oncancel }} aria-label={correcting ? t('me_correct') : t('me_add')}>
 	{#if !correcting && kinds.length > 1}
 		<div class="seg" role="group" aria-label={t('me_kind')}>
 			{#each kinds as k (k)}<button type="button" class:on={k === kind} aria-pressed={k === kind} onclick={() => pick(k)}>{t('me_k_' + k)}</button>{/each}

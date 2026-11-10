@@ -4,6 +4,9 @@ import { i18n, t } from '#lib/i18n/index.svelte';
 import { dict } from '#lib/i18n/dict';
 import { latestRunner } from '#lib/logic/loader';
 import { pluralKey } from '#lib/logic/plural';
+import { errKey, stripErrorName } from '#lib/logic/errors';
+
+export { unitLabel } from '#lib/logic/format';
 
 /** t() with {name} placeholders. */
 export function tf(key: string, vars: Record<string, string | number>): string {
@@ -31,10 +34,28 @@ export class Loader<T> {
 	}
 }
 
-/** Short code for an error shown in an empty state: 'HTTP 404', 'HTTP 500 · …'. */
+/** Short code for an error shown in an empty state: 'HTTP 404', 'HTTP 500 · …', 'no connection'. */
 export function errCode(e: unknown): string {
 	if (e instanceof ApiError) return `HTTP ${e.status}${e.code && !e.code.startsWith('http_') ? ' · ' + e.code : ''}`;
+	const m = e instanceof Error ? e.message : String(e);
+	return errKey(null, m, (k) => k in dict.en) === 'err_no_connection' ? t('err_conn_short') : m;
+}
+
+/** The raw text of an error, for a title or a dim second line under errText(). */
+export function errRaw(e: unknown): string {
 	return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * What a person reads for an error: our sentence for the server's code or for a common cause (connection
+ * refused, DNS, TLS, a duplicate, an unsupported file…), else the server's own message. Logic in #lib/logic/errors.
+ */
+export function errText(e: unknown): string {
+	const code = e instanceof ApiError ? e.code : null;
+	const raw = errRaw(e);
+	const key = errKey(code, raw, (k) => k in dict.en);
+	if (key) return t(key);
+	return e instanceof ApiError && !raw ? `HTTP ${e.status}` : stripErrorName(raw);
 }
 
 /** Decimal year of an ISO date, for time axes (same formula as the mockup's yfrac). */

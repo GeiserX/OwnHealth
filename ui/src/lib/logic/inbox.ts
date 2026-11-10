@@ -251,13 +251,28 @@ export function tokenButtonKey(kind: Kind, hasToken: boolean): string {
 	return hasToken ? 'fu_mon_token_new' : 'fu_mon_token';
 }
 
-/** Copy a value; true only when the clipboard took it (no clipboard on a plain-http origin). */
-export async function copyText(clip: { writeText(t: string): Promise<void> } | null | undefined, text: string): Promise<boolean> {
-	if (!clip) return false;
+/**
+ * The one copy path of the app. Copy a value; true only when the clipboard took it (there is no clipboard
+ * on a plain-http LAN origin). On false, the caller shows fu_copy_hand; when it passes the box that shows
+ * the value (a .p2secret or pre.code, both user-select:all), its text is selected for Ctrl/Cmd+C.
+ */
+export async function copyText(
+	clip: { writeText(t: string): Promise<void> } | null | undefined,
+	text: string,
+	box?: { ownerDocument: Document } | null
+): Promise<boolean> {
 	try {
+		if (!clip) throw new Error('no clipboard');
 		await clip.writeText(text);
 		return true;
 	} catch {
+		if (box) {
+			const sel = box.ownerDocument.getSelection();
+			const range = box.ownerDocument.createRange();
+			range.selectNodeContents(box as unknown as Node);
+			sel?.removeAllRanges();
+			sel?.addRange(range);
+		}
 		return false;
 	}
 }

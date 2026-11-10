@@ -3,6 +3,8 @@
 	// back once; the parent shows it with the Claude Code snippet and never stores it.
 	import { createToken } from '#lib/api';
 	import type { ProfileSummary, Scope, TokenOut } from '#lib/api/types';
+	import { focusOnOpen } from '#lib/actions/focusOnOpen';
+	import { errText } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
 	import { withStepUp } from './stepup.svelte';
 
@@ -47,14 +49,14 @@
 			const res = await withStepUp(() => createToken({ label: label.trim(), profiles: chosen, scopes, days, identity_mode: identity, default_profile: chosen[0] }));
 			oncreated(res.token, res.plaintext);
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = errText(err);
 		} finally {
 			busy = false;
 		}
 	}
 </script>
 
-<form class="card p2form" onsubmit={submit} aria-labelledby="tf-h">
+<form class="card p2form" onsubmit={submit} use:focusOnOpen={{ oncancel }} aria-labelledby="tf-h">
 	<h3 id="tf-h">{t('i2_tok_new')}<span class="r">{t('i2_tok_stepup')}</span></h3>
 	<label>{t('i2_tok_label')}<input class="p2in" bind:value={label} required maxlength="80" /></label>
 	<fieldset class="fs">

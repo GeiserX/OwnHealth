@@ -28,6 +28,7 @@
 		fmt = (v: number) => String(v),
 		refLine = null,
 		pad = [8, 8, 20, 32],
+		label,
 		onpoint
 	}: {
 		series: Series[];
@@ -42,6 +43,8 @@
 		fmt?: (v: number) => string;
 		refLine?: number | null;
 		pad?: [number, number, number, number];
+		/** What the chart shows, for screen readers ('Steps, average 8 400, 30 days'). */
+		label?: string;
 		onpoint?: (index: number, event: MouseEvent | null) => void;
 	} = $props();
 
@@ -71,7 +74,7 @@
 	const anchor = (k: number, len: number) => (bars ? 'middle' : k === len - 1 ? 'end' : k === 0 ? 'start' : 'middle');
 </script>
 
-<svg width="100%" viewBox="0 0 {w} {h}" preserveAspectRatio="xMidYMid meet" role="img">
+<svg width="100%" viewBox="0 0 {w} {h}" preserveAspectRatio="xMidYMid meet" role="img" aria-label={label}>
 	{#each ticks as v (v)}
 		<line x1={g.pl} x2={w - g.pr} y1={g.sy(v)} y2={g.sy(v)} stroke={C.grid} />
 		<text x={g.pl - 5} y={g.sy(v) + 3.5} fill={C.axis} font-size="10" text-anchor="end">{fmt(v)}</text>

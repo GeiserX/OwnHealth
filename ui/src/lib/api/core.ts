@@ -1,5 +1,7 @@
 // Typed fetch wrapper and the foundation endpoints. Same-origin; the session cookie rides along.
 import { filenameFromDisposition } from '#lib/logic/download';
+import { validationDetail } from '#lib/logic/errors';
+import { app } from '#lib/state/app.svelte';
 import type { ImportItem, JobInfo, Me, ProfileSummary, ReviewItem, SourceDetail, Uuid } from './types';
 
 export class ApiError extends Error {
@@ -38,7 +40,8 @@ async function send(method: string, path: string, opts: { query?: Query; body?: 
 		try {
 			const body = await res.json();
 			const d = body?.detail;
-			if (d && typeof d === 'object') {
+			if (Array.isArray(d)) ({ code, message } = validationDetail(d));
+			else if (d && typeof d === 'object') {
 				code = d.code ?? code;
 				message = d.message ?? message;
 				allowed = d.allowed ?? [];
@@ -46,6 +49,8 @@ async function send(method: string, path: string, opts: { query?: Query; body?: 
 		} catch {
 			/* not JSON */
 		}
+		// A session that ended mid-use: the layout shows the sign-in screen instead of a broken page.
+		if (res.status === 401 && !path.startsWith('/auth/')) app.unauthenticated = true;
 		throw new ApiError(res.status, code, message, allowed);
 	}
 	return res;

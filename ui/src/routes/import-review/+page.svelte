@@ -6,6 +6,7 @@
 	import { goto } from '$app/navigation';
 	import {
 		acceptReview,
+		getMe,
 		addAlias,
 		bulkAccept,
 		dismissReview,
@@ -68,7 +69,6 @@
 				// The inbox tiles; a viewer who cannot manage sources (403) just sees the setup tile.
 				listInboxes().catch(() => ({ items: [] as InboxSource[] }))
 			]);
-			if (app.me) app.me.review_open = r.open;
 			return { items: r.items, docs: d.items, jobs: j.jobs, sources: s.items };
 		}, slug);
 	}
@@ -172,7 +172,17 @@
 			busy = false;
 			// Also after a failure: a batch that failed at row N already accepted rows 1 to N-1.
 			load();
+			refreshReviewTotal();
 		}
+	}
+	// The top bar and the sidebar show the household total; refresh it from /me after every decision.
+	// If that call fails the old number stays, and the queue's own load shows the error.
+	function refreshReviewTotal() {
+		getMe()
+			.then((m) => {
+				if (app.me) app.me.review_open = m.review_open;
+			})
+			.catch(() => undefined);
 	}
 	const acceptPicked = () => act(async () => { for (const id of picked) await acceptReview(id); });
 
@@ -389,6 +399,7 @@
 {#if others.length}
 	<div class="card" style="margin-top:12px;padding:8px 6px 2px">
 		<h3 style="padding:0 8px">{t('i2_others')}<span class="r">{tf('i2_others_d', { n: others.length })}</span></h3>
+		<div class="tscroll">
 		<table class="t">
 			<tbody>
 				{#each others as it (it.id)}
@@ -426,6 +437,7 @@
 				{/each}
 			</tbody>
 		</table>
+		</div>
 	</div>
 {/if}
 
@@ -444,6 +456,13 @@
 		margin: 10px 12px;
 		padding: 7px 10px;
 		flex-wrap: wrap;
+	}
+	/* Every connected source gets a tile: they wrap onto more rows instead of running off the page. */
+	.inbox {
+		flex-wrap: wrap;
+	}
+	.inbox .ib {
+		min-width: 200px;
 	}
 	@media (max-width: 760px) {
 		.imp {
