@@ -21,7 +21,8 @@
 	import type { DocumentDetail, DocumentSummary, JobInfo, ReviewItem } from '#lib/api/types';
 	import type { InboxSource } from '#lib/api/inbox';
 	import AgentContext from '#lib/components/inbox/AgentContext.svelte';
-	import { nearDuplicateOf, paperlessLink, rowGrounding, sourceStatus } from '#lib/logic/inbox';
+	import ProposalRows from '#lib/components/inbox/ProposalRows.svelte';
+	import { nearDuplicateOf, paperlessLink, proposalRows, rowGrounding, sourceStatus, sourceWhere } from '#lib/logic/inbox';
 	import PageHeader from '#lib/components/PageHeader.svelte';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
@@ -77,8 +78,10 @@
 	});
 
 	const items = $derived(queue.data?.items ?? []);
+	// An agent's observations proposal is shown row by row next to its document, like an import.
+	const isObsProposal = (i: ReviewItem) => i.kind === 'agent_proposal' && !!i.document_id && proposalRows(i) != null;
 	const docsWithRows = $derived.by(() => {
-		const ids = new Set(items.filter((i) => i.kind === 'candidate_row' && i.document_id).map((i) => i.document_id as string));
+		const ids = new Set(items.filter((i) => (i.kind === 'candidate_row' || isObsProposal(i)) && i.document_id).map((i) => i.document_id as string));
 		return (queue.data?.docs ?? []).filter((d) => ids.has(d.id));
 	});
 	// Links from MCP: get_source.crop_url (?doc=&page=&src=) and propose.review_url (?item=).
@@ -86,6 +89,11 @@
 	const docId = $derived(
 		page.url.searchParams.get('doc') ?? items.find((i) => i.id === itemParam)?.document_id ?? docsWithRows[0]?.id ?? null
 	);
+	// The two-click "reject as duplicate" belongs to one document: another document starts unarmed.
+	$effect(() => {
+		void docId;
+		confirmDup = false;
+	});
 	$effect(() => {
 		const id = docId;
 		if (!id) return;
@@ -95,9 +103,12 @@
 		doc.run(() => getDocument(id), id);
 	});
 	const rows = $derived(items.filter((i) => i.kind === 'candidate_row' && i.document_id === docId));
+	const docProposals = $derived(items.filter((i) => isObsProposal(i) && i.document_id === docId).map((i) => ({ item: i, rows: proposalRows(i) ?? [] })));
 	// v0.2: "probably the same as document X" (dedup level 2) is a banner over that document's rows.
 	const near = $derived(nearDuplicateOf(items, docId));
-	const others = $derived(items.filter((i) => !(i.kind === 'candidate_row' && i.document_id === docId) && i.id !== near?.id));
+	const others = $derived(
+		items.filter((i) => !((i.kind === 'candidate_row' || isObsProposal(i)) && i.document_id === docId) && i.id !== near?.id)
+	);
 	const nearOf = $derived.by(() => {
 		const id = (near?.payload as { same_as?: string } | undefined)?.same_as;
 		return id ? { id, doc: (queue.data?.docs ?? []).find((x) => x.id === id) ?? null } : null;
@@ -108,16 +119,22 @@
 	};
 	const pg = (i: ReviewItem) => Number((i.payload as { page_no?: number }).page_no ?? 1);
 	const pinfo = $derived(doc.data?.pages_info.find((p) => p.page_no === pageNo) ?? null);
-	const boxes = $derived<Box[]>(
-		rows
+	const boxes = $derived<Box[]>([
+		...rows
 			.filter((i) => pg(i) === pageNo && Array.isArray((i.payload as { bbox?: number[] }).bbox))
 			.map((i) => ({
 				id: i.id,
 				bbox: (i.payload as { bbox: number[] }).bbox,
-				tone: i.reasons.includes('possible_injection') || rowGrounding(i) === 'ungrounded' ? 'bad' : i.reasons.length ? 'low' : '',
+				tone: (i.reasons.includes('possible_injection') || rowGrounding(i) === 'ungrounded' ? 'bad' : i.reasons.length ? 'low' : '') as Box['tone'],
 				label: String(((i.payload as { observation?: { printed_name?: string } }).observation ?? {}).printed_name ?? '')
-			}))
-	);
+			})),
+		// An agent's rows the server found on this page; a row not found has no box to draw.
+		...docProposals.flatMap((p) =>
+			p.rows
+				.filter((r) => r.bbox && r.page === pageNo)
+				.map((r) => ({ id: `${p.item.id}:${r.index}`, bbox: r.bbox as number[], tone: (r.problems.length ? 'low' : '') as Box['tone'], label: r.name }))
+		)
+	]);
 	// Pages carrying text aimed at an AI or hidden text (lane B's flags on the page and on the document).
 	const flagged = $derived.by(() => {
 		const d = doc.data;
@@ -176,7 +193,7 @@
 		(queue.data?.sources ?? []).map((s) => {
 			const c = s.config as Record<string, unknown>;
 			const what =
-				s.kind === 'email' ? String(c.username ?? c.host ?? '') : s.kind === 'folder' ? `/${String(c.subdir ?? c.path ?? '')}` : s.kind === 'paperless' && c.tag ? `tag: ${String(c.tag)}` : '';
+				s.kind === 'email' ? String(c.username ?? c.host ?? '') : s.kind === 'folder' ? `/${sourceWhere(c).subdir}` : s.kind === 'paperless' && sourceWhere(c).tag ? `tag: ${sourceWhere(c).tag}` : '';
 			const st = sourceStatus(s);
 			const bad = st === 'out' || st === 'partial';
 			const state = st === 'out' ? tf('fu_tile_failing', { n: 1 }) : st === 'partial' ? t('fu_st_partial') : s.last_success_at ? tf('fu_tile_synced', { when: ago(s.last_success_at) }) : t('fu_st_nodata');
@@ -345,7 +362,14 @@
 					onalias={(b) => prof && act(() => addAlias({ profile: prof.slug, alias: String((it.payload as { observation?: { printed_name?: string } }).observation?.printed_name ?? ''), alias_group: b.alias_group, loinc: b.loinc, lang: i18n.lang }))}
 				/>
 			{:else}
-				<div class="empty">{t('i2_doc_done')}</div>
+				{#if !docProposals.length}<div class="empty">{t('i2_doc_done')}</div>{/if}
+			{/each}
+			{#each docProposals as p (p.item.id)}
+				<div class="prop">
+					<div style="font-size:12px"><span class="chip" style="color:var(--accent);border-color:rgba(110,168,254,.5)">agent</span> ◆ {otherTitle(p.item)}</div>
+					<ProposalRows rows={p.rows} {busy} onaccept={(edits) => act(() => acceptReview(p.item.id, edits))} onreject={() => act(() => rejectReview(p.item.id, 'rejected in review'))} />
+					<AgentContext item={p.item} docName={docNameOf} />
+				</div>
 			{/each}
 			<div style="padding:10px 12px;display:flex;flex-direction:column;gap:6px">
 				{#if agentCount}
@@ -368,11 +392,14 @@
 		<table class="t">
 			<tbody>
 				{#each others as it (it.id)}
+					{@const prows = proposalRows(it)}
 					<tr class:agent={it.kind === 'agent_proposal'}>
 						<td style="width:1%"><span class="chip mono" style={it.kind === 'agent_proposal' ? 'color:var(--accent);border-color:rgba(110,168,254,.5)' : ''}>{it.kind}</span></td>
 						<td>
 							<div>{it.kind === 'agent_proposal' ? '◆ ' : ''}{otherTitle(it)}</div>
-							{#if otherText(it)}<pre class="p2untrusted" style="margin-top:4px">{otherText(it)}</pre>{/if}
+							{#if prows}
+								<ProposalRows rows={prows} {busy} documentId={it.document_id} onaccept={(edits) => act(() => acceptReview(it.id, edits))} onreject={() => act(() => rejectReview(it.id, 'rejected in review'))} />
+							{:else if otherText(it)}<pre class="p2untrusted" style="margin-top:4px">{otherText(it)}</pre>{/if}
 							{#if it.kind === 'agent_proposal'}<AgentContext item={it} docName={docNameOf} />{:else if it.context_src_ids?.length}<div class="dim mono" style="font-size:10.5px">{t('i2_based_on')} {it.context_src_ids.join(', ')}</div>{/if}
 						</td>
 						<td class="dim num" style="white-space:nowrap">{day(it.created_at)}</td>
@@ -383,7 +410,7 @@
 								{#if it.document_id}<a class="btn sm" href={documentFileUrl(it.document_id)} target="_blank" rel="noopener">{t('i2_open_doc')}</a>{/if}
 								<button class="btn sm pri" onclick={() => (entering = entering === it.id ? null : it.id)} aria-expanded={entering === it.id}>{t('me_enter')}</button>
 								<button class="btn sm" onclick={() => act(() => dismissReview(it.id, entering === it.id ? 'entered by hand' : undefined))} disabled={busy}>{entering === it.id ? t('me_done') : t('i2_dismiss')}</button>
-							{:else if it.kind === 'agent_proposal' || it.kind === 'fhir_unmapped'}
+							{:else if (it.kind === 'agent_proposal' && !prows) || it.kind === 'fhir_unmapped'}
 								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
 								<button class="btn sm no" onclick={() => act(() => rejectReview(it.id, 'rejected in review'))} disabled={busy}>{t('i2_reject')}</button>
 							{:else}
@@ -431,6 +458,11 @@
 	}
 	a.lnkt {
 		color: inherit;
+	}
+	.prop {
+		padding: 8px 12px;
+		border-top: 1px solid var(--line);
+		background: rgba(110, 168, 254, 0.05);
 	}
 	a.lnkt:hover {
 		border-color: var(--line2);

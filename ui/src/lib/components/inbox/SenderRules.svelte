@@ -10,7 +10,12 @@
 	import { t } from '#lib/i18n/index.svelte';
 	import { senderPattern } from '#lib/logic/inbox';
 
-	let { sourceId, profiles, onchange }: { sourceId: string; profiles: ProfileSummary[]; onchange?: () => void } = $props();
+	let {
+		sourceId,
+		profiles,
+		onchange,
+		authChecked = true
+	}: { sourceId: string; profiles: ProfileSummary[]; onchange?: () => void; authChecked?: boolean } = $props();
 
 	const rules = new Loader<SenderRuleOut[]>();
 	const load = () => rules.run(async () => (await listSenders(sourceId)).items, sourceId);
@@ -24,6 +29,8 @@
 	let nr = $state({ pattern: '', profile_id: '', trust_unauthenticated: false });
 	let pwFor = $state<string | null>(null);
 	let pw = $state({ password: '', label: '' });
+	// A sender or a PDF password waiting for its second click: neither can be read back once gone.
+	let removing = $state<string | null>(null);
 
 	async function act(fn: () => Promise<unknown>) {
 		busy = true;
@@ -66,6 +73,7 @@
 <div class="sr">
 	<div class="hd"><b>{t('fu_senders')}</b><span class="dim">{t('fu_senders_d')}</span></div>
 	{#if error}<div class="p2err" role="alert">{error}</div>{/if}
+	{#if !authChecked && (rules.data ?? []).some((r) => !r.trust_unauthenticated)}<div class="note" style="color:var(--watch)" role="note">{t('fu_sr_no_auth_d')}</div>{/if}
 	{#if rules.error}
 		<NotReady error={rules.error} onretry={load} />
 	{:else}
@@ -77,16 +85,37 @@
 							<td class="mono">{r.pattern}</td>
 							<td>→ {profileName(r.profile_id)}</td>
 							<td>
-								{#if r.trust_unauthenticated}<span class="pill p-watch" title={t('fu_unauth_d')}><i aria-hidden="true"></i>{t('fu_unauth')}</span>{:else}<span class="pill p-ok"><i aria-hidden="true"></i>DKIM/SPF</span>{/if}
+								{#if r.trust_unauthenticated}<span class="pill p-watch" title={t('fu_unauth_d')}><i aria-hidden="true"></i>{t('fu_unauth')}</span>{:else if authChecked}<span class="pill p-ok"><i aria-hidden="true"></i>DKIM/SPF</span>{:else}<span class="pill p-watch" title={t('fu_sr_no_auth_d')}><i aria-hidden="true"></i>{t('fu_sr_no_auth')}</span>{/if}
 							</td>
 							<td>
 								{#each r.pdf_passwords as p (p.id)}
-									<span class="chip pw">🔑 {p.label ?? t('fu_pw_unnamed')} <button class="x" aria-label="{t('i2_remove')} {p.label ?? ''}" disabled={busy} onclick={() => act(() => deletePdfPassword(p.id))}>×</button></span>
+									<span class="chip pw"
+										>🔑 {p.label ?? t('fu_pw_unnamed')}
+										{#if removing === p.id}
+											<button class="x on" title={t('fu_pw_remove_d')} disabled={busy} onclick={() => act(async () => { removing = null; await deletePdfPassword(p.id); })}>{t('fu_remove_yes')}</button>
+											<button class="x" onclick={() => (removing = null)}>{t('i2_cancel')}</button>
+										{:else}
+											<button class="x" aria-label="{t('i2_remove')} {p.label ?? ''}" disabled={busy} onclick={() => (removing = p.id)}>×</button>
+										{/if}</span
+									>
 								{/each}
 								<button class="btn sm" onclick={() => (pwFor = pwFor === r.id ? null : r.id)} aria-expanded={pwFor === r.id}>{t('fu_pw_add')}</button>
 							</td>
-							<td style="text-align:right"><button class="btn sm no" disabled={busy} onclick={() => act(() => deleteSender(r.id))}>{t('i2_remove')}</button></td>
+							<td style="text-align:right;white-space:nowrap">
+								{#if removing === r.id}
+									<button class="btn sm no" disabled={busy} onclick={() => act(async () => { removing = null; await deleteSender(r.id); })}>{t('fu_remove_yes')}</button>
+									<button class="btn sm" onclick={() => (removing = null)}>{t('i2_cancel')}</button>
+								{:else}
+									<button class="btn sm no" disabled={busy} onclick={() => (removing = r.id)}>{t('i2_remove')}</button>
+								{/if}
+							</td>
 						</tr>
+						{#if removing === r.id && r.pdf_passwords.length}
+							<tr><td colspan="5"><div class="note" style="color:var(--watch)">{t('fu_sender_remove_d')}</div></td></tr>
+						{/if}
+						{#if r.pdf_passwords.some((p) => p.id === removing)}
+							<tr><td colspan="5"><div class="note" style="color:var(--watch)">{t('fu_pw_remove_d')}</div></td></tr>
+						{/if}
 						{#if pwFor === r.id}
 							<tr>
 								<td colspan="5">
@@ -142,7 +171,8 @@
 		padding: 0 0 0 2px;
 		color: var(--dim);
 	}
-	.x:hover {
+	.x:hover,
+	.x.on {
 		color: var(--out);
 	}
 	.ck {

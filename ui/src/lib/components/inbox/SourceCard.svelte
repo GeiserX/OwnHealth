@@ -7,7 +7,7 @@
 	import Switch from '#lib/components/pages2/Switch.svelte';
 	import { ago, stamp } from '#lib/components/pages2/fmt';
 	import { t } from '#lib/i18n/index.svelte';
-	import { POLL_KINDS, PUSH_KINDS, sourceStatus } from '#lib/logic/inbox';
+	import { POLL_KINDS, hasAuthserv, sourceStatus, sourceWhere, tokenButtonKey } from '#lib/logic/inbox';
 	import SenderRules from './SenderRules.svelte';
 
 	let {
@@ -37,21 +37,24 @@
 	const runs = new Loader<SourceRun[]>();
 	let open = $state<'' | 'runs' | 'senders'>('');
 	let confirming = $state(false);
+	// Replacing a live token cuts off whatever uses it, so it waits for a second click.
+	let confirmToken = $state(false);
 	function toggle(what: 'runs' | 'senders') {
 		open = open === what ? '' : what;
 		if (open === 'runs') runs.run(async () => (await listRuns(source.id, 10)).items, source.id);
 	}
 	const c = $derived(source.config as Record<string, string | number | boolean | null | undefined>);
+	const where = $derived(sourceWhere(source.config));
 	const detail = $derived.by(() => {
 		switch (source.kind) {
 			case 'email':
 				return [c.username, c.host].filter(Boolean).join(' · ');
 			case 'folder':
-				return `OWNHEALTH_INBOX_DIR/${c.path ? c.path + '/' : ''}`;
+				return `OWNHEALTH_INBOX_DIR/${where.subdir ? where.subdir + '/' : ''}`;
 			case 'paperless':
-				return [c.url, c.tag ? `tag: ${c.tag}` : null].filter(Boolean).join(' · ');
+				return [where.url, where.tag ? `tag: ${where.tag}` : null].filter(Boolean).join(' · ');
 			case 'nightscout':
-				return String(c.url ?? '');
+				return where.url;
 			default:
 				return source.token_prefix ? `${source.token_prefix}…` : t('fu_no_token');
 		}
@@ -100,7 +103,13 @@
 	<div class="acts">
 		<Switch on={source.enabled} label={tf('fu_enabled', { label: source.label })} disabled={busy} onchange={ontoggle} />
 		{#if POLL_KINDS.includes(source.kind)}<button class="btn sm" disabled={busy || !source.enabled} onclick={onsync}>{t('fu_sync')}</button>{/if}
-		{#if PUSH_KINDS.includes(source.kind)}<button class="btn sm" disabled={busy} onclick={ontoken}>{source.token_prefix ? t('fu_token_new') : t('fu_token')}</button>{/if}
+		{#if confirmToken}
+			<button class="btn sm no" disabled={busy} onclick={() => { confirmToken = false; ontoken(); }}>{t('fu_token_new_yes')}</button>
+			<button class="btn sm" onclick={() => (confirmToken = false)}>{t('i2_cancel')}</button>
+		{:else}
+			<!-- Every kind gets a token: push kinds send with it, polled kinds give it to a monitor. -->
+			<button class="btn sm" disabled={busy} onclick={() => (source.token_prefix ? (confirmToken = true) : ontoken())}>{t(tokenButtonKey(source.kind, !!source.token_prefix))}</button>
+		{/if}
 		{#if source.kind === 'email'}<button class="btn sm" onclick={() => toggle('senders')} aria-expanded={open === 'senders'}>{t('fu_senders')}</button>{/if}
 		<button class="btn sm" onclick={() => toggle('runs')} aria-expanded={open === 'runs'}>{t('fu_runs')}</button>
 		<button class="btn sm" onclick={onedit}>{t('i2_edit')}</button>
@@ -111,6 +120,7 @@
 			<button class="btn sm no" onclick={() => (confirming = true)}>{t('fu_delete')}</button>
 		{/if}
 	</div>
+	{#if confirmToken}<div class="note" style="color:var(--watch)" role="note">{t('fu_token_new_d')}</div>{/if}
 	{#if open === 'runs'}
 		<div class="runs">
 			{#if runs.error}
@@ -138,7 +148,7 @@
 			{/if}
 		</div>
 	{:else if open === 'senders'}
-		<SenderRules sourceId={source.id} {profiles} {onchange} />
+		<SenderRules sourceId={source.id} {profiles} {onchange} authChecked={hasAuthserv(source.config)} />
 	{/if}
 </article>
 

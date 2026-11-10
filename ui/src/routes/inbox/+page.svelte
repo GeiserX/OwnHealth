@@ -24,7 +24,7 @@
 	import SourceCard from '#lib/components/inbox/SourceCard.svelte';
 	import SourceForm from '#lib/components/inbox/SourceForm.svelte';
 	import { t } from '#lib/i18n/index.svelte';
-	import { RECIPE, RECIPES_URL, heldTotal } from '#lib/logic/inbox';
+	import { PUSH_KINDS, RECIPE, RECIPES_URL, copyText, heldTotal, quarantineReason } from '#lib/logic/inbox';
 	import { app, currentProfile } from '#lib/state/app.svelte';
 
 	const sources = new Loader<InboxSource[]>();
@@ -41,7 +41,8 @@
 	let error = $state<string | null>(null);
 	let notice = $state<string | null>(null);
 	let fresh = $state<{ source: InboxSource; token: string } | null>(null);
-	let copied = $state(false);
+	// null: not tried yet; false: the clipboard refused, so the person copies the token by hand.
+	let copied = $state<boolean | null>(null);
 	// Inline release form: which held message, into which profile.
 	let releasing = $state<string | null>(null);
 	let target = $state('');
@@ -66,7 +67,7 @@
 		act(async () => {
 			const r = await issueInboxToken(s.id);
 			fresh = { source: s, token: r.token };
-			copied = false;
+			copied = null;
 		});
 	const remove = (q: QuarantineOut) =>
 		act(async () => {
@@ -86,8 +87,7 @@
 		});
 	async function copy() {
 		if (!fresh) return;
-		await navigator.clipboard?.writeText(fresh.token).catch(() => null);
-		copied = true;
+		copied = await copyText(typeof navigator === 'undefined' ? null : navigator.clipboard, fresh.token);
 	}
 	// Where each push source sends, with which header (connectors.md, ingestion.md 3).
 	const PUSH: Record<string, { path: string; header: string }> = {
@@ -97,6 +97,7 @@
 	};
 	const origin = typeof location !== 'undefined' ? location.origin : '';
 	const sourceName = (id: string | null) => sources.data?.find((s) => s.id === id)?.label ?? '—';
+	const mailboxOf = (id: string | null) => sources.data?.find((s) => s.id === id)?.config ?? null;
 	const doneFolder = (id: string | null) => String(sources.data?.find((s) => s.id === id)?.config.done_folder ?? 'OwnHealth/Done');
 	const failing = $derived((sources.data ?? []).filter((s) => s.enabled && s.consecutive_failures > 0).length);
 	// the server's count, not the length of the first page of the list
@@ -149,13 +150,17 @@
 	<section class="card tok" aria-live="polite">
 		<h3>{tf('fu_token_made', { label: fresh.source.label })}<span class="r"><button class="btn sm" onclick={copy}>{copied ? t('i2_copied') : t('i2_copy')}</button> <button class="btn sm" onclick={() => (fresh = null)}>{t('fu_done')}</button></span></h3>
 		<div class="p2secret">{fresh.token}</div>
+		{#if copied === false}<div class="note" role="alert" style="color:var(--watch)">{t('fu_copy_hand')}</div>{/if}
 		{#if PUSH[fresh.source.kind]}
 			<pre class="code">POST {origin}{PUSH[fresh.source.kind].path}
 {PUSH[fresh.source.kind].header}{fresh.token.slice(0, 12)}…</pre>
+		{:else}
+			<pre class="code">GET {origin}/api/inboxes/{fresh.source.id}/health?format=prometheus
+Authorization: Bearer {fresh.token.slice(0, 12)}…</pre>
 		{/if}
 		<div class="note">
-			{t('fu_token_once')} {t('fu_tk_' + fresh.source.kind)}
-			{#if RECIPE[fresh.source.kind]}<a href={RECIPES_URL + RECIPE[fresh.source.kind]} target="_blank" rel="noopener noreferrer">{t('fu_recipe')} ↗</a>{/if}
+			{t('fu_token_once')} {t(PUSH_KINDS.includes(fresh.source.kind) ? 'fu_tk_' + fresh.source.kind : 'fu_tk_monitor')}
+			{#if !PUSH_KINDS.includes(fresh.source.kind)}<a href="https://github.com/GeiserX/OwnHealth/blob/main/deploy/README.md#monitoring-the-inboxes" target="_blank" rel="noopener noreferrer">{t('fu_recipe')} ↗</a>{:else if RECIPE[fresh.source.kind]}<a href={RECIPES_URL + RECIPE[fresh.source.kind]} target="_blank" rel="noopener noreferrer">{t('fu_recipe')} ↗</a>{/if}
 		</div>
 	</section>
 {/if}
@@ -200,6 +205,7 @@
 				</thead>
 				<tbody>
 					{#each held.data as q (q.id)}
+						{@const why = quarantineReason(q.reason, mailboxOf(q.source_id))}
 						<tr>
 							<td class="dim num nw">{ago(q.received_at)}<div style="font-size:10.5px">{sourceName(q.source_id)}</div></td>
 							<td class="mono ut">{plain(q.sender) || '—'}</td>
@@ -209,7 +215,7 @@
 									<div class="att"><span class="mono">{plain(a.filename)}</span> <span class="dim">{kb(a.size)}</span></div>
 								{:else}<span class="dim">{t('fu_q_nofiles')}</span>{/each}
 							</td>
-							<td><span class="pill {q.reason === 'auth_failed' ? 'p-out' : 'p-watch'}"><i aria-hidden="true"></i>{t('fu_qr_' + q.reason)}</span></td>
+							<td><span class="pill {why.tone}" title={why.key === 'fu_qr_auth_unchecked' ? t('fu_q_auth_unchecked_d') : undefined}><i aria-hidden="true"></i>{t(why.key)}</span></td>
 							<td class="nw" style="text-align:right">
 								{#if q.reason !== 'too_large'}
 									<button class="btn sm" onclick={() => startRelease(q)} aria-expanded={releasing === q.id}>{t('fu_q_release')}</button>
@@ -236,7 +242,7 @@
 											{#each profiles as p (p.id)}<option value={p.id}>{p.display_name}</option>{/each}
 										</select>
 										<button class="btn sm" disabled={busy || !target} onclick={() => release(q, false)}>{t('fu_q_once')}</button>
-										<button class="btn sm pri" disabled={busy || !target || q.reason === 'auth_failed'} onclick={() => release(q, true)} title={q.reason === 'auth_failed' ? t('fu_q_auth_no_allow') : ''}>{t('fu_q_allow')}</button>
+										<button class="btn sm pri" disabled={busy || !target || q.reason === 'auth_failed'} onclick={() => release(q, true)} title={q.reason === 'auth_failed' ? t(why.key === 'fu_qr_auth_unchecked' ? 'fu_q_auth_unchecked_d' : 'fu_q_auth_no_allow') : ''}>{t('fu_q_allow')}</button>
 										<button class="btn sm" onclick={() => (releasing = null)}>{t('i2_cancel')}</button>
 									</div>
 									<div class="note" style="margin-top:4px">{t('fu_q_release_d')}</div>

@@ -9,6 +9,7 @@
 	import PageHeader from '#lib/components/PageHeader.svelte';
 	import { tf, tp } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
+	import { shareTone } from '#lib/logic/inbox';
 	import { app, currentProfile } from '#lib/state/app.svelte';
 
 	type Result = { filename: string; outcome?: string; duplicate?: boolean };
@@ -94,7 +95,8 @@
 			<h3>{t('fu_share_done')}</h3>
 			<ul class="files">
 				{#each results as r, i (i)}
-					<li><span class="mono nm">{r.filename}</span><span class="pill {r.duplicate || r.outcome === 'duplicate' || r.outcome === 'already_seen' ? 'p-stale' : 'p-ok'}"><i aria-hidden="true"></i>{r.duplicate || r.outcome === 'duplicate' || r.outcome === 'already_seen' ? t('fu_share_dup') : r.outcome === 'unsupported' ? t('fu_share_unsupported') : t('fu_share_queued')}</span></li>
+					{@const pill = shareTone(r)}
+					<li><span class="mono nm">{r.filename}</span><span class="pill {pill.tone}"><i aria-hidden="true"></i>{t(pill.key)}</span></li>
 				{/each}
 			</ul>
 			<a class="btn" href="/import-review">{t('nav_imp')}</a>

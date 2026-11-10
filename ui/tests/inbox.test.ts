@@ -4,7 +4,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
 	agentContext,
+	cgmBands,
 	consentDefaults,
+	copyText,
 	consentProblem,
 	emptyForm,
 	formOf,
@@ -12,10 +14,17 @@ import {
 	nearDuplicateOf,
 	paperlessLink,
 	portForTls,
+	proposalAcceptEdits,
+	proposalDefaultKeep,
+	proposalRows,
+	quarantineReason,
 	rowGrounding,
 	senderPattern,
+	shareTone,
 	sourceBody,
-	sourceStatus
+	sourceStatus,
+	sourceWhere,
+	tokenButtonKey
 } from '../src/lib/logic/inbox.ts';
 
 const h = (o: Partial<Parameters<typeof sourceStatus>[0]>) => ({
@@ -157,7 +166,8 @@ test('every key the v0.2 screens build at run time exists in es and en', async (
 		...['ok', 'out', 'stale', 'nodata', 'off'].map((s) => 'fu_st_' + s),
 		...['poll', 'push', 'manual'].map((s) => 'fu_trig_' + s),
 		...['running', 'ok', 'partial', 'error'].map((s) => 'fu_run_' + s),
-		...['sender_not_allowed', 'auth_failed', 'too_large', 'unsupported_type', 'no_profile'].map((s) => 'fu_qr_' + s),
+		...['sender_not_allowed', 'auth_failed', 'auth_unchecked', 'too_large', 'unsupported_type', 'no_profile'].map((s) => 'fu_qr_' + s),
+		...(['email', 'folder', 'nightscout', 'paperless', 'shortcut', 'health_auto_export'] as const).flatMap((k) => [tokenButtonKey(k, false), tokenButtonKey(k, true)]),
 		...scopes.map((s) => 'fu_sc_' + s.replace(':', '_'))
 	];
 	for (const lang of ['en', 'es'] as const) {
@@ -207,4 +217,107 @@ test('held mail is counted from the server counts, not the first page of the lis
 		]),
 		143
 	);
+});
+
+test('editing a source keeps the config keys the form does not show', () => {
+	const stored = { base_url: 'http://paperless.lan:8000', health_tag: 'health', allow_private: true, profile_by_tag: { '12': 'lucia-profile' } };
+	const f = formOf({ kind: 'paperless', label: 'Paperless', profile_id: 'p1', config: stored, poll_seconds: 900 });
+	const r = sourceBody({ ...f, poll_minutes: '30' }, true, stored);
+	assert.ok('body' in r);
+	assert.deepEqual(r.body.config.profile_by_tag, { '12': 'lucia-profile' }, 'tag routing survives an edit');
+	assert.equal(r.body.poll_seconds, 1800);
+	// An older `url` key is replaced, never sent next to base_url (the server refuses both at once).
+	const ns = { url: 'https://ns.rivera.example', backfill_days: 30, api: 'v3' };
+	const n = sourceBody(formOf({ kind: 'nightscout', label: 'CGM', profile_id: 'p3', config: ns, poll_seconds: 300 }), true, ns);
+	assert.ok('body' in n);
+	assert.deepEqual(n.body.config, { base_url: 'https://ns.rivera.example', allow_private: false, backfill_days: 30, api: 'v3' });
+	const mail = { host: 'imap.rivera.example', port: 993, tls: 'implicit', username: 'u', ca_file: '/certs/ca.pem' };
+	const m = sourceBody(formOf({ kind: 'email', label: 'Correo', profile_id: null, config: mail, poll_seconds: 60 }), true, mail);
+	assert.ok('body' in m);
+	assert.equal(m.body.config.ca_file, '/certs/ca.pem');
+});
+
+test('source cards read the keys the form writes, and the older ones', () => {
+	assert.deepEqual(sourceWhere({ subdir: 'scans', base_url: 'http://p.lan', health_tag: 'health' }), { subdir: 'scans', url: 'http://p.lan', tag: 'health' });
+	assert.deepEqual(sourceWhere({ path: 'old', url: 'http://n.lan', tag: '7' }), { subdir: 'old', url: 'http://n.lan', tag: '7' });
+	assert.deepEqual(sourceWhere(null), { subdir: '', url: '', tag: '' });
+});
+
+test('every inbox kind offers a token: push kinds for the sender, polled kinds for the monitor', () => {
+	assert.equal(tokenButtonKey('paperless', false), 'fu_token');
+	assert.equal(tokenButtonKey('health_auto_export', true), 'fu_token_new');
+	assert.equal(tokenButtonKey('email', false), 'fu_mon_token');
+	assert.equal(tokenButtonKey('nightscout', true), 'fu_mon_token_new');
+	assert.equal(tokenButtonKey('folder', false), 'fu_mon_token');
+});
+
+test('mail held from a mailbox with no authserv-id is unchecked (amber), not a DKIM/SPF failure', () => {
+	assert.deepEqual(quarantineReason('auth_failed', { trusted_authserv_id: null }), { key: 'fu_qr_auth_unchecked', tone: 'p-watch' });
+	assert.deepEqual(quarantineReason('auth_failed', { trusted_authserv_id: '  ' }), { key: 'fu_qr_auth_unchecked', tone: 'p-watch' });
+	assert.deepEqual(quarantineReason('auth_failed', { trusted_authserv_id: 'mx.rivera.example' }), { key: 'fu_qr_auth_failed', tone: 'p-out' });
+	assert.deepEqual(quarantineReason('sender_not_allowed', {}), { key: 'fu_qr_sender_not_allowed', tone: 'p-watch' });
+});
+
+test('"copied" only when the clipboard took the token', async () => {
+	assert.equal(await copyText(undefined, 'x'), false, 'no clipboard on plain http');
+	assert.equal(await copyText({ writeText: () => Promise.reject(new Error('denied')) }, 'x'), false);
+	let got = '';
+	assert.equal(await copyText({ writeText: async (t) => void (got = t) }, 'tok'), true);
+	assert.equal(got, 'tok');
+});
+
+test('a shared file that will never import is not green', () => {
+	assert.equal(shareTone({ outcome: 'unsupported' }).tone, 'p-watch');
+	assert.equal(shareTone({ outcome: 'queued' }).tone, 'p-ok');
+	assert.equal(shareTone({ outcome: 'already_seen' }).tone, 'p-stale');
+	assert.equal(shareTone({ duplicate: true }).key, 'fu_share_dup');
+});
+
+test('an invalid CGM summary draws no band (missing is not 0 %)', () => {
+	const keys = ['very_low_pct', 'low_pct', 'in_range_pct'] as const;
+	assert.equal(cgmBands({ valid: false, very_low_pct: null, low_pct: null, in_range_pct: null }, keys), null);
+	assert.deepEqual(cgmBands({ valid: true, very_low_pct: 0, low_pct: 2.5, in_range_pct: 97.5 }, keys), { very_low_pct: 0, low_pct: 2.5, in_range_pct: 97.5 });
+	assert.equal(cgmBands({ valid: true, very_low_pct: null, low_pct: 2.5, in_range_pct: 97.5 }, keys), null);
+});
+
+// An observations proposal as propose.rs stores it: the agent's rows, each with the server's checks.
+const proposal = {
+	kind: 'agent_proposal',
+	payload: {
+		kind: 'observations',
+		payload: { doc_id: 'doc_1', rows: [] },
+		rows: [
+			{ input: { name: 'Glucosa', value: 92, unit: 'mg/dL', page: 1 }, observation: { loinc: '2345-7' }, grounding: 'grounded', bbox: [10, 20, 60, 30], checks: [{ name: 'grounding', ok: true, reason: null }] },
+			{ input: { name: 'Hemoglobina', value: '15.1', unit: 'g/dL', page: 2 }, observation: { loinc: '718-7' }, grounding: 'ungrounded', bbox: null, checks: [{ name: 'grounding', ok: false, reason: 'not_grounded', detail: 'value not found on the page word layer' }] },
+			{ input: { name: 'TSH', value: 2.1, unit: 'mU/L', page: 1 }, observation: { loinc: '3016-3' }, grounding: 'ungrounded_no_word_layer', bbox: null, checks: [{ name: 'date_in_document', ok: false, reason: 'date_invalid', detail: 'date outside the report' }] },
+			{ input: { name: '???', value: 'x', page: 1 }, observation: null, grounding: 'ungrounded', checks: [{ name: 'normalize', ok: false, reason: 'unmapped' }] }
+		]
+	}
+};
+
+test('an observations proposal shows each row with its grounding and problems', () => {
+	const rows = proposalRows(proposal);
+	assert.ok(rows);
+	assert.deepEqual(rows.map((r) => r.grounding), ['grounded', 'ungrounded', 'no_word_layer', 'ungrounded']);
+	assert.deepEqual(rows[0].bbox, [10, 20, 60, 30]);
+	assert.equal(rows[1].page, 2);
+	assert.deepEqual(rows[1].problems, [], 'grounding has its own flag');
+	assert.deepEqual(rows[2].problems, [{ reason: 'date_invalid', detail: 'date outside the report' }]);
+	assert.equal(rows[3].usable, false);
+	// "grounded" without a box is not trusted as grounded
+	const odd = proposalRows({ kind: 'agent_proposal', payload: { kind: 'observations', rows: [{ input: {}, observation: {}, grounding: 'grounded' }] } });
+	assert.equal(odd?.[0].grounding, 'ungrounded');
+	assert.equal(proposalRows({ kind: 'agent_proposal', payload: { kind: 'note', payload: { text: 'x' } } }), null);
+	assert.equal(proposalRows({ kind: 'candidate_row', payload: {} }), null);
+});
+
+test('accepting a proposal keeps only the ticked rows; ungrounded rows start unticked', () => {
+	const rows = proposalRows(proposal) ?? [];
+	assert.deepEqual(proposalDefaultKeep(rows), [0]);
+	assert.deepEqual(proposalAcceptEdits(rows, [0]), { rows: [0] });
+	// A person may tick an ungrounded row after comparing it with the page.
+	assert.deepEqual(proposalAcceptEdits(rows, [1, 0, 1]), { rows: [0, 1] });
+	// Nothing ticked is no accept at all: an empty list would make the server keep every row.
+	assert.equal(proposalAcceptEdits(rows, []), null);
+	assert.equal(proposalAcceptEdits(rows, [3]), null, 'a row the server could not read is never sent');
 });

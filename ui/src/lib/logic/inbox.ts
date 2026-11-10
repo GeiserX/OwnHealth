@@ -134,9 +134,12 @@ function httpUrl(v: string): string | null {
 
 /**
  * The POST /inboxes body for a form, or the i18n key of the first problem. `editing` skips the
- * secret requirement (an empty secret field keeps the stored one).
+ * secret requirement (an empty secret field keeps the stored one). `stored` is the config the source
+ * has now: the server replaces config as a whole, so an edit starts from it and overwrites only the
+ * keys the form owns. Keys set only through the API (Paperless `profile_by_tag`, Nightscout
+ * `backfill_days`, a mailbox `ca_file`) survive an edit in the form.
  */
-export function sourceBody(f: SourceForm, editing = false): { body: SourceBody } | { error: string } {
+export function sourceBody(f: SourceForm, editing = false, stored?: Record<string, unknown> | null): { body: SourceBody } | { error: string } {
 	const label = f.label.trim();
 	if (!label) return { error: 'fu_err_label' };
 	if (PROFILE_KINDS.includes(f.kind) && !f.profile_id) return { error: 'fu_err_profile' };
@@ -146,7 +149,7 @@ export function sourceBody(f: SourceForm, editing = false): { body: SourceBody }
 		if (!Number.isFinite(m) || m < 1 || m > 1440) return { error: 'fu_err_poll' };
 		poll_seconds = Math.round(m * 60);
 	}
-	const config: Record<string, unknown> = {};
+	const config: Record<string, unknown> = { ...(stored ?? {}) };
 	const needSecret = SECRET_OF[f.kind] && !editing;
 	switch (f.kind) {
 		case 'email': {
@@ -168,6 +171,7 @@ export function sourceBody(f: SourceForm, editing = false): { body: SourceBody }
 			const path = f.path.trim().replace(/^\/+|\/+$/g, '');
 			if (path.split('/').includes('..')) return { error: 'fu_err_path' };
 			config.subdir = path;
+			delete config.path;
 			break;
 		}
 		case 'paperless':
@@ -175,8 +179,13 @@ export function sourceBody(f: SourceForm, editing = false): { body: SourceBody }
 			const url = httpUrl(f.url);
 			if (!url) return { error: 'fu_err_url' };
 			config.base_url = url;
+			// `url` is an older name of base_url; both at once would be refused by the server.
+			delete config.url;
 			config.allow_private = f.allow_private;
-			if (f.kind === 'paperless') config.health_tag = f.tag.trim() || 'health';
+			if (f.kind === 'paperless') {
+				config.health_tag = f.tag.trim() || 'health';
+				delete config.tag;
+			}
 			break;
 		}
 	}
@@ -208,6 +217,71 @@ export function formOf(s: { kind: Kind; label: string; profile_id: string | null
 		allow_private: c.allow_private === true,
 		poll_minutes: s.poll_seconds ? String(Math.round(s.poll_seconds / 60)) : f.poll_minutes
 	};
+}
+
+/** What a source card shows of its config: the names the form writes, or the older ones. */
+export function sourceWhere(config: Record<string, unknown> | null | undefined): { subdir: string; url: string; tag: string } {
+	const c = config ?? {};
+	const s = (...keys: string[]) => {
+		for (const k of keys) if (c[k] != null && c[k] !== '') return String(c[k]);
+		return '';
+	};
+	return { subdir: s('subdir', 'path'), url: s('base_url', 'url'), tag: s('health_tag', 'tag') };
+}
+
+/**
+ * The pill of a held message. `auth_failed` from a mailbox with no trusted authserv-id means nothing
+ * was checked (the sender rule does not accept unauthenticated mail), so it is not a forgery: amber
+ * `auth_unchecked`, which points at the authserv-id field. A real DKIM/SPF failure stays red.
+ */
+export function quarantineReason(reason: string, mailbox: Record<string, unknown> | null | undefined): { key: string; tone: 'p-out' | 'p-watch' } {
+	if (reason !== 'auth_failed') return { key: 'fu_qr_' + reason, tone: 'p-watch' };
+	return hasAuthserv(mailbox) ? { key: 'fu_qr_auth_failed', tone: 'p-out' } : { key: 'fu_qr_auth_unchecked', tone: 'p-watch' };
+}
+
+/** Whether a mailbox config names the authserv-id whose Authentication-Results count. */
+export function hasAuthserv(mailbox: Record<string, unknown> | null | undefined): boolean {
+	const v = mailbox?.trusted_authserv_id;
+	return typeof v === 'string' && v.trim() !== '';
+}
+
+/** The label of a source's token button: every kind can have one, a polled kind for its monitor. */
+export function tokenButtonKey(kind: Kind, hasToken: boolean): string {
+	if (PUSH_KINDS.includes(kind)) return hasToken ? 'fu_token_new' : 'fu_token';
+	return hasToken ? 'fu_mon_token_new' : 'fu_mon_token';
+}
+
+/** Copy a value; true only when the clipboard took it (no clipboard on a plain-http origin). */
+export async function copyText(clip: { writeText(t: string): Promise<void> } | null | undefined, text: string): Promise<boolean> {
+	if (!clip) return false;
+	try {
+		await clip.writeText(text);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** The pill of a shared file: already there, will never import, or queued. */
+export function shareTone(r: { outcome?: string; duplicate?: boolean }): { key: string; tone: 'p-stale' | 'p-watch' | 'p-ok' } {
+	if (r.duplicate || r.outcome === 'duplicate' || r.outcome === 'already_seen') return { key: 'fu_share_dup', tone: 'p-stale' };
+	if (r.outcome === 'unsupported') return { key: 'fu_share_unsupported', tone: 'p-watch' };
+	return { key: 'fu_share_queued', tone: 'p-ok' };
+}
+
+/**
+ * The five time-in-range bands of a CGM summary, or null when the summary is not valid: the server
+ * then gives no figures, and none may be drawn (a missing band is not 0 %).
+ */
+export function cgmBands<K extends string>(g: { valid: boolean } & Partial<Record<K, number | null>>, keys: readonly K[]): Record<K, number> | null {
+	if (!g.valid) return null;
+	const out = {} as Record<K, number>;
+	for (const k of keys) {
+		const v = g[k];
+		if (typeof v !== 'number') return null;
+		out[k] = v;
+	}
+	return out;
 }
 
 const PATTERN = /^([^@\s]+@)?[^@\s]+\.[^@\s]+$/;
@@ -251,6 +325,62 @@ export function rowGrounding(item: { reasons: string[]; payload: Record<string, 
 	if (g === 'ungrounded_no_word_layer' || item.reasons.includes('ungrounded_no_word_layer')) return 'no_word_layer';
 	if (g === 'grounded') return 'grounded';
 	return null;
+}
+
+/** One row of an agent's observations proposal, as the server checked it (propose.rs `stored.rows`). */
+export interface ProposalRow {
+	index: number;
+	name: string;
+	value: string;
+	unit: string;
+	page: number;
+	bbox: number[] | null;
+	grounding: Grounding;
+	/** Failed checks other than grounding, which has its own flag. */
+	problems: { reason: string | null; detail: string | null }[];
+	/** False when the server could not normalize the row: accepting cannot write it. */
+	usable: boolean;
+}
+
+/** The rows of an observations proposal, or null for any other item. */
+export function proposalRows(item: { kind: string; payload: Record<string, unknown> }): ProposalRow[] | null {
+	const p = item.payload ?? {};
+	if (item.kind !== 'agent_proposal' || p.kind !== 'observations' || !Array.isArray(p.rows)) return null;
+	return (p.rows as Record<string, unknown>[]).map((r, index) => {
+		const input = (r?.input ?? {}) as Record<string, unknown>;
+		const g = r?.grounding;
+		const checks = (Array.isArray(r?.checks) ? r.checks : []) as { ok?: unknown; name?: unknown; reason?: unknown; detail?: unknown }[];
+		const bbox = Array.isArray(r?.bbox) && r.bbox.length === 4 ? (r.bbox as number[]) : null;
+		return {
+			index,
+			name: String(input.name ?? ''),
+			value: input.value == null ? '' : String(input.value),
+			unit: input.unit == null ? '' : String(input.unit),
+			page: Number(input.page ?? 1) || 1,
+			bbox,
+			// An unknown or missing grounding counts as not found: never shown as grounded.
+			grounding: g === 'grounded' && bbox ? 'grounded' : g === 'ungrounded_no_word_layer' ? 'no_word_layer' : 'ungrounded',
+			problems: checks
+				.filter((c) => c.ok !== true && c.name !== 'grounding')
+				.map((c) => ({ reason: typeof c.reason === 'string' ? c.reason : null, detail: typeof c.detail === 'string' ? c.detail : null })),
+			usable: r?.observation != null && typeof r.observation === 'object'
+		};
+	});
+}
+
+/** The rows ticked at first: only usable rows the server found on the page. The rest wait for a person. */
+export function proposalDefaultKeep(rows: ProposalRow[]): number[] {
+	return rows.filter((r) => r.usable && r.grounding === 'grounded').map((r) => r.index);
+}
+
+/**
+ * The accept edits for the ticked rows, or null when none is ticked. Never an empty list: the server
+ * reads an empty or absent `rows` as "every row".
+ */
+export function proposalAcceptEdits(rows: ProposalRow[], kept: number[]): { rows: number[] } | null {
+	const ok = new Set(rows.filter((r) => r.usable).map((r) => r.index));
+	const pick = [...new Set(kept)].filter((i) => ok.has(i)).sort((a, b) => a - b);
+	return pick.length ? { rows: pick } : null;
 }
 
 /** What the proposing token read in the hour before a proposal (security-privacy.md 4.2 #4). */

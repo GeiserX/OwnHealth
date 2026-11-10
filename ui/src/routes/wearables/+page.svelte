@@ -10,6 +10,7 @@
 	import { Loader, tf, tp } from '#lib/components/pages1/util.svelte';
 	import TrendChart from '#lib/components/TrendChart.svelte';
 	import { axisTicks } from '#lib/logic/axis';
+	import { cgmBands } from '#lib/logic/inbox';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
 	import { hoursMinutes } from '#lib/logic/duration';
 	import { currentProfile } from '#lib/state/app.svelte';
@@ -37,7 +38,8 @@
 		if (slug) cgm.run(() => getCgmSummary(slug), slug);
 	}
 	// The five consensus ranges, very low to very high, as one stacked bar.
-	const CGM_BANDS: [keyof CgmSummary, string, string][] = [
+	type Band = 'very_low_pct' | 'low_pct' | 'in_range_pct' | 'high_pct' | 'very_high_pct';
+	const CGM_BANDS: [Band, string, string][] = [
 		['very_low_pct', 'h1_cgm_vlow', '#c0392b'],
 		['low_pct', 'h1_cgm_low', '#e58f96'],
 		['in_range_pct', 'h1_cgm_in', '#3fb68b'],
@@ -149,32 +151,43 @@
 				</div>
 			</div>
 		{/each}
-		<div class="card">
-			<h3>{t('h1_cgm')}<span class="r">{t('h1_cgm_window')}</span></h3>
-			{#if cgm.data && cgm.data.readings > 0}
-				{@const g = cgm.data}
-				<div class="cgm">
-					<div><div class="dim">{t('h1_cgm_tir')}</div><b class="num">{g.in_range_pct == null ? '—' : fmtNum(g.in_range_pct, 1) + ' %'}</b></div>
-					<div><div class="dim">{t('h1_cgm_mean')}</div><b class="num">{g.mean_mg_dl == null ? '—' : fmtNum(g.mean_mg_dl, 0) + ' mg/dL'}</b></div>
-					<div><div class="dim">GMI</div><b class="num">{g.gmi_percent == null ? '—' : fmtNum(g.gmi_percent, 1) + ' %'}</b></div>
-					<div><div class="dim">{t('h1_cgm_wear')}</div><b class="num">{fmtNum(g.wear_fraction * 100, 0)} %</b></div>
-				</div>
+	</div>
+{/if}
+
+<!-- Outside the wearables branches: a failed or empty wearables summary never hides the CGM card. -->
+<div class="wg" style="margin-top:12px">
+	<div class="card">
+		<h3>{t('h1_cgm')}<span class="r">{t('h1_cgm_window')}</span></h3>
+		{#if cgm.loading && !cgm.data}
+			<div class="empty">{t('loading')}</div>
+		{:else if cgm.error}
+			<NotReady error={cgm.error} onretry={load} />
+		{:else if cgm.data && cgm.data.readings > 0}
+			{@const g = cgm.data}
+			{@const bands = cgmBands(g, CGM_BANDS.map(([k]) => k))}
+			<div class="cgm">
+				<div><div class="dim">{t('h1_cgm_tir')}</div><b class="num">{g.in_range_pct == null ? '—' : fmtNum(g.in_range_pct, 1) + ' %'}</b></div>
+				<div><div class="dim">{t('h1_cgm_mean')}</div><b class="num">{g.mean_mg_dl == null ? '—' : fmtNum(g.mean_mg_dl, 0) + ' mg/dL'}</b></div>
+				<div><div class="dim">GMI</div><b class="num">{g.gmi_percent == null ? '—' : fmtNum(g.gmi_percent, 1) + ' %'}</b></div>
+				<div><div class="dim">{t('h1_cgm_wear')}</div><b class="num">{fmtNum(g.wear_fraction * 100, 0)} %</b></div>
+			</div>
+			<!-- Not valid: the server gives no range figures, so no bar and no legend (a missing band is not 0 %). -->
+			{#if bands}
 				<div class="tir" role="img" aria-label={t('h1_cgm_tir')}>
 					{#each CGM_BANDS as [k, label, color] (k)}
-						{@const v = Number(g[k] ?? 0)}
-						{#if v > 0}<span style="width:{v}%;background:{color}" title="{t(label)}: {fmtNum(v, 1)} %"></span>{/if}
+						{#if bands[k] > 0}<span style="width:{bands[k]}%;background:{color}" title="{t(label)}: {fmtNum(bands[k], 1)} %"></span>{/if}
 					{/each}
 				</div>
 				<div class="dim" style="font-size:11px;display:flex;flex-wrap:wrap;gap:8px">
-					{#each CGM_BANDS as [k, label, color] (k)}<span><i style="background:{color}"></i>{t(label)} {fmtNum(Number(g[k] ?? 0), 1)} %</span>{/each}
+					{#each CGM_BANDS as [k, label, color] (k)}<span><i style="background:{color}"></i>{t(label)} {fmtNum(bands[k], 1)} %</span>{/each}
 				</div>
-				{#if !g.valid}<div class="note" style="margin-top:6px">{t('h1_cgm_bad_' + (g.invalid_reason ?? 'no_readings'))}</div>{/if}
-			{:else}
-				<div class="empty">{t('h1_cgm_d')}</div>
 			{/if}
-		</div>
+			{#if !g.valid}<div class="note" style="margin-top:6px">{t('h1_cgm_bad_' + (g.invalid_reason ?? 'no_readings'))}</div>{/if}
+		{:else}
+			<div class="empty">{t('h1_cgm_d')}</div>
+		{/if}
 	</div>
-{/if}
+</div>
 
 <style>
 	.cgm {

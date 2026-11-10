@@ -31,7 +31,8 @@
 
 	async function submit(e: SubmitEvent) {
 		e.preventDefault();
-		const r = sourceBody(f, editing);
+		// An edit starts from the stored config, so keys set through the API (tag routing, backfill) stay.
+		const r = sourceBody(f, editing, source?.config);
 		if ('error' in r) {
 			error = t(r.error);
 			return;
