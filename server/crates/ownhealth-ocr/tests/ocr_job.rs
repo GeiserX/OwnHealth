@@ -500,3 +500,173 @@ async fn turning_ocr_on_later_reads_the_scans_that_waited() -> anyhow::Result<()
     use_reader(None);
     Ok(())
 }
+
+/// A reader that hands back `words` for page 1 (made-up lines of prose, no table) and fails every
+/// page in `fail`; any other page is read from `pdf`'s text layer.
+fn mixed_reader(pdf: &[u8], prose_on_1: bool, fail: &'static [i32]) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let text = text_reader(pdf, 0.99, calls);
+    let prose = [
+        "Informe de alta hospitalaria",
+        "Servicio de Medicina Interna",
+        "Evolución favorable durante el ingreso.",
+        "Se recomienda reposo relativo y control en dos semanas.",
+    ];
+    let read: Reader = Arc::new(move |rgb, w, h, dpi, page_no| {
+        if fail.contains(&page_no) {
+            return Err(OcrError::Engine(format!("page {page_no} unreadable")));
+        }
+        if prose_on_1 && page_no == 1 {
+            let mut words = Vec::new();
+            for (i, line) in prose.iter().enumerate() {
+                let top = 120.0 + 30.0 * i as f64;
+                let mut x = 72.0;
+                for t in line.split_whitespace() {
+                    let x1 = x + 7.0 * t.chars().count() as f64;
+                    words.push(OcrWord {
+                        text: t.into(),
+                        bbox: [x, top, x1, top + 12.0],
+                        conf: 0.99,
+                    });
+                    x = x1 + 5.0;
+                }
+            }
+            return Ok(OcrPage {
+                page_no,
+                width_pt: 595.0,
+                height_pt: 842.0,
+                words,
+                engine: ENGINE.into(),
+                engine_version: "test".into(),
+                seconds: 0.0,
+            });
+        }
+        text(rgb, w, h, dpi, page_no)
+    });
+    use_reader(Some((read, "test-models".into())));
+}
+
+async fn pending_items(c: &mut PgConnection, doc: Uuid) -> anyhow::Result<Vec<Value>> {
+    Ok(sqlx::query_scalar(
+        "select payload from review_item where document_id = $1 and kind = 'pending_document' and status = 'open'",
+    )
+    .bind(doc)
+    .fetch_all(c)
+    .await?)
+}
+
+#[tokio::test]
+async fn a_scan_that_is_not_a_lab_report_and_holds_no_table_waits_after_ocr() -> anyhow::Result<()> {
+    let _turn = TURN.lock().await;
+    let e = setup().await?;
+    let mut c = e.conn().await?;
+    let lay = generate::layouts().remove(0);
+    let (pdf, _) = generate::render(&lay, None);
+    let one_page = scan(&pdf);
+    mixed_reader(&pdf, true, &[]);
+    let doc = import_with_ocr(&e, &mut c, &one_page, "application/pdf", "alex").await?;
+    use_reader(None);
+    let doc_type: Option<String> = sqlx::query_scalar("select doc_type from document where id = $1")
+        .bind(doc)
+        .fetch_one(&mut *c)
+        .await?;
+    assert_ne!(doc_type.as_deref(), Some("lab_report"));
+    let items = pending_items(&mut c, doc).await?;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["why"], "no_table");
+    assert_eq!(items[0]["pages"], serde_json::json!([1]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_page_ocr_cannot_read_waits_as_ocr_failed_next_to_the_pages_it_read() -> anyhow::Result<()> {
+    let _turn = TURN.lock().await;
+    let e = setup().await?;
+    let mut c = e.conn().await?;
+    let ln = generate::labnorte_3p();
+    let (pdf, _) = generate::render(&ln, None);
+    mixed_reader(&pdf, false, &[3]);
+    let doc = import_with_ocr(&e, &mut c, &scan(&pdf), "application/pdf", "alex").await?;
+    let items = pending_items(&mut c, doc).await?;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["why"], "ocr_failed", "{items:?}");
+    assert_eq!(items[0]["pages"], serde_json::json!([3]), "{items:?}");
+    use_reader(None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn pages_without_a_table_and_pages_ocr_failed_on_share_one_item() -> anyhow::Result<()> {
+    let _turn = TURN.lock().await;
+    let e = setup().await?;
+    let mut c = e.conn().await?;
+    let ln = generate::labnorte_3p();
+    let (pdf, _) = generate::render(&ln, None);
+    mixed_reader(&pdf, true, &[2, 3]);
+    let doc = import_with_ocr(&e, &mut c, &scan(&pdf), "application/pdf", "alex").await?;
+    use_reader(None);
+    let items = pending_items(&mut c, doc).await?;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["pages"], serde_json::json!([1, 2, 3]), "{items:?}");
+    assert_eq!(
+        items[0]["page_why"],
+        serde_json::json!({"1": "no_table", "2": "ocr_failed", "3": "ocr_failed"}),
+        "{items:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_scan_moved_to_another_profile_is_read_again_for_it() -> anyhow::Result<()> {
+    let _turn = TURN.lock().await;
+    let e = setup().await?;
+    let mut c = e.conn().await?;
+    let ln = generate::labnorte_3p();
+    let (pdf, truth) = generate::render(&ln, None);
+    let calls = reader_on(&pdf, 0.995);
+    let doc = import_with_ocr(&e, &mut c, &scan(&pdf), "application/pdf", "alex").await?;
+    let o = eval::outcomes(&mut c, "labnorte", doc, &truth).await?;
+    assert_eq!(o.accepted + o.review, o.truth, "{o:?}");
+
+    let sam = e.fam.profile("sam");
+    ownhealth_ingest_pdf::assign_document(&mut c, doc, sam, e.fam.user("alex"), None).await?;
+    // the forced import.pdf the move queued, with the `ocr` profile on
+    let s = import_pdf_opts(
+        &mut c,
+        &e.blobs,
+        doc,
+        true,
+        ImportOptions {
+            threshold: DEFAULT_THRESHOLD,
+            ocr: true,
+        },
+    )
+    .await?;
+    assert_eq!(s.reasons.get("ocr_queued"), Some(&1), "{s:?}");
+    run_ocr_queue(&e).await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 6, "every page is read again");
+    use_reader(None);
+
+    let live: i64 = sqlx::query_scalar(
+        "select count(*) from observation where document_id = $1 and profile_id = $2 and status in ('current', 'provisional')",
+    )
+    .bind(doc)
+    .bind(sam)
+    .fetch_one(&mut *c)
+    .await?;
+    let waiting: i64 = sqlx::query_scalar(
+        "select count(*) from review_item where document_id = $1 and profile_id = $2 and kind = 'candidate_row' \
+         and status = 'open'",
+    )
+    .bind(doc)
+    .bind(sam)
+    .fetch_one(&mut *c)
+    .await?;
+    assert_eq!(
+        usize::try_from(live + waiting)?,
+        o.truth,
+        "every row is stored or waits for sam"
+    );
+    assert_eq!(state(&mut c, doc).await?, "done");
+    Ok(())
+}

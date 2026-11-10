@@ -19,9 +19,8 @@ use ownhealth_core::arrive::{OCR_JOB, enqueue_ocr, set_ocr_state};
 use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::config::Settings;
 use ownhealth_core::jobs::{self, Job, JobContext, JobError};
-use ownhealth_core::review::{ReviewItemIn, create_item};
 use ownhealth_ingest_pdf::textlayer::{PWord, PageModel, injection_hits};
-use ownhealth_ingest_pdf::{OcrPages, Word, decode_image, import_ocr, render_page_png};
+use ownhealth_ingest_pdf::{OcrPages, Word, add_pending_pages, decode_image, import_ocr, render_page_png};
 use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, Row as _};
 use uuid::Uuid;
@@ -323,31 +322,10 @@ async fn record_run(
     Ok(())
 }
 
-/// One `pending_document` item for the pages OCR could not read (the open one, if there is one).
+/// The pages OCR could not read wait as `ocr_failed`, in the document's one open `pending_document`
+/// item (they join it when the OCR pass already filed pages without a table).
 async fn pending(conn: &mut PgConnection, document_id: Uuid, doc: &Doc, pages: &[i32]) -> Result<(), Error> {
-    let open: Option<Uuid> = sqlx::query_scalar(
-        "select id from review_item where document_id = $1 and kind = 'pending_document' and status = 'open'",
-    )
-    .bind(document_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    if open.is_some() {
-        return Ok(());
-    }
-    create_item(
-        conn,
-        &ReviewItemIn {
-            kind: "pending_document".into(),
-            household_id: Some(doc.household_id),
-            profile_id: doc.profile_id,
-            payload: json!({"document_id": document_id.to_string(), "pages": pages, "why": "ocr_failed"}),
-            document_id: Some(document_id),
-            ref_table: Some("document".into()),
-            ref_id: Some(document_id),
-            ..ReviewItemIn::default()
-        },
-    )
-    .await?;
+    add_pending_pages(conn, document_id, doc.household_id, doc.profile_id, pages, "ocr_failed").await?;
     Ok(())
 }
 

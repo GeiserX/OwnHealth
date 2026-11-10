@@ -178,9 +178,11 @@ pub struct OcrPages {
     pub check: OcrRowCheck,
 }
 
-/// Route the rows of pages read by OCR (the `ocr.document` job, lane C). Runs once per document and
-/// engine: a second call finds the done extraction run and returns `already_imported`. An OCR page
-/// with no readable table waits as one `pending_document` item (`why = "no_table"`).
+/// Route the rows of pages read by OCR (the `ocr.document` job, lane C). The job hands over only pages
+/// not read since they were last stored (`word_layer <> 'ocr'`), so an earlier OCR run of the same
+/// document does not stop this one: after a move to another profile or a re-upload, the forced
+/// `import.pdf` stores the pages again and their rows are routed again for the document as it is now.
+/// An OCR page with no readable table waits as one `pending_document` item (`why = "no_table"`).
 pub async fn import_ocr(
     conn: &mut PgConnection,
     blobs: &BlobStore,
@@ -221,15 +223,12 @@ async fn import_inner(
         summary.reasons.insert("encrypted_original".into(), 1);
         return Ok(summary);
     }
-    if !force {
-        // an OCR pass checks only for its own earlier run: the text-layer run of the same document
-        // (its other pages) does not count
+    if !force && ocr_in.is_none() {
+        // an OCR pass is never skipped here: the job reads only pages not read since they were stored
         let done: Option<i32> = sqlx::query_scalar(
-            "select 1 from extraction_run where document_id = $1 and status = 'done' and extractor <> 'agent' \
-             and ($2::text is null or engine = $2)",
+            "select 1 from extraction_run where document_id = $1 and status = 'done' and extractor <> 'agent'",
         )
         .bind(document_id)
-        .bind(ocr_in.map(|o| o.engine.as_str()))
         .fetch_optional(&mut *conn)
         .await?;
         if done.is_some() {
@@ -308,33 +307,35 @@ async fn import_inner(
             summary.queued += 1;
             summary.reasons.insert("pending_document".into(), 1);
         }
-    }
-    // Pages without a text layer go to OCR when the profile is on; otherwise they wait with the lab
-    // pages whose table nobody could read.
-    let ocr_pages = ocr_in.is_none() && opts.ocr && !ext.pending_pages.is_empty();
-    if ocr_pages {
-        enqueue_ocr(&mut *conn, doc.id, &ext.pending_pages, "no_text_layer").await?;
-        summary.reasons.insert("ocr_queued".into(), 1);
-    } else if !ext.pending_pages.is_empty() {
-        set_ocr_state(&mut *conn, doc.id, "off").await?;
-    }
-    let mut unread = if ocr_pages {
-        Vec::new()
     } else {
-        ext.pending_pages.clone()
-    };
-    if lab {
-        unread.extend(&ext.no_table_pages);
-    }
-    if !unread.is_empty() {
-        let why = if ocr_pages || ext.pending_pages.is_empty() {
-            "no_table"
+        // The text-layer pass. Pages without a text layer go to OCR when the profile is on; otherwise
+        // they wait with the lab pages whose table nobody could read. The OCR pass never routes these
+        // again: the text pass did, and the job files the pages OCR could not read as `ocr_failed`.
+        let ocr_pages = opts.ocr && !ext.pending_pages.is_empty();
+        if ocr_pages {
+            enqueue_ocr(&mut *conn, doc.id, &ext.pending_pages, "no_text_layer").await?;
+            summary.reasons.insert("ocr_queued".into(), 1);
+        } else if !ext.pending_pages.is_empty() {
+            set_ocr_state(&mut *conn, doc.id, "off").await?;
+        }
+        let mut unread = if ocr_pages {
+            Vec::new()
         } else {
-            "no_text_layer"
+            ext.pending_pages.clone()
         };
-        pending_document(&mut *conn, &doc, &unread, why).await?;
-        summary.queued += 1;
-        summary.reasons.insert("pending_document".into(), 1);
+        if lab {
+            unread.extend(&ext.no_table_pages);
+        }
+        if !unread.is_empty() {
+            let why = if ocr_pages || ext.pending_pages.is_empty() {
+                "no_table"
+            } else {
+                "no_text_layer"
+            };
+            pending_document(&mut *conn, &doc, &unread, why).await?;
+            summary.queued += 1;
+            summary.reasons.insert("pending_document".into(), 1);
+        }
     }
     if results.is_empty() && ext.pending().is_empty() {
         flag_near(&mut *conn, &doc, near.as_ref(), &mut summary).await?;
@@ -788,25 +789,73 @@ async fn guess_profile(conn: &mut PgConnection, household_id: Uuid, ext: &Extrac
 
 /// One review item: this document waits for an outside agent (MCP propose) or manual entry.
 async fn pending_document(conn: &mut PgConnection, doc: &Doc, pages: &[i32], why: &str) -> Result<Uuid> {
-    let existing: Option<Uuid> = sqlx::query_scalar(
-        "select id from review_item where document_id = $1 and kind = 'pending_document' and status = 'open'",
+    add_pending_pages(conn, doc.id, doc.household_id, doc.profile_id, pages, why).await
+}
+
+/// File `pages` of a document as waiting for a person or an agent, with `why`. A document has one
+/// open `pending_document` item: pages added while it is open join it (`pages` is the union, and
+/// `page_why` keeps each page's own reason once two reasons meet), so no page is left out of it.
+pub async fn add_pending_pages(
+    conn: &mut PgConnection,
+    document_id: Uuid,
+    household_id: Uuid,
+    profile_id: Option<Uuid>,
+    pages: &[i32],
+    why: &str,
+) -> Result<Uuid> {
+    let existing: Option<(Uuid, Value)> = sqlx::query_as(
+        "select id, payload from review_item where document_id = $1 and kind = 'pending_document' and status = 'open' \
+         for update",
     )
-    .bind(doc.id)
+    .bind(document_id)
     .fetch_optional(&mut *conn)
     .await?;
-    if let Some(id) = existing {
+    if let Some((id, mut payload)) = existing {
+        let old_why = payload.get("why").and_then(Value::as_str).unwrap_or(why).to_string();
+        let old: BTreeSet<i32> = payload
+            .get("pages")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| p.as_i64().and_then(|n| i32::try_from(n).ok()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let new: Vec<i32> = pages.iter().copied().filter(|p| !old.contains(p)).collect();
+        if new.is_empty() {
+            return Ok(id);
+        }
+        let mut page_why: Map<String, Value> = match payload.get("page_why") {
+            Some(Value::Object(m)) => m.clone(),
+            _ => old.iter().map(|p| (p.to_string(), json!(old_why))).collect(),
+        };
+        for p in &new {
+            page_why.insert(p.to_string(), json!(why));
+        }
+        let all: BTreeSet<i32> = old.into_iter().chain(new).collect();
+        if let Value::Object(m) = &mut payload {
+            m.insert("pages".into(), json!(all));
+            if page_why.values().any(|w| w.as_str() != Some(old_why.as_str())) {
+                m.insert("page_why".into(), Value::Object(page_why));
+            }
+        }
+        sqlx::query("update review_item set payload = $2 where id = $1")
+            .bind(id)
+            .bind(&payload)
+            .execute(&mut *conn)
+            .await?;
         return Ok(id);
     }
     create_item(
         conn,
         &ReviewItemIn {
             kind: "pending_document".into(),
-            household_id: Some(doc.household_id),
-            profile_id: doc.profile_id,
-            payload: json!({"document_id": doc.id.to_string(), "pages": pages, "why": why}),
-            document_id: Some(doc.id),
+            household_id: Some(household_id),
+            profile_id,
+            payload: json!({"document_id": document_id.to_string(), "pages": pages, "why": why}),
+            document_id: Some(document_id),
             ref_table: Some("document".into()),
-            ref_id: Some(doc.id),
+            ref_id: Some(document_id),
             ..ReviewItemIn::default()
         },
     )
