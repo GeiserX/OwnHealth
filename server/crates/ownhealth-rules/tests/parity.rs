@@ -1,6 +1,7 @@
 //! Byte parity with the Python backend 0.1.1: on the rows its demo seed wrote, the Rust state code
 //! gives the same bodies and state_hash, the same rendered status, dashboards, check_drug answers and
-//! status words (fixtures/expected.json, written by the Python backend).
+//! status words (fixtures/expected.json, written by the Python backend). One deliberate change since:
+//! the Spanish dashboards and flag texts print numbers with a decimal comma ("pasó de 1,1 a 2,4").
 
 mod common;
 

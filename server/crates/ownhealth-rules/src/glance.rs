@@ -61,7 +61,7 @@ fn grouped(n: i64) -> String {
     if n < 0 { format!("-{out}") } else { out }
 }
 
-fn value_of(m: &Marker, spec: &Map<String, Value>) -> (String, String) {
+fn value_of(m: &Marker, spec: &Map<String, Value>, lang: &str) -> (String, String) {
     if m.source == "wearables" {
         let unit = spec.get("unit").map(text).unwrap_or_default();
         let Some(v) = m.wearable.as_ref().and_then(|w| w.value) else {
@@ -72,12 +72,17 @@ fn value_of(m: &Marker, spec: &Map<String, Value>) -> (String, String) {
             return (format!("{}:{:02}", whole.div_euclid(60), whole.rem_euclid(60)), unit);
         }
         if spec.get("agg").and_then(Value::as_str) == Some("sum30") {
-            return (grouped(whole), unit);
+            let shown = if lang == "es" {
+                num::localized(&whole.to_string(), lang)
+            } else {
+                grouped(whole)
+            };
+            return (shown, unit);
         }
-        return (num(&v), unit);
+        return (num::localized(&num(&v), lang), unit);
     }
     match m.latest() {
-        Some(p) => (p.shown(), p.unit.clone().unwrap_or_default()),
+        Some(p) => (num::localized(&p.shown(), lang), p.unit.clone().unwrap_or_default()),
         None => (String::new(), String::new()),
     }
 }
@@ -125,7 +130,7 @@ fn band(m: &Marker) -> Value {
 }
 
 fn marker_row(m: &Marker, spec: &Map<String, Value>, pack: &Pack, lang: &str, sources: &HashMap<i16, String>) -> Value {
-    let (value, unit) = value_of(m, spec);
+    let (value, unit) = value_of(m, spec, lang);
     if m.source == "wearables" {
         let Some(w) = &m.wearable else { return Value::Null };
         let name = spec

@@ -12,6 +12,36 @@ pub fn num(d: &Decimal) -> String {
     d.to_string()
 }
 
+/// A plain printed number (`-1234.5`) as a person reading `lang` writes it. Spanish takes a decimal
+/// comma and a '.' between thousands from five integer digits on, as the UI's `fmtNum` (es-ES)
+/// does; anything else, and any other text, comes back as it is.
+pub fn localized(s: &str, lang: &str) -> String {
+    if lang != "es" {
+        return s.to_string();
+    }
+    let (sign, body) = match s.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", s),
+    };
+    let (int, frac) = body.split_once('.').unwrap_or((body, ""));
+    let digits = |x: &str| x.chars().all(|c| c.is_ascii_digit());
+    if int.is_empty() || !digits(int) || !digits(frac) || (body.contains('.') && frac.is_empty()) {
+        return s.to_string();
+    }
+    let mut out = String::from(sign);
+    for (i, c) in int.chars().enumerate() {
+        if int.len() >= 5 && i > 0 && (int.len() - i).is_multiple_of(3) {
+            out.push('.');
+        }
+        out.push(c);
+    }
+    if !frac.is_empty() {
+        out.push(',');
+        out.push_str(frac);
+    }
+    out
+}
+
 /// `d.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_EVEN)`: exactly `places` decimals.
 pub fn quantize(d: Decimal, places: u32) -> Decimal {
     let mut r = d.round_dp_with_strategy(places, RoundingStrategy::MidpointNearestEven);
@@ -73,6 +103,18 @@ pub fn to_f64(d: &Decimal) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spanish_numbers_take_a_decimal_comma() {
+        assert_eq!(localized("2.4", "es"), "2,4");
+        assert_eq!(localized("0.98", "es"), "0,98");
+        assert_eq!(localized("9240", "es"), "9240");
+        assert_eq!(localized("12345.5", "es"), "12.345,5");
+        assert_eq!(localized("-1.1", "es"), "-1,1");
+        assert_eq!(localized("2.4", "en"), "2.4");
+        assert_eq!(localized("< 75", "es"), "< 75");
+        assert_eq!(localized("abc", "es"), "abc");
+    }
 
     #[test]
     fn quantize_keeps_the_scale_and_rounds_half_even() {
