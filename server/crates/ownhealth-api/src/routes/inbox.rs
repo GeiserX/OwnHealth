@@ -1,7 +1,9 @@
 //! Lane A (v0.2): email routing over REST (`ownhealth_inbox::email`): the allowlist, PDF password
 //! rules and the quarantine. A person who manages a profile (owner, or guardian of an unclaimed
 //! profile) of the household. Releasing a message and adding a sender widen what flows in, so both
-//! need step-up and the right to manage the target profile; deleting does not.
+//! need step-up and the right to manage the target profile. Deleting a sender frees it to be routed
+//! into another profile, so it needs the same; deleting a PDF password needs the right to manage the
+//! rule's profile. Deleting a held message needs neither.
 //!
 //! | Route | What |
 //! |---|---|
@@ -10,7 +12,7 @@
 //! | `DELETE /inboxes/quarantine/{id}` | delete a held message |
 //! | `GET /inboxes/{id}/senders`, `POST /inboxes/{id}/senders` | sender rules of a mailbox (each with its password labels); `{pattern, profile_id, doc_type_hint?, trust_unauthenticated?}` |
 //! | `DELETE /senders/{id}` | one rule, and its passwords |
-//! | `POST /senders/{id}/pdf-passwords` | `{password, label?}` (sealed; never returned) |
+//! | `POST /senders/{id}/pdf-passwords` | `{password, label?}` (sealed; never returned) -> `{id, unlocked_document_ids}`: the sender's locked PDFs waiting in review are tried again |
 //! | `DELETE /pdf-passwords/{id}` | one password rule |
 
 use axum::Router;
@@ -248,10 +250,26 @@ async fn delete_sender(State(rt): State<Runtime>, Caller(p): Caller, Path(id): P
     let id = parse_id(&id)?;
     let mut tx = rt.pool.begin().await?;
     let household = manager(&mut tx, &p).await?;
-    if rule_owner(&mut tx, id).await?.0 != household {
+    let (owner, profile) = rule_owner(&mut tx, id).await?;
+    if owner != household {
         return Err(not_found("sender rule").into());
     }
+    // removing a rule frees its sender to be routed elsewhere: the same rights as adding it
+    manages_profile(&mut tx, &p, profile).await?;
+    sessions::require_step_up(&mut tx, &p, sessions::STEP_UP_SECONDS).await?;
     email::delete_rule(&mut tx, id).await?;
+    write_audit(
+        &mut tx,
+        &AuditEvent {
+            actor_id: p.user_id,
+            tool: Some("inbox".into()),
+            profile_id: Some(profile),
+            resource_type: Some("sender_rule".into()),
+            resource_ids: Some(vec![id.to_string()]),
+            ..AuditEvent::new("user", "ui", "sender_rule.delete")
+        },
+    )
+    .await?;
     tx.commit().await?;
     ok(json!({"deleted": true}))
 }
@@ -280,25 +298,45 @@ async fn add_password(
     let sb = SecretBox::from_settings(&rt.settings)?;
     let password = SecretString::new(b.password);
     let rule = email::add_pdf_password(&mut tx, &sb, id, &password, b.label.as_deref()).await?;
+    // the sender's locked PDFs already waiting in review get the new password at once
+    let unlocked = email::retry_locked(&mut tx, &rt.blobs, &sb, id).await?;
     tx.commit().await?;
-    Ok(answer(StatusCode::CREATED, json!({"id": rule}), &[]))
+    Ok(answer(
+        StatusCode::CREATED,
+        json!({"id": rule, "unlocked_document_ids": unlocked}),
+        &[],
+    ))
 }
 
 async fn delete_password(State(rt): State<Runtime>, Caller(p): Caller, Path(id): Path<String>) -> R {
     let id = parse_id(&id)?;
     let mut tx = rt.pool.begin().await?;
     let household = manager(&mut tx, &p).await?;
-    let owner: Option<Uuid> = sqlx::query_scalar(
-        "select s.household_id from pdf_password_rule pr join sender_rule r on r.id = pr.sender_rule_id \
+    let owner: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "select s.household_id, r.profile_id from pdf_password_rule pr join sender_rule r on r.id = pr.sender_rule_id \
          join source s on s.id = r.source_id where pr.id = $1",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
-    if owner != Some(household) {
-        return Err(not_found("password rule").into());
-    }
+    let profile = match owner {
+        Some((h, profile)) if h == household => profile,
+        _ => return Err(not_found("password rule").into()),
+    };
+    manages_profile(&mut tx, &p, profile).await?;
     email::delete_pdf_password(&mut tx, id).await?;
+    write_audit(
+        &mut tx,
+        &AuditEvent {
+            actor_id: p.user_id,
+            tool: Some("inbox".into()),
+            profile_id: Some(profile),
+            resource_type: Some("pdf_password_rule".into()),
+            resource_ids: Some(vec![id.to_string()]),
+            ..AuditEvent::new("user", "ui", "pdf_password.delete")
+        },
+    )
+    .await?;
     tx.commit().await?;
     ok(json!({"deleted": true}))
 }

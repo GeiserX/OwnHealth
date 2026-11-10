@@ -231,11 +231,17 @@ async fn poll_session(
     step("select", session.select(&cfg.folder)).await?;
     // UNDELETED: a message we copied and flagged on a server without UIDPLUS stays until the server
     // expunges it, and must not be read again
-    let mut uids: Vec<u32> = step("search", session.uid_search("UNDELETED"))
-        .await?
-        .into_iter()
-        .collect();
-    uids.sort_unstable();
+    let all: std::collections::HashSet<u32> = step("search", session.uid_search("UNDELETED")).await?;
+    // Unseen mail first: we flag what we handled \Seen before moving it, so mail that could not be
+    // moved never takes the places of new mail under the cap. Seen mail is still read after it (a
+    // person may have opened a lab result on the phone before the poll).
+    let unseen: std::collections::HashSet<u32> = step("search", session.uid_search("UNDELETED UNSEEN")).await?;
+    let mut first: Vec<u32> = unseen.intersection(&all).copied().collect();
+    let mut rest: Vec<u32> = all.difference(&unseen).copied().collect();
+    first.sort_unstable();
+    rest.sort_unstable();
+    let mut uids = first;
+    uids.extend(rest);
     uids.truncate(MAX_MESSAGES_PER_POLL);
     if uids.is_empty() {
         return Ok(run);
@@ -263,11 +269,18 @@ async fn poll_session(
             }),
         }
     }
+    // Handled mail that stays in the folder is read again on every poll: the run fails, so the source
+    // shows red and names the folder, instead of a quiet partial success. What it imported is
+    // committed, and the Message-ID stops a second import.
     if let Err(e) = move_done(session, cfg, &handled, has_move, has_uidplus).await {
-        run.problems.push(RunProblem {
-            code: "move_failed".into(),
-            message: e.text(),
-        });
+        return Err(imap_err(
+            &format!(
+                "{} handled message(s) could not be moved to the done folder {:?}",
+                handled.len(),
+                cfg.done_folder
+            ),
+            e.text(),
+        ));
     }
     Ok(run)
 }

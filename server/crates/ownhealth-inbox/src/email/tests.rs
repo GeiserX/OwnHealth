@@ -175,6 +175,27 @@ fn trust_unauthenticated_needs_no_header_but_a_trusted_failure_still_holds() {
     );
 }
 
+/// The receiving server copies the envelope sender into its own header. A quoted local part chosen by
+/// the sender must stay one value: its `;`, spaces and `)` never start a result of their own.
+#[test]
+fn a_quoted_envelope_sender_cannot_inject_a_pass_into_the_trusted_header() {
+    let p = Uuid::new_v4();
+    let rules = [rule("labnorte.example", p, false)];
+    let from = "resultados@labnorte.example";
+    for h in [
+        format!(
+            "{TRUSTED}; spf=pass smtp.mailfrom=\"x;dkim=pass header.d=labnorte.example y\"@attacker.example; dkim=none"
+        ),
+        format!(
+            "{TRUSTED}; spf=pass (mailfrom \"x) ; dkim=pass header.d=labnorte.example (\"@attacker.example) \
+             smtp.mailfrom=attacker.example"
+        ),
+    ] {
+        let r = route_message(&facts(from, &[&h]), &rules, Some(TRUSTED));
+        assert_eq!(reason(&r), "auth_failed", "{h}");
+    }
+}
+
 #[test]
 fn comments_are_stripped_without_touching_quotes() {
     assert_eq!(strip_comments("a (b (c)) d \"(e)\" f"), "a  d \"(e)\" f");

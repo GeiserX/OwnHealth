@@ -167,9 +167,13 @@ pub struct MessageFacts {
 }
 
 impl MessageFacts {
-    /// What the quarantine row shows as the sender: the one From address, else the first one.
-    fn display_sender(&self, first_from: Option<&str>) -> Option<String> {
-        self.from.clone().or_else(|| first_from.map(str::to_lowercase))
+    /// What the quarantine row shows as the sender: the one From address, or every address of a
+    /// message with several (`a@x, b@y`), so a forged second sender never shows as the allowed lab
+    /// alone. A list is not an address, so "release and allow the sender" refuses it.
+    fn display_sender(&self, froms: &[String]) -> Option<String> {
+        self.from
+            .clone()
+            .or_else(|| (!froms.is_empty()).then(|| froms.join(", ")))
     }
 }
 
@@ -213,7 +217,8 @@ struct Part {
 
 struct Parsed {
     facts: MessageFacts,
-    first_from: Option<String>,
+    /// Every From address, lower case, in order.
+    froms: Vec<String>,
     parts: Vec<Part>,
 }
 
@@ -265,11 +270,7 @@ fn parse(raw: &[u8], with_bytes: bool) -> Result<Parsed> {
             .map(|p| (p.filename.clone(), p.mime.clone(), p.size))
             .collect(),
     };
-    Ok(Parsed {
-        facts,
-        first_from: froms.into_iter().next(),
-        parts,
-    })
+    Ok(Parsed { facts, froms, parts })
 }
 
 fn unfold(s: &str) -> String {
@@ -294,7 +295,10 @@ fn aligned(authenticated: &str, from_domain: &str) -> bool {
     a.contains('.') && (a == from_domain || from_domain.ends_with(&format!(".{a}")))
 }
 
-/// RFC 5322 comments `( ... )` out, nested ones too, quoted strings kept.
+/// RFC 5322 comments `( ... )` out, nested ones too, quoted strings kept. A `"` inside a comment
+/// also opens a quoted run in which `(` and `)` do not count: a value the receiving server echoes
+/// (an envelope sender, a HELO name) cannot close the comment early and speak outside it. A stray
+/// quote then swallows the rest of the comment, which can only lose a pass, never add one.
 fn strip_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
@@ -313,9 +317,11 @@ fn strip_comments(s: &str) -> String {
                     out.push(c);
                 }
             }
-            '"' if depth == 0 => {
+            '"' => {
                 quoted = !quoted;
-                out.push(c);
+                if depth == 0 {
+                    out.push(c);
+                }
             }
             '(' if !quoted => depth += 1,
             ')' if !quoted && depth > 0 => depth -= 1,
@@ -323,6 +329,27 @@ fn strip_comments(s: &str) -> String {
             _ => {}
         }
     }
+    out
+}
+
+/// Split `s` where `sep` matches outside a quoted string (backslash escapes honoured). A `;` or a
+/// space inside a quoted value (an envelope sender the server copied verbatim) is part of the value.
+fn split_unquoted(s: &str, sep: impl Fn(char) -> bool) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut quoted, mut escaped) = (0usize, false, false);
+    for (i, c) in s.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            quoted = !quoted;
+        } else if !quoted && sep(c) {
+            out.push(&s[start..i]);
+            start = i + c.len_utf8();
+        }
+    }
+    out.push(&s[start..]);
     out
 }
 
@@ -342,16 +369,17 @@ enum AuthVerdict {
 fn auth_verdict(headers: &[String], trusted: &str, from_domain: &str) -> AuthVerdict {
     let mut verdict = AuthVerdict::None;
     let trusted_header = headers.iter().map(|h| strip_comments(h)).find(|h| {
-        let authserv = h
-            .split(';')
+        let authserv = split_unquoted(h, |c| c == ';')[0]
+            .split_whitespace()
             .next()
-            .and_then(|s| s.split_whitespace().next())
             .unwrap_or("");
         authserv.eq_ignore_ascii_case(trusted.trim())
     });
     if let Some(h) = trusted_header {
-        for section in h.split(';').skip(1) {
-            let mut words = section.split_whitespace();
+        for section in split_unquoted(&h, |c| c == ';').into_iter().skip(1) {
+            let mut words = split_unquoted(section, char::is_whitespace)
+                .into_iter()
+                .filter(|w| !w.is_empty());
             let Some((method, result)) = words.next().and_then(|w| w.split_once('=')) else {
                 continue;
             };
@@ -498,6 +526,92 @@ async fn arrive_bytes(
     .await
 }
 
+async fn has_unlocked_copy(conn: &mut PgConnection, original: Uuid) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar("select exists (select 1 from document where derived_from = $1)")
+            .bind(original)
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
+/// Import the unlocked copy of a locked original, and close the original's open
+/// `encrypted_document` review item: its values are on their way.
+async fn arrive_unlocked(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    t: &Target<'_>,
+    filename: Option<&str>,
+    pdf: Vec<u8>,
+    original: Uuid,
+) -> Result<Arrived> {
+    let arrived = arrive_bytes(&mut *conn, blobs, t, filename, pdf, Some(original)).await?;
+    sqlx::query(
+        "update review_item set status = 'dismissed', decided_at = now(), decision_reason = 'unlocked' \
+         where kind = 'encrypted_document' and document_id = $1 and status = 'open'",
+    )
+    .bind(original)
+    .execute(conn)
+    .await?;
+    Ok(arrived)
+}
+
+/// A locked original waiting in review: (document, household, profile, source, blob sha, filename).
+type LockedOriginal = (Uuid, Uuid, Option<Uuid>, Option<Uuid>, String, Option<String>);
+
+/// Try the passwords of one sender rule again on its locked PDFs still waiting in review
+/// (`encrypted_document`), after a person added a password. Each one that opens now is imported as
+/// its unlocked copy and its review item closes. Returns the documents created.
+pub async fn retry_locked(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    sb: &SecretBox,
+    sender_rule_id: Uuid,
+) -> Result<Vec<Uuid>> {
+    let waiting: Vec<LockedOriginal> = sqlx::query_as(
+        "select d.id, d.household_id, d.profile_id, d.source_id, encode(d.blob_sha256, 'hex'), d.filename \
+         from review_item i join document d on d.id = i.document_id \
+         where i.kind = 'encrypted_document' and i.status = 'open' and i.payload->>'sender_rule_id' = $1::text \
+         order by i.created_at",
+    )
+    .bind(sender_rule_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut created = Vec::new();
+    for (original, household_id, profile_id, source_id, sha, filename) in waiting {
+        let (Some(profile_id), Some(source_id)) = (profile_id, source_id) else {
+            continue;
+        };
+        if has_unlocked_copy(&mut *conn, original).await? {
+            continue;
+        }
+        let Some(source) = ownhealth_core::sources::get_source(&mut *conn, source_id).await? else {
+            continue;
+        };
+        let passwords = passwords_for(&mut *conn, Some(sb), household_id, sender_rule_id).await?;
+        let b = blobs.clone();
+        let unlock = blocking(move || {
+            let locked = b.get_bytes(&sha).map_err(Error::from)?;
+            pdf_password::unlock(&locked, &passwords)
+        })
+        .await?;
+        let Unlock::Unlocked { pdf, .. } = unlock else {
+            continue;
+        };
+        let t = Target {
+            source: &source,
+            profile_id,
+            rule: None,
+            message_id: None,
+        };
+        let mut out = MessageOutcome::default();
+        let arrived = arrive_unlocked(&mut *conn, blobs, &t, filename.as_deref(), pdf, original).await?;
+        tally(&mut out, 1, arrived);
+        created.extend(out.document_ids);
+    }
+    Ok(created)
+}
+
 /// A locked PDF: keep the original as a document of its own (never imported), then import the
 /// unlocked copy with `derived_from`, or file `encrypted_document` when no password opened it.
 async fn arrive_locked(
@@ -535,7 +649,15 @@ async fn arrive_locked(
     )
     .await?;
     if !original.created && !original.reactivated {
-        out.duplicates += 1;
+        // Held before: the right password may have been added since, so a second copy of the mail
+        // (the lab sends it again) brings the values in once a stored password opens it.
+        match unlock {
+            Unlock::Unlocked { pdf, .. } if !has_unlocked_copy(&mut *conn, original.id).await? => {
+                let arrived = arrive_unlocked(conn, blobs, t, part.filename.as_deref(), pdf, original.id).await?;
+                tally(out, n, arrived);
+            }
+            _ => out.duplicates += 1,
+        }
         return Ok(());
     }
     sqlx::query("update document set flags = flags || '{\"encrypted\": true}'::jsonb where id = $1")
@@ -545,7 +667,7 @@ async fn arrive_locked(
     out.document_ids.push(original.id);
     match unlock {
         Unlock::Unlocked { pdf, .. } => {
-            let arrived = arrive_bytes(conn, blobs, t, part.filename.as_deref(), pdf, Some(original.id)).await?;
+            let arrived = arrive_unlocked(conn, blobs, t, part.filename.as_deref(), pdf, original.id).await?;
             tally(out, n, arrived);
         }
         Unlock::NoPasswordWorked | Unlock::NotEncrypted => {
@@ -698,7 +820,7 @@ async fn hold(conn: &mut PgConnection, source: &Source, parsed: &Parsed, raw_sha
         .iter()
         .map(|(f, m, s)| json!({"filename": f, "mime": m, "size": s}))
         .collect();
-    let sender = parsed.facts.display_sender(parsed.first_from.as_deref());
+    let sender = parsed.facts.display_sender(&parsed.froms);
     quarantine::hold(
         conn,
         &QuarantineIn {
@@ -796,7 +918,7 @@ pub async fn release(
             .sender
             .as_deref()
             .ok_or_else(|| Error::Invalid("this message has no sender to allow".into()))?;
-        insert_rule(
+        let (rule_id, is_new) = insert_rule(
             &mut *conn,
             source.id,
             &SenderRuleIn {
@@ -808,6 +930,15 @@ pub async fn release(
             Some(user_id),
         )
         .await?;
+        // an existing rule for this sender stays as it is: if it files into another profile, the
+        // next message would not go where this release says, so refuse instead of keeping it quietly
+        if !is_new && get_rule(&mut *conn, rule_id).await?.map(|r| r.profile_id) != Some(profile_id) {
+            return Err(Error::Review(
+                "This sender is already on the list for another profile. Change or remove that sender \
+                 rule first, or release this message without allowing the sender."
+                    .into(),
+            ));
+        }
     }
     let sha = item.raw_sha256_hex();
     let b = blobs.clone();

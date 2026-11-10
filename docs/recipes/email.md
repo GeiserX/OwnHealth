@@ -60,7 +60,7 @@ In OwnHealth, open **Inbox**, add a source of kind **Email in** and fill in:
 
 ### The done folder on servers with an `INBOX.` prefix
 
-Some servers (Courier, and Dovecot set up with a namespace prefix) keep every folder under `INBOX` and separate levels with a dot: `INBOX.Sent`, `INBOX.Archive`. On such a server `OwnHealth/Done` cannot be created. The mailbox then shows `move_failed` on each run and handled mail stays in the folder it was read from. OwnHealth still imports each message once, but the folder fills up.
+Some servers (Courier, and Dovecot set up with a namespace prefix) keep every folder under `INBOX` and separate levels with a dot: `INBOX.Sent`, `INBOX.Archive`. On such a server `OwnHealth/Done` cannot be created. Each run then fails with an error that names the done folder, and handled mail stays in the folder it was read from. OwnHealth still imports each message once, and reads new (unread) mail before the handled mail left behind, but fix the folder name so the source turns green again.
 
 Look at the folder names your mail client shows. If they start with `INBOX.`, set **Move processed mail to** to `INBOX.OwnHealth` (or another name under `INBOX.`). OwnHealth creates the folder if it is missing.
 

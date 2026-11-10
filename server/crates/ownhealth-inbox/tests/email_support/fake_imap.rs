@@ -45,6 +45,8 @@ pub struct State {
     pub failed_logins: u32,
     pub has_move: bool,
     pub has_uidplus: bool,
+    /// CREATE, MOVE and COPY answer NO, as a server whose folders live under another namespace.
+    pub refuse_done: bool,
     /// Every command line received (LOGIN lines included), for the "no password in clear" checks.
     pub plain_lines: Vec<String>,
 }
@@ -67,6 +69,7 @@ impl FakeImap {
             failed_logins: 0,
             has_move: true,
             has_uidplus: true,
+            refuse_done: false,
             plain_lines: Vec::new(),
         }));
         let st = Arc::clone(&state);
@@ -271,7 +274,9 @@ async fn session(io: Box<dyn Io>, st: Arc<Mutex<State>>, greet: bool) -> std::io
             "CREATE" => {
                 let name = a.get(1).cloned().unwrap_or_default();
                 let mut s = lock(&st);
-                if let std::collections::btree_map::Entry::Vacant(e) = s.folders.entry(name) {
+                if s.refuse_done {
+                    out.extend_from_slice(format!("{tag} NO [CANNOT] wrong namespace\r\n").as_bytes());
+                } else if let std::collections::btree_map::Entry::Vacant(e) = s.folders.entry(name) {
                     e.insert(Vec::new());
                     ok(&mut out, "CREATE completed");
                 } else {
@@ -314,10 +319,11 @@ fn uid_command(st: &Mutex<State>, selected: Option<&str>, tag: &str, a: &[String
     match sub.as_str() {
         "SEARCH" => {
             let f = s.folders.get(&folder).cloned().unwrap_or_default();
-            let undeleted = a[1..].iter().any(|w| w.eq_ignore_ascii_case("UNDELETED"));
+            let has = |k: &str| a[1..].iter().any(|w| w.eq_ignore_ascii_case(k));
+            let (undeleted, unseen) = (has("UNDELETED"), has("UNSEEN"));
             let uids: Vec<String> = f
                 .iter()
-                .filter(|m| !(undeleted && m.deleted))
+                .filter(|m| !(undeleted && m.deleted) && !(unseen && m.seen))
                 .map(|m| m.uid.to_string())
                 .collect();
             let sep = if uids.is_empty() { "" } else { " " };
@@ -363,7 +369,7 @@ fn uid_command(st: &Mutex<State>, selected: Option<&str>, tag: &str, a: &[String
         }
         "MOVE" | "COPY" => {
             let dest = a.get(2).cloned().unwrap_or_default();
-            if !s.folders.contains_key(&dest) {
+            if s.refuse_done || !s.folders.contains_key(&dest) {
                 out.extend_from_slice(format!("{tag} NO [TRYCREATE] no such folder\r\n").as_bytes());
                 return;
             }

@@ -463,6 +463,189 @@ async fn a_pdf_no_password_opens_goes_to_review_and_is_not_imported() -> R {
     Ok(())
 }
 
+/// A locked report that came before its password: adding the password opens the one waiting in
+/// review, and a later copy of the same report is opened too, instead of counting as a duplicate.
+#[tokio::test]
+async fn a_locked_pdf_held_before_its_password_opens_once_the_password_is_added() -> R {
+    let env = Env::new().await?;
+    let source = env.mailbox(json!({})).await?;
+    let locked = lock(&slip(), "12345678Z")?;
+    let first = env
+        .ingest(&source, &lab_mail("late-1@labnorte.example", locked.clone()))
+        .await?;
+    assert_eq!(first.document_ids.len(), 1, "{first:?}");
+    let original = first.document_ids[0];
+    let mut c = env.db.pool.acquire().await?;
+    let rule = email::list_rules(&mut c, source.id).await?[0].id;
+    // a wrong password changes nothing
+    email::add_pdf_password(&mut c, &env.sb, rule, &SecretString::new("99999999R"), None).await?;
+    assert!(
+        email::retry_locked(&mut c, &env.ctx.blobs, &env.sb, rule)
+            .await?
+            .is_empty()
+    );
+    email::add_pdf_password(&mut c, &env.sb, rule, &SecretString::new("12345678Z"), Some("DNI")).await?;
+    let opened = email::retry_locked(&mut c, &env.ctx.blobs, &env.sb, rule).await?;
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    let derived: Option<Uuid> = sqlx::query_scalar("select derived_from from document where id = $1")
+        .bind(opened[0])
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(derived, Some(original));
+    let status: String = sqlx::query_scalar("select status from review_item where kind = 'encrypted_document'")
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(status, "dismissed");
+    assert_eq!(env.n("select count(*) from job where kind = 'import.pdf'").await?, 1);
+    // nothing left to open
+    assert!(
+        email::retry_locked(&mut c, &env.ctx.blobs, &env.sb, rule)
+            .await?
+            .is_empty()
+    );
+    drop(c);
+
+    // the same path through the mailbox: a report held before its password, sent again after it
+    // (a fresh household, so the unlocked copy is not a duplicate of the one above)
+    let env = Env::new().await?;
+    let source2 = env.mailbox(json!({})).await?;
+    let locked2 = lock(&slip(), "11111111H")?;
+    let n = |o: &email::MessageOutcome| o.document_ids.len();
+    let held = env
+        .ingest(&source2, &lab_mail("late-2@labnorte.example", locked2.clone()))
+        .await?;
+    assert_eq!(n(&held), 1, "{held:?}");
+    let mut c = env.db.pool.acquire().await?;
+    let rule2 = email::list_rules(&mut c, source2.id).await?[0].id;
+    sqlx::query("insert into pdf_password_rule (sender_rule_id, secret_id, position) values ($1, $2, 0)")
+        .bind(rule2)
+        .bind(
+            ownhealth_core::secrets::store_secret(
+                &mut c,
+                &env.sb,
+                env.fam.household_id,
+                "pdf_password",
+                None,
+                &SecretString::new("11111111H"),
+            )
+            .await?,
+        )
+        .execute(&mut *c)
+        .await?;
+    drop(c);
+    let again = env
+        .ingest(&source2, &lab_mail("late-3@labnorte.example", locked2))
+        .await?;
+    assert_eq!(n(&again), 1, "the unlocked copy arrives: {again:?}");
+    assert_eq!(env.n("select count(*) from job where kind = 'import.pdf'").await?, 1);
+    assert_eq!(
+        env.n("select count(*) from review_item where kind = 'encrypted_document' and status = 'open'")
+            .await?,
+        0
+    );
+    Ok(())
+}
+
+/// Two From addresses: the held row shows both, never the allowed lab alone, and the list cannot be
+/// allowed as a sender.
+#[tokio::test]
+async fn a_held_message_with_two_senders_shows_both() -> R {
+    let env = Env::new().await?;
+    let source = env.mailbox(json!({})).await?;
+    let raw = Mail::new(
+        "two-from@labnorte.example",
+        "resultados@labnorte.example, promo@ofertas-salud.example",
+    )
+    .auth(auth_pass("labnorte.example"))
+    .attach("informe.pdf", "application/pdf", slip())
+    .build();
+    let qid = env
+        .ingest(&source, &raw)
+        .await?
+        .quarantine_id
+        .ok_or_else(|| anyhow::anyhow!("not held"))?;
+    let mut c = env.db.pool.acquire().await?;
+    let item = quarantine::get_item(&mut c, qid)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("gone"))?;
+    assert_eq!(
+        item.sender.as_deref(),
+        Some("resultados@labnorte.example, promo@ofertas-salud.example")
+    );
+    let r = email::release(
+        &mut c,
+        &env.ctx.blobs,
+        Some(&env.sb),
+        qid,
+        env.fam.user("alex"),
+        env.fam.profile("alex"),
+        true,
+    )
+    .await;
+    assert!(matches!(r, Err(ownhealth_core::Error::Invalid(_))), "{r:?}");
+    Ok(())
+}
+
+/// A held message whose sender already has a rule for another profile: "allow the sender" would keep
+/// filing it there, so the release is refused instead of saying the sender was allowed.
+#[tokio::test]
+async fn allowing_a_sender_already_listed_for_another_profile_is_refused() -> R {
+    let env = Env::new().await?;
+    let source = env.mailbox(json!({})).await?;
+    let user = env.fam.user("alex");
+    let mut c = env.db.pool.acquire().await?;
+    email::add_rule(
+        &mut c,
+        source.id,
+        &SenderRuleIn {
+            pattern: LAB.into(),
+            profile_id: env.fam.profile("alex"),
+            doc_type_hint: None,
+            trust_unauthenticated: false,
+        },
+        user,
+    )
+    .await?;
+    drop(c);
+    // this copy carries no authentication, so it is held even though its sender is listed
+    let raw = Mail::new("conflict-1@labnorte.example", LAB)
+        .attach("informe.pdf", "application/pdf", slip())
+        .build();
+    let qid = env
+        .ingest(&source, &raw)
+        .await?
+        .quarantine_id
+        .ok_or_else(|| anyhow::anyhow!("not held"))?;
+    let mut c = env.db.pool.acquire().await?;
+    let r = email::release(
+        &mut c,
+        &env.ctx.blobs,
+        Some(&env.sb),
+        qid,
+        user,
+        env.fam.profile("carmen"),
+        true,
+    )
+    .await;
+    assert!(matches!(r, Err(ownhealth_core::Error::Review(_))), "{r:?}");
+    let rules = email::list_rules(&mut c, source.id).await?;
+    assert_eq!(rules.len(), 2);
+    assert!(rules.iter().all(|r| r.profile_id == env.fam.profile("alex")));
+    // into the profile the rule already names, allowing is a no-op and the release goes through
+    let out = email::release(
+        &mut c,
+        &env.ctx.blobs,
+        Some(&env.sb),
+        qid,
+        user,
+        env.fam.profile("alex"),
+        true,
+    )
+    .await?;
+    assert_eq!(out.document_ids.len(), 1);
+    Ok(())
+}
+
 // ---------------------------------------------------------------- release ----
 
 #[tokio::test]
@@ -692,6 +875,52 @@ async fn a_poll_ingests_and_moves_mail_to_the_done_folder() -> R {
         let run = email::poll_mailbox(env.ctx.clone(), source).await?;
         assert_eq!(run.seen, 0);
     }
+    Ok(())
+}
+
+/// The done folder cannot be created or used (folders under another namespace): the run fails and
+/// names the folder, instead of a quiet partial success while handled mail piles up in the inbox.
+#[tokio::test]
+async fn a_poll_whose_mail_cannot_be_moved_fails_and_names_the_done_folder() -> R {
+    let env = Env::new().await?;
+    let imap = FakeImap::start(IMAP_USER, IMAP_PASS, Mode::Plain).await?;
+    imap.lock().refuse_done = true;
+    let source = env.mailbox(json!({"port": imap.addr.port()})).await?;
+    imap.deliver(lab_mail("stuck-1@labnorte.example", slip()));
+    let Err(e) = email::poll_mailbox(env.ctx.clone(), source.clone()).await else {
+        panic!("a poll that could not move its mail must fail");
+    };
+    assert!(e.text().contains(email::DEFAULT_DONE_FOLDER), "{}", e.text());
+    // what it imported is kept, and the next poll does not import it again
+    assert_eq!(env.n("select count(*) from document").await?, 1);
+    assert!(email::poll_mailbox(env.ctx.clone(), source).await.is_err());
+    assert_eq!(env.n("select count(*) from document").await?, 1);
+    Ok(())
+}
+
+/// Handled mail that could not be moved (flagged \Seen) fills the per-poll cap: new mail must still
+/// be read first.
+#[tokio::test]
+async fn new_mail_is_read_before_handled_mail_left_in_the_inbox() -> R {
+    let env = Env::new().await?;
+    let imap = FakeImap::start(IMAP_USER, IMAP_PASS, Mode::Plain).await?;
+    let source = env.mailbox(json!({"port": imap.addr.port()})).await?;
+    for i in 0..email::imap::MAX_MESSAGES_PER_POLL {
+        let uid =
+            imap.deliver(Mail::new(&format!("old-{i}@ofertas-salud.example"), "promo@ofertas-salud.example").build());
+        if let Some(m) = imap
+            .lock()
+            .folders
+            .get_mut("INBOX")
+            .and_then(|f| f.iter_mut().find(|m| m.uid == uid))
+        {
+            m.seen = true;
+        }
+    }
+    imap.deliver(lab_mail("new-1@labnorte.example", slip()));
+    let run = email::poll_mailbox(env.ctx.clone(), source).await?;
+    assert_eq!(run.new, 1, "{run:?}");
+    assert_eq!(env.n("select count(*) from document").await?, 1);
     Ok(())
 }
 

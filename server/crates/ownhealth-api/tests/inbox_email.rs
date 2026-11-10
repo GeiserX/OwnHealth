@@ -383,3 +383,83 @@ async fn sender_and_password_routes_never_return_a_password() -> R {
     );
     Ok(())
 }
+
+/// Held mail belongs to one household: another household's manager neither lists it nor deletes or
+/// releases it.
+#[tokio::test]
+async fn another_household_cannot_list_delete_or_release_held_mail() -> R {
+    let env = env().await?;
+    let source = mailbox(&env, 1).await?;
+    let raw = Mail::new("iso@clinica-norte.example", "citas@clinica-norte.example")
+        .attach(
+            "informe.pdf",
+            "application/pdf",
+            fixture("labslips/injection/inj-metadata.pdf")?,
+        )
+        .build();
+    let q = hold(&env, source, &raw).await?;
+    let (mut other, other_alex) = {
+        let mut c = env.pool().acquire().await?;
+        let fam = ownhealth_core::demo::create_rivera_family(&mut c, "Ortega").await?;
+        drop(c);
+        (env.as_user(fam.user("alex")).await?, fam.profile("alex"))
+    };
+    let r = other.get("/api/inboxes/quarantine?status=all").await?;
+    assert_eq!((r.status, r.json.clone()), (StatusCode::OK, json!([])));
+    let r = other.delete(&format!("/api/inboxes/quarantine/{q}")).await?;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let r = other
+        .post(
+            &format!("/api/inboxes/quarantine/{q}/release"),
+            &json!({"profile_id": other_alex}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{:?}", r.json);
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let mine = alex.get("/api/inboxes/quarantine").await?.json;
+    assert!(
+        mine.as_array()
+            .is_some_and(|a| a.len() == 1 && a[0]["id"] == json!(q) && a[0]["status"] == "held"),
+        "{mine}"
+    );
+    Ok(())
+}
+
+/// Removing a sender rule frees its sender to be routed into another profile, so it needs the same
+/// rights as adding it: manage the rule's profile, and a fresh login. Sam only views Alex's profile.
+#[tokio::test]
+async fn removing_a_sender_needs_the_right_to_manage_its_profile() -> R {
+    let env = env().await?;
+    let source = mailbox(&env, 1).await?;
+    let mut c = env.pool().acquire().await?;
+    let rule = email::list_rules(&mut c, source).await?[0].id;
+    let pw = email::add_pdf_password(&mut c, &sb(&env)?, rule, &SecretString::new("12345678Z"), None).await?;
+    drop(c);
+    let mut sam = env.as_user(env.user("sam")).await?;
+    assert_eq!(
+        sam.delete(&format!("/api/senders/{rule}")).await?.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        sam.delete(&format!("/api/pdf-passwords/{pw}")).await?.status,
+        StatusCode::FORBIDDEN
+    );
+    let mut stale = env.stale(env.user("alex")).await?;
+    assert_eq!(
+        stale.delete(&format!("/api/senders/{rule}")).await?.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(env.scalar_i64("select count(*) from sender_rule").await?, 1);
+    assert_eq!(env.scalar_i64("select count(*) from pdf_password_rule").await?, 1);
+    let mut alex = env.as_user(env.user("alex")).await?;
+    assert_eq!(
+        alex.delete(&format!("/api/senders/{rule}")).await?.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        env.scalar_i64("select count(*) from audit_event where action = 'sender_rule.delete'")
+            .await?,
+        1
+    );
+    Ok(())
+}
