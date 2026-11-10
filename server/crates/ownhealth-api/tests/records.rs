@@ -283,6 +283,50 @@ async fn manual_observation_and_its_correction() -> R {
 }
 
 #[tokio::test]
+async fn manual_observation_refuses_words_and_future_dates() -> R {
+    let a = app().await?;
+    let body = json!({"name": "Glucosa", "value": "92", "unit": "mg/dL", "effective_at": "2026-11-06T08:00:00+01:00"});
+    for bad in [json!({"value": "abc"}), json!({"effective_at": "2031-01-01T08:00:00Z"})] {
+        let (s, out) = post(
+            &a,
+            "alex",
+            "/profiles/alex/manual-observations",
+            merge(&body, bad.clone()),
+        )
+        .await?;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{bad} {out}");
+        assert_eq!(out["detail"]["code"], "bad_input", "{bad} {out}");
+    }
+    let (s, out) = post(
+        &a,
+        "alex",
+        "/profiles/alex/manual-observations",
+        merge(&body, json!({"value": "5,4"})),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::CREATED, "{out}");
+    // the first value of a marker, with no printed range, has nothing to be compared with
+    let (s, t) = get(&a, "alex", "/profiles/alex/trend?code=Glucosa&window=P5Y").await?;
+    assert_eq!(s, StatusCode::OK, "{t}");
+    assert_eq!(t["points"].as_array().map(Vec::len), Some(1), "{t}");
+    assert_eq!(t["points"][0]["status"], Value::Null, "{t}");
+    // a value dated after today (stored before this check existed) is not drawn
+    let mut tx = a.rt.pool.begin().await?;
+    // rows are immutable; the test bypasses the trigger to plant an old bad row
+    sqlx::query("set local session_replication_role = replica")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("update observation set effective_at = now() + interval '400 days' where id = $1")
+        .bind(Uuid::parse_str(out["id"].as_str().unwrap_or_default())?)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let (_, t) = get(&a, "alex", "/profiles/alex/trend?code=Glucosa&window=P5Y").await?;
+    assert_eq!(t["points"], json!([]), "{t}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn manual_observation_refuses_a_blank_name_or_value() -> R {
     let a = app().await?;
     let body = json!({"name": "Peso", "value": "81,4", "unit": "kg", "effective_at": "2026-11-06T08:00:00+01:00"});

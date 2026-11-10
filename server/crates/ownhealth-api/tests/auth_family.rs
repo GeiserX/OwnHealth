@@ -87,6 +87,23 @@ async fn relative_guardian_manages_until_claimed() -> R {
         .await?;
     assert_eq!(r.status, StatusCode::CREATED, "{:?}", r.json);
     assert_eq!(r.json["slug"], "mateo");
+    // a birth date in the future or before 1900, or a country that is not two letters, is refused
+    for bad in [
+        json!({"birth_date": "2099-01-01"}),
+        json!({"birth_date": "1850-01-01"}),
+        json!({"country": "X1"}),
+    ] {
+        let mut body = json!({"display_name": "Nadie Rivera", "role": "guardian", "relationship": "child"});
+        if let (Some(b), Some(extra)) = (body.as_object_mut(), bad.as_object()) {
+            b.extend(extra.clone());
+        }
+        let r = alex.post("/api/household/profiles", &body).await?;
+        assert_eq!(
+            (r.status, r.code()),
+            (StatusCode::UNPROCESSABLE_ENTITY, "bad_input"),
+            "{bad}"
+        );
+    }
     let mateo: Uuid = serde_json::from_value(r.json["id"].clone())?;
     // the guardian grants Sam guardian too, with step-up
     let body = json!({"user_id": env.user("sam"), "profile": "mateo", "role": "guardian"});
