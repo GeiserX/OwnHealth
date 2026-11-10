@@ -364,3 +364,40 @@ async fn removing_the_newest_export_gives_the_older_one_its_samples_back() -> R 
     assert_eq!(days, 31);
     Ok(())
 }
+
+#[tokio::test]
+async fn an_export_deleted_before_its_queued_import_again_stays_deleted() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let dir = tempfile::tempdir()?;
+    for (name, days) in [("jan", 31), ("feb", 59)] {
+        let (state, _, err) = job(
+            &env,
+            upload(&env, small(&dir.path().join(name), days, &[])?, "sam").await?,
+        )
+        .await?;
+        assert_eq!(state, "done", "{err:?}");
+    }
+    let docs: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "select id from document where profile_id = $1 and mime = 'application/vnd.sqlite3' order by created_at",
+    )
+    .bind(sam)
+    .fetch_all(&env.db.pool)
+    .await?;
+    let mut c = env.db.pool.acquire().await?;
+    // both deleted, the newest while its import again is still queued
+    for d in [docs[1], docs[0]] {
+        sqlx::query("update document set status = 'retracted' where id = $1")
+            .bind(d)
+            .execute(&mut *c)
+            .await?;
+        ownhealth_ingest_structured::retract::retract_document_facts(&mut c, d, "tidy up").await?;
+    }
+    drop(c);
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    let left = env
+        .count("select count(*) from wearable_sample where profile_id = $1", sam)
+        .await?;
+    assert_eq!(left, 0, "a deleted export brings nothing back");
+    Ok(())
+}
