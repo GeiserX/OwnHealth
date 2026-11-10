@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Utc};
 use ownhealth_core::acceptance::Check;
+use ownhealth_core::family::{self, FamilyCondition, MemberIn};
 use ownhealth_core::fhir::loinc_of;
 use ownhealth_core::pyjson::py_decimal_str;
 use ownhealth_core::records::{AllergyIn, Common, ConditionIn, ImmunizationIn, MedicationIn, ProcedureIn, RecordIn};
@@ -95,6 +96,11 @@ pub enum Mapped {
     Observations(Vec<ObsRow>),
     Record {
         record: Box<RecordIn>,
+        checks: Vec<Check>,
+    },
+    /// A relative of the profile (FamilyMemberHistory, v0.3).
+    Family {
+        member: Box<MemberIn>,
         checks: Vec<Check>,
     },
     /// entered-in-error, not-done ...: counted, never projected.
@@ -707,6 +713,118 @@ pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&s
         }),
         checks,
     )
+}
+
+// ------------------------------------------------------------- family (v0.3) ----
+
+/// An age in years (`Age`: unit `a`), rounded to whole years.
+fn years(v: Option<&Value>) -> Option<i32> {
+    let v = v?;
+    let unit = v
+        .get("code")
+        .or_else(|| v.get("unit"))
+        .and_then(Value::as_str)
+        .unwrap_or("a");
+    if !matches!(unit, "a" | "yr" | "year" | "years") {
+        return None;
+    }
+    let n = v.get("value")?.as_f64()?;
+    (0.0..=130.0).contains(&n).then(|| n.round() as i32)
+}
+
+/// FamilyMemberHistory -> one relative. The relationship must be an HL7 v3 RoleCode family code we
+/// draw; a condition's SNOMED code picks its kind (anything else is `other` with its text).
+pub fn family_member_history(r: &Value, profile_id: Uuid) -> Mapped {
+    if status(r).as_deref() == Some("entered-in-error") {
+        return skip("status_entered-in-error");
+    }
+    // our own export holds every version, tagged; only the current one is a fact
+    let lifecycle = list(r.get("meta"), "tag")
+        .iter()
+        .find(|t| t.get("system").and_then(Value::as_str) == Some("urn:ownhealth:lifecycle"))
+        .and_then(|t| t.get("code").and_then(Value::as_str));
+    if matches!(lifecycle, Some("superseded" | "retracted")) {
+        return skip("lifecycle_not_current");
+    }
+    let Ok(cat) = family::catalog() else {
+        return unmapped("family data not loaded");
+    };
+    let code = list(r.get("relationship"), "coding")
+        .iter()
+        .filter(|c| c.get("system").and_then(Value::as_str) == Some(family::ROLE_CODE))
+        .find_map(|c| {
+            c.get("code")
+                .and_then(Value::as_str)
+                .filter(|c| cat.relationship(c).is_some())
+        });
+    let Some(code) = code else {
+        return unmapped("FamilyMemberHistory with a relationship we do not draw");
+    };
+    let mut m = MemberIn::new(profile_id, code);
+    m.display_name = get_truthy(Some(r), "name").map(text_of);
+    m.sex_at_birth = list(r.get("sex"), "coding")
+        .iter()
+        .find_map(|c| match c.get("code").and_then(Value::as_str)? {
+            s @ ("female" | "male" | "unknown") => Some(s.to_string()),
+            "other" => Some("unknown".into()),
+            _ => None,
+        });
+    let born = r
+        .get("bornDate")
+        .or_else(|| r.get("bornPeriod").and_then(|p| p.get("start")));
+    m.born_year = born
+        .and_then(Value::as_str)
+        .and_then(|s| s.get(..4))
+        .and_then(|y| y.parse().ok());
+    m.death_age = years(r.get("deceasedAge"));
+    m.deceased = m.death_age.is_some()
+        || r.get("deceasedBoolean").and_then(Value::as_bool).unwrap_or(false)
+        || ["deceasedDate", "deceasedString", "deceasedRange"]
+            .iter()
+            .any(|k| truthy(r.get(*k)));
+    for c in list(Some(r), "condition") {
+        let (code_system, code) = first_coding(c.get("code"), Some(SNOMED));
+        let known = match (code_system.as_deref(), code.as_deref()) {
+            (Some("snomed"), Some(code)) => cat.kind_for_code(code),
+            _ => None,
+        };
+        let mut text = concept_text(c.get("code")).filter(|t| !t.is_empty());
+        if known.is_some_and(|k| text.as_deref() == Some(k.en.as_str())) {
+            text = None; // the name we write ourselves, not a received one
+        }
+        let kind = known.map_or("other", |k| k.kind.as_str());
+        if kind == "other" && text.is_none() {
+            return unmapped("FamilyMemberHistory condition without a code or text");
+        }
+        let approx = c
+            .get("onsetString")
+            .and_then(Value::as_str)
+            .and_then(|s| s.trim().strip_prefix(family::APPROX))
+            .and_then(|n| n.trim().parse::<i32>().ok());
+        let range = c.get("onsetRange").and_then(|r| years(r.get("low")));
+        let (onset_age, onset_approx) = match (years(c.get("onsetAge")), approx.or(range)) {
+            (Some(a), _) => (Some(a), false),
+            (None, Some(a)) => (Some(a), true),
+            _ => (None, false),
+        };
+        m.conditions.push(FamilyCondition {
+            kind: kind.into(),
+            text,
+            code_system,
+            code,
+            onset_age,
+            onset_approx,
+        });
+    }
+    m.sensitivity = sensitivity(r);
+    m.fhir = Some(r.clone());
+    match m.normalized() {
+        Ok(m) => Mapped::Family {
+            member: Box::new(m),
+            checks: Vec::new(),
+        },
+        Err(e) => unmapped(format!("FamilyMemberHistory not readable: {e}")),
+    }
 }
 
 #[cfg(test)]

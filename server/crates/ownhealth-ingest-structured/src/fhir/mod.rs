@@ -26,6 +26,7 @@ use futures::future::BoxFuture;
 use ownhealth_core::acceptance::{Check, DEFAULT_THRESHOLD, auto_accept};
 use ownhealth_core::access::{Profile, get_profile};
 use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::family::{self, MemberIn};
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::observations::ObservationIn;
 use ownhealth_core::provenance::{SrcIn, SrcRef};
@@ -470,6 +471,7 @@ impl Run<'_> {
             "Immunization" => Some(mapping::immunization(r, pid)),
             "Procedure" => Some(mapping::procedure(r, pid)),
             "MedicationStatement" | "MedicationRequest" => Some(mapping::medication(r, pid, |x| index.resolve(x))),
+            "FamilyMemberHistory" => Some(mapping::family_member_history(r, pid)),
             _ => None,
         };
         match m {
@@ -496,6 +498,7 @@ impl Run<'_> {
                 }
             }
             Some(Mapped::Record { record, checks }) => self.record(conn, e, &record, checks, &tail, &reference).await?,
+            Some(Mapped::Family { member, checks }) => self.family(conn, e, &member, checks, &tail, &reference).await?,
         }
         Ok(())
     }
@@ -686,6 +689,67 @@ impl Run<'_> {
     }
 }
 
+impl Run<'_> {
+    /// A relative (v0.3): auto-accepted under the same rule as records, held in review otherwise.
+    async fn family(
+        &mut self,
+        conn: &mut PgConnection,
+        e: &Entry,
+        member: &MemberIn,
+        mut checks: Vec<Check>,
+        tail: &str,
+        reference: &str,
+    ) -> Result<()> {
+        let (skip, previous) = self
+            .dedupe(&mut *conn, family::TABLE, tail, &e.resource, &mut checks)
+            .await?;
+        if skip {
+            self.skipped("duplicate");
+            return Ok(());
+        }
+        let allowance = if checks.iter().all(|c| c.ok) {
+            "structured_valid"
+        } else {
+            "structured_partial"
+        };
+        let decision = auto_accept(1.0, &checks, allowance, self.identity, DEFAULT_THRESHOLD);
+        let src = self.src(reference, None);
+        if decision.auto {
+            family::add(conn, member, &SrcRef::New(src), "import", None, None).await?;
+            self.summary.accepted += 1;
+            return Ok(());
+        }
+        let payload = json!({
+            "projection": "family_member",
+            "member": serde_json::to_value(member)?,
+            "src": serde_json::to_value(&src)?,
+            "supersedes": previous.map(|p| p.to_string()),
+            "checks": serde_json::to_value(&checks)?,
+            "identity": self.identity,
+            "why_not": decision.why_not,
+            "resource_type": e.rtype(),
+            "json_pointer": e.pointer,
+        });
+        create_item(
+            conn,
+            &ReviewItemIn {
+                kind: "fhir_unmapped".into(),
+                household_id: Some(self.profile.household_id),
+                profile_id: Some(self.profile.id),
+                document_id: Some(self.document_id),
+                reasons: decision.reasons.clone(),
+                row_conf: Some(1.0),
+                payload,
+                ..ReviewItemIn::default()
+            },
+        )
+        .await?;
+        self.summary.queued += 1;
+        self.count(&decision.reasons);
+        Ok(())
+    }
+}
+
 /// `record.model_dump(mode="json")`.
 pub fn record_json(record: &RecordIn) -> Result<Value> {
     Ok(match record {
@@ -708,6 +772,9 @@ async fn accept_fhir_item(
     edits: Option<&Value>,
 ) -> Result<Vec<Uuid>> {
     let payload = &item.payload;
+    if payload.get("projection").and_then(Value::as_str) == Some("family_member") {
+        return accept_family_item(conn, payload, user_id, edits).await;
+    }
     if payload.get("projection").and_then(Value::as_str) != Some("record") {
         return Err(Error::Review(
             "stored, not projected: this resource type has no table yet; dismiss the item".into(),
@@ -742,6 +809,55 @@ async fn accept_fhir_item(
             supersede_record(conn, old, &record, &SrcRef::New(src), "person", "updated at the source").await?
         }
         None => add_record(conn, &record, &SrcRef::New(src), RecordOptions::new("person")).await?,
+    };
+    Ok(vec![committed.id])
+}
+
+fn held_src(payload: &Value, user_id: Uuid) -> Result<SrcIn> {
+    let mut src = payload
+        .get("src")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    src.insert("actor_kind".into(), json!("user"));
+    src.insert("actor_id".into(), json!(user_id.to_string()));
+    serde_json::from_value::<SrcIn>(Value::Object(src))
+        .map_err(|e| Error::Invalid(e.to_string()))?
+        .validate()
+}
+
+/// A held relative becomes a family_member version (a correction when it changed upstream).
+async fn accept_family_item(
+    conn: &mut PgConnection,
+    payload: &Value,
+    user_id: Uuid,
+    edits: Option<&Value>,
+) -> Result<Vec<Uuid>> {
+    let mut data = payload
+        .get("member")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(Value::Object(e)) = edits {
+        data.extend(e.clone());
+    }
+    let member: MemberIn = serde_json::from_value(Value::Object(data)).map_err(|e| Error::Invalid(e.to_string()))?;
+    let src = SrcRef::New(held_src(payload, user_id)?);
+    let committed = match payload.get("supersedes").and_then(Value::as_str) {
+        Some(old) => {
+            let old = Uuid::parse_str(old).map_err(|e| Error::Invalid(e.to_string()))?;
+            family::supersede(
+                conn,
+                old,
+                &member,
+                &src,
+                "person",
+                "updated at the source",
+                family::LinkChange::Keep,
+            )
+            .await?
+        }
+        None => family::add(conn, &member, &src, "person", None, None).await?,
     };
     Ok(vec![committed.id])
 }

@@ -1,0 +1,206 @@
+//! The Rivera pedigree as FHIR: the export writes FamilyMemberHistory.ndjson (every version, the
+//! current one with the latest conditions), and importing it into a fresh profile gives back the same
+//! relatives with nothing left unmapped.
+//!
+//! With `OWNHEALTH_FHIR_OUT=<dir>` the test also writes each exported resource as its own JSON file
+//! there, for the HL7 validator job (.github/workflows/fhir-validate.yml).
+
+use std::io::{Cursor, Read};
+
+use ownhealth_core::access::{ProfileIn, create_household, create_profile, get_profile};
+use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::demo::{DEMO_HOUSEHOLD, seed_demo};
+use ownhealth_core::documents::{NewDocument, create_document};
+use ownhealth_core::family::{self, FamilyCondition, LinkChange, Member, MemberIn};
+use ownhealth_core::provenance::{SrcIn, SrcRef};
+use ownhealth_core::testing::TestDb;
+use ownhealth_ingest_structured::fhir::{import_resources, read_entries};
+use ownhealth_ops::export::export_profile;
+use serde_json::Value;
+use uuid::Uuid;
+
+fn lines(bytes: &[u8]) -> anyhow::Result<Vec<Value>> {
+    Ok(bytes
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(serde_json::from_slice)
+        .collect::<Result<_, _>>()?)
+}
+
+fn lifecycle(r: &Value) -> &str {
+    r["meta"]["tag"]
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["system"] == "urn:ownhealth:lifecycle"))
+        .and_then(|t| t["code"].as_str())
+        .unwrap_or_default()
+}
+
+/// What a relative is, without ids, links or provenance.
+fn essence(rows: &[Member]) -> Vec<String> {
+    let mut out: Vec<String> = rows
+        .iter()
+        .map(|m| {
+            format!(
+                "{} {:?} {:?} {:?} {} {:?} {:?}",
+                m.relationship, m.display_name, m.sex_at_birth, m.born_year, m.deceased, m.death_age, m.conditions.0
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn the_rivera_pedigree_exports_and_imports_back_with_nothing_dropped() -> anyhow::Result<()> {
+    ownhealth_ops::register();
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let settings = db.settings(dir.path())?;
+    let blobs = BlobStore::new(settings.blobs_path())?;
+    assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
+    let mut c = db.pool.acquire().await?;
+    let alex: Uuid = sqlx::query_scalar(
+        "select p.id from profile p join household h on h.id = p.household_id where h.name = $1 and p.slug = 'alex'",
+    )
+    .bind(DEMO_HOUSEHOLD)
+    .fetch_one(&mut *c)
+    .await?;
+    let seeded = family::list(&mut c, alex, true).await?;
+    assert_eq!(seeded.len(), 7);
+    assert_eq!(seeded.iter().filter(|m| m.linked_profile_id.is_some()).count(), 3);
+
+    // a later version of the father adds a condition: the export's current version must carry both
+    let father = seeded.iter().find(|m| m.relationship == "FTH").expect("father");
+    let mut m = MemberIn::new(alex, "FTH");
+    m.born_year = father.born_year;
+    m.death_age = father.death_age;
+    m.conditions = father.conditions.0.clone();
+    m.conditions.push(FamilyCondition {
+        kind: "hypertension".into(),
+        text: None,
+        code_system: None,
+        code: None,
+        onset_age: Some(45),
+        onset_approx: true,
+    });
+    let src = SrcRef::New(SrcIn::manual(None));
+    let v2 = family::supersede(
+        &mut c,
+        father.id,
+        &m,
+        &src,
+        "person",
+        "added a condition",
+        LinkChange::Keep,
+    )
+    .await?;
+    drop(c);
+
+    let mut tx = db.pool.begin().await?;
+    sqlx::query("set transaction isolation level repeatable read")
+        .execute(&mut *tx)
+        .await?;
+    let mut zip_bytes = Cursor::new(Vec::new());
+    export_profile(&mut tx, &blobs, alex, &mut zip_bytes, "zip").await?;
+    tx.commit().await?;
+    let mut z = zip::ZipArchive::new(Cursor::new(zip_bytes.into_inner()))?;
+    let mut read = |name: &str| -> anyhow::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        z.by_name(name)?.read_to_end(&mut out)?;
+        Ok(out)
+    };
+    let fmh_bytes = read("fhir/FamilyMemberHistory.ndjson")?;
+    let patient_bytes = read("fhir/Patient.ndjson")?;
+    let fmh = lines(&fmh_bytes)?;
+    assert_eq!(fmh.len(), 8, "seven relatives and one superseded version");
+    let current = fmh
+        .iter()
+        .find(|r| r["id"] == v2.id.to_string())
+        .expect("the new version");
+    assert_eq!(lifecycle(current), "current");
+    assert_eq!(current["patient"]["reference"], format!("Patient/{alex}"));
+    assert!(current.get("subject").is_none());
+    let codes: Vec<&Value> = current["condition"]
+        .as_array()
+        .map(|c| c.iter().map(|c| &c["code"]["coding"][0]["code"]).collect())
+        .unwrap_or_default();
+    assert_eq!(codes, ["22298006", "38341003"]);
+    assert_eq!(current["condition"][1]["onsetString"], "~45");
+    let old = fmh
+        .iter()
+        .find(|r| r["id"] == father.id.to_string())
+        .expect("the old version");
+    assert_eq!(
+        (lifecycle(old), old["condition"].as_array().map(Vec::len)),
+        ("superseded", Some(1))
+    );
+
+    if let Ok(out) = std::env::var("OWNHEALTH_FHIR_OUT") {
+        std::fs::create_dir_all(&out)?;
+        for (i, r) in lines(&patient_bytes)?.iter().chain(fmh.iter()).enumerate() {
+            let name = format!("{out}/{i:02}-{}.json", r["resourceType"].as_str().unwrap_or("Resource"));
+            std::fs::write(name, serde_json::to_vec_pretty(r)?)?;
+        }
+    }
+
+    // import the two files into a fresh profile for the same person
+    let mut c = db.pool.acquire().await?;
+    let alex_row = get_profile(&mut c, alex).await?.expect("alex");
+    let h = create_household(&mut c, "Restore test").await?;
+    let fresh = create_profile(
+        &mut c,
+        &ProfileIn {
+            household_id: h,
+            slug: "alex".into(),
+            display_name: alex_row.display_name.clone(),
+            relationship: Some("self".into()),
+            birth_date: alex_row.birth_date,
+            sex_at_birth: alex_row.sex_at_birth.clone(),
+            country: Some("ES".into()),
+            user_id: None,
+            unit_pref: None,
+        },
+    )
+    .await?;
+    let mut ndjson = patient_bytes.clone();
+    ndjson.extend_from_slice(&fmh_bytes);
+    let sha = blobs.put_bytes(&ndjson)?;
+    let doc = create_document(
+        &mut c,
+        &NewDocument {
+            filename: Some("FamilyMemberHistory.ndjson"),
+            ..NewDocument::upload(h, Some(fresh), &sha, "application/fhir+ndjson", ndjson.len() as i64)
+        },
+    )
+    .await?;
+    let (_, entries) = read_entries(&ndjson, true)?;
+    let profile = get_profile(&mut c, fresh).await?.expect("fresh");
+    let (summary, identity) = import_resources(&mut c, &entries, &profile, doc.id, "restore", None, "FHIR").await?;
+    assert_eq!(identity, "matched");
+    assert_eq!(
+        (summary.accepted, summary.queued, summary.skipped),
+        (7, 0, 1),
+        "{summary:?}"
+    );
+    let unmapped: i64 =
+        sqlx::query_scalar("select count(*) from review_item where profile_id = $1 and kind = 'fhir_unmapped'")
+            .bind(fresh)
+            .fetch_one(&mut *c)
+            .await?;
+    assert_eq!(unmapped, 0);
+    let back = family::list(&mut c, fresh, true).await?;
+    let now = family::list(&mut c, alex, true).await?;
+    assert_eq!(essence(&back), essence(&now));
+    // importing the same file again adds nothing
+    let doc2 = create_document(
+        &mut c,
+        &NewDocument {
+            filename: Some("again.ndjson"),
+            ..NewDocument::upload(h, Some(fresh), &sha, "application/fhir+ndjson", ndjson.len() as i64)
+        },
+    )
+    .await?;
+    let (again, _) = import_resources(&mut c, &entries, &profile, doc2.id, "restore", None, "FHIR").await?;
+    assert_eq!((again.accepted, again.queued), (0, 0), "{again:?}");
+    Ok(())
+}
