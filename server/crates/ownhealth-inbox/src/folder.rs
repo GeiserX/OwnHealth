@@ -18,7 +18,8 @@
 //! the scan and the read is refused, not followed. Source `config` (kind `folder`): `{}` (the root is
 //! OWNHEALTH_INBOX_DIR) or `{"subdir": "..."}`, a relative path below it. The subdir may not start
 //! with a hidden folder (`.done`, `.failed`) or a profile's folder, so a source cannot read another
-//! source's archive or another person's drops as its own root files. The demo never reads the folder:
+//! source's archive or another person's drops as its own root files, and two folder sources never share a
+//! root or sit one inside the other ([`check_overlap`]). The demo never reads the folder:
 //! the demo stack shares `./inbox` with a real install.
 
 use std::path::{Component, Path, PathBuf};
@@ -75,6 +76,34 @@ fn subdir(config: &serde_json::Value) -> Result<Option<&Path>> {
 /// Checks a `folder` source config before it is saved.
 pub fn check_config(config: &serde_json::Value) -> Result<()> {
     subdir(config).map(|_| ())
+}
+
+/// Refuses a `folder` source whose root equals, contains or sits inside the root of another `folder`
+/// source on this server (`source_id` is the one being saved, None for a new one). Two sources on
+/// one folder would race for its files and file one person's drops under the other's profile.
+pub async fn check_overlap(
+    conn: &mut sqlx::PgConnection,
+    source_id: Option<Uuid>,
+    config: &serde_json::Value,
+) -> Result<()> {
+    let mine = subdir(config)?.map(Path::to_path_buf).unwrap_or_default();
+    let others: Vec<serde_json::Value> =
+        sqlx::query_scalar("select config from source where kind = 'folder' and id is distinct from $1")
+            .bind(source_id)
+            .fetch_all(conn)
+            .await?;
+    for other in others {
+        // a stored config that no longer parses reads nothing, so it is in nobody's way
+        let Ok(theirs) = subdir(&other).map(|p| p.map(Path::to_path_buf).unwrap_or_default()) else {
+            continue;
+        };
+        if mine.starts_with(&theirs) || theirs.starts_with(&mine) {
+            return Err(Error::Invalid(
+                "another folder inbox already reads this folder, a folder inside it or a folder around it".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A file ready to be taken.

@@ -439,3 +439,53 @@ async fn a_paperless_tag_cannot_route_into_a_profile_the_caller_does_not_manage(
     assert_eq!(mapped, Some(env.profile("lucia").to_string()));
     Ok(())
 }
+
+#[tokio::test]
+async fn two_folder_sources_never_read_the_same_folder() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let mut sam = env.as_user(env.user("sam")).await?;
+    let folder = |profile: &str, subdir: Option<&str>| {
+        let mut b = json!({"kind": "folder", "label": "Escáner", "profile_id": env.profile(profile)});
+        if let Some(s) = subdir {
+            b["config"] = json!({"subdir": s});
+        }
+        b
+    };
+    let r = alex.post("/api/inboxes", &folder("alex", Some("escaner-alex"))).await?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.json);
+    let alex_id = r.json["id"].as_str().unwrap_or_default().to_string();
+    // the same folder, a folder inside it, or the root around it would take Alex's drops for Sam
+    for (subdir, why) in [
+        (Some("escaner-alex"), "the same folder"),
+        (Some("escaner-alex/hojas"), "inside"),
+        (None, "the root around it"),
+    ] {
+        let r = sam.post("/api/inboxes", &folder("sam", subdir)).await?;
+        assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{why}: {}", r.json);
+    }
+    let r = sam.post("/api/inboxes", &folder("sam", Some("escaner-sam"))).await?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.json);
+    let sam_id = r.json["id"].as_str().unwrap_or_default().to_string();
+    let r = sam
+        .send(
+            Method::PATCH,
+            &format!("/api/inboxes/{sam_id}"),
+            Some(&json!({"config": {"subdir": "escaner-alex"}})),
+            &[],
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.json);
+    // a source saved again with its own folder is not in its own way
+    let r = alex
+        .send(
+            Method::PATCH,
+            &format!("/api/inboxes/{alex_id}"),
+            Some(&json!({"config": {"subdir": "escaner-alex"}})),
+            &[],
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(env.scalar_i64("select count(*) from source").await?, 2);
+    Ok(())
+}

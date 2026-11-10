@@ -315,6 +315,9 @@ async fn create(State(rt): State<Runtime>, Caller(p): Caller, Body(b): Body<Sour
     if let Some(profile) = b.profile_id {
         manages_profile(&mut tx, &p, profile).await?;
     }
+    if b.kind == "folder" {
+        ownhealth_inbox::folder::check_overlap(&mut tx, None, &config).await?;
+    }
     if b.kind == "paperless" {
         for profile in tag_profiles(&config) {
             manages_profile(&mut tx, &p, profile).await?;
@@ -397,6 +400,9 @@ async fn patch(State(rt): State<Runtime>, Caller(p): Caller, Path(id): Path<Stri
             for profile in tag_profiles(c) {
                 manages_profile(&mut tx, &p, profile).await?;
             }
+        }
+        if s.kind == "folder" {
+            ownhealth_inbox::folder::check_overlap(&mut tx, Some(s.id), c).await?;
         }
     }
     if let Some(profile) = b.profile_id {

@@ -57,7 +57,7 @@ For a phone, a sync tool that writes into `inbox/<profile>/` (Syncthing, for exa
 
 ## 3. The folder inbox in OwnHealth
 
-In OwnHealth, open **Inbox** and add a source of kind **Watched folder**. Pick the default profile for files in the root. To watch a subfolder of `/inbox` instead of the whole folder, give its relative path. It cannot start with a hidden folder (`.done`, `.failed`) or a profile's folder, so one source never reads another's archive or another person's drops. The demo never reads the folder, because it shares `./inbox` with your real install.
+In OwnHealth, open **Inbox** and add a source of kind **Watched folder**. Pick the default profile for files in the root. To watch a subfolder of `/inbox` instead of the whole folder, give its relative path. It cannot start with a hidden folder (`.done`, `.failed`) or a profile's folder, so one source never reads another's archive or another person's drops. Two folder sources never share a folder: a subfolder that is already watched, or sits inside or around a watched one, is refused. The demo never reads the folder, because it shares `./inbox` with your real install.
 
 ## 4. Check it
 
