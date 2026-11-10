@@ -32,8 +32,8 @@ impl Egress {
     }
 
     /// A service the person runs (Paperless, Nightscout): 30 s, 50 MiB. Plain http only when it is
-    /// on the person's network (`allow_private`): its API token goes in every request, and on a
-    /// public address it would cross the internet in clear.
+    /// on the person's network (`allow_private`, and every address private): its API token goes in
+    /// every request, and on a public address it would cross the internet in clear.
     pub fn home_service(allow_private: bool) -> Egress {
         Egress {
             allow_private,
@@ -158,6 +158,11 @@ pub async fn get(url: &str, egress: &Egress, headers: &[(&str, &str)]) -> Result
     let host = parsed.host_str().ok_or(NetError::BadUrl)?.to_string();
     let port = parsed.port_or_known_default().ok_or(NetError::BadUrl)?;
     let addrs = resolve_checked(&host, port, egress.allow_private).await?;
+    // "on my network" allows plain http to the person's network only: a token sent to a public
+    // address would cross the internet in clear
+    if parsed.scheme() == "http" && addrs.iter().any(|a| is_public(a.ip())) {
+        return Err(NetError::NotHttps);
+    }
     let http = |e: reqwest::Error| {
         if e.is_timeout() {
             NetError::Timeout(host.clone())
@@ -257,6 +262,11 @@ mod tests {
         assert_eq!(
             get("https://user:pw@example.com/x", &Egress::cimd(), &[]).await,
             Err(NetError::BadUrl)
+        );
+        // "on my network" allows plain http to a private address, never to a public one
+        assert_eq!(
+            get("http://93.184.215.14/api/", &Egress::home_service(true), &[]).await,
+            Err(NetError::NotHttps)
         );
         assert!(resolve_checked("127.0.0.1", 80, true).await.is_ok());
         assert!(resolve_checked("localhost", 80, false).await.is_err());
