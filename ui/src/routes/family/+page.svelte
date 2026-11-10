@@ -3,7 +3,7 @@
 	// Profiles come from GET /me; the full matrix from GET /household (lane G). Pedigree and hints are
 	// v0.3, break-glass v1.0: their cards say so.
 	import '#lib/components/pages2/pages2.css';
-	import { addRelative, getHousehold, getMe, inviteMember, listAudit, putGrant, type RelativeIn } from '#lib/api';
+	import { addRelative, getHousehold, getMe, inviteMember, putGrant, type RelativeIn } from '#lib/api';
 	import StepUpDialog from '#lib/components/pages2/StepUpDialog.svelte';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import type { Household, ProfileSummary, Role, Scope } from '#lib/api/types';
@@ -15,8 +15,8 @@
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { roleCell } from '#lib/logic/grants';
-	import { formerAccess, type FormerAccess } from '#lib/logic/transfer';
-	import { day } from '#lib/components/pages2/fmt';
+	import { backSummary, localDay, type FormerAccess } from '#lib/logic/transfer';
+	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
 
 	const me = $derived(app.me);
@@ -115,20 +115,21 @@
 	// who took over sees who had access before and can give it back.
 	type HhProfile = Household['profiles'][number];
 	const takeOver = $derived(
-		(hh.data?.transfer_pending ?? []).map((s) => hh.data?.profiles.find((p) => p.slug === s)).filter((p): p is HhProfile => !!p)
+		(hh.data?.transfer_pending ?? [])
+			.map((x) => ({ p: hh.data?.profiles.find((p) => p.slug === x.profile), invited: x.invited }))
+			.filter((x): x is { p: HhProfile; invited: boolean } => !!x.p)
 	);
 	const mine = $derived(profiles.find((p) => p.is_self && p.role === 'owner' && p.relationship === 'child'));
-	let former = $state<FormerAccess[]>([]);
+	const former = $derived(mine ? (hh.data?.former_access ?? []).filter((f) => f.profile === mine.slug) : []);
+	// The person whose "give access back" waits for the second click.
+	let backing = $state('');
 	let gaveBack = $state('');
-	$effect(() => {
-		const slug = mine?.slug;
-		const grants = hh.data?.grants;
-		if (!slug || !grants) return;
-		listAudit({ profile: slug, limit: 500 })
-			.then((r) => (former = formerAccess(r.items, grants, slug)))
-			.catch(() => (former = []));
-	});
 	const memberName = (id: string) => hh.data?.members.find((m) => m.user_id === id)?.display_name ?? t('xfer_someone');
+	function backWhat(f: FormerAccess): string {
+		const s = backSummary(f.categories);
+		const list = s.keys.length ? tf('xfer_what', { list: s.keys.map((k) => t(k)).join('; ') }) : t('xfer_what_role');
+		return s.sensitive ? `${list} ${t('xfer_what_sens')}` : list;
+	}
 	function inviteToTakeOver(p: HhProfile) {
 		inv = { ...inv, display_name: p.display_name, claim_profile: p.slug };
 		form = 'invite';
@@ -138,7 +139,14 @@
 		const slug = mine?.slug;
 		if (!slug) return;
 		act('xfer', async () => {
-			await putGrant({ user_id: f.user_id, profile: slug, role: f.role as Role, categories: f.categories.length ? (f.categories as Scope[]) : null });
+			await putGrant({
+				user_id: f.user_id,
+				profile: slug,
+				role: f.role as Role,
+				categories: f.categories.length ? (f.categories as Scope[]) : null,
+				expires_at: f.expires_at
+			});
+			backing = '';
 			gaveBack = memberName(f.user_id);
 			load();
 		});
@@ -222,11 +230,15 @@
 	</section>
 {/if}
 
-{#each takeOver as p (p.slug)}
+{#each takeOver as { p, invited } (p.slug)}
 	<section class="card xfer" aria-labelledby="xfer-{p.slug}">
 		<h3 id="xfer-{p.slug}">{tf('xfer_title', { name: first(p.display_name), age: p.age ?? '' })}</h3>
 		<div class="note">{tf('xfer_d', { name: first(p.display_name) })}</div>
-		<div class="p2row"><button class="btn pri" onclick={() => inviteToTakeOver(p)}>{tf('xfer_invite', { name: first(p.display_name) })}</button></div>
+		{#if invited}
+			<div class="p2row muted" role="status">{tf('xfer_invited', { name: first(p.display_name) })}</div>
+		{:else}
+			<div class="p2row"><button class="btn pri" onclick={() => inviteToTakeOver(p)}>{tf('xfer_invite', { name: first(p.display_name) })}</button></div>
+		{/if}
 	</section>
 {/each}
 {#if mine && former.length}
@@ -236,8 +248,21 @@
 		<ul class="xfer-list">
 			{#each former as f (f.user_id)}
 				<li>
-					<span class="who"><b>{memberName(f.user_id)}</b> <span class="muted">{t('r_' + f.role).toLowerCase()} · {tf('xfer_until', { date: day(f.ts) })}</span></span>
-					<button class="btn" disabled={busy} onclick={() => giveBack(f)}>{t('xfer_back')}</button>
+					<span class="who"
+						><b>{memberName(f.user_id)}</b> <span class="muted">{t('r_' + f.role).toLowerCase()} · {tf('xfer_until', { date: localDay(f.ended_at) })}</span>
+						<span class="what muted">{backWhat(f)}</span></span
+					>
+					{#if backing === f.user_id}
+						<ConfirmRow
+							text={tf('xfer_back_q', { name: memberName(f.user_id) })}
+							confirmLabel={t('xfer_back_yes')}
+							{busy}
+							onconfirm={() => giveBack(f)}
+							oncancel={() => (backing = '')}
+						/>
+					{:else}
+						<button class="btn" disabled={busy} onclick={() => (backing = f.user_id)}>{t('xfer_back')}</button>
+					{/if}
 				</li>
 			{/each}
 		</ul>
@@ -352,6 +377,10 @@
 		gap: 8px;
 		padding: 6px 0;
 		border-top: 1px solid var(--line);
+	}
+	.xfer-list .what {
+		display: block;
+		font-size: 12px;
 	}
 	.xfer-done {
 		margin: -4px 0 12px;

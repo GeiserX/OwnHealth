@@ -1286,6 +1286,12 @@ export const dict = {
 		xfer_back_done: "Access given back to {name}.",
 		xfer_genome: "Sensitive genome findings start hidden. You can show them from the Genome page.",
 		xfer_someone: "A former member",
+		xfer_invited: "Invite sent to {name}.",
+		xfer_what: "Gets back: {list}.",
+		xfer_what_role: "Gets back the access their role gives.",
+		xfer_what_sens: "This includes sensitive facts and genome results.",
+		xfer_back_q: "Give {name} this access again?",
+		xfer_back_yes: "Yes, give it back",
 	},
 	es: {
 		household: "Hogar",
@@ -2571,6 +2577,12 @@ export const dict = {
 		xfer_back_done: "Acceso devuelto a {name}.",
 		xfer_genome: "Los hallazgos genómicos sensibles empiezan ocultos. Puedes mostrarlos desde la página Genoma.",
 		xfer_someone: "Un antiguo miembro",
+		xfer_invited: "Invitación enviada a {name}.",
+		xfer_what: "Recupera: {list}.",
+		xfer_what_role: "Recupera el acceso que da su rol.",
+		xfer_what_sens: "Incluye datos sensibles y resultados del genoma.",
+		xfer_back_q: "¿Devolver este acceso a {name}?",
+		xfer_back_yes: "Sí, devolverlo",
 	},
 } as const;
 

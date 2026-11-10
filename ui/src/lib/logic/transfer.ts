@@ -1,28 +1,31 @@
 // Ownership transfer at majority. When a child past the age of majority claims her profile, the
-// server ends each guardian's grant and writes one audit row per person
-// (`grant_change`, args `majority;role=guardian;categories=a,b`). These helpers read them back.
+// server ends each guardian's grant, and GET /household lists them for her as `former_access`.
+// These helpers turn one entry into what her "give access back" row says.
 
-type AuditRow = {
-	id: number;
-	ts: string;
-	action: string;
-	profile: string | null;
-	resource_ids?: string[];
-	args_summary?: string | null;
+/** One person whose access to the caller's profile ended when she took it over (GET /household). */
+export type FormerAccess = {
+	profile: string;
+	user_id: string;
+	role: string;
+	categories: string[];
+	expires_at: string | null;
+	ended_at: string;
 };
 
-export type FormerAccess = { user_id: string; role: string; categories: string[]; ts: string };
+/** The dictionary keys of what a grant with these categories gives back, and whether it reaches the
+ * sensitive facts or the genome. */
+export function backSummary(categories: string[]): { keys: string[]; sensitive: boolean } {
+	return {
+		keys: categories.map((c) => 'fu_sc_' + c.replace(':', '_')),
+		sensitive: categories.some((c) => c === 'read:sensitive' || c.startsWith('read:genome'))
+	};
+}
 
-/** The people whose access to `slug` ended at the claim and who have no grant on it now, latest row first. */
-export function formerAccess(rows: AuditRow[], grants: { user_id: string; profile: string }[], slug: string): FormerAccess[] {
-	const out: FormerAccess[] = [];
-	for (const r of [...rows].sort((a, b) => b.id - a.id)) {
-		const user = r.resource_ids?.[0];
-		const args = r.args_summary ?? '';
-		if (r.action !== 'grant_change' || r.profile !== slug || !user || !args.startsWith('majority;')) continue;
-		if (out.some((f) => f.user_id === user) || grants.some((g) => g.user_id === user && g.profile === slug)) continue;
-		const field = (k: string) => args.split(';').find((p) => p.startsWith(k + '='))?.slice(k.length + 1) ?? '';
-		out.push({ user_id: user, role: field('role'), categories: field('categories').split(',').filter(Boolean), ts: r.ts });
-	}
-	return out;
+/** The local calendar day of an instant, as YYYY-MM-DD: a claim just after local midnight reads as
+ * that day, not the UTC one before it. */
+export function localDay(iso: string): string {
+	const d = new Date(iso);
+	if (Number.isNaN(d.getTime())) return '—';
+	const pad = (n: number) => String(n).padStart(2, '0');
+	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }

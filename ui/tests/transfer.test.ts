@@ -1,45 +1,26 @@
-// Ownership transfer at majority: who had access to a profile before its person took it over.
+// Ownership transfer at majority: what her "give access back" row says.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formerAccess } from '../src/lib/logic/transfer.ts';
+import { backSummary, localDay } from '../src/lib/logic/transfer.ts';
 
-const row = (id: number, user: string, args: string, extra: Record<string, unknown> = {}) => ({
-	id,
-	ts: `2026-06-2${id}T10:00:00Z`,
-	action: 'grant_change',
-	profile: 'lucia',
-	resource_ids: [user],
-	args_summary: args,
-	...extra
+test('names every category that comes back, and flags sensitive facts and the genome', () => {
+	assert.deepEqual(backSummary(['read:labs', 'read:summary']), { keys: ['fu_sc_read_labs', 'fu_sc_read_summary'], sensitive: false });
+	assert.equal(backSummary(['read:labs', 'read:sensitive']).sensitive, true);
+	assert.equal(backSummary(['read:genome_raw']).sensitive, true);
+	assert.deepEqual(backSummary([]), { keys: [], sensitive: false });
 });
 
-test('lists each guardian whose access ended at the claim, with the categories they had', () => {
-	const rows = [
-		row(2, 'u-alex', 'majority;role=guardian;categories=read:labs,read:summary'),
-		row(1, 'u-sam', 'majority;role=guardian;categories=')
-	];
-	assert.deepEqual(formerAccess(rows, [], 'lucia'), [
-		{ user_id: 'u-alex', role: 'guardian', categories: ['read:labs', 'read:summary'], ts: '2026-06-22T10:00:00Z' },
-		{ user_id: 'u-sam', role: 'guardian', categories: [], ts: '2026-06-21T10:00:00Z' }
-	]);
-});
-
-test('leaves out people who have access again, other profiles and ordinary grant changes', () => {
-	const rows = [
-		row(4, 'u-alex', 'majority;role=guardian;categories=read:labs'),
-		row(3, 'u-sam', 'majority;role=guardian;categories=read:labs'),
-		row(2, 'u-sam', 'role=viewer;categories=default'),
-		row(1, 'u-ana', 'majority;role=guardian;categories=read:labs', { profile: 'mateo' }),
-		row(0, 'u-eva', 'majority;role=guardian;categories=read:labs', { action: 'read' })
-	];
-	const grants = [{ user_id: 'u-alex', profile: 'lucia' }];
-	assert.deepEqual(
-		formerAccess(rows, grants, 'lucia').map((f) => f.user_id),
-		['u-sam']
-	);
-});
-
-test('a person listed twice shows once, from the latest row', () => {
-	const rows = [row(5, 'u-sam', 'majority;role=guardian;categories=read:genome'), row(1, 'u-sam', 'majority;role=guardian;categories=read:labs')];
-	assert.deepEqual(formerAccess(rows, [], 'lucia')[0].categories, ['read:genome']);
+test('the end date is the local day, not the UTC one', () => {
+	const prev = process.env.TZ;
+	try {
+		// 00:10 on 11 November in Madrid is still 10 November in UTC
+		process.env.TZ = 'Europe/Madrid';
+		assert.equal(localDay('2026-11-10T23:10:00Z'), '2026-11-11');
+		process.env.TZ = 'UTC';
+		assert.equal(localDay('2026-11-10T23:10:00Z'), '2026-11-10');
+		assert.equal(localDay('not a date'), '—');
+	} finally {
+		if (prev === undefined) delete process.env.TZ;
+		else process.env.TZ = prev;
+	}
 });
