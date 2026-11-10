@@ -13,6 +13,7 @@ pub mod demo;
 pub mod demo_pdf;
 pub mod documents;
 pub mod error;
+pub mod family;
 pub mod fhir;
 pub mod ids;
 pub mod ingest;
