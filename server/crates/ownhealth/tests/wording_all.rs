@@ -11,6 +11,7 @@ use std::pin::Pin;
 
 use common::{Seeded, as_of, seeded};
 use ownhealth_core::access::all_scopes;
+use ownhealth_rules::cited;
 use ownhealth_rules::wording::{SKIP_KEYS, imperative_phrases, lint};
 use ownhealth_rules::{build_state, check_drug, dashboard, load_pack, render};
 use serde_json::{Value, json};
@@ -19,6 +20,7 @@ type R = anyhow::Result<()>;
 type Out<'a> = Pin<Box<dyn Future<Output = anyhow::Result<Vec<Value>>> + 'a>>;
 type Source = for<'a> fn(&'a Seeded) -> Out<'a>;
 
+const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../data");
 const SLUGS: [&str; 4] = ["alex", "sam", "lucia", "carmen"];
 const LANGS: [&str; 2] = ["en", "es"];
 
@@ -77,7 +79,11 @@ async fn every_output_source_is_information_not_advice() -> R {
         let outputs = source(&s).await?;
         assert!(!outputs.is_empty(), "{name} produced nothing to lint");
         for out in &outputs {
-            hits.extend(lint(out, &SKIP_KEYS).into_iter().map(|(p, h)| format!("{name} {p}: {h}")));
+            hits.extend(
+                lint(out, &SKIP_KEYS)
+                    .into_iter()
+                    .map(|(p, h)| format!("{name} {p}: {h}")),
+            );
         }
     }
     assert_eq!(hits, Vec::<String>::new());
@@ -95,7 +101,7 @@ async fn the_gate_goes_red_on_an_unattributed_quote() -> R {
     for g in out["guidance"].as_array_mut().into_iter().flatten() {
         if let Some(m) = g.as_object_mut() {
             for k in ["source", "url", "cite"] {
-                m.remove(k);
+                m.shift_remove(k);
             }
         }
     }
@@ -132,4 +138,115 @@ fn a_quote_is_exempt_only_with_its_attribution() {
         let v = json!({"quote": quote, attribution: "https://cpicpgx.org/guidelines/"});
         assert_eq!(lint(&v, &SKIP_KEYS), Vec::new(), "{attribution}");
     }
+}
+
+/// Every es/en string in every YAML or JSON file under `data/`, so a new data file or directory is
+/// linted the day it lands.
+#[test]
+fn every_es_en_string_under_data_is_information_not_advice() -> R {
+    let (mut files, mut texts, mut hits) = (0, 0, Vec::new());
+    let mut dirs = vec![std::path::PathBuf::from(DATA)];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+            if !["yaml", "yml", "json"].contains(&ext) {
+                continue;
+            }
+            files += 1;
+            for (at, text) in cited::localized(&cited::read_doc(&path)?) {
+                texts += 1;
+                hits.extend(
+                    imperative_phrases(&text)
+                        .into_iter()
+                        .map(|h| format!("{} {at}: {h}", path.display())),
+                );
+            }
+        }
+    }
+    assert_eq!(hits, Vec::<String>::new());
+    assert!(files >= 20 && texts >= 300, "{files} files, {texts} texts"); // the walk really read data/
+    Ok(())
+}
+
+fn cited_file(body: &str) -> anyhow::Result<(tempfile::TempDir, std::path::PathBuf)> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("example.yaml");
+    std::fs::write(&path, body)?;
+    Ok((dir, path))
+}
+
+const GOOD: &str = r#"
+version: "example 0.1.0"
+rows:
+  - id: example.one
+    cite: https://www.ncbi.nlm.nih.gov/books/NBK000000/
+templates:
+  example.one: {en: "Last measured {when}.", es: "Última medida {when}."}
+"#;
+
+#[test]
+fn a_cited_file_loads_with_its_version_hash_and_rows() -> R {
+    let (_dir, path) = cited_file(GOOD)?;
+    let f = cited::load(&path)?;
+    assert_eq!(f.version, "example 0.1.0");
+    assert_eq!(f.sha256.len(), 64);
+    assert_eq!(f.rows.len(), 1);
+    assert_eq!(f.doc["templates"]["example.one"]["es"], "Última medida {when}.");
+    Ok(())
+}
+
+#[test]
+fn the_cited_loader_refuses_a_row_or_template_that_breaks_the_rules() -> R {
+    let cite = "https://www.ncbi.nlm.nih.gov/books/NBK000000/";
+    for (what, body, reason) in [
+        (
+            "http cite",
+            GOOD.replace("https://www", "http://www"),
+            "no https `cite`",
+        ),
+        (
+            "no cite",
+            GOOD.replace(&format!("    cite: {cite}\n"), ""),
+            "no https `cite`",
+        ),
+        ("bare https", GOOD.replace(cite, "https://"), "no https `cite`"),
+        (
+            "missing es template",
+            GOOD.replace(r#", es: "Última medida {when}.""#, ""),
+            "no `es` text",
+        ),
+        (
+            "empty en template",
+            GOOD.replace(r#"en: "Last measured {when}.""#, r#"en: """#),
+            "no `en` text",
+        ),
+        (
+            "imperative template",
+            GOOD.replace("Última medida {when}.", "Evitar codeína."),
+            "reads as advice",
+        ),
+        (
+            "no version",
+            GOOD.replace(r#"version: "example 0.1.0""#, ""),
+            "no `version`",
+        ),
+        (
+            "rows not a list",
+            GOOD.replace(&format!("  - id: example.one\n    cite: {cite}"), "  id: example.one"),
+            "not a list",
+        ),
+    ] {
+        assert_ne!(body, GOOD, "{what}: the mutation did not apply");
+        let (_dir, path) = cited_file(&body)?;
+        match cited::load(&path) {
+            Ok(_) => panic!("{what} loaded"),
+            Err(e) => assert!(e.to_string().contains(reason), "{what}: {e}"),
+        }
+    }
+    Ok(())
 }
