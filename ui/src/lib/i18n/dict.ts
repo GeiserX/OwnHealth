@@ -1314,7 +1314,7 @@ export const dict = {
 		rule: "regla",
 		changed: "Cambios desde la última analítica",
 		changed_r: "vs 2026-03-02",
-		due: "Pendientes",
+		due: "Por hacer",
 		needs: "Pendiente de revisar",
 		needs_d: "filas de 3 documentos, 1 propuesta por un agente",
 		open: "Abrir cola",

@@ -121,7 +121,9 @@ table.t{width:100%;border-collapse:collapse;font-size:12.5px}
 .mk .n{font-size:12.5px;line-height:1.15}
 .mk .v{font-size:14px;font-weight:600;text-align:right;line-height:1.1}
 .mk .v small{font-size:10.5px;color:var(--muted);font-weight:400;margin-left:2px}
-.stale-b{font-size:10px;padding:0 5px;border-radius:4px;color:var(--stale);border:1px dashed var(--stale);margin-left:5px;vertical-align:1px}
+.stale-b{font-size:10px;padding:0 5px;border-radius:4px;color:var(--stale);border:1px dashed var(--stale);margin-left:5px;vertical-align:1px;white-space:nowrap}
+/* A stale row's name wraps rather than being cut by its chip. */
+.mk .n:has(.stale-b){white-space:normal}
 .sc .ft{margin-top:auto;padding-top:6px;gap:8px;white-space:nowrap;font-size:10.5px;color:var(--dim);display:flex;justify-content:space-between}
 .chg{display:grid;grid-template-columns:1fr auto auto;gap:6px 10px;align-items:center;font-size:12.5px}
 .arrow-up{color:var(--out)}
