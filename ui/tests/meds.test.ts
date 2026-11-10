@@ -1,7 +1,7 @@
 // The Medications screen: which medicines are current, the history grouped per medicine, and the code chips.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { codeChips, historyGroups, isCurrent, type MedRecord } from '../src/lib/logic/meds.ts';
+import { codeChips, historyGroups, isCurrent, replacedReason, type MedRecord } from '../src/lib/logic/meds.ts';
 
 const rec = (id: string, detail: Record<string, unknown>, extra: Partial<MedRecord> = {}): MedRecord => ({
 	id,
@@ -62,4 +62,11 @@ test('code chips show the primary code first and every received code once', () =
 	assert.equal(chips[1].display, 'Metformina 850 mg');
 	assert.deepEqual(codeChips({}), []);
 	assert.deepEqual(codeChips({ codes: 'not a list' }), []);
+});
+
+test('an agent proposal reason splits into a translatable action and the reason text', () => {
+	assert.deepEqual(replacedReason('agent proposal stop'), { action: 'stop', text: null });
+	assert.deepEqual(replacedReason('agent proposal change: moved to the morning'), { action: 'change', text: 'moved to the morning' });
+	assert.deepEqual(replacedReason('dosis mal copiada'), { action: null, text: 'dosis mal copiada' });
+	assert.deepEqual(replacedReason(null), { action: null, text: null });
 });

@@ -97,3 +97,14 @@ export function codeChips(detail: Record<string, unknown>): CodeChip[] {
 	}
 	return out;
 }
+
+/**
+ * The reason a version was replaced, split for translation. The server writes an agent's accepted
+ * proposal as `agent proposal <start|stop|change>` with an optional `: <reason>`; any other text is
+ * the person's own correction note and is shown as written.
+ */
+export function replacedReason(reason: string | null): { action: 'start' | 'stop' | 'change' | null; text: string | null } {
+	const m = /^agent proposal (start|stop|change)(?:: ([\s\S]*))?$/.exec(reason ?? '');
+	if (m) return { action: m[1] as 'start' | 'stop' | 'change', text: str(m[2]) };
+	return { action: null, text: str(reason) };
+}

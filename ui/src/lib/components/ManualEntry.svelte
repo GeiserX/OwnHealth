@@ -39,7 +39,7 @@
 		observation: [['name', 'me_f_name', 'text', true], ['value', 'me_f_value', 'text', true], ['unit', 'me_f_unit', 'text', false], ['date', 'me_f_date', 'date', true]],
 		// medication (slice 3): what, how much, when it is taken, since when, who prescribed it and why
 		medication: [
-			['name', 'me_f_med', 'text', true],
+			['name', 'med_f_name', 'text', true],
 			['strength', 'me_f_strength', 'text', false],
 			['dose_text', 'me_f_dose', 'text', false],
 			['schedule_text', 'med_f_schedule', 'text', false],

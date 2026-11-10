@@ -1302,6 +1302,10 @@ export const dict = {
 		med_f_schedule: "Schedule",
 		med_f_prescriber: "Prescribed by",
 		med_f_reason: "Reason",
+		med_f_name: "Medicine or supplement",
+		med_by_agent_start: "agent proposal to start",
+		med_by_agent_stop: "agent proposal to stop",
+		med_by_agent_change: "agent proposal to change",
 	},
 	es: {
 		household: "Hogar",
@@ -2603,6 +2607,10 @@ export const dict = {
 		med_f_schedule: "Pauta",
 		med_f_prescriber: "Prescrito por",
 		med_f_reason: "Motivo",
+		med_f_name: "Medicamento o suplemento",
+		med_by_agent_start: "propuesta de un agente para empezar",
+		med_by_agent_stop: "propuesta de un agente para suspender",
+		med_by_agent_change: "propuesta de un agente para cambiar",
 	},
 } as const;
 

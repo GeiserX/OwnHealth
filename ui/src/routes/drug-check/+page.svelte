@@ -15,7 +15,7 @@
 	import { Loader, tf } from '#lib/components/pages1/util.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { isActionable } from '#lib/logic/health';
-	import { codeChips, historyGroups, isCurrent } from '#lib/logic/meds';
+	import { codeChips, historyGroups, isCurrent, replacedReason } from '#lib/logic/meds';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const prof = $derived(currentProfile());
@@ -72,6 +72,11 @@
 				: (s(r, 'med_status') ?? 'active') === 'active'
 					? null
 					: t('med_st_' + s(r, 'med_status'));
+	// Why a version was replaced, in the reader's language when an agent proposal replaced it.
+	const replaced = (r: RecordOut) => {
+		const { action, text } = replacedReason(r.status_reason);
+		return [action ? t('med_by_agent_' + action) : null, text].filter(Boolean).join(': ') || null;
+	};
 </script>
 
 <div class="ph">
@@ -108,6 +113,7 @@
 							<div class="muted line">
 								{#each [s(r, 'dose_text'), s(r, 'schedule_text')].filter(Boolean) as x, i (i)}{i ? ' · ' : ''}{x}{/each}
 								{#if s(r, 'started')}{s(r, 'dose_text') || s(r, 'schedule_text') ? ' · ' : ''}<span style="white-space:nowrap">{t('med_since')} <span class="num">{s(r, 'started')}</span></span>{/if}
+								{#if !badges(r).length && !chips.length}<SourceChip label="" name={r.title} src={r.src} onopen={openSource} />{/if}
 							</div>
 							{#if s(r, 'reason_text') || s(r, 'prescriber')}
 								<div class="dim line">
@@ -115,7 +121,7 @@
 									{#if s(r, 'prescriber')}{s(r, 'reason_text') ? ' · ' : ''}{t('med_prescriber')}: {s(r, 'prescriber')}{/if}
 								</div>
 							{/if}
-							<div class="chips">
+							{#if badges(r).length || chips.length}<div class="chips">
 								{#each badges(r) as x (x.gene)}
 									{@const na = x.evidence == null && x.diplotype == null}
 									<a
@@ -127,7 +133,7 @@
 								{/each}
 								{#each chips as c (c.label + c.code)}<span class="chip mono" title={[t('med_codes'), c.display, c.system].filter(Boolean).join(' · ')}>{c.label} {c.code}</span>{/each}
 								<SourceChip label="" name={r.title} src={r.src} onopen={openSource} />
-							</div>
+							</div>{/if}
 						</div>
 						{#if canWrite}<button class="btn sm" onclick={() => ((correcting = correcting === r.id ? null : r.id), (adding = false))} aria-expanded={correcting === r.id}>{t('me_correct')}</button>{/if}
 					</div>
@@ -155,11 +161,12 @@
 					<ol class="hist">
 						{#each g.entries as e (e.id)}
 							<li class:old={e.status !== 'current'}>
-								<span class="num" style="white-space:nowrap">{s(e, 'started') ?? '—'} → {s(e, 'stopped') ?? t('med_ongoing')}</span>
+								<!-- a replaced version's end is the version that replaced it, so it shows only its start -->
+								<span class="num" style="white-space:nowrap">{s(e, 'started') ?? '—'}{#if e.status !== 'superseded' && e.status !== 'retracted'}{' '}→ {s(e, 'stopped') ?? t('med_ongoing')}{/if}</span>
 								{#if stateWord(e)}<span class="muted">· {stateWord(e)}</span>{/if}
 								{#if s(e, 'strength') || s(e, 'dose_text') || s(e, 'schedule_text')}<span class="muted">· {[s(e, 'strength'), s(e, 'dose_text'), s(e, 'schedule_text')].filter(Boolean).join(' · ')}</span>{/if}
 								{#if s(e, 'reason_text')}<span class="muted">· {t('med_reason')}: {s(e, 'reason_text')}</span>{/if}
-								{#if e.status_reason}<span class="dim">· {e.status_reason}</span>{/if}
+								{#if replaced(e)}<span class="dim">· {replaced(e)}</span>{/if}
 								<SourceChip label="" name={e.title} src={e.src} onopen={openSource} />
 							</li>
 						{/each}
