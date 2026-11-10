@@ -210,7 +210,7 @@
 			<div class="empty">{t('h1_bio_none')}</div>
 		{:else}
 			<div class="tscroll">
-			<table class="t nw">
+			<table class="t nw bml">
 				<thead><tr><th>{t('h1_th_name')}</th><th>{t('h1_th_latest')}</th><th>{t('h1_th_status')}</th><th class="ph-hide">{t('h1_th_printed')}</th><th>{t('h1_th_date')}</th><th>{t('h1_th_lab')}</th><th style="text-align:right">{t('h1_th_n')}</th><th>{t('h1_th_source')}</th></tr></thead>
 				<tbody>
 					{#each groups as g (g.latest.alias_group)}
@@ -285,7 +285,8 @@
 						<span class="dim">{t('h1_lg_shape')} {#each labs as l (l)}{GLYPH[shapeOf(l)]} {l}{' '}{/each}</span>
 						<span class="dim">{t('h1_lg_flags')}</span>
 					</div>
-					<svg width="100%" viewBox="0 0 {W} {H + extra}" role="img" aria-label={tp('h1_chart_label', pts.length, { name: tr.name, v: fmt(last.value), u: unitLabel(last.unit) })}>
+					<!-- role=group, not img: its points are buttons a keyboard and a screen reader reach one by one. -->
+					<svg width="100%" viewBox="0 0 {W} {H + extra}" role="group" aria-label={tp('h1_chart_label', pts.length, { name: tr.name, v: fmt(last.value), u: unitLabel(last.unit) })}>
 						{#each geo.ticks as v (v)}
 							<line x1={pl} x2={W - pr} y1={geo.sy(v)} y2={geo.sy(v)} stroke={C.grid} />
 							<text x={pl - 7} y={geo.sy(v) + 4} fill={C.axis} font-size="11" text-anchor="end">{fmt(v)}</text>
@@ -454,9 +455,17 @@
 
 <style>
 	/* The printed name repeats the name on a phone: the list keeps what fits. */
+	/* On a phone the status must show: the name wraps onto two lines instead of taking the width. */
 	@media (max-width: 760px) {
 		.ph-hide {
 			display: none;
+		}
+		.bml td:first-child {
+			white-space: normal;
+			min-width: 7em;
+		}
+		.bml td:nth-child(2) {
+			white-space: normal;
 		}
 	}
 </style>

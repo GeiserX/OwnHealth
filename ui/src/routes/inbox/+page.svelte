@@ -263,7 +263,7 @@ Authorization: Bearer {fresh.token.slice(0, 12)}…</pre>
 							<td class="dim"><span class="num nw">{ago(q.received_at)}</span><div style="font-size:10.5px">{sourceName(q.source_id)}</div></td>
 							<td class="mono ut snd">{plain(q.sender) || '—'}</td>
 							<td class="ut"><span title={t('fu_untrusted_title')}>{plain(q.subject) || t('fu_q_nosubject')}</span></td>
-							<td>
+							<td data-label={q.attachments.length ? undefined : t('fu_q_files')}>
 								{#each q.attachments as a, i (i)}
 									<div class="att"><span class="mono">{plain(a.filename)}</span> <span class="dim">{kb(a.size)}</span></div>
 								{:else}<span class="dim">{t('fu_q_nofiles')}</span>{/each}
@@ -368,7 +368,27 @@ Authorization: Bearer {fresh.token.slice(0, 12)}…</pre>
 		flex: 1 1 170px;
 		min-width: 0;
 	}
+	/* Tablet: the table may scroll sideways, but the buttons, the only actions on a row, stay in view
+	   at its right edge, and the sender gets room for a readable line. */
+	@media (max-width: 1100px) {
+		.qt td.acts-cell,
+		.qt th:last-child {
+			position: sticky;
+			right: 0;
+			background: var(--surface);
+			box-shadow: -8px 0 8px -8px rgba(0, 0, 0, 0.6);
+		}
+		.q .snd {
+			min-width: 22ch;
+		}
+	}
 	@media (max-width: 760px) {
+		.qt td.acts-cell,
+		.qt th:last-child {
+			position: static;
+			background: none;
+			box-shadow: none;
+		}
 		/* A long value ('hace 10 minutos') goes under the label instead of past the tile's edge. */
 		.inbox .ib {
 			flex-wrap: wrap;

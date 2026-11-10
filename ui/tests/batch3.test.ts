@@ -68,9 +68,17 @@ test('an SpO2 axis never passes 100 % and a 1 bpm change is not a cliff', () => 
 	assert.ok(hr.lo <= 76 && hr.hi >= 77.3);
 });
 
-import { errKey } from '../src/lib/logic/errors.ts';
+import { browserErrorCode, errKey } from '../src/lib/logic/errors.ts';
 test('a refused hand-entered value reads in the reader language', () => {
 	const has = (k: string) => ['err_decimal', 'err_future_date'].includes(k);
 	assert.equal(errKey('bad_input', 'The value is not a number. Type it as it is printed, for example 5,4.', has), 'err_decimal');
 	assert.equal(errKey('bad_input', 'The date is in the future. Use the day the value was measured.', has), 'err_future_date');
+});
+
+test('passkeys: the browser\'s WebAuthn refusals get our own words, any other error keeps its message', () => {
+	assert.equal(browserErrorCode('SecurityError'), 'wa_security');
+	assert.equal(browserErrorCode('NotAllowedError'), 'wa_not_allowed');
+	assert.equal(browserErrorCode('InvalidStateError'), 'wa_invalid_state');
+	assert.equal(browserErrorCode('AbortError'), 'wa_abort');
+	assert.equal(browserErrorCode('TypeError'), null);
 });

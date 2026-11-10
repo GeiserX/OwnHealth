@@ -148,6 +148,10 @@
 								<td><span class="pill {runTone[r.status]}"><i aria-hidden="true"></i>{t('fu_run_' + r.status)}</span></td>
 								<td class="num">{tf(source.kind === 'email' ? 'fu_run_counts' : 'fu_run_counts_nq', { seen: r.items_seen, new: r.items_new, dup: r.items_duplicate, q: r.items_quarantined })}</td>
 							</tr>
+							{@const skipped = Object.keys(r.skipped ?? {})}
+							{#if skipped.length}
+								<tr><td colspan="4" class="dim">{tp('fu_run_skipped', skipped.length)} <span class="mono">{skipped.join(', ')}</span></td></tr>
+							{/if}
 							{#if r.error || r.errors.length}
 								<tr><td colspan="4" class="mono err2">{[r.error, ...r.errors.map((e) => `${e.code}: ${e.message}`)].filter(Boolean).join(' · ')}</td></tr>
 							{/if}

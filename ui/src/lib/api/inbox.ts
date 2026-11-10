@@ -49,6 +49,8 @@ export interface SourceRun {
 	items_quarantined: number;
 	errors: { code: string; message: string }[];
 	error: string | null;
+	/** What a push held that OwnHealth does not chart yet: metric name -> samples. */
+	skipped?: Record<string, number>;
 }
 
 export interface SourceIn {

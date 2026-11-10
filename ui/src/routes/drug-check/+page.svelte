@@ -178,9 +178,9 @@
 									<tr>
 										<td style="white-space:nowrap"><b>{m.name}</b></td>
 										<td><StatusChip status={relTone(m.relation)} label={m.relation_text} /></td>
-										<td class="muted" style="font-size:12px;white-space:nowrap">
-											{#if m.since}{t('i2_since')} <span class="num" style="white-space:nowrap">{m.since}</span>{/if}
-											<span style="white-space:nowrap">{m.since ? '· ' : ''}<SourceChip label="Rx" name={m.name} src={m.src} onopen={openSource} /></span>
+										<td class="muted" style="font-size:12px">
+											{#if m.since}<span style="white-space:nowrap">{t('i2_since')} <span class="num">{m.since}</span></span>{/if}
+											<span style="white-space:nowrap;margin-left:{m.since ? '6px' : '0'}"><SourceChip label="Rx" name={m.name} src={m.src} onopen={openSource} /></span>
 										</td>
 									</tr>
 								{/each}

@@ -40,6 +40,27 @@ export function matrixHeads(profiles: { slug: string; display_name: string }[]):
 	});
 }
 
+/**
+ * A member's row in the grants matrix: the first name, or the full name when that first name also
+ * belongs to another member or to a profile of someone else (an invitee 'Carmen' next to the profile
+ * column 'Carmen'); the signed-in member's row ends in ' (you)'.
+ */
+export function matrixRowLabel(
+	m: { user_id: string; display_name: string; is_me?: boolean },
+	members: { user_id: string; display_name: string }[],
+	profiles: { display_name: string }[],
+	you: string
+): string {
+	const first = (n: string) => (n.trim().split(/\s+/)[0] ?? n).toLocaleLowerCase();
+	const same = (a: string, b: string) => a.trim().replace(/\s+/g, ' ').toLocaleLowerCase() === b.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+	const f = first(m.display_name);
+	const clash =
+		members.some((o) => o.user_id !== m.user_id && first(o.display_name) === f) ||
+		profiles.some((p) => first(p.display_name) === f && !same(p.display_name, m.display_name));
+	const label = clash ? m.display_name.trim() : (m.display_name.trim().split(/\s+/)[0] ?? m.display_name);
+	return m.is_me ? `${label} (${you})` : label;
+}
+
 /** True when a profile already carries this name (case and spacing ignored). A note, never a block. */
 export function nameTaken(name: string, profiles: { display_name: string }[]): boolean {
 	const n = name.trim().replace(/\s+/g, ' ').toLocaleLowerCase();

@@ -11,7 +11,7 @@
 	import { Loader, cap, errRaw, errText, tf, tp } from '#lib/components/pages1/util.svelte';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { copyText } from '#lib/logic/inbox';
-	import { foreignOrigin, matrixHeads, nameTaken, todayIso } from '#lib/logic/people';
+	import { foreignOrigin, matrixHeads, matrixRowLabel, nameTaken, todayIso } from '#lib/logic/people';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { roleCell } from '#lib/logic/grants';
@@ -230,7 +230,7 @@
 						{#if hh.data}
 							{#each hh.data.members as m (m.user_id)}
 								<tr class:pending={m.invite_pending}>
-									<td>{first(m.display_name)}{#if m.invite_pending}<span class="dim">{' · ' + t('h1_invite_pending')}</span>{/if}</td>
+									<td>{matrixRowLabel(m, hh.data.members, cols, t('h1_you'))}{#if m.invite_pending}<span class="dim">{' · ' + t('h1_invite_pending')}</span>{/if}</td>
 									{#each cols as c (c.slug)}
 										{@const r = roleCell(hh.data.grants, m, c.slug, manages(c.slug))}
 										<td>{#if r === '?'}<span class="dim" title={t('h1_grant_unknown')}>?</span>{:else if r}{t('r_' + r).toLowerCase()}{:else}<span class="dim">—</span>{/if}</td>
@@ -271,5 +271,23 @@
 	}
 	tr.pending td {
 		color: var(--muted);
+	}
+	/* Phone: each field of the two forms takes a whole line, and a long option never sets the width. */
+	@media (max-width: 760px) {
+		.p2form > * {
+			min-width: 0;
+		}
+		.p2form .p2row > label {
+			flex: 1 1 100%;
+			min-width: 0 !important;
+		}
+		.p2form select.p2in {
+			width: 100%;
+			max-width: 100%;
+			min-width: 0;
+		}
+		.p2form h3 .r {
+			white-space: normal;
+		}
 	}
 </style>

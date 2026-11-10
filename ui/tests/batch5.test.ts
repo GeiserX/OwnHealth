@@ -16,6 +16,7 @@ import {
 	lastSignIn,
 	liveConsents,
 	matrixHeads,
+	matrixRowLabel,
 	nameTaken,
 	todayIso,
 	tokenProblem
@@ -58,6 +59,22 @@ test('grants matrix: first names, the full name when two first names collide', (
 		{ slug: 'lucia-2', display_name: 'Lucía Ortega' }
 	]);
 	assert.deepEqual(heads.map((h) => [h.label, h.dup]), [['Alex', false], ['Lucía Rivera', true], ['Lucía Ortega', true]]);
+});
+
+test('grants matrix rows: the full name when the first name is another person, (you) on the signed-in row', () => {
+	const members = [
+		{ user_id: 'u1', display_name: 'Alex Rivera', is_me: true },
+		{ user_id: 'u2', display_name: 'Carmen Ortega Prueba', is_me: false },
+		{ user_id: 'u3', display_name: 'Sam Rivera', is_me: false }
+	];
+	const profiles = [
+		{ slug: 'alex', display_name: 'Alex Rivera' },
+		{ slug: 'carmen', display_name: 'Carmen Ortega' }
+	];
+	assert.deepEqual(
+		members.map((m) => matrixRowLabel(m, members, profiles, 'you')),
+		['Alex (you)', 'Carmen Ortega Prueba', 'Sam']
+	);
 });
 
 test('add relative: an exact name match is noticed, spacing and case ignored', () => {

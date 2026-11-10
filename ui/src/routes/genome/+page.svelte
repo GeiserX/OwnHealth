@@ -38,8 +38,19 @@
 		calls?: Call[];
 		cited_by_findings?: string[];
 		limitations?: string[];
+		limitation_codes?: string[];
 	};
 	const lookup = new Loader<Lookup>();
+	// A lookup's limitation in the reader's language by its code; the server's sentence when it has none.
+	const limText = (L: Lookup, i: number, text: string) => {
+		const k = 'g_lim_' + (L.limitation_codes?.[i] || '-');
+		return t(k) === k ? text : t(k);
+	};
+	// The fix of a refused lookup in the reader's language when we have one for its code.
+	const fixText = (e: ApiError) => {
+		const k = 'err_' + (e.code ?? '') + '_fix';
+		return t(k) === k ? e.fix : t(k);
+	};
 	// Revealing sensitive findings widens what is on screen: it asks once, inline.
 	let revealing = $state(false);
 
@@ -158,7 +169,7 @@
 		<span class="dim" style="font-size:11.5px">{t('i2_lookup_d')}</span>
 		{#if lookup.error}
 			<div class="p2err" role="alert" style="flex-basis:100%">
-				{errText(lookup.error)}{#if lookup.error instanceof ApiError && lookup.error.fix}<div class="dim">{lookup.error.fix}</div>{/if}
+				{errText(lookup.error)}{#if lookup.error instanceof ApiError && lookup.error.fix}<div class="dim">{fixText(lookup.error)}</div>{/if}
 			</div>
 		{/if}
 		{#if lookup.data}
@@ -182,7 +193,7 @@
 						{#each L.cited_by_findings as id, i (id)}{@const f = findingById(id)}{i ? ', ' : ''}<a href="#f-{id}">{f ? [f.gene, resultCell(f)].filter(Boolean).join(' · ') : id}</a>{/each}
 					</dd>
 				{/if}
-				{#each L.limitations ?? [] as l (l)}<dt></dt><dd class="dim">{l}</dd>{/each}
+				{#each L.limitations ?? [] as l, i (l)}<dt></dt><dd class="dim">{limText(L, i, l)}</dd>{/each}
 			</dl>
 			<details style="flex-basis:100%"><summary class="dim">{t('i2_lk_raw')}</summary><pre class="code mono" style="max-height:240px;overflow:auto">{JSON.stringify(L, null, 2)}</pre></details>
 		{/if}
@@ -226,7 +237,7 @@
 	</div>
 	<div class="card" style="padding:4px 6px">
 		<div class="tscroll">
-		<table class="t">
+		<table class="t gtab">
 			<thead>
 				<tr><th>{t('i2_g_cat')}</th><th>{t('i2_g_gene')}</th><th>{t('i2_g_var')}</th><th>{t('i2_g_res')}</th><th>{t('i2_g_ev')}</th><th>{t('i2_g_conf')}</th><th>call_state</th><th>{t('i2_g_note')}</th></tr>
 			</thead>
@@ -303,6 +314,23 @@
 <StepUpDialog />
 
 <style>
+	/* On a phone the result and its confidence must show: the category chip, the variant ids and the raw
+	   call state go (the result says the same in words). Desktop and tablet keep every column. */
+	@media (max-width: 760px) {
+		.gtab th:nth-child(1),
+		.gtab td:nth-child(1),
+		.gtab tr:not(.lock) th:nth-child(3),
+		.gtab tr:not(.lock) td:nth-child(3),
+		.gtab th:nth-child(7),
+		.gtab td:nth-child(7) {
+			display: none;
+		}
+		/* A hidden finding's sentence wraps inside the screen instead of under the scrolled columns. */
+		.gtab tr.lock td[colspan] > span {
+			display: inline-block;
+			max-width: calc(100vw - 72px);
+		}
+	}
 	.lnk {
 		background: none;
 		border: 0;

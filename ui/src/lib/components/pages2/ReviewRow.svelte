@@ -2,12 +2,12 @@
 	// One extracted row waiting in the review queue: the mockup's `.xr` grid, with accept, edit,
 	// reject (with a reason), "add alias" for unknown names, and quarantine for untrusted text.
 	import type { Check, ReviewItem } from '#lib/api/types';
-	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
 	import { errRaw, errText, tf } from '#lib/components/pages1/util.svelte';
 	import AgentContext from '#lib/components/inbox/AgentContext.svelte';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { repeatsLabel, reviewChecks, rowGrounding } from '#lib/logic/inbox';
-	import { decimalText } from '#lib/logic/format';
+	import { decimalText, unitLabel } from '#lib/logic/format';
 	import { dict } from '#lib/i18n/dict';
 	import { day } from './fmt';
 
@@ -60,8 +60,14 @@
 	const tone = $derived(
 		quarantined || grounding === 'ungrounded' ? 'bad' : item.reasons.length || lowConf || grounding === 'no_word_layer' ? 'low' : agent ? 'agent' : ''
 	);
-	const printed = $derived([obs.printed_value, obs.printed_unit].filter(Boolean).join(' '));
-	const canonical = $derived(obs.value_canonical != null ? `${obs.value_canonical} ${obs.unit_canonical ?? ''}`.trim() : '');
+	// The value as printed (its unit written the usual way), and the stored value in the reader's number
+	// format, shown only when it says something the printed one does not.
+	const printed = $derived([obs.printed_value, unitLabel(obs.printed_unit == null ? null : String(obs.printed_unit))].filter(Boolean).join(' '));
+	const canonical = $derived(
+		obs.value_canonical != null && Number.isFinite(Number(obs.value_canonical))
+			? `${fmtNum(Number(obs.value_canonical))} ${unitLabel(obs.unit_canonical == null ? null : String(obs.unit_canonical))}`.trim()
+			: ''
+	);
 	const rowText = $derived(Object.values(pl.cells ?? {}).map((c) => c.text ?? '').join(' · '));
 
 	let mode = $state<'' | 'edit' | 'reject' | 'alias' | 'view'>('');
@@ -131,15 +137,15 @@
 	<div class="mono c-lo" style="font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="{obs.loinc ?? ''} {obs.alias_group ?? ''}">
 		{#if quarantined}—{:else}{obs.loinc ?? t('i2_no_loinc')} <span class="dim">{obs.alias_group}</span>{/if}
 	</div>
-	<div class="num c-val" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-		{#if quarantined}{t('i2_free_text')}{:else}{printed}{#if canonical && canonical !== printed}<span class="dim"> → {canonical}</span>{/if}{/if}
+	<div class="num c-val" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title={quarantined ? undefined : [printed, canonical && canonical !== printed ? canonical : ''].filter(Boolean).join(' → ')}>
+		{#if quarantined}{t('i2_free_text')}{:else}{printed}{#if canonical && canonical !== printed}{' '}<span class="dim">→ {canonical}</span>{/if}{/if}
 	</div>
 	<div class="conf">
 		{#if quarantined}
 			<span class="pill p-out"><i aria-hidden="true"></i>{t('i2_quarantined')}</span>
 		{:else}
 			<div class="bar" aria-hidden="true"><i style="width:{Math.max(conf * 100, grounding === 'ungrounded' ? 100 : 0)}%;background:{grounding === 'ungrounded' ? 'var(--out)' : conf > 0.9 ? 'var(--ok)' : 'var(--watch)'}"></i></div>
-			<span class="num" aria-label="{t('i2_confidence')} {conf.toFixed(2)}">{conf.toFixed(2)}</span>
+			<span class="num" aria-label="{t('i2_confidence')} {fmtNum(conf, 2)}">{fmtNum(conf, 2)}</span>
 		{/if}
 	</div>
 	<div class="acts" style="justify-content:flex-end">
@@ -167,7 +173,7 @@
 		<div class="why dim">{t(wordLayer === 'ocr' ? 'fu_wl_ocr' : 'fu_wl_paperless')}{#if grounding === 'grounded'} · {tf('fu_grounded', { p: Number((item.payload as { page_no?: number }).page_no ?? 1) })}{/if}</div>
 	{/if}
 	{#if !failed.length && lowConf && grounding !== 'ungrounded'}
-		<div class="why" style="color:var(--watch)">● {tf('i2_low_conf', { c: conf.toFixed(2), t: threshold.toFixed(2) })}</div>
+		<div class="why" style="color:var(--watch)">● {tf('i2_low_conf', { c: fmtNum(conf, 2), t: fmtNum(threshold, 2) })}</div>
 	{/if}
 	{#if unknownName && !quarantined && mode !== 'alias'}
 		<div class="why"><button class="lnk" onclick={() => open('alias')}>{t('i2_add_alias')}</button> <span class="dim">{t('i2_add_alias_d')}</span></div>

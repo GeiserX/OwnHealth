@@ -71,7 +71,8 @@
 		});
 		return d;
 	}
-	const anchor = (k: number, len: number) => (bars ? 'middle' : k === len - 1 ? 'end' : k === 0 ? 'start' : 'middle');
+	// The last label ends at its point so it never runs past the right edge, bars included.
+	const anchor = (k: number, len: number) => (k === len - 1 ? 'end' : bars ? 'middle' : k === 0 ? 'start' : 'middle');
 </script>
 
 <svg width="100%" viewBox="0 0 {w} {h}" preserveAspectRatio="xMidYMid meet" role="img" aria-label={label}>

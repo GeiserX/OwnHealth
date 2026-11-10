@@ -18,10 +18,19 @@
 	aria-label={`${t('open_src')}: ${said}`}
 	onclick={() => src && onopen?.(src)}
 >
-	<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4" /></svg>{label}
+	<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4" /></svg><span class="lbl">{label}</span>
 </button>
 
 <style>
+	/* A label longer than its place ends in an ellipsis; the title holds the whole of it. */
+	.src {
+		max-width: 100%;
+	}
+	.lbl {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
 	/* A chip with no words is only its icon: still a 24 px target. */
 	.bare {
 		min-width: 24px;

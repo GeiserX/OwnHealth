@@ -220,7 +220,7 @@
 										{#each ROLES as r (r)}<option value={r}>{t('r_' + r)}</option>{/each}
 									</select>
 								</td>
-								<td class="muted"><span class="num" style="white-space:nowrap">{g.expires_at ? day(g.expires_at) : t('i2_never')}</span></td>
+								<td class="muted" data-label={t('i2_t_exp')}><span class="num" style="white-space:nowrap">{g.expires_at ? day(g.expires_at) : t('i2_never')}</span></td>
 								<td class="acts-cell" style="text-align:right">
 									<button class="btn sm no" disabled={busy} aria-expanded={confirming === key} aria-label="{t('i2_revoke')} {member(g.user_id)} · {profileName(g.profile)}" onclick={() => (confirming = key)}>{t('i2_revoke')}</button>
 								</td>
@@ -287,9 +287,8 @@
 				{#each LOCKABLE as s (s)}
 					{@const locked = (p.locks ?? []).includes(s)}
 					<div class="set">
-						<Switch on={locked} label="{t('i2_lock')} {scopeText(s)} · {p.display_name}" disabled={busy} onchange={(on) => toggleLock(p.slug, p.locks ?? [], s, on)} />
+						<Switch on={locked} label="{t('i2_lock')} {scopeText(s)} · {p.display_name}" words={[t('i2_lock_on'), t('i2_lock_off')]} disabled={busy} onchange={(on) => toggleLock(p.slug, p.locks ?? [], s, on)} />
 						<div style="flex:1;min-width:0"><div>{scopeText(s)}</div><div class="dim mono" style="font-size:10.5px">{s}</div></div>
-						<span class="dim" style="font-size:11px">{locked ? t('i2_locked_w') : ''}</span>
 					</div>
 				{/each}
 				<div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:10px 0 2px">{t('st_data')}</div>

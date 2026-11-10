@@ -35,7 +35,7 @@
 	import UploadPanel from '#lib/components/pages2/UploadPanel.svelte';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
-	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
 	import { app, currentProfile } from '#lib/state/app.svelte';
 
 	const THRESHOLD = 0.95;
@@ -248,7 +248,7 @@
 	const tiles = $derived([
 		{ k: 'i2_in_lab', d: latest('import.pdf'), doc: latestDoc('lab_report'), n: count('candidate_row', 'document_identity', 'amended_report', 'pending_document') },
 		// An Apple Health export goes straight in; nothing from it waits for review.
-		{ k: 'i2_in_apple', d: latest('import.apple_health'), n: 0 },
+		{ k: 'i2_in_apple', d: latest('import.apple_health'), doc: (queue.data?.docs ?? []).find((x) => x.flags?.apple_health) ?? null, n: 0 },
 		{ k: 'i2_in_fhir', d: latest('import.fhir_bundle'), n: count('fhir_unmapped') },
 		{ k: 'i2_in_genome', d: latest('import.genome_facts'), doc: latestDoc('genomics'), n: count('genome_reinterpretation') },
 		{ k: 'i2_in_agent', d: null, n: count('agent_proposal'), sub: 'write:propose' },
@@ -395,7 +395,7 @@
 					{#if picked.length}<button class="btn sm ok" onclick={acceptPicked} disabled={busy}>{tf('i2_accept_sel', { n: picked.length })}</button>{/if}
 					<!-- A document with nothing left to decide offers neither: there is nothing to accept or withdraw here. -->
 					{#if rows.length}
-						<button class="btn sm" onclick={() => docId && act(() => bulkAccept(docId, THRESHOLD))} disabled={busy || !bulkable} title={t('i2_bulk_d')}>{t('i2_bulk')} ≥ {THRESHOLD.toFixed(2)}</button>
+						<button class="btn sm" onclick={() => docId && act(() => bulkAccept(docId, THRESHOLD))} disabled={busy || !bulkable} title={t('i2_bulk_d')}>{t('i2_bulk')} ≥ {fmtNum(THRESHOLD, 2)}</button>
 						<button class="btn sm no" onclick={() => (rejectingDoc = !rejectingDoc)} aria-expanded={rejectingDoc}>{t('i2_reject_doc')}</button>
 					{/if}
 				</span>
@@ -505,7 +505,7 @@
 								{#if it.document_id}<a class="btn sm" href={documentFileUrl(it.document_id)} target="_blank" rel="noopener">{t('i2_open_doc')}</a>{/if}
 								{#if entering === it.id}
 									<button class="btn sm pri" onclick={() => doneEntering(it)} disabled={busy || !enteredIds.length}>{t('me_done')}</button>
-									<button class="btn sm" onclick={() => enter(null)}>{t('i2_cancel')}</button>
+									<button class="btn sm" onclick={() => enter(null)} aria-expanded="true">{t('h1_close')}</button>
 								{:else}
 									<button class="btn sm pri" onclick={() => enter(it.id)} aria-expanded="false">{t('me_enter')}</button>
 								{/if}
@@ -650,6 +650,17 @@
 			color: var(--text);
 			font-size: 12.5px;
 			font-weight: 560;
+		}
+		/* A stacked row is one block: its buttons take the full width (right-aligned), and the agent
+		   tint covers the whole row, not each stacked cell. */
+		.others td.acts-cell {
+			width: 100%;
+		}
+		tr.agent {
+			background: rgba(110, 168, 254, 0.05);
+		}
+		tr.agent td {
+			background: none;
 		}
 	}
 	a.lnkt {

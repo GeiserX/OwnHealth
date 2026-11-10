@@ -26,6 +26,19 @@ const PATTERNS: [RegExp, string][] = [
 	[/demo never reads the inbox folder/i, 'err_demo_folder']
 ];
 
+// The browser's WebAuthn refusals (a DOMException name), which it words in its own language.
+const BROWSER: Record<string, string> = {
+	SecurityError: 'wa_security',
+	NotAllowedError: 'wa_not_allowed',
+	InvalidStateError: 'wa_invalid_state',
+	AbortError: 'wa_abort'
+};
+
+/** Our code for a browser error name ('SecurityError' → 'wa_security'), or null. */
+export function browserErrorCode(name: string): string | null {
+	return BROWSER[name] ?? null;
+}
+
 /** The message without a leading exception name ('ImapError: connect: …' → 'connect: …'). */
 export function stripErrorName(message: string): string {
 	return message.replace(/^\s*\w*(Error|Exception):\s*/, '');

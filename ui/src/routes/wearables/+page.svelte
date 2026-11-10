@@ -175,13 +175,13 @@
 				{:else}
 					<div class="empty">{t('h1_nomark')}</div>
 				{/if}
-				<div style="display:flex;justify-content:space-between;margin-top:2px">
+				<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-top:2px">
 					{#if m.source}
 						<span class="src" style="cursor:default"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4" /></svg>{m.source}</span>
 					{:else}
 						<span class="dim" style="font-size:11px">{t('h1_several_src')}</span>
 					{/if}
-					<span class="dim" style="font-size:11px">
+					<span class="dim" style="font-size:11px;text-align:right">
 						{#if m.metric === 'vo2max'}{t('h1_estimate')}{:else if c?.missing}{tp('h1_missing', c.missing)}{:else if c}{tf('h1_cov_pct', { n: fmtNum(c.coverage, 0) })}{/if}
 					</span>
 				</div>

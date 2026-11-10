@@ -4,7 +4,7 @@ import { i18n, t } from '#lib/i18n/index.svelte';
 import { dict } from '#lib/i18n/dict';
 import { latestRunner } from '#lib/logic/loader';
 import { pluralKey } from '#lib/logic/plural';
-import { errKey, stripErrorName } from '#lib/logic/errors';
+import { browserErrorCode, errKey, stripErrorName } from '#lib/logic/errors';
 
 export { unitLabel } from '#lib/logic/format';
 
@@ -51,7 +51,7 @@ export function errRaw(e: unknown): string {
  * refused, DNS, TLS, a duplicate, an unsupported file…), else the server's own message. Logic in #lib/logic/errors.
  */
 export function errText(e: unknown): string {
-	const code = e instanceof ApiError ? e.code : null;
+	const code = e instanceof ApiError ? e.code : e instanceof Error ? browserErrorCode(e.name) : null;
 	const raw = errRaw(e);
 	const key = errKey(code, raw, (k) => k in dict.en);
 	if (key) return t(key);

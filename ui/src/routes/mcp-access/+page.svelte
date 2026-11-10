@@ -156,8 +156,8 @@
 									<td><b>{x.label}</b><div class="dim mono" style="font-size:10.5px">{x.prefix}…</div></td>
 									<td>{x.profiles.map(name).join(', ')}</td>
 									<td>{#each x.scopes as s (s)}<span class="chip mono {tone(s)}" title={scopeText(s)}>{s}</span> {/each}</td>
-									<td><span class="num" style="white-space:nowrap">{ago(x.last_used_at)}</span></td>
-									<td><span class="num" style="white-space:nowrap">{x.expires_at ? day(x.expires_at) : t('i2_never')}</span></td>
+									<td data-label={t('i2_t_last')}><span class="num" style="white-space:nowrap">{ago(x.last_used_at)}</span></td>
+									<td data-label={t('i2_t_exp')}><span class="num" style="white-space:nowrap">{x.expires_at ? day(x.expires_at) : t('i2_never')}</span></td>
 									<td class="acts-cell" style="text-align:right">
 										<button class="btn sm no" disabled={busy} aria-expanded={confirming === x.id} onclick={() => (confirming = x.id)} aria-label="{t('i2_revoke')} {x.label}">{t('i2_revoke')}</button>
 									</td>
@@ -285,7 +285,7 @@
 			<h3>{t('i2_tools')}<span class="r">{t('i2_tools_d')}</span></h3>
 			{#each TOOLS as x, i (x.name)}
 				<div class="tool">
-					<span class="dim num" style="width:14px">{i + 1}</span><code class="mono">{x.name}</code>
+					<span class="dim num" style="flex:none;width:18px">{i + 1}</span><code class="mono" style="flex:none">{x.name}</code>
 					<span class="dim need">
 						{#if x.any}{t('i2_tool_anyof') + ' '}{/if}{#each x.scopes as s, k (s)}{k ? ' · ' : ''}<span title={scopeText(s)}>{s}</span>{/each}{#if x.note}{(x.scopes.length ? ' · ' : '') + tf(x.note[0], x.note[1] ?? {})}{/if}
 					</span>
