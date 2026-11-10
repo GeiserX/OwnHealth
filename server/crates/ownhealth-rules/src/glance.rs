@@ -166,11 +166,24 @@ fn marker_row(m: &Marker, spec: &Map<String, Value>, pack: &Pack, lang: &str, so
     }
     let Some(p) = m.latest() else { return Value::Null };
     let spark_n = usize::try_from(int(pack.dashboard.get("spark_points")).unwrap_or(9)).unwrap_or(9);
+    // every point in the newest one's unit; one in an equivalent notation (10^3/µL, 10^9/L) is
+    // converted, the way get_trend draws it, and one that does not convert is left out
     let spark_unit = p.comparable_unit();
-    let points: Vec<_> = m
+    let points: Vec<Option<Decimal>> = m
         .points
         .iter()
-        .filter(|x| x.comparable().is_some() && x.comparable_unit() == spark_unit)
+        .filter_map(|x| {
+            let v = x.comparable()?;
+            let u = x.comparable_unit();
+            if u == spark_unit {
+                return Some(Some(v));
+            }
+            let (from, to) = (u.filter(|s| !s.is_empty())?, spark_unit.filter(|s| !s.is_empty())?);
+            ownhealth_normalize::convert(v, from, to, &m.key)
+                .ok()
+                .flatten()
+                .map(Some)
+        })
         .collect();
     let points = &points[points.len().saturating_sub(spark_n)..];
     json!({
@@ -183,7 +196,7 @@ fn marker_row(m: &Marker, spec: &Map<String, Value>, pack: &Pack, lang: &str, so
         "date": iso(p.date),
         "src": p.src,
         "src_label": p.src_label,
-        "spark": points.iter().map(|x| f(x.comparable())).collect::<Vec<_>>(),
+        "spark": points.iter().map(|x| f(*x)).collect::<Vec<_>>(),
         "band": band(m),
         "rule": m.rule,
     })

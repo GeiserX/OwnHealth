@@ -117,9 +117,21 @@ async fn normalized(
     rr: &str,
     day: &str,
 ) -> anyhow::Result<ObservationIn> {
+    normalized_as(conn, pid, "Glucosa", v, u, rr, day).await
+}
+
+async fn normalized_as(
+    conn: &mut PgConnection,
+    pid: Uuid,
+    name: &str,
+    v: &str,
+    u: &str,
+    rr: &str,
+    day: &str,
+) -> anyhow::Result<ObservationIn> {
     let row = RowIn {
         profile_id: pid,
-        printed_name: "Glucosa",
+        printed_name: name,
         printed_value: v,
         printed_unit: Some(u),
         printed_range: Some(rr),
@@ -190,6 +202,40 @@ async fn si_range_is_converted_to_the_spark_unit() -> R {
             "{}",
             r["band"]
         );
+    }
+    Ok(())
+}
+
+/// 10^3/µL and 10^9/L are the same count: a new report in the other notation keeps the history.
+#[tokio::test]
+async fn the_spark_keeps_history_across_equivalent_units() -> R {
+    common::install_fake_genome();
+    let db = TestDb::new().await?;
+    let mut tx = db.pool.begin().await?;
+    let pid = create_rivera_family(&mut tx, "Rivera").await?.profile("alex");
+    // each value kept in its own canonical notation, as the demo seed and older imports store it
+    for (v, u, ucum, day) in [
+        ("244", "x10^9/L", "10*9/L", "2026-03-01"),
+        ("276", "x10^3/µL", "10*3/uL", "2026-09-01"),
+    ] {
+        let mut o = normalized_as(&mut tx, pid, "Plaquetas", v, u, "150-400", day).await?;
+        o.value_canonical = Some(dec(v));
+        o.unit_canonical = Some(ucum.into());
+        add(&mut tx, &o, pid).await?;
+    }
+    let d = dashboard(
+        &mut tx,
+        pid,
+        NaiveDate::from_ymd_opt(2026, 10, 1).unwrap_or_default(),
+        "en",
+        &all_scopes(),
+    )
+    .await?;
+    let mut rows = Vec::new();
+    rows_of(&d, "platelets", &mut rows);
+    assert!(!rows.is_empty());
+    for r in rows {
+        assert_eq!(r["spark"], json!([244.0, 276.0]));
     }
     Ok(())
 }
