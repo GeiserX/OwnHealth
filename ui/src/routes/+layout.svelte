@@ -65,8 +65,17 @@
 	}
 	// After a click in the views, the open view is visible in that row, and focus moves to the page, so a
 	// screen reader announces it and Tab starts from its content.
+	// Only the row scrolls, never through scrollIntoView: that moves the browser's Tab starting point to
+	// the link, so the first Tab after a load would skip the skip link and the profile switcher. A
+	// sidebar that is a column (desktop, tablet) does not scroll sideways and is left alone.
 	function showActiveView() {
-		document.querySelector('nav.menu a.on')?.scrollIntoView({ inline: 'center', block: 'nearest' });
+		const el = sideEl;
+		const a = el?.querySelector<HTMLElement>('nav.menu a.on');
+		if (el && a && el.scrollWidth > el.clientWidth) {
+			const r = a.getBoundingClientRect();
+			const box = el.getBoundingClientRect();
+			el.scrollLeft += r.left + r.width / 2 - (box.left + box.width / 2);
+		}
 		measureSide();
 	}
 	// The profiles arrive after the first paint and push the views to the right: centre again then.

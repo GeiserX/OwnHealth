@@ -13,7 +13,16 @@
 		busy = false
 	}: { text: string; confirmLabel: string; onconfirm: () => void; oncancel: () => void; busy?: boolean } = $props();
 	let cancelEl: HTMLButtonElement | undefined = $state();
-	onMount(() => cancelEl?.focus());
+	let root: HTMLDivElement | undefined = $state();
+	// The button that opened this row, so Cancel or Escape hands focus back to it, as focusOnOpen does.
+	const opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+	onMount(() => {
+		cancelEl?.focus();
+		return () => {
+			const a = document.activeElement;
+			if (opener?.isConnected && (!a || a === document.body || root?.contains(a))) opener.focus();
+		};
+	});
 	function onKey(e: KeyboardEvent) {
 		if (e.key !== 'Escape') return;
 		e.preventDefault();
@@ -23,7 +32,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div class="confirm" role="group" aria-label={text} onkeydown={onKey}>
+<div class="confirm" role="group" aria-label={text} onkeydown={onKey} bind:this={root}>
 	<span class="txt">{text}</span>
 	<span class="acts">
 		<button type="button" class="btn sm" bind:this={cancelEl} onclick={oncancel}>{t('i2_cancel')}</button>
