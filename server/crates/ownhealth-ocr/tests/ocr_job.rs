@@ -728,3 +728,40 @@ async fn a_photo_moved_to_another_profile_is_read_again_for_it() -> anyhow::Resu
     assert_eq!(state(&mut c, doc).await?, "done");
     Ok(())
 }
+
+/// Dedup level 2 positive control: once OCR has read a scan's words, a scan of a report we hold
+/// matches it on its page fingerprints, and a scan of another report from the same template does not.
+/// (On import the edition link wins over the "probably the same" flag; this pins the match under it.)
+#[tokio::test]
+async fn a_scan_of_a_report_we_hold_matches_it_once_ocr_reads_it() -> anyhow::Result<()> {
+    let _turn = TURN.lock().await;
+    let e = setup().await?;
+    let mut c = e.conn().await?;
+    let lay = generate::layouts().remove(0);
+    let (pdf, truth) = generate::render(&lay, None);
+    let person = truth["person"].as_str().unwrap_or("alex");
+    let original = e.store(&mut c, &pdf, person, "application/pdf", "informe.pdf").await?;
+    ownhealth_ingest_pdf::import_pdf(&mut c, &e.blobs, original, false).await?;
+
+    reader_on(&pdf, 0.99);
+    let same = import_with_ocr(&e, &mut c, &scan(&pdf), "application/pdf", person).await?;
+    let near = ownhealth_core::dedup::find_near_duplicate(&mut c, same).await?;
+    assert_eq!(near.map(|n| n.document_id), Some(original));
+
+    // next month's report from the same lab: the same layout, other values, date and sample
+    let (next, _) = generate::render(
+        &generate::Layout {
+            seed: lay.seed + 7,
+            collected: "2026-10-14",
+            sample: "S-0002".into(),
+            ..lay.clone()
+        },
+        None,
+    );
+    reader_on(&next, 0.99);
+    let other = import_with_ocr(&e, &mut c, &scan(&next), "application/pdf", person).await?;
+    use_reader(None);
+    let near = ownhealth_core::dedup::find_near_duplicate(&mut c, other).await?;
+    assert_eq!(near.map(|n| n.document_id), None, "another report is not the same");
+    Ok(())
+}
