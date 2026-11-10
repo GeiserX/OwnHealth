@@ -1,16 +1,25 @@
 //! Lane B: the watched folder (ingestion.md 3, connectors.md 2.1). Polling, because inotify is
 //! unreliable on SMB and NFS mounts. `<OWNHEALTH_INBOX_DIR>/<profile-slug>/<file>` goes to that
-//! profile; a file directly in the root goes to `source.profile_id`. A file is taken once nothing has
+//! profile, when the person who set the source up manages that profile (owner, or guardian of an
+//! unclaimed profile); a file in the folder of a profile they do not manage stays where it is, for the
+//! source of someone who does. A file directly in the root goes to `source.profile_id`. A file is
+//! taken once nothing has
 //! written to it for STABLE_SECONDS (its mtime and ctime, so a copy that keeps the original mtime still
 //! waits); after its document commits it moves to `<root>/.done/<slug>/`, on failure to
-//! `<root>/.failed/<slug>/` next to a `<name>.reason.txt`. The per-source dedup key is the relative
-//! path, size and mtime, so a file that could not be moved is not imported twice.
+//! `<root>/.failed/<slug>/` next to a `<name>.reason.txt`, when the failure is about the file itself.
+//! A failure of our own (the database or the blob store is down) leaves the file in place for the
+//! next poll. The per-source dedup key is the relative path, size and mtime, so a file that could not
+//! be moved is not imported twice.
 //!
 //! Hidden files, temporary downloads (`.part`, `.crdownload`, `.tmp`, `~$...`) and symlinks are
-//! skipped: a link could point anywhere the server can read. The file is opened once and checked on
-//! the open handle (same inode as the scan saw, same size and mtime), so a file swapped for a link
-//! between the scan and the read is refused, not followed. Source `config` (kind `folder`): `{}`
-//! (the root is OWNHEALTH_INBOX_DIR) or `{"subdir": "..."}`, a relative path below it.
+//! skipped: a link could point anywhere the server can read. The file is opened once, without
+//! following a link and without waiting on a pipe, and checked on the open handle (a regular file,
+//! same inode as the scan saw, same size and mtime), so a file swapped for a link or a FIFO between
+//! the scan and the read is refused, not followed. Source `config` (kind `folder`): `{}` (the root is
+//! OWNHEALTH_INBOX_DIR) or `{"subdir": "..."}`, a relative path below it. The subdir may not start
+//! with a hidden folder (`.done`, `.failed`) or a profile's folder, so a source cannot read another
+//! source's archive or another person's drops as its own root files. The demo never reads the folder:
+//! the demo stack shares `./inbox` with a real install.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -52,6 +61,13 @@ fn subdir(config: &serde_json::Value) -> Result<Option<&Path>> {
     let p = Path::new(sub);
     if !p.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(Error::Invalid("the folder subdir must be a plain relative path".into()));
+    }
+    if p.components()
+        .any(|c| c.as_os_str().to_str().is_none_or(|n| n.starts_with('.')))
+    {
+        return Err(Error::Invalid(
+            "the folder subdir may not name a hidden folder such as .done or .failed".into(),
+        ));
     }
     Ok(Some(p))
 }
@@ -125,10 +141,36 @@ fn file_id(_meta: &std::fs::Metadata) -> (u64, u64) {
     (0, 0)
 }
 
+#[cfg(unix)]
+const ELOOP: i32 = libc::ELOOP;
+#[cfg(not(unix))]
+const ELOOP: i32 = -1;
+
+/// Open for reading without following a final link and without blocking on a FIFO that has no
+/// writer (a plain `open` would hang the poll for good). A regular file ignores O_NONBLOCK.
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
 /// Read a scanned file into the blob store from one open handle. None when the handle is not the
 /// file the scan saw (swapped, for a link or anything else) or the file changed while we read it.
 fn read_stable(blobs: &BlobStore, f: &Ready) -> std::io::Result<Option<(String, u64)>> {
-    let file = std::fs::File::open(&f.path)?;
+    let file = match open_no_follow(&f.path) {
+        Ok(file) => file,
+        // a link put in its place (O_NOFOLLOW), or the file is gone: not the file the scan saw
+        Err(e) if e.raw_os_error() == Some(ELOOP) || e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
     let same = |m: &std::fs::Metadata| -> std::io::Result<bool> {
         Ok(m.is_file() && file_id(m) == f.id && m.len() == f.size && nanos(m.modified()?) == f.mtime_ns)
     };
@@ -142,15 +184,52 @@ fn read_stable(blobs: &BlobStore, f: &Ready) -> std::io::Result<Option<(String, 
     Ok(Some((sha, size)))
 }
 
+/// The metadata of one directory entry, without following a link; None when the entry went away
+/// between the listing and the look (someone moved or deleted it): the next poll sees the folder again.
+fn entry_meta(path: &Path) -> std::io::Result<Option<(std::fs::Metadata, SystemTime)>> {
+    let gone = |e: std::io::Error| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Ok(None)
+        } else {
+            Err(e)
+        }
+    };
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) => return gone(e),
+    };
+    if !meta.is_file() {
+        return Ok(Some((meta, SystemTime::UNIX_EPOCH)));
+    }
+    match last_change(&meta) {
+        Ok(t) => Ok(Some((meta, t))),
+        Err(e) => gone(e),
+    }
+}
+
+/// What one scan found.
+#[derive(Debug, Default)]
+struct Scan {
+    ready: Vec<Ready>,
+    /// Directory entries that could not be read at all.
+    unreadable: i32,
+}
+
 /// The files of `root` and its profile subfolders that have been still for `stable`, and how many
-/// are still being written.
-fn scan(root: &Path, stable: Duration) -> std::io::Result<(Vec<Ready>, i32)> {
+/// entries could not be read.
+fn scan(root: &Path, stable: Duration) -> std::io::Result<Scan> {
     let now = SystemTime::now();
-    let (mut ready, mut waiting) = (Vec::new(), 0);
+    let (mut ready, mut unreadable) = (Vec::new(), 0);
     let mut look =
         |dir: &Path, slug: Option<&str>, ready: &mut Vec<Ready>| -> std::io::Result<Vec<(PathBuf, String)>> {
             let mut subdirs = Vec::new();
-            let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
+            let mut entries = Vec::new();
+            for e in std::fs::read_dir(dir)? {
+                match e {
+                    Ok(e) => entries.push(e),
+                    Err(_) => unreadable += 1,
+                }
+            }
             entries.sort_by_key(|e| e.file_name());
             for e in entries {
                 let Some(name) = e.file_name().to_str().map(str::to_string) else {
@@ -159,7 +238,9 @@ fn scan(root: &Path, stable: Duration) -> std::io::Result<(Vec<Ready>, i32)> {
                 if skipped_name(&name) {
                     continue;
                 }
-                let meta = std::fs::symlink_metadata(e.path())?;
+                let Some((meta, changed)) = entry_meta(&e.path())? else {
+                    continue;
+                };
                 if meta.is_dir() {
                     subdirs.push((e.path(), name));
                     continue;
@@ -167,10 +248,8 @@ fn scan(root: &Path, stable: Duration) -> std::io::Result<(Vec<Ready>, i32)> {
                 if !meta.is_file() {
                     continue; // symlinks, sockets, devices
                 }
-                let changed = last_change(&meta)?;
                 if now.duration_since(changed).unwrap_or(Duration::ZERO) < stable {
-                    waiting += 1;
-                    continue;
+                    continue; // still being written
                 }
                 ready.push(Ready {
                     path: e.path(),
@@ -185,9 +264,14 @@ fn scan(root: &Path, stable: Duration) -> std::io::Result<(Vec<Ready>, i32)> {
         };
     for (dir, slug) in look(root, None, &mut ready)? {
         // one level of profile folders; deeper folders are not read
-        look(&dir, Some(&slug), &mut ready)?;
+        match look(&dir, Some(&slug), &mut ready) {
+            Ok(_) => {}
+            // the folder went away between the two listings
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
     }
-    Ok((ready, waiting))
+    Ok(Scan { ready, unreadable })
 }
 
 /// A free path for `name` in `dir`: `name`, else `stem-1.ext`, `stem-2.ext`, ...
@@ -232,28 +316,65 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> std::io::Result<T> + Se
         .map_err(Error::from)
 }
 
-async fn profile_for(pool: &PgPool, source: &Source, slug: Option<&str>) -> Result<Uuid> {
-    match slug {
-        None => source
+/// Where a file goes.
+enum Route {
+    Profile(Uuid),
+    /// A profile folder of someone the source's creator does not manage: left for their own source.
+    NotManaged,
+}
+
+/// The profile a file goes to: the source's profile for a root file, else the profile named by the
+/// folder, when the person who set the source up still manages it (the same right the Paperless tag
+/// and sender rules need).
+async fn profile_for(pool: &PgPool, source: &Source, slug: Option<&str>) -> Result<Route> {
+    let Some(s) = slug else {
+        return source
             .profile_id
-            .ok_or_else(|| Error::Invalid("a file in the root needs a profile folder (no default profile)".into())),
-        Some(s) => {
-            let id: Option<Uuid> = sqlx::query_scalar("select id from profile where household_id = $1 and slug = $2")
-                .bind(source.household_id)
-                .bind(s)
-                .fetch_optional(pool)
-                .await?;
-            id.ok_or_else(|| Error::Invalid("the folder name is not a profile of this household".into()))
-        }
+            .map(Route::Profile)
+            .ok_or_else(|| Error::Invalid("a file in the root needs a profile folder (no default profile)".into()));
+    };
+    let row: Option<(Uuid, bool)> = sqlx::query_as(
+        "select p.id, exists (select 1 from profile_grant g where g.profile_id = p.id and g.user_id = $3 \
+         and (g.expires_at is null or g.expires_at > now()) \
+         and (g.role = 'owner' or (g.role = 'guardian' and p.user_id is null))) \
+         from profile p where p.household_id = $1 and p.slug = $2",
+    )
+    .bind(source.household_id)
+    .bind(s)
+    .bind(source.created_by)
+    .fetch_optional(pool)
+    .await?;
+    match row {
+        Some((id, true)) => Ok(Route::Profile(id)),
+        Some((_, false)) => Ok(Route::NotManaged),
+        None => Err(Error::Invalid(
+            "the folder name is not a profile of this household".into(),
+        )),
     }
 }
 
-/// What happened to one file: arrived (or a file that changed while we read it: None, retried).
-async fn take(pool: &PgPool, blobs: &BlobStore, source: &Source, f: &Ready) -> Result<Option<Arrived>> {
-    let profile_id = profile_for(pool, source, f.slug.as_deref()).await?;
+/// Our own failure (database, disk, blob store), not the file's: leave the file for the next poll.
+fn transient(e: &Error) -> bool {
+    matches!(e, Error::Db(_) | Error::Io(_) | Error::Other(_))
+}
+
+/// What became of one file.
+enum Taken {
+    Arrived(Arrived),
+    /// Changed while we read it, or not ours to route: left in place.
+    Left,
+    NotManaged,
+}
+
+/// What happened to one file.
+async fn take(pool: &PgPool, blobs: &BlobStore, source: &Source, f: &Ready) -> Result<Taken> {
+    let profile_id = match profile_for(pool, source, f.slug.as_deref()).await? {
+        Route::Profile(id) => id,
+        Route::NotManaged => return Ok(Taken::NotManaged),
+    };
     let (b, g) = (blobs.clone(), f.clone());
     let Some((sha, size)) = blocking(move || read_stable(&b, &g)).await? else {
-        return Ok(None);
+        return Ok(Taken::Left);
     };
     let key = f.key();
     let mut tx = pool.begin().await?;
@@ -276,7 +397,7 @@ async fn take(pool: &PgPool, blobs: &BlobStore, source: &Source, f: &Ready) -> R
     )
     .await?;
     tx.commit().await?;
-    Ok(Some(a))
+    Ok(Taken::Arrived(a))
 }
 
 /// One pass over a folder. `stable` is how long a file must be untouched (STABLE_SECONDS in
@@ -298,13 +419,41 @@ pub async fn poll_root(
         ));
     }
     let dir = root.to_path_buf();
-    let (ready, _waiting) = blocking(move || scan(&dir, stable)).await?;
+    let found = blocking(move || scan(&dir, stable)).await?;
     let mut out = RunOutcome::default();
+    if found.unreadable > 0 {
+        out.problems.push(RunProblem {
+            code: "entry_unreadable".into(),
+            message: format!("{} folder entries could not be read", found.unreadable),
+        });
+    }
     let mut stuck: Option<(usize, String)> = None;
-    for f in ready {
+    let mut not_managed: Vec<String> = Vec::new();
+    for f in found.ready {
         let failed = match take(pool, blobs, source, &f).await {
-            Ok(None) => continue,
-            Ok(Some(a)) => {
+            Ok(Taken::Left) => continue,
+            Ok(Taken::NotManaged) => {
+                let slug = f.bucket().to_string();
+                if !not_managed.contains(&slug) {
+                    out.problems.push(RunProblem {
+                        code: "folder_not_managed".into(),
+                        message: format!(
+                            "files in {slug}/ were left in place: whoever set up this source does not manage that profile"
+                        ),
+                    });
+                    not_managed.push(slug);
+                }
+                continue;
+            }
+            Err(e) if transient(&e) => {
+                out.seen += 1;
+                out.problems.push(RunProblem {
+                    code: "file_retry".into(),
+                    message: format!("{e}; left in place for the next poll"),
+                });
+                continue;
+            }
+            Ok(Taken::Arrived(a)) => {
                 out.seen += 1;
                 match a {
                     Arrived::Queued { .. } => {
@@ -345,9 +494,52 @@ pub async fn poll_root(
     }
 }
 
+/// A subdir must not lead (through a link on the share either) into a hidden folder or a profile's
+/// folder of the inbox: its files would count as this source's root files and go to its profile.
+async fn check_root(pool: &PgPool, settings: &Settings, source: &Source, root: &Path) -> Result<()> {
+    if subdir(&source.config)?.is_none() {
+        return Ok(());
+    }
+    let (base, dir) = (settings.inbox_dir.clone(), root.to_path_buf());
+    let first: Option<String> = blocking(move || {
+        let (Some(base), Ok(dir)) = (base, dir.canonicalize()) else {
+            return Ok(None);
+        };
+        let base = base.canonicalize()?;
+        Ok(match dir.strip_prefix(&base) {
+            Ok(rel) => rel
+                .components()
+                .next()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+            // a link out of the inbox folder altogether
+            Err(_) => Some(".".into()),
+        })
+    })
+    .await?;
+    let Some(first) = first else { return Ok(()) };
+    let slug_taken: bool =
+        sqlx::query_scalar("select exists (select 1 from profile where household_id = $1 and slug = $2)")
+            .bind(source.household_id)
+            .bind(&first)
+            .fetch_one(pool)
+            .await?;
+    if first.starts_with('.') || slug_taken {
+        return Err(Error::Invalid(
+            "the folder subdir leads into a hidden folder, a profile's folder or out of the inbox folder".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The `folder` poller.
 pub async fn poll_folder(ctx: JobContext, source: Source) -> std::result::Result<RunOutcome, JobError> {
+    if ctx.settings.demo {
+        return Err(JobError::permanent(
+            "the demo never reads the inbox folder: it shares ./inbox with a real install",
+        ));
+    }
     let root = root(&ctx.settings, &source)?;
+    check_root(&ctx.pool, &ctx.settings, &source, &root).await?;
     Ok(poll_root(
         &ctx.pool,
         &ctx.blobs,
@@ -360,16 +552,21 @@ pub async fn poll_folder(ctx: JobContext, source: Source) -> std::result::Result
 
 /// Demo data (RUST-CONTRACTS 10.6, order 1020): the household's scanner folder. It is never polled:
 /// the demo stack shares the checkout's `./inbox` with a real install, and a polling demo source
-/// would take the real household's files (and move them to `.failed`).
+/// would take the real household's files (and move them to `.failed`). It is off, so "Sync now" is
+/// off too, and `poll_folder` refuses to run in the demo even if someone turns it on.
 async fn seed_demo(conn: &mut sqlx::PgConnection, ctx: &mut ownhealth_core::demo::DemoContext) -> Result<()> {
-    ownhealth_core::sources::create_source(
-        conn,
+    let id = ownhealth_core::sources::create_source(
+        &mut *conn,
         &ownhealth_core::sources::NewSource {
             poll_seconds: None,
             ..ownhealth_core::sources::NewSource::new(ctx.family.household_id, "folder", "Escáner del salón")
         },
     )
     .await?;
+    sqlx::query("update source set enabled = false where id = $1")
+        .bind(id)
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -417,8 +614,8 @@ mod tests {
         let secret = d.path().join("secret.txt");
         std::fs::write(&secret, b"clave-sintetica-0001")?;
         std::fs::write(inbox.join("scan.pdf"), b"%PDF-1.7 informe-0001")?;
-        let (ready, _) = scan(&inbox, Duration::ZERO)?;
-        let mut f = ready
+        let mut f = scan(&inbox, Duration::ZERO)?
+            .ready
             .into_iter()
             .next()
             .ok_or_else(|| std::io::Error::other("not scanned"))?;
@@ -430,6 +627,54 @@ mod tests {
         std::os::unix::fs::symlink(&secret, &f.path)?;
         assert_eq!(read_stable(&blobs, &f)?, None);
         Ok(())
+    }
+
+    /// A FIFO with no writer put in place of a scanned file: a blocking open would hang the poll
+    /// for good. The read must give up at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_swapped_for_a_fifo_after_the_scan_does_not_hang_the_poll() -> std::io::Result<()> {
+        let d = tempfile::tempdir()?;
+        let blobs = BlobStore::new(d.path().join("blobs"))?;
+        let inbox = d.path().join("inbox");
+        std::fs::create_dir_all(&inbox)?;
+        std::fs::write(inbox.join("scan.pdf"), b"%PDF-1.7 informe-0002")?;
+        let f = scan(&inbox, Duration::ZERO)?
+            .ready
+            .into_iter()
+            .next()
+            .ok_or_else(|| std::io::Error::other("not scanned"))?;
+        std::fs::remove_file(&f.path)?;
+        let status = std::process::Command::new("mkfifo").arg(&f.path).status()?;
+        assert!(status.success(), "mkfifo");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_stable(&blobs, &f).map_err(|e| e.to_string()));
+        });
+        let got = rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| std::io::Error::other("the read hung on the FIFO"))?;
+        assert_eq!(got, Ok(None));
+        Ok(())
+    }
+
+    #[test]
+    fn an_entry_that_vanished_after_the_listing_is_skipped() -> std::io::Result<()> {
+        let d = tempfile::tempdir()?;
+        assert!(entry_meta(&d.path().join("gone.pdf"))?.is_none());
+        std::fs::write(d.path().join("here.pdf"), b"x")?;
+        assert!(entry_meta(&d.path().join("here.pdf"))?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn a_subdir_may_not_name_a_hidden_folder() {
+        for bad in [".done/ortega", ".failed", "scans/.done", "../etc", "/etc"] {
+            assert!(check_config(&serde_json::json!({"subdir": bad})).is_err(), "{bad}");
+        }
+        for ok in ["escaner", "casa/escaner"] {
+            assert!(check_config(&serde_json::json!({"subdir": ok})).is_ok(), "{ok}");
+        }
     }
 
     #[test]

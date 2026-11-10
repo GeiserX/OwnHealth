@@ -53,6 +53,8 @@ async fn env(default_profile: Option<&str>) -> anyhow::Result<Env> {
         &NewSource {
             profile_id: default_profile.map(|p| fam.profile(p)),
             poll_seconds: Some(folder::DEFAULT_POLL_SECONDS),
+            // Alex owns his profile and guards Lucía's; he only views Sam's
+            created_by: Some(fam.user("alex")),
             ..NewSource::new(fam.household_id, "folder", "Escáner del salón")
         },
     )
@@ -265,10 +267,141 @@ async fn the_demo_folder_source_never_polls_even_with_an_inbox_dir() -> R {
             .fetch_all(&db.pool)
             .await?;
     assert_eq!(rows, vec![("folder".into(), None)]);
+    let enabled: bool = sqlx::query_scalar("select enabled from source where kind = 'folder'")
+        .fetch_one(&db.pool)
+        .await?;
+    assert!(!enabled, "the demo folder source is off, so Sync now is off too");
     let mut c = db.pool.acquire().await?;
     let due: i64 = sqlx::query_scalar("select count(*) from source where poll_seconds is not null and kind = 'folder'")
         .fetch_one(&mut *c)
         .await?;
     assert_eq!(due, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn sync_now_on_a_demo_folder_source_leaves_the_real_inbox_alone() -> R {
+    let e = env(Some("alex")).await?;
+    let alex = e.inbox.join("alex");
+    std::fs::create_dir_all(&alex)?;
+    std::fs::write(alex.join("informe.pdf"), pdf("LN-D1"))?;
+    std::fs::write(e.inbox.join("suelto.pdf"), pdf("LN-D2"))?;
+    let dir = tempfile::tempdir()?;
+    let mut settings = e.db.settings(dir.path())?;
+    settings.inbox_dir = Some(e.inbox.clone());
+    settings.demo = true;
+    let ctx = JobContext::new(e.db.pool.clone(), Arc::new(settings), e.blobs.clone());
+    // the job "Sync now" queues, on an enabled source
+    folder::register();
+    sources::register();
+    let mut c = e.db.pool.acquire().await?;
+    sources::enqueue_poll(&mut c, e.source.id).await?;
+    drop(c);
+    let kinds = [sources::POLL_JOB.to_string()];
+    assert!(
+        ownhealth_core::jobs::run_one(&ctx, "core", Some(&kinds))
+            .await?
+            .is_some()
+    );
+    // refused before the folder is even listed (the files here are too fresh to be taken anyway, so
+    // the refusal is what this checks)
+    let (status, error): (String, Option<String>) =
+        sqlx::query_as("select status, error from source_run where source_id = $1 order by id desc limit 1")
+            .bind(e.source.id)
+            .fetch_one(&e.db.pool)
+            .await?;
+    assert_eq!(status, "error");
+    assert!(error.as_deref().is_some_and(|m| m.contains("demo")), "{error:?}");
+    assert_eq!(files_in(&alex), ["informe.pdf"]);
+    assert!(e.inbox.join("suelto.pdf").exists());
+    assert!(!e.inbox.join(".failed").exists() && !e.inbox.join(".done").exists());
+    let docs: i64 = sqlx::query_scalar("select count(*) from document")
+        .fetch_one(&e.db.pool)
+        .await?;
+    assert_eq!(docs, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn files_for_a_profile_the_creator_does_not_manage_stay_in_place() -> R {
+    let e = env(Some("alex")).await?;
+    let sam = e.inbox.join("sam");
+    std::fs::create_dir_all(&sam)?;
+    std::fs::write(sam.join("analitica.pdf"), pdf("LN-S1"))?;
+    let o = poll_root(&e.db.pool, &e.blobs, &e.source, &e.inbox, Duration::ZERO).await?;
+    assert_eq!((o.seen, o.new), (0, 0), "{o:?}");
+    assert_eq!(
+        o.problems.iter().map(|p| p.code.as_str()).collect::<Vec<_>>(),
+        ["folder_not_managed"]
+    );
+    assert_eq!(files_in(&sam), ["analitica.pdf"]);
+    let docs: i64 = sqlx::query_scalar("select count(*) from document")
+        .fetch_one(&e.db.pool)
+        .await?;
+    assert_eq!(docs, 0);
+    Ok(())
+}
+
+/// Set the mode of `dir` and every folder below it.
+#[cfg(unix)]
+fn chmod_tree(dir: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for e in std::fs::read_dir(dir)? {
+        let e = e?;
+        if e.file_type()?.is_dir() {
+            chmod_tree(&e.path(), mode)?;
+        }
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode))
+}
+
+/// The blob store cannot be written (a full disk, as when the database is down): our failure, not
+/// the file's. The file stays for the next poll instead of going to `.failed` for good.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failure_of_our_own_leaves_the_file_for_the_next_poll() -> R {
+    let e = env(Some("alex")).await?;
+    std::fs::write(e.inbox.join("informe.pdf"), pdf("LN-T1"))?;
+    let blobs = e._dir.path().join("blobs");
+    chmod_tree(&blobs, 0o555)?;
+    let o = poll_root(&e.db.pool, &e.blobs, &e.source, &e.inbox, Duration::ZERO).await;
+    chmod_tree(&blobs, 0o755)?;
+    let o = o?;
+    assert_eq!((o.seen, o.new), (1, 0), "{o:?}");
+    assert_eq!(o.problems[0].code, "file_retry", "{o:?}");
+    assert!(e.inbox.join("informe.pdf").exists());
+    assert!(!e.inbox.join(".failed").exists());
+    let o = poll_root(&e.db.pool, &e.blobs, &e.source, &e.inbox, Duration::ZERO).await?;
+    assert_eq!((o.seen, o.new), (1, 1), "{o:?}");
+    assert_eq!(files_in(&e.inbox.join(".done/_root")), ["informe.pdf"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_subdir_cannot_lead_into_a_profile_folder_or_an_archive() -> R {
+    let e = env(Some("alex")).await?;
+    let carmen = e.inbox.join("carmen");
+    std::fs::create_dir_all(&carmen)?;
+    std::fs::write(carmen.join("informe.pdf"), pdf("LN-C1"))?;
+    std::fs::create_dir_all(e.inbox.join("escaner"))?;
+    let dir = tempfile::tempdir()?;
+    let mut settings = e.db.settings(dir.path())?;
+    settings.inbox_dir = Some(e.inbox.clone());
+    let ctx = JobContext::new(e.db.pool.clone(), Arc::new(settings), e.blobs.clone());
+    let mut subdirs = vec!["carmen", ".done/carmen"];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&carmen, e.inbox.join("c"))?;
+        subdirs.push("c");
+    }
+    for sub in subdirs {
+        let mut s = e.source.clone();
+        s.config = json!({"subdir": sub});
+        assert!(folder::poll_folder(ctx.clone(), s).await.is_err(), "{sub}");
+    }
+    assert_eq!(files_in(&carmen), ["informe.pdf"]);
+    let mut s = e.source.clone();
+    s.config = json!({"subdir": "escaner"});
+    assert!(folder::poll_folder(ctx, s).await.is_ok());
     Ok(())
 }

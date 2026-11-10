@@ -87,6 +87,7 @@ flate2 = "1.1"
 # v0.2 inboxes (SPIKES-v0.2.md)
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+libc = "0.2"
 lopdf = { version = "=0.47.0", default-features = false }
 mail-parser = "1"
 # OCR engine: PaddleOCR PP-OCRv5 ONNX on ONNX Runtime (ort). Only the `ocr` feature of the binary builds it.

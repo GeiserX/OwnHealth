@@ -3944,6 +3944,7 @@ dependencies = [
  "chrono",
  "futures",
  "hex",
+ "libc",
  "lopdf",
  "mail-parser",
  "ownhealth-core",

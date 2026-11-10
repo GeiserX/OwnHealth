@@ -15,6 +15,9 @@ inbox/
   .failed/alex/  files that could not be imported, each with a <name>.reason.txt
 ```
 
+- A profile folder is read only for profiles the person who added the source manages (their own, or a child's they guard). A file in someone else's folder stays where it is, and the run says so: that person adds their own folder source, or the household's owner of that profile does.
+- A file goes to `.failed/` only when the file itself is the problem (a type OwnHealth does not import, a folder that is not a profile). If OwnHealth itself fails (the database restarts, the disk is full), the file stays in place and is tried again on the next poll.
+
 - It looks every 60 seconds. It polls instead of waiting for change events, because those are unreliable on SMB and NFS shares.
 - A file is taken once nothing has written to it for 10 seconds, so a half-written scan is never read.
 - PDFs and images (JPEG, PNG) go through the same path as an upload. HEIC photos are stored but not read: have the phone app save JPEG. A PDF with a text layer is read at once. A scan or photo goes to OCR when the `ocr` profile is on ([below](#scans-and-ocr)), and waits for your agent otherwise.
@@ -54,7 +57,7 @@ For a phone, a sync tool that writes into `inbox/<profile>/` (Syncthing, for exa
 
 ## 3. The folder inbox in OwnHealth
 
-In OwnHealth, open **Inbox** and add a source of kind **Watched folder**. Pick the default profile for files in the root. To watch a subfolder of `/inbox` instead of the whole folder, give its relative path.
+In OwnHealth, open **Inbox** and add a source of kind **Watched folder**. Pick the default profile for files in the root. To watch a subfolder of `/inbox` instead of the whole folder, give its relative path. It cannot start with a hidden folder (`.done`, `.failed`) or a profile's folder, so one source never reads another's archive or another person's drops. The demo never reads the folder, because it shares `./inbox` with your real install.
 
 ## 4. Check it
 
