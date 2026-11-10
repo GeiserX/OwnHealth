@@ -10,8 +10,8 @@
 //! Reading needs `read:records`; a row with a sensitivity tag is left out without `read:sensitive`.
 //! A relative linked to their own profile shows that profile's name only when the caller can read
 //! it (`read:records` there); otherwise the row comes back masked: no name, no years, no conditions.
-//! Writing needs the role action `write`, and a masked row cannot be changed. Nothing here enters the
-//! hashed state body.
+//! Writing needs the role action `write`. A masked row can only be removed, or unlinked by a new
+//! version that holds what the caller sends. Nothing here enters the hashed state body.
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
@@ -231,12 +231,15 @@ fn src(principal: &Principal, profile_id: Uuid) -> SrcRef {
     })
 }
 
-/// A current relative of this profile that the caller may change.
+/// A current relative of this profile that the caller may change. A row linked to a profile the
+/// caller cannot read is refused unless `masked_ok`: removing it, or unlinking it with a new version
+/// that holds only what the caller sends, shows nothing of the linked profile.
 async fn editable(
     conn: &mut PgConnection,
     principal: &Principal,
     perm: &Permission,
     id: &str,
+    masked_ok: bool,
 ) -> Result<Member, ApiError> {
     let id = Uuid::parse_str(id).map_err(|_| unknown())?;
     let m = family::get(&mut *conn, id)
@@ -247,6 +250,7 @@ async fn editable(
         return Err(unknown());
     }
     if let Some(l) = m.linked_profile_id
+        && !masked_ok
         && readable(&mut *conn, principal, l).await?.is_none()
     {
         return Err(ApiError::new(
@@ -317,7 +321,8 @@ async fn update(
     let body = body_object(body)?;
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, None, Some("write")).await?;
-    let old = editable(&mut tx, &caller.0, &perm, &id).await?;
+    let unlink = body.get("linked_profile") == Some(&Value::Null);
+    let old = editable(&mut tx, &caller.0, &perm, &id, unlink).await?;
     let member = member_in(perm.profile.id, &body)?;
     let link = match body.get("linked_profile") {
         None => LinkChange::Keep,
@@ -377,7 +382,7 @@ async fn retract(
     }
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, None, Some("write")).await?;
-    let old = editable(&mut tx, &caller.0, &perm, &id).await?;
+    let old = editable(&mut tx, &caller.0, &perm, &id, true).await?;
     family::retract(&mut tx, old.id, &reason).await?;
     audit(&mut tx, &caller.0, &perm, "retract", &[old.id.to_string()]).await?;
     tx.commit().await?;

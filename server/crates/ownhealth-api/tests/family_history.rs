@@ -344,6 +344,45 @@ async fn a_caller_who_cannot_read_the_linked_profile_sees_no_name_and_no_conditi
 }
 
 #[tokio::test]
+async fn a_writer_who_cannot_read_the_linked_profile_can_still_unlink_or_remove_the_relative() -> R {
+    let a = app().await?;
+    let member = mother(&a).await?;
+    let mut c = a.db.pool.acquire().await?;
+    let cats = scope_set(["read:summary", "read:records"]);
+    set_grant(
+        &mut c,
+        a.family.user("sam"),
+        a.family.profile("alex"),
+        "caregiver",
+        Some(&cats),
+        None,
+        None,
+    )
+    .await?;
+    drop(c);
+    // unlinking is a new version with only what the writer sends: nothing of the old one shows
+    let (s, out) = send(
+        &a,
+        "sam",
+        "PUT",
+        &format!("/profiles/alex/family/{member}"),
+        Some(json!({"relationship": "MTH", "linked_profile": null})),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(
+        (&out["linked"], &out["masked"], &out["born_year"], &out["conditions"]),
+        (&json!(false), &json!(false), &Value::Null, &json!([]))
+    );
+    // a masked row can be removed outright
+    let other = mother(&a).await?;
+    let (s, out) = send(&a, "sam", "DELETE", &format!("/profiles/alex/family/{other}"), None).await?;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    assert_eq!(out["status"], "retracted");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_sensitive_relative_is_hidden_without_read_sensitive() -> R {
     let a = app().await?;
     let (s, row) = send(
