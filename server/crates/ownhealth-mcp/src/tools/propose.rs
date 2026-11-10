@@ -1256,6 +1256,8 @@ pub async fn accept_proposal(
                 "schedule_text",
                 "prescriber",
                 "codes",
+                "sensitivity",
+                "effective_at",
             ] {
                 fields.insert(k.into(), old.get(k).cloned().unwrap_or(Value::Null));
             }
@@ -1274,15 +1276,13 @@ pub async fn accept_proposal(
                 }
             }
             let new = RecordIn::Medication(serde_json::from_value(Value::Object(fields))?);
-            let c = supersede_record(
-                &mut *conn,
-                match_id,
-                &new,
-                &src,
-                "person",
-                &format!("agent proposal {action}"),
-            )
-            .await?;
+            // The agent's reason for the stop or change becomes the old version's status_reason,
+            // which the History card shows; reason_text stays why the medicine is taken.
+            let why = match str_of(&body, "reason").map(str::trim).filter(|r| !r.is_empty()) {
+                Some(r) => format!("agent proposal {action}: {r}"),
+                None => format!("agent proposal {action}"),
+            };
+            let c = supersede_record(&mut *conn, match_id, &new, &src, "person", &why).await?;
             Ok(vec![c.id])
         }
         _ => Err(Error::Review(

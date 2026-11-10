@@ -91,17 +91,24 @@ async fn change_sets_the_schedule_and_keeps_the_rest() -> R {
         &mut conn,
         "medication",
         json!({"profile_id": alex, "name": "Omeprazole", "strength": "20 mg", "started": "2026-04-01",
-               "prescriber": "Dr. Synthetic", "codes": codes}),
+               "prescriber": "Dr. Synthetic", "codes": codes, "sensitivity": ["sexual_health"],
+               "effective_at": "2026-04-01T09:00:00+00:00"}),
         alex,
     )
     .await?;
+    let old_id: Uuid =
+        sqlx::query_scalar("select id from medication_statement where profile_id = $1 and name = 'Omeprazole'")
+            .bind(alex)
+            .fetch_one(&mut *conn)
+            .await?;
     drop(conn);
     let c = w.connect(&w.tok().await?).await?;
     let changed = c
         .call_tool(
             "propose",
             json!({"profile": "alex", "kind": "medication",
-                   "payload": {"action": "change", "name": "Omeprazole", "schedule": "before breakfast", "date": "2026-11-01"}}),
+                   "payload": {"action": "change", "name": "Omeprazole", "schedule": "before breakfast", "date": "2026-11-01",
+                               "reason": "moved to the morning"}}),
         )
         .await?
         .ok();
@@ -116,5 +123,34 @@ async fn change_sets_the_schedule_and_keeps_the_rest() -> R {
             &json!("20 mg")
         )
     );
+    assert_eq!(
+        m["sensitivity"],
+        json!(["sexual_health"]),
+        "a change keeps the sensitivity flag"
+    );
+    assert!(!m["effective_at"].is_null(), "a change keeps effective_at");
+    let old = row(&w, old_id).await?;
+    assert_eq!(old["status_reason"], "agent proposal change: moved to the morning");
+
+    let stopped = c
+        .call_tool(
+            "propose",
+            json!({"profile": "alex", "kind": "medication",
+                   "payload": {"action": "stop", "name": "Omeprazole", "date": "2026-11-09",
+                               "reason": "symptoms resolved"}}),
+        )
+        .await?
+        .ok();
+    let after = accept(&w, &stopped).await?[0];
+    let m = row(&w, after).await?;
+    assert_eq!(
+        (&m["med_status"], &m["sensitivity"]),
+        (&json!("stopped"), &json!(["sexual_health"]))
+    );
+    let prev: Value = sqlx::query_scalar("select to_jsonb(m) from medication_statement m where id = (select supersedes from medication_statement where id = $1)")
+        .bind(after)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(prev["status_reason"], "agent proposal stop: symptoms resolved");
     Ok(())
 }
