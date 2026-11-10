@@ -614,7 +614,7 @@ Payload per kind:
 | `observations` | `{doc_id, rows:[{name, value, unit, range?, date, page, bbox?}]}` | LOINC resolves; UCUM unit parses and converts; value within plausible bounds for the analyte; **value grounded in the page word layer** (fuzzy, decimal-separator tolerant; gives the bbox); date inside the document's date range |
 | `note` | `{text, attach_to?: src_id\|"status", lang}` | Length cap 4k chars; stored as `author_kind: agent` |
 | `finding_status` | `{finding_id, verification?: "confirmed"\|"provisional", lifecycle?: "retracted", reason, evidence_src?}` | Finding exists; transition allowed (verification is separate from the lifecycle, section 3) |
-| `medication` | `{action: "start"\|"stop"\|"change", name, dose?, schedule?, date, reason?}` | Drug name resolves or is kept as free text with a limitation |
+| `medication` | `{action: "start"\|"stop"\|"change", name, kind?: "medication"\|"supplement", dose?, schedule?, prescriber?, date, reason?}` | Drug name resolves or is kept as free text with a limitation |
 
 Example:
 
