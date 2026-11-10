@@ -25,7 +25,7 @@ Each export holds everything Gadgetbridge has, so upload a new one whenever you 
 | Breathing rate | respiratory rate |
 | Weight (Mi Scale and other scales) | weight |
 
-Gadgetbridge writes 0 or 255 where a device measured nothing; OwnHealth drops those and other values outside a plausible range, and readings dated before 2000 or in the future (a band whose clock was never set writes 1970). The import summary counts them as `bad_time`. Sleep stages, stress, HRV and vendor scores are not imported yet. The import summary lists them by table.
+Gadgetbridge writes 0 or 255 where a device measured nothing; OwnHealth drops those and other values outside a plausible range, without a count. Readings dated before 2000 or more than a day ahead (a band whose clock was never set writes 1970) are skipped, and the import summary counts them as `bad_time`. Sleep stages, stress, HRV and vendor scores are not imported yet. The import summary lists them by table.
 
 The readings appear on the profile's **Wearables** page.
 

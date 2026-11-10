@@ -83,7 +83,7 @@ Turn it on only when your mail server adds no `Authentication-Results` and you c
 
 Many Spanish portals send PDFs locked with a password, often derived from the patient's ID document number. Add the password to the sender's rule (**PDF password**). OwnHealth tries only that sender's passwords, in the order you added them, and never a list shared by all senders. The locked original is kept, and the unlocked copy is imported with a link to it. Passwords are stored encrypted and never appear in logs or errors.
 
-Add the password before the first locked mail arrives. A locked PDF that none of the passwords opened is kept and shown in the review queue as "Locked PDF: no stored password opened it". Adding the password afterwards does not open that copy again: take the attachment from the done folder, open it with the password and upload it under **Import & review**.
+A locked PDF that none of the passwords opened is kept and shown in the review queue as "Locked PDF: no stored password opened it". When you then add the password to that sender's rule, OwnHealth opens the sender's locked PDFs still waiting in the review queue at once and imports their unlocked copies. A locked PDF you released from **Quarantine** has no sender rule, so it is not reopened: open it with the password yourself and upload it under **Import & review**.
 
 ## 6. Check it
 
