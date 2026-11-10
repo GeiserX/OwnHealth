@@ -309,6 +309,21 @@ async fn a_proposal_context_never_names_another_profiles_reads() -> R {
         (&json!([alex_doc]), &json!(["src_alex_ctx_1"])),
         "{it}"
     );
+    // the agent lists what it read in based_on, as the tool asks: another profile's src id is dropped
+    let r = c
+        .call(
+            "propose",
+            json!({"profile": "alex", "kind": "note", "based_on": ["src_sam_ctx_1", "src_alex_ctx_1"],
+                   "payload": {"text": "Comparar con el último análisis."}}),
+        )
+        .await?;
+    assert!(!r.is_error, "{}", r.raw);
+    let it = review_item(&w, r.sc["data"]["proposal_id"].as_str().unwrap_or_default()).await?;
+    assert_eq!(
+        (&it["context_src_ids"], &it["payload"]["based_on"]),
+        (&json!(["src_alex_ctx_1"]), &json!(["src_alex_ctx_1"])),
+        "{it}"
+    );
     Ok(())
 }
 

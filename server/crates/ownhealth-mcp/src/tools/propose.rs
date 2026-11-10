@@ -1001,14 +1001,31 @@ pub async fn propose(call: &mut Call<'_>) -> ToolResult<Answer> {
     let item_id = match existing {
         Some(id) => id,
         None => {
+            // only ids of this profile are kept: a token on two profiles never names the other one's
+            // documents or src ids to this profile's reviewer
             let mut docs: Vec<Uuid> = Vec::new();
+            let mut kept: Vec<String> = Vec::new();
             for b in &based_on {
-                if DOC_RE.is_match(b)
-                    && let Some(d) = find_document(call, b).await?
-                {
-                    docs.push(d.id);
+                if DOC_RE.is_match(b) {
+                    if let Some(d) = find_document(call, b).await? {
+                        docs.push(d.id);
+                        kept.push(b.clone());
+                    }
+                } else if SRC_RE.is_match(b) {
+                    let mine: bool =
+                        sqlx::query_scalar("select exists (select 1 from src where id = $1 and profile_id = $2)")
+                            .bind(b)
+                            .bind(pid)
+                            .fetch_one(&mut *call.conn)
+                            .await?;
+                    if mine {
+                        kept.push(b.clone());
+                    }
+                } else {
+                    kept.push(b.clone());
                 }
             }
+            let based_on = kept;
             if kind == "observations"
                 && let Some(d) = out.document_id
             {
