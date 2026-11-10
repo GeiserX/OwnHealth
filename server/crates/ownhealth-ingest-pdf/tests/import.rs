@@ -632,12 +632,17 @@ async fn a_locked_original_is_never_imported() -> R {
 
 /// A one-page LabNorte report for alex (synthetic), with the collection date as printed.
 fn labnorte(report_id: &str, collected: &str, rows: &[(&str, &str, &str, &str)]) -> Vec<u8> {
+    labnorte_for(("RIVERA, ALEX", "14/05/1979"), report_id, collected, rows)
+}
+
+/// The same report printed for another patient (name, birth date).
+fn labnorte_for(patient: (&str, &str), report_id: &str, collected: &str, rows: &[(&str, &str, &str, &str)]) -> Vec<u8> {
     use ownhealth_core::demo_pdf::{LabReport, LabRow, lab_report_pdf};
     lab_report_pdf(&LabReport {
         lab: "LabNorte",
         title: "Informe de laboratorio",
-        patient: "RIVERA, ALEX",
-        birth: "14/05/1979",
+        patient: patient.0,
+        birth: patient.1,
         collected,
         report_id,
         pages: vec![rows.iter().map(|(n, v, u, r)| LabRow::new(n, v, u, r)).collect()],
@@ -724,6 +729,36 @@ async fn the_same_fact_again_is_linked_and_a_date_only_one_goes_to_review() -> R
         .await?;
     let s = import_pdf(&mut c, &e.blobs, d, false).await?;
     assert_eq!(s.reasons.get("collection_time_unknown"), Some(&1), "{}", s.to_value());
+    assert_eq!(glucose_rows(&mut c).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_known_value_on_someone_elses_report_is_not_cited_without_review() -> R {
+    fake_normalizer();
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    let a = e
+        .store_pdf(&mut c, &labnorte("LN-D6", "14/09/2026 08:15", &[GLUCOSE]), "a.pdf")
+        .await?;
+    import_pdf(&mut c, &e.blobs, a, false).await?;
+    let mut rows = vec![GLUCOSE];
+    rows.extend(OTHERS);
+    // Carmen Ortega's report uploaded to alex by mistake, with the same glucose at the same time
+    let b = e
+        .store_pdf(
+            &mut c,
+            &labnorte_for(("ORTEGA, CARMEN", "02/03/1985"), "LN-D7", "14/09/2026 08:15", &rows),
+            "b.pdf",
+        )
+        .await?;
+    let s = import_pdf(&mut c, &e.blobs, b, false).await?;
+    assert_eq!(s.accepted, 0, "{}", s.to_value());
+    let links: i64 = sqlx::query_scalar("select count(*) from observation_link where document_id = $1")
+        .bind(b)
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(links, 0, "a mismatched report is never cited as a source");
     assert_eq!(glucose_rows(&mut c).await?, 1);
     Ok(())
 }

@@ -451,8 +451,16 @@ async fn import_inner(
             continue;
         }
         // dedup level 3: the same fact (analyte, specimen time, value, lab) already stored is linked,
-        // not stored twice; a maybe-same fact goes to a person
+        // not stored twice; a maybe-same fact goes to a person. Only a row that passes every check on a
+        // document of this person is cited as one more source; any other waits with the rest.
+        let clean = identity == "matched" && cand.checks.iter().all(|c| c.ok);
         match match_observation(&mut *conn, &cand.observation, provider.as_deref(), time_known).await? {
+            ObservationMatch::Same { .. } if !clean => cand.checks.push(Check {
+                name: "duplicate".into(),
+                ok: false,
+                detail: Some("the same result is already stored".into()),
+                reason: Some("duplicate".into()),
+            }),
             ObservationMatch::Same { observation_id } => {
                 let row_id = insert_candidate(&mut *conn, run_id, &cand, "confirmed", Some(observation_id)).await?;
                 let src = SrcIn {
