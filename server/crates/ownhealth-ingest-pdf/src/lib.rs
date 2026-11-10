@@ -20,7 +20,7 @@
 //! Review kinds it files: `candidate_row` (through the core), `amended_report`, `document_identity`,
 //! `pending_document`.
 
-pub mod afm;
+pub use ownhealth_core::afm;
 pub mod classify;
 pub mod extract;
 mod import;

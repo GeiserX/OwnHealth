@@ -3,6 +3,7 @@
 
 pub mod acceptance;
 pub mod access;
+pub mod afm;
 pub mod arrive;
 pub mod audit;
 pub mod blobs;
