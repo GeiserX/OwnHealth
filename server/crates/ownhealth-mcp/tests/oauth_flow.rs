@@ -290,6 +290,21 @@ async fn a_cimd_client_runs_the_whole_flow_and_calls_tools() -> R {
         (400, json!("invalid_grant"))
     );
     assert_eq!(mcp_status(&app, &access2).await?, 401);
+    // and the person can see why the app lost its access
+    let (client, via, result, args): (Option<String>, String, Option<String>, Option<String>) = sqlx::query_as(
+        "select client, via, result_kind, args_summary from audit_event where action = 'oauth_reuse_revoked'",
+    )
+    .fetch_one(&w.db.pool)
+    .await?;
+    assert_eq!(
+        (client.as_deref(), via.as_str(), result.as_deref(), args.as_deref()),
+        (
+            Some("Agente de prueba"),
+            "mcp",
+            Some("denied"),
+            Some("replayed=refresh_token")
+        )
+    );
 
     // a replayed code fails too
     let r = exchange(&app, &client_id, &code).await?;
@@ -497,6 +512,30 @@ async fn plain_pkce_foreign_resources_and_bad_redirects_are_refused() -> R {
     .await?;
     assert_eq!(r.status, 400);
     assert!(location(&r).is_empty());
+    // a person's browser goes to our own consent page with the reason, never to the client
+    let r = send(
+        &app,
+        Request::get(format!(
+            "/oauth/authorize?{}",
+            query(&[
+                ("response_type", "code"),
+                ("client_id", &client_id),
+                ("redirect_uri", "https://attacker.example/cb"),
+                ("code_challenge", &challenge),
+                ("code_challenge_method", "S256"),
+            ])
+        ))
+        .header("accept", "text/html,application/xhtml+xml")
+        .body(Body::empty())?,
+    )
+    .await?;
+    let to = location(&r);
+    assert_eq!(r.status, 303, "{to}");
+    assert!(
+        to.starts_with(&format!("{BASE}/oauth/consent?error=bad_redirect&detail=")),
+        "{to}"
+    );
+    assert!(!to.contains("attacker.example"), "{to}");
 
     // a wrong verifier at the token endpoint
     let code = approved_code(&w, &app, &client_id, &["read:summary"]).await?;

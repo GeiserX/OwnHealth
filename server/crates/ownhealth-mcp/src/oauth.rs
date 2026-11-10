@@ -7,8 +7,9 @@
 //!   `authorization_response_iss_parameter_supported: true`; no `registration_endpoint` (no DCR).
 //! - `GET /oauth/authorize`: checks the client (CIMD) and `redirect_uri`, then `response_type=code`,
 //!   PKCE S256 (plain or missing is refused), `resource` = our canonical `/mcp` URI (RFC 8707), the
-//!   scopes and a `state` of 512 bytes at most. Any failure is a 400 shown to the person, never a
-//!   redirect (the requester writes the client document, so a redirect would be an open redirector);
+//!   scopes and a `state` of 512 bytes at most. A failure never goes back to the client (the
+//!   requester writes the client document, so that would be an open redirector): a browser goes to
+//!   our own `/oauth/consent?error=<code>&detail=<text>`, any other caller gets a JSON 400;
 //!   at most 1000 requests stay open (503 beyond). Then it sends the browser to the
 //!   consent screen, `/oauth/consent?request=<id>`, where the person logs in and approves with step-up
 //!   (`ownhealth_api::routes::oauth`).
@@ -19,7 +20,7 @@
 //! the protected-resource metadata names no authorization server.
 
 use axum::extract::{Query, RawForm, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -107,9 +108,10 @@ fn single<'a>(q: &'a [(String, String)], key: &str) -> Result<Option<&'a str>, O
 /// What `/oauth/authorize` decides, before anything is stored.
 #[derive(Debug, PartialEq)]
 pub enum Authorize {
-    /// Shown to the person as a 400. A refused request is never redirected: the client document and
-    /// its redirect URIs are the requester's own, so a redirect here would make `/oauth/authorize` an
-    /// open redirector (RFC 9700 4.11.2). Only the consent decision sends the browser back.
+    /// Shown to the person: a browser goes to our own consent page with the reason, any other caller
+    /// gets a 400. A refused request never goes back to the client: its document and redirect URIs
+    /// are the requester's own, so that would make `/oauth/authorize` an open redirector (RFC 9700
+    /// 4.11.2). Only the consent decision sends the browser back.
     Show(OAuthError),
     Ok(AuthorizeIn),
 }
@@ -212,14 +214,45 @@ async fn decide(rt: &Runtime, q: &[(String, String)]) -> Result<Authorize, Error
     })
 }
 
-async fn authorize(State(rt): State<Runtime>, Query(q): Query<Vec<(String, String)>>) -> Response {
+/// The consent page's word for a refused request: the OAuth code, or what part of an
+/// `invalid_request` was wrong (the redirect address or PKCE), so the page can say it plainly.
+fn page_code(e: &OAuthError) -> &'static str {
+    match e.code {
+        "invalid_client" => "invalid_client",
+        "invalid_scope" => "invalid_scope",
+        "invalid_target" => "invalid_target",
+        "unsupported_response_type" => "unsupported_response_type",
+        _ if e.description.contains("redirect_uri") => "bad_redirect",
+        _ if e.description.contains("PKCE") || e.description.contains("code_challenge") => "pkce",
+        _ => "invalid_request",
+    }
+}
+
+/// A refused request, for a person's browser: our own consent page with the reason in their language
+/// (same origin, so never an open redirect). Any other caller gets the JSON 400.
+fn refused(issuer: &str, headers: &HeaderMap, e: &OAuthError) -> Response {
+    let html = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"));
+    if !html {
+        return error_json(StatusCode::BAD_REQUEST, e);
+    }
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("error", page_code(e))
+        .append_pair("detail", &e.description)
+        .finish();
+    no_store(Redirect::to(&format!("{issuer}/oauth/consent?{query}")).into_response())
+}
+
+async fn authorize(State(rt): State<Runtime>, headers: HeaderMap, Query(q): Query<Vec<(String, String)>>) -> Response {
     if !oauth::enabled(base(&rt)) {
         return disabled();
     }
     let issuer = base(&rt).to_string();
     match decide(&rt, &q).await {
         Err(e) => internal(e),
-        Ok(Authorize::Show(e)) => error_json(StatusCode::BAD_REQUEST, &e),
+        Ok(Authorize::Show(e)) => refused(&issuer, &headers, &e),
         Ok(Authorize::Ok(a)) => {
             let stored = async {
                 let mut conn = rt.pool.acquire().await?;
