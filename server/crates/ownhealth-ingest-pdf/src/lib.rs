@@ -29,6 +29,7 @@ pub mod pdfium;
 pub mod py;
 pub mod tables;
 pub mod templates;
+pub mod textcheck;
 pub mod textlayer;
 
 use futures::future::BoxFuture;

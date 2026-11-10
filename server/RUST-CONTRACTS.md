@@ -172,6 +172,8 @@ ImportSummary { document_id, accepted, queued, skipped, reasons }; .count(&Route
 text::untrusted(Option<&str>, origin) -> Result<Value>  // Invalid for an unknown origin; final shape: {"trust": "untrusted_text", origin, text}
 demo::create_rivera_family(conn, name) -> Family; demo::seed_demo(pool, settings, blobs, force) -> bool
 demo_pdf::lab_report_pdf(&LabReport) -> (Vec<u8>, Vec<Vec<BBox>>)   // byte-identical to demo/pdf.py
+pdfwrite::Writer::new().on_new_page(hook); .paragraph / .table / .rule / .polyline / .text; .finish() -> Rendered { pdf, folded }  // the one PDF writer: AFM wrap, WinAnsi with folding, /ID = content hash, no date
+afm::{HELVETICA, HELVETICA_BOLD, cp1252, width}   // moved from ingest-pdf, which re-exports it; textcheck::assert_text_layer(pdf, |line| ..) reads a sheet back
 testing::TestDb::new() / ::empty() / .settings(dir)  // feature "testing": a throwaway migrated database
 ```
 
