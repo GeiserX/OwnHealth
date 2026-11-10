@@ -223,9 +223,11 @@ async fn push_tokens_are_shown_once_and_checked_in_constant_time() -> R {
         .fetch_one(&mut *c)
         .await?;
     assert!(!stored.windows(8).any(|w| token.as_bytes().windows(8).any(|t| t == w)));
+    // The last character must change: a token that already ends in 'A' (1 in 16) would stay the same.
     let mut wrong = token.clone();
-    wrong.pop();
-    wrong.push('A');
+    let last = wrong.pop().expect("a token is never empty");
+    wrong.push(if last == 'A' { 'B' } else { 'A' });
+    assert_ne!(wrong, token);
     assert!(source_for_token(&mut c, &wrong).await?.is_none());
     assert!(source_for_token(&mut c, "oh_pat_abcdefgh_x").await?.is_none());
     // a new token replaces the old one
