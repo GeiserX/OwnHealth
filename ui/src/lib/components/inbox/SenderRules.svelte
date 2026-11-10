@@ -5,7 +5,7 @@
 	import { addPdfPassword, addSender, deletePdfPassword, deleteSender, listSenders, type SenderRuleOut } from '#lib/api/inbox';
 	import type { ProfileSummary } from '#lib/api/types';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
-	import { Loader } from '#lib/components/pages1/util.svelte';
+	import { Loader, errRaw, errText } from '#lib/components/pages1/util.svelte';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { t } from '#lib/i18n/index.svelte';
 	import { senderPattern } from '#lib/logic/inbox';
@@ -25,7 +25,7 @@
 	});
 
 	let busy = $state(false);
-	let error = $state<string | null>(null);
+	let error = $state<{ text: string; raw: string } | null>(null);
 	let nr = $state({ pattern: '', profile_id: '', trust_unauthenticated: false });
 	let pwFor = $state<string | null>(null);
 	let pw = $state({ password: '', label: '' });
@@ -40,7 +40,7 @@
 			load();
 			onchange?.();
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = { text: errText(e), raw: errRaw(e) };
 		} finally {
 			busy = false;
 		}
@@ -49,7 +49,7 @@
 		e.preventDefault();
 		const pattern = senderPattern(nr.pattern);
 		if (!pattern) {
-			error = t('fu_err_pattern');
+			error = { text: t('fu_err_pattern'), raw: '' };
 			return;
 		}
 		const body = { pattern, profile_id: nr.profile_id, trust_unauthenticated: nr.trust_unauthenticated };
@@ -72,7 +72,7 @@
 
 <div class="sr">
 	<div class="hd"><b>{t('fu_senders')}</b><span class="dim">{t('fu_senders_d')}</span></div>
-	{#if error}<div class="p2err" role="alert">{error}</div>{/if}
+	{#if error}<div class="p2err" role="alert" title={error.raw || undefined}>{error.text}</div>{/if}
 	{#if !authChecked && (rules.data ?? []).some((r) => !r.trust_unauthenticated)}<div class="note" style="color:var(--watch)" role="note">{t('fu_sr_no_auth_d')}</div>{/if}
 	{#if rules.error}
 		<NotReady error={rules.error} onretry={load} />

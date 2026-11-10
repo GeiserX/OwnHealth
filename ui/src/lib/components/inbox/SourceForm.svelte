@@ -2,12 +2,14 @@
 	// Add or edit one inbox: mailbox (IMAP), watched folder, Paperless-ngx, Health Auto Export, iOS
 	// Shortcut, Nightscout. Secrets go to the server once and are sealed there; they never come back,
 	// so editing leaves the field empty and an empty field keeps the stored one.
+	import { untrack } from 'svelte';
 	import { createInbox, updateInbox, type InboxSource, type SourceKind } from '#lib/api/inbox';
 	import type { ProfileSummary } from '#lib/api/types';
-	import { tf } from '#lib/components/pages1/util.svelte';
+	import { errRaw, errText, tf } from '#lib/components/pages1/util.svelte';
+	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { t } from '#lib/i18n/index.svelte';
-	import { ADDABLE, POLL_KINDS, PROFILE_KINDS, RECIPE, RECIPES_URL, SECRET_OF, TLS_MODES, emptyForm, formOf, portForTls, sourceBody, type SourceForm, type TlsMode } from '#lib/logic/inbox';
+	import { ADDABLE, POLL_KINDS, PROFILE_KINDS, RECIPE, RECIPES_URL, SECRET_OF, TLS_MODES, emptyForm, formOf, manageable, portForTls, sourceBody, type SourceForm, type TlsMode } from '#lib/logic/inbox';
 
 	let {
 		profiles,
@@ -16,10 +18,13 @@
 		oncancel
 	}: { profiles: ProfileSummary[]; source?: InboxSource | null; onsaved: (s: InboxSource) => void; oncancel: () => void } = $props();
 
+	// Only profiles the person manages can own a source (the server refuses the others); with one, it is preselected.
+	const own = untrack(() => manageable(profiles));
+	const choices = $derived(manageable(profiles));
 	// Captured once: the form edits its own copy.
-	const initial = () => (source ? formOf(source) : emptyForm('email'));
+	const initial = () => (source ? formOf(source) : { ...emptyForm('email'), profile_id: own.length === 1 ? own[0].id : '' });
 	let f = $state<SourceForm>(initial());
-	let error = $state<string | null>(null);
+	let error = $state<{ text: string; raw: string } | null>(null);
 	let busy = $state(false);
 	const editing = $derived(source != null);
 
@@ -34,7 +39,7 @@
 		// An edit starts from the stored config, so keys set through the API (tag routing, backfill) stay.
 		const r = sourceBody(f, editing, source?.config);
 		if ('error' in r) {
-			error = t(r.error);
+			error = { text: t(r.error), raw: '' };
 			return;
 		}
 		busy = true;
@@ -44,7 +49,7 @@
 			const saved = source ? await withStepUp(() => updateInbox(source.id, patch)) : await withStepUp(() => createInbox({ kind, ...patch }));
 			onsaved(saved);
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = { text: errText(err), raw: errRaw(err) };
 		} finally {
 			busy = false;
 		}
@@ -53,7 +58,7 @@
 	const profileRequired = $derived(PROFILE_KINDS.includes(f.kind));
 </script>
 
-<form class="card p2form sf" onsubmit={submit} aria-labelledby="sf-h">
+<form class="card p2form sf" onsubmit={submit} aria-labelledby="sf-h" use:focusOnOpen={{ oncancel }}>
 	<h3 id="sf-h">{editing ? tf('fu_edit_t', { label: source?.label ?? '' }) : t('fu_add_t')}<span class="r">{t('fu_add_r')}</span></h3>
 	{#if !editing}
 		<div class="kinds" role="radiogroup" aria-label={t('fu_kind')}>
@@ -73,7 +78,9 @@
 			>{t('fu_f_profile')}
 			<select class="p2in" bind:value={f.profile_id} required={profileRequired}>
 				{#if !profileRequired}<option value="">{t(f.kind === 'folder' ? 'fu_f_profile_folder' : 'fu_f_profile_rule')}</option>{:else}<option value="" disabled>{t('fu_f_profile_pick')}</option>{/if}
-				{#each profiles as p (p.id)}<option value={p.id}>{p.display_name}</option>{/each}
+				{#each choices as p (p.id)}<option value={p.id}>{p.display_name}</option>{/each}
+				<!-- A source already pointing at a profile the person does not manage keeps showing it. -->
+				{#if f.profile_id && !choices.some((p) => p.id === f.profile_id)}<option value={f.profile_id}>{profiles.find((p) => p.id === f.profile_id)?.display_name ?? '—'}</option>{/if}
 			</select>
 		</label>
 	</div>
@@ -132,7 +139,7 @@
 		<div class="note">{t('fu_f_push_d')}</div>
 	{/if}
 
-	{#if error}<div class="p2err" role="alert">{error}</div>{/if}
+	{#if error}<div class="p2err" role="alert" title={error.raw || undefined}>{error.text}</div>{/if}
 	<div class="p2row" style="justify-content:flex-end">
 		<button type="button" class="btn" onclick={oncancel}>{t('i2_cancel')}</button>
 		<button type="submit" class="btn pri" disabled={busy}>{editing ? t('fu_save') : t('fu_add')}</button>

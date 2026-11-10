@@ -3,11 +3,12 @@
 	// sync, the last error, and its actions. Push sources get a token (shown once by the parent).
 	import { listRuns, type InboxSource, type SourceRun } from '#lib/api/inbox';
 	import type { ProfileSummary } from '#lib/api/types';
-	import { Loader, tf, tp } from '#lib/components/pages1/util.svelte';
+	import { Loader, errRaw, errText, tf, tp } from '#lib/components/pages1/util.svelte';
+	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import Switch from '#lib/components/pages2/Switch.svelte';
 	import { ago, stamp } from '#lib/components/pages2/fmt';
 	import { t } from '#lib/i18n/index.svelte';
-	import { POLL_KINDS, hasAuthserv, sourceStatus, sourceWhere, tokenButtonKey } from '#lib/logic/inbox';
+	import { POLL_KINDS, PROFILE_KINDS, hasAuthserv, sourceStatus, sourceWhere, tokenButtonKey } from '#lib/logic/inbox';
 	import SenderRules from './SenderRules.svelte';
 
 	let {
@@ -19,7 +20,9 @@
 		onedit,
 		ondelete,
 		ontoken,
-		onchange
+		onchange,
+		error = null,
+		notice = null
 	}: {
 		source: InboxSource;
 		profiles: ProfileSummary[];
@@ -30,10 +33,15 @@
 		ondelete: () => void;
 		ontoken: () => void;
 		onchange: () => void;
+		/** What the last action on this card did: shown here, next to the buttons that did it. */
+		error?: { text: string; raw: string } | null;
+		notice?: string | null;
 	} = $props();
 
 	const PILL = { ok: 'p-ok', out: 'p-out', partial: 'p-watch', stale: 'p-stale', nodata: 'p-stale', off: 'p-stale' } as const;
 	const status = $derived(sourceStatus(source));
+	// A paused source has no fresh data: it shows No data (one of the five status words); the switch says paused.
+	const pillWord = $derived(status === 'off' ? 'fu_st_nodata' : 'fu_st_' + status);
 	const runs = new Loader<SourceRun[]>();
 	let open = $state<'' | 'runs' | 'senders'>('');
 	let confirming = $state(false);
@@ -59,13 +67,16 @@
 				return source.token_prefix ? `${source.token_prefix}…` : t('fu_no_token');
 		}
 	});
-	const who = $derived(
-		source.profile_id
-			? (profiles.find((p) => p.id === source.profile_id)?.display_name ?? '—')
-			: source.kind === 'folder'
-				? t('fu_f_profile_folder')
-				: t('fu_f_profile_rule')
-	);
+	// Where the data goes. With no profile set, each kind has its own rule; a kind that needs one says so.
+	const who = $derived.by(() => {
+		if (source.profile_id) return { text: profiles.find((p) => p.id === source.profile_id)?.display_name ?? '—', warn: false };
+		if (source.kind === 'email') return { text: t('fu_f_profile_rule'), warn: false };
+		if (source.kind === 'folder') return { text: t('fu_f_profile_folder'), warn: false };
+		if (source.kind === 'share') return { text: t('fu_to_share'), warn: false };
+		if (PROFILE_KINDS.includes(source.kind)) return { text: t('fu_to_none'), warn: true };
+		return { text: '—', warn: false };
+	});
+	const lastErr = $derived(source.last_error ? errText(new Error(source.last_error)) : '');
 	const runTone = { ok: 'p-ok', partial: 'p-watch', error: 'p-out', running: 'p-info' } as const;
 </script>
 
@@ -76,22 +87,25 @@
 			<b id="src-{source.id}">{source.label}</b>
 			<div class="dim kind">{t('fu_k_' + source.kind)} · <span class="mono">{detail}</span></div>
 		</div>
-		<span class="pill {PILL[status]}"><i aria-hidden="true"></i>{t('fu_st_' + status)}</span>
+		<span class="pill {PILL[status]}"><i aria-hidden="true"></i>{t(pillWord)}</span>
 	</div>
 	<dl class="facts">
 		<dt>{t('fu_to')}</dt>
-		<dd>{who}</dd>
+		<dd style={who.warn ? 'color:var(--watch)' : ''}>{who.text}</dd>
 		<dt>{t('fu_last_run')}</dt>
-		<dd>{source.last_run_at ? ago(source.last_run_at) : t('i2_never')}</dd>
+		<dd><span class="num" style="white-space:nowrap">{source.last_run_at ? ago(source.last_run_at) : t('i2_never')}</span></dd>
 		<dt>{t('fu_last_ok')}</dt>
-		<dd class:stale={source.stale}>{source.last_success_at ? ago(source.last_success_at) : t('i2_never')}</dd>
+		<dd class:stale={status === 'stale'}><span class="num" style="white-space:nowrap">{source.last_success_at ? ago(source.last_success_at) : t('i2_never')}</span></dd>
 		{#if source.kind === 'email' && source.quarantined}
 			<dt>{t('fu_quarantine')}</dt>
 			<dd style="color:var(--watch)">{source.quarantined}</dd>
 		{/if}
 	</dl>
 	{#if status === 'out' && source.last_error}
-		<div class="err" role="status">⚠ {tp('fu_failed_n', source.consecutive_failures)} <span class="mono">{source.last_error}</span></div>
+		<div class="err" role="status">
+			⚠ {tp('fu_failed_n', source.consecutive_failures)} {lastErr}
+			{#if lastErr !== source.last_error}<div class="mono dim raw">{source.last_error}</div>{/if}
+		</div>
 	{:else if status === 'partial'}
 		<div class="note" role="status" style="color:var(--watch);overflow-wrap:anywhere">
 			⚠ {tp('fu_partial_n', source.last_run_problems ?? 0)}
@@ -101,41 +115,38 @@
 		<div class="note" style="color:var(--stale)">{t('fu_stale_d')}</div>
 	{/if}
 	<div class="acts">
-		<Switch on={source.enabled} label={tf('fu_enabled', { label: source.label })} disabled={busy} onchange={ontoggle} />
+		<Switch on={source.enabled} label={tf('fu_enabled', { label: source.label })} words={[t('fu_sw_on'), t('fu_sw_off')]} disabled={busy} onchange={ontoggle} />
 		{#if POLL_KINDS.includes(source.kind)}<button class="btn sm" disabled={busy || !source.enabled} onclick={onsync}>{t('fu_sync')}</button>{/if}
-		{#if confirmToken}
-			<button class="btn sm no" disabled={busy} onclick={() => { confirmToken = false; ontoken(); }}>{t('fu_token_new_yes')}</button>
-			<button class="btn sm" onclick={() => (confirmToken = false)}>{t('i2_cancel')}</button>
-		{:else}
-			<!-- Every kind gets a token: push kinds send with it, polled kinds give it to a monitor. -->
-			<button class="btn sm" disabled={busy} onclick={() => (source.token_prefix ? (confirmToken = true) : ontoken())}>{t(tokenButtonKey(source.kind, !!source.token_prefix))}</button>
-		{/if}
+		<!-- Every kind gets a token: push kinds send with it, polled kinds give it to a monitor. -->
+		<button class="btn sm" disabled={busy} aria-expanded={source.token_prefix ? confirmToken : undefined} onclick={() => (source.token_prefix ? (confirmToken = !confirmToken) : ontoken())}>{t(tokenButtonKey(source.kind, !!source.token_prefix))}</button>
 		{#if source.kind === 'email'}<button class="btn sm" onclick={() => toggle('senders')} aria-expanded={open === 'senders'}>{t('fu_senders')}</button>{/if}
 		<button class="btn sm" onclick={() => toggle('runs')} aria-expanded={open === 'runs'}>{t('fu_runs')}</button>
-		<button class="btn sm" onclick={onedit}>{t('i2_edit')}</button>
-		{#if confirming}
-			<button class="btn sm no" disabled={busy} onclick={ondelete}>{t('fu_delete_yes')}</button>
-			<button class="btn sm" onclick={() => (confirming = false)}>{t('i2_cancel')}</button>
-		{:else}
-			<button class="btn sm no" onclick={() => (confirming = true)}>{t('fu_delete')}</button>
-		{/if}
+		<button class="btn sm" data-edit={source.id} onclick={onedit}>{t('i2_edit')}</button>
+		<button class="btn sm no del" disabled={busy} onclick={() => (confirming = !confirming)} aria-expanded={confirming}>{t('fu_delete')}</button>
 	</div>
-	{#if confirmToken}<div class="note" style="color:var(--watch)" role="note">{t('fu_token_new_d')}</div>{/if}
+	{#if confirmToken}
+		<ConfirmRow text={t('fu_token_new_d')} confirmLabel={t('fu_token_new_yes')} {busy} onconfirm={() => { confirmToken = false; ontoken(); }} oncancel={() => (confirmToken = false)} />
+	{/if}
+	{#if confirming}
+		<ConfirmRow text={tf('fu_src_delete_d', { label: source.label })} confirmLabel={t('fu_delete_yes')} {busy} onconfirm={ondelete} oncancel={() => (confirming = false)} />
+	{/if}
+	{#if error}<div class="p2err" role="alert" title={error.raw}>{error.text}</div>{/if}
+	{#if notice}<div class="p2ok" role="status" style="font-size:12px">{notice}</div>{/if}
 	{#if open === 'runs'}
 		<div class="runs">
 			{#if runs.error}
-				<div class="p2err">{runs.error.message}</div>
+				<div class="p2err" role="alert" title={errRaw(runs.error)}>{errText(runs.error)}</div>
 			{:else if runs.loading && !runs.data}
 				<div class="dim">{t('loading')}</div>
 			{:else}
-				<table class="t nw">
+				<table class="t nw" style="width:auto">
 					<tbody>
 						{#each runs.data ?? [] as r (r.id)}
 							<tr>
-								<td class="num dim">{stamp(r.started_at)}</td>
+								<td class="dim"><span class="num" style="white-space:nowrap">{stamp(r.started_at)}</span></td>
 								<td class="dim">{t('fu_trig_' + r.trigger)}</td>
 								<td><span class="pill {runTone[r.status]}"><i aria-hidden="true"></i>{t('fu_run_' + r.status)}</span></td>
-								<td class="num">{tf('fu_run_counts', { seen: r.items_seen, new: r.items_new, dup: r.items_duplicate, q: r.items_quarantined })}</td>
+								<td class="num">{tf(source.kind === 'email' ? 'fu_run_counts' : 'fu_run_counts_nq', { seen: r.items_seen, new: r.items_new, dup: r.items_duplicate, q: r.items_quarantined })}</td>
 							</tr>
 							{#if r.error || r.errors.length}
 								<tr><td colspan="4" class="mono err2">{[r.error, ...r.errors.map((e) => `${e.code}: ${e.message}`)].filter(Boolean).join(' · ')}</td></tr>
@@ -196,6 +207,13 @@
 		font-size: 11.5px;
 		color: var(--out);
 		overflow-wrap: anywhere;
+	}
+	.err .raw {
+		font-size: 10.5px;
+		margin-top: 2px;
+	}
+	.acts .del {
+		margin-left: auto;
 	}
 	.err2 {
 		color: var(--out);
