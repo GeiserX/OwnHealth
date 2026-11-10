@@ -338,7 +338,7 @@ https://www.dataprotection.ie/en/faqs/general/what-household-exemption
 ### 13.2 EU Medical Device Regulation
 
 - MDR Rule 11 (Annex VIII) classifies software that provides information used to take decisions with diagnostic or therapeutic purposes as at least class IIa. MDCG 2019-11 explains how intended purpose decides qualification. Being free or open source does not exempt software; what matters is "placing on the market" and "making available" "in the course of a commercial activity" (MDR Art. 2(27)-(28)).
-- Our risk surfaces: `check_drug` output (PGx joined with current medications and labs, v0.1), status flags (v0.1), calculators (CKD-EPI 2021, PREVENT, SCORE2, FIB-4, HOMA-IR, PhenoAge, v0.3) and preventive screening rules (v0.3).
+- Our risk surfaces: `check_drug` output (PGx joined with current medications and labs, v0.1), status flags (v0.1), calculators (CKD-EPI 2021, PREVENT, SCORE2, FIB-4, HOMA-IR, v0.3) and preventive screening rules (v0.3).
 - Our position today: OwnHealth is non-commercial open-source software. No hosted version, no paid tier, no CE claim. Software that is not made available in the course of a commercial activity is not placed on the market, so we believe the MDR does not apply to it (unverified; not tested in court; the Blue Guide's "commercial activity" definition is the next primary source to read). A hosted or paid version would be the clearest way to become commercial, so it would need a fresh regulatory assessment first.
 - The narrow intended purpose below is our second line: it aims to keep the software outside the medical-device definition even if the commercial test were read against us (unverified).
 - Wording decides qualification, so it is fixed in code and docs:

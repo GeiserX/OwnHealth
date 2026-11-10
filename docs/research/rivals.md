@@ -292,7 +292,7 @@ https://github.com/GeiserX/OwnGenome
 | Google Health app (May 2026) | Combines Fitbit, Pixel Watch, Health Connect, Apple Health and medical records, with a Gemini coach | Hosted, embedded AI, vendor-bound |
 | InsideTracker, Levels, Bearable, Exist.io, Gyroscope, Humanity (unverified) | Blood + DNA "inner age" scores; CGM metabolic scoring; mood/symptom correlations with tracked data; life dashboards; biological-age estimates | Hosted; scores without published formulas |
 
-Ideas worth taking from this group: a custom "ideal panel", one "how am I doing" status per domain, auto-correlation across sources, and a biological-age view (PhenoAge) labelled as an estimate with its formula cited.
+Ideas worth taking from this group: a custom "ideal panel", one "how am I doing" status per domain, and auto-correlation across sources. We do not take the biological-age view (PhenoAge): the roadmap's Never list rules out a composite health score.
 
 https://guavahealth.com/article/lab-integration-dashboard-for-providers
 https://www.health3.app/compare/health3-vs-guava/
@@ -318,7 +318,7 @@ Ranked by value divided by effort. The phase column matches our roadmap (ROADMAP
 | 8 | Device-day authority: which source wins steps or sleep on a given day | Mirobody `th_day_authority`, Syntropy | v0.1 |
 | 9 | Paperless-ngx source and a mail-in address with sender allowlist | Paperless, Oncofiles | v0.2 |
 | 10 | Nightscout for CGM; Health Auto Export JSON v2; Gadgetbridge SQLite | HealthLog, community bridges | v0.2 |
-| 11 | Deterministic analytics: Mann-Kendall trend with slope per year, anomalies against the person's own baseline, critical-value alerts, screening calendar; range precedence condition, then sex, then default | health-os, Mirobody roadmap | v0.1 trend, v0.3 screening, baseline anomalies and critical values |
+| 11 | Deterministic analytics: Mann-Kendall trend with slope per year, anomalies against the person's own baseline, critical-value alerts, screening calendar; range precedence condition, then sex, then default | health-os, Mirobody roadmap | v0.1 trend, v0.3 screening and baseline anomalies; critical values cut |
 | 12 | Genome as findings: PGx diplotypes, ClinVar, carrier status, PRS with percentile and ancestry caveat, HLA, APOE, Lp(a); raw lookups through `lookup_variant`; `check_drug` joins PGx with current medications and labs | GeneChat, OwnGenome | v0.1 |
 | 13 | SMART on FHIR patient-access sync; C-CDA/CCD/XDM and Epic EHI import | Syntropy, Strand, Mere | v1.0 |
 | 14 | Wearable OAuth through Open Wearables instead of our own connectors | Open Wearables | v1.0 |
