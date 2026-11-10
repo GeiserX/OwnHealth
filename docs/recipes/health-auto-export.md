@@ -5,7 +5,7 @@ The iOS app Health Auto Export can push Apple Health data to a URL on a schedule
 ## How it works
 
 - The app posts JSON (export version 2) to `POST /api/ingest/health-auto-export` with the source's push token.
-- Each push is stored as received, then mapped to wearable samples for the source's profile.
+- Each push is stored as received, then mapped to wearable samples for the source's profile. The stored push is removed after 30 days; the samples it brought stay. Pushes re-send the last day every 15 minutes, so keeping every one would grow by gigabytes a year.
 - Pushes overlap on purpose, and the hour still running at one push is sent again, larger, at the next. OwnHealth keeps one sample per profile, metric, source and time, and updates a bucket that grew. Seven days of 15-minute pushes give zero duplicate samples.
 - All samples of one source are filed under that source, whatever device the app names (iPhone, Watch or both). The same bucket can arrive as iPhone at one push and as iPhone and Watch at the next, and it is still one sample. OwnHealth does not keep the Watch and the iPhone apart.
 - Metrics OwnHealth does not chart yet (workouts, nutrition, symptoms) are skipped and named in the log, without values.

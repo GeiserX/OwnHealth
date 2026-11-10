@@ -260,8 +260,41 @@ async fn a_day_bucket_resent_after_the_phone_changed_time_zone_stays_one_sample(
     let day = Utc.with_ymd_and_hms(2026, 11, 2, 0, 0, 0).single();
     assert_eq!(
         rows.iter().map(|r| (Some(r.0), r.1, r.2)).collect::<Vec<_>>(),
-        vec![(day, 53.0, Some(120))]
+        vec![(day, 53.0, Some(0))]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resting_heart_rate_west_of_utc_stays_on_its_own_day() -> R {
+    let env = Env::new().await?;
+    let alex = env.fam.profile("alex");
+    let source = env.source("health_auto_export", Some("alex"), json!({}), None).await?;
+    let body = json!({"data": {"metrics": [{"name": "resting_heart_rate", "units": "count/min",
+        "data": [{"date": "2026-11-02 00:00:00 -0500", "qty": 54, "source": "Apple Watch de Alex"}]}]}});
+    import(&env, &source, &body).await?;
+    let days: Vec<(DateTime<Utc>, f32)> = sqlx::query_as(
+        "select t, v_avg from wearable_rollup where profile_id = $1 and metric = 'hr_resting' and bucket = 'day'",
+    )
+    .bind(alex)
+    .fetch_all(&env.db.pool)
+    .await?;
+    let day = Utc.with_ymd_and_hms(2026, 11, 2, 0, 0, 0).single().unwrap_or_default();
+    assert_eq!(days, vec![(day, 54.0)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_uncharted_metric_without_a_date_is_not_a_problem() -> R {
+    let env = Env::new().await?;
+    let source = env.source("health_auto_export", Some("alex"), json!({}), None).await?;
+    let o = import(
+        &env,
+        &source,
+        &json!({"data": {"metrics": [{"name": "dietary_water", "units": "mL", "data": [{"qty": 250}]}]}}),
+    )
+    .await?;
+    assert_eq!((o.seen, o.problems.len()), (0, 0), "{o:?}");
     Ok(())
 }
 
@@ -300,5 +333,57 @@ async fn points_lost_to_an_unknown_unit_make_the_run_partial() -> R {
         .count("select count(*) from wearable_sample where profile_id = $1", alex)
         .await?;
     assert_eq!(rows, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn push_bodies_older_than_the_keep_window_are_removed() -> R {
+    let env = Env::new().await?;
+    let source = env.source("health_auto_export", Some("alex"), json!({}), None).await?;
+    let old_body = push(start() + Duration::hours(3));
+    import(&env, &source, &old_body).await?;
+    let sha_of = |src: uuid::Uuid| {
+        sqlx::query_scalar::<_, String>(
+            "select encode(blob_sha256, 'hex') from source_item where source_id = $1 order by seen_at desc limit 1",
+        )
+        .bind(src)
+        .fetch_one(&env.db.pool)
+    };
+    let old_sha = sha_of(source.id).await?;
+    assert!(env.blobs.exists(&old_sha));
+    sqlx::query("update source_item set seen_at = now() - make_interval(days => $2) where source_id = $1")
+        .bind(source.id)
+        .bind(i32::try_from(hae::PUSH_KEEP_DAYS)? + 1)
+        .execute(&env.db.pool)
+        .await?;
+    // a recent push, and the same old body also held by a second inbox: that copy stays
+    let other = env.source("health_auto_export", Some("alex"), json!({}), None).await?;
+    let shared = push(start() + Duration::hours(4));
+    import(&env, &other, &shared).await?;
+    import(&env, &source, &shared).await?;
+    let shared_sha = sha_of(other.id).await?;
+    sqlx::query("update source_item set seen_at = now() - make_interval(days => $2) where source_id = $1")
+        .bind(source.id)
+        .bind(i32::try_from(hae::PUSH_KEEP_DAYS)? + 1)
+        .execute(&env.db.pool)
+        .await?;
+    import(&env, &source, &push(start() + Duration::hours(5))).await?;
+    let kept: Vec<String> =
+        sqlx::query_scalar("select encode(blob_sha256, 'hex') from source_item where source_id = $1 order by seen_at")
+            .bind(source.id)
+            .fetch_all(&env.db.pool)
+            .await?;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(!env.blobs.exists(&old_sha), "the old push body is gone");
+    assert!(env.blobs.exists(&shared_sha), "another inbox still holds this body");
+    assert!(env.blobs.exists(&kept[0]));
+    // the samples the pruned pushes brought stay
+    let rows = env
+        .count(
+            "select count(*) from wearable_sample where profile_id = $1",
+            env.fam.profile("alex"),
+        )
+        .await?;
+    assert!(rows > 0);
     Ok(())
 }

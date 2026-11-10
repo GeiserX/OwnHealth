@@ -11,6 +11,10 @@
 //! cannot be read (a unit we do not know, a point without a value or date) are reported as run problems,
 //! so the run reads `partial` in the Runs panel.
 //!
+//! Push bodies are kept for `PUSH_KEEP_DAYS` days, then removed: every push re-sends the last day or
+//! more, so the bodies differ every time and content addressing never shares them, and at 96 pushes a
+//! day with minute data they would grow by gigabytes a year. The samples they brought stay.
+//!
 //! Each inbox writes through one `wearable_source` (external id = the inbox id), whatever the sample's
 //! `source` string says. The app merges sources into `"iPhone|Watch"` for summarized buckets, and the
 //! same bucket can arrive as `"iPhone"` at one push (the phone wrote the hour first) and as
@@ -20,6 +24,8 @@
 //! Day-granularity metrics (resting heart rate) are keyed on the local calendar date at 00:00 UTC, not
 //! on the instant: the app writes a day bucket as local midnight in the phone's current time zone, so
 //! the same day re-sent after the phone changed offset (travel) would otherwise be a second sample.
+//! Their offset is stored as 0: the key already is the local date, and the daily rollup adds the offset
+//! to find the local day, so keeping it would move every day west of UTC to the day before.
 
 use std::collections::BTreeMap;
 
@@ -36,6 +42,10 @@ use crate::store::{self, Conflict, Sample};
 /// The largest push body we accept.
 pub const MAX_BODY_BYTES: usize = 50 * 1024 * 1024;
 pub const PROVIDER: &str = "health_auto_export";
+/// How long a push body is kept after it arrived.
+pub const PUSH_KEEP_DAYS: i64 = 30;
+/// Old push bodies removed per push at most, so the first push after an upgrade stays short.
+const PRUNE_BATCH: i64 = 500;
 
 /// HAE metric name -> (our metric, the field holding the value, [(unit as sent, factor)]). An empty
 /// unit list takes any unit.
@@ -186,6 +196,15 @@ pub fn parse(body: &[u8]) -> Result<Parsed> {
         let name = m.get("name").and_then(Value::as_str).unwrap_or_default();
         let units = m.get("units").and_then(Value::as_str).unwrap_or_default();
         let items = m.get("data").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+        let charted = matches!(name, "sleep_analysis" | "blood_pressure" | "blood_oxygen_saturation")
+            || SIMPLE.iter().any(|s| s.0 == name);
+        if !charted {
+            // not charted yet: skipped and logged by name, whatever its points hold
+            if !items.is_empty() {
+                *out.skipped.entry(format!("metric:{name}")).or_default() += items.len() as i64;
+            }
+            continue;
+        }
         for item in items {
             let device = device_of(item.get("source").and_then(Value::as_str));
             if name == "sleep_analysis" {
@@ -200,10 +219,10 @@ pub fn parse(body: &[u8]) -> Result<Parsed> {
             };
             let t_end = time(item, "end").map(|e| e.0).filter(|e| *e > t);
             let mut point = |metric: &'static str, v: f64| {
-                let (t, t_end) = if DAY_METRICS.contains(&metric) {
-                    (day_key(t, tz), None)
+                let (t, t_end, tz) = if DAY_METRICS.contains(&metric) {
+                    (day_key(t, tz), None, 0)
                 } else {
-                    (t, t_end)
+                    (t, t_end, tz)
                 };
                 out.points.push(Point {
                     device: device.clone(),
@@ -233,7 +252,6 @@ pub fn parse(body: &[u8]) -> Result<Parsed> {
                 continue;
             }
             let Some((_, (metric, field, unit_table))) = SIMPLE.iter().find(|s| s.0 == name) else {
-                bump(&mut out.skipped, format!("metric:{name}"));
                 continue;
             };
             let factor = if unit_table.is_empty() {
@@ -272,7 +290,9 @@ pub async fn import_push(
         return Err(Error::Invalid("the push is larger than 50 MB".into()));
     }
     let (sha, _) = ownhealth_core::arrive::store_bytes(blobs, body.to_vec()).await?;
-    ownhealth_core::dedup::record_item(&mut *conn, source.id, &format!("push:{sha}"), Some(&sha), None, None).await?;
+    let item = format!("push:{sha}");
+    ownhealth_core::dedup::record_item(&mut *conn, source.id, &item, Some(&sha), None, None).await?;
+    prune_pushes(&mut *conn, blobs, source.id, &item).await?;
     let raw = body.to_vec();
     let parsed = tokio::task::spawn_blocking(move || parse(&raw))
         .await
@@ -324,6 +344,36 @@ pub async fn import_push(
         problems,
         ..RunOutcome::default()
     })
+}
+
+/// Remove this source's push bodies older than `PUSH_KEEP_DAYS`, and their blobs when no other row
+/// (another inbox's item, a document, a held mail) still holds the same bytes.
+async fn prune_pushes(conn: &mut PgConnection, blobs: &BlobStore, source_id: uuid::Uuid, current: &str) -> Result<()> {
+    let gone: Vec<Option<String>> = sqlx::query_scalar(
+        "delete from source_item where (source_id, external_id) in (select source_id, external_id \
+         from source_item where source_id = $1 and external_id like 'push:%' and external_id <> $2 \
+         and seen_at < now() - make_interval(days => $3) limit $4) returning encode(blob_sha256, 'hex')",
+    )
+    .bind(source_id)
+    .bind(current)
+    .bind(i32::try_from(PUSH_KEEP_DAYS).unwrap_or(i32::MAX))
+    .bind(PRUNE_BATCH)
+    .fetch_all(&mut *conn)
+    .await?;
+    for sha in gone.into_iter().flatten() {
+        let held: bool = sqlx::query_scalar(
+            "select exists (select 1 from source_item where blob_sha256 = decode($1, 'hex')) \
+             or exists (select 1 from document where blob_sha256 = decode($1, 'hex')) \
+             or exists (select 1 from quarantine_item where raw_blob = decode($1, 'hex'))",
+        )
+        .bind(&sha)
+        .fetch_one(&mut *conn)
+        .await?;
+        if !held {
+            blobs.delete(&sha)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
