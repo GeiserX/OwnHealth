@@ -1,4 +1,8 @@
 {
+  "age_of_majority": "int",
+  "former_access": {
+    "[]": "empty"
+  },
   "grants": {
     "[]": {
       "categories": {

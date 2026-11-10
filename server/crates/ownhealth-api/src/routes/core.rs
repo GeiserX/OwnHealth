@@ -36,7 +36,7 @@ pub fn router() -> Router<Runtime> {
 
 /// Python's `date.today()`: the server's local date.
 pub fn local_today() -> NaiveDate {
-    chrono::Local::now().date_naive()
+    ownhealth_core::access::today()
 }
 
 /// One profile as the UI's profile switcher reads it.

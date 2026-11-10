@@ -133,7 +133,7 @@ accessible_profiles(conn, &Principal) -> Result<Vec<Permission>>
 resolve_profile_ref(conn, &Principal, ProfileRef) -> Result<Uuid>          // Id | Name(slug or "me") | Default
 effective_scopes(token, categories, locks, role) -> Scopes
 create_household / create_user / create_profile(&ProfileIn) / set_grant / revoke_grant / list_grants
-set_locks / set_genome_switches / age_of_majority / get_profile / get_profile_by_slug
+set_locks / set_genome_switches / majority(conn, household_id) / today() / get_profile / get_profile_by_slug
 Error::AccessDenied { code, message, allowed }    // 404 profile_not_granted, else 403
 // provenance
 SrcIn::new(kind) / SrcIn::manual(user) / .validate(); SrcRef::{Id(String), New(SrcIn)}

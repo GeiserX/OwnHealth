@@ -137,3 +137,112 @@ async fn every_surface_agrees_on_who_is_a_minor() -> R {
     assert_eq!(answers(&app, &db, lucia, &token).await?, [true; 4]);
     Ok(())
 }
+
+/// Lucía's state hash in the manifest `ownhealth backup` writes under `OWNHEALTH_AGE_OF_MAJORITY=years`.
+fn backup_hash(db: &TestDb, dir: &std::path::Path, years: &str, lucia: Uuid) -> anyhow::Result<String> {
+    let archive = dir.join(format!("backup-{years}"));
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ownhealth"))
+        .args(["backup", &archive.display().to_string()])
+        .env("OWNHEALTH_DATABASE_URL", &db.url)
+        .env("OWNHEALTH_DATA_DIR", dir.join("live"))
+        .env("OWNHEALTH_AGE_OF_MAJORITY", years)
+        .output()?;
+    anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let m: Value = serde_json::from_slice(&std::fs::read(archive.join("manifest.json"))?)?;
+    let hash = m["state_hash"][lucia.to_string()].as_str();
+    hash.map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("no state hash for lucia in {m}"))
+}
+
+#[tokio::test]
+async fn the_backup_command_uses_the_same_age_of_majority_as_the_server() -> R {
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let mut c = db.pool.acquire().await?;
+    let fam = ownhealth_core::demo::create_rivera_family(&mut c, "Rivera").await?;
+    let lucia = fam.profile("lucia");
+    sqlx::query("update profile set birth_date = current_date - interval '17 years 30 days' where id = $1")
+        .bind(lucia)
+        .execute(&mut *c)
+        .await?;
+    carrier_finding(&mut c, lucia).await?;
+    let at16 = backup_hash(&db, dir.path(), "16", lucia)?;
+    // the env decides the minor rule in the manifest too, so a restored instance agrees with the app
+    assert_ne!(at16, backup_hash(&db, dir.path(), "18", lucia)?);
+    ownhealth_core::access::set_env_majority(16);
+    let today = sqlx::types::chrono::Utc::now().date_naive();
+    let state = ownhealth_rules::build_state(&mut c, lucia, today, None).await?;
+    assert_eq!(state["state_hash"].as_str(), Some(at16.as_str()));
+    Ok(())
+}
+
+/// On her 18th birthday, by the server's local day, with UTC on another day: the profile list, the
+/// genome page, the agent's gate and the rules engine all count the same day. The case runs in a child
+/// process whose `TZ` makes the split, because the local zone is read from the environment.
+#[tokio::test]
+async fn on_the_birthday_every_surface_counts_the_same_day() -> R {
+    use sqlx::types::chrono::Utc;
+    const CHILD: &str = "OWNHEALTH_TEST_SPLIT_DAY";
+    if std::env::var_os(CHILD).is_none() {
+        // a zone whose day differs from UTC's right now: 12 hours behind before noon, 14 ahead after
+        let tz = if *Utc::now().format("%H").to_string() < *"12" {
+            "Etc/GMT+12"
+        } else {
+            "Etc/GMT-14"
+        };
+        let out = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "on_the_birthday_every_surface_counts_the_same_day",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("TZ", tz)
+            .output()?;
+        anyhow::ensure!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("1 passed"),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return Ok(());
+    }
+    let (local, utc) = (Local::now().date_naive(), Utc::now().date_naive());
+    anyhow::ensure!(local != utc, "TZ did not split the day: {local}");
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let mut settings = db.settings(dir.path())?;
+    settings.age_of_majority = 18;
+    let app = build_app(Runtime::with_pool(settings, db.pool.clone())?);
+    ownhealth::register_lanes();
+    let mut c = db.pool.acquire().await?;
+    let fam = ownhealth_core::demo::create_rivera_family(&mut c, "Rivera").await?;
+    let lucia = fam.profile("lucia");
+    // 18 on the later of the two days: an adult if the server's day is that one, a minor if not
+    let later = local.max(utc);
+    sqlx::query("update profile set birth_date = ($1::date - interval '18 years')::date where id = $2")
+        .bind(later)
+        .bind(lucia)
+        .execute(&mut *c)
+        .await?;
+    carrier_finding(&mut c, lucia).await?;
+    let token = ownhealth_auth::tokens::create_token(
+        &mut c,
+        &ownhealth_auth::tokens::TokenIn {
+            user_id: fam.user("alex"),
+            label: "t",
+            profile_ids: vec![lucia],
+            scopes: vec!["read:summary".into(), "read:genome".into()],
+            default_profile: None,
+            days: 30,
+            identity_mode: "full",
+            lang: "en",
+            units: "si",
+        },
+    )
+    .await?
+    .plaintext;
+    let minor = local < utc;
+    assert_eq!(answers(&app, &db, lucia, &token).await?, [minor; 4]);
+    Ok(())
+}

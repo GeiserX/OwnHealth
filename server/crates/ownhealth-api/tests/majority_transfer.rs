@@ -124,7 +124,119 @@ async fn a_claim_at_majority_ends_guardian_access() -> R {
         assert_eq!(*actor, Some(lucia_user));
         assert_eq!(ids, &vec![env.user("alex").to_string()]);
         assert!(args.starts_with("majority;role=guardian;categories="), "{args}");
+        // the switches turned off at the claim are in the audit trail like any other change
+        let consent: Vec<(Option<Uuid>, String)> = sqlx::query_as(
+            "select actor_id, args_summary from audit_event where profile_id = $1 and action = 'consent_change'",
+        )
+        .bind(lucia)
+        .fetch_all(env.pool())
+        .await?;
+        assert_eq!(
+            consent,
+            vec![(Some(lucia_user), "ui=False;agents=False;majority".to_string())],
+            "{on}"
+        );
     }
+    Ok(())
+}
+
+fn former(household: &Value) -> Vec<(String, String, Value)> {
+    household["former_access"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|f| {
+                    (
+                        f["user_id"].as_str().unwrap_or_default().to_string(),
+                        f["role"].as_str().unwrap_or_default().to_string(),
+                        f["expires_at"].clone(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn she_sees_who_had_live_access_however_long_the_audit_log_grows() -> R {
+    let env = Env::new(true).await?;
+    let lucia = env.profile("lucia");
+    exec(
+        &env,
+        "update profile set birth_date = '2008-06-21' where id = $1",
+        lucia,
+    )
+    .await?;
+    // Sam's guardian grant had already ended; Alex's runs for another month
+    let expiry = |user: Uuid, when: &str| {
+        format!(
+            "update profile_grant set expires_at = {when} where profile_id = $1 and user_id = '{user}' \
+             and role = 'guardian'"
+        )
+    };
+    exec(&env, &expiry(env.user("sam"), "'2026-01-01'"), lucia).await?;
+    exec(
+        &env,
+        &expiry(env.user("alex"), "date_trunc('second', now()) + interval '30 days'"),
+        lucia,
+    )
+    .await?;
+    let alex_expiry = format!(
+        "select expires_at from profile_grant where profile_id = $1 and user_id = '{}'",
+        env.user("alex")
+    );
+    let alex_until: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(sqlx::AssertSqlSafe(alex_expiry.clone()))
+        .bind(lucia)
+        .fetch_one(env.pool())
+        .await?;
+    let mut tx = env.pool().begin().await?;
+    let (user, _) = household::invite_member(
+        &mut tx,
+        env.fam().household_id,
+        env.user("alex"),
+        "Lucía Rivera",
+        "es",
+        Some(lucia),
+    )
+    .await?;
+    household::claim_profile(&mut tx, lucia, user, Some(env.user("alex")), day("2026-06-21")).await?;
+    tx.commit().await?;
+    // both rows are gone, but only the live one is hers to give back, with its end date
+    let left = grants(&env, lucia).await?;
+    assert!(!left.contains_key(&env.user("sam")) && !left.contains_key(&env.user("alex")));
+    let rows = audits(&env, lucia).await?;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    // newer activity on her profile never pushes them out of view
+    exec(
+        &env,
+        "insert into audit_event (actor_kind, via, action, profile_id) \
+         select 'user', 'mcp', 'read', $1 from generate_series(1, 600)",
+        lucia,
+    )
+    .await?;
+    let mut her = env.as_user(user).await?;
+    let until = json!(ownhealth_core::pyjson::pydantic_datetime_utc(&alex_until));
+    assert_eq!(
+        former(&her.get("/api/household").await?.json),
+        vec![(env.user("alex").to_string(), "guardian".to_string(), until.clone())]
+    );
+    // nobody else is told who had access to her profile
+    let mut alex = env.as_user(env.user("alex")).await?;
+    assert_eq!(alex.get("/api/household").await?.json["former_access"], json!([]));
+    // given back, with the same end date, Alex leaves the list
+    let r = her
+        .put(
+            "/api/grants",
+            &json!({"user_id": env.user("alex"), "profile": "lucia", "role": "guardian", "expires_at": until}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(former(&her.get("/api/household").await?.json), vec![]);
+    let back: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(sqlx::AssertSqlSafe(alex_expiry))
+        .bind(lucia)
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(back, Some(alex_until));
     Ok(())
 }
 
@@ -174,20 +286,53 @@ async fn guardians_see_a_pending_transfer_from_the_birthday_on() -> R {
     let eighteen = today.checked_sub_months(Months::new(18 * 12)).unwrap_or(today);
     let mut alex = env.as_user(env.user("alex")).await?;
     let set_birth = |d: NaiveDate| format!("update profile set birth_date = '{d}' where id = $1");
+    let waiting = |invited: bool| json!([{"profile": "lucia", "invited": invited}]);
 
     exec(&env, &set_birth(eighteen.succ_opt().unwrap_or(eighteen)), lucia).await?;
     assert_eq!(pending(&alex.get("/api/household").await?.json), json!([]));
 
     exec(&env, &set_birth(eighteen), lucia).await?;
-    assert_eq!(pending(&alex.get("/api/household").await?.json), json!(["lucia"]));
+    assert_eq!(pending(&alex.get("/api/household").await?.json), waiting(false));
     let mut sam = env.as_user(env.user("sam")).await?;
-    assert_eq!(pending(&sam.get("/api/household").await?.json), json!(["lucia"]));
+    assert_eq!(pending(&sam.get("/api/household").await?.json), waiting(false));
+    // only a guardian is told: a caregiver may not send the invite
+    let sam_role = format!(
+        "update profile_grant set role = 'caregiver' where profile_id = $1 and user_id = '{}'",
+        env.user("sam")
+    );
+    exec(&env, &sam_role, lucia).await?;
+    assert_eq!(pending(&sam.get("/api/household").await?.json), json!([]));
 
     // the household's own age decides: at 21 she is a minor again
     let r = alex
         .put("/api/household/settings", &json!({"age_of_majority": 21}))
         .await?;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(pending(&alex.get("/api/household").await?.json), json!([]));
+    let r = alex
+        .put("/api/household/settings", &json!({"age_of_majority": 18}))
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(alex.get("/api/household").await?.json["age_of_majority"], json!(18));
+
+    // once her invite is out, the banner says so instead of offering a second one
+    let r = alex
+        .post(
+            "/api/household/invites",
+            &json!({"display_name": "Lucía Rivera", "claim_profile": "lucia"}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::CREATED, "{:?}", r.json);
+    assert_eq!(pending(&alex.get("/api/household").await?.json), waiting(true));
+
+    // a profile with a login already (she claimed it before 18) waits for nothing
+    let user = r.json["user_id"].as_str().unwrap_or_default().to_string();
+    exec(
+        &env,
+        &format!("update profile set user_id = '{user}' where id = $1"),
+        lucia,
+    )
+    .await?;
     assert_eq!(pending(&alex.get("/api/household").await?.json), json!([]));
     Ok(())
 }

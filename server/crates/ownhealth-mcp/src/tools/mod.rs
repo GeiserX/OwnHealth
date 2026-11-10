@@ -182,7 +182,7 @@ impl Call<'_> {
     }
 
     pub fn gate(&self) -> ToolResult<GenomeGate> {
-        Ok(gate::genome_gate(self.perm()?, self.as_of.day, self.majority))
+        Ok(gate::genome_gate(self.perm()?, access::today(), self.majority))
     }
 
     pub fn arg_str(&self, key: &str) -> Option<&str> {
@@ -452,7 +452,6 @@ pub async fn parse_as_of(conn: &mut PgConnection, value: Option<&str>) -> ToolRe
     })
 }
 
-/// The database's clock: `recorded_at` comes from it, so a cutoff must too.
 /// The age of majority for the call's profile; a call with no profile reads the environment's.
 pub async fn majority_of(conn: &mut PgConnection, perm: Option<&Permission>) -> Result<i32, Error> {
     match perm {
@@ -461,6 +460,7 @@ pub async fn majority_of(conn: &mut PgConnection, perm: Option<&Permission>) -> 
     }
 }
 
+/// The database's clock: `recorded_at` comes from it, so a cutoff must too.
 pub async fn db_now(conn: &mut PgConnection) -> ToolResult<DateTime<FixedOffset>> {
     let now: DateTime<Utc> = sqlx::query_scalar("select now()").fetch_one(conn).await?;
     Ok(now.fixed_offset())
@@ -916,7 +916,7 @@ pub async fn finish(call: &mut Call<'_>, mut answer: Answer, qhash: &str, secret
     if let Some(perm) = call.perm.as_ref()
         && answer.prune
     {
-        let g = gate::genome_gate(perm, call.as_of.day, call.majority);
+        let g = gate::genome_gate(perm, access::today(), call.majority);
         let ids = collect_src_ids(&data);
         let hidden = gate::hidden_reasons(&mut *call.conn, perm, g, &ids).await?;
         data = gate::prune(data, &hidden, &mut withheld);

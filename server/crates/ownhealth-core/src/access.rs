@@ -613,6 +613,12 @@ pub async fn majority(conn: &mut PgConnection, household_id: Uuid) -> Result<i32
     })
 }
 
+/// The day every minor check is made on: the server's local day. The profile list, the genome page and
+/// its consent, the agent's gate and a claim all ask this, so on a birthday they flip together.
+pub fn today() -> NaiveDate {
+    chrono::Local::now().date_naive()
+}
+
 pub fn today_utc() -> NaiveDate {
     Utc::now().date_naive()
 }

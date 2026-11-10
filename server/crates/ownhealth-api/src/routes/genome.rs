@@ -18,7 +18,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use ownhealth_auth::sessions;
 use ownhealth_core::Runtime;
 use ownhealth_core::access::{Permission, Principal, PrincipalKind, majority, set_genome_switches};
@@ -41,7 +41,7 @@ fn surface(p: &Principal) -> &'static str {
 }
 
 fn today() -> NaiveDate {
-    Utc::now().date_naive()
+    ownhealth_core::access::today()
 }
 
 async fn gate(_rt: &Runtime, conn: &mut PgConnection, perm: &Permission, p: &Principal) -> CoreResult<Gate> {

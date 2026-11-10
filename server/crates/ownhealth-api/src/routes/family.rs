@@ -156,6 +156,10 @@ async fn get_household(State(rt): State<Runtime>, SessionCaller(p): SessionCalle
     .await?;
     let aom = household_majority(&mut tx, &perms).await?;
     let transfer_pending = household::transfer_pending(&mut tx, &perms, local_today()).await?;
+    let former_access = match p.user_id {
+        Some(uid) => household::former_access(&mut tx, &perms, uid).await?,
+        None => Vec::new(),
+    };
     tx.commit().await?;
     let profiles: Vec<Value> = summaries(&perms, &p, aom)
         .into_iter()
@@ -204,7 +208,14 @@ async fn get_household(State(rt): State<Runtime>, SessionCaller(p): SessionCalle
             })
         })
         .collect();
-    ok(json!({"members": members, "profiles": profiles, "grants": grants, "transfer_pending": transfer_pending}))
+    ok(json!({
+        "members": members,
+        "profiles": profiles,
+        "grants": grants,
+        "age_of_majority": aom,
+        "transfer_pending": transfer_pending,
+        "former_access": former_access,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

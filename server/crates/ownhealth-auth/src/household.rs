@@ -287,7 +287,7 @@ pub async fn redeem_invite(conn: &mut PgConnection, code: &str) -> AuthResult<Uu
                 "Someone else manages this profile now. Ask them for a new invite.",
             ));
         }
-        claim_profile(conn, claim, user_id, Some(inviter), chrono::Local::now().date_naive()).await?;
+        claim_profile(conn, claim, user_id, Some(inviter), ownhealth_core::access::today()).await?;
     }
     Ok(user_id)
 }
@@ -316,17 +316,81 @@ pub fn at_majority(profile: &Profile, majority: i32, on: NaiveDate) -> bool {
     profile.relationship.as_deref() == Some("child") && profile.birth_date.is_some() && !profile.is_minor(on, majority)
 }
 
-/// The slugs among `perms` that wait for their person to take them over: managed by the caller as
-/// guardian, nobody's login yet, and past the age of majority.
-pub async fn transfer_pending(conn: &mut PgConnection, perms: &[Permission], on: NaiveDate) -> Result<Vec<String>> {
+/// The profiles among `perms` that wait for their person to take them over: managed by the caller as
+/// guardian, nobody's login yet, and past the age of majority. `invited` is true while a claim invite
+/// for it is still open, so nobody sends a second one.
+pub async fn transfer_pending(conn: &mut PgConnection, perms: &[Permission], on: NaiveDate) -> Result<Vec<Value>> {
     let Some(first) = perms.first() else {
         return Ok(Vec::new());
     };
-    let aom = majority(conn, first.profile.household_id).await?;
-    Ok(perms
+    let aom = majority(&mut *conn, first.profile.household_id).await?;
+    let mut out = Vec::new();
+    for p in perms
         .iter()
         .filter(|p| p.role == "guardian" && p.profile.user_id.is_none() && at_majority(&p.profile, aom, on))
-        .map(|p| p.profile.slug.clone())
+    {
+        let invited: bool = sqlx::query_scalar(
+            "select exists (select 1 from auth_challenge where purpose = 'invite' and used_at is null \
+             and expires_at > now() and data->>'claim_profile_id' = $1)",
+        )
+        .bind(p.profile.id.to_string())
+        .fetch_one(&mut *conn)
+        .await?;
+        out.push(json!({"profile": p.profile.slug, "invited": invited}));
+    }
+    Ok(out)
+}
+
+/// Who had access to the profiles the caller owns until she took them over at majority, and has none
+/// now: one entry per person, from the claim's `grant_change` audit rows (never a capped page of them).
+pub async fn former_access(conn: &mut PgConnection, perms: &[Permission], user_id: Uuid) -> Result<Vec<Value>> {
+    let owned: Vec<Uuid> = perms
+        .iter()
+        .filter(|p| p.role == "owner" && p.profile.user_id == Some(user_id))
+        .map(|p| p.profile.id)
+        .collect();
+    if owned.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "select slug, who, args_summary, ts from ( \
+           select distinct on (e.profile_id, e.resource_ids[1]) p.slug, e.resource_ids[1] as who, \
+             e.args_summary, e.ts, e.id \
+           from audit_event e join profile p on p.id = e.profile_id \
+           where e.profile_id = any($1) and e.action = 'grant_change' and e.args_summary like 'majority;%' \
+           and e.resource_ids[1] is not null \
+           and not exists (select 1 from profile_grant g where g.profile_id = e.profile_id \
+             and g.user_id::text = e.resource_ids[1]) \
+           order by e.profile_id, e.resource_ids[1], e.id desc \
+         ) latest order by id desc",
+    )
+    .bind(&owned)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(slug, user, args, ts)| {
+            let field = |k: &str| {
+                args.split(';')
+                    .find_map(|part| part.strip_prefix(k).and_then(|v| v.strip_prefix('=')))
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let categories: Vec<String> = field("categories")
+                .split(',')
+                .filter(|c| !c.is_empty())
+                .map(str::to_string)
+                .collect();
+            let expires = field("expires");
+            json!({
+                "profile": slug,
+                "user_id": user,
+                "role": field("role"),
+                "categories": categories,
+                "expires_at": if expires.is_empty() { Value::Null } else { json!(expires) },
+                "ended_at": ownhealth_core::pyjson::pydantic_datetime_utc(&ts),
+            })
+        })
         .collect())
 }
 
@@ -362,27 +426,48 @@ pub async fn claim_profile(
     if !at_majority(&profile, majority(&mut *conn, profile.household_id).await?, on) {
         return Ok(());
     }
-    let ended: Vec<(Uuid, Vec<String>)> = sqlx::query_as(
+    // A grant that had already expired gave no access: it goes without a word, and only live ones are
+    // listed as hers to give back, each with the end date it had.
+    type Ended = (Uuid, Vec<String>, Option<chrono::DateTime<chrono::Utc>>, bool);
+    let ended: Vec<Ended> = sqlx::query_as(
         "delete from profile_grant where profile_id = $1 and role = 'guardian' and user_id <> $2 \
-         returning user_id, categories",
+         returning user_id, categories, expires_at, (expires_at is null or expires_at > now())",
     )
     .bind(profile_id)
     .bind(user_id)
     .fetch_all(&mut *conn)
     .await?;
     set_genome_switches(&mut *conn, profile_id, Some(false), Some(false)).await?;
-    for (guardian, mut categories) in ended {
+    let event = |action: &str, args: String| AuditEvent {
+        actor_id: Some(user_id),
+        tool: Some("claim_profile".into()),
+        profile_id: Some(profile_id),
+        args_summary: Some(args),
+        ..AuditEvent::new("user", "ui", action)
+    };
+    write_audit(
+        &mut *conn,
+        &event("consent_change", "ui=False;agents=False;majority".into()),
+    )
+    .await?;
+    for (guardian, mut categories, expires_at, live) in ended {
+        if !live {
+            continue;
+        }
         categories.sort();
+        let mut args = format!("majority;role=guardian;categories={}", categories.join(","));
+        if let Some(at) = expires_at {
+            args.push_str(&format!(
+                ";expires={}",
+                ownhealth_core::pyjson::pydantic_datetime_utc(&at)
+            ));
+        }
         write_audit(
             &mut *conn,
             &AuditEvent {
-                actor_id: Some(user_id),
-                tool: Some("claim_profile".into()),
-                profile_id: Some(profile_id),
                 resource_type: Some("user".into()),
                 resource_ids: Some(vec![guardian.to_string()]),
-                args_summary: Some(format!("majority;role=guardian;categories={}", categories.join(","))),
-                ..AuditEvent::new("user", "ui", "grant_change")
+                ..event("grant_change", args)
             },
         )
         .await?;
