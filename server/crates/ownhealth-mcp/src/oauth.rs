@@ -5,9 +5,11 @@
 //! - `GET /.well-known/oauth-authorization-server` (RFC 8414): issuer = OWNHEALTH_BASE_URL,
 //!   `code_challenge_methods_supported: ["S256"]`, `client_id_metadata_document_supported: true`,
 //!   `authorization_response_iss_parameter_supported: true`; no `registration_endpoint` (no DCR).
-//! - `GET /oauth/authorize`: checks the client (CIMD) and `redirect_uri` first (a failure there is
-//!   shown, never redirected), then `response_type=code`, PKCE S256 (plain or missing is refused),
-//!   `resource` = our canonical `/mcp` URI (RFC 8707) and the scopes; then sends the browser to the
+//! - `GET /oauth/authorize`: checks the client (CIMD) and `redirect_uri`, then `response_type=code`,
+//!   PKCE S256 (plain or missing is refused), `resource` = our canonical `/mcp` URI (RFC 8707), the
+//!   scopes and a `state` of 512 bytes at most. Any failure is a 400 shown to the person, never a
+//!   redirect (the requester writes the client document, so a redirect would be an open redirector);
+//!   at most 1000 requests stay open (503 beyond). Then it sends the browser to the
 //!   consent screen, `/oauth/consent?request=<id>`, where the person logs in and approves with step-up
 //!   (`ownhealth_api::routes::oauth`).
 //! - `POST /oauth/token` (form): `authorization_code` (PKCE verifier, same `resource`) and
@@ -105,14 +107,10 @@ fn single<'a>(q: &'a [(String, String)], key: &str) -> Result<Option<&'a str>, O
 /// What `/oauth/authorize` decides, before anything is stored.
 #[derive(Debug, PartialEq)]
 pub enum Authorize {
-    /// Shown to the person; the client is not trusted with a redirect.
+    /// Shown to the person as a 400. A refused request is never redirected: the client document and
+    /// its redirect URIs are the requester's own, so a redirect here would make `/oauth/authorize` an
+    /// open redirector (RFC 9700 4.11.2). Only the consent decision sends the browser back.
     Show(OAuthError),
-    /// Sent back to the client's redirect URI.
-    Back {
-        redirect_uri: String,
-        state: Option<String>,
-        error: OAuthError,
-    },
     Ok(AuthorizeIn),
 }
 
@@ -163,10 +161,17 @@ pub fn check_authorize(
         }
     };
     let scopes = oauth::parse_scopes(single(q, "scope")?)?;
+    let state = single(q, "state")?;
+    if state.is_some_and(|s| s.len() > oauth::STATE_MAX_BYTES) {
+        return Err(OAuthError::new(
+            "invalid_request",
+            format!("state must be at most {} bytes.", oauth::STATE_MAX_BYTES),
+        ));
+    }
     Ok(AuthorizeIn {
         client_id: client_id.to_string(),
         redirect_uri: redirect_uri.to_string(),
-        state: single(q, "state")?.map(str::to_string),
+        state: state.map(str::to_string),
         code_challenge: challenge.to_string(),
         resource: resource.to_string(),
         scopes,
@@ -200,15 +205,10 @@ async fn decide(rt: &Runtime, q: &[(String, String)]) -> Result<Authorize, Error
         }
         Err(e) => return Ok(Authorize::Show(e)),
     };
-    let state = single(q, "state").ok().flatten().map(str::to_string);
     let canonical = oauth::canonical_resource(base(rt));
     Ok(match check_authorize(q, client_id, redirect_uri, &canonical) {
         Ok(a) => Authorize::Ok(a),
-        Err(error) => Authorize::Back {
-            redirect_uri: redirect_uri.to_string(),
-            state,
-            error,
-        },
+        Err(error) => Authorize::Show(error),
     })
 }
 
@@ -220,21 +220,6 @@ async fn authorize(State(rt): State<Runtime>, Query(q): Query<Vec<(String, Strin
     match decide(&rt, &q).await {
         Err(e) => internal(e),
         Ok(Authorize::Show(e)) => error_json(StatusCode::BAD_REQUEST, &e),
-        Ok(Authorize::Back {
-            redirect_uri,
-            state,
-            error,
-        }) => {
-            let mut p = vec![("error", error.code), ("error_description", error.description.as_str())];
-            if let Some(s) = &state {
-                p.push(("state", s));
-            }
-            p.push(("iss", issuer.as_str()));
-            match oauth::redirect_with(&redirect_uri, &p) {
-                Ok(to) => no_store(Redirect::to(&to).into_response()),
-                Err(e) => internal(e),
-            }
-        }
         Ok(Authorize::Ok(a)) => {
             let stored = async {
                 let mut conn = rt.pool.acquire().await?;
@@ -243,6 +228,10 @@ async fn authorize(State(rt): State<Runtime>, Query(q): Query<Vec<(String, Strin
             .await;
             match stored {
                 Ok(id) => no_store(Redirect::to(&format!("{issuer}/oauth/consent?request={id}")).into_response()),
+                Err(Error::Invalid(m)) => error_json(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &OAuthError::new("temporarily_unavailable", m),
+                ),
                 Err(e) => internal(e),
             }
         }

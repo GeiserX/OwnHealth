@@ -424,7 +424,24 @@ async fn plain_pkce_foreign_resources_and_bad_redirects_are_refused() -> R {
         ("redirect_uri", CB),
         ("state", "s"),
     ];
-    let cases: [(&[(&str, &str)], &str); 4] = [
+    let long_state = "s".repeat(513);
+    let cases: [(&[(&str, &str)], &str); 6] = [
+        (
+            &[
+                ("response_type", "token"),
+                ("code_challenge", &challenge),
+                ("code_challenge_method", "S256"),
+            ],
+            "unsupported_response_type",
+        ),
+        (
+            &[
+                ("state", &long_state),
+                ("code_challenge", &challenge),
+                ("code_challenge_method", "S256"),
+            ],
+            "invalid_request",
+        ),
         (
             &[("code_challenge", VERIFIER), ("code_challenge_method", "plain")],
             "invalid_request",
@@ -447,15 +464,19 @@ async fn plain_pkce_foreign_resources_and_bad_redirects_are_refused() -> R {
             "invalid_scope",
         ),
     ];
+    // a refused request is a 400 shown to the person, never a redirect: the requester wrote the
+    // client document, so following its redirect URI would make /oauth/authorize an open redirector
     for (extra, code) in cases {
-        let mut pairs = base.to_vec();
+        let mut pairs: Vec<(&str, &str)> = base
+            .iter()
+            .copied()
+            .filter(|(k, _)| !extra.iter().any(|(e, _)| e == k))
+            .collect();
         pairs.extend_from_slice(extra);
         let r = authorize(&app, &pairs).await?;
-        assert!(r.status.is_redirection(), "{extra:?}");
-        let to = location(&r);
-        assert!(to.starts_with(CB), "{to}");
-        assert_eq!(param(&to, "error").as_deref(), Some(code), "{extra:?}");
-        assert_eq!(param(&to, "iss").as_deref(), Some(BASE));
+        assert_eq!(r.status, 400, "{extra:?}");
+        assert!(location(&r).is_empty(), "{extra:?}");
+        assert_eq!(r.json()["error"], code, "{extra:?}");
     }
     let open: i64 = sqlx::query_scalar("select count(*) from oauth_request")
         .fetch_one(&w.db.pool)
@@ -491,6 +512,89 @@ async fn plain_pkce_foreign_resources_and_bad_redirects_are_refused() -> R {
     )
     .await?;
     assert_eq!(r.json()["error"], "invalid_grant");
+    Ok(())
+}
+
+/// `/oauth/authorize` needs no login, so what it stores is purged once lapsed and capped while open.
+#[tokio::test]
+async fn unauthenticated_authorize_requests_cannot_fill_the_database() -> R {
+    let w = world().await?;
+    let app = app_at(&w, BASE);
+    let client_id = serve_cimd(&[CB]).await?;
+    let challenge = pkce_s256(VERIFIER);
+    let pairs = [
+        ("response_type", "code"),
+        ("client_id", client_id.as_str()),
+        ("redirect_uri", CB),
+        ("code_challenge", challenge.as_str()),
+        ("code_challenge_method", "S256"),
+    ];
+    let count = |sql: &'static str| sqlx::query_scalar::<_, i64>(sql).fetch_one(&w.db.pool);
+    // lapsed rows from earlier visits: an old request and a stale client nobody approved
+    sqlx::query(
+        "insert into oauth_client (client_id, redirect_uris, document, expires_at) values \
+         ('https://stale.example/c.json', '{https://stale.example/cb}', '{}', now() - interval '1 hour')",
+    )
+    .execute(&w.db.pool)
+    .await?;
+    sqlx::query(
+        "insert into oauth_request (client_id, redirect_uri, code_challenge, resource, scopes, expires_at) \
+         select 'https://stale.example/c.json', 'https://stale.example/cb', 'x', 'r', '{}', \
+         now() - interval '1 minute' from generate_series(1, 5)",
+    )
+    .execute(&w.db.pool)
+    .await?;
+    let r = authorize(&app, &pairs).await?;
+    assert!(r.status.is_redirection(), "{}", r.status);
+    assert_eq!(
+        count("select count(*) from oauth_request").await?,
+        1,
+        "lapsed requests are purged"
+    );
+    assert_eq!(
+        count("select count(*) from oauth_client where client_id = 'https://stale.example/c.json'").await?,
+        0,
+        "a stale unapproved client is purged"
+    );
+    // open requests are capped
+    sqlx::query(
+        "insert into oauth_request (client_id, redirect_uri, code_challenge, resource, scopes, expires_at) \
+         select $1, $2, 'x', 'r', '{}', now() + interval '10 minutes' from generate_series(1, $3)",
+    )
+    .bind(&client_id)
+    .bind(CB)
+    .bind((oauth::MAX_OPEN_REQUESTS - 1) as i32)
+    .execute(&w.db.pool)
+    .await?;
+    let r = authorize(&app, &pairs).await?;
+    assert_eq!(r.status, 503);
+    assert_eq!(r.json()["error"], "temporarily_unavailable");
+    assert_eq!(
+        count("select count(*) from oauth_request").await?,
+        oauth::MAX_OPEN_REQUESTS
+    );
+    // and so are documents of clients nobody approved
+    sqlx::query(
+        "insert into oauth_client (client_id, redirect_uris, document, expires_at) \
+         select 'https://flood.example/' || g || '.json', '{https://flood.example/cb}', '{}', now() + interval '1 day' \
+         from generate_series(1, $1) g",
+    )
+    .bind(oauth::MAX_UNAPPROVED_CLIENTS as i32)
+    .execute(&w.db.pool)
+    .await?;
+    let other = serve_cimd(&[CB]).await?;
+    let mut flooded = pairs.to_vec();
+    flooded[1] = ("client_id", other.as_str());
+    let r = authorize(&app, &flooded).await?;
+    assert_eq!(
+        (r.status.as_u16(), r.json()["error"].clone()),
+        (400, json!("invalid_client"))
+    );
+    let stored = sqlx::query_scalar::<_, i64>("select count(*) from oauth_client where client_id = $1")
+        .bind(&other)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(stored, 0);
     Ok(())
 }
 

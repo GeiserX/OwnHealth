@@ -228,6 +228,24 @@ fn clean(v: Option<&Value>) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// A redirect URI a client may register (OAuth 2.1 section 2.3.1, RFC 8252 7): https, plain http only
+/// to a loopback host, or a native app's private-use scheme in reverse-domain form
+/// (`com.example.app:/cb`). Never userinfo or a fragment; so never `javascript:`, `data:` or `file:`.
+pub fn redirect_uri_acceptable(u: &str) -> bool {
+    let Ok(p) = url::Url::parse(u) else {
+        return false;
+    };
+    if p.fragment().is_some() || !p.username().is_empty() || p.password().is_some() {
+        return false;
+    }
+    match p.scheme() {
+        "https" => p.host_str().is_some(),
+        "http" => matches!(p.host_str(), Some("127.0.0.1" | "[::1]" | "localhost")),
+        "javascript" | "data" | "file" | "blob" | "about" | "vbscript" | "ftp" | "ws" | "wss" => false,
+        s => s.contains('.'),
+    }
+}
+
 /// Check a fetched document against the URL it came from.
 pub fn parse_document(client_id: &str, body: &[u8]) -> Result<(ClientMetadata, Value)> {
     let bad = |why: &str| Error::Invalid(format!("client metadata document {why}"));
@@ -259,8 +277,7 @@ pub fn parse_document(client_id: &str, body: &[u8]) -> Result<(ClientMetadata, V
         return Err(bad("lists no redirect_uris"));
     }
     for u in &uris {
-        let ok = url::Url::parse(u).is_ok_and(|p| p.fragment().is_none() && p.scheme() != "javascript");
-        if !ok {
+        if !redirect_uri_acceptable(u) {
             return Err(bad("has an invalid redirect URI"));
         }
     }
@@ -342,6 +359,20 @@ pub async fn fetch_client(conn: &mut PgConnection, client_id: &str) -> Result<Cl
     }
     let (client, doc) = parse_document(client_id, &fetched.body)?;
     let ttl = cache_seconds(fetched.cache_control.as_deref());
+    purge_expired(&mut *conn).await?;
+    let unapproved: i64 = sqlx::query_scalar(
+        "select count(*) from oauth_client k where not exists (select 1 from oauth_client n where n.client_id = $1) \
+         and not exists (select 1 from oauth_consent c where c.client_id = k.client_id)",
+    )
+    .bind(client_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    // a client already cached (approved or not) is always refreshed; only new ones count
+    if unapproved >= MAX_UNAPPROVED_CLIENTS {
+        return Err(Error::Invalid(
+            "too many unknown clients are pending on this server; try again later".into(),
+        ));
+    }
     sqlx::query(
         "insert into oauth_client (client_id, client_name, client_uri, logo_uri, redirect_uris, document, \
          fetched_at, expires_at) values ($1, $2, $3, $4, $5, $6, now(), now() + make_interval(secs => $7)) \
@@ -374,7 +405,44 @@ pub struct AuthorizeIn {
     pub scopes: Vec<String>,
 }
 
+/// Open authorization requests the server keeps at once. `/oauth/authorize` needs no login, so
+/// without a cap anyone could fill the database with pending requests.
+pub const MAX_OPEN_REQUESTS: i64 = 1000;
+/// Cached metadata documents of clients nobody approved yet, kept at once (up to 64 KiB each).
+pub const MAX_UNAPPROVED_CLIENTS: i64 = 1000;
+/// The longest `state` a client may send; it is stored and echoed back.
+pub const STATE_MAX_BYTES: usize = 512;
+
+/// Delete what can no longer be used: lapsed requests, codes a day past their expiry (a used code
+/// stays that long, so a replay still revokes its consent), expired refresh tokens, and cached
+/// documents of clients with no consent and no open request once their cache lifetime is over.
+pub async fn purge_expired(conn: &mut PgConnection) -> Result<()> {
+    for sql in [
+        "delete from oauth_request where expires_at <= now()",
+        "delete from oauth_code where expires_at <= now() - interval '1 day'",
+        "delete from oauth_refresh_token where expires_at <= now()",
+        "delete from oauth_client k where k.status = 'active' and k.expires_at <= now() \
+         and not exists (select 1 from oauth_consent c where c.client_id = k.client_id) \
+         and not exists (select 1 from oauth_request r where r.client_id = k.client_id) \
+         and not exists (select 1 from oauth_code o where o.client_id = k.client_id) \
+         and not exists (select 1 from api_token t where t.oauth_client_id = k.client_id)",
+    ] {
+        sqlx::query(sql).execute(&mut *conn).await?;
+    }
+    Ok(())
+}
+
+/// Store a pending authorization. Refused with `Error::Invalid` while [`MAX_OPEN_REQUESTS`] are open.
 pub async fn create_request(conn: &mut PgConnection, r: &AuthorizeIn) -> Result<Uuid> {
+    purge_expired(&mut *conn).await?;
+    let open: i64 = sqlx::query_scalar("select count(*) from oauth_request where decided_at is null")
+        .fetch_one(&mut *conn)
+        .await?;
+    if open >= MAX_OPEN_REQUESTS {
+        return Err(Error::Invalid(
+            "Too many authorization requests are open on this server; try again in a few minutes.".into(),
+        ));
+    }
     Ok(sqlx::query_scalar(
         "insert into oauth_request (client_id, redirect_uri, state, code_challenge, resource, scopes, expires_at) \
          values ($1, $2, $3, $4, $5, $6, now() + make_interval(secs => $7)) returning id",
@@ -1158,6 +1226,39 @@ mod tests {
             "[]".to_string(),
         ] {
             assert!(parse_document(id, bad.as_bytes()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn redirect_uris_are_https_loopback_http_or_a_reverse_domain_scheme() {
+        for good in [
+            "https://app.example/cb",
+            "http://127.0.0.1/cb",
+            "http://127.0.0.1:33418/callback",
+            "http://[::1]:8080/cb",
+            "http://localhost/cb",
+            "com.example.agent:/oauth/cb",
+        ] {
+            assert!(redirect_uri_acceptable(good), "{good}");
+        }
+        for bad in [
+            "http://agent.example/cb",
+            "http://192.168.1.5/cb",
+            "https://user:pw@app.example/cb",
+            "https://user@app.example/cb",
+            "https://app.example/cb#frag",
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "file:///etc/passwd",
+            "myapp:/cb",
+            "not a url",
+        ] {
+            assert!(!redirect_uri_acceptable(bad), "{bad}");
+            let doc = format!(r#"{{"client_id":"https://a.example/c.json","redirect_uris":["{bad}"]}}"#);
+            assert!(
+                parse_document("https://a.example/c.json", doc.as_bytes()).is_err(),
+                "{bad}"
+            );
         }
     }
 
