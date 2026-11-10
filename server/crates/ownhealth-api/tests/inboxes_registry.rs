@@ -28,6 +28,24 @@ fn mailbox() -> Value {
            "config": {"host": "imap.rivera.example", "port": 993, "tls": "implicit", "username": "salud.rivera"}})
 }
 
+/// A response that shows a source (or a list of them) holds neither the secret nor its handles.
+fn no_secret_in(r: &support::Resp, secret: &str) {
+    assert!(
+        !String::from_utf8_lossy(&r.bytes).contains(secret),
+        "the secret is in the answer"
+    );
+    let rows = match r.json.as_array() {
+        Some(a) => a.clone(),
+        None => vec![r.json.clone()],
+    };
+    assert!(!rows.is_empty(), "no source in the answer: {}", r.json);
+    for row in rows {
+        for hidden in ["secret_id", "cursor", "token_sha256", "secret", "password", "token"] {
+            assert!(row.get(hidden).is_none(), "{hidden} leaked: {row}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_manager_adds_changes_and_removes_a_mailbox() -> R {
     let env = env().await?;
@@ -61,6 +79,11 @@ async fn a_manager_adds_changes_and_removes_a_mailbox() -> R {
         .as_array()
         .and_then(|a| a.iter().find(|s| s["id"] == id.as_str()));
     assert_eq!(row.map(|s| s["kind"].clone()), Some(json!("email")));
+    // The list and the detail never carry the secret or its handles, as the create answer does not.
+    let one = c.get(&format!("/api/inboxes/{id}")).await?;
+    assert_eq!(one.status, StatusCode::OK);
+    no_secret_in(&list, IMAP_PASS);
+    no_secret_in(&one, IMAP_PASS);
 
     // a new password replaces the sealed one in place; an absent one keeps it
     let r = c
@@ -77,6 +100,9 @@ async fn a_manager_adds_changes_and_removes_a_mailbox() -> R {
         (Some("Buzón"), Some(120))
     );
     assert_eq!(env.scalar_i64("select count(*) from secret").await?, 1);
+    no_secret_in(&r, "otra-clave");
+    no_secret_in(&c.get("/api/inboxes").await?, "otra-clave");
+    no_secret_in(&c.get(&format!("/api/inboxes/{id}")).await?, "otra-clave");
 
     // "sync now" queues one poll job
     let r = c.post0(&format!("/api/inboxes/{id}/sync")).await?;

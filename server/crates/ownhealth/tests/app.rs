@@ -70,6 +70,32 @@ async fn probes_answer_like_python() -> R {
     Ok(())
 }
 
+/// No page of the UI may be framed: a sibling subdomain the SameSite=Lax cookie lets through could
+/// otherwise overlay the OAuth consent screen and trick the person into approving a client.
+#[tokio::test]
+async fn no_ui_page_can_be_framed() -> R {
+    let db = TestDb::empty().await?;
+    let dir = tempfile::tempdir()?;
+    let app = build_app(runtime(&db, dir.path(), true).await?);
+    for path in ["/", "/oauth/consent", "/_app/app.js"] {
+        let res = app.clone().oneshot(get(path)?).await?;
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+        let h = |name: &str| {
+            res.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        assert_eq!(
+            h("content-security-policy").as_deref(),
+            Some("frame-ancestors 'none'"),
+            "{path}"
+        );
+        assert_eq!(h("x-frame-options").as_deref(), Some("DENY"), "{path}");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_ui_falls_back_to_index_but_api_and_mcp_paths_do_not() -> R {
     let db = TestDb::new().await?;

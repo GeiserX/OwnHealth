@@ -66,11 +66,20 @@ impl Ui {
     }
 }
 
+/// Every UI response refuses to be framed, so no other site (a sibling subdomain included, which the
+/// SameSite=Lax session cookie does not stop) can overlay the OAuth consent screen or any other page
+/// and trick a click. `X-Frame-Options` is for browsers without CSP level 2.
 fn file(data: Cow<'static, [u8]>, content_type: &str, cache: Option<&'static str>) -> Response {
     let mut r = Response::new(Body::from(data.into_owned()));
     if let Ok(v) = HeaderValue::from_str(content_type) {
         r.headers_mut().insert(header::CONTENT_TYPE, v);
     }
+    let h = r.headers_mut();
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     if let Some(c) = cache {
         r.headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static(c));
