@@ -5,7 +5,10 @@
 //! sample that is already there:
 //! - `Keep`: the first file to bring a sample owns it (Gadgetbridge exports, Nightscout readings);
 //! - `Refresh`: a push may carry a newer value for the same bucket (Health Auto Export sums a minute or
-//!   an hour that was still open at the previous push), so the value is replaced when it differs.
+//!   an hour that was still open at the previous push), so the value is replaced when it differs;
+//! - `Adopt`: the newest file owns the samples it holds (Gadgetbridge exports are cumulative, so each
+//!   holds the previous ones): a stored sample moves to the new document and takes its value, and
+//!   retracting an older export leaves what a newer one still holds.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,6 +37,7 @@ pub struct Sample {
 pub enum Conflict {
     Keep,
     Refresh,
+    Adopt,
 }
 
 /// What a write did. `seen` counts distinct samples after merging repeats inside the batch.
@@ -49,6 +53,20 @@ impl Written {
     pub fn duplicate(&self) -> i64 {
         self.seen - self.new
     }
+
+    /// Add another batch's counts (`insert` per batch, then one `rebuild`).
+    pub fn add(&mut self, o: Written) {
+        self.seen += o.seen;
+        self.new += o.new;
+        self.refreshed += o.refreshed;
+    }
+}
+
+/// What a series of `insert`s changed, for one rollup rebuild at the end (`rebuild`).
+#[derive(Debug, Clone, Default)]
+pub struct Touched {
+    metrics: BTreeSet<String>,
+    sources: BTreeSet<i16>,
 }
 
 /// The `wearable_source` of one device, linked to the connector `source` that brings it.
@@ -80,6 +98,31 @@ pub async fn write(
     samples: Vec<Sample>,
     conflict: Conflict,
 ) -> Result<Written> {
+    let mut touched = Touched::default();
+    let w = insert(&mut *conn, profile_id, document_id, samples, conflict, &mut touched).await?;
+    rebuild(conn, profile_id, touched).await?;
+    Ok(w)
+}
+
+/// Rebuild the rollups of what the inserts touched.
+pub async fn rebuild(conn: &mut PgConnection, profile_id: Uuid, touched: Touched) -> Result<()> {
+    if !touched.metrics.is_empty() {
+        let metrics: Vec<String> = touched.metrics.into_iter().collect();
+        let sources: Vec<i16> = touched.sources.into_iter().collect();
+        wearables::recompute_rollups(&mut *conn, profile_id, Some(&metrics), Some(&sources)).await?;
+    }
+    Ok(())
+}
+
+/// Insert one batch without rebuilding rollups; what it touched is added to `touched`.
+pub async fn insert(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    document_id: Option<Uuid>,
+    samples: Vec<Sample>,
+    conflict: Conflict,
+    touched: &mut Touched,
+) -> Result<Written> {
     let mut unique: BTreeMap<(&'static str, i16, DateTime<Utc>), Sample> = BTreeMap::new();
     for s in samples {
         if s.v.is_finite() {
@@ -98,6 +141,11 @@ pub async fn write(
              tz_offset_min = excluded.tz_offset_min where wearable_sample.v is distinct from excluded.v \
              or wearable_sample.t_end is distinct from excluded.t_end"
         }
+        Conflict::Adopt => {
+            "on conflict (profile_id, metric, source_id, t) do update set document_id = excluded.document_id, \
+             v = excluded.v where wearable_sample.document_id is distinct from excluded.document_id \
+             or wearable_sample.v is distinct from excluded.v"
+        }
     };
     let sql = format!(
         "insert into wearable_sample (profile_id, metric, t, t_end, v, tz_offset_min, source_id, document_id) \
@@ -105,8 +153,6 @@ pub async fn write(
          cast($5 as timestamptz[]), cast($6 as real[]), cast($7 as smallint[]), cast($8 as smallint[])) \
          as x(m, t, te, v, tz, s) {on_conflict} returning (xmax = 0) as inserted"
     );
-    let mut touched_metrics: BTreeSet<String> = BTreeSet::new();
-    let mut touched_sources: BTreeSet<i16> = BTreeSet::new();
     for chunk in rows.chunks(CHUNK) {
         let metrics: Vec<&str> = chunk.iter().map(|s| s.metric).collect();
         let ts: Vec<DateTime<Utc>> = chunk.iter().map(|s| s.t).collect();
@@ -131,13 +177,8 @@ pub async fn write(
         out.new += flags.iter().filter(|f| **f).count() as i64;
         out.refreshed += flags.iter().filter(|f| !**f).count() as i64;
         // a chunk that wrote anything may have touched any of its metrics and sources
-        touched_metrics.extend(chunk.iter().map(|s| s.metric.to_string()));
-        touched_sources.extend(chunk.iter().map(|s| s.source));
-    }
-    if !touched_metrics.is_empty() {
-        let metrics: Vec<String> = touched_metrics.into_iter().collect();
-        let sources: Vec<i16> = touched_sources.into_iter().collect();
-        wearables::recompute_rollups(&mut *conn, profile_id, Some(&metrics), Some(&sources)).await?;
+        touched.metrics.extend(chunk.iter().map(|s| s.metric.to_string()));
+        touched.sources.extend(chunk.iter().map(|s| s.source));
     }
     Ok(out)
 }

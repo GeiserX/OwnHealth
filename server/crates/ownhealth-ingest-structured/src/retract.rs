@@ -8,8 +8,8 @@
 //! lifecycle, so they are deleted and the rollups they fed rebuilt. The document's import flags are
 //! cleared, so importing it again runs the import instead of returning the old summary.
 //!
-//! Samples another still-active export also holds belong to whichever export brought them first;
-//! they leave with that one.
+//! Samples another still-active export also holds belong to whichever export brought them first
+//! (Apple Health) or last (Gadgetbridge, whose exports are cumulative); they leave with that one.
 
 use std::collections::{BTreeMap, BTreeSet};
 

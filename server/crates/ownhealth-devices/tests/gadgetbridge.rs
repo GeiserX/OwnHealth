@@ -240,3 +240,88 @@ async fn another_sqlite_file_fails_for_good_and_writes_nothing() -> R {
     );
     Ok(())
 }
+
+/// A small export: one band with one resting heart rate per day for `days` days from `SMALL_T0`, plus
+/// rows at the given raw TIMESTAMP values (milliseconds).
+const SMALL_T0: i64 = T0 - 100 * 86_400; // 2026-07-18, so 59 days stay in the past
+
+fn small(path: &Path, days: i64, odd: &[i64]) -> rusqlite::Result<Vec<u8>> {
+    let db = Connection::open(path)?;
+    db.execute_batch(
+        "create table DEVICE (_id integer primary key, NAME text not null, IDENTIFIER text not null unique);
+         insert into DEVICE values (1, 'Amazfit Band 7', 'C8:0F:10:00:00:01');
+         create table HUAMI_HEART_RATE_RESTING_SAMPLE (TIMESTAMP integer not null, DEVICE_ID integer not null,
+           HEART_RATE integer not null, primary key (TIMESTAMP, DEVICE_ID));",
+    )?;
+    for d in 0..days {
+        db.execute(
+            "insert into HUAMI_HEART_RATE_RESTING_SAMPLE values (?1, 1, ?2)",
+            ((SMALL_T0 + d * 86_400) * 1000, 50 + d % 10),
+        )?;
+    }
+    for ms in odd {
+        db.execute("insert into HUAMI_HEART_RATE_RESTING_SAMPLE values (?1, 1, 60)", (*ms,))?;
+    }
+    drop(db);
+    std::fs::read(path).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+#[tokio::test]
+async fn timestamps_outside_any_real_reading_are_bad_times_not_samples() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let dir = tempfile::tempdir()?;
+    // 1970-01-01 (an unset clock), 1999, and ten years ahead
+    let future = (Utc::now() + chrono::Duration::days(3650)).timestamp_millis();
+    let bytes = small(&dir.path().join("gb"), 3, &[0, 915_148_800_000, future])?;
+    let (state, result, err) = job(&env, upload(&env, bytes, "sam").await?).await?;
+    assert_eq!(state, "done", "{err:?}");
+    assert_eq!(result["reasons"], json!({"bad_time": 3}), "{result}");
+    assert_eq!(result["accepted"], json!(3));
+    let (lo, hi): (chrono::DateTime<Utc>, chrono::DateTime<Utc>) =
+        sqlx::query_as("select min(t), max(t) from wearable_sample where profile_id = $1")
+            .bind(sam)
+            .fetch_one(&env.db.pool)
+            .await?;
+    assert_eq!(lo, Utc.timestamp_opt(SMALL_T0, 0).single().unwrap_or_default());
+    assert_eq!(
+        hi,
+        Utc.timestamp_opt(SMALL_T0 + 2 * 86_400, 0).single().unwrap_or_default()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn removing_an_older_cumulative_export_keeps_what_the_newer_one_holds() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let dir = tempfile::tempdir()?;
+    // January's export, then February's, which holds January again (Gadgetbridge exports everything)
+    let jan = small(&dir.path().join("jan"), 31, &[])?;
+    let feb = small(&dir.path().join("feb"), 59, &[])?;
+    let (state, _, err) = job(&env, upload(&env, jan, "sam").await?).await?;
+    assert_eq!(state, "done", "{err:?}");
+    let (state, _, err) = job(&env, upload(&env, feb, "sam").await?).await?;
+    assert_eq!(state, "done", "{err:?}");
+    let docs: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "select id from document where profile_id = $1 and mime = 'application/vnd.sqlite3' order by created_at",
+    )
+    .bind(sam)
+    .fetch_all(&env.db.pool)
+    .await?;
+    assert_eq!(docs.len(), 2);
+    let mut c = env.db.pool.acquire().await?;
+    ownhealth_ingest_structured::retract::retract_document_facts(&mut c, docs[0], "tidy up").await?;
+    let left = env
+        .count("select count(*) from wearable_sample where profile_id = $1", sam)
+        .await?;
+    assert_eq!(left, 59, "February's export still holds every day");
+    let days = env
+        .count(
+            "select count(*) from wearable_rollup where profile_id = $1 and metric = 'hr_resting' and bucket = 'day'",
+            sam,
+        )
+        .await?;
+    assert_eq!(days, 59);
+    Ok(())
+}

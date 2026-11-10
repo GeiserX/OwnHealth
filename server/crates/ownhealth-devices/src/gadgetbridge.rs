@@ -19,14 +19,23 @@
 //! | `_WEIGHT_SAMPLE` (Mi Scale, generic scales) | ms | `WEIGHT_KG` -> weight |
 //!
 //! Gadgetbridge writes 0 or 255 where a device measured nothing; values outside a plausible range are
-//! dropped. Other `*_SAMPLE` tables with rows (sleep stages, stress, PAI, HRV, vendor scores) are not
+//! dropped, and so are times before 2000 or more than a day ahead (a band whose clock was never set
+//! writes 1970), counted as `bad_time`.
+//!
+//! Exports are cumulative, so the newest export owns every sample it holds (`Conflict::Adopt`):
+//! deleting an older export leaves what a newer one still holds, and deleting the newest removes the
+//! overlap too until an older one is imported again.
+//!
+//! Gadgetbridge stores instants without the phone's UTC offset, so samples are stored with no offset
+//! and the daily totals and resting heart rate of this source fall on UTC days, not local ones: in
+//! Madrid, steps between midnight and 01:00 or 02:00 local count to the day before. Other `*_SAMPLE` tables with rows (sleep stages, stress, PAI, HRV, vendor scores) are not
 //! imported yet and are listed in the import summary by table. Sleep needs per-device stage decoding;
 //! HRV needs the method stored with it (connectors.md 4), so neither is guessed here.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use chrono::DateTime;
+use chrono::{DateTime, Duration, Utc};
 use ownhealth_core::access::get_profile;
 use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::error::{Error, Result};
@@ -45,6 +54,10 @@ pub const JOB: &str = "import.gadgetbridge";
 pub const PROVIDER: &str = "gadgetbridge";
 /// Samples one file may hold: years of minute data from several devices.
 pub const MAX_SAMPLES: usize = 20_000_000;
+/// Samples converted and written at a time, so the import holds one batch, not a second copy of all.
+const BATCH: usize = 100_000;
+/// The earliest sample time we keep: 2000-01-01 (a band with an unset clock writes 1970).
+const EARLIEST_MS: i64 = 946_684_800_000;
 
 /// (table suffix, timestamp column holds ms, [(column, metric, min, max)]).
 type Rule = (&'static str, &'static [(&'static str, &'static str, f64, f64)]);
@@ -282,7 +295,7 @@ pub async fn import_gadgetbridge(
         .await?
         .ok_or_else(|| Error::NotFound(format!("unknown profile {profile_id}")))?;
     let path = blobs.path(&sha)?;
-    let read = tokio::task::spawn_blocking(move || read_db(&path))
+    let mut read = tokio::task::spawn_blocking(move || read_db(&path))
         .await
         .map_err(|e| Error::Other(anyhow::anyhow!("gadgetbridge read task failed: {e}")))??;
     let mut ids: HashMap<i64, i16> = HashMap::new();
@@ -293,31 +306,60 @@ pub async fn import_gadgetbridge(
             store::device_source(&mut *conn, profile.id, PROVIDER, Some(&d.name), ext, source_id).await?,
         );
     }
-    let mut unknown_device = 0i64;
-    let mut samples = Vec::with_capacity(read.samples.len());
-    for s in &read.samples {
-        let (Some(source), Some(t)) = (ids.get(&s.device_id), DateTime::from_timestamp_millis(s.t_ms)) else {
-            unknown_device += 1;
-            continue;
-        };
-        samples.push(Sample {
-            metric: s.metric,
-            t,
-            t_end: None,
-            v: s.v,
-            tz: None,
-            source: *source,
-        });
+    let (mut unknown_device, mut bad_time) = (0i64, 0i64);
+    let latest_ms = (Utc::now() + Duration::days(1)).timestamp_millis();
+    let raw = std::mem::take(&mut read.samples);
+    // converted and written one batch at a time, so the samples never exist twice in full
+    let mut touched = store::Touched::default();
+    let mut w = store::Written::default();
+    for chunk in raw.chunks(BATCH) {
+        let mut samples = Vec::with_capacity(chunk.len());
+        for s in chunk {
+            let Some(source) = ids.get(&s.device_id) else {
+                unknown_device += 1;
+                continue;
+            };
+            let Some(t) = (EARLIEST_MS..=latest_ms)
+                .contains(&s.t_ms)
+                .then(|| DateTime::from_timestamp_millis(s.t_ms))
+                .flatten()
+            else {
+                bad_time += 1;
+                continue;
+            };
+            samples.push(Sample {
+                metric: s.metric,
+                t,
+                t_end: None,
+                v: s.v,
+                tz: None,
+                source: *source,
+            });
+        }
+        let b = store::insert(
+            &mut *conn,
+            profile.id,
+            Some(document_id),
+            samples,
+            Conflict::Adopt,
+            &mut touched,
+        )
+        .await?;
+        w.add(b);
     }
-    let w = store::write(&mut *conn, profile.id, Some(document_id), samples, Conflict::Keep).await?;
+    drop(raw);
+    store::rebuild(&mut *conn, profile.id, touched).await?;
     let mut summary = ImportSummary::new(document_id.to_string());
     summary.accepted = w.new;
-    summary.skipped = w.duplicate() + unknown_device;
-    if w.duplicate() > 0 {
-        summary.reasons.insert("duplicate".into(), w.duplicate());
-    }
-    if unknown_device > 0 {
-        summary.reasons.insert("unknown_device".into(), unknown_device);
+    summary.skipped = w.duplicate() + unknown_device + bad_time;
+    for (reason, n) in [
+        ("duplicate", w.duplicate()),
+        ("unknown_device", unknown_device),
+        ("bad_time", bad_time),
+    ] {
+        if n > 0 {
+            summary.reasons.insert(reason.into(), n);
+        }
     }
     let details = json!({
         "samples": w.new,
