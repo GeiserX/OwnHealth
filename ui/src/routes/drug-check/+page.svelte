@@ -13,8 +13,9 @@
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
 	import { openSource } from '#lib/components/pages1/source.svelte';
-	import { Loader, tf } from '#lib/components/pages1/util.svelte';
-	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { Loader, tf, tp, unitLabel } from '#lib/components/pages1/util.svelte';
+	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
+	import { isActionable, withheldBy } from '#lib/logic/health';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const prof = $derived(currentProfile());
@@ -48,7 +49,15 @@
 	const unknown = $derived(check.error instanceof ApiError && check.error.code === 'drug_unknown');
 	const relTone = (r: string): 'watch' | 'info' | 'stale' => (r.startsWith('inhibitor') || r.startsWith('inducer') ? 'watch' : r === 'same_drug' ? 'info' : 'stale');
 	const EXAMPLES = ['clopidogrel', 'codeine', 'warfarin', 'simvastatin'];
-	const labSrc = (l: DrugCheckView['relevant_labs'][number]) => [l.date].filter(Boolean).join(' · ');
+	const labSrc = (l: DrugCheckView['relevant_labs'][number]) => [l.lab, l.date, l.page != null ? 'p' + l.page : null].filter(Boolean).join(' · ');
+	// The API names a withheld scope with or without 'read:'.
+	const withheld = (s: string) => withheldBy(c?.withheld.by_scope, s);
+	// A dict word for a code, with the code itself when the dict has none.
+	const word = (prefix: string, code: string) => {
+		const k = prefix + code.toLowerCase().replace(/\W+/g, '_');
+		return t(k) === k ? code : t(k);
+	};
+	const labValue = (v: string) => (/^-?\d+(\.\d+)?$/.test(v) ? fmtNum(Number(v)) : v);
 	const allergyItems = $derived((allergies.data ?? []).filter((r) => r.status === 'current' || r.status === 'provisional'));
 </script>
 
@@ -81,43 +90,52 @@
 {:else if unknown}
 	<div class="card"><div class="empty">{tf('i2_drug_unknown', { drug })}</div></div>
 {:else if check.error}
-	<NotReady error={check.error} />
+	<div class="card"><NotReady error={check.error} /></div>
 {:else if check.loading && !c}
-	<div class="empty">{t('loading')}</div>
+	<div class="card"><div class="empty">{t('loading')}</div></div>
 {:else if c}
 	<div class="drug">
 		<div class="grid" style="align-content:start">
 			{#each c.pgx as x (x.gene)}
 				{@const recs = c.guidance.filter((gd) => gd.applies_to.startsWith(x.gene))}
-				<section class="card" style={recs.length ? 'border-color:rgba(224,168,74,.45)' : ''}>
+				{@const missing = x.evidence == null && x.diplotype == null}
+				<!-- Amber only when the phenotype changes what CPIC says: standard dosing is not a warning. -->
+				{@const act = recs.length > 0 && isActionable(x.phenotype)}
+				<section class="card" style={act ? 'border-color:rgba(224,168,74,.45)' : ''}>
 					<h3>
 						{t('i2_pgx')}
-						{#if recs.length}<span class="pill p-watch"><i aria-hidden="true"></i>{tf('i2_recs', { n: recs.length })}</span>{:else}<span class="pill p-stale"><i aria-hidden="true"></i>{t('i2_no_recs')}</span>{/if}
+						{#if missing}<span class="pill p-stale"><i aria-hidden="true"></i>{t('i2_not_assessed')}</span>
+						{:else if recs.length}<span class="pill {act ? 'p-watch' : 'p-info'}"><i aria-hidden="true"></i>{tp('i2_recs', recs.length)}</span>
+						{:else}<span class="pill p-stale"><i aria-hidden="true"></i>{t('i2_no_recs')}</span>{/if}
 						{#if x.cpic_level}<span class="r">{t('i2_cpic_level')} {x.cpic_level}</span>{/if}
 					</h3>
-					<div style="display:flex;gap:22px;align-items:center;margin:4px 0 8px">
+					{#if missing}
+						<div class="muted">{tf('i2_gene_missing', { gene: x.gene })}</div>
+					{:else}
+					<div style="display:flex;gap:22px;align-items:center;margin:4px 0 8px;flex-wrap:wrap">
 						<div><div class="dim" style="font-size:11px">{t('i2_g_gene')}</div><div style="font-size:18px;font-weight:650">{x.gene}</div></div>
 						<div><div class="dim" style="font-size:11px">{t('i2_diplotype')}</div><div style="font-size:18px;font-weight:650" class="mono">{x.diplotype ?? '—'}</div></div>
-						<div><div class="dim" style="font-size:11px">{t('i2_phenotype')}</div><div style="font-size:15px;font-weight:600;color:{recs.length ? 'var(--watch)' : 'var(--text)'}">{x.phenotype ?? '—'}</div></div>
+						<div><div class="dim" style="font-size:11px">{t('i2_phenotype')}</div><div style="font-size:15px;font-weight:600;color:{act ? 'var(--watch)' : 'var(--text)'}">{x.phenotype ?? '—'}</div></div>
 						<div style="margin-left:auto;text-align:right">
-							<span class="pgx ev-{x.evidence}">{x.evidence}</span>
-							<span class="pill {x.confidence === 'high' ? 'p-ok' : x.confidence === 'medium' ? 'p-watch' : 'p-stale'}"><i aria-hidden="true"></i>{t('i2_conf_' + x.confidence)}</span>
-							<div style="margin-top:4px"><SourceChip label={`OwnGenome · ${x.call_state ?? 'n/a'}`} src={x.src} onopen={openSource} /></div>
+							{#if x.evidence}<span class="pgx ev-{x.evidence}">{x.evidence}</span>{/if}
+							{#if x.confidence}<span class="pill {x.confidence === 'high' ? 'p-ok' : x.confidence === 'medium' ? 'p-watch' : 'p-stale'}"><i aria-hidden="true"></i>{t('i2_conf_' + x.confidence)}</span>{/if}
+							{#if x.src}<div style="margin-top:4px"><SourceChip label={`OwnGenome · ${x.call_state ?? 'n/a'}`} src={x.src} onopen={openSource} /></div>{/if}
 						</div>
 					</div>
+					{/if}
 					{#each recs as gd (gd.quote)}
-						<div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em">{gd.source} · {gd.applies_to}{gd.population ? ' · ' + gd.population : ''}</div>
-						<blockquote>“{gd.quote}” <span class="dim">{t('i2_classification')}: {gd.strength.toLowerCase()}</span></blockquote>
+						<div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em">{gd.source} · {gd.applies_to}{gd.population ? ' · ' + word('i2_pop_', gd.population) : ''}</div>
+						<blockquote>“{gd.quote}” <span class="dim" style="white-space:nowrap">{t('i2_classification')}: {word('i2_str_', gd.strength)}</span></blockquote>
 					{/each}
 					{#if recs.length}
 						<div class="dim" style="font-size:11px">{[...new Set(recs.map((r) => r.url))].join(' · ')}</div>
-						<div class="note" style="margin-top:8px">{t('i2_indication')}</div>
+						{#if recs.length > 1}<div class="note" style="margin-top:8px">{t('i2_indication')}</div>{/if}
 					{/if}
 				</section>
 			{:else}
 				<section class="card">
 					<h3>{t('i2_pgx')}</h3>
-					<div class="muted">{c.withheld.by_scope.includes('read:genome') ? t('i2_withheld_genome') : t('i2_no_pgx')}</div>
+					<div class="muted">{#if withheld('genome')}<span aria-hidden="true">{'🔒 '}</span>{t('i2_withheld_genome')}{:else}{t('i2_no_pgx')}{/if}</div>
 				</section>
 			{/each}
 
@@ -128,7 +146,7 @@
 						<div style="display:flex;gap:10px;align-items:center">
 							{#if pc.computed}<span class="pill p-info"><i aria-hidden="true"></i>{t('i2_computed')}</span>{:else}<span class="pill p-stale"><i aria-hidden="true"></i>{t('i2_not_computed')}</span>{/if}
 							<span>{pc.text}</span>
-							<SourceChip label={pc.src} src={pc.src} onopen={openSource} />
+							<SourceChip label="" name={pc.text} src={pc.src} onopen={openSource} />
 						</div>
 					{/each}
 				</section>
@@ -140,11 +158,11 @@
 					<div class="lab">
 						<span style="flex:1">{l.name} <span class="dim" style="font-size:11px">· {l.reason}</span></span>
 						{#if l.src}<SourceChip label={labSrc(l)} src={l.src} onopen={openSource} />{/if}
-						<span class="num" style="font-weight:600;width:130px;text-align:right">{l.value != null ? `${l.value} ${l.unit ?? ''}` : '—'}</span>
+						<span class="num" style="font-weight:600;min-width:90px;text-align:right;white-space:nowrap">{#if l.value != null}{labValue(l.value)} <span class="muted" style="font-weight:400">{unitLabel(l.unit)}</span>{:else}<span class="dim">—</span>{/if}</span>
 						<StatusChip status={l.status} />
 					</div>
 				{:else}
-					<div class="muted">{c.withheld.by_scope.includes('read:labs') ? t('i2_withheld_labs') : t('i2_no_labs')}</div>
+					<div class="muted">{#if withheld('labs')}<span aria-hidden="true">{'🔒 '}</span>{t('i2_withheld_labs')}{:else}{t('i2_no_labs')}{/if}</div>
 				{/each}
 			</section>
 		</div>
@@ -153,28 +171,33 @@
 			<section class="card">
 				<h3>{t('meds')}</h3>
 				{#if c.current_medications_relevant.length}
-					<table class="t">
-						<tbody>
-							{#each c.current_medications_relevant as m (m.src + m.name)}
-								<tr>
-									<td style="white-space:nowrap"><b>{m.name}</b></td>
-									<td><StatusChip status={relTone(m.relation)} label={m.relation_text} /></td>
-									<td class="muted" style="font-size:12px">{m.since ? `${t('i2_since')} ${m.since} · ` : ''}<SourceChip label={`Rx · ${m.src}`} src={m.src} onopen={openSource} /></td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
+					<div class="tscroll">
+						<table class="t">
+							<tbody>
+								{#each c.current_medications_relevant as m (m.src + m.name)}
+									<tr>
+										<td style="white-space:nowrap"><b>{m.name}</b></td>
+										<td><StatusChip status={relTone(m.relation)} label={m.relation_text} /></td>
+										<td class="muted" style="font-size:12px;white-space:nowrap">
+											{#if m.since}{t('i2_since')} <span class="num" style="white-space:nowrap">{m.since}</span>{/if}
+											<span style="white-space:nowrap">{m.since ? '· ' : ''}<SourceChip label="Rx" name={m.name} src={m.src} onopen={openSource} /></span>
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
 				{:else}
-					<div class="muted">{c.withheld.by_scope.includes('read:records') ? t('i2_withheld_records') : t('i2_no_meds')}</div>
+					<div class="muted">{#if withheld('records')}<span aria-hidden="true">{'🔒 '}</span>{t('i2_withheld_records')}{:else}{t('i2_no_meds')}{/if}</div>
 				{/if}
-				{#each c.not_assessed as na (na)}<div class="note" style="margin-top:6px">not_assessed: {na}</div>{/each}
+				{#each c.not_assessed as na (na)}<div class="note" style="margin-top:6px">{t('i2_not_assessed_cap')}: {na}</div>{/each}
 			</section>
 			<section class="card">
 				<h3>{t('i2_allergies')}</h3>
 				{#if allergies.error}
 					<NotReady error={allergies.error} />
 				{:else if allergyItems.length}
-					{#each allergyItems as a (a.id)}<div><b>{a.title}</b> <SourceChip label={a.src} src={a.src} onopen={openSource} /></div>{/each}
+					{#each allergyItems as a (a.id)}<div><b>{a.title}</b> <SourceChip label="" name={a.title} src={a.src} onopen={openSource} /></div>{/each}
 				{:else if allergies.data}
 					<div class="muted">{t('i2_no_allergy')}</div>
 				{/if}
@@ -191,8 +214,8 @@
 
 <div class="disc">
 	<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 8v.5M12 11v5" /></svg>
-	<div><b>{t('i2_disc_b')}</b> {t('i2_disc')}</div>
-	{#if drug && prof}<span class="mono" style="margin-left:auto;font-size:11px;color:var(--muted);white-space:nowrap">MCP: check_drug(profile="{prof.slug}", drug="{drug}")</span>{/if}
+	<div style="flex:1 1 300px"><b>{t('i2_disc_b')}</b> {t('i2_disc')}</div>
+	{#if drug && prof}<span class="mono mcp-snip" style="margin-left:auto;font-size:11px;color:var(--muted)">MCP: check_drug(profile="{prof.slug}", drug="{drug}")</span>{/if}
 </div>
 
 <SourcePanel />
@@ -216,5 +239,37 @@
 	}
 	.lab:first-of-type {
 		border-top: 0;
+	}
+	.mcp-snip {
+		white-space: nowrap;
+	}
+	/* On a phone the MCP call may wrap, on its own line under the disclaimer. */
+	/* Below desktop the MCP call takes its own line under the disclaimer, so the text keeps its width. */
+	@media (max-width: 1100px) {
+		.disc {
+			flex-wrap: wrap;
+		}
+		.mcp-snip {
+			flex-basis: 100%;
+			margin-left: 0 !important;
+		}
+	}
+	@media (max-width: 760px) {
+		/* The drug's code and genes drop under the box instead of pushing the page sideways. */
+		.search.big {
+			flex-wrap: wrap;
+			height: auto;
+			min-height: 42px;
+			padding-top: 6px;
+			padding-bottom: 6px;
+		}
+		.search.big input {
+			flex: 1 1 60%;
+			min-width: 0;
+		}
+		.mcp-snip {
+			white-space: normal;
+			overflow-wrap: anywhere;
+		}
 	}
 </style>
