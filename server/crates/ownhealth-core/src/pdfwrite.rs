@@ -4,8 +4,8 @@
 //!
 //! Coordinates are PDF points with the origin at the bottom left. The cursor `y` is the top of the
 //! free space on the current page; flowing content (`paragraph`, `table`) moves it down and starts a
-//! new page when it would cross the bottom margin. The demo lab reports (`demo_pdf`) are drawn with
-//! the same primitives.
+//! new page when it would cross the bottom margin. The demo lab reports (`demo_pdf`) share this
+//! module's text operator and file assembly.
 
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
@@ -47,8 +47,8 @@ pub struct Folded {
     pub to: String,
 }
 
-/// Letters NFKD does not split into a base letter and a mark.
-const STROKES: [(char, char); 7] = [
+/// Letters NFKD does not split into a base letter and a mark, and signs with a WinAnsi twin.
+const STROKES: [(char, char); 9] = [
     ('ł', 'l'),
     ('Ł', 'L'),
     ('đ', 'd'),
@@ -56,19 +56,35 @@ const STROKES: [(char, char); 7] = [
     ('ħ', 'h'),
     ('Ħ', 'H'),
     ('ı', 'i'),
+    ('μ', 'µ'),
+    ('−', '-'),
 ];
 
-/// What WinAnsi prints for `c`: itself, its NFKD letters without the marks, or `?`.
+/// What WinAnsi prints for `c`, which it cannot show: its NFKD letters without the marks, or `?`.
+/// A fold that would print a digit is refused (`⁹` is not `9`, `⅓` is not `13`), so a number on
+/// the page is never a different number. A control character prints as a space.
 fn fold(c: char) -> String {
     if let Some((_, to)) = STROKES.iter().find(|(from, _)| *from == c) {
         return to.to_string();
+    }
+    if c.is_control() {
+        return " ".into();
     }
     let base: String = c
         .nfkd()
         .filter(|d| !is_combining_mark(*d))
         .filter(|d| afm::cp1252(*d).is_some())
         .collect();
-    if base.is_empty() { "?".into() } else { base }
+    if base.is_empty() || base.chars().any(|d| d.is_ascii_digit()) {
+        "?".into()
+    } else {
+        base
+    }
+}
+
+/// A character WinAnsi prints as itself: everything `cp1252` maps except the control characters.
+fn printable(c: char) -> Option<u8> {
+    if c.is_control() { None } else { afm::cp1252(c) }
 }
 
 /// `s` in WinAnsi bytes, and the characters that had to be folded (each once, in order).
@@ -76,7 +92,7 @@ pub fn encode(s: &str) -> (Vec<u8>, Vec<Folded>) {
     let mut bytes = Vec::with_capacity(s.len());
     let mut folded: Vec<Folded> = Vec::new();
     for c in s.chars() {
-        match afm::cp1252(c) {
+        match printable(c) {
             Some(b) => bytes.push(b),
             None => {
                 let to = fold(c);
@@ -100,8 +116,15 @@ pub fn text_width(s: &str, font: Font, size: f64) -> f64 {
     bytes_width(&encode(s).0, font, size)
 }
 
-/// Split `s` into lines no wider than `max_w`, at spaces; a word longer than a line is cut.
+/// Split `s` into lines no wider than `max_w`: at each line break (`\n` or `\r\n`), then at spaces;
+/// a word longer than a line is cut.
 pub fn wrap(s: &str, font: Font, size: f64, max_w: f64) -> Vec<String> {
+    s.split('\n')
+        .flat_map(|l| wrap_line(l.strip_suffix('\r').unwrap_or(l), font, size, max_w))
+        .collect()
+}
+
+fn wrap_line(s: &str, font: Font, size: f64, max_w: f64) -> Vec<String> {
     let fits = |t: &str| text_width(t, font, size) <= max_w;
     let mut lines = Vec::new();
     let mut line = String::new();
@@ -339,27 +362,46 @@ impl Writer {
         self.page().extend_from_slice(op.as_bytes());
     }
 
-    fn row(&mut self, cols: &[Column], cells: &[&str], bold: bool, size: f64, leading: f64) {
-        let wrapped: Vec<Vec<String>> = cols
-            .iter()
+    fn cells(cols: &[Column], cells: &[&str], bold: bool, size: f64) -> Vec<Vec<String>> {
+        cols.iter()
             .zip(cells)
             .map(|(c, s)| wrap(s, if bold { Font::Bold } else { c.font }, size, c.width))
-            .collect();
-        let lines = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+            .collect()
+    }
+
+    /// Lines `from..to` of a wrapped row, the first at the cursor; the cursor moves below them.
+    #[allow(clippy::too_many_arguments)]
+    fn lines(
+        &mut self,
+        cols: &[Column],
+        wrapped: &[Vec<String>],
+        from: usize,
+        to: usize,
+        bold: bool,
+        size: f64,
+        leading: f64,
+    ) {
         let top = self.y;
-        for (c, cell) in cols.iter().zip(&wrapped) {
-            for (i, line) in cell.iter().enumerate() {
+        for (c, cell) in cols.iter().zip(wrapped) {
+            let font = if bold { Font::Bold } else { c.font };
+            for (i, line) in cell.iter().enumerate().take(to).skip(from) {
                 if !line.is_empty() {
-                    let font = if bold { Font::Bold } else { c.font };
-                    self.text(c.x, top - size - i as f64 * leading, line, font, size);
+                    self.text(c.x, top - size - (i - from) as f64 * leading, line, font, size);
                 }
             }
         }
-        self.y = top - lines as f64 * leading;
+        self.y = top - (to - from) as f64 * leading;
     }
 
-    /// Rows of cells under an optional bold header; each cell wraps inside its column. A row never
-    /// splits across pages, and the header repeats at the top of every page the table reaches.
+    fn row(&mut self, cols: &[Column], cells: &[&str], bold: bool, size: f64, leading: f64) {
+        let wrapped = Writer::cells(cols, cells, bold, size);
+        let n = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        self.lines(cols, &wrapped, 0, n, bold, size, leading);
+    }
+
+    /// Rows of cells under an optional bold header; each cell wraps inside its column. A row that
+    /// does not fit in the rest of the page starts a new one; a row taller than a whole page
+    /// continues on the next page. The header repeats at the top of every page the table reaches.
     pub fn table(&mut self, cols: &[Column], header: Option<&[&str]>, rows: &[Vec<String>], size: f64, leading: f64) {
         let rule_w = 0.6;
         let draw_header = |w: &mut Writer| {
@@ -374,25 +416,39 @@ impl Writer {
                 w.y -= 2.0;
             }
         };
-        let height = |cells: &[String]| {
-            cols.iter()
-                .zip(cells)
-                .map(|(c, s)| wrap(s, c.font, size, c.width).len())
-                .max()
-                .unwrap_or(1) as f64
-                * leading
-        };
-        let first = rows.first().map_or(leading, |r| height(r));
+        let wrapped: Vec<Vec<Vec<String>>> = rows
+            .iter()
+            .map(|r| {
+                let cells: Vec<&str> = r.iter().map(String::as_str).collect();
+                Writer::cells(cols, &cells, false, size)
+            })
+            .collect();
+        let count = |w: &[Vec<String>]| w.iter().map(Vec::len).max().unwrap_or(1);
+        let first = wrapped.first().map_or(1, |w| count(w)) as f64 * leading;
         self.ensure(first + if header.is_some() { leading + 4.0 } else { 0.0 });
         draw_header(self);
-        for r in rows {
-            let h = height(r);
-            if self.y - h < self.bottom {
+        let mut on_page = 0;
+        for w in &wrapped {
+            let n = count(w);
+            if on_page > 0 && self.y - n as f64 * leading < self.bottom {
+                self.new_page();
+                draw_header(self);
+                on_page = 0;
+            }
+            let mut from = 0;
+            loop {
+                // At least one line per page, so a page hook that leaves no room cannot loop forever.
+                let room = (((self.y - self.bottom) / leading).floor() as usize).max(1);
+                let to = n.min(from + room);
+                self.lines(cols, w, from, to, false, size, leading);
+                from = to;
+                if from >= n {
+                    break;
+                }
                 self.new_page();
                 draw_header(self);
             }
-            let cells: Vec<&str> = r.iter().map(String::as_str).collect();
-            self.row(cols, &cells, false, size, leading);
+            on_page += 1;
         }
     }
 

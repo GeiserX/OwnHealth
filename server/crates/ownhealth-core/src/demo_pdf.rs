@@ -1,6 +1,6 @@
-//! Synthetic lab reports for the demo seed and the tests, drawn with `pdfwrite` and byte for byte the
-//! output of `demo/pdf.py`. It knows where it drew each row, so the bboxes it returns match the page
-//! (PDF points, origin top-left).
+//! Synthetic lab reports for the demo seed and the tests. They share `pdfwrite`'s text operator and
+//! file assembly, and stay byte for byte the output of `demo/pdf.py`. It knows where it drew each
+//! row, so the bboxes it returns match the page (PDF points, origin top-left).
 
 use crate::afm;
 pub use crate::pdfwrite::{PAGE_H, PAGE_W};

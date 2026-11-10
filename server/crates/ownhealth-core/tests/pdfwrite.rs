@@ -156,3 +156,84 @@ fn an_empty_writer_still_makes_one_page() {
     let pdf = Writer::new().finish().pdf;
     assert!(String::from_utf8_lossy(&pdf).contains("/Count 1 "));
 }
+
+#[test]
+fn a_fold_never_turns_into_a_different_number() {
+    let mut w = Writer::new();
+    w.paragraph(
+        "Leucocitos 7,2 x10⁹/L · ⅓ comprimido · 12 μmol/L · −0,4",
+        Font::Regular,
+        10.0,
+        13.0,
+    );
+    let out = w.finish();
+    let s = String::from_utf8_lossy(&out.pdf);
+    assert!(
+        s.contains("(Leucocitos 7,2 x10?/L \u{FFFD} ? comprimido \u{FFFD} 12 \u{FFFD}mol/L \u{FFFD} -0,4) Tj"),
+        "{s}"
+    );
+    let to = |c: char| out.folded.iter().find(|f| f.ch == c).map(|f| f.to.clone());
+    assert_eq!(to('⁹').as_deref(), Some("?"), "a superscript nine is not a nine");
+    assert_eq!(to('⅓').as_deref(), Some("?"), "a third is not thirteen");
+    assert_eq!(to('μ').as_deref(), Some("µ"), "Greek mu prints as the micro sign");
+    assert_eq!(to('−').as_deref(), Some("-"), "the minus sign stays a minus");
+}
+
+#[test]
+fn line_breaks_start_new_lines_and_other_controls_are_reported() {
+    assert_eq!(
+        wrap("Tomar con comida\nNotas: ninguna\r\n\nFin", Font::Regular, 10.0, 400.0),
+        vec!["Tomar con comida", "Notas: ninguna", "", "Fin"]
+    );
+    let mut w = Writer::new();
+    w.paragraph("a\tb\nc", Font::Regular, 10.0, 13.0);
+    let out = w.finish();
+    assert_eq!(
+        out.folded,
+        vec![Folded {
+            ch: '\t',
+            to: " ".into()
+        }]
+    );
+    let s = String::from_utf8_lossy(&out.pdf);
+    assert!(s.contains("(a b) Tj") && s.contains("(c) Tj"), "{s}");
+}
+
+/// The y of `BT /F1 9.0 Tf x y Td (...) Tj ET`.
+fn td_y(line: &str) -> Option<f64> {
+    line.split(" Td ").next()?.rsplit(' ').next()?.parse().ok()
+}
+
+#[test]
+fn a_row_taller_than_a_page_continues_on_the_next_and_loses_nothing() {
+    let cols = [
+        Column::new(56.0, 60.0, Font::Regular),
+        Column::new(120.0, 40.0, Font::Regular),
+    ];
+    let rows = vec![
+        vec!["corta".to_string(), "1".to_string()],
+        vec!["nota".to_string(), "palabra ".repeat(300)],
+        vec!["después".to_string(), "2".to_string()],
+    ];
+    let mut w = Writer::new();
+    w.table(&cols, Some(&["Campo", "Texto"]), &rows, 9.0, 12.0);
+    let out = w.finish();
+    let s = String::from_utf8_lossy(&out.pdf);
+    assert_eq!(s.matches("palabra").count(), 300, "every word is printed");
+    for line in s.lines().filter(|l| l.contains(" Td ")) {
+        let y = td_y(line).expect("a Td line has a y");
+        assert!(y >= 56.0, "drawn below the bottom margin: {line}");
+    }
+    let pages: usize = s
+        .split("/Count ")
+        .nth(1)
+        .and_then(|r| r.split(' ').next()?.parse().ok())
+        .expect("a page count");
+    assert!(pages >= 3, "300 lines need several pages");
+    assert_eq!(
+        s.matches("(Texto) Tj").count(),
+        pages,
+        "the header repeats on every page"
+    );
+    assert!(s.contains("(corta) Tj") && s.contains("(despu\u{FFFD}s) Tj"));
+}
