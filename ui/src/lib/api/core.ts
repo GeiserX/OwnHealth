@@ -1,5 +1,7 @@
 // Typed fetch wrapper and the foundation endpoints. Same-origin; the session cookie rides along.
 import { filenameFromDisposition } from '#lib/logic/download';
+import { validationDetail } from '#lib/logic/errors';
+import { app } from '#lib/state/app.svelte';
 import type { ImportItem, JobInfo, Me, ProfileSummary, ReviewItem, SourceDetail, Uuid } from './types';
 
 export class ApiError extends Error {
@@ -7,7 +9,9 @@ export class ApiError extends Error {
 		public status: number,
 		public code: string,
 		message: string,
-		public allowed: string[] = []
+		public allowed: string[] = [],
+		// What the server says to do instead ('Ask by position instead: …'), when it says one.
+		public fix: string | null = null
 	) {
 		super(message);
 	}
@@ -35,18 +39,23 @@ async function send(method: string, path: string, opts: { query?: Query; body?: 
 		let code = 'http_' + res.status;
 		let message = res.statusText;
 		let allowed: string[] = [];
+		let fix: string | null = null;
 		try {
 			const body = await res.json();
 			const d = body?.detail;
-			if (d && typeof d === 'object') {
+			if (Array.isArray(d)) ({ code, message } = validationDetail(d));
+			else if (d && typeof d === 'object') {
 				code = d.code ?? code;
 				message = d.message ?? message;
 				allowed = d.allowed ?? [];
+				fix = typeof d.fix === 'string' ? d.fix : null;
 			} else if (typeof d === 'string') message = d;
 		} catch {
 			/* not JSON */
 		}
-		throw new ApiError(res.status, code, message, allowed);
+		// A session that ended mid-use: the layout shows the sign-in screen instead of a broken page.
+		if (res.status === 401 && !path.startsWith('/auth/')) app.unauthenticated = true;
+		throw new ApiError(res.status, code, message, allowed, fix);
 	}
 	return res;
 }

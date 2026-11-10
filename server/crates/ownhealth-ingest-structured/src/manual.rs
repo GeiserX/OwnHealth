@@ -2,10 +2,10 @@
 //! never the auto-accept rule. A correction is a new version that supersedes the old one; nothing is
 //! overwritten.
 
-use chrono::{DateTime, FixedOffset};
-use ownhealth_core::Result;
+use chrono::{DateTime, FixedOffset, TimeDelta, Utc};
 use ownhealth_core::observations::{CommitOptions, Committed, commit_observation, supersede_observation};
 use ownhealth_core::provenance::{SrcIn, SrcRef};
+use ownhealth_core::{Error, Result};
 use ownhealth_normalize as normalize;
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -26,8 +26,30 @@ pub struct ManualObservation<'a> {
     pub reason: Option<&'a str>,
 }
 
+/// Why a typed value cannot be stored, or None when it can: the value must read as a number (a
+/// decimal comma is fine, as is a leading `<`, `>`, `<=` or `>=` copied from a report), and the date
+/// may not be later than tomorrow (a person in a time zone ahead of the server).
+pub fn refusal(value: &str, effective_at: DateTime<FixedOffset>, now: DateTime<Utc>) -> Option<&'static str> {
+    let v = value.trim();
+    let v = ["<=", ">=", "≤", "≥", "<", ">"]
+        .iter()
+        .find_map(|c| v.strip_prefix(c))
+        .unwrap_or(v)
+        .trim();
+    if !v.replace(',', ".").parse::<f64>().is_ok_and(f64::is_finite) {
+        return Some("The value is not a number. Type it as it is printed, for example 5,4.");
+    }
+    if effective_at.with_timezone(&Utc) > now + TimeDelta::days(1) {
+        return Some("The date is in the future. Use the day the value was measured.");
+    }
+    None
+}
+
 /// Commit one typed value. `corrects` names the observation this one replaces (with `reason`).
 pub async fn add_manual_observation(conn: &mut PgConnection, m: &ManualObservation<'_>) -> Result<Committed> {
+    if let Some(why) = refusal(m.value, m.effective_at, Utc::now()) {
+        return Err(Error::Invalid(why.into()));
+    }
     let lang: Option<String> = sqlx::query_scalar("select locale from app_user where id = $1")
         .bind(m.user_id)
         .fetch_optional(&mut *conn)
@@ -66,7 +88,7 @@ pub async fn add_manual_observation(conn: &mut PgConnection, m: &ManualObservati
     }
     let src = SrcRef::New(SrcIn {
         profile_id: Some(m.profile_id),
-        label: Some("Entered by hand".into()),
+        label: Some("manual".into()), // a code: the UI says "entered by hand" in its language
         ..SrcIn::manual(Some(m.user_id))
     });
     let committed = match m.corrects {
@@ -103,4 +125,25 @@ pub async fn add_manual_observation(conn: &mut PgConnection, m: &ManualObservati
         .await?;
     }
     Ok(committed)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuses_words_and_future_dates() {
+        let now: DateTime<Utc> = "2026-11-10T12:00:00Z".parse().unwrap();
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap();
+        let today = at("2026-11-10T08:00:00+01:00");
+        for ok in ["81,4", "97", "5.4", "-2", "< 0,5", ">=200"] {
+            assert_eq!(refusal(ok, today, now), None, "{ok}");
+        }
+        for bad in ["abc", "", "1,2,3", "NaN", "inf", "12 mg"] {
+            assert!(refusal(bad, today, now).is_some(), "{bad}");
+        }
+        assert_eq!(refusal("97", at("2026-11-11T10:00:00+01:00"), now), None);
+        assert!(refusal("97", at("2031-01-01T08:00:00Z"), now).is_some());
+    }
 }

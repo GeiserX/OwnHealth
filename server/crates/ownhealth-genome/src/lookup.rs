@@ -39,6 +39,29 @@ pub const PAGE: usize = 50;
 pub const MIN_GQ: f64 = 20.0;
 pub const MIN_DP: f64 = 8.0;
 pub const UNKNOWN_NOTE: &str = "not_on_array and not_covered mean unknown, not negative.";
+const ONE_POSITION_NOTE: &str = "This lookup covers one position; it does not test other variants of the gene.";
+const WITHHELD_MINOR_NOTE: &str = "Withheld: the minor rule keeps this site back until the person is an adult.";
+const WITHHELD_SENSITIVE_NOTE: &str =
+    "Withheld: this site is in a sensitive gene and the profile's opt-in for this surface is off.";
+const REGION_RECORDS_NOTE: &str =
+    "Region answers list the records in the VCF; a position with no record is not listed.";
+const REGION_NO_VCF_NOTE: &str = "A source without a VCF on file is not part of region answers.";
+
+/// The code of a lookup's limitation sentence, so the UI can say it in its language; "" for a
+/// sentence with none. MCP keeps sending the English sentence.
+pub fn limitation_code(text: &str) -> &'static str {
+    [
+        (UNKNOWN_NOTE, "unknown_not_negative"),
+        (ONE_POSITION_NOTE, "one_position"),
+        (WITHHELD_MINOR_NOTE, "withheld_minor"),
+        (WITHHELD_SENSITIVE_NOTE, "withheld_sensitive"),
+        (REGION_RECORDS_NOTE, "region_records"),
+        (REGION_NO_VCF_NOTE, "region_no_vcf"),
+    ]
+    .into_iter()
+    .find(|(t, _)| *t == text)
+    .map_or("", |(_, c)| c)
+}
 const CHIP: [&str; 2] = ["chip", "chip_imputed"];
 const BLOCK_ALTS: [&str; 2] = ["<NON_REF>", "<*>"];
 
@@ -528,9 +551,9 @@ pub async fn lookup(
     };
     if let Some(why) = why {
         let limitation = if why == "minor" {
-            "Withheld: the minor rule keeps this site back until the person is an adult."
+            WITHHELD_MINOR_NOTE
         } else {
-            "Withheld: this site is in a sensitive gene and the profile's opt-in for this surface is off."
+            WITHHELD_SENSITIVE_NOTE
         };
         return Ok(Ok(json!({
             "query": query,
@@ -608,7 +631,7 @@ pub async fn lookup(
     {
         limitations.push(UNKNOWN_NOTE.to_string());
     }
-    limitations.push("This lookup covers one position; it does not test other variants of the gene.".into());
+    limitations.push(ONE_POSITION_NOTE.into());
     let cited: BTreeSet<&str> = cited_rows.iter().map(|(r, _)| r.fact_id.as_str()).collect();
     Ok(Ok(json!({
         "query": query,
@@ -746,10 +769,9 @@ fn region_answer(
     let all: Vec<Value> = records.into_iter().map(|(_, _, v)| v).collect();
     let page = py_page(&all, offset);
     let next = offset.saturating_add(PAGE as i64);
-    let mut limitations =
-        vec!["Region answers list the records in the VCF; a position with no record is not listed.".to_string()];
+    let mut limitations = vec![REGION_RECORDS_NOTE.to_string()];
     if datasets.iter().any(|d| d.vcf.is_none()) {
-        limitations.push("A source without a VCF on file is not part of region answers.".into());
+        limitations.push(REGION_NO_VCF_NOTE.into());
     }
     Ok(Ok(json!({
         "query": region,

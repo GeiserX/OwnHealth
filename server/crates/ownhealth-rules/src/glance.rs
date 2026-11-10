@@ -61,7 +61,7 @@ fn grouped(n: i64) -> String {
     if n < 0 { format!("-{out}") } else { out }
 }
 
-fn value_of(m: &Marker, spec: &Map<String, Value>) -> (String, String) {
+fn value_of(m: &Marker, spec: &Map<String, Value>, lang: &str) -> (String, String) {
     if m.source == "wearables" {
         let unit = spec.get("unit").map(text).unwrap_or_default();
         let Some(v) = m.wearable.as_ref().and_then(|w| w.value) else {
@@ -72,12 +72,17 @@ fn value_of(m: &Marker, spec: &Map<String, Value>) -> (String, String) {
             return (format!("{}:{:02}", whole.div_euclid(60), whole.rem_euclid(60)), unit);
         }
         if spec.get("agg").and_then(Value::as_str) == Some("sum30") {
-            return (grouped(whole), unit);
+            let shown = if lang == "es" {
+                num::localized(&whole.to_string(), lang)
+            } else {
+                grouped(whole)
+            };
+            return (shown, unit);
         }
-        return (num(&v), unit);
+        return (num::localized(&num(&v), lang), unit);
     }
     match m.latest() {
-        Some(p) => (p.shown(), p.unit.clone().unwrap_or_default()),
+        Some(p) => (num::localized(&p.shown(), lang), p.unit.clone().unwrap_or_default()),
         None => (String::new(), String::new()),
     }
 }
@@ -125,7 +130,7 @@ fn band(m: &Marker) -> Value {
 }
 
 fn marker_row(m: &Marker, spec: &Map<String, Value>, pack: &Pack, lang: &str, sources: &HashMap<i16, String>) -> Value {
-    let (value, unit) = value_of(m, spec);
+    let (value, unit) = value_of(m, spec, lang);
     if m.source == "wearables" {
         let Some(w) = &m.wearable else { return Value::Null };
         let name = spec
@@ -161,11 +166,24 @@ fn marker_row(m: &Marker, spec: &Map<String, Value>, pack: &Pack, lang: &str, so
     }
     let Some(p) = m.latest() else { return Value::Null };
     let spark_n = usize::try_from(int(pack.dashboard.get("spark_points")).unwrap_or(9)).unwrap_or(9);
+    // every point in the newest one's unit; one in an equivalent notation (10^3/µL, 10^9/L) is
+    // converted, the way get_trend draws it, and one that does not convert is left out
     let spark_unit = p.comparable_unit();
-    let points: Vec<_> = m
+    let points: Vec<Option<Decimal>> = m
         .points
         .iter()
-        .filter(|x| x.comparable().is_some() && x.comparable_unit() == spark_unit)
+        .filter_map(|x| {
+            let v = x.comparable()?;
+            let u = x.comparable_unit();
+            if u == spark_unit {
+                return Some(Some(v));
+            }
+            let (from, to) = (u.filter(|s| !s.is_empty())?, spark_unit.filter(|s| !s.is_empty())?);
+            ownhealth_normalize::convert(v, from, to, &m.key)
+                .ok()
+                .flatten()
+                .map(Some)
+        })
         .collect();
     let points = &points[points.len().saturating_sub(spark_n)..];
     json!({
@@ -178,7 +196,7 @@ fn marker_row(m: &Marker, spec: &Map<String, Value>, pack: &Pack, lang: &str, so
         "date": iso(p.date),
         "src": p.src,
         "src_label": p.src_label,
-        "spark": points.iter().map(|x| f(x.comparable())).collect::<Vec<_>>(),
+        "spark": points.iter().map(|x| f(*x)).collect::<Vec<_>>(),
         "band": band(m),
         "rule": m.rule,
     })
@@ -266,9 +284,19 @@ pub async fn build_dashboard(
         .iter()
         .filter(|m| m.source == "labs" && !m.points.is_empty())
         .collect();
+    // A draw is a day with a lab report. A value typed by hand is not one, so it never hides the
+    // changes between the last two reports; with only hand-typed values, those days count.
+    let reported = lab_markers
+        .iter()
+        .any(|m| m.points.iter().any(|p| p.src_kind != "manual"));
     let draws: BTreeSet<_> = lab_markers
         .iter()
-        .flat_map(|m| m.points.iter().map(|p| p.date))
+        .flat_map(|m| {
+            m.points
+                .iter()
+                .filter(|p| !reported || p.src_kind != "manual")
+                .map(|p| p.date)
+        })
         .collect();
     let mut draws: Vec<_> = draws.into_iter().collect();
     draws.reverse();

@@ -67,6 +67,7 @@
     "pending": {
       "[]": "empty"
     },
+    "review_open": "int",
     "rules_version": "string",
     "stale": {
       "[]": {

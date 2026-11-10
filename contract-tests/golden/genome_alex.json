@@ -350,6 +350,12 @@
     }
   },
   "is_minor": "bool",
+  "limitation_codes": {
+    "[]": {
+      "assay": "null",
+      "code": "string"
+    }
+  },
   "limitations": {
     "[]": "string"
   },
@@ -377,6 +383,7 @@
     }
   },
   "notice": "string",
+  "notice_code": "string",
   "tiles": {
     "[]": {
       "actionable": "int",

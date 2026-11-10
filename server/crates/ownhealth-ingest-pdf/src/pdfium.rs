@@ -63,6 +63,16 @@ pub fn pdfium() -> Result<&'static Pdfium> {
         .map_err(|e| Error::Other(anyhow::anyhow!("{e}")))
 }
 
+/// A PDF locked with a password: no retry can open it, so its import stops at once and the person
+/// sees a review item. The code `pdf_password` leads the text, so the UI can say it in its language.
+pub const PDF_PASSWORD: &str =
+    "pdf_password: the PDF is locked with a password. Save a copy without the password and upload that.";
+
 pub(crate) fn pdf_error(e: PdfiumError) -> Error {
-    Error::Other(anyhow::anyhow!("unreadable PDF: {e}"))
+    match e {
+        PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => {
+            Error::Invalid(PDF_PASSWORD.into())
+        }
+        e => Error::Other(anyhow::anyhow!("unreadable PDF: {e}")),
+    }
 }

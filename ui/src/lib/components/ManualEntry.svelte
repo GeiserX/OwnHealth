@@ -9,7 +9,10 @@
 	import { untrack } from 'svelte';
 	import { addManualObservation, correctRecord, createRecord } from '#lib/api';
 	import type { RecordOut } from '#lib/api/types';
+	import { focusOnOpen } from '#lib/actions/focusOnOpen';
+	import { errText } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
+	import { decimalText } from '#lib/logic/format';
 
 	type Fields = Record<string, string>;
 	let {
@@ -17,6 +20,7 @@
 		kinds = ['observation', 'medication', 'condition', 'allergy', 'immunization'],
 		correcting = null,
 		note = '',
+		date = null,
 		onsaved,
 		oncancel
 	}: {
@@ -24,7 +28,9 @@
 		kinds?: EntryKind[];
 		correcting?: RecordOut | null;
 		note?: string;
-		onsaved: (kind: EntryKind) => void;
+		/** The day an observation starts on; '' leaves it empty (required), null means today. */
+		date?: string | null;
+		onsaved: (kind: EntryKind, id?: string) => void;
 		oncancel?: () => void;
 	} = $props();
 
@@ -37,7 +43,7 @@
 		immunization: [['vaccine', 'me_f_vaccine', 'text', true], ['occurred', 'me_f_occurred', 'date', false], ['dose_number', 'me_f_dosen', 'number', false]]
 	};
 	const today = new Date().toISOString().slice(0, 10);
-	const fresh = (k: EntryKind): Fields => (k === 'observation' ? { date: today, note } : {});
+	const fresh = (k: EntryKind): Fields => (k === 'observation' ? { date: date ?? today, note } : {});
 	const fromRecord = (r: RecordOut): Fields =>
 		Object.fromEntries(FIELDS[r.kind as EntryKind].map(([f]) => [f, r.detail[f] == null ? '' : String(r.detail[f])]));
 
@@ -63,37 +69,51 @@
 		if (kind === 'condition') out.clinical_status = val('abatement') ? 'resolved' : 'active';
 		return out;
 	}
+	// The timeline places a new medication on its start day, so a new one needs it. A correction keeps
+	// whatever the record already had.
+	const needsStart = (k: string) => kind === 'medication' && k === 'started' && !correcting;
+	// The value of an observation is a number: say so in the reader's language before anything is sent.
+	const isValue = (k: string) => kind === 'observation' && k === 'value';
+	function checkValue(e: Event) {
+		const el = e.currentTarget as HTMLInputElement;
+		el.setCustomValidity(el.value.trim() && decimalText(el.value) == null ? t('err_decimal') : '');
+	}
 	async function save(e: SubmitEvent) {
 		e.preventDefault();
-		busy = true;
 		error = null;
+		if (kind === 'observation' && !correcting && decimalText(f.value ?? '') == null) {
+			error = t('err_decimal');
+			return;
+		}
+		busy = true;
+		let id: string | undefined;
 		try {
 			if (correcting) {
 				await correctRecord(profile, correcting.kind, correcting.id, { ...correcting.detail, ...body(), reason: reason.trim() });
 			} else if (kind === 'observation') {
-				await addManualObservation(profile, {
+				id = (await addManualObservation(profile, {
 					name: val('name')!,
-					value: val('value')!,
+					value: decimalText(f.value ?? '')!,
 					unit: val('unit'),
 					effective_at: `${val('date') ?? today}T12:00:00Z`,
 					note: val('note')
-				});
+				})).id;
 			} else {
-				await createRecord(profile, kind, body());
+				id = (await createRecord(profile, kind, body())).id;
 			}
 			saved++;
 			const k = kind;
 			if (!correcting) f = { ...fresh(k), ...(k === 'observation' ? { date: f.date } : {}) };
-			onsaved(k);
+			onsaved(k, id);
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = errText(err);
 		} finally {
 			busy = false;
 		}
 	}
 </script>
 
-<form class="p2form" onsubmit={save} aria-label={correcting ? t('me_correct') : t('me_add')}>
+<form class="p2form" onsubmit={save} use:focusOnOpen={{ oncancel }} aria-label={correcting ? t('me_correct') : t('me_add')}>
 	{#if !correcting && kinds.length > 1}
 		<div class="seg" role="group" aria-label={t('me_kind')}>
 			{#each kinds as k (k)}<button type="button" class:on={k === kind} aria-pressed={k === kind} onclick={() => pick(k)}>{t('me_k_' + k)}</button>{/each}
@@ -101,9 +121,20 @@
 	{/if}
 	<div class="p2row">
 		{#each FIELDS[kind] as [k, key, type, req] (k)}
-			<label style={type === 'text' ? 'flex:1;min-width:120px' : ''}>{t(key)}<input class="p2in" {type} bind:value={f[k]} required={req} /></label>
+			<label style={type === 'text' ? 'flex:1;min-width:120px' : ''}
+				>{t(key)}{#if isValue(k)}<input
+						class="p2in"
+						type="text"
+						inputmode="decimal"
+						pattern={'-?(\\d+([.,]\\d+)?|[.,]\\d+)'}
+						bind:value={f[k]}
+						required={req}
+						oninput={checkValue}
+					/>{:else}<input class="p2in" {type} bind:value={f[k]} required={req || needsStart(k)} max={kind === 'observation' && k === 'date' ? today : undefined} />{/if}</label
+			>
 		{/each}
 	</div>
+	{#if kind === 'medication' && !correcting}<div class="dim" style="font-size:11.5px">{t('me_start_why')}</div>{/if}
 	{#if kind === 'observation' && !correcting}
 		<label>{t('me_f_note')}<input class="p2in" bind:value={f.note} maxlength="4000" /></label>
 	{/if}

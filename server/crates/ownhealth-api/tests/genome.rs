@@ -372,6 +372,12 @@ async fn variant_over_http_for_a_person_and_no_genome_is_404() -> R {
         .await?;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(body["calls"][0]["call_state"], "alt");
+    // each limitation sentence carries a code the UI translates
+    assert_eq!(
+        body["limitation_codes"].as_array().map(Vec::len),
+        body["limitations"].as_array().map(Vec::len)
+    );
+    assert!(arr_has(&body["limitation_codes"], "one_position"), "{body}");
     // Sam has no genome: the answer is a 404 and its audit row still commits
     let sam = env.login("sam", true).await?;
     let (s, body) = env.get(&sam, "/api/profiles/sam/genome/variant?rsid=rs4244285").await?;
@@ -387,4 +393,8 @@ async fn variant_over_http_for_a_person_and_no_genome_is_404() -> R {
             .await?;
     assert_eq!(rows, vec![(Some("no_genome".to_string()),)]);
     Ok(())
+}
+
+fn arr_has(v: &Value, s: &str) -> bool {
+    v.as_array().is_some_and(|a| a.iter().any(|x| x == s))
 }

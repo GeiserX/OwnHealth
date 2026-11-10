@@ -8,11 +8,14 @@
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
 	import { openSource } from '#lib/components/pages1/source.svelte';
-	import { Loader, tf, tp } from '#lib/components/pages1/util.svelte';
+	import { errText, Loader, tf, tp } from '#lib/components/pages1/util.svelte';
+	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
+	import { ApiError } from '#lib/api/core';
+	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import StepUpDialog from '#lib/components/pages2/StepUpDialog.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
-	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { i18n, t, type Key } from '#lib/i18n/index.svelte';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const OWNGENOME = 'https://github.com/GeiserX/OwnGenome';
@@ -28,7 +31,28 @@
 	let actionError = $state<string | null>(null);
 	let lookupOpen = $state(false);
 	let rsid = $state('');
-	const lookup = new Loader<Record<string, unknown>>();
+	// The answer of GET /genome/variant, as far as this page shows it; the whole answer stays under 'Raw'.
+	type Call = { source?: string; assay?: string; call_state?: string | null; genotype?: string | null; zygosity?: string | null; dp?: number | null; gq?: number | null };
+	type Lookup = {
+		variant?: { chrom?: string; pos?: number; ref?: string; alt?: string; rsid?: string; gene?: string | null };
+		calls?: Call[];
+		cited_by_findings?: string[];
+		limitations?: string[];
+		limitation_codes?: string[];
+	};
+	const lookup = new Loader<Lookup>();
+	// A lookup's limitation in the reader's language by its code; the server's sentence when it has none.
+	const limText = (L: Lookup, i: number, text: string) => {
+		const k = 'g_lim_' + (L.limitation_codes?.[i] || '-');
+		return t(k) === k ? text : t(k);
+	};
+	// The fix of a refused lookup in the reader's language when we have one for its code.
+	const fixText = (e: ApiError) => {
+		const k = 'err_' + (e.code ?? '') + '_fix';
+		return t(k) === k ? e.fix : t(k);
+	};
+	// Revealing sensitive findings widens what is on screen: it asks once, inline.
+	let revealing = $state(false);
 
 	function load() {
 		const slug = prof?.slug;
@@ -45,13 +69,13 @@
 	async function consent(ui: boolean) {
 		const slug = prof?.slug;
 		if (!slug) return;
-		if (ui && !confirm(tf('i2_reveal_confirm', { name: prof?.display_name ?? '' }))) return;
 		actionError = null;
 		try {
 			await withStepUp(() => setGenomeConsent(slug, { ui }));
+			revealing = false;
 			load();
 		} catch (e) {
-			actionError = e instanceof Error ? e.message : String(e);
+			actionError = errText(e);
 		}
 	}
 
@@ -61,7 +85,7 @@
 			await dismissReview(id, 'read');
 			load();
 		} catch (e) {
-			actionError = e instanceof Error ? e.message : String(e);
+			actionError = errText(e);
 		}
 	}
 
@@ -92,6 +116,27 @@
 	});
 	const subTail = $derived(ds ? [...Object.entries(ds.db_versions).filter(([k]) => k === 'clinvar' || k === 'cpic').map(([k, val]) => `${k === 'clinvar' ? 'ClinVar' : 'CPIC'} ${val}`), `${t('i2_ingested')} ${day(ds.imported_at)}`].join(' · ') : '');
 	const sensitiveShown = $derived((g?.findings ?? []).filter((f) => f.sensitive));
+	// The server's limitation codes in the reader's language; an unknown code keeps the server's text.
+	const LIM: Record<string, Key> = {
+		no_genome: 'i2_lim_no_genome',
+		no_vcf: 'i2_lim_no_vcf',
+		variant_only_vcf: 'i2_lim_variant_only',
+		chip_unconfirmed: 'i2_lim_chip',
+		no_cram: 'i2_lim_no_cram'
+	};
+	const limits = $derived(
+		(g?.limitations ?? []).map((text, i) => {
+			const c = g?.limitation_codes?.[i];
+			const key = c && LIM[c.code];
+			return key ? tf(key, { kind: (c.assay ?? '').toUpperCase() }) : text;
+		})
+	);
+	// A dataset whose findings were all retracted (or never had any) reads as no genome data at all.
+	const empty = $derived(!!g && (!ds || (!g.findings.length && !g.locked.length && !g.withheld.minor_rule)));
+	const denied = $derived(gen.error instanceof ApiError && gen.error.status === 403);
+	const canRaw = $derived(prof?.scopes.includes('read:genome_raw') ?? false);
+	const catLabel = (c: string) => (t('i2_cat_' + c) === 'i2_cat_' + c ? c : t('i2_cat_' + c));
+	const findingById = (id: string) => g?.findings.find((f) => f.id === id) ?? null;
 	const coverage = $derived.by(() => {
 		const c = g?.coverage ?? [];
 		return { assessed: c.filter((x) => x.state === 'assessed').length, partial: c.filter((x) => x.state === 'partial').map((x) => x.target), total: c.length };
@@ -111,18 +156,47 @@
 	</div>
 	<div class="right">
 		<PhaseChip phase="v0.1" /><PhaseChip phase={t('i2_gen_ph')} />
-		<button class="btn" onclick={() => (lookupOpen = !lookupOpen)} aria-expanded={lookupOpen} disabled={!prof?.scopes.includes('read:genome_raw')} title={prof?.scopes.includes('read:genome_raw') ? '' : 'read:genome_raw'}>{t('i2_lookup')}</button>
+		{#if !canRaw}<span class="dim" style="font-size:11.5px">{t('i2_lookup_noraw')}</span>{/if}
+		<button class="btn" onclick={() => (lookupOpen = !lookupOpen)} aria-expanded={lookupOpen} disabled={!canRaw}>{t('i2_lookup')}</button>
 	</div>
 </div>
 
 {#if lookupOpen && prof}
-	<form class="card p2row" style="margin-bottom:12px" onsubmit={(e) => { e.preventDefault(); lookup.run(() => lookupVariant(prof.slug, rsid.trim())); }}>
+	<form class="card p2row" style="margin-bottom:12px" onsubmit={(e) => { e.preventDefault(); lookup.run(() => lookupVariant(prof.slug, rsid.trim()) as Promise<Lookup>); }} use:focusOnOpen={{ oncancel: () => (lookupOpen = false) }}>
 		<label for="rsid" class="dim">rsID</label>
 		<input id="rsid" class="p2in mono" bind:value={rsid} placeholder="rs4244285" required pattern="rs\d+" />
-		<button class="btn sm" type="submit">{t('i2_lookup')}</button>
+		<button class="btn sm pri" type="submit" disabled={lookup.loading}>{t('i2_lookup_go')}</button>
 		<span class="dim" style="font-size:11.5px">{t('i2_lookup_d')}</span>
-		{#if lookup.error}<span class="p2err">{lookup.error.message}</span>{/if}
-		{#if lookup.data}<pre class="code mono" style="flex-basis:100%;max-height:240px;overflow:auto">{JSON.stringify(lookup.data, null, 2)}</pre>{/if}
+		{#if lookup.error}
+			<div class="p2err" role="alert" style="flex-basis:100%">
+				{errText(lookup.error)}{#if lookup.error instanceof ApiError && lookup.error.fix}<div class="dim">{fixText(lookup.error)}</div>{/if}
+			</div>
+		{/if}
+		{#if lookup.data}
+			{@const L = lookup.data}
+			<dl class="lk">
+				{#if L.variant}
+					<dt>{t('i2_g_gene')}</dt><dd><b>{L.variant.gene ?? '—'}</b> <span class="mono muted">{L.variant.rsid ?? ''}</span></dd>
+					<dt>{t('i2_lk_pos')}</dt><dd class="mono">{L.variant.chrom}:{L.variant.pos} {L.variant.ref}&gt;{L.variant.alt}</dd>
+				{/if}
+				{#each L.calls ?? [] as c, i (i)}
+					<dt>{t('i2_lk_call')}{(L.calls?.length ?? 0) > 1 ? ' ' + (i + 1) : ''}</dt>
+					<dd>
+						<b class="mono">{c.genotype ?? '—'}</b>{#if c.zygosity}{' · '}{t('i2_zyg_' + c.zygosity)}{/if}{' · '}<span class="mono">{c.call_state ?? 'n/a'}</span>{#if c.dp != null || c.gq != null}{' · '}<span class="num">{tf('i2_lk_depth', { dp: c.dp ?? '—', gq: c.gq ?? '—' })}</span>{/if}{#if c.assay}{' · '}<span class="dim">{c.assay.toUpperCase()}</span>{/if}
+					</dd>
+				{:else}
+					<dt>{t('i2_lk_call')}</dt><dd class="dim">{t('i2_lk_nocall')}</dd>
+				{/each}
+				{#if L.cited_by_findings?.length}
+					<dt>{t('i2_lk_cited')}</dt>
+					<dd>
+						{#each L.cited_by_findings as id, i (id)}{@const f = findingById(id)}{i ? ', ' : ''}<a href="#f-{id}">{f ? [f.gene, resultCell(f)].filter(Boolean).join(' · ') : id}</a>{/each}
+					</dd>
+				{/if}
+				{#each L.limitations ?? [] as l, i (l)}<dt></dt><dd class="dim">{limText(L, i, l)}</dd>{/each}
+			</dl>
+			<details style="flex-basis:100%"><summary class="dim">{t('i2_lk_raw')}</summary><pre class="code mono" style="max-height:240px;overflow:auto">{JSON.stringify(L, null, 2)}</pre></details>
+		{/if}
 	</form>
 {/if}
 
@@ -138,13 +212,13 @@
 {#if actionError}<div class="p2err" role="alert" style="margin-bottom:8px">{actionError}</div>{/if}
 
 {#if gen.error}
-	<NotReady error={gen.error} onretry={load} />
+	<div class="card"><NotReady error={gen.error} onretry={load} /></div>
 {:else if gen.loading && !g}
-	<div class="empty">{t('loading')}</div>
-{:else if g && !ds}
+	<div class="card"><div class="empty">{t('loading')}</div></div>
+{:else if g && empty}
 	<div class="card promo">
 		<h3>{t('i2_gen_empty_t')}</h3>
-		<p class="muted" style="margin:0 0 10px">{t('i2_gen_empty_d')}</p>
+		<p class="muted" style="margin:0 0 10px">{t('i2_gen_empty_d')} {t('i2_gen_from_none')}</p>
 		<div class="p2row">
 			<a class="btn pri" href={OWNGENOME} target="_blank" rel="noopener">{t('i2_gen_get')}</a>
 			<a class="btn" href="/import-review">{t('i2_gen_import')}</a>
@@ -162,14 +236,15 @@
 		{/each}
 	</div>
 	<div class="card" style="padding:4px 6px">
-		<table class="t">
+		<div class="tscroll">
+		<table class="t gtab">
 			<thead>
-				<tr><th>{t('i2_g_cat')}</th><th>{t('i2_g_gene')}</th><th>{t('i2_g_var')}</th><th>{t('i2_g_res')}</th><th>{t('i2_g_ev')}</th><th>{t('i2_g_conf')}</th><th>call_state</th><th>{t('i2_g_note')}</th></tr>
+				<tr><th>{t('i2_g_cat')}</th><th>{t('i2_g_gene')}</th><th>{t('i2_g_var')}</th><th>{t('i2_g_res')}</th><th>{t('i2_g_ev')}</th><th>{t('i2_g_conf')}</th><th>{t('i2_g_cs')}</th><th>{t('i2_g_note')}</th></tr>
 			</thead>
 			<tbody>
 				{#each g.findings as f (f.id)}
-					<tr>
-						<td><span class="chip mono">{f.category}</span></td>
+					<tr id="f-{f.id}" class:sens={f.sensitive}>
+						<td><span class="chip" title={f.category}>{catLabel(f.category)}</span></td>
 						<td><b>{f.gene ?? '—'}</b></td>
 						<td class="mono muted">{variantCell(f)}</td>
 						<td>
@@ -177,52 +252,94 @@
 							{#if f.confirm_clinically}<div class="dim" style="font-size:11px">{t('i2_confirm_clin')}</div>{/if}
 						</td>
 						<td><span class="pgx ev-{f.evidence}" title={t('i2_ev_' + f.evidence)}>{f.evidence}</span></td>
-						<td><span class="pill {conf(f.confidence)}"><i aria-hidden="true"></i>{t('i2_conf_' + f.confidence)}</span></td>
+						<td>{#if f.confidence}<span class="pill {conf(f.confidence)}"><i aria-hidden="true"></i>{t('i2_conf_' + f.confidence)}</span>{:else}<span class="dim">—</span>{/if}</td>
 						<td class="mono" style="color:{f.call_state === 'alt' ? 'var(--text)' : 'var(--muted)'}">{f.call_state ?? 'n/a'}</td>
 						<td class="muted" style="font-size:12px">
 							{noteCell(f) || '—'}
-							{#if f.sensitive}<div>{t('i2_sens_shown')} · <button class="lnk" onclick={() => consent(false)}>{t('i2_hide')}</button></div>{/if}
+							{#if f.sensitive}
+								<div class="p2row" style="margin-top:4px">
+									<span class="pill p-watch"><i aria-hidden="true"></i>{t('i2_sens_chip')}</span>
+									<span class="dim" style="font-size:11px">{t('i2_sens_by_owner')}</span>
+									<button class="btn sm" onclick={() => consent(false)}>{t('i2_hide_btn')}</button>
+								</div>
+							{/if}
 						</td>
 					</tr>
 				{/each}
-				{#each g.locked as l, i (i)}
-					<tr class="lock">
-						<td><span class="chip mono">{l.category}</span></td>
-						<td colspan="6"><span style="color:var(--muted)"><span aria-hidden="true">🔒 </span>{tf('i2_locked', { gene: l.gene ?? '—' })} <span class="mono">read:sensitive</span>.</span></td>
-						<td>
-							{#if g.consent.can_change}<button class="btn sm" onclick={() => consent(true)}>{t('i2_reveal')}</button>{:else}<span class="dim" style="font-size:11px">{t('i2_owner_only')}</span>{/if}
-						</td>
-					</tr>
-				{/each}
-				{#if g.withheld.minor_rule}
-					<tr class="lock"><td colspan="8"><span class="muted"><span aria-hidden="true">🔒 </span>{tf('i2_minor_rule', { n: g.withheld.minor_rule })}</span></td></tr>
-				{/if}
 			</tbody>
 		</table>
+		</div>
+		{#if g.locked.length || g.withheld.minor_rule}
+			<!-- Outside the scrolling table, so the reveal button and its question stay on screen at any width. -->
+			<div class="locks">
+				{#each g.locked as l, i (i)}
+					<div class="lockline"><span class="chip" title={l.category}>{catLabel(l.category)}</span><span class="muted"><span aria-hidden="true">{'🔒 '}</span>{tf('i2_locked', { gene: l.gene ?? '—' })}</span></div>
+				{/each}
+				{#if g.locked.length}
+					<div class="p2row">
+						{#if g.consent.can_change}<button class="btn sm" onclick={() => (revealing = true)} aria-expanded={revealing}>{t('i2_reveal')}</button>{:else}<span class="dim" style="font-size:11px">{t('i2_owner_only')}</span>{/if}
+					</div>
+					{#if revealing}
+						<ConfirmRow text={tf('i2_reveal_confirm', { name: prof?.display_name ?? '' })} confirmLabel={t('i2_reveal_yes')} onconfirm={() => consent(true)} oncancel={() => (revealing = false)} />
+					{/if}
+				{/if}
+				{#if g.withheld.minor_rule}
+					<div class="lockline"><span class="muted"><span aria-hidden="true">{'🔒 '}</span>{tf('i2_minor_rule', { n: g.withheld.minor_rule })}</span></div>
+				{/if}
+			</div>
+		{/if}
 	</div>
 	{#if sensitiveShown.length}<div class="sr-only" role="status">{t('i2_sens_shown')}</div>{/if}
 {/if}
 
-<div class="note" style="margin-top:10px">
-	<span>{t('i2_gen_from1')} <a href={OWNGENOME} target="_blank" rel="noopener">OwnGenome</a> ({OWNGENOME}) {t('i2_gen_from2')}</span>
-</div>
-{#if g && ds}
+{#if !denied}
+	<div class="note" style="margin-top:10px">
+		<span>{t('i2_gen_from1')} <a href={OWNGENOME} target="_blank" rel="noopener">OwnGenome</a> {t('i2_gen_from2')}</span>
+	</div>
+{/if}
+{#if g && ds && !empty}
 	<div style="display:flex;gap:18px;margin-top:6px" class="note cov">
 		<span>
-			<b style="color:var(--text)">{t('i2_coverage')}</b> · {tf('i2_cov_line', { a: coverage.assessed, n: coverage.total })}{#if coverage.partial.length} · {t('i2_cov_partial')}: {coverage.partial.join(', ')}{/if}
-			· call_state: ref / alt / no_call / not_on_array / not_covered; n/a {t('i2_cs_na')}
-			{#if g.not_assessed.length} · not_assessed: {g.not_assessed.map((x) => x.gene ?? x.panel).join(', ')}{/if}
-			{#each g.limitations as l (l)} · {l}{/each}
+			<b style="color:var(--text)">{t('i2_coverage')}</b>{' · '}{tf('i2_cov_line', { a: coverage.assessed, n: coverage.total })}{#if coverage.partial.length}{' · '}{t('i2_cov_partial')}: {coverage.partial.join(', ')}{/if}
+			{' · '}call_state: ref / alt / no_call / not_on_array / not_covered; n/a {t('i2_cs_na')}
+			{#if g.not_assessed.length}{' · '}{t('i2_not_assessed')}: {g.not_assessed.map((x) => x.gene ?? (t('i2_cat_' + x.panel) === 'i2_cat_' + x.panel ? x.panel.replace(/_/g, ' ') : t('i2_cat_' + x.panel))).join(', ')}{/if}
+			{#each limits as l (l)}{' · '}{l}{/each}
 		</span>
 		<span style="margin-left:auto">{t('i2_ev_legend')}</span>
 	</div>
-	<div class="note" style="margin-top:6px">{plain(g.notice)}</div>
+	<div class="note" style="margin-top:6px">{g.notice_code ? t('i2_gen_notice') : plain(g.notice)}</div>
 {/if}
 
 <SourcePanel />
 <StepUpDialog />
 
 <style>
+	/* On a phone the result and its confidence must show: the category chip, the variant ids and the raw
+	   call state go (the result says the same in words). Desktop and tablet keep every column. */
+	@media (max-width: 760px) {
+		.gtab th:nth-child(1),
+		.gtab td:nth-child(1),
+		.gtab th:nth-child(3),
+		.gtab td:nth-child(3),
+		.gtab th:nth-child(7),
+		.gtab td:nth-child(7) {
+			display: none;
+		}
+	}
+	.locks {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 10px 8px 8px;
+		border-top: 1px solid var(--line);
+		font-size: 12.5px;
+	}
+	.lockline {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px 8px;
+	}
 	.lnk {
 		background: none;
 		border: 0;
@@ -233,6 +350,26 @@
 	}
 	button.lnk:hover {
 		color: var(--accent);
+	}
+	tr.sens td {
+		background: rgba(224, 168, 74, 0.06);
+	}
+	tr.sens td:first-child {
+		box-shadow: inset 3px 0 0 var(--watch);
+	}
+	.lk {
+		flex-basis: 100%;
+		display: grid;
+		grid-template-columns: max-content minmax(0, 1fr);
+		gap: 4px 12px;
+		margin: 4px 0 0;
+		font-size: 12.5px;
+	}
+	.lk dt {
+		color: var(--dim);
+	}
+	.lk dd {
+		margin: 0;
 	}
 	.promo {
 		border-color: rgba(110, 168, 254, 0.35);

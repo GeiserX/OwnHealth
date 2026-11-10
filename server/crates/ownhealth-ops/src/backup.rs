@@ -279,12 +279,35 @@ fn sort_keys(v: Value) -> Value {
     }
 }
 
+/// The backup holds the whole health record: only its owner may read it (directories 0700, files
+/// 0600), whatever the umask. `dest` itself is closed first, so nothing inside is ever open to others.
+#[cfg(unix)]
+fn owner_only(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        for entry in fs::read_dir(path)? {
+            owner_only(&entry?.path())?;
+        }
+    } else if meta.is_file() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn owner_only(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// Write a consistent backup directory at `dest` (must be missing or empty). Returns `dest`.
 pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     if dest.exists() && fs::read_dir(dest)?.next().is_some() {
         return Err(ops_error(format!("{} is not empty", dest.display())));
     }
     fs::create_dir_all(dest)?;
+    owner_only(dest)?;
     let url = settings.sqlx_url();
     let mut conn = PgConnection::connect(&url).await?;
     sqlx::raw_sql("begin isolation level repeatable read")
@@ -351,6 +374,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     });
     let text = serde_json::to_string_pretty(&sort_keys(manifest))? + "\n";
     fs::write(dest.join("manifest.json"), text)?;
+    owner_only(dest)?;
     Ok(dest.to_path_buf())
 }
 
@@ -531,6 +555,24 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn backups_are_readable_by_their_owner_only() -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir()?;
+        let dest = tmp.path().join("b1");
+        fs::create_dir_all(dest.join("blobs/sha256/ab"))?;
+        fs::write(dest.join("db.dump"), b"x")?;
+        fs::write(dest.join("blobs/sha256/ab/cd"), b"y")?;
+        owner_only(&dest)?;
+        let mode = |p: &Path| fs::metadata(p).map(|m| m.permissions().mode() & 0o777);
+        assert_eq!(mode(&dest)?, 0o700);
+        assert_eq!(mode(&dest.join("blobs/sha256/ab"))?, 0o700);
+        assert_eq!(mode(&dest.join("db.dump"))?, 0o600);
+        assert_eq!(mode(&dest.join("blobs/sha256/ab/cd"))?, 0o600);
+        Ok(())
+    }
 
     #[test]
     fn the_password_stays_out_of_the_pg_tools_argv() {

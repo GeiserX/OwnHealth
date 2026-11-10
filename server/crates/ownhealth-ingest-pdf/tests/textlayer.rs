@@ -177,3 +177,14 @@ fn committed_injection_files_match_the_generator() {
         assert!(on_disk.windows(6).any(|w| w == b"CANARY"));
     }
 }
+
+#[test]
+fn a_password_locked_pdf_is_a_permanent_refusal() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/A-email/labnorte-locked-12345678Z.pdf");
+    let data = std::fs::read(path).expect("the locked fixture");
+    match read_pdf(&data) {
+        Err(ownhealth_core::Error::Invalid(m)) => assert_eq!(m, ownhealth_ingest_pdf::pdfium::PDF_PASSWORD),
+        other => panic!("expected the password refusal, got {other:?}"),
+    }
+}

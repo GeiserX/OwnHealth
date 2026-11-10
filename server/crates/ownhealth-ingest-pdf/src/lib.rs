@@ -86,6 +86,9 @@ async fn run_import_pdf(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     {
         Ok(s) => s,
         Err(ownhealth_core::Error::NotFound(msg)) => return Err(JobError::permanent(msg)),
+        Err(ownhealth_core::Error::Invalid(msg)) if msg == pdfium::PDF_PASSWORD => {
+            return Err(JobError::permanent(msg));
+        }
         Err(e) => return Err(e.into()),
     };
     tx.commit().await?;

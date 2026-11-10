@@ -8,21 +8,36 @@
 	import { approveOAuth, denyOAuth, getOAuthRequest, type IdentityMode, type OAuthRequestOut } from '#lib/api/inbox';
 	import type { Scope } from '#lib/api/types';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
-	import { Loader, tf } from '#lib/components/pages1/util.svelte';
+	import { Loader, errText, tf } from '#lib/components/pages1/util.svelte';
 	import { plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
-	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
 	import { consentDefaults, consentProblem } from '#lib/logic/inbox';
+	import { byOrder, byScopeOrder } from '#lib/logic/people';
+	import { app } from '#lib/state/app.svelte';
 
 	const RISKY: Scope[] = ['read:genome_raw', 'read:sensitive'];
 	const req = new Loader<OAuthRequestOut>();
 	const id = $derived(page.url.searchParams.get('request') ?? '');
+	// The authorization server sends a person's browser here with ?error=<code>&detail=<text> when it
+	// refused the app's request. The detail is the app's own input echoed back: plain text only.
+	const REFUSED = ['invalid_client', 'invalid_scope', 'invalid_target', 'unsupported_response_type', 'bad_redirect', 'pkce', 'invalid_request'];
+	const refusedCode = $derived.by(() => {
+		const e = page.url.searchParams.get('error');
+		return e ? (REFUSED.includes(e) ? e : 'invalid_request') : null;
+	});
+	const refusedDetail = $derived(page.url.searchParams.get('detail') ?? '');
 	let scopes = $state<string[]>([]);
 	let profiles = $state<string[]>([]);
 	let days = $state(90);
 	let identity = $state<IdentityMode>('pseudonymous');
 	let error = $state<string | null>(null);
 	let busy = $state(false);
+	let formEl: HTMLFormElement | undefined = $state();
+	// The decision is the whole page: the first profile box takes focus as soon as the request is shown.
+	$effect(() => {
+		if (req.data && formEl) formEl.querySelector<HTMLInputElement>('input[type=checkbox]')?.focus();
+	});
 
 	$effect(() => {
 		const rid = id;
@@ -47,6 +62,14 @@
 		const k = 'fu_sc_' + scopeOf(s).replace(':', '_');
 		return t(k) !== k ? t(k) : scopeOf(s);
 	}
+	// Scopes in the token form's order (plain reads first, the risky ones last); profiles in household order.
+	const shownScopes = $derived(req.data ? byScopeOrder(req.data.scopes, scopeOf) : []);
+	const shownProfiles = $derived(req.data ? byOrder(req.data.profiles, (p) => p.id, (app.me?.profiles ?? []).map((p) => p.id)) : []);
+	// A fixed form clears its old error.
+	$effect(() => {
+		void [scopes.length, profiles.length, days];
+		error = null;
+	});
 	const redirectHost = $derived.by(() => {
 		try {
 			return req.data ? new URL(req.data.redirect_uri).host : '';
@@ -70,7 +93,7 @@
 			);
 			location.href = r.redirect;
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = errText(err);
 			busy = false;
 		}
 	}
@@ -79,14 +102,33 @@
 		try {
 			location.href = (await denyOAuth(id)).redirect;
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = errText(err);
 			busy = false;
 		}
 	}
 </script>
 
 <div class="wrap">
-	{#if !id}
+	<div class="cbar">
+		<div class="brand"><div class="logo sm" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-5 4 10 2-5h6" /></svg></div>OwnHealth</div>
+		<div class="seg" role="group" aria-label={t('lang_label')}>
+			<button class:on={i18n.lang === 'es'} aria-pressed={i18n.lang === 'es'} onclick={() => setLang('es')}>ES</button>
+			<button class:on={i18n.lang === 'en'} aria-pressed={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
+		</div>
+	</div>
+	{#if refusedCode}
+		<div class="card" role="alert">
+			<h1 style="font-size:17px;margin:0 0 8px">{t('fu_oa_refused')}</h1>
+			<p style="margin:0 0 6px">{t('fu_oa_err_' + refusedCode)}</p>
+			<p class="dim" style="margin:0">{t('fu_oa_refused_d')}</p>
+			{#if refusedDetail}
+				<details class="dim" style="margin-top:10px;font-size:12px">
+					<summary>{t('fu_oa_detail')}</summary>
+					<div class="mono" style="margin-top:4px;word-break:break-word">{refusedDetail}</div>
+				</details>
+			{/if}
+		</div>
+	{:else if !id}
 		<div class="card"><div class="empty">{t('fu_oa_missing')}</div></div>
 	{:else if req.error}
 		{#if 'status' in req.error && (req.error.status === 404 || req.error.status === 410)}
@@ -98,7 +140,7 @@
 		<div class="empty">{t('loading')}</div>
 	{:else}
 		{@const r = req.data}
-		<form class="card p2form" onsubmit={approve} aria-labelledby="oa-h">
+		<form class="card p2form" novalidate onsubmit={approve} aria-labelledby="oa-h" bind:this={formEl}>
 			<div class="who">
 				<!-- No client logo: it would be an outside request from this page, and its picture is untrusted. -->
 				<div class="logo" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="1.8"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg></div>
@@ -111,7 +153,7 @@
 
 			<fieldset class="fs">
 				<legend>{t('fu_oa_profiles')}</legend>
-				{#each r.profiles as p (p.id)}
+				{#each shownProfiles as p (p.id)}
 					<label class="ck"><input type="checkbox" value={p.id} bind:group={profiles} /> {p.display_name}</label>
 				{:else}
 					<span class="dim">{t('fu_oa_noprofiles')}</span>
@@ -120,7 +162,7 @@
 
 			<fieldset class="fs col">
 				<legend>{t('fu_oa_scopes')}</legend>
-				{#each r.scopes as s (scopeOf(s))}
+				{#each shownScopes as s (scopeOf(s))}
 					<label class="ck">
 						<input type="checkbox" value={scopeOf(s)} bind:group={scopes} />
 						<span>{words(s)} <span class="chip mono" class:r={RISKY.includes(scopeOf(s))} class:w={scopeOf(s) === 'write:propose'}>{scopeOf(s)}</span></span>
@@ -154,6 +196,20 @@
 	.wrap {
 		max-width: 620px;
 		margin: 10px auto;
+	}
+	.cbar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 12px;
+	}
+	.cbar .brand {
+		padding: 0;
+	}
+	.logo.sm {
+		width: 28px;
+		height: 28px;
+		border-radius: 8px;
 	}
 	h1 {
 		font-size: 17px;

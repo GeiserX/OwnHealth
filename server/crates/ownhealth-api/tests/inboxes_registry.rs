@@ -155,6 +155,14 @@ async fn a_broken_source_is_refused_when_saved() -> R {
             "url",
         ),
         (
+            json!({"kind": "nightscout", "label": "x", "profile_id": alex, "config": {"base_url": "http://127.0.0.1:9"}}),
+            "plain http without the local-network option",
+        ),
+        (
+            json!({"kind": "paperless", "label": "x", "profile_id": alex, "config": {"base_url": "http://paperless.example", "health_tag": "health"}}),
+            "plain http without the local-network option",
+        ),
+        (
             json!({"kind": "health_auto_export", "label": "x", "profile_id": alex, "secret": "s"}),
             "no secret kind",
         ),

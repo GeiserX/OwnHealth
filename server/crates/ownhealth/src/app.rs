@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::Router;
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{StatusCode, Uri};
+use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -16,6 +16,7 @@ use ownhealth_core::{Error, Runtime, demo, jobs, migrate};
 use serde_json::json;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::ui::Ui;
 
@@ -32,7 +33,15 @@ pub fn check_secret_key(settings: &Settings) -> anyhow::Result<()> {
 pub fn build_app(rt: Runtime) -> Router {
     let ui = Arc::new(Ui::from_settings(rt.settings.static_dir.as_deref()));
     let web = Router::new()
-        .nest("/api", ownhealth_api::router())
+        .nest(
+            "/api",
+            // Health answers are private and change on every import: no browser or proxy keeps
+            // one unless a route says otherwise.
+            ownhealth_api::router().layer(SetResponseHeaderLayer::if_not_present(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            )),
+        )
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .fallback(move |uri: Uri| {

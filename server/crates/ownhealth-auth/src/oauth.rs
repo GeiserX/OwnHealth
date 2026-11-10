@@ -790,13 +790,31 @@ async fn revoke_tokens(conn: &mut PgConnection, consent_id: Uuid) -> Result<()> 
     Ok(())
 }
 
-/// Revoke a consent whatever its owner (a replayed code or refresh token).
-async fn revoke_by_server(conn: &mut PgConnection, consent_id: Uuid) -> Result<()> {
-    sqlx::query("update oauth_consent set revoked_at = now() where id = $1 and revoked_at is null")
-        .bind(consent_id)
-        .execute(&mut *conn)
-        .await?;
-    revoke_tokens(conn, consent_id).await
+/// Revoke a consent whatever its owner (a replayed code or refresh token, named by `replayed`), and
+/// write the audit row the person sees: the app, the consent and why its access ended.
+async fn revoke_by_server(conn: &mut PgConnection, consent_id: Uuid, replayed: &str) -> Result<()> {
+    let who: Option<(Uuid, String, Option<String>)> = sqlx::query_as(
+        "update oauth_consent c set revoked_at = now() where c.id = $1 and c.revoked_at is null \
+         returning c.user_id, c.client_id, (select k.client_name from oauth_client k where k.client_id = c.client_id)",
+    )
+    .bind(consent_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    revoke_tokens(&mut *conn, consent_id).await?;
+    if let Some((user_id, client_id, name)) = who {
+        let ev = ownhealth_core::audit::AuditEvent {
+            actor_id: Some(user_id),
+            client: Some(name.filter(|n| !n.is_empty()).unwrap_or(client_id)),
+            tool: Some("POST /oauth/token".into()),
+            resource_type: Some("oauth_consent".into()),
+            resource_ids: Some(vec![consent_id.to_string()]),
+            args_summary: Some(format!("replayed={replayed}")),
+            result_kind: Some("denied".into()),
+            ..ownhealth_core::audit::AuditEvent::new("token", "mcp", "oauth_reuse_revoked")
+        };
+        ownhealth_core::audit::write_audit(&mut *conn, &ev).await?;
+    }
+    Ok(())
 }
 
 /// One approved client, for the settings list (newest first).
@@ -1008,7 +1026,7 @@ pub async fn exchange_code(
     if used_at.is_some() {
         // RFC 6749 4.1.2: a replayed code revokes what it issued. `used_at` is set only by a
         // redemption that issued tokens.
-        revoke_by_server(&mut *conn, consent_id).await?;
+        revoke_by_server(&mut *conn, consent_id, "authorization_code").await?;
         return grant("This authorization code was already used; its tokens are revoked.");
     }
     if expires_at <= Utc::now() {
@@ -1054,7 +1072,7 @@ pub async fn refresh(
         return grant("Unknown refresh token.");
     };
     if used_at.is_some() {
-        revoke_by_server(&mut *conn, consent_id).await?;
+        revoke_by_server(&mut *conn, consent_id, "refresh_token").await?;
         return grant("This refresh token was already used; the consent is revoked.");
     }
     if revoked_at.is_some() || expires_at <= Utc::now() {

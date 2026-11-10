@@ -7,6 +7,7 @@
 
 use axum::Router;
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::routing::get;
 use chrono::{DateTime, Utc};
 use ownhealth_auth::household::can_manage;
@@ -16,7 +17,7 @@ use ownhealth_core::pyjson::pydantic_datetime_utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::auth::{R, ok};
+use super::auth::{R, detail, ok};
 use crate::extract::{Caller, SessionCaller};
 use crate::validate;
 
@@ -38,6 +39,7 @@ struct Row {
     withheld: Option<Value>,
     user_name: Option<String>,
     token_label: Option<String>,
+    client: Option<String>,
     profile_slug: Option<String>,
 }
 
@@ -54,6 +56,17 @@ async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Q
         .map(|perm| perm.profile.id)
         .collect();
     let profile = validate::param(&q, "profile").filter(|s| !s.is_empty());
+    // One channel only ('mcp', 'ui', 'api'): what agents did is not buried under page views.
+    let via = validate::param(&q, "via").filter(|s| !s.is_empty()).map(str::to_owned);
+    if let Some(v) = via.as_deref()
+        && !["mcp", "ui", "api"].contains(&v)
+    {
+        return Err(detail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "bad_input",
+            &format!("Unknown via '{v}': use mcp, ui or api."),
+        ));
+    }
     let pid = match profile {
         Some(r) => Some(Caller(p.clone()).require(&mut tx, r, None, None).await?.profile.id),
         None => None,
@@ -61,17 +74,18 @@ async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Q
     let rows: Vec<Row> = sqlx::query_as(
         "select e.id, e.ts, e.actor_kind, e.via, e.action, e.tool, e.resource_type, e.resource_ids, e.src_ids, \
          e.args_summary, e.rows_out, e.bytes_out, e.result_kind, e.withheld, u.display_name as user_name, \
-         t.label as token_label, p.slug as profile_slug \
+         t.label as token_label, e.client, p.slug as profile_slug \
          from audit_event e left join app_user u on u.id = e.actor_id \
          left join api_token t on t.id = e.token_id left join profile p on p.id = e.profile_id \
          where (e.profile_id = any($1) or e.actor_id = $2) and ($3::uuid is null or e.profile_id = $3) \
-         and ($4::bigint is null or e.id < $4) order by e.id desc limit $5",
+         and ($4::bigint is null or e.id < $4) and ($6::text is null or e.via = $6) order by e.id desc limit $5",
     )
     .bind(&managed)
     .bind(p.user_id)
     .bind(pid)
     .bind(before)
     .bind(limit)
+    .bind(via)
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -79,7 +93,14 @@ async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Q
         .into_iter()
         .map(|r| {
             let actor = match r.actor_kind.as_str() {
-                "token" => format!("{} (token)", r.token_label.as_deref().unwrap_or("deleted token")),
+                // a row the server wrote with no token (a replayed OAuth code) still names its app
+                "token" => format!(
+                    "{} (token)",
+                    r.token_label
+                        .as_deref()
+                        .or(r.client.as_deref().filter(|c| !c.is_empty()))
+                        .unwrap_or("deleted token")
+                ),
                 "system" => "OwnHealth".into(),
                 _ => r.user_name.clone().unwrap_or_else(|| "unknown".into()),
             };

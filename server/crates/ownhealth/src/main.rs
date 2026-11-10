@@ -18,26 +18,52 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the web app, MCP server and job loop.
+    /// Run the web app, MCP server and job loop. Needs OWNHEALTH_DATABASE_URL and OWNHEALTH_SECRET_KEY.
     Serve,
-    /// Apply pending database migrations.
+    /// Apply pending database migrations. Needs OWNHEALTH_DATABASE_URL.
     Migrate,
-    /// Load the synthetic Rivera family.
+    /// Load the synthetic Rivera family. Needs OWNHEALTH_DATABASE_URL.
     DemoSeed {
         /// Seed even if the demo household exists.
         #[arg(long)]
         force: bool,
     },
-    /// Run only the job loop (OWNHEALTH_QUEUES).
+    /// Run only the job loop (OWNHEALTH_QUEUES). Needs OWNHEALTH_DATABASE_URL.
     Worker,
-    /// Exit 0 when /healthz answers.
+    /// Exit 0 when /healthz answers on 127.0.0.1:OWNHEALTH_PORT; print why when it does not.
     Healthcheck,
-    /// Write a consistent backup directory (database dump, blobs, manifest) for restic.
-    Backup { path: PathBuf },
-    /// Load a backup directory into this empty instance and check every state_hash.
-    Restore { path: PathBuf },
-    /// Restore a backup into a scratch database, compare with its manifest, drop it.
-    VerifyRestore { path: PathBuf },
+    /// Write a consistent backup directory (database dump, blobs, manifest) for restic, readable by
+    /// its owner only. Needs OWNHEALTH_DATABASE_URL and pg_dump 17.
+    Backup {
+        /// The directory to write: new, or empty.
+        path: PathBuf,
+    },
+    /// Load a backup directory into this empty instance and check every state_hash. Needs
+    /// OWNHEALTH_DATABASE_URL and pg_restore 17.
+    Restore {
+        /// A directory `ownhealth backup` wrote.
+        path: PathBuf,
+    },
+    /// Restore a backup into a scratch database, compare with its manifest, drop it. Needs
+    /// OWNHEALTH_DATABASE_URL and pg_restore 17.
+    VerifyRestore {
+        /// A directory `ownhealth backup` wrote.
+        path: PathBuf,
+    },
+}
+
+/// `host:port` of a database URL, for an error a person can act on (never the password).
+fn db_target(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, r)| r);
+    let host = rest.split(['/', '?']).next().unwrap_or_default();
+    if host.is_empty() {
+        "localhost:5432".into()
+    } else if host.contains(':') && !host.ends_with(']') {
+        host.into()
+    } else {
+        format!("{host}:5432")
+    }
 }
 
 #[tokio::main]
@@ -54,7 +80,17 @@ async fn main() -> ExitCode {
     match run(cli.cmd).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            let text = format!("{e:#}");
+            if text.contains("pool timed out") || text.contains("Connection refused") {
+                // the same source the command used: the variable, its _FILE, or the built-in default
+                let url = Settings::from_env().map(|s| s.database_url).unwrap_or_default();
+                eprintln!(
+                    "error: could not reach the database at {} (set OWNHEALTH_DATABASE_URL, see compose.yaml): {text}",
+                    db_target(&url)
+                );
+            } else {
+                eprintln!("error: {text}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -83,10 +119,12 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
         }
         Cmd::Restore { path } => report(&ownhealth_ops::restore(&settings, &path).await?),
         Cmd::VerifyRestore { path } => report(&ownhealth_ops::verify_restore(&settings, &path).await?),
-        Cmd::Healthcheck => Ok(if healthcheck(settings.port).await {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
+        Cmd::Healthcheck => Ok(match healthcheck(settings.port).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(why) => {
+                eprintln!("unhealthy: http://127.0.0.1:{}/healthz {why}", settings.port);
+                ExitCode::FAILURE
+            }
         }),
         Cmd::Migrate => {
             let rt = Runtime::new(settings)?;
@@ -131,17 +169,38 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
     }
 }
 
-/// A plain HTTP/1.0 GET of /healthz on loopback, 3 s budget, like Python's urlopen check.
-async fn healthcheck(port: u16) -> bool {
+/// A plain HTTP/1.0 GET of /healthz on loopback, 3 s budget, like Python's urlopen check. The error
+/// is the status line the server answered, or why there was none.
+async fn healthcheck(port: u16) -> Result<(), String> {
     let probe = async {
         let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
         s.write_all(b"GET /healthz HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n").await?;
         let mut buf = Vec::new();
         s.read_to_end(&mut buf).await?;
-        Ok::<bool, std::io::Error>(buf.starts_with(b"HTTP/1.0 200") || buf.starts_with(b"HTTP/1.1 200"))
+        Ok::<Vec<u8>, std::io::Error>(buf)
     };
-    matches!(
-        tokio::time::timeout(std::time::Duration::from_secs(3), probe).await,
-        Ok(Ok(true))
-    )
+    match tokio::time::timeout(std::time::Duration::from_secs(3), probe).await {
+        Err(_) => Err("no answer in 3 s".into()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Ok(Ok(buf)) if buf.starts_with(b"HTTP/1.0 200") || buf.starts_with(b"HTTP/1.1 200") => Ok(()),
+        Ok(Ok(buf)) => {
+            let line = String::from_utf8_lossy(&buf);
+            Err(line.lines().next().unwrap_or("an empty answer").to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::db_target;
+
+    #[test]
+    fn database_target_names_host_and_port_never_the_password() {
+        assert_eq!(
+            db_target("postgresql://oh:s3cret@db:5433/oh?sslmode=require"),
+            "db:5433"
+        );
+        assert_eq!(db_target("postgresql+psycopg://oh@db/oh"), "db:5432");
+        assert_eq!(db_target("postgresql://127.0.0.1:55432/x"), "127.0.0.1:55432");
+    }
 }

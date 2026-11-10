@@ -5,14 +5,27 @@
 	import { listJobs, uploadFiles } from '#lib/api';
 	import type { ImportItem, JobInfo } from '#lib/api/types';
 	import { t } from '#lib/i18n/index.svelte';
-	import { tf } from '#lib/components/pages1/util.svelte';
+	import { errRaw, errText, tf, tp } from '#lib/components/pages1/util.svelte';
 	import { poller } from '#lib/logic/poll';
 
-	let { profile, profileName, ondone }: { profile: string; profileName: string; ondone: () => void } = $props();
+	// ondone gets the documents the finished jobs made, in upload order; rowsOf counts a document's rows to review.
+	let {
+		profile,
+		profileName,
+		ondone,
+		rowsOf = () => 0,
+		failedOf = () => false
+	}: {
+		profile: string;
+		profileName: string;
+		ondone: (documentIds: string[]) => void;
+		rowsOf?: (documentId: string) => number;
+		failedOf?: (documentId: string) => boolean;
+	} = $props();
 
 	let items = $state<ImportItem[]>([]);
 	let jobs = $state<Record<number, JobInfo>>({});
-	let error = $state<string | null>(null);
+	let error = $state<{ text: string; raw: string } | null>(null);
 	let skipped = $state(0);
 	let busy = $state(false);
 	let over = $state(false);
@@ -30,7 +43,7 @@
 		skipped = list.length - files.length;
 		error = null;
 		if (!files.length) {
-			error = t('i2_up_none');
+			error = { text: t('i2_up_none'), raw: '' };
 			return;
 		}
 		busy = true;
@@ -39,7 +52,7 @@
 			items = res.items;
 			poll();
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = { text: errText(e), raw: errRaw(e) };
 		} finally {
 			busy = false;
 		}
@@ -54,13 +67,18 @@
 			for (const j of res.jobs) jobs[j.id] = j;
 			return ids.every((id) => jobs[id] && TERMINAL.has(jobs[id].state));
 		},
-		ondone: () => ondone(),
-		onfail: (e) => (error = e instanceof Error ? e.message : String(e))
+		ondone: () => ondone(docIds()),
+		onfail: (e) => (error = { text: errText(e), raw: errRaw(e) })
 	});
 	const poll = () => jobPoll.start();
+	// The document each upload made, from the upload answer or its finished job.
+	const docOf = (i: ImportItem) => i.document_id ?? (i.job_id != null ? (jobs[i.job_id]?.document_id ?? undefined) : undefined);
+	const docIds = () => items.filter((i) => (i.job_id == null || jobs[i.job_id]?.state === 'done')).map(docOf).filter((x): x is string => !!x);
 	$effect(() => jobPoll.stop);
 
 	function stateOf(i: ImportItem): { word: string; cls: string } {
+		// A file sent again whose first import failed is not "already imported": its reason is in Other items.
+		if (i.duplicate && i.document_id && failedOf(i.document_id)) return { word: t('i2_up_dup_failed'), cls: 'p-out' };
 		if (i.duplicate) return { word: t('i2_up_dup'), cls: 'p-stale' };
 		if (i.attached_to) return { word: t('i2_up_attached'), cls: 'p-stale' };
 		const j = i.job_id != null ? jobs[i.job_id] : undefined;
@@ -97,23 +115,27 @@
 		<span>{t('i2_up_genome')} <a href="https://github.com/GeiserX/OwnGenome" target="_blank" rel="noopener">OwnGenome</a> (https://github.com/GeiserX/OwnGenome).</span>
 	</div>
 	{#if busy}<div class="muted" role="status" style="margin-top:8px">{t('i2_up_sending')}</div>{/if}
-	{#if error}<div class="p2err" role="alert" style="margin-top:8px">{error}</div>{/if}
+	{#if error}<div class="p2err" role="alert" style="margin-top:8px" title={error.raw || undefined}>{error.text}</div>{/if}
 	{#if skipped}<div class="dim" style="margin-top:6px;font-size:11.5px">{tf('i2_up_skipped', { n: skipped })}</div>{/if}
 	{#if items.length}
+		<div class="tscroll">
 		<table class="t" style="margin-top:8px" aria-live="polite">
 			<tbody>
 				{#each items as i (i.sha256 + i.filename)}
 					{@const s = stateOf(i)}
 					{@const j = i.job_id != null ? jobs[i.job_id] : undefined}
+					{@const d = docOf(i)}
+					{@const n = d && j?.state === 'done' ? rowsOf(d) : 0}
 					<tr>
-						<td>{i.filename}</td>
-						<td class="mono dim">{i.kind}</td>
-						<td><span class="pill {s.cls}"><i aria-hidden="true"></i>{s.word}</span></td>
-						<td class="dim" style="font-size:11.5px">{j?.last_error ?? ''}</td>
+						<td style="overflow-wrap:anywhere">{#if d && (j?.state === 'done' || i.duplicate)}<a href="?doc={d}">{i.filename}</a>{:else}{i.filename}{/if}</td>
+						<td class="dim" title={i.kind}>{t('i2_ik_' + i.kind) !== 'i2_ik_' + i.kind ? t('i2_ik_' + i.kind) : i.kind}</td>
+						<td style="white-space:nowrap"><span class="pill {s.cls}"><i aria-hidden="true"></i>{s.word}</span>{#if n}<a class="dim" style="font-size:11.5px;margin-left:8px" href="?doc={d}">{tp('i2_up_rows', n)}</a>{/if}</td>
+						<td class="dim" style="font-size:11.5px" title={j?.last_error ?? undefined}>{j?.last_error ? errText(new Error(j.last_error)) : ''}</td>
 					</tr>
 				{/each}
 			</tbody>
 		</table>
+		</div>
 	{/if}
 </section>
 

@@ -178,6 +178,8 @@ pub struct DatasetRow {
 }
 
 /// The profile's datasets visible at as_of, newest first.
+/// The datasets on file, newest first: current ones (or those known at `as_of`), never one whose
+/// genome-facts.json document was retracted.
 pub async fn current_datasets(
     conn: &mut PgConnection,
     profile_id: Uuid,
@@ -188,6 +190,8 @@ pub async fn current_datasets(
          producer, encode(vcf_blob, 'hex') as vcf, encode(tbi_blob, 'hex') as tbi, encode(gvcf_blob, 'hex') as gvcf, \
          encode(gvcf_tbi_blob, 'hex') as gvcf_tbi, encode(sites_blob, 'hex') as sites, \
          encode(sites_tbi_blob, 'hex') as sites_tbi from genome_dataset where profile_id = $1 and \
+         not exists (select 1 from document doc where doc.id = genome_dataset.document_id \
+         and doc.status = 'retracted') and \
          (case when cast($2 as timestamptz) is null then status = 'current' else imported_at <= \
          cast($2 as timestamptz) and status <> 'retracted' and (superseded_at is null or superseded_at > \
          cast($2 as timestamptz)) end) order by imported_at desc, id",
@@ -531,25 +535,43 @@ pub fn assay_out(ds: &DatasetRow) -> Value {
     })
 }
 
-pub fn dataset_limitations(datasets: &[DatasetRow]) -> Vec<String> {
+/// The coverage notes of the datasets on file: `(code, assay, English text)`. The code and assay let
+/// the UI say the note in its language; MCP sends the English text.
+pub fn dataset_notes(datasets: &[DatasetRow]) -> Vec<(&'static str, String, String)> {
     let mut out = Vec::new();
     for ds in datasets {
         let kind = ds.assay.as_str();
         if ds.vcf.is_none() {
-            out.push(format!(
-                "{kind}: no VCF on file, so variant lookups can only answer sites the findings cite."
+            out.push((
+                "no_vcf",
+                kind.to_string(),
+                format!("{kind}: no VCF on file, so variant lookups can only answer sites the findings cite."),
             ));
         } else if ["wgs", "wes", "long_read"].contains(&kind) && ds.gvcf.is_none() {
-            out.push(format!(
-                "{kind}: variant-only VCF; a site with no record cannot be told from reference (no_call)."
+            out.push((
+                "variant_only_vcf",
+                kind.to_string(),
+                format!("{kind}: variant-only VCF; a site with no record cannot be told from reference (no_call)."),
             ));
         }
         if ["chip", "chip_imputed"].contains(&kind) {
-            out.push("Chip: rare pathogenic calls are unconfirmed and a negative is not reassurance.".into());
+            out.push((
+                "chip_unconfirmed",
+                kind.to_string(),
+                "Chip: rare pathogenic calls are unconfirmed and a negative is not reassurance.".into(),
+            ));
         }
     }
-    out.push("CRAM/BAM not on file: structural variant, CYP2D6 and HLA re-calls are not possible here.".into());
+    out.push((
+        "no_cram",
+        String::new(),
+        "CRAM/BAM not on file: structural variant, CYP2D6 and HLA re-calls are not possible here.".into(),
+    ));
     out
+}
+
+pub fn dataset_limitations(datasets: &[DatasetRow]) -> Vec<String> {
+    dataset_notes(datasets).into_iter().map(|(_, _, text)| text).collect()
 }
 
 /// What `list_findings` answers (Python's `Findings` dataclass, same field order).
@@ -563,6 +585,9 @@ pub struct Findings {
     pub assay: Option<Value>,
     pub coverage: Vec<Value>,
     pub limitations: Vec<String>,
+    /// `{code, assay}` per limitation, in the same order (the UI's words for them).
+    #[serde(skip)]
+    pub limitation_codes: Vec<Value>,
 }
 
 /// Gated findings, strongest evidence first. `min_evidence` is the weakest level included (E2 shows
@@ -599,6 +624,7 @@ pub async fn collect_findings(
     let Some(newest) = datasets.first() else {
         result.limitations =
             vec!["No genome data on file for this profile. OwnGenome produces genome-facts.json.".into()];
+        result.limitation_codes = vec![json!({"code": "no_genome", "assay": null})];
         return Ok(result);
     };
     result.assay = Some(assay_out(newest));
@@ -606,7 +632,12 @@ pub async fn collect_findings(
         Value::Object(m) => Value::Object(m.clone()),
         _ => json!({}),
     };
-    result.limitations = dataset_limitations(&datasets);
+    let notes = dataset_notes(&datasets);
+    result.limitation_codes = notes
+        .iter()
+        .map(|(code, assay, _)| json!({"code": code, "assay": (!assay.is_empty()).then_some(assay)}))
+        .collect();
+    result.limitations = notes.into_iter().map(|(_, _, text)| text).collect();
     let want_gene = gene.map(|g| g.trim().to_uppercase()).filter(|g| !g.is_empty());
     let ids: HashSet<Uuid> = datasets.iter().map(|d| d.id).collect();
 

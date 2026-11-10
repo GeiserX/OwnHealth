@@ -515,6 +515,8 @@ pub async fn devices(
     .await?;
     Ok(rows
         .into_iter()
+        // a source whose samples were all retracted is not a device the person still has data from
+        .filter(|row| row.3.is_some())
         .map(|(id, provider, device, last, cov)| {
             let cov = real(Some(cov)).unwrap_or(0.0);
             json!({

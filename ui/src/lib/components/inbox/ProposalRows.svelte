@@ -1,9 +1,9 @@
 <script lang="ts">
 	// An agent's observations proposal, row by row (agent-extraction.md 4): each value with its page, its
-	// grounding flag and the server's other checks. Rows found on the page start ticked; a row not found
-	// there waits until the person has compared it with the page and ticks it. Accept writes only the
+	// grounding flag and the server's other checks. Rows found on the page and not already in the record
+	// start ticked; a duplicate, a conflict or a row not found there waits until the person has compared it with the page and ticks it. Accept writes only the
 	// ticked rows, and never runs with none ticked.
-	import { tf } from '#lib/components/pages1/util.svelte';
+	import { tf, tp } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
 	import { proposalAcceptEdits, proposalDefaultKeep, type ProposalRow } from '#lib/logic/inbox';
 
@@ -59,7 +59,7 @@
 		{/each}
 	</ul>
 	<div class="acts">
-		<button class="btn sm ok" disabled={busy || !edits} onclick={() => edits && onaccept(edits)}>{tf('fu_pr_accept', { n: edits?.rows.length ?? 0 })}</button>
+		<button class="btn sm ok" disabled={busy || !edits} onclick={() => edits && onaccept(edits)}>{tp('fu_pr_accept', edits?.rows.length ?? 0)}</button>
 		<button class="btn sm no" disabled={busy} onclick={onreject}>{t('i2_reject')}</button>
 		{#if !edits}<span class="dim" style="font-size:11px">{t('fu_pr_none')}</span>{/if}
 	</div>
@@ -105,9 +105,5 @@
 		gap: 6px;
 		align-items: center;
 		flex-wrap: wrap;
-	}
-	.btn:disabled {
-		opacity: 0.5;
-		cursor: default;
 	}
 </style>

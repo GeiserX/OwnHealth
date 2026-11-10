@@ -99,6 +99,30 @@ fn check_config(kind: &str, config: &Value) -> Result<(), Error> {
     }
 }
 
+/// A Paperless or Nightscout address on plain http without the local-network option would fail at
+/// its first sync (only https leaves the network); refuse it when it is saved instead.
+fn plain_http(kind: &str, config: &Value) -> R<()> {
+    if !matches!(kind, "paperless" | "nightscout") {
+        return Ok(());
+    }
+    let url = config
+        .get("base_url")
+        .filter(|v| !v.is_null())
+        .or_else(|| config.get("url"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let private = config.get("allow_private").and_then(Value::as_bool).unwrap_or(false);
+    if url.trim().to_ascii_lowercase().starts_with("http://") && !private {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "bad_input",
+            "This address uses plain http. Use https, or tick the option for a service on your own network.",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// The config fields that decide where a kind sends its stored secret. Changing one without typing the
 /// secret again would hand the sealed password or token to a host the person never gave it to.
 fn destination(kind: &str, config: &Value) -> Vec<Value> {
@@ -299,6 +323,7 @@ async fn create(State(rt): State<Runtime>, Caller(p): Caller, Body(b): Body<Sour
     let label = check_label(&b.label)?;
     let config = b.config.unwrap_or_else(|| json!({}));
     check_config(&b.kind, &config)?;
+    plain_http(&b.kind, &config)?;
     if needs_profile(&b.kind) && b.profile_id.is_none() {
         return Err(Error::Invalid(format!("a source of kind {} needs profile_id", b.kind)).into());
     }
@@ -385,6 +410,7 @@ async fn patch(State(rt): State<Runtime>, Caller(p): Caller, Path(id): Path<Stri
     let label = b.label.as_deref().map(check_label).transpose()?;
     if let Some(c) = &b.config {
         check_config(&s.kind, c)?;
+        plain_http(&s.kind, c)?;
         // the config of a kind with a secret holds where it goes and, for mail, which
         // Authentication-Results count: widening either is a step-up action, like a sender rule
         if secret_purpose(&s.kind).is_some() {

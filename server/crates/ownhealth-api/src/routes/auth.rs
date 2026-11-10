@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::CookieJar;
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use ownhealth_auth::oidc::{self, OidcConfig};
 use ownhealth_auth::passkeys::{self, Rp};
 use ownhealth_auth::sessions::{self, COOKIE, STEP_UP_SECONDS};
@@ -481,6 +481,26 @@ pub fn date_field(check: &mut Check, field: &str, value: Option<&str>) -> Option
     }
 }
 
+/// A person's birth date (not after today, not before 1900) and country (two letters, an ISO
+/// 3166 code), refused with `bad_input` and a message the UI can show.
+pub fn person_fields(birth: Option<NaiveDate>, country: Option<&str>) -> R<()> {
+    let bad = |m: &str| Err(detail(StatusCode::UNPROCESSABLE_ENTITY, "bad_input", m));
+    if let Some(b) = birth {
+        if b > super::core::local_today() {
+            return bad("The birth date is in the future.");
+        }
+        if b.year() < 1900 {
+            return bad("The birth date is before 1900.");
+        }
+    }
+    if let Some(c) = country.filter(|c| !c.is_empty())
+        && !(c.chars().count() == 2 && c.chars().all(|ch| ch.is_ascii_alphabetic()))
+    {
+        return bad("The country is two letters, for example ES or GB.");
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ auth bits ----
 
 fn rp(settings: &Settings) -> Rp {
@@ -711,10 +731,12 @@ impl CredentialIn {
     }
 }
 
-async fn setup_begin(State(rt): State<Runtime>, _: Public, Body(body): Body<SetupIn>) -> R {
+async fn setup_begin(State(rt): State<Runtime>, _: Public, Body(mut body): Body<SetupIn>) -> R {
+    body.country = body.country.map(|c| c.to_ascii_uppercase());
     let mut c = Check::body();
-    body.check(&mut c);
+    let birth = body.check(&mut c);
     c.done()?;
+    person_fields(birth, body.country.as_deref())?;
     require_passkeys(&rt.settings)?;
     let mut tx = rt.pool.begin().await?;
     if household::users_exist(&mut tx).await? {
@@ -792,11 +814,13 @@ pub struct PasswordSetupIn {
 }
 
 /// First run on a plain-HTTP LAN address, where passkeys cannot run.
-async fn setup_password(State(rt): State<Runtime>, _: Public, meta: Meta, Body(body): Body<PasswordSetupIn>) -> R {
+async fn setup_password(State(rt): State<Runtime>, _: Public, meta: Meta, Body(mut body): Body<PasswordSetupIn>) -> R {
+    body.setup.country = body.setup.country.map(|c| c.to_ascii_uppercase());
     let mut c = Check::body();
     let birth = body.setup.check(&mut c);
     c.len("password", Some(&body.password), password::MIN_LENGTH, 256)
         .done()?;
+    person_fields(birth, body.setup.country.as_deref())?;
     require_no_passkeys(&rt.settings)?;
     let mut tx = rt.pool.begin().await?;
     let owner = household::setup_owner(&mut tx, &body.setup.owner(birth)).await?;

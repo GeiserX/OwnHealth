@@ -1,10 +1,12 @@
 /*
  * OwnHealth design system, ported verbatim from docs/mockup/index.html (the visual spec).
  * Change a value here only together with the mockup. Additions for the real app are at the end.
+ * One value differs from the mockup on purpose: --dim is #8a93a4 (the mockup has #7a8394), so dim text
+ * on --surface and --bg passes WCAG AA contrast (4.5:1).
  */
 :root{
   --bg:#0f1115;--surface:#161a21;--raised:#1d222c;--hover:#232937;--line:#2a303c;--line2:#343b49;
-  --text:#e6e8ee;--muted:#9aa3b2;--dim:#7a8394;
+  --text:#e6e8ee;--muted:#9aa3b2;--dim:#8a93a4;
   --accent:#6ea8fe;--accent-bg:rgba(110,168,254,.13);
   --ok:#3fb68b;--ok-bg:rgba(63,182,139,.14);
   --watch:#e0a84a;--watch-bg:rgba(224,168,74,.14);
@@ -15,6 +17,8 @@
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
 a{color:var(--accent);text-decoration:none}
+/* A link inside grey running text differs from it by more than a near-equal colour: it is underlined. */
+:is(.sub,.muted,.dim,.note) a:not(.btn,.pill,.chip){text-decoration:underline;text-underline-offset:2px}
 button{font:inherit;color:inherit;cursor:pointer}
 .num{font-variant-numeric:tabular-nums}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
@@ -98,7 +102,8 @@ table.t{width:100%;border-collapse:collapse;font-size:12.5px}
 .grid{display:grid;gap:12px}
 /* dashboard */
 .dash{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:14px;align-items:start}
-.meds{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:8px 12px;margin-bottom:12px;flex-wrap:nowrap;overflow:hidden}
+.meds{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:8px 12px;margin-bottom:12px;flex-wrap:wrap}
+.meds .tail{display:flex;align-items:center;gap:10px;margin-left:auto;flex:none}
 .med{display:flex;align-items:center;gap:7px;padding:3px 10px 3px 8px;background:var(--raised);border-radius:8px;white-space:nowrap}
 .med b{font-weight:560}
 .pgx{font-size:10.5px;font-weight:600;padding:0 6px;border-radius:5px;border:1px solid}
@@ -116,7 +121,9 @@ table.t{width:100%;border-collapse:collapse;font-size:12.5px}
 .mk .n{font-size:12.5px;line-height:1.15}
 .mk .v{font-size:14px;font-weight:600;text-align:right;line-height:1.1}
 .mk .v small{font-size:10.5px;color:var(--muted);font-weight:400;margin-left:2px}
-.stale-b{font-size:10px;padding:0 5px;border-radius:4px;color:var(--stale);border:1px dashed var(--stale);margin-left:5px;vertical-align:1px}
+.stale-b{font-size:10px;padding:0 5px;border-radius:4px;color:var(--stale);border:1px dashed var(--stale);margin-left:5px;vertical-align:1px;white-space:nowrap}
+/* A stale row's name wraps rather than being cut by its chip. */
+.mk .n:has(.stale-b){white-space:normal}
 .sc .ft{margin-top:auto;padding-top:6px;gap:8px;white-space:nowrap;font-size:10.5px;color:var(--dim);display:flex;justify-content:space-between}
 .chg{display:grid;grid-template-columns:1fr auto auto;gap:6px 10px;align-items:center;font-size:12.5px}
 .arrow-up{color:var(--out)}
@@ -238,19 +245,84 @@ pre.code{background:#0b0d11;border:1px solid var(--line);border-radius:8px;paddi
 .empty{color:var(--muted);font-size:12.5px;padding:18px 4px;text-align:center}
 .err{color:var(--out);font-size:12.5px}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-/* v0.2 (lane F-ui): a phone layout for the shell, so the share screen and the inbox work on Android.
-   The sidebar becomes one scrolling row of views; the profile list and the search hide. */
+/* Shared patterns for the real app. */
+.tscroll{overflow-x:auto;max-width:100%}
+.btn:disabled,.btn[aria-disabled=true]{opacity:.5;cursor:not-allowed}
+.btn:disabled:hover,.btn[aria-disabled=true]:hover{background:var(--raised)}
+.p2secret,pre.code{user-select:all;-webkit-user-select:all}
+.search:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+.asof,.iconbtn{white-space:nowrap}
+.card h3{flex-wrap:wrap}
+.card h3 .r{white-space:nowrap}
+/* A segmented switch inside a card wraps instead of pushing the card wider than its column. */
+.card .seg{display:flex;flex-wrap:wrap;max-width:100%}
+/* A tab row that fills its card: tighter tabs share the width, so four record kinds fit one line. */
+.seg.fill button{flex:1 1 auto;padding:5px 6px;white-space:nowrap}
+.skip{position:absolute;left:8px;top:-60px;z-index:20;background:var(--accent);color:#0c1222;font-weight:600;padding:6px 12px;border-radius:8px}
+.skip:focus{top:8px}
+/* The bare screens with no shell: sign-in, an invite link, the OAuth consent. */
+.bare{min-height:100vh;padding:18px 14px 28px}
+/* MCP & access and Drug check: their columns never grow past their tracks, so a wide table scrolls or
+   wraps inside its card. */
+.mcp>*,.mcp>*>*,.drug>*,.drug>*>*{min-width:0}
+/* A touch screen gets finger-sized small buttons at any width. */
+@media (pointer:coarse){.btn.sm{min-height:36px}.mk .n a,.sc .ft a{display:inline-block;padding:5px 0}.xr input[type=checkbox]{width:24px;height:24px;margin:0}.swb{min-height:32px}}
+/* Tablet: every screen grid becomes one column; the card grids fill the width; the top bar never overlaps. */
+@media (max-width:1100px){
+.dash,.bm,.tl,.fam,.mcp,.drug{grid-template-columns:minmax(0,1fr)}
+.bm>*,.fam>*,.fam>*>*{min-width:0}
+.sys,.wg{grid-template-columns:repeat(2,minmax(0,1fr))}
+.tiles,.devs,.mem{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
+.img{grid-template-columns:minmax(0,1fr);height:auto!important}
+.viewer{min-height:260px}
+.top .asof{display:none}
+.search{min-width:0;max-width:420px;flex:8 1 0}
+.search input{min-width:0;width:100%}
+.xr{grid-template-columns:20px minmax(120px,1.4fr) minmax(0,1fr) minmax(0,1.2fr) 80px 118px}
+.ph{flex-wrap:wrap}
+.ph .right{flex-wrap:wrap}
+.foot-hash{flex-wrap:wrap;gap:6px 14px}
+}
+/* Phone (v0.2, lane F-ui; finished in the UI polish): the sidebar becomes one scrolling row with the
+   profile initials and the views; the search moves to a second row of the top bar. */
 @media (max-width:760px){
-.app{grid-template-columns:1fr;grid-template-rows:auto 1fr;height:auto;min-height:100vh}
+.app{grid-template-columns:minmax(0,1fr);grid-template-rows:auto 1fr;height:auto;min-height:100vh}
 .side{flex-direction:row;align-items:center;overflow-x:auto;overflow-y:hidden;padding:8px;gap:6px;border-right:0;border-bottom:1px solid var(--line)}
-.side .plabel,.side .profiles,.side .foot,.brand small{display:none}
+.side.fade{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(to right,#000 calc(100% - 28px),transparent)}
+.side .plabel,.side .foot,.side .brand small,.side .brand>div:last-child{display:none}
+.side .profiles{flex-direction:row;gap:4px;flex:none}
+.side .prof{width:auto;padding:4px;gap:0}
+.side .prof .nm,.side .prof .rl,.side .prof .bdg,.side .prof>span:not(.av){display:none}
+.side .prof .av{width:30px;height:30px}
 .brand{padding:0 4px}
 nav.menu{flex-direction:row}
 nav.menu a{white-space:nowrap}
-.main{height:auto}
-.top{gap:8px;padding:0 10px}
-.top .search,.top .asof{display:none}
+.main{height:auto;min-width:0}
+.top{height:auto;flex-wrap:wrap;gap:8px;padding:8px 10px}
+.top .search{order:9;flex:1 1 100%;max-width:none}
 .view{padding:12px}
-.ph{flex-wrap:wrap}
-.ph .right{margin-left:0;flex-wrap:wrap}
+.ph .right{margin-left:0}
+.sys,.wg,.devs{grid-template-columns:minmax(0,1fr)}
+.tiles,.mem{grid-template-columns:repeat(2,minmax(0,1fr))}
+.ev{grid-template-columns:44px 24px minmax(0,1fr)}
+.ev .body{flex-wrap:wrap;min-width:0}
+.ev .body .rt{margin-left:0;flex-wrap:wrap;min-width:0}
+.yr{margin-left:56px}
+.disc{flex-wrap:wrap}
+.banner svg{flex:none}
+.btn.sm{min-height:36px}
+.btn.no{margin-left:auto}
+.src{min-height:28px}
+/* A table where a person acts on each row stacks: main text, then details, then the buttons. */
+table.stack thead{display:none}
+table.stack,table.stack tbody,table.stack tr,table.stack td{display:block;width:100%}
+table.stack tr{padding:8px 2px;border-bottom:1px solid var(--line)}
+table.stack td{border:0;padding:2px 4px;white-space:normal}
+table.stack td:first-child{font-weight:560}
+table.stack td:not(:first-child):not(.acts-cell){display:inline-block;width:auto;color:var(--muted);font-size:12px;margin-right:10px}
+table.stack td.acts-cell{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;padding-top:6px}
+/* The header row is hidden, so a bare detail says what it is: <td data-label="caduca">. */
+table.stack td[data-label]::before{content:attr(data-label) ': ';color:var(--dim)}
+table.stack tr:hover td{background:none}
+.xr.h{display:none}
 }

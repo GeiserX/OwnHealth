@@ -30,7 +30,7 @@
 	<a class="btn sm" style="margin-left:auto" href="/import-review">{t('h1_img_go')}</a>
 </div>
 
-<div class="img" style="height:calc(100vh - 52px - 40px - 52px - 100px)">
+<div class="img under-banner">
 	<div class="card" style="padding:8px;overflow:auto">
 		<h3 style="padding:2px 6px 0">{t('h1_img_studies')}</h3>
 		<div class="empty">{t('h1_img_none')}</div>
@@ -49,7 +49,7 @@
 		</div>
 		<div class="thumbs">
 			<div style="margin-left:auto;border:0;width:auto;display:flex;align-items:center">
-				<button class="btn pri" aria-disabled="true" title={t('h1_soon_btn')} style="opacity:.5">{t('h1_img_ohif')}</button>
+				<button class="btn pri" aria-disabled="true" title={t('h1_soon_btn')}>{t('h1_img_ohif')}</button>
 			</div>
 		</div>
 	</div>
@@ -58,3 +58,10 @@
 		<div class="dim" style="font-size:12px;line-height:1.55">{t('h1_img_report_d')}</div>
 	</div>
 </div>
+
+<style>
+	/* The panes fill the window below the banner; under 1100 px app.css lets them grow with their content. */
+	.under-banner {
+		height: calc(100vh - 52px - 40px - 52px - 100px);
+	}
+</style>

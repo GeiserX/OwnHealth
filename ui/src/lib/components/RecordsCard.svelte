@@ -5,7 +5,8 @@
 	import { listRecords, retractRecord } from '#lib/api';
 	import type { RecordOut } from '#lib/api/types';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
-	import { Loader } from '#lib/components/pages1/util.svelte';
+	import { errText, Loader } from '#lib/components/pages1/util.svelte';
+	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import ManualEntry, { type EntryKind } from './ManualEntry.svelte';
 	import { t } from '#lib/i18n/index.svelte';
 
@@ -19,6 +20,7 @@
 	let retracting = $state<string | null>(null);
 	let reason = $state('');
 	let error = $state<string | null>(null);
+	let busy = $state(false);
 
 	function load() {
 		const p = profile;
@@ -35,50 +37,76 @@
 	}
 	async function retract(e: SubmitEvent, r: RecordOut) {
 		e.preventDefault();
+		if (busy) return;
+		busy = true;
 		error = null;
 		try {
 			await retractRecord(profile, r.kind, r.id, reason.trim());
 			reason = '';
 			changed();
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = errText(err);
+		} finally {
+			busy = false;
 		}
 	}
-	const sub = (r: RecordOut) => {
-		const d = r.detail;
-		const parts = [d.dose_text, d.started && `${t('me_f_start')} ${d.started}`, d.stopped && `${t('me_f_stop')} ${d.stopped}`, d.onset, d.occurred, d.reaction_text];
-		return parts.filter(Boolean).join(' · ');
+	function openRetract(id: string) {
+		retracting = retracting === id ? null : id;
+		correcting = null;
+		reason = '';
+		error = null;
+	}
+	// The second line of a record: words, and dates that never break in the middle.
+	const sub = (r: RecordOut): { w?: string; d?: string }[] => {
+		const d = r.detail as Record<string, string | null | undefined>;
+		const parts: { w?: string; d?: string }[] = [];
+		if (d.dose_text) parts.push({ w: d.dose_text });
+		if (d.started) parts.push({ w: t('me_f_start'), d: d.started });
+		if (d.stopped) parts.push({ w: t('me_f_stop'), d: d.stopped });
+		if (d.onset) parts.push({ d: d.onset });
+		if (d.occurred) parts.push({ d: d.occurred });
+		if (d.reaction_text) parts.push({ w: d.reaction_text });
+		return parts;
 	};
 </script>
 
 <div class="card">
 	<h3>{t('me_records')}{#if canWrite}<span class="r"><button class="btn sm" onclick={() => ((adding = !adding), (correcting = null))} aria-expanded={adding}>{t('me_add')}</button></span>{/if}</h3>
-	<div class="seg" role="group" aria-label={t('me_kind')} style="margin-bottom:6px">
+	<div class="seg fill" role="group" aria-label={t('me_kind')} style="margin-bottom:6px">
 		{#each KINDS as k (k)}<button class:on={k === kind} aria-pressed={k === kind} onclick={() => ((kind = k), (adding = false))}>{t('me_k_' + k)}</button>{/each}
 	</div>
 	{#if adding}
 		{#key kind}<ManualEntry {profile} kinds={[kind]} onsaved={changed} oncancel={() => (adding = false)} />{/key}
 	{/if}
-	{#if error}<div class="p2err" role="alert">{error}</div>{/if}
 	{#if recs.error}
 		<NotReady error={recs.error} onretry={load} />
 	{:else}
 		{#each recs.data ?? [] as r (r.id)}
 			<div style="padding:5px 0;border-top:1px solid #20252f">
 				<div class="p2row">
-					<div style="flex:1;min-width:0"><b>{r.title}</b>{#if sub(r)}<div class="dim" style="font-size:11px">{sub(r)}</div>{/if}</div>
+					<div style="flex:1;min-width:0">
+						<b>{r.title}</b>
+						{#if sub(r).length}
+							<div class="dim" style="font-size:11px">
+								{#each sub(r) as x, i (i)}{i ? ' · ' : ''}{x.w ?? ''}{x.w && x.d ? ' ' : ''}{#if x.d}<span class="num" style="white-space:nowrap">{x.d}</span>{/if}{/each}
+							</div>
+						{/if}
+					</div>
 					{#if canWrite}
 						<button class="btn sm" onclick={() => ((correcting = correcting === r.id ? null : r.id), (retracting = null))} aria-expanded={correcting === r.id}>{t('me_correct')}</button>
-						<button class="btn sm no" onclick={() => ((retracting = retracting === r.id ? null : r.id), (correcting = null), (reason = ''))} aria-expanded={retracting === r.id}>{t('me_retract')}</button>
+						<button class="btn sm no" onclick={() => openRetract(r.id)} aria-expanded={retracting === r.id}>{t('me_retract')}</button>
 					{/if}
 				</div>
 				{#if correcting === r.id}
 					<ManualEntry {profile} correcting={r} onsaved={changed} oncancel={() => (correcting = null)} />
 				{:else if retracting === r.id}
-					<form class="p2row" style="margin-top:4px" onsubmit={(e) => retract(e, r)}>
-						<input class="p2in" style="flex:1" bind:value={reason} required maxlength="500" placeholder={t('me_reason')} aria-label={t('me_reason')} />
-						<button class="btn sm no" type="submit">{t('me_retract')}</button>
+					<form class="p2row" style="margin-top:4px" onsubmit={(e) => retract(e, r)} use:focusOnOpen={{ oncancel: () => (retracting = null) }}>
+						<span class="muted" style="font-size:12px;flex-basis:100%">{t('me_retract_d')}</span>
+						<input class="p2in" style="flex:1;min-width:140px" bind:value={reason} required maxlength="500" placeholder={t('me_reason')} aria-label={t('me_reason')} />
+						<button class="btn sm" type="button" onclick={() => (retracting = null)}>{t('i2_cancel')}</button>
+						<button class="btn sm no" type="submit" disabled={busy}>{t('me_retract')}</button>
 					</form>
+					{#if error}<div class="p2err" role="alert">{error}</div>{/if}
 				{/if}
 			</div>
 		{:else}

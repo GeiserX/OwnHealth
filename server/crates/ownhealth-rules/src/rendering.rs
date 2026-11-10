@@ -174,6 +174,8 @@ pub fn render_with(
         let unit = s(f, "unit");
         let unit_txt = unit.unwrap_or_default();
         let value = s(f, "value");
+        // numbers inside the sentence follow the language; the structured fields stay plain
+        let loc = |v: Option<&str>| P::from(v.map(|x| num::localized(x, lang)));
         let text_out;
         if is_lab {
             let group = s(f, "group").unwrap_or_default();
@@ -198,7 +200,7 @@ pub fn render_with(
                     lang,
                     &[
                         ("name", P::from(&name)),
-                        ("value", P::from(value)),
+                        ("value", loc(value)),
                         ("unit", P::from(unit_txt)),
                         ("ref", P::from(s(f, "ref").unwrap_or_default())),
                         ("flag", P::from(s(f, "flag"))),
@@ -215,11 +217,11 @@ pub fn render_with(
                     lang,
                     &[
                         ("name", P::from(&name)),
-                        ("prev", P::from(s(f, "prev"))),
-                        ("value", P::from(value)),
+                        ("prev", loc(s(f, "prev"))),
+                        ("value", loc(value)),
                         ("unit", P::from(unit_txt)),
-                        ("change_pct", P::from(s(f, "change_pct"))),
-                        ("rcv_pct", P::from(rcv_pct)),
+                        ("change_pct", loc(s(f, "change_pct"))),
+                        ("rcv_pct", P::from(num::localized(&rcv_pct.to_string(), lang))),
                         ("prev_date", P::from(when_s(s(f, "prev_date"))?)),
                     ],
                 )?;
@@ -233,8 +235,8 @@ pub fn render_with(
                     &[
                         ("name", P::from(&name)),
                         ("n", P::I(points)),
-                        ("slope", P::from(s(f, "slope"))),
-                        ("value", P::from(value)),
+                        ("slope", loc(s(f, "slope"))),
+                        ("value", loc(value)),
                         ("unit", P::from(unit_txt)),
                         ("when", P::from(on(s(f, "date"))?)),
                     ],

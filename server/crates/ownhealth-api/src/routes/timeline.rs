@@ -57,31 +57,61 @@ struct Words {
     draw: &'static str,
     draw1: &'static str,
     flagged: &'static str,
+    flagged1: &'static str,
     started: &'static str,
     stopped: &'static str,
     genome: &'static str,
     visit: &'static str,
+    /// Stored status words (condition verification, medication status) in this language.
+    enums: &'static [(&'static str, &'static str)],
 }
 
 const EN: Words = Words {
     draw: "Lab report · {n} results",
     draw1: "Lab report · 1 result",
     flagged: "{n} flagged by the lab",
+    flagged1: "1 flagged by the lab",
     started: "{name} started",
     stopped: "{name} stopped",
     genome: "Genome facts imported",
     visit: "Visit",
+    enums: &[("on-hold", "paused"), ("entered-in-error", "entered in error")],
 };
 
 const ES: Words = Words {
     draw: "Analítica · {n} resultados",
     draw1: "Analítica · 1 resultado",
     flagged: "{n} marcados por el laboratorio",
+    flagged1: "1 marcado por el laboratorio",
     started: "Inicio de {name}",
     stopped: "Fin de {name}",
     genome: "Datos genómicos importados",
     visit: "Consulta",
+    enums: &[
+        ("confirmed", "confirmado"),
+        ("provisional", "provisional"),
+        ("unconfirmed", "sin confirmar"),
+        ("differential", "diferencial"),
+        ("refuted", "descartado"),
+        ("entered-in-error", "registrado por error"),
+        ("active", "activo"),
+        ("paused", "en pausa"),
+        ("on-hold", "en pausa"),
+        ("stopped", "suspendido"),
+        ("completed", "completado"),
+        ("intended", "previsto"),
+    ],
 };
+
+impl Words {
+    /// A stored status word in this language; any other text stays as it is.
+    fn word(&self, v: Option<String>) -> Option<String> {
+        v.map(|v| match self.enums.iter().find(|(k, _)| *k == v) {
+            Some((_, w)) => (*w).to_string(),
+            None => v,
+        })
+    }
+}
 
 /// What is true now on a clinical table aliased `a`: current, not superseded, sensitive only if allowed.
 fn live(a: &str, include_sensitive: bool) -> String {
@@ -166,7 +196,11 @@ async fn labs(conn: &mut PgConnection, pid: Uuid, sens: bool, t: &Words) -> R<Ve
         let n: i64 = r.try_get("n")?;
         let flagged: i64 = r.try_get("flagged")?;
         let provider = text(&r, "provider")?;
-        let flagged_text = (flagged != 0).then(|| t.flagged.replace("{n}", &flagged.to_string()));
+        let flagged_text = match flagged {
+            0 => None,
+            1 => Some(t.flagged1.to_string()),
+            n => Some(t.flagged.replace("{n}", &n.to_string())),
+        };
         let detail = joined(&[provider.clone(), flagged_text]);
         let title = if n == 1 {
             t.draw1.to_string()
@@ -221,7 +255,7 @@ async fn records(
                 day(&r, "stopped")?,
                 "medication",
                 t.stopped.replace("{name}", &name),
-                text(&r, "reason_text")?,
+                t.word(text(&r, "reason_text")?),
                 src,
                 label,
                 None,
@@ -242,7 +276,7 @@ async fn records(
                 }
                 _ => None,
             };
-            let detail = joined(&[code, text(&r, "verification_status")?]);
+            let detail = joined(&[code, t.word(text(&r, "verification_status")?)]);
             out.push(event(
                 day(&r, "day")?,
                 "diagnosis",
@@ -320,17 +354,23 @@ async fn records(
 
 async fn genome(conn: &mut PgConnection, pid: Uuid, t: &Words) -> R<Vec<Option<Event>>> {
     let sql = "select g.imported_at::date as day, g.assay, g.build, g.owngenome_version, g.src_id, s.label \
-               from genome_dataset g join src s on s.id = g.src_id where g.profile_id = $1 and g.status = 'current'";
+               from genome_dataset g join src s on s.id = g.src_id where g.profile_id = $1 and g.status = 'current' \
+               and not exists (select 1 from document d where d.id = g.document_id and d.status = 'retracted')";
     let mut out = Vec::new();
     for r in rows(conn, sql, pid).await? {
-        let version = text(&r, "owngenome_version")?.unwrap_or_else(|| "None".into());
+        // the producer and its version ('OwnGenome 1.4.2'); a bare version gets the name once
+        let version = match text(&r, "owngenome_version")? {
+            Some(v) if v.starts_with("OwnGenome") => v,
+            Some(v) => format!("OwnGenome {v}"),
+            None => "OwnGenome".into(),
+        };
         let assay = text(&r, "assay")?.unwrap_or_default().to_uppercase();
         let build = text(&r, "build")?.unwrap_or_else(|| "None".into());
         out.push(event(
             day(&r, "day")?,
             "genome",
             t.genome.to_string(),
-            Some(format!("OwnGenome {version} · {assay} · {build}")),
+            Some(format!("{version} · {assay} · {build}")),
             text(&r, "src_id")?,
             text(&r, "label")?,
             Some("OwnGenome".into()),

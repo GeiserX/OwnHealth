@@ -391,8 +391,22 @@ async fn the_webhook_refuses_what_it_should_and_says_why_on_the_source() -> R {
     let (source, token) = paperless_source(&a, cfg.clone(), PL_TOKEN).await?;
     let body = |id: i64| json!({"doc_url": format!("{base}/documents/{id}/details")}).to_string();
 
-    // no token, a token of another kind of source
-    assert_eq!(webhook(&a, None, &body(9)).await?.0, StatusCode::UNAUTHORIZED);
+    // no token, a bad token, a token of another kind of source
+    let (s, v) = webhook(&a, None, &body(9)).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("bad_push_token"))
+    );
+    let msg = v["detail"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("Inbox page") && msg.contains("X-OwnHealth-Secret"),
+        "{msg}"
+    );
+    let (s, v) = webhook(&a, Some("oh_ing_bogus"), &body(9)).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("bad_push_token"))
+    );
     let (_, shortcut_token) = push_source(&a, "shortcut", Some("alex")).await?;
     let (s, v) = webhook(&a, Some(&shortcut_token), &body(9)).await?;
     assert_eq!(
@@ -771,10 +785,13 @@ async fn the_shortcut_pushes_with_a_token_bound_to_one_profile() -> R {
     // refused: a session, a Paperless token, a Shortcut source with no profile
     let alex = a.cookie("alex").await?;
     let f = || multipart(&[], &[("file", "y.pdf", b"%PDF-1.4\n")]);
+    let (s, v) = a.send(push("/ingest/shortcut", &[("cookie", &alex)], f())?).await?;
     assert_eq!(
-        a.send(push("/ingest/shortcut", &[("cookie", &alex)], f())?).await?.0,
-        StatusCode::UNAUTHORIZED
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("bad_push_token"))
     );
+    let msg = v["detail"]["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("Authorization: Bearer"), "{msg}");
     let (_, pl) = push_source(&a, "paperless", Some("alex")).await?;
     let (s, v) = a
         .send(push(

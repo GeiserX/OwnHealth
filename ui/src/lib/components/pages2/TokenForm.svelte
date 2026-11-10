@@ -3,7 +3,10 @@
 	// back once; the parent shows it with the Claude Code snippet and never stores it.
 	import { createToken } from '#lib/api';
 	import type { ProfileSummary, Scope, TokenOut } from '#lib/api/types';
+	import { focusOnOpen } from '#lib/actions/focusOnOpen';
+	import { errText, scopeText } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
+	import { tokenProblem } from '#lib/logic/people';
 	import { withStepUp } from './stepup.svelte';
 
 	let { profiles, oncreated, oncancel }: { profiles: ProfileSummary[]; oncreated: (token: TokenOut, plaintext: string) => void; oncancel: () => void } =
@@ -28,18 +31,29 @@
 	let identity = $state<'full' | 'pseudonymous' | 'minimal'>('pseudonymous');
 	let error = $state<string | null>(null);
 	let busy = $state(false);
+	// Tick your own profile once, when the profiles arrive; after that an empty list is the person's choice.
+	let seeded = false;
 	$effect(() => {
+		if (seeded || !profiles.length) return;
+		seeded = true;
 		if (!chosen.length) {
 			const own = profiles.find((p) => p.is_self) ?? profiles[0];
 			if (own) chosen = [own.slug];
 		}
 	});
+	// A fixed form clears its old error.
+	$effect(() => {
+		void [label, chosen.length, scopes.length, days];
+		error = null;
+	});
+	const docsAndPropose = $derived(scopes.includes('write:propose') && scopes.includes('read:documents_text'));
 
 	async function submit(e: SubmitEvent) {
 		e.preventDefault();
 		error = null;
-		if (!chosen.length || !scopes.length) {
-			error = t('i2_tok_need');
+		const problem = tokenProblem(label, chosen, scopes, days);
+		if (problem) {
+			error = t(problem);
 			return;
 		}
 		busy = true;
@@ -47,30 +61,31 @@
 			const res = await withStepUp(() => createToken({ label: label.trim(), profiles: chosen, scopes, days, identity_mode: identity, default_profile: chosen[0] }));
 			oncreated(res.token, res.plaintext);
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = errText(err);
 		} finally {
 			busy = false;
 		}
 	}
 </script>
 
-<form class="card p2form" onsubmit={submit} aria-labelledby="tf-h">
+<form class="card p2form" novalidate onsubmit={submit} use:focusOnOpen={{ oncancel }} aria-labelledby="tf-h">
 	<h3 id="tf-h">{t('i2_tok_new')}<span class="r">{t('i2_tok_stepup')}</span></h3>
-	<label>{t('i2_tok_label')}<input class="p2in" bind:value={label} required maxlength="80" /></label>
+	<label>{t('i2_tok_label')}<input class="p2in" bind:value={label} maxlength="80" /></label>
 	<fieldset class="fs">
 		<legend>{t('i2_tok_profiles')}</legend>
 		{#each profiles as p (p.id)}
 			<label class="ck"><input type="checkbox" value={p.slug} bind:group={chosen} /> {p.display_name}</label>
 		{/each}
 	</fieldset>
-	<fieldset class="fs">
+	<fieldset class="fs col">
 		<legend>{t('i2_tok_scopes')}</legend>
 		{#each SCOPES as x (x.s)}
-			<label class="ck"><input type="checkbox" value={x.s} bind:group={scopes} /> <span class="chip mono {x.tone}">{x.s}</span></label>
+			<label class="ck"><input type="checkbox" value={x.s} bind:group={scopes} /> <span>{scopeText(x.s)} <span class="chip mono {x.tone}">{x.s}</span></span></label>
 		{/each}
 	</fieldset>
+	{#if docsAndPropose}<div class="note" style="color:var(--watch)">{t('i2_tok_doc_propose')}</div>{/if}
 	<div class="p2row">
-		<label>{t('i2_tok_days')}<input class="p2in num" type="number" min="1" max="365" required bind:value={days} style="width:90px" /></label>
+		<label>{t('i2_tok_days')}<input class="p2in num" type="number" min="1" max="365" bind:value={days} style="width:90px" /></label>
 		<label
 			>{t('i2_tok_identity')}
 			<select class="p2in" bind:value={identity}>
@@ -80,6 +95,7 @@
 			</select>
 		</label>
 	</div>
+	<div class="dim" style="font-size:11.5px">{t('i2_id_' + identity + '_d')}</div>
 	<div class="note">{t('i2_tok_note')}</div>
 	{#if error}<div class="p2err" role="alert">{error}</div>{/if}
 	<div class="p2row" style="justify-content:flex-end">
@@ -97,6 +113,9 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 4px 14px;
+	}
+	.fs.col {
+		flex-direction: column;
 	}
 	.fs legend {
 		font-size: 11.5px;

@@ -315,6 +315,13 @@ async fn lan_install_uses_password() -> R {
     let r = c
         .post(
             "/api/auth/setup/password",
+            &json!({"display_name": "Alex Rivera", "password": "a long synthetic pass", "country": "X1"}),
+        )
+        .await?;
+    assert_eq!((r.status, r.code()), (StatusCode::UNPROCESSABLE_ENTITY, "bad_input"));
+    let r = c
+        .post(
+            "/api/auth/setup/password",
             &json!({"display_name": "Alex Rivera", "password": "a long synthetic pass"}),
         )
         .await?;
