@@ -325,3 +325,42 @@ async fn removing_an_older_cumulative_export_keeps_what_the_newer_one_holds() ->
     assert_eq!(days, 59);
     Ok(())
 }
+
+#[tokio::test]
+async fn removing_the_newest_export_gives_the_older_one_its_samples_back() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let dir = tempfile::tempdir()?;
+    let jan = small(&dir.path().join("jan"), 31, &[])?;
+    let feb = small(&dir.path().join("feb"), 59, &[])?;
+    let (state, _, err) = job(&env, upload(&env, jan, "sam").await?).await?;
+    assert_eq!(state, "done", "{err:?}");
+    let (state, _, err) = job(&env, upload(&env, feb, "sam").await?).await?;
+    assert_eq!(state, "done", "{err:?}");
+    let docs: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "select id from document where profile_id = $1 and mime = 'application/vnd.sqlite3' order by created_at",
+    )
+    .bind(sam)
+    .fetch_all(&env.db.pool)
+    .await?;
+    let mut c = env.db.pool.acquire().await?;
+    sqlx::query("update document set status = 'retracted' where id = $1")
+        .bind(docs[1])
+        .execute(&mut *c)
+        .await?;
+    ownhealth_ingest_structured::retract::retract_document_facts(&mut c, docs[1], "wrong export").await?;
+    drop(c);
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    let left = env
+        .count("select count(*) from wearable_sample where profile_id = $1", sam)
+        .await?;
+    assert_eq!(left, 31, "January's export still holds its days");
+    let days = env
+        .count(
+            "select count(*) from wearable_rollup where profile_id = $1 and metric = 'hr_resting' and bucket = 'day'",
+            sam,
+        )
+        .await?;
+    assert_eq!(days, 31);
+    Ok(())
+}

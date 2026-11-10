@@ -12,7 +12,7 @@ In OwnHealth, open **Import & review** on the profile the data belongs to, tap *
 
 The file becomes a document of that profile and owns the readings it brought. Retracting the document removes them.
 
-Each export holds everything Gadgetbridge has, so upload a new one whenever you like. The newest upload owns every reading it holds: retracting an older export keeps what a newer one still has. Retracting the newest removes those readings too, until you upload it again.
+Each export holds everything Gadgetbridge has, so upload a new one whenever you like. The newest upload owns every reading it holds: retracting an older export keeps what a newer one still has. Retracting the newest gives the readings it shared back to the older exports you kept: they are imported again by themselves.
 
 ## What is imported
 

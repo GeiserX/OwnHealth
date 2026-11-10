@@ -23,8 +23,9 @@
 //! writes 1970), counted as `bad_time`.
 //!
 //! Exports are cumulative, so the newest export owns every sample it holds (`Conflict::Adopt`):
-//! deleting an older export leaves what a newer one still holds, and deleting the newest removes the
-//! overlap too until an older one is imported again.
+//! deleting an older export leaves what a newer one still holds, and deleting the newest queues the
+//! profile's other active exports for import again (`retract::retract_document_facts`), so what they
+//! hold comes back.
 //!
 //! Gadgetbridge stores instants without the phone's UTC offset, so samples are stored with no offset
 //! and the daily totals and resting heart rate of this source fall on UTC days, not local ones: in
