@@ -56,13 +56,18 @@ async fn upgrading_a_0_3_0_database_keeps_every_state_hash() -> R {
     let rows = std::fs::read_to_string(format!("{FIXTURES}/seed.sql"))?;
     let script = format!("begin; set local session_replication_role = replica;\n{rows}\ncommit;");
     sqlx::raw_sql(sqlx::AssertSqlSafe(script)).execute(&db.pool).await?;
-    let s = Seeded { db };
+    let mut s = Seeded { db };
     for slug in SLUGS {
         s.set_findings(slug, reference.findings(slug));
     }
     assert_eq!(hashes(&s).await?, expected(), "before the upgrade");
     let applied = migrate_embedded(s.pool()).await?;
     assert!(applied.contains(&1100), "{applied:?}");
+    // The server restarts after a migration. A connection from before it holds plans for the old
+    // medication_statement row type, and Postgres refuses to reuse them ("cached plan must not change
+    // result type"), so the hashes after the upgrade are read through new connections.
+    s.db.pool.close().await;
+    s.db.pool = sqlx::PgPool::connect(&s.db.url).await?;
     assert_eq!(hashes(&s).await?, expected(), "after the upgrade");
     let filled: i64 = sqlx::query_scalar(
         "select count(*) from medication_statement where schedule_text is not null or prescriber is not null or codes is not null",
