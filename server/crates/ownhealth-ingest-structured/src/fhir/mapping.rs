@@ -11,7 +11,9 @@ use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Utc};
 use ownhealth_core::acceptance::Check;
 use ownhealth_core::fhir::loinc_of;
 use ownhealth_core::pyjson::py_decimal_str;
-use ownhealth_core::records::{AllergyIn, Common, ConditionIn, ImmunizationIn, MedicationIn, ProcedureIn, RecordIn};
+use ownhealth_core::records::{
+    AllergyIn, Common, ConditionIn, ImmunizationIn, MedCode, MedicationIn, ProcedureIn, RecordIn,
+};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
@@ -629,6 +631,22 @@ fn med_status(status: &str) -> Option<&'static str> {
     })
 }
 
+/// Every coding of a medication concept that has a code, as received (`MedicationIn.codes`).
+fn med_codes(concept: Option<&Value>) -> Option<Vec<MedCode>> {
+    let field = |c: &Value, k: &str| get_truthy(Some(c), k).map(text_of);
+    let codes: Vec<MedCode> = list(concept, "coding")
+        .iter()
+        .filter_map(|c| {
+            Some(MedCode {
+                system: field(c, "system"),
+                code: field(c, "code")?,
+                display: field(c, "display"),
+            })
+        })
+        .collect();
+    (!codes.is_empty()).then_some(codes)
+}
+
 /// MedicationStatement and MedicationRequest; a request becomes a statement with the source status.
 /// `resolve(reference)` returns a contained or bundled resource (for medicationReference).
 pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&str>) -> Option<&'a Value>) -> Mapped {
@@ -679,6 +697,20 @@ pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&s
         )
     };
     let dose_text = dosage.iter().find_map(|d| get_truthy(Some(d), "text")).map(text_of);
+    let schedule_text = dosage
+        .iter()
+        .find_map(|d| concept_text(d.get("timing").and_then(|t| t.get("code"))).filter(|t| !t.is_empty()));
+    let who = if rtype == "MedicationStatement" {
+        "informationSource"
+    } else {
+        "requester"
+    };
+    let prescriber = r
+        .get(who)
+        .and_then(|w| get_truthy(Some(w), "display"))
+        .map(text_of)
+        .filter(|t| !t.is_empty());
+    let codes = med_codes(concept);
     if status == "stopped" && stopped.is_none() {
         stopped = if rtype == "MedicationStatement" {
             parse_date(r.get("dateAsserted"))
@@ -704,6 +736,9 @@ pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&s
             stopped,
             med_status: status.into(),
             reason_text,
+            schedule_text,
+            prescriber,
+            codes,
         }),
         checks,
     )
