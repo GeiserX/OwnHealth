@@ -143,3 +143,71 @@ async fn a_medication_request_keeps_its_requester() -> R {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_patient_report_has_no_prescriber_and_a_blank_coding_is_dropped() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let statement = json!({
+        "resourceType": "MedicationStatement",
+        "id": "carmen-ortega-atorvastatin",
+        "status": "active",
+        "medicationCodeableConcept": {
+            "coding": [
+                {"system": ATC, "code": " "},
+                {"system": RXNORM, "code": "617310", "display": "atorvastatin 20 MG Oral Tablet"},
+            ],
+            "text": "Atorvastatin 20 mg",
+        },
+        "subject": {"reference": "Patient/carmen-ortega"},
+        "effectivePeriod": {"start": "2025-03-01"},
+        "informationSource": {"reference": "Patient/carmen-ortega", "display": "Carmen Ortega"},
+    });
+    let by_clinician = json!({
+        "resourceType": "MedicationStatement",
+        "id": "carmen-ortega-ramipril",
+        "status": "active",
+        "medicationCodeableConcept": {"coding": [{"system": ATC, "code": "C09AA05"}], "text": "Ramipril 5 mg"},
+        "subject": {"reference": "Patient/carmen-ortega"},
+        "effectivePeriod": {"start": "2025-03-01"},
+        "informationSource": {"reference": "Practitioner/synthetic-1", "display": "Dra. Synthetic"},
+    });
+    let bundle = ips_bundle(
+        "carmen-self",
+        "Carmen",
+        "Ortega",
+        NaiveDate::from_ymd_opt(1955, 1, 30).unwrap_or_default(),
+        false,
+        &[statement, by_clinician],
+    );
+    let doc = store_doc(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        "carmen",
+        &serde_json::to_vec(&bundle)?,
+        "ips-carmen-self.json",
+        JSON,
+    )
+    .await?;
+    import_fhir(&mut tx, &env.blobs, doc).await?;
+    let meds = list_records(&mut tx, "medication", fam.profile("carmen"), None, true).await?;
+    let find = |name: &str| {
+        meds.iter()
+            .find(|m| m["name"] == name)
+            .ok_or_else(|| anyhow::anyhow!("{name} not imported: {meds:?}"))
+    };
+    let m = find("Atorvastatin 20 mg")?;
+    assert_eq!(
+        m["prescriber"],
+        Value::Null,
+        "the patient reported it; nobody is named as prescriber"
+    );
+    assert_eq!(
+        m["codes"],
+        json!([{"system": RXNORM, "code": "617310", "display": "atorvastatin 20 MG Oral Tablet"}])
+    );
+    assert_eq!(find("Ramipril 5 mg")?["prescriber"], "Dra. Synthetic");
+    Ok(())
+}

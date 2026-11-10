@@ -639,7 +639,8 @@ fn med_codes(concept: Option<&Value>) -> Option<Vec<MedCode>> {
         .filter_map(|c| {
             Some(MedCode {
                 system: field(c, "system"),
-                code: field(c, "code")?,
+                // a blank code is junk from the source: drop the coding, keep the bundle
+                code: field(c, "code").filter(|s| !s.trim().is_empty())?,
                 display: field(c, "display"),
             })
         })
@@ -705,8 +706,19 @@ pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&s
     } else {
         "requester"
     };
+    // informationSource is whoever reported the statement, often the patient; a requester can be
+    // the patient too. A source that names a patient, relative or device is not a prescriber. A
+    // display with no reference and no type is kept: in practice it names the clinician.
     let prescriber = r
         .get(who)
+        .filter(|w| {
+            let kind = w
+                .get("reference")
+                .and_then(Value::as_str)
+                .and_then(|r| r.rsplit('/').nth(1))
+                .or_else(|| w.get("type").and_then(Value::as_str));
+            !matches!(kind, Some("Patient" | "RelatedPerson" | "Device"))
+        })
         .and_then(|w| get_truthy(Some(w), "display"))
         .map(text_of)
         .filter(|t| !t.is_empty());
