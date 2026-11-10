@@ -297,9 +297,10 @@ fn aligned(authenticated: &str, from_domain: &str) -> bool {
 
 /// RFC 5322 comments `( ... )` out, nested ones too, quoted strings kept. A `"` inside a comment
 /// also opens a quoted run in which `(` and `)` do not count: a value the receiving server echoes
-/// (an envelope sender, a HELO name) cannot close the comment early and speak outside it. A stray
-/// quote then swallows the rest of the comment, which can only lose a pass, never add one.
-fn strip_comments(s: &str) -> String {
+/// (an envelope sender, a HELO name) cannot close the comment early and speak outside it. The flag is
+/// false when a comment or a quote is still open at the end: a stray quote swallowed the rest of the
+/// header, and with it maybe a failure, so the caller must not trust what is left.
+fn strip_comments(s: &str) -> (String, bool) {
     let mut out = String::with_capacity(s.len());
     let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
     for c in s.chars() {
@@ -329,7 +330,7 @@ fn strip_comments(s: &str) -> String {
             _ => {}
         }
     }
-    out
+    (out, depth == 0 && !quoted)
 }
 
 /// Split `s` where `sep` matches outside a quoted string (backslash escapes honoured). A `;` or a
@@ -368,14 +369,18 @@ enum AuthVerdict {
 /// id came with the message (a forgery the server did not strip) and is never read.
 fn auth_verdict(headers: &[String], trusted: &str, from_domain: &str) -> AuthVerdict {
     let mut verdict = AuthVerdict::None;
-    let trusted_header = headers.iter().map(|h| strip_comments(h)).find(|h| {
+    let trusted_header = headers.iter().map(|h| strip_comments(h)).find(|(h, _)| {
         let authserv = split_unquoted(h, |c| c == ';')[0]
             .split_whitespace()
             .next()
             .unwrap_or("");
         authserv.eq_ignore_ascii_case(trusted.trim())
     });
-    if let Some(h) = trusted_header {
+    if let Some((h, complete)) = trusted_header {
+        // a comment or quote left open hid the rest of the header, a failure maybe: never a pass
+        if !complete {
+            return AuthVerdict::Fail;
+        }
         for section in split_unquoted(&h, |c| c == ';').into_iter().skip(1) {
             let mut words = split_unquoted(section, char::is_whitespace)
                 .into_iter()

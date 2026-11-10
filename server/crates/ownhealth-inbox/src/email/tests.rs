@@ -197,8 +197,25 @@ fn a_quoted_envelope_sender_cannot_inject_a_pass_into_the_trusted_header() {
 }
 
 #[test]
+fn a_stray_quote_in_a_comment_cannot_hide_a_later_failure() {
+    let p = Uuid::new_v4();
+    let rules = [rule("labnorte.example", p, true)];
+    let from = "resultados@labnorte.example";
+    let h = format!(
+        "{TRUSTED}; spf=fail (helo=a\"b; domain of labnorte.example does not designate 203.0.113.9) \
+         smtp.mailfrom=labnorte.example; dkim=fail header.d=labnorte.example"
+    );
+    let r = route_message(&facts(from, &[&h]), &rules, Some(TRUSTED));
+    assert_eq!(reason(&r), "auth_failed", "{h}");
+}
+
+#[test]
 fn comments_are_stripped_without_touching_quotes() {
-    assert_eq!(strip_comments("a (b (c)) d \"(e)\" f"), "a  d \"(e)\" f");
+    assert_eq!(
+        strip_comments("a (b (c)) d \"(e)\" f"),
+        ("a  d \"(e)\" f".to_string(), true)
+    );
+    assert!(!strip_comments("a (b \"c) d").1, "a quote left open");
 }
 
 #[test]
