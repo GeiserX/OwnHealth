@@ -578,10 +578,23 @@ function genome(){
    <span><b style="color:var(--text)">Coverage</b> · 99.1% of PGx positions ≥20× · CYP2D6 from BAM, not VCF · call_state: ref / alt / no_call / not_on_array / not_covered; n/a for typing and scores · not_assessed: SMN1 copy number, mitochondrial heteroplasmy, repeat expansions</span>
    <span style="margin-left:auto">Evidence: E1 guideline / ClinVar ≥2★ · E2 1★ / replicated · E3 single study / PRS · E4 hidden</span></div>`;
 }
-/* ---------- 5. drug check ---------- */
+/* ---------- 5. medications (#drug-check): current, history, check a drug ---------- */
 function drug(){
   return `
-  <div class="ph"><div><h1>Drug check</h1><div class="sub">Alex Rivera · gene × drug, current medications and relevant labs, before a medicine starts</div></div><div class="right"><span class="phase">v0.1</span><span class="phase">full medication lane v0.3</span></div></div>
+  <div class="ph"><div><h1>Medications</h1><div class="sub">Alex Rivera · what is taken, how and since when, and a drug check before a new one</div></div><div class="right"><span class="phase">v0.1</span><span class="phase">v0.3</span></div></div>
+  <div class="drug" style="margin-bottom:14px">
+   <div class="card"><h3>Current medicines and supplements<span class="r"><button class="btn sm">Add by hand</button></span></h3>
+    ${[["Atorvastatin","20 mg","1 tablet daily · every evening · since <span class='num'>2026-03-10</span>","Reason: hypercholesterolaemia · Prescribed by: Dr. Synthetic",[["info","SLCO1B1 · Decreased function"]],["ATC C10AA05"],"Rx · src_m02"],
+       ["Omeprazole","20 mg","1 capsule · before breakfast · since <span class='num'>2026-04-01</span>","",[["watch","CYP2C19 · Intermediate metabolizer"]],["RxNorm 40790","ATC A02BC01"],"Rx · src_m05"],
+       ["Vitamin D3","1000 IU <span class='chip'>Supplement</span>","1 capsule · once a day · since <span class='num'>2025-10-01</span>","",[],[],"entered by hand"]]
+      .map(m=>`<div style="padding:7px 0;border-top:1px solid #20252f"><div style="display:flex;gap:8px;align-items:flex-start"><div style="flex:1"><div><b>${m[0]}</b> ${m[1]}</div><div class="muted" style="font-size:12px;margin-top:2px">${m[2]}</div>${m[3]?`<div class="dim" style="font-size:12px">${m[3]}</div>`:""}<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px">${m[4].map(b=>pill(b[0],b[1])).join("")}${m[5].map(c=>`<span class="chip mono" title="Codes as the source sent them">${c}</span>`).join("")}${src(m[6])}</div></div><button class="btn sm">Correct</button></div></div>`).join("")}</div>
+   <div class="card"><h3>History</h3><div class="dim" style="font-size:11.5px;margin:-4px 0 6px">every course and version, grouped by medicine</div>
+    ${[["Omeprazole",[["2026-04-01 → ongoing","Taking","20 mg · 1 capsule · before breakfast",""]]],
+       ["Atorvastatin",[["2026-03-10 → ongoing","Taking","20 mg · 1 tablet daily",""],["2022-06-20 → 2025-12-01","Stopped","20 mg · 1 tablet daily","Reason: paused"]]],
+       ["Vitamin D3",[["2025-10-01 → ongoing","Taking","1000 IU · once a day",""],["2025-10-01 → ongoing","Corrected","400 IU · once a day","dose corrected"]]]]
+      .map(g=>`<div style="padding:7px 0;border-top:1px solid #20252f"><b>${g[0]}</b><ol style="list-style:none;margin:4px 0 0;padding:0 0 0 10px;border-left:2px solid var(--line2);font-size:12px;display:grid;gap:3px">${g[1].map(e=>`<li style="${e[1]==="Corrected"?"opacity:.7":""}"><span class="num">${e[0]}</span> <span class="muted">· ${e[1]} · ${e[2]}${e[3]?" · "+e[3]:""}</span></li>`).join("")}</ol></div>`).join("")}</div>
+  </div>
+  <h2 style="font-size:15px;font-weight:620;margin:4px 0 10px">Check a drug</h2>
   <div class="search" style="max-width:none;height:42px;margin-bottom:12px;background:var(--raised)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9aa3b2" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input value="clopidogrel" style="font-size:15px"><span class="chip">Plavix</span><span class="chip">antiplatelet</span></div>
   <div class="drug"><div class="grid" style="align-content:start">
    <div class="card" style="border-color:rgba(224,168,74,.45)"><h3>Pharmacogenomics ${pill("watch","Actionable")}<span class="r">CPIC level A</span></h3>
