@@ -215,8 +215,4 @@
 		padding-top: 6px;
 		overflow-x: auto;
 	}
-	.btn:disabled {
-		opacity: 0.5;
-		cursor: default;
-	}
 </style>

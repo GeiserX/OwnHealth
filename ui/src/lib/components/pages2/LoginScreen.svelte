@@ -5,7 +5,7 @@
 	import '#lib/components/pages2/pages2.css';
 	import { getAuthState, loginBegin, loginFinish, passwordLogin, recoveryLogin, setupBegin, setupFinish, setupPassword } from '#lib/api';
 	import type { AuthState } from '#lib/api/types';
-	import { Loader } from '#lib/components/pages1/util.svelte';
+	import { Loader, errText } from '#lib/components/pages1/util.svelte';
 	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
 	import { createPasskey, usePasskey } from './webauthn';
 
@@ -28,7 +28,7 @@
 		try {
 			await fn();
 		} catch (e) {
-			error = e instanceof Error && e.message !== 'cancelled' ? e.message : t('i2_cancelled');
+			error = e instanceof Error && e.message !== 'cancelled' ? errText(e) : t('i2_cancelled');
 		} finally {
 			busy = false;
 		}
@@ -74,20 +74,20 @@
 <div class="login">
 	<div class="brand" style="justify-content:center">
 		<div class="logo"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6" /></svg></div>
-		<div>OwnHealth<small>{t('selfhosted')} · v0.1</small></div>
+		<div>OwnHealth<small>{t('selfhosted')} · v{__APP_VERSION__}</small></div>
 	</div>
-	<div class="seg" role="group" aria-label="Language" style="align-self:center">
-		<button class:on={i18n.lang === 'es'} onclick={() => setLang('es')}>ES</button>
-		<button class:on={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
+	<div class="seg" role="group" aria-label={t('lang_label')} style="align-self:center">
+		<button class:on={i18n.lang === 'es'} aria-pressed={i18n.lang === 'es'} onclick={() => setLang('es')}>ES</button>
+		<button class:on={i18n.lang === 'en'} aria-pressed={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
 	</div>
 
 	{#if st.error}
-		<div class="card"><div class="p2err" role="alert">{st.error.message}</div></div>
+		<div class="card"><div class="p2err" role="alert" title={st.error.message}>{errText(st.error)}</div></div>
 	{:else if !s}
 		<div class="empty">{t('loading')}</div>
 	{:else if codes}
 		<section class="card p2form" aria-labelledby="rc-h">
-			<h3 id="rc-h">{t('i2_rc_t')}</h3>
+			<h1 id="rc-h">{t('i2_rc_t')}</h1>
 			<div class="muted">{t('i2_rc_setup')}</div>
 			<div class="p2secret" style="columns:2">{#each codes as c (c)}<div>{c}</div>{/each}</div>
 			<div class="note" style="color:var(--watch)">{t('i2_rc_once')}</div>
@@ -95,7 +95,7 @@
 		</section>
 	{:else if s.setup_needed}
 		<form class="card p2form" onsubmit={setup} aria-labelledby="su-h">
-			<h3 id="su-h">{t('i2_setup_t')}</h3>
+			<h1 id="su-h">{t('i2_setup_t')}</h1>
 			<div class="muted">{t('i2_setup_d')}</div>
 			<label>{t('i2_your_name')}<input class="p2in" bind:value={f.display_name} required maxlength="80" autocomplete="name" /></label>
 			<label>{t('i2_hh_name')}<input class="p2in" bind:value={f.household_name} maxlength="80" placeholder={t('i2_hh_ph')} /></label>
@@ -118,12 +118,12 @@
 		</form>
 	{:else if s.user && s.auth_kind}
 		<section class="card p2form">
-			<h3>{t('i2_signed_in')} {s.user.display_name}</h3>
+			<h1>{t('i2_signed_in')} {s.user.display_name}</h1>
 			<a class="btn pri" href="/">{t('nav_dash')}</a>
 		</section>
 	{:else if mode === 'recovery'}
 		<form class="card p2form" onsubmit={withCode} aria-labelledby="rec-h">
-			<h3 id="rec-h">{t('i2_rc_use')}</h3>
+			<h1 id="rec-h">{t('i2_rc_use')}</h1>
 			<div class="muted">{t('i2_rc_use_d')}</div>
 			<label>{t('i2_rc_code')}<input class="p2in mono" bind:value={login.code} required autocomplete="one-time-code" /></label>
 			{#if error}<div class="p2err" role="alert">{error}</div>{/if}
@@ -132,7 +132,7 @@
 		</form>
 	{:else}
 		<section class="card p2form" aria-labelledby="li-h">
-			<h3 id="li-h">{t('login')}</h3>
+			<h1 id="li-h">{t('login')}</h1>
 			{#if s.passkeys_possible}
 				<button class="btn pri" onclick={withPasskey} disabled={busy}>{t('i2_login_pk')}</button>
 			{/if}
@@ -161,6 +161,12 @@
 	}
 	.login .card {
 		padding: 16px 18px;
+	}
+	/* Each state of the card is the page itself, so its title is the page's h1, at the card-title size. */
+	.login h1 {
+		margin: 0;
+		font-size: 15px;
+		font-weight: 620;
 	}
 	.login .btn {
 		justify-content: center;

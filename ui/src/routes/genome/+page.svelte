@@ -162,6 +162,7 @@
 		{/each}
 	</div>
 	<div class="card" style="padding:4px 6px">
+		<div class="tscroll">
 		<table class="t">
 			<thead>
 				<tr><th>{t('i2_g_cat')}</th><th>{t('i2_g_gene')}</th><th>{t('i2_g_var')}</th><th>{t('i2_g_res')}</th><th>{t('i2_g_ev')}</th><th>{t('i2_g_conf')}</th><th>call_state</th><th>{t('i2_g_note')}</th></tr>
@@ -199,6 +200,7 @@
 				{/if}
 			</tbody>
 		</table>
+		</div>
 	</div>
 	{#if sensitiveShown.length}<div class="sr-only" role="status">{t('i2_sens_shown')}</div>{/if}
 {/if}

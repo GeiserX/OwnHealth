@@ -190,6 +190,7 @@
 		{:else if !groups.length}
 			<div class="empty">{t('h1_bio_none')}</div>
 		{:else}
+			<div class="tscroll">
 			<table class="t nw">
 				<thead><tr><th>{t('h1_th_name')}</th><th>{t('h1_th_latest')}</th><th>{t('h1_th_printed')}</th><th>{t('h1_th_date')}</th><th>{t('h1_th_lab')}</th><th style="text-align:right">{t('h1_th_n')}</th><th>{t('h1_th_source')}</th></tr></thead>
 				<tbody>
@@ -206,6 +207,7 @@
 					{/each}
 				</tbody>
 			</table>
+			</div>
 		{/if}
 	</div>
 {:else}

@@ -8,10 +8,10 @@
 	import { approveOAuth, denyOAuth, getOAuthRequest, type IdentityMode, type OAuthRequestOut } from '#lib/api/inbox';
 	import type { Scope } from '#lib/api/types';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
-	import { Loader, tf } from '#lib/components/pages1/util.svelte';
+	import { Loader, errText, tf } from '#lib/components/pages1/util.svelte';
 	import { plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
-	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
 	import { consentDefaults, consentProblem } from '#lib/logic/inbox';
 
 	const RISKY: Scope[] = ['read:genome_raw', 'read:sensitive'];
@@ -23,6 +23,11 @@
 	let identity = $state<IdentityMode>('pseudonymous');
 	let error = $state<string | null>(null);
 	let busy = $state(false);
+	let formEl: HTMLFormElement | undefined = $state();
+	// The decision is the whole page: the first profile box takes focus as soon as the request is shown.
+	$effect(() => {
+		if (req.data && formEl) formEl.querySelector<HTMLInputElement>('input[type=checkbox]')?.focus();
+	});
 
 	$effect(() => {
 		const rid = id;
@@ -70,7 +75,7 @@
 			);
 			location.href = r.redirect;
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = errText(err);
 			busy = false;
 		}
 	}
@@ -79,13 +84,20 @@
 		try {
 			location.href = (await denyOAuth(id)).redirect;
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = errText(err);
 			busy = false;
 		}
 	}
 </script>
 
 <div class="wrap">
+	<div class="cbar">
+		<div class="brand"><div class="logo sm" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-5 4 10 2-5h6" /></svg></div>OwnHealth</div>
+		<div class="seg" role="group" aria-label={t('lang_label')}>
+			<button class:on={i18n.lang === 'es'} aria-pressed={i18n.lang === 'es'} onclick={() => setLang('es')}>ES</button>
+			<button class:on={i18n.lang === 'en'} aria-pressed={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
+		</div>
+	</div>
 	{#if !id}
 		<div class="card"><div class="empty">{t('fu_oa_missing')}</div></div>
 	{:else if req.error}
@@ -98,7 +110,7 @@
 		<div class="empty">{t('loading')}</div>
 	{:else}
 		{@const r = req.data}
-		<form class="card p2form" onsubmit={approve} aria-labelledby="oa-h">
+		<form class="card p2form" onsubmit={approve} aria-labelledby="oa-h" bind:this={formEl}>
 			<div class="who">
 				<!-- No client logo: it would be an outside request from this page, and its picture is untrusted. -->
 				<div class="logo" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="1.8"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg></div>
@@ -154,6 +166,20 @@
 	.wrap {
 		max-width: 620px;
 		margin: 10px auto;
+	}
+	.cbar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 12px;
+	}
+	.cbar .brand {
+		padding: 0;
+	}
+	.logo.sm {
+		width: 28px;
+		height: 28px;
+		border-radius: 8px;
 	}
 	h1 {
 		font-size: 17px;

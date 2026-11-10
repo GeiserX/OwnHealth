@@ -7,7 +7,7 @@
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
 	import { openSource } from '#lib/components/pages1/source.svelte';
-	import { Loader, shortHash, tf, tp } from '#lib/components/pages1/util.svelte';
+	import { Loader, shortHash, tf, tp, unitLabel } from '#lib/components/pages1/util.svelte';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import Sparkline from '#lib/components/Sparkline.svelte';
@@ -110,7 +110,7 @@
 								<a href="/biomarkers?code={encodeURIComponent(m.alias_group)}" style="color:inherit">{m.name}</a>{#if m.stale}<span class="stale-b">{t('staleb')}</span>{/if}
 							</div>
 							<div class="v num" style="color:{statusColor(m.status)}">
-								{m.value}<small>{m.unit}</small><span class="sr-only"> · {t(m.status)}</span>
+								{m.value}<small>{unitLabel(m.unit)}</small><span class="sr-only"> · {t(m.status)}</span>
 							</div>
 							<div class="s"><SourceChip label={m.src_label ?? m.src ?? ''} src={m.src} onopen={openSource} /></div>
 							<div class="g">{#if m.spark.length}<Sparkline values={m.spark} status={m.status} band={m.band} w={64} h={18} />{/if}</div>
@@ -143,7 +143,7 @@
 					<div class="chg">
 						{#each d.changes as c (c.name)}
 							<span>{c.name}</span>
-							<span class="num" style="color:{C[c.status]}">{c.from} → {c.to} <small class="muted">{c.unit}</small></span>
+							<span class="num" style="color:{C[c.status]}">{c.from} → {c.to} <small class="muted">{unitLabel(c.unit)}</small></span>
 							<span style="color:{C[c.status]}" title={t(c.status)}>{c.direction === 'down' ? '▼' : '▲'}<span class="sr-only">{t(c.status)}</span></span>
 						{/each}
 					</div>

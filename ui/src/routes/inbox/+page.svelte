@@ -295,10 +295,6 @@ Authorization: Bearer {fresh.token.slice(0, 12)}…</pre>
 	tr.rel td {
 		background: var(--raised);
 	}
-	.btn:disabled {
-		opacity: 0.5;
-		cursor: default;
-	}
 	@media (max-width: 760px) {
 		.inbox {
 			flex-wrap: wrap;

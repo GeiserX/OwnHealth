@@ -125,6 +125,7 @@
 	<div class="card"><div class="empty">{applied ? tf('i2_docs_nohit', { q: applied }) : t('i2_docs_none')}</div></div>
 {:else}
 	<div class="card" style="padding:6px 6px 2px">
+		<div class="tscroll">
 		<table class="t">
 			<thead><tr><th>{t('i2_date')}</th><th>{t('i2_type')}</th><th>{t('i2_doc')}</th><th>{t('i2_provider')}</th><th style="text-align:right">{t('i2_pages')}</th><th>{t('i2_state')}</th><th></th></tr></thead>
 			<tbody>
@@ -169,6 +170,7 @@
 				{/each}
 			</tbody>
 		</table>
+		</div>
 	</div>
 {/if}
 

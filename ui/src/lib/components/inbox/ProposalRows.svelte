@@ -106,8 +106,4 @@
 		align-items: center;
 		flex-wrap: wrap;
 	}
-	.btn:disabled {
-		opacity: 0.5;
-		cursor: default;
-	}
 </style>

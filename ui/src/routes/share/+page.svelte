@@ -148,8 +148,4 @@
 		padding: 9px 12px;
 		font-size: 13px;
 	}
-	.btn:disabled {
-		opacity: 0.5;
-		cursor: default;
-	}
 </style>
