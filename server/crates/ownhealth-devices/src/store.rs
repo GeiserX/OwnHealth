@@ -67,6 +67,8 @@ impl Written {
 pub struct Touched {
     metrics: BTreeSet<String>,
     sources: BTreeSet<i16>,
+    /// The first and last sample time written, so the rebuild stays near them.
+    span: Option<(DateTime<Utc>, DateTime<Utc>)>,
 }
 
 /// The `wearable_source` of one device, linked to the connector `source` that brings it.
@@ -89,7 +91,8 @@ pub async fn device_source(
     Ok(id)
 }
 
-/// Insert `samples` for one profile, then rebuild the rollups of the metrics and sources that changed.
+/// Insert `samples` for one profile, then rebuild the rollups of the metrics and sources that changed,
+/// near the times written (`wearables::recompute_rollups_between`).
 /// Repeats inside the batch (same metric, source and time) collapse to the last one.
 pub async fn write(
     conn: &mut PgConnection,
@@ -109,7 +112,8 @@ pub async fn rebuild(conn: &mut PgConnection, profile_id: Uuid, touched: Touched
     if !touched.metrics.is_empty() {
         let metrics: Vec<String> = touched.metrics.into_iter().collect();
         let sources: Vec<i16> = touched.sources.into_iter().collect();
-        wearables::recompute_rollups(&mut *conn, profile_id, Some(&metrics), Some(&sources)).await?;
+        wearables::recompute_rollups_between(&mut *conn, profile_id, Some(&metrics), Some(&sources), touched.span)
+            .await?;
     }
     Ok(())
 }
@@ -179,6 +183,11 @@ pub async fn insert(
         // a chunk that wrote anything may have touched any of its metrics and sources
         touched.metrics.extend(chunk.iter().map(|s| s.metric.to_string()));
         touched.sources.extend(chunk.iter().map(|s| s.source));
+        for s in chunk {
+            let (lo, hi) = touched.span.get_or_insert((s.t, s.t));
+            *lo = (*lo).min(s.t);
+            *hi = (*hi).max(s.t);
+        }
     }
     Ok(out)
 }

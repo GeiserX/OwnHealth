@@ -237,12 +237,13 @@ fn cols(a: &str) -> String {
     format!("{a}.profile_id, {a}.metric, {a}.t, {a}.t_end, {a}.v, {a}.tz_offset_min, {a}.source_id")
 }
 
-/// wearable_sample rows matching `sel` (on alias w), with `at` and `off` added.
-fn samples(sel: &str) -> String {
+/// wearable_sample rows matching `sel` (on alias w), with `at` and `off` added. `plain` narrows the
+/// metrics that are not sleep only (sleep sessions are always read whole).
+fn samples(sel: &str, plain: &str) -> String {
     let part = |a: &str| format!("partition by {a}.profile_id, {a}.metric, {a}.source_id");
     format!(
         "(select {w}, w.t as at, w.tz_offset_min as off from wearable_sample w where {sel} \
-         and not w.metric = any(cast($4 as text[])) \
+         and not w.metric = any(cast($4 as text[])) and {plain} \
          union all \
          select {z}, max(coalesce(z.t_end, z.t)) over ({pz}, z.sess), \
          first_value(z.tz_offset_min) over ({pz}, z.sess order by coalesce(z.t_end, z.t) desc) \
@@ -271,19 +272,50 @@ pub async fn recompute_rollups(
     metrics: Option<&[String]>,
     source_ids: Option<&[i16]>,
 ) -> Result<i64> {
+    recompute_rollups_between(conn, profile_id, metrics, source_ids, None).await
+}
+
+/// `recompute_rollups` after a write whose samples all lie in `span` (first and last `t`): metrics
+/// other than sleep rebuild only the hour and day buckets those samples can reach, from three days
+/// before the first sample's UTC day to three days after the last, reading the samples two days wider
+/// each side so every rebuilt bucket sees all of its own (a local day reaches at most a day either side
+/// of its UTC date). Sleep metrics are rebuilt whole: a new stage can join a session that began
+/// earlier and move the date of all of it. `None` rebuilds everything.
+pub async fn recompute_rollups_between(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    metrics: Option<&[String]>,
+    source_ids: Option<&[i16]>,
+    span: Option<(DateTime<Utc>, DateTime<Utc>)>,
+) -> Result<i64> {
+    let day = |t: DateTime<Utc>| t.date_naive().and_time(chrono::NaiveTime::MIN).and_utc();
+    let (lo, hi) = match span {
+        Some((a, b)) => (
+            Some(day(a.min(b)) - chrono::Duration::days(3)),
+            Some(day(a.max(b)) + chrono::Duration::days(4)),
+        ),
+        None => (None, None),
+    };
     let sel = "w.profile_id = $1 and (cast($2 as text[]) is null or w.metric = any(cast($2 as text[]))) \
                and (cast($3 as smallint[]) is null or w.source_id = any(cast($3 as smallint[])))";
-    let from = samples(sel);
+    let plain = "(cast($6 as timestamptz) is null or (w.t >= cast($6 as timestamptz) - interval '2 days' \
+                 and w.t < cast($7 as timestamptz) + interval '2 days'))";
+    let from = samples(sel, plain);
     let sleep: Vec<String> = SLEEP_METRICS.iter().map(|s| s.to_string()).collect();
     let daily = daily_metrics();
     sqlx::query(
         "delete from wearable_rollup where profile_id = $1 \
          and (cast($2 as text[]) is null or metric = any(cast($2 as text[]))) \
-         and (cast($3 as smallint[]) is null or source_id = any(cast($3 as smallint[])))",
+         and (cast($3 as smallint[]) is null or source_id = any(cast($3 as smallint[]))) \
+         and (cast($5 as timestamptz) is null or metric = any(cast($4 as text[])) \
+              or (t >= cast($5 as timestamptz) and t < cast($6 as timestamptz)))",
     )
     .bind(profile_id)
     .bind(metrics)
     .bind(source_ids)
+    .bind(&sleep)
+    .bind(lo)
+    .bind(hi)
     .execute(&mut *conn)
     .await?;
     let insert = |bucket: &str, t: &str, coverage: String| {
@@ -291,7 +323,8 @@ pub async fn recompute_rollups(
             "insert into wearable_rollup (profile_id, metric, source_id, bucket, t, n, v_min, v_max, v_avg, v_sum, \
              v_p10, v_p50, v_p90, coverage) select s.profile_id, s.metric, s.source_id, '{bucket}', {t}, {STATS}, \
              case when s.metric = any(cast($5 as text[])) then 1.0 else {coverage} end \
-             from {from} group by 1, 2, 3, 5"
+             from {from} group by 1, 2, 3, 5 having cast($6 as timestamptz) is null \
+             or s.metric = any(cast($4 as text[])) or ({t} >= cast($6 as timestamptz) and {t} < cast($7 as timestamptz))"
         )
     };
     let hour_sql = insert(
@@ -308,6 +341,8 @@ pub async fn recompute_rollups(
             .bind(source_ids)
             .bind(&sleep)
             .bind(&daily)
+            .bind(lo)
+            .bind(hi)
             .execute(&mut *conn)
             .await?;
         written += done.rows_affected() as i64;
