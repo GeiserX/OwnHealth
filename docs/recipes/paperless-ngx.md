@@ -43,7 +43,7 @@ In OwnHealth, open **Inbox**, add a source of kind **Paperless-ngx** and fill in
 | Allow a private address | on | Needed when Paperless is on your LAN. OwnHealth refuses private addresses unless the source allows them |
 | API token | the token from step 1 | Stored encrypted, never shown again |
 
-Optionally map tags to profiles (for example a `health-lucia` tag to Lucía's profile).
+Optionally route a tag to another profile (for example a `health-lucia` tag to Lucía's profile). The form has no field for it: set `profile_by_tag`, a map from the tag's numeric id to a profile id, with `PATCH /api/inboxes/<id>`. A PATCH replaces the whole `config`, so send the other keys with it: `{"config": {"base_url": "…", "health_tag": "health", "allow_private": true, "profile_by_tag": {"12": "<Lucía's profile id>"}}}`. Saving the source later in **Inbox** keeps the map.
 
 Save, then create the source's push token. It starts with `oh_ing_` and is shown once.
 

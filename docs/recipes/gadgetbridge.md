@@ -1,0 +1,28 @@
+# Gadgetbridge
+
+Import the data of a band, watch or scale that Gadgetbridge manages on an Android phone: steps, heart rate, resting heart rate, SpO2, breathing rate and weight. It all stays offline: you export Gadgetbridge's database file and upload it to OwnHealth.
+
+## 1. Export the database in Gadgetbridge
+
+In Gadgetbridge, open **Data management** from the menu (older versions call it **Database management**) and tap **Export DB**. Gadgetbridge writes a file named `Gadgetbridge`, with no extension, to the export folder it shows on that screen. Copy it off the phone if you upload from a computer. Upload the database file itself, not a zip export.
+
+## 2. Upload it to OwnHealth
+
+In OwnHealth, open **Import & review** on the profile the data belongs to, tap **Upload** and pick the file. On a phone, the picker shows files with no extension too. On a computer you can also drag the file onto the upload panel. OwnHealth recognises the database by its content, not by its name.
+
+The file becomes a document of that profile and owns the readings it brought. Retracting the document removes them.
+
+## What is imported
+
+| Gadgetbridge data | OwnHealth metric |
+|---|---|
+| Activity samples (steps per minute, heart rate) | steps, heart rate |
+| Heart rate samples | heart rate |
+| Resting heart rate | resting heart rate |
+| SpO2 | SpO2 |
+| Breathing rate | respiratory rate |
+| Weight (Mi Scale and other scales) | weight |
+
+Gadgetbridge writes 0 or 255 where a device measured nothing; OwnHealth drops those and other values outside a plausible range. Sleep stages, stress, HRV and vendor scores are not imported yet. The import summary lists them by table.
+
+The readings appear on the profile's **Wearables** page.

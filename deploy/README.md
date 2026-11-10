@@ -85,7 +85,7 @@ ownhealth_source_last_run_ok{source="…",kind="email"} 1
 
 `ownhealth_source_last_run_ok` is 1 when the newest finished run brought everything in (or no run has finished yet) and 0 when it was partial or failed.
 
-A monitor has no browser session, so it reads one inbox at a time with that inbox's own push token (`oh_ing_...`, created in **Inbox**): `GET /api/inboxes/<id>/health?format=prometheus` with `Authorization: Bearer oh_ing_...`. The token sees its own inbox and nothing else. For a push inbox (Paperless, Shortcut, Health Auto Export) it is the token the sender already uses. For a polled one (mailbox, folder, Nightscout), create a token just for the monitor.
+A monitor has no browser session, so it reads one inbox at a time with that inbox's own push token (`oh_ing_...`, created in **Inbox**): `GET /api/inboxes/<id>/health?format=prometheus` with `Authorization: Bearer oh_ing_...`. The token sees its own inbox and nothing else. For a push inbox (Paperless, Shortcut, Health Auto Export) it is the token the sender already uses. For a polled one (mailbox, folder, Nightscout), create a token just for the monitor with **Monitor token** on the inbox's card. The card then shows the health address to scrape.
 
 A Prometheus job per inbox:
 

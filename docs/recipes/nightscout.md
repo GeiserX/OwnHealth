@@ -41,9 +41,9 @@ In OwnHealth, open **Inbox**, add a source of kind **Nightscout** and fill in:
 | Profile | Lucía | Whose readings these are |
 | Nightscout URL | `https://lucia-ns.example.com` | The site's base address |
 | Token | the readable token | Stored encrypted, never shown again |
-| API | v1 | v3 also works; v1 is the safe default |
-| Backfill days | 90 | How far back the first run reads |
-| Allow a private address | off | Turn it on only for a site on your LAN |
+| Allow a private address | off | Turn it on only for a site on your LAN. With it off the site must be `https://`: the token is never sent over plain http to a public address |
+
+Two settings have no field in the form and keep their defaults unless you set them in the source's `config` with `PATCH /api/inboxes/<id>`: `api` (`v1` by default, `v3` also works) and `backfill_days`, how far back the first run reads (90 by default). A PATCH replaces the whole `config`, so send `base_url` and `allow_private` with them. Saving the source later in **Inbox** keeps both.
 
 ## 3. Check it
 
