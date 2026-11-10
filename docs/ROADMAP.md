@@ -23,7 +23,7 @@ flowchart LR
 |---|---|---|
 | **v0.1 Foundation** | A family can import its lab PDFs, genome facts and Apple Health data, see current status, and query all of it from Claude Code with citations. | Synthetic Spanish 3-page lab report imports with >=98% of rows auto-accepted and 100% linked to page+bbox; `get_health_status` answers in <300 ms p95 under 2 KB with a stable `state_hash`; 8 MCP tools pass contract tests; restore test reproduces the same `state_hash`. |
 | **v0.2 Inboxes** | Documents and device data arrive on their own, and scans become reviewable values without an embedded model. | An allowlisted, password-protected lab email reaches the review queue in <2 min; 100% of non-allowlisted mail is quarantined; a claude.ai remote connector connects over OAuth 2.1 with CIMD; scanned-page row F1 >=0.90 on the eval set. |
-| **v0.3 Insight** | Turn the record into cited, deterministic answers: the full medication lane, risk calculators, screening, family patterns, a paper summary for the doctor. | `check_drug` covers 100% of CPIC level A pairs in fixtures with citations and no imperative advice; every calculator matches its published worked examples; doctor summary renders in es/en in <5 s. |
+| **v0.3 Insight** | Turn the record into cited, deterministic answers: the full medication lane, risk calculators, screening, family patterns, a paper summary for the doctor. | `check_drug` covers 100% of CPIC level A pairs in fixtures with citations and no imperative advice; every calculator matches published worked examples or named reference-implementation vectors; doctor summary renders in es/en in <5 s; family history round-trips as FHIR. |
 | **v1.0 Connected** | Pull live data where a self-hoster can register, open imaging, share safely, and protect each profile with its own key. | Epic sandbox patient connects and refreshes for 30 days; DICOM CD of 2,000 images opens in OHIF; SHL created in the UI opens in a reference viewer and revokes; crypto-shredding a profile leaves its blobs unreadable. |
 | **v2 Everywhere** | Follow EHDS into EU formats, open the connector ecosystem, and reach phones and homes. | EU Patient Summary and HL7 Europe Lab example instances import with 0 silent drops; 3 community plugins pass the SDK conformance suite; Android companion reads Health Connect medical records into the review queue. |
 | **Moonshots** | Hard, valuable, not committed. | Each gets a design doc and a spike before any code lands in main. |
@@ -214,9 +214,9 @@ Ships in 0.3.0. Measured exit criteria: [v0.2-exit-criteria.md](v0.2-exit-criter
 **Records**
 - [ ] Full medication lane: dose, schedule, start/stop, reason, prescriber; supplements as first-class records with label photo and a decision (`keep`, `stop`, `do not repurchase`) with reason.
 - [ ] Optional codes: RxNorm, national drug codes, ATC codes only as received (ATC content never shipped).
-- [ ] Family history and pedigree: relative records (including deceased), conditions with age at onset, GEDCOM import (structure only), FHIR FamilyMemberHistory export.
+- [ ] Family history and pedigree: relative records (including deceased), conditions with age at onset, FHIR FamilyMemberHistory export.
 - [ ] Cross-profile hints: cited rules where a finding in one relative suggests a test in another, with consent per relative.
-- [ ] Timeline: visits, diagnoses, meds as bars, labs as dots, imaging, genome runs, documents; episodes; document-gap tracker with a GDPR Art. 15 request letter template.
+- [ ] Timeline: visits, diagnoses, meds as bars, labs as dots, imaging, genome runs, documents; condition spans on the timeline (onset to abatement); document-gap tracker with a GDPR Art. 15 request letter template.
 - [ ] IPS summary export (FHIR `document` Bundle plus printable PDF, es/en) from the UI.
 - [ ] Ownership transfer at majority: the young adult claims the profile; guardian grants drop or are re-granted by the new owner.
 
@@ -226,13 +226,12 @@ Ships in 0.3.0. Measured exit criteria: [v0.2-exit-criteria.md](v0.2-exit-criter
 - [ ] Consumer chips via OwnGenome (local Beagle imputation default), with hard caps: rare P/LP from arrays always "unconfirmed" (PPV ~16%, PMID 33589468).
 - [ ] Couple carrier view from OwnGenome carrier facts.
 - [ ] CPIC and PharmCAT staleness check: PGx facts marked stale when a newer guideline or release supersedes their `db_versions`.
-- [ ] Relatedness QC: genotype fingerprints of family profiles compared at import; unexpected pairs go to review.
 
 **Normalization / calculators**
-- [ ] Calculators as versioned, cited code with validity rules: CKD-EPI 2021 (creatinine and creatinine-cystatin C), PREVENT, SCORE2 / SCORE2-OP by risk region, FIB-4 (not valid under 35; from 65 the low cutoff is 2.0 instead of 1.3), HOMA-IR (same-specimen pairing), PhenoAge (single complete draw only).
-- [ ] Reference change value (RCV) from EFLM biological variation data.
+- [ ] Calculators as versioned, cited code with validity rules: CKD-EPI 2021 (creatinine and creatinine-cystatin C), PREVENT, SCORE2 / SCORE2-OP by risk region, FIB-4 (not valid under 35; from 65 the low cutoff is 2.0 instead of 1.3), HOMA-IR (same-specimen pairing).
+- [ ] Reference change value (RCV) from cited primary biological-variation papers.
 - [ ] Method-change markers on trends (assay or lab change).
-- [ ] Personal-baseline anomalies (a value outside the person's own usual range, not only the lab's) and critical-value alerts (values past published critical limits), both as cited rules in the rule pack.
+- [ ] Personal-baseline anomalies (a value outside the person's own usual range, not only the lab's) as cited rules in the rule pack. The lab's own printed critical flags (HH, LL) stay, labelled as the lab's.
 
 **Prevention**
 - [ ] Screening and vaccine rules as cited YAML per country: PAPPS (Spain) and USPSTF first. Each rule: age, sex, risk modifiers, interval, citation URL.
@@ -243,11 +242,11 @@ Ships in 0.3.0. Measured exit criteria: [v0.2-exit-criteria.md](v0.2-exit-criter
 - [ ] Medications screen: history, schedules, supplements and decisions, with PGx badges and a "check a drug" box.
 - [ ] Genome screen: PGx gene grid, carrier, monogenic, PRS with ancestry caveat, raw lookup; sensitive findings behind a reveal.
 - [ ] Family screen: pedigree canvas, patterns list, name-hiding toggle for screenshots.
-- [ ] Printable doctor summary (es/en), two A4 pages, light print theme, specialty templates (GP, cardiology, endocrinology, hematology).
+- [ ] Printable doctor summary (es/en), two A4 pages, server-rendered PDF, specialty templates (GP, cardiology, endocrinology, hematology).
 
 **MCP**
 - [ ] `get_health_status` gains supplement, screening and family sections within the same 2 KB budget.
-- [ ] Evaluate later candidates (`timeline`, `what_changed_since`, `list_conditions`, `get_medications`) against logged agent sessions; add only those with evidence (see "How we decide").
+- [ ] Evaluate later candidates (`timeline`, `what_changed_since`, `list_conditions`, `get_medications`) against logged agent sessions; add only those with evidence (see "How we decide", which records the 0.4.0 result).
 
 **Security/Privacy**
 - [ ] Wording lint in CI: PGx and calculator outputs never contain imperative treatment advice ("do not take", "stop") in text we write. A verbatim guideline quotation, attributed to its source, is exempt.
@@ -257,16 +256,19 @@ Ships in 0.3.0. Measured exit criteria: [v0.2-exit-criteria.md](v0.2-exit-criter
 - [ ] One page per calculator: formula, version, citation, validity limits, worked example.
 - [ ] Guideline YAML contribution guide; a reviewer of record per country file.
 
+**Moved out of v0.3.** GEDCOM import and the agent session report move to v1.0, and relatedness QC moves to v2, each with its reason there. PhenoAge and critical-value alerts are cut, not planned, with their reasons under Never.
+
 ### Exit criteria
 
 | Area | Criterion |
 |---|---|
 | Drug check | `check_drug` answers for 100% of CPIC level A gene-drug pairs present in fixtures, each with a guideline citation, supplements included in the medication join; the wording lint finds 0 imperative phrases outside attributed guideline quotations. |
-| Calculators | Every calculator reproduces its published worked examples to the stated precision and refuses (with reason) when a validity rule fails. |
+| Calculators | Every calculator reproduces, to the stated precision, its published worked examples or, where the paper gives none, vectors recorded once from a named independent reference implementation with its version; it refuses (with reason) when a validity rule fails. |
 | ClinVar diff | Weekly diff for a household of 4 genomes finishes in <5 min; alert-policy fixtures fire exactly on the 3 alert classes. |
 | Chips | A synthetic array with a planted rare P/LP shows it as "unconfirmed" with the PPV note, never as confirmed. |
 | Doctor summary | Two-page PDF renders in es and en in <5 s; every number on it has a `src` id. |
 | Screening | Every PAPPS and USPSTF rule has a citation URL; CI fails on a missing one. |
+| Family | The Rivera pedigree exports as FamilyMemberHistory that passes the HL7 validator and imports back with 0 drops; hint fixtures fire exactly on consented pairs, with 0 genome hints from or to a minor and 0 gene names without `read:genome`. |
 | Status budget | `get_health_status` still <2 KB and <300 ms p95 with supplements and screening added. |
 
 ---
@@ -284,6 +286,7 @@ Ships in 0.3.0. Measured exit criteria: [v0.2-exit-criteria.md](v0.2-exit-criter
 - [ ] C-CDA import (US CCD) through an open CDA-to-FHIR mapper.
 - [ ] SMART Health Links and SMART Health Cards receiver (QR scan or paste).
 - [ ] Refresh-token rotation persisted atomically before use.
+- [ ] GEDCOM import (structure only), moved from v0.3: typing 6 to 10 relatives by hand works for a household, and a GEDCOM file is mostly free text about living people that we would have to prove we never store.
 
 **Wearables**
 - [ ] `wearables` profile: Open Wearables (MIT) sidecar, pinned release, pulled over its REST API. The sidecar's Strava provider is disabled, and the `openwearables` connector drops any sample whose provider is `strava`.
@@ -311,6 +314,7 @@ Ships in 0.3.0. Measured exit criteria: [v0.2-exit-criteria.md](v0.2-exit-criter
 
 **MCP**
 - [ ] `get_imaging_studies` if logged sessions show the need (metadata and report only, no pixel data).
+- [ ] Agent session report, moved from v0.3: it needs a consent switch for logged sessions (rule 2 of "How we decide"), and `audit_event` does not yet record `not_assessed` counts or argument width.
 - [ ] Sidecar vendor metrics (Oura, Whoop, Polar, Withings, Dexcom) in `search_observations` and `get_trend`, with LTTB or min/max downsampling for long windows.
 
 **Ops/Distribution**
@@ -375,6 +379,7 @@ Ships in 0.3.0. Measured exit criteria: [v0.2-exit-criteria.md](v0.2-exit-criter
 **Genome**
 - [ ] FHIR Genomics Reporting IG export, from the UI only.
 - [ ] HPO codes on conditions for genome-phenotype matching.
+- [ ] Relatedness QC across family profiles, moved from v0.3: it waits for OwnGenome to emit a fingerprint over a defined panel, and a parent-child check could reveal misattributed parentage, which is harm in a family app. The per-profile fingerprint check stays.
 
 ### Exit criteria
 
@@ -469,7 +474,8 @@ Not committed. Each needs a design doc and a spike before code reaches main.
 | Shipped SNOMED CT or WHO ATC content | SNOMED CT needs an affiliate licence outside member countries; ATC is not redistributable. We store codes as received; bring your own terminology. |
 | Running genome engines inside the app | OwnGenome does all genome compute, including chips. Engines bring a JVM and heavy pipelines into a one-container app. |
 | An MCP tool that shares, exports or emails | Imported text is untrusted; an outbound tool completes the exfiltration path. Sharing is a human click in the UI. |
-| A single composite "health score" | One number hides everything and implies precision we do not have. Per-system cards with a "stale" state instead. |
+| A single composite "health score" | One number hides everything and implies precision we do not have. Per-system cards with a "stale" state instead. This also rules out a biological-age estimate such as PhenoAge: it is a research composite with no use in a visit, and a complete 9-analyte draw is rare in a routine Spanish panel. |
+| Critical-value alerts from a list we define | No openly licensed universal list of critical limits exists, and limits vary by institution. Alerting from our own list is urgency logic, which is outside our intended purpose ([security-privacy.md](design/security-privacy.md)). The lab's own printed critical flags (HH, LL) stay, labelled as the lab's. |
 | Central aggregation infrastructure for US endpoints | Running it is what pushed the open-source Fasten off live EHR pulls. Each instance connects for itself. |
 | openEHR or OMOP as a store | Out of scope; FHIR at the edges, our own tables inside. |
 | TimescaleDB, Redis or a JVM in core | Plain Postgres covers the load; compression needs the non-OSI TSL edition; fewer moving parts. |
@@ -487,6 +493,8 @@ Inside a phase, order is set by these signals, strongest first:
 4. **Review queue statistics.** The analytes, units and layouts that most often land in review tell us which aliases and templates to add next.
 5. **Regulation and vendor dates.** EHDS milestones, vendor API shutdowns and terms changes (Oura, Withings, Google Health API) move items earlier or later.
 6. **Cost to the self-hoster.** Between two equal items, the one that adds no container and no RAM wins.
+
+**MCP evaluation for 0.4.0.** No candidate tool (`timeline`, `what_changed_since`, `list_conditions`, `get_medications`, or any other) is added in 0.4.0, because no recorded agent session shows a gap. The new 0.4.0 reads go through `get_health_status` sections, `get_genome_findings` and MCP resources. The logged-session report that would supply this evidence waits for the consent switch that rule 2 requires (v1.0).
 
 What does not move the roadmap: a feature a rival has, a request with no sample, a model release.
 
