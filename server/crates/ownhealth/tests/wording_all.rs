@@ -140,6 +140,14 @@ fn a_quote_is_exempt_only_with_its_attribution() {
     }
 }
 
+/// The fixed notices shown beside genome and record text are user-facing too.
+#[test]
+fn the_fixed_notices_are_information_not_advice() {
+    for notice in [ownhealth_genome::NOTICE, ownhealth_core::text::NOTICE] {
+        assert_eq!(imperative_phrases(notice), Vec::<String>::new(), "{notice}");
+    }
+}
+
 /// Every es/en string in every YAML or JSON file under `data/`, so a new data file or directory is
 /// linted the day it lands.
 #[test]
@@ -169,7 +177,9 @@ fn every_es_en_string_under_data_is_information_not_advice() -> R {
         }
     }
     assert_eq!(hits, Vec::<String>::new());
-    assert!(files >= 20 && texts >= 300, "{files} files, {texts} texts"); // the walk really read data/
+    // A sanity floor with headroom (20 files and 302 texts today): it proves the walk read data/,
+    // and a later slice that trims or merges data files does not turn the gate red.
+    assert!(files >= 10 && texts >= 150, "{files} files, {texts} texts");
     Ok(())
 }
 
