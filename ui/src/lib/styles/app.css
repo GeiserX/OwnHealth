@@ -17,6 +17,8 @@
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
 a{color:var(--accent);text-decoration:none}
+/* A link inside grey running text differs from it by more than a near-equal colour: it is underlined. */
+:is(.sub,.muted,.dim,.note) a:not(.btn,.pill,.chip){text-decoration:underline;text-underline-offset:2px}
 button{font:inherit;color:inherit;cursor:pointer}
 .num{font-variant-numeric:tabular-nums}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
@@ -100,7 +102,8 @@ table.t{width:100%;border-collapse:collapse;font-size:12.5px}
 .grid{display:grid;gap:12px}
 /* dashboard */
 .dash{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:14px;align-items:start}
-.meds{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:8px 12px;margin-bottom:12px;flex-wrap:nowrap;overflow:hidden}
+.meds{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:8px 12px;margin-bottom:12px;flex-wrap:wrap}
+.meds .tail{display:flex;align-items:center;gap:10px;margin-left:auto;flex:none}
 .med{display:flex;align-items:center;gap:7px;padding:3px 10px 3px 8px;background:var(--raised);border-radius:8px;white-space:nowrap}
 .med b{font-weight:560}
 .pgx{font-size:10.5px;font-weight:600;padding:0 6px;border-radius:5px;border:1px solid}
@@ -251,6 +254,8 @@ pre.code{background:#0b0d11;border:1px solid var(--line);border-radius:8px;paddi
 .card h3 .r{white-space:nowrap}
 /* A segmented switch inside a card wraps instead of pushing the card wider than its column. */
 .card .seg{display:flex;flex-wrap:wrap;max-width:100%}
+/* A tab row that fills its card: tighter tabs share the width, so four record kinds fit one line. */
+.seg.fill button{flex:1 1 auto;padding:5px 6px;white-space:nowrap}
 .skip{position:absolute;left:8px;top:-60px;z-index:20;background:var(--accent);color:#0c1222;font-weight:600;padding:6px 12px;border-radius:8px}
 .skip:focus{top:8px}
 /* The bare screens with no shell: sign-in, an invite link, the OAuth consent. */
@@ -259,7 +264,7 @@ pre.code{background:#0b0d11;border:1px solid var(--line);border-radius:8px;paddi
    wraps inside its card. */
 .mcp>*,.mcp>*>*,.drug>*,.drug>*>*{min-width:0}
 /* A touch screen gets finger-sized small buttons at any width. */
-@media (pointer:coarse){.btn.sm{min-height:36px}.mk .n a,.sc .ft a{display:inline-block;padding:5px 0}}
+@media (pointer:coarse){.btn.sm{min-height:36px}.mk .n a,.sc .ft a{display:inline-block;padding:5px 0}.xr input[type=checkbox]{width:24px;height:24px;margin:0}.swb{min-height:32px}}
 /* Tablet: every screen grid becomes one column; the card grids fill the width; the top bar never overlaps. */
 @media (max-width:1100px){
 .dash,.bm,.tl,.fam,.mcp,.drug{grid-template-columns:minmax(0,1fr)}
@@ -269,12 +274,11 @@ pre.code{background:#0b0d11;border:1px solid var(--line);border-radius:8px;paddi
 .img{grid-template-columns:minmax(0,1fr);height:auto!important}
 .viewer{min-height:260px}
 .top .asof{display:none}
-.search{min-width:0;max-width:280px}
+.search{min-width:0;max-width:420px;flex:8 1 0}
 .search input{min-width:0;width:100%}
 .xr{grid-template-columns:20px minmax(120px,1.4fr) minmax(0,1fr) minmax(0,1.2fr) 80px 118px}
 .ph{flex-wrap:wrap}
 .ph .right{flex-wrap:wrap}
-.meds{flex-wrap:wrap;overflow:visible}
 .foot-hash{flex-wrap:wrap;gap:6px 14px}
 }
 /* Phone (v0.2, lane F-ui; finished in the UI polish): the sidebar becomes one scrolling row with the

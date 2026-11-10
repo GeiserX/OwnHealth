@@ -134,8 +134,8 @@
 {:else}
 	<div class="card" style="padding:6px 6px 2px">
 		<div class="tscroll">
-		<table class="t">
-			<thead><tr><th>{t('i2_date')}</th><th>{t('i2_type')}</th><th>{t('i2_doc')}</th><th>{t('i2_provider')}</th><th style="text-align:right">{t('i2_pages')}</th><th>{t('i2_state')}</th><th></th></tr></thead>
+		<table class="t stack docs">
+			<thead><tr><th>{t('i2_date')}</th><th>{t('i2_type')}</th><th>{t('i2_doc')}</th><th class="wide">{t('i2_provider')}</th><th class="wide" style="text-align:right">{t('i2_pages')}</th><th>{t('i2_state')}</th><th></th></tr></thead>
 			<tbody>
 				{#each byYear as [year, list] (year)}
 					<tr class="yr-row"><td colspan="7">{year}</td></tr>
@@ -143,13 +143,14 @@
 						<tr class:gone={d.status === 'retracted'}>
 							<td class="num" style="white-space:nowrap">{day(d.collected_at)}</td>
 							<td><span class="chip">{t('i2_dt_' + (d.doc_type ?? 'other'))}</span></td>
-							<td>
+							<td class="doc">
 								<a href={documentFileUrl(d.id)} target="_blank" rel="noopener">{plain(d.filename) || d.id.slice(0, 8)}</a>
+								<div class="dim tab">{d.provider_name ?? '—'} · {t('i2_pages')}: {d.pages ?? '—'}</div>
 								{#if d.snippet}<div class="dim snip">{plain(d.snippet).replace(/<\/?b>/g, '')}</div>{/if}
 							</td>
-							<td>{d.provider_name ?? '—'}</td>
-							<td class="num" style="text-align:right">{d.pages ?? '—'}</td>
-							<td style="white-space:nowrap">
+							<td class="wide" data-label={t('i2_provider')}>{d.provider_name ?? '—'}</td>
+							<td class="num wide" style="text-align:right" data-label={t('i2_pages')}>{d.pages ?? '—'}</td>
+							<td class="st">
 								{#if d.status === 'retracted'}<span class="pill p-stale"><i aria-hidden="true"></i>{t('i2_retracted')}</span>
 								{:else if d.open_review}<a class="pill p-watch" href="/import-review?doc={d.id}"><i aria-hidden="true"></i>{tf('i2_to_review', { n: d.open_review })}</a>
 								{:else if jobs[d.id] && jobs[d.id].state !== 'done'}
@@ -158,7 +159,7 @@
 								{:else}<span class="pill p-ok"><i aria-hidden="true"></i>{t('i2_imported')}</span>{/if}
 								{#each flagWords(d.flags) as fw (fw)} <span class="pill p-out" title="trust: untrusted_text"><i aria-hidden="true"></i>{t('i2_flag_' + fw)}</span>{/each}
 							</td>
-							<td style="text-align:right;white-space:nowrap">
+							<td class="acts-cell" style="text-align:right;white-space:nowrap">
 								{#if canWrite && d.status !== 'retracted'}<button class="btn sm no" onclick={() => { retracting = retracting === d.id ? null : d.id; reason = ''; actionError = null; }} aria-expanded={retracting === d.id}>{t('i2_retract')}</button>{/if}
 							</td>
 						</tr>
@@ -201,8 +202,11 @@
 	.gone td {
 		opacity: 0.55;
 	}
+	/* width 0 with min-width 100%: the snippet takes the cell's width and never widens the table. */
 	.snip {
 		font-size: 11.5px;
+		width: 0;
+		min-width: 100%;
 		max-width: 520px;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -210,5 +214,52 @@
 	}
 	a.pill {
 		text-decoration: none;
+	}
+	.doc a {
+		overflow-wrap: break-word;
+	}
+	.tab {
+		display: none;
+		font-size: 11.5px;
+	}
+	.st :global(.pill) {
+		white-space: nowrap;
+		margin: 1px 0;
+	}
+	/* Tablet: seven columns do not fit, so provider and pages move under the document name. */
+	@media (min-width: 761px) and (max-width: 1100px) {
+		.docs .wide {
+			display: none;
+		}
+		.tab {
+			display: block;
+		}
+	}
+	/* Phone: the document name leads each block, then date, type, provider and status, then Retirar. */
+	@media (max-width: 760px) {
+		.docs tr:not(.yr-row) {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			gap: 2px 0;
+		}
+		.docs td.doc {
+			order: -1;
+			flex-basis: 100%;
+			font-weight: 560;
+			color: var(--text);
+			font-size: 12.5px;
+		}
+		.docs td.acts-cell {
+			flex-basis: 100%;
+		}
+		/* The date is a detail here, not the heading: it sits on the details line. */
+		.docs tr:not(.yr-row) td:first-child {
+			width: auto;
+			font-weight: 400;
+			color: var(--muted);
+			font-size: 12px;
+			margin-right: 10px;
+		}
 	}
 </style>

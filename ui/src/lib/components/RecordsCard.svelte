@@ -72,7 +72,7 @@
 
 <div class="card">
 	<h3>{t('me_records')}{#if canWrite}<span class="r"><button class="btn sm" onclick={() => ((adding = !adding), (correcting = null))} aria-expanded={adding}>{t('me_add')}</button></span>{/if}</h3>
-	<div class="seg" role="group" aria-label={t('me_kind')} style="margin-bottom:6px">
+	<div class="seg fill" role="group" aria-label={t('me_kind')} style="margin-bottom:6px">
 		{#each KINDS as k (k)}<button class:on={k === kind} aria-pressed={k === kind} onclick={() => ((kind = k), (adding = false))}>{t('me_k_' + k)}</button>{/each}
 	</div>
 	{#if adding}

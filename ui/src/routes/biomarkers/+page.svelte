@@ -102,13 +102,16 @@
 	const shapeOf = (lab: string | null) => SHAPES[Math.max(0, labs.indexOf(lab ?? '—')) % SHAPES.length];
 
 	// ---- chart geometry (port of the mockup's ldlChart) ----
-	const W = 860;
+	// 860 wide as in the mockup. In a narrow card the drawing gets the card's own width (a little less,
+	// so 10-unit text lands at 11 px), or a phone would shrink every label to about 4 px.
+	let chartW = $state(0);
+	const W = $derived(chartW > 0 && chartW < 760 ? Math.max(300, Math.round(chartW / 1.1)) : 860);
 	const H = 330;
 	const pl = 60;
 	const pr = 20;
 	const pt = 14;
 	const pb = 74;
-	const iw = W - pl - pr;
+	const iw = $derived(W - pl - pr);
 	const ih = H - pt - pb;
 	const geo = $derived.by(() => {
 		if (!pts.length || !tr) return null;
@@ -286,6 +289,7 @@
 						<span class="dim">{t('h1_lg_flags')}</span>
 					</div>
 					<!-- role=group, not img: its points are buttons a keyboard and a screen reader reach one by one. -->
+					<div bind:clientWidth={chartW}>
 					<svg width="100%" viewBox="0 0 {W} {H + extra}" role="group" aria-label={tp('h1_chart_label', pts.length, { name: tr.name, v: fmt(last.value), u: unitLabel(last.unit) })}>
 						{#each geo.ticks as v (v)}
 							<line x1={pl} x2={W - pr} y1={geo.sy(v)} y2={geo.sy(v)} stroke={C.grid} />
@@ -294,7 +298,8 @@
 						{#each geo.band as b, i (i)}
 							{#if b}<rect x={b.x} y={b.y} width={b.w} height={b.h} fill="#3fb68b" opacity=".08" />{/if}
 						{/each}
-						<text x={pl + 6} y={geo.sy(geo.y0) - 6} fill="#3fb68b" font-size="10.5" opacity=".9">{t('h1_band')}</text>
+						<!-- Only when it fits: on a phone the legend line above says what the band is. -->
+						{#if t('h1_band').length * 5.8 < iw - 12}<text x={pl + 6} y={geo.sy(geo.y0) - 6} fill="#3fb68b" font-size="10.5" opacity=".9">{t('h1_band')}</text>{/if}
 						{#each geo.years as y (y)}
 							<line x1={geo.sx(y)} x2={geo.sx(y)} y1={pt} y2={pt + ih} stroke={C.grid} opacity=".6" />
 							<text x={geo.sx(y)} y={pt + ih + 15} fill={C.axis} font-size="11" text-anchor="middle">{y}</text>
@@ -359,8 +364,9 @@
 							{/each}
 						{/if}
 					</svg>
+					</div>
 					{#if unlabelled.length}
-						<div class="dim" style="font-size:11px;margin:0 0 6px {pl / 8.6}%">{t('h1_meds_row')}: {unlabelled.join(' · ')}</div>
+						<div class="dim" style="font-size:11px;margin:0 0 6px {(pl / W) * 100}%">{t('h1_meds_row')}: {unlabelled.join(' · ')}</div>
 					{/if}
 				</div>
 
