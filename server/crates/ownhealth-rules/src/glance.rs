@@ -284,9 +284,19 @@ pub async fn build_dashboard(
         .iter()
         .filter(|m| m.source == "labs" && !m.points.is_empty())
         .collect();
+    // A draw is a day with a lab report. A value typed by hand is not one, so it never hides the
+    // changes between the last two reports; with only hand-typed values, those days count.
+    let reported = lab_markers
+        .iter()
+        .any(|m| m.points.iter().any(|p| p.src_kind != "manual"));
     let draws: BTreeSet<_> = lab_markers
         .iter()
-        .flat_map(|m| m.points.iter().map(|p| p.date))
+        .flat_map(|m| {
+            m.points
+                .iter()
+                .filter(|p| !reported || p.src_kind != "manual")
+                .map(|p| p.date)
+        })
         .collect();
     let mut draws: Vec<_> = draws.into_iter().collect();
     draws.reverse();

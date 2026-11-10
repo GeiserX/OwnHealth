@@ -80,6 +80,8 @@ pub struct Point {
     pub method: Option<String>,
     pub src: String,
     pub src_label: Option<String>,
+    /// src.kind: 'manual' for a value typed by hand, which is not a lab draw of its own
+    pub src_kind: String,
     pub derivation: String,
 }
 
@@ -270,7 +272,7 @@ async fn load_points(
         "select o.id, o.alias_group, o.loinc, o.effective_at, o.value_num, o.value_canonical, o.unit_canonical, \
          o.printed_value, o.printed_unit, o.unit_ucum, o.printed_ref_range, o.ref_low, o.ref_high, \
          o.interpretation, o.printed_flag, o.method, o.src_id, o.derivation_version, \
-         cardinality(o.sensitivity) > 0 as sensitive, s.label \
+         cardinality(o.sensitivity) > 0 as sensitive, s.label, s.kind as src_kind \
          from observation o join src s on s.id = o.src_id where {} order by o.effective_at, o.recorded_at, o.id",
         where_.join(" and ")
     );
@@ -317,6 +319,7 @@ async fn load_points(
             method: r.try_get("method")?,
             src: r.try_get("src_id")?,
             src_label: r.try_get("label")?,
+            src_kind: r.try_get("src_kind")?,
             derivation: r.try_get("derivation_version")?,
         });
     }

@@ -7,6 +7,7 @@
 
 use axum::Router;
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::routing::get;
 use chrono::{DateTime, Utc};
 use ownhealth_auth::household::can_manage;
@@ -16,7 +17,7 @@ use ownhealth_core::pyjson::pydantic_datetime_utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::auth::{R, ok};
+use super::auth::{R, detail, ok};
 use crate::extract::{Caller, SessionCaller};
 use crate::validate;
 
@@ -57,6 +58,15 @@ async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Q
     let profile = validate::param(&q, "profile").filter(|s| !s.is_empty());
     // One channel only ('mcp', 'ui', 'api'): what agents did is not buried under page views.
     let via = validate::param(&q, "via").filter(|s| !s.is_empty()).map(str::to_owned);
+    if let Some(v) = via.as_deref()
+        && !["mcp", "ui", "api"].contains(&v)
+    {
+        return Err(detail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "bad_input",
+            &format!("Unknown via '{v}': use mcp, ui or api."),
+        ));
+    }
     let pid = match profile {
         Some(r) => Some(Caller(p.clone()).require(&mut tx, r, None, None).await?.profile.id),
         None => None,

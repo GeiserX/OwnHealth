@@ -42,6 +42,7 @@ fn pt(day: &str, value: &str, canonical: Option<&str>) -> Point {
         method: None,
         src: "src_x".into(),
         src_label: None,
+        src_kind: "document_region".into(),
         derivation: "test".into(),
     }
 }
@@ -268,5 +269,41 @@ async fn changes_never_compare_a_point_the_normalizer_could_not_convert() -> R {
         .filter(|c| c["direction"] == "down")
         .collect();
     assert!(down.is_empty(), "{down:?}");
+    Ok(())
+}
+
+/// Two lab reports, then one value typed by hand: the changes still compare the two reports.
+#[tokio::test]
+async fn one_value_entered_by_hand_keeps_the_changes_since_the_last_report() -> R {
+    common::install_fake_genome();
+    let db = TestDb::new().await?;
+    let mut tx = db.pool.begin().await?;
+    let pid = create_rivera_family(&mut tx, "Rivera").await?.profile("alex");
+    for (v, day) in [("92", "2026-03-01"), ("130", "2026-09-01")] {
+        let o = normalized(&mut tx, pid, v, "mg/dL", "70-110", day).await?;
+        let src = SrcIn {
+            profile_id: Some(pid),
+            label: Some("LabNorte".into()),
+            import_ref: Some(format!("labnorte-{day}")),
+            ..SrcIn::new("fhir_import")
+        };
+        commit_observation(&mut tx, &o, &SrcRef::New(src), CommitOptions::new("import")).await?;
+    }
+    let by_hand = normalized_as(&mut tx, pid, "Plaquetas", "250", "x10^3/µL", "150-400", "2026-09-20").await?;
+    add(&mut tx, &by_hand, pid).await?;
+    let d = dashboard(
+        &mut tx,
+        pid,
+        NaiveDate::from_ymd_opt(2026, 10, 1).unwrap_or_default(),
+        "en",
+        &all_scopes(),
+    )
+    .await?;
+    assert_eq!(d["changes_vs"], json!("2026-03-01"), "{}", d["changes"]);
+    assert!(
+        d["changes"].as_array().is_some_and(|c| !c.is_empty()),
+        "{}",
+        d["changes"]
+    );
     Ok(())
 }

@@ -443,6 +443,25 @@ async fn audit_filters_by_channel() -> R {
     Ok(())
 }
 
+// A typo in the channel ('agent' for 'mcp') is a bad request that names the allowed values, never an
+// empty page that reads as "no agent activity".
+#[tokio::test]
+async fn audit_refuses_an_unknown_channel() -> R {
+    let env = Env::new(true).await?;
+    let mut a = env.as_user(env.user("alex")).await?;
+    let r = a.get("/api/audit?via=agent").await?;
+    assert_eq!(
+        (r.status, r.code()),
+        (StatusCode::UNPROCESSABLE_ENTITY, "bad_input"),
+        "{}",
+        r.json
+    );
+    let msg = r.json.to_string();
+    assert!(msg.contains("mcp, ui or api"), "{msg}");
+    assert_eq!(a.get("/api/audit?via=ui").await?.status, StatusCode::OK);
+    Ok(())
+}
+
 #[tokio::test]
 async fn guardian_stops_managing_once_claimed() -> R {
     let env = Env::new(true).await?;
