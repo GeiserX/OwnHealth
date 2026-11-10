@@ -60,22 +60,21 @@ const STROKES: [(char, char); 9] = [
     ('−', '-'),
 ];
 
+fn stroke(c: char) -> char {
+    STROKES.iter().find(|(from, _)| *from == c).map_or(c, |(_, to)| *to)
+}
+
 /// What WinAnsi prints for `c`, which it cannot show: its NFKD letters without the marks, or `?`.
-/// A fold that would print a digit is refused (`⁹` is not `9`, `⅓` is not `13`), so a number on
-/// the page is never a different number. A control character prints as a space.
+/// A fold that would print a digit is refused (`⁹` is not `9`, `⅓` is not `13`), and so is one
+/// with a part WinAnsi cannot show (`㏀` is not `k`), so a value on the page is never a different
+/// value. A control character prints as a space.
 fn fold(c: char) -> String {
-    if let Some((_, to)) = STROKES.iter().find(|(from, _)| *from == c) {
-        return to.to_string();
-    }
     if c.is_control() {
         return " ".into();
     }
-    let base: String = c
-        .nfkd()
-        .filter(|d| !is_combining_mark(*d))
-        .filter(|d| afm::cp1252(*d).is_some())
-        .collect();
-    if base.is_empty() || base.chars().any(|d| d.is_ascii_digit()) {
+    let parts: Vec<char> = c.nfkd().filter(|d| !is_combining_mark(*d)).map(stroke).collect();
+    let base: String = parts.iter().collect();
+    if parts.is_empty() || parts.iter().any(|d| afm::cp1252(*d).is_none() || d.is_ascii_digit()) {
         "?".into()
     } else {
         base

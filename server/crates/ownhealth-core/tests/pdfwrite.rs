@@ -177,6 +177,31 @@ fn a_fold_never_turns_into_a_different_number() {
     assert_eq!(to('⅓').as_deref(), Some("?"), "a third is not thirteen");
     assert_eq!(to('μ').as_deref(), Some("µ"), "Greek mu prints as the micro sign");
     assert_eq!(to('−').as_deref(), Some("-"), "the minus sign stays a minus");
+
+    let mut w = Writer::new();
+    w.paragraph("50 ㎍ · 10 ㎛ · 5 ㎕ · ㎓", Font::Regular, 10.0, 13.0);
+    let out = w.finish();
+    let to = |c: char| out.folded.iter().find(|f| f.ch == c).map(|f| f.to.clone());
+    assert_eq!(to('㎍').as_deref(), Some("µg"), "microgram stays micro");
+    assert_eq!(to('㎛').as_deref(), Some("µm"), "micrometre stays micro");
+    assert_eq!(to('㎕').as_deref(), Some("µl"), "microlitre stays micro");
+    assert_eq!(to('㎓').as_deref(), Some("GHz"), "a fold of plain letters still works");
+}
+
+#[test]
+fn a_fold_never_drops_part_of_a_character() {
+    // A character with a part that has no WinAnsi byte prints as `?`, never as the other parts:
+    // ㏀ is k + Greek omega, and "k" alone would be a different unit.
+    let mut w = Writer::new();
+    w.paragraph("㎆ ㏀", Font::Regular, 10.0, 13.0);
+    let out = w.finish();
+    let to = |c: char| out.folded.iter().find(|f| f.ch == c).map(|f| f.to.clone());
+    assert_eq!(to('㎆').as_deref(), Some("MB"));
+    assert_eq!(
+        to('㏀').as_deref(),
+        Some("?"),
+        "kilo-ohm loses its omega, so it is refused"
+    );
 }
 
 #[test]
