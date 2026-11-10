@@ -12,6 +12,8 @@ In OwnHealth, open **Import & review** on the profile the data belongs to, tap *
 
 The file becomes a document of that profile and owns the readings it brought. Retracting the document removes them.
 
+Each export holds everything Gadgetbridge has, so upload a new one whenever you like. The newest upload owns every reading it holds: retracting an older export keeps what a newer one still has. Retracting the newest removes those readings too, until you upload it again.
+
 ## What is imported
 
 | Gadgetbridge data | OwnHealth metric |
@@ -23,6 +25,8 @@ The file becomes a document of that profile and owns the readings it brought. Re
 | Breathing rate | respiratory rate |
 | Weight (Mi Scale and other scales) | weight |
 
-Gadgetbridge writes 0 or 255 where a device measured nothing; OwnHealth drops those and other values outside a plausible range. Sleep stages, stress, HRV and vendor scores are not imported yet. The import summary lists them by table.
+Gadgetbridge writes 0 or 255 where a device measured nothing; OwnHealth drops those and other values outside a plausible range, and readings dated before 2000 or in the future (a band whose clock was never set writes 1970). The import summary counts them as `bad_time`. Sleep stages, stress, HRV and vendor scores are not imported yet. The import summary lists them by table.
 
 The readings appear on the profile's **Wearables** page.
+
+Gadgetbridge does not record the phone's time zone, so daily totals and resting heart rate from it fall on UTC days. In Madrid, steps taken between midnight and 01:00 (02:00 in summer) count to the day before.
