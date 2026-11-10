@@ -5,6 +5,7 @@
 // Common causes, matched on the message after its 'XxxError: ' prefix. Order matters: first match wins.
 const PATTERNS: [RegExp, string][] = [
 	[/connection refused/i, 'err_refused'],
+	[/error sending request|failed to connect|connection (timed out|reset)|operation timed out/i, 'err_unreachable'],
 	[/failed to lookup address|nodename nor servname|name or service not known|dns error/i, 'err_dns'],
 	[/\btls\b|certificate|handshake/i, 'err_tls'],
 	[/wrong name or password/i, 'err_login'],

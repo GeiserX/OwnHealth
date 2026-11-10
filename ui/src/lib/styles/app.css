@@ -309,4 +309,5 @@ table.stack td:first-child{font-weight:560}
 table.stack td:not(:first-child):not(.acts-cell){display:inline-block;width:auto;color:var(--muted);font-size:12px;margin-right:10px}
 table.stack td.acts-cell{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;padding-top:6px}
 table.stack tr:hover td{background:none}
+.xr.h{display:none}
 }

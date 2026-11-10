@@ -36,6 +36,9 @@ export type SourceStatus = 'off' | 'out' | 'partial' | 'stale' | 'ok' | 'nodata'
 
 interface HealthLike {
 	enabled: boolean;
+	last_run_at?: string | null;
+	poll_seconds?: number | null;
+	created_at?: string | null;
 	last_success_at: string | null;
 	last_error_at: string | null;
 	consecutive_failures: number;
@@ -49,12 +52,14 @@ interface HealthLike {
  * failure is recent. A last run that brought some items in but not others is Partial (Watch), so a
  * stuck message or file never hides behind OK. A source that never ran is No data, never OK.
  */
-export function sourceStatus(s: HealthLike): SourceStatus {
+export function sourceStatus(s: HealthLike, now = new Date()): SourceStatus {
 	if (!s.enabled) return 'off';
 	const failing = s.consecutive_failures > 0 && (!s.last_success_at || (s.last_error_at != null && s.last_error_at > s.last_success_at));
 	if (failing) return 'out';
 	if (s.last_run_status === 'partial') return 'partial';
-	if (s.stale) return 'stale';
+	// A source added a moment ago has not had its first run yet: that is No data, not Stale.
+	const fresh = !s.last_run_at && !!s.created_at && !!s.poll_seconds && now.getTime() - new Date(s.created_at).getTime() < s.poll_seconds * 1000;
+	if (s.stale && !fresh) return 'stale';
 	if (!s.last_success_at) return 'nodata';
 	return 'ok';
 }
@@ -178,6 +183,8 @@ export function sourceBody(f: SourceForm, editing = false, stored?: Record<strin
 		case 'nightscout': {
 			const url = httpUrl(f.url);
 			if (!url) return { error: 'fu_err_url' };
+			// The server only takes plain http for a service on the person's own network.
+			if (url.startsWith('http:') && !f.allow_private) return { error: 'fu_err_http' };
 			config.base_url = url;
 			// `url` is an older name of base_url; both at once would be refused by the server.
 			delete config.url;
@@ -383,9 +390,89 @@ export function proposalRows(item: { kind: string; payload: Record<string, unkno
 	});
 }
 
-/** The rows ticked at first: only usable rows the server found on the page. The rest wait for a person. */
+/**
+ * The rows ticked at first: only usable rows the server found on the page and that are not already in the
+ * record (a duplicate) or against a value already there (a conflict). The rest wait for a person.
+ */
 export function proposalDefaultKeep(rows: ProposalRow[]): number[] {
-	return rows.filter((r) => r.usable && r.grounding === 'grounded').map((r) => r.index);
+	const held = (r: ProposalRow) => r.problems.some((p) => p.reason === 'duplicate' || p.reason === 'conflict');
+	return rows.filter((r) => r.usable && r.grounding === 'grounded' && !held(r)).map((r) => r.index);
+}
+
+/** The value a conflict check found in another document ('another document holds 231 for this date'), or null. */
+export function conflictValue(detail: string | null | undefined): string | null {
+	const m = /another document holds (.+) for this date/.exec(detail ?? '');
+	return m && m[1] !== 'None' ? m[1].trim() : null;
+}
+
+/**
+ * The failed checks of a review row, one per reason (the server can file the same reason twice), skipping
+ * the reasons that have their own line. A conflict keeps the other value when any of its checks names it.
+ */
+export function reviewChecks(
+	checks: { ok: boolean; reason: string | null; detail: string | null }[],
+	skip: string[] = []
+): { reason: string | null; detail: string | null; value: string | null }[] {
+	const out = new Map<string, { reason: string | null; detail: string | null; value: string | null }>();
+	for (const c of checks) {
+		if (c.ok || skip.includes(c.reason ?? '')) continue;
+		const key = c.reason ?? `?${c.detail ?? ''}`;
+		const value = c.reason === 'conflict' ? conflictValue(c.detail) : null;
+		const had = out.get(key);
+		if (!had) out.set(key, { reason: c.reason, detail: c.detail, value });
+		else if (value && !had.value) out.set(key, { ...had, value, detail: c.detail });
+	}
+	return [...out.values()];
+}
+
+/** Whether a check's detail only says again what its translated label says. */
+export function repeatsLabel(detail: string | null | undefined, label: string | null | undefined): boolean {
+	const n = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+	return !!detail && !!label && n(detail) === n(label);
+}
+
+/** One line of 'Other items': a document's extracted rows together, or one item on its own. */
+export type OtherLine<T> = { document_id: string; rows: T[]; item: T } | { document_id: null; rows: null; item: T };
+
+/** The 'Other items' list with the extracted rows of each document folded into one line, in first-seen order. */
+export function othersGrouped<T extends { kind: string; document_id: string | null }>(items: T[]): OtherLine<T>[] {
+	const out: OtherLine<T>[] = [];
+	const byDoc = new Map<string, T[]>();
+	for (const i of items) {
+		if (i.kind === 'candidate_row' && i.document_id) {
+			const rows = byDoc.get(i.document_id);
+			if (rows) rows.push(i);
+			else {
+				const fresh = [i];
+				byDoc.set(i.document_id, fresh);
+				out.push({ document_id: i.document_id, rows: fresh, item: i });
+			}
+		} else out.push({ document_id: null, rows: null, item: i });
+	}
+	return out;
+}
+
+/** Profiles whose sources a person may set up: the ones they own or are guardian of. */
+export function manageable<T extends { role: string }>(profiles: T[]): T[] {
+	return profiles.filter((p) => p.role === 'owner' || p.role === 'guardian');
+}
+
+/** The one Inbox tile of Import & review: how many sources, how many failing, held mail. Null until loaded. */
+export function inboxSummary(
+	sources: { kind: string; enabled: boolean; consecutive_failures: number; quarantined?: number }[] | null | undefined
+): { sources: number; failing: number; held: number } | null {
+	if (!sources) return null;
+	return {
+		sources: sources.length,
+		failing: sources.filter((s) => s.enabled && s.consecutive_failures > 0).length,
+		held: heldTotal(sources) ?? 0
+	};
+}
+
+/** Whether the share screen can send a file: a PDF or an image, as the share endpoint takes. */
+export function shareAccepts(f: { name: string; type: string }): boolean {
+	if (f.type === 'application/pdf' || f.type.startsWith('image/')) return true;
+	return /\.(pdf|jpe?g|png|heic|heif|webp|tiff?|gif)$/i.test(f.name);
 }
 
 /**

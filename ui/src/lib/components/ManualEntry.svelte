@@ -20,6 +20,7 @@
 		kinds = ['observation', 'medication', 'condition', 'allergy', 'immunization'],
 		correcting = null,
 		note = '',
+		date = null,
 		onsaved,
 		oncancel
 	}: {
@@ -27,7 +28,9 @@
 		kinds?: EntryKind[];
 		correcting?: RecordOut | null;
 		note?: string;
-		onsaved: (kind: EntryKind) => void;
+		/** The day an observation starts on; '' leaves it empty (required), null means today. */
+		date?: string | null;
+		onsaved: (kind: EntryKind, id?: string) => void;
 		oncancel?: () => void;
 	} = $props();
 
@@ -40,7 +43,7 @@
 		immunization: [['vaccine', 'me_f_vaccine', 'text', true], ['occurred', 'me_f_occurred', 'date', false], ['dose_number', 'me_f_dosen', 'number', false]]
 	};
 	const today = new Date().toISOString().slice(0, 10);
-	const fresh = (k: EntryKind): Fields => (k === 'observation' ? { date: today, note } : {});
+	const fresh = (k: EntryKind): Fields => (k === 'observation' ? { date: date ?? today, note } : {});
 	const fromRecord = (r: RecordOut): Fields =>
 		Object.fromEntries(FIELDS[r.kind as EntryKind].map(([f]) => [f, r.detail[f] == null ? '' : String(r.detail[f])]));
 
@@ -80,24 +83,25 @@
 			return;
 		}
 		busy = true;
+		let id: string | undefined;
 		try {
 			if (correcting) {
 				await correctRecord(profile, correcting.kind, correcting.id, { ...correcting.detail, ...body(), reason: reason.trim() });
 			} else if (kind === 'observation') {
-				await addManualObservation(profile, {
+				id = (await addManualObservation(profile, {
 					name: val('name')!,
 					value: decimalText(f.value ?? '')!,
 					unit: val('unit'),
 					effective_at: `${val('date') ?? today}T12:00:00Z`,
 					note: val('note')
-				});
+				})).id;
 			} else {
-				await createRecord(profile, kind, body());
+				id = (await createRecord(profile, kind, body())).id;
 			}
 			saved++;
 			const k = kind;
 			if (!correcting) f = { ...fresh(k), ...(k === 'observation' ? { date: f.date } : {}) };
-			onsaved(k);
+			onsaved(k, id);
 		} catch (err) {
 			error = errText(err);
 		} finally {

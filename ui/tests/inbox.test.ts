@@ -84,7 +84,7 @@ test('push and device kinds need a profile; URLs must be http(s)', () => {
 	const ok = sourceBody({ ...ns, url: 'https://ns.rivera.example/', allow_private: true });
 	assert.ok('body' in ok);
 	assert.deepEqual(ok.body.config, { base_url: 'https://ns.rivera.example', allow_private: true });
-	const pl = sourceBody({ ...emptyForm('paperless'), label: 'Paperless', profile_id: 'p1', url: 'http://paperless.lan:8000', secret: 't', tag: '' });
+	const pl = sourceBody({ ...emptyForm('paperless'), label: 'Paperless', profile_id: 'p1', url: 'http://paperless.lan:8000', secret: 't', tag: '', allow_private: true });
 	assert.ok('body' in pl);
 	assert.equal(pl.body.config.health_tag, 'health');
 	assert.equal(pl.body.poll_seconds, 900);
