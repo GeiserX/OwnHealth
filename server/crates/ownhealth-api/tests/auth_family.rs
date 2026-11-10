@@ -369,6 +369,52 @@ async fn audit_viewer_scope() -> R {
     Ok(())
 }
 
+// What agents did stays findable however many pages the person opened since: `via=mcp` filters on the
+// server, so a page of 60 is never all page views.
+#[tokio::test]
+async fn audit_filters_by_channel() -> R {
+    let env = Env::new(true).await?;
+    let mut c = env.pool().acquire().await?;
+    write_audit(
+        &mut c,
+        &AuditEvent {
+            actor_id: Some(env.user("alex")),
+            tool: Some("get_trend".into()),
+            profile_id: Some(env.profile("alex")),
+            ..AuditEvent::new("user", "mcp", "mcp")
+        },
+    )
+    .await?;
+    for _ in 0..3 {
+        write_audit(
+            &mut c,
+            &AuditEvent {
+                actor_id: Some(env.user("alex")),
+                profile_id: Some(env.profile("alex")),
+                ..AuditEvent::new("user", "ui", "dashboard")
+            },
+        )
+        .await?;
+    }
+    drop(c);
+    let mut a = env.as_user(env.user("alex")).await?;
+    let page = a.get("/api/audit?limit=2&via=mcp").await?.json;
+    let vias: Vec<&str> = page["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["via"].as_str())
+        .collect();
+    assert_eq!(vias, vec!["mcp"], "{page}");
+    let all = a.get("/api/audit?limit=2").await?.json;
+    assert!(
+        all["items"]
+            .as_array()
+            .is_some_and(|i| i.iter().all(|e| e["via"] == "ui"))
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn guardian_stops_managing_once_claimed() -> R {
     let env = Env::new(true).await?;

@@ -54,6 +54,8 @@ async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Q
         .map(|perm| perm.profile.id)
         .collect();
     let profile = validate::param(&q, "profile").filter(|s| !s.is_empty());
+    // One channel only ('mcp', 'ui', 'api'): what agents did is not buried under page views.
+    let via = validate::param(&q, "via").filter(|s| !s.is_empty()).map(str::to_owned);
     let pid = match profile {
         Some(r) => Some(Caller(p.clone()).require(&mut tx, r, None, None).await?.profile.id),
         None => None,
@@ -65,13 +67,14 @@ async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Q
          from audit_event e left join app_user u on u.id = e.actor_id \
          left join api_token t on t.id = e.token_id left join profile p on p.id = e.profile_id \
          where (e.profile_id = any($1) or e.actor_id = $2) and ($3::uuid is null or e.profile_id = $3) \
-         and ($4::bigint is null or e.id < $4) order by e.id desc limit $5",
+         and ($4::bigint is null or e.id < $4) and ($6::text is null or e.via = $6) order by e.id desc limit $5",
     )
     .bind(&managed)
     .bind(p.user_id)
     .bind(pid)
     .bind(before)
     .bind(limit)
+    .bind(via)
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
