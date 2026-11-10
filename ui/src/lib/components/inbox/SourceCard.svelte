@@ -64,6 +64,11 @@
 				return [where.url, where.tag ? `tag: ${where.tag}` : null].filter(Boolean).join(' · ');
 			case 'nightscout':
 				return where.url;
+			// These two never send with a token of their own: say how their files arrive instead.
+			case 'gadgetbridge':
+				return t('fu_via_upload');
+			case 'share':
+				return t('fu_via_share');
 			default:
 				return source.token_prefix ? `${source.token_prefix}…` : t('fu_no_token');
 		}
@@ -86,7 +91,7 @@
 	<div class="hd">
 		<div style="min-width:0">
 			<b id="src-{source.id}">{source.label}</b>
-			<div class="dim kind">{t('fu_k_' + source.kind)} · <span class="mono">{detail}</span></div>
+			<div class="dim kind">{t('fu_k_' + source.kind)} · <span class:mono={source.kind !== 'gadgetbridge' && source.kind !== 'share'}>{detail}</span></div>
 		</div>
 		<span class="pill {PILL[status]}"><i aria-hidden="true"></i>{t(pillWord)}</span>
 	</div>

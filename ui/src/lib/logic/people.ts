@@ -131,9 +131,12 @@ export function auditWhat(a: { via: string; tool: string | null; action: string 
 	return a.via === 'mcp' ? (a.tool ?? a.action) : a.action;
 }
 
-/** The dict key of what a page or app row did ('i2_act_consent_change'); null for an agent's tool name. */
+/**
+ * The dict key of what a page or app row did ('i2_act_consent_change'); null for an agent's tool name.
+ * A row the server wrote for a route ('POST /oauth/token') is not a tool call, so it gets its action too.
+ */
 export function auditActionKey(a: { via: string; tool: string | null; action: string }): string | null {
-	if (a.via === 'mcp' && a.tool) return null;
+	if (a.via === 'mcp' && a.tool && !/^[A-Z]+ \//.test(a.tool)) return null;
 	return 'i2_act_' + a.action.replace(/[^a-z0-9]+/gi, '_');
 }
 
@@ -172,6 +175,9 @@ export function auditDetail(
 		const scopes = grant[1].split(',').filter(Boolean).length;
 		return [w.n('i2_ad_scopes', scopes), w.n('i2_ad_profiles', Number(grant[2])), w.n('i2_ad_days', Number(grant[3]))].join(' · ');
 	}
+	// A replayed app code or refresh token: 'replayed=authorization_code'.
+	const replay = /^replayed=(authorization_code|refresh_token)$/.exec(args);
+	if (replay) return w.t('i2_ad_replayed_' + replay[1]);
 	if (args && !args.startsWith('h:')) return args;
 	const type = a.resource_type;
 	if (!type) return '—';

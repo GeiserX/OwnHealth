@@ -584,8 +584,6 @@ export interface DrugCheckView {
 		stale: boolean;
 		reason: string;
 		src: string | null;
-		lab?: string | null; // sent by newer servers; the chip shows what is there
-		page?: number | null;
 	}[];
 	guidance: { source: string; level: string | null; strength: string; applies_to: string; population: string | null; quote: string; url: string }[];
 	not_assessed: string[];

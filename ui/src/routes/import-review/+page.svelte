@@ -146,6 +146,9 @@
 		const id = (near?.payload as { same_as?: string } | undefined)?.same_as;
 		return id ? { id, doc: (queue.data?.docs ?? []).find((x) => x.id === id) ?? null } : null;
 	});
+	// Documents whose import failed: they have no pages and no rows, and the reason is in Other items.
+	const failedDocs = $derived(new Set(items.filter((i) => i.kind === 'job_failed' && i.document_id).map((i) => i.document_id as string)));
+	const docFailed = $derived(!!docId && failedDocs.has(docId));
 	const docNameOf = (id: string) => {
 		const d = (queue.data?.docs ?? []).find((x) => x.id === id);
 		return d ? docLabel(d) : '';
@@ -270,7 +273,11 @@
 	function otherTitle(i: ReviewItem): string {
 		const p = i.payload as Record<string, unknown>;
 		if (i.kind === 'agent_proposal') return tf('i2_ag_t', { kind: kindWord('i2_pk_', String(p.kind ?? '')), token: String(p.token_label ?? '—') });
-		if (i.kind === 'job_failed') return tf('i2_jf_t', { file: String(p.filename ?? p.kind ?? '') });
+		// A failed job's payload may carry no file name; its document has one. Never show the job kind as a name.
+		if (i.kind === 'job_failed') {
+			const file = (p.filename ? String(p.filename) : '') || docName(i.document_id);
+			return file ? tf('i2_jf_t', { file }) : t('i2_kind_job_failed');
+		}
 		if (i.kind === 'candidate_row') {
 			const d = (queue.data?.docs ?? []).find((x) => x.id === i.document_id);
 			return tf('i2_cr_t', { name: String((p.observation as { printed_name?: string })?.printed_name ?? ''), doc: d ? docLabel(d) : '—' });
@@ -285,8 +292,8 @@
 		if (i.kind === 'agent_proposal') return String(inner?.text ?? JSON.stringify(inner ?? {}));
 		if (i.kind === 'job_failed') {
 			const err = String(p.error ?? p.last_error ?? '');
-			// the server's code for a locked PDF: say what to do in the reader's language
-			return err.includes('pdf_password:') ? t('ir_pdf_password') : errText(new Error(err));
+			// errText says the server's code for a locked PDF ('pdf_password: …') in the reader's language.
+			return errText(new Error(err));
 		}
 		return '';
 	}
@@ -304,6 +311,7 @@
 		profile={prof.slug}
 		profileName={prof.display_name}
 		rowsOf={(id) => items.filter((i) => i.kind === 'candidate_row' && i.document_id === id).length}
+		failedOf={(id) => failedDocs.has(id)}
 		ondone={(ids) => {
 			load();
 			refreshReviewTotal();
@@ -374,6 +382,8 @@
 			</div>
 			{#if doc.error}
 				<NotReady error={doc.error} />
+			{:else if doc.data && docFailed}
+				<div class="empty">{t('i2_doc_failed')}</div>
 			{:else if doc.data && pinfo && docId}
 				<PageView documentId={docId} page={pageNo} width={pinfo.width_pt} height={pinfo.height_pt} {boxes} {selected} {zoom} onpick={pick} />
 			{:else if doc.data && docId && doc.data.mime.startsWith('image/')}
@@ -450,7 +460,7 @@
 					onalias={(b) => rowAct(async () => prof && addAlias({ profile: prof.slug, alias: String((it.payload as { observation?: { printed_name?: string } }).observation?.printed_name ?? ''), alias_group: b.alias_group, loinc: b.loinc, lang: i18n.lang }))}
 				/>
 			{:else}
-				{#if !docProposals.length}<div class="empty">{t('i2_doc_done')}</div>{/if}
+				{#if !docProposals.length}<div class="empty">{docFailed ? t('i2_doc_failed_rows') : t('i2_doc_done')}</div>{/if}
 			{/each}
 			{#each docProposals as p (p.item.id)}
 				<div class="prop">

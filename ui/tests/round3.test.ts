@@ -143,3 +143,9 @@ test('Spanish: the sentence after a colon starts in lowercase, acronyms keep the
 	assert.equal(afterColon('Could not connect', 'en'), 'Could not connect');
 	assert.equal(afterColon('', 'es'), '');
 });
+
+test('audit: a replayed app code reads as its action and in words, never as a route or a key=value', () => {
+	assert.equal(auditActionKey({ via: 'mcp', tool: 'POST /oauth/token', action: 'oauth_reuse_revoked' }), 'i2_act_oauth_reuse_revoked');
+	assert.equal(auditDetail({ action: 'oauth_reuse_revoked', args_summary: 'replayed=authorization_code' }, w), 'i2_ad_replayed_authorization_code');
+	assert.equal(auditDetail({ action: 'oauth_reuse_revoked', args_summary: 'replayed=refresh_token' }, w), 'i2_ad_replayed_refresh_token');
+});

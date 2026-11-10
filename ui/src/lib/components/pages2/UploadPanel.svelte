@@ -13,8 +13,15 @@
 		profile,
 		profileName,
 		ondone,
-		rowsOf = () => 0
-	}: { profile: string; profileName: string; ondone: (documentIds: string[]) => void; rowsOf?: (documentId: string) => number } = $props();
+		rowsOf = () => 0,
+		failedOf = () => false
+	}: {
+		profile: string;
+		profileName: string;
+		ondone: (documentIds: string[]) => void;
+		rowsOf?: (documentId: string) => number;
+		failedOf?: (documentId: string) => boolean;
+	} = $props();
 
 	let items = $state<ImportItem[]>([]);
 	let jobs = $state<Record<number, JobInfo>>({});
@@ -70,6 +77,8 @@
 	$effect(() => jobPoll.stop);
 
 	function stateOf(i: ImportItem): { word: string; cls: string } {
+		// A file sent again whose first import failed is not "already imported": its reason is in Other items.
+		if (i.duplicate && i.document_id && failedOf(i.document_id)) return { word: t('i2_up_dup_failed'), cls: 'p-out' };
 		if (i.duplicate) return { word: t('i2_up_dup'), cls: 'p-stale' };
 		if (i.attached_to) return { word: t('i2_up_attached'), cls: 'p-stale' };
 		const j = i.job_id != null ? jobs[i.job_id] : undefined;

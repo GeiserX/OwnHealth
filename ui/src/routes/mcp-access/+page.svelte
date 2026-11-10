@@ -323,11 +323,14 @@
 		border-color: rgba(239, 107, 115, 0.5);
 	}
 	td .chip {
-		margin: 1px 0;
+		margin: 1px 4px 1px 0;
 	}
-	/* A long snippet scrolls inside its card. */
+	/* A long snippet scrolls inside its card, and wraps only at spaces, so '--header' never splits. */
 	pre.code {
 		overflow-x: auto;
+		white-space: pre-wrap;
+		overflow-wrap: normal;
+		word-break: normal;
 	}
 	.need {
 		margin-left: auto;

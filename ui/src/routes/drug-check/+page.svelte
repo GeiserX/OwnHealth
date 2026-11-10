@@ -49,7 +49,8 @@
 	const unknown = $derived(check.error instanceof ApiError && check.error.code === 'drug_unknown');
 	const relTone = (r: string): 'watch' | 'info' | 'stale' => (r.startsWith('inhibitor') || r.startsWith('inducer') ? 'watch' : r === 'same_drug' ? 'info' : 'stale');
 	const EXAMPLES = ['clopidogrel', 'codeine', 'warfarin', 'simvastatin'];
-	const labSrc = (l: DrugCheckView['relevant_labs'][number]) => [l.lab, l.date, l.page != null ? 'p' + l.page : null].filter(Boolean).join(' · ');
+	// The answer names a lab value by its date; the chip opens the source, which shows the lab and page.
+	const labSrc = (l: DrugCheckView['relevant_labs'][number]) => l.date ?? '—';
 	// The API names a withheld scope with or without 'read:'.
 	const withheld = (s: string) => withheldBy(c?.withheld.by_scope, s);
 	// A dict word for a code, with the code itself when the dict has none.

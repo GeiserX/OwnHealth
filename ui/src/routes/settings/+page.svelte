@@ -1,6 +1,7 @@
 <script lang="ts">
 	// Settings: your passkeys and recovery codes, and for each profile you manage its locks, the two
 	// sensitive-genome switches, and who has access (grants). Changes that widen access need step-up.
+	import { tick } from 'svelte';
 	import '#lib/components/pages2/pages2.css';
 	import {
 		addPasskeyBegin,
@@ -71,7 +72,15 @@
 	}
 	const addKey = () => act('pk', async () => addPasskeyFinish(await createPasskey(await addPasskeyBegin()), navigator.platform || undefined));
 	const noCodes = $derived(!codes && auth.data?.user?.recovery_codes_left === 0);
-	const regen = () => act('rc', async () => (codes = (await newRecoveryCodes()).recovery_codes), false);
+	// The new codes are what is left now; focus moves to them, since the button that had it is replaced.
+	let codesEl: HTMLElement | undefined = $state();
+	const codesLeft = $derived(codes ? codes.length : auth.data?.user?.recovery_codes_left);
+	const regen = () =>
+		act('rc', async () => {
+			codes = (await newRecoveryCodes()).recovery_codes;
+			await tick();
+			codesEl?.focus();
+		}, false);
 	async function signOut() {
 		await logout().catch(() => null);
 		location.href = '/';
@@ -187,10 +196,10 @@
 			{@render fail('pk')}
 		</section>
 		<section class="card">
-			<h3>{t('i2_rc')}<span class="r">{auth.data?.user ? tf('i2_rc_left', { n: auth.data.user.recovery_codes_left }) : ''}</span></h3>
+			<h3>{t('i2_rc')}<span class="r">{codesLeft != null ? tf('i2_rc_left', { n: codesLeft }) : ''}</span></h3>
 			<div class="muted" style="font-size:12px">{t('i2_rc_d')}</div>
 			{#if codes}
-				<div class="p2secret" style="margin-top:8px;columns:2" aria-live="polite">{#each codes as c (c)}<div>{c}</div>{/each}</div>
+				<div class="p2secret" style="margin-top:8px;columns:2" aria-live="polite" tabindex="-1" bind:this={codesEl}>{#each codes as c (c)}<div>{c}</div>{/each}</div>
 				<div class="note" style="margin-top:6px;color:var(--watch)">{t('i2_rc_once')}</div>
 			{/if}
 			<div class="p2row" style="margin-top:8px">

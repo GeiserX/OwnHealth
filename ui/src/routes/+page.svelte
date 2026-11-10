@@ -205,7 +205,7 @@
 						{#if d.genome.hidden}<span class="chip">🔒 {tp('h1_hidden', d.genome.hidden)}</span>{/if}
 					</div>
 					<!-- The snapshot is the agents' one, so it holds sensitive findings back even after the owner shows them in the app. -->
-					{#if d.genome.hidden}<div class="dim" style="font-size:11.5px;margin-top:6px">{t('h1_hidden_why')} <a href="/genome">{t('h1_hidden_where')}</a></div>{/if}
+					{#if d.genome.hidden}<div class="dim" style="font-size:11.5px;margin-top:6px">{t('h1_hidden_why')} {#if profile?.is_minor}{t('i2_minor_d')}{:else}<a href="/genome">{t('h1_hidden_where')}</a>{/if}</div>{/if}
 				{:else}
 					<div class="dim" style="font-size:12px">{t('h1_nogen')}</div>
 				{/if}

@@ -149,3 +149,8 @@ test('the server refusing a birth date or a country reads in plain words', () =>
 	assert.equal(errKey('bad_input', 'The birth date is before 1900.', has), 'err_birth_old');
 	assert.equal(errKey('bad_input', 'The country is two letters, for example ES or GB.', has), 'err_country');
 });
+
+test('a locked PDF reads in plain words wherever its job error shows', () => {
+	const has = () => true;
+	assert.equal(errKey(null, 'pdf_password: the PDF is locked with a password. Save a copy without the password and upload that.', has), 'ir_pdf_password');
+});

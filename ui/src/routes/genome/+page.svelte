@@ -239,7 +239,7 @@
 		<div class="tscroll">
 		<table class="t gtab">
 			<thead>
-				<tr><th>{t('i2_g_cat')}</th><th>{t('i2_g_gene')}</th><th>{t('i2_g_var')}</th><th>{t('i2_g_res')}</th><th>{t('i2_g_ev')}</th><th>{t('i2_g_conf')}</th><th>call_state</th><th>{t('i2_g_note')}</th></tr>
+				<tr><th>{t('i2_g_cat')}</th><th>{t('i2_g_gene')}</th><th>{t('i2_g_var')}</th><th>{t('i2_g_res')}</th><th>{t('i2_g_ev')}</th><th>{t('i2_g_conf')}</th><th>{t('i2_g_cs')}</th><th>{t('i2_g_note')}</th></tr>
 			</thead>
 			<tbody>
 				{#each g.findings as f (f.id)}
@@ -266,28 +266,28 @@
 						</td>
 					</tr>
 				{/each}
-				{#each g.locked as l, i (i)}
-					<tr class="lock">
-						<td><span class="chip" title={l.category}>{catLabel(l.category)}</span></td>
-						<td colspan="6"><span style="color:var(--muted)"><span aria-hidden="true">{'🔒 '}</span>{tf('i2_locked', { gene: l.gene ?? '—' })}</span></td>
-						<td>
-							{#if g.consent.can_change}<button class="btn sm" onclick={() => (revealing = true)} aria-expanded={revealing}>{t('i2_reveal')}</button>{:else}<span class="dim" style="font-size:11px">{t('i2_owner_only')}</span>{/if}
-						</td>
-					</tr>
-					{#if revealing && i === 0}
-						<tr>
-							<td colspan="8">
-								<ConfirmRow text={tf('i2_reveal_confirm', { name: prof?.display_name ?? '' })} confirmLabel={t('i2_reveal_yes')} onconfirm={() => consent(true)} oncancel={() => (revealing = false)} />
-							</td>
-						</tr>
-					{/if}
-				{/each}
-				{#if g.withheld.minor_rule}
-					<tr class="lock"><td colspan="8"><span class="muted"><span aria-hidden="true">{'🔒 '}</span>{tf('i2_minor_rule', { n: g.withheld.minor_rule })}</span></td></tr>
-				{/if}
 			</tbody>
 		</table>
 		</div>
+		{#if g.locked.length || g.withheld.minor_rule}
+			<!-- Outside the scrolling table, so the reveal button and its question stay on screen at any width. -->
+			<div class="locks">
+				{#each g.locked as l, i (i)}
+					<div class="lockline"><span class="chip" title={l.category}>{catLabel(l.category)}</span><span class="muted"><span aria-hidden="true">{'🔒 '}</span>{tf('i2_locked', { gene: l.gene ?? '—' })}</span></div>
+				{/each}
+				{#if g.locked.length}
+					<div class="p2row">
+						{#if g.consent.can_change}<button class="btn sm" onclick={() => (revealing = true)} aria-expanded={revealing}>{t('i2_reveal')}</button>{:else}<span class="dim" style="font-size:11px">{t('i2_owner_only')}</span>{/if}
+					</div>
+					{#if revealing}
+						<ConfirmRow text={tf('i2_reveal_confirm', { name: prof?.display_name ?? '' })} confirmLabel={t('i2_reveal_yes')} onconfirm={() => consent(true)} oncancel={() => (revealing = false)} />
+					{/if}
+				{/if}
+				{#if g.withheld.minor_rule}
+					<div class="lockline"><span class="muted"><span aria-hidden="true">{'🔒 '}</span>{tf('i2_minor_rule', { n: g.withheld.minor_rule })}</span></div>
+				{/if}
+			</div>
+		{/if}
 	</div>
 	{#if sensitiveShown.length}<div class="sr-only" role="status">{t('i2_sens_shown')}</div>{/if}
 {/if}
@@ -319,17 +319,26 @@
 	@media (max-width: 760px) {
 		.gtab th:nth-child(1),
 		.gtab td:nth-child(1),
-		.gtab tr:not(.lock) th:nth-child(3),
-		.gtab tr:not(.lock) td:nth-child(3),
+		.gtab th:nth-child(3),
+		.gtab td:nth-child(3),
 		.gtab th:nth-child(7),
 		.gtab td:nth-child(7) {
 			display: none;
 		}
-		/* A hidden finding's sentence wraps inside the screen instead of under the scrolled columns. */
-		.gtab tr.lock td[colspan] > span {
-			display: inline-block;
-			max-width: calc(100vw - 72px);
-		}
+	}
+	.locks {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 10px 8px 8px;
+		border-top: 1px solid var(--line);
+		font-size: 12.5px;
+	}
+	.lockline {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px 8px;
 	}
 	.lnk {
 		background: none;

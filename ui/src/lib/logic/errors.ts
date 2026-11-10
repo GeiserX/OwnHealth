@@ -4,6 +4,7 @@
 
 // Common causes, matched on the message after its 'XxxError: ' prefix. Order matters: first match wins.
 const PATTERNS: [RegExp, string][] = [
+	[/^pdf_password:/i, 'ir_pdf_password'],
 	[/connection refused/i, 'err_refused'],
 	[/error sending request|failed to connect|connection (timed out|reset)|operation timed out/i, 'err_unreachable'],
 	[/failed to lookup address|nodename nor servname|name or service not known|dns error/i, 'err_dns'],
