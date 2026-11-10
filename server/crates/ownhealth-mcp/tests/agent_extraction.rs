@@ -250,6 +250,68 @@ async fn an_agent_extracts_a_scanned_page_using_only_mcp() -> R {
     Ok(())
 }
 
+/// The review item's context lists only what the agent read on the proposal's own profile: a token
+/// that holds two profiles never hands one reviewer the other's document or src ids.
+#[tokio::test]
+async fn a_proposal_context_never_names_another_profiles_reads() -> R {
+    let w = world().await?;
+    let alex_doc = scanned_page(&w).await?;
+    let sam_doc: Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes) \
+         values ($1, $2, '\\x5a', 'image/png', 1) returning id",
+    )
+    .bind(w.family.household_id)
+    .bind(w.pid("sam"))
+    .fetch_one(&w.db.pool)
+    .await?;
+    for (id, slug) in [("src_alex_ctx_1", "alex"), ("src_sam_ctx_1", "sam")] {
+        sqlx::query("insert into src (id, profile_id, kind, actor_kind) values ($1, $2, 'manual', 'user')")
+            .bind(id)
+            .bind(w.pid(slug))
+            .execute(&w.db.pool)
+            .await?;
+    }
+    let tok = w
+        .token(Tok {
+            profiles: vec!["alex", "sam"],
+            ..extraction_token()
+        })
+        .await?;
+    let token_id = w.token_id(&tok).await?;
+    // what get_document_page and get_source audit when the token reads a page and a src on each profile
+    let mut conn = w.conn().await?;
+    for (doc, src, slug) in [(sam_doc, "src_sam_ctx_1", "sam"), (alex_doc, "src_alex_ctx_1", "alex")] {
+        ownhealth_core::audit::write_audit(
+            &mut conn,
+            &ownhealth_core::audit::AuditEvent {
+                token_id: Some(token_id),
+                profile_id: Some(w.pid(slug)),
+                resource_type: Some("document".into()),
+                resource_ids: Some(vec![doc.to_string()]),
+                src_ids: Some(vec![src.into()]),
+                ..ownhealth_core::audit::AuditEvent::new("token", "mcp", "read")
+            },
+        )
+        .await?;
+    }
+    drop(conn);
+    let c = w.connect_real(&tok).await?;
+    let r = c
+        .call(
+            "propose",
+            json!({"profile": "alex", "kind": "note", "payload": {"text": "Revisar en la próxima visita."}}),
+        )
+        .await?;
+    assert!(!r.is_error, "{}", r.raw);
+    let it = review_item(&w, r.sc["data"]["proposal_id"].as_str().unwrap_or_default()).await?;
+    assert_eq!(
+        (&it["context_documents"], &it["context_src_ids"]),
+        (&json!([alex_doc]), &json!(["src_alex_ctx_1"])),
+        "{it}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn pages_follow_scopes_identity_mode_the_page_rule_and_the_cap() -> R {
     let w = world().await?;
@@ -323,6 +385,40 @@ async fn pages_follow_scopes_identity_mode_the_page_rule_and_the_cap() -> R {
         .call_tool("get_document_page", json!({"doc_id": doc.to_string(), "page": 1}))
         .await?;
     assert_eq!(r.sc["code"], "page_cap", "{}", r.raw);
+    Ok(())
+}
+
+/// A page with no extracted fact still holds unextracted content, whether or not a pending_document
+/// item lists it: dismissed, queued for OCR, or never read by an importer. It keeps the pending rule.
+#[tokio::test]
+async fn a_page_nothing_was_extracted_from_keeps_the_pending_rule_once_its_item_is_gone() -> R {
+    let w = world().await?;
+    let doc = scanned_page(&w).await?;
+    // the pending item is dismissed and the page waits for OCR: no item lists it any more
+    sqlx::query("update review_item set status = 'dismissed' where document_id = $1 and kind = 'pending_document'")
+        .bind(doc)
+        .execute(&w.db.pool)
+        .await?;
+    sqlx::query("update document set ocr_state = 'queued' where id = $1")
+        .bind(doc)
+        .execute(&w.db.pool)
+        .await?;
+    let page = json!({"doc_id": doc.to_string(), "page": 1, "include": ["words", "image"]});
+    // a narrow extraction token: page text and propose only
+    let narrow = w
+        .connect_real(&w.tok_scopes(scopes(&["read:documents_text", "write:propose"])).await?)
+        .await?;
+    let r = narrow.call_tool("get_document_page", page.clone()).await?;
+    assert_eq!(r.sc["code"], "page_withheld", "{}", r.raw);
+    assert!(!dumps(&r.raw).contains("image/png"), "{}", r.raw);
+    // every category but the agents switch off: still withheld
+    let c = w.connect_real(&w.token(extraction_token()).await?).await?;
+    let r = c.call_tool("get_document_page", page.clone()).await?;
+    assert_eq!(r.sc["code"], "page_withheld", "{}", r.raw);
+    // positive control: every category and the switch on
+    w.set_switch("alex", true).await?;
+    let r = c.call_tool("get_document_page", page).await?;
+    assert!(!r.is_error, "{}", r.raw);
     Ok(())
 }
 

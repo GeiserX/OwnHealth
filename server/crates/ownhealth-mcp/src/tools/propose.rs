@@ -911,10 +911,14 @@ async fn medication(call: &mut Call<'_>, p: &MedicationPayload) -> ToolResult<Ou
 
 /// What was in the agent's context (security-privacy.md 4.2 #4): based_on plus every src id and
 /// document this token read in the last hour, from the audit log (`context::agent_context`).
-async fn agent_context(call: &mut Call<'_>, based_on: &[String]) -> ToolResult<crate::context::AgentContext> {
+async fn agent_context(
+    call: &mut Call<'_>,
+    profile_id: Uuid,
+    based_on: &[String],
+) -> ToolResult<crate::context::AgentContext> {
     let now = super::db_now(&mut *call.conn).await?.with_timezone(&chrono::Utc);
     let token = call.principal.token_id.unwrap_or_default();
-    let read = crate::context::agent_context(&mut *call.conn, token, now).await?;
+    let read = crate::context::agent_context(&mut *call.conn, token, profile_id, now).await?;
     let mut ids: Vec<String> = Vec::new();
     for b in based_on
         .iter()
@@ -1018,7 +1022,7 @@ pub async fn propose(call: &mut Call<'_>) -> ToolResult<Answer> {
             stored_payload.insert("based_on".into(), json!(based_on));
             stored_payload.insert("payload_hash".into(), json!(phash));
             let reasons: BTreeSet<String> = out.reasons.iter().cloned().collect();
-            let ctx = agent_context(call, &based_on).await?;
+            let ctx = agent_context(call, pid, &based_on).await?;
             let mut unique_docs: Vec<Uuid> = Vec::new();
             for d in docs.iter().chain(ctx.documents.iter()) {
                 if !unique_docs.contains(d) {

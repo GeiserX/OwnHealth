@@ -1,14 +1,15 @@
 //! Grounding for `propose` (ingestion.md 7.2, ROADMAP v0.2): a proposed value counts only where the
-//! agent says it is. With a `bbox`, the value must sit inside that box (`ownhealth_ocr::grounding`).
-//! Without one, it must sit on a line that prints one of the analyte's name words before it. The
-//! same number printed under another analyte, or outside the claimed box, grounds nothing.
+//! agent says it is. It must sit on a line that prints one of the analyte's name words before it,
+//! and, when the agent gives a `bbox`, also inside that box (`ownhealth_ocr::grounding`). A box never
+//! replaces the name: the same number printed under another analyte grounds nothing, however large
+//! the box, and neither does the right row outside the claimed box.
 
 use ownhealth_ingest_pdf::Word;
 use ownhealth_ingest_pdf::classify::fold;
 use ownhealth_ocr::grounding::{Grounding, ground};
 
 /// The box of `value` on this page's words, widened to the name words on its line; None when the
-/// page does not show it where the agent claims.
+/// page does not show it under that name, or not inside `near` when a box is claimed.
 pub fn ground_row(
     words: &[Word],
     name: &str,
@@ -16,15 +17,21 @@ pub fn ground_row(
     unit: Option<&str>,
     near: Option<[f64; 4]>,
 ) -> Option<[f64; 4]> {
-    if near.is_some() {
-        return bbox_of(ground(words, value, unit, near));
-    }
     let want = name_tokens(name);
     let named = |w: &&Word| w.hidden.is_none() && tokens(&w.text).iter().any(|t| want.contains(t));
     let mut best: Option<([f64; 4], usize)> = None;
     for anchor in words.iter().filter(named) {
         // the rest of the anchor's line, to its right
-        let rest = [anchor.bbox[2], anchor.bbox[1], f64::INFINITY, anchor.bbox[3]];
+        let mut rest = [anchor.bbox[2], anchor.bbox[1], f64::INFINITY, anchor.bbox[3]];
+        if let Some(b) = near {
+            // and inside the claimed box (`ground` pads it, so a box a little off still counts)
+            rest = [
+                rest[0].max(b[0]),
+                rest[1].max(b[1]),
+                rest[2].min(b[2]),
+                rest[3].min(b[3]),
+            ];
+        }
         let Some(hit) = bbox_of(ground(words, value, unit, Some(rest))) else {
             continue;
         };
@@ -122,11 +129,28 @@ mod tests {
         let p = page();
         assert_eq!(
             ground_row(&p, "Leucocitos", "5,8", None, Some([50.0, 164.0, 380.0, 178.0])),
-            Some([300.0, 166.0, 315.0, 176.0])
+            Some([56.0, 166.0, 315.0, 176.0])
+        );
+        // a box drawn tight around the value cell alone still grounds: the name is found on its line
+        assert_eq!(
+            ground_row(&p, "Leucocitos", "5,8", None, Some([298.0, 165.0, 317.0, 177.0])),
+            Some([56.0, 166.0, 315.0, 176.0])
         );
         assert_eq!(
             ground_row(&p, "Leucocitos", "5,8", None, Some([50.0, 148.0, 380.0, 162.0])),
             None
+        );
+    }
+
+    #[test]
+    fn a_box_never_stands_in_for_the_name() {
+        let p = page();
+        let whole_page = Some([0.0, 0.0, 10_000.0, 10_000.0]);
+        assert_eq!(ground_row(&p, "Hemoglobina", "92", None, whole_page), None);
+        assert_eq!(ground_row(&p, "Glucosa", "5,8", None, whole_page), None);
+        assert_eq!(
+            ground_row(&p, "Glucosa", "92", Some("mg/dL"), whole_page),
+            Some([56.0, 150.0, 360.0, 160.0])
         );
     }
 
