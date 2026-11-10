@@ -515,7 +515,8 @@ async fn plain_pkce_foreign_resources_and_bad_redirects_are_refused() -> R {
     Ok(())
 }
 
-/// `/oauth/authorize` needs no login, so what it stores is purged once lapsed and capped while open.
+/// `/oauth/authorize` needs no login, so what it stores is purged once lapsed and capped while open,
+/// and a full cap makes room by dropping the oldest instead of refusing everyone.
 #[tokio::test]
 async fn unauthenticated_authorize_requests_cannot_fill_the_database() -> R {
     let w = world().await?;
@@ -556,45 +557,73 @@ async fn unauthenticated_authorize_requests_cannot_fill_the_database() -> R {
         0,
         "a stale unapproved client is purged"
     );
-    // open requests are capped
+    // open requests are capped by evicting the oldest, never by refusing everyone: one client keeps
+    // at most its own share, and a flood of other clients cannot lock a new one out
     sqlx::query(
         "insert into oauth_request (client_id, redirect_uri, code_challenge, resource, scopes, expires_at) \
-         select $1, $2, 'x', 'r', '{}', now() + interval '10 minutes' from generate_series(1, $3)",
+         select $1, $2, 'x', 'r', '{}', now() + interval '10 minutes' from generate_series(1, 50)",
     )
     .bind(&client_id)
     .bind(CB)
-    .bind((oauth::MAX_OPEN_REQUESTS - 1) as i32)
     .execute(&w.db.pool)
     .await?;
     let r = authorize(&app, &pairs).await?;
-    assert_eq!(r.status, 503);
-    assert_eq!(r.json()["error"], "temporarily_unavailable");
+    assert!(r.status.is_redirection(), "{}", r.status);
+    assert_eq!(
+        count("select count(*) from oauth_request").await?,
+        oauth::MAX_OPEN_REQUESTS_PER_CLIENT,
+        "one client's oldest requests make room for its newest"
+    );
+    // a flood of requests from 100 other clients fills the server's cap: the oldest go, the new one stays
+    sqlx::query(
+        "insert into oauth_client (client_id, redirect_uris, document, fetched_at, expires_at) \
+         select 'https://flood.example/' || g || '.json', '{https://flood.example/cb}', '{}', \
+         now() - interval '1 hour', now() + interval '1 day' from generate_series(1, 100) g",
+    )
+    .execute(&w.db.pool)
+    .await?;
+    sqlx::query(
+        "insert into oauth_request (client_id, redirect_uri, code_challenge, resource, scopes, expires_at) \
+         select 'https://flood.example/' || (g % 100 + 1) || '.json', 'https://flood.example/cb', 'x', 'r', '{}', \
+         now() + interval '10 minutes' from generate_series(1, $1) g",
+    )
+    .bind(oauth::MAX_OPEN_REQUESTS as i32)
+    .execute(&w.db.pool)
+    .await?;
+    let r = authorize(&app, &pairs).await?;
+    assert!(r.status.is_redirection(), "{}", r.status);
     assert_eq!(
         count("select count(*) from oauth_request").await?,
         oauth::MAX_OPEN_REQUESTS
     );
-    // and so are documents of clients nobody approved
+    // a flood of cached documents from clients nobody approved: a client the server never saw is still
+    // let in, and the oldest unapproved documents make room for it
     sqlx::query(
         "insert into oauth_client (client_id, redirect_uris, document, expires_at) \
-         select 'https://flood.example/' || g || '.json', '{https://flood.example/cb}', '{}', now() + interval '1 day' \
-         from generate_series(1, $1) g",
+         select 'https://flood.example/more-' || g || '.json', '{https://flood.example/cb}', '{}', \
+         now() + interval '1 day' from generate_series(1, $1) g",
     )
     .bind(oauth::MAX_UNAPPROVED_CLIENTS as i32)
     .execute(&w.db.pool)
     .await?;
     let other = serve_cimd(&[CB]).await?;
-    let mut flooded = pairs.to_vec();
-    flooded[1] = ("client_id", other.as_str());
-    let r = authorize(&app, &flooded).await?;
-    assert_eq!(
-        (r.status.as_u16(), r.json()["error"].clone()),
-        (400, json!("invalid_client"))
-    );
-    let stored = sqlx::query_scalar::<_, i64>("select count(*) from oauth_client where client_id = $1")
+    let mut fresh = pairs.to_vec();
+    fresh[1] = ("client_id", other.as_str());
+    let r = authorize(&app, &fresh).await?;
+    assert!(r.status.is_redirection(), "{}", r.status);
+    let stored = sqlx::query_scalar::<_, i64>("select count(*) from oauth_request where client_id = $1")
         .bind(&other)
         .fetch_one(&w.db.pool)
         .await?;
-    assert_eq!(stored, 0);
+    assert_eq!(stored, 1);
+    assert_eq!(
+        count(
+            "select count(*) from oauth_client k where not exists \
+             (select 1 from oauth_consent c where c.client_id = k.client_id)"
+        )
+        .await?,
+        oauth::MAX_UNAPPROVED_CLIENTS
+    );
     Ok(())
 }
 

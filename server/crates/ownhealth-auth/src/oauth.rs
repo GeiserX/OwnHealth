@@ -360,18 +360,27 @@ pub async fn fetch_client(conn: &mut PgConnection, client_id: &str) -> Result<Cl
     let (client, doc) = parse_document(client_id, &fetched.body)?;
     let ttl = cache_seconds(fetched.cache_control.as_deref());
     purge_expired(&mut *conn).await?;
-    let unapproved: i64 = sqlx::query_scalar(
-        "select count(*) from oauth_client k where not exists (select 1 from oauth_client n where n.client_id = $1) \
-         and not exists (select 1 from oauth_consent c where c.client_id = k.client_id)",
+    // a new client is always let in: when the cache of clients nobody approved is full, the oldest
+    // ones (and their open requests) make room, so a flood cannot lock a new client out
+    let victims: Vec<String> = sqlx::query_scalar(
+        "select client_id from (select k.client_id, row_number() over (order by k.fetched_at desc, k.client_id \
+         desc) as rn from oauth_client k where k.status = 'active' \
+         and not exists (select 1 from oauth_client n where n.client_id = $1) \
+         and not exists (select 1 from oauth_consent c where c.client_id = k.client_id) \
+         and not exists (select 1 from oauth_code o where o.client_id = k.client_id) \
+         and not exists (select 1 from api_token t where t.oauth_client_id = k.client_id)) pool where rn >= $2",
     )
     .bind(client_id)
-    .fetch_one(&mut *conn)
+    .bind(MAX_UNAPPROVED_CLIENTS)
+    .fetch_all(&mut *conn)
     .await?;
-    // a client already cached (approved or not) is always refreshed; only new ones count
-    if unapproved >= MAX_UNAPPROVED_CLIENTS {
-        return Err(Error::Invalid(
-            "too many unknown clients are pending on this server; try again later".into(),
-        ));
+    if !victims.is_empty() {
+        for sql in [
+            "delete from oauth_request where client_id = any($1)",
+            "delete from oauth_client where client_id = any($1)",
+        ] {
+            sqlx::query(sql).bind(&victims).execute(&mut *conn).await?;
+        }
     }
     sqlx::query(
         "insert into oauth_client (client_id, client_name, client_uri, logo_uri, redirect_uris, document, \
@@ -406,9 +415,12 @@ pub struct AuthorizeIn {
 }
 
 /// Open authorization requests the server keeps at once. `/oauth/authorize` needs no login, so
-/// without a cap anyone could fill the database with pending requests.
+/// without a cap anyone could fill the database with pending requests; past it the oldest go.
 pub const MAX_OPEN_REQUESTS: i64 = 1000;
-/// Cached metadata documents of clients nobody approved yet, kept at once (up to 64 KiB each).
+/// Open requests one client keeps at once, so a single client cannot take the whole cap.
+pub const MAX_OPEN_REQUESTS_PER_CLIENT: i64 = 20;
+/// Cached metadata documents of clients nobody approved yet, kept at once (up to 64 KiB each); past
+/// it the oldest go.
 pub const MAX_UNAPPROVED_CLIENTS: i64 = 1000;
 /// The longest `state` a client may send; it is stored and echoed back.
 pub const STATE_MAX_BYTES: usize = 512;
@@ -432,17 +444,27 @@ pub async fn purge_expired(conn: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
-/// Store a pending authorization. Refused with `Error::Invalid` while [`MAX_OPEN_REQUESTS`] are open.
+/// Store a pending authorization, evicting the oldest open ones past [`MAX_OPEN_REQUESTS_PER_CLIENT`]
+/// and [`MAX_OPEN_REQUESTS`].
 pub async fn create_request(conn: &mut PgConnection, r: &AuthorizeIn) -> Result<Uuid> {
     purge_expired(&mut *conn).await?;
-    let open: i64 = sqlx::query_scalar("select count(*) from oauth_request where decided_at is null")
-        .fetch_one(&mut *conn)
-        .await?;
-    if open >= MAX_OPEN_REQUESTS {
-        return Err(Error::Invalid(
-            "Too many authorization requests are open on this server; try again in a few minutes.".into(),
-        ));
-    }
+    // never refuse: the oldest open requests of this client, then of the whole server, make room, so a
+    // flood cannot lock a new connection out and one client cannot take the whole cap
+    sqlx::query(
+        "delete from oauth_request where id in (select id from oauth_request where client_id = $1 \
+         and decided_at is null order by created_at desc, id desc offset $2 - 1)",
+    )
+    .bind(&r.client_id)
+    .bind(MAX_OPEN_REQUESTS_PER_CLIENT)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "delete from oauth_request where id in (select id from oauth_request where decided_at is null \
+         order by created_at desc, id desc offset $1 - 1)",
+    )
+    .bind(MAX_OPEN_REQUESTS)
+    .execute(&mut *conn)
+    .await?;
     Ok(sqlx::query_scalar(
         "insert into oauth_request (client_id, redirect_uri, state, code_challenge, resource, scopes, expires_at) \
          values ($1, $2, $3, $4, $5, $6, now() + make_interval(secs => $7)) returning id",

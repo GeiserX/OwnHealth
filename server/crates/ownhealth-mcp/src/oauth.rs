@@ -228,10 +228,6 @@ async fn authorize(State(rt): State<Runtime>, Query(q): Query<Vec<(String, Strin
             .await;
             match stored {
                 Ok(id) => no_store(Redirect::to(&format!("{issuer}/oauth/consent?request={id}")).into_response()),
-                Err(Error::Invalid(m)) => error_json(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    &OAuthError::new("temporarily_unavailable", m),
-                ),
                 Err(e) => internal(e),
             }
         }
