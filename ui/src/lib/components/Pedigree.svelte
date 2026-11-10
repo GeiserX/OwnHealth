@@ -164,7 +164,13 @@
 		const slug = profile.slug;
 		const rows = fill;
 		act(async () => {
-			for (const r of rows) await addFamilyMember(slug, r);
+			try {
+				for (const r of rows) await addFamilyMember(slug, r);
+			} catch (e) {
+				// the rows added before the failure are saved: reload so a retry sends only the rest
+				load();
+				throw e;
+			}
 		});
 	}
 	function setKind(c: FamilyCondition, kind: string) {
