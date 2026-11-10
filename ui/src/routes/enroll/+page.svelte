@@ -71,7 +71,7 @@
 			{/if}
 			{#if s.password_allowed}
 				<form class="p2form" onsubmit={withPassword}>
-					<label>{t('i2_pw')}<input class="p2in" type="password" bind:value={pw} required minlength="12" autocomplete="new-password" /></label>
+					<label>{t('i2_pw_new')}<input class="p2in" type="password" bind:value={pw} required minlength="12" autocomplete="new-password" /></label>
 					<div class="note">{t('i2_pw_http')}</div>
 					<button class="btn pri" type="submit" disabled={busy}>{t('en_pw')}</button>
 				</form>

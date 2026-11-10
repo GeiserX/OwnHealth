@@ -7,6 +7,7 @@
 	import type { AuthState } from '#lib/api/types';
 	import { Loader, errText } from '#lib/components/pages1/util.svelte';
 	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
+	import { todayIso } from '#lib/logic/people';
 	import { createPasskey, usePasskey } from './webauthn';
 
 	let { ondone = () => location.reload() }: { ondone?: () => void } = $props();
@@ -21,6 +22,7 @@
 	let codes = $state<string[] | null>(null);
 	let f = $state({ household_name: '', display_name: '', birth_date: '', sex_at_birth: '', country: 'ES', password: '' });
 	let login = $state({ name: '', password: '', code: '' });
+	const today = todayIso();
 
 	async function run(fn: () => Promise<void>) {
 		busy = true;
@@ -100,16 +102,16 @@
 			<label>{t('i2_your_name')}<input class="p2in" bind:value={f.display_name} required maxlength="80" autocomplete="name" /></label>
 			<label>{t('i2_hh_name')}<input class="p2in" bind:value={f.household_name} maxlength="80" placeholder={t('i2_hh_ph')} /></label>
 			<div class="p2row">
-				<label style="flex:1">{t('i2_birth')}<input class="p2in" type="date" bind:value={f.birth_date} /></label>
+				<label style="flex:1">{t('i2_birth')}<input class="p2in" type="date" min="1900-01-01" max={today} bind:value={f.birth_date} /></label>
 				<label>{t('i2_sex')}
 					<select class="p2in" bind:value={f.sex_at_birth}>
 						<option value="">—</option><option value="female">{t('i2_sex_f')}</option><option value="male">{t('i2_sex_m')}</option><option value="unknown">{t('i2_sex_u')}</option>
 					</select>
 				</label>
-				<label>{t('i2_country')}<input class="p2in" bind:value={f.country} maxlength="2" style="width:56px" /></label>
+				<label>{t('i2_country')}<input class="p2in" bind:value={f.country} maxlength="2" pattern="[A-Za-z]{2}" title={t('i2_country_t')} style="width:56px" /></label>
 			</div>
 			{#if !s.passkeys_possible}
-				<label>{t('i2_pw')}<input class="p2in" type="password" bind:value={f.password} required minlength="12" autocomplete="new-password" /></label>
+				<label>{t('i2_pw_new')}<input class="p2in" type="password" bind:value={f.password} required minlength="12" autocomplete="new-password" /></label>
 				<div class="note">{t('i2_pw_http')}</div>
 			{/if}
 			{#if error}<div class="p2err" role="alert">{error}</div>{/if}

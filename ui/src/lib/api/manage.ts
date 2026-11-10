@@ -54,7 +54,7 @@ export const createToken = (body: {
 export const revokeToken = (id: Uuid) => del<{ id: Uuid; revoked: true }>(`/tokens/${id}`);
 export const getTokenUsage = (id: Uuid) => get<TokenUsage>(`/tokens/${id}/usage`);
 
-export const listAudit = (q: { profile?: string; limit?: number; before?: number } = {}) => get<{ items: AuditOut[] }>('/audit', q);
+export const listAudit = (q: { profile?: string; limit?: number; before?: number; via?: string } = {}) => get<{ items: AuditOut[] }>('/audit', q);
 
 export const getHousehold = () => get<Household>('/household');
 // People (backend api/family.py): a profile without a login, an invite for a new login, deleting a profile.

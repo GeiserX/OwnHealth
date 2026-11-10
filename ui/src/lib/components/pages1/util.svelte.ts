@@ -58,6 +58,16 @@ export function errText(e: unknown): string {
 	return e instanceof ApiError && !raw ? `HTTP ${e.status}` : stripErrorName(raw);
 }
 
+/** A scope in plain words ('Read lab results'), or the scope id when there are none. */
+export function scopeText(scope: string): string {
+	const k = 'fu_sc_' + scope.replace(':', '_');
+	const w = t(k);
+	return w === k ? scope : w;
+}
+
+/** A label that starts a line or an option: 'Hija o hijo' from 'hija o hijo'. */
+export const cap = (s: string): string => (s ? s[0].toLocaleUpperCase() + s.slice(1) : s);
+
 /** Decimal year of an ISO date, for time axes (same formula as the mockup's yfrac). */
 export function yfrac(d: string): number {
 	const [y, m, dd] = d.slice(0, 10).split('-').map(Number);

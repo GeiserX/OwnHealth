@@ -18,6 +18,9 @@ const PATTERNS: [RegExp, string][] = [
 	[/not a PDF, image/i, 'err_unsupported_file'],
 	[/^not a decimal|^the value is not a number/i, 'err_decimal'],
 	[/^the date is in the future/i, 'err_future_date'],
+	[/^the birth date is in the future/i, 'err_birth_future'],
+	[/^the birth date is before 1900/i, 'err_birth_old'],
+	[/^the country is two letters/i, 'err_country'],
 	[/^failed to fetch$|networkerror|load failed/i, 'err_no_connection'],
 	[/source is switched off/i, 'err_switched_off'],
 	[/demo never reads the inbox folder/i, 'err_demo_folder']

@@ -13,6 +13,8 @@
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
 	import { consentDefaults, consentProblem } from '#lib/logic/inbox';
+	import { byOrder, byScopeOrder } from '#lib/logic/people';
+	import { app } from '#lib/state/app.svelte';
 
 	const RISKY: Scope[] = ['read:genome_raw', 'read:sensitive'];
 	const req = new Loader<OAuthRequestOut>();
@@ -60,6 +62,14 @@
 		const k = 'fu_sc_' + scopeOf(s).replace(':', '_');
 		return t(k) !== k ? t(k) : scopeOf(s);
 	}
+	// Scopes in the token form's order (plain reads first, the risky ones last); profiles in household order.
+	const shownScopes = $derived(req.data ? byScopeOrder(req.data.scopes, scopeOf) : []);
+	const shownProfiles = $derived(req.data ? byOrder(req.data.profiles, (p) => p.id, (app.me?.profiles ?? []).map((p) => p.id)) : []);
+	// A fixed form clears its old error.
+	$effect(() => {
+		void [scopes.length, profiles.length, days];
+		error = null;
+	});
 	const redirectHost = $derived.by(() => {
 		try {
 			return req.data ? new URL(req.data.redirect_uri).host : '';
@@ -130,7 +140,7 @@
 		<div class="empty">{t('loading')}</div>
 	{:else}
 		{@const r = req.data}
-		<form class="card p2form" onsubmit={approve} aria-labelledby="oa-h" bind:this={formEl}>
+		<form class="card p2form" novalidate onsubmit={approve} aria-labelledby="oa-h" bind:this={formEl}>
 			<div class="who">
 				<!-- No client logo: it would be an outside request from this page, and its picture is untrusted. -->
 				<div class="logo" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="1.8"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg></div>
@@ -143,7 +153,7 @@
 
 			<fieldset class="fs">
 				<legend>{t('fu_oa_profiles')}</legend>
-				{#each r.profiles as p (p.id)}
+				{#each shownProfiles as p (p.id)}
 					<label class="ck"><input type="checkbox" value={p.id} bind:group={profiles} /> {p.display_name}</label>
 				{:else}
 					<span class="dim">{t('fu_oa_noprofiles')}</span>
@@ -152,7 +162,7 @@
 
 			<fieldset class="fs col">
 				<legend>{t('fu_oa_scopes')}</legend>
-				{#each r.scopes as s (scopeOf(s))}
+				{#each shownScopes as s (scopeOf(s))}
 					<label class="ck">
 						<input type="checkbox" value={scopeOf(s)} bind:group={scopes} />
 						<span>{words(s)} <span class="chip mono" class:r={RISKY.includes(scopeOf(s))} class:w={scopeOf(s) === 'write:propose'}>{scopeOf(s)}</span></span>
