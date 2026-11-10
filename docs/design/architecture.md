@@ -675,8 +675,8 @@ Wall clock, locale, time zone and the caller's identity are not inputs. The outp
 |---|---|---|
 | `recency` | value older than its window is `stale` | HbA1c 6 months, lipids 12 months |
 | `never_measured` | relevant analyte with no value | ferritin for a person on an iron supplement |
-| `lab_range` | outside the report's own range: `L`, `H`, critical when the lab or the pack says so | |
-| `rcv` | change between two values above the reference change value | analytical CV and within-subject CV from the EFLM database |
+| `lab_range` | outside the report's own range: `L`, `H`, critical only when the lab's report flags it (`HH`, `LL`), labelled as the lab's | |
+| `rcv` | change between two values above the reference change value | analytical CV and within-subject CV from cited primary biological-variation papers |
 | `trend` | monotonic over 3 or more points with slope over a threshold | |
 | `gene_drug` | active medication with a CPIC or DPWG actionable phenotype | SLCO1B1 decreased function + atorvastatin |
 | `gene_lab` | genotype paired with a lab | HFE with ferritin; LPA variants with Lp(a) |
