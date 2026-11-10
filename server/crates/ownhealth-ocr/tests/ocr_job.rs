@@ -670,3 +670,61 @@ async fn a_scan_moved_to_another_profile_is_read_again_for_it() -> anyhow::Resul
     assert_eq!(state(&mut c, doc).await?, "done");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_photo_moved_to_another_profile_is_read_again_for_it() -> anyhow::Result<()> {
+    let _turn = TURN.lock().await;
+    let e = setup().await?;
+    let mut c = e.conn().await?;
+    let lay = generate::layouts().remove(0);
+    let (pdf, truth) = generate::render(&lay, None);
+    let calls = reader_on(&pdf, 0.99);
+    let page = eval::render_pages(&pdf, 50.0).remove(0);
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80).encode_image(&page)?;
+    let person = truth["person"].as_str().unwrap_or("alex");
+    let doc = import_with_ocr(&e, &mut c, &jpeg, "image/jpeg", person).await?;
+    let o = eval::outcomes(&mut c, "photo", doc, &truth).await?;
+    assert_eq!(o.accepted + o.review, o.truth, "{o:?}");
+
+    let to = e.fam.profile(if person == "sam" { "alex" } else { "sam" });
+    ownhealth_ingest_pdf::assign_document(&mut c, doc, to, e.fam.user("alex"), None).await?;
+    let s = import_pdf_opts(
+        &mut c,
+        &e.blobs,
+        doc,
+        true,
+        ImportOptions {
+            threshold: DEFAULT_THRESHOLD,
+            ocr: true,
+        },
+    )
+    .await?;
+    assert_eq!(s.reasons.get("ocr_queued"), Some(&1), "{s:?}");
+    run_ocr_queue(&e).await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "the photo is read again");
+    use_reader(None);
+
+    let live: i64 = sqlx::query_scalar(
+        "select count(*) from observation where document_id = $1 and profile_id = $2 and status in ('current', 'provisional')",
+    )
+    .bind(doc)
+    .bind(to)
+    .fetch_one(&mut *c)
+    .await?;
+    let waiting: i64 = sqlx::query_scalar(
+        "select count(*) from review_item where document_id = $1 and profile_id = $2 and kind = 'candidate_row' \
+         and status = 'open'",
+    )
+    .bind(doc)
+    .bind(to)
+    .fetch_one(&mut *c)
+    .await?;
+    assert_eq!(
+        usize::try_from(live + waiting)?,
+        o.truth,
+        "every row is stored or waits for the new profile"
+    );
+    assert_eq!(state(&mut c, doc).await?, "done");
+    Ok(())
+}

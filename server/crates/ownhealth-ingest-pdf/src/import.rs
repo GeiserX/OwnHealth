@@ -239,6 +239,13 @@ async fn import_inner(
     let data = blobs.get_bytes(&hex::encode(&doc.blob_sha256))?;
     if doc.mime != "application/pdf" && ocr_in.is_none() {
         if opts.ocr {
+            if force {
+                // a moved or re-uploaded photo is read again: the OCR job skips a page it already read
+                sqlx::query("update document_page set word_layer = 'none' where document_id = $1")
+                    .bind(doc.id)
+                    .execute(&mut *conn)
+                    .await?;
+            }
             enqueue_ocr(&mut *conn, doc.id, &[1], "image").await?;
             summary.reasons.insert("ocr_queued".into(), 1);
             return Ok(summary);
