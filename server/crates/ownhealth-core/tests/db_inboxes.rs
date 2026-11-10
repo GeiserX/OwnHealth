@@ -553,3 +553,57 @@ async fn a_date_only_fact_finds_the_same_value_stored_just_after_local_midnight(
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_timed_fact_finds_the_same_value_stored_with_its_date_only() -> R {
+    let db = TestDb::new().await?;
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    let alex = f.profile("alex");
+    // a PDF that printed only "14/09/2026" came first
+    let mut date_only = obs(alex, "131");
+    date_only.effective_at = chrono::DateTime::parse_from_rfc3339("2026-09-14T00:00:00+00:00")?;
+    let committed = commit_observation(
+        &mut c,
+        &date_only,
+        &SrcRef::New(manual_src()),
+        CommitOptions::new("person"),
+    )
+    .await?;
+    // the same draw printed with its local time, 00:30 in Madrid, which is 13 September in UTC
+    let mut timed = obs(alex, "131");
+    timed.effective_at = chrono::DateTime::parse_from_rfc3339("2026-09-14T00:30:00+02:00")?;
+    assert_eq!(
+        match_observation(&mut c, &timed, None, true).await?,
+        ObservationMatch::Review {
+            observation_id: committed.id,
+            reason: "collection_time_unknown".into()
+        }
+    );
+    // a timed value on another local day is another draw
+    timed.effective_at = chrono::DateTime::parse_from_rfc3339("2026-09-15T08:30:00+02:00")?;
+    assert_eq!(
+        match_observation(&mut c, &timed, None, true).await?,
+        ObservationMatch::New
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_date_only_facts_a_day_apart_are_two_draws() -> R {
+    let db = TestDb::new().await?;
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    let alex = f.profile("alex");
+    // daily monitoring printed with dates only: 4.1 on 14 September, 4.1 again on 15 September
+    let mut first = obs(alex, "131");
+    first.effective_at = chrono::DateTime::parse_from_rfc3339("2026-09-14T00:00:00+00:00")?;
+    commit_observation(&mut c, &first, &SrcRef::New(manual_src()), CommitOptions::new("person")).await?;
+    let mut next = obs(alex, "131");
+    next.effective_at = chrono::DateTime::parse_from_rfc3339("2026-09-15T00:00:00+00:00")?;
+    assert_eq!(
+        match_observation(&mut c, &next, None, false).await?,
+        ObservationMatch::New
+    );
+    Ok(())
+}

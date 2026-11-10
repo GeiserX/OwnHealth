@@ -12,7 +12,8 @@
 //! 3. **Observation match**: same profile, analyte group, canonical value, comparator, method and
 //!    collection time, and not two different labs: one observation with one more provenance link
 //!    ([`match_observation`], [`link_observation`]). A missing collection time or a different
-//!    comparator is sent to review, never merged. A fact with no time looks one UTC day either side.
+//!    comparator is sent to review, never merged. A fact with no time and a timed one are compared one
+//!    UTC day either side, in both orders; two facts with no time only on the same date.
 
 use std::collections::HashMap;
 
@@ -385,17 +386,20 @@ pub async fn match_observation(
          o.method, o.effective_at, d.provider_name \
          from observation o left join document d on d.id = o.document_id \
          where o.profile_id = $1 and o.alias_group = $2 and o.status in ('current', 'provisional') \
-           and abs((o.effective_at at time zone 'UTC')::date - ($3 at time zone 'UTC')::date) <= $4 \
+           and abs((o.effective_at at time zone 'UTC')::date - ($3 at time zone 'UTC')::date) <= 1 \
          order by o.recorded_at",
     )
     .bind(obs.profile_id)
     .bind(&obs.alias_group)
     .bind(obs.effective_at)
-    // a date with no time is midnight UTC of the printed date, while the same draw entered elsewhere
-    // with its local time can fall on the UTC day before or after: look one day either side
-    .bind(if time_known { 0i32 } else { 1i32 })
     .fetch_all(conn)
     .await?;
+    // A date with no time is stored as midnight UTC of the printed date, while the same draw entered
+    // elsewhere with its local time can fall on the UTC day before or after. So a date-only fact and a
+    // timed one are compared one UTC day either side, in both orders; two date-only facts, or two timed
+    // ones, only on their own date or instant.
+    let date_only = |at: DateTime<Utc>| at.time() == chrono::NaiveTime::MIN;
+    let mine = obs.effective_at.with_timezone(&Utc);
     for r in &rows {
         let their_lab: Option<String> = r.try_get("provider_name")?;
         if let (Some(a), Some(b)) = (lab, their_lab.as_deref())
@@ -431,14 +435,23 @@ pub async fn match_observation(
             continue;
         }
         let at: DateTime<Utc> = r.try_get("effective_at")?;
-        if !time_known {
+        if time_known && at == mine {
+            return Ok(ObservationMatch::Same { observation_id: id });
+        }
+        let maybe_same_draw = match (time_known, date_only(at)) {
+            // date-only against date-only: the same printed date
+            (false, true) => at.date_naive() == mine.date_naive(),
+            // date-only against a stored time: one UTC day either side (the query's window)
+            (false, false) => true,
+            // a time against a stored date-only fact: the printed date is the local date of the time
+            (true, true) => at.date_naive() == obs.effective_at.date_naive(),
+            (true, false) => false,
+        };
+        if maybe_same_draw {
             return Ok(ObservationMatch::Review {
                 observation_id: id,
                 reason: "collection_time_unknown".into(),
             });
-        }
-        if at == obs.effective_at.with_timezone(&Utc) {
-            return Ok(ObservationMatch::Same { observation_id: id });
         }
     }
     Ok(ObservationMatch::New)
