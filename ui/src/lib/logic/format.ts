@@ -21,3 +21,17 @@ export function sourceLabel(label: string | null | undefined, manualWord: string
 	const [first, ...rest] = label.split(' · ');
 	return MANUAL.has(first.trim().toLowerCase()) ? [manualWord, ...rest].join(' · ') : label;
 }
+
+/** A reference range from its numbers: '0,4–4', '< 3,36', '> 30', '—'. For a unit the lab did not print. */
+export function refRange(low: number | null, high: number | null, fmt: (v: number) => string): string {
+	if (low != null && high != null) return `${fmt(low)}–${fmt(high)}`;
+	if (high != null) return `< ${fmt(high)}`;
+	if (low != null) return `> ${fmt(low)}`;
+	return '—';
+}
+
+/** A typed number with a point or a comma for decimals, as the server wants it ('5,6' → '5.6'), or null. */
+export function decimalText(s: string): string | null {
+	const v = s.trim().replace('−', '-');
+	return /^-?(\d+([.,]\d+)?|[.,]\d+)$/.test(v) ? v.replace(',', '.') : null;
+}

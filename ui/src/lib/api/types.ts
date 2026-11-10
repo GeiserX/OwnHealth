@@ -574,7 +574,19 @@ export interface DrugCheckView {
 	}[];
 	phenoconversion: { gene: string; by: string; inhibitor_strength: string; computed: boolean; functional_phenotype: string | null; rule: string | null; src: string; text: string }[];
 	current_medications_relevant: { name: string; since: IsoDate | null; relation: string; relation_text: string; src: string }[];
-	relevant_labs: { name: string; alias_group: string; value: string | null; unit: string | null; date: IsoDate | null; status: Status; stale: boolean; reason: string; src: string | null }[];
+	relevant_labs: {
+		name: string;
+		alias_group: string;
+		value: string | null;
+		unit: string | null;
+		date: IsoDate | null;
+		status: Status;
+		stale: boolean;
+		reason: string;
+		src: string | null;
+		lab?: string | null; // sent by newer servers; the chip shows what is there
+		page?: number | null;
+	}[];
 	guidance: { source: string; level: string | null; strength: string; applies_to: string; population: string | null; quote: string; url: string }[];
 	not_assessed: string[];
 	limitations: string[];

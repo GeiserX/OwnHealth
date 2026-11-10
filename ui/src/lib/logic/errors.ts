@@ -15,7 +15,8 @@ const PATTERNS: [RegExp, string][] = [
 	[/already on the list/i, 'err_sender_dup'],
 	[/already reads this folder/i, 'err_folder_overlap'],
 	[/not a PDF, image/i, 'err_unsupported_file'],
-	[/^not a decimal/i, 'err_decimal'],
+	[/^not a decimal|^the value is not a number/i, 'err_decimal'],
+	[/^the date is in the future/i, 'err_future_date'],
 	[/^failed to fetch$|networkerror|load failed/i, 'err_no_connection'],
 	[/source is switched off/i, 'err_switched_off'],
 	[/demo never reads the inbox folder/i, 'err_demo_folder']

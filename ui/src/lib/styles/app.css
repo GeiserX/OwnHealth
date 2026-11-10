@@ -258,6 +258,7 @@ pre.code{background:#0b0d11;border:1px solid var(--line);border-radius:8px;paddi
 /* Tablet: every screen grid becomes one column; the card grids fill the width; the top bar never overlaps. */
 @media (max-width:1100px){
 .dash,.bm,.tl,.fam,.mcp,.drug{grid-template-columns:minmax(0,1fr)}
+.bm>*,.drug>*,.drug>*>*{min-width:0}
 .sys,.wg{grid-template-columns:repeat(2,minmax(0,1fr))}
 .tiles,.devs,.mem{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
 .img{grid-template-columns:minmax(0,1fr);height:auto!important}
@@ -292,7 +293,7 @@ nav.menu a{white-space:nowrap}
 .tiles,.mem{grid-template-columns:repeat(2,minmax(0,1fr))}
 .ev{grid-template-columns:44px 24px minmax(0,1fr)}
 .ev .body{flex-wrap:wrap;min-width:0}
-.ev .body .rt{margin-left:0}
+.ev .body .rt{margin-left:0;flex-wrap:wrap;min-width:0}
 .yr{margin-left:56px}
 .disc{flex-wrap:wrap}
 .banner svg{flex:none}

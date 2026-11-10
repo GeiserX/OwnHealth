@@ -7,7 +7,9 @@
 	import type { DocumentSummary, JobInfo } from '#lib/api/types';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
-	import { Loader, tf } from '#lib/components/pages1/util.svelte';
+	import { errText, Loader, tf } from '#lib/components/pages1/util.svelte';
+	import { ApiError } from '#lib/api/core';
+	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { t } from '#lib/i18n/index.svelte';
 	import { currentProfile } from '#lib/state/app.svelte';
@@ -57,6 +59,10 @@
 		seenTypes = [];
 		type = '';
 	});
+	// A viewer reads; uploading and retracting are for the roles that write.
+	const canWrite = $derived(!!prof && prof.role !== 'viewer');
+	// Not shared with you: nothing on this screen can work, so only the lock shows.
+	const denied = $derived(docs.error instanceof ApiError && docs.error.status === 403);
 	const canText = $derived(prof?.scopes.includes('read:documents_text') ?? false);
 	const rows = $derived(docs.data ?? []);
 	const byYear = $derived.by(() => {
@@ -80,7 +86,7 @@
 			reason = '';
 			load();
 		} catch (e) {
-			actionError = e instanceof Error ? e.message : String(e);
+			actionError = errText(e);
 		} finally {
 			retractBusy = false;
 		}
@@ -93,8 +99,12 @@
 		<h1>{t('i2_docs')}</h1>
 		<div class="sub">{prof?.display_name ?? ''} · {t('i2_docs_sub')}</div>
 	</div>
-	<div class="right"><PhaseChip phase="v0.1" /><a class="btn pri" href="/import-review">{t('i2_upload')}</a></div>
+	<div class="right"><PhaseChip phase="v0.1" />{#if canWrite && !denied}<a class="btn pri" href="/import-review">{t('i2_upload')}</a>{/if}</div>
 </div>
+
+{#if denied}
+	<div class="card"><NotReady error={docs.error} /></div>
+{:else}
 
 <form
 	class="search big"
@@ -115,12 +125,10 @@
 	{#if !canText}<span class="dim" style="font-size:11.5px;margin-left:8px">{t('i2_docs_notext')}</span>{/if}
 </div>
 
-{#if actionError}<div class="p2err" role="alert" style="margin-bottom:8px">{actionError}</div>{/if}
-
 {#if docs.error}
-	<NotReady error={docs.error} onretry={load} />
+	<div class="card"><NotReady error={docs.error} onretry={load} /></div>
 {:else if docs.loading && !docs.data}
-	<div class="empty">{t('loading')}</div>
+	<div class="card"><div class="empty">{t('loading')}</div></div>
 {:else if !rows.length}
 	<div class="card"><div class="empty">{applied ? tf('i2_docs_nohit', { q: applied }) : t('i2_docs_none')}</div></div>
 {:else}
@@ -151,18 +159,19 @@
 								{#each flagWords(d.flags) as fw (fw)} <span class="pill p-out" title="trust: untrusted_text"><i aria-hidden="true"></i>{t('i2_flag_' + fw)}</span>{/each}
 							</td>
 							<td style="text-align:right;white-space:nowrap">
-								{#if d.status !== 'retracted'}<button class="btn sm no" onclick={() => { retracting = retracting === d.id ? null : d.id; reason = ''; }} aria-expanded={retracting === d.id}>{t('i2_retract')}</button>{/if}
+								{#if canWrite && d.status !== 'retracted'}<button class="btn sm no" onclick={() => { retracting = retracting === d.id ? null : d.id; reason = ''; actionError = null; }} aria-expanded={retracting === d.id}>{t('i2_retract')}</button>{/if}
 							</td>
 						</tr>
 						{#if retracting === d.id}
 							<tr>
 								<td colspan="7">
-									<form class="p2row" onsubmit={(e) => { e.preventDefault(); retract(d.id); }}>
+									<form class="p2row" onsubmit={(e) => { e.preventDefault(); retract(d.id); }} use:focusOnOpen={{ oncancel: () => (retracting = null) }}>
 										<span class="muted" style="font-size:12px">{t('i2_retract_d')}</span>
-										<input class="p2in" style="flex:1" bind:value={reason} required placeholder={t('i2_reject_reason')} aria-label={t('i2_reject_reason')} />
-										<button class="btn sm no" type="submit" disabled={retractBusy}>{t('i2_retract')}</button>
+										<input class="p2in" style="flex:1;min-width:140px" bind:value={reason} required placeholder={t('i2_reject_reason')} aria-label={t('i2_reject_reason')} />
 										<button class="btn sm" type="button" onclick={() => (retracting = null)}>{t('i2_cancel')}</button>
+										<button class="btn sm no" type="submit" disabled={retractBusy}>{t('i2_retract')}</button>
 									</form>
+									{#if actionError}<div class="p2err" role="alert">{actionError}</div>{/if}
 								</td>
 							</tr>
 						{/if}
@@ -172,6 +181,7 @@
 		</table>
 		</div>
 	</div>
+{/if}
 {/if}
 
 <style>
