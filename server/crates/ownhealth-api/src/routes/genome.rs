@@ -290,6 +290,15 @@ pub async fn variant(rt: &Runtime, principal: &Principal, p: &str, params: &Vari
             m
         }
     };
+    // one code per limitation sentence, so the UI says it in the reader's language
+    let codes: Vec<&str> = out
+        .get("limitations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|l| ownhealth_genome::lookup::limitation_code(l.as_str().unwrap_or_default()))
+        .collect();
+    out.insert("limitation_codes".into(), json!(codes));
     out.insert("notice".into(), json!(NOTICE));
     Ok((StatusCode::OK, Value::Object(out)))
 }
