@@ -8,8 +8,10 @@
 //! lifecycle, so they are deleted and the rollups they fed rebuilt. The document's import flags are
 //! cleared, so importing it again runs the import instead of returning the old summary.
 //!
-//! Samples another still-active export also holds belong to whichever export brought them first;
-//! they leave with that one.
+//! Samples another still-active export also holds belong to whichever export brought them first
+//! (Apple Health) or last (Gadgetbridge, whose exports are cumulative); they leave with that one. A
+//! retracted Gadgetbridge export queues the profile's other active exports for import again, so what
+//! they hold comes back.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -91,6 +93,9 @@ pub fn retract_document_facts<'c>(
             .bind(document_id)
             .execute(&mut *conn)
             .await?;
+        if !gone.is_empty() {
+            reimport_cumulative(&mut *conn, document_id).await?;
+        }
         Ok(json!({
             "observations": observations,
             "records": records,
@@ -98,4 +103,33 @@ pub fn retract_document_facts<'c>(
             "documents": children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
         }))
     })
+}
+
+/// The Gadgetbridge exports of the same profile that are still active are imported again, so the
+/// samples the retracted export had adopted from them (`Conflict::Adopt`) come back with them.
+async fn reimport_cumulative(conn: &mut PgConnection, document_id: Uuid) -> Result<()> {
+    let Some(job) = ownhealth_core::documents::job_kind("gadgetbridge_db") else {
+        return Ok(());
+    };
+    let mime = ownhealth_core::documents::mime("gadgetbridge_db").unwrap_or_default();
+    let others: Vec<Uuid> = sqlx::query_scalar(
+        "update document o set flags = o.flags - 'import' from document d where d.id = $1 and d.mime = $2 \
+         and o.mime = $2 and o.profile_id = d.profile_id and o.id <> d.id and o.status = 'active' \
+         and o.flags ? 'import' returning o.id",
+    )
+    .bind(document_id)
+    .bind(mime)
+    .fetch_all(&mut *conn)
+    .await?;
+    for id in others {
+        let key = format!("{job}:reimport:{id}");
+        ownhealth_core::jobs::enqueue(
+            &mut *conn,
+            job,
+            &json!({"document_id": id.to_string()}),
+            ownhealth_core::jobs::EnqueueOptions::dedupe(&key),
+        )
+        .await?;
+    }
+    Ok(())
 }

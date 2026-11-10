@@ -1,0 +1,16 @@
+# The v0.2 password-PDF spike (SPIKES-v0.2.md c): lopdf locks a synthetic slip with AES-256 (V5/R6),
+# pdfium-render opens it with the password, reads the text and saves an unlocked copy.
+[package]
+name = "ownhealth-spike-pdfpass"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+lopdf = { version = "=0.47.0", default-features = false }
+pdfium-render = { version = "0.9.5", default-features = false, features = ["thread_safe", "pdfium_8125"] }
+rand = "0.9"

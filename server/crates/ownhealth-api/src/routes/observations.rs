@@ -469,6 +469,15 @@ fn py_float(x: f64) -> String {
     }
 }
 
+/// The chemical formula of a molar-table species ('cholesterol C27H46O' -> 'C27H46O'), which reads
+/// the same in every language; the whole species when it has none.
+fn formula(species: &str) -> &str {
+    match species.rsplit_once(' ') {
+        Some((_, f)) if f.starts_with(|c: char| c.is_ascii_uppercase()) && f.chars().any(|c| c.is_ascii_digit()) => f,
+        _ => species,
+    }
+}
+
 /// Python's `round(x, 1)` for a float.
 fn round1(x: f64) -> f64 {
     format!("{x:.1}").parse().unwrap_or(x)
@@ -510,6 +519,8 @@ async fn trend(
         .await?
         .into_iter()
         .filter(|r| cats.contains(&r.category.as_str()))
+        // a value dated after today is not drawn, as get_trend leaves out what is after as_of
+        .filter(|r| day_of(r) <= today)
         .collect();
     rows.sort_by_key(|r| (r.effective_at, r.id.to_string()));
     let printed_ucums: BTreeSet<Option<String>> = rows
@@ -557,7 +568,9 @@ async fn trend(
             continue;
         };
         let day = day_of(r);
-        if let std::collections::hash_map::Entry::Vacant(slot) = statuses.entry(day) {
+        // a first value with no printed range and no lab flag has nothing to be compared with
+        let unassessed = points.is_empty() && r.ref_low.is_none() && r.ref_high.is_none() && r.interpretation.is_none();
+        if !unassessed && let std::collections::hash_map::Entry::Vacant(slot) = statuses.entry(day) {
             slot.insert(status(&mut tx, profile_id, &group, day).await?);
         }
         let printed: Vec<&str> = [Some(r.printed_value.as_str()), r.printed_unit.as_deref()]
@@ -579,7 +592,7 @@ async fn trend(
             "lab": r.document_id.and_then(|d| labs.get(&d).cloned()).unwrap_or(Value::Null),
             "src": r.src_id,
             "src_label": src.get(&r.src_id).cloned().unwrap_or(Value::Null),
-            "status": statuses.get(&day).cloned().unwrap_or(Value::Null),
+            "status": if unassessed { Value::Null } else { statuses.get(&day).cloned().unwrap_or(Value::Null) },
         });
         if let Value::Object(m) = point {
             points.push(m);
@@ -592,6 +605,7 @@ async fn trend(
         .into_iter()
         .collect();
     let es = lang == "es";
+    let pack = ownhealth_rules::load_pack().ok();
     let mut limitations: Vec<String> = Vec::new();
     let methods: BTreeSet<&str> = rows.iter().filter_map(|r| non_empty(r.method.as_deref())).collect();
     if codes.len() > 1 || methods.len() > 1 {
@@ -605,14 +619,24 @@ async fn trend(
                 && n > 0
             {
                 limitations.push(if es {
+                    // the LOINC long name is English: the analyte's Spanish name, its method and the code
+                    let name = pack
+                        .as_ref()
+                        .map_or_else(|| lc.alias_group.clone(), |p| p.name(&lc.alias_group, "es"));
+                    let method = match lc.method.as_str() {
+                        "" => String::new(),
+                        "calculated" => ", calculado".into(),
+                        "direct" => ", medida directa".into(),
+                        "fasting" => ", en ayunas".into(),
+                        m => format!(", {m}"),
+                    };
                     format!(
-                        "{} {} ({c}).",
+                        "{} {name}{method} (LOINC {bare}).",
                         if n == 1 {
                             "1 punto es".to_string()
                         } else {
                             format!("{n} puntos son")
                         },
-                        lc.long_name
                     )
                 } else {
                     format!(
@@ -645,7 +669,11 @@ async fn trend(
         let mass = m.map(|m| py_float(m.g_per_mol_text.parse::<f64>().unwrap_or(f64::NAN)));
         if es {
             let how = match (m, &mass) {
-                (Some(m), Some(g)) => format!(" con la masa molar de {} ({g} g/mol)", m.species),
+                (Some(m), Some(g)) => format!(
+                    " con la masa molar de {} ({} g/mol)",
+                    formula(&m.species),
+                    ownhealth_rules::num::localized(g, "es")
+                ),
                 _ => String::new(),
             };
             limitations.push(format!(

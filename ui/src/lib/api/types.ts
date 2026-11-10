@@ -103,7 +103,9 @@ export interface ReviewItem {
 		| 'genome_reinterpretation'
 		| 'job_failed'
 		| 'pending_document'
-		| 'restore_check_failed';
+		| 'restore_check_failed'
+		| 'near_duplicate'
+		| 'encrypted_document';
 	profile_id: Uuid | null;
 	status: 'open' | 'accepted' | 'rejected' | 'dismissed';
 	reasons: string[];
@@ -115,6 +117,8 @@ export interface ReviewItem {
 	row_conf: number | null;
 	proposed_by_token: Uuid | null;
 	context_src_ids: string[] | null;
+	/** v0.2: documents the proposing token read in the hour before (when the server sends them). */
+	context_documents?: Uuid[] | null;
 	decided_by: Uuid | null;
 	decided_at: IsoDateTime | null;
 	decision_reason: string | null;
@@ -549,7 +553,10 @@ export interface GenomeView {
 	consent: { ui: boolean; agents: boolean; can_change: boolean };
 	is_minor: boolean;
 	limitations: string[];
+	/** The same limitations as codes, in the same order, so the page can say them in its language. */
+	limitation_codes?: { code: string; assay: string | null }[];
 	notice: string;
+	notice_code?: string;
 }
 
 export interface DrugCheckView {
@@ -567,7 +574,17 @@ export interface DrugCheckView {
 	}[];
 	phenoconversion: { gene: string; by: string; inhibitor_strength: string; computed: boolean; functional_phenotype: string | null; rule: string | null; src: string; text: string }[];
 	current_medications_relevant: { name: string; since: IsoDate | null; relation: string; relation_text: string; src: string }[];
-	relevant_labs: { name: string; alias_group: string; value: string | null; unit: string | null; date: IsoDate | null; status: Status; stale: boolean; reason: string; src: string | null }[];
+	relevant_labs: {
+		name: string;
+		alias_group: string;
+		value: string | null;
+		unit: string | null;
+		date: IsoDate | null;
+		status: Status;
+		stale: boolean;
+		reason: string;
+		src: string | null;
+	}[];
 	guidance: { source: string; level: string | null; strength: string; applies_to: string; population: string | null; quote: string; url: string }[];
 	not_assessed: string[];
 	limitations: string[];

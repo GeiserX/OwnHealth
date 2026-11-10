@@ -155,6 +155,32 @@ async fn wearables_summary_and_series() -> R {
     Ok(())
 }
 
+/// A source with no samples left (its export retracted) is not a device the person still has data from.
+#[tokio::test]
+async fn a_source_with_no_samples_is_not_listed() -> R {
+    let a = app().await?;
+    import_lucia(&a).await?;
+    // a source with no samples left (its export retracted) is not listed
+    sqlx::query("insert into wearable_source (profile_id, provider, device) values ($1, 'gadgetbridge', 'Band')")
+        .bind(a.family.profile("lucia"))
+        .execute(&a.rt.pool)
+        .await?;
+    let (s, again) = get(
+        &a,
+        "sam",
+        "/profiles/lucia/wearables/summary?as_of=2026-11-07&days=30&lang=en",
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{again}");
+    assert_eq!(
+        again["devices"].as_array().map(Vec::len),
+        Some(2),
+        "{}",
+        again["devices"]
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_wearables_window_too_large_for_the_calendar_is_capped() -> R {
     let a = app().await?;

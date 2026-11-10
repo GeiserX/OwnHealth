@@ -4,7 +4,7 @@
 	import '#lib/components/pages2/pages2.css';
 	import { page } from '$app/state';
 	import { enrollBegin, enrollFinish, enrollPassword, getInvite, type InviteInfo } from '#lib/api';
-	import { Loader, tf } from '#lib/components/pages1/util.svelte';
+	import { Loader, errText, tf } from '#lib/components/pages1/util.svelte';
 	import { createPasskey } from '#lib/components/pages2/webauthn';
 	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
 
@@ -25,7 +25,7 @@
 		try {
 			codes = (await fn()).recovery_codes;
 		} catch (e) {
-			error = e instanceof Error && e.message !== 'cancelled' ? e.message : t('i2_cancelled');
+			error = e instanceof Error && e.message !== 'cancelled' ? errText(e) : t('i2_cancelled');
 		} finally {
 			busy = false;
 		}
@@ -41,11 +41,11 @@
 <div class="login">
 	<div class="brand" style="justify-content:center">
 		<div class="logo"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6" /></svg></div>
-		<div>OwnHealth<small>{t('selfhosted')} · v0.1</small></div>
+		<div>OwnHealth<small>{t('selfhosted')} · v{__APP_VERSION__}</small></div>
 	</div>
-	<div class="seg" role="group" aria-label="Language" style="align-self:center">
-		<button class:on={i18n.lang === 'es'} onclick={() => setLang('es')}>ES</button>
-		<button class:on={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
+	<div class="seg" role="group" aria-label={t('lang_label')} style="align-self:center">
+		<button class:on={i18n.lang === 'es'} aria-pressed={i18n.lang === 'es'} onclick={() => setLang('es')}>ES</button>
+		<button class:on={i18n.lang === 'en'} aria-pressed={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
 	</div>
 
 	{#if !code}
@@ -56,7 +56,7 @@
 		<div class="empty">{t('loading')}</div>
 	{:else if codes}
 		<section class="card p2form" aria-labelledby="rc-h">
-			<h3 id="rc-h">{t('i2_rc_t')}</h3>
+			<h1 id="rc-h">{t('i2_rc_t')}</h1>
 			<div class="muted">{t('i2_rc_setup')}</div>
 			<div class="p2secret" style="columns:2" data-testid="recovery-codes">{#each codes as c (c)}<div>{c}</div>{/each}</div>
 			<div class="note" style="color:var(--watch)">{t('i2_rc_once')}</div>
@@ -64,14 +64,14 @@
 		</section>
 	{:else}
 		<section class="card p2form" aria-labelledby="en-h">
-			<h3 id="en-h">{tf('en_t', { name: s.display_name })}</h3>
+			<h1 id="en-h">{tf('en_t', { name: s.display_name })}</h1>
 			<div class="muted">{tf('en_d', { hh: s.household })}{s.claims_profile ? ' ' + t('en_claims') : ''}</div>
 			{#if s.passkeys_possible}
 				<button class="btn pri" onclick={withPasskey} disabled={busy}>{t('en_pk')}</button>
 			{/if}
 			{#if s.password_allowed}
 				<form class="p2form" onsubmit={withPassword}>
-					<label>{t('i2_pw')}<input class="p2in" type="password" bind:value={pw} required minlength="12" autocomplete="new-password" /></label>
+					<label>{t('i2_pw_new')}<input class="p2in" type="password" bind:value={pw} required minlength="12" autocomplete="new-password" /></label>
 					<div class="note">{t('i2_pw_http')}</div>
 					<button class="btn pri" type="submit" disabled={busy}>{t('en_pw')}</button>
 				</form>
@@ -93,6 +93,12 @@
 	}
 	.login .card {
 		padding: 16px 18px;
+	}
+	/* Each state of the card is the page itself, so its title is the page's h1, at the card-title size. */
+	.login h1 {
+		margin: 0;
+		font-size: 15px;
+		font-weight: 620;
 	}
 	.login .btn {
 		justify-content: center;

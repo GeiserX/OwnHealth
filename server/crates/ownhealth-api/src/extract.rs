@@ -70,3 +70,43 @@ impl FromRequestParts<Runtime> for SessionCaller {
         Ok(SessionCaller(p))
     }
 }
+
+/// v0.2: a push inbox (Paperless webhook, iOS Shortcut, Health Auto Export) authenticated by its
+/// source token, `Authorization: Bearer oh_ing_...` or `X-OwnHealth-Secret: oh_ing_...` (Paperless
+/// workflows can set a header but not a bearer). 401 without a token, or for an unknown or disabled
+/// source. The route checks `source.kind` itself.
+#[derive(Debug, Clone)]
+pub struct SourceCaller(pub ownhealth_core::sources::Source);
+
+impl FromRequestParts<Runtime> for SourceCaller {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, rt: &Runtime) -> Result<Self, Self::Rejection> {
+        let header = |name: &str| parts.headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+        // a phone app or a webhook cannot log in: say which token and which header this route reads
+        let how = if parts.uri.path().ends_with("/paperless") {
+            "the X-OwnHealth-Secret header"
+        } else {
+            "the Authorization: Bearer header"
+        };
+        let refused = |why: &str| {
+            ApiError::new(
+                axum::http::StatusCode::UNAUTHORIZED,
+                "bad_push_token",
+                format!("{why} It goes in {how}."),
+            )
+        };
+        let invalid = "This push token is not valid for any source. Make a new one on the Inbox page.";
+        let token = header("authorization")
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .or_else(|| header("x-ownhealth-secret"))
+            .filter(|t| t.starts_with(ownhealth_core::sources::TOKEN_PREFIX))
+            .ok_or_else(|| refused(invalid))?;
+        let mut conn = rt.pool.acquire().await?;
+        match ownhealth_core::sources::source_for_token(&mut conn, token).await? {
+            Some(s) if s.enabled => Ok(SourceCaller(s)),
+            Some(_) => Err(refused("This source is switched off. Turn it on on the Inbox page.")),
+            None => Err(refused(invalid)),
+        }
+    }
+}

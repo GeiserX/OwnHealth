@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};
 
-use super::{Answer, Call, ToolResult, ToolSpec};
+use ownhealth_core::Error;
+
+use super::{Answer, Call, Fail, ToolError, ToolResult, ToolSpec};
 use crate::envelope::{dumps, wrap_plain};
 
 const NOTICE: &str = "Information from your records, not medical advice. Discuss with your prescriber.";
@@ -78,7 +80,17 @@ pub async fn check_drug(call: &mut Call<'_>) -> ToolResult<Answer> {
     let raw = call
         .svc
         .check_drug(&mut *call.conn, pid, &drug, &scopes, &call.lang, call.as_of.day)
-        .await?;
+        .await
+        .map_err(|e| match e {
+            // a name outside the drug table never resolves on a retry, so say what to change
+            Error::NotFound(_) => ToolError::fix(
+                "drug_unknown",
+                format!("'{drug}' is not in the drug table."),
+                "Use the generic name (for example atorvastatin) or its RxNorm id (RxNorm:83367).",
+            )
+            .into(),
+            other => Fail::from(other),
+        })?;
     let mut raw = match raw {
         Value::Object(m) => m,
         _ => Map::new(),

@@ -1,6 +1,7 @@
 import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig, loadEnv } from 'vite';
+import pkg from './package.json' with { type: 'json' };
 
 // The built UI lands in server/static: the release binary embeds it (rust-embed), and a debug
 // server reads it from there.
@@ -9,6 +10,8 @@ const out = '../server/static';
 const backend = loadEnv('', '.', 'OWNHEALTH_').OWNHEALTH_BACKEND ?? 'http://127.0.0.1:8080';
 
 export default defineConfig({
+	// The version the UI shows (sidebar, login, invite) is the package's, so it never drifts from the release.
+	define: { __APP_VERSION__: JSON.stringify(pkg.version) },
 	plugins: [sveltekit({ adapter: adapter({ pages: out, assets: out, fallback: 'index.html', strict: true }) })],
 	server: { proxy: { '/api': backend, '/mcp': backend, '/healthz': backend } }
 });

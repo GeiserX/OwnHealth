@@ -60,6 +60,8 @@ static ISO_DATE: LazyLock<Regex> =
 #[allow(clippy::unwrap_used)]
 static DIGIT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d$").unwrap());
 #[allow(clippy::unwrap_used)]
+static BBOX_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^-?[\d.]+ -?[\d.]+ -?[\d.]+ -?[\d.]+\t").unwrap());
+#[allow(clippy::unwrap_used)]
 static SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
 fn strictness(mode: &str) -> Option<usize> {
@@ -205,6 +207,27 @@ pub fn scrub(text: &str, names: &[String]) -> String {
     text
 }
 
+/// Scrub a page word layer (`x0 top x1 bottom<TAB>text` per line, from `get_document_page`) one
+/// line's text at a time, so a phone run can never span a newline, a tab or a bbox. Any other text
+/// is scrubbed whole.
+fn scrub_untrusted(text: &str, names: &[String]) -> String {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    if lines.is_empty() || !lines.iter().all(|l| BBOX_LINE.is_match(l)) {
+        return scrub(text, names);
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in lines {
+        let prefix = BBOX_LINE.find(line).map_or(0, |m| m.end());
+        let (body, nl) = line[prefix..]
+            .strip_suffix('\n')
+            .map_or((&line[prefix..], ""), |b| (b, "\n"));
+        out.push_str(&line[..prefix]);
+        out.push_str(&scrub(body, names));
+        out.push_str(nl);
+    }
+    out
+}
+
 /// Full names and each part of 3+ letters, longest first, so 'Alex Rivera' goes before 'Alex'.
 pub fn name_dictionary(full_names: &[String]) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
@@ -259,7 +282,7 @@ fn go(node: &Value, key: Option<&str>, mode: &str, as_of: NaiveDate, names: &[St
         }
         let mut m = node.as_object().cloned().unwrap_or_default();
         if let Some(Value::String(t)) = m.get("text") {
-            let s = scrub(t, names);
+            let s = scrub_untrusted(t, names);
             m.insert("text".into(), Value::String(s));
         }
         return Value::Object(m);
@@ -318,6 +341,18 @@ mod tests {
         assert_eq!(stricter("weird", None), "pseudonymous");
         assert_eq!(age_band(Some(8)).as_deref(), Some("0-17"));
         assert_eq!(age_band(Some(47)).as_deref(), Some("40-49"));
+    }
+
+    #[test]
+    fn page_word_lines_keep_their_boxes_and_values() {
+        let text = "56 100 330 110\tHemoglobina 14,8 g/dL 13,5 - 17,5\n56 120 90 130\tLlame al +34 600 123 456\n";
+        let wrapped = serde_json::json!({"trust": "untrusted_text", "origin": "pdf_text_layer", "text": text});
+        let day = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        let out = apply(wrapped, "pseudonymous", day, &[]);
+        assert_eq!(
+            out["text"],
+            "56 100 330 110\tHemoglobina 14,8 g/dL 13,5 - 17,5\n56 120 90 130\tLlame al [phone]\n"
+        );
     }
 
     #[test]

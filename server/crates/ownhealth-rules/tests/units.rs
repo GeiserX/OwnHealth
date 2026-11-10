@@ -42,6 +42,7 @@ fn pt(day: &str, value: &str, canonical: Option<&str>) -> Point {
         method: None,
         src: "src_x".into(),
         src_label: None,
+        src_kind: "document_region".into(),
         derivation: "test".into(),
     }
 }
@@ -117,9 +118,21 @@ async fn normalized(
     rr: &str,
     day: &str,
 ) -> anyhow::Result<ObservationIn> {
+    normalized_as(conn, pid, "Glucosa", v, u, rr, day).await
+}
+
+async fn normalized_as(
+    conn: &mut PgConnection,
+    pid: Uuid,
+    name: &str,
+    v: &str,
+    u: &str,
+    rr: &str,
+    day: &str,
+) -> anyhow::Result<ObservationIn> {
     let row = RowIn {
         profile_id: pid,
-        printed_name: "Glucosa",
+        printed_name: name,
         printed_value: v,
         printed_unit: Some(u),
         printed_range: Some(rr),
@@ -194,6 +207,40 @@ async fn si_range_is_converted_to_the_spark_unit() -> R {
     Ok(())
 }
 
+/// 10^3/µL and 10^9/L are the same count: a new report in the other notation keeps the history.
+#[tokio::test]
+async fn the_spark_keeps_history_across_equivalent_units() -> R {
+    common::install_fake_genome();
+    let db = TestDb::new().await?;
+    let mut tx = db.pool.begin().await?;
+    let pid = create_rivera_family(&mut tx, "Rivera").await?.profile("alex");
+    // each value kept in its own canonical notation, as the demo seed and older imports store it
+    for (v, u, ucum, day) in [
+        ("244", "x10^9/L", "10*9/L", "2026-03-01"),
+        ("276", "x10^3/µL", "10*3/uL", "2026-09-01"),
+    ] {
+        let mut o = normalized_as(&mut tx, pid, "Plaquetas", v, u, "150-400", day).await?;
+        o.value_canonical = Some(dec(v));
+        o.unit_canonical = Some(ucum.into());
+        add(&mut tx, &o, pid).await?;
+    }
+    let d = dashboard(
+        &mut tx,
+        pid,
+        NaiveDate::from_ymd_opt(2026, 10, 1).unwrap_or_default(),
+        "en",
+        &all_scopes(),
+    )
+    .await?;
+    let mut rows = Vec::new();
+    rows_of(&d, "platelets", &mut rows);
+    assert!(!rows.is_empty());
+    for r in rows {
+        assert_eq!(r["spark"], json!([244.0, 276.0]));
+    }
+    Ok(())
+}
+
 /// 92 mg/dL, then 5,3 mmol/L left unconverted: not a 94% drop.
 #[tokio::test]
 async fn changes_never_compare_a_point_the_normalizer_could_not_convert() -> R {
@@ -222,5 +269,41 @@ async fn changes_never_compare_a_point_the_normalizer_could_not_convert() -> R {
         .filter(|c| c["direction"] == "down")
         .collect();
     assert!(down.is_empty(), "{down:?}");
+    Ok(())
+}
+
+/// Two lab reports, then one value typed by hand: the changes still compare the two reports.
+#[tokio::test]
+async fn one_value_entered_by_hand_keeps_the_changes_since_the_last_report() -> R {
+    common::install_fake_genome();
+    let db = TestDb::new().await?;
+    let mut tx = db.pool.begin().await?;
+    let pid = create_rivera_family(&mut tx, "Rivera").await?.profile("alex");
+    for (v, day) in [("92", "2026-03-01"), ("130", "2026-09-01")] {
+        let o = normalized(&mut tx, pid, v, "mg/dL", "70-110", day).await?;
+        let src = SrcIn {
+            profile_id: Some(pid),
+            label: Some("LabNorte".into()),
+            import_ref: Some(format!("labnorte-{day}")),
+            ..SrcIn::new("fhir_import")
+        };
+        commit_observation(&mut tx, &o, &SrcRef::New(src), CommitOptions::new("import")).await?;
+    }
+    let by_hand = normalized_as(&mut tx, pid, "Plaquetas", "250", "x10^3/µL", "150-400", "2026-09-20").await?;
+    add(&mut tx, &by_hand, pid).await?;
+    let d = dashboard(
+        &mut tx,
+        pid,
+        NaiveDate::from_ymd_opt(2026, 10, 1).unwrap_or_default(),
+        "en",
+        &all_scopes(),
+    )
+    .await?;
+    assert_eq!(d["changes_vs"], json!("2026-03-01"), "{}", d["changes"]);
+    assert!(
+        d["changes"].as_array().is_some_and(|c| !c.is_empty()),
+        "{}",
+        d["changes"]
+    );
     Ok(())
 }

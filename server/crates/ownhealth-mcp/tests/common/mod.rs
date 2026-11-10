@@ -1212,6 +1212,10 @@ impl Services for Fakes {
                     .collect();
                 return Ok(json!({"drug": {"name": drug, "query": drug}, "pgx": [], "relevant_labs": labs}));
             }
+            // the real lane answers a name outside the drug table this way (ownhealth-rules drugs.rs)
+            if drug.starts_with("zzz") {
+                return Err(Error::NotFound(format!("Unknown drug '{drug}'.")));
+            }
             let g: Option<String> =
                 sqlx::query_scalar("select src_id from genome_finding where profile_id = $1 and gene = 'SLCO1B1'")
                     .bind(profile_id)
@@ -1379,6 +1383,8 @@ impl Services for Fakes {
         _page_no: i32,
         _name: &'a str,
         value: &'a str,
+        _unit: Option<&'a str>,
+        _near: Option<[f64; 4]>,
     ) -> BoxFuture<'a, Result<Option<[f64; 4]>>> {
         let v = value.replace(',', ".");
         Box::pin(async move {
@@ -1485,8 +1491,10 @@ impl Services for RealWords {
         page_no: i32,
         name: &'a str,
         value: &'a str,
+        unit: Option<&'a str>,
+        near: Option<[f64; 4]>,
     ) -> BoxFuture<'a, Result<Option<[f64; 4]>>> {
-        Box::pin(Lanes.ground_value(conn, blobs, document_id, page_no, name, value))
+        Box::pin(Lanes.ground_value(conn, blobs, document_id, page_no, name, value, unit, near))
     }
     fn page_words<'a>(
         &'a self,

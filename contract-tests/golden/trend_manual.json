@@ -28,7 +28,12 @@
       "ref_high": "null",
       "ref_low": "null",
       "src": "src_id",
-      "status": "=ok",
+      "status": {
+        "|": [
+          "=ok",
+          "null"
+        ]
+      },
       "unit": "string",
       "value": "float"
     }

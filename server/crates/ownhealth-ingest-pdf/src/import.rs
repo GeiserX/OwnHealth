@@ -7,11 +7,16 @@ use std::sync::RwLock;
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 use futures::future::BoxFuture;
 use ownhealth_core::acceptance::{Check, DEFAULT_THRESHOLD, failed_reasons};
+use ownhealth_core::arrive::{enqueue_ocr, set_ocr_state};
 use ownhealth_core::blobs::{BlobStore, sha256_hex_to_bytes};
+use ownhealth_core::dedup::{
+    NearDuplicate, ObservationMatch, find_near_duplicate, flag_near_duplicate, link_observation, match_observation,
+    simhash64, store_page_fingerprint,
+};
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::jobs::{EnqueueOptions, enqueue};
 use ownhealth_core::observations::{ObservationIn, confirm_observation, supersede_observation};
-use ownhealth_core::provenance::{SrcIn, SrcRef, region_label};
+use ownhealth_core::provenance::{SrcIn, SrcRef, create_src, region_label};
 use ownhealth_core::review::{
     CandidateIn, ReviewItem, ReviewItemIn, create_extraction_run, create_item, dismiss, finish_extraction_run,
     submit_candidate,
@@ -25,9 +30,10 @@ use sqlx::{PgConnection, Row as _};
 use uuid::Uuid;
 
 use crate::classify::{fold, identity_match, name_tokens};
-use crate::extract::{Extraction, extract};
+use crate::extract::{Extraction, extract, extract_model};
+use crate::pages::page_phashes;
 use crate::tables::Row;
-use crate::textlayer::{ENGINE, ENGINE_VERSION, PageModel, injection_hits};
+use crate::textlayer::{ENGINE, ENGINE_VERSION, PageModel, PdfModel, injection_hits, read_pdf};
 
 const GROUND_PAD: f64 = 4.0;
 
@@ -80,12 +86,14 @@ struct Doc {
     blob_sha256: Vec<u8>,
     doc_type: Option<String>,
     created_at: DateTime<Utc>,
+    /// The locked original of an email PDF (`flags.encrypted`); its unlocked copy is the one read.
+    encrypted: bool,
 }
 
 async fn lock_document(conn: &mut PgConnection, document_id: Uuid) -> Result<Option<Doc>> {
     let row = sqlx::query(
-        "select id, household_id, profile_id, status, mime, blob_sha256, doc_type, created_at from document \
-         where id = $1 for update",
+        "select id, household_id, profile_id, status, mime, blob_sha256, doc_type, created_at, \
+         coalesce(flags->>'encrypted' = 'true', false) as encrypted from document where id = $1 for update",
     )
     .bind(document_id)
     .fetch_optional(conn)
@@ -100,6 +108,7 @@ async fn lock_document(conn: &mut PgConnection, document_id: Uuid) -> Result<Opt
             blob_sha256: r.try_get("blob_sha256")?,
             doc_type: r.try_get("doc_type")?,
             created_at: r.try_get("created_at")?,
+            encrypted: r.try_get("encrypted")?,
         })
     })
     .transpose()
@@ -122,8 +131,7 @@ pub async fn import_pdf(
     import_pdf_with(conn, blobs, document_id, force, DEFAULT_THRESHOLD).await
 }
 
-/// `import_pdf` with the auto-accept threshold of the settings. An unknown document is
-/// `Error::NotFound` (the job handler makes it a permanent failure).
+/// `import_pdf` with the auto-accept threshold of the settings (OCR off).
 pub async fn import_pdf_with(
     conn: &mut PgConnection,
     blobs: &BlobStore,
@@ -131,6 +139,77 @@ pub async fn import_pdf_with(
     force: bool,
     threshold: f64,
 ) -> Result<ImportSummary> {
+    import_pdf_opts(conn, blobs, document_id, force, ImportOptions { threshold, ocr: false }).await
+}
+
+/// How `import.pdf` runs: the auto-accept threshold, and whether the `ocr` compose profile is on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImportOptions {
+    pub threshold: f64,
+    /// On: pages without a text layer (and images) go to the `ocr` queue (`ocr.document`, lane C).
+    /// Off: they wait as one `pending_document` item, and `document.ocr_state` is `off`.
+    pub ocr: bool,
+}
+
+/// The import itself. An unknown document is `Error::NotFound` (the job handler makes it a permanent
+/// failure).
+pub async fn import_pdf_opts(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    document_id: Uuid,
+    force: bool,
+    opts: ImportOptions,
+) -> Result<ImportSummary> {
+    import_inner(conn, blobs, document_id, force, opts, None).await
+}
+
+/// Lane C's checks on one OCR row before it is routed: extra checks (grounding on the OCR word
+/// layer) and a cap on the row confidence (the recognizer's confidence in the row's words).
+pub type OcrRowCheck = Box<dyn Fn(&Row, &ObservationIn) -> (Vec<Check>, f64) + Send + Sync>;
+
+/// Pages lane C read with OCR (ingestion.md 6). They take the place of the document's pages of the
+/// same number and run through the same extraction as a text layer; only their rows are routed, as
+/// `ocr_template` / `ocr_rules`, with `check` added. Each page model has `text_layer_ok` set (its words
+/// are readable); the stored page keeps `text_layer_ok = false` and gets `word_layer = 'ocr'`.
+pub struct OcrPages {
+    pub pages: Vec<PageModel>,
+    pub engine: String,
+    pub engine_version: String,
+    pub check: OcrRowCheck,
+}
+
+/// Route the rows of pages read by OCR (the `ocr.document` job, lane C). The job hands over only pages
+/// not read since they were last stored (`word_layer <> 'ocr'`), so an earlier OCR run of the same
+/// document does not stop this one: after a move to another profile or a re-upload, the forced
+/// `import.pdf` stores the pages again and their rows are routed again for the document as it is now.
+/// An OCR page with no readable table waits as one `pending_document` item (`why = "no_table"`).
+pub async fn import_ocr(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    document_id: Uuid,
+    ocr: &OcrPages,
+    threshold: f64,
+) -> Result<ImportSummary> {
+    import_inner(
+        conn,
+        blobs,
+        document_id,
+        false,
+        ImportOptions { threshold, ocr: true },
+        Some(ocr),
+    )
+    .await
+}
+
+async fn import_inner(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    document_id: Uuid,
+    force: bool,
+    opts: ImportOptions,
+    ocr_in: Option<&OcrPages>,
+) -> Result<ImportSummary> {
+    let threshold = opts.threshold;
     let doc = lock_document(&mut *conn, document_id)
         .await?
         .ok_or_else(|| Error::NotFound(format!("document {document_id} not found")))?;
@@ -139,7 +218,13 @@ pub async fn import_pdf_with(
         summary.reasons.insert("not_assigned_or_retracted".into(), 1);
         return Ok(summary);
     };
-    if !force {
+    if doc.encrypted {
+        // a locked original is kept as received and never read; its unlocked copy is imported
+        summary.reasons.insert("encrypted_original".into(), 1);
+        return Ok(summary);
+    }
+    if !force && ocr_in.is_none() {
+        // an OCR pass is never skipped here: the job reads only pages not read since they were stored
         let done: Option<i32> = sqlx::query_scalar(
             "select 1 from extraction_run where document_id = $1 and status = 'done' and extractor <> 'agent'",
         )
@@ -152,14 +237,29 @@ pub async fn import_pdf_with(
         }
     }
     let data = blobs.get_bytes(&hex::encode(&doc.blob_sha256))?;
-    if doc.mime != "application/pdf" {
+    if doc.mime != "application/pdf" && ocr_in.is_none() {
+        if opts.ocr {
+            if force {
+                // a moved or re-uploaded photo is read again: the OCR job skips a page it already read
+                sqlx::query("update document_page set word_layer = 'none' where document_id = $1")
+                    .bind(doc.id)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            enqueue_ocr(&mut *conn, doc.id, &[1], "image").await?;
+            summary.reasons.insert("ocr_queued".into(), 1);
+            return Ok(summary);
+        }
+        set_ocr_state(&mut *conn, doc.id, "off").await?;
         pending_document(&mut *conn, &doc, &[1], "image").await?;
         summary.queued += 1;
         summary.reasons.insert("pending_document".into(), 1);
         return Ok(summary);
     }
 
-    let ext = tokio_blocking_extract(data).await?;
+    let pdf = doc.mime == "application/pdf";
+    let ext = tokio_blocking_extract(data, pdf, ocr_in.map(|o| o.pages.clone())).await?;
+    let ocr_set: BTreeSet<i32> = ocr_in.map_or_else(BTreeSet::new, |o| o.pages.iter().map(|p| p.page_no).collect());
     let r = sqlx::query("select id, household_id, display_name, birth_date from profile where id = $1")
         .bind(profile_id)
         .fetch_one(&mut *conn)
@@ -170,7 +270,8 @@ pub async fn import_pdf_with(
         display_name: r.try_get("display_name")?,
         birth_date: r.try_get("birth_date")?,
     };
-    store_pages(&mut *conn, blobs, document_id, &ext).await?;
+    store_pages(&mut *conn, blobs, document_id, &ext, ocr_in).await?;
+    let near = near_duplicate(&mut *conn, blobs, &doc).await?;
     let cls = &ext.cls;
     let identity = identity_match(
         cls.patient_name.as_deref(),
@@ -190,28 +291,61 @@ pub async fn import_pdf_with(
     update_document(&mut *conn, &doc, &ext, identity, guess, sample_hash.as_deref()).await?;
     if let Some(g) = guess
         && g != profile.id
+        && (ocr_in.is_none() || !has_open_item(&mut *conn, doc.id, "document_identity").await?)
     {
         identity_item(&mut *conn, &doc, g).await?;
         summary.queued += 1;
     }
 
     let lab = cls.doc_type == "lab_report";
-    let results = if lab { ext.results() } else { Vec::new() };
-    let mut unread = ext.pending_pages.clone();
-    if lab {
-        unread.extend(&ext.no_table_pages);
-    }
-    if !unread.is_empty() {
-        let why = if ext.pending_pages.is_empty() {
-            "no_table"
+    let mut results = if lab { ext.results() } else { Vec::new() };
+    if ocr_in.is_some() {
+        // the OCR pass routes only the pages it read; the text-layer pass routed the others
+        results.retain(|(_, r)| ocr_set.contains(&r.page_no));
+        let unread: Vec<i32> = ext
+            .no_table_pages
+            .iter()
+            .copied()
+            .filter(|p| ocr_set.contains(p))
+            .collect();
+        // a scan whose words hold no table waits, lab report or not: with OCR off it would have waited
+        if !unread.is_empty() {
+            pending_document(&mut *conn, &doc, &unread, "no_table").await?;
+            summary.queued += 1;
+            summary.reasons.insert("pending_document".into(), 1);
+        }
+    } else {
+        // The text-layer pass. Pages without a text layer go to OCR when the profile is on; otherwise
+        // they wait with the lab pages whose table nobody could read. The OCR pass never routes these
+        // again: the text pass did, and the job files the pages OCR could not read as `ocr_failed`.
+        let ocr_pages = opts.ocr && !ext.pending_pages.is_empty();
+        if ocr_pages {
+            enqueue_ocr(&mut *conn, doc.id, &ext.pending_pages, "no_text_layer").await?;
+            summary.reasons.insert("ocr_queued".into(), 1);
+        } else if !ext.pending_pages.is_empty() {
+            set_ocr_state(&mut *conn, doc.id, "off").await?;
+        }
+        let mut unread = if ocr_pages {
+            Vec::new()
         } else {
-            "no_text_layer"
+            ext.pending_pages.clone()
         };
-        pending_document(&mut *conn, &doc, &unread, why).await?;
-        summary.queued += 1;
-        summary.reasons.insert("pending_document".into(), 1);
+        if lab {
+            unread.extend(&ext.no_table_pages);
+        }
+        if !unread.is_empty() {
+            let why = if ocr_pages || ext.pending_pages.is_empty() {
+                "no_table"
+            } else {
+                "no_text_layer"
+            };
+            pending_document(&mut *conn, &doc, &unread, why).await?;
+            summary.queued += 1;
+            summary.reasons.insert("pending_document".into(), 1);
+        }
     }
     if results.is_empty() && ext.pending().is_empty() {
+        flag_near(&mut *conn, &doc, near.as_ref(), &mut summary).await?;
         return Ok(summary);
     }
 
@@ -222,17 +356,19 @@ pub async fn import_pdf_with(
         ext.extractor(),
         ext.extractor_version(),
         &config_hash,
-        Some(ENGINE),
-        Some(ENGINE_VERSION),
+        Some(ocr_in.map_or(ENGINE, |o| o.engine.as_str())),
+        Some(ocr_in.map_or(ENGINE_VERSION, |o| o.engine_version.as_str())),
     )
     .await?;
     let (effective_at, date_check) = effective_at(&ext, &profile);
     let report_key = report_key(&ext, sample_hash.as_deref(), document_id);
     let provider = ext.template.as_ref().map(|t| t.provider_name.clone());
+    // a collection date printed without a time reads as midnight: level 3 cannot tell two draws apart
+    let time_known = ext.cls.collected_at.is_some_and(|t| t.time() != chrono::NaiveTime::MIN);
     let pages: HashMap<i32, &PageModel> = ext.pdf.pages.iter().map(|p| (p.page_no, p)).collect();
     let normalize = normalizer();
 
-    let mut normalized: Vec<(f64, &Row, ObservationIn, Vec<Check>)> = Vec::new();
+    let mut normalized: Vec<(f64, f64, &Row, ObservationIn, Vec<Check>)> = Vec::new();
     for (spec, row) in &results {
         let row_in = RowIn {
             profile_id: profile.id,
@@ -260,10 +396,16 @@ pub async fn import_pdf_with(
             checks.extend(row_checks(row, page));
         }
         checks.push(date_check.clone());
-        normalized.push((spec.prior, *row, obs, checks));
+        let mut row_conf = row.conf(spec.prior);
+        if let Some(o) = ocr_in {
+            let (more, cap) = (o.check)(row, &obs);
+            checks.extend(more);
+            row_conf = row_conf.min(cap);
+        }
+        normalized.push((spec.prior, row_conf, *row, obs, checks));
     }
 
-    let groups: BTreeSet<String> = normalized.iter().map(|(_, _, o, _)| o.alias_group.clone()).collect();
+    let groups: BTreeSet<String> = normalized.iter().map(|(_, _, _, o, _)| o.alias_group.clone()).collect();
     let earlier = earlier_edition(
         &mut *conn,
         &doc,
@@ -274,6 +416,11 @@ pub async fn import_pdf_with(
         &groups,
     )
     .await?;
+    // an edition of an earlier report is linked row by row below; only a document nothing else
+    // recognised gets the "probably the same as" review
+    if earlier.is_none() {
+        flag_near(&mut *conn, &doc, near.as_ref(), &mut summary).await?;
+    }
     if let Some(e) = earlier {
         sqlx::query("update document set supersedes_document = $1 where id = $2")
             .bind(e)
@@ -287,12 +434,12 @@ pub async fn import_pdf_with(
     };
     let provisional = cls.report_status == "preliminary";
 
-    for (prior, row, obs, checks) in normalized {
+    for (prior, row_conf, row, obs, checks) in normalized {
         let mut cand = CandidateIn {
             page_no: row.page_no,
             bbox: row.bbox(),
             cells: row.cells.as_dict(),
-            row_conf: row.conf(prior),
+            row_conf,
             observation: obs,
             checks,
         };
@@ -311,14 +458,55 @@ pub async fn import_pdf_with(
             }
             continue;
         }
-        let dup = duplicate(&mut *conn, &cand.observation, document_id).await?;
-        if let Some(d) = &dup {
-            if same_value(d, &cand.observation) {
-                insert_candidate(&mut *conn, run_id, &cand, "confirmed", Some(d.id)).await?;
+        // dedup level 3: the same fact (analyte, specimen time, value, lab) already stored is linked,
+        // not stored twice; a maybe-same fact goes to a person. Only a row that passes every check on a
+        // document of this person is cited as one more source; any other waits with the rest. The
+        // normalizer's own `duplicate` flag is this very match, so it does not count against it.
+        let clean = identity == "matched" && cand.checks.iter().filter(|c| c.name != "duplicate").all(|c| c.ok);
+        match match_observation(&mut *conn, &cand.observation, provider.as_deref(), time_known).await? {
+            ObservationMatch::Same { .. } if !clean => cand.checks.push(Check {
+                name: "duplicate".into(),
+                ok: false,
+                detail: Some("the same result is already stored".into()),
+                reason: Some("duplicate".into()),
+            }),
+            ObservationMatch::Same { observation_id } => {
+                let row_id = insert_candidate(&mut *conn, run_id, &cand, "confirmed", Some(observation_id)).await?;
+                let src = SrcIn {
+                    profile_id: Some(cand.observation.profile_id),
+                    document_id: Some(document_id),
+                    page_no: Some(cand.page_no),
+                    bbox: Some(cand.bbox),
+                    label: Some(
+                        region_label(
+                            &mut *conn,
+                            document_id,
+                            cand.page_no,
+                            Some(&cand.observation.effective_at),
+                        )
+                        .await?,
+                    ),
+                    extraction_run_id: Some(run_id),
+                    candidate_row_id: Some(row_id),
+                    ..SrcIn::new("document_region")
+                };
+                let src_id = create_src(&mut *conn, &src).await?;
+                link_observation(&mut *conn, observation_id, &src_id, Some(document_id)).await?;
                 summary.skipped += 1;
                 bump(&mut summary, "duplicate");
                 continue;
             }
+            ObservationMatch::Review { reason, .. } => cand.checks.push(Check {
+                name: "duplicate".into(),
+                ok: false,
+                detail: Some("maybe the same result as one already stored".into()),
+                reason: Some(reason),
+            }),
+            ObservationMatch::New => {}
+        }
+        // a different value for the same analyte and day, already stored: a person decides
+        let dup = duplicate(&mut *conn, &cand.observation, document_id).await?;
+        if let Some(d) = dup.as_ref().filter(|d| !same_value(d, &cand.observation)) {
             cand.checks.push(Check {
                 name: "conflict".into(),
                 ok: false,
@@ -329,7 +517,12 @@ pub async fn import_pdf_with(
                 )),
             });
         }
-        let allowance = if prior >= 1.0 { "template_text" } else { "rules_text" };
+        let allowance = match (ocr_in.is_some(), prior >= 1.0) {
+            (false, true) => "template_text",
+            (false, false) => "rules_text",
+            (true, true) => "ocr_template",
+            (true, false) => "ocr_rules",
+        };
         let result = submit_candidate(&mut *conn, run_id, &cand, allowance, identity, threshold, provisional).await?;
         if result.state == "auto_accepted" {
             summary.accepted += 1;
@@ -365,9 +558,81 @@ fn bump(s: &mut ImportSummary, reason: &str) {
     *s.reasons.entry(reason.to_string()).or_default() += 1;
 }
 
+/// Dedup level 2: store each page's pHash (the simhash went in with the page) and look for an earlier
+/// document of the profile with the same pages. A PDF that will not render has no pHash; its text
+/// simhash still counts. A photo or scan stored as an image is hashed as its one page.
+async fn near_duplicate(conn: &mut PgConnection, blobs: &BlobStore, doc: &Doc) -> Result<Option<NearDuplicate>> {
+    let (blobs, sha) = (blobs.clone(), hex::encode(&doc.blob_sha256));
+    let image = doc.mime.starts_with("image/");
+    let hashes = tokio::task::spawn_blocking(move || -> Result<Vec<Option<u64>>> {
+        let data = blobs.get_bytes(&sha)?;
+        if image {
+            crate::pages::image_phash(&data)
+        } else {
+            page_phashes(&data)
+        }
+    })
+    .await
+    .map_err(|e| Error::Other(anyhow::anyhow!("page fingerprint task failed: {e}")))?
+    .unwrap_or_else(|e| {
+        tracing::warn!(document_id = %doc.id, error = %e, "page fingerprints skipped");
+        Vec::new()
+    });
+    for (page_no, h) in (1..).zip(hashes) {
+        if h.is_some() {
+            store_page_fingerprint(&mut *conn, doc.id, page_no, h, None).await?;
+        }
+    }
+    find_near_duplicate(conn, doc.id).await
+}
+
+async fn has_open_item(conn: &mut PgConnection, document_id: Uuid, kind: &str) -> Result<bool> {
+    let found: Option<i32> =
+        sqlx::query_scalar("select 1 from review_item where document_id = $1 and kind = $2 and status = 'open'")
+            .bind(document_id)
+            .bind(kind)
+            .fetch_optional(conn)
+            .await?;
+    Ok(found.is_some())
+}
+
+async fn flag_near(
+    conn: &mut PgConnection,
+    doc: &Doc,
+    near: Option<&NearDuplicate>,
+    summary: &mut ImportSummary,
+) -> Result<()> {
+    if let Some(n) = near {
+        flag_near_duplicate(conn, doc.id, n).await?;
+        summary.queued += 1;
+        bump(summary, "near_duplicate");
+    }
+    Ok(())
+}
+
 /// PDF parsing is CPU work: off the async worker threads.
-async fn tokio_blocking_extract(data: Vec<u8>) -> Result<Extraction> {
-    match tokio::task::spawn_blocking(move || extract(&data)).await {
+/// With `ocr` pages, they replace the PDF's pages of the same number (an image has no PDF pages).
+async fn tokio_blocking_extract(data: Vec<u8>, pdf: bool, ocr: Option<Vec<PageModel>>) -> Result<Extraction> {
+    let work = move || {
+        let Some(pages) = ocr else { return extract(&data) };
+        let mut model = if pdf {
+            read_pdf(&data)?
+        } else {
+            PdfModel {
+                pages: Vec::new(),
+                metadata: Vec::new(),
+                annotations: Vec::new(),
+                flags: Map::new(),
+            }
+        };
+        for page in pages {
+            model.pages.retain(|p| p.page_no != page.page_no);
+            model.pages.push(page);
+        }
+        model.pages.sort_by_key(|p| p.page_no);
+        extract_model(model)
+    };
+    match tokio::task::spawn_blocking(work).await {
         Ok(r) => r,
         Err(e) => Err(Error::Other(anyhow::anyhow!("PDF extraction panicked: {e}"))),
     }
@@ -375,11 +640,29 @@ async fn tokio_blocking_extract(data: Vec<u8>) -> Result<Extraction> {
 
 // ------------------------------------------------------------------- pages ----
 
-async fn store_pages(conn: &mut PgConnection, blobs: &BlobStore, document_id: Uuid, ext: &Extraction) -> Result<()> {
+/// Every page; with `ocr`, only the pages it read (`word_layer = 'ocr'`, `text_layer_ok` false).
+async fn store_pages(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    document_id: Uuid,
+    ext: &Extraction,
+    ocr: Option<&OcrPages>,
+) -> Result<()> {
     let cfg = fts_config(ext.cls.language.as_deref());
     for page in &ext.pdf.pages {
+        let is_ocr = ocr.is_some_and(|o| o.pages.iter().any(|p| p.page_no == page.page_no));
+        if ocr.is_some() && !is_ocr {
+            continue;
+        }
+        let (engine, layer_kind) = match ocr.filter(|_| is_ocr) {
+            Some(o) => (format!("{} {}", o.engine, o.engine_version), "ocr"),
+            None => (
+                format!("{ENGINE} {ENGINE_VERSION}"),
+                if page.text_layer_ok { "text_layer" } else { "none" },
+            ),
+        };
         let layer = json!({
-            "engine": format!("{ENGINE} {ENGINE_VERSION}"),
+            "engine": engine,
             "width": page.width,
             "height": page.height,
             "words": page.words.iter().map(|w| w.as_dict()).collect::<Vec<_>>(),
@@ -387,22 +670,30 @@ async fn store_pages(conn: &mut PgConnection, blobs: &BlobStore, document_id: Uu
         let words_sha = blobs.put_bytes(&serde_json::to_vec(&layer)?)?;
         sqlx::query(
             "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok, words_blob, \
-             flags, text_content, fts) values ($1, $2, $3, $4, $5, $6, $7, $8, to_tsvector(cast($9 as regconfig), $10)) \
+             flags, text_content, fts, word_layer, text_simhash) values ($1, $2, $3, $4, $5, $6, $7, $8, \
+             to_tsvector(cast($9 as regconfig), $10), $11, $12) \
              on conflict (document_id, page_no) do update set width_pt = excluded.width_pt, \
              height_pt = excluded.height_pt, text_layer_ok = excluded.text_layer_ok, \
              words_blob = excluded.words_blob, flags = excluded.flags, text_content = excluded.text_content, \
-             fts = excluded.fts",
+             fts = excluded.fts, word_layer = excluded.word_layer, text_simhash = excluded.text_simhash",
         )
         .bind(document_id)
         .bind(page.page_no)
         .bind(page.width as f32)
         .bind(page.height as f32)
-        .bind(page.text_layer_ok)
+        .bind(page.text_layer_ok && !is_ocr)
         .bind(sha256_hex_to_bytes(&words_sha)?)
         .bind(Value::Object(page.flags.clone()))
         .bind(page.text(false))
         .bind(cfg)
         .bind(page.text(true))
+        .bind(layer_kind)
+        // dedup level 2: the simhash of the visible text (a scan has none until OCR)
+        .bind(
+            simhash64(&page.text(true))
+                .filter(|_| page.text_layer_ok)
+                .map(|h| h as i64),
+        )
         .execute(&mut *conn)
         .await?;
     }
@@ -506,25 +797,73 @@ async fn guess_profile(conn: &mut PgConnection, household_id: Uuid, ext: &Extrac
 
 /// One review item: this document waits for an outside agent (MCP propose) or manual entry.
 async fn pending_document(conn: &mut PgConnection, doc: &Doc, pages: &[i32], why: &str) -> Result<Uuid> {
-    let existing: Option<Uuid> = sqlx::query_scalar(
-        "select id from review_item where document_id = $1 and kind = 'pending_document' and status = 'open'",
+    add_pending_pages(conn, doc.id, doc.household_id, doc.profile_id, pages, why).await
+}
+
+/// File `pages` of a document as waiting for a person or an agent, with `why`. A document has one
+/// open `pending_document` item: pages added while it is open join it (`pages` is the union, and
+/// `page_why` keeps each page's own reason once two reasons meet), so no page is left out of it.
+pub async fn add_pending_pages(
+    conn: &mut PgConnection,
+    document_id: Uuid,
+    household_id: Uuid,
+    profile_id: Option<Uuid>,
+    pages: &[i32],
+    why: &str,
+) -> Result<Uuid> {
+    let existing: Option<(Uuid, Value)> = sqlx::query_as(
+        "select id, payload from review_item where document_id = $1 and kind = 'pending_document' and status = 'open' \
+         for update",
     )
-    .bind(doc.id)
+    .bind(document_id)
     .fetch_optional(&mut *conn)
     .await?;
-    if let Some(id) = existing {
+    if let Some((id, mut payload)) = existing {
+        let old_why = payload.get("why").and_then(Value::as_str).unwrap_or(why).to_string();
+        let old: BTreeSet<i32> = payload
+            .get("pages")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| p.as_i64().and_then(|n| i32::try_from(n).ok()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let new: Vec<i32> = pages.iter().copied().filter(|p| !old.contains(p)).collect();
+        if new.is_empty() {
+            return Ok(id);
+        }
+        let mut page_why: Map<String, Value> = match payload.get("page_why") {
+            Some(Value::Object(m)) => m.clone(),
+            _ => old.iter().map(|p| (p.to_string(), json!(old_why))).collect(),
+        };
+        for p in &new {
+            page_why.insert(p.to_string(), json!(why));
+        }
+        let all: BTreeSet<i32> = old.into_iter().chain(new).collect();
+        if let Value::Object(m) = &mut payload {
+            m.insert("pages".into(), json!(all));
+            if page_why.values().any(|w| w.as_str() != Some(old_why.as_str())) {
+                m.insert("page_why".into(), Value::Object(page_why));
+            }
+        }
+        sqlx::query("update review_item set payload = $2 where id = $1")
+            .bind(id)
+            .bind(&payload)
+            .execute(&mut *conn)
+            .await?;
         return Ok(id);
     }
     create_item(
         conn,
         &ReviewItemIn {
             kind: "pending_document".into(),
-            household_id: Some(doc.household_id),
-            profile_id: doc.profile_id,
-            payload: json!({"document_id": doc.id.to_string(), "pages": pages, "why": why}),
-            document_id: Some(doc.id),
+            household_id: Some(household_id),
+            profile_id,
+            payload: json!({"document_id": document_id.to_string(), "pages": pages, "why": why}),
+            document_id: Some(document_id),
             ref_table: Some("document".into()),
-            ref_id: Some(doc.id),
+            ref_id: Some(document_id),
             ..ReviewItemIn::default()
         },
     )
@@ -985,11 +1324,12 @@ async fn duplicate(conn: &mut PgConnection, obs: &ObservationIn, document_id: Uu
     let row = sqlx::query(
         "select id, alias_group, status, value_num, unit_ucum, printed_value, document_id from observation \
          where profile_id = $1 and alias_group = $2 and status in ('current', 'provisional') \
-         and effective_at::date = $3 and document_id is distinct from $4 order by recorded_at desc limit 1",
+         and (effective_at at time zone 'UTC')::date = ($3 at time zone 'UTC')::date \
+         and document_id is distinct from $4 order by recorded_at desc limit 1",
     )
     .bind(obs.profile_id)
     .bind(&obs.alias_group)
-    .bind(obs.effective_at.date_naive())
+    .bind(obs.effective_at)
     .bind(document_id)
     .fetch_optional(conn)
     .await?;

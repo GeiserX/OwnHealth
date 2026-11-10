@@ -514,6 +514,34 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
         .await?
         .rows_affected();
     counts.push(("api_token".into(), tokens));
+    // OAuth consents drop the profile the same way, so a refresh never reissues it; a consent left with
+    // no profile is revoked with whatever it issued.
+    sqlx::query(
+        "update oauth_consent set profile_ids = array_remove(profile_ids, $1), \
+         default_profile = case when default_profile = $1 then (array_remove(profile_ids, $1))[1] \
+         else default_profile end where $1 = any(profile_ids) or default_profile = $1",
+    )
+    .bind(profile_id)
+    .execute(&mut *conn)
+    .await?;
+    let emptied: Vec<Uuid> = sqlx::query_scalar(
+        "update oauth_consent set revoked_at = coalesce(revoked_at, now()) \
+         where cardinality(profile_ids) = 0 returning id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    if !emptied.is_empty() {
+        sqlx::query("update api_token set revoked_at = now() where consent_id = any($1) and revoked_at is null")
+            .bind(&emptied)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query(
+            "update oauth_refresh_token set revoked_at = now() where consent_id = any($1) and revoked_at is null",
+        )
+        .bind(&emptied)
+        .execute(&mut *conn)
+        .await?;
+    }
     sqlx::query("delete from profile where id = $1")
         .bind(profile_id)
         .execute(&mut *conn)

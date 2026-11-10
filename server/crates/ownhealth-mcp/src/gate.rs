@@ -341,9 +341,12 @@ pub enum PageRefusal {
 }
 
 /// Why the caller may not read one page's text (mcp.md 5.7, 9.7), or None. A finished page is
-/// permitted when the caller can read every fact extracted from it (committed or still queued); a
-/// pending page can hold anything, so it needs every category, the agents genome switch, and a
-/// profile that is not a minor. The document-wide sensitivity label is checked by the caller.
+/// permitted when the caller can read every fact extracted from it (committed or still queued). A
+/// page that still holds unextracted content can hold anything, so it needs every category, the
+/// agents genome switch, and a profile that is not a minor: a page an open pending_document item
+/// lists, and any page with no extracted fact at all (queued for OCR, its pending item dismissed,
+/// a document no importer read, or every row rejected). The document-wide sensitivity label is
+/// checked by the caller.
 pub async fn page_refusal(
     conn: &mut PgConnection,
     perm: &Permission,
@@ -351,7 +354,22 @@ pub async fn page_refusal(
     document_id: Uuid,
     page_no: i32,
 ) -> Result<Option<PageRefusal>> {
-    if page_pending(&mut *conn, document_id, page_no).await? {
+    let src_ids: Vec<String> = sqlx::query_scalar("select id from src where document_id = $1 and page_no = $2")
+        .bind(document_id)
+        .bind(page_no)
+        .fetch_all(&mut *conn)
+        .await?;
+    // rows read from the page that wait in the review queue are on the page too
+    let queued: Vec<Option<Value>> = sqlx::query_scalar(
+        "select payload->'observation' from review_item where document_id = $1 and status = 'open' \
+         and kind = 'candidate_row' and coalesce(payload->>'page_no', payload->'src'->>'page_no') = $2",
+    )
+    .bind(document_id)
+    .bind(page_no.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    let unextracted = src_ids.is_empty() && queued.is_empty();
+    if unextracted || page_pending(&mut *conn, document_id, page_no).await? {
         let missing: Vec<String> = PAGE_ALL_SCOPES
             .iter()
             .filter(|s| !perm.scopes.contains(**s))
@@ -368,24 +386,10 @@ pub async fn page_refusal(
         }
         return Ok(None);
     }
-    let src_ids: Vec<String> = sqlx::query_scalar("select id from src where document_id = $1 and page_no = $2")
-        .bind(document_id)
-        .bind(page_no)
-        .fetch_all(&mut *conn)
-        .await?;
     let mut reasons: Vec<Why> = hidden_reasons(&mut *conn, perm, gate, &src_ids)
         .await?
         .into_values()
         .collect();
-    // rows read from the page that wait in the review queue are on the page too
-    let queued: Vec<Option<Value>> = sqlx::query_scalar(
-        "select payload->'observation' from review_item where document_id = $1 and status = 'open' \
-         and kind = 'candidate_row' and coalesce(payload->>'page_no', payload->'src'->>'page_no') = $2",
-    )
-    .bind(document_id)
-    .bind(page_no.to_string())
-    .fetch_all(&mut *conn)
-    .await?;
     for obs in queued {
         let obs = obs.unwrap_or(Value::Null);
         let scope = obs_category_scope(obs.get("category").and_then(Value::as_str));

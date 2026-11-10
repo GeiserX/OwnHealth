@@ -69,7 +69,16 @@ test('search passes the typed term on', () => {
 	assert.equal(searchTarget('LDL'), '/biomarkers?q=LDL');
 	assert.equal(searchTarget('labnorte'), '/documents?q=labnorte');
 	assert.equal(searchTarget('  '), null);
-	assert.equal(searchTarget('APOE'), '/genome');
+	assert.equal(searchTarget('APOE'), '/genome?q=APOE');
+});
+
+test('search sends marker names to Biomarkers and gene symbols to Genome with the term', () => {
+	for (const m of ['Lp(a)', 'lpa', 'PCR', 'CRP', 'ALT', 'AST', 'GGT', 'hemoglobina', 'plaquetas', 'platelets', 'leucocitos', 'VCM', 'MCV', 'B12', 'T4', 'eGFR', 'filtrado glomerular', 'albúmina', 'albumin'])
+		assert.equal(searchTarget(m), `/biomarkers?q=${encodeURIComponent(m)}`, m);
+	assert.equal(searchTarget('CYP2C19'), '/genome?q=CYP2C19');
+	// Short marker names match whole words only.
+	assert.equal(searchTarget('salt'), '/documents?q=salt');
+	assert.equal(searchTarget('pasta'), '/documents?q=pasta');
 });
 
 test('download file name comes from Content-Disposition', () => {
@@ -222,4 +231,55 @@ test('hours never read 60 min', () => {
 	assert.equal(hoursMinutes(7.5), '7 h 30 min');
 	assert.equal(hoursMinutes(6.6), '6 h 36 min');
 	assert.equal(hoursMinutes(0), '0 h 0 min');
+});
+
+import { errKey, stripErrorName, validationDetail } from '../src/lib/logic/errors.ts';
+import { sourceLabel, unitLabel } from '../src/lib/logic/format.ts';
+
+const KEYS = new Set([
+	'err_insufficient_scope', 'err_recovery', 'err_login', 'err_stepup_pw', 'err_refused', 'err_dns', 'err_tls',
+	'err_sender_dup', 'err_sender_other', 'err_folder_overlap', 'err_unsupported_file', 'err_decimal', 'err_no_connection', 'err_pdf_password'
+]);
+const has = (k: string) => KEYS.has(k);
+
+test('errors read in plain words: the code first, then the common cause, else the server message', () => {
+	assert.equal(errKey('insufficient_scope', 'Token lacks read:labs', has), 'err_insufficient_scope');
+	assert.equal(errKey('login_failed', 'Wrong name or password.', has), 'err_login');
+	assert.equal(errKey('login_failed', 'Wrong password.', has), 'err_stepup_pw');
+	assert.equal(errKey('recovery_invalid', 'Unknown or used recovery code.', has), 'err_recovery');
+	assert.equal(errKey(null, 'ImapError: connect: Connection refused (os error 61)', has), 'err_refused');
+	assert.equal(errKey(null, 'ImapError: resolve: failed to lookup address information: nodename nor servname provided, or not known', has), 'err_dns');
+	assert.equal(errKey('conflict', 'This sender is already on the list.', has), 'err_sender_dup');
+	assert.equal(errKey('conflict', 'This sender is already on the list for another profile. Change it.', has), 'err_sender_other');
+	assert.equal(errKey('invalid', 'another folder inbox already reads this folder, a folder inside it or a folder around it', has), 'err_folder_overlap');
+	assert.equal(errKey('unsupported_upload', 'notes.txt: not a PDF, image, Apple Health export, FHIR bundle or genome facts file', has), 'err_unsupported_file');
+	assert.equal(errKey('invalid', 'not a decimal: "abc"', has), 'err_decimal');
+	assert.equal(errKey(null, 'Failed to fetch', has), 'err_no_connection');
+	assert.equal(errKey(null, 'PasswordError: the file is encrypted', has), 'err_pdf_password');
+	assert.equal(errKey('bad_input', 'A retraction needs a reason.', has), null);
+	assert.equal(stripErrorName('RuntimeError: request to 127.0.0.1 failed'), 'request to 127.0.0.1 failed');
+	assert.equal(stripErrorName('plain words'), 'plain words');
+});
+
+test('a validation answer names the field that failed, never "Unprocessable Entity"', () => {
+	const d = [{ type: 'string_too_short', loc: ['body', 'password'], msg: 'String should have at least 12 characters' }];
+	assert.deepEqual(validationDetail(d), { code: 'invalid', message: 'password: String should have at least 12 characters' });
+	assert.deepEqual(validationDetail([{ loc: ['body'], msg: 'Field required' }]), { code: 'invalid', message: 'Field required' });
+});
+
+test('units print as people write them', () => {
+	assert.equal(unitLabel('x10^9/L'), '×10⁹/L');
+	assert.equal(unitLabel('x10^3/µL'), '×10³/µL');
+	assert.equal(unitLabel('10*3/uL'), '×10³/µL');
+	assert.equal(unitLabel('mL/min/1.73m2'), 'mL/min/1.73m²');
+	assert.equal(unitLabel('mg/dL'), 'mg/dL');
+	assert.equal(unitLabel(null), '');
+});
+
+test('a manual source reads in the reader language, alone or with its date', () => {
+	assert.equal(sourceLabel('manual', 'introducido a mano'), 'introducido a mano');
+	assert.equal(sourceLabel('manual · 2026-09-14', 'entered by hand'), 'entered by hand · 2026-09-14');
+	assert.equal(sourceLabel('Entered by hand', 'introducido a mano'), 'introducido a mano');
+	assert.equal(sourceLabel('LabNorte · 2026-09-14 · p2', 'introducido a mano'), 'LabNorte · 2026-09-14 · p2');
+	assert.equal(sourceLabel(null, 'x'), '');
 });

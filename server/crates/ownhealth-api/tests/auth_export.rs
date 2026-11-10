@@ -278,6 +278,79 @@ async fn delete_profile() -> R {
     Ok(())
 }
 
+/// A level-3 dedup link (observation_link has no profile_id) and OAuth consents naming the profile,
+/// revoked or live, never block the delete; consents drop the profile, and one left empty is revoked.
+#[tokio::test]
+async fn delete_profile_with_dedup_links_and_oauth_consents() -> R {
+    let env = Env::new(true).await?;
+    let (lucia, sam, alex) = (env.profile("lucia"), env.profile("sam"), env.user("alex"));
+    let mut c = env.pool().acquire().await?;
+    let manual = || SrcRef::New(SrcIn::manual(Some(alex)));
+    let first = commit_observation(
+        &mut c,
+        &obs(lucia, "97", "2026-10-02")?,
+        &manual(),
+        CommitOptions::new("person"),
+    )
+    .await?;
+    let second = commit_observation(
+        &mut c,
+        &obs(lucia, "98", "2026-10-03")?,
+        &manual(),
+        CommitOptions::new("person"),
+    )
+    .await?;
+    ownhealth_core::dedup::link_observation(&mut c, first.id, &second.src_id, None).await?;
+    sqlx::query(
+        "insert into oauth_client (client_id, redirect_uris, document, expires_at) values \
+         ('https://claude.example/c.json', '{https://claude.example/cb}', '{}', now())",
+    )
+    .execute(&mut *c)
+    .await?;
+    let consent = |profiles: Vec<Uuid>, revoked: bool| {
+        sqlx::query_scalar::<_, Uuid>(
+            "insert into oauth_consent (user_id, client_id, scopes, profile_ids, default_profile, expires_at, \
+             revoked_at) values ($1, 'https://claude.example/c.json', '{read:summary}', $2, $2[1], \
+             now() + interval '1 day', case when $3 then now() end) returning id",
+        )
+        .bind(alex)
+        .bind(profiles)
+        .bind(revoked)
+    };
+    let revoked = consent(vec![lucia], true).fetch_one(&mut *c).await?;
+    let both = consent(vec![lucia, sam], false).fetch_one(&mut *c).await?;
+    let only = consent(vec![lucia], false).fetch_one(&mut *c).await?;
+    sqlx::query("insert into oauth_refresh_token (consent_id, secret_sha256, expires_at) values ($1, '\\x01', now() + interval '1 day')")
+        .bind(only)
+        .execute(&mut *c)
+        .await?;
+    drop(c);
+    let r = env
+        .as_user(alex)
+        .await?
+        .delete("/api/profiles/lucia?confirm=lucia")
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(env.scalar_i64("select count(*) from observation_link").await?, 0);
+    type Row = (Vec<Uuid>, Option<Uuid>, bool);
+    let row = |id: Uuid| {
+        sqlx::query_as::<_, Row>(
+            "select profile_ids, default_profile, revoked_at is not null from oauth_consent where id = $1",
+        )
+        .bind(id)
+    };
+    assert_eq!(row(revoked).fetch_one(env.pool()).await?, (vec![], None, true));
+    assert_eq!(row(both).fetch_one(env.pool()).await?, (vec![sam], Some(sam), false));
+    assert_eq!(row(only).fetch_one(env.pool()).await?, (vec![], None, true));
+    let live_refresh = env
+        .scalar_i64(&format!(
+            "select count(*) from oauth_refresh_token where consent_id = '{only}' and revoked_at is null"
+        ))
+        .await?;
+    assert_eq!(live_refresh, 0);
+    Ok(())
+}
+
 #[tokio::test]
 async fn shared_blob_survives() -> R {
     let env = Env::new(true).await?;

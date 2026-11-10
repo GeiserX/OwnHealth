@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 use ownhealth_core::Runtime;
 use ownhealth_core::access::{Permission, Principal, PrincipalKind};
 use ownhealth_core::audit::{AuditEvent, write_audit};
@@ -22,7 +22,7 @@ use ownhealth_core::pyjson::pydantic_datetime_utc;
 
 use crate::validate::pydantic_datetimes;
 use ownhealth_core::records::{self as rec, RecordIn, RecordOptions};
-use ownhealth_ingest_structured::manual::{ManualObservation, add_manual_observation};
+use ownhealth_ingest_structured::manual::{ManualObservation, add_manual_observation, refusal as manual_refusal};
 use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -359,7 +359,7 @@ fn lax_record(kind: &str, data: &mut Map<String, Value>) -> Result<(), Vec<Value
 fn src(principal: &Principal, profile_id: Uuid) -> SrcRef {
     SrcRef::New(SrcIn {
         profile_id: Some(profile_id),
-        label: Some("Entered by hand".into()),
+        label: Some("manual".into()), // a code: the UI says "entered by hand" in its language
         ..SrcIn::manual(principal.user_id)
     })
 }
@@ -728,6 +728,9 @@ async fn manual_observation(
     let Some(effective_at) = body.effective_at else {
         return Err(bad_input("effective_at needs a UTC offset.").into());
     };
+    if let Some(why) = manual_refusal(body.value.trim(), effective_at, Utc::now()) {
+        return Err(bad_input(why).into());
+    }
     if let Some(old) = body.corrects {
         match get_observation(&mut tx, old).await? {
             Some(o) if o.profile_id == perm.profile.id => {}

@@ -87,6 +87,23 @@ async fn relative_guardian_manages_until_claimed() -> R {
         .await?;
     assert_eq!(r.status, StatusCode::CREATED, "{:?}", r.json);
     assert_eq!(r.json["slug"], "mateo");
+    // a birth date in the future or before 1900, or a country that is not two letters, is refused
+    for bad in [
+        json!({"birth_date": "2099-01-01"}),
+        json!({"birth_date": "1850-01-01"}),
+        json!({"country": "X1"}),
+    ] {
+        let mut body = json!({"display_name": "Nadie Rivera", "role": "guardian", "relationship": "child"});
+        if let (Some(b), Some(extra)) = (body.as_object_mut(), bad.as_object()) {
+            b.extend(extra.clone());
+        }
+        let r = alex.post("/api/household/profiles", &body).await?;
+        assert_eq!(
+            (r.status, r.code()),
+            (StatusCode::UNPROCESSABLE_ENTITY, "bad_input"),
+            "{bad}"
+        );
+    }
     let mateo: Uuid = serde_json::from_value(r.json["id"].clone())?;
     // the guardian grants Sam guardian too, with step-up
     let body = json!({"user_id": env.user("sam"), "profile": "mateo", "role": "guardian"});
@@ -349,6 +366,99 @@ async fn audit_viewer_scope() -> R {
         a.get("/api/audit?limit=x").await?.status,
         StatusCode::UNPROCESSABLE_ENTITY
     );
+    Ok(())
+}
+
+// A server-side revocation (a replayed OAuth code) has no token row, only the app's name: the log names
+// the app that lost its access, not "deleted token".
+#[tokio::test]
+async fn audit_names_the_app_of_a_tokenless_row() -> R {
+    let env = Env::new(true).await?;
+    let mut c = env.pool().acquire().await?;
+    write_audit(
+        &mut c,
+        &AuditEvent {
+            actor_id: Some(env.user("alex")),
+            client: Some("Agente de ejemplo".into()),
+            ..AuditEvent::new("token", "mcp", "oauth_reuse_revoked")
+        },
+    )
+    .await?;
+    drop(c);
+    let log = env.as_user(env.user("alex")).await?.get("/api/audit").await?.json;
+    let row = log["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|e| e["action"] == "oauth_reuse_revoked")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(row["actor"], "Agente de ejemplo (token)");
+    Ok(())
+}
+
+// What agents did stays findable however many pages the person opened since: `via=mcp` filters on the
+// server, so a page of 60 is never all page views.
+#[tokio::test]
+async fn audit_filters_by_channel() -> R {
+    let env = Env::new(true).await?;
+    let mut c = env.pool().acquire().await?;
+    write_audit(
+        &mut c,
+        &AuditEvent {
+            actor_id: Some(env.user("alex")),
+            tool: Some("get_trend".into()),
+            profile_id: Some(env.profile("alex")),
+            ..AuditEvent::new("user", "mcp", "mcp")
+        },
+    )
+    .await?;
+    for _ in 0..3 {
+        write_audit(
+            &mut c,
+            &AuditEvent {
+                actor_id: Some(env.user("alex")),
+                profile_id: Some(env.profile("alex")),
+                ..AuditEvent::new("user", "ui", "dashboard")
+            },
+        )
+        .await?;
+    }
+    drop(c);
+    let mut a = env.as_user(env.user("alex")).await?;
+    let page = a.get("/api/audit?limit=2&via=mcp").await?.json;
+    let vias: Vec<&str> = page["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["via"].as_str())
+        .collect();
+    assert_eq!(vias, vec!["mcp"], "{page}");
+    let all = a.get("/api/audit?limit=2").await?.json;
+    assert!(
+        all["items"]
+            .as_array()
+            .is_some_and(|i| i.iter().all(|e| e["via"] == "ui"))
+    );
+    Ok(())
+}
+
+// A typo in the channel ('agent' for 'mcp') is a bad request that names the allowed values, never an
+// empty page that reads as "no agent activity".
+#[tokio::test]
+async fn audit_refuses_an_unknown_channel() -> R {
+    let env = Env::new(true).await?;
+    let mut a = env.as_user(env.user("alex")).await?;
+    let r = a.get("/api/audit?via=agent").await?;
+    assert_eq!(
+        (r.status, r.code()),
+        (StatusCode::UNPROCESSABLE_ENTITY, "bad_input"),
+        "{}",
+        r.json
+    );
+    let msg = r.json.to_string();
+    assert!(msg.contains("mcp, ui or api"), "{msg}");
+    assert_eq!(a.get("/api/audit?via=ui").await?.status, StatusCode::OK);
     Ok(())
 }
 

@@ -10,7 +10,8 @@
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
 	import { openSource } from '#lib/components/pages1/source.svelte';
 	import Tip from '#lib/components/pages1/Tip.svelte';
-	import { Loader, tf, tp, yfrac } from '#lib/components/pages1/util.svelte';
+	import { Loader, tf, tp, unitLabel, yfrac } from '#lib/components/pages1/util.svelte';
+	import { ApiError } from '#lib/api/core';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
@@ -18,6 +19,7 @@
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
 	import { buildBars, niceStep } from '#lib/logic/axis';
+	import { refRange, sourceLabel } from '#lib/logic/format';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const profile = $derived(currentProfile());
@@ -45,6 +47,7 @@
 		if (!code) {
 			const q = query || undefined;
 			obs.run(() => searchObservations(slug, { category: 'laboratory', lang, q }), slug);
+			dash.run(() => getDashboard(slug, lang), slug);
 			return;
 		}
 		unitIdx = 0;
@@ -73,6 +76,11 @@
 		return [...by.values()].sort((a, b) => a.latest.name.localeCompare(b.latest.name));
 	});
 
+	// Each marker's status word from the dashboard (lane E). A marker the dashboard does not show has none.
+	const statusOf = $derived(new Map((dash.data?.systems ?? []).flatMap((s) => (s.withheld ? [] : s.markers.map((m) => [m.alias_group, m.status] as const)))));
+	// An unknown code is not an outage: there is nothing to retry.
+	const unknown = $derived(trends.error instanceof ApiError && trends.error.status === 404 && trends.error.code === 'unknown');
+
 	const tr = $derived(trends.data?.[Math.min(unitIdx, (trends.data?.length ?? 1) - 1)] ?? null);
 	const pts = $derived((tr?.points ?? []) as TrendPointStatus[]);
 	const last = $derived(pts.length ? pts[pts.length - 1] : null);
@@ -94,13 +102,16 @@
 	const shapeOf = (lab: string | null) => SHAPES[Math.max(0, labs.indexOf(lab ?? '—')) % SHAPES.length];
 
 	// ---- chart geometry (port of the mockup's ldlChart) ----
-	const W = 860;
+	// 860 wide as in the mockup. In a narrow card the drawing gets the card's own width (a little less,
+	// so 10-unit text lands at 11 px), or a phone would shrink every label to about 4 px.
+	let chartW = $state(0);
+	const W = $derived(chartW > 0 && chartW < 760 ? Math.max(300, Math.round(chartW / 1.1)) : 860);
 	const H = 330;
 	const pl = 60;
 	const pr = 20;
 	const pt = 14;
 	const pb = 74;
-	const iw = W - pl - pr;
+	const iw = $derived(W - pl - pr);
 	const ih = H - pt - pb;
 	const geo = $derived.by(() => {
 		if (!pts.length || !tr) return null;
@@ -150,10 +161,16 @@
 		const clampX = (d: string) => Math.min(sx(x1), Math.max(sx(x0), sx(yfrac(d))));
 		// Annotations with an end draw as a bar on the Meds row; one-day ones as a dot on the Events row.
 		// A course with no end is still running and draws to today.
-		const bars = buildBars(tr.annotations, clampX, asOf);
+		const bars = buildBars(tr.annotations, clampX, asOf, `${x0}-01-01`);
 		return { x0, x1, y0, y1, sx, sy, ticks, years, xy, band, marks, bars };
 	});
 
+	// Courses too short to hold their name, near the right edge: their names go under the chart.
+	const unlabelled = $derived(
+		geo
+			? [...new Set(geo.bars.filter((b) => b.span && !(b.x2 - b.x > b.label.length * 5.6 + 12) && !(b.x2 + 6 + b.label.length * 5.6 < W - pr)).map((b) => b.label))]
+			: []
+	);
 	// Extra Meds rows when courses overlap: each adds 14 px below the chart.
 	const extra = $derived(geo ? Math.max(0, ...geo.bars.filter((b) => b.span).map((b) => b.row)) * 14 : 0);
 	// Hover: the printed string and its provenance.
@@ -161,7 +178,12 @@
 	const fmt = (v: number) => fmtNum(v);
 	const pctFmt = (v: number) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${fmtNum(Math.abs(v), 1)}%`;
 	const change = $derived(pts.length > 1 ? pts[pts.length - 1].value - pts[pts.length - 2].value : null);
-	const rangeOf = (p: TrendPointStatus) => p.range ?? (p.ref_low != null || p.ref_high != null ? `${p.ref_low ?? ''}-${p.ref_high ?? ''}` : '—');
+	// The printed range is in the lab's unit. In another unit the range comes from the converted numbers.
+	const converted = $derived(unitIdx > 0);
+	const rangeOf = (p: TrendPointStatus) => (!converted && p.range) || refRange(p.ref_low, p.ref_high, fmt);
+	const years = (a: string, b: string) => (a === b ? a : `${a}–${b}`);
+	// A number from the dashboard ('5.6') in the reader's language; words such as '7:14' stay as they are.
+	const numText = (v: string | number) => (typeof v === 'number' || /^-?\d+(\.\d+)?$/.test(v) ? fmtNum(Number(v)) : v);
 </script>
 
 {#if !code}
@@ -190,14 +212,22 @@
 		{:else if !groups.length}
 			<div class="empty">{t('h1_bio_none')}</div>
 		{:else}
-			<table class="t nw">
-				<thead><tr><th>{t('h1_th_name')}</th><th>{t('h1_th_latest')}</th><th>{t('h1_th_printed')}</th><th>{t('h1_th_date')}</th><th>{t('h1_th_lab')}</th><th style="text-align:right">{t('h1_th_n')}</th><th>{t('h1_th_source')}</th></tr></thead>
+			<div class="tscroll">
+			<table class="t nw bml">
+				<thead><tr><th>{t('h1_th_name')}</th><th>{t('h1_th_latest')}</th><th>{t('h1_th_status')}</th><th class="ph-hide">{t('h1_th_printed')}</th><th>{t('h1_th_date')}</th><th>{t('h1_th_lab')}</th><th style="text-align:right">{t('h1_th_n')}</th><th>{t('h1_th_source')}</th></tr></thead>
 				<tbody>
 					{#each groups as g (g.latest.alias_group)}
 						<tr>
 							<td><a href="/biomarkers?code={encodeURIComponent(g.latest.alias_group)}">{g.latest.name}</a></td>
-							<td class="num" style="font-weight:600">{g.latest.printed.value} <span class="muted" style="font-weight:400">{g.latest.printed.unit ?? ''}</span></td>
-							<td class="mono muted">{g.latest.printed.name}</td>
+							<td class="num" style="font-weight:600" title={g.latest.printed.value + (g.latest.printed.unit ? ' ' + g.latest.printed.unit : '')}>
+								{#if g.latest.value != null}{fmtNum(g.latest.value)} <span class="muted" style="font-weight:400">{unitLabel(g.latest.unit ?? g.latest.printed.unit)}</span>
+								{:else}{g.latest.printed.value} <span class="muted" style="font-weight:400">{unitLabel(g.latest.printed.unit)}</span>{/if}
+							</td>
+							<td>
+								{#if statusOf.get(g.latest.alias_group)}<StatusChip status={statusOf.get(g.latest.alias_group)!} />
+								{:else}<span class="dim">—</span>{/if}
+							</td>
+							<td class="mono muted ph-hide">{g.latest.printed.name}</td>
 							<td class="num">{g.latest.date}</td>
 							<td>{g.latest.lab ?? '—'}</td>
 							<td class="num" style="text-align:right">{g.n}</td>
@@ -206,6 +236,7 @@
 					{/each}
 				</tbody>
 			</table>
+			</div>
 		{/if}
 	</div>
 {:else}
@@ -219,9 +250,7 @@
 			</h1>
 			<div class="sub">
 				{#if pts.length}
-					{profile?.display_name} · {tp('h1_meas', pts.length, { labs: tp('h1_labs', labs.length), from: pts[0].date.slice(0, 4), to: pts[pts.length - 1].date.slice(0, 4) })}
-				{:else}
-					<a href="/biomarkers">← {t('h1_back')}</a>
+					{profile?.display_name} · {tp('h1_meas', pts.length, { labs: tp('h1_labs', labs.length), years: years(pts[0].date.slice(0, 4), pts[pts.length - 1].date.slice(0, 4)) })}
 				{/if}
 			</div>
 		</div>
@@ -230,6 +259,8 @@
 
 	{#if trends.loading && !trends.data}
 		<div class="card"><div class="empty">{t('loading')}</div></div>
+	{:else if unknown}
+		<div class="card"><div class="empty">{tf('h1_code_unknown', { code: code ?? '' })}</div></div>
 	{:else if trends.error}
 		<div class="card"><NotReady error={trends.error} onretry={load} /></div>
 	{:else if tr && !pts.length}
@@ -238,14 +269,14 @@
 		<div class="bm">
 			<div>
 				<div class="card" style="padding:12px 14px 6px">
-					<div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
-						<div class="kv"><span class="big num">{fmt(last.value)}</span><span class="muted">{last.unit}</span></div>
+					<div style="display:flex;align-items:center;gap:6px 16px;margin-bottom:4px;flex-wrap:wrap">
+						<div class="kv"><span class="big num">{fmt(last.value)}</span><span class="muted">{unitLabel(last.unit)}</span></div>
 						{#if marker}<StatusChip status={marker.status} />{:else if last.status}<StatusChip status={last.status} />{/if}
-						<span class="muted" style="font-size:12px">{last.date} · <SourceChip label={last.src_label ?? last.src} src={last.src} onopen={openSource} /></span>
+						<span class="muted" style="font-size:12px"><span class="num" style="white-space:nowrap">{last.date}</span> · <SourceChip label={last.src_label ?? last.src} src={last.src} onopen={openSource} /></span>
 						{#if (trends.data?.length ?? 0) > 1}
 							<div class="seg" role="group" aria-label={t('h1_th_value')} style="margin-left:auto">
 								{#each trends.data ?? [] as u, i (u.unit)}
-									<button class:on={i === unitIdx} aria-pressed={i === unitIdx} onclick={() => (unitIdx = i)}>{u.unit}</button>
+									<button class:on={i === unitIdx} aria-pressed={i === unitIdx} onclick={() => (unitIdx = i)}>{unitLabel(u.unit)}</button>
 								{/each}
 							</div>
 						{/if}
@@ -257,7 +288,9 @@
 						<span class="dim">{t('h1_lg_shape')} {#each labs as l (l)}{GLYPH[shapeOf(l)]} {l}{' '}{/each}</span>
 						<span class="dim">{t('h1_lg_flags')}</span>
 					</div>
-					<svg width="100%" viewBox="0 0 {W} {H + extra}" role="img" aria-label="{tr.name} · {pts.length}">
+					<!-- role=group, not img: its points are buttons a keyboard and a screen reader reach one by one. -->
+					<div bind:clientWidth={chartW}>
+					<svg width="100%" viewBox="0 0 {W} {H + extra}" role="group" aria-label={tp('h1_chart_label', pts.length, { name: tr.name, v: fmt(last.value), u: unitLabel(last.unit) })}>
 						{#each geo.ticks as v (v)}
 							<line x1={pl} x2={W - pr} y1={geo.sy(v)} y2={geo.sy(v)} stroke={C.grid} />
 							<text x={pl - 7} y={geo.sy(v) + 4} fill={C.axis} font-size="11" text-anchor="end">{fmt(v)}</text>
@@ -265,7 +298,8 @@
 						{#each geo.band as b, i (i)}
 							{#if b}<rect x={b.x} y={b.y} width={b.w} height={b.h} fill="#3fb68b" opacity=".08" />{/if}
 						{/each}
-						<text x={pl + 6} y={geo.sy(geo.y0) - 6} fill="#3fb68b" font-size="10.5" opacity=".9">{t('h1_band')}</text>
+						<!-- Only when it fits: on a phone the legend line above says what the band is. -->
+						{#if t('h1_band').length * 5.8 < iw - 12}<text x={pl + 6} y={geo.sy(geo.y0) - 6} fill="#3fb68b" font-size="10.5" opacity=".9">{t('h1_band')}</text>{/if}
 						{#each geo.years as y (y)}
 							<line x1={geo.sx(y)} x2={geo.sx(y)} y1={pt} y2={pt + ih} stroke={C.grid} opacity=".6" />
 							<text x={geo.sx(y)} y={pt + ih + 15} fill={C.axis} font-size="11" text-anchor="middle">{y}</text>
@@ -311,13 +345,17 @@
 						{/each}
 						{#if geo.bars.length}
 							{@const my = pt + ih + 30}
-							<text x={pl - 7} y={my + 9} fill={C.axis} font-size="10.5" text-anchor="end">{t('h1_meds_row')}</text>
+							{#if geo.bars.some((b) => b.span)}<text x={pl - 7} y={my + 9} fill={C.axis} font-size="10.5" text-anchor="end">{t('h1_meds_row')}</text>{/if}
 							{#each geo.bars.filter((b) => b.span) as b, i (i)}
+								<!-- A wide bar holds its label; a narrow one prints it after its end, or in the list under the chart. -->
+								{@const wide = b.x2 - b.x > b.label.length * 5.6 + 12}
+								{@const after = b.x2 + 6 + b.label.length * 5.6 < W - pr}
 								<rect x={b.x} y={my + b.row * 14} width={Math.max(4, b.x2 - b.x)} height="12" rx="3" fill={C.accent} opacity=".55"><title>{b.label}{b.ongoing ? ' · ' + t('h1_ongoing') : ''}</title></rect>
 								{#if b.ongoing}<path d="M{b.x2 - 1} {my + b.row * 14 + 2}l5 4-5 4z" fill={C.accent} opacity=".8" />{/if}
-								<text x={b.x + 6} y={my + b.row * 14 + 9.5} fill="#0c1222" font-size="10" font-weight="600">{b.x2 - b.x > 110 ? b.label : ''}</text>
+								{#if wide}<text x={b.x + 6} y={my + b.row * 14 + 9.5} fill="#0c1222" font-size="10" font-weight="600">{b.label}</text>
+								{:else if after}<text x={b.x2 + (b.ongoing ? 9 : 4)} y={my + b.row * 14 + 9.5} fill="#8a93a5" font-size="10">{b.label}</text>{/if}
 							{/each}
-							<text x={pl - 7} y={my + 37 + extra} fill={C.axis} font-size="10.5" text-anchor="end">{t('h1_ev_row')}</text>
+							{#if geo.bars.some((b) => !b.span)}<text x={pl - 7} y={my + 37 + extra} fill={C.axis} font-size="10.5" text-anchor="end">{t('h1_ev_row')}</text>{/if}
 							{#each geo.bars.filter((b) => !b.span) as b, i (i)}
 								<circle cx={b.x} cy={my + 33 + extra} r="4" fill="#c39bd3"><title>{b.label}</title></circle>
 								<!-- left of the dot, unless that would print over the row's own label -->
@@ -326,6 +364,10 @@
 							{/each}
 						{/if}
 					</svg>
+					</div>
+					{#if unlabelled.length}
+						<div class="dim" style="font-size:11px;margin:0 0 6px {(pl / W) * 100}%">{t('h1_meds_row')}: {unlabelled.join(' · ')}</div>
+					{/if}
 				</div>
 
 				<div class="card" style="margin-top:12px;padding:6px 6px 2px;overflow-x:auto">
@@ -337,7 +379,7 @@
 							{#each pts.slice().reverse() as p, i (p.src + "|" + i)}
 								<tr>
 									<td class="num">{p.date}</td>
-									<td class="num" style="font-weight:600;color:{p.status && p.status !== 'ok' ? C[p.status] : 'inherit'}">{fmt(p.value)} <span class="muted" style="font-weight:400">{p.unit}</span></td>
+									<td class="num" style="font-weight:600;color:{p.status && p.status !== 'ok' ? C[p.status] : 'inherit'}">{fmt(p.value)} <span class="muted" style="font-weight:400">{unitLabel(p.unit)}</span></td>
 									<td class="mono muted">{p.printed}</td>
 									<td class="num">{rangeOf(p)}</td>
 									<td class="mono">{p.loinc ?? '—'}</td>
@@ -362,7 +404,7 @@
 						<div style="display:flex;gap:16px;align-items:baseline">
 							<div>
 								<div class="dim" style="font-size:11px">{t('h1_change')}</div>
-								<div style="font-size:18px;font-weight:650">{change > 0 ? '+' : change < 0 ? '−' : ''}{fmt(Math.abs(+change.toFixed(4)))} {last.unit}</div>
+								<div style="font-size:18px;font-weight:650;white-space:nowrap">{change > 0 ? '+' : change < 0 ? '−' : ''}{fmt(Math.abs(+change.toFixed(4)))} {unitLabel(last.unit)}</div>
 								{#if tr.stats.last_vs_previous_pct != null}<div class="muted" style="font-size:11.5px">{pctFmt(tr.stats.last_vs_previous_pct)}</div>{/if}
 							</div>
 							{#if tr.stats.rcv_pct != null}
@@ -387,7 +429,7 @@
 						{#each related as m (m.alias_group)}
 							<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #20252f">
 								<a style="flex:1;color:inherit" href="/biomarkers?code={encodeURIComponent(m.alias_group)}">{m.name}</a>
-								<span class="num" style="color:{m.status === 'ok' ? 'inherit' : C[m.status]};font-weight:600">{m.value} {m.unit}<span class="sr-only"> · {t(m.status)}</span></span>
+								<span class="num" style="color:{m.status === 'ok' ? 'inherit' : C[m.status]};font-weight:600">{numText(m.value)} {unitLabel(m.unit)}<span class="sr-only"> · {t(m.status)}</span></span>
 								{#if m.spark.length}<Sparkline values={m.spark} status={m.status} w={60} h={20} />{/if}
 							</div>
 						{/each}
@@ -407,12 +449,29 @@
 {#if tip && pts[tip.i]}
 	{@const p = pts[tip.i]}
 	<Tip x={tip.x} y={tip.y}>
-		<b>{fmt(p.value)} {p.unit}</b>{#if p.status}&nbsp;·&nbsp;<StatusChip status={p.status} />{/if}<br />
+		<b>{fmt(p.value)} {unitLabel(p.unit)}</b>{#if p.status}&nbsp;·&nbsp;<StatusChip status={p.status} />{/if}<br />
 		<span class="mono">{p.printed}</span><br />
-		{p.date} · {p.lab ?? '—'}{p.method ? ' · ' + methodLabel(p.method) : ''}<br />
+		<span class="num" style="white-space:nowrap">{p.date}</span> · {p.lab ?? '—'}{p.method ? ' · ' + methodLabel(p.method) : ''}<br />
 		<span class="dim">{t('h1_printed_range')} {rangeOf(p)}{p.loinc ? ' · LOINC ' + p.loinc : ''}</span><br />
-		<span style="color:#6ea8fe">{tf('h1_open_page', { p: p.src_label ?? p.src })}</span>
+		<span style="color:#6ea8fe;white-space:nowrap">{tf('h1_open_page', { p: sourceLabel(p.src_label ?? p.src, t('src_manual')) })}</span>
 	</Tip>
 {/if}
 
 <SourcePanel />
+
+<style>
+	/* The printed name repeats the name on a phone: the list keeps what fits. */
+	/* On a phone the status must show: the name wraps onto two lines instead of taking the width. */
+	@media (max-width: 760px) {
+		.ph-hide {
+			display: none;
+		}
+		.bml td:first-child {
+			white-space: normal;
+			min-width: 7em;
+		}
+		.bml td:nth-child(2) {
+			white-space: normal;
+		}
+	}
+</style>

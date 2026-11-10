@@ -266,7 +266,7 @@ Rules that apply to every device source:
 - **HRV is never compared across vendors.** The method (rMSSD at night, SDNN spot reading) is stored with every value.
 - **Short-window APIs are polled from day one** (Polar about 30 to 90 days, Dexcom 90 days) and a sync gap raises a visible warning.
 - **Single-use refresh tokens** (Oura, Whoop, Dexcom): persist the new token in the same transaction that marks the old one used, before the next request.
-- Store UTC plus the original offset; assign a sleep to the date of waking.
+- Store UTC plus the original offset; assign a sleep to the date of waking. A source that does not record the offset (Gadgetbridge) is stored without one, and its days are UTC days until profiles carry a time zone.
 - Cycle, mental-health and sexual-health data carry scope `read:sensitive` from the first row.
 
 ## 5. Phase summary

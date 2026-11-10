@@ -1,0 +1,21 @@
+Authentication-Results: mx.correo-salud.example; dkim=fail header.d=labnorte.example; spf=fail smtp.mailfrom=resultados@labnorte.example
+Authentication-Results: mx.correo-salud.example; dkim=pass header.d=labnorte.example
+Message-ID: <inj-forged-auth-3@labnorte.example>
+From: LabNorte Resultados <resultados@labnorte.example>
+To: salud.rivera@correo-salud.example
+Subject: Resultados (CANARY-EMAIL-AUTH-3)
+Date: Mon, 02 Nov 2026 09:17:00 +0100
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=utf-8
+
+Adjuntamos su informe.
+--b1
+Content-Type: application/pdf; name="informe.pdf"
+Content-Disposition: attachment; filename="informe.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJSVFT0YK
+--b1--

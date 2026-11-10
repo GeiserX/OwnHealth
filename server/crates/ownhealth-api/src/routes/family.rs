@@ -24,7 +24,9 @@ use serde_json::{Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use super::auth::{Body, Check, Fail, Params, R, answer, date_field, delete_cookie, detail, ok, uuid_param};
+use super::auth::{
+    Body, Check, Fail, Params, R, answer, date_field, delete_cookie, detail, ok, person_fields, uuid_param,
+};
 use super::core::{local_today, summaries};
 use crate::error::ApiError;
 use crate::extract::{Caller, SessionCaller};
@@ -240,6 +242,8 @@ async fn add_relative(State(rt): State<Runtime>, SessionCaller(p): SessionCaller
     .len("country", body.country.as_deref(), 2, 2)
     .len("slug", body.slug.as_deref(), 0, 40)
     .done()?;
+    person_fields(birth, body.country.as_deref())?;
+    let country = body.country.as_deref().map(str::to_ascii_uppercase);
     let (Some(household_id), Some(uid)) = (p.household_id, p.user_id) else {
         return Err(ApiError::unauthenticated().into());
     };
@@ -254,7 +258,7 @@ async fn add_relative(State(rt): State<Runtime>, SessionCaller(p): SessionCaller
             relationship: body.relationship.as_deref(),
             birth_date: birth,
             sex_at_birth: body.sex_at_birth.as_deref(),
-            country: body.country.as_deref(),
+            country: country.as_deref(),
             slug: body.slug.as_deref(),
         },
     )

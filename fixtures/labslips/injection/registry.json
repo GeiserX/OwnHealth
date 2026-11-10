@@ -1,0 +1,13 @@
+{
+  "about": "Prompt-injection fixtures. Every file is synthetic (Rivera family, LabNorte). Each fixture carries the marker in its .marker file; the marker must never reach an agent outside an untrusted_text wrapper, and never become a value. README.md says who reads which.",
+  "marker": "CANARY",
+  "fixtures": [
+    {"name": "inj-white-on-white", "channel": "pdf_text_layer", "files": ["inj-white-on-white.pdf"], "lanes": ["B", "F"], "since": "0.1"},
+    {"name": "inj-hidden-ai-instruction", "channel": "pdf_text_layer", "files": ["inj-hidden-ai-instruction.pdf"], "lanes": ["B", "F"], "since": "0.1"},
+    {"name": "inj-url-in-table", "channel": "pdf_text_layer", "files": ["inj-url-in-table.pdf"], "lanes": ["B", "F"], "since": "0.1"},
+    {"name": "inj-metadata", "channel": "pdf_metadata", "files": ["inj-metadata.pdf"], "lanes": ["B", "F"], "since": "0.1"},
+    {"name": "inj-email-body", "channel": "email_body", "files": ["inj-email-body.eml"], "lanes": ["A", "F"], "since": "0.3"},
+    {"name": "inj-paperless-note", "channel": "paperless_note", "files": ["inj-paperless-note.document.json", "inj-paperless-note.pdf"], "lanes": ["B", "F"], "since": "0.3"},
+    {"name": "inj-ocr-only", "channel": "ocr_only", "files": ["inj-ocr-only.jpg"], "lanes": ["C", "F"], "since": "0.3"}
+  ]
+}

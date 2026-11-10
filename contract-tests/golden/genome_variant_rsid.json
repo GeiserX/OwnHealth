@@ -22,6 +22,9 @@
     "reason": "null",
     "state": "string"
   },
+  "limitation_codes": {
+    "[]": "string"
+  },
   "limitations": {
     "[]": "string"
   },

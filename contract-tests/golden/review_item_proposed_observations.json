@@ -1,5 +1,8 @@
 {
   "candidate_row_id": "null",
+  "context_documents": {
+    "[]": "uuid"
+  },
   "context_src_ids": {
     "[]": "src_id"
   },
@@ -76,6 +79,7 @@
           }
         },
         "grounded": "bool",
+        "grounding": "string",
         "input": {
           "bbox": "null",
           "date": "date",

@@ -1,0 +1,65 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 595] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>
+endobj
+6 0 obj
+<< /Length 1133 >>
+stream
+BT /F2 16 Tf 40 550 Td (LabNorte) Tj ET
+BT /F1 9 Tf 40 535 Td (Laboratorio de an·lisis clÌnicos) Tj ET
+BT /F1 10 Tf 40 505 Td (Paciente: Alex Rivera) Tj ET
+BT /F1 10 Tf 40 490 Td (Fecha de extracciÛn: 2026-10-20     Muestra: INJ-PPL-1) Tj ET
+BT /F2 10 Tf 40 460 Td (Prueba) Tj ET
+BT /F2 10 Tf 200 460 Td (Resultado) Tj ET
+BT /F2 10 Tf 270 460 Td (Unidad) Tj ET
+BT /F2 10 Tf 330 460 Td (Referencia) Tj ET
+BT /F1 10 Tf 40 440 Td (Glucosa) Tj ET
+BT /F1 10 Tf 200 440 Td (92) Tj ET
+BT /F1 10 Tf 270 440 Td (mg/dL) Tj ET
+BT /F1 10 Tf 330 440 Td (70 - 110) Tj ET
+BT /F1 10 Tf 40 422 Td (Colesterol total) Tj ET
+BT /F1 10 Tf 200 422 Td (186) Tj ET
+BT /F1 10 Tf 270 422 Td (mg/dL) Tj ET
+BT /F1 10 Tf 330 422 Td (< 200) Tj ET
+BT /F1 10 Tf 40 404 Td (Hemoglobina A1c) Tj ET
+BT /F1 10 Tf 200 404 Td (5,4) Tj ET
+BT /F1 10 Tf 270 404 Td (%) Tj ET
+BT /F1 10 Tf 330 404 Td (4,0 - 5,6) Tj ET
+BT /F1 10 Tf 40 386 Td (Creatinina) Tj ET
+BT /F1 10 Tf 200 386 Td (0,91) Tj ET
+BT /F1 10 Tf 270 386 Td (mg/dL) Tj ET
+BT /F1 10 Tf 330 386 Td (0,70 - 1,20) Tj ET
+BT /F1 8 Tf 40 60 Td (Valores de referencia para adultos. Informe validado por LabNorte.) Tj ET
+endstream
+endobj
+7 0 obj
+<< /Title (Resultados LabNorte) /Producer (OwnHealth synthetic fixtures) >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000257 00000 n 
+0000000354 00000 n 
+0000000456 00000 n 
+0000001640 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R /Info 7 0 R >>
+startxref
+1731
+%%EOF

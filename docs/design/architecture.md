@@ -76,7 +76,7 @@ Rules that follow from the diagram:
 | HTTP server | axum on tokio, one process. Routes: `/api/*`, `/mcp`, `/.well-known/*`, `/healthz`, `/readyz`, `/metrics`, and the static UI at `/` |
 | MCP | rmcp's streamable HTTP service mounted at `/mcp`. Spec 2026-07-28 is stateless (no `initialize` handshake, no `Mcp-Session-Id`), so no session affinity is needed. We keep the 2025-11-25 fallback for older clients |
 | Job loop | `N` tokio tasks started with the server (default `N=2`). Each claims one job, runs it, commits. CPU-bound and file-bound steps (PDF text layer, Apple Health XML, rollups, export zips) run on tokio's blocking threads so they never stall requests |
-| OCR | Not in the core image. The `ocr` profile runs the same code from the image `ownhealth-ocr` with `OWNHEALTH_ROLE=worker` and `OWNHEALTH_QUEUES=ocr`: no HTTP server, only the job loop for the `ocr` queue |
+| OCR | Not in the default image. The `ocr` profile runs the same code from the image variant `drumsergio/ownhealth:<version>-ocr` (the engine, PaddleOCR PP-OCRv5 on ONNX Runtime, and its models) as `ownhealth worker` with `OWNHEALTH_QUEUES=ocr`: no HTTP server, only the job loop for the `ocr` queue |
 | Scheduler | A row in `job` with `run_after` is a timer. Recurring jobs (rollups, restore check, ClinVar diff in v0.3) re-enqueue themselves on completion. No cron daemon |
 | Static UI | `adapter-static` output embedded in the release binary (`rust-embed`) at image build time. No Node at runtime |
 
@@ -89,7 +89,7 @@ Libraries in the core: axum, tower and tokio; sqlx for Postgres (queries checked
 | Profile | Services | Image size, RAM (estimates, unverified) | Ships in |
 |---|---|---|---|
 | (default) | `app`, `db` | app under 400 MB image; app plus Postgres about 0.5 GB RAM idle | v0.1 |
-| `ocr` | `ocr` (PaddleOCR PP-StructureV3 or Docling on CPU; PaddleOCR-VL 0.9B on GPU or iGPU) | several GB image; 2 to 8 GB RAM while working | v0.2 |
+| `ocr` | `ocr` worker: PaddleOCR PP-OCRv5 mobile detection and Latin recognition, ONNX on ONNX Runtime, CPU (an ONNX Runtime GPU provider is optional) | 436 MB unpacked against 364 MB for the default image (arm64, 0.3.0); worker peak RSS 240 MB reading the demo's scanned page (arm64) | v0.2 (0.3.0) |
 | `imaging` | `orthanc` with the DICOMweb and OHIF plugins | 100 to 300 MB RAM idle | v1.0 |
 | `wearables` | `open-wearables` plus its own Postgres and Redis | brings Redis and Celery, but only inside the profile | v1.0 |
 
@@ -103,7 +103,7 @@ Tags are pinned semver at release time and never `:latest`. The version numbers 
 name: ownhealth
 services:
   app:
-    image: drumsergio/ownhealth:0.2.0
+    image: drumsergio/ownhealth:0.3.0
     restart: unless-stopped
     depends_on: { db: { condition: service_healthy } }
     environment:
@@ -142,19 +142,17 @@ services:
 
   ocr:
     profiles: [ocr]
-    image: geiserx/ownhealth-ocr:0.2.0
+    image: drumsergio/ownhealth:0.3.0-ocr
     restart: unless-stopped
     depends_on: { db: { condition: service_healthy } }
+    command: ["ownhealth", "worker"]
     environment:
-      OWNHEALTH_ROLE: worker
       OWNHEALTH_QUEUES: ocr
-      OWNHEALTH_DATABASE_URL: postgresql://ownhealth@db:5432/ownhealth
-      OWNHEALTH_DB_PASSWORD_FILE: /run/secrets/db_password
-      OWNHEALTH_OCR_ENGINE: ppstructure      # ppstructure | docling | paddleocr-vl
-    secrets: [db_password]
+      OWNHEALTH_DATABASE_URL: postgresql://ownhealth_app@db:5432/ownhealth
+      OWNHEALTH_DB_PASSWORD_FILE: /run/secrets/app_db_password
+    secrets: [app_db_password]
     volumes: [blobs:/data/blobs]
-    # devices: ["/dev/dri:/dev/dri"]        # Intel iGPU, only for paddleocr-vl
-    mem_limit: 8g
+    healthcheck: { disable: true }          # a worker serves no /healthz
 
   orthanc:
     profiles: [imaging]
@@ -219,7 +217,7 @@ SNOMED CT and WHO ATC content are never in the repo. Codes that arrive inside im
 - `recorded_at` is when the fact entered OwnHealth as accepted (auto-accepted or confirmed by a person, section 8). A query `as_of T` sees rows with `recorded_at <= T` and (`superseded_at` is null or `superseded_at > T`).
 - `sensitivity text[]` takes `mental_health`, `reproductive`, `sexual_health`. Rows with any label need `read:sensitive`.
 - `src` is the provenance table. Every fact points to one `src` row, and the MCP `src` citation id is its public id.
-- **Delete and purge.** Deleting an item in the UI is a soft delete: the row becomes `retracted` with a reason, disappears from current views at once and can be restored for 30 days. Nothing is removed from disk automatically. A hard purge is a separate, explicit action by the owner (step-up auth): it removes the rows (with the copies `normalize.rederive` made of them, which share their `src`), every copy of their values (the `candidate_row` each was read from, whose `cells` hold the printed text, and the review items whose payload holds them), each `src` row no remaining fact cites, and any blob no other row references, and writes a `purge` audit event with ids only. A row that survives the purge can point at a purged row through `supersedes` (a person's correction of a value read from the purged document). The purge clears that `supersedes` first, the one change the trigger allows on a clinical row and only inside a purge, so the correction stays `current` and no longer links to the value it replaced; the audit event lists those ids too. Purging a whole source document also removes its pages (word layer, page image, full-text index), extraction runs, candidate rows and review items. The purge takes the profile's `state.rebuild` advisory lock (section 8) before it deletes and holds it until commit, so a rebuild that read the rows before the purge cannot store a snapshot holding them after it. A snapshot body can hold the purged values, so the purge also deletes from `state_snapshot`, in the same transaction, every snapshot of that profile with `as_of` at or after the earliest `recorded_at` of the purged rows (those are the snapshots that could include them), then queues a `state.rebuild`. Their hashes are gone with them: no later `as_of` check or restore check expects them. Copies in older backups and pre-migration dumps (section 13) stay until those are pruned; the purge screen states the date the last one holding them expires and offers "prune backups now".
+- **Delete and purge.** Deleting an item in the UI is a soft delete: the row becomes `retracted` with a reason, disappears from current views at once and can be restored for 30 days. Nothing is removed from disk automatically, except the raw bodies of wearable pushes (Health Auto Export), which are kept 30 days: each re-sends the last day, and the samples they brought stay. A hard purge is a separate, explicit action by the owner (step-up auth): it removes the rows (with the copies `normalize.rederive` made of them, which share their `src`), every copy of their values (the `candidate_row` each was read from, whose `cells` hold the printed text, and the review items whose payload holds them), each `src` row no remaining fact cites, and any blob no other row references, and writes a `purge` audit event with ids only. A row that survives the purge can point at a purged row through `supersedes` (a person's correction of a value read from the purged document). The purge clears that `supersedes` first, the one change the trigger allows on a clinical row and only inside a purge, so the correction stays `current` and no longer links to the value it replaced; the audit event lists those ids too. Purging a whole source document also removes its pages (word layer, page image, full-text index), extraction runs, candidate rows and review items. The purge takes the profile's `state.rebuild` advisory lock (section 8) before it deletes and holds it until commit, so a rebuild that read the rows before the purge cannot store a snapshot holding them after it. A snapshot body can hold the purged values, so the purge also deletes from `state_snapshot`, in the same transaction, every snapshot of that profile with `as_of` at or after the earliest `recorded_at` of the purged rows (those are the snapshots that could include them), then queues a `state.rebuild`. Their hashes are gone with them: no later `as_of` check or restore check expects them. Copies in older backups and pre-migration dumps (section 13) stay until those are pruned; the purge screen states the date the last one holding them expires and offers "prune backups now".
 
 ### 6.2 DDL sketch
 
@@ -778,6 +776,7 @@ A benchmark job in CI runs the synthetic family and fails if a target regresses 
 
 - `/metrics` in Prometheus text format, served on a separate port (default 9464) bound to the compose network, or on the main port behind a metrics token.
 - Labels never carry profile ids, names, codes, values or token ids.
+- Not built yet: the instance-wide `/metrics` below. What ships since 0.3.0 is inbox health: `GET /api/inboxes/health` and `GET /api/inboxes/{id}/health`, JSON or `?format=prometheus` (gauges `ownhealth_source_{enabled,stale,consecutive_failures,last_success_timestamp_seconds,last_run_timestamp_seconds}`, labels `source` id and `kind`). A monitor reads one source with that source's own `oh_ing_` token (deploy/README.md, Monitoring the inboxes).
 
 | Metric | Type, labels |
 |---|---|

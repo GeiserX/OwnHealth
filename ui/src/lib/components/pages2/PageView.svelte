@@ -42,14 +42,17 @@
 	{:else}
 		<img src={pageImageUrl(documentId, page)} alt="{t('i2_page')} {page}" onerror={() => (failed = true)} />
 	{/if}
+	<!-- The boxes point at rows the list beside the page already offers to the keyboard and screen readers,
+	     so they are a second way in for the pointer only, with a finger-sized hit area on touch screens. -->
 	{#each boxes as b (b.id)}
 		{@const [x0, y0, x1, y1] = b.bbox}
 		<button
 			class="box {b.tone === 'bad' ? 'bb-x' : b.tone === 'low' ? 'bb-w' : 'bb'}"
 			class:on={selected === b.id}
 			style="left:{pct(x0 - pad, width)};top:{pct(y0 - pad, height)};width:{pct(x1 - x0 + 2 * pad, width)};height:{pct(y1 - y0 + 2 * pad, height)}"
-			aria-label={b.label}
 			title={b.label}
+			tabindex="-1"
+			aria-hidden="true"
 			onclick={() => onpick(b.id)}
 		></button>
 	{/each}
@@ -78,6 +81,17 @@
 		border: 0;
 		padding: 0;
 		border-radius: 1px;
+	}
+	@media (pointer: coarse) {
+		.box::after {
+			content: '';
+			position: absolute;
+			left: 0;
+			right: 0;
+			top: 50%;
+			height: max(100%, 24px);
+			transform: translateY(-50%);
+		}
 	}
 	.box.on {
 		outline-width: 3px;
