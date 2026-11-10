@@ -454,6 +454,7 @@ async fn pedigree(State(rt): State<Runtime>, caller: Caller, Path(p): Path<Strin
                 "sex_at_birth": prof.sex_at_birth,
                 "age": prof.age_on(today),
                 "deceased": prof.deceased,
+                "slot": 25,
                 "union": "self",
                 "child_of": "parents",
             },

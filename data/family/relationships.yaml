@@ -10,7 +10,7 @@
 # union       the couple this relative is a member of in the drawing.
 # child_of    the couple whose sibship line this relative hangs from (null: drawn without a line).
 #
-# The proband belongs to union "self" and is a child of "parents".
+# The proband sits at slot 25, belongs to union "self" and is a child of "parents".
 version: 0.1.0
 rows:
   - {code: PGRFTH, en: paternal grandfather, es: abuelo paterno, generation: -2, side: paternal, degree: 2, sex: male, slot: 10, union: pgp, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
@@ -33,14 +33,14 @@ rows:
   - {code: BRO, en: brother, es: hermano, generation: 0, side: own, degree: 1, sex: male, slot: 14, union: null, child_of: parents, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
   - {code: SIS, en: sister, es: hermana, generation: 0, side: own, degree: 1, sex: female, slot: 14, union: null, child_of: parents, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
   - {code: SIB, en: sibling, es: hermano o hermana, generation: 0, side: own, degree: 1, sex: null, slot: 14, union: null, child_of: parents, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
-  - {code: SPS, en: spouse or partner, es: pareja, generation: 0, side: partner, degree: 0, sex: null, slot: 35, union: self, child_of: inlaws, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
-  - {code: HUSB, en: husband, es: marido, generation: 0, side: partner, degree: 0, sex: male, slot: 35, union: self, child_of: inlaws, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
-  - {code: WIFE, en: wife, es: esposa, generation: 0, side: partner, degree: 0, sex: female, slot: 35, union: self, child_of: inlaws, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: SPS, en: spouse or partner, es: pareja, generation: 0, side: partner, degree: 0, sex: null, slot: 45, union: self, child_of: inlaws, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: HUSB, en: husband, es: marido, generation: 0, side: partner, degree: 0, sex: male, slot: 45, union: self, child_of: inlaws, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: WIFE, en: wife, es: esposa, generation: 0, side: partner, degree: 0, sex: female, slot: 45, union: self, child_of: inlaws, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
   - {code: MCOUSN, en: maternal cousin, es: primo o prima por parte de madre, generation: 0, side: maternal, degree: 3, sex: null, slot: 52, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
   - {code: NEPHEW, en: nephew, es: sobrino, generation: 1, side: own, degree: 2, sex: male, slot: 14, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
   - {code: NIECE, en: niece, es: sobrina, generation: 1, side: own, degree: 2, sex: female, slot: 14, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
-  - {code: SON, en: son, es: hijo, generation: 1, side: own, degree: 1, sex: male, slot: 30, union: null, child_of: self, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
-  - {code: DAU, en: daughter, es: hija, generation: 1, side: own, degree: 1, sex: female, slot: 30, union: null, child_of: self, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
-  - {code: CHILD, en: child, es: hijo o hija, generation: 1, side: own, degree: 1, sex: null, slot: 30, union: null, child_of: self, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
-  - {code: GRNDSON, en: grandson, es: nieto, generation: 2, side: own, degree: 2, sex: male, slot: 30, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
-  - {code: GRNDDAU, en: granddaughter, es: nieta, generation: 2, side: own, degree: 2, sex: female, slot: 30, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: SON, en: son, es: hijo, generation: 1, side: own, degree: 1, sex: male, slot: 35, union: null, child_of: self, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: DAU, en: daughter, es: hija, generation: 1, side: own, degree: 1, sex: female, slot: 35, union: null, child_of: self, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: CHILD, en: child, es: hijo o hija, generation: 1, side: own, degree: 1, sex: null, slot: 35, union: null, child_of: self, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: GRNDSON, en: grandson, es: nieto, generation: 2, side: own, degree: 2, sex: male, slot: 35, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: GRNDDAU, en: granddaughter, es: nieta, generation: 2, side: own, degree: 2, sex: female, slot: 35, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
