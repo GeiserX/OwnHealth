@@ -301,7 +301,11 @@ pub async fn import_push(
     // sections we do not chart yet are expected on every push and only logged
     let mut problems = Vec::new();
     let mut not_charted = Vec::new();
+    let mut skipped = BTreeMap::new();
     for (key, count) in &parsed.skipped {
+        if let Some(metric) = key.strip_prefix("metric:") {
+            skipped.insert(metric.to_string(), *count);
+        }
         if key.starts_with("unit:") || key.starts_with("bad_point:") {
             problems.push(RunProblem {
                 code: "points_skipped".into(),
@@ -342,6 +346,7 @@ pub async fn import_push(
         new: n(w.new),
         duplicate: n(w.duplicate()),
         problems,
+        skipped,
         ..RunOutcome::default()
     })
 }

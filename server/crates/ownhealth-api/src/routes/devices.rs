@@ -54,7 +54,9 @@ async fn health_auto_export(
         Err(_) => finish_run(&mut conn, run, Err("internal error")).await?,
     }
     let o = result?;
-    Ok(Json(json!({"seen": o.seen, "new": o.new, "duplicate": o.duplicate})))
+    Ok(Json(
+        json!({"seen": o.seen, "new": o.new, "duplicate": o.duplicate, "skipped": o.skipped}),
+    ))
 }
 
 fn bad(msg: &str) -> ApiError {
@@ -184,12 +186,26 @@ mod tests {
         let token = sources::issue_token(&mut c, hae_id).await?;
         let bearer = format!("Bearer {token}");
         let body = serde_json::to_vec(&json!({"data": {"metrics": [{"name": "step_count", "units": "count",
-            "data": [{"date": "2026-11-02 10:00:00 +0100", "qty": 321, "source": "Apple Watch de Alex"}]}]}}))?;
+            "data": [{"date": "2026-11-02 10:00:00 +0100", "qty": 321, "source": "Apple Watch de Alex"}]},
+            {"name": "weird_metric", "units": "count", "data": [{"date": "2026-11-02 10:00:00 +0100", "qty": 1}]}]}}))?;
         let push = "/api/ingest/health-auto-export";
+        let skipped = json!({"weird_metric": 1});
         let (s, v) = send(&app, Method::POST, push, &[("authorization", &bearer)], body.clone()).await?;
-        assert_eq!((s, v), (StatusCode::OK, json!({"seen": 1, "new": 1, "duplicate": 0})));
+        assert_eq!(
+            (s, v),
+            (
+                StatusCode::OK,
+                json!({"seen": 1, "new": 1, "duplicate": 0, "skipped": skipped})
+            )
+        );
         let (s, v) = send(&app, Method::POST, push, &[("x-ownhealth-secret", &token)], body).await?;
-        assert_eq!((s, v), (StatusCode::OK, json!({"seen": 1, "new": 0, "duplicate": 1})));
+        assert_eq!(
+            (s, v),
+            (
+                StatusCode::OK,
+                json!({"seen": 1, "new": 0, "duplicate": 1, "skipped": skipped})
+            )
+        );
         let (s, v) = send(
             &app,
             Method::POST,
@@ -208,6 +224,7 @@ mod tests {
             .map(|r| (r.trigger.as_str(), r.status.as_str(), r.items_new))
             .collect();
         assert_eq!(got, vec![("push", "error", 0), ("push", "ok", 0), ("push", "ok", 1)]);
+        assert_eq!(runs[2].skipped, skipped);
         assert!(
             runs[0]
                 .error

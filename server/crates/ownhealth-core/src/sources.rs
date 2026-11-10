@@ -274,6 +274,8 @@ pub struct RunOutcome {
     pub quarantined: i32,
     pub problems: Vec<RunProblem>,
     pub cursor: Option<Value>,
+    /// Items left out on purpose, counted by name (a metric OwnHealth does not chart yet).
+    pub skipped: std::collections::BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
@@ -291,6 +293,7 @@ pub struct SourceRun {
     pub items_quarantined: i32,
     pub errors: Value,
     pub error: Option<String>,
+    pub skipped: Value,
 }
 
 /// Open a run (`trigger`: poll | push | manual) and stamp `last_run_at`.
@@ -337,7 +340,8 @@ pub async fn finish_run(
     let o = outcome.unwrap_or(&d);
     let source_id: Uuid = sqlx::query_scalar(
         "update source_run set finished_at = now(), status = $2, items_seen = $3, items_new = $4, \
-         items_duplicate = $5, items_quarantined = $6, errors = $7, error = $8 where id = $1 returning source_id",
+         items_duplicate = $5, items_quarantined = $6, errors = $7, error = $8, skipped = $9 where id = $1 \
+         returning source_id",
     )
     .bind(run_id)
     .bind(status)
@@ -347,6 +351,7 @@ pub async fn finish_run(
     .bind(o.quarantined)
     .bind(serde_json::to_value(&o.problems)?)
     .bind(&error)
+    .bind(serde_json::to_value(&o.skipped)?)
     .fetch_one(&mut *conn)
     .await?;
     if let Some(e) = &error {
@@ -374,7 +379,7 @@ pub async fn finish_run(
 pub async fn list_runs(conn: &mut PgConnection, source_id: Uuid, limit: i64) -> Result<Vec<SourceRun>> {
     Ok(sqlx::query_as(
         "select id, source_id, trigger, job_id, started_at, finished_at, status, items_seen, items_new, \
-         items_duplicate, items_quarantined, errors, error from source_run where source_id = $1 \
+         items_duplicate, items_quarantined, errors, error, skipped from source_run where source_id = $1 \
          order by started_at desc, id desc limit $2",
     )
     .bind(source_id)
