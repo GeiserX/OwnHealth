@@ -793,6 +793,8 @@ function family(){
   const yes='<span style="color:var(--ok)">●</span>',no='<span class="dim">—</span>';
   return `
   <div class="ph"><div><h1>Family</h1><div class="sub">Rivera household · 4 profiles · roles decide what each person and each token can see</div></div><div class="right"><span class="phase">roles v0.1</span><span class="phase">pedigree, hints v0.3</span><span class="phase">break-glass v1.0</span><button class="btn" style="white-space:nowrap">Add relative</button><button class="btn pri">Invite member</button></div></div>
+  <!-- ownership transfer at majority: one banner per child profile past the household's age of majority (example: Lucía from her 18th birthday) -->
+  <div class="card" style="margin-bottom:12px;border-color:var(--accent)"><h3>Lucía is 18 now</h3><div class="note">Invite Lucía to take over this profile. When Lucía joins, it becomes theirs: guardian access ends then, and Lucía can give it back.</div><div style="margin-top:8px"><button class="btn pri">Invite Lucía</button></div></div>
   <div class="mem">
    ${[["AR","#6ea8fe","Alex Rivera","owner of own profile","passkey · 2 devices"],["SR","#3fb68b","Sam Rivera","owner of own profile","passkey · OIDC (Pocket ID)"],["LR","#e0a84a","Lucía Rivera","child, 9 · guardians Alex and Sam","no login · adult-onset, carrier withheld"],["CO","#c39bd3","Carmen Ortega","parent, 71 · Alex is caregiver","own passkey · grant 2026-04-02"]].map(m=>`<div class="mcard"><div class="av" style="background:${m[1]};width:34px;height:34px">${m[0]}</div><div><div style="font-weight:600">${m[2]}</div><div class="muted" style="font-size:11.5px">${m[3]}</div><div class="dim" style="font-size:11px">${m[4]}</div></div></div>`).join("")}
   </div>

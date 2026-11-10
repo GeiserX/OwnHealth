@@ -3,10 +3,10 @@
 	// Profiles come from GET /me; the full matrix from GET /household (lane G). Pedigree and hints are
 	// v0.3, break-glass v1.0: their cards say so.
 	import '#lib/components/pages2/pages2.css';
-	import { addRelative, getHousehold, getMe, inviteMember, type RelativeIn } from '#lib/api';
+	import { addRelative, getHousehold, getMe, inviteMember, listAudit, putGrant, type RelativeIn } from '#lib/api';
 	import StepUpDialog from '#lib/components/pages2/StepUpDialog.svelte';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
-	import type { Household, ProfileSummary } from '#lib/api/types';
+	import type { Household, ProfileSummary, Role, Scope } from '#lib/api/types';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import { Loader, cap, errRaw, errText, tf, tp } from '#lib/components/pages1/util.svelte';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
@@ -15,6 +15,8 @@
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { roleCell } from '#lib/logic/grants';
+	import { formerAccess, type FormerAccess } from '#lib/logic/transfer';
+	import { day } from '#lib/components/pages2/fmt';
 	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
 
 	const me = $derived(app.me);
@@ -108,6 +110,39 @@
 	const canInvite = $derived(isOwner || unclaimed.length > 0);
 	const hasUnknown = $derived(!!hh.data && hh.data.members.some((m) => cols.some((c) => roleCell(hh.data!.grants, m, c.slug, manages(c.slug)) === '?')));
 	const manages = (slug: string) => !!hh.data?.profiles.find((p) => p.slug === slug)?.can_manage;
+
+	// Ownership transfer at majority: a guardian sees who may take over their profile now; the person
+	// who took over sees who had access before and can give it back.
+	type HhProfile = Household['profiles'][number];
+	const takeOver = $derived(
+		(hh.data?.transfer_pending ?? []).map((s) => hh.data?.profiles.find((p) => p.slug === s)).filter((p): p is HhProfile => !!p)
+	);
+	const mine = $derived(profiles.find((p) => p.is_self && p.role === 'owner' && p.relationship === 'child'));
+	let former = $state<FormerAccess[]>([]);
+	let gaveBack = $state('');
+	$effect(() => {
+		const slug = mine?.slug;
+		const grants = hh.data?.grants;
+		if (!slug || !grants) return;
+		listAudit({ profile: slug, limit: 500 })
+			.then((r) => (former = formerAccess(r.items, grants, slug)))
+			.catch(() => (former = []));
+	});
+	const memberName = (id: string) => hh.data?.members.find((m) => m.user_id === id)?.display_name ?? t('xfer_someone');
+	function inviteToTakeOver(p: HhProfile) {
+		inv = { ...inv, display_name: p.display_name, claim_profile: p.slug };
+		form = 'invite';
+		error = null;
+	}
+	function giveBack(f: FormerAccess) {
+		const slug = mine?.slug;
+		if (!slug) return;
+		act('xfer', async () => {
+			await putGrant({ user_id: f.user_id, profile: slug, role: f.role as Role, categories: f.categories.length ? (f.categories as Scope[]) : null });
+			gaveBack = memberName(f.user_id);
+			load();
+		});
+	}
 </script>
 
 <div class="ph">
@@ -186,6 +221,31 @@
 		<div class="p2row"><button class="btn" onclick={() => invited && copy(invited.url)}>{copied ? t('fm_copied') : t('fm_copy')}</button><button class="btn" onclick={() => (invited = null)}>{t('fm_inv_close')}</button></div>
 	</section>
 {/if}
+
+{#each takeOver as p (p.slug)}
+	<section class="card xfer" aria-labelledby="xfer-{p.slug}">
+		<h3 id="xfer-{p.slug}">{tf('xfer_title', { name: first(p.display_name), age: p.age ?? '' })}</h3>
+		<div class="note">{tf('xfer_d', { name: first(p.display_name) })}</div>
+		<div class="p2row"><button class="btn pri" onclick={() => inviteToTakeOver(p)}>{tf('xfer_invite', { name: first(p.display_name) })}</button></div>
+	</section>
+{/each}
+{#if mine && former.length}
+	<section class="card xfer" aria-labelledby="xfer-had">
+		<h3 id="xfer-had">{t('xfer_had')}<span class="r">{t('xfer_had_r')}</span></h3>
+		<div class="note">{t('xfer_had_d')}</div>
+		<ul class="xfer-list">
+			{#each former as f (f.user_id)}
+				<li>
+					<span class="who"><b>{memberName(f.user_id)}</b> <span class="muted">{t('r_' + f.role).toLowerCase()} · {tf('xfer_until', { date: day(f.ts) })}</span></span>
+					<button class="btn" disabled={busy} onclick={() => giveBack(f)}>{t('xfer_back')}</button>
+				</li>
+			{/each}
+		</ul>
+		{#if error?.where === 'xfer'}<div class="p2err" role="alert" title={error.raw}>{error.text}</div>{/if}
+		{#if !mine.genome_sensitive_ui}<div class="note">{t('xfer_genome')}</div>{/if}
+	</section>
+{/if}
+{#if gaveBack}<div class="note xfer-done" role="status">{tf('xfer_back_done', { name: gaveBack })}</div>{/if}
 
 <div class="mem">
 	{#each profiles as p (p.id)}
@@ -271,6 +331,30 @@
 	}
 	tr.pending td {
 		color: var(--muted);
+	}
+	.xfer {
+		margin-bottom: 12px;
+		border-color: var(--accent);
+	}
+	.xfer .p2row {
+		margin-top: 8px;
+	}
+	.xfer-list {
+		list-style: none;
+		margin: 8px 0;
+		padding: 0;
+	}
+	.xfer-list li {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		padding: 6px 0;
+		border-top: 1px solid var(--line);
+	}
+	.xfer-done {
+		margin: -4px 0 12px;
 	}
 	/* Phone: each field of the two forms takes a whole line, and a long option never sets the width. */
 	@media (max-width: 760px) {

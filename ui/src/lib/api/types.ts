@@ -469,6 +469,8 @@ export interface Household {
 	// profiles carry, beyond ProfileSummary: can_manage, claimed, locks, genome_sensitive_agents
 	profiles: (ProfileSummary & { can_manage?: boolean; claimed?: boolean; locks?: Scope[]; genome_sensitive_agents?: boolean })[];
 	grants: { user_id: Uuid; profile: string; role: Role; categories: Scope[]; expires_at: IsoDateTime | null; granted_at?: IsoDateTime }[];
+	// slugs past the age of majority that wait for their person to take them over (caller is guardian)
+	transfer_pending?: string[];
 }
 
 /** GET /auth/state: what the login, setup and enrol pages need. */
