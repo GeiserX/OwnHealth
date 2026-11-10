@@ -37,15 +37,27 @@
 	// The fields each kind asks for, in order: [field, dict key, input type, required].
 	const FIELDS: Record<EntryKind, [string, string, string, boolean][]> = {
 		observation: [['name', 'me_f_name', 'text', true], ['value', 'me_f_value', 'text', true], ['unit', 'me_f_unit', 'text', false], ['date', 'me_f_date', 'date', true]],
-		medication: [['name', 'me_f_med', 'text', true], ['strength', 'me_f_strength', 'text', false], ['dose_text', 'me_f_dose', 'text', false], ['started', 'me_f_start', 'date', false], ['stopped', 'me_f_stop', 'date', false]],
+		// medication (slice 3): what, how much, when it is taken, since when, who prescribed it and why
+		medication: [
+			['name', 'me_f_med', 'text', true],
+			['strength', 'me_f_strength', 'text', false],
+			['dose_text', 'me_f_dose', 'text', false],
+			['schedule_text', 'med_f_schedule', 'text', false],
+			['started', 'me_f_start', 'date', false],
+			['stopped', 'me_f_stop', 'date', false],
+			['prescriber', 'med_f_prescriber', 'text', false],
+			['reason_text', 'med_f_reason', 'text', false]
+		],
 		condition: [['text', 'me_f_cond', 'text', true], ['onset', 'me_f_onset', 'date', false], ['abatement', 'me_f_abate', 'date', false]],
 		allergy: [['substance', 'me_f_subst', 'text', true], ['reaction_text', 'me_f_reaction', 'text', false]],
 		immunization: [['vaccine', 'me_f_vaccine', 'text', true], ['occurred', 'me_f_occurred', 'date', false], ['dose_number', 'me_f_dosen', 'number', false]]
 	};
 	const today = new Date().toISOString().slice(0, 10);
-	const fresh = (k: EntryKind): Fields => (k === 'observation' ? { date: date ?? today, note } : {});
-	const fromRecord = (r: RecordOut): Fields =>
-		Object.fromEntries(FIELDS[r.kind as EntryKind].map(([f]) => [f, r.detail[f] == null ? '' : String(r.detail[f])]));
+	const fresh = (k: EntryKind): Fields => (k === 'observation' ? { date: date ?? today, note } : k === 'medication' ? { kind: 'medication' } : {});
+	const fromRecord = (r: RecordOut): Fields => ({
+		...Object.fromEntries(FIELDS[r.kind as EntryKind].map(([f]) => [f, r.detail[f] == null ? '' : String(r.detail[f])])),
+		...(r.kind === 'medication' ? { kind: String(r.detail.kind ?? 'medication') } : {})
+	});
 
 	// The form starts from the props once; a parent that needs a fresh form remounts it ({#key}).
 	const start = untrack(() => (correcting ? { kind: correcting.kind as EntryKind, f: fromRecord(correcting) } : { kind: kinds[0], f: fresh(kinds[0]) }));
@@ -65,7 +77,10 @@
 	function body(): Record<string, unknown> {
 		const out: Record<string, unknown> = {};
 		for (const [k, , type] of FIELDS[kind]) out[k] = type === 'number' ? (val(k) ? Number(val(k)) : null) : val(k);
-		if (kind === 'medication') out.med_status = val('stopped') && val('stopped')! <= today ? 'stopped' : 'active';
+		if (kind === 'medication') {
+			out.med_status = val('stopped') && val('stopped')! <= today ? 'stopped' : 'active';
+			out.kind = f.kind === 'supplement' ? 'supplement' : 'medication';
+		}
 		if (kind === 'condition') out.clinical_status = val('abatement') ? 'resolved' : 'active';
 		return out;
 	}
@@ -117,6 +132,11 @@
 	{#if !correcting && kinds.length > 1}
 		<div class="seg" role="group" aria-label={t('me_kind')}>
 			{#each kinds as k (k)}<button type="button" class:on={k === kind} aria-pressed={k === kind} onclick={() => pick(k)}>{t('me_k_' + k)}</button>{/each}
+		</div>
+	{/if}
+	{#if kind === 'medication'}
+		<div class="seg" role="group" aria-label={t('med_f_kind')}>
+			{#each ['medication', 'supplement'] as mk (mk)}<button type="button" class:on={(f.kind ?? 'medication') === mk} aria-pressed={(f.kind ?? 'medication') === mk} onclick={() => (f.kind = mk)}>{t('med_k_' + mk)}</button>{/each}
 		</div>
 	{/if}
 	<div class="p2row">
