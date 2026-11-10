@@ -267,6 +267,8 @@ When the agent wants to show the person where 97 came from, it calls `get_source
 - **Narrative:** a `priorities` block written by the person, or proposed by an agent through `propose(kind="note")` and confirmed. It renders verbatim with author and date. The deterministic part never depends on it.
 - **Recompute** on every import or confirmed write; store each snapshot with its hash so changes over time are a diff of two snapshots.
 
+The hashed state body (`ownhealth.state/v1`) is frozen within a rule-pack version: the same data under the same pack gives the same `state_hash`, release after release. New insight outputs (calculators, due items, family patterns and hints, document gaps) never add keys to that body. Each is a separate derived document, `ownhealth.<name>/v1`, computed on read and never stored, with its own `<name>_hash` over the same canonical JSON. A guideline update or a snooze then moves only its own hash. For unchanged data, only a new pack version moves `state_hash`, and the changelog says so.
+
 ## Risks and how we handle them
 
 | Risk | What could happen | What we do |
