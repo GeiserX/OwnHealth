@@ -636,7 +636,8 @@ fn fill(text: &str, params: &Map<String, Value>, data: &Data, lang: &str) -> Str
 }
 
 /// The document with the words in `lang` (es or en): each item gains `name`, its refusal as `text`,
-/// and `notes` (the band, then the limitations). The hash stays the document's.
+/// `notes` (the band, then the limitations), the `system` and `shows_on` groups where it is
+/// listed, and a `name` on each input. The hash stays the document's.
 pub fn render(doc: &Value, lang: &str) -> Result<Value> {
     let data = data()?;
     let lang = if lang == "en" { "en" } else { "es" };
@@ -649,10 +650,21 @@ pub fn render(doc: &Value, lang: &str) -> Result<Value> {
         let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
         let name = template(data, "name", &id, lang).unwrap_or(&id).to_string();
         m.insert("name".into(), json!(name));
+        // where the UI lists it: the dashboard card and the biomarker pages
+        if let Some(c) = data.calcs.iter().find(|c| c.id == id) {
+            m.insert("system".into(), json!(c.system));
+            m.insert("shows_on".into(), json!(c.shows_on));
+        }
         if let Some(code) = m.get("reason_code").and_then(Value::as_str).map(str::to_string) {
             let params = m.get("reason").and_then(Value::as_object).cloned().unwrap_or_default();
             let text = template(data, "reason", &code, lang).unwrap_or(&code);
             m.insert("text".into(), json!(fill(text, &params, data, lang)));
+        }
+        for i in m.get_mut("inputs").and_then(Value::as_array_mut).into_iter().flatten() {
+            let g = i["group"].as_str().unwrap_or_default().to_string();
+            if let Some(o) = i.as_object_mut() {
+                o.insert("name".into(), json!(group_name(data, &g, lang)));
+            }
         }
         let mut notes = Vec::new();
         if let Some(c) = m.get("category").and_then(Value::as_object) {
