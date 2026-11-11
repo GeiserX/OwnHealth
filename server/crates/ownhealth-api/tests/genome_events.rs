@@ -22,6 +22,8 @@ struct Env {
     rt: Runtime,
     app: Router,
     fam: Family,
+    /// Alex's genome-facts document.
+    doc: uuid::Uuid,
 }
 
 const HEAD: &str = "##fileformat=VCFv4.1\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
@@ -66,7 +68,7 @@ async fn env() -> anyhow::Result<Env> {
     let fam = create_rivera_family(&mut c, "Rivera").await?;
     let raw = synthetic::alex_raw_files()?;
     let (facts, att) = synthetic::with_files(&synthetic::alex_facts(), &rt.blobs, &raw)?;
-    synthetic::seed_genome(
+    let (doc, _) = synthetic::seed_genome(
         &mut c,
         &rt.blobs,
         fam.household_id,
@@ -74,6 +76,20 @@ async fn env() -> anyhow::Result<Env> {
         &facts,
         &att,
         "g.json",
+        None,
+    )
+    .await?;
+    // Carmen, whom Alex cares for without read:genome, carries the same CFTR site.
+    let mut carmen = synthetic::alex_facts();
+    carmen["subject"]["sample_id"] = serde_json::json!("CO-01");
+    synthetic::seed_genome(
+        &mut c,
+        &rt.blobs,
+        fam.household_id,
+        fam.profile("carmen"),
+        &carmen,
+        &[],
+        "c.json",
         None,
     )
     .await?;
@@ -85,17 +101,38 @@ async fn env() -> anyhow::Result<Env> {
     let app = Router::new()
         .nest("/api", ownhealth_api::router())
         .with_state(rt.clone());
-    Ok(Env { db, dir, rt, app, fam })
+    Ok(Env {
+        db,
+        dir,
+        rt,
+        app,
+        fam,
+        doc,
+    })
 }
 
 impl Env {
     async fn get(&self, slug: &str, uri: &str) -> anyhow::Result<(StatusCode, Value)> {
+        self.send(slug, Request::get(uri), Body::empty()).await
+    }
+
+    async fn post(&self, slug: &str, uri: &str, body: Value) -> anyhow::Result<(StatusCode, Value)> {
+        let req = Request::post(uri).header("content-type", "application/json");
+        self.send(slug, req, Body::from(body.to_string())).await
+    }
+
+    async fn send(
+        &self,
+        slug: &str,
+        req: axum::http::request::Builder,
+        body: Body,
+    ) -> anyhow::Result<(StatusCode, Value)> {
         let mut c = self.db.pool.acquire().await?;
         let secret =
             sessions::create_session_with(&mut c, self.fam.user(slug), None, None, "passkey", Some(false)).await?;
-        let req = Request::get(uri)
+        let req = req
             .header("cookie", format!("{}={secret}", sessions::COOKIE))
-            .body(Body::empty())?;
+            .body(body)?;
         let res = self.app.clone().oneshot(req).await?;
         let status = res.status();
         let body = to_bytes(res.into_body(), 1 << 24).await?;
@@ -212,5 +249,50 @@ async fn a_minor_s_events_are_withheld_by_the_minor_rule() -> R {
     assert_eq!(body["withheld"]["minor_rule"], 2, "{body}");
     assert_eq!(genes(&body), vec!["-", "-"]);
     assert!(!body.to_string().contains("CFTR") && !body.to_string().contains("APOE"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_caregiver_without_read_genome_sees_no_gene_in_the_review_queue() -> R {
+    let e = env().await?;
+    let (status, body) = e.get("alex", "/api/profiles/carmen/genome/events").await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = e
+        .get(
+            "alex",
+            "/api/review?status=open&profile=carmen&kind=genome_reinterpretation",
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["items"].as_array().cloned().unwrap_or_default();
+    assert!(!items.is_empty(), "{body}");
+    for leak in ["CFTR", "7105", "APOE", "17864"] {
+        assert!(!body.to_string().contains(leak), "{leak} in {body}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn retracting_the_genome_hides_its_events_and_dismisses_its_alerts() -> R {
+    let e = env().await?;
+    let open = "/api/review?status=open&profile=alex&kind=genome_reinterpretation";
+    let (_, before) = e.get("alex", open).await?;
+    assert!(
+        !before["items"].as_array().cloned().unwrap_or_default().is_empty(),
+        "{before}"
+    );
+    let (status, body) = e
+        .post(
+            "alex",
+            &format!("/api/documents/{}/retract", e.doc),
+            serde_json::json!({"reason": "another person's file"}),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = e.get("alex", "/api/profiles/alex/genome/events").await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["events"], serde_json::json!([]), "{body}");
+    let (_, after) = e.get("alex", open).await?;
+    assert_eq!(after["items"], serde_json::json!([]), "{after}");
     Ok(())
 }

@@ -1,5 +1,5 @@
 //! `GET /api/profiles/{p}/genome/events`: the ClinVar diff's history for one profile (genomics.md 9),
-//! newest first, `read:genome`.
+//! newest first, `read:genome`. Events of a genome whose file was retracted are gone, as its findings are.
 //!
 //! The reader's own gate decides what each event shows: the gene, the VariationID and both
 //! classifications only when the sensitive switch and read:sensitive open it and the minor rule does
@@ -60,7 +60,8 @@ pub async fn events(rt: &Runtime, principal: &Principal, p: &str) -> R<Value> {
     let rows: Vec<Row> = sqlx::query_as(
         "select e.id, e.variation_id, e.kind, e.gene, e.sensitive, e.adult_onset, e.carrier, e.old, e.new, \
          e.release_from, e.release_to, e.alerted, e.created_at, d.assay from genome_event e \
-         join genome_dataset d on d.id = e.dataset_id where e.profile_id = $1 \
+         join genome_dataset d on d.id = e.dataset_id where e.profile_id = $1 and d.status <> 'retracted' \
+         and not exists (select 1 from document doc where doc.id = d.document_id and doc.status = 'retracted') \
          order by e.created_at desc, e.release_to desc, e.variation_id",
     )
     .bind(perm.profile.id)

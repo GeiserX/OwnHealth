@@ -11,8 +11,10 @@
 //! other carried site counts as not reported), then the previous snapshot. Three things alert, as a
 //! `genome_reinterpretation` review item: an upgrade to P/LP with at least 1 star, a downgrade of a
 //! P/LP the person was shown, and any change in an ACMG SF gene. Everything else is a silent event.
-//! A result behind the sensitive switch or the minor rule reads "a withheld result changed", with no
-//! gene; a chip result reads "worth a clinical test".
+//! The review item names nothing: it reads "a result you carry changed" (or "a withheld result
+//! changed" behind the sensitive switch or the minor rule), and a chip result adds "worth a clinical
+//! test". The gene and both classes are read from `GET /genome/events`, where the reader's own gate
+//! decides at read time.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
@@ -208,6 +210,16 @@ pub fn summary(t: &EventText<'_>, lang: &str) -> String {
             .replace("{old}", &old)
     };
     if t.unconfirmed {
+        s.push(' ');
+        s.push_str(&tpl("chip", lang));
+    }
+    s
+}
+
+/// The review item's sentence in `lang`: it never names the variant, so any reviewer may read it.
+pub fn review_summary(withheld: bool, unconfirmed: bool, lang: &str) -> String {
+    let mut s = tpl(if withheld { "withheld" } else { "changed" }, lang);
+    if unconfirmed {
         s.push(' ');
         s.push_str(&tpl("chip", lang));
     }
@@ -575,10 +587,15 @@ async fn fact_sites(conn: &mut PgConnection, dataset_id: Uuid) -> Result<Vec<Fac
 pub struct DatasetReport {
     pub dataset_id: Uuid,
     pub profile_id: Uuid,
+    /// The profile's slug, so an operator can tell whose genome it is.
+    pub profile: String,
     pub assay: String,
     /// Why nothing was compared: `already_compared` (this release or a newer one is the snapshot),
-    /// `older_than_genome_file` (the facts were annotated with a newer ClinVar).
+    /// `older_than_genome_file` (the facts were annotated with a newer ClinVar), `unreadable` (the
+    /// dataset's calls VCF could not be read in GRCh38 contig order; see `error`).
     pub skipped: Option<&'static str>,
+    /// What went wrong when `skipped` is `unreadable`: file and dataset ids only, never a genotype.
+    pub error: Option<String>,
     pub carried: usize,
     pub events: usize,
     pub alerts: usize,
@@ -595,6 +612,8 @@ struct DatasetRow {
     id: Uuid,
     profile_id: Uuid,
     household_id: Uuid,
+    slug: String,
+    document_id: Option<Uuid>,
     assay: String,
     db_versions: sqlx::types::Json<Value>,
     vcf: Option<String>,
@@ -613,17 +632,33 @@ pub async fn diff_release(
     let date = blocking(move || release_date(&path)).await?;
     let mut conn = pool.acquire().await?;
     let datasets: Vec<DatasetRow> = sqlx::query_as(
-        "select d.id, d.profile_id, p.household_id, d.assay, d.db_versions, encode(d.vcf_blob, 'hex') as vcf \
+        "select d.id, d.profile_id, p.household_id, p.slug, d.document_id, d.assay, d.db_versions, encode(d.vcf_blob, 'hex') as vcf \
          from genome_dataset d join profile p on p.id = d.profile_id where d.status = 'current' and not exists \
          (select 1 from document doc where doc.id = d.document_id and doc.status = 'retracted') \
-         order by d.imported_at, d.id",
+         order by d.assay in ('chip', 'chip_imputed'), d.imported_at, d.id",
     )
     .fetch_all(&mut *conn)
     .await?;
     drop(conn);
     let mut reports = Vec::new();
     for ds in datasets {
-        reports.push(diff_dataset(pool, blobs, release, date, &ds, default_age_of_majority).await?);
+        // One unreadable dataset must not stop the others; its transaction rolls back, so nothing
+        // partial is written. A database error still stops the run.
+        match diff_dataset(pool, blobs, release, date, &ds, default_age_of_majority).await {
+            Ok(r) => reports.push(r),
+            Err(e @ (Error::Db(_) | Error::Other(_))) => return Err(e),
+            Err(e) => reports.push(DatasetReport {
+                dataset_id: ds.id,
+                profile_id: ds.profile_id,
+                profile: ds.slug.clone(),
+                assay: ds.assay.clone(),
+                skipped: Some("unreadable"),
+                error: Some(e.to_string()),
+                carried: 0,
+                events: 0,
+                alerts: 0,
+            }),
+        }
     }
     Ok(DiffReport {
         release: date,
@@ -642,8 +677,10 @@ async fn diff_dataset(
     let mut report = DatasetReport {
         dataset_id: ds.id,
         profile_id: ds.profile_id,
+        profile: ds.slug.clone(),
         assay: ds.assay.clone(),
         skipped: None,
+        error: None,
         carried: 0,
         events: 0,
         alerts: 0,
@@ -794,32 +831,35 @@ async fn diff_dataset(
         if !alerted {
             continue;
         }
+        // The same change seen through another current dataset of this profile (a chip and a WGS)
+        // already has its item; datasets run non-chip first, so the kept one is the confirmed one.
+        let already: bool = sqlx::query_scalar(
+            "select exists (select 1 from review_item r join genome_event g on g.id = r.ref_id \
+             where r.kind = 'genome_reinterpretation' and r.status = 'open' and r.profile_id = $1 \
+             and g.variation_id = $2 and g.release_to = $3)",
+        )
+        .bind(ds.profile_id)
+        .bind(c.variation_id)
+        .bind(&release_to)
+        .fetch_one(&mut *tx)
+        .await?;
+        if already {
+            continue;
+        }
         report.alerts += 1;
         let withheld = minor_gated || (sensitive && !profile.genome_sensitive_ui);
-        let text = EventText {
-            gene,
-            old: old.as_ref(),
-            new_class,
-            new_stars: c.stars,
-            withheld,
-            unconfirmed,
-        };
-        let mut payload = json!({
+        // Nothing that names the variant goes into the payload: a reviewer may lack read:genome or
+        // read:sensitive, and the subject's switch may change later.
+        let payload = json!({
             "event_id": event_id,
             "event": kind,
             "withheld": withheld,
             "unconfirmed": unconfirmed,
-            "summary": summary(&text, "en"),
-            "summary_es": summary(&text, "es"),
+            "summary": review_summary(withheld, unconfirmed, "en"),
+            "summary_es": review_summary(withheld, unconfirmed, "es"),
             "release_from": release_from,
             "release_to": release_to,
         });
-        if !withheld {
-            payload["gene"] = json!(gene);
-            payload["variation_id"] = json!(c.variation_id);
-            payload["from"] = json!(old.as_ref().map_or("not_reported", |o| o.class));
-            payload["to"] = json!(new_class);
-        }
         create_item(
             &mut tx,
             &ReviewItemIn {
@@ -830,6 +870,7 @@ async fn diff_dataset(
                 reasons: vec![kind.to_string()],
                 ref_table: Some("genome_event".into()),
                 ref_id: Some(event_id),
+                document_id: ds.document_id,
                 ..ReviewItemIn::default()
             },
         )
@@ -860,14 +901,21 @@ async fn diff_dataset(
 }
 
 /// `clinvar_now` for the findings of one profile: per ClinVar VariationID, the classification in the
-/// newest release compared, from the current datasets' snapshots.
-pub async fn now_by_variation(conn: &mut PgConnection, profile_id: Uuid) -> Result<HashMap<i64, Value>> {
+/// newest release compared, from the current datasets' snapshots. Only a snapshot whose release is
+/// on or before `as_of` counts: the store did not know a later one on that date. Only our own class
+/// vocabulary is given, never the release's free text.
+pub async fn now_by_variation(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    as_of: NaiveDate,
+) -> Result<HashMap<i64, Value>> {
     let rows: Vec<(i64, String, i16, NaiveDate)> = sqlx::query_as(
         "select c.variation_id, c.significance, c.stars, c.release_date from clinvar_carried c \
          join genome_dataset d on d.id = c.dataset_id where d.profile_id = $1 and d.status = 'current' \
-         order by c.release_date, c.variation_id",
+         and c.release_date <= $2 order by c.release_date, c.variation_id",
     )
     .bind(profile_id)
+    .bind(as_of)
     .fetch_all(conn)
     .await?;
     Ok(rows
@@ -875,16 +923,21 @@ pub async fn now_by_variation(conn: &mut PgConnection, profile_id: Uuid) -> Resu
         .map(|(v, sig, stars, date)| {
             (
                 v,
-                json!({"significance": sig, "class": class_of(&sig), "stars": stars, "release": date.to_string()}),
+                json!({"class": class_of(&sig), "stars": stars, "release": date.to_string()}),
             )
         })
         .collect())
 }
 
 /// Add `clinvar_now` to every finding in a `Findings` JSON whose `clinvar.variation_id` is in a
-/// snapshot. Findings with nothing compared yet stay as they are.
-pub async fn attach_now(conn: &mut PgConnection, profile_id: Uuid, findings: &mut Value) -> Result<()> {
-    let now = now_by_variation(conn, profile_id).await?;
+/// snapshot known at `as_of`. Findings with nothing compared yet stay as they are.
+pub async fn attach_now(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    as_of: NaiveDate,
+    findings: &mut Value,
+) -> Result<()> {
+    let now = now_by_variation(conn, profile_id, as_of).await?;
     if now.is_empty() {
         return Ok(());
     }

@@ -34,6 +34,7 @@ const CYP2C19: (&str, i64, &str, &str) = ("10", 94781859, "G", "A");
 const BRCA2: (&str, i64, &str, &str) = ("13", 32338000, "A", "G");
 const MULTI_POS: i64 = 5_000_000; // chr11, REF GT, ALT G,GTT, GT 1/2
 const DPYD_REF: (&str, i64, &str, &str) = ("1", 97450058, "C", "T"); // Alex is ref here
+const NO_CALL: (&str, i64, &str, &str) = ("3", 1_000_500, "A", "G"); // Alex's calls VCF has ./. here
 
 fn cv<'a>(site: (&'a str, i64, &'a str, &'a str), vid: i64, sig: &'a str, rev: &'a str, gene: &'a str) -> Cv<'a> {
     (site.0, site.1, vid, site.2, site.3, sig, rev, gene)
@@ -59,6 +60,7 @@ fn release_one() -> Vec<Cv<'static>> {
         cv(BRCA2, 900010, "Uncertain_significance", SINGLE, "BRCA2"),
         cv(CYP2C19, 12348, "drug_response", EXPERT, "CYP2C19"),
         cv(CFTR, 7105, "Pathogenic", EXPERT, "CFTR"),
+        cv(NO_CALL, 900050, "Pathogenic", MULTI, "SYNTH3"),
     ]
 }
 
@@ -73,6 +75,7 @@ fn release_two() -> Vec<Cv<'static>> {
         cv(BRCA2, 900010, "Likely_benign", SINGLE, "BRCA2"),                       // SF gene: alert
         cv(CYP2C19, 12348, "drug_response", EXPERT, "CYP2C19"),
         cv(CFTR, 7105, "Uncertain_significance", SINGLE, "CFTR"), // downgrade of a shown P: alert
+        cv(NO_CALL, 900050, "Likely_pathogenic", EXPERT, "SYNTH3"), // not covered: nothing
     ]
 }
 
@@ -123,7 +126,7 @@ fn alex_calls() -> Vec<VcfRow> {
     }
     rows.push(VcfRow::new("chr13", BRCA2.1, BRCA2.2, BRCA2.3, "0/1"));
     rows.push(VcfRow::new("chr11", MULTI_POS, "GT", "G,GTT", "1/2"));
-    rows.push(VcfRow::new("chr3", 1_000_500, "A", "G", "./."));
+    rows.push(VcfRow::new("chr3", NO_CALL.1, NO_CALL.2, NO_CALL.3, "./."));
     rows
 }
 
@@ -216,6 +219,21 @@ fn alert_for<'a>(items: &'a [Value], event: &str) -> Vec<&'a Value> {
     items.iter().filter(|p| p["event"] == event).collect()
 }
 
+/// A review payload names no gene, VariationID or class: the reader's gate decides that at read time.
+fn names_nothing(item: &Value, words: &[&str]) {
+    for key in ["gene", "variation_id", "from", "to"] {
+        assert!(item.get(key).is_none(), "{key} in {item}");
+    }
+    let text = item.to_string();
+    for w in words {
+        assert!(!text.contains(w), "{w} in {text}");
+    }
+}
+
+fn date(s: &str) -> chrono::NaiveDate {
+    s.parse().unwrap_or_default()
+}
+
 #[tokio::test]
 async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     let e = env().await?;
@@ -248,21 +266,18 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     let alex = e.profile("alex");
     let planted = alerts_of(&mut c, alex).await?;
     assert_eq!(planted.len(), 1);
-    assert_eq!(planted[0]["gene"], "MTHFR");
-    assert_eq!(planted[0]["from"], "not_reported");
-    assert_eq!(
-        planted[0]["summary"],
-        "ClinVar now classifies a variant you carry in MTHFR as pathogenic or likely pathogenic (1 star). \
-         Before: not reported in your genome file."
-    );
+    // The review item names nothing: the gene and classes come from the gated events route.
+    assert_eq!(planted[0]["withheld"], false);
+    assert_eq!(planted[0]["summary"], "A result you carry changed in ClinVar.");
     assert_eq!(
         planted[0]["summary_es"],
-        "ClinVar clasifica ahora una variante que tienes en MTHFR como patogénica o probablemente patogénica \
-         (1 estrella). Antes: sin informar en tu archivo genómico."
+        "Ha cambiado en ClinVar un resultado que tienes."
     );
+    names_nothing(&planted[0], &["MTHFR", "900030"]);
 
     // The snapshot holds exactly the carried records: the indel, both alleles of the multiallelic
-    // site, and nothing at the ref site (Alex) or the not_on_array site (Sam's chip).
+    // site, and nothing at the ref site (Alex), the no-call site (Alex, 900050) or the not_on_array
+    // site (Sam's chip).
     let snap: Vec<(String, i64)> = sqlx::query_as(
         "select p.slug, c.variation_id from clinvar_carried c join genome_dataset d on d.id = c.dataset_id \
          join profile p on p.id = d.profile_id order by 1, 2",
@@ -316,12 +331,10 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     let text = sf[0].to_string();
     assert!(!text.contains("BRCA2") && !text.contains("900010"), "{text}");
     let down = alert_for(&items, "downgraded_from_plp");
-    assert_eq!(down[0]["gene"], "CFTR");
-    assert_eq!(
-        down[0]["summary"],
-        "ClinVar now classifies a variant you carry in CFTR as of uncertain significance (1 star). Before: \
-         pathogenic or likely pathogenic (3 stars)."
-    );
+    names_nothing(down[0], &["CFTR", "7105"]);
+    for item in &items {
+        names_nothing(item, &["MTHFR", "LCT", "BRCA2", "CFTR"]);
+    }
 
     let sam = alerts_of(&mut c, e.profile("sam")).await?;
     assert_eq!(sam.len(), 1);
@@ -342,7 +355,7 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
 
     // get_genome_findings' clinvar_now: the CFTR finding now reads what release two says.
     let mut found = list_findings(&mut c, alex, &Gate::new(false, false), &FindingsQuery::default()).await?;
-    clinvar::attach_now(&mut c, alex, &mut found).await?;
+    clinvar::attach_now(&mut c, alex, date(b), &mut found).await?;
     let cftr = found["findings"]
         .as_array()
         .into_iter()
@@ -350,10 +363,12 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
         .find(|f| f["gene"] == "CFTR")
         .cloned()
         .unwrap_or_default();
-    assert_eq!(
-        cftr["clinvar_now"],
-        json!({"significance": "Uncertain_significance", "class": "vus", "stars": 1, "release": b})
-    );
+    // Only our own class vocabulary reaches an agent, never the release's free text.
+    assert_eq!(cftr["clinvar_now"], json!({"class": "vus", "stars": 1, "release": b}));
+    // An as_of before the release compared knows nothing of it.
+    let mut past = list_findings(&mut c, alex, &Gate::new(false, false), &FindingsQuery::default()).await?;
+    clinvar::attach_now(&mut c, alex, date("2026-10-11"), &mut past).await?;
+    assert!(!past.to_string().contains("clinvar_now"), "{past}");
 
     // The same release again, or an older one, compares nothing.
     let again = clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
@@ -383,12 +398,152 @@ async fn an_sf_gene_is_named_once_the_sensitive_switch_is_on() -> R {
     let items = alerts_of(&mut c, e.profile("alex")).await?;
     let sf = alert_for(&items, "vus_resolved");
     assert_eq!(sf[0]["withheld"], false);
-    assert_eq!(sf[0]["gene"], "BRCA2");
+    // Even with the switch on the item names nothing: the switch can be turned off later, and the
+    // reviewer may be a caregiver without read:genome.
+    names_nothing(sf[0], &["BRCA2", "900010"]);
+    Ok(())
+}
+
+#[test]
+fn the_named_sentence_reads_well_for_every_class() {
+    let vus = Before {
+        class: "vus",
+        stars: Some(1),
+    };
+    let plp = Before {
+        class: "plp",
+        stars: Some(3),
+    };
+    fn named(old: Option<&Before>, new_class: &str, lang: &str) -> String {
+        summary(
+            &clinvar::EventText {
+                gene: Some("BRCA2"),
+                old,
+                new_class,
+                new_stars: 1,
+                withheld: false,
+                unconfirmed: false,
+            },
+            lang,
+        )
+    }
     assert_eq!(
-        sf[0]["summary"],
-        "ClinVar now classifies a variant you carry in BRCA2 as benign or likely benign (1 star). Before: of \
-         uncertain significance (1 star)."
+        named(Some(&vus), "blb", "en"),
+        "ClinVar's classification of a variant you carry in BRCA2 is now: benign or likely benign (1 star). \
+         Before: uncertain significance (1 star)."
     );
+    assert_eq!(
+        named(Some(&plp), "vus", "es"),
+        "La clasificación en ClinVar de una variante que tienes en BRCA2 es ahora: significado incierto \
+         (1 estrella). Antes: patogénica o probablemente patogénica (3 estrellas)."
+    );
+    assert_eq!(
+        named(Some(&plp), "conflicting", "en"),
+        "ClinVar's classification of a variant you carry in BRCA2 is now: conflicting classifications \
+         (1 star). Before: pathogenic or likely pathogenic (3 stars)."
+    );
+    assert_eq!(
+        named(None, "plp", "es"),
+        "La clasificación en ClinVar de una variante que tienes en BRCA2 es ahora: patogénica o probablemente \
+         patogénica (1 estrella). Antes: sin informar en tu archivo genómico."
+    );
+}
+
+/// Alex's calls VCF rewritten in text order (chrM first, then chr1, chr10...), as some producers sort.
+async fn unsort_alex_calls(e: &Env, c: &mut PgConnection) -> anyhow::Result<()> {
+    let sha: String = sqlx::query_scalar(
+        "select encode(vcf_blob, 'hex') from genome_dataset where profile_id = $1 and status = 'current'",
+    )
+    .bind(e.profile("alex"))
+    .fetch_one(&mut *c)
+    .await?;
+    let path = e.blobs.path(&sha)?;
+    let mut text = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tAR-01\n".to_string();
+    text.push_str("chrM\t100\t.\tA\tG\t50\tPASS\t.\tGT\t1/1\n");
+    for r in alex_calls() {
+        text.push_str(&format!(
+            "{}\t{}\t.\t{}\t{}\t50\tPASS\t.\tGT\t{}\n",
+            r.chrom, r.pos, r.reference, r.alt, r.gt
+        ));
+    }
+    let mut perms = std::fs::metadata(&path)?.permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&path, perms)?;
+    std::fs::write(&path, text)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_unreadable_calls_vcf_does_not_stop_the_other_datasets() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_family(&e, &mut c).await?;
+    unsort_alex_calls(&e, &mut c).await?;
+    let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
+    let two = write_release(e.dir.path(), "two.vcf", "20261012", &release_two(), false)?;
+    let r1 = clinvar::diff_release(&e.db.pool, &e.blobs, &one, 18).await?;
+    let alex = r1.datasets.iter().find(|d| d.profile == "alex").cloned();
+    let alex = alex.ok_or_else(|| anyhow::anyhow!("no alex in {r1:?}"))?;
+    assert_eq!(alex.skipped, Some("unreadable"), "{r1:?}");
+    assert!(
+        alex.error.as_deref().is_some_and(|m| m.contains("not sorted")),
+        "{alex:?}"
+    );
+    assert_eq!(r1.datasets.len(), 3);
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
+    // Nothing partial for Alex; Sam, compared after him, still gets his LCT alert.
+    assert_eq!(
+        events(&mut c).await?,
+        vec![
+            ev("lucia", 7105, "downgraded_from_plp", false, "2026-10-05", "2026-10-12"),
+            ev("sam", 900020, "upgraded_to_plp", true, "2026-10-05", "2026-10-12"),
+        ]
+    );
+    let n: i64 = sqlx::query_scalar(
+        "select count(*) from clinvar_carried c join genome_dataset d on d.id = c.dataset_id where d.profile_id = $1",
+    )
+    .bind(e.profile("alex"))
+    .fetch_one(&mut *c)
+    .await?;
+    assert_eq!(n, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_change_alerts_once_when_a_profile_has_two_current_datasets() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_alex(&e, &mut c).await?;
+    // Alex also has a chip (another sample, so both datasets stay current) that carries LCT.
+    let mut chip = sam_chip();
+    chip["subject"] = synthetic::alex_facts()["subject"].clone();
+    chip["subject"]["sample_id"] = json!("AR-CHIP");
+    e.seed(&mut c, "alex", &chip, &[]).await?;
+    let current: i64 =
+        sqlx::query_scalar("select count(*) from genome_dataset where profile_id = $1 and status = 'current'")
+            .bind(e.profile("alex"))
+            .fetch_one(&mut *c)
+            .await?;
+    assert_eq!(current, 2);
+    let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
+    let two = write_release(e.dir.path(), "two.vcf", "20261012", &release_two(), false)?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &one, 18).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
+    // Two LCT events, one per dataset, and one review item: the WGS one, which is confirmed.
+    let lct: Vec<Ev> = events(&mut c)
+        .await?
+        .into_iter()
+        .filter(|x| x.variation_id == 900020)
+        .collect();
+    assert_eq!(lct.len(), 2, "{lct:?}");
+    let items = alerts_of(&mut c, e.profile("alex")).await?;
+    let lct_items: Vec<&Value> = items
+        .iter()
+        .filter(|p| p["event"] == "upgraded_to_plp" && p["release_to"] == "2026-10-12")
+        .collect();
+    assert_eq!(lct_items.len(), 1, "{items:?}");
+    assert_eq!(lct_items[0]["unconfirmed"], false);
     Ok(())
 }
 
