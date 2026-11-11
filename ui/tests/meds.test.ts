@@ -50,7 +50,7 @@ test('a medicine not taken today is labelled by its newest version, never stoppe
 	const state = (...rows: MedRecord[]) => historyGroups(rows, today)[0].state;
 	assert.equal(state(rec('s', { name: 'S', med_status: 'stopped', started: '2022-01-01', stopped: '2025-12-01' })), 'stopped');
 	assert.equal(state(rec('h', { name: 'H', med_status: 'on_hold', started: '2026-01-01' })), 'on_hold');
-	assert.equal(state(rec('f', { name: 'F', med_status: 'active', started: '2026-12-01' })), null, 'starts later');
+	assert.equal(state(rec('f', { name: 'F', med_status: 'active', started: '2026-12-01' })), 'later', 'starts later');
 	assert.equal(state(rec('r', { name: 'R', med_status: 'active', started: '2026-01-01' }, { status: 'retracted' })), 'retracted');
 	assert.equal(
 		state(

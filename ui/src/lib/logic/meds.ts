@@ -32,11 +32,11 @@ export interface MedGroup<T extends MedRecord = MedRecord> {
 	title: string;
 	current: boolean;
 	/**
-	 * Why a medicine not taken today is not current, from its newest live version: stopped, on hold, or
-	 * retracted when no version is live. Null when current, when it starts later, or when every version
-	 * was corrected into another medicine.
+	 * Why a medicine not taken today is not current, from its newest live version: stopped, on hold, starts
+	 * later, or retracted when no version is live. Null when current, or when every version was corrected
+	 * into another medicine.
 	 */
-	state: 'stopped' | 'on_hold' | 'retracted' | null;
+	state: 'stopped' | 'on_hold' | 'later' | 'retracted' | null;
 	/** Newest course first; corrected and retracted versions sit with their medicine. */
 	entries: T[];
 }
@@ -62,7 +62,7 @@ function notTaken(entries: MedRecord[], today: string): MedGroup['state'] {
 	if (!live) return entries.some((e) => e.status === 'retracted') ? 'retracted' : null;
 	if (str(live.detail.med_status) === 'on_hold') return 'on_hold';
 	const started = str(live.detail.started);
-	return started && started > today ? null : 'stopped';
+	return started && started > today ? 'later' : 'stopped';
 }
 
 const SYSTEMS: Record<string, string> = {
