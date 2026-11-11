@@ -15,6 +15,9 @@
   "not_measured_this_time": {
     "[]": "empty"
   },
+  "prevention_due": {
+    "[]": "empty"
+  },
   "profile": "string",
   "review_open": "int",
   "rules_version": "string",

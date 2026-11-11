@@ -61,6 +61,76 @@
   "not_measured_this_time": {
     "[]": "string"
   },
+  "prevention_due": {
+    "[]": {
+      "area": "string",
+      "cite": "string",
+      "due": {
+        "|": [
+          "absent",
+          "date"
+        ]
+      },
+      "group": {
+        "|": [
+          "absent",
+          "string"
+        ]
+      },
+      "key": "string",
+      "kind": {
+        "|": [
+          "=never_measured",
+          "=once",
+          "=recency",
+          "=seasonal"
+        ]
+      },
+      "labs": {
+        "|": [
+          "absent",
+          "bool"
+        ]
+      },
+      "last": {
+        "|": [
+          "absent",
+          {
+            "date": "date",
+            "src": "src_id"
+          }
+        ]
+      },
+      "record": {
+        "|": [
+          "absent",
+          {
+            "kind": "=immunization",
+            "text": "string"
+          }
+        ]
+      },
+      "rule": "string",
+      "source": {
+        "|": [
+          "absent",
+          "string"
+        ]
+      },
+      "src": {
+        "[]": "src_id"
+      },
+      "status": {
+        "|": [
+          "=due",
+          "=overdue",
+          "=up_to_date"
+        ]
+      },
+      "title": "string",
+      "why": "string"
+    }
+  },
   "profile": "string",
   "review_open": "int",
   "rules_version": "string",
