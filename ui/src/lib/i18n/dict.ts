@@ -1292,6 +1292,7 @@ export const dict = {
 		xfer_what_sens: "This includes sensitive facts and genome results.",
 		xfer_back_q: "Give {name} this access again?",
 		xfer_back_yes: "Yes, give it back",
+		xfer_lapsed: "Their access would have ended on {date}.",
 	},
 	es: {
 		household: "Hogar",
@@ -2583,6 +2584,7 @@ export const dict = {
 		xfer_what_sens: "Incluye datos sensibles y resultados del genoma.",
 		xfer_back_q: "¿Devolver este acceso a {name}?",
 		xfer_back_yes: "Sí, devolverlo",
+		xfer_lapsed: "Su acceso habría terminado el {date}.",
 	},
 } as const;
 

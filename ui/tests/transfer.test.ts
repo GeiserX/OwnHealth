@@ -1,7 +1,7 @@
 // Ownership transfer at majority: what her "give access back" row says.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { backSummary, localDay } from '../src/lib/logic/transfer.ts';
+import { backSummary, lapsed, localDay } from '../src/lib/logic/transfer.ts';
 
 test('names every category that comes back, and flags sensitive facts and the genome', () => {
 	assert.deepEqual(backSummary(['read:labs', 'read:summary']), { keys: ['fu_sc_read_labs', 'fu_sc_read_summary'], sensitive: false });
@@ -23,4 +23,12 @@ test('the end date is the local day, not the UTC one', () => {
 		if (prev === undefined) delete process.env.TZ;
 		else process.env.TZ = prev;
 	}
+});
+
+test('a grant whose end date has passed cannot come back as it was', () => {
+	const now = new Date('2026-11-11T10:00:00Z');
+	assert.equal(lapsed(null, now), false);
+	assert.equal(lapsed('2026-11-12T00:00:00Z', now), false);
+	assert.equal(lapsed('2026-11-11T10:00:00Z', now), true);
+	assert.equal(lapsed('2026-11-01T00:00:00Z', now), true);
 });

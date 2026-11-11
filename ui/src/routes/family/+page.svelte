@@ -15,7 +15,7 @@
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { roleCell } from '#lib/logic/grants';
-	import { backSummary, localDay, type FormerAccess } from '#lib/logic/transfer';
+	import { backSummary, lapsed, localDay, type FormerAccess } from '#lib/logic/transfer';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
 
@@ -137,7 +137,7 @@
 	}
 	function giveBack(f: FormerAccess) {
 		const slug = mine?.slug;
-		if (!slug) return;
+		if (!slug || lapsed(f.expires_at)) return;
 		act('xfer', async () => {
 			await putGrant({
 				user_id: f.user_id,
@@ -252,7 +252,9 @@
 						><b>{memberName(f.user_id)}</b> <span class="muted">{t('r_' + f.role).toLowerCase()} · {tf('xfer_until', { date: localDay(f.ended_at) })}</span>
 						<span class="what muted">{backWhat(f)}</span></span
 					>
-					{#if backing === f.user_id}
+					{#if f.expires_at && lapsed(f.expires_at)}
+						<span class="muted">{tf('xfer_lapsed', { date: localDay(f.expires_at) })}</span>
+					{:else if backing === f.user_id}
 						<ConfirmRow
 							text={tf('xfer_back_q', { name: memberName(f.user_id) })}
 							confirmLabel={t('xfer_back_yes')}

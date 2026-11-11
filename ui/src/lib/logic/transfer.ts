@@ -29,3 +29,9 @@ export function localDay(iso: string): string {
 	const pad = (n: number) => String(n).padStart(2, '0');
 	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
+
+/** Whether the end date a former grant had has passed: such a grant would have ended anyway, so it
+ * cannot come back as it was (a PUT with a past end date would restore nothing). */
+export function lapsed(expiresAt: string | null, now: Date = new Date()): boolean {
+	return expiresAt !== null && new Date(expiresAt).getTime() <= now.getTime();
+}
