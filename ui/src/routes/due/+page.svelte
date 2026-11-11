@@ -14,12 +14,13 @@
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { dueColor, isOpen, type DueDoc, type DueItem } from '#lib/logic/due';
+	import { todayIso } from '#lib/logic/people';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const prof = $derived(currentProfile());
 	const canWrite = $derived(!!prof && prof.role !== 'viewer');
 	const doc = new Loader<DueDoc>();
-	const today = new Date().toISOString().slice(0, 10);
+	const today = todayIso();
 
 	function load() {
 		const slug = prof?.slug;
@@ -44,6 +45,9 @@
 	// again after a record (a row never recorded says so instead of a date from decades ago).
 	const when = (i: DueItem) =>
 		!i.due || (!i.last && isOpen(i) && i.status !== 'upcoming') ? '' : i.status === 'up_to_date' ? tf('due_next', { d: i.due }) : i.status === 'upcoming' ? tf('due_from', { d: i.due }) : tf('due_since', { d: i.due });
+
+	// How many items the scopes leave out, and which scopes they need.
+	const withheldText = (d: DueDoc) => tf('due_withheld', { n: d.withheld, scopes: (d.withheld_scopes ?? []).join(', ') });
 
 	// One small form at a time: record a vaccine or a procedure with the name that counts for the row.
 	let open = $state<string | null>(null);
@@ -94,7 +98,7 @@
 	{#if d.reason}<div class="banner" role="note">{d.reason}</div>{/if}
 	{#if d.disclaimer}<div class="note" style="margin-bottom:10px">{d.disclaimer}</div>{/if}
 	{#if !items.length}
-		<div class="card" style="margin-bottom:10px"><div class="empty">{d.withheld ? tf('due_withheld', { n: d.withheld }) : t('due_none')}</div></div>
+		<div class="card" style="margin-bottom:10px"><div class="empty">{d.withheld ? withheldText(d) : t('due_none')}</div></div>
 	{/if}
 	{#each groups.filter((g) => g.rows.length) as g (g.id)}
 		<section class="card" style="margin-bottom:12px" aria-labelledby="due-{g.id}">
@@ -144,7 +148,7 @@
 			{/each}
 		</section>
 	{/each}
-	{#if items.length && d.withheld}<div class="note" style="margin-bottom:10px">{tf('due_withheld', { n: d.withheld })}</div>{/if}
+	{#if items.length && d.withheld}<div class="note" style="margin-bottom:10px">{withheldText(d)}</div>{/if}
 	{#if d.unmatched?.length}
 		<div class="note" style="margin-bottom:10px">
 			{t('due_unmatched')}

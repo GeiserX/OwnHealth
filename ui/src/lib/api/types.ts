@@ -200,6 +200,8 @@ export interface Dashboard {
 	due: { title: string; why: string; status: Status; kind: 'lab' | 'vaccine' | 'screening'; phase: string | null; rule?: string }[];
 	/** Screenings, vaccines and lab gaps of ownhealth.prevention/v1 (0.4.0); the Due card merges it with `due`. */
 	prevention_due?: import('../logic/due').DueItem[];
+	/** The scopes the Due card lacks to show every item; empty when nothing is withheld. */
+	prevention_withheld?: string[];
 	genome: { summary: string; chips: string[]; hidden: number; source: string | null } | null;
 	review_open: number;
 	state_hash: string;

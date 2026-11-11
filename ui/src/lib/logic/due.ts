@@ -38,8 +38,18 @@ export interface DueDoc {
 	items: DueItem[];
 	unmatched?: { name: string; src: string }[];
 	withheld: number;
+	/** The scopes the withheld items need. */
+	withheld_scopes?: string[];
 	prevention_hash: string;
 	lang: string;
+}
+
+/**
+ * The scopes an empty Due card lacks, as one string ("read:labs, read:records"), or null when the
+ * card has rows or nothing is withheld: an empty card that withholds items must not read as nothing due.
+ */
+export function lockedScopes(rows: CardRow[], withheld: string[] | undefined): string | null {
+	return !rows.length && withheld?.length ? withheld.join(', ') : null;
 }
 
 /** A row of the dashboard's older `due` list (lab gaps of the rule pack, grouped by rule). */

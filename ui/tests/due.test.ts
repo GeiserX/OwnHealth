@@ -2,7 +2,7 @@
 // with nothing shown twice.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dueCard, dueColor, isOpen, type DueItem, type GlanceDue } from '../src/lib/logic/due.ts';
+import { dueCard, dueColor, isOpen, lockedScopes, type DueItem, type GlanceDue } from '../src/lib/logic/due.ts';
 
 const item = (key: string, status: DueItem['status'], extra: Partial<DueItem> = {}): DueItem => ({
 	key,
@@ -56,4 +56,12 @@ test('the card lists open items only, each with its colour and word', () => {
 	assert.equal(isOpen({ status: 'up_to_date' }), false);
 	assert.equal(dueColor('up_to_date'), 'ok');
 	assert.equal(dueColor('not_assessed'), 'nodata');
+});
+
+test('an empty Due card that withholds items names the scopes, and a card with rows does not', () => {
+	assert.equal(lockedScopes([], ['read:records']), 'read:records');
+	assert.equal(lockedScopes([], ['read:labs', 'read:records']), 'read:labs, read:records');
+	assert.equal(lockedScopes([], []), null);
+	assert.equal(lockedScopes([], undefined), null);
+	assert.equal(lockedScopes(dueCard([hcvRow], []), ['read:records']), null);
 });
