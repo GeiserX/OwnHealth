@@ -108,6 +108,9 @@ fn report(r: &serde_json::Value) -> anyhow::Result<ExitCode> {
 async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
     ownhealth::register_lanes();
     let settings = Settings::from_env()?;
+    // Every command, not only those that build a Runtime: backup and verify-restore compute state
+    // hashes, and the minor rule in them must match the server's.
+    ownhealth_core::access::set_env_majority(settings.age_of_majority);
     match cmd {
         Cmd::Serve => {
             app::serve(settings).await?;
