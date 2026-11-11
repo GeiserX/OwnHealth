@@ -334,6 +334,10 @@ fn ckd_epi_refuses_a_child_an_unknown_sex_and_a_censored_value() {
         (child[0]["status"].clone(), child[0]["reason_code"].clone()),
         (json!("refused"), json!("not_adult"))
     );
+    // the combined equation, with no cystatin C, refuses with the age at the same draw, not today's
+    let both = one("ckd_epi_2021_cr_cys", &draws, &person("2017-06-21", Some(Sex::Female)));
+    assert_eq!(both[0]["reason"], json!({"age": 8, "on": "2026-02-18"}));
+    assert_eq!(child[0]["reason"], both[0]["reason"]);
     let nosex = one("ckd_epi_2021_cr", &draws, &person("1980-01-01", None));
     assert_eq!(nosex[0]["reason_code"], "sex_not_recorded");
     let mut censored = obs("creatinine", "0.3", "mg/dL", "2026-02-18", "c");

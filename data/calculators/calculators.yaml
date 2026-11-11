@@ -13,7 +13,7 @@
 version: 0.1.0
 rows:
   - id: ckd_epi_2021_cr
-    version: CKD-EPI 2021 creatinine
+    version: CKD-EPI 2021 cr
     inputs: [creatinine]
     shows_on: [creatinine, egfr, cystatin_c]
     system: kidney
@@ -21,7 +21,7 @@ rows:
     precision: 0
     cite: https://pubmed.ncbi.nlm.nih.gov/34554658/
   - id: ckd_epi_2021_cr_cys
-    version: CKD-EPI 2021 creatinine-cystatin C
+    version: CKD-EPI 2021 cr-cys
     inputs: [creatinine, cystatin_c]
     shows_on: [creatinine, egfr, cystatin_c]
     system: kidney
@@ -61,11 +61,16 @@ templates:
     ckd_epi_2021_cr_cys: {en: "eGFR (CKD-EPI 2021, creatinine and cystatin C)", es: "FGe (CKD-EPI 2021, creatinina y cistatina C)"}
     fib4: {en: "FIB-4", es: "FIB-4"}
     homa_ir: {en: "HOMA-IR", es: "HOMA-IR"}
+  short:
+    ckd_epi_2021_cr: {en: "eGFR (creatinine)", es: "FGe (creatinina)"}
+    ckd_epi_2021_cr_cys: {en: "eGFR (creatinine, cystatin C)", es: "FGe (creatinina, cistatina C)"}
+    fib4: {en: "FIB-4", es: "FIB-4"}
+    homa_ir: {en: "HOMA-IR", es: "HOMA-IR"}
   reason:
     missing_input: {en: "Not computed: no {groups} on record.", es: "Sin calcular: el registro no tiene {groups}."}
     inputs_not_same_draw: {en: "Not computed: {groups} come from different draws, and the formula needs one draw.", es: "Sin calcular: {groups} vienen de extracciones distintas y la fórmula necesita una sola."}
-    not_adult: {en: "Not computed: the equation is validated for adults (18 and over); age {age} at this draw.", es: "Sin calcular: la ecuación está validada en adultos (18 años o más); edad {age} en esta extracción."}
-    age_below_35: {en: "Not computed: FIB-4 is validated from age 35; age {age} at this draw.", es: "Sin calcular: el FIB-4 está validado desde los 35 años; edad {age} en esta extracción."}
+    not_adult: {en: "Not computed: the equation is validated for adults (18 and over); age {age} on {on}.", es: "Sin calcular: la ecuación está validada en adultos (18 años o más); {age} años el {on}."}
+    age_below_35: {en: "Not computed: FIB-4 is validated from age 35; age {age} on {on}.", es: "Sin calcular: el FIB-4 está validado desde los 35 años; {age} años el {on}."}
     sex_not_recorded: {en: "Not computed: the equation uses sex at birth, which is not recorded.", es: "Sin calcular: la ecuación usa el sexo al nacer, que no está registrado."}
     birth_date_not_recorded: {en: "Not computed: the formula uses age, and the birth date is not recorded.", es: "Sin calcular: la fórmula usa la edad y la fecha de nacimiento no está registrada."}
     unit_unsupported: {en: "Not computed: {group} is in {unit}, a unit with no published conversion here.", es: "Sin calcular: {group} está en {unit}, una unidad sin conversión publicada aquí."}

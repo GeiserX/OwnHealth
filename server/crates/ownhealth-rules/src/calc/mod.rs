@@ -9,6 +9,8 @@
 //!         reason_code, reason{..}, limitations[..], category{code, low, high, cite}}
 //! ```
 //!
+//! `converted` is an input in the formula's unit, shown to 3 decimals; the formula reads it unrounded.
+//!
 //! Every input of one result comes from one draw (the observation's `report_key`, else its document,
 //! else its day, as the timeline groups a draw). A formula runs once per draw that holds all its
 //! inputs; with no such draw the calculator gives one item saying why. A failed validity rule is
@@ -351,10 +353,10 @@ fn person_check(id: &str, person: &Person, on: NaiveDate) -> Option<Refusal> {
         return Some(("birth_date_not_recorded", json!({})));
     };
     if id.starts_with("ckd_epi") && age < ADULT_AGE {
-        return Some(("not_adult", json!({"age": age})));
+        return Some(("not_adult", json!({"age": age, "on": iso(on)})));
     }
     if id == "fib4" && age < FIB4_MIN_AGE {
-        return Some(("age_below_35", json!({"age": age})));
+        return Some(("age_below_35", json!({"age": age, "on": iso(on)})));
     }
     None
 }
@@ -370,7 +372,10 @@ fn input_json(o: &Obs, converted: Option<(Decimal, &str)>) -> Value {
     m.insert("date".into(), json!(iso(o.date)));
     m.insert("src".into(), json!(o.src));
     if let Some((v, unit)) = converted {
-        m.insert("converted".into(), json!({"value": num(&v.normalize()), "unit": unit}));
+        m.insert(
+            "converted".into(),
+            json!({"value": num(&quantize(v, 3).normalize()), "unit": unit}),
+        );
     }
     Value::Object(m)
 }
@@ -544,7 +549,9 @@ pub fn evaluate(data: &Data, calc: &Calc, draws: &[Draw], person: &Person, as_of
         .filter_map(|g| draws.iter().rev().find_map(|d| d.obs.get(g)))
         .collect();
     let inputs: Vec<Value> = newest.iter().map(|o| input_json(o, None)).collect();
-    if let Some(r) = person_check(&calc.id, person, as_of) {
+    // the age that counts is the one at the newest input's draw; with no input, on `as_of`
+    let on = newest.iter().map(|o| o.date).max().unwrap_or(as_of);
+    if let Some(r) = person_check(&calc.id, person, on) {
         return vec![refused(calc, "refused", r, None, inputs)];
     }
     if newest.len() == calc.inputs.len() {
@@ -635,7 +642,7 @@ fn fill(text: &str, params: &Map<String, Value>, data: &Data, lang: &str) -> Str
     out
 }
 
-/// The document with the words in `lang` (es or en): each item gains `name`, its refusal as `text`,
+/// The document with the words in `lang` (es or en): each item gains `name` and `short`, its refusal as `text`,
 /// `notes` (the band, then the limitations), the `system` and `shows_on` groups where it is
 /// listed, and a `name` on each input. The hash stays the document's.
 pub fn render(doc: &Value, lang: &str) -> Result<Value> {
@@ -650,6 +657,8 @@ pub fn render(doc: &Value, lang: &str) -> Result<Value> {
         let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
         let name = template(data, "name", &id, lang).unwrap_or(&id).to_string();
         m.insert("name".into(), json!(name));
+        let short = template(data, "short", &id, lang).unwrap_or(&name).to_string();
+        m.insert("short".into(), json!(short));
         // where the UI lists it: the dashboard card and the biomarker pages
         if let Some(c) = data.calcs.iter().find(|c| c.id == id) {
             m.insert("system".into(), json!(c.system));
