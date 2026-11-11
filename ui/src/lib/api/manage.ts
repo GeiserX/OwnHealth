@@ -8,6 +8,7 @@ import type {
 	DocumentDetail,
 	DocumentSummary,
 	DrugCheckView,
+	GenomeEvents,
 	GenomeView,
 	Household,
 	PasskeyOut,
@@ -82,6 +83,7 @@ export const setLocks = (profile: string, locks: Scope[]) => put<{ ok: true }>(`
 // ---- lane I-ui-2: genome, drug check, documents, review helpers, auth, settings ----
 
 export const getGenomeView = (profile: string, lang?: string) => get<GenomeView>(`${p(profile)}/genome`, { lang });
+export const getGenomeEvents = (profile: string) => get<GenomeEvents>(`${p(profile)}/genome/events`);
 /** Needs a fresh step-up (withStepUp). */
 export const setGenomeConsent = (profile: string, body: { ui?: boolean; agents?: boolean }) =>
 	post<{ ui: boolean; agents: boolean }>(`${p(profile)}/genome/consent`, body);

@@ -531,6 +531,43 @@ export interface GenomeFindingFull extends Omit<GenomeFinding, 'call_state'> {
 	source: { assay: string; tool: string; sample_id: string | null } | null;
 }
 
+/** One ClinVar classification in a genome event: our class vocabulary, ClinVar's own wording and stars. */
+export interface ClinvarClass {
+	class?: 'plp' | 'vus' | 'conflicting' | 'blb' | 'other';
+	significance?: string;
+	stars?: number | null;
+	fact_id?: string;
+}
+
+/** GET /profiles/{p}/genome/events: a withheld event carries no kind, gene, classes or alert flag. */
+export interface GenomeEvent {
+	id: Uuid;
+	release_from: string | null;
+	release_to: string;
+	unconfirmed: boolean;
+	created_at: IsoDateTime;
+	text: { en: string; es: string };
+	withheld?: 'minor' | 'sensitive';
+	alerted?: boolean;
+	kind?:
+		| 'upgraded_to_plp'
+		| 'downgraded_from_plp'
+		| 'vus_resolved'
+		| 'became_conflicting'
+		| 'significance_changed'
+		| 'stars_changed'
+		| 'new_assertion_on_carried_variant';
+	gene?: string | null;
+	variation_id?: number;
+	old?: ClinvarClass;
+	new?: ClinvarClass;
+}
+
+export interface GenomeEvents {
+	events: GenomeEvent[];
+	withheld: { sensitive: number; minor_rule: number };
+}
+
 export interface GenomeView {
 	dataset: {
 		assay: string;
