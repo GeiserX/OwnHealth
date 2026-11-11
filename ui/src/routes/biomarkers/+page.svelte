@@ -3,8 +3,8 @@
 	// detail: trend over the lab's printed reference band, a source chip per point, the printed string on
 	// hover and a unit toggle. Values come from lane A (observations, trend); status words from lane E.
 	import { page } from '$app/state';
-	import { getDashboard, getTrend, searchObservations, type TrendPointStatus, type Units } from '#lib/api';
-	import type { Dashboard, MarkerRow, ObservationOut, Trend } from '#lib/api/types';
+	import { getCalculators, getDashboard, getTrend, searchObservations, type TrendPointStatus, type Units } from '#lib/api';
+	import type { Calculators, Dashboard, MarkerRow, ObservationOut, Trend } from '#lib/api/types';
 	import { C } from '#lib/components/colors';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
@@ -19,6 +19,7 @@
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
 	import { buildBars, niceStep } from '#lib/logic/axis';
+	import { calcUnit, forGroup, rowsForCard } from '#lib/logic/calc';
 	import { refRange, sourceLabel } from '#lib/logic/format';
 	import { currentProfile } from '#lib/state/app.svelte';
 
@@ -37,6 +38,8 @@
 	// ---- detail: one trend per unit system, so the toggle shows only units that really differ ----
 	const trends = new Loader<Trend[]>();
 	const dash = new Loader<Dashboard>();
+	// v0.3 calculators: published formulas on this profile's labs (read:labs), computed on read.
+	const calcs = new Loader<Calculators>();
 	let unitIdx = $state(0);
 	let adding = $state(false);
 
@@ -59,6 +62,7 @@
 			return ok.filter((tr, i) => ok.findIndex((o) => o.unit === tr.unit) === i);
 		}, `${slug}/${c}`);
 		dash.run(() => getDashboard(slug, lang), slug);
+		calcs.run(() => getCalculators(slug, lang), slug);
 	}
 	$effect(load);
 
@@ -89,6 +93,9 @@
 	const card = $derived(dash.data?.systems.find((s) => s.markers.some((m) => m.alias_group === tr?.alias_group)) ?? null);
 	const marker = $derived(card?.markers.find((m) => m.alias_group === tr?.alias_group) ?? null);
 	const related = $derived((card?.markers ?? []).filter((m) => m.alias_group !== tr?.alias_group) as MarkerRow[]);
+	// The calculators that read this marker, and the computed rows of its dashboard card.
+	const calcShown = $derived(forGroup(calcs.data?.items ?? [], tr?.alias_group ?? code ?? ''));
+	const calcRows = $derived(card ? rowsForCard(calcs.data?.items ?? [], card.key) : []);
 
 	// A point's colour: its status from lane E when present, else the lab's own flag (abnormal or not).
 	const ABN = new Set(['L', 'H', 'LL', 'HH', 'A']);
@@ -421,9 +428,46 @@
 				</div>
 				<div class="card">
 					<h3>{t('h1_calc')} <span class="r">{t('nodx')}</span></h3>
-					<div class="empty" style="padding:8px 0"><PhaseChip phase="v0.3" /> {t('h1_calc_d')}</div>
+					{#if calcs.loading && !calcs.data}
+						<div class="empty" style="padding:8px 0">{t('loading')}</div>
+					{:else if calcs.error}
+						<NotReady error={calcs.error} onretry={load} />
+					{:else if !calcShown.length}
+						<div class="empty" style="padding:8px 0">{t('calc_none')}</div>
+					{:else}
+						{#each calcShown as c (c.id)}
+							{@const it = c.latest}
+							<div class="calc">
+								<div class="row">
+									<b>{it.name}</b>
+									{#if it.status === 'ok'}
+										<span class="val num" style="white-space:nowrap">{numText(it.value ?? '')}{#if it.unit}{' '}<small class="muted" style="font-size:11px;font-weight:400">{calcUnit(it.unit)}</small>{/if}</span>
+									{:else}
+										<span class="val dim" style="font-size:12px;font-weight:500;white-space:nowrap">{t('calc_' + it.status)}</span>
+									{/if}
+								</div>
+								{#if it.status === 'ok' && it.date}
+									<div class="muted" style="font-size:11.5px"><span class="num">{it.date}</span>{#if c.computed > 1}{' · ' + tp('calc_computed', c.computed)}{/if}</div>
+								{/if}
+								{#if it.text}<div class="note" style="margin-top:2px">{it.text}</div>{/if}
+								{#each it.notes as n (n)}<div class="dim" style="font-size:11px">{n}</div>{/each}
+								{#if it.inputs.length || it.person}
+									<div class="dim calc-in" style="font-size:11px">
+										{t('calc_inputs')}:
+										{#each it.inputs as i (i.group)}
+											<span><span class="calc-nw">{i.name} <span class="num">{numText(i.value)}</span> {calcUnit(i.unit)}</span>{#if i.converted}{' '}<span class="calc-nw">({tf('calc_read_as', { v: numText(i.converted.value) + ' ' + calcUnit(i.converted.unit) })})</span>{/if}{' '}<SourceChip label={i.date} name={i.name} src={i.src} onopen={openSource} /></span>
+										{/each}
+										{#if it.person?.age != null}<span class="calc-nw">{tf('calc_age', { age: it.person.age })}</span>{/if}
+										{#if it.person?.sex}<span class="calc-nw">{t('calc_' + it.person.sex)}</span>{/if}
+									</div>
+								{/if}
+								<div class="dim" style="font-size:11px;overflow-wrap:anywhere">{it.version} · <a href={it.cite} target="_blank" rel="noopener noreferrer">{it.cite}</a></div>
+							</div>
+						{/each}
+						<div class="note" style="margin-top:4px">{t('calc_note')}</div>
+					{/if}
 				</div>
-				{#if related.length}
+				{#if related.length || calcRows.length}
 					<div class="card">
 						<h3>{t('h1_related')}</h3>
 						{#each related as m (m.alias_group)}
@@ -431,6 +475,13 @@
 								<a style="flex:1;color:inherit" href="/biomarkers?code={encodeURIComponent(m.alias_group)}">{m.name}</a>
 								<span class="num" style="color:{m.status === 'ok' ? 'inherit' : C[m.status]};font-weight:600">{numText(m.value)} {unitLabel(m.unit)}<span class="sr-only"> · {t(m.status)}</span></span>
 								{#if m.spark.length}<Sparkline values={m.spark} status={m.status} w={60} h={20} />{/if}
+							</div>
+						{/each}
+						{#each calcRows as c (c.id)}
+							<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #20252f">
+								<span style="flex:1" title={c.latest.name}>{c.latest.short}</span>
+								<span class="num" style="font-weight:600;white-space:nowrap">{numText(c.latest.value ?? '')} {calcUnit(c.latest.unit)}</span>
+								<span class="dim" style="font-size:11px;white-space:nowrap">calc · {c.latest.date}</span>
 							</div>
 						{/each}
 					</div>
@@ -462,6 +513,15 @@
 <style>
 	/* The printed name repeats the name on a phone: the list keeps what fits. */
 	/* On a phone the status must show: the name wraps onto two lines instead of taking the width. */
+	.calc-in {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 2px 6px;
+	}
+	.calc-nw {
+		white-space: nowrap;
+	}
 	@media (max-width: 760px) {
 		.ph-hide {
 			display: none;

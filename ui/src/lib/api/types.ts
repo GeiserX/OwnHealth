@@ -606,3 +606,55 @@ export interface PasskeyOut {
 	created_at: IsoDateTime;
 	last_used_at: IsoDateTime | null;
 }
+
+// ---- calculators (GET /profiles/{p}/calculators, ownhealth.calculators/v1 rendered) ----
+export interface CalcInput {
+	group: string;
+	name: string;
+	/** as recorded */
+	value: string;
+	unit: string | null;
+	date: IsoDate;
+	src: string;
+	/** the value in the formula's unit, when the formula needed another one */
+	converted?: { value: string; unit: string };
+}
+
+export interface CalcItem {
+	id: string;
+	version: string;
+	name: string;
+	/** the name a narrow row has room for */
+	short: string;
+	status: 'ok' | 'refused' | 'not_assessed';
+	/** only when status is ok */
+	value?: string;
+	unit?: string | null;
+	date?: IsoDate;
+	person?: { age?: number; sex?: string };
+	inputs: CalcInput[];
+	cite: string;
+	src: string[];
+	reason_code?: string;
+	/** why it was not computed */
+	text?: string;
+	limitations?: string[];
+	category?: { code: string; low: string; high: string; cite: string };
+	/** the published band, then the limitations, in the reader's language */
+	notes: string[];
+	/** the dashboard card it belongs to */
+	system: string;
+	/** alias groups whose biomarker page lists it */
+	shows_on: string[];
+}
+
+export interface Calculators {
+	schema: string;
+	profile: string;
+	as_of: IsoDate;
+	rules: string;
+	units: string;
+	lang: string;
+	items: CalcItem[];
+	calculators_hash: string;
+}
