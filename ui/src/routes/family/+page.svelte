@@ -242,12 +242,13 @@
 		<div class="note">{t('xfer_had_d')}</div>
 		<ul class="xfer-list">
 			{#each former as f (f.user_id)}
+					{@const gone = lapsed(f.expires_at)}
 				<li>
 					<span class="who"
 						><b>{memberName(f.user_id)}</b> <span class="muted">{t('r_' + f.role).toLowerCase()} · {tf('xfer_until', { date: localDay(f.ended_at) })}</span>
-						<span class="what muted">{backWhat(f)}</span></span
+						{#if !gone}<span class="what muted">{backWhat(f)}</span>{/if}</span
 					>
-					{#if f.expires_at && lapsed(f.expires_at)}
+					{#if gone && f.expires_at}
 						<span class="muted">{tf('xfer_lapsed', { date: localDay(f.expires_at) })}</span>
 					{:else if backing === f.user_id}
 						<ConfirmRow
