@@ -193,10 +193,15 @@ fn a_fold_never_drops_part_of_a_character() {
     // A character with a part that has no WinAnsi byte prints as `?`, never as the other parts:
     // ㏀ is k + Greek omega, and "k" alone would be a different unit.
     let mut w = Writer::new();
-    w.paragraph("㎆ ㏀", Font::Regular, 10.0, 13.0);
+    w.paragraph("㎆ ㏀ 5 \u{212B}", Font::Regular, 10.0, 13.0);
     let out = w.finish();
     let to = |c: char| out.folded.iter().find(|f| f.ch == c).map(|f| f.to.clone());
     assert_eq!(to('㎆').as_deref(), Some("MB"));
+    assert_eq!(
+        to('\u{212B}').as_deref(),
+        Some("Å"),
+        "the angstrom sign keeps its ring, a plain A is ampere"
+    );
     assert_eq!(
         to('㏀').as_deref(),
         Some("?"),

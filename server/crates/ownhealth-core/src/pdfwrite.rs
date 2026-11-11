@@ -64,13 +64,21 @@ fn stroke(c: char) -> char {
     STROKES.iter().find(|(from, _)| *from == c).map_or(c, |(_, to)| *to)
 }
 
-/// What WinAnsi prints for `c`, which it cannot show: its NFKD letters without the marks, or `?`.
+/// What WinAnsi prints for `c`, which it cannot show: its NFC form when WinAnsi shows that, else
+/// its NFKD letters without the marks, or `?`.
 /// A fold that would print a digit is refused (`⁹` is not `9`, `⅓` is not `13`), and so is one
 /// with a part WinAnsi cannot show (`㏀` is not `k`), so a value on the page is never a different
 /// value. A control character prints as a space.
 fn fold(c: char) -> String {
     if c.is_control() {
         return " ".into();
+    }
+    // A canonical twin WinAnsi shows keeps the whole character: the angstrom sign prints as Å.
+    let mut nfc = std::iter::once(c).nfc();
+    if let (Some(one), None) = (nfc.next(), nfc.next())
+        && afm::cp1252(one).is_some()
+    {
+        return one.into();
     }
     let parts: Vec<char> = c.nfkd().filter(|d| !is_combining_mark(*d)).map(stroke).collect();
     let base: String = parts.iter().collect();
