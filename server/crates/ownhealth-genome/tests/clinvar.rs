@@ -686,6 +686,85 @@ fn a_multiallelic_and_an_indel_site_are_matched_from_a_vcf() -> R {
     Ok(())
 }
 
+#[test]
+fn calls_out_of_order_past_the_release_end_are_still_refused() -> R {
+    // The release ends at chr13; the calls go chrM, chrM, then chr7. Reading only up to the release's
+    // end would never see the chr7 line, and would miss its carried CFTR allele without a word.
+    let dir = tempfile::tempdir()?;
+    let rel = write_release(dir.path(), "r.vcf", "20261005", &release_one(), false)?;
+    let calls = dir.path().join("calls.vcf");
+    std::fs::write(
+        &calls,
+        format!(
+            "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tX\n\
+             chrM\t1\t.\tA\tG\t50\tPASS\t.\tGT\t1/1\n\
+             chrM\t2\t.\tA\tG\t50\tPASS\t.\tGT\t1/1\n\
+             chr7\t{}\t.\t{}\t{}\t50\tPASS\t.\tGT\t0/1\n",
+            CFTR.1, CFTR.2, CFTR.3
+        ),
+    )?;
+    let mut person = VcfAlleles::open(&calls, "calls")?;
+    let err = carried_records(&rel, &mut person)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err.contains("calls") && err.contains("not sorted"), "{err}");
+    Ok(())
+}
+
+#[test]
+fn a_release_record_with_missing_columns_is_refused() -> R {
+    // A row cut after ALT, at a site nobody carries: the full pass over the release must still refuse
+    // it, or a later run could take a release with a lost record as its snapshot.
+    let dir = tempfile::tempdir()?;
+    let p = dir.path().join("partial.vcf");
+    std::fs::write(
+        &p,
+        "##fileDate=20261005\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+         1\t100\t1\tA\tG\t.\t.\tCLNREVSTAT=no_assertion_provided;CLNSIG=Benign\n\
+         7\t117559590\t7105\tATCT\tA\n",
+    )?;
+    let mut person = FactAlleles::new(vec![((22, 1), "A".into(), "G".into())]);
+    let err = carried_records(&p, &mut person)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err.contains("partial.vcf") && err.contains("columns"), "{err}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_dataset_is_compared_by_one_run_at_a_time() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_alex(&e, &mut c).await?;
+    let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
+    // Another run holds Alex's dataset and is about to commit its snapshot of this same release. This
+    // run must wait for it and then find the release compared, never read the old snapshot date and
+    // write the same events a second time.
+    let mut other = e.db.pool.begin().await?;
+    let dataset: Uuid =
+        sqlx::query_scalar("select id from genome_dataset where profile_id = $1 and status = 'current' for update")
+            .bind(e.profile("alex"))
+            .fetch_one(&mut *other)
+            .await?;
+    sqlx::query(
+        "insert into clinvar_carried (dataset_id, release_date, variation_id, significance, stars) \
+         values ($1, '2026-10-05', 7105, 'Pathogenic', 3)",
+    )
+    .bind(dataset)
+    .execute(&mut *other)
+    .await?;
+    let (pool, blobs, path) = (e.db.pool.clone(), e.blobs.clone(), one.clone());
+    let run = tokio::spawn(async move { clinvar::diff_release(&pool, &blobs, &path).await });
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    other.commit().await?;
+    let r = run.await??;
+    assert_eq!(r.datasets[0].skipped, Some("already_compared"), "{r:?}");
+    assert!(events(&mut c).await?.is_empty());
+    Ok(())
+}
+
 fn calls_with(dir: &tempfile::TempDir, rows: &[VcfRow]) -> anyhow::Result<VcfAlleles> {
     let f = write_vcf("x.vcf.gz", rows, "X")?;
     let p = dir.path().join("x.vcf.gz");

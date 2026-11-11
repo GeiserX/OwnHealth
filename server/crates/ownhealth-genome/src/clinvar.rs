@@ -492,6 +492,18 @@ pub fn carried_records(release: &Path, person: &mut dyn Alleles) -> Result<(Naiv
             return Err(bad_file(&label, "records are not sorted by GRCh38 contig order"));
         }
         last = key;
+        // Every record needs its eight columns, carried or not, so the full pass over a release
+        // refuses one with a cut row instead of letting a later run skip the record unseen.
+        let (Some(id), Some(reference), Some(alt), Some(_qual), Some(_filter), Some(info_col)) = (
+            cols.next(),
+            cols.next(),
+            cols.next(),
+            cols.next(),
+            cols.next(),
+            cols.next(),
+        ) else {
+            return Err(bad_file(&label, "a record with fewer than the 8 VCF columns"));
+        };
         let mut gk = gk;
         while gk < key {
             fill(&mut pending, &mut group, &mut group_key)?;
@@ -503,16 +515,6 @@ pub fn carried_records(release: &Path, person: &mut dyn Alleles) -> Result<(Naiv
         if group_key != Some(key) {
             continue;
         }
-        let (Some(id), Some(reference), Some(alt), Some(_qual), Some(_filter), Some(info_col)) = (
-            cols.next(),
-            cols.next(),
-            cols.next(),
-            cols.next(),
-            cols.next(),
-            cols.next(),
-        ) else {
-            continue;
-        };
         let (Ok(variation_id), Some(sig)) = (id.parse::<i64>(), info(info_col, "CLNSIG")) else {
             continue;
         };
@@ -531,6 +533,11 @@ pub fn carried_records(release: &Path, person: &mut dyn Alleles) -> Result<(Naiv
                 stars: stars_of(info(info_col, "CLNREVSTAT").unwrap_or_default()),
             });
         }
+    }
+    // The release ended first: read the person's remaining calls too, so a calls file out of order
+    // past the release's last record is refused rather than read only in part.
+    while pending.is_some() {
+        pending = person.next_allele()?;
     }
     Ok((date, out))
 }
@@ -686,6 +693,12 @@ async fn diff_dataset(
         alerts: 0,
     };
     let mut tx = pool.begin().await?;
+    // One run at a time per dataset: a second run waits here, then reads the first one's snapshot
+    // date, so two runs never compare the same release twice.
+    sqlx::query("select 1 from genome_dataset where id = $1 for update")
+        .bind(ds.id)
+        .execute(&mut *tx)
+        .await?;
     let prev_date: Option<NaiveDate> =
         sqlx::query_scalar("select max(release_date) from clinvar_carried where dataset_id = $1")
             .bind(ds.id)
