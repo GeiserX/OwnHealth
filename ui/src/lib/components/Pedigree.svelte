@@ -20,7 +20,7 @@
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import { Loader, cap, errRaw, errText, tf } from '#lib/components/pages1/util.svelte';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
-	import { fromHousehold, layout, type Box } from '#lib/logic/pedigree';
+	import { addEach, fromHousehold, layout, type Box } from '#lib/logic/pedigree';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { tick } from 'svelte';
 
@@ -164,12 +164,11 @@
 		const slug = profile.slug;
 		const rows = fill;
 		act(async () => {
-			try {
-				for (const r of rows) await addFamilyMember(slug, r);
-			} catch (e) {
-				// the rows added before the failure are saved: reload so a retry sends only the rest
+			const failed = await addEach(rows, (r) => addFamilyMember(slug, r));
+			if (failed !== undefined) {
+				// the other rows are saved: reload so a retry sends only the one that failed
 				load();
-				throw e;
+				throw failed;
 			}
 		});
 	}
@@ -251,7 +250,7 @@
 		<div class="empty">{t('loading')}</div>
 	{:else}
 		<div class="svgwrap" bind:this={svgwrap}>
-			<svg viewBox="0 0 {drawing.width} {drawing.height}" width={drawing.width} style="min-width:{Math.min(560, drawing.width)}px" role="group" aria-label={t('h1_pedigree')} data-testid="pedigree">
+			<svg viewBox="0 0 {drawing.width} {drawing.height}" width={drawing.width} style="min-width:{Math.round(drawing.width * 0.8)}px" role="group" aria-label={t('h1_pedigree')} data-testid="pedigree">
 				{#each drawing.gens as g (g.label)}<text x="16" y={g.y + 4} class="gen">{g.label}</text>{/each}
 				{#each drawing.segs as s, i (i)}<line x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} class="ln" />{/each}
 				{#each drawing.nodes as b (b.id ?? 'proband')}
@@ -392,6 +391,7 @@
 	}
 	.svgwrap svg {
 		display: block;
+		/* fits the card when it nearly does; the inline min-width keeps a big family at 80% or more, and it scrolls */
 		max-width: 100%;
 		height: auto;
 	}

@@ -211,7 +211,8 @@
 
 <div class="fam">
 	<div class="grid" style="align-content:start">
-		{#if onScreen}<Pedigree profile={onScreen} {profiles} />{/if}
+		<!-- keyed: a drawer left open for one profile must never save under the next one -->
+		{#if onScreen}{#key onScreen.slug}<Pedigree profile={onScreen} {profiles} />{/key}{/if}
 	</div>
 	<div class="grid" style="align-content:start">
 		<div class="card">

@@ -209,3 +209,20 @@ export function fromHousehold(
 		.map((p) => ({ relationship: code(p.relationship ?? '', p.sex_at_birth), sex_at_birth: p.sex_at_birth, linked_profile: p.slug }))
 		.filter((r): r is { relationship: string; sex_at_birth: Sex | null; linked_profile: string } => r.relationship !== null);
 }
+
+/**
+ * Adds every row, one after another, and carries on past a row the server refuses: a household profile
+ * can already be linked from a relative this reader may not see, and that one refusal must not keep the
+ * others out. Returns the first error, or undefined when every row went in.
+ */
+export async function addEach<T>(rows: T[], add: (row: T) => Promise<unknown>): Promise<unknown> {
+	let failed: unknown;
+	for (const r of rows) {
+		try {
+			await add(r);
+		} catch (e) {
+			failed ??= e;
+		}
+	}
+	return failed;
+}

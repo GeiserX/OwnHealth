@@ -2,7 +2,7 @@
 // joined, and the name toggle that leaves no name anywhere in the drawing's text.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fromHousehold, layout, type Words } from '../src/lib/logic/pedigree.ts';
+import { addEach, fromHousehold, layout, type Words } from '../src/lib/logic/pedigree.ts';
 import type { Pedigree, PedigreeNode } from '../src/lib/api/family.ts';
 
 const words: Words = {
@@ -115,4 +115,16 @@ test('fill from household turns the founder household into relatives once', () =
 		new Set(['sam'])
 	);
 	assert.deepEqual(rows.map((r) => [r.relationship, r.linked_profile]), [['DAU', 'lucia'], ['MTH', 'carmen']]);
+});
+
+test('fill from household: a refused row does not keep the later rows out', async () => {
+	const sent: string[] = [];
+	const refused = new Error('already linked');
+	const failed = await addEach(['sam', 'lucia', 'carmen'], async (slug) => {
+		if (slug === 'lucia') throw refused;
+		sent.push(slug);
+	});
+	assert.deepEqual(sent, ['sam', 'carmen']);
+	assert.equal(failed, refused);
+	assert.equal(await addEach(['sam'], async () => {}), undefined);
 });
