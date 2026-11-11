@@ -359,14 +359,15 @@ async fn status_with_the_due_section_stays_under_2kb() -> R {
     let w = demo_world().await?;
     let (tok, _) = demo_token(&w, "carmen", all().into_iter().collect()).await?;
     let c = w.connect_real(&tok).await?;
-    let env = c
-        .call_tool("get_health_status", json!({"profile": "carmen"}))
-        .await?
-        .ok();
+    let r = c.call("get_health_status", json!({"profile": "carmen"})).await?;
+    // the text form names the section's own fields, so none reads as a field of the whole status
+    assert!(r.text.contains("\ndue_total: "), "{}", r.text);
+    assert!(!r.text.contains("\ntotal: "), "{}", r.text);
+    let env = r.ok();
     assert!(size(&env) < 2048, "{}", size(&env));
     let due = &env["data"]["due"];
     assert_eq!(due["items"].as_array().map(Vec::len), Some(3), "{due}");
-    assert!(due["total"].as_u64().unwrap_or(0) >= 6, "{due}");
+    assert!(due["due_total"].as_u64().unwrap_or(0) >= 6, "{due}");
     assert!(
         due["prevention_hash"]
             .as_str()

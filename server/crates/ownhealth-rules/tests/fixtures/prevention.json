@@ -337,9 +337,10 @@
         "kind": "never_measured",
         "status": "due",
         "group": "hcv_ab",
-        "cite": "https://www.cdc.gov/mmwr/volumes/69/rr/rr6902a1.htm",
+        "cite": "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/hepatitis-c-screening",
         "src": [],
-        "labs": true
+        "labs": true,
+        "source": "USPSTF 2020 (B)"
       },
       {
         "key": "lipid.lpa.once_adult",

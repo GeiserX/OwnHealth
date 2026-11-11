@@ -85,6 +85,8 @@ pub struct CountryRules {
     pub rows: Vec<Row>,
     /// Rows that name a rule-pack rule instead of evaluating it: (row id, pack rule id).
     pub pack_rules: Vec<(String, String)>,
+    /// The country's (source, cite) for each pack rule it names, by pack rule id.
+    pub pack_cites: HashMap<String, (String, String)>,
     pub disclaimer: Option<Value>,
 }
 
@@ -364,6 +366,7 @@ pub fn build(
         }
         let mut rows = Vec::new();
         let mut pack_rules = Vec::new();
+        let mut pack_cites = HashMap::new();
         for r in &f.rows {
             if let Some(rule) = r.get("pack_rule").map(text) {
                 let id = r.get("id").map(text).unwrap_or_default();
@@ -378,6 +381,9 @@ pub fn build(
                         format!("{id}: pack_rule {rule} is not a never_measured or recency rule"),
                     ));
                 }
+                let source = r.get("source").map(text).unwrap_or_default();
+                let cite = r.get("cite").map(text).unwrap_or_default();
+                pack_cites.insert(rule.clone(), (source, cite));
                 pack_rules.push((id, rule));
                 continue;
             }
@@ -395,6 +401,7 @@ pub fn build(
                 file,
                 rows,
                 pack_rules,
+                pack_cites,
                 disclaimer: f.doc.get("disclaimer").cloned(),
             },
         );
@@ -454,6 +461,9 @@ fn add_months(d: NaiveDate, months: u32) -> NaiveDate {
 /// (text, code system, code, date, src id) of an immunization or a procedure.
 type CodedRow = (String, Option<String>, Option<String>, NaiveDate, String);
 
+/// The facts that may count as done. A record tagged sensitive is left out, as the state engine
+/// leaves it out: the document is the same for every caller, so it never holds what only
+/// read:sensitive may see.
 async fn facts(
     conn: &mut PgConnection,
     profile_id: uuid::Uuid,
@@ -466,7 +476,8 @@ async fn facts(
     let others: Vec<&Group> = prev.groups.values().filter(|g| !g.vaccine).collect();
     let imms: Vec<CodedRow> = sqlx::query_as(
         "select vaccine, code_system, code, coalesce(occurred, effective_at::date), src_id from immunization \
-         where profile_id = $1 and status = 'current' and coalesce(occurred, effective_at::date) <= $2 \
+         where profile_id = $1 and status = 'current' and cardinality(sensitivity) = 0 \
+         and coalesce(occurred, effective_at::date) <= $2 \
          order by 4, src_id",
     )
     .bind(profile_id)
@@ -498,7 +509,8 @@ async fn facts(
     }
     let procs: Vec<CodedRow> = sqlx::query_as(
         "select text, code_system, code, coalesce(performed, effective_at::date), src_id from procedure \
-         where profile_id = $1 and status = 'current' and coalesce(performed, effective_at::date) <= $2 \
+         where profile_id = $1 and status = 'current' and cardinality(sensitivity) = 0 \
+         and coalesce(performed, effective_at::date) <= $2 \
          order by 4, src_id",
     )
     .bind(profile_id)
@@ -524,7 +536,8 @@ async fn facts(
     let alias_groups: Vec<String> = others.iter().flat_map(|g| g.alias_groups.clone()).collect();
     let obs: Vec<(Option<String>, String, NaiveDate, String)> = sqlx::query_as(
         "select loinc, alias_group, effective_at::date, src_id from observation where profile_id = $1 \
-         and status = 'current' and effective_at < $2 and (loinc = any($3) or alias_group = any($4)) \
+         and status = 'current' and cardinality(sensitivity) = 0 and effective_at < $2 \
+         and (loinc = any($3) or alias_group = any($4)) \
          order by 3, src_id",
     )
     .bind(profile_id)
@@ -592,16 +605,19 @@ fn item(row: &Row, prev: &Prevention, birth: NaiveDate, as_of: NaiveDate, facts:
             (Some(next), !counted.is_empty())
         }
         "series" => {
-            let mut days: Vec<NaiveDate> = counted.iter().map(|f| f.date).collect();
-            days.dedup();
+            // a dose counts only when it comes at least gap_days after the previous counted one
+            let gap = chrono::Duration::days(row.gap_days.unwrap_or(0));
+            let mut days: Vec<NaiveDate> = Vec::new();
+            for d in counted.iter().map(|f| f.date) {
+                if days.last().is_none_or(|l| d - *l >= gap) {
+                    days.push(d);
+                }
+            }
             let doses = row.doses.unwrap_or(1);
             match days.last() {
                 _ if days.len() >= doses => (None, false),
                 None => (Some(start), false),
-                Some(last) => (
-                    Some((*last + chrono::Duration::days(row.gap_days.unwrap_or(0))).max(start)),
-                    true,
-                ),
+                Some(last) => (Some((*last + gap).max(start)), true),
             }
         }
         _ => {
@@ -614,12 +630,17 @@ fn item(row: &Row, prev: &Prevention, birth: NaiveDate, as_of: NaiveDate, facts:
             } else {
                 next_season(as_of + chrono::Duration::days(1), s)
             };
-            (
-                Some(next.max(if start > as_of { next_season(start, s) } else { start })),
-                false,
-            )
+            let next = next.max(if start > as_of { next_season(start, s) } else { start });
+            // off season with no dose this season, the row claims nothing until the next season is
+            // near: up to date needs a dose, and due needs a season that is running
+            if start <= as_of && !done && !in_season && (next - as_of).num_days() > prev.upcoming_days {
+                return None;
+            }
+            (Some(next), false)
         }
     };
+    // past the age window the guideline lists nothing, so there is no next date
+    let next = next.filter(|n| end.is_none_or(|e| *n < e));
     let status = match next {
         None => "up_to_date",
         Some(n) if (n - as_of).num_days() > prev.upcoming_days => "up_to_date",
@@ -635,6 +656,8 @@ fn item(row: &Row, prev: &Prevention, birth: NaiveDate, as_of: NaiveDate, facts:
         src.push(l.src.clone());
     }
     src.dedup();
+    // an item shows a lab value when any fact it used is one, not only the latest
+    let labs = counted.iter().any(|f| f.lab) || last.is_some_and(|f| f.lab);
     Some(json!({
         "key": row.id,
         "rule": row.id,
@@ -646,7 +669,7 @@ fn item(row: &Row, prev: &Prevention, birth: NaiveDate, as_of: NaiveDate, facts:
         "source": row.source,
         "cite": row.cite,
         "src": src,
-        "labs": if last.is_some_and(|f| f.lab) { json!(true) } else { Value::Null },
+        "labs": if labs { json!(true) } else { Value::Null },
     }))
 }
 
@@ -751,7 +774,17 @@ pub async fn document(
             }
         }
     }
-    items.extend(pack_items(body, pack));
+    // a pack rule the country's file names keeps the pack as its evaluator and cites the country's
+    // guideline
+    for mut it in pack_items(body, pack) {
+        if let Some((source, cite)) = rules.and_then(|r| r.pack_cites.get(&text(&it["rule"])))
+            && let Some(m) = it.as_object_mut()
+        {
+            m.insert("source".into(), json!(source));
+            m.insert("cite".into(), json!(cite));
+        }
+        items.push(it);
+    }
     let rank = |v: &Value| {
         let s = v.get("status").and_then(Value::as_str).unwrap_or_default();
         STATUSES.iter().position(|x| *x == s).unwrap_or(STATUSES.len())
@@ -799,7 +832,19 @@ pub async fn build_document(conn: &mut PgConnection, profile_id: uuid::Uuid, as_
 /// Whether the caller may see one item: every item is a record (read:records), and one that a lab
 /// value shows also needs read:labs.
 pub fn visible(item: &Value, scopes: &Scopes) -> bool {
-    scopes.contains("read:records") && (item.get("labs") != Some(&Value::Bool(true)) || scopes.contains("read:labs"))
+    needs(item, scopes).is_empty()
+}
+
+/// The scopes the caller lacks to see one item.
+pub fn needs(item: &Value, scopes: &Scopes) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if !scopes.contains("read:records") {
+        out.push("read:records");
+    }
+    if item.get("labs") == Some(&Value::Bool(true)) && !scopes.contains("read:labs") {
+        out.push("read:labs");
+    }
+    out
 }
 
 fn fill(template: &str, params: &[(&str, String)]) -> String {
@@ -818,7 +863,8 @@ fn pick(v: Option<&Value>, lang: &str) -> Option<String> {
 
 /// The document in one language for one caller: every item gains `title` and `why` (or `reason`
 /// for not_assessed), and a guideline row `record` {kind, text} for a form that records it. Items
-/// the scopes do not cover are left out and counted in `withheld`.
+/// the scopes do not cover are left out, counted in `withheld`, and the scopes they need are named
+/// in `withheld_scopes`.
 pub fn render(doc: &Value, pack: &Pack, lang: &str, scopes: &Scopes) -> Result<Value> {
     let prev = load(pack)?;
     let lang = if lang == "es" { "es" } else { "en" };
@@ -838,9 +884,15 @@ pub fn render(doc: &Value, pack: &Pack, lang: &str, scopes: &Scopes) -> Result<V
     };
     let mut items = Vec::new();
     let mut withheld = 0;
+    let mut lacking: Vec<&str> = Vec::new();
     for it in doc.get("items").and_then(Value::as_array).into_iter().flatten() {
         if !visible(it, scopes) {
             withheld += 1;
+            for s in needs(it, scopes) {
+                if !lacking.contains(&s) {
+                    lacking.push(s);
+                }
+            }
             continue;
         }
         let mut out = it.as_object().cloned().unwrap_or_default();
@@ -912,17 +964,20 @@ pub fn render(doc: &Value, pack: &Pack, lang: &str, scopes: &Scopes) -> Result<V
         out.shift_remove("unmatched");
     }
     out.insert("withheld".into(), json!(withheld));
+    lacking.sort_unstable();
+    out.insert("withheld_scopes".into(), json!(lacking));
     Ok(Value::Object(out))
 }
 
-/// How many items the `due` section of get_health_status lists; the rest are counted in `total`.
+/// How many items the `due` section of get_health_status lists; the rest are counted in `due_total`.
 pub const STATUS_TOP: usize = 3;
 /// The statuses that count as due in the status section.
 const OPEN: [&str; 3] = ["overdue", "due", "upcoming"];
 
 /// The `due` section of get_health_status: the first open screenings and vaccines as
-/// `{key, status, due, rule}` (rule only when it is not the key), their count and the document's
-/// hash. Rule ids, no URLs: the cites stay in the document. The lab gaps are left out, because the
+/// `{key, status, due, rule}` (rule only when it is not the key), their count `due_total` and the
+/// document's hash. An item due or overdue that was never recorded has no `due`: its date is where
+/// the age window opened, not a deadline. Rule ids, no URLs: the cites stay in the document. The lab gaps are left out, because the
 /// status lists them already under never_measured and stale; an item a lab value shows needs
 /// read:labs. None when nothing is open (the status page has 2 KB and spends none of it on an empty
 /// list) or the profile is not in the store.
@@ -950,10 +1005,15 @@ pub async fn status_section(
         .take(STATUS_TOP)
         .map(|i| {
             let mut m = Map::new();
-            for k in ["key", "status", "due"] {
+            for k in ["key", "status"] {
                 if let Some(v) = i.get(k) {
                     m.insert(k.into(), v.clone());
                 }
+            }
+            if let Some(d) = i.get("due")
+                && (i.get("last").is_some() || i["status"] == "upcoming")
+            {
+                m.insert("due".into(), d.clone());
             }
             if i["rule"] != i["key"] {
                 m.insert("rule".into(), i["rule"].clone());
@@ -964,9 +1024,11 @@ pub async fn status_section(
     if open.is_empty() {
         return Ok(None);
     }
+    // the scalars first and named for the section, so the text form does not read them as fields
+    // of the whole status
     Ok(Some(json!({
-        "items": items,
-        "total": open.len(),
+        "due_total": open.len(),
         "prevention_hash": doc["prevention_hash"],
+        "items": items,
     })))
 }

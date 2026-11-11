@@ -19,7 +19,7 @@ groups:
     snomed: ["73761001"]
   cervical_cytology:
     name: {en: "Cervical cytology", es: "Citología cervical"}
-    aliases: [cervical cytology, pap smear, pap test, citología cervical, citologia cervical, citología]
+    aliases: [cervical cytology, pap smear, pap test, citología cervical, citologia cervical]
     loinc: ["10524-7"]
   hpv_test:
     name: {en: "HPV test", es: "Prueba del VPH"}

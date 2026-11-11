@@ -212,8 +212,10 @@ async fn a_caller_without_labs_or_records_sees_less() -> R {
     assert!(shown > 0);
     assert!(r["items"].as_array().into_iter().flatten().all(|i| i["area"] != "lab"));
     assert_eq!(r["withheld"].as_u64().unwrap_or(0) as usize + shown, keys(&doc).len());
+    assert_eq!(r["withheld_scopes"], json!(["read:labs"]));
     let summary = prevention::render(&doc, &pack, "en", &scope_set(["read:summary"]))?;
     assert_eq!(summary["items"], json!([]));
+    assert_eq!(summary["withheld_scopes"], json!(["read:labs", "read:records"]));
     assert!(summary.get("unmatched").is_none());
     tx.rollback().await?;
     Ok(())
@@ -380,5 +382,261 @@ fn the_loader_refuses_each_broken_file() -> R {
             Err(e) => assert!(e.to_string().contains(reason), "{what}: {e}"),
         }
     }
+    Ok(())
+}
+
+fn day(s: &str) -> chrono::NaiveDate {
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap_or_default()
+}
+
+/// A record tagged sensitive is left out for every caller, as the state engine leaves it out: it
+/// never counts as done and its name is never listed as unmatched.
+#[tokio::test]
+async fn sensitive_records_never_count_and_are_never_listed() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let sam = s.pid("sam");
+    record(
+        &mut tx,
+        "procedure",
+        json!({"profile_id": sam, "text": "Citología cervical", "performed": "2026-01-10",
+               "sensitivity": ["reproductive"]}),
+    )
+    .await?;
+    record(
+        &mut tx,
+        "immunization",
+        json!({"profile_id": sam, "vaccine": "Vacuna inventada", "occurred": "2026-01-11",
+               "sensitivity": ["sexual_health"]}),
+    )
+    .await?;
+    let doc = build_document(&mut tx, sam, as_of()).await?;
+    let hpv = item(&doc, "es.cancer.cervix_hpv");
+    assert_eq!(hpv["status"], "due", "{hpv}");
+    assert!(hpv.get("last").is_none(), "{hpv}");
+    assert!(!doc.to_string().contains("Vacuna inventada"), "{doc}");
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// Off season, a seasonal row with no dose this season claims nothing: it shows as upcoming once the
+/// next season is near, and before that not at all. A dose this season reads up to date.
+#[tokio::test]
+async fn a_seasonal_row_off_season_never_claims_up_to_date_without_a_dose() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let carmen = s.pid("carmen");
+    let may = build_document(&mut tx, carmen, day("2027-05-01")).await?;
+    assert!(!keys(&may).contains(&"es.vac.influenza".to_string()), "{may}");
+    let aug = build_document(&mut tx, carmen, day("2027-08-01")).await?;
+    let flu = item(&aug, "es.vac.influenza");
+    assert_eq!(
+        (&flu["status"], &flu["due"]),
+        (&json!("upcoming"), &json!("2027-10-01"))
+    );
+    record(
+        &mut tx,
+        "immunization",
+        json!({"profile_id": carmen, "vaccine": "Gripe", "occurred": "2026-11-20"}),
+    )
+    .await?;
+    let may = build_document(&mut tx, carmen, day("2027-05-01")).await?;
+    assert_eq!(item(&may, "es.vac.influenza")["status"], "up_to_date");
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// An item any of whose counted facts is a lab value needs read:labs, even when its latest fact is
+/// a procedure.
+#[tokio::test]
+async fn an_item_with_any_lab_fact_needs_read_labs() -> R {
+    use ownhealth_core::observations::{CommitOptions, ObservationIn, commit_observation};
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let sam = s.pid("sam");
+    let src = ownhealth_core::provenance::create_src(
+        &mut tx,
+        &SrcIn {
+            profile_id: Some(sam),
+            label: Some("LabNorte · 2024-01-10".into()),
+            ..SrcIn::new("manual")
+        },
+    )
+    .await?;
+    let obs = ObservationIn::from_json(json!({
+        "profile_id": sam, "printed_name": "VPH alto riesgo", "printed_value": "Negativo",
+        "loinc": "21440-3", "alias_group": "hpv_hr", "derivation_version": "test",
+        "effective_at": "2024-01-10T08:00:00+00:00",
+    }))?;
+    commit_observation(&mut tx, &obs, &SrcRef::Id(src), CommitOptions::new("auto")).await?;
+    record(
+        &mut tx,
+        "procedure",
+        json!({"profile_id": sam, "text": "Citología cervical", "performed": "2025-01-10"}),
+    )
+    .await?;
+    let doc = build_document(&mut tx, sam, as_of()).await?;
+    let hpv = item(&doc, "es.cancer.cervix_hpv");
+    assert_eq!(hpv["last"]["date"], "2025-01-10", "{hpv}");
+    assert_eq!(hpv["labs"], true, "{hpv}");
+    let pack = load_pack()?;
+    let mut no_labs = all_scopes();
+    no_labs.remove("read:labs");
+    let shown = prevention::render(&doc, &pack, "en", &no_labs)?;
+    assert!(item(&shown, "es.cancer.cervix_hpv").is_null());
+    assert_eq!(shown["withheld_scopes"], json!(["read:labs"]));
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// A cytology of another organ is not cervical screening.
+#[tokio::test]
+async fn a_urine_cytology_is_not_cervical_screening() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let sam = s.pid("sam");
+    record(
+        &mut tx,
+        "procedure",
+        json!({"profile_id": sam, "text": "Citología de orina", "performed": "2026-01-10"}),
+    )
+    .await?;
+    let doc = build_document(&mut tx, sam, as_of()).await?;
+    assert_eq!(item(&doc, "es.cancer.cervix_hpv")["status"], "due");
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// A next date after the row's age window is not sent: the guideline lists nothing then.
+#[tokio::test]
+async fn no_next_date_after_the_age_window() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let carmen = s.pid("carmen");
+    record(
+        &mut tx,
+        "procedure",
+        json!({"profile_id": carmen, "text": "Colonoscopia", "performed": "2020-03-01"}),
+    )
+    .await?;
+    let doc = build_document(&mut tx, carmen, as_of()).await?;
+    let crc = item(&doc, "es.cancer.colorectal");
+    assert_eq!(crc["status"], "up_to_date", "{crc}");
+    assert!(crc.get("due").is_none(), "{crc}");
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// A series counts a dose only when it comes at least gap_days after the previous counted one.
+#[tokio::test]
+async fn a_series_counts_doses_the_gap_apart() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let carmen = s.pid("carmen");
+    for (name, date) in [("Herpes zóster", "2026-11-01"), ("Shingrix", "2026-11-02")] {
+        record(
+            &mut tx,
+            "immunization",
+            json!({"profile_id": carmen, "vaccine": name, "occurred": date}),
+        )
+        .await?;
+    }
+    let doc = build_document(&mut tx, carmen, as_of()).await?;
+    let z = item(&doc, "es.vac.zoster");
+    assert_eq!(
+        (&z["status"], &z["due"]),
+        (&json!("upcoming"), &json!("2026-12-27")),
+        "{z}"
+    );
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// The status section names its own fields (`due_total`), and leaves out the date of an open item
+/// never recorded: that date is where the age window opened, not a deadline.
+#[tokio::test]
+async fn the_status_section_sends_no_window_start_as_a_due_date() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let pack = load_pack()?;
+    let carmen = s.pid("carmen");
+    let body = build_state(&mut tx, carmen, as_of(), None).await?;
+    let sec = prevention::status_section(&mut tx, carmen, as_of(), &body, &pack, &all_scopes())
+        .await?
+        .unwrap_or_default();
+    assert!(sec["due_total"].as_u64().unwrap_or(0) >= 6, "{sec}");
+    assert!(sec.get("total").is_none(), "{sec}");
+    let items = sec["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(items.len(), 3, "{sec}");
+    assert!(items.iter().all(|i| i.get("due").is_none()), "{sec}");
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// The dashboard says which scope its Due card lacks, so an empty card is not read as nothing due.
+#[tokio::test]
+async fn the_dashboard_names_the_scope_the_due_card_lacks() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let viewer = ownhealth_rules::dashboard(&mut tx, s.pid("sam"), as_of(), "es", &scope_set(["read:summary"])).await?;
+    assert_eq!(viewer["prevention_due"], json!([]));
+    assert_eq!(viewer["prevention_withheld"], json!(["read:records"]));
+    let full = ownhealth_rules::dashboard(&mut tx, s.pid("sam"), as_of(), "es", &all_scopes()).await?;
+    assert_eq!(full["prevention_withheld"], json!([]));
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// The cited schedules list a conjugate pneumococcal vaccine and the recombinant zoster vaccine: a
+/// polysaccharide dose (CVX 33) or live zoster doses (CVX 121) do not count, and are listed instead.
+#[tokio::test]
+async fn ppsv23_and_live_zoster_do_not_count() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let carmen = s.pid("carmen");
+    for (name, code, date) in [
+        ("PPSV23", "33", "2026-01-05"),
+        ("Zostavax", "121", "2025-01-05"),
+        ("Zostavax", "121", "2025-06-05"),
+    ] {
+        record(
+            &mut tx,
+            "immunization",
+            json!({"profile_id": carmen, "vaccine": name, "code_system": "CVX", "code": code, "occurred": date}),
+        )
+        .await?;
+    }
+    let doc = build_document(&mut tx, carmen, as_of()).await?;
+    assert_eq!(item(&doc, "es.vac.pneumococcal")["status"], "due");
+    assert_eq!(item(&doc, "es.vac.zoster")["status"], "due");
+    let unmatched: Vec<&str> = doc["unmatched"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|u| u["name"].as_str())
+        .collect();
+    assert_eq!(unmatched, ["Zostavax", "Zostavax", "PPSV23"], "{doc}");
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// A country row that names a pack rule gives that rule's item the country's source and cite; the
+/// pack stays the one that evaluates it.
+#[tokio::test]
+async fn a_pack_rule_named_by_a_country_row_carries_its_cite() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let jordan = us_profile(&s, &mut tx).await?;
+    let doc = build_document(&mut tx, jordan, as_of()).await?;
+    let hcv = item(&doc, "infect.hcv.once_adult");
+    assert_eq!(hcv["source"], "USPSTF 2020 (B)", "{hcv}");
+    assert_eq!(
+        hcv["cite"],
+        "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/hepatitis-c-screening"
+    );
+    // a Spanish profile keeps the pack's own cite
+    let alex = build_document(&mut tx, s.pid("alex"), as_of()).await?;
+    assert!(item(&alex, "infect.hcv.once_adult").get("source").is_none());
+    tx.rollback().await?;
     Ok(())
 }
