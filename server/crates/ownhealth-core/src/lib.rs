@@ -3,6 +3,7 @@
 
 pub mod acceptance;
 pub mod access;
+pub mod afm;
 pub mod arrive;
 pub mod audit;
 pub mod blobs;
@@ -13,6 +14,7 @@ pub mod demo;
 pub mod demo_pdf;
 pub mod documents;
 pub mod error;
+pub mod family;
 pub mod fhir;
 pub mod ids;
 pub mod ingest;
@@ -21,6 +23,7 @@ pub mod lifecycle;
 pub mod migrate;
 pub mod net;
 pub mod observations;
+pub mod pdfwrite;
 pub mod provenance;
 pub mod pyjson;
 pub mod pyrandom;

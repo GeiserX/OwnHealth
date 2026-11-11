@@ -28,7 +28,9 @@ export const getDocument = (id: Uuid) => get<DocumentDetail>(`/documents/${id}`)
 export const pageImageUrl = (id: Uuid, page: number) => `/api/documents/${id}/pages/${page}.png`;
 export const documentFileUrl = (id: Uuid) => `/api/documents/${id}/file`;
 
-export const listRecords = (profile: string, kind: RecordOut['kind']) => get<{ items: RecordOut[] }>(`${p(profile)}/records/${kind}`);
+/** `history` adds the superseded and retracted versions of every current record. */
+export const listRecords = (profile: string, kind: RecordOut['kind'], history = false) =>
+	get<{ items: RecordOut[] }>(`${p(profile)}/records/${kind}`, history ? { history: true } : undefined);
 
 // Manual entry and corrections (backend api/records.py). A correction is a new version; the old one stays.
 export type ManualObservationIn = { name: string; value: string; unit?: string | null; effective_at: string; note?: string | null; loinc?: string | null; category?: string | null };

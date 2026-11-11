@@ -1127,6 +1127,63 @@ pub async fn seed_base(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result
     Ok(())
 }
 
+/// v0.3 family history: Alex's relatives as the mockup draws them (synthetic). Its own demo hook
+/// (`family`, after every other one), so the 0.3.0 seed stays exactly what it was.
+pub async fn seed_family(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result<()> {
+    use ownhealth_core::family::{self, FamilyCondition, MemberIn};
+    let alex = ctx.family.profile("alex");
+    let user = ctx.family.user("alex");
+    let condition = |kind: &str, onset_age: i32| FamilyCondition {
+        kind: kind.into(),
+        text: None,
+        code_system: None,
+        code: None,
+        onset_age: Some(onset_age),
+        onset_approx: false,
+    };
+    // relationship, born, death age, conditions, linked profile
+    type Relative = (
+        &'static str,
+        Option<i32>,
+        Option<i32>,
+        Vec<FamilyCondition>,
+        Option<&'static str>,
+    );
+    let rows: [Relative; 7] = [
+        ("FTH", Some(1949), Some(64), vec![condition("mi", 52)], None),
+        ("MTH", Some(1955), None, vec![condition("t2d", 69)], Some("carmen")),
+        ("SIS", Some(1982), None, Vec::new(), None),
+        ("SPS", Some(1981), None, Vec::new(), Some("sam")),
+        ("DAU", Some(2017), None, Vec::new(), Some("lucia")),
+        ("FTHINLAW", Some(1950), None, Vec::new(), None),
+        ("MTHINLAW", Some(1953), None, Vec::new(), None),
+    ];
+    for (relationship, born_year, death_age, conditions, link) in rows {
+        let mut m = MemberIn::new(alex, relationship);
+        m.born_year = born_year;
+        m.death_age = death_age;
+        m.conditions = conditions;
+        if relationship == "SPS" {
+            m.sex_at_birth = Some("female".into());
+        }
+        let src = SrcRef::New(SrcIn {
+            profile_id: Some(alex),
+            label: Some("manual".into()),
+            ..SrcIn::manual(Some(user))
+        });
+        family::add(
+            &mut *conn,
+            &m,
+            &src,
+            "person",
+            None,
+            link.map(|l| ctx.family.profile(l)),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use sha2::{Digest, Sha256};
