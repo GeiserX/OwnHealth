@@ -11,6 +11,7 @@ pub mod documents;
 pub mod drug_check;
 pub mod export;
 pub mod family;
+pub mod family_history;
 pub mod genome;
 pub mod imports;
 pub mod inbox;
@@ -37,6 +38,7 @@ pub fn all() -> Router<Runtime> {
         .merge(drug_check::router())
         .merge(export::router())
         .merge(family::router())
+        .merge(family_history::router())
         .merge(genome::router())
         .merge(genome::events::router())
         .merge(imports::router())

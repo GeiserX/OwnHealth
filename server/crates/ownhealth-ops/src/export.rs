@@ -39,7 +39,7 @@ pub const LIFECYCLE_TAG: &str = "urn:ownhealth:lifecycle";
 /// secret references, routing rules), and tables that only repeat the profile.
 const SKIP_RAW: [&str; 5] = ["profile", "profile_grant", "api_token", "sender_rule", "source"];
 /// These name the person `patient`, not `subject`.
-const PATIENT_FIELD: [&str; 2] = ["AllergyIntolerance", "Immunization"];
+const PATIENT_FIELD: [&str; 3] = ["AllergyIntolerance", "FamilyMemberHistory", "Immunization"];
 const GENOME_FILES: [(&str, &str); 4] = [
     ("facts_blob", "genome-facts.json"),
     ("vcf_blob", "genome.vcf.gz"),

@@ -3,6 +3,7 @@
 **/__pycache__
 ui/.svelte-kit
 data/*
+!data/family
 !data/genome-facts
 !data/genome
 !data/rules
