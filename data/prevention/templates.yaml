@@ -1,0 +1,35 @@
+# The words the Due screen shows beside each row, in both languages. Information only: each sentence
+# says what the guideline lists, never what the person ought to do.
+version: "prevention-templates 0.1.0"
+why:
+  every_n_months:
+    en: "The guideline lists it every {months} months between ages {from} and {to}."
+    es: "La guía lo incluye cada {months} meses entre los {from} y los {to} años."
+  every_n_months_open:
+    en: "The guideline lists it every {months} months from age {from}."
+    es: "La guía lo incluye cada {months} meses a partir de los {from} años."
+  once:
+    en: "The guideline lists it once between ages {from} and {to}."
+    es: "La guía lo incluye una vez entre los {from} y los {to} años."
+  once_open:
+    en: "The guideline lists it once from age {from}."
+    es: "La guía lo incluye una vez a partir de los {from} años."
+  series:
+    en: "The guideline lists {doses} doses from age {from}."
+    es: "La guía incluye {doses} dosis a partir de los {from} años."
+  seasonal:
+    en: "The guideline lists one dose each season from age {from}."
+    es: "La guía incluye una dosis cada temporada a partir de los {from} años."
+reasons:
+  no_birth_date:
+    en: "The profile has no birth date, so the rows by age cannot be checked."
+    es: "El perfil no tiene fecha de nacimiento, así que las filas por edad no se pueden comprobar."
+  no_sex:
+    en: "The profile has no sex at birth, so this row cannot be checked."
+    es: "El perfil no tiene sexo al nacer, así que esta fila no se puede comprobar."
+  country_not_covered:
+    en: "There is no prevention list for this profile's country yet. Only the lab gaps of the rule pack show."
+    es: "Aún no hay lista de prevención para el país de este perfil. Solo se muestran los huecos de analíticas del paquete de reglas."
+  no_country:
+    en: "The profile has no country, so no prevention list applies yet. Only the lab gaps of the rule pack show."
+    es: "El perfil no tiene país, así que aún no se aplica ninguna lista de prevención. Solo se muestran los huecos de analíticas del paquete de reglas."

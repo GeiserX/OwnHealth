@@ -1,0 +1,17 @@
+# The prevention pack: which screenings and vaccines a country's guideline lists for a person's age
+# and sex. Read by server/crates/ownhealth-rules/src/prevention.rs into ownhealth.prevention/v1, a
+# document computed on read and never stored. Lab-type screening that the rule pack already owns
+# (data/rules/pack/screening.yaml and its recency rules) stays there: a row here may only name it by
+# rule id (`pack_rule`), never evaluate the same analyte again.
+version: "prevention 0.1.0"
+# Days ahead of a due date that an item reads as upcoming.
+upcoming_days: 90
+statuses: [overdue, due, upcoming, up_to_date, not_assessed]
+kinds: [once, every_n_months, series, seasonal]
+# The closed list of answers a person may give about themselves (stored from slice 17 on).
+answer_keys: [smoking_history, hysterectomy, pregnant]
+# One rule file per country (ISO 3166-1 alpha-2). A profile in any other country gets the rule
+# pack's lab items only, with the reason `country_not_covered`.
+countries:
+  ES: es.yaml
+  US: us.yaml
