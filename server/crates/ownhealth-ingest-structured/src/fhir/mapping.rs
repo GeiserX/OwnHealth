@@ -629,6 +629,16 @@ pub fn procedure(r: &Value, profile_id: Uuid) -> Mapped {
     )
 }
 
+/// Our own export holds every version, tagged; only the current one is a fact. The export appends
+/// its tag after any it stored from an earlier import, so the last one is the authoritative one.
+fn not_current(r: &Value) -> bool {
+    let lifecycle = list(r.get("meta"), "tag")
+        .iter()
+        .rfind(|t| t.get("system").and_then(Value::as_str) == Some("urn:ownhealth:lifecycle"))
+        .and_then(|t| t.get("code").and_then(Value::as_str));
+    matches!(lifecycle, Some("superseded" | "retracted"))
+}
+
 /// A visit. One that was cancelled or entered in error never happened; one still planned waits in
 /// review as stored. The reason is the first reasonCode, else the visit type; the provider is the
 /// service provider, else the first participant, as received.
@@ -638,16 +648,27 @@ pub fn encounter(r: &Value, profile_id: Uuid) -> Mapped {
         Some("planned") => return unmapped("Encounter not held yet (status planned)"),
         _ => {}
     }
+    if not_current(r) {
+        return skip("lifecycle_not_current");
+    }
     let period = r.get("period");
     let Some(start) = parse_datetime(get_truthy(period, "start")) else {
         return unmapped("Encounter without a start date");
     };
     let mut checks = Vec::new();
-    let mut end = parse_datetime(get_truthy(period, "end"));
-    if end.is_some_and(|e| e < start) {
+    let raw_end = get_truthy(period, "end");
+    let mut end = parse_datetime(raw_end);
+    let problem = if raw_end.is_some() && end.is_none() {
+        Some("the visit's end date cannot be read")
+    } else if end.is_some_and(|e| e < start) {
+        Some("the visit ends before it starts")
+    } else {
+        None
+    };
+    if let Some(p) = problem {
         end = None;
         checks.push(Check {
-            detail: Some("the visit ends before it starts".into()),
+            detail: Some(p.into()),
             ..Check::fail("period", "date_invalid")
         });
     }
@@ -836,13 +857,7 @@ pub fn family_member_history(r: &Value, profile_id: Uuid) -> Mapped {
     if status(r).as_deref() == Some("entered-in-error") {
         return skip("status_entered-in-error");
     }
-    // our own export holds every version, tagged; only the current one is a fact. The export appends
-    // its tag after any it stored from an earlier import, so the last one is the authoritative one.
-    let lifecycle = list(r.get("meta"), "tag")
-        .iter()
-        .rfind(|t| t.get("system").and_then(Value::as_str) == Some("urn:ownhealth:lifecycle"))
-        .and_then(|t| t.get("code").and_then(Value::as_str));
-    if matches!(lifecycle, Some("superseded" | "retracted")) {
+    if not_current(r) {
         return skip("lifecycle_not_current");
     }
     let Ok(cat) = family::catalog() else {
@@ -1057,6 +1072,27 @@ mod tests {
         };
         assert!(matches!(*record, RecordIn::Visit(VisitIn { period_end: None, .. })));
         assert_eq!(checks.len(), 1);
+        // an end we cannot read is not silently dropped: the visit waits in review
+        let Mapped::Record { record, checks } = enc(json!({"period": {"start": "2026-05-12", "end": "not a date"}}))
+        else {
+            panic!("a visit")
+        };
+        assert!(matches!(*record, RecordIn::Visit(VisitIn { period_end: None, .. })));
+        assert_eq!(checks.len(), 1);
+        // our own export keeps every version, tagged: only the last tag counts
+        let tag = |code: &str| json!({"system": "urn:ownhealth:lifecycle", "code": code});
+        assert_eq!(
+            enc(json!({"meta": {"tag": [tag("current"), tag("superseded")]}})),
+            skip("lifecycle_not_current")
+        );
+        assert_eq!(
+            enc(json!({"meta": {"tag": [tag("retracted")]}})),
+            skip("lifecycle_not_current")
+        );
+        assert!(matches!(
+            enc(json!({"meta": {"tag": [tag("superseded"), tag("current")]}})),
+            Mapped::Record { .. }
+        ));
     }
 
     #[test]

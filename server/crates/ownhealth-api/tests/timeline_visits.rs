@@ -384,3 +384,27 @@ async fn a_medicine_row_has_one_name_when_two_courses_start_together() -> R {
     assert_eq!(rows[0].0, "Cardyl");
     Ok(())
 }
+
+/// A course on hold with no stop date is not running now: it never reads as ongoing.
+#[tokio::test]
+async fn a_course_on_hold_is_not_ongoing() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let mut tx = a.rt.pool.begin().await?;
+    record(
+        &mut tx,
+        "medication",
+        json!({"profile_id": alex, "name": "Metformin", "started": "2025-01-15", "med_status": "on_hold"}),
+    )
+    .await?;
+    tx.commit().await?;
+    let (_, out) = a.get("alex", "/profiles/alex/timeline?types=medication").await?;
+    assert_eq!(
+        spans(&out, "medication"),
+        [(
+            "Metformin".to_string(),
+            vec![(json!("2025-01-15"), json!("2025-01-15"))]
+        )]
+    );
+    Ok(())
+}

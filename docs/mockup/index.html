@@ -533,7 +533,7 @@ function lane(){
    return `<div style="display:grid;grid-template-columns:170px 1fr;gap:10px;align-items:center"><div style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${c};margin-right:6px"></i>${s[1]}</div><div style="position:relative;height:22px">${segs}</div></div>`}).join("");
   return `<div class="card" style="margin-bottom:12px"><h3>Conditions and medicines over time</h3>
    <div style="display:grid;grid-template-columns:170px 1fr;gap:10px"><div></div><div style="position:relative;height:18px;border-bottom:1px solid var(--line)">${ticks}</div></div>${rows}
-   <div style="display:flex;gap:8px;align-items:center;margin-top:8px;padding-top:6px;border-top:1px solid var(--line);font-size:12px"><b>Atorvastatin 20 mg</b><span class="muted num">2026-03-10 – now</span><span class="chip">ongoing</span>${src("Prescription")}</div></div>`;
+   ${shown.some(s=>s[1]==="Atorvastatin")?`<div style="display:flex;gap:8px;align-items:center;margin-top:8px;padding-top:6px;border-top:1px solid var(--line);font-size:12px"><b>Atorvastatin 20 mg</b><span class="muted num">2026-03-10 – now</span><span class="chip">ongoing</span>${src("Prescription")}</div>`:""}</div>`;
 }
 function timeline(){
   const ev=EVENTS.slice().sort((a,b)=>b[0].localeCompare(a[0]));

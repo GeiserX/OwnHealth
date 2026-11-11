@@ -504,7 +504,7 @@ struct Span {
 }
 
 /// The bars lane. A condition that is resolved but has no abatement date, or a course that stopped
-/// with no stop date, is a one-day segment: it never reads as still running.
+/// or is on hold with no stop date, is a one-day segment: it never reads as still running.
 async fn spans(
     conn: &mut PgConnection,
     pid: Uuid,
@@ -558,7 +558,8 @@ async fn spans(
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ");
-            let stopped = text(&r, "med_status")?.as_deref() == Some("stopped");
+            // a course on hold is not running now: with no stop date it reads like a stopped one
+            let stopped = matches!(text(&r, "med_status")?.as_deref(), Some("stopped" | "on_hold"));
             let seg = Segment {
                 date: start,
                 end: day(&r, "stopped")?.or(stopped.then_some(start)),

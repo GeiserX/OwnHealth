@@ -14,6 +14,7 @@
 	import { t } from '#lib/i18n/index.svelte';
 	import { decimalText } from '#lib/logic/format';
 	import { visitPeriod } from '#lib/logic/visit';
+	import { todayIso } from '#lib/logic/people';
 
 	type Fields = Record<string, string>;
 	let {
@@ -56,7 +57,7 @@
 		visit: [['period_start', 'tl_f_day', 'date', true], ['reason_text', 'tl_f_reason', 'text', false], ['provider_name', 'tl_f_provider', 'text', false]]
 	};
 	const kindName = (k: EntryKind) => (k === 'visit' ? t('h1_ty_visit') : t('me_k_' + k));
-	const today = new Date().toISOString().slice(0, 10);
+	const today = todayIso();
 	const fresh = (k: EntryKind): Fields => (k === 'observation' ? { date: date ?? today, note } : k === 'medication' ? { kind: 'medication' } : {});
 	const fromRecord = (r: RecordOut): Fields => ({
 		// a visit's day is the date part of its start

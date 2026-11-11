@@ -15,6 +15,7 @@
 	import { currentProfile } from '#lib/state/app.svelte';
 	import { sourceLabel } from '#lib/logic/format';
 	import { buildBars, type Bar } from '#lib/logic/axis';
+	import { todayIso } from '#lib/logic/people';
 
 	type Ty = TimelineEvent['type'];
 	// Colours and glyphs from the mockup's TYPES table (procedure and document added in slice 6).
@@ -76,7 +77,7 @@
 	}
 
 	// ---- the bars lane: x in percent of the time from Jan 1 of the first year to today ----
-	const today = new Date().toISOString().slice(0, 10);
+	const today = todayIso();
 	const spans = $derived((tl.data?.spans ?? []).filter((s) => !types.size || types.has(s.type)));
 	const lane = $derived.by(() => {
 		const dates = spans.flatMap((s) => s.segments.map((g) => g.date));
@@ -93,7 +94,9 @@
 		const rows = spans.map((s) => ({ span: s, bars: buildBars(s.segments, x, today).map((b, i) => ({ b, g: s.segments[i] })) }));
 		return { ticks, rows };
 	});
-	let tip = $state<{ span: TimelineSpan; g: TimelineSegment } | null>(null);
+	let pick = $state<{ span: TimelineSpan; g: TimelineSegment } | null>(null);
+	// the detail follows the bars: another profile or a type filter that hides its row clears it
+	const tip = $derived(pick && spans.includes(pick.span) ? pick : null);
 	const range = (g: TimelineSegment) => (g.end === g.date ? g.date : `${g.date} – ${g.end ?? t('tl_now')}`);
 	// two courses of one medicine at once (two strengths) stack inside its row
 	const segStyle = (b: Bar, c: string) =>
@@ -155,9 +158,9 @@
 									style={segStyle(b, TY[r.span.type].c)}
 									title={`${g.label} · ${range(g)}`}
 									aria-label={`${g.label}: ${range(g)}`}
-									onmouseenter={() => (tip = { span: r.span, g })}
-									onfocus={() => (tip = { span: r.span, g })}
-									onclick={() => (tip = { span: r.span, g })}
+									onmouseenter={() => (pick = { span: r.span, g })}
+									onfocus={() => (pick = { span: r.span, g })}
+									onclick={() => (pick = { span: r.span, g })}
 								></button>
 							{/each}
 						</div>
@@ -203,7 +206,7 @@
 							<div>
 								<div class="t1">{e.title}</div>
 								{#if e.detail}<div class="t2">{e.detail}</div>{/if}
-								{#if e.filename && e.document_id}<a class="t2 fname" href={documentFileUrl(e.document_id)} target="_blank" rel="noopener" title={e.filename.text}>{e.filename.text}</a>
+								{#if e.document_id}<a class="t2 fname" href={documentFileUrl(e.document_id)} target="_blank" rel="noopener" title={e.filename?.text}>{e.filename?.text ?? t('i2_open_doc')}</a>
 								{:else if e.filename}<div class="t2 fname" title={e.filename.text}>{e.filename.text}</div>{/if}
 							</div>
 							<div class="rt">
