@@ -1,9 +1,9 @@
 <script module lang="ts">
-	export type EntryKind = 'observation' | 'medication' | 'condition' | 'allergy' | 'immunization';
+	export type EntryKind = 'observation' | 'medication' | 'condition' | 'allergy' | 'immunization' | 'visit';
 </script>
 
 <script lang="ts">
-	// Enter a value or a record by hand (observation, current medication, condition, allergy, vaccine),
+	// Enter a value or a record by hand (observation, current medication, condition, allergy, vaccine, visit),
 	// or correct a record: a correction is stored as a new version with a reason, the old one stays.
 	import '#lib/components/pages2/pages2.css';
 	import { untrack } from 'svelte';
@@ -50,12 +50,16 @@
 		],
 		condition: [['text', 'me_f_cond', 'text', true], ['onset', 'me_f_onset', 'date', false], ['abatement', 'me_f_abate', 'date', false]],
 		allergy: [['substance', 'me_f_subst', 'text', true], ['reaction_text', 'me_f_reaction', 'text', false]],
-		immunization: [['vaccine', 'me_f_vaccine', 'text', true], ['occurred', 'me_f_occurred', 'date', false], ['dose_number', 'me_f_dosen', 'number', false]]
+		immunization: [['vaccine', 'me_f_vaccine', 'text', true], ['occurred', 'me_f_occurred', 'date', false], ['dose_number', 'me_f_dosen', 'number', false]],
+		// visit (slice 6): the day it happened, why, and where; it goes on the timeline on that day
+		visit: [['period_start', 'tl_f_day', 'date', true], ['reason_text', 'tl_f_reason', 'text', false], ['provider_name', 'tl_f_provider', 'text', false]]
 	};
+	const kindName = (k: EntryKind) => (k === 'visit' ? t('tl_k_visit') : t('me_k_' + k));
 	const today = new Date().toISOString().slice(0, 10);
 	const fresh = (k: EntryKind): Fields => (k === 'observation' ? { date: date ?? today, note } : k === 'medication' ? { kind: 'medication' } : {});
 	const fromRecord = (r: RecordOut): Fields => ({
-		...Object.fromEntries(FIELDS[r.kind as EntryKind].map(([f]) => [f, r.detail[f] == null ? '' : String(r.detail[f])])),
+		// a visit's day is the date part of its start
+		...Object.fromEntries(FIELDS[r.kind as EntryKind].map(([f]) => [f, r.detail[f] == null ? '' : f === 'period_start' ? String(r.detail[f]).slice(0, 10) : String(r.detail[f])])),
 		...(r.kind === 'medication' ? { kind: String(r.detail.kind ?? 'medication') } : {})
 	});
 
@@ -82,6 +86,8 @@
 			out.kind = f.kind === 'supplement' ? 'supplement' : 'medication';
 		}
 		if (kind === 'condition') out.clinical_status = val('abatement') ? 'resolved' : 'active';
+		// the visit's day at noon UTC, so it stays on that day in every time zone the timeline is read in
+		if (kind === 'visit' && val('period_start')) out.period_start = `${val('period_start')}T12:00:00Z`;
 		return out;
 	}
 	// The timeline places a new medication on its start day, so a new one needs it. A correction keeps
@@ -131,7 +137,7 @@
 <form class="p2form" onsubmit={save} use:focusOnOpen={{ oncancel }} aria-label={correcting ? t('me_correct') : t('me_add')}>
 	{#if !correcting && kinds.length > 1}
 		<div class="seg" role="group" aria-label={t('me_kind')}>
-			{#each kinds as k (k)}<button type="button" class:on={k === kind} aria-pressed={k === kind} onclick={() => pick(k)}>{t('me_k_' + k)}</button>{/each}
+			{#each kinds as k (k)}<button type="button" class:on={k === kind} aria-pressed={k === kind} onclick={() => pick(k)}>{kindName(k)}</button>{/each}
 		</div>
 	{/if}
 	{#if kind === 'medication'}
@@ -150,7 +156,7 @@
 						bind:value={f[k]}
 						required={req}
 						oninput={checkValue}
-					/>{:else}<input class="p2in" {type} bind:value={f[k]} required={req || needsStart(k)} max={kind === 'observation' && k === 'date' ? today : undefined} />{/if}</label
+					/>{:else}<input class="p2in" {type} bind:value={f[k]} required={req || needsStart(k)} max={(kind === 'observation' && k === 'date') || (kind === 'visit' && k === 'period_start') ? today : undefined} />{/if}</label
 			>
 		{/each}
 	</div>

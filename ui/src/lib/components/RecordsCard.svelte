@@ -12,7 +12,8 @@
 
 	let { profile, canWrite, onchange }: { profile: string; canWrite: boolean; onchange?: () => void } = $props();
 	type RK = Exclude<EntryKind, 'observation'>;
-	const KINDS: RK[] = ['medication', 'condition', 'allergy', 'immunization'];
+	const KINDS: RK[] = ['medication', 'condition', 'allergy', 'immunization', 'visit'];
+	const kindName = (k: RK) => (k === 'visit' ? t('tl_k_visit') : t('me_k_' + k));
 	let kind = $state<RK>('medication');
 	const recs = new Loader<RecordOut[]>();
 	let adding = $state(false);
@@ -66,6 +67,8 @@
 		if (d.onset) parts.push({ d: d.onset });
 		if (d.occurred) parts.push({ d: d.occurred });
 		if (d.reaction_text) parts.push({ w: d.reaction_text });
+		if (d.period_start) parts.push({ d: d.period_start.slice(0, 10) });
+		if (d.provider_name && d.provider_name !== r.title) parts.push({ w: d.provider_name });
 		return parts;
 	};
 </script>
@@ -73,7 +76,7 @@
 <div class="card">
 	<h3>{t('me_records')}{#if canWrite}<span class="r"><button class="btn sm" onclick={() => ((adding = !adding), (correcting = null))} aria-expanded={adding}>{t('me_add')}</button></span>{/if}</h3>
 	<div class="seg fill" role="group" aria-label={t('me_kind')} style="margin-bottom:6px">
-		{#each KINDS as k (k)}<button class:on={k === kind} aria-pressed={k === kind} onclick={() => ((kind = k), (adding = false))}>{t('me_k_' + k)}</button>{/each}
+		{#each KINDS as k (k)}<button class:on={k === kind} aria-pressed={k === kind} onclick={() => ((kind = k), (adding = false))}>{kindName(k)}</button>{/each}
 	</div>
 	{#if adding}
 		{#key kind}<ManualEntry {profile} kinds={[kind]} onsaved={changed} oncancel={() => (adding = false)} />{/key}
