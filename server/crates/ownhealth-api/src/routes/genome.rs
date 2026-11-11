@@ -412,3 +412,6 @@ pub fn router() -> Router<Runtime> {
         .route("/profiles/{p}/genome/variant", get(genome_variant))
         .route("/profiles/{p}/genome/consent", post(genome_consent))
 }
+
+/// The ClinVar diff's history, a submodule router (merged in routes.rs).
+pub mod events;
