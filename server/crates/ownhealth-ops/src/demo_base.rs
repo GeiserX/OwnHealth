@@ -839,6 +839,17 @@ async fn seed_records(conn: &mut PgConnection, ctx: &DemoContext, assigned: &mut
     Ok(())
 }
 
+/// Visits (slice 6): Alex's traumatology visit, whose report never arrived, on the timeline.
+async fn seed_visits(conn: &mut PgConnection, ctx: &DemoContext) -> Result<()> {
+    let src = manual(conn, ctx.family.user("alex"), None, "manual").await?;
+    let body = json!({
+        "profile_id": ctx.family.profile("alex"), "period_start": "2025-11-10T09:30:00+00:00",
+        "reason_text": "Right knee pain", "provider_name": "Traumatología · Hospital Norte",
+    });
+    record(conn, "visit", body, src).await?;
+    Ok(())
+}
+
 /// metric: (start value, end value, noise), in the Python dict's order (the draws depend on it).
 const WEARABLE_METRICS: [(&str, f64, f64, f64); 5] = [
     ("hr_resting", 58.0, 54.0, 1.5),      // bpm
@@ -1124,6 +1135,7 @@ pub async fn seed_base(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result
     ] {
         ctx.src_ids.insert(k.into(), id(v)?);
     }
+    seed_visits(conn, ctx).await?;
     Ok(())
 }
 
