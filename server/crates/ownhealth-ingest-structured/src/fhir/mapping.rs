@@ -781,7 +781,7 @@ pub fn family_member_history(r: &Value, profile_id: Uuid) -> Mapped {
     m.death_age = years(r.get("deceasedAge"));
     m.deceased = m.death_age.is_some()
         || r.get("deceasedBoolean").and_then(Value::as_bool).unwrap_or(false)
-        || ["deceasedDate", "deceasedString", "deceasedRange"]
+        || ["deceasedAge", "deceasedDate", "deceasedString", "deceasedRange"]
             .iter()
             .any(|k| truthy(r.get(*k)));
     for c in list(Some(r), "condition") {
@@ -846,6 +846,20 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_death_age_in_months_still_marks_the_relative_deceased() {
+        let r = json!({
+            "resourceType": "FamilyMemberHistory",
+            "status": "completed",
+            "relationship": {"coding": [{"system": family::ROLE_CODE, "code": "BRO"}]},
+            "deceasedAge": {"value": 3, "unit": "mo", "code": "mo"}
+        });
+        let Mapped::Family { member, .. } = family_member_history(&r, Uuid::nil()) else {
+            panic!("not mapped");
+        };
+        assert_eq!((member.deceased, member.death_age), (true, None));
+    }
 
     #[test]
     fn loinc_check_digit() {
