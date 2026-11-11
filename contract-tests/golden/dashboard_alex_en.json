@@ -131,6 +131,9 @@
       "why": "string"
     }
   },
+  "prevention_withheld": {
+    "[]": "empty"
+  },
   "profile": "string",
   "review_open": "int",
   "rules_version": "string",

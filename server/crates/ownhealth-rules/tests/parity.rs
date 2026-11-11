@@ -112,8 +112,9 @@ async fn dashboards_match_python() -> R {
     let mut tx = s.pool().begin().await?;
     let check = |key: String, mut got: Value| {
         let generated = got.as_object_mut().and_then(|m| m.shift_remove("generated_at"));
-        // 0.4.0 key, not in the Python lineage (tests/prevention.rs pins it)
+        // 0.4.0 keys, not in the Python lineage (tests/prevention.rs pins them)
         got.as_object_mut().and_then(|m| m.shift_remove("prevention_due"));
+        got.as_object_mut().and_then(|m| m.shift_remove("prevention_withheld"));
         assert!(
             generated
                 .as_ref()
