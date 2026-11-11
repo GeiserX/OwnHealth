@@ -376,7 +376,7 @@ fixtures/<lane>/                                               that lane
 
 New ranges, after every 0.2.0 file. The migrator applies missing files in number order, so a
 v0.2 file numbered below 0600 would run before 0150-0600 on a fresh database and be undone by them
-(0150 redefines `review_item_kind_check`). CONTRACTS.md section 7 carries the same table.
+(0150 redefines `review_item_kind_check`). This table covers v0.2; CONTRACTS.md section 7 is the full list, later phases included.
 
 | Range | Owner |
 |---|---|

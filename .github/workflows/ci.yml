@@ -72,6 +72,10 @@ jobs:
       - run: mkdir -p static # the UI build is embedded only in release builds; tests serve their own
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Information, never advice: 0 imperative phrases outside attributed quotes in everything we
+      # write (crates/ownhealth/tests/wording_all.rs), as its own step so a wording failure is named.
+      - name: Wording lint
+        run: cargo test -p ownhealth --test wording_all --locked
       - run: cargo test --workspace --locked
 
   # The OCR engine (v0.2): the `ocr` feature links ONNX Runtime, so it gets its own lints, and the
