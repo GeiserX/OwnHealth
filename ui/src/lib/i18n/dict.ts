@@ -1352,6 +1352,7 @@ export const dict = {
 		tl_f_day: "Day",
 		tl_f_reason: "Reason",
 		tl_f_provider: "Clinic or clinician",
+		tl_bars_country: "The bars are hidden while a country is selected: conditions and medicines carry no country.",
 	},
 	es: {
 		household: "Hogar",
@@ -1539,7 +1540,7 @@ export const dict = {
 		h1_trend_none: "No hay valores para este biomarcador.",
 		h1_limits: "Limitaciones",
 		h1_tl_sub: "{name} · {n} eventos de {s} orígenes",
-		h1_ty_visit: "Consulta",
+		h1_ty_visit: "Visita médica",
 		h1_ty_lab: "Analítica",
 		h1_ty_imaging: "Imagen",
 		h1_ty_diagnosis: "Diagnóstico",
@@ -2703,6 +2704,7 @@ export const dict = {
 		tl_f_day: "Día",
 		tl_f_reason: "Motivo",
 		tl_f_provider: "Centro o profesional",
+		tl_bars_country: "Las barras se ocultan mientras hay un país seleccionado: los diagnósticos y los medicamentos no llevan país.",
 	},
 } as const;
 

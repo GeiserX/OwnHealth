@@ -13,6 +13,7 @@
 	import { errText } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
 	import { decimalText } from '#lib/logic/format';
+	import { visitPeriod } from '#lib/logic/visit';
 
 	type Fields = Record<string, string>;
 	let {
@@ -86,8 +87,8 @@
 			out.kind = f.kind === 'supplement' ? 'supplement' : 'medication';
 		}
 		if (kind === 'condition') out.clinical_status = val('abatement') ? 'resolved' : 'active';
-		// the visit's day at noon UTC, so it stays on that day in every time zone the timeline is read in
-		if (kind === 'visit' && val('period_start')) out.period_start = `${val('period_start')}T12:00:00Z`;
+		// the visit's day at noon UTC; a correction on the same day keeps the stored start (visitPeriod)
+		if (kind === 'visit') Object.assign(out, visitPeriod(val('period_start'), correcting?.detail));
 		return out;
 	}
 	// The timeline places a new medication on its start day, so a new one needs it. A correction keeps

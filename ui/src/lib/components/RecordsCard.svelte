@@ -88,7 +88,7 @@
 			<div style="padding:5px 0;border-top:1px solid #20252f">
 				<div class="p2row">
 					<div style="flex:1;min-width:0">
-						<b>{r.title}</b>
+						<b>{r.title || kindName(kind)}</b>
 						{#if sub(r).length}
 							<div class="dim" style="font-size:11px">
 								{#each sub(r) as x, i (i)}{i ? ' · ' : ''}{x.w ?? ''}{x.w && x.d ? ' ' : ''}{#if x.d}<span class="num" style="white-space:nowrap">{x.d}</span>{/if}{/each}

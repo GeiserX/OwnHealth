@@ -2,7 +2,7 @@
 	// Timeline (mockup screen #timeline): dated events from GET /profiles/{p}/timeline (lane H), newest first,
 	// grouped by year, filterable by type and country, each with its source chip. Above the list, the bars lane
 	// (slice 6): one row per condition and per medicine, a segment per course; phones get it as a list.
-	import { getTimeline } from '#lib/api';
+	import { documentFileUrl, getTimeline } from '#lib/api';
 	import type { Timeline, TimelineEvent, TimelineSegment, TimelineSpan } from '#lib/api/types';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
@@ -130,7 +130,9 @@
 			<button class="chip" onclick={() => ((types = new Set()), (countries = new Set()))}>{t('h1_clear')}</button>
 		{/if}
 	</div>
-	{#if lane}
+	{#if lane && countries.size}
+		<div class="note" style="margin-bottom:12px">{t('tl_bars_country')}</div>
+	{:else if lane}
 		<div class="card lane">
 			<h3>{t('tl_bars')}</h3>
 			<div class="lgrid" role="group" aria-label={t('tl_bars')}>
@@ -201,7 +203,8 @@
 							<div>
 								<div class="t1">{e.title}</div>
 								{#if e.detail}<div class="t2">{e.detail}</div>{/if}
-								{#if e.filename}<div class="t2 fname" title={e.filename.text}>{e.filename.text}</div>{/if}
+								{#if e.filename && e.document_id}<a class="t2 fname" href={documentFileUrl(e.document_id)} target="_blank" rel="noopener" title={e.filename.text}>{e.filename.text}</a>
+								{:else if e.filename}<div class="t2 fname" title={e.filename.text}>{e.filename.text}</div>{/if}
 							</div>
 							<div class="rt">
 								<span class="chip">{tyName(e.type)}</span>

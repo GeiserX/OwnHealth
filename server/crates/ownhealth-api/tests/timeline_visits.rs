@@ -323,11 +323,64 @@ async fn without_records_scope_no_bars_visits_or_documents() -> R {
             "visit"
         ])
     );
-    // Records without read:sensitive: the sensitive diagnosis has no bar either.
+    // A discharge report whose diagnosis is sensitive: the document is as sensitive as its facts.
+    let mut tx = a.rt.pool.begin().await?;
+    let doc: uuid::Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type, \
+         provider_name, collected_at) values ($1, $2, decode(repeat('cc', 32), 'hex'), 'Alta_hidden_2023.pdf', \
+         'application/pdf', 10, 'discharge', 'Hospital Norte', '2023-01-05T10:00:00Z') returning id",
+    )
+    .bind(a.family.household_id)
+    .bind(alex)
+    .fetch_one(&mut *tx)
+    .await?;
+    let src: SrcIn = serde_json::from_value(json!({"kind": "manual", "profile_id": alex, "document_id": doc}))?;
+    let r = RecordIn::from_json(
+        "condition",
+        json!({"profile_id": alex, "text": "Hidden from the report", "onset": "2023-01-05",
+               "sensitivity": ["mental_health"]}),
+    )?;
+    add_record(&mut tx, &r, &SrcRef::New(src), RecordOptions::new("person")).await?;
+    tx.commit().await?;
+    let names = |v: &Value| -> Vec<String> {
+        of_type(v, "document")
+            .iter()
+            .map(|d| d["filename"]["text"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+
+    // Records without read:sensitive: the sensitive diagnosis has no bar, and its report is not listed.
     categories(&["read:records"]).await?;
     let (_, out) = a.get("alex", "/profiles/alex/timeline").await?;
     let labels: Vec<String> = spans(&out, "diagnosis").into_iter().map(|(l, _)| l).collect();
     assert_eq!(labels, ["Hypercholesterolaemia"]);
-    assert_eq!(of_type(&out, "document").len(), 1);
+    assert_eq!(names(&out), ["Informe_alta_2025-11-12.pdf"]);
+    categories(&["read:records", "read:sensitive"]).await?;
+    let (_, out) = a.get("alex", "/profiles/alex/timeline").await?;
+    assert_eq!(names(&out), ["Informe_alta_2025-11-12.pdf", "Alta_hidden_2023.pdf"]);
+    Ok(())
+}
+
+/// Two courses of one medicine that start on the same day: the row's name does not depend on the
+/// order the rows sit on disk, so two calls give the same bytes.
+#[tokio::test]
+async fn a_medicine_row_has_one_name_when_two_courses_start_together() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let mut tx = a.rt.pool.begin().await?;
+    // stored in the reverse of name order: a query without an order returns them as stored
+    for name in ["Cardyl", "Atorvastatin"] {
+        record(
+            &mut tx,
+            "medication",
+            json!({"profile_id": alex, "name": name, "ingredient": "atorvastatin", "started": "2026-03-10"}),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    let (_, out) = a.get("alex", "/profiles/alex/timeline?types=medication").await?;
+    let rows = spans(&out, "medication");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].0, "Cardyl");
     Ok(())
 }

@@ -24,6 +24,7 @@ use axum::{Json, Router};
 use chrono::NaiveDate;
 use ownhealth_core::Runtime;
 use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::documents::sensitive_document_sql;
 use ownhealth_core::pyjson::py_date;
 use serde_json::{Value, json};
 use sqlx::postgres::PgRow;
@@ -393,7 +394,7 @@ async fn records(
         }
     }
     if want.contains("document") {
-        out.extend(documents(conn, pid, t).await?);
+        out.extend(documents(conn, pid, sens, t).await?);
     }
     if want.contains("imaging") {
         let sql = "select i.modality, i.description, i.study_date, i.src_id, s.label \
@@ -419,14 +420,23 @@ async fn records(
 }
 
 /// Documents that are not lab reports (draws are lab events) or genome files (genome events), on the
-/// day they were collected, else reported. A document has no `src`: it is its own source.
-async fn documents(conn: &mut PgConnection, pid: Uuid, t: &Words) -> R<Vec<Option<Event>>> {
-    let sql = "select d.id, d.doc_type, d.filename, d.provider_name, coalesce(d.collected_at, d.reported_at)::date as day \
-               from document d where d.profile_id = $1 and d.status = 'active' \
-               and d.doc_type is distinct from 'lab_report' and d.doc_type is distinct from 'genomics' \
-               order by d.id";
+/// day they were collected, else reported. A document with neither date has no place on the timeline
+/// (the day it was uploaded is not a day anything happened). A document with a sensitive fact is
+/// sensitive. A document has no `src`: it is its own source.
+async fn documents(conn: &mut PgConnection, pid: Uuid, sens: bool, t: &Words) -> R<Vec<Option<Event>>> {
+    let hide = if sens {
+        String::new()
+    } else {
+        format!(" and not {}", sensitive_document_sql("d.id"))
+    };
+    let sql = format!(
+        "select d.id, d.doc_type, d.filename, d.provider_name, coalesce(d.collected_at, d.reported_at)::date as day \
+         from document d where d.profile_id = $1 and d.status = 'active' \
+         and d.doc_type is distinct from 'lab_report' and d.doc_type is distinct from 'genomics'{hide} \
+         order by d.id"
+    );
     let mut out = Vec::new();
-    for r in rows(conn, sql, pid).await? {
+    for r in rows(conn, &sql, pid).await? {
         let doc_type = text(&r, "doc_type")?;
         let title = t
             .doc_types
@@ -534,7 +544,8 @@ async fn spans(
         let sql = format!(
             "select lower(trim(coalesce(nullif(trim(m.ingredient), ''), m.name))) as key, m.name, m.strength, \
              m.started, m.stopped, m.med_status, m.src_id, s.label from medication_statement m \
-             join src s on s.id = m.src_id where m.profile_id = $1 and m.started is not null and {}",
+             join src s on s.id = m.src_id where m.profile_id = $1 and m.started is not null and {} \
+             order by m.started, m.name, m.src_id",
             live("m", sens)
         );
         let mut by_key: std::collections::BTreeMap<String, Span> = std::collections::BTreeMap::new();
@@ -561,7 +572,7 @@ async fn spans(
                 label: name.clone(),
                 segments: Vec::new(),
             });
-            // the row is named after its latest course
+            // the row is named after its latest course (rows come by start, then name: a tie is stable)
             if span.segments.iter().all(|s| s.date <= start) {
                 span.label = name;
             }

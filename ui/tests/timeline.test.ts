@@ -35,3 +35,19 @@ test('the courses of one medicine share its row: the pause is a gap, the current
 	);
 	assert.ok(bars[0].x2 < bars[1].x, 'the pause shows as a gap');
 });
+
+// A visit's correction (ManualEntry): the form has only a day, the stored visit may carry times.
+import { visitPeriod } from '../src/lib/logic/visit.ts';
+
+test('correcting a visit without moving its day keeps the stored start, so an imported end stays valid', () => {
+	const stored = { period_start: '2026-05-12T06:30:00Z', period_end: '2026-05-12T07:00:00Z' };
+	assert.deepEqual(visitPeriod('2026-05-12', stored), { period_start: '2026-05-12T06:30:00Z' });
+});
+
+test('a new visit, or a moved day, is placed at noon UTC; an end before the new start is cleared', () => {
+	assert.deepEqual(visitPeriod('2025-11-10'), { period_start: '2025-11-10T12:00:00Z' });
+	const stored = { period_start: '2026-05-12T06:30:00Z', period_end: '2026-05-12T07:00:00Z' };
+	assert.deepEqual(visitPeriod('2026-05-13', stored), { period_start: '2026-05-13T12:00:00Z', period_end: null });
+	assert.deepEqual(visitPeriod('2026-05-11', stored), { period_start: '2026-05-11T12:00:00Z' });
+	assert.deepEqual(visitPeriod(undefined, stored), {});
+});
