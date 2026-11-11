@@ -31,7 +31,7 @@ async fn hashes(
 
 #[tokio::test]
 async fn a_030_database_migrates_and_gains_relatives_with_every_state_hash_kept() -> anyhow::Result<()> {
-    let db = TestDb::empty().await?;
+    let mut db = TestDb::empty().await?;
     let all = embedded()?;
     let old: Vec<_> = all.iter().filter(|m| m.version <= V030).cloned().collect();
     assert!(old.len() < all.len(), "1110 is not among the 0.3.0 files");
@@ -60,6 +60,11 @@ async fn a_030_database_migrates_and_gains_relatives_with_every_state_hash_kept(
 
     let applied = migrate(&db.pool, &all).await?;
     assert!(applied.contains(&1110), "{applied:?}");
+    // The server restarts after a migration. A connection from before it holds plans for the old
+    // medication_statement row type (1100 adds columns), and Postgres refuses to reuse them ("cached
+    // plan must not change result type"), so everything after the upgrade uses new connections.
+    db.pool.close().await;
+    db.pool = sqlx::PgPool::connect(&db.url).await?;
     let mut c = db.pool.acquire().await?;
     assert_eq!(
         hashes(&mut c, &profiles).await?,
