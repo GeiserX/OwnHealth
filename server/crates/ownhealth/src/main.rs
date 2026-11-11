@@ -1,4 +1,5 @@
-//! `ownhealth serve | migrate | demo-seed | worker | healthcheck | backup | restore | verify-restore`.
+//! `ownhealth serve | migrate | demo-seed | worker | healthcheck | backup | restore | verify-restore |
+//! clinvar-diff`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -48,6 +49,13 @@ enum Cmd {
     /// OWNHEALTH_DATABASE_URL and pg_restore 17.
     VerifyRestore {
         /// A directory `ownhealth backup` wrote.
+        path: PathBuf,
+    },
+    /// Compare every current genome with a ClinVar release (the GRCh38 VCF, bgzipped or plain, from a
+    /// local path), write the events and alerts, and print what each dataset got. Needs
+    /// OWNHEALTH_DATABASE_URL.
+    ClinvarDiff {
+        /// The ClinVar VCF, for example clinvar_20261005.vcf.gz.
         path: PathBuf,
     },
 }
@@ -144,6 +152,13 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
             } else {
                 println!("demo household exists; use --force to add another");
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::ClinvarDiff { path } => {
+            let rt = Runtime::new(settings)?;
+            let r = ownhealth_genome::clinvar::diff_release(&rt.pool, &rt.blobs, &path, rt.settings.age_of_majority)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Worker => {
