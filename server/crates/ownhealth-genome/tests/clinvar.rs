@@ -730,7 +730,38 @@ fn a_release_record_with_missing_columns_is_refused() -> R {
         .map(|e| e.to_string())
         .unwrap_or_default();
     assert!(err.contains("partial.vcf") && err.contains("columns"), "{err}");
+    // A row cut right after a known contig, before POS, is refused too.
+    let p = dir.path().join("cut.vcf");
+    std::fs::write(
+        &p,
+        "##fileDate=20261005\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+         1\t100\t1\tA\tG\t.\t.\tCLNREVSTAT=no_assertion_provided;CLNSIG=Benign\n\
+         7\n",
+    )?;
+    let mut person = FactAlleles::new(vec![((22, 1), "A".into(), "G".into())]);
+    let err = carried_records(&p, &mut person)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err.contains("cut.vcf") && err.contains("columns"), "{err}");
     Ok(())
+}
+
+/// Wait until a statement of this test's database waits on a row lock: the run reached its lock.
+async fn wait_for_a_lock_wait(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    for _ in 0..600 {
+        let waiting: bool = sqlx::query_scalar(
+            "select exists (select 1 from pg_stat_activity where datname = current_database() \
+             and wait_event_type = 'Lock')",
+        )
+        .fetch_one(pool)
+        .await?;
+        if waiting {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("no statement ever waited on a lock")
 }
 
 #[tokio::test]
@@ -757,11 +788,40 @@ async fn a_dataset_is_compared_by_one_run_at_a_time() -> R {
     .await?;
     let (pool, blobs, path) = (e.db.pool.clone(), e.blobs.clone(), one.clone());
     let run = tokio::spawn(async move { clinvar::diff_release(&pool, &blobs, &path).await });
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    wait_for_a_lock_wait(&e.db.pool).await?;
     other.commit().await?;
     let r = run.await??;
     assert_eq!(r.datasets[0].skipped, Some("already_compared"), "{r:?}");
     assert!(events(&mut c).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_genome_retracted_while_the_run_waits_is_not_compared() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_alex(&e, &mut c).await?;
+    let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
+    // The run has listed Alex's dataset and waits for it; meanwhile the genome file is retracted.
+    let mut other = e.db.pool.begin().await?;
+    let doc: Uuid = sqlx::query_scalar(
+        "select document_id from genome_dataset where profile_id = $1 and status = 'current' for update",
+    )
+    .bind(e.profile("alex"))
+    .fetch_one(&mut *other)
+    .await?;
+    let (pool, blobs, path) = (e.db.pool.clone(), e.blobs.clone(), one.clone());
+    let run = tokio::spawn(async move { clinvar::diff_release(&pool, &blobs, &path).await });
+    wait_for_a_lock_wait(&e.db.pool).await?;
+    sqlx::query("update document set status = 'retracted' where id = $1")
+        .bind(doc)
+        .execute(&mut *other)
+        .await?;
+    other.commit().await?;
+    let r = run.await??;
+    assert_eq!(r.datasets[0].skipped, Some("no_longer_current"), "{r:?}");
+    assert!(events(&mut c).await?.is_empty());
+    assert!(alerts_of(&mut c, e.profile("alex")).await?.is_empty());
     Ok(())
 }
 

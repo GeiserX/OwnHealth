@@ -323,3 +323,60 @@ async fn retracting_the_genome_hides_its_events_and_dismisses_its_alerts() -> R 
     assert_eq!(after["items"], serde_json::json!([]), "{after}");
     Ok(())
 }
+
+/// Wait until `n` statements of this test's database wait on a lock.
+async fn wait_for_lock_waits(pool: &sqlx::PgPool, n: i64) -> anyhow::Result<()> {
+    for _ in 0..600 {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if waiting >= n {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("fewer than {n} statements ever waited on a lock")
+}
+
+#[tokio::test]
+async fn a_retraction_during_a_comparison_still_dismisses_what_it_wrote() -> R {
+    let e = env().await?;
+    let three = e.dir.path().join("three.vcf");
+    std::fs::write(
+        &three,
+        format!(
+            "##fileDate=20261019\n{HEAD}7\t117559590\t7105\tATCT\tA\t.\t.\tCLNREVSTAT=reviewed_by_expert_panel;\
+             CLNSIG=Pathogenic;GENEINFO=CFTR:1\n19\t44908684\t17864\tT\tC\t.\t.\t\
+             CLNREVSTAT=criteria_provided,_single_submitter;CLNSIG=Pathogenic;GENEINFO=APOE:1\n"
+        ),
+    )?;
+    // Hold the comparison of the third release just before it writes Alex's events, while it already
+    // holds Alex's genome file; the file is retracted in that moment.
+    let mut blocker = e.db.pool.begin().await?;
+    sqlx::query("lock table genome_event in exclusive mode")
+        .execute(&mut *blocker)
+        .await?;
+    let (pool, blobs) = (e.db.pool.clone(), e.rt.blobs.clone());
+    let run = tokio::spawn(async move { clinvar::diff_release(&pool, &blobs, &three).await });
+    wait_for_lock_waits(&e.db.pool, 1).await?;
+    let uri = format!("/api/documents/{}/retract", e.doc);
+    let retract = e.post("alex", &uri, serde_json::json!({"reason": "another person's file"}));
+    let release = async {
+        wait_for_lock_waits(&e.db.pool, 2).await?;
+        blocker.commit().await?;
+        anyhow::Ok(run.await??)
+    };
+    let ((status, body), r) = tokio::try_join!(retract, release)?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(r.datasets.iter().any(|d| d.profile == "alex" && d.alerts > 0), "{r:?}");
+    let (_, after) = e
+        .get(
+            "alex",
+            "/api/review?status=open&profile=alex&kind=genome_reinterpretation",
+        )
+        .await?;
+    assert_eq!(after["items"], serde_json::json!([]), "{after}");
+    Ok(())
+}

@@ -478,11 +478,14 @@ pub fn carried_records(release: &Path, person: &mut dyn Alleles) -> Result<(Naiv
             break;
         }
         let mut cols = line.trim_end_matches(['\n', '\r']).splitn(9, '\t');
-        let (Some(chrom), Some(pos)) = (cols.next(), cols.next()) else {
+        let Some(chrom) = cols.next() else {
             continue;
         };
         let Some(rank) = contig_rank(chrom) else {
             continue;
+        };
+        let Some(pos) = cols.next() else {
+            return Err(bad_file(&label, "a record with fewer than the 8 VCF columns"));
         };
         let pos: i64 = pos
             .parse()
@@ -614,7 +617,8 @@ pub struct DatasetReport {
     pub assay: String,
     /// Why nothing was compared: `already_compared` (this release or a newer one is the snapshot),
     /// `older_than_genome_file` (the facts were annotated with a newer ClinVar), `unreadable` (the
-    /// dataset's calls VCF could not be read in GRCh38 contig order; see `error`).
+    /// dataset's calls VCF could not be read in GRCh38 contig order; see `error`), `no_longer_current`
+    /// (the dataset was replaced or its genome file retracted while the run went on).
     pub skipped: Option<&'static str>,
     /// What went wrong when `skipped` is `unreadable`: file and dataset ids only, never a genotype.
     pub error: Option<String>,
@@ -695,10 +699,28 @@ async fn diff_dataset(
     let mut tx = pool.begin().await?;
     // One run at a time per dataset: a second run waits here, then reads the first one's snapshot
     // date, so two runs never compare the same release twice.
-    sqlx::query("select 1 from genome_dataset where id = $1 for update")
-        .bind(ds.id)
-        .execute(&mut *tx)
-        .await?;
+    let current: Option<bool> =
+        sqlx::query_scalar("select status = 'current' from genome_dataset where id = $1 for update")
+            .bind(ds.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    // The dataset was listed before this point, so its file may have been retracted since. A
+    // retraction locks the document row before it dismisses the file's alerts: it either finished
+    // and this read sees it, or it waits for this transaction and then dismisses what it wrote.
+    let retracted = match ds.document_id {
+        Some(doc) => {
+            sqlx::query_scalar::<_, i32>("select 1 from document where id = $1 and status <> 'retracted' for share")
+                .bind(doc)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_none()
+        }
+        None => false,
+    };
+    if current != Some(true) || retracted {
+        report.skipped = Some("no_longer_current");
+        return Ok(report);
+    }
     let prev_date: Option<NaiveDate> =
         sqlx::query_scalar("select max(release_date) from clinvar_carried where dataset_id = $1")
             .bind(ds.id)
