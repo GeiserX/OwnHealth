@@ -95,8 +95,12 @@
 		return { ticks, rows };
 	});
 	let pick = $state<{ span: TimelineSpan; g: TimelineSegment } | null>(null);
-	// the detail follows the bars: another profile or a type filter that hides its row clears it
+	// the detail follows the bars: another profile or a type filter that hides its row clears it, so removing
+	// the filter later does not bring the old detail back
 	const tip = $derived(pick && spans.includes(pick.span) ? pick : null);
+	$effect(() => {
+		if (pick && !tip) pick = null;
+	});
 	const range = (g: TimelineSegment) => (g.end === g.date ? g.date : `${g.date} – ${g.end ?? t('tl_now')}`);
 	// two courses of one medicine at once (two strengths) stack inside its row
 	const segStyle = (b: Bar, c: string) =>
