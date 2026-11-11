@@ -15,7 +15,7 @@
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { roleCell } from '#lib/logic/grants';
-	import { backSummary, lapsed, localDay, type FormerAccess } from '#lib/logic/transfer';
+	import { backSummary, giveBackGrant, lapsed, localDay, type FormerAccess } from '#lib/logic/transfer';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
 
@@ -139,13 +139,8 @@
 		const slug = mine?.slug;
 		if (!slug || lapsed(f.expires_at)) return;
 		act('xfer', async () => {
-			await putGrant({
-				user_id: f.user_id,
-				profile: slug,
-				role: f.role as Role,
-				categories: f.categories.length ? (f.categories as Scope[]) : null,
-				expires_at: f.expires_at
-			});
+			const g = giveBackGrant(f);
+			await putGrant({ ...g, profile: slug, role: g.role as Role, categories: g.categories as Scope[] });
 			backing = '';
 			gaveBack = memberName(f.user_id);
 			load();

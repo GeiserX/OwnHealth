@@ -35,3 +35,9 @@ export function localDay(iso: string): string {
 export function lapsed(expiresAt: string | null, now: Date = new Date()): boolean {
 	return expiresAt !== null && new Date(expiresAt).getTime() <= now.getTime();
 }
+
+/** The PUT /grants body that gives one former grant back as it was: same role, same categories (an
+ * empty set stays empty, since null would mean the role's default), same end date. */
+export function giveBackGrant(f: FormerAccess): { user_id: string; profile: string; role: string; categories: string[]; expires_at: string | null } {
+	return { user_id: f.user_id, profile: f.profile, role: f.role, categories: f.categories, expires_at: f.expires_at };
+}
