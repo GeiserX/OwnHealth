@@ -1,7 +1,7 @@
 // The Medications screen: which medicines are current, the history grouped per medicine, and the code chips.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { codeChips, historyGroups, isCurrent, replacedReason, type MedRecord } from '../src/lib/logic/meds.ts';
+import { codeChips, historyGroups, isCurrent, pgxFor, replacedReason, type MedRecord } from '../src/lib/logic/meds.ts';
 
 const rec = (id: string, detail: Record<string, unknown>, extra: Partial<MedRecord> = {}): MedRecord => ({
 	id,
@@ -36,13 +36,38 @@ test('the history groups the pause and the restart of one medicine, newest first
 		'2026-11-10'
 	);
 	assert.deepEqual(
-		groups.map((g) => [g.title, g.entries.map((e) => e.id), g.current]),
+		groups.map((g) => [g.title, g.entries.map((e) => e.id), g.current, g.state]),
 		[
-			['Omeprazole', ['omep'], true],
-			['Atorvastatin', ['new', 'old'], true],
-			['Vitamin D3', ['v1'], false]
+			['Omeprazole', ['omep'], true, null],
+			['Atorvastatin', ['new', 'old'], true, null],
+			['Vitamin D3', ['v1'], false, null]
 		]
 	);
+});
+
+test('a medicine not taken today is labelled by its newest version, never stopped by default', () => {
+	const today = '2026-11-10';
+	const state = (...rows: MedRecord[]) => historyGroups(rows, today)[0].state;
+	assert.equal(state(rec('s', { name: 'S', med_status: 'stopped', started: '2022-01-01', stopped: '2025-12-01' })), 'stopped');
+	assert.equal(state(rec('h', { name: 'H', med_status: 'on_hold', started: '2026-01-01' })), 'on_hold');
+	assert.equal(state(rec('f', { name: 'F', med_status: 'active', started: '2026-12-01' })), null, 'starts later');
+	assert.equal(state(rec('r', { name: 'R', med_status: 'active', started: '2026-01-01' }, { status: 'retracted' })), 'retracted');
+	assert.equal(
+		state(
+			rec('old', { name: 'P', med_status: 'stopped', started: '2022-01-01', stopped: '2025-01-01' }),
+			rec('new', { name: 'P', med_status: 'on_hold', started: '2025-06-01' })
+		),
+		'on_hold',
+		'the newest course decides'
+	);
+});
+
+test('PGx answers show only for the profile they were asked for, and never on a supplement', () => {
+	const views = { slug: 'alex', views: { atorvastatin: { pgx: [{ gene: 'SLCO1B1' }] } } };
+	assert.deepEqual(pgxFor(views, 'alex', 'atorvastatin', 'medication'), { pgx: [{ gene: 'SLCO1B1' }] });
+	assert.equal(pgxFor(views, 'sam', 'atorvastatin', 'medication'), null, 'another profile');
+	assert.equal(pgxFor(views, 'alex', 'atorvastatin', 'supplement'), null, 'a supplement');
+	assert.equal(pgxFor(null, 'alex', 'atorvastatin', 'medication'), null);
 });
 
 test('code chips show the primary code first and every received code once', () => {

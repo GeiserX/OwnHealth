@@ -31,6 +31,12 @@ export interface MedGroup<T extends MedRecord = MedRecord> {
 	key: string;
 	title: string;
 	current: boolean;
+	/**
+	 * Why a medicine not taken today is not current, from its newest live version: stopped, on hold, or
+	 * retracted when no version is live. Null when current, when it starts later, or when every version
+	 * was corrected into another medicine.
+	 */
+	state: 'stopped' | 'on_hold' | 'retracted' | null;
 	/** Newest course first; corrected and retracted versions sit with their medicine. */
 	entries: T[];
 }
@@ -45,9 +51,18 @@ export function historyGroups<T extends MedRecord>(records: T[], today: string):
 	const since = (r: MedRecord) => str(r.detail.started) ?? '';
 	const groups: MedGroup<T>[] = [...byKey].map(([key, rows]) => {
 		const entries = [...rows].sort((a, b) => since(b).localeCompare(since(a)) || b.recorded_at.localeCompare(a.recorded_at));
-		return { key, title: str(entries[0].detail.name) ?? entries[0].title, current: entries.some((e) => isCurrent(e, today)), entries };
+		const current = entries.some((e) => isCurrent(e, today));
+		return { key, title: str(entries[0].detail.name) ?? entries[0].title, current, state: current ? null : notTaken(entries, today), entries };
 	});
 	return groups.sort((a, b) => Number(b.current) - Number(a.current) || since(b.entries[0]).localeCompare(since(a.entries[0])) || a.title.localeCompare(b.title));
+}
+
+function notTaken(entries: MedRecord[], today: string): MedGroup['state'] {
+	const live = entries.find((e) => e.status === 'current' || e.status === 'provisional');
+	if (!live) return entries.some((e) => e.status === 'retracted') ? 'retracted' : null;
+	if (str(live.detail.med_status) === 'on_hold') return 'on_hold';
+	const started = str(live.detail.started);
+	return started && started > today ? null : 'stopped';
 }
 
 const SYSTEMS: Record<string, string> = {
@@ -107,4 +122,19 @@ export function replacedReason(reason: string | null): { action: 'start' | 'stop
 	const m = /^agent proposal (start|stop|change)(?:: ([\s\S]*))?$/.exec(reason ?? '');
 	if (m) return { action: m[1] as 'start' | 'stop' | 'change', text: str(m[2]) };
 	return { action: null, text: str(reason) };
+}
+
+/** The drug-check answers asked for one profile, keyed by the drug name the check resolves. */
+export interface PgxViews<V> {
+	slug: string;
+	views: Record<string, V | null>;
+}
+
+/**
+ * The drug-check answer behind a current row's PGx badges: only from answers asked for this profile, and
+ * never for a supplement (supplements are not in CPIC). Answers left from another profile show nothing.
+ */
+export function pgxFor<V>(cache: PgxViews<V> | null, slug: string | undefined, drug: string, kind: unknown): V | null {
+	if (!cache || cache.slug !== slug || kind === 'supplement') return null;
+	return cache.views[drug] ?? null;
 }

@@ -15,14 +15,14 @@
 	import { Loader, tf } from '#lib/components/pages1/util.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { isActionable } from '#lib/logic/health';
-	import { codeChips, historyGroups, isCurrent, replacedReason } from '#lib/logic/meds';
+	import { codeChips, historyGroups, isCurrent, pgxFor, replacedReason, type PgxViews } from '#lib/logic/meds';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const prof = $derived(currentProfile());
 	const canWrite = $derived(!!prof && prof.role !== 'viewer');
 	const today = new Date().toISOString().slice(0, 10);
 	const meds = new Loader<RecordOut[]>();
-	const pgx = new Loader<Record<string, DrugCheckView | null>>();
+	const pgx = new Loader<PgxViews<DrugCheckView>>();
 	let adding = $state(false);
 	let correcting = $state<string | null>(null);
 
@@ -50,7 +50,8 @@
 	const drugOf = (r: RecordOut) => s(r, 'ingredient') ?? s(r, 'name') ?? r.title;
 
 	// One drug check per current medicine, for its PGx badges. A drug the check does not know has none;
-	// supplements are not in CPIC, so they are not asked about.
+	// supplements are not in CPIC, so they are not asked about. Answers carry the profile they were asked
+	// for, so another profile's answers never show here.
 	$effect(() => {
 		const slug = prof?.slug;
 		const lang = i18n.lang;
@@ -58,11 +59,12 @@
 		if (!slug || !names.length) return;
 		pgx.run(async () => {
 			const answers = await Promise.all(names.map((n) => getDrugCheckView(slug, n, lang).catch(() => null)));
-			return Object.fromEntries(names.map((n, i) => [n, answers[i]]));
+			return { slug, views: Object.fromEntries(names.map((n, i) => [n, answers[i]])) };
 		}, `${slug}/${lang}/${names.join('|')}`);
 	});
-	const badges = (r: RecordOut) => pgx.data?.[drugOf(r)]?.pgx ?? [];
-	const guided = (r: RecordOut, gene: string) => (pgx.data?.[drugOf(r)]?.guidance ?? []).some((g) => g.applies_to.startsWith(gene));
+	const view = (r: RecordOut) => pgxFor(pgx.data, prof?.slug, drugOf(r), r.detail.kind);
+	const badges = (r: RecordOut) => view(r)?.pgx ?? [];
+	const guided = (r: RecordOut, gene: string) => (view(r)?.guidance ?? []).some((g) => g.applies_to.startsWith(gene));
 	// What a version's dates do not already say: corrected, retracted, stopped or on hold.
 	const stateWord = (r: RecordOut) =>
 		r.status === 'superseded'
@@ -157,7 +159,7 @@
 		{:else}
 			{#each groups as g (g.key)}
 				<div class="medrow">
-					<div><b>{g.title}</b>{#if !g.current}<span class="pill p-stale" style="margin-left:6px"><i aria-hidden="true"></i>{t('med_st_stopped')}</span>{/if}</div>
+					<div><b>{g.title}</b>{#if g.state}<span class="pill p-stale" style="margin-left:6px"><i aria-hidden="true"></i>{t('med_st_' + g.state)}</span>{/if}</div>
 					<ol class="hist">
 						{#each g.entries as e (e.id)}
 							<li class:old={e.status !== 'current'}>
