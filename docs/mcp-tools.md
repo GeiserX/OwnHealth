@@ -315,6 +315,8 @@ Input: `kind` (`observations`, `note`, `finding_status`, `medication`), `payload
 
 For `observations` read from a page, give each row's `page` and `bbox` (the box from `get_document_page`). OwnHealth checks every value against the page's own word layer and marks each stored row `grounded`, `ungrounded` or `ungrounded_no_word_layer` (a scan read from its image), so the reviewer sees which values it could not find on the page. The review item also lists the documents and sources the agent read in the hour before the proposal, from the audit log.
 
+A `medication` payload is `{action: "start"|"stop"|"change", name, kind?: "medication"|"supplement", dose?, schedule?, prescriber?, date, reason?}`. When a person accepts it, `dose`, `schedule` and `prescriber` become the record's dose, schedule and prescriber. A `start` with `kind: "supplement"` creates a supplement record. A `change` keeps everything the current version had, its sensitivity flags included, and replaces only the fields it names. A `stop` sets the stop date. On a `stop` or `change`, `reason` says why: it is kept on the replaced version as `agent proposal <action>: <reason>`, which the Medications history shows.
+
 ```json
 "data": {
   "proposal_id": "prop_49a8d360", "status": "queued_for_review", "kind": "note", "checks": [],

@@ -225,6 +225,8 @@ enum Field {
     Literal(&'static [&'static str]),
     OptLiteral(&'static [&'static str]),
     Sensitivity,
+    /// `[{system?, code, display?}]`, the codings of a medicine as received.
+    OptCodes,
 }
 
 const COMMON: [(&str, Field, bool); 2] = [
@@ -269,6 +271,9 @@ fn record_fields(kind: &str) -> &'static [(&'static str, Field, bool)] {
             ("stopped", OptDate, false),
             ("med_status", Literal(&["active", "stopped", "on_hold"]), false),
             ("reason_text", OptStr, false),
+            ("schedule_text", OptStr, false),
+            ("prescriber", OptStr, false),
+            ("codes", OptCodes, false),
         ],
         "allergy" => &[
             ("substance", Str, true),
@@ -308,7 +313,12 @@ fn lax_record(kind: &str, data: &mut Map<String, Value>) -> Result<(), Vec<Value
         };
         let optional = matches!(
             field,
-            Field::OptStr | Field::OptDate | Field::OptDatetime | Field::OptInt | Field::OptLiteral(_)
+            Field::OptStr
+                | Field::OptDate
+                | Field::OptDatetime
+                | Field::OptInt
+                | Field::OptLiteral(_)
+                | Field::OptCodes
         );
         if v.is_null() && optional {
             continue;
@@ -338,6 +348,37 @@ fn lax_record(kind: &str, data: &mut Map<String, Value>) -> Result<(), Vec<Value
             Field::OptInt => match crate::validate::lax_int(v) {
                 Ok(n) => *v = json!(n),
                 Err((kind, msg)) => fail(loc, kind, msg),
+            },
+            Field::OptCodes => match v.as_array() {
+                None => fail(loc, "list_type", "Input should be a valid list"),
+                Some(items) => {
+                    for (i, c) in items.iter().enumerate() {
+                        let at = |k: &str| vec![json!(name), json!(i), json!(k)];
+                        let Some(c) = c.as_object() else {
+                            fail(
+                                vec![json!(name), json!(i)],
+                                "dict_type",
+                                "Input should be a valid dictionary",
+                            );
+                            continue;
+                        };
+                        match c.get("code") {
+                            Some(Value::String(s)) if !s.trim().is_empty() => {}
+                            Some(Value::String(_)) => fail(
+                                at("code"),
+                                "string_too_short",
+                                "String should have at least 1 character",
+                            ),
+                            None => fail(at("code"), "missing", "Field required"),
+                            Some(_) => fail(at("code"), "string_type", "Input should be a valid string"),
+                        }
+                        for k in ["system", "display"] {
+                            if c.get(k).is_some_and(|x| !x.is_null() && !x.is_string()) {
+                                fail(at(k), "string_type", "Input should be a valid string");
+                            }
+                        }
+                    }
+                }
             },
             Field::Sensitivity => match v.as_array() {
                 None => fail(loc, "list_type", "Input should be a valid list"),
