@@ -162,7 +162,7 @@
 					</div>
 				{/each}
 			</div>
-			<div class="tip" aria-live="polite">
+			<div class="ltip" aria-live="polite">
 				{#if tip}
 					<i style="background:{TY[tip.span.type].c}"></i><b>{tip.g.label}</b>
 					<span class="num muted">{range(tip.g)}</span>
@@ -268,7 +268,7 @@
 		text-overflow: ellipsis;
 	}
 	.lname i,
-	.tip i,
+	.ltip i,
 	.llist i {
 		display: inline-block;
 		width: 8px;
@@ -334,7 +334,8 @@
 		outline: 2px solid var(--accent);
 		outline-offset: 2px;
 	}
-	.tip {
+	/* not `.tip`: app.css uses it for the floating chart tooltip */
+	.ltip {
 		display: flex;
 		gap: 8px;
 		align-items: center;
@@ -372,7 +373,7 @@
 	}
 	@media (max-width: 760px) {
 		.lgrid,
-		.tip {
+		.ltip {
 			display: none;
 		}
 		.llist {

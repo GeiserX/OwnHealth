@@ -54,7 +54,7 @@
 		// visit (slice 6): the day it happened, why, and where; it goes on the timeline on that day
 		visit: [['period_start', 'tl_f_day', 'date', true], ['reason_text', 'tl_f_reason', 'text', false], ['provider_name', 'tl_f_provider', 'text', false]]
 	};
-	const kindName = (k: EntryKind) => (k === 'visit' ? t('tl_k_visit') : t('me_k_' + k));
+	const kindName = (k: EntryKind) => (k === 'visit' ? t('h1_ty_visit') : t('me_k_' + k));
 	const today = new Date().toISOString().slice(0, 10);
 	const fresh = (k: EntryKind): Fields => (k === 'observation' ? { date: date ?? today, note } : k === 'medication' ? { kind: 'medication' } : {});
 	const fromRecord = (r: RecordOut): Fields => ({

@@ -13,7 +13,7 @@
 	let { profile, canWrite, onchange }: { profile: string; canWrite: boolean; onchange?: () => void } = $props();
 	type RK = Exclude<EntryKind, 'observation'>;
 	const KINDS: RK[] = ['medication', 'condition', 'allergy', 'immunization', 'visit'];
-	const kindName = (k: RK) => (k === 'visit' ? t('tl_k_visit') : t('me_k_' + k));
+	const kindName = (k: RK) => (k === 'visit' ? t('h1_ty_visit') : t('me_k_' + k));
 	let kind = $state<RK>('medication');
 	const recs = new Loader<RecordOut[]>();
 	let adding = $state(false);
