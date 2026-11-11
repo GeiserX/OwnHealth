@@ -1,5 +1,6 @@
-//! Migration 1120 (the ClinVar diff) on a 0.3.0 database: the 0.3.0 schema with the 0.3.0 demo seed,
-//! then the v0.3 migrations, then a ClinVar diff. Every profile's state_hash stays the same at each
+//! Migration 1120 (the ClinVar diff) on a populated database: every migration before it with the demo
+//! seed (the seed writes the current columns, so it needs the migrations it was written for), then
+//! 1120 and the rest, then a ClinVar diff. Every profile's state_hash stays the same at each
 //! step: no ClinVar snapshot or event enters the hashed state body. Then a profile with snapshots
 //! and events is deleted. All data is synthetic.
 
@@ -12,8 +13,8 @@ use ownhealth_core::testing::TestDb;
 use sqlx::PgConnection;
 use sqlx::types::Uuid;
 
-/// The last migration 0.3.0 shipped.
-const V030: i32 = 1052;
+/// The ClinVar diff's migration.
+const CLINVAR: i32 = 1120;
 
 async fn hashes(
     conn: &mut PgConnection,
@@ -45,8 +46,8 @@ async fn a_030_database_migrates_diffs_clinvar_and_deletes_a_profile_with_every_
     ownhealth::register_lanes();
     let db = TestDb::empty().await?;
     let all = embedded()?;
-    let old: Vec<_> = all.iter().filter(|m| m.version <= V030).cloned().collect();
-    assert!(old.len() < all.len(), "1120 is not among the 0.3.0 files");
+    let old: Vec<_> = all.iter().filter(|m| m.version < CLINVAR).cloned().collect();
+    assert!(old.len() < all.len(), "1120 is not among the migrations");
     migrate(&db.pool, &old).await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
