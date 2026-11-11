@@ -15,6 +15,7 @@ server/vendor/
 # Runtime data and secrets. data/ holds the shipped reference files; a server started from the repo
 # root or server/ keeps its own files in ./data, which stay out of git.
 /data/*
+!/data/family/
 !/data/genome-facts/
 !/data/genome/
 !/data/prevention/

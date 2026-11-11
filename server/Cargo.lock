@@ -3813,6 +3813,7 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
+ "zip 9.4.2",
 ]
 
 [[package]]
@@ -3881,6 +3882,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.11.1",
  "sqlx",
  "subtle",

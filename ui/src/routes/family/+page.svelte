@@ -13,6 +13,7 @@
 	import { copyText } from '#lib/logic/inbox';
 	import { foreignOrigin, matrixHeads, matrixRowLabel, nameTaken, todayIso } from '#lib/logic/people';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
+	import Pedigree from '#lib/components/Pedigree.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { roleCell } from '#lib/logic/grants';
 	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
@@ -210,10 +211,8 @@
 
 <div class="fam">
 	<div class="grid" style="align-content:start">
-		<div class="card">
-			<h3>{t('h1_pedigree')}<span class="r">{t('h1_pedigree_r')}</span></h3>
-			<div class="empty"><PhaseChip phase="v0.3" /> {t('h1_pedigree_d')}</div>
-		</div>
+		<!-- keyed: a drawer left open for one profile must never save under the next one -->
+		{#if onScreen}{#key onScreen.slug}<Pedigree profile={onScreen} {profiles} />{/key}{/if}
 	</div>
 	<div class="grid" style="align-content:start">
 		<div class="card">
