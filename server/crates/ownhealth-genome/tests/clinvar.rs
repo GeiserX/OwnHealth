@@ -215,17 +215,26 @@ async fn alerts_of(c: &mut PgConnection, profile: Uuid) -> anyhow::Result<Vec<Va
     .await?)
 }
 
-fn alert_for<'a>(items: &'a [Value], event: &str) -> Vec<&'a Value> {
-    items.iter().filter(|p| p["event"] == event).collect()
+/// The review items of one event kind, found through genome_event: the item itself does not say.
+async fn alert_for(c: &mut PgConnection, profile: Uuid, kind: &str) -> anyhow::Result<Vec<Value>> {
+    Ok(sqlx::query_scalar(
+        "select r.payload from review_item r join genome_event g on g.id = r.ref_id \
+         where r.kind = 'genome_reinterpretation' and r.profile_id = $1 and g.kind = $2 order by g.release_to",
+    )
+    .bind(profile)
+    .bind(kind)
+    .fetch_all(c)
+    .await?)
 }
 
-/// A review payload names no gene, VariationID or class: the reader's gate decides that at read time.
+/// A review payload names no gene, VariationID, class or the way the class moved: the reader's gate
+/// decides that at read time.
 fn names_nothing(item: &Value, words: &[&str]) {
-    for key in ["gene", "variation_id", "from", "to"] {
+    for key in ["gene", "variation_id", "from", "to", "event"] {
         assert!(item.get(key).is_none(), "{key} in {item}");
     }
     let text = item.to_string();
-    for w in words {
+    for w in words.iter().copied().chain(clinvar::EVENT_KINDS) {
         assert!(!text.contains(w), "{w} in {text}");
     }
 }
@@ -320,7 +329,7 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
 
     let items = alerts_of(&mut c, alex).await?;
     assert_eq!(items.len(), 4);
-    let sf = alert_for(&items, "vus_resolved");
+    let sf = alert_for(&mut c, alex, "vus_resolved").await?;
     assert_eq!(sf.len(), 1);
     assert_eq!(sf[0]["withheld"], true);
     assert_eq!(sf[0]["summary"], "A withheld result changed in ClinVar.");
@@ -330,11 +339,18 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     );
     let text = sf[0].to_string();
     assert!(!text.contains("BRCA2") && !text.contains("900010"), "{text}");
-    let down = alert_for(&items, "downgraded_from_plp");
-    names_nothing(down[0], &["CFTR", "7105"]);
+    let down = alert_for(&mut c, alex, "downgraded_from_plp").await?;
+    names_nothing(&down[0], &["CFTR", "7105"]);
     for item in &items {
         names_nothing(item, &["MTHFR", "LCT", "BRCA2", "CFTR"]);
     }
+    // The item's reasons are as neutral as its payload.
+    let reasons: Vec<Vec<String>> =
+        sqlx::query_scalar("select reasons from review_item where kind = 'genome_reinterpretation'")
+            .fetch_all(&mut *c)
+            .await?;
+    assert_eq!(reasons.len(), 5, "{reasons:?}");
+    assert!(reasons.iter().all(|r| r == &["clinvar_change"]), "{reasons:?}");
 
     let sam = alerts_of(&mut c, e.profile("sam")).await?;
     assert_eq!(sam.len(), 1);
@@ -395,12 +411,11 @@ async fn an_sf_gene_is_named_once_the_sensitive_switch_is_on() -> R {
     let two = write_release(e.dir.path(), "two.vcf", "20261012", &release_two(), false)?;
     clinvar::diff_release(&e.db.pool, &e.blobs, &one, 18).await?;
     clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
-    let items = alerts_of(&mut c, e.profile("alex")).await?;
-    let sf = alert_for(&items, "vus_resolved");
+    let sf = alert_for(&mut c, e.profile("alex"), "vus_resolved").await?;
     assert_eq!(sf[0]["withheld"], false);
     // Even with the switch on the item names nothing: the switch can be turned off later, and the
     // reviewer may be a caregiver without read:genome.
-    names_nothing(sf[0], &["BRCA2", "900010"]);
+    names_nothing(&sf[0], &["BRCA2", "900010"]);
     Ok(())
 }
 
@@ -511,6 +526,32 @@ async fn one_unreadable_calls_vcf_does_not_stop_the_other_datasets() -> R {
 }
 
 #[tokio::test]
+async fn a_broken_release_stops_the_run_and_blames_no_genome() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_family(&e, &mut c).await?;
+    // A release whose last record is out of order, after a chrM record past every allele the family
+    // carries: each dataset stops reading before it, so only a full pass over the release sees it.
+    let path = write_release(e.dir.path(), "broken.vcf", "20261005", &release_one(), false)?;
+    let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
+    f.write_all(b"MT\t16000\t2\tA\tG\t.\t.\tCLNREVSTAT=no_assertion_provided;CLNSIG=Benign\n")?;
+    f.write_all(b"1\t1\t1\tA\tG\t.\t.\tCLNREVSTAT=no_assertion_provided;CLNSIG=Benign\n")?;
+    drop(f);
+    let r = clinvar::diff_release(&e.db.pool, &e.blobs, &path, 18).await;
+    let err = match r {
+        Ok(report) => anyhow::bail!("a broken release was accepted: {report:?}"),
+        Err(err) => err.to_string(),
+    };
+    assert!(err.contains("broken.vcf") && err.contains("not sorted"), "{err}");
+    assert!(events(&mut c).await?.is_empty());
+    let n: i64 = sqlx::query_scalar("select count(*) from clinvar_carried")
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(n, 0, "no dataset may take a broken release as its snapshot");
+    Ok(())
+}
+
+#[tokio::test]
 async fn one_change_alerts_once_when_a_profile_has_two_current_datasets() -> R {
     let e = env().await?;
     let mut c = e.conn().await?;
@@ -537,11 +578,8 @@ async fn one_change_alerts_once_when_a_profile_has_two_current_datasets() -> R {
         .filter(|x| x.variation_id == 900020)
         .collect();
     assert_eq!(lct.len(), 2, "{lct:?}");
-    let items = alerts_of(&mut c, e.profile("alex")).await?;
-    let lct_items: Vec<&Value> = items
-        .iter()
-        .filter(|p| p["event"] == "upgraded_to_plp" && p["release_to"] == "2026-10-12")
-        .collect();
+    let items = alert_for(&mut c, e.profile("alex"), "upgraded_to_plp").await?;
+    let lct_items: Vec<&Value> = items.iter().filter(|p| p["release_to"] == "2026-10-12").collect();
     assert_eq!(lct_items.len(), 1, "{items:?}");
     assert_eq!(lct_items[0]["unconfirmed"], false);
     Ok(())

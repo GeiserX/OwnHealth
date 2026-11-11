@@ -426,6 +426,21 @@ impl Alleles for VcfAlleles {
     }
 }
 
+/// A person's alleles that remember whether reading them failed, so a broken calls VCF is told apart
+/// from a broken release.
+struct Watched {
+    inner: Box<dyn Alleles>,
+    failed: bool,
+}
+
+impl Alleles for Watched {
+    fn next_allele(&mut self) -> Result<Option<(Key, String, String)>> {
+        let next = self.inner.next_allele();
+        self.failed |= next.is_err();
+        next
+    }
+}
+
 /// Merge-join a ClinVar release with one person's alleles, both sorted by position. Returns the
 /// release date and the records whose exact allele the person carries. Stops reading the release once
 /// the person's alleles run out.
@@ -628,8 +643,14 @@ pub async fn diff_release(
     release: &Path,
     default_age_of_majority: i32,
 ) -> Result<DiffReport> {
+    // Read the whole release once first: a release that is truncated, corrupt or out of order stops
+    // the run before any dataset is compared, so it is never reported as a broken genome.
     let path = release.to_path_buf();
-    let date = blocking(move || release_date(&path)).await?;
+    let date = blocking(move || {
+        let mut past_the_end = FactAlleles::new(vec![((u8::MAX, i64::MAX), String::new(), String::new())]);
+        carried_records(&path, &mut past_the_end).map(|(date, _)| date)
+    })
+    .await?;
     let mut conn = pool.acquire().await?;
     let datasets: Vec<DatasetRow> = sqlx::query_as(
         "select d.id, d.profile_id, p.household_id, p.slug, d.document_id, d.assay, d.db_versions, encode(d.vcf_blob, 'hex') as vcf \
@@ -642,23 +663,7 @@ pub async fn diff_release(
     drop(conn);
     let mut reports = Vec::new();
     for ds in datasets {
-        // One unreadable dataset must not stop the others; its transaction rolls back, so nothing
-        // partial is written. A database error still stops the run.
-        match diff_dataset(pool, blobs, release, date, &ds, default_age_of_majority).await {
-            Ok(r) => reports.push(r),
-            Err(e @ (Error::Db(_) | Error::Other(_))) => return Err(e),
-            Err(e) => reports.push(DatasetReport {
-                dataset_id: ds.id,
-                profile_id: ds.profile_id,
-                profile: ds.slug.clone(),
-                assay: ds.assay.clone(),
-                skipped: Some("unreadable"),
-                error: Some(e.to_string()),
-                carried: 0,
-                events: 0,
-                alerts: 0,
-            }),
-        }
+        reports.push(diff_dataset(pool, blobs, release, date, &ds, default_age_of_majority).await?);
     }
     Ok(DiffReport {
         release: date,
@@ -707,24 +712,46 @@ async fn diff_dataset(
     }
     let sites = fact_sites(&mut tx, ds.id).await?;
     let label = format!("the calls VCF of dataset {}", ds.id);
-    let vcf_path: Option<PathBuf> = match &ds.vcf {
-        Some(sha) => Some(blobs.path(sha).map_err(|e| bad_file(&label, e))?),
-        None => None,
-    };
+    let vcf_path: Result<Option<PathBuf>> = ds
+        .vcf
+        .as_ref()
+        .map(|sha| blobs.path(sha).map_err(|e| bad_file(&label, e)))
+        .transpose();
     let fact_alleles: Vec<(Key, String, String)> = sites
         .iter()
         .filter(|s| s.alt_called)
         .map(|s| (s.key, s.alleles.0.clone(), s.alleles.1.clone()))
         .collect();
     let rel = release.to_path_buf();
-    let (_, carried) = blocking(move || {
-        let mut person: Box<dyn Alleles> = match vcf_path {
-            Some(p) => Box::new(VcfAlleles::open(&p, &label)?),
-            None => Box::new(FactAlleles::new(fact_alleles)),
+    // The outer error is the release's and stops the run; the inner one is this dataset's calls VCF,
+    // which must not stop the other datasets.
+    let read = blocking(move || -> Result<Result<Vec<Carried>>> {
+        let person: Box<dyn Alleles> = match vcf_path.and_then(|p| p.map(|p| VcfAlleles::open(&p, &label)).transpose())
+        {
+            Ok(Some(v)) => Box::new(v),
+            Ok(None) => Box::new(FactAlleles::new(fact_alleles)),
+            Err(e) => return Ok(Err(e)),
         };
-        carried_records(&rel, person.as_mut())
+        let mut person = Watched {
+            inner: person,
+            failed: false,
+        };
+        match carried_records(&rel, &mut person) {
+            Ok((_, carried)) => Ok(Ok(carried)),
+            Err(e) if person.failed => Ok(Err(e)),
+            Err(e) => Err(e),
+        }
     })
     .await?;
+    let carried = match read {
+        Ok(carried) => carried,
+        // Nothing was written yet, and the transaction rolls back when dropped.
+        Err(e) => {
+            report.skipped = Some("unreadable");
+            report.error = Some(e.to_string());
+            return Ok(report);
+        }
+    };
     report.carried = carried.len();
 
     let prev: HashMap<i64, (String, i16)> = sqlx::query_as::<_, (i64, String, i16)>(
@@ -848,11 +875,11 @@ async fn diff_dataset(
         }
         report.alerts += 1;
         let withheld = minor_gated || (sensitive && !profile.genome_sensitive_ui);
-        // Nothing that names the variant goes into the payload: a reviewer may lack read:genome or
-        // read:sensitive, and the subject's switch may change later.
+        // Nothing that names the variant or the way its class moved goes into the item: a reviewer
+        // may lack read:genome or read:sensitive, and the subject's switch may change later. The kind
+        // stays on genome_event, read through the gated events route by event_id.
         let payload = json!({
             "event_id": event_id,
-            "event": kind,
             "withheld": withheld,
             "unconfirmed": unconfirmed,
             "summary": review_summary(withheld, unconfirmed, "en"),
@@ -867,7 +894,7 @@ async fn diff_dataset(
                 household_id: Some(ds.household_id),
                 profile_id: Some(ds.profile_id),
                 payload,
-                reasons: vec![kind.to_string()],
+                reasons: vec!["clinvar_change".into()],
                 ref_table: Some("genome_event".into()),
                 ref_id: Some(event_id),
                 document_id: ds.document_id,

@@ -266,8 +266,24 @@ async fn a_caregiver_without_read_genome_sees_no_gene_in_the_review_queue() -> R
     assert_eq!(status, StatusCode::OK, "{body}");
     let items = body["items"].as_array().cloned().unwrap_or_default();
     assert!(!items.is_empty(), "{body}");
-    for leak in ["CFTR", "7105", "APOE", "17864"] {
+    // Nor which way the class moved: that alone would say Carmen carries a pathogenic variant.
+    for leak in ["CFTR", "7105", "APOE", "17864"]
+        .into_iter()
+        .chain(clinvar::EVENT_KINDS)
+    {
         assert!(!body.to_string().contains(leak), "{leak} in {body}");
+    }
+    // The single-item view says no more than the list.
+    for item in &items {
+        let id = item["id"].as_str().unwrap_or_default();
+        let (status, one) = e.get("alex", &format!("/api/review/{id}")).await?;
+        assert_eq!(status, StatusCode::OK, "{one}");
+        for leak in ["CFTR", "7105", "APOE", "17864"]
+            .into_iter()
+            .chain(clinvar::EVENT_KINDS)
+        {
+            assert!(!one.to_string().contains(leak), "{leak} in {one}");
+        }
     }
     Ok(())
 }
