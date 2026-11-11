@@ -197,7 +197,7 @@ impl Services for Lanes {
                 as_of: Some(q.as_of),
             };
             let mut found = ownhealth_genome::list_findings(&mut *conn, profile_id, gate, &lane_q).await?;
-            ownhealth_genome::clinvar::attach_now(conn, profile_id, q.as_of, &mut found).await?;
+            ownhealth_genome::clinvar::attach_now(conn, profile_id, q.as_of, gate, &mut found).await?;
             Ok(found)
         })
     }

@@ -930,14 +930,15 @@ async fn diff_dataset(
 /// `clinvar_now` for the findings of one profile: per ClinVar VariationID, the classification in the
 /// newest release compared, from the snapshots of current datasets whose file is not retracted. Only
 /// a snapshot whose release is on or before `as_of` counts: the store did not know a later one on
-/// that date. Only our own class vocabulary is given, never the release's free text.
+/// that date. Only our own class vocabulary is given, never the release's free text; the record's gene
+/// rides beside it for the reader's gate and is never shown.
 pub async fn now_by_variation(
     conn: &mut PgConnection,
     profile_id: Uuid,
     as_of: NaiveDate,
-) -> Result<HashMap<i64, Value>> {
-    let rows: Vec<(i64, String, i16, NaiveDate)> = sqlx::query_as(
-        "select c.variation_id, c.significance, c.stars, c.release_date from clinvar_carried c \
+) -> Result<HashMap<i64, (Value, Option<String>)>> {
+    let rows: Vec<(i64, String, i16, NaiveDate, Option<String>)> = sqlx::query_as(
+        "select c.variation_id, c.significance, c.stars, c.release_date, c.gene from clinvar_carried c \
          join genome_dataset d on d.id = c.dataset_id where d.profile_id = $1 and d.status = 'current' \
          and not exists (select 1 from document doc where doc.id = d.document_id and doc.status = 'retracted') \
          and c.release_date <= $2 order by c.release_date, c.variation_id",
@@ -948,21 +949,22 @@ pub async fn now_by_variation(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(v, sig, stars, date)| {
-            (
-                v,
-                json!({"class": class_of(&sig), "stars": stars, "release": date.to_string()}),
-            )
+        .map(|(v, sig, stars, date, gene)| {
+            let now = json!({"class": class_of(&sig), "stars": stars, "release": date.to_string()});
+            (v, (now, gene))
         })
         .collect())
 }
 
 /// Add `clinvar_now` to every finding in a `Findings` JSON whose `clinvar.variation_id` is in a
-/// snapshot known at `as_of`. Findings with nothing compared yet stay as they are.
+/// snapshot known at `as_of`. Findings with nothing compared yet stay as they are. The record passes
+/// the reader's gate as its event does: a sensitive gene (ClinVar's or at the cited position) needs
+/// the sensitive switch, and a minor sees no sensitive or carrier-panel record.
 pub async fn attach_now(
     conn: &mut PgConnection,
     profile_id: Uuid,
     as_of: NaiveDate,
+    gate: &crate::Gate,
     findings: &mut Value,
 ) -> Result<()> {
     let now = now_by_variation(conn, profile_id, as_of).await?;
@@ -975,9 +977,26 @@ pub async fn attach_now(
         .into_iter()
         .flatten()
     {
-        let vid = f.pointer("/clinvar/variation_id").and_then(Value::as_i64);
-        if let (Some(v), Some(o)) = (vid.and_then(|v| now.get(&v)), f.as_object_mut()) {
-            o.insert("clinvar_now".into(), v.clone());
+        let Some(vid) = f.pointer("/clinvar/variation_id").and_then(Value::as_i64) else {
+            continue;
+        };
+        let Some((value, gene)) = now.get(&vid) else {
+            continue;
+        };
+        let site = f["variants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|v| v["clinvar_variation_id"].as_i64() == Some(vid));
+        let chrom = site.and_then(|v| v["chrom"].as_str()).unwrap_or_default();
+        let pos = site.and_then(|v| v["pos"].as_i64()).unwrap_or_default();
+        let sensitive = is_sensitive_gene(gene.as_deref()) || sensitive_gene_at(chrom, pos).is_some();
+        let carrier = !carrier_spans_overlapping(chrom, pos, pos).is_empty();
+        if (sensitive && !gate.sensitive) || (gate.minor && (sensitive || carrier)) {
+            continue;
+        }
+        if let Some(o) = f.as_object_mut() {
+            o.insert("clinvar_now".into(), value.clone());
         }
     }
     Ok(())

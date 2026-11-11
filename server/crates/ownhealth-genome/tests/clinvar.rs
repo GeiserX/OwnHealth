@@ -371,19 +371,38 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
 
     // get_genome_findings' clinvar_now: the CFTR finding now reads what release two says.
     let mut found = list_findings(&mut c, alex, &Gate::new(false, false), &FindingsQuery::default()).await?;
-    clinvar::attach_now(&mut c, alex, date(b), &mut found).await?;
-    let cftr = found["findings"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|f| f["gene"] == "CFTR")
-        .cloned()
-        .unwrap_or_default();
+    clinvar::attach_now(&mut c, alex, date(b), &Gate::new(false, false), &mut found).await?;
+    let cftr_of = |found: &Value| {
+        found["findings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|f| f["gene"] == "CFTR")
+            .cloned()
+            .unwrap_or_default()
+    };
     // Only our own class vocabulary reaches an agent, never the release's free text.
-    assert_eq!(cftr["clinvar_now"], json!({"class": "vus", "stars": 1, "release": b}));
+    assert_eq!(
+        cftr_of(&found)["clinvar_now"],
+        json!({"class": "vus", "stars": 1, "release": b})
+    );
+    // A carried record ClinVar files under a sensitive gene stays behind the reader's gate, as its
+    // event does, even when the finding citing it is not sensitive.
+    sqlx::query("update clinvar_carried set gene = 'BRCA2' where variation_id = 7105")
+        .execute(&mut *c)
+        .await?;
+    for (include_sensitive, shown) in [(false, false), (true, true)] {
+        let gate = Gate::new(include_sensitive, false);
+        let mut found = list_findings(&mut c, alex, &gate, &FindingsQuery::default()).await?;
+        clinvar::attach_now(&mut c, alex, date(b), &gate, &mut found).await?;
+        assert_eq!(cftr_of(&found).get("clinvar_now").is_some(), shown, "{found}");
+    }
+    sqlx::query("update clinvar_carried set gene = 'CFTR' where variation_id = 7105")
+        .execute(&mut *c)
+        .await?;
     // An as_of before the release compared knows nothing of it.
     let mut past = list_findings(&mut c, alex, &Gate::new(false, false), &FindingsQuery::default()).await?;
-    clinvar::attach_now(&mut c, alex, date("2026-10-11"), &mut past).await?;
+    clinvar::attach_now(&mut c, alex, date("2026-10-11"), &Gate::new(false, false), &mut past).await?;
     assert!(!past.to_string().contains("clinvar_now"), "{past}");
     // A retracted genome file's snapshot no longer feeds clinvar_now, as it feeds no event.
     sqlx::query(
