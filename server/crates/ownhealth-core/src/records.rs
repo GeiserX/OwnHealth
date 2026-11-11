@@ -118,6 +118,27 @@ pub struct MedicationIn {
     pub med_status: String,
     #[serde(default)]
     pub reason_text: Option<String>,
+    // Migration 1100. Left out of the column list when absent, so a row without them is written as
+    // before and reads them as null.
+    /// When it is taken, as written ("twice daily").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_text: Option<String>,
+    /// Who prescribed it, as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prescriber: Option<String>,
+    /// Every coding the source sent, as received. The primary code stays in `code_system`/`code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codes: Option<Vec<MedCode>>,
+}
+
+/// One coding of a medicine as the source sent it (system URL, code, display).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MedCode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -255,6 +276,9 @@ impl RecordIn {
             ),
             RecordIn::Medication(m) => {
                 check("kind", &m.kind, &["medication", "supplement"])?;
+                if m.codes.iter().flatten().any(|c| c.code.trim().is_empty()) {
+                    return Err(Error::Invalid("codes: a coding needs a code".into()));
+                }
                 check("med_status", &m.med_status, &["active", "stopped", "on_hold"])
             }
             RecordIn::Allergy(a) => match &a.criticality {
@@ -301,6 +325,7 @@ fn sql_type(column: &str) -> &'static str {
         "sensitivity" => "text[]",
         "onset" | "abatement" | "started" | "stopped" | "occurred" | "performed" => "date",
         "dose_number" => "int",
+        "codes" => "jsonb",
         _ => "text",
     }
 }
@@ -351,6 +376,7 @@ pub async fn add_record(
         .iter()
         .map(|c| match sql_type(c) {
             "text[]" => format!("array(select jsonb_array_elements_text($1->'{c}'))"),
+            "jsonb" => format!("$1->'{c}'"),
             t => format!("($1->>'{c}')::{t}"),
         })
         .collect();

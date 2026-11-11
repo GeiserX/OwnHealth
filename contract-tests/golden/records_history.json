@@ -5,6 +5,7 @@
         "accepted_by": "=person",
         "code": "null",
         "code_system": "null",
+        "codes": "null",
         "dose_text": {
           "|": [
             "null",
@@ -16,7 +17,9 @@
         "kind": "=medication",
         "med_status": "string",
         "name": "string",
+        "prescriber": "null",
         "reason_text": "null",
+        "schedule_text": "null",
         "sensitivity": {
           "[]": "empty"
         },

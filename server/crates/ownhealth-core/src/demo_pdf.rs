@@ -1,9 +1,10 @@
-//! A tiny PDF writer for synthetic lab reports (demo seed and tests), byte for byte the output of
-//! `demo/pdf.py`. Text layer only, Helvetica. It knows where it drew each row, so the bboxes it
-//! returns match the page (PDF points, origin top-left).
+//! Synthetic lab reports for the demo seed and the tests. They share `pdfwrite`'s text operator and
+//! file assembly, and stay byte for byte the output of `demo/pdf.py`. It knows where it drew each
+//! row, so the bboxes it returns match the page (PDF points, origin top-left).
 
-pub const PAGE_W: f64 = 595.0;
-pub const PAGE_H: f64 = 842.0;
+use crate::afm;
+pub use crate::pdfwrite::{PAGE_H, PAGE_W};
+use crate::pdfwrite::{assemble, show};
 /// name, value, unit, range, flag
 pub const COLS: [f64; 5] = [56.0, 300.0, 352.0, 430.0, 515.0];
 pub const ROW_H: f64 = 16.0;
@@ -52,60 +53,10 @@ pub struct LabReport<'a> {
     pub pages: Vec<Vec<LabRow>>,
 }
 
-/// Python `s.encode("cp1252", errors="replace")`.
-fn cp1252(s: &str) -> Vec<u8> {
-    const HIGH: [(char, u8); 27] = [
-        ('€', 0x80),
-        ('‚', 0x82),
-        ('ƒ', 0x83),
-        ('„', 0x84),
-        ('…', 0x85),
-        ('†', 0x86),
-        ('‡', 0x87),
-        ('ˆ', 0x88),
-        ('‰', 0x89),
-        ('Š', 0x8A),
-        ('‹', 0x8B),
-        ('Œ', 0x8C),
-        ('Ž', 0x8E),
-        ('‘', 0x91),
-        ('’', 0x92),
-        ('“', 0x93),
-        ('”', 0x94),
-        ('•', 0x95),
-        ('–', 0x96),
-        ('—', 0x97),
-        ('˜', 0x98),
-        ('™', 0x99),
-        ('š', 0x9A),
-        ('›', 0x9B),
-        ('œ', 0x9C),
-        ('ž', 0x9E),
-        ('Ÿ', 0x9F),
-    ];
-    s.chars()
-        .map(|c| match c as u32 {
-            0..=0x7F | 0xA0..=0xFF => c as u8,
-            _ => HIGH.iter().find(|(h, _)| *h == c).map_or(b'?', |(_, b)| *b),
-        })
-        .collect()
-}
-
-fn esc(s: &str) -> Vec<u8> {
-    let mut out = Vec::new();
-    for b in cp1252(s) {
-        if matches!(b, b'\\' | b'(' | b')') {
-            out.push(b'\\');
-        }
-        out.push(b);
-    }
-    out
-}
-
+/// Python `s.encode("cp1252", errors="replace")`: the demo never folds, so its bytes stay Python's.
 fn text(out: &mut Vec<u8>, x: f64, y: f64, s: &str, font: &str, size: f64) {
-    out.extend_from_slice(format!("BT /{font} {size:.1} Tf {x:.2} {y:.2} Td (").as_bytes());
-    out.extend_from_slice(&esc(s));
-    out.extend_from_slice(b") Tj ET\n");
+    let bytes: Vec<u8> = s.chars().map(|c| afm::cp1252(c).unwrap_or(b'?')).collect();
+    show(out, x, y, &bytes, font, size);
 }
 
 fn width(s: &str) -> f64 {
@@ -184,55 +135,5 @@ pub fn lab_report_pdf(r: &LabReport<'_>) -> (Vec<u8>, Vec<Vec<BBox>>) {
         streams.push(out);
         boxes.push(page_boxes);
     }
-    (assemble(&streams), boxes)
-}
-
-fn assemble(streams: &[Vec<u8>]) -> Vec<u8> {
-    let n = streams.len();
-    // objects: 1 catalog, 2 pages, 3 font F1, 4 font F2, then per page: page obj, content obj
-    let kids = (0..n)
-        .map(|i| format!("{} 0 R", 5 + 2 * i))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut objs: Vec<Vec<u8>> = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        format!("<< /Type /Pages /Kids [{kids}] /Count {n} >>").into_bytes(),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>".to_vec(),
-    ];
-    for (i, stream) in streams.iter().enumerate() {
-        let content_ref = 6 + 2 * i;
-        objs.push(
-            format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W:.0} {PAGE_H:.0}] \
-                 /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_ref} 0 R >>"
-            )
-            .into_bytes(),
-        );
-        let mut body = format!("<< /Length {} >>\nstream\n", stream.len()).into_bytes();
-        body.extend_from_slice(stream);
-        body.extend_from_slice(b"endstream");
-        objs.push(body);
-    }
-    let mut out: Vec<u8> = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
-    let mut offsets = Vec::new();
-    for (num, body) in objs.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n", num + 1).as_bytes());
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\nendobj\n");
-    }
-    let xref = out.len();
-    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
-    for off in offsets {
-        out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
-    }
-    out.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-            objs.len() + 1
-        )
-        .as_bytes(),
-    );
-    out
+    (assemble(&streams, false), boxes)
 }

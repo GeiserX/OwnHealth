@@ -196,17 +196,45 @@ pub fn medication_statement(m: &MedicationIn) -> Value {
         .flatten()
         .filter(|x| !x.is_empty())
         .collect();
+    let primary_system = system_url(m.code_system.as_deref());
+    let mut concept = code(primary_system.as_deref(), m.code.as_deref(), &display.join(" "));
+    // Every other coding the source sent, after the primary one, as received.
+    let extra: Vec<Value> = m
+        .codes
+        .iter()
+        .flatten()
+        .filter(|c| !(Some(c.code.as_str()) == m.code.as_deref() && c.system == primary_system))
+        .map(|c| {
+            drop_none(vec![
+                ("system", s(c.system.as_deref())),
+                ("code", s(Some(&c.code))),
+                ("display", s(c.display.as_deref())),
+            ])
+        })
+        .collect();
+    if !extra.is_empty()
+        && let Some(obj) = concept.as_object_mut()
+    {
+        let mut coding = obj.get("coding").and_then(Value::as_array).cloned().unwrap_or_default();
+        coding.extend(extra);
+        let text = obj.shift_remove("text");
+        obj.insert("coding".into(), Value::Array(coding));
+        if let Some(t) = text {
+            obj.insert("text".into(), t);
+        }
+    }
+    let text = |v: Option<&str>| v.filter(|x| !x.is_empty()).map(|x| x.to_string());
+    let dosage = drop_none(vec![
+        ("text", s(text(m.dose_text.as_deref()).as_deref())),
+        (
+            "timing",
+            text(m.schedule_text.as_deref()).map_or(Value::Null, |t| json!({"code": {"text": t}})),
+        ),
+    ]);
     drop_none(vec![
         ("resourceType", json!("MedicationStatement")),
         ("status", json!(status)),
-        (
-            "medicationCodeableConcept",
-            code(
-                system_url(m.code_system.as_deref()).as_deref(),
-                m.code.as_deref(),
-                &display.join(" "),
-            ),
-        ),
+        ("medicationCodeableConcept", concept),
         (
             "effectivePeriod",
             drop_none(vec![
@@ -216,10 +244,19 @@ pub fn medication_statement(m: &MedicationIn) -> Value {
         ),
         (
             "dosage",
-            m.dose_text
-                .as_deref()
-                .filter(|d| !d.is_empty())
-                .map_or(Value::Null, |d| json!([{"text": d}])),
+            if dosage.as_object().is_none_or(Map::is_empty) {
+                Value::Null
+            } else {
+                Value::Array(vec![dosage])
+            },
+        ),
+        (
+            "informationSource",
+            text(m.prescriber.as_deref()).map_or(Value::Null, |p| json!({"display": p})),
+        ),
+        (
+            "reasonCode",
+            text(m.reason_text.as_deref()).map_or(Value::Null, |r| json!([{"text": r}])),
         ),
         (
             "category",
