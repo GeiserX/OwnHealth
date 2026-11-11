@@ -1362,6 +1362,7 @@ export const dict = {
 		fam_masked_d: "Linked to a profile whose records you cannot read, so it shows no name, years or conditions.",
 		fam_masked_rm: "You can still remove it from this family history.",
 		fam_swipe: "Swipe sideways to see the whole tree.",
+		med_dpwg_from_file: "Quoted from the genome file as received, for the genotype phenotype.",
 	},
 	es: {
 		household: "Hogar",
@@ -2723,6 +2724,7 @@ export const dict = {
 		fam_masked_d: "Enlazado a un perfil cuyo historial no puedes leer: no muestra nombre, años ni enfermedades.",
 		fam_masked_rm: "Aun así, puedes quitarlo de este historial familiar.",
 		fam_swipe: "Desliza de lado para ver el árbol entero.",
+		med_dpwg_from_file: "Citado del archivo genómico tal como llegó, para el fenotipo por genotipo.",
 	},
 } as const;
 
