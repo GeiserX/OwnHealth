@@ -323,7 +323,7 @@ fn the_shipped_files_load_and_every_row_is_cited() -> R {
 fn the_loader_refuses_each_broken_file() -> R {
     let pack = load_pack()?;
     let cite = "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/breast-cancer-screening";
-    let cases: [(&str, &str, &str, String, &str); 7] = [
+    let cases: [(&str, &str, &str, String, &str); 12] = [
         (
             "http cite",
             "us.yaml",
@@ -372,6 +372,35 @@ fn the_loader_refuses_each_broken_file() -> R {
             "pack_rule: infect.hcv.once_adult",
             "pack_rule: infect.hcv.twice".into(),
             "not a never_measured or recency rule",
+        ),
+        (
+            "an unreadable end age",
+            "es.yaml",
+            "ages: [35, 65]",
+            "ages: [35, sixty]".into(),
+            "end age",
+        ),
+        (
+            "an end age below the start",
+            "es.yaml",
+            "ages: [25, 34]",
+            "ages: [25, 20]".into(),
+            "end age",
+        ),
+        ("a zero interval", "es.yaml", "months: 36", "months: 0".into(), "months"),
+        (
+            "an unreadable group interval",
+            "es.yaml",
+            "interval_for: {colonoscopy: 180}",
+            "interval_for: {colonoscopy: soon}".into(),
+            "interval_for",
+        ),
+        (
+            "a group interval outside the evidence",
+            "es.yaml",
+            "interval_for: {colonoscopy: 180}",
+            "interval_for: {hpv_test: 180}".into(),
+            "interval_for",
         ),
     ];
     for (what, file, from, to, reason) in cases {
@@ -588,7 +617,8 @@ async fn the_dashboard_names_the_scope_the_due_card_lacks() -> R {
 }
 
 /// The cited schedules list a conjugate pneumococcal vaccine and the recombinant zoster vaccine: a
-/// polysaccharide dose (CVX 33) or live zoster doses (CVX 121) do not count, and are listed instead.
+/// polysaccharide dose (CVX 33) or live zoster doses (CVX 121) do not count, and are listed instead,
+/// even when their names read like the group's.
 #[tokio::test]
 async fn ppsv23_and_live_zoster_do_not_count() -> R {
     let s = seeded().await?;
@@ -598,6 +628,9 @@ async fn ppsv23_and_live_zoster_do_not_count() -> R {
         ("PPSV23", "33", "2026-01-05"),
         ("Zostavax", "121", "2025-01-05"),
         ("Zostavax", "121", "2025-06-05"),
+        ("Pneumococcal polysaccharide vaccine", "33", "2026-02-05"),
+        ("Zoster vaccine live", "121", "2025-02-05"),
+        ("Zoster vaccine live", "121", "2025-07-05"),
     ] {
         record(
             &mut tx,
@@ -615,7 +648,18 @@ async fn ppsv23_and_live_zoster_do_not_count() -> R {
         .flatten()
         .filter_map(|u| u["name"].as_str())
         .collect();
-    assert_eq!(unmatched, ["Zostavax", "Zostavax", "PPSV23"], "{doc}");
+    assert_eq!(
+        unmatched,
+        [
+            "Zostavax",
+            "Zoster vaccine live",
+            "Zostavax",
+            "Zoster vaccine live",
+            "PPSV23",
+            "Pneumococcal polysaccharide vaccine"
+        ],
+        "{doc}"
+    );
     tx.rollback().await?;
     Ok(())
 }

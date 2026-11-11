@@ -97,6 +97,8 @@ pub struct Group {
     pub aliases: Vec<Vec<String>>,
     pub snomed: Vec<String>,
     pub cvx: Vec<String>,
+    /// CVX codes that never count for the group, even when the record's name matches.
+    pub cvx_not: Vec<String>,
     pub loinc: Vec<String>,
     pub alias_groups: Vec<String>,
     pub name: Value,
@@ -170,7 +172,12 @@ fn parse_vaccines(file: &str, tsv: &str) -> std::result::Result<Vec<Group>, Cite
             id: id.trim().to_string(),
             vaccine: true,
             aliases: split(en).iter().chain(&split(es)).map(|a| words(a)).collect(),
-            cvx: split(cvx),
+            cvx: split(cvx).into_iter().filter(|c| !c.starts_with('!')).collect(),
+            cvx_not: split(cvx)
+                .iter()
+                .filter_map(|c| c.strip_prefix('!'))
+                .map(str::to_string)
+                .collect(),
             name: json!({"en": label_en.trim(), "es": label_es.trim()}),
             ..Group::default()
         });
@@ -238,7 +245,14 @@ fn parse_row(
         .first()
         .and_then(|v| age(Some(v)))
         .ok_or_else(|| e("no start age"))?;
-    let to = ages.get(1).and_then(|v| age(Some(v)));
+    let to = match ages.get(1) {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            age(Some(v))
+                .filter(|t| *t >= from)
+                .ok_or_else(|| e("end age is not a whole year from the start age on"))?,
+        ),
+    };
     let evidence = strings(r.get("evidence"));
     if evidence.is_empty() {
         return Err(e("no evidence groups"));
@@ -246,16 +260,22 @@ fn parse_row(
     if let Some(g) = evidence.iter().find(|g| !groups.contains_key(*g)) {
         return Err(e(&format!("unknown evidence group {g}")));
     }
-    let months = int(r.get("months")).and_then(|m| u32::try_from(m).ok());
-    let interval_for: HashMap<String, u32> = r
-        .get("interval_for")
-        .and_then(Value::as_object)
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| int(Some(v)).and_then(|n| u32::try_from(n).ok()).map(|n| (k.clone(), n)))
-                .collect()
-        })
-        .unwrap_or_default();
+    let positive = |v: &Value| int(Some(v)).and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0);
+    let months = match r.get("months") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(positive(v).ok_or_else(|| e("months is not a whole number above 0"))?),
+    };
+    let mut interval_for = HashMap::new();
+    if let Some(v) = r.get("interval_for").filter(|v| !v.is_null()) {
+        let m = v.as_object().ok_or_else(|| e("interval_for is not a map"))?;
+        for (k, v) in m {
+            if !evidence.contains(k) {
+                return Err(e(&format!("interval_for names {k}, which is not in its evidence")));
+            }
+            let n = positive(v).ok_or_else(|| e(&format!("interval_for {k} is not a whole number above 0")))?;
+            interval_for.insert(k.clone(), n);
+        }
+    }
     let doses = int(r.get("doses")).and_then(|n| usize::try_from(n).ok());
     let gap_days = int(r.get("gap_days"));
     let season_start = r.get("season_start").and_then(Value::as_str).and_then(|s| {
@@ -492,7 +512,8 @@ async fn facts(
         let hits: Vec<&&Group> = vaccines
             .iter()
             .filter(|g| {
-                (cvx && code.as_ref().is_some_and(|c| g.cvx.contains(c))) || g.aliases.iter().any(|a| holds(&w, a))
+                let coded = |list: &Vec<String>| cvx && code.as_ref().is_some_and(|c| list.contains(c));
+                !coded(&g.cvx_not) && (coded(&g.cvx) || g.aliases.iter().any(|a| holds(&w, a)))
             })
             .collect();
         if hits.is_empty() {
