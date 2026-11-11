@@ -12,6 +12,7 @@
 //! language, unit preference, identity mode and the caller are not inputs, so every token sees the
 //! same `state_hash` for the same data.
 
+pub mod cited;
 pub mod drugs;
 pub mod engine;
 pub mod genome;

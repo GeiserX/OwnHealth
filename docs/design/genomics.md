@@ -2,7 +2,7 @@
 
 Genome findings come from [OwnGenome](https://github.com/GeiserX/OwnGenome), our sibling project in the Own* family. It runs a whole-genome or chip analysis on your own hardware and writes the results to files. OwnHealth ingests its `genome-facts.json` and serves it next to your labs and medications. If you have a genome or a chip file and no findings yet, run OwnGenome first.
 
-Status: design, pre-alpha. This page says how genome data enters OwnHealth, how it is stored, what the web page and the MCP server return, and what we will not do. Phases follow the [roadmap](../ROADMAP.md): v0.1 (facts ingest, VCF lookups, `check_drug` with PGx, current medications and labs), v0.3 (chip input, ClinVar diff, `check_drug` widened, CPIC/PharmCAT staleness, relatedness QC, family view), v1.0 (per-profile keys), v2 (FHIR Genomics Reporting export), moonshots (Phenopackets).
+Status: design, pre-alpha. This page says how genome data enters OwnHealth, how it is stored, what the web page and the MCP server return, and what we will not do. Phases follow the [roadmap](../ROADMAP.md): v0.1 (facts ingest, VCF lookups, `check_drug` with PGx, current medications and labs), v0.3 (chip input, ClinVar diff, `check_drug` widened, CPIC/PharmCAT staleness, family view), v1.0 (per-profile keys), v2 (relatedness QC across profiles, FHIR Genomics Reporting export), moonshots (Phenopackets).
 
 ## 1. Division of labour
 
@@ -476,7 +476,7 @@ Each relative's genome stays in their own profile. Nothing crosses profiles with
 
 - **Carrier couple screen.** When two profiles are partners in the pedigree and both granted `carrier` to each other, OwnHealth joins their carrier facts by gene: shared AR gene (1 in 4 per pregnancy when both heterozygous), X-linked findings from either partner, and one-partner-only genes. The join covers whatever the facts hold, including SMN1 copy loss and repeat carriers from WGS. Each row carries residual-risk text: a chip or an unassessed gene in the partner means "not detected" is not "not a carrier". The page recommends a clinical carrier test and genetic counselling before any reproductive decision.
 - **Cascade.** A P/LP finding (`monogenic_pathogenic`, `acmg_sf`) in Alex lists first-degree relatives from the pedigree with "cascade testing is usually offered to relatives". If Carmen Ortega (parent) granted `cascade` to Alex, the row shows only Carmen's call_state at that one variant (`alt`, `ref`, `not_on_array`, `not_covered`), never her other findings. Relatives without a profile can hold a manually entered result from a clinical report, with the document as `src`.
-- **Relatedness QC.** Fingerprints of family profiles are compared at import; a parent-child pair sharing almost no alleles is flagged for review, not silently linked.
+- **Relatedness QC (v2).** Fingerprints of family profiles are compared at import; a parent-child pair sharing almost no alleles is flagged for review, not silently linked.
 - **Minors in the family.** Lucía Rivera (child) is never included in a carrier join or cascade row until she is 18.
 
 ## 11. Exports
@@ -502,9 +502,9 @@ Each relative's genome stays in their own profile. Nothing crosses profiles with
 | Phase | Genome work |
 |---|---|
 | v0.1 | OwnGenome facts step (separate repo); schema `ownhealth.genome-facts/v1` in this repo; ingest with validation, sha256 and fingerprint checks; VCF copied into blob storage; genome page with categories, coverage strip, sensitive locks; `get_genome_findings`, `lookup_variant`, `check_drug` (PGx + current medications + labs, CYP2D6 phenoconversion); consent settings (UI and agents); minors gating; audit |
-| v0.3 | OwnGenome chip mode with local Beagle; ClinVar weekly diff and alerts; CPIC/PharmCAT staleness; relatedness QC; `check_drug` widened (supplements, inhibitors named per gene, DPWG); carrier couple screen and cascade view; doctor summary PGx block |
+| v0.3 | OwnGenome chip mode with local Beagle; ClinVar weekly diff and alerts; CPIC/PharmCAT staleness; `check_drug` widened (supplements, inhibitors named per gene, DPWG); carrier couple screen and cascade view; doctor summary PGx block |
 | v1.0 | per-profile data keys so a genome can be crypto-shredded; break-glass rules for genome data (sensitive facts excluded) |
-| v2 | FHIR Genomics Reporting IG export, from the UI only |
+| v2 | FHIR Genomics Reporting IG export, from the UI only; relatedness QC across family profiles |
 | Moonshot | Phenopackets v2 export; research donation with explicit consent |
 
 ## 14. Open decisions

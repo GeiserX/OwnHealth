@@ -76,6 +76,10 @@ never collide:
 | 0600-0699 | G |
 | 0700-0799 | J |
 | 1000-1079 | v0.2 Inboxes: foundation 1000-1009, then lanes A-G in steps of ten (server/RUST-CONTRACTS.md 10.3) |
+| 1100-1109 | v0.3 Insight (0.4.0), records: medication fields, decisions and labels |
+| 1110-1119 | v0.3 Insight (0.4.0), family: relatives, links and sharing consent |
+| 1120-1129 | v0.3 Insight (0.4.0), genome: ClinVar snapshots and genome events |
+| 1130-1139 | v0.3 Insight (0.4.0), prevention: decisions, answers and calendar feeds |
 
 H and I have no migrations. Every new phase numbers after the highest shipped file: the migrator applies
 missing files in number order, so a lower number would run before files it depends on. Prefer using the 0001 tables; add columns only when the design needs them.
