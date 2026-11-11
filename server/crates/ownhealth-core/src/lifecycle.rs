@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::error::{Error, Result};
 use crate::pyjson::row_to_json;
 
-pub const LIFECYCLE_TABLES: [&str; 9] = [
+pub const LIFECYCLE_TABLES: [&str; 10] = [
     "observation",
     "condition",
     "medication_statement",
@@ -23,6 +23,7 @@ pub const LIFECYCLE_TABLES: [&str; 9] = [
     "encounter",
     "note",
     "genome_finding",
+    "family_member",
 ];
 
 /// The table name, once checked against `LIFECYCLE_TABLES` (it goes into SQL text).

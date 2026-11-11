@@ -1,0 +1,46 @@
+# Family relationships we record and draw, relative to the profile (the proband).
+#
+# code        HL7 v3 RoleCode (http://terminology.hl7.org/CodeSystem/v3-RoleCode), as FHIR
+#             FamilyMemberHistory.relationship carries it.
+# generation  0 is the proband's own generation; parents -1, children +1.
+# side        paternal | maternal | own (the proband's own branch) | partner (not a blood relative).
+# degree      1 first-degree, 2 second-degree, 3 third-degree; 0 is not a blood relative.
+# sex         the sex the code implies, or null when the code does not say.
+# slot        left-to-right order inside a generation in the pedigree drawing.
+# union       the couple this relative is a member of in the drawing.
+# child_of    the couple whose sibship line this relative hangs from (null: drawn without a line).
+#
+# The proband sits at slot 25, belongs to union "self" and is a child of "parents".
+version: 0.1.0
+rows:
+  - {code: PGRFTH, en: paternal grandfather, es: abuelo paterno, generation: -2, side: paternal, degree: 2, sex: male, slot: 10, union: pgp, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: PGRMTH, en: paternal grandmother, es: abuela paterna, generation: -2, side: paternal, degree: 2, sex: female, slot: 20, union: pgp, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: MGRFTH, en: maternal grandfather, es: abuelo materno, generation: -2, side: maternal, degree: 2, sex: male, slot: 40, union: mgp, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: MGRMTH, en: maternal grandmother, es: abuela materna, generation: -2, side: maternal, degree: 2, sex: female, slot: 50, union: mgp, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: PUNCLE, en: paternal uncle, es: tío paterno, generation: -1, side: paternal, degree: 2, sex: male, slot: 0, union: null, child_of: pgp, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: PAUNT, en: paternal aunt, es: tía paterna, generation: -1, side: paternal, degree: 2, sex: female, slot: 1, union: null, child_of: pgp, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: FTH, en: father, es: padre, generation: -1, side: paternal, degree: 1, sex: male, slot: 15, union: parents, child_of: pgp, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: PRN, en: parent, es: progenitor, generation: -1, side: own, degree: 1, sex: null, slot: 25, union: parents, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: MTH, en: mother, es: madre, generation: -1, side: maternal, degree: 1, sex: female, slot: 35, union: parents, child_of: mgp, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: MUNCLE, en: maternal uncle, es: tío materno, generation: -1, side: maternal, degree: 2, sex: male, slot: 51, union: null, child_of: mgp, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: MAUNT, en: maternal aunt, es: tía materna, generation: -1, side: maternal, degree: 2, sex: female, slot: 52, union: null, child_of: mgp, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: FTHINLAW, en: father-in-law, es: suegro, generation: -1, side: partner, degree: 0, sex: male, slot: 60, union: inlaws, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: MTHINLAW, en: mother-in-law, es: suegra, generation: -1, side: partner, degree: 0, sex: female, slot: 70, union: inlaws, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: PCOUSN, en: paternal cousin, es: primo o prima por parte de padre, generation: 0, side: paternal, degree: 3, sex: null, slot: 0, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: HBRO, en: half-brother, es: medio hermano, generation: 0, side: own, degree: 2, sex: male, slot: 12, union: null, child_of: parents, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: HSIS, en: half-sister, es: media hermana, generation: 0, side: own, degree: 2, sex: female, slot: 12, union: null, child_of: parents, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: HSIB, en: half-sibling, es: medio hermano o hermana, generation: 0, side: own, degree: 2, sex: null, slot: 12, union: null, child_of: parents, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: BRO, en: brother, es: hermano, generation: 0, side: own, degree: 1, sex: male, slot: 14, union: null, child_of: parents, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: SIS, en: sister, es: hermana, generation: 0, side: own, degree: 1, sex: female, slot: 14, union: null, child_of: parents, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: SIB, en: sibling, es: hermano o hermana, generation: 0, side: own, degree: 1, sex: null, slot: 14, union: null, child_of: parents, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: SPS, en: spouse or partner, es: pareja, generation: 0, side: partner, degree: 0, sex: null, slot: 45, union: self, child_of: inlaws, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: HUSB, en: husband, es: marido, generation: 0, side: partner, degree: 0, sex: male, slot: 45, union: self, child_of: inlaws, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: WIFE, en: wife, es: esposa, generation: 0, side: partner, degree: 0, sex: female, slot: 45, union: self, child_of: inlaws, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: MCOUSN, en: maternal cousin, es: primo o prima por parte de madre, generation: 0, side: maternal, degree: 3, sex: null, slot: 52, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: NEPHEW, en: nephew, es: sobrino, generation: 1, side: own, degree: 2, sex: male, slot: 14, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: NIECE, en: niece, es: sobrina, generation: 1, side: own, degree: 2, sex: female, slot: 14, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: SON, en: son, es: hijo, generation: 1, side: own, degree: 1, sex: male, slot: 35, union: null, child_of: self, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: DAU, en: daughter, es: hija, generation: 1, side: own, degree: 1, sex: female, slot: 35, union: null, child_of: self, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: CHILD, en: child, es: hijo o hija, generation: 1, side: own, degree: 1, sex: null, slot: 35, union: null, child_of: self, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: GRNDSON, en: grandson, es: nieto, generation: 2, side: own, degree: 2, sex: male, slot: 35, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}
+  - {code: GRNDDAU, en: granddaughter, es: nieta, generation: 2, side: own, degree: 2, sex: female, slot: 35, union: null, child_of: null, cite: "https://terminology.hl7.org/CodeSystem-v3-RoleCode.html"}

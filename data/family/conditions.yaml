@@ -1,0 +1,25 @@
+# Conditions a relative can have in the family history (FamilyMemberHistory.condition).
+#
+# kind        our key, stored in family_member.conditions[].kind
+# en, es      the name; short is the abbreviation the pedigree drawing uses
+# group       cardiovascular | metabolic | cancer | neurological | respiratory | other
+# code        SNOMED CT concept (http://snomed.info/sct), written when a person picks the kind; a code
+#             that arrives in an import is kept as received. "other" has no code: its text is required.
+version: 0.1.0
+rows:
+  - {kind: mi, en: heart attack, es: infarto de miocardio, short_en: MI, short_es: IAM, group: cardiovascular, code: "22298006", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=22298006"}
+  - {kind: cad, en: coronary artery disease, es: enfermedad coronaria, short_en: CAD, short_es: EC, group: cardiovascular, code: "53741008", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=53741008"}
+  - {kind: stroke, en: stroke, es: ictus, short_en: stroke, short_es: ictus, group: cardiovascular, code: "230690007", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=230690007"}
+  - {kind: hypertension, en: high blood pressure, es: hipertensión, short_en: HTN, short_es: HTA, group: cardiovascular, code: "38341003", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=38341003"}
+  - {kind: hypercholesterolemia, en: high cholesterol, es: colesterol alto, short_en: high chol., short_es: colest. alto, group: metabolic, code: "13644009", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=13644009"}
+  - {kind: t2d, en: type 2 diabetes, es: diabetes tipo 2, short_en: T2D, short_es: DM2, group: metabolic, code: "44054006", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=44054006"}
+  - {kind: t1d, en: type 1 diabetes, es: diabetes tipo 1, short_en: T1D, short_es: DM1, group: metabolic, code: "46635009", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=46635009"}
+  - {kind: cancer_breast, en: breast cancer, es: cáncer de mama, short_en: breast ca., short_es: ca. mama, group: cancer, code: "254837009", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=254837009"}
+  - {kind: cancer_colon, en: colon cancer, es: cáncer de colon, short_en: colon ca., short_es: ca. colon, group: cancer, code: "363406005", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=363406005"}
+  - {kind: cancer_prostate, en: prostate cancer, es: cáncer de próstata, short_en: prostate ca., short_es: ca. próstata, group: cancer, code: "399068003", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=399068003"}
+  - {kind: cancer_ovary, en: ovarian cancer, es: cáncer de ovario, short_en: ovarian ca., short_es: ca. ovario, group: cancer, code: "363443007", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=363443007"}
+  - {kind: cancer_other, en: cancer (other site), es: cáncer (otra localización), short_en: cancer, short_es: cáncer, group: cancer, code: "363346000", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=363346000"}
+  - {kind: alzheimer, en: Alzheimer's disease, es: enfermedad de Alzheimer, short_en: Alzheimer, short_es: Alzheimer, group: neurological, code: "26929004", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=26929004"}
+  - {kind: dementia, en: dementia, es: demencia, short_en: dementia, short_es: demencia, group: neurological, code: "52448006", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=52448006"}
+  - {kind: asthma, en: asthma, es: asma, short_en: asthma, short_es: asma, group: respiratory, code: "195967001", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=195967001"}
+  - {kind: other, en: other condition, es: otra enfermedad, short_en: other, short_es: otra, group: other, code: null, cite: "https://hl7.org/fhir/R4/familymemberhistory-definitions.html#FamilyMemberHistory.condition"}

@@ -1,0 +1,79 @@
+name: FHIR validate
+
+# The official HL7 validator reads what our export writes. The family history test
+# (server/crates/ownhealth-api/tests/family_fhir.rs) seeds the Rivera demo, exports Alex, imports the
+# export back with nothing left unmapped, and with OWNHEALTH_FHIR_OUT writes each exported resource as
+# its own file. The validator then checks every file against FHIR R4 (4.0.1), codes included through
+# the public terminology server, and fails the job on any error.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - ".github/workflows/fhir-validate.yml"
+      - "data/family/**"
+      - "migrations/**"
+      - "server/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fhir-validate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: "1.98.1" # the same as ci.yml
+  CARGO_TERM_COLOR: always
+  VALIDATOR_VERSION: "7.0.5"
+  VALIDATOR_SHA256: "9dfe9f305b0f9389eceade2a4a1c9a2740d7b0e614066fdf07a78b571c76d92f"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: server
+    env:
+      OWNHEALTH_TEST_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:55432/postgres
+      OWNHEALTH_FHIR_OUT: ${{ github.workspace }}/fhir-out
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: server
+          key: fhir-validate
+      - run: mkdir -p static
+      - name: Export the Rivera family history and import it back
+        run: cargo test -p ownhealth-api --test family_fhir --locked
+      - name: Every exported resource was written
+        run: test "$(ls "$OWNHEALTH_FHIR_OUT"/*-FamilyMemberHistory.json | wc -l)" -ge 7
+      - name: HL7 validator ${{ env.VALIDATOR_VERSION }} (pinned, sha256-checked)
+        working-directory: .
+        run: |
+          curl -fsSL -o /tmp/validator_cli.jar "https://github.com/hapifhir/org.hl7.fhir.core/releases/download/${VALIDATOR_VERSION}/validator_cli.jar"
+          echo "${VALIDATOR_SHA256}  /tmp/validator_cli.jar" | sha256sum -c -
+      - name: Validate against FHIR R4
+        working-directory: .
+        run: '"$JAVA_HOME_21_X64/bin/java" -Xmx3g -jar /tmp/validator_cli.jar "$OWNHEALTH_FHIR_OUT" -version 4.0.1'

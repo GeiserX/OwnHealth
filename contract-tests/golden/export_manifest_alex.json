@@ -3,6 +3,7 @@
     "Condition": "int",
     "DocumentReference": "int",
     "Encounter": "int",
+    "FamilyMemberHistory": "int",
     "Immunization": "int",
     "MedicationStatement": "int",
     "Observation": "int",
