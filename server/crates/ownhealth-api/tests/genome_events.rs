@@ -254,6 +254,12 @@ async fn a_minor_s_events_are_withheld_by_the_minor_rule() -> R {
     assert_eq!(body["withheld"]["minor_rule"], 2, "{body}");
     assert_eq!(genes(&body), vec!["-", "-"]);
     assert!(!body.to_string().contains("CFTR") && !body.to_string().contains("APOE"));
+    for ev in body["events"].as_array().into_iter().flatten() {
+        assert_eq!(ev["withheld"], "minor", "{ev}");
+        for key in ["kind", "gene", "variation_id", "old", "new", "alerted"] {
+            assert!(ev.get(key).is_none(), "{key} in {ev}");
+        }
+    }
     Ok(())
 }
 
