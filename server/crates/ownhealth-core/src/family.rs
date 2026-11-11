@@ -30,6 +30,8 @@ pub const ROLE_CODE: &str = "http://terminology.hl7.org/CodeSystem/v3-RoleCode";
 pub const GENDER: &str = "http://hl7.org/fhir/administrative-gender";
 pub const SNOMED: &str = "http://snomed.info/sct";
 const ACT_CODE: &str = "http://terminology.hl7.org/CodeSystem/v3-ActCode";
+/// Our exact sensitivity tag, kept in `meta.tag` beside the HL7 label, which is coarser.
+pub const SENSITIVITY_TAG: &str = "urn:ownhealth:sensitivity";
 /// An approximate onset age travels as `onsetString` with this prefix (`~52`): FHIR R4 Age has no
 /// "about" comparator.
 pub const APPROX: &str = "~";
@@ -394,14 +396,14 @@ pub fn fhir(m: &MemberIn) -> Result<Value> {
         .collect();
     let mut r = Map::new();
     r.insert("resourceType".into(), json!("FamilyMemberHistory"));
-    // the sensitivity travels with the export, so an import of it stays hidden without read:sensitive
+    // the sensitivity travels with the export, so an import of it stays hidden without read:sensitive.
+    // HL7 SEX covers sexual and reproductive health; our exact tag rides in meta.tag for our importer.
     let mut labels: Vec<&str> = m
         .sensitivity
         .iter()
         .filter_map(|s| match s.as_str() {
             "mental_health" => Some("PSY"),
-            "sexual_health" => Some("SEX"),
-            "reproductive" => Some("SDV"),
+            "sexual_health" | "reproductive" => Some("SEX"),
             _ => None,
         })
         .collect();
@@ -409,7 +411,14 @@ pub fn fhir(m: &MemberIn) -> Result<Value> {
     labels.dedup();
     if !labels.is_empty() {
         let security: Vec<Value> = labels.iter().map(|c| json!({"system": ACT_CODE, "code": c})).collect();
-        r.insert("meta".into(), json!({"security": security}));
+        let mut tags: Vec<&str> = m.sensitivity.iter().map(String::as_str).collect();
+        tags.sort_unstable();
+        tags.dedup();
+        let tag: Vec<Value> = tags
+            .iter()
+            .map(|t| json!({"system": SENSITIVITY_TAG, "code": t}))
+            .collect();
+        r.insert("meta".into(), json!({"security": security, "tag": tag}));
     }
     r.insert("status".into(), json!("completed"));
     r.insert(

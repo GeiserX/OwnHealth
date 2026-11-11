@@ -11,6 +11,7 @@ use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Utc};
 use ownhealth_core::acceptance::Check;
 use ownhealth_core::family::{self, FamilyCondition, MemberIn};
 use ownhealth_core::fhir::loinc_of;
+use ownhealth_core::observations::SENSITIVITY;
 use ownhealth_core::pyjson::py_decimal_str;
 use ownhealth_core::records::{AllergyIn, Common, ConditionIn, ImmunizationIn, MedicationIn, ProcedureIn, RecordIn};
 use rust_decimal::Decimal;
@@ -817,7 +818,19 @@ pub fn family_member_history(r: &Value, profile_id: Uuid) -> Mapped {
             onset_approx,
         });
     }
-    m.sensitivity = sensitivity(r);
+    // our own export carries the exact tags; any other source has only the HL7 labels
+    let exact: BTreeSet<String> = list(r.get("meta"), "tag")
+        .iter()
+        .filter(|t| t.get("system").and_then(Value::as_str) == Some(family::SENSITIVITY_TAG))
+        .filter_map(|t| t.get("code").and_then(Value::as_str))
+        .filter(|c| SENSITIVITY.contains(c))
+        .map(String::from)
+        .collect();
+    m.sensitivity = if exact.is_empty() {
+        sensitivity(r)
+    } else {
+        exact.into_iter().collect()
+    };
     m.fhir = Some(r.clone());
     match m.normalized() {
         Ok(m) => Mapped::Family {

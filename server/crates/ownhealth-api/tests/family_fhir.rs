@@ -191,6 +191,26 @@ async fn the_rivera_pedigree_exports_and_imports_back_with_nothing_dropped() -> 
         (lifecycle(old), old["condition"].as_array().map(Vec::len)),
         ("superseded", Some(1))
     );
+    // HL7 has no label for reproductive alone: it goes out as SEX, and the exact tag rides in meta.tag
+    let aunt_out = fmh
+        .iter()
+        .find(|r| r["relationship"]["coding"][0]["code"] == "MAUNT")
+        .expect("the aunt");
+    let security: Vec<&Value> = aunt_out["meta"]["security"]
+        .as_array()
+        .map(|s| s.iter().map(|s| &s["code"]).collect())
+        .unwrap_or_default();
+    assert_eq!(security, ["PSY", "SEX"]);
+    let tags: Vec<&Value> = aunt_out["meta"]["tag"]
+        .as_array()
+        .map(|t| {
+            t.iter()
+                .filter(|t| t["system"] == "urn:ownhealth:sensitivity")
+                .map(|t| &t["code"])
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(tags, ["mental_health", "reproductive"]);
 
     if let Ok(out) = std::env::var("OWNHEALTH_FHIR_OUT") {
         std::fs::create_dir_all(&out)?;
