@@ -27,7 +27,33 @@
           "=genome",
           "=lab",
           "=medication",
-          "=vaccine"
+          "=vaccine",
+          "=visit"
+        ]
+      }
+    }
+  },
+  "spans": {
+    "[]": {
+      "label": "string",
+      "segments": {
+        "[]": {
+          "<src>": "string",
+          "date": "date",
+          "end": {
+            "|": [
+              "date",
+              "null"
+            ]
+          },
+          "label": "string",
+          "src": "src_id"
+        }
+      },
+      "type": {
+        "|": [
+          "=diagnosis",
+          "=medication"
         ]
       }
     }

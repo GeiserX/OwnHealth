@@ -2,6 +2,7 @@
   "counts": {
     "Condition": "int",
     "DocumentReference": "int",
+    "Encounter": "int",
     "Immunization": "int",
     "MedicationStatement": "int",
     "Observation": "int",
