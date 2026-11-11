@@ -252,7 +252,12 @@ async fn the_vaccine_join_matches_whole_words_and_lists_what_it_does_not_know() 
         let shown = prevention::render(&doc, &pack, lang, &all_scopes())?;
         let rec = &item(&shown, key)["record"];
         assert_eq!(rec["kind"], "procedure", "{key}");
-        record(&mut tx, "procedure", json!({"profile_id": carmen, "text": rec["text"], "performed": "2026-10-01"})).await?;
+        record(
+            &mut tx,
+            "procedure",
+            json!({"profile_id": carmen, "text": rec["text"], "performed": "2026-10-01"}),
+        )
+        .await?;
         let after = build_document(&mut tx, carmen, as_of()).await?;
         assert_eq!(item(&after, key)["status"], "up_to_date", "{key} recorded as {rec}");
     }
