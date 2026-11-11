@@ -197,7 +197,9 @@ export interface Dashboard {
 	changes: { name: string; from: string; to: string; unit: string; direction: 'up' | 'down'; status: Status }[];
 	changes_vs: IsoDate | null;
 	not_measured_this_time: string[];
-	due: { title: string; why: string; status: Status; kind: 'lab' | 'vaccine' | 'screening'; phase: string | null }[];
+	due: { title: string; why: string; status: Status; kind: 'lab' | 'vaccine' | 'screening'; phase: string | null; rule?: string }[];
+	/** Screenings, vaccines and lab gaps of ownhealth.prevention/v1 (0.4.0); the Due card merges it with `due`. */
+	prevention_due?: import('../logic/due').DueItem[];
 	genome: { summary: string; chips: string[]; hidden: number; source: string | null } | null;
 	review_open: number;
 	state_hash: string;

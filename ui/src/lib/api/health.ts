@@ -1,12 +1,15 @@
 // Endpoints the "health" pages read (lane H owns this file): dashboard, biomarkers, timeline (genome and drug check: manage.ts).
 // Backends: lane E (status.py, drug_check.py), lane A (observations.py), lane H (timeline.py), lane D (genome.py).
 import { get, p } from './core';
+import type { DueDoc } from '../logic/due';
 import type { Dashboard, ObservationOut, Status, TimelineEvent, Trend, TrendPoint } from './types';
 
 export type Units = 'si' | 'conventional' | 'as_reported';
 
 export const getDashboard = (profile: string, lang: string, asOf?: string) =>
 	get<Dashboard>(`${p(profile)}/dashboard`, { lang, as_of: asOf });
+/** The Due screen: ownhealth.prevention/v1 in one language, trimmed to the caller's scopes. */
+export const getDue = (profile: string, lang: string, asOf?: string) => get<DueDoc>(`${p(profile)}/due`, { lang, as_of: asOf });
 export const getStatus = (profile: string, asOf?: string) => get<Record<string, unknown>>(`${p(profile)}/status`, { as_of: asOf });
 
 export const searchObservations = (

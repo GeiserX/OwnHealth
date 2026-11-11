@@ -13,6 +13,7 @@
 	import Sparkline from '#lib/components/Sparkline.svelte';
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
+	import { dueCard } from '#lib/logic/due';
 	import { app, currentProfile } from '#lib/state/app.svelte';
 
 	// The rule pack ships inside the package. The link names only the system's pack file, never the rule that fired.
@@ -52,6 +53,9 @@
 	// The scope a withheld card needs: the backend's `needs` when sent, else by the card's source.
 	const needs = (s: SystemCard) => s.needs ?? (s.key === 'sleep' || s.key === 'fitness' ? 'read:wearables' : 'read:labs');
 	const statusColor = (s: Status) => (s === 'ok' ? 'inherit' : C[s]);
+	// Screenings, vaccines and lab gaps, each once (the prevention list, then older lab rows it lacks).
+	const DUE_MAX = 6;
+	const dueRows = $derived(dash.data ? dueCard(dash.data.due, dash.data.prevention_due) : []);
 	const DUE_ICON: Record<string, string> = {
 		lab: '<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/>',
 		vaccine: '<path d="m18 2 4 4M17 7l-9 9M14 4l6 6M5 19l-3 3M7 13l4 4"/>',
@@ -180,17 +184,18 @@
 			</div>
 
 			<div class="card">
-				<h3>{t('due')}<span class="r">{t('duescr')}</span></h3>
-				{#each d.due as x (x.title)}
+				<h3>{t('due')}<span class="r"><a href="/due">{t('due_all')}</a></span></h3>
+				{#each dueRows.slice(0, DUE_MAX) as x (x.key)}
 					<div class="due">
-						<div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true">{@html DUE_ICON[x.kind] ?? DUE_ICON.lab}</svg></div>
+						<div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true">{@html DUE_ICON[x.area] ?? DUE_ICON.lab}</svg></div>
 						<div class="w"><div>{x.title}</div><div>{x.why}</div></div>
 						{#if x.phase}<PhaseChip phase={x.phase} />{/if}
-						<i style="width:8px;height:8px;border-radius:50%;background:{C[x.status]};flex:none" title={t(x.status)}></i><span class="sr-only">{t(x.status)}</span>
+						<i style="width:8px;height:8px;border-radius:50%;background:{C[x.color as Status]};flex:none" title={t(x.word)}></i><span class="sr-only">{t(x.word)}</span>
 					</div>
 				{:else}
 					<div class="dim" style="font-size:12px">{t('h1_nodue')}</div>
 				{/each}
+				{#if dueRows.length > DUE_MAX}<div class="dim" style="font-size:11.5px;margin-top:4px"><a href="/due">{tf('due_more', { n: dueRows.length - DUE_MAX })}</a></div>{/if}
 			</div>
 
 			<div class="card">
