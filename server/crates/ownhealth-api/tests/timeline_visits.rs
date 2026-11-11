@@ -255,7 +255,7 @@ async fn the_timeline_shows_visits_documents_and_bars() -> R {
     for s in out["spans"].as_array().into_iter().flatten() {
         for g in s["segments"].as_array().into_iter().flatten() {
             assert!(g["src"].as_str().is_some_and(|s| s.starts_with("src_")), "{g}");
-            assert!(g["label"].is_string(), "{g}");
+            assert!(g["label"].is_string() && g.get("src_label").is_some(), "{g}");
         }
     }
     let atorva = &out["spans"][2]["segments"][0]["label"];

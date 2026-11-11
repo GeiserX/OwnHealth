@@ -460,12 +460,13 @@ async fn documents(conn: &mut PgConnection, pid: Uuid, t: &Words) -> R<Vec<Optio
     Ok(out)
 }
 
-/// One segment of a bar: `{date, end, label, src}`.
+/// One segment of a bar: `{date, end, label, src, src_label}`.
 struct Segment {
     date: NaiveDate,
     end: Option<NaiveDate>,
     label: String,
     src: Option<String>,
+    src_label: Option<String>,
 }
 
 impl Segment {
@@ -475,6 +476,7 @@ impl Segment {
             "end": self.end.as_ref().map(py_date),
             "label": self.label,
             "src": self.src,
+            "src_label": self.src_label,
         })
     }
 
@@ -503,8 +505,8 @@ async fn spans(
     let mut out: Vec<Span> = Vec::new();
     if want.contains("diagnosis") {
         let sql = format!(
-            "select c.text, coalesce(c.onset, c.effective_at::date) as day, c.abatement, c.clinical_status, c.src_id \
-             from condition c where c.profile_id = $1 and {} \
+            "select c.text, coalesce(c.onset, c.effective_at::date) as day, c.abatement, c.clinical_status, c.src_id, \
+             s.label from condition c join src s on s.id = c.src_id where c.profile_id = $1 and {} \
              and c.verification_status not in ('refuted', 'entered-in-error')",
             live("c", sens)
         );
@@ -523,6 +525,7 @@ async fn spans(
                     end: day(&r, "abatement")?.or(over.then_some(start)),
                     label,
                     src: text(&r, "src_id")?,
+                    src_label: text(&r, "label")?,
                 }],
             });
         }
@@ -530,8 +533,8 @@ async fn spans(
     if want.contains("medication") {
         let sql = format!(
             "select lower(trim(coalesce(nullif(trim(m.ingredient), ''), m.name))) as key, m.name, m.strength, \
-             m.started, m.stopped, m.med_status, m.src_id from medication_statement m \
-             where m.profile_id = $1 and m.started is not null and {}",
+             m.started, m.stopped, m.med_status, m.src_id, s.label from medication_statement m \
+             join src s on s.id = m.src_id where m.profile_id = $1 and m.started is not null and {}",
             live("m", sens)
         );
         let mut by_key: std::collections::BTreeMap<String, Span> = std::collections::BTreeMap::new();
@@ -550,6 +553,7 @@ async fn spans(
                 end: day(&r, "stopped")?.or(stopped.then_some(start)),
                 label,
                 src: text(&r, "src_id")?,
+                src_label: text(&r, "label")?,
             };
             let key: String = r.try_get::<Option<String>, _>("key")?.unwrap_or_default();
             let span = by_key.entry(key).or_insert_with(|| Span {
