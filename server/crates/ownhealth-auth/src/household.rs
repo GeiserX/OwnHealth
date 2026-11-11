@@ -9,7 +9,11 @@
 use std::collections::BTreeSet;
 
 use chrono::NaiveDate;
-use ownhealth_core::access::{Permission, ProfileIn, create_household, create_profile, set_grant};
+use ownhealth_core::access::{
+    Permission, Profile, ProfileIn, create_household, create_profile, get_profile, majority, set_genome_switches,
+    set_grant,
+};
+use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
 use sqlx::{AssertSqlSafe, Connection, PgConnection};
@@ -283,7 +287,7 @@ pub async fn redeem_invite(conn: &mut PgConnection, code: &str) -> AuthResult<Uu
                 "Someone else manages this profile now. Ask them for a new invite.",
             ));
         }
-        claim_profile(conn, claim, user_id, Some(inviter)).await?;
+        claim_profile(conn, claim, user_id, Some(inviter), ownhealth_core::access::today()).await?;
     }
     Ok(user_id)
 }
@@ -305,13 +309,103 @@ pub async fn claim_invite_allowed(conn: &mut PgConnection, profile_id: Uuid, inv
     Ok(ok.unwrap_or(false))
 }
 
+/// A child's profile whose person has reached the household's age of majority on `on`: she takes it
+/// over when she claims it. A relative with no birth date, or who is not the household's child (an
+/// elderly parent), is not.
+pub fn at_majority(profile: &Profile, majority: i32, on: NaiveDate) -> bool {
+    profile.relationship.as_deref() == Some("child") && profile.birth_date.is_some() && !profile.is_minor(on, majority)
+}
+
+/// The profiles among `perms` that wait for their person to take them over: managed by the caller as
+/// guardian, nobody's login yet, and past the age of majority. `invited` is true while a claim invite
+/// for it is still open, so nobody sends a second one.
+pub async fn transfer_pending(conn: &mut PgConnection, perms: &[Permission], on: NaiveDate) -> Result<Vec<Value>> {
+    let Some(first) = perms.first() else {
+        return Ok(Vec::new());
+    };
+    let aom = majority(&mut *conn, first.profile.household_id).await?;
+    let mut out = Vec::new();
+    for p in perms
+        .iter()
+        .filter(|p| p.role == "guardian" && p.profile.user_id.is_none() && at_majority(&p.profile, aom, on))
+    {
+        let invited: bool = sqlx::query_scalar(
+            "select exists (select 1 from auth_challenge where purpose = 'invite' and used_at is null \
+             and expires_at > now() and data->>'claim_profile_id' = $1)",
+        )
+        .bind(p.profile.id.to_string())
+        .fetch_one(&mut *conn)
+        .await?;
+        out.push(json!({"profile": p.profile.slug, "invited": invited}));
+    }
+    Ok(out)
+}
+
+/// Who had access to the profiles the caller owns until she took them over at majority, and has none
+/// now: one entry per person, from the claim's `grant_change` audit rows (never a capped page of them).
+pub async fn former_access(conn: &mut PgConnection, perms: &[Permission], user_id: Uuid) -> Result<Vec<Value>> {
+    let owned: Vec<Uuid> = perms
+        .iter()
+        .filter(|p| p.role == "owner" && p.profile.user_id == Some(user_id))
+        .map(|p| p.profile.id)
+        .collect();
+    if owned.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "select slug, who, args_summary, ts from ( \
+           select distinct on (e.profile_id, e.resource_ids[1]) p.slug, e.resource_ids[1] as who, \
+             e.args_summary, e.ts, e.id \
+           from audit_event e join profile p on p.id = e.profile_id \
+           where e.profile_id = any($1) and e.action = 'grant_change' and e.args_summary like 'majority;%' \
+           and e.resource_ids[1] is not null \
+           and not exists (select 1 from profile_grant g where g.profile_id = e.profile_id \
+             and g.user_id::text = e.resource_ids[1]) \
+           order by e.profile_id, e.resource_ids[1], e.id desc \
+         ) latest order by id desc",
+    )
+    .bind(&owned)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(slug, user, args, ts)| {
+            let field = |k: &str| {
+                args.split(';')
+                    .find_map(|part| part.strip_prefix(k).and_then(|v| v.strip_prefix('=')))
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let categories: Vec<String> = field("categories")
+                .split(',')
+                .filter(|c| !c.is_empty())
+                .map(str::to_string)
+                .collect();
+            let expires = field("expires");
+            json!({
+                "profile": slug,
+                "user_id": user,
+                "role": field("role"),
+                "categories": categories,
+                "expires_at": if expires.is_empty() { Value::Null } else { json!(expires) },
+                "ended_at": ownhealth_core::pyjson::pydantic_datetime_utc(&ts),
+            })
+        })
+        .collect())
+}
+
 /// The person takes over their own profile: it is linked to their login and they become owner.
-/// Existing guardian and caregiver grants stay until the new owner changes them.
+///
+/// A child past the age of majority on `on` takes it over whole: the guardians' grants end, each
+/// written to the audit log as a `grant_change` of hers so she sees who had access and can give it
+/// back, and both sensitive genome switches start off until she turns them on. Otherwise (a minor,
+/// an adult relative) guardian and caregiver grants stay until the new owner changes them.
 pub async fn claim_profile(
     conn: &mut PgConnection,
     profile_id: Uuid,
     user_id: Uuid,
     granted_by: Option<Uuid>,
+    on: NaiveDate,
 ) -> AuthResult<()> {
     let n = sqlx::query("update profile set user_id = $1 where id = $2 and user_id is null")
         .bind(user_id)
@@ -326,6 +420,86 @@ pub async fn claim_profile(
         ));
     }
     set_grant(conn, user_id, profile_id, "owner", None, granted_by, None).await?;
+    let Some(profile) = get_profile(&mut *conn, profile_id).await? else {
+        return Ok(());
+    };
+    if !at_majority(&profile, majority(&mut *conn, profile.household_id).await?, on) {
+        return Ok(());
+    }
+    // A grant that had already expired gave no access: it goes without a word, and only live ones are
+    // listed as hers to give back, each with the end date it had.
+    type Ended = (Uuid, Vec<String>, Option<chrono::DateTime<chrono::Utc>>, bool);
+    let ended: Vec<Ended> = sqlx::query_as(
+        "delete from profile_grant where profile_id = $1 and role = 'guardian' and user_id <> $2 \
+         returning user_id, categories, expires_at, (expires_at is null or expires_at > now())",
+    )
+    .bind(profile_id)
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    set_genome_switches(&mut *conn, profile_id, Some(false), Some(false)).await?;
+    let event = |action: &str, args: String| AuditEvent {
+        actor_id: Some(user_id),
+        tool: Some("claim_profile".into()),
+        profile_id: Some(profile_id),
+        args_summary: Some(args),
+        ..AuditEvent::new("user", "ui", action)
+    };
+    write_audit(
+        &mut *conn,
+        &event("consent_change", "ui=False;agents=False;majority".into()),
+    )
+    .await?;
+    for (guardian, mut categories, expires_at, live) in ended {
+        if !live {
+            continue;
+        }
+        categories.sort();
+        let mut args = format!("majority;role=guardian;categories={}", categories.join(","));
+        if let Some(at) = expires_at {
+            args.push_str(&format!(
+                ";expires={}",
+                ownhealth_core::pyjson::pydantic_datetime_utc(&at)
+            ));
+        }
+        write_audit(
+            &mut *conn,
+            &AuditEvent {
+                resource_type: Some("user".into()),
+                resource_ids: Some(vec![guardian.to_string()]),
+                ..event("grant_change", args)
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The household's founder: the login whose own profile is the household's `self`. Only they change
+/// household settings.
+pub async fn is_household_owner(conn: &mut PgConnection, household_id: Uuid, user_id: Uuid) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "select exists (select 1 from profile where household_id = $1 and user_id = $2 and relationship = 'self')",
+    )
+    .bind(household_id)
+    .bind(user_id)
+    .fetch_one(conn)
+    .await?)
+}
+
+/// The ages a household may set as its age of majority.
+pub const MAJORITY_RANGE: std::ops::RangeInclusive<i32> = 14..=21;
+
+/// Store the household's age of majority.
+pub async fn set_majority(conn: &mut PgConnection, household_id: Uuid, years: i32) -> Result<()> {
+    sqlx::query(
+        "insert into household_setting (household_id, key, value) values ($1, 'age_of_majority', $2) \
+         on conflict (household_id, key) do update set value = excluded.value",
+    )
+    .bind(household_id)
+    .bind(json!(years))
+    .execute(conn)
+    .await?;
     Ok(())
 }
 

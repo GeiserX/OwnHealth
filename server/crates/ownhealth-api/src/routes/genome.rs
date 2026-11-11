@@ -18,10 +18,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use ownhealth_auth::sessions;
 use ownhealth_core::Runtime;
-use ownhealth_core::access::{Permission, Principal, PrincipalKind, age_of_majority, set_genome_switches};
+use ownhealth_core::access::{Permission, Principal, PrincipalKind, majority, set_genome_switches};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::{Error, Result as CoreResult};
 use ownhealth_genome::findings::visible_rows;
@@ -41,11 +41,11 @@ fn surface(p: &Principal) -> &'static str {
 }
 
 fn today() -> NaiveDate {
-    Utc::now().date_naive()
+    ownhealth_core::access::today()
 }
 
-async fn gate(rt: &Runtime, conn: &mut PgConnection, perm: &Permission, p: &Principal) -> CoreResult<Gate> {
-    let aom = age_of_majority(conn, perm.profile.household_id, rt.settings.age_of_majority).await?;
+async fn gate(_rt: &Runtime, conn: &mut PgConnection, perm: &Permission, p: &Principal) -> CoreResult<Gate> {
+    let aom = majority(conn, perm.profile.household_id).await?;
     gate_for(perm, surface(p), today(), aom)
 }
 
@@ -352,7 +352,7 @@ pub async fn consent(rt: &Runtime, principal: &Principal, p: &str, ui: Option<bo
     }
     let mut tx = rt.pool.begin().await?;
     let perm = Caller(principal.clone()).require(&mut tx, p, None, None).await?;
-    let aom = age_of_majority(&mut tx, perm.profile.household_id, rt.settings.age_of_majority).await?;
+    let aom = majority(&mut tx, perm.profile.household_id).await?;
     let minor = perm.profile.is_minor(today(), aom);
     if !(perm.role == "owner" || (perm.role == "guardian" && minor)) {
         return Err(Error::access_denied("forbidden", "Only the profile's owner changes its genome consent.").into());

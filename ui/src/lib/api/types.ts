@@ -494,6 +494,13 @@ export interface Household {
 	// profiles carry, beyond ProfileSummary: can_manage, claimed, locks, genome_sensitive_agents
 	profiles: (ProfileSummary & { can_manage?: boolean; claimed?: boolean; locks?: Scope[]; genome_sensitive_agents?: boolean })[];
 	grants: { user_id: Uuid; profile: string; role: Role; categories: Scope[]; expires_at: IsoDateTime | null; granted_at?: IsoDateTime }[];
+	// the household's age of majority in force (its own setting, else the server's)
+	age_of_majority?: number;
+	// profiles past the age of majority that wait for their person to take them over (caller is guardian);
+	// invited: a claim invite for it is still open
+	transfer_pending?: { profile: string; invited: boolean }[];
+	// who had access to the caller's own profile until she took it over at majority, and has none now
+	former_access?: { profile: string; user_id: Uuid; role: Role; categories: Scope[]; expires_at: IsoDateTime | null; ended_at: IsoDateTime }[];
 }
 
 /** GET /auth/state: what the login, setup and enrol pages need. */
