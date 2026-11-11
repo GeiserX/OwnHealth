@@ -199,17 +199,22 @@ async fn as_of_answers_what_the_store_knew() -> R {
     Ok(())
 }
 
-#[tokio::test]
-async fn demo_alex_status_pages_stay_under_2kb_whole() -> R {
+/// The demo household seeded into the world, and a token on one of its profiles.
+async fn demo_world() -> anyhow::Result<World> {
     let w = world().await?;
     ownhealth_ops::register();
     ownhealth_genome::register();
     assert!(ownhealth_core::demo::seed_demo(&w.db.pool, &w.rt.settings, &w.rt.blobs, false).await?);
+    Ok(w)
+}
+
+async fn demo_token(w: &World, slug: &str, scopes: Vec<String>) -> anyhow::Result<(String, uuid::Uuid)> {
     let (u, p): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
         "select u.id, p.id from app_user u join household h on h.id = u.household_id \
-         join profile p on p.household_id = h.id and p.slug = 'alex' where h.name = $1 order by u.created_at limit 1",
+         join profile p on p.household_id = h.id and p.slug = $2 where h.name = $1 order by u.created_at limit 1",
     )
     .bind(ownhealth_core::demo::DEMO_HOUSEHOLD)
+    .bind(slug)
     .fetch_one(&w.db.pool)
     .await?;
     let tok = ownhealth_auth::tokens::create_token(
@@ -218,7 +223,7 @@ async fn demo_alex_status_pages_stay_under_2kb_whole() -> R {
             user_id: u,
             label: "t",
             profile_ids: vec![p],
-            scopes: all().into_iter().collect(),
+            scopes,
             default_profile: None,
             days: 90,
             identity_mode: "full",
@@ -228,6 +233,13 @@ async fn demo_alex_status_pages_stay_under_2kb_whole() -> R {
     )
     .await?
     .plaintext;
+    Ok((tok, p))
+}
+
+#[tokio::test]
+async fn demo_alex_status_pages_stay_under_2kb_whole() -> R {
+    let w = demo_world().await?;
+    let (tok, _) = demo_token(&w, "alex", all().into_iter().collect()).await?;
     let c = w.connect_real(&tok).await?;
     let (mut flags, mut cursor, mut pages) = (Vec::new(), None::<String>, 0);
     loop {
@@ -299,5 +311,104 @@ async fn check_drug_takes_back_its_own_cursor() -> R {
         .ok();
     let seen = first["data"]["relevant_labs"].as_array().map_or(0, Vec::len);
     assert_eq!(second["data"]["relevant_labs"][0]["src"], format!("src_l{seen}"));
+    Ok(())
+}
+
+/// The flags on page 1 of every demo profile's status, as `rank rule-or-code`. A new status section
+/// takes bytes from the same 2 KB page; when it pushes a flag to page 2, this changes. Paging alone
+/// would hide that (every flag still arrives, one page later), so the sizes above cannot catch it.
+/// Recorded before the `due` section existed.
+const PAGE_ONE: [(&str, &[&str]); 4] = [
+    ("alex", &["1 range.lab LOINC:43583-4"]),
+    ("sam", &[]),
+    ("lucia", &[]),
+    ("carmen", &["1 range.lab LOINC:4548-4", "2 range.lab LOINC:98979-8"]),
+];
+
+fn flag_id(f: &Value) -> String {
+    let part = |k: &str| f[k].as_str().unwrap_or("-").to_string();
+    format!("{} {} {}", f["rank"], part("rule"), part("code"))
+}
+
+#[tokio::test]
+async fn demo_page_one_flags_do_not_move() -> R {
+    let w = demo_world().await?;
+    let mut got = Vec::new();
+    for (slug, _) in PAGE_ONE {
+        let (tok, _) = demo_token(&w, slug, all().into_iter().collect()).await?;
+        let c = w.connect_real(&tok).await?;
+        let env = c.call_tool("get_health_status", json!({"profile": slug})).await?.ok();
+        let ids: Vec<String> = env["data"]["flags"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(flag_id)
+            .collect();
+        got.push((slug, ids));
+    }
+    for ((slug, ids), (_, want)) in got.iter().zip(PAGE_ONE) {
+        assert_eq!(ids, want, "{slug}");
+    }
+    Ok(())
+}
+
+/// The `due` section lists 3 items whatever the count, without URLs: Carmen (71) has every open
+/// screening and vaccine of the shipped pack, and her page stays under 2 KB with it.
+#[tokio::test]
+async fn status_with_the_due_section_stays_under_2kb() -> R {
+    let w = demo_world().await?;
+    let (tok, _) = demo_token(&w, "carmen", all().into_iter().collect()).await?;
+    let c = w.connect_real(&tok).await?;
+    let env = c
+        .call_tool("get_health_status", json!({"profile": "carmen"}))
+        .await?
+        .ok();
+    assert!(size(&env) < 2048, "{}", size(&env));
+    let due = &env["data"]["due"];
+    assert_eq!(due["items"].as_array().map(Vec::len), Some(3), "{due}");
+    assert!(due["total"].as_u64().unwrap_or(0) >= 6, "{due}");
+    assert!(
+        due["prevention_hash"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("sha256:")
+    );
+    assert!(!due.to_string().contains("http"), "status cites by rule id: {due}");
+    assert!(size(due) < 320, "{}", size(due));
+    Ok(())
+}
+
+/// A viewer token (read:summary only) gets no `due` section, and the status says records were
+/// withheld. Each lab gap shows once: hepatitis C stays under never_measured, never again in `due`.
+#[tokio::test]
+async fn the_due_section_follows_scopes_and_never_repeats_a_lab_gap() -> R {
+    let w = demo_world().await?;
+    for slug in ["alex", "carmen"] {
+        let (tok, _) = demo_token(&w, slug, all().into_iter().collect()).await?;
+        let env = w
+            .connect_real(&tok)
+            .await?
+            .call_tool("get_health_status", json!({"profile": slug}))
+            .await?
+            .ok();
+        let text = env["data"].to_string();
+        assert_eq!(text.matches("infect.hcv.once_adult").count(), 1, "{slug}: {text}");
+    }
+    let (tok, _) = demo_token(&w, "carmen", vec!["read:summary".into()]).await?;
+    let env = w
+        .connect_real(&tok)
+        .await?
+        .call_tool("get_health_status", json!({"profile": "carmen"}))
+        .await?
+        .ok();
+    assert!(env["data"].get("due").is_none(), "{env}");
+    assert!(
+        env["withheld"]["by_scope"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|s| s == "records"),
+        "{env}"
+    );
     Ok(())
 }

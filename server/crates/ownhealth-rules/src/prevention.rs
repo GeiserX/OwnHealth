@@ -451,6 +451,9 @@ fn add_months(d: NaiveDate, months: u32) -> NaiveDate {
     d.checked_add_months(Months::new(months)).unwrap_or(NaiveDate::MAX)
 }
 
+/// (text, code system, code, date, src id) of an immunization or a procedure.
+type CodedRow = (String, Option<String>, Option<String>, NaiveDate, String);
+
 async fn facts(
     conn: &mut PgConnection,
     profile_id: uuid::Uuid,
@@ -461,7 +464,7 @@ async fn facts(
     let mut unmatched = Vec::new();
     let vaccines: Vec<&Group> = prev.groups.values().filter(|g| g.vaccine).collect();
     let others: Vec<&Group> = prev.groups.values().filter(|g| !g.vaccine).collect();
-    let imms: Vec<(String, Option<String>, Option<String>, NaiveDate, String)> = sqlx::query_as(
+    let imms: Vec<CodedRow> = sqlx::query_as(
         "select vaccine, code_system, code, coalesce(occurred, effective_at::date), src_id from immunization \
          where profile_id = $1 and status = 'current' and coalesce(occurred, effective_at::date) <= $2 \
          order by 4, src_id",
@@ -493,7 +496,7 @@ async fn facts(
             });
         }
     }
-    let procs: Vec<(String, Option<String>, Option<String>, NaiveDate, String)> = sqlx::query_as(
+    let procs: Vec<CodedRow> = sqlx::query_as(
         "select text, code_system, code, coalesce(performed, effective_at::date), src_id from procedure \
          where profile_id = $1 and status = 'current' and coalesce(performed, effective_at::date) <= $2 \
          order by 4, src_id",
@@ -712,22 +715,31 @@ pub fn prevention_hash(doc: &Value) -> Result<String> {
 
 /// The document for one evaluation (the dashboard already holds one) and its state body.
 pub async fn from_evaluation(conn: &mut PgConnection, ev: &Evaluation, body: &Value, pack: &Pack) -> Result<Value> {
+    document(conn, &ev.profile, ev.as_of, body, pack).await
+}
+
+/// The document of one profile on one day, given its state body (for the pack's lab gaps).
+pub async fn document(
+    conn: &mut PgConnection,
+    profile: &ownhealth_core::access::Profile,
+    as_of: NaiveDate,
+    body: &Value,
+    pack: &Pack,
+) -> Result<Value> {
     let prev = load(pack)?;
-    let as_of = ev.as_of;
-    let country = ev.profile.country.as_deref().filter(|c| !c.is_empty());
+    let country = profile.country.as_deref().filter(|c| !c.is_empty());
     let rules = country.and_then(|c| prev.countries.get(c));
     let mut items = Vec::new();
     let mut unmatched = Vec::new();
     if let Some(rules) = rules {
-        let (facts, unknown) = facts(&mut *conn, ev.profile_id, as_of, prev).await?;
+        let (facts, unknown) = facts(&mut *conn, profile.id, as_of, prev).await?;
         unmatched = unknown;
-        let sex = ev
-            .profile
+        let sex = profile
             .sex_at_birth
             .as_deref()
             .filter(|s| ["female", "male"].contains(s));
         for row in &rules.rows {
-            match (ev.profile.birth_date, &row.sex, sex) {
+            match (profile.birth_date, &row.sex, sex) {
                 (_, Some(want), Some(have)) if want != have => {}
                 (None, _, _) => items.push(not_assessed(row, "no_birth_date")),
                 (Some(birth), Some(_), None) => {
@@ -762,7 +774,7 @@ pub async fn from_evaluation(conn: &mut PgConnection, ev: &Evaluation, body: &Va
     };
     let mut doc = drop_nulls(json!({
         "schema": SCHEMA,
-        "profile": ev.slug,
+        "profile": profile.slug,
         "as_of": iso(as_of),
         "rules": rules.map(|r| r.version.clone()),
         "country": country,
@@ -891,4 +903,60 @@ pub fn render(doc: &Value, pack: &Pack, lang: &str, scopes: &Scopes) -> Result<V
     }
     out.insert("withheld".into(), json!(withheld));
     Ok(Value::Object(out))
+}
+
+/// How many items the `due` section of get_health_status lists; the rest are counted in `total`.
+pub const STATUS_TOP: usize = 3;
+/// The statuses that count as due in the status section.
+const OPEN: [&str; 3] = ["overdue", "due", "upcoming"];
+
+/// The `due` section of get_health_status: the first open screenings and vaccines as
+/// `{key, status, due, rule}` (rule only when it is not the key), their count and the document's
+/// hash. Rule ids, no URLs: the cites stay in the document. The lab gaps are left out, because the
+/// status lists them already under never_measured and stale; an item a lab value shows needs
+/// read:labs. None when nothing is open (the status page has 2 KB and spends none of it on an empty
+/// list) or the profile is not in the store.
+pub async fn status_section(
+    conn: &mut PgConnection,
+    profile_id: uuid::Uuid,
+    as_of: NaiveDate,
+    body: &Value,
+    pack: &Pack,
+    scopes: &Scopes,
+) -> Result<Option<Value>> {
+    let Some(profile) = ownhealth_core::access::get_profile(&mut *conn, profile_id).await? else {
+        return Ok(None);
+    };
+    let doc = document(conn, &profile, as_of, body, pack).await?;
+    let open: Vec<&Value> = doc["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["area"] != "lab" && visible(i, scopes))
+        .filter(|i| i["status"].as_str().is_some_and(|s| OPEN.contains(&s)))
+        .collect();
+    let items: Vec<Value> = open
+        .iter()
+        .take(STATUS_TOP)
+        .map(|i| {
+            let mut m = Map::new();
+            for k in ["key", "status", "due"] {
+                if let Some(v) = i.get(k) {
+                    m.insert(k.into(), v.clone());
+                }
+            }
+            if i["rule"] != i["key"] {
+                m.insert("rule".into(), i["rule"].clone());
+            }
+            Value::Object(m)
+        })
+        .collect();
+    if open.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "items": items,
+        "total": open.len(),
+        "prevention_hash": doc["prevention_hash"],
+    })))
 }
