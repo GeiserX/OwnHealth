@@ -22,9 +22,9 @@ use std::io::{self, BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use noodles::bgzf;
-use ownhealth_core::access::{age_of_majority, get_profile};
+use ownhealth_core::access::{get_profile, majority, today};
 use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::review::{ReviewItemIn, create_item};
 use ownhealth_core::{Error, Result};
@@ -636,13 +636,9 @@ struct DatasetRow {
 
 /// Compare every current genome dataset with the ClinVar release at `release` (a GRCh38 VCF), write
 /// the events and alerts, and keep the carried records as each dataset's new snapshot. One
-/// transaction per dataset. `default_age_of_majority` is the install's setting, for the minor rule.
-pub async fn diff_release(
-    pool: &PgPool,
-    blobs: &BlobStore,
-    release: &Path,
-    default_age_of_majority: i32,
-) -> Result<DiffReport> {
+/// transaction per dataset. The minor rule counts age with `access::majority` on `access::today`, as
+/// every other minor check does.
+pub async fn diff_release(pool: &PgPool, blobs: &BlobStore, release: &Path) -> Result<DiffReport> {
     // Read the whole release once first: a release that is truncated, corrupt or out of order stops
     // the run before any dataset is compared, so it is never reported as a broken genome.
     let path = release.to_path_buf();
@@ -663,7 +659,7 @@ pub async fn diff_release(
     drop(conn);
     let mut reports = Vec::new();
     for ds in datasets {
-        reports.push(diff_dataset(pool, blobs, release, date, &ds, default_age_of_majority).await?);
+        reports.push(diff_dataset(pool, blobs, release, date, &ds).await?);
     }
     Ok(DiffReport {
         release: date,
@@ -677,7 +673,6 @@ async fn diff_dataset(
     release: &Path,
     date: NaiveDate,
     ds: &DatasetRow,
-    default_aom: i32,
 ) -> Result<DatasetReport> {
     let mut report = DatasetReport {
         dataset_id: ds.id,
@@ -772,8 +767,8 @@ async fn diff_dataset(
     let profile = get_profile(&mut tx, ds.profile_id)
         .await?
         .ok_or_else(|| Error::NotFound(format!("profile {}", ds.profile_id)))?;
-    let aom = age_of_majority(&mut tx, ds.household_id, default_aom).await?;
-    let minor = profile.is_minor(Utc::now().date_naive(), aom);
+    let aom = majority(&mut tx, ds.household_id).await?;
+    let minor = profile.is_minor(today(), aom);
     let unconfirmed = matches!(ds.assay.as_str(), "chip" | "chip_imputed");
 
     let mut seen = std::collections::HashSet::new();

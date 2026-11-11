@@ -82,7 +82,7 @@ async fn a_030_database_migrates_diffs_clinvar_and_deletes_a_profile_with_every_
              CLNSIG=Uncertain_significance;GENEINFO=CFTR:1080\n"
         ),
     )?;
-    let report = ownhealth_genome::clinvar::diff_release(&db.pool, &blobs, &release, 18).await?;
+    let report = ownhealth_genome::clinvar::diff_release(&db.pool, &blobs, &release).await?;
     assert_eq!(report.datasets.len(), 3, "{report:?}");
     let alex = profiles["alex"];
     let kinds: Vec<(String, bool)> =

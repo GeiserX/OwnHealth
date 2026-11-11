@@ -96,7 +96,7 @@ async fn env() -> anyhow::Result<Env> {
     drop(c);
     let (one, two) = releases(dir.path())?;
     for r in [one, two] {
-        clinvar::diff_release(&db.pool, &rt.blobs, &r, 18).await?;
+        clinvar::diff_release(&db.pool, &rt.blobs, &r).await?;
     }
     let app = Router::new()
         .nest("/api", ownhealth_api::router())
@@ -247,7 +247,7 @@ async fn a_minor_s_events_are_withheld_by_the_minor_rule() -> R {
             "CLNREVSTAT=criteria_provided,_single_submitter;CLNSIG=Benign",
         ),
     )?;
-    clinvar::diff_release(&e.db.pool, &e.rt.blobs, &three, 18).await?;
+    clinvar::diff_release(&e.db.pool, &e.rt.blobs, &three).await?;
     // Lucía's first run against her facts: CFTR P -> benign, APOE risk factor -> P.
     let (status, body) = e.get("alex", "/api/profiles/lucia/genome/events").await?;
     assert_eq!(status, StatusCode::OK, "{body}");

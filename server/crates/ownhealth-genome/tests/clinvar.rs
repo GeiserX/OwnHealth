@@ -264,7 +264,7 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     )?;
 
     // First run: the facts are the baseline. Only the planted MTHFR LP (1 star, no fact) is new.
-    let r1 = clinvar::diff_release(&e.db.pool, &e.blobs, &one, 18).await?;
+    let r1 = clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
     assert_eq!(r1.release.to_string(), "2026-10-05");
     assert_eq!(r1.datasets.len(), 3);
     assert!(r1.datasets.iter().all(|d| d.skipped.is_none()), "{r1:?}");
@@ -310,7 +310,7 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     assert_eq!(snap, want);
 
     // Second run: diffed against the snapshot.
-    let r2 = clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
+    let r2 = clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
     assert!(r2.datasets.iter().all(|d| d.skipped.is_none()), "{r2:?}");
     let (a, b) = ("2026-10-05", "2026-10-12");
     assert_eq!(
@@ -420,12 +420,12 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     .await?;
 
     // The same release again, or an older one, compares nothing.
-    let again = clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
+    let again = clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
     assert!(
         again.datasets.iter().all(|d| d.skipped == Some("already_compared")),
         "{again:?}"
     );
-    let older = clinvar::diff_release(&e.db.pool, &e.blobs, &one, 18).await?;
+    let older = clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
     assert!(older.datasets.iter().all(|d| d.skipped == Some("already_compared")));
     assert_eq!(events(&mut c).await?.len(), 8);
     Ok(())
@@ -442,8 +442,8 @@ async fn an_sf_gene_is_named_once_the_sensitive_switch_is_on() -> R {
         .await?;
     let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
     let two = write_release(e.dir.path(), "two.vcf", "20261012", &release_two(), false)?;
-    clinvar::diff_release(&e.db.pool, &e.blobs, &one, 18).await?;
-    clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
     let sf = alert_for(&mut c, e.profile("alex"), "vus_resolved").await?;
     assert_eq!(sf[0]["withheld"], false);
     // Even with the switch on the item names nothing: the switch can be turned off later, and the
@@ -530,7 +530,7 @@ async fn one_unreadable_calls_vcf_does_not_stop_the_other_datasets() -> R {
     unsort_alex_calls(&e, &mut c).await?;
     let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
     let two = write_release(e.dir.path(), "two.vcf", "20261012", &release_two(), false)?;
-    let r1 = clinvar::diff_release(&e.db.pool, &e.blobs, &one, 18).await?;
+    let r1 = clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
     let alex = r1.datasets.iter().find(|d| d.profile == "alex").cloned();
     let alex = alex.ok_or_else(|| anyhow::anyhow!("no alex in {r1:?}"))?;
     assert_eq!(alex.skipped, Some("unreadable"), "{r1:?}");
@@ -539,7 +539,7 @@ async fn one_unreadable_calls_vcf_does_not_stop_the_other_datasets() -> R {
         "{alex:?}"
     );
     assert_eq!(r1.datasets.len(), 3);
-    clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
     // Nothing partial for Alex; Sam, compared after him, still gets his LCT alert.
     assert_eq!(
         events(&mut c).await?,
@@ -570,7 +570,7 @@ async fn a_broken_release_stops_the_run_and_blames_no_genome() -> R {
     f.write_all(b"MT\t16000\t2\tA\tG\t.\t.\tCLNREVSTAT=no_assertion_provided;CLNSIG=Benign\n")?;
     f.write_all(b"1\t1\t1\tA\tG\t.\t.\tCLNREVSTAT=no_assertion_provided;CLNSIG=Benign\n")?;
     drop(f);
-    let r = clinvar::diff_release(&e.db.pool, &e.blobs, &path, 18).await;
+    let r = clinvar::diff_release(&e.db.pool, &e.blobs, &path).await;
     let err = match r {
         Ok(report) => anyhow::bail!("a broken release was accepted: {report:?}"),
         Err(err) => err.to_string(),
@@ -602,8 +602,8 @@ async fn one_change_alerts_once_when_a_profile_has_two_current_datasets() -> R {
     assert_eq!(current, 2);
     let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
     let two = write_release(e.dir.path(), "two.vcf", "20261012", &release_two(), false)?;
-    clinvar::diff_release(&e.db.pool, &e.blobs, &one, 18).await?;
-    clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
     // Two LCT events, one per dataset, and one review item: the WGS one, which is confirmed.
     let lct: Vec<Ev> = events(&mut c)
         .await?
@@ -624,7 +624,7 @@ async fn a_release_older_than_the_genome_file_is_not_a_baseline() -> R {
     let mut c = e.conn().await?;
     seed_alex(&e, &mut c).await?;
     let old = write_release(e.dir.path(), "old.vcf", "20260901", &release_two(), false)?;
-    let r = clinvar::diff_release(&e.db.pool, &e.blobs, &old, 18).await?;
+    let r = clinvar::diff_release(&e.db.pool, &e.blobs, &old).await?;
     assert_eq!(r.datasets[0].skipped, Some("older_than_genome_file"));
     assert!(events(&mut c).await?.is_empty());
     Ok(())

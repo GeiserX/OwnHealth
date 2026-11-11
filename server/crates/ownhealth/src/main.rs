@@ -159,8 +159,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
         }
         Cmd::ClinvarDiff { path } => {
             let rt = Runtime::new(settings)?;
-            let r = ownhealth_genome::clinvar::diff_release(&rt.pool, &rt.blobs, &path, rt.settings.age_of_majority)
-                .await?;
+            let r = ownhealth_genome::clinvar::diff_release(&rt.pool, &rt.blobs, &path).await?;
             println!("{}", serde_json::to_string_pretty(&r)?);
             // A dataset that could not be read is reported and the others still run; the exit code
             // says so, for a cron or an operator.
