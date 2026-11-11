@@ -817,7 +817,8 @@ fn pick(v: Option<&Value>, lang: &str) -> Option<String> {
 }
 
 /// The document in one language for one caller: every item gains `title` and `why` (or `reason`
-/// for not_assessed); items the scopes do not cover are left out and counted in `withheld`.
+/// for not_assessed), and a guideline row `record` {kind, text} for a form that records it. Items
+/// the scopes do not cover are left out and counted in `withheld`.
 pub fn render(doc: &Value, pack: &Pack, lang: &str, scopes: &Scopes) -> Result<Value> {
     let prev = load(pack)?;
     let lang = if lang == "es" { "es" } else { "en" };
@@ -862,6 +863,15 @@ pub fn render(doc: &Value, pack: &Pack, lang: &str, scopes: &Scopes) -> Result<V
                     ],
                 )
             });
+            // what the Due screen's "record it" form fills in: the record kind and a name the
+            // evidence join matches, so the new record counts for this row
+            if let Some(g) = row.evidence.first().and_then(|g| prev.groups.get(g)) {
+                let kind = if g.vaccine { "immunization" } else { "procedure" };
+                out.insert(
+                    "record".into(),
+                    json!({"kind": kind, "text": pick(Some(&g.name), lang)}),
+                );
+            }
             (pick(Some(&row.name), lang), why)
         } else {
             let group = it.get("group").map(text).unwrap_or_default();
