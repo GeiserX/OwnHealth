@@ -1,0 +1,746 @@
+//! The ClinVar diff (genomics.md 9) against two synthetic mini releases written as files: the first
+//! run compares with the facts, the second with the first run's snapshot. All data is synthetic.
+
+mod common;
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use common::{Env, R, env};
+use noodles::bgzf;
+use ownhealth_genome::clinvar::{
+    self, Before, FactAlleles, VcfAlleles, alerts, carried_records, event_kind, is_sf_gene, summary,
+};
+use ownhealth_genome::sensitive::{acmg_sf_genes, sensitive_genes};
+use ownhealth_genome::synthetic::{self, VcfRow, write_vcf};
+use ownhealth_genome::{FindingsQuery, Gate, list_findings};
+use serde_json::{Value, json};
+use sqlx::PgConnection;
+use uuid::Uuid;
+
+/// (chrom, pos, VariationID, REF, ALT, CLNSIG, CLNREVSTAT, gene)
+type Cv<'a> = (&'a str, i64, i64, &'a str, &'a str, &'a str, &'a str, &'a str);
+
+const EXPERT: &str = "reviewed_by_expert_panel";
+const SINGLE: &str = "criteria_provided,_single_submitter";
+const MULTI: &str = "criteria_provided,_multiple_submitters,_no_conflicts";
+const NONE: &str = "no_assertion_criteria_provided";
+
+// Alex's carried sites (synthetic.rs alex_facts) plus three this test adds to his calls VCF.
+const CFTR: (&str, i64, &str, &str) = ("7", 117559590, "ATCT", "A"); // an indel, VariationID 7105
+const MTHFR: (&str, i64, &str, &str) = ("1", 11796321, "G", "A");
+const LCT: (&str, i64, &str, &str) = ("2", 135851076, "G", "A");
+const CYP2C19: (&str, i64, &str, &str) = ("10", 94781859, "G", "A");
+const BRCA2: (&str, i64, &str, &str) = ("13", 32338000, "A", "G");
+const MULTI_POS: i64 = 5_000_000; // chr11, REF GT, ALT G,GTT, GT 1/2
+const DPYD_REF: (&str, i64, &str, &str) = ("1", 97450058, "C", "T"); // Alex is ref here
+
+fn cv<'a>(site: (&'a str, i64, &'a str, &'a str), vid: i64, sig: &'a str, rev: &'a str, gene: &'a str) -> Cv<'a> {
+    (site.0, site.1, vid, site.2, site.3, sig, rev, gene)
+}
+
+/// Release one (2026-10-05): what the facts already say, plus a planted LP at MTHFR.
+fn release_one() -> Vec<Cv<'static>> {
+    vec![
+        cv(MTHFR, 900030, "Likely_pathogenic", SINGLE, "MTHFR"),
+        cv(DPYD_REF, 900040, "Pathogenic", MULTI, "DPYD"),
+        cv(LCT, 900020, "Benign", MULTI, "LCT"),
+        ("11", MULTI_POS, 900001, "GT", "G", "Benign", SINGLE, "SYNTH1"),
+        (
+            "11",
+            MULTI_POS,
+            900002,
+            "G",
+            "GT",
+            "Uncertain_significance",
+            SINGLE,
+            "SYNTH1",
+        ),
+        cv(BRCA2, 900010, "Uncertain_significance", SINGLE, "BRCA2"),
+        cv(CYP2C19, 12348, "drug_response", EXPERT, "CYP2C19"),
+        cv(CFTR, 7105, "Pathogenic", EXPERT, "CFTR"),
+    ]
+}
+
+/// Release two (2026-10-12): one change of every kind.
+fn release_two() -> Vec<Cv<'static>> {
+    vec![
+        cv(MTHFR, 900030, "Likely_pathogenic", MULTI, "MTHFR"), // stars 1 -> 2: silent
+        cv(DPYD_REF, 900040, "Pathogenic", MULTI, "DPYD"),
+        cv(LCT, 900020, "Likely_pathogenic", SINGLE, "LCT"), // upgrade, 1 star: alert
+        ("11", MULTI_POS, 900001, "GT", "G", "Benign", SINGLE, "SYNTH1"),
+        ("11", MULTI_POS, 900002, "G", "GT", "Likely_pathogenic", NONE, "SYNTH1"), // upgrade, 0 stars
+        cv(BRCA2, 900010, "Likely_benign", SINGLE, "BRCA2"),                       // SF gene: alert
+        cv(CYP2C19, 12348, "drug_response", EXPERT, "CYP2C19"),
+        cv(CFTR, 7105, "Uncertain_significance", SINGLE, "CFTR"), // downgrade of a shown P: alert
+    ]
+}
+
+fn rank(chrom: &str) -> u8 {
+    clinvar::contig_rank(chrom).unwrap_or(99)
+}
+
+/// A ClinVar-shaped GRCh38 VCF, sorted as ClinVar sorts it; bgzipped when `bgzip`.
+fn write_release(dir: &Path, name: &str, date: &str, rows: &[Cv<'_>], bgzip: bool) -> anyhow::Result<PathBuf> {
+    let mut rows = rows.to_vec();
+    rows.sort_by_key(|r| (rank(r.0), r.1, r.2));
+    let mut text = format!(
+        "##fileformat=VCFv4.1\n##fileDate={date}\n##source=ClinVar (synthetic test release)\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+    );
+    for (chrom, pos, vid, r, a, sig, rev, gene) in rows {
+        text.push_str(&format!(
+            "{chrom}\t{pos}\t{vid}\t{r}\t{a}\t.\t.\tALLELEID={vid};CLNREVSTAT={rev};CLNSIG={sig};GENEINFO={gene}:1\n"
+        ));
+    }
+    let path = dir.join(name);
+    if bgzip {
+        let mut w = bgzf::io::Writer::new(std::fs::File::create(&path)?);
+        w.write_all(text.as_bytes())?;
+        w.finish()?;
+    } else {
+        std::fs::write(&path, text)?;
+    }
+    Ok(path)
+}
+
+/// Alex's calls VCF as synthetic.rs builds it, plus a BRCA2 site and a multiallelic site.
+fn alex_calls() -> Vec<VcfRow> {
+    let mut rows = Vec::new();
+    for fact in synthetic::alex_facts()["facts"].as_array().into_iter().flatten() {
+        for v in fact.get("variants").and_then(Value::as_array).into_iter().flatten() {
+            if v["genotype"]["call_state"] == "alt" {
+                let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+                rows.push(VcfRow::new(
+                    &s("chrom"),
+                    v["pos"].as_i64().unwrap_or_default(),
+                    &s("ref"),
+                    &s("alt"),
+                    "0/1",
+                ));
+            }
+        }
+    }
+    rows.push(VcfRow::new("chr13", BRCA2.1, BRCA2.2, BRCA2.3, "0/1"));
+    rows.push(VcfRow::new("chr11", MULTI_POS, "GT", "G,GTT", "1/2"));
+    rows.push(VcfRow::new("chr3", 1_000_500, "A", "G", "./."));
+    rows
+}
+
+async fn seed_alex(e: &Env, c: &mut PgConnection) -> anyhow::Result<()> {
+    let raw = vec![(
+        "calls_vcf".to_string(),
+        write_vcf("AR-01.vcf.gz", &alex_calls(), "AR-01")?,
+    )];
+    let (facts, att) = synthetic::with_files(&synthetic::alex_facts(), &e.blobs, &raw)?;
+    e.seed(c, "alex", &facts, &att).await?;
+    Ok(())
+}
+
+/// Sam's chip: an LCT call and a DPYD site the array does not probe.
+fn sam_chip() -> Value {
+    let mut doc = synthetic::sam_facts();
+    doc["assay"] = json!({"build": "GRCh38", "type": "chip", "platform": "synthetic array v1"});
+    let site = |(chrom, pos, r, a): (&str, i64, &str, &str), state: &str, gt: &str| {
+        json!({"chrom": format!("chr{chrom}"), "pos": pos, "ref": r, "alt": a,
+               "vrs_id": synthetic::vrs_id(&format!("chr{chrom}"), pos, r, a),
+               "genotype": {"call_state": state, "gt": gt}})
+    };
+    let lct = site(LCT, "alt", "0/1");
+    let dpyd = site(DPYD_REF, "not_on_array", "./.");
+    doc["facts"] = json!([
+        {"id": ownhealth_genome::fact_id("trait", "LCT", lct["vrs_id"].as_str().unwrap_or_default()),
+         "category": "trait", "gene": "LCT", "variants": [lct],
+         "value": {"trait": "lactase persistence", "call": "likely"},
+         "summary": "LCT -13910 C/T: lactase persistence likely.",
+         "evidence": {"level": "E2", "native": "replicated association"},
+         "confidence": {"level": "medium", "basis": "array call"}, "sensitivity": {"level": "normal"}},
+        {"id": ownhealth_genome::fact_id("trait", "DPYD", dpyd["vrs_id"].as_str().unwrap_or_default()),
+         "category": "trait", "gene": "DPYD", "variants": [dpyd],
+         "value": {"trait": "synthetic marker", "call": "unknown"},
+         "summary": "Not on this array.",
+         "evidence": {"level": "E3", "native": "synthetic"},
+         "confidence": {"level": "low", "basis": "not probed"}, "sensitivity": {"level": "normal"}},
+    ]);
+    doc
+}
+
+async fn seed_family(e: &Env, c: &mut PgConnection) -> anyhow::Result<()> {
+    seed_alex(e, c).await?;
+    e.seed(c, "lucia", &synthetic::lucia_facts(), &[]).await?;
+    e.seed(c, "sam", &sam_chip(), &[]).await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+struct Ev {
+    slug: String,
+    variation_id: i64,
+    kind: String,
+    alerted: bool,
+    release_from: Option<String>,
+    release_to: String,
+}
+
+async fn events(c: &mut PgConnection) -> anyhow::Result<Vec<Ev>> {
+    Ok(sqlx::query_as(
+        "select p.slug, e.variation_id, e.kind, e.alerted, e.release_from, e.release_to from genome_event e \
+         join profile p on p.id = e.profile_id order by p.slug, e.release_to, e.variation_id",
+    )
+    .fetch_all(c)
+    .await?)
+}
+
+fn ev(slug: &str, vid: i64, kind: &str, alerted: bool, from: &str, to: &str) -> Ev {
+    Ev {
+        slug: slug.into(),
+        variation_id: vid,
+        kind: kind.into(),
+        alerted,
+        release_from: Some(from.into()),
+        release_to: to.into(),
+    }
+}
+
+async fn alerts_of(c: &mut PgConnection, profile: Uuid) -> anyhow::Result<Vec<Value>> {
+    Ok(sqlx::query_scalar(
+        "select payload from review_item where kind = 'genome_reinterpretation' and profile_id = $1 \
+         order by payload->>'event_id'",
+    )
+    .bind(profile)
+    .fetch_all(c)
+    .await?)
+}
+
+fn alert_for<'a>(items: &'a [Value], event: &str) -> Vec<&'a Value> {
+    items.iter().filter(|p| p["event"] == event).collect()
+}
+
+#[tokio::test]
+async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_family(&e, &mut c).await?;
+    let one = write_release(
+        e.dir.path(),
+        "clinvar_20261005.vcf.gz",
+        "20261005",
+        &release_one(),
+        true,
+    )?;
+    let two = write_release(
+        e.dir.path(),
+        "clinvar_20261012.vcf",
+        "2026-10-12",
+        &release_two(),
+        false,
+    )?;
+
+    // First run: the facts are the baseline. Only the planted MTHFR LP (1 star, no fact) is new.
+    let r1 = clinvar::diff_release(&e.db.pool, &e.blobs, &one, 18).await?;
+    assert_eq!(r1.release.to_string(), "2026-10-05");
+    assert_eq!(r1.datasets.len(), 3);
+    assert!(r1.datasets.iter().all(|d| d.skipped.is_none()), "{r1:?}");
+    assert_eq!(
+        events(&mut c).await?,
+        vec![ev("alex", 900030, "upgraded_to_plp", true, "2026-09-28", "2026-10-05")]
+    );
+    let alex = e.profile("alex");
+    let planted = alerts_of(&mut c, alex).await?;
+    assert_eq!(planted.len(), 1);
+    assert_eq!(planted[0]["gene"], "MTHFR");
+    assert_eq!(planted[0]["from"], "not_reported");
+    assert_eq!(
+        planted[0]["summary"],
+        "ClinVar now classifies a variant you carry in MTHFR as pathogenic or likely pathogenic (1 star). \
+         Before: not reported in your genome file."
+    );
+    assert_eq!(
+        planted[0]["summary_es"],
+        "ClinVar clasifica ahora una variante que tienes en MTHFR como patogénica o probablemente patogénica \
+         (1 estrella). Antes: sin informar en tu archivo genómico."
+    );
+
+    // The snapshot holds exactly the carried records: the indel, both alleles of the multiallelic
+    // site, and nothing at the ref site (Alex) or the not_on_array site (Sam's chip).
+    let snap: Vec<(String, i64)> = sqlx::query_as(
+        "select p.slug, c.variation_id from clinvar_carried c join genome_dataset d on d.id = c.dataset_id \
+         join profile p on p.id = d.profile_id order by 1, 2",
+    )
+    .fetch_all(&mut *c)
+    .await?;
+    let want: Vec<(String, i64)> = [
+        ("alex", 7105),
+        ("alex", 12348),
+        ("alex", 900001),
+        ("alex", 900002),
+        ("alex", 900010),
+        ("alex", 900020),
+        ("alex", 900030),
+        ("lucia", 7105),
+        ("sam", 900020),
+    ]
+    .iter()
+    .map(|(s, v)| (s.to_string(), *v))
+    .collect();
+    assert_eq!(snap, want);
+
+    // Second run: diffed against the snapshot.
+    let r2 = clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
+    assert!(r2.datasets.iter().all(|d| d.skipped.is_none()), "{r2:?}");
+    let (a, b) = ("2026-10-05", "2026-10-12");
+    assert_eq!(
+        events(&mut c).await?,
+        vec![
+            ev("alex", 900030, "upgraded_to_plp", true, "2026-09-28", a),
+            ev("alex", 7105, "downgraded_from_plp", true, a, b),
+            ev("alex", 900002, "upgraded_to_plp", false, a, b), // 0 stars: an event, no alert
+            ev("alex", 900010, "vus_resolved", true, a, b),     // ACMG SF gene
+            ev("alex", 900020, "upgraded_to_plp", true, a, b),
+            ev("alex", 900030, "stars_changed", false, a, b),
+            ev("lucia", 7105, "downgraded_from_plp", false, a, b), // a minor's carrier fact is not shown
+            ev("sam", 900020, "upgraded_to_plp", true, a, b),
+        ]
+    );
+
+    let items = alerts_of(&mut c, alex).await?;
+    assert_eq!(items.len(), 4);
+    let sf = alert_for(&items, "vus_resolved");
+    assert_eq!(sf.len(), 1);
+    assert_eq!(sf[0]["withheld"], true);
+    assert_eq!(sf[0]["summary"], "A withheld result changed in ClinVar.");
+    assert_eq!(
+        sf[0]["summary_es"],
+        "Ha cambiado en ClinVar un resultado que está oculto."
+    );
+    let text = sf[0].to_string();
+    assert!(!text.contains("BRCA2") && !text.contains("900010"), "{text}");
+    let down = alert_for(&items, "downgraded_from_plp");
+    assert_eq!(down[0]["gene"], "CFTR");
+    assert_eq!(
+        down[0]["summary"],
+        "ClinVar now classifies a variant you carry in CFTR as of uncertain significance (1 star). Before: \
+         pathogenic or likely pathogenic (3 stars)."
+    );
+
+    let sam = alerts_of(&mut c, e.profile("sam")).await?;
+    assert_eq!(sam.len(), 1);
+    assert_eq!(sam[0]["unconfirmed"], true);
+    assert!(
+        sam[0]["summary"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("It comes from a chip and is unconfirmed: worth a clinical test.")),
+        "{}",
+        sam[0]
+    );
+    assert!(
+        sam[0]["summary_es"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("merece una prueba clínica."))
+    );
+    assert!(alerts_of(&mut c, e.profile("lucia")).await?.is_empty());
+
+    // get_genome_findings' clinvar_now: the CFTR finding now reads what release two says.
+    let mut found = list_findings(&mut c, alex, &Gate::new(false, false), &FindingsQuery::default()).await?;
+    clinvar::attach_now(&mut c, alex, &mut found).await?;
+    let cftr = found["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|f| f["gene"] == "CFTR")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        cftr["clinvar_now"],
+        json!({"significance": "Uncertain_significance", "class": "vus", "stars": 1, "release": b})
+    );
+
+    // The same release again, or an older one, compares nothing.
+    let again = clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
+    assert!(
+        again.datasets.iter().all(|d| d.skipped == Some("already_compared")),
+        "{again:?}"
+    );
+    let older = clinvar::diff_release(&e.db.pool, &e.blobs, &one, 18).await?;
+    assert!(older.datasets.iter().all(|d| d.skipped == Some("already_compared")));
+    assert_eq!(events(&mut c).await?.len(), 8);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_sf_gene_is_named_once_the_sensitive_switch_is_on() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_alex(&e, &mut c).await?;
+    sqlx::query("update profile set genome_sensitive_ui = true where id = $1")
+        .bind(e.profile("alex"))
+        .execute(&mut *c)
+        .await?;
+    let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
+    let two = write_release(e.dir.path(), "two.vcf", "20261012", &release_two(), false)?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &one, 18).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;
+    let items = alerts_of(&mut c, e.profile("alex")).await?;
+    let sf = alert_for(&items, "vus_resolved");
+    assert_eq!(sf[0]["withheld"], false);
+    assert_eq!(sf[0]["gene"], "BRCA2");
+    assert_eq!(
+        sf[0]["summary"],
+        "ClinVar now classifies a variant you carry in BRCA2 as benign or likely benign (1 star). Before: of \
+         uncertain significance (1 star)."
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_release_older_than_the_genome_file_is_not_a_baseline() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_alex(&e, &mut c).await?;
+    let old = write_release(e.dir.path(), "old.vcf", "20260901", &release_two(), false)?;
+    let r = clinvar::diff_release(&e.db.pool, &e.blobs, &old, 18).await?;
+    assert_eq!(r.datasets[0].skipped, Some("older_than_genome_file"));
+    assert!(events(&mut c).await?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_file_without_a_release_date_or_out_of_order_is_refused() -> R {
+    let dir = tempfile::tempdir()?;
+    let p = dir.path().join("nodate.vcf");
+    std::fs::write(
+        &p,
+        "##fileformat=VCFv4.1\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+    )?;
+    let err = clinvar::release_date(&p)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err.contains("no ##fileDate"), "{err}");
+    let mut rows = release_one();
+    rows.sort_by_key(|r| (rank(r.0), r.1));
+    rows.reverse();
+    let mut text = "##fileDate=20261005\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n".to_string();
+    for (chrom, pos, vid, r, a, sig, rev, gene) in rows {
+        text.push_str(&format!(
+            "{chrom}\t{pos}\t{vid}\t{r}\t{a}\t.\t.\tCLNREVSTAT={rev};CLNSIG={sig};GENEINFO={gene}:1\n"
+        ));
+    }
+    let p = dir.path().join("unsorted.vcf");
+    std::fs::write(&p, text)?;
+    let mut person = FactAlleles::new(vec![((22, 1), "A".into(), "G".into())]);
+    let err = carried_records(&p, &mut person)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err.contains("not sorted"), "{err}");
+    Ok(())
+}
+
+#[test]
+fn a_multiallelic_and_an_indel_site_are_matched_from_a_vcf() -> R {
+    let dir = tempfile::tempdir()?;
+    let rel = write_release(dir.path(), "r.vcf.gz", "20261005", &release_one(), true)?;
+    let calls = write_vcf("AR-01.vcf.gz", &alex_calls(), "AR-01")?;
+    let vcf = dir.path().join("calls.vcf.gz");
+    std::fs::write(&vcf, &calls.data)?;
+    let mut person = VcfAlleles::open(&vcf, "calls")?;
+    let (_, carried) = carried_records(&rel, &mut person)?;
+    let ids: Vec<i64> = carried.iter().map(|c| c.variation_id).collect();
+    assert!(ids.contains(&7105), "the CFTR indel: {ids:?}");
+    assert!(
+        ids.contains(&900001) && ids.contains(&900002),
+        "both alleles of the 1/2 site: {ids:?}"
+    );
+    assert!(!ids.contains(&900040), "a ref site is not carried: {ids:?}");
+    // Only the carried allele: a person 0/1 at the multiallelic site carries GT>G, not G>GT.
+    let mut one = calls_with(&dir, &[VcfRow::new("chr11", MULTI_POS, "GT", "G,GTT", "0/1")])?;
+    let (_, carried) = carried_records(&rel, &mut one)?;
+    assert_eq!(carried.iter().map(|c| c.variation_id).collect::<Vec<_>>(), vec![900001]);
+    Ok(())
+}
+
+fn calls_with(dir: &tempfile::TempDir, rows: &[VcfRow]) -> anyhow::Result<VcfAlleles> {
+    let f = write_vcf("x.vcf.gz", rows, "X")?;
+    let p = dir.path().join("x.vcf.gz");
+    std::fs::write(&p, &f.data)?;
+    Ok(VcfAlleles::open(&p, "x")?)
+}
+
+/// The policy fixture: (old class, old stars, new class, new stars, first run, SF gene, shown P/LP)
+/// -> (event, alert).
+type Case = (
+    Option<(&'static str, Option<i16>)>,
+    &'static str,
+    i16,
+    bool,
+    bool,
+    bool,
+    Option<&'static str>,
+    bool,
+);
+
+const POLICY: [Case; 14] = [
+    (None, "plp", 1, true, false, false, Some("upgraded_to_plp"), true),
+    (None, "plp", 0, true, false, false, Some("upgraded_to_plp"), false),
+    (
+        Some(("vus", Some(1))),
+        "plp",
+        1,
+        false,
+        false,
+        false,
+        Some("upgraded_to_plp"),
+        true,
+    ),
+    (
+        Some(("vus", Some(1))),
+        "plp",
+        0,
+        false,
+        false,
+        false,
+        Some("upgraded_to_plp"),
+        false,
+    ),
+    (
+        Some(("plp", Some(3))),
+        "vus",
+        1,
+        false,
+        false,
+        true,
+        Some("downgraded_from_plp"),
+        true,
+    ),
+    (
+        Some(("plp", Some(3))),
+        "vus",
+        1,
+        false,
+        false,
+        false,
+        Some("downgraded_from_plp"),
+        false,
+    ),
+    (
+        Some(("plp", Some(2))),
+        "conflicting",
+        1,
+        false,
+        false,
+        true,
+        Some("became_conflicting"),
+        true,
+    ),
+    (
+        Some(("plp", Some(3))),
+        "plp",
+        2,
+        false,
+        false,
+        true,
+        Some("stars_changed"),
+        false,
+    ),
+    (Some(("plp", None)), "plp", 2, true, false, true, None, false),
+    (
+        Some(("vus", Some(1))),
+        "blb",
+        1,
+        false,
+        false,
+        false,
+        Some("vus_resolved"),
+        false,
+    ),
+    (
+        Some(("vus", Some(1))),
+        "blb",
+        1,
+        false,
+        true,
+        false,
+        Some("vus_resolved"),
+        true,
+    ),
+    (
+        Some(("blb", Some(2))),
+        "vus",
+        1,
+        false,
+        false,
+        false,
+        Some("significance_changed"),
+        false,
+    ),
+    (None, "blb", 2, true, false, false, None, false),
+    (
+        None,
+        "vus",
+        1,
+        false,
+        false,
+        false,
+        Some("new_assertion_on_carried_variant"),
+        false,
+    ),
+];
+
+fn run_policy(cases: &[Case]) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for (i, (old, new, stars, first, sf, shown, want_kind, want_alert)) in cases.iter().enumerate() {
+        let old = old.map(|(class, stars)| Before { class, stars });
+        let kind = event_kind(old.as_ref(), new, *stars, *first);
+        let alert = kind.is_some_and(|k| alerts(k, old.as_ref(), *stars, *sf, *shown));
+        if kind != *want_kind || alert != *want_alert {
+            wrong.push(format!("case {i}: got {kind:?}/{alert}"));
+        }
+    }
+    wrong
+}
+
+#[test]
+fn the_policy_fixture_holds_and_one_flipped_star_breaks_it() {
+    assert_eq!(run_policy(&POLICY), Vec::<String>::new());
+    // The control: the 1-star upgrade read as 0 stars must fail the fixture.
+    let mut flipped = POLICY;
+    flipped[0].2 = 0;
+    assert_eq!(
+        run_policy(&flipped),
+        vec!["case 0: got Some(\"upgraded_to_plp\")/false".to_string()]
+    );
+}
+
+#[test]
+fn every_alert_class_sf_gene_is_in_the_sensitive_set() {
+    let sf = acmg_sf_genes();
+    let sensitive = sensitive_genes();
+    assert!(sf.iter().all(|g| sensitive.contains(g)));
+    // ACMG SF v3.3 cancer (28) and cardiovascular (41, with PLN) genes.
+    assert_eq!(sf.len(), 69, "{sf:?}");
+    assert!(is_sf_gene(Some("PLN")) && is_sf_gene(Some("brca2")) && !is_sf_gene(Some("APOE")));
+}
+
+#[test]
+fn a_withheld_alert_names_nothing_in_either_language() {
+    let old = Before {
+        class: "plp",
+        stars: Some(3),
+    };
+    let t = clinvar::EventText {
+        gene: Some("BRCA1"),
+        old: Some(&old),
+        new_class: "vus",
+        new_stars: 1,
+        withheld: true,
+        unconfirmed: true,
+    };
+    for lang in ["en", "es"] {
+        let s = summary(&t, lang);
+        assert!(
+            !s.contains("BRCA1") && !s.contains("pathogen") && !s.contains("patogén"),
+            "{s}"
+        );
+    }
+}
+
+/// The exit criterion on this box: a household of 4 genomes against a 3M-record synthetic release in
+/// under 5 minutes with a peak RSS under 500 MB. Run with
+/// `cargo test -p ownhealth-genome --release --test clinvar -- --ignored household_of_four`.
+#[test]
+#[ignore = "perf: writes about 300 MB of synthetic files"]
+fn household_of_four_genomes_against_a_3m_record_release() -> R {
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir()?;
+    let contigs: Vec<String> = (1..=22)
+        .map(|i| i.to_string())
+        .chain(["X".into(), "Y".into(), "MT".into()])
+        .collect();
+    let per_contig = 3_000_000 / contigs.len() as i64 + 1;
+    let rel = dir.path().join("clinvar.vcf.gz");
+    {
+        let mut w = bgzf::io::Writer::new(std::io::BufWriter::new(std::fs::File::create(&rel)?));
+        writeln!(
+            w,
+            "##fileformat=VCFv4.1\n##fileDate=20261005\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
+        )?;
+        let sigs = [
+            ("Benign", MULTI),
+            ("Uncertain_significance", SINGLE),
+            ("Likely_pathogenic", SINGLE),
+        ];
+        let mut vid = 1;
+        for c in &contigs {
+            for i in 0..per_contig {
+                let (sig, rev) = sigs[(vid % 3) as usize];
+                writeln!(
+                    w,
+                    "{c}\t{}\t{vid}\tA\tG\t.\t.\tALLELEID={vid};CLNDISDB=MedGen:CN169374;CLNDN=not_specified;\
+                     CLNREVSTAT={rev};CLNSIG={sig};CLNVC=single_nucleotide_variant;GENEINFO=SYNTH{}:1;\
+                     MC=SO:0001583|missense_variant;ORIGIN=1",
+                    100 + i * 50,
+                    vid % 500
+                )?;
+                vid += 1;
+            }
+        }
+        w.finish()?;
+    }
+    // Four genomes of 1.2M calls each, one in three on a ClinVar position.
+    let mut genomes = Vec::new();
+    for g in 0..4 {
+        let p = dir.path().join(format!("g{g}.vcf.gz"));
+        let mut w = bgzf::io::Writer::new(std::io::BufWriter::new(std::fs::File::create(&p)?));
+        writeln!(
+            w,
+            "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS{g}"
+        )?;
+        for c in &contigs {
+            for i in 0..(1_200_000 / contigs.len() as i64) {
+                let pos = if i % 3 == 0 { 100 + i * 50 } else { 125 + i * 50 };
+                writeln!(
+                    w,
+                    "chr{}\t{pos}\t.\tA\tG\t50\tPASS\t.\tGT:DP:GQ\t0/1:30:60",
+                    if c == "MT" { "M" } else { c }
+                )?;
+            }
+        }
+        w.finish()?;
+        genomes.push(p);
+    }
+    let peak = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler = {
+        let (peak, stop) = (peak.clone(), stop.clone());
+        let pid = std::process::id().to_string();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(o) = std::process::Command::new("ps")
+                    .args(["-o", "rss=", "-p", &pid])
+                    .output()
+                {
+                    let kb: u64 = String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0);
+                    peak.fetch_max(kb, std::sync::atomic::Ordering::Relaxed);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        })
+    };
+    let t = Instant::now();
+    let mut total = 0;
+    for (g, p) in genomes.iter().enumerate() {
+        let mut person = VcfAlleles::open(p, &format!("g{g}"))?;
+        let (_, carried) = carried_records(&rel, &mut person)?;
+        assert!(!carried.is_empty());
+        total += carried.len();
+    }
+    let took = t.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = sampler.join();
+    let rss_mb = peak.load(std::sync::atomic::Ordering::Relaxed) / 1024;
+    eprintln!("4 genomes x 3M records: {took:?}, {total} carried, peak RSS {rss_mb} MB");
+    assert!(took < Duration::from_secs(300), "{took:?}");
+    assert!(rss_mb < 500, "{rss_mb} MB");
+    Ok(())
+}

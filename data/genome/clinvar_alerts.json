@@ -1,0 +1,30 @@
+{
+ "version": "clinvar_alerts 0.1.0",
+ "cite": "https://www.ncbi.nlm.nih.gov/clinvar/docs/review_status/",
+ "templates": {
+  "named": {
+   "en": "ClinVar now classifies a variant you carry in {gene} as {new} ({stars}). Before: {old}.",
+   "es": "ClinVar clasifica ahora una variante que tienes en {gene} como {new} ({stars}). Antes: {old}."
+  },
+  "named_no_gene": {
+   "en": "ClinVar now classifies a variant you carry as {new} ({stars}). Before: {old}.",
+   "es": "ClinVar clasifica ahora una variante que tienes como {new} ({stars}). Antes: {old}."
+  },
+  "withheld": {
+   "en": "A withheld result changed in ClinVar.",
+   "es": "Ha cambiado en ClinVar un resultado que está oculto."
+  },
+  "chip": {
+   "en": "It comes from a chip and is unconfirmed: worth a clinical test.",
+   "es": "Viene de un chip y no está confirmado: merece una prueba clínica."
+  },
+  "stars_one": {"en": "1 star", "es": "1 estrella"},
+  "stars_many": {"en": "{n} stars", "es": "{n} estrellas"},
+  "class_plp": {"en": "pathogenic or likely pathogenic", "es": "patogénica o probablemente patogénica"},
+  "class_vus": {"en": "of uncertain significance", "es": "de significado incierto"},
+  "class_conflicting": {"en": "with conflicting classifications", "es": "con clasificaciones contradictorias"},
+  "class_blb": {"en": "benign or likely benign", "es": "benigna o probablemente benigna"},
+  "class_other": {"en": "another kind of classification", "es": "otro tipo de clasificación"},
+  "class_not_reported": {"en": "not reported in your genome file", "es": "sin informar en tu archivo genómico"}
+ }
+}
