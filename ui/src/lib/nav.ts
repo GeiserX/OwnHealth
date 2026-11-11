@@ -19,7 +19,7 @@ export const NAV: NavItem[] = [
 	},
 	{
 		path: '/drug-check',
-		key: 'nav_drug',
+		key: 'med_nav', // the Medications screen; the route and the mockup hash keep the drug-check name
 		mockup: 'drug-check',
 		icon: '<rect x="3" y="9" width="18" height="7" rx="3.5" transform="rotate(-35 12 12.5)"/><path d="m9 9 5 6"/>'
 	},

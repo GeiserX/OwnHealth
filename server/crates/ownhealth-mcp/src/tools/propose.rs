@@ -366,9 +366,12 @@ struct FindingStatusPayload {
 #[derive(Debug, Clone)]
 struct MedicationPayload {
     action: String,
+    /// medication | supplement (a new one; a stop or change keeps the record's own)
+    kind: Option<String>,
     name: String,
     dose: Option<String>,
     schedule: Option<String>,
+    prescriber: Option<String>,
     date: NaiveDate,
     reason: Option<String>,
 }
@@ -429,9 +432,11 @@ impl Payload {
                 let o = Obj::of(v, "", "MedicationPayload")?;
                 Payload::Medication(MedicationPayload {
                     action: o.literal_req("action", &["start", "stop", "change"])?,
+                    kind: o.literal_opt("kind", &["medication", "supplement"])?,
                     name: o.str_req("name", 1, Some(200), None)?,
                     dose: o.str_opt("dose", 0, Some(100), None)?,
                     schedule: o.str_opt("schedule", 0, Some(100), None)?,
+                    prescriber: o.str_opt("prescriber", 0, Some(200), None)?,
                     date: o.date_req("date")?,
                     reason: o.str_opt("reason", 0, Some(500), None)?,
                 })
@@ -456,9 +461,11 @@ impl Payload {
             }),
             Payload::Medication(p) => json!({
                 "action": p.action,
+                "kind": p.kind,
                 "name": p.name,
                 "dose": p.dose,
                 "schedule": p.schedule,
+                "prescriber": p.prescriber,
                 "date": p.date.format("%Y-%m-%d").to_string(),
                 "reason": p.reason,
             }),
@@ -1208,8 +1215,11 @@ pub async fn accept_proposal(
             if action == "start" {
                 let rec: MedicationIn = serde_json::from_value(json!({
                     "profile_id": profile_id,
+                    "kind": str_of(&body, "kind").unwrap_or("medication"),
                     "name": str_of(&body, "name").unwrap_or_default(),
                     "dose_text": str_of(&body, "dose"),
+                    "schedule_text": str_of(&body, "schedule"),
+                    "prescriber": str_of(&body, "prescriber"),
                     "started": when,
                     "med_status": "active",
                     "reason_text": str_of(&body, "reason"),
@@ -1243,25 +1253,36 @@ pub async fn accept_proposal(
                 "stopped",
                 "med_status",
                 "reason_text",
+                "schedule_text",
+                "prescriber",
+                "codes",
+                "sensitivity",
+                "effective_at",
             ] {
                 fields.insert(k.into(), old.get(k).cloned().unwrap_or(Value::Null));
             }
             if action == "stop" {
                 fields.insert("stopped".into(), json!(when));
                 fields.insert("med_status".into(), json!("stopped"));
-            } else if let Some(d) = str_of(&body, "dose").filter(|d| !d.is_empty()) {
-                fields.insert("dose_text".into(), json!(d));
+            } else {
+                for (from, to) in [
+                    ("dose", "dose_text"),
+                    ("schedule", "schedule_text"),
+                    ("prescriber", "prescriber"),
+                ] {
+                    if let Some(v) = str_of(&body, from).filter(|v| !v.is_empty()) {
+                        fields.insert(to.into(), json!(v));
+                    }
+                }
             }
             let new = RecordIn::Medication(serde_json::from_value(Value::Object(fields))?);
-            let c = supersede_record(
-                &mut *conn,
-                match_id,
-                &new,
-                &src,
-                "person",
-                &format!("agent proposal {action}"),
-            )
-            .await?;
+            // The agent's reason for the stop or change becomes the old version's status_reason,
+            // which the History card shows; reason_text stays why the medicine is taken.
+            let why = match str_of(&body, "reason").map(str::trim).filter(|r| !r.is_empty()) {
+                Some(r) => format!("agent proposal {action}: {r}"),
+                None => format!("agent proposal {action}"),
+            };
+            let c = supersede_record(&mut *conn, match_id, &new, &src, "person", &why).await?;
             Ok(vec![c.id])
         }
         _ => Err(Error::Review(
