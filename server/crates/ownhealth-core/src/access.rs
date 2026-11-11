@@ -10,6 +10,7 @@
 
 use sqlx::AssertSqlSafe;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -583,18 +584,41 @@ pub async fn set_genome_switches(
     Ok(())
 }
 
-/// The household's `age_of_majority` setting, or `default`.
-pub async fn age_of_majority(conn: &mut PgConnection, household_id: Uuid, default: i32) -> Result<i32> {
+/// `OWNHEALTH_AGE_OF_MAJORITY` as the running process read it: `Runtime` stores it here when it is
+/// built, so code without the settings at hand (the rules engine) answers like the routes.
+static ENV_MAJORITY: AtomicI32 = AtomicI32::new(18);
+
+pub fn set_env_majority(years: i32) {
+    ENV_MAJORITY.store(years, Ordering::Relaxed);
+}
+
+pub fn env_majority() -> i32 {
+    ENV_MAJORITY.load(Ordering::Relaxed)
+}
+
+/// The age of majority of one household: its `age_of_majority` setting, else
+/// `OWNHEALTH_AGE_OF_MAJORITY`, else 18. Every minor check (the profile list, the genome page, the
+/// agent's gate, the rules engine, a claim) asks this one function, so they always agree.
+pub async fn majority(conn: &mut PgConnection, household_id: Uuid) -> Result<i32> {
     let value: Option<serde_json::Value> =
         sqlx::query_scalar("select value from household_setting where household_id = $1 and key = 'age_of_majority'")
             .bind(household_id)
             .fetch_optional(conn)
             .await?;
+    let default = env_majority();
     Ok(match value {
         Some(serde_json::Value::Number(n)) => n.as_i64().and_then(|v| i32::try_from(v).ok()).unwrap_or(default),
         Some(serde_json::Value::String(s)) => s.trim().parse().unwrap_or(default),
         _ => default,
     })
+}
+
+/// The day every minor check is made on: the UTC day, the one the rules engine, the status page and
+/// the agent's default `as_of` use, so a record stored a moment ago is in it. The profile list, the
+/// genome page and its consent, the agent's gate and a claim all ask this, so on a birthday they flip
+/// together, whatever the server's `TZ`.
+pub fn today() -> NaiveDate {
+    today_utc()
 }
 
 pub fn today_utc() -> NaiveDate {

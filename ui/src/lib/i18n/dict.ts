@@ -1272,6 +1272,25 @@ export const dict = {
 		i2_tok_doc_propose: "To read pages that wait for review, the token also needs read:labs, read:vitals, read:records, read:genome and read:sensitive: a page not read yet can hold anything.",
 		// ---- end UI polish batch 5 ----
 		// ---- end UI polish ----
+		// ---- ownership transfer at majority (xfer_) ----
+		xfer_title: "{name} is {age} now",
+		xfer_d: "Invite {name} to take over this profile. When {name} joins, it becomes theirs: guardian access ends then, and {name} can give it back.",
+		xfer_invite: "Invite {name}",
+		xfer_had: "Who had access before you",
+		xfer_had_r: "ended when you took over",
+		xfer_had_d: "Their access ended when your profile became yours. You decide who gets it back.",
+		xfer_until: "until {date}",
+		xfer_back: "Give access back",
+		xfer_back_done: "Access given back to {name}.",
+		xfer_genome: "Sensitive genome findings start hidden. You can show them from the Genome page.",
+		xfer_someone: "A former member",
+		xfer_invited: "Invite sent to {name}.",
+		xfer_what: "Gets back: {list}.",
+		xfer_what_role: "Gets back their role, with no data categories.",
+		xfer_what_sens: "This includes sensitive facts and genome results.",
+		xfer_back_q: "Give {name} this access again?",
+		xfer_back_yes: "Yes, give it back",
+		xfer_lapsed: "Their access would have ended on {date}.",
 		// ---- slice 3: medication lane (med_) ----
 		med_nav: "Medications",
 		med_sub: "what is taken, how and since when, and a drug check before a new one",
@@ -2644,6 +2663,25 @@ export const dict = {
 		i2_tok_doc_propose: "Para leer páginas que esperan revisión, el token necesita además read:labs, read:vitals, read:records, read:genome y read:sensitive: una página aún sin leer puede contener cualquier cosa.",
 		// ---- end UI polish batch 5 ----
 		// ---- end UI polish ----
+		// ---- ownership transfer at majority (xfer_) ----
+		xfer_title: "{name} ya tiene {age} años",
+		xfer_d: "Invita a {name} a hacerse cargo de este perfil. Cuando {name} se dé de alta, el perfil pasa a ser suyo: el acceso de los tutores termina entonces, y {name} puede devolverlo.",
+		xfer_invite: "Invitar a {name}",
+		xfer_had: "Quién tenía acceso antes que tú",
+		xfer_had_r: "terminó al pasar a ser tuyo",
+		xfer_had_d: "Su acceso terminó cuando tu perfil pasó a ser tuyo. Tú decides a quién se lo devuelves.",
+		xfer_until: "hasta el {date}",
+		xfer_back: "Devolver el acceso",
+		xfer_back_done: "Acceso devuelto a {name}.",
+		xfer_genome: "Los hallazgos genómicos sensibles empiezan ocultos. Puedes mostrarlos desde la página Genoma.",
+		xfer_someone: "Un antiguo miembro",
+		xfer_invited: "Invitación enviada a {name}.",
+		xfer_what: "Recupera: {list}.",
+		xfer_what_role: "Recupera su rol, sin categorías de datos.",
+		xfer_what_sens: "Incluye datos sensibles y resultados del genoma.",
+		xfer_back_q: "¿Devolver este acceso a {name}?",
+		xfer_back_yes: "Sí, devolverlo",
+		xfer_lapsed: "Su acceso habría terminado el {date}.",
 		// ---- slice 3: medication lane (med_) ----
 		med_nav: "Medicación",
 		med_sub: "qué se toma, cómo y desde cuándo, y una consulta antes de empezar un fármaco nuevo",

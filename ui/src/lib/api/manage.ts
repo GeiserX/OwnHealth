@@ -96,7 +96,7 @@ export const addAlias = (body: { profile: string; alias: string; alias_group: st
 
 export const deleteGrant = (userId: Uuid, profile: string) =>
 	request<{ ok: true }>('DELETE', '/grants', { query: { user_id: userId, profile } });
-export const putGrant = (body: { user_id: Uuid; profile: string; role: Role; categories?: Scope[] | null }) => put<{ ok: true }>('/grants', body);
+export const putGrant = (body: { user_id: Uuid; profile: string; role: Role; categories?: Scope[] | null; expires_at?: string | null }) => put<{ ok: true }>('/grants', body);
 export const putLocks = (profile: string, locks: Scope[]) => put<{ ok: true; locks: Scope[] }>(`${p(profile)}/locks`, { locks });
 export const putSensitive = (profile: string, body: { ui?: boolean; agents?: boolean }) =>
 	put<{ ok: true; ui: boolean; agents: boolean }>(`${p(profile)}/sensitive`, body);

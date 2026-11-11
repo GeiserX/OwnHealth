@@ -140,8 +140,9 @@ async fn make_call<'c>(
     usage: Usage,
     lim: Limits,
 ) -> Result<Call<'c>, Fail> {
-    let as_of = parse_as_of(&mut *conn, None).await?;
+    let as_of = parse_as_of(None)?;
     let at = db_now(&mut *conn).await?;
+    let majority = crate::tools::majority_of(&mut *conn, perm.as_ref()).await?;
     Ok(Call {
         conn,
         rt,
@@ -166,6 +167,7 @@ async fn make_call<'c>(
         usage,
         limits: lim,
         tool: tool.into(),
+        majority,
     })
 }
 

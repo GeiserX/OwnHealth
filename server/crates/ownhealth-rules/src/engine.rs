@@ -8,7 +8,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
-use ownhealth_core::access::{Profile, age_of_majority, get_profile};
+use ownhealth_core::access::{Profile, get_profile, majority};
 use ownhealth_core::lifecycle::visible_sql;
 use ownhealth_core::records::{active_medications, list_records};
 use ownhealth_core::{Error, Result};
@@ -698,8 +698,7 @@ pub async fn evaluate(
     let profile = get_profile(&mut *conn, profile_id)
         .await?
         .ok_or_else(|| Error::NotFound(format!("profile {profile_id} not found")))?;
-    let majority = age_of_majority(&mut *conn, profile.household_id, 18).await?;
-    let minor = profile.is_minor(as_of, majority);
+    let minor = profile.is_minor(as_of, majority(&mut *conn, profile.household_id).await?);
     let age = profile.age_on(as_of);
     let (series, sensitive) = load_points(&mut *conn, profile_id, as_of, known_at, only_group, pack).await?;
 
