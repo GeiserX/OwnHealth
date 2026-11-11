@@ -51,8 +51,8 @@ pub const SUPPORTING: [&str; 7] = [
 fn security_tag(code: &str) -> Option<&'static str> {
     Some(match code {
         "PSY" | "PSYTHPN" | "MH" | "SUD" | "ETH" => "mental_health",
-        "SEX" | "STD" | "HIV" => "sexual_health",
-        "SDV" => "reproductive",
+        // SDV is sexual assault, abuse or domestic violence: the closest bucket is sexual_health
+        "SEX" | "STD" | "HIV" | "SDV" => "sexual_health",
         _ => return None,
     })
 }
@@ -818,19 +818,22 @@ pub fn family_member_history(r: &Value, profile_id: Uuid) -> Mapped {
             onset_approx,
         });
     }
-    // our own export carries the exact tags; any other source has only the HL7 labels
-    let exact: BTreeSet<String> = list(r.get("meta"), "tag")
+    // our own export carries the exact tags beside the HL7 labels; keep the exact tags, and add any
+    // HL7 label they do not cover (we export reproductive as SEX, so SEX is covered by it)
+    let mut tags: BTreeSet<String> = list(r.get("meta"), "tag")
         .iter()
         .filter(|t| t.get("system").and_then(Value::as_str) == Some(family::SENSITIVITY_TAG))
         .filter_map(|t| t.get("code").and_then(Value::as_str))
         .filter(|c| SENSITIVITY.contains(c))
         .map(String::from)
         .collect();
-    m.sensitivity = if exact.is_empty() {
-        sensitivity(r)
-    } else {
-        exact.into_iter().collect()
-    };
+    let has_reproductive = tags.contains("reproductive");
+    for t in sensitivity(r) {
+        if !(t == "sexual_health" && has_reproductive) {
+            tags.insert(t);
+        }
+    }
+    m.sensitivity = tags.into_iter().collect();
     m.fhir = Some(r.clone());
     match m.normalized() {
         Ok(m) => Mapped::Family {
@@ -859,6 +862,29 @@ mod tests {
             panic!("not mapped");
         };
         assert_eq!((member.deceased, member.death_age), (true, None));
+    }
+
+    #[test]
+    fn an_hl7_label_our_exact_tags_do_not_cover_is_kept() {
+        let r = json!({
+            "resourceType": "FamilyMemberHistory",
+            "status": "completed",
+            "meta": {
+                "security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "PSY"}],
+                "tag": [{"system": family::SENSITIVITY_TAG, "code": "reproductive"}]
+            },
+            "relationship": {"coding": [{"system": family::ROLE_CODE, "code": "MTH"}]}
+        });
+        let Mapped::Family { member, .. } = family_member_history(&r, Uuid::nil()) else {
+            panic!("not mapped");
+        };
+        assert_eq!(member.sensitivity, ["mental_health", "reproductive"]);
+    }
+
+    #[test]
+    fn sdv_imports_as_sexual_health_not_reproductive() {
+        let r = json!({"meta": {"security": [{"code": "SDV"}]}});
+        assert_eq!(sensitivity(&r), ["sexual_health"]);
     }
 
     #[test]
