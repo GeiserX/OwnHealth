@@ -36,7 +36,7 @@ pub fn router() -> Router<Runtime> {
 
 /// Python's `date.today()`: the server's local date.
 pub fn local_today() -> NaiveDate {
-    ownhealth_core::access::today()
+    chrono::Local::now().date_naive()
 }
 
 /// One profile as the UI's profile switcher reads it.
@@ -89,7 +89,7 @@ pub async fn household_majority(conn: &mut sqlx::PgConnection, perms: &[Permissi
 
 /// The caller first, then the household as the mockup lists it: partner, children, parents, others.
 pub fn summaries(perms: &[Permission], principal: &Principal, age_of_majority: i32) -> Vec<Value> {
-    let today = local_today();
+    let today = ownhealth_core::access::today();
     let mut rows: Vec<(bool, u8, String, Value)> = perms
         .iter()
         .map(|p| {
@@ -181,7 +181,7 @@ async fn source(
     }
     let g = gate::genome_gate(
         &perm,
-        local_today(),
+        ownhealth_core::access::today(),
         majority(&mut tx, perm.profile.household_id).await?,
     );
     let hidden = gate::hidden_reasons(&mut tx, &perm, g, std::slice::from_ref(&src_id)).await?;

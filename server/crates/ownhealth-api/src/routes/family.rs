@@ -27,7 +27,7 @@ use uuid::Uuid;
 use super::auth::{
     Body, Check, Fail, Params, R, answer, date_field, delete_cookie, detail, ok, person_fields, uuid_param,
 };
-use super::core::{household_majority, local_today, summaries};
+use super::core::{household_majority, summaries};
 use crate::error::ApiError;
 use crate::extract::{Caller, SessionCaller};
 
@@ -155,7 +155,7 @@ async fn get_household(State(rt): State<Runtime>, SessionCaller(p): SessionCalle
     .fetch_all(&mut *tx)
     .await?;
     let aom = household_majority(&mut tx, &perms).await?;
-    let transfer_pending = household::transfer_pending(&mut tx, &perms, local_today()).await?;
+    let transfer_pending = household::transfer_pending(&mut tx, &perms, ownhealth_core::access::today()).await?;
     let former_access = match p.user_id {
         Some(uid) => household::former_access(&mut tx, &perms, uid).await?,
         None => Vec::new(),
@@ -660,10 +660,10 @@ async fn put_sensitive(
     let turning_on = (body.ui == Some(true) && !perm.profile.genome_sensitive_ui)
         || (body.agents == Some(true) && !perm.profile.genome_sensitive_agents);
     if turning_on {
-        if perm
-            .profile
-            .is_minor(local_today(), majority(&mut tx, perm.profile.household_id).await?)
-        {
+        if perm.profile.is_minor(
+            ownhealth_core::access::today(),
+            majority(&mut tx, perm.profile.household_id).await?,
+        ) {
             return Err(detail(
                 StatusCode::CONFLICT,
                 "minor",

@@ -613,10 +613,12 @@ pub async fn majority(conn: &mut PgConnection, household_id: Uuid) -> Result<i32
     })
 }
 
-/// The day every minor check is made on: the server's local day. The profile list, the genome page and
-/// its consent, the agent's gate and a claim all ask this, so on a birthday they flip together.
+/// The day every minor check is made on: the UTC day, the one the rules engine, the status page and
+/// the agent's default `as_of` use, so a record stored a moment ago is in it. The profile list, the
+/// genome page and its consent, the agent's gate and a claim all ask this, so on a birthday they flip
+/// together, whatever the server's `TZ`.
 pub fn today() -> NaiveDate {
-    chrono::Local::now().date_naive()
+    today_utc()
 }
 
 pub fn today_utc() -> NaiveDate {

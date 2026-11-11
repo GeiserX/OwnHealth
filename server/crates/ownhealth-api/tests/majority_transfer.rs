@@ -8,7 +8,7 @@ mod support;
 use std::collections::BTreeMap;
 
 use axum::http::StatusCode;
-use chrono::{Local, Months, NaiveDate};
+use chrono::{Months, NaiveDate};
 use ownhealth_auth::household;
 use serde_json::{Value, json};
 use support::Env;
@@ -264,7 +264,14 @@ async fn an_adult_relative_claim_keeps_the_guardians() -> R {
         Some(carmen),
     )
     .await?;
-    household::claim_profile(&mut tx, carmen, user, Some(env.user("sam")), Local::now().date_naive()).await?;
+    household::claim_profile(
+        &mut tx,
+        carmen,
+        user,
+        Some(env.user("sam")),
+        ownhealth_core::access::today(),
+    )
+    .await?;
     tx.commit().await?;
     assert_eq!(
         grants(&env, carmen).await?.get(&env.user("sam")).map(String::as_str),
@@ -282,7 +289,7 @@ fn pending(household: &Value) -> Value {
 async fn guardians_see_a_pending_transfer_from_the_birthday_on() -> R {
     let env = Env::new(true).await?;
     let lucia = env.profile("lucia");
-    let today = Local::now().date_naive();
+    let today = ownhealth_core::access::today();
     let eighteen = today.checked_sub_months(Months::new(18 * 12)).unwrap_or(today);
     let mut alex = env.as_user(env.user("alex")).await?;
     let set_birth = |d: NaiveDate| format!("update profile set birth_date = '{d}' where id = $1");

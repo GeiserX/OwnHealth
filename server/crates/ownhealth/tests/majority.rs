@@ -1,5 +1,5 @@
 //! One answer to "is this person a minor?" everywhere: the profile list (`/api/me`), the genome page,
-//! the agent's gate over MCP and the rules engine all read the household setting, else
+//! the agent's gate over MCP, the status page and the agent's health status all read the household setting, else
 //! `OWNHEALTH_AGE_OF_MAJORITY`, else 18.
 //!
 //! Its own test binary: the environment default lives in the process, and this test sets it to 16.
@@ -57,18 +57,11 @@ async fn carrier_finding(c: &mut sqlx::PgConnection, profile_id: Uuid) -> R {
     Ok(())
 }
 
-/// (profile list, genome page, MCP gate, rules engine): is Lucía a minor?
-async fn answers(app: &axum::Router, db: &TestDb, lucia: Uuid, token: &str) -> anyhow::Result<[bool; 4]> {
-    let me = send(app, Request::get("/api/me").body(Body::empty())?).await?;
-    let listed = me["profiles"]
-        .as_array()
-        .and_then(|ps| ps.iter().find(|p| p["slug"] == "lucia"))
-        .map(|p| p["is_minor"] == true)
-        .ok_or_else(|| anyhow::anyhow!("lucia missing from /api/me"))?;
-    let page = send(app, Request::get("/api/profiles/lucia/genome").body(Body::empty())?).await?;
+/// One MCP tool call as the agent with `token`; returns its `structuredContent`.
+async fn tool(app: &axum::Router, token: &str, name: &str) -> anyhow::Result<Value> {
     let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "get_genome_findings", "arguments": {"profile": "lucia"}}});
-    let mcp = send(
+        "params": {"name": name, "arguments": {"profile": "lucia"}}});
+    let out = send(
         app,
         Request::post("/mcp")
             .header("host", "127.0.0.1")
@@ -79,12 +72,39 @@ async fn answers(app: &axum::Router, db: &TestDb, lucia: Uuid, token: &str) -> a
             .body(Body::from(call.to_string()))?,
     )
     .await?;
-    let withheld = &mcp["result"]["structuredContent"]["withheld"]["minor_rule"];
-    anyhow::ensure!(withheld.is_i64(), "no minor_rule count in {mcp}");
-    let mut c = db.pool.acquire().await?;
-    let pack = ownhealth_rules::load_pack()?;
-    let ev = ownhealth_rules::engine::evaluate(&mut c, lucia, Local::now().date_naive(), &pack, None, None).await?;
-    Ok([listed, page["is_minor"] == true, withheld != 0, ev.minor])
+    Ok(out["result"]["structuredContent"].clone())
+}
+
+/// Whether a carrier finding was withheld by the minor rule, from a `withheld.minor_rule` count.
+fn minor_rule(v: &Value) -> anyhow::Result<bool> {
+    let n = &v["withheld"]["minor_rule"];
+    anyhow::ensure!(n.is_i64(), "no minor_rule count in {v}");
+    Ok(n != 0)
+}
+
+/// (profile list, genome page, MCP gate, status page): is Lucía a minor? Each is asked the way the app
+/// asks it, with no day passed, so each uses its own default day. The agent's health status must give
+/// the status page's state hash: its `withheld` does not carry the minor count, but the hash does.
+async fn answers(app: &axum::Router, token: &str) -> anyhow::Result<[bool; 4]> {
+    let me = send(app, Request::get("/api/me").body(Body::empty())?).await?;
+    let listed = me["profiles"]
+        .as_array()
+        .and_then(|ps| ps.iter().find(|p| p["slug"] == "lucia"))
+        .map(|p| p["is_minor"] == true)
+        .ok_or_else(|| anyhow::anyhow!("lucia missing from /api/me"))?;
+    let page = send(app, Request::get("/api/profiles/lucia/genome").body(Body::empty())?).await?;
+    let gate = minor_rule(&tool(app, token, "get_genome_findings").await?)?;
+    let status = send(app, Request::get("/api/profiles/lucia/status").body(Body::empty())?).await?;
+    let health = tool(app, token, "get_health_status").await?;
+    let hash = &status["state_hash"];
+    anyhow::ensure!(hash.is_string(), "no state hash in {status}");
+    anyhow::ensure!(
+        health["data"]["state_hash"] == *hash,
+        "the agent's health status ({}) is not the status page's ({})",
+        health["as_of"],
+        status["as_of"]
+    );
+    Ok([listed, page["is_minor"] == true, gate, minor_rule(&status)?])
 }
 
 #[tokio::test]
@@ -127,14 +147,14 @@ async fn every_surface_agrees_on_who_is_a_minor() -> R {
         .fetch_one(&mut *c)
         .await?;
     assert_eq!(none, 0);
-    assert_eq!(answers(&app, &db, lucia, &token).await?, [false; 4]);
+    assert_eq!(answers(&app, &token).await?, [false; 4]);
 
     // the household's own 18 wins over the environment everywhere
     sqlx::query("insert into household_setting (household_id, key, value) values ($1, 'age_of_majority', '18')")
         .bind(fam.household_id)
         .execute(&mut *c)
         .await?;
-    assert_eq!(answers(&app, &db, lucia, &token).await?, [true; 4]);
+    assert_eq!(answers(&app, &token).await?, [true; 4]);
     Ok(())
 }
 
@@ -176,9 +196,10 @@ async fn the_backup_command_uses_the_same_age_of_majority_as_the_server() -> R {
     Ok(())
 }
 
-/// On her 18th birthday, by the server's local day, with UTC on another day: the profile list, the
-/// genome page, the agent's gate and the rules engine all count the same day. The case runs in a child
-/// process whose `TZ` makes the split, because the local zone is read from the environment.
+/// On her 18th birthday, with the server's local day on another day than UTC's: the profile list, the
+/// genome page, the agent's gate, the status page and the agent's health status all count the UTC day,
+/// the one records are stored on. The case runs in a child process whose `TZ` makes the split, because
+/// the local zone is read from the environment.
 #[tokio::test]
 async fn on_the_birthday_every_surface_counts_the_same_day() -> R {
     use sqlx::types::chrono::Utc;
@@ -198,6 +219,8 @@ async fn on_the_birthday_every_surface_counts_the_same_day() -> R {
             ])
             .env(CHILD, "1")
             .env("TZ", tz)
+            // the agent's daily budgets reset on this zone's midnight; its default day must not follow
+            .env("OWNHEALTH_TIMEZONE", tz)
             .output()?;
         anyhow::ensure!(
             out.status.success() && String::from_utf8_lossy(&out.stdout).contains("1 passed"),
@@ -218,7 +241,7 @@ async fn on_the_birthday_every_surface_counts_the_same_day() -> R {
     let mut c = db.pool.acquire().await?;
     let fam = ownhealth_core::demo::create_rivera_family(&mut c, "Rivera").await?;
     let lucia = fam.profile("lucia");
-    // 18 on the later of the two days: an adult if the server's day is that one, a minor if not
+    // 18 on the later of the two days: an adult if UTC's day is that one, a minor if the local day is
     let later = local.max(utc);
     sqlx::query("update profile set birth_date = ($1::date - interval '18 years')::date where id = $2")
         .bind(later)
@@ -242,7 +265,7 @@ async fn on_the_birthday_every_surface_counts_the_same_day() -> R {
     )
     .await?
     .plaintext;
-    let minor = local < utc;
-    assert_eq!(answers(&app, &db, lucia, &token).await?, [minor; 4]);
+    let minor = utc < local;
+    assert_eq!(answers(&app, &token).await?, [minor; 4]);
     Ok(())
 }

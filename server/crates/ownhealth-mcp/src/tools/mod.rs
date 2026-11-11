@@ -420,9 +420,10 @@ pub fn start_of_day(d: NaiveDate) -> DateTime<FixedOffset> {
     Utc.fix().from_utc_datetime(&d.and_time(NaiveTime::MIN))
 }
 
-pub async fn parse_as_of(conn: &mut PgConnection, value: Option<&str>) -> ToolResult<AsOf> {
+pub fn parse_as_of(value: Option<&str>) -> ToolResult<AsOf> {
     let Some(value) = value.filter(|v| !v.is_empty()) else {
-        let d = limits::today(conn).await?;
+        // the day every minor check uses, so the agent's state agrees with the app's on a birthday
+        let d = access::today();
         return Ok(AsOf {
             day: d,
             at: None,
@@ -787,7 +788,7 @@ async fn run(
     ]);
     let mut offset = 0usize;
     let mut inner = None;
-    let mut as_of = parse_as_of(&mut *conn, args.get("as_of").and_then(Value::as_str)).await?;
+    let mut as_of = parse_as_of(args.get("as_of").and_then(Value::as_str))?;
     if as_of.at.is_none() {
         // pin "now", so every page of a paginated answer sees the same store
         as_of.at = Some(db_now(&mut *conn).await?);
