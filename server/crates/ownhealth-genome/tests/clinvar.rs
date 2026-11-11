@@ -385,6 +385,20 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     let mut past = list_findings(&mut c, alex, &Gate::new(false, false), &FindingsQuery::default()).await?;
     clinvar::attach_now(&mut c, alex, date("2026-10-11"), &mut past).await?;
     assert!(!past.to_string().contains("clinvar_now"), "{past}");
+    // A retracted genome file's snapshot no longer feeds clinvar_now, as it feeds no event.
+    sqlx::query(
+        "update document set status = 'retracted' where id in (select document_id from genome_dataset where profile_id = $1)",
+    )
+    .bind(alex)
+    .execute(&mut *c)
+    .await?;
+    assert!(clinvar::now_by_variation(&mut c, alex, date(b)).await?.is_empty());
+    sqlx::query(
+        "update document set status = 'active' where id in (select document_id from genome_dataset where profile_id = $1)",
+    )
+    .bind(alex)
+    .execute(&mut *c)
+    .await?;
 
     // The same release again, or an older one, compares nothing.
     let again = clinvar::diff_release(&e.db.pool, &e.blobs, &two, 18).await?;

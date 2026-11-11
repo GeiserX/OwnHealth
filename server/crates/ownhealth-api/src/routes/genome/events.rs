@@ -105,7 +105,6 @@ pub async fn events(rt: &Runtime, principal: &Principal, p: &str) -> R<Value> {
             "id": r.id,
             "release_from": r.release_from,
             "release_to": r.release_to,
-            "alerted": r.alerted,
             "unconfirmed": unconfirmed,
             "created_at": py_isoformat_utc(&r.created_at),
             "text": {"en": summary(&text, "en"), "es": summary(&text, "es")},
@@ -120,6 +119,7 @@ pub async fn events(rt: &Runtime, principal: &Principal, p: &str) -> R<Value> {
                 e["withheld"] = json!(why);
             }
             None => {
+                e["alerted"] = json!(r.alerted);
                 e["kind"] = json!(r.kind);
                 e["gene"] = json!(r.gene);
                 e["variation_id"] = json!(r.variation_id);

@@ -928,9 +928,9 @@ async fn diff_dataset(
 }
 
 /// `clinvar_now` for the findings of one profile: per ClinVar VariationID, the classification in the
-/// newest release compared, from the current datasets' snapshots. Only a snapshot whose release is
-/// on or before `as_of` counts: the store did not know a later one on that date. Only our own class
-/// vocabulary is given, never the release's free text.
+/// newest release compared, from the snapshots of current datasets whose file is not retracted. Only
+/// a snapshot whose release is on or before `as_of` counts: the store did not know a later one on
+/// that date. Only our own class vocabulary is given, never the release's free text.
 pub async fn now_by_variation(
     conn: &mut PgConnection,
     profile_id: Uuid,
@@ -939,6 +939,7 @@ pub async fn now_by_variation(
     let rows: Vec<(i64, String, i16, NaiveDate)> = sqlx::query_as(
         "select c.variation_id, c.significance, c.stars, c.release_date from clinvar_carried c \
          join genome_dataset d on d.id = c.dataset_id where d.profile_id = $1 and d.status = 'current' \
+         and not exists (select 1 from document doc where doc.id = d.document_id and doc.status = 'retracted') \
          and c.release_date <= $2 order by c.release_date, c.variation_id",
     )
     .bind(profile_id)

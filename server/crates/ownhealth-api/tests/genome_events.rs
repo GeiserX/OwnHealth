@@ -176,6 +176,11 @@ async fn the_reader_gate_decides_whether_an_event_is_named() -> R {
     for leak in ["APOE", "17864", "upgraded", "Pathogenic"] {
         assert!(!hidden.to_string().contains(leak), "{leak} in {hidden}");
     }
+    // Nothing but the release window, the chip flag and the generic text: not even whether it alerted,
+    // which would narrow the change to an upgrade, a shown downgrade or an SF gene.
+    for key in ["kind", "gene", "variation_id", "old", "new", "alerted"] {
+        assert!(hidden.get(key).is_none(), "{key} in {hidden}");
+    }
     let cftr = &body["events"][0];
     assert_eq!(cftr["kind"], "downgraded_from_plp");
     assert_eq!(cftr["new"]["class"], "vus");
