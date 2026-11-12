@@ -10,6 +10,7 @@
 	import { openSource } from '#lib/components/pages1/source.svelte';
 	import { errText, Loader, tf, tp } from '#lib/components/pages1/util.svelte';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
+	import CoupleCarrierCard from '#lib/components/CoupleCarrierCard.svelte';
 	import { ApiError } from '#lib/api/core';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import StepUpDialog from '#lib/components/pages2/StepUpDialog.svelte';
@@ -310,6 +311,7 @@
 	<div class="note" style="margin-top:6px">{g.notice_code ? t('i2_gen_notice') : plain(g.notice)}</div>
 {/if}
 
+{#if g && ds && !empty && prof}<CoupleCarrierCard profile={prof} />{/if}
 <SourcePanel />
 <StepUpDialog />
 
