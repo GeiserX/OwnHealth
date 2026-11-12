@@ -1,0 +1,109 @@
+# Spain: our own reading of the PAPPS 2024 cancer screening update (semFYC) and of the vaccination
+# calendar for the whole life that the Consejo Interterritorial del SNS approved for 2026. Rows are for
+# adolescents and adults. Information, not advice: each row says what the guideline lists and cites it.
+#
+# Row fields: kind once | every_n_months | series | seasonal; ages [from, to] in whole years (`to`
+# inclusive, null for no end); sex female | male when the row is for one sex; evidence: the groups that
+# count as done (evidence.yaml or vaccines.tsv); months: the interval of every_n_months, with
+# interval_for giving another interval to one evidence group; count_from: an age before which a dose
+# does not count for this row; doses and gap_days for a series; season_start (MM-DD) for seasonal.
+version: "prevention-es 0.1.0"
+reviewer: "OwnHealth maintainers (not clinicians)"
+reviewed: 2026-11-11
+calendar_updated: 2025-12-12
+rows:
+  - id: es.cancer.breast
+    kind: every_n_months
+    area: screening
+    sex: female
+    ages: [50, 74]
+    months: 24
+    evidence: [mammography]
+    source: PAPPS 2024
+    cite: https://www.elsevier.es/es-revista-atencion-primaria-27-articulo-recomendaciones-prevencion-del-cancer-actualizacion-S0212656724002701
+    name: {en: "Breast cancer screening (mammography)", es: "Cribado de cáncer de mama (mamografía)"}
+  - id: es.cancer.colorectal
+    kind: every_n_months
+    area: screening
+    ages: [50, 74]
+    months: 24
+    evidence: [fit, colonoscopy]
+    interval_for: {colonoscopy: 180}
+    source: PAPPS 2024
+    cite: https://www.elsevier.es/es-revista-atencion-primaria-27-articulo-recomendaciones-prevencion-del-cancer-actualizacion-S0212656724002701
+    name: {en: "Colorectal cancer screening", es: "Cribado de cáncer colorrectal"}
+  - id: es.cancer.cervix_cytology
+    kind: every_n_months
+    area: screening
+    sex: female
+    ages: [25, 34]
+    months: 36
+    evidence: [cervical_cytology]
+    source: PAPPS 2024
+    cite: https://www.elsevier.es/es-revista-atencion-primaria-27-articulo-recomendaciones-prevencion-del-cancer-actualizacion-S0212656724002701
+    name: {en: "Cervical cancer screening (cytology)", es: "Cribado de cáncer de cuello de útero (citología)"}
+  - id: es.cancer.cervix_hpv
+    kind: every_n_months
+    area: screening
+    sex: female
+    ages: [35, 65]
+    months: 60
+    evidence: [hpv_test, cervical_cytology]
+    interval_for: {cervical_cytology: 36}
+    source: PAPPS 2024
+    cite: https://www.elsevier.es/es-revista-atencion-primaria-27-articulo-recomendaciones-prevencion-del-cancer-actualizacion-S0212656724002701
+    name: {en: "Cervical cancer screening (HPV test)", es: "Cribado de cáncer de cuello de útero (prueba del VPH)"}
+  - id: es.vac.td
+    kind: once
+    area: vaccine
+    ages: [65, null]
+    count_from: 65
+    evidence: [td]
+    source: CISNS 2026
+    cite: https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf
+    name: {en: "Tetanus and diphtheria (Td), dose around age 65", es: "Tétanos y difteria (Td), dosis hacia los 65 años"}
+  - id: es.vac.influenza
+    kind: seasonal
+    area: vaccine
+    ages: [60, null]
+    season_start: "10-01"
+    evidence: [influenza]
+    source: CISNS 2026
+    cite: https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf
+    name: {en: "Influenza, one dose each season", es: "Gripe, una dosis cada temporada"}
+  - id: es.vac.pneumococcal
+    kind: once
+    area: vaccine
+    ages: [65, null]
+    count_from: 65
+    evidence: [pneumococcal]
+    source: CISNS 2026
+    cite: https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf
+    name: {en: "Pneumococcal, from age 65", es: "Neumococo, a partir de los 65 años"}
+  - id: es.vac.zoster
+    kind: series
+    area: vaccine
+    ages: [65, null]
+    doses: 2
+    gap_days: 56
+    evidence: [zoster]
+    source: CISNS 2026
+    cite: https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf
+    name: {en: "Herpes zoster, two doses from age 65", es: "Herpes zóster, dos dosis a partir de los 65 años"}
+  - id: es.vac.hpv
+    kind: once
+    area: vaccine
+    ages: [12, 18]
+    evidence: [hpv]
+    source: CISNS 2026
+    cite: https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf
+    name: {en: "Human papillomavirus (HPV), one dose at 12", es: "Virus del papiloma humano (VPH), una dosis a los 12 años"}
+  - id: es.vac.menacwy
+    kind: once
+    area: vaccine
+    ages: [12, 18]
+    count_from: 10
+    evidence: [menacwy]
+    source: CISNS 2026
+    cite: https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf
+    name: {en: "Meningococcal ACWY, one dose at 12", es: "Meningococo ACWY, una dosis a los 12 años"}

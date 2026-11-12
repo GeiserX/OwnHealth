@@ -1,7 +1,9 @@
 # Genes OwnHealth treats as sensitive (docs/design/genomics.md section 7), applied on top of the
 # producer's sensitivity tag. GRCh38 spans (1-based, closed) of the HGNC gene, from the UCSC hg38
-# search API, fetched 2026-11-07. acmg_sf_*: the cancer and cardiovascular genes of ACMG SF v3.2
-# (PMID 37347242); the v3.3 additions (PMID 40568962) are to be checked against its spreadsheet.
+# search API, fetched 2026-11-07 (PLN 2026-11-11). acmg_sf_*: the cancer and cardiovascular genes of
+# ACMG SF v3.3 (PMID 40568962): v3.2 (PMID 37347242) plus PLN. v3.3's two other additions, ABCD1 and
+# CYP27A1, are metabolic genes, outside the cancer and cardiovascular groups this list holds. The
+# ClinVar alert class "a change in an ACMG SF gene" is the acmg_sf_* rows of this file.
 # Lookups pad each span by SPAN_PAD_BP so promoter-adjacent sites stay gated.
 gene	chrom	start	end	group
 APC	chr5	112707518	112846239	acmg_sf_cancer
@@ -58,6 +60,7 @@ MYL2	chr12	110909996	111052434	acmg_sf_cardiovascular
 MYL3	chr3	46835110	46882178	acmg_sf_cardiovascular
 PCSK9	chr1	55039445	55064852	acmg_sf_cardiovascular
 PKP2	chr12	32790745	32896798	acmg_sf_cardiovascular
+PLN	chr6	118548296	118561716	acmg_sf_cardiovascular
 PRKAG2	chr7	151556124	151877214	acmg_sf_cardiovascular
 RBM20	chr10	110644336	110839471	acmg_sf_cardiovascular
 RYR2	chr1	237042184	237833988	acmg_sf_cardiovascular

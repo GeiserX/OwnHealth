@@ -16,6 +16,7 @@
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { i18n, t, type Key } from '#lib/i18n/index.svelte';
+	import { reinterpText } from '#lib/logic/inbox';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const OWNGENOME = 'https://github.com/GeiserX/OwnGenome';
@@ -201,10 +202,9 @@
 {/if}
 
 {#each alerts.data ?? [] as a (a.id)}
-	{@const p = a.payload as Record<string, string>}
 	<div class="banner" role="status">
 		<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e0a84a" stroke-width="2" aria-hidden="true"><path d="M12 3 2 20h20zM12 10v4M12 17v.5" /></svg>
-		<div><b>{t('i2_reinterp')}</b><div class="muted" style="font-size:12px">{p.summary ?? p.text ?? [p.gene, p.from, '→', p.to].filter(Boolean).join(' ')}</div></div>
+		<div><b>{t('i2_reinterp')}</b><div class="muted" style="font-size:12px">{reinterpText(a.payload, i18n.lang)}</div></div>
 		<button class="btn sm" style="margin-left:auto" onclick={() => markRead(a.id)}>{t('i2_mark_read')}</button>
 	</div>
 {/each}

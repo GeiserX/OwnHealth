@@ -57,6 +57,15 @@ pub fn sensitive_genes() -> &'static BTreeSet<String> {
     &SENSITIVE_GENES
 }
 
+/// The ACMG SF genes of the list (its `acmg_sf_*` rows): the ClinVar diff alerts on any change in one.
+pub fn acmg_sf_genes() -> BTreeSet<String> {
+    SPANS
+        .iter()
+        .filter(|s| s.group.starts_with("acmg_sf_"))
+        .map(|s| s.gene.to_uppercase())
+        .collect()
+}
+
 pub fn is_sensitive_gene(gene: Option<&str>) -> bool {
     gene.is_some_and(|g| !g.is_empty() && SENSITIVE_GENES.contains(&g.trim().to_uppercase()))
 }

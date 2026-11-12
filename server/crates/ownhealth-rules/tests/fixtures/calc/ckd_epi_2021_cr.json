@@ -1,0 +1,118 @@
+{
+ "calculator": "ckd_epi_2021_cr",
+ "source": "kidney.epi 1.4.0 from CRAN (R package by Scientific-Tools.Org), run once in the r-base 4.4.2 image on 2026-11-11: egfr.ckdepi.cr.2021 and egfr.ckdepi.cr_cys.2021, creatinine_units mg/dl or micromol/l, which round to 2 decimals. Numbers only; no code copied.",
+ "paper": "https://pubmed.ncbi.nlm.nih.gov/34554658/",
+ "precision": 2,
+ "cases": [
+  {
+   "sex": "male",
+   "age": 47,
+   "inputs": {
+    "creatinine": {
+     "value": "0.98",
+     "unit": "mg/dL"
+    }
+   },
+   "expected": "95.71"
+  },
+  {
+   "sex": "female",
+   "age": 30,
+   "inputs": {
+    "creatinine": {
+     "value": "0.5",
+     "unit": "mg/dL"
+    }
+   },
+   "expected": "129.32"
+  },
+  {
+   "sex": "female",
+   "age": 60,
+   "inputs": {
+    "creatinine": {
+     "value": "1.2",
+     "unit": "mg/dL"
+    }
+   },
+   "expected": "51.82"
+  },
+  {
+   "sex": "female",
+   "age": 25,
+   "inputs": {
+    "creatinine": {
+     "value": "0.7",
+     "unit": "mg/dL"
+    }
+   },
+   "expected": "123.01"
+  },
+  {
+   "sex": "male",
+   "age": 80,
+   "inputs": {
+    "creatinine": {
+     "value": "0.9",
+     "unit": "mg/dL"
+    }
+   },
+   "expected": "86.34"
+  },
+  {
+   "sex": "male",
+   "age": 71,
+   "inputs": {
+    "creatinine": {
+     "value": "2.4",
+     "unit": "mg/dL"
+    }
+   },
+   "expected": "28.14"
+  },
+  {
+   "sex": "female",
+   "age": 45,
+   "inputs": {
+    "creatinine": {
+     "value": "0.64",
+     "unit": "mg/dL"
+    }
+   },
+   "expected": "110.99"
+  },
+  {
+   "sex": "male",
+   "age": 52,
+   "inputs": {
+    "creatinine": {
+     "value": "1.1",
+     "unit": "mg/dL"
+    }
+   },
+   "expected": "80.77"
+  },
+  {
+   "sex": "male",
+   "age": 47,
+   "inputs": {
+    "creatinine": {
+     "value": "86.6",
+     "unit": "umol/L"
+    }
+   },
+   "expected": "95.75"
+  },
+  {
+   "sex": "female",
+   "age": 71,
+   "inputs": {
+    "creatinine": {
+     "value": "61.9",
+     "unit": "umol/L"
+    }
+   },
+   "expected": "92.37"
+  }
+ ]
+}

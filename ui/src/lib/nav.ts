@@ -25,6 +25,13 @@ export const NAV: NavItem[] = [
 		mockup: 'drug-check',
 		icon: '<rect x="3" y="9" width="18" height="7" rx="3.5" transform="rotate(-35 12 12.5)"/><path d="m9 9 5 6"/>'
 	},
+	// 0.4.0: screenings, vaccines and lab gaps (not one of the ten mockup screens; mockup #due)
+	{
+		path: '/due',
+		key: 'due_nav',
+		mockup: 'due',
+		icon: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 13l2 2 4-4"/>'
+	},
 	{
 		path: '/wearables',
 		key: 'nav_wear',

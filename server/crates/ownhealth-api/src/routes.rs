@@ -5,10 +5,12 @@ use ownhealth_core::Runtime;
 
 pub mod audit;
 pub mod auth;
+pub mod calculators;
 pub mod core;
 pub mod devices;
 pub mod documents;
 pub mod drug_check;
+pub mod due;
 pub mod export;
 pub mod family;
 pub mod family_history;
@@ -33,14 +35,17 @@ pub fn all() -> Router<Runtime> {
     Router::new()
         .merge(audit::router())
         .merge(auth::router())
+        .merge(calculators::router())
         .merge(core::router())
         .merge(devices::router())
         .merge(documents::router())
         .merge(drug_check::router())
+        .merge(due::router())
         .merge(export::router())
         .merge(family::router())
         .merge(family_history::router())
         .merge(genome::router())
+        .merge(genome::events::router())
         .merge(imports::router())
         .merge(inbox::router())
         .merge(inboxes::router())

@@ -1,0 +1,33 @@
+# Unit conversions the calculators apply to a printed lab value before a formula reads it.
+#
+# group   the alias_group of the input
+# unit    the printed unit in UCUM, as the observation stores it (unit_ucum)
+# to      the unit the formula takes
+# divide  the printed value is divided by this number; 1 means the unit is already the formula's
+# cite    where the number comes from
+#
+# A value in a unit with no row here is refused (reason unit_unsupported); no factor is guessed.
+version: 0.1.0
+rows:
+  # Creatinine: 1 mg/dL = 10 000 / 113.12 umol/L = 88.4 umol/L (creatinine 113.12 g/mol). The
+  # CKD-EPI equations take mg/dL.
+  - {id: creatinine.mg_dl, group: creatinine, unit: mg/dL, to: mg/dL, divide: "1", cite: "https://pubmed.ncbi.nlm.nih.gov/34554658/"}
+  - {id: creatinine.umol_l, group: creatinine, unit: umol/L, to: mg/dL, divide: "88.4", cite: "https://pubchem.ncbi.nlm.nih.gov/compound/588"}
+  # Cystatin C is printed in mg/L, the unit of the CKD-EPI 2021 creatinine-cystatin C equation.
+  - {id: cystatin_c.mg_l, group: cystatin_c, unit: mg/L, to: mg/L, divide: "1", cite: "https://pubmed.ncbi.nlm.nih.gov/34554658/"}
+  # FIB-4 takes AST and ALT in U/L and platelets in 10^9/L (10^3/uL is the same number).
+  - {id: ast.u_l, group: ast, unit: U/L, to: U/L, divide: "1", cite: "https://pubmed.ncbi.nlm.nih.gov/16729309/"}
+  - {id: alt.u_l, group: alt, unit: U/L, to: U/L, divide: "1", cite: "https://pubmed.ncbi.nlm.nih.gov/16729309/"}
+  - {id: platelets.10_9_l, group: platelets, unit: 10*9/L, to: 10*9/L, divide: "1", cite: "https://pubmed.ncbi.nlm.nih.gov/16729309/"}
+  - {id: platelets.10_3_ul, group: platelets, unit: 10*3/uL, to: 10*9/L, divide: "1", cite: "https://pubmed.ncbi.nlm.nih.gov/16729309/"}
+  # HOMA-IR takes fasting glucose in mmol/L and insulin in uU/mL (Matthews 1985). Glucose in mg/dL
+  # is divided by 18 (D-glucose 180.16 g/mol), the factor behind the mg/dL form glucose x insulin / 405.
+  - {id: glucose.mmol_l, group: glucose, unit: mmol/L, to: mmol/L, divide: "1", cite: "https://pubmed.ncbi.nlm.nih.gov/3899825/"}
+  - {id: glucose.mg_dl, group: glucose, unit: mg/dL, to: mmol/L, divide: "18", cite: "https://pubchem.ncbi.nlm.nih.gov/compound/5793"}
+  - {id: insulin.uiu_ml, group: insulin, unit: "u[IU]/mL", to: "u[IU]/mL", divide: "1", cite: "https://pubmed.ncbi.nlm.nih.gov/3899825/"}
+  - {id: insulin.miu_l, group: insulin, unit: "m[IU]/L", to: "u[IU]/mL", divide: "1", cite: "https://pubmed.ncbi.nlm.nih.gov/3899825/"}
+  # Insulin in pmol/L: 1 uIU/mL = 6.00 pmol/L, the factor Knopp et al. 2019 show is the correct
+  # one. Many labs and calculators use 6.945 instead; with it the same pmol/L value reads about 14%
+  # lower in uIU/mL, and HOMA-IR with it. Every result that converted pmol/L says so (limitation
+  # insulin_factor).
+  - {id: insulin.pmol_l, group: insulin, unit: pmol/L, to: "u[IU]/mL", divide: "6.00", cite: "https://pubmed.ncbi.nlm.nih.gov/30318910/", limitation: insulin_factor}

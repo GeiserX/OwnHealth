@@ -197,7 +197,11 @@ export interface Dashboard {
 	changes: { name: string; from: string; to: string; unit: string; direction: 'up' | 'down'; status: Status }[];
 	changes_vs: IsoDate | null;
 	not_measured_this_time: string[];
-	due: { title: string; why: string; status: Status; kind: 'lab' | 'vaccine' | 'screening'; phase: string | null }[];
+	due: { title: string; why: string; status: Status; kind: 'lab' | 'vaccine' | 'screening'; phase: string | null; rule?: string }[];
+	/** Screenings, vaccines and lab gaps of ownhealth.prevention/v1 (0.4.0); the Due card merges it with `due`. */
+	prevention_due?: import('../logic/due').DueItem[];
+	/** The scopes the Due card lacks to show every item; empty when nothing is withheld. */
+	prevention_withheld?: string[];
 	genome: { summary: string; chips: string[]; hidden: number; source: string | null } | null;
 	review_open: number;
 	state_hash: string;
@@ -354,7 +358,7 @@ export interface WearablesSummary {
 
 export interface RecordOut {
 	id: Uuid;
-	kind: 'condition' | 'medication' | 'allergy' | 'immunization' | 'procedure';
+	kind: 'condition' | 'medication' | 'allergy' | 'immunization' | 'procedure' | 'visit';
 	title: string;
 	detail: Record<string, unknown>;
 	status: Lifecycle;
@@ -369,7 +373,7 @@ export interface RecordOut {
 
 export interface TimelineEvent {
 	date: IsoDate;
-	type: 'lab' | 'visit' | 'imaging' | 'diagnosis' | 'medication' | 'vaccine' | 'genome';
+	type: 'lab' | 'visit' | 'imaging' | 'diagnosis' | 'medication' | 'vaccine' | 'genome' | 'procedure' | 'document';
 	title: string;
 	detail: string | null;
 	country: string | null;
@@ -377,6 +381,31 @@ export interface TimelineEvent {
 	src: string | null;
 	src_label: string | null; // 'LabNorte · 2026-09-14 · p1'
 	provider: string | null; // lab or clinic name when the source records one
+	/** document events only: the document is its own source */
+	document_id?: Uuid;
+	filename?: UntrustedText | null;
+}
+
+/** One course of a medicine or the run of a condition: the biomarker chart's annotation shape plus its src. */
+export interface TimelineSegment {
+	date: IsoDate;
+	end: IsoDate | null; // null while it runs
+	label: string;
+	src: string | null;
+	src_label: string | null; // 'Rx · 2022-06-20'
+}
+
+/** A row of the timeline's bars lane (slice 6). */
+export interface TimelineSpan {
+	type: 'diagnosis' | 'medication';
+	label: string;
+	segments: TimelineSegment[];
+}
+
+export interface Timeline {
+	events: TimelineEvent[];
+	spans: TimelineSpan[];
+	withheld: { by_scope: string[] };
 }
 
 // ------------------------------------------------ lane B: documents ----
@@ -538,6 +567,43 @@ export interface GenomeFindingFull extends Omit<GenomeFinding, 'call_state'> {
 	source: { assay: string; tool: string; sample_id: string | null } | null;
 }
 
+/** One ClinVar classification in a genome event: our class vocabulary, ClinVar's own wording and stars. */
+export interface ClinvarClass {
+	class?: 'plp' | 'vus' | 'conflicting' | 'blb' | 'other';
+	significance?: string;
+	stars?: number | null;
+	fact_id?: string;
+}
+
+/** GET /profiles/{p}/genome/events: a withheld event carries no kind, gene, classes or alert flag. */
+export interface GenomeEvent {
+	id: Uuid;
+	release_from: string | null;
+	release_to: string;
+	unconfirmed: boolean;
+	created_at: IsoDateTime;
+	text: { en: string; es: string };
+	withheld?: 'minor' | 'sensitive';
+	alerted?: boolean;
+	kind?:
+		| 'upgraded_to_plp'
+		| 'downgraded_from_plp'
+		| 'vus_resolved'
+		| 'became_conflicting'
+		| 'significance_changed'
+		| 'stars_changed'
+		| 'new_assertion_on_carried_variant';
+	gene?: string | null;
+	variation_id?: number;
+	old?: ClinvarClass;
+	new?: ClinvarClass;
+}
+
+export interface GenomeEvents {
+	events: GenomeEvent[];
+	withheld: { sensitive: number; minor_rule: number };
+}
+
 export interface GenomeView {
 	dataset: {
 		assay: string;
@@ -580,7 +646,7 @@ export interface DrugCheckView {
 		src: string;
 	}[];
 	phenoconversion: { gene: string; by: string; inhibitor_strength: string; computed: boolean; functional_phenotype: string | null; rule: string | null; src: string; text: string }[];
-	current_medications_relevant: { name: string; since: IsoDate | null; relation: string; relation_text: string; src: string }[];
+	current_medications_relevant: { name: string; kind: 'medication' | 'supplement'; since: IsoDate | null; relation: string; relation_text: string; src: string }[];
 	relevant_labs: {
 		name: string;
 		alias_group: string;
@@ -592,7 +658,8 @@ export interface DrugCheckView {
 		reason: string;
 		src: string | null;
 	}[];
-	guidance: { source: string; level: string | null; strength: string; applies_to: string; population: string | null; quote: string; url: string }[];
+	// CPIC rows quote the bundled snapshot; DPWG rows quote the genome file, as untrusted text.
+	guidance: { source: string; level: string | null; strength: string | null; applies_to: string; population: string | null; quote: string | UntrustedText | null; url: string | null; origin: 'cpic_snapshot' | 'genome_facts' }[];
 	not_assessed: string[];
 	limitations: string[];
 	withheld: { by_scope: string[] };
@@ -605,4 +672,56 @@ export interface PasskeyOut {
 	label: string | null;
 	created_at: IsoDateTime;
 	last_used_at: IsoDateTime | null;
+}
+
+// ---- calculators (GET /profiles/{p}/calculators, ownhealth.calculators/v1 rendered) ----
+export interface CalcInput {
+	group: string;
+	name: string;
+	/** as recorded */
+	value: string;
+	unit: string | null;
+	date: IsoDate;
+	src: string;
+	/** the value in the formula's unit, when the formula needed another one */
+	converted?: { value: string; unit: string };
+}
+
+export interface CalcItem {
+	id: string;
+	version: string;
+	name: string;
+	/** the name a narrow row has room for */
+	short: string;
+	status: 'ok' | 'refused' | 'not_assessed';
+	/** only when status is ok */
+	value?: string;
+	unit?: string | null;
+	date?: IsoDate;
+	person?: { age?: number; sex?: string };
+	inputs: CalcInput[];
+	cite: string;
+	src: string[];
+	reason_code?: string;
+	/** why it was not computed */
+	text?: string;
+	limitations?: string[];
+	category?: { code: string; low: string; high: string; cite: string };
+	/** the published band, then the limitations, in the reader's language */
+	notes: string[];
+	/** the dashboard card it belongs to */
+	system: string;
+	/** alias groups whose biomarker page lists it */
+	shows_on: string[];
+}
+
+export interface Calculators {
+	schema: string;
+	profile: string;
+	as_of: IsoDate;
+	rules: string;
+	units: string;
+	lang: string;
+	items: CalcItem[];
+	calculators_hash: string;
 }

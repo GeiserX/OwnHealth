@@ -11,6 +11,7 @@ use std::pin::Pin;
 
 use common::{Seeded, as_of, seeded};
 use ownhealth_core::access::all_scopes;
+use ownhealth_genome::clinvar::{self, Before, EventText};
 use ownhealth_rules::cited;
 use ownhealth_rules::wording::{SKIP_KEYS, imperative_phrases, lint};
 use ownhealth_rules::{build_state, check_drug, dashboard, load_pack, render};
@@ -30,6 +31,12 @@ const SOURCES: &[(&str, Source)] = &[
     ("dashboard", |s| Box::pin(dashboards(s))),
     ("check_drug", |s| Box::pin(drug_checks(s))),
     ("summary", |s| Box::pin(summaries(s))),
+    ("timeline", |_| {
+        Box::pin(async { Ok(vec![ownhealth_api::routes::timeline::phrases()]) })
+    }),
+    ("clinvar_alerts", |_| Box::pin(clinvar_alerts())),
+    ("due", |s| Box::pin(due(s))),
+    ("calculators", |s| Box::pin(calculators(s))),
 ];
 
 async fn status(s: &Seeded) -> anyhow::Result<Vec<Value>> {
@@ -67,6 +74,69 @@ async fn drug_checks(s: &Seeded) -> anyhow::Result<Vec<Value>> {
             for lang in LANGS {
                 out.push(check_drug(&mut tx, s.pid(slug), drug, &all_scopes(), lang, Some(as_of())).await?);
             }
+        }
+    }
+    Ok(out)
+}
+
+/// Every ClinVar alert and review sentence: each class change, star count, gate and chip flag.
+async fn clinvar_alerts() -> anyhow::Result<Vec<Value>> {
+    const CLASSES: [&str; 5] = ["plp", "vus", "conflicting", "blb", "other"];
+    let befores: Vec<Option<Before>> = std::iter::once(None)
+        .chain(
+            CLASSES
+                .iter()
+                .flat_map(|&class| [None, Some(0), Some(1), Some(3)].map(|stars| Some(Before { class, stars }))),
+        )
+        .collect();
+    let mut out = Vec::new();
+    for lang in LANGS {
+        for (withheld, unconfirmed) in [(false, false), (false, true), (true, false), (true, true)] {
+            out.push(json!({"summary": clinvar::review_summary(withheld, unconfirmed, lang)}));
+            for gene in [None, Some("BRCA2")] {
+                for old in &befores {
+                    for new_class in CLASSES {
+                        for new_stars in [0, 1, 2] {
+                            let t = EventText {
+                                gene,
+                                old: old.as_ref(),
+                                new_class,
+                                new_stars,
+                                withheld,
+                                unconfirmed,
+                            };
+                            out.push(json!({"summary": clinvar::summary(&t, lang)}));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The Due screen (ownhealth.prevention/v1 rendered) of each person in both languages.
+async fn due(s: &Seeded) -> anyhow::Result<Vec<Value>> {
+    let mut tx = s.pool().begin().await?;
+    let pack = load_pack()?;
+    let mut out = Vec::new();
+    for slug in SLUGS {
+        let doc = ownhealth_rules::prevention::build_document(&mut tx, s.pid(slug), as_of()).await?;
+        for lang in LANGS {
+            out.push(ownhealth_rules::prevention::render(&doc, &pack, lang, &all_scopes())?);
+        }
+    }
+    Ok(out)
+}
+
+/// The calculators (ownhealth.calculators/v1 rendered) of each person in both languages.
+async fn calculators(s: &Seeded) -> anyhow::Result<Vec<Value>> {
+    let mut tx = s.pool().begin().await?;
+    let mut out = Vec::new();
+    for slug in SLUGS {
+        let doc = ownhealth_rules::calc::document(&mut tx, s.pid(slug), as_of()).await?;
+        for lang in LANGS {
+            out.push(ownhealth_rules::calc::render(&doc, lang)?);
         }
     }
     Ok(out)
@@ -282,4 +352,14 @@ async fn summaries(s: &Seeded) -> anyhow::Result<Vec<Value>> {
         }
     }
     Ok(out)
+}
+
+/// The ClinVar alert wording is a cited data file too; the genome crate reads it at build time,
+/// below ownhealth-rules, so this is where it passes the cited loader's checks.
+#[test]
+fn the_clinvar_alert_file_passes_the_cited_loader() -> R {
+    let f = cited::load(&std::path::PathBuf::from(DATA).join("genome/clinvar_alerts.json"))?;
+    assert!(f.version.starts_with("clinvar_alerts "), "{}", f.version);
+    assert!(f.doc["cite"].as_str().is_some_and(|c| c.starts_with("https://")));
+    Ok(())
 }

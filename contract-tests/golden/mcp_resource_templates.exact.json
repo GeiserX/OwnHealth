@@ -23,6 +23,12 @@
       "mimeType": "application/json",
       "name": "access-log",
       "uriTemplate": "ownhealth://profile/{id}/access-log"
+    },
+    {
+      "description": "Published formulas run on this profile's recorded labs, with citations and inputs.",
+      "mimeType": "application/json",
+      "name": "calculators",
+      "uriTemplate": "ownhealth://profile/{id}/calculators"
     }
   ]
 }
