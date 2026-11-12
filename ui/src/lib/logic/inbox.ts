@@ -349,6 +349,15 @@ export function rowGrounding(item: { reasons: string[]; payload: Record<string, 
 	return null;
 }
 
+/**
+ * The text of a genome_reinterpretation review item in the screen language: the ClinVar diff writes
+ * `summary` (en) and `summary_es`. Older or hand-made items fall back to what they carry.
+ */
+export function reinterpText(p: Record<string, unknown>, lang: string): string {
+	const s = (k: string) => (typeof p[k] === 'string' ? (p[k] as string) : undefined);
+	return (lang === 'es' ? s('summary_es') : undefined) ?? s('summary') ?? s('text') ?? [s('gene'), s('from'), '→', s('to')].filter(Boolean).join(' ');
+}
+
 /** One row of an agent's observations proposal, as the server checked it (propose.rs `stored.rows`). */
 export interface ProposalRow {
 	index: number;

@@ -10,6 +10,7 @@
     "ownhealth/audit_event": "int",
     "ownhealth/document": "int",
     "ownhealth/genome_dataset": "int",
+    "ownhealth/genome_event": "int",
     "ownhealth/genome_finding": "int",
     "ownhealth/note": "int",
     "ownhealth/prevention_answer": "int",

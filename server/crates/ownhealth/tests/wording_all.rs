@@ -11,6 +11,7 @@ use std::pin::Pin;
 
 use common::{Seeded, as_of, seeded};
 use ownhealth_core::access::all_scopes;
+use ownhealth_genome::clinvar::{self, Before, EventText};
 use ownhealth_rules::cited;
 use ownhealth_rules::wording::{SKIP_KEYS, imperative_phrases, lint};
 use ownhealth_rules::{build_state, check_drug, dashboard, load_pack, render};
@@ -29,6 +30,7 @@ const SOURCES: &[(&str, Source)] = &[
     ("status", |s| Box::pin(status(s))),
     ("dashboard", |s| Box::pin(dashboards(s))),
     ("check_drug", |s| Box::pin(drug_checks(s))),
+    ("clinvar_alerts", |_| Box::pin(clinvar_alerts())),
     ("due", |s| Box::pin(due(s))),
     ("calculators", |s| Box::pin(calculators(s))),
 ];
@@ -67,6 +69,45 @@ async fn drug_checks(s: &Seeded) -> anyhow::Result<Vec<Value>> {
         for drug in &drugs {
             for lang in LANGS {
                 out.push(check_drug(&mut tx, s.pid(slug), drug, &all_scopes(), lang, Some(as_of())).await?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Every ClinVar alert and review sentence: each class change, star count, gate and chip flag.
+async fn clinvar_alerts() -> anyhow::Result<Vec<Value>> {
+    const CLASSES: [&str; 5] = ["plp", "vus", "conflicting", "blb", "other"];
+    let befores: Vec<Option<Before>> = std::iter::once(None)
+        .chain(
+            CLASSES
+                .iter()
+                .flat_map(|&class| [None, Some(0), Some(1), Some(3)].map(|stars| Some(Before { class, stars }))),
+        )
+        .collect();
+    let mut out = Vec::new();
+    for lang in LANGS {
+        for (withheld, unconfirmed) in [(false, false), (false, true), (true, false), (true, true)] {
+            out.push(json!({"summary": clinvar::review_summary(withheld, unconfirmed, lang)}));
+            for gene in [None, Some("BRCA2")] {
+                for old in &befores {
+                    for new_class in CLASSES {
+                        for new_stars in [0, 1, 2] {
+                            for not_in_previous_release in [false, true] {
+                                let t = EventText {
+                                    gene,
+                                    old: old.as_ref(),
+                                    new_class,
+                                    new_stars,
+                                    withheld,
+                                    unconfirmed,
+                                    not_in_previous_release,
+                                };
+                                out.push(json!({"summary": clinvar::summary(&t, lang)}));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -287,5 +328,15 @@ fn the_cited_loader_refuses_a_row_or_template_that_breaks_the_rules() -> R {
             Err(e) => assert!(e.to_string().contains(reason), "{what}: {e}"),
         }
     }
+    Ok(())
+}
+
+/// The ClinVar alert wording is a cited data file too; the genome crate reads it at build time,
+/// below ownhealth-rules, so this is where it passes the cited loader's checks.
+#[test]
+fn the_clinvar_alert_file_passes_the_cited_loader() -> R {
+    let f = cited::load(&std::path::PathBuf::from(DATA).join("genome/clinvar_alerts.json"))?;
+    assert!(f.version.starts_with("clinvar_alerts "), "{}", f.version);
+    assert!(f.doc["cite"].as_str().is_some_and(|c| c.starts_with("https://")));
     Ok(())
 }
