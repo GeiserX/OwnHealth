@@ -323,7 +323,7 @@ fn the_shipped_files_load_and_every_row_is_cited() -> R {
 fn the_loader_refuses_each_broken_file() -> R {
     let pack = load_pack()?;
     let cite = "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/breast-cancer-screening";
-    let cases: [(&str, &str, &str, String, &str); 12] = [
+    let cases: [(&str, &str, &str, String, &str); 13] = [
         (
             "http cite",
             "us.yaml",
@@ -393,6 +393,13 @@ fn the_loader_refuses_each_broken_file() -> R {
             "es.yaml",
             "interval_for: {colonoscopy: 180}",
             "interval_for: {colonoscopy: soon}".into(),
+            "interval_for",
+        ),
+        (
+            "a yes-or-no group interval",
+            "es.yaml",
+            "interval_for: {colonoscopy: 180}",
+            "interval_for: {colonoscopy: true}".into(),
             "interval_for",
         ),
         (

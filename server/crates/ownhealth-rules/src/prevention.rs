@@ -260,7 +260,13 @@ fn parse_row(
     if let Some(g) = evidence.iter().find(|g| !groups.contains_key(*g)) {
         return Err(e(&format!("unknown evidence group {g}")));
     }
-    let positive = |v: &Value| int(Some(v)).and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0);
+    let positive = |v: &Value| {
+        (!v.is_boolean())
+            .then(|| int(Some(v)))
+            .flatten()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0)
+    };
     let months = match r.get("months") {
         None | Some(Value::Null) => None,
         Some(v) => Some(positive(v).ok_or_else(|| e("months is not a whole number above 0"))?),
