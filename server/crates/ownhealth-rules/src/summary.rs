@@ -188,38 +188,48 @@ fn point(p: &Point, lang: &str) -> Value {
 /// does ('4,0 - 5,6', '< 3,0', '> 30'). A one-sided bound is inclusive or strict as the normalizer
 /// read it from the printed range ('Hasta 40', '≤ 40' and 'up to 40' are inclusive, '< 40' is not),
 /// and an inclusive one prints as '<=' or '>=', which the PDF's WinAnsi font can show. A range with
-/// no numbers prints as the lab wrote it.
-fn range(p: &Point, lang: &str) -> Option<String> {
+/// no numbers prints as the lab wrote it. `sex` and `age` (on the draw date) pick the range among
+/// several printed per sex or age, as the normalizer picked it.
+fn range(p: &Point, lang: &str, sex: Option<&str>, age: Option<i32>) -> Option<String> {
     let n = |d: &rust_decimal::Decimal| num::localized(&num::num(d), lang);
+    let picked = || picked(p, sex, age);
     match (&p.ref_low, &p.ref_high) {
         (Some(lo), Some(hi)) => Some(format!("{} - {}", n(lo), n(hi))),
-        (None, Some(hi)) => Some(format!(
-            "{} {}",
-            if inclusive(p, |r| r.high_inclusive) { "<=" } else { "<" },
-            n(hi)
-        )),
-        (Some(lo), None) => Some(format!(
-            "{} {}",
-            if inclusive(p, |r| r.low_inclusive) { ">=" } else { ">" },
-            n(lo)
-        )),
+        (None, Some(hi)) => {
+            let op = if picked().is_some_and(|r| r.high_inclusive) {
+                "<="
+            } else {
+                "<"
+            };
+            Some(format!("{op} {}", n(hi)))
+        }
+        (Some(lo), None) => {
+            let op = if picked().is_some_and(|r| r.low_inclusive) {
+                ">="
+            } else {
+                ">"
+            };
+            Some(format!("{op} {}", n(lo)))
+        }
         (None, None) => p.ref_text.clone(),
     }
 }
 
-/// Whether the stored one-sided bound is inclusive: the printed range parsed again by the
-/// normalizer, in the range whose bounds are the stored ones (a range printed per sex or age holds
-/// several). Inclusivity is not stored, and the printed text is all the normalizer read it from.
-fn inclusive(p: &Point, side: impl Fn(&ownhealth_normalize::RefRange) -> bool) -> bool {
-    let Some(printed) = p.ref_text.as_deref() else {
-        return false;
-    };
-    ["es", "en"].iter().any(|locale| {
-        ownhealth_normalize::parse_range(printed, locale, p.unit.as_deref())
+/// The range the stored bounds came from: the printed range parsed again by the normalizer, among
+/// the ranges whose bounds are the stored ones the one `pick_range` gives for the person (as the
+/// normalizer chose it), else the first. Inclusivity is not stored; the printed text is all the
+/// normalizer read it from.
+fn picked(p: &Point, sex: Option<&str>, age: Option<i32>) -> Option<ownhealth_normalize::RefRange> {
+    let printed = p.ref_text.as_deref()?;
+    ["es", "en"].iter().find_map(|locale| {
+        let same: Vec<_> = ownhealth_normalize::parse_range(printed, locale, p.unit.as_deref())
             .unwrap_or_default()
-            .iter()
-            .find(|r| (r.low, r.high) == (p.ref_low, p.ref_high))
-            .is_some_and(&side)
+            .into_iter()
+            .filter(|r| (r.low, r.high) == (p.ref_low, p.ref_high))
+            .collect();
+        ownhealth_normalize::pick_range(&same, sex, age)
+            .or_else(|| same.first())
+            .cloned()
     })
 }
 
@@ -231,6 +241,7 @@ fn markers(
     flags: &[(String, i64)],
     lang: &str,
 ) -> Vec<Value> {
+    let sex = ev.profile.sex_at_birth.as_deref();
     spec.markers
         .iter()
         .map(|group| {
@@ -251,7 +262,10 @@ fn markers(
                 Some((last, before)) => {
                     if let (Some(m), Value::Object(p)) = (row.as_object_mut(), point(last, lang)) {
                         m.extend(p);
-                        m.insert("range".into(), json!(range(last, lang)));
+                        m.insert(
+                            "range".into(),
+                            json!(range(last, lang, sex, ev.profile.age_on(last.date))),
+                        );
                         m.insert("previous".into(), before.last().map_or(Value::Null, |b| point(b, lang)));
                     }
                 }
@@ -655,7 +669,7 @@ mod tests {
             src_kind: "lab".into(),
             derivation: "printed".into(),
         };
-        let r = |pt: Point, lang: &str| range(&pt, lang);
+        let r = |pt: Point, lang: &str| range(&pt, lang, None, None);
         // the PDF font is WinAnsi, which has no '≤' or '≥': the sheet writes '<=' and '>='
         assert_eq!(r(p(None, Some("5.6"), Some("≤ 5.6")), "es").as_deref(), Some("<= 5,6"));
         assert_eq!(r(p(None, Some("5.6"), Some("<=5.6")), "en").as_deref(), Some("<= 5.6"));
@@ -693,7 +707,7 @@ mod tests {
             src_kind: "lab".into(),
             derivation: "printed".into(),
         };
-        let r = |pt: Point, lang: &str| range(&pt, lang);
+        let r = |pt: Point, lang: &str| range(&pt, lang, None, None);
         assert_eq!(r(p(None, Some("40"), "Hasta 40"), "es").as_deref(), Some("<= 40"));
         assert_eq!(r(p(None, Some("40"), "HASTA 40"), "en").as_deref(), Some("<= 40"));
         assert_eq!(r(p(None, Some("5.6"), "up to 5.6"), "en").as_deref(), Some("<= 5.6"));
@@ -712,6 +726,12 @@ mod tests {
         let two = "Hombres: < 40\nMujeres: hasta 50";
         assert_eq!(r(p(None, Some("50"), two), "es").as_deref(), Some("<= 50"));
         assert_eq!(r(p(None, Some("40"), two), "es").as_deref(), Some("< 40"));
+        // equal bounds, different comparators: the person's sex and age pick the range, as the
+        // normalizer picked it
+        let same = "Hombres: < 40\nMujeres: hasta 40";
+        let who = |sex: &str| range(&p(None, Some("40"), same), "es", Some(sex), Some(45));
+        assert_eq!(who("female").as_deref(), Some("<= 40"));
+        assert_eq!(who("male").as_deref(), Some("< 40"));
     }
 
     #[test]
