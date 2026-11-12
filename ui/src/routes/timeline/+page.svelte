@@ -80,7 +80,7 @@
 	// ---- the bars lane: x in percent of the time from Jan 1 of the first year to today ----
 	const today = todayIso();
 	const spans = $derived((tl.data?.spans ?? []).filter((s) => !types.size || types.has(s.type)));
-	// one row per span with a course started by today; null (no card) when no course has started yet
+	// one row per span with a course started by today; null (no chart) when no course has started yet
 	const lane = $derived(buildLane(spans, today));
 	let pick = $state<{ span: TimelineSpan; g: TimelineSegment } | null>(null);
 	// the detail follows the bars: another profile, a type filter that hides its row or a country filter that
@@ -127,48 +127,51 @@
 	</div>
 	{#if lane && countries.size}
 		<div class="note" style="margin-bottom:12px">{t('tl_bars_country')}</div>
-	{:else if lane}
-		<div class="card lane">
+	{:else if spans.length && !countries.size}
+		<!-- with no course started yet there is no chart: the card shows only on phones, as the list -->
+		<div class="card lane" class:soon={!lane}>
 			<h3>{t('tl_bars')}</h3>
-			<div class="lgrid" role="group" aria-label={t('tl_bars')}>
-				<div class="lrow axis" aria-hidden="true">
-					<div></div>
-					<div class="track">{#each lane.ticks as k (k.year)}<span class="tick num" style="left:{k.x}%">{k.year}</span>{/each}</div>
-				</div>
-				{#each lane.rows as r, ri (r.span.type + r.span.label + ri)}
-					<div class="lrow">
-						<div class="lname" title={r.span.label}><i style="background:{TY[r.span.type].c}"></i>{r.span.label}</div>
-						<div class="track" style="height:{trackHeight(r.bars)}px">
-							{#each lane.ticks as k (k.year)}<span class="gl" style="left:{k.x}%"></span>{/each}
-							{#each r.bars as { b, g }, i (i)}
-								<button
-									type="button"
-									class="seg"
-									class:dot={!b.span}
-									class:open={b.ongoing}
-									class:sel={tip?.g === g}
-									style={segStyle(b, TY[r.span.type].c)}
-									title={`${g.label} · ${range(g)}`}
-									aria-label={`${g.label}: ${range(g)}`}
-									onmouseenter={() => (pick = { span: r.span, g })}
-									onfocus={() => (pick = { span: r.span, g })}
-									onclick={() => (pick = { span: r.span, g })}
-								></button>
-							{/each}
-						</div>
+			{#if lane}
+				<div class="lgrid" role="group" aria-label={t('tl_bars')}>
+					<div class="lrow axis" aria-hidden="true">
+						<div></div>
+						<div class="track">{#each lane.ticks as k (k.year)}<span class="tick num" style="left:{k.x}%">{k.year}</span>{/each}</div>
 					</div>
-				{/each}
-			</div>
-			<div class="ltip" aria-live="polite">
-				{#if tip}
-					<i style="background:{TY[tip.span.type].c}"></i><b>{tip.g.label}</b>
-					<span class="num muted">{range(tip.g)}</span>
-					{#if tip.g.end == null}<span class="chip">{t('tl_ongoing')}</span>{/if}
-					{#if tip.g.src}<SourceChip label={tip.g.src_label ?? tip.g.src} name={tip.g.label} src={tip.g.src} onopen={openSource} />{/if}
-				{:else}
-					<span class="dim">{t('tl_bars_hint')}</span>
-				{/if}
-			</div>
+					{#each lane.rows as r, ri (r.span.type + r.span.label + ri)}
+						<div class="lrow">
+							<div class="lname" title={r.span.label}><i style="background:{TY[r.span.type].c}"></i>{r.span.label}</div>
+							<div class="track" style="height:{trackHeight(r.bars)}px">
+								{#each lane.ticks as k (k.year)}<span class="gl" style="left:{k.x}%"></span>{/each}
+								{#each r.bars as { b, g }, i (i)}
+									<button
+										type="button"
+										class="seg"
+										class:dot={!b.span}
+										class:open={b.ongoing}
+										class:sel={tip?.g === g}
+										style={segStyle(b, TY[r.span.type].c)}
+										title={`${g.label} · ${range(g)}`}
+										aria-label={`${g.label}: ${range(g)}`}
+										onmouseenter={() => (pick = { span: r.span, g })}
+										onfocus={() => (pick = { span: r.span, g })}
+										onclick={() => (pick = { span: r.span, g })}
+									></button>
+								{/each}
+							</div>
+						</div>
+					{/each}
+				</div>
+				<div class="ltip" aria-live="polite">
+					{#if tip}
+						<i style="background:{TY[tip.span.type].c}"></i><b>{tip.g.label}</b>
+						<span class="num muted">{range(tip.g)}</span>
+						{#if tip.g.end == null}<span class="chip">{t('tl_ongoing')}</span>{/if}
+						{#if tip.g.src}<SourceChip label={tip.g.src_label ?? tip.g.src} name={tip.g.label} src={tip.g.src} onopen={openSource} />{/if}
+					{:else}
+						<span class="dim">{t('tl_bars_hint')}</span>
+					{/if}
+				</div>
+			{/if}
 			<ul class="llist">
 				{#each spans as s, si (s.type + s.label + si)}
 					<li>
@@ -249,6 +252,9 @@
 <style>
 	.lane {
 		margin-bottom: 12px;
+	}
+	.lane.soon {
+		display: none;
 	}
 	.lrow {
 		display: grid;
@@ -379,7 +385,8 @@
 		.ltip {
 			display: none;
 		}
-		.llist {
+		.llist,
+		.lane.soon {
 			display: block;
 		}
 	}
