@@ -963,15 +963,17 @@ fn apply_decisions(
     (shown, hidden)
 }
 
-/// The answer keys some guideline row of this country uses for a person of this sex (every row when
-/// the sex is not recorded), in the pack's order.
-pub fn answer_keys_for(prev: &Prevention, country: Option<&str>, sex: Option<&str>) -> Vec<String> {
+/// The answer keys some guideline row of this country uses for a person of this sex and age (every
+/// row when the sex or age is not recorded; a row counts from a year before its start age to its end),
+/// in the pack's order.
+pub fn answer_keys_for(prev: &Prevention, country: Option<&str>, sex: Option<&str>, age: Option<i32>) -> Vec<String> {
     let rows: Vec<&Row> = country
         .and_then(|c| prev.countries.get(c))
         .map(|r| {
             r.rows
                 .iter()
                 .filter(|r| r.sex.is_none() || sex.is_none() || r.sex.as_deref() == sex)
+                .filter(|r| age.is_none_or(|a| a + 1 >= r.from && r.to.is_none_or(|t| a <= t)))
                 .collect()
         })
         .unwrap_or_default();

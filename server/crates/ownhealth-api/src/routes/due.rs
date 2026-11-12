@@ -336,7 +336,7 @@ async fn undo(State(rt): State<Runtime>, caller: Caller, Path((p, key)): Path<(S
 
 type AnswerRow = (String, String, String, chrono::DateTime<chrono::Utc>);
 
-/// The questions that apply to the profile (its country's rows, for its sex) and every key it
+/// The questions that apply to the profile (its country's rows, for its sex and age) and every key it
 /// already answered, with the current answers.
 async fn answers_out(conn: &mut PgConnection, perm: &Permission, lang: &str) -> Result<Value, ApiError> {
     let pack = ownhealth_rules::load_pack().map_err(ownhealth_core::Error::from)?;
@@ -352,6 +352,7 @@ async fn answers_out(conn: &mut PgConnection, perm: &Permission, lang: &str) -> 
         prev,
         perm.profile.country.as_deref(),
         perm.profile.sex_at_birth.as_deref(),
+        perm.profile.age_on(today_utc()),
     );
     let items: Vec<Value> = prev
         .answer_keys

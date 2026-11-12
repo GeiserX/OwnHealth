@@ -458,6 +458,9 @@ async fn an_answer_moves_a_row_from_not_assessed_to_due_and_clearing_it_reverts(
     // a man in Spain has no question that applies to him
     let (_, v) = send(&a, "alex", "GET", "/profiles/alex/prevention-answers", None).await?;
     assert_eq!(v["items"], json!([]));
+    // nor a woman of 71, past the age of every row that asks
+    let (_, v) = send(&a, "alex", "GET", "/profiles/carmen/prevention-answers", None).await?;
+    assert_eq!(v["items"], json!([]));
     Ok(())
 }
 
