@@ -29,9 +29,11 @@
 		if (pdf) URL.revokeObjectURL(pdf.url);
 		pdf = null;
 	}
-	// Another profile: its sheet is another person's, so the old one goes.
+	// Another profile: its sheet is another person's, so the old one goes, and the sensitive tick
+	// was a choice for that person's print, so it is cleared too.
 	$effect(() => {
 		void prof?.slug;
+		sensitive = false;
 		return drop;
 	});
 
