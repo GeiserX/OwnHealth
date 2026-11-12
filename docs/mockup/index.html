@@ -272,7 +272,8 @@ const NAV=[
   ["imaging","nav_img",'<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="12" cy="12" r="4"/>'],
   ["import-review","nav_imp",'<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/>',7],
   ["family","nav_fam",'<circle cx="8" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 20c0-3 2.5-5 5-5s5 2 5 5M13 20c0-2.5 1.8-4 4-4s4 1.5 4 4"/>'],
-  ["mcp-access","nav_mcp",'<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>']
+  ["mcp-access","nav_mcp",'<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'],
+  ["doctor-summary","prep",'<path d="M6 3h9l3 3v15H6z"/><path d="M9 10h6M9 14h6M9 18h4"/>']
 ];
 /* ---------- i18n (main labels; dashboard fully translated) ---------- */
 const T={
@@ -872,8 +873,35 @@ function mcp(){
     <tr><td class="dim">Document text</td><td><span class="mono">read:documents_text</span> · off by default</td></tr></tbody></table></div>
   </div></div>`;
 }
+/* ---------- #doctor-summary (0.4.0): options left, the server-rendered two-page PDF right ---------- */
+function doctorSummary(){
+  const es=S.lang==="es";
+  const L=es?{t:"Resumen para el médico",sub:"Dos páginas A4 para entregar en la consulta. Cada valor cita su fuente.",o:"Qué imprimir",sp:"Especialidad",sps:["Medicina general","Cardiología","Endocrinología","Hematología"],spd:"La especialidad elige los valores de laboratorio de la hoja. Un valor nunca medido figura como «no medido».",lg:"Idioma de la hoja",sens:"Incluir hallazgos genómicos sensibles",sensd:"Solo para esta impresión. Se imprimen solo si el interruptor de datos sensibles de este perfil está activado (Ajustes).",show:"Ver el resumen",dl:"Descargar PDF",open:"Abrir en otra pestaña"}
+   :{t:"Doctor summary",sub:"Two A4 pages to hand over at a visit. Every value names its source.",o:"What to print",sp:"Specialty",sps:["General practice","Cardiology","Endocrinology","Hematology"],spd:"The specialty picks the lab values the sheet lists. A value never measured reads \"not measured\".",lg:"Language of the sheet",sens:"Include sensitive genome findings",sensd:"Only for this print. They print only while the sensitive switch of this profile is on (Settings).",show:"Show the summary",dl:"Download PDF",open:"Open in a new tab"};
+  const rows=[["LDL-C","97 mg/dL","< 130","2026-09-14","src_brgiggq4","118 · 2026-03-02 · src_9f3"],["HbA1c","5.6 %","4.0 - 5.6","2026-09-14","src_8qt2ptbp","5.5 · 2026-03-02 · src_yp2f8s2h"],["Vitamin D 25-OH","24 ng/mL","30 - 100","2026-09-14","src_a12","31 · 2026-03-02 · src_zejbc6tk"],["AST",es?"no medido":"not measured","","","",""]];
+  return `
+  <div class="ph"><div><h1>${L.t} · ${PROFILES.find(p=>p.id===S.profile).name}</h1><div class="sub">${L.sub}</div></div><div class="right"><span class="phase">v0.4</span></div></div>
+  <div style="display:grid;grid-template-columns:minmax(240px,300px) 1fr;gap:14px;align-items:start">
+   <div class="card"><h3>${L.o}</h3>
+    <div class="muted" style="font-size:12px">${L.sp}</div>
+    ${L.sps.map((x,i)=>`<label style="display:flex;gap:8px;padding:3px 0"><input type="radio" name="sp" ${i?"":"checked"}>${x}</label>`).join("")}
+    <div class="dim" style="font-size:11.5px;margin:4px 0 10px">${L.spd}</div>
+    <div class="muted" style="font-size:12px">${L.lg}</div>
+    <label style="display:flex;gap:8px;padding:3px 0"><input type="radio" name="lg" ${es?"checked":""}>Español</label>
+    <label style="display:flex;gap:8px;padding:3px 0"><input type="radio" name="lg" ${es?"":"checked"}>English</label>
+    <label style="display:flex;gap:8px;padding:10px 0 3px"><input type="checkbox">${L.sens}</label>
+    <div class="dim" style="font-size:11.5px">${L.sensd}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"><button class="btn pri">${L.show}</button><button class="btn">${L.dl}</button><button class="btn">${L.open}</button></div></div>
+   <div class="card"><div class="page" style="height:auto">
+    <b style="font-size:15px;font-family:Arial,Helvetica,sans-serif">${L.t} · ${L.sps[0]}</b><br><b style="font-family:Arial,Helvetica,sans-serif">Alex Rivera · ${es?"Hombre · 47 años":"Male · 47 years"}</b>
+    <table style="margin-top:10px"><thead><tr><th align="left">${es?"Prueba":"Test"}</th><th align="left">${es?"Valor":"Value"}</th><th align="left">${es?"Rango lab.":"Lab range"}</th><th align="left">${es?"Fecha":"Date"}</th><th align="left">${es?"Fuente":"Source"}</th><th align="left">${es?"Valor anterior":"Previous value"}</th></tr></thead>
+    <tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>
+    <div style="margin-top:14px;font-family:Arial,Helvetica,sans-serif;font-size:9px;color:#555">OwnHealth · ownhealth-rules 0.1.0 · summary-templates 0.1.0 · ${es?"estado":"state"} 4940b85a2df5 · ${es?"página":"page"} 1/2</div>
+   </div></div>
+  </div>`;
+}
 /* ---------- router ---------- */
-const ROUTES={dashboard,biomarker,timeline,genome,"drug-check":drug,wearables,imaging,"import-review":importReview,family,"mcp-access":mcp};
+const ROUTES={dashboard,biomarker,timeline,genome,"drug-check":drug,wearables,imaging,"import-review":importReview,family,"mcp-access":mcp,"doctor-summary":doctorSummary};
 function renderChrome(){
   document.documentElement.lang=S.lang;
   document.querySelectorAll("[data-i18n]").forEach(e=>e.textContent=t(e.dataset.i18n));
