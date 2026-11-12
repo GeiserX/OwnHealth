@@ -185,25 +185,42 @@ fn point(p: &Point, lang: &str) -> Value {
 }
 
 /// The lab range in the sheet's number format, built from its numeric bounds as the UI's `refRange`
-/// does ('4,0 - 5,6', '< 3,0', '> 30'); a one-sided bound the lab printed as inclusive ('≤', '<=')
-/// prints as '<=' or '>=', which the PDF's WinAnsi font can show; a range with no numbers prints as
-/// the lab wrote it.
+/// does ('4,0 - 5,6', '< 3,0', '> 30'). A one-sided bound is inclusive or strict as the normalizer
+/// read it from the printed range ('Hasta 40', '≤ 40' and 'up to 40' are inclusive, '< 40' is not),
+/// and an inclusive one prints as '<=' or '>=', which the PDF's WinAnsi font can show. A range with
+/// no numbers prints as the lab wrote it.
 fn range(p: &Point, lang: &str) -> Option<String> {
     let n = |d: &rust_decimal::Decimal| num::localized(&num::num(d), lang);
-    let printed = p.ref_text.as_deref().unwrap_or_default();
-    let cmp = |inclusive: [&'static str; 2], strict: &'static str| {
-        if inclusive.iter().any(|c| printed.contains(c)) {
-            inclusive[0]
-        } else {
-            strict
-        }
-    };
     match (&p.ref_low, &p.ref_high) {
         (Some(lo), Some(hi)) => Some(format!("{} - {}", n(lo), n(hi))),
-        (None, Some(hi)) => Some(format!("{} {}", cmp(["<=", "≤"], "<"), n(hi))),
-        (Some(lo), None) => Some(format!("{} {}", cmp([">=", "≥"], ">"), n(lo))),
+        (None, Some(hi)) => Some(format!(
+            "{} {}",
+            if inclusive(p, |r| r.high_inclusive) { "<=" } else { "<" },
+            n(hi)
+        )),
+        (Some(lo), None) => Some(format!(
+            "{} {}",
+            if inclusive(p, |r| r.low_inclusive) { ">=" } else { ">" },
+            n(lo)
+        )),
         (None, None) => p.ref_text.clone(),
     }
+}
+
+/// Whether the stored one-sided bound is inclusive: the printed range parsed again by the
+/// normalizer, in the range whose bounds are the stored ones (a range printed per sex or age holds
+/// several). Inclusivity is not stored, and the printed text is all the normalizer read it from.
+fn inclusive(p: &Point, side: impl Fn(&ownhealth_normalize::RefRange) -> bool) -> bool {
+    let Some(printed) = p.ref_text.as_deref() else {
+        return false;
+    };
+    ["es", "en"].iter().any(|locale| {
+        ownhealth_normalize::parse_range(printed, locale, p.unit.as_deref())
+            .unwrap_or_default()
+            .iter()
+            .find(|r| (r.low, r.high) == (p.ref_low, p.ref_high))
+            .is_some_and(&side)
+    })
 }
 
 /// The marker table: one row per series of the specialty, in its order.
@@ -652,6 +669,49 @@ mod tests {
             Some("4,0 - 5,6")
         );
         assert_eq!(r(p(None, None, Some("negativo")), "es").as_deref(), Some("negativo"));
+    }
+
+    #[test]
+    fn a_range_in_words_keeps_the_inclusivity_the_normalizer_gave_it() {
+        let p = |lo: Option<&str>, hi: Option<&str>, text: &str| Point {
+            id: uuid::Uuid::nil(),
+            date: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap_or_default(),
+            value: None,
+            canonical: None,
+            canonical_unit: None,
+            printed_value: String::new(),
+            unit: None,
+            unit_ucum: None,
+            ref_text: Some(text.into()),
+            ref_low: lo.and_then(|v| v.parse().ok()),
+            ref_high: hi.and_then(|v| v.parse().ok()),
+            flag: None,
+            loinc: None,
+            method: None,
+            src: "src_x".into(),
+            src_label: None,
+            src_kind: "lab".into(),
+            derivation: "printed".into(),
+        };
+        let r = |pt: Point, lang: &str| range(&pt, lang);
+        assert_eq!(r(p(None, Some("40"), "Hasta 40"), "es").as_deref(), Some("<= 40"));
+        assert_eq!(r(p(None, Some("40"), "HASTA 40"), "en").as_deref(), Some("<= 40"));
+        assert_eq!(r(p(None, Some("5.6"), "up to 5.6"), "en").as_deref(), Some("<= 5.6"));
+        assert_eq!(
+            r(p(None, Some("5.6"), "inferior a 5,6"), "es").as_deref(),
+            Some("<= 5,6")
+        );
+        assert_eq!(r(p(None, Some("5.6"), "=< 5,6"), "es").as_deref(), Some("<= 5,6"));
+        assert_eq!(r(p(Some("30"), None, "Desde 30"), "es").as_deref(), Some(">= 30"));
+        assert_eq!(r(p(Some("30"), None, "superior a 30"), "en").as_deref(), Some(">= 30"));
+        assert_eq!(r(p(Some("30"), None, "=> 30"), "en").as_deref(), Some(">= 30"));
+        // only the bare symbol is strict
+        assert_eq!(r(p(None, Some("130"), "< 130"), "es").as_deref(), Some("< 130"));
+        assert_eq!(r(p(Some("90"), None, "> 90"), "en").as_deref(), Some("> 90"));
+        // the bound picked for the person is the one whose comparator counts
+        let two = "Hombres: < 40\nMujeres: hasta 50";
+        assert_eq!(r(p(None, Some("50"), two), "es").as_deref(), Some("<= 50"));
+        assert_eq!(r(p(None, Some("40"), two), "es").as_deref(), Some("< 40"));
     }
 
     #[test]
