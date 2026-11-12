@@ -915,13 +915,32 @@ async fn person_inputs(
     Ok((answers.into_iter().collect(), decisions))
 }
 
+/// Whether a `done` decision still covers its item on `as_of`. The evidence needs a day, on or
+/// before `as_of`. A guideline row needs nothing more (the day counted as a fact). A lab gap never
+/// measured is covered by any evidence. A stale lab (`last`, `due`) is covered when the evidence is
+/// not older than the last value it reports, up to that day plus the rule's window: then the next
+/// retest is due again, and a later stale cycle (a newer `last`) is not covered either.
+fn done_holds(item: &Value, e: &Evidence, row: bool, as_of: NaiveDate) -> bool {
+    let Some(day) = e.day.filter(|d| *d <= as_of) else {
+        return false;
+    };
+    if row {
+        return true;
+    }
+    let Some(last) = item.get("last").and_then(|l| date_field(l, "date")) else {
+        return true;
+    };
+    let window = date_field(item, "due").map_or(0, |due| (due - last).num_days());
+    day >= last && as_of <= day + chrono::Duration::days(window)
+}
+
 /// Split the items by the person's decisions: (shown, hidden). Each item with a decision that
 /// counts carries it as `decision` {kind, until | evidence}:
 /// - snooze: hidden up to and including `until`, shown again from the day after;
 /// - dismiss: hidden;
-/// - done: a guideline row stays shown (its evidence already counted as a fact); any other item
-///   (a lab gap, a document request) is hidden. Evidence that no longer holds reopens the item: it
-///   shows as if there were no decision.
+/// - done: a guideline row stays shown (its evidence already counted as a fact); a lab gap is
+///   hidden while the evidence covers it (`done_holds`). Evidence that no longer holds or no longer
+///   covers the item reopens it: it shows as if there were no decision.
 fn apply_decisions(
     items: Vec<Value>,
     decisions: &BTreeMap<String, Decision>,
@@ -942,7 +961,7 @@ fn apply_decisions(
                 json!({"kind": "snooze", "until": d.until.map(iso)}),
             ),
             ("dismiss", _) => (true, json!({"kind": "dismiss"})),
-            ("done", Some(e)) => (
+            ("done", Some(e)) if done_holds(&it, e, rows.contains(key.as_str()), as_of) => (
                 !rows.contains(key.as_str()),
                 json!({"kind": "done", "evidence": {"table": e.table, "id": e.id}}),
             ),

@@ -6,7 +6,7 @@
 //! POST   /api/profiles/{p}/due/{item_key}/decision      read:records + write   {kind, until?, reason?, evidence?}
 //! DELETE /api/profiles/{p}/due/{item_key}/decision      read:records + write   (undo: the item is as before)
 //! GET    /api/profiles/{p}/prevention-answers?lang=     read:records
-//! PUT    /api/profiles/{p}/prevention-answers           read:records + write   {answer_key: "yes" | "no" | null}
+//! PUT    /api/profiles/{p}/prevention-answers?lang=     read:records + write   {answer_key: "yes" | "no" | null}
 //! ```
 //!
 //! Every item is a record, so a caller without read:records gets an empty list, and an item a lab
@@ -15,7 +15,8 @@
 //! caller without read:records gets none (the audit row keeps it).
 //!
 //! A decision is `snooze` (until a date, shown again the day after), `dismiss` (a reason is required)
-//! or `done` (evidence: a current record or an active document of the same profile). A new decision
+//! or `done` (evidence: a current record or an active document of the same profile, dated today or
+//! earlier). A lab gap needs read:labs to act on, as to see it. A new decision
 //! supersedes the current one; undo retracts it. Answers are "yes" or "no" to the closed list of
 //! `data/prevention/pack.yaml`; null retracts one. The audit rows carry ids and codes only: never a
 //! reason or an answer value.
@@ -194,14 +195,24 @@ fn evidence_of(body: &Map<String, Value>) -> Result<(String, Uuid), ApiError> {
     Ok((table.to_string(), id))
 }
 
-/// Whether the profile's document today lists the item (shown or hidden).
-async fn known_item(conn: &mut PgConnection, profile_id: Uuid, key: &str) -> Result<bool, ApiError> {
-    let doc = prevention::build_document(conn, profile_id, today_utc()).await?;
+/// Whether the profile's document today lists the item (shown or hidden) and the caller may see it:
+/// a lab gap the caller's scopes withhold is unknown to them, so they can neither learn of it nor
+/// hide it.
+async fn known_item(conn: &mut PgConnection, perm: &Permission, key: &str) -> Result<bool, ApiError> {
+    let doc = prevention::build_document(conn, perm.profile.id, today_utc()).await?;
     Ok(["items", "hidden"].iter().any(|l| {
-        doc[*l]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|i| i["key"].as_str() == Some(key)))
+        doc[*l].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|i| i["key"].as_str() == Some(key) && prevention::visible(i, &perm.scopes))
+        })
     }))
+}
+
+/// Whether the key names a lab gap (a pack rule never measured, or `stale:<rule>:<group>`), which a
+/// caller without read:labs may not see.
+fn lab_key(key: &str) -> Result<bool, ApiError> {
+    let pack = ownhealth_rules::load_pack().map_err(ownhealth_core::Error::from)?;
+    Ok(key.starts_with("stale:") || pack.rule(key).is_some())
 }
 
 fn unknown_item() -> ApiError {
@@ -249,16 +260,23 @@ async fn decide(
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), Some("write")).await?;
     let pid = perm.profile.id;
-    if !known_item(&mut tx, pid, &key).await? {
+    if !known_item(&mut tx, &perm, &key).await? {
         return Err(unknown_item());
     }
-    if let Some((table, id)) = &evidence
-        && prevention::evidence(&mut tx, pid, table, *id).await?.is_none()
-    {
-        return Err(bad_input(
-            "evidence_refused",
-            "The evidence is not a current, non-sensitive record or an active document of this profile.",
-        ));
+    if let Some((table, id)) = &evidence {
+        let Some(found) = prevention::evidence(&mut tx, pid, table, *id).await? else {
+            return Err(bad_input(
+                "evidence_refused",
+                "The evidence is not a current, non-sensitive record or an active document of this profile.",
+            ));
+        };
+        // an undated record proves nothing on any day, and a later one not yet
+        if found.day.is_none_or(|d| d > today) {
+            return Err(bad_input(
+                "evidence_undated",
+                "The evidence needs the day it was done, today or earlier.",
+            ));
+        }
     }
     let old = current_decision(&mut tx, pid, &key).await?;
     if let Some(old) = old {
@@ -309,6 +327,9 @@ async fn decide(
 async fn undo(State(rt): State<Runtime>, caller: Caller, Path((p, key)): Path<(String, String)>) -> Answer {
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), Some("write")).await?;
+    if lab_key(&key)? && !perm.scopes.contains("read:labs") {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "unknown", "No decision about this item."));
+    }
     let id = current_decision(&mut tx, perm.profile.id, &key)
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown", "No decision about this item."))?;
@@ -393,6 +414,7 @@ async fn put_answers(
     State(rt): State<Runtime>,
     caller: Caller,
     Path(p): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Answer {
     let body = body_object(body)?;
@@ -471,7 +493,9 @@ async fn put_answers(
     if !ids.is_empty() {
         audit(&mut tx, &caller.0, &perm, "prevention_answer", &ids, keys.join(" ")).await?;
     }
-    let out = answers_out(&mut tx, &perm, &caller.0.lang).await?;
+    // the reply speaks the screen's language, as the GET does
+    let lang = q.get("lang").map_or(caller.0.lang.as_str(), String::as_str);
+    let out = answers_out(&mut tx, &perm, lang).await?;
     tx.commit().await?;
     Ok((StatusCode::OK, Json(out)))
 }

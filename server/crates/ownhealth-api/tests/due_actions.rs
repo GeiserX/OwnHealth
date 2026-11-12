@@ -7,7 +7,7 @@ use chrono::{Duration, Months, NaiveDate};
 use http::{Request, StatusCode, header};
 use ownhealth_auth::sessions::{COOKIE, create_session};
 use ownhealth_core::Runtime;
-use ownhealth_core::access::{ProfileIn, all_scopes, create_profile, set_grant, today_utc};
+use ownhealth_core::access::{ProfileIn, Scopes, all_scopes, create_profile, set_grant, today_utc};
 use ownhealth_core::demo::{Family, create_rivera_family};
 use ownhealth_core::testing::TestDb;
 use serde_json::{Value, json};
@@ -403,6 +403,22 @@ async fn an_answer_moves_a_row_from_not_assessed_to_due_and_clearing_it_reverts(
         v["items"][0]["src"].as_str().is_some_and(|s| s.starts_with("src_")),
         "{v}"
     );
+    // the reply speaks the language the screen asks for, not the user's stored one (Spanish)
+    let (s, v) = send(
+        &a,
+        "alex",
+        "PUT",
+        "/profiles/dana/prevention-answers?lang=en",
+        Some(json!({"smoking_history": "yes"})),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(
+        v["items"][0]["question"]
+            .as_str()
+            .is_some_and(|q| q.contains("pack-years")),
+        "{v}"
+    );
     let yes = due(&a, "alex", "dana", today).await?;
     assert_eq!(find(&yes, "items", lung).map(|i| &i["status"]), Some(&json!("due")));
     assert_ne!(yes["prevention_hash"], before["prevention_hash"]);
@@ -575,5 +591,73 @@ async fn on_a_minors_profile_a_guardian_acts_and_a_viewer_cannot() -> R {
     assert_eq!(s, StatusCode::CREATED, "{v}");
     let (s, _) = send(&a, "sam", "DELETE", &format!("/profiles/noa/due/{key}/decision"), None).await?;
     assert_eq!(s, StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+#[tokio::test]
+async fn evidence_without_a_day_or_from_the_future_is_refused() -> R {
+    let a = app().await?;
+    let today = today_utc();
+    // a record with no day, and one dated after today
+    let mut ids = Vec::new();
+    for performed in [None, Some(iso(today + Duration::days(2)))] {
+        let (s, v) = send(
+            &a,
+            "alex",
+            "POST",
+            "/profiles/carmen/records/procedure",
+            Some(json!({"text": "Breast imaging", "performed": performed})),
+        )
+        .await?;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+        ids.push(v["id"].as_str().unwrap_or_default().to_string());
+    }
+    for id in ids {
+        let (s, v) = decide(
+            &a,
+            "alex",
+            "carmen",
+            KEY,
+            json!({"kind": "done", "evidence": {"table": "procedure", "id": id}}),
+        )
+        .await?;
+        assert_eq!(
+            (s, v["detail"]["code"].as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, Some("evidence_undated")),
+            "{v}"
+        );
+    }
+    Ok(())
+}
+
+/// A caregiver whose grant leaves out read:labs cannot see a lab gap, so they can neither probe for
+/// it nor hide it, nor undo a decision about it.
+#[tokio::test]
+async fn a_lab_gap_needs_read_labs_to_act_on() -> R {
+    let a = app().await?;
+    let gap = "lipid.lpa.once_adult";
+    let body = json!({"kind": "dismiss", "reason": "measured abroad"});
+    let (s, v) = decide(&a, "alex", "carmen", gap, body.clone()).await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    {
+        let mut c = a.db.pool.acquire().await?;
+        let pid = a.family.profile("carmen");
+        let cats: Scopes = all_scopes().into_iter().filter(|s| s != "read:labs").collect();
+        set_grant(&mut c, a.family.user("alex"), pid, "caregiver", Some(&cats), None, None).await?;
+    }
+    let (s, v) = decide(&a, "alex", "carmen", gap, body).await?;
+    assert_eq!((s, v["detail"]["code"].as_str()), (StatusCode::NOT_FOUND, Some("unknown")), "{v}");
+    let (s, v) = send(&a, "alex", "DELETE", &format!("/profiles/carmen/due/{gap}/decision"), None).await?;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+    // a row the grant still covers takes a decision as before
+    let (s, v) = decide(
+        &a,
+        "alex",
+        "carmen",
+        KEY,
+        json!({"kind": "snooze", "until": iso(today_utc() + Duration::days(7))}),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
     Ok(())
 }

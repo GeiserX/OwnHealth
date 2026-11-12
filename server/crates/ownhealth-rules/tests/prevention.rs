@@ -815,3 +815,83 @@ async fn an_off_season_row_before_its_start_age_claims_nothing_without_a_dose() 
     tx.rollback().await?;
     Ok(())
 }
+
+/// A procedure on `on` and a current `done` decision about `key` that points at it.
+async fn done_with(tx: &mut PgConnection, pid: Uuid, key: &str, on: chrono::NaiveDate) -> R {
+    let src = record(
+        tx,
+        "procedure",
+        json!({"profile_id": pid, "text": "Blood draw, private clinic", "performed": on.to_string()}),
+    )
+    .await?;
+    let id: Uuid = sqlx::query_scalar("select id from procedure where src_id = $1")
+        .bind(&src)
+        .fetch_one(&mut *tx)
+        .await?;
+    sqlx::query(
+        "update prevention_decision set status = 'superseded', superseded_at = clock_timestamp() \
+         where profile_id = $1 and item_key = $2 and status = 'current'",
+    )
+    .bind(pid)
+    .bind(key)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "insert into prevention_decision (profile_id, item_key, kind, evidence_table, evidence_id) \
+         values ($1, $2, 'done', 'procedure', $3)",
+    )
+    .bind(pid)
+    .bind(key)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// A retest marked done is hidden while its evidence covers it: from a day no older than the last
+/// value the item reports, for the rule's window. Then the next retest is due again, shown as if
+/// nothing had been decided; evidence older than the last value covers nothing.
+#[tokio::test]
+async fn done_on_a_retest_lasts_one_window_from_its_evidence() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let alex = s.pid("alex");
+    let key = "stale:recency.thyroid:tsh";
+    let before = build_document(&mut tx, alex, as_of()).await?;
+    let stale = item(&before, key).clone();
+    let (last, due) = (
+        day(stale["last"]["date"].as_str().unwrap_or_default()),
+        day(stale["due"].as_str().unwrap_or_default()),
+    );
+    let window = due - last;
+    let listed = |doc: &Value, list: &str| {
+        doc[list]
+            .as_array()
+            .and_then(|a| a.iter().find(|i| i["key"] == key))
+            .cloned()
+    };
+
+    done_with(&mut tx, alex, key, last - chrono::Duration::days(1)).await?;
+    let doc = build_document(&mut tx, alex, as_of()).await?;
+    let shown = listed(&doc, "items").expect("older evidence covers nothing");
+    assert!(shown.get("decision").is_none(), "{shown}");
+
+    let on = as_of() - chrono::Duration::days(3);
+    done_with(&mut tx, alex, key, on).await?;
+    for d in [as_of(), on + window] {
+        let doc = build_document(&mut tx, alex, d).await?;
+        assert!(listed(&doc, "items").is_none(), "{d}: still listed");
+        assert_eq!(
+            listed(&doc, "hidden").map(|h| h["decision"]["kind"].clone()),
+            Some(json!("done")),
+            "{d}"
+        );
+    }
+    let later = on + window + chrono::Duration::days(1);
+    let doc = build_document(&mut tx, alex, later).await?;
+    let back = listed(&doc, "items").expect("due again once the window has run");
+    assert!(back.get("decision").is_none(), "{back}");
+    assert!(listed(&doc, "hidden").is_none(), "{doc}");
+    tx.rollback().await?;
+    Ok(())
+}
