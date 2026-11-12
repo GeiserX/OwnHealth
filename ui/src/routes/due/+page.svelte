@@ -263,7 +263,7 @@
 			<span class="stw" style="color:{C[dueColor(i.status)]}"
 				><i style="background:{C[dueColor(i.status)]}" aria-hidden="true"></i>{t('due_st_' + i.status)}</span
 			>
-			{#if when(i)}<span class="num dim">{when(i)}</span>{/if}
+			{#if when(i)}<span class="num dim" style="white-space:nowrap">{when(i)}</span>{/if}
 			{#if canWrite && !isHidden}
 				<span class="acts">
 					{#if i.record}
