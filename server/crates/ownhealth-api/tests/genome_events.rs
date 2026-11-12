@@ -324,6 +324,53 @@ async fn retracting_the_genome_hides_its_events_and_dismisses_its_alerts() -> R 
     Ok(())
 }
 
+/// Alex has a second genome file that shows the same changes. Retracting the first file moves its
+/// open alerts to the second file's events instead of dismissing them.
+#[tokio::test]
+async fn retracting_one_genome_file_keeps_the_alerts_another_file_still_shows() -> R {
+    let e = env().await?;
+    let mut c = e.db.pool.acquire().await?;
+    let mut second = synthetic::alex_facts();
+    second["subject"]["sample_id"] = serde_json::json!("AR-02");
+    let (second_doc, _) = synthetic::seed_genome(
+        &mut c,
+        &e.rt.blobs,
+        e.fam.household_id,
+        e.fam.profile("alex"),
+        &second,
+        &[],
+        "g2.json",
+        None,
+    )
+    .await?;
+    drop(c);
+    let (_, two) = releases(e.dir.path())?;
+    clinvar::diff_release(&e.db.pool, &e.rt.blobs, &two).await?;
+    let open = "/api/review?status=open&profile=alex&kind=genome_reinterpretation";
+    let (_, before) = e.get("alex", open).await?;
+    let n = before["items"].as_array().map_or(0, Vec::len);
+    assert!(n > 0, "{before}");
+    let (status, body) = e
+        .post(
+            "alex",
+            &format!("/api/documents/{}/retract", e.doc),
+            serde_json::json!({"reason": "another person's file"}),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, after) = e.get("alex", open).await?;
+    let items = after["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(items.len(), n, "{after}");
+    let docs: Vec<Option<uuid::Uuid>> = sqlx::query_scalar(
+        "select document_id from review_item where kind = 'genome_reinterpretation' and status = 'open'",
+    )
+    .fetch_all(&e.db.pool)
+    .await?;
+    assert!(docs.iter().all(|d| *d != Some(e.doc)), "{docs:?}");
+    assert!(docs.contains(&Some(second_doc)), "{docs:?}");
+    Ok(())
+}
+
 /// A record new to ClinVar at a site the person carries, on a later run, reads "not in the previous
 /// ClinVar release" as its before: the genome file does carry the variant, so "not reported in your
 /// genome file" would be false there.

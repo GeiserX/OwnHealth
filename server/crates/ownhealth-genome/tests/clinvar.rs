@@ -740,6 +740,119 @@ async fn a_later_genome_file_confirms_an_open_chip_alert() -> R {
     Ok(())
 }
 
+/// Retract Alex's genome file of `assay` the way the retract route does: the open items of the file
+/// are handed over or dismissed, then the file is retracted.
+async fn retract_assay(c: &mut PgConnection, alex: Uuid, assay: &str) -> anyhow::Result<()> {
+    let doc: Uuid = sqlx::query_scalar("select document_id from genome_dataset where profile_id = $1 and assay = $2")
+        .bind(alex)
+        .bind(assay)
+        .fetch_one(&mut *c)
+        .await?;
+    clinvar::hand_over_alerts(&mut *c, doc).await?;
+    sqlx::query(
+        "update review_item set status = 'dismissed', decided_at = now(), decision_reason = 'document retracted' \
+         where document_id = $1 and status = 'open'",
+    )
+    .bind(doc)
+    .execute(&mut *c)
+    .await?;
+    sqlx::query("update document set status = 'retracted' where id = $1")
+        .bind(doc)
+        .execute(&mut *c)
+        .await?;
+    Ok(())
+}
+
+/// The item of Alex's LCT change: its summary and its document.
+async fn lct_item(c: &mut PgConnection, alex: Uuid) -> anyhow::Result<(Value, Option<Uuid>)> {
+    Ok(sqlx::query_as(
+        "select r.payload, r.document_id from review_item r join genome_event g on g.id = r.ref_id \
+         where r.profile_id = $1 and g.variation_id = 900020 and g.release_to = '2026-10-12'",
+    )
+    .bind(alex)
+    .fetch_one(c)
+    .await?)
+}
+
+async fn chip_doc(c: &mut PgConnection, alex: Uuid) -> anyhow::Result<Option<Uuid>> {
+    Ok(
+        sqlx::query_scalar("select document_id from genome_dataset where profile_id = $1 and assay = 'chip'")
+            .bind(alex)
+            .fetch_one(c)
+            .await?,
+    )
+}
+
+/// The chip's alert, confirmed by a later genome file, comes back to the chip when that genome file
+/// is retracted: the chip still shows the change.
+#[tokio::test]
+async fn retracting_the_confirming_genome_file_hands_the_alert_back_to_the_chip() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    let alex = e.profile("alex");
+    e.seed(&mut c, "alex", &alex_chip(), &[]).await?;
+    let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
+    let two = write_release(e.dir.path(), "two.vcf", "20261012", &release_two(), false)?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
+    seed_alex(&e, &mut c).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
+    assert_eq!(
+        lct_items(&mut c, alex).await?,
+        vec![("open".to_string(), false, "wgs".to_string())]
+    );
+    retract_assay(&mut c, alex, "wgs").await?;
+    assert_eq!(
+        lct_items(&mut c, alex).await?,
+        vec![("open".to_string(), true, "chip".to_string())]
+    );
+    let item = lct_item(&mut c, alex).await?;
+    assert_eq!(item.1, chip_doc(&mut c, alex).await?);
+    assert!(
+        item.0["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("A result you carry changed in ClinVar. "),
+        "{}",
+        item.0
+    );
+    Ok(())
+}
+
+/// A genome file and a chip compared in the same run: the genome file raised the alert and the chip
+/// was skipped. Retracting the genome file hands the alert to the chip's event.
+#[tokio::test]
+async fn retracting_the_genome_file_hands_a_same_run_alert_to_the_chip() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    let alex = e.profile("alex");
+    seed_alex(&e, &mut c).await?;
+    e.seed(&mut c, "alex", &alex_chip(), &[]).await?;
+    let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
+    let two = write_release(e.dir.path(), "two.vcf", "20261012", &release_two(), false)?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
+    assert_eq!(
+        lct_items(&mut c, alex).await?,
+        vec![("open".to_string(), false, "wgs".to_string())]
+    );
+    retract_assay(&mut c, alex, "wgs").await?;
+    assert_eq!(
+        lct_items(&mut c, alex).await?,
+        vec![("open".to_string(), true, "chip".to_string())]
+    );
+    let item = lct_item(&mut c, alex).await?;
+    assert_eq!(item.1, chip_doc(&mut c, alex).await?);
+    assert_ne!(item.0["summary_es"], "Ha cambiado en ClinVar un resultado que tienes.");
+    // Retracting the chip as well leaves nothing to hand over: the alert is dismissed.
+    retract_assay(&mut c, alex, "chip").await?;
+    assert_eq!(
+        lct_items(&mut c, alex).await?,
+        vec![("dismissed".to_string(), true, "chip".to_string())]
+    );
+    Ok(())
+}
+
 /// A change inside one class (Pathogenic to Likely_pathogenic, stars unchanged) is an event; in an
 /// ACMG SF gene it alerts, as any change there does.
 #[tokio::test]
