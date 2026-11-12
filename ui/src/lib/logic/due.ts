@@ -52,6 +52,11 @@ export function lockedScopes(rows: CardRow[], withheld: string[] | undefined): s
 	return !rows.length && withheld?.length ? withheld.join(', ') : null;
 }
 
+/** The scopes a Due card with rows still leaves items out for, or null: a partial card must say so. */
+export function partialScopes(rows: CardRow[], withheld: string[] | undefined): string | null {
+	return rows.length && withheld?.length ? withheld.join(', ') : null;
+}
+
 /** A row of the dashboard's older `due` list (lab gaps of the rule pack, grouped by rule). */
 export interface GlanceDue {
 	title: string;

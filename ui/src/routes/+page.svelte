@@ -13,7 +13,7 @@
 	import Sparkline from '#lib/components/Sparkline.svelte';
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
-	import { dueCard, lockedScopes } from '#lib/logic/due';
+	import { dueCard, lockedScopes, partialScopes } from '#lib/logic/due';
 	import { app, currentProfile } from '#lib/state/app.svelte';
 
 	// The rule pack ships inside the package. The link names only the system's pack file, never the rule that fired.
@@ -57,6 +57,7 @@
 	const DUE_MAX = 6;
 	const dueRows = $derived(dash.data ? dueCard(dash.data.due, dash.data.prevention_due) : []);
 	const dueLocked = $derived(dash.data ? lockedScopes(dueRows, dash.data.prevention_withheld) : null);
+	const duePartial = $derived(dash.data ? partialScopes(dueRows, dash.data.prevention_withheld) : null);
 	const DUE_ICON: Record<string, string> = {
 		lab: '<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/>',
 		vaccine: '<path d="m18 2 4 4M17 7l-9 9M14 4l6 6M5 19l-3 3M7 13l4 4"/>',
@@ -197,6 +198,7 @@
 					<div class="dim" style="font-size:12px">{dueLocked ? tf('h1_withheld_sys', { scope: dueLocked }) : t('h1_nodue')}</div>
 				{/each}
 				{#if dueRows.length > DUE_MAX}<div class="dim" style="font-size:11.5px;margin-top:4px"><a href="/due">{tf('due_more', { n: dueRows.length - DUE_MAX })}</a></div>{/if}
+				{#if duePartial}<div class="dim" style="font-size:11.5px;margin-top:4px">🔒 {tf('due_partial', { scope: duePartial })}</div>{/if}
 			</div>
 
 			<div class="card">

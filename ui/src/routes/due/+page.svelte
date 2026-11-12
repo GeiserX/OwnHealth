@@ -26,7 +26,8 @@
 		const slug = prof?.slug;
 		const lang = i18n.lang;
 		if (!slug) return;
-		doc.run(() => getDue(slug, lang), `${slug}/${lang}`);
+		// the local day, as the form's date: a record saved today counts on the reload
+		doc.run(() => getDue(slug, lang, today), `${slug}/${lang}`);
 	}
 	$effect(load);
 
