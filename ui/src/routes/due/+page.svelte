@@ -20,14 +20,17 @@
 	const prof = $derived(currentProfile());
 	const canWrite = $derived(!!prof && prof.role !== 'viewer');
 	const doc = new Loader<DueDoc>();
-	const today = todayIso();
+	// the local day, read again on each load and each form open, so a page left open past midnight moves on
+	let today = $state(todayIso());
 
 	function load() {
 		const slug = prof?.slug;
 		const lang = i18n.lang;
 		if (!slug) return;
 		// the local day, as the form's date: a record saved today counts on the reload
-		doc.run(() => getDue(slug, lang, today), `${slug}/${lang}`);
+		const day = todayIso();
+		today = day;
+		doc.run(() => getDue(slug, lang, day), `${slug}/${lang}`);
 	}
 	$effect(load);
 
@@ -59,6 +62,7 @@
 	function start(i: DueItem) {
 		open = open === i.key ? null : i.key;
 		name = i.record?.text ?? i.title ?? '';
+		today = todayIso();
 		date = today;
 		error = null;
 	}
