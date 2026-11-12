@@ -190,7 +190,12 @@
 	const rangeOf = (p: TrendPointStatus) => (!converted && p.range) || refRange(p.ref_low, p.ref_high, fmt);
 	const years = (a: string, b: string) => (a === b ? a : `${a}–${b}`);
 	// A number from the dashboard ('5.6') in the reader's language; words such as '7:14' stay as they are.
-	const numText = (v: string | number) => (typeof v === 'number' || /^-?\d+(\.\d+)?$/.test(v) ? fmtNum(Number(v)) : v);
+	// a number in the reader's language; a censored value ('<5', '>=0.3') keeps its comparator
+	const numText = (v: string | number) => {
+		if (typeof v === 'number') return fmtNum(v);
+		const m = /^([<>]=?)?(-?\d+(\.\d+)?)$/.exec(v);
+		return m ? (m[1] ?? '') + fmtNum(Number(m[2])) : v;
+	};
 </script>
 
 {#if !code}
@@ -449,6 +454,10 @@
 								{#if it.status === 'ok' && it.date}
 									<div class="muted" style="font-size:11.5px"><span class="num">{it.date}</span>{#if c.computed > 1}{' · ' + tp('calc_computed', c.computed)}{/if}</div>
 								{/if}
+								{#if it.status !== 'ok' && c.latestOk}
+									{@const ok = c.latestOk}
+									<div class="muted" style="font-size:11.5px">{tf('calc_last_ok', { v: numText(ok.value ?? '') + (ok.unit ? ' ' + calcUnit(ok.unit) : ''), date: ok.date ?? '' })}{#if c.computed > 1}{' · ' + tp('calc_computed', c.computed)}{/if}</div>
+								{/if}
 								{#if it.text}<div class="note" style="margin-top:2px">{it.text}</div>{/if}
 								{#each it.notes as n (n)}<div class="dim" style="font-size:11px">{n}</div>{/each}
 								{#if it.inputs.length || it.person}
@@ -479,9 +488,9 @@
 						{/each}
 						{#each calcRows as c (c.id)}
 							<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #20252f">
-								<span style="flex:1" title={c.latest.name}>{c.latest.short}</span>
-								<span class="num" style="font-weight:600;white-space:nowrap">{numText(c.latest.value ?? '')} {calcUnit(c.latest.unit)}</span>
-								<span class="dim" style="font-size:11px;white-space:nowrap">calc · {c.latest.date}</span>
+								<span style="flex:1" title={c.latestOk.name}>{c.latestOk.short}</span>
+								<span class="num" style="font-weight:600;white-space:nowrap">{numText(c.latestOk.value ?? '')} {calcUnit(c.latestOk.unit)}</span>
+								<span class="dim" style="font-size:11px;white-space:nowrap">calc · {c.latestOk.date}</span>
 							</div>
 						{/each}
 					</div>

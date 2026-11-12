@@ -49,4 +49,31 @@ test('the eGFR unit reads as people write it', () => {
 	assert.equal(calcUnit('u[IU]/mL'), 'µU/mL');
 	assert.equal(calcUnit('10*9/L'), '×10⁹/L');
 	assert.equal(calcUnit(null), '');
+	assert.equal(calcUnit('umol/L'), 'µmol/L');
+	assert.equal(calcUnit('ug/L'), 'µg/L');
+	assert.equal(calcUnit('u[IU]/mL'), 'µU/mL');
+});
+
+test('a refused newest draw keeps the last computed result in sight', () => {
+	const seq = [
+		item('fib4', 'ok', '2026-10-01', '2.13'),
+		item('fib4', 'refused', '2026-11-01'),
+		item('ckd_epi_2021_cr', 'ok', '2026-10-01', '68'),
+		item('ckd_epi_2021_cr', 'refused', '2026-11-01')
+	];
+	const s = forGroup(seq, 'ast');
+	assert.deepEqual(
+		s.map((x) => [x.latest.status, x.latestOk?.value, x.latestOk?.date, x.computed]),
+		[['refused', '2.13', '2026-10-01', 1]]
+	);
+	assert.deepEqual(
+		rowsForCard(seq, 'liver').map((x) => [x.id, x.latestOk?.value]),
+		[['fib4', '2.13']]
+	);
+	assert.deepEqual(
+		rowsForCard(seq, 'kidney').map((x) => [x.id, x.latestOk?.value]),
+		[['ckd_epi_2021_cr', '68']]
+	);
+	// nothing computed: no row on the card, and no earlier value on the page
+	assert.equal(forGroup(items, 'ast')[0].latestOk, undefined);
 });

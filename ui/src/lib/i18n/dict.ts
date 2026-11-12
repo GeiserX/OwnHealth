@@ -1373,6 +1373,7 @@ export const dict = {
 		calc_note: "Published formulas run on the recorded values, each with its citation and inputs.",
 		calc_computed: "computed for {n} draws",
 		calc_computed_one: "computed for 1 draw",
+		calc_last_ok: "last computed: {v} on {date}",
 	},
 	es: {
 		household: "Hogar",
@@ -2745,6 +2746,7 @@ export const dict = {
 		calc_note: "Fórmulas publicadas aplicadas a los valores registrados, cada una con su cita y sus datos de entrada.",
 		calc_computed: "calculado en {n} extracciones",
 		calc_computed_one: "calculado en 1 extracción",
+		calc_last_ok: "último cálculo: {v} el {date}",
 	},
 } as const;
 
