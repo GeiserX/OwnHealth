@@ -210,6 +210,53 @@ async fn alex_shows_values_ranges_previous_values_and_flags() -> R {
     Ok(())
 }
 
+/// The appendix names a hand-entered source in words with its date, and lists documents newest first
+/// with the pages of one report together; a Spanish sheet writes its lab ranges with a decimal comma.
+#[tokio::test]
+async fn the_appendix_reads_in_words_by_date_and_ranges_use_the_sheets_decimals() -> R {
+    let s = seeded().await?;
+    for (lang, by_hand, sep) in [("es", "introducido a mano · ", ','), ("en", "entered by hand · ", '.')] {
+        let m = model(&s, s.pid("alex"), &all_scopes(), &opts("hematology", lang)).await?;
+        let lines = check_sheet(&m, lang);
+        let at = lines
+            .iter()
+            .rposition(|l| l == "Fuentes" || l == "Sources")
+            .ok_or_else(|| anyhow::anyhow!("no appendix"))?;
+        let appendix = &lines[at..];
+        assert!(!appendix.iter().any(|l| l.starts_with("manual ")), "{appendix:#?}");
+        assert!(appendix.iter().any(|l| l.starts_with(by_hand)), "{lang}: {appendix:#?}");
+        // LabNorte · 2026-09-14 · p1 ... : dates never go up, pages go up within a date
+        let docs: Vec<(String, String)> = appendix
+            .iter()
+            .filter_map(|l| l.strip_prefix("LabNorte · "))
+            .filter_map(|l| {
+                let mut p = l.split(" · ");
+                Some((p.next()?.to_string(), p.next()?.split(' ').next()?.to_string()))
+            })
+            .collect();
+        assert!(docs.len() > 1, "{appendix:#?}");
+        for w in docs.windows(2) {
+            assert!(
+                w[0].0 > w[1].0 || (w[0].0 == w[1].0 && w[0].1 < w[1].1),
+                "{lang}: {docs:?}"
+            );
+        }
+        let other = if sep == ',' { '.' } else { ',' };
+        let mut ranges = 0;
+        for r in m["markers"].as_array().into_iter().flatten() {
+            let Some(range) = r["range"].as_str() else { continue };
+            let c: Vec<char> = range.chars().collect();
+            let mixed = c
+                .windows(3)
+                .any(|w| w[0].is_ascii_digit() && w[1] == other && w[2].is_ascii_digit());
+            assert!(!mixed, "{lang}: {} range {range}", r["name"]);
+            ranges += 1;
+        }
+        assert!(ranges > 0, "{lang}: no ranges");
+    }
+    Ok(())
+}
+
 /// The check above is not one that cannot fail: a marker printed without its src id is refused.
 #[tokio::test]
 async fn a_value_without_its_src_fails_the_check() -> R {
@@ -322,6 +369,60 @@ async fn an_overflow_is_cut_by_rank_with_a_count_of_what_is_left_out() -> R {
         assert!(
             !lines.iter().any(|l| l.starts_with("150 ")),
             "{lang}: the last flag printed"
+        );
+    }
+    Ok(())
+}
+
+/// Conditions, allergies and medicines alone can fill more than two pages: their tails are cut too,
+/// each with its count, and the src ids the sheet reports (for the audit row) are exactly the ones
+/// on the paper, never those of a cut row.
+#[tokio::test]
+async fn long_record_lists_are_cut_too_and_only_printed_ids_are_reported() -> R {
+    let s = seeded().await?;
+    for lang in LANGS {
+        let mut m = model(&s, s.pid("alex"), &all_scopes(), &opts("gp", lang)).await?;
+        let rows = |kind: &str, n: usize| -> Vec<Value> {
+            (0..n)
+                .map(|i| match kind {
+                    "medications" => json!({"name": format!("Medicine {i:03}"), "schedule": "once a day",
+                        "since": "2024-01-01", "src": format!("src_fake_med_{i:03}")}),
+                    "allergies" => json!({"substance": format!("Substance {i:03}"), "criticality": "low",
+                        "reaction": "rash", "src": format!("src_fake_alg_{i:03}")}),
+                    _ => json!({"name": format!("Condition {i:03}"), "since": "2020-01-01",
+                        "src": format!("src_fake_cnd_{i:03}")}),
+                })
+                .collect()
+        };
+        m["medications"] = json!(rows("medications", 130));
+        m["allergies"] = json!(rows("allergies", 60));
+        m["conditions"] = json!(rows("conditions", 60));
+        let sheet = render(&m);
+        assert!(sheet.pages <= MAX_PAGES, "{lang}: {} pages", sheet.pages);
+        let lines = check_sheet(&m, lang);
+        let more = if lang == "es" {
+            "más en el registro"
+        } else {
+            "more in the record"
+        };
+        assert!(lines.iter().any(|l| l.contains(more)), "{lang}: {lines:#?}");
+        let on_paper: Vec<&str> = lines
+            .iter()
+            .flat_map(|l| l.split_whitespace())
+            .filter(|w| w.starts_with("src_"))
+            .collect();
+        for id in &sheet.printed {
+            assert!(on_paper.contains(&id.as_str()), "{lang}: {id} reported but not printed");
+        }
+        for id in &on_paper {
+            assert!(
+                sheet.printed.iter().any(|p| p == id),
+                "{lang}: {id} printed but not reported"
+            );
+        }
+        assert!(
+            !sheet.printed.iter().any(|p| p == "src_fake_med_129"),
+            "{lang}: a cut medicine's src is reported"
         );
     }
     Ok(())

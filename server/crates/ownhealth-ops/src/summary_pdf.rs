@@ -4,8 +4,9 @@
 //!
 //! Every table row that prints a value prints its `src` id in the same row; the sources appendix maps
 //! each id to its document, page and date. When the content needs more than two pages, rows are cut
-//! from the bottom of the ranking (unflagged lab rows first, then flags by rank, then vaccines) and
-//! the cut section ends with "n more in the record". The footer carries the rules versions, the
+//! from the bottom of the ranking (unflagged lab rows first, then flags by rank, then vaccines, then
+//! the tail of medicines, allergies, conditions and genome rows) and the cut section ends with
+//! "n more in the record". The footer carries the rules versions, the
 //! start of the state hash and the page number.
 
 use std::cell::Cell;
@@ -27,14 +28,39 @@ pub struct SummaryPdf {
     pub pdf: Vec<u8>,
     pub pages: usize,
     pub cut: usize,
+    /// The src ids the printed rows cite, in print order (what the audit row names).
+    pub printed: Vec<String>,
 }
 
-/// How many rows of each cuttable section print.
+/// How many rows of each section print.
 #[derive(Debug, Clone, Copy)]
 struct Keep {
     markers: usize,
     flags: usize,
     vaccines: usize,
+    medications: usize,
+    allergies: usize,
+    conditions: usize,
+    genome: usize,
+}
+
+impl Keep {
+    fn all(model: &Value) -> Keep {
+        let n = |k: &str| arr(model, k).len();
+        Keep {
+            markers: n("markers"),
+            flags: n("flags"),
+            vaccines: n("vaccines"),
+            medications: n("medications"),
+            allergies: n("allergies"),
+            conditions: n("conditions"),
+            genome: n("genome"),
+        }
+    }
+
+    fn rows(&self) -> usize {
+        self.markers + self.flags + self.vaccines + self.medications + self.allergies + self.conditions + self.genome
+    }
 }
 
 fn arr<'a>(v: &'a Value, k: &str) -> &'a [Value] {
@@ -206,27 +232,31 @@ impl Sheet<'_> {
         }
     }
 
-    fn records(&mut self) {
+    fn records(&mut self, keep: Keep) {
         let m = self.model;
         if self.out("records") {
             return;
         }
         self.heading("sec.conditions");
         {
-            let rows: Vec<Vec<String>> = arr(m, "conditions")
+            let all = arr(m, "conditions");
+            let rows: Vec<Vec<String>> = all
                 .iter()
+                .take(keep.conditions)
                 .map(|c| vec![st(c, "name").into(), st(c, "since").into(), self.cite(&srcs(c))])
                 .collect();
             let n = rows.len();
             if n > 0 {
                 self.table(&[330.0, 80.0, 105.0], &["col.condition", "col.since", "col.src"], rows);
             }
-            self.none_or_more(n, n);
+            self.none_or_more(n, all.len());
         }
         self.heading("sec.allergies");
         {
-            let rows: Vec<Vec<String>> = arr(m, "allergies")
+            let all = arr(m, "allergies");
+            let rows: Vec<Vec<String>> = all
                 .iter()
+                .take(keep.allergies)
                 .map(|a| {
                     vec![
                         st(a, "substance").into(),
@@ -244,12 +274,14 @@ impl Sheet<'_> {
                     rows,
                 );
             }
-            self.none_or_more(n, n);
+            self.none_or_more(n, all.len());
         }
         self.heading("sec.medications");
         {
-            let rows: Vec<Vec<String>> = arr(m, "medications")
+            let all = arr(m, "medications");
+            let rows: Vec<Vec<String>> = all
                 .iter()
+                .take(keep.medications)
                 .map(|x| {
                     vec![
                         join(&[st(x, "name"), st(x, "strength"), st(x, "kind")], " · "),
@@ -268,14 +300,16 @@ impl Sheet<'_> {
                     rows,
                 );
             }
-            self.none_or_more(n, n);
+            self.none_or_more(n, all.len());
         }
     }
 
-    fn genome(&mut self) {
+    fn genome(&mut self, keep: usize) {
         let m = self.model;
-        let rows: Vec<Vec<String>> = arr(m, "genome")
+        let all = arr(m, "genome");
+        let rows: Vec<Vec<String>> = all
             .iter()
+            .take(keep)
             .map(|g| {
                 let drugs: Vec<&str> = arr(g, "drugs").iter().filter_map(Value::as_str).collect();
                 vec![
@@ -286,12 +320,9 @@ impl Sheet<'_> {
                 ]
             })
             .collect();
-        let w = &m["withheld"];
-        let (sens, minor) = (
-            w["sensitive"].as_i64().unwrap_or(0),
-            w["minor_rule"].as_i64().unwrap_or(0),
-        );
-        if self.out("genome") || (rows.is_empty() && sens == 0 && minor == 0) {
+        // the sheet goes to a third party: findings the sensitive gate or the minor rule hold back
+        // are not counted here (the audit row keeps the counts), so the paper does not say they exist
+        if self.out("genome") || all.is_empty() {
             return;
         }
         self.heading("sec.genome");
@@ -303,12 +334,7 @@ impl Sheet<'_> {
                 rows,
             );
         }
-        for (key, count) in [("withheld.sensitive", sens), ("withheld.minor", minor)] {
-            if count > 0 {
-                let text = fill(&self.t(key), &[("n", count.to_string())]);
-                self.line(&text);
-            }
-        }
+        self.none_or_more(n, all.len());
     }
 
     fn flags(&mut self, keep: usize) {
@@ -414,21 +440,31 @@ impl Sheet<'_> {
         self.none_or_more(n, all.len());
     }
 
-    /// The printed ids grouped by what they point at: `LabNorte · 2026-09-14 · p1: src_a src_b`.
+    /// The printed ids grouped by what they point at: `LabNorte · 2026-09-14 · p1: src_a src_b`,
+    /// in the model's order (newest first, then provider and page).
     fn appendix(&mut self) {
         if self.printed.is_empty() {
             return;
         }
-        let labels: Vec<(&str, &str)> = arr(self.model, "sources")
+        let sources = arr(self.model, "sources");
+        let known = |id: &String| sources.iter().any(|s| st(s, "src") == id);
+        let listed = sources
             .iter()
-            .map(|s| (st(s, "src"), st(s, "label")))
-            .collect();
+            .map(|s| (st(s, "label").to_string(), st(s, "src").to_string()));
+        // an id the model has no source row for still prints, unlabelled, at the end
+        let unknown = self
+            .printed
+            .iter()
+            .filter(|id| !known(id))
+            .map(|id| (String::new(), id.clone()));
         let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-        for id in &self.printed {
-            let what = labels.iter().find(|(s, _)| s == id).map_or("", |(_, l)| *l).to_string();
+        for (what, id) in listed.chain(unknown) {
+            if !self.printed.contains(&id) {
+                continue;
+            }
             match groups.iter_mut().find(|(w, _)| *w == what) {
-                Some((_, ids)) => ids.push(id.clone()),
-                None => groups.push((what, vec![id.clone()])),
+                Some((_, ids)) => ids.push(id),
+                None => groups.push((what, vec![id])),
             }
         }
         self.heading("sec.sources");
@@ -440,7 +476,7 @@ impl Sheet<'_> {
     }
 }
 
-fn draw(model: &Value, keep: Keep, total: usize) -> (Rendered, usize) {
+fn draw(model: &Value, keep: Keep, total: usize) -> (Rendered, usize, Vec<String>) {
     let empty = Map::new();
     let l = model.get("labels").and_then(Value::as_object).unwrap_or(&empty);
     let hash = st(model, "state_hash");
@@ -481,23 +517,20 @@ fn draw(model: &Value, keep: Keep, total: usize) -> (Rendered, usize) {
         printed: Vec::new(),
     };
     sheet.header();
-    sheet.records();
-    sheet.genome();
+    sheet.records(keep);
+    sheet.genome(keep.genome);
     sheet.flags(keep.flags);
     sheet.markers(keep.markers);
     sheet.vaccines(keep.vaccines);
     sheet.appendix();
+    let printed = std::mem::take(&mut sheet.printed);
     let out = sheet.w.finish();
-    (out, pages.get().max(1))
+    (out, pages.get().max(1), printed)
 }
 
 /// The summary on at most two pages (rows cut by rank when it would not fit), byte-stable.
 pub fn render(model: &Value) -> SummaryPdf {
-    let full = Keep {
-        markers: arr(model, "markers").len(),
-        flags: arr(model, "flags").len(),
-        vaccines: arr(model, "vaccines").len(),
-    };
+    let full = Keep::all(model);
     let mut keep = full;
     let mut pages = draw(model, keep, 0).1;
     while pages > MAX_PAGES {
@@ -515,17 +548,25 @@ pub fn render(model: &Value) -> SummaryPdf {
             keep.vaccines -= 1;
         } else if keep.markers > 0 {
             keep.markers -= 1;
+        } else if keep.medications > 0 {
+            keep.medications -= 1;
+        } else if keep.allergies > 0 {
+            keep.allergies -= 1;
+        } else if keep.conditions > 0 {
+            keep.conditions -= 1;
+        } else if keep.genome > 0 {
+            keep.genome -= 1;
         } else {
             break;
         }
         pages = draw(model, keep, 0).1;
     }
     // the footer's "page x/n" needs n: draw once more with it (the layout does not change)
-    let (out, pages) = draw(model, keep, pages);
-    let cut = (full.markers - keep.markers) + (full.flags - keep.flags) + (full.vaccines - keep.vaccines);
+    let (out, pages, printed) = draw(model, keep, pages);
     SummaryPdf {
         pdf: out.pdf,
         pages,
-        cut,
+        cut: full.rows() - keep.rows(),
+        printed,
     }
 }

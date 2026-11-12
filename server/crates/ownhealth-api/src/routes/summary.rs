@@ -1,7 +1,7 @@
 //! The printed doctor summary, from the UI only (never MCP): two A4 pages as a PDF.
 //!
 //! ```text
-//! POST /api/profiles/{p}/summary.pdf  {lang, specialty, include_sensitive?, as_of?}
+//! POST /api/profiles/{p}/summary.pdf  {lang, specialty, include_sensitive?, as_of? (not after today)}
 //! ```
 //!
 //! Needs step-up and `read:summary` on the profile, so a caregiver can print it; what each part
@@ -52,21 +52,35 @@ async fn summary_pdf(
         .literal("lang", Some(&lang), &LANGS)
         .literal("specialty", Some(&body.specialty), &SPECIALTIES)
         .done()?;
-    let as_of = body.as_of.unwrap_or_else(today_utc);
+    let today = today_utc();
+    let as_of = body.as_of.unwrap_or(today);
+    if as_of > today {
+        // a date on which a minor is an adult would lift the minor rule
+        Check::body()
+            .push(
+                "value_error",
+                "as_of",
+                "Value error, as_of cannot be after today",
+                json!(as_of),
+            )
+            .done()?;
+    }
     let mut tx = rt.pool.begin().await?;
     let perm = Caller(p.clone())
         .require(&mut tx, &profile, Some("read:summary"), None)
         .await?;
-    let gate = ownhealth_genome::gate_for(&perm, "ui", as_of, majority(&mut tx, perm.profile.household_id).await?)?;
+    // the minor rule is judged on today's date, as the genome page does
+    let gate = ownhealth_genome::gate_for(&perm, "ui", today, majority(&mut tx, perm.profile.household_id).await?)?;
     let opts = Options {
         lang,
         specialty: body.specialty.clone(),
-        sensitive_open: body.include_sensitive && gate.sensitive,
+        sensitive_open: body.include_sensitive && gate.sensitive && !gate.minor,
         as_of,
     };
     let model = summary::build(&mut tx, perm.profile.id, &perm.scopes, &opts).await?;
-    let sheet = ownhealth_ops::summary_pdf::render(&model);
-    let srcs = summary::cited_srcs(&model);
+    let mut sheet = ownhealth_ops::summary_pdf::render(&model);
+    // the ids the paper shows, not those of rows cut to fit two pages
+    let srcs = std::mem::take(&mut sheet.printed);
     let mut e = event(&p, perm.profile.id, "POST /api/profiles/{p}/summary.pdf");
     e.via = "export".into();
     e.action = "export".into();

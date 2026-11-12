@@ -184,6 +184,18 @@ fn point(p: &Point, lang: &str) -> Value {
     })
 }
 
+/// The lab range in the sheet's number format, built from its numeric bounds as the UI's `refRange`
+/// does ('4,0 - 5,6', '< 3,0', '> 30'); a range with no numbers prints as the lab wrote it.
+fn range(p: &Point, lang: &str) -> Option<String> {
+    let n = |d: &rust_decimal::Decimal| num::localized(&num::num(d), lang);
+    match (&p.ref_low, &p.ref_high) {
+        (Some(lo), Some(hi)) => Some(format!("{} - {}", n(lo), n(hi))),
+        (None, Some(hi)) => Some(format!("< {}", n(hi))),
+        (Some(lo), None) => Some(format!("> {}", n(lo))),
+        (None, None) => p.ref_text.clone(),
+    }
+}
+
 /// The marker table: one row per series of the specialty, in its order.
 fn markers(
     pack: &Pack,
@@ -212,7 +224,7 @@ fn markers(
                 Some((last, before)) => {
                     if let (Some(m), Value::Object(p)) = (row.as_object_mut(), point(last, lang)) {
                         m.extend(p);
-                        m.insert("range".into(), json!(last.ref_text));
+                        m.insert("range".into(), json!(range(last, lang)));
                         m.insert("previous".into(), before.last().map_or(Value::Null, |b| point(b, lang)));
                     }
                 }
@@ -220,6 +232,35 @@ fn markers(
             row
         })
         .collect()
+}
+
+/// Each rendered lab flag's series and rank. The renderer keeps the body's flag order and leaves
+/// some out, so a rendered flag is the next unused body flag with the same src and rule: two series
+/// that share one src each keep their own flag.
+fn flag_groups(rendered: &[Value], body: &[Map<String, Value>]) -> Vec<(String, i64)> {
+    let mut used = vec![false; body.len()];
+    let mut out = Vec::new();
+    for f in rendered {
+        let hit = body.iter().enumerate().find(|(i, b)| {
+            !used[*i] && b.get("src") == f.get("src") && b.get("rule").and_then(Value::as_str) == f["rule"].as_str()
+        });
+        if let Some((i, b)) = hit {
+            used[i] = true;
+            if let Some(g) = str_of(b, "group") {
+                out.push((g.to_string(), f["rank"].as_i64().unwrap_or(0)));
+            }
+        }
+    }
+    out
+}
+
+/// How a medicine is taken: the dose and the schedule, both when the record has both.
+fn taken(m: &Map<String, Value>) -> Value {
+    match (s(m, "dose_text"), s(m, "schedule_text")) {
+        (Value::String(d), Value::String(w)) if d != w => json!(format!("{d} · {w}")),
+        (d, Value::Null) => d,
+        (_, w) => w,
+    }
 }
 
 /// Genome rows: actionable PGx, and sensitive findings when the gate let them through.
@@ -296,7 +337,15 @@ fn cited(model: &Value) -> Vec<String> {
     out
 }
 
-/// src id -> what a reader can find: the document, its page and date (the src label), else the kind.
+/// A src label that is a code, not words: the kind itself, or the older English words for 'manual'.
+fn is_code(label: &str, kind: &str) -> bool {
+    let l = label.trim().to_lowercase();
+    l == kind || (kind == "manual" && ["manual entry", "entered by hand"].contains(&l.as_str()))
+}
+
+/// src id -> what a reader can find: the document, its page and date (the src label), else the
+/// kind of source and the day it was recorded. Newest first, then provider and page, so the pages
+/// of one report sit together.
 async fn sources(conn: &mut PgConnection, ids: &[String], l: &Map<String, Value>) -> Result<Vec<Value>> {
     type Row = (
         String,
@@ -305,18 +354,30 @@ async fn sources(conn: &mut PgConnection, ids: &[String], l: &Map<String, Value>
         Option<i32>,
         Option<String>,
         Option<chrono::DateTime<chrono::Utc>>,
+        chrono::DateTime<chrono::Utc>,
     );
     let rows: Vec<Row> = sqlx::query_as(
-        "select s.id, s.kind, s.label, s.page_no, d.provider_name, d.collected_at \
+        "select s.id, s.kind, s.label, s.page_no, d.provider_name, d.collected_at, s.created_at \
          from src s left join document d on d.id = s.document_id where s.id = any($1)",
     )
     .bind(ids)
     .fetch_all(conn)
     .await?;
-    Ok(ids
-        .iter()
-        .filter_map(|id| rows.iter().find(|r| &r.0 == id))
-        .map(|(id, kind, lbl, page, provider, collected)| {
+    let mut out: Vec<(std::cmp::Reverse<NaiveDate>, String, i32, String, String)> = rows
+        .into_iter()
+        .map(|(id, kind, lbl, page, provider, collected, created)| {
+            let lbl = lbl.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+            // the date a reader knows the source by: the document's, the one its label names, else
+            // the day it was recorded
+            let named = lbl.as_deref().and_then(|x| {
+                x.split(" · ")
+                    .find_map(|p| NaiveDate::parse_from_str(p, "%Y-%m-%d").ok())
+            });
+            let date = collected
+                .map(|c| c.date_naive())
+                .or(named)
+                .unwrap_or(created.date_naive());
+            let words = label(l, &format!("kind.{kind}"));
             let built = || {
                 let parts: Vec<String> = [
                     provider.clone(),
@@ -328,13 +389,29 @@ async fn sources(conn: &mut PgConnection, ids: &[String], l: &Map<String, Value>
                 .collect();
                 (!parts.is_empty()).then(|| parts.join(" · "))
             };
-            let what = lbl
-                .clone()
-                .filter(|x| !x.trim().is_empty())
-                .or_else(built)
-                .unwrap_or_else(|| label(l, &format!("kind.{kind}")));
-            json!({"src": id, "label": what})
+            // a label that starts with a code ('manual', or the older 'manual entry') reads as the
+            // kind's own words, as the UI's sourceLabel does; with no other part it gains the date
+            let what = match lbl {
+                Some(x) => match x.split_once(" · ") {
+                    Some((first, rest)) if is_code(first, &kind) => format!("{words} · {rest}"),
+                    None if is_code(&x, &kind) => format!("{words} · {}", iso(date)),
+                    _ => x,
+                },
+                None => built().unwrap_or_else(|| format!("{words} · {}", iso(date))),
+            };
+            (
+                std::cmp::Reverse(date),
+                provider.unwrap_or_default(),
+                page.unwrap_or(0),
+                what,
+                id,
+            )
         })
+        .collect();
+    out.sort();
+    Ok(out
+        .into_iter()
+        .map(|(_, _, _, what, id)| json!({"src": id, "label": what}))
         .collect())
 }
 
@@ -354,21 +431,13 @@ pub async fn build(conn: &mut PgConnection, profile_id: Uuid, scopes: &Scopes, o
     let allowed = |s: &str| scopes.contains(s);
     let (labs_ok, records_ok, genome_ok) = (allowed("read:labs"), allowed("read:records"), allowed("read:genome"));
 
-    // flags, ranked by the renderer; a lab flag's series comes from the body flag with the same src
-    let mut flags = Vec::new();
-    let mut flag_groups: Vec<(String, i64)> = Vec::new();
-    for f in rendered["data"]["flags"].as_array().into_iter().flatten() {
-        let rank = f["rank"].as_i64().unwrap_or(0);
-        if let Some(g) = ev
-            .flags
-            .iter()
-            .find(|b| b.get("src") == f.get("src"))
-            .and_then(|b| str_of(b, "group"))
-        {
-            flag_groups.push((g.to_string(), rank));
-        }
-        flags.push(json!({"rank": rank, "text": f["text"], "src": src_list(&f["src"])}));
-    }
+    // flags, ranked by the renderer
+    let rendered_flags = rendered["data"]["flags"].as_array().map_or(&[][..], Vec::as_slice);
+    let flag_groups = flag_groups(rendered_flags, &ev.flags);
+    let flags: Vec<Value> = rendered_flags
+        .iter()
+        .map(|f| json!({"rank": f["rank"].as_i64().unwrap_or(0), "text": f["text"], "src": src_list(&f["src"])}))
+        .collect();
 
     let prof = &ev.profile;
     let person = json!({
@@ -409,7 +478,7 @@ pub async fn build(conn: &mut PgConnection, profile_id: Uuid, scopes: &Scopes, o
                 "name": s(m, "name"),
                 "strength": s(m, "strength"),
                 "kind": if supplement { json!(label(&l, "supplement")) } else { Value::Null },
-                "schedule": s(m, "schedule_text").as_str().map_or(s(m, "dose_text"), |x| json!(x)),
+                "schedule": taken(m),
                 "prescriber": s(m, "prescriber"),
                 "since": s(m, "started"),
                 "src": s(m, "src_id"),
@@ -506,4 +575,47 @@ pub fn specialty_markers() -> Result<Vec<(String, Vec<String>)>> {
         .iter()
         .map(|s| (s.id.clone(), s.markers.clone()))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(v: Value) -> Map<String, Value> {
+        v.as_object().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn two_series_that_share_a_src_keep_their_own_flag() {
+        let body = [
+            map(json!({"src": "src_a", "rule": "lab_range", "group": "ldl_c"})),
+            map(json!({"src": "src_a", "rule": "lab_range", "group": "hdl_c"})),
+            map(json!({"src": "src_b", "rule": "lab_range", "group": "tsh"})),
+        ];
+        let rendered = [
+            json!({"rank": 1, "src": "src_a", "rule": "lab_range"}),
+            json!({"rank": 2, "src": "src_a", "rule": "lab_range"}),
+            json!({"rank": 3, "src": "src_b", "rule": "lab_range"}),
+        ];
+        assert_eq!(
+            flag_groups(&rendered, &body),
+            vec![("ldl_c".into(), 1), ("hdl_c".into(), 2), ("tsh".into(), 3)]
+        );
+    }
+
+    #[test]
+    fn a_schedule_keeps_the_dose_beside_it() {
+        let m = |v: Value| taken(&map(v));
+        assert_eq!(
+            m(json!({"dose_text": "2 tablets", "schedule_text": "nightly"})),
+            json!("2 tablets · nightly")
+        );
+        assert_eq!(m(json!({"dose_text": "2 tablets"})), json!("2 tablets"));
+        assert_eq!(m(json!({"schedule_text": "nightly"})), json!("nightly"));
+        assert_eq!(
+            m(json!({"dose_text": "nightly", "schedule_text": "nightly"})),
+            json!("nightly")
+        );
+        assert_eq!(m(json!({})), Value::Null);
+    }
 }

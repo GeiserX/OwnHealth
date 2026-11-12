@@ -175,7 +175,10 @@ async fn a_sensitive_finding_prints_only_when_ticked_and_never_for_a_minor() -> 
         let body = json!({"lang": "en", "specialty": "gp", "include_sensitive": tick});
         let r = alex.post(&format!("/api/profiles/{slug}/summary.pdf"), &body).await?;
         assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
-        Ok(lines(&r.bytes).iter().any(|l| l.contains("APOE")))
+        let text = lines(&r.bytes);
+        // the sheet goes to a third party: it never says that a gated finding exists, nor how many
+        assert!(!text.iter().any(|l| l.contains("not printed")), "{text:#?}");
+        Ok(text.iter().any(|l| l.contains("APOE")))
     };
     // the profile's UI switch is off: ticking alone does not open it
     sensitive_ui(&env, "alex", false).await?;
@@ -186,6 +189,10 @@ async fn a_sensitive_finding_prints_only_when_ticked_and_never_for_a_minor() -> 
     // Lucía is 9: never, whatever the switch and the tick say
     sensitive_ui(&env, "lucia", true).await?;
     assert!(!apoe("lucia", true).await?);
+    // nor by asking for a date on which she is an adult: a print is never dated after today
+    let body = json!({"lang": "en", "specialty": "gp", "include_sensitive": true, "as_of": "2045-01-01"});
+    let r = alex.post("/api/profiles/lucia/summary.pdf", &body).await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
     Ok(())
 }
 

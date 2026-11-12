@@ -52,8 +52,6 @@ templates:
     labs: {en: "Lab values: not shown, this account cannot read them.", es: "Valores de laboratorio: no se muestran, esta cuenta no puede leerlos."}
     records: {en: "Conditions, allergies, medicines and vaccines: not shown, this account cannot read them.", es: "Problemas de salud, alergias, medicamentos y vacunas: no se muestran, esta cuenta no puede leerlos."}
     genome: {en: "Genome findings: not shown, this account cannot read them.", es: "Hallazgos genómicos: no se muestran, esta cuenta no puede leerlos."}
-    sensitive: {en: "Sensitive genome findings not printed: {n}.", es: "Hallazgos genómicos sensibles no impresos: {n}."}
-    minor: {en: "Genome findings not printed for a minor: {n}.", es: "Hallazgos genómicos no impresos por ser menor: {n}."}
   criticality:
     high: {en: high, es: alta}
     low: {en: low, es: baja}
