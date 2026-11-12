@@ -618,11 +618,11 @@ function drug(){
     ${[["Platelets","231 ×10⁹/L","ok","LabNorte · 2026-09-14 · p1"],["Haemoglobin","15.1 g/dL","ok","LabNorte · 2026-09-14 · p1"],["eGFR (CKD-EPI 2021)","94 mL/min/1.73m²","ok","calc · 2026-09-14"],["ALT","24 U/L","ok","LabNorte · 2026-09-14 · p1"]].map(l=>`<div style="display:flex;gap:10px;align-items:center;padding:5px 0;border-top:1px solid #20252f"><span style="flex:1">${l[0]}</span>${src(l[3])}<span class="num" style="font-weight:600;width:130px;text-align:right">${l[1]}</span>${pill(l[2])}</div>`).join("")}</div>
   </div>
   <div class="grid" style="align-content:start">
-   <div class="card"><h3>Current medications</h3>
+   <div class="card"><h3>Current medicines and supplements</h3>
     <table class="t"><tbody>
      <tr><td style="white-space:nowrap"><b>Omeprazole</b> 20 mg</td><td>${pill("watch","CYP2C19 inhibitor")}</td><td class="muted" style="font-size:12px">since 2026-04-01 · named in the phenoconversion card · ${src("Rx · src_m05")}</td></tr>
      <tr><td style="white-space:nowrap"><b>Atorvastatin</b> 20 mg</td><td>${pill("stale","Not assessed")}</td><td class="muted" style="font-size:12px">since 2026-03-10 · ${src("Rx · src_m02")}</td></tr>
-     <tr><td style="white-space:nowrap"><b>Vitamin D3</b> 1000 IU <span class="chip">Supplement</span></td><td>${pill("stale","Not assessed")}</td><td class="muted" style="font-size:12px">since 2026-05-01 · ${src("Rx · src_m09")}</td></tr>
+     <tr><td style="white-space:nowrap"><b>Vitamin D3</b> 1000 IU <span class="chip">Supplement</span></td><td>${pill("stale","Not assessed")}</td><td class="muted" style="font-size:12px">since 2026-05-01 · ${src("src_m09")}</td></tr>
     </tbody></table>
     <div class="note" style="margin-top:6px">not_assessed: drug-drug interactions (no open-licence source configured).</div></div>
    <div class="card"><h3>Allergies and intolerances</h3><div class="muted">No drug allergy on record · statin myalgia 2025 (intolerance, not allergy)</div></div>
