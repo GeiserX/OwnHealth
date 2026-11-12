@@ -14,7 +14,8 @@
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { currentProfile } from '#lib/state/app.svelte';
 	import { sourceLabel } from '#lib/logic/format';
-	import { buildBars, type Bar } from '#lib/logic/axis';
+	import type { Bar } from '#lib/logic/axis';
+	import { laneBars } from '#lib/logic/lane';
 	import { todayIso } from '#lib/logic/people';
 
 	type Ty = TimelineEvent['type'];
@@ -90,14 +91,14 @@
 		const step = y1 - y0 > 12 ? 5 : y1 - y0 > 6 ? 2 : 1;
 		const ticks: { year: number; x: number }[] = [];
 		for (let y = y0; y <= y1; y += step) ticks.push({ year: y, x: x(`${y}-01-01`) });
-		// one row per span; buildBars draws its open-ended courses and one-day dots
-		const rows = spans.map((s) => ({ span: s, bars: buildBars(s.segments, x, today).map((b, i) => ({ b, g: s.segments[i] })) }));
+		// one row per span with a course started by today; buildBars draws open-ended courses and one-day dots
+		const rows = spans.map((s) => ({ span: s, bars: laneBars(s.segments, x, today) })).filter((r) => r.bars.length);
 		return { ticks, rows };
 	});
 	let pick = $state<{ span: TimelineSpan; g: TimelineSegment } | null>(null);
-	// the detail follows the bars: another profile or a type filter that hides its row clears it, so removing
-	// the filter later does not bring the old detail back
-	const tip = $derived(pick && spans.includes(pick.span) ? pick : null);
+	// the detail follows the bars: another profile, a type filter that hides its row or a country filter that
+	// hides the lane clears it, so removing the filter later does not bring the old detail back
+	const tip = $derived(pick && !countries.size && spans.includes(pick.span) ? pick : null);
 	$effect(() => {
 		if (pick && !tip) pick = null;
 	});
@@ -187,7 +188,8 @@
 						<div><i style="background:{TY[s.type].c}"></i><b>{s.label}</b> <span class="dim">{tyName(s.type)}</span></div>
 						{#each s.segments as g, gi (gi)}
 							<div class="lseg">
-								<span class="num">{range(g)}</span>
+								<span class="num nowrap">{range(g)}</span>
+								{#if g.label !== s.label}<span class="muted">{g.label}</span>{/if}
 								{#if g.src}<SourceChip label={g.src_label ?? g.src} name={g.label} src={g.src} onopen={openSource} />{/if}
 							</div>
 						{/each}
@@ -372,7 +374,8 @@
 	}
 	.lseg {
 		display: flex;
-		gap: 8px;
+		flex-wrap: wrap;
+		gap: 2px 8px;
 		align-items: center;
 		margin: 3px 0 0 14px;
 		font-size: 12px;
@@ -380,6 +383,9 @@
 	}
 	.fname {
 		overflow-wrap: anywhere;
+	}
+	.nowrap {
+		white-space: nowrap;
 	}
 	@media (max-width: 760px) {
 		.lgrid,

@@ -51,3 +51,20 @@ test('a new visit, or a moved day, is placed at noon UTC; an end before the new 
 	assert.deepEqual(visitPeriod('2026-05-11', stored), { period_start: '2026-05-11T12:00:00Z' });
 	assert.deepEqual(visitPeriod(undefined, stored), {});
 });
+
+// The lane's axis ends today: a course that has not started yet is not drawn at today's edge.
+import { laneBars } from '../src/lib/logic/lane.ts';
+
+test('a course that starts after today has no bar, and each bar keeps its own segment', () => {
+	const segs = [
+		{ date: '2026-03-10', end: null, label: 'Atorvastatin 20 mg' },
+		{ date: '2027-01-15', end: null, label: 'Atorvastatin 40 mg' }
+	];
+	const rows = laneBars(segs, x, '2026-11-10');
+	assert.deepEqual(
+		rows.map((r) => r.g.label),
+		['Atorvastatin 20 mg']
+	);
+	assert.equal(rows[0].b.x2, x('2026-11-10'));
+	assert.deepEqual(laneBars([segs[1]], x, '2026-11-10'), []);
+});
