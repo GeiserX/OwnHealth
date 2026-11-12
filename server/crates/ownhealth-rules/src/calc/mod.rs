@@ -560,7 +560,11 @@ pub fn evaluate(data: &Data, calc: &Calc, draws: &[Draw], person: &Person, as_of
         .filter(|d| calc.inputs.iter().all(|g| d.obs.contains_key(g)))
         .collect();
     if !complete.is_empty() {
-        return complete.into_iter().map(|d| on_draw(data, calc, d, person)).collect();
+        // oldest first by each result's own date (a draw sorts by its newest value of any group);
+        // the sort is stable, so draw order breaks ties
+        let mut items: Vec<Value> = complete.into_iter().map(|d| on_draw(data, calc, d, person)).collect();
+        items.sort_by(|a, b| a["date"].as_str().cmp(&b["date"].as_str()));
+        return items;
     }
     // the newest value of each input the record has, in input order
     let newest: Vec<&Obs> = calc

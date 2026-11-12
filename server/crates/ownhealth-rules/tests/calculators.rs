@@ -433,6 +433,21 @@ fn a_result_is_dated_by_its_own_inputs() {
     );
 }
 
+/// Results come oldest first by their own date, even when a report's other values are newer.
+#[test]
+fn results_are_ordered_by_their_own_date() {
+    let p = person("1979-05-14", Some(Sex::Male));
+    let a = draw(vec![
+        obs("creatinine", "0.98", "mg/dL", "2026-09-14", "a"),
+        obs("glucose", "5.4", "mmol/L", "2026-09-20", "g"),
+    ]);
+    let b = draw(vec![obs("creatinine", "0.90", "mg/dL", "2026-09-16", "b")]);
+    // the draws are in Draw.date order: b (09-16), then a (09-20)
+    let items = one("ckd_epi_2021_cr", &[b, a], &p);
+    let dates: Vec<&str> = items.iter().filter_map(|i| i["date"].as_str()).collect();
+    assert_eq!(dates, ["2026-09-14", "2026-09-16"]);
+}
+
 #[test]
 fn homa_ir_says_fasting_is_not_recorded_only_when_the_glucose_row_does_not_say_it() {
     let p = person("1981-02-02", Some(Sex::Female));
