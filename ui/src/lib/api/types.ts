@@ -197,7 +197,11 @@ export interface Dashboard {
 	changes: { name: string; from: string; to: string; unit: string; direction: 'up' | 'down'; status: Status }[];
 	changes_vs: IsoDate | null;
 	not_measured_this_time: string[];
-	due: { title: string; why: string; status: Status; kind: 'lab' | 'vaccine' | 'screening'; phase: string | null }[];
+	due: { title: string; why: string; status: Status; kind: 'lab' | 'vaccine' | 'screening'; phase: string | null; rule?: string }[];
+	/** Screenings, vaccines and lab gaps of ownhealth.prevention/v1 (0.4.0); the Due card merges it with `due`. */
+	prevention_due?: import('../logic/due').DueItem[];
+	/** The scopes the Due card lacks to show every item; empty when nothing is withheld. */
+	prevention_withheld?: string[];
 	genome: { summary: string; chips: string[]; hidden: number; source: string | null } | null;
 	review_open: number;
 	state_hash: string;
@@ -642,4 +646,56 @@ export interface PasskeyOut {
 	label: string | null;
 	created_at: IsoDateTime;
 	last_used_at: IsoDateTime | null;
+}
+
+// ---- calculators (GET /profiles/{p}/calculators, ownhealth.calculators/v1 rendered) ----
+export interface CalcInput {
+	group: string;
+	name: string;
+	/** as recorded */
+	value: string;
+	unit: string | null;
+	date: IsoDate;
+	src: string;
+	/** the value in the formula's unit, when the formula needed another one */
+	converted?: { value: string; unit: string };
+}
+
+export interface CalcItem {
+	id: string;
+	version: string;
+	name: string;
+	/** the name a narrow row has room for */
+	short: string;
+	status: 'ok' | 'refused' | 'not_assessed';
+	/** only when status is ok */
+	value?: string;
+	unit?: string | null;
+	date?: IsoDate;
+	person?: { age?: number; sex?: string };
+	inputs: CalcInput[];
+	cite: string;
+	src: string[];
+	reason_code?: string;
+	/** why it was not computed */
+	text?: string;
+	limitations?: string[];
+	category?: { code: string; low: string; high: string; cite: string };
+	/** the published band, then the limitations, in the reader's language */
+	notes: string[];
+	/** the dashboard card it belongs to */
+	system: string;
+	/** alias groups whose biomarker page lists it */
+	shows_on: string[];
+}
+
+export interface Calculators {
+	schema: string;
+	profile: string;
+	as_of: IsoDate;
+	rules: string;
+	units: string;
+	lang: string;
+	items: CalcItem[];
+	calculators_hash: string;
 }

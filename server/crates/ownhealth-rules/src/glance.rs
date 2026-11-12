@@ -398,6 +398,17 @@ pub async fn build_dashboard(
         }
     }
 
+    // screenings, vaccines and the lab gaps above as one list with stable keys (ownhealth.prevention/v1);
+    // the Due card shows these and keeps a `due` row only when no item here has its rule
+    // `prevention_withheld` names the scopes the card lacks, so an empty card is not read as nothing due
+    let (prevention_due, prevention_withheld) = if scopes.contains("read:records") {
+        let doc = crate::prevention::from_evaluation(&mut *conn, ev, body, pack).await?;
+        let mut shown = crate::prevention::render(&doc, pack, lang, scopes)?;
+        (shown["items"].take(), shown["withheld_scopes"].take())
+    } else {
+        (json!([]), json!(["read:records"]))
+    };
+
     // medication strip with PGx badges (CPIC level A pairs with a non-normal phenotype)
     let genome_ok = scopes.contains("read:genome");
     let findings = if genome_ok { &ev.findings[..] } else { &[] };
@@ -552,6 +563,8 @@ pub async fn build_dashboard(
         "changes_vs": changes_vs,
         "not_measured_this_time": not_this_time,
         "due": due,
+        "prevention_due": prevention_due,
+        "prevention_withheld": prevention_withheld,
         "genome": genome,
         "review_open": review_open,
         "state_hash": body.get("state_hash"),

@@ -31,6 +31,8 @@ const SOURCES: &[(&str, Source)] = &[
     ("dashboard", |s| Box::pin(dashboards(s))),
     ("check_drug", |s| Box::pin(drug_checks(s))),
     ("clinvar_alerts", |_| Box::pin(clinvar_alerts())),
+    ("due", |s| Box::pin(due(s))),
+    ("calculators", |s| Box::pin(calculators(s))),
 ];
 
 async fn status(s: &Seeded) -> anyhow::Result<Vec<Value>> {
@@ -104,6 +106,33 @@ async fn clinvar_alerts() -> anyhow::Result<Vec<Value>> {
                     }
                 }
             }
+        }
+    }
+    Ok(out)
+}
+
+/// The Due screen (ownhealth.prevention/v1 rendered) of each person in both languages.
+async fn due(s: &Seeded) -> anyhow::Result<Vec<Value>> {
+    let mut tx = s.pool().begin().await?;
+    let pack = load_pack()?;
+    let mut out = Vec::new();
+    for slug in SLUGS {
+        let doc = ownhealth_rules::prevention::build_document(&mut tx, s.pid(slug), as_of()).await?;
+        for lang in LANGS {
+            out.push(ownhealth_rules::prevention::render(&doc, &pack, lang, &all_scopes())?);
+        }
+    }
+    Ok(out)
+}
+
+/// The calculators (ownhealth.calculators/v1 rendered) of each person in both languages.
+async fn calculators(s: &Seeded) -> anyhow::Result<Vec<Value>> {
+    let mut tx = s.pool().begin().await?;
+    let mut out = Vec::new();
+    for slug in SLUGS {
+        let doc = ownhealth_rules::calc::document(&mut tx, s.pid(slug), as_of()).await?;
+        for lang in LANGS {
+            out.push(ownhealth_rules::calc::render(&doc, lang)?);
         }
     }
     Ok(out)

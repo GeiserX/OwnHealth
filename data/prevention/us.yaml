@@ -1,0 +1,84 @@
+# United States: our own reading of the USPSTF grade A and B recommendations and of the CDC adult
+# immunization schedule. Rows are for adults. Hepatitis C screening is the rule pack's
+# infect.hcv.once_adult (data/rules/pack/screening.yaml): this file names it by rule id and never
+# evaluates it a second time.
+version: "prevention-us 0.1.0"
+reviewer: "OwnHealth maintainers (not clinicians)"
+reviewed: 2026-11-11
+disclaimer:
+  en: "OwnHealth is not affiliated with the USPSTF or the CDC, and neither endorses this list. It is our own reading of their published recommendations."
+  es: "OwnHealth no tiene relación con el USPSTF ni con los CDC, y ninguno de los dos respalda esta lista. Es nuestra propia lectura de sus recomendaciones publicadas."
+rows:
+  - id: us.cancer.breast
+    kind: every_n_months
+    area: screening
+    sex: female
+    ages: [40, 74]
+    months: 24
+    evidence: [mammography]
+    source: USPSTF 2024 (B)
+    cite: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/breast-cancer-screening
+    name: {en: "Breast cancer screening (mammography)", es: "Cribado de cáncer de mama (mamografía)"}
+  - id: us.cancer.colorectal
+    kind: every_n_months
+    area: screening
+    ages: [45, 75]
+    months: 12
+    evidence: [fit, colonoscopy]
+    interval_for: {colonoscopy: 120}
+    source: USPSTF 2021 (A, B)
+    cite: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/colorectal-cancer-screening
+    name: {en: "Colorectal cancer screening", es: "Cribado de cáncer colorrectal"}
+  - id: us.cancer.cervix_cytology
+    kind: every_n_months
+    area: screening
+    sex: female
+    ages: [21, 29]
+    months: 36
+    evidence: [cervical_cytology]
+    source: USPSTF 2018 (A)
+    cite: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/cervical-cancer-screening
+    name: {en: "Cervical cancer screening (cytology)", es: "Cribado de cáncer de cuello de útero (citología)"}
+  - id: us.cancer.cervix_hpv
+    kind: every_n_months
+    area: screening
+    sex: female
+    ages: [30, 65]
+    months: 60
+    evidence: [hpv_test, cervical_cytology]
+    interval_for: {cervical_cytology: 36}
+    source: USPSTF 2018 (A)
+    cite: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/cervical-cancer-screening
+    name: {en: "Cervical cancer screening (HPV test)", es: "Cribado de cáncer de cuello de útero (prueba del VPH)"}
+  - id: us.infect.hcv
+    pack_rule: infect.hcv.once_adult
+    source: USPSTF 2020 (B)
+    cite: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/hepatitis-c-screening
+  - id: us.vac.td
+    kind: every_n_months
+    area: vaccine
+    ages: [19, null]
+    months: 120
+    evidence: [td]
+    source: CDC adult schedule
+    cite: https://www.cdc.gov/vaccines/hcp/imz-schedules/adult-age.html
+    name: {en: "Tetanus and diphtheria (Td or Tdap), every 10 years", es: "Tétanos y difteria (Td o Tdap), cada 10 años"}
+  - id: us.vac.influenza
+    kind: seasonal
+    area: vaccine
+    ages: [19, null]
+    season_start: "09-01"
+    evidence: [influenza]
+    source: CDC adult schedule
+    cite: https://www.cdc.gov/vaccines/hcp/imz-schedules/adult-age.html
+    name: {en: "Influenza, one dose each season", es: "Gripe, una dosis cada temporada"}
+  - id: us.vac.zoster
+    kind: series
+    area: vaccine
+    ages: [50, null]
+    doses: 2
+    gap_days: 56
+    evidence: [zoster]
+    source: CDC adult schedule
+    cite: https://www.cdc.gov/vaccines/hcp/imz-schedules/adult-age.html
+    name: {en: "Herpes zoster, two doses from age 50", es: "Herpes zóster, dos dosis a partir de los 50 años"}
