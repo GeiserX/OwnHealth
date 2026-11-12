@@ -459,7 +459,10 @@ pub async fn build(conn: &mut PgConnection, profile_id: Uuid, scopes: &Scopes, o
             .map(|c| json!({"name": s(c, "text"), "since": s(c, "onset"), "src": s(c, "src_id")}))
             .collect();
         for a in list_records(&mut *conn, "allergy", profile_id, None, false).await? {
-            let active = !matches!(str_of(&a, "clinical_status"), Some("inactive" | "resolved"))
+            // the sheet's date: an allergy recorded as starting later is not on it yet
+            let started = date_of(&a, "effective_at").is_none_or(|d| d <= opts.as_of);
+            let active = started
+                && !matches!(str_of(&a, "clinical_status"), Some("inactive" | "resolved"))
                 && !matches!(str_of(&a, "verification_status"), Some("refuted" | "entered-in-error"));
             if active {
                 let crit = str_of(&a, "criticality").map(|c| label(&l, &format!("criticality.{c}")));

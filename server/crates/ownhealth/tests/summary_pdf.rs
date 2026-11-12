@@ -257,6 +257,45 @@ async fn the_appendix_reads_in_words_by_date_and_ranges_use_the_sheets_decimals(
     Ok(())
 }
 
+/// A sheet dated in the past leaves out an allergy recorded as starting after that date.
+#[tokio::test]
+async fn an_allergy_that_starts_after_the_print_date_is_left_out() -> R {
+    let s = seeded().await?;
+    let names = |m: &Value| -> Vec<String> {
+        m["allergies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a["substance"].as_str().map(str::to_string))
+            .collect()
+    };
+    let before = model(&s, s.pid("sam"), &all_scopes(), &opts("gp", "en")).await?;
+    let first = names(&before)
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("sam has no allergy"))?;
+    // a fixture edit, past the trigger that keeps clinical rows immutable
+    let mut tx = s.pool().begin().await?;
+    sqlx::query("set local session_replication_role = replica")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("update allergy set effective_at = $3 where profile_id = $1 and substance = $2")
+        .bind(s.pid("sam"))
+        .bind(&first)
+        .bind(
+            (as_of() + chrono::Duration::days(1))
+                .and_hms_opt(9, 0, 0)
+                .map(|t| t.and_utc()),
+        )
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let after = model(&s, s.pid("sam"), &all_scopes(), &opts("gp", "en")).await?;
+    assert!(!names(&after).contains(&first), "{first} printed before it started");
+    assert_eq!(names(&after).len() + 1, names(&before).len());
+    Ok(())
+}
+
 /// The check above is not one that cannot fail: a marker printed without its src id is refused.
 #[tokio::test]
 async fn a_value_without_its_src_fails_the_check() -> R {
