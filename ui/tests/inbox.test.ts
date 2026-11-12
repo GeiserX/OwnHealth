@@ -18,6 +18,7 @@ import {
 	proposalDefaultKeep,
 	proposalRows,
 	quarantineReason,
+	reinterpText,
 	rowGrounding,
 	senderPattern,
 	shareTone,
@@ -320,4 +321,12 @@ test('accepting a proposal keeps only the ticked rows; ungrounded rows start unt
 	// Nothing ticked is no accept at all: an empty list would make the server keep every row.
 	assert.equal(proposalAcceptEdits(rows, []), null);
 	assert.equal(proposalAcceptEdits(rows, [3]), null, 'a row the server could not read is never sent');
+});
+
+test('a reinterpretation alert reads in the screen language', () => {
+	const p = { summary: 'A result you carry changed in ClinVar.', summary_es: 'Ha cambiado en ClinVar un resultado que tienes.' };
+	assert.equal(reinterpText(p, 'es'), 'Ha cambiado en ClinVar un resultado que tienes.');
+	assert.equal(reinterpText(p, 'en'), 'A result you carry changed in ClinVar.');
+	// An item with only the English text still shows it rather than nothing.
+	assert.equal(reinterpText({ summary: 'A result you carry changed in ClinVar.' }, 'es'), 'A result you carry changed in ClinVar.');
 });

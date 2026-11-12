@@ -1,0 +1,236 @@
+<script lang="ts">
+	// Mockup screen #due: the screenings and vaccines the profile country's guideline lists for this
+	// person's age and sex, and the rule pack's lab gaps, from GET /profiles/{p}/due
+	// (ownhealth.prevention/v1). The server computes every status and date; this page groups and shows.
+	import '#lib/components/pages2/pages2.css';
+	import { createRecord, getDue } from '#lib/api';
+	import { focusOnOpen } from '#lib/actions/focusOnOpen';
+	import { C } from '#lib/components/colors';
+	import NotReady from '#lib/components/pages1/NotReady.svelte';
+	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
+	import { openSource } from '#lib/components/pages1/source.svelte';
+	import { errText, Loader, shortHash, tf } from '#lib/components/pages1/util.svelte';
+	import PhaseChip from '#lib/components/PhaseChip.svelte';
+	import SourceChip from '#lib/components/SourceChip.svelte';
+	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { dueColor, isOpen, type DueDoc, type DueItem } from '#lib/logic/due';
+	import { todayIso } from '#lib/logic/people';
+	import { currentProfile } from '#lib/state/app.svelte';
+
+	const prof = $derived(currentProfile());
+	const canWrite = $derived(!!prof && prof.role !== 'viewer');
+	const doc = new Loader<DueDoc>();
+	// the local day, read again on each load and each form open, so a page left open past midnight moves on
+	let today = $state(todayIso());
+
+	function load() {
+		const slug = prof?.slug;
+		const lang = i18n.lang;
+		if (!slug) return;
+		// the local day, as the form's date: a record saved today counts on the reload
+		const day = todayIso();
+		today = day;
+		doc.run(() => getDue(slug, lang, day), `${slug}/${lang}`);
+	}
+	$effect(load);
+
+	const items = $derived(doc.data?.items ?? []);
+	const groups = $derived([
+		{ id: 'open', title: t('due_g_open'), rows: items.filter(isOpen) },
+		{ id: 'done', title: t('due_g_done'), rows: items.filter((i) => i.status === 'up_to_date') },
+		{ id: 'na', title: t('due_g_na'), rows: items.filter((i) => i.status === 'not_assessed') }
+	]);
+	const ICON: Record<string, string> = {
+		lab: '<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/>',
+		vaccine: '<path d="m18 2 4 4M17 7l-9 9M14 4l6 6M5 19l-3 3M7 13l4 4"/>',
+		screening: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>'
+	};
+	// The date beside the status: when it opens, when it is next listed, or since when it is open
+	// again after a record (a row never recorded says so instead of a date from decades ago).
+	const when = (i: DueItem) =>
+		!i.due || (!i.last && isOpen(i) && i.status !== 'upcoming') ? '' : i.status === 'up_to_date' ? tf('due_next', { d: i.due }) : i.status === 'upcoming' ? tf('due_from', { d: i.due }) : tf('due_since', { d: i.due });
+
+	// How many items the scopes leave out, and which scopes they need.
+	const withheldText = (d: DueDoc) => tf('due_withheld', { n: d.withheld, scopes: (d.withheld_scopes ?? []).join(', ') });
+
+	// One small form at a time: record a vaccine or a procedure with the name that counts for the row.
+	let open = $state<string | null>(null);
+	let name = $state('');
+	let date = $state('');
+	let busy = $state(false);
+	let error = $state<string | null>(null);
+	function start(i: DueItem) {
+		open = open === i.key ? null : i.key;
+		name = i.record?.text ?? i.title ?? '';
+		today = todayIso();
+		date = today;
+		error = null;
+	}
+	async function save(e: SubmitEvent, i: DueItem) {
+		e.preventDefault();
+		if (!prof || !i.record || busy) return;
+		busy = true;
+		error = null;
+		try {
+			const body = i.record.kind === 'immunization' ? { vaccine: name.trim(), occurred: date || null } : { text: name.trim(), performed: date || null };
+			await createRecord(prof.slug, i.record.kind, body);
+			open = null;
+			load();
+		} catch (err) {
+			error = errText(err);
+		} finally {
+			busy = false;
+		}
+	}
+</script>
+
+<div class="ph">
+	<div>
+		<h1>{t('due_nav')}</h1>
+		<div class="sub">{prof?.display_name ?? ''} · {t('due_sub')}</div>
+	</div>
+	<div class="right"><PhaseChip phase="v0.3" /></div>
+</div>
+
+{#if !prof}
+	<div class="card"><div class="empty">{t('h1_noprofile')} <a href="/family">{t('h1_noprofile_link')}</a></div></div>
+{:else if doc.error}
+	<div class="card"><NotReady error={doc.error} onretry={load} /></div>
+{:else if doc.loading && !doc.data}
+	<div class="card"><div class="empty">{t('loading')}</div></div>
+{:else if doc.data}
+	{@const d = doc.data}
+	{#if d.reason}<div class="banner" role="note">{d.reason}</div>{/if}
+	{#if d.disclaimer}<div class="note" style="margin-bottom:10px">{d.disclaimer}</div>{/if}
+	{#if !items.length}
+		<div class="card" style="margin-bottom:10px"><div class="empty">{d.withheld ? withheldText(d) : t('due_none')}</div></div>
+	{/if}
+	{#each groups.filter((g) => g.rows.length) as g (g.id)}
+		<section class="card" style="margin-bottom:12px" aria-labelledby="due-{g.id}">
+			<h3 id="due-{g.id}">{g.title}<span class="r num">{g.rows.length}</span></h3>
+			{#each g.rows as i (i.key)}
+				<div class="due duerow">
+					<div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true">{@html ICON[i.area] ?? ICON.lab}</svg></div>
+					<div class="w">
+						<div><b>{i.title ?? i.key}</b></div>
+						<div>{i.reason ?? i.why}</div>
+						<div class="meta">
+							{#if i.last}
+								<span>{tf('due_last', { d: i.last.date })}</span>
+								{#if i.last.src}<SourceChip label="" name={i.title ?? i.key} src={i.last.src} onopen={openSource} />{/if}
+							{:else if i.status !== 'not_assessed'}
+								<span>{t('due_never')}</span>
+							{/if}
+							{#if i.cite}<a class="chip" href={i.cite} target="_blank" rel="noopener" title={t('due_cite_t')}>{i.source ?? t('due_pack')}</a>{/if}
+							{#if i.area === 'lab' && i.group}<a href="/biomarkers?code={encodeURIComponent(i.group)}">{t('due_lab_link')}</a>{/if}
+							{#if i.area !== 'lab'}<span class="mono dim" style="font-size:10px">{i.rule}</span>{/if}
+						</div>
+					</div>
+					<div class="st">
+						<span class="stw" style="color:{C[dueColor(i.status)]}"
+							><i style="background:{C[dueColor(i.status)]}" aria-hidden="true"></i>{t('due_st_' + i.status)}</span
+						>
+						{#if when(i)}<span class="num dim">{when(i)}</span>{/if}
+						{#if canWrite && i.record}
+							<button class="btn sm" type="button" aria-expanded={open === i.key} onclick={() => start(i)}>{t('due_record')}</button>
+						{/if}
+					</div>
+				</div>
+				{#if open === i.key && i.record}
+					<form class="p2form recform" onsubmit={(e) => save(e, i)} use:focusOnOpen={{ oncancel: () => (open = null) }} aria-label={t('due_record')}>
+						<div class="p2row">
+							<label style="flex:1;min-width:160px">{t(i.record.kind === 'immunization' ? 'due_f_vaccine' : 'due_f_procedure')}<input class="p2in" bind:value={name} required maxlength="200" /></label>
+							<label>{t('me_f_date')}<input class="p2in" type="date" bind:value={date} max={today} required /></label>
+						</div>
+						{#if error}<div class="p2err" role="alert">{error}</div>{/if}
+						<div class="p2row">
+							<button class="btn pri sm" type="submit" disabled={busy || !name.trim()}>{t('me_save')}</button>
+							<button class="btn sm" type="button" onclick={() => (open = null)}>{t('i2_cancel')}</button>
+						</div>
+						<div class="note">{t('due_record_note')}</div>
+					</form>
+				{/if}
+			{/each}
+		</section>
+	{/each}
+	{#if items.length && d.withheld}<div class="note" style="margin-bottom:10px">{withheldText(d)}</div>{/if}
+	{#if d.unmatched?.length}
+		<div class="note" style="margin-bottom:10px">
+			{t('due_unmatched')}
+			{#each d.unmatched as u, k (u.src + k)}{k ? ', ' : ' '}<span>{u.name}</span> <SourceChip label="" name={u.name} src={u.src} onopen={openSource} />{/each}
+		</div>
+	{/if}
+	<div class="note">{t('due_info')}</div>
+	<div class="foot-hash">
+		<span>prevention_hash <span class="mono" title={d.prevention_hash}>{shortHash(d.prevention_hash)}</span></span>
+		{#if d.rules}<span>{t('due_rules')} <span class="mono">{d.rules}</span></span>{/if}
+		<span>{t('due_asof')} <span class="num">{d.as_of}</span></span>
+	</div>
+{/if}
+
+<SourcePanel />
+
+<style>
+	.duerow {
+		align-items: flex-start;
+		padding: 9px 0;
+	}
+	.duerow .w > div:first-child {
+		font-size: 13px;
+		color: var(--text);
+	}
+	.meta {
+		display: flex;
+		gap: 8px;
+		flex-wrap: wrap;
+		align-items: center;
+		margin-top: 4px;
+		font-size: 11px;
+		color: var(--dim);
+	}
+	.meta a.chip {
+		text-decoration: none;
+	}
+	.st {
+		display: grid;
+		justify-items: end;
+		gap: 4px;
+		font-size: 11.5px;
+		flex: none;
+		text-align: right;
+	}
+	.stw {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-weight: 600;
+	}
+	.stw i {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+	}
+	.recform {
+		margin: 0 0 10px 36px;
+		padding: 10px;
+		border: 1px solid var(--line2);
+		border-radius: 10px;
+	}
+	@media (max-width: 640px) {
+		.duerow {
+			flex-wrap: wrap;
+		}
+		.st {
+			justify-items: start;
+			text-align: left;
+			width: 100%;
+			padding-left: 36px;
+			grid-auto-flow: column;
+			justify-content: start;
+			align-items: center;
+		}
+		.recform {
+			margin-left: 0;
+		}
+	}
+</style>

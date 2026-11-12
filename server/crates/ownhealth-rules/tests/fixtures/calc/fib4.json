@@ -1,0 +1,116 @@
+{
+ "calculator": "fib4",
+ "source": "The formula as printed in Sterling et al., Hepatology 2006 (age x AST / (platelets x sqrt(ALT))), evaluated once with Python 3 decimal at 50 significant digits and rounded half-even to 2 decimals. The paper gives no worked example.",
+ "paper": "https://pubmed.ncbi.nlm.nih.gov/16729309/",
+ "precision": 2,
+ "cases": [
+  {
+   "age": 47,
+   "inputs": {
+    "ast": {
+     "value": "24",
+     "unit": "U/L"
+    },
+    "alt": {
+     "value": "24",
+     "unit": "U/L"
+    },
+    "platelets": {
+     "value": "231",
+     "unit": "10*9/L"
+    }
+   },
+   "expected": "1.00"
+  },
+  {
+   "age": 55,
+   "inputs": {
+    "ast": {
+     "value": "40",
+     "unit": "U/L"
+    },
+    "alt": {
+     "value": "30",
+     "unit": "U/L"
+    },
+    "platelets": {
+     "value": "180",
+     "unit": "10*9/L"
+    }
+   },
+   "expected": "2.23"
+  },
+  {
+   "age": 62,
+   "inputs": {
+    "ast": {
+     "value": "85",
+     "unit": "U/L"
+    },
+    "alt": {
+     "value": "60",
+     "unit": "U/L"
+    },
+    "platelets": {
+     "value": "120",
+     "unit": "10*3/uL"
+    }
+   },
+   "expected": "5.67"
+  },
+  {
+   "age": 70,
+   "inputs": {
+    "ast": {
+     "value": "35",
+     "unit": "U/L"
+    },
+    "alt": {
+     "value": "28",
+     "unit": "U/L"
+    },
+    "platelets": {
+     "value": "210",
+     "unit": "10*9/L"
+    }
+   },
+   "expected": "2.20"
+  },
+  {
+   "age": 38,
+   "inputs": {
+    "ast": {
+     "value": "22",
+     "unit": "U/L"
+    },
+    "alt": {
+     "value": "45",
+     "unit": "U/L"
+    },
+    "platelets": {
+     "value": "300",
+     "unit": "10*3/uL"
+    }
+   },
+   "expected": "0.42"
+  },
+  {
+   "age": 66,
+   "inputs": {
+    "ast": {
+     "value": "120",
+     "unit": "U/L"
+    },
+    "alt": {
+     "value": "70",
+     "unit": "U/L"
+    },
+    "platelets": {
+     "value": "95",
+     "unit": "10*9/L"
+    }
+   },
+   "expected": "9.96"
+  }
+ ]
+}

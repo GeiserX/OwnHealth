@@ -268,6 +268,7 @@ const NAV=[
   ["timeline","nav_tl",'<path d="M12 3v18M7 7h5M12 12h5M7 17h5"/>'],
   ["genome","nav_gen",'<path d="M7 3c0 6 10 6 10 12s-10 6-10 6M17 3c0 6-10 6-10 12"/><path d="M8 7h8M8 17h8"/>'],
   ["drug-check","nav_drug",'<rect x="3" y="9" width="18" height="7" rx="3.5" transform="rotate(-35 12 12.5)"/><path d="m9 9 5 6"/>'],
+  ["due","nav_due",'<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 13l2 2 4-4"/>'],
   ["wearables","nav_wear",'<rect x="7" y="6" width="10" height="12" rx="3"/><path d="M9 6V3h6v3M9 18v3h6v-3"/>'],
   ["imaging","nav_img",'<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="12" cy="12" r="4"/>'],
   ["import-review","nav_imp",'<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/>',7],
@@ -389,7 +390,7 @@ function dashboard(){
   ];
   const chg=[["m_ldl","118 → 97","mg/dL","dn","ok"],["m_vitd","31 → 24","ng/mL","up2","out"],["m_crp","1.1 → 2.4","mg/L","up","watch"],["m_a1c","5.5 → 5.6","%","up","watch"]];
   const dueI={lab:'<svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/></svg>',vac:'<svg viewBox="0 0 24 24"><path d="m18 2 4 4M17 7l-9 9M14 4l6 6M5 19l-3 3M7 13l4 4"/></svg>',scr:'<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>'};
-  const due=[["d1","d1w","lab","out",""],["d6","d6w","lab","watch",""],["d2","d2w","lab","watch",""],["d3","d3w","vac","watch","v0.3"],["d5","d5w","scr","stale","v0.3"]];
+  const due=[["d1","d1w","lab","out",""],["d6","d6w","lab","watch",""],["d2","d2w","lab","watch",""],["d3","d3w","vac","watch",""],["d5","d5w","scr","stale",""]];
   return `
   <div class="ph"><div><h1>${t("dash_t")} · ${P.name}</h1><div class="sub">${t("dash_sub")}</div></div>
    <div class="right"><span class="phase">v0.1</span><button class="btn">${t("ice")} <span class="phase">v1.0</span></button><button class="btn">${t("prep")} <span class="phase">v0.3</span></button></div></div>
@@ -404,7 +405,7 @@ function dashboard(){
     <div class="card"><h3>${t("needs")}</h3><div class="review"><div class="big num">7</div><div class="muted" style="font-size:12px">${t("needs_d")}</div><a class="btn sm" style="margin-left:auto" href="#import-review">${t("open")}</a></div></div>
     <div class="card"><h3>${t("changed")}<span class="r">${t("changed_r")}</span></h3><div class="chg">${chg.map(c=>`<span>${t(c[0])}</span><span class="num" style="color:${C[c[4]]}">${c[1]} <small class="muted">${c[2]}</small></span><span class="${c[3]==="dn"?"arrow-dn":"arrow-up"}" style="${c[3]==="up2"?"color:var(--watch)":""}">${c[3]==="dn"?"▼":c[3]==="up2"?"▼":"▲"}</span>`).join("")}</div>
      <div class="note" style="margin-top:8px">${t("notm")}</div></div>
-    <div class="card"><h3>${t("due")}<span class="r">${t("duescr")}</span></h3>${due.map(d=>`<div class="due"><div class="ic">${dueI[d[2]]}</div><div class="w"><div>${t(d[0])}</div><div>${t(d[1])}</div></div>${d[4]?`<span class="phase">${d[4]}</span>`:""}<i style="width:8px;height:8px;border-radius:50%;background:${C[d[3]]};flex:none"></i></div>`).join("")}</div>
+    <div class="card"><h3>${t("due")}<span class="r"><a href="#due">${t("due_all")}</a></span></h3>${due.map(d=>`<div class="due"><div class="ic">${dueI[d[2]]}</div><div class="w"><div>${t(d[0])}</div><div>${t(d[1])}</div></div>${d[4]?`<span class="phase">${d[4]}</span>`:""}<i style="width:8px;height:8px;border-radius:50%;background:${C[d[3]]};flex:none"></i></div>`).join("")}</div>
     <div class="card"><h3>${t("gen_h")}<span class="r"><a href="https://github.com/GeiserX/OwnGenome" target="_blank" rel="noopener">OwnGenome v1.4.2</a></span></h3><div class="muted" style="font-size:12px">${t("gen_d")}</div><div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap"><span class="chip">CYP2C19 *1/*2 IM</span><span class="chip">SLCO1B1 *1/*5 DF</span><span class="chip">LPA rs10455872 A/G</span><span class="chip">🔒 1 hidden</span></div></div>
   </div></div>
   <div class="foot-hash"><span>state_hash <span class="mono">sha256:4be1…</span></span><span>${t("footer")} <span class="mono">ownhealth-rules 0.1.0</span></span><span>2026-11-07 07:12 UTC</span><span style="margin-left:auto">Same snapshot over MCP: <span class="mono">get_health_status(profile="alex")</span></span></div>`;
@@ -506,6 +507,7 @@ const EVENTS=[
  ["2025-12-01","med","Atorvastatin paused","myalgia; CK 210 U/L (in range)","ES","Visit note p2"],
  ["2025-11-18","imaging","MRI right knee","3 series · 412 images · report: medial meniscus tear","ES","DICOM + report"],
  ["2025-11-18","diagnosis","Medial meniscus tear, right knee","confirmed by MRI · conservative care","ES","Report p1"],
+ ["2025-11-10","visit","Visit · Right knee pain","Traumatología · Hospital Norte · no report on file","ES","entered by hand"],
  ["2025-11-05","med","Ibuprofen 600 mg started, stopped 2025-11-26","3 weeks, knee pain","ES","Prescription"],
  ["2024-05-22","lab","Annual check · 31 results","Labor Berlin · 0 out of range","DE","Befund p1-3"],
  ["2024-02-07","imaging","Chest X-ray PA/lateral","Praxis Berlin-Mitte · no acute findings","DE","DICOM + Befund"],
@@ -515,6 +517,25 @@ const EVENTS=[
  ["2021-01-26","lab","Lipid panel","Quest Diagnostics · LDL 158 mg/dL","US","FHIR (Blue Button)"],
  ["2019-08-14","visit","Annual physical","Bay Clinic, San Francisco (synthetic)","US","C-CDA"]
 ];
+/* bars lane: one row per condition and per medicine, a segment per course; null end = still running */
+const SPANS=[
+ ["diagnosis","Hypercholesterolaemia",[["2021-11-22",null,"Visit note"]]],
+ ["diagnosis","Medial meniscus tear, right knee",[["2025-11-18",null,"Report p1"]]],
+ ["med","Atorvastatin",[["2022-06-20","2025-12-01","Prescription"],["2026-03-10",null,"Prescription"]]],
+ ["med","Ibuprofen",[["2025-11-05","2025-11-26","Prescription"]]]
+];
+function lane(){
+  const t0=Date.parse("2019-01-01"),t1=Date.parse("2026-11-10"),x=d=>((Date.parse(d)-t0)/(t1-t0)*100).toFixed(2);
+  const shown=SPANS.filter(s=>S.tlTypes.size===0||S.tlTypes.has(s[0]));
+  if(!shown.length)return "";
+  const ticks=[2019,2020,2021,2022,2023,2024,2025,2026].map(y=>`<span style="position:absolute;left:${x(y+"-01-01")}%;font-size:10.5px;color:var(--dim)">${y}</span>`).join("");
+  const rows=shown.map(s=>{const c=TYPES[s[0]][1];
+   const segs=s[2].map(g=>{const l=x(g[0]),r=x(g[1]||"2026-11-10");return `<span title="${s[1]} · ${g[0]} – ${g[1]||"now"} · ${g[2]}" style="position:absolute;top:6px;height:10px;left:${l}%;width:${Math.max(r-l,0.8)}%;border-radius:${g[1]?"5px":"5px 0 0 5px"};background:${g[1]?c:`linear-gradient(90deg,${c} 80%,transparent)`}"></span>`}).join("");
+   return `<div style="display:grid;grid-template-columns:170px 1fr;gap:10px;align-items:center"><div style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${c};margin-right:6px"></i>${s[1]}</div><div style="position:relative;height:22px">${segs}</div></div>`}).join("");
+  return `<div class="card" style="margin-bottom:12px"><h3>Conditions and medicines over time</h3>
+   <div style="display:grid;grid-template-columns:170px 1fr;gap:10px"><div></div><div style="position:relative;height:18px;border-bottom:1px solid var(--line)">${ticks}</div></div>${rows}
+   ${shown.some(s=>s[1]==="Atorvastatin")?`<div style="display:flex;gap:8px;align-items:center;margin-top:8px;padding-top:6px;border-top:1px solid var(--line);font-size:12px"><b>Atorvastatin 20 mg</b><span class="muted num">2026-03-10 – now</span><span class="chip">ongoing</span>${src("Prescription")}</div>`:""}</div>`;
+}
 function timeline(){
   const ev=EVENTS.slice().sort((a,b)=>b[0].localeCompare(a[0]));
   const show=e=>(S.tlTypes.size===0||S.tlTypes.has(e[1]))&&(S.tlCountries.size===0||S.tlCountries.has(e[4]));
@@ -525,10 +546,11 @@ function timeline(){
     <div class="body"><div><div class="t1">${e[2]}</div><div class="t2">${e[3]}</div></div><div class="rt"><span class="chip">${ty[0]}</span>${e[4]!=="—"?`<span class="flag">${e[4]}</span>`:""}${src(e[5])}</div></div></div>`});
   const counts=k=>EVENTS.filter(e=>e[1]===k).length;
   return `
-  <div class="ph"><div><h1>Timeline</h1><div class="sub">Alex Rivera · ${EVENTS.length} events from 9 sources in 3 countries</div></div><div class="right"><span class="phase">v0.3</span><button class="btn">Export for doctor (PDF)</button></div></div>
+  <div class="ph"><div><h1>Timeline</h1><div class="sub">Alex Rivera · ${EVENTS.length} events from 9 sources in 3 countries</div></div></div>
   <div class="filters"><span class="lab">Type</span>${Object.entries(TYPES).map(([k,v])=>`<button class="chip tlt ${S.tlTypes.has(k)?"on":""}" data-k="${k}"><i style="width:8px;height:8px;border-radius:50%;background:${v[1]};display:inline-block"></i>${v[0]} <span class="dim">${counts(k)}</span></button>`).join("")}
    <span class="lab" style="margin-left:14px">Country</span>${["ES","DE","US"].map(c=>`<button class="chip tlc ${S.tlCountries.has(c)?"on":""}" data-k="${c}">${c}</button>`).join("")}
    ${S.tlTypes.size||S.tlCountries.size?`<button class="chip" id="tlclear">clear</button>`:""}</div>
+  ${lane()}
   <div class="tl"><div>${rows||'<div class="muted" style="padding:30px">No events match.</div>'}</div>
   <div class="grid" style="align-content:start">
    <div class="card"><h3>Sources</h3>
@@ -876,8 +898,33 @@ function mcp(){
     <tr><td class="dim">Document text</td><td><span class="mono">read:documents_text</span> · off by default</td></tr></tbody></table></div>
   </div></div>`;
 }
+/* ---------- 11. due (0.4.0) ---------- */
+Object.assign(T.en,{nav_due:"Due",due_all:"All"});Object.assign(T.es,{nav_due:"Por hacer",due_all:"Ver todo"});
+function due(){
+  const es=S.lang==="es",P=PROFILES.find(p=>p.id===S.profile);
+  const L=es?{t:"Por hacer",sub:"cribados y vacunas que la guía incluye para esta edad y sexo, y los huecos de analíticas del paquete de reglas",open:"Pendiente y próximo",done:"Al día",rec:"Añadir registro",never:"Sin registro todavía",last:"Último registro",info:"Información, no consejo: cada fila dice lo que la guía incluye para esta edad y sexo, y enlaza a ella.",st:{overdue:"Vencido",due:"Pendiente",upcoming:"Próximo",up_to_date:"Al día"},since:"desde",next:"siguiente",pack:"Paquete de reglas de OwnHealth",bio:"Ver en Biomarcadores"}
+   :{t:"Due",sub:"screenings and vaccines the guideline lists for this age and sex, and the rule pack's lab gaps",open:"Due and coming up",done:"Up to date",rec:"Add a record",never:"No record yet",last:"Last on record",info:"Information, not advice: each row says what the guideline lists for this age and sex, and links to it.",st:{overdue:"Overdue",due:"Due",upcoming:"Coming up",up_to_date:"Up to date"},since:"since",next:"next",pack:"OwnHealth rule pack",bio:"See in Biomarkers"};
+  const col={overdue:C.out,due:C.watch,upcoming:C.stale,up_to_date:C.ok};
+  const ic={lab:'<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/>',vac:'<path d="m18 2 4 4M17 7l-9 9M14 4l6 6M5 19l-3 3M7 13l4 4"/>',scr:'<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>'};
+  // [area, title en, title es, why en, why es, status, date, last, source, rule]
+  const rows=[
+   ["lab","TSH","TSH","overdue · rule recency.thyroid (12 months)","vencido · regla recency.thyroid (12 meses)","overdue","2026-01-20","2025-01-20","",""],
+   ["lab","Hepatitis C antibody","Anticuerpos hepatitis C","never measured · rule infect.hcv.once_adult","nunca medido · regla infect.hcv.once_adult","due","","","",""],
+   ["vac","Influenza, one dose each season","Gripe, una dosis cada temporada","The guideline lists one dose each season from age 60.","La guía incluye una dosis cada temporada a partir de los 60 años.","up_to_date","2039-10-01","2025-10-21","CISNS 2026","es.vac.influenza"],
+   ["vac","Tetanus and diphtheria (Td), dose around age 65","Tétanos y difteria (Td), dosis hacia los 65 años","The guideline lists it once from age 65.","La guía lo incluye una vez a partir de los 65 años.","up_to_date","2044-05-14","2016-05-10","CISNS 2026","es.vac.td"]];
+  const row=r=>`<div class="due" style="align-items:flex-start;padding:9px 0"><div class="ic"><svg viewBox="0 0 24 24">${ic[r[0]]}</svg></div>
+   <div class="w"><div><b>${es?r[2]:r[1]}</b></div><div>${es?r[4]:r[3]}</div>
+   <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:4px;font-size:11px;color:var(--dim)">${r[7]?`<span>${L.last}: ${r[7]}</span>${src("")}`:`<span>${L.never}</span>`}<span class="chip">${r[8]||L.pack}</span>${r[0]==="lab"?`<a href="#biomarker">${L.bio}</a>`:`<span class="mono">${r[9]}</span>`}</div></div>
+   <div style="display:grid;justify-items:end;gap:4px;font-size:11.5px;text-align:right;flex:none"><span style="color:${col[r[5]]};font-weight:600"><i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${col[r[5]]};margin-right:6px"></i>${L.st[r[5]]}</span>${r[6]&&r[7]?`<span class="num dim">${r[5]==="up_to_date"?L.next:L.since} ${r[6]}</span>`:""}${r[0]!=="lab"?`<button class="btn sm">${L.rec}</button>`:""}</div></div>`;
+  const open=rows.filter(r=>r[5]!=="up_to_date"),done=rows.filter(r=>r[5]==="up_to_date");
+  return `<div class="ph"><div><h1>${L.t}</h1><div class="sub">${P.name} · ${L.sub}</div></div><div class="right"><span class="phase">v0.3</span></div></div>
+  <div class="card" style="margin-bottom:12px"><h3>${L.open}<span class="r num">${open.length}</span></h3>${open.map(row).join("")}</div>
+  <div class="card" style="margin-bottom:12px"><h3>${L.done}<span class="r num">${done.length}</span></h3>${done.map(row).join("")}</div>
+  <div class="note">${L.info}</div>
+  <div class="foot-hash"><span>prevention_hash <span class="mono">sha256:9829…</span></span><span>es.yaml prevention-es 0.1.0</span></div>`;
+}
 /* ---------- router ---------- */
-const ROUTES={dashboard,biomarker,timeline,genome,"drug-check":drug,wearables,imaging,"import-review":importReview,family,"mcp-access":mcp};
+const ROUTES={dashboard,biomarker,timeline,genome,"drug-check":drug,due,wearables,imaging,"import-review":importReview,family,"mcp-access":mcp};
 function renderChrome(){
   document.documentElement.lang=S.lang;
   document.querySelectorAll("[data-i18n]").forEach(e=>e.textContent=t(e.dataset.i18n));

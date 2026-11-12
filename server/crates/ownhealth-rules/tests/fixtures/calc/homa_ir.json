@@ -1,0 +1,86 @@
+{
+ "calculator": "homa_ir",
+ "source": "The formula of Matthews et al., Diabetologia 1985 (glucose mmol/L x insulin uU/mL / 22.5), evaluated once with Python 3 decimal at 50 significant digits and rounded half-even to 2 decimals; glucose in mg/dL divided by 18 and insulin in pmol/L divided by 6.00 as data/calculators/units.yaml pins. 5.0 mmol/L x 10 uU/mL is the worked example 50 / 22.5 = 2.22.",
+ "paper": "https://pubmed.ncbi.nlm.nih.gov/3899825/",
+ "precision": 2,
+ "cases": [
+  {
+   "inputs": {
+    "glucose": {
+     "value": "5.0",
+     "unit": "mmol/L"
+    },
+    "insulin": {
+     "value": "10.0",
+     "unit": "u[IU]/mL"
+    }
+   },
+   "expected": "2.22"
+  },
+  {
+   "inputs": {
+    "glucose": {
+     "value": "90",
+     "unit": "mg/dL"
+    },
+    "insulin": {
+     "value": "8.0",
+     "unit": "u[IU]/mL"
+    }
+   },
+   "expected": "1.78"
+  },
+  {
+   "inputs": {
+    "glucose": {
+     "value": "5.4",
+     "unit": "mmol/L"
+    },
+    "insulin": {
+     "value": "60",
+     "unit": "pmol/L"
+    }
+   },
+   "expected": "2.40"
+  },
+  {
+   "inputs": {
+    "glucose": {
+     "value": "101",
+     "unit": "mg/dL"
+    },
+    "insulin": {
+     "value": "14.2",
+     "unit": "m[IU]/L"
+    }
+   },
+   "expected": "3.54"
+  },
+  {
+   "inputs": {
+    "glucose": {
+     "value": "6.1",
+     "unit": "mmol/L"
+    },
+    "insulin": {
+     "value": "125",
+     "unit": "pmol/L"
+    }
+   },
+   "expected": "5.65"
+  },
+  {
+   "inputs": {
+    "glucose": {
+     "value": "82",
+     "unit": "mg/dL"
+    },
+    "insulin": {
+     "value": "4.5",
+     "unit": "u[IU]/mL"
+    }
+   },
+   "expected": "0.91"
+  }
+ ]
+}

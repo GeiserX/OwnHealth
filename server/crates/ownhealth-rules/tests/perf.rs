@@ -1,12 +1,13 @@
 //! Budget (0.1.1 tests/state/test_perf.py): the status of a profile with 5 years of labs
-//! (40 analytes x 60 monthly draws, 2400 values) builds and renders in under 300 ms at p95.
+//! (40 analytes x 60 monthly draws, 2400 values) builds and renders in under 300 ms at p95, with
+//! its due section.
 
 mod common;
 
 use std::time::Instant;
 
 use chrono::{NaiveDate, TimeZone, Utc};
-use ownhealth_core::access::{ProfileIn, create_household, create_profile};
+use ownhealth_core::access::{ProfileIn, all_scopes, create_household, create_profile};
 use ownhealth_core::observations::{CommitOptions, ObservationIn, commit_observation};
 use ownhealth_core::provenance::{SrcIn, SrcRef, create_src};
 use ownhealth_core::testing::TestDb;
@@ -77,11 +78,16 @@ async fn status_for_five_years_of_labs_is_under_300ms_p95() -> anyhow::Result<()
         body["flags"].as_array().is_some_and(|f| !f.is_empty()),
         "the generated profile must exercise the rules"
     );
+    let pack = load_pack()?;
     let mut times = Vec::with_capacity(RUNS);
     for _ in 0..RUNS {
         let t = Instant::now();
         let body = build_state(&mut conn, pid, as_of, None).await?;
         render(&body, "es", "as_reported", "pseudonymous", None)?;
+        // the status's due section (screenings and vaccines) is part of the same call
+        let due =
+            ownhealth_rules::prevention::status_section(&mut conn, pid, as_of, &body, &pack, &all_scopes()).await?;
+        assert!(due.is_some(), "the profile must exercise the prevention rows");
         times.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     times.sort_by(f64::total_cmp);

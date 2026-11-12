@@ -1,0 +1,382 @@
+{
+  "alex": {
+    "schema": "ownhealth.prevention/v1",
+    "profile": "alex",
+    "as_of": "2026-11-07",
+    "rules": "es.yaml prevention-es 0.1.0",
+    "country": "ES",
+    "items": [
+      {
+        "key": "stale:recency.kidney:urine_acr",
+        "rule": "recency.kidney",
+        "area": "lab",
+        "kind": "recency",
+        "status": "overdue",
+        "group": "urine_acr",
+        "due": "2025-05-22",
+        "last": {
+          "date": "2024-05-22",
+          "src": "src_phc894yu"
+        },
+        "cite": "https://kdigo.org/guidelines/ckd-evaluation-and-management/",
+        "src": [
+          "src_phc894yu"
+        ],
+        "labs": true
+      },
+      {
+        "key": "stale:recency.thyroid:ft4",
+        "rule": "recency.thyroid",
+        "area": "lab",
+        "kind": "recency",
+        "status": "overdue",
+        "group": "ft4",
+        "due": "2026-01-20",
+        "last": {
+          "date": "2025-01-20",
+          "src": "src_59rf9tr4"
+        },
+        "cite": "https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack",
+        "src": [
+          "src_59rf9tr4"
+        ],
+        "labs": true
+      },
+      {
+        "key": "stale:recency.thyroid:tsh",
+        "rule": "recency.thyroid",
+        "area": "lab",
+        "kind": "recency",
+        "status": "overdue",
+        "group": "tsh",
+        "due": "2026-01-20",
+        "last": {
+          "date": "2025-01-20",
+          "src": "src_a05"
+        },
+        "cite": "https://github.com/GeiserX/OwnHealth/blob/main/docs/design/architecture.md#11-current-state-the-deterministic-rule-pack",
+        "src": [
+          "src_a05"
+        ],
+        "labs": true
+      },
+      {
+        "key": "infect.hcv.once_adult",
+        "rule": "infect.hcv.once_adult",
+        "area": "lab",
+        "kind": "never_measured",
+        "status": "due",
+        "group": "hcv_ab",
+        "cite": "https://www.cdc.gov/mmwr/volumes/69/rr/rr6902a1.htm",
+        "src": [],
+        "labs": true
+      },
+      {
+        "key": "es.vac.influenza",
+        "rule": "es.vac.influenza",
+        "area": "vaccine",
+        "kind": "seasonal",
+        "status": "up_to_date",
+        "due": "2039-10-01",
+        "last": {
+          "date": "2025-10-21",
+          "src": "src_d6up7zm6"
+        },
+        "source": "CISNS 2026",
+        "cite": "https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf",
+        "src": [
+          "src_d6up7zm6"
+        ]
+      },
+      {
+        "key": "es.vac.td",
+        "rule": "es.vac.td",
+        "area": "vaccine",
+        "kind": "once",
+        "status": "up_to_date",
+        "due": "2044-05-14",
+        "last": {
+          "date": "2016-05-10",
+          "src": "src_k65m8uwj"
+        },
+        "source": "CISNS 2026",
+        "cite": "https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf",
+        "src": [
+          "src_k65m8uwj"
+        ]
+      }
+    ],
+    "unmatched": [],
+    "prevention_hash": "sha256:bc963671c623b3a47a8392ec084d4e6943f3d436f1798bd36eb8e5e02aed971a"
+  },
+  "sam": {
+    "schema": "ownhealth.prevention/v1",
+    "profile": "sam",
+    "as_of": "2026-11-07",
+    "rules": "es.yaml prevention-es 0.1.0",
+    "country": "ES",
+    "items": [
+      {
+        "key": "es.cancer.cervix_hpv",
+        "rule": "es.cancer.cervix_hpv",
+        "area": "screening",
+        "kind": "every_n_months",
+        "status": "due",
+        "due": "2016-02-02",
+        "source": "PAPPS 2024",
+        "cite": "https://www.elsevier.es/es-revista-atencion-primaria-27-articulo-recomendaciones-prevencion-del-cancer-actualizacion-S0212656724002701",
+        "src": []
+      },
+      {
+        "key": "infect.hcv.once_adult",
+        "rule": "infect.hcv.once_adult",
+        "area": "lab",
+        "kind": "never_measured",
+        "status": "due",
+        "group": "hcv_ab",
+        "cite": "https://www.cdc.gov/mmwr/volumes/69/rr/rr6902a1.htm",
+        "src": [],
+        "labs": true
+      },
+      {
+        "key": "lipid.lpa.once_adult",
+        "rule": "lipid.lpa.once_adult",
+        "area": "lab",
+        "kind": "never_measured",
+        "status": "due",
+        "group": "lpa",
+        "cite": "https://doi.org/10.1093/eurheartj/ehz455",
+        "src": [],
+        "labs": true
+      }
+    ],
+    "unmatched": [],
+    "prevention_hash": "sha256:09fe5dd7d7be921d095ca543a6bb9bd4a7e000f33effbc8ebbdf7c6071b1f1b5"
+  },
+  "lucia": {
+    "schema": "ownhealth.prevention/v1",
+    "profile": "lucia",
+    "as_of": "2026-11-07",
+    "rules": "es.yaml prevention-es 0.1.0",
+    "country": "ES",
+    "items": [],
+    "unmatched": [],
+    "prevention_hash": "sha256:75211b66d50b785df094eeb4e5f3274a57bca86809bacb76d7b7e53852604deb"
+  },
+  "carmen": {
+    "schema": "ownhealth.prevention/v1",
+    "profile": "carmen",
+    "as_of": "2026-11-07",
+    "rules": "es.yaml prevention-es 0.1.0",
+    "country": "ES",
+    "items": [
+      {
+        "key": "es.cancer.breast",
+        "rule": "es.cancer.breast",
+        "area": "screening",
+        "kind": "every_n_months",
+        "status": "due",
+        "due": "2005-01-30",
+        "source": "PAPPS 2024",
+        "cite": "https://www.elsevier.es/es-revista-atencion-primaria-27-articulo-recomendaciones-prevencion-del-cancer-actualizacion-S0212656724002701",
+        "src": []
+      },
+      {
+        "key": "es.cancer.colorectal",
+        "rule": "es.cancer.colorectal",
+        "area": "screening",
+        "kind": "every_n_months",
+        "status": "due",
+        "due": "2005-01-30",
+        "source": "PAPPS 2024",
+        "cite": "https://www.elsevier.es/es-revista-atencion-primaria-27-articulo-recomendaciones-prevencion-del-cancer-actualizacion-S0212656724002701",
+        "src": []
+      },
+      {
+        "key": "es.vac.pneumococcal",
+        "rule": "es.vac.pneumococcal",
+        "area": "vaccine",
+        "kind": "once",
+        "status": "due",
+        "due": "2020-01-30",
+        "source": "CISNS 2026",
+        "cite": "https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf",
+        "src": []
+      },
+      {
+        "key": "es.vac.td",
+        "rule": "es.vac.td",
+        "area": "vaccine",
+        "kind": "once",
+        "status": "due",
+        "due": "2020-01-30",
+        "source": "CISNS 2026",
+        "cite": "https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf",
+        "src": []
+      },
+      {
+        "key": "es.vac.zoster",
+        "rule": "es.vac.zoster",
+        "area": "vaccine",
+        "kind": "series",
+        "status": "due",
+        "due": "2020-01-30",
+        "source": "CISNS 2026",
+        "cite": "https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf",
+        "src": []
+      },
+      {
+        "key": "es.vac.influenza",
+        "rule": "es.vac.influenza",
+        "area": "vaccine",
+        "kind": "seasonal",
+        "status": "due",
+        "due": "2026-10-01",
+        "source": "CISNS 2026",
+        "cite": "https://www.sanidad.gob.es/areas/promocionPrevencion/vacunaciones/calendario/docs/CalendarioVacunacion_Todalavida.pdf",
+        "src": []
+      },
+      {
+        "key": "infect.hcv.once_adult",
+        "rule": "infect.hcv.once_adult",
+        "area": "lab",
+        "kind": "never_measured",
+        "status": "due",
+        "group": "hcv_ab",
+        "cite": "https://www.cdc.gov/mmwr/volumes/69/rr/rr6902a1.htm",
+        "src": [],
+        "labs": true
+      },
+      {
+        "key": "lipid.lpa.once_adult",
+        "rule": "lipid.lpa.once_adult",
+        "area": "lab",
+        "kind": "never_measured",
+        "status": "due",
+        "group": "lpa",
+        "cite": "https://doi.org/10.1093/eurheartj/ehz455",
+        "src": [],
+        "labs": true
+      }
+    ],
+    "unmatched": [],
+    "prevention_hash": "sha256:259d136f28e39d72fc1fe509016ad71612f059cf7023561910349eb224e4b94e"
+  },
+  "jordan": {
+    "schema": "ownhealth.prevention/v1",
+    "profile": "jordan",
+    "as_of": "2026-11-07",
+    "rules": "us.yaml prevention-us 0.1.0",
+    "country": "US",
+    "items": [
+      {
+        "key": "us.vac.td",
+        "rule": "us.vac.td",
+        "area": "vaccine",
+        "kind": "every_n_months",
+        "status": "overdue",
+        "due": "2024-09-02",
+        "last": {
+          "date": "2014-09-02",
+          "src": "src_x"
+        },
+        "source": "CDC adult schedule",
+        "cite": "https://www.cdc.gov/vaccines/hcp/imz-schedules/adult-age.html",
+        "src": [
+          "src_x"
+        ]
+      },
+      {
+        "key": "us.cancer.cervix_hpv",
+        "rule": "us.cancer.cervix_hpv",
+        "area": "screening",
+        "kind": "every_n_months",
+        "status": "due",
+        "due": "2004-03-10",
+        "source": "USPSTF 2018 (A)",
+        "cite": "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/cervical-cancer-screening",
+        "src": []
+      },
+      {
+        "key": "us.cancer.colorectal",
+        "rule": "us.cancer.colorectal",
+        "area": "screening",
+        "kind": "every_n_months",
+        "status": "due",
+        "due": "2019-03-10",
+        "source": "USPSTF 2021 (A, B)",
+        "cite": "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/colorectal-cancer-screening",
+        "src": []
+      },
+      {
+        "key": "us.vac.zoster",
+        "rule": "us.vac.zoster",
+        "area": "vaccine",
+        "kind": "series",
+        "status": "due",
+        "due": "2024-03-10",
+        "source": "CDC adult schedule",
+        "cite": "https://www.cdc.gov/vaccines/hcp/imz-schedules/adult-age.html",
+        "src": []
+      },
+      {
+        "key": "us.vac.influenza",
+        "rule": "us.vac.influenza",
+        "area": "vaccine",
+        "kind": "seasonal",
+        "status": "due",
+        "due": "2026-09-01",
+        "source": "CDC adult schedule",
+        "cite": "https://www.cdc.gov/vaccines/hcp/imz-schedules/adult-age.html",
+        "src": []
+      },
+      {
+        "key": "infect.hcv.once_adult",
+        "rule": "infect.hcv.once_adult",
+        "area": "lab",
+        "kind": "never_measured",
+        "status": "due",
+        "group": "hcv_ab",
+        "cite": "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/hepatitis-c-screening",
+        "src": [],
+        "labs": true,
+        "source": "USPSTF 2020 (B)"
+      },
+      {
+        "key": "lipid.lpa.once_adult",
+        "rule": "lipid.lpa.once_adult",
+        "area": "lab",
+        "kind": "never_measured",
+        "status": "due",
+        "group": "lpa",
+        "cite": "https://doi.org/10.1093/eurheartj/ehz455",
+        "src": [],
+        "labs": true
+      },
+      {
+        "key": "us.cancer.breast",
+        "rule": "us.cancer.breast",
+        "area": "screening",
+        "kind": "every_n_months",
+        "status": "upcoming",
+        "due": "2027-01-15",
+        "last": {
+          "date": "2025-01-15",
+          "src": "src_x"
+        },
+        "source": "USPSTF 2024 (B)",
+        "cite": "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/breast-cancer-screening",
+        "src": [
+          "src_x"
+        ]
+      }
+    ],
+    "unmatched": [
+      {
+        "name": "Yellow fever",
+        "src": "src_x"
+      }
+    ],
+    "prevention_hash": "sha256:generated"
+  }
+}

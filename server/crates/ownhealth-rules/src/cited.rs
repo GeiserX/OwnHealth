@@ -43,9 +43,15 @@ pub struct CitedFile {
 
 /// Read and check one cited file.
 pub fn load(path: &Path) -> Result<CitedFile, CitedError> {
+    let bytes = std::fs::read(path).map_err(|e| CitedError(format!("{}: {e}", path.display())))?;
+    load_bytes(path, &bytes)
+}
+
+/// Check one file whose bytes are already in hand (a file compiled into the binary); `path` names
+/// it in errors and picks YAML or JSON by its extension.
+pub fn load_bytes(path: &Path, bytes: &[u8]) -> Result<CitedFile, CitedError> {
     let name = path.display();
-    let bytes = std::fs::read(path).map_err(|e| CitedError(format!("{name}: {e}")))?;
-    let doc = parse(path, &bytes)?;
+    let doc = parse(path, bytes)?;
     let version = doc
         .get("version")
         .and_then(Value::as_str)
@@ -73,7 +79,7 @@ pub fn load(path: &Path) -> Result<CitedFile, CitedError> {
     check_templates(&doc, "$", &name.to_string())?;
     Ok(CitedFile {
         version,
-        sha256: hex::encode(Sha256::digest(&bytes)),
+        sha256: hex::encode(Sha256::digest(bytes)),
         rows,
         doc,
     })
