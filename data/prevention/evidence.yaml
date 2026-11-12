@@ -2,7 +2,7 @@
 # words, accents and case ignored) or carries one of the SNOMED CT codes, or an observation with one of
 # the LOINC codes or alias groups. Vaccine groups live in vaccines.tsv. A group that names an alias
 # group the rule pack already checks (never_measured or recency) is refused by the loader.
-version: "prevention-evidence 0.1.0"
+version: "prevention-evidence 0.2.0"
 groups:
   mammography:
     name: {en: "Mammography", es: "Mamografía"}
@@ -25,3 +25,6 @@ groups:
     name: {en: "HPV test", es: "Prueba del VPH"}
     aliases: [hpv test, prueba del vph, prueba de vph, test de vph, test vph]
     loinc: ["21440-3"]
+  ldct_chest:
+    name: {en: "Low-dose chest CT", es: "TC de tórax de baja dosis"}
+    aliases: [low dose ct, low dose computed tomography, ldct, tc de baja dosis, tac de baja dosis]

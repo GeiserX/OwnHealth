@@ -143,7 +143,7 @@ async fn goldens_for_the_riveras_and_a_us_profile() -> R {
     assert_eq!(item(jordan, "us.cancer.breast")["due"], "2027-01-15");
     assert_eq!(item(jordan, "us.vac.td")["status"], "overdue");
     assert_eq!(jordan["unmatched"][0]["name"], "Yellow fever");
-    assert_eq!(jordan["rules"], "us.yaml prevention-us 0.1.0");
+    assert_eq!(jordan["rules"], "us.yaml prevention-us 0.2.0");
     tx.rollback().await?;
     Ok(())
 }
@@ -323,7 +323,7 @@ fn the_shipped_files_load_and_every_row_is_cited() -> R {
 fn the_loader_refuses_each_broken_file() -> R {
     let pack = load_pack()?;
     let cite = "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/breast-cancer-screening";
-    let cases: [(&str, &str, &str, String, &str); 13] = [
+    let cases: [(&str, &str, &str, String, &str); 16] = [
         (
             "http cite",
             "us.yaml",
@@ -408,6 +408,27 @@ fn the_loader_refuses_each_broken_file() -> R {
             "interval_for: {colonoscopy: 180}",
             "interval_for: {hpv_test: 180}".into(),
             "interval_for",
+        ),
+        (
+            "a row that needs an answer nobody can give",
+            "us.yaml",
+            "needs: {smoking_history: \"yes\"}",
+            "needs: {pack_years: \"yes\"}".into(),
+            "not one of the answer_keys",
+        ),
+        (
+            "an answer that is not yes or no",
+            "es.yaml",
+            "unless: {hysterectomy: \"yes\"}",
+            "unless: {hysterectomy: \"maybe\"}".into(),
+            "is \"yes\" or \"no\"",
+        ),
+        (
+            "an answer key with no question",
+            "templates.yaml",
+            "  hysterectomy:\n    question:",
+            "  hysterectomy_old:\n    question:".into(),
+            "answer hysterectomy has no question",
         ),
     ];
     for (what, file, from, to, reason) in cases {
