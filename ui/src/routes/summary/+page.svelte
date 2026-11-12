@@ -45,6 +45,8 @@
 			const { blob, filename } = await withStepUp(() =>
 				printSummary(slug, { lang, specialty, include_sensitive: sensitive && !sensitiveWhy })
 			);
+			// the profile changed while it was made: this sheet is another person's
+			if (prof?.slug !== slug) return;
 			drop();
 			pdf = { url: URL.createObjectURL(new Blob([blob], { type: 'application/pdf' })), filename, key: made };
 		} catch (e) {
@@ -99,7 +101,8 @@
 			<button class="btn pri" onclick={show} disabled={!prof || busy} aria-busy={busy}>{busy ? t('sum_making') : t('sum_show')}</button>
 			{#if pdf}
 				<button class="btn" onclick={download} disabled={outdated}>{t('sum_download')}</button>
-				<a class="btn" href={pdf.url} target="_blank" rel="noopener" aria-disabled={outdated}>{t('sum_open')}</a>
+				<!-- out of date: no href and out of the tab order, so neither a click nor Enter opens the old sheet -->
+				<a class="btn" href={outdated ? undefined : pdf.url} target="_blank" rel="noopener" aria-disabled={outdated} tabindex={outdated ? -1 : undefined}>{t('sum_open')}</a>
 			{/if}
 		</div>
 	</section>
