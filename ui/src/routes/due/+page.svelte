@@ -62,6 +62,14 @@
 	let date = $state('');
 	let busy = $state(false);
 	let error = $state<string | null>(null);
+	// An open form belongs to the profile it was opened for: another profile closes it, so text typed
+	// for one person is never saved to another.
+	const profSlug = $derived(prof?.slug);
+	$effect(() => {
+		void profSlug;
+		open = null;
+		error = null;
+	});
 	function start(i: DueItem) {
 		open = open === i.key && panel === 'record' ? null : i.key;
 		panel = 'record';
