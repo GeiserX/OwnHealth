@@ -1,0 +1,83 @@
+{
+  "version": "couple 0.1.0",
+  "about": "The couple carrier view (docs/design/genomics.md section 10): the wording of each row and each side, and the source behind each kind of row. Loaded by ownhealth-genome couple.rs and checked by ownhealth_rules::cited.",
+  "rows": [
+    {
+      "id": "couple.ar",
+      "cite": "https://www.acog.org/clinical/clinical-guidance/committee-opinion/articles/2017/03/carrier-screening-for-genetic-conditions",
+      "note": "Two carriers of a variant in the same autosomal recessive gene: 1 in 4 per pregnancy (ACOG Committee Opinion 691)."
+    },
+    {
+      "id": "couple.residual",
+      "cite": "https://www.acog.org/clinical/clinical-guidance/committee-opinion/articles/2017/03/carrier-screening-in-the-age-of-genomic-medicine",
+      "note": "A negative screen lowers, but does not remove, the chance of being a carrier (residual risk, ACOG Committee Opinion 690)."
+    },
+    {
+      "id": "couple.xl",
+      "cite": "https://doi.org/10.1038/s41436-021-01203-z",
+      "note": "X-linked conditions in preconception carrier screening (Gregg et al., ACMG practice resource, 2021)."
+    }
+  ],
+  "templates": {
+    "row.ar_both": {
+      "en": "Both partners carry a variant in {gene}, a recessive gene. With both carriers confirmed, each pregnancy has a 1 in 4 chance that the child inherits both variants.",
+      "es": "Los dos miembros de la pareja portan una variante en {gene}, un gen recesivo. Con los dos portadores confirmados, cada embarazo tiene 1 probabilidad entre 4 de que el hijo herede las dos variantes."
+    },
+    "row.ar_both_unconfirmed": {
+      "en": "Both partners show a variant in {gene}, a recessive gene, but at least one result is unconfirmed. No risk figure is given until a clinical carrier test confirms both.",
+      "es": "Los dos miembros de la pareja muestran una variante en {gene}, un gen recesivo, pero al menos un resultado no está confirmado. No se da ninguna cifra de riesgo hasta que una prueba clínica de portador confirme los dos."
+    },
+    "row.ar_one_not_detected": {
+      "en": "{carrier} carries a variant in {gene}, a recessive gene. It was not detected in {other}, but sequencing does not find every variant: not detected is not the same as not a carrier.",
+      "es": "{carrier} porta una variante en {gene}, un gen recesivo. No se detectó en {other}, pero la secuenciación no encuentra todas las variantes: no detectada no es lo mismo que no portador."
+    },
+    "row.ar_one_probed": {
+      "en": "{carrier} carries a variant in {gene}, a recessive gene. The data of {other} come from a chip, which reads only some positions of {gene}: not detected is not the same as not a carrier.",
+      "es": "{carrier} porta una variante en {gene}, un gen recesivo. Los datos de {other} vienen de un chip, que solo lee algunas posiciones de {gene}: no detectada no es lo mismo que no portador."
+    },
+    "row.ar_one_not_assessed": {
+      "en": "{carrier} carries a variant in {gene}, a recessive gene. The data of {other} did not assess {gene}: not detected is not the same as not a carrier.",
+      "es": "{carrier} porta una variante en {gene}, un gen recesivo. Los datos de {other} no evaluaron {gene}: no detectada no es lo mismo que no portador."
+    },
+    "row.xl_one": {
+      "en": "{carrier} carries a variant in {gene}, a gene on the X chromosome. The 1 in 4 figure of shared recessive genes does not apply: the chance for a child depends on which partner carries it and on the child's sex.",
+      "es": "{carrier} porta una variante en {gene}, un gen del cromosoma X. La cifra de 1 entre 4 de los genes recesivos compartidos no se aplica: la probabilidad para un hijo depende de quién la porta y del sexo del hijo."
+    },
+    "row.xl_both": {
+      "en": "Both partners carry a variant in {gene}, a gene on the X chromosome. The 1 in 4 figure of shared recessive genes does not apply: the chance for a child depends on which partner carries it and on the child's sex.",
+      "es": "Los dos miembros de la pareja portan una variante en {gene}, un gen del cromosoma X. La cifra de 1 entre 4 de los genes recesivos compartidos no se aplica: la probabilidad para un hijo depende de quién la porta y del sexo del hijo."
+    },
+    "row.withheld": {
+      "en": "A withheld result. A sensitive gene shows by name only when both profiles allow sensitive results.",
+      "es": "Un resultado retenido. Un gen sensible solo se muestra por su nombre cuando los dos perfiles permiten los resultados sensibles."
+    },
+    "side.carrier": {
+      "en": "Carries a variant",
+      "es": "Porta una variante"
+    },
+    "side.carrier_unconfirmed": {
+      "en": "Carries a variant, unconfirmed: a clinical carrier test comes first",
+      "es": "Porta una variante, sin confirmar: primero va una prueba clínica de portador"
+    },
+    "side.not_detected": {
+      "en": "Not detected",
+      "es": "No detectada"
+    },
+    "side.not_detected_partial": {
+      "en": "Not detected, gene partly assessed",
+      "es": "No detectada, gen evaluado en parte"
+    },
+    "side.probed_only": {
+      "en": "Not assessed beyond the chip's probed sites",
+      "es": "No evaluado más allá de las posiciones que lee el chip"
+    },
+    "side.not_assessed": {
+      "en": "Not assessed",
+      "es": "No evaluado"
+    },
+    "counsel": {
+      "en": "A clinical carrier test and genetic counselling come before any reproductive decision.",
+      "es": "Una prueba clínica de portador y el consejo genético van antes de cualquier decisión reproductiva."
+    }
+  }
+}

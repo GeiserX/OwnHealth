@@ -30,6 +30,7 @@ const SOURCES: &[(&str, Source)] = &[
     ("dashboard", |s| Box::pin(dashboards(s))),
     ("check_drug", |s| Box::pin(drug_checks(s))),
     ("calculators", |s| Box::pin(calculators(s))),
+    ("couple_carrier", |_| Box::pin(couple_carrier())),
 ];
 
 async fn status(s: &Seeded) -> anyhow::Result<Vec<Value>> {
@@ -273,4 +274,66 @@ fn the_cited_loader_refuses_a_row_or_template_that_breaks_the_rules() -> R {
         }
     }
     Ok(())
+}
+
+/// The couple carrier view in both languages, with every kind of row: two people built to hit each
+/// one (a shared gene confirmed and not, X-linked, each partner state and a withheld sensitive gene).
+async fn couple_carrier() -> anyhow::Result<Vec<Value>> {
+    use ownhealth_genome::Gate;
+    use ownhealth_genome::couple::{Carried, Person, join};
+    let carried = |inheritance: &str, confirmed: bool, sensitive: bool| Carried {
+        inheritance: inheritance.into(),
+        confirmed,
+        sensitive,
+        assays: ["wgs".to_string()].into(),
+        src: vec!["src_example".into()],
+        ..Carried::default()
+    };
+    let person = |name: &str, genes: Vec<(&str, Carried)>, coverage: Vec<(&str, Vec<(&str, &str)>)>| Person {
+        name: name.into(),
+        carried: genes.into_iter().map(|(g, c)| (g.to_string(), c)).collect(),
+        coverage: coverage
+            .into_iter()
+            .map(|(a, g)| {
+                (
+                    a.to_string(),
+                    g.into_iter().map(|(g, s)| (g.to_string(), s.to_string())).collect(),
+                )
+            })
+            .collect(),
+    };
+    let alex = person(
+        "Alex",
+        vec![
+            ("GJB2", carried("AR", true, false)),
+            ("HBB", carried("AR", true, false)),
+            ("CFTR", carried("AR", true, false)),
+            ("PAH", carried("AR", true, false)),
+            ("SMN1", carried("AR", true, false)),
+            ("DMD", carried("XL", true, false)),
+            ("OTC", carried("XL", true, false)),
+            ("BRCA2", carried("AR", true, true)),
+        ],
+        vec![],
+    );
+    let sam = person(
+        "Sam",
+        vec![
+            ("GJB2", carried("AR", true, false)),
+            ("HBB", carried("AR", false, false)),
+            ("DMD", carried("XL", false, false)),
+        ],
+        vec![
+            ("chip", vec![("CFTR", "partial")]),
+            ("wgs", vec![("PAH", "assessed"), ("SMN1", "partial")]),
+        ],
+    );
+    let mut out = Vec::new();
+    for lang in LANGS {
+        for open in [true, false] {
+            let gate = Gate::new(open, false);
+            out.push(json!(join(&alex, &sam, &gate, &gate, lang)?.rows));
+        }
+    }
+    Ok(out)
 }
