@@ -12,6 +12,8 @@
     "ownhealth/genome_dataset": "int",
     "ownhealth/genome_finding": "int",
     "ownhealth/note": "int",
+    "ownhealth/prevention_answer": "int",
+    "ownhealth/prevention_decision": "int",
     "ownhealth/review_item": "int",
     "ownhealth/source_priority": "int",
     "ownhealth/src": "int",
