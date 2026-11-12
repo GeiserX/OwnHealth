@@ -1,0 +1,27 @@
+# What counts as "done" for a screening row: a procedure whose text holds one of the aliases (as whole
+# words, accents and case ignored) or carries one of the SNOMED CT codes, or an observation with one of
+# the LOINC codes or alias groups. Vaccine groups live in vaccines.tsv. A group that names an alias
+# group the rule pack already checks (never_measured or recency) is refused by the loader.
+version: "prevention-evidence 0.1.0"
+groups:
+  mammography:
+    name: {en: "Mammography", es: "Mamografía"}
+    aliases: [mammography, mammogram, mamografía, mamografia]
+    snomed: ["71651007"]
+    loinc: ["24606-6"]
+  fit:
+    name: {en: "Faecal immunochemical test", es: "Sangre oculta en heces (test inmunológico)"}
+    aliases: [faecal immunochemical test, fecal immunochemical test, fit test, sangre oculta en heces, sohi]
+    loinc: ["29771-3", "57905-2"]
+  colonoscopy:
+    name: {en: "Colonoscopy", es: "Colonoscopia"}
+    aliases: [colonoscopy, colonoscopia]
+    snomed: ["73761001"]
+  cervical_cytology:
+    name: {en: "Cervical cytology", es: "Citología cervical"}
+    aliases: [cervical cytology, pap smear, pap test, citología cervical, citologia cervical]
+    loinc: ["10524-7"]
+  hpv_test:
+    name: {en: "HPV test", es: "Prueba del VPH"}
+    aliases: [hpv test, prueba del vph, prueba de vph, test de vph, test vph]
+    loinc: ["21440-3"]

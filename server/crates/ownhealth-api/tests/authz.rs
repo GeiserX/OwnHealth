@@ -37,14 +37,21 @@ const PUBLIC: [&str; 15] = [
 
 const METHODS: [Method; 5] = [Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE];
 
-/// Every path a route module registers under `/api`.
+/// Every path a route module registers under `/api`, submodule routers (`routes/genome/`) included.
 fn route_paths() -> anyhow::Result<BTreeSet<String>> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/routes");
     let re = Regex::new(r#"\.route\(\s*"([^"]+)""#)?;
     let mut out = BTreeSet::new();
-    for entry in std::fs::read_dir(dir)? {
-        let src = std::fs::read_to_string(entry?.path())?;
-        out.extend(re.captures_iter(&src).map(|c| c[1].to_string()));
+    let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/routes")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            let src = std::fs::read_to_string(path)?;
+            out.extend(re.captures_iter(&src).map(|c| c[1].to_string()));
+        }
     }
     anyhow::ensure!(out.len() > 50, "the route scan found only {} paths", out.len());
     Ok(out)

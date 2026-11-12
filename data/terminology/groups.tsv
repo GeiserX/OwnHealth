@@ -35,6 +35,7 @@ glucose	mg/dL	mmol/L	mg/dL	10	1500	Glucose	Glucosa
 glucose_blood	mg/dL	mmol/L	mg/dL	10	1500	Glucose (whole blood)	Glucosa (sangre)
 hba1c	%	mmol/mol	%	3	20	HbA1c	Hemoglobina glicada (HbA1c)
 creatinine	mg/dL	umol/L	mg/dL	0.05	30	Creatinine	Creatinina
+cystatin_c	mg/L	mg/L	mg/L	0.1	20	Cystatin C	Cistatina C
 bun	mg/dL	mmol/L	mg/dL	1	300	Urea nitrogen (BUN)	Nitrógeno ureico (BUN)
 urea	mg/dL	mmol/L	mg/dL	2	650	Urea	Urea
 uric_acid	mg/dL	umol/L	mg/dL	0.2	30	Uric acid	Ácido úrico
