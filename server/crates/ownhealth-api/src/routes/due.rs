@@ -11,7 +11,8 @@
 //!
 //! Every item is a record, so a caller without read:records gets an empty list, and an item a lab
 //! value shows also needs read:labs. What the scopes leave out is counted in `withheld`. The
-//! `prevention_hash` covers the whole document and is the same for every caller and language.
+//! `prevention_hash` covers the whole document and is the same for every caller and language; a
+//! caller without read:records gets none (the audit row keeps it).
 //!
 //! A decision is `snooze` (until a date, shown again the day after), `dismiss` (a reason is required)
 //! or `done` (evidence: a current record or an active document of the same profile). A new decision

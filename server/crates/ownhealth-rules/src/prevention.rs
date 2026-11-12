@@ -1220,7 +1220,7 @@ fn pick(v: Option<&Value>, lang: &str) -> Option<String> {
 /// The document in one language for one caller: every item (shown or `hidden`) gains `title` and
 /// `why` (or `reason` for not_assessed), and a guideline row `record` {kind, text} for a form that
 /// records it. Items the scopes do not cover are left out, counted in `withheld`, and the scopes they
-/// need are named in `withheld_scopes`.
+/// need are named in `withheld_scopes`. Without read:records `prevention_hash` is left out too.
 pub fn render(doc: &Value, pack: &Pack, lang: &str, scopes: &Scopes) -> Result<Value> {
     let prev = load(pack)?;
     let lang = if lang == "es" { "es" } else { "en" };
@@ -1330,8 +1330,12 @@ pub fn render(doc: &Value, pack: &Pack, lang: &str, scopes: &Scopes) -> Result<V
     if let Some(d) = rules.and_then(|r| r.disclaimer.as_ref()) {
         whole.insert("disclaimer".into(), json!(pick(Some(d), lang)));
     }
+    // the hash covers immunizations, procedures, encounters and the person's decisions and answers,
+    // which the state body does not hold: without read:records the same hash twice would still say
+    // whether one of them changed. (A lab change shows in the state_hash every token gets already.)
     if !scopes.contains("read:records") {
         whole.shift_remove("unmatched");
+        whole.shift_remove("prevention_hash");
     }
     whole.insert("withheld".into(), json!(withheld));
     lacking.sort_unstable();

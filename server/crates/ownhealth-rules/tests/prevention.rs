@@ -764,3 +764,22 @@ async fn a_pack_rule_named_by_a_country_row_carries_its_cite() -> R {
     tx.rollback().await?;
     Ok(())
 }
+
+/// The hash covers immunizations, procedures, encounters and the person's decisions and answers,
+/// which the state body does not hold. A caller without read:records sees none of them, so it gets
+/// no hash either: the same hash before and after would tell it whether such a record changed.
+#[tokio::test]
+async fn a_caller_without_read_records_gets_no_prevention_hash() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let pack = load_pack()?;
+    let doc = build_document(&mut tx, s.pid("alex"), as_of()).await?;
+    let summary = prevention::render(&doc, &pack, "en", &scope_set(["read:summary"]))?;
+    assert!(summary.get("prevention_hash").is_none(), "{summary}");
+    let mut no_labs = all_scopes();
+    no_labs.remove("read:labs");
+    let r = prevention::render(&doc, &pack, "en", &no_labs)?;
+    assert_eq!(r["prevention_hash"], doc["prevention_hash"]);
+    tx.rollback().await?;
+    Ok(())
+}

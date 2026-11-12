@@ -69,7 +69,8 @@ export interface DueDoc {
 	withheld: number;
 	/** The scopes the withheld items need. */
 	withheld_scopes?: string[];
-	prevention_hash: string;
+	/** Absent for a caller without read:records. */
+	prevention_hash?: string;
 	lang: string;
 }
 

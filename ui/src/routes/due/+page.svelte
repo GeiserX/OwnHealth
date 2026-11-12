@@ -218,7 +218,7 @@
 	{#if prof}<div style="margin-bottom:12px"><DueAnswers profile={prof.slug} {canWrite} onchange={load} /></div>{/if}
 	<div class="note">{t('due_info')}</div>
 	<div class="foot-hash">
-		<span>prevention_hash <span class="mono" title={d.prevention_hash}>{shortHash(d.prevention_hash)}</span></span>
+		{#if d.prevention_hash}<span>prevention_hash <span class="mono" title={d.prevention_hash}>{shortHash(d.prevention_hash)}</span></span>{/if}
 		{#if d.rules}<span>{t('due_rules')} <span class="mono">{d.rules}</span></span>{/if}
 		<span>{t('due_asof')} <span class="num">{d.as_of}</span></span>
 	</div>
