@@ -170,6 +170,9 @@ async fn a_snooze_hides_the_item_until_its_date_and_it_is_back_the_day_after() -
     let body = json!({"kind": "snooze", "until": iso(today - Duration::days(1))});
     let (s, v) = decide(&a, "alex", "carmen", KEY, body).await?;
     assert_eq!(s, StatusCode::CREATED, "{v}");
+    // the screen asks for its own local day, on which the item is hidden
+    let doc = due(&a, "alex", "carmen", today - Duration::days(1)).await?;
+    assert!(find(&doc, "hidden", KEY).is_some(), "{doc}");
     Ok(())
 }
 
@@ -632,6 +635,30 @@ async fn evidence_without_a_day_or_from_the_future_is_refused() -> R {
             "{v}"
         );
     }
+    // a document with no collection or report date is undated too: the day it was stored says
+    // nothing about when the test was done
+    let doc: Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes) \
+         select household_id, id, decode(repeat('ab', 32), 'hex'), 'application/pdf', 1 from profile where id = $1 \
+         returning id",
+    )
+    .bind(a.family.profile("carmen"))
+    .fetch_one(&a.db.pool)
+    .await?;
+    let body = json!({"kind": "done", "evidence": {"table": "document", "id": doc}});
+    let (s, v) = decide(&a, "alex", "carmen", KEY, body.clone()).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::UNPROCESSABLE_ENTITY, Some("evidence_undated")),
+        "{v}"
+    );
+    // once the document carries its report date, it counts
+    sqlx::query("update document set reported_at = now() - interval '3 days' where id = $1")
+        .bind(doc)
+        .execute(&a.db.pool)
+        .await?;
+    let (s, v) = decide(&a, "alex", "carmen", KEY, body).await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
     Ok(())
 }
 

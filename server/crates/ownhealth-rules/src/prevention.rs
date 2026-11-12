@@ -821,7 +821,7 @@ pub async fn evidence(
 ) -> Result<Option<Evidence>> {
     let found: Option<(Option<NaiveDate>, Option<String>)> = if table == "document" {
         sqlx::query_as(
-            "select coalesce(collected_at, reported_at, created_at)::date, null::text from document \
+            "select coalesce(collected_at, reported_at)::date, null::text from document \
              where id = $1 and profile_id = $2 and status = 'active'",
         )
         .bind(id)

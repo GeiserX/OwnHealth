@@ -124,7 +124,8 @@
 			...imm.items.filter(recDay).map(rec('immunization', t('due_f_vaccine'))),
 			...proc.items.filter(recDay).map(rec('procedure', t('due_f_procedure'))),
 			...docs.items
-				.filter((d) => d.status === 'active')
+				// a document needs a clinical date to count, and this list knows only its collection day
+				.filter((d) => d.status === 'active' && d.collected_at)
 				.map((d) => ({ value: `document:${d.id}`, label: docLabel(d), group: t('due_ev_document') }))
 		];
 	}
