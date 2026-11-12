@@ -42,9 +42,9 @@
 		error = null;
 		const made = key;
 		try {
-			const { blob, filename } = await withStepUp(() =>
-				printSummary(slug, { lang, specialty, include_sensitive: sensitive && !sensitiveWhy })
-			);
+			// the options as they were when asked: a retry after the step-up sends these, not later ones
+			const body = { lang, specialty, include_sensitive: sensitive && !sensitiveWhy };
+			const { blob, filename } = await withStepUp(() => printSummary(slug, body));
 			// the profile changed while it was made: this sheet is another person's
 			if (prof?.slug !== slug) return;
 			drop();
