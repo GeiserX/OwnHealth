@@ -55,3 +55,57 @@ async fn a_token_without_read_labs_neither_sees_nor_reads_it() -> R {
     assert!(refused.message.contains("scope_missing"), "{}", refused.message);
     Ok(())
 }
+
+/// A token in minimal identity mode gets the draw dates relative to as_of, as every tool answer
+/// does; the hash stays the document's.
+#[tokio::test]
+async fn a_minimal_token_reads_dates_relative_to_as_of() -> R {
+    let w = world().await?;
+    let read = |mode: &'static str| {
+        let w = &w;
+        async move {
+            let c = w
+                .connect(
+                    &w.token(Tok {
+                        identity_mode: mode,
+                        profiles: vec!["alex", "lucia"],
+                        ..Tok::default()
+                    })
+                    .await?,
+                )
+                .await?;
+            let mut out = Vec::new();
+            for uri in [URI, "ownhealth://profile/lucia/calculators"] {
+                out.push(serde_json::from_str::<Value>(&c.read_text(uri).await?)?);
+            }
+            anyhow::Ok(out)
+        }
+    };
+    let full = read("full").await?;
+    let minimal = read("minimal").await?;
+    let iso = |s: &str| s.len() >= 10 && s.as_bytes()[4] == b'-' && s[..4].chars().all(|c| c.is_ascii_digit());
+    let mut dates = 0;
+    for (f, m) in full.iter().zip(&minimal) {
+        assert_eq!(f["calculators_hash"], m["calculators_hash"]);
+        for it in m["items"].as_array().into_iter().flatten() {
+            let mut seen: Vec<&str> = vec![it["date"].as_str().unwrap_or_default()];
+            seen.extend(
+                it["inputs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|i| i["date"].as_str()),
+            );
+            seen.extend(it["reason"]["on"].as_str());
+            for s in seen.into_iter().filter(|s| !s.is_empty()) {
+                dates += 1;
+                assert!(!iso(s) && s.ends_with("as_of"), "{s} in {it}");
+            }
+            // the refusal text is filled after the dates were made relative
+            let text = it["text"].as_str().unwrap_or_default();
+            assert!(!text.split_whitespace().any(iso), "{text}");
+        }
+    }
+    assert!(dates >= 3, "the control saw dates: {dates}");
+    Ok(())
+}

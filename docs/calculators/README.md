@@ -36,6 +36,7 @@ computed, it says why. This is information, not diagnosis.
 
 - REST: `GET /api/profiles/{p}/calculators?as_of=&lang=`, with scope `read:labs`.
 - MCP: the resource `ownhealth://profile/{id}/calculators`, with scope `read:labs`. There is no tool.
+  A token in `minimal` identity mode reads every date relative to `as_of`, as in the tool answers.
 - UI: the Calculators card on a biomarker page lists every calculator that reads that marker. The
   Related markers card of a kidney or liver marker also shows the computed eGFR or FIB-4.
 

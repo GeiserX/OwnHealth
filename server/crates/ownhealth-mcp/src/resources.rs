@@ -435,9 +435,13 @@ async fn read_in(
             if !perm.has("read:labs") {
                 return Err(tool_err("scope_missing", "needs read:labs"));
             }
-            let doc = ownhealth_rules::calc::document(&mut *conn, perm.profile.id, day).await?;
+            // as_of is the day the tools default to; the token's identity mode makes the dates
+            // relative before the words are filled in, as every tool answer does
+            let as_of = ownhealth_core::access::today();
+            let doc = ownhealth_rules::calc::document(&mut *conn, perm.profile.id, as_of).await?;
+            let mode = redact::stricter(&principal.identity_mode, None);
             let lang = if principal.lang == "en" { "en" } else { "es" };
-            content = ownhealth_rules::calc::render(&doc, lang)?;
+            content = ownhealth_rules::calc::render(&redact::apply(doc, &mode, as_of, &[]), lang)?;
             body = dumps(&content);
         } else {
             if !perm.has("read:summary") {
