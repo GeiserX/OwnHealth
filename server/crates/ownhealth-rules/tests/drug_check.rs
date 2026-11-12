@@ -736,3 +736,49 @@ async fn dpwg_url_and_level_from_the_file_are_kept_only_when_well_formed() -> R 
     }
     Ok(())
 }
+
+/// Two genes, DPWG text for one: the record still says the other gene's text is not in the file.
+#[tokio::test]
+async fn missing_dpwg_text_is_named_per_gene() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let mut with_dpwg = tpmt();
+    with_dpwg["guidance"] = json!([{"drug": "azathioprine", "source": "DPWG", "level": "4",
+        "recommendation": {"trust": "untrusted_text", "origin": "genome_facts", "text": DPWG_SYNTHETIC}}]);
+    s.set_findings(
+        "carmen",
+        vec![
+            with_dpwg,
+            json!({"category": "pgx", "gene": "NUDT15", "phenotype": "Normal Metabolizer", "call_state": "ref",
+                   "evidence": "E1", "src": "src_g62"}),
+        ],
+    );
+    let out = check_drug(
+        &mut tx,
+        s.pid("carmen"),
+        "azathioprine",
+        &all_scopes(),
+        "en",
+        Some(as_of()),
+    )
+    .await?;
+    let dpwg_rows = out["guidance"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|g| g["source"] == "DPWG")
+        .count();
+    assert_eq!(dpwg_rows, 1);
+    let na: Vec<String> = out["not_assessed"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .filter(|v| v.contains("DPWG"))
+        .collect();
+    assert_eq!(
+        na,
+        ["DPWG text for the genotype phenotype of NUDT15 not in this genome file"]
+    );
+    Ok(())
+}

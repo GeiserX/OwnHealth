@@ -129,7 +129,7 @@
 						<div class="dim" style="font-size:11px">{[...new Set(recs.map((r) => r.url))].join(' · ')}</div>
 						{#if recs.length > 1}<div class="note" style="margin-top:8px">{t('i2_indication')}</div>{/if}
 					{/if}
-					{#each dpwg as gd (quoteText(gd.quote))}
+					{#each dpwg as gd, i (i)}
 						<div class="dpwg">
 							<div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em">DPWG{gd.level ? ' ' + gd.level : ''} · {gd.applies_to}</div>
 							<blockquote>“{quoteText(gd.quote)}” <span class="chip untrusted" title={t('med_dpwg_from_file')}>{t('fu_untrusted_chip')}</span></blockquote>

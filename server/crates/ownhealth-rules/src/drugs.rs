@@ -599,9 +599,14 @@ pub async fn check_drug(
                 "based_on": f.src.into_iter().collect::<Vec<_>>(),
             }));
         }
-        if dpwg.is_empty() && !pgx.is_empty() {
-            let checked: Vec<&str> = pgx.iter().filter_map(|p| p["gene"].as_str()).collect();
-            not_assessed.push(own_text("drug.na.dpwg", lang)?.replace("{genes}", &checked.join(", ")));
+        // the checked genes whose fact carries no DPWG text we could quote
+        let uncovered: Vec<&str> = pgx
+            .iter()
+            .filter_map(|p| p["gene"].as_str())
+            .filter(|g| !dpwg.iter().any(|(d, _)| d == g))
+            .collect();
+        if !uncovered.is_empty() {
+            not_assessed.push(own_text("drug.na.dpwg", lang)?.replace("{genes}", &uncovered.join(", ")));
         }
         if cpic_empty {
             if key == "warfarin" {
