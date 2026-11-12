@@ -1,0 +1,43 @@
+{
+ "version": "clinvar_alerts 0.1.0",
+ "cite": "https://www.ncbi.nlm.nih.gov/clinvar/docs/review_status/",
+ "templates": {
+  "named": {
+   "en": "ClinVar's classification of a variant you carry in {gene} is now: {new} ({stars}). Before: {old}.",
+   "es": "La clasificación en ClinVar de una variante que tienes en {gene} es ahora: {new} ({stars}). Antes: {old}."
+  },
+  "named_no_gene": {
+   "en": "ClinVar's classification of a variant you carry is now: {new} ({stars}). Before: {old}.",
+   "es": "La clasificación en ClinVar de una variante que tienes es ahora: {new} ({stars}). Antes: {old}."
+  },
+  "named_same_class": {
+   "en": "ClinVar changed its classification of a variant you carry in {gene} within the same group. It is now: {new} ({stars}).",
+   "es": "ClinVar ha cambiado su clasificación de una variante que tienes en {gene} dentro del mismo grupo. Es ahora: {new} ({stars})."
+  },
+  "named_same_class_no_gene": {
+   "en": "ClinVar changed its classification of a variant you carry within the same group. It is now: {new} ({stars}).",
+   "es": "ClinVar ha cambiado su clasificación de una variante que tienes dentro del mismo grupo. Es ahora: {new} ({stars})."
+  },
+  "changed": {
+   "en": "A result you carry changed in ClinVar.",
+   "es": "Ha cambiado en ClinVar un resultado que tienes."
+  },
+  "withheld": {
+   "en": "A withheld result changed in ClinVar.",
+   "es": "Ha cambiado en ClinVar un resultado que está oculto."
+  },
+  "chip": {
+   "en": "It comes from a chip and is unconfirmed: worth a clinical test.",
+   "es": "Viene de un chip y no está confirmado: merece una prueba clínica."
+  },
+  "stars_one": {"en": "1 star", "es": "1 estrella"},
+  "stars_many": {"en": "{n} stars", "es": "{n} estrellas"},
+  "class_plp": {"en": "pathogenic or likely pathogenic", "es": "patogénica o probablemente patogénica"},
+  "class_vus": {"en": "uncertain significance", "es": "significado incierto"},
+  "class_conflicting": {"en": "conflicting classifications", "es": "clasificaciones contradictorias"},
+  "class_blb": {"en": "benign or likely benign", "es": "benigna o probablemente benigna"},
+  "class_other": {"en": "another kind of classification", "es": "otro tipo de clasificación"},
+  "class_not_reported": {"en": "not reported in your genome file", "es": "sin informar en tu archivo genómico"},
+  "class_not_in_clinvar": {"en": "not in the previous ClinVar release", "es": "sin registro en la versión anterior de ClinVar"}
+ }
+}

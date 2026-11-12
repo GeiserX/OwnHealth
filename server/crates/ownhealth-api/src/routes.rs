@@ -44,6 +44,7 @@ pub fn all() -> Router<Runtime> {
         .merge(family::router())
         .merge(family_history::router())
         .merge(genome::router())
+        .merge(genome::events::router())
         .merge(imports::router())
         .merge(inbox::router())
         .merge(inboxes::router())

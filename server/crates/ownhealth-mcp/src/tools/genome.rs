@@ -16,7 +16,7 @@ use crate::services::{FindingsArgs, LookupError, VariantArgs};
 
 const GENOME_LIMITATION: &str =
     "Research-grade analysis, not a clinical laboratory report. Confirm actionable findings with a clinical test.";
-const SUMMARY_FIELDS: [&str; 17] = [
+const SUMMARY_FIELDS: [&str; 18] = [
     "id",
     "category",
     "gene",
@@ -27,6 +27,7 @@ const SUMMARY_FIELDS: [&str; 17] = [
     "hgvs",
     "zygosity",
     "clinvar",
+    "clinvar_now",
     "evidence",
     "confidence",
     "call_state",
