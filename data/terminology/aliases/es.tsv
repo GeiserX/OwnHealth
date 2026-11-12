@@ -117,6 +117,9 @@ Hemoglobina A1c	hba1c		curated	2026-11-08
 Creatinina	creatinine		curated	2026-11-08
 Creatinina sérica	creatinine		curated	2026-11-08
 Creatinina en suero	creatinine		curated	2026-11-08
+Cistatina C	cystatin_c		curated	2026-11-11
+Cistatina C sérica	cystatin_c		curated	2026-11-11
+Cistatina C en suero	cystatin_c		curated	2026-11-11
 Nitrógeno ureico	bun		curated	2026-11-08
 BUN	bun		curated	2026-11-08
 Nitrógeno ureico en sangre	bun		curated	2026-11-08

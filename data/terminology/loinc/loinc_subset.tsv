@@ -40,6 +40,7 @@ loinc	alias_group	method	long_name	component	property	time	system	scale	example_
 59261-8	hba1c	ifcc	Hemoglobin A1c/Hemoglobin.total standardized per IFCC-RMP for CDT in Blood	Hemoglobin A1c/Hemoglobin.total^^standardized per IFCC-RMP for CDT	SFr	Pt	Bld	Qn	mmol/mol	ACTIVE
 2160-0	creatinine		Creatinine [Mass/volume] in Serum or Plasma	Creatinine	MCnc	Pt	Ser/Plas	Qn	mg/dL	ACTIVE
 14682-9	creatinine		Creatinine [Moles/volume] in Serum or Plasma	Creatinine	SCnc	Pt	Ser/Plas	Qn	umol/L	ACTIVE
+33863-2	cystatin_c		Cystatin C [Mass/volume] in Serum or Plasma	Cystatin C	MCnc	Pt	Ser/Plas	Qn	mg/L	ACTIVE
 3094-0	bun		Urea nitrogen [Mass/volume] in Serum or Plasma	Urea nitrogen	MCnc	Pt	Ser/Plas	Qn	mg/dL	ACTIVE
 14937-7	bun		Urea nitrogen [Moles/volume] in Serum or Plasma	Urea nitrogen	SCnc	Pt	Ser/Plas	Qn	mmol/L	ACTIVE
 3091-6	urea		Urea [Mass/volume] in Serum or Plasma	Urea	MCnc	Pt	Ser/Plas	Qn	mg/dL	ACTIVE

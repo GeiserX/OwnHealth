@@ -1,0 +1,98 @@
+{
+ "calculator": "ckd_epi_2021_cr_cys",
+ "source": "kidney.epi 1.4.0 from CRAN (R package by Scientific-Tools.Org), run once in the r-base 4.4.2 image on 2026-11-11: egfr.ckdepi.cr.2021 and egfr.ckdepi.cr_cys.2021, creatinine_units mg/dl or micromol/l, which round to 2 decimals. Numbers only; no code copied.",
+ "paper": "https://pubmed.ncbi.nlm.nih.gov/34554658/",
+ "precision": 2,
+ "cases": [
+  {
+   "sex": "male",
+   "age": 47,
+   "inputs": {
+    "creatinine": {
+     "value": "0.98",
+     "unit": "mg/dL"
+    },
+    "cystatin_c": {
+     "value": "0.85",
+     "unit": "mg/L"
+    }
+   },
+   "expected": "102.32"
+  },
+  {
+   "sex": "female",
+   "age": 45,
+   "inputs": {
+    "creatinine": {
+     "value": "0.64",
+     "unit": "mg/dL"
+    },
+    "cystatin_c": {
+     "value": "0.7",
+     "unit": "mg/L"
+    }
+   },
+   "expected": "116.10"
+  },
+  {
+   "sex": "male",
+   "age": 60,
+   "inputs": {
+    "creatinine": {
+     "value": "1.2",
+     "unit": "mg/dL"
+    },
+    "cystatin_c": {
+     "value": "1.4",
+     "unit": "mg/L"
+    }
+   },
+   "expected": "59.08"
+  },
+  {
+   "sex": "female",
+   "age": 30,
+   "inputs": {
+    "creatinine": {
+     "value": "0.6",
+     "unit": "mg/dL"
+    },
+    "cystatin_c": {
+     "value": "0.6",
+     "unit": "mg/L"
+    }
+   },
+   "expected": "131.24"
+  },
+  {
+   "sex": "female",
+   "age": 75,
+   "inputs": {
+    "creatinine": {
+     "value": "2",
+     "unit": "mg/dL"
+    },
+    "cystatin_c": {
+     "value": "2.1",
+     "unit": "mg/L"
+    }
+   },
+   "expected": "25.86"
+  },
+  {
+   "sex": "male",
+   "age": 55,
+   "inputs": {
+    "creatinine": {
+     "value": "88.4",
+     "unit": "umol/L"
+    },
+    "cystatin_c": {
+     "value": "1",
+     "unit": "mg/L"
+    }
+   },
+   "expected": "86.44"
+  }
+ ]
+}

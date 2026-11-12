@@ -25,6 +25,12 @@
       "uri": "ownhealth://profile/alex/status.md"
     },
     {
+      "description": "eGFR (CKD-EPI 2021), FIB-4 and HOMA-IR from recorded labs, each with its formula, citation and inputs, or the reason it was not computed.",
+      "mimeType": "application/json",
+      "name": "alex calculators",
+      "uri": "ownhealth://profile/alex/calculators"
+    },
+    {
       "description": "Who read this profile, 30 days.",
       "mimeType": "application/json",
       "name": "alex access log",

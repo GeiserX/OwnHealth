@@ -73,6 +73,8 @@ Hämoglobin A1c	hba1c		curated	2026-11-08
 Kreatinin	creatinine		curated	2026-11-08
 Creatinin	creatinine		curated	2026-11-08
 Kreatinin im Serum	creatinine		curated	2026-11-08
+Cystatin C	cystatin_c		curated	2026-11-11
+Cystatin C im Serum	cystatin_c		curated	2026-11-11
 Harnstoff-Stickstoff	bun		curated	2026-11-08
 BUN	bun		curated	2026-11-08
 Harnstoff	urea		curated	2026-11-08

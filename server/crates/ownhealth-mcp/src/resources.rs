@@ -10,6 +10,7 @@
 //! | ownhealth://source/{src_id}           | get_source without text                   | the fact's scope           |
 //! | ownhealth://rules/{version}           | the rule pack in force                    | a valid token              |
 //! | ownhealth://profile/{id}/access-log   | this profile's audit entries, 30 days     | owner or guardian          |
+//! | ownhealth://profile/{id}/calculators  | ownhealth.calculators/v1, in token lang   | read:labs                  |
 
 use std::sync::LazyLock;
 
@@ -35,8 +36,9 @@ pub const RESOURCE_NOT_FOUND: i32 = -32002;
 pub const INVALID_PARAMS: i32 = -32602;
 
 #[allow(clippy::unwrap_used)]
-static PROFILE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^ownhealth://profile/([a-z0-9_-]+)/(status|status\.md|access-log)$").unwrap());
+static PROFILE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^ownhealth://profile/([a-z0-9_-]+)/(status|status\.md|access-log|calculators)$").unwrap()
+});
 #[allow(clippy::unwrap_used)]
 static SOURCE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ownhealth://source/(src_[a-z0-9_]+)$").unwrap());
 #[allow(clippy::unwrap_used)]
@@ -83,6 +85,14 @@ pub async fn list_resources(
                 "The health status as markdown.",
             ));
         }
+        if perm.has("read:labs") {
+            out.push(resource(
+                format!("ownhealth://profile/{slug}/calculators"),
+                format!("{slug} calculators"),
+                "application/json",
+                "eGFR (CKD-EPI 2021), FIB-4 and HOMA-IR from recorded labs, each with its formula, citation and inputs, or the reason it was not computed.",
+            ));
+        }
         if perm.role == "owner" || perm.role == "guardian" {
             out.push(resource(
                 format!("ownhealth://profile/{slug}/access-log"),
@@ -121,6 +131,12 @@ pub fn list_templates() -> Vec<Value> {
             "access-log",
             "application/json",
             "This profile's audit entries, 30 days.",
+        ),
+        t(
+            "ownhealth://profile/{id}/calculators",
+            "calculators",
+            "application/json",
+            "Published formulas run on this profile's recorded labs, with citations and inputs.",
         ),
     ]
 }
@@ -414,6 +430,18 @@ async fn read_in(
                 return Err(tool_err("scope_missing", "owner or guardian only"));
             }
             content = access_log(&mut *conn, &perm).await?;
+            body = dumps(&content);
+        } else if what == "calculators" {
+            if !perm.has("read:labs") {
+                return Err(tool_err("scope_missing", "needs read:labs"));
+            }
+            // as_of is the day the tools default to; the token's identity mode makes the dates
+            // relative before the words are filled in, as every tool answer does
+            let as_of = ownhealth_core::access::today();
+            let doc = ownhealth_rules::calc::document(&mut *conn, perm.profile.id, as_of).await?;
+            let mode = redact::stricter(&principal.identity_mode, None);
+            let lang = if principal.lang == "en" { "en" } else { "es" };
+            content = ownhealth_rules::calc::render(&redact::apply(doc, &mode, as_of, &[]), lang)?;
             body = dumps(&content);
         } else {
             if !perm.has("read:summary") {
