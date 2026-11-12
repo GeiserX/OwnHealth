@@ -51,3 +51,51 @@ test('a new visit, or a moved day, is placed at noon UTC; an end before the new 
 	assert.deepEqual(visitPeriod('2026-05-11', stored), { period_start: '2026-05-11T12:00:00Z' });
 	assert.deepEqual(visitPeriod(undefined, stored), {});
 });
+
+// The lane's axis ends today: a course that has not started yet is not drawn at today's edge.
+import { laneBars } from '../src/lib/logic/lane.ts';
+
+test('a course that starts after today has no bar, and each bar keeps its own segment', () => {
+	const segs = [
+		{ date: '2026-03-10', end: null, label: 'Atorvastatin 20 mg' },
+		{ date: '2027-01-15', end: null, label: 'Atorvastatin 40 mg' }
+	];
+	const rows = laneBars(segs, x, '2026-11-10');
+	assert.deepEqual(
+		rows.map((r) => r.g.label),
+		['Atorvastatin 20 mg']
+	);
+	assert.equal(rows[0].b.x2, x('2026-11-10'));
+	assert.deepEqual(laneBars([segs[1]], x, '2026-11-10'), []);
+});
+
+// The lane's axis starts at the first course drawn: a profile whose courses all start after today has no lane.
+import { buildLane } from '../src/lib/logic/lane.ts';
+
+test('a lane with only courses after today is no lane, and a later course never moves the axis', () => {
+	const future = { type: 'medication' as const, label: 'Ibuprofen', segments: [{ date: '2099-03-01', end: null, label: 'Ibuprofen 200 mg' }] };
+	assert.equal(buildLane([future], '2026-11-10'), null);
+	const now = { type: 'diagnosis' as const, label: 'Asthma', segments: [{ date: '2024-05-02', end: null, label: 'Asthma' }] };
+	const lane = buildLane([future, now], '2026-11-10');
+	assert.ok(lane);
+	assert.deepEqual(
+		lane.rows.map((r) => r.span.label),
+		['Asthma']
+	);
+	assert.deepEqual(
+		lane.ticks.map((k) => k.year),
+		[2024, 2025, 2026]
+	);
+});
+
+// The phone list prints each course's dates: a course that has not started yet never reads as running now.
+import { segRange } from '../src/lib/logic/lane.ts';
+
+test('a course that starts after today reads "from <day>", never "<day> – now"', () => {
+	const w = { now: 'now', from: 'from' };
+	assert.equal(segRange({ date: '2099-03-01', end: null }, '2026-11-12', w), 'from 2099-03-01');
+	assert.equal(segRange({ date: '2026-03-10', end: null }, '2026-11-12', w), '2026-03-10 – now');
+	assert.equal(segRange({ date: '2026-11-12', end: null }, '2026-11-12', w), '2026-11-12 – now');
+	assert.equal(segRange({ date: '2099-03-01', end: '2099-04-01' }, '2026-11-12', w), '2099-03-01 – 2099-04-01');
+	assert.equal(segRange({ date: '2024-03-01', end: '2024-03-01' }, '2026-11-12', w), '2024-03-01');
+});

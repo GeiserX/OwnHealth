@@ -408,3 +408,101 @@ async fn a_course_on_hold_is_not_ongoing() -> R {
     );
     Ok(())
 }
+
+/// A window that leaves out the latest course of a medicine: the row is named after a course the
+/// answer still shows, never the one the window removed.
+#[tokio::test]
+async fn a_medicine_row_is_named_after_a_course_the_window_keeps() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let mut tx = a.rt.pool.begin().await?;
+    for (name, started, stopped) in [
+        ("Atorvastatin", "2022-06-20", Some("2023-06-01")),
+        ("Cardyl", "2026-03-10", None),
+    ] {
+        record(
+            &mut tx,
+            "medication",
+            json!({"profile_id": alex, "name": name, "ingredient": "atorvastatin", "started": started,
+                   "stopped": stopped}),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    let (_, out) = a
+        .get("alex", "/profiles/alex/timeline?types=medication&to=2023-12-31")
+        .await?;
+    assert_eq!(
+        spans(&out, "medication"),
+        [(
+            "Atorvastatin".to_string(),
+            vec![(json!("2022-06-20"), json!("2023-06-01"))]
+        )]
+    );
+    let (_, all) = a.get("alex", "/profiles/alex/timeline?types=medication").await?;
+    assert_eq!(spans(&all, "medication")[0].0, "Cardyl");
+    Ok(())
+}
+
+/// A medicine whose latest course starts after today: the lane draws no bar for that course, so the
+/// row is named after the latest course that has started. A row with only future courses keeps the
+/// latest one's name.
+#[tokio::test]
+async fn a_medicine_row_is_named_after_a_course_that_has_started() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let mut tx = a.rt.pool.begin().await?;
+    for (name, ingredient, started) in [
+        ("Atorvastatin", "atorvastatin", "2026-03-10"),
+        ("Cardyl", "atorvastatin", "2099-02-01"),
+        ("Ibuprofen", "ibuprofen", "2099-03-01"),
+        ("Neobrufen", "ibuprofen", "2099-04-01"),
+    ] {
+        record(
+            &mut tx,
+            "medication",
+            json!({"profile_id": alex, "name": name, "ingredient": ingredient, "started": started}),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    let (_, out) = a.get("alex", "/profiles/alex/timeline?types=medication").await?;
+    let names: Vec<String> = spans(&out, "medication").into_iter().map(|(l, _)| l).collect();
+    assert_eq!(names, ["Atorvastatin", "Neobrufen"]);
+    Ok(())
+}
+
+/// The UI draws the lane up to its own day and sends that day as `as_of`, so the row names follow the
+/// same day as the drawn bars, whatever the server's clock says. A malformed day is refused.
+#[tokio::test]
+async fn a_medicine_row_is_named_on_the_day_the_caller_draws() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let mut tx = a.rt.pool.begin().await?;
+    for (name, ingredient, started) in [
+        ("Atorvastatin", "atorvastatin", "2026-03-10"),
+        ("Cardyl", "atorvastatin", "2099-02-01"),
+        ("Ibuprofen", "ibuprofen", "2099-03-01"),
+        ("Neobrufen", "ibuprofen", "2099-04-01"),
+    ] {
+        record(
+            &mut tx,
+            "medication",
+            json!({"profile_id": alex, "name": name, "ingredient": ingredient, "started": started}),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    let names = |out: &Value| -> Vec<String> { spans(out, "medication").into_iter().map(|(l, _)| l).collect() };
+    let (_, out) = a
+        .get("alex", "/profiles/alex/timeline?types=medication&as_of=2099-03-15")
+        .await?;
+    assert_eq!(names(&out), ["Cardyl", "Ibuprofen"]);
+    let (_, out) = a
+        .get("alex", "/profiles/alex/timeline?types=medication&as_of=2026-11-12")
+        .await?;
+    assert_eq!(names(&out), ["Atorvastatin", "Neobrufen"]);
+    let (code, _) = a.get("alex", "/profiles/alex/timeline?as_of=soon").await?;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+    Ok(())
+}

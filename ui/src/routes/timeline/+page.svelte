@@ -14,7 +14,8 @@
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { currentProfile } from '#lib/state/app.svelte';
 	import { sourceLabel } from '#lib/logic/format';
-	import { buildBars, type Bar } from '#lib/logic/axis';
+	import type { Bar } from '#lib/logic/axis';
+	import { buildLane, segRange } from '#lib/logic/lane';
 	import { todayIso } from '#lib/logic/people';
 
 	type Ty = TimelineEvent['type'];
@@ -38,10 +39,12 @@
 	let types = $state(new Set<Ty>());
 	let countries = $state(new Set<string>());
 
+	// one day for the drawn bars and the row names: the server names each medicine row on the day sent as as_of
+	const today = todayIso();
 	function load() {
 		const slug = profile?.slug;
 		const lang = i18n.lang;
-		if (slug) tl.run(() => getTimeline(slug, { lang }), slug);
+		if (slug) tl.run(() => getTimeline(slug, { lang, as_of: today }), slug);
 	}
 	$effect(load);
 
@@ -77,31 +80,18 @@
 	}
 
 	// ---- the bars lane: x in percent of the time from Jan 1 of the first year to today ----
-	const today = todayIso();
 	const spans = $derived((tl.data?.spans ?? []).filter((s) => !types.size || types.has(s.type)));
-	const lane = $derived.by(() => {
-		const dates = spans.flatMap((s) => s.segments.map((g) => g.date));
-		if (!dates.length) return null;
-		const y0 = Number(dates.reduce((a, b) => (a < b ? a : b)).slice(0, 4));
-		const t0 = Date.parse(`${y0}-01-01`);
-		const t1 = Date.parse(today);
-		const x = (d: string) => Math.min(100, Math.max(0, ((Date.parse(d) - t0) / Math.max(1, t1 - t0)) * 100));
-		const y1 = Number(today.slice(0, 4));
-		const step = y1 - y0 > 12 ? 5 : y1 - y0 > 6 ? 2 : 1;
-		const ticks: { year: number; x: number }[] = [];
-		for (let y = y0; y <= y1; y += step) ticks.push({ year: y, x: x(`${y}-01-01`) });
-		// one row per span; buildBars draws its open-ended courses and one-day dots
-		const rows = spans.map((s) => ({ span: s, bars: buildBars(s.segments, x, today).map((b, i) => ({ b, g: s.segments[i] })) }));
-		return { ticks, rows };
-	});
+	// one row per span with a course started by today; null (no chart) when no course has started yet
+	const lane = $derived(buildLane(spans, today));
 	let pick = $state<{ span: TimelineSpan; g: TimelineSegment } | null>(null);
-	// the detail follows the bars: another profile or a type filter that hides its row clears it, so removing
-	// the filter later does not bring the old detail back
-	const tip = $derived(pick && spans.includes(pick.span) ? pick : null);
+	// the detail follows the bars: another profile, a type filter that hides its row or a country filter that
+	// hides the lane clears it, so removing the filter later does not bring the old detail back
+	const tip = $derived(pick && !countries.size && spans.includes(pick.span) ? pick : null);
 	$effect(() => {
 		if (pick && !tip) pick = null;
 	});
-	const range = (g: TimelineSegment) => (g.end === g.date ? g.date : `${g.date} – ${g.end ?? t('tl_now')}`);
+	// a course that starts after today reads 'from <day>' in the phone list, never '<day> – now'
+	const range = (g: TimelineSegment) => segRange(g, today, { now: t('tl_now'), from: t('tl_from') });
 	// two courses of one medicine at once (two strengths) stack inside its row
 	const segStyle = (b: Bar, c: string) =>
 		(b.span ? `left:${b.x}%;width:${Math.max(b.x2 - b.x, 0.8)}%;` : `left:calc(${b.x}% - 5px);`) + `top:${6 + b.row * 12}px;--c:${c}`;
@@ -139,55 +129,59 @@
 	</div>
 	{#if lane && countries.size}
 		<div class="note" style="margin-bottom:12px">{t('tl_bars_country')}</div>
-	{:else if lane}
-		<div class="card lane">
+	{:else if spans.length && !countries.size}
+		<!-- with no course started yet there is no chart: the card shows only on phones, as the list -->
+		<div class="card lane" class:soon={!lane}>
 			<h3>{t('tl_bars')}</h3>
-			<div class="lgrid" role="group" aria-label={t('tl_bars')}>
-				<div class="lrow axis" aria-hidden="true">
-					<div></div>
-					<div class="track">{#each lane.ticks as k (k.year)}<span class="tick num" style="left:{k.x}%">{k.year}</span>{/each}</div>
-				</div>
-				{#each lane.rows as r, ri (r.span.type + r.span.label + ri)}
-					<div class="lrow">
-						<div class="lname" title={r.span.label}><i style="background:{TY[r.span.type].c}"></i>{r.span.label}</div>
-						<div class="track" style="height:{trackHeight(r.bars)}px">
-							{#each lane.ticks as k (k.year)}<span class="gl" style="left:{k.x}%"></span>{/each}
-							{#each r.bars as { b, g }, i (i)}
-								<button
-									type="button"
-									class="seg"
-									class:dot={!b.span}
-									class:open={b.ongoing}
-									class:sel={tip?.g === g}
-									style={segStyle(b, TY[r.span.type].c)}
-									title={`${g.label} · ${range(g)}`}
-									aria-label={`${g.label}: ${range(g)}`}
-									onmouseenter={() => (pick = { span: r.span, g })}
-									onfocus={() => (pick = { span: r.span, g })}
-									onclick={() => (pick = { span: r.span, g })}
-								></button>
-							{/each}
-						</div>
+			{#if lane}
+				<div class="lgrid" role="group" aria-label={t('tl_bars')}>
+					<div class="lrow axis" aria-hidden="true">
+						<div></div>
+						<div class="track">{#each lane.ticks as k (k.year)}<span class="tick num" style="left:{k.x}%">{k.year}</span>{/each}</div>
 					</div>
-				{/each}
-			</div>
-			<div class="ltip" aria-live="polite">
-				{#if tip}
-					<i style="background:{TY[tip.span.type].c}"></i><b>{tip.g.label}</b>
-					<span class="num muted">{range(tip.g)}</span>
-					{#if tip.g.end == null}<span class="chip">{t('tl_ongoing')}</span>{/if}
-					{#if tip.g.src}<SourceChip label={tip.g.src_label ?? tip.g.src} name={tip.g.label} src={tip.g.src} onopen={openSource} />{/if}
-				{:else}
-					<span class="dim">{t('tl_bars_hint')}</span>
-				{/if}
-			</div>
+					{#each lane.rows as r, ri (r.span.type + r.span.label + ri)}
+						<div class="lrow">
+							<div class="lname" title={r.span.label}><i style="background:{TY[r.span.type].c}"></i>{r.span.label}</div>
+							<div class="track" style="height:{trackHeight(r.bars)}px">
+								{#each lane.ticks as k (k.year)}<span class="gl" style="left:{k.x}%"></span>{/each}
+								{#each r.bars as { b, g }, i (i)}
+									<button
+										type="button"
+										class="seg"
+										class:dot={!b.span}
+										class:open={b.ongoing}
+										class:sel={tip?.g === g}
+										style={segStyle(b, TY[r.span.type].c)}
+										title={`${g.label} · ${range(g)}`}
+										aria-label={`${g.label}: ${range(g)}`}
+										onmouseenter={() => (pick = { span: r.span, g })}
+										onfocus={() => (pick = { span: r.span, g })}
+										onclick={() => (pick = { span: r.span, g })}
+									></button>
+								{/each}
+							</div>
+						</div>
+					{/each}
+				</div>
+				<div class="ltip" aria-live="polite">
+					{#if tip}
+						<i style="background:{TY[tip.span.type].c}"></i><b>{tip.g.label}</b>
+						<span class="num muted">{range(tip.g)}</span>
+						{#if tip.g.end == null}<span class="chip">{t('tl_ongoing')}</span>{/if}
+						{#if tip.g.src}<SourceChip label={tip.g.src_label ?? tip.g.src} name={tip.g.label} src={tip.g.src} onopen={openSource} />{/if}
+					{:else}
+						<span class="dim">{t('tl_bars_hint')}</span>
+					{/if}
+				</div>
+			{/if}
 			<ul class="llist">
 				{#each spans as s, si (s.type + s.label + si)}
 					<li>
 						<div><i style="background:{TY[s.type].c}"></i><b>{s.label}</b> <span class="dim">{tyName(s.type)}</span></div>
 						{#each s.segments as g, gi (gi)}
 							<div class="lseg">
-								<span class="num">{range(g)}</span>
+								<span class="num nowrap">{range(g)}</span>
+								{#if g.label !== s.label}<span class="muted">{g.label}</span>{/if}
 								{#if g.src}<SourceChip label={g.src_label ?? g.src} name={g.label} src={g.src} onopen={openSource} />{/if}
 							</div>
 						{/each}
@@ -260,6 +254,9 @@
 <style>
 	.lane {
 		margin-bottom: 12px;
+	}
+	.lane.soon {
+		display: none;
 	}
 	.lrow {
 		display: grid;
@@ -372,7 +369,8 @@
 	}
 	.lseg {
 		display: flex;
-		gap: 8px;
+		flex-wrap: wrap;
+		gap: 2px 8px;
 		align-items: center;
 		margin: 3px 0 0 14px;
 		font-size: 12px;
@@ -381,12 +379,16 @@
 	.fname {
 		overflow-wrap: anywhere;
 	}
+	.nowrap {
+		white-space: nowrap;
+	}
 	@media (max-width: 760px) {
 		.lgrid,
 		.ltip {
 			display: none;
 		}
-		.llist {
+		.llist,
+		.lane.soon {
 			display: block;
 		}
 	}

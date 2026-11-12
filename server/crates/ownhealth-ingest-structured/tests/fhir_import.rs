@@ -708,3 +708,57 @@ async fn rederive_keeps_the_received_ucum_code() -> R {
     let _ = o.id;
     Ok(())
 }
+
+/// An Encounter that ends before it starts waits in review without its end. The stored resource
+/// says what the visit's columns say: no end when accepted as is, and the edited end after an edit.
+#[tokio::test]
+async fn a_visit_with_a_rejected_end_never_exports_it() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let mut data: Value = serde_json::from_slice(&fhir_file("ips-alex.json"))?;
+    for e in entries_mut(&mut data) {
+        if e["resource"]["resourceType"] == "Encounter" {
+            e["resource"]["period"]["end"] = json!("2026-05-11T09:00:00+02:00");
+        }
+    }
+    let doc = store_doc(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        "alex",
+        data.to_string().as_bytes(),
+        "a.json",
+        JSON,
+    )
+    .await?;
+    import_fhir(&mut tx, &env.blobs, doc).await?;
+    let held: Vec<ReviewItem> = items(&mut tx, doc, Some("fhir_unmapped"))
+        .await?
+        .into_iter()
+        .filter(|i| i.payload["record_kind"] == "visit")
+        .collect();
+    assert_eq!(held.len(), 1);
+    let period = |v: &Map<String, Value>| v["fhir"]["period"].clone();
+
+    // accepted as is: no end anywhere
+    let mut sp = sqlx::Connection::begin(&mut *tx).await?;
+    review::accept(&mut sp, held[0].id, fam.user("alex"), None).await?;
+    let visits = records(&mut sp, "visit", p).await?;
+    assert_eq!(visits[0]["period_end"], Value::Null);
+    assert_eq!(period(&visits[0]), json!({"start": "2026-05-12T08:30:00+02:00"}));
+    sp.rollback().await?;
+
+    // accepted with an edited end: the resource carries that end
+    let edits = json!({"period_end": "2026-05-12T09:15:00+02:00"});
+    review::accept(&mut tx, held[0].id, fam.user("alex"), Some(&edits)).await?;
+    let visits = records(&mut tx, "visit", p).await?;
+    assert_eq!(visits[0]["period_end"], json!("2026-05-12T07:15:00+00:00"));
+    assert_eq!(
+        period(&visits[0]),
+        json!({"start": "2026-05-12T08:30:00+02:00", "end": "2026-05-12T09:15:00+02:00"})
+    );
+    assert_eq!(visits[0]["fhir"]["id"], "alex-enc-1"); // the rest of the received JSON is kept
+    Ok(())
+}
