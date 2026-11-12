@@ -1007,6 +1007,54 @@ async fn diff_dataset(
     Ok(report)
 }
 
+/// Before a genome file is retracted: each open ClinVar alert raised through that file moves to the
+/// alerted event of the same change (same profile, VariationID and release) in another current
+/// dataset of the person whose file stands, a genome file before a chip. The alert keeps standing
+/// while a file still shows the change. Returns the items moved; the caller dismisses the rest.
+pub async fn hand_over_alerts(conn: &mut PgConnection, document_id: Uuid) -> Result<Vec<Uuid>> {
+    let open: Vec<(Uuid, Value)> = sqlx::query_as(
+        "select id, payload from review_item where document_id = $1 and status = 'open' \
+         and kind = 'genome_reinterpretation' order by id for update",
+    )
+    .bind(document_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut moved = Vec::new();
+    for (item, mut payload) in open {
+        let other: Option<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+            "select g2.id, d2.assay, d2.document_id from review_item r join genome_event g on g.id = r.ref_id \
+             join genome_event g2 on g2.profile_id = g.profile_id and g2.variation_id = g.variation_id \
+             and g2.release_to = g.release_to and g2.alerted and g2.id <> g.id \
+             join genome_dataset d2 on d2.id = g2.dataset_id \
+             where r.id = $1 and d2.status = 'current' and d2.document_id is distinct from $2 \
+             and not exists (select 1 from document doc where doc.id = d2.document_id and doc.status = 'retracted') \
+             order by d2.assay in ('chip', 'chip_imputed'), d2.imported_at, d2.id limit 1",
+        )
+        .bind(item)
+        .bind(document_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some((event_id, assay, doc)) = other else {
+            continue;
+        };
+        let unconfirmed = matches!(assay.as_str(), "chip" | "chip_imputed");
+        let withheld = payload["withheld"].as_bool().unwrap_or(true);
+        payload["event_id"] = json!(event_id);
+        payload["unconfirmed"] = json!(unconfirmed);
+        payload["summary"] = json!(review_summary(withheld, unconfirmed, "en"));
+        payload["summary_es"] = json!(review_summary(withheld, unconfirmed, "es"));
+        sqlx::query("update review_item set ref_id = $2, document_id = $3, payload = $4 where id = $1")
+            .bind(item)
+            .bind(event_id)
+            .bind(doc)
+            .bind(&payload)
+            .execute(&mut *conn)
+            .await?;
+        moved.push(item);
+    }
+    Ok(moved)
+}
+
 /// `clinvar_now` for the findings of one profile: per ClinVar VariationID, the classification in the
 /// newest release compared, from the snapshots of current datasets whose file is not retracted. Only
 /// a snapshot whose release is on or before `as_of` counts: the store did not know a later one on

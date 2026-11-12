@@ -592,6 +592,9 @@ async fn retract(
     }
     let why = format!("document retracted: {reason}");
     let out = ownhealth_ingest_structured::retract::retract_document_facts(&mut tx, document_id, &why).await?;
+    // A ClinVar alert of this file moves to another current file of the person that shows the same
+    // change; only an alert no other file stands for is dismissed below.
+    ownhealth_genome::clinvar::hand_over_alerts(&mut tx, document_id).await?;
     let open: Vec<Uuid> = sqlx::query_scalar("select id from review_item where document_id = $1 and status = 'open'")
         .bind(document_id)
         .fetch_all(&mut *tx)
