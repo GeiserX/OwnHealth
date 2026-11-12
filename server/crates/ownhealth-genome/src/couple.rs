@@ -2,8 +2,11 @@
 //!
 //! Each side is one profile's current carrier facts, plus its `monogenic_pathogenic` facts in an
 //! autosomal recessive (AR) or X-linked (XL) gene. Inheritance comes from the fact, else from
-//! `data/genome/carrier_genes.tsv`. A side without a fact in the gene is "not detected" (with its
-//! coverage), "not assessed beyond the probed sites" (a chip) or "not assessed".
+//! `data/genome/carrier_genes.tsv`. A side without a carrier fact in the gene is, in this order:
+//! "a finding in this gene is listed under Findings" (any other current finding there, never read as
+//! not detected); "not detected" (a carrier or ACMG SF coverage row of a sequencing source); "not
+//! detected, coverage not stated" (a sequencing source with no such row); "not assessed beyond the
+//! probed sites" (a chip); "not assessed"; or "no genome data" (no current dataset).
 //!
 //! A 1 in 4 figure is printed only when both sides carry a variant in the same AR gene and both are
 //! confirmed: a sequencing assay (WGS, WES, long reads) with a confidence above `unconfirmed`, or a
@@ -97,17 +100,35 @@ pub struct Carried {
     pub confirmed: bool,
     pub assays: BTreeSet<String>,
     pub zygosity: Option<String>,
+    /// The distinct variants (VRS id, else position) across the facts: more than one may be two altered
+    /// copies of the gene.
+    pub variants: BTreeSet<String>,
     pub src: Vec<String>,
     pub fact_ids: Vec<String>,
     pub sensitive: bool,
 }
 
-/// What one side holds for a gene where it has no carrier fact.
+/// One side's other current findings in one gene (not carrier facts): enough to say they exist.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Other {
+    pub assays: BTreeSet<String>,
+    pub src: Vec<String>,
+    pub fact_ids: Vec<String>,
+    pub sensitive: bool,
+}
+
+/// What one side holds for a gene where it has no finding at all.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Absent {
-    /// A sequencing source assessed the gene and found nothing; `partial` when only part was callable.
+    /// A carrier or ACMG SF coverage row says the gene was assessed and nothing was found; `partial`
+    /// when only part was callable.
     NotDetected {
         partial: bool,
+        assay: String,
+    },
+    /// A sequencing source with no carrier or ACMG SF coverage row for the gene: nothing found, but how
+    /// well the gene was read is not stated.
+    NotStated {
         assay: String,
     },
     /// Only a chip covers the gene: it read some positions, not the gene.
@@ -115,13 +136,38 @@ pub enum Absent {
         assay: String,
     },
     NotAssessed,
+    /// No current dataset at all.
+    NoGenome,
+}
+
+impl Absent {
+    /// Lower is a stronger statement; the strongest source of a side wins.
+    fn strength(&self) -> u8 {
+        match self {
+            Absent::NotDetected { partial: false, .. } => 0,
+            Absent::NotDetected { partial: true, .. } => 1,
+            Absent::NotStated { .. } => 2,
+            Absent::ProbedOnly { .. } => 3,
+            Absent::NotAssessed => 4,
+            Absent::NoGenome => 5,
+        }
+    }
 }
 
 /// One side of a row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Side<'a> {
     Carrier(&'a Carried),
+    /// Another finding in the gene: never read as "not detected".
+    Other(&'a Other),
     Absent(Absent),
+}
+
+/// Whether a coverage row speaks for carrier status. A sequencing source counts only its carrier and
+/// ACMG SF rows (a CPIC row covers the star-allele sites, not the gene); a chip reads probed sites
+/// whatever the panel.
+pub fn coverage_counts(assay: &str, panel: Option<&str>) -> bool {
+    assay.starts_with("chip") || panel.is_some_and(|p| p == "carrier" || p.starts_with("acmg_sf"))
 }
 
 /// Everything about one profile the join reads.
@@ -129,74 +175,104 @@ pub enum Side<'a> {
 pub struct Person {
     pub name: String,
     pub carried: BTreeMap<String, Carried>,
-    /// Per dataset: assay and the gene coverage rows (gene upper case -> state).
+    /// Genes with another current finding (any category) that is not a carrier fact.
+    pub other: BTreeMap<String, Other>,
+    /// Per current dataset: assay and the gene coverage rows that count (`coverage_counts`), gene upper
+    /// case -> state. Empty when the person has no current dataset.
     pub coverage: Vec<(String, HashMap<String, String>)>,
 }
 
 impl Person {
-    /// What this person holds in `gene` when no carrier fact names it.
+    /// What this person's coverage says about `gene` when no finding names it.
     pub fn absent(&self, gene: &str) -> Absent {
-        let mut chip = None;
-        let mut partial = None;
+        let mut best = Absent::NoGenome;
         for (assay, genes) in &self.coverage {
-            let Some(state) = genes.get(gene) else { continue };
-            if state != "assessed" && state != "partial" {
-                continue;
-            }
-            if assay.starts_with("chip") {
-                chip.get_or_insert_with(|| assay.clone());
-            } else if state == "assessed" {
-                return Absent::NotDetected {
+            let chip = assay.starts_with("chip");
+            let here = match (genes.get(gene).map(String::as_str), chip) {
+                (Some("assessed"), false) => Absent::NotDetected {
                     partial: false,
                     assay: assay.clone(),
-                };
-            } else {
-                partial.get_or_insert_with(|| assay.clone());
+                },
+                (Some("partial"), false) => Absent::NotDetected {
+                    partial: true,
+                    assay: assay.clone(),
+                },
+                (Some("assessed" | "partial"), true) => Absent::ProbedOnly { assay: assay.clone() },
+                (None, false) if SEQUENCING.contains(&assay.as_str()) => Absent::NotStated { assay: assay.clone() },
+                _ => Absent::NotAssessed,
+            };
+            if here.strength() < best.strength() {
+                best = here;
             }
         }
-        match (partial, chip) {
-            (Some(assay), _) => Absent::NotDetected { partial: true, assay },
-            (None, Some(assay)) => Absent::ProbedOnly { assay },
-            (None, None) => Absent::NotAssessed,
-        }
+        best
     }
 
     fn side(&self, gene: &str) -> Side<'_> {
-        match self.carried.get(gene) {
-            Some(c) => Side::Carrier(c),
-            None => Side::Absent(self.absent(gene)),
+        match (self.carried.get(gene), self.other.get(gene)) {
+            (Some(c), _) => Side::Carrier(c),
+            (None, Some(o)) => Side::Other(o),
+            (None, None) => Side::Absent(self.absent(gene)),
         }
     }
 }
 
-fn is_carrier_row(r: &FindingRow) -> Option<String> {
-    if r.status != "current" || r.verification_status == "refuted" {
+/// A current, not refuted finding that reads a variant (or a result with no call state).
+fn is_present(r: &FindingRow) -> bool {
+    r.status == "current" && r.verification_status != "refuted" && matches!(r.call_state.as_deref(), None | Some("alt"))
+}
+
+/// The inheritance a fact joins under, or None when it is not a carrier fact for this view. A declared
+/// AR or XL wins; with none declared the carrier panel decides; a monogenic fact that declares another
+/// mode (a dominant form of the gene) stays out.
+fn inheritance_of(category: &str, gene: &str, declared: &str) -> Option<String> {
+    if !matches!(category, "carrier" | "monogenic_pathogenic") {
         return None;
     }
-    if !matches!(r.call_state.as_deref(), None | Some("alt")) {
+    let inheritance = match declared {
+        "AR" | "XL" => declared.to_string(),
+        _ if category == "monogenic_pathogenic" && !declared.is_empty() => return None,
+        _ => PANEL_INHERITANCE.get(gene)?.clone(),
+    };
+    matches!(inheritance.as_str(), "AR" | "XL").then_some(inheritance)
+}
+
+fn is_carrier_row(r: &FindingRow) -> Option<String> {
+    if !is_present(r) {
         return None;
     }
     let gene = r.gene.as_deref()?.trim().to_uppercase();
     let declared = r.fact.0["condition"]["inheritance"].as_str().unwrap_or_default();
-    let inheritance = match declared {
-        "AR" | "XL" => declared.to_string(),
-        _ if r.category == "monogenic_pathogenic" => return None,
-        _ => PANEL_INHERITANCE.get(&gene)?.clone(),
-    };
-    match r.category.as_str() {
-        "carrier" | "monogenic_pathogenic" if inheritance == "AR" || inheritance == "XL" => Some(inheritance),
-        _ => None,
-    }
+    inheritance_of(&r.category, &gene, declared)
 }
 
 /// Read one profile's carrier facts and gene coverage. `name` is how the texts call this person.
 pub async fn load_person(conn: &mut PgConnection, profile_id: Uuid, name: &str) -> Result<Person> {
     let mut carried: BTreeMap<String, Carried> = BTreeMap::new();
+    let mut other: BTreeMap<String, Other> = BTreeMap::new();
     for r in visible_rows(&mut *conn, profile_id, None).await? {
-        let Some(inheritance) = is_carrier_row(&r) else {
+        let Some(gene) = r
+            .gene
+            .as_deref()
+            .map(|g| g.trim().to_uppercase())
+            .filter(|g| !g.is_empty())
+        else {
             continue;
         };
-        let gene = r.gene.as_deref().unwrap_or_default().trim().to_uppercase();
+        let Some(inheritance) = is_carrier_row(&r) else {
+            if is_present(&r) {
+                let o = other.entry(gene.clone()).or_default();
+                o.assays.insert(r.assay.clone());
+                o.sensitive |= r.sensitive || is_sensitive_gene(Some(&gene));
+                if !o.src.contains(&r.src_id) {
+                    o.src.push(r.src_id.clone());
+                }
+                if !o.fact_ids.contains(&r.fact_id) {
+                    o.fact_ids.push(r.fact_id.clone());
+                }
+            }
+            continue;
+        };
         let c = carried.entry(gene.clone()).or_default();
         c.inheritance = inheritance;
         if c.condition.is_none() {
@@ -207,6 +283,12 @@ pub async fn load_person(conn: &mut PgConnection, profile_id: Uuid, name: &str) 
         c.assays.insert(r.assay.clone());
         if c.zygosity.is_none() {
             c.zygosity = r.zygosity.clone();
+        }
+        for v in r.fact.0["variants"].as_array().into_iter().flatten() {
+            let key = v["vrs_id"]
+                .as_str()
+                .map_or_else(|| format!("{}:{}", v["chrom"], v["pos"]), str::to_string);
+            c.variants.insert(key);
         }
         c.sensitive |= r.sensitive || is_sensitive_gene(Some(&gene));
         if !c.src.contains(&r.src_id) {
@@ -224,20 +306,33 @@ pub async fn load_person(conn: &mut PgConnection, profile_id: Uuid, name: &str) 
         .map(|d| {
             let genes = rows
                 .iter()
-                .filter(|c| c.dataset_id == d.id && c.scope == "gene")
+                .filter(|c| c.dataset_id == d.id && c.scope == "gene" && coverage_counts(&d.assay, c.panel.as_deref()))
                 .map(|c| (c.target.to_uppercase(), c.state.clone()))
                 .collect();
             (d.assay.clone(), genes)
         })
         .collect();
+    other.retain(|g, _| !carried.contains_key(g));
     Ok(Person {
         name: name.to_string(),
         carried,
+        other,
         coverage,
     })
 }
 
 fn side_out(side: &Side<'_>, lang: &str) -> Value {
+    let plain = |state: &str, assay: Option<&String>, coverage: Value| {
+        json!({
+            "state": state,
+            "label": text(&format!("side.{state}"), lang, &[]),
+            "confirmed": Value::Null,
+            "assays": assay.into_iter().collect::<Vec<_>>(),
+            "zygosity": Value::Null,
+            "coverage": coverage,
+            "src": [],
+        })
+    };
     match side {
         Side::Carrier(c) => json!({
             "state": "carrier",
@@ -257,24 +352,19 @@ fn side_out(side: &Side<'_>, lang: &str) -> Value {
             "coverage": if *partial { "partial" } else { "assessed" },
             "src": [],
         }),
-        Side::Absent(Absent::ProbedOnly { assay }) => json!({
-            "state": "probed_only",
-            "label": text("side.probed_only", lang, &[]),
+        Side::Other(o) => json!({
+            "state": "other_finding",
+            "label": text("side.other_finding", lang, &[]),
             "confirmed": Value::Null,
-            "assays": [assay],
+            "assays": o.assays,
             "zygosity": Value::Null,
-            "coverage": "partial",
-            "src": [],
+            "coverage": Value::Null,
+            "src": o.src,
         }),
-        Side::Absent(Absent::NotAssessed) => json!({
-            "state": "not_assessed",
-            "label": text("side.not_assessed", lang, &[]),
-            "confirmed": Value::Null,
-            "assays": [],
-            "zygosity": Value::Null,
-            "coverage": "not_assessed",
-            "src": [],
-        }),
+        Side::Absent(Absent::NotStated { assay }) => plain("not_stated", Some(assay), json!("not_stated")),
+        Side::Absent(Absent::ProbedOnly { assay }) => plain("probed_only", Some(assay), json!("partial")),
+        Side::Absent(Absent::NotAssessed) => plain("not_assessed", None, json!("not_assessed")),
+        Side::Absent(Absent::NoGenome) => plain("no_genome", None, Value::Null),
     }
 }
 
@@ -285,26 +375,36 @@ fn kind(inheritance: &str, a: &Side<'_>, b: &Side<'_>) -> (&'static str, &'stati
     if inheritance == "XL" {
         return (if carrier(a) && carrier(b) { "xl_both" } else { "xl_one" }, "couple.xl");
     }
+    // The 1 in 4 figure assumes one altered copy in each partner: one heterozygous variant per side.
+    let single_het =
+        |s: &Side<'_>| matches!(s, Side::Carrier(c) if c.zygosity.as_deref() == Some("het") && c.variants.len() <= 1);
     if carrier(a) && carrier(b) {
-        return if confirmed(a) && confirmed(b) {
-            ("ar_both", "couple.ar")
+        let k = if !(confirmed(a) && confirmed(b)) {
+            "ar_both_unconfirmed"
+        } else if single_het(a) && single_het(b) {
+            "ar_both"
         } else {
-            ("ar_both_unconfirmed", "couple.ar")
+            "ar_both_no_figure"
         };
+        return (k, "couple.ar");
     }
     let other = if carrier(a) { b } else { a };
-    match other {
-        Side::Absent(Absent::NotDetected { .. }) => ("ar_one_not_detected", "couple.residual"),
-        Side::Absent(Absent::ProbedOnly { .. }) => ("ar_one_probed", "couple.residual"),
-        _ => ("ar_one_not_assessed", "couple.residual"),
-    }
+    let k = match other {
+        Side::Other(_) => "ar_one_other_finding",
+        Side::Absent(Absent::NotDetected { .. }) => "ar_one_not_detected",
+        Side::Absent(Absent::NotStated { .. }) => "ar_one_not_stated",
+        Side::Absent(Absent::ProbedOnly { .. }) => "ar_one_probed",
+        Side::Absent(Absent::NoGenome) => "ar_one_no_genome",
+        _ => "ar_one_not_assessed",
+    };
+    (k, "couple.residual")
 }
 
 /// Order of rows: shared genes first, then X-linked, then one-side genes, withheld last.
 fn rank(kind: &str) -> u8 {
     match kind {
         "ar_both" => 0,
-        "ar_both_unconfirmed" => 1,
+        "ar_both_unconfirmed" | "ar_both_no_figure" => 1,
         "xl_both" | "xl_one" => 2,
         "withheld" => 9,
         _ => 3,
@@ -336,11 +436,19 @@ pub fn join(a: &Person, b: &Person, gate_a: &Gate, gate_b: &Gate, lang: &str) ->
             .into_iter()
             .filter_map(|s| match s {
                 Side::Carrier(c) => Some(*c),
-                Side::Absent(_) => None,
+                Side::Other(_) | Side::Absent(_) => None,
+            })
+            .collect();
+        let others: Vec<&Other> = [&sa, &sb]
+            .into_iter()
+            .filter_map(|s| match s {
+                Side::Other(o) => Some(*o),
+                Side::Carrier(_) | Side::Absent(_) => None,
             })
             .collect();
         let inheritance = carried.first().map(|c| c.inheritance.clone()).unwrap_or_default();
-        let sensitive = carried.iter().any(|c| c.sensitive) || is_sensitive_gene(Some(gene));
+        let sensitive =
+            carried.iter().any(|c| c.sensitive) || others.iter().any(|o| o.sensitive) || is_sensitive_gene(Some(gene));
         if sensitive && !open {
             out.withheld += 1;
             rows.push((
@@ -355,9 +463,16 @@ pub fn join(a: &Person, b: &Person, gate_a: &Gate, gate_b: &Gate, lang: &str) ->
             continue;
         }
         for (side, used) in [(&sa, &mut out.a_used), (&sb, &mut out.b_used)] {
-            if let Side::Carrier(c) = side {
-                used.0.extend(c.fact_ids.iter().cloned());
-                used.1.extend(c.src.iter().cloned());
+            match side {
+                Side::Carrier(c) => {
+                    used.0.extend(c.fact_ids.iter().cloned());
+                    used.1.extend(c.src.iter().cloned());
+                }
+                Side::Other(o) => {
+                    used.0.extend(o.fact_ids.iter().cloned());
+                    used.1.extend(o.src.iter().cloned());
+                }
+                Side::Absent(_) => {}
             }
         }
         let (k, cite_id) = kind(&inheritance, &sa, &sb);
@@ -401,6 +516,7 @@ mod tests {
         Carried {
             inheritance: inheritance.into(),
             confirmed,
+            zygosity: Some("het".into()),
             assays: [assay.to_string()].into(),
             src: vec![format!("src_{assay}")],
             fact_ids: vec!["f_0000000000000001".into()],
@@ -412,6 +528,7 @@ mod tests {
         Person {
             name: name.into(),
             carried: genes.iter().map(|(g, c)| ((*g).to_string(), c.clone())).collect(),
+            other: BTreeMap::new(),
             coverage: coverage
                 .iter()
                 .map(|(assay, genes)| {
@@ -441,6 +558,33 @@ mod tests {
         assert!(c.rows[0]["text"].as_str().unwrap_or_default().contains("1 in 4"));
         assert!(c.rows[0]["cite"].as_str().unwrap_or_default().starts_with("https://"));
         Ok(())
+    }
+
+    #[test]
+    fn a_homozygous_or_two_variant_side_gives_no_figure() -> Result<()> {
+        let alex = person("Alex", &[("GJB2", carried("AR", "wgs", true))], &[]);
+        let mut hom = carried("AR", "wes", true);
+        hom.zygosity = Some("hom".into());
+        let mut two = carried("AR", "wes", true);
+        two.variants = ["ga4gh:VA.one".to_string(), "ga4gh:VA.two".to_string()].into();
+        for side in [hom, two] {
+            let sam = person("Sam", &[("GJB2", side)], &[]);
+            let c = join(&alex, &sam, &adult(false), &adult(false), "en")?;
+            assert_eq!(c.rows[0]["kind"], "ar_both_no_figure");
+            assert_eq!(c.rows[0]["risk"], Value::Null);
+            assert!(!c.rows[0]["text"].as_str().unwrap_or_default().contains("chance"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn inheritance_comes_from_the_fact_else_the_panel() {
+        assert_eq!(inheritance_of("monogenic_pathogenic", "CFTR", ""), Some("AR".into()));
+        assert_eq!(inheritance_of("monogenic_pathogenic", "CFTR", "AR"), Some("AR".into()));
+        assert_eq!(inheritance_of("monogenic_pathogenic", "GJB2", "AD"), None);
+        assert_eq!(inheritance_of("carrier", "DMD", ""), Some("XL".into()));
+        assert_eq!(inheritance_of("monogenic_pathogenic", "LPA", ""), None);
+        assert_eq!(inheritance_of("pgx", "CFTR", "AR"), None);
     }
 
     #[test]
@@ -482,9 +626,54 @@ mod tests {
                 assay: "wgs".into()
             }
         );
-        assert_eq!(sam.absent("GJB2"), Absent::ProbedOnly { assay: "chip".into() });
+        // The chip probed GJB2, but the whole genome read it: the genome's statement is the stronger one.
+        assert_eq!(sam.absent("GJB2"), Absent::NotStated { assay: "wgs".into() });
+        let chip_only = person("Sam", &[], &[("chip", &[("GJB2", "partial")])]);
+        assert_eq!(chip_only.absent("GJB2"), Absent::ProbedOnly { assay: "chip".into() });
         assert_eq!(sam.absent("SMN1"), Absent::NotAssessed);
-        assert_eq!(sam.absent("PAH"), Absent::NotAssessed);
+        // A whole genome with no row for the gene found nothing there, but says nothing of its coverage.
+        assert_eq!(sam.absent("PAH"), Absent::NotStated { assay: "wgs".into() });
+        // A chip with no row for the gene did not read it.
+        let chip = person("Sam", &[], &[("chip", &[])]);
+        assert_eq!(chip.absent("PAH"), Absent::NotAssessed);
+        // No current dataset at all.
+        assert_eq!(person("Carmen", &[], &[]).absent("CFTR"), Absent::NoGenome);
+    }
+
+    #[test]
+    fn only_carrier_and_acmg_rows_of_a_sequencing_source_count() {
+        assert!(coverage_counts("wgs", Some("carrier")));
+        assert!(coverage_counts("wgs", Some("acmg_sf_v3.3")));
+        assert!(!coverage_counts("wgs", Some("cpic")));
+        assert!(!coverage_counts("wgs", None));
+        assert!(coverage_counts("chip", Some("cpic")));
+    }
+
+    #[test]
+    fn another_finding_in_the_gene_is_never_read_as_not_detected() -> Result<()> {
+        let sam = person("Sam", &[("BRCA2", carried("AR", "chip", false))], &[]);
+        let mut alex = person("Alex", &[], &[("wgs", &[("BRCA2", "assessed")])]);
+        alex.other.insert(
+            "BRCA2".into(),
+            Other {
+                assays: ["wgs".to_string()].into(),
+                src: vec!["src_wgs".into()],
+                fact_ids: vec!["f_0000000000000002".into()],
+                sensitive: true,
+            },
+        );
+        let c = join(&alex, &sam, &adult(true), &adult(true), "en")?;
+        assert_eq!(c.rows[0]["kind"], "ar_one_other_finding");
+        assert_eq!(c.rows[0]["a"]["state"], "other_finding");
+        assert_eq!(c.rows[0]["a"]["src"], json!(["src_wgs"]));
+        assert_eq!(c.rows[0]["risk"], Value::Null);
+        assert!(!c.rows[0].to_string().contains("not_detected"));
+        assert_eq!(c.a_used.0, vec!["f_0000000000000002".to_string()]);
+        // Its sensitive flag closes the row like a carrier fact's would.
+        let c = join(&alex, &sam, &adult(false), &adult(true), "en")?;
+        assert_eq!(c.rows[0]["kind"], "withheld");
+        assert!(c.a_used.0.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -493,6 +682,7 @@ mod tests {
             "Alex",
             &[
                 ("CFTR", carried("AR", "wgs", true)),
+                ("GALT", carried("AR", "wgs", true)),
                 ("HBB", carried("AR", "wgs", true)),
                 ("PAH", carried("AR", "wgs", true)),
                 ("DMD", carried("XL", "wgs", true)),
@@ -502,7 +692,10 @@ mod tests {
         let sam = person(
             "Sam",
             &[],
-            &[("chip", &[("HBB", "partial")]), ("wes", &[("PAH", "assessed")])],
+            &[
+                ("chip", &[("HBB", "partial")]),
+                ("vcf_only", &[("PAH", "assessed"), ("CFTR", "not_assessed")]),
+            ],
         );
         let c = join(&alex, &sam, &adult(false), &adult(false), "en")?;
         let kinds: Vec<(&str, &str)> = c
@@ -520,17 +713,25 @@ mod tests {
             vec![
                 ("DMD", "xl_one"),
                 ("CFTR", "ar_one_not_assessed"),
+                ("GALT", "ar_one_not_assessed"),
                 ("HBB", "ar_one_probed"),
                 ("PAH", "ar_one_not_detected"),
             ]
         );
-        let cftr = &c.rows[1];
-        assert!(
-            cftr["text"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("not detected is not the same as not a carrier")
+        let cftr = c.rows[1]["text"].as_str().unwrap_or_default();
+        assert!(cftr.contains("not assessed is not the same as not a carrier"), "{cftr}");
+        assert!(!cftr.contains("not detected"), "{cftr}");
+        let rosa = person("Rosa", &[], &[("wgs", &[])]);
+        let c = join(&alex, &rosa, &adult(false), &adult(false), "en")?;
+        assert_eq!(c.rows[2]["kind"], "ar_one_not_stated");
+        assert_eq!(
+            c.rows[2]["b"]["label"],
+            "Not detected; coverage of this gene not stated"
         );
+        let carmen = person("Carmen", &[], &[]);
+        let c = join(&alex, &carmen, &adult(false), &adult(false), "en")?;
+        assert_eq!(c.rows[1]["kind"], "ar_one_no_genome");
+        assert_eq!(c.rows[1]["b"]["label"], "No genome data");
         assert!(c.rows.iter().all(|r| r["risk"].is_null()));
         Ok(())
     }

@@ -2,12 +2,12 @@
 	// GET /api/genome/carrier-couple (routes/genome/couple.rs). The texts come from the server in the
 	// reader's language (data/genome/couple.json), so they stay under the wording lint.
 	export type CoupleSide = {
-		state: 'carrier' | 'not_detected' | 'probed_only' | 'not_assessed';
+		state: 'carrier' | 'other_finding' | 'not_detected' | 'not_stated' | 'probed_only' | 'not_assessed' | 'no_genome';
 		label: string;
 		confirmed: boolean | null;
 		assays: string[];
 		zygosity: string | null;
-		coverage: 'assessed' | 'partial' | 'not_assessed' | null;
+		coverage: 'assessed' | 'partial' | 'not_stated' | 'not_assessed' | null;
 		src: string[];
 	};
 	export type CoupleRow = {
@@ -37,7 +37,7 @@
 <script lang="ts">
 	// The couple carrier card of the Genome screen (genomics.md section 10): two adult partners' carrier
 	// facts joined by gene. A risk figure shows only when the server gives one (both sides confirmed).
-	import { get } from '#lib/api/core';
+	import { ApiError, get } from '#lib/api/core';
 	import type { ProfileSummary } from '#lib/api/types';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
@@ -68,8 +68,10 @@
 	});
 
 	const v = $derived(partner ? view.data : null);
+	// A deceased or minor profile is refused by design (the profile list does not say who is deceased).
+	const ineligible = $derived(view.error instanceof ApiError && view.error.code === 'couple_not_eligible');
 	const tone = (s: CoupleSide) =>
-		s.state === 'carrier' ? (s.confirmed ? 'p-watch' : 'p-stale') : s.state === 'not_detected' ? 'p-info' : 'p-stale';
+		s.state === 'carrier' ? (s.confirmed ? 'p-watch' : 'p-stale') : s.state === 'other_finding' ? 'p-watch' : s.state === 'not_detected' ? 'p-info' : 'p-stale';
 	// The citation's site, so a long guideline URL does not fill the row; the title holds the whole URL.
 	const host = (u: string) => {
 		try {
@@ -78,7 +80,7 @@
 			return u;
 		}
 	};
-	const kindTone = (k: string) => (k === 'ar_both' ? 'p-out' : k === 'ar_both_unconfirmed' || k.startsWith('xl') ? 'p-watch' : 'p-stale');
+	const kindTone = (k: string) => (k === 'ar_both' ? 'p-out' : k === 'ar_both_unconfirmed' || k === 'ar_both_no_figure' || k.startsWith('xl') ? 'p-watch' : 'p-stale');
 </script>
 
 {#if usable}
@@ -98,6 +100,8 @@
 
 		{#if !partner}
 			<div class="empty">{t('gen_couple_nobody')}</div>
+		{:else if ineligible}
+			<div class="empty">{t('gen_couple_not_eligible')}</div>
 		{:else if view.error}
 			<NotReady error={view.error} />
 		{:else if view.loading && !v}
@@ -122,7 +126,7 @@
 							<p class="txt">{r.text}</p>
 							{#if r.a && r.b}
 								<div class="sides">
-									{#each [[v.a.name, r.a], [v.b.name, r.b]] as const as [name, s] (name)}
+									{#each [[v.a.name, r.a], [v.b.name, r.b]] as const as [name, s]}
 										<div class="cside">
 											<span class="who">{name}</span>
 											<span class="pill {tone(s)}"><i aria-hidden="true"></i>{s.label}</span>

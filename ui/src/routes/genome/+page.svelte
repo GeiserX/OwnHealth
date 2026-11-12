@@ -311,7 +311,7 @@
 	<div class="note" style="margin-top:6px">{g.notice_code ? t('i2_gen_notice') : plain(g.notice)}</div>
 {/if}
 
-{#if g && ds && !empty && prof}<CoupleCarrierCard profile={prof} />{/if}
+{#if g && prof}{#key gen.data}<CoupleCarrierCard profile={prof} />{/key}{/if}
 <SourcePanel />
 <StepUpDialog />
 

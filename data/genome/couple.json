@@ -24,20 +24,36 @@
       "es": "Los dos miembros de la pareja portan una variante en {gene}, un gen recesivo. Con los dos portadores confirmados, cada embarazo tiene 1 probabilidad entre 4 de que el hijo herede las dos variantes."
     },
     "row.ar_both_unconfirmed": {
-      "en": "Both partners show a variant in {gene}, a recessive gene, but at least one result is unconfirmed. No risk figure is given until a clinical carrier test confirms both.",
-      "es": "Los dos miembros de la pareja muestran una variante en {gene}, un gen recesivo, pero al menos un resultado no está confirmado. No se da ninguna cifra de riesgo hasta que una prueba clínica de portador confirme los dos."
+      "en": "Both partners show a variant in {gene}, a recessive gene, but at least one result is unconfirmed. No risk figure is given until both results are confirmed, by a clinical carrier test or by sequencing.",
+      "es": "Los dos miembros de la pareja muestran una variante en {gene}, un gen recesivo, pero al menos un resultado no está confirmado. No se da ninguna cifra de riesgo hasta que los dos resultados estén confirmados, por una prueba clínica de portador o por secuenciación."
+    },
+    "row.ar_both_no_figure": {
+      "en": "Both partners carry a variant in {gene}, a recessive gene, but at least one result is not a single heterozygous variant. The 1 in 4 figure assumes one altered copy in each partner, so no figure is given here.",
+      "es": "Los dos miembros de la pareja portan una variante en {gene}, un gen recesivo, pero al menos un resultado no es una sola variante heterocigota. La cifra de 1 entre 4 supone una copia alterada en cada miembro, así que aquí no se da ninguna cifra."
     },
     "row.ar_one_not_detected": {
       "en": "{carrier} carries a variant in {gene}, a recessive gene. It was not detected in {other}, but sequencing does not find every variant: not detected is not the same as not a carrier.",
       "es": "{carrier} porta una variante en {gene}, un gen recesivo. No se detectó en {other}, pero la secuenciación no encuentra todas las variantes: no detectada no es lo mismo que no portador."
+    },
+    "row.ar_one_not_stated": {
+      "en": "{carrier} carries a variant in {gene}, a recessive gene. It was not detected in the sequencing data of {other}, but how well those data read {gene} is not stated: not detected is not the same as not a carrier.",
+      "es": "{carrier} porta una variante en {gene}, un gen recesivo. No se detectó en los datos de secuenciación de {other}, pero no consta qué parte de {gene} leyeron esos datos: no detectada no es lo mismo que no portador."
     },
     "row.ar_one_probed": {
       "en": "{carrier} carries a variant in {gene}, a recessive gene. The data of {other} come from a chip, which reads only some positions of {gene}: not detected is not the same as not a carrier.",
       "es": "{carrier} porta una variante en {gene}, un gen recesivo. Los datos de {other} vienen de un chip, que solo lee algunas posiciones de {gene}: no detectada no es lo mismo que no portador."
     },
     "row.ar_one_not_assessed": {
-      "en": "{carrier} carries a variant in {gene}, a recessive gene. The data of {other} did not assess {gene}: not detected is not the same as not a carrier.",
-      "es": "{carrier} porta una variante en {gene}, un gen recesivo. Los datos de {other} no evaluaron {gene}: no detectada no es lo mismo que no portador."
+      "en": "{carrier} carries a variant in {gene}, a recessive gene. The data of {other} did not assess {gene}, so they say nothing about carrying it: not assessed is not the same as not a carrier.",
+      "es": "{carrier} porta una variante en {gene}, un gen recesivo. Los datos de {other} no evaluaron {gene}, así que no dicen nada sobre si porta una variante en él: no evaluado no es lo mismo que no portador."
+    },
+    "row.ar_one_no_genome": {
+      "en": "{carrier} carries a variant in {gene}, a recessive gene. There are no genome data for {other}: no result is not the same as not a carrier.",
+      "es": "{carrier} porta una variante en {gene}, un gen recesivo. No hay datos genómicos de {other}: sin resultado no es lo mismo que no portador."
+    },
+    "row.ar_one_other_finding": {
+      "en": "{carrier} carries a variant in {gene}, a recessive gene. {other} also has another finding in {gene}, shown on the Genome screen of {other}. This view does not count it as a carrier result, so no risk figure is given.",
+      "es": "{carrier} porta una variante en {gene}, un gen recesivo. {other} también tiene otro hallazgo en {gene}, que aparece en la pantalla Genoma de {other}. Esta vista no lo cuenta como resultado de portador, así que no se da ninguna cifra de riesgo."
     },
     "row.xl_one": {
       "en": "{carrier} carries a variant in {gene}, a gene on the X chromosome. The 1 in 4 figure of shared recessive genes does not apply: the chance for a child depends on which partner carries it and on the child's sex.",
@@ -48,8 +64,8 @@
       "es": "Los dos miembros de la pareja portan una variante en {gene}, un gen del cromosoma X. La cifra de 1 entre 4 de los genes recesivos compartidos no se aplica: la probabilidad para un hijo depende de quién la porta y del sexo del hijo."
     },
     "row.withheld": {
-      "en": "A withheld result. A sensitive gene shows by name only when both profiles allow sensitive results.",
-      "es": "Un resultado retenido. Un gen sensible solo se muestra por su nombre cuando los dos perfiles permiten los resultados sensibles."
+      "en": "A sensitive gene shows by name only when you may see sensitive results on both profiles.",
+      "es": "Un gen sensible solo se muestra por su nombre cuando puedes ver los resultados sensibles de los dos perfiles."
     },
     "side.carrier": {
       "en": "Carries a variant",
@@ -67,6 +83,10 @@
       "en": "Not detected, gene partly assessed",
       "es": "No detectada, gen evaluado en parte"
     },
+    "side.not_stated": {
+      "en": "Not detected; coverage of this gene not stated",
+      "es": "No detectada; la cobertura de este gen no consta"
+    },
     "side.probed_only": {
       "en": "Not assessed beyond the chip's probed sites",
       "es": "No evaluado más allá de las posiciones que lee el chip"
@@ -74,6 +94,14 @@
     "side.not_assessed": {
       "en": "Not assessed",
       "es": "No evaluado"
+    },
+    "side.no_genome": {
+      "en": "No genome data",
+      "es": "Sin datos genómicos"
+    },
+    "side.other_finding": {
+      "en": "Another finding in this gene, on the Genome screen",
+      "es": "Otro hallazgo en este gen, en la pantalla Genoma"
     },
     "counsel": {
       "en": "A clinical carrier test and genetic counselling come before any reproductive decision.",
