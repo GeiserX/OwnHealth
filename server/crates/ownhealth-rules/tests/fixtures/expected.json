@@ -7899,7 +7899,7 @@
    ],
    "not_assessed": [
     "CYP2D6: no genome finding on record",
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2C19 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -7992,7 +7992,7 @@
    ],
    "not_assessed": [
     "CYP2D6: ningún hallazgo genómico registrado",
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2C19",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -8202,7 +8202,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of SLCO1B1 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -8315,7 +8315,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de SLCO1B1",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -9166,7 +9166,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2C19 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -9270,7 +9270,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2C19",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -9425,7 +9425,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2C19 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -9581,7 +9581,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2C19",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -10020,7 +10020,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2C19 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -10124,7 +10124,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2C19",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -11150,7 +11150,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2C19 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -11266,7 +11266,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2C19",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -12228,7 +12228,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2C19 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -12344,7 +12344,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2C19",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -12648,7 +12648,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2C19 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -12764,7 +12764,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2C19",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -13192,7 +13192,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of SLCO1B1 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -13305,7 +13305,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de SLCO1B1",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -13512,7 +13512,7 @@
    ],
    "not_assessed": [
     "ABCG2: no genome finding on record",
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of SLCO1B1 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -13627,7 +13627,7 @@
    ],
    "not_assessed": [
     "ABCG2: ningún hallazgo genómico registrado",
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de SLCO1B1",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -13730,7 +13730,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2C19 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -13834,7 +13834,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2C19",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -13948,7 +13948,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of SLCO1B1 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -14061,7 +14061,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de SLCO1B1",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -14936,7 +14936,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2C19 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -15043,7 +15043,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2C19",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -15524,7 +15524,7 @@
    ],
    "not_assessed": [
     "CYP2C19: no genome finding on record",
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2D6 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -15585,7 +15585,7 @@
    ],
    "not_assessed": [
     "CYP2C19: ningún hallazgo genómico registrado",
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2D6",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -15659,7 +15659,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2D6 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -15734,7 +15734,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2D6",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -16747,7 +16747,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2D6 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -16831,7 +16831,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2D6",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -18326,7 +18326,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2D6 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -18385,7 +18385,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2D6",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -18556,7 +18556,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2D6 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -18615,7 +18615,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2D6",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -18857,7 +18857,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2D6 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -18929,7 +18929,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2D6",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -19782,7 +19782,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2D6 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -19841,7 +19841,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2D6",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -20205,7 +20205,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2D6 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [
@@ -20289,7 +20289,7 @@
     }
    ],
    "not_assessed": [
-    "el archivo genómico no trae texto de DPWG",
+    "el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de CYP2D6",
     "interacciones entre fármacos (sin fuente de licencia abierta configurada)"
    ],
    "limitations": [
@@ -20651,7 +20651,7 @@
     }
    ],
    "not_assessed": [
-    "DPWG text not in this genome file",
+    "DPWG text for the genotype phenotype of CYP2C19 not in this genome file",
     "drug-drug interactions (no open-licence source configured)"
    ],
    "limitations": [

@@ -49,6 +49,37 @@ fn own_text(key: &str, lang: &str) -> Result<String> {
         .ok_or_else(|| Error::Invalid(format!("check_drug.yaml: no {lang} text for {key}")))
 }
 
+/// A DPWG entry of a fact's drug_guidance, kept only when it quotes text for the finding's own
+/// (genotype) phenotype. The file is untrusted: its url is kept only as an https URL and its level
+/// only as a short code, so neither carries free text past the quote's untrusted wrapper.
+fn dpwg_row(gene: &str, phenotype: Option<&str>, d: &Value) -> Option<Value> {
+    if d["source"] != "DPWG" {
+        return None;
+    }
+    let text = d["recommendation"]["text"]
+        .as_str()
+        .or_else(|| d["recommendation"].as_str())?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    if let Some(p) = d["phenotype"].as_str()
+        && norm_value(gene, Some(p)) != norm_value(gene, phenotype)
+    {
+        return None;
+    }
+    let url = d["url"]
+        .as_str()
+        .filter(|u| u.starts_with("https://") && u.len() > 8 && u.len() <= 500 && !u.contains(char::is_whitespace));
+    let level = d["level"]
+        .as_str()
+        .filter(|l| (1..=4).contains(&l.len()) && l.chars().all(|c| c.is_ascii_alphanumeric()));
+    Some(json!({
+        "level": level,
+        "url": url,
+        "quote": {"trust": "untrusted_text", "origin": "genome_facts", "text": text},
+    }))
+}
+
 fn arr<'a>(v: &'a Value, key: &str) -> impl Iterator<Item = &'a Map<String, Value>> + 'a {
     v.get(key)
         .and_then(Value::as_array)
@@ -334,8 +365,8 @@ pub async fn check_drug(
                     && finding(&findings, &g).is_none()
                 {
                     for d in raw["guidance"].as_array().into_iter().flatten() {
-                        if d["source"] == "DPWG" {
-                            dpwg.push((g.clone(), d.clone()));
+                        if let Some(d) = dpwg_row(&g, f.phenotype.as_deref(), d) {
+                            dpwg.push((g.clone(), d));
                         }
                     }
                     findings.push((g, f));
@@ -554,26 +585,23 @@ pub async fn check_drug(
         for (gene, d) in &dpwg {
             let Some(f) = finding(&findings, gene) else { continue };
             let phen = format!("{gene} {}", f.phenotype.as_deref().unwrap_or("None"));
-            let quote = match &d["recommendation"] {
-                Value::String(s) => json!({"trust": "untrusted_text", "origin": "genome_facts", "text": s}),
-                other => other.clone(),
-            };
             guidance.push(json!({
                 "source": "DPWG",
-                "level": d.get("level"),
+                "level": d["level"],
                 "strength": null,
                 "applies_to": t("drug.applies.genotype", &[("phenotype", P::from(phen))])?,
                 "population": null,
-                "quote": quote,
-                "url": d.get("url"),
+                "quote": d["quote"],
+                "url": d["url"],
                 "recommendation_id": null,
                 "origin": "genome_facts",
                 "license": null,
                 "based_on": f.src.into_iter().collect::<Vec<_>>(),
             }));
         }
-        if dpwg.is_empty() {
-            not_assessed.push(own_text("drug.na.dpwg", lang)?);
+        if dpwg.is_empty() && !pgx.is_empty() {
+            let checked: Vec<&str> = pgx.iter().filter_map(|p| p["gene"].as_str()).collect();
+            not_assessed.push(own_text("drug.na.dpwg", lang)?.replace("{genes}", &checked.join(", ")));
         }
         if cpic_empty {
             if key == "warfarin" {

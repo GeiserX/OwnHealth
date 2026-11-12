@@ -9,8 +9,8 @@ rows:
     cite: https://www.knmp.nl/dossiers/farmacogenetica
 templates:
   drug.na.dpwg:
-    en: DPWG text not in this genome file
-    es: el archivo genómico no trae texto de DPWG
+    en: DPWG text for the genotype phenotype of {genes} not in this genome file
+    es: el archivo genómico no trae texto de DPWG para el fenotipo por genotipo de {genes}
   drug.lim.dpwg:
     en: DPWG text is quoted from the genome file as received; it is for the genotype phenotype only, not for a phenotype changed by a medicine.
     es: El texto de DPWG se cita del archivo genómico tal como llegó; corresponde solo al fenotipo por genotipo, no a un fenotipo cambiado por un medicamento.
