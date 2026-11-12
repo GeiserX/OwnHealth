@@ -168,7 +168,8 @@ fn until_of(body: &Map<String, Value>, today: NaiveDate) -> Result<NaiveDate, Ap
         .and_then(Value::as_str)
         .and_then(|s| NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok())
         .ok_or_else(|| bad_input("until_required", "A snooze needs `until`, a date (YYYY-MM-DD)."))?;
-    if d < today || (d - today).num_days() > SNOOZE_MAX_DAYS {
+    // the screen offers the person's local today, which west of UTC is still yesterday here
+    if d < today - chrono::Duration::days(1) || (d - today).num_days() > SNOOZE_MAX_DAYS {
         return Err(bad_input("bad_until", "until: a date from today on, within ten years."));
     }
     Ok(d)
@@ -327,12 +328,14 @@ async fn decide(
 async fn undo(State(rt): State<Runtime>, caller: Caller, Path((p, key)): Path<(String, String)>) -> Answer {
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), Some("write")).await?;
-    if lab_key(&key)? && !perm.scopes.contains("read:labs") {
-        return Err(ApiError::new(StatusCode::NOT_FOUND, "unknown", "No decision about this item."));
+    // a lab gap the caller's scopes withhold has no decision they can see
+    let hidden = lab_key(&key)? && !perm.scopes.contains("read:labs");
+    let id = if hidden {
+        None
+    } else {
+        current_decision(&mut tx, perm.profile.id, &key).await?
     }
-    let id = current_decision(&mut tx, perm.profile.id, &key)
-        .await?
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown", "No decision about this item."))?;
+    .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown", "No decision about this item."))?;
     sqlx::query(
         "update prevention_decision set status = 'retracted', status_reason = 'undone', \
          superseded_at = clock_timestamp() where id = $1",

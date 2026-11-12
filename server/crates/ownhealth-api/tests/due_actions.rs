@@ -157,14 +157,19 @@ async fn a_snooze_hides_the_item_until_its_date_and_it_is_back_the_day_after() -
     )
     .await?;
     assert_eq!(s, StatusCode::NOT_FOUND);
-    // a snooze into the past, or with no date, is refused
+    // a snooze into the past (before the local today of a browser west of UTC), or with no date, is
+    // refused
     for body in [
-        json!({"kind": "snooze", "until": iso(today - Duration::days(1))}),
+        json!({"kind": "snooze", "until": iso(today - Duration::days(2))}),
         json!({"kind": "snooze"}),
     ] {
         let (s, v) = decide(&a, "alex", "carmen", KEY, body).await?;
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     }
+    // the local today of a browser west of UTC is yesterday here, and the screen offers it
+    let body = json!({"kind": "snooze", "until": iso(today - Duration::days(1))});
+    let (s, v) = decide(&a, "alex", "carmen", KEY, body).await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
     Ok(())
 }
 
@@ -646,8 +651,19 @@ async fn a_lab_gap_needs_read_labs_to_act_on() -> R {
         set_grant(&mut c, a.family.user("alex"), pid, "caregiver", Some(&cats), None, None).await?;
     }
     let (s, v) = decide(&a, "alex", "carmen", gap, body).await?;
-    assert_eq!((s, v["detail"]["code"].as_str()), (StatusCode::NOT_FOUND, Some("unknown")), "{v}");
-    let (s, v) = send(&a, "alex", "DELETE", &format!("/profiles/carmen/due/{gap}/decision"), None).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::NOT_FOUND, Some("unknown")),
+        "{v}"
+    );
+    let (s, v) = send(
+        &a,
+        "alex",
+        "DELETE",
+        &format!("/profiles/carmen/due/{gap}/decision"),
+        None,
+    )
+    .await?;
     assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
     // a row the grant still covers takes a decision as before
     let (s, v) = decide(
