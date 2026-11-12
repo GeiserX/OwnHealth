@@ -36,7 +36,8 @@ create table genome_event (
   sensitive boolean not null,
   adult_onset boolean not null,
   carrier boolean not null,
-  old jsonb not null,                  -- {class, significance, stars, fact_id} before; {} when nothing was reported
+  old jsonb not null,                  -- {class, significance, stars, fact_id} before; {} when the genome file reported
+                                       -- nothing (first run), {in_previous_release: false} when the previous release had no record
   new jsonb not null,                  -- {class, significance, stars} in release_to
   release_from text,                   -- previous snapshot's release, else the facts file's db_versions.clinvar
   release_to text not null,

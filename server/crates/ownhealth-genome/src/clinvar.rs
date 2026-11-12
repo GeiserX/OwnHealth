@@ -185,6 +185,9 @@ pub struct EventText<'a> {
     pub new_stars: i16,
     pub withheld: bool,
     pub unconfirmed: bool,
+    /// `old` is None because the previous compared release had no such record, not because the
+    /// genome file did not report it (the first run, against the facts).
+    pub not_in_previous_release: bool,
 }
 
 fn stars_text(n: i16, lang: &str) -> String {
@@ -201,6 +204,7 @@ pub fn summary(t: &EventText<'_>, lang: &str) -> String {
         tpl("withheld", lang)
     } else {
         let old = match t.old {
+            None if t.not_in_previous_release => tpl("class_not_in_clinvar", lang),
             None => tpl("class_not_reported", lang),
             Some(o) => {
                 let c = tpl(&format!("class_{}", o.class), lang);
@@ -873,7 +877,8 @@ async fn diff_dataset(
         };
         let alerted = alerts(kind, old.as_ref(), c.stars, is_sf_gene(gene), shown_plp);
         let old_json = match &old {
-            None => json!({}),
+            None if first_run => json!({}),
+            None => json!({"in_previous_release": false}),
             Some(o) => {
                 let mut m = json!({"class": o.class, "stars": o.stars});
                 if !first_run && let Some((sig, _)) = prev.get(&c.variation_id) {

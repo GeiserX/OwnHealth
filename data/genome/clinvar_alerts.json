@@ -37,6 +37,7 @@
   "class_conflicting": {"en": "conflicting classifications", "es": "clasificaciones contradictorias"},
   "class_blb": {"en": "benign or likely benign", "es": "benigna o probablemente benigna"},
   "class_other": {"en": "another kind of classification", "es": "otro tipo de clasificación"},
-  "class_not_reported": {"en": "not reported in your genome file", "es": "sin informar en tu archivo genómico"}
+  "class_not_reported": {"en": "not reported in your genome file", "es": "sin informar en tu archivo genómico"},
+  "class_not_in_clinvar": {"en": "not in the previous ClinVar release", "es": "sin registro en la versión anterior de ClinVar"}
  }
 }

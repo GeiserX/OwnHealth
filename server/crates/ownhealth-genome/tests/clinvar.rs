@@ -471,6 +471,7 @@ fn the_named_sentence_reads_well_for_every_class() {
                 new_stars: 1,
                 withheld: false,
                 unconfirmed: false,
+                not_in_previous_release: false,
             },
             lang,
         )
@@ -1308,6 +1309,7 @@ fn a_withheld_alert_names_nothing_in_either_language() {
         new_stars: 1,
         withheld: true,
         unconfirmed: true,
+        not_in_previous_release: false,
     };
     for lang in ["en", "es"] {
         let s = summary(&t, lang);
