@@ -59,7 +59,7 @@
 		return t(k) === k ? code : t(k);
 	};
 	// CPIC quotes are plain text; DPWG quotes come from the genome file wrapped as untrusted text.
-	const quoteText = (q: DrugCheckView['guidance'][number]['quote']) => (typeof q === 'string' ? q : q.text);
+	const quoteText = (q: DrugCheckView['guidance'][number]['quote']) => (q == null ? '' : typeof q === 'string' ? q : q.text);
 	const labValue = (v: string) => (/^-?\d+(\.\d+)?$/.test(v) ? fmtNum(Number(v)) : v);
 	const allergyItems = $derived((allergies.data ?? []).filter((r) => r.status === 'current' || r.status === 'provisional'));
 </script>
@@ -94,7 +94,7 @@
 		<div class="grid" style="align-content:start">
 			{#each c.pgx as x (x.gene)}
 				{@const recs = c.guidance.filter((gd) => gd.source !== 'DPWG' && gd.applies_to.startsWith(x.gene))}
-				{@const dpwg = c.guidance.filter((gd) => gd.source === 'DPWG' && gd.applies_to.startsWith(x.gene))}
+				{@const dpwg = c.guidance.filter((gd) => gd.source === 'DPWG' && gd.applies_to.startsWith(x.gene) && quoteText(gd.quote))}
 				{@const missing = x.evidence == null && x.diplotype == null}
 				<!-- Amber only when the phenotype changes what CPIC says: standard dosing is not a warning. -->
 				{@const act = recs.length > 0 && isActionable(x.phenotype)}
@@ -174,7 +174,7 @@
 
 		<div class="grid" style="align-content:start">
 			<section class="card">
-				<h3>{t('meds')}</h3>
+				<h3>{t('med_current')}</h3>
 				{#if c.current_medications_relevant.length}
 					<div class="tscroll">
 						<table class="t">
@@ -185,7 +185,7 @@
 										<td><StatusChip status={relTone(m.relation)} label={m.relation_text} /></td>
 										<td class="muted" style="font-size:12px">
 											{#if m.since}<span style="white-space:nowrap">{t('i2_since')} <span class="num">{m.since}</span></span>{/if}
-											<span style="white-space:nowrap;margin-left:{m.since ? '6px' : '0'}"><SourceChip label="Rx" name={m.name} src={m.src} onopen={openSource} /></span>
+											<span style="white-space:nowrap;margin-left:{m.since ? '6px' : '0'}"><SourceChip label={m.kind === 'supplement' ? '' : 'Rx'} name={m.name} src={m.src} onopen={openSource} /></span>
 										</td>
 									</tr>
 								{/each}

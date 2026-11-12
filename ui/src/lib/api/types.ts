@@ -593,7 +593,7 @@ export interface DrugCheckView {
 		src: string | null;
 	}[];
 	// CPIC rows quote the bundled snapshot; DPWG rows quote the genome file, as untrusted text.
-	guidance: { source: string; level: string | null; strength: string | null; applies_to: string; population: string | null; quote: string | UntrustedText; url: string | null; origin: 'cpic_snapshot' | 'genome_facts' }[];
+	guidance: { source: string; level: string | null; strength: string | null; applies_to: string; population: string | null; quote: string | UntrustedText | null; url: string | null; origin: 'cpic_snapshot' | 'genome_facts' }[];
 	not_assessed: string[];
 	limitations: string[];
 	withheld: { by_scope: string[] };
