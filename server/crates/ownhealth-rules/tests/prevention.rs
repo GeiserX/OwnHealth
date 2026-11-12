@@ -671,6 +671,58 @@ async fn ppsv23_and_live_zoster_do_not_count() -> R {
     Ok(())
 }
 
+/// A recognised CVX code decides the group on its own, so a name that reads like another vaccine
+/// does not make one dose count twice. A record with no code that names the polysaccharide or the
+/// live product does not count either.
+#[tokio::test]
+async fn a_known_cvx_code_wins_over_the_name() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let carmen = s.pid("carmen");
+    record(
+        &mut tx,
+        "immunization",
+        json!({"profile_id": carmen, "vaccine": "Pneumococcal vaccine", "code_system": "CVX", "code": "187", "occurred": "2026-01-05"}),
+    )
+    .await?;
+    for (name, date) in [
+        ("Pneumococcal polysaccharide vaccine (PPSV23)", "2026-02-05"),
+        ("Vacuna neumocócica polisacárida 23-valente", "2026-02-06"),
+        ("Zoster vaccine live", "2025-02-05"),
+        ("Vacuna de herpes zóster atenuada", "2025-03-05"),
+    ] {
+        record(
+            &mut tx,
+            "immunization",
+            json!({"profile_id": carmen, "vaccine": name, "occurred": date}),
+        )
+        .await?;
+    }
+    let doc = build_document(&mut tx, carmen, as_of()).await?;
+    assert_eq!(item(&doc, "es.vac.zoster")["last"]["date"], "2026-01-05", "{doc}");
+    let pneumo = item(&doc, "es.vac.pneumococcal");
+    assert_eq!(pneumo["status"], "due", "{pneumo}");
+    assert!(pneumo.get("last").is_none(), "{pneumo}");
+    let unmatched: Vec<&str> = doc["unmatched"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|u| u["name"].as_str())
+        .collect();
+    assert_eq!(
+        unmatched,
+        [
+            "Zoster vaccine live",
+            "Vacuna de herpes zóster atenuada",
+            "Pneumococcal polysaccharide vaccine (PPSV23)",
+            "Vacuna neumocócica polisacárida 23-valente"
+        ],
+        "{doc}"
+    );
+    tx.rollback().await?;
+    Ok(())
+}
+
 /// A country row that names a pack rule gives that rule's item the country's source and cite; the
 /// pack stays the one that evaluates it.
 #[tokio::test]

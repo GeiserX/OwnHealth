@@ -99,6 +99,8 @@ pub struct Group {
     pub cvx: Vec<String>,
     /// CVX codes that never count for the group, even when the record's name matches.
     pub cvx_not: Vec<String>,
+    /// Names that keep a record with no listed CVX code out of the group.
+    pub aliases_not: Vec<Vec<String>>,
     pub loinc: Vec<String>,
     pub alias_groups: Vec<String>,
     pub name: Value,
@@ -168,10 +170,12 @@ fn parse_vaccines(file: &str, tsv: &str) -> std::result::Result<Vec<Group>, Cite
         if label_en.trim().is_empty() || label_es.trim().is_empty() {
             return Err(err(file, format!("line {}: a label is empty", i + 1)));
         }
+        let names: Vec<String> = split(en).into_iter().chain(split(es)).collect();
         out.push(Group {
             id: id.trim().to_string(),
             vaccine: true,
-            aliases: split(en).iter().chain(&split(es)).map(|a| words(a)).collect(),
+            aliases: names.iter().filter(|a| !a.starts_with('!')).map(|a| words(a)).collect(),
+            aliases_not: names.iter().filter_map(|a| a.strip_prefix('!')).map(words).collect(),
             cvx: split(cvx).into_iter().filter(|c| !c.starts_with('!')).collect(),
             cvx_not: split(cvx)
                 .iter()
@@ -515,11 +519,17 @@ async fn facts(
         let cvx = system
             .as_deref()
             .is_some_and(|s| s.eq_ignore_ascii_case("cvx") || s.ends_with("/cvx"));
+        let coded = |list: &Vec<String>| cvx && code.as_ref().is_some_and(|c| list.contains(c));
+        // A code some group lists decides on its own; the name counts only for a record without one.
+        let known = vaccines.iter().any(|g| coded(&g.cvx) || coded(&g.cvx_not));
         let hits: Vec<&&Group> = vaccines
             .iter()
             .filter(|g| {
-                let coded = |list: &Vec<String>| cvx && code.as_ref().is_some_and(|c| list.contains(c));
-                !coded(&g.cvx_not) && (coded(&g.cvx) || g.aliases.iter().any(|a| holds(&w, a)))
+                if known {
+                    coded(&g.cvx)
+                } else {
+                    g.aliases.iter().any(|a| holds(&w, a)) && !g.aliases_not.iter().any(|a| holds(&w, a))
+                }
             })
             .collect();
         if hits.is_empty() {
