@@ -630,17 +630,21 @@ function drug(){
     <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em">CPIC guideline, neurovascular indications</div>
     <blockquote>Recommendation shown verbatim from the CPIC 2022 guideline, neurovascular section. <span class="dim">Classification: moderate</span></blockquote>
     <div class="dim" style="font-size:11px">Lee CR et al. CPIC guideline for CYP2C19 and clopidogrel therapy: 2022 update. Clin Pharmacol Ther 2022 · https://pubmed.ncbi.nlm.nih.gov/35034351/ · https://cpicpgx.org/guidelines/guideline-for-clopidogrel-and-cyp2c19/</div>
-    <div class="note" style="margin-top:8px">The indication decides which recommendation applies. The app does not know the indication, so it shows both.</div></div>
+    <div class="note" style="margin-top:8px">The indication decides which recommendation applies. The app does not know the indication, so it shows both.</div>
+    <div style="margin-top:10px;padding-top:8px;border-top:1px solid #20252f"><div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em">DPWG 4 · CYP2C19 Intermediate Metabolizer (genotype)</div>
+    <blockquote>"Synthetic paraphrase: the genome file's own DPWG text for this phenotype sits here." <span class="chip" style="font-size:10px;color:var(--watch);border-color:rgba(224,168,74,.45)">untrusted</span></blockquote>
+    <div class="dim" style="font-size:11px">Quoted from the genome file as received, for the genotype phenotype. <span class="phase">v0.3</span></div></div></div>
    <div class="card"><h3>Phenoconversion <span class="r">rule pgx_phenoconversion.yaml v0.1.0</span></h3>
     <div style="display:flex;gap:10px;align-items:center"><span class="pill p-stale"><i></i>Not computed</span><span>You take <b>omeprazole</b>, a CYP2C19 inhibitor. CPIC has no conversion rule for CYP2C19, so the effect on your phenotype is not computed. The genotype phenotype above stays as called.</span></div></div>
    <div class="card"><h3>Relevant labs <span class="r">latest</span></h3>
     ${[["Platelets","231 ×10⁹/L","ok","LabNorte · 2026-09-14 · p1"],["Haemoglobin","15.1 g/dL","ok","LabNorte · 2026-09-14 · p1"],["eGFR (CKD-EPI 2021)","94 mL/min/1.73m²","ok","calc · 2026-09-14"],["ALT","24 U/L","ok","LabNorte · 2026-09-14 · p1"]].map(l=>`<div style="display:flex;gap:10px;align-items:center;padding:5px 0;border-top:1px solid #20252f"><span style="flex:1">${l[0]}</span>${src(l[3])}<span class="num" style="font-weight:600;width:130px;text-align:right">${l[1]}</span>${pill(l[2])}</div>`).join("")}</div>
   </div>
   <div class="grid" style="align-content:start">
-   <div class="card"><h3>Current medications</h3>
+   <div class="card"><h3>Current medicines and supplements</h3>
     <table class="t"><tbody>
      <tr><td style="white-space:nowrap"><b>Omeprazole</b> 20 mg</td><td>${pill("watch","CYP2C19 inhibitor")}</td><td class="muted" style="font-size:12px">since 2026-04-01 · named in the phenoconversion card · ${src("Rx · src_m05")}</td></tr>
      <tr><td style="white-space:nowrap"><b>Atorvastatin</b> 20 mg</td><td>${pill("stale","Not assessed")}</td><td class="muted" style="font-size:12px">since 2026-03-10 · ${src("Rx · src_m02")}</td></tr>
+     <tr><td style="white-space:nowrap"><b>Vitamin D3</b> 1000 IU <span class="chip">Supplement</span></td><td>${pill("stale","Not assessed")}</td><td class="muted" style="font-size:12px">since 2025-10-01 · ${src("entered by hand")}</td></tr>
     </tbody></table>
     <div class="note" style="margin-top:6px">not_assessed: drug-drug interactions (no open-licence source configured).</div></div>
    <div class="card"><h3>Allergies and intolerances</h3><div class="muted">No drug allergy on record · statin myalgia 2025 (intolerance, not allergy)</div></div>

@@ -646,7 +646,7 @@ export interface DrugCheckView {
 		src: string;
 	}[];
 	phenoconversion: { gene: string; by: string; inhibitor_strength: string; computed: boolean; functional_phenotype: string | null; rule: string | null; src: string; text: string }[];
-	current_medications_relevant: { name: string; since: IsoDate | null; relation: string; relation_text: string; src: string }[];
+	current_medications_relevant: { name: string; kind: 'medication' | 'supplement'; since: IsoDate | null; relation: string; relation_text: string; src: string }[];
 	relevant_labs: {
 		name: string;
 		alias_group: string;
@@ -658,7 +658,8 @@ export interface DrugCheckView {
 		reason: string;
 		src: string | null;
 	}[];
-	guidance: { source: string; level: string | null; strength: string; applies_to: string; population: string | null; quote: string; url: string }[];
+	// CPIC rows quote the bundled snapshot; DPWG rows quote the genome file, as untrusted text.
+	guidance: { source: string; level: string | null; strength: string | null; applies_to: string; population: string | null; quote: string | UntrustedText | null; url: string | null; origin: 'cpic_snapshot' | 'genome_facts' }[];
 	not_assessed: string[];
 	limitations: string[];
 	withheld: { by_scope: string[] };
