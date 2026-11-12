@@ -81,8 +81,8 @@ pub trait Services: Send + Sync {
         as_of: NaiveDate,
     ) -> BoxFuture<'a, Result<Value>>;
     fn resolve_drug<'a>(&'a self, conn: &'a mut PgConnection, name: &'a str) -> BoxFuture<'a, Result<Option<Value>>>;
-    /// The `Findings` of lane D as JSON: findings, not_assessed, withheld_sensitive, withheld_minor,
-    /// db_versions, assay.
+    /// The `Findings` of lane D as JSON: findings (each with `clinvar_now` once a ClinVar release was
+    /// compared), not_assessed, withheld_sensitive, withheld_minor, db_versions, assay.
     fn list_findings<'a>(
         &'a self,
         conn: &'a mut PgConnection,
@@ -196,7 +196,9 @@ impl Services for Lanes {
                 min_evidence: Some(q.min_evidence.as_str()),
                 as_of: Some(q.as_of),
             };
-            ownhealth_genome::list_findings(conn, profile_id, gate, &lane_q).await
+            let mut found = ownhealth_genome::list_findings(&mut *conn, profile_id, gate, &lane_q).await?;
+            ownhealth_genome::clinvar::attach_now(conn, profile_id, q.as_of, gate, &mut found).await?;
+            Ok(found)
         })
     }
 

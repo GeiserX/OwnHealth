@@ -4,6 +4,7 @@
 //! the uploaded .vcf.gz/.tbi with noodles for `lookup_variant`. Job kind `import.genome_facts`, demo
 //! hook `genome` (order 400). The constants are final.
 
+pub mod clinvar;
 pub mod couple;
 pub mod findings;
 pub mod ingest;
