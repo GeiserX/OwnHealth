@@ -68,3 +68,22 @@ test('a course that starts after today has no bar, and each bar keeps its own se
 	assert.equal(rows[0].b.x2, x('2026-11-10'));
 	assert.deepEqual(laneBars([segs[1]], x, '2026-11-10'), []);
 });
+
+// The lane's axis starts at the first course drawn: a profile whose courses all start after today has no lane.
+import { buildLane } from '../src/lib/logic/lane.ts';
+
+test('a lane with only courses after today is no lane, and a later course never moves the axis', () => {
+	const future = { type: 'medication' as const, label: 'Ibuprofen', segments: [{ date: '2099-03-01', end: null, label: 'Ibuprofen 200 mg' }] };
+	assert.equal(buildLane([future], '2026-11-10'), null);
+	const now = { type: 'diagnosis' as const, label: 'Asthma', segments: [{ date: '2024-05-02', end: null, label: 'Asthma' }] };
+	const lane = buildLane([future, now], '2026-11-10');
+	assert.ok(lane);
+	assert.deepEqual(
+		lane.rows.map((r) => r.span.label),
+		['Asthma']
+	);
+	assert.deepEqual(
+		lane.ticks.map((k) => k.year),
+		[2024, 2025, 2026]
+	);
+});

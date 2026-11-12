@@ -15,7 +15,7 @@
 	import { currentProfile } from '#lib/state/app.svelte';
 	import { sourceLabel } from '#lib/logic/format';
 	import type { Bar } from '#lib/logic/axis';
-	import { laneBars } from '#lib/logic/lane';
+	import { buildLane } from '#lib/logic/lane';
 	import { todayIso } from '#lib/logic/people';
 
 	type Ty = TimelineEvent['type'];
@@ -80,21 +80,8 @@
 	// ---- the bars lane: x in percent of the time from Jan 1 of the first year to today ----
 	const today = todayIso();
 	const spans = $derived((tl.data?.spans ?? []).filter((s) => !types.size || types.has(s.type)));
-	const lane = $derived.by(() => {
-		const dates = spans.flatMap((s) => s.segments.map((g) => g.date));
-		if (!dates.length) return null;
-		const y0 = Number(dates.reduce((a, b) => (a < b ? a : b)).slice(0, 4));
-		const t0 = Date.parse(`${y0}-01-01`);
-		const t1 = Date.parse(today);
-		const x = (d: string) => Math.min(100, Math.max(0, ((Date.parse(d) - t0) / Math.max(1, t1 - t0)) * 100));
-		const y1 = Number(today.slice(0, 4));
-		const step = y1 - y0 > 12 ? 5 : y1 - y0 > 6 ? 2 : 1;
-		const ticks: { year: number; x: number }[] = [];
-		for (let y = y0; y <= y1; y += step) ticks.push({ year: y, x: x(`${y}-01-01`) });
-		// one row per span with a course started by today; buildBars draws open-ended courses and one-day dots
-		const rows = spans.map((s) => ({ span: s, bars: laneBars(s.segments, x, today) })).filter((r) => r.bars.length);
-		return { ticks, rows };
-	});
+	// one row per span with a course started by today; null (no card) when no course has started yet
+	const lane = $derived(buildLane(spans, today));
 	let pick = $state<{ span: TimelineSpan; g: TimelineSegment } | null>(null);
 	// the detail follows the bars: another profile, a type filter that hides its row or a country filter that
 	// hides the lane clears it, so removing the filter later does not bring the old detail back
