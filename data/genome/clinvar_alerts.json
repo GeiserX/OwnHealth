@@ -10,6 +10,14 @@
    "en": "ClinVar's classification of a variant you carry is now: {new} ({stars}). Before: {old}.",
    "es": "La clasificación en ClinVar de una variante que tienes es ahora: {new} ({stars}). Antes: {old}."
   },
+  "named_same_class": {
+   "en": "ClinVar changed its classification of a variant you carry in {gene} within the same group. It is now: {new} ({stars}).",
+   "es": "ClinVar ha cambiado su clasificación de una variante que tienes en {gene} dentro del mismo grupo. Es ahora: {new} ({stars})."
+  },
+  "named_same_class_no_gene": {
+   "en": "ClinVar changed its classification of a variant you carry within the same group. It is now: {new} ({stars}).",
+   "es": "ClinVar ha cambiado su clasificación de una variante que tienes dentro del mismo grupo. Es ahora: {new} ({stars})."
+  },
   "changed": {
    "en": "A result you carry changed in ClinVar.",
    "es": "Ha cambiado en ClinVar un resultado que tienes."
