@@ -1353,7 +1353,6 @@ export const dict = {
 		due_rules: "guideline set",
 		due_asof: "as of",
 		due_more: "{n} more on the Due screen",
-		due_more_hidden: "{n} more not shown",
 		due_pack: "OwnHealth rule pack",
 		due_partial: "Some items are not shared with this access (needs {scope})",
 		// ---- family history (v0.3) ----
@@ -1433,6 +1432,8 @@ export const dict = {
 		due_ans_unset: "Not answered",
 		due_ans_link: "Answer",
 		due_ans_saved: "Saved",
+		due_more_show: "Show {n} more",
+		due_fewer: "Show fewer",
 	},
 	es: {
 		household: "Hogar",
@@ -2785,7 +2786,6 @@ export const dict = {
 		due_rules: "guía",
 		due_asof: "a fecha de",
 		due_more: "{n} más en la pantalla Por hacer",
-		due_more_hidden: "{n} más sin mostrar",
 		due_pack: "Paquete de reglas de OwnHealth",
 		due_partial: "Algunos elementos no se comparten con este acceso (necesita {scope})",
 		// ---- family history (v0.3) ----
@@ -2865,6 +2865,8 @@ export const dict = {
 		due_ans_unset: "Sin responder",
 		due_ans_link: "Responder",
 		due_ans_saved: "Guardado",
+		due_more_show: "Mostrar {n} más",
+		due_fewer: "Mostrar menos",
 	},
 } as const;
 

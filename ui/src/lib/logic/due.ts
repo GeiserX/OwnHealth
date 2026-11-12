@@ -92,6 +92,16 @@ export function dueScreenOpen(withheld: string[] | undefined): boolean {
 	return !withheld?.includes('read:records');
 }
 
+/**
+ * What the dashboard's Due card lists: the first `max` rows, and for the rest a link to the Due
+ * screen when it is open to the caller, or else a control that reveals them on the card itself.
+ */
+export function dueCardView<R>(rows: R[], max: number, linked: boolean, expanded: boolean): { rows: R[]; more: number; action: 'link' | 'expand' | 'collapse' | null } {
+	if (rows.length <= max) return { rows, more: 0, action: null };
+	if (linked) return { rows: rows.slice(0, max), more: rows.length - max, action: 'link' };
+	return expanded ? { rows, more: 0, action: 'collapse' } : { rows: rows.slice(0, max), more: rows.length - max, action: 'expand' };
+}
+
 /** A row of the dashboard's older `due` list (lab gaps of the rule pack, grouped by rule). */
 export interface GlanceDue {
 	title: string;
