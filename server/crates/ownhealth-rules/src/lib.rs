@@ -20,6 +20,7 @@ pub mod glance;
 pub mod num;
 pub mod pack;
 pub mod rendering;
+pub mod summary;
 pub mod wording;
 
 use chrono::{DateTime, NaiveDate, Utc};

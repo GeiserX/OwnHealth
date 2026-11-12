@@ -19,6 +19,7 @@ server/vendor/
 !/data/genome-facts/
 !/data/genome/
 !/data/rules/
+!/data/summary/
 !/data/terminology/
 !/data/vendors/
 server/data/
