@@ -4,7 +4,7 @@
 version: "summary-templates 0.1.0"
 templates:
   title: {en: Doctor summary, es: Resumen para el médico}
-  subtitle: {en: "{specialty} · data as of {as_of}", es: "{specialty} · datos a {as_of}"}
+  subtitle: {en: "Data as of {as_of}", es: "Datos a {as_of}"}
   notice:
     en: "Information from the person's own records, not a diagnosis. Every value names its source (src_…); the sources are listed at the end."
     es: "Información de los registros de la propia persona, no un diagnóstico. Cada valor cita su fuente (src_…); las fuentes se listan al final."
@@ -36,7 +36,7 @@ templates:
     flag: {en: Flag, es: Aviso}
     test: {en: Test, es: Prueba}
     value: {en: Value, es: Valor}
-    range: {en: Lab range, es: Rango del lab.}
+    range: {en: Lab range, es: Rango lab.}
     date: {en: Date, es: Fecha}
     status: {en: Status, es: Estado}
     previous: {en: Previous value, es: Valor anterior}

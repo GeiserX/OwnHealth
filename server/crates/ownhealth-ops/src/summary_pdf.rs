@@ -194,10 +194,7 @@ impl Sheet<'_> {
         let p = &m["person"];
         let who = join(&[st(p, "name"), st(p, "sex"), st(p, "age"), st(p, "born")], " · ");
         self.w.paragraph(&who, Font::Bold, 9.0, 12.0);
-        let sub = fill(
-            &self.t("subtitle"),
-            &[("specialty", spec.into()), ("as_of", st(m, "as_of").into())],
-        );
+        let sub = fill(&self.t("subtitle"), &[("as_of", st(m, "as_of").into())]);
         self.line(&sub);
         let notice = self.t("notice");
         self.line(&notice);
@@ -372,7 +369,7 @@ impl Sheet<'_> {
         let n = rows.len();
         if n > 0 {
             self.table(
-                &[84.0, 60.0, 58.0, 48.0, 52.0, 63.0, 150.0],
+                &[80.0, 58.0, 56.0, 48.0, 62.0, 63.0, 148.0],
                 &[
                     "col.test",
                     "col.value",
