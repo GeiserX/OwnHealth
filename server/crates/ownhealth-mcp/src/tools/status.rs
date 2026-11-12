@@ -20,10 +20,13 @@ const ENVELOPE_FIELDS: [&str; 6] = [
     "withheld",
     "notice",
 ];
-const SECTION_SCOPE: [(&str, &str); 3] = [
+/// Sections for a domain, each dropped and named in `withheld.by_scope` when the token lacks its
+/// scope. A new section adds one line here.
+const SECTION_SCOPE: [(&str, &str); 4] = [
     ("medications", "read:records"),
     ("supplements", "read:records"),
     ("active_conditions", "read:records"),
+    ("due", "read:records"),
 ];
 const FRESHNESS_SCOPE: [(&str, &str); 5] = [
     ("labs", "read:labs"),
@@ -140,6 +143,7 @@ pub async fn status_data(call: &mut Call<'_>) -> ToolResult<(Map<String, Value>,
     }
 
     let scopes = call.scopes();
+    let mut by_scope: BTreeSet<String> = BTreeSet::new();
     // open review rows are not facts: a count of what waits for a person, by the kinds this token
     // could read once accepted
     let kinds: Vec<&str> = REVIEW_SCOPE
@@ -155,7 +159,19 @@ pub async fn status_data(call: &mut Call<'_>) -> ToolResult<(Map<String, Value>,
     .fetch_one(&mut *call.conn)
     .await?;
     rendered.insert("review_open".into(), json!(review_open));
-    let mut by_scope: BTreeSet<String> = BTreeSet::new();
+    // screenings and vaccines the country's guideline lists (ownhealth.prevention/v1), computed on
+    // read; only for a token that may see it, so a viewer pays nothing for it
+    if scopes.contains("read:records") {
+        let pack = ownhealth_rules::load_pack().map_err(ownhealth_core::Error::from)?;
+        let due =
+            ownhealth_rules::prevention::status_section(&mut *call.conn, pid, call.as_of.day, &body, &pack, &scopes)
+                .await?;
+        if let Some(due) = due {
+            rendered.insert("due".into(), due);
+        }
+    } else {
+        by_scope.insert(crate::gate::scope_label("read:records"));
+    }
     for (key, scope) in SECTION_SCOPE {
         if rendered.contains_key(key) && !scopes.contains(scope) {
             rendered.shift_remove(key);

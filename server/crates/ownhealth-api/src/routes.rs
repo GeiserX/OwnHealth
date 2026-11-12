@@ -10,6 +10,7 @@ pub mod core;
 pub mod devices;
 pub mod documents;
 pub mod drug_check;
+pub mod due;
 pub mod export;
 pub mod family;
 pub mod family_history;
@@ -38,6 +39,7 @@ pub fn all() -> Router<Runtime> {
         .merge(devices::router())
         .merge(documents::router())
         .merge(drug_check::router())
+        .merge(due::router())
         .merge(export::router())
         .merge(family::router())
         .merge(family_history::router())
