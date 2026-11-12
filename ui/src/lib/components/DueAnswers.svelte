@@ -3,6 +3,8 @@
 	// GET/PUT /profiles/{p}/prevention-answers. An answer only decides whether a row applies; the card
 	// hides itself when no row of the profile's country needs one and nothing was answered.
 	import { getDueAnswers, putDueAnswers } from '#lib/api';
+	import { ApiError } from '#lib/api/core';
+	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import type { DueAnswer } from '#lib/logic/due';
 	import { errText } from '#lib/components/pages1/util.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
@@ -19,16 +21,29 @@
 	let error = $state<string | null>(null);
 	let busy = $state(false);
 	let saved = $state<string | null>(null);
+	// a load that failed for another reason than the scopes: the card says so and offers a retry
+	let loadErr = $state<unknown>(null);
+	let reload = $state(0);
+	// a reply is applied only while its profile and language are still the ones shown
+	const current = (slug: string, lang: string) => slug === profile && lang === i18n.lang;
 
 	$effect(() => {
 		const slug = profile;
 		const lang = i18n.lang;
+		void reload;
 		items = null;
 		error = null;
+		loadErr = null;
 		getDueAnswers(slug, lang).then(
-			(r) => (items = r.items),
-			// a caller without read:records gets no card at all
-			() => (items = [])
+			(r) => {
+				if (current(slug, lang)) items = r.items;
+			},
+			(e) => {
+				if (!current(slug, lang)) return;
+				items = [];
+				// a caller without read:records gets no card at all
+				if (!(e instanceof ApiError && e.status === 403)) loadErr = e;
+			}
 		);
 	});
 
@@ -40,11 +55,15 @@
 
 	async function set(key: string, value: 'yes' | 'no' | null) {
 		if (busy) return;
+		const slug = profile;
+		const lang = i18n.lang;
 		busy = true;
 		error = null;
 		saved = null;
 		try {
-			items = (await putDueAnswers(profile, { [key]: value }, i18n.lang)).items;
+			const r = await putDueAnswers(slug, { [key]: value }, lang);
+			if (!current(slug, lang)) return;
+			items = r.items;
 			saved = key;
 			onchange?.();
 		} catch (e) {
@@ -71,6 +90,11 @@
 		{/each}
 		{#if error}<div class="p2err" role="alert">{error}</div>{/if}
 		<div class="note">{t('due_ans_note')}</div>
+	</section>
+{:else if loadErr}
+	<section class:card={!bare} aria-labelledby="due-ans-{profile}">
+		<h3 id="due-ans-{profile}" class:sub={bare}>{t('due_ans_title')}{#if name}<span class="r">{name}</span>{/if}</h3>
+		<NotReady error={loadErr} onretry={() => reload++} />
 	</section>
 {/if}
 

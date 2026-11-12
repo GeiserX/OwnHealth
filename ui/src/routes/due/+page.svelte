@@ -104,7 +104,11 @@
 	let evidence = $state('');
 	type Ev = { value: string; label: string; group: string };
 	let evidenceList = $state<Ev[] | null>(null);
+	// only the latest load fills the list: a slower one for another item or profile is dropped
+	let evidenceSeq = 0;
 	async function loadEvidence(slug: string) {
+		const seq = ++evidenceSeq;
+		evidenceList = null;
 		const day = (v: unknown) => (typeof v === 'string' ? v.slice(0, 10) : '');
 		const [proc, imm, docs] = await Promise.all([
 			listRecords(slug, 'procedure').catch(() => ({ items: [] })),
@@ -114,6 +118,7 @@
 		type Rec = { id: string; title: string; detail: Record<string, unknown> };
 		const recDay = (r: Rec) => day(r.detail.performed ?? r.detail.occurred ?? r.detail.effective_at);
 		const rec = (kind: string, group: string) => (r: Rec) => ({ value: `${kind}:${r.id}`, label: [r.title, recDay(r)].join(' · '), group });
+		if (seq !== evidenceSeq) return;
 		// a record with no day proves nothing on any day, so the server refuses it as evidence
 		evidenceList = [
 			...imm.items.filter(recDay).map(rec('immunization', t('due_f_vaccine'))),
