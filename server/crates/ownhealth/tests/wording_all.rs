@@ -97,15 +97,18 @@ async fn clinvar_alerts() -> anyhow::Result<Vec<Value>> {
                 for old in &befores {
                     for new_class in CLASSES {
                         for new_stars in [0, 1, 2] {
-                            let t = EventText {
-                                gene,
-                                old: old.as_ref(),
-                                new_class,
-                                new_stars,
-                                withheld,
-                                unconfirmed,
-                            };
-                            out.push(json!({"summary": clinvar::summary(&t, lang)}));
+                            for not_in_previous_release in [false, true] {
+                                let t = EventText {
+                                    gene,
+                                    old: old.as_ref(),
+                                    new_class,
+                                    new_stars,
+                                    withheld,
+                                    unconfirmed,
+                                    not_in_previous_release,
+                                };
+                                out.push(json!({"summary": clinvar::summary(&t, lang)}));
+                            }
                         }
                     }
                 }

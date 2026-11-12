@@ -151,6 +151,13 @@ pub fn event_kind(old: Option<&Before>, new_class: &str, new_stars: i16, first_r
     })
 }
 
+/// Whether two CLNSIG values say the same thing: ClinVar's terms, read without case or spacing.
+/// Pathogenic and Likely_pathogenic are one class but not the same significance.
+pub fn same_significance(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.trim().to_ascii_lowercase().replace(' ', "_");
+    norm(a) == norm(b)
+}
+
 /// The alert filter: an upgrade to P/LP with at least 1 star, a downgrade of a P/LP the person was
 /// shown, any change in an ACMG SF gene.
 pub fn alerts(kind: &str, old: Option<&Before>, new_stars: i16, sf_gene: bool, shown_plp: bool) -> bool {
@@ -178,6 +185,9 @@ pub struct EventText<'a> {
     pub new_stars: i16,
     pub withheld: bool,
     pub unconfirmed: bool,
+    /// `old` is None because the previous compared release had no such record, not because the
+    /// genome file did not report it (the first run, against the facts).
+    pub not_in_previous_release: bool,
 }
 
 fn stars_text(n: i16, lang: &str) -> String {
@@ -194,6 +204,7 @@ pub fn summary(t: &EventText<'_>, lang: &str) -> String {
         tpl("withheld", lang)
     } else {
         let old = match t.old {
+            None if t.not_in_previous_release => tpl("class_not_in_clinvar", lang),
             None => tpl("class_not_reported", lang),
             Some(o) => {
                 let c = tpl(&format!("class_{}", o.class), lang);
@@ -203,7 +214,16 @@ pub fn summary(t: &EventText<'_>, lang: &str) -> String {
                 }
             }
         };
-        let key = if t.gene.is_some() { "named" } else { "named_no_gene" };
+        // Same class and stars: ClinVar moved inside the class (Pathogenic to Likely_pathogenic).
+        let same = t
+            .old
+            .is_some_and(|o| o.class == t.new_class && o.stars == Some(t.new_stars));
+        let key = match (same, t.gene.is_some()) {
+            (false, true) => "named",
+            (false, false) => "named_no_gene",
+            (true, true) => "named_same_class",
+            (true, false) => "named_same_class_no_gene",
+        };
         tpl(key, lang)
             .replace("{gene}", t.gene.unwrap_or_default())
             .replace("{new}", &tpl(&format!("class_{}", t.new_class), lang))
@@ -831,7 +851,14 @@ async fn diff_dataset(
             })
         };
         let new_class = class_of(&c.significance);
-        let Some(kind) = event_kind(old.as_ref(), new_class, c.stars, first_run) else {
+        // A move inside one class (Pathogenic to Likely_pathogenic, same stars) is still a change.
+        let moved = !first_run
+            && prev
+                .get(&c.variation_id)
+                .is_some_and(|(sig, _)| !same_significance(sig, &c.significance));
+        let Some(kind) =
+            event_kind(old.as_ref(), new_class, c.stars, first_run).or(moved.then_some("significance_changed"))
+        else {
             continue;
         };
         let gene = c.gene.as_deref();
@@ -850,7 +877,8 @@ async fn diff_dataset(
         };
         let alerted = alerts(kind, old.as_ref(), c.stars, is_sf_gene(gene), shown_plp);
         let old_json = match &old {
-            None => json!({}),
+            None if first_run => json!({}),
+            None => json!({"in_previous_release": false}),
             Some(o) => {
                 let mut m = json!({"class": o.class, "stars": o.stars});
                 if !first_run && let Some((sig, _)) = prev.get(&c.variation_id) {
@@ -887,22 +915,6 @@ async fn diff_dataset(
         if !alerted {
             continue;
         }
-        // The same change seen through another current dataset of this profile (a chip and a WGS)
-        // already has its item; datasets run non-chip first, so the kept one is the confirmed one.
-        let already: bool = sqlx::query_scalar(
-            "select exists (select 1 from review_item r join genome_event g on g.id = r.ref_id \
-             where r.kind = 'genome_reinterpretation' and r.status = 'open' and r.profile_id = $1 \
-             and g.variation_id = $2 and g.release_to = $3)",
-        )
-        .bind(ds.profile_id)
-        .bind(c.variation_id)
-        .bind(&release_to)
-        .fetch_one(&mut *tx)
-        .await?;
-        if already {
-            continue;
-        }
-        report.alerts += 1;
         let withheld = minor_gated || (sensitive && !profile.genome_sensitive_ui);
         // Nothing that names the variant or the way its class moved goes into the item: a reviewer
         // may lack read:genome or read:sensitive, and the subject's switch may change later. The kind
@@ -916,6 +928,40 @@ async fn diff_dataset(
             "release_from": release_from,
             "release_to": release_to,
         });
+        // The same change seen through another dataset of this profile already has its item, open or
+        // already decided: a dismissed alert is not raised again. An item whose genome file was
+        // retracted no longer stands for the change. Datasets run non-chip first within one run; an
+        // open chip item found by a later genome file becomes the confirmed item.
+        let earlier: Vec<(Uuid, bool, bool)> = sqlx::query_as(
+            "select r.id, r.status = 'open', coalesce((r.payload->>'unconfirmed')::boolean, false) \
+             from review_item r join genome_event g on g.id = r.ref_id join genome_dataset d on d.id = g.dataset_id \
+             where r.kind = 'genome_reinterpretation' and r.profile_id = $1 and g.variation_id = $2 \
+             and g.release_to = $3 and d.status <> 'retracted' and not exists \
+             (select 1 from document doc where doc.id = d.document_id and doc.status = 'retracted') \
+             order by r.created_at, r.id for update of r",
+        )
+        .bind(ds.profile_id)
+        .bind(c.variation_id)
+        .bind(&release_to)
+        .fetch_all(&mut *tx)
+        .await?;
+        if !earlier.is_empty() {
+            let chip_only = earlier.iter().all(|(_, _, chip)| *chip);
+            if let Some((item, _, _)) = earlier.iter().find(|(_, open, _)| *open)
+                && chip_only
+                && !unconfirmed
+            {
+                sqlx::query("update review_item set ref_id = $2, document_id = $3, payload = $4 where id = $1")
+                    .bind(item)
+                    .bind(event_id)
+                    .bind(ds.document_id)
+                    .bind(&payload)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            continue;
+        }
+        report.alerts += 1;
         create_item(
             &mut tx,
             &ReviewItemIn {

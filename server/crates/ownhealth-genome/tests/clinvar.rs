@@ -471,6 +471,7 @@ fn the_named_sentence_reads_well_for_every_class() {
                 new_stars: 1,
                 withheld: false,
                 unconfirmed: false,
+                not_in_previous_release: false,
             },
             lang,
         )
@@ -489,6 +490,20 @@ fn the_named_sentence_reads_well_for_every_class() {
         named(Some(&plp), "conflicting", "en"),
         "ClinVar's classification of a variant you carry in BRCA2 is now: conflicting classifications \
          (1 star). Before: pathogenic or likely pathogenic (3 stars)."
+    );
+    let plp_one = Before {
+        class: "plp",
+        stars: Some(1),
+    };
+    assert_eq!(
+        named(Some(&plp_one), "plp", "en"),
+        "ClinVar changed its classification of a variant you carry in BRCA2 within the same group. It is \
+         now: pathogenic or likely pathogenic (1 star)."
+    );
+    assert_eq!(
+        named(Some(&plp_one), "plp", "es"),
+        "ClinVar ha cambiado su clasificación de una variante que tienes en BRCA2 dentro del mismo grupo. \
+         Es ahora: patogénica o probablemente patogénica (1 estrella)."
     );
     assert_eq!(
         named(None, "plp", "es"),
@@ -615,6 +630,177 @@ async fn one_change_alerts_once_when_a_profile_has_two_current_datasets() -> R {
     let lct_items: Vec<&Value> = items.iter().filter(|p| p["release_to"] == "2026-10-12").collect();
     assert_eq!(lct_items.len(), 1, "{items:?}");
     assert_eq!(lct_items[0]["unconfirmed"], false);
+    Ok(())
+}
+
+/// Sam's chip filed as Alex's second sample: it carries LCT.
+fn alex_chip() -> Value {
+    let mut chip = sam_chip();
+    chip["subject"] = synthetic::alex_facts()["subject"].clone();
+    chip["subject"]["sample_id"] = json!("AR-CHIP");
+    chip
+}
+
+/// (status, unconfirmed, event's assay) of every LCT item of Alex that release two raised.
+async fn lct_items(c: &mut PgConnection, alex: Uuid) -> anyhow::Result<Vec<(String, bool, String)>> {
+    Ok(sqlx::query_as(
+        "select r.status, (r.payload->>'unconfirmed')::boolean, d.assay from review_item r \
+         join genome_event g on g.id = r.ref_id join genome_dataset d on d.id = g.dataset_id \
+         where r.kind = 'genome_reinterpretation' and r.profile_id = $1 and g.variation_id = 900020 \
+         and g.release_to = '2026-10-12' order by r.created_at",
+    )
+    .bind(alex)
+    .fetch_all(c)
+    .await?)
+}
+
+/// A dismissed alert stays dismissed: a dataset imported later that sees the same change in the same
+/// release raises nothing new. Only when the alert's own genome file is retracted does the other
+/// dataset raise it again.
+#[tokio::test]
+async fn a_dismissed_alert_is_not_raised_again_by_a_later_dataset() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_alex(&e, &mut c).await?;
+    let alex = e.profile("alex");
+    let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
+    let two = write_release(e.dir.path(), "two.vcf", "20261012", &release_two(), false)?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
+    sqlx::query(
+        "update review_item set status = 'dismissed', decided_at = now() where kind = 'genome_reinterpretation' \
+         and profile_id = $1",
+    )
+    .bind(alex)
+    .execute(&mut *c)
+    .await?;
+    e.seed(&mut c, "alex", &alex_chip(), &[]).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
+    assert_eq!(
+        lct_items(&mut c, alex).await?,
+        vec![("dismissed".to_string(), false, "wgs".to_string())]
+    );
+    // The WGS file is retracted (its open items would be dismissed), then a new chip sees the change:
+    // the retracted file's dismissed alert no longer stands for it.
+    sqlx::query(
+        "update document set status = 'retracted' where id in \
+         (select document_id from genome_dataset where profile_id = $1 and assay = 'wgs')",
+    )
+    .bind(alex)
+    .execute(&mut *c)
+    .await?;
+    let mut chip2 = alex_chip();
+    chip2["subject"]["sample_id"] = json!("AR-CHIP-2");
+    e.seed(&mut c, "alex", &chip2, &[]).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
+    let items = lct_items(&mut c, alex).await?;
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[1], ("open".to_string(), true, "chip".to_string()));
+    Ok(())
+}
+
+/// A chip compared before a genome file of the same person: when the genome file later sees the same
+/// change in the same release, the chip's open alert becomes the confirmed one, without the chip
+/// wording, instead of staying unconfirmed beside a skipped confirmation.
+#[tokio::test]
+async fn a_later_genome_file_confirms_an_open_chip_alert() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    let alex = e.profile("alex");
+    e.seed(&mut c, "alex", &alex_chip(), &[]).await?;
+    let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
+    let two = write_release(e.dir.path(), "two.vcf", "20261012", &release_two(), false)?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
+    assert_eq!(
+        lct_items(&mut c, alex).await?,
+        vec![("open".to_string(), true, "chip".to_string())]
+    );
+    seed_alex(&e, &mut c).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
+    assert_eq!(
+        lct_items(&mut c, alex).await?,
+        vec![("open".to_string(), false, "wgs".to_string())]
+    );
+    let item: (Value, Option<Uuid>) = sqlx::query_as(
+        "select r.payload, r.document_id from review_item r join genome_event g on g.id = r.ref_id \
+         where r.profile_id = $1 and g.variation_id = 900020 and g.release_to = '2026-10-12'",
+    )
+    .bind(alex)
+    .fetch_one(&mut *c)
+    .await?;
+    assert_eq!(item.0["summary"], "A result you carry changed in ClinVar.");
+    assert_eq!(item.0["summary_es"], "Ha cambiado en ClinVar un resultado que tienes.");
+    let wgs_doc: Option<Uuid> =
+        sqlx::query_scalar("select document_id from genome_dataset where profile_id = $1 and assay = 'wgs'")
+            .bind(alex)
+            .fetch_one(&mut *c)
+            .await?;
+    assert_eq!(item.1, wgs_doc, "a retraction of the genome file must reach the item");
+    Ok(())
+}
+
+/// A change inside one class (Pathogenic to Likely_pathogenic, stars unchanged) is an event; in an
+/// ACMG SF gene it alerts, as any change there does.
+#[tokio::test]
+async fn a_change_inside_one_class_is_an_event_and_alerts_in_an_sf_gene() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_alex(&e, &mut c).await?;
+    let one = write_release(
+        e.dir.path(),
+        "one.vcf",
+        "20261005",
+        &[
+            cv(MTHFR, 900030, "Pathogenic", MULTI, "MTHFR"),
+            cv(BRCA2, 900010, "Pathogenic", MULTI, "BRCA2"),
+        ],
+        false,
+    )?;
+    let two = write_release(
+        e.dir.path(),
+        "two.vcf",
+        "20261012",
+        &[
+            cv(MTHFR, 900030, "Likely_pathogenic", MULTI, "MTHFR"),
+            cv(BRCA2, 900010, "Likely_pathogenic", MULTI, "BRCA2"),
+        ],
+        false,
+    )?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
+    clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
+    let (a, b) = ("2026-10-05", "2026-10-12");
+    let second: Vec<Ev> = events(&mut c)
+        .await?
+        .into_iter()
+        .filter(|x| x.release_to == b)
+        .collect();
+    assert_eq!(
+        second,
+        vec![
+            ev("alex", 900010, "significance_changed", true, a, b),
+            ev("alex", 900030, "significance_changed", false, a, b),
+        ]
+    );
+    assert_eq!(
+        alert_for(&mut c, e.profile("alex"), "significance_changed")
+            .await?
+            .len(),
+        1
+    );
+    // The same significance written differently is no change.
+    let three = write_release(
+        e.dir.path(),
+        "three.vcf",
+        "20261019",
+        &[
+            cv(MTHFR, 900030, "Likely_Pathogenic", MULTI, "MTHFR"),
+            cv(BRCA2, 900010, "Likely_pathogenic", MULTI, "BRCA2"),
+        ],
+        false,
+    )?;
+    let r3 = clinvar::diff_release(&e.db.pool, &e.blobs, &three).await?;
+    assert_eq!(r3.datasets[0].events, 0, "{r3:?}");
     Ok(())
 }
 
@@ -1123,6 +1309,7 @@ fn a_withheld_alert_names_nothing_in_either_language() {
         new_stars: 1,
         withheld: true,
         unconfirmed: true,
+        not_in_previous_release: false,
     };
     for lang in ["en", "es"] {
         let s = summary(&t, lang);
