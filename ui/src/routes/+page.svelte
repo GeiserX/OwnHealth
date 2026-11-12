@@ -13,7 +13,7 @@
 	import Sparkline from '#lib/components/Sparkline.svelte';
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
-	import { dueCard, lockedScopes, partialScopes } from '#lib/logic/due';
+	import { dueCard, dueScreenOpen, lockedScopes, partialScopes } from '#lib/logic/due';
 	import { app, currentProfile } from '#lib/state/app.svelte';
 
 	// The rule pack ships inside the package. The link names only the system's pack file, never the rule that fired.
@@ -57,6 +57,7 @@
 	const DUE_MAX = 6;
 	const dueRows = $derived(dash.data ? dueCard(dash.data.due, dash.data.prevention_due) : []);
 	const dueLocked = $derived(dash.data ? lockedScopes(dueRows, dash.data.prevention_withheld) : null);
+	const dueLinked = $derived(dueScreenOpen(dash.data?.prevention_withheld));
 	const duePartial = $derived(dash.data ? partialScopes(dueRows, dash.data.prevention_withheld) : null);
 	const DUE_ICON: Record<string, string> = {
 		lab: '<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/>',
@@ -186,7 +187,7 @@
 			</div>
 
 			<div class="card">
-				<h3>{t('due')}<span class="r">{#if dueLocked}<span class="chip" title={tf('h1_withheld_sys', { scope: dueLocked })}>🔒 {t('h1_locked')}</span>{:else if !dash.data?.prevention_withheld?.includes('read:records')}<a href="/due">{t('due_all')}</a>{/if}</span></h3>
+				<h3>{t('due')}<span class="r">{#if dueLocked}<span class="chip" title={tf('h1_withheld_sys', { scope: dueLocked })}>🔒 {t('h1_locked')}</span>{:else if dueLinked}<a href="/due">{t('due_all')}</a>{/if}</span></h3>
 				{#each dueRows.slice(0, DUE_MAX) as x (x.key)}
 					<div class="due">
 						<div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true">{@html DUE_ICON[x.area] ?? DUE_ICON.lab}</svg></div>
@@ -197,7 +198,7 @@
 				{:else}
 					<div class="dim" style="font-size:12px">{dueLocked ? tf('h1_withheld_sys', { scope: dueLocked }) : t('h1_nodue')}</div>
 				{/each}
-				{#if dueRows.length > DUE_MAX}<div class="dim" style="font-size:11.5px;margin-top:4px"><a href="/due">{tf('due_more', { n: dueRows.length - DUE_MAX })}</a></div>{/if}
+				{#if dueRows.length > DUE_MAX}<div class="dim" style="font-size:11.5px;margin-top:4px">{#if dueLinked}<a href="/due">{tf('due_more', { n: dueRows.length - DUE_MAX })}</a>{:else}{tf('due_more_hidden', { n: dueRows.length - DUE_MAX })}{/if}</div>{/if}
 				{#if duePartial}<div class="dim" style="font-size:11.5px;margin-top:4px">🔒 {tf('due_partial', { scope: duePartial })}</div>{/if}
 			</div>
 

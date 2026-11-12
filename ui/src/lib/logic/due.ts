@@ -57,6 +57,11 @@ export function partialScopes(rows: CardRow[], withheld: string[] | undefined): 
 	return rows.length && withheld?.length ? withheld.join(', ') : null;
 }
 
+/** The Due screen lists prevention items only, which need read:records: without it the card links nowhere. */
+export function dueScreenOpen(withheld: string[] | undefined): boolean {
+	return !withheld?.includes('read:records');
+}
+
 /** A row of the dashboard's older `due` list (lab gaps of the rule pack, grouped by rule). */
 export interface GlanceDue {
 	title: string;

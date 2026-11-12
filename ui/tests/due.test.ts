@@ -2,7 +2,7 @@
 // with nothing shown twice.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dueCard, dueColor, isOpen, lockedScopes, partialScopes, type DueItem, type GlanceDue } from '../src/lib/logic/due.ts';
+import { dueCard, dueColor, dueScreenOpen, isOpen, lockedScopes, partialScopes, type DueItem, type GlanceDue } from '../src/lib/logic/due.ts';
 
 const item = (key: string, status: DueItem['status'], extra: Partial<DueItem> = {}): DueItem => ({
 	key,
@@ -71,4 +71,12 @@ test('a Due card with rows still names the scopes of the items it leaves out', (
 	assert.equal(partialScopes(dueCard([hcvRow], []), []), null);
 	assert.equal(partialScopes(dueCard([hcvRow], []), undefined), null);
 	assert.equal(partialScopes([], ['read:labs']), null);
+});
+
+test('the Due card links to the Due screen only when the caller can read what it lists', () => {
+	assert.equal(dueScreenOpen(undefined), true);
+	assert.equal(dueScreenOpen([]), true);
+	assert.equal(dueScreenOpen(['read:labs']), true);
+	assert.equal(dueScreenOpen(['read:records']), false);
+	assert.equal(dueScreenOpen(['read:labs', 'read:records']), false);
 });

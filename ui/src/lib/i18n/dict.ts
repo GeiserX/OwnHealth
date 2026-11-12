@@ -1353,6 +1353,7 @@ export const dict = {
 		due_rules: "guideline set",
 		due_asof: "as of",
 		due_more: "{n} more on the Due screen",
+		due_more_hidden: "{n} more not shown",
 		due_pack: "OwnHealth rule pack",
 		due_partial: "Some items are not shared with this access (needs {scope})",
 		// ---- family history (v0.3) ----
@@ -2745,6 +2746,7 @@ export const dict = {
 		due_rules: "guía",
 		due_asof: "a fecha de",
 		due_more: "{n} más en la pantalla Por hacer",
+		due_more_hidden: "{n} más sin mostrar",
 		due_pack: "Paquete de reglas de OwnHealth",
 		due_partial: "Algunos elementos no se comparten con este acceso (necesita {scope})",
 		// ---- family history (v0.3) ----
