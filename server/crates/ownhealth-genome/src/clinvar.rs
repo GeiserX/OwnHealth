@@ -8,7 +8,8 @@
 //! whatever their size.
 //!
 //! The baseline is the facts themselves on the first run (a P/LP fact and its `clinvar_stars`; any
-//! other carried site counts as not reported), then the previous snapshot. Three things alert, as a
+//! other carried site counts as not reported), then the previous compared release (its snapshot, empty
+//! when the person carried nothing in it; `genome_dataset.clinvar_compared` holds its date). Three things alert, as a
 //! `genome_reinterpretation` review item: an upgrade to P/LP with at least 1 star, a downgrade of a
 //! P/LP the person was shown, and any change in an ACMG SF gene. Everything else is a silent event.
 //! The review item names nothing: it reads "a result you carry changed" (or "a withheld result
@@ -615,7 +616,7 @@ pub struct DatasetReport {
     /// The profile's slug, so an operator can tell whose genome it is.
     pub profile: String,
     pub assay: String,
-    /// Why nothing was compared: `already_compared` (this release or a newer one is the snapshot),
+    /// Why nothing was compared: `already_compared` (this release or a newer one was compared),
     /// `older_than_genome_file` (the facts were annotated with a newer ClinVar), `unreadable` (the
     /// dataset's calls VCF could not be read in GRCh38 contig order; see `error`), `no_longer_current`
     /// (the dataset was replaced or its genome file retracted while the run went on).
@@ -697,13 +698,16 @@ async fn diff_dataset(
         alerts: 0,
     };
     let mut tx = pool.begin().await?;
-    // One run at a time per dataset: a second run waits here, then reads the first one's snapshot
-    // date, so two runs never compare the same release twice.
-    let current: Option<bool> =
-        sqlx::query_scalar("select status = 'current' from genome_dataset where id = $1 for update")
+    // One run at a time per dataset: a second run waits here, then reads the release the first one
+    // compared, so two runs never compare the same release twice.
+    let locked: Option<(bool, Option<NaiveDate>)> =
+        sqlx::query_as("select status = 'current', clinvar_compared from genome_dataset where id = $1 for update")
             .bind(ds.id)
             .fetch_optional(&mut *tx)
             .await?;
+    let current = locked.map(|(c, _)| c);
+    // The last release compared, even one in which the person carried nothing.
+    let prev_date = locked.and_then(|(_, d)| d);
     // The dataset was listed before this point, so its file may have been retracted since. A
     // retraction locks the document row before it dismisses the file's alerts: it either finished
     // and this read sees it, or it waits for this transaction and then dismisses what it wrote.
@@ -721,11 +725,6 @@ async fn diff_dataset(
         report.skipped = Some("no_longer_current");
         return Ok(report);
     }
-    let prev_date: Option<NaiveDate> =
-        sqlx::query_scalar("select max(release_date) from clinvar_carried where dataset_id = $1")
-            .bind(ds.id)
-            .fetch_one(&mut *tx)
-            .await?;
     let facts_release = ds
         .db_versions
         .0
@@ -953,6 +952,11 @@ async fn diff_dataset(
     .bind(&stars)
     .execute(&mut *tx)
     .await?;
+    sqlx::query("update genome_dataset set clinvar_compared = $2 where id = $1")
+        .bind(ds.id)
+        .bind(date)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(report)
 }

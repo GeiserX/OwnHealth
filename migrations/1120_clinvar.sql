@@ -12,6 +12,10 @@ alter table source drop constraint source_kind_check;
 alter table source add constraint source_kind_check check (kind in ('email', 'folder', 'paperless', 'share',
   'shortcut', 'health_auto_export', 'gadgetbridge', 'nightscout', 'clinvar'));
 
+-- The ##fileDate of the last ClinVar release compared for the dataset, even when the person carried
+-- nothing in it: the next release is new against that one, never against the facts file.
+alter table genome_dataset add column clinvar_compared date;
+
 create table clinvar_carried (
   dataset_id uuid not null references genome_dataset on delete cascade,
   release_date date not null,          -- the ClinVar VCF's ##fileDate

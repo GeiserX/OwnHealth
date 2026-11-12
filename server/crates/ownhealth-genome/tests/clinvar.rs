@@ -11,7 +11,7 @@ use noodles::bgzf;
 use ownhealth_genome::clinvar::{
     self, Before, FactAlleles, VcfAlleles, alerts, carried_records, event_kind, is_sf_gene, summary,
 };
-use ownhealth_genome::sensitive::{acmg_sf_genes, sensitive_genes};
+use ownhealth_genome::sensitive::{acmg_sf_genes, carrier_spans_overlapping, sensitive_gene_at, sensitive_genes};
 use ownhealth_genome::synthetic::{self, VcfRow, write_vcf};
 use ownhealth_genome::{FindingsQuery, Gate, list_findings};
 use serde_json::{Value, json};
@@ -618,6 +618,125 @@ async fn one_change_alerts_once_when_a_profile_has_two_current_datasets() -> R {
     Ok(())
 }
 
+/// A release in which the person carries nothing is still a compared release: a record that appears
+/// in the next one is new against it, and the event's release_from is that release, not the facts'.
+#[tokio::test]
+async fn a_release_where_nothing_is_carried_is_still_the_baseline() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_alex(&e, &mut c).await?;
+    let one = write_release(
+        e.dir.path(),
+        "one.vcf",
+        "20261005",
+        &[cv(DPYD_REF, 900040, "Pathogenic", MULTI, "DPYD")],
+        false,
+    )?;
+    let two = write_release(
+        e.dir.path(),
+        "two.vcf",
+        "20261012",
+        &[
+            cv(DPYD_REF, 900040, "Pathogenic", MULTI, "DPYD"),
+            cv(BRCA2, 900010, "Uncertain_significance", SINGLE, "BRCA2"),
+        ],
+        false,
+    )?;
+    let r1 = clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
+    assert_eq!((r1.datasets[0].carried, r1.datasets[0].events), (0, 0));
+    // The same release again is already compared, though nothing was carried in it.
+    let again = clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
+    assert_eq!(again.datasets[0].skipped, Some("already_compared"));
+    let r2 = clinvar::diff_release(&e.db.pool, &e.blobs, &two).await?;
+    assert_eq!(r2.datasets[0].skipped, None);
+    assert_eq!(
+        events(&mut c).await?,
+        vec![ev(
+            "alex",
+            900010,
+            "new_assertion_on_carried_variant",
+            true,
+            "2026-10-05",
+            "2026-10-12"
+        )]
+    );
+    assert_eq!(
+        alert_for(&mut c, e.profile("alex"), "new_assertion_on_carried_variant")
+            .await?
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+/// A minor's finding that carries no sensitive or carrier flag still gets no clinvar_now when its
+/// ClinVar record sits in a carrier-panel gene or ClinVar files it under a sensitive gene: the minor
+/// rule withholds the record as it withholds its event.
+#[tokio::test]
+async fn a_minor_sees_no_clinvar_now_for_a_sensitive_or_carrier_record() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    // Two plain trait findings, so nothing flags their rows: SYNTH7 inside the CFTR span, SYNTH3 in
+    // no carrier or sensitive span.
+    let trait_at = |gene: &str, chrom: &str, pos: i64, vid: i64| {
+        let site = json!({"chrom": chrom, "pos": pos, "ref": "C", "alt": "T", "clinvar_variation_id": vid,
+                          "vrs_id": synthetic::vrs_id(chrom, pos, "C", "T"),
+                          "genotype": {"call_state": "alt", "gt": "0/1"}});
+        json!({
+            "id": ownhealth_genome::fact_id("trait", gene, site["vrs_id"].as_str().unwrap_or_default()),
+            "category": "trait", "gene": gene, "variants": [site],
+            "value": {"trait": "synthetic marker", "call": "likely"},
+            "summary": "A synthetic marker.",
+            "evidence": {"level": "E2", "native": "synthetic"},
+            "confidence": {"level": "high", "basis": "synthetic"}, "sensitivity": {"level": "normal"}})
+    };
+    assert!(!carrier_spans_overlapping("chr7", 117_559_000, 117_559_000).is_empty());
+    assert!(carrier_spans_overlapping("chr3", 1_000_700, 1_000_700).is_empty());
+    assert!(sensitive_gene_at("chr3", 1_000_700).is_none());
+    let mut doc = synthetic::lucia_facts();
+    if let Some(facts) = doc["facts"].as_array_mut() {
+        facts.push(trait_at("SYNTH7", "chr7", 117_559_000, 900070));
+        facts.push(trait_at("SYNTH3", "chr3", 1_000_700, 900071));
+    }
+    e.seed(&mut c, "lucia", &doc, &[]).await?;
+    let lucia = e.profile("lucia");
+    // SYNTH3's record is filed under BRCA2 by ClinVar.
+    sqlx::query(
+        "insert into clinvar_carried (dataset_id, release_date, variation_id, gene, significance, stars)          select id, '2026-10-12', v, g, 'Likely_benign', 1 from genome_dataset,          (values (900070::bigint, 'SYNTH7'), (900071, 'BRCA2')) x(v, g) where profile_id = $1",
+    )
+    .bind(lucia)
+    .execute(&mut *c)
+    .await?;
+    let shown = async |c: &mut PgConnection, gate: Gate| -> anyhow::Result<Vec<(String, bool)>> {
+        let mut found = list_findings(&mut *c, lucia, &gate, &FindingsQuery::default()).await?;
+        clinvar::attach_now(&mut *c, lucia, date("2026-10-12"), &gate, &mut found).await?;
+        Ok(found["findings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|f| f["gene"] == "SYNTH7" || f["gene"] == "SYNTH3")
+            .map(|f| {
+                (
+                    f["gene"].as_str().unwrap_or_default().to_string(),
+                    f.get("clinvar_now").is_some(),
+                )
+            })
+            .collect())
+    };
+    let both = |s7: bool, s3: bool| vec![("SYNTH3".to_string(), s3), ("SYNTH7".to_string(), s7)];
+    let sorted = |mut v: Vec<(String, bool)>| {
+        v.sort();
+        v
+    };
+    // Without the minor rule both are shown (the sensitive one needs the switch); under it neither,
+    // even with the sensitive switch on.
+    assert_eq!(sorted(shown(&mut c, Gate::new(true, false)).await?), both(true, true));
+    assert_eq!(sorted(shown(&mut c, Gate::new(false, false)).await?), both(true, false));
+    assert_eq!(sorted(shown(&mut c, Gate::new(true, true)).await?), both(false, false));
+    assert_eq!(sorted(shown(&mut c, Gate::new(false, true)).await?), both(false, false));
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_release_older_than_the_genome_file_is_not_a_baseline() -> R {
     let e = env().await?;
@@ -771,7 +890,7 @@ async fn a_dataset_is_compared_by_one_run_at_a_time() -> R {
     seed_alex(&e, &mut c).await?;
     let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
     // Another run holds Alex's dataset and is about to commit its snapshot of this same release. This
-    // run must wait for it and then find the release compared, never read the old snapshot date and
+    // run must wait for it and then find the release compared, never read the old compared date and
     // write the same events a second time.
     let mut other = e.db.pool.begin().await?;
     let dataset: Uuid =
@@ -786,6 +905,10 @@ async fn a_dataset_is_compared_by_one_run_at_a_time() -> R {
     .bind(dataset)
     .execute(&mut *other)
     .await?;
+    sqlx::query("update genome_dataset set clinvar_compared = '2026-10-05' where id = $1")
+        .bind(dataset)
+        .execute(&mut *other)
+        .await?;
     let (pool, blobs, path) = (e.db.pool.clone(), e.blobs.clone(), one.clone());
     let run = tokio::spawn(async move { clinvar::diff_release(&pool, &blobs, &path).await });
     wait_for_a_lock_wait(&e.db.pool).await?;
