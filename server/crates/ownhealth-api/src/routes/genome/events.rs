@@ -100,6 +100,7 @@ pub async fn events(rt: &Runtime, principal: &Principal, p: &str) -> R<Value> {
             new_stars: new_stars.unwrap_or(0),
             withheld: reason.is_some(),
             unconfirmed,
+            not_in_previous_release: r.old.0.get("in_previous_release") == Some(&Value::Bool(false)),
         };
         let mut e = json!({
             "id": r.id,

@@ -324,6 +324,46 @@ async fn retracting_the_genome_hides_its_events_and_dismisses_its_alerts() -> R 
     Ok(())
 }
 
+/// A record new to ClinVar at a site the person carries, on a later run, reads "not in the previous
+/// ClinVar release" as its before: the genome file does carry the variant, so "not reported in your
+/// genome file" would be false there.
+#[tokio::test]
+async fn a_record_new_to_clinvar_reads_as_not_in_the_previous_release() -> R {
+    let e = env().await?;
+    let three = e.dir.path().join("three.vcf");
+    std::fs::write(
+        &three,
+        format!(
+            "##fileDate=20261019\n{HEAD}7\t117559590\t7105\tATCT\tA\t.\t.\tCLNREVSTAT=criteria_provided,_single_submitter;\
+             CLNSIG=Uncertain_significance;GENEINFO=CFTR:1\n7\t117559590\t990001\tATCT\tA\t.\t.\t\
+             CLNREVSTAT=criteria_provided,_single_submitter;CLNSIG=Likely_benign;GENEINFO=CFTR:1\n"
+        ),
+    )?;
+    clinvar::diff_release(&e.db.pool, &e.rt.blobs, &three).await?;
+    let (status, body) = e.get("alex", "/api/profiles/alex/genome/events").await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let new = body["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|x| x["kind"] == "new_assertion_on_carried_variant")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        new["text"]["en"],
+        "ClinVar's classification of a variant you carry in CFTR is now: benign or likely benign (1 star). \
+         Before: not in the previous ClinVar release.",
+        "{body}"
+    );
+    assert!(
+        new["text"]["es"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("Antes: sin registro en la versión anterior de ClinVar.")),
+        "{body}"
+    );
+    Ok(())
+}
+
 /// Wait until `n` statements of this test's database wait on a lock.
 async fn wait_for_lock_waits(pool: &sqlx::PgPool, n: i64) -> anyhow::Result<()> {
     for _ in 0..600 {
