@@ -24,22 +24,24 @@
 	// a load that failed for another reason than the scopes: the card says so and offers a retry
 	let loadErr = $state<unknown>(null);
 	let reload = $state(0);
-	// a reply is applied only while its profile and language are still the ones shown
-	const current = (slug: string, lang: string) => slug === profile && lang === i18n.lang;
+	// only the latest request fills the card: a slower one, for this or another profile or language,
+	// is dropped
+	let gen = 0;
 
 	$effect(() => {
 		const slug = profile;
 		const lang = i18n.lang;
 		void reload;
+		const g = ++gen;
 		items = null;
 		error = null;
 		loadErr = null;
 		getDueAnswers(slug, lang).then(
 			(r) => {
-				if (current(slug, lang)) items = r.items;
+				if (g === gen) items = r.items;
 			},
 			(e) => {
-				if (!current(slug, lang)) return;
+				if (g !== gen) return;
 				items = [];
 				// a caller without read:records gets no card at all
 				if (!(e instanceof ApiError && e.status === 403)) loadErr = e;
@@ -55,14 +57,13 @@
 
 	async function set(key: string, value: 'yes' | 'no' | null) {
 		if (busy) return;
-		const slug = profile;
-		const lang = i18n.lang;
+		const g = ++gen;
 		busy = true;
 		error = null;
 		saved = null;
 		try {
-			const r = await putDueAnswers(slug, { [key]: value }, lang);
-			if (!current(slug, lang)) return;
+			const r = await putDueAnswers(profile, { [key]: value }, i18n.lang);
+			if (g !== gen) return;
 			items = r.items;
 			saved = key;
 			onchange?.();
