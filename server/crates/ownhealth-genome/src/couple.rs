@@ -100,12 +100,30 @@ pub struct Carried {
     pub confirmed: bool,
     pub assays: BTreeSet<String>,
     pub zygosity: Option<String>,
+    /// Two current facts gave different zygosities (for example het and hom): the zygosity is unknown.
+    pub zygosity_conflict: bool,
     /// The distinct variants (VRS id, else position) across the facts: more than one may be two altered
     /// copies of the gene.
     pub variants: BTreeSet<String>,
     pub src: Vec<String>,
     pub fact_ids: Vec<String>,
     pub sensitive: bool,
+}
+
+impl Carried {
+    /// Fold one more fact's zygosity in. Facts that disagree leave it unknown, so no figure rests on it.
+    pub fn merge_zygosity(&mut self, z: Option<&str>) {
+        let Some(z) = z else { return };
+        match self.zygosity.as_deref() {
+            _ if self.zygosity_conflict => {}
+            None => self.zygosity = Some(z.to_string()),
+            Some(prev) if prev != z => {
+                self.zygosity = None;
+                self.zygosity_conflict = true;
+            }
+            Some(_) => {}
+        }
+    }
 }
 
 /// One side's other current findings in one gene (not carrier facts): enough to say they exist.
@@ -188,17 +206,20 @@ impl Person {
         let mut best = Absent::NoGenome;
         for (assay, genes) in &self.coverage {
             let chip = assay.starts_with("chip");
-            let here = match (genes.get(gene).map(String::as_str), chip) {
-                (Some("assessed"), false) => Absent::NotDetected {
+            // Only a sequencing source can say a gene holds no variant: a variant-only VCF lists what
+            // it found and cannot tell an absent variant from an unreported reference call.
+            let seq = SEQUENCING.contains(&assay.as_str());
+            let here = match (genes.get(gene).map(String::as_str), chip, seq) {
+                (Some("assessed"), _, true) => Absent::NotDetected {
                     partial: false,
                     assay: assay.clone(),
                 },
-                (Some("partial"), false) => Absent::NotDetected {
+                (Some("partial"), _, true) => Absent::NotDetected {
                     partial: true,
                     assay: assay.clone(),
                 },
-                (Some("assessed" | "partial"), true) => Absent::ProbedOnly { assay: assay.clone() },
-                (None, false) if SEQUENCING.contains(&assay.as_str()) => Absent::NotStated { assay: assay.clone() },
+                (Some("assessed" | "partial"), true, _) => Absent::ProbedOnly { assay: assay.clone() },
+                (None, _, true) => Absent::NotStated { assay: assay.clone() },
                 _ => Absent::NotAssessed,
             };
             if here.strength() < best.strength() {
@@ -281,9 +302,7 @@ pub async fn load_person(conn: &mut PgConnection, profile_id: Uuid, name: &str) 
         c.confirmed |= r.verification_status == "confirmed"
             || (SEQUENCING.contains(&r.assay.as_str()) && r.confidence != "unconfirmed");
         c.assays.insert(r.assay.clone());
-        if c.zygosity.is_none() {
-            c.zygosity = r.zygosity.clone();
-        }
+        c.merge_zygosity(r.zygosity.as_deref());
         for v in r.fact.0["variants"].as_array().into_iter().flatten() {
             let key = v["vrs_id"]
                 .as_str()
@@ -578,6 +597,25 @@ mod tests {
     }
 
     #[test]
+    fn facts_that_disagree_on_zygosity_give_no_figure() -> Result<()> {
+        let mut c = carried("AR", "wes", true);
+        c.zygosity = None;
+        for z in [Some("het"), None, Some("hom"), Some("het")] {
+            c.merge_zygosity(z);
+        }
+        assert_eq!(c.zygosity, None);
+        let mut same = carried("AR", "wes", true);
+        same.merge_zygosity(Some("het"));
+        assert_eq!(same.zygosity.as_deref(), Some("het"));
+        let alex = person("Alex", &[("GJB2", carried("AR", "wgs", true))], &[]);
+        let sam = person("Sam", &[("GJB2", c)], &[]);
+        let j = join(&alex, &sam, &adult(false), &adult(false), "en")?;
+        assert_eq!(j.rows[0]["kind"], "ar_both_no_figure");
+        assert_eq!(j.rows[0]["risk"], Value::Null);
+        Ok(())
+    }
+
+    #[test]
     fn inheritance_comes_from_the_fact_else_the_panel() {
         assert_eq!(inheritance_of("monogenic_pathogenic", "CFTR", ""), Some("AR".into()));
         assert_eq!(inheritance_of("monogenic_pathogenic", "CFTR", "AR"), Some("AR".into()));
@@ -629,6 +667,10 @@ mod tests {
         // The chip probed GJB2, but the whole genome read it: the genome's statement is the stronger one.
         assert_eq!(sam.absent("GJB2"), Absent::NotStated { assay: "wgs".into() });
         let chip_only = person("Sam", &[], &[("chip", &[("GJB2", "partial")])]);
+        // A variant-only VCF lists what it found, so its "assessed" row is no negative result.
+        let vcf = person("Sam", &[], &[("vcf_only", &[("PAH", "assessed"), ("HBB", "partial")])]);
+        assert_eq!(vcf.absent("PAH"), Absent::NotAssessed);
+        assert_eq!(vcf.absent("HBB"), Absent::NotAssessed);
         assert_eq!(chip_only.absent("GJB2"), Absent::ProbedOnly { assay: "chip".into() });
         assert_eq!(sam.absent("SMN1"), Absent::NotAssessed);
         // A whole genome with no row for the gene found nothing there, but says nothing of its coverage.
@@ -715,7 +757,8 @@ mod tests {
                 ("CFTR", "ar_one_not_assessed"),
                 ("GALT", "ar_one_not_assessed"),
                 ("HBB", "ar_one_probed"),
-                ("PAH", "ar_one_not_detected"),
+                // A variant-only VCF that lists PAH as assessed still cannot say PAH holds no variant.
+                ("PAH", "ar_one_not_assessed"),
             ]
         );
         let cftr = c.rows[1]["text"].as_str().unwrap_or_default();

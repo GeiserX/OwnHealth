@@ -397,8 +397,12 @@ async fn couple_carrier() -> anyhow::Result<Vec<Value>> {
         ],
     );
     sam.other.insert("GALT".into(), Other::default());
-    // A whole genome with no row for any gene, and a person with no genome at all.
-    let rosa = person("Rosa", vec![], vec![("wgs", vec![])]);
+    // A whole genome with rows for two genes only, and a person with no genome at all.
+    let rosa = person(
+        "Rosa",
+        vec![],
+        vec![("wgs", vec![("PAH", "assessed"), ("SMN1", "partial")])],
+    );
     let carmen = person("Carmen", vec![], vec![]);
     let mut out = Vec::new();
     for lang in LANGS {

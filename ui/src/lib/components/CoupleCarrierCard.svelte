@@ -46,7 +46,9 @@
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { app } from '#lib/state/app.svelte';
 
-	let { profile }: { profile: ProfileSummary } = $props();
+	// `rev` changes when the page reloads its genome data (a consent change): the card fetches again and
+	// keeps the chosen partner.
+	let { profile, rev }: { profile: ProfileSummary; rev?: unknown } = $props();
 
 	// Partners the caller can join with this profile: other adults whose genome the caller may read.
 	const candidates = $derived((app.me?.profiles ?? []).filter((p) => p.slug !== profile.slug && !p.is_minor && p.scopes.includes('read:genome')));
@@ -63,6 +65,7 @@
 		const a = profile.slug;
 		const b = partner?.slug;
 		const lang = i18n.lang;
+		void rev;
 		if (!usable || !b) return;
 		view.run(() => get<CoupleView>('/genome/carrier-couple', { a, b, lang }), `${a}/${b}/${lang}`);
 	});
