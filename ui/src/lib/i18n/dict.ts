@@ -1387,9 +1387,10 @@ export const dict = {
 		gen_couple_k_ar_one_not_detected: "one carrier",
 		gen_couple_k_ar_one_probed: "one carrier · chip",
 		gen_couple_k_ar_one_not_assessed: "one carrier · not assessed",
-		gen_couple_k_xl_one: "X-linked",
-		gen_couple_k_xl_both: "X-linked · both",
+		gen_couple_k_xl_one: "one carrier",
+		gen_couple_k_xl_both: "both carriers",
 		gen_couple_withheld: "A withheld result",
+		gen_couple_cite: "Source",
 	},
 	es: {
 		household: "Hogar",
@@ -2776,9 +2777,10 @@ export const dict = {
 		gen_couple_k_ar_one_not_detected: "un portador",
 		gen_couple_k_ar_one_probed: "un portador · chip",
 		gen_couple_k_ar_one_not_assessed: "un portador · no evaluado",
-		gen_couple_k_xl_one: "ligado al X",
-		gen_couple_k_xl_both: "ligado al X · ambos",
+		gen_couple_k_xl_one: "un portador",
+		gen_couple_k_xl_both: "ambos portadores",
 		gen_couple_withheld: "Un resultado retenido",
+		gen_couple_cite: "Fuente",
 	},
 } as const;
 

@@ -70,6 +70,14 @@
 	const v = $derived(partner ? view.data : null);
 	const tone = (s: CoupleSide) =>
 		s.state === 'carrier' ? (s.confirmed ? 'p-watch' : 'p-stale') : s.state === 'not_detected' ? 'p-info' : 'p-stale';
+	// The citation's site, so a long guideline URL does not fill the row; the title holds the whole URL.
+	const host = (u: string) => {
+		try {
+			return new URL(u).hostname.replace(/^www\./, '');
+		} catch {
+			return u;
+		}
+	};
 	const kindTone = (k: string) => (k === 'ar_both' ? 'p-out' : k === 'ar_both_unconfirmed' || k.startsWith('xl') ? 'p-watch' : 'p-stale');
 </script>
 
@@ -115,7 +123,7 @@
 							{#if r.a && r.b}
 								<div class="sides">
 									{#each [[v.a.name, r.a], [v.b.name, r.b]] as const as [name, s] (name)}
-										<div class="side">
+										<div class="cside">
 											<span class="who">{name}</span>
 											<span class="pill {tone(s)}"><i aria-hidden="true"></i>{s.label}</span>
 											{#if s.assays.length}<span class="dim mono">{s.assays.map((x) => x.toUpperCase()).join(' · ')}</span>{/if}
@@ -124,7 +132,7 @@
 									{/each}
 								</div>
 							{/if}
-							{#if r.cite}<a class="cite dim" href={r.cite} target="_blank" rel="noopener">{r.cite}</a>{/if}
+							{#if r.cite}<a class="cite dim" href={r.cite} target="_blank" rel="noopener" title={r.cite}>{t('gen_couple_cite')}: {host(r.cite)}</a>{/if}
 						</li>
 					{/each}
 				</ul>
@@ -173,7 +181,7 @@
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 6px 16px;
 	}
-	.side {
+	.cside {
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
@@ -181,7 +189,7 @@
 		font-size: 12px;
 		min-width: 0;
 	}
-	.side .pill {
+	.cside .pill {
 		white-space: normal;
 	}
 	.who {
@@ -191,7 +199,6 @@
 		display: inline-block;
 		margin-top: 4px;
 		font-size: 11px;
-		word-break: break-all;
 	}
 	.counsel {
 		margin-top: 8px;
