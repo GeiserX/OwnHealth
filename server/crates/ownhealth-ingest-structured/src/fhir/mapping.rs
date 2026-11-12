@@ -665,8 +665,13 @@ pub fn encounter(r: &Value, profile_id: Uuid) -> Mapped {
     } else {
         None
     };
+    // the stored resource says what the columns say: a rejected end leaves both
+    let mut kept = r.clone();
     if let Some(p) = problem {
         end = None;
+        if let Some(Value::Object(period)) = kept.get_mut("period") {
+            period.shift_remove("end");
+        }
         checks.push(Check {
             detail: Some(p.into()),
             ..Check::fail("period", "date_invalid")
@@ -687,7 +692,7 @@ pub fn encounter(r: &Value, profile_id: Uuid) -> Mapped {
         .filter(|t| !t.is_empty());
     record(
         RecordIn::Visit(VisitIn {
-            common: common(profile_id, Some(start), r),
+            common: common(profile_id, Some(start), &kept),
             class: get_truthy(r.get("class"), "code").map(text_of),
             provider_name,
             period_start: Some(start),

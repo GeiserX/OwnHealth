@@ -19,7 +19,7 @@ export const searchObservations = (
 export const getTrend = (profile: string, code: string, window = 'P10Y', units: Units = 'as_reported', lang?: string) =>
 	get<Trend>(`${p(profile)}/trend`, { code, window, units, lang });
 
-export const getTimeline = (profile: string, q: { types?: string; from?: string; to?: string; lang?: string } = {}) =>
+export const getTimeline = (profile: string, q: { types?: string; from?: string; to?: string; as_of?: string; lang?: string } = {}) =>
 	get<Timeline>(`${p(profile)}/timeline`, q);
 
 /** A trend point may carry the status word lane E computed for it (requested in .lanes/H-ui-1-requests.md). */
