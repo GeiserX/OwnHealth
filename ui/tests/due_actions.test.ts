@@ -2,7 +2,7 @@
 // again", in one section only, and a new snooze starts no earlier than tomorrow.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { addDays, dueGroups, shownAgain, type DueItem } from '../src/lib/logic/due.ts';
+import { addDays, docLabel, dueGroups, shownAgain, type DueItem } from '../src/lib/logic/due.ts';
 
 const item = (key: string, status: DueItem['status'], extra: Partial<DueItem> = {}): DueItem => ({
 	key,
@@ -43,4 +43,13 @@ test('days add across a month and a year end', () => {
 	assert.equal(addDays('2026-11-30', 1), '2026-12-01');
 	assert.equal(addDays('2026-12-31', 1), '2027-01-01');
 	assert.equal(addDays('2026-11-12', 90), '2027-02-10');
+});
+
+test('a document in the Done evidence list is labelled by its file name text, never an object', () => {
+	const untrusted = { id: 'd1a2b3c4-0000', filename: { trust: 'untrusted_text', origin: 'document', text: 'LabNorte_2026-11-03.pdf' }, doc_type: 'lab_report', collected_at: '2026-11-03T08:00:00Z' };
+	assert.equal(docLabel(untrusted), 'LabNorte_2026-11-03.pdf · 2026-11-03');
+	assert.equal(docLabel({ id: 'd1a2b3c4-0000', filename: 'scan.pdf', collected_at: null }), 'scan.pdf');
+	assert.equal(docLabel({ id: 'd1a2b3c4-0000', filename: null, doc_type: 'lab_report' }), 'lab_report');
+	assert.equal(docLabel({ id: 'd1a2b3c4-0000', filename: { text: '' } }), 'd1a2b3c4');
+	for (const d of [untrusted, { id: 'x', filename: { text: 'a.pdf' } }]) assert.ok(!docLabel(d).includes('[object'));
 });

@@ -1,6 +1,6 @@
 // Endpoints the "health" pages read (lane H owns this file): dashboard, biomarkers, timeline (genome and drug check: manage.ts).
 // Backends: lane E (status.py, drug_check.py), lane A (observations.py), lane H (timeline.py), lane D (genome.py).
-import { del, get, p, post, put } from './core';
+import { del, get, p, post, request } from './core';
 import type { DueAnswer, DueDecisionIn, DueDoc } from '../logic/due';
 import type { Calculators, Dashboard, ObservationOut, Status, TimelineEvent, Trend, TrendPoint } from './types';
 
@@ -34,5 +34,5 @@ const dueKey = (profile: string, key: string) => `${p(profile)}/due/${encodeURIC
 export const decideDue = (profile: string, key: string, body: DueDecisionIn) => post<{ id: string; item_key: string; kind: string }>(dueKey(profile, key), body);
 export const undoDue = (profile: string, key: string) => del<{ item_key: string; retracted: string }>(dueKey(profile, key));
 export const getDueAnswers = (profile: string, lang: string) => get<{ items: DueAnswer[] }>(`${p(profile)}/prevention-answers`, { lang });
-export const putDueAnswers = (profile: string, answers: Record<string, 'yes' | 'no' | null>) =>
-	put<{ items: DueAnswer[] }>(`${p(profile)}/prevention-answers`, answers);
+export const putDueAnswers = (profile: string, answers: Record<string, 'yes' | 'no' | null>, lang: string) =>
+	request<{ items: DueAnswer[] }>('PUT', `${p(profile)}/prevention-answers`, { query: { lang }, body: answers });

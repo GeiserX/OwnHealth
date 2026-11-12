@@ -16,7 +16,7 @@
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
-	import { addDays, dueColor, dueGroups, isOpen, type DueDecisionIn, type DueDoc, type DueItem } from '#lib/logic/due';
+	import { addDays, docLabel, dueColor, dueGroups, isOpen, type DueDecisionIn, type DueDoc, type DueItem } from '#lib/logic/due';
 	import { todayIso } from '#lib/logic/people';
 	import { currentProfile } from '#lib/state/app.svelte';
 
@@ -111,17 +111,16 @@
 			listRecords(slug, 'immunization').catch(() => ({ items: [] })),
 			listDocuments(slug).catch(() => ({ items: [] }))
 		]);
-		const rec = (kind: string, group: string) => (r: { id: string; title: string; detail: Record<string, unknown> }) => ({
-			value: `${kind}:${r.id}`,
-			label: [r.title, day(r.detail.performed ?? r.detail.occurred ?? r.detail.effective_at)].filter(Boolean).join(' · '),
-			group
-		});
+		type Rec = { id: string; title: string; detail: Record<string, unknown> };
+		const recDay = (r: Rec) => day(r.detail.performed ?? r.detail.occurred ?? r.detail.effective_at);
+		const rec = (kind: string, group: string) => (r: Rec) => ({ value: `${kind}:${r.id}`, label: [r.title, recDay(r)].join(' · '), group });
+		// a record with no day proves nothing on any day, so the server refuses it as evidence
 		evidenceList = [
-			...imm.items.map(rec('immunization', t('due_f_vaccine'))),
-			...proc.items.map(rec('procedure', t('due_f_procedure'))),
+			...imm.items.filter(recDay).map(rec('immunization', t('due_f_vaccine'))),
+			...proc.items.filter(recDay).map(rec('procedure', t('due_f_procedure'))),
 			...docs.items
 				.filter((d) => d.status === 'active')
-				.map((d) => ({ value: `document:${d.id}`, label: [d.filename ?? d.doc_type ?? d.id.slice(0, 8), day(d.collected_at)].filter(Boolean).join(' · '), group: t('due_ev_document') }))
+				.map((d) => ({ value: `document:${d.id}`, label: docLabel(d), group: t('due_ev_document') }))
 		];
 	}
 	function startAct(i: DueItem) {

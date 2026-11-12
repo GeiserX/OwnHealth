@@ -44,7 +44,7 @@
 		error = null;
 		saved = null;
 		try {
-			items = (await putDueAnswers(profile, { [key]: value })).items;
+			items = (await putDueAnswers(profile, { [key]: value }, i18n.lang)).items;
 			saved = key;
 			onchange?.();
 		} catch (e) {
