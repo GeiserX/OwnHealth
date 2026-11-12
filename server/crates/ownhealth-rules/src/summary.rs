@@ -185,13 +185,23 @@ fn point(p: &Point, lang: &str) -> Value {
 }
 
 /// The lab range in the sheet's number format, built from its numeric bounds as the UI's `refRange`
-/// does ('4,0 - 5,6', '< 3,0', '> 30'); a range with no numbers prints as the lab wrote it.
+/// does ('4,0 - 5,6', '< 3,0', '> 30'); a one-sided bound the lab printed as inclusive ('≤', '<=')
+/// prints as '<=' or '>=', which the PDF's WinAnsi font can show; a range with no numbers prints as
+/// the lab wrote it.
 fn range(p: &Point, lang: &str) -> Option<String> {
     let n = |d: &rust_decimal::Decimal| num::localized(&num::num(d), lang);
+    let printed = p.ref_text.as_deref().unwrap_or_default();
+    let cmp = |inclusive: [&'static str; 2], strict: &'static str| {
+        if inclusive.iter().any(|c| printed.contains(c)) {
+            inclusive[0]
+        } else {
+            strict
+        }
+    };
     match (&p.ref_low, &p.ref_high) {
         (Some(lo), Some(hi)) => Some(format!("{} - {}", n(lo), n(hi))),
-        (None, Some(hi)) => Some(format!("< {}", n(hi))),
-        (Some(lo), None) => Some(format!("> {}", n(lo))),
+        (None, Some(hi)) => Some(format!("{} {}", cmp(["<=", "≤"], "<"), n(hi))),
+        (Some(lo), None) => Some(format!("{} {}", cmp([">=", "≥"], ">"), n(lo))),
         (None, None) => p.ref_text.clone(),
     }
 }
@@ -604,6 +614,44 @@ mod tests {
             flag_groups(&rendered, &body),
             vec![("ldl_c".into(), 1), ("hdl_c".into(), 2), ("tsh".into(), 3)]
         );
+    }
+
+    #[test]
+    fn a_one_sided_range_keeps_the_comparator_the_lab_printed() {
+        let p = |lo: Option<&str>, hi: Option<&str>, text: Option<&str>| Point {
+            id: uuid::Uuid::nil(),
+            date: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap_or_default(),
+            value: None,
+            canonical: None,
+            canonical_unit: None,
+            printed_value: String::new(),
+            unit: None,
+            unit_ucum: None,
+            ref_text: text.map(Into::into),
+            ref_low: lo.and_then(|v| v.parse().ok()),
+            ref_high: hi.and_then(|v| v.parse().ok()),
+            flag: None,
+            loinc: None,
+            method: None,
+            src: "src_x".into(),
+            src_label: None,
+            src_kind: "lab".into(),
+            derivation: "printed".into(),
+        };
+        let r = |pt: Point, lang: &str| range(&pt, lang);
+        // the PDF font is WinAnsi, which has no '≤' or '≥': the sheet writes '<=' and '>='
+        assert_eq!(r(p(None, Some("5.6"), Some("≤ 5.6")), "es").as_deref(), Some("<= 5,6"));
+        assert_eq!(r(p(None, Some("5.6"), Some("<=5.6")), "en").as_deref(), Some("<= 5.6"));
+        assert_eq!(r(p(Some("30"), None, Some("≥ 30")), "es").as_deref(), Some(">= 30"));
+        assert_eq!(r(p(Some("30"), None, Some(">= 30")), "en").as_deref(), Some(">= 30"));
+        assert_eq!(r(p(None, Some("200"), Some("< 200")), "en").as_deref(), Some("< 200"));
+        assert_eq!(r(p(None, Some("200"), None), "en").as_deref(), Some("< 200"));
+        assert_eq!(r(p(Some("30"), None, None), "en").as_deref(), Some("> 30"));
+        assert_eq!(
+            r(p(Some("4.0"), Some("5.6"), Some("4.0-5.6")), "es").as_deref(),
+            Some("4,0 - 5,6")
+        );
+        assert_eq!(r(p(None, None, Some("negativo")), "es").as_deref(), Some("negativo"));
     }
 
     #[test]
