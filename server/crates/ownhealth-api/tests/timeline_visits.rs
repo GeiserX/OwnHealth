@@ -443,3 +443,31 @@ async fn a_medicine_row_is_named_after_a_course_the_window_keeps() -> R {
     assert_eq!(spans(&all, "medication")[0].0, "Cardyl");
     Ok(())
 }
+
+/// A medicine whose latest course starts after today: the lane draws no bar for that course, so the
+/// row is named after the latest course that has started. A row with only future courses keeps the
+/// latest one's name.
+#[tokio::test]
+async fn a_medicine_row_is_named_after_a_course_that_has_started() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let mut tx = a.rt.pool.begin().await?;
+    for (name, ingredient, started) in [
+        ("Atorvastatin", "atorvastatin", "2026-03-10"),
+        ("Cardyl", "atorvastatin", "2099-02-01"),
+        ("Ibuprofen", "ibuprofen", "2099-03-01"),
+        ("Neobrufen", "ibuprofen", "2099-04-01"),
+    ] {
+        record(
+            &mut tx,
+            "medication",
+            json!({"profile_id": alex, "name": name, "ingredient": ingredient, "started": started}),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    let (_, out) = a.get("alex", "/profiles/alex/timeline?types=medication").await?;
+    let names: Vec<String> = spans(&out, "medication").into_iter().map(|(l, _)| l).collect();
+    assert_eq!(names, ["Atorvastatin", "Neobrufen"]);
+    Ok(())
+}

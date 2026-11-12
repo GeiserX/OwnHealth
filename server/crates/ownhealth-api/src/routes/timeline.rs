@@ -548,6 +548,7 @@ async fn spans(
              order by m.started, m.name, m.src_id",
             live("m", sens)
         );
+        let today = super::core::local_today();
         let mut by_key: std::collections::BTreeMap<String, Span> = std::collections::BTreeMap::new();
         for r in rows(conn, &sql, pid).await? {
             let Some(start) = day(&r, "started")? else { continue };
@@ -577,8 +578,10 @@ async fn spans(
                 label: name.clone(),
                 segments: Vec::new(),
             });
-            // the row is named after its latest course (rows come by start, then name: a tie is stable)
-            if span.segments.iter().all(|s| s.date <= start) {
+            // the row is named after its latest course that has started by today (rows come by start, then
+            // name: a tie is stable); the lane draws no bar for a later course, so it never names the row,
+            // unless no course has started yet
+            if start <= today || span.segments.iter().all(|s| s.date > today) {
                 span.label = name;
             }
             span.segments.push(seg);
