@@ -13,6 +13,8 @@
 //! the principal, which is also how the tests reach the token paths Python reached by overriding
 //! `get_principal`.
 
+pub mod couple;
+
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
