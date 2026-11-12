@@ -567,6 +567,10 @@ async fn spans(
                 src: text(&r, "src_id")?,
                 src_label: text(&r, "label")?,
             };
+            // the window applies before naming, so a course it removes never names the row
+            if !seg.within(window.0, window.1) {
+                continue;
+            }
             let key: String = r.try_get::<Option<String>, _>("key")?.unwrap_or_default();
             let span = by_key.entry(key).or_insert_with(|| Span {
                 kind: "medication",

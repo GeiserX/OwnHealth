@@ -408,3 +408,38 @@ async fn a_course_on_hold_is_not_ongoing() -> R {
     );
     Ok(())
 }
+
+/// A window that leaves out the latest course of a medicine: the row is named after a course the
+/// answer still shows, never the one the window removed.
+#[tokio::test]
+async fn a_medicine_row_is_named_after_a_course_the_window_keeps() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let mut tx = a.rt.pool.begin().await?;
+    for (name, started, stopped) in [
+        ("Atorvastatin", "2022-06-20", Some("2023-06-01")),
+        ("Cardyl", "2026-03-10", None),
+    ] {
+        record(
+            &mut tx,
+            "medication",
+            json!({"profile_id": alex, "name": name, "ingredient": "atorvastatin", "started": started,
+                   "stopped": stopped}),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    let (_, out) = a
+        .get("alex", "/profiles/alex/timeline?types=medication&to=2023-12-31")
+        .await?;
+    assert_eq!(
+        spans(&out, "medication"),
+        [(
+            "Atorvastatin".to_string(),
+            vec![(json!("2022-06-20"), json!("2023-06-01"))]
+        )]
+    );
+    let (_, all) = a.get("alex", "/profiles/alex/timeline?types=medication").await?;
+    assert_eq!(spans(&all, "medication")[0].0, "Cardyl");
+    Ok(())
+}
