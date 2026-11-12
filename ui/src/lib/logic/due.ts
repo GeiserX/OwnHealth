@@ -24,6 +24,33 @@ export interface DueItem {
 	reason_code?: string;
 	/** A guideline row: the record kind and the name that make a new record count for it. */
 	record?: { kind: 'immunization' | 'procedure'; text: string | null };
+	/** not_assessed `no_answer`: the answer key the row depends on. */
+	answer?: string;
+	/** What the person decided about this item (POST /profiles/{p}/due/{key}/decision). */
+	decision?: DueDecision;
+}
+
+/** A person's decision about one item; `reason` is their own words (shown, never hashed). */
+export interface DueDecision {
+	kind: 'snooze' | 'dismiss' | 'done';
+	until?: string;
+	reason?: string;
+	evidence?: { table: 'immunization' | 'procedure' | 'encounter' | 'document'; id: string };
+}
+
+/** A decision as the screen sends it. */
+export type DueDecisionIn =
+	| { kind: 'snooze'; until: string; reason?: string }
+	| { kind: 'dismiss'; reason: string }
+	| { kind: 'done'; evidence: { table: 'immunization' | 'procedure' | 'encounter' | 'document'; id: string }; reason?: string };
+
+/** One question some guideline rows need (GET /profiles/{p}/prevention-answers). */
+export interface DueAnswer {
+	key: string;
+	question: string | null;
+	value: 'yes' | 'no' | null;
+	src: string | null;
+	recorded_at: string | null;
 }
 
 export interface DueDoc {
@@ -36,6 +63,8 @@ export interface DueDoc {
 	reason?: string | null;
 	disclaimer?: string | null;
 	items: DueItem[];
+	/** Items the person's decisions hide (snoozed, dismissed, done); absent when none. */
+	hidden?: DueItem[];
 	unmatched?: { name: string; src: string }[];
 	withheld: number;
 	/** The scopes the withheld items need. */
@@ -74,6 +103,26 @@ export interface GlanceDue {
 
 const OPEN: DueStatus[] = ['overdue', 'due', 'upcoming'];
 export const isOpen = (i: { status: string }) => (OPEN as string[]).includes(i.status);
+
+/** An open item whose snooze has run out: the screen lists it under "Shown again" until the person acts. */
+export const shownAgain = (i: DueItem) => i.decision?.kind === 'snooze' && isOpen(i);
+
+/** The Due screen's sections, in order; an item is in exactly one. */
+export function dueGroups(items: DueItem[]): { id: 'again' | 'open' | 'done' | 'na'; rows: DueItem[] }[] {
+	return [
+		{ id: 'again', rows: items.filter(shownAgain) },
+		{ id: 'open', rows: items.filter((i) => isOpen(i) && !shownAgain(i)) },
+		{ id: 'done', rows: items.filter((i) => i.status === 'up_to_date') },
+		{ id: 'na', rows: items.filter((i) => i.status === 'not_assessed') }
+	];
+}
+
+/** The day after `iso` (YYYY-MM-DD), the earliest a new snooze may end on the local calendar. */
+export function addDays(iso: string, n: number): string {
+	const d = new Date(`${iso}T12:00:00Z`);
+	d.setUTCDate(d.getUTCDate() + n);
+	return d.toISOString().slice(0, 10);
+}
 
 /** The status colour key (colors.ts C) of a due status. */
 export function dueColor(s: string): 'out' | 'watch' | 'ok' | 'nodata' | 'stale' {
