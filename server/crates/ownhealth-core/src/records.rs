@@ -130,7 +130,21 @@ pub struct MedicationIn {
     /// Every coding the source sent, as received. The primary code stays in `code_system`/`code`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codes: Option<Vec<MedCode>>,
+    // Migration 1101, left out the same way. The person's own choice, never advice; it stays out of
+    // the state body.
+    /// keep | stop | do_not_repurchase
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    /// Why, as the person wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_reason: Option<String>,
+    /// The day the person decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_on: Option<NaiveDate>,
 }
+
+/// The decisions a person can record on a medicine or supplement.
+pub const DECISIONS: [&str; 3] = ["keep", "stop", "do_not_repurchase"];
 
 /// One coding of a medicine as the source sent it (system URL, code, display).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -306,6 +320,9 @@ impl RecordIn {
                 if m.codes.iter().flatten().any(|c| c.code.trim().is_empty()) {
                     return Err(Error::Invalid("codes: a coding needs a code".into()));
                 }
+                if let Some(d) = &m.decision {
+                    check("decision", d, &DECISIONS)?;
+                }
                 check("med_status", &m.med_status, &["active", "stopped", "on_hold"])
             }
             RecordIn::Allergy(a) => match &a.criticality {
@@ -357,7 +374,7 @@ fn sql_type(column: &str) -> &'static str {
         "profile_id" => "uuid",
         "effective_at" | "period_start" | "period_end" => "timestamptz",
         "sensitivity" => "text[]",
-        "onset" | "abatement" | "started" | "stopped" | "occurred" | "performed" => "date",
+        "onset" | "abatement" | "started" | "stopped" | "occurred" | "performed" | "decision_on" => "date",
         "dose_number" => "int",
         "codes" => "jsonb",
         _ => "text",
@@ -462,8 +479,42 @@ pub async fn supersede_record(
         },
     )
     .await?;
+    if table == "medication_statement" {
+        // the label photos follow the record to its new version
+        sqlx::query(
+            "insert into medication_label (medication_id, document_id, created_at) \
+             select $2, document_id, created_at from medication_label where medication_id = $1",
+        )
+        .bind(old_id)
+        .bind(committed.id)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     Ok(committed)
+}
+
+/// Link a stored document (a label photo) to a medicine or supplement version.
+pub async fn add_label(conn: &mut PgConnection, medication_id: Uuid, document_id: Uuid) -> Result<()> {
+    sqlx::query("insert into medication_label (medication_id, document_id) values ($1, $2) on conflict do nothing")
+        .bind(medication_id)
+        .bind(document_id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// The label photos of each medication version, newest first, leaving out retracted documents:
+/// `(medication_id, [document_id])`.
+pub async fn labels_of(conn: &mut PgConnection, medication_ids: &[Uuid]) -> Result<Vec<(Uuid, Vec<Uuid>)>> {
+    Ok(sqlx::query_as(
+        "select l.medication_id, array_agg(l.document_id order by l.created_at desc, l.document_id) \
+         from medication_label l join document d on d.id = l.document_id \
+         where l.medication_id = any($1) and d.status = 'active' group by l.medication_id",
+    )
+    .bind(medication_ids)
+    .fetch_all(conn)
+    .await?)
 }
 
 pub async fn retract_record(conn: &mut PgConnection, kind: &str, record_id: Uuid, reason: &str) -> Result<()> {

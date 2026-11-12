@@ -9,6 +9,7 @@
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
+	import SupplementsCard from '#lib/components/SupplementsCard.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
 	import { openSource } from '#lib/components/pages1/source.svelte';
@@ -180,6 +181,8 @@
 		{/if}
 	</section>
 </div>
+
+{#if prof && meds.data}<SupplementsCard profile={prof.slug} records={meds.data} {canWrite} onsaved={load} />{/if}
 
 <DrugCheckCard />
 

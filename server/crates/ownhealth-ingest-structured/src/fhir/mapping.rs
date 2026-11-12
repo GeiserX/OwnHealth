@@ -834,6 +834,9 @@ pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&s
             schedule_text,
             prescriber,
             codes,
+            decision: None,
+            decision_reason: None,
+            decision_on: None,
         }),
         checks,
     )

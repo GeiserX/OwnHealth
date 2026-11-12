@@ -138,3 +138,20 @@ export function pgxFor<V>(cache: PgxViews<V> | null, slug: string | undefined, d
 	if (!cache || cache.slug !== slug || kind === 'supplement') return null;
 	return cache.views[drug] ?? null;
 }
+
+/** The decisions a person can record on a supplement: their own choice, never advice. */
+export const DECISIONS = ['keep', 'stop', 'do_not_repurchase'] as const;
+export type Decision = (typeof DECISIONS)[number];
+
+/** The decision a version carries, or null when none was recorded (or the value is not one we know). */
+export function decisionOf(detail: Record<string, unknown>): Decision | null {
+	const d = detail.decision;
+	return DECISIONS.includes(d as Decision) ? (d as Decision) : null;
+}
+
+/** Every supplement's live version, taken or not: the ones taken today first, then by name. */
+export function supplementRows<T extends MedRecord>(records: T[], today: string): T[] {
+	return records
+		.filter((r) => (r.status === 'current' || r.status === 'provisional') && r.detail.kind === 'supplement')
+		.sort((a, b) => Number(isCurrent(b, today)) - Number(isCurrent(a, today)) || a.title.localeCompare(b.title));
+}
