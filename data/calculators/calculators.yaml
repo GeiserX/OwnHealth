@@ -1,0 +1,94 @@
+# Calculators: published formulas run on a person's recorded lab values (docs/calculators/).
+# Results are computed on read and never stored (ownhealth.calculators/v1). The coefficients live in
+# server/crates/ownhealth-rules/src/calc/, pinned by the vectors in tests/fixtures/calc/.
+#
+# id         the calculator, as the document names it
+# version    the version of the formula
+# inputs     alias groups the formula reads, all from one draw
+# shows_on   alias groups whose biomarker page lists the result
+# system     the dashboard card the result belongs to
+# unit       UCUM unit of the result, empty for a ratio
+# precision  decimals shown
+# cite       the paper
+version: 0.1.0
+rows:
+  - id: ckd_epi_2021_cr
+    version: CKD-EPI 2021 cr
+    inputs: [creatinine]
+    shows_on: [creatinine, egfr, cystatin_c]
+    system: kidney
+    unit: "mL/min/{1.73_m2}"
+    precision: 0
+    cite: https://pubmed.ncbi.nlm.nih.gov/34554658/
+  - id: ckd_epi_2021_cr_cys
+    version: CKD-EPI 2021 cr-cys
+    inputs: [creatinine, cystatin_c]
+    shows_on: [creatinine, egfr, cystatin_c]
+    system: kidney
+    unit: "mL/min/{1.73_m2}"
+    precision: 0
+    cite: https://pubmed.ncbi.nlm.nih.gov/34554658/
+  - id: fib4
+    version: FIB-4 (Sterling 2006)
+    inputs: [ast, alt, platelets]
+    shows_on: [ast, alt, platelets, ggt]
+    system: liver
+    unit: ""
+    precision: 2
+    cite: https://pubmed.ncbi.nlm.nih.gov/16729309/
+  - id: homa_ir
+    version: HOMA-IR (Matthews 1985)
+    inputs: [glucose, insulin]
+    shows_on: [glucose, insulin, hba1c]
+    system: cardiometabolic
+    unit: ""
+    precision: 2
+    cite: https://pubmed.ncbi.nlm.nih.gov/3899825/
+  # The published FIB-4 bands. Shah 2009 gives 1.3 and 2.67; McPherson 2017 gives 2.0 as the lower
+  # cutoff from age 65.
+  - id: fib4.cutoffs
+    low: "1.3"
+    high: "2.67"
+    cite: https://pubmed.ncbi.nlm.nih.gov/19523535/
+  - id: fib4.cutoffs_65
+    low: "2.0"
+    high: "2.67"
+    from_age: 65
+    cite: https://pubmed.ncbi.nlm.nih.gov/27725647/
+templates:
+  name:
+    ckd_epi_2021_cr: {en: "eGFR (CKD-EPI 2021, creatinine)", es: "FGe (CKD-EPI 2021, creatinina)"}
+    ckd_epi_2021_cr_cys: {en: "eGFR (CKD-EPI 2021, creatinine and cystatin C)", es: "FGe (CKD-EPI 2021, creatinina y cistatina C)"}
+    fib4: {en: "FIB-4", es: "FIB-4"}
+    homa_ir: {en: "HOMA-IR", es: "HOMA-IR"}
+  short:
+    ckd_epi_2021_cr: {en: "eGFR (creatinine)", es: "FGe (creatinina)"}
+    ckd_epi_2021_cr_cys: {en: "eGFR (creatinine, cystatin C)", es: "FGe (creatinina, cistatina C)"}
+    fib4: {en: "FIB-4", es: "FIB-4"}
+    homa_ir: {en: "HOMA-IR", es: "HOMA-IR"}
+  reason:
+    missing_input: {en: "Not computed: no {groups} on record.", es: "Sin calcular: el registro no tiene {groups}."}
+    inputs_not_same_draw: {en: "Not computed: {groups} come from different draws, and the formula needs one draw.", es: "Sin calcular: {groups} vienen de extracciones distintas y la fórmula necesita una sola."}
+    not_adult: {en: "Not computed: the equation is validated for adults (18 and over); age {age} on {on}.", es: "Sin calcular: la ecuación está validada en adultos (18 años o más); {age} años el {on}."}
+    age_below_35: {en: "Not computed: FIB-4 is validated from age 35; age {age} on {on}.", es: "Sin calcular: el FIB-4 está validado desde los 35 años; {age} años el {on}."}
+    sex_not_recorded: {en: "Not computed: the equation uses sex at birth, which is not recorded.", es: "Sin calcular: la ecuación usa el sexo al nacer, que no está registrado."}
+    birth_date_not_recorded: {en: "Not computed: the formula uses age, and the birth date is not recorded.", es: "Sin calcular: la fórmula usa la edad y la fecha de nacimiento no está registrada."}
+    unit_unsupported: {en: "Not computed: {group} is in {unit}, a unit with no published conversion here.", es: "Sin calcular: {group} está en {unit}, una unidad sin conversión publicada aquí."}
+    out_of_range: {en: "Not computed: an input is zero or negative, outside what the formula takes.", es: "Sin calcular: un valor es cero o negativo, fuera de lo que admite la fórmula."}
+    not_a_number: {en: "Not computed: {group} is not a plain number ({printed}).", es: "Sin calcular: {group} no es un número exacto ({printed})."}
+  limitation:
+    fasting_not_recorded: {en: "HOMA-IR assumes fasting samples; the record does not say whether this draw was fasting.", es: "El HOMA-IR supone muestras en ayunas; el registro no dice si esta extracción lo fue."}
+    insulin_factor: {en: "Insulin was printed in pmol/L and read as µIU/mL with the factor 6.00 (Knopp 2019). With the other published factor, 6.945, this result would be about 14% lower.", es: "La insulina venía en pmol/L y se leyó en µUI/mL con el factor 6,00 (Knopp 2019). Con el otro factor publicado, 6,945, este resultado sería un 14 % más bajo."}
+    fib4_age_65: {en: "From age 65 the published lower cutoff is 2.0 instead of 1.3 (McPherson 2017).", es: "Desde los 65 años el punto de corte inferior publicado es 2,0 en lugar de 1,3 (McPherson 2017)."}
+  category:
+    fib4.low: {en: "Below the published lower cutoff ({low}).", es: "Por debajo del punto de corte inferior publicado ({low})."}
+    fib4.mid: {en: "Between the published cutoffs ({low} and {high}).", es: "Entre los puntos de corte publicados ({low} y {high})."}
+    fib4.high: {en: "Above the published upper cutoff ({high}).", es: "Por encima del punto de corte superior publicado ({high})."}
+  group:
+    creatinine: {en: creatinine, es: creatinina}
+    cystatin_c: {en: cystatin C, es: cistatina C}
+    ast: {en: AST, es: AST}
+    alt: {en: ALT, es: ALT}
+    platelets: {en: platelets, es: plaquetas}
+    glucose: {en: glucose, es: glucosa}
+    insulin: {en: insulin, es: insulina}

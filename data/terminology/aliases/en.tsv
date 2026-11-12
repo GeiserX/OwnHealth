@@ -99,6 +99,9 @@ HbA1c (NGSP)	hba1c		curated	2026-11-08
 Creatinine	creatinine		curated	2026-11-08
 Creatinine, serum	creatinine		curated	2026-11-08
 Serum creatinine	creatinine		curated	2026-11-08
+Cystatin C	cystatin_c		curated	2026-11-11
+Cystatin C, serum	cystatin_c		curated	2026-11-11
+Serum cystatin C	cystatin_c		curated	2026-11-11
 BUN	bun		curated	2026-11-08
 Blood urea nitrogen	bun		curated	2026-11-08
 Urea nitrogen	bun		curated	2026-11-08
