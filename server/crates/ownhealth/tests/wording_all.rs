@@ -29,6 +29,7 @@ const SOURCES: &[(&str, Source)] = &[
     ("status", |s| Box::pin(status(s))),
     ("dashboard", |s| Box::pin(dashboards(s))),
     ("check_drug", |s| Box::pin(drug_checks(s))),
+    ("due", |s| Box::pin(due(s))),
     ("calculators", |s| Box::pin(calculators(s))),
 ];
 
@@ -67,6 +68,20 @@ async fn drug_checks(s: &Seeded) -> anyhow::Result<Vec<Value>> {
             for lang in LANGS {
                 out.push(check_drug(&mut tx, s.pid(slug), drug, &all_scopes(), lang, Some(as_of())).await?);
             }
+        }
+    }
+    Ok(out)
+}
+
+/// The Due screen (ownhealth.prevention/v1 rendered) of each person in both languages.
+async fn due(s: &Seeded) -> anyhow::Result<Vec<Value>> {
+    let mut tx = s.pool().begin().await?;
+    let pack = load_pack()?;
+    let mut out = Vec::new();
+    for slug in SLUGS {
+        let doc = ownhealth_rules::prevention::build_document(&mut tx, s.pid(slug), as_of()).await?;
+        for lang in LANGS {
+            out.push(ownhealth_rules::prevention::render(&doc, &pack, lang, &all_scopes())?);
         }
     }
     Ok(out)
