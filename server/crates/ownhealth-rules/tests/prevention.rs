@@ -783,3 +783,35 @@ async fn a_caller_without_read_records_gets_no_prevention_hash() -> R {
     tx.rollback().await?;
     Ok(())
 }
+
+/// A seasonal row whose start age is a few weeks away, off season and with no dose on record, claims
+/// nothing: it is not up to date, because up to date needs a dose.
+#[tokio::test]
+async fn an_off_season_row_before_its_start_age_claims_nothing_without_a_dose() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let household: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(s.pid("alex"))
+        .fetch_one(&mut *tx)
+        .await?;
+    let pid = create_profile(
+        &mut *tx,
+        &ProfileIn {
+            household_id: household,
+            slug: "riley".into(),
+            display_name: "Riley Test".into(),
+            relationship: Some("other".into()),
+            birth_date: chrono::NaiveDate::from_ymd_opt(2008, 6, 1),
+            sex_at_birth: Some("male".into()),
+            country: Some("US".into()),
+            ..ProfileIn::default()
+        },
+    )
+    .await?;
+    // 19 on 2027-06-01, 47 days after this date; the season opens on 09-01
+    let doc = build_document(&mut tx, pid, day("2027-04-15")).await?;
+    let flu = item(&doc, "us.vac.influenza");
+    assert!(flu.is_null(), "{flu}");
+    tx.rollback().await?;
+    Ok(())
+}

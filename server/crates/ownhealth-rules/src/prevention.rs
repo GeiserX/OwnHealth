@@ -733,8 +733,13 @@ fn item(row: &Row, prev: &Prevention, birth: NaiveDate, as_of: NaiveDate, facts:
             };
             let next = next.max(if start > as_of { next_season(start, s) } else { start });
             // off season with no dose this season, the row claims nothing until the next season is
-            // near: up to date needs a dose, and due needs a season that is running
-            if start <= as_of && !done && !in_season && (next - as_of).num_days() > prev.upcoming_days {
+            // near: up to date needs a dose, and due needs a season that is running. Before the
+            // start age this holds too when no dose is on record at all.
+            if (start <= as_of || mine.is_empty())
+                && !done
+                && !in_season
+                && (next - as_of).num_days() > prev.upcoming_days
+            {
                 return None;
             }
             (Some(next), false)
