@@ -10,8 +10,11 @@
 
 use rust_decimal::{Decimal, MathematicalOps};
 
-/// FIB-4, unrounded. None when a divisor is zero.
+/// FIB-4, unrounded. None when an input is zero or negative.
 pub fn fib4(age: u32, ast_u_l: Decimal, alt_u_l: Decimal, platelets_10_9_l: Decimal) -> Option<Decimal> {
+    if [ast_u_l, alt_u_l, platelets_10_9_l].iter().any(|x| *x <= Decimal::ZERO) {
+        return None;
+    }
     let root = alt_u_l.sqrt()?;
     let divisor = platelets_10_9_l.checked_mul(root)?;
     Decimal::from(age).checked_mul(ast_u_l)?.checked_div(divisor)

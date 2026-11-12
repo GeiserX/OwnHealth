@@ -9,7 +9,7 @@ computed, it says why. This is information, not diagnosis.
 | eGFR, CKD-EPI 2021 creatinine | [ckd-epi-2021.md](ckd-epi-2021.md) | creatinine | adults (18 and over), sex at birth recorded |
 | eGFR, CKD-EPI 2021 creatinine-cystatin C | [ckd-epi-2021.md](ckd-epi-2021.md) | creatinine, cystatin C | as above |
 | FIB-4 | [fib-4.md](fib-4.md) | AST, ALT, platelets | age 35 and over |
-| HOMA-IR | [homa-ir.md](homa-ir.md) | glucose, insulin | same draw; fasting is not recorded |
+| HOMA-IR | [homa-ir.md](homa-ir.md) | glucose, insulin | same draw; says when fasting is not recorded |
 
 ## How a result is made
 
@@ -17,8 +17,10 @@ computed, it says why. This is information, not diagnosis.
   for one profile and one `as_of` day. Its `calculators_hash` is the sha256 of the same canonical JSON
   that `state_hash` uses. The document never enters the hashed state body.
 - **One draw.** All inputs of one result come from one draw: the lab report (`report_key`), else the
-  document, else the day. The timeline groups a draw the same way. A formula runs once for each draw
-  that holds all its inputs, so the kidney card can show eGFR over time.
+  document and the day, else the day. A document alone is not a draw, because a FHIR bundle or an
+  Apple Health export with no DiagnosticReport holds values from many days. Inputs with different
+  days are refused (`inputs_not_same_draw`). A formula runs once for each draw that holds all its
+  inputs, so the kidney card can show eGFR over time.
 - **Units.** `data/calculators/units.yaml` lists each unit a formula accepts and the number the
   printed value is divided by, with its citation. A unit with no row is refused (`unit_unsupported`).
   No factor is guessed.

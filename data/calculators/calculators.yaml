@@ -78,7 +78,7 @@ templates:
     not_a_number: {en: "Not computed: {group} is not a plain number ({printed}).", es: "Sin calcular: {group} no es un número exacto ({printed})."}
   limitation:
     fasting_not_recorded: {en: "HOMA-IR assumes fasting samples; the record does not say whether this draw was fasting.", es: "El HOMA-IR supone muestras en ayunas; el registro no dice si esta extracción lo fue."}
-    insulin_factor: {en: "Insulin was printed in pmol/L and read as uIU/mL with the factor 6.00 (Knopp 2019). With the other published factor, 6.945, this result would be about 14% lower.", es: "La insulina venía en pmol/L y se leyó en µUI/mL con el factor 6,00 (Knopp 2019). Con el otro factor publicado, 6,945, este resultado sería un 14 % más bajo."}
+    insulin_factor: {en: "Insulin was printed in pmol/L and read as µIU/mL with the factor 6.00 (Knopp 2019). With the other published factor, 6.945, this result would be about 14% lower.", es: "La insulina venía en pmol/L y se leyó en µUI/mL con el factor 6,00 (Knopp 2019). Con el otro factor publicado, 6,945, este resultado sería un 14 % más bajo."}
     fib4_age_65: {en: "From age 65 the published lower cutoff is 2.0 instead of 1.3 (McPherson 2017).", es: "Desde los 65 años el punto de corte inferior publicado es 2,0 en lugar de 1,3 (McPherson 2017)."}
   category:
     fib4.low: {en: "Below the published lower cutoff ({low}).", es: "Por debajo del punto de corte inferior publicado ({low})."}

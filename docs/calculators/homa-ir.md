@@ -20,9 +20,11 @@ HOMA-IR = fasting glucose [mmol/L] x fasting insulin [µU/mL] / 22.5
   calculators use 6.945 instead. With that factor the result would be about 14% lower. Every result
   that converted pmol/L carries the limitation `insulin_factor`, which says so.
 
-**Validity.** Glucose and insulin must come from the same draw (`inputs_not_same_draw`). The record
-does not say whether a draw was fasting, so every result carries the limitation
-`fasting_not_recorded`. No published cutoff is shown.
+**Validity.** Glucose and insulin must come from the same draw (`inputs_not_same_draw`). The formula
+assumes fasting samples. When the glucose row is not labelled fasting (for example "Glucosa en
+ayunas", "Fasting glucose" or LOINC 1558-6), the result carries the limitation
+`fasting_not_recorded`. A zero or negative input is refused (`out_of_range`). No published cutoff is
+shown.
 
 **Precision.** 2 decimals.
 

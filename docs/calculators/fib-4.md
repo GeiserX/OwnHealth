@@ -19,7 +19,7 @@ FIB-4 = age [years] x AST [U/L] / (platelets [10^9/L] x sqrt(ALT [U/L]))
   https://pubmed.ncbi.nlm.nih.gov/27725647/ Such a result also carries the limitation `fib4_age_65`.
 
 **Validity.** Age 35 or over at the draw (`age_below_35`). AST, ALT and platelets must come from the
-same draw.
+same draw. A zero or negative input is refused (`out_of_range`).
 
 **Precision.** 2 decimals.
 

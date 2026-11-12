@@ -11,8 +11,10 @@
 //!
 //! `converted` is an input in the formula's unit, shown to 3 decimals; the formula reads it unrounded.
 //!
-//! Every input of one result comes from one draw (the observation's `report_key`, else its document,
-//! else its day, as the timeline groups a draw). A formula runs once per draw that holds all its
+//! Every input of one result comes from one draw: the observation's `report_key`, else its document
+//! and day, else its day. A document alone is no draw: a FHIR bundle or an Apple Health export with
+//! no DiagnosticReport holds years of values under one document. A draw whose inputs still carry
+//! different days is refused as `inputs_not_same_draw`. A formula runs once per draw that holds all its
 //! inputs; with no such draw the calculator gives one item saying why. A failed validity rule is
 //! `refused`, a missing input `not_assessed`; neither ever carries a value.
 //!
@@ -253,6 +255,8 @@ pub struct Obs {
     pub unit: Option<String>,
     pub date: NaiveDate,
     pub src: String,
+    /// the method the lab printed or the terminology resolved (`fasting` for a fasting glucose)
+    pub method: Option<String>,
 }
 
 /// One draw: the values recorded in it, the newest per group.
@@ -273,7 +277,7 @@ async fn draws(
 ) -> Result<Vec<Draw>> {
     let sql = format!(
         "select o.alias_group, o.value_num, o.value_cmp, o.printed_value, coalesce(o.unit_ucum, o.printed_unit) as unit, \
-         o.effective_at, o.src_id, coalesce(o.report_key, o.document_id::text, o.effective_at::date::text) as draw \
+         o.effective_at, o.src_id, o.method, coalesce(o.report_key, o.document_id::text || ':' || o.effective_at::date::text, o.effective_at::date::text) as draw \
          from observation o where o.profile_id = $1 and {} and o.effective_at < $3 and o.alias_group = any($4) \
          and cardinality(o.sensitivity) = 0 order by o.effective_at, o.recorded_at, o.id",
         visible_sql("o", "$2")
@@ -296,6 +300,7 @@ async fn draws(
             unit: r.try_get("unit")?,
             date: effective.date_naive(),
             src: r.try_get("src_id")?,
+            method: r.try_get("method")?,
         };
         let d = by_key.entry(r.try_get("draw")?).or_default();
         d.date = Some(d.date.map_or(o.date, |x| x.max(o.date)));
@@ -364,10 +369,13 @@ fn person_check(id: &str, person: &Person, on: NaiveDate) -> Option<Refusal> {
 fn input_json(o: &Obs, converted: Option<(Decimal, &str)>) -> Value {
     let mut m = Map::new();
     m.insert("group".into(), json!(o.group));
-    m.insert(
-        "value".into(),
-        json!(o.value.as_ref().map_or_else(|| o.printed.clone(), num)),
-    );
+    // a censored value keeps its comparator: '<5' is never shown as a plain 5
+    let value = match (&o.value, &o.comparator) {
+        (Some(v), Some(c)) => format!("{c}{}", num(v)),
+        (Some(v), None) => num(v),
+        (None, _) => o.printed.clone(),
+    };
+    m.insert("value".into(), json!(value));
     m.insert("unit".into(), json!(o.unit));
     m.insert("date".into(), json!(iso(o.date)));
     m.insert("src".into(), json!(o.src));
@@ -442,6 +450,16 @@ pub fn on_draw(data: &Data, calc: &Calc, draw: &Draw, person: &Person) -> Value 
     let date = draw.date.unwrap_or_default();
     let found: Vec<&Obs> = calc.inputs.iter().filter_map(|g| draw.obs.get(g)).collect();
     let plain = |found: &[&Obs]| found.iter().map(|o| input_json(o, None)).collect::<Vec<_>>();
+    if found.iter().any(|o| o.date != date) {
+        let why = json!({"groups": calc.inputs});
+        return refused(
+            calc,
+            "refused",
+            ("inputs_not_same_draw", why),
+            Some(date),
+            plain(&found),
+        );
+    }
     let mut values = BTreeMap::new();
     let mut inputs = Vec::new();
     let mut limitations: Vec<String> = Vec::new();
@@ -526,7 +544,7 @@ pub fn on_draw(data: &Data, calc: &Calc, draw: &Draw, person: &Person) -> Value 
             }
         }
     }
-    if calc.id == "homa_ir" {
+    if calc.id == "homa_ir" && draw.obs.get("glucose").and_then(|g| g.method.as_deref()) != Some("fasting") {
         limitations.insert(0, "fasting_not_recorded".into());
     }
     m.insert("limitations".into(), json!(limitations));

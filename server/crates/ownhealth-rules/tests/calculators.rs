@@ -221,6 +221,7 @@ fn obs(group: &str, value: &str, unit: &str, date: &str, src: &str) -> Obs {
         unit: Some(unit.into()),
         date: day(date),
         src: src.into(),
+        method: None,
     }
 }
 
@@ -395,6 +396,102 @@ fn every_refusal_and_note_reads_in_both_languages() -> R {
     Ok(())
 }
 
+/// One import without a DiagnosticReport puts every value under one document: a draw that mixes
+/// days is refused, never computed as if it were one specimen.
+#[test]
+fn inputs_from_two_days_are_never_one_draw() {
+    let p = person("1955-01-30", Some(Sex::Female));
+    let mixed = draw(vec![
+        obs("ast", "35", "U/L", "2024-03-02", "a"),
+        obs("alt", "28", "U/L", "2024-03-02", "b"),
+        obs("platelets", "210", "10*9/L", "2025-11-20", "c"),
+    ]);
+    let items = one("fib4", &[mixed], &p);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["status"], "refused");
+    assert_eq!(items[0]["reason_code"], "inputs_not_same_draw");
+    assert!(items[0].get("value").is_none());
+    assert_eq!(items[0]["src"], json!(["a", "b", "c"]));
+}
+
+#[test]
+fn homa_ir_says_fasting_is_not_recorded_only_when_the_glucose_row_does_not_say_it() {
+    let p = person("1981-02-02", Some(Sex::Female));
+    let with = |method: Option<&str>| {
+        let mut g = obs("glucose", "5.4", "mmol/L", "2026-06-10", "g");
+        g.method = method.map(str::to_string);
+        one(
+            "homa_ir",
+            &[draw(vec![g, obs("insulin", "10", "u[IU]/mL", "2026-06-10", "i")])],
+            &p,
+        )[0]["limitations"]
+            .clone()
+    };
+    assert_eq!(with(None), json!(["fasting_not_recorded"]));
+    assert_eq!(with(Some("calculated")), json!(["fasting_not_recorded"]));
+    assert_eq!(with(Some("fasting")), json!([]));
+}
+
+#[test]
+fn a_zero_or_negative_input_is_out_of_range_not_a_value() {
+    for (id, printed, age) in [
+        (
+            "fib4",
+            vec![
+                ("ast", "0", "U/L"),
+                ("alt", "20", "U/L"),
+                ("platelets", "210", "10*9/L"),
+            ],
+            Some(60),
+        ),
+        (
+            "fib4",
+            vec![
+                ("ast", "-3", "U/L"),
+                ("alt", "20", "U/L"),
+                ("platelets", "210", "10*9/L"),
+            ],
+            Some(60),
+        ),
+        (
+            "homa_ir",
+            vec![("glucose", "0", "mmol/L"), ("insulin", "10", "u[IU]/mL")],
+            None,
+        ),
+        (
+            "homa_ir",
+            vec![("glucose", "5.0", "mmol/L"), ("insulin", "0", "u[IU]/mL")],
+            None,
+        ),
+    ] {
+        let p: Vec<(&str, Decimal, &str)> = printed.iter().map(|(g, v, u)| (*g, d(v), *u)).collect();
+        assert_eq!(calc::raw(data(), id, &p, age, None), Ok(None), "{id} {printed:?}");
+        let values = printed.iter().map(|(g, v, u)| obs(g, v, u, "2026-06-10", g)).collect();
+        let items = one(id, &[draw(values)], &person("1960-01-01", Some(Sex::Female)));
+        assert_eq!(items[0]["reason_code"], "out_of_range", "{id} {printed:?}");
+        assert!(items[0].get("value").is_none());
+    }
+}
+
+#[test]
+fn a_censored_input_keeps_its_comparator_in_the_inputs() {
+    let mut ast = obs("ast", "5", "U/L", "2026-11-01", "a");
+    ast.comparator = Some("<".into());
+    ast.printed = "<5".into();
+    let items = one(
+        "fib4",
+        &[draw(vec![
+            ast,
+            obs("alt", "20", "U/L", "2026-11-01", "b"),
+            obs("platelets", "210", "10*9/L", "2026-11-01", "c"),
+        ])],
+        &person("1955-01-30", Some(Sex::Female)),
+    );
+    assert_eq!(items[0]["reason_code"], "not_a_number");
+    assert_eq!(items[0]["inputs"][0]["value"], "<5");
+    assert_eq!(items[0]["inputs"][1]["value"], "20");
+}
+
 // ---------------------------------------------------------------- on the demo family ----
 
 #[tokio::test]
@@ -462,5 +559,51 @@ async fn the_demo_family_gets_results_and_reasons_twice_the_same() -> R {
             "{slug}"
         );
     }
+    Ok(())
+}
+
+/// A FHIR bundle with no DiagnosticReport gives every Observation the bundle's document and no
+/// report_key. Values from different days in it stay different draws.
+#[tokio::test]
+async fn one_document_without_a_report_key_splits_its_draws_by_day() -> R {
+    install_fake_genome();
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let sam = s.pid("sam");
+    let (doc, src): (uuid::Uuid, String) = sqlx::query_as(
+        "select document_id, src_id from observation where profile_id = $1 and document_id is not null limit 1",
+    )
+    .bind(sam)
+    .fetch_one(&mut *tx)
+    .await?;
+    for (group, value, unit, day) in [
+        ("ast", "35", "U/L", "2024-03-02"),
+        ("alt", "28", "U/L", "2024-03-02"),
+        ("platelets", "210", "10*9/L", "2025-11-20"),
+    ] {
+        sqlx::query(
+            "insert into observation (profile_id, category, document_id, source_kind, printed_name, printed_value, \
+             printed_unit, value_num, alias_group, unit_ucum, derivation_version, effective_at, src_id, accepted_by, fhir) \
+             values ($1, 'laboratory', $2, 'clinical', $3, $4, $5, $4::numeric, $3, $5, 'test', $6::date + time '08:00', \
+             $7, 'import', '{}')",
+        )
+        .bind(sam)
+        .bind(doc)
+        .bind(group)
+        .bind(value)
+        .bind(unit)
+        .bind(day)
+        .bind(&src)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let got = calc::document(&mut tx, sam, as_of()).await?;
+    let fib4: Vec<&Value> = got["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["id"] == "fib4" && i["status"] == "ok" && i["date"] == "2025-11-20")
+        .collect();
+    assert_eq!(fib4, Vec::<&Value>::new());
     Ok(())
 }
