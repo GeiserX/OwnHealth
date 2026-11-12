@@ -795,7 +795,7 @@ async fn an_off_season_row_before_its_start_age_claims_nothing_without_a_dose() 
         .fetch_one(&mut *tx)
         .await?;
     let pid = create_profile(
-        &mut *tx,
+        &mut tx,
         &ProfileIn {
             household_id: household,
             slug: "riley".into(),
