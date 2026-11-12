@@ -447,8 +447,10 @@ pub fn raw(
 
 /// One calculator on one draw that holds all its inputs.
 pub fn on_draw(data: &Data, calc: &Calc, draw: &Draw, person: &Person) -> Value {
-    let date = draw.date.unwrap_or_default();
     let found: Vec<&Obs> = calc.inputs.iter().filter_map(|g| draw.obs.get(g)).collect();
+    // the date of this calculator's own inputs: another calculator's values in the same report
+    // neither move nor refuse it
+    let date = found.iter().map(|o| o.date).max().or(draw.date).unwrap_or_default();
     let plain = |found: &[&Obs]| found.iter().map(|o| input_json(o, None)).collect::<Vec<_>>();
     if found.iter().any(|o| o.date != date) {
         let why = json!({"groups": calc.inputs});

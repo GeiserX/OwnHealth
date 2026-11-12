@@ -414,6 +414,25 @@ fn inputs_from_two_days_are_never_one_draw() {
     assert_eq!(items[0]["src"], json!(["a", "b", "c"]));
 }
 
+/// Values of other calculators in the same report do not move this one's date or refuse it.
+#[test]
+fn a_result_is_dated_by_its_own_inputs() {
+    let p = person("1979-05-14", Some(Sex::Male));
+    let report = draw(vec![
+        obs("creatinine", "0.98", "mg/dL", "2026-09-14", "cr"),
+        obs("glucose", "5.4", "mmol/L", "2026-09-15", "g"),
+        obs("insulin", "10", "u[IU]/mL", "2026-09-15", "i"),
+    ]);
+    let egfr = &one("ckd_epi_2021_cr", std::slice::from_ref(&report), &p)[0];
+    assert_eq!(egfr["status"], "ok", "{egfr}");
+    assert_eq!(egfr["date"], "2026-09-14");
+    let homa = &one("homa_ir", &[report], &p)[0];
+    assert_eq!(
+        (homa["status"].clone(), homa["date"].clone()),
+        (json!("ok"), json!("2026-09-15"))
+    );
+}
+
 #[test]
 fn homa_ir_says_fasting_is_not_recorded_only_when_the_glucose_row_does_not_say_it() {
     let p = person("1981-02-02", Some(Sex::Female));
