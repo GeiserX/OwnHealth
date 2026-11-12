@@ -12,7 +12,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use ownhealth_core::pdfwrite::{Column, Font, PAGE_H, Rendered, Writer};
+use ownhealth_core::pdfwrite::{Column, Font, PAGE_H, Rendered, Writer, encode};
 use ownhealth_rules::summary::fill;
 use serde_json::{Map, Value};
 
@@ -105,6 +105,22 @@ fn plain(s: &str) -> String {
         }
     }
     out
+}
+
+/// Whether some text of the model prints a '?' in place of a character (a name in Chinese or Arabic
+/// letters): the WinAnsi font has no glyph for it. The labels are the sheet's own words and print.
+fn unprintable(model: &Value) -> bool {
+    fn any(v: &Value) -> bool {
+        match v {
+            Value::String(s) => encode(&plain(s)).1.iter().any(|f| f.to.contains('?')),
+            Value::Array(a) => a.iter().any(any),
+            Value::Object(o) => o.values().any(any),
+            _ => false,
+        }
+    }
+    model
+        .as_object()
+        .is_some_and(|m| m.iter().any(|(k, v)| k != "labels" && any(v)))
 }
 
 fn join(parts: &[&str], sep: &str) -> String {
@@ -220,6 +236,10 @@ impl Sheet<'_> {
         let p = &m["person"];
         let who = join(&[st(p, "name"), st(p, "sex"), st(p, "age"), st(p, "born")], " · ");
         self.w.paragraph(&who, Font::Bold, 9.0, 12.0);
+        if unprintable(m) {
+            let text = self.t("unprintable");
+            self.line(&text);
+        }
         let sub = fill(&self.t("subtitle"), &[("as_of", st(m, "as_of").into())]);
         self.line(&sub);
         let notice = self.t("notice");

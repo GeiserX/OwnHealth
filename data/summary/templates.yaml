@@ -8,6 +8,9 @@ templates:
   notice:
     en: "Information from the person's own records, not a diagnosis. Every value names its source (src_…); the sources are listed at the end."
     es: "Información de los registros de la propia persona, no un diagnóstico. Cada valor cita su fuente (src_…); las fuentes se listan al final."
+  unprintable:
+    en: "Characters this sheet cannot print show as ?; the record keeps the original text."
+    es: "Los caracteres que esta hoja no puede imprimir aparecen como ?; el registro guarda el texto original."
   age: {en: "{n} years", es: "{n} años"}
   born: {en: "born {date}", es: "nacimiento {date}"}
   sec:

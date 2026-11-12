@@ -316,6 +316,31 @@ async fn a_value_without_its_src_fails_the_check() -> R {
     Ok(())
 }
 
+/// The PDF font is WinAnsi: a name in Chinese or Arabic letters cannot print, and each such letter
+/// shows as '?'. The sheet says so beside the name, so the paper never shows a name that looks whole.
+#[tokio::test]
+async fn a_name_the_font_cannot_print_is_marked_beside_it() -> R {
+    let s = seeded().await?;
+    for lang in LANGS {
+        let mut m = model(&s, s.pid("alex"), &all_scopes(), &opts("gp", lang)).await?;
+        let says = if lang == "es" {
+            "esta hoja no puede imprimir"
+        } else {
+            "this sheet cannot print"
+        };
+        let lines = check_sheet(&m, "latin name");
+        assert!(!lines.iter().any(|l| l.contains(says)), "{lines:#?}");
+        m["person"]["name"] = json!("李明 Li Ming");
+        let lines = check_sheet(&m, "chinese name");
+        let at = lines
+            .iter()
+            .position(|l| l.contains("?? Li Ming"))
+            .ok_or_else(|| anyhow::anyhow!("no name line: {lines:#?}"))?;
+        assert!(lines[at + 1].contains(says), "{lines:#?}");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_viewer_without_lab_records_or_genome_scopes_gets_them_withheld() -> R {
     let s = seeded().await?;
