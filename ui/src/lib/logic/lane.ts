@@ -24,3 +24,11 @@ export function buildLane<S extends { segments: Annotation[] }>(spans: S[], toda
 	const rows = spans.map((s) => ({ span: s, bars: laneBars(s.segments as S['segments'][number][], x, today) })).filter((r) => r.bars.length);
 	return { ticks, rows };
 }
+
+/** A course's dates as text: one day, `start – end`, `start – now` while it runs, and `from start` for a
+ * course that starts after today, which is not running now. */
+export function segRange(g: { date: string; end: string | null }, today: string, w: { now: string; from: string }): string {
+	if (g.end === g.date) return g.date;
+	if (g.end == null && g.date > today) return `${w.from} ${g.date}`;
+	return `${g.date} – ${g.end ?? w.now}`;
+}

@@ -87,3 +87,15 @@ test('a lane with only courses after today is no lane, and a later course never 
 		[2024, 2025, 2026]
 	);
 });
+
+// The phone list prints each course's dates: a course that has not started yet never reads as running now.
+import { segRange } from '../src/lib/logic/lane.ts';
+
+test('a course that starts after today reads "from <day>", never "<day> – now"', () => {
+	const w = { now: 'now', from: 'from' };
+	assert.equal(segRange({ date: '2099-03-01', end: null }, '2026-11-12', w), 'from 2099-03-01');
+	assert.equal(segRange({ date: '2026-03-10', end: null }, '2026-11-12', w), '2026-03-10 – now');
+	assert.equal(segRange({ date: '2026-11-12', end: null }, '2026-11-12', w), '2026-11-12 – now');
+	assert.equal(segRange({ date: '2099-03-01', end: '2099-04-01' }, '2026-11-12', w), '2099-03-01 – 2099-04-01');
+	assert.equal(segRange({ date: '2024-03-01', end: '2024-03-01' }, '2026-11-12', w), '2024-03-01');
+});

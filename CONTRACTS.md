@@ -50,7 +50,7 @@ All routes are under `/api`, JSON, and resolve `{p}` as a profile slug, `me` or 
 | G | family.rs | `GET /household` (with `age_of_majority`, `transfer_pending` and `former_access`) ; `PUT /household/settings` `{age_of_majority}` (household owner, step-up, 14 to 21) ; `PUT /grants` ; `DELETE /grants?user_id=&profile=` ; `PUT /profiles/{p}/locks` ; `PUT /profiles/{p}/sensitive` ; `POST /household/profiles` ; `POST /household/invites` ; `DELETE /profiles/{p}?confirm=<slug>` ; `DELETE /account?confirm=<name>&delete_profile=` | |
 | G | export.rs | `POST /profiles/{p}/export` `{fmt}` | step-up; answers the zip itself |
 | G | auth.rs | `/auth/state`, `/auth/setup/{begin,finish,password}`, `/auth/login/{begin,finish}`, `/auth/recovery`, `/auth/password/login`, `/auth/step-up/{begin,finish}`, `/auth/passkeys` (GET, `/begin`, `/finish`, `DELETE /{id}`), `/auth/recovery-codes`, `/auth/invite/{code}`, `/auth/enroll/{begin,finish,password}`, `/auth/oidc/{login,callback}` | 403 `step_up_required`, 403 `csrf_failed` |
-| H | timeline.rs | `GET /profiles/{p}/timeline?types=&from=&to=&lang=` | |
+| H | timeline.rs | `GET /profiles/{p}/timeline?types=&from=&to=&as_of=&lang=` | |
 | J | app-level | `GET /metrics` (Prometheus, outside `/api`) | |
 
 The TypeScript shapes for every route are in `ui/src/lib/api/types.ts`; the client functions are in

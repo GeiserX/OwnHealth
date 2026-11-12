@@ -2,7 +2,7 @@
 //! store.
 //!
 //! ```text
-//! GET /api/profiles/{p}/timeline   ?types=lab,visit&from=YYYY-MM-DD&to=YYYY-MM-DD&lang=en
+//! GET /api/profiles/{p}/timeline   ?types=lab,visit&from=YYYY-MM-DD&to=YYYY-MM-DD&as_of=YYYY-MM-DD&lang=en
 //! ```
 //!
 //! Lab draws (one event per report, not per value), medication starts and stops, diagnoses, vaccines,
@@ -13,7 +13,9 @@
 //!
 //! `spans` is the bars lane: one row per condition from onset to abatement, and one row per medicine
 //! (grouped by ingredient, else name) with one segment per course. A segment has the annotation shape
-//! of the biomarker chart, `{date, end, label}` (end null while it runs), plus its `src`.
+//! of the biomarker chart, `{date, end, label}` (end null while it runs), plus its `src`. `as_of` is the
+//! day the caller's lane ends (default: the server's today): a medicine row is named after its latest
+//! course started by that day, so the name and the drawn bars follow one date.
 
 use std::collections::BTreeSet;
 
@@ -511,6 +513,7 @@ async fn spans(
     sens: bool,
     want: &BTreeSet<&str>,
     window: (Option<NaiveDate>, Option<NaiveDate>),
+    today: NaiveDate,
 ) -> R<Vec<Value>> {
     let mut out: Vec<Span> = Vec::new();
     if want.contains("diagnosis") {
@@ -548,7 +551,6 @@ async fn spans(
              order by m.started, m.name, m.src_id",
             live("m", sens)
         );
-        let today = super::core::local_today();
         let mut by_key: std::collections::BTreeMap<String, Span> = std::collections::BTreeMap::new();
         for r in rows(conn, &sql, pid).await? {
             let Some(start) = day(&r, "started")? else { continue };
@@ -658,6 +660,7 @@ async fn timeline(
     let mut e = Errors::new();
     let from = e.date(&q, "from");
     let to = e.date(&q, "to");
+    let as_of = e.date(&q, "as_of");
     e.done()?;
     let lang = param(&q, "lang").unwrap_or("en");
     let types = param(&q, "types").filter(|t| !t.is_empty());
@@ -704,7 +707,8 @@ async fn timeline(
             .cmp(&(&a.date, a.kind, &a.title))
             .then(a.tie.cmp(&b.tie))
     });
-    let spans = spans(&mut tx, pid, sens, &want, (from_day, to_day)).await?;
+    let today = as_of.unwrap_or_else(super::core::local_today);
+    let spans = spans(&mut tx, pid, sens, &want, (from_day, to_day), today).await?;
 
     let mut a = AuditEvent::new(principal.actor_kind(), "ui", "read");
     a.actor_id = principal.user_id;

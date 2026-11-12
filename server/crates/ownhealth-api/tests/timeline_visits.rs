@@ -471,3 +471,38 @@ async fn a_medicine_row_is_named_after_a_course_that_has_started() -> R {
     assert_eq!(names, ["Atorvastatin", "Neobrufen"]);
     Ok(())
 }
+
+/// The UI draws the lane up to its own day and sends that day as `as_of`, so the row names follow the
+/// same day as the drawn bars, whatever the server's clock says. A malformed day is refused.
+#[tokio::test]
+async fn a_medicine_row_is_named_on_the_day_the_caller_draws() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let mut tx = a.rt.pool.begin().await?;
+    for (name, ingredient, started) in [
+        ("Atorvastatin", "atorvastatin", "2026-03-10"),
+        ("Cardyl", "atorvastatin", "2099-02-01"),
+        ("Ibuprofen", "ibuprofen", "2099-03-01"),
+        ("Neobrufen", "ibuprofen", "2099-04-01"),
+    ] {
+        record(
+            &mut tx,
+            "medication",
+            json!({"profile_id": alex, "name": name, "ingredient": ingredient, "started": started}),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    let names = |out: &Value| -> Vec<String> { spans(out, "medication").into_iter().map(|(l, _)| l).collect() };
+    let (_, out) = a
+        .get("alex", "/profiles/alex/timeline?types=medication&as_of=2099-03-15")
+        .await?;
+    assert_eq!(names(&out), ["Cardyl", "Ibuprofen"]);
+    let (_, out) = a
+        .get("alex", "/profiles/alex/timeline?types=medication&as_of=2026-11-12")
+        .await?;
+    assert_eq!(names(&out), ["Atorvastatin", "Neobrufen"]);
+    let (code, _) = a.get("alex", "/profiles/alex/timeline?as_of=soon").await?;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+    Ok(())
+}

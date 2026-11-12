@@ -15,7 +15,7 @@
 	import { currentProfile } from '#lib/state/app.svelte';
 	import { sourceLabel } from '#lib/logic/format';
 	import type { Bar } from '#lib/logic/axis';
-	import { buildLane } from '#lib/logic/lane';
+	import { buildLane, segRange } from '#lib/logic/lane';
 	import { todayIso } from '#lib/logic/people';
 
 	type Ty = TimelineEvent['type'];
@@ -39,10 +39,12 @@
 	let types = $state(new Set<Ty>());
 	let countries = $state(new Set<string>());
 
+	// one day for the drawn bars and the row names: the server names each medicine row on the day sent as as_of
+	const today = todayIso();
 	function load() {
 		const slug = profile?.slug;
 		const lang = i18n.lang;
-		if (slug) tl.run(() => getTimeline(slug, { lang }), slug);
+		if (slug) tl.run(() => getTimeline(slug, { lang, as_of: today }), slug);
 	}
 	$effect(load);
 
@@ -78,7 +80,6 @@
 	}
 
 	// ---- the bars lane: x in percent of the time from Jan 1 of the first year to today ----
-	const today = todayIso();
 	const spans = $derived((tl.data?.spans ?? []).filter((s) => !types.size || types.has(s.type)));
 	// one row per span with a course started by today; null (no chart) when no course has started yet
 	const lane = $derived(buildLane(spans, today));
@@ -89,7 +90,8 @@
 	$effect(() => {
 		if (pick && !tip) pick = null;
 	});
-	const range = (g: TimelineSegment) => (g.end === g.date ? g.date : `${g.date} – ${g.end ?? t('tl_now')}`);
+	// a course that starts after today reads 'from <day>' in the phone list, never '<day> – now'
+	const range = (g: TimelineSegment) => segRange(g, today, { now: t('tl_now'), from: t('tl_from') });
 	// two courses of one medicine at once (two strengths) stack inside its row
 	const segStyle = (b: Bar, c: string) =>
 		(b.span ? `left:${b.x}%;width:${Math.max(b.x2 - b.x, 0.8)}%;` : `left:calc(${b.x}% - 5px);`) + `top:${6 + b.row * 12}px;--c:${c}`;
