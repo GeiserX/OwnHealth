@@ -1,6 +1,6 @@
 # LOINC notice
 
-`loinc_subset.tsv` contains content from LOINC® (https://loinc.org), version 2.83: 202 codes with
+`loinc_subset.tsv` contains content from LOINC® (https://loinc.org), version 2.83: 205 codes with
 their long common name, component, property, timing, system, scale, example UCUM units and status.
 The rows were looked up on the HL7 FHIR terminology server (tx.fhir.org) by
 `build_subset.py` from the curated list in `codes.tsv` (both in this folder). The

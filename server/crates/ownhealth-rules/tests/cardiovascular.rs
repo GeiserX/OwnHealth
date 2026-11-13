@@ -181,6 +181,47 @@ fn the_cardiovascular_files_pass_the_cited_loader_and_refuse_a_bad_row() -> R {
     Ok(())
 }
 
+/// A report's systolic pressure or smoking status, in any of the four languages, lands in the group
+/// the risk calculators read, with its LOINC code.
+#[tokio::test]
+async fn systolic_pressure_and_smoking_status_resolve_in_es_en_de_fr() -> R {
+    for (name, lang, unit, group, loinc) in [
+        (
+            "Presión arterial sistólica",
+            "es",
+            Some("mmHg"),
+            "bp_systolic",
+            "8480-6",
+        ),
+        ("Systolic blood pressure", "en", Some("mm[Hg]"), "bp_systolic", "8480-6"),
+        ("Systolischer Blutdruck", "de", Some("mmHg"), "bp_systolic", "8480-6"),
+        (
+            "Pression artérielle systolique",
+            "fr",
+            Some("mmHg"),
+            "bp_systolic",
+            "8480-6",
+        ),
+        ("Tabaquismo", "es", None, "smoking_status", "72166-2"),
+        ("Smoking status", "en", None, "smoking_status", "72166-2"),
+        ("Raucherstatus", "de", None, "smoking_status", "72166-2"),
+        ("Statut tabagique", "fr", None, "smoking_status", "72166-2"),
+    ] {
+        let q = ownhealth_normalize::ResolveQuery {
+            lang,
+            unit,
+            ..Default::default()
+        };
+        let r = ownhealth_normalize::resolve_analyte(None, name, &q).await?;
+        assert_eq!(
+            (r.alias_group.as_str(), r.loinc.as_deref()),
+            (group, Some(loinc)),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- regions and classes ----
 
 #[test]
