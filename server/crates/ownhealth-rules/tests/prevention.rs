@@ -971,6 +971,37 @@ fn every_group_name_matches_its_own_aliases() -> R {
     Ok(())
 }
 
+/// Lung screening counts only a low-dose CT of the chest: a low-dose CT of another part of the body,
+/// such as one for kidney stones, says nothing about the lungs.
+#[test]
+fn only_a_chest_low_dose_ct_counts_for_lung_screening() -> R {
+    let pack = load_pack()?;
+    let p = load_dir(Path::new(DATA), &pack)?;
+    let g = &p.groups["ldct_chest"];
+    let hit = |name: &str| {
+        let w = prevention::words(name);
+        let any = |list: &Vec<Vec<String>>| list.iter().any(|a| !a.is_empty() && w.windows(a.len()).any(|x| x == a));
+        any(&g.aliases) && !any(&g.aliases_not)
+    };
+    for yes in [
+        "Low-dose CT chest",
+        "LDCT lung screening",
+        "Low dose chest CT",
+        "TAC de tórax de baja dosis",
+    ] {
+        assert!(hit(yes), "{yes}");
+    }
+    for no in [
+        "Low-dose CT abdomen",
+        "Low dose CT kidney stones",
+        "TC de baja dosis abdominal",
+        "Low dose computed tomography of the sinuses",
+    ] {
+        assert!(!hit(no), "{no}");
+    }
+    Ok(())
+}
+
 /// A retest marked done is hidden while its evidence covers it: from a day no older than the last
 /// value the item reports, for the rule's window. Then the next retest is due again, shown as if
 /// nothing had been decided; evidence older than the last value covers nothing.
