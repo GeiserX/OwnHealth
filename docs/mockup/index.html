@@ -612,7 +612,16 @@ function genome(){
   <div class="note" style="margin-top:10px"><span>Where these come from: <a href="https://github.com/GeiserX/OwnGenome" target="_blank" rel="noopener">OwnGenome</a> (https://github.com/GeiserX/OwnGenome) runs the genome analysis (WGS or a consumer chip) and writes <span class="mono">genome-facts.json</span> plus the VCF. OwnHealth only ingests them; it runs no genome engine. No findings yet? Run OwnGenome, then import its output here.</span></div>
   <div style="display:flex;gap:18px;margin-top:6px" class="note">
    <span><b style="color:var(--text)">Coverage</b> · 99.1% of PGx positions ≥20× · CYP2D6 from BAM, not VCF · call_state: ref / alt / no_call / not_on_array / not_covered; n/a for typing and scores · not_assessed: SMN1 copy number, mitochondrial heteroplasmy, repeat expansions</span>
-   <span style="margin-left:auto">Evidence: E1 guideline / ClinVar ≥2★ · E2 1★ / replicated · E3 single study / PRS · E4 hidden</span></div>`;
+   <span style="margin-left:auto">Evidence: E1 guideline / ClinVar ≥2★ · E2 1★ / replicated · E3 single study / PRS · E4 hidden</span></div>
+  <div class="card" style="margin-top:12px"><h3>Couple carrier view<span class="r" style="font-weight:400;font-size:12px"><span class="dim">with</span> <select style="background:var(--surface);border:1px solid var(--line2);border-radius:8px;color:var(--text);padding:3px 6px"><option>Sam Rivera</option></select></span></h3>
+   <div class="muted" style="font-size:12px;margin-bottom:8px">Carrier findings of two adult partners, gene by gene. A figure shows only when both results are confirmed; minors are never part of this view.</div>
+   <div style="padding:10px 0;border-top:1px solid var(--line)"><b>GJB2</b> <span class="muted">Hearing loss</span> <span class="chip">recessive</span> <span class="pill p-watch"><i></i>both, unconfirmed</span>
+    <div style="font-size:12.5px;margin:6px 0">Both partners show a variant in GJB2, a recessive gene, but at least one result is unconfirmed. No risk figure is given until a clinical carrier test confirms both.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:12px"><span><b>Alex Rivera</b> <span class="pill p-watch"><i></i>Carries a variant</span> <span class="dim mono">WGS</span> ${src("OwnGenome")}</span><span><b>Sam Rivera</b> <span class="pill p-stale"><i></i>Carries a variant, unconfirmed: a clinical carrier test comes first</span> <span class="dim mono">CHIP</span></span></div></div>
+   <div style="padding:10px 0;border-top:1px solid var(--line)"><b>CFTR</b> <span class="muted">Cystic fibrosis</span> <span class="chip">recessive</span> <span class="pill p-stale"><i></i>one carrier · not assessed</span>
+    <div style="font-size:12.5px;margin:6px 0">Alex Rivera carries a variant in CFTR, a recessive gene. The data of Sam Rivera did not assess CFTR: not detected is not the same as not a carrier.</div></div>
+   <div style="padding:10px 0;border-top:1px solid var(--line)"><span class="muted">🔒 A withheld result</span><div style="font-size:12.5px;margin-top:6px">A withheld result. A sensitive gene shows by name only when both profiles allow sensitive results.</div></div>
+   <div class="note" style="color:var(--text)">A clinical carrier test and genetic counselling come before any reproductive decision.</div></div>`;
 }
 /* ---------- 5. medications (#drug-check): current, history, check a drug ---------- */
 function drug(){
