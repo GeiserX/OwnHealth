@@ -837,8 +837,21 @@ fn evaluate_one(
         let tc = draws.iter().any(|d| d.obs.contains_key("total_cholesterol"));
         let hdl = draws.iter().any(|d| d.obs.contains_key("hdl_c"));
         if tc && hdl {
+            // the newest of each, first, so the person sees which draws they came from
+            let newest = |g: &str| {
+                draws
+                    .iter()
+                    .rev()
+                    .find_map(|d| d.obs.get(g))
+                    .map(|o| input_json(o, None))
+            };
+            let mut with: Vec<Value> = ["total_cholesterol", "hdl_c"]
+                .iter()
+                .filter_map(|g| newest(g))
+                .collect();
+            with.extend(inputs);
             let why = json!({"groups": calc.inputs});
-            return refuse(calc, "refused", ("inputs_not_same_draw", why), as_of, inputs);
+            return refuse(calc, "refused", ("inputs_not_same_draw", why), as_of, with);
         }
         if !tc {
             missing.push("total_cholesterol");

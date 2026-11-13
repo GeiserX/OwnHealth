@@ -537,6 +537,24 @@ fn every_published_validity_limit_is_a_refusal_with_its_reason() {
         reason(&run("score2", &mmol, &p, &facts(), &[egfr("52")])).0,
         "egfr_below_60"
     );
+    // total and HDL cholesterol from two days are not one draw; both show with their sources
+    let mut hdl_later = lipids("5.8", "1.3", "mmol/L");
+    hdl_later.obs.remove("hdl_c");
+    let two = [
+        hdl_later,
+        Draw {
+            date: Some(day("2026-10-01")),
+            obs: [(
+                "hdl_c".to_string(),
+                obs("hdl_c", "1.3", "mmol/L", "2026-10-01", "src_hdl2"),
+            )]
+            .into_iter()
+            .collect(),
+        },
+    ];
+    let items = run("score2", &two, &p, &facts(), &[]);
+    assert_eq!(reason(&items).0, "inputs_not_same_draw");
+    assert_eq!(items[0]["src"], json!(["src_tc", "src_hdl2", "src_bp", "src_smk"]));
     // PREVENT's cholesterol range
     assert_eq!(
         reason(&run(
