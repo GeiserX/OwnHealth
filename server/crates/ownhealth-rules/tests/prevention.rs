@@ -988,11 +988,14 @@ fn only_a_chest_low_dose_ct_counts_for_lung_screening() -> R {
         "LDCT lung screening",
         "Low dose chest CT",
         "TAC de tórax de baja dosis",
+        "CT chest low dose",
+        "Chest CT low dose",
     ] {
         assert!(hit(yes), "{yes}");
     }
     for no in [
         "Low-dose CT abdomen",
+        "LDCT abdomen",
         "Low dose CT kidney stones",
         "TC de baja dosis abdominal",
         "Low dose computed tomography of the sinuses",

@@ -27,5 +27,5 @@ groups:
     loinc: ["21440-3"]
   ldct_chest:
     name: {en: "Low-dose chest CT", es: "TC de tórax de baja dosis"}
-    # only a CT of the chest: a low-dose CT of the abdomen or the kidneys says nothing about the lungs
-    aliases: [ldct, low dose chest ct, low dose ct chest, low dose ct of the chest, low dose lung ct, low dose ct lung, lung cancer screening ct, tc de torax de baja dosis, tac de torax de baja dosis, tc toracico de baja dosis, tc de baja dosis de torax, tac de baja dosis de torax]
+    # only a CT of the chest: a low-dose CT of the abdomen or the kidneys, or a bare "LDCT", says nothing about the lungs
+    aliases: [ldct chest, chest ldct, ldct lung, lung ldct, ldct of the chest, low dose chest ct, low dose ct chest, low dose ct of the chest, low dose lung ct, low dose ct lung, ct chest low dose, chest ct low dose, lung cancer screening ct, tc de torax de baja dosis, tac de torax de baja dosis, tc toracico de baja dosis, tc de baja dosis de torax, tac de baja dosis de torax]
