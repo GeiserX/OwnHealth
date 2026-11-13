@@ -5,6 +5,7 @@
 //! hook `genome` (order 400). The constants are final.
 
 pub mod clinvar;
+pub mod couple;
 pub mod findings;
 pub mod ingest;
 pub mod lookup;
