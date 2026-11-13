@@ -73,6 +73,15 @@ async fn an_agent_reads_stale_the_prs_code_and_the_chip_ppv_note() -> R {
         .unwrap_or_default();
     assert_eq!(row["stale"], tpmt["stale"], "{env}");
 
+    // Sam reads his own chip
+    let sam = w
+        .token(Tok {
+            user: "sam",
+            profiles: vec!["sam"],
+            ..Tok::default()
+        })
+        .await?;
+    let c = w.connect_real(&sam).await?;
     let env = c
         .call_tool("get_genome_findings", json!({"profile": "sam", "detail": "full"}))
         .await?

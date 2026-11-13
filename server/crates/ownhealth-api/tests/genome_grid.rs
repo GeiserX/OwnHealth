@@ -81,7 +81,7 @@ async fn the_grid_names_each_gene_and_the_current_medicines_it_touches() -> R {
     }
     let mut agent = Principal::session(fam.user("alex"), fam.household_id);
     agent.kind = PrincipalKind::Token;
-    agent.scopes = scope_set(&["read:genome"]);
+    agent.scopes = scope_set(["read:genome"]);
     agent.token_label = Some("test agent".into());
     let body = genome::overview(&rt, &agent, "alex", None)
         .await
