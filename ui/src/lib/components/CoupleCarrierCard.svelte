@@ -61,13 +61,21 @@
 	const usable = $derived(!profile.is_minor && profile.scopes.includes('read:genome'));
 
 	const view = new Loader<CoupleView>();
+	// A new `rev` or a retry is a new request key, so the old rows (sensitive names included) clear at once.
+	let attempt = $state(0);
+	let revN = 0;
+	let lastRev: unknown;
 	$effect(() => {
 		const a = profile.slug;
 		const b = partner?.slug;
 		const lang = i18n.lang;
-		void rev;
+		if (rev !== lastRev) {
+			lastRev = rev;
+			revN++;
+		}
+		const n = attempt;
 		if (!usable || !b) return;
-		view.run(() => get<CoupleView>('/genome/carrier-couple', { a, b, lang }), `${a}/${b}/${lang}`);
+		view.run(() => get<CoupleView>('/genome/carrier-couple', { a, b, lang }), `${a}/${b}/${lang}/${revN}/${n}`);
 	});
 
 	const v = $derived(partner ? view.data : null);
@@ -106,7 +114,7 @@
 		{:else if ineligible}
 			<div class="empty">{t('gen_couple_not_eligible')}</div>
 		{:else if view.error}
-			<NotReady error={view.error} />
+			<NotReady error={view.error} onretry={() => attempt++} />
 		{:else if view.loading && !v}
 			<div class="empty">{t('loading')}</div>
 		{:else if v}
