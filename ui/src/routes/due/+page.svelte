@@ -63,15 +63,20 @@
 	let date = $state('');
 	let busy = $state(false);
 	let error = $state<string | null>(null);
+	// each form opening gets a new number: a save that ends after the form was closed or opened again
+	// leaves the newer form and its draft alone
+	let formSeq = 0;
 	// An open form belongs to the profile it was opened for: another profile closes it, so text typed
 	// for one person is never saved to another.
 	const profSlug = $derived(prof?.slug);
 	$effect(() => {
 		void profSlug;
+		formSeq++;
 		open = null;
 		error = null;
 	});
 	function start(i: DueItem) {
+		formSeq++;
 		open = open === i.key && panel === 'record' ? null : i.key;
 		panel = 'record';
 		name = i.record?.text ?? i.title ?? '';
@@ -82,15 +87,16 @@
 	async function save(e: SubmitEvent, i: DueItem) {
 		e.preventDefault();
 		if (!prof || !i.record || busy) return;
+		const form = formSeq;
 		busy = true;
 		error = null;
 		try {
 			const body = i.record.kind === 'immunization' ? { vaccine: name.trim(), occurred: date || null } : { text: name.trim(), performed: date || null };
 			await createRecord(prof.slug, i.record.kind, body);
-			open = null;
+			if (form === formSeq) open = null;
 			load();
 		} catch (err) {
-			error = errText(err);
+			if (form === formSeq) error = errText(err);
 		} finally {
 			busy = false;
 		}
@@ -141,6 +147,7 @@
 		];
 	}
 	function startAct(i: DueItem) {
+		formSeq++;
 		open = open === i.key && panel === 'act' ? null : i.key;
 		panel = 'act';
 		today = todayIso();
@@ -162,15 +169,16 @@
 			const [table, id] = evidence.split(':') as ['immunization' | 'procedure' | 'document', string];
 			body = { kind: 'done', evidence: { table, id }, reason: note };
 		}
+		const form = formSeq;
 		busy = true;
 		error = null;
 		try {
 			await decideDue(prof.slug, i.key, body);
-			// a form opened for another item meanwhile stays open, with its draft
-			if (open === i.key) open = null;
+			// a form opened meanwhile, for this item or another, stays open with its draft
+			if (form === formSeq) open = null;
 			load();
 		} catch (err) {
-			if (open === i.key) error = errText(err);
+			if (form === formSeq) error = errText(err);
 		} finally {
 			busy = false;
 		}
