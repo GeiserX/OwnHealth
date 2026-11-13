@@ -45,7 +45,7 @@ const SCORE2_SCOPE: [&str; 4] = ["ascvd", "diabetes", "ckd", "fh"];
 /// What PREVENT refuses on (adults without cardiovascular disease).
 const PREVENT_SCOPE: [&str; 2] = ["ascvd", "heart_failure"];
 /// SNOMED CT answers to LOINC 72166-2 (tobacco smoking status), and what each means here.
-const SMOKING: [(&str, &str); 8] = [
+pub const SMOKING: [(&str, &str); 8] = [
     ("77176002", "current"),
     ("449868002", "current"),
     ("428041000124106", "current"),

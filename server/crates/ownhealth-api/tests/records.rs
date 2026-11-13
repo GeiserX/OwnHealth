@@ -342,3 +342,66 @@ async fn manual_observation_refuses_a_blank_name_or_value() -> R {
     }
     Ok(())
 }
+
+/// The smoking status block: a coded answer (SNOMED CT) to LOINC 72166-2, stored as the code with the
+/// words the person saw, and read by the risk calculators.
+#[tokio::test]
+async fn manual_smoking_status_is_stored_as_its_code() -> R {
+    let a = app().await?;
+    let body = json!({
+        "name": "Tabaquismo",
+        "value": "Nunca ha fumado",
+        "loinc": "72166-2",
+        "value_code": "266919005",
+        "category": "survey",
+        "effective_at": "2026-11-06T12:00:00Z",
+    });
+    let (s, out) = post(&a, "alex", "/profiles/alex/manual-observations", body.clone()).await?;
+    assert_eq!(s, StatusCode::CREATED, "{out}");
+    assert_eq!(out["alias_group"], "smoking_status", "{out}");
+    let (code, num, loinc): (Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as("select value_code, value_num::text, loinc from observation where id = $1")
+            .bind(Uuid::parse_str(out["id"].as_str().unwrap_or_default())?)
+            .fetch_one(&a.rt.pool)
+            .await?;
+    assert_eq!(
+        (code.as_deref(), num, loinc.as_deref()),
+        (Some("266919005"), None, Some("72166-2"))
+    );
+    let (s, calc) = get(&a, "alex", "/profiles/alex/calculators?lang=en").await?;
+    assert_eq!(s, StatusCode::OK, "{calc}");
+    let score2 = calc["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|i| i["id"] == "score2")
+        .cloned()
+        .unwrap_or_default();
+    let smoking = score2["inputs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|i| i["group"] == "smoking_status")
+        .cloned();
+    assert_eq!(
+        smoking.map(|i| i["text"].clone()),
+        Some(json!("never smoked")),
+        "{score2}"
+    );
+    // a code needs its LOINC question, and only the smoking answers are taken
+    for bad in [
+        json!({"loinc": null}),
+        json!({"value_code": "12345"}),
+        json!({"loinc": "8480-6"}),
+    ] {
+        let (s, out) = post(
+            &a,
+            "alex",
+            "/profiles/alex/manual-observations",
+            merge(&body, bad.clone()),
+        )
+        .await?;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{bad} {out}");
+    }
+    Ok(())
+}
