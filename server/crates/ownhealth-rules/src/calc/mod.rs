@@ -692,12 +692,18 @@ fn fill(text: &str, params: &Map<String, Value>, data: &Data, lang: &str) -> Str
     let mut out = text.to_string();
     for (k, v) in params {
         let shown = match (k.as_str(), v) {
-            ("groups", Value::Array(gs)) => gs
-                .iter()
-                .filter_map(Value::as_str)
-                .map(|g| group_name(data, g, lang))
-                .collect::<Vec<_>>()
-                .join(and),
+            // "a, b and c": the last two joined by the word, the rest by commas
+            ("groups", Value::Array(gs)) => {
+                let names: Vec<String> = gs
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|g| group_name(data, g, lang))
+                    .collect();
+                match names.split_last() {
+                    Some((last, rest)) if !rest.is_empty() => format!("{}{and}{last}", rest.join(", ")),
+                    _ => names.join(and),
+                }
+            }
             ("group", Value::String(g)) => group_name(data, g, lang),
             ("condition", Value::String(c)) => template(data, "condition", c, lang).unwrap_or(c).to_string(),
             (_, Value::String(s)) => localized(s, lang),

@@ -695,6 +695,23 @@ fn every_risk_line_and_refusal_reads_in_both_languages() -> R {
         es["items"][2]["text"],
         "Sin calcular: la ecuación abarca de 40 a 69 años; 39 años el 2026-11-07."
     );
+    // missing inputs read as a list
+    let no_facts = Facts {
+        country: Some("ES".into()),
+        ..Facts::default()
+    };
+    let missing = run("score2", &[lipids("5.8", "1.3", "mmol/L")], &p, &no_facts, &[]);
+    let doc = json!({"schema": calc::SCHEMA, "profile": "x", "as_of": ON, "items": missing});
+    assert_eq!(
+        calc::render(&doc, "es")?["items"][0]["text"],
+        "Sin calcular: el registro no tiene presión arterial sistólica y tabaquismo."
+    );
+    let none = run("score2", &[], &p, &no_facts, &[]);
+    let doc = json!({"schema": calc::SCHEMA, "profile": "x", "as_of": ON, "items": none});
+    assert_eq!(
+        calc::render(&doc, "en")?["items"][0]["text"],
+        "Not computed: no total cholesterol, HDL cholesterol, systolic blood pressure and smoking status on record."
+    );
     Ok(())
 }
 
