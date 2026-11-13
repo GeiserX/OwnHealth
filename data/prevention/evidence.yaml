@@ -27,4 +27,4 @@ groups:
     loinc: ["21440-3"]
   ldct_chest:
     name: {en: "Low-dose chest CT", es: "TC de tórax de baja dosis"}
-    aliases: [low dose ct, low dose computed tomography, ldct, tc de baja dosis, tac de baja dosis]
+    aliases: [low dose ct, low dose chest ct, low dose computed tomography, ldct, tc de baja dosis, tac de baja dosis, tc de torax de baja dosis]

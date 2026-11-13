@@ -818,16 +818,26 @@ async fn an_off_season_row_before_its_start_age_claims_nothing_without_a_dose() 
 
 /// A procedure on `on` and a current `done` decision about `key` that points at it.
 async fn done_with(tx: &mut PgConnection, pid: Uuid, key: &str, on: chrono::NaiveDate) -> R {
+    done_with_named(tx, pid, key, "Blood draw, private clinic", on).await
+}
+
+/// A procedure named `text` on `on` and a current `done` decision about `key` that points at it.
+async fn done_with_named(tx: &mut PgConnection, pid: Uuid, key: &str, text: &str, on: chrono::NaiveDate) -> R {
     let src = record(
         tx,
         "procedure",
-        json!({"profile_id": pid, "text": "Blood draw, private clinic", "performed": on.to_string()}),
+        json!({"profile_id": pid, "text": text, "performed": on.to_string()}),
     )
     .await?;
     let id: Uuid = sqlx::query_scalar("select id from procedure where src_id = $1")
         .bind(&src)
         .fetch_one(&mut *tx)
         .await?;
+    decide_done(tx, pid, key, Some(id), None).await
+}
+
+/// A current `done` decision about `key` that points at a record (a procedure) or a document.
+async fn decide_done(tx: &mut PgConnection, pid: Uuid, key: &str, record: Option<Uuid>, doc: Option<Uuid>) -> R {
     sqlx::query(
         "update prevention_decision set status = 'superseded', superseded_at = clock_timestamp() \
          where profile_id = $1 and item_key = $2 and status = 'current'",
@@ -837,14 +847,94 @@ async fn done_with(tx: &mut PgConnection, pid: Uuid, key: &str, on: chrono::Naiv
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "insert into prevention_decision (profile_id, item_key, kind, evidence_table, evidence_id) \
-         values ($1, $2, 'done', 'procedure', $3)",
+        "insert into prevention_decision (profile_id, item_key, kind, evidence_table, evidence_id, document_id) \
+         values ($1, $2, 'done', $3, $4, $5)",
     )
     .bind(pid)
     .bind(key)
-    .bind(id)
+    .bind(record.map(|_| "procedure"))
+    .bind(record)
+    .bind(doc)
     .execute(&mut *tx)
     .await?;
+    Ok(())
+}
+
+/// A done decision on the cervical HPV row whose evidence is a cytology the record already counts
+/// keeps the cytology's 36-month interval; a document, which names no group, gets the row's
+/// shortest interval, never the HPV test's 60 months.
+#[tokio::test]
+async fn done_on_a_cytology_keeps_its_own_interval() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let jordan = us_profile(&s, &mut tx).await?;
+    let key = "us.cancer.cervix_hpv";
+    done_with_named(&mut tx, jordan, key, "Pap test", day("2026-01-01")).await?;
+    let doc = build_document(&mut tx, jordan, as_of()).await?;
+    assert_eq!(item(&doc, key)["due"], "2029-01-01", "{doc}");
+
+    let file: Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, collected_at) \
+         select household_id, id, decode(repeat('cd', 32), 'hex'), 'application/pdf', 1, '2026-02-01' \
+         from profile where id = $1 returning id",
+    )
+    .bind(jordan)
+    .fetch_one(&mut *tx)
+    .await?;
+    decide_done(&mut tx, jordan, key, None, Some(file)).await?;
+    let doc = build_document(&mut tx, jordan, as_of()).await?;
+    assert_eq!(item(&doc, key)["due"], "2029-02-01", "{doc}");
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// A series counts its doses in date order, so a done decision that proves an earlier dose than
+/// the one on record completes it when the two are the gap apart.
+#[tokio::test]
+async fn done_with_an_earlier_dose_completes_a_series() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let carmen = s.pid("carmen");
+    let key = "es.vac.zoster";
+    record(
+        &mut tx,
+        "immunization",
+        json!({"profile_id": carmen, "vaccine": "Shingrix", "occurred": "2026-11-01"}),
+    )
+    .await?;
+    let file: Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, collected_at) \
+         select household_id, id, decode(repeat('ef', 32), 'hex'), 'application/pdf', 1, '2026-09-01' \
+         from profile where id = $1 returning id",
+    )
+    .bind(carmen)
+    .fetch_one(&mut *tx)
+    .await?;
+    decide_done(&mut tx, carmen, key, None, Some(file)).await?;
+    let doc = build_document(&mut tx, carmen, as_of()).await?;
+    assert_eq!(item(&doc, key)["status"], "up_to_date", "{doc}");
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// The name the Due screen fills in to record a group is one its own aliases match, in every
+/// language, so the record it saves counts.
+#[test]
+fn every_group_name_matches_its_own_aliases() -> R {
+    let pack = load_pack()?;
+    let p = load_dir(Path::new(DATA), &pack)?;
+    let mut misses = Vec::new();
+    for g in p.groups.values() {
+        for (lang, name) in g.name.as_object().into_iter().flatten() {
+            let w = prevention::words(name.as_str().unwrap_or_default());
+            let hit =
+                |list: &Vec<Vec<String>>| list.iter().any(|a| !a.is_empty() && w.windows(a.len()).any(|x| x == a));
+            if !hit(&g.aliases) || hit(&g.aliases_not) {
+                misses.push(format!("{} {lang}: {name}", g.id));
+            }
+        }
+    }
+    assert!(misses.is_empty(), "{misses:?}");
     Ok(())
 }
 

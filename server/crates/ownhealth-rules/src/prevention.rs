@@ -708,8 +708,10 @@ fn item(row: &Row, prev: &Prevention, birth: NaiveDate, as_of: NaiveDate, facts:
         "series" => {
             // a dose counts only when it comes at least gap_days after the previous counted one
             let gap = chrono::Duration::days(row.gap_days.unwrap_or(0));
+            let mut dated: Vec<NaiveDate> = counted.iter().map(|f| f.date).collect();
+            dated.sort();
             let mut days: Vec<NaiveDate> = Vec::new();
-            for d in counted.iter().map(|f| f.date) {
+            for d in dated {
                 if days.last().is_none_or(|l| d - *l >= gap) {
                     days.push(d);
                 }
@@ -1114,21 +1116,33 @@ pub async fn document(
                     Some(_) => continue,
                 },
             };
-            // a record or document a `done` decision points at counts as a fact of the row's first
-            // evidence group, on its own day
+            // a record or document a `done` decision points at counts as a fact of the row, on its own
+            // day. A record already matched to one of the row's groups counts as that group alone;
+            // anything else counts as the row's group with the shortest interval, so it never claims
+            // longer cover than the row allows.
             let done = decisions
                 .get(&row.id)
                 .filter(|d| d.kind == "done")
                 .and_then(|d| d.evidence.as_ref())
                 .and_then(|e| e.day.filter(|d| *d <= as_of).map(|day| (day, e.src.clone())));
             let mut own = facts.clone();
-            if let (Some((date, src)), Some(group)) = (done, row.evidence.first()) {
-                own.push(Fact {
-                    date,
-                    src: src.unwrap_or_default(),
-                    group: group.clone(),
-                    lab: false,
-                });
+            if let Some((date, src)) = done {
+                let matched = src
+                    .as_ref()
+                    .is_some_and(|s| facts.iter().any(|f| &f.src == s && row.evidence.contains(&f.group)));
+                let base = row.months.unwrap_or(12);
+                let shortest = row
+                    .evidence
+                    .iter()
+                    .min_by_key(|g| row.interval_for.get(*g).copied().unwrap_or(base));
+                if let (false, Some(group)) = (matched, shortest) {
+                    own.push(Fact {
+                        date,
+                        src: src.unwrap_or_default(),
+                        group: group.clone(),
+                        lab: false,
+                    });
+                }
             }
             match (profile.birth_date, &row.sex, sex) {
                 (_, Some(want), Some(have)) if want != have => {}
