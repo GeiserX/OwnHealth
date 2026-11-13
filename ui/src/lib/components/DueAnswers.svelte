@@ -58,14 +58,19 @@
 	async function set(key: string, value: 'yes' | 'no' | null) {
 		if (busy) return;
 		const g = ++gen;
+		const slug = profile;
 		busy = true;
 		error = null;
 		saved = null;
 		try {
-			const r = await putDueAnswers(profile, { [key]: value }, i18n.lang);
-			if (g !== gen) return;
-			items = r.items;
-			saved = key;
+			const r = await putDueAnswers(slug, { [key]: value }, i18n.lang);
+			if (g === gen) {
+				items = r.items;
+				saved = key;
+			} else if (slug === profile) {
+				// a load started while the answer was saving may predate it: load again
+				reload++;
+			}
 			onchange?.();
 		} catch (e) {
 			error = errText(e);

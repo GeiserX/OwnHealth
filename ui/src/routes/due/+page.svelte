@@ -6,13 +6,14 @@
 	// record or document that shows it, or dismiss it with a reason (POST /profiles/{p}/due/{key}/decision).
 	import '#lib/components/pages2/pages2.css';
 	import { createRecord, decideDue, getDue, listDocuments, listRecords, undoDue } from '#lib/api';
+	import { ApiError } from '#lib/api/core';
 	import DueAnswers from '#lib/components/DueAnswers.svelte';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { C } from '#lib/components/colors';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
 	import { openSource } from '#lib/components/pages1/source.svelte';
-	import { errText, Loader, shortHash, tf } from '#lib/components/pages1/util.svelte';
+	import { errCode, errText, Loader, shortHash, tf } from '#lib/components/pages1/util.svelte';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
@@ -104,21 +105,30 @@
 	let evidence = $state('');
 	type Ev = { value: string; label: string; group: string };
 	let evidenceList = $state<Ev[] | null>(null);
+	// a source that failed for another reason than the scopes: the list says so and offers a retry
+	let evidenceErr = $state<unknown>(null);
 	// only the latest load fills the list: a slower one for another item or profile is dropped
 	let evidenceSeq = 0;
 	async function loadEvidence(slug: string) {
 		const seq = ++evidenceSeq;
 		evidenceList = null;
+		evidenceErr = null;
+		const failed: unknown[] = [];
+		const empty = (e: unknown) => {
+			if (!(e instanceof ApiError && e.status === 403)) failed.push(e);
+			return { items: [] };
+		};
 		const day = (v: unknown) => (typeof v === 'string' ? v.slice(0, 10) : '');
 		const [proc, imm, docs] = await Promise.all([
-			listRecords(slug, 'procedure').catch(() => ({ items: [] })),
-			listRecords(slug, 'immunization').catch(() => ({ items: [] })),
-			listDocuments(slug).catch(() => ({ items: [] }))
+			listRecords(slug, 'procedure').catch(empty),
+			listRecords(slug, 'immunization').catch(empty),
+			listDocuments(slug).catch(empty)
 		]);
 		type Rec = { id: string; title: string; detail: Record<string, unknown> };
 		const recDay = (r: Rec) => day(r.detail.performed ?? r.detail.occurred ?? r.detail.effective_at);
 		const rec = (kind: string, group: string) => (r: Rec) => ({ value: `${kind}:${r.id}`, label: [r.title, recDay(r)].join(' · '), group });
 		if (seq !== evidenceSeq) return;
+		evidenceErr = failed[0] ?? null;
 		// a record with no day proves nothing on any day, so the server refuses it as evidence
 		evidenceList = [
 			...imm.items.filter(recDay).map(rec('immunization', t('due_f_vaccine'))),
@@ -155,10 +165,11 @@
 		error = null;
 		try {
 			await decideDue(prof.slug, i.key, body);
-			open = null;
+			// a form opened for another item meanwhile stays open, with its draft
+			if (open === i.key) open = null;
 			load();
 		} catch (err) {
-			error = errText(err);
+			if (open === i.key) error = errText(err);
 		} finally {
 			busy = false;
 		}
@@ -318,6 +329,12 @@
 						</select>
 					{/if}
 				</label>
+				{#if evidenceErr}
+					<div class="p2err" role="alert">
+						{tf('h1_na_d', { code: errCode(evidenceErr) })}
+						<button class="btn sm" type="button" onclick={() => prof && loadEvidence(prof.slug)}>{t('retry')}</button>
+					</div>
+				{/if}
 			{/if}
 			<label>{t(act === 'dismiss' ? 'due_reason' : 'due_note_opt')}<input class="p2in" bind:value={reason} maxlength="500" required={act === 'dismiss'} /></label>
 			{#if error}<div class="p2err" role="alert">{error}</div>{/if}
