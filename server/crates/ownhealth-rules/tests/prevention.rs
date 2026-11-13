@@ -917,6 +917,39 @@ async fn done_with_an_earlier_dose_completes_a_series() -> R {
     Ok(())
 }
 
+/// One source may hold several records. A done decision that points at a record the rules do not
+/// match still counts on its own day when another record of the same source counts on another day.
+#[tokio::test]
+async fn done_on_a_record_that_shares_its_source_still_counts() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let carmen = s.pid("carmen");
+    let key = "es.vac.zoster";
+    let src = record(
+        &mut tx,
+        "immunization",
+        json!({"profile_id": carmen, "vaccine": "Shingrix", "occurred": "2026-09-01"}),
+    )
+    .await?;
+    let body = json!({"profile_id": carmen, "text": "Vaccination visit", "performed": "2026-11-01"});
+    let done = add_record(
+        &mut tx,
+        &RecordIn::from_json("procedure", body)?,
+        &SrcRef::Id(src),
+        RecordOptions::new("person"),
+    )
+    .await?;
+    let id: Uuid = sqlx::query_scalar("select id from procedure where src_id = $1 and performed = '2026-11-01'")
+        .bind(&done.src_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    decide_done(&mut tx, carmen, key, Some(id), None).await?;
+    let doc = build_document(&mut tx, carmen, as_of()).await?;
+    assert_eq!(item(&doc, key)["status"], "up_to_date", "{doc}");
+    tx.rollback().await?;
+    Ok(())
+}
+
 /// The name the Due screen fills in to record a group is one its own aliases match, in every
 /// language, so the record it saves counts.
 #[test]

@@ -1127,9 +1127,12 @@ pub async fn document(
                 .and_then(|e| e.day.filter(|d| *d <= as_of).map(|day| (day, e.src.clone())));
             let mut own = facts.clone();
             if let Some((date, src)) = done {
-                let matched = src
-                    .as_ref()
-                    .is_some_and(|s| facts.iter().any(|f| &f.src == s && row.evidence.contains(&f.group)));
+                // one source may hold several records, so the record is the fact of its source on its day
+                let matched = src.as_ref().is_some_and(|s| {
+                    facts
+                        .iter()
+                        .any(|f| &f.src == s && f.date == date && row.evidence.contains(&f.group))
+                });
                 let base = row.months.unwrap_or(12);
                 let shortest = row
                     .evidence
