@@ -2,7 +2,7 @@
 // again", in one section only, and a new snooze starts no earlier than tomorrow.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { addDays, docLabel, dueGroups, evidenceDay, shownAgain, type DueItem } from '../src/lib/logic/due.ts';
+import { addDays, docLabel, dueGroups, evidenceDay, evidenceLimit, shownAgain, type DueItem } from '../src/lib/logic/due.ts';
 
 const item = (key: string, status: DueItem['status'], extra: Partial<DueItem> = {}): DueItem => ({
 	key,
@@ -60,4 +60,12 @@ test('evidence counts only with a day on or before today, as the server checks i
 	assert.equal(evidenceDay('2026-11-14', '2026-11-13'), null);
 	assert.equal(evidenceDay(undefined, '2026-11-13'), null);
 	assert.equal(evidenceDay('', '2026-11-13'), null);
+});
+
+test('the evidence limit is the UTC day the server checks, even where the local day is already the next one', () => {
+	// 00:30 in Madrid on 13 November is still 12 November on the server
+	const now = new Date('2026-11-12T23:30:00Z');
+	assert.equal(evidenceLimit(now), '2026-11-12');
+	assert.equal(evidenceDay('2026-11-13', evidenceLimit(now)), null);
+	assert.equal(evidenceLimit(new Date('2026-11-13T00:30:00Z')), '2026-11-13');
 });

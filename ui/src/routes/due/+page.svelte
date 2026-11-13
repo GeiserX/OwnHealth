@@ -17,7 +17,7 @@
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
-	import { addDays, docLabel, dueColor, dueGroups, evidenceDay, isOpen, type DueDecisionIn, type DueDoc, type DueItem } from '#lib/logic/due';
+	import { addDays, docLabel, dueColor, dueGroups, evidenceDay, evidenceLimit, isOpen, type DueDecisionIn, type DueDoc, type DueItem } from '#lib/logic/due';
 	import { todayIso } from '#lib/logic/people';
 	import { currentProfile } from '#lib/state/app.svelte';
 
@@ -124,7 +124,7 @@
 			if (!(e instanceof ApiError && e.status === 403)) failed.push(e);
 			return { items: [] };
 		};
-		const limit = todayIso();
+		const limit = evidenceLimit();
 		const day = (v: unknown) => evidenceDay(v, limit);
 		const [proc, imm, docs] = await Promise.all([
 			listRecords(slug, 'procedure').catch(empty),

@@ -146,6 +146,14 @@ export function evidenceDay(v: unknown, today: string): string | null {
 	return day && day <= today ? day : null;
 }
 
+/**
+ * The last day the server takes as `done` evidence: its own today, on the UTC calendar. East of UTC
+ * the browser's local day can already be tomorrow there, and a record of that day would be refused.
+ */
+export function evidenceLimit(now = new Date()): string {
+	return now.toISOString().slice(0, 10);
+}
+
 /** The day after `iso` (YYYY-MM-DD), the earliest a new snooze may end on the local calendar. */
 export function addDays(iso: string, n: number): string {
 	const d = new Date(`${iso}T12:00:00Z`);
