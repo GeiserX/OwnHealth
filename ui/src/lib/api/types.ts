@@ -685,6 +685,8 @@ export interface CalcInput {
 	src: string;
 	/** the value in the formula's unit, when the formula needed another one */
 	converted?: { value: string; unit: string };
+	/** a line that is no lab value, as words: 'no diabetes recorded', 'never smoked', a wearable mean with its window */
+	text?: string;
 }
 
 export interface CalcItem {
@@ -703,6 +705,10 @@ export interface CalcItem {
 	cite: string;
 	src: string[];
 	reason_code?: string;
+	/** the reason's parameters: `groups` names the missing inputs */
+	reason?: { groups?: string[] };
+	/** SCORE2's risk region, from the profile's country */
+	region?: string;
 	/** why it was not computed */
 	text?: string;
 	limitations?: string[];

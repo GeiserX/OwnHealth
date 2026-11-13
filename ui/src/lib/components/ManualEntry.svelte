@@ -1,5 +1,5 @@
 <script module lang="ts">
-	export type EntryKind = 'observation' | 'medication' | 'condition' | 'allergy' | 'immunization' | 'visit';
+	export type EntryKind = 'observation' | 'medication' | 'condition' | 'allergy' | 'immunization' | 'visit' | 'smoking';
 </script>
 
 <script lang="ts">
@@ -54,11 +54,16 @@
 		allergy: [['substance', 'me_f_subst', 'text', true], ['reaction_text', 'me_f_reaction', 'text', false]],
 		immunization: [['vaccine', 'me_f_vaccine', 'text', true], ['occurred', 'me_f_occurred', 'date', false], ['dose_number', 'me_f_dosen', 'number', false]],
 		// visit (slice 6): the day it happened, why, and where; it goes on the timeline on that day
-		visit: [['period_start', 'tl_f_day', 'date', true], ['reason_text', 'tl_f_reason', 'text', false], ['provider_name', 'tl_f_provider', 'text', false]]
+		visit: [['period_start', 'tl_f_day', 'date', true], ['reason_text', 'tl_f_reason', 'text', false], ['provider_name', 'tl_f_provider', 'text', false]],
+		// smoking status (slice 20): one answer and the day it was true; the risk calculators read it
+		smoking: [['date', 'me_f_date', 'date', true]]
 	};
-	const kindName = (k: EntryKind) => (k === 'visit' ? t('h1_ty_visit') : t('me_k_' + k));
+	// The smoking answers as SNOMED CT codes (LOINC 72166-2), in the order the block shows them.
+	const SMOKING = [['266919005', 'calc_smk_never'], ['8517006', 'calc_smk_former'], ['77176002', 'calc_smk_current']] as const;
+	const kindName = (k: EntryKind) => (k === 'visit' ? t('h1_ty_visit') : k === 'smoking' ? t('calc_smoking') : t('me_k_' + k));
 	const today = todayIso();
-	const fresh = (k: EntryKind): Fields => (k === 'observation' ? { date: date ?? today, note } : k === 'medication' ? { kind: 'medication' } : {});
+	const fresh = (k: EntryKind): Fields =>
+		k === 'observation' ? { date: date ?? today, note } : k === 'medication' ? { kind: 'medication' } : k === 'smoking' ? { date: today, code: '' } : {};
 	const fromRecord = (r: RecordOut): Fields => ({
 		// a visit's day is the date part of its start
 		...Object.fromEntries(FIELDS[r.kind as EntryKind].map(([f]) => [f, r.detail[f] == null ? '' : f === 'period_start' ? String(r.detail[f]).slice(0, 10) : String(r.detail[f])])),
@@ -104,6 +109,11 @@
 	async function save(e: SubmitEvent) {
 		e.preventDefault();
 		error = null;
+		// no answer is chosen for the person: the block waits for one
+		if (kind === 'smoking' && !SMOKING.some(([c]) => c === f.code)) {
+			error = t('calc_smk_pick');
+			return;
+		}
 		if (kind === 'observation' && !correcting && decimalText(f.value ?? '') == null) {
 			error = t('err_decimal');
 			return;
@@ -113,6 +123,17 @@
 		try {
 			if (correcting) {
 				await correctRecord(profile, correcting.kind, correcting.id, { ...correcting.detail, ...body(), reason: reason.trim() });
+			} else if (kind === 'smoking') {
+				// the code is what counts; the words are the answer as the person saw it
+				const answer = SMOKING.find(([c]) => c === f.code)!;
+				id = (await addManualObservation(profile, {
+					name: t('calc_smoking'),
+					value: t(answer[1]),
+					loinc: '72166-2',
+					value_code: answer[0],
+					category: 'survey',
+					effective_at: `${val('date') ?? today}T12:00:00Z`
+				})).id;
 			} else if (kind === 'observation') {
 				id = (await addManualObservation(profile, {
 					name: val('name')!,
@@ -126,7 +147,7 @@
 			}
 			saved++;
 			const k = kind;
-			if (!correcting) f = { ...fresh(k), ...(k === 'observation' ? { date: f.date } : {}) };
+			if (!correcting) f = { ...fresh(k), ...(k === 'observation' || k === 'smoking' ? { date: f.date } : {}) };
 			onsaved(k, id);
 		} catch (err) {
 			error = errText(err);
@@ -147,6 +168,11 @@
 			{#each ['medication', 'supplement'] as mk (mk)}<button type="button" class:on={(f.kind ?? 'medication') === mk} aria-pressed={(f.kind ?? 'medication') === mk} onclick={() => (f.kind = mk)}>{t('med_k_' + mk)}</button>{/each}
 		</div>
 	{/if}
+	{#if kind === 'smoking'}
+		<div class="seg" role="group" aria-label={t('calc_smoking')}>
+			{#each SMOKING as [code, key] (code)}<button type="button" class:on={f.code === code} aria-pressed={f.code === code} onclick={() => (f.code = code)}>{t(key)}</button>{/each}
+		</div>
+	{/if}
 	<div class="p2row">
 		{#each FIELDS[kind] as [k, key, type, req] (k)}
 			<label style={type === 'text' ? 'flex:1;min-width:120px' : ''}
@@ -158,7 +184,7 @@
 						bind:value={f[k]}
 						required={req}
 						oninput={checkValue}
-					/>{:else}<input class="p2in" {type} bind:value={f[k]} required={req || needsStart(k)} max={(kind === 'observation' && k === 'date') || (kind === 'visit' && k === 'period_start') ? today : undefined} />{/if}</label
+					/>{:else}<input class="p2in" {type} bind:value={f[k]} required={req || needsStart(k)} max={((kind === 'observation' || kind === 'smoking') && k === 'date') || (kind === 'visit' && k === 'period_start') ? today : undefined} />{/if}</label
 			>
 		{/each}
 	</div>

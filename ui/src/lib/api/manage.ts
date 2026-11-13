@@ -34,7 +34,7 @@ export const listRecords = (profile: string, kind: RecordOut['kind'], history = 
 	get<{ items: RecordOut[] }>(`${p(profile)}/records/${kind}`, history ? { history: true } : undefined);
 
 // Manual entry and corrections (backend api/records.py). A correction is a new version; the old one stays.
-export type ManualObservationIn = { name: string; value: string; unit?: string | null; effective_at: string; note?: string | null; loinc?: string | null; category?: string | null };
+export type ManualObservationIn = { name: string; value: string; unit?: string | null; effective_at: string; note?: string | null; loinc?: string | null; category?: string | null; value_code?: string | null };
 export const addManualObservation = (profile: string, body: ManualObservationIn) =>
 	post<{ id: Uuid; src: string; status: string }>(`${p(profile)}/manual-observations`, body);
 export const createRecord = (profile: string, kind: RecordOut['kind'], body: Record<string, unknown>) => post<RecordOut>(`${p(profile)}/records/${kind}`, body);

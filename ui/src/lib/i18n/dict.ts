@@ -1463,6 +1463,13 @@ export const dict = {
 		gen_couple_k_xl_both: "both carriers",
 		gen_couple_withheld: "A withheld result",
 		gen_couple_cite: "Source",
+		// ---- slice 20: cardiovascular risk, smoking status (calc_) ----
+		calc_smoking: "Smoking status",
+		calc_smk_never: "Never smoked",
+		calc_smk_former: "Former smoker",
+		calc_smk_current: "Smokes now",
+		calc_smk_pick: "Choose one answer.",
+		calc_smk_add: "Record smoking status",
 	},
 	es: {
 		household: "Hogar",
@@ -2925,6 +2932,13 @@ export const dict = {
 		gen_couple_k_xl_both: "ambos portadores",
 		gen_couple_withheld: "Un resultado retenido",
 		gen_couple_cite: "Fuente",
+		// ---- slice 20: cardiovascular risk, smoking status (calc_) ----
+		calc_smoking: "Tabaquismo",
+		calc_smk_never: "Nunca ha fumado",
+		calc_smk_former: "Fumó en el pasado",
+		calc_smk_current: "Fuma actualmente",
+		calc_smk_pick: "Elige una respuesta.",
+		calc_smk_add: "Registrar tabaquismo",
 	},
 } as const;
 

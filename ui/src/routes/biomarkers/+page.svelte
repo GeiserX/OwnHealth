@@ -42,6 +42,8 @@
 	const calcs = new Loader<Calculators>();
 	let unitIdx = $state(0);
 	let adding = $state(false);
+	// the calculators card's smoking status form, opened from a risk result that waits for it
+	let smoking = $state(false);
 
 	function load() {
 		const slug = profile?.slug;
@@ -212,7 +214,7 @@
 	{#if adding && profile}
 		<div class="card" style="margin-bottom:12px">
 			<h3>{t('me_add_value')}</h3>
-			<ManualEntry profile={profile.slug} kinds={['observation']} onsaved={load} oncancel={() => (adding = false)} />
+			<ManualEntry profile={profile.slug} kinds={['observation', 'smoking']} onsaved={load} oncancel={() => (adding = false)} />
 		</div>
 	{/if}
 	{#if query}<div class="note" style="margin-bottom:6px">{t('me_filtered')} <b>{query}</b> · <a href="/biomarkers">{t('h1_clear')}</a></div>{/if}
@@ -464,7 +466,12 @@
 									<div class="dim calc-in" style="font-size:11px">
 										{t('calc_inputs')}:
 										{#each it.inputs as i (i.group)}
-											<span><span class="calc-nw">{i.name} <span class="num">{numText(i.value)}</span> {calcUnit(i.unit)}</span>{#if i.converted}{' '}<span class="calc-nw">({tf('calc_read_as', { v: numText(i.converted.value) + ' ' + calcUnit(i.converted.unit) })})</span>{/if}{' '}<SourceChip label={i.date} name={i.name} src={i.src} onopen={openSource} /></span>
+											{#if i.text}
+												<!-- a line that is no lab value: what the record holds, with its source when it holds something -->
+												<span><span>{i.text}</span>{#if i.src}{' '}<SourceChip label={i.date} name={i.name} src={i.src} onopen={openSource} />{/if}</span>
+											{:else}
+												<span><span class="calc-nw">{i.name} <span class="num">{numText(i.value)}</span> {calcUnit(i.unit)}</span>{#if i.converted}{' '}<span class="calc-nw">({tf('calc_read_as', { v: numText(i.converted.value) + ' ' + calcUnit(i.converted.unit) })})</span>{/if}{' '}<SourceChip label={i.date} name={i.name} src={i.src} onopen={openSource} /></span>
+											{/if}
 										{/each}
 										{#if it.person?.age != null}<span class="calc-nw">{tf('calc_age', { age: it.person.age })}</span>{/if}
 										{#if it.person?.sex}<span class="calc-nw">{t('calc_' + it.person.sex)}</span>{/if}
@@ -473,6 +480,13 @@
 								<div class="dim" style="font-size:11px;overflow-wrap:anywhere">{it.version} · <a href={it.cite} target="_blank" rel="noopener noreferrer">{it.cite}</a></div>
 							</div>
 						{/each}
+						{#if profile && profile.role !== 'viewer' && calcShown.some((c) => c.latest.reason?.groups?.includes('smoking_status'))}
+							{#if smoking}
+								<ManualEntry profile={profile.slug} kinds={['smoking']} onsaved={() => ((smoking = false), load())} oncancel={() => (smoking = false)} />
+							{:else}
+								<button class="btn sm" style="margin-top:6px" onclick={() => (smoking = true)}>{t('calc_smk_add')}</button>
+							{/if}
+						{/if}
 						<div class="note" style="margin-top:4px">{t('calc_note')}</div>
 					{/if}
 				</div>
