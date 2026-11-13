@@ -37,6 +37,7 @@ const SOURCES: &[(&str, Source)] = &[
     ("clinvar_alerts", |_| Box::pin(clinvar_alerts())),
     ("due", |s| Box::pin(due(s))),
     ("calculators", |s| Box::pin(calculators(s))),
+    ("couple_carrier", |_| Box::pin(couple_carrier())),
 ];
 
 async fn status(s: &Seeded) -> anyhow::Result<Vec<Value>> {
@@ -333,6 +334,109 @@ fn the_cited_loader_refuses_a_row_or_template_that_breaks_the_rules() -> R {
         }
     }
     Ok(())
+}
+
+/// The couple carrier view in both languages, with every kind of row: people built to hit each one (a
+/// shared gene confirmed and not, X-linked, each partner state and a withheld sensitive gene).
+async fn couple_carrier() -> anyhow::Result<Vec<Value>> {
+    use ownhealth_genome::Gate;
+    use ownhealth_genome::couple::{Carried, Other, Person, join};
+    let carried = |inheritance: &str, confirmed: bool, sensitive: bool| Carried {
+        inheritance: inheritance.into(),
+        confirmed,
+        sensitive,
+        zygosity: Some("het".into()),
+        assays: ["wgs".to_string()].into(),
+        src: vec!["src_example".into()],
+        ..Carried::default()
+    };
+    let person = |name: &str, genes: Vec<(&str, Carried)>, coverage: Vec<(&str, Vec<(&str, &str)>)>| Person {
+        name: name.into(),
+        carried: genes.into_iter().map(|(g, c)| (g.to_string(), c)).collect(),
+        other: Default::default(),
+        coverage: coverage
+            .into_iter()
+            .map(|(a, g)| {
+                (
+                    a.to_string(),
+                    g.into_iter().map(|(g, s)| (g.to_string(), s.to_string())).collect(),
+                )
+            })
+            .collect(),
+    };
+    let alex = person(
+        "Alex",
+        vec![
+            ("GJB2", carried("AR", true, false)),
+            ("HBB", carried("AR", true, false)),
+            ("CFTR", carried("AR", true, false)),
+            ("PAH", carried("AR", true, false)),
+            ("SMN1", carried("AR", true, false)),
+            ("GALT", carried("AR", true, false)),
+            ("ATP7B", carried("AR", true, false)),
+            ("MUTYH", carried("AR", true, false)),
+            ("DMD", carried("XL", true, false)),
+            ("OTC", carried("XL", true, false)),
+            ("BRCA2", carried("AR", true, true)),
+        ],
+        vec![],
+    );
+    let mut sam = person(
+        "Sam",
+        vec![
+            ("GJB2", carried("AR", true, false)),
+            ("HBB", carried("AR", false, false)),
+            (
+                "ATP7B",
+                Carried {
+                    zygosity: Some("hom".into()),
+                    ..carried("AR", true, false)
+                },
+            ),
+            ("DMD", carried("XL", false, false)),
+        ],
+        vec![
+            ("chip", vec![("CFTR", "partial")]),
+            ("vcf_only", vec![("PAH", "assessed"), ("SMN1", "partial")]),
+        ],
+    );
+    sam.other.insert("GALT".into(), Other::default());
+    // A whole genome with rows for two genes only, and a person with no genome at all.
+    let rosa = person(
+        "Rosa",
+        vec![],
+        vec![("wgs", vec![("PAH", "assessed"), ("SMN1", "partial")])],
+    );
+    let carmen = person("Carmen", vec![], vec![]);
+    let mut out = Vec::new();
+    for lang in LANGS {
+        for open in [true, false] {
+            let gate = Gate::new(open, false);
+            for partner in [&sam, &rosa, &carmen] {
+                out.push(json!(join(&alex, partner, &gate, &gate, lang)?.rows));
+            }
+        }
+    }
+    // Every row and side template is reached, so a new one cannot slip past the lint.
+    let mut used = std::collections::BTreeSet::new();
+    for r in out.iter().filter_map(Value::as_array).flatten() {
+        used.insert(format!("row.{}", r["kind"].as_str().unwrap_or_default()));
+        for side in [&r["a"], &r["b"]] {
+            if let Some(state) = side["state"].as_str() {
+                let partial = side["coverage"] == "partial" && state == "not_detected";
+                used.insert(format!("side.{state}{}", if partial { "_partial" } else { "" }));
+                if side["confirmed"] == false {
+                    used.insert("side.carrier_unconfirmed".into());
+                }
+            }
+        }
+    }
+    let missing: Vec<String> = ownhealth_genome::couple::template_keys()
+        .into_iter()
+        .filter(|k| k != "counsel" && !used.contains(k))
+        .collect();
+    assert!(missing.is_empty(), "couple templates no row reaches: {missing:?}");
+    Ok(out)
 }
 
 /// The printed doctor summary's model, every profile, specialty and language (its PDF text layer is
