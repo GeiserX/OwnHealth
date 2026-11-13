@@ -65,7 +65,7 @@ rows:
     precision: 1
     cite: https://pubmed.ncbi.nlm.nih.gov/34120185/
   - id: prevent_cvd
-    version: PREVENT base, 10-year total CVD (AHA 2023)
+    version: PREVENT base (AHA 2023)
     inputs: [total_cholesterol, hdl_c]
     shows_on: [total_cholesterol, hdl_c, ldl_c, non_hdl_c]
     system: cardiometabolic
@@ -73,7 +73,7 @@ rows:
     precision: 1
     cite: https://pubmed.ncbi.nlm.nih.gov/37947085/
   - id: prevent_ascvd
-    version: PREVENT base, 10-year ASCVD (AHA 2023)
+    version: PREVENT base (AHA 2023)
     inputs: [total_cholesterol, hdl_c]
     shows_on: [total_cholesterol, hdl_c, ldl_c, non_hdl_c]
     system: cardiometabolic

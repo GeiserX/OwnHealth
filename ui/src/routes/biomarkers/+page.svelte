@@ -468,7 +468,7 @@
 										{#each it.inputs as i (i.group)}
 											{#if i.text}
 												<!-- a line that is no lab value: what the record holds, with its source when it holds something -->
-												<span><span>{i.text}</span>{#if i.src}{' '}<SourceChip label={i.date} name={i.name} src={i.src} onopen={openSource} />{/if}</span>
+												<span class="calc-fact"><span>{i.text}</span>{#if i.src}{' '}<SourceChip label={i.date} name={i.name} src={i.src} onopen={openSource} />{/if}</span>
 											{:else}
 												<span><span class="calc-nw">{i.name} <span class="num">{numText(i.value)}</span> {calcUnit(i.unit)}</span>{#if i.converted}{' '}<span class="calc-nw">({tf('calc_read_as', { v: numText(i.converted.value) + ' ' + calcUnit(i.converted.unit) })})</span>{/if}{' '}<SourceChip label={i.date} name={i.name} src={i.src} onopen={openSource} /></span>
 											{/if}
@@ -544,6 +544,12 @@
 	}
 	.calc-nw {
 		white-space: nowrap;
+	}
+	/* fact lines read as separate items, not one sentence */
+	.calc-fact::before {
+		content: '·';
+		margin-right: 4px;
+		opacity: 0.6;
 	}
 	@media (max-width: 760px) {
 		.ph-hide {
