@@ -326,13 +326,13 @@ async fn load_points(
     Ok((series, sensitive))
 }
 
-type Day = (NaiveDate, Option<f64>, Option<f64>);
+pub(crate) type Day = (NaiveDate, Option<f64>, Option<f64>);
 type RollupRow = (String, i16, DateTime<Utc>, Option<f32>, Option<f32>);
 type BySource = Vec<(i16, Vec<Day>)>;
 
 /// Daily rollups of the last 90 days per metric, one source per metric (source_priority, else the
 /// source with the most days). metric -> [(day, avg, sum)] chronological.
-async fn wearables(
+pub(crate) async fn wearables(
     conn: &mut PgConnection,
     profile_id: Uuid,
     as_of: NaiveDate,
