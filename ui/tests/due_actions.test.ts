@@ -2,7 +2,7 @@
 // again", in one section only, and a new snooze starts no earlier than tomorrow.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { addDays, docLabel, dueGroups, shownAgain, type DueItem } from '../src/lib/logic/due.ts';
+import { addDays, docLabel, dueGroups, evidenceDay, shownAgain, type DueItem } from '../src/lib/logic/due.ts';
 
 const item = (key: string, status: DueItem['status'], extra: Partial<DueItem> = {}): DueItem => ({
 	key,
@@ -52,4 +52,12 @@ test('a document in the Done evidence list is labelled by its file name text, ne
 	assert.equal(docLabel({ id: 'd1a2b3c4-0000', filename: null, doc_type: 'lab_report' }), 'lab_report');
 	assert.equal(docLabel({ id: 'd1a2b3c4-0000', filename: { text: '' } }), 'd1a2b3c4');
 	for (const d of [untrusted, { id: 'x', filename: { text: 'a.pdf' } }]) assert.ok(!docLabel(d).includes('[object'));
+});
+
+test('evidence counts only with a day on or before today, as the server checks it', () => {
+	assert.equal(evidenceDay('2026-11-01', '2026-11-13'), '2026-11-01');
+	assert.equal(evidenceDay('2026-11-13T08:00:00Z', '2026-11-13'), '2026-11-13');
+	assert.equal(evidenceDay('2026-11-14', '2026-11-13'), null);
+	assert.equal(evidenceDay(undefined, '2026-11-13'), null);
+	assert.equal(evidenceDay('', '2026-11-13'), null);
 });

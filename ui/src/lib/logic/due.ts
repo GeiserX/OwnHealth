@@ -137,6 +137,15 @@ export function docLabel(d: { id: string; filename?: { text: string } | string |
 	return [name || d.doc_type || d.id.slice(0, 8), d.collected_at?.slice(0, 10)].filter(Boolean).join(' · ');
 }
 
+/**
+ * The day (YYYY-MM-DD) a record or document proves something was done, or null when it has none or
+ * it is after `today`: the server refuses both as `done` evidence.
+ */
+export function evidenceDay(v: unknown, today: string): string | null {
+	const day = typeof v === 'string' ? v.slice(0, 10) : '';
+	return day && day <= today ? day : null;
+}
+
 /** The day after `iso` (YYYY-MM-DD), the earliest a new snooze may end on the local calendar. */
 export function addDays(iso: string, n: number): string {
 	const d = new Date(`${iso}T12:00:00Z`);

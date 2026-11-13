@@ -17,7 +17,7 @@
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
-	import { addDays, docLabel, dueColor, dueGroups, isOpen, type DueDecisionIn, type DueDoc, type DueItem } from '#lib/logic/due';
+	import { addDays, docLabel, dueColor, dueGroups, evidenceDay, isOpen, type DueDecisionIn, type DueDoc, type DueItem } from '#lib/logic/due';
 	import { todayIso } from '#lib/logic/people';
 	import { currentProfile } from '#lib/state/app.svelte';
 
@@ -118,7 +118,8 @@
 			if (!(e instanceof ApiError && e.status === 403)) failed.push(e);
 			return { items: [] };
 		};
-		const day = (v: unknown) => (typeof v === 'string' ? v.slice(0, 10) : '');
+		const limit = todayIso();
+		const day = (v: unknown) => evidenceDay(v, limit);
 		const [proc, imm, docs] = await Promise.all([
 			listRecords(slug, 'procedure').catch(empty),
 			listRecords(slug, 'immunization').catch(empty),
@@ -129,13 +130,13 @@
 		const rec = (kind: string, group: string) => (r: Rec) => ({ value: `${kind}:${r.id}`, label: [r.title, recDay(r)].join(' · '), group });
 		if (seq !== evidenceSeq) return;
 		evidenceErr = failed[0] ?? null;
-		// a record with no day proves nothing on any day, so the server refuses it as evidence
+		// a record with no day, or one after today, proves nothing yet, so the server refuses it as evidence
 		evidenceList = [
 			...imm.items.filter(recDay).map(rec('immunization', t('due_f_vaccine'))),
 			...proc.items.filter(recDay).map(rec('procedure', t('due_f_procedure'))),
 			...docs.items
 				// a document needs a clinical date to count, and this list knows only its collection day
-				.filter((d) => d.status === 'active' && d.collected_at)
+				.filter((d) => d.status === 'active' && day(d.collected_at))
 				.map((d) => ({ value: `document:${d.id}`, label: docLabel(d), group: t('due_ev_document') }))
 		];
 	}
