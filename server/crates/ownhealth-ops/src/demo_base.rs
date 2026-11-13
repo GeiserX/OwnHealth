@@ -1316,7 +1316,7 @@ pub fn demo_label_png() -> Result<Vec<u8>> {
 }
 
 /// v0.3 supplements (migration 1101): Alex's vitamin D3, with a photo of its label and the decision to
-/// keep taking it each winter, and Carmen's iron, which she decided not to buy again. Both courses
+/// take it again next winter, and Carmen's iron, which she decided not to buy again. Both courses
 /// ended before the demo day, so no state_hash moves. Its own demo hook (`supplements`).
 pub async fn seed_supplements(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result<()> {
     use ownhealth_core::records::{add_label, supersede_record};
@@ -1350,7 +1350,7 @@ pub async fn seed_supplements(conn: &mut PgConnection, ctx: &mut DemoContext) ->
     add_label(conn, made.id, doc.id).await?;
     let mut decided = first;
     decided["decision"] = json!("keep");
-    decided["decision_reason"] = json!("La tomo de noviembre a marzo");
+    decided["decision_reason"] = json!("Solo en invierno; la vuelvo a tomar en noviembre");
     decided["decision_on"] = json!("2026-04-02");
     let src = manual(conn, user, None, "manual").await?;
     supersede_record(
@@ -1359,7 +1359,7 @@ pub async fn seed_supplements(conn: &mut PgConnection, ctx: &mut DemoContext) ->
         &RecordIn::from_json("medication", decided)?,
         &src,
         "person",
-        "Decisión registrada",
+        ownhealth_core::records::DECISION_RECORDED,
     )
     .await?;
     let src = manual(conn, user, None, "manual").await?;

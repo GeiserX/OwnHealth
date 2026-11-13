@@ -8,8 +8,9 @@
 	import { openSource } from '#lib/components/pages1/source.svelte';
 	import { errText, tf } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
-	import { DECISIONS, decisionOf, isCurrent, supplementRows, type Decision } from '#lib/logic/meds';
+	import { DECISIONS, DECISION_RECORDED, decisionOf, decisionReasonOf, isCurrent, supplementRows, type Decision } from '#lib/logic/meds';
 	import { todayIso } from '#lib/logic/people';
+	import { tick } from 'svelte';
 
 	let {
 		profile,
@@ -35,11 +36,15 @@
 	let uploading = $state<string | null>(null);
 	let errors = $state<Record<string, string>>({});
 	const inputs: Record<string, HTMLInputElement> = {};
+	let reasonInput = $state<HTMLInputElement | null>(null);
 
-	function pick(r: RecordOut, d: Decision) {
+	async function pick(r: RecordOut, d: Decision) {
 		deciding = { id: r.id, decision: d };
-		reason = decisionOf(r.detail) === d ? (s(r, 'decision_reason') ?? '') : '';
+		reason = decisionOf(r.detail) === d ? (decisionReasonOf(r.detail) ?? '') : '';
 		errors = { ...errors, [r.id]: '' };
+		// the reason is the next thing to write
+		await tick();
+		reasonInput?.focus();
 	}
 
 	async function saveDecision(e: SubmitEvent, r: RecordOut) {
@@ -52,7 +57,7 @@
 				decision: deciding.decision,
 				decision_reason: reason.trim() || null,
 				decision_on: today,
-				reason: t('med_sup_corr_reason')
+				reason: DECISION_RECORDED
 			});
 			deciding = null;
 			onsaved();
@@ -75,7 +80,9 @@
 		busy = uploading = r.id;
 		errors = { ...errors, [r.id]: '' };
 		try {
-			await addMedicationLabel(profile, r.id, file);
+			// the Documents list names the photo after the supplement, not the camera's IMG_1234.jpg
+			const ext = file.name.match(/\.[A-Za-z0-9]{1,5}$/)?.[0] ?? '';
+			await addMedicationLabel(profile, r.id, file, `${s(r, 'name') ?? r.title} – ${t('med_sup_photo_file')}${ext}`);
 			onsaved();
 		} catch (err) {
 			errors = { ...errors, [r.id]: errText(err) };
@@ -122,7 +129,7 @@
 					{/if}
 					<SourceChip label="" name={r.title} src={r.src} onopen={openSource} />
 				</div>
-				{#if decision && s(r, 'decision_reason')}<div class="dim line">{t('med_reason')}: {s(r, 'decision_reason')}</div>{/if}
+				{#if decision && decisionReasonOf(r.detail)}<div class="dim line">{t('med_reason')}: {decisionReasonOf(r.detail)}</div>{/if}
 				{#if canWrite}
 					<div class="p2row acts">
 						<div class="seg" role="group" aria-label={t('med_sup_seg')}>
@@ -135,7 +142,6 @@
 							bind:this={inputs[r.id]}
 							type="file"
 							accept={IMAGE.join(',')}
-							capture="environment"
 							hidden
 							onchange={(e) => upload(r, e.currentTarget)}
 						/>
@@ -145,7 +151,7 @@
 					</div>
 					{#if deciding?.id === r.id}
 						<form class="p2form decide" onsubmit={(e) => saveDecision(e, r)}>
-							<label>{t('med_sup_reason')}<input class="p2in" bind:value={reason} maxlength="500" /></label>
+							<label>{t('med_sup_reason')}<input class="p2in" bind:this={reasonInput} bind:value={reason} maxlength="500" onkeydown={(e) => e.key === 'Escape' && (deciding = null)} /></label>
 							<div class="p2row">
 								<button class="btn pri sm" type="submit" disabled={busy === r.id}>{t('med_sup_save')}</button>
 								<button class="btn sm" type="button" onclick={() => (deciding = null)}>{t('i2_cancel')}</button>

@@ -1,7 +1,7 @@
 // The Medications screen: which medicines are current, the history grouped per medicine, and the code chips.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { codeChips, decisionOf, historyGroups, isCurrent, pgxFor, replacedReason, supplementRows, type MedRecord } from '../src/lib/logic/meds.ts';
+import { codeChips, decisionOf, decisionReasonOf, historyGroups, isCurrent, pgxFor, replacedReason, supplementRows, type MedRecord } from '../src/lib/logic/meds.ts';
 
 const rec = (id: string, detail: Record<string, unknown>, extra: Partial<MedRecord> = {}): MedRecord => ({
 	id,
@@ -114,4 +114,8 @@ test('the supplements card lists every live supplement, taken ones first, and re
 	assert.equal(decisionOf(rows[1].detail), 'do_not_repurchase');
 	assert.equal(decisionOf(rows[0].detail), null);
 	assert.equal(decisionOf({ decision: 'buy_more' }), null, 'a value we do not know shows no decision');
+	assert.equal(decisionReasonOf({ decision_reason: { trust: 'untrusted_text', origin: 'person_note', text: 'Upset stomach' } }), 'Upset stomach', 'a read marks the reason');
+	assert.equal(decisionReasonOf({ decision_reason: 'Upset stomach' }), 'Upset stomach');
+	assert.equal(decisionReasonOf({ decision_reason: null }), null);
+	assert.equal(decisionReasonOf({ decision_reason: { trust: 'untrusted_text', origin: 'person_note', text: ' ' } }), null);
 });

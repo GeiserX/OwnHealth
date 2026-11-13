@@ -146,6 +146,10 @@ pub struct MedicationIn {
 /// The decisions a person can record on a medicine or supplement.
 pub const DECISIONS: [&str; 3] = ["keep", "stop", "do_not_repurchase"];
 
+/// The `status_reason` of a version replaced by a new decision: a code, which the UI says in the
+/// reader's language.
+pub const DECISION_RECORDED: &str = "decision recorded";
+
 /// One coding of a medicine as the source sent it (system URL, code, display).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MedCode {
@@ -419,7 +423,10 @@ pub async fn add_record(
         other => other.clone(),
     };
     let src_id = ensure_src(&mut *conn, &src, Some(profile_id)).await?;
-    let resource = record.common().fhir.clone().unwrap_or_else(|| record.build_fhir());
+    let mut resource = record.common().fhir.clone().unwrap_or_else(|| record.build_fhir());
+    if let RecordIn::Medication(m) = record {
+        crate::fhir::set_medication_decision(&mut resource, m);
+    }
     let cols = record.columns()?;
     // One jsonb parameter holds the typed columns; each is read back with its SQL type.
     let names: Vec<&String> = cols.keys().collect();
@@ -468,6 +475,21 @@ pub async fn supersede_record(
         ));
     }
     lifecycle::mark_superseded(&mut tx, table, old_id, Some(reason)).await?;
+    // A new version that says nothing of the decision (a source update, a correction from a form
+    // without it) keeps the person's recorded decision, as the label photos below do.
+    let carried;
+    let new = match new {
+        RecordIn::Medication(m) if m.decision.is_none() && m.decision_reason.is_none() && m.decision_on.is_none() => {
+            let text = |k: &str| old.get(k).and_then(Value::as_str).map(str::to_string);
+            let mut m = m.clone();
+            m.decision = text("decision");
+            m.decision_reason = text("decision_reason");
+            m.decision_on = text("decision_on").and_then(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok());
+            carried = RecordIn::Medication(m);
+            &carried
+        }
+        other => other,
+    };
     let committed = add_record(
         &mut tx,
         new,

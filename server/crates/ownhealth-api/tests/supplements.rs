@@ -250,7 +250,8 @@ async fn a_decision_is_a_new_version_that_keeps_the_reason_and_the_label() -> R 
         ),
         (
             &json!("do_not_repurchase"),
-            &json!("Too large to swallow"),
+            // the person's reason is free text, so a read marks it
+            &json!({"trust": "untrusted_text", "origin": "person_note", "text": "Too large to swallow"}),
             &json!("2026-11-01"),
             &json!(id)
         )
@@ -348,5 +349,66 @@ async fn deleting_a_profile_with_a_labelled_supplement_succeeds() -> R {
         .fetch_one(&a.db.pool)
         .await?;
     assert_eq!(links, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_label_photo_past_the_limit_is_told_its_size_not_a_parse_error() -> R {
+    let a = app().await?;
+    let made = supplement(&a, "alex").await?;
+    let uri = format!("/profiles/alex/records/medication/{}/label", id_of(&made));
+    // a 20 MB phone photo: a PNG header, then padding
+    let mut big = PNG.to_vec();
+    big.resize(20 * 1024 * 1024, 0);
+    let (s, out) = upload(&a, "alex", &uri, "label.png", &big).await?;
+    assert_eq!(
+        (s, &out["detail"]["code"]),
+        (StatusCode::PAYLOAD_TOO_LARGE, &json!("too_large")),
+        "{out}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_new_version_that_says_nothing_of_the_decision_keeps_the_persons_decision() -> R {
+    // a source update (a FHIR re-import accepted from review) sends the medicine without the
+    // decision columns: it goes through the same supersede, so the recorded decision stays
+    let a = app().await?;
+    let made = supplement(&a, "alex").await?;
+    let mut body = made["detail"].clone();
+    body["decision"] = json!("stop");
+    body["decision_reason"] = json!("Upset stomach");
+    body["decision_on"] = json!("2026-11-01");
+    let (s, decided) = post(
+        &a,
+        &format!("/profiles/alex/records/medication/{}/correct", id_of(&made)),
+        body,
+    )
+    .await?;
+    assert_eq!(s, StatusCode::CREATED, "{decided}");
+    let (s, updated) = post(
+        &a,
+        &format!("/profiles/alex/records/medication/{}/correct", id_of(&decided)),
+        json!({"kind": "supplement", "name": "Vitamin D3", "strength": "4000 IU", "started": "2026-01-10"}),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::CREATED, "{updated}");
+    let d = &updated["detail"];
+    assert_eq!(
+        (&d["strength"], &d["decision"], &d["decision_reason"], &d["decision_on"]),
+        (
+            &json!("4000 IU"),
+            &json!("stop"),
+            &json!({"trust": "untrusted_text", "origin": "person_note", "text": "Upset stomach"}),
+            &json!("2026-11-01")
+        ),
+        "{updated}"
+    );
+    // the stored resource says it too, so the export keeps it
+    let fhir: Value = sqlx::query_scalar("select fhir from medication_statement where id = $1")
+        .bind(Uuid::parse_str(&id_of(&updated))?)
+        .fetch_one(&a.db.pool)
+        .await?;
+    assert!(fhir.to_string().contains("urn:ownhealth:decision"), "{fhir}");
     Ok(())
 }

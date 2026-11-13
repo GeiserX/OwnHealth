@@ -223,6 +223,15 @@ fn model(kind: &str, profile_id: Uuid, body: &Map<String, Value>) -> Result<Reco
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     data.insert("profile_id".into(), json!(profile_id.to_string()));
+    // a medicine read and sent back as it came keeps its reason: the marked text is unwrapped
+    if let Some(text) = data
+        .get("decision_reason")
+        .filter(|v| ownhealth_core::text::is_untrusted(v))
+        .and_then(|v| v.get("text"))
+        .cloned()
+    {
+        data.insert("decision_reason".into(), text);
+    }
     let refused = |errors: Vec<Value>| Failure::Api(bad_input("Invalid record.").with("errors", json!(errors)));
     lax_record(kind, &mut data).map_err(refused)?;
     RecordIn::from_json(kind, Value::Object(data)).map_err(|e| refused(vec![json!({"msg": e.to_string()})]))
@@ -455,6 +464,14 @@ async fn records_out(conn: &mut PgConnection, kind: &str, rows: &[Map<String, Va
         let ids: Vec<Uuid> = rows.iter().filter_map(|r| Uuid::parse_str(&id_of(r)).ok()).collect();
         let labels = rec::labels_of(conn, &ids).await?;
         for (row, o) in rows.iter().zip(out.iter_mut()) {
+            // the person's reason is free text: a reader (an agent over the API too) gets it marked
+            if let Some(r) = row
+                .get("decision_reason")
+                .and_then(Value::as_str)
+                .filter(|r| !r.is_empty())
+            {
+                o["detail"]["decision_reason"] = json!({"trust": "untrusted_text", "origin": "person_note", "text": r});
+            }
             let mine = labels
                 .iter()
                 .find(|(m, _)| m.to_string() == id_of(row))
@@ -664,16 +681,28 @@ async fn add_label(
     form: Result<Multipart, MultipartRejection>,
 ) -> Answer {
     let record_id = uuid_param(&["path", "record_id"], &record_id)?;
-    let bad_body = || {
+    let too_large = || {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "There was an error parsing the body",
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            "A label photo is at most 15 MiB.",
         )
+    };
+    // a body past the route's limit fails while it is read: that is the size answer, not a parse error
+    let bad_body = |e: axum::extract::multipart::MultipartError| {
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            too_large()
+        } else {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "There was an error parsing the body",
+            )
+        }
     };
     let mut file: Option<(String, Vec<u8>)> = None;
     if let Ok(mut form) = form {
-        while let Some(field) = form.next_field().await.map_err(|_| bad_body())? {
+        while let Some(field) = form.next_field().await.map_err(bad_body)? {
             if field.name() != Some("file") || file.is_some() {
                 continue;
             }
@@ -682,14 +711,9 @@ async fn add_label(
                 .filter(|f| !f.is_empty())
                 .unwrap_or("label")
                 .to_string();
-            let bytes = field.bytes().await.map_err(|_| bad_body())?;
+            let bytes = field.bytes().await.map_err(bad_body)?;
             if bytes.len() > LABEL_MAX_BYTES {
-                return Err(ApiError::new(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "too_large",
-                    "A label photo is at most 15 MiB.",
-                )
-                .into());
+                return Err(too_large().into());
             }
             file = Some((name, bytes.to_vec()));
         }

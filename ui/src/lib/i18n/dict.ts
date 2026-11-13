@@ -1461,6 +1461,7 @@ export const dict = {
 		med_sup_photo_open: "Open the label photo",
 		med_sup_photo_type: "A label photo is a PNG, JPEG or WebP image.",
 		med_sup_uploading: "Uploading…",
+		med_sup_photo_file: "label",
 	},
 	es: {
 		household: "Hogar",
@@ -2921,6 +2922,7 @@ export const dict = {
 		med_sup_photo_open: "Abrir la foto de la etiqueta",
 		med_sup_photo_type: "La foto de la etiqueta tiene que ser una imagen PNG, JPEG o WebP.",
 		med_sup_uploading: "Subiendo…",
+		med_sup_photo_file: "etiqueta",
 	},
 } as const;
 

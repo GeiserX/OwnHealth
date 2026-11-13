@@ -43,9 +43,9 @@ export const correctRecord = (profile: string, kind: RecordOut['kind'], id: Uuid
 export const retractRecord = (profile: string, kind: RecordOut['kind'], id: Uuid, reason: string) =>
 	post<RecordOut>(`${p(profile)}/records/${kind}/${id}/retract`, { reason });
 /** A photo of a medicine or supplement label (PNG, JPEG or WebP), stored as a document and linked to the record. */
-export function addMedicationLabel(profile: string, id: Uuid, file: File): Promise<{ medication_id: Uuid; document_id: Uuid }> {
+export function addMedicationLabel(profile: string, id: Uuid, file: File, filename = file.name): Promise<{ medication_id: Uuid; document_id: Uuid }> {
 	const form = new FormData();
-	form.set('file', file, file.name);
+	form.set('file', file, filename);
 	return request('POST', `${p(profile)}/records/medication/${id}/label`, { body: form });
 }
 

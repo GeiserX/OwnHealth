@@ -78,7 +78,7 @@ async fn the_supplements_hook_adds_a_label_and_two_decisions_and_moves_no_state_
             (
                 "current".to_string(),
                 Some("keep".to_string()),
-                Some("La tomo de noviembre a marzo".to_string()),
+                Some("Solo en invierno; la vuelvo a tomar en noviembre".to_string()),
                 1
             )
         ]
@@ -119,5 +119,67 @@ async fn the_supplements_hook_adds_a_label_and_two_decisions_and_moves_no_state_
         .fetch_one(&mut *tx)
         .await?;
     assert_eq!(left, 0);
+    Ok(())
+}
+
+fn zip_text(z: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>, name: &str) -> anyhow::Result<String> {
+    use std::io::Read;
+    let mut out = String::new();
+    z.by_name(name)?.read_to_string(&mut out)?;
+    Ok(out)
+}
+
+#[tokio::test]
+async fn the_export_keeps_the_decision_and_the_link_to_the_label_photo() -> anyhow::Result<()> {
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let settings = db.settings(dir.path())?;
+    let blobs = BlobStore::new(settings.blobs_path())?;
+    let mut tx = db.pool.begin().await?;
+    let family = create_rivera_family(&mut tx, "Rivera (supplements export)").await?;
+    let mut ctx = DemoContext {
+        settings,
+        blobs: blobs.clone(),
+        family,
+        as_of: as_of(),
+        documents: HashMap::new(),
+        src_ids: HashMap::new(),
+    };
+    ownhealth_ops::seed_supplements(&mut tx, &mut ctx).await?;
+    let alex = ctx.family.profile("alex");
+    let mut out = std::io::Cursor::new(Vec::new());
+    let manifest = ownhealth_ops::export::export_profile(&mut tx, &blobs, alex, &mut out, "zip").await?;
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(out.into_inner()))?;
+
+    // the current version says the decision, its reason and its day; the first version says none
+    let statements: Vec<serde_json::Value> = zip_text(&mut z, "fhir/MedicationStatement.ndjson")?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let decisions: Vec<&serde_json::Value> = statements
+        .iter()
+        .flat_map(|s| s["extension"].as_array().into_iter().flatten())
+        .filter(|e| e["url"] == "urn:ownhealth:decision")
+        .collect();
+    assert_eq!(statements.len(), 2, "{statements:?}");
+    assert_eq!(decisions.len(), 1, "{statements:?}");
+    let parts = &decisions[0]["extension"];
+    assert_eq!(parts[0], serde_json::json!({"url": "code", "valueCode": "keep"}));
+    assert_eq!(parts[1]["url"], "reason");
+    assert_eq!(parts[2], serde_json::json!({"url": "date", "valueDate": "2026-04-02"}));
+
+    // both versions link the one label photo, which the export carries as a DocumentReference
+    let doc: Uuid = sqlx::query_scalar("select id from document where profile_id = $1")
+        .bind(alex)
+        .fetch_one(&mut *tx)
+        .await?;
+    let links: Vec<serde_json::Value> = zip_text(&mut z, "ownhealth/medication_label.ndjson")?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(links.len(), 2, "{links:?}");
+    assert!(links.iter().all(|l| l["document_id"] == doc.to_string()), "{links:?}");
+    assert!(zip_text(&mut z, "fhir/DocumentReference.ndjson")?.contains(&doc.to_string()));
+    assert_eq!(manifest["counts"]["ownhealth/medication_label"], 2);
     Ok(())
 }
