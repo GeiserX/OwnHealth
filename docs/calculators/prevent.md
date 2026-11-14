@@ -24,8 +24,8 @@ The coefficients are in `server/crates/ownhealth-rules/src/calc/prevent.rs`.
 
 **Inputs we read.**
 
-- Total and HDL cholesterol from one draw, the newest. A value in mg/dL is divided by 38.67, the
-  same factor as PREVENT's own 0.02586.
+- Total and HDL cholesterol from one draw and one day, the newest by that day. A value in mg/dL is
+  divided by 38.67, the same factor as PREVENT's own 0.02586.
 - Systolic pressure and smoking status, as for SCORE2 (see [score2.md](score2.md)).
 - eGFR: the newest CKD-EPI 2021 result of the same document, with the creatinine's source.
 - Diabetes: recorded or not (`data/calculators/conditions.yaml`).

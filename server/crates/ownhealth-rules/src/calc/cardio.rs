@@ -261,6 +261,24 @@ fn words(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// The clauses of a condition's text, as words: split at punctuation and at "con" and "with".
+fn clauses(text: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for part in text.split(|c: char| ",;.:()[]/\n".contains(c)) {
+        let mut clause = Vec::new();
+        for w in words(part) {
+            if w == "con" || w == "with" {
+                out.push(std::mem::take(&mut clause));
+            } else {
+                clause.push(w);
+            }
+        }
+        out.push(clause);
+    }
+    out.retain(|c| !c.is_empty());
+    out
+}
+
 /// `phrase` appears in `text` as whole words.
 fn has_phrase(text: &[String], phrase: &str) -> bool {
     let p = words(phrase);
@@ -287,12 +305,16 @@ fn is_icd10(system: &str) -> bool {
 
 /// The condition classes a recorded condition belongs to.
 pub fn condition_classes<'a>(cv: &'a CvData, text: &str, system: Option<&str>, code: Option<&str>) -> Vec<&'a str> {
-    let ws = words(text);
+    let parts = clauses(text);
     let code = code.map(|c| c.replace('.', "").to_ascii_uppercase());
     cv.conditions
         .iter()
         .filter(|c| {
-            let by_text = c.terms.iter().any(|t| has_phrase(&ws, t)) && !c.not_terms.iter().any(|t| has_phrase(&ws, t));
+            // an exclusion holds only inside its own clause: "riesgo de diabetes" is not diabetes, but
+            // "diabetes con riesgo de complicaciones" is
+            let by_text = parts
+                .iter()
+                .any(|ws| c.terms.iter().any(|t| has_phrase(ws, t)) && !c.not_terms.iter().any(|t| has_phrase(ws, t)));
             let by_code = system.is_some_and(is_icd10)
                 && code
                     .as_deref()
@@ -432,7 +454,7 @@ pub async fn facts(
     }
     if out.sbp.is_none() && scopes.contains("read:wearables") {
         let metrics = vec!["bp_systolic".to_string()];
-        if let Some((source, days)) = crate::engine::wearables(&mut *conn, profile_id, as_of, &metrics)
+        if let Some((source, days)) = crate::engine::wearables(&mut *conn, profile_id, as_of, &metrics, WEARABLE_DAYS)
             .await?
             .remove("bp_systolic")
         {
@@ -601,12 +623,19 @@ fn egfr_json(e: &Value) -> Value {
 }
 
 /// The newest draw that holds total and HDL cholesterol from one day.
+/// A draw's date is its newest value of any group, so the pair is chosen by its own date; the later
+/// draw wins a tie.
 fn lipid_draw(draws: &[Draw]) -> Option<(&Obs, &Obs)> {
-    draws.iter().rev().find_map(|d| {
-        let tc = d.obs.get("total_cholesterol")?;
-        let hdl = d.obs.get("hdl_c")?;
-        (tc.date == hdl.date).then_some((tc, hdl))
-    })
+    draws
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| {
+            let tc = d.obs.get("total_cholesterol")?;
+            let hdl = d.obs.get("hdl_c")?;
+            (tc.date == hdl.date).then_some((i, tc, hdl))
+        })
+        .max_by_key(|(i, tc, _)| (tc.date, *i))
+        .map(|(_, tc, hdl)| (tc, hdl))
 }
 
 /// A lab value read for a formula: (value in the formula's unit, the input line, a limitation).
@@ -959,7 +988,13 @@ fn evaluate_one(
     }
     let egfr_v = egfr.and_then(|e| e["value"].as_str()?.parse::<Decimal>().ok());
     if is_score2 {
-        let ldl = draws.iter().rev().find_map(|d| d.obs.get("ldl_c"));
+        // the newest LDL-C by its own date, the later draw on a tie
+        let ldl = draws
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| d.obs.get("ldl_c").map(|o| (i, o)))
+            .max_by_key(|(i, o)| (o.date, *i))
+            .map(|(_, o)| o);
         let mut checks: Vec<(&Obs, Decimal, &str)> = Vec::new();
         for o in [tc_o].into_iter().chain(ldl) {
             if let (Some(v), None) = (o.value, &o.comparator) {

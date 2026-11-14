@@ -36,14 +36,17 @@ country in no region, such as US, it is refused too (`region_not_covered`). We n
 
 **Inputs we read.**
 
-- Total and HDL cholesterol from one draw, the newest. A value in mg/dL is divided by 38.67.
+- Total and HDL cholesterol from one draw and one day, the newest by that day. A value in mg/dL is
+  divided by 38.67. LDL-C, for the marked-factor rule, is the newest by its own day too.
 - Systolic pressure: the newest office reading (LOINC 8480-6) in the 12 months up to the day. If
-  there is none, the mean of the last 30 days of wearable daily means, shown with its window. The
-  result then carries the limitation `sbp_from_wearable`.
+  there is none, the mean of the last 30 days of wearable daily means, shown with its window and its
+  wearable source (the preferred one, else the one with the most days in those 30). The result
+  then carries the limitation `sbp_from_wearable`.
 - Smoking status: the newest answer to LOINC 72166-2 (SNOMED CT). Only "smokes now" counts as a
   smoker. The app records it by hand on the lipid page. A newest answer with no known code is
   refused (`smoking_status_not_coded`) with its words and source; an older answer never stands in.
-- The recorded conditions, matched by `data/calculators/conditions.yaml`.
+- The recorded conditions, matched by `data/calculators/conditions.yaml`. An exclusion such as
+  "riesgo de" holds only in its own clause, so "diabetes con riesgo de complicaciones" is diabetes.
 
 Each input line names its source. A condition that is not on record reads as "no diabetes recorded",
 never as "no diabetes".

@@ -293,6 +293,24 @@ fn a_statin_is_found_by_its_spanish_brand_and_a_condition_by_its_words_or_icd10_
         vec!["ckd"]
     );
     assert!(cardio::condition_classes(cv(), "Riesgo de diabetes", None, None).is_empty());
+    // an exclusion holds only in its own clause: a risk or a family history named beside the
+    // diagnosis does not erase it
+    for text in [
+        "Diabetes mellitus tipo 2 con riesgo de complicaciones",
+        "Type 2 diabetes with risk of complications",
+        "Antecedentes familiares de diabetes; diabetes mellitus tipo 2",
+        "Family history of diabetes, type 2 diabetes",
+    ] {
+        assert_eq!(
+            cardio::condition_classes(cv(), text, None, None),
+            vec!["diabetes"],
+            "{text}"
+        );
+    }
+    assert!(cardio::condition_classes(cv(), "Antecedentes familiares de diabetes", None, None).is_empty());
+    // a screening is not the disease
+    assert!(cardio::condition_classes(cv(), "Screening for diabetes mellitus", None, None).is_empty());
+    assert!(cardio::condition_classes(cv(), "Cribado de diabetes", None, None).is_empty());
     assert!(cardio::condition_classes(cv(), "At risk of heart failure", None, None).is_empty());
     // words that mean something else, and codes read only as received
     assert!(cardio::condition_classes(cv(), "Diabetes gestacional", None, None).is_empty());
@@ -955,6 +973,27 @@ async fn without_an_office_reading_the_wearable_mean_is_read_with_its_window() -
         .execute(&mut *tx)
         .await?;
     }
+    // a second cuff with more days, all older than the window, is not the one chosen: the source is
+    // picked from the same 30 days the mean reads
+    let old_cuff: i16 = sqlx::query_scalar(
+        "insert into wearable_source (id, profile_id, provider, device) overriding system value \
+         values ((select coalesce(max(id), 0) + 1 from wearable_source), $1, 'test', 'old cuff') returning id",
+    )
+    .bind(alex)
+    .fetch_one(&mut *tx)
+    .await?;
+    for ago in 35..45 {
+        sqlx::query(
+            "insert into wearable_rollup (profile_id, metric, source_id, bucket, t, n, v_avg, coverage) \
+             values ($1, 'bp_systolic', $2, 'day', $3::date - $4::int, 1, 150, 1)",
+        )
+        .bind(alex)
+        .bind(old_cuff)
+        .bind(as_of())
+        .bind(ago)
+        .execute(&mut *tx)
+        .await?;
+    }
     let f = cardio::facts(&mut tx, cv(), alex, Some("ES"), as_of(), &all_scopes()).await?;
     // without read:wearables the mean is not read
     let no_wear = scope_set(["read:labs", "read:records", "read:vitals"]);
@@ -1107,4 +1146,51 @@ async fn the_newest_smoking_status_counts_and_facts_read_only_under_their_scopes
     let doc = calc::document_for(&mut tx, alex, as_of(), &labs_vitals).await?;
     assert!(!doc.to_string().contains("src_m02"), "{doc}");
     Ok(())
+}
+
+/// A report's draw date is its newest value, so a report with old lipids and a new creatinine sorts
+/// after a newer lipid draw: the pair and the LDL-C are taken by their own dates.
+#[test]
+fn the_newest_lipids_count_by_their_own_date_not_by_their_report() {
+    let mut newer = lipids("5.8", "1.3", "mmol/L");
+    let mut old = Draw {
+        date: Some(day("2026-11-01")),
+        obs: [
+            (
+                "total_cholesterol".to_string(),
+                obs("total_cholesterol", "6.5", "mmol/L", "2026-01-10", "src_tc_old"),
+            ),
+            (
+                "hdl_c".to_string(),
+                obs("hdl_c", "1.0", "mmol/L", "2026-01-10", "src_hdl_old"),
+            ),
+            (
+                "creatinine".to_string(),
+                obs("creatinine", "0.9", "mg/dL", "2026-11-01", "src_cr_new"),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let it = &run(
+        "score2",
+        &[newer.clone(), old.clone()],
+        &born(1971, Sex::Male),
+        &facts(),
+        &[],
+    )[0];
+    assert_eq!(it["status"], "ok", "{it}");
+    assert_eq!(it["inputs"][0]["src"], "src_tc");
+    assert_eq!(it["inputs"][1]["src"], "src_hdl");
+    // the newer LDL-C of 5.2 mmol/L is the one the marked-factor rule reads
+    newer.obs.insert(
+        "ldl_c".into(),
+        obs("ldl_c", "5.2", "mmol/L", "2026-09-14", "src_ldl_new"),
+    );
+    old.obs.insert(
+        "ldl_c".into(),
+        obs("ldl_c", "2.0", "mmol/L", "2026-01-10", "src_ldl_old"),
+    );
+    let it = &run("score2", &[newer, old], &born(1971, Sex::Male), &facts(), &[])[0];
+    assert_eq!(reason(&[it.clone()]).0, "marked_risk_factor", "{it}");
 }

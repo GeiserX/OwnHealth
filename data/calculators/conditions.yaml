@@ -13,7 +13,9 @@
 # id         ascvd | diabetes | ckd | fh | heart_failure
 # terms      English and Spanish words, lower case, no accents
 # not_terms  words that make a matching text mean something else; "riesgo de" and "risk of", never a
-#            bare "risk", so "diabetes, alto riesgo cardiovascular" stays diabetes
+#            bare "risk", so "diabetes, alto riesgo cardiovascular" stays diabetes; each holds only in its own
+#            clause (split at punctuation, "con" and "with"), so "diabetes con riesgo de complicaciones"
+#            stays diabetes
 # icd10      code prefixes, with or without the dot
 # cite       the definition
 version: 0.1.0
@@ -33,7 +35,7 @@ rows:
     cite: https://academic.oup.com/eurheartj/article/42/34/3227/6358713
   - id: diabetes
     terms: [diabetes, diabetes mellitus, dm1, dm2]
-    not_terms: [gestational, gestacional, insipidus, insipida, antecedentes familiares, family history, riesgo de, risk of, risk for]
+    not_terms: [gestational, gestacional, insipidus, insipida, screening, cribado, antecedentes familiares, family history, riesgo de, risk of, risk for]
     icd10: [E08, E09, E10, E11, E13, E14]
     cite: https://academic.oup.com/eurheartj/article/42/34/3227/6358713
   - id: ckd

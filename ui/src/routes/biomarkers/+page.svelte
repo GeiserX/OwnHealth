@@ -214,7 +214,8 @@
 	{#if adding && profile}
 		<div class="card" style="margin-bottom:12px">
 			<h3>{t('me_add_value')}</h3>
-			<ManualEntry profile={profile.slug} kinds={['observation', 'smoking']} onsaved={load} oncancel={() => (adding = false)} />
+			<!-- a form belongs to one profile: another profile gets a fresh one -->
+			{#key profile.slug}<ManualEntry profile={profile.slug} kinds={['observation', 'smoking']} onsaved={load} oncancel={() => (adding = false)} />{/key}
 		</div>
 	{/if}
 	{#if query}<div class="note" style="margin-bottom:6px">{t('me_filtered')} <b>{query}</b> · <a href="/biomarkers">{t('h1_clear')}</a></div>{/if}
@@ -482,7 +483,7 @@
 						{/each}
 						{#if profile && profile.role !== 'viewer' && calcShown.some((c) => c.latest.reason?.groups?.includes('smoking_status') || c.latest.reason_code === 'smoking_status_not_coded')}
 							{#if smoking}
-								<ManualEntry profile={profile.slug} kinds={['smoking']} onsaved={() => ((smoking = false), load())} oncancel={() => (smoking = false)} />
+								{#key profile.slug}<ManualEntry profile={profile.slug} kinds={['smoking']} onsaved={() => ((smoking = false), load())} oncancel={() => (smoking = false)} />{/key}
 							{:else}
 								<button class="btn sm" style="margin-top:6px" onclick={() => (smoking = true)}>{t('calc_smk_add')}</button>
 							{/if}
