@@ -164,7 +164,7 @@ Input: `code`, `window` (`P3Y`, `P90D`, `all`), `resolution`, `cursor`, `as_of`.
 
 ### get_genome_findings
 
-Curated findings from the profile's [OwnGenome](https://github.com/GeiserX/OwnGenome) `genome-facts.json`: pharmacogenes, pathogenic variants, carrier status, HLA and risk markers. Each has its evidence level (E1 to E4), confidence and `call_state`. Sensitive findings (such as APOE) stay out unless the profile switched them on for agents and the token holds `read:sensitive`; the count shows in `withheld.sensitive`. For a minor, adult-onset and carrier findings stay out.
+Curated findings from the profile's [OwnGenome](https://github.com/GeiserX/OwnGenome) `genome-facts.json`: pharmacogenes, pathogenic variants, carrier status, HLA and risk markers. Each has its evidence level (E1 to E4), confidence and `call_state`. Sensitive findings (such as APOE) stay out unless the profile switched them on for agents and the token holds `read:sensitive`; the count shows in `withheld.sensitive`. For a minor, adult-onset and carrier findings stay out. A PGx call carries `stale` when a newer CPIC or PharmCAT release came out after it was made, with the OwnGenome `rerun_steps` that make it again (each `{step, name, cite}`). A PRS carries `prs.status`: `not_interpretable` means it lost its percentile, and `reason_code` says why. A chip call of a rare-variant category carries `chip_note`: `ppv_pct` is the share of very rare array calls that proved real in UK Biobank, not this call's own chance.
 
 Input: `category`, `gene`, `min_evidence`, `detail`, `cursor`, `as_of`. Scope: `read:genome`.
 

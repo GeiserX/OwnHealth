@@ -21,7 +21,7 @@ use ownhealth_core::lifecycle::visible_sql;
 use ownhealth_core::pyjson::{f32_json, py_isoformat_utc};
 use ownhealth_core::{Error, Result};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sqlx::types::Json;
 use sqlx::{AssertSqlSafe, PgConnection};
@@ -264,6 +264,14 @@ pub struct CpicChange {
     pub genes: Vec<String>,
 }
 
+/// One OwnGenome step that makes a PGx call again: its number, its name and its doc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RerunStep {
+    pub step: i64,
+    pub name: String,
+    pub cite: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
     pub version: String,
@@ -277,7 +285,7 @@ pub struct Release {
 pub struct PgxReleases {
     pub cpic_changes: Vec<CpicChange>,
     pub pharmcat: Option<Release>,
-    pub rerun_steps: Vec<i64>,
+    pub rerun_steps: Vec<RerunStep>,
 }
 
 static SHIPPED: LazyLock<PgxReleases> = LazyLock::new(|| {
@@ -309,7 +317,13 @@ static SHIPPED: LazyLock<PgxReleases> = LazyLock::new(|| {
         }),
         rerun_steps: rows
             .iter()
-            .filter_map(|r| r.get("step").and_then(Value::as_i64))
+            .filter_map(|r| {
+                Some(RerunStep {
+                    step: r.get("step").and_then(Value::as_i64)?,
+                    name: str_of(r, "name"),
+                    cite: str_of(r, "cite"),
+                })
+            })
             .collect(),
     }
 });
@@ -793,7 +807,7 @@ pub struct Findings {
     /// `{code, assay}` per limitation, in the same order (the UI's words for them).
     #[serde(skip)]
     pub limitation_codes: Vec<Value>,
-    /// Upper-case genes with a withheld finding, so the gene grid never reads them as "no finding".
+    /// Upper-case genes with a withheld PGx or HLA call, so the gene grid never reads them as "no finding".
     #[serde(skip)]
     pub withheld_genes: Vec<String>,
 }
@@ -863,7 +877,9 @@ pub async fn collect_findings(
             continue;
         }
         let why = withheld_reason(&r, gate);
+        // only a hidden PGx or HLA call makes a gene box untrue; any other hidden result stays unnamed
         if why.is_some()
+            && (r.category == "pgx" || r.category == "hla")
             && let Some(g) = r.gene.as_deref().map(str::to_uppercase)
             && !result.withheld_genes.contains(&g)
         {
@@ -1021,6 +1037,12 @@ fn actionable(f: &Value, guidance: &[Value]) -> bool {
     }
 }
 
+/// `actionable` read against the finding's own drug guidance: the gene grid frames by it and the PGx
+/// tile counts by it, so the two never disagree.
+pub fn actionable_call(f: &Value) -> bool {
+    actionable(f, f["drug_guidance"].as_array().map_or(&[], Vec::as_slice))
+}
+
 /// PGx (and HLA) findings relevant to one drug: one entry per gene CPIC ties to the drug (from
 /// `genes`, else the CPIC snapshot pairs) plus any gene whose facts carry guidance for it.
 /// Sensitive findings are never returned here.
@@ -1138,10 +1160,12 @@ pub fn genes_for_drug_name(name: &str) -> Vec<String> {
 }
 
 /// One row per CPIC gene (the snapshot's, the coverage map's `cpic` panel, and any other gene with a
-/// PGx or HLA finding), alphabetical: the call, or
-/// why there is none (`no_finding` on an assessed gene, `not_assessed` with the coverage reason or
-/// `not_in_coverage_map`, `withheld`), whether it is stale, and the current medicines it touches.
-/// `meds` is gene -> medicines from the person's records; None when the reader may not see records.
+/// PGx or HLA finding), alphabetical: the call, or why there is none (`no_finding` on an assessed
+/// gene, `partial` on partly callable coverage, `not_assessed` with the coverage reason or
+/// `not_in_coverage_map`, `withheld` for a hidden PGx or HLA call), whether it is stale, and the
+/// current medicines it touches. A `<GENE>-SV` coverage target is that gene's structural variants:
+/// it is no box of its own and goes out as the gene's `sv_coverage`. `meds` is gene -> medicines from
+/// the person's records; None when the reader may not see records.
 pub fn pgx_grid(found: &Findings, meds: Option<&BTreeMap<String, Vec<Value>>>) -> Vec<Value> {
     let upper = |v: &Value| v.as_str().unwrap_or_default().to_uppercase();
     let calls: Vec<&Value> = found
@@ -1153,7 +1177,7 @@ pub fn pgx_grid(found: &Findings, meds: Option<&BTreeMap<String, Vec<Value>>>) -
     let cpic_panel = found
         .coverage
         .iter()
-        .filter(|c| c["scope"] == "gene" && c["panel"] == "cpic")
+        .filter(|c| c["scope"] == "gene" && c["panel"] == "cpic" && !upper(&c["target"]).ends_with("-SV"))
         .map(|c| &c["target"]);
     for g in calls.iter().map(|f| &f["gene"]).chain(cpic_panel).map(upper) {
         if !g.is_empty() && !genes.contains(&g) {
@@ -1170,11 +1194,18 @@ pub fn pgx_grid(found: &Findings, meds: Option<&BTreeMap<String, Vec<Value>>>) -
                 Some(c) => json!({"state": c["state"], "reason": c["reason"]}),
                 None => json!({"state": "not_assessed", "reason": "not_in_coverage_map"}),
             };
+            let sv = format!("{gene}-SV");
+            let sv_coverage = found
+                .coverage
+                .iter()
+                .find(|c| upper(&c["target"]) == sv)
+                .map_or(Value::Null, |c| json!({"state": c["state"], "reason": c["reason"]}));
             let meds = meds.map_or(Value::Null, |m| json!(m.get(&gene).cloned().unwrap_or_default()));
             let mut row = json!({
                 "gene": gene, "status": "", "diplotype": null, "phenotype": null, "activity_score": null,
                 "call_state": null, "markers": [], "evidence": null, "confidence": null, "actionable": false,
-                "stale": null, "coverage": coverage, "meds": meds, "fact_ids": [], "src": null,
+                "stale": null, "coverage": coverage, "sv_coverage": sv_coverage, "meds": meds, "fact_ids": [],
+                "src": null,
             });
             let status = if let Some(first) = hits.iter().find(|f| f["category"] == "pgx").or(hits.first()) {
                 for k in [
@@ -1200,12 +1231,14 @@ pub fn pgx_grid(found: &Findings, meds: Option<&BTreeMap<String, Vec<Value>>>) -
                         .map(|f| json!({"marker": f["value"]["marker"], "present": f["value"]["present"]}))
                         .collect::<Vec<_>>()
                 );
-                row["actionable"] = json!(hits.iter().any(|f| actionable(f, &[])));
+                row["actionable"] = json!(hits.iter().any(|f| actionable_call(f)));
                 row["fact_ids"] = json!(hits.iter().map(|f| f["id"].clone()).collect::<Vec<_>>());
                 "found"
             } else if found.withheld_genes.contains(&gene) {
                 row["coverage"] = Value::Null;
                 "withheld"
+            } else if cov.is_some_and(|c| c["state"] == "partial") {
+                "partial"
             } else if cov.is_some_and(|c| c["state"] != "not_assessed") {
                 "no_finding"
             } else {

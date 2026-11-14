@@ -46,7 +46,27 @@ async fn an_agent_reads_stale_the_prs_code_and_the_chip_ppv_note() -> R {
             .unwrap_or_default()
     };
     let tpmt = find(&env, "TPMT");
-    assert_eq!(tpmt["stale"]["rerun_steps"], json!([36, 7, 27]), "{tpmt}");
+    let steps = &tpmt["stale"]["rerun_steps"];
+    assert_eq!(
+        (&steps[0]["step"], &steps[1]["step"], &steps[2]["step"]),
+        (&json!(36), &json!(7), &json!(27)),
+        "{tpmt}"
+    );
+    // each step names its doc, so an agent can say which OwnGenome step it is
+    assert!(
+        steps[0]["cite"]
+            .as_str()
+            .is_some_and(|c| c.starts_with("https://github.com/GeiserX/OwnGenome/")),
+        "{tpmt}"
+    );
+    // the findings page by size, so the score is read in its own category
+    let env = c
+        .call_tool(
+            "get_genome_findings",
+            json!({"profile": "alex", "category": "prs", "min_evidence": "E3"}),
+        )
+        .await?
+        .ok();
     let prs = env["data"]["findings"]
         .as_array()
         .into_iter()

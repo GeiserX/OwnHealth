@@ -127,7 +127,11 @@ carrier status, HLA, risk markers, each with evidence E1-E4, confidence and call
 no_call, not_on_array, not_covered). Filter by category or gene. E4 and traits are left out unless \
 asked for. not_assessed lists what the source could not test: not assessed is unknown, not negative. \
 withheld.sensitive counts findings behind the profile's opt-in; their content is never shown. \
-Research-grade unless a clinical lab confirmed it.",
+A PGx call carries stale: null when current, else since when, the newer releases (by) and the \
+OwnGenome rerun_steps that make the call again. A PRS carries prs.status; not_interpretable means \
+it lost its percentile, and reason_code says why. A chip call of a rare-variant category carries \
+chip_note: ppv_pct is the share of very rare array calls that proved real in UK Biobank, not this \
+call's own chance. Research-grade unless a clinical lab confirmed it.",
     input_schema: findings_schema,
     any_scope: &["read:genome"],
     all_scopes: &[],

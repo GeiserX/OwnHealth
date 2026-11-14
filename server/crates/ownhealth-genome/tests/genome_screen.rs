@@ -7,7 +7,7 @@ mod common;
 
 use chrono::NaiveDate;
 use common::{R, env, fact_mut};
-use ownhealth_genome::findings::{CpicChange, PgxReleases, Release, pgx_grid};
+use ownhealth_genome::findings::{CpicChange, PgxReleases, Release, RerunStep, pgx_grid};
 use ownhealth_genome::{FindingsQuery, Gate, list_findings_typed, pgx_for_drug, synthetic};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -21,6 +21,15 @@ fn e4() -> FindingsQuery<'static> {
         min_evidence: Some("E4"),
         ..Default::default()
     }
+}
+
+/// The three OwnGenome steps that make a PGx call again, as the shipped file names them.
+fn steps() -> Value {
+    json!([
+        {"step": 36, "name": "pgx-consensus", "cite": "https://github.com/GeiserX/OwnGenome/blob/main/docs/36-pgx-consensus.md"},
+        {"step": 7, "name": "pharmacogenomics", "cite": "https://github.com/GeiserX/OwnGenome/blob/main/docs/07-pharmacogenomics.md"},
+        {"step": 27, "name": "cpic-lookup", "cite": "https://github.com/GeiserX/OwnGenome/blob/main/docs/27-cpic-lookup.md"},
+    ])
 }
 
 fn finding<'a>(found: &'a [Value], gene: &str) -> &'a Value {
@@ -48,13 +57,13 @@ fn a_cpic_change_after_the_call_marks_only_its_gene_stale() {
             version: "3.4.0".into(),
             released: "2026-07-14".into(),
         }),
-        rerun_steps: vec![36, 7, 27],
+        rerun_steps: serde_json::from_value::<Vec<RerunStep>>(steps()).unwrap_or_default(),
     };
     let dbv = json!({"cpic": "2025-01", "pharmcat": "3.4.0"});
     let on = day(2026, 11, 7);
     assert_eq!(
         rel.stale("TPMT", &dbv, on),
-        Some(json!({"since": "2026-02-03", "by": ["CPIC 2026-02-03"], "rerun_steps": [36, 7, 27]}))
+        Some(json!({"since": "2026-02-03", "by": ["CPIC 2026-02-03"], "rerun_steps": steps()}))
     );
     assert_eq!(rel.stale("CYP2C19", &dbv, on), None);
     // a change inside the month the call was made against is not newer than it
@@ -68,7 +77,7 @@ fn a_cpic_change_after_the_call_marks_only_its_gene_stale() {
     let old = json!({"cpic": "2026-09", "pharmcat": "3.1.0"});
     assert_eq!(
         rel.stale("CYP2C19", &old, on),
-        Some(json!({"since": "2026-07-14", "by": ["PharmCAT 3.4.0"], "rerun_steps": [36, 7, 27]}))
+        Some(json!({"since": "2026-07-14", "by": ["PharmCAT 3.4.0"], "rerun_steps": steps()}))
     );
     assert_eq!(rel.stale("CYP2C19", &old, day(2026, 7, 13)), None);
     // a patch release is not a new minor; an unreadable version is never called stale
@@ -89,7 +98,7 @@ fn the_shipped_release_data_loads() {
     assert!(rel.cpic_changes.len() > 100, "{}", rel.cpic_changes.len());
     assert!(rel.cpic_changes.iter().any(|c| c.genes.iter().any(|g| g == "TPMT")));
     assert!(rel.pharmcat.as_ref().is_some_and(|p| p.version.starts_with('3')));
-    assert_eq!(rel.rerun_steps, vec![36, 7, 27]);
+    assert_eq!(serde_json::to_value(&rel.rerun_steps).unwrap_or_default(), steps());
 }
 
 #[tokio::test]
@@ -120,7 +129,7 @@ async fn findings_and_check_drug_say_stale_with_the_steps_to_rerun() -> R {
     e.seed(&mut c, "alex", &facts, &[]).await?;
     let found = list_findings_typed(&mut c, alex, &Gate::new(true, false), &e4()).await?;
     let tpmt = &finding(&found.findings, "TPMT")["stale"];
-    assert_eq!(tpmt["rerun_steps"], json!([36, 7, 27]), "{tpmt}");
+    assert_eq!(tpmt["rerun_steps"], steps(), "{tpmt}");
     assert!(
         tpmt["by"][0].as_str().unwrap_or_default().starts_with("CPIC 20"),
         "{tpmt}"
@@ -235,9 +244,19 @@ async fn the_grid_answers_every_cpic_gene_with_its_call_or_why_not() -> R {
             }
             c
         })
+        .chain([
+            json!({"scope": "gene", "id": "CYP4F2", "panel": "cpic", "state": "partial", "reason": "paralog"}),
+            json!({"scope": "gene", "id": "CYP2D6-SV", "panel": "cpic", "state": "not_assessed", "reason": "no_bam"}),
+        ])
         .collect();
     facts["coverage"] = json!(cov);
     fact_mut(&mut facts, "TPMT")["value"]["diplotype"] = json!("*1/*1");
+    // DPYD with no phenotype of its own and a reference call: its guidance's phenotype decides
+    let dpyd = fact_mut(&mut facts, "DPYD");
+    dpyd["value"]["phenotype"] = Value::Null;
+    for g in dpyd["drug_guidance"].as_array_mut().into_iter().flatten() {
+        g["phenotype"] = json!("Intermediate Metabolizer");
+    }
     let alex = e.profile("alex");
     e.seed(&mut c, "alex", &facts, &[]).await?;
     let found = list_findings_typed(&mut c, alex, &Gate::new(false, false), &e4()).await?;
@@ -274,6 +293,10 @@ async fn the_grid_answers_every_cpic_gene_with_its_call_or_why_not() -> R {
     assert_eq!(cyp["meds"], json!([{"name": "Omeprazole 20 mg", "src": "src_med"}]));
     assert!(cyp["src"].as_str().is_some_and(|s| s.starts_with("src_")), "{cyp}");
     assert_eq!(row("TPMT")["actionable"], false);
+    assert_eq!(
+        (&row("DPYD")["phenotype"], &row("DPYD")["actionable"]),
+        (&Value::Null, &json!(true))
+    );
     assert_eq!(row("TPMT")["meds"], json!([]));
     assert_eq!(
         row("HLA-B")["markers"],
@@ -292,7 +315,58 @@ async fn the_grid_answers_every_cpic_gene_with_its_call_or_why_not() -> R {
         (&row("NUDT15")["status"], &row("NUDT15")["coverage"]["reason"]),
         (&json!("not_assessed"), &json!("not_in_coverage_map"))
     );
+    // an absence on partial coverage is not an assessed negative
+    assert_eq!(
+        (&row("CYP4F2")["status"], &row("CYP4F2")["coverage"]["reason"]),
+        (&json!("partial"), &json!("paralog"))
+    );
+    // CYP2D6-SV is a coverage target of CYP2D6 (its structural variants), not a gene of its own
+    assert!(!genes.contains(&"CYP2D6-SV"), "{genes:?}");
+    assert_eq!(
+        row("CYP2D6")["sv_coverage"],
+        json!({"state": "not_assessed", "reason": "no_bam"})
+    );
+    assert_eq!(row("CYP2C19")["sv_coverage"], Value::Null);
     // without read:records the meds are withheld, not empty
     assert_eq!(pgx_grid(&found, None)[0]["meds"], Value::Null);
+    Ok(())
+}
+
+/// "withheld" in a gene box means a hidden PGx or HLA call. A hidden carrier result of a minor in a
+/// gene that also has a box must not name that gene.
+#[tokio::test]
+async fn the_grid_names_a_withheld_gene_only_for_a_hidden_pgx_call() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    let mut facts = synthetic::alex_facts();
+    for cov in facts["coverage"].as_array_mut().into_iter().flatten() {
+        if cov["id"] == "CFTR" {
+            cov["panel"] = json!("cpic");
+        }
+    }
+    e.seed(&mut c, "alex", &facts, &[]).await?;
+    let found = list_findings_typed(&mut c, e.profile("alex"), &Gate::new(false, true), &e4()).await?;
+    assert!(
+        found.withheld_minor > 0,
+        "the CFTR carrier result is withheld for a minor"
+    );
+    let grid = pgx_grid(&found, None);
+    let cftr = grid.iter().find(|r| r["gene"] == "CFTR").cloned().unwrap_or_default();
+    assert_eq!(cftr["status"], "no_finding", "{cftr}");
+
+    // the control: a hidden PGx call still reads withheld, never "no call"
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    let mut facts = synthetic::alex_facts();
+    // a sensitive fact must sit in the sensitive gene spans when it has variants: this one has none
+    let tpmt = fact_mut(&mut facts, "TPMT");
+    tpmt["sensitivity"] = json!({"level": "sensitive", "reason": "test"});
+    tpmt["variants"] = json!([]);
+    e.seed(&mut c, "alex", &facts, &[]).await?;
+    let found = list_findings_typed(&mut c, e.profile("alex"), &Gate::new(false, false), &e4()).await?;
+    assert!(found.withheld_sensitive > 0);
+    let grid = pgx_grid(&found, None);
+    let tpmt = grid.iter().find(|r| r["gene"] == "TPMT").cloned().unwrap_or_default();
+    assert_eq!((&tpmt["status"], &tpmt["coverage"]), (&json!("withheld"), &Value::Null));
     Ok(())
 }

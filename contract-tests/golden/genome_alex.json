@@ -205,7 +205,11 @@
               "[]": "string"
             },
             "rerun_steps": {
-              "[]": "int"
+              "[]": {
+                "cite": "string",
+                "name": "string",
+                "step": "int"
+              }
             },
             "since": "date"
           }
@@ -488,7 +492,11 @@
               "[]": "string"
             },
             "rerun_steps": {
-              "[]": "int"
+              "[]": {
+                "cite": "string",
+                "name": "string",
+                "step": "int"
+              }
             },
             "since": "date"
           }
@@ -500,7 +508,8 @@
           "=no_finding",
           "=not_assessed"
         ]
-      }
+      },
+      "sv_coverage": "null"
     }
   },
   "tiles": {

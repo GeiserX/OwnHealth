@@ -72,7 +72,40 @@ async fn the_grid_names_each_gene_and_the_current_medicines_it_touches() -> R {
     // a CPIC gene with no finding and an assessed coverage entry
     assert_eq!(row(&body, "CYP3A5")["status"], "no_finding");
     // the demo was called with PharmCAT 3.1.0: an older minor than the shipped release
-    assert_eq!(cyp["stale"]["rerun_steps"], json!([36, 7, 27]), "{cyp}");
+    let steps: Vec<&Value> = cyp["stale"]["rerun_steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| &s["step"])
+        .collect();
+    assert_eq!(steps, [&json!(36), &json!(7), &json!(27)], "{cyp}");
+    // the tile counts the same actionable calls the grid frames
+    let framed = body["pgx_grid"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["actionable"] == true && !r["gene"].as_str().unwrap_or_default().starts_with("HLA-"))
+        .count();
+    let tile = body["tiles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|t| t["key"] == "pgx")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!((tile["actionable"].as_u64(), framed), (Some(3), 3), "{tile}");
+    // the audit names every src the overview returned, the medicines of the grid too
+    let src_ids: Option<Vec<String>> = sqlx::query_scalar(
+        "select src_ids from audit_event where profile_id = $1 and tool = 'GET /api/profiles/{p}/genome' order by id desc limit 1",
+    )
+    .bind(alex)
+    .fetch_one(&db.pool)
+    .await?;
+    let med_src = cyp["meds"][0]["src"].as_str().unwrap_or("none");
+    assert!(
+        src_ids.is_some_and(|s| s.iter().any(|x| x == med_src)),
+        "{med_src} not audited"
+    );
 
     // an agent with read:genome alone sees the calls, not the medicines
     {
@@ -89,5 +122,59 @@ async fn the_grid_names_each_gene_and_the_current_medicines_it_touches() -> R {
     let cyp = row(&body, "CYP2C19");
     assert_eq!((&cyp["status"], &cyp["meds"]), (&json!("found"), &Value::Null));
     assert!(!body.to_string().contains("Omeprazole"));
+    Ok(())
+}
+
+/// The grid answers each gene whatever evidence level the table below it shows: a PGx call under the
+/// reader's min_evidence is still a call, never "assessed, no call in the file".
+#[tokio::test]
+async fn the_grid_keeps_a_call_the_table_filters_out_by_evidence() -> R {
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let rt = Runtime::with_pool(db.settings(dir.path())?, db.pool.clone())?;
+    let mut c = db.pool.acquire().await?;
+    let fam = create_rivera_family(&mut c, "Rivera").await?;
+    let alex = fam.profile("alex");
+    let mut facts = synthetic::alex_facts();
+    for f in facts["facts"].as_array_mut().into_iter().flatten() {
+        if f["gene"] == "CYP2D6" {
+            f["evidence"]["level"] = json!("E2");
+        }
+    }
+    synthetic::seed_genome(
+        &mut c,
+        &rt.blobs,
+        fam.household_id,
+        alex,
+        &facts,
+        &[],
+        "genome-facts.json",
+        None,
+    )
+    .await?;
+    drop(c);
+    let person = Principal::session(fam.user("alex"), fam.household_id);
+    let body = genome::overview(&rt, &person, "alex", Some("E1"))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    assert!(
+        !body["findings"].to_string().contains("CYP2D6"),
+        "the table filters it out"
+    );
+    let cyp = row(&body, "CYP2D6");
+    assert_eq!(
+        (&cyp["status"], &cyp["diplotype"]),
+        (&json!("found"), &json!("*1/*41")),
+        "{cyp}"
+    );
+    // the audit names the src of the call the grid shows
+    let src_ids: Option<Vec<String>> = sqlx::query_scalar(
+        "select src_ids from audit_event where profile_id = $1 and tool = 'GET /api/profiles/{p}/genome' order by id desc limit 1",
+    )
+    .bind(alex)
+    .fetch_one(&db.pool)
+    .await?;
+    let src = cyp["src"].as_str().unwrap_or("none");
+    assert!(src_ids.is_some_and(|s| s.iter().any(|x| x == src)), "{src} not audited");
     Ok(())
 }

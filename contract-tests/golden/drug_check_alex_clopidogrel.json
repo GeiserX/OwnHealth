@@ -64,7 +64,11 @@
           "[]": "string"
         },
         "rerun_steps": {
-          "[]": "int"
+          "[]": {
+            "cite": "string",
+            "name": "string",
+            "step": "int"
+          }
         },
         "since": "date"
       }
