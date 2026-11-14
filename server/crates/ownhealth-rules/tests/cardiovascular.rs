@@ -1191,6 +1191,6 @@ fn the_newest_lipids_count_by_their_own_date_not_by_their_report() {
         "ldl_c".into(),
         obs("ldl_c", "2.0", "mmol/L", "2026-01-10", "src_ldl_old"),
     );
-    let it = &run("score2", &[newer, old], &born(1971, Sex::Male), &facts(), &[])[0];
-    assert_eq!(reason(&[it.clone()]).0, "marked_risk_factor", "{it}");
+    let items = run("score2", &[newer, old], &born(1971, Sex::Male), &facts(), &[]);
+    assert_eq!(reason(&items).0, "marked_risk_factor", "{items:?}");
 }
