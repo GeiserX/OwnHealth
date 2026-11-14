@@ -1,7 +1,7 @@
 // The Medications screen: which medicines are current, the history grouped per medicine, and the code chips.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { codeChips, decisionOf, decisionReasonOf, historyGroups, isCurrent, pgxFor, replacedReason, supplementRows, type MedRecord } from '../src/lib/logic/meds.ts';
+import { codeChips, decisionOf, decisionReasonOf, supplementState, historyGroups, isCurrent, pgxFor, replacedReason, supplementRows, type MedRecord } from '../src/lib/logic/meds.ts';
 
 const rec = (id: string, detail: Record<string, unknown>, extra: Partial<MedRecord> = {}): MedRecord => ({
 	id,
@@ -117,5 +117,10 @@ test('the supplements card lists every live supplement, taken ones first, and re
 	assert.equal(decisionReasonOf({ decision_reason: { trust: 'untrusted_text', origin: 'person_note', text: 'Upset stomach' } }), 'Upset stomach', 'a read marks the reason');
 	assert.equal(decisionReasonOf({ decision_reason: 'Upset stomach' }), 'Upset stomach');
 	assert.equal(decisionReasonOf({ decision_reason: null }), null);
+	const sup = (detail: Record<string, unknown>) => ({ id: 'x', status: 'current', title: 'X', detail: { kind: 'supplement', ...detail } }) as MedRecord;
+	assert.equal(supplementState(sup({ med_status: 'active', started: '2026-12-01' }), '2026-11-10'), 'later', 'a future start is not stopped');
+	assert.equal(supplementState(sup({ med_status: 'active', started: '2026-01-01' }), '2026-11-10'), 'active');
+	assert.equal(supplementState(sup({ med_status: 'on_hold' }), '2026-11-10'), 'on_hold');
+	assert.equal(supplementState(sup({ med_status: 'active', started: '2025-11-01', stopped: '2026-03-31' }), '2026-11-10'), 'stopped');
 	assert.equal(decisionReasonOf({ decision_reason: { trust: 'untrusted_text', origin: 'person_note', text: ' ' } }), null);
 });

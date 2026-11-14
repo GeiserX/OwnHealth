@@ -186,7 +186,7 @@
 	</section>
 </div>
 
-{#if prof && meds.data}<SupplementsCard profile={prof.slug} records={meds.data} {canWrite} onsaved={load} />{/if}
+{#if prof && meds.data}<SupplementsCard profile={prof.slug} records={meds.data} {canWrite} {today} onsaved={load} />{/if}
 
 <DrugCheckCard />
 

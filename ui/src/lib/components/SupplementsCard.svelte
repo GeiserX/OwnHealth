@@ -8,7 +8,7 @@
 	import { openSource } from '#lib/components/pages1/source.svelte';
 	import { errText, tf } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
-	import { DECISIONS, DECISION_RECORDED, decisionOf, decisionReasonOf, isCurrent, supplementRows, type Decision } from '#lib/logic/meds';
+	import { DECISIONS, DECISION_RECORDED, decisionOf, decisionReasonOf, isCurrent, supplementRows, supplementState, type Decision } from '#lib/logic/meds';
 	import { todayIso } from '#lib/logic/people';
 	import { tick } from 'svelte';
 
@@ -16,16 +16,18 @@
 		profile,
 		records,
 		canWrite,
+		today,
 		onsaved
 	}: {
 		profile: string;
 		/** Every medication record of the profile, with history. */
 		records: RecordOut[];
 		canWrite: boolean;
+		/** The page's own date, so this card and the medication list agree on what is taken today. */
+		today: string;
 		onsaved: () => void;
 	} = $props();
 
-	const today = todayIso();
 	const rows = $derived(supplementRows(records, today));
 	const s = (r: RecordOut, k: string) => (typeof r.detail[k] === 'string' && (r.detail[k] as string).trim() ? (r.detail[k] as string) : null);
 
@@ -49,17 +51,20 @@
 
 	async function saveDecision(e: SubmitEvent, r: RecordOut) {
 		e.preventDefault();
-		if (!deciding) return;
+		const open = deciding;
+		if (!open) return;
 		busy = r.id;
 		try {
 			await correctRecord(profile, 'medication', r.id, {
 				...r.detail,
-				decision: deciding.decision,
+				decision: open.decision,
 				decision_reason: reason.trim() || null,
-				decision_on: today,
+				// the day the person decided, on their own calendar
+				decision_on: todayIso(),
 				reason: DECISION_RECORDED
 			});
-			deciding = null;
+			// a form opened on another row while this one saved stays open
+			if (deciding === open) deciding = null;
 			onsaved();
 		} catch (err) {
 			errors = { ...errors, [r.id]: errText(err) };
@@ -117,7 +122,7 @@
 				<div>
 					<b>{name}</b>{#if s(r, 'strength')}{' '}{s(r, 'strength')}{/if}
 					<span class="pill {isCurrent(r, today) ? 'p-ok' : 'p-stale'}" style="margin-left:4px"
-						><i aria-hidden="true"></i>{isCurrent(r, today) ? t('med_st_active') : t('med_st_' + (s(r, 'med_status') === 'on_hold' ? 'on_hold' : 'stopped'))}</span
+						><i aria-hidden="true"></i>{t('med_st_' + supplementState(r, today))}</span
 					>
 				</div>
 				<div class="line">

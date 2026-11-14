@@ -162,6 +162,14 @@ export function decisionReasonOf(detail: Record<string, unknown>): string | null
 	return text?.trim() ? text : null;
 }
 
+/** How a supplement row reads today: taken, starting later, on hold or stopped. */
+export function supplementState(r: MedRecord, today: string): 'active' | 'later' | 'on_hold' | 'stopped' {
+	if (isCurrent(r, today)) return 'active';
+	// the same reading as the History card's group label
+	const state = notTaken([r], today);
+	return state === 'on_hold' || state === 'later' ? state : 'stopped';
+}
+
 /** Every supplement's live version, taken or not: the ones taken today first, then by name. */
 export function supplementRows<T extends MedRecord>(records: T[], today: string): T[] {
 	return records
