@@ -413,3 +413,166 @@ async fn the_due_section_follows_scopes_and_never_repeats_a_lab_gap() -> R {
     );
     Ok(())
 }
+
+/// A token on one demo profile with its own language and identity mode.
+async fn token_as(w: &World, slug: &str, scopes: Vec<String>, lang: &str, mode: &str) -> anyhow::Result<String> {
+    let (u, p): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
+        "select u.id, p.id from app_user u join household h on h.id = u.household_id \
+         join profile p on p.household_id = h.id and p.slug = $2 where h.name = $1 order by u.created_at limit 1",
+    )
+    .bind(ownhealth_core::demo::DEMO_HOUSEHOLD)
+    .bind(slug)
+    .fetch_one(&w.db.pool)
+    .await?;
+    Ok(ownhealth_auth::tokens::create_token(
+        &mut *w.conn().await?,
+        &ownhealth_auth::tokens::TokenIn {
+            user_id: u,
+            label: "t",
+            profile_ids: vec![p],
+            scopes,
+            default_profile: None,
+            days: 90,
+            identity_mode: mode,
+            lang,
+            units: "si",
+        },
+    )
+    .await?
+    .plaintext)
+}
+
+/// Give a demo profile one relative per (relationship, kind, onset age), with an optional sensitivity.
+async fn relatives(w: &World, slug: &str, rows: &[(&str, &str, Option<i32>, &[&str])]) -> R {
+    use ownhealth_core::family::{self, FamilyCondition, MemberIn};
+    use ownhealth_core::provenance::{SrcIn, SrcRef};
+    let pid: uuid::Uuid = sqlx::query_scalar(
+        "select p.id from profile p join household h on h.id = p.household_id where h.name = $1 and p.slug = $2",
+    )
+    .bind(ownhealth_core::demo::DEMO_HOUSEHOLD)
+    .bind(slug)
+    .fetch_one(&w.db.pool)
+    .await?;
+    let mut c = w.conn().await?;
+    for (code, kind, onset, sensitivity) in rows {
+        let mut m = MemberIn::new(pid, code);
+        m.conditions = vec![FamilyCondition {
+            kind: (*kind).into(),
+            text: None,
+            code_system: None,
+            code: None,
+            onset_age: *onset,
+            onset_approx: false,
+        }];
+        m.sensitivity = sensitivity.iter().map(|s| s.to_string()).collect();
+        let src = SrcRef::New(SrcIn {
+            profile_id: Some(pid),
+            ..SrcIn::manual(None)
+        });
+        family::add(&mut c, &m, &src, "person", None, None).await?;
+    }
+    Ok(())
+}
+
+async fn status(w: &World, tok: &str, slug: &str) -> anyhow::Result<Value> {
+    Ok(w.connect_real(tok)
+        .await?
+        .call_tool("get_health_status", json!({"profile": slug}))
+        .await?
+        .ok())
+}
+
+/// Alex's demo father had a heart attack at 52: the status names the pattern by rule id and
+/// relationship, with no URL and no name, and every language and identity mode gets the same bytes.
+#[tokio::test]
+async fn the_family_section_names_alex_fathers_pattern_the_same_for_every_token() -> R {
+    let w = demo_world().await?;
+    let mut seen = Vec::new();
+    for (lang, mode) in [("en", "full"), ("es", "pseudonymous"), ("en", "minimal")] {
+        let tok = token_as(&w, "alex", all().into_iter().collect(), lang, mode).await?;
+        let env = status(&w, &tok, "alex").await?;
+        seen.push(env["data"]["family"].to_string());
+        let fam = &env["data"]["family"];
+        assert_eq!(fam["items"], json!([{"rule": "fam.ascvd", "rel": ["FTH"]}]), "{env}");
+        // one pattern, all listed: no total
+        assert!(fam.get("pattern_total").is_none(), "{fam}");
+        assert_eq!(fam["family_hash"].as_str().map(str::len), Some(12), "{fam}");
+        assert!(!fam.to_string().contains("http"), "{fam}");
+    }
+    assert!(seen.iter().all(|s| s == &seen[0]), "{seen:?}");
+    Ok(())
+}
+
+/// The due and family sections both at their maximum (Carmen has every open screening, and here a
+/// relative for every pattern) keep her status page under 2 KB.
+#[tokio::test]
+async fn status_with_due_and_family_sections_at_maximum_stays_under_2kb() -> R {
+    let w = demo_world().await?;
+    relatives(
+        &w,
+        "carmen",
+        &[
+            ("FTH", "mi", Some(50), &[]),
+            ("PUNCLE", "mi", Some(60), &[]),
+            ("MTH", "cancer_colon", Some(50), &[]),
+            ("MAUNT", "cancer_ovary", Some(45), &[]),
+            ("SIS", "hereditary_variant", None, &[]),
+        ],
+    )
+    .await?;
+    let (tok, _) = demo_token(&w, "carmen", all().into_iter().collect()).await?;
+    let env = status(&w, &tok, "carmen").await?;
+    assert!(size(&env) < 2048, "{}", size(&env));
+    assert_eq!(env["data"]["due"]["items"].as_array().map(Vec::len), Some(3), "{env}");
+    let fam = &env["data"]["family"];
+    assert_eq!(fam["pattern_total"], 5, "{env}");
+    assert_eq!(fam["items"].as_array().map(Vec::len), Some(3), "{fam}");
+    assert!(size(fam) < 320, "{}", size(fam));
+    Ok(())
+}
+
+/// A viewer token (read:summary only) gets no family section and is told records were withheld; a
+/// relative with a sensitivity tag feeds no pattern without read:sensitive.
+#[tokio::test]
+async fn the_family_section_follows_scopes_and_sensitivity() -> R {
+    let w = demo_world().await?;
+    relatives(&w, "carmen", &[("BRO", "mi", Some(50), &["mental_health"])]).await?;
+    let (tok, _) = demo_token(&w, "carmen", vec!["read:summary".into()]).await?;
+    let env = status(&w, &tok, "carmen").await?;
+    assert!(env["data"].get("family").is_none(), "{env}");
+    assert!(
+        env["withheld"]["by_scope"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|s| s == "records"),
+        "{env}"
+    );
+    let no_sensitive: Vec<String> = all().into_iter().filter(|s| s != "read:sensitive").collect();
+    let (tok, _) = demo_token(&w, "carmen", no_sensitive).await?;
+    assert!(status(&w, &tok, "carmen").await?["data"].get("family").is_none());
+    // the same relative without the tag does feed it (the control)
+    relatives(&w, "carmen", &[("SIS", "mi", Some(50), &[])]).await?;
+    let env = status(&w, &tok, "carmen").await?;
+    assert_eq!(env["data"]["family"]["items"][0]["rel"], json!(["SIS"]), "{env}");
+    Ok(())
+}
+
+/// The family section rides on the first page only: a later page holds the remaining flags.
+#[tokio::test]
+async fn the_family_section_is_on_the_first_status_page_only() -> R {
+    let w = demo_world().await?;
+    let (tok, _) = demo_token(&w, "alex", all().into_iter().collect()).await?;
+    let c = w.connect_real(&tok).await?;
+    let first = c.call_tool("get_health_status", json!({"profile": "alex"})).await?.ok();
+    assert!(first["data"].get("family").is_some(), "{first}");
+    let next = c
+        .call_tool(
+            "get_health_status",
+            json!({"profile": "alex", "cursor": first["next_cursor"]}),
+        )
+        .await?
+        .ok();
+    assert!(next["data"].get("family").is_none(), "{next}");
+    Ok(())
+}
