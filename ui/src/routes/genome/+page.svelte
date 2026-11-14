@@ -3,7 +3,7 @@
 	// sensitive findings behind the profile's consent switch. OwnHealth runs no genome engine.
 	import '#lib/components/pages2/pages2.css';
 	import { dismissReview, getGenomeView, listReview, lookupVariant, setGenomeConsent } from '#lib/api';
-	import type { GenomeFindingFull, GenomeView, PgxGridRow, PgxStale, ReviewItem } from '#lib/api/types';
+	import type { GenomeFindingFull, GenomeView, PgxStale, ReviewItem } from '#lib/api/types';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
@@ -17,6 +17,7 @@
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { i18n, t, type Key } from '#lib/i18n/index.svelte';
+	import { gridCall, resultCell as resultCellOf, svNote } from '#lib/logic/genome';
 	import { reinterpText } from '#lib/logic/inbox';
 	import { currentProfile } from '#lib/state/app.svelte';
 
@@ -100,14 +101,7 @@
 		const ids = f.variants?.length ? f.variants.map((x) => x.rsid).filter(Boolean) : [f.rsid];
 		return [ids.join(', '), f.hgvs].filter(Boolean).join(' · ');
 	}
-	function resultCell(f: GenomeFindingFull): string {
-		if (f.diplotype || f.phenotype) return [f.diplotype, f.phenotype].filter(Boolean).join(' · ');
-		if (f.category === 'prs' && f.prs?.status === 'not_interpretable') return t('gen_prs_ni');
-		if (f.category === 'prs') return tf('i2_prs_pct', { p: String(v(f, 'percentile') ?? '—'), pop: String(v(f, 'most_similar_pop') ?? '') });
-		if (f.category === 'hla') return `${(v(f, 'alleles') as string[] | undefined)?.join(' · ') ?? ''} · ${v(f, 'marker')} ${v(f, 'present') ? t('i2_present') : t('i2_absent')}`;
-		if (f.category === 'trait') return `${v(f, 'trait') ?? ''} ${v(f, 'call') ?? ''}`.trim();
-		return [f.zygosity ? t('i2_zyg_' + f.zygosity) : null, f.condition?.name].filter(Boolean).join(' · ');
-	}
+	const resultCell = (f: GenomeFindingFull) => resultCellOf(f, t, tf);
 	function noteCell(f: GenomeFindingFull): string {
 		const parts = [f.evidence_native, f.clinvar ? `VariationID ${f.clinvar.variation_id}` : null, f.drugs?.length ? f.drugs.join(', ') : null];
 		return parts.filter(Boolean).join(' · ');
@@ -150,21 +144,11 @@
 		return tf('gen_stale_note', {
 			genes: list(rows.map((r) => r.gene)),
 			by: list([...new Set(all.flatMap((s) => s.by))]),
-			since: day(all.map((s) => s.since).sort()[0]),
-			steps: list(all[0].rerun_steps)
+			since: day(all.map((s) => s.since).sort()[0])
 		});
 	});
-	const staleTitle = (s: PgxStale) => tf('gen_stale_title', { by: list(s.by), steps: list(s.rerun_steps) });
-	function gridCall(r: PgxGridRow): string {
-		if (r.status === 'withheld') return t('gen_grid_withheld');
-		if (r.status === 'no_finding') return t('gen_grid_no_finding');
-		if (r.status === 'not_assessed') {
-			const why = r.coverage?.reason;
-			return why === 'not_in_coverage_map' ? t('gen_grid_not_in_map') : [t('gen_grid_not_assessed'), why?.replace(/_/g, ' ')].filter(Boolean).join(' · ');
-		}
-		if (r.markers.length && !r.phenotype) return r.markers.map((m) => `${m.marker.replace(/^HLA-/, '')} ${m.present ? t('i2_present') : t('i2_absent')}`).join(' · ');
-		return [r.diplotype, r.phenotype].filter(Boolean).join(' · ') || '—';
-	}
+	const staleSteps = $derived(grid.find((r) => r.stale)?.stale?.rerun_steps ?? []);
+	const staleTitle = (s: PgxStale) => tf('gen_stale_title', { by: list(s.by), steps: list(s.rerun_steps.map((x) => x.step)) });
 	const coverage = $derived.by(() => {
 		const c = g?.coverage ?? [];
 		return { assessed: c.filter((x) => x.state === 'assessed').length, partial: c.filter((x) => x.state === 'partial').map((x) => x.target), total: c.length };
@@ -265,15 +249,18 @@
 	{#if grid.length}
 		<section class="card pgxgrid" aria-labelledby="pgx-grid-h">
 			<div class="gh"><h2 id="pgx-grid-h">{t('gen_grid_t')}</h2><span class="dim">{t('gen_grid_d')}</span></div>
-			{#if staleNote}<div class="stalenote" role="note"><span class="pill p-stale"><i aria-hidden="true"></i>{t('gen_stale')}</span><span class="muted">{staleNote}</span></div>{/if}
+			{#if staleNote}<div class="stalenote" role="note"><span class="pill p-stale"><i aria-hidden="true"></i>{t('gen_stale')}</span><span class="muted">{staleNote} {t('gen_stale_steps')} {#each staleSteps as s, i (s.step)}{i ? ', ' : ''}<a href={s.cite} target="_blank" rel="noopener">{s.step} {s.name}</a>{/each}.</span></div>{/if}
+			{#if grid.some((r) => r.actionable)}<div class="glegend dim"><span class="swatch" aria-hidden="true"></span>{t('gen_grid_legend')}</div>{/if}
 			<ul class="ggrid">
 				{#each grid as r (r.gene)}
 					<li class="gcell" class:act={r.actionable} class:none={r.status !== 'found'}>
 						<div class="gname">
-							{#if r.fact_ids.length}<a href="#f-{r.fact_ids[0]}"><b>{r.gene}</b></a>{:else}<b>{r.gene}</b>{/if}
+							{#if r.fact_ids.length && findingById(r.fact_ids[0])}<a href="#f-{r.fact_ids[0]}"><b>{r.gene}</b></a>{:else}<b>{r.gene}</b>{/if}
 							{#if r.stale}<span class="pill p-stale" title={staleTitle(r.stale)}><i aria-hidden="true"></i>{t('gen_stale')}</span>{/if}
+							{#if r.status === 'found' && r.confidence && r.confidence !== 'high'}<span class="pill {conf(r.confidence)}"><i aria-hidden="true"></i>{t('i2_conf_' + r.confidence)}</span>{/if}
 						</div>
-						<div class="gcall">{gridCall(r)}{#if r.actionable}<span class="sr-only"> · {t('gen_grid_act')}</span>{/if}</div>
+						<div class="gcall">{gridCall(r, t)}{#if r.actionable}<span class="sr-only"> · {t('gen_grid_act')}</span>{/if}</div>
+						{#if svNote(r, t)}<div class="gsv dim">{svNote(r, t)}</div>{/if}
 						{#if r.meds?.length}<div class="gmeds">{tf('gen_grid_on', { meds: r.meds.map((m) => m.name).join(', ') })}</div>{/if}
 					</li>
 				{/each}
@@ -297,7 +284,7 @@
 							<button class="lnk" onclick={() => openSource(f.src)} title={t('open_src')}>{resultCell(f)}</button>
 							{#if f.stale}<span class="pill p-stale" style="margin-left:6px" title={staleTitle(f.stale)}><i aria-hidden="true"></i>{t('gen_stale')}</span>{/if}
 							{#if f.prs?.reason_code}<div class="dim" style="font-size:11px">{t('gen_prs_' + f.prs.reason_code)}</div>{/if}
-							{#if f.confirm_clinically}<div class="dim" style="font-size:11px">{t('i2_confirm_clin')}</div>{/if}
+							{#if f.confirm_clinically || f.chip_note}<div class="dim" style="font-size:11px">{t('i2_confirm_clin')}</div>{/if}
 							{#if f.chip_note}<div class="dim" style="font-size:11px">{tf('gen_chip_note', { pct: f.chip_note.ppv_pct })} <a href={f.chip_note.cite} target="_blank" rel="noopener">PubMed</a></div>{/if}
 						</td>
 						<td><span class="pgx ev-{f.evidence}" title={t('i2_ev_' + f.evidence)}>{f.evidence}</span></td>
@@ -486,6 +473,24 @@
 	.gcall {
 		margin-top: 3px;
 		overflow-wrap: anywhere;
+	}
+	.glegend {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 11.5px;
+		margin-bottom: 8px;
+	}
+	.swatch {
+		width: 14px;
+		height: 10px;
+		border: 1px solid rgba(224, 168, 74, 0.55);
+		box-shadow: inset 3px 0 0 var(--watch);
+		border-radius: 3px;
+	}
+	.gsv {
+		margin-top: 3px;
+		font-size: 11.5px;
 	}
 	.gmeds {
 		margin-top: 3px;

@@ -577,13 +577,14 @@ export interface GenomeFindingFull extends Omit<GenomeFinding, 'call_state'> {
 export interface PgxStale {
 	since: IsoDate;
 	by: string[];
-	rerun_steps: number[];
+	/** The OwnGenome steps that make the call again, each with its doc. */
+	rerun_steps: { step: number; name: string; cite: string }[];
 }
 
 /** One CPIC gene on the Genome screen: its call, or why there is none, and the current medicines it touches. */
 export interface PgxGridRow {
 	gene: string;
-	status: 'found' | 'no_finding' | 'not_assessed' | 'withheld';
+	status: 'found' | 'no_finding' | 'partial' | 'not_assessed' | 'withheld';
 	diplotype: string | null;
 	phenotype: string | null;
 	activity_score: number | null;
@@ -594,6 +595,8 @@ export interface PgxGridRow {
 	actionable: boolean;
 	stale: PgxStale | null;
 	coverage: { state: string; reason: string | null } | null;
+	/** The coverage of the gene's structural variants (a `<GENE>-SV` target), when the source has one. */
+	sv_coverage: { state: string; reason: string | null } | null;
 	/** null: the reader may not see records. */
 	meds: { name: string; kind: string | null; src: string | null }[] | null;
 	fact_ids: string[];
