@@ -31,11 +31,10 @@
 	const rows = $derived(supplementRows(records, today));
 	const s = (r: RecordOut, k: string) => (typeof r.detail[k] === 'string' && (r.detail[k] as string).trim() ? (r.detail[k] as string) : null);
 
-	// One open decision form and one upload at a time; errors stay with their row.
+	// One open decision form; a save or an upload is pending per row, and errors stay with their row.
 	let deciding = $state<{ id: string; decision: Decision } | null>(null);
 	let reason = $state('');
-	let busy = $state<string | null>(null);
-	let uploading = $state<string | null>(null);
+	let busy = $state<Record<string, 'save' | 'upload'>>({});
 	let errors = $state<Record<string, string>>({});
 	const inputs: Record<string, HTMLInputElement> = {};
 	let reasonInput = $state<HTMLInputElement | null>(null);
@@ -52,8 +51,8 @@
 	async function saveDecision(e: SubmitEvent, r: RecordOut) {
 		e.preventDefault();
 		const open = deciding;
-		if (!open) return;
-		busy = r.id;
+		if (!open || busy[r.id]) return;
+		busy[r.id] = 'save';
 		try {
 			await correctRecord(profile, 'medication', r.id, {
 				...r.detail,
@@ -69,7 +68,7 @@
 		} catch (err) {
 			errors = { ...errors, [r.id]: errText(err) };
 		} finally {
-			busy = null;
+			delete busy[r.id];
 		}
 	}
 
@@ -77,12 +76,12 @@
 	async function upload(r: RecordOut, input: HTMLInputElement) {
 		const file = input.files?.[0];
 		input.value = '';
-		if (!file) return;
+		if (!file || busy[r.id]) return;
 		if (file.type && !IMAGE.includes(file.type)) {
 			errors = { ...errors, [r.id]: t('med_sup_photo_type') };
 			return;
 		}
-		busy = uploading = r.id;
+		busy[r.id] = 'upload';
 		errors = { ...errors, [r.id]: '' };
 		try {
 			// the Documents list names the photo after the supplement, not the camera's IMG_1234.jpg
@@ -92,7 +91,7 @@
 		} catch (err) {
 			errors = { ...errors, [r.id]: errText(err) };
 		} finally {
-			busy = uploading = null;
+			delete busy[r.id];
 		}
 	}
 </script>
@@ -140,7 +139,7 @@
 						<div class="seg" role="group" aria-label={t('med_sup_seg')}>
 							{#each DECISIONS as d (d)}
 								{@const on = deciding?.id === r.id ? deciding.decision === d : decision === d}
-								<button type="button" class:on aria-pressed={on} disabled={busy === r.id} onclick={() => pick(r, d)}>{t('med_sup_dec_' + d)}</button>
+								<button type="button" class:on aria-pressed={on} disabled={!!busy[r.id]} onclick={() => pick(r, d)}>{t('med_sup_dec_' + d)}</button>
 							{/each}
 						</div>
 						<input
@@ -150,15 +149,15 @@
 							hidden
 							onchange={(e) => upload(r, e.currentTarget)}
 						/>
-						<button type="button" class="btn sm" disabled={busy === r.id} onclick={() => inputs[r.id]?.click()}>
-							{uploading === r.id ? t('med_sup_uploading') : label ? t('med_sup_photo_change') : t('med_sup_photo_add')}
+						<button type="button" class="btn sm" disabled={!!busy[r.id]} onclick={() => inputs[r.id]?.click()}>
+							{busy[r.id] === 'upload' ? t('med_sup_uploading') : label ? t('med_sup_photo_change') : t('med_sup_photo_add')}
 						</button>
 					</div>
 					{#if deciding?.id === r.id}
 						<form class="p2form decide" onsubmit={(e) => saveDecision(e, r)}>
 							<label>{t('med_sup_reason')}<input class="p2in" bind:this={reasonInput} bind:value={reason} maxlength="500" onkeydown={(e) => e.key === 'Escape' && (deciding = null)} /></label>
 							<div class="p2row">
-								<button class="btn pri sm" type="submit" disabled={busy === r.id}>{t('med_sup_save')}</button>
+								<button class="btn pri sm" type="submit" disabled={!!busy[r.id]}>{t('med_sup_save')}</button>
 								<button class="btn sm" type="button" onclick={() => (deciding = null)}>{t('i2_cancel')}</button>
 							</div>
 						</form>

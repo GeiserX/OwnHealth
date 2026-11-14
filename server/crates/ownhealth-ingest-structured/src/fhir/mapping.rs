@@ -737,6 +737,9 @@ pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&s
     if raw_status.as_deref() == Some("entered-in-error") {
         return skip("status_entered-in-error");
     }
+    if not_current(r) {
+        return skip("lifecycle_not_current");
+    }
     let Some(status) = raw_status.as_deref().and_then(med_status) else {
         return unmapped(format!("{rtype} with status {}", py::py_str(r.get("status"))));
     };
@@ -1034,6 +1037,10 @@ mod tests {
             panic!("not a medicine");
         };
         assert_eq!((m.decision, m.decision_reason), (None, None));
+        // an earlier version in the export, with its earlier decision, is not a second medicine
+        let mut old = r.clone();
+        old["meta"] = json!({"tag": [{"system": "urn:ownhealth:lifecycle", "code": "superseded"}]});
+        assert_eq!(medication(&old, Uuid::nil(), |_| None), skip("lifecycle_not_current"));
     }
 
     #[test]

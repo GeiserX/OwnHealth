@@ -296,6 +296,22 @@ async fn a_decision_is_a_new_version_that_keeps_the_reason_and_the_label() -> R 
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{r}");
         assert_eq!(r["detail"]["errors"][0]["loc"], loc, "{r}");
     }
+    // a reason or a day with no decision would be stored and then lost on export, so it is refused
+    for bad in [
+        json!({"name": "X", "decision_reason": "Upset stomach"}),
+        json!({"name": "X", "decision_on": "2026-11-01"}),
+    ] {
+        let (s, r) = post(&a, "/profiles/alex/records/medication", bad).await?;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{r}");
+    }
+    // an empty reason with no decision says nothing, so it is accepted
+    let (s, r) = post(
+        &a,
+        "/profiles/alex/records/medication",
+        json!({"name": "X", "decision_reason": ""}),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::CREATED, "{r}");
     Ok(())
 }
 

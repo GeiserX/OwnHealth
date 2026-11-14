@@ -326,6 +326,10 @@ impl RecordIn {
                 }
                 if let Some(d) = &m.decision {
                     check("decision", d, &DECISIONS)?;
+                } else if m.decision_on.is_some() || m.decision_reason.as_deref().is_some_and(|r| !r.trim().is_empty())
+                {
+                    // the export carries a reason and a day only with their decision
+                    return Err(Error::Invalid("decision: a reason or a day needs a decision".into()));
                 }
                 check("med_status", &m.med_status, &["active", "stopped", "on_hold"])
             }
