@@ -44,6 +44,7 @@
             "=risk_marker"
           ]
         },
+        "chip_note": "null",
         "clinvar": {
           "|": [
             "null",
@@ -84,6 +85,7 @@
             "string"
           ]
         },
+        "prs": "null",
         "rsid": {
           "|": [
             "null",
@@ -91,6 +93,24 @@
           ]
         },
         "src": "src_id",
+        "stale": {
+          "|": [
+            "null",
+            {
+              "by": {
+                "[]": "string"
+              },
+              "rerun_steps": {
+                "[]": {
+                  "cite": "string",
+                  "name": "string",
+                  "step": "int"
+                }
+              },
+              "since": "date"
+            }
+          ]
+        },
         "verification": "=provisional",
         "zygosity": {
           "|": [

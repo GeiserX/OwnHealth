@@ -26,7 +26,7 @@ use ownhealth_core::Runtime;
 use ownhealth_core::access::{Permission, Principal, PrincipalKind, majority, set_genome_switches};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::{Error, Result as CoreResult};
-use ownhealth_genome::findings::visible_rows;
+use ownhealth_genome::findings::{actionable_call, visible_rows};
 use ownhealth_genome::{EVIDENCE, FindingsQuery, Gate, NOTICE, VariantQuery, gate_for, withheld_reason};
 use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
@@ -101,13 +101,8 @@ fn tiles(findings: &[Value], locked: &HashMap<String, i64>) -> Vec<Value> {
         if rows.is_empty() && hidden == 0 {
             continue;
         }
-        let actionable = rows
-            .iter()
-            .filter(|f| {
-                let ph = &f["phenotype"];
-                truthy(ph) && !py_str(ph).to_lowercase().starts_with("normal")
-            })
-            .count();
+        // the rule the gene grid frames by
+        let actionable = rows.iter().filter(|f| actionable_call(f)).count();
         // a gene, else the score id or rsID: never the title, whose words are English
         let mut seen: Vec<String> = Vec::new();
         for f in &rows {
@@ -163,6 +158,7 @@ pub async fn overview(rt: &Runtime, principal: &Principal, p: &str, min_evidence
         ..FindingsQuery::default()
     };
     let found = ownhealth_genome::list_findings_typed(&mut tx, perm.profile.id, &gate, &q).await?;
+    let pgx_grid = pgx::grid(&mut tx, &perm, &gate).await?;
     let mut locked_rows: Vec<Value> = Vec::new();
     if surface(principal) == "ui" && !gate.minor {
         for r in visible_rows(&mut tx, perm.profile.id, None).await? {
@@ -183,6 +179,7 @@ pub async fn overview(rt: &Runtime, principal: &Principal, p: &str, min_evidence
     e.resource_type = Some("genome_finding".into());
     e.resource_ids = Some(found.findings.iter().map(|f| py_str(&f["id"])).collect());
     e.src_ids = Some(found.findings.iter().map(|f| py_str(&f["src"])).collect());
+    pgx::audit_grid(&mut e, &pgx_grid);
     e.rows_out = i32::try_from(found.findings.len()).ok();
     e.withheld = Some(withheld.clone());
     write_audit(&mut tx, &e).await?;
@@ -208,6 +205,7 @@ pub async fn overview(rt: &Runtime, principal: &Principal, p: &str, min_evidence
     Ok(json!({
         "dataset": dataset,
         "tiles": tiles(&found.findings, &locked_by_cat),
+        "pgx_grid": pgx_grid,
         "findings": found.findings,
         "coverage": found.coverage,
         "not_assessed": found.not_assessed,
@@ -417,3 +415,5 @@ pub fn router() -> Router<Runtime> {
 
 /// The ClinVar diff's history, a submodule router (merged in routes.rs).
 pub mod events;
+/// The PGx gene grid of the overview.
+pub mod pgx;
