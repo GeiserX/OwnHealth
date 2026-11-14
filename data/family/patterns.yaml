@@ -1,0 +1,91 @@
+# Family patterns: what the person's own family history shows that a guideline names. Evaluated on
+# read into ownhealth.family/v1 (server/crates/ownhealth-rules/src/family.rs); never stored.
+#
+# A rule fires when any of its clauses matches. A clause looks only at the condition `kind` picked
+# from data/family/conditions.yaml, never at free text: a condition written as "other" never counts.
+#
+# id            stable rule id; the status names it, the templates below give its words
+# source        a short citation label (the same in every language) of the guideline the rule reads
+# basis         guideline (the guideline names the pattern) or pack_default (our own reading of it)
+# any           the clauses, each:
+#   relationships  HL7 RoleCodes that count (absent: every blood relative within `degree`)
+#   degree         the blood degrees that count (absent: 1 and 2)
+#   kinds          the condition kinds that count; `same_kind` instead counts every kind but other
+#   sex            only relatives of this sex
+#   before         onset age below which a condition counts, by the relative's sex; a relative of
+#                  unknown sex needs the lower of the two
+#   count          how many distinct relatives must match (default 1)
+#   same_side      the count must be reached on one side; a sibling or child counts on both
+version: 0.1.0
+rows:
+  - id: fam.ascvd
+    source: "ACC/AHA 2026 dyslipidemia, Table 13"
+    basis: guideline
+    cite: "https://doi.org/10.1161/CIR.0000000000001423"
+    any:
+      - {relationships: [FTH, MTH, PRN, BRO, SIS, SIB], kinds: [mi, cad, stroke], before: {male: 55, female: 65}}
+  - id: fam.crc
+    source: "USMSTF 2017"
+    basis: guideline
+    cite: "https://doi.org/10.1053/j.gastro.2017.05.013"
+    any:
+      - {degree: [1], kinds: [cancer_colon], before: {male: 60, female: 60}}
+      - {degree: [1], kinds: [cancer_colon], count: 2}
+  - id: fam.hboc
+    source: "USPSTF 2019, BRCA"
+    basis: guideline
+    cite: "https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/brca-related-cancer-risk-assessment-genetic-counseling-and-genetic-testing"
+    any:
+      - {kinds: [cancer_breast], before: {male: 50, female: 50}}
+      - {kinds: [cancer_breast], sex: male}
+      - {kinds: [cancer_ovary]}
+      - {kinds: [cancer_breast, cancer_ovary, cancer_pancreas, cancer_prostate], count: 2, same_side: true}
+  - id: fam.variant
+    source: "CDC, BRCA risk factors"
+    basis: guideline
+    cite: "https://www.cdc.gov/breast-ovarian-cancer-hereditary/risk-factors/index.html"
+    any:
+      - {degree: [1, 2, 3], kinds: [hereditary_variant]}
+  - id: fam.same_side
+    source: "CDC, Prev Chronic Dis 2010"
+    basis: pack_default
+    cite: "https://www.cdc.gov/pcd/issues/2010/Jan/08_0221a.htm"
+    any:
+      - {same_kind: true, count: 2, same_side: true}
+templates:
+  title:
+    fam.ascvd:
+      en: "Heart or artery disease at a young age in a parent or sibling"
+      es: "Enfermedad del corazón o de las arterias a edad temprana en un padre, una madre o un hermano"
+    fam.crc:
+      en: "Colon cancer in a first-degree relative before 60, or in two of them"
+      es: "Cáncer de colon en un familiar de primer grado antes de los 60, o en dos de ellos"
+    fam.hboc:
+      en: "Breast, ovarian, pancreatic or prostate cancers in the family"
+      es: "Cánceres de mama, ovario, páncreas o próstata en la familia"
+    fam.variant:
+      en: "A gene variant known in a blood relative"
+      es: "Una variante genética conocida en un familiar de sangre"
+    fam.same_side:
+      en: "The same condition in two or more relatives on one side"
+      es: "La misma enfermedad en dos o más familiares del mismo lado"
+  why:
+    fam.ascvd:
+      en: "The guideline lists a parent or sibling with heart or artery disease before 55 (men) or 65 (women) as a risk-enhancing factor."
+      es: "La guía incluye a un padre, una madre o un hermano con enfermedad del corazón o de las arterias antes de los 55 (hombres) o los 65 (mujeres) como factor que aumenta el riesgo."
+    fam.crc:
+      en: "The guideline names colon cancer in a first-degree relative before 60, or in two first-degree relatives at any age, as a family history that changes when screening starts."
+      es: "La guía cita el cáncer de colon en un familiar de primer grado antes de los 60, o en dos familiares de primer grado a cualquier edad, como un antecedente que cambia cuándo empieza el cribado."
+    fam.hboc:
+      en: "The guideline lists breast cancer before 50, breast cancer in a man, ovarian cancer, or several of these cancers on one side as family history linked to BRCA1 and BRCA2."
+      es: "La guía incluye el cáncer de mama antes de los 50, el cáncer de mama en un hombre, el cáncer de ovario o varios de estos cánceres en un mismo lado como antecedentes ligados a BRCA1 y BRCA2."
+    fam.variant:
+      en: "The CDC lists a relative with a known gene variant as a family history risk factor."
+      es: "Los CDC incluyen a un familiar con una variante genética conocida como factor de riesgo por antecedentes familiares."
+    fam.same_side:
+      en: "Our own reading of family history guidance: the same condition in two or more close relatives on one side is a pattern worth knowing about."
+      es: "Nuestra lectura de las guías de antecedentes familiares: la misma enfermedad en dos o más familiares cercanos de un mismo lado es un patrón que conviene conocer."
+  reasons:
+    no_onset_age:
+      en: "A relative has a matching condition with no age at onset, so this pattern cannot be checked."
+      es: "Un familiar tiene una enfermedad que encaja pero sin edad de inicio, así que este patrón no se puede comprobar."

@@ -5,7 +5,7 @@
 # group       cardiovascular | metabolic | cancer | neurological | respiratory | other
 # code        SNOMED CT concept (http://snomed.info/sct), written when a person picks the kind; a code
 #             that arrives in an import is kept as received. "other" has no code: its text is required.
-version: 0.1.0
+version: 0.2.0
 rows:
   - {kind: mi, en: heart attack, es: infarto de miocardio, short_en: MI, short_es: IAM, group: cardiovascular, code: "22298006", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=22298006"}
   - {kind: cad, en: coronary artery disease, es: enfermedad coronaria, short_en: CAD, short_es: EC, group: cardiovascular, code: "53741008", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=53741008"}
@@ -18,8 +18,10 @@ rows:
   - {kind: cancer_colon, en: colon cancer, es: cáncer de colon, short_en: colon ca., short_es: ca. colon, group: cancer, code: "363406005", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=363406005"}
   - {kind: cancer_prostate, en: prostate cancer, es: cáncer de próstata, short_en: prostate ca., short_es: ca. próstata, group: cancer, code: "399068003", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=399068003"}
   - {kind: cancer_ovary, en: ovarian cancer, es: cáncer de ovario, short_en: ovarian ca., short_es: ca. ovario, group: cancer, code: "363443007", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=363443007"}
+  - {kind: cancer_pancreas, en: pancreatic cancer, es: cáncer de páncreas, short_en: pancreatic ca., short_es: ca. páncreas, group: cancer, code: "363418001", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=363418001"}
   - {kind: cancer_other, en: cancer (other site), es: cáncer (otra localización), short_en: cancer, short_es: cáncer, group: cancer, code: "363346000", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=363346000"}
   - {kind: alzheimer, en: Alzheimer's disease, es: enfermedad de Alzheimer, short_en: Alzheimer, short_es: Alzheimer, group: neurological, code: "26929004", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=26929004"}
   - {kind: dementia, en: dementia, es: demencia, short_en: dementia, short_es: demencia, group: neurological, code: "52448006", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=52448006"}
   - {kind: asthma, en: asthma, es: asma, short_en: asthma, short_es: asma, group: respiratory, code: "195967001", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=195967001"}
+  - {kind: hereditary_variant, en: known hereditary gene variant, es: variante genética hereditaria conocida, short_en: gene variant, short_es: variante gen., group: other, code: "32895009", cite: "https://browser.ihtsdotools.org/?perspective=full&conceptId1=32895009"}
   - {kind: other, en: other condition, es: otra enfermedad, short_en: other, short_es: otra, group: other, code: null, cite: "https://hl7.org/fhir/R4/familymemberhistory-definitions.html#FamilyMemberHistory.condition"}
