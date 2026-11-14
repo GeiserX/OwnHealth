@@ -23,7 +23,7 @@
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { addEach, fromHousehold, layout, type Box } from '#lib/logic/pedigree';
 	import { i18n, t } from '#lib/i18n/index.svelte';
-	import { tick } from 'svelte';
+	import { tick, untrack } from 'svelte';
 
 	let { profile, profiles }: { profile: ProfileSummary; profiles: ProfileSummary[] } = $props();
 
@@ -63,6 +63,10 @@
 	const relLabel = (code: string) => {
 		const r = catalog?.relationships.find((x) => x.code === code);
 		return r ? r[lang] : code;
+	};
+	const kindLabel = (kind: string) => {
+		const k = catalog?.conditions.find((x) => x.kind === kind);
+		return k ? k[lang === 'es' ? 'short_es' : 'short_en'] : kind;
 	};
 	// The founder's household relationships are relative to the founder, so only the founder fills from them.
 	const fill = $derived(
@@ -213,6 +217,15 @@
 	$effect(() => {
 		if (drawing && svgwrap) tick().then(centre);
 	});
+	// a pattern just picked: bring its first relative into view, in the page and in a tree that scrolls sideways
+	$effect(() => {
+		const picked = pattern;
+		if (!picked) return;
+		untrack(() => {
+			const first = patterns?.items.find((p) => p.rule === picked)?.members[0];
+			if (first) tick().then(() => svgwrap?.querySelector(`g[data-id="${first}"]`)?.scrollIntoView({ block: 'nearest', inline: 'center' }));
+		});
+	});
 	const listLine = (m: FamilyMember) => {
 		const head = cap(relLabel(m.relationship)) + (!hideNames && m.name ? ` · ${m.name}` : '');
 		if (m.masked) return `${head} · ${t('fam_masked')}`;
@@ -267,7 +280,7 @@
 							{@render symbol(b)}
 						</g>
 					{:else}
-						<g class="node" class:link={b.linked} class:masked={b.masked} class:aff={b.affected} class:pat={!!b.id && shade.has(b.id)} role="img" aria-label={b.title}>
+						<g class="node" class:link={b.linked} class:masked={b.masked} class:aff={b.affected} class:pat={!!b.id && shade.has(b.id)} role="img" aria-label={b.title} data-id={b.id}>
 							{@render symbol(b)}
 						</g>
 					{/if}
@@ -372,7 +385,7 @@
 	<div class="note">{t('fam_note')}</div>
 	{#if ped.data}<div class="mono dim rules">{ped.data.rules}</div>{/if}
 </div>
-{#if patterns && ped.data?.nodes.length}<FamilyPatterns {patterns} {relLabel} bind:selected={pattern} />{/if}
+{#if patterns && ped.data?.nodes.length}<FamilyPatterns {patterns} {relLabel} {kindLabel} bind:selected={pattern} />{/if}
 
 <style>
 	.rules {

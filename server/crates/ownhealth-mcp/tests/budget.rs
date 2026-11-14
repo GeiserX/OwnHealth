@@ -493,13 +493,27 @@ async fn the_family_section_names_alex_fathers_pattern_the_same_for_every_token(
         let env = status(&w, &tok, "alex").await?;
         seen.push(env["data"]["family"].to_string());
         let fam = &env["data"]["family"];
-        assert_eq!(fam["items"], json!([{"rule": "fam.ascvd", "rel": ["FTH"]}]), "{env}");
+        assert_eq!(fam["items"], json!([{"rule": "fam.ascvd", "rel": "FTH"}]), "{env}");
         // one pattern, all listed: no total
         assert!(fam.get("pattern_total").is_none(), "{fam}");
-        assert_eq!(fam["family_hash"].as_str().map(str::len), Some(12), "{fam}");
+        // a 12-digit prefix of the document's hash, named as one
+        assert_eq!(fam["family_hash12"].as_str().map(str::len), Some(12), "{fam}");
+        assert!(fam.get("family_hash").is_none(), "{fam}");
         assert!(!fam.to_string().contains("http"), "{fam}");
     }
     assert!(seen.iter().all(|s| s == &seen[0]), "{seen:?}");
+    // the text form prints one line per pattern, its rule and relationships together
+    let tok = token_as(&w, "alex", all().into_iter().collect(), "en", "full").await?;
+    let r = w
+        .connect_real(&tok)
+        .await?
+        .call_tool("get_health_status", json!({"profile": "alex"}))
+        .await?;
+    assert!(
+        r.text.contains("family.items:\n- rule=fam.ascvd rel=FTH\n"),
+        "{}",
+        r.text
+    );
     Ok(())
 }
 
@@ -517,6 +531,25 @@ async fn status_with_due_and_family_sections_at_maximum_stays_under_2kb() -> R {
             ("MTH", "cancer_colon", Some(50), &[]),
             ("MAUNT", "cancer_ovary", Some(45), &[]),
             ("SIS", "hereditary_variant", None, &[]),
+            // a large family: premature heart disease in several parents and siblings (two brothers),
+            // and breast or prostate cancer in twelve relatives on both sides
+            ("PRN", "mi", Some(40), &[]),
+            ("BRO", "mi", Some(40), &[]),
+            ("BRO", "mi", Some(41), &[]),
+            ("SIB", "mi", Some(42), &[]),
+            ("SIS", "stroke", Some(43), &[]),
+            ("PGRFTH", "cancer_prostate", Some(70), &[]),
+            ("PGRMTH", "cancer_breast", Some(70), &[]),
+            ("PUNCLE", "cancer_prostate", Some(70), &[]),
+            ("PAUNT", "cancer_breast", Some(70), &[]),
+            ("FTH", "cancer_prostate", Some(70), &[]),
+            ("MTH", "cancer_breast", Some(70), &[]),
+            ("MGRFTH", "cancer_prostate", Some(70), &[]),
+            ("MGRMTH", "cancer_breast", Some(70), &[]),
+            ("MUNCLE", "cancer_prostate", Some(70), &[]),
+            ("MAUNT", "cancer_breast", Some(70), &[]),
+            ("BRO", "cancer_prostate", Some(70), &[]),
+            ("SIS", "cancer_breast", Some(70), &[]),
         ],
     )
     .await?;
@@ -527,7 +560,20 @@ async fn status_with_due_and_family_sections_at_maximum_stays_under_2kb() -> R {
     let fam = &env["data"]["family"];
     assert_eq!(fam["pattern_total"], 5, "{env}");
     assert_eq!(fam["items"].as_array().map(Vec::len), Some(3), "{fam}");
-    assert!(size(fam) < 320, "{}", size(fam));
+    // each pattern names at most four distinct relationships and counts the rest
+    for it in fam["items"].as_array().into_iter().flatten() {
+        let rel = it["rel"].as_str().unwrap_or_default();
+        let codes: Vec<&str> = rel.split(' ').collect();
+        assert!(codes.len() <= 4, "{it}");
+        assert_eq!(
+            codes.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            codes.len(),
+            "{it}"
+        );
+    }
+    assert_eq!(fam["items"][0]["rel_total"], 5, "{fam}");
+    assert_eq!(fam["items"][2]["rel_total"], 12, "{fam}");
+    assert!(size(fam) < 400, "{}", size(fam));
     Ok(())
 }
 
@@ -554,7 +600,7 @@ async fn the_family_section_follows_scopes_and_sensitivity() -> R {
     // the same relative without the tag does feed it (the control)
     relatives(&w, "carmen", &[("SIS", "mi", Some(50), &[])]).await?;
     let env = status(&w, &tok, "carmen").await?;
-    assert_eq!(env["data"]["family"]["items"][0]["rel"], json!(["SIS"]), "{env}");
+    assert_eq!(env["data"]["family"]["items"][0]["rel"], "SIS", "{env}");
     Ok(())
 }
 

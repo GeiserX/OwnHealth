@@ -38,6 +38,10 @@ const SHIPPED: &str = include_str!(concat!(
 ));
 const BASES: [&str; 2] = ["guideline", "pack_default"];
 const SIDES: [&str; 2] = ["paternal", "maternal"];
+/// The relatives of the proband's own branch who share both of the proband's sides: full siblings and
+/// the proband's descendants. A half-sibling, a parent of unknown side (PRN), a niece or a nephew may
+/// share only one, and which one is not known, so for a same-side count they sit on neither.
+const BOTH_SIDES: [&str; 8] = ["BRO", "SIS", "SIB", "SON", "DAU", "CHILD", "GRNDSON", "GRNDDAU"];
 /// How many patterns the `family` section of get_health_status lists; the rest are counted.
 pub const STATUS_TOP: usize = 3;
 
@@ -318,8 +322,9 @@ fn run(c: &Clause, cat: &Catalog, relatives: &[Relative]) -> Run {
         let side = cat.relationship(&h.rel.relationship).map_or("", |r| r.side.as_str());
         let sides: Vec<&str> = match (c.same_side, side) {
             (false, _) => vec![""],
-            // a sibling or a child shares both of the proband's sides
-            (true, "own") => SIDES.to_vec(),
+            (true, "own") if BOTH_SIDES.contains(&h.rel.relationship.as_str()) => SIDES.to_vec(),
+            // a half-sibling or a parent of unknown side: the side is not known
+            (true, "own") => Vec::new(),
             (true, s) => vec![s],
         };
         for s in sides {
@@ -539,41 +544,72 @@ pub fn render(doc: &Value) -> Result<Value> {
     Ok(Value::Object(out))
 }
 
-/// Hex digits of `family_hash` the status section carries: the whole hash and one pattern do not fit
-/// beside a full demo page in 2 KB, and 48 bits are plenty to tell that the patterns changed.
+/// Hex digits of `family_hash` the status section carries, as `family_hash12`.
 pub const STATUS_HASH_HEX: usize = 12;
 
-/// The `family` section of get_health_status: the first present patterns as `{rule, rel}` (rule id
-/// and RoleCodes, no URLs and no names), `pattern_total` when there are more than it lists, and
-/// `family_hash` as the first `STATUS_HASH_HEX` hex digits of the document's hash. None when no
-/// pattern is present: the 2 KB page spends nothing on an empty list.
+/// How many relationship codes one item of the `family` status section names; `rel_total` counts
+/// the rest, so a large family cannot push the 2 KB page over.
+pub const STATUS_REL: usize = 4;
+
+/// The `family` section of get_health_status, by rule id and RoleCode only (no URLs, no names):
+/// - `items`: the first `STATUS_TOP` present patterns, each flat so the text form prints one line per
+///   pattern: `rule`, `rel` (its distinct RoleCodes in drawing order, at most `STATUS_REL`, joined by
+///   spaces) and `rel_total` when it has more;
+/// - `pattern_total` when more patterns are present than it lists;
+/// - `not_assessed`: the rule ids that could not be checked (an onset age is missing), so a reader
+///   can tell "no pattern" from "could not check";
+/// - `family_hash12`: the first `STATUS_HASH_HEX` hex digits of the document's `family_hash`, enough to
+///   tell that the patterns changed. The whole hash does not fit beside a full demo page in 2 KB, and
+///   the key is not `family_hash` so no client mistakes it for the whole one.
+///
+/// None when no pattern is present or not assessed: the 2 KB page spends nothing on an empty list.
 pub fn status_section(doc: &Value) -> Option<Value> {
-    let present: Vec<&Value> = doc["items"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|i| i["status"] == "present")
-        .collect();
-    if present.is_empty() {
+    let all: Vec<&Value> = doc["items"].as_array().into_iter().flatten().collect();
+    let with = |status: &str| -> Vec<&Value> { all.iter().copied().filter(|i| i["status"] == status).collect() };
+    let present = with("present");
+    let unchecked: Vec<&Value> = with("not_assessed").iter().map(|i| &i["rule"]).collect();
+    if present.is_empty() && unchecked.is_empty() {
         return None;
     }
     let items: Vec<Value> = present
         .iter()
         .take(STATUS_TOP)
-        .map(|i| json!({"rule": i["rule"], "rel": i["rel"]}))
-        .collect();
-    let hash = doc["family_hash"].as_str().unwrap_or_default();
-    let short: String = hash
-        .trim_start_matches("sha256:")
-        .chars()
-        .take(STATUS_HASH_HEX)
+        .map(|i| {
+            let mut codes: Vec<&str> = Vec::new();
+            for c in i["rel"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                if !codes.contains(&c) {
+                    codes.push(c);
+                }
+            }
+            let mut m = Map::new();
+            m.insert("rule".into(), i["rule"].clone());
+            m.insert(
+                "rel".into(),
+                json!(codes.iter().take(STATUS_REL).copied().collect::<Vec<_>>().join(" ")),
+            );
+            if codes.len() > STATUS_REL {
+                m.insert("rel_total".into(), json!(codes.len()));
+            }
+            Value::Object(m)
+        })
         .collect();
     let mut m = Map::new();
     // the scalars named for the section, so the text form does not read them as fields of the status
     if present.len() > items.len() {
         m.insert("pattern_total".into(), json!(present.len()));
     }
-    m.insert("family_hash".into(), json!(short));
-    m.insert("items".into(), Value::Array(items));
+    let hash = doc["family_hash"].as_str().unwrap_or_default();
+    let short: String = hash
+        .trim_start_matches("sha256:")
+        .chars()
+        .take(STATUS_HASH_HEX)
+        .collect();
+    m.insert("family_hash12".into(), json!(short));
+    if !items.is_empty() {
+        m.insert("items".into(), Value::Array(items));
+    }
+    if !unchecked.is_empty() {
+        m.insert("not_assessed".into(), json!(unchecked));
+    }
     Some(Value::Object(m))
 }

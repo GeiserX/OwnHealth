@@ -92,7 +92,11 @@ fn a_matching_condition_without_onset_age_is_not_assessed() {
     assert_eq!(item["rule"], "fam.ascvd");
     assert_eq!(item["status"], "not_assessed");
     assert_eq!(item["reason_code"], "no_onset_age");
-    assert!(status_section(&d).is_none(), "the status lists present patterns only");
+    // the status says it could not check, rather than staying silent
+    let s = status_section(&d).expect("section");
+    assert_eq!(s["not_assessed"], serde_json::json!(["fam.ascvd"]), "{s}");
+    assert!(s.get("items").is_none(), "{s}");
+    assert!(status_section(&doc(&[rel(1, "FTH", "asthma", Some(10))])).is_none());
     // a dated match elsewhere decides it
     let d = doc(&[rel(1, "FTH", "mi", None), rel(2, "MTH", "mi", Some(60))]);
     assert_eq!(d["items"][0]["status"], "present");
@@ -153,6 +157,14 @@ fn breast_and_ovarian_cancers_follow_the_brca_family_history_factors() {
         ],
         r
     ));
+    // a half-sister's side is not known, so she joins no one-side cluster
+    assert!(!fires(
+        &[
+            rel(1, "HSIS", "cancer_breast", Some(60)),
+            rel(2, "MUNCLE", "cancer_prostate", Some(70))
+        ],
+        r
+    ));
     // a cousin is third-degree, past the close relatives the factors name
     assert!(!fires(&[rel(1, "MCOUSN", "cancer_ovary", Some(40))], r));
 }
@@ -174,9 +186,22 @@ fn the_same_kind_on_one_side_counts_and_free_text_never_does() {
         ],
         r
     ));
-    // a sibling shares both sides
+    // a full sibling and a child share both sides
     assert!(fires(
         &[rel(1, "MTH", "t2d", Some(60)), rel(2, "SIS", "t2d", Some(40))],
+        r
+    ));
+    assert!(fires(
+        &[rel(1, "PGRMTH", "t2d", Some(60)), rel(2, "SON", "t2d", Some(20))],
+        r
+    ));
+    // a half-sibling or a parent of unknown side may share only one side, and which is not known
+    assert!(!fires(
+        &[rel(1, "HBRO", "t2d", Some(40)), rel(2, "MGRMTH", "t2d", Some(70))],
+        r
+    ));
+    assert!(!fires(
+        &[rel(1, "PRN", "t2d", Some(40)), rel(2, "PGRMTH", "t2d", Some(70))],
         r
     ));
     assert!(!fires(
@@ -212,8 +237,8 @@ fn every_item_cites_its_rule_and_names_its_sources() {
     assert!(d["rules"].as_str().unwrap_or_default().starts_with("patterns.yaml "));
     for it in d["items"].as_array().into_iter().flatten() {
         assert!(it["cite"].as_str().unwrap_or_default().starts_with("https://"), "{it}");
-        assert!(!it["src"].as_array().map_or(true, Vec::is_empty), "{it}");
-        assert!(!it["members"].as_array().map_or(true, Vec::is_empty), "{it}");
+        assert!(!it["src"].as_array().is_none_or(Vec::is_empty), "{it}");
+        assert!(!it["members"].as_array().is_none_or(Vec::is_empty), "{it}");
     }
     assert_eq!(
         present(&[rel(1, "FTH", "mi", Some(52)), rel(2, "PUNCLE", "mi", Some(60))]),
@@ -257,8 +282,10 @@ fn the_status_section_lists_three_patterns_by_rule_and_relationship_only() {
     let s = status_section(&d).expect("section");
     assert_eq!(s["pattern_total"], 5);
     assert_eq!(s["items"].as_array().map(Vec::len), Some(3));
+    // a prefix of the document's hash, under a key that says it is one
+    assert!(s.get("family_hash").is_none(), "{s}");
     let full = d["family_hash"].as_str().unwrap_or_default();
-    let short = s["family_hash"].as_str().unwrap_or_default();
+    let short = s["family_hash12"].as_str().unwrap_or_default();
     assert_eq!(short.len(), 12);
     assert!(full.starts_with(&format!("sha256:{short}")), "{short} {full}");
     let text = s.to_string();
@@ -268,6 +295,26 @@ fn the_status_section_lists_three_patterns_by_rule_and_relationship_only() {
         let keys: Vec<&String> = it.as_object().map(|m| m.keys().collect()).unwrap_or_default();
         assert_eq!(keys, ["rule", "rel"], "{it}");
     }
+    assert_eq!(s["items"][0], serde_json::json!({"rule": "fam.ascvd", "rel": "FTH"}));
+}
+
+#[test]
+fn a_large_family_names_a_few_distinct_relationships_and_counts_the_rest() {
+    let codes = [
+        "PGRFTH", "PGRMTH", "PUNCLE", "PAUNT", "FTH", "MTH", "MGRFTH", "MGRMTH", "MUNCLE", "MAUNT", "BRO", "BRO", "SIS",
+    ];
+    let rels: Vec<Relative> = codes
+        .iter()
+        .enumerate()
+        .map(|(n, c)| rel(n as u128 + 1, c, "hypertension", Some(60)))
+        .collect();
+    let s = status_section(&doc(&rels)).expect("section");
+    let item = &s["items"][0];
+    assert_eq!(item["rule"], "fam.same_side", "{s}");
+    // drawing order, each code once: the two brothers are one BRO
+    assert_eq!(item["rel"], "PGRFTH PGRMTH MGRFTH MGRMTH", "{s}");
+    assert_eq!(item["rel_total"], 12, "{s}");
+    assert!(s.to_string().len() < 200, "{s}");
 }
 
 #[test]

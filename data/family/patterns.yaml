@@ -15,7 +15,9 @@
 #   before         onset age below which a condition counts, by the relative's sex; a relative of
 #                  unknown sex needs the lower of the two
 #   count          how many distinct relatives must match (default 1)
-#   same_side      the count must be reached on one side; a sibling or child counts on both
+#   same_side      the count must be reached on one side; a full sibling, a child or a grandchild
+#                  counts on both, and a half-sibling, a parent of unknown side (PRN), a niece or a
+#                  nephew on neither, because their side is not known
 version: 0.1.0
 rows:
   - id: fam.ascvd

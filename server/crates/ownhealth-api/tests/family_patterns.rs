@@ -141,3 +141,28 @@ async fn a_sensitive_relative_feeds_no_pattern_without_read_sensitive() -> R {
     assert_eq!(ped["patterns"]["items"], json!([]), "{ped}");
     Ok(())
 }
+
+/// SNOMED 32895009 is "Hereditary disease": an imported relative coded with it keeps the received
+/// condition as `other` and never fires the gene-variant pattern; 106221001 "Genetic finding" is the
+/// code the hereditary_variant kind carries.
+#[test]
+fn a_hereditary_disease_code_never_imports_as_a_known_gene_variant() {
+    use ownhealth_ingest_structured::fhir::mapping::{Mapped, family_member_history};
+    let kind = |code: &str| {
+        let r = json!({
+            "resourceType": "FamilyMemberHistory",
+            "status": "completed",
+            "relationship": {"coding": [{"system": family::ROLE_CODE, "code": "MTH"}]},
+            "condition": [{"code": {
+                "coding": [{"system": "http://snomed.info/sct", "code": code}],
+                "text": "haemochromatosis"
+            }}]
+        });
+        match family_member_history(&r, uuid::Uuid::nil()) {
+            Mapped::Family { member, .. } => member.conditions[0].kind.clone(),
+            _ => String::new(),
+        }
+    };
+    assert_eq!(kind("32895009"), "other");
+    assert_eq!(kind("106221001"), "hereditary_variant");
+}

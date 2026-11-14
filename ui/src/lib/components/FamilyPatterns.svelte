@@ -9,11 +9,19 @@
 	let {
 		patterns,
 		relLabel,
+		kindLabel,
 		selected = $bindable(null)
-	}: { patterns: FamilyPatterns; relLabel: (code: string) => string; selected?: string | null } = $props();
+	}: {
+		patterns: FamilyPatterns;
+		relLabel: (code: string) => string;
+		kindLabel: (kind: string) => string;
+		selected?: string | null;
+	} = $props();
 
 	const lang = $derived(i18n.lang as 'es' | 'en');
-	const who = (rel: string[]) => [...new Set(rel)].map((r) => relLabel(r)).join(' · ');
+	// the relatives, then the conditions the pattern matched: "Tío paterno · padre · IAM"
+	const who = (p: { rel: string[]; kinds: string[] }) =>
+		[...[...new Set(p.rel)].map((r) => relLabel(r)), ...p.kinds.map((k) => kindLabel(k))].join(' · ');
 	const pick = (rule: string) => (selected = selected === rule ? null : rule);
 </script>
 
@@ -31,7 +39,7 @@
 					</button>
 					<div class="why">{p.status === 'not_assessed' && p.reason ? p.reason[lang] : p.why[lang]}</div>
 					<div class="meta">
-						<span>{cap(who(p.rel))}</span>
+						<span>{cap(who(p))}</span>
 						<a class="chip" href={p.cite} target="_blank" rel="noopener" title={t('fam_pat_cite')}>{p.source}</a>
 						{#if p.basis === 'pack_default'}<span class="chip" title={t('fam_pat_ours_d')}>{t('fam_pat_ours')}</span>{/if}
 						<span class="mono">{p.rule}</span>
@@ -41,6 +49,7 @@
 		</ul>
 	{/if}
 	<div class="dim note">{t('fam_pat_kind')}</div>
+	<div class="mono dim rules">{patterns.rules}</div>
 </section>
 
 <style>
@@ -124,5 +133,9 @@
 	}
 	.note {
 		margin-top: 6px;
+	}
+	.rules {
+		font-size: 10.5px;
+		margin-top: 4px;
 	}
 </style>
