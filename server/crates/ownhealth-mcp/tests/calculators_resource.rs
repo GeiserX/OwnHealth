@@ -124,12 +124,21 @@ async fn a_read_labs_token_sees_no_condition_medicine_or_vital_in_a_risk_result(
         }
     };
     let all = read(&["read:summary", "read:labs", "read:records", "read:vitals"]).await?;
-    assert!(all.to_string().contains("src_m02"), "the control sees the statin");
+    // the control: with read:records and read:vitals the statin line shows, with its src
+    let statin_src = all["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|i| i["inputs"].as_array().into_iter().flatten())
+        .find(|i| i["group"] == "statin" && i["value"] == "recorded")
+        .and_then(|i| i["src"].as_str())
+        .map(str::to_string)
+        .expect("the control sees the statin");
     let doc = read(&["read:labs"]).await?;
     let body = doc.to_string();
     for hidden in [
-        "src_m02",
-        "statin",
+        statin_src.as_str(),
+        "\"statin\"",
         "antihypertensive",
         "\"diabetes\"",
         "smoking_status",

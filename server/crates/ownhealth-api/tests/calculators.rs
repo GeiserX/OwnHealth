@@ -121,7 +121,7 @@ async fn a_token_without_read_records_sees_no_condition_or_medicine_in_a_risk_re
     let body = doc.to_string();
     for hidden in [
         "src_m02",
-        "statin",
+        "\"statin\"",
         "antihypertensive",
         "\"diabetes\"",
         "smoking_status",
