@@ -5,7 +5,7 @@ export interface GridRow {
 	status: 'found' | 'no_finding' | 'partial' | 'not_assessed' | 'withheld';
 	diplotype: string | null;
 	phenotype: string | null;
-	markers: { marker: string; present: boolean }[];
+	markers: { marker: string; present: boolean | null }[];
 	coverage: { state: string; reason: string | null } | null;
 	sv_coverage?: { state: string; reason: string | null } | null;
 }
@@ -49,7 +49,9 @@ export function gridCall(r: GridRow, t: T): string {
 		return why === 'not_in_coverage_map' ? t('gen_grid_not_in_map') : coverageText('not_assessed', why, t);
 	}
 	if (r.markers.length && !r.phenotype) {
-		return r.markers.map((m) => `${m.marker.replace(/^HLA-/, '')} ${m.present ? t('i2_present') : t('i2_absent')}`).join(' · ');
+		// a marker whose presence the file does not state is unknown, never absent
+		const word = (p: boolean | null) => (p === true ? t('i2_present') : p === false ? t('i2_absent') : t('gen_grid_marker_unknown'));
+		return r.markers.map((m) => `${m.marker.replace(/^HLA-/, '')} ${word(m.present)}`).join(' · ');
 	}
 	return [r.diplotype, r.phenotype].filter(Boolean).join(' · ') || '—';
 }
@@ -83,4 +85,19 @@ export function resultCell(f: ResultRow, t: T, tf: TF): string {
 	if (f.category === 'hla') return `${(v('alleles') as string[] | undefined)?.join(' · ') ?? ''} · ${v('marker')} ${v('present') ? t('i2_present') : t('i2_absent')}`;
 	if (f.category === 'trait') return `${v('trait') ?? ''} ${v('call') ?? ''}`.trim();
 	return [f.zygosity ? t('i2_zyg_' + f.zygosity) : null, f.condition?.name].filter(Boolean).join(' · ');
+}
+
+/** The parts of the overview the empty state reads. */
+export interface OverviewLike {
+	findings: unknown[];
+	locked: unknown[];
+	withheld: { minor_rule?: number | null };
+	pgx_grid?: { status: string }[] | null;
+}
+
+/** No genome data to show: no dataset, or a dataset with nothing in the table, nothing locked, nothing
+ *  withheld for a minor and no call in the gene grid (which also reads calls below the table level). */
+export function genomeEmpty(g: OverviewLike, hasDataset: boolean): boolean {
+	if (!hasDataset) return true;
+	return !g.findings.length && !g.locked.length && !g.withheld.minor_rule && !(g.pgx_grid ?? []).some((r) => r.status === 'found');
 }

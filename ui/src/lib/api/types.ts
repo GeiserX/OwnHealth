@@ -589,7 +589,7 @@ export interface PgxGridRow {
 	phenotype: string | null;
 	activity_score: number | null;
 	call_state: CallState | null;
-	markers: { marker: string; present: boolean }[];
+	markers: { marker: string; present: boolean | null }[];
 	evidence: string | null;
 	confidence: string | null;
 	actionable: boolean;

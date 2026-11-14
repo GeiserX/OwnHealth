@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dict } from '../src/lib/i18n/dict.ts';
-import { COVERAGE_REASONS, gridCall, resultCell, svNote, type GridRow } from '../src/lib/logic/genome.ts';
+import { COVERAGE_REASONS, genomeEmpty, gridCall, resultCell, svNote, type GridRow } from '../src/lib/logic/genome.ts';
 
 const tr = (lang: 'en' | 'es') => (k: string) => (dict[lang] as Record<string, string>)[k] ?? k;
 const en = tr('en');
@@ -67,4 +67,17 @@ test('a refused PRS reads not interpretable even when its fact carries a phenoty
 	assert.ok(resultCell(ok, en, tf).includes('91'));
 	const pgx = { category: 'pgx', diplotype: '*1/*2', phenotype: 'Intermediate Metabolizer', value: {} };
 	assert.equal(resultCell(pgx, en, tf), '*1/*2 · Intermediate Metabolizer');
+});
+
+test('a dataset whose only call sits below the table level still shows the grid, not the import card', () => {
+	const base = { findings: [], locked: [], withheld: { minor_rule: 0 }, pgx_grid: [] as { status: string }[] };
+	assert.equal(genomeEmpty({ ...base, pgx_grid: [{ status: 'found' }, { status: 'not_assessed' }] }, true), false);
+	assert.equal(genomeEmpty({ ...base, pgx_grid: [{ status: 'not_assessed' }, { status: 'no_finding' }] }, true), true);
+	assert.equal(genomeEmpty({ ...base, pgx_grid: [{ status: 'found' }] }, false), true);
+});
+
+test('an HLA marker whose presence the file does not state reads unknown, never absent', () => {
+	const r = row({ markers: [{ marker: 'HLA-B*58:01', present: null }, { marker: 'HLA-B*15:02', present: false }] });
+	assert.equal(gridCall(r, en), 'B*58:01 not determined · B*15:02 absent');
+	assert.equal(gridCall(r, es), 'B*58:01 no determinado · B*15:02 ausente');
 });

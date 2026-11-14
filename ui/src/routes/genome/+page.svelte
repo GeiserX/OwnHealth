@@ -17,7 +17,7 @@
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { i18n, t, type Key } from '#lib/i18n/index.svelte';
-	import { gridCall, resultCell as resultCellOf, svNote } from '#lib/logic/genome';
+	import { genomeEmpty, gridCall, resultCell as resultCellOf, svNote } from '#lib/logic/genome';
 	import { reinterpText } from '#lib/logic/inbox';
 	import { currentProfile } from '#lib/state/app.svelte';
 
@@ -129,7 +129,8 @@
 		})
 	);
 	// A dataset whose findings were all retracted (or never had any) reads as no genome data at all.
-	const empty = $derived(!!g && (!ds || (!g.findings.length && !g.locked.length && !g.withheld.minor_rule)));
+	// A call the grid shows below the table's evidence level still counts as data.
+	const empty = $derived(!!g && genomeEmpty(g, !!ds));
 	const denied = $derived(gen.error instanceof ApiError && gen.error.status === 403);
 	const canRaw = $derived(prof?.scopes.includes('read:genome_raw') ?? false);
 	const catLabel = (c: string) => (t('i2_cat_' + c) === 'i2_cat_' + c ? c : t('i2_cat_' + c));
