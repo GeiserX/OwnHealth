@@ -971,6 +971,27 @@ fn every_group_name_matches_its_own_aliases() -> R {
     Ok(())
 }
 
+/// The hysterectomy answer takes the cervical rows away, so it asks about any past cervical cancer or
+/// high-grade precancer, not only the reason for the surgery: a precancer treated years before a
+/// hysterectomy for another cause still calls for follow-up.
+#[test]
+fn the_hysterectomy_question_asks_about_any_history() -> R {
+    let pack = load_pack()?;
+    let p = load_dir(Path::new(DATA), &pack)?;
+    let q = |lang| prevention::question(&p, "hysterectomy", lang).unwrap_or_default();
+    assert!(
+        q("en").contains("no history of cervical cancer or a high-grade precancer"),
+        "{}",
+        q("en")
+    );
+    assert!(
+        q("es").contains("sin antecedentes de cáncer de cuello de útero ni de lesión precancerosa de alto grado"),
+        "{}",
+        q("es")
+    );
+    Ok(())
+}
+
 /// Lung screening counts only a low-dose CT of the chest: a low-dose CT of another part of the body,
 /// such as one for kidney stones, says nothing about the lungs.
 #[test]

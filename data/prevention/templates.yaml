@@ -44,5 +44,5 @@ answers:
       es: "Un historial de tabaquismo de 20 paquetes-año o más, con consumo actual o abandonado en los últimos 15 años (un paquete al día durante un año es un paquete-año)"
   hysterectomy:
     question:
-      en: "A hysterectomy that removed the cervix, not done for cervical cancer or a high-grade precancer"
-      es: "Una histerectomía con extirpación del cuello del útero, no realizada por cáncer de cuello de útero ni por una lesión precancerosa de alto grado"
+      en: "A hysterectomy that removed the cervix, and no history of cervical cancer or a high-grade precancer"
+      es: "Una histerectomía con extirpación del cuello del útero, sin antecedentes de cáncer de cuello de útero ni de lesión precancerosa de alto grado"
