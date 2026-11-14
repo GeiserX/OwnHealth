@@ -387,9 +387,10 @@ impl PgxReleases {
     }
 }
 
-/// A PGx call's `stale` on `on` (null when current, or for any other category).
+/// A PGx or HLA call's `stale` on `on` (null when no newer release is known, or for any other
+/// category). CPIC guides HLA-A and HLA-B like any pharmacogene, so their calls age the same way.
 fn stale_of(row: &FindingRow, on: NaiveDate) -> Value {
-    if row.category != "pgx" {
+    if row.category != "pgx" && row.category != "hla" {
         return Value::Null;
     }
     let gene = row.gene.as_deref().unwrap_or_default();

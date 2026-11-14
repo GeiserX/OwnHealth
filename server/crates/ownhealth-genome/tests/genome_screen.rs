@@ -134,7 +134,13 @@ async fn findings_and_check_drug_say_stale_with_the_steps_to_rerun() -> R {
         tpmt["by"][0].as_str().unwrap_or_default().starts_with("CPIC 20"),
         "{tpmt}"
     );
-    // only PGx calls go stale
+    // an HLA-B call is CPIC guidance too, and HLA-B changed in CPIC after 2025-01
+    let hla = &finding(&found.findings, "HLA-B")["stale"];
+    assert!(
+        hla["by"][0].as_str().unwrap_or_default().starts_with("CPIC 20"),
+        "{hla}"
+    );
+    // only PGx and HLA calls go stale
     assert_eq!(finding(&found.findings, "CFTR")["stale"], Value::Null);
     let aza = pgx_for_drug(&mut c, alex, "RxNorm:1256", None).await?;
     let row = aza.iter().find(|r| r["gene"] == "TPMT").cloned().unwrap_or_default();

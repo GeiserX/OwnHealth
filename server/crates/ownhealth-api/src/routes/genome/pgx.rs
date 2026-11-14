@@ -41,8 +41,24 @@ async fn meds_by_gene(conn: &mut PgConnection, perm: &Permission) -> Result<BTre
     Ok(out)
 }
 
+/// The grid of one reader, and the src of every call it read (a gene's row shows one call's src).
+pub struct Grid {
+    pub rows: Vec<Value>,
+    call_srcs: Vec<String>,
+}
+
+impl Grid {
+    /// The PGx genes the grid frames as actionable: the PGx tile counts these, so the two agree.
+    pub fn actionable_pgx(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|r| r["actionable"] == true && !r["gene"].as_str().unwrap_or_default().starts_with("HLA-"))
+            .count()
+    }
+}
+
 /// The grid for one reader, through the same gate as the table.
-pub async fn grid(conn: &mut PgConnection, perm: &Permission, gate: &Gate) -> Result<Vec<Value>> {
+pub async fn grid(conn: &mut PgConnection, perm: &Permission, gate: &Gate) -> Result<Grid> {
     let q = FindingsQuery {
         min_evidence: Some("E4"),
         ..FindingsQuery::default()
@@ -53,11 +69,20 @@ pub async fn grid(conn: &mut PgConnection, perm: &Permission, gate: &Gate) -> Re
     } else {
         None
     };
-    Ok(pgx_grid(&found, meds.as_ref()))
+    let call_srcs = found
+        .findings
+        .iter()
+        .filter(|f| f["category"] == "pgx" || f["category"] == "hla")
+        .filter_map(|f| f["src"].as_str().map(str::to_string))
+        .collect();
+    Ok(Grid {
+        rows: pgx_grid(&found, meds.as_ref()),
+        call_srcs,
+    })
 }
 
-/// The audit of the overview names what the grid returned too: its calls and its medicines.
-pub fn audit_grid(e: &mut AuditEvent, grid: &[Value]) {
+/// The audit of the overview names what the grid returned too: every call it read and its medicines.
+pub fn audit_grid(e: &mut AuditEvent, grid: &Grid) {
     let add = |into: &mut Option<Vec<String>>, ids: Vec<&str>| {
         let list = into.get_or_insert_with(Vec::new);
         for id in ids {
@@ -66,9 +91,18 @@ pub fn audit_grid(e: &mut AuditEvent, grid: &[Value]) {
             }
         }
     };
-    let facts = grid.iter().flat_map(|r| r["fact_ids"].as_array().into_iter().flatten());
+    let facts = grid
+        .rows
+        .iter()
+        .flat_map(|r| r["fact_ids"].as_array().into_iter().flatten());
     add(&mut e.resource_ids, facts.filter_map(Value::as_str).collect());
-    let meds = grid.iter().flat_map(|r| r["meds"].as_array().into_iter().flatten());
-    let srcs = grid.iter().map(|r| &r["src"]).chain(meds.map(|m| &m["src"]));
-    add(&mut e.src_ids, srcs.filter_map(Value::as_str).collect());
+    let meds = grid
+        .rows
+        .iter()
+        .flat_map(|r| r["meds"].as_array().into_iter().flatten());
+    let srcs = grid.call_srcs.iter().map(String::as_str);
+    add(
+        &mut e.src_ids,
+        srcs.chain(meds.filter_map(|m| m["src"].as_str())).collect(),
+    );
 }

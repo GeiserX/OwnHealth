@@ -137,7 +137,7 @@ async fn the_grid_keeps_a_call_the_table_filters_out_by_evidence() -> R {
     let alex = fam.profile("alex");
     let mut facts = synthetic::alex_facts();
     for f in facts["facts"].as_array_mut().into_iter().flatten() {
-        if f["gene"] == "CYP2D6" {
+        if f["gene"] == "CYP2D6" || f["gene"] == "CYP2C19" {
             f["evidence"]["level"] = json!("E2");
         }
     }
@@ -167,6 +167,24 @@ async fn the_grid_keeps_a_call_the_table_filters_out_by_evidence() -> R {
         (&json!("found"), &json!("*1/*41")),
         "{cyp}"
     );
+    // the PGx tile counts the actionable calls the grid frames, CYP2C19 among them, not only the table's
+    assert_eq!(row(&body, "CYP2C19")["actionable"], true);
+    let framed = body["pgx_grid"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["actionable"] == true && !r["gene"].as_str().unwrap_or_default().starts_with("HLA-"))
+        .count();
+    let tile = body["tiles"]
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["key"] == "pgx"))
+        .cloned();
+    assert_eq!(
+        tile.map(|t| t["actionable"].clone()),
+        Some(json!(framed)),
+        "{}",
+        body["tiles"]
+    );
     // the audit names the src of the call the grid shows
     let src_ids: Option<Vec<String>> = sqlx::query_scalar(
         "select src_ids from audit_event where profile_id = $1 and tool = 'GET /api/profiles/{p}/genome' order by id desc limit 1",
@@ -176,5 +194,78 @@ async fn the_grid_keeps_a_call_the_table_filters_out_by_evidence() -> R {
     .await?;
     let src = cyp["src"].as_str().unwrap_or("none");
     assert!(src_ids.is_some_and(|s| s.iter().any(|x| x == src)), "{src} not audited");
+    Ok(())
+}
+
+/// A gene's box shows one call's src, but the audit names the src of every call the grid read: here a
+/// second HLA-B marker from a chip at E4, below the table's default E3.
+#[tokio::test]
+async fn the_audit_names_every_src_the_grid_read() -> R {
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let rt = Runtime::with_pool(db.settings(dir.path())?, db.pool.clone())?;
+    let mut c = db.pool.acquire().await?;
+    let fam = create_rivera_family(&mut c, "Rivera").await?;
+    let alex = fam.profile("alex");
+    let wgs = synthetic::alex_facts();
+    synthetic::seed_genome(
+        &mut c,
+        &rt.blobs,
+        fam.household_id,
+        alex,
+        &wgs,
+        &[],
+        "genome-facts.json",
+        None,
+    )
+    .await?;
+    let mut chip = synthetic::alex_facts();
+    chip["subject"]["sample_id"] = json!("alex-chip-synthetic");
+    chip["assay"] = json!({"type": "chip", "build": "GRCh38", "platform": "consumer array (synthetic)"});
+    let mut hla = wgs["facts"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["category"] == "hla").cloned())
+        .unwrap_or_default();
+    hla["id"] = json!(ownhealth_genome::schema::fact_id("hla", "HLA-B", "HLA-B*15:02"));
+    hla["value"]["marker"] = json!("HLA-B*15:02");
+    hla["evidence"]["level"] = json!("E4");
+    hla["confidence"]["level"] = json!("low");
+    chip["facts"] = json!([hla]);
+    synthetic::seed_genome(
+        &mut c,
+        &rt.blobs,
+        fam.household_id,
+        alex,
+        &chip,
+        &[],
+        "chip-facts.json",
+        None,
+    )
+    .await?;
+    let srcs: Vec<String> = sqlx::query_scalar(
+        "select f.src_id from genome_finding f join genome_dataset d on d.id = f.dataset_id \
+         where d.profile_id = $1 and d.status = 'current' and f.status = 'current' and f.gene = 'HLA-B'",
+    )
+    .bind(alex)
+    .fetch_all(&mut *c)
+    .await?;
+    drop(c);
+    assert_eq!(srcs.len(), 2, "both HLA-B calls are current: {srcs:?}");
+    let person = Principal::session(fam.user("alex"), fam.household_id);
+    let body = genome::overview(&rt, &person, "alex", None)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let hla_b = row(&body, "HLA-B");
+    assert_eq!(hla_b["markers"].as_array().map(Vec::len), Some(2), "{hla_b}");
+    let audited: Option<Vec<String>> = sqlx::query_scalar(
+        "select src_ids from audit_event where profile_id = $1 and tool = 'GET /api/profiles/{p}/genome' order by id desc limit 1",
+    )
+    .bind(alex)
+    .fetch_one(&db.pool)
+    .await?;
+    let audited = audited.unwrap_or_default();
+    for s in &srcs {
+        assert!(audited.contains(s), "{s} not audited in {audited:?}");
+    }
     Ok(())
 }

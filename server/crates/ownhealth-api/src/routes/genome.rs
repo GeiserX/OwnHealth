@@ -26,7 +26,7 @@ use ownhealth_core::Runtime;
 use ownhealth_core::access::{Permission, Principal, PrincipalKind, majority, set_genome_switches};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::{Error, Result as CoreResult};
-use ownhealth_genome::findings::{actionable_call, visible_rows};
+use ownhealth_genome::findings::visible_rows;
 use ownhealth_genome::{EVIDENCE, FindingsQuery, Gate, NOTICE, VariantQuery, gate_for, withheld_reason};
 use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
@@ -93,7 +93,8 @@ fn first_truthy<'a>(vals: &[&'a Value]) -> &'a Value {
     vals.iter().copied().find(|v| truthy(v)).unwrap_or(vals[vals.len() - 1])
 }
 
-fn tiles(findings: &[Value], locked: &HashMap<String, i64>) -> Vec<Value> {
+/// `actionable_pgx` is the grid's count, so the tile and the grid frame the same genes.
+fn tiles(findings: &[Value], locked: &HashMap<String, i64>, actionable_pgx: usize) -> Vec<Value> {
     let mut out = Vec::new();
     for cat in TILE_CATEGORIES {
         let rows: Vec<&Value> = findings.iter().filter(|f| f["category"] == cat).collect();
@@ -101,8 +102,7 @@ fn tiles(findings: &[Value], locked: &HashMap<String, i64>) -> Vec<Value> {
         if rows.is_empty() && hidden == 0 {
             continue;
         }
-        // the rule the gene grid frames by
-        let actionable = rows.iter().filter(|f| actionable_call(f)).count();
+        let actionable = if cat == "pgx" { actionable_pgx } else { 0 };
         // a gene, else the score id or rsID: never the title, whose words are English
         let mut seen: Vec<String> = Vec::new();
         for f in &rows {
@@ -130,7 +130,7 @@ fn tiles(findings: &[Value], locked: &HashMap<String, i64>) -> Vec<Value> {
             "key": cat,
             "value": rows.len().to_string(),
             "detail": detail,
-            "actionable": if cat == "pgx" { actionable } else { 0 },
+            "actionable": actionable,
             "genes": genes,
             "hidden": hidden,
         }));
@@ -204,8 +204,8 @@ pub async fn overview(rt: &Runtime, principal: &Principal, p: &str, min_evidence
     };
     Ok(json!({
         "dataset": dataset,
-        "tiles": tiles(&found.findings, &locked_by_cat),
-        "pgx_grid": pgx_grid,
+        "tiles": tiles(&found.findings, &locked_by_cat, pgx_grid.actionable_pgx()),
+        "pgx_grid": pgx_grid.rows,
         "findings": found.findings,
         "coverage": found.coverage,
         "not_assessed": found.not_assessed,
