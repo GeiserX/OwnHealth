@@ -760,6 +760,20 @@ fn manual_in(body: &Map<String, Value>) -> Result<ManualIn, Failure> {
             json!(c),
         );
     }
+    // a coded answer is a survey answer, never a lab value: no category means survey, another one is refused
+    let category = match (&value_code, category) {
+        (Some(_), None) => Some("survey".to_string()),
+        (Some(_), Some(c)) if c != "survey" => {
+            err(
+                "value_error",
+                "category",
+                "Value error, a value_code answer has category survey",
+                json!(c),
+            );
+            None
+        }
+        (_, c) => c,
+    };
     let corrects_id = match &corrects {
         Some(c) => match Uuid::parse_str(c) {
             Ok(u) => Some(u),

@@ -12,7 +12,8 @@
 #
 # id         ascvd | diabetes | ckd | fh | heart_failure
 # terms      English and Spanish words, lower case, no accents
-# not_terms  words that make a matching text mean something else
+# not_terms  words that make a matching text mean something else; "riesgo de" and "risk of", never a
+#            bare "risk", so "diabetes, alto riesgo cardiovascular" stays diabetes
 # icd10      code prefixes, with or without the dot
 # cite       the definition
 version: 0.1.0
@@ -27,17 +28,17 @@ rows:
       arteriopatia periferica, coronary stent, stent coronario, coronary artery bypass, bypass coronario,
       coronary angioplasty, angioplastia coronaria,
     ]
-    not_terms: [antecedentes familiares, family history, riesgo, risk]
+    not_terms: [antecedentes familiares, family history, riesgo de, risk of, risk for]
     icd10: [I20, I21, I22, I23, I24, I25, I63, I64, I65, I66, I69.3, I70, I73.9, G45, Z95.1, Z95.5]
     cite: https://academic.oup.com/eurheartj/article/42/34/3227/6358713
   - id: diabetes
     terms: [diabetes, diabetes mellitus, dm1, dm2]
-    not_terms: [gestational, gestacional, insipidus, insipida, antecedentes familiares, family history, riesgo, risk]
+    not_terms: [gestational, gestacional, insipidus, insipida, antecedentes familiares, family history, riesgo de, risk of, risk for]
     icd10: [E08, E09, E10, E11, E13, E14]
     cite: https://academic.oup.com/eurheartj/article/42/34/3227/6358713
   - id: ckd
     terms: [chronic kidney disease, chronic renal failure, ckd, enfermedad renal cronica, insuficiencia renal cronica, erc]
-    not_terms: [antecedentes familiares, family history, riesgo, risk]
+    not_terms: [antecedentes familiares, family history, riesgo de, risk of, risk for]
     icd10: [N18]
     cite: https://academic.oup.com/eurheartj/article/42/34/3227/6358713
   - id: fh
@@ -47,6 +48,6 @@ rows:
     cite: https://academic.oup.com/eurheartj/article/42/34/3227/6358713
   - id: heart_failure
     terms: [heart failure, cardiac failure, insuficiencia cardiaca]
-    not_terms: [antecedentes familiares, family history, riesgo, risk]
+    not_terms: [antecedentes familiares, family history, riesgo de, risk of, risk for]
     icd10: [I50]
     cite: https://pubmed.ncbi.nlm.nih.gov/37947085/

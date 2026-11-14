@@ -40,6 +40,8 @@ The coefficients are in `server/crates/ownhealth-rules/src/calc/prevent.rs`.
   320 mg/dL (3.36 to 8.28 mmol/L), HDL 20 to 100 mg/dL (0.52 to 2.59 mmol/L), systolic pressure
   90 to 200 mmHg, and eGFR 15 to 140.
 - A missing cholesterol, systolic pressure, smoking status or eGFR gives `not_assessed` and names it.
+- A smoking status with no known code (`smoking_status_not_coded`), and a caller without the scopes of
+  the facts (`scope_missing`), as for SCORE2.
 
 **Limitations.** PREVENT was built and validated in adults in the United States. A profile with
 another country, or none, carries the limitation `prevent_us_cohorts`.

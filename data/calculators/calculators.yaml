@@ -126,8 +126,10 @@ templates:
     outside_score2_scope: {en: "Not computed: {condition} is recorded. SCORE2 does not apply: it is for apparently healthy people (ESC 2021).", es: "Sin calcular: consta {condition}. SCORE2 no se aplica: es para personas aparentemente sanas (ESC 2021)."}
     outside_prevent_scope: {en: "Not computed: {condition} is recorded. PREVENT does not apply: it is for adults without cardiovascular disease.", es: "Sin calcular: consta {condition}. PREVENT no se aplica: es para adultos sin enfermedad cardiovascular."}
     egfr_below_60: {en: "Not computed: eGFR {value} on {on} is below 60, which ESC 2021 counts as chronic kidney disease. SCORE2 does not apply.", es: "Sin calcular: el FGe de {value} el {on} es menor de 60, lo que la ESC 2021 cuenta como enfermedad renal crónica. SCORE2 no se aplica."}
-    marked_risk_factor: {en: "Not computed: {group} {value} {unit} on {on} is above {limit} {unit}, a markedly raised single risk factor. SCORE2 does not apply (ESC 2021).", es: "Sin calcular: {group} de {value} {unit} el {on} supera {limit} {unit}, un factor de riesgo aislado muy elevado. SCORE2 no se aplica (ESC 2021)."}
+    marked_risk_factor: {en: "Not computed: {group} {value} {unit} on {on} is at or above {limit} {unit}, a markedly raised single risk factor. SCORE2 does not apply (ESC 2021).", es: "Sin calcular: {group} de {value} {unit} el {on} alcanza o supera {limit} {unit}, un factor de riesgo aislado muy elevado. SCORE2 no se aplica (ESC 2021)."}
     input_out_of_range: {en: "Not computed: {group} {value} {unit} is outside the range PREVENT was built on ({low} to {high} {unit}).", es: "Sin calcular: {group} de {value} {unit} está fuera del rango con el que se construyó PREVENT ({low} a {high} {unit})."}
+    smoking_status_not_coded: {en: "Not computed: the newest smoking status, on {on}, reads \"{printed}\" with no code the equation reads (never, former or current smoker).", es: "Sin calcular: el tabaquismo más reciente, del {on}, dice «{printed}» sin un código que la ecuación lea (nunca, en el pasado o actualmente)."}
+    scope_missing: {en: "Not computed: this access does not include {scopes}, and the risk equation reads conditions, medicines and vital signs.", es: "Sin calcular: este acceso no incluye {scopes}, y la ecuación de riesgo lee diagnósticos, medicación y constantes vitales."}
   limitation:
     fasting_not_recorded: {en: "HOMA-IR assumes fasting samples; the record does not say whether this draw was fasting.", es: "El HOMA-IR supone muestras en ayunas; el registro no dice si esta extracción lo fue."}
     insulin_factor: {en: "Insulin was printed in pmol/L and read as µIU/mL with the factor 6.00 (Knopp 2019). With the other published factor, 6.945, this result would be about 14% lower.", es: "La insulina venía en pmol/L y se leyó en µUI/mL con el factor 6,00 (Knopp 2019). Con el otro factor publicado, 6,945, este resultado sería un 14 % más bajo."}
@@ -169,6 +171,7 @@ templates:
     smoking_status.current: {en: smokes now, es: fuma actualmente}
     smoking_status.former: {en: former smoker, es: fumó en el pasado}
     smoking_status.never: {en: never smoked, es: nunca ha fumado}
+    smoking_status.not_coded: {en: "smoking status as recorded: {printed}", es: "tabaquismo según el registro: {printed}"}
     ascvd.recorded: {en: established cardiovascular disease recorded, es: enfermedad cardiovascular establecida registrada}
     ascvd.not_recorded: {en: no established cardiovascular disease recorded, es: sin enfermedad cardiovascular establecida registrada}
     diabetes.recorded: {en: diabetes recorded, es: diabetes registrada}

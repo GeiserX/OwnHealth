@@ -9,6 +9,7 @@ use std::str::FromStr;
 
 use chrono::NaiveDate;
 use common::{EXPECTED, as_of, install_fake_genome, seeded};
+use ownhealth_core::access::{all_scopes, scope_set};
 use ownhealth_rules::calc::cardio::{self, CvData, Fact, Factors, Facts, Sbp};
 use ownhealth_rules::calc::{self, Calc, Data, Draw, Obs, Person, Sex};
 use ownhealth_rules::{build_state, cited, state_hash};
@@ -278,6 +279,21 @@ fn a_statin_is_found_by_its_spanish_brand_and_a_condition_by_its_words_or_icd10_
         cardio::condition_classes(cv(), "Enfermedad renal crónica estadio 3", None, None),
         vec!["ckd"]
     );
+    // a high risk is no reason to drop a diagnosis; a risk of the disease is not the disease
+    assert_eq!(
+        cardio::condition_classes(cv(), "Diabetes mellitus tipo 2, alto riesgo cardiovascular", None, None),
+        vec!["diabetes"]
+    );
+    assert_eq!(
+        cardio::condition_classes(cv(), "Type 2 diabetes, high cardiovascular risk", None, None),
+        vec!["diabetes"]
+    );
+    assert_eq!(
+        cardio::condition_classes(cv(), "Enfermedad renal crónica, riesgo alto", None, None),
+        vec!["ckd"]
+    );
+    assert!(cardio::condition_classes(cv(), "Riesgo de diabetes", None, None).is_empty());
+    assert!(cardio::condition_classes(cv(), "At risk of heart failure", None, None).is_empty());
     // words that mean something else, and codes read only as received
     assert!(cardio::condition_classes(cv(), "Diabetes gestacional", None, None).is_empty());
     assert!(cardio::condition_classes(cv(), "Antecedentes familiares de infarto", None, None).is_empty());
@@ -328,6 +344,7 @@ fn fact(value: &str, src: &str) -> Fact {
         value: value.into(),
         date: Some(day("2026-01-10")),
         src: src.into(),
+        printed: None,
     }
 }
 
@@ -506,7 +523,26 @@ fn every_published_validity_limit_is_a_refusal_with_its_reason() {
         "outside_prevent_scope"
     );
     assert_eq!(
+        reason(&run("prevent_cvd", &mmol, &p, &with("heart_failure"), &[egfr("90")])),
+        ("outside_prevent_scope".into(), json!({"condition": "heart_failure"}))
+    );
+    assert_eq!(
         run("prevent_cvd", &mmol, &p, &with("diabetes"), &[egfr("90")])[0]["status"],
+        "ok"
+    );
+    // total cholesterol above 8 mmol/L (310 mg/dL)
+    for (tc, unit, limit) in [("8.2", "mmol/L", "8"), ("320", "mg/dL", "310")] {
+        let hdl = if unit == "mmol/L" { "1.3" } else { "50" };
+        let (code, why) = reason(&run("score2", &[lipids(tc, hdl, unit)], &p, &facts(), &[]));
+        assert_eq!(
+            (code.as_str(), why["group"].clone(), why["limit"].clone()),
+            ("marked_risk_factor", json!("total_cholesterol"), json!(limit)),
+            "{tc} {unit}"
+        );
+    }
+    // at exactly 8 mmol/L the rule (above 8) does not hold
+    assert_eq!(
+        run("score2", &[lipids("8.0", "1.3", "mmol/L")], &p, &facts(), &[])[0]["status"],
         "ok"
     );
     // markedly raised single risk factors
@@ -521,6 +557,23 @@ fn every_published_validity_limit_is_a_refusal_with_its_reason() {
     let mut high_bp = facts();
     high_bp.sbp = Some(Sbp::Office(obs("bp_systolic", "210", "mm[Hg]", "2026-10-02", "src_bp")));
     assert_eq!(reason(&run("score2", &mmol, &p, &high_bp, &[])).0, "marked_risk_factor");
+    // the pressure rule holds from 180 itself, and the words say so
+    let mut at_180 = facts();
+    at_180.sbp = Some(Sbp::Office(obs("bp_systolic", "180", "mm[Hg]", "2026-10-02", "src_bp")));
+    let items = run("score2", &mmol, &p, &at_180, &[]);
+    assert_eq!(reason(&items).0, "marked_risk_factor");
+    let doc = json!({"schema": calc::SCHEMA, "profile": "x", "as_of": ON, "items": items});
+    assert_eq!(
+        calc::render(&doc, "en").expect("render")["items"][0]["text"],
+        "Not computed: systolic blood pressure 180 mmHg on 2026-10-02 is at or above 180 mmHg, a markedly raised single risk factor. SCORE2 does not apply (ESC 2021)."
+    );
+    assert_eq!(
+        calc::render(&doc, "es").expect("render")["items"][0]["text"],
+        "Sin calcular: presión arterial sistólica de 180 mmHg el 2026-10-02 alcanza o supera 180 mmHg, un factor de riesgo aislado muy elevado. SCORE2 no se aplica (ESC 2021)."
+    );
+    let mut below = facts();
+    below.sbp = Some(Sbp::Office(obs("bp_systolic", "179", "mm[Hg]", "2026-10-02", "src_bp")));
+    assert_eq!(run("score2", &mmol, &p, &below, &[])[0]["status"], "ok");
     assert_eq!(
         reason(&run("prevent_cvd", &mmol, &p, &high_bp, &[egfr("90")])),
         (
@@ -625,6 +678,7 @@ fn a_wearable_mean_stands_in_for_an_office_reading_and_says_so() {
         since: day("2026-10-09"),
         until: day("2026-11-07"),
         days: 21,
+        source: 7,
     });
     let it = &run(
         "score2",
@@ -639,6 +693,8 @@ fn a_wearable_mean_stands_in_for_an_office_reading_and_says_so() {
         it["inputs"][2]["window"],
         json!({"since": "2026-10-09", "until": "2026-11-07", "days": 21})
     );
+    // wearables have no src id: the line names the wearable_source the daily means came from
+    assert_eq!(it["inputs"][2]["wearable_source"], 7);
     let doc = json!({"schema": calc::SCHEMA, "profile": "x", "as_of": ON, "items": [it]});
     for (lang, want) in [
         (
@@ -899,19 +955,156 @@ async fn without_an_office_reading_the_wearable_mean_is_read_with_its_window() -
         .execute(&mut *tx)
         .await?;
     }
-    let f = cardio::facts(&mut tx, cv(), alex, Some("ES"), as_of()).await?;
+    let f = cardio::facts(&mut tx, cv(), alex, Some("ES"), as_of(), &all_scopes()).await?;
+    // without read:wearables the mean is not read
+    let no_wear = scope_set(["read:labs", "read:records", "read:vitals"]);
+    let hidden = cardio::facts(&mut tx, cv(), alex, Some("ES"), as_of(), &no_wear).await?;
+    assert!(hidden.sbp.is_none() && hidden.withheld.is_empty(), "{:?}", hidden.sbp);
     match f.sbp {
         Some(Sbp::Wearable {
             mean,
             since,
             until,
             days,
+            source: from,
         }) => {
+            assert_eq!(from, source);
             assert_eq!((mean, days), (d("122.0"), 3));
             assert_eq!(until, as_of());
             assert_eq!(since, as_of() - chrono::Duration::days(29));
         }
         other => panic!("want the wearable mean, got {other:?}"),
     }
+    Ok(())
+}
+
+/// A smoking status whose code is none of the known answers is refused with its words and source,
+/// never read as a non-smoker and never passed over for an older answer.
+#[test]
+fn an_uncoded_smoking_status_is_refused_with_its_words() -> R {
+    let mut f = facts();
+    f.smoking = Some(Fact {
+        value: cardio::NOT_CODED.into(),
+        date: Some(day("2026-06-01")),
+        src: "src_smk2".into(),
+        printed: Some("Fumador ocasional".into()),
+    });
+    let items = run(
+        "score2",
+        &[lipids("5.8", "1.3", "mmol/L")],
+        &born(1971, Sex::Male),
+        &f,
+        &[],
+    );
+    assert_eq!(items[0]["status"], "refused");
+    assert_eq!(
+        reason(&items),
+        (
+            "smoking_status_not_coded".into(),
+            json!({"printed": "Fumador ocasional", "on": "2026-06-01"})
+        )
+    );
+    assert!(
+        items[0]["src"]
+            .as_array()
+            .is_some_and(|a| a.contains(&json!("src_smk2")))
+    );
+    let doc = json!({"schema": calc::SCHEMA, "profile": "x", "as_of": ON, "items": items});
+    let es = calc::render(&doc, "es")?;
+    assert_eq!(
+        es["items"][0]["text"],
+        "Sin calcular: el tabaquismo más reciente, del 2026-06-01, dice «Fumador ocasional» sin un código que la ecuación lea (nunca, en el pasado o actualmente)."
+    );
+    assert_eq!(
+        es["items"][0]["inputs"][3]["text"],
+        "tabaquismo según el registro: Fumador ocasional"
+    );
+    let en = calc::render(&doc, "en")?;
+    assert_eq!(
+        en["items"][0]["inputs"][3]["text"],
+        "smoking status as recorded: Fumador ocasional"
+    );
+    Ok(())
+}
+
+/// Without read:records or read:vitals a risk result is not assessed for that scope and shows no
+/// input line at all.
+#[test]
+fn a_caller_without_the_scopes_of_the_facts_gets_no_input_line() {
+    let mut f = facts();
+    f.conditions.insert("diabetes".into(), fact("recorded", "src_cond"));
+    f.drugs.insert("statin".into(), fact("recorded", "src_med"));
+    f.withheld = vec!["read:records".into()];
+    for id in ["score2", "prevent_cvd"] {
+        let items = run(
+            id,
+            &[lipids("5.8", "1.3", "mmol/L")],
+            &born(1971, Sex::Male),
+            &f,
+            &[egfr("90")],
+        );
+        assert_eq!(items[0]["status"], "not_assessed");
+        assert_eq!(
+            reason(&items),
+            ("scope_missing".into(), json!({"scopes": ["read:records"]}))
+        );
+        assert_eq!(
+            (items[0]["inputs"].clone(), items[0]["src"].clone()),
+            (json!([]), json!([]))
+        );
+    }
+}
+
+/// The newest smoking status counts whatever its code; and facts reads conditions, medicines and
+/// vitals only with their scopes.
+#[tokio::test]
+async fn the_newest_smoking_status_counts_and_facts_read_only_under_their_scopes() -> R {
+    install_fake_genome();
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let alex = s.pid("alex");
+    let (doc_id, src): (Option<uuid::Uuid>, String) =
+        sqlx::query_as("select document_id, src_id from observation where profile_id = $1 limit 1")
+            .bind(alex)
+            .fetch_one(&mut *tx)
+            .await?;
+    for (printed, code, when) in [
+        ("Never smoked", Some("266919005"), "2020-02-01"),
+        ("Occasional cigarette smoker", Some("230059006"), "2026-02-01"),
+    ] {
+        sqlx::query(
+            "insert into observation (profile_id, category, document_id, source_kind, printed_name, printed_value, \
+             value_code, alias_group, derivation_version, effective_at, src_id, accepted_by, fhir) \
+             values ($1, 'survey', $2, 'clinical', 'Smoking status', $3, $4, 'smoking_status', 'test', \
+             $5::date + time '08:00', $6, 'import', '{}')",
+        )
+        .bind(alex)
+        .bind(doc_id)
+        .bind(printed)
+        .bind(code)
+        .bind(when)
+        .bind(&src)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let f = cardio::facts(&mut tx, cv(), alex, Some("ES"), as_of(), &all_scopes()).await?;
+    let smoking = f.smoking.expect("a smoking status");
+    assert_eq!(
+        (smoking.value.as_str(), smoking.printed.as_deref(), smoking.date),
+        (
+            cardio::NOT_CODED,
+            Some("Occasional cigarette smoker"),
+            Some(day("2026-02-01"))
+        )
+    );
+    assert!(f.drugs.contains_key("statin"), "the control reads the statin");
+    let labs_vitals = scope_set(["read:summary", "read:labs", "read:vitals"]);
+    let hidden = cardio::facts(&mut tx, cv(), alex, Some("ES"), as_of(), &labs_vitals).await?;
+    assert_eq!(hidden.withheld, vec!["read:records".to_string()]);
+    assert!(
+        hidden.smoking.is_none() && hidden.sbp.is_none() && hidden.drugs.is_empty() && hidden.conditions.is_empty()
+    );
+    let doc = calc::document_for(&mut tx, alex, as_of(), &labs_vitals).await?;
+    assert!(!doc.to_string().contains("src_m02"), "{doc}");
     Ok(())
 }

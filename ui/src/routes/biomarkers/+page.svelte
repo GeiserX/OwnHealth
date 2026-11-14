@@ -480,7 +480,7 @@
 								<div class="dim" style="font-size:11px;overflow-wrap:anywhere">{it.version} · <a href={it.cite} target="_blank" rel="noopener noreferrer">{it.cite}</a></div>
 							</div>
 						{/each}
-						{#if profile && profile.role !== 'viewer' && calcShown.some((c) => c.latest.reason?.groups?.includes('smoking_status'))}
+						{#if profile && profile.role !== 'viewer' && calcShown.some((c) => c.latest.reason?.groups?.includes('smoking_status') || c.latest.reason_code === 'smoking_status_not_coded')}
 							{#if smoking}
 								<ManualEntry profile={profile.slug} kinds={['smoking']} onsaved={() => ((smoking = false), load())} oncancel={() => (smoking = false)} />
 							{:else}

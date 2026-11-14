@@ -4,11 +4,18 @@
 //!
 //! - systolic pressure: the newest office reading (an observation of bp_systolic) in the 12 months up
 //!   to `as_of`, else the mean of the last 30 days of wearable daily means, shown with its window;
-//! - smoking status: the newest smoking_status observation (LOINC 72166-2, SNOMED answer);
+//! - smoking status: the newest smoking_status observation (LOINC 72166-2); an answer that is not one
+//!   of the known SNOMED CT codes is refused, never passed over for an older one;
 //! - eGFR (PREVENT, and SCORE2's chronic kidney disease rule): the newest CKD-EPI 2021 result of the
 //!   same document, with the creatinine's src;
 //! - recorded conditions (`conditions.yaml`) and active medicines (`drug_classes.yaml`);
 //! - the profile's country, for SCORE2's region (`score2_regions.yaml`).
+//!
+//! Each source is read only when the caller's scopes allow it: conditions, medicines and the smoking
+//! status need read:records, the office pressure and the smoking status read:vitals (the two maps of
+//! observation categories differ on `survey`), the wearable mean read:wearables. A caller without
+//! read:records or read:vitals gets each risk result as `not_assessed`, `scope_missing`, with no input
+//! line; without read:wearables the wearable mean is not read.
 //!
 //! Age is taken on `as_of`, and so is the result's date. A rule the guideline gives is a refusal with
 //! a reason, a missing input is `not_assessed` naming it; neither carries a value. An input line says
@@ -18,6 +25,7 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use chrono::{Duration, NaiveDate};
+use ownhealth_core::access::Scopes;
 use ownhealth_core::records::{active_medications, list_records};
 use ownhealth_core::{Error, Result};
 use ownhealth_normalize::tables::fold;
@@ -56,6 +64,10 @@ pub const SMOKING: [(&str, &str); 8] = [
     ("266919005", "never"),
 ];
 pub const SMOKING_LOINC: &str = "72166-2";
+/// The value of a smoking status whose code is none of `SMOKING`.
+pub const NOT_CODED: &str = "not_coded";
+/// What a risk result reads beyond the labs, as scopes; without one of them it is not assessed.
+pub const NEEDS: [&str; 2] = ["read:records", "read:vitals"];
 
 /// The shipped files, compiled in.
 pub const FILES: [(&str, &str); 3] = [
@@ -299,6 +311,8 @@ pub struct Fact {
     pub value: String,
     pub date: Option<NaiveDate>,
     pub src: String,
+    /// the words as recorded, for a smoking status whose code is not known
+    pub printed: Option<String>,
 }
 
 /// Systolic pressure: an office reading, or a wearable mean over a window.
@@ -310,6 +324,8 @@ pub enum Sbp {
         since: NaiveDate,
         until: NaiveDate,
         days: usize,
+        /// the wearable_source the daily means came from: wearables have no src id
+        source: i16,
     },
 }
 
@@ -339,24 +355,35 @@ pub struct Facts {
     pub conditions: BTreeMap<String, Fact>,
     /// medicine class -> the first matching active medicine
     pub drugs: BTreeMap<String, Fact>,
+    /// the scopes of `NEEDS` the caller lacks: then nothing above but the country was read
+    pub withheld: Vec<String>,
 }
 
 /// SBP: an office reading counts for 12 months; the wearable mean covers the last 30 days.
 const OFFICE_DAYS: i64 = 365;
 const WEARABLE_DAYS: i64 = 30;
 
-/// Read the facts of one profile on `as_of`.
+/// Read the facts of one profile on `as_of`, only from the sources `scopes` may read.
 pub async fn facts(
     conn: &mut PgConnection,
     cv: &CvData,
     profile_id: Uuid,
     country: Option<&str>,
     as_of: NaiveDate,
+    scopes: &Scopes,
 ) -> Result<Facts> {
     let mut out = Facts {
         country: country.map(str::trim).filter(|c| !c.is_empty()).map(str::to_string),
+        withheld: NEEDS
+            .iter()
+            .filter(|s| !scopes.contains(**s))
+            .map(|s| (*s).to_string())
+            .collect(),
         ..Facts::default()
     };
+    if !out.withheld.is_empty() {
+        return Ok(out);
+    }
     let sql = format!(
         "select o.alias_group, o.value_num, o.value_cmp, o.value_code, o.printed_value, \
          coalesce(o.unit_ucum, o.printed_unit) as unit, o.effective_at, o.src_id, o.method \
@@ -378,14 +405,18 @@ pub async fn facts(
         let date = effective.date_naive();
         let src: String = r.try_get("src_id")?;
         if group == "smoking_status" && out.smoking.is_none() {
+            // the newest answer counts, whatever its code: an unknown one is refused, not skipped
             let code: Option<String> = r.try_get("value_code")?;
-            if let Some((_, v)) = code.as_deref().and_then(|c| SMOKING.iter().find(|(k, _)| *k == c)) {
-                out.smoking = Some(Fact {
-                    value: (*v).to_string(),
-                    date: Some(date),
-                    src,
-                });
-            }
+            let known = code.as_deref().and_then(|c| SMOKING.iter().find(|(k, _)| *k == c));
+            out.smoking = Some(Fact {
+                value: known.map_or(NOT_CODED, |(_, v)| *v).to_string(),
+                date: Some(date),
+                src,
+                printed: known
+                    .is_none()
+                    .then(|| r.try_get::<String, _>("printed_value"))
+                    .transpose()?,
+            });
         } else if group == "bp_systolic" && out.sbp.is_none() && date >= office_from {
             out.sbp = Some(Sbp::Office(Obs {
                 group,
@@ -399,9 +430,9 @@ pub async fn facts(
             }));
         }
     }
-    if out.sbp.is_none() {
+    if out.sbp.is_none() && scopes.contains("read:wearables") {
         let metrics = vec!["bp_systolic".to_string()];
-        if let Some((_, days)) = crate::engine::wearables(&mut *conn, profile_id, as_of, &metrics)
+        if let Some((source, days)) = crate::engine::wearables(&mut *conn, profile_id, as_of, &metrics)
             .await?
             .remove("bp_systolic")
         {
@@ -418,6 +449,7 @@ pub async fn facts(
                     since,
                     until,
                     days: vals.len(),
+                    source,
                 });
             }
         }
@@ -443,6 +475,7 @@ pub async fn facts(
                         value: "recorded".into(),
                         date: day,
                         src: s("src_id").unwrap_or_default().to_string(),
+                        printed: None,
                     },
                 );
             }
@@ -456,6 +489,7 @@ pub async fn facts(
                 value: "recorded".into(),
                 date: started,
                 src: s("src_id").to_string(),
+                printed: None,
             });
         }
     }
@@ -532,12 +566,14 @@ fn sbp_json(s: &Sbp) -> Value {
             since,
             until,
             days,
+            source,
         } => json!({
             "group": "bp_systolic",
             "value": num(mean),
             "unit": "mm[Hg]",
             "date": iso(*until),
             "window": {"since": iso(*since), "until": iso(*until), "days": days},
+            "wearable_source": source,
         }),
     }
 }
@@ -755,6 +791,11 @@ fn evaluate_one(
     if !applies {
         return Vec::new();
     }
+    // a caller who may not read conditions, medicines or vitals learns nothing of them here
+    if !facts.withheld.is_empty() {
+        let why = json!({"scopes": facts.withheld});
+        return refuse(calc, "not_assessed", ("scope_missing", why), as_of, Vec::new());
+    }
     // every line the result would read, gathered first so a refusal shows them too
     let lipids = lipid_draw(draws);
     let mut inputs: Vec<Value> = Vec::new();
@@ -766,9 +807,12 @@ fn evaluate_one(
         inputs.push(sbp_json(s));
     }
     if let Some(s) = &facts.smoking {
-        inputs.push(
-            json!({"group": "smoking_status", "value": s.value, "unit": null, "date": s.date.map(iso), "src": s.src}),
-        );
+        let mut line =
+            json!({"group": "smoking_status", "value": s.value, "unit": null, "date": s.date.map(iso), "src": s.src});
+        if let (Some(p), Some(m)) = (&s.printed, line.as_object_mut()) {
+            m.insert("printed".into(), json!(p));
+        }
+        inputs.push(line);
     }
     let egfr = newest_egfr(computed);
     if !is_score2 && let Some(e) = egfr {
@@ -877,6 +921,10 @@ fn evaluate_one(
             as_of,
             inputs,
         );
+    }
+    if let Some(s) = facts.smoking.as_ref().filter(|s| s.value == NOT_CODED) {
+        let why = json!({"printed": s.printed.clone().unwrap_or_default(), "on": s.date.map(iso)});
+        return refuse(calc, "refused", ("smoking_status_not_coded", why), as_of, inputs);
     }
     let (Some((tc_o, hdl_o)), Some(sbp)) = (lipids, &facts.sbp) else {
         return Vec::new();

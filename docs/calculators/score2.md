@@ -41,7 +41,8 @@ country in no region, such as US, it is refused too (`region_not_covered`). We n
   there is none, the mean of the last 30 days of wearable daily means, shown with its window. The
   result then carries the limitation `sbp_from_wearable`.
 - Smoking status: the newest answer to LOINC 72166-2 (SNOMED CT). Only "smokes now" counts as a
-  smoker. The app records it by hand on the lipid page.
+  smoker. The app records it by hand on the lipid page. A newest answer with no known code is
+  refused (`smoking_status_not_coded`) with its words and source; an older answer never stands in.
 - The recorded conditions, matched by `data/calculators/conditions.yaml`.
 
 Each input line names its source. A condition that is not on record reads as "no diabetes recorded",
@@ -59,6 +60,9 @@ never as "no diabetes".
   more (`marked_risk_factor`).
 - A missing cholesterol, systolic pressure or smoking status gives `not_assessed` and names it
   (`missing_input`).
+- A caller without read:records or read:vitals gets `not_assessed` (`scope_missing`) with no input
+  line: the result reads conditions, medicines and vital signs. Without read:wearables the wearable
+  mean is not read.
 
 **Precision.** 1 decimal.
 

@@ -60,6 +60,18 @@
 	};
 	// The smoking answers as SNOMED CT codes (LOINC 72166-2), in the order the block shows them.
 	const SMOKING = [['266919005', 'calc_smk_never'], ['8517006', 'calc_smk_former'], ['77176002', 'calc_smk_current']] as const;
+	// The smoking block puts focus on its first answer when it opens or is chosen, after the form's own
+	// focus on open (one frame), so Tab goes on to the day and Save.
+	function firstAnswer(node: HTMLElement) {
+		let inner = 0;
+		const outer = requestAnimationFrame(() => (inner = requestAnimationFrame(() => node.querySelector<HTMLElement>('button')?.focus({ preventScroll: true }))));
+		return {
+			destroy() {
+				cancelAnimationFrame(outer);
+				cancelAnimationFrame(inner);
+			}
+		};
+	}
 	const kindName = (k: EntryKind) => (k === 'visit' ? t('h1_ty_visit') : k === 'smoking' ? t('calc_smoking') : t('me_k_' + k));
 	const today = todayIso();
 	const fresh = (k: EntryKind): Fields =>
@@ -169,8 +181,11 @@
 		</div>
 	{/if}
 	{#if kind === 'smoking'}
-		<div class="seg" role="group" aria-label={t('calc_smoking')}>
-			{#each SMOKING as [code, key] (code)}<button type="button" class:on={f.code === code} aria-pressed={f.code === code} onclick={() => (f.code = code)}>{t(key)}</button>{/each}
+		<div style="display:grid;gap:3px;font-size:11.5px;color:var(--muted)">
+			<span aria-hidden="true">{t('calc_smoking')}</span>
+			<div class="seg" role="group" aria-label={t('calc_smoking')} use:firstAnswer>
+				{#each SMOKING as [code, key] (code)}<button type="button" class:on={f.code === code} aria-pressed={f.code === code} onclick={() => (f.code = code)}>{t(key)}</button>{/each}
+			</div>
 		</div>
 	{/if}
 	<div class="p2row">

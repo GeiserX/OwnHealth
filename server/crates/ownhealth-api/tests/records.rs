@@ -393,6 +393,7 @@ async fn manual_smoking_status_is_stored_as_its_code() -> R {
         json!({"loinc": null}),
         json!({"value_code": "12345"}),
         json!({"loinc": "8480-6"}),
+        json!({"category": "laboratory"}),
     ] {
         let (s, out) = post(
             &a,
@@ -403,5 +404,41 @@ async fn manual_smoking_status_is_stored_as_its_code() -> R {
         .await?;
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{bad} {out}");
     }
+    Ok(())
+}
+
+/// A coded answer sent with no category is stored as a survey answer, so it never lands in the lab
+/// list; the same post with category laboratory is refused above.
+#[tokio::test]
+async fn a_coded_answer_without_category_is_a_survey_answer() -> R {
+    let a = app().await?;
+    let body = json!({
+        "name": "Tabaquismo",
+        "value": "fuma",
+        "loinc": "72166-2",
+        "value_code": "77176002",
+        "effective_at": "2026-11-06T12:00:00Z",
+    });
+    let (s, out) = post(&a, "alex", "/profiles/alex/manual-observations", body).await?;
+    assert_eq!(s, StatusCode::CREATED, "{out}");
+    let category: String = sqlx::query_scalar("select category from observation where id = $1")
+        .bind(Uuid::parse_str(out["id"].as_str().unwrap_or_default())?)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    assert_eq!(category, "survey");
+    let (s, labs) = get(
+        &a,
+        "alex",
+        "/profiles/alex/observations?category=laboratory&q=Tabaquismo",
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{labs}");
+    assert!(
+        !labs.to_string().contains("smoking_status") && !labs.to_string().contains("fuma"),
+        "{labs}"
+    );
+    // the control: the same search without a category filter finds it
+    let (_, all) = get(&a, "alex", "/profiles/alex/observations?q=Tabaquismo").await?;
+    assert!(all.to_string().contains("smoking_status"), "{all}");
     Ok(())
 }

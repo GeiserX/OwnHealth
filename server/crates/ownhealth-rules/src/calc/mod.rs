@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use ownhealth_core::access::{Profile, get_profile};
+use ownhealth_core::access::{Profile, Scopes, all_scopes, get_profile};
 use ownhealth_core::canonical::canonical_json;
 use ownhealth_core::lifecycle::visible_sql;
 use ownhealth_core::{Error, Result};
@@ -654,8 +654,20 @@ pub fn build(
     Ok(doc)
 }
 
-/// The ownhealth.calculators/v1 document of one profile on `as_of`.
+/// The ownhealth.calculators/v1 document of one profile on `as_of`, read with every scope.
 pub async fn document(conn: &mut PgConnection, profile_id: Uuid, as_of: NaiveDate) -> Result<Value> {
+    document_for(conn, profile_id, as_of, &all_scopes()).await
+}
+
+/// The document as a caller with `scopes` may read it: a cardiovascular result reads conditions,
+/// medicines, vitals and wearables only under their own scopes (`cardio::facts`). The hash is the same
+/// for every caller with the same scopes.
+pub async fn document_for(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    as_of: NaiveDate,
+    scopes: &Scopes,
+) -> Result<Value> {
     let data = data()?;
     let profile = get_profile(&mut *conn, profile_id)
         .await?
@@ -672,6 +684,7 @@ pub async fn document(conn: &mut PgConnection, profile_id: Uuid, as_of: NaiveDat
         profile_id,
         profile.country.as_deref(),
         as_of,
+        scopes,
     )
     .await?;
     build(data, &profile.slug, as_of, &Person::of(&profile), &draws, &facts)
@@ -693,11 +706,17 @@ fn fill(text: &str, params: &Map<String, Value>, data: &Data, lang: &str) -> Str
     for (k, v) in params {
         let shown = match (k.as_str(), v) {
             // "a, b and c": the last two joined by the word, the rest by commas
-            ("groups", Value::Array(gs)) => {
+            ("groups" | "scopes", Value::Array(gs)) => {
                 let names: Vec<String> = gs
                     .iter()
                     .filter_map(Value::as_str)
-                    .map(|g| group_name(data, g, lang))
+                    .map(|g| {
+                        if k == "groups" {
+                            group_name(data, g, lang)
+                        } else {
+                            g.to_string()
+                        }
+                    })
                     .collect();
                 match names.split_last() {
                     Some((last, rest)) if !rest.is_empty() => format!("{}{and}{last}", rest.join(", ")),
@@ -760,7 +779,11 @@ pub fn render(doc: &Value, lang: &str) -> Result<Value> {
                     p.insert("value".into(), i["value"].clone());
                     template(data, "fact", "bp_systolic.window", lang).map(|t| fill(t, &p, data, lang))
                 }
-                None => template(data, "fact", &fact, lang).map(str::to_string),
+                // a smoking status with no known code shows its words: "{printed}"
+                None => template(data, "fact", &fact, lang).map(|t| match i.get("printed") {
+                    Some(Value::String(p)) => t.replace("{printed}", p),
+                    _ => t.to_string(),
+                }),
             };
             if let Some(o) = i.as_object_mut() {
                 o.insert("name".into(), json!(group_name(data, &g, lang)));
