@@ -5,7 +5,8 @@
 //! - `POST /profiles/{p}/family`, `PUT /profiles/{p}/family/{id}` (a new version),
 //!   `DELETE /profiles/{p}/family/{id}?reason=` (retract).
 //! - `GET /profiles/{p}/pedigree`: the drawing data for this profile's own rows, placed by
-//!   `relationships.yaml`.
+//!   `relationships.yaml`, and under `patterns` the ownhealth.family/v1 document of the same rows:
+//!   the guideline patterns they show (`ownhealth_rules::family`), worded in es and en.
 //!
 //! Reading needs `read:records`; a row with a sensitivity tag is left out without `read:sensitive`.
 //! A relative linked to their own profile shows that profile's name only when the caller can read
@@ -396,9 +397,12 @@ async fn pedigree(State(rt): State<Runtime>, caller: Caller, Path(p): Path<Strin
     let rows = shown(&mut tx, &caller.0, &perm).await?;
     let ids: Vec<String> = rows.iter().map(|r| r.member.id.to_string()).collect();
     audit(&mut tx, &caller.0, &perm, "read", &ids).await?;
+    let today = ownhealth_core::access::today_utc();
+    // the guideline patterns of these same relatives (ownhealth.family/v1), for the patterns card
+    let patterns =
+        ownhealth_rules::family::build_document(&mut tx, &caller.0, &perm.profile, &perm.scopes, today).await?;
     tx.commit().await?;
     let cat = family::catalog()?;
-    let today = ownhealth_core::access::today_utc();
     let nodes: Vec<Value> = rows
         .iter()
         .filter_map(|r| {
@@ -466,6 +470,7 @@ async fn pedigree(State(rt): State<Runtime>, caller: Caller, Path(p): Path<Strin
             "as_of": today.to_string(),
             "rules": cat.version,
             "nodes": nodes,
+            "patterns": ownhealth_rules::family::render(&patterns)?,
         })),
     ))
 }
