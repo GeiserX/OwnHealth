@@ -6,11 +6,13 @@
 //! - `export::export_profile`: the full export of one profile (FHIR NDJSON plus the original files,
 //!   one zip), for the step-up-protected REST route.
 //! - `summary_pdf::render`: the printed doctor summary, two A4 pages through `pdfwrite`.
+//! - `next_draw_pdf::render`: the printed next-draw request, through `pdfwrite`.
 //! - the demo hook `base` (order 0), the port of `demo/base.py`.
 
 mod backup;
 mod demo_base;
 pub mod export;
+pub mod next_draw_pdf;
 pub mod summary_pdf;
 
 pub use backup::{MANIFEST_SCHEMA, backup, restore, verify_restore};

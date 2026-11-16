@@ -20,6 +20,7 @@ pub mod inbox;
 pub mod inboxes;
 pub mod ingest;
 pub mod mcp_usage;
+pub mod next_draw;
 pub mod oauth;
 pub mod observations;
 pub mod records;
@@ -52,6 +53,7 @@ pub fn all() -> Router<Runtime> {
         .merge(inboxes::router())
         .merge(ingest::router())
         .merge(mcp_usage::router())
+        .merge(next_draw::router())
         .merge(oauth::router())
         .merge(observations::router())
         .merge(records::router())

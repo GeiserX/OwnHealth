@@ -72,7 +72,7 @@ fn st<'a>(v: &'a Value, k: &str) -> &'a str {
 }
 
 /// Superscript digits as `^n`: WinAnsi has no ⁹, and folding would print a different number.
-fn plain(s: &str) -> String {
+pub(crate) fn plain(s: &str) -> String {
     const SUP: [(char, char); 11] = [
         ('⁰', '0'),
         ('¹', '1'),
