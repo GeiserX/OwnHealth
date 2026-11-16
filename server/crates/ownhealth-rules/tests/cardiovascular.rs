@@ -315,10 +315,22 @@ fn a_statin_is_found_by_its_spanish_brand_and_a_condition_by_its_words_or_icd10_
         "Screening for diabetes mellitus (DM2)",
         "Diabetes mellitus (gestational)",
         "Diabetes mellitus (tipo 2, gestacional)",
+        "Diabetes mellitus (gestational with DM2)",
+        "Diabetes mellitus (with gestational onset)",
+        "Screening for diabetes mellitus (with DM2)",
     ] {
         assert!(cardio::condition_classes(cv(), text, None, None).is_empty(), "{text}");
     }
-    // the heading ends with its statement
+    // the heading is only the clause right before the colon, and it ends with its statement
+    assert_eq!(
+        cardio::condition_classes(
+            cv(),
+            "Type 2 diabetes, screening for diabetes mellitus: negative",
+            None,
+            None
+        ),
+        vec!["diabetes"]
+    );
     assert_eq!(
         cardio::condition_classes(
             cv(),

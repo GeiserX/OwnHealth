@@ -263,42 +263,58 @@ fn words(s: &str) -> Vec<String> {
 
 /// The clauses of a condition's text, as words. A statement ends at `.`, `;` or a new line; inside it,
 /// clauses split at `,`, `/`, "con" and "with", never inside a bracket, since a bracket qualifies the
-/// words before it ("diabetes mellitus (gestational)"). A heading before a colon belongs to every
-/// clause of its statement ("Family history: stroke, diabetes").
+/// words before it ("diabetes mellitus (gestational)"). The clause right before a colon is a heading
+/// that belongs to every clause after it ("Family history: stroke, diabetes").
 fn clauses(text: &str) -> Vec<Vec<String>> {
     let mut out = Vec::new();
     for statement in text.split(|c: char| ".;\n".contains(c)) {
-        let (heading, body) = match statement.split_once(':') {
-            Some((h, b)) => (words(h), b),
-            None => (Vec::new(), statement),
-        };
-        let mut parts = vec![String::new()];
-        let mut depth = 0usize;
-        for ch in body.chars() {
-            match ch {
-                '(' | '[' => depth += 1,
-                ')' | ']' => depth = depth.saturating_sub(1),
-                ',' | '/' if depth == 0 => {
-                    parts.push(String::new());
-                    continue;
-                }
-                _ => {}
+        match statement.split_once(':') {
+            Some((before, body)) => {
+                let mut before = split_clauses(before, &[]);
+                let heading = before.pop().unwrap_or_default();
+                out.extend(before);
+                out.extend(split_clauses(body, &heading));
             }
-            parts.last_mut().expect("never empty").push(ch);
-        }
-        for part in parts {
-            let mut clause = heading.clone();
-            for w in words(&part) {
-                if w == "con" || w == "with" {
-                    out.push(std::mem::replace(&mut clause, heading.clone()));
-                } else {
-                    clause.push(w);
-                }
-            }
-            out.push(clause);
+            None => out.extend(split_clauses(statement, &[])),
         }
     }
     out.retain(|c| !c.is_empty());
+    out
+}
+
+/// One statement's clauses, each starting with `heading`: split at `,`, `/`, "con" and "with" outside
+/// brackets.
+fn split_clauses(body: &str, heading: &[String]) -> Vec<Vec<String>> {
+    let mut out = vec![heading.to_vec()];
+    let push = |seg: &mut String, inside: bool, out: &mut Vec<Vec<String>>| {
+        for w in words(&std::mem::take(seg)) {
+            if !inside && (w == "con" || w == "with") {
+                out.push(heading.to_vec());
+            } else {
+                out.last_mut().expect("never empty").push(w);
+            }
+        }
+    };
+    let mut seg = String::new();
+    let mut depth = 0usize;
+    for ch in body.chars() {
+        match ch {
+            '(' | '[' => {
+                push(&mut seg, depth > 0, &mut out);
+                depth += 1;
+            }
+            ')' | ']' => {
+                push(&mut seg, depth > 0, &mut out);
+                depth = depth.saturating_sub(1);
+            }
+            ',' | '/' if depth == 0 => {
+                push(&mut seg, false, &mut out);
+                out.push(heading.to_vec());
+            }
+            _ => seg.push(ch),
+        }
+    }
+    push(&mut seg, depth > 0, &mut out);
     out
 }
 
