@@ -137,7 +137,7 @@ async fn the_grid_keeps_a_call_the_table_filters_out_by_evidence() -> R {
     let alex = fam.profile("alex");
     let mut facts = synthetic::alex_facts();
     for f in facts["facts"].as_array_mut().into_iter().flatten() {
-        if f["gene"] == "CYP2D6" || f["gene"] == "CYP2C19" {
+        if f["category"] == "pgx" {
             f["evidence"]["level"] = json!("E2");
         }
     }
@@ -167,7 +167,7 @@ async fn the_grid_keeps_a_call_the_table_filters_out_by_evidence() -> R {
         (&json!("found"), &json!("*1/*41")),
         "{cyp}"
     );
-    // the PGx tile counts the actionable calls the grid frames, CYP2C19 among them, not only the table's
+    // no PGx call reaches the table, yet the PGx tile stays and counts the actionable calls the grid frames
     assert_eq!(row(&body, "CYP2C19")["actionable"], true);
     let framed = body["pgx_grid"]
         .as_array()

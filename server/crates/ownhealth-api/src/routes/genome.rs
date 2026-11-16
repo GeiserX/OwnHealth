@@ -99,10 +99,11 @@ fn tiles(findings: &[Value], locked: &HashMap<String, i64>, actionable_pgx: usiz
     for cat in TILE_CATEGORIES {
         let rows: Vec<&Value> = findings.iter().filter(|f| f["category"] == cat).collect();
         let hidden = locked.get(cat).copied().unwrap_or(0);
-        if rows.is_empty() && hidden == 0 {
+        let actionable = if cat == "pgx" { actionable_pgx } else { 0 };
+        // the grid can frame a call the table filters out: the tile still counts it
+        if rows.is_empty() && hidden == 0 && actionable == 0 {
             continue;
         }
-        let actionable = if cat == "pgx" { actionable_pgx } else { 0 };
         // a gene, else the score id or rsID: never the title, whose words are English
         let mut seen: Vec<String> = Vec::new();
         for f in &rows {
@@ -116,7 +117,11 @@ fn tiles(findings: &[Value], locked: &HashMap<String, i64>, actionable_pgx: usiz
         let genes: String = seen.join(", ").chars().take(120).collect();
         let mut detail = genes.clone();
         if cat == "pgx" && actionable > 0 {
-            detail = format!("{actionable} actionable · {genes}");
+            detail = if genes.is_empty() {
+                format!("{actionable} actionable")
+            } else {
+                format!("{actionable} actionable · {genes}")
+            };
         }
         if hidden > 0 {
             detail = if detail.is_empty() {

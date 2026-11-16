@@ -81,3 +81,11 @@ test('an HLA marker whose presence the file does not state reads unknown, never 
 	assert.equal(gridCall(r, en), 'B*58:01 not determined · B*15:02 absent');
 	assert.equal(gridCall(r, es), 'B*58:01 no determinado · B*15:02 ausente');
 });
+
+test('the finding table reads an unstated HLA marker as not determined too', () => {
+	const tf = (k: string) => en(k);
+	const hla = (present: unknown) => ({ category: 'hla', value: { alleles: ['HLA-B*07:02'], marker: 'HLA-B*58:01', present } });
+	assert.equal(resultCell(hla(null), en, tf), 'HLA-B*07:02 · HLA-B*58:01 not determined');
+	assert.equal(resultCell(hla(false), es, tf), 'HLA-B*07:02 · HLA-B*58:01 ausente');
+	assert.equal(resultCell(hla(true), en, tf), 'HLA-B*07:02 · HLA-B*58:01 present');
+});
