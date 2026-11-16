@@ -18,6 +18,7 @@ pub mod drugs;
 pub mod engine;
 pub mod genome;
 pub mod glance;
+pub mod next_draw;
 pub mod num;
 pub mod pack;
 pub mod prevention;
