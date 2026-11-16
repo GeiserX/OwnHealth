@@ -353,9 +353,43 @@ fn a_statin_is_found_by_its_spanish_brand_and_a_condition_by_its_words_or_icd10_
     ] {
         assert_eq!(cardio::condition_classes(cv(), text, None, None), vec![class], "{text}");
     }
+    // a family history is not this person, before or after the disease; "family history of" names
+    // only what follows it, so a diagnosis before it stays
+    for text in [
+        "Diabetes (family history)",
+        "Diabetes (antecedentes familiares)",
+        "Stroke (family history)",
+        "Infarto (antecedentes familiares)",
+        "Diabetes: family history",
+        "Chronic kidney disease (family history)",
+        "Heart failure - family history",
+    ] {
+        assert!(cardio::condition_classes(cv(), text, None, None).is_empty(), "{text}");
+    }
+    for text in [
+        "Diabetes tipo 2 y antecedentes familiares de infarto",
+        "Type 2 diabetes: family history of stroke",
+    ] {
+        assert_eq!(
+            cardio::condition_classes(cv(), text, None, None),
+            vec!["diabetes"],
+            "{text}"
+        );
+    }
     // a screening is not the disease
-    assert!(cardio::condition_classes(cv(), "Screening for diabetes mellitus", None, None).is_empty());
-    assert!(cardio::condition_classes(cv(), "Cribado de diabetes", None, None).is_empty());
+    for text in [
+        "Screening for diabetes mellitus",
+        "Cribado de diabetes",
+        "Screening for chronic kidney disease",
+        "Cribado de enfermedad arterial periférica",
+        "Screening for heart failure",
+    ] {
+        assert!(cardio::condition_classes(cv(), text, None, None).is_empty(), "{text}");
+    }
+    assert_eq!(
+        cardio::condition_classes(cv(), "Chronic kidney disease (screening for anaemia)", None, None),
+        vec!["ckd"]
+    );
     assert!(cardio::condition_classes(cv(), "At risk of heart failure", None, None).is_empty());
     // words that mean something else, and codes read only as received
     assert!(cardio::condition_classes(cv(), "Diabetes gestacional", None, None).is_empty());

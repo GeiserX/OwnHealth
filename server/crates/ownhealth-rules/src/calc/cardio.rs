@@ -335,11 +335,6 @@ fn phrase_at(text: &[String], phrase: &str) -> Vec<usize> {
         .collect()
 }
 
-/// `phrase` appears in `text` as whole words.
-fn has_phrase(text: &[String], phrase: &str) -> bool {
-    !phrase_at(text, phrase).is_empty()
-}
-
 /// The medicine class a name or ingredient belongs to, if any.
 pub fn drug_class<'a>(cv: &'a CvData, texts: &[&str]) -> Vec<&'a str> {
     let ws: Vec<String> = texts.iter().flat_map(|t| words(t)).collect();
@@ -367,9 +362,18 @@ pub fn condition_classes<'a>(cv: &'a CvData, text: &str, system: Option<&str>, c
         .filter(|c| {
             // an exclusion holds only inside its own clause, and a `not_terms` one only before the term:
             // "riesgo de diabetes" is not diabetes, but "diabetes con riesgo de complicaciones" and
-            // "diabetes mellitus tipo 2: riesgo de hipoglucemia" are
+            // "diabetes mellitus tipo 2: riesgo de hipoglucemia" are. A qualifier that starts a longer
+            // `not_terms` phrase there is that phrase: "family history" excludes its whole clause, but
+            // "family history of stroke" only what follows it
+            let qualified = |ws: &[String], q: &str| {
+                phrase_at(ws, q).into_iter().any(|at| {
+                    !c.not_terms
+                        .iter()
+                        .any(|n| words(n).len() > words(q).len() && phrase_at(ws, n).contains(&at))
+                })
+            };
             let by_text = parts.iter().any(|ws| {
-                !c.qualifiers.iter().any(|q| has_phrase(ws, q))
+                !c.qualifiers.iter().any(|q| qualified(ws, q))
                     && c.terms.iter().flat_map(|t| phrase_at(ws, t)).any(|at| {
                         !c.not_terms
                             .iter()
