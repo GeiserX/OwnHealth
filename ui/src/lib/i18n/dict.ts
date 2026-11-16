@@ -1389,7 +1389,7 @@ export const dict = {
 		fam_lg_affected: "condition recorded",
 		fam_lg_deceased: "deceased",
 		fam_lg_linked: "has a profile here",
-		fam_note: "Each family member is a record entered by hand or imported. Family patterns do not change any lab result or flag; an agent with access to records sees them too.",
+		fam_note: "Each family member is a record entered by hand or imported. Nothing here changes the health status.",
 		fam_masked_d: "Linked to a profile whose records you cannot read, so it shows no name, years or conditions.",
 		fam_masked_rm: "You can still remove it from this family history.",
 		fam_swipe: "Swipe sideways to see the whole tree.",
@@ -1501,6 +1501,7 @@ export const dict = {
 		fam_pat_ours_d: "Not a guideline line: OwnHealth's own reading of family history guidance.",
 		fam_pat_kind: "Patterns read the condition picked from the list and its age at onset. A condition written in by hand (other) never counts.",
 		fam_lg_pattern: "in the picked pattern",
+		fam_pat_note: "Each family member is a record entered by hand or imported. Family patterns do not change any lab result or flag; an agent with access to records sees them too.",
 	},
 	es: {
 		household: "Hogar",
@@ -2889,7 +2890,7 @@ export const dict = {
 		fam_lg_affected: "enfermedad registrada",
 		fam_lg_deceased: "persona fallecida",
 		fam_lg_linked: "tiene perfil aquí",
-		fam_note: "Cada familiar es un registro introducido a mano o importado. Los patrones familiares no cambian ningún resultado ni aviso de analítica; un agente con acceso al historial también los ve.",
+		fam_note: "Cada familiar es un registro introducido a mano o importado. Nada de esto cambia el estado de salud.",
 		fam_masked_d: "Enlazado a un perfil cuyo historial no puedes leer: no muestra nombre, años ni enfermedades.",
 		fam_masked_rm: "Aun así, puedes quitarlo de este historial familiar.",
 		fam_swipe: "Desliza de lado para ver el árbol entero.",
@@ -3001,6 +3002,7 @@ export const dict = {
 		fam_pat_ours_d: "No es una línea de una guía: es la lectura propia de OwnHealth de las guías de antecedentes familiares.",
 		fam_pat_kind: "Los patrones leen la enfermedad elegida de la lista y su edad de inicio. Una enfermedad escrita a mano (otra) nunca cuenta.",
 		fam_lg_pattern: "en el patrón elegido",
+		fam_pat_note: "Cada familiar es un registro introducido a mano o importado. Los patrones familiares no cambian ningún resultado ni aviso de analítica; un agente con acceso al historial también los ve.",
 	},
 } as const;
 

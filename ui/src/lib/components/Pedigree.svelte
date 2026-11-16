@@ -382,7 +382,7 @@
 	{:else if error}
 		<div class="p2err" role="alert" title={error.raw}>{error.text}</div>
 	{/if}
-	<div class="note">{t('fam_note')}</div>
+	<div class="note">{t('fam_pat_note')}</div>
 	{#if ped.data}<div class="mono dim rules">{ped.data.rules}</div>{/if}
 </div>
 {#if patterns && ped.data?.nodes.length}<FamilyPatterns {patterns} {relLabel} {kindLabel} bind:selected={pattern} />{/if}
