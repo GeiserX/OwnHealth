@@ -393,6 +393,10 @@ async fn retract(
 /// The drawing: the proband and this profile's relatives, each placed by its relationship row.
 async fn pedigree(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>) -> Answer {
     let mut tx = rt.pool.begin().await?;
+    // one snapshot for the nodes and the patterns, so a pattern never names a relative the drawing lacks
+    sqlx::query("set transaction isolation level repeatable read")
+        .execute(&mut *tx)
+        .await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
     let rows = shown(&mut tx, &caller.0, &perm).await?;
     let ids: Vec<String> = rows.iter().map(|r| r.member.id.to_string()).collect();
