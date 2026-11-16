@@ -44,7 +44,7 @@ const SHIPPED: &str = include_str!(concat!(
 pub struct Prep {
     pub id: String,
     pub groups: Vec<String>,
-    pub source: String,
+    pub source: Value,
     pub cite: String,
     pub name: Value,
     pub text: Value,
@@ -80,7 +80,7 @@ pub fn parse(bytes: &[u8], pack: &Pack) -> std::result::Result<DrawPrep, CitedEr
         rows.push(Prep {
             id,
             groups,
-            source: s("source"),
+            source: r.get("source").cloned().unwrap_or(Value::Null),
             cite: s("cite"),
             name: r.get("name").cloned().unwrap_or(Value::Null),
             text: r.get("text").cloned().unwrap_or(Value::Null),
@@ -251,7 +251,7 @@ pub fn render(plan: &Value, pack: &Pack, lang: &str) -> Result<Value> {
             rows.iter()
                 .map(
                     |r| json!({"id": r.id, "name": pick(&r.name, lang), "text": pick(&r.text, lang),
-                                "source": r.source, "cite": r.cite})
+                                "source": pick(&r.source, lang), "cite": r.cite})
                 )
                 .collect::<Vec<_>>()
         );

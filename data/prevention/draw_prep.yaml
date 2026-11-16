@@ -2,7 +2,7 @@
 # about the preparation for a test, and the words of the planner and its printed request. Our own
 # reading of each source, written as information about the test, never as an instruction.
 #
-# Row fields: id; name and text (es and en); groups: the pack's alias groups (data/rules/pack/
+# Row fields: id; name, text and source (es and en); groups: the pack's alias groups (data/rules/pack/
 # analytes.yaml) the row is about; source: a short label of the cited source; cite: https.
 version: "draw-prep 0.1.0"
 reviewer: "OwnHealth maintainers (not clinicians)"
@@ -14,7 +14,7 @@ rows:
       en: "The cited standard defines a fasting glucose as one with no caloric intake for at least 8 hours before it."
       es: "La norma citada define la glucosa en ayunas como la medida sin ingesta calórica en las 8 horas anteriores como mínimo."
     groups: [glucose]
-    source: "ADA Standards of Care 2026, section 2"
+    source: {en: "ADA Standards of Care 2026, section 2", es: "Estándares de atención de la ADA 2026, sección 2"}
     cite: https://doi.org/10.2337/dc26-S002
   - id: morning_urine
     name: {en: "Early-morning urine", es: "Orina de primera hora"}
@@ -22,7 +22,7 @@ rows:
       en: "The cited guideline prefers an early-morning urine sample for the albumin-to-creatinine ratio."
       es: "La guía citada prefiere una muestra de orina de primera hora de la mañana para el cociente albúmina/creatinina."
     groups: [urine_acr]
-    source: "KDIGO 2024 CKD guideline"
+    source: {en: "KDIGO 2024 CKD guideline", es: "Guía KDIGO 2024 de ERC"}
     cite: https://kdigo.org/guidelines/ckd-evaluation-and-management/
   - id: biotin
     name: {en: "Biotin", es: "Biotina"}
@@ -32,7 +32,7 @@ rows:
       en: "Biotin (vitamin B7), common in supplements, can interfere with some lab tests and give a wrong result, according to the FDA."
       es: "La biotina (vitamina B7), frecuente en suplementos, puede interferir con algunas pruebas de laboratorio y dar un resultado erróneo, según la FDA."
     groups: [tsh, ft4]
-    source: "FDA, biotin interference with lab tests"
+    source: {en: "FDA, biotin interference with lab tests", es: "FDA, interferencia de la biotina en pruebas de laboratorio"}
     cite: https://www.fda.gov/medical-devices/in-vitro-diagnostics/biotin-interference-troponin-lab-tests-assays-subject-biotin-interference
 templates:
   # why each test is on the list
