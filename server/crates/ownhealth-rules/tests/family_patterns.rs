@@ -134,15 +134,24 @@ fn breast_and_ovarian_cancers_follow_the_brca_family_history_factors() {
         "breast cancer in a man"
     );
     assert!(fires(&[rel(1, "MGRMTH", "cancer_ovary", Some(70))], r));
-    // two on one side
+    // several breast cancers on one side
     assert!(fires(
+        &[
+            rel(1, "MGRMTH", "cancer_breast", Some(60)),
+            rel(2, "MAUNT", "cancer_breast", Some(55))
+        ],
+        r
+    ));
+    // pancreatic and prostate cancer are outside the scope of the cited guideline, so they never
+    // make a cluster
+    assert!(!fires(
         &[
             rel(1, "MUNCLE", "cancer_prostate", Some(70)),
             rel(2, "MAUNT", "cancer_breast", Some(60))
         ],
         r
     ));
-    assert!(fires(
+    assert!(!fires(
         &[
             rel(1, "FTH", "cancer_pancreas", Some(70)),
             rel(2, "SIS", "cancer_breast", Some(60))
@@ -152,7 +161,7 @@ fn breast_and_ovarian_cancers_follow_the_brca_family_history_factors() {
     // one on each side is not a cluster
     assert!(!fires(
         &[
-            rel(1, "MUNCLE", "cancer_prostate", Some(70)),
+            rel(1, "MAUNT", "cancer_breast", Some(60)),
             rel(2, "PAUNT", "cancer_breast", Some(60))
         ],
         r
@@ -161,7 +170,7 @@ fn breast_and_ovarian_cancers_follow_the_brca_family_history_factors() {
     assert!(!fires(
         &[
             rel(1, "HSIS", "cancer_breast", Some(60)),
-            rel(2, "MUNCLE", "cancer_prostate", Some(70))
+            rel(2, "MAUNT", "cancer_breast", Some(60))
         ],
         r
     ));
@@ -174,6 +183,10 @@ fn a_known_gene_variant_in_a_blood_relative_counts() {
     let r = "fam.variant";
     assert!(fires(&[rel(1, "PCOUSN", "hereditary_variant", None)], r));
     assert!(!fires(&[rel(1, "WIFE", "hereditary_variant", None)], r));
+    // the kind names no gene, and the cited page names only BRCA, so the rule is our own reading
+    let d = doc(&[rel(1, "PCOUSN", "hereditary_variant", None)]);
+    assert_eq!(d["items"][0]["rule"], r, "{d}");
+    assert_eq!(d["items"][0]["basis"], "pack_default", "{d}");
 }
 
 #[test]

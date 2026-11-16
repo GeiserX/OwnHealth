@@ -41,10 +41,12 @@ rows:
       - {kinds: [cancer_breast], before: {male: 50, female: 50}}
       - {kinds: [cancer_breast], sex: male}
       - {kinds: [cancer_ovary]}
-      - {kinds: [cancer_breast, cancer_ovary, cancer_pancreas, cancer_prostate], count: 2, same_side: true}
+      # pancreatic and prostate cancer are outside the scope of this recommendation, so they never count
+      - {kinds: [cancer_breast, cancer_ovary], count: 2, same_side: true}
   - id: fam.variant
     source: "CDC, BRCA risk factors"
-    basis: guideline
+    # the kind names no gene and the page names only BRCA, so the rule is our own reading of it
+    basis: pack_default
     cite: "https://www.cdc.gov/breast-ovarian-cancer-hereditary/risk-factors/index.html"
     any:
       - {degree: [1, 2, 3], kinds: [hereditary_variant]}
@@ -63,8 +65,8 @@ templates:
       en: "Colon cancer in a first-degree relative before 60, or in two of them"
       es: "Cáncer de colon en un familiar de primer grado antes de los 60, o en dos de ellos"
     fam.hboc:
-      en: "Breast, ovarian, pancreatic or prostate cancers in the family"
-      es: "Cánceres de mama, ovario, páncreas o próstata en la familia"
+      en: "Breast or ovarian cancers in the family"
+      es: "Cánceres de mama u ovario en la familia"
     fam.variant:
       en: "A gene variant known in a blood relative"
       es: "Una variante genética conocida en un familiar de sangre"
@@ -82,8 +84,8 @@ templates:
       en: "The guideline lists breast cancer before 50, breast cancer in a man, ovarian cancer, or several of these cancers on one side as family history linked to BRCA1 and BRCA2."
       es: "La guía incluye el cáncer de mama antes de los 50, el cáncer de mama en un hombre, el cáncer de ovario o varios de estos cánceres en un mismo lado como antecedentes ligados a BRCA1 y BRCA2."
     fam.variant:
-      en: "The CDC lists a relative with a known gene variant as a family history risk factor."
-      es: "Los CDC incluyen a un familiar con una variante genética conocida como factor de riesgo por antecedentes familiares."
+      en: "Our own reading of family history guidance: a known hereditary gene variant in a blood relative is worth knowing about. The CDC lists a relative with a known BRCA gene mutation as a risk factor."
+      es: "Nuestra lectura de las guías de antecedentes familiares: una variante genética hereditaria conocida en un familiar de sangre es un dato que conviene conocer. Los CDC incluyen a un familiar con una mutación conocida en un gen BRCA como factor de riesgo."
     fam.same_side:
       en: "Our own reading of family history guidance: the same condition in two or more close relatives on one side is a pattern worth knowing about."
       es: "Nuestra lectura de las guías de antecedentes familiares: la misma enfermedad en dos o más familiares cercanos de un mismo lado es un patrón que conviene conocer."
