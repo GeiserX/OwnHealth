@@ -70,10 +70,11 @@ async fn status_and_dashboard_of_every_demo_profile() -> anyhow::Result<()> {
             &format!("/api/profiles/{p}/status"),
         )
         .await?;
+        // pinned to the demo's date: Lucía's CGM ends there, so on a later day its window goes stale
         check(
             &c,
             &format!("dashboard_{p}"),
-            &format!("/api/profiles/{p}/dashboard"),
+            &format!("/api/profiles/{p}/dashboard?as_of=2026-11-07"),
         )
         .await?;
     }
@@ -86,7 +87,7 @@ async fn status_and_dashboard_of_every_demo_profile() -> anyhow::Result<()> {
     check(
         &c,
         "dashboard_alex_en",
-        "/api/profiles/alex/dashboard?lang=en",
+        "/api/profiles/alex/dashboard?lang=en&as_of=2026-11-07",
     )
     .await?;
     Ok(())
