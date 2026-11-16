@@ -308,6 +308,26 @@ fn a_statin_is_found_by_its_spanish_brand_and_a_condition_by_its_words_or_icd10_
         );
     }
     assert!(cardio::condition_classes(cv(), "Antecedentes familiares de diabetes", None, None).is_empty());
+    // a heading before a colon qualifies its whole list, and a bracket qualifies the words before it
+    for text in [
+        "Family history: diabetes mellitus",
+        "Antecedentes familiares: cardiopatía isquémica, diabetes",
+        "Screening for diabetes mellitus (DM2)",
+        "Diabetes mellitus (gestational)",
+        "Diabetes mellitus (tipo 2, gestacional)",
+    ] {
+        assert!(cardio::condition_classes(cv(), text, None, None).is_empty(), "{text}");
+    }
+    // the heading ends with its statement
+    assert_eq!(
+        cardio::condition_classes(
+            cv(),
+            "Antecedentes familiares: infarto; diabetes mellitus (DM2)",
+            None,
+            None
+        ),
+        vec!["diabetes"]
+    );
     // a screening is not the disease
     assert!(cardio::condition_classes(cv(), "Screening for diabetes mellitus", None, None).is_empty());
     assert!(cardio::condition_classes(cv(), "Cribado de diabetes", None, None).is_empty());

@@ -261,19 +261,42 @@ fn words(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// The clauses of a condition's text, as words: split at punctuation and at "con" and "with".
+/// The clauses of a condition's text, as words. A statement ends at `.`, `;` or a new line; inside it,
+/// clauses split at `,`, `/`, "con" and "with", never inside a bracket, since a bracket qualifies the
+/// words before it ("diabetes mellitus (gestational)"). A heading before a colon belongs to every
+/// clause of its statement ("Family history: stroke, diabetes").
 fn clauses(text: &str) -> Vec<Vec<String>> {
     let mut out = Vec::new();
-    for part in text.split(|c: char| ",;.:()[]/\n".contains(c)) {
-        let mut clause = Vec::new();
-        for w in words(part) {
-            if w == "con" || w == "with" {
-                out.push(std::mem::take(&mut clause));
-            } else {
-                clause.push(w);
+    for statement in text.split(|c: char| ".;\n".contains(c)) {
+        let (heading, body) = match statement.split_once(':') {
+            Some((h, b)) => (words(h), b),
+            None => (Vec::new(), statement),
+        };
+        let mut parts = vec![String::new()];
+        let mut depth = 0usize;
+        for ch in body.chars() {
+            match ch {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth = depth.saturating_sub(1),
+                ',' | '/' if depth == 0 => {
+                    parts.push(String::new());
+                    continue;
+                }
+                _ => {}
             }
+            parts.last_mut().expect("never empty").push(ch);
         }
-        out.push(clause);
+        for part in parts {
+            let mut clause = heading.clone();
+            for w in words(&part) {
+                if w == "con" || w == "with" {
+                    out.push(std::mem::replace(&mut clause, heading.clone()));
+                } else {
+                    clause.push(w);
+                }
+            }
+            out.push(clause);
+        }
     }
     out.retain(|c| !c.is_empty());
     out

@@ -47,6 +47,8 @@ country in no region, such as US, it is refused too (`region_not_covered`). We n
   refused (`smoking_status_not_coded`) with its words and source; an older answer never stands in.
 - The recorded conditions, matched by `data/calculators/conditions.yaml`. An exclusion such as
   "riesgo de" holds only in its own clause, so "diabetes con riesgo de complicaciones" is diabetes.
+  A heading before a colon and a bracket stay with their words, so "Family history: diabetes" and
+  "Diabetes mellitus (gestational)" are not diabetes.
 
 Each input line names its source. A condition that is not on record reads as "no diabetes recorded",
 never as "no diabetes".

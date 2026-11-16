@@ -14,8 +14,10 @@
 # terms      English and Spanish words, lower case, no accents
 # not_terms  words that make a matching text mean something else; "riesgo de" and "risk of", never a
 #            bare "risk", so "diabetes, alto riesgo cardiovascular" stays diabetes; each holds only in its own
-#            clause (split at punctuation, "con" and "with"), so "diabetes con riesgo de complicaciones"
-#            stays diabetes
+#            clause (split at "," "/" "con" and "with", and at the end of a statement), so "diabetes con
+#            riesgo de complicaciones" stays diabetes; a bracket stays with the words before it and a
+#            heading before a colon with every clause after it, so "Family history: diabetes" and
+#            "Diabetes mellitus (gestational)" are not diabetes
 # icd10      code prefixes, with or without the dot
 # cite       the definition
 version: 0.1.0
