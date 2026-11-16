@@ -340,3 +340,63 @@ async fn an_e4_call_stays_hidden_in_the_grid_until_the_reader_asks_for_e4() -> R
     assert_eq!(row(&body, "CYP2D6")["status"], "found");
     Ok(())
 }
+
+/// A gene box shows every HLA marker it read, so the box is Stale when any of them is: here the WGS
+/// call was made with the newest PharmCAT and CPIC, and a second HLA-B marker from a chip with an
+/// older PharmCAT.
+#[tokio::test]
+async fn a_box_is_stale_when_any_marker_it_shows_is_stale() -> R {
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let rt = Runtime::with_pool(db.settings(dir.path())?, db.pool.clone())?;
+    let mut c = db.pool.acquire().await?;
+    let fam = create_rivera_family(&mut c, "Rivera").await?;
+    let alex = fam.profile("alex");
+    let mut wgs = synthetic::alex_facts();
+    wgs["provenance"]["db_versions"]["pharmcat"] = json!("3.4.0");
+    wgs["provenance"]["db_versions"]["cpic"] = json!("2026-11");
+    synthetic::seed_genome(
+        &mut c,
+        &rt.blobs,
+        fam.household_id,
+        alex,
+        &wgs,
+        &[],
+        "genome-facts.json",
+        None,
+    )
+    .await?;
+    let mut chip = synthetic::alex_facts();
+    chip["subject"]["sample_id"] = json!("alex-chip-synthetic");
+    chip["assay"] = json!({"type": "chip", "build": "GRCh38", "platform": "consumer array (synthetic)"});
+    let mut hla = wgs["facts"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["category"] == "hla").cloned())
+        .unwrap_or_default();
+    hla["id"] = json!(ownhealth_genome::schema::fact_id("hla", "HLA-B", "HLA-B*15:02"));
+    hla["value"]["marker"] = json!("HLA-B*15:02");
+    hla["evidence"]["level"] = json!("E3");
+    hla["confidence"]["level"] = json!("low");
+    chip["facts"] = json!([hla]);
+    synthetic::seed_genome(
+        &mut c,
+        &rt.blobs,
+        fam.household_id,
+        alex,
+        &chip,
+        &[],
+        "chip-facts.json",
+        None,
+    )
+    .await?;
+    drop(c);
+    let person = Principal::session(fam.user("alex"), fam.household_id);
+    let body = genome::overview(&rt, &person, "alex", None)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    assert!(row(&body, "CYP2C19")["stale"].is_null(), "the WGS calls are current");
+    let hla_b = row(&body, "HLA-B");
+    assert_eq!(hla_b["markers"].as_array().map(Vec::len), Some(2), "{hla_b}");
+    assert_eq!(hla_b["stale"]["by"], json!(["PharmCAT 3.4.0"]), "{hla_b}");
+    Ok(())
+}

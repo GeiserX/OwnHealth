@@ -1233,12 +1233,22 @@ pub fn pgx_grid(found: &Findings, meds: Option<&BTreeMap<String, Vec<Value>>>) -
                         json!(a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("/"))
                     });
                 }
+                let markers: Vec<&&&Value> = hits
+                    .iter()
+                    .filter(|f| f["category"] == "hla" && f["value"]["marker"].is_string())
+                    .collect();
                 row["markers"] = json!(
-                    hits.iter()
-                        .filter(|f| f["category"] == "hla" && f["value"]["marker"].is_string())
+                    markers
+                        .iter()
                         .map(|f| json!({"marker": f["value"]["marker"], "present": f["value"]["present"]}))
                         .collect::<Vec<_>>()
                 );
+                // the box shows every marker: it is stale when the call or any marker it shows is
+                if row["stale"].is_null()
+                    && let Some(s) = markers.iter().map(|f| &f["stale"]).find(|s| !s.is_null())
+                {
+                    row["stale"] = s.clone();
+                }
                 row["actionable"] = json!(hits.iter().any(|f| actionable_call(f)));
                 row["fact_ids"] = json!(hits.iter().map(|f| f["id"].clone()).collect::<Vec<_>>());
                 "found"
