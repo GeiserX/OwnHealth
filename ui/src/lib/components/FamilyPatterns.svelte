@@ -53,6 +53,10 @@
 </section>
 
 <style>
+	/* The subtitle carries the "not a diagnosis" note, so it wraps on a phone instead of being cut off. */
+	h3 .r {
+		white-space: normal;
+	}
 	ul {
 		list-style: none;
 		margin: 0;
