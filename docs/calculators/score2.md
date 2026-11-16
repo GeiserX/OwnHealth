@@ -46,9 +46,11 @@ country in no region, such as US, it is refused too (`region_not_covered`). We n
   smoker. The app records it by hand on the lipid page. A newest answer with no known code is
   refused (`smoking_status_not_coded`) with its words and source; an older answer never stands in.
 - The recorded conditions, matched by `data/calculators/conditions.yaml`. An exclusion such as
-  "riesgo de" holds only in its own clause, so "diabetes con riesgo de complicaciones" is diabetes.
-  A heading before a colon and a bracket stay with their words, so "Family history: diabetes" and
-  "Diabetes mellitus (gestational)" are not diabetes.
+  "riesgo de", "screening" or "family history" holds only in its own clause and only before the
+  disease, so "Riesgo de diabetes" and "Family history: diabetes" are not diabetes, while "diabetes
+  con riesgo de complicaciones", "Diabetes mellitus tipo 2: riesgo de hipoglucemia" and "Stroke (risk
+  of recurrence)" keep their diagnosis. A qualifier such as "gestational" or "insipidus" excludes
+  wherever it stands in the clause, so "Diabetes mellitus (gestational)" is not diabetes.
 
 Each input line names its source. A condition that is not on record reads as "no diabetes recorded",
 never as "no diabetes".

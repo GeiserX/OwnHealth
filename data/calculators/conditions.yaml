@@ -5,19 +5,21 @@
 # diabetes as an input.
 #
 # A recorded condition (not refuted, not entered in error, resolved or not) is in a class when
-#   - its text holds one of the `terms` as whole words, compared in lower case without accents, and
-#     none of the `not_terms`; or
+#   - its text holds one of the `terms` as whole words, compared in lower case without accents, with
+#     none of the `not_terms` before it and none of the `qualifiers` in its clause; or
 #   - its code was received as ICD-10 (any ICD-10 code system) and starts with one of `icd10`.
 # Codes are matched only as received: no other code system is translated to ICD-10.
 #
 # id         ascvd | diabetes | ckd | fh | heart_failure
 # terms      English and Spanish words, lower case, no accents
-# not_terms  words that make a matching text mean something else; "riesgo de" and "risk of", never a
-#            bare "risk", so "diabetes, alto riesgo cardiovascular" stays diabetes; each holds only in its own
-#            clause (split at "," "/" "con" and "with", and at the end of a statement), so "diabetes con
-#            riesgo de complicaciones" stays diabetes; a bracket stays with the words before it and a
-#            heading before a colon with every clause after it, so "Family history: diabetes" and
-#            "Diabetes mellitus (gestational)" are not diabetes
+# not_terms  words that make a term after them mean something else; "riesgo de" and "risk of", never a
+#            bare "risk", so "diabetes, alto riesgo cardiovascular" stays diabetes; each holds only before
+#            the term and in its own clause (split at "," "/" "con" and "with" outside a bracket, and at the
+#            end of a statement); a bracket stays with the words before it and a heading before a colon
+#            with every clause after it; so "Family history: diabetes" and "Riesgo de diabetes" are not
+#            diabetes, but "diabetes con riesgo de complicaciones" and "Stroke (risk of recurrence)" stay
+# qualifiers words that make a term mean something else wherever they stand in its clause, so
+#            "Diabetes mellitus (gestational)" and "Gestational diabetes" are not diabetes
 # icd10      code prefixes, with or without the dot
 # cite       the definition
 version: 0.1.0
@@ -37,7 +39,8 @@ rows:
     cite: https://academic.oup.com/eurheartj/article/42/34/3227/6358713
   - id: diabetes
     terms: [diabetes, diabetes mellitus, dm1, dm2]
-    not_terms: [gestational, gestacional, insipidus, insipida, screening, cribado, antecedentes familiares, family history, riesgo de, risk of, risk for]
+    not_terms: [screening, cribado, antecedentes familiares, family history, riesgo de, risk of, risk for]
+    qualifiers: [gestational, gestacional, insipidus, insipida]
     icd10: [E08, E09, E10, E11, E13, E14]
     cite: https://academic.oup.com/eurheartj/article/42/34/3227/6358713
   - id: ckd

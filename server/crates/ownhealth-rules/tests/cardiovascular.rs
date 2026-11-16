@@ -340,12 +340,27 @@ fn a_statin_is_found_by_its_spanish_brand_and_a_condition_by_its_words_or_icd10_
         ),
         vec!["diabetes"]
     );
+    // a risk, a screening or a family history excludes only a disease named after it: one named after
+    // the disease is a complication of a recorded diagnosis, which stays
+    for (text, class) in [
+        ("Stroke (risk of recurrence)", "ascvd"),
+        ("Ictus isquémico (riesgo de recurrencia)", "ascvd"),
+        ("Diabetes mellitus tipo 2 (riesgo de hipoglucemia)", "diabetes"),
+        ("Diabetes mellitus tipo 2: riesgo de hipoglucemia", "diabetes"),
+        ("Type 2 diabetes: screening for retinopathy negative", "diabetes"),
+        ("Heart failure: at risk of decompensation", "heart_failure"),
+        ("Chronic kidney disease (risk of progression)", "ckd"),
+    ] {
+        assert_eq!(cardio::condition_classes(cv(), text, None, None), vec![class], "{text}");
+    }
     // a screening is not the disease
     assert!(cardio::condition_classes(cv(), "Screening for diabetes mellitus", None, None).is_empty());
     assert!(cardio::condition_classes(cv(), "Cribado de diabetes", None, None).is_empty());
     assert!(cardio::condition_classes(cv(), "At risk of heart failure", None, None).is_empty());
     // words that mean something else, and codes read only as received
     assert!(cardio::condition_classes(cv(), "Diabetes gestacional", None, None).is_empty());
+    assert!(cardio::condition_classes(cv(), "Gestational diabetes", None, None).is_empty());
+    assert!(cardio::condition_classes(cv(), "Diabetes insípida", None, None).is_empty());
     assert!(cardio::condition_classes(cv(), "Antecedentes familiares de infarto", None, None).is_empty());
     assert!(cardio::condition_classes(cv(), "Hypercholesterolaemia", Some("icd10"), Some("E78.0")).is_empty());
     assert_eq!(

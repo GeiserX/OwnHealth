@@ -123,8 +123,12 @@ pub struct DrugClass {
 pub struct ConditionClass {
     pub id: String,
     pub terms: Vec<String>,
+    /// words that exclude a term only when they come before it in its clause ("riesgo de diabetes")
     #[serde(default)]
     pub not_terms: Vec<String>,
+    /// words that exclude a term anywhere in its clause ("diabetes mellitus (gestational)")
+    #[serde(default)]
+    pub qualifiers: Vec<String>,
     #[serde(default)]
     pub icd10: Vec<String>,
 }
@@ -318,10 +322,22 @@ fn split_clauses(body: &str, heading: &[String]) -> Vec<Vec<String>> {
     out
 }
 
+/// Where `phrase` starts in `text` as whole words.
+fn phrase_at(text: &[String], phrase: &str) -> Vec<usize> {
+    let p = words(phrase);
+    if p.is_empty() {
+        return Vec::new();
+    }
+    text.windows(p.len())
+        .enumerate()
+        .filter(|(_, w)| *w == p.as_slice())
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// `phrase` appears in `text` as whole words.
 fn has_phrase(text: &[String], phrase: &str) -> bool {
-    let p = words(phrase);
-    !p.is_empty() && text.windows(p.len()).any(|w| w == p.as_slice())
+    !phrase_at(text, phrase).is_empty()
 }
 
 /// The medicine class a name or ingredient belongs to, if any.
@@ -349,11 +365,17 @@ pub fn condition_classes<'a>(cv: &'a CvData, text: &str, system: Option<&str>, c
     cv.conditions
         .iter()
         .filter(|c| {
-            // an exclusion holds only inside its own clause: "riesgo de diabetes" is not diabetes, but
-            // "diabetes con riesgo de complicaciones" is
-            let by_text = parts
-                .iter()
-                .any(|ws| c.terms.iter().any(|t| has_phrase(ws, t)) && !c.not_terms.iter().any(|t| has_phrase(ws, t)));
+            // an exclusion holds only inside its own clause, and a `not_terms` one only before the term:
+            // "riesgo de diabetes" is not diabetes, but "diabetes con riesgo de complicaciones" and
+            // "diabetes mellitus tipo 2: riesgo de hipoglucemia" are
+            let by_text = parts.iter().any(|ws| {
+                !c.qualifiers.iter().any(|q| has_phrase(ws, q))
+                    && c.terms.iter().flat_map(|t| phrase_at(ws, t)).any(|at| {
+                        !c.not_terms
+                            .iter()
+                            .any(|n| phrase_at(ws, n).into_iter().any(|before| before < at))
+                    })
+            });
             let by_code = system.is_some_and(is_icd10)
                 && code
                     .as_deref()
