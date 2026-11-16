@@ -163,7 +163,7 @@ pub async fn overview(rt: &Runtime, principal: &Principal, p: &str, min_evidence
         ..FindingsQuery::default()
     };
     let found = ownhealth_genome::list_findings_typed(&mut tx, perm.profile.id, &gate, &q).await?;
-    let pgx_grid = pgx::grid(&mut tx, &perm, &gate).await?;
+    let pgx_grid = pgx::grid(&mut tx, &perm, &gate, min_evidence).await?;
     let mut locked_rows: Vec<Value> = Vec::new();
     if surface(principal) == "ui" && !gate.minor {
         for r in visible_rows(&mut tx, perm.profile.id, None).await? {

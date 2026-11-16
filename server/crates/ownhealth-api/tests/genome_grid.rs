@@ -198,7 +198,7 @@ async fn the_grid_keeps_a_call_the_table_filters_out_by_evidence() -> R {
 }
 
 /// A gene's box shows one call's src, but the audit names the src of every call the grid read: here a
-/// second HLA-B marker from a chip at E4, below the table's default E3.
+/// second HLA-B marker from a chip at E3, below the table's level E1.
 #[tokio::test]
 async fn the_audit_names_every_src_the_grid_read() -> R {
     let db = TestDb::new().await?;
@@ -228,7 +228,7 @@ async fn the_audit_names_every_src_the_grid_read() -> R {
         .unwrap_or_default();
     hla["id"] = json!(ownhealth_genome::schema::fact_id("hla", "HLA-B", "HLA-B*15:02"));
     hla["value"]["marker"] = json!("HLA-B*15:02");
-    hla["evidence"]["level"] = json!("E4");
+    hla["evidence"]["level"] = json!("E3");
     hla["confidence"]["level"] = json!("low");
     chip["facts"] = json!([hla]);
     synthetic::seed_genome(
@@ -252,7 +252,7 @@ async fn the_audit_names_every_src_the_grid_read() -> R {
     drop(c);
     assert_eq!(srcs.len(), 2, "both HLA-B calls are current: {srcs:?}");
     let person = Principal::session(fam.user("alex"), fam.household_id);
-    let body = genome::overview(&rt, &person, "alex", None)
+    let body = genome::overview(&rt, &person, "alex", Some("E1"))
         .await
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let hla_b = row(&body, "HLA-B");
@@ -267,5 +267,76 @@ async fn the_audit_names_every_src_the_grid_read() -> R {
     for s in &srcs {
         assert!(audited.contains(s), "{s} not audited in {audited:?}");
     }
+    Ok(())
+}
+
+/// E4 is hidden until the reader asks for it (genomics.md 3): at the default level an E4 or
+/// hidden-by-default PGx call is neither shown, framed nor counted in the PGx tile. A CPIC gene whose
+/// only call is hidden this way reads "withheld", never "assessed, no call in the file".
+#[tokio::test]
+async fn an_e4_call_stays_hidden_in_the_grid_until_the_reader_asks_for_e4() -> R {
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let rt = Runtime::with_pool(db.settings(dir.path())?, db.pool.clone())?;
+    let mut c = db.pool.acquire().await?;
+    let fam = create_rivera_family(&mut c, "Rivera").await?;
+    let alex = fam.profile("alex");
+    let mut facts = synthetic::alex_facts();
+    let list = facts["facts"].as_array_mut().expect("facts");
+    let mut extra = list.iter().find(|f| f["gene"] == "CYP2C19").cloned().expect("CYP2C19");
+    extra["id"] = json!(ownhealth_genome::schema::fact_id("pgx", "CYP1A2", "CYP1A2"));
+    extra["gene"] = json!("CYP1A2");
+    extra["value"] = json!({"diplotype": "*1F/*1F", "phenotype": "Ultrarapid Metabolizer"});
+    extra["summary"] = json!("CYP1A2 *1F/*1F: Ultrarapid Metabolizer.");
+    extra["evidence"]["level"] = json!("E4");
+    extra["hidden_by_default"] = json!(true);
+    list.push(extra);
+    for f in list.iter_mut().filter(|f| f["gene"] == "CYP2D6") {
+        f["evidence"]["level"] = json!("E4");
+    }
+    synthetic::seed_genome(
+        &mut c,
+        &rt.blobs,
+        fam.household_id,
+        alex,
+        &facts,
+        &[],
+        "genome-facts.json",
+        None,
+    )
+    .await?;
+    drop(c);
+    let person = Principal::session(fam.user("alex"), fam.household_id);
+    let pgx_tile = |body: &Value| {
+        body["tiles"]
+            .as_array()
+            .and_then(|t| t.iter().find(|t| t["key"] == "pgx"))
+            .map(|t| t["actionable"].clone())
+    };
+
+    let body = genome::overview(&rt, &person, "alex", None)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let grid = body["pgx_grid"].to_string();
+    assert!(!grid.contains("CYP1A2") && !grid.contains("*1F"), "{grid}");
+    let cyp2d6 = row(&body, "CYP2D6");
+    assert_eq!(
+        (&cyp2d6["status"], &cyp2d6["diplotype"], &cyp2d6["actionable"]),
+        (&json!("withheld"), &Value::Null, &json!(false)),
+        "{cyp2d6}"
+    );
+    assert_eq!(pgx_tile(&body), Some(json!(3)), "{}", body["tiles"]);
+
+    // asked for E4, the hidden call is there, with its evidence for the badge
+    let body = genome::overview(&rt, &person, "alex", Some("E4"))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let cyp1a2 = row(&body, "CYP1A2");
+    assert_eq!(
+        (&cyp1a2["status"], &cyp1a2["evidence"]),
+        (&json!("found"), &json!("E4")),
+        "{cyp1a2}"
+    );
+    assert_eq!(row(&body, "CYP2D6")["status"], "found");
     Ok(())
 }

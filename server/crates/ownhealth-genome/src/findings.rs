@@ -808,7 +808,8 @@ pub struct Findings {
     /// `{code, assay}` per limitation, in the same order (the UI's words for them).
     #[serde(skip)]
     pub limitation_codes: Vec<Value>,
-    /// Upper-case genes with a withheld PGx or HLA call, so the gene grid never reads them as "no finding".
+    /// Upper-case genes with a withheld PGx or HLA call, or one under the evidence level asked for, so
+    /// the gene grid never reads them as "no finding".
     #[serde(skip)]
     pub withheld_genes: Vec<String>,
 }
@@ -897,10 +898,16 @@ pub async fn collect_findings(
             }
             None => {}
         }
-        if r.evidence.as_str() > min_evidence {
-            continue;
-        }
-        if r.fact.0.get("hidden_by_default").is_some_and(truthy) && min_evidence != "E4" {
+        let below = r.evidence.as_str() > min_evidence
+            || (r.fact.0.get("hidden_by_default").is_some_and(truthy) && min_evidence != "E4");
+        if below {
+            // a PGx or HLA call under the level asked for is hidden, never "no call in the file"
+            if (r.category == "pgx" || r.category == "hla")
+                && let Some(g) = r.gene.as_deref().map(str::to_uppercase)
+                && !result.withheld_genes.contains(&g)
+            {
+                result.withheld_genes.push(g);
+            }
             continue;
         }
         shown.push(r);

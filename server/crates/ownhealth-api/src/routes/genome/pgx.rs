@@ -1,8 +1,10 @@
 //! The PGx gene grid of `GET /api/profiles/{p}/genome` (genomics.md 6, v0.3): one row per CPIC gene
 //! with its call or why there is none, and the current medicines from the person's records that CPIC
 //! ties to that gene. The medicines need read:records; without it the grid says so (`meds: null`).
-//! The grid reads every PGx and HLA call the reader's gate lets through, whatever evidence level the
-//! table below it shows: a call under that level is still a call, never "no call in the file".
+//! The grid reads every PGx and HLA call the reader's gate lets through down to E3, or down to E4 when
+//! the reader asked for E4, whatever stricter level the table below it shows. E4 and hidden-by-default
+//! calls stay hidden until asked for (genomics.md 3); a CPIC gene whose only call is hidden or under
+//! the level reads `withheld`, never "no call in the file".
 
 use std::collections::BTreeMap;
 
@@ -57,10 +59,11 @@ impl Grid {
     }
 }
 
-/// The grid for one reader, through the same gate as the table.
-pub async fn grid(conn: &mut PgConnection, perm: &Permission, gate: &Gate) -> Result<Grid> {
+/// The grid for one reader, through the same gate as the table. `min_evidence` is the table's level:
+/// the grid reads at that level or E3, whichever lets more through.
+pub async fn grid(conn: &mut PgConnection, perm: &Permission, gate: &Gate, min_evidence: &str) -> Result<Grid> {
     let q = FindingsQuery {
-        min_evidence: Some("E4"),
+        min_evidence: Some(min_evidence.max("E3")),
         ..FindingsQuery::default()
     };
     let found = list_findings_typed(&mut *conn, perm.profile.id, gate, &q).await?;
