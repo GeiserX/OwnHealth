@@ -49,6 +49,11 @@ fn medication() -> String {
     "medication".into()
 }
 
+/// An optional text in which only spaces count as absent.
+fn non_blank<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<String>, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.filter(|s| !s.trim().is_empty()))
+}
+
 /// The fields every record has (`_Common`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Common {
@@ -135,8 +140,9 @@ pub struct MedicationIn {
     /// keep | stop | do_not_repurchase
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<String>,
-    /// Why, as the person wrote it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Why, as the person wrote it. A blank reason is no reason, so it cannot stop a correction
+    /// from keeping the recorded decision.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "non_blank")]
     pub decision_reason: Option<String>,
     /// The day the person decided.
     #[serde(default, skip_serializing_if = "Option::is_none")]

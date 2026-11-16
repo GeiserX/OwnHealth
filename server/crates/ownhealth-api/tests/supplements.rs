@@ -304,14 +304,17 @@ async fn a_decision_is_a_new_version_that_keeps_the_reason_and_the_label() -> R 
         let (s, r) = post(&a, "/profiles/alex/records/medication", bad).await?;
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{r}");
     }
-    // an empty reason with no decision says nothing, so it is accepted
-    let (s, r) = post(
-        &a,
-        "/profiles/alex/records/medication",
-        json!({"name": "X", "decision_reason": ""}),
-    )
-    .await?;
-    assert_eq!(s, StatusCode::CREATED, "{r}");
+    // an empty or blank reason with no decision says nothing: it is accepted and stored as no reason
+    for blank in ["", "   "] {
+        let (s, r) = post(
+            &a,
+            "/profiles/alex/records/medication",
+            json!({"name": "X", "decision_reason": blank}),
+        )
+        .await?;
+        assert_eq!(s, StatusCode::CREATED, "{r}");
+        assert_eq!(r["detail"]["decision_reason"], Value::Null, "{r}");
+    }
     Ok(())
 }
 
@@ -426,5 +429,18 @@ async fn a_new_version_that_says_nothing_of_the_decision_keeps_the_persons_decis
         .fetch_one(&a.db.pool)
         .await?;
     assert!(fhir.to_string().contains("urn:ownhealth:decision"), "{fhir}");
+    // a form that sends a blank reason and no decision also says nothing of the decision
+    let (s, blank) = post(
+        &a,
+        &format!("/profiles/alex/records/medication/{}/correct", id_of(&updated)),
+        json!({"kind": "supplement", "name": "Vitamin D3", "strength": "2000 IU", "decision_reason": "  "}),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::CREATED, "{blank}");
+    assert_eq!(
+        (&blank["detail"]["decision"], &blank["detail"]["decision_on"]),
+        (&json!("stop"), &json!("2026-11-01")),
+        "{blank}"
+    );
     Ok(())
 }
