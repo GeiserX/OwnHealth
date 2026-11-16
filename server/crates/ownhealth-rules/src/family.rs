@@ -80,13 +80,15 @@ fn err(what: impl std::fmt::Display) -> CitedError {
     CitedError(format!("{FILE}: {what}"))
 }
 
-fn strings(v: Option<&Value>) -> Vec<String> {
-    v.and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect()
+/// An absent list is empty; a present one must be a list of strings.
+fn strings(v: Option<&Value>) -> Option<Vec<String>> {
+    let Some(v) = v else { return Some(Vec::new()) };
+    v.as_array()?.iter().map(|x| x.as_str().map(str::to_string)).collect()
+}
+
+/// An absent flag is false; a present one must be true or false.
+fn flag(v: Option<&Value>) -> Option<bool> {
+    v.map_or(Some(false), Value::as_bool)
 }
 
 fn clause(rule: &str, i: usize, v: &Value, cat: &Catalog) -> std::result::Result<Clause, CitedError> {
@@ -108,7 +110,7 @@ fn clause(rule: &str, i: usize, v: &Value, cat: &Catalog) -> std::result::Result
             return Err(at(&format!("unknown key {k}")));
         }
     }
-    let relationships = strings(m.get("relationships"));
+    let relationships = strings(m.get("relationships")).ok_or_else(|| at("relationships is a list of strings"))?;
     for r in &relationships {
         match cat.relationship(r) {
             Some(row) if row.degree > 0 => {}
@@ -130,8 +132,8 @@ fn clause(rule: &str, i: usize, v: &Value, cat: &Catalog) -> std::result::Result
             })
             .collect::<std::result::Result<_, _>>()?,
     };
-    let kinds = strings(m.get("kinds"));
-    let same_kind = m.get("same_kind").and_then(Value::as_bool).unwrap_or(false);
+    let kinds = strings(m.get("kinds")).ok_or_else(|| at("kinds is a list of strings"))?;
+    let same_kind = flag(m.get("same_kind")).ok_or_else(|| at("same_kind is true or false"))?;
     if same_kind == !kinds.is_empty() {
         return Err(at("needs either kinds or same_kind"));
     }
@@ -141,10 +143,15 @@ fn clause(rule: &str, i: usize, v: &Value, cat: &Catalog) -> std::result::Result
             return Err(at(&format!("kind {k} cannot be matched")));
         }
     }
-    let sex = m.get("sex").and_then(Value::as_str).map(str::to_string);
-    if sex.as_deref().is_some_and(|s| !["female", "male"].contains(&s)) {
-        return Err(at("sex is female or male"));
-    }
+    let sex = match m.get("sex") {
+        None => None,
+        Some(s) => Some(
+            s.as_str()
+                .filter(|s| ["female", "male"].contains(s))
+                .ok_or_else(|| at("sex is female or male"))?
+                .to_string(),
+        ),
+    };
     let before = match m.get("before") {
         None => None,
         Some(b) => {
@@ -166,7 +173,7 @@ fn clause(rule: &str, i: usize, v: &Value, cat: &Catalog) -> std::result::Result
             .filter(|c| *c >= 1)
             .ok_or_else(|| at("count is 1 or more"))?,
     };
-    let same_side = m.get("same_side").and_then(Value::as_bool).unwrap_or(false);
+    let same_side = flag(m.get("same_side")).ok_or_else(|| at("same_side is true or false"))?;
     Ok(Clause {
         relationships,
         degree,

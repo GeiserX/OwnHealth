@@ -352,6 +352,35 @@ fn the_loader_refuses_a_rule_without_cite_template_or_matchable_kind() -> R {
     assert!(parse(advice.as_bytes(), cat).is_err());
     let unknown = SHIPPED.replacen("[FTH, MTH,", "[XYZ, MTH,", 1);
     assert!(parse(unknown.as_bytes(), cat).is_err());
+    // a value of the wrong type is refused by name, never read as the default that widens the rule
+    for (from, to, named) in [
+        (
+            "relationships: [FTH, MTH, PRN, BRO, SIS, SIB]",
+            "relationships: FTH",
+            "relationships is a list of strings",
+        ),
+        (
+            "kinds: [mi, cad, stroke]",
+            "kinds: [mi, 5]",
+            "kinds is a list of strings",
+        ),
+        (
+            "count: 2, same_side: true}",
+            "count: 2, same_side: \"yes\"}",
+            "same_side is true or false",
+        ),
+        (
+            "{same_kind: true,",
+            "{same_kind: \"true\",",
+            "same_kind is true or false",
+        ),
+        ("sex: male}", "sex: 1}", "sex is female or male"),
+    ] {
+        let bad = SHIPPED.replacen(from, to, 1);
+        assert_ne!(bad, SHIPPED, "{from}");
+        let e = parse(bad.as_bytes(), cat).expect_err(to).0;
+        assert!(e.contains(named), "{to}: {e}");
+    }
     // a rule the mutated file still loads evaluates the same way
     let doc = document_with(&pat, cat, "alex", day(), &[rel(1, "FTH", "mi", Some(52))])?;
     assert_eq!(doc["items"][0]["rule"], "fam.ascvd");
