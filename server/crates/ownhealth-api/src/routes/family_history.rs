@@ -504,7 +504,9 @@ async fn share_manager(conn: &mut PgConnection, caller: &Caller, p: &str) -> Res
 /// two writes of one source's shares run one after the other.
 async fn share_writer(conn: &mut PgConnection, caller: &Caller, p: &str) -> Result<Permission, ApiError> {
     let perm = share_manager(&mut *conn, caller, p).await?;
-    sqlx::query("select 1 from profile where id = $1 for update")
+    // no key update: it still waits for a claim and for another write of this source, and it lets a
+    // share that references this profile check its foreign key meanwhile (no A-to-B, B-to-A deadlock)
+    sqlx::query("select 1 from profile where id = $1 for no key update")
         .bind(perm.profile.id)
         .execute(&mut *conn)
         .await?;

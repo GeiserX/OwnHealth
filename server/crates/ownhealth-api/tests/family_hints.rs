@@ -211,6 +211,22 @@ impl Env {
             .await?)
     }
 
+    /// True once another session of this database waits on a lock (bounded at 10 s).
+    async fn lock_wait(&self) -> anyhow::Result<bool> {
+        for _ in 0..200 {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+            )
+            .fetch_one(&self.db.pool)
+            .await?;
+            if waiting > 0 {
+                return Ok(true);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Ok(false)
+    }
+
     /// A share written straight to the table, as a stale or hand-made row would be.
     async fn raw_share(&self, source: &str, target: &str, categories: &[&str]) -> R {
         sqlx::query("insert into family_share (source_profile_id, target_profile_id, categories) values ($1, $2, $3)")
@@ -675,11 +691,35 @@ async fn a_share_written_during_a_claim_waits_for_it_and_is_refused() -> R {
             json!({"target": "alex", "categories": ["labs"]}).to_string(),
         ))?;
     let put = tokio::spawn(e.app.clone().oneshot(req));
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(e.lock_wait().await?, "the PUT waits for the open claim");
     claim.commit().await?;
     let res = put.await??;
     // the claim ended his guardianship first, so her profile reads as unknown to him
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     assert_eq!(e.shares().await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_share_write_lets_a_concurrent_share_to_its_source_check_its_key() -> R {
+    let e = env().await?;
+    // another write, still open, adds a share that points at Alex (its foreign key holds a key share)
+    let mut other = e.db.pool.begin().await?;
+    sqlx::query(
+        "insert into family_share (source_profile_id, target_profile_id, categories) values ($1, $2, '{labs}')",
+    )
+    .bind(e.fam.profile("carmen"))
+    .bind(e.fam.profile("alex"))
+    .execute(&mut *other)
+    .await?;
+    // Alex's own write locks his profile row: it must not wait for that key share
+    let put = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        e.share("alex", "alex", "carmen", &["labs"]),
+    )
+    .await;
+    other.rollback().await?;
+    let (s, v) = put.map_err(|_| anyhow::anyhow!("the PUT waited on a foreign-key check"))??;
+    assert_eq!(s, StatusCode::OK, "{v}");
     Ok(())
 }
