@@ -460,15 +460,19 @@ pub fn register_default_sources(kind: &str, hook: DefaultSources) {
     }
 }
 
-/// Run every kind's default-sources hook. Returns the rows added.
+/// Run every kind's default-sources hook. Returns the rows added. A hook that fails is logged and
+/// skipped, so it stops neither the other hooks nor the scheduler's polls of the existing sources.
 pub async fn add_default_sources(ctx: &JobContext) -> Result<u64> {
-    let hooks: Vec<DefaultSources> = DEFAULTS
+    let hooks: Vec<(String, DefaultSources)> = DEFAULTS
         .read()
-        .map(|m| m.values().copied().collect())
+        .map(|m| m.iter().map(|(k, h)| (k.clone(), *h)).collect())
         .unwrap_or_default();
     let mut added = 0;
-    for hook in hooks {
-        added += hook(ctx.clone()).await?;
+    for (kind, hook) in hooks {
+        match hook(ctx.clone()).await {
+            Ok(n) => added += n,
+            Err(e) => tracing::warn!(kind, error = %e, "a default-sources hook failed"),
+        }
     }
     Ok(added)
 }

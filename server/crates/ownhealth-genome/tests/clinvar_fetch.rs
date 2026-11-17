@@ -327,6 +327,20 @@ async fn a_failed_fetch_is_tried_again_within_hours_not_a_week() -> R {
     Ok(())
 }
 
+/// A default-sources hook that fails (a database error, say) is logged and skipped: the ClinVar hook
+/// still turns the check on, and the pass still queues the polls.
+#[tokio::test]
+async fn a_failing_default_sources_hook_stops_no_other_hook_or_poll() -> R {
+    sources::register_default_sources("zz_failing_test_hook", |_| {
+        Box::pin(async { Err(ownhealth_core::Error::Invalid("this hook always fails".into())) })
+    });
+    let f = fx(false).await?;
+    f.alex_genome().await?;
+    let queued = sources::scheduler_tick(&f.ctx).await?;
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_scheduler_pass_turns_the_check_on_and_queues_it() -> R {
     let f = fx(false).await?;
