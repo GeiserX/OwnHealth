@@ -423,9 +423,14 @@ fn patient(id: Uuid, name: &str, birth: Option<NaiveDate>, sex: Option<&str>) ->
     if let Some(g) = sex.filter(|s| ["female", "male", "unknown"].contains(s)) {
         p.insert("gender".into(), json!(g));
     }
-    if let Some(b) = birth {
-        p.insert("birthDate".into(), json!(b.format("%Y-%m-%d").to_string()));
-    }
+    // IPS requires a birth date (1..1): an unknown one is said with the data-absent-reason extension
+    match birth {
+        Some(b) => p.insert("birthDate".into(), json!(b.format("%Y-%m-%d").to_string())),
+        None => p.insert(
+            "_birthDate".into(),
+            json!({"extension": [{"url": "http://hl7.org/fhir/StructureDefinition/data-absent-reason", "valueCode": "unknown"}]}),
+        ),
+    };
     Value::Object(p)
 }
 
@@ -582,6 +587,19 @@ pub async fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// IPS requires a birth date, so an unknown one is stated as unknown, never left out.
+    #[test]
+    fn an_unknown_birth_date_is_stated_as_unknown() {
+        let p = patient(Uuid::nil(), "Carmen Ortega", None, Some("female"));
+        assert!(p.get("birthDate").is_none());
+        assert_eq!(p["_birthDate"]["extension"][0]["valueCode"], "unknown");
+        let d = NaiveDate::from_ymd_opt(1955, 3, 1);
+        assert_eq!(
+            patient(Uuid::nil(), "Carmen Ortega", d, None)["birthDate"],
+            "1955-03-01"
+        );
+    }
 
     #[test]
     fn every_section_code_is_a_valid_loinc_code() {
