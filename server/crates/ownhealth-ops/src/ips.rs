@@ -342,7 +342,8 @@ fn entry(row: &Map<String, Value>, patient_url: &str, inside: &HashSet<String>) 
         return None;
     };
     let rtype = res.get("resourceType").and_then(Value::as_str)?.to_string();
-    if rtype == "MedicationStatement"
+    // both kinds the importer stores as a medicine: a reference outside the resource becomes its codes
+    if (rtype == "MedicationStatement" || rtype == "MedicationRequest")
         && res.get("medicationCodeableConcept").is_none()
         && res
             .get("medicationReference")
@@ -641,6 +642,27 @@ mod tests {
                 "medicationReference": {"reference": "#med"},
             })
         );
+    }
+
+    /// A prescription through an external Medication keeps the medicine's codes, as a statement does.
+    #[test]
+    fn a_referenced_medicine_keeps_its_codes_in_a_request_too() {
+        for rtype in ["MedicationStatement", "MedicationRequest"] {
+            let row = json!({
+                "id": "00000000-0000-0000-0000-000000000001",
+                "name": "Enalapril 10 mg",
+                "codes": [{"system": "http://www.whocc.no/atc", "code": "C09AA02"}],
+                "fhir": {"resourceType": rtype, "medicationReference": {"reference": "Medication/enalapril"}},
+            });
+            let row = row.as_object().cloned().unwrap_or_default();
+            let (_, e) = entry(&row, "urn:uuid:p", &HashSet::new()).unwrap_or_default();
+            let res = &e;
+            assert!(res.get("medicationReference").is_none(), "{rtype} {e}");
+            assert_eq!(
+                res["medicationCodeableConcept"]["coding"][0]["code"], "C09AA02",
+                "{rtype} {e}"
+            );
+        }
     }
 
     #[test]
