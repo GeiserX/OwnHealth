@@ -172,10 +172,11 @@ async fn genome_page_for_the_owner() -> R {
             .unwrap_or_default()
             .contains("1 hidden")
     );
-    // numbers go out for the UI to word; no English title words in the PRS tile
+    // numbers go out for the UI to word; no English title words in the PRS tile. Actionable is the
+    // gene grid's rule: CYP2C19, SLCO1B1 and VKORC1 (a non-reference call with no phenotype)
     assert_eq!(
         (&tile(&body, "pgx")["actionable"], &tile(&body, "risk_marker")["hidden"]),
-        (&json!(2), &json!(1))
+        (&json!(3), &json!(1))
     );
     let prs = tile(&body, "prs")["genes"].as_str().unwrap_or_default();
     assert!(!prs.contains("percentile") && prs.contains("PGS"), "{prs}");
