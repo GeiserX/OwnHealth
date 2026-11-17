@@ -38,6 +38,7 @@ const SOURCES: &[(&str, Source)] = &[
     ("due", |s| Box::pin(due(s))),
     ("calculators", |s| Box::pin(calculators(s))),
     ("couple_carrier", |_| Box::pin(couple_carrier())),
+    ("ips", |s| Box::pin(ips_narratives(s))),
 ];
 
 async fn status(s: &Seeded) -> anyhow::Result<Vec<Value>> {
@@ -469,4 +470,27 @@ fn the_clinvar_alert_file_passes_the_cited_loader() -> R {
     assert!(f.version.starts_with("clinvar_alerts "), "{}", f.version);
     assert!(f.doc["cite"].as_str().is_some_and(|c| c.starts_with("https://")));
     Ok(())
+}
+
+/// The IPS export's own words: the Composition title and every section's title and narrative, for
+/// every profile in es and en (the rows' FHIR is the record as received, not text we write).
+async fn ips_narratives(s: &Seeded) -> anyhow::Result<Vec<Value>> {
+    let mut tx = s.pool().begin().await?;
+    let mut out = Vec::new();
+    for slug in SLUGS {
+        for lang in LANGS {
+            let b = ownhealth_ops::ips::build(&mut tx, s.pid(slug), &all_scopes(), lang, as_of())
+                .await?
+                .bundle;
+            let comp = &b["entry"][0]["resource"];
+            let sections: Vec<Value> = comp["section"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|x| json!({"title": x["title"], "narrative": x["text"]["div"]}))
+                .collect();
+            out.push(json!({"title": comp["title"], "sections": sections}));
+        }
+    }
+    Ok(out)
 }
