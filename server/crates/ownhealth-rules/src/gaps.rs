@@ -16,10 +16,12 @@
 //!   `hole:<from>:<to>`. A dated fact is a lab value, a diagnosis, a medicine start or stop, a vaccine,
 //!   a procedure, a visit or a dated document.
 //!
-//! Only current, non-sensitive rows count, and nothing after `as_of`. `letter` names the access
-//! request letter of the profile's country (`spain`, `eu`); a country in no list gets no letter. Each gap
-//! is also a reminder: `due_items` gives the prevention document its items `gap:<key>` (kind
-//! `document_request`), so a person can snooze, mark done or dismiss it on the Due list.
+//! Only current, non-sensitive rows and documents count, and nothing after `as_of`: the document is
+//! the same for every caller, so neither a gap nor its absence tells what only read:sensitive may see.
+//! `letter` names the access request letter of the profile's country (`spain`, `eu`); a country in no
+//! list, or a deceased person's record, gets no letter. Each gap is also a reminder: `due_items` gives
+//! the prevention document its items `gap:<key>` (kind `document_request`), so a person can snooze,
+//! mark done or dismiss it on the Due list.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -48,6 +50,22 @@ pub const LANGS: [&str; 2] = ["es", "en"];
 pub const DUE_PREFIX: &str = "gap:";
 
 const FILE: &str = "gaps.yaml";
+/// The words every letter prints (`letters.text`).
+const LETTER_TEXT: [&str; 13] = [
+    "title",
+    "title_for",
+    "to",
+    "from",
+    "requester",
+    "on_behalf",
+    "id_number",
+    "address",
+    "deadline",
+    "format",
+    "sign",
+    "laws",
+    "footer",
+];
 const SHIPPED: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../data/timeline/gaps.yaml"));
 
 /// One law a letter cites.
@@ -64,7 +82,10 @@ pub struct Letter {
     pub id: String,
     pub countries: Vec<String>,
     pub laws: Vec<Law>,
+    /// The person's own request.
     pub basis: Value,
+    /// The request a legal representative makes for a minor.
+    pub basis_for: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -137,8 +158,10 @@ pub fn build(bytes: &[u8]) -> std::result::Result<Gaps, CitedError> {
                 })
             })
             .collect::<std::result::Result<_, _>>()?;
-        if l.get("basis").is_none() {
-            return Err(err(format!("letter {id}: no `basis`")));
+        for k in ["basis", "basis_for"] {
+            if l.get(k).is_none() {
+                return Err(err(format!("letter {id}: no `{k}`")));
+            }
         }
         letters.push(Letter {
             id: id.clone(),
@@ -148,11 +171,12 @@ pub fn build(bytes: &[u8]) -> std::result::Result<Gaps, CitedError> {
                 .unwrap_or_default(),
             laws,
             basis: l["basis"].clone(),
+            basis_for: l["basis_for"].clone(),
         });
     }
     let letter_text = f.doc["letters"]["text"].clone();
-    if letter_text.get("title").is_none() {
-        return Err(err("no `letters.text`"));
+    if let Some(k) = LETTER_TEXT.iter().find(|k| letter_text.get(**k).is_none()) {
+        return Err(err(format!("no `letters.text.{k}`")));
     }
     Ok(Gaps {
         version: f.version,
@@ -214,11 +238,13 @@ pub fn fill(template: &str, params: &[(&str, String)]) -> String {
 }
 
 /// Whether two provider names name the same provider: case and accents folded, the words of the
-/// shorter name appear in order in the longer one.
+/// shorter name appear in order in the longer one, with other words allowed between them ("Hospital
+/// Norte" matches "Hospital Universitario Norte").
 pub fn same_provider(a: &str, b: &str) -> bool {
     let (a, b) = (words(a), words(b));
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    !short.is_empty() && long.windows(short.len()).any(|w| w == short.as_slice())
+    let mut rest = long.iter();
+    !short.is_empty() && short.iter().all(|w| rest.any(|x| x == w))
 }
 
 /// The short hash of a provider name in a visit gap's key: the folded words, so a change of case or
@@ -310,17 +336,21 @@ async fn visits(conn: &mut PgConnection, pid: Uuid, as_of: NaiveDate) -> Result<
         .await?)
 }
 
-/// Active documents with a provider and a day up to `as_of`: (day, provider).
+/// Active, non-sensitive documents with a provider and a day up to `as_of`: (day, provider). A
+/// sensitive one clears no gap, or the gap's absence would tell a caller without read:sensitive that it
+/// exists.
 async fn provider_documents(conn: &mut PgConnection, pid: Uuid, as_of: NaiveDate) -> Result<Vec<(NaiveDate, String)>> {
-    Ok(sqlx::query_as(
-        "select coalesce(collected_at, reported_at)::date, provider_name from document \
-         where profile_id = $1 and status = 'active' and nullif(trim(provider_name), '') is not null \
-         and coalesce(collected_at, reported_at)::date <= $2",
-    )
-    .bind(pid)
-    .bind(as_of)
-    .fetch_all(&mut *conn)
-    .await?)
+    let sql = format!(
+        "select coalesce(d.collected_at, d.reported_at)::date, d.provider_name from document d \
+         where d.profile_id = $1 and d.status = 'active' and nullif(trim(d.provider_name), '') is not null \
+         and coalesce(d.collected_at, d.reported_at)::date <= $2 and not {}",
+        sensitive_document_sql("d.id")
+    );
+    Ok(sqlx::query_as(AssertSqlSafe(sql))
+        .bind(pid)
+        .bind(as_of)
+        .fetch_all(&mut *conn)
+        .await?)
 }
 
 // ------------------------------------------------------------- the document ----
@@ -336,7 +366,11 @@ fn drop_nulls(v: Value) -> Value {
 pub async fn document(conn: &mut PgConnection, profile: &Profile, as_of: NaiveDate) -> Result<Value> {
     let g = load()?;
     let country = profile.country.as_deref().filter(|c| !c.is_empty());
-    let letter = g.letter_for(country).map(|l| l.id.clone());
+    // the right of access is the living person's own: a deceased person's record gets no letter
+    let letter = (!profile.deceased)
+        .then(|| g.letter_for(country))
+        .flatten()
+        .map(|l| l.id.clone());
     let mut items = Vec::new();
 
     let (source, cite) = g.row("visit_without_report");
@@ -415,6 +449,26 @@ pub async fn build_document(conn: &mut PgConnection, profile_id: Uuid, as_of: Na
     document(conn, &profile, as_of).await
 }
 
+/// The document with the person's Due decisions on its gaps (`gap:<key>`): a gap snoozed, dismissed or
+/// done moves from `items` to `hidden` with its `decision`, as on the Due list. `hidden` is absent when
+/// empty. Call it after the hash: `gaps_hash` covers the gaps, not what the person decided.
+pub async fn with_decisions(
+    conn: &mut PgConnection,
+    mut doc: Value,
+    profile_id: Uuid,
+    as_of: NaiveDate,
+) -> Result<Value> {
+    let items = doc["items"].as_array().cloned().unwrap_or_default();
+    let (shown, hidden) = crate::prevention::decided(conn, profile_id, items, DUE_PREFIX, as_of).await?;
+    if let Some(m) = doc.as_object_mut() {
+        m.insert("items".into(), json!(shown));
+        if !hidden.is_empty() {
+            m.insert("hidden".into(), json!(hidden));
+        }
+    }
+    Ok(doc)
+}
+
 /// The hash of a gaps document, as `state_hash` hashes the state body.
 pub fn gaps_hash(doc: &Value) -> Result<String> {
     let mut clean = doc.clone();
@@ -457,7 +511,7 @@ fn template(g: &Gaps, kind: &str, rule: &str, lang: &str) -> String {
     pick(&g.templates[kind][rule], lang)
 }
 
-/// The document in one language for one caller: each item gains `title` and `why`. Items the scopes
+/// The document in one language for one caller: each item, open or `hidden`, gains `title` and `why`. Items the scopes
 /// do not cover are left out and counted in `withheld`, with the scopes they need in
 /// `withheld_scopes`; without read:records `gaps_hash` is left out too.
 pub fn render(doc: &Value, lang: &str, scopes: &Scopes) -> Result<Value> {
@@ -466,22 +520,27 @@ pub fn render(doc: &Value, lang: &str, scopes: &Scopes) -> Result<Value> {
     let mut whole = doc.as_object().cloned().unwrap_or_default();
     let mut withheld = 0;
     let mut lacking = BTreeSet::new();
-    let mut items = Vec::new();
-    for it in doc["items"].as_array().into_iter().flatten() {
-        let need = needs(it, scopes);
-        if !need.is_empty() {
-            withheld += 1;
-            lacking.extend(need);
+    for list in ["items", "hidden"] {
+        let Some(all) = doc[list].as_array() else {
             continue;
+        };
+        let mut items = Vec::new();
+        for it in all {
+            let need = needs(it, scopes);
+            if !need.is_empty() {
+                withheld += 1;
+                lacking.extend(need);
+                continue;
+            }
+            let rule = it["rule"].as_str().unwrap_or_default();
+            let p = params(it, g);
+            let mut out = it.as_object().cloned().unwrap_or_default();
+            out.insert("title".into(), json!(fill(&template(g, "title", rule, lang), &p)));
+            out.insert("why".into(), json!(fill(&template(g, "why", rule, lang), &p)));
+            items.push(Value::Object(out));
         }
-        let rule = it["rule"].as_str().unwrap_or_default();
-        let p = params(it, g);
-        let mut out = it.as_object().cloned().unwrap_or_default();
-        out.insert("title".into(), json!(fill(&template(g, "title", rule, lang), &p)));
-        out.insert("why".into(), json!(fill(&template(g, "why", rule, lang), &p)));
-        items.push(Value::Object(out));
+        whole.insert(list.into(), json!(items));
     }
-    whole.insert("items".into(), json!(items));
     whole.insert("lang".into(), json!(lang));
     if !scopes.contains("read:records") {
         whole.shift_remove("gaps_hash");

@@ -171,6 +171,13 @@ fn provider_names_match_folded_and_in_order() {
     assert!(gaps::same_provider("Traumatología · Hospital Norte", "hospital norte"));
     assert!(gaps::same_provider("Hospital Norte", "Traumatologia - HOSPITAL NORTE"));
     assert!(!gaps::same_provider("Hospital Norte", "Norte Hospital"));
+    // other words may stand between the shorter name's words
+    assert!(gaps::same_provider("Hospital Norte", "Hospital Universitario Norte"));
+    assert!(gaps::same_provider(
+        "Hospital Universitario del Norte",
+        "hospital norte"
+    ));
+    assert!(!gaps::same_provider("Hospital Norte", "Hospital Sur"));
     assert!(!gaps::same_provider("Hospital Norte", "LabNorte"));
     assert!(!gaps::same_provider("Hospital Norte", " · "));
 }
@@ -244,5 +251,97 @@ async fn a_gap_is_a_due_item_that_a_snooze_or_done_hides() -> R {
     let due2 = due(&d).await?;
     assert!(!keys(&due2, "items").contains(&visit), "{:?}", keys(&due2, "items"));
     assert!(keys(&due2, "hidden").contains(&visit));
+    Ok(())
+}
+
+/// A sensitive document clears no gap: the gaps document is the same for every caller, so a visit
+/// gap that vanished would tell a caller without read:sensitive that the document exists.
+#[tokio::test]
+async fn a_sensitive_report_from_the_provider_does_not_clear_the_visit_gap() -> R {
+    let d = demo().await?;
+    let doc = report(&d, "Hospital Norte", "2025-11-20").await?;
+    let src: ownhealth_core::provenance::SrcIn =
+        serde_json::from_value(serde_json::json!({"kind": "manual", "profile_id": d.alex, "document_id": doc}))?;
+    let r = ownhealth_core::records::RecordIn::from_json(
+        "condition",
+        serde_json::json!({"profile_id": d.alex, "text": "Synthetic sensitive note", "onset": "2025-11-20",
+                           "sensitivity": ["mental_health"]}),
+    )?;
+    let mut c = d.db.pool.acquire().await?;
+    ownhealth_core::records::add_record(
+        &mut c,
+        &r,
+        &ownhealth_core::provenance::SrcRef::New(src),
+        ownhealth_core::records::RecordOptions::new("person"),
+    )
+    .await?;
+    drop(c);
+    let doc = gaps_of(&d).await?;
+    assert_eq!(doc["items"][0]["rule"], "visit_without_report", "{doc:#}");
+    Ok(())
+}
+
+/// The copy that was asked for often comes back with no date and no provider: marked done on Due with
+/// that upload, the visit gap is hidden from its upload day on.
+#[tokio::test]
+async fn an_undated_upload_marks_a_visit_gap_done() -> R {
+    let d = demo().await?;
+    let doc = gaps_of(&d).await?;
+    let visit = format!("gap:{}", doc["items"][0]["key"].as_str().unwrap_or_default());
+    let undated: Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type, created_at) \
+         values ($1, $2, decode(repeat('ab', 32), 'hex'), 'copia.pdf', 'application/pdf', 10, 'other', \
+         ($3::date + time '10:00') at time zone 'UTC') returning id",
+    )
+    .bind(d.household)
+    .bind(d.alex)
+    .bind(as_of() - chrono::Duration::days(3))
+    .fetch_one(&d.db.pool)
+    .await?;
+    decide(&d, &visit, "done", None, Some(undated)).await?;
+    let due1 = due(&d).await?;
+    assert!(keys(&due1, "hidden").contains(&visit), "{:?}", keys(&due1, "items"));
+    // only a document gap takes the upload day: a screening still needs the day the document shows
+    let e = {
+        let mut c = d.db.pool.acquire().await?;
+        prevention::evidence(&mut c, d.alex, "document", undated).await?
+    };
+    let e = e.ok_or_else(|| anyhow::anyhow!("no evidence"))?;
+    assert_eq!(e.day, None);
+    assert_eq!(e.day_for(&visit), Some(as_of() - chrono::Duration::days(3)));
+    assert_eq!(e.day_for("es.colorectal"), None);
+    Ok(())
+}
+
+/// The `due_document_requests` count of Alex's status page, checking that no document request is listed.
+async fn status_requests(d: &Demo) -> anyhow::Result<Value> {
+    let pack = ownhealth_rules::load_pack()?;
+    let mut c = d.db.pool.acquire().await?;
+    let body = ownhealth_rules::build_state(&mut c, d.alex, as_of(), None).await?;
+    let sec = prevention::status_section(
+        &mut c,
+        d.alex,
+        as_of(),
+        &body,
+        &pack,
+        &ownhealth_core::access::all_scopes(),
+    )
+    .await?
+    .unwrap_or_default();
+    assert!(
+        !sec.to_string().contains("gap:"),
+        "no document request is listed: {sec}"
+    );
+    Ok(sec["due_document_requests"].clone())
+}
+
+/// The agent's status page lists no document request (the 2 KB page has no room), but counts the open
+/// ones, so an agent can point the person at the Due screen; a snoozed one leaves the count.
+#[tokio::test]
+async fn the_status_page_counts_the_open_document_requests() -> R {
+    let d = demo().await?;
+    assert_eq!(status_requests(&d).await?, 2);
+    decide(&d, "gap:hole:2016-05-10:2021-11-09", "snooze", as_of().succ_opt(), None).await?;
+    assert_eq!(status_requests(&d).await?, 1);
     Ok(())
 }

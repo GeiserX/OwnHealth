@@ -7,12 +7,15 @@
 //! ```
 //!
 //! The first answers the ownhealth.gaps/v1 document with the words in `lang`; a hole whose edge is a
-//! lab value also needs read:labs (what the scopes leave out is counted in `withheld`). The second
+//! lab value also needs read:labs (what the scopes leave out is counted in `withheld`). A gap the
+//! person snoozed, dismissed or marked done on the Due list is in `hidden` with its `decision`. The second
 //! prints the access-request letter of a visit gap open today, for a profile whose country has one
 //! (Spain: GDPR Art. 15 and Ley 41/2002 art. 18; the other EU and EEA countries: GDPR Art. 15). It
 //! takes the language and nothing else: the identity number and the address print as blank lines,
-//! so they are never sent or stored. The audit row names the gap key and the visit's src id, never
-//! the name or the provider.
+//! so they are never sent or stored. A minor's letter is their legal representative's, whose name is a
+//! blank line too. An access whose identity mode hides names (a token set to `minimal` or
+//! `pseudonymous`) gets 403: the letter prints the patient's name. The audit row names the gap key and the visit's src id, never the name or the
+//! provider.
 
 use std::collections::HashMap;
 
@@ -22,7 +25,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use ownhealth_core::Runtime;
-use ownhealth_core::access::today_utc;
+use ownhealth_core::access::{majority, today_utc};
 use ownhealth_core::audit::write_audit;
 use ownhealth_rules::gaps::{self, LANGS};
 use serde_json::{Value, json};
@@ -52,7 +55,9 @@ async fn get_gaps(
     let perm = Caller(c.clone())
         .require(&mut tx, &p, Some("read:records"), None)
         .await?;
-    let doc = gaps::document(&mut tx, &perm.profile, as_of.unwrap_or_else(today_utc)).await?;
+    let as_of = as_of.unwrap_or_else(today_utc);
+    let doc = gaps::document(&mut tx, &perm.profile, as_of).await?;
+    let doc = gaps::with_decisions(&mut tx, doc, perm.profile.id, as_of).await?;
     let mut e = event(&c, perm.profile.id, "GET /api/profiles/{p}/gaps");
     e.resource_type = Some("gaps".into());
     e.resource_ids = Some(vec![doc["gaps_hash"].as_str().unwrap_or_default().to_string()]);
@@ -72,6 +77,15 @@ async fn get_letter(
     let perm = Caller(c.clone())
         .require(&mut tx, &p, Some("read:records"), None)
         .await?;
+    // the letter prints the patient's name: an access that hides names gets no letter
+    if c.identity_mode != "full" {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "This access hides names, and the letter prints the patient's name.",
+        )
+        .into());
+    }
     let mut check = Check::query();
     let lang = lang_of(&q, &mut check).unwrap_or(if c.lang == "es" { "es" } else { "en" });
     // the language is the only input: nothing a person types reaches the letter or the audit row
@@ -82,7 +96,12 @@ async fn get_letter(
     }
     check.done()?;
     let g = gaps::load()?;
-    let doc = gaps::document(&mut tx, &perm.profile, today_utc()).await?;
+    let today = today_utc();
+    let doc = gaps::document(&mut tx, &perm.profile, today).await?;
+    // a minor's letter is their legal representative's request on their behalf
+    let on_behalf = perm
+        .profile
+        .is_minor(today, majority(&mut tx, perm.profile.household_id).await?);
     let unknown = || {
         ApiError::new(
             StatusCode::NOT_FOUND,
@@ -108,6 +127,7 @@ async fn get_letter(
             name: &perm.profile.display_name,
             provider: &provider,
             date: &date,
+            on_behalf,
         },
     );
     let srcs: Vec<String> = item["src"]

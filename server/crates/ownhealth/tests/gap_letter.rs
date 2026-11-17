@@ -15,6 +15,10 @@ type R = anyhow::Result<()>;
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 fn letter(id: &str, lang: &str) -> anyhow::Result<Vec<u8>> {
+    letter_as(id, lang, "Alex Rivera", false)
+}
+
+fn letter_as(id: &str, lang: &str, name: &str, on_behalf: bool) -> anyhow::Result<Vec<u8>> {
     let g = gaps::load()?;
     let l = g.letter(id).ok_or_else(|| anyhow::anyhow!("no letter {id}"))?;
     Ok(render(
@@ -22,9 +26,10 @@ fn letter(id: &str, lang: &str) -> anyhow::Result<Vec<u8>> {
         l,
         &LetterIn {
             lang,
-            name: "Alex Rivera",
+            name,
             provider: "Traumatología · Hospital Norte",
             date: "2025-11-10",
+            on_behalf,
         },
     ))
 }
@@ -85,6 +90,7 @@ fn the_letter_names_the_patient_provider_and_day_and_cites_each_article() -> R {
         // each law with its URL, on its own line
         for url in [
             "https://eur-lex.europa.eu/eli/reg/2016/679/oj#art_15",
+            "https://eur-lex.europa.eu/eli/reg/2016/679/oj#art_12",
             "https://www.boe.es/buscar/act.php?id=BOE-A-2002-22188#a18",
         ] {
             assert!(text.iter().any(|l| l.ends_with(url)), "{lang}: {url} in {text:#?}");
@@ -100,9 +106,45 @@ fn the_letter_names_the_patient_provider_and_day_and_cites_each_article() -> R {
     // the letter for the rest of the EU and EEA cites the GDPR only
     let eu = lines(&letter("eu", "en")?).join("\n");
     assert!(
-        eu.contains("Article 15") && !eu.contains("41/2002") && !eu.contains("boe.es"),
+        eu.contains("Article 15") && eu.contains("oj#art_12") && !eu.contains("41/2002") && !eu.contains("boe.es"),
         "{eu}"
     );
+    Ok(())
+}
+
+/// A minor's letter is their legal representative's request: the requester's name is a blank line,
+/// the child is the person it is made for, and nothing reads as the child asking about "my visit".
+#[test]
+fn a_minors_letter_is_the_legal_representatives_request() -> R {
+    for (lang, title, requester, behalf, own) in [
+        (
+            "es",
+            "Solicitud de copia de la historia clínica",
+            "Solicitante (representante legal):",
+            "En nombre de: Lucía Rivera",
+            "mi visita",
+        ),
+        (
+            "en",
+            "Request for a copy of health records",
+            "From (legal representative):",
+            "On behalf of: Lucía Rivera",
+            "my visit",
+        ),
+    ] {
+        for id in ["spain", "eu"] {
+            let text = lines(&letter_as(id, lang, "Lucía Rivera", true)?);
+            let all = text.join("\n");
+            assert_eq!(text[0], title, "{id} {lang}: {text:#?}");
+            assert!(text.iter().any(|l| l.trim() == requester), "{id} {lang}: {text:#?}");
+            assert!(text.iter().any(|l| l.trim() == behalf), "{id} {lang}: {text:#?}");
+            assert!(!all.contains(own), "{id} {lang}: {all}");
+            assert!(
+                all.contains("Lucía Rivera") && all.contains("2025-11-10"),
+                "{id} {lang}: {all}"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -125,6 +167,7 @@ fn a_letter_that_reads_as_advice_fails_the_check() {
             name: "Alex Rivera",
             provider: "Hospital Norte",
             date: "2025-11-10",
+            on_behalf: false,
         },
     );
     let refused = std::panic::catch_unwind(|| lines(&pdf));

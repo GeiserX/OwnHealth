@@ -11,13 +11,39 @@ use lane_i::{App, R, app};
 use serde_json::{Value, json};
 
 async fn visit(a: &App) -> anyhow::Result<String> {
+    visit_of(a, "alex").await
+}
+
+/// A visit typed by hand for one profile, and the key of its gap.
+async fn visit_of(a: &App, slug: &str) -> anyhow::Result<String> {
     let body = json!({"period_start": "2025-11-10T09:30:00Z", "reason_text": "Right knee pain",
                       "provider_name": "Traumatología · Hospital Norte"});
-    let (s, v) = a.post("alex", "/profiles/alex/records/visit", Some(body)).await?;
+    let (s, v) = a
+        .post("alex", &format!("/profiles/{slug}/records/visit"), Some(body))
+        .await?;
     assert_eq!(s, StatusCode::CREATED, "{v}");
-    let (s, doc) = a.get("alex", "/profiles/alex/gaps?lang=es&as_of=2026-11-07").await?;
+    let (s, doc) = a
+        .get("alex", &format!("/profiles/{slug}/gaps?lang=es&as_of=2026-11-07"))
+        .await?;
     assert_eq!(s, StatusCode::OK, "{doc}");
     Ok(doc["items"][0]["key"].as_str().unwrap_or_default().to_string())
+}
+
+/// The letter the route printed for one profile, as the renderer prints it.
+fn expected_letter(name: &str, lang: &str, on_behalf: bool) -> anyhow::Result<Vec<u8>> {
+    let g = ownhealth_rules::gaps::load()?;
+    let l = g.letter("spain").ok_or_else(|| anyhow::anyhow!("no spain letter"))?;
+    Ok(ownhealth_ops::letter_pdf::render(
+        g,
+        l,
+        &ownhealth_ops::letter_pdf::LetterIn {
+            lang,
+            name,
+            provider: "Traumatología · Hospital Norte",
+            date: "2025-11-10",
+            on_behalf,
+        },
+    ))
 }
 
 async fn letter(a: &App, uri: &str) -> anyhow::Result<(StatusCode, http::HeaderMap, Vec<u8>)> {
@@ -149,5 +175,173 @@ async fn no_letter_for_an_unknown_gap_or_a_country_without_one() -> R {
     assert!(doc["items"][0].get("letter").is_none(), "{doc}");
     let (s, _, _) = letter(&a, &format!("/profiles/alex/gaps/{key}/letter.pdf")).await?;
     assert_eq!(s, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// The letter is the person's own for an adult, and their legal representative's for a minor (Lucía,
+/// born 2017); a deceased person's record gets the gap with no letter.
+#[tokio::test]
+async fn a_minors_letter_is_the_representatives_and_a_deceased_record_has_none() -> R {
+    let a = app().await?;
+    let key = visit(&a).await?;
+    let (s, _, pdf) = letter(&a, &format!("/profiles/alex/gaps/{key}/letter.pdf?lang=es")).await?;
+    assert_eq!(s, StatusCode::OK);
+    assert!(
+        pdf == expected_letter("Alex Rivera", "es", false)?,
+        "an adult's letter is their own"
+    );
+    let lkey = visit_of(&a, "lucia").await?;
+    let (s, _, pdf) = letter(&a, &format!("/profiles/lucia/gaps/{lkey}/letter.pdf?lang=es")).await?;
+    assert_eq!(s, StatusCode::OK);
+    assert!(
+        pdf == expected_letter("Lucía Rivera", "es", true)?,
+        "a minor's letter is not the representative's"
+    );
+    sqlx::query("update profile set deceased = true where id = $1")
+        .bind(a.family.profile("alex"))
+        .execute(&a.rt.pool)
+        .await?;
+    let (_, doc) = a.get("alex", "/profiles/alex/gaps?lang=en&as_of=2026-11-07").await?;
+    assert_eq!(doc["items"][0]["key"], key.as_str(), "the gap stays: {doc}");
+    assert!(doc["items"][0].get("letter").is_none(), "{doc}");
+    let (s, _, _) = letter(&a, &format!("/profiles/alex/gaps/{key}/letter.pdf")).await?;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// A hole whose edge is a lab value needs read:labs: a caregiver whose grant leaves it out gets the
+/// hole counted in `withheld`, never listed, and still gets the hash.
+#[tokio::test]
+async fn a_hole_at_a_lab_value_needs_read_labs() -> R {
+    use ownhealth_core::access::{Scopes, all_scopes, set_grant};
+    use ownhealth_core::observations::{CommitOptions, commit_observation};
+    use ownhealth_core::provenance::SrcRef;
+    let a = app().await?;
+    let carmen = a.family.profile("carmen");
+    let mut c = a.conn().await?;
+    for (value, day) in [("120", "2023-01-10"), ("118", "2024-06-01")] {
+        let o = lane_i::obs(carmen, value, json!({"day": day}));
+        commit_observation(
+            &mut c,
+            &o,
+            &SrcRef::New(lane_i::manual_src()),
+            CommitOptions::new("person"),
+        )
+        .await?;
+    }
+    let uri = "/profiles/carmen/gaps?lang=en&as_of=2026-11-07";
+    let (s, doc) = a.get("alex", uri).await?;
+    assert_eq!(s, StatusCode::OK, "{doc}");
+    assert_eq!(doc["items"][0]["key"], "hole:2023-01-10:2024-06-01", "{doc}");
+    assert_eq!(doc["items"][0]["labs"], true, "{doc}");
+    assert_eq!(doc["withheld"], 0);
+    let cats: Scopes = all_scopes().into_iter().filter(|s| s != "read:labs").collect();
+    set_grant(
+        &mut c,
+        a.family.user("alex"),
+        carmen,
+        "caregiver",
+        Some(&cats),
+        None,
+        None,
+    )
+    .await?;
+    drop(c);
+    let (s, doc) = a.get("alex", uri).await?;
+    assert_eq!(s, StatusCode::OK, "{doc}");
+    assert_eq!(doc["items"], json!([]), "{doc}");
+    assert_eq!(doc["withheld"], 1, "{doc}");
+    assert_eq!(doc["withheld_scopes"], json!(["read:labs"]), "{doc}");
+    assert!(
+        doc["gaps_hash"].as_str().is_some_and(|h| h.starts_with("sha256:")),
+        "{doc}"
+    );
+    Ok(())
+}
+
+/// What the person decides on the Due list shows on the Gaps card: a snoozed gap moves to `hidden`
+/// with its decision, and a copy that came back with no date or provider marks it done.
+#[tokio::test]
+async fn a_due_decision_on_a_gap_shows_on_the_card() -> R {
+    let a = app().await?;
+    let key = visit(&a).await?;
+    let due_key = format!("gap:{key}");
+    let until = (ownhealth_core::access::today_utc() + chrono::Duration::days(30)).to_string();
+    let (s, v) = a
+        .post(
+            "alex",
+            &format!("/profiles/alex/due/{due_key}/decision"),
+            Some(json!({"kind": "snooze", "until": until})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let (_, doc) = a.get("alex", "/profiles/alex/gaps?lang=en").await?;
+    assert_eq!(doc["items"], json!([]), "{doc}");
+    assert_eq!(doc["hidden"][0]["key"], key.as_str(), "{doc}");
+    assert_eq!(doc["hidden"][0]["decision"]["kind"], "snooze", "{doc}");
+    assert_eq!(doc["hidden"][0]["decision"]["until"], until.as_str(), "{doc}");
+    assert!(
+        doc["hidden"][0]["title"]
+            .as_str()
+            .is_some_and(|t| t.contains("2025-11-10")),
+        "{doc}"
+    );
+    // the copy the letter asked for, uploaded with no date and no provider
+    let copy: uuid::Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type) \
+         values ($1, $2, decode(repeat('ab', 32), 'hex'), 'copia.pdf', 'application/pdf', 10, 'other') returning id",
+    )
+    .bind(a.family.household_id)
+    .bind(a.family.profile("alex"))
+    .fetch_one(&a.rt.pool)
+    .await?;
+    let (s, v) = a
+        .post(
+            "alex",
+            &format!("/profiles/alex/due/{due_key}/decision"),
+            Some(json!({"kind": "done", "evidence": {"table": "document", "id": copy}})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let (_, doc) = a.get("alex", "/profiles/alex/gaps?lang=en").await?;
+    assert_eq!(doc["hidden"][0]["decision"]["kind"], "done", "{doc}");
+    // a screening still needs the day the document shows: due_actions.rs refuses this same upload
+    Ok(())
+}
+
+/// A token whose identity mode hides names gets no letter, which prints the patient's name.
+#[tokio::test]
+async fn an_access_that_hides_names_gets_no_letter() -> R {
+    use ownhealth_auth::tokens::{TokenIn, create_token};
+    let a = app().await?;
+    let key = visit(&a).await?;
+    for (mode, want) in [
+        ("full", StatusCode::OK),
+        ("pseudonymous", StatusCode::FORBIDDEN),
+        ("minimal", StatusCode::FORBIDDEN),
+    ] {
+        let mut c = a.conn().await?;
+        let t = create_token(
+            &mut c,
+            &TokenIn {
+                user_id: a.family.user("alex"),
+                label: "agent",
+                profile_ids: vec![a.family.profile("alex")],
+                scopes: ownhealth_core::access::all_scopes().into_iter().collect(),
+                default_profile: None,
+                days: 30,
+                identity_mode: mode,
+                lang: "en",
+                units: "si",
+            },
+        )
+        .await?;
+        drop(c);
+        let req = Request::get(format!("/profiles/alex/gaps/{key}/letter.pdf"))
+            .header(header::AUTHORIZATION, format!("Bearer {}", t.plaintext))
+            .body(Body::empty())?;
+        let (s, _, _) = a.send_raw(req).await?;
+        assert_eq!(s, want, "{mode}");
+    }
     Ok(())
 }

@@ -3,7 +3,9 @@
 //!
 //! The letter names the patient, the provider and the visit day, and cites each law with its URL
 //! (`data/timeline/gaps.yaml` `letters`). The identity document number and the postal address print
-//! as labels over blank lines to fill in by hand: they are never an input here.
+//! as labels over blank lines to fill in by hand: they are never an input here. For a minor the
+//! letter is the legal representative's: their name is a blank line too, and the patient is the
+//! person the request is made for.
 
 use ownhealth_core::pdfwrite::{Font, Writer, text_width};
 use ownhealth_rules::gaps::{Gaps, Letter, fill, pick};
@@ -20,6 +22,8 @@ pub struct LetterIn<'a> {
     pub provider: &'a str,
     /// The visit day, YYYY-MM-DD.
     pub date: &'a str,
+    /// A legal representative asks on the patient's behalf (the patient is a minor).
+    pub on_behalf: bool,
 }
 
 /// A label with a line to its right, to fill in by hand; with no label, a line across the page.
@@ -48,17 +52,32 @@ pub fn render(g: &Gaps, letter: &Letter, l: &LetterIn) -> Vec<u8> {
         ("date", l.date.to_string()),
     ];
     let mut w = Writer::new();
-    w.paragraph(&t("title"), Font::Bold, 15.0, 22.0);
+    w.paragraph(
+        &t(if l.on_behalf { "title_for" } else { "title" }),
+        Font::Bold,
+        15.0,
+        22.0,
+    );
     w.y -= 10.0;
     w.paragraph(&fill(&t("to"), &p), Font::Regular, SIZE, LEADING);
-    w.paragraph(&fill(&t("from"), &p), Font::Regular, SIZE, LEADING);
-    w.y -= 8.0;
+    if l.on_behalf {
+        w.paragraph(&fill(&t("on_behalf"), &p), Font::Regular, SIZE, LEADING);
+        w.y -= 8.0;
+        blank(&mut w, &t("requester"));
+    } else {
+        w.paragraph(&fill(&t("from"), &p), Font::Regular, SIZE, LEADING);
+        w.y -= 8.0;
+    }
     blank(&mut w, &t("id_number"));
     blank(&mut w, &t("address"));
     blank(&mut w, "");
     w.y -= 14.0;
     for k in ["basis", "deadline", "format"] {
-        let text = if k == "basis" { pick(&letter.basis, lang) } else { t(k) };
+        let text = match k {
+            "basis" if l.on_behalf => pick(&letter.basis_for, lang),
+            "basis" => pick(&letter.basis, lang),
+            _ => t(k),
+        };
         w.paragraph(&fill(&text, &p), Font::Regular, SIZE, LEADING);
         w.y -= 8.0;
     }

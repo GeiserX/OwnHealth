@@ -36,6 +36,7 @@ fn the_shipped_file_loads_with_a_cite_for_every_row_and_law() -> R {
         laws,
         [
             "https://eur-lex.europa.eu/eli/reg/2016/679/oj#art_15",
+            "https://eur-lex.europa.eu/eli/reg/2016/679/oj#art_12",
             "https://www.boe.es/buscar/act.php?id=BOE-A-2002-22188#a18"
         ]
     );
@@ -49,7 +50,7 @@ fn a_broken_file_is_refused_with_its_reason() -> R {
     let good = std::fs::read_to_string(FILE)?;
     let hole_cite =
         "    min_days: 365\n    source: GDPR Art. 15\n    cite: https://eur-lex.europa.eu/eli/reg/2016/679/oj#art_15\n";
-    let cases: [(&str, String, &str); 8] = [
+    let cases: [(&str, String, &str); 10] = [
         (
             "a row without a cite",
             good.replace(hole_cite, "    min_days: 365\n    source: GDPR Art. 15\n"),
@@ -97,6 +98,16 @@ fn a_broken_file_is_refused_with_its_reason() -> R {
             "a letter without its basis",
             good.replacen("    basis:\n", "    basis_text:\n", 1),
             "no `basis`",
+        ),
+        (
+            "a letter without the representative's basis",
+            good.replacen("    basis_for:\n", "    basis_extra:\n", 1),
+            "no `basis_for`",
+        ),
+        (
+            "the shared letter text without a line it prints",
+            good.replacen("    on_behalf:\n", "    behalf:\n", 1),
+            "no `letters.text.on_behalf`",
         ),
     ];
     for (what, body, reason) in cases {
