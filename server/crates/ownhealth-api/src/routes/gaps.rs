@@ -13,9 +13,9 @@
 //! (Spain: GDPR Art. 15 and Ley 41/2002 art. 18; the other EU and EEA countries: GDPR Art. 15). It
 //! takes the language and nothing else: the identity number and the address print as blank lines,
 //! so they are never sent or stored. A minor's letter is their legal representative's, whose name is a
-//! blank line too. An access whose identity mode hides names (a token set to `minimal` or
-//! `pseudonymous`) gets 403: the letter prints the patient's name. The audit row names the gap key and the visit's src id, never the name or the
-//! provider.
+//! blank line too. The letter prints the patient's name, so an access token gets 403 here in every
+//! identity mode (tokens work only on /mcp), and an access whose identity mode hides names would get
+//! 403 too. The audit row names the gap key and the visit's src id, never the name or the provider.
 
 use std::collections::HashMap;
 

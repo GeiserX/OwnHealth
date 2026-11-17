@@ -309,17 +309,17 @@ async fn a_due_decision_on_a_gap_shows_on_the_card() -> R {
     Ok(())
 }
 
-/// A token whose identity mode hides names gets no letter, which prints the patient's name.
+/// The letter prints the patient's name, so only the person in the web app gets it: an access token
+/// is refused on this route whatever its identity mode, since tokens work only on /mcp, where the
+/// identity mode applies. The same request from the session gets the letter.
 #[tokio::test]
-async fn an_access_that_hides_names_gets_no_letter() -> R {
+async fn an_access_token_gets_no_letter_in_any_identity_mode() -> R {
     use ownhealth_auth::tokens::{TokenIn, create_token};
     let a = app().await?;
     let key = visit(&a).await?;
-    for (mode, want) in [
-        ("full", StatusCode::OK),
-        ("pseudonymous", StatusCode::FORBIDDEN),
-        ("minimal", StatusCode::FORBIDDEN),
-    ] {
+    let (s, _, _) = letter(&a, &format!("/profiles/alex/gaps/{key}/letter.pdf")).await?;
+    assert_eq!(s, StatusCode::OK);
+    for mode in ["full", "pseudonymous", "minimal"] {
         let mut c = a.conn().await?;
         let t = create_token(
             &mut c,
@@ -340,8 +340,9 @@ async fn an_access_that_hides_names_gets_no_letter() -> R {
         let req = Request::get(format!("/profiles/alex/gaps/{key}/letter.pdf"))
             .header(header::AUTHORIZATION, format!("Bearer {}", t.plaintext))
             .body(Body::empty())?;
-        let (s, _, _) = a.send_raw(req).await?;
-        assert_eq!(s, want, "{mode}");
+        let (s, v) = a.send(req).await?;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{mode} {v}");
+        assert_eq!(v["detail"]["code"], "forbidden", "{mode} {v}");
     }
     Ok(())
 }
