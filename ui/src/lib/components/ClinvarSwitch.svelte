@@ -47,8 +47,9 @@
 			error = { text: errText(e), raw: errRaw(e) };
 			return false;
 		} finally {
+			// the field follows the server again only once the server's new row is here
+			await load();
 			busy = false;
-			load();
 		}
 	}
 	// The household has one check. The scheduler may have added it since this page loaded; the server

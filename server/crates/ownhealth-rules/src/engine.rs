@@ -634,7 +634,8 @@ pub fn baseline_band(rule: &Map<String, Value>, cvs: &Map<String, Value>, earlie
     use rust_decimal::MathematicalOps;
     let min = usize::try_from(int(rule.get("min_points")).unwrap_or(3)).ok()?;
     let max = usize::try_from(int(rule.get("max_points")).unwrap_or(5)).ok()?;
-    if earlier.len() < min.max(1) {
+    // a max under the min would cut the history below the min
+    if earlier.len() < min.max(1) || max < min {
         return None;
     }
     let used = &earlier[earlier.len().saturating_sub(max)..];

@@ -238,6 +238,10 @@ fn the_baseline_band_is_the_formula() -> R {
     let seven: Vec<Decimal> = ["9", "9", "1", "1", "1", "1", "1"].iter().map(|v| dec(v)).collect();
     let b = baseline_band(&base, &crea, &seven).ok_or_else(|| anyhow::anyhow!("no band"))?;
     assert_eq!((b.n, b.set_point), (5, Decimal::ONE));
+    // a rule whose max is under its min never gives a band from fewer than min points
+    let mut odd = base.clone();
+    odd.insert("max_points".into(), json!(2));
+    assert!(baseline_band(&odd, &crea, &[dec("0.80"), dec("0.81"), dec("0.90")]).is_none());
     // only same-method earlier points count
     let lab = Some("LabNorte");
     let pts = [
