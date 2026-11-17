@@ -523,7 +523,8 @@ async fn trend(
         // a value dated after today is not drawn, as get_trend leaves out what is after as_of
         .filter(|r| day_of(r) <= today)
         .collect();
-    rows.sort_by_key(|r| (r.effective_at, r.id.to_string()));
+    // the engine's order, so the last point here is the one the state flag judges
+    rows.sort_by_key(|r| (r.effective_at, r.recorded_at, r.id.to_string()));
     // the window limits what is drawn; the usual level still reads the results before it, as the
     // state flag does
     let (before_window, rows): (Vec<Observation>, Vec<Observation>) = rows
@@ -794,7 +795,8 @@ async fn trend(
     }
     // the person's usual level before the last point, from the earlier points of the same key
     let baseline = match (rule_for("baseline"), rcv_rule, series.split_last()) {
-        (Some(rule), Some(cvs), Some(((key, v), earlier))) if !points.is_empty() => {
+        // no chart unit (a last result printed with none): nothing to compare the history in
+        (Some(rule), Some(cvs), Some(((key, v), earlier))) if !points.is_empty() && target_set.is_some() => {
             let earlier: Vec<_> = earlier.iter().filter(|(k, _)| k == key).map(|(_, x)| *x).collect();
             ownhealth_rules::engine::baseline_band(rule, cvs, &earlier).map(|b| {
                 let f = |d| decimal_to_f64(&ownhealth_rules::num::quantize(d, 2));

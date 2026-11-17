@@ -256,13 +256,17 @@ async fn test_trend() -> R {
 
 /// One LDL printed by a lab, on a document named after that lab.
 async fn lab_row(c: &mut PgConnection, f: &Family, lab: &str, day: &str, value: &str) -> R {
+    lab_row_in(c, f, lab, day, value, Some("mg/dL")).await
+}
+
+async fn lab_row_in(c: &mut PgConnection, f: &Family, lab: &str, day: &str, value: &str, unit: Option<&str>) -> R {
     let doc: uuid::Uuid = sqlx::query_scalar(
         "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, doc_type, provider_name) \
          values ($1, $2, $3, 'application/pdf', 1, 'lab_report', $4) returning id",
     )
     .bind(f.household_id)
     .bind(f.profile("alex"))
-    .bind(format!("{lab} {day}").into_bytes())
+    .bind(format!("{lab} {day} {value}").into_bytes())
     .bind(lab)
     .fetch_one(&mut *c)
     .await?;
@@ -277,7 +281,7 @@ async fn lab_row(c: &mut PgConnection, f: &Family, lab: &str, day: &str, value: 
             profile_id: f.profile("alex"),
             printed_name: "Colesterol LDL",
             printed_value: value,
-            printed_unit: Some("mg/dL"),
+            printed_unit: unit,
             printed_range: Some("< 130"),
             printed_flag: None,
             effective_at: when.fixed_offset(),
@@ -380,6 +384,65 @@ async fn the_usual_level_does_not_depend_on_the_window() -> R {
         "{seen:?}"
     );
     assert!(seen.iter().all(|b| *b == seen[0]), "{seen:?}");
+    Ok(())
+}
+
+/// A last result printed with no unit has no chart unit to compare in, so there is no usual level.
+#[tokio::test]
+async fn a_result_with_no_unit_gets_no_usual_level() -> R {
+    let a = app().await?;
+    let today = chrono::Local::now().date_naive();
+    let mut tx = a.rt.pool.begin().await?;
+    for (days_ago, v, unit) in [
+        (900, "100", Some("mg/dL")),
+        (800, "102", Some("mg/dL")),
+        (700, "101", Some("mg/dL")),
+        (30, "300", None),
+    ] {
+        let day = (today - chrono::Days::new(days_ago)).format("%Y-%m-%d").to_string();
+        lab_row_in(&mut tx, &a.family, "LabNorte", &day, v, unit).await?;
+    }
+    tx.commit().await?;
+    let (s, t) = get(&a, "alex", "/profiles/alex/trend?code=ldl_c&window=P1Y").await?;
+    assert_eq!(s, StatusCode::OK, "{t}");
+    assert!(t["stats"]["baseline"].is_null(), "{t}");
+    Ok(())
+}
+
+/// Two results on the same day are ordered as the engine orders them, by when they were recorded,
+/// so the last point the trend judges is the one the state flag judges.
+#[tokio::test]
+async fn results_on_one_day_keep_the_order_they_were_recorded_in() -> R {
+    let a = app().await?;
+    // find a pair whose id order is the reverse of its recording order; each insert is its own transaction
+    let mut found = false;
+    for i in 1..=30 {
+        let day = format!("2026-01-{i:02}");
+        let mut ids = Vec::new();
+        for v in ["100", "140"] {
+            let mut tx = a.rt.pool.begin().await?;
+            lab_row(&mut tx, &a.family, "LabNorte", &day, v).await?;
+            tx.commit().await?;
+            let id: uuid::Uuid = sqlx::query_scalar(
+                "select id from observation where alias_group = 'ldl_c' order by recorded_at desc limit 1",
+            )
+            .fetch_one(&a.rt.pool)
+            .await?;
+            ids.push(id.to_string());
+        }
+        if ids[0] > ids[1] {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "no pair with ids in reverse recording order");
+    let (_, t) = get(&a, "alex", "/profiles/alex/trend?code=ldl_c&window=P10Y").await?;
+    let last = t["points"]
+        .as_array()
+        .and_then(|p| p.last())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(last["value"], json!(140.0), "{t}");
     Ok(())
 }
 
