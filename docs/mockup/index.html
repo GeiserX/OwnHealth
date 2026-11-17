@@ -969,8 +969,41 @@ function due(){
   <div class="note">${L.info}</div>
   <div class="foot-hash"><span>prevention_hash <span class="mono">sha256:9829…</span></span><span>es.yaml prevention-es 0.2.0</span></div>`;
 }
+/* ---------- 11b. due, next draw (0.4.0) ---------- */
+function nextDraw(){
+  const es=S.lang==="es",P=PROFILES.find(p=>p.id===S.profile);
+  const L=es?{t:"Por hacer",sub:"las pruebas que el registro señala para la próxima analítica, por qué, y lo que dicen las fuentes citadas sobre la preparación",list:"Lista",tab:"Próxima analítica",n:n=>n===1?"1 prueba":n+" pruebas",bio:"Ver en Biomarcadores",opts:"Solicitud para imprimir",lang:"Idioma de la hoja",hide:"Ocultar el nombre y la fecha de nacimiento",hide_d:"La hoja lleva entonces una línea en blanco para el nombre, para rellenar a mano.",dl:"Descargar PDF",open:"Abrir en otra pestaña",info:"Información, no consejo: el médico decide qué pedir. Cada línea nombra la regla y los valores de los que sale.",sheet:"Solicitud de pruebas para la próxima analítica"}
+   :{t:"Due",sub:"the tests the record lists for the next blood draw, why, and what the cited sources say about preparing",list:"Items",tab:"Next draw",n:n=>n===1?"1 test":n+" tests",bio:"See in Biomarkers",opts:"Printable request",lang:"Language of the sheet",hide:"Hide the name and birth date",hide_d:"The sheet then has a blank line for the name, to fill in by hand.",dl:"Download PDF",open:"Open in a new tab",info:"Information, not advice: the doctor decides what to order. Each line names the rule and the values it comes from.",sheet:"Tests to request at the next blood draw"};
+  // [preparation en, es, note en, es, cite], then [test, LOINC, reason en, es, src, rule]
+  const G=[
+   ["Early-morning urine","Orina de primera hora","The cited guideline prefers an early-morning urine sample for the albumin-to-creatinine ratio.","La guía citada prefiere una muestra de orina de primera hora de la mañana para el cociente albúmina/creatinina.","KDIGO 2024 CKD guideline|Guía KDIGO 2024 de ERC",
+    [["Urine alb/creat|Cociente alb/creat","9318-7","Last measured 2024-05-22, longer ago than the rule's 12-month interval.","Última medición el 2024-05-22, hace más que el intervalo de 12 meses de la regla.","src_s5y3mab4","recency.kidney"]]],
+   ["Biotin","Biotina","Biotin (vitamin B7), common in supplements, can interfere with some lab tests and give a wrong result, per the FDA.","La biotina (vitamina B7), frecuente en suplementos, puede interferir con algunas pruebas de laboratorio y dar un resultado erróneo, según la FDA.","FDA, biotin interference with lab tests|FDA, interferencia de la biotina en pruebas de laboratorio",
+    [["Free T4|T4 libre","3024-7","Last measured 2025-01-20, longer ago than the rule's 12-month interval.","Última medición el 2025-01-20, hace más que el intervalo de 12 meses de la regla.","src_pi25884h","recency.thyroid"],
+     ["TSH","3016-3","Last measured 2025-01-20, longer ago than the rule's 12-month interval.","Última medición el 2025-01-20, hace más que el intervalo de 12 meses de la regla.","src_a05","recency.thyroid"]]],
+   ["Our sources describe no preparation","Nuestras fuentes no indican preparación","","","",
+    [["Hepatitis C antibody|Anticuerpos hepatitis C","16128-1","No value on record; the rule lists this test for this person.","Ningún valor en el registro; la regla incluye esta prueba para esta persona.","","infect.hcv.once_adult"],
+     ["Lp(a)","43583-4","Last value 142 nmol/L on 2025-09-08, outside the lab range < 75.","Último valor 142 nmol/L el 2025-09-08, fuera del rango del laboratorio < 75.","src_a07","range.lab"],
+     ["Vitamin D 25-OH|Vitamina D 25-OH","62292-8","Last value 24 ng/mL on 2026-09-14, outside the lab range 30 - 100.","Último valor 24 ng/mL el 2026-09-14, fuera del rango del laboratorio 30 - 100.","src_a12","range.lab"]]]];
+  const i=es?1:0,nm=r=>r[0].split("|")[r[0].includes("|")?i:0];
+  const line=r=>`<div class="due" style="align-items:flex-start;padding:9px 0"><div class="w"><div><b>${nm(r)}</b> <span class="mono dim" style="font-size:11px">LOINC ${r[1]}</span></div><div>${r[2+i]} ${r[4]?src(r[4])+" ":""}<span class="chip mono">${r[5]}</span></div></div><a href="#biomarker" style="font-size:11.5px;flex:none">${L.bio}</a></div>`;
+  const grp=g=>`<div class="card" style="margin-bottom:12px"><h3>${g[i]}<span class="r num">${L.n(g[5].length)}</span></h3>${g[2+i]?`<div style="font-size:12.5px;color:var(--muted);margin-bottom:6px">${g[2+i]} <span class="chip">${g[4].split("|")[i]}</span></div>`:""}${g[5].map(line).join("")}</div>`;
+  const sheet=`<div style="background:#f3f2ee;color:#1a1a1a;border-radius:4px;padding:18px 20px;font:11px/1.45 Helvetica,Arial,sans-serif;min-height:260px"><b style="font-size:13px">${L.sheet}</b><div style="margin:6px 0 10px">${P.name}</div>${G.map(g=>`<div style="margin-top:8px"><b>${g[i]}</b>${g[5].map(r=>`<div>${nm(r)} · LOINC ${r[1]} · ${r[5]}</div>`).join("")}</div>`).join("")}</div>`;
+  return `<div class="ph"><div><h1>${L.t}</h1><div class="sub">${P.name} · ${L.sub}</div></div><div class="right"><span class="phase">v0.3</span></div></div>
+  <div class="seg" style="margin-bottom:12px"><a href="#due" style="padding:5px 12px;font-size:12.5px;color:var(--muted);text-decoration:none">${L.list}</a><a class="on" href="#due/next-draw" style="padding:5px 12px;font-size:12.5px;text-decoration:none">${L.tab}</a></div>
+  ${G.map(grp).join("")}
+  <div style="display:grid;grid-template-columns:minmax(0,300px) 1fr;gap:12px;margin-bottom:12px">
+   <div class="card"><h3>${L.opts}</h3><div style="font-size:12px;color:var(--muted)">${L.lang}</div>
+    <div class="seg" style="margin:6px 0 10px"><button class="${es?"on":""}">Español</button><button class="${es?"":"on"}">English</button></div>
+    <div style="display:flex;gap:8px;align-items:center"><span class="sw off" role="switch" tabindex="0" aria-checked="false"></span><span>${L.hide}</span></div>
+    <div style="font-size:11px;color:var(--dim);margin:6px 0 10px">${L.hide_d}</div>
+    <button class="btn sm">${L.dl}</button> <button class="btn sm">${L.open}</button></div>
+   <div class="card">${sheet}</div></div>
+  <div class="note">${L.info}</div>
+  <div class="foot-hash"><span>state_hash <span class="mono">sha256:2176…</span></span><span>es.yaml prevention-es 0.2.0 · draw_prep.yaml draw-prep 0.1.0</span></div>`;
+}
 /* ---------- router ---------- */
-const ROUTES={dashboard,biomarker,timeline,genome,"drug-check":drug,due,wearables,imaging,"import-review":importReview,family,"mcp-access":mcp,"doctor-summary":doctorSummary};
+const ROUTES={dashboard,biomarker,timeline,genome,"drug-check":drug,due,wearables,imaging,"import-review":importReview,family,"mcp-access":mcp,"doctor-summary":doctorSummary,"due/next-draw":nextDraw};
 function renderChrome(){
   document.documentElement.lang=S.lang;
   document.querySelectorAll("[data-i18n]").forEach(e=>e.textContent=t(e.dataset.i18n));
