@@ -44,7 +44,10 @@ lab (the provider name of the source document). The method is the one stored wit
 one the shipped LOINC table gives its code (calculated or direct LDL, the eGFR equation: CKD-EPI,
 CKD-EPI 2021 or MDRD). Two codes that differ only in the unit name the same method: creatinine in mg/dL
 (LOINC 2160-0) and in µmol/L (14682-9) compare through their canonical value. The comparison ignores
-case and extra spaces. When the last two results differ in method or lab:
+case and extra spaces. A missing lab name or method counts as one more value: two results that both
+have no lab name count as the same lab, even when they came from two labs, and two results that both
+have no method count as the same method. A result with a lab name and one without differ. When the last
+two results differ in method or lab:
 
 - the rule pack raises no RCV flag;
 - the REST trend gives `exceeds_rcv: null`, `method_change: true` and a sentence in `limitations`;

@@ -147,6 +147,34 @@ fn a_change_inside_one_lab_is_judged_and_a_lab_or_method_switch_is_not() -> R {
     Ok(())
 }
 
+/// What docs/calculators/rcv.md says about a missing lab or method: a missing value counts as one
+/// more value, so two missing ones match and a missing one never matches a present one.
+#[test]
+fn a_missing_lab_or_method_counts_as_one_more_value() -> R {
+    let ldl = rule("rcv.ldl_c")?;
+    let no_lab = [pt("2026-01-10", "100", None, None), pt("2026-06-10", "130", None, None)];
+    assert!(rcv(&ldl, &no_lab).is_some());
+    let one_lab = [
+        pt("2026-01-10", "100", None, None),
+        pt("2026-06-10", "130", Some("LabNorte"), None),
+    ];
+    assert!(rcv(&ldl, &one_lab).is_none());
+    // 2089-1 has no method in the shipped LOINC table
+    let uncoded = |day, value, method: Option<&str>| {
+        let mut p = pt(day, value, Some("LabNorte"), method);
+        p.loinc = Some("2089-1".into());
+        p
+    };
+    let no_method = [uncoded("2026-01-10", "100", None), uncoded("2026-06-10", "130", None)];
+    assert!(rcv(&ldl, &no_method).is_some());
+    let one_method = [
+        uncoded("2026-01-10", "100", None),
+        uncoded("2026-06-10", "130", Some("direct")),
+    ];
+    assert!(rcv(&ldl, &one_method).is_none());
+    Ok(())
+}
+
 /// mg/dL (LOINC 2160-0) and umol/L (14682-9) are the same creatinine measurement: a lab that prints
 /// SI units on one report and conventional on the next has not changed its method.
 #[test]
