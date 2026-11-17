@@ -347,11 +347,39 @@ async fn a_lab_switch_is_not_judged_as_a_change() -> R {
         (&json!("Hospital Norte"), &json!(true))
     );
     assert!(
-        t["limitations"].as_array().is_some_and(|l| l.iter().any(|x| x
-            .as_str()
-            .is_some_and(|x| x.contains("otro método, código LOINC o laboratorio")))),
+        t["limitations"].as_array().is_some_and(|l| l
+            .iter()
+            .any(|x| x.as_str().is_some_and(|x| x.contains("otro método o laboratorio")))),
         "{t}"
     );
+    Ok(())
+}
+
+/// The usual level reads every earlier result of the same lab and method, as the state flag does,
+/// whatever window the chart asks for.
+#[tokio::test]
+async fn the_usual_level_does_not_depend_on_the_window() -> R {
+    let a = app().await?;
+    let today = chrono::Local::now().date_naive();
+    let mut tx = a.rt.pool.begin().await?;
+    for (days_ago, v) in [(1825, "100"), (1460, "102"), (1095, "101"), (730, "100"), (30, "140")] {
+        let day = (today - chrono::Days::new(days_ago)).format("%Y-%m-%d").to_string();
+        lab_row(&mut tx, &a.family, "LabNorte", &day, v).await?;
+    }
+    tx.commit().await?;
+    let mut seen = Vec::new();
+    for window in ["P1Y", "P3Y", "P10Y"] {
+        let (s, t) = get(&a, "alex", &format!("/profiles/alex/trend?code=ldl_c&window={window}")).await?;
+        assert_eq!(s, StatusCode::OK, "{t}");
+        seen.push(t["stats"]["baseline"].clone());
+    }
+    // set point 100.75 from the four earlier results, even when the window shows only the last one
+    assert_eq!(
+        (&seen[0]["n"], &seen[0]["set_point"], &seen[0]["outside"]),
+        (&json!(4), &json!(100.75), &json!(true)),
+        "{seen:?}"
+    );
+    assert!(seen.iter().all(|b| *b == seen[0]), "{seen:?}");
     Ok(())
 }
 

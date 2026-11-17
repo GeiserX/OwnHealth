@@ -510,9 +510,9 @@ async fn trend(
     };
     let today = chrono::Local::now().date_naive();
     let start = window_start(window, today)?;
+    let since = start.map(|d| Utc.from_utc_datetime(&d.and_time(NaiveTime::MIN)));
     let query = ObservationQuery {
         alias_group: Some(group.clone()),
-        since: start.map(|d| Utc.from_utc_datetime(&d.and_time(NaiveTime::MIN))),
         exclude_sensitive: !perm.has("read:sensitive"),
         ..Default::default()
     };
@@ -524,6 +524,11 @@ async fn trend(
         .filter(|r| day_of(r) <= today)
         .collect();
     rows.sort_by_key(|r| (r.effective_at, r.id.to_string()));
+    // the window limits what is drawn; the usual level still reads the results before it, as the
+    // state flag does
+    let (before_window, rows): (Vec<Observation>, Vec<Observation>) = rows
+        .into_iter()
+        .partition(|r| since.is_some_and(|s| r.effective_at < s));
     let printed_ucums: BTreeSet<Option<String>> = rows
         .iter()
         .filter(|r| r.value_num.is_some())
@@ -543,12 +548,28 @@ async fn trend(
     };
     let target_set = non_empty(target.as_deref());
     let (src, labs) = labels(&mut tx, &rows).await?;
+    let (_, labs_before) = labels(&mut tx, &before_window).await?;
     let mut points: Vec<Map<String, Value>> = Vec::new();
     let mut skipped = 0usize;
     let mut converted: BTreeSet<String> = BTreeSet::new();
     let mut statuses: HashMap<NaiveDate, Value> = HashMap::new();
-    // each drawn point's method, LOINC code and lab: a change is judged only between equal keys
+    // each drawn point's method and lab: a change is judged only between equal keys
     let mut keys: Vec<MethodKey> = Vec::new();
+    // every result in the chart's unit with its key, the ones before the window first
+    let mut series = Vec::new();
+    for r in &before_window {
+        let Some(num) = r.value_num else { continue };
+        let ucum = r.unit_ucum.as_deref();
+        let value = match (target_set, non_empty(ucum)) {
+            (Some(t), Some(u)) if u != t => normalize::convert(num, u, t, &group).ok().flatten(),
+            _ if target.is_none() || ucum == target.as_deref() => Some(num),
+            _ => None,
+        };
+        let lab = r.document_id.and_then(|d| labs_before.get(&d)).and_then(Value::as_str);
+        if let Some(v) = value {
+            series.push((method_key(r.method.as_deref(), r.loinc.as_deref(), lab), v));
+        }
+    }
     for r in &rows {
         let Some(num) = r.value_num else { continue };
         let ucum = r.unit_ucum.as_deref();
@@ -579,6 +600,7 @@ async fn trend(
         let lab = r.document_id.and_then(|d| labs.get(&d).cloned()).unwrap_or(Value::Null);
         let key = method_key(r.method.as_deref(), r.loinc.as_deref(), lab.as_str());
         let method_change = keys.last().is_some_and(|k| *k != key);
+        series.push((key.clone(), value));
         keys.push(key);
         let printed: Vec<&str> = [Some(r.printed_value.as_str()), r.printed_unit.as_deref()]
             .into_iter()
@@ -749,7 +771,7 @@ async fn trend(
     let rcv_pct: Option<f64> = rcv_rule.and_then(|r| ownhealth_rules::engine::rcv_percent(r).parse::<f64>().ok());
     let (mut last_vs_prev, mut exceeds_rcv) = (Value::Null, Value::Null);
     let value_at = |i: usize| points.get(i).and_then(|p| p.get("value")).and_then(Value::as_f64);
-    // the last two results come from another method, LOINC code or lab: the change is not judged
+    // the last two results come from another method or lab: the change is not judged
     let last_switched = points.len() >= 2 && keys.last() != keys.len().checked_sub(2).and_then(|i| keys.get(i));
     if points.len() >= 2
         && let (Some(prev), Some(last)) = (value_at(points.len() - 2), value_at(points.len() - 1))
@@ -765,27 +787,20 @@ async fn trend(
     }
     if last_switched && rcv_pct.is_some() {
         limitations.push(if es {
-            "Los dos últimos resultados son de otro método, código LOINC o laboratorio, así que el cambio no se compara con el valor de referencia del cambio.".into()
+            "Los dos últimos resultados son de otro método o laboratorio, así que el cambio no se compara con el valor de referencia del cambio.".into()
         } else {
-            "The last two results come from a different method, LOINC code or lab, so the change is not compared with the reference change value.".into()
+            "The last two results come from a different method or lab, so the change is not compared with the reference change value.".into()
         });
     }
     // the person's usual level before the last point, from the earlier points of the same key
-    let baseline = match (rule_for("baseline"), rcv_rule, keys.last(), points.last()) {
-        (Some(rule), Some(cvs), Some(key), Some(last)) => {
-            let earlier: Vec<_> = points[..points.len() - 1]
-                .iter()
-                .zip(&keys)
-                .filter(|(_, k)| *k == key)
-                .filter_map(|(p, _)| p.get("value").and_then(Value::as_f64))
-                .filter_map(ownhealth_rules::num::from_f64)
-                .collect();
+    let baseline = match (rule_for("baseline"), rcv_rule, series.split_last()) {
+        (Some(rule), Some(cvs), Some(((key, v), earlier))) if !points.is_empty() => {
+            let earlier: Vec<_> = earlier.iter().filter(|(k, _)| k == key).map(|(_, x)| *x).collect();
             ownhealth_rules::engine::baseline_band(rule, cvs, &earlier).map(|b| {
                 let f = |d| decimal_to_f64(&ownhealth_rules::num::quantize(d, 2));
-                let v = last.get("value").and_then(Value::as_f64).unwrap_or_default();
                 json!({
                     "set_point": f(b.set_point), "low": f(b.low), "high": f(b.high), "n": b.n,
-                    "outside": v < f(b.low) || v > f(b.high), "rule": rule.get("id"), "cite": rule.get("cite"),
+                    "outside": *v < b.low || *v > b.high, "rule": rule.get("id"), "cite": rule.get("cite"),
                 })
             })
         }
