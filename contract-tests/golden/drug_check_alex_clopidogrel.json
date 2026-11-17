@@ -58,7 +58,20 @@
       "evidence": "=E1",
       "gene": "string",
       "phenotype": "string",
-      "src": "src_id"
+      "src": "src_id",
+      "stale": {
+        "by": {
+          "[]": "string"
+        },
+        "rerun_steps": {
+          "[]": {
+            "cite": "string",
+            "name": "string",
+            "step": "int"
+          }
+        },
+        "since": "date"
+      }
     }
   },
   "phenoconversion": {

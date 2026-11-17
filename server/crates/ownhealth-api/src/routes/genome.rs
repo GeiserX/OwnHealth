@@ -93,21 +93,17 @@ fn first_truthy<'a>(vals: &[&'a Value]) -> &'a Value {
     vals.iter().copied().find(|v| truthy(v)).unwrap_or(vals[vals.len() - 1])
 }
 
-fn tiles(findings: &[Value], locked: &HashMap<String, i64>) -> Vec<Value> {
+/// `actionable_pgx` is the grid's count, so the tile and the grid frame the same genes.
+fn tiles(findings: &[Value], locked: &HashMap<String, i64>, actionable_pgx: usize) -> Vec<Value> {
     let mut out = Vec::new();
     for cat in TILE_CATEGORIES {
         let rows: Vec<&Value> = findings.iter().filter(|f| f["category"] == cat).collect();
         let hidden = locked.get(cat).copied().unwrap_or(0);
-        if rows.is_empty() && hidden == 0 {
+        let actionable = if cat == "pgx" { actionable_pgx } else { 0 };
+        // the grid can frame a call the table filters out: the tile still counts it
+        if rows.is_empty() && hidden == 0 && actionable == 0 {
             continue;
         }
-        let actionable = rows
-            .iter()
-            .filter(|f| {
-                let ph = &f["phenotype"];
-                truthy(ph) && !py_str(ph).to_lowercase().starts_with("normal")
-            })
-            .count();
         // a gene, else the score id or rsID: never the title, whose words are English
         let mut seen: Vec<String> = Vec::new();
         for f in &rows {
@@ -121,7 +117,11 @@ fn tiles(findings: &[Value], locked: &HashMap<String, i64>) -> Vec<Value> {
         let genes: String = seen.join(", ").chars().take(120).collect();
         let mut detail = genes.clone();
         if cat == "pgx" && actionable > 0 {
-            detail = format!("{actionable} actionable · {genes}");
+            detail = if genes.is_empty() {
+                format!("{actionable} actionable")
+            } else {
+                format!("{actionable} actionable · {genes}")
+            };
         }
         if hidden > 0 {
             detail = if detail.is_empty() {
@@ -135,7 +135,7 @@ fn tiles(findings: &[Value], locked: &HashMap<String, i64>) -> Vec<Value> {
             "key": cat,
             "value": rows.len().to_string(),
             "detail": detail,
-            "actionable": if cat == "pgx" { actionable } else { 0 },
+            "actionable": actionable,
             "genes": genes,
             "hidden": hidden,
         }));
@@ -163,6 +163,7 @@ pub async fn overview(rt: &Runtime, principal: &Principal, p: &str, min_evidence
         ..FindingsQuery::default()
     };
     let found = ownhealth_genome::list_findings_typed(&mut tx, perm.profile.id, &gate, &q).await?;
+    let pgx_grid = pgx::grid(&mut tx, &perm, &gate, min_evidence).await?;
     let mut locked_rows: Vec<Value> = Vec::new();
     if surface(principal) == "ui" && !gate.minor {
         for r in visible_rows(&mut tx, perm.profile.id, None).await? {
@@ -183,6 +184,7 @@ pub async fn overview(rt: &Runtime, principal: &Principal, p: &str, min_evidence
     e.resource_type = Some("genome_finding".into());
     e.resource_ids = Some(found.findings.iter().map(|f| py_str(&f["id"])).collect());
     e.src_ids = Some(found.findings.iter().map(|f| py_str(&f["src"])).collect());
+    pgx::audit_grid(&mut e, &pgx_grid);
     e.rows_out = i32::try_from(found.findings.len()).ok();
     e.withheld = Some(withheld.clone());
     write_audit(&mut tx, &e).await?;
@@ -207,7 +209,8 @@ pub async fn overview(rt: &Runtime, principal: &Principal, p: &str, min_evidence
     };
     Ok(json!({
         "dataset": dataset,
-        "tiles": tiles(&found.findings, &locked_by_cat),
+        "tiles": tiles(&found.findings, &locked_by_cat, pgx_grid.actionable_pgx()),
+        "pgx_grid": pgx_grid.rows,
         "findings": found.findings,
         "coverage": found.coverage,
         "not_assessed": found.not_assessed,
@@ -417,3 +420,5 @@ pub fn router() -> Router<Runtime> {
 
 /// The ClinVar diff's history, a submodule router (merged in routes.rs).
 pub mod events;
+/// The PGx gene grid of the overview.
+pub mod pgx;
