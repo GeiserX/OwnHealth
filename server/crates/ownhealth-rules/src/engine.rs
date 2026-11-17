@@ -78,6 +78,8 @@ pub struct Point {
     pub flag: Option<String>,
     pub loinc: Option<String>,
     pub method: Option<String>,
+    /// the lab that printed it (document.provider_name); None for a value with no document
+    pub lab: Option<String>,
     pub src: String,
     pub src_label: Option<String>,
     /// src.kind: 'manual' for a value typed by hand, which is not a lab draw of its own
@@ -101,6 +103,31 @@ impl Point {
         } else {
             self.unit.as_deref()
         }
+    }
+
+    pub fn method_key(&self) -> MethodKey {
+        method_key(self.method.as_deref(), self.loinc.as_deref(), self.lab.as_deref())
+    }
+}
+
+/// What a change check compares across: two results compare only when the method, the LOINC code
+/// and the lab are the same (case and spaces aside). A lab or method switch moves a value by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodKey {
+    pub method: Option<String>,
+    pub loinc: Option<String>,
+    pub lab: Option<String>,
+}
+
+pub fn method_key(method: Option<&str>, loinc: Option<&str>, lab: Option<&str>) -> MethodKey {
+    let norm = |s: Option<&str>| {
+        s.map(|s| casefold(s.split_whitespace().collect::<Vec<_>>().join(" ").as_str()))
+            .filter(|s| !s.is_empty())
+    };
+    MethodKey {
+        method: norm(method),
+        loinc: norm(loinc),
+        lab: norm(lab),
     }
 }
 
@@ -272,8 +299,9 @@ async fn load_points(
         "select o.id, o.alias_group, o.loinc, o.effective_at, o.value_num, o.value_canonical, o.unit_canonical, \
          o.printed_value, o.printed_unit, o.unit_ucum, o.printed_ref_range, o.ref_low, o.ref_high, \
          o.interpretation, o.printed_flag, o.method, o.src_id, o.derivation_version, \
-         cardinality(o.sensitivity) > 0 as sensitive, s.label, s.kind as src_kind \
-         from observation o join src s on s.id = o.src_id where {} order by o.effective_at, o.recorded_at, o.id",
+         cardinality(o.sensitivity) > 0 as sensitive, s.label, s.kind as src_kind, d.provider_name as lab \
+         from observation o join src s on s.id = o.src_id left join document d on d.id = o.document_id \
+         where {} order by o.effective_at, o.recorded_at, o.id",
         where_.join(" and ")
     );
     let mut q = sqlx::query(AssertSqlSafe(sql))
@@ -317,6 +345,7 @@ async fn load_points(
             flag: interpretation.filter(|s| !s.is_empty()).or(printed),
             loinc,
             method: r.try_get("method")?,
+            lab: r.try_get("lab")?,
             src: r.try_get("src_id")?,
             src_label: r.try_get("label")?,
             src_kind: r.try_get("src_kind")?,
@@ -483,7 +512,8 @@ pub fn rcv(rule: &Map<String, Value>, pts: &[Point]) -> Option<Map<String, Value
     }
     let (a, b) = (&pts[pts.len() - 2], &pts[pts.len() - 1]);
     let (va, vb) = (a.comparable()?, b.comparable()?);
-    if va.is_zero() || a.comparable_unit() != b.comparable_unit() {
+    // a lab or method switch is not judged as a change (the trend answers say so per point)
+    if va.is_zero() || a.comparable_unit() != b.comparable_unit() || a.method_key() != b.method_key() {
         return None;
     }
     let rcv = rcv_value(rule)?;
@@ -512,11 +542,16 @@ pub fn rcv(rule: &Map<String, Value>, pts: &[Point]) -> Option<Map<String, Value
 pub fn trend(rule: &Map<String, Value>, pts: &[Point]) -> Option<Map<String, Value>> {
     let n = usize::try_from(int(rule.get("points")).unwrap_or(3)).ok()?;
     let usable: Vec<&Point> = pts.iter().filter(|p| p.comparable().is_some()).collect();
-    // one unit per series: a point the normalizer could not convert must not read as a jump
+    // one unit per series: a point the normalizer could not convert must not read as a jump; and one
+    // method, LOINC code and lab, so a lab switch does not read as one either
     let tail: Vec<&Point> = match usable.last() {
         Some(last) => {
-            let unit = last.comparable_unit();
-            let same: Vec<&Point> = usable.iter().copied().filter(|p| p.comparable_unit() == unit).collect();
+            let (unit, key) = (last.comparable_unit(), last.method_key());
+            let same: Vec<&Point> = usable
+                .iter()
+                .copied()
+                .filter(|p| p.comparable_unit() == unit && p.method_key() == key)
+                .collect();
             same[same.len().saturating_sub(n)..].to_vec()
         }
         None => Vec::new(),
@@ -565,6 +600,85 @@ pub fn trend(rule: &Map<String, Value>, pts: &[Point]) -> Option<Map<String, Val
         "slope": num(&quantize(slope, 2)),
         "date": iso(last.date),
         "src": tail.iter().map(|p| p.src.clone()).collect::<Vec<_>>(),
+    });
+    out.as_object().cloned()
+}
+
+/// The person's usual level before the newest point: the set point is the mean of the latest
+/// `min_points` to `max_points` earlier points with the newest one's unit, method, LOINC code and lab,
+/// and the band is set point x (1 +/- z * sqrt(CVa^2 + CVi^2) * sqrt(1 + 1/n)) (Coskun et al. 2021).
+/// CVa and CVi are the analyte's `rcv` rule's. None when fewer earlier points share the method.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Baseline {
+    pub set_point: Decimal,
+    pub low: Decimal,
+    pub high: Decimal,
+    /// how many earlier points the set point is the mean of
+    pub n: usize,
+}
+
+pub fn baseline_band(rule: &Map<String, Value>, cvs: &Map<String, Value>, earlier: &[Decimal]) -> Option<Baseline> {
+    use rust_decimal::MathematicalOps;
+    let min = usize::try_from(int(rule.get("min_points")).unwrap_or(3)).ok()?;
+    let max = usize::try_from(int(rule.get("max_points")).unwrap_or(5)).ok()?;
+    if earlier.len() < min.max(1) {
+        return None;
+    }
+    let used = &earlier[earlier.len().saturating_sub(max)..];
+    let n = Decimal::from(used.len() as u64);
+    let set_point = used
+        .iter()
+        .try_fold(Decimal::ZERO, |a, b| a.checked_add(*b))?
+        .checked_div(n)?;
+    let (cvi, cva) = (dec(cvs.get("cv_i"))?, dec(cvs.get("cv_a"))?);
+    let z = dec(rule.get("z"))?;
+    let spread = cvi.checked_mul(cvi)?.checked_add(cva.checked_mul(cva)?)?.sqrt()?;
+    let widen = Decimal::ONE.checked_add(Decimal::ONE.checked_div(n)?)?.sqrt()?;
+    let half = set_point
+        .checked_mul(z)?
+        .checked_mul(spread)?
+        .checked_mul(widen)?
+        .checked_div(Decimal::from(100))?
+        .abs();
+    Some(Baseline {
+        set_point,
+        low: set_point.checked_sub(half)?,
+        high: set_point.checked_add(half)?,
+        n: used.len(),
+    })
+}
+
+/// `baseline(rule, rcv rule, pts)`: a flag when the newest point is outside the person's usual level.
+pub fn baseline(rule: &Map<String, Value>, cvs: &Map<String, Value>, pts: &[Point]) -> Option<Map<String, Value>> {
+    let (last, before) = pts.split_last()?;
+    let v = last.comparable()?;
+    let (unit, key) = (last.comparable_unit(), last.method_key());
+    let same: Vec<&Point> = before
+        .iter()
+        .filter(|p| p.comparable().is_some() && p.comparable_unit() == unit && p.method_key() == key)
+        .collect();
+    let vals: Vec<Decimal> = same.iter().filter_map(|p| p.comparable()).collect();
+    let band = baseline_band(rule, cvs, &vals)?;
+    if v >= band.low && v <= band.high {
+        return None;
+    }
+    let used = &same[same.len() - band.n..];
+    // every number in the unit the comparison ran in (canonical when the points have one)
+    let shown = |d: Decimal| num(&quantize(d, 2));
+    let mut src: Vec<String> = used.iter().map(|p| p.src.clone()).collect();
+    src.push(last.src.clone());
+    let out = json!({
+        "kind": "baseline",
+        "reason": "BASELINE_OUT",
+        "rule": rule_id(rule),
+        "severity": severity(rule, 1),
+        "value": num(&v),
+        "unit": opt(unit),
+        "set_point": shown(band.set_point),
+        "low": shown(band.low),
+        "high": shown(band.high),
+        "date": iso(last.date),
+        "src": src,
     });
     out.as_object().cloned()
 }
@@ -807,6 +921,19 @@ pub async fn evaluate(
                         f.insert("group".into(), json!(key));
                         flags.push(f);
                         break;
+                    }
+                }
+                if m.status != "watch"
+                    && let Some(cvs) = rules_for(pack, "rcv", &key).next()
+                {
+                    for rule in rules_for(pack, "baseline", &key) {
+                        if let Some(mut f) = baseline(rule, cvs, &m.points) {
+                            m.status = "watch";
+                            m.rule = f.get("rule").map(text);
+                            f.insert("group".into(), json!(key));
+                            flags.push(f);
+                            break;
+                        }
                     }
                 }
                 if m.status != "watch" {

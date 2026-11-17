@@ -40,6 +40,7 @@ fn pt(day: &str, value: &str, canonical: Option<&str>) -> Point {
         flag: None,
         loinc: None,
         method: None,
+        lab: None,
         src: "src_x".into(),
         src_label: None,
         src_kind: "document_region".into(),
