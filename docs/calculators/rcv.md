@@ -37,25 +37,28 @@ Notes on the table:
   ship. An install can add a rule in its override directory (`OWNHEALTH_RULES_OVERRIDE_DIR`). The pack
   version then ends in `+local.<sha8>`, so the change is visible in every answer.
 
-**Only like with like.** A change is judged only between two results with the same method, the same
-LOINC code and the same lab (the provider name of the source document). The comparison ignores case
-and extra spaces. When the last two results differ in any of these:
+**Only like with like.** A change is judged only between two results with the same method and the same
+lab (the provider name of the source document). The method is the one stored with the result, else the
+one the shipped LOINC table gives its code (calculated or direct LDL, enzymatic eGFR formulas). Two codes
+that differ only in the unit name the same method: creatinine in mg/dL (LOINC 2160-0) and in µmol/L
+(14682-9) compare through their canonical value. The comparison ignores case and extra spaces. When the
+last two results differ in method or lab:
 
 - the rule pack raises no RCV flag;
 - the REST trend gives `exceeds_rcv: null`, `method_change: true` and a sentence in `limitations`;
 - the MCP tool `get_trend` marks the point with `method_change: true` and adds a limitation.
 
-A trend rule also uses only the points with the same method, code and lab as the last point.
+A trend rule also uses only the points with the same method and lab as the last point.
 
 **A rule must cite its paper.** The pack refuses to load an `rcv` or `baseline` rule whose `cite` is
 not a DOI link (`https://doi.org/...`).
 
 **Where to read it.**
 
-- REST: `GET /api/profiles/{p}/observations/trend` returns `stats.rcv_pct`, `stats.exceeds_rcv`,
+- REST: `GET /api/profiles/{p}/trend?code=...` returns `stats.rcv_pct`, `stats.exceeds_rcv`,
   `stats.cv_i`, `stats.cv_a`, `stats.rcv_cite` and `stats.method_change`, and `method_change` on
   each point.
-- MCP: `get_trend` returns `method_change` on a point that changed method, code or lab.
+- MCP: `get_trend` returns `method_change` on a raw point that changed method or lab.
 - UI: the "Is the last change real?" card of a biomarker page shows the RCV, the two CVs and a link to
   their source.
 

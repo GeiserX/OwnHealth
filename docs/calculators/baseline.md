@@ -22,7 +22,7 @@ widens the band when the set point rests on few results.
 
 **Which results count.**
 
-- Only earlier results with the same unit, method, LOINC code and lab as the last result. A result
+- Only earlier results with the same method and lab as the last result (see [rcv.md](rcv.md)). A result
   from another lab or method never moves the set point.
 - At least 3 earlier results. With 2 or fewer there is no usual level and no flag.
 - At most the 5 most recent earlier results, so the set point follows slow change and the state body
@@ -42,8 +42,9 @@ from 0.90 to 0.98 is 8.9%, inside the creatinine RCV of 12.6%. So only the basel
 
 - State body and its render: a flag with reason `BASELINE_OUT`. The text names the usual level and the
   number of earlier results it rests on. Its sources are the earlier results and the last one.
-- REST: `GET /api/profiles/{p}/observations/trend` returns `stats.baseline` with `set_point`, `low`,
-  `high`, `n`, `outside`, `rule` and `cite`, or `null` when there is no usual level yet.
+- REST: `GET /api/profiles/{p}/trend?code=...` returns `stats.baseline` with `set_point`, `low`,
+  `high`, `n`, `outside`, `rule` and `cite`, or `null` when there is no usual level yet. The band
+  reads every earlier result, also the ones before the `window` the chart asks for.
 - UI: the biomarker chart draws the usual level as a blue dashed band, with `n`. The "Is the last
   change real?" card shows the band and says whether the last result is inside it.
 

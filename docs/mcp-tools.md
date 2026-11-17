@@ -141,7 +141,7 @@ Input: `query` or `loinc`, `category`, `from`, `to`, `flagged_only`, `group_by`,
 
 ### get_trend
 
-One analyte (a LOINC code or a name) or a wearable metric such as `hr_resting` over a window, downsampled to fit, with coverage and summary statistics. A series that mixes codes (calculated and direct LDL) says so in `limitations`, and each point names its code. A point whose method, LOINC code or lab differs from the point before it carries `"method_change": true`; the change between those two points is not judged against the reference change value (see [calculators/rcv.md](calculators/rcv.md)).
+One analyte (a LOINC code or a name) or a wearable metric such as `hr_resting` over a window, downsampled to fit, with coverage and summary statistics. A series that mixes codes (calculated and direct LDL) says so in `limitations`, and each point names its code. A raw point whose method or lab differs from the point before it carries `"method_change": true`; the change between those two points is not judged against the reference change value (see [calculators/rcv.md](calculators/rcv.md)). A weekly or monthly answer has no per-point marker; its `limitations` say that the series changes method or lab.
 
 Input: `code`, `window` (`P3Y`, `P90D`, `all`), `resolution`, `cursor`, `as_of`. Scope: as for `search_observations`.
 
