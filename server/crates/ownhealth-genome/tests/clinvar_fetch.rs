@@ -279,6 +279,95 @@ async fn a_failed_fetch_shows_on_the_health_row_and_writes_no_event() -> R {
 }
 
 #[tokio::test]
+async fn a_failed_fetch_is_tried_again_within_hours_not_a_week() -> R {
+    let f = fx(false).await?;
+    f.alex_genome().await?;
+    let (url, _) = serve(503, b"busy".to_vec()).await?;
+    let s = f.source(json!({"url": url, "allow_private": true}), true).await?;
+    let mut c = f.e.conn().await?;
+    let ran = |ago: &str| {
+        format!(
+            "update source set last_run_at = now() - interval '{ago}' where id = '{}'",
+            s.id
+        )
+    };
+    for (failures, waited, due) in [
+        (1, "50 minutes", false),
+        (1, "61 minutes", true),
+        (2, "61 minutes", false),
+        (2, "121 minutes", true),
+        // the wait doubles up to 64 hours, still sooner than the weekly poll
+        (20, "63 hours", false),
+        (20, "65 hours", true),
+    ] {
+        let run = f.poll(s.id).await?.ok_or_else(|| anyhow::anyhow!("no run"))?;
+        assert_eq!(run.status, "error");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "update source set consecutive_failures = {failures} where id = '{}'",
+            s.id
+        )))
+        .execute(&mut *c)
+        .await?;
+        sqlx::query(sqlx::AssertSqlSafe(ran(waited))).execute(&mut *c).await?;
+        let queued = sources::schedule_due(&mut c).await?;
+        assert_eq!(!queued.is_empty(), due, "{failures} failures, {waited} ago");
+        jobs::drain(&f.ctx, "core", 10, None).await?;
+    }
+    // After a success the weekly interval holds again.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "update source set consecutive_failures = 0 where id = '{}'",
+        s.id
+    )))
+    .execute(&mut *c)
+    .await?;
+    sqlx::query(sqlx::AssertSqlSafe(ran("65 hours")))
+        .execute(&mut *c)
+        .await?;
+    assert!(sources::schedule_due(&mut c).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_scheduler_pass_turns_the_check_on_and_queues_it() -> R {
+    let f = fx(false).await?;
+    f.alex_genome().await?;
+    let queued = sources::scheduler_tick(&f.ctx).await?;
+    let mut c = f.e.conn().await?;
+    let cv: Vec<Source> = sources::list_sources(&mut c, f.e.fam.household_id)
+        .await?
+        .into_iter()
+        .filter(|s| s.kind == "clinvar")
+        .collect();
+    assert_eq!(cv.len(), 1);
+    assert!(cv[0].enabled);
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(
+        f.scalar(&format!(
+            "select count(*) from job where kind = 'source.poll' and state = 'queued' and payload ->> 'source_id' = '{}'",
+            cv[0].id
+        ))
+        .await?,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_local_file_compressed_with_plain_gzip_is_read() -> R {
+    let f = fx(false).await?;
+    f.alex_genome().await?;
+    let local: &Path = &f.e.dir.path().join("clinvar_20261005.vcf.gz");
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(RELEASE.as_bytes())?;
+    std::fs::write(local, gz.finish()?)?;
+    let s = f.source(json!({"path": local.display().to_string()}), true).await?;
+    let run = f.poll(s.id).await?.ok_or_else(|| anyhow::anyhow!("no run"))?;
+    assert_eq!((run.status.as_str(), run.items_new), ("ok", 1), "{run:?}");
+    assert_eq!(f.scalar("select count(*) from genome_event where alerted").await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_household_without_a_genome_downloads_nothing() -> R {
     let f = fx(false).await?;
     let (url, hits) = serve(200, bgzipped(RELEASE)?).await?;

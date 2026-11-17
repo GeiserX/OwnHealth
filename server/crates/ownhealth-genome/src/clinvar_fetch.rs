@@ -22,6 +22,7 @@ use ownhealth_core::net::{self, Egress};
 use ownhealth_core::sources::{RunOutcome, RunProblem, Source};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::clinvar;
@@ -154,6 +155,29 @@ pub async fn poll_clinvar(ctx: JobContext, source: Source) -> Result<RunOutcome,
     Ok(out)
 }
 
+/// Takes the lock every writer of a new ClinVar source holds until its transaction ends, so two
+/// schedulers (two replicas), or the scheduler and the API, never add a household's row twice.
+async fn lock_new_sources(conn: &mut PgConnection) -> ownhealth_core::Result<()> {
+    sqlx::query("select pg_advisory_xact_lock(hashtext('ownhealth.clinvar_default_sources'))")
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Whether the household already has its ClinVar source. Call it inside the transaction that adds
+/// one: it takes the same lock as [`add_default_sources`], so the answer holds until that commit. A
+/// household has one check: a second one would download the release again and could not be deleted.
+pub async fn has_source(conn: &mut PgConnection, household: Uuid) -> ownhealth_core::Result<bool> {
+    lock_new_sources(&mut *conn).await?;
+    Ok(
+        sqlx::query_scalar("select exists (select 1 from source where household_id = $1 and kind = $2)")
+            .bind(household)
+            .bind(KIND)
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
 /// The default: a ClinVar source, on and weekly, for each household with a current genome dataset and
 /// no ClinVar source. Never in the demo. Returns the rows added.
 pub async fn add_default_sources(ctx: JobContext) -> ownhealth_core::Result<u64> {
@@ -161,10 +185,7 @@ pub async fn add_default_sources(ctx: JobContext) -> ownhealth_core::Result<u64>
         return Ok(0);
     }
     let mut tx = ctx.pool.begin().await?;
-    // Two schedulers (two replicas) never add the same household's row twice.
-    sqlx::query("select pg_advisory_xact_lock(hashtext('ownhealth.clinvar_default_sources'))")
-        .execute(&mut *tx)
-        .await?;
+    lock_new_sources(&mut tx).await?;
     let added = sqlx::query(
         "insert into source (household_id, kind, label, poll_seconds) \
          select distinct p.household_id, $1, $2, $3::int from genome_dataset d join profile p on p.id = d.profile_id \

@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use chrono::NaiveDate;
-use noodles::bgzf;
 use ownhealth_core::access::{get_profile, majority, today};
 use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::review::{ReviewItemIn, create_item};
@@ -288,13 +287,16 @@ fn bad_file(what: &str, message: impl std::fmt::Display) -> Error {
     Error::Invalid(format!("{what}: {message}"))
 }
 
-/// A bgzipped file (ClinVar ships `clinvar.vcf.gz` bgzipped) or plain text.
+/// A gzipped file or plain text. ClinVar ships `clinvar.vcf.gz` bgzipped, which is a run of gzip
+/// members; a copy compressed again with plain `gzip` is one member. The multi-member reader reads both.
 fn open_text(path: &Path) -> io::Result<Box<dyn BufRead + Send>> {
     let mut magic = [0u8; 2];
     let n = File::open(path)?.read(&mut magic)?;
     let f = File::open(path)?;
     Ok(if n == 2 && magic == [0x1f, 0x8b] {
-        Box::new(bgzf::io::Reader::new(f))
+        Box::new(io::BufReader::new(flate2::read::MultiGzDecoder::new(
+            io::BufReader::new(f),
+        )))
     } else {
         Box::new(io::BufReader::new(f))
     })
@@ -804,7 +806,14 @@ async fn diff_dataset(
             failed: false,
         };
         match carried_records(&rel, &mut person) {
-            Ok((_, carried)) => Ok(Ok(carried)),
+            Ok((seen, carried)) if seen == date => Ok(Ok(carried)),
+            // A local release replaced while the run read it: stop rather than file the new
+            // release's records under the old date.
+            Ok((seen, _)) => Err(bad_file(
+                &rel.file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                format!("the release changed during the run ({seen} instead of {date})"),
+            )),
             Err(e) if person.failed => Ok(Err(e)),
             Err(e) => Err(e),
         }

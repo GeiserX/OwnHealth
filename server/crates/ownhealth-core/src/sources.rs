@@ -515,7 +515,9 @@ pub fn register() {
 }
 
 /// Enqueue a `source.poll` for every enabled source whose kind has a poller and whose interval has
-/// passed. Returns the jobs added.
+/// passed. After a failed run the wait is shorter: 1 hour, doubling with each failure up to 64 hours,
+/// and never longer than the interval, so a weekly source that hit one bad answer tries again the
+/// same day. Returns the jobs added.
 pub async fn schedule_due(conn: &mut PgConnection) -> Result<Vec<i64>> {
     let kinds = polled_kinds();
     if kinds.is_empty() {
@@ -523,7 +525,9 @@ pub async fn schedule_due(conn: &mut PgConnection) -> Result<Vec<i64>> {
     }
     let due: Vec<Uuid> = sqlx::query_scalar(
         "select id from source where enabled and poll_seconds is not null and kind = any($1) \
-         and (last_run_at is null or last_run_at <= now() - make_interval(secs => poll_seconds)) order by id",
+         and (last_run_at is null or last_run_at <= now() - make_interval(secs => case when consecutive_failures > 0 \
+         then least(poll_seconds, 3600 * power(2, least(consecutive_failures, 7) - 1)) else poll_seconds end)) \
+         order by id",
     )
     .bind(&kinds)
     .fetch_all(&mut *conn)
@@ -549,7 +553,14 @@ pub async fn enqueue_poll(conn: &mut PgConnection, source_id: Uuid) -> Result<Op
     .await?)
 }
 
-/// Every SCHEDULER_SECONDS: `add_default_sources`, then `schedule_due`. Stops when `stop` turns true.
+/// One scheduler pass: `add_default_sources`, then `schedule_due`. Returns the jobs added.
+pub async fn scheduler_tick(ctx: &JobContext) -> Result<Vec<i64>> {
+    add_default_sources(ctx).await?;
+    let mut conn = ctx.pool.acquire().await?;
+    schedule_due(&mut conn).await
+}
+
+/// Every SCHEDULER_SECONDS: `scheduler_tick`. Stops when `stop` turns true.
 pub async fn scheduler_loop(ctx: JobContext, mut stop: watch::Receiver<bool>) {
     let mut tick = tokio::time::interval(Duration::from_secs(SCHEDULER_SECONDS));
     loop {
@@ -560,13 +571,7 @@ pub async fn scheduler_loop(ctx: JobContext, mut stop: watch::Receiver<bool>) {
         if *stop.borrow() {
             return;
         }
-        let r = async {
-            add_default_sources(&ctx).await?;
-            let mut conn = ctx.pool.acquire().await?;
-            schedule_due(&mut conn).await
-        }
-        .await;
-        if let Err(e) = r {
+        if let Err(e) = scheduler_tick(&ctx).await {
             tracing::warn!(error = %e, "source scheduler failed");
         }
     }

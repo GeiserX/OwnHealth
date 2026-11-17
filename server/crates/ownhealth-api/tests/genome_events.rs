@@ -517,6 +517,14 @@ async fn the_history_names_the_release_in_use_and_the_weekly_switch() -> R {
     assert_eq!(src["profile_id"], Value::Null);
     let (_, body) = e.get("alex", "/api/profiles/alex/genome/events").await?;
     assert_eq!(body["weekly"], true);
+    // One check per household: a second one would download the release twice a week and could
+    // neither show in Settings nor be deleted.
+    let (status, twice) = e.post("alex", "/api/inboxes", new(serde_json::json!({}))).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{twice}");
+    let n: i64 = sqlx::query_scalar("select count(*) from source where kind = 'clinvar'")
+        .fetch_one(&e.db.pool)
+        .await?;
+    assert_eq!(n, 1);
 
     let id = src["id"].as_str().unwrap_or_default();
     let (status, gone) = e

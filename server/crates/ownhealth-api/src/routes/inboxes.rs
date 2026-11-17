@@ -345,6 +345,11 @@ async fn create(State(rt): State<Runtime>, Caller(p): Caller, Body(b): Body<Sour
     if b.kind == "folder" {
         ownhealth_inbox::folder::check_overlap(&mut tx, None, &config).await?;
     }
+    if b.kind == ownhealth_genome::clinvar_fetch::KIND
+        && ownhealth_genome::clinvar_fetch::has_source(&mut tx, household).await?
+    {
+        return Err(Error::Invalid("the household already has its ClinVar check: change it in Settings".into()).into());
+    }
     if b.kind == "paperless" {
         for profile in tag_profiles(&config) {
             manages_profile(&mut tx, &p, profile).await?;
