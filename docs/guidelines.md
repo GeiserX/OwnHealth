@@ -190,10 +190,11 @@ open an issue. We then put their name in `reviewer` and their GitHub account in 
      OWNHEALTH_RECORD_PREVENTION=1 cargo test -p ownhealth-rules --test prevention
      cargo test -p ownhealth-rules --test prevention
      cargo test -p ownhealth --test wording_all
+     cd ..
      ```
 
    The test database is in [AGENTS.md](../AGENTS.md#dev-commands).
-6. Check the links with `bash scripts/cite-links.sh`. It lists each dead link and exits with 1 when it finds one.
+6. From the repository root, check the links with `bash scripts/cite-links.sh`. It lists each dead link and exits with 1 when it finds one.
 7. Open the pull request ready for review. Give the source and its terms (a row in the licence
    table above), and say which steps you want the maintainer to do.
 
