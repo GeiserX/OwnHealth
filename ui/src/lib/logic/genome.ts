@@ -104,3 +104,26 @@ export function genomeEmpty(g: OverviewLike, hasDataset: boolean): boolean {
 	if (!hasDataset) return true;
 	return !g.findings.length && !g.locked.length && !g.withheld.minor_rule && !(g.pgx_grid ?? []).some((r) => r.status === 'found');
 }
+
+/** Limitation codes the Genome screen words itself; any other line shows the server's text. */
+const LIMIT_KEYS: Record<string, string> = {
+	no_genome: 'i2_lim_no_genome',
+	no_vcf: 'i2_lim_no_vcf',
+	variant_only_vcf: 'i2_lim_variant_only',
+	chip_unconfirmed: 'gen_lim_chip',
+	no_cram: 'i2_lim_no_cram'
+};
+
+/** The limitation lines under the coverage note, in the reader's language. Two datasets can give the same line; it shows once. */
+export function limitLines(
+	texts: string[],
+	codes: ({ code: string; assay?: string | null } | null | undefined)[] | null | undefined,
+	tf: TF
+): string[] {
+	const lines = texts.map((text, i) => {
+		const c = codes?.[i];
+		const key = c && LIMIT_KEYS[c.code];
+		return key ? tf(key, { kind: (c.assay ?? '').toUpperCase() }) : text;
+	});
+	return [...new Set(lines)];
+}

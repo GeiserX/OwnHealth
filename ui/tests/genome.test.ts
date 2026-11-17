@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dict } from '../src/lib/i18n/dict.ts';
-import { COVERAGE_REASONS, genomeEmpty, gridCall, resultCell, svNote, type GridRow } from '../src/lib/logic/genome.ts';
+import { COVERAGE_REASONS, genomeEmpty, gridCall, limitLines, resultCell, svNote, type GridRow } from '../src/lib/logic/genome.ts';
 
 const tr = (lang: 'en' | 'es') => (k: string) => (dict[lang] as Record<string, string>)[k] ?? k;
 const en = tr('en');
@@ -98,4 +98,16 @@ test('the stale texts name the OwnGenome command that re-runs the out-of-date st
 		}
 		assert.ok(d.gen_stale_title.includes('{by}') && d.gen_stale_title.includes('{steps}'), `${lang}: ${d.gen_stale_title}`);
 	}
+});
+
+test('two datasets with the same limitation show it once, so the keyed list never repeats a key', () => {
+	const tf = (k: string, v: Record<string, string>) => `${en(k)}|${v.kind}`;
+	const lines = limitLines(
+		['No VCF uploaded', 'No VCF uploaded', 'Free text'],
+		[{ code: 'no_vcf', assay: 'wgs' }, { code: 'no_vcf', assay: 'wgs' }, null],
+		tf
+	);
+	assert.equal(lines.length, 2);
+	assert.equal(new Set(lines).size, lines.length);
+	assert.equal(lines[1], 'Free text');
 });
