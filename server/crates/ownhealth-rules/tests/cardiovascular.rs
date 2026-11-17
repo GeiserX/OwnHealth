@@ -403,11 +403,19 @@ fn a_statin_is_found_by_its_spanish_brand_and_a_condition_by_its_words_or_icd10_
     assert!(cardio::condition_classes(cv(), "Gestational diabetes", None, None).is_empty());
     assert!(cardio::condition_classes(cv(), "Diabetes insípida", None, None).is_empty());
     // a negation before the disease in its clause is not the disease; after it, the disease stays
-    for text in ["Hypertension without diabetes", "Hipertensión sin diabetes", "No diabetes"] {
+    for text in [
+        "Hypertension without diabetes",
+        "Hipertensión sin diabetes",
+        "No diabetes",
+    ] {
         assert!(cardio::condition_classes(cv(), text, None, None).is_empty(), "{text}");
     }
     for text in ["Diabetes without complications", "Diabetes tipo 2 sin complicaciones"] {
-        assert_eq!(cardio::condition_classes(cv(), text, None, None), vec!["diabetes"], "{text}");
+        assert_eq!(
+            cardio::condition_classes(cv(), text, None, None),
+            vec!["diabetes"],
+            "{text}"
+        );
     }
     assert!(cardio::condition_classes(cv(), "Antecedentes familiares de infarto", None, None).is_empty());
     assert!(cardio::condition_classes(cv(), "Hypercholesterolaemia", Some("icd10"), Some("E78.0")).is_empty());
