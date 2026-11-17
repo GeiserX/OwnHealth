@@ -1,8 +1,8 @@
 // Endpoints the "health" pages read (lane H owns this file): dashboard, biomarkers, timeline (genome and drug check: manage.ts).
 // Backends: lane E (status.py, drug_check.py), lane A (observations.py), lane H (timeline.py), lane D (genome.py).
-import { del, get, p, post, request } from './core';
+import { del, get, p, post, request, requestBlob } from './core';
 import type { DueAnswer, DueDecisionIn, DueDoc } from '../logic/due';
-import type { Calculators, Dashboard, Gaps, ObservationOut, Status, Timeline, Trend, TrendPoint } from './types';
+import type { Calculators, Dashboard, Gaps, NextDraw, ObservationOut, Status, Timeline, Trend, TrendPoint } from './types';
 
 export type Units = 'si' | 'conventional' | 'as_reported';
 
@@ -42,3 +42,10 @@ export const putDueAnswers = (profile: string, answers: Record<string, 'yes' | '
 export const getGaps = (profile: string, lang: string, asOf?: string) => get<Gaps>(`${p(profile)}/gaps`, { lang, as_of: asOf });
 export const gapLetterUrl = (profile: string, key: string, lang: string) =>
 	`/api${p(profile)}/gaps/${encodeURIComponent(key)}/letter.pdf?lang=${encodeURIComponent(lang)}`;
+// v0.4.0 next-draw planner: the tests worth asking for at the next blood draw (read:labs), and the
+// same list as a printable request; hide_name prints a blank for the name and no birth date.
+export const getNextDraw = (profile: string, lang: string, asOf?: string) => get<NextDraw>(`${p(profile)}/next-draw`, { lang, as_of: asOf });
+export const nextDrawPdf = (profile: string, q: { lang: 'es' | 'en'; hide_name: boolean; as_of?: string }) => {
+	const qs = new URLSearchParams({ lang: q.lang, hide_name: q.hide_name ? '1' : '0', ...(q.as_of ? { as_of: q.as_of } : {}) });
+	return requestBlob('GET', `${p(profile)}/next-draw.pdf?${qs}`, undefined, `ownhealth-next-draw-${profile}.pdf`);
+};

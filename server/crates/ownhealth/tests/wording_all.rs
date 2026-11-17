@@ -38,6 +38,7 @@ const SOURCES: &[(&str, Source)] = &[
     ("due", |s| Box::pin(due(s))),
     ("calculators", |s| Box::pin(calculators(s))),
     ("couple_carrier", |_| Box::pin(couple_carrier())),
+    ("next_draw", |s| Box::pin(next_draws(s))),
     ("family_patterns", |_| Box::pin(family_patterns())),
     ("family_hints", |_| Box::pin(family_hints())),
     ("gaps", |s| Box::pin(gaps(s))),
@@ -524,6 +525,27 @@ fn the_clinvar_alert_file_passes_the_cited_loader() -> R {
     assert!(f.version.starts_with("clinvar_alerts "), "{}", f.version);
     assert!(f.doc["cite"].as_str().is_some_and(|c| c.starts_with("https://")));
     Ok(())
+}
+
+/// The next-draw planner rendered for each person in both languages, with the person's line (its PDF
+/// text layer is linted in `next_draw_pdf.rs`).
+async fn next_draws(s: &Seeded) -> anyhow::Result<Vec<Value>> {
+    use ownhealth_rules::next_draw;
+    let mut tx = s.pool().begin().await?;
+    let pack = load_pack()?;
+    let mut out = Vec::new();
+    for slug in SLUGS {
+        let plan = next_draw::build(&mut tx, s.pid(slug), as_of()).await?;
+        let profile = ownhealth_core::access::get_profile(&mut tx, s.pid(slug)).await?;
+        for lang in LANGS {
+            let mut model = next_draw::render(&plan, &pack, lang)?;
+            if let Some(p) = &profile {
+                model["person"] = next_draw::person(p, as_of(), lang, true)?;
+            }
+            out.push(model);
+        }
+    }
+    Ok(out)
 }
 
 /// The family patterns card with every rule present and one that cannot be checked.

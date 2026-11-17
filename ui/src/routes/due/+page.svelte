@@ -20,6 +20,7 @@
 	import { addDays, docLabel, dueColor, dueGroups, evidenceDay, evidenceLimit, isOpen, type DueDecisionIn, type DueDoc, type DueItem } from '#lib/logic/due';
 	import { todayIso } from '#lib/logic/people';
 	import { currentProfile } from '#lib/state/app.svelte';
+	import Tabs from './next-draw/Tabs.svelte';
 
 	const prof = $derived(currentProfile());
 	const canWrite = $derived(!!prof && prof.role !== 'viewer');
@@ -218,6 +219,7 @@
 	</div>
 	<div class="right"><PhaseChip phase="v0.3" /></div>
 </div>
+<Tabs />
 
 {#if !prof}
 	<div class="card"><div class="empty">{t('h1_noprofile')} <a href="/family">{t('h1_noprofile_link')}</a></div></div>

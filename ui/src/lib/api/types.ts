@@ -815,3 +815,46 @@ export interface Gaps {
 	/** Absent for a caller without read:records. */
 	gaps_hash?: string;
 }
+
+// v0.4.0 next-draw planner: GET /profiles/{p}/next-draw (read:labs), in one language.
+export interface NextDrawReason {
+	kind: 'recency' | 'never_measured' | 'lab_range';
+	rule: string;
+	cite?: string;
+	src: string[];
+	/** why the test is listed, in the reader's language */
+	text: string;
+	last?: IsoDate;
+	value?: string;
+	unit?: string;
+	ref?: string;
+	flag?: string;
+	date?: IsoDate;
+}
+export interface NextDrawItem {
+	group: string;
+	name: string;
+	loinc?: string;
+	prep: string[];
+	reasons: NextDrawReason[];
+}
+export interface NextDrawSection {
+	/** the preparation rows this group of tests shares; empty for the tests with none */
+	prep: string[];
+	title: string;
+	notes: { id: string; name: string; text: string; source: string; cite: string }[];
+	items: NextDrawItem[];
+}
+export interface NextDraw {
+	schema: string;
+	profile: string;
+	as_of: IsoDate;
+	lang: string;
+	rules: string[];
+	state_hash: string;
+	prevention_hash?: string;
+	count: number;
+	sections: NextDrawSection[];
+	/** the words of the sheet (title, notice, empty, ...) */
+	labels: Record<string, string>;
+}
