@@ -640,6 +640,12 @@ export interface GenomeEvent {
 export interface GenomeEvents {
 	events: GenomeEvent[];
 	withheld: { sensitive: number; minor_rule: number };
+	/** The newest ClinVar release compared for this profile's genomes; null before the first. */
+	release?: string | null;
+	/** The household's weekly ClinVar check is on. */
+	weekly?: boolean;
+	/** Where a reclassified call is made again: OwnGenome's command, in both languages. */
+	rerun?: { en: string; es: string };
 }
 
 export interface GenomeView {
