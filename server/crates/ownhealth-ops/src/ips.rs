@@ -20,7 +20,7 @@
 //!   "none known"), and an empty recommended one is left out; the narrative says why it is empty
 //!   (nothing on record, or the caller's scopes hide it). The importer skips those entries;
 //! - the narratives are the sheet's own words (`data/summary/templates.yaml`) in the chosen language,
-//!   so the wording lint covers them; the section codes are `data/terminology/loinc/sections.tsv`;
+//!   so the wording lint covers them; the section codes are `data/summary/ips_sections.tsv`;
 //! - the same data on the same day gives the same bytes.
 
 use std::collections::HashSet;
@@ -44,10 +44,10 @@ const SRC_URN: &str = "urn:ownhealth:src:";
 /// The document and section codes, compiled in.
 pub const SECTIONS_TSV: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../data/terminology/loinc/sections.tsv"
+    "/../../../data/summary/ips_sections.tsv"
 ));
 
-/// One IPS section: its key in sections.tsv, the summary model list it shows, the table that list's
+/// One IPS section: its key in ips_sections.tsv, the summary model list it shows, the table that list's
 /// rows live in, its title in the templates, and the domain whose scope hides it.
 struct Section {
     key: &'static str,
@@ -130,7 +130,7 @@ impl Ips {
     }
 }
 
-/// section key -> (code, LOINC long name), from sections.tsv.
+/// section key -> (code, LOINC long name), from ips_sections.tsv.
 pub fn section_code(key: &str) -> Option<(&'static str, &'static str)> {
     SECTIONS_TSV
         .lines()
@@ -144,7 +144,8 @@ pub fn section_code(key: &str) -> Option<(&'static str, &'static str)> {
 }
 
 fn coded(key: &str) -> Result<Value> {
-    let (code, display) = section_code(key).ok_or_else(|| Error::Invalid(format!("sections.tsv has no {key} row")))?;
+    let (code, display) =
+        section_code(key).ok_or_else(|| Error::Invalid(format!("ips_sections.tsv has no {key} row")))?;
     Ok(json!({"coding": [{"system": LOINC, "code": code, "display": display}]}))
 }
 
