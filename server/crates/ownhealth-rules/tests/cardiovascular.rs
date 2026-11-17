@@ -387,6 +387,9 @@ fn a_statin_is_found_by_its_spanish_brand_and_a_condition_by_its_words_or_icd10_
         "Screening for chronic kidney disease",
         "Cribado de enfermedad arterial periférica",
         "Screening for heart failure",
+        "Screening for familial hypercholesterolaemia",
+        "Cribado de hipercolesterolemia familiar",
+        "Riesgo de hipercolesterolemia familiar",
     ] {
         assert!(cardio::condition_classes(cv(), text, None, None).is_empty(), "{text}");
     }

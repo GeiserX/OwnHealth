@@ -65,8 +65,8 @@ rows:
   - id: fh
     terms: [familial hypercholesterolemia, familial hypercholesterolaemia, hipercolesterolemia familiar]
     not_terms: [
-      antecedentes familiares de, family history of, no family history, without family history,
-      sin antecedentes familiares,
+      screening, cribado, antecedentes familiares de, family history of, no family history,
+      without family history, sin antecedentes familiares, riesgo de, risk of, risk for,
     ]
     qualifiers: [antecedentes familiares, family history]
     icd10: [E78.01]
