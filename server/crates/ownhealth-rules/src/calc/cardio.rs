@@ -362,14 +362,16 @@ pub fn condition_classes<'a>(cv: &'a CvData, text: &str, system: Option<&str>, c
         .filter(|c| {
             // an exclusion holds only inside its own clause, and a `not_terms` one only before the term:
             // "riesgo de diabetes" is not diabetes, but "diabetes con riesgo de complicaciones" and
-            // "diabetes mellitus tipo 2: riesgo de hipoglucemia" are. A qualifier that starts a longer
-            // `not_terms` phrase there is that phrase: "family history" excludes its whole clause, but
-            // "family history of stroke" only what follows it
+            // "diabetes mellitus tipo 2: riesgo de hipoglucemia" are. A qualifier inside a longer
+            // `not_terms` phrase is that phrase: "family history" excludes its whole clause, but
+            // "family history of stroke" only what follows it, and "no family history" nothing before it
             let qualified = |ws: &[String], q: &str| {
+                let ql = words(q).len();
                 phrase_at(ws, q).into_iter().any(|at| {
-                    !c.not_terms
-                        .iter()
-                        .any(|n| words(n).len() > words(q).len() && phrase_at(ws, n).contains(&at))
+                    !c.not_terms.iter().any(|n| {
+                        let nl = words(n).len();
+                        nl > ql && phrase_at(ws, n).into_iter().any(|s| s <= at && at + ql <= s + nl)
+                    })
                 })
             };
             let by_text = parts.iter().any(|ws| {

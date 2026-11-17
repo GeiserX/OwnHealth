@@ -363,18 +363,22 @@ fn a_statin_is_found_by_its_spanish_brand_and_a_condition_by_its_words_or_icd10_
         "Diabetes: family history",
         "Chronic kidney disease (family history)",
         "Heart failure - family history",
+        "Familial hypercholesterolaemia (family history)",
+        "Hipercolesterolemia familiar (antecedentes familiares)",
     ] {
         assert!(cardio::condition_classes(cv(), text, None, None).is_empty(), "{text}");
     }
-    for text in [
-        "Diabetes tipo 2 y antecedentes familiares de infarto",
-        "Type 2 diabetes: family history of stroke",
+    for (text, class) in [
+        ("Diabetes tipo 2 y antecedentes familiares de infarto", "diabetes"),
+        ("Type 2 diabetes: family history of stroke", "diabetes"),
+        ("Type 2 diabetes (no family history)", "diabetes"),
+        ("Diabetes tipo 2 sin antecedentes familiares", "diabetes"),
+        (
+            "Familial hypercholesterolaemia: family history of premature coronary disease",
+            "fh",
+        ),
     ] {
-        assert_eq!(
-            cardio::condition_classes(cv(), text, None, None),
-            vec!["diabetes"],
-            "{text}"
-        );
+        assert_eq!(cardio::condition_classes(cv(), text, None, None), vec![class], "{text}");
     }
     // a screening is not the disease
     for text in [

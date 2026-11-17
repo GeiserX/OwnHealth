@@ -48,8 +48,9 @@ country in no region, such as US, it is refused too (`region_not_covered`). We n
 - The recorded conditions, matched by `data/calculators/conditions.yaml`. An exclusion such as
   "riesgo de", "screening" or "family history of" holds only in its own clause and only before the
   disease, so "Riesgo de diabetes" and "Screening for chronic kidney disease" are not that disease,
-  while "diabetes con riesgo de complicaciones", "Diabetes mellitus tipo 2: riesgo de hipoglucemia"
-  and "Type 2 diabetes: family history of stroke" keep their diagnosis. A qualifier such as
+  while "diabetes con riesgo de complicaciones", "Diabetes mellitus tipo 2: riesgo de hipoglucemia",
+  "Type 2 diabetes: family history of stroke" and "Type 2 diabetes (no family history)" keep their
+  diagnosis. A qualifier such as
   "gestational", "insipidus" or a bare "family history" excludes wherever it stands in the clause,
   so "Diabetes mellitus (gestational)", "Family history: diabetes" and "Stroke (family history)" are
   not that disease.
