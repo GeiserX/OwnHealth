@@ -526,15 +526,23 @@ pub fn rcv(rule: &Map<String, Value>, pts: &[Point]) -> Option<Map<String, Value
     if change.abs() <= rcv {
         return None;
     }
+    // the sentence names one unit: the printed numbers when both were printed in it, else both
+    // numbers in the unit the change was judged in
+    let (value, prev, unit) = if a.unit == b.unit {
+        (b.shown(), a.shown(), b.unit.as_deref())
+    } else {
+        let shown = |d: Decimal| num(&quantize(d, 2).normalize());
+        (shown(vb), shown(va), b.comparable_unit())
+    };
     let out = json!({
         "kind": "rcv",
         "reason": "RCV_CHANGE",
         "rule": rule_id(rule),
         "severity": severity(rule, 1),
-        "value": b.shown(),
-        "prev": a.shown(),
+        "value": value,
+        "prev": prev,
         "prev_date": iso(a.date),
-        "unit": opt(b.unit.as_deref()),
+        "unit": opt(unit),
         "change_pct": num(&quantize(change, 1)),
         "rcv_pct": num(&quantize(rcv, 1)),
         "date": iso(b.date),
