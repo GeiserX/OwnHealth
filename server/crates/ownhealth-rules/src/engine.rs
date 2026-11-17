@@ -326,17 +326,19 @@ async fn load_points(
     Ok((series, sensitive))
 }
 
-type Day = (NaiveDate, Option<f64>, Option<f64>);
+pub(crate) type Day = (NaiveDate, Option<f64>, Option<f64>);
 type RollupRow = (String, i16, DateTime<Utc>, Option<f32>, Option<f32>);
 type BySource = Vec<(i16, Vec<Day>)>;
 
-/// Daily rollups of the last 90 days per metric, one source per metric (source_priority, else the
-/// source with the most days). metric -> [(day, avg, sum)] chronological.
-async fn wearables(
+/// Daily rollups of the last `days` days per metric (the state reads 90), one source per metric
+/// (source_priority, else the source with the most days in that window). metric -> [(day, avg, sum)]
+/// chronological.
+pub(crate) async fn wearables(
     conn: &mut PgConnection,
     profile_id: Uuid,
     as_of: NaiveDate,
     metrics: &[String],
+    days: i64,
 ) -> Result<HashMap<String, (i16, Vec<Day>)>> {
     if metrics.is_empty() {
         return Ok(HashMap::new());
@@ -350,7 +352,7 @@ async fn wearables(
     .bind(profile_id)
     .bind(metrics)
     .bind(cut)
-    .bind(cut - Duration::days(90))
+    .bind(cut - Duration::days(days))
     .fetch_all(&mut *conn)
     .await?;
     let prio: HashMap<String, Vec<i16>> =
@@ -733,7 +735,7 @@ pub async fn evaluate(
         .flat_map(|s| s.markers.iter().map(System::marker_key))
         .collect();
     let wdays = if only_group.is_none() {
-        wearables(&mut *conn, profile_id, as_of, &metrics).await?
+        wearables(&mut *conn, profile_id, as_of, &metrics, 90).await?
     } else {
         HashMap::new()
     };

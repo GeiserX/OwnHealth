@@ -1609,6 +1609,13 @@ export const dict = {
 		fam_share_masked: "A profile you cannot open",
 		fam_share_masked_d: "you cannot see their family history, so the degree is not shown",
 		fam_share_notmgr: "Only the manager of this profile chooses what {name} shares with relatives: the owner, or a guardian while nobody has claimed the profile. An adult with no login yet chooses once they claim it.",
+		// ---- slice 20: cardiovascular risk, smoking status (calc_) ----
+		calc_smoking: "Smoking status",
+		calc_smk_never: "Never smoked",
+		calc_smk_former: "Former smoker",
+		calc_smk_current: "Smokes now",
+		calc_smk_pick: "Choose one answer.",
+		calc_smk_add: "Record smoking status",
 	},
 	es: {
 		household: "Hogar",
@@ -3217,6 +3224,13 @@ export const dict = {
 		fam_share_masked: "Un perfil que no puedes abrir",
 		fam_share_masked_d: "no puedes ver su historial familiar, así que no se muestra el grado",
 		fam_share_notmgr: "Solo quien gestiona este perfil elige qué comparte {name} con sus familiares: la persona titular, o un tutor mientras nadie haya reclamado el perfil. Un adulto que aún no tiene acceso lo elige cuando reclame el perfil.",
+		// ---- slice 20: cardiovascular risk, smoking status (calc_) ----
+		calc_smoking: "Tabaquismo",
+		calc_smk_never: "Nunca ha fumado",
+		calc_smk_former: "Fumó en el pasado",
+		calc_smk_current: "Fuma actualmente",
+		calc_smk_pick: "Elige una respuesta.",
+		calc_smk_add: "Registrar tabaquismo",
 	},
 } as const;
 
