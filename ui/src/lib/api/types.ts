@@ -776,3 +776,42 @@ export interface Calculators {
 	items: CalcItem[];
 	calculators_hash: string;
 }
+
+// v0.3 document gaps (GET /profiles/{p}/gaps): ownhealth.gaps/v1 in one language, trimmed to the caller's scopes.
+export interface GapItem {
+	key: string;
+	rule: 'visit_without_report' | 'records_hole';
+	source: string;
+	cite: string;
+	src: string[];
+	documents?: Uuid[];
+	labs?: boolean;
+	/** visit_without_report: the visit day, its provider and the letter of the profile's country, if any */
+	date?: IsoDate;
+	provider?: string;
+	letter?: string;
+	/** records_hole: the dated facts on each side and the days between */
+	from?: IsoDate;
+	to?: IsoDate;
+	days?: number;
+	title: string;
+	why: string;
+	/** In `hidden`: what the person decided about it on the Due list (item `gap:<key>`). */
+	decision?: { kind: 'snooze' | 'dismiss' | 'done'; until?: IsoDate };
+}
+
+export interface Gaps {
+	schema: string;
+	profile: string;
+	as_of: IsoDate;
+	rules: string;
+	country?: string;
+	lang: string;
+	items: GapItem[];
+	/** Gaps snoozed, dismissed or marked done on the Due list; absent when there are none. */
+	hidden?: GapItem[];
+	withheld: number;
+	withheld_scopes: string[];
+	/** Absent for a caller without read:records. */
+	gaps_hash?: string;
+}

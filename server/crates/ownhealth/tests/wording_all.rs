@@ -40,6 +40,8 @@ const SOURCES: &[(&str, Source)] = &[
     ("couple_carrier", |_| Box::pin(couple_carrier())),
     ("family_patterns", |_| Box::pin(family_patterns())),
     ("family_hints", |_| Box::pin(family_hints())),
+    ("gaps", |s| Box::pin(gaps(s))),
+    ("gap_letters", |_| Box::pin(gap_letters())),
 ];
 
 async fn status(s: &Seeded) -> anyhow::Result<Vec<Value>> {
@@ -130,6 +132,57 @@ async fn due(s: &Seeded) -> anyhow::Result<Vec<Value>> {
         let doc = ownhealth_rules::prevention::build_document(&mut tx, s.pid(slug), as_of()).await?;
         for lang in LANGS {
             out.push(ownhealth_rules::prevention::render(&doc, &pack, lang, &all_scopes())?);
+        }
+    }
+    Ok(out)
+}
+
+/// The document gaps (ownhealth.gaps/v1 rendered) of each person in both languages, plus one gap of
+/// each rule as the Gaps card and the Due list word it (the seed has holes but no visit).
+async fn gaps(s: &Seeded) -> anyhow::Result<Vec<Value>> {
+    use ownhealth_rules::gaps::{build_document, due_text, render};
+    let mut tx = s.pool().begin().await?;
+    let mut out = Vec::new();
+    let each = json!({"schema": "ownhealth.gaps/v1", "items": [
+        {"key": "visit:2025-11-10:00000000", "rule": "visit_without_report", "date": "2025-11-10",
+         "provider": "Hospital Norte", "src": ["src_example"]},
+        {"key": "hole:2016-05-10:2021-11-09", "rule": "records_hole", "from": "2016-05-10", "to": "2021-11-09",
+         "days": 2009, "src": ["src_example"]},
+    ]});
+    for lang in LANGS {
+        out.push(render(&each, lang, &all_scopes())?);
+        for it in each["items"].as_array().into_iter().flatten() {
+            out.push(json!(due_text(it, lang)?));
+        }
+    }
+    for slug in SLUGS {
+        let doc = build_document(&mut tx, s.pid(slug), as_of()).await?;
+        for lang in LANGS {
+            out.push(render(&doc, lang, &all_scopes())?);
+        }
+    }
+    Ok(out)
+}
+
+/// Every access-request letter (`ownhealth_ops::letter_pdf`) in both languages, the person's own and
+/// a legal representative's, read back from the PDF's text layer.
+async fn gap_letters() -> anyhow::Result<Vec<Value>> {
+    use ownhealth_ops::letter_pdf::{LetterIn, render};
+    let g = ownhealth_rules::gaps::load()?;
+    let mut out = Vec::new();
+    for l in &g.letters {
+        for lang in LANGS {
+            for on_behalf in [false, true] {
+                let input = LetterIn {
+                    lang,
+                    name: "Alex Rivera",
+                    provider: "Hospital Norte",
+                    date: "2025-11-10",
+                    on_behalf,
+                };
+                let lines = ownhealth_ingest_pdf::textcheck::assert_text_layer(&render(g, l, &input), |_| Ok(()));
+                out.push(json!({"letter": l.id, "lang": lang, "lines": lines}));
+            }
         }
     }
     Ok(out)
