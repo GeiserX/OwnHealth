@@ -1171,12 +1171,13 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
             limitations.push(if resolution == "raw" {
                 json!(
                     "A point with method_change comes from another method or lab than the point before it; \
-                     the change between them is not judged against the reference change value."
+                     the change between them is not judged against the reference change value. The trend \
+                     statistics still use every point."
                 )
             } else {
                 json!(
                     "The series changes method or lab; a change across a switch is not judged against the \
-                     reference change value."
+                     reference change value. The trend statistics still use every point."
                 )
             });
         }

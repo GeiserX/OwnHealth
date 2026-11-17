@@ -154,7 +154,7 @@ async fn trend_keeps_both_codes_stats_and_annotations() -> R {
     assert!(
         strs(&env["limitations"])
             .iter()
-            .any(|x| x.starts_with("A point with method_change"))
+            .any(|x| x.starts_with("A point with method_change") && x.ends_with("still use every point."))
     );
     // a monthly answer has no per-point marker, so its limitation names the switch for the series
     let month = c
@@ -168,7 +168,8 @@ async fn trend_keeps_both_codes_stats_and_annotations() -> R {
     let lim = strs(&month["limitations"]);
     assert!(!lim.iter().any(|x| x.contains("method_change")), "{lim:?}");
     assert!(
-        lim.iter().any(|x| x.starts_with("The series changes method or lab")),
+        lim.iter()
+            .any(|x| x.starts_with("The series changes method or lab") && x.ends_with("still use every point.")),
         "{lim:?}"
     );
     let c = w.connect(&w.tok_scopes(scopes(&["read:labs"])).await?).await?;
