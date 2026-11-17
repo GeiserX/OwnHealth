@@ -605,7 +605,13 @@ pub fn finding_out(row: &FindingRow) -> Value {
                 "native": ev.get("native").cloned().unwrap_or(Value::Null),
             })
         });
-    let drugs: Vec<Value> = guidance.iter().map(|g| g["drug"].clone()).collect();
+    // One name per drug, in first-seen order: CPIC and DPWG can both cover the same drug.
+    let mut drugs: Vec<Value> = Vec::new();
+    for g in &guidance {
+        if !drugs.contains(&g["drug"]) {
+            drugs.push(g["drug"].clone());
+        }
+    }
     let limitations: Vec<Value> = fact
         .get("limitations")
         .and_then(Value::as_array)
@@ -753,9 +759,10 @@ pub fn assay_out(ds: &DatasetRow) -> Value {
 }
 
 /// The coverage notes of the datasets on file: `(code, assay, English text)`. The code and assay let
-/// the UI say the note in its language; MCP sends the English text.
+/// the UI say the note in its language; MCP sends the English text. Two datasets with the same gap
+/// (two WGS imports with no VCF) give one note: each line is said once.
 pub fn dataset_notes(datasets: &[DatasetRow]) -> Vec<(&'static str, String, String)> {
-    let mut out = Vec::new();
+    let mut out: Vec<(&'static str, String, String)> = Vec::new();
     for ds in datasets {
         let kind = ds.assay.as_str();
         if ds.vcf.is_none() {
@@ -787,6 +794,8 @@ pub fn dataset_notes(datasets: &[DatasetRow]) -> Vec<(&'static str, String, Stri
         String::new(),
         "CRAM/BAM not on file: structural variant, CYP2D6 and HLA re-calls are not possible here.".into(),
     ));
+    let mut said = HashSet::new();
+    out.retain(|(_, _, text)| said.insert(text.clone()));
     out
 }
 
@@ -1283,6 +1292,86 @@ mod tests {
         let (name, genes) = drug_genes("RxNorm:32968");
         assert_eq!(name.as_deref(), Some("clopidogrel"));
         assert!(genes.iter().any(|g| g == "CYP2C19"));
+    }
+
+    #[test]
+    fn a_drug_two_guidelines_cover_is_named_once() {
+        let fact = json!({"id": "f_1", "category": "pgx", "gene": "CYP3A5",
+        "drug_guidance": [
+            {"drug": "tacrolimus", "source": "CPIC", "level": "Strong"},
+            {"drug": "tacrolimus", "source": "DPWG", "level": "Unspecified"},
+            {"drug": "voriconazole", "source": "DPWG", "level": "Unspecified"}
+        ]});
+        let row = FindingRow {
+            id: Uuid::nil(),
+            dataset_id: Uuid::nil(),
+            fact_id: "f_1".into(),
+            category: "pgx".into(),
+            gene: Some("CYP3A5".into()),
+            rsid: None,
+            hgvs: None,
+            diplotype: Some("*1/*1".into()),
+            phenotype: Some("Normal Metabolizer".into()),
+            activity_score: None,
+            zygosity: None,
+            evidence: "E1".into(),
+            confidence: "high".into(),
+            call_state: None,
+            verification_status: "unverified".into(),
+            sensitive: false,
+            adult_onset: false,
+            carrier: false,
+            status: "current".into(),
+            src_id: "src_1".into(),
+            fact: Json(fact),
+            assay: "wgs".into(),
+            owngenome_version: "0.8.2".into(),
+            db_versions: Json(json!({})),
+            sample_id: "S1".into(),
+            imported_at: DateTime::<Utc>::default(),
+            n_sources: 1,
+            guidance_cpic_version: None,
+        };
+        let out = finding_out(&row);
+        assert_eq!(out["drugs"], json!(["tacrolimus", "voriconazole"]));
+        // Each guideline's own row stays: the two sources say different things.
+        assert_eq!(out["drug_guidance"].as_array().map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn two_datasets_with_the_same_gap_note_it_once() {
+        let ds = |assay: &str| DatasetRow {
+            id: Uuid::nil(),
+            sample_id: "S1".into(),
+            assay: assay.into(),
+            build: "GRCh38".into(),
+            owngenome_version: "0.8.2".into(),
+            db_versions: Json(json!({})),
+            src_id: "src_1".into(),
+            imported_at: DateTime::<Utc>::default(),
+            assay_detail: Json(json!({})),
+            producer: Json(json!({})),
+            vcf: None,
+            tbi: None,
+            gvcf: None,
+            gvcf_tbi: None,
+            sites: None,
+            sites_tbi: None,
+        };
+        let notes = dataset_notes(&[ds("wgs"), ds("wgs"), ds("chip"), ds("chip_imputed")]);
+        let codes: Vec<(&str, &str)> = notes.iter().map(|(c, a, _)| (*c, a.as_str())).collect();
+        assert_eq!(
+            codes,
+            [
+                ("no_vcf", "wgs"),
+                ("no_vcf", "chip"),
+                ("chip_unconfirmed", "chip"),
+                ("no_vcf", "chip_imputed"),
+                ("no_cram", "")
+            ]
+        );
+        let texts: HashSet<&str> = notes.iter().map(|(_, _, t)| t.as_str()).collect();
+        assert_eq!(texts.len(), notes.len(), "every line differs: {notes:?}");
     }
 
     #[test]

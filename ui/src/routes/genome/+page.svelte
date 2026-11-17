@@ -18,7 +18,7 @@
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { i18n, t, type Key } from '#lib/i18n/index.svelte';
-	import { genomeEmpty, gridCall, resultCell as resultCellOf, svNote } from '#lib/logic/genome';
+	import { genomeEmpty, gridCall, limitLines, resultCell as resultCellOf, svNote } from '#lib/logic/genome';
 	import { reinterpText } from '#lib/logic/inbox';
 	import { currentProfile } from '#lib/state/app.svelte';
 
@@ -117,20 +117,7 @@
 	const subTail = $derived(ds ? [...Object.entries(ds.db_versions).filter(([k]) => k === 'clinvar' || k === 'cpic').map(([k, val]) => `${k === 'clinvar' ? 'ClinVar' : 'CPIC'} ${k === 'clinvar' ? (clinvarNow ?? val) : val}`), `${t('i2_ingested')} ${day(ds.imported_at)}`].join(' · ') : '');
 	const sensitiveShown = $derived((g?.findings ?? []).filter((f) => f.sensitive));
 	// The server's limitation codes in the reader's language; an unknown code keeps the server's text.
-	const LIM: Record<string, Key> = {
-		no_genome: 'i2_lim_no_genome',
-		no_vcf: 'i2_lim_no_vcf',
-		variant_only_vcf: 'i2_lim_variant_only',
-		chip_unconfirmed: 'gen_lim_chip',
-		no_cram: 'i2_lim_no_cram'
-	};
-	const limits = $derived(
-		(g?.limitations ?? []).map((text, i) => {
-			const c = g?.limitation_codes?.[i];
-			const key = c && LIM[c.code];
-			return key ? tf(key, { kind: (c.assay ?? '').toUpperCase() }) : text;
-		})
-	);
+	const limits = $derived(limitLines(g?.limitations ?? [], g?.limitation_codes, tf));
 	// A dataset whose findings were all retracted (or never had any) reads as no genome data at all.
 	// A call the grid shows below the table's evidence level still counts as data.
 	const empty = $derived(!!g && genomeEmpty(g, !!ds));
