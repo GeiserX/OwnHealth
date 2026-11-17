@@ -755,7 +755,13 @@ fn med_codes(concept: Option<&Value>) -> Option<Vec<MedCode>> {
 /// `resolve(reference)` returns a contained or bundled resource (for medicationReference).
 pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&str>) -> Option<&'a Value>) -> Mapped {
     let rtype = r.get("resourceType").and_then(Value::as_str).unwrap_or_default();
-    if absent(r.get("medicationCodeableConcept")) {
+    let mut concept = r.get("medicationCodeableConcept").filter(|c| !c.is_null());
+    if concept.is_none() && truthy(r.get("medicationReference")) {
+        let reference = r["medicationReference"].get("reference").and_then(Value::as_str);
+        concept = resolve(reference).and_then(|m| m.get("code"));
+    }
+    // an IPS "no information" entry, inline or through the Medication it references
+    if absent(concept) {
         return skip("absent_unknown");
     }
     let raw_status = status(r);
@@ -768,11 +774,6 @@ pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&s
     let Some(status) = raw_status.as_deref().and_then(med_status) else {
         return unmapped(format!("{rtype} with status {}", py::py_str(r.get("status"))));
     };
-    let mut concept = r.get("medicationCodeableConcept").filter(|c| !c.is_null());
-    if concept.is_none() && truthy(r.get("medicationReference")) {
-        let reference = r["medicationReference"].get("reference").and_then(Value::as_str);
-        concept = resolve(reference).and_then(|m| m.get("code"));
-    }
     let Some(name) = concept_text(concept).filter(|t| !t.is_empty()) else {
         return unmapped(format!("{rtype} without a medication code"));
     };
@@ -1024,6 +1025,22 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// An IPS "no information" medicine is skipped whether it is inline or a referenced Medication.
+    #[test]
+    fn a_referenced_no_information_medicine_is_skipped() {
+        let none = json!({"coding": [{"system": ABSENT_UNKNOWN, "code": "no-medication-info"}]});
+        let med = json!({"resourceType": "Medication", "id": "m", "code": none});
+        for status in ["active", "unknown"] {
+            let r = json!({
+                "resourceType": "MedicationStatement",
+                "status": status,
+                "medicationReference": {"reference": "#m"}
+            });
+            let got = medication(&r, Uuid::nil(), |_| Some(&med));
+            assert!(matches!(&got, Mapped::Skip(why) if why == "absent_unknown"), "{status}");
+        }
+    }
 
     #[test]
     fn a_re_imported_export_keeps_the_recorded_decision() {
