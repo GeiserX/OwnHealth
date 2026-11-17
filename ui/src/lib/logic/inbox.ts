@@ -1,14 +1,14 @@
 // Pure helpers for the v0.2 screens (Inbox, review queue additions, OAuth consent). No Svelte, no
 // fetch: tests/inbox.test.ts runs them under node.
 
-type Kind = 'email' | 'folder' | 'paperless' | 'share' | 'shortcut' | 'health_auto_export' | 'gadgetbridge' | 'nightscout';
+type Kind = 'email' | 'folder' | 'paperless' | 'share' | 'shortcut' | 'health_auto_export' | 'gadgetbridge' | 'nightscout' | 'clinvar';
 
 /** Kinds a person can add from the Inbox screen, in the order the form offers them. */
 export const ADDABLE: Kind[] = ['email', 'folder', 'paperless', 'health_auto_export', 'shortcut', 'nightscout'];
 /** Kinds that receive pushes with an `oh_ing_` token (Paperless webhook, Shortcut, Health Auto Export). */
 export const PUSH_KINDS: Kind[] = ['paperless', 'shortcut', 'health_auto_export'];
 /** Kinds the scheduler polls. */
-export const POLL_KINDS: Kind[] = ['email', 'folder', 'paperless', 'nightscout'];
+export const POLL_KINDS: Kind[] = ['email', 'folder', 'paperless', 'nightscout', 'clinvar'];
 /** Kinds whose data always belongs to one profile (email picks it per sender rule, a folder per subfolder). */
 export const PROFILE_KINDS: Kind[] = ['paperless', 'shortcut', 'health_auto_export', 'nightscout'];
 /** The secret each kind keeps sealed, if any. */
