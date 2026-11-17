@@ -25,6 +25,15 @@
       "labs": "date",
       "wearables": "date"
     },
+    "family": {
+      "family_hash12": "string",
+      "items": {
+        "[]": {
+          "rel": "string",
+          "rule": "string"
+        }
+      }
+    },
     "flags": {
       "[]": {
         "code": "string",
