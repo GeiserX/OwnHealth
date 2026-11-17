@@ -18,7 +18,7 @@
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { i18n, t, type Key } from '#lib/i18n/index.svelte';
-	import { genomeEmpty, gridCall, limitLines, resultCell as resultCellOf, svNote } from '#lib/logic/genome';
+	import { genomeEmpty, gridCall, limitLines, releaseParts, resultCell as resultCellOf, svNote } from '#lib/logic/genome';
 	import { reinterpText } from '#lib/logic/inbox';
 	import { currentProfile } from '#lib/state/app.svelte';
 
@@ -114,7 +114,7 @@
 	});
 	// The ClinVar release in use: the newest the weekly check compared, else the genome file's own.
 	let clinvarNow = $state<string | null>(null);
-	const subTail = $derived(ds ? [...Object.entries(ds.db_versions).filter(([k]) => k === 'clinvar' || k === 'cpic').map(([k, val]) => `${k === 'clinvar' ? 'ClinVar' : 'CPIC'} ${k === 'clinvar' ? (clinvarNow ?? val) : val}`), `${t('i2_ingested')} ${day(ds.imported_at)}`].join(' · ') : '');
+	const subTail = $derived(ds ? [...releaseParts(ds.db_versions, clinvarNow), `${t('i2_ingested')} ${day(ds.imported_at)}`].join(' · ') : '');
 	const sensitiveShown = $derived((g?.findings ?? []).filter((f) => f.sensitive));
 	// The server's limitation codes in the reader's language; an unknown code keeps the server's text.
 	const limits = $derived(limitLines(g?.limitations ?? [], g?.limitation_codes, tf));
