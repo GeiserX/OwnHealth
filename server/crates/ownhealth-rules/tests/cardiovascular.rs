@@ -660,6 +660,38 @@ fn every_published_validity_limit_is_a_refusal_with_its_reason() {
         (code.as_str(), why["group"].clone(), why["limit"].clone()),
         ("marked_risk_factor", json!("ldl_c"), json!("4.9"))
     );
+    // a newer total cholesterol with no HDL beside it still counts for the rule, and the risk uses the pair
+    let newer_tc = Draw {
+        date: Some(day("2026-10-20")),
+        obs: [(
+            "total_cholesterol".to_string(),
+            obs("total_cholesterol", "9", "mmol/L", "2026-10-20", "src_tc2"),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let (code, why) = reason(&run(
+        "score2",
+        &[lipids("5.8", "1.3", "mmol/L"), newer_tc],
+        &p,
+        &facts(),
+        &[],
+    ));
+    assert_eq!(
+        (code.as_str(), why["group"].clone(), why["on"].clone()),
+        ("marked_risk_factor", json!("total_cholesterol"), json!("2026-10-20"))
+    );
+    // an LDL printed as above a value at or over the limit is over it too
+    let mut censored = lipids("5.8", "1.3", "mmol/L");
+    let mut over = obs("ldl_c", "5.2", "mmol/L", "2026-09-14", "src_ldl");
+    over.comparator = Some(">".into());
+    over.printed = ">5.2".into();
+    censored.obs.insert("ldl_c".into(), over);
+    let (code, why) = reason(&run("score2", &[censored], &p, &facts(), &[]));
+    assert_eq!(
+        (code.as_str(), why["group"].clone(), why["value"].clone()),
+        ("marked_risk_factor", json!("ldl_c"), json!(">5.2"))
+    );
     let mut high_bp = facts();
     high_bp.sbp = Some(Sbp::Office(obs("bp_systolic", "210", "mm[Hg]", "2026-10-02", "src_bp")));
     assert_eq!(reason(&run("score2", &mmol, &p, &high_bp, &[])).0, "marked_risk_factor");
@@ -680,6 +712,10 @@ fn every_published_validity_limit_is_a_refusal_with_its_reason() {
     let mut below = facts();
     below.sbp = Some(Sbp::Office(obs("bp_systolic", "179", "mm[Hg]", "2026-10-02", "src_bp")));
     assert_eq!(run("score2", &mmol, &p, &below, &[])[0]["status"], "ok");
+    // a pressure of zero or below is no reading: refused, never a risk
+    let mut zero = facts();
+    zero.sbp = Some(Sbp::Office(obs("bp_systolic", "0", "mm[Hg]", "2026-10-02", "src_bp")));
+    assert_eq!(reason(&run("score2", &mmol, &p, &zero, &[])).0, "out_of_range");
     assert_eq!(
         reason(&run("prevent_cvd", &mmol, &p, &high_bp, &[egfr("90")])),
         (

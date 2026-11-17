@@ -1053,37 +1053,53 @@ fn evaluate_one(
         let why = json!({"group": "bp_systolic", "unit": sbp_unit});
         return refuse(calc, "refused", ("unit_unsupported", why), as_of, inputs);
     }
+    // a pressure of zero or below is no reading, and no equation takes it
+    if sbp_v <= Decimal::ZERO {
+        return refuse(calc, "refused", ("out_of_range", json!({})), as_of, inputs);
+    }
     let egfr_v = egfr.and_then(|e| e["value"].as_str()?.parse::<Decimal>().ok());
     if is_score2 {
-        // the newest LDL-C by its own date, the later draw on a tie
-        let ldl = draws
-            .iter()
-            .enumerate()
-            .filter_map(|(i, d)| d.obs.get("ldl_c").map(|o| (i, o)))
-            .max_by_key(|(i, o)| (o.date, *i))
-            .map(|(_, o)| o);
-        let mut checks: Vec<(&Obs, Decimal, &str)> = Vec::new();
-        for o in [tc_o].into_iter().chain(ldl) {
-            if let (Some(v), None) = (o.value, &o.comparator) {
-                checks.push((o, v, o.unit.as_deref().unwrap_or_default()));
-            }
+        // the newest LDL-C and total cholesterol by their own date, the later draw on a tie: a newer
+        // total cholesterol with no HDL beside it still counts for the rule, while the risk uses the pair
+        let newest = |group: &str| {
+            draws
+                .iter()
+                .enumerate()
+                .filter_map(|(i, d)| d.obs.get(group).map(|o| (i, o)))
+                .max_by_key(|(i, o)| (o.date, *i))
+                .map(|(_, o)| o)
+        };
+        let ldl = newest("ldl_c");
+        let tc_newest = newest("total_cholesterol").filter(|o| o.date > tc_o.date);
+        // a value printed as above a bound (">5.2") is above the bound, so the bound is judged; one
+        // printed as below a bound can never be markedly raised
+        let mut checks: Vec<(&Obs, Decimal, &str, String)> = Vec::new();
+        for o in [tc_o].into_iter().chain(tc_newest).chain(ldl) {
+            let Some(v) = o.value else { continue };
+            let shown = match o.comparator.as_deref() {
+                None => num(&v),
+                Some(c @ (">" | ">=")) => format!("{c}{}", num(&v)),
+                Some(_) => continue,
+            };
+            checks.push((o, v, o.unit.as_deref().unwrap_or_default(), shown));
         }
         let sbp_line = (sbp_v, sbp.date());
         for (group, unit, m, scale, inclusive) in MARKED {
             let limit = Decimal::new(m, scale);
             let hit = |v: Decimal| if inclusive { v >= limit } else { v > limit };
             let found = if group == "bp_systolic" {
-                hit(sbp_line.0).then_some((sbp_line.0, sbp_line.1, None))
+                hit(sbp_line.0).then_some((num(&sbp_line.0), sbp_line.1, None))
             } else {
                 checks
                     .iter()
-                    .find(|(o, v, u)| o.group == group && *u == unit && hit(*v))
-                    .map(|(o, v, _)| (*v, o.date, Some(*o)))
+                    .find(|(o, v, u, _)| o.group == group && *u == unit && hit(*v))
+                    .map(|(o, _, _, shown)| (shown.clone(), o.date, Some(*o)))
             };
             if let Some((v, on, obs)) = found {
-                let why = json!({"group": group, "value": num(&v), "unit": shown_unit(unit), "limit": num(&limit), "on": iso(on)});
+                let why =
+                    json!({"group": group, "value": v, "unit": shown_unit(unit), "limit": num(&limit), "on": iso(on)});
                 let mut with = inputs.clone();
-                if let Some(o) = obs.filter(|o| o.group == "ldl_c") {
+                if let Some(o) = obs.filter(|o| !std::ptr::eq(*o, tc_o)) {
                     with.push(input_json(o, None));
                 }
                 return refuse(calc, "refused", ("marked_risk_factor", why), as_of, with);

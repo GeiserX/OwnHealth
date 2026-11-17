@@ -37,7 +37,8 @@ country in no region, such as US, it is refused too (`region_not_covered`). We n
 **Inputs we read.**
 
 - Total and HDL cholesterol from one draw and one day, the newest by that day. A value in mg/dL is
-  divided by 38.67. LDL-C, for the marked-factor rule, is the newest by its own day too.
+  divided by 38.67. For the marked-factor rule, LDL-C and total cholesterol are each the newest by
+  their own day too, and a value printed as above a bound (">5.2") is judged by that bound.
 - Systolic pressure: the newest office reading (LOINC 8480-6) in the 12 months up to the day. If
   there is none, the mean of the last 30 days of wearable daily means, shown with its window and its
   wearable source (the preferred one, else the one with the most days in those 30). The result
@@ -68,6 +69,7 @@ never as "no diabetes".
 - A markedly raised single risk factor puts a person outside SCORE2: total cholesterol above
   8 mmol/L (310 mg/dL), LDL-C above 4.9 mmol/L (190 mg/dL), or systolic pressure of 180 mmHg or
   more (`marked_risk_factor`).
+- A systolic pressure of zero or below is no reading, so the risk is refused (`out_of_range`).
 - A missing cholesterol, systolic pressure or smoking status gives `not_assessed` and names it
   (`missing_input`).
 - A caller without read:records or read:vitals gets `not_assessed` (`scope_missing`) with no input
