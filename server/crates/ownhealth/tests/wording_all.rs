@@ -39,6 +39,7 @@ const SOURCES: &[(&str, Source)] = &[
     ("calculators", |s| Box::pin(calculators(s))),
     ("couple_carrier", |_| Box::pin(couple_carrier())),
     ("family_patterns", |_| Box::pin(family_patterns())),
+    ("family_hints", |_| Box::pin(family_hints())),
 ];
 
 async fn status(s: &Seeded) -> anyhow::Result<Vec<Value>> {
@@ -502,4 +503,30 @@ async fn family_patterns() -> anyhow::Result<Vec<Value>> {
         render(&document("alex", as_of(), &every)?)?,
         render(&document("alex", as_of(), &undated)?)?,
     ])
+}
+
+/// Every cross-profile hint in both languages: each rule, a named gene and a withheld one.
+async fn family_hints() -> anyhow::Result<Vec<Value>> {
+    use ownhealth_rules::family::{HintSource, HintViewer, document, hint_items, load_hints, render, with_hints};
+    use std::collections::{BTreeMap, BTreeSet};
+    let source = |rel: &str, sensitive: bool| HintSource {
+        rel: rel.into(),
+        categories: vec!["labs".into(), "cascade".into()],
+        minor: false,
+        labs: BTreeSet::from(["lab.ldl_fh".to_string()]),
+        findings: BTreeMap::from([("genome.cascade".to_string(), vec![("BRCA2".to_string(), sensitive)])]),
+    };
+    let viewer = HintViewer {
+        labs: true,
+        genome: true,
+        sensitive: false,
+        target_minor: false,
+        guardian: false,
+    };
+    let rules = load_hints()?;
+    let cat = ownhealth_core::family::catalog()?;
+    let hints = hint_items(rules, cat, &viewer, &[source("MTH", false), source("FTH", true)]);
+    assert_eq!(hints.len(), 4, "{hints:?}");
+    assert!(hints.iter().any(|h| h["withheld"] == true), "{hints:?}");
+    Ok(vec![render(&with_hints(document("alex", as_of(), &[])?, hints)?)?])
 }
