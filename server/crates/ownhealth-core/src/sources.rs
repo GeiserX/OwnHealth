@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 use crate::jobs::{self, EnqueueOptions, Job, JobContext, JobError};
 
 /// The `source.kind` check constraint.
-pub const SOURCE_KINDS: [&str; 8] = [
+pub const SOURCE_KINDS: [&str; 9] = [
     "email",
     "folder",
     "paperless",
@@ -33,6 +33,7 @@ pub const SOURCE_KINDS: [&str; 8] = [
     "health_auto_export",
     "gadgetbridge",
     "nightscout",
+    "clinvar",
 ];
 pub const POLL_JOB: &str = "source.poll";
 /// How often the scheduler looks for due sources.
@@ -446,6 +447,32 @@ pub fn register_poller(kind: &str, poller: Poller) {
     }
 }
 
+/// Adds the sources a kind turns on by itself (ClinVar for a household with a genome). The scheduler
+/// runs every one before it looks for due sources. A hook only adds rows that do not exist yet, so a
+/// source a person switched off stays off.
+pub type DefaultSources = fn(JobContext) -> BoxFuture<'static, Result<u64>>;
+
+static DEFAULTS: LazyLock<RwLock<HashMap<String, DefaultSources>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+
+pub fn register_default_sources(kind: &str, hook: DefaultSources) {
+    if let Ok(mut m) = DEFAULTS.write() {
+        m.insert(kind.to_string(), hook);
+    }
+}
+
+/// Run every kind's default-sources hook. Returns the rows added.
+pub async fn add_default_sources(ctx: &JobContext) -> Result<u64> {
+    let hooks: Vec<DefaultSources> = DEFAULTS
+        .read()
+        .map(|m| m.values().copied().collect())
+        .unwrap_or_default();
+    let mut added = 0;
+    for hook in hooks {
+        added += hook(ctx.clone()).await?;
+    }
+    Ok(added)
+}
+
 pub fn poller_for(kind: &str) -> Option<Poller> {
     POLLERS.read().ok().and_then(|m| m.get(kind).copied())
 }
@@ -522,7 +549,7 @@ pub async fn enqueue_poll(conn: &mut PgConnection, source_id: Uuid) -> Result<Op
     .await?)
 }
 
-/// Every SCHEDULER_SECONDS: `schedule_due`. Stops when `stop` turns true.
+/// Every SCHEDULER_SECONDS: `add_default_sources`, then `schedule_due`. Stops when `stop` turns true.
 pub async fn scheduler_loop(ctx: JobContext, mut stop: watch::Receiver<bool>) {
     let mut tick = tokio::time::interval(Duration::from_secs(SCHEDULER_SECONDS));
     loop {
@@ -534,6 +561,7 @@ pub async fn scheduler_loop(ctx: JobContext, mut stop: watch::Receiver<bool>) {
             return;
         }
         let r = async {
+            add_default_sources(&ctx).await?;
             let mut conn = ctx.pool.acquire().await?;
             schedule_due(&mut conn).await
         }

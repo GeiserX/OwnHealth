@@ -237,6 +237,11 @@ pub fn summary(t: &EventText<'_>, lang: &str) -> String {
     s
 }
 
+/// Where a reclassified call is made again: OwnGenome, never OwnHealth, which only compares.
+pub fn rerun_text(lang: &str) -> String {
+    tpl("rerun", lang)
+}
+
 /// The review item's sentence in `lang`: it never names the variant, so any reviewer may read it.
 pub fn review_summary(withheld: bool, unconfirmed: bool, lang: &str) -> String {
     let mut s = tpl(if withheld { "withheld" } else { "changed" }, lang);
@@ -671,6 +676,17 @@ struct DatasetRow {
 /// transaction per dataset. The minor rule counts age with `access::majority` on `access::today`, as
 /// every other minor check does.
 pub async fn diff_release(pool: &PgPool, blobs: &BlobStore, release: &Path) -> Result<DiffReport> {
+    diff_release_in(pool, blobs, release, None).await
+}
+
+/// [`diff_release`] for the genomes of one household only (its weekly ClinVar source), or of every
+/// household when `household` is None.
+pub async fn diff_release_in(
+    pool: &PgPool,
+    blobs: &BlobStore,
+    release: &Path,
+    household: Option<Uuid>,
+) -> Result<DiffReport> {
     // Read the whole release once first: a release that is truncated, corrupt or out of order stops
     // the run before any dataset is compared, so it is never reported as a broken genome.
     let path = release.to_path_buf();
@@ -684,8 +700,10 @@ pub async fn diff_release(pool: &PgPool, blobs: &BlobStore, release: &Path) -> R
         "select d.id, d.profile_id, p.household_id, p.slug, d.document_id, d.assay, d.db_versions, encode(d.vcf_blob, 'hex') as vcf \
          from genome_dataset d join profile p on p.id = d.profile_id where d.status = 'current' and not exists \
          (select 1 from document doc where doc.id = d.document_id and doc.status = 'retracted') \
+         and ($1::uuid is null or p.household_id = $1) \
          order by d.assay in ('chip', 'chip_imputed'), d.imported_at, d.id",
     )
+    .bind(household)
     .fetch_all(&mut *conn)
     .await?;
     drop(conn);
