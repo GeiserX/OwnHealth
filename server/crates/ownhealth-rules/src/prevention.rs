@@ -1441,8 +1441,8 @@ const OPEN: [&str; 3] = ["overdue", "due", "upcoming"];
 /// document's hash. An item due or overdue that was never recorded has no `due`: its date is where
 /// the age window opened, not a deadline. Rule ids, no URLs: the cites stay in the document. The lab gaps are left out, because the
 /// status lists them already under never_measured and stale, and so are the document gaps, which the
-/// 2 KB page has no room for: their count is `due_document_requests`, and the Due screen and the
-/// dashboard list them. An item a lab value shows needs read:labs. Open items the person's decisions hide are left out and counted in `due_hidden`. None
+/// 2 KB page has no room for, not even as a count: with one flag, Alex's demo page is 24 bytes under
+/// 2 KB and a due section costs more (the Due screen and the dashboard list them). An item a lab value shows needs read:labs. Open items the person's decisions hide are left out and counted in `due_hidden`. None
 /// when nothing is open or hidden (the status page has 2 KB and spends none of it on an empty list)
 /// or the profile is not in the store.
 pub async fn status_section(
@@ -1470,13 +1470,6 @@ pub async fn status_section(
     let open = open_in("items");
     // open items the person's decisions hide (snoozed, dismissed, done): counted, never listed
     let hidden = open_in("hidden").len();
-    // the open document requests: counted, so an agent knows the Due screen lists them
-    let requests = doc["items"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|i| i["area"] == "document" && visible(i, scopes))
-        .count();
     let items: Vec<Value> = open
         .iter()
         .take(STATUS_TOP)
@@ -1498,7 +1491,7 @@ pub async fn status_section(
             Value::Object(m)
         })
         .collect();
-    if open.is_empty() && hidden == 0 && requests == 0 {
+    if open.is_empty() && hidden == 0 {
         return Ok(None);
     }
     // the scalars first and named for the section, so the text form does not read them as fields
@@ -1507,9 +1500,6 @@ pub async fn status_section(
     section.insert("due_total".into(), json!(open.len()));
     if hidden > 0 {
         section.insert("due_hidden".into(), json!(hidden));
-    }
-    if requests > 0 {
-        section.insert("due_document_requests".into(), json!(requests));
     }
     section.insert("prevention_hash".into(), doc["prevention_hash"].clone());
     if !items.is_empty() {

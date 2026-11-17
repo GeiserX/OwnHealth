@@ -313,8 +313,8 @@ async fn an_undated_upload_marks_a_visit_gap_done() -> R {
     Ok(())
 }
 
-/// The `due_document_requests` count of Alex's status page, checking that no document request is listed.
-async fn status_requests(d: &Demo) -> anyhow::Result<Value> {
+/// Alex's status page section for Due, checking that no document request is listed or counted.
+async fn status_due(d: &Demo) -> anyhow::Result<Option<Value>> {
     let pack = ownhealth_rules::load_pack()?;
     let mut c = d.db.pool.acquire().await?;
     let body = ownhealth_rules::build_state(&mut c, d.alex, as_of(), None).await?;
@@ -326,22 +326,32 @@ async fn status_requests(d: &Demo) -> anyhow::Result<Value> {
         &pack,
         &ownhealth_core::access::all_scopes(),
     )
-    .await?
-    .unwrap_or_default();
-    assert!(
-        !sec.to_string().contains("gap:"),
-        "no document request is listed: {sec}"
-    );
-    Ok(sec["due_document_requests"].clone())
+    .await?;
+    let text = sec.as_ref().map(Value::to_string).unwrap_or_default();
+    assert!(!text.contains("gap:") && !text.contains("document"), "{text}");
+    Ok(sec)
 }
 
-/// The agent's status page lists no document request (the 2 KB page has no room), but counts the open
-/// ones, so an agent can point the person at the Due screen; a snoozed one leaves the count.
+/// The agent's status page has no room for document requests (with one flag, Alex's demo page is
+/// already near 2 KB, and budget.rs holds it under): two open gaps add no Due section of their own.
 #[tokio::test]
-async fn the_status_page_counts_the_open_document_requests() -> R {
+async fn the_status_page_spends_nothing_on_document_requests() -> R {
     let d = demo().await?;
-    assert_eq!(status_requests(&d).await?, 2);
-    decide(&d, "gap:hole:2016-05-10:2021-11-09", "snooze", as_of().succ_opt(), None).await?;
-    assert_eq!(status_requests(&d).await?, 1);
+    let mut c = d.db.pool.acquire().await?;
+    let alex = ownhealth_core::access::get_profile(&mut c, d.alex)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no alex"))?;
+    let body = ownhealth_rules::build_state(&mut c, d.alex, as_of(), None).await?;
+    let pack = ownhealth_rules::load_pack()?;
+    let doc = prevention::document(&mut c, &alex, as_of(), &body, &pack).await?;
+    drop(c);
+    let requests = doc["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["area"] == "document")
+        .count();
+    assert_eq!(requests, 2, "{doc}");
+    assert_eq!(status_due(&d).await?, None);
     Ok(())
 }
