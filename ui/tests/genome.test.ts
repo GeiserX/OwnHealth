@@ -89,3 +89,13 @@ test('the finding table reads an unstated HLA marker as not determined too', () 
 	assert.equal(resultCell(hla(false), es, tf), 'HLA-B*07:02 · HLA-B*58:01 ausente');
 	assert.equal(resultCell(hla(true), en, tf), 'HLA-B*07:02 · HLA-B*58:01 present');
 });
+
+test('the stale texts name the OwnGenome command that re-runs the out-of-date steps', () => {
+	for (const lang of ['en', 'es'] as const) {
+		const d = dict[lang] as Record<string, string>;
+		for (const k of ['gen_stale_title', 'gen_stale_steps']) {
+			assert.ok(d[k].includes('bin/og recheck --sample <name> --rerun'), `${lang} ${k}: ${d[k]}`);
+		}
+		assert.ok(d.gen_stale_title.includes('{by}') && d.gen_stale_title.includes('{steps}'), `${lang}: ${d.gen_stale_title}`);
+	}
+});

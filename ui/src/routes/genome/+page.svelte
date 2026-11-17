@@ -149,6 +149,9 @@
 		});
 	});
 	const staleSteps = $derived(grid.find((r) => r.stale)?.stale?.rerun_steps ?? []);
+	// The OwnGenome command named in the stale texts, kept on one line so it reads as one command.
+	const RECHECK = 'bin/og recheck --sample <name> --rerun';
+	const staleStepsText = $derived(t('gen_stale_steps').split(RECHECK));
 	const staleTitle = (s: PgxStale) => tf('gen_stale_title', { by: list(s.by), steps: list(s.rerun_steps.map((x) => x.step)) });
 	const coverage = $derived.by(() => {
 		const c = g?.coverage ?? [];
@@ -250,7 +253,7 @@
 	{#if grid.length}
 		<section class="card pgxgrid" aria-labelledby="pgx-grid-h">
 			<div class="gh"><h2 id="pgx-grid-h">{t('gen_grid_t')}</h2><span class="dim">{t('gen_grid_d')}</span></div>
-			{#if staleNote}<div class="stalenote" role="note"><span class="pill p-stale"><i aria-hidden="true"></i>{t('gen_stale')}</span><span class="muted">{staleNote} {t('gen_stale_steps')} {#each staleSteps as s, i (s.step)}{i ? ', ' : ''}<a href={s.cite} target="_blank" rel="noopener">{s.step} {s.name}</a>{/each}.</span></div>{/if}
+			{#if staleNote}<div class="stalenote" role="note"><span class="pill p-stale"><i aria-hidden="true"></i>{t('gen_stale')}</span><span class="muted">{staleNote} {staleStepsText[0]}{#if staleStepsText.length > 1}<code class="mono">{RECHECK}</code>{staleStepsText.slice(1).join(RECHECK)}{/if} {#each staleSteps as s, i (s.step)}{i ? ', ' : ''}<a href={s.cite} target="_blank" rel="noopener">{s.step} {s.name}</a>{/each}.</span></div>{/if}
 			{#if grid.some((r) => r.actionable)}<div class="glegend dim"><span class="swatch" aria-hidden="true"></span>{t('gen_grid_legend')}</div>{/if}
 			<ul class="ggrid">
 				{#each grid as r (r.gene)}
@@ -436,6 +439,9 @@
 	}
 	.stalenote .pill {
 		flex: none;
+	}
+	.stalenote code {
+		white-space: nowrap;
 	}
 	.ggrid {
 		list-style: none;
