@@ -46,12 +46,17 @@
     "[]": {
       "name": "string",
       "pgx": {
-        "gene": "string",
-        "label": "string",
-        "level": "string",
-        "phenotype": "string",
-        "src": "src_id",
-        "text": "string"
+        "|": [
+          "null",
+          {
+            "gene": "string",
+            "label": "string",
+            "level": "string",
+            "phenotype": "string",
+            "src": "src_id",
+            "text": "string"
+          }
+        ]
       },
       "since": "date",
       "src": "src_id",

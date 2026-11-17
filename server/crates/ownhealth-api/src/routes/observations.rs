@@ -27,6 +27,7 @@ use uuid::Uuid;
 use crate::error::{ApiError, ApiResult};
 use crate::extract::Caller;
 use ownhealth_normalize::text::py_repr;
+use ownhealth_rules::engine::{MethodKey, method_key};
 
 pub fn router() -> Router<Runtime> {
     Router::new()
@@ -546,6 +547,8 @@ async fn trend(
     let mut skipped = 0usize;
     let mut converted: BTreeSet<String> = BTreeSet::new();
     let mut statuses: HashMap<NaiveDate, Value> = HashMap::new();
+    // each drawn point's method, LOINC code and lab: a change is judged only between equal keys
+    let mut keys: Vec<MethodKey> = Vec::new();
     for r in &rows {
         let Some(num) = r.value_num else { continue };
         let ucum = r.unit_ucum.as_deref();
@@ -573,6 +576,10 @@ async fn trend(
         if !unassessed && let std::collections::hash_map::Entry::Vacant(slot) = statuses.entry(day) {
             slot.insert(status(&mut tx, profile_id, &group, day).await?);
         }
+        let lab = r.document_id.and_then(|d| labs.get(&d).cloned()).unwrap_or(Value::Null);
+        let key = method_key(r.method.as_deref(), r.loinc.as_deref(), lab.as_str());
+        let method_change = keys.last().is_some_and(|k| *k != key);
+        keys.push(key);
         let printed: Vec<&str> = [Some(r.printed_value.as_str()), r.printed_unit.as_deref()]
             .into_iter()
             .flatten()
@@ -589,7 +596,8 @@ async fn trend(
             "flag": r.interpretation,
             "method": r.method,
             "loinc": r.loinc,
-            "lab": r.document_id.and_then(|d| labs.get(&d).cloned()).unwrap_or(Value::Null),
+            "lab": lab,
+            "method_change": method_change,
             "src": r.src_id,
             "src_label": src.get(&r.src_id).cloned().unwrap_or(Value::Null),
             "status": if unassessed { Value::Null } else { statuses.get(&day).cloned().unwrap_or(Value::Null) },
@@ -730,26 +738,59 @@ async fn trend(
         annotations.sort_by(|a, b| a["date"].as_str().cmp(&b["date"].as_str()));
     }
     let pack = ownhealth_rules::load_pack().map_err(Error::from)?;
-    let rcv_pct: Option<f64> = pack
-        .rules_of("rcv")
-        .find(|r| {
+    let rule_for = |kind: &'static str| {
+        pack.rules_of(kind).find(|r| {
             r.get("match")
                 .and_then(Value::as_array)
                 .is_some_and(|m| m.iter().any(|x| x.as_str() == Some(group.as_str())))
         })
-        .and_then(|r| ownhealth_rules::engine::rcv_percent(r).parse::<f64>().ok());
+    };
+    let rcv_rule = rule_for("rcv");
+    let rcv_pct: Option<f64> = rcv_rule.and_then(|r| ownhealth_rules::engine::rcv_percent(r).parse::<f64>().ok());
     let (mut last_vs_prev, mut exceeds_rcv) = (Value::Null, Value::Null);
     let value_at = |i: usize| points.get(i).and_then(|p| p.get("value")).and_then(Value::as_f64);
+    // the last two results come from another method, LOINC code or lab: the change is not judged
+    let last_switched = points.len() >= 2 && keys.last() != keys.len().checked_sub(2).and_then(|i| keys.get(i));
     if points.len() >= 2
         && let (Some(prev), Some(last)) = (value_at(points.len() - 2), value_at(points.len() - 1))
         && prev != 0.0
     {
         let change = (last - prev) / prev * 100.0;
         last_vs_prev = json!(round1(change));
-        if let Some(rcv) = rcv_pct {
+        if let Some(rcv) = rcv_pct
+            && !last_switched
+        {
             exceeds_rcv = json!(change.abs() > rcv);
         }
     }
+    if last_switched && rcv_pct.is_some() {
+        limitations.push(if es {
+            "Los dos últimos resultados son de otro método, código LOINC o laboratorio, así que el cambio no se compara con el valor de referencia del cambio.".into()
+        } else {
+            "The last two results come from a different method, LOINC code or lab, so the change is not compared with the reference change value.".into()
+        });
+    }
+    // the person's usual level before the last point, from the earlier points of the same key
+    let baseline = match (rule_for("baseline"), rcv_rule, keys.last(), points.last()) {
+        (Some(rule), Some(cvs), Some(key), Some(last)) => {
+            let earlier: Vec<_> = points[..points.len() - 1]
+                .iter()
+                .zip(&keys)
+                .filter(|(_, k)| *k == key)
+                .filter_map(|(p, _)| p.get("value").and_then(Value::as_f64))
+                .filter_map(ownhealth_rules::num::from_f64)
+                .collect();
+            ownhealth_rules::engine::baseline_band(rule, cvs, &earlier).map(|b| {
+                let f = |d| decimal_to_f64(&ownhealth_rules::num::quantize(d, 2));
+                let v = last.get("value").and_then(Value::as_f64).unwrap_or_default();
+                json!({
+                    "set_point": f(b.set_point), "low": f(b.low), "high": f(b.high), "n": b.n,
+                    "outside": v < f(b.low) || v > f(b.high), "rule": rule.get("id"), "cite": rule.get("cite"),
+                })
+            })
+        }
+        _ => None,
+    };
     let mut options: Vec<String> = Vec::new();
     for key in ["canonical", "si", "conventional"] {
         if let Some(u) = has_group.then(|| group_unit(&group, key)).flatten() {
@@ -781,6 +822,11 @@ async fn trend(
             "last_vs_previous_pct": last_vs_prev,
             "rcv_pct": rcv_pct,
             "exceeds_rcv": exceeds_rcv,
+            "method_change": last_switched,
+            "cv_i": rcv_rule.and_then(|r| r.get("cv_i")),
+            "cv_a": rcv_rule.and_then(|r| r.get("cv_a")),
+            "rcv_cite": rcv_rule.and_then(|r| r.get("cite")),
+            "baseline": baseline,
         },
         "limitations": limitations,
     })))
