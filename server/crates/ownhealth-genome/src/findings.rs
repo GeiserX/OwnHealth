@@ -759,9 +759,10 @@ pub fn assay_out(ds: &DatasetRow) -> Value {
 }
 
 /// The coverage notes of the datasets on file: `(code, assay, English text)`. The code and assay let
-/// the UI say the note in its language; MCP sends the English text.
+/// the UI say the note in its language; MCP sends the English text. Two datasets with the same gap
+/// (two WGS imports with no VCF) give one note: each line is said once.
 pub fn dataset_notes(datasets: &[DatasetRow]) -> Vec<(&'static str, String, String)> {
-    let mut out = Vec::new();
+    let mut out: Vec<(&'static str, String, String)> = Vec::new();
     for ds in datasets {
         let kind = ds.assay.as_str();
         if ds.vcf.is_none() {
@@ -793,6 +794,8 @@ pub fn dataset_notes(datasets: &[DatasetRow]) -> Vec<(&'static str, String, Stri
         String::new(),
         "CRAM/BAM not on file: structural variant, CYP2D6 and HLA re-calls are not possible here.".into(),
     ));
+    let mut said = HashSet::new();
+    out.retain(|(_, _, text)| said.insert(text.clone()));
     out
 }
 
@@ -1333,6 +1336,42 @@ mod tests {
         assert_eq!(out["drugs"], json!(["tacrolimus", "voriconazole"]));
         // Each guideline's own row stays: the two sources say different things.
         assert_eq!(out["drug_guidance"].as_array().map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn two_datasets_with_the_same_gap_note_it_once() {
+        let ds = |assay: &str| DatasetRow {
+            id: Uuid::nil(),
+            sample_id: "S1".into(),
+            assay: assay.into(),
+            build: "GRCh38".into(),
+            owngenome_version: "0.8.2".into(),
+            db_versions: Json(json!({})),
+            src_id: "src_1".into(),
+            imported_at: DateTime::<Utc>::default(),
+            assay_detail: Json(json!({})),
+            producer: Json(json!({})),
+            vcf: None,
+            tbi: None,
+            gvcf: None,
+            gvcf_tbi: None,
+            sites: None,
+            sites_tbi: None,
+        };
+        let notes = dataset_notes(&[ds("wgs"), ds("wgs"), ds("chip"), ds("chip_imputed")]);
+        let codes: Vec<(&str, &str)> = notes.iter().map(|(c, a, _)| (*c, a.as_str())).collect();
+        assert_eq!(
+            codes,
+            [
+                ("no_vcf", "wgs"),
+                ("no_vcf", "chip"),
+                ("chip_unconfirmed", "chip"),
+                ("no_vcf", "chip_imputed"),
+                ("no_cram", "")
+            ]
+        );
+        let texts: HashSet<&str> = notes.iter().map(|(_, _, t)| t.as_str()).collect();
+        assert_eq!(texts.len(), notes.len(), "every line differs: {notes:?}");
     }
 
     #[test]
