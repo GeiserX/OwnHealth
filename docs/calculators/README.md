@@ -13,6 +13,13 @@ computed, it says why. This is information, not diagnosis.
 | SCORE2, SCORE2-OP | [score2.md](score2.md) | total and HDL cholesterol; systolic pressure, smoking status, country | 40 to 69, and 70 to 89; apparently healthy people |
 | PREVENT (total CVD, ASCVD) | [prevent.md](prevent.md) | total and HDL cholesterol; systolic pressure, smoking status, eGFR, diabetes, medicines | 30 to 79, no cardiovascular disease; the published input ranges |
 
+Two more pages explain how the rule pack judges change over time in one marker. They are rules, not
+calculators, and their flags enter the state body:
+
+- [rcv.md](rcv.md): the reference change value, its EuBIVAS CVs with their DOIs, and why a change of
+  lab or method is not judged.
+- [baseline.md](baseline.md): the person's usual level from 3 to 5 earlier results.
+
 ## How a result is made
 
 - **Computed on read.** Nothing is stored. Each read builds the document `ownhealth.calculators/v1`
