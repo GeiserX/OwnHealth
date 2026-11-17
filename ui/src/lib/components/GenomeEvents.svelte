@@ -52,7 +52,8 @@
 		{t('gen_cv_t')}
 		<span class="r">
 			{#if v}
-				<span class="dim num">{v.release ? tf('gen_cv_release', { date: day(v.release) }) : t('gen_cv_never')}</span>
+				<!-- Before the first comparison the body says so, and the page subtitle names the genome file's release. -->
+				{#if v.release}<span class="dim num">{tf('gen_cv_release', { date: day(v.release) })}</span>{/if}
 				<a class="pill {v.weekly ? 'p-ok' : 'p-stale'}" href="/settings"><i aria-hidden="true"></i>{t(v.weekly ? 'gen_cv_on' : 'gen_cv_off')}</a>
 			{/if}
 		</span>

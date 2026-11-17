@@ -333,8 +333,9 @@
 		{/if}
 	</div>
 	{#if sensitiveShown.length}<div class="sr-only" role="status">{t('i2_sens_shown')}</div>{/if}
-	{#if prof}<GenomeEvents profile={prof.slug} rev={gen.data} bind:release={clinvarNow} />{/if}
 {/if}
+<!-- Outside the findings branch: a genome with nothing to report can still carry a reclassified variant. -->
+{#if !gen.error && g && ds && prof}<GenomeEvents profile={prof.slug} rev={gen.data} bind:release={clinvarNow} />{/if}
 
 {#if !denied}
 	<div class="note" style="margin-top:10px">

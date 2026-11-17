@@ -4,12 +4,13 @@
 	// It is one inbox source, so its health also shows on the Inbox screen.
 	import { createInbox, listInboxes, updateInbox, type InboxSource } from '#lib/api/inbox';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
-	import { Loader, errRaw, errText } from '#lib/components/pages1/util.svelte';
+	import { Loader, errRaw, errText, tf } from '#lib/components/pages1/util.svelte';
 	import Switch from '#lib/components/pages2/Switch.svelte';
 	import { ago } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { t } from '#lib/i18n/index.svelte';
-	import { sourceStatus } from '#lib/logic/inbox';
+	import { clinvarConfig, clinvarOn, sourceStatus } from '#lib/logic/inbox';
+	import { app } from '#lib/state/app.svelte';
 
 	// `canManage`: the reader owns or guards a profile; only then does the household's check show.
 	let { canManage }: { canManage: boolean } = $props();
@@ -20,6 +21,11 @@
 		if (canManage) load();
 	});
 	const src = $derived(sources.data?.find((s) => s.kind === 'clinvar') ?? null);
+	const demo = $derived(!!app.me?.demo);
+	// With no source yet the switch shows the default the first genome brings (on, never in the demo).
+	const on = $derived(clinvarOn(src, demo));
+	// A mirror set through the API (config.url) stays when the path field is left empty.
+	const mirror = $derived(typeof src?.config.url === 'string' ? src.config.url : '');
 	let busy = $state(false);
 	let error = $state<{ text: string; raw: string } | null>(null);
 	let saved = $state(false);
@@ -45,8 +51,19 @@
 			load();
 		}
 	}
-	const create = (enabled: boolean, config: Record<string, unknown>) => createInbox({ kind: 'clinvar', label: 'ClinVar', config, enabled });
-	const toggle = (on: boolean) => act(() => (src ? updateInbox(src.id, { enabled: on }) : create(on, {})));
+	// The household has one check. The scheduler may have added it since this page loaded; the server
+	// then refuses a second one, and the change goes to the row it added.
+	async function upsert(change: { enabled?: boolean; config?: Record<string, unknown> }) {
+		if (src) return updateInbox(src.id, change);
+		try {
+			return await createInbox({ kind: 'clinvar', label: 'ClinVar', config: change.config ?? {}, enabled: change.enabled ?? on });
+		} catch (e) {
+			const row = (await listInboxes()).items.find((s) => s.kind === 'clinvar');
+			if (!row) throw e;
+			return updateInbox(row.id, change);
+		}
+	}
+	const toggle = (next: boolean) => act(() => upsert({ enabled: next }));
 	async function save(e: SubmitEvent) {
 		e.preventDefault();
 		const p = path.trim();
@@ -56,8 +73,8 @@
 			saved = false;
 			return;
 		}
-		const config = p ? { path: p } : {};
-		if (await act(() => (src ? updateInbox(src.id, { config }) : create(false, config)))) {
+		const config = clinvarConfig(p, src?.config);
+		if (await act(() => upsert({ config }))) {
 			saved = true;
 			typed = false;
 		}
@@ -70,7 +87,7 @@
 	<section class="card cvs" aria-labelledby="cvs-h">
 		<h3 id="cvs-h">{t('gen_cv_set_t')}</h3>
 		<div class="set">
-			<Switch on={!!src?.enabled} label={t('gen_cv_set_t')} disabled={busy || !sources.data} onchange={toggle} />
+			<Switch {on} label={t('gen_cv_set_t')} disabled={busy || !sources.data || !app.me} onchange={toggle} />
 			<div class="dim" style="flex:1;min-width:0;font-size:11.5px">{t('gen_cv_set_d')}</div>
 		</div>
 		{#if sources.error}
@@ -87,10 +104,10 @@
 		<form class="path" onsubmit={save}>
 			<label for="cvs-path" style="font-size:12px">{t('gen_cv_set_path')}</label>
 			<div class="p2row">
-				<input id="cvs-path" class="p2in mono" bind:value={path} oninput={() => ((typed = true), (saved = false))} placeholder="/srv/clinvar/clinvar.vcf.gz" autocomplete="off" spellcheck="false" aria-describedby="cvs-path-d" aria-invalid={error?.raw === path.trim() ? true : undefined} />
+				<input id="cvs-path" class="p2in mono" bind:value={path} disabled={busy} oninput={() => ((typed = true), (saved = false))} placeholder="/srv/clinvar/clinvar.vcf.gz" autocomplete="off" spellcheck="false" aria-describedby="cvs-path-d" aria-invalid={error?.raw === path.trim() ? true : undefined} />
 				<button class="btn sm" type="submit" disabled={busy || !sources.data}>{t('fu_save')}</button>
 			</div>
-			<div class="dim" id="cvs-path-d" style="font-size:11px">{t('gen_cv_set_path_d')}</div>
+			<div class="dim" id="cvs-path-d" style="font-size:11px;overflow-wrap:anywhere">{t('gen_cv_set_path_d')} {mirror ? tf('gen_cv_set_mirror', { url: mirror }) : t('gen_cv_set_ncbi')}</div>
 		</form>
 		{#if error}<div class="p2err" role="alert" title={error.raw}>{error.text}</div>{/if}
 		{#if saved}<div class="p2ok" role="status" style="font-size:12px">{t('gen_cv_set_saved')}</div>{/if}
