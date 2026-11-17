@@ -143,9 +143,14 @@ export interface FamilyShares {
 	minor: boolean;
 	categories: ShareCategory[];
 	items: {
+		/** The slug, or the id of a masked profile. */
 		profile: string;
-		display_name: string;
-		minor: boolean;
+		/** Null when masked: the caller cannot read that profile. */
+		display_name: string | null;
+		masked: boolean;
+		minor: boolean | null;
+		/** The caller reads that profile's family history; without it the degree is unknown, not absent. */
+		history: boolean;
 		/** The blood degree of that profile's relative row linked to this one, or null. */
 		degree: number | null;
 		categories: ShareCategory[];

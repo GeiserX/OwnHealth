@@ -1572,7 +1572,10 @@ export const dict = {
 		fam_share_none: "There is no other profile in this household.",
 		fam_share_with: "What is shared with {name}",
 		fam_share_saving: "Saving…",
-		fam_share_gene: "Sharing genetic findings tells everyone who can see genome results in that profile that a first-degree relative carries a pathogenic variant, which can point to {name}. The gene is named only where sensitive results are switched on; elsewhere it reads “A relative shared a genetic finding”.",
+		fam_share_gene: "Sharing genetic findings tells everyone who can see genome results in that profile that a first-degree relative carries a pathogenic variant in a named gene, which can point to {name}. A gene on the sensitive list is named only where sensitive results are switched on; elsewhere it reads “A relative shared a genetic finding”.",
+		fam_share_masked: "A profile you cannot open",
+		fam_share_masked_d: "you cannot see their family history, so the degree is not shown",
+		fam_share_notmgr: "Only the manager of this profile chooses what {name} shares with relatives: the owner, or a guardian while nobody has claimed the profile. An adult with no login yet chooses once they claim it.",
 	},
 	es: {
 		household: "Hogar",
@@ -3144,7 +3147,10 @@ export const dict = {
 		fam_share_none: "No hay ningún otro perfil en este hogar.",
 		fam_share_with: "Qué se comparte con {name}",
 		fam_share_saving: "Guardando…",
-		fam_share_gene: "Compartir hallazgos genéticos indica a quien puede ver los resultados genómicos de ese perfil que un familiar de primer grado porta una variante patógena, lo que puede señalar a {name}. El gen solo se nombra donde los resultados sensibles están activados; en los demás casos se lee «Un familiar ha compartido un hallazgo genético».",
+		fam_share_gene: "Compartir hallazgos genéticos indica a quien puede ver los resultados genómicos de ese perfil que un familiar de primer grado porta una variante patógena en un gen que se nombra, lo que puede señalar a {name}. Un gen de la lista de sensibles solo se nombra donde los resultados sensibles están activados; en los demás casos se lee «Un familiar ha compartido un hallazgo genético».",
+		fam_share_masked: "Un perfil que no puedes abrir",
+		fam_share_masked_d: "no puedes ver su historial familiar, así que no se muestra el grado",
+		fam_share_notmgr: "Solo quien gestiona este perfil elige qué comparte {name} con sus familiares: la persona titular, o un tutor mientras nadie haya reclamado el perfil. Un adulto que aún no tiene acceso lo elige cuando reclame el perfil.",
 	},
 } as const;
 
