@@ -32,7 +32,9 @@ Notes on the table:
 - **TSH.** The summary table gives CVi 18.9%. The abstract of the primary paper gives 17.7%. We use
   the summary table, the same source as every other row.
 - **Creatinine.** The values are for the enzymatic method. The alkaline picrate (Jaffe) method gave CVi
-  4.7% and CVa 4.4%. A Jaffe result and an enzymatic result are not compared, see below.
+  4.7% and CVa 4.4%. A Jaffe result and an enzymatic result are not compared, see below. The LOINC
+  codes we ship do not tell the two methods apart, so a creatinine result with no method recorded is
+  judged with the enzymatic values. An install that knows its lab uses Jaffe can override the rule.
 - **HbA1c and ferritin** have no RCV in pack 0.2.0. We found no EuBIVAS estimate for them that we may
   ship. An install can add a rule in its override directory (`OWNHEALTH_RULES_OVERRIDE_DIR`). The pack
   version then ends in `+local.<sha8>`, so the change is visible in every answer.
