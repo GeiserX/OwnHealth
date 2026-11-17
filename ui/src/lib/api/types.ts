@@ -244,7 +244,7 @@ export interface TrendPoint {
 	src: string;
 	src_label: string | null;
 	status?: Status; // lane E's status word as of the point's date
-	method_change?: boolean; // another method, LOINC code or lab than the point before it
+	method_change?: boolean; // another method or lab than the point before it
 }
 
 export interface Trend {
@@ -260,12 +260,12 @@ export interface Trend {
 		last_vs_previous_pct: number | null;
 		rcv_pct: number | null;
 		exceeds_rcv: boolean | null;
-		// rule pack 0.2.0: the last two points differ in method, LOINC code or lab, so the change is not judged
+		// rule pack 0.2.0: the last two points differ in method or lab, so the change is not judged
 		method_change?: boolean;
 		cv_i?: string | null;
 		cv_a?: string | null;
 		rcv_cite?: string | null;
-		// the person's usual level: mean of 3 to 5 earlier points with the same method, code and lab
+		// the person's usual level: mean of 3 to 5 earlier points with the same method and lab
 		baseline?: { set_point: number; low: number; high: number; n: number; outside: boolean; rule: string; cite: string } | null;
 	};
 	limitations: string[];

@@ -1562,8 +1562,10 @@ export const dict = {
 		calc_bl_na: "No usual level yet: it needs 3 earlier results from the same lab and method.",
 		calc_cv: "Variation used: within-person {cvi}%, method {cva}%.",
 		calc_cv_src: "Source of these numbers",
-		calc_method_change: "The last two results come from a different method, LOINC code or lab, so this change is not compared with the reference change value.",
-		calc_pt_change: "other method, code or lab than the result before",
+		calc_method_change: "Not judged: the method or the lab changed.",
+		calc_pt_change: "other method or lab than the result before",
+		calc_lg_watch: "watch (changed more than the reference change value, outside the usual level, or a sustained trend)",
+		calc_rcv_none: "This rule pack ships no cited variation data for this marker, so the change is not judged; an install can add it (see docs/calculators/rcv.md).",
 	},
 	es: {
 		household: "Hogar",
@@ -3125,8 +3127,10 @@ export const dict = {
 		calc_bl_na: "Aún no hay nivel habitual: hacen falta 3 resultados anteriores del mismo laboratorio y método.",
 		calc_cv: "Variación usada: de la persona {cvi}\u00a0%, del método {cva}\u00a0%.",
 		calc_cv_src: "Origen de estas cifras",
-		calc_method_change: "Los dos últimos resultados son de otro método, código LOINC o laboratorio, así que este cambio no se compara con el valor de referencia del cambio.",
-		calc_pt_change: "otro método, código o laboratorio que el resultado anterior",
+		calc_method_change: "No se valora: cambió el método o el laboratorio.",
+		calc_pt_change: "otro método o laboratorio que el resultado anterior",
+		calc_lg_watch: "vigilar (cambio mayor que el valor de referencia del cambio, fuera del nivel habitual o tendencia sostenida)",
+		calc_rcv_none: "Este paquete de reglas no incluye datos de variación citados para este marcador, así que el cambio no se valora; una instalación puede añadirlos (ver docs/calculators/rcv.md).",
 	},
 } as const;
 

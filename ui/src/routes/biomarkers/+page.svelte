@@ -153,7 +153,7 @@
 		for (let i = 1; i < pts.length; i++) {
 			const a = pts[i - 1];
 			const b = pts[i];
-			// the server compares method, code and lab without case or spacing; trust it when it answers
+			// the server compares method and lab without case or spacing; trust it when it answers
 			if (b.method_change === false) continue;
 			const parts = [];
 			if ((a.lab ?? '') !== (b.lab ?? '')) parts.push(t('h1_lab_change'));
@@ -300,7 +300,7 @@
 					</div>
 					<div class="legend" style="margin:2px 0 2px">
 						<span><i style="width:9px;height:9px;border-radius:50%;background:{C.ok}"></i>{t('h1_lg_ok')}</span>
-						<span><i style="width:9px;height:9px;border-radius:50%;background:{C.watch}"></i>{t('h1_lg_watch')}</span>
+						<span><i style="width:9px;height:9px;border-radius:50%;background:{C.watch}"></i>{t('calc_lg_watch')}</span>
 						<span><i style="width:9px;height:9px;border-radius:50%;background:{C.out}"></i>{t('h1_lg_out')}</span>
 						<span class="dim">{t('h1_lg_shape')} {#each labs as l (l)}{GLYPH[shapeOf(l)]} {l}{' '}{/each}</span>
 						<span class="dim">{t('h1_lg_flags')}</span>
@@ -343,7 +343,7 @@
 								style="cursor:pointer"
 								role="button"
 								tabindex="0"
-								aria-label="{p.date} · {p.printed} · {p.lab ?? ''}{p.method_change ? ' · ' + t('calc_pt_change') : ''}"
+								aria-label={[p.date, p.printed, p.lab, p.method_change && t('calc_pt_change')].filter(Boolean).join(' · ')}
 								onmousemove={(e) => (tip = { i, x: e.clientX, y: e.clientY })}
 								onmouseleave={() => (tip = null)}
 								onfocus={(e) => {
@@ -440,7 +440,7 @@
 						</div>
 					{/if}
 					<div class="note" style="margin-top:6px">
-						{tr.stats.exceeds_rcv === true ? t('h1_rcv_yes') : tr.stats.exceeds_rcv === false ? t('h1_rcv_no') : tr.stats.method_change && tr.stats.rcv_pct != null ? t('calc_method_change') : t('h1_rcv_na')}
+						{tr.stats.exceeds_rcv === true ? t('h1_rcv_yes') : tr.stats.exceeds_rcv === false ? t('h1_rcv_no') : tr.stats.method_change && tr.stats.rcv_pct != null ? t('calc_method_change') : tr.stats.rcv_pct == null && tr.stats.n >= 2 ? t('calc_rcv_none') : t('h1_rcv_na')}
 					</div>
 					{#if tr.stats.cv_i != null && tr.stats.cv_a != null}
 						<div class="dim" style="font-size:11.5px;margin-top:6px">
