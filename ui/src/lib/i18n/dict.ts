@@ -1641,6 +1641,12 @@ export const dict = {
 		gap_dismissed: "Dismissed on the Due list",
 		gap_short_visit: "No report from this visit on file",
 		gap_short_hole: "No dated record in this stretch",
+		ips_spec: "International Patient Summary (IPS)",
+		ips_fhir: "IPS (FHIR)",
+		ips_fhir_d: "The same summary as a FHIR file (the HL7 International Patient Summary) that another health system can read. In the language of the sheet.",
+		ips_making: "Preparing the file…",
+		ips_done: "The IPS file is in your downloads.",
+		ips_failed: "The IPS file could not be made. Try again in a moment.",
 	},
 	es: {
 		household: "Hogar",
@@ -3281,6 +3287,12 @@ export const dict = {
 		gap_dismissed: "Descartado en Por hacer",
 		gap_short_visit: "No hay informe archivado de esta visita",
 		gap_short_hole: "Ningún registro fechado en este periodo",
+		ips_spec: "Resumen internacional del paciente (IPS)",
+		ips_fhir: "IPS (FHIR)",
+		ips_fhir_d: "El mismo resumen como fichero FHIR (el Resumen internacional del paciente de HL7), que otro sistema sanitario puede leer. En el idioma de la hoja.",
+		ips_making: "Preparando el fichero…",
+		ips_done: "El fichero IPS está en tus descargas.",
+		ips_failed: "No se pudo preparar el fichero IPS. Vuelve a intentarlo en un momento.",
 	},
 } as const;
 

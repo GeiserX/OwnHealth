@@ -43,6 +43,7 @@ const SOURCES: &[(&str, Source)] = &[
     ("family_hints", |_| Box::pin(family_hints())),
     ("gaps", |s| Box::pin(gaps(s))),
     ("gap_letters", |_| Box::pin(gap_letters())),
+    ("ips", |s| Box::pin(ips_narratives(s))),
 ];
 
 async fn status(s: &Seeded) -> anyhow::Result<Vec<Value>> {
@@ -604,4 +605,27 @@ async fn family_hints() -> anyhow::Result<Vec<Value>> {
     assert_eq!(hints.len(), 4, "{hints:?}");
     assert!(hints.iter().any(|h| h["withheld"] == true), "{hints:?}");
     Ok(vec![render(&with_hints(document("alex", as_of(), &[])?, hints)?)?])
+}
+
+/// The IPS export's own words: the Composition title and every section's title and narrative, for
+/// every profile in es and en (the rows' FHIR is the record as received, not text we write).
+async fn ips_narratives(s: &Seeded) -> anyhow::Result<Vec<Value>> {
+    let mut tx = s.pool().begin().await?;
+    let mut out = Vec::new();
+    for slug in SLUGS {
+        for lang in LANGS {
+            let b = ownhealth_ops::ips::build(&mut tx, s.pid(slug), &all_scopes(), lang, as_of())
+                .await?
+                .bundle;
+            let comp = &b["entry"][0]["resource"];
+            let sections: Vec<Value> = comp["section"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|x| json!({"title": x["title"], "narrative": x["text"]["div"]}))
+                .collect();
+            out.push(json!({"title": comp["title"], "sections": sections}));
+        }
+    }
+    Ok(out)
 }
