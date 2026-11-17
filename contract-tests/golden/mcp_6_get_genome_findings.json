@@ -32,18 +32,16 @@
         "call_state": {
           "|": [
             "=alt",
-            "=ref",
-            "null"
+            "=ref"
           ]
         },
         "category": {
           "|": [
             "=carrier",
-            "=hla",
-            "=pgx",
-            "=risk_marker"
+            "=pgx"
           ]
         },
+        "chip_note": "null",
         "clinvar": {
           "|": [
             "null",
@@ -64,12 +62,7 @@
         "drugs": {
           "[]": "string"
         },
-        "evidence": {
-          "|": [
-            "=E1",
-            "=E2"
-          ]
-        },
+        "evidence": "=E1",
         "gene": "string",
         "hgvs": {
           "|": [
@@ -84,19 +77,32 @@
             "string"
           ]
         },
-        "rsid": {
+        "prs": "null",
+        "rsid": "string",
+        "src": "src_id",
+        "stale": {
           "|": [
             "null",
-            "string"
+            {
+              "by": {
+                "[]": "string"
+              },
+              "rerun_steps": {
+                "[]": {
+                  "cite": "string",
+                  "name": "string",
+                  "step": "int"
+                }
+              },
+              "since": "date"
+            }
           ]
         },
-        "src": "src_id",
         "verification": "=provisional",
         "zygosity": {
           "|": [
             "=het",
-            "=ref",
-            "null"
+            "=ref"
           ]
         }
       }
@@ -119,7 +125,7 @@
   "limitations": {
     "[]": "string"
   },
-  "next_cursor": "null",
+  "next_cursor": "string",
   "not_assessed": {
     "[]": {
       "gene": {

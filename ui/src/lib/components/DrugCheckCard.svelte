@@ -121,7 +121,8 @@
 						</div>
 					</div>
 					{/if}
-					{#each recs as gd (quoteText(gd.quote))}
+					<!-- Keyed by position: CPIC repeats one quote for each population (clopidogrel, voriconazole). -->
+					{#each recs as gd, i (i)}
 						<div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em">{gd.source} · {gd.applies_to}{gd.population ? ' · ' + word('i2_pop_', gd.population) : ''}</div>
 						<blockquote>“{quoteText(gd.quote)}” {#if gd.strength}<span class="dim" style="white-space:nowrap">{t('i2_classification')}: {word('i2_str_', gd.strength)}</span>{/if}</blockquote>
 					{/each}
