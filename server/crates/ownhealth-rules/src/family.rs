@@ -1008,10 +1008,13 @@ pub async fn hint_sources(
                     }
                 }
                 HintTest::Finding { categories } => {
+                    // a carried variant only, as the couple view counts one (ownhealth-genome couple.rs
+                    // `is_present`): an `alt` call (or none) that no confirmation test refuted
                     let sql = format!(
                         "select distinct f.gene, f.sensitive from genome_finding f \
                          join genome_dataset d on d.id = f.dataset_id where f.profile_id = $1 \
                          and d.status <> 'retracted' and f.category = any($2) and f.confidence <> 'unconfirmed' \
+                         and (f.call_state is null or f.call_state = 'alt') and f.verification_status <> 'refuted' \
                          and f.gene is not null and {} order by f.gene",
                         ownhealth_core::lifecycle::visible_sql("f", "$3")
                     );

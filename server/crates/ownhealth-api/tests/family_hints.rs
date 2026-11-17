@@ -55,11 +55,23 @@ async fn ldl(c: &mut PgConnection, profile_id: Uuid, value: &str) -> anyhow::Res
     )
 }
 
-/// A genome dataset with one P/LP finding in an ACMG SF gene.
+/// A genome dataset with one P/LP finding in an ACMG SF gene, carried (an `alt` call).
 async fn sf_finding(c: &mut PgConnection, profile_id: Uuid, gene: &str, confidence: &str) -> R {
+    sf_call(c, profile_id, gene, confidence, "alt", "provisional").await
+}
+
+/// A genome dataset with one finding in an ACMG SF gene, with its call and its verification.
+async fn sf_call(
+    c: &mut PgConnection,
+    profile_id: Uuid,
+    gene: &str,
+    confidence: &str,
+    call_state: &str,
+    verification: &str,
+) -> R {
     let mut s = SrcIn::new("genome_facts");
     s.profile_id = Some(profile_id);
-    s.import_ref = Some(format!("facts-{gene}-{confidence}"));
+    s.import_ref = Some(format!("facts-{gene}-{confidence}-{call_state}-{verification}"));
     let sid = ensure_src(&mut *c, &SrcRef::New(s), Some(profile_id)).await?;
     let sha: Vec<u8> = Uuid::new_v4().as_bytes().repeat(2);
     let dataset: Uuid = sqlx::query_scalar(
@@ -74,14 +86,16 @@ async fn sf_finding(c: &mut PgConnection, profile_id: Uuid, gene: &str, confiden
     .await?;
     sqlx::query(
         "insert into genome_finding (dataset_id, profile_id, fact_id, category, gene, evidence, confidence, \
-         call_state, sensitive, adult_onset, carrier, status, src_id, fact) values \
-         ($1, $2, $3, 'acmg_sf', $4, 'E1', $5, 'alt', true, true, false, 'current', $6, '{}')",
+         call_state, verification_status, sensitive, adult_onset, carrier, status, src_id, fact) values \
+         ($1, $2, $3, 'acmg_sf', $4, 'E1', $5, $6, $7, true, true, false, 'current', $8, '{}')",
     )
     .bind(dataset)
     .bind(profile_id)
     .bind(format!("f_{}", &Uuid::new_v4().simple().to_string()[..16]))
     .bind(gene)
     .bind(confidence)
+    .bind(call_state)
+    .bind(verification)
     .bind(&sid)
     .execute(&mut *c)
     .await?;
@@ -275,6 +289,88 @@ async fn the_consent_list_shows_each_profile_and_its_degree() -> R {
 }
 
 #[tokio::test]
+async fn the_consent_list_masks_a_profile_the_caller_cannot_read() -> R {
+    let e = env().await?;
+    // Carmen's history lists Sam as her son, in a row with a sensitivity tag
+    let mut c = e.db.pool.acquire().await?;
+    let mut son = MemberIn::new(e.fam.profile("carmen"), "SON");
+    son.sensitivity = vec!["reproductive".into()];
+    let carmen_src = SrcRef::New(manual(e.fam.profile("carmen")));
+    family::add(&mut c, &son, &carmen_src, "person", None, Some(e.fam.profile("sam"))).await?;
+    drop(c);
+    let id = e.fam.profile("carmen").to_string();
+    let carmen_item = |v: &Value| {
+        v["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|i| i["profile"] == id.as_str() || i["profile"] == "carmen")
+            .cloned()
+            .unwrap_or_default()
+    };
+    // Sam manages his own profile and has no grant on Carmen: no name, no slug, no minor flag, no degree
+    let (s, v) = e.get("sam", "/api/profiles/sam/family-shares").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let item = carmen_item(&v);
+    assert_eq!(item["masked"], true, "{v}");
+    assert_eq!(
+        (&item["display_name"], &item["minor"], &item["history"], &item["degree"]),
+        (&Value::Null, &Value::Null, &json!(false), &Value::Null),
+        "{v}"
+    );
+    assert!(!v.to_string().contains("Carmen"), "{v}");
+    // the masked id is the address: a share to it answers with the same id, never the slug
+    let (s, put) = e.share("sam", "sam", &id, &["labs"]).await?;
+    assert_eq!(
+        (s, put["target"].clone()),
+        (StatusCode::OK, item["profile"].clone()),
+        "{put}"
+    );
+    // any access to Carmen shows her name, as the profile switcher does; her relative rows need
+    // read:records there, and the tagged row also read:sensitive
+    let carmen = e.fam.profile("carmen");
+    for scopes in [
+        vec!["read:summary", "read:sensitive"],
+        vec!["read:summary", "read:records"],
+    ] {
+        let mut c = e.db.pool.acquire().await?;
+        let cats = scope_set(&scopes);
+        set_grant(&mut c, e.fam.user("sam"), carmen, "caregiver", Some(&cats), None, None).await?;
+        drop(c);
+        let (_, v) = e.get("sam", "/api/profiles/sam/family-shares").await?;
+        let item = carmen_item(&v);
+        assert_eq!(
+            (
+                &item["profile"],
+                &item["display_name"],
+                &item["masked"],
+                &item["degree"]
+            ),
+            (&json!("carmen"), &json!("Carmen Ortega"), &json!(false), &Value::Null),
+            "{scopes:?}: {v}"
+        );
+        assert_eq!(item["history"], scopes.contains(&"read:records"), "{v}");
+    }
+    // the control: with read:sensitive there, the degree of that row shows
+    let mut c = e.db.pool.acquire().await?;
+    let sensitive = scope_set(["read:summary", "read:records", "read:sensitive"]);
+    set_grant(
+        &mut c,
+        e.fam.user("sam"),
+        carmen,
+        "caregiver",
+        Some(&sensitive),
+        None,
+        None,
+    )
+    .await?;
+    drop(c);
+    let (_, v) = e.get("sam", "/api/profiles/sam/family-shares").await?;
+    assert_eq!(carmen_item(&v)["degree"], 1, "{v}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn only_the_sources_manager_writes_and_a_grant_needs_step_up() -> R {
     let e = env().await?;
     // widening needs a fresh step-up; narrowing and revoking do not
@@ -392,6 +488,85 @@ async fn an_unconfirmed_call_feeds_no_cascade_hint() -> R {
 }
 
 #[tokio::test]
+async fn a_finding_the_relative_does_not_carry_feeds_no_cascade_hint() -> R {
+    // a confident call on Carmen that is not a carried variant: a reference call, a no-call, a
+    // variant off the array or uncovered, and a carried call that a confirmation test refuted
+    for (call, verification) in [
+        ("ref", "provisional"),
+        ("no_call", "provisional"),
+        ("not_on_array", "provisional"),
+        ("not_covered", "provisional"),
+        ("alt", "refuted"),
+    ] {
+        let e = env().await?;
+        let mut c = e.db.pool.acquire().await?;
+        sf_call(&mut c, e.fam.profile("carmen"), "MLH1", "high", call, verification).await?;
+        drop(c);
+        e.share("alex", "carmen", "alex", &["cascade"]).await?;
+        let seen = e.pedigree("alex", "alex").await?;
+        assert!(seen.get("hints").is_none(), "{call} {verification}: {seen}");
+    }
+    // the control: the same finding carried and confirmed gives the hint
+    let e = env().await?;
+    let mut c = e.db.pool.acquire().await?;
+    sf_call(&mut c, e.fam.profile("carmen"), "MLH1", "high", "alt", "confirmed").await?;
+    drop(c);
+    e.share("alex", "carmen", "alex", &["cascade"]).await?;
+    assert_eq!(hints(&e.pedigree("alex", "alex").await?), ["genome.cascade MTH"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_relative_row_with_a_sensitivity_tag_feeds_no_hint_without_read_sensitive() -> R {
+    let e = env().await?;
+    e.share("alex", "carmen", "alex", &["labs"]).await?;
+    // Alex's row for his mother, linked to Carmen, now carries a sensitivity tag
+    let mut c = e.db.pool.acquire().await?;
+    let alex = e.fam.profile("alex");
+    let mth: Uuid = sqlx::query_scalar(
+        "select id from family_member where profile_id = $1 and relationship = 'MTH' and status = 'current'",
+    )
+    .bind(alex)
+    .fetch_one(&mut *c)
+    .await?;
+    let mut tagged = MemberIn::new(alex, "MTH");
+    tagged.sensitivity = vec!["reproductive".into()];
+    family::supersede(
+        &mut c,
+        mth,
+        &tagged,
+        &SrcRef::New(manual(alex)),
+        "person",
+        "tagged",
+        family::LinkChange::Keep,
+    )
+    .await?;
+    // Sam reads Alex's records and labs, but not his sensitive rows: GET /family hides that row
+    let grant = |scopes: &[&str]| scope_set(scopes.iter().copied());
+    let open = grant(&["read:summary", "read:records", "read:labs"]);
+    set_grant(&mut c, e.fam.user("sam"), alex, "caregiver", Some(&open), None, None).await?;
+    drop(c);
+    let seen = e.pedigree("sam", "alex").await?;
+    assert!(seen.get("hints").is_none(), "{seen}");
+    // the control: the same caller with read:sensitive gets the hint
+    let mut c = e.db.pool.acquire().await?;
+    let sensitive = grant(&["read:summary", "read:records", "read:labs", "read:sensitive"]);
+    set_grant(
+        &mut c,
+        e.fam.user("sam"),
+        alex,
+        "caregiver",
+        Some(&sensitive),
+        None,
+        None,
+    )
+    .await?;
+    drop(c);
+    assert_eq!(hints(&e.pedigree("sam", "alex").await?), ["lab.ldl_fh MTH"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_hint_names_no_source_and_opens_no_source_record() -> R {
     let e = env().await?;
     e.share("alex", "carmen", "alex", &["labs"]).await?;
@@ -443,16 +618,13 @@ async fn deleting_either_profile_removes_the_share() -> R {
     Ok(())
 }
 
-#[tokio::test]
-async fn a_claim_at_majority_clears_the_shares_her_guardians_made() -> R {
-    let e = env().await?;
+/// Marta turned 18 last year and has not claimed her profile; Alex is her guardian.
+async fn unclaimed_adult(e: &Env) -> anyhow::Result<Uuid> {
     let mut c = e.db.pool.acquire().await?;
-    let hh = e.fam.household_id;
-    // Marta turned 18 last year and has not claimed her profile; her guardian shared her labs
     let marta = ownhealth_core::access::create_profile(
         &mut c,
         &ownhealth_core::access::ProfileIn {
-            household_id: hh,
+            household_id: e.fam.household_id,
             slug: "marta".into(),
             display_name: "Marta Rivera".into(),
             relationship: Some("child".into()),
@@ -463,7 +635,15 @@ async fn a_claim_at_majority_clears_the_shares_her_guardians_made() -> R {
     )
     .await?;
     set_grant(&mut c, e.fam.user("alex"), marta, "guardian", None, None, None).await?;
-    drop(c);
+    Ok(marta)
+}
+
+#[tokio::test]
+async fn a_claim_at_majority_clears_the_shares_her_guardians_made() -> R {
+    let e = env().await?;
+    let hh = e.fam.household_id;
+    let marta = unclaimed_adult(&e).await?;
+    // her guardian shared her labs
     let (s, v) = e.share("alex", "marta", "alex", &["labs"]).await?;
     assert_eq!(s, StatusCode::OK, "{v}");
     e.share("alex", "alex", "marta", &["labs"]).await?;
@@ -475,5 +655,31 @@ async fn a_claim_at_majority_clears_the_shares_her_guardians_made() -> R {
         .fetch_all(&mut *c)
         .await?;
     assert_eq!(left, [e.fam.profile("alex")], "hers went, her father's to her stayed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_share_written_during_a_claim_waits_for_it_and_is_refused() -> R {
+    let e = env().await?;
+    let marta = unclaimed_adult(&e).await?;
+    // Marta claims her profile; the claim has not committed yet when her former guardian shares her labs
+    let mut claim = e.db.pool.begin().await?;
+    let user = ownhealth_core::access::create_user(&mut claim, e.fam.household_id, "Marta Rivera", "es", None).await?;
+    ownhealth_auth::household::claim_profile(&mut claim, marta, user, None, ownhealth_core::access::today()).await?;
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/api/profiles/marta/family-shares")
+        .header("cookie", e.cookie("alex", true).await?)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"target": "alex", "categories": ["labs"]}).to_string(),
+        ))?;
+    let put = tokio::spawn(e.app.clone().oneshot(req));
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    claim.commit().await?;
+    let res = put.await??;
+    // the claim ended his guardianship first, so her profile reads as unknown to him
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(e.shares().await?, 0);
     Ok(())
 }

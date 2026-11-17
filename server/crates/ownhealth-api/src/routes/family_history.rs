@@ -10,7 +10,9 @@
 //!
 //! - `GET /profiles/{p}/family-shares`: what this profile lets its results feed as hints in each other
 //!   profile of the household (`family_share`, migration 1111), with that profile's minor flag and the
-//!   degree of its relative row linked to this one. `PUT` `{target, categories}` sets one pair;
+//!   degree of its relative row linked to this one. A profile the caller has no access to is masked:
+//!   its id, no name, no minor flag, no degree. The degree needs `read:records` there (`history`), and
+//!   a row with a sensitivity tag also `read:sensitive`. `PUT` `{target, categories}` sets one pair;
 //!   widening it needs step-up, narrowing does not. `DELETE ?target=` revokes it. Only this profile's
 //!   manager reads or writes them, and a minor's profile shares nothing.
 //!
@@ -497,6 +499,18 @@ async fn share_manager(conn: &mut PgConnection, caller: &Caller, p: &str) -> Res
     Ok(ownhealth_auth::household::require_manage(perm)?)
 }
 
+/// The source's manager for a write. The source's profile row is locked first and the permission read
+/// again after it, so a claim of that profile (which updates the row) finishes before the check, and
+/// two writes of one source's shares run one after the other.
+async fn share_writer(conn: &mut PgConnection, caller: &Caller, p: &str) -> Result<Permission, ApiError> {
+    let perm = share_manager(&mut *conn, caller, p).await?;
+    sqlx::query("select 1 from profile where id = $1 for update")
+        .bind(perm.profile.id)
+        .execute(&mut *conn)
+        .await?;
+    share_manager(conn, caller, p).await
+}
+
 async fn is_minor(conn: &mut PgConnection, profile: &ownhealth_core::access::Profile) -> Result<bool, ApiError> {
     let aom = ownhealth_core::access::majority(&mut *conn, profile.household_id).await?;
     Ok(profile.is_minor(ownhealth_core::access::today(), aom))
@@ -543,23 +557,44 @@ async fn share_audit(
     Ok(())
 }
 
-/// Every other profile of the household with what this one shares with it.
+/// How the caller may see another profile of the household in the consent list: `None` when it has no
+/// access there (the profile is masked), otherwise whether it reads that profile's relative rows
+/// (`read:records`) and their tagged rows (`read:sensitive`).
+async fn share_view(
+    conn: &mut PgConnection,
+    principal: &Principal,
+    profile_id: Uuid,
+) -> Result<Option<(bool, bool)>, ApiError> {
+    Ok(match effective_permission(conn, principal, profile_id).await {
+        Ok(perm) => Some((perm.has("read:records"), perm.has("read:sensitive"))),
+        Err(ownhealth_core::Error::AccessDenied { .. }) => None,
+        Err(e) => return Err(e.into()),
+    })
+}
+
+/// The address of a target in answers: its slug when the caller has access there, otherwise its id,
+/// so an answer never names a profile the consent list masks.
+async fn target_label(
+    conn: &mut PgConnection,
+    principal: &Principal,
+    target: &ownhealth_core::access::Profile,
+) -> Result<String, ApiError> {
+    Ok(match share_view(conn, principal, target.id).await? {
+        Some(_) => target.slug.clone(),
+        None => target.id.to_string(),
+    })
+}
+
+/// Every other profile of the household with what this one shares with it. A profile the caller has
+/// no access to comes back masked: its id, no name, no minor flag and no degree.
 async fn list_shares(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>) -> Answer {
     let mut tx = rt.pool.begin().await?;
     let perm = share_manager(&mut tx, &caller, &p).await?;
     let source_minor = is_minor(&mut tx, &perm.profile).await?;
-    type Row = (
-        Uuid,
-        Option<Vec<String>>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<String>,
-    );
-    // each profile with its share and the relationship of its current relative row linked to this one
+    type Row = (Uuid, Option<Vec<String>>, Option<chrono::DateTime<chrono::Utc>>);
     let rows: Vec<Row> = sqlx::query_as(
-        "select t.id, s.categories, s.granted_at, \
-         (select m.relationship from family_member m join family_member_link l on l.family_member_id = m.id \
-          where m.profile_id = t.id and m.status = 'current' and l.linked_profile_id = $1 limit 1) \
-         from profile t left join family_share s on s.source_profile_id = $1 and s.target_profile_id = t.id \
+        "select t.id, s.categories, s.granted_at from profile t \
+         left join family_share s on s.source_profile_id = $1 and s.target_profile_id = t.id \
          where t.household_id = $2 and t.id <> $1 order by t.slug",
     )
     .bind(perm.profile.id)
@@ -568,9 +603,39 @@ async fn list_shares(State(rt): State<Runtime>, caller: Caller, Path(p): Path<St
     .await?;
     let cat = family::catalog()?;
     let mut items = Vec::with_capacity(rows.len());
-    for (id, categories, granted_at, rel) in rows {
+    for (id, categories, granted_at) in rows {
         let Some(t) = ownhealth_core::access::get_profile(&mut tx, id).await? else {
             continue;
+        };
+        let categories = categories.unwrap_or_default();
+        let Some((read_records, read_sensitive)) = share_view(&mut tx, &caller.0, t.id).await? else {
+            items.push(json!({
+                "profile": t.id,
+                "display_name": null,
+                "masked": true,
+                "minor": null,
+                "history": false,
+                "degree": null,
+                "categories": categories,
+                "granted_at": granted_at,
+            }));
+            continue;
+        };
+        // the relationship of its current relative row linked to this one, read as GET /family would:
+        // only with read:records there, and a tagged row only with read:sensitive
+        let rel: Option<String> = if !read_records {
+            None
+        } else {
+            sqlx::query_scalar(
+                "select m.relationship from family_member m join family_member_link l on l.family_member_id = m.id \
+             where m.profile_id = $1 and m.status = 'current' and l.linked_profile_id = $2 \
+             and ($3 or m.sensitivity = '{}') limit 1",
+            )
+            .bind(t.id)
+            .bind(perm.profile.id)
+            .bind(read_sensitive)
+            .fetch_optional(&mut *tx)
+            .await?
         };
         let degree = rel
             .as_deref()
@@ -580,9 +645,11 @@ async fn list_shares(State(rt): State<Runtime>, caller: Caller, Path(p): Path<St
         items.push(json!({
             "profile": t.slug,
             "display_name": t.display_name,
+            "masked": false,
             "minor": is_minor(&mut tx, &t).await?,
+            "history": read_records,
             "degree": degree,
-            "categories": categories.unwrap_or_default(),
+            "categories": categories,
             "granted_at": granted_at,
         }));
     }
@@ -632,7 +699,7 @@ async fn put_share(
         .and_then(Value::as_str)
         .ok_or_else(|| bad_input("target: the slug or id of another profile of this household."))?;
     let mut tx = rt.pool.begin().await?;
-    let perm = share_manager(&mut tx, &caller, &p).await?;
+    let perm = share_writer(&mut tx, &caller, &p).await?;
     let target = share_target(&mut tx, &perm, target).await?;
     if !categories.is_empty() && is_minor(&mut tx, &perm.profile).await? {
         return Err(ApiError::new(
@@ -682,10 +749,11 @@ async fn put_share(
     if categories != had {
         share_audit(&mut tx, &caller.0, &perm, target.id, &categories).await?;
     }
+    let label = target_label(&mut tx, &caller.0, &target).await?;
     tx.commit().await?;
     Ok((
         StatusCode::OK,
-        Json(json!({"profile": perm.profile.slug, "target": target.slug, "categories": categories})),
+        Json(json!({"profile": perm.profile.slug, "target": label, "categories": categories})),
     ))
 }
 
@@ -703,7 +771,7 @@ async fn delete_share(
         .map(|(_, v)| v.clone())
         .ok_or_else(|| bad_input("target: the slug or id of another profile of this household."))?;
     let mut tx = rt.pool.begin().await?;
-    let perm = share_manager(&mut tx, &caller, &p).await?;
+    let perm = share_writer(&mut tx, &caller, &p).await?;
     let target = share_target(&mut tx, &perm, &target).await?;
     let n = sqlx::query("delete from family_share where source_profile_id = $1 and target_profile_id = $2")
         .bind(perm.profile.id)
@@ -714,9 +782,10 @@ async fn delete_share(
     if n > 0 {
         share_audit(&mut tx, &caller.0, &perm, target.id, &[]).await?;
     }
+    let label = target_label(&mut tx, &caller.0, &target).await?;
     tx.commit().await?;
     Ok((
         StatusCode::OK,
-        Json(json!({"profile": perm.profile.slug, "target": target.slug, "categories": []})),
+        Json(json!({"profile": perm.profile.slug, "target": label, "categories": []})),
     ))
 }
