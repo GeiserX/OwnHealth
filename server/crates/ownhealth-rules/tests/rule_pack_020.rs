@@ -94,6 +94,16 @@ fn a_rcv_rule_without_a_doi_does_not_load() -> R {
         .map(|e| e.to_string())
         .unwrap_or_default();
     assert!(err.contains("rcv.alt") && err.contains("DOI"), "{err}");
+    // the baseline rule's z and formula come from a paper too
+    let mut files: BTreeMap<String, Value> = shipped_files()?;
+    let pack = files.get_mut("pack.yaml").ok_or_else(|| anyhow::anyhow!("pack.yaml"))?;
+    assert_eq!(pack["rules"][1]["id"], "baseline.personal");
+    pack["rules"][1]["cite"] = json!("https://example.org/");
+    let err = build_pack(&files, true)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err.contains("baseline.personal") && err.contains("DOI"), "{err}");
     Ok(())
 }
 
@@ -134,6 +144,32 @@ fn a_change_inside_one_lab_is_judged_and_a_lab_or_method_switch_is_not() -> R {
         pt("2026-06-10", "130", Some(" labnorte "), None),
     ];
     assert!(rcv(&ldl, &spelled).is_some());
+    Ok(())
+}
+
+/// mg/dL (LOINC 2160-0) and umol/L (14682-9) are the same creatinine measurement: a lab that prints
+/// SI units on one report and conventional on the next has not changed its method.
+#[test]
+fn a_unit_change_alone_is_not_a_method_change() -> R {
+    let crea = rule("rcv.creatinine")?;
+    let lab = Some("LabNorte");
+    let mut a = pt("2026-01-10", "0.81", lab, None);
+    a.loinc = Some("2160-0".into());
+    let mut b = pt("2026-06-10", "0.99525", lab, None);
+    (b.loinc, b.printed_value, b.unit, b.unit_ucum) = (
+        Some("14682-9".into()),
+        "88".into(),
+        Some("umol/L".into()),
+        Some("umol/L".into()),
+    );
+    b.value = Some(dec("88"));
+    let flag = rcv(&crea, &[a.clone(), b.clone()]).ok_or_else(|| anyhow::anyhow!("no flag"))?;
+    assert_eq!(flag["reason"], "RCV_CHANGE", "{flag:?}");
+    // calculated and direct LDL are still two methods, whatever codes name them
+    let (mut calc, mut direct) = (pt("2026-01-10", "100", lab, None), pt("2026-06-10", "130", lab, None));
+    calc.loinc = Some("39469-2".into());
+    direct.loinc = Some("18262-6".into());
+    assert!(rcv(&rule("rcv.ldl_c")?, &[calc, direct]).is_none());
     Ok(())
 }
 
@@ -271,6 +307,40 @@ async fn the_baseline_stays_silent_with_two_earlier_results() -> R {
     }
     let body = build_state(&mut tx, carmen, as_of(), None).await?;
     assert!(flag_for(&body, "creatinine").is_none(), "{}", body["flags"]);
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// The same lab prints creatinine in mg/dL three times and then in umol/L: the stored canonical values
+/// compare, so a rise above the RCV is still a change.
+#[tokio::test]
+async fn a_rise_printed_in_si_units_is_still_a_change() -> R {
+    let s = seeded().await?;
+    let mut tx = s.pool().begin().await?;
+    let carmen = s.pid("carmen");
+    for (day, v) in [("2026-08-05", "0.80"), ("2026-08-19", "0.82"), ("2026-09-02", "0.81")] {
+        manual_creatinine(&mut tx, carmen, day, v).await?;
+    }
+    let o = ObservationIn::from_json(json!({
+        "profile_id": carmen, "printed_name": "Creatinina", "printed_value": "88", "printed_unit": "umol/L",
+        "printed_ref_range": "44 - 97", "value_num": "88", "ref_low": "44", "ref_high": "97",
+        "loinc": "14682-9", "alias_group": "creatinine", "unit_ucum": "umol/L", "value_canonical": "0.99525",
+        "unit_canonical": "mg/dL", "derivation_version": "test", "effective_at": "2026-09-16T08:00:00+00:00",
+    }))?;
+    commit_observation(
+        &mut tx,
+        &o,
+        &SrcRef::New(SrcIn::new("manual")),
+        CommitOptions::new("person"),
+    )
+    .await?;
+    let body = build_state(&mut tx, carmen, as_of(), None).await?;
+    let f = flag_for(&body, "creatinine").cloned().unwrap_or(Value::Null);
+    assert_eq!(
+        (&f["reason"], &f["rule"]),
+        (&json!("RCV_CHANGE"), &json!("rcv.creatinine")),
+        "{f}"
+    );
     tx.rollback().await?;
     Ok(())
 }

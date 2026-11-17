@@ -18,7 +18,7 @@ rules:
     cite: https://github.com/GeiserX/OwnHealth/blob/main/docs/design/ingestion.md#8-normalisation
     basis: lab_printed_range
   # A value outside the person's own usual level: the set point is the mean of the latest 3 to 5 earlier
-  # results with the same method, LOINC code and lab, and the band is
+  # results with the same method and lab, and the band is
   # set point x (1 +/- z * sqrt(CVa^2 + CVi^2) * sqrt(1 + 1/n)) (Coskun et al. 2021, personalised reference
   # intervals). CVa and CVi come from the analyte's rcv rule, so only an analyte with a cited rcv rule has
   # a baseline.

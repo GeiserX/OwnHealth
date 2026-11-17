@@ -110,12 +110,13 @@ impl Point {
     }
 }
 
-/// What a change check compares across: two results compare only when the method, the LOINC code
-/// and the lab are the same (case and spaces aside). A lab or method switch moves a value by itself.
+/// What a change check compares across: two results compare only when the method and the lab are the
+/// same (case and spaces aside). A lab or method switch moves a value by itself. The method is the
+/// observation's, else the one the shipped LOINC table gives its code (calculated, direct, ...): a
+/// code that differs only in the unit (creatinine 2160-0 mg/dL, 14682-9 umol/L) is the same method.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodKey {
     pub method: Option<String>,
-    pub loinc: Option<String>,
     pub lab: Option<String>,
 }
 
@@ -124,9 +125,11 @@ pub fn method_key(method: Option<&str>, loinc: Option<&str>, lab: Option<&str>) 
         s.map(|s| casefold(s.split_whitespace().collect::<Vec<_>>().join(" ").as_str()))
             .filter(|s| !s.is_empty())
     };
+    let coded = loinc
+        .and_then(|l| ownhealth_normalize::tables::loinc_codes().get(l.trim()))
+        .map(|c| c.method.as_str());
     MethodKey {
-        method: norm(method),
-        loinc: norm(loinc),
+        method: norm(method).or_else(|| norm(coded)),
         lab: norm(lab),
     }
 }
@@ -543,7 +546,7 @@ pub fn trend(rule: &Map<String, Value>, pts: &[Point]) -> Option<Map<String, Val
     let n = usize::try_from(int(rule.get("points")).unwrap_or(3)).ok()?;
     let usable: Vec<&Point> = pts.iter().filter(|p| p.comparable().is_some()).collect();
     // one unit per series: a point the normalizer could not convert must not read as a jump; and one
-    // method, LOINC code and lab, so a lab switch does not read as one either
+    // method and lab, so a lab switch does not read as one either
     let tail: Vec<&Point> = match usable.last() {
         Some(last) => {
             let (unit, key) = (last.comparable_unit(), last.method_key());
@@ -605,7 +608,7 @@ pub fn trend(rule: &Map<String, Value>, pts: &[Point]) -> Option<Map<String, Val
 }
 
 /// The person's usual level before the newest point: the set point is the mean of the latest
-/// `min_points` to `max_points` earlier points with the newest one's unit, method, LOINC code and lab,
+/// `min_points` to `max_points` earlier points with the newest one's unit, method and lab,
 /// and the band is set point x (1 +/- z * sqrt(CVa^2 + CVi^2) * sqrt(1 + 1/n)) (Coskun et al. 2021).
 /// CVa and CVi are the analyte's `rcv` rule's. None when fewer earlier points share the method.
 #[derive(Debug, Clone, PartialEq)]
