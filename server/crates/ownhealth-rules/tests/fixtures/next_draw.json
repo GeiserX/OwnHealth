@@ -4,12 +4,12 @@
     "profile": "alex",
     "as_of": "2026-11-07",
     "rules": [
-      "ownhealth-rules 0.1.0",
+      "ownhealth-rules 0.2.0",
       "es.yaml prevention-es 0.2.0",
       "draw_prep.yaml draw-prep 0.1.0"
     ],
-    "state_hash": "sha256:768c2af0b6a47129d39d6bff7b15db562e9d0722840a701354d5da81121e28e6",
-    "prevention_hash": "sha256:f1ab2c2e764b7010e70185913df1b962034a82c003dbc18ef83eec7cc8fbd128",
+    "state_hash": "sha256:8aa5616a4d3a3aef2535f1628a1c7e904ee62f8a382b09051e6f7c657b90d0c0",
+    "prevention_hash": "sha256:c70577970ae8635b0542ab93456848858dbee1c077fd84a5f6b2bf01e26fd5dd",
     "count": 6,
     "sections": [
       {
@@ -145,12 +145,12 @@
     "profile": "carmen",
     "as_of": "2026-11-07",
     "rules": [
-      "ownhealth-rules 0.1.0",
+      "ownhealth-rules 0.2.0",
       "es.yaml prevention-es 0.2.0",
       "draw_prep.yaml draw-prep 0.1.0"
     ],
-    "state_hash": "sha256:76684b61674b98c4e95edec86bb7ef06932eb4a2c92ed169ff960c36685c81ad",
-    "prevention_hash": "sha256:d428c13a6a0721a5528dc437c38dcaaab8e0923fccf9a085e3632d44ccf81a5a",
+    "state_hash": "sha256:060aa47e438e19aa8b5254a55ef38e754655f45565f10c2b8629686ff46029f7",
+    "prevention_hash": "sha256:36e1a4063a99f27432737e9fdf8b9cc37dab44b9ca3d2f9ec13384795eded4ec",
     "count": 4,
     "sections": [
       {
