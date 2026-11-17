@@ -17,12 +17,13 @@
 	} from '#lib/api/family';
 	import type { ProfileSummary } from '#lib/api/types';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
+	import FamilyPatterns from '#lib/components/FamilyPatterns.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import { Loader, cap, errRaw, errText, tf } from '#lib/components/pages1/util.svelte';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { addEach, fromHousehold, layout, type Box } from '#lib/logic/pedigree';
 	import { i18n, t } from '#lib/i18n/index.svelte';
-	import { tick } from 'svelte';
+	import { tick, untrack } from 'svelte';
 
 	let { profile, profiles }: { profile: ProfileSummary; profiles: ProfileSummary[] } = $props();
 
@@ -36,6 +37,13 @@
 	$effect(load);
 
 	let hideNames = $state(true);
+	// the pattern whose relatives the drawing shades; it clears when the pattern is gone (a new profile, an edit)
+	let pattern = $state<string | null>(null);
+	const patterns = $derived(ped.data && ped.data.profile.slug === profile.slug ? ped.data.patterns : null);
+	const shade = $derived(new Set(patterns?.items.find((p) => p.rule === pattern)?.members ?? []));
+	$effect(() => {
+		if (pattern && patterns && !patterns.items.some((p) => p.rule === pattern)) pattern = null;
+	});
 	const lang = $derived(i18n.lang as 'es' | 'en');
 	const words = $derived({
 		proband: t('fam_proband'),
@@ -55,6 +63,10 @@
 	const relLabel = (code: string) => {
 		const r = catalog?.relationships.find((x) => x.code === code);
 		return r ? r[lang] : code;
+	};
+	const kindLabel = (kind: string) => {
+		const k = catalog?.conditions.find((x) => x.kind === kind);
+		return k ? k[lang === 'es' ? 'short_es' : 'short_en'] : kind;
 	};
 	// The founder's household relationships are relative to the founder, so only the founder fills from them.
 	const fill = $derived(
@@ -205,6 +217,15 @@
 	$effect(() => {
 		if (drawing && svgwrap) tick().then(centre);
 	});
+	// a pattern just picked: bring its first relative into view, in the page and in a tree that scrolls sideways
+	$effect(() => {
+		const picked = pattern;
+		if (!picked) return;
+		untrack(() => {
+			const first = patterns?.items.find((p) => p.rule === picked)?.members[0];
+			if (first) tick().then(() => svgwrap?.querySelector(`g[data-id="${first}"]`)?.scrollIntoView({ block: 'nearest', inline: 'center' }));
+		});
+	});
 	const listLine = (m: FamilyMember) => {
 		const head = cap(relLabel(m.relationship)) + (!hideNames && m.name ? ` · ${m.name}` : '');
 		if (m.masked) return `${head} · ${t('fam_masked')}`;
@@ -255,11 +276,11 @@
 				{#each drawing.segs as s, i (i)}<line x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} class="ln" />{/each}
 				{#each drawing.nodes as b (b.id ?? 'proband')}
 					{#if editable(b)}
-						<g class="node edit" class:link={b.linked} class:masked={b.masked} class:aff={b.affected} role="button" tabindex="0" aria-label={b.title} data-id={b.id} onclick={() => openEdit(b.id, true)} onkeydown={(e) => keyOpen(e, b)}>
+						<g class="node edit" class:link={b.linked} class:masked={b.masked} class:aff={b.affected} class:pat={!!b.id && shade.has(b.id)} role="button" tabindex="0" aria-label={b.title} data-id={b.id} onclick={() => openEdit(b.id, true)} onkeydown={(e) => keyOpen(e, b)}>
 							{@render symbol(b)}
 						</g>
 					{:else}
-						<g class="node" class:link={b.linked} class:masked={b.masked} class:aff={b.affected} role="img" aria-label={b.title}>
+						<g class="node" class:link={b.linked} class:masked={b.masked} class:aff={b.affected} class:pat={!!b.id && shade.has(b.id)} role="img" aria-label={b.title} data-id={b.id}>
 							{@render symbol(b)}
 						</g>
 					{/if}
@@ -272,6 +293,7 @@
 			<span><svg width="14" height="14" aria-hidden="true"><rect x="2" y="2" width="10" height="10" class="sym" /><line x1="0" y1="14" x2="14" y2="0" class="dead" /></svg>{t('fam_lg_deceased')}</span>
 			<span><svg width="14" height="14" aria-hidden="true"><path d="M1 13 L11 3 M11 3 l-5 0.5 M11 3 l-0.5 5" class="arrow" /></svg>{t('fam_proband')}</span>
 			<span><svg width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="5.5" class="sym link" /></svg>{t('fam_lg_linked')}</span>
+			{#if shade.size}<span><svg width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="5.5" class="sym patsym" /></svg>{t('fam_lg_pattern')}</span>{/if}
 		</div>{:else}<div class="empty">{t('fam_empty')}</div>{/if}
 	{/if}
 
@@ -360,9 +382,10 @@
 	{:else if error}
 		<div class="p2err" role="alert" title={error.raw}>{error.text}</div>
 	{/if}
-	<div class="note">{t('fam_note')}</div>
+	<div class="note">{t('fam_pat_note')}</div>
 	{#if ped.data}<div class="mono dim rules">{ped.data.rules}</div>{/if}
 </div>
+{#if patterns && ped.data?.nodes.length}<FamilyPatterns {patterns} {relLabel} {kindLabel} bind:selected={pattern} />{/if}
 
 <style>
 	.rules {
@@ -417,6 +440,12 @@
 	.sym.link {
 		stroke: var(--accent);
 		stroke-width: 2.6;
+	}
+	/* the relatives of the picked pattern: a warm ring, the affected fill kept */
+	.pat .sym,
+	.sym.patsym {
+		stroke: var(--watch);
+		stroke-width: 3.5;
 	}
 	.masked .sym {
 		stroke-dasharray: 4 3;

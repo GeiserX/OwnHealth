@@ -85,6 +85,34 @@ export interface Pedigree {
 	as_of: string;
 	rules: string;
 	nodes: PedigreeNode[];
+	/** ownhealth.family/v1: the guideline patterns these same relatives show, worded in es and en. */
+	patterns: FamilyPatterns;
+}
+
+export interface FamilyPattern {
+	rule: string;
+	status: 'present' | 'not_assessed';
+	reason_code?: string;
+	basis: 'guideline' | 'pack_default';
+	source: string;
+	cite: string;
+	/** The relatives (node ids) the pattern rests on, in drawing order. */
+	members: Uuid[];
+	rel: string[];
+	kinds: string[];
+	src: string[];
+	title: { en: string; es: string };
+	why: { en: string; es: string };
+	reason?: { en: string; es: string };
+}
+
+export interface FamilyPatterns {
+	schema: 'ownhealth.family/v1';
+	profile: string;
+	as_of: string;
+	rules: string;
+	items: FamilyPattern[];
+	family_hash: string;
 }
 
 /** A new version: the whole relative. `linked_profile` absent keeps the link, null removes it. */
