@@ -1491,6 +1491,12 @@ export const dict = {
 		gen_couple_k_xl_both: "both carriers",
 		gen_couple_withheld: "A withheld result",
 		gen_couple_cite: "Source",
+		ips_spec: "International Patient Summary (IPS)",
+		ips_fhir: "IPS (FHIR)",
+		ips_fhir_d: "The same summary as a FHIR file (the HL7 International Patient Summary) that another health system can read. In the language of the sheet.",
+		ips_making: "Preparing the file…",
+		ips_done: "The IPS file is in your downloads.",
+		ips_failed: "The IPS file could not be made. Try again in a moment.",
 	},
 	es: {
 		household: "Hogar",
@@ -2981,6 +2987,12 @@ export const dict = {
 		gen_couple_k_xl_both: "ambos portadores",
 		gen_couple_withheld: "Un resultado retenido",
 		gen_couple_cite: "Fuente",
+		ips_spec: "Resumen internacional del paciente (IPS)",
+		ips_fhir: "IPS (FHIR)",
+		ips_fhir_d: "El mismo resumen como fichero FHIR (el Resumen internacional del paciente de HL7), que otro sistema sanitario puede leer. En el idioma de la hoja.",
+		ips_making: "Preparando el fichero…",
+		ips_done: "El fichero IPS está en tus descargas.",
+		ips_failed: "No se pudo preparar el fichero IPS. Vuelve a intentarlo en un momento.",
 	},
 } as const;
 
