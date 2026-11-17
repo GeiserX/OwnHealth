@@ -38,6 +38,7 @@ const SOURCES: &[(&str, Source)] = &[
     ("due", |s| Box::pin(due(s))),
     ("calculators", |s| Box::pin(calculators(s))),
     ("couple_carrier", |_| Box::pin(couple_carrier())),
+    ("family_patterns", |_| Box::pin(family_patterns())),
 ];
 
 async fn status(s: &Seeded) -> anyhow::Result<Vec<Value>> {
@@ -469,4 +470,36 @@ fn the_clinvar_alert_file_passes_the_cited_loader() -> R {
     assert!(f.version.starts_with("clinvar_alerts "), "{}", f.version);
     assert!(f.doc["cite"].as_str().is_some_and(|c| c.starts_with("https://")));
     Ok(())
+}
+
+/// The family patterns card with every rule present and one that cannot be checked.
+async fn family_patterns() -> anyhow::Result<Vec<Value>> {
+    use ownhealth_core::family::FamilyCondition;
+    use ownhealth_rules::family::{Relative, document, render};
+    let rel = |n: u128, code: &str, kind: &str, onset: Option<i32>| Relative {
+        id: uuid::Uuid::from_u128(n),
+        relationship: code.into(),
+        sex: None,
+        conditions: vec![FamilyCondition {
+            kind: kind.into(),
+            text: None,
+            code_system: None,
+            code: None,
+            onset_age: onset,
+            onset_approx: false,
+        }],
+        src: format!("src_{n}"),
+    };
+    let every = [
+        rel(1, "FTH", "mi", Some(50)),
+        rel(2, "PUNCLE", "mi", Some(60)),
+        rel(3, "MTH", "cancer_colon", Some(50)),
+        rel(4, "MAUNT", "cancer_ovary", Some(45)),
+        rel(5, "SIS", "hereditary_variant", None),
+    ];
+    let undated = [rel(1, "FTH", "mi", None)];
+    Ok(vec![
+        render(&document("alex", as_of(), &every)?)?,
+        render(&document("alex", as_of(), &undated)?)?,
+    ])
 }

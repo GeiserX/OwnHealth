@@ -22,11 +22,12 @@ const ENVELOPE_FIELDS: [&str; 6] = [
 ];
 /// Sections for a domain, each dropped and named in `withheld.by_scope` when the token lacks its
 /// scope. A new section adds one line here.
-const SECTION_SCOPE: [(&str, &str); 4] = [
+const SECTION_SCOPE: [(&str, &str); 5] = [
     ("medications", "read:records"),
     ("supplements", "read:records"),
     ("active_conditions", "read:records"),
     ("due", "read:records"),
+    ("family", "read:records"),
 ];
 const FRESHNESS_SCOPE: [(&str, &str); 5] = [
     ("labs", "read:labs"),
@@ -171,6 +172,20 @@ pub async fn status_data(call: &mut Call<'_>) -> ToolResult<(Map<String, Value>,
         }
     } else {
         by_scope.insert(crate::gate::scope_label("read:records"));
+    }
+    // patterns of the person's own family history a guideline names (ownhealth.family/v1), computed
+    // on read from the relatives this token may read; a viewer is told above that records were withheld.
+    // First page only: a later page carries the remaining flags, and its 2 KB has no room to repeat it.
+    if call.offset == 0
+        && scopes.contains("read:records")
+        && let Some(profile) = ownhealth_core::access::get_profile(&mut *call.conn, pid).await?
+    {
+        let doc =
+            ownhealth_rules::family::build_document(&mut *call.conn, call.principal, &profile, &scopes, call.as_of.day)
+                .await?;
+        if let Some(family) = ownhealth_rules::family::status_section(&doc) {
+            rendered.insert("family".into(), family);
+        }
     }
     for (key, scope) in SECTION_SCOPE {
         if rendered.contains_key(key) && !scopes.contains(scope) {
