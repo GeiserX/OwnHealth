@@ -1070,7 +1070,8 @@ fn evaluate_one(
                 .map(|(_, o)| o)
         };
         let ldl = newest("ldl_c");
-        let tc_newest = newest("total_cholesterol").filter(|o| o.date > tc_o.date);
+        // any other draw counts, a second one on the pair's own day too
+        let tc_newest = newest("total_cholesterol").filter(|o| !std::ptr::eq(*o, tc_o));
         // a value printed as above a bound (">5.2") is above the bound, so the bound is judged; one
         // printed as below a bound can never be markedly raised
         let mut checks: Vec<(&Obs, Decimal, &str, String)> = Vec::new();

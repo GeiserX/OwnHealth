@@ -696,6 +696,29 @@ fn every_published_validity_limit_is_a_refusal_with_its_reason() {
         (code.as_str(), why["group"].clone(), why["on"].clone()),
         ("marked_risk_factor", json!("total_cholesterol"), json!("2026-10-20"))
     );
+    // a second draw on the pair's own day counts too, when its total cholesterol is the high one
+    let same_day_tc = Draw {
+        date: Some(day("2026-09-14")),
+        obs: [(
+            "total_cholesterol".to_string(),
+            obs("total_cholesterol", "9", "mmol/L", "2026-09-14", "src_tc_same_day"),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let items = run(
+        "score2",
+        &[lipids("5.8", "1.3", "mmol/L"), same_day_tc],
+        &p,
+        &facts(),
+        &[],
+    );
+    let (code, why) = reason(&items);
+    assert_eq!(
+        (code.as_str(), why["group"].clone(), why["value"].clone()),
+        ("marked_risk_factor", json!("total_cholesterol"), json!("9")),
+        "{items:?}"
+    );
     // an LDL printed as above a value at or over the limit is over it too
     let mut censored = lipids("5.8", "1.3", "mmol/L");
     let mut over = obs("ldl_c", "5.2", "mmol/L", "2026-09-14", "src_ldl");
