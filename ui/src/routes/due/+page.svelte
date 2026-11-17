@@ -116,7 +116,8 @@
 	let evidenceErr = $state<unknown>(null);
 	// only the latest load fills the list: a slower one for another item or profile is dropped
 	let evidenceSeq = 0;
-	async function loadEvidence(slug: string) {
+	// `anyDocument`: a document gap takes any document that came, an undated one from its upload day
+	async function loadEvidence(slug: string, anyDocument = false) {
 		const seq = ++evidenceSeq;
 		evidenceList = null;
 		evidenceErr = null;
@@ -142,8 +143,9 @@
 			...imm.items.filter(recDay).map(rec('immunization', t('due_f_vaccine'))),
 			...proc.items.filter(recDay).map(rec('procedure', t('due_f_procedure'))),
 			...docs.items
-				// a document needs a clinical date to count, and this list knows only its collection day
-				.filter((d) => d.status === 'active' && day(d.collected_at))
+				// a document needs a clinical date to count, and this list knows only its collection day; for a
+				// document gap any copy that came counts, from its upload day when it has no date
+				.filter((d) => d.status === 'active' && (day(d.collected_at) || (anyDocument && !d.collected_at)))
 				.map((d) => ({ value: `document:${d.id}`, label: docLabel(d), group: t('due_ev_document') }))
 		];
 	}
@@ -157,7 +159,7 @@
 		reason = '';
 		evidence = '';
 		error = null;
-		if (open && prof) loadEvidence(prof.slug);
+		if (open && prof) loadEvidence(prof.slug, i.area === 'document');
 	}
 	async function saveAct(e: SubmitEvent, i: DueItem) {
 		e.preventDefault();
@@ -346,7 +348,7 @@
 				{#if evidenceErr}
 					<div class="p2err" role="alert">
 						{tf('h1_na_d', { code: errCode(evidenceErr) })}
-						<button class="btn sm" type="button" onclick={() => prof && loadEvidence(prof.slug)}>{t('retry')}</button>
+						<button class="btn sm" type="button" onclick={() => prof && loadEvidence(prof.slug, i.area === 'document')}>{t('retry')}</button>
 					</div>
 				{/if}
 			{/if}

@@ -784,6 +784,8 @@ export interface GapItem {
 	days?: number;
 	title: string;
 	why: string;
+	/** In `hidden`: what the person decided about it on the Due list (item `gap:<key>`). */
+	decision?: { kind: 'snooze' | 'dismiss' | 'done'; until?: IsoDate };
 }
 
 export interface Gaps {
@@ -794,6 +796,8 @@ export interface Gaps {
 	country?: string;
 	lang: string;
 	items: GapItem[];
+	/** Gaps snoozed, dismissed or marked done on the Due list; absent when there are none. */
+	hidden?: GapItem[];
 	withheld: number;
 	withheld_scopes: string[];
 	/** Absent for a caller without read:records. */

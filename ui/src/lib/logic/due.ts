@@ -183,6 +183,12 @@ export function dueColor(s: string): 'out' | 'watch' | 'ok' | 'nodata' | 'stale'
 	}
 }
 
+/** A title split around its ISO dates (the odd indexes), so the card keeps each date on one line. */
+export const dateParts = (s: string): string[] => s.split(/(\d{4}-\d{2}-\d{2})/);
+
+/** The dict key of a document gap's one-line note on the dashboard card (its full why is on Due). */
+export const gapShortKey = (key: string): 'gap_short_visit' | 'gap_short_hole' => (key.startsWith('gap:visit:') ? 'gap_short_visit' : 'gap_short_hole');
+
 /** A row of the Due card; `color` is a key of colors.ts C and `word` the dict key of its status. */
 export type CardRow = { key: string; title: string; why: string; color: string; word: string; area: string; phase: string | null };
 

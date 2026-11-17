@@ -3,7 +3,10 @@
 	// with no records, from GET /profiles/{p}/gaps (ownhealth.gaps/v1). Each gap names the src that raised it
 	// and cites its rule; a visit gap in a country with a letter template links the printable access-request
 	// letter in Spanish and in English. The same gaps are items of the Due list, where they can be snoozed,
-	// marked done or dismissed. `stamp` changes when the timeline reloads, so a new record refreshes the card.
+	// marked done or dismissed: a gap decided there is listed dimmed under the open ones, with what was
+	// decided, and only open gaps count. The server's own day is the day of the list, as for the letter,
+	// so a gap listed here always has its letter. `stamp` changes when the timeline reloads, so a new
+	// record refreshes the card.
 	import { gapLetterUrl, getGaps } from '#lib/api';
 	import type { GapItem, Gaps } from '#lib/api/types';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
@@ -11,7 +14,6 @@
 	import { Loader, tf } from '#lib/components/pages1/util.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
-	import { todayIso } from '#lib/logic/people';
 
 	let { profile, stamp }: { profile: string; stamp?: unknown } = $props();
 	const gaps = new Loader<Gaps>();
@@ -20,13 +22,17 @@
 		void stamp;
 		const slug = profile;
 		const lang = i18n.lang;
-		gaps.run(() => getGaps(slug, lang, todayIso()), `${slug}/${lang}`);
+		gaps.run(() => getGaps(slug, lang), `${slug}/${lang}`);
 	}
 	$effect(load);
 
 	// the day each src stands for: the visit's, or a hole's two edges when both are records (an edge that is a
 	// document has no src id, so a lone src is left unlabelled rather than guessed)
 	const srcDay = (g: GapItem, k: number) => (g.date ? g.date : g.src.length === 2 ? ((k ? g.to : g.from) ?? '') : '');
+
+	// what the person decided on the Due list
+	const decided = (g: GapItem) =>
+		g.decision?.kind === 'snooze' ? tf('gap_snoozed', { d: g.decision.until ?? '' }) : g.decision?.kind === 'done' ? t('gap_done') : t('gap_dismissed');
 
 	const LETTER_LANGS: [string, string][] = [
 		['es', 'Español'],
@@ -67,10 +73,19 @@
 				</div>
 			</div>
 		{:else}
-			<div class="dim" style="font-size:12px">{d.withheld ? '' : t('gap_none')}</div>
+			{#if !d.hidden?.length}<div class="dim" style="font-size:12px">{d.withheld ? '' : t('gap_none')}</div>{/if}
+		{/each}
+		{#each d.hidden ?? [] as g (g.key)}
+			<div class="due gap decided">
+				<div class="ic" aria-hidden="true">✓</div>
+				<div class="w">
+					<div>{g.title}</div>
+					<div class="meta"><span>{decided(g)}</span></div>
+				</div>
+			</div>
 		{/each}
 		{#if d.withheld}<div class="note" style="margin-top:6px">{tf('gap_withheld', { n: d.withheld, scopes: d.withheld_scopes.join(', ') })}</div>{/if}
-		{#if d.items.length}<div class="dim" style="font-size:11.5px;margin-top:6px"><a href="/due">{t('gap_due_link')}</a></div>{/if}
+		{#if d.items.length || d.hidden?.length}<div class="dim" style="font-size:11.5px;margin-top:6px"><a href="/due">{t('gap_due_link')}</a></div>{/if}
 	{/if}
 </div>
 
@@ -83,6 +98,13 @@
 		color: var(--watch);
 		font-weight: 700;
 		font-size: 13px;
+	}
+	.decided {
+		opacity: 0.65;
+	}
+	.decided .ic {
+		background: var(--ok-bg);
+		color: var(--ok);
 	}
 	.meta {
 		display: flex;

@@ -13,7 +13,7 @@
 	import Sparkline from '#lib/components/Sparkline.svelte';
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
-	import { dueCard, dueCardView, dueScreenOpen, lockedScopes, partialScopes } from '#lib/logic/due';
+	import { dateParts, dueCard, dueCardView, dueScreenOpen, gapShortKey, lockedScopes, partialScopes } from '#lib/logic/due';
 	import { app, currentProfile } from '#lib/state/app.svelte';
 
 	// The rule pack ships inside the package. The link names only the system's pack file, never the rule that fired.
@@ -195,7 +195,7 @@
 				{#each dueView.rows as x (x.key)}
 					<div class="due">
 						<div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true">{@html DUE_ICON[x.area] ?? DUE_ICON.lab}</svg></div>
-						<div class="w"><div>{x.title}</div><div>{x.why}</div></div>
+						<div class="w"><div>{#each dateParts(x.title) as part, k (k)}{#if k % 2}<span style="white-space:nowrap">{part}</span>{:else}{part}{/if}{/each}</div><div>{x.area === 'document' ? t(gapShortKey(x.key)) : x.why}</div></div>
 						{#if x.phase}<PhaseChip phase={x.phase} />{/if}
 						<i style="width:8px;height:8px;border-radius:50%;background:{C[x.color as Status]};flex:none" title={t(x.word)}></i><span class="sr-only">{t(x.word)}</span>
 					</div>
