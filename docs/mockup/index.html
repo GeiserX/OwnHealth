@@ -398,7 +398,7 @@ function dashboard(){
   ${S.profile!=="alex"?`<div class="banner" style="border-color:var(--line2);background:var(--surface)"><span class="muted">Mockup: every profile shows Alex's synthetic values. In the app, the switcher reloads the page for ${P.name} within your grants.</span></div>`:""}
   <div class="meds"><b style="font-size:12px;color:var(--muted);white-space:nowrap">${t("meds")}</b>
     <span class="med"><b>Atorvastatin</b> 20 mg <span class="pgx" style="color:var(--watch);border-color:rgba(224,168,74,.5)" title="SLCO1B1 *1/*5 decreased function · CPIC A · discuss with your prescriber">SLCO1B1 DF</span></span>
-    <span class="med"><b>Omeprazole</b> 20 mg <span class="pgx" style="color:var(--watch);border-color:rgba(224,168,74,.5)" title="CYP2C19 *1/*2 intermediate metabolizer · CPIC A">CYP2C19 IM</span></span>
+    <span class="med"><b>Cenobamate</b> 50 mg <span class="pgx" style="color:var(--watch);border-color:rgba(224,168,74,.5)" title="moderate CYP2C19 inhibitor in the FDA table · CYP2C19 *1/*2 intermediate metabolizer">CYP2C19 inhibitor</span></span>
     <span style="margin-left:auto">${src("Rx · 2026-09-20")}</span>
     <a class="btn sm" href="#drug-check">${t("chk")}</a><span class="phase">v0.1</span></div>
   <div class="dash"><div class="sys">${cards.join("")}</div>
@@ -569,7 +569,7 @@ function genome(){
   const ev=e=>`<span class="pgx ev-${e}">${e}</span>`;
   const cf=c=>`<span class="pill ${c==="high"?"p-ok":c==="medium"?"p-watch":c==="low"?"p-stale":"p-out"}"><i></i>${c}</span>`;
   const R=[
-   ["pgx","CYP2C19","rs4244285 (*2)","*1/*2 · intermediate metabolizer","E1","high","alt","CPIC A · clopidogrel, PPIs, SSRIs · on omeprazole"],
+   ["pgx","CYP2C19","rs4244285 (*2)","*1/*2 · intermediate metabolizer","E1","high","alt","CPIC A · clopidogrel, PPIs, SSRIs · on cenobamate, a CYP2C19 inhibitor"],
    ["pgx","SLCO1B1","rs4149056 T/C","*1/*5 · decreased function","E1","high","alt","CPIC A · statins · on atorvastatin"],
    ["pgx","CYP2D6","pypgx + Cyrius from BAM","*1/*41 · normal metabolizer (AS 1.5)","E1","high","alt","CPIC A · codeine, tramadol"],
    ["pgx","CYP2C9 / VKORC1","rs1799853 C/C · rs9923231 G/A","*1/*1 · VKORC1 −1639 G/A","E1","high","alt","CPIC A · warfarin"],
@@ -583,7 +583,7 @@ function genome(){
    ["pgx","DPYD","c.1905+1G>A, c.2846A>T","no variant found","E1","high","ref","CPIC A · fluoropyrimidines"]
   ];
   const G=[
-   ["CYP2C19","*1/*2 · Intermediate Metabolizer",1,1,"Omeprazole 20 mg"],["CYP2C9","*1/*1 · Normal Metabolizer",0,0,""],
+   ["CYP2C19","*1/*2 · Intermediate Metabolizer",1,1,""],["CYP2C9","*1/*1 · Normal Metabolizer",0,0,""],
    ["CYP2D6","*1/*41 · Normal Metabolizer",0,0,""],["CYP3A5","assessed · no call in the file",0,0,""],
    ["DPYD","*1/*1 · Normal Metabolizer",0,0,""],["HLA-B","B*58:01 absent",0,0,""],["NUDT15","not in the coverage map",0,0,""],
    ["SLCO1B1","*1/*5 · Decreased Function",0,1,"Atorvastatin 20 mg"],["TPMT","*1/*1 · Normal Metabolizer",1,0,""],
@@ -643,11 +643,11 @@ function drug(){
   <div class="drug" style="margin-bottom:14px">
    <div class="card"><h3>Current medicines and supplements<span class="r"><button class="btn sm">Add by hand</button></span></h3>
     ${[["Atorvastatin","20 mg","1 tablet daily · every evening · since <span class='num'>2026-03-10</span>","Reason: hypercholesterolaemia · Prescribed by: Dr. Synthetic",[["info","SLCO1B1 · Decreased function"]],["ATC C10AA05"],"Rx · src_m02"],
-       ["Omeprazole","20 mg","1 capsule · before breakfast · since <span class='num'>2026-04-01</span>","",[["watch","CYP2C19 · Intermediate metabolizer"]],["RxNorm 40790","ATC A02BC01"],"Rx · src_m05"],
+       ["Cenobamate","50 mg","1 tablet · at night · since <span class='num'>2026-04-01</span>","",[["watch","CYP2C19 inhibitor (moderate)"]],["ATC N03AX25"],"Rx · src_m05"],
        ["Vitamin D3","1000 IU <span class='chip'>Supplement</span>","1 capsule · once a day · since <span class='num'>2025-10-01</span>","",[],[],"entered by hand"]]
       .map(m=>`<div style="padding:7px 0;border-top:1px solid #20252f"><div style="display:flex;gap:8px;align-items:flex-start"><div style="flex:1"><div><b>${m[0]}</b> ${m[1]}</div><div class="muted" style="font-size:12px;margin-top:2px">${m[2]}</div>${m[3]?`<div class="dim" style="font-size:12px">${m[3]}</div>`:""}<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px">${m[4].map(b=>pill(b[0],b[1])).join("")}${m[5].map(c=>`<span class="chip mono" title="Codes as the source sent them">${c}</span>`).join("")}${src(m[6])}</div></div><button class="btn sm">Correct</button></div></div>`).join("")}</div>
    <div class="card"><h3>History</h3><div class="dim" style="font-size:11.5px;margin:-4px 0 6px">every course and version, grouped by medicine</div>
-    ${[["Omeprazole",[["2026-04-01 → ongoing","Taking","20 mg · 1 capsule · before breakfast",""]]],
+    ${[["Cenobamate",[["2026-04-01 → ongoing","Taking","50 mg · 1 tablet · at night",""]]],
        ["Atorvastatin",[["2026-03-10 → ongoing","Taking","20 mg · 1 tablet daily",""],["2022-06-20 → 2025-12-01","Stopped","20 mg · 1 tablet daily","Reason: paused"]]],
        ["Vitamin D3",[["2025-10-01 → ongoing","Taking","1000 IU · once a day",""],["2025-10-01","Corrected","400 IU · once a day","dose corrected"]]]]
       .map(g=>`<div style="padding:7px 0;border-top:1px solid #20252f"><b>${g[0]}</b><ol style="list-style:none;margin:4px 0 0;padding:0 0 0 10px;border-left:2px solid var(--line2);font-size:12px;display:grid;gap:3px">${g[1].map(e=>`<li style="${e[1]==="Corrected"?"opacity:.7":""}"><span class="num">${e[0]}</span> <span class="muted">· ${e[1]} · ${e[2]}${e[3]?" · "+e[3]:""}</span></li>`).join("")}</ol></div>`).join("")}</div>
