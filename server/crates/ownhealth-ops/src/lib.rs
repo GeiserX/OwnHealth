@@ -14,9 +14,9 @@
 mod backup;
 mod demo_base;
 pub mod export;
+pub mod ips;
 pub mod letter_pdf;
 pub mod next_draw_pdf;
-pub mod ips;
 pub mod summary_pdf;
 
 pub use backup::{MANIFEST_SCHEMA, backup, restore, verify_restore};
