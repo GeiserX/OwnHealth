@@ -41,6 +41,7 @@ pub const LOINC: &str = "http://loinc.org";
 pub const ABSENT_UNKNOWN: &str = "http://hl7.org/fhir/uv/ips/CodeSystem/absent-unknown-uv-ips";
 const XHTML: &str = "http://www.w3.org/1999/xhtml";
 const SRC_URN: &str = "urn:ownhealth:src:";
+const DATA_ABSENT: &str = "http://hl7.org/fhir/StructureDefinition/data-absent-reason";
 /// The document and section codes, compiled in.
 pub const SECTIONS_TSV: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -357,6 +358,7 @@ fn entry(row: &Map<String, Value>, patient_url: &str, inside: &HashSet<String>) 
     let mut v = Value::Object(res);
     localize(&mut v, inside);
     let Value::Object(mut res) = v else { return None };
+    required_elements(&rtype, &mut res, row);
     res.insert("id".into(), json!(id));
     let mut meta = match res.shift_remove("meta") {
         Some(Value::Object(m)) => m,
@@ -384,6 +386,35 @@ fn entry(row: &Map<String, Value>, patient_url: &str, inside: &HashSet<String>) 
     };
     out.insert(who.into(), json!({"reference": patient_url}));
     Some((id, Value::Object(out)))
+}
+
+/// The elements IPS requires (1..1) that a stored resource can lack: a vaccine, procedure or medicine
+/// typed with no date, and a Condition imported without a clinicalStatus. A missing date is stated as
+/// unknown with the data-absent-reason extension; a missing clinical status is the row's own column.
+fn required_elements(rtype: &str, res: &mut Map<String, Value>, row: &Map<String, Value>) {
+    let has = |res: &Map<String, Value>, prefix: &str| res.keys().any(|k| k.trim_start_matches('_').starts_with(prefix));
+    let unknown = || json!({"extension": [{"url": DATA_ABSENT, "valueCode": "unknown"}]});
+    match rtype {
+        "Immunization" if !has(res, "occurrence") => {
+            res.insert("_occurrenceDateTime".into(), unknown());
+        }
+        "Procedure" if !has(res, "performed") => {
+            res.insert("_performedDateTime".into(), unknown());
+        }
+        "MedicationStatement" if !has(res, "effective") => {
+            res.insert("effectivePeriod".into(), unknown());
+        }
+        "Condition" if !res.contains_key("clinicalStatus") => {
+            let status = row.get("clinical_status").and_then(Value::as_str).unwrap_or("active");
+            if ["active", "recurrence", "relapse", "inactive", "remission", "resolved"].contains(&status) {
+                res.insert(
+                    "clinicalStatus".into(),
+                    json!({"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": status}]}),
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The entry of an empty required section, as the IPS examples write it: "no information about ...".
@@ -663,6 +694,64 @@ mod tests {
                 "{rtype} {e}"
             );
         }
+    }
+
+    fn entry_of(row: Value) -> Value {
+        let row = row.as_object().cloned().unwrap_or_default();
+        entry(&row, "urn:uuid:p", &HashSet::new()).map(|e| e.1).unwrap_or_default()
+    }
+
+    const DAR: &str = "http://hl7.org/fhir/StructureDefinition/data-absent-reason";
+
+    /// IPS requires Immunization.occurrence[x] (1..1): a vaccine with no date says the date is unknown.
+    #[test]
+    fn an_undated_vaccine_states_its_date_as_unknown() {
+        let e = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001",
+            "fhir": {"resourceType": "Immunization", "status": "completed", "vaccineCode": {"text": "Td"}}}));
+        assert_eq!(e["_occurrenceDateTime"]["extension"][0]["url"], DAR, "{e}");
+        assert_eq!(e["_occurrenceDateTime"]["extension"][0]["valueCode"], "unknown", "{e}");
+        let dated = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001",
+            "fhir": {"resourceType": "Immunization", "occurrenceDateTime": "2016-05-10"}}));
+        assert!(dated.get("_occurrenceDateTime").is_none(), "{dated}");
+    }
+
+    /// IPS requires Procedure.performed[x] (1..1).
+    #[test]
+    fn an_undated_procedure_states_its_date_as_unknown() {
+        let e = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001",
+            "fhir": {"resourceType": "Procedure", "status": "completed", "code": {"text": "Appendectomy"}}}));
+        assert_eq!(e["_performedDateTime"]["extension"][0]["valueCode"], "unknown", "{e}");
+        let dated = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001",
+            "fhir": {"resourceType": "Procedure", "performedPeriod": {"start": "2020-01-01"}}}));
+        assert!(dated.get("_performedDateTime").is_none(), "{dated}");
+    }
+
+    /// IPS requires MedicationStatement.effective[x] (1..1): a medicine with no start says so.
+    #[test]
+    fn an_undated_medicine_states_its_period_as_unknown() {
+        let e = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001",
+            "fhir": {"resourceType": "MedicationStatement", "status": "active",
+                     "medicationCodeableConcept": {"text": "Enalapril 10 mg"}}}));
+        assert_eq!(e["effectivePeriod"]["extension"][0]["valueCode"], "unknown", "{e}");
+        let dated = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001",
+            "fhir": {"resourceType": "MedicationStatement", "effectiveDateTime": "2026-01-01",
+                     "medicationCodeableConcept": {"text": "Enalapril 10 mg"}}}));
+        assert!(dated.get("effectivePeriod").is_none(), "{dated}");
+    }
+
+    /// IPS requires Condition.clinicalStatus (1..1): an imported Condition without one gets the row's.
+    #[test]
+    fn a_condition_without_a_clinical_status_gets_the_row_s() {
+        let e = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001", "clinical_status": "recurrence",
+            "fhir": {"resourceType": "Condition", "code": {"text": "Hypertension"}}}));
+        assert_eq!(
+            e["clinicalStatus"]["coding"][0],
+            json!({"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "recurrence"}),
+            "{e}"
+        );
+        let kept = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001", "clinical_status": "active",
+            "fhir": {"resourceType": "Condition", "clinicalStatus": {"text": "as sent"}}}));
+        assert_eq!(kept["clinicalStatus"], json!({"text": "as sent"}));
     }
 
     #[test]

@@ -4,7 +4,8 @@
 //! give the same bytes, and Lucía's empty required sections carry the IPS "no information" entry.
 //!
 //! With `OWNHEALTH_FHIR_OUT=<dir>` the demo test also writes Alex's and Carmen's Bundles there, for
-//! the HL7 validator job (.github/workflows/fhir-validate.yml).
+//! the HL7 validator job (.github/workflows/fhir-validate.yml). Carmen's carries a vaccine, a
+//! procedure and a medicine with no date, so the job sees how the export states a date it lacks.
 
 #[path = "auth_support.rs"]
 mod support;
@@ -16,6 +17,8 @@ use ownhealth_core::access::{ProfileIn, all_scopes, create_household, create_pro
 use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::demo::{DEMO_HOUSEHOLD, seed_demo};
 use ownhealth_core::documents::{NewDocument, create_document};
+use ownhealth_core::provenance::{SrcIn, SrcRef};
+use ownhealth_core::records::{RecordIn, RecordOptions, add_record};
 use ownhealth_core::testing::TestDb;
 use ownhealth_ingest_pdf::textcheck::assert_text_layer;
 use ownhealth_ingest_structured::fhir::{import_resources, read_entries};
@@ -208,10 +211,43 @@ async fn alex_exports_an_ips_that_imports_back_with_the_same_values_and_units() 
     let records_in = entries.len() - 2 - obs.len() - absent;
     assert!(records_in >= 5, "{records_in} records");
 
+    // Carmen gets a vaccine, a procedure and a medicine typed with no date: IPS requires each date, so
+    // the Bundle states it as unknown, and the validator job reads this Bundle
+    let carmen_id = pid(&db, "carmen").await?;
+    let mut c = db.pool.acquire().await?;
+    for (kind, body) in [
+        ("immunization", json!({"vaccine": "Td"})),
+        ("procedure", json!({"text": "Apendicectomía"})),
+        ("medication", json!({"name": "Paracetamol", "strength": "1 g"})),
+    ] {
+        let mut body = body;
+        body["profile_id"] = json!(carmen_id.to_string());
+        let record = RecordIn::from_json(kind, body)?;
+        let src = SrcRef::New(SrcIn {
+            profile_id: Some(carmen_id),
+            label: Some("manual".into()),
+            ..SrcIn::manual(None)
+        });
+        add_record(&mut c, &record, &src, RecordOptions::new("person")).await?;
+    }
+    drop(c);
+    let carmen = export(&db, carmen_id, "es").await?;
+    let unknown = |r: &Value, k: &str| r[k]["extension"][0]["valueCode"] == "unknown";
+    let undated: Vec<&str> = carmen.bundle["entry"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| &e["resource"])
+        .filter(|r| {
+            unknown(r, "_occurrenceDateTime") || unknown(r, "_performedDateTime") || unknown(r, "effectivePeriod")
+        })
+        .filter_map(|r| r["resourceType"].as_str())
+        .collect();
+    assert_eq!(undated, ["MedicationStatement", "Immunization", "Procedure"], "{}", carmen.bundle);
+
     if let Ok(dir) = std::env::var("OWNHEALTH_FHIR_OUT") {
         std::fs::create_dir_all(&dir)?;
         std::fs::write(format!("{dir}/ips-alex-en.json"), out.to_bytes()?)?;
-        let carmen = export(&db, pid(&db, "carmen").await?, "es").await?;
         std::fs::write(format!("{dir}/ips-carmen-es.json"), carmen.to_bytes()?)?;
     }
 
