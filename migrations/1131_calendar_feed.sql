@@ -6,8 +6,8 @@
 -- access to the profile or is disabled, and when someone revokes it.
 --
 -- Access control, not a clinical row: no lifecycle trigger, and the raw part of a person's export
--- leaves the table out (ownhealth-ops export.rs SKIP_RAW). Both keys cascade, so deleting the
--- profile or the login removes its feeds.
+-- leaves the table out (ownhealth-ops export.rs SKIP_RAW). Deleting the profile removes its feeds.
+-- Closing a login keeps its user row (disabled), so its feeds stay but stop answering.
 create table calendar_feed (
   id uuid primary key default gen_random_uuid(),
   profile_id uuid not null references profile on delete cascade,
