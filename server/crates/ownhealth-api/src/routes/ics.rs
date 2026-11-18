@@ -18,11 +18,14 @@
 //! A fetch reads the ownhealth.prevention/v1 document as its creator, in the creator's language: one
 //! all-day VEVENT per open item (overdue, due, upcoming) on its due date, or today when that date has
 //! passed or there is none, and one per snoozed item on the day it is shown again, or on its due date
-//! when that comes later. A dismissed item, an item marked done and one up to date are left out.
-//! UID = sha256(profile id, item key), so an event keeps its UID when its day moves. `generic` titles every event "OwnHealth: 1 item due"; `named` uses the item's title
-//! and puts its reason and guideline link in the description. Each fetch writes one audit row (via
-//! export, actor share, action calendar_feed.fetch, with the caller's address and user agent), and a
-//! feed fetched more than RATE_PER_HOUR times in the last hour waits.
+//! when that comes later. A dismissed item and one up to date are left out. An item marked done is
+//! left out while the mark hides it, and comes back when its next round is open, as on the Due screen.
+//! UID = sha256(profile id, item key), so an event keeps its UID when its day moves. `generic` titles
+//! every event "OwnHealth: 1 item due"; `named` uses the item's title and puts its reason and
+//! guideline link in the description. Each fetch writes one audit row (via export, actor share,
+//! action calendar_feed.fetch, with the peer address and user agent: behind a reverse proxy the
+//! address is the proxy's, as on every audit row), and a feed fetched more than RATE_PER_HOUR times
+//! in the last hour waits. A HEAD gets 405: it would deliver no calendar.
 
 use axum::Router;
 use axum::extract::{Path, State};
@@ -84,8 +87,9 @@ struct Feed {
 }
 
 /// The live feed of a token, or None. The same work for every token: one lookup by prefix and one
-/// constant-time hash comparison, against a dummy hash when the prefix is unknown. The feed row stays
-/// locked to the end of the transaction, so two fetches at once count the hour's fetches in turn.
+/// constant-time hash comparison, against a dummy hash when the prefix is unknown. Only a matching
+/// secret then locks the feed row, to the end of the transaction, so two fetches at once count the
+/// hour's fetches in turn and a wrong secret never waits on a fetch in progress.
 async fn lookup(conn: &mut PgConnection, token: &str) -> Result<Option<Feed>, ApiError> {
     let (prefix, secret) = token
         .strip_prefix(PREFIX)
@@ -95,14 +99,25 @@ async fn lookup(conn: &mut PgConnection, token: &str) -> Result<Option<Feed>, Ap
     let row: Option<Row> = sqlx::query_as(
         "select f.id, f.profile_id, f.created_by, u.household_id, u.locale, f.detail, f.secret_sha256, \
          f.revoked_at is null and u.disabled_at is null \
-         from calendar_feed f join app_user u on u.id = f.created_by where f.prefix = $1 for update of f",
+         from calendar_feed f join app_user u on u.id = f.created_by where f.prefix = $1",
     )
     .bind(format!("{PREFIX}{prefix}"))
     .fetch_optional(&mut *conn)
     .await?;
     let stored = row.as_ref().map_or_else(|| vec![0u8; 32], |r| r.6.clone());
     let same: bool = ownhealth_auth::sha256(secret).ct_eq(&stored).into();
-    Ok(row.filter(|r| same && r.7 && !secret.is_empty()).map(|r| Feed {
+    let Some(r) = row.filter(|r| same && r.7 && !secret.is_empty()) else {
+        return Ok(None);
+    };
+    // the feed is still live once its row is ours: a revoke or a disabled login in between ends it
+    let live: Option<bool> = sqlx::query_scalar(
+        "select f.revoked_at is null and u.disabled_at is null \
+         from calendar_feed f join app_user u on u.id = f.created_by where f.id = $1 for update of f",
+    )
+    .bind(r.0)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok((live == Some(true)).then_some(Feed {
         id: r.0,
         profile_id: r.1,
         created_by: r.2,
@@ -306,7 +321,7 @@ async fn serve(rt: &Runtime, file: &str, meta: Meta) -> Result<Response, ApiErro
         "OwnHealth".to_string()
     };
     let text = calendar(&name, &list, Utc::now());
-    // a calendar app's fetch, with the address and user agent it came from, so the owner of an
+    // a calendar app's fetch, with the peer address and user agent it came from, so the owner of an
     // address that leaked can tell who polls it
     let mut e = AuditEvent::new("share", "export", "calendar_feed.fetch");
     e.actor_id = Some(f.created_by);
@@ -485,9 +500,15 @@ async fn revoke(State(rt): State<Runtime>, caller: Caller, Path((p, id)): Path<(
     ok(json!({"id": id, "revoked": true}))
 }
 
+/// A HEAD would run the whole fetch, take one of the hour's fetches and write an audit row, and
+/// deliver no calendar: it is refused before any lookup, the same for every token.
+async fn no_head() -> Response {
+    (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "GET")]).into_response()
+}
+
 pub fn router() -> Router<Runtime> {
     Router::new()
-        .route("/ics/{file}", get(feed))
+        .route("/ics/{file}", get(feed).head(no_head))
         .route("/profiles/{p}/calendar-feeds", get(list).post(create))
         .route(
             "/profiles/{p}/calendar-feeds/{id}",

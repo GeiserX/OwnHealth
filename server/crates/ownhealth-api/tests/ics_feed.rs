@@ -195,11 +195,15 @@ const KEY: &str = "es.cancer.breast";
 async fn the_feed_is_rfc_5545_with_one_all_day_event_per_open_item_and_stable_uids() -> R {
     let a = app().await?;
     let (_, path) = new_feed(&a, "alex", "carmen", "generic").await?;
+    let today = today_utc();
     let first = events(&ics(&a, &path).await?)?;
     let open = open_items(&a, "alex", "carmen", "en").await?;
+    if today_utc() != today {
+        // midnight UTC passed while the test ran: the feed and the list may be a day apart
+        return Ok(());
+    }
     assert!(open.iter().any(|i| i["key"] == KEY), "{open:?}");
     assert_eq!(first.len(), open.len(), "{first:?}");
-    let today = today_utc();
     for (day, summary, _) in first.values() {
         assert_eq!(summary, "OwnHealth: 1 elemento pendiente");
         // nothing lands where a calendar no longer looks
@@ -490,6 +494,46 @@ async fn each_fetch_is_audited_once_and_a_busy_feed_is_slowed_down() -> R {
     Ok(())
 }
 
+/// A HEAD answers 405 before any lookup: it delivers no calendar, so it takes no fetch from the hour
+/// and writes no audit row.
+#[tokio::test]
+async fn a_head_request_is_refused_and_not_counted_as_a_fetch() -> R {
+    let a = app().await?;
+    let (_, path) = new_feed(&a, "alex", "carmen", "generic").await?;
+    let (s, h, _) = raw(&a, None, "HEAD", &path, None).await?;
+    assert_eq!(
+        (s, h.get(header::ALLOW).cloned()),
+        (StatusCode::METHOD_NOT_ALLOWED, Some("GET".parse()?))
+    );
+    let n: i64 = sqlx::query_scalar("select count(*) from audit_event where tool = 'ics'")
+        .fetch_one(&a.db.pool)
+        .await?;
+    assert_eq!(n, 0);
+    Ok(())
+}
+
+/// A wrong secret for a real prefix answers at once while a fetch of that feed holds its row: only a
+/// matching secret waits for the lock.
+#[tokio::test]
+async fn a_wrong_secret_never_waits_on_a_fetch_in_progress() -> R {
+    let a = app().await?;
+    let (id, path) = new_feed(&a, "alex", "carmen", "generic").await?;
+    let (head, _) = path.rsplit_once('_').unwrap_or_default();
+    let wrong = format!("{head}_{}.ics", "x".repeat(43));
+    let mut held = a.db.pool.begin().await?;
+    sqlx::query("select 1 from calendar_feed where id = $1 for update")
+        .bind(id)
+        .execute(&mut *held)
+        .await?;
+    let got = tokio::time::timeout(Wall::from_secs(3), fetch(&a, &wrong)).await;
+    held.rollback().await?;
+    assert_eq!(
+        got.map(|r| r.map(|f| f.0).ok()).ok().flatten(),
+        Some(StatusCode::NOT_FOUND)
+    );
+    Ok(())
+}
+
 /// Two calendar apps polling the same address at once, one fetch short of the hour's limit: one gets
 /// the feed, the other waits.
 #[tokio::test]
@@ -608,8 +652,19 @@ async fn making_a_feed_and_naming_its_items_need_step_up_and_going_back_or_revok
     let (s, _, b) = request(&a, Some(stale(&a, "alex").await?), "POST", feeds, Some(json!({}))).await?;
     assert_eq!((s, code(&b)), (StatusCode::FORBIDDEN, json!("step_up_required")));
     let named = Some(json!({"detail": "named"}));
-    let (s, _, b) = request(&a, Some(stale(&a, "alex").await?), "PATCH", &one, named).await?;
+    let (s, _, b) = request(&a, Some(stale(&a, "alex").await?), "PATCH", &one, named.clone()).await?;
     assert_eq!((s, code(&b)), (StatusCode::FORBIDDEN, json!("step_up_required")));
+    let detail = || async {
+        sqlx::query_scalar::<_, String>("select detail from calendar_feed where id = $1")
+            .bind(id)
+            .fetch_one(&a.db.pool)
+            .await
+    };
+    // the refused call named nothing
+    assert_eq!(detail().await?, "generic");
+    // named with a fresh step-up, then a stale session can still go back to generic
+    let (s, v) = send(&a, "alex", "PATCH", &one, named).await?;
+    assert_eq!((s, detail().await?.as_str()), (StatusCode::OK, "named"), "{v}");
     let generic = Some(json!({"detail": "generic"}));
     let (s, _, b) = request(&a, Some(stale(&a, "alex").await?), "PATCH", &one, generic).await?;
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
