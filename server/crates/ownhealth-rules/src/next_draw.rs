@@ -214,7 +214,12 @@ pub async fn build_for(conn: &mut PgConnection, profile_id: Uuid, as_of: NaiveDa
     build_inner(conn, profile_id, as_of, Some(scopes)).await
 }
 
-async fn build_inner(conn: &mut PgConnection, profile_id: Uuid, as_of: NaiveDate, scopes: Option<&Scopes>) -> Result<Value> {
+async fn build_inner(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    as_of: NaiveDate,
+    scopes: Option<&Scopes>,
+) -> Result<Value> {
     let (body, ev) = crate::build_with_evaluation(&mut *conn, profile_id, as_of, None).await?;
     let pack = crate::load_pack()?;
     let mut prevention = crate::prevention::from_evaluation(conn, &ev, &body, &pack).await?;

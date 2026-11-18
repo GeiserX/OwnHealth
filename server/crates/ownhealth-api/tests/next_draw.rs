@@ -143,10 +143,7 @@ async fn a_caregiver_without_read_records_sees_only_the_lab_range_lines() -> R {
     };
     let (st, open) = json(&app, "/api/profiles/carmen/next-draw?as_of=2026-11-07&lang=en").await?;
     assert_eq!(st, StatusCode::OK, "{open}");
-    assert!(
-        groups(&open).iter().any(|(_, k)| k == "never_measured"),
-        "{open:#}"
-    );
+    assert!(groups(&open).iter().any(|(_, k)| k == "never_measured"), "{open:#}");
     sqlx::query("update profile set locks = array['read:records'] where id = $1")
         .bind(s.pid("carmen"))
         .execute(s.pool())

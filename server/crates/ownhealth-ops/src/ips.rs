@@ -393,7 +393,8 @@ fn entry(row: &Map<String, Value>, patient_url: &str, inside: &HashSet<String>) 
 /// unknown with the data-absent-reason extension; a missing clinical status is the row's own column.
 /// The Observation status follows the row as well: a confirmed preliminary value is final.
 fn required_elements(rtype: &str, res: &mut Map<String, Value>, row: &Map<String, Value>) {
-    let has = |res: &Map<String, Value>, prefix: &str| res.keys().any(|k| k.trim_start_matches('_').starts_with(prefix));
+    let has =
+        |res: &Map<String, Value>, prefix: &str| res.keys().any(|k| k.trim_start_matches('_').starts_with(prefix));
     let unknown = || json!({"extension": [{"url": DATA_ABSENT, "valueCode": "unknown"}]});
     match rtype {
         "Immunization" if !has(res, "occurrence") => {
@@ -707,7 +708,9 @@ mod tests {
 
     fn entry_of(row: Value) -> Value {
         let row = row.as_object().cloned().unwrap_or_default();
-        entry(&row, "urn:uuid:p", &HashSet::new()).map(|e| e.1).unwrap_or_default()
+        entry(&row, "urn:uuid:p", &HashSet::new())
+            .map(|e| e.1)
+            .unwrap_or_default()
     }
 
     const DAR: &str = "http://hl7.org/fhir/StructureDefinition/data-absent-reason";
@@ -751,15 +754,19 @@ mod tests {
     /// IPS requires Condition.clinicalStatus (1..1): an imported Condition without one gets the row's.
     #[test]
     fn a_condition_without_a_clinical_status_gets_the_row_s() {
-        let e = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001", "clinical_status": "recurrence",
-            "fhir": {"resourceType": "Condition", "code": {"text": "Hypertension"}}}));
+        let e = entry_of(
+            json!({"id": "00000000-0000-0000-0000-000000000001", "clinical_status": "recurrence",
+            "fhir": {"resourceType": "Condition", "code": {"text": "Hypertension"}}}),
+        );
         assert_eq!(
             e["clinicalStatus"]["coding"][0],
             json!({"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "recurrence"}),
             "{e}"
         );
-        let kept = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001", "clinical_status": "active",
-            "fhir": {"resourceType": "Condition", "clinicalStatus": {"text": "as sent"}}}));
+        let kept = entry_of(
+            json!({"id": "00000000-0000-0000-0000-000000000001", "clinical_status": "active",
+            "fhir": {"resourceType": "Condition", "clinicalStatus": {"text": "as sent"}}}),
+        );
         assert_eq!(kept["clinicalStatus"], json!({"text": "as sent"}));
     }
 
@@ -767,11 +774,15 @@ mod tests {
     /// immutable but for their status); the summary carries only current rows, so it is final there.
     #[test]
     fn a_confirmed_value_is_final_in_the_summary() {
-        let e = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001", "status": "current",
-            "fhir": {"resourceType": "Observation", "status": "preliminary", "code": {"text": "Glucosa"}}}));
+        let e = entry_of(
+            json!({"id": "00000000-0000-0000-0000-000000000001", "status": "current",
+            "fhir": {"resourceType": "Observation", "status": "preliminary", "code": {"text": "Glucosa"}}}),
+        );
         assert_eq!(e["status"], "final", "{e}");
-        let amended = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001", "status": "current",
-            "fhir": {"resourceType": "Observation", "status": "amended"}}));
+        let amended = entry_of(
+            json!({"id": "00000000-0000-0000-0000-000000000001", "status": "current",
+            "fhir": {"resourceType": "Observation", "status": "amended"}}),
+        );
         assert_eq!(amended["status"], "amended");
     }
 

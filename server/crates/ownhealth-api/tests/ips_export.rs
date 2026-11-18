@@ -243,7 +243,12 @@ async fn alex_exports_an_ips_that_imports_back_with_the_same_values_and_units() 
         })
         .filter_map(|r| r["resourceType"].as_str())
         .collect();
-    assert_eq!(undated, ["MedicationStatement", "Immunization", "Procedure"], "{}", carmen.bundle);
+    assert_eq!(
+        undated,
+        ["MedicationStatement", "Immunization", "Procedure"],
+        "{}",
+        carmen.bundle
+    );
 
     if let Ok(dir) = std::env::var("OWNHEALTH_FHIR_OUT") {
         std::fs::create_dir_all(&dir)?;

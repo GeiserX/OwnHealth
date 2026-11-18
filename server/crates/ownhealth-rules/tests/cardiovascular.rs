@@ -420,7 +420,10 @@ fn a_statin_is_found_by_its_spanish_brand_and_a_condition_by_its_words_or_icd10_
         assert!(cardio::condition_classes(cv(), text, None, None).is_empty(), "{text}");
     }
     for (text, class) in [
-        ("Hipertensión arterial no controlada y diabetes mellitus tipo 2", "diabetes"),
+        (
+            "Hipertensión arterial no controlada y diabetes mellitus tipo 2",
+            "diabetes",
+        ),
         ("Obesidad sin tratamiento y diabetes tipo 2", "diabetes"),
         ("Hypertension without treatment and type 2 diabetes", "diabetes"),
         ("Dislipemia no tratada y cardiopatía isquémica", "ascvd"),
