@@ -18,7 +18,7 @@
 	import Sparkline from '#lib/components/Sparkline.svelte';
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
-	import { buildBars, niceStep } from '#lib/logic/axis';
+	import { buildBars, labsOf, layoutMarks, measKey, niceStep } from '#lib/logic/axis';
 	import { calcUnit, forGroup, rowsForCard } from '#lib/logic/calc';
 	import { refRange, sourceLabel } from '#lib/logic/format';
 	import { currentProfile } from '#lib/state/app.svelte';
@@ -42,6 +42,8 @@
 	const calcs = new Loader<Calculators>();
 	let unitIdx = $state(0);
 	let adding = $state(false);
+	// the calculators card's smoking status form, opened from a risk result that waits for it
+	let smoking = $state(false);
 
 	function load() {
 		const slug = profile?.slug;
@@ -88,7 +90,9 @@
 	const tr = $derived(trends.data?.[Math.min(unitIdx, (trends.data?.length ?? 1) - 1)] ?? null);
 	const pts = $derived((tr?.points ?? []) as TrendPointStatus[]);
 	const last = $derived(pts.length ? pts[pts.length - 1] : null);
-	const labs = $derived([...new Set(pts.map((p) => p.lab ?? '—'))]);
+	// the labs in the order first seen; a point entered by hand (no lab) has its own shape but is no lab
+	const labInfo = $derived(labsOf(pts));
+	const labs = $derived(labInfo.keys);
 	// The dashboard card holding this marker gives its status and the related markers.
 	const card = $derived(dash.data?.systems.find((s) => s.markers.some((m) => m.alias_group === tr?.alias_group)) ?? null);
 	const marker = $derived(card?.markers.find((m) => m.alias_group === tr?.alias_group) ?? null);
@@ -106,7 +110,7 @@
 	}
 	const SHAPES = ['circle', 'square', 'diamond', 'triangle'] as const;
 	const GLYPH = { circle: '●', square: '■', diamond: '◆', triangle: '▲' };
-	const shapeOf = (lab: string | null) => SHAPES[Math.max(0, labs.indexOf(lab ?? '—')) % SHAPES.length];
+	const shapeOf = (lab: string | null | undefined) => SHAPES[Math.max(0, labs.indexOf(lab ?? null)) % SHAPES.length];
 
 	// ---- chart geometry (port of the mockup's ldlChart) ----
 	// 860 wide as in the mockup. In a narrow card the drawing gets the card's own width (a little less,
@@ -125,7 +129,8 @@
 		const asOf = new Date().toISOString().slice(0, 10);
 		const x0 = Math.floor(yfrac(pts[0].date));
 		const x1 = Math.max(Math.ceil(yfrac(pts[pts.length - 1].date) + 0.01), Math.ceil(yfrac(asOf)));
-		const vals = pts.flatMap((p) => [p.value, p.ref_low, p.ref_high]).filter((v): v is number => v != null);
+		const bl = tr.stats.baseline ?? null;
+		const vals = [...pts.flatMap((p) => [p.value, p.ref_low, p.ref_high]), bl?.low, bl?.high].filter((v): v is number => v != null);
 		const lo = Math.min(...vals);
 		const hi = Math.max(...vals);
 		const step = niceStep((hi - lo || Math.abs(hi) || 1) / 4);
@@ -148,28 +153,26 @@
 			return { x: a, w: b - a, y: top, h: Math.max(0, bot - top) };
 		});
 		// Dashed markers where the lab or the code changes between two points.
-		const marks: { x: number; label: string; row: number }[] = [];
+		const marks: { x: number; label: string }[] = [];
 		for (let i = 1; i < pts.length; i++) {
 			const a = pts[i - 1];
 			const b = pts[i];
+			// the server compares method and lab without case or spacing; trust it when it answers
+			if (b.method_change === false) continue;
 			const parts = [];
 			if ((a.lab ?? '') !== (b.lab ?? '')) parts.push(t('h1_lab_change'));
 			if ((a.loinc ?? '') !== (b.loinc ?? '') || (a.method ?? '') !== (b.method ?? '')) parts.push(b.method ? methodLabel(b.method) : t('h1_code_change'));
-			if (parts.length) marks.push({ x: (xy[i - 1][0] + xy[i][0]) / 2, label: parts.join(' · '), row: 0 });
+			if (parts.length) marks.push({ x: (xy[i - 1][0] + xy[i][0]) / 2, label: parts.join(' · ') });
 		}
-		// Each label takes the first row where it does not print over an earlier one (about 5.6 px per character).
-		const rowEnd: number[] = [];
-		for (const m of marks) {
-			let r = rowEnd.findIndex((end) => m.x + 4 > end + 6);
-			if (r < 0) r = rowEnd.length;
-			rowEnd[r] = m.x + 4 + m.label.length * 5.6;
-			m.row = r;
-		}
+		// Each label takes the first free row, and one at the right edge is drawn left of its line.
+		const placed = layoutMarks(marks, W - pr);
 		const clampX = (d: string) => Math.min(sx(x1), Math.max(sx(x0), sx(yfrac(d))));
 		// Annotations with an end draw as a bar on the Meds row; one-day ones as a dot on the Events row.
 		// A course with no end is still running and draws to today.
 		const bars = buildBars(tr.annotations, clampX, asOf, `${x0}-01-01`);
-		return { x0, x1, y0, y1, sx, sy, ticks, years, xy, band, marks, bars };
+		// The person's usual level before the last point (rule pack 0.2.0), drawn across the chart.
+		const usual = bl ? { y: sy(Math.min(bl.high, y1)), h: Math.max(0, sy(Math.max(bl.low, y0)) - sy(Math.min(bl.high, y1))), yl: sy(bl.low), yh: sy(bl.high), n: bl.n } : null;
+		return { x0, x1, y0, y1, sx, sy, ticks, years, xy, band, marks: placed, bars, usual };
 	});
 
 	// Courses too short to hold their name, near the right edge: their names go under the chart.
@@ -212,7 +215,8 @@
 	{#if adding && profile}
 		<div class="card" style="margin-bottom:12px">
 			<h3>{t('me_add_value')}</h3>
-			<ManualEntry profile={profile.slug} kinds={['observation']} onsaved={load} oncancel={() => (adding = false)} />
+			<!-- a form belongs to one profile: another profile gets a fresh one -->
+			{#key profile.slug}<ManualEntry profile={profile.slug} kinds={['observation', 'smoking']} onsaved={load} oncancel={() => (adding = false)} />{/key}
 		</div>
 	{/if}
 	{#if query}<div class="note" style="margin-bottom:6px">{t('me_filtered')} <b>{query}</b> · <a href="/biomarkers">{t('h1_clear')}</a></div>{/if}
@@ -262,7 +266,7 @@
 			</h1>
 			<div class="sub">
 				{#if pts.length}
-					{profile?.display_name} · {tp('h1_meas', pts.length, { labs: tp('h1_labs', labs.length), years: years(pts[0].date.slice(0, 4), pts[pts.length - 1].date.slice(0, 4)) })}
+					{profile?.display_name} · {tp(measKey(labInfo.count), pts.length, { labs: tp('h1_labs', labInfo.count), years: years(pts[0].date.slice(0, 4), pts[pts.length - 1].date.slice(0, 4)) })}
 				{/if}
 			</div>
 		</div>
@@ -295,10 +299,11 @@
 					</div>
 					<div class="legend" style="margin:2px 0 2px">
 						<span><i style="width:9px;height:9px;border-radius:50%;background:{C.ok}"></i>{t('h1_lg_ok')}</span>
-						<span><i style="width:9px;height:9px;border-radius:50%;background:{C.watch}"></i>{t('h1_lg_watch')}</span>
+						<span><i style="width:9px;height:9px;border-radius:50%;background:{C.watch}"></i>{t('calc_lg_watch')}</span>
 						<span><i style="width:9px;height:9px;border-radius:50%;background:{C.out}"></i>{t('h1_lg_out')}</span>
-						<span class="dim">{t('h1_lg_shape')} {#each labs as l (l)}{GLYPH[shapeOf(l)]} {l}{' '}{/each}</span>
+						<span class="dim">{t('h1_lg_shape')} {#each labs as l (l ?? '')}{GLYPH[shapeOf(l)]} {l ?? t('src_manual')}{' '}{/each}</span>
 						<span class="dim">{t('h1_lg_flags')}</span>
+						{#if tr.stats.baseline}<span><i style="width:14px;height:0;border-top:1.5px dashed {C.accent}"></i>{tf('calc_bl_band', { n: tr.stats.baseline.n })}</span>{/if}
 					</div>
 					<!-- role=group, not img: its points are buttons a keyboard and a screen reader reach one by one. -->
 					<div bind:clientWidth={chartW}>
@@ -312,13 +317,19 @@
 						{/each}
 						<!-- Only when it fits: on a phone the legend line above says what the band is. -->
 						{#if t('h1_band').length * 5.8 < iw - 12}<text x={pl + 6} y={geo.sy(geo.y0) - 6} fill="#3fb68b" font-size="10.5" opacity=".9">{t('h1_band')}</text>{/if}
+						{#if geo.usual}
+							{@const u = geo.usual}
+							<rect x={pl} y={u.y} width={iw} height={u.h} fill={C.accent} opacity=".07" />
+							<line x1={pl} x2={W - pr} y1={u.yh} y2={u.yh} stroke={C.accent} stroke-dasharray="4 3" opacity=".7" />
+							<line x1={pl} x2={W - pr} y1={u.yl} y2={u.yl} stroke={C.accent} stroke-dasharray="4 3" opacity=".7" />
+						{/if}
 						{#each geo.years as y (y)}
 							<line x1={geo.sx(y)} x2={geo.sx(y)} y1={pt} y2={pt + ih} stroke={C.grid} opacity=".6" />
 							<text x={geo.sx(y)} y={pt + ih + 15} fill={C.axis} font-size="11" text-anchor="middle">{y}</text>
 						{/each}
 						{#each geo.marks as m, i (i)}
 							<line x1={m.x} x2={m.x} y1={pt} y2={pt + ih} stroke="#56607a" stroke-dasharray="2 3" />
-							<text x={m.x + 4} y={pt + 10 + m.row * 12} fill="#8a93a5" font-size="10">{m.label}</text>
+							<text x={m.tx} y={pt + 10 + m.row * 12} fill="#8a93a5" font-size="10" text-anchor={m.anchor}>{m.label}</text>
 						{/each}
 						<polyline points={geo.xy.map((p) => p.join(',')).join(' ')} fill="none" stroke="#8792a6" stroke-width="1.6" />
 						{#each pts as p, i (p.src + "|" + i)}
@@ -331,7 +342,7 @@
 								style="cursor:pointer"
 								role="button"
 								tabindex="0"
-								aria-label="{p.date} · {p.printed} · {p.lab ?? ''}"
+								aria-label={[p.date, p.printed, p.lab, p.method_change && t('calc_pt_change')].filter(Boolean).join(' · ')}
 								onmousemove={(e) => (tip = { i, x: e.clientX, y: e.clientY })}
 								onmouseleave={() => (tip = null)}
 								onfocus={(e) => {
@@ -428,8 +439,27 @@
 						</div>
 					{/if}
 					<div class="note" style="margin-top:6px">
-						{tr.stats.exceeds_rcv === true ? t('h1_rcv_yes') : tr.stats.exceeds_rcv === false ? t('h1_rcv_no') : t('h1_rcv_na')}
+						{tr.stats.exceeds_rcv === true ? t('h1_rcv_yes') : tr.stats.exceeds_rcv === false ? t('h1_rcv_no') : tr.stats.method_change && tr.stats.rcv_pct != null ? t('calc_method_change') : tr.stats.rcv_pct == null && tr.stats.n >= 2 ? t('calc_rcv_none') : t('h1_rcv_na')}
 					</div>
+					{#if tr.stats.cv_i != null && tr.stats.cv_a != null}
+						<div class="dim" style="font-size:11.5px;margin-top:6px">
+							{tf('calc_cv', { cvi: fmtNum(Number(tr.stats.cv_i)), cva: fmtNum(Number(tr.stats.cv_a)) })}
+							{#if tr.stats.rcv_cite}<a href={tr.stats.rcv_cite} target="_blank" rel="noopener noreferrer">{t('calc_cv_src')}</a>{/if}
+						</div>
+					{/if}
+					{#if tr.stats.cv_i != null}
+						{@const bl = tr.stats.baseline}
+						<div style="margin-top:10px">
+							<div class="dim" style="font-size:11px">{t('calc_bl_t')}</div>
+							{#if bl}
+								<div style="font-size:15px;font-weight:650;white-space:nowrap">{fmt(bl.low)}–{fmt(bl.high)} {unitLabel(last.unit)}</div>
+								<div class="muted" style="font-size:11.5px">{tf('calc_bl_range', { n: bl.n })}</div>
+								<div class="note" style="margin-top:4px">{bl.outside ? t('calc_bl_out') : t('calc_bl_in')}</div>
+							{:else}
+								<div class="muted" style="font-size:11.5px">{t('calc_bl_na')}</div>
+							{/if}
+						</div>
+					{/if}
 				</div>
 				<div class="card">
 					<h3>{t('h1_calc')} <span class="r">{t('nodx')}</span></h3>
@@ -464,7 +494,12 @@
 									<div class="dim calc-in" style="font-size:11px">
 										{t('calc_inputs')}:
 										{#each it.inputs as i (i.group)}
-											<span><span class="calc-nw">{i.name} <span class="num">{numText(i.value)}</span> {calcUnit(i.unit)}</span>{#if i.converted}{' '}<span class="calc-nw">({tf('calc_read_as', { v: numText(i.converted.value) + ' ' + calcUnit(i.converted.unit) })})</span>{/if}{' '}<SourceChip label={i.date} name={i.name} src={i.src} onopen={openSource} /></span>
+											{#if i.text}
+												<!-- a line that is no lab value: what the record holds, with its source when it holds something -->
+												<span class="calc-fact"><span>{i.text}</span>{#if i.src}{' '}<SourceChip label={i.date} name={i.name} src={i.src} onopen={openSource} />{/if}</span>
+											{:else}
+												<span><span class="calc-nw">{i.name} <span class="num">{numText(i.value)}</span> {calcUnit(i.unit)}</span>{#if i.converted}{' '}<span class="calc-nw">({tf('calc_read_as', { v: numText(i.converted.value) + ' ' + calcUnit(i.converted.unit) })})</span>{/if}{' '}<SourceChip label={i.date} name={i.name} src={i.src} onopen={openSource} /></span>
+											{/if}
 										{/each}
 										{#if it.person?.age != null}<span class="calc-nw">{tf('calc_age', { age: it.person.age })}</span>{/if}
 										{#if it.person?.sex}<span class="calc-nw">{t('calc_' + it.person.sex)}</span>{/if}
@@ -473,6 +508,13 @@
 								<div class="dim" style="font-size:11px;overflow-wrap:anywhere">{it.version} · <a href={it.cite} target="_blank" rel="noopener noreferrer">{it.cite}</a></div>
 							</div>
 						{/each}
+						{#if profile && profile.role !== 'viewer' && calcShown.some((c) => c.latest.reason?.groups?.includes('smoking_status') || c.latest.reason_code === 'smoking_status_not_coded')}
+							{#if smoking}
+								{#key profile.slug}<ManualEntry profile={profile.slug} kinds={['smoking']} onsaved={() => ((smoking = false), load())} oncancel={() => (smoking = false)} />{/key}
+							{:else}
+								<button class="btn sm" style="margin-top:6px" onclick={() => (smoking = true)}>{t('calc_smk_add')}</button>
+							{/if}
+						{/if}
 						<div class="note" style="margin-top:4px">{t('calc_note')}</div>
 					{/if}
 				</div>
@@ -530,6 +572,12 @@
 	}
 	.calc-nw {
 		white-space: nowrap;
+	}
+	/* fact lines read as separate items, not one sentence */
+	.calc-fact::before {
+		content: '·';
+		margin-right: 4px;
+		opacity: 0.6;
 	}
 	@media (max-width: 760px) {
 		.ph-hide {
