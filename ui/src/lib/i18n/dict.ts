@@ -1569,6 +1569,10 @@ export const dict = {
 		due_ics_copy_hand: "This browser did not let the page use the clipboard: the address is selected to copy by hand.",
 		due_ics_revoke_d: "The address stops working, and the calendar app gets no more updates from it.",
 		due_ics_google: "Google Calendar fetches the address from Google's servers, so it cannot reach an OwnHealth that answers only on a home network or on Tailscale. Apple Calendar, Thunderbird and DAVx⁵ fetch it from the device itself.",
+		i2_act_calendar_feed_fetch: "Calendar app fetched the feed",
+		i2_act_calendar_feed_create: "Calendar feed made",
+		i2_act_calendar_feed_detail: "Calendar feed detail changed",
+		i2_act_calendar_feed_revoke: "Calendar feed revoked",
 	},
 	es: {
 		household: "Hogar",
@@ -3137,6 +3141,10 @@ export const dict = {
 		due_ics_copy_hand: "Este navegador no deja a la página usar el portapapeles: la dirección queda seleccionada para copiarla a mano.",
 		due_ics_revoke_d: "La dirección deja de funcionar y la app de calendario no recibe más cambios de ella.",
 		due_ics_google: "Google Calendar lee la dirección desde los servidores de Google, así que no llega a un OwnHealth que solo responde en la red de casa o en Tailscale. Calendario de Apple, Thunderbird y DAVx⁵ la leen desde el propio dispositivo.",
+		i2_act_calendar_feed_fetch: "Lectura de la app de calendario",
+		i2_act_calendar_feed_create: "Suscripción creada",
+		i2_act_calendar_feed_detail: "Detalle de la suscripción cambiado",
+		i2_act_calendar_feed_revoke: "Suscripción revocada",
 	},
 } as const;
 

@@ -14,7 +14,9 @@
 	import { t } from '#lib/i18n/index.svelte';
 	import { copyText } from '#lib/logic/inbox';
 
-	let { profile, name }: { profile: string; name: string } = $props();
+	// `locks` is the profile's lock list: a change to it can give or take away read:records, so the
+	// list loads again and the section shows or hides to match.
+	let { profile, name, locks = [] }: { profile: string; name: string; locks?: readonly string[] } = $props();
 
 	let feeds = $state<CalendarFeed[] | null>(null);
 	let hidden = $state(false);
@@ -32,12 +34,15 @@
 	$effect(() => {
 		const slug = profile;
 		void reload;
+		void locks.join();
 		const g = ++gen;
 		feeds = null;
 		loadErr = null;
 		listCalendarFeeds(slug).then(
 			(r) => {
-				if (g === gen) feeds = r.items;
+				if (g !== gen) return;
+				feeds = r.items;
+				hidden = false;
 			},
 			(e) => {
 				if (g !== gen) return;
@@ -92,7 +97,7 @@
 						<div class="mono" style="font-size:11.5px">{f.prefix}…</div>
 						<div class="dim" style="font-size:11px">{t('due_ics_last')}: <span class="num">{ago(f.last_used_at)}</span> · {t('i2_added')} <span class="num">{day(f.created_at)}</span></div>
 					</div>
-					<Switch on={f.detail === 'named'} label="{t('due_ics_names')} · {name}" words={[t('due_ics_named'), t('due_ics_generic')]} disabled={busy} onchange={(on) => setDetail(f, on)} />
+					<Switch on={f.detail === 'named'} label="{t('due_ics_names')} · {name} · {f.prefix}" words={[t('due_ics_named'), t('due_ics_generic')]} disabled={busy} onchange={(on) => setDetail(f, on)} />
 					<button class="btn sm no" disabled={busy} aria-expanded={confirming === f.id} aria-label="{t('i2_revoke')} {f.prefix}" onclick={() => (confirming = f.id)}>{t('i2_revoke')}</button>
 				</div>
 				{#if fresh?.id === f.id}

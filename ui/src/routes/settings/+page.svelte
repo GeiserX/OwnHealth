@@ -309,7 +309,7 @@
 					</div>
 				{/each}
 				<DueAnswers profile={p.slug} canWrite bare />
-				<CalendarFeed profile={p.slug} name={p.display_name} />
+				<CalendarFeed profile={p.slug} name={p.display_name} locks={p.locks ?? []} />
 				<div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:10px 0 2px">{t('st_data')}</div>
 				<div class="set">
 					<div style="flex:1;min-width:0"><div>{t('st_export')}</div><div class="dim" style="font-size:11px">{t('st_export_d')}</div></div>
