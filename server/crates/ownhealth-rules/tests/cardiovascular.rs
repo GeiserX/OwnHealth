@@ -410,6 +410,25 @@ fn a_statin_is_found_by_its_spanish_brand_and_a_condition_by_its_words_or_icd10_
     ] {
         assert!(cardio::condition_classes(cv(), text, None, None).is_empty(), "{text}");
     }
+    // a negation reaches only up to the next "y", "e" or "and": past it, the clause names another
+    // condition, so a negation of an earlier one does not hide it
+    for text in [
+        "Without diabetes or chronic kidney disease",
+        "Sin antecedentes de diabetes",
+        "No history of diabetes",
+    ] {
+        assert!(cardio::condition_classes(cv(), text, None, None).is_empty(), "{text}");
+    }
+    for (text, class) in [
+        ("Hipertensión arterial no controlada y diabetes mellitus tipo 2", "diabetes"),
+        ("Obesidad sin tratamiento y diabetes tipo 2", "diabetes"),
+        ("Hypertension without treatment and type 2 diabetes", "diabetes"),
+        ("Dislipemia no tratada y cardiopatía isquémica", "ascvd"),
+        ("Hipertensión no controlada e infarto agudo de miocardio", "ascvd"),
+        ("Asma no controlada y enfermedad renal crónica estadio 3", "ckd"),
+    ] {
+        assert_eq!(cardio::condition_classes(cv(), text, None, None), vec![class], "{text}");
+    }
     for text in ["Diabetes without complications", "Diabetes tipo 2 sin complicaciones"] {
         assert_eq!(
             cardio::condition_classes(cv(), text, None, None),

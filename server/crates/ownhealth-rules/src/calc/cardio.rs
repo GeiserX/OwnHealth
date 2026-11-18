@@ -126,6 +126,10 @@ pub struct ConditionClass {
     /// words that exclude a term only when they come before it in its clause ("riesgo de diabetes")
     #[serde(default)]
     pub not_terms: Vec<String>,
+    /// words that deny a term after them in its clause, up to the next conjunction ("sin diabetes",
+    /// but not "no controlada y diabetes")
+    #[serde(default)]
+    pub negations: Vec<String>,
     /// words that exclude a term anywhere in its clause ("diabetes mellitus (gestational)")
     #[serde(default)]
     pub qualifiers: Vec<String>,
@@ -353,6 +357,11 @@ fn is_icd10(system: &str) -> bool {
         || s.ends_with("2.16.840.1.113883.6.3")
 }
 
+/// The words that end a negation's reach inside a clause: past one of them the clause names another
+/// condition ("Hipertensión no controlada y diabetes"). "or", "o", "u" and "ni" do not end it, because
+/// a negation covers each choice ("without diabetes or CKD").
+const NEGATION_ENDS: [&str; 3] = ["y", "e", "and"];
+
 /// The condition classes a recorded condition belongs to.
 pub fn condition_classes<'a>(cv: &'a CvData, text: &str, system: Option<&str>, code: Option<&str>) -> Vec<&'a str> {
     let parts = clauses(text);
@@ -380,6 +389,13 @@ pub fn condition_classes<'a>(cv: &'a CvData, text: &str, system: Option<&str>, c
                         !c.not_terms
                             .iter()
                             .any(|n| phrase_at(ws, n).into_iter().any(|before| before < at))
+                            && !c.negations.iter().any(|n| {
+                                let nl = words(n).len();
+                                phrase_at(ws, n).into_iter().any(|before| {
+                                    before + nl <= at
+                                        && !ws[before + nl..at].iter().any(|w| NEGATION_ENDS.contains(&w.as_str()))
+                                })
+                            })
                     })
             });
             let by_code = system.is_some_and(is_icd10)
