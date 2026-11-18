@@ -101,3 +101,8 @@ export function labsOf(points: { lab?: string | null }[]): { keys: (string | nul
 	const keys = [...new Set(points.map((p) => p.lab ?? null))];
 	return { keys, count: keys.filter((k) => k != null).length };
 }
+
+/** The detail page subtitle: a series with no lab (every value entered by hand) leaves the lab count out. */
+export function measKey(labCount: number): 'h1_meas' | 'h1_meas_nolab' {
+	return labCount > 0 ? 'h1_meas' : 'h1_meas_nolab';
+}

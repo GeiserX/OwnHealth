@@ -18,7 +18,7 @@
 	import Sparkline from '#lib/components/Sparkline.svelte';
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
-	import { buildBars, labsOf, layoutMarks, niceStep } from '#lib/logic/axis';
+	import { buildBars, labsOf, layoutMarks, measKey, niceStep } from '#lib/logic/axis';
 	import { calcUnit, forGroup, rowsForCard } from '#lib/logic/calc';
 	import { refRange, sourceLabel } from '#lib/logic/format';
 	import { currentProfile } from '#lib/state/app.svelte';
@@ -266,7 +266,7 @@
 			</h1>
 			<div class="sub">
 				{#if pts.length}
-					{profile?.display_name} · {tp('h1_meas', pts.length, { labs: tp('h1_labs', labInfo.count), years: years(pts[0].date.slice(0, 4), pts[pts.length - 1].date.slice(0, 4)) })}
+					{profile?.display_name} · {tp(measKey(labInfo.count), pts.length, { labs: tp('h1_labs', labInfo.count), years: years(pts[0].date.slice(0, 4), pts[pts.length - 1].date.slice(0, 4)) })}
 				{/if}
 			</div>
 		</div>
