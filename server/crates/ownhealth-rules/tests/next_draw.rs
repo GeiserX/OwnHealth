@@ -192,6 +192,21 @@ fn an_analyte_both_stale_and_flagged_is_listed_once_with_both_reasons() -> R {
             "Last value 6.1 mIU/L on 2025-01-20, outside the lab range 0.4 - 4.0.",
         ]
     );
+    // numbers inside a Spanish sentence follow the language, as on the dashboard and the summary
+    let es = next_draw::render(&plan, &pack, "es")?;
+    assert_eq!(
+        items(&es)[0]["reasons"][1]["text"],
+        "Último valor 6,1 mIU/L el 2025-01-20, fuera del rango del laboratorio 0,4 - 4,0."
+    );
+    let mut one_sided = plan.clone();
+    one_sided["sections"][0]["items"][0]["reasons"][1]["ref"] = json!("< 75");
+    let es = next_draw::render(&one_sided, &pack, "es")?;
+    assert!(
+        items(&es)[0]["reasons"][1]["text"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("del laboratorio < 75.")),
+        "{es:#}"
+    );
     Ok(())
 }
 

@@ -272,14 +272,22 @@ pub fn render(plan: &Value, pack: &Pack, lang: &str) -> Result<Value> {
                     "lab_range" => fill(
                         &t("reason.lab_range"),
                         &[
-                            ("value", s("value")),
+                            ("value", crate::num::localized(&s("value"), lang)),
                             ("unit", s("unit")),
                             ("date", s("date")),
-                            ("ref", s("ref")),
+                            (
+                                "ref",
+                                s("ref")
+                                    .split(' ')
+                                    .map(|w| crate::num::localized(w, lang))
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            ),
                         ],
                     ),
                     _ => t("reason.never_measured"),
                 };
+                // numbers inside the sentence follow the language ("6,4" in Spanish); the plan keeps them plain
                 r["text"] = json!(words.replace("  ", " "));
             }
         }
