@@ -993,6 +993,7 @@ function due(){
   const again=rows.filter(r=>r[1]==="TSH"),open=rows.filter(r=>r[5]!=="up_to_date"&&r[1]!=="TSH"),done=rows.filter(r=>r[5]==="up_to_date");
   const hid=["lab","Urine albumin/creatinine ratio","Cociente albúmina/creatinina en orina","overdue · rule recency.kidney (12 months)","vencido · regla recency.kidney (12 meses)","overdue","2025-05-22","2024-05-22","",""];
   return `<div class="ph"><div><h1>${L.t}</h1><div class="sub">${P.name} · ${L.sub}</div></div><div class="right"><span class="phase">v0.3</span></div></div>
+  <div class="seg" style="margin-bottom:12px"><a class="on" href="#due" style="padding:5px 12px;font-size:12.5px;text-decoration:none">${es?"Lista":"Items"}</a><a href="#due/next-draw" style="padding:5px 12px;font-size:12.5px;color:var(--muted);text-decoration:none">${es?"Próxima analítica":"Next draw"}</a></div>
   <div class="card" style="margin-bottom:12px"><h3>${L.again}<span class="r num">${again.length}</span></h3>${again.map(r=>row(r)+dec(L.was+" 2026-11-01",L.keep)).join("")}</div>
   <div class="card" style="margin-bottom:12px"><h3>${L.open}<span class="r num">${open.length}</span></h3>${open.map(row).join("")}</div>
   <div class="card" style="margin-bottom:12px"><h3>${L.done}<span class="r num">${done.length}</span></h3>${done.map(row).join("")}</div>
@@ -1008,11 +1009,11 @@ function nextDraw(){
   // [preparation en, es, note en, es, cite], then [test, LOINC, reason en, es, src, rule]
   const G=[
    ["Early-morning urine","Orina de primera hora","The cited guideline prefers an early-morning urine sample for the albumin-to-creatinine ratio.","La guía citada prefiere una muestra de orina de primera hora de la mañana para el cociente albúmina/creatinina.","KDIGO 2024 CKD guideline|Guía KDIGO 2024 de ERC",
-    [["Urine alb/creat|Cociente alb/creat","9318-7","Last measured 2024-05-22, longer ago than the rule's 12-month interval.","Última medición el 2024-05-22, hace más que el intervalo de 12 meses de la regla.","src_s5y3mab4","recency.kidney"]]],
-   ["Biotin","Biotina","Biotin (vitamin B7), common in supplements, can interfere with some lab tests and give a wrong result, per the FDA.","La biotina (vitamina B7), frecuente en suplementos, puede interferir con algunas pruebas de laboratorio y dar un resultado erróneo, según la FDA.","FDA, biotin interference with lab tests|FDA, interferencia de la biotina en pruebas de laboratorio",
-    [["Free T4|T4 libre","3024-7","Last measured 2025-01-20, longer ago than the rule's 12-month interval.","Última medición el 2025-01-20, hace más que el intervalo de 12 meses de la regla.","src_pi25884h","recency.thyroid"],
-     ["TSH","3016-3","Last measured 2025-01-20, longer ago than the rule's 12-month interval.","Última medición el 2025-01-20, hace más que el intervalo de 12 meses de la regla.","src_a05","recency.thyroid"]]],
-   ["Our sources describe no preparation","Nuestras fuentes no indican preparación","","","",
+    [["Urine alb/creat|Cociente alb/creat","9318-7","Last measured on 2024-05-22, longer ago than the rule's interval of 12 months.","Última medición el 2024-05-22, hace más que el intervalo de 12 meses de la regla.","src_s5y3mab4","recency.kidney"]]],
+   ["Biotin","Biotina","Biotin (vitamin B7), common in supplements, can interfere with some lab tests and give a wrong result, according to the FDA.","La biotina (vitamina B7), frecuente en suplementos, puede interferir con algunas pruebas de laboratorio y dar un resultado erróneo, según la FDA.","FDA, biotin interference with lab tests|FDA, interferencia de la biotina en pruebas de laboratorio",
+    [["Free T4|T4 libre","3024-7","Last measured on 2025-01-20, longer ago than the rule's interval of 12 months.","Última medición el 2025-01-20, hace más que el intervalo de 12 meses de la regla.","src_pi25884h","recency.thyroid"],
+     ["TSH","3016-3","Last measured on 2025-01-20, longer ago than the rule's interval of 12 months.","Última medición el 2025-01-20, hace más que el intervalo de 12 meses de la regla.","src_a05","recency.thyroid"]]],
+   ["No preparation listed by our sources","Nuestras fuentes no indican preparación","","","",
     [["Hepatitis C antibody|Anticuerpos hepatitis C","16128-1","No value on record; the rule lists this test for this person.","Ningún valor en el registro; la regla incluye esta prueba para esta persona.","","infect.hcv.once_adult"],
      ["Lp(a)","43583-4","Last value 142 nmol/L on 2025-09-08, outside the lab range < 75.","Último valor 142 nmol/L el 2025-09-08, fuera del rango del laboratorio < 75.","src_a07","range.lab"],
      ["Vitamin D 25-OH|Vitamina D 25-OH","62292-8","Last value 24 ng/mL on 2026-09-14, outside the lab range 30 - 100.","Último valor 24 ng/mL el 2026-09-14, fuera del rango del laboratorio 30 - 100.","src_a12","range.lab"]]]];
@@ -1031,7 +1032,7 @@ function nextDraw(){
     <button class="btn sm">${L.dl}</button> <button class="btn sm">${L.open}</button></div>
    <div class="card">${sheet}</div></div>
   <div class="note">${L.info}</div>
-  <div class="foot-hash"><span>state_hash <span class="mono">sha256:2176…</span></span><span>es.yaml prevention-es 0.2.0 · draw_prep.yaml draw-prep 0.1.0</span></div>`;
+  <div class="foot-hash"><span>state_hash <span class="mono">sha256:8aa5…</span></span><span>${es?"guía":"guideline set"} <span class="mono">ownhealth-rules 0.2.0 · es.yaml prevention-es 0.2.0 · draw_prep.yaml draw-prep 0.1.0</span></span></div>`;
 }
 /* ---------- router ---------- */
 const ROUTES={dashboard,biomarker,timeline,genome,"drug-check":drug,due,wearables,imaging,"import-review":importReview,family,"mcp-access":mcp,"doctor-summary":doctorSummary,"due/next-draw":nextDraw};
@@ -1040,7 +1041,7 @@ function renderChrome(){
   document.querySelectorAll("[data-i18n]").forEach(e=>e.textContent=t(e.dataset.i18n));
   document.querySelectorAll("[data-i18n-ph]").forEach(e=>e.placeholder=t(e.dataset.i18nPh));
   const r=(location.hash.slice(1)||"dashboard");
-  document.getElementById("menu").innerHTML=NAV.map(n=>`<a href="#${n[0]}" class="${n[0]===r?"on":""}"><svg viewBox="0 0 24 24">${n[2]}</svg>${t(n[1])}${n[3]?`<span class="cnt">${n[3]}</span>`:""}</a>`).join("");
+  document.getElementById("menu").innerHTML=NAV.map(n=>`<a href="#${n[0]}" class="${n[0]===r.split("/")[0]?"on":""}"><svg viewBox="0 0 24 24">${n[2]}</svg>${t(n[1])}${n[3]?`<span class="cnt">${n[3]}</span>`:""}</a>`).join("");
   document.getElementById("profiles").innerHTML=PROFILES.map(p=>`<button class="prof ${p.id===S.profile?"on":""}" data-p="${p.id}"><span class="av" style="background:${p.col}">${p.av}</span><span><div class="nm">${p.name}</div><div class="rl">${t(p.role.split("|")[0])} · ${p.role.split("|")[1]}</div></span>${p.flags?`<span class="bdg">${p.flags}</span>`:""}</button>`).join("");
   document.querySelectorAll("#lang button").forEach(b=>b.classList.toggle("on",b.dataset.l===S.lang));
 }
