@@ -18,7 +18,7 @@
 	import Sparkline from '#lib/components/Sparkline.svelte';
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
-	import { buildBars, niceStep } from '#lib/logic/axis';
+	import { buildBars, labsOf, layoutMarks, niceStep } from '#lib/logic/axis';
 	import { calcUnit, forGroup, rowsForCard } from '#lib/logic/calc';
 	import { refRange, sourceLabel } from '#lib/logic/format';
 	import { currentProfile } from '#lib/state/app.svelte';
@@ -90,7 +90,9 @@
 	const tr = $derived(trends.data?.[Math.min(unitIdx, (trends.data?.length ?? 1) - 1)] ?? null);
 	const pts = $derived((tr?.points ?? []) as TrendPointStatus[]);
 	const last = $derived(pts.length ? pts[pts.length - 1] : null);
-	const labs = $derived([...new Set(pts.map((p) => p.lab ?? '—'))]);
+	// the labs in the order first seen; a point entered by hand (no lab) has its own shape but is no lab
+	const labInfo = $derived(labsOf(pts));
+	const labs = $derived(labInfo.keys);
 	// The dashboard card holding this marker gives its status and the related markers.
 	const card = $derived(dash.data?.systems.find((s) => s.markers.some((m) => m.alias_group === tr?.alias_group)) ?? null);
 	const marker = $derived(card?.markers.find((m) => m.alias_group === tr?.alias_group) ?? null);
@@ -108,7 +110,7 @@
 	}
 	const SHAPES = ['circle', 'square', 'diamond', 'triangle'] as const;
 	const GLYPH = { circle: '●', square: '■', diamond: '◆', triangle: '▲' };
-	const shapeOf = (lab: string | null) => SHAPES[Math.max(0, labs.indexOf(lab ?? '—')) % SHAPES.length];
+	const shapeOf = (lab: string | null | undefined) => SHAPES[Math.max(0, labs.indexOf(lab ?? null)) % SHAPES.length];
 
 	// ---- chart geometry (port of the mockup's ldlChart) ----
 	// 860 wide as in the mockup. In a narrow card the drawing gets the card's own width (a little less,
@@ -151,7 +153,7 @@
 			return { x: a, w: b - a, y: top, h: Math.max(0, bot - top) };
 		});
 		// Dashed markers where the lab or the code changes between two points.
-		const marks: { x: number; label: string; row: number }[] = [];
+		const marks: { x: number; label: string }[] = [];
 		for (let i = 1; i < pts.length; i++) {
 			const a = pts[i - 1];
 			const b = pts[i];
@@ -160,23 +162,17 @@
 			const parts = [];
 			if ((a.lab ?? '') !== (b.lab ?? '')) parts.push(t('h1_lab_change'));
 			if ((a.loinc ?? '') !== (b.loinc ?? '') || (a.method ?? '') !== (b.method ?? '')) parts.push(b.method ? methodLabel(b.method) : t('h1_code_change'));
-			if (parts.length) marks.push({ x: (xy[i - 1][0] + xy[i][0]) / 2, label: parts.join(' · '), row: 0 });
+			if (parts.length) marks.push({ x: (xy[i - 1][0] + xy[i][0]) / 2, label: parts.join(' · ') });
 		}
-		// Each label takes the first row where it does not print over an earlier one (about 5.6 px per character).
-		const rowEnd: number[] = [];
-		for (const m of marks) {
-			let r = rowEnd.findIndex((end) => m.x + 4 > end + 6);
-			if (r < 0) r = rowEnd.length;
-			rowEnd[r] = m.x + 4 + m.label.length * 5.6;
-			m.row = r;
-		}
+		// Each label takes the first free row, and one at the right edge is drawn left of its line.
+		const placed = layoutMarks(marks, W - pr);
 		const clampX = (d: string) => Math.min(sx(x1), Math.max(sx(x0), sx(yfrac(d))));
 		// Annotations with an end draw as a bar on the Meds row; one-day ones as a dot on the Events row.
 		// A course with no end is still running and draws to today.
 		const bars = buildBars(tr.annotations, clampX, asOf, `${x0}-01-01`);
 		// The person's usual level before the last point (rule pack 0.2.0), drawn across the chart.
 		const usual = bl ? { y: sy(Math.min(bl.high, y1)), h: Math.max(0, sy(Math.max(bl.low, y0)) - sy(Math.min(bl.high, y1))), yl: sy(bl.low), yh: sy(bl.high), n: bl.n } : null;
-		return { x0, x1, y0, y1, sx, sy, ticks, years, xy, band, marks, bars, usual };
+		return { x0, x1, y0, y1, sx, sy, ticks, years, xy, band, marks: placed, bars, usual };
 	});
 
 	// Courses too short to hold their name, near the right edge: their names go under the chart.
@@ -270,7 +266,7 @@
 			</h1>
 			<div class="sub">
 				{#if pts.length}
-					{profile?.display_name} · {tp('h1_meas', pts.length, { labs: tp('h1_labs', labs.length), years: years(pts[0].date.slice(0, 4), pts[pts.length - 1].date.slice(0, 4)) })}
+					{profile?.display_name} · {tp('h1_meas', pts.length, { labs: tp('h1_labs', labInfo.count), years: years(pts[0].date.slice(0, 4), pts[pts.length - 1].date.slice(0, 4)) })}
 				{/if}
 			</div>
 		</div>
@@ -305,7 +301,7 @@
 						<span><i style="width:9px;height:9px;border-radius:50%;background:{C.ok}"></i>{t('h1_lg_ok')}</span>
 						<span><i style="width:9px;height:9px;border-radius:50%;background:{C.watch}"></i>{t('calc_lg_watch')}</span>
 						<span><i style="width:9px;height:9px;border-radius:50%;background:{C.out}"></i>{t('h1_lg_out')}</span>
-						<span class="dim">{t('h1_lg_shape')} {#each labs as l (l)}{GLYPH[shapeOf(l)]} {l}{' '}{/each}</span>
+						<span class="dim">{t('h1_lg_shape')} {#each labs as l (l ?? '')}{GLYPH[shapeOf(l)]} {l ?? t('src_manual')}{' '}{/each}</span>
 						<span class="dim">{t('h1_lg_flags')}</span>
 						{#if tr.stats.baseline}<span><i style="width:14px;height:0;border-top:1.5px dashed {C.accent}"></i>{tf('calc_bl_band', { n: tr.stats.baseline.n })}</span>{/if}
 					</div>
@@ -333,7 +329,7 @@
 						{/each}
 						{#each geo.marks as m, i (i)}
 							<line x1={m.x} x2={m.x} y1={pt} y2={pt + ih} stroke="#56607a" stroke-dasharray="2 3" />
-							<text x={m.x + 4} y={pt + 10 + m.row * 12} fill="#8a93a5" font-size="10">{m.label}</text>
+							<text x={m.tx} y={pt + 10 + m.row * 12} fill="#8a93a5" font-size="10" text-anchor={m.anchor}>{m.label}</text>
 						{/each}
 						<polyline points={geo.xy.map((p) => p.join(',')).join(' ')} fill="none" stroke="#8792a6" stroke-width="1.6" />
 						{#each pts as p, i (p.src + "|" + i)}

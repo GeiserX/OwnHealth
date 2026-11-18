@@ -72,3 +72,32 @@ export function buildBars(annotations: Annotation[], clampX: (d: string) => numb
 	}
 	return bars;
 }
+
+export type Mark = { x: number; label: string };
+export type PlacedMark = Mark & { row: number; anchor: 'start' | 'end'; tx: number };
+
+/**
+ * The dashed lab and method change markers of the biomarker chart. A label starts 4 units right of its
+ * line, unless it would pass `right` (the plot's right edge): then it ends 4 units left of the line, so
+ * a change at the latest point stays readable. Each label takes the first row where it does not print
+ * over an earlier one (about 5.6 units per character at font size 10).
+ */
+export function layoutMarks(marks: Mark[], right: number): PlacedMark[] {
+	const rowEnd: number[] = [];
+	return marks.map((m) => {
+		const w = m.label.length * 5.6;
+		const end = m.x + 4 + w > right;
+		const tx = end ? m.x - 4 : m.x + 4;
+		const [a, b] = end ? [tx - w, tx] : [tx, tx + w];
+		let row = rowEnd.findIndex((e) => a > e + 6);
+		if (row < 0) row = rowEnd.length;
+		rowEnd[row] = b;
+		return { ...m, row, anchor: end ? 'end' : 'start', tx };
+	});
+}
+
+/** The labs of a series in the order first seen (null: entered by hand), and how many are real labs. */
+export function labsOf(points: { lab?: string | null }[]): { keys: (string | null)[]; count: number } {
+	const keys = [...new Set(points.map((p) => p.lab ?? null))];
+	return { keys, count: keys.filter((k) => k != null).length };
+}
