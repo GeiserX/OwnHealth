@@ -17,6 +17,7 @@ tells the person what to do.
 | `evidence.yaml` | What counts as done for a screening: names, SNOMED CT and LOINC codes |
 | `vaccines.tsv` | What counts as a dose of each vaccine: CVX codes and names in English and Spanish |
 | `templates.yaml` | The sentences that the Due screen shows beside a row, in English and Spanish |
+| `draw_prep.yaml` | The next-draw planner's notes on test preparation (fasting, early-morning urine, biotin), each with its cite, read by `server/crates/ownhealth-rules/src/next_draw.rs`. It is not a country file: leave it alone in a country pull request. |
 
 The loader (`server/crates/ownhealth-rules/src/prevention.rs`) checks every file. It refuses a file
 that breaks a rule on this page, and the tests fail with the reason.
@@ -82,7 +83,7 @@ rows:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `id` | yes | `<cc>.<area>.<name>`, unique across every country file. Never reuse an id for another row. |
+| `id` | yes | `<cc>.<topic>.<name>`, for example `es.cancer.breast` or `es.vac.td`, unique across every country file. The topic is a short group name (`cancer`, `vac`, `infect`), not the `area` value. Never reuse an id for another row. |
 | `kind` | yes | `once`, `every_n_months`, `series` or `seasonal` (below). |
 | `area` | yes | `screening` or `vaccine`. |
 | `ages` | yes | `[from, to]` in whole years. `to` is inclusive, and `null` means no end. |
@@ -112,11 +113,12 @@ Spanish in `templates.yaml` `answers`.
 Each item has one status:
 
 - `overdue`: the interval or the gap after a counted test or dose has passed.
-- `due`: never done, and the start age has passed.
+- `due`: no counted test or dose yet (for a seasonal row, none this season), and the start age has passed.
 - `upcoming`: due within 90 days.
 - `up_to_date`: done, and next due more than 90 days ahead.
 
-Past the end age the row lists no next date. Before the start age a row shows only
+Past the end age the row does not show. A next date that would fall past the end age is not
+listed. Before the start age a row shows only
 within 90 days of it, or when the record already holds a matching test or dose.
 
 ## not_assessed
@@ -175,7 +177,8 @@ open an issue. We then put their name in `reviewer` and their GitHub account in 
 2. List it in `data/prevention/pack.yaml` under `countries` (`XX: xx.yaml`).
 3. Name the reviewer with a line `/data/prevention/<cc>.yaml @<account>` in `.github/CODEOWNERS`.
 4. Add the file name to the `shipped!(...)` list in
-   `server/crates/ownhealth-rules/src/prevention.rs`, which builds the files into the binary.
+   `server/crates/ownhealth-rules/src/prevention.rs`, which builds the files into the binary, and
+   raise the count in `[(&str, &str); 6]` by one.
 5. Add a fixture and a golden in `server/crates/ownhealth-rules/tests/prevention.rs`:
    - Add a synthetic person in the new country, like `us_profile` (Jordan Test). Give a made-up
      name, and a birth date and a sex that put several rows in their age window. Add one or two
