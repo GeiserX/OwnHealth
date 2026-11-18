@@ -391,6 +391,7 @@ fn entry(row: &Map<String, Value>, patient_url: &str, inside: &HashSet<String>) 
 /// The elements IPS requires (1..1) that a stored resource can lack: a vaccine, procedure or medicine
 /// typed with no date, and a Condition imported without a clinicalStatus. A missing date is stated as
 /// unknown with the data-absent-reason extension; a missing clinical status is the row's own column.
+/// The Observation status follows the row as well: a confirmed preliminary value is final.
 fn required_elements(rtype: &str, res: &mut Map<String, Value>, row: &Map<String, Value>) {
     let has = |res: &Map<String, Value>, prefix: &str| res.keys().any(|k| k.trim_start_matches('_').starts_with(prefix));
     let unknown = || json!({"extension": [{"url": DATA_ABSENT, "valueCode": "unknown"}]});
@@ -403,6 +404,14 @@ fn required_elements(rtype: &str, res: &mut Map<String, Value>, row: &Map<String
         }
         "MedicationStatement" if !has(res, "effective") => {
             res.insert("effectivePeriod".into(), unknown());
+        }
+        // a value a final report confirmed: the row became current, but its stored FHIR (written at
+        // insert, and immutable) still says "preliminary"
+        "Observation"
+            if row.get("status").and_then(Value::as_str) == Some("current")
+                && res.get("status").and_then(Value::as_str) == Some("preliminary") =>
+        {
+            res.insert("status".into(), json!("final"));
         }
         "Condition" if !res.contains_key("clinicalStatus") => {
             let status = row.get("clinical_status").and_then(Value::as_str).unwrap_or("active");
@@ -752,6 +761,18 @@ mod tests {
         let kept = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001", "clinical_status": "active",
             "fhir": {"resourceType": "Condition", "clinicalStatus": {"text": "as sent"}}}));
         assert_eq!(kept["clinicalStatus"], json!({"text": "as sent"}));
+    }
+
+    /// A preliminary value that a final report confirmed keeps "preliminary" in its stored FHIR (rows are
+    /// immutable but for their status); the summary carries only current rows, so it is final there.
+    #[test]
+    fn a_confirmed_value_is_final_in_the_summary() {
+        let e = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001", "status": "current",
+            "fhir": {"resourceType": "Observation", "status": "preliminary", "code": {"text": "Glucosa"}}}));
+        assert_eq!(e["status"], "final", "{e}");
+        let amended = entry_of(json!({"id": "00000000-0000-0000-0000-000000000001", "status": "current",
+            "fhir": {"resourceType": "Observation", "status": "amended"}}));
+        assert_eq!(amended["status"], "amended");
     }
 
     #[test]
