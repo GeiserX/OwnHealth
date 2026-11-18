@@ -77,7 +77,7 @@ async fn summary_pdf(
         sensitive_open: body.include_sensitive && gate.sensitive && !gate.minor,
         as_of,
     };
-    let model = summary::build(&mut tx, perm.profile.id, &perm.scopes, &opts).await?;
+    let model = summary::build_for(&mut tx, Some(&p), perm.profile.id, &perm.scopes, &opts).await?;
     let mut sheet = ownhealth_ops::summary_pdf::render(&model);
     // the ids the paper shows, not those of rows cut to fit two pages
     let srcs = std::mem::take(&mut sheet.printed);

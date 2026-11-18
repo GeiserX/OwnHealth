@@ -3,11 +3,13 @@
 //! always gives the same bytes.
 //!
 //! Every table row that prints a value prints its `src` id in the same row; the sources appendix maps
-//! each id to its document, page and date. When the content needs more than two pages, rows are cut
-//! from the bottom of the ranking (unflagged lab rows first, then flags by rank, then vaccines and
-//! procedures, then the tail of medicines, allergies, conditions and genome rows) and the cut section ends with
-//! "n more in the record". The footer carries the rules versions, the
-//! start of the state hash and the page number.
+//! each id to its document, page and date. A row of a slot (calculators, due items, family patterns)
+//! also prints the id of the formula or guideline row it comes from, and a second appendix maps each
+//! such id to its citation. When the content needs more than two pages, rows are cut from the bottom
+//! of the ranking (unflagged lab rows first, then flags by rank, then vaccines and procedures, then due
+//! items, family patterns and calculated values, then the tail of medicines, allergies, conditions and
+//! genome rows) and the cut section ends with "n more in the record". The footer carries the rules
+//! versions, the start of the state hash and the page number.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -43,6 +45,9 @@ struct Keep {
     allergies: usize,
     conditions: usize,
     genome: usize,
+    due: usize,
+    family: usize,
+    calculators: usize,
 }
 
 impl Keep {
@@ -57,6 +62,9 @@ impl Keep {
             allergies: n("allergies"),
             conditions: n("conditions"),
             genome: n("genome"),
+            due: slot(model, "due").len(),
+            family: slot(model, "family").len(),
+            calculators: slot(model, "calculators").len(),
         }
     }
 
@@ -69,11 +77,19 @@ impl Keep {
             + self.allergies
             + self.conditions
             + self.genome
+            + self.due
+            + self.family
+            + self.calculators
     }
 }
 
 fn arr<'a>(v: &'a Value, k: &str) -> &'a [Value] {
     v.get(k).and_then(Value::as_array).map_or(&[], Vec::as_slice)
+}
+
+/// The rows of one slot of the model.
+fn slot<'a>(model: &'a Value, k: &str) -> &'a [Value] {
+    arr(&model["slots"], k)
 }
 
 fn st<'a>(v: &'a Value, k: &str) -> &'a str {
@@ -182,6 +198,8 @@ struct Sheet<'a> {
     w: Writer,
     /// src ids in the order the rows printed them, for the appendix.
     printed: Vec<String>,
+    /// The citations of the printed slot rows, in print order: (source · cite, the row ids citing it).
+    cites: Vec<(String, Vec<String>)>,
 }
 
 impl Sheet<'_> {
@@ -196,6 +214,22 @@ impl Sheet<'_> {
             }
         }
         ids.join(" ")
+    }
+
+    /// A slot row's source cell: its formula or guideline row id first (so it prints on the row's
+    /// first line), then its src ids. The id joins the citations appendix.
+    fn cite_rule(&mut self, row: &Value) -> String {
+        let rule = st(row, "rule").to_string();
+        let what = join(&[st(row, "source"), st(row, "cite")], " · ");
+        if !rule.is_empty() && !what.is_empty() {
+            match self.cites.iter_mut().find(|(w, _)| *w == what) {
+                Some((_, ids)) if ids.contains(&rule) => {}
+                Some((_, ids)) => ids.push(rule.clone()),
+                None => self.cites.push((what, vec![rule.clone()])),
+            }
+        }
+        let ids = self.cite(&srcs(row));
+        join(&[&rule, &ids], " ")
     }
 
     fn heading(&mut self, key: &str) {
@@ -308,21 +342,40 @@ impl Sheet<'_> {
         self.heading("sec.medications");
         {
             let all = arr(m, "medications");
-            let rows: Vec<Vec<String>> = all
+            let kept = &all[..keep.medications.min(all.len())];
+            // the decision column prints only when a printed row has a recorded decision
+            let decided = kept.iter().any(|x| !st(x, "decision").is_empty());
+            let rows: Vec<Vec<String>> = kept
                 .iter()
-                .take(keep.medications)
                 .map(|x| {
-                    vec![
+                    let mut row = vec![
                         join(&[st(x, "name"), st(x, "strength"), st(x, "kind")], " · "),
                         st(x, "schedule").into(),
                         st(x, "prescriber").into(),
                         st(x, "since").into(),
-                        self.cite(&srcs(x)),
-                    ]
+                    ];
+                    if decided {
+                        row.push(st(x, "decision").into());
+                    }
+                    row.push(self.cite(&srcs(x)));
+                    row
                 })
                 .collect();
             let n = rows.len();
-            if n > 0 {
+            if n > 0 && decided {
+                self.table(
+                    &[135.0, 95.0, 65.0, 55.0, 85.0, 80.0],
+                    &[
+                        "col.medicine",
+                        "col.schedule",
+                        "col.prescriber",
+                        "col.since",
+                        "col.decision",
+                        "col.src",
+                    ],
+                    rows,
+                );
+            } else if n > 0 {
                 self.table(
                     &[170.0, 110.0, 70.0, 60.0, 105.0],
                     &["col.medicine", "col.schedule", "col.prescriber", "col.since", "col.src"],
@@ -487,6 +540,104 @@ impl Sheet<'_> {
         self.none_or_more(n, all.len());
     }
 
+    /// The family patterns the view lists that the person's own family history shows (never a hint
+    /// from another profile): the relatives they name, or why one could not be checked.
+    fn family(&mut self, keep: usize) {
+        let all = slot(self.model, "family");
+        if all.is_empty() {
+            return;
+        }
+        self.heading("sec.family");
+        let rows: Vec<Vec<String>> = all
+            .iter()
+            .take(keep)
+            .map(|f| {
+                let who = if st(f, "text").is_empty() {
+                    st(f, "relatives")
+                } else {
+                    st(f, "text")
+                };
+                vec![st(f, "title").into(), who.into(), self.cite_rule(f)]
+            })
+            .collect();
+        let n = rows.len();
+        if n > 0 {
+            self.table(
+                &[235.0, 150.0, 130.0],
+                &["col.pattern", "col.relatives", "col.src"],
+                rows,
+            );
+        }
+        self.none_or_more(n, all.len());
+    }
+
+    /// The calculators the view lists: each one's newest value with its date, or why it was not
+    /// computed.
+    fn calculators(&mut self, keep: usize) {
+        let all = slot(self.model, "calculators");
+        if all.is_empty() {
+            return;
+        }
+        self.heading("sec.calculators");
+        let rows: Vec<Vec<String>> = all
+            .iter()
+            .take(keep)
+            .map(|c| {
+                let result = if st(c, "status") == "ok" {
+                    join(&[st(c, "value"), st(c, "unit")], " ")
+                } else {
+                    st(c, "text").into()
+                };
+                vec![st(c, "name").into(), result, st(c, "date").into(), self.cite_rule(c)]
+            })
+            .collect();
+        let n = rows.len();
+        if n > 0 {
+            self.table(
+                &[170.0, 160.0, 55.0, 130.0],
+                &["col.calculation", "col.result", "col.date", "col.src"],
+                rows,
+            );
+        }
+        self.none_or_more(n, all.len());
+    }
+
+    /// The open screenings and vaccines the view lists, with the guideline row each comes from.
+    fn due(&mut self, keep: usize) {
+        let all = slot(self.model, "due");
+        if all.is_empty() {
+            return;
+        }
+        self.heading("sec.due");
+        let never = self.t("never");
+        let rows: Vec<Vec<String>> = all
+            .iter()
+            .take(keep)
+            .map(|d| {
+                let last = match st(&d["last"], "date") {
+                    "" => never.clone(),
+                    date => date.to_string(),
+                };
+                vec![
+                    st(d, "title").into(),
+                    st(d, "status_text").into(),
+                    st(d, "due").into(),
+                    last,
+                    self.cite_rule(d),
+                ]
+            })
+            .collect();
+        let n = rows.len();
+        if n > 0 {
+            self.table(
+                &[205.0, 55.0, 60.0, 65.0, 130.0],
+                &["col.item", "col.status", "col.due", "col.last", "col.src"],
+                rows,
+            );
+        }
+        self.none_or_more(n, all.len());
+    }
+
     /// The printed ids grouped by what they point at: `LabNorte · 2026-09-14 · p1: src_a src_b`,
     /// in the model's order (newest first, then provider and page).
     fn appendix(&mut self) {
@@ -520,6 +671,19 @@ impl Sheet<'_> {
             .map(|(what, ids)| vec![what, ids.join(" ")])
             .collect();
         self.table(&[180.0, 335.0], &["col.document", "col.src"], rows);
+    }
+
+    /// Each formula or guideline a printed slot row cites, with the ids the rows print for it.
+    fn cites_appendix(&mut self) {
+        if self.cites.is_empty() {
+            return;
+        }
+        self.heading("sec.cites");
+        let rows = std::mem::take(&mut self.cites)
+            .into_iter()
+            .map(|(what, ids)| vec![what, ids.join(" ")])
+            .collect();
+        self.table(&[385.0, 130.0], &["col.guideline", "col.cited_as"], rows);
     }
 }
 
@@ -562,15 +726,20 @@ fn draw(model: &Value, keep: Keep, total: usize) -> (Rendered, usize, Vec<String
         l,
         w,
         printed: Vec::new(),
+        cites: Vec::new(),
     };
     sheet.header();
     sheet.records(keep);
+    sheet.family(keep.family);
     sheet.genome(keep.genome);
     sheet.flags(keep.flags);
     sheet.markers(keep.markers);
+    sheet.calculators(keep.calculators);
     sheet.vaccines(keep.vaccines);
     sheet.procedures(keep.procedures);
+    sheet.due(keep.due);
     sheet.appendix();
+    sheet.cites_appendix();
     let printed = std::mem::take(&mut sheet.printed);
     let out = sheet.w.finish();
     (out, pages.get().max(1), printed)
@@ -596,6 +765,12 @@ pub fn render(model: &Value) -> SummaryPdf {
             keep.vaccines -= 1;
         } else if keep.procedures > 0 {
             keep.procedures -= 1;
+        } else if keep.due > 0 {
+            keep.due -= 1;
+        } else if keep.family > 0 {
+            keep.family -= 1;
+        } else if keep.calculators > 0 {
+            keep.calculators -= 1;
         } else if keep.markers > 0 {
             keep.markers -= 1;
         } else if keep.medications > 0 {

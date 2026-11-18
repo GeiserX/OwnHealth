@@ -2,7 +2,7 @@
 # themselves, in English and Spanish. Placeholders in braces are filled by the server ({n}, {date},
 # {page}, ...). Information, never advice: the wording lint reads each string, and the PDF's text
 # layer is linted again in the tests.
-version: "summary-templates 0.2.0"
+version: "summary-templates 0.3.0"
 templates:
   title: {en: Doctor summary, es: Resumen para el médico}
   subtitle: {en: "Data as of {as_of}", es: "Datos a {as_of}"}
@@ -19,11 +19,15 @@ templates:
     allergies: {en: Allergies, es: Alergias}
     medications: {en: Medicines and supplements, es: Medicamentos y suplementos}
     genome: {en: Pharmacogenomics and genome findings, es: Farmacogenética y hallazgos genómicos}
-    flags: {en: Flags, by rank, es: Avisos, por orden de importancia}
+    flags: {en: "Flags, by rank", es: "Avisos, por orden de importancia"}
     markers: {en: Lab values, es: Valores de laboratorio}
     vaccines: {en: Vaccines, es: Vacunas}
     procedures: {en: Procedures, es: Procedimientos}
+    calculators: {en: Calculated values, es: Valores calculados}
+    due: {en: "Screenings, vaccines and lab tests due", es: "Cribados, vacunas y análisis pendientes"}
+    family: {en: Patterns in the family history, es: Patrones en los antecedentes familiares}
     sources: {en: Sources, es: Fuentes}
+    cites: {en: Guidelines and formulas, es: Guías y fórmulas}
   col:
     condition: {en: Condition, es: Problema}
     since: {en: Since, es: Desde}
@@ -48,11 +52,33 @@ templates:
     vaccine: {en: Vaccine, es: Vacuna}
     dose: {en: Dose, es: Dosis}
     procedure: {en: Procedure, es: Procedimiento}
-    document: {en: Document, page and date, es: Documento, página y fecha}
+    document: {en: "Document, page and date", es: "Documento, página y fecha"}
+    decision: {en: Recorded decision, es: Decisión registrada}
+    calculation: {en: Calculation, es: Cálculo}
+    result: {en: Result, es: Resultado}
+    item: {en: "Screening, vaccine or test", es: "Cribado, vacuna o análisis"}
+    due: {en: Due date, es: Fecha prevista}
+    last: {en: Last on record, es: Último registro}
+    pattern: {en: Pattern, es: Patrón}
+    relatives: {en: Relatives, es: Familiares}
+    guideline: {en: Guideline or formula, es: Guía o fórmula}
+    cited_as: {en: Cited as, es: Citada como}
   none: {en: None on record., es: Nada registrado.}
   not_measured: {en: not measured, es: no medido}
   more: {en: "And {n} more in the record.", es: "Y {n} más en el registro."}
   supplement: {en: supplement, es: suplemento}
+  never: {en: none on record, es: sin registro}
+  # the person's own recorded choice, said as a fact about them (the lint reads a bare "keep" or
+  # "stop" as advice)
+  decision:
+    keep: {en: decided to keep taking it, es: decidió seguir tomándolo}
+    stop: {en: decided to stop it, es: decidió dejarlo}
+    do_not_repurchase: {en: decided not to buy it again, es: decidió no volver a comprarlo}
+  decision_on: {en: "{decision} on {date}", es: "{decision} el {date}"}
+  due_status:
+    overdue: {en: overdue, es: vencido}
+    due: {en: due, es: pendiente}
+    upcoming: {en: coming up, es: próximo}
   sensitive: {en: "sensitive, printed because it was ticked for this print", es: "sensible, impreso porque se marcó para esta impresión"}
   withheld:
     labs: {en: "Lab values: not shown, this account cannot read them.", es: "Valores de laboratorio: no se muestran, esta cuenta no puede leerlos."}

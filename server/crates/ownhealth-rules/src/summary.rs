@@ -23,7 +23,7 @@
 use std::sync::OnceLock;
 
 use chrono::NaiveDate;
-use ownhealth_core::access::Scopes;
+use ownhealth_core::access::{Principal, Scopes};
 use ownhealth_core::records::list_records;
 use ownhealth_core::{Error, Result};
 use ownhealth_genome::{FindingsQuery, Gate};
@@ -76,7 +76,26 @@ struct Specialty {
     names: Map<String, Value>,
     markers: Vec<String>,
     cite: String,
+    slots: Slots,
 }
+
+/// The computed sections one view prints (`slots` of specialties.yaml); empty: left out.
+#[derive(Debug, Clone, Default)]
+struct Slots {
+    /// Calculator ids, in print order.
+    calculators: Vec<String>,
+    /// Prevention areas whose open items print.
+    due: Vec<String>,
+    /// Family pattern ids.
+    family: Vec<String>,
+}
+
+/// The prevention areas a `due` slot may name: the guideline's screenings and vaccines, and the rule
+/// pack's lab gaps (a test never measured, or one older than its rule allows). The record's own
+/// document gaps are a matter between the person and their providers, not for the sheet.
+const DUE_AREAS: [&str; 3] = ["screening", "vaccine", "lab"];
+/// The prevention statuses a `due` slot prints: what is open, never what is up to date.
+const DUE_OPEN: [&str; 3] = ["overdue", "due", "upcoming"];
 
 #[derive(Debug)]
 struct Data {
@@ -92,12 +111,19 @@ fn version_of(doc: &Value, name: &str) -> Result<String> {
         .ok_or_else(|| Error::Invalid(format!("{name}: no version")))
 }
 
-fn parse() -> Result<Data> {
+/// The two files: templates, then specialties.
+fn parse(templates: &str, specialties: &str) -> Result<Data> {
     let yaml = |name: &str, s: &str| -> Result<Value> {
         serde_yaml::from_str(s).map_err(|e| Error::Invalid(format!("{name}: {e}")))
     };
-    let tpl = yaml(FILES[0].0, FILES[0].1)?;
-    let spec = yaml(FILES[1].0, FILES[1].1)?;
+    let tpl = yaml(FILES[0].0, templates)?;
+    let spec = yaml(FILES[1].0, specialties)?;
+    let list = |v: Option<&Value>| -> Vec<String> {
+        v.and_then(Value::as_array)
+            .map(|a| a.iter().map(text).collect())
+            .unwrap_or_default()
+    };
+    let patterns: Vec<&str> = crate::family::load()?.rules.iter().map(|r| r.id.as_str()).collect();
     let specialties = spec
         .get("rows")
         .and_then(Value::as_array)
@@ -105,18 +131,33 @@ fn parse() -> Result<Data> {
         .flatten()
         .map(|r| {
             let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-            Specialty {
-                id: s("id"),
+            let id = s("id");
+            let slot = |k: &str| list(r.get("slots").and_then(|v| v.get(k)));
+            let slots = Slots {
+                calculators: slot("calculators"),
+                due: slot("due"),
+                family: slot("family"),
+            };
+            let known = |ids: &[String], all: &[&str], what: &str| -> Result<()> {
+                match ids.iter().find(|i| !all.contains(&i.as_str())) {
+                    Some(bad) => Err(Error::Invalid(format!(
+                        "specialties.yaml: {id} names the {what} {bad:?}, which the code does not know"
+                    ))),
+                    None => Ok(()),
+                }
+            };
+            known(&slots.calculators, &crate::calc::IDS, "calculator")?;
+            known(&slots.due, &DUE_AREAS, "prevention area")?;
+            known(&slots.family, &patterns, "family pattern")?;
+            Ok(Specialty {
                 names: r.get("names").and_then(Value::as_object).cloned().unwrap_or_default(),
-                markers: r
-                    .get("markers")
-                    .and_then(Value::as_array)
-                    .map(|a| a.iter().map(text).collect())
-                    .unwrap_or_default(),
+                markers: list(r.get("markers")),
                 cite: s("cite"),
-            }
+                slots,
+                id,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let ids: Vec<&str> = specialties.iter().map(|s| s.id.as_str()).collect();
     if ids != SPECIALTIES {
         return Err(Error::Invalid(format!(
@@ -132,7 +173,7 @@ fn parse() -> Result<Data> {
 
 fn data() -> Result<&'static Data> {
     static DATA: OnceLock<std::result::Result<Data, String>> = OnceLock::new();
-    DATA.get_or_init(|| parse().map_err(|e| e.to_string()))
+    DATA.get_or_init(|| parse(FILES[0].1, FILES[1].1).map_err(|e| e.to_string()))
         .as_ref()
         .map_err(|e| Error::Invalid(e.clone()))
 }
@@ -308,6 +349,19 @@ fn taken(m: &Map<String, Value>) -> Value {
     }
 }
 
+/// The person's recorded decision on a medicine or supplement, in words with its day ("keep, on
+/// 2026-04-02"); never the reason, which is the person's own text.
+fn decision(m: &Map<String, Value>, l: &Map<String, Value>) -> Value {
+    let Some(d) = str_of(m, "decision") else {
+        return Value::Null;
+    };
+    let words = label(l, &format!("decision.{d}"));
+    match s(m, "decision_on") {
+        Value::String(on) => json!(fill(&label(l, "decision_on"), &[("decision", words), ("date", on)])),
+        _ => json!(words),
+    }
+}
+
 /// Genome rows: actionable PGx, and sensitive findings when the gate let them through.
 fn genome_rows(findings: &Value, l: &Map<String, Value>) -> Vec<Value> {
     findings
@@ -460,8 +514,123 @@ async fn sources(conn: &mut PgConnection, ids: &[String], l: &Map<String, Value>
         .collect())
 }
 
-/// The summary model for one profile, read with `scopes`.
+/// A calculator unit as a lab report writes it: UCUM's `{1.73_m2}` annotation is 1.73 m2.
+fn calc_unit(u: &str) -> String {
+    u.replace("{1.73_m2}", "1.73 m2")
+}
+
+/// The refusals that say a formula is not made for the person's age (CKD-EPI before 18, FIB-4 before
+/// 35, SCORE2 and PREVENT outside their ranges): the sheet leaves those calculators out, as the
+/// calculators document already leaves out SCORE2-OP below 70.
+const NOT_FOR_AGE: [&str; 3] = ["not_adult", "age_below_35", "age_out_of_range"];
+
+/// The calculators slot from a rendered ownhealth.calculators/v1 document: one row per listed id, in
+/// the view's order, holding that calculator's newest item (the document lists each oldest first). A
+/// result carries its value, unit, date and the src ids of its inputs; a refusal carries the reason
+/// in words and no value, and one for the person's age is left out (`NOT_FOR_AGE`). Every row names
+/// its formula (`rule`, `source`, `cite`).
+fn calculator_rows(doc: &Value, ids: &[String], lang: &str) -> Vec<Value> {
+    let items = doc["items"].as_array().map_or(&[][..], Vec::as_slice);
+    ids.iter()
+        .filter_map(|id| items.iter().rfind(|i| i["id"] == id.as_str()))
+        .filter(|i| !NOT_FOR_AGE.contains(&i["reason_code"].as_str().unwrap_or_default()))
+        .map(|i| {
+            let ok = i["status"] == "ok";
+            json!({
+                "rule": i["id"],
+                "name": i["name"],
+                "status": i["status"],
+                "value": if ok { json!(num::localized(&text(&i["value"]), lang)) } else { Value::Null },
+                "unit": i["unit"].as_str().map(calc_unit),
+                // a refusal is dated by the day it was asked, which is no fact of the record
+                "date": if ok { i["date"].clone() } else { Value::Null },
+                "text": if ok { Value::Null } else { i["text"].clone() },
+                "src": src_list(&i["src"]),
+                "source": i["version"],
+                "cite": i["cite"],
+            })
+        })
+        .collect()
+}
+
+/// The due slot from a rendered ownhealth.prevention/v1 document: the open items of the listed areas
+/// (what the person's decisions hide is not there). An item due or overdue that was never recorded has
+/// no date: its date is where the age window opened, not a deadline (as in get_health_status).
+fn due_rows(doc: &Value, areas: &[String], l: &Map<String, Value>) -> Vec<Value> {
+    doc["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| areas.iter().any(|a| i["area"] == a.as_str()))
+        .filter_map(|i| {
+            let status = i["status"].as_str().filter(|s| DUE_OPEN.contains(s))?;
+            let last = i.get("last").filter(|l| l.is_object());
+            let dated = last.is_some() || status == "upcoming";
+            Some(json!({
+                "rule": i["rule"],
+                "area": i["area"],
+                "title": i["title"],
+                "status": status,
+                "status_text": label(l, &format!("due_status.{status}")),
+                "due": if dated { i.get("due").cloned().unwrap_or(Value::Null) } else { Value::Null },
+                "last": last.map_or(Value::Null, |l| json!({"date": l["date"], "src": l["src"]})),
+                "src": src_list(&i["src"]),
+                "source": i["source"],
+                "cite": i["cite"],
+            }))
+        })
+        .collect()
+}
+
+/// The family slot from a rendered ownhealth.family/v1 document built from the person's own family
+/// history (never its hints): the listed patterns, each with the relatives it names, or why it could
+/// not be checked.
+fn family_rows(doc: &Value, ids: &[String], lang: &str) -> Result<Vec<Value>> {
+    let cat = ownhealth_core::family::catalog()?;
+    Ok(doc["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| ids.iter().any(|id| i["rule"] == id.as_str()))
+        .map(|i| {
+            let mut rel: Vec<String> = Vec::new();
+            for code in i["rel"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                let name = cat
+                    .relationship(code)
+                    .map_or(code, |r| if lang == "es" { r.es.as_str() } else { r.en.as_str() });
+                if !rel.iter().any(|n| n == name) {
+                    rel.push(name.to_string());
+                }
+            }
+            json!({
+                "rule": i["rule"],
+                "title": i["title"][lang],
+                "status": i["status"],
+                "relatives": rel.join(", "),
+                "text": i.get("reason").map_or(Value::Null, |r| r[lang].clone()),
+                "src": src_list(&i["src"]),
+                "source": i["source"],
+                "cite": i["cite"],
+            })
+        })
+        .collect())
+}
+
+/// The summary model for one profile, read with `scopes`, without a viewer: the family slot needs one
+/// (`build_for`), so it stays empty. The IPS export prints no family slot.
 pub async fn build(conn: &mut PgConnection, profile_id: Uuid, scopes: &Scopes, opts: &Options) -> Result<Value> {
+    build_for(conn, None, profile_id, scopes, opts).await
+}
+
+/// The summary model for one profile as `viewer` reads it with `scopes`. A relative linked to another
+/// profile feeds a family pattern only when the viewer may read that profile, as on the Family screen.
+pub async fn build_for(
+    conn: &mut PgConnection,
+    viewer: Option<&Principal>,
+    profile_id: Uuid,
+    scopes: &Scopes,
+    opts: &Options,
+) -> Result<Value> {
     let lang = if opts.lang == "es" { "es" } else { "en" };
     let pack = load_pack()?;
     let d = data()?;
@@ -531,6 +700,7 @@ pub async fn build(conn: &mut PgConnection, profile_id: Uuid, scopes: &Scopes, o
                 "kind": if supplement { json!(label(&l, "supplement")) } else { Value::Null },
                 "schedule": taken(m),
                 "prescriber": s(m, "prescriber"),
+                "decision": decision(m, &l),
                 "since": s(m, "started"),
                 "src": s(m, "src_id"),
             }));
@@ -582,6 +752,26 @@ pub async fn build(conn: &mut PgConnection, profile_id: Uuid, scopes: &Scopes, o
     } else {
         Vec::new()
     };
+    // the slots this view prints, each from its own cited document; a domain the caller cannot read
+    // leaves its slot empty (and named in by_scope)
+    let slots = &spec.slots;
+    let mut calculators = Vec::new();
+    if labs_ok && !slots.calculators.is_empty() {
+        let doc = crate::calc::document_for(&mut *conn, profile_id, opts.as_of, scopes).await?;
+        calculators = calculator_rows(&crate::calc::render(&doc, lang)?, &slots.calculators, lang);
+    }
+    let mut due = Vec::new();
+    if records_ok && !slots.due.is_empty() {
+        let doc = crate::prevention::from_evaluation(&mut *conn, &ev, &body, &pack).await?;
+        due = due_rows(&crate::prevention::render(&doc, &pack, lang, scopes)?, &slots.due, &l);
+    }
+    let mut family = Vec::new();
+    if let (true, false, Some(viewer)) = (records_ok, slots.family.is_empty(), viewer) {
+        let rel = crate::family::relatives(&mut *conn, viewer, profile_id, scopes, opts.as_of).await?;
+        let doc = crate::family::document(&ev.slug, opts.as_of, &rel)?;
+        family = family_rows(&crate::family::render(&doc)?, &slots.family, lang)?;
+    }
+
     let by_scope: Vec<&str> = [("labs", labs_ok), ("records", records_ok), ("genome", genome_ok)]
         .into_iter()
         .filter(|(_, ok)| !ok)
@@ -610,7 +800,7 @@ pub async fn build(conn: &mut PgConnection, profile_id: Uuid, scopes: &Scopes, o
         "markers": markers,
         "vaccines": vaccines,
         "procedures": procedures,
-        "slots": {"calculators": [], "due": [], "family": []},
+        "slots": {"calculators": calculators, "due": due, "family": family},
         "withheld": {"by_scope": by_scope, "sensitive": w_sensitive, "minor_rule": w_minor},
     });
     let ids = cited(&model);
@@ -750,6 +940,61 @@ mod tests {
         let who = |sex: &str| range(&p(None, Some("40"), same), "es", Some(sex), Some(45));
         assert_eq!(who("female").as_deref(), Some("<= 40"));
         assert_eq!(who("male").as_deref(), Some("< 40"));
+    }
+
+    #[test]
+    fn a_slot_naming_an_id_the_code_does_not_know_is_refused() {
+        let (tpl, spec) = (FILES[0].1, FILES[1].1);
+        assert!(parse(tpl, spec).is_ok());
+        for (from, to) in [
+            ("calculators: [homa_ir,", "calculators: [homa_ir_2,"),
+            ("due: [screening,", "due: [document,"),
+            ("family: [fam.ascvd]", "family: [fam.unknown]"),
+        ] {
+            assert!(spec.contains(from), "{from}");
+            let bad = spec.replacen(from, to, 1);
+            let err = parse(tpl, &bad).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(err.contains("the code does not know"), "{to}: {err}");
+        }
+    }
+
+    /// A flow mapping splits at a comma: `{en: Flags, by rank, es: ...}` reads as `en: Flags` and a
+    /// key `by rank`. Every template is exactly its two languages.
+    #[test]
+    fn every_template_is_one_text_in_each_language() -> Result<()> {
+        fn walk(v: &Value, at: &str, bad: &mut Vec<String>) {
+            let Some(m) = v.as_object() else { return };
+            if m.contains_key("en") || m.contains_key("es") {
+                let keys: Vec<&str> = m.keys().map(String::as_str).collect();
+                if keys != ["en", "es"] || m.values().any(|t| !t.is_string()) {
+                    bad.push(format!("{at}: {keys:?}"));
+                }
+                return;
+            }
+            for (k, v) in m {
+                walk(v, &format!("{at}.{k}"), bad);
+            }
+        }
+        let mut bad = Vec::new();
+        walk(&data()?.templates, "templates", &mut bad);
+        assert_eq!(bad, Vec::<String>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn a_decision_reads_as_the_persons_choice_with_its_day() -> Result<()> {
+        let d = data()?;
+        for (lang, want, undated) in [
+            ("en", "decided not to buy it again on 2025-12-15", "decided to stop it"),
+            ("es", "decidió no volver a comprarlo el 2025-12-15", "decidió dejarlo"),
+        ] {
+            let l = labels(&d.templates, lang);
+            let m = map(json!({"decision": "do_not_repurchase", "decision_on": "2025-12-15", "decision_reason": "x"}));
+            assert_eq!(decision(&m, &l), json!(want));
+            assert_eq!(decision(&map(json!({"decision": "stop"})), &l), json!(undated));
+            assert!(decision(&map(json!({})), &l).is_null());
+        }
+        Ok(())
     }
 
     #[test]

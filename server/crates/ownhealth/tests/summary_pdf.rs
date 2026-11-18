@@ -1,7 +1,9 @@
 //! The printed doctor summary (`ownhealth_rules::summary` + `ownhealth_ops::summary_pdf`), read back
 //! the way a reader would (PDFium): the Rivera family and a profile with five years of monthly labs,
 //! for every specialty in es and en, fit on two A4 pages in under 5 s; every line that prints a value
-//! names its src id; two renders give the same bytes; the text layer is information, not advice.
+//! names its src id; two renders give the same bytes; the text layer is information, not advice. The
+//! slots (calculated values, due items, family patterns) print with the id of the formula or guideline
+//! row beside each number, and a recorded decision on a medicine prints without its reason.
 
 #[path = "../../ownhealth-rules/tests/common/mod.rs"]
 mod common;
@@ -12,9 +14,11 @@ use std::time::Instant;
 
 use chrono::{NaiveDate, TimeZone, Utc};
 use common::{Seeded, as_of, seeded};
-use ownhealth_core::access::{ProfileIn, Scopes, all_scopes, create_household, create_profile, scope_set};
+use ownhealth_core::access::{Principal, ProfileIn, Scopes, all_scopes, create_household, create_profile, scope_set};
+use ownhealth_core::family::{FamilyCondition, MemberIn};
 use ownhealth_core::observations::{CommitOptions, ObservationIn, commit_observation};
 use ownhealth_core::provenance::{SrcIn, SrcRef, create_src};
+use ownhealth_core::records::{RecordIn, RecordOptions, add_record};
 use ownhealth_ingest_pdf::textcheck::assert_text_layer;
 use ownhealth_ingest_pdf::textlayer::read_pdf;
 use ownhealth_ops::summary_pdf::{MAX_PAGES, render};
@@ -39,31 +43,169 @@ fn opts(specialty: &str, lang: &str) -> Options {
     }
 }
 
+/// A reason the person wrote for a decision; no sheet may print it.
+const REASON: &str = "Decision reason marker 41c9";
+
+/// A browser session of one user of the Rivera household.
+async fn session(s: &Seeded, slug: &str) -> anyhow::Result<Principal> {
+    let household: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(s.pid(slug))
+        .fetch_one(s.pool())
+        .await?;
+    Ok(Principal::session(s.user(slug), household))
+}
+
+/// The sheet as Alex prints it (he owns his profile, is Lucía's guardian and Carmen's caregiver).
 async fn model(s: &Seeded, pid: Uuid, scopes: &Scopes, o: &Options) -> anyhow::Result<Value> {
+    model_as(s, "alex", pid, scopes, o).await
+}
+
+async fn model_as(s: &Seeded, viewer: &str, pid: Uuid, scopes: &Scopes, o: &Options) -> anyhow::Result<Value> {
+    let viewer = session(s, viewer).await?;
     let mut tx = s.pool().begin().await?;
-    let m = summary::build(&mut tx, pid, scopes, o).await?;
+    let m = summary::build_for(&mut tx, Some(&viewer), pid, scopes, o).await?;
     tx.commit().await?;
     Ok(m)
 }
 
+fn condition(kind: &str, onset_age: i32) -> FamilyCondition {
+    FamilyCondition {
+        kind: kind.into(),
+        text: None,
+        code_system: None,
+        code: None,
+        onset_age: Some(onset_age),
+        onset_approx: false,
+    }
+}
+
+/// One relative of `slug`, entered by hand by `by`.
+async fn relative(
+    s: &Seeded,
+    slug: &str,
+    by: &str,
+    relationship: &str,
+    conditions: Vec<FamilyCondition>,
+    link: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut m = MemberIn::new(s.pid(slug), relationship);
+    m.conditions = conditions;
+    let src = SrcRef::New(SrcIn {
+        profile_id: Some(s.pid(slug)),
+        ..SrcIn::manual(Some(s.user(by)))
+    });
+    let mut tx = s.pool().begin().await?;
+    let made = ownhealth_core::family::add(&mut tx, &m, &src, "person", None, link.map(|l| s.pid(l))).await?;
+    // the sheets are printed as of the fixture's day, so the store knew the relative by then (a
+    // fixture edit, past the trigger that keeps clinical rows immutable)
+    sqlx::query("set local session_replication_role = replica")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("update family_member set recorded_at = $2 where id = $1")
+        .bind(made.id)
+        .bind(as_of().and_hms_opt(9, 0, 0).map(|t| t.and_utc()))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// What fills the slots beyond the seed: Alex's father with a heart attack at 52 and his mother
+/// (Carmen) with type 2 diabetes, as the demo has them, and a vitamin D he takes with his recorded
+/// decision to keep taking it.
+async fn fill_slots(s: &Seeded) -> anyhow::Result<()> {
+    relative(s, "alex", "alex", "FTH", vec![condition("mi", 52)], None).await?;
+    relative(s, "alex", "alex", "MTH", vec![condition("t2d", 69)], Some("carmen")).await?;
+    let d3 = RecordIn::from_json(
+        "medication",
+        json!({
+            "profile_id": s.pid("alex"), "kind": "supplement", "name": "Vitamina D3", "strength": "2000 UI",
+            "dose_text": "1 perla", "schedule_text": "con el desayuno", "started": "2026-01-10",
+            "decision": "keep", "decision_reason": REASON, "decision_on": "2026-04-02",
+        }),
+    )?;
+    let src = SrcRef::New(SrcIn {
+        profile_id: Some(s.pid("alex")),
+        ..SrcIn::manual(Some(s.user("alex")))
+    });
+    let mut tx = s.pool().begin().await?;
+    add_record(&mut tx, &d3, &src, RecordOptions::new("person")).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Every slot row prints the id of its formula or guideline row on the line that prints its number:
+/// a calculated value with its date, a due item with its due date (or its last date), a family
+/// pattern with its first src id. The citations appendix maps each id to its source.
+fn slot_check(model: &Value) -> impl Fn(&[String]) -> Result<(), String> + use<> {
+    let slot = |k: &str| model["slots"][k].as_array().cloned().unwrap_or_default();
+    let mut want: Vec<(String, Vec<String>)> = Vec::new();
+    for c in slot("calculators") {
+        let mut parts = vec![c["value"].as_str().unwrap_or_default().to_string()];
+        parts.extend(c["date"].as_str().map(str::to_string));
+        want.push((c["rule"].as_str().unwrap_or_default().to_string(), parts));
+    }
+    for d in slot("due") {
+        let date = d["due"].as_str().or(d["last"]["date"].as_str());
+        want.push((
+            d["rule"].as_str().unwrap_or_default().to_string(),
+            date.map(str::to_string).into_iter().collect(),
+        ));
+    }
+    for f in slot("family") {
+        want.push((
+            f["rule"].as_str().unwrap_or_default().to_string(),
+            f["src"][0].as_str().map(str::to_string).into_iter().collect(),
+        ));
+    }
+    move |lines: &[String]| {
+        for (rule, parts) in &want {
+            let on_line = lines
+                .iter()
+                .any(|l| l.split_whitespace().any(|w| w == rule) && parts.iter().all(|p| l.contains(p.as_str())));
+            if !on_line {
+                return Err(format!("{rule}: no line prints {parts:?} beside its rule id"));
+            }
+            // the appendix lists the id after its citation
+            if lines.iter().filter(|l| l.split_whitespace().any(|w| w == rule)).count() < 2 {
+                return Err(format!("{rule}: not in the citations appendix"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Every row that prints a lab value or a ranked flag names its own src id on its first line: a
-/// marker row starts with the series name, a flag row with its rank. Every line is information.
+/// marker row starts with the series name, a flag row with its rank, each read in its own section (a
+/// due item or a calculated value may start with a series name too). Every line is information.
 fn src_check(model: &Value) -> impl FnMut(&str) -> Result<(), String> + use<> {
+    let headings: Vec<(String, String)> = model["labels"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| k.starts_with("sec."))
+        .map(|(k, v)| (v.as_str().unwrap_or_default().to_string(), k.clone()))
+        .collect();
+    let mut section = String::new();
     let mut rows: Vec<(String, Vec<String>)> = Vec::new();
     for m in model["markers"].as_array().into_iter().flatten() {
         if m.get("not_measured").is_none() {
             let mut ids = vec![m["src"].as_str().unwrap_or("src_missing").to_string()];
             ids.extend(m["previous"]["src"].as_str().map(str::to_string));
-            rows.push((format!("{} ", m["name"].as_str().unwrap_or_default()), ids));
+            rows.push((format!("sec.markers {} ", m["name"].as_str().unwrap_or_default()), ids));
         }
     }
     for f in model["flags"].as_array().into_iter().flatten() {
         let first = f["src"][0].as_str().unwrap_or("src_missing").to_string();
-        rows.push((format!("{} ", f["rank"]), vec![first]));
+        rows.push((format!("sec.flags {} ", f["rank"]), vec![first]));
     }
     move |line: &str| {
+        if let Some((_, key)) = headings.iter().find(|(h, _)| h == line) {
+            section = key.clone();
+        }
+        let keyed = format!("{section} {line}");
         for (start, ids) in &rows {
-            if line.starts_with(start.as_str()) && ids.iter().any(|id| !line.contains(id.as_str())) {
+            if keyed.starts_with(start.as_str()) && ids.iter().any(|id| !line.contains(id.as_str())) {
                 return Err(format!("a value without its src id ({ids:?})"));
             }
         }
@@ -139,6 +281,7 @@ fn every_specialty_series_is_a_pack_marker() -> R {
 #[tokio::test]
 async fn the_rivera_family_prints_on_two_pages_with_every_value_cited() -> R {
     let s = seeded().await?;
+    fill_slots(&s).await?;
     let scopes = all_scopes();
     for slug in SLUGS {
         for specialty in SPECIALTIES {
@@ -151,6 +294,9 @@ async fn the_rivera_family_prints_on_two_pages_with_every_value_cited() -> R {
                 assert!(took < BUDGET_S, "{what}: {took:.2} s");
                 let lines = check_sheet(&m, &what);
                 assert_eq!(lint(&m, &SKIP_KEYS), Vec::new(), "{what}");
+                if let Err(e) = slot_check(&m)(&lines) {
+                    panic!("{what}: {e}: {lines:#?}");
+                }
                 // every marker either prints a value with its range, date and src, or reads "not measured"
                 for r in m["markers"].as_array().into_iter().flatten() {
                     if r.get("not_measured").is_some() {
@@ -193,7 +339,6 @@ async fn alex_shows_values_ranges_previous_values_and_flags() -> R {
         .unwrap_or(Value::Null);
     assert!(ldl["previous"].is_object(), "{ldl}");
     assert!(m["flags"].as_array().is_some_and(|f| !f.is_empty()), "{m}");
-    assert_eq!(m["slots"], json!({"calculators": [], "due": [], "family": []}));
     let lines = check_sheet(&m, "alex cardiology es");
     assert!(
         lines
@@ -370,6 +515,216 @@ async fn a_viewer_without_lab_records_or_genome_scopes_gets_them_withheld() -> R
     Ok(())
 }
 
+/// The slots of each view: cardiology prints the cardiovascular calculators, eGFR and the family's heart
+/// pattern; general practice prints eGFR, FIB-4, the due items and every family pattern; hematology
+/// and the IPS print none.
+#[tokio::test]
+async fn each_view_prints_the_slots_it_names() -> R {
+    let s = seeded().await?;
+    fill_slots(&s).await?;
+    let ids = |m: &Value, k: &str| -> Vec<String> {
+        m["slots"][k]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r["rule"].as_str().map(str::to_string))
+            .collect()
+    };
+    for (lang, father, ckd) in [("en", "father", "eGFR"), ("es", "padre", "FGe")] {
+        let m = model(&s, s.pid("alex"), &all_scopes(), &opts("cardiology", lang)).await?;
+        // SCORE2-OP is for 70 and over: the calculators document has no item for Alex at 47
+        assert_eq!(
+            ids(&m, "calculators"),
+            ["score2", "prevent_cvd", "prevent_ascvd", "ckd_epi_2021_cr"],
+            "{lang}"
+        );
+        assert_eq!(ids(&m, "family"), ["fam.ascvd"], "{lang}");
+        assert_eq!(ids(&m, "due"), Vec::<String>::new(), "{lang}");
+        let fam = &m["slots"]["family"][0];
+        assert_eq!(fam["status"], "present", "{lang}");
+        assert_eq!(fam["relatives"], father, "{lang}");
+        let egfr = &m["slots"]["calculators"][3];
+        assert_eq!(egfr["status"], "ok", "{egfr}");
+        assert!(egfr["value"].is_string() && egfr["date"].is_string(), "{egfr}");
+        assert!(egfr["src"].as_array().is_some_and(|a| !a.is_empty()), "{egfr}");
+        // a refusal carries its reason and neither a value nor a date
+        let score2 = &m["slots"]["calculators"][0];
+        assert_ne!(score2["status"], "ok", "{score2}");
+        assert!(score2["value"].is_null() && score2["date"].is_null(), "{score2}");
+        assert!(score2["text"].as_str().is_some_and(|t| !t.is_empty()), "{score2}");
+        let lines = check_sheet(&m, lang);
+        assert!(lines.iter().any(|l| l.starts_with(ckd)), "{lines:#?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("https://doi.org/10.1161/CIR.0000000000001423")),
+            "{lang}: the family pattern's citation: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("https://pubmed.ncbi.nlm.nih.gov/34554658/")),
+            "{lang}: the eGFR formula's citation: {lines:#?}"
+        );
+
+        let gp = model(&s, s.pid("alex"), &all_scopes(), &opts("gp", lang)).await?;
+        assert_eq!(
+            ids(&gp, "calculators"),
+            ["ckd_epi_2021_cr", "ckd_epi_2021_cr_cys", "fib4"]
+        );
+        assert_eq!(ids(&gp, "family"), ["fam.ascvd"]);
+        // Alex's open items are lab gaps; the record's document gaps never print
+        let due = gp["slots"]["due"].as_array().cloned().unwrap_or_default();
+        assert!(!due.is_empty(), "{lang}: {gp}");
+        for d in &due {
+            assert!(
+                ["overdue", "due", "upcoming"].contains(&d["status"].as_str().unwrap_or_default()),
+                "{d}"
+            );
+            assert!(
+                ["screening", "vaccine", "lab"].contains(&d["area"].as_str().unwrap_or_default()),
+                "{d}"
+            );
+            // a never-recorded item has no due date: the date its age window opened is no deadline
+            if d["last"].is_null() && d["status"] != "upcoming" {
+                assert!(d["due"].is_null(), "{d}");
+            }
+        }
+        check_sheet(&gp, lang);
+        for view in ["hematology", "ips"] {
+            let m = model(&s, s.pid("alex"), &all_scopes(), &opts(view, lang)).await?;
+            assert_eq!(
+                m["slots"],
+                json!({"calculators": [], "due": [], "family": []}),
+                "{view}"
+            );
+        }
+    }
+    // Lucía at 9: CKD-EPI is for adults and FIB-4 from 35, so the sheet prints no calculated value
+    let m = model(&s, s.pid("lucia"), &all_scopes(), &opts("gp", "en")).await?;
+    assert_eq!(ids(&m, "calculators"), Vec::<String>::new(), "{m}");
+    let lines = check_sheet(&m, "lucia gp");
+    assert!(!lines.iter().any(|l| l == "Calculated values"), "{lines:#?}");
+    // Carmen at 71: the guideline's screenings and vaccines are open, each with its rule's source
+    let m = model(&s, s.pid("carmen"), &all_scopes(), &opts("gp", "en")).await?;
+    let areas: Vec<&str> = m["slots"]["due"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d["rule"].as_str())
+        .collect();
+    assert!(areas.iter().any(|r| r.starts_with("es.vac.")), "{areas:?}");
+    assert!(areas.iter().any(|r| r.starts_with("es.cancer.")), "{areas:?}");
+    // her record's document gaps (requests to her providers) are not for the sheet
+    assert!(
+        !m["slots"]["due"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|d| d["area"] == "document"),
+        "{m}"
+    );
+    let lines = check_sheet(&m, "carmen gp");
+    assert!(lines.iter().any(|l| l.contains("none on record")), "{lines:#?}");
+    Ok(())
+}
+
+/// The check of the slot rows can fail: a row printed without its formula or guideline id is refused.
+#[tokio::test]
+async fn a_slot_row_without_its_rule_id_fails_the_check() -> R {
+    let s = seeded().await?;
+    fill_slots(&s).await?;
+    for (view, k) in [("cardiology", "calculators"), ("cardiology", "family"), ("gp", "due")] {
+        let clean = model(&s, s.pid("alex"), &all_scopes(), &opts(view, "en")).await?;
+        let lines = assert_text_layer(&render(&clean).pdf, |_| Ok(()));
+        assert!(slot_check(&clean)(&lines).is_ok(), "{view} {k}: the clean sheet fails");
+        let mut m = clean.clone();
+        let row = m["slots"][k]
+            .as_array_mut()
+            .and_then(|a| a.last_mut())
+            .ok_or_else(|| anyhow::anyhow!("{view}: no {k} row"))?;
+        row["rule"] = json!("");
+        let lines = assert_text_layer(&render(&m).pdf, |_| Ok(()));
+        assert!(
+            slot_check(&clean)(&lines).is_err(),
+            "{view} {k}: a row without its rule id passed"
+        );
+    }
+    Ok(())
+}
+
+/// A recorded decision on a supplement prints in words with its day, in its own column; the reason the
+/// person wrote never prints.
+#[tokio::test]
+async fn a_recorded_decision_prints_beside_its_medicine_without_its_reason() -> R {
+    let s = seeded().await?;
+    fill_slots(&s).await?;
+    for (lang, said, column) in [
+        ("en", "decided to keep taking it on 2026-04-02", "Recorded decision"),
+        ("es", "decidió seguir tomándolo el 2026-04-02", "Decisión registrada"),
+    ] {
+        let m = model(&s, s.pid("alex"), &all_scopes(), &opts("gp", lang)).await?;
+        let d3 = m["medications"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|x| x["name"] == "Vitamina D3")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no vitamin D3 row"))?;
+        assert_eq!(d3["decision"], said, "{lang}");
+        assert_eq!(d3["schedule"], "1 perla · con el desayuno", "{lang}");
+        assert!(!m.to_string().contains(REASON), "{lang}: the reason is in the model");
+        let lines = check_sheet(&m, lang);
+        let text = lines.join("\n");
+        assert!(text.contains(column), "{lang}: {lines:#?}");
+        // the cell wraps, so its words are read across the lines
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let said_words: Vec<&str> = said.split_whitespace().collect();
+        assert!(said_words.iter().all(|w| words.contains(w)), "{lang}: {lines:#?}");
+        assert!(!text.contains(REASON), "{lang}: the reason printed");
+    }
+    // a sheet whose medicines carry no decision keeps the five columns
+    let m = model(&s, s.pid("sam"), &all_scopes(), &opts("gp", "en")).await?;
+    let lines = check_sheet(&m, "sam");
+    assert!(!lines.iter().any(|l| l.contains("Recorded decision")), "{lines:#?}");
+    Ok(())
+}
+
+/// A family pattern on the sheet counts only the relatives the viewer may read, as on the Family
+/// screen: Lucía's father is linked to Alex's profile, which Sam may not read beyond its summary. A
+/// build with no viewer prints no family slot.
+#[tokio::test]
+async fn a_relative_linked_to_a_profile_the_viewer_cannot_read_feeds_no_pattern() -> R {
+    let s = seeded().await?;
+    relative(&s, "lucia", "alex", "FTH", vec![condition("mi", 50)], Some("alex")).await?;
+    let rules = |m: &Value| -> Vec<String> {
+        m["slots"]["family"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r["rule"].as_str().map(str::to_string))
+            .collect()
+    };
+    let o = opts("gp", "en");
+    let by_alex = model_as(&s, "alex", s.pid("lucia"), &all_scopes(), &o).await?;
+    assert_eq!(rules(&by_alex), ["fam.ascvd"]);
+    let by_sam = model_as(&s, "sam", s.pid("lucia"), &all_scopes(), &o).await?;
+    assert_eq!(rules(&by_sam), Vec::<String>::new());
+    let mut tx = s.pool().begin().await?;
+    let none = summary::build(&mut tx, s.pid("lucia"), &all_scopes(), &o).await?;
+    tx.commit().await?;
+    assert_eq!(rules(&none), Vec::<String>::new());
+    // without read:records there is no family or due slot; without read:labs no calculators
+    let labs_only = model(&s, s.pid("alex"), &scope_set(["read:summary", "read:labs"]), &o).await?;
+    assert_eq!(labs_only["slots"]["family"], json!([]));
+    assert_eq!(labs_only["slots"]["due"], json!([]));
+    let records_only = model(&s, s.pid("alex"), &scope_set(["read:summary", "read:records"]), &o).await?;
+    assert_eq!(records_only["slots"]["calculators"], json!([]));
+    check_sheet(&labs_only, "labs only");
+    check_sheet(&records_only, "records only");
+    Ok(())
+}
+
 /// Carmen Ortega with five years of monthly draws of 40 series, the newest all above range.
 #[tokio::test]
 async fn five_years_of_labs_print_on_two_pages_in_time() -> R {
@@ -389,6 +744,9 @@ async fn five_years_of_labs_print_on_two_pages_in_time() -> R {
             );
             let lines = check_sheet(&m, &what);
             assert!(lines.iter().any(|l| l.starts_with("1 ")), "{what}: flag 1 is missing");
+            if let Err(e) = slot_check(&m)(&lines) {
+                panic!("{what}: {e}: {lines:#?}");
+            }
         }
     }
     Ok(())
