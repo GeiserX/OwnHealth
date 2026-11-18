@@ -2,7 +2,7 @@
 // household has its source and what a save sends, and the Genome subtitle's release (logic/genome.ts).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clinvarConfig, clinvarOn } from '../src/lib/logic/inbox.ts';
+import { clinvarConfig, clinvarNote, clinvarOn } from '../src/lib/logic/inbox.ts';
 import { releaseParts } from '../src/lib/logic/genome.ts';
 
 test('before the first genome the switch shows the default: on, except in the demo', () => {
@@ -10,6 +10,17 @@ test('before the first genome the switch shows the default: on, except in the de
 	assert.equal(clinvarOn(null, true), false);
 	assert.equal(clinvarOn({ enabled: false }, false), false);
 	assert.equal(clinvarOn({ enabled: true }, true), true);
+});
+
+test('the demo never says the check turns on by itself, since there it stays off', async () => {
+	const { dict } = await import('../src/lib/i18n/dict.ts');
+	assert.equal(clinvarNote(false), 'gen_cv_set_auto');
+	assert.equal(clinvarNote(true), 'gen_cv_set_demo');
+	for (const lang of ['en', 'es'] as const) {
+		const table = dict[lang] as Record<string, string>;
+		for (const k of ['gen_cv_set_d', 'gen_cv_set_auto', 'gen_cv_set_demo']) assert.ok(table[k], `${lang} ${k}`);
+		assert.ok(!/by itself|sola/.test(table.gen_cv_set_d), table.gen_cv_set_d);
+	}
 });
 
 test('a save keeps a mirror set through the API unless a path is typed', () => {

@@ -535,6 +535,11 @@ export function clinvarOn(src: { enabled: boolean } | null, demo: boolean): bool
 	return src ? src.enabled : !demo;
 }
 
+/** The sentence under the switch about when it turns on: by itself with the first genome, never in the demo. */
+export function clinvarNote(demo: boolean): 'gen_cv_set_auto' | 'gen_cv_set_demo' {
+	return demo ? 'gen_cv_set_demo' : 'gen_cv_set_auto';
+}
+
 /** The config a Settings save sends: a typed path, else the mirror set through the API, else NCBI. */
 export function clinvarConfig(path: string, current: Record<string, unknown> | undefined): Record<string, unknown> {
 	const p = path.trim();

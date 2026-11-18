@@ -9,7 +9,7 @@
 	import { ago } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { t } from '#lib/i18n/index.svelte';
-	import { clinvarConfig, clinvarOn, sourceStatus } from '#lib/logic/inbox';
+	import { clinvarConfig, clinvarNote, clinvarOn, sourceStatus } from '#lib/logic/inbox';
 	import { app } from '#lib/state/app.svelte';
 
 	// `canManage`: the reader owns or guards a profile; only then does the household's check show.
@@ -89,7 +89,7 @@
 		<h3 id="cvs-h">{t('gen_cv_set_t')}</h3>
 		<div class="set">
 			<Switch {on} label={t('gen_cv_set_t')} disabled={busy || !sources.data || !app.me} onchange={toggle} />
-			<div class="dim" style="flex:1;min-width:0;font-size:11.5px">{t('gen_cv_set_d')}</div>
+			<div class="dim" style="flex:1;min-width:0;font-size:11.5px">{t('gen_cv_set_d')} {t(clinvarNote(demo))}</div>
 		</div>
 		{#if sources.error}
 			<NotReady error={sources.error} onretry={load} />
