@@ -195,13 +195,16 @@ const KEY: &str = "es.cancer.breast";
 async fn the_feed_is_rfc_5545_with_one_all_day_event_per_open_item_and_stable_uids() -> R {
     let a = app().await?;
     let (_, path) = new_feed(&a, "alex", "carmen", "generic").await?;
-    let today = today_utc();
-    let first = events(&ics(&a, &path).await?)?;
-    let open = open_items(&a, "alex", "carmen", "en").await?;
-    if today_utc() != today {
-        // midnight UTC passed while the test ran: the feed and the list may be a day apart
-        return Ok(());
-    }
+    // two fetches and the Due list on one UTC day: sampled again when midnight passes in between
+    let (today, first, again, open) = loop {
+        let today = today_utc();
+        let first = events(&ics(&a, &path).await?)?;
+        let again = events(&ics(&a, &path).await?)?;
+        let open = open_items(&a, "alex", "carmen", "en").await?;
+        if today_utc() == today {
+            break (today, first, again, open);
+        }
+    };
     assert!(open.iter().any(|i| i["key"] == KEY), "{open:?}");
     assert_eq!(first.len(), open.len(), "{first:?}");
     for (day, summary, _) in first.values() {
@@ -210,7 +213,6 @@ async fn the_feed_is_rfc_5545_with_one_all_day_event_per_open_item_and_stable_ui
         assert!(*day >= today, "{day}");
     }
     // the same UIDs on the next fetch, and one per item
-    let again = events(&ics(&a, &path).await?)?;
     assert_eq!(first.keys().collect::<Vec<_>>(), again.keys().collect::<Vec<_>>());
     let uids: BTreeSet<&String> = first.keys().collect();
     assert_eq!(uids.len(), open.len());
@@ -518,8 +520,12 @@ async fn a_head_request_is_refused_and_not_counted_as_a_fetch() -> R {
 async fn a_wrong_secret_never_waits_on_a_fetch_in_progress() -> R {
     let a = app().await?;
     let (id, path) = new_feed(&a, "alex", "carmen", "generic").await?;
-    let (head, _) = path.rsplit_once('_').unwrap_or_default();
-    let wrong = format!("{head}_{}.ics", "x".repeat(43));
+    // the same feed id and secret length, one character of the secret changed
+    let at = "/ics/oh_ics_".len() + 9;
+    let flip = if &path[at..=at] == "x" { "y" } else { "x" };
+    let wrong = format!("{}{flip}{}", &path[..at], &path[at + 1..]);
+    assert_eq!((wrong.len(), &wrong[..at]), (path.len(), &path[..at]));
+    assert_ne!(wrong, path);
     let mut held = a.db.pool.begin().await?;
     sqlx::query("select 1 from calendar_feed where id = $1 for update")
         .bind(id)
@@ -531,6 +537,50 @@ async fn a_wrong_secret_never_waits_on_a_fetch_in_progress() -> R {
         got.map(|r| r.map(|f| f.0).ok()).ok().flatten(),
         Some(StatusCode::NOT_FOUND)
     );
+    Ok(())
+}
+
+/// A fetch that read a named feed and then waited for its row, while its creator made it generic,
+/// serves the generic feed: the detail is read again under the lock.
+#[tokio::test]
+async fn a_feed_made_generic_while_a_fetch_waits_is_served_generic() -> R {
+    let a = app().await?;
+    let words = telling_words(&a, "carmen").await?;
+    let (id, path) = new_feed(&a, "alex", "carmen", "named").await?;
+    let pool = &a.db.pool;
+    let mut held = pool.begin().await?;
+    sqlx::query("select 1 from calendar_feed where id = $1 for update")
+        .bind(id)
+        .execute(&mut *held)
+        .await?;
+    let downgrade = async move {
+        // the fetch has read the feed and now waits for its row
+        let start = Instant::now();
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_stat_activity where datname = current_database() \
+                 and wait_event_type = 'Lock' and query like '%for update of f%'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting > 0 {
+                break;
+            }
+            anyhow::ensure!(start.elapsed() < Wall::from_secs(10), "the fetch never waited");
+            tokio::time::sleep(Wall::from_millis(20)).await;
+        }
+        sqlx::query("update calendar_feed set detail = 'generic' where id = $1")
+            .bind(id)
+            .execute(&mut *held)
+            .await?;
+        held.commit().await?;
+        anyhow::Ok(())
+    };
+    let (got, changed) = tokio::join!(ics(&a, &path), downgrade);
+    changed?;
+    let text = got?;
+    assert_eq!(leaks(&text, &words), Vec::<String>::new(), "{text}");
+    assert!(!text.contains("Carmen"), "{text}");
     Ok(())
 }
 

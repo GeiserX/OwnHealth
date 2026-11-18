@@ -95,35 +95,36 @@ async fn lookup(conn: &mut PgConnection, token: &str) -> Result<Option<Feed>, Ap
         .strip_prefix(PREFIX)
         .and_then(|rest| rest.split_once('_'))
         .unwrap_or(("", ""));
-    type Row = (Uuid, Uuid, Uuid, Uuid, String, String, Vec<u8>, bool);
+    type Row = (Uuid, Uuid, Uuid, Uuid, String, Vec<u8>, bool);
     let row: Option<Row> = sqlx::query_as(
-        "select f.id, f.profile_id, f.created_by, u.household_id, u.locale, f.detail, f.secret_sha256, \
+        "select f.id, f.profile_id, f.created_by, u.household_id, u.locale, f.secret_sha256, \
          f.revoked_at is null and u.disabled_at is null \
          from calendar_feed f join app_user u on u.id = f.created_by where f.prefix = $1",
     )
     .bind(format!("{PREFIX}{prefix}"))
     .fetch_optional(&mut *conn)
     .await?;
-    let stored = row.as_ref().map_or_else(|| vec![0u8; 32], |r| r.6.clone());
+    let stored = row.as_ref().map_or_else(|| vec![0u8; 32], |r| r.5.clone());
     let same: bool = ownhealth_auth::sha256(secret).ct_eq(&stored).into();
-    let Some(r) = row.filter(|r| same && r.7 && !secret.is_empty()) else {
+    let Some(r) = row.filter(|r| same && r.6 && !secret.is_empty()) else {
         return Ok(None);
     };
-    // the feed is still live once its row is ours: a revoke or a disabled login in between ends it
-    let live: Option<bool> = sqlx::query_scalar(
-        "select f.revoked_at is null and u.disabled_at is null \
+    // the feed as it is once its row is ours: a revoke, a disabled login or a change of detail in
+    // between counts
+    let locked: Option<(bool, String)> = sqlx::query_as(
+        "select f.revoked_at is null and u.disabled_at is null, f.detail \
          from calendar_feed f join app_user u on u.id = f.created_by where f.id = $1 for update of f",
     )
     .bind(r.0)
     .fetch_optional(&mut *conn)
     .await?;
-    Ok((live == Some(true)).then_some(Feed {
+    Ok(locked.filter(|l| l.0).map(|(_, detail)| Feed {
         id: r.0,
         profile_id: r.1,
         created_by: r.2,
         household_id: r.3,
         locale: r.4,
-        detail: r.5,
+        detail,
     }))
 }
 
