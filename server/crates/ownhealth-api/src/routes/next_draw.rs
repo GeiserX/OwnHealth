@@ -6,7 +6,9 @@
 //! GET /api/profiles/{p}/next-draw.pdf?as_of=&lang=&hide_name=     read:labs
 //! ```
 //!
-//! Every line is a lab value or a lab gap, so both need read:labs. `hide_name=1` prints a blank for
+//! Every line is a lab value or a lab gap, so both need read:labs. A lab gap is a prevention item,
+//! which is a record, so it joins only for a caller who can see it on the Due list (read:records too).
+//! `hide_name=1` prints a blank for
 //! the name and leaves the birth date out. One audit row per call names the state hash; the PDF's row
 //! (`via = export`) also names every src id printed.
 
@@ -42,7 +44,7 @@ async fn rendered(
     let perm = Caller(principal.clone())
         .require(&mut *tx, p, Some("read:labs"), None)
         .await?;
-    let plan = next_draw::build(&mut *tx, perm.profile.id, as_of).await?;
+    let plan = next_draw::build_for(&mut *tx, perm.profile.id, as_of, &perm.scopes).await?;
     let pack = ownhealth_rules::load_pack().map_err(ownhealth_core::Error::from)?;
     Ok((next_draw::render(&plan, &pack, lang)?, perm))
 }

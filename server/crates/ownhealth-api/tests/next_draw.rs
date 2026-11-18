@@ -118,3 +118,43 @@ async fn a_viewer_without_read_labs_is_refused() -> R {
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
     Ok(())
 }
+
+/// A lab gap is a prevention item, and every prevention item is a record: a caller who cannot read
+/// Carmen's records (here her lock on read:records binds Alex, her caregiver) gets only the values
+/// outside the lab range, as the Due list beside it shows no gap.
+#[tokio::test]
+async fn a_caregiver_without_read_records_sees_only_the_lab_range_lines() -> R {
+    let (s, _dir, _rt, app) = env().await?;
+    let groups = |plan: &Value| -> Vec<(String, String)> {
+        plan["sections"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|s| s["items"].as_array().into_iter().flatten())
+            .flat_map(|it| {
+                it["reasons"].as_array().into_iter().flatten().map(move |r| {
+                    (
+                        it["group"].as_str().unwrap_or_default().to_string(),
+                        r["kind"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+            })
+            .collect()
+    };
+    let (st, open) = json(&app, "/api/profiles/carmen/next-draw?as_of=2026-11-07&lang=en").await?;
+    assert_eq!(st, StatusCode::OK, "{open}");
+    assert!(
+        groups(&open).iter().any(|(_, k)| k == "never_measured"),
+        "{open:#}"
+    );
+    sqlx::query("update profile set locks = array['read:records'] where id = $1")
+        .bind(s.pid("carmen"))
+        .execute(s.pool())
+        .await?;
+    let (st, locked) = json(&app, "/api/profiles/carmen/next-draw?as_of=2026-11-07&lang=en").await?;
+    assert_eq!(st, StatusCode::OK, "{locked}");
+    let got = groups(&locked);
+    assert!(!got.is_empty() && got.iter().all(|(_, k)| k == "lab_range"), "{got:?}");
+    assert_eq!(locked["count"], got.len(), "{locked:#}");
+    Ok(())
+}

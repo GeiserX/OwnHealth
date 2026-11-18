@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 
 use chrono::NaiveDate;
 use ownhealth_core::Result;
-use ownhealth_core::access::Profile;
+use ownhealth_core::access::{Profile, Scopes};
 use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -204,9 +204,23 @@ pub fn plan(body: &Value, prevention: &Value, pack: &Pack, prep: &DrawPrep) -> V
 
 /// The plan of one profile on one day.
 pub async fn build(conn: &mut PgConnection, profile_id: Uuid, as_of: NaiveDate) -> Result<Value> {
+    build_inner(conn, profile_id, as_of, None).await
+}
+
+/// The plan as a caller with `scopes` may see it: a prevention item (a lab gap) is a record, so it
+/// joins only when `prevention::visible` holds, as on the Due list; the values outside the lab range
+/// need read:labs only.
+pub async fn build_for(conn: &mut PgConnection, profile_id: Uuid, as_of: NaiveDate, scopes: &Scopes) -> Result<Value> {
+    build_inner(conn, profile_id, as_of, Some(scopes)).await
+}
+
+async fn build_inner(conn: &mut PgConnection, profile_id: Uuid, as_of: NaiveDate, scopes: Option<&Scopes>) -> Result<Value> {
     let (body, ev) = crate::build_with_evaluation(&mut *conn, profile_id, as_of, None).await?;
     let pack = crate::load_pack()?;
-    let prevention = crate::prevention::from_evaluation(conn, &ev, &body, &pack).await?;
+    let mut prevention = crate::prevention::from_evaluation(conn, &ev, &body, &pack).await?;
+    if let (Some(scopes), Some(items)) = (scopes, prevention.get_mut("items").and_then(Value::as_array_mut)) {
+        items.retain(|it| crate::prevention::visible(it, scopes));
+    }
     Ok(plan(&body, &prevention, &pack, load()?))
 }
 
