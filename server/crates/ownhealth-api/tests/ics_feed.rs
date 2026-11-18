@@ -2,13 +2,15 @@
 //! with no cookie. Each test runs on its own throwaway database as the synthetic Rivera family.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
 use std::time::{Duration as Wall, Instant};
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use chrono::{Duration, Months, NaiveDate};
 use http::{Request, StatusCode, header};
 use icalendar::{Calendar, CalendarComponent, Component, DatePerhapsTime};
-use ownhealth_auth::sessions::{COOKIE, create_session};
+use ownhealth_auth::sessions::{COOKIE, create_session, create_session_with};
 use ownhealth_auth::testing::unzip;
 use ownhealth_core::Runtime;
 use ownhealth_core::access::{ProfileIn, create_profile, set_grant, today_utc};
@@ -42,6 +44,10 @@ async fn app() -> anyhow::Result<App> {
     })
 }
 
+/// The address and user agent of the calendar app in these tests (TEST-NET-1, RFC 5737).
+const APP_IP: &str = "192.0.2.7";
+const APP_UA: &str = "SyntheticCalendar/1.0";
+
 async fn raw(
     a: &App,
     who: Option<&str>,
@@ -49,14 +55,33 @@ async fn raw(
     uri: &str,
     body: Option<Value>,
 ) -> anyhow::Result<(StatusCode, http::HeaderMap, Vec<u8>)> {
+    let session = match who {
+        Some(who) => {
+            let mut c = a.rt.pool.acquire().await?;
+            Some(create_session(&mut c, a.family.user(who), None, None, "passkey").await?)
+        }
+        None => None,
+    };
+    request(a, session, method, uri, body).await
+}
+
+/// One request with this session cookie, or as a calendar app when there is none.
+async fn request(
+    a: &App,
+    session: Option<String>,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> anyhow::Result<(StatusCode, http::HeaderMap, Vec<u8>)> {
     let mut req = Request::builder().method(method).uri(uri);
-    if let Some(who) = who {
-        let mut c = a.rt.pool.acquire().await?;
-        let secret = create_session(&mut c, a.family.user(who), None, None, "passkey").await?;
-        req = req
+    req = match session {
+        Some(secret) => req
             .header(header::COOKIE, format!("{COOKIE}={secret}"))
-            .header(header::CONTENT_TYPE, "application/json");
-    }
+            .header(header::CONTENT_TYPE, "application/json"),
+        None => req
+            .header(header::USER_AGENT, APP_UA)
+            .extension(ConnectInfo(SocketAddr::new(APP_IP.parse()?, 443))),
+    };
     let req = req.body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))?;
     let res = ownhealth_api::router().with_state(a.rt.clone()).oneshot(req).await?;
     let status = res.status();
@@ -185,17 +210,18 @@ async fn the_feed_is_rfc_5545_with_one_all_day_event_per_open_item_and_stable_ui
     assert_eq!(first.keys().collect::<Vec<_>>(), again.keys().collect::<Vec<_>>());
     let uids: BTreeSet<&String> = first.keys().collect();
     assert_eq!(uids.len(), open.len());
-    // each item's day is its due date, or today when that has passed or there is none (a breast
-    // screening never recorded is "due" from the day Carmen turned 50)
-    let days: BTreeSet<NaiveDate> = first.values().map(|e| e.0).collect();
+    // each item's event, found by its UID, sits on its due date, or today when that has passed or
+    // there is none (a breast screening never recorded is "due" from the day Carmen turned 50)
+    let carmen = a.family.profile("carmen");
     for i in &open {
         let want = i["due"]
             .as_str()
             .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
             .map_or(today, |d| d.max(today));
-        assert!(days.contains(&want), "{i}");
+        let uid = ownhealth_api::routes::ics::uid(carmen, i["key"].as_str().unwrap_or_default());
+        assert_eq!(first.get(&uid).map(|e| e.0), Some(want), "{i}");
     }
-    assert!(days.contains(&today), "{days:?}");
+    assert!(first.values().any(|e| e.0 == today), "{first:?}");
     Ok(())
 }
 
@@ -412,16 +438,36 @@ async fn each_fetch_is_audited_once_and_a_busy_feed_is_slowed_down() -> R {
     assert_eq!(count().await?, 1);
     ics(&a, &path).await?;
     assert_eq!(count().await?, 2);
-    let (actor, actor_id, via, profile, rows, bytes): (String, Uuid, String, Uuid, i32, i32) = sqlx::query_as(
-        "select actor_kind, actor_id, via, profile_id, rows_out, bytes_out from audit_event \
-         where tool = 'ics' order by id limit 1",
+    type Row = (
+        String,
+        Uuid,
+        String,
+        String,
+        Uuid,
+        i32,
+        i32,
+        Option<String>,
+        Option<String>,
+    );
+    let (actor, actor_id, via, action, profile, rows, bytes, ip, ua): Row = sqlx::query_as(
+        "select actor_kind, actor_id, via, action, profile_id, rows_out, bytes_out, host(ip), user_agent \
+         from audit_event where tool = 'ics' order by id limit 1",
     )
     .fetch_one(&a.db.pool)
     .await?;
+    // a calendar app's fetch reads as one, not as the creator reading the profile, and names where
+    // it came from, so the owner of an address that leaked can tell who polls it
     assert_eq!(
-        (actor.as_str(), actor_id, via.as_str(), profile),
-        ("share", a.family.user("alex"), "export", a.family.profile("carmen"))
+        (actor.as_str(), actor_id, via.as_str(), action.as_str(), profile),
+        (
+            "share",
+            a.family.user("alex"),
+            "export",
+            "calendar_feed.fetch",
+            a.family.profile("carmen")
+        )
     );
+    assert_eq!((ip.as_deref(), ua.as_deref()), (Some(APP_IP), Some(APP_UA)));
     assert_eq!(rows as usize, events(&text)?.len());
     assert_eq!(bytes as usize, text.len());
     let (_, v) = send(&a, "alex", "GET", "/profiles/carmen/calendar-feeds", None).await?;
@@ -430,7 +476,7 @@ async fn each_fetch_is_audited_once_and_a_busy_feed_is_slowed_down() -> R {
     // an hour's worth of fetches: the next one waits
     let mut c = a.db.pool.acquire().await?;
     for _ in 0..58 {
-        let mut e = AuditEvent::new("share", "export", "read");
+        let mut e = AuditEvent::new("share", "export", "calendar_feed.fetch");
         e.tool = Some("ics".into());
         e.profile_id = Some(a.family.profile("carmen"));
         e.resource_type = Some("calendar_feed".into());
@@ -441,6 +487,31 @@ async fn each_fetch_is_audited_once_and_a_busy_feed_is_slowed_down() -> R {
     assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
     assert!(h.contains_key(header::RETRY_AFTER));
     assert_eq!(count().await?, 60, "a refused fetch is not a read");
+    Ok(())
+}
+
+/// Two calendar apps polling the same address at once, one fetch short of the hour's limit: one gets
+/// the feed, the other waits.
+#[tokio::test]
+async fn two_fetches_at_once_never_pass_the_hourly_limit() -> R {
+    let a = app().await?;
+    let (id, path) = new_feed(&a, "alex", "carmen", "generic").await?;
+    let mut c = a.db.pool.acquire().await?;
+    for _ in 0..59 {
+        let mut e = AuditEvent::new("share", "export", "calendar_feed.fetch");
+        e.tool = Some("ics".into());
+        e.profile_id = Some(a.family.profile("carmen"));
+        e.resource_type = Some("calendar_feed".into());
+        e.resource_ids = Some(vec![id.to_string()]);
+        write_audit(&mut c, &e).await?;
+    }
+    // two open connections in the pool, so neither fetch waits to connect and both start together
+    let warm = a.db.pool.acquire().await?;
+    drop((c, warm));
+    let (one, two) = tokio::join!(fetch(&a, &path), fetch(&a, &path));
+    let mut got = vec![one?.0, two?.0];
+    got.sort();
+    assert_eq!(got, vec![StatusCode::OK, StatusCode::TOO_MANY_REQUESTS]);
     Ok(())
 }
 
@@ -518,6 +589,39 @@ async fn making_a_feed_needs_read_records_and_only_its_creator_sees_or_revokes_i
         v["items"][0].get("url").is_none() && !v.to_string().contains(".ics"),
         "{v}"
     );
+    Ok(())
+}
+
+/// A session past its step-up window: older than STEP_UP_SECONDS, or opened with a recovery code.
+async fn stale(a: &App, who: &str) -> anyhow::Result<String> {
+    let mut c = a.rt.pool.acquire().await?;
+    Ok(create_session_with(&mut c, a.family.user(who), None, None, "passkey", Some(false)).await?)
+}
+
+#[tokio::test]
+async fn making_a_feed_and_naming_its_items_need_step_up_and_going_back_or_revoking_does_not() -> R {
+    let a = app().await?;
+    let (id, _) = new_feed(&a, "alex", "carmen", "generic").await?;
+    let feeds = "/profiles/carmen/calendar-feeds";
+    let one = format!("{feeds}/{id}");
+    let code = |b: &[u8]| serde_json::from_slice::<Value>(b).unwrap_or(Value::Null)["detail"]["code"].clone();
+    let (s, _, b) = request(&a, Some(stale(&a, "alex").await?), "POST", feeds, Some(json!({}))).await?;
+    assert_eq!((s, code(&b)), (StatusCode::FORBIDDEN, json!("step_up_required")));
+    let named = Some(json!({"detail": "named"}));
+    let (s, _, b) = request(&a, Some(stale(&a, "alex").await?), "PATCH", &one, named).await?;
+    assert_eq!((s, code(&b)), (StatusCode::FORBIDDEN, json!("step_up_required")));
+    let generic = Some(json!({"detail": "generic"}));
+    let (s, _, b) = request(&a, Some(stale(&a, "alex").await?), "PATCH", &one, generic).await?;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let (s, _, b) = request(&a, Some(stale(&a, "alex").await?), "DELETE", &one, None).await?;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    // nothing was made or named on the refused calls
+    let rows: Vec<(String, bool)> =
+        sqlx::query_as("select detail, revoked_at is not null from calendar_feed where profile_id = $1")
+            .bind(a.family.profile("carmen"))
+            .fetch_all(&a.db.pool)
+            .await?;
+    assert_eq!(rows, vec![("generic".to_string(), true)]);
     Ok(())
 }
 

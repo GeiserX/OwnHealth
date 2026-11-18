@@ -17,11 +17,12 @@
 //!
 //! A fetch reads the ownhealth.prevention/v1 document as its creator, in the creator's language: one
 //! all-day VEVENT per open item (overdue, due, upcoming) on its due date, or today when that date has
-//! passed or there is none, and one per snoozed item on the day it is shown again. A dismissed item, an item marked done and
-//! one up to date are left out. UID = sha256(profile id, item key), so an event keeps its UID when
-//! its day moves. `generic` titles every event "OwnHealth: 1 item due"; `named` uses the item's title
+//! passed or there is none, and one per snoozed item on the day it is shown again, or on its due date
+//! when that comes later. A dismissed item, an item marked done and one up to date are left out.
+//! UID = sha256(profile id, item key), so an event keeps its UID when its day moves. `generic` titles every event "OwnHealth: 1 item due"; `named` uses the item's title
 //! and puts its reason and guideline link in the description. Each fetch writes one audit row (via
-//! export, actor share), and a feed fetched more than RATE_PER_HOUR times in the last hour waits.
+//! export, actor share, action calendar_feed.fetch, with the caller's address and user agent), and a
+//! feed fetched more than RATE_PER_HOUR times in the last hour waits.
 
 use axum::Router;
 use axum::extract::{Path, State};
@@ -40,7 +41,7 @@ use sqlx::PgConnection;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use super::auth::{Body, Check, R, answer, ok};
+use super::auth::{Body, Check, Meta, R, answer, ok};
 use crate::error::ApiError;
 use crate::extract::Caller;
 
@@ -83,7 +84,8 @@ struct Feed {
 }
 
 /// The live feed of a token, or None. The same work for every token: one lookup by prefix and one
-/// constant-time hash comparison, against a dummy hash when the prefix is unknown.
+/// constant-time hash comparison, against a dummy hash when the prefix is unknown. The feed row stays
+/// locked to the end of the transaction, so two fetches at once count the hour's fetches in turn.
 async fn lookup(conn: &mut PgConnection, token: &str) -> Result<Option<Feed>, ApiError> {
     let (prefix, secret) = token
         .strip_prefix(PREFIX)
@@ -93,7 +95,7 @@ async fn lookup(conn: &mut PgConnection, token: &str) -> Result<Option<Feed>, Ap
     let row: Option<Row> = sqlx::query_as(
         "select f.id, f.profile_id, f.created_by, u.household_id, u.locale, f.detail, f.secret_sha256, \
          f.revoked_at is null and u.disabled_at is null \
-         from calendar_feed f join app_user u on u.id = f.created_by where f.prefix = $1",
+         from calendar_feed f join app_user u on u.id = f.created_by where f.prefix = $1 for update of f",
     )
     .bind(format!("{PREFIX}{prefix}"))
     .fetch_optional(&mut *conn)
@@ -137,19 +139,22 @@ fn events(doc: &Value, profile_id: Uuid, today: NaiveDate, named: bool, lang: &s
             if !OPEN.contains(&it["status"].as_str().unwrap_or_default()) {
                 continue;
             }
-            let start = if list == "items" {
-                // an item already due sits on today: its date has passed, or is where the age window
-                // opened for something never recorded, and a past day is out of a calendar's sight
-                day(&it["due"]).map_or(today, |d| d.max(today))
+            // the first day the item can show: today for a listed one (a day already past is out of a
+            // calendar's sight), and the day after `until` for a snoozed one
+            let first = if list == "items" {
+                today
             } else if it["decision"]["kind"] == "snooze" {
-                // hidden through `until`, shown again the day after
                 match day(&it["decision"]["until"]).and_then(|u| u.succ_opt()) {
-                    Some(d) => d,
+                    Some(d) => d.max(today),
                     None => continue,
                 }
             } else {
                 continue;
             };
+            // on its due date, or that first day when the date is earlier (it has passed, or is where
+            // the age window opened for something never recorded) or there is none: a snooze never
+            // brings an item forward
+            let start = day(&it["due"]).map_or(first, |d| d.max(first));
             let key = it["key"].as_str().unwrap_or_default();
             let (summary, description) = if named {
                 let title = it["title"].as_str().unwrap_or(key);
@@ -244,14 +249,14 @@ fn calendar(name: &str, events: &[Event], now: DateTime<Utc>) -> String {
     out
 }
 
-async fn feed(State(rt): State<Runtime>, Path(file): Path<String>) -> Response {
-    match serve(&rt, &file).await {
+async fn feed(State(rt): State<Runtime>, meta: Meta, Path(file): Path<String>) -> Response {
+    match serve(&rt, &file, meta).await {
         Ok(r) => r,
         Err(e) => e.into_response(),
     }
 }
 
-async fn serve(rt: &Runtime, file: &str) -> Result<Response, ApiError> {
+async fn serve(rt: &Runtime, file: &str, meta: Meta) -> Result<Response, ApiError> {
     let token = file.strip_suffix(".ics").unwrap_or_default();
     let mut tx = rt.pool.begin().await?;
     let f = lookup(&mut tx, token).await?.ok_or_else(gone)?;
@@ -301,8 +306,12 @@ async fn serve(rt: &Runtime, file: &str) -> Result<Response, ApiError> {
         "OwnHealth".to_string()
     };
     let text = calendar(&name, &list, Utc::now());
-    let mut e = AuditEvent::new("share", "export", "read");
+    // a calendar app's fetch, with the address and user agent it came from, so the owner of an
+    // address that leaked can tell who polls it
+    let mut e = AuditEvent::new("share", "export", "calendar_feed.fetch");
     e.actor_id = Some(f.created_by);
+    e.ip = meta.ip;
+    e.user_agent = meta.user_agent;
     e.tool = Some("ics".into());
     e.profile_id = Some(f.profile_id);
     e.resource_type = Some("calendar_feed".into());
@@ -497,6 +506,32 @@ mod tests {
         line(&mut out, &text);
         assert!(out.split("\r\n").all(|l| l.len() <= 75), "{out}");
         assert_eq!(out.replace("\r\n ", ""), format!("{text}\r\n"));
+    }
+
+    /// A snooze hides an item until a day; it never brings an item forward of its due date.
+    #[test]
+    fn a_snoozed_item_comes_back_after_its_snooze_and_never_before_its_due_date() {
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap_or_default();
+        let snooze = json!({"kind": "snooze", "until": "2026-12-01"});
+        let doc = json!({"items": [], "hidden": [
+            {"key": "later", "status": "upcoming", "due": "2027-03-01", "decision": snooze},
+            {"key": "now", "status": "due", "due": "2026-11-17", "decision": snooze},
+            {"key": "undated", "status": "due", "decision": snooze},
+            {"key": "dismissed", "status": "due", "decision": {"kind": "dismiss"}},
+        ]});
+        let p = Uuid::nil();
+        let got: Vec<(String, NaiveDate)> = events(&doc, p, d("2026-11-17"), false, "en")
+            .into_iter()
+            .map(|e| (e.0, e.1))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (uid(p, "later"), d("2027-03-01")),
+                (uid(p, "now"), d("2026-12-02")),
+                (uid(p, "undated"), d("2026-12-02")),
+            ]
+        );
     }
 
     #[test]
