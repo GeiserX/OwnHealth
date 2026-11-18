@@ -46,8 +46,9 @@
 			},
 			(e) => {
 				if (g !== gen) return;
-				if (e instanceof ApiError && e.status === 403) hidden = true;
-				else loadErr = e;
+				// a 403 hides the section; any other failure shows it with its retry
+				hidden = e instanceof ApiError && e.status === 403;
+				if (!hidden) loadErr = e;
 			}
 		);
 	});
