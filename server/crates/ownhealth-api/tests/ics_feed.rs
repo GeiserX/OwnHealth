@@ -581,6 +581,17 @@ async fn a_feed_made_generic_while_a_fetch_waits_is_served_generic() -> R {
     let text = got?;
     assert_eq!(leaks(&text, &words), Vec::<String>::new(), "{text}");
     assert!(!text.contains("Carmen"), "{text}");
+    // served, not emptied: Carmen's items are all there, each under the generic title
+    let got = events(&text)?;
+    assert!(
+        got.contains_key(&ownhealth_api::routes::ics::uid(a.family.profile("carmen"), KEY)),
+        "{text}"
+    );
+    assert!(
+        got.values()
+            .all(|e| e.1 == "OwnHealth: 1 elemento pendiente" && e.2.is_empty()),
+        "{text}"
+    );
     Ok(())
 }
 
