@@ -708,7 +708,21 @@ fn every_published_validity_limit_is_a_refusal_with_its_reason() {
     };
     let items = run(
         "score2",
-        &[lipids("5.8", "1.3", "mmol/L"), same_day_tc],
+        &[lipids("5.8", "1.3", "mmol/L"), same_day_tc.clone()],
+        &p,
+        &facts(),
+        &[],
+    );
+    let (code, why) = reason(&items);
+    assert_eq!(
+        (code.as_str(), why["group"].clone(), why["value"].clone()),
+        ("marked_risk_factor", json!("total_cholesterol"), json!("9")),
+        "{items:?}"
+    );
+    // the same two draws in the other order give the same refusal
+    let items = run(
+        "score2",
+        &[same_day_tc, lipids("5.8", "1.3", "mmol/L")],
         &p,
         &facts(),
         &[],
@@ -730,6 +744,19 @@ fn every_published_validity_limit_is_a_refusal_with_its_reason() {
         (code.as_str(), why["group"].clone(), why["value"].clone()),
         ("marked_risk_factor", json!("ldl_c"), json!(">5.2"))
     );
+    // an LDL printed as above the limit itself (">4.9") is over it; one printed as at least the limit is not
+    for (comparator, refused) in [(">", true), (">=", false)] {
+        let mut at_limit = lipids("5.8", "1.3", "mmol/L");
+        let mut o = obs("ldl_c", "4.9", "mmol/L", "2026-09-14", "src_ldl");
+        o.comparator = Some(comparator.into());
+        o.printed = format!("{comparator}4.9");
+        at_limit.obs.insert("ldl_c".into(), o);
+        let items = run("score2", &[at_limit], &p, &facts(), &[]);
+        assert_eq!(items[0]["status"] != "ok", refused, "{comparator} {items:?}");
+        if refused {
+            assert_eq!(reason(&items).1["value"], json!(">4.9"));
+        }
+    }
     let mut high_bp = facts();
     high_bp.sbp = Some(Sbp::Office(obs("bp_systolic", "210", "mm[Hg]", "2026-10-02", "src_bp")));
     assert_eq!(reason(&run("score2", &mmol, &p, &high_bp, &[])).0, "marked_risk_factor");

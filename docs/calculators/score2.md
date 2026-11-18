@@ -38,7 +38,8 @@ country in no region, such as US, it is refused too (`region_not_covered`). We n
 
 - Total and HDL cholesterol from one draw and one day, the newest by that day. A value in mg/dL is
   divided by 38.67. For the marked-factor rule, LDL-C and total cholesterol are each the newest by
-  their own day too, and a value printed as above a bound (">5.2") is judged by that bound.
+  their own day too, and every value from that day counts. A value printed as above a bound (">5.2")
+  is judged by that bound, and one printed as above the limit itself (">8") is over the limit.
 - Systolic pressure: the newest office reading (LOINC 8480-6) in the 12 months up to the day. If
   there is none, the mean of the last 30 days of wearable daily means, shown with its window and its
   wearable source (the preferred one, else the one with the most days in those 30). The result

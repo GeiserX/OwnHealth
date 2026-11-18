@@ -1059,21 +1059,24 @@ fn evaluate_one(
     }
     let egfr_v = egfr.and_then(|e| e["value"].as_str()?.parse::<Decimal>().ok());
     if is_score2 {
-        // the newest LDL-C and total cholesterol by their own date, the later draw on a tie: a newer
+        // every LDL-C and total cholesterol on the newest day of its own, in any draw order: a newer
         // total cholesterol with no HDL beside it still counts for the rule, while the risk uses the pair
-        let newest = |group: &str| {
+        let newest = |group: &str| -> Vec<&Obs> {
+            let on = draws.iter().filter_map(|d| d.obs.get(group)).map(|o| o.date).max();
             draws
                 .iter()
-                .enumerate()
-                .filter_map(|(i, d)| d.obs.get(group).map(|o| (i, o)))
-                .max_by_key(|(i, o)| (o.date, *i))
-                .map(|(_, o)| o)
+                .filter_map(|d| d.obs.get(group))
+                .filter(|o| Some(o.date) == on)
+                .collect()
         };
         let ldl = newest("ldl_c");
         // any other draw counts, a second one on the pair's own day too
-        let tc_newest = newest("total_cholesterol").filter(|o| !std::ptr::eq(*o, tc_o));
-        // a value printed as above a bound (">5.2") is above the bound, so the bound is judged; one
-        // printed as below a bound can never be markedly raised
+        let tc_newest = newest("total_cholesterol")
+            .into_iter()
+            .filter(|o| !std::ptr::eq(*o, tc_o));
+        // a value printed as above a bound (">5.2") is above the bound, so the bound is judged, and one
+        // printed as above the limit itself (">8") is over it; one printed as below a bound can never be
+        // markedly raised
         let mut checks: Vec<(&Obs, Decimal, &str, String)> = Vec::new();
         for o in [tc_o].into_iter().chain(tc_newest).chain(ldl) {
             let Some(v) = o.value else { continue };
@@ -1087,13 +1090,15 @@ fn evaluate_one(
         let sbp_line = (sbp_v, sbp.date());
         for (group, unit, m, scale, inclusive) in MARKED {
             let limit = Decimal::new(m, scale);
-            let hit = |v: Decimal| if inclusive { v >= limit } else { v > limit };
+            let hit = |v: Decimal, above: bool| if inclusive || above { v >= limit } else { v > limit };
             let found = if group == "bp_systolic" {
-                hit(sbp_line.0).then_some((num(&sbp_line.0), sbp_line.1, None))
+                hit(sbp_line.0, false).then_some((num(&sbp_line.0), sbp_line.1, None))
             } else {
                 checks
                     .iter()
-                    .find(|(o, v, u, _)| o.group == group && *u == unit && hit(*v))
+                    .find(|(o, v, u, _)| {
+                        o.group == group && *u == unit && hit(*v, o.comparator.as_deref() == Some(">"))
+                    })
                     .map(|(o, _, _, shown)| (shown.clone(), o.date, Some(*o)))
             };
             if let Some((v, on, obs)) = found {
