@@ -6,7 +6,7 @@ name: ownhealth
 # nothing, so it cannot ALTER a table, disable a trigger, or UPDATE, DELETE or TRUNCATE the audit log.
 services:
   admin:
-    image: drumsergio/ownhealth:0.3.0
+    image: drumsergio/ownhealth:0.4.0
     build:
       context: .
       target: app
@@ -25,7 +25,7 @@ services:
       - ownhealth-data:/data
 
   app:
-    image: drumsergio/ownhealth:0.3.0
+    image: drumsergio/ownhealth:0.4.0
     build:
       context: .
       target: app
@@ -58,7 +58,7 @@ services:
   # that carries the engine and the models; it serves no HTTP, it only runs `ocr` jobs.
   ocr:
     profiles: [ocr]
-    image: drumsergio/ownhealth:0.3.0-ocr
+    image: drumsergio/ownhealth:0.4.0-ocr
     build:
       context: .
       target: ocr

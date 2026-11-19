@@ -103,7 +103,7 @@ Tags are pinned semver at release time and never `:latest`. The version numbers 
 name: ownhealth
 services:
   app:
-    image: drumsergio/ownhealth:0.3.0
+    image: drumsergio/ownhealth:0.4.0
     restart: unless-stopped
     depends_on: { db: { condition: service_healthy } }
     environment:
@@ -142,7 +142,7 @@ services:
 
   ocr:
     profiles: [ocr]
-    image: drumsergio/ownhealth:0.3.0-ocr
+    image: drumsergio/ownhealth:0.4.0-ocr
     restart: unless-stopped
     depends_on: { db: { condition: service_healthy } }
     command: ["ownhealth", "worker"]

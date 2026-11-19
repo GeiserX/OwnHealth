@@ -9,7 +9,7 @@ name: ownhealth
 # which owns nothing, so it cannot ALTER a table, disable a trigger, or rewrite the audit log.
 services:
   admin:
-    image: drumsergio/ownhealth:0.3.0
+    image: drumsergio/ownhealth:0.4.0
     restart: "no"
     depends_on:
       db:
@@ -36,7 +36,7 @@ services:
     security_opt: ["no-new-privileges:true"]
 
   app:
-    image: drumsergio/ownhealth:0.3.0
+    image: drumsergio/ownhealth:0.4.0
     restart: unless-stopped
     depends_on:
       db:
@@ -67,7 +67,7 @@ services:
   # to the `ocr` queue instead of leaving them pending). It serves no HTTP and only runs `ocr` jobs.
   ocr:
     profiles: [ocr]
-    image: drumsergio/ownhealth:0.3.0-ocr
+    image: drumsergio/ownhealth:0.4.0-ocr
     restart: unless-stopped
     depends_on:
       db:
