@@ -584,7 +584,17 @@ impl Sheet<'_> {
             .take(keep)
             .map(|c| {
                 let result = if st(c, "status") == "ok" {
-                    join(&[st(c, "value"), st(c, "unit")], " ")
+                    // the value first, then what qualifies it
+                    let mut parts = vec![join(&[st(c, "value"), st(c, "unit")], " ")];
+                    parts.extend(
+                        c["notes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string),
+                    );
+                    parts.join(" · ")
                 } else {
                     st(c, "text").into()
                 };

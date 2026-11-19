@@ -504,12 +504,24 @@ async fn a_viewer_without_lab_records_or_genome_scopes_gets_them_withheld() -> R
             assert_eq!(m[k], json!([]), "{k}");
         }
         let lines = check_sheet(&m, "viewer");
-        let says = if lang == "es" {
-            "esta cuenta no puede leer"
+        // a withheld line may wrap, so its words are read across the lines
+        let text = lines.join(" ");
+        let (says, labs, records) = if lang == "es" {
+            (
+                "esta cuenta no puede leer",
+                "Valores de laboratorio y valores calculados: no se muestran",
+                "cribados pendientes y antecedentes familiares: no se muestran",
+            )
         } else {
-            "this account cannot read"
+            (
+                "this account cannot read",
+                "Lab values and calculated values: not shown",
+                "screenings due and family history: not shown",
+            )
         };
-        assert_eq!(lines.iter().filter(|l| l.contains(says)).count(), 3, "{lines:#?}");
+        assert_eq!(text.matches(says).count(), 3, "{lines:#?}");
+        // the withheld lines name the slots they leave out too
+        assert!(text.contains(labs) && text.contains(records), "{lines:#?}");
         assert!(!lines.iter().any(|l| l.contains("mg/dL")), "{lines:#?}");
     }
     Ok(())
@@ -585,6 +597,8 @@ async fn each_view_prints_the_slots_it_names() -> R {
                 ["screening", "vaccine", "lab"].contains(&d["area"].as_str().unwrap_or_default()),
                 "{d}"
             );
+            // every row names its guideline beside the link, a rule pack lab item the pack
+            assert!(d["source"].as_str().is_some_and(|s| !s.is_empty()), "{d}");
             // a never-recorded item has no due date: the date its age window opened is no deadline
             if d["last"].is_null() && d["status"] != "upcoming" {
                 assert!(d["due"].is_null(), "{d}");
@@ -722,6 +736,110 @@ async fn a_relative_linked_to_a_profile_the_viewer_cannot_read_feeds_no_pattern(
     assert_eq!(records_only["slots"]["calculators"], json!([]));
     check_sheet(&labs_only, "labs only");
     check_sheet(&records_only, "records only");
+    Ok(())
+}
+
+/// A calculated value prints with what qualifies it: HOMA-IR from a draw not labelled fasting, with
+/// insulin read from pmol/L, says both beside the number.
+#[tokio::test]
+async fn a_calculated_value_prints_with_its_qualifications() -> R {
+    let s = seeded().await?;
+    let pid = s.pid("alex");
+    let mut tx = s.pool().begin().await?;
+    let src = SrcIn {
+        profile_id: Some(pid),
+        label: Some("LabNorte · 2026-06-10 · p1".into()),
+        ..SrcIn::new("manual")
+    };
+    let src = create_src(&mut tx, &src).await?;
+    for (g, v, unit, canonical, canonical_unit) in [
+        ("glucose", "5.4", "mmol/L", "97", "mg/dL"),
+        ("insulin", "60", "pmol/L", "10", "u[IU]/mL"),
+    ] {
+        let obs = ObservationIn::from_json(json!({
+            "profile_id": pid, "printed_name": g, "printed_value": v, "printed_unit": unit,
+            "value_num": v, "alias_group": g, "unit_ucum": unit, "value_canonical": canonical,
+            "unit_canonical": canonical_unit, "derivation_version": "summary",
+            "effective_at": "2026-06-10T08:00:00Z",
+        }))?;
+        commit_observation(&mut tx, &obs, &SrcRef::Id(src.clone()), CommitOptions::new("auto")).await?;
+    }
+    tx.commit().await?;
+    for (lang, fasting, factor) in [
+        (
+            "en",
+            "the record does not say whether this draw was fasting",
+            "factor 6.00",
+        ),
+        ("es", "el registro no dice si esta extracción lo fue", "factor 6,00"),
+    ] {
+        let m = model(&s, pid, &all_scopes(), &opts("endocrinology", lang)).await?;
+        let homa = m["slots"]["calculators"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|c| c["rule"] == "homa_ir")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(homa["status"], "ok", "{lang}: {m}");
+        assert_eq!(homa["notes"].as_array().map_or(0, Vec::len), 2, "{lang}: {homa}");
+        let lines = check_sheet(&m, lang);
+        // the result cell wraps, so its words are read across the lines
+        let text = lines.join(" ");
+        assert!(text.contains(fasting) && text.contains(factor), "{lang}: {lines:#?}");
+    }
+    Ok(())
+}
+
+/// A relative tagged sensitive feeds no family pattern on the sheet, as the person's own sensitive
+/// records never print: not for an owner who may read sensitive facts, and not with the tick, which
+/// covers genome findings only.
+#[tokio::test]
+async fn a_relative_tagged_sensitive_feeds_no_pattern_on_the_sheet() -> R {
+    let s = seeded().await?;
+    relative(&s, "alex", "alex", "FTH", vec![condition("mi", 50)], None).await?;
+    let o = opts("cardiology", "en");
+    let present = |m: &Value| -> Vec<String> {
+        m["slots"]["family"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| r["status"] == "present")
+            .filter_map(|r| r["rule"].as_str().map(str::to_string))
+            .collect()
+    };
+    // the control: untagged, the father's heart attack makes the pattern
+    assert_eq!(
+        present(&model(&s, s.pid("alex"), &all_scopes(), &o).await?),
+        ["fam.ascvd"]
+    );
+    let src: String = sqlx::query_scalar("select src_id from family_member where profile_id = $1")
+        .bind(s.pid("alex"))
+        .fetch_one(s.pool())
+        .await?;
+    // a fixture edit, past the trigger that keeps clinical rows immutable
+    let mut tx = s.pool().begin().await?;
+    sqlx::query("set local session_replication_role = replica")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("update family_member set sensitivity = '{mental_health}' where profile_id = $1")
+        .bind(s.pid("alex"))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    for sensitive_open in [false, true] {
+        let o = Options {
+            sensitive_open,
+            ..opts("cardiology", "en")
+        };
+        let m = model(&s, s.pid("alex"), &all_scopes(), &o).await?;
+        assert_eq!(present(&m), Vec::<String>::new(), "tick {sensitive_open}");
+        assert!(
+            !m.to_string().contains(&src),
+            "tick {sensitive_open}: {src} is on the sheet"
+        );
+        check_sheet(&m, "sensitive relative");
+    }
     Ok(())
 }
 

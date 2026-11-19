@@ -350,11 +350,15 @@ fn taken(m: &Map<String, Value>) -> Value {
 }
 
 /// The person's recorded decision on a medicine or supplement, in words with its day ("keep, on
-/// 2026-04-02"); never the reason, which is the person's own text.
-fn decision(m: &Map<String, Value>, l: &Map<String, Value>) -> Value {
+/// 2026-04-02"); never the reason, which is the person's own text. A decision dated after the sheet's
+/// date is not on it yet.
+fn decision(m: &Map<String, Value>, l: &Map<String, Value>, as_of: NaiveDate) -> Value {
     let Some(d) = str_of(m, "decision") else {
         return Value::Null;
     };
+    if date_of(m, "decision_on").is_some_and(|on| on > as_of) {
+        return Value::Null;
+    }
     let words = label(l, &format!("decision.{d}"));
     match s(m, "decision_on") {
         Value::String(on) => json!(fill(&label(l, "decision_on"), &[("decision", words), ("date", on)])),
@@ -526,9 +530,9 @@ const NOT_FOR_AGE: [&str; 3] = ["not_adult", "age_below_35", "age_out_of_range"]
 
 /// The calculators slot from a rendered ownhealth.calculators/v1 document: one row per listed id, in
 /// the view's order, holding that calculator's newest item (the document lists each oldest first). A
-/// result carries its value, unit, date and the src ids of its inputs; a refusal carries the reason
-/// in words and no value, and one for the person's age is left out (`NOT_FOR_AGE`). Every row names
-/// its formula (`rule`, `source`, `cite`).
+/// result carries its value, unit, date, the src ids of its inputs and the notes that qualify it; a
+/// refusal carries the reason in words and no value, and one for the person's age is left out
+/// (`NOT_FOR_AGE`). Every row names its formula (`rule`, `source`, `cite`).
 fn calculator_rows(doc: &Value, ids: &[String], lang: &str) -> Vec<Value> {
     let items = doc["items"].as_array().map_or(&[][..], Vec::as_slice);
     ids.iter()
@@ -545,6 +549,8 @@ fn calculator_rows(doc: &Value, ids: &[String], lang: &str) -> Vec<Value> {
                 // a refusal is dated by the day it was asked, which is no fact of the record
                 "date": if ok { i["date"].clone() } else { Value::Null },
                 "text": if ok { Value::Null } else { i["text"].clone() },
+                // what qualifies a result (a draw not labelled fasting, a unit factor, a cutoff band)
+                "notes": if ok { i["notes"].clone() } else { json!([]) },
                 "src": src_list(&i["src"]),
                 "source": i["version"],
                 "cite": i["cite"],
@@ -555,8 +561,9 @@ fn calculator_rows(doc: &Value, ids: &[String], lang: &str) -> Vec<Value> {
 
 /// The due slot from a rendered ownhealth.prevention/v1 document: the open items of the listed areas
 /// (what the person's decisions hide is not there). An item due or overdue that was never recorded has
-/// no date: its date is where the age window opened, not a deadline (as in get_health_status).
-fn due_rows(doc: &Value, areas: &[String], l: &Map<String, Value>) -> Vec<Value> {
+/// no date: its date is where the age window opened, not a deadline (as in get_health_status). A rule
+/// pack lab item names no guideline of its own, so its row names the pack (`pack`) beside the link.
+fn due_rows(doc: &Value, areas: &[String], l: &Map<String, Value>, pack: &str) -> Vec<Value> {
     doc["items"]
         .as_array()
         .into_iter()
@@ -575,7 +582,7 @@ fn due_rows(doc: &Value, areas: &[String], l: &Map<String, Value>) -> Vec<Value>
                 "due": if dated { i.get("due").cloned().unwrap_or(Value::Null) } else { Value::Null },
                 "last": last.map_or(Value::Null, |l| json!({"date": l["date"], "src": l["src"]})),
                 "src": src_list(&i["src"]),
-                "source": i["source"],
+                "source": i["source"].as_str().filter(|s| !s.is_empty()).unwrap_or(pack),
                 "cite": i["cite"],
             }))
         })
@@ -700,7 +707,7 @@ pub async fn build_for(
                 "kind": if supplement { json!(label(&l, "supplement")) } else { Value::Null },
                 "schedule": taken(m),
                 "prescriber": s(m, "prescriber"),
-                "decision": decision(m, &l),
+                "decision": decision(m, &l, opts.as_of),
                 "since": s(m, "started"),
                 "src": s(m, "src_id"),
             }));
@@ -763,11 +770,20 @@ pub async fn build_for(
     let mut due = Vec::new();
     if records_ok && !slots.due.is_empty() {
         let doc = crate::prevention::from_evaluation(&mut *conn, &ev, &body, &pack).await?;
-        due = due_rows(&crate::prevention::render(&doc, &pack, lang, scopes)?, &slots.due, &l);
+        due = due_rows(
+            &crate::prevention::render(&doc, &pack, lang, scopes)?,
+            &slots.due,
+            &l,
+            &pack.version,
+        );
     }
     let mut family = Vec::new();
     if let (true, false, Some(viewer)) = (records_ok, slots.family.is_empty(), viewer) {
-        let rel = crate::family::relatives(&mut *conn, viewer, profile_id, scopes, opts.as_of).await?;
+        // a relative tagged sensitive never prints, as the person's own sensitive records do not (the
+        // tick covers genome findings only)
+        let mut fam_scopes = scopes.clone();
+        fam_scopes.remove("read:sensitive");
+        let rel = crate::family::relatives(&mut *conn, viewer, profile_id, &fam_scopes, opts.as_of).await?;
         let doc = crate::family::document(&ev.slug, opts.as_of, &rel)?;
         family = family_rows(&crate::family::render(&doc)?, &slots.family, lang)?;
     }
@@ -990,9 +1006,15 @@ mod tests {
         ] {
             let l = labels(&d.templates, lang);
             let m = map(json!({"decision": "do_not_repurchase", "decision_on": "2025-12-15", "decision_reason": "x"}));
-            assert_eq!(decision(&m, &l), json!(want));
-            assert_eq!(decision(&map(json!({"decision": "stop"})), &l), json!(undated));
-            assert!(decision(&map(json!({})), &l).is_null());
+            let on = |d: &str| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap_or_default();
+            assert_eq!(decision(&m, &l, on("2025-12-15")), json!(want));
+            assert_eq!(
+                decision(&map(json!({"decision": "stop"})), &l, on("2025-01-01")),
+                json!(undated)
+            );
+            assert!(decision(&map(json!({})), &l, on("2026-01-01")).is_null());
+            // a sheet dated before the decision does not print it
+            assert!(decision(&m, &l, on("2025-12-14")).is_null(), "{lang}");
         }
         Ok(())
     }

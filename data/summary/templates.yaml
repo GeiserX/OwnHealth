@@ -81,8 +81,8 @@ templates:
     upcoming: {en: coming up, es: próximo}
   sensitive: {en: "sensitive, printed because it was ticked for this print", es: "sensible, impreso porque se marcó para esta impresión"}
   withheld:
-    labs: {en: "Lab values: not shown, this account cannot read them.", es: "Valores de laboratorio: no se muestran, esta cuenta no puede leerlos."}
-    records: {en: "Conditions, allergies, medicines and vaccines: not shown, this account cannot read them.", es: "Problemas de salud, alergias, medicamentos y vacunas: no se muestran, esta cuenta no puede leerlos."}
+    labs: {en: "Lab values and calculated values: not shown, this account cannot read them.", es: "Valores de laboratorio y valores calculados: no se muestran, esta cuenta no puede leerlos."}
+    records: {en: "Conditions, allergies, medicines, vaccines, procedures, screenings due and family history: not shown, this account cannot read them.", es: "Problemas de salud, alergias, medicamentos, vacunas, procedimientos, cribados pendientes y antecedentes familiares: no se muestran, esta cuenta no puede leerlos."}
     genome: {en: "Genome findings: not shown, this account cannot read them.", es: "Hallazgos genómicos: no se muestran, esta cuenta no puede leerlos."}
   criticality:
     high: {en: high, es: alta}

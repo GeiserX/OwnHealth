@@ -148,7 +148,11 @@ async fn a_caregiver_prints_and_a_viewer_gets_labs_records_and_genome_withheld()
         .await?;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
     let text = lines(&r.bytes);
-    assert!(text.iter().any(|l| l.starts_with("Lab values: not shown")), "{text:#?}");
+    assert!(
+        text.iter()
+            .any(|l| l.starts_with("Lab values and calculated values: not shown")),
+        "{text:#?}"
+    );
     assert!(
         text.iter().any(|l| l.starts_with("Genome findings: not shown")),
         "{text:#?}"
