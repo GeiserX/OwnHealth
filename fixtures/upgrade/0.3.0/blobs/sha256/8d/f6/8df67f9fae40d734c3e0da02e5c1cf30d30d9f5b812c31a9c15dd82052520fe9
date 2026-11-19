@@ -1,0 +1,50 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 839 >>
+stream
+BT /F2 14.0 Tf 56.00 790.00 Td (LabNorte) Tj ET
+BT /F1 10.0 Tf 56.00 772.00 Td (Informe de resultados de laboratorio) Tj ET
+BT /F1 9.0 Tf 56.00 748.00 Td (Paciente: RIVERA, SAM    F. nacimiento: 02/02/1981) Tj ET
+BT /F1 9.0 Tf 56.00 734.00 Td (Fecha de toma: 12/06/2025    Informe: LN-20250612-SA1    Pagina 1/1) Tj ET
+BT /F2 8.5 Tf 56.00 706.00 Td (Prueba) Tj ET
+BT /F2 8.5 Tf 300.00 706.00 Td (Resultado) Tj ET
+BT /F2 8.5 Tf 352.00 706.00 Td (Unidades) Tj ET
+BT /F2 8.5 Tf 430.00 706.00 Td (Valores de referencia) Tj ET
+0.6 w 56 700 m 539 700 l S
+BT /F1 9.0 Tf 56.00 684.00 Td (Ferritina) Tj ET
+BT /F1 9.0 Tf 300.00 684.00 Td (28) Tj ET
+BT /F1 9.0 Tf 352.00 684.00 Td (ng/mL) Tj ET
+BT /F1 9.0 Tf 430.00 684.00 Td (15 - 150) Tj ET
+BT /F1 7.0 Tf 56.00 60.00 Td (Documento sintetico de prueba. No corresponde a ningun paciente real.) Tj ET
+endstream
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000218 00000 n 
+0000000320 00000 n 
+0000000456 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R >>
+startxref
+1345
+%%EOF
