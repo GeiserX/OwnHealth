@@ -100,7 +100,7 @@ Email-in and the watched folder carry the highest prompt-injection exposure: any
 
 | API | Client type | Registration | Data | Phase |
 |---|---|---|---|---|
-| US SMART on FHIR patient standalone launch (Epic, Oracle Health, athenahealth, eClinicalWorks, MEDITECH, NextGen, Veradigm, VA Lighthouse) | Public (PKCE) or confidential (JWT client assertion) | Bring-your-own client per vendor (section 7); a shared project client is an open decision | US Core / USCDI: labs, vitals, meds, conditions, allergies, immunizations, notes, documents | v1.0 |
+| US SMART on FHIR patient standalone launch (Epic, Oracle Health, athenahealth, eClinicalWorks, MEDITECH, NextGen, Veradigm, VA Lighthouse) | Public (PKCE) or confidential (client secret, or a JWT client assertion on a public instance, section 7) | Bring-your-own client per vendor (section 7); a shared project client is an open decision | US Core / USCDI: labs, vitals, meds, conditions, allergies, immunizations, notes, documents | v1.0 |
 | CMS Blue Button 2.0 | Confidential, authorization code only | BYO; sandbox self-serve, production needs CMS approval (unverified effort) | Medicare A/B/D claims as CARIN BB `ExplanationOfBenefit`, `Coverage`, `Patient` | v1.0 |
 | US payer Patient Access APIs (CMS-9115-F) | Per payer | BYO per payer (unverified how many accept self-registration) | CARIN BB claims + US Core clinical | After v1.0, per payer (not scheduled) |
 | Oura v2 | OAuth only (PATs gone since Dec 2025); single-use refresh tokens | BYO app, 10 users before approval | Sleep, readiness, HRV, temperature deviation, SpO2 | v1.0 via `wearables` |
@@ -113,7 +113,7 @@ Email-in and the watched folder carry the highest prompt-injection exposure: any
 | Hevy | API key, Pro only | Key from the user's settings | Workouts, sets, body measurements | v2 (training lane) |
 | wger | REST token on the user's own instance | Their instance | Workouts, nutrition, weight | Not scheduled |
 
-All wearable OAuth (Oura, Whoop, Polar, Withings, and Garmin/Suunto for anyone holding partner approval) goes through the Open Wearables sidecar in the `wearables` profile. We do not reimplement those OAuth flows. OwnHealth has one connector, `openwearables`, that pulls normalized samples and daily summaries from the sidecar's REST API. Coros is not an Open Wearables provider; it stays FIT export only. Open Wearables also ships a Strava API provider. We disable it in the sidecar config, and the `openwearables` connector drops any sample whose provider is `strava`, so no Strava API data reaches the store or MCP (section 4). Dexcom is not in Open Wearables' provider list (unverified as of today), so Dexcom is a native T2 connector, or users route it through Nightscout.
+Oura, Whoop, Polar and Withings OAuth goes through the Open Wearables sidecar (pinned at 0.11.0) in the `wearables` profile. We do not reimplement those OAuth flows. OwnHealth has one connector, `openwearables`, that pulls normalized samples and daily summaries from the sidecar's REST API. Its ingest is an allowlist of those four providers. Every other provider is off in the sidecar config, and the connector drops and counts any sample from a provider outside the list. That keeps Strava API data out of the store and MCP (section 4), and Garmin and Fitbit history comes in through their export files instead. Coros is not an Open Wearables provider; it stays FIT export only. Open Wearables 0.11.0 has no Dexcom provider, so Dexcom is a native T2 connector, or users route it through Nightscout.
 
 We never ship a client secret in the repo. Every T2 connector needs the self-hoster to register their own app. Each connector has a setup page that shows the exact redirect URI, the scopes to tick and the vendor's registration URL.
 
@@ -276,163 +276,92 @@ Rules that apply to every device source:
 | v0.1 | Upload, PDF text-layer lab import, manual entry (including current medications, which feed `check_drug` with PGx and labs), Apple Health zip (incl. `clinical-records/` FHIR), FHIR R4 / IPS bundle import (EU PS read as generic FHIR), OwnGenome facts + VCF |
 | v0.2 | Email-in, watched folder, Paperless-ngx, PWA share target, `ocr` profile, agent-assisted extraction, Health Auto Export push, Gadgetbridge DB, Nightscout (incl. Libre via nightscout-connect) |
 | v0.3 | No new sources; the full medication and supplement lane widens what `check_drug` sees; chip input via OwnGenome |
-| v1.0 | US SMART on FHIR, Blue Button 2.0, `wearables` profile (Open Wearables: Oura, Whoop v2, Polar, Withings; its Strava provider disabled), Dexcom v3, Garmin export, Google Takeout, Strava bulk export, Coros and Suunto FIT, LibreView and Dexcom Clarity CSV, `imaging` profile (DICOM into Orthanc), SMART Health Cards/Links receive, C-CDA |
+| v1.0 | US SMART on FHIR, Blue Button 2.0, `wearables` profile (Open Wearables: Oura, Whoop v2, Polar, Withings; every other provider off), Dexcom v3 (native), Garmin export, Google Takeout, Strava bulk export, Coros and Suunto FIT, LibreView and Dexcom Clarity CSV, `imaging` profile (DICOM into Orthanc), SMART Health Cards/Links receive, C-CDA |
 | v2 | EU Patient Summary and HL7 Europe Lab profile mapping, Italy CDA2-in-PDF, HL7 v2 and lab CSV with column mapper, Taiwan My Health Bank, connector SDK published, community plugins repo (T3), companion app (Health Connect incl. medical records, HealthKit), Samsung Health via Health Connect, cycle, nutrition and training lanes, access-request letter generator. Payer APIs come after v1.0, per payer, not yet scheduled |
 
-## 6. Connector SDK
+## 6. Connector framework
 
-One interface for every tier. Core connectors and community plugins implement the same protocol. Plugins register through the Python entry point group `ownhealth.connectors`. The SDK is internal from v0.1 (every importer above uses it) and published as a stable API in v2.
+Every connector is Rust code compiled into the one binary. There is no plugin loader and no Python. The framework is the source registry in `ownhealth-core/src/sources.rs`: a `source` row per configured connection, a scheduler, one `source.poll` job per run, and a `source_run` row that records what each run did. From v1.0, `connector_oauth.rs` adds the OAuth part that SMART on FHIR, Blue Button and Dexcom share. Community plugins (T3) run outside the binary (6.4).
 
 ### 6.1 Lifecycle
 
 ```mermaid
 sequenceDiagram
-  participant UI as Web UI
-  participant J as Job loop
-  participant C as Connector
+  participant S as Scheduler (every 30 s)
+  participant J as source.poll job
+  participant P as Poller (per kind)
   participant B as Blob store
-  participant N as Normalizer
+  participant I as Importer
   participant Q as Review queue
-  UI->>C: discover(ctx)
-  C-->>UI: SourceAccount candidates
-  UI->>C: authorize(account, callback)
-  C-->>UI: Credentials (stored encrypted)
-  J->>C: pull(account, since=cursor)
-  loop each raw item
-    C-->>J: RawItem(bytes, media_type, locator)
-    J->>B: put(bytes) -> sha256
-    J->>C: map(raw_item)
-    C-->>N: MappedResource[] + Problems[]
-    N->>N: validate LOINC, UCUM, range, grounding
-    N-->>Q: anything doubtful, every Problem
-    N-->>J: committed ids
-    J->>J: save the item's cursor (same transaction)
+  S->>J: enqueue, one per due source (dedupe key per source)
+  J->>J: begin_run
+  J->>P: poller(ctx, source)
+  P->>P: read the secret and the cursor, fetch through core::net
+  loop each item
+    P->>B: store the bytes first -> sha256
+    P->>P: source_item seen? stop
+    P->>I: arrive() or the kind's own importer
+    I-->>Q: every doubtful row, every unmapped resource
   end
+  P-->>J: RunOutcome {seen, new, duplicate, quarantined, problems, skipped, cursor}
+  J->>J: finish_run: health, failures, cursor saved on success
 ```
 
-`pull` and `map` are separate on purpose. `pull` touches the network and stores bytes; `map` is a pure function of the stored bytes and the parser version. When a parser improves, a job re-runs `map` over stored blobs with no new network call. That is how "derived values are recomputable" holds for connectors.
+- **Registry.** `source.kind` is one of `SOURCE_KINDS`. A source belongs to one household and, for data that has an owner, one profile. Its config is JSON, and its credential is a row in the `secret` table that `source.secret_id` points to.
+- **Scheduler.** Every 30 s, `schedule_due` enqueues a `source.poll` for every enabled source whose interval has passed. After a failure, the wait is shorter: 1 hour, doubling up to 64 hours, and never longer than the interval. A kind can also register a hook that adds its default sources (the household's ClinVar check does this).
+- **Pollers.** A polled kind calls `register_poller(kind, poller)`. Push kinds (Paperless webhook, share target, Shortcut, Health Auto Export) call `begin_run` and `finish_run` themselves, so every source reports health the same way.
+- **Runs.** `finish_run` stores the counts and the problems, sets `last_success_at` or `last_error`, and counts consecutive failures. A source with no success for 3 intervals is stale on its health card.
+- **Importers.** Documents go through `arrive::arrive` (sniff, dedupe by file hash, the import job). Structured data goes to its own importer: FHIR resources to `import_resources`, wearable series to the samples store. Re-running an importer over a stored blob needs no network call, so derived values stay recomputable for connectors too.
 
-### 6.2 Interface sketch
+```rust
+// ownhealth-core/src/sources.rs
+pub type Poller = fn(JobContext, Source) -> BoxFuture<'static, Result<RunOutcome, JobError>>;
+pub fn register_poller(kind: &str, poller: Poller);
 
-```python
-from __future__ import annotations
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import AsyncIterator, Iterable, Protocol, Literal, Any
-
-class Tier(str, Enum):
-    T0 = "universal"
-    T1 = "standard_file"
-    T2 = "live_api"
-    T3 = "browser_session"       # T4 (legal-entity APIs) is never implemented
-
-@dataclass(frozen=True)
-class ConnectorManifest:
-    id: str                       # "us-smart", "apple-health-zip", "es-hcdsns" (plugin)
-    version: str                  # parser version; part of provenance
-    tier: Tier
-    title: dict[str, str]         # {"en": ..., "es": ...}
-    countries: list[str]          # ISO 3166-1, ["*"] for universal
-    media_types: list[str] = field(default_factory=list)   # for file connectors
-    hosts: list[str] = field(default_factory=list)         # every host it may call
-    needs_browser: bool = False
-    auth: Literal["none", "oauth_public", "oauth_confidential", "api_key", "token", "session"] = "none"
-    tos_risk: Literal["none", "low", "medium", "high"] = "none"
-    tos_notes_url: str | None = None
-    sensitive_kinds: list[str] = field(default_factory=list)  # e.g. ["reproductive"] -> read:sensitive
-
-@dataclass
-class SourceAccount:
-    connector_id: str
-    profile_id: str               # which family member the data belongs to
-    label: str                    # "Epic: Example Health System"
-    endpoint: str | None = None   # FHIR base URL, mailbox, folder path
-    config: dict[str, Any] = field(default_factory=dict)
-
-@dataclass
-class Credentials:
-    kind: str
-    secret_ref: str               # pointer into the secrets store, never the value
-    expires_at: datetime | None = None
-
-@dataclass
-class Cursor:
-    value: str                    # opaque: _lastUpdated, IMAP UID, file mtime, page token
-
-@dataclass
-class RawItem:
-    data: bytes
-    media_type: str               # "application/fhir+json", "application/pdf", "application/dicom"
-    locator: str                  # where it came from: resource URL, message-id, path
-    fetched_at: datetime
-    source_modified_at: datetime | None = None
-
-@dataclass
-class Provenance:
-    connector_id: str
-    connector_version: str
-    account_id: str
-    blob_sha256: str
-    locator: str                  # inside the blob: FHIR id, JSON pointer, page + bbox, CSV row
-    fetched_at: datetime
-    method: Literal["structured", "text_layer", "ocr", "agent_proposed", "manual"]
-    confidence: float | None = None
-
-@dataclass
-class MappedResource:
-    resource_type: str            # Observation, DiagnosticReport, DocumentReference, MedicationStatement,
-                                  # Condition, Immunization, AllergyIntolerance, Procedure, ImagingStudy,
-                                  # Encounter, FamilyMemberHistory, or "Sample" (wearable samples table)
-    body: dict[str, Any]          # FHIR R4-shaped JSON; printed value/unit/range kept verbatim
-    provenance: Provenance
-    identity_key: str             # for dedup across sources (analyte + specimen time + value + issuer)
-    untrusted_text: list[str] = field(default_factory=list)   # JSON paths holding imported free text
-
-@dataclass
-class Problem:
-    severity: Literal["info", "review", "rejected"]
-    code: str                     # "unit_unconvertible", "loinc_unknown", "row_unparsed", "token_expired"
-    message: str
-    provenance: Provenance | None = None
-
-class Connector(Protocol):
-    manifest: ConnectorManifest
-
-    def discover(self, ctx: "Context") -> list[SourceAccount]:
-        """Candidates: FHIR brands near the user, files in the drop, mailboxes. No network for T0/T1."""
-
-    async def authorize(self, account: SourceAccount, ctx: "Context") -> Credentials | None:
-        """OAuth start/finish, API key capture, or None. T3 plugins return a session handle, never eID secrets."""
-
-    def pull(self, account: SourceAccount, creds: Credentials | None,
-             since: Cursor | None) -> AsyncIterator[tuple[RawItem, Cursor]]:
-        """Yield raw bytes plus the cursor that is safe after this item. No parsing here."""
-
-    def map(self, item: RawItem, account: SourceAccount) -> Iterable[MappedResource | Problem]:
-        """Pure: same bytes + same version -> same output. Never drops a row silently: emit a Problem."""
+pub struct RunOutcome {
+    pub seen: i32,
+    pub new: i32,
+    pub duplicate: i32,
+    pub quarantined: i32,
+    pub problems: Vec<RunProblem>,   // {code, message}, never content
+    pub cursor: Option<Value>,       // saved with the run's end, on success
+    pub skipped: BTreeMap<String, i64>, // items left out on purpose, counted by name
+}
 ```
+
+### 6.2 OAuth connectors (v1.0)
+
+SMART on FHIR, Blue Button and Dexcom share one OAuth core. Each registers its kind; none has its own token store or routes.
+
+- **`connector_oauth.rs`** builds the authorize URL (PKCE S256, a `state` of at least 16 characters, a binder cookie, the challenge in `auth_challenge`) and exchanges the code as a public client or with the client secret (`client_secret_basic` or `client_secret_post`).
+- **`routes/connectors.rs`** holds the only launch, callback, reconnect and disconnect routes. `POST /api/inboxes` refuses connector kinds, so a connector source is created only through a completed launch.
+- **`connector_client`** holds one client id and secret per vendor per household (the self-hoster's own registration, section 7). `source.secret_id` holds the refresh token.
+- **Refresh is atomic.** One transaction locks the source row `FOR UPDATE`, posts the refresh, stores the new refresh token, and commits. Only then is the access token used. A reply with no new refresh token keeps the old one. A rejected token (`invalid_grant`) sets `reconsent_needed_at`, and a reconnect clears it.
+- **Expiry is visible.** `grant_expires_at`, `access_expires_at` and `reconsent_needed_at` on `source` feed the Connections screen.
+- **Delete revokes first.** Before a profile delete, the route calls each vendor's revocation endpoint once, best effort. A failure is audited and shown with the vendor's own revoke page. The token is deleted either way.
+- **One bundle per pull.** Every pull stores what the server sent as one profile-owned blob before it imports anything. Resources are deduped in `source_item` as `<type>/<id>@<versionId or sha>`. Resource types we do not map become one grouped review item per run and type, with a count, never one item each.
 
 ### 6.3 Contract rules
 
-1. **Bytes first.** The job loop stores every `RawItem` in the blob store before `map` runs. A connector never writes to Postgres.
-2. **Cursor after commit.** Each item is stored, mapped and committed one at a time, and the cursor past it is saved in the same transaction as its blob reference and mapped rows, so a crash re-pulls rather than skips. Some sources cannot be pulled twice: an SHL file location can be single-use, and a link can allow one manifest request. For those, each response body is stored as a blob the moment it arrives, before decryption or mapping, and the import records the blob as pulled; after a crash the job maps from that blob instead of fetching again. If the crash came before the bytes reached disk and the link no longer answers, the import says so and asks the person for a new link.
-3. **Nothing silent.** Every unparsed row, unknown code, unconvertible unit and low-confidence value becomes a `Problem` that lands in the review queue.
-4. **Printed values are the truth layer.** `map` keeps the printed value, unit and range verbatim. LOINC, UCUM and canonical values are added by the normalizer, not by the connector, so a better resolver re-derives them for every source at once. A code the source itself sent travels with the printed value and is kept.
-5. **Untrusted text is declared.** Any free text from outside (notes, narrative, PDF text) is listed in `untrusted_text` and returned over MCP with `trust: untrusted_text`.
-6. **No outbound sharing.** Connectors read. None can push data to a third party; SHL sharing lives in the UI only, and its ciphertext goes to a host the user controls (the instance behind a tunnel, or their own static or S3 host). We run no share host.
-7. **Hosts are declared.** A connector lists the hosts it calls in its manifest. For core connectors the `httpx` client the job loop hands them refuses other hosts, which catches mistakes. Some hosts are only known per account: a person's own Nightscout, or the manifest and file hosts inside a SMART Health Link. The manifest marks those as account hosts; the person approves the exact host when adding the account (for an SHL, when importing it), and the approval is stored on that account only. The client applies the same list to every redirect, and resolves each approved name before connecting and refuses private, loopback and link-local addresses unless the person ticked "on my network" for that host (a Nightscout at home). An unapproved host is refused as before. That is not a sandbox: connector code runs in the app process and could open its own socket, so for a community plugin the host list is informational, shown to the user before install (6.4), and the real boundary is the trust decision to install it.
-8. **Secrets by reference.** Tokens and PDF passwords live in the secrets store; connectors see `secret_ref` resolved at call time and never log it.
+1. **Bytes first.** A poller stores the raw bytes in the blob store before anything is mapped or imported, so a better parser can re-read them later. The one exception is GEDCOM: it is parsed in memory and never stored, and a test proves it.
+2. **Cursor after commit.** A poller saves its cursor in the same transaction as the item it follows (`save_cursor`), or returns it in `RunOutcome`, where it is saved only when the run succeeds. A crash or a failed run re-pulls rather than skips, and `source_item` makes the re-pull add nothing. Some sources cannot be pulled twice: an SHL file location can be single-use, and a link can allow one manifest request. For those, each response body is stored as a blob the moment it arrives, before decryption or mapping, and the import records the blob as pulled; after a crash the job maps from that blob instead of fetching again. If the crash came before the bytes reached disk and the link no longer answers, the import says so and asks the person for a new link.
+3. **Nothing silent.** Every unparsed row, unknown code, unconvertible unit and low-confidence value becomes a problem that lands in the review queue. An item left out on purpose is counted in `skipped` by name.
+4. **Printed values are the truth layer.** The importer keeps the printed value, unit and range verbatim. LOINC, UCUM and canonical values are added by the normalizer, so a better resolver re-derives them for every source at once. A code the source itself sent travels with the printed value and is kept.
+5. **Untrusted text is declared.** Any free text from outside (notes, narrative, PDF text) is returned over MCP with `trust: untrusted_text`.
+6. **No outbound sharing.** Connectors read. None can push data to a third party. SHL sharing lives in the UI only, and the instance serves the ciphertext itself through a public site block that exposes only the link routes. We run no share host.
+7. **Hosts are checked.** Every fetch goes through the egress guard in `ownhealth-core/src/net.rs` (`net::get` and `net::download`; from v1.0 also `net::post_form` and `net::post_json`). It resolves each name first, refuses private, loopback and link-local addresses unless the person ticked "on my network" for that host (a Nightscout at home), connects only to the addresses it checked, follows no redirect, and caps the body in bytes and time. Some hosts are known only per account: a person's own Nightscout, or the manifest and file hosts inside a SMART Health Link. The person approves the exact host when adding the account (for an SHL, when importing it), and the approval is stored on that account only.
+8. **Secrets by reference.** Tokens and passwords live in the `secret` table, sealed with AES-256-GCM under `OWNHEALTH_SECRETS_KEY`. A poller reads one at call time; the value is a `SecretString`, which prints `***`, and no log line or error message carries it.
 9. **Profile binding.** Every account belongs to one profile. Data for a family member needs that member's own account or an explicit proxy grant in the source system.
-10. **Fixtures.** Each connector ships synthetic fixtures (for example an Apple Health zip for Alex Rivera, a lab PDF for Carmen Ortega) and at least one prompt-injection fixture where it accepts free text.
+10. **Fixtures.** Each connector ships synthetic fixtures (for example an Apple Health zip for Alex Rivera, a lab PDF for Carmen Ortega) and at least one prompt-injection fixture where it accepts free text. A live API is tested against an axum fake that the test starts, never the internet.
 
 ### 6.4 Community plugins (T3) and trust
 
-A plugin is Python code running with the app's permissions. Installing one is the same trust decision as installing any package. So:
+A compiled binary cannot load third-party code, so a community plugin never runs inside OwnHealth:
 
-- Core never fetches or installs plugins. The user adds the package by pinning it in the compose override, by version and hash.
-- The UI shows each installed plugin's manifest: hosts, `needs_browser`, ToS risk, maintainer, and a link to the source.
-- Browser-driving plugins run Playwright locally, outside the core container, and hand files to core through the intake API with a per-plugin ingest token. Core never imports Playwright. Proposal, not decided: package them as a fourth `plugins` compose profile. That breaks the rule of three opt-in profiles (`ocr`, `imaging`, `wearables`), so the default is to run them on the user's desktop (open decision 4).
+- A plugin runs on its own, by default on the person's desktop (open decision 4), and hands files to OwnHealth through a push source with its own ingest token (`oh_ing_...`), the way the iOS Shortcut does. It can only add documents that land in the review queue.
+- Core never fetches or installs plugins. The person installs one, and that is the same trust decision as installing any program.
+- Browser-driving plugins run Playwright outside the core container. Core never imports Playwright.
+- The connector SDK published in v2 is this push contract plus the file formats we import, not an in-process interface.
 
 ## 7. US SMART on FHIR: registration strategy
 
@@ -441,12 +370,12 @@ The problem: every self-hosted instance has its own URL, SMART needs a registere
 | Option | How it works | Pros | Cons |
 |---|---|---|---|
 | A. Shared public client (open decision, not planned) | We would register one patient-facing, read-only, USCDI-only app named OwnHealth at Epic (and other vendors). Public client with PKCE. Redirect goes to a static relay page on a project domain that forwards `code` and `state` to the instance URL carried in `state` | No setup for the user; Epic auto-distributes to every customer that allows it; the code is useless without the PKCE verifier, which never leaves the instance | No refresh tokens where the vendor requires a client credential for them, so each pull is a fresh login; the relay page is infrastructure we would run, and our name sits on the consent screen |
-| B. BYO client | The user registers their own app at fhir.epic.com etc., as a confidential client with a JWKS our instance publishes, redirect to their own instance | Refresh tokens and background sync; the project's name is not on the consent screen | Registration per vendor per user; Epic activation per organisation can take time (unverified duration) |
+| B. BYO client | The user registers their own app at fhir.epic.com etc., as a confidential client with a client secret (a JWKS only when the instance is public), redirect to their own instance | Refresh tokens and background sync; the project's name is not on the consent screen | Registration per vendor per user; Epic activation per organisation can take time (unverified duration) |
 | C. Loopback redirect | Public client with `http://127.0.0.1:<port>/callback` | No relay | Works only when the browser runs on the same machine as the instance (unverified that vendors accept loopback for patient apps) |
 
-Decision: **ship B in v1.0**, as a bring-your-own client wizard. The wizard shows the exact redirect URI, the JWKS URL our instance publishes, and the scopes to tick: `patient/*.rs` US Core scopes plus `openid fhirUser launch/patient offline_access`. It warns that any write scope or non-USCDI resource disqualifies Epic auto-distribution. C is tried per vendor as a fallback for people who run the browser on the instance machine. A stays an open decision: it needs a relay page we would run, and we run no infrastructure for users (open decision 3).
+Decision: **ship B in v1.0**, as a bring-your-own client wizard. The client authenticates with a client secret, stored once per vendor per household in `connector_client` (6.2). A JWKS would be the stronger credential, but the vendor fetches it from the instance, and a LAN-only instance cannot serve it to the vendor. Epic also accepts no manually uploaded EC key. The wizard offers a JWKS URL only when the instance is public. If the live Epic sandbox gives no rotating refresh token to a client with a secret, we add RS384 `private_key_jwt` with a manually uploaded public key. The wizard shows the exact redirect URI, the credential to register, and the scopes to tick: `patient/*.rs` US Core scopes plus `openid fhirUser launch/patient offline_access`. It warns that any write scope or non-USCDI resource disqualifies Epic auto-distribution. C is tried per vendor as a fallback for people who run the browser on the instance machine. A stays an open decision: it needs a relay page we would run, and we run no infrastructure for users (open decision 3).
 
-Endpoint discovery: build the brand list from vendors' SMART User-access Brands bundles at release time, ship it as a versioned JSON file, and let the user search by organisation name. About 60 of roughly 500 Epic organisations reached by auto-distribution had no brand entry (unverified), so the UI also accepts a raw FHIR base URL.
+Endpoint discovery: each instance builds its brand list from the vendors' SMART User-access Brands bundles and lets the person search by organisation name. We ship no Brands or endpoint file in the repo: Epic's terms allow distribution by link only, and Oracle's endpoint list has no licence. The instance downloads the bundles only after a person first opens the US connection wizard, so a household that never connects a US portal sends no request to a US vendor. About 60 of roughly 500 Epic organisations reached by auto-distribution had no brand entry (unverified), so the UI also accepts a raw FHIR base URL.
 
 Blue Button 2.0 is B only (confidential client, authorization code grant). Payer APIs are B only.
 
@@ -477,7 +406,7 @@ Plan: v0.1 reads any FHIR R4 bundle, so an EU PS bundle already imports as gener
 
 Phases above follow the roadmap. These questions are still open:
 
-1. **Dexcom:** native T2 connector in v1.0, or Nightscout only? Depends on whether Open Wearables adds Dexcom (unverified).
+1. **Dexcom:** decided. Native T2 connector in v1.0, because Open Wearables 0.11.0 has no Dexcom provider. Nightscout stays the other path.
 2. **Oura's 2026 API and MCP agreement.** Read the primary text before shipping the Oura path; if it bans user-directed MCP exposure, Oura drops to file export, as Strava did.
 3. **US SMART shared client (option A).** It would need a static relay page on a domain we run. It holds no data and has no backend, but it is still infrastructure run for users, and we run none today. Bring-your-own ships in v1.0 either way.
 4. **Plugin isolation.** Run T3 plugins on the user's desktop, posting files with a per-plugin ingest token (default), or add a fourth `plugins` compose profile next to `ocr`, `imaging` and `wearables`?
