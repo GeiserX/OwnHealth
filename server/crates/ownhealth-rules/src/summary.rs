@@ -409,7 +409,13 @@ fn genome_rows(findings: &Value, l: &Map<String, Value>) -> Vec<Value> {
 fn src_list(v: &Value) -> Vec<String> {
     match v {
         Value::String(s) => vec![s.clone()],
-        Value::Array(a) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        // two inputs from one report name its src once
+        Value::Array(a) => a.iter().filter_map(Value::as_str).fold(Vec::new(), |mut out, s| {
+            if !out.iter().any(|o| o == s) {
+                out.push(s.to_string());
+            }
+            out
+        }),
         _ => Vec::new(),
     }
 }

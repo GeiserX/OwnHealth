@@ -783,9 +783,17 @@ async fn a_calculated_value_prints_with_its_qualifications() -> R {
             .unwrap_or_default();
         assert_eq!(homa["status"], "ok", "{lang}: {m}");
         assert_eq!(homa["notes"].as_array().map_or(0, Vec::len), 2, "{lang}: {homa}");
+        // one report holds both inputs, so its src is named once
+        assert_eq!(homa["src"].as_array().map_or(0, Vec::len), 1, "{lang}: {homa}");
         let lines = check_sheet(&m, lang);
-        // the result cell wraps, so its words are read across the lines
-        let text = lines.join(" ");
+        // the result cell wraps beside the source cell, so its words are read across the lines
+        // without the src ids
+        let words: Vec<&str> = lines
+            .iter()
+            .flat_map(|l| l.split_whitespace())
+            .filter(|w| !w.starts_with("src_"))
+            .collect();
+        let text = words.join(" ");
         assert!(text.contains(fasting) && text.contains(factor), "{lang}: {lines:#?}");
     }
     Ok(())
