@@ -11,11 +11,11 @@
  },
  "pack": {
   "version": "ownhealth-rules 0.2.0",
-  "sha256": "d334dce6c63b6e0ee3ed0f66dcef52692cc7e6560b5e832cbb4949f976940b57"
+  "sha256": "592ff425fbbf70ace0fe5412d73b56d6cdb422e47187b13e9530adffb640a594"
  },
  "rules": {
   "version": "ownhealth-rules 0.2.0",
-  "sha256": "d334dce6c63b6e0ee3ed0f66dcef52692cc7e6560b5e832cbb4949f976940b57",
+  "sha256": "592ff425fbbf70ace0fe5412d73b56d6cdb422e47187b13e9530adffb640a594",
   "systems": [
    {
     "key": "cardiometabolic",
@@ -1744,7 +1744,7 @@
       "date": "2025-09-08",
       "range": "< 75",
       "flag": "H",
-      "text": "Lp(a) 142 nmol/L (H, rango del laboratorio < 75) el 2025-09-08.",
+      "text": "Lp(a) 142 nmol/L (H, rango lab. < 75) el 2025-09-08.",
       "src": "src_a07"
      },
      {
@@ -1758,7 +1758,7 @@
       "date": "2026-09-14",
       "range": "30 - 100",
       "flag": "L",
-      "text": "Vitamina D 25-OH 24 ng/mL (L, rango del laboratorio 30 - 100) el 2026-09-14.",
+      "text": "Vitamina D 25-OH 24 ng/mL (L, rango lab. 30 - 100) el 2026-09-14.",
       "src": "src_a12"
      },
      {
@@ -1916,7 +1916,7 @@
       "date": "2025-09-08",
       "range": "< 75",
       "flag": "H",
-      "text": "Lp(a) 142 nmol/L (H, rango del laboratorio < 75) el 2025-09-08.",
+      "text": "Lp(a) 142 nmol/L (H, rango lab. < 75) el 2025-09-08.",
       "src": "src_a07"
      },
      {
@@ -1930,7 +1930,7 @@
       "date": "2026-09-14",
       "range": "30 - 100",
       "flag": "L",
-      "text": "Vitamina D 25-OH 24 ng/mL (L, rango del laboratorio 30 - 100) el 2026-09-14.",
+      "text": "Vitamina D 25-OH 24 ng/mL (L, rango lab. 30 - 100) el 2026-09-14.",
       "src": "src_a12"
      },
      {
@@ -2088,7 +2088,7 @@
       "date": "hace 425 días",
       "range": "< 75",
       "flag": "H",
-      "text": "Lp(a) 142 nmol/L (H, rango del laboratorio < 75) hace 425 días.",
+      "text": "Lp(a) 142 nmol/L (H, rango lab. < 75) hace 425 días.",
       "src": "src_a07"
      },
      {
@@ -2102,7 +2102,7 @@
       "date": "hace 54 días",
       "range": "30 - 100",
       "flag": "L",
-      "text": "Vitamina D 25-OH 24 ng/mL (L, rango del laboratorio 30 - 100) hace 54 días.",
+      "text": "Vitamina D 25-OH 24 ng/mL (L, rango lab. 30 - 100) hace 54 días.",
       "src": "src_a12"
      },
      {
@@ -2249,7 +2249,7 @@
       "date": "2025-09-08",
       "range": "< 75",
       "flag": "H",
-      "text": "Lp(a) 142 nmol/L (H, rango del laboratorio < 75) el 2025-09-08.",
+      "text": "Lp(a) 142 nmol/L (H, rango lab. < 75) el 2025-09-08.",
       "src": "src_a07"
      },
      {
@@ -2267,7 +2267,7 @@
        "value": "59.9032562412",
        "unit": "nmol/L"
       },
-      "text": "Vitamina D 25-OH 24 ng/mL (L, rango del laboratorio 30 - 100) el 2026-09-14.",
+      "text": "Vitamina D 25-OH 24 ng/mL (L, rango lab. 30 - 100) el 2026-09-14.",
       "src": "src_a12"
      },
      {
@@ -2429,7 +2429,7 @@
       "date": "2025-09-08",
       "range": "< 75",
       "flag": "H",
-      "text": "Lp(a) 142 nmol/L (H, rango del laboratorio < 75) el 2025-09-08.",
+      "text": "Lp(a) 142 nmol/L (H, rango lab. < 75) el 2025-09-08.",
       "src": "src_a07"
      },
      {
@@ -2443,7 +2443,7 @@
       "date": "2026-09-14",
       "range": "30 - 100",
       "flag": "L",
-      "text": "Vitamina D 25-OH 24 ng/mL (L, rango del laboratorio 30 - 100) el 2026-09-14.",
+      "text": "Vitamina D 25-OH 24 ng/mL (L, rango lab. 30 - 100) el 2026-09-14.",
       "src": "src_a12"
      },
      {
@@ -3780,7 +3780,7 @@
       "date": "2026-07-22",
       "range": "4.0 - 5.6",
       "flag": "H",
-      "text": "HbA1c 6,4 % (H, rango del laboratorio 4.0 - 5.6) el 2026-07-22.",
+      "text": "HbA1c 6,4 % (H, rango lab. 4.0 - 5.6) el 2026-07-22.",
       "src": "src_zdvf68sw"
      },
      {
@@ -3794,7 +3794,7 @@
       "date": "2026-07-22",
       "range": "> 60",
       "flag": "L",
-      "text": "FG estimado 58 mL/min/1.73m2 (L, rango del laboratorio > 60) el 2026-07-22.",
+      "text": "FG estimado 58 mL/min/1.73m2 (L, rango lab. > 60) el 2026-07-22.",
       "src": "src_z4r23m9p"
      }
     ],
@@ -3865,7 +3865,7 @@
       "date": "2026-07-22",
       "range": "4.0 - 5.6",
       "flag": "H",
-      "text": "HbA1c 6,4 % (H, rango del laboratorio 4.0 - 5.6) el 2026-07-22.",
+      "text": "HbA1c 6,4 % (H, rango lab. 4.0 - 5.6) el 2026-07-22.",
       "src": "src_zdvf68sw"
      },
      {
@@ -3879,7 +3879,7 @@
       "date": "2026-07-22",
       "range": "> 60",
       "flag": "L",
-      "text": "FG estimado 58 mL/min/1.73m2 (L, rango del laboratorio > 60) el 2026-07-22.",
+      "text": "FG estimado 58 mL/min/1.73m2 (L, rango lab. > 60) el 2026-07-22.",
       "src": "src_z4r23m9p"
      }
     ],
@@ -3950,7 +3950,7 @@
       "date": "hace 108 días",
       "range": "4.0 - 5.6",
       "flag": "H",
-      "text": "HbA1c 6,4 % (H, rango del laboratorio 4.0 - 5.6) hace 108 días.",
+      "text": "HbA1c 6,4 % (H, rango lab. 4.0 - 5.6) hace 108 días.",
       "src": "src_zdvf68sw"
      },
      {
@@ -3964,7 +3964,7 @@
       "date": "hace 108 días",
       "range": "> 60",
       "flag": "L",
-      "text": "FG estimado 58 mL/min/1.73m2 (L, rango del laboratorio > 60) hace 108 días.",
+      "text": "FG estimado 58 mL/min/1.73m2 (L, rango lab. > 60) hace 108 días.",
       "src": "src_z4r23m9p"
      }
     ],
@@ -4039,7 +4039,7 @@
        "value": "46.44825",
        "unit": "mmol/mol"
       },
-      "text": "HbA1c 6,4 % (H, rango del laboratorio 4.0 - 5.6) el 2026-07-22.",
+      "text": "HbA1c 6,4 % (H, rango lab. 4.0 - 5.6) el 2026-07-22.",
       "src": "src_zdvf68sw"
      },
      {
@@ -4053,7 +4053,7 @@
       "date": "2026-07-22",
       "range": "> 60",
       "flag": "L",
-      "text": "FG estimado 58 mL/min/1.73m2 (L, rango del laboratorio > 60) el 2026-07-22.",
+      "text": "FG estimado 58 mL/min/1.73m2 (L, rango lab. > 60) el 2026-07-22.",
       "src": "src_z4r23m9p"
      }
     ],
@@ -4124,7 +4124,7 @@
       "date": "2026-07-22",
       "range": "4.0 - 5.6",
       "flag": "H",
-      "text": "HbA1c 6,4 % (H, rango del laboratorio 4.0 - 5.6) el 2026-07-22.",
+      "text": "HbA1c 6,4 % (H, rango lab. 4.0 - 5.6) el 2026-07-22.",
       "src": "src_zdvf68sw"
      },
      {
@@ -4138,7 +4138,7 @@
       "date": "2026-07-22",
       "range": "> 60",
       "flag": "L",
-      "text": "FG estimado 58 mL/min/1.73m2 (L, rango del laboratorio > 60) el 2026-07-22.",
+      "text": "FG estimado 58 mL/min/1.73m2 (L, rango lab. > 60) el 2026-07-22.",
       "src": "src_z4r23m9p"
      }
     ],

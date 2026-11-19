@@ -9,10 +9,10 @@ templates:
   status.nodata:        {en: No data, es: Sin datos}
   LAB_HIGH:
     en: "{name} {value} {unit} (H, lab range {ref}) {when}."
-    es: "{name} {value} {unit} (H, rango del laboratorio {ref}) {when}."
+    es: "{name} {value} {unit} (H, rango lab. {ref}) {when}."
   LAB_LOW:
     en: "{name} {value} {unit} (L, lab range {ref}) {when}."
-    es: "{name} {value} {unit} (L, rango del laboratorio {ref}) {when}."
+    es: "{name} {value} {unit} (L, rango lab. {ref}) {when}."
   LAB_ABNORMAL:
     en: "{name} {value} {unit} flagged {flag} by the lab {when}."
     es: "{name} {value} {unit} marcado {flag} por el laboratorio {when}."

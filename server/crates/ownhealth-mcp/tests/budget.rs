@@ -209,6 +209,12 @@ async fn demo_world() -> anyhow::Result<World> {
 }
 
 async fn demo_token(w: &World, slug: &str, scopes: Vec<String>) -> anyhow::Result<(String, uuid::Uuid)> {
+    demo_token_in(w, slug, scopes, "en").await
+}
+
+/// The same token in a given language: the Spanish flag texts are longer, and Spanish is the
+/// install default (`OWNHEALTH_DEFAULT_LOCALE=es`), so the 2 KB checks run in both.
+async fn demo_token_in(w: &World, slug: &str, scopes: Vec<String>, lang: &str) -> anyhow::Result<(String, uuid::Uuid)> {
     let (u, p): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
         "select u.id, p.id from app_user u join household h on h.id = u.household_id \
          join profile p on p.household_id = h.id and p.slug = $2 where h.name = $1 order by u.created_at limit 1",
@@ -227,7 +233,7 @@ async fn demo_token(w: &World, slug: &str, scopes: Vec<String>) -> anyhow::Resul
             default_profile: None,
             days: 90,
             identity_mode: "full",
-            lang: "en",
+            lang,
             units: "si",
         },
     )
@@ -239,7 +245,14 @@ async fn demo_token(w: &World, slug: &str, scopes: Vec<String>) -> anyhow::Resul
 #[tokio::test]
 async fn demo_alex_status_pages_stay_under_2kb_whole() -> R {
     let w = demo_world().await?;
-    let (tok, _) = demo_token(&w, "alex", all().into_iter().collect()).await?;
+    for lang in ["en", "es"] {
+        demo_alex_pages_in(&w, lang).await?;
+    }
+    Ok(())
+}
+
+async fn demo_alex_pages_in(w: &World, lang: &str) -> R {
+    let (tok, _) = demo_token_in(w, "alex", all().into_iter().collect(), lang).await?;
     let c = w.connect_real(&tok).await?;
     let (mut flags, mut cursor, mut pages) = (Vec::new(), None::<String>, 0);
     loop {
@@ -248,7 +261,7 @@ async fn demo_alex_status_pages_stay_under_2kb_whole() -> R {
             args["cursor"] = json!(cur);
         }
         let env = c.call_tool("get_health_status", args).await?.ok();
-        assert!(size(&env) < 2048, "page {pages}: {}", size(&env));
+        assert!(size(&env) < 2048, "{lang} page {pages}: {}", size(&env));
         flags.extend(env["data"]["flags"].as_array().cloned().unwrap_or_default());
         pages += 1;
         cursor = env["next_cursor"].as_str().map(str::to_string);
@@ -333,21 +346,24 @@ fn flag_id(f: &Value) -> String {
 #[tokio::test]
 async fn demo_page_one_flags_do_not_move() -> R {
     let w = demo_world().await?;
-    let mut got = Vec::new();
-    for (slug, _) in PAGE_ONE {
-        let (tok, _) = demo_token(&w, slug, all().into_iter().collect()).await?;
-        let c = w.connect_real(&tok).await?;
-        let env = c.call_tool("get_health_status", json!({"profile": slug})).await?.ok();
-        let ids: Vec<String> = env["data"]["flags"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(flag_id)
-            .collect();
-        got.push((slug, ids));
-    }
-    for ((slug, ids), (_, want)) in got.iter().zip(PAGE_ONE) {
-        assert_eq!(ids, want, "{slug}");
+    for lang in ["en", "es"] {
+        let mut got = Vec::new();
+        for (slug, _) in PAGE_ONE {
+            let (tok, _) = demo_token_in(&w, slug, all().into_iter().collect(), lang).await?;
+            let c = w.connect_real(&tok).await?;
+            let env = c.call_tool("get_health_status", json!({"profile": slug})).await?.ok();
+            assert!(size(&env) < 2048, "{lang} {slug} page 1: {}", size(&env));
+            let ids: Vec<String> = env["data"]["flags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(flag_id)
+                .collect();
+            got.push((slug, ids));
+        }
+        for ((slug, ids), (_, want)) in got.iter().zip(PAGE_ONE) {
+            assert_eq!(ids, want, "{lang} {slug}");
+        }
     }
     Ok(())
 }

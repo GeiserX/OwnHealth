@@ -38,10 +38,7 @@ async fn same_hash_for_every_language_unit_and_identity_setting() -> R {
         Ok(render(&body, lang, "as_reported", "pseudonymous", None)?["data"]["flags"][0]["text"].clone())
     };
     assert_eq!(text("en")?, "Lp(a) 142 nmol/L (H, lab range < 75) on 2025-09-08.");
-    assert_eq!(
-        text("es")?,
-        "Lp(a) 142 nmol/L (H, rango del laboratorio < 75) el 2025-09-08."
-    );
+    assert_eq!(text("es")?, "Lp(a) 142 nmol/L (H, rango lab. < 75) el 2025-09-08.");
     // rendering did not touch the body
     assert_eq!(body["state_hash"].as_str(), Some(state_hash(&body)?.as_str()));
     Ok(())
