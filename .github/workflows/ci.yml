@@ -150,6 +150,7 @@ jobs:
           cache-dependency-path: ui/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
+      - run: pnpm test
       - run: pnpm build
       - run: test -f ../server/static/index.html
 
