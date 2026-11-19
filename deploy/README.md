@@ -185,16 +185,21 @@ Restore with the OwnHealth version that made the backup (`app_version` in the ma
 
 ## Upgrades
 
-Change the image tag in `compose.yaml` to the new version (and the `ocr` service's `<version>-ocr` tag with it), then:
+Take a fresh backup first, while `compose.yaml` still names the old version: `backup.sh` runs in the `admin` image, and a newer image would write the backup with its own rules before the migrations ran.
 
 ```sh
 ./deploy/restic/backup.sh         # a fresh backup before every upgrade
+```
+
+Then change the image tag of the `admin` and `app` services in `compose.yaml` to the new version, and the `ocr` service's tag to `<version>-ocr`, and start it:
+
+```sh
 docker compose pull && docker compose up -d
 ```
 
 Migrations are forward-only and run at start, in the `admin` service, before the app comes up. To go back to an older version, restore the backup you took before the upgrade.
 
-**To 0.4.0.** Change both image tags; nothing else in the compose files changes. Rule pack 0.2.0 moves every profile's `state_hash` once, so restore a backup made before the upgrade with 0.3.0, as above. A household with a genome starts downloading NCBI's weekly ClinVar file (about 192 MB, no personal data in the request); turn it off in Settings, or set a local file path on a server without internet.
+**To 0.4.0.** After the backup, set `admin` and `app` to `drumsergio/ownhealth:0.4.0` and `ocr` to `drumsergio/ownhealth:0.4.0-ocr`; nothing else in the compose files changes. Rule pack 0.2.0 moves every profile's `state_hash` once, so restore a backup made before the upgrade with 0.3.0, as above. For the same reason, `restore-test.sh` on a snapshot made before the upgrade reports every profile's `state_hash` as different; run `./deploy/restic/backup.sh` once after the upgrade, so the restore test checks a 0.4.0 snapshot. A household with a genome starts downloading NCBI's weekly ClinVar file (about 200 MB, no personal data in the request); turn it off in Settings, or set a local file path on a server without internet.
 
 **To 0.3.0.** Take the new `compose.homelab.yaml` (it adds the `ocr` worker, the inbox folder and the `secrets_key` secret), then before `docker compose up -d`:
 

@@ -247,7 +247,7 @@ Ships in 0.4.0. Measured exit criteria, and the test behind each deliverable: [v
 - [x] Printable doctor summary (es/en), two A4 pages, server-rendered PDF, specialty templates (GP, cardiology, endocrinology, hematology).
 
 **MCP**
-- [ ] `get_health_status` gains supplement, screening and family sections within the same 2 KB budget.
+- [x] `get_health_status` gains supplement, screening and family sections within the same 2 KB budget.
 - [x] Evaluate later candidates (`timeline`, `what_changed_since`, `list_conditions`, `get_medications`) against logged agent sessions; add only those with evidence (see "How we decide", which records the 0.4.0 result).
 
 **Security/Privacy**
