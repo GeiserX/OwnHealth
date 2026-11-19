@@ -207,54 +207,56 @@ Ships in 0.3.0. Measured exit criteria: [v0.2-exit-criteria.md](v0.2-exit-criter
 
 ## v0.3 Insight
 
+Ships in 0.4.0. Measured exit criteria, and the test behind each deliverable: [v0.3-exit-criteria.md](v0.3-exit-criteria.md).
+
 **Goal.** Cited, deterministic answers that matter in a visit: drug checks, risk calculators, screening, family patterns, a paper summary.
 
 ### Deliverables
 
 **Records**
-- [ ] Full medication lane: dose, schedule, start/stop, reason, prescriber; supplements as first-class records with label photo and a decision (`keep`, `stop`, `do not repurchase`) with reason.
-- [ ] Optional codes: RxNorm, national drug codes, ATC codes only as received (ATC content never shipped).
-- [ ] Family history and pedigree: relative records (including deceased), conditions with age at onset, FHIR FamilyMemberHistory export.
-- [ ] Cross-profile hints: cited rules where a finding in one relative suggests a test in another, with consent per relative.
-- [ ] Timeline: visits, diagnoses, meds as bars, labs as dots, imaging, genome runs, documents; condition spans on the timeline (onset to abatement); document-gap tracker with a GDPR Art. 15 request letter template.
-- [ ] IPS summary export (FHIR `document` Bundle plus printable PDF, es/en) from the UI.
-- [ ] Ownership transfer at majority: the young adult claims the profile; guardian grants drop or are re-granted by the new owner.
+- [x] Full medication lane: dose, schedule, start/stop, reason, prescriber; supplements as first-class records with label photo and a decision (`keep`, `stop`, `do not repurchase`) with reason.
+- [x] Optional codes: RxNorm, national drug codes, ATC codes only as received (ATC content never shipped).
+- [x] Family history and pedigree: relative records (including deceased), conditions with age at onset, FHIR FamilyMemberHistory export.
+- [x] Cross-profile hints: cited rules where a finding in one relative suggests a test in another, with consent per relative.
+- [x] Timeline: visits, diagnoses, meds as bars, labs as dots, imaging, genome runs, documents; condition spans on the timeline (onset to abatement); document-gap tracker with a GDPR Art. 15 request letter template.
+- [x] IPS summary export (FHIR `document` Bundle plus printable PDF, es/en) from the UI.
+- [x] Ownership transfer at majority: the young adult claims the profile; guardian grants drop or are re-granted by the new owner.
 
 **Genome**
-- [ ] `check_drug` widened: supplements in the medication join, the inhibitor table beyond CYP2D6 named per gene, DPWG text beside CPIC.
-- [ ] Weekly ClinVar VCF diff by VariationID against each person's calls; alerts only on upgrades to P/LP with >=1 star, downgrades of shown P/LP, SF-gene changes.
-- [ ] Consumer chips via OwnGenome (local Beagle imputation default), with hard caps: rare P/LP from arrays always "unconfirmed" (PPV ~16%, PMID 33589468).
-- [ ] Couple carrier view from OwnGenome carrier facts.
-- [ ] CPIC and PharmCAT staleness check: PGx facts marked stale when a newer guideline or release supersedes their `db_versions`.
+- [x] `check_drug` widened: supplements in the medication join, the inhibitor table beyond CYP2D6 named per gene, DPWG text beside CPIC.
+- [x] Weekly ClinVar VCF diff by VariationID against each person's calls; alerts only on upgrades to P/LP with >=1 star, downgrades of shown P/LP, SF-gene changes.
+- [x] Consumer chips via OwnGenome (local Beagle imputation default), with hard caps: rare P/LP from arrays always "unconfirmed" (PPV ~16%, PMID 33589468).
+- [x] Couple carrier view from OwnGenome carrier facts.
+- [x] CPIC and PharmCAT staleness check: PGx facts marked stale when a newer guideline or release supersedes their `db_versions`.
 
 **Normalization / calculators**
-- [ ] Calculators as versioned, cited code with validity rules: CKD-EPI 2021 (creatinine and creatinine-cystatin C), PREVENT, SCORE2 / SCORE2-OP by risk region, FIB-4 (not valid under 35; from 65 the low cutoff is 2.0 instead of 1.3), HOMA-IR (same-specimen pairing).
-- [ ] Reference change value (RCV) from cited primary biological-variation papers.
-- [ ] Method-change markers on trends (assay or lab change).
-- [ ] Personal-baseline anomalies (a value outside the person's own usual range, not only the lab's) as cited rules in the rule pack. The lab's own printed critical flags (HH, LL) stay, labelled as the lab's.
+- [x] Calculators as versioned, cited code with validity rules: CKD-EPI 2021 (creatinine and creatinine-cystatin C), PREVENT, SCORE2 / SCORE2-OP by risk region, FIB-4 (not valid under 35; from 65 the low cutoff is 2.0 instead of 1.3), HOMA-IR (same-specimen pairing).
+- [x] Reference change value (RCV) from cited primary biological-variation papers.
+- [x] Method-change markers on trends (assay or lab change).
+- [x] Personal-baseline anomalies (a value outside the person's own usual range, not only the lab's) as cited rules in the rule pack. The lab's own printed critical flags (HH, LL) stay, labelled as the lab's.
 
 **Prevention**
-- [ ] Screening and vaccine rules as cited YAML per country: PAPPS (Spain) and USPSTF first. Each rule: age, sex, risk modifiers, interval, citation URL.
-- [ ] Reminders inbox: retests, screenings, vaccines, document requests; snooze, done with evidence, dismiss with reason; ICS feed per profile.
-- [ ] Next-draw planner: overdue, abnormal follow-up, never measured; pre-draw conditions; printable request.
+- [x] Screening and vaccine rules as cited YAML per country: PAPPS (Spain) and USPSTF first. Each rule: age, sex, risk modifiers, interval, citation URL.
+- [x] Reminders inbox: retests, screenings, vaccines, document requests; snooze, done with evidence, dismiss with reason; ICS feed per profile.
+- [x] Next-draw planner: overdue, abnormal follow-up, never measured; pre-draw conditions; printable request.
 
 **UI**
-- [ ] Medications screen: history, schedules, supplements and decisions, with PGx badges and a "check a drug" box.
-- [ ] Genome screen: PGx gene grid, carrier, monogenic, PRS with ancestry caveat, raw lookup; sensitive findings behind a reveal.
-- [ ] Family screen: pedigree canvas, patterns list, name-hiding toggle for screenshots.
-- [ ] Printable doctor summary (es/en), two A4 pages, server-rendered PDF, specialty templates (GP, cardiology, endocrinology, hematology).
+- [x] Medications screen: history, schedules, supplements and decisions, with PGx badges and a "check a drug" box.
+- [x] Genome screen: PGx gene grid, carrier, monogenic, PRS with ancestry caveat, raw lookup; sensitive findings behind a reveal.
+- [x] Family screen: pedigree canvas, patterns list, name-hiding toggle for screenshots.
+- [x] Printable doctor summary (es/en), two A4 pages, server-rendered PDF, specialty templates (GP, cardiology, endocrinology, hematology).
 
 **MCP**
 - [ ] `get_health_status` gains supplement, screening and family sections within the same 2 KB budget.
-- [ ] Evaluate later candidates (`timeline`, `what_changed_since`, `list_conditions`, `get_medications`) against logged agent sessions; add only those with evidence (see "How we decide", which records the 0.4.0 result).
+- [x] Evaluate later candidates (`timeline`, `what_changed_since`, `list_conditions`, `get_medications`) against logged agent sessions; add only those with evidence (see "How we decide", which records the 0.4.0 result).
 
 **Security/Privacy**
-- [ ] Wording lint in CI: PGx and calculator outputs never contain imperative treatment advice ("do not take", "stop") in text we write. A verbatim guideline quotation, attributed to its source, is exempt.
-- [ ] Per-relative consent for cross-profile hints; minors' data never feeds hints to non-guardians.
+- [x] Wording lint in CI: PGx and calculator outputs never contain imperative treatment advice ("do not take", "stop") in text we write. A verbatim guideline quotation, attributed to its source, is exempt.
+- [x] Per-relative consent for cross-profile hints; minors' data never feeds hints to non-guardians.
 
 **Docs/Community**
-- [ ] One page per calculator: formula, version, citation, validity limits, worked example.
-- [ ] Guideline YAML contribution guide; a reviewer of record per country file.
+- [x] One page per calculator: formula, version, citation, validity limits, worked example.
+- [x] Guideline YAML contribution guide; a reviewer of record per country file.
 
 **Moved out of v0.3.** GEDCOM import and the agent session report move to v1.0, and relatedness QC moves to v2, each with its reason there. PhenoAge and critical-value alerts are cut, not planned, with their reasons under Never.
 
