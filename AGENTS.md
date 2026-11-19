@@ -1,6 +1,6 @@
 # AGENTS.md
 
-OwnHealth is a self-hosted personal health record: a web app that keeps a person's (and a family's) labs, records, wearables, genome and imaging in one place, and an MCP server that lets an outside agent read it. Pre-alpha: 0.3.0 ships the v0.2 inboxes; the plan lives in `docs/`, and [server/RUST-CONTRACTS.md](server/RUST-CONTRACTS.md) maps the crates and their interfaces.
+OwnHealth is a self-hosted personal health record: a web app that keeps a person's (and a family's) labs, records, wearables, genome and imaging in one place, and an MCP server that lets an outside agent read it. Pre-alpha: 0.4.0 ships the v0.3 insight work (medicines, calculators, screening, family history, ClinVar changes, the doctor summary); the plan lives in `docs/`, and [server/RUST-CONTRACTS.md](server/RUST-CONTRACTS.md) maps the crates and their interfaces.
 
 ## Rules for agents
 
@@ -35,7 +35,11 @@ The backup tests need pg_dump and pg_restore 17 and restic. Without a local Post
 `OWNHEALTH_PG_BINDIR=$PWD/../scripts/pg-bin` to run them inside the test container. The Python MCP
 client contract (`ownhealth-mcp/tests/python_client.rs`) needs `uv` on PATH.
 
-Contract suite, from the repo root: `bash contract-tests/run.sh rust`. Its goldens were recorded from 0.1.1.
+Contract suite, from the repo root: `bash contract-tests/run.sh rust`. Its goldens were recorded from 0.1.1,
+then re-recorded where 0.4.0 added keys or demo rows and where rule pack 0.2.0 changed an answer; each PR names
+the goldens it re-recorded. The parity goldens (`server/crates/ownhealth-rules/tests/fixtures/expected.json`) came
+from the Python 0.1.1 backend. That lineage ends in 0.4.0 for `check_drug.*`, `pack.*` and the state keys pack 0.2.0
+moved (`rules`, `bodies`, `renders`, `dashboards`); only `profiles`, `users` and `status_words` are still Python's.
 
 OCR (v0.2). The default build has no OCR engine; the `engine` feature of `ownhealth-ocr` (`ocr` on the
 `ownhealth` binary) links ONNX Runtime and needs the models, which are never committed:

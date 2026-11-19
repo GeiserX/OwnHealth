@@ -194,6 +194,8 @@ docker compose pull && docker compose up -d
 
 Migrations are forward-only and run at start, in the `admin` service, before the app comes up. To go back to an older version, restore the backup you took before the upgrade.
 
+**To 0.4.0.** Change both image tags; nothing else in the compose files changes. Rule pack 0.2.0 moves every profile's `state_hash` once, so restore a backup made before the upgrade with 0.3.0, as above. A household with a genome starts downloading NCBI's weekly ClinVar file (about 192 MB, no personal data in the request); turn it off in Settings, or set a local file path on a server without internet.
+
 **To 0.3.0.** Take the new `compose.homelab.yaml` (it adds the `ocr` worker, the inbox folder and the `secrets_key` secret), then before `docker compose up -d`:
 
 ```sh

@@ -18,7 +18,7 @@ You run it yourself.
 
 ## What it does
 
-In 0.3.0:
+In 0.4.0:
 
 - One dashboard for the whole family, one profile per person, with OK, Watch, Out, Stale or No data per body system
 - Lab reports read from PDFs into trendable values, each linked to its page and position on the page; anything uncertain waits in a review queue
@@ -26,12 +26,17 @@ In 0.3.0:
 - Local OCR for scans and photos, in the `drumsergio/ownhealth:<version>-ocr` image and the `ocr` compose profile, on CPU; every value it reads is checked against the page. Without it, scans wait for your own agent to read them over MCP
 - FHIR and IPS bundles, the Apple Health export, Health Auto Export, Gadgetbridge, Nightscout with a CGM summary, and manual entry
 - Genome findings from [OwnGenome](https://github.com/GeiserX/OwnGenome): drug response, carrier status and risk variants, joined with your medications and labs
-- A drug check that quotes the CPIC guideline for your genotype next to your current medications and relevant labs
+- A drug check that quotes the CPIC guideline for your genotype, and DPWG text from your genome file, next to your current medicines, supplements and relevant labs
+- Medicines with their schedule and prescriber, and supplements with a label photo and your recorded decision
+- Calculators with their citation and sourced inputs: eGFR (CKD-EPI 2021), FIB-4, HOMA-IR, SCORE2 and PREVENT, or the reason one does not apply
+- The screenings and vaccines due for each person by their country's guideline (Spain and the US), the tests to ask for at the next blood draw, and a private calendar feed
+- Family history as a pedigree with its cited patterns, exported as FHIR, and ClinVar changes to the variants you carry, checked every week
+- A two-page doctor summary and an International Patient Summary, in Spanish or English, where every value names its source
 - An MCP server with 10 tools, scoped per person and per token, with a citation behind every answer; connect with a token or with OAuth 2.1 (claude.ai and Claude Code, no client registration)
 - Passkeys, an append-only audit log, a full export, and restic backups with a scripted restore test
 - Dark theme, Spanish and English
 
-Limits in 0.3.0. Lab PDFs are read with generic table rules plus one template, for the fictional LabNorte lab. Real lab layouts come later as contributed templates. The LOINC set is a curated subset of 202 codes, so a test outside it waits in review. OCR rows go to review unless a vendor template matches.
+Limits in 0.4.0. Lab PDFs are read with generic table rules plus one template, for the fictional LabNorte lab. Real lab layouts come later as contributed templates. The LOINC set is a curated subset of 202 codes, so a test outside it waits in review. OCR rows go to review unless a vendor template matches.
 
 Later: imaging (DICOM), more wearables and US patient portals. See the [roadmap](docs/ROADMAP.md).
 
