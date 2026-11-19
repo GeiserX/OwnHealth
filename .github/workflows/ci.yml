@@ -183,6 +183,8 @@ jobs:
         working-directory: ui
       - run: pnpm build
         working-directory: ui
+      - name: PDFium (pinned, sha256-checked), so the demo's PDFs extract as they do in production
+        run: bash scripts/fetch-pdfium.sh linux-x64
       - run: cargo build -p ownhealth --locked
         working-directory: server
       - name: Chromium for Playwright (the version @playwright/test pins)
