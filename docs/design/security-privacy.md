@@ -236,7 +236,7 @@ Successor and inheritance of data after death is a v2 item.
 ### 7.2 v1.0: per-profile data keys
 
 - Each profile gets a random 256-bit data key (DEK). DEKs are stored wrapped by the household key-encryption key (KEK).
-- Encrypted with the profile DEK: blobs (documents, genome facts file, VCF). Free-text fields tagged sensitive are cut from 1.0 (later). Blobs use streaming AEAD (XChaCha20-Poly1305 secretstream; cut from 1.0, later). The tabix VCF is decrypted to a tmpfs file for lookups and removed after.
+- Encrypted with the profile DEK: blobs (documents, genome facts file, VCF) and the profile's connector tokens. Blobs use chunked AES-GCM. XChaCha20-Poly1305 secretstream and DEK-encrypted sensitive free text are cut from 1.0 (later). The tabix VCF is decrypted to a tmpfs file for lookups and removed after.
 - Not encrypted with the DEK: typed observation values, codes and dates, because trends and the deterministic status are SQL over them. They rely on disk encryption.
 - Blob addresses become `HMAC(profile key, sha256(plaintext))`, so identical files across profiles do not reveal that two people hold the same document.
 
