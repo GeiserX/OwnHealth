@@ -39,7 +39,7 @@ All routes are under `/api`, JSON, and resolve `{p}` as a profile slug, `me` or 
 | C | records.rs | `GET`/`POST /profiles/{p}/records/{kind}` ; `POST .../{kind}/{id}/correct` ; `.../{id}/retract` | |
 | C | records.rs | `POST /profiles/{p}/manual-observations` | |
 | C | records.rs | `POST /profiles/{p}/records/medication/{id}/label` multipart `file` | a label photo (PNG, JPEG or WebP, at most 15 MiB) stored as a document (doc_type `other`, no job) and linked to the current version; write role; medication reads list `labels` |
-| C | wearables.rs | `GET /profiles/{p}/wearables/summary` ; `GET /profiles/{p}/wearables/{metric}?window=` | |
+| C | wearables.rs | `GET /profiles/{p}/wearables/summary` ; `GET /profiles/{p}/wearables/{metric}?window=` | an HRV series (and the summary HRV entry) is one source for the whole window; `limitations: string[]` is there only when another source was left out |
 | D | genome.rs | `GET /profiles/{p}/genome` ; `GET /profiles/{p}/genome/variant?rsid=` ; `POST /profiles/{p}/genome/consent` | consent needs step-up |
 | D | genome/events.rs | `GET /profiles/{p}/genome/events` | read:genome; the ClinVar diff's events, each named or withheld by the reader's gate; `release` (newest release compared, or null), `weekly` (the household's ClinVar check is on) and `rerun` `{en, es}` (OwnGenome's command for a reclassified call) |
 | E | status.rs | `GET /profiles/{p}/status?as_of=` ; `GET /profiles/{p}/dashboard?lang=&as_of=` ; `GET /rules` | |
@@ -81,9 +81,32 @@ never collide:
 | 1110-1119 | v0.3 Insight (0.4.0), family: relatives, links and sharing consent |
 | 1120-1129 | v0.3 Insight (0.4.0), genome: ClinVar snapshots and genome events |
 | 1130-1139 | v0.3 Insight (0.4.0), prevention: decisions, answers and calendar feeds |
+| 1200-1209 | v1.0 Connected, foundation: every v1.0 kind, purpose and channel, connector clients and state (1200) |
+| 1210-1219 | v1.0 Connected, records: SMART, Blue Button, C-CDA, SHL and SHC receive, GEDCOM |
+| 1220-1229 | v1.0 Connected, wearables: Open Wearables, Dexcom, vendor scores, sync gaps |
+| 1230-1239 | v1.0 Connected, imaging |
+| 1240-1249 | v1.0 Connected, keys: per-profile data keys and crypto-shredding |
+| 1250-1259 | v1.0 Connected, audit: hash chain and session-report columns |
+| 1260-1269 | v1.0 Connected, break-glass |
+| 1270-1279 | v1.0 Connected, sharing: SMART Health Links and the ICE card |
+| 1280-1289 | v1.0 Connected, ops: languages, partitions and other operations |
 
 H and I have no migrations. Every new phase numbers after the highest shipped file: the migrator applies
-missing files in number order, so a lower number would run before files it depends on. Prefer using the 0001 tables; add columns only when the design needs them.
+missing files in number order, so a lower number would run before files it depends on. Inside a phase,
+a file depends only on files with lower numbers, and two files never share a number (the migrator
+refuses to start). Prefer using the 0001 tables; add columns only when the design needs them.
+
+Some CHECK constraints list allowed values: `source.kind`, `secret.purpose`, `auth_challenge.purpose`,
+`document_source.channel`, `src.kind` and `review_item.kind`. A migration re-creates such a CHECK with
+the full union of every value shipped so far. A list with only one lane's values silently drops the
+values of the other lanes. From 1200 on, each of these lists has a Rust constant, and
+`server/crates/ownhealth/tests/check_mirror.rs` fails when a CHECK and its constant differ.
+The migrator applies every missing file in number order. On a fresh database or a release upgrade
+the highest-numbered re-creation runs last and wins. A dev database that already ran a higher file
+applies a lower file that merged late last, so that file wins there. In v1.0 only 1200 changes these
+six lists. A later value goes into a new file numbered above every file that re-creates that CHECK,
+and `check_mirror.rs` is the gate.
+
 Lifecycle rule for every clinical table: only `status`, `status_reason` and `superseded_at` change after
 insert (a trigger enforces it), and `audit_event` is append-only.
 
