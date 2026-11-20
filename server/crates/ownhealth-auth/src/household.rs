@@ -559,15 +559,51 @@ pub async fn add_relative(conn: &mut PgConnection, r: &RelativeIn<'_>) -> AuthRe
 
 // ------------------------------------------------------------------- deletion ----
 
-/// Tables that hold blob hashes, and their columns: a blob is deleted only when no row still names it.
-pub const BLOB_COLUMNS: [(&str, &[&str]); 3] = [
-    ("document", &["blob_sha256"]),
-    ("document_page", &["words_blob", "image_blob"]),
+/// Every column that names a blob by its sha256, with the condition that picks the rows profile `$1`
+/// owns. A blob is collected from those rows and deleted only when no row of any of these columns
+/// still names it. `tests/blob_columns_mirror.rs` fails when the schema has a blob column missing here
+/// and in [`HOUSEHOLD_BLOB_COLUMNS`].
+pub const BLOB_COLUMNS: &[(&str, &[&str], &str)] = &[
+    ("document", &["blob_sha256"], "profile_id = $1"),
+    (
+        "document_page",
+        &["words_blob", "image_blob"],
+        "document_id in (select id from document where profile_id = $1)",
+    ),
     (
         "genome_dataset",
-        &["facts_blob", "vcf_blob", "tbi_blob", "coverage_blob"],
+        &[
+            "facts_blob",
+            "vcf_blob",
+            "tbi_blob",
+            "coverage_blob",
+            "gvcf_blob",
+            "gvcf_tbi_blob",
+            "sites_blob",
+            "sites_tbi_blob",
+        ],
+        "profile_id = $1",
+    ),
+    (
+        "ocr_run",
+        &["words_blob"],
+        "document_id in (select id from document where profile_id = $1)",
+    ),
+    // a Health Auto Export push, a Gadgetbridge export: the raw bytes a profile's source handed us
+    (
+        "source_item",
+        &["blob_sha256"],
+        "source_id in (select id from source where profile_id = $1)",
+    ),
+    // mail held on a profile's own mailbox
+    (
+        "quarantine_item",
+        &["raw_blob"],
+        "source_id in (select id from source where profile_id = $1)",
     ),
 ];
+/// Blob columns that never belong to one profile, so a profile delete leaves them alone. None yet.
+pub const HOUSEHOLD_BLOB_COLUMNS: &[(&str, &str)] = &[];
 const KEEP: [&str; 3] = ["profile", "profile_grant", "audit_event"];
 
 /// Every table with a profile_id column (other lanes add their own), minus the ones we keep.
@@ -585,23 +621,19 @@ async fn profile_tables(conn: &mut PgConnection) -> Result<Vec<String>> {
 
 async fn profile_blobs(conn: &mut PgConnection, profile_id: Uuid) -> Result<BTreeSet<Vec<u8>>> {
     let mut shas = BTreeSet::new();
-    for sql in [
-        "select blob_sha256, null::bytea, null::bytea, null::bytea from document where profile_id = $1",
-        "select words_blob, image_blob, null::bytea, null::bytea from document_page dp \
-         join document d on d.id = dp.document_id where d.profile_id = $1",
-        "select facts_blob, vcf_blob, tbi_blob, coverage_blob from genome_dataset where profile_id = $1",
-    ] {
-        type Four = (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
-        let rows: Vec<Four> = sqlx::query_as(sql).bind(profile_id).fetch_all(&mut *conn).await?;
-        for (a, b, c, d) in rows {
-            shas.extend([a, b, c, d].into_iter().flatten());
-        }
+    for (table, cols, owned) in BLOB_COLUMNS {
+        let sql = format!("select unnest(array[{}]) from {table} where {owned}", cols.join(", "));
+        let rows: Vec<Option<Vec<u8>>> = sqlx::query_scalar(AssertSqlSafe(sql))
+            .bind(profile_id)
+            .fetch_all(&mut *conn)
+            .await?;
+        shas.extend(rows.into_iter().flatten());
     }
     Ok(shas)
 }
 
 async fn still_referenced(conn: &mut PgConnection, sha: &[u8]) -> Result<bool> {
-    for (table, cols) in BLOB_COLUMNS {
+    for (table, cols, _) in BLOB_COLUMNS {
         let cond: Vec<String> = cols.iter().map(|c| format!("{c} = $1")).collect();
         let sql = format!("select 1 from {table} where {} limit 1", cond.join(" or "));
         let hit: Option<i32> = sqlx::query_scalar(AssertSqlSafe(sql))
@@ -639,6 +671,25 @@ impl Deleted {
 /// no profile is deleted.
 pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthResult<Deleted> {
     let candidates = profile_blobs(&mut *conn, profile_id).await?;
+    // The credentials the profile's inboxes keep (a mailbox password, a Nightscout token) and the PDF
+    // passwords of the sender rules that file mail to it, as removing the inbox does: the source and
+    // sender rows go with the profile, and `secret` would keep the sealed values with nothing naming them.
+    let secrets: Vec<Uuid> = sqlx::query_scalar(
+        "select secret_id from source where profile_id = $1 and secret_id is not null union \
+         select pr.secret_id from pdf_password_rule pr join sender_rule r on r.id = pr.sender_rule_id \
+         where r.profile_id = $1 or r.source_id in (select id from source where profile_id = $1)",
+    )
+    .bind(profile_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    // Mail held on the profile's own mailbox: `quarantine_item.source_id` is set null when the source
+    // goes, which would keep the message and its raw blob.
+    let held =
+        sqlx::query("delete from quarantine_item where source_id in (select id from source where profile_id = $1)")
+            .bind(profile_id)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected();
     // candidate_row -> observation -> src -> candidate_row is a cycle: cut it first.
     sqlx::query(
         "update candidate_row set observation_id = null where observation_id in \
@@ -649,7 +700,7 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     .execute(&mut *conn)
     .await?;
     let mut todo = profile_tables(&mut *conn).await?;
-    let mut counts: Vec<(String, u64)> = Vec::new();
+    let mut counts: Vec<(String, u64)> = vec![("quarantine_item".into(), held)];
     while !todo.is_empty() {
         let mut failed = Vec::new();
         for table in &todo {
@@ -721,6 +772,12 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
         .execute(&mut *conn)
         .await?;
     }
+    let sealed = sqlx::query("delete from secret where id = any($1)")
+        .bind(&secrets)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    counts.push(("secret".into(), sealed));
     sqlx::query("delete from profile where id = $1")
         .bind(profile_id)
         .execute(&mut *conn)
