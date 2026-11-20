@@ -30,7 +30,7 @@ flowchart LR
   Inbox[Email, watched folder, Paperless] --> JOBS
   JOBS --> PG & BL
   OW <--> Vendors[(Wearable vendor APIs)]
-  App -- ciphertext only, v1.0 --> SH[(SHL host the user controls)]
+  Viewer[Doctor opening an SHL] -- link routes only, ciphertext, v1.0 --> RP
   PG & BL -. restic .-> BK[(Backup target)]
 ```
 
@@ -58,7 +58,7 @@ Four lines cross a trust boundary and carry most of the risk:
 
 | Actor | Goal / path | Mitigation | Phase | Residual risk we accept |
 |---|---|---|---|---|
-| Remote attacker | Reach the app from the internet | Default bind `127.0.0.1`; docs put it behind a reverse proxy on LAN or VPN; MCP validates `Origin`; SHL ciphertext goes to a host the user controls, and we run none | v0.1 | A self-hoster who port-forwards the app; we warn in the setup checklist |
+| Remote attacker | Reach the app from the internet | Default bind `127.0.0.1`; docs put it behind a reverse proxy on LAN or VPN; MCP validates `Origin`; from v1.0 a public site block exposes only the SHL link routes, and we run no share host | v0.1 | A self-hoster who port-forwards the app; we warn in the setup checklist |
 | Remote attacker | Exploit a parser (PDF, DICOM, zip, XML) | Parsers run in the job loop with size and page limits, zip-slip and zip-bomb checks, `defusedxml`, no shell-outs with user paths; container `read_only`, `cap_drop: ALL`, non-root, `no-new-privileges` | v0.1 | Memory-safety bugs in native PDF/OCR libraries |
 | Household member | Read another member's data, or a category hidden from them | Per-profile grants intersected with categories and the profile owner's locks; one authorization function used by UI, REST, MCP and export; "who can see my data" page | v0.1 | The server admin can read everything (they hold the disk, and from v1.0 the KEK) |
 | Household member | Read a minor's or partner's data after a relationship changes | Grants revocable by the profile owner; ownership transfer at majority; audit visible to the owner | v0.1 / v0.3 | Copies already taken |
@@ -293,9 +293,9 @@ What we do on our side:
 **SMART Health Links, UI only, v1.0.**
 
 - The user selects what to share (IPS summary, chosen labs, chosen documents) in the UI, with step-up auth.
-- The app builds the FHIR bundle, encrypts it locally (JWE `dir` + `A256GCM`, 32-byte random key) and uploads only ciphertext to a host the user controls. The key lives in the URL `#fragment`, which never reaches the host.
-- The project runs no share host and no relay. The host is either the user's own instance reached through a tunnel (Tailscale Funnel, Cloudflare Tunnel), or a static or S3-compatible host the user owns. Only the second keeps the home network free of any public ingress.
-- Default expiry 7 days; optional passcode (flag `P`) with an attempt limit; revocation deletes the object. A plain static host cannot count passcode attempts, so the passcode needs the instance as host (unverified per host type).
+- The app builds the FHIR bundle, encrypts it locally (JWE `dir` + `A256GCM`, 32-byte random key) and stores only ciphertext, which the instance serves itself. The key lives in the URL `#fragment`, which never reaches the host.
+- The project runs no share host and no relay. The instance serves its own links, reached through a tunnel (Tailscale Funnel, Cloudflare Tunnel), and its public site block exposes only the link routes. A static or S3 host is not used in 1.0: it cannot count passcode attempts or keep the access log.
+- Default expiry 7 days; optional passcode (flag `P`) with an attempt limit; revocation deletes the object. The instance counts the passcode attempts.
 - Whether we also publish a reference share-host component for users to run is open (section 15).
 - No MCP tool can create, list or extend a share (section 4.2, row 3).
 
@@ -435,7 +435,7 @@ https://huggingface.co/PaddlePaddle/PaddleOCR-VL
 2. **KEK default.** Key file by default, sealed mode opt-in. Reverse it if most users run on hardware that is often physically exposed.
 3. **Remote MCP clients.** Vendor-cloud connectors need public reachability. Do we document a hardened public setup, or only support local clients and VPN?
 4. **Sensitive sub-scopes.** `read:sensitive` covers mental, reproductive and sexual health together. Split it (e.g. reproductive alone, for cycle data in v2) only if a real grant needs the split.
-5. **Reference share host.** We run no share host; the ciphertext goes to a host the user controls. Open: do we also publish a small reference component for users to run, or only document compatible hosts?
+5. **Reference share host.** We run no share host; each instance serves its own links. Open: do we also publish a small reference share-host component for users to run?
 6. **MDR position.** Needs a lawyer's reading of "commercial activity" before v0.1 ships `check_drug` PGx output, and again before the v0.3 calculators.
 7. **Unverified licences** to confirm before shipping tables: UCUM, CPIC, ClinPGx, Orthanc OHIF plugin, the OCR model cards other than PaddleOCR-VL.
 
