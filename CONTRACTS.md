@@ -101,6 +101,9 @@ Some CHECK constraints list allowed values: `source.kind`, `secret.purpose`, `au
 the full union of every value shipped so far. A list with only one lane's values silently drops the
 values of the other lanes. From 1200 on, each of these lists has a Rust constant, and
 `server/crates/ownhealth/tests/check_mirror.rs` fails when a CHECK and its constant differ.
+The migrator applies files by number, so when lanes merge out of order the highest-numbered
+re-creation wins. In v1.0 only 1200 changes these six lists. A later value goes into a new file
+numbered above every file that re-creates that CHECK, and `check_mirror.rs` is the gate.
 
 Lifecycle rule for every clinical table: only `status`, `status_reason` and `superseded_at` change after
 insert (a trigger enforces it), and `audit_event` is append-only.
