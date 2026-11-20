@@ -372,7 +372,7 @@ https://eur-lex.europa.eu/eli/reg/2025/327/oj
 | Vendor | Term | Our decision |
 |---|---|---|
 | Strava | API Agreement and Policy from June 2026: §5.3 bans AI use including ingestion into a context window; §5.16 bans aggregators and MCP servers exposing Strava data | Never build a Strava API connector. Import only the user's own bulk export file |
-| Oura | API and MCP Agreement effective 2026-06-08 restricts AI processing (unverified wording) | Read the primary text before the v1.0 connector; ship it only if user-directed processing in a user-chosen agent is allowed |
+| Oura | API and MCP Agreement effective 2026-06-08 restricts AI processing (unverified wording) | The v1.0 connector ships; its data reaches MCP, the rule-pack markers and the calculators only once its connector page quotes the primary terms and they show no AI ban |
 | Garmin | Health API is business-only; AI processing reportedly allowed with disclosure and consent (unverified) | Exports and phone hubs only |
 | Others via Open Wearables | Each self-hoster registers their own OAuth app and accepts the vendor's terms | Setup docs link each vendor's terms |
 
