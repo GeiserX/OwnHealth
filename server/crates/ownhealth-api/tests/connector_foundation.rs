@@ -156,21 +156,17 @@ async fn deleting_an_unused_connector_client_deletes_its_secret() -> R {
 async fn a_source_shows_its_reconsent_and_expiry_state() -> R {
     let env = env().await?;
     let (household, client, _) = client_with_secret(&env).await?;
-    let row: (
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<chrono::DateTime<chrono::Utc>>,
-    ) = sqlx::query_as(
+    let row: (bool, bool, bool) = sqlx::query_as(
         "insert into source (household_id, profile_id, kind, label, connector_client_id, reconsent_needed_at, \
-             grant_expires_at, access_expires_at) values ($1, $2, 'smart', 'Hospital LabNorte', $3, now(), \
-             now() + interval '90 days', now() + interval '1 hour') \
-             returning reconsent_needed_at, grant_expires_at, access_expires_at",
+         grant_expires_at, access_expires_at) values ($1, $2, 'smart', 'Hospital LabNorte', $3, now(), \
+         now() + interval '90 days', now() + interval '1 hour') returning reconsent_needed_at is not null, \
+         grant_expires_at > access_expires_at, access_expires_at > now()",
     )
     .bind(household)
     .bind(env.profile("alex"))
     .bind(client)
     .fetch_one(env.pool())
     .await?;
-    assert!(row.0.is_some() && row.1.is_some() && row.2.is_some(), "{row:?}");
+    assert_eq!(row, (true, true, true));
     Ok(())
 }
