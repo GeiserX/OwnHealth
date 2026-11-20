@@ -422,6 +422,25 @@ mod tests {
     }
 
     #[test]
+    fn jwe_refuses_an_iv_that_is_not_96_bits() {
+        let key = key32(NODE_KEY);
+        let real = URL_SAFE_NO_PAD.decode(parts(NODE_JWE_RAW)[2].as_str()).expect("b64");
+        // the real IV with 4 more bytes would open if the IV were cut to 12 bytes
+        let mut long = real.clone();
+        long.extend_from_slice(&[0u8; 4]);
+        for iv in [long, real[..8].to_vec(), vec![0u8; 16], Vec::new()] {
+            let mut p = parts(NODE_JWE_RAW);
+            p[2] = b64(&iv);
+            assert_eq!(
+                decrypt(&key, &p.join("."), MIB).err(),
+                Some(JoseError::Malformed("the IV is not 96 bits")),
+                "{} bytes",
+                iv.len()
+            );
+        }
+    }
+
+    #[test]
     fn jwe_refuses_every_alg_enc_and_zip_but_dir_a256gcm_def() {
         let key = [7u8; KEY_LEN];
         let cases = [
