@@ -7,7 +7,8 @@ name: FHIR validate
 # the public terminology server, and fails the job on any error.
 #
 # The IPS export (server/crates/ownhealth-api/tests/ips_export.rs) writes Alex's and Carmen's
-# International Patient Summary Bundles, and the validator checks both against the IPS 1.1.0 Bundle
+# International Patient Summary Bundles and one with a lab panel (a component rejected in review, one
+# the sheet does not list), and the validator checks all three against the IPS 1.1.0 Bundle
 # profile (the IG package is cached). A coding's display is the words the source or the lab sheet
 # used, kept as received, so a display that differs from the code system's is a warning there; the
 # codes themselves are checked. A copy of Alex's Bundle with its Composition removed must fail.
@@ -87,19 +88,19 @@ jobs:
       - name: Validate against FHIR R4
         working-directory: .
         run: '"$JAVA_HOME_21_X64/bin/java" -Xmx3g -jar /tmp/validator_cli.jar "$OWNHEALTH_FHIR_OUT" -version 4.0.1'
-      - name: Export Alex's and Carmen's IPS Bundles
+      - name: Export Alex's, Carmen's and the panel IPS Bundles
         env:
           OWNHEALTH_FHIR_OUT: ${{ github.workspace }}/ips-out
-        run: cargo test -p ownhealth-api --test ips_export --locked alex_exports
-      - name: Both IPS Bundles were written
+        run: cargo test -p ownhealth-api --test ips_export --locked -- alex_exports a_panel_is_one_entry
+      - name: The three IPS Bundles were written
         working-directory: .
-        run: test -s ips-out/ips-alex-en.json && test -s ips-out/ips-carmen-es.json
+        run: test -s ips-out/ips-alex-en.json && test -s ips-out/ips-carmen-es.json && test -s ips-out/ips-panel-en.json
       - name: Cache the FHIR packages (IPS IG and its dependencies)
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.fhir/packages
           key: fhir-packages-${{ env.IPS_IG }}-${{ env.VALIDATOR_VERSION }}
-      - name: Validate the IPS Bundles against the IPS profile
+      - name: Validate the IPS Bundles against the IPS profile (all of ips-out)
         working-directory: .
         run: '"$JAVA_HOME_21_X64/bin/java" -Xmx3g -jar /tmp/validator_cli.jar ips-out -version 4.0.1 -ig "$IPS_IG" -profile "$IPS_PROFILE" -display-issues-are-warnings'
       - name: A Bundle without its Composition fails the same check

@@ -9,10 +9,12 @@
 //!                 Immunizations 11369-6, Results 30954-2, Procedures 47519-4 (recommended)
 //!   Patient      the profile
 //!   one entry per row the sheet shows: the row's stored FHIR, codes as received (a panel sent as
-//!                one Observation goes in once, with its components, though each is its own row)
+//!                one Observation goes in once, though each component is its own row, and keeps only
+//!                the components whose rows the sheet shows)
 //! ```
 //!
-//! - every entry's `id` is its row id, its `meta.source` is `urn:ownhealth:src:<src id>`, and it
+//! - every entry's `id` is its row id, its `meta.source` is `urn:ownhealth:src:<src id>` (a panel's
+//!   is its first shown row's src; the narrative lists the src of every row), and it
 //!   points at the Patient; a reference to something outside the Bundle keeps only its words, so
 //!   the document resolves in itself (a medicine named through a Medication resource gets its
 //!   received codes back as `medicationCodeableConcept`);
@@ -321,12 +323,36 @@ fn medication_concept(row: &Map<String, Value>) -> Value {
     Value::Object(concept)
 }
 
-/// The rows of one table, by id: (row as JSON, stored FHIR).
+/// A panel's parts the sheet shows (`component<n>`, or "" for the panel's own value): the others
+/// leave its stored FHIR. False when no value is left, so the panel has no entry.
+fn only_shown(fhir: &mut Map<String, Value>, parts: &[String]) -> bool {
+    let Some(Value::Array(components)) = fhir.get_mut("component") else {
+        return true; // one value, one row
+    };
+    let mut n = 0;
+    components.retain(|_| {
+        n += 1;
+        parts.iter().any(|p| *p == format!("component{}", n - 1))
+    });
+    let left = !components.is_empty();
+    if !left {
+        fhir.shift_remove("component");
+    }
+    if !parts.iter().any(String::is_empty) {
+        fhir.retain(|k, _| !k.starts_with("value") && k != "interpretation" && k != "referenceRange");
+    }
+    left || fhir.keys().any(|k| k.starts_with("value"))
+}
+
+/// The rows of one table, by id, each with its src's `import_ref`.
 async fn rows(conn: &mut PgConnection, table: &str, ids: &[Uuid]) -> Result<Vec<Map<String, Value>>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let sql = format!("select to_jsonb(t) from {table} t where t.id = any($1)");
+    let sql = format!(
+        "select to_jsonb(t) || jsonb_build_object('import_ref', s.import_ref) from {table} t \
+         left join src s on s.id = t.src_id where t.id = any($1)"
+    );
     let found: Vec<Value> = sqlx::query_scalar(AssertSqlSafe(sql)).bind(ids).fetch_all(conn).await?;
     Ok(found
         .into_iter()
@@ -519,22 +545,47 @@ pub async fn build(
             .filter_map(|r| r.get("id").and_then(Value::as_str))
             .filter_map(|i| Uuid::parse_str(i).ok())
             .collect();
-        let found_here = rows(&mut *conn, s.table, &ids).await?;
+        let mut found_here = rows(&mut *conn, s.table, &ids).await?;
         // a panel sent as one Observation is stored whole on each of its component rows: the first
-        // row the list shows carries it, the others are only words in the narrative
-        let mut carried: Vec<&Map<String, Value>> = Vec::new();
+        // row the list shows carries it, the others are only words in the narrative. The panel keeps
+        // only the parts whose rows the list shows: a component rejected in review, or one the sheet
+        // does not list, is not sent
+        let mut panels: Vec<(usize, Vec<String>)> = Vec::new(); // (carrier row, shown parts)
         for r in &list {
-            let Some(Value::Object(fhir)) = found_here
+            let Some(i) = found_here
                 .iter()
-                .find(|row| row.get("id").and_then(Value::as_str) == Some(st(r, "id")))
-                .and_then(|row| row.get("fhir"))
+                .position(|row| row.get("id").and_then(Value::as_str) == Some(st(r, "id")))
             else {
                 continue;
             };
-            if carried.contains(&fhir) {
-                again.insert(st(r, "id").to_string());
-            } else {
-                carried.push(fhir);
+            let Some(fhir @ Value::Object(_)) = found_here[i].get("fhir") else {
+                continue;
+            };
+            // the importer's src: `<bundle>/Observation/<id>#component<n>`, no `#` for the panel's own value
+            let part = found_here[i]
+                .get("import_ref")
+                .and_then(Value::as_str)
+                .and_then(|x| x.rsplit_once('#'))
+                .map_or("", |(_, p)| p)
+                .to_string();
+            match panels
+                .iter_mut()
+                .find(|(c, _)| found_here[*c].get("fhir") == Some(fhir))
+            {
+                Some((_, parts)) => {
+                    again.insert(st(r, "id").to_string());
+                    parts.push(part);
+                }
+                None => panels.push((i, vec![part])),
+            }
+        }
+        for (i, parts) in &panels {
+            let row = &mut found_here[*i];
+            if let Some(Value::Object(fhir)) = row.get_mut("fhir")
+                && !only_shown(fhir, parts)
+                && let Some(id) = row.get("id").and_then(Value::as_str)
+            {
+                again.insert(id.to_string());
             }
         }
         found.push(found_here);
@@ -693,6 +744,29 @@ mod tests {
             assert_eq!(((10 - total % 10) % 10).to_string(), check, "{key} {code}");
         }
         assert_eq!(section_code("document").map(|c| c.0), Some("60591-5"));
+    }
+
+    /// A panel keeps the parts the sheet shows, and with none left it has no entry.
+    #[test]
+    fn a_panel_keeps_only_its_shown_parts() {
+        let panel = json!({
+            "resourceType": "Observation",
+            "valueQuantity": {"value": 7},
+            "interpretation": [{"text": "H"}],
+            "component": [{"code": {"text": "a"}}, {"code": {"text": "b"}}, {"code": {"text": "c"}}],
+        });
+        let Value::Object(mut kept) = panel.clone() else { return };
+        assert!(only_shown(&mut kept, &["component2".into(), "component0".into()]));
+        assert_eq!(
+            kept["component"],
+            json!([{"code": {"text": "a"}}, {"code": {"text": "c"}}])
+        );
+        assert!(!kept.contains_key("valueQuantity") && !kept.contains_key("interpretation"));
+        let Value::Object(mut own) = panel.clone() else { return };
+        assert!(only_shown(&mut own, &[String::new()]));
+        assert!(own.contains_key("valueQuantity") && !own.contains_key("component"));
+        let Value::Object(mut none) = panel else { return };
+        assert!(!only_shown(&mut none, &["component9".into()]));
     }
 
     #[test]
