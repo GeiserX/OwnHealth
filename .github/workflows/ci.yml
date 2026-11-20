@@ -150,8 +150,56 @@ jobs:
           cache-dependency-path: ui/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
+      - run: pnpm test
       - run: pnpm build
       - run: test -f ../server/static/index.html
+
+  # The browser checks (ui/e2e/): Playwright on Chromium with the dark scheme, against the debug
+  # server on a fresh demo database in the shared test Postgres that scripts/test-db.sh starts,
+  # serving this UI build. A control test must fail on every run, or the job turns red.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: server
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.2"
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: ui
+      - run: pnpm build
+        working-directory: ui
+      - name: PDFium (pinned, sha256-checked), so the demo's PDFs extract as they do in production
+        run: bash scripts/fetch-pdfium.sh linux-x64
+      - run: cargo build -p ownhealth --locked
+        working-directory: server
+      - name: Chromium for Playwright (the version @playwright/test pins)
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+        working-directory: ui
+      - run: bash scripts/test-db.sh
+      - run: pnpm run e2e
+        working-directory: ui
+      - name: Keep the traces and screenshots of a red run
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-test-results
+          path: ui/e2e/test-results
+          if-no-files-found: ignore
 
   # The black-box suite (contract-tests/): HTTP and MCP tests with goldens recorded from 0.1.1, on a
   # fresh demo database in the shared test Postgres that scripts/test-db.sh starts.
