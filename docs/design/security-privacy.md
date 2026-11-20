@@ -236,16 +236,16 @@ Successor and inheritance of data after death is a v2 item.
 ### 7.2 v1.0: per-profile data keys
 
 - Each profile gets a random 256-bit data key (DEK). DEKs are stored wrapped by the household key-encryption key (KEK).
-- Encrypted with the profile DEK: blobs (documents, genome facts file, VCF), and free-text fields tagged sensitive. Blobs use streaming AEAD (XChaCha20-Poly1305 secretstream). The tabix VCF is decrypted to a tmpfs file for lookups and removed after.
+- Encrypted with the profile DEK: blobs (documents, genome facts file, VCF). Free-text fields tagged sensitive are cut from 1.0 (later). Blobs use streaming AEAD (XChaCha20-Poly1305 secretstream; cut from 1.0, later). The tabix VCF is decrypted to a tmpfs file for lookups and removed after.
 - Not encrypted with the DEK: typed observation values, codes and dates, because trends and the deterministic status are SQL over them. They rely on disk encryption.
 - Blob addresses become `HMAC(profile key, sha256(plaintext))`, so identical files across profiles do not reveal that two people hold the same document.
 
 | KEK mode | How | Works unattended | Default |
 |---|---|---|---|
 | Key file | 32 random bytes in a docker secret (`OWNHEALTH_KEK_FILE`), also stored in the household's password manager | Yes: MCP, jobs and imports run after a reboot | Yes |
-| Sealed | KEK derived with Argon2id from a passphrase typed after each start; until then the app serves only an unlock page, MCP returns 503, jobs wait | No | Opt-in |
+| Sealed | KEK derived with Argon2id from a passphrase typed after each start; until then the app serves only an unlock page, MCP returns 503, jobs wait | No | Cut from 1.0 (later) |
 
-Sealed mode protects the blobs and sensitive free text on a seized running-then-powered-off server. It does not replace full-disk encryption: typed values, codes and dates sit outside the DEK, so disk encryption stays a requirement in sealed mode too. It costs availability: an agent cannot read anything after a power cut until someone unlocks.
+Sealed mode is cut from 1.0 (later). It protects the blobs and sensitive free text on a seized running-then-powered-off server. It does not replace full-disk encryption: typed values, codes and dates sit outside the DEK, so disk encryption stays a requirement in sealed mode too. It costs availability: an agent cannot read anything after a power cut until someone unlocks.
 
 ### 7.3 Crypto-shredding
 
@@ -432,7 +432,7 @@ https://huggingface.co/PaddlePaddle/PaddleOCR-VL
 ## 15. Open decisions
 
 1. **Break-glass delay.** Default 48 hours here; 24 hours is the other candidate.
-2. **KEK default.** Key file by default, sealed mode opt-in. Reverse it if most users run on hardware that is often physically exposed.
+2. **KEK default.** Key file in 1.0; sealed mode is cut from 1.0 (later). When it lands, make it the default only if most users run on hardware that is often physically exposed.
 3. **Remote MCP clients.** Vendor-cloud connectors need public reachability. Do we document a hardened public setup, or only support local clients and VPN?
 4. **Sensitive sub-scopes.** `read:sensitive` covers mental, reproductive and sexual health together. Split it (e.g. reproductive alone, for cycle data in v2) only if a real grant needs the split.
 5. **Reference share host.** We run no share host; each instance serves its own links. Open: do we also publish a small reference share-host component for users to run?

@@ -314,7 +314,7 @@ Ships in 0.4.0. Measured exit criteria, and the test behind each deliverable: [v
 - [ ] Per-profile data keys (DEKs) for blobs, genome files and connector tokens, wrapped by a household key; crypto-shredding on profile deletion.
 - [ ] Hash-chained audit log, user-visible.
 - [ ] Break-glass for family: a grant that activates after a delay unless the owner cancels it; every use audited and notified. The owner hears at request time through an event in their calendar feed, the only outbound channel before v2. Every step also lands in the in-app outbox.
-- [ ] Threat model updated for live connectors and sharing; external security review before tagging 1.0.
+- [ ] Threat model and security design updated for live connectors, sharing and the 1.0 key scope; external security review before tagging 1.0.
 
 **MCP**
 - [ ] Agent session report, moved from v0.3: it needs a consent switch for logged sessions (rule 2 of "How we decide"), and `audit_event` does not yet record `not_assessed` counts or argument width.
@@ -358,7 +358,7 @@ Every row names the test that proves it. A row that also says **Live** needs one
 | Microsoft FHIR-Converter for C-CDA | It needs the .NET runtime in core. A Rust port of an Apache-2.0 C-CDA mapper replaces it. |
 | Shipping vendor Brands or endpoint files in the repo, or fetching them by default | Epic's terms allow distribution by link only, and Oracle's endpoint list has no licence. Each instance downloads them itself, only after a person opens the US connection wizard. |
 | SMART API-access content inside a received SHL | It is a live API grant, so it would be a second connector path. The receiver lists it as not imported, with a reason. |
-| Sealed mode, secretstream and encrypted free text from the security design | 1.0 asks for per-profile keys for blobs, genome files and connector tokens only. The security design will be updated to match (the threat model deliverable above). |
+| Sealed mode, secretstream and encrypted free text from the security design | 1.0 asks for per-profile keys for blobs, genome files and connector tokens only. The security design marks them as cut from 1.0. |
 | A retry queue for vendor token revocation after a profile delete | The queue would have to keep the deleted person's token. Revocation runs once before the delete. A failure is audited and shown with the vendor's own revoke page, and the token is deleted either way. |
 | An English fallback for strings missing in the new languages | It would hide missing translations ("nothing silent"). The new languages land after every UI change, so their completeness checks stay strict. |
 | Live verification of all seven SMART vendors as a 1.0 gate | Six of them need developer accounts opened one by one. 1.0 ships each vendor's honest status, and verification continues after the tag. |
