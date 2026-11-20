@@ -9,6 +9,8 @@
 # 0.1.0 has no fixture of its own: 0.1.1 ships the same migrations, so its database covers 0.1.0.
 # A fixture is written once per release. Rebuilding one draws new random src ids, so its golden.json
 # must be recorded again; never rebuild a fixture to make a failing upgrade test pass.
+# To record it: run `cargo test -p ownhealth-ops --test upgrade_fixtures --locked` in server/. The test
+# for that version fails and prints the JSON HEAD gave; save it as fixtures/upgrade/<version>/golden.json.
 #
 # Usage: bash scripts/upgrade-fixtures.sh [version ...]    (default: 0.1.1 0.2.0 0.3.0 0.4.0)
 set -euo pipefail

@@ -8,7 +8,12 @@
 //!
 //! - every profile's HEAD state_hash, at the manifest's `as_of`, equals the fixture's `golden.json`
 //!   (recorded with 1.0's rule pack; a mismatch prints the hashes HEAD gave);
-//! - for 0.4.0, the state_hash its own backup recorded equals the HEAD hash too (no pack bump in 1.0);
+//! - for 0.4.0, the state_hash its own backup recorded equals the HEAD hash too (no pack bump in 1.0).
+//!   0.1.1, 0.2.0 and 0.3.0 recorded their hashes with rule pack 0.1.0 (`rules_version` in their
+//!   manifests), and pack 0.2.0 in 0.4.0 moved every hash once, on purpose
+//!   (docs/v0.3-exit-criteria.md, "Upgrade from 0.3.0"). So those three are pinned to a golden
+//!   recorded at HEAD, and `ownhealth verify-restore` of those backups with HEAD reports the pack
+//!   change as `"ok": false` while its tables and blobs match;
 //! - the truth rows (every lifecycle-guarded clinical table, `src` and `document`) are the same before
 //!   and after the migration, on the columns the old release had;
 //! - every blob a row references is in the fixture and still hashes to its name, and the migration
