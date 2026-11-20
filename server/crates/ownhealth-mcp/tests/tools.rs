@@ -433,6 +433,10 @@ async fn wearable_trend_uses_the_day_total_for_summed_metrics() -> R {
     // Python's `== [420]` holds for 420.0 too; both sides serialize the float column as 420.0
     let values: Vec<Option<f64>> = col(&env["data"]["points"], "value").iter().map(Value::as_f64).collect();
     assert_eq!(values, vec![Some(420.0)]);
+    // min and max are day totals too, never the 60 and 240 of single sleep segments
+    let point = &arr(&env["data"]["points"])[0];
+    assert_eq!(point["min"], json!(420.0));
+    assert_eq!(point["max"], json!(420.0));
     Ok(())
 }
 
@@ -496,7 +500,9 @@ async fn wearable_trend_fills_days_from_the_next_source() -> R {
 
 #[tokio::test]
 async fn a_year_trend_keeps_the_real_lows_and_highs() -> R {
-    // three days of one week in November 2026: the day means stay near 60, one reading reaches 142
+    // two weeks of November 2026, three days each: the day means stay near 60, one reading reaches 142
+    // in the first week and 175 in the second. The second week's low (55) is above the first week's
+    // (48), so an extreme that leaks into the wrong bucket in either direction shows.
     let w = world().await?;
     let pid = w.pid("alex");
     let sid: i16 = sqlx::query_scalar(
@@ -509,6 +515,9 @@ async fn a_year_trend_keeps_the_real_lows_and_highs() -> R {
         (2, 52.0_f32, 60.0_f32, 71.0_f32),
         (3, 50.0, 64.0, 142.0),
         (4, 48.0, 59.0, 70.0),
+        (9, 56.0, 63.0, 88.0),
+        (10, 55.0, 66.0, 175.0),
+        (11, 58.0, 62.0, 80.0),
     ] {
         sqlx::query(
             "insert into wearable_rollup (profile_id, metric, source_id, bucket, t, n, v_min, v_max, v_avg, v_sum, \
@@ -531,13 +540,22 @@ async fn a_year_trend_keeps_the_real_lows_and_highs() -> R {
         )
         .await?
         .ok();
-    eprintln!("{}", serde_json::to_string(&env["data"]["points"])?);
     assert_eq!(env["data"]["resolution"], "week");
+    // oldest first: the week of 2 Nov, then the week of 9 Nov
     let points = arr(&env["data"]["points"]);
-    assert_eq!(points.len(), 1);
+    assert_eq!(points.len(), 2);
+    assert_eq!(points[0]["date"], "2026-11-02");
     assert_eq!(points[0]["value"], json!(61.0));
     assert_eq!(points[0]["min"], json!(48.0));
     assert_eq!(points[0]["max"], json!(142.0));
+    assert_eq!(points[1]["date"], "2026-11-09");
+    assert_eq!(points[1]["value"], json!(63.67));
+    assert_eq!(points[1]["min"], json!(55.0));
+    assert_eq!(points[1]["max"], json!(175.0));
+    // the stats follow the points: the lowest point min and the highest point max
+    let stats = &env["data"]["stats"];
+    assert_eq!(stats["min"], json!(48.0));
+    assert_eq!(stats["max"], json!(175.0));
     Ok(())
 }
 

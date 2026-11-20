@@ -719,7 +719,7 @@
       "readOnlyHint": true,
       "title": "Trend of one analyte or metric"
     },
-    "description": "One lab analyte (LOINC code or name) or wearable metric (e.g. 'hr_resting') over a window such as P3Y, downsampled to fit, with coverage and change statistics and medication start/stop annotations. Points keep the printed value and unit beside the canonical one; every point has a src id. Analytes that arrived under two LOINC codes are both kept and named in codes. Missing is not normal.",
+    "description": "One lab analyte (LOINC code or name) or wearable metric (e.g. 'hr_resting') over a window such as P3Y, downsampled to fit, with coverage and change statistics and medication start/stop annotations. Points keep the printed value and unit beside the canonical one; every point has a src id. Analytes that arrived under two LOINC codes are both kept and named in codes. A bucketed point's min and max are the lowest and highest single reading, on day points too; for a summed metric (steps, sleep, energy, distance) they are the lowest and highest day total. n counts readings. stats.min and stats.max follow the points. Missing is not normal.",
     "inputSchema": {
       "properties": {
         "profile": {

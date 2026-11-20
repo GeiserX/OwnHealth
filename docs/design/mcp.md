@@ -370,7 +370,7 @@ get_trend(profile="alex", code="LOINC:13457-7", window="P5Y")
 
 A value printed in another unit (for example 3.4 mmol/L) keeps its printed `value` and `unit`, and `canonical` holds the converted number, with the factor named in `limitations`.
 
-For wearables, `coverage_pct` is the share of days in the window with data, and `points` are rollups with `min`, `max`, `n`.
+For wearables, `coverage_pct` is the share of days in the window with data, and `points` are rollups with `min`, `max`, `n`. A bucketed point's `min` and `max` are the lowest and highest single reading, on day points too; for a summed metric (steps, sleep, energy, distance) they are the lowest and highest day total. `n` counts readings. `stats.min` and `stats.max` follow the points: the lowest point `min` and the highest point `max`.
 
 ### 5.4 `get_genome_findings`
 

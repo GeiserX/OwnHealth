@@ -115,7 +115,10 @@ pub static TREND_SPEC: ToolSpec = ToolSpec {
     description: "One lab analyte (LOINC code or name) or wearable metric (e.g. 'hr_resting') over a window such as \
 P3Y, downsampled to fit, with coverage and change statistics and medication start/stop annotations. \
 Points keep the printed value and unit beside the canonical one; every point has a src id. Analytes \
-that arrived under two LOINC codes are both kept and named in codes. Missing is not normal.",
+that arrived under two LOINC codes are both kept and named in codes. A bucketed point's min and max are the \
+lowest and highest single reading, on day points too; for a summed metric (steps, sleep, energy, distance) \
+they are the lowest and highest day total. n counts readings. stats.min and stats.max follow the points. \
+Missing is not normal.",
     input_schema: trend_schema,
     any_scope: &["read:labs", "read:vitals", "read:wearables"],
     all_scopes: &[],
@@ -823,6 +826,25 @@ pub fn stats_of(mut series: Vec<(NaiveDate, f64)>) -> Value {
     Value::Object(out)
 }
 
+/// Stats min and max follow the points: the lowest point min and the highest point max, or the point's
+/// `key` value where it has no min or max. Without this a bucketed trend's stats give the range of the
+/// bucket means, below the extremes its own points show.
+fn stats_follow_points(mut stats: Value, points: &[Value], key: &str) -> Value {
+    let value = |p: &Value, k: &str| p.get(k).and_then(Value::as_f64);
+    let with_value = || points.iter().filter(|p| value(p, key).is_some());
+    let lo = with_value()
+        .filter_map(|p| value(p, "min").or(value(p, key)))
+        .reduce(f64::min);
+    let hi = with_value()
+        .filter_map(|p| value(p, "max").or(value(p, key)))
+        .reduce(f64::max);
+    if let (Some(lo), Some(hi), Value::Object(out)) = (lo, hi, &mut stats) {
+        out.insert("min".into(), json!(lo));
+        out.insert("max".into(), json!(hi));
+    }
+    stats
+}
+
 fn bucket_key(d: NaiveDate, resolution: &str) -> NaiveDate {
     match resolution {
         "week" => d - Duration::days(i64::from(d.weekday().num_days_from_monday())),
@@ -1048,6 +1070,7 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
                 Some((d, p.get("value")?.as_f64()?))
             })
             .collect();
+        let stats = stats_follow_points(stats_of(series), &points, "value");
         let annotations = med_annotations(call, since, until).await?;
         data.insert("name".into(), json!(metric));
         data.insert("codes".into(), json!([metric]));
@@ -1056,7 +1079,7 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
         data.insert("resolution".into(), json!(resolution));
         data.insert("coverage_pct".into(), json!(coverage.min(100)));
         data.insert("points".into(), Value::Array(newest_first(points)));
-        data.insert("stats".into(), stats_of(series));
+        data.insert("stats".into(), stats);
         data.insert("annotations".into(), Value::Array(annotations));
         if days.iter().any(|d| d.src.is_none()) {
             limitations.push(json!(
@@ -1224,6 +1247,7 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
                 Some((d, p.get(stat_key)?.as_f64()?))
             })
             .collect();
+        let stats = stats_follow_points(stats_of(series), &points, stat_key);
         let with_canonical = raw_points.iter().filter(|p| p.contains_key("canonical")).count();
         let name = match rows.last() {
             Some(r) => json!(r.alias_group),
@@ -1244,7 +1268,7 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
         data.insert("resolution".into(), json!(resolution));
         data.insert("coverage_pct".into(), json!(coverage));
         data.insert("points".into(), Value::Array(newest_first(points)));
-        data.insert("stats".into(), stats_of(series));
+        data.insert("stats".into(), stats);
         data.insert("annotations".into(), Value::Array(annotations));
         if rows.is_empty() {
             data.insert("not_measured".into(), Value::Bool(true));
@@ -1339,6 +1363,36 @@ mod tests {
         );
         assert_eq!(labs[0]["min"], json!(3.1));
         assert_eq!(labs[0]["max"], json!(4.4));
+    }
+
+    #[test]
+    fn stats_min_and_max_follow_the_points() {
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        let lab = |date, v| Pt {
+            date,
+            v: Some(v),
+            lo: None,
+            hi: None,
+            n: None,
+            src: None,
+        };
+        // two lab values in March (3.0 and 5.0) and one in May: the March mean is 4.0
+        let points = aggregate(&[lab(d(3, 2), 3.0), lab(d(3, 20), 5.0), lab(d(5, 4), 4.2)], "month");
+        let series = vec![(d(3, 1), 4.0), (d(5, 1), 4.2)];
+        let stats = stats_follow_points(stats_of(series), &points, "value");
+        assert_eq!(stats["min"], json!(3.0));
+        assert_eq!(stats["max"], json!(5.0));
+        // raw lab points carry no min or max: the stats key's own value counts
+        let raw = vec![
+            json!({"canonical": 3.1}),
+            json!({"canonical": 4.0}),
+            json!({"value": 9.9}),
+        ];
+        let stats = stats_follow_points(json!({"n": 2}), &raw, "canonical");
+        assert_eq!(stats["min"], json!(3.1));
+        assert_eq!(stats["max"], json!(4.0));
+        // no points: the stats stay as they were
+        assert_eq!(stats_follow_points(json!({"n": 0}), &[], "value"), json!({"n": 0}));
     }
 
     #[test]
