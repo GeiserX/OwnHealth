@@ -204,3 +204,89 @@ async fn a_wearables_window_too_large_for_the_calendar_is_capped() -> R {
     );
     Ok(())
 }
+
+/// One wearable_source of Lucía's with daily rollups of `metric` on the given days of November 2026.
+async fn rollup_days(a: &App, provider: &str, device: &str, metric: &str, days: &[u32], v: f32) -> anyhow::Result<i16> {
+    let pid = a.family.profile("lucia");
+    let sid: i16 = sqlx::query_scalar(
+        "insert into wearable_source (profile_id, provider, device) values ($1, $2, $3) returning id",
+    )
+    .bind(pid)
+    .bind(provider)
+    .bind(device)
+    .fetch_one(&a.rt.pool)
+    .await?;
+    for d in days {
+        sqlx::query(
+            "insert into wearable_rollup (profile_id, metric, source_id, bucket, t, n, v_min, v_max, v_avg, v_sum, \
+             v_p10, v_p50, v_p90, coverage) values ($1, $2, $3, 'day', $4, 1, $5, $5, $5, $5, $5, $5, $5, 1)",
+        )
+        .bind(pid)
+        .bind(metric)
+        .bind(sid)
+        .bind(Utc.with_ymd_and_hms(2026, 11, *d, 0, 0, 0).single().unwrap_or_default())
+        .bind(v)
+        .execute(&a.rt.pool)
+        .await?;
+    }
+    Ok(sid)
+}
+
+fn devices_of(body: &Value) -> Vec<String> {
+    body["points"]
+        .as_array()
+        .map(|p| {
+            p.iter()
+                .filter_map(|x| x["device"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Two vendors measure rMSSD on alternate days: the series is one vendor's, and names the other.
+#[tokio::test]
+async fn an_hrv_series_takes_one_vendor_and_names_the_rest() -> R {
+    let a = app().await?;
+    let odd = [1, 3, 5, 7, 9];
+    let even = [2, 4, 6, 8, 10];
+    rollup_days(&a, "oura", "Oura Ring", "hrv_rmssd", &odd, 48.0).await?;
+    let whoop = rollup_days(&a, "whoop", "Whoop 4.0", "hrv_rmssd", &even, 71.0).await?;
+    let uri = "/profiles/lucia/wearables/hrv_rmssd?window=P30D&as_of=2026-11-12";
+    let (s, body) = get(&a, "sam", &format!("{uri}&lang=en")).await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(devices_of(&body), vec!["Oura Ring"; 5], "{body}");
+    let note = body["limitations"][0].as_str().unwrap_or_default();
+    assert!(note.contains("Oura Ring") && note.contains("Whoop 4.0"), "{body}");
+    let (_, es) = get(&a, "sam", &format!("{uri}&lang=es")).await?;
+    let nota = es["limitations"][0].as_str().unwrap_or_default();
+    assert!(nota.contains("VFC") && nota.contains("Whoop 4.0"), "{es}");
+    // the person's own order picks the vendor
+    let mut c = a.rt.pool.acquire().await?;
+    ownhealth_ingest_structured::wearables::set_priority(&mut c, a.family.profile("lucia"), "hrv_rmssd", &[whoop])
+        .await?;
+    let (_, body) = get(&a, "sam", uri).await?;
+    assert_eq!(devices_of(&body), vec!["Whoop 4.0"; 5], "{body}");
+    Ok(())
+}
+
+/// Other metrics still fill each day from the best source that has it, with no note.
+#[tokio::test]
+async fn other_metrics_still_mix_sources_day_by_day() -> R {
+    let a = app().await?;
+    rollup_days(&a, "oura", "Oura Ring", "hr_resting", &[1, 3], 55.0).await?;
+    rollup_days(&a, "whoop", "Whoop 4.0", "hr_resting", &[2, 4], 58.0).await?;
+    let (s, body) = get(
+        &a,
+        "sam",
+        "/profiles/lucia/wearables/hr_resting?window=P30D&as_of=2026-11-12",
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        devices_of(&body),
+        ["Oura Ring", "Whoop 4.0", "Oura Ring", "Whoop 4.0"],
+        "{body}"
+    );
+    assert!(body.get("limitations").is_none(), "{body}");
+    Ok(())
+}

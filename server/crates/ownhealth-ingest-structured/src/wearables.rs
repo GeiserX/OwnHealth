@@ -10,6 +10,9 @@
 //! series takes, for each day, the highest-priority source that has data that day. That stops an
 //! iPhone and an Apple Watch both counting the same steps. A `source_priority` row overrides the
 //! default order (Watch, then iPhone, then anything else).
+//!
+//! HRV is the exception: each vendor measures it its own way, so an HRV series takes one source for
+//! the whole window (the best one with data there) and names the sources it left out.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -390,8 +393,24 @@ fn real(v: Option<f32>) -> Option<f64> {
     v.and_then(|x| f32_json(x).as_f64())
 }
 
+/// Metrics whose value depends on the vendor's own method: a series uses one source, never a mix.
+pub fn one_source(metric_key: &str) -> bool {
+    metric_key.starts_with("hrv_")
+}
+
+/// A series and the sources with data in the window that it left out (HRV only), best first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Series {
+    pub points: Vec<Point>,
+    /// The device name, else the provider, of each source left out.
+    pub left_out: Vec<String>,
+    /// The same name for the one source an HRV series shows; None for every other metric.
+    pub shown: Option<String>,
+}
+
 /// One point per bucket with data, taken from the best source that has that bucket. Buckets without
-/// data are absent; callers fill gaps if they draw them.
+/// data are absent; callers fill gaps if they draw them. An HRV series takes every point from one
+/// source: the best one with data in the window.
 pub async fn points(
     conn: &mut PgConnection,
     profile_id: Uuid,
@@ -400,6 +419,22 @@ pub async fn points(
     until: DateTime<Utc>,
     resolution: &str,
 ) -> Result<Vec<Point>> {
+    Ok(
+        points_and_left_out(conn, profile_id, metric_key, since, until, resolution)
+            .await?
+            .points,
+    )
+}
+
+/// `points`, plus the sources an HRV series left out.
+pub async fn points_and_left_out(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    metric_key: &str,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+    resolution: &str,
+) -> Result<Series> {
     let info = metric(metric_key);
     let rank: HashMap<i16, usize> = priority(&mut *conn, profile_id, metric_key)
         .await?
@@ -407,7 +442,7 @@ pub async fn points(
         .enumerate()
         .map(|(i, s)| (s, i))
         .collect();
-    let rows: Vec<RollupRow> = sqlx::query_as(
+    let mut rows: Vec<RollupRow> = sqlx::query_as(
         "select r.t, r.source_id, r.n, r.v_min, r.v_max, r.v_avg, r.v_sum, r.v_p10, r.v_p50, r.v_p90, r.coverage, \
          ws.device from wearable_rollup r join wearable_source ws on ws.id = r.source_id \
          where r.profile_id = $1 and r.metric = $2 and r.bucket = $3 and r.t >= $4 and r.t <= $5 order by r.t",
@@ -417,9 +452,24 @@ pub async fn points(
     .bind(resolution)
     .bind(since)
     .bind(until)
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
     .await?;
     let rank_of = |s: i16| rank.get(&s).copied().unwrap_or(99);
+    let mut left_out: Vec<i16> = Vec::new();
+    let chosen = rows
+        .iter()
+        .map(|r| r.1)
+        .min_by_key(|s| (rank_of(*s), *s))
+        .filter(|_| one_source(metric_key));
+    if let Some(chosen) = chosen {
+        for r in &rows {
+            if r.1 != chosen && !left_out.contains(&r.1) {
+                left_out.push(r.1);
+            }
+        }
+        left_out.sort_by_key(|s| (rank_of(*s), *s));
+        rows.retain(|r| r.1 == chosen);
+    }
     let mut best: BTreeMap<DateTime<Utc>, RollupRow> = BTreeMap::new();
     for r in rows {
         match best.get(&r.0) {
@@ -429,7 +479,19 @@ pub async fn points(
             }
         }
     }
-    Ok(best
+    let names: Vec<(i16, String)> = match chosen {
+        None => Vec::new(),
+        Some(c) => {
+            sqlx::query_as("select id, coalesce(device, provider) from wearable_source where id = any($1)")
+                .bind(left_out.iter().copied().chain([c]).collect::<Vec<i16>>())
+                .fetch_all(&mut *conn)
+                .await?
+        }
+    };
+    let name = |id: i16| names.iter().find(|n| n.0 == id).map(|n| n.1.clone());
+    let shown = chosen.and_then(name);
+    let left_out = left_out.iter().filter_map(|id| name(*id)).collect();
+    let points = best
         .into_values()
         .map(|r| Point {
             t: r.0,
@@ -445,7 +507,35 @@ pub async fn points(
             source_id: r.1,
             device: r.11,
         })
-        .collect())
+        .collect();
+    Ok(Series {
+        points,
+        left_out,
+        shown,
+    })
+}
+
+/// The limitation line of a one-source series that left a source out: which it shows and which not.
+pub fn left_out_note(series: &Series, lang: &str) -> Option<String> {
+    let shown = series.shown.as_deref().filter(|_| !series.left_out.is_empty())?;
+    let rest = series.left_out.join(", ");
+    Some(if lang == "es" {
+        format!(
+            "VFC de una sola fuente: {shown}. Sin mostrar porque cada fabricante mide la VFC de forma distinta: {rest}."
+        )
+    } else {
+        format!("HRV from one source only: {shown}. Left out because vendors measure HRV differently: {rest}.")
+    })
+}
+
+/// Every text this module writes for a person, for the wording lint.
+pub fn phrases() -> Value {
+    let series = Series {
+        points: Vec::new(),
+        left_out: vec!["Whoop 4.0".into()],
+        shown: Some("Oura Ring".into()),
+    };
+    json!({"en": left_out_note(&series, "en"), "es": left_out_note(&series, "es")})
 }
 
 /// Python's `wearables.series` as JSON: `t`, `value`, `min`, `max`, `mean`, `median`, `p10`, `p90`,

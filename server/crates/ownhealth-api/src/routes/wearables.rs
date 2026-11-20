@@ -1,5 +1,6 @@
 //! Lane C: `api/wearables.py`. Daily rollups with the source-priority rule applied, one source per
-//! day: `/profiles/{p}/wearables/summary` and `/profiles/{p}/wearables/{metric}`.
+//! day (HRV: one source per series): `/profiles/{p}/wearables/summary` and
+//! `/profiles/{p}/wearables/{metric}`.
 //!
 //! Needs `read:wearables`; every read writes one audit row.
 
@@ -292,7 +293,8 @@ async fn summary(
     Ok(Json(json!({"metrics": out, "devices": devices})))
 }
 
-/// One metric: every bucket with data from the best source for it (hour buckets up to 14 days).
+/// One metric: every bucket with data from the best source for it (hour buckets up to 14 days). An
+/// HRV series that left a vendor out says so in `limitations`.
 async fn metric_series(
     State(rt): State<Runtime>,
     caller: Caller,
@@ -315,7 +317,8 @@ async fn metric_series(
     let since = w::day_start(start);
     let until = w::day_start(end) + TimeDelta::days(1) - TimeDelta::seconds(1);
     let info = w::metric(&metric);
-    let points = w::points(&mut tx, perm.profile.id, &metric, since, until, resolution).await?;
+    let series = w::points_and_left_out(&mut tx, perm.profile.id, &metric, since, until, resolution).await?;
+    let points = &series.points;
     audit(&mut tx, &caller.0, &perm, "wearables.series", vec![metric.clone()]).await?;
     let priority = w::priority(&mut tx, perm.profile.id, &metric).await?;
     tx.commit().await?;
@@ -338,7 +341,7 @@ async fn metric_series(
             })
         })
         .collect();
-    Ok(Json(json!({
+    let mut body = json!({
         "metric": metric,
         "label": label(&info, lang),
         "unit": info.unit,
@@ -347,7 +350,12 @@ async fn metric_series(
         "window": window,
         "priority": priority,
         "points": pts,
-    })))
+    });
+    // only when a vendor was left out, so every other answer keeps its recorded shape
+    if let Some(note) = w::left_out_note(&series, lang) {
+        body["limitations"] = json!([note]);
+    }
+    Ok(Json(body))
 }
 
 #[cfg(test)]
