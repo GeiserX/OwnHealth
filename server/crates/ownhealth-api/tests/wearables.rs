@@ -205,11 +205,14 @@ async fn a_wearables_window_too_large_for_the_calendar_is_capped() -> R {
     Ok(())
 }
 
-/// One wearable_source of Lucía's with daily rollups of `metric` on the given days of November 2026.
+/// One wearable_source of Lucía's (made once) with daily rollups of `metric` on the given days of
+/// November 2026.
 async fn rollup_days(a: &App, provider: &str, device: &str, metric: &str, days: &[u32], v: f32) -> anyhow::Result<i16> {
     let pid = a.family.profile("lucia");
     let sid: i16 = sqlx::query_scalar(
-        "insert into wearable_source (profile_id, provider, device) values ($1, $2, $3) returning id",
+        "with s as (insert into wearable_source (profile_id, provider, device) values ($1, $2, $3) \
+         on conflict do nothing returning id) select id from s union all \
+         select id from wearable_source where profile_id = $1 and provider = $2 and device = $3 limit 1",
     )
     .bind(pid)
     .bind(provider)
@@ -243,29 +246,30 @@ fn devices_of(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Two vendors measure rMSSD on alternate days: the series is one vendor's, and names the other.
+/// Two vendors measure rMSSD on alternate days: the series is one vendor's (the same count of days,
+/// so the one with the newest day), and names the other.
 #[tokio::test]
 async fn an_hrv_series_takes_one_vendor_and_names_the_rest() -> R {
     let a = app().await?;
     let odd = [1, 3, 5, 7, 9];
     let even = [2, 4, 6, 8, 10];
-    rollup_days(&a, "oura", "Oura Ring", "hrv_rmssd", &odd, 48.0).await?;
-    let whoop = rollup_days(&a, "whoop", "Whoop 4.0", "hrv_rmssd", &even, 71.0).await?;
+    let oura = rollup_days(&a, "oura", "Oura Ring", "hrv_rmssd", &odd, 48.0).await?;
+    rollup_days(&a, "whoop", "Whoop 4.0", "hrv_rmssd", &even, 71.0).await?;
     let uri = "/profiles/lucia/wearables/hrv_rmssd?window=P30D&as_of=2026-11-12";
     let (s, body) = get(&a, "sam", &format!("{uri}&lang=en")).await?;
     assert_eq!(s, StatusCode::OK, "{body}");
-    assert_eq!(devices_of(&body), vec!["Oura Ring"; 5], "{body}");
+    assert_eq!(devices_of(&body), vec!["Whoop 4.0"; 5], "{body}");
     let note = body["limitations"][0].as_str().unwrap_or_default();
     assert!(note.contains("Oura Ring") && note.contains("Whoop 4.0"), "{body}");
     let (_, es) = get(&a, "sam", &format!("{uri}&lang=es")).await?;
     let nota = es["limitations"][0].as_str().unwrap_or_default();
-    assert!(nota.contains("VFC") && nota.contains("Whoop 4.0"), "{es}");
+    assert!(nota.contains("VFC") && nota.contains("Oura Ring"), "{es}");
     // the person's own order picks the vendor
     let mut c = a.rt.pool.acquire().await?;
-    ownhealth_ingest_structured::wearables::set_priority(&mut c, a.family.profile("lucia"), "hrv_rmssd", &[whoop])
+    ownhealth_ingest_structured::wearables::set_priority(&mut c, a.family.profile("lucia"), "hrv_rmssd", &[oura])
         .await?;
     let (_, body) = get(&a, "sam", uri).await?;
-    assert_eq!(devices_of(&body), vec!["Whoop 4.0"; 5], "{body}");
+    assert_eq!(devices_of(&body), vec!["Oura Ring"; 5], "{body}");
     Ok(())
 }
 
@@ -288,5 +292,56 @@ async fn other_metrics_still_mix_sources_day_by_day() -> R {
         "{body}"
     );
     assert!(body.get("limitations").is_none(), "{body}");
+    Ok(())
+}
+
+/// Two vendors of the same default rank: the one with more points in the window wins, not the one
+/// connected first. An explicit order still wins.
+#[tokio::test]
+async fn an_hrv_tie_goes_to_the_source_with_more_points() -> R {
+    let a = app().await?;
+    let oura = rollup_days(&a, "oura", "Oura Ring", "hrv_rmssd", &[1], 48.0).await?;
+    let rest: Vec<u32> = (2..=30).collect();
+    rollup_days(&a, "whoop", "Whoop 4.0", "hrv_rmssd", &rest, 71.0).await?;
+    let uri = "/profiles/lucia/wearables/hrv_rmssd?window=P30D&as_of=2026-11-30&lang=en";
+    let (s, body) = get(&a, "sam", uri).await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(devices_of(&body), vec!["Whoop 4.0"; 29], "{body}");
+    let mut c = a.rt.pool.acquire().await?;
+    ownhealth_ingest_structured::wearables::set_priority(&mut c, a.family.profile("lucia"), "hrv_rmssd", &[oura])
+        .await?;
+    let (_, body) = get(&a, "sam", uri).await?;
+    assert_eq!(devices_of(&body), vec!["Oura Ring"], "{body}");
+    Ok(())
+}
+
+/// The summary the Wearables page reads carries the same note on the HRV entry, and only there.
+#[tokio::test]
+async fn the_summary_names_the_hrv_vendor_left_out() -> R {
+    let a = app().await?;
+    rollup_days(&a, "oura", "Oura Ring", "hrv_rmssd", &[1, 3, 5, 7, 9], 48.0).await?;
+    rollup_days(&a, "whoop", "Whoop 4.0", "hrv_rmssd", &[2, 4, 6, 8, 10], 71.0).await?;
+    rollup_days(&a, "oura", "Oura Ring", "hr_resting", &[1, 3], 55.0).await?;
+    rollup_days(&a, "whoop", "Whoop 4.0", "hr_resting", &[2, 4], 58.0).await?;
+    let (s, body) = get(
+        &a,
+        "sam",
+        "/profiles/lucia/wearables/summary?days=30&as_of=2026-11-12&lang=en",
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let entry = |m: &str| {
+        body["metrics"]
+            .as_array()
+            .and_then(|a| a.iter().find(|x| x["metric"] == m))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let note = entry("hrv_rmssd")["limitations"][0]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(note.contains("Oura Ring") && note.contains("Whoop 4.0"), "{body}");
+    assert!(entry("hr_resting").get("limitations").is_none(), "{body}");
     Ok(())
 }

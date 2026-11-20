@@ -41,6 +41,15 @@ fn values(env: &Value, list: &str) -> Vec<Option<f64>> {
         .unwrap_or_default()
 }
 
+/// The envelope says which vendor the series shows and which it left out.
+fn names_left_out(env: &Value) -> bool {
+    env["limitations"].as_array().is_some_and(|l| {
+        l.iter()
+            .filter_map(Value::as_str)
+            .any(|n| n.contains("Oura Ring") && n.contains("Whoop 4.0"))
+    })
+}
+
 #[tokio::test]
 async fn an_agent_sees_one_hrv_vendor_and_mixed_resting_hr() -> R {
     let w = world().await?;
@@ -51,7 +60,9 @@ async fn an_agent_sees_one_hrv_vendor_and_mixed_resting_hr() -> R {
     let c = w.connect_real(&w.tok().await?).await?;
     let trend = |code: &str| json!({"profile": "alex", "code": code, "window": "P30D", "as_of": "2026-11-12"});
     let hrv = c.call("get_trend", trend("hrv_rmssd")).await?.ok();
-    assert_eq!(values(&hrv, "points"), vec![Some(48.0); 5], "{hrv}");
+    // the same count of days each: the vendor with the newest day
+    assert_eq!(values(&hrv, "points"), vec![Some(71.0); 5], "{hrv}");
+    assert!(names_left_out(&hrv), "{hrv}");
     let found = c
         .call(
             "search_observations",
@@ -60,7 +71,8 @@ async fn an_agent_sees_one_hrv_vendor_and_mixed_resting_hr() -> R {
         )
         .await?
         .ok();
-    assert_eq!(values(&found, "results"), vec![Some(48.0); 5], "{found}");
+    assert_eq!(values(&found, "results"), vec![Some(71.0); 5], "{found}");
+    assert!(names_left_out(&found), "{found}");
     // resting heart rate still takes each day from whichever source has it
     let hr = c.call("get_trend", trend("hr_resting")).await?.ok();
     assert_eq!(
@@ -68,5 +80,6 @@ async fn an_agent_sees_one_hrv_vendor_and_mixed_resting_hr() -> R {
         [Some(55.0), Some(58.0), Some(55.0), Some(58.0)],
         "{hr}"
     );
+    assert!(!names_left_out(&hr), "{hr}");
     Ok(())
 }

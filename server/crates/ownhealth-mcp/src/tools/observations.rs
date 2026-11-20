@@ -559,20 +559,33 @@ struct Day {
 }
 
 /// Daily rollups of one metric, newest first, one source per day: the best source that has the day
-/// (source_priority, then the default order), as the REST summary picks them.
+/// (source_priority, then the default order), as the REST summary picks them. An HRV series is one
+/// source's, and the source it left out goes in `limitations`.
 async fn rollups(
     call: &mut Call<'_>,
     metric: &str,
     since: Option<NaiveDate>,
     until: NaiveDate,
+    limitations: &mut Vec<Value>,
 ) -> ToolResult<Vec<Day>> {
     let pid = call.profile_id()?;
     // window "all": from year 1, which Postgres can store (chrono's minimum it cannot)
     let first = NaiveDate::from_ymd_opt(1, 1, 1).unwrap_or(NaiveDate::MIN);
     let since_t = start_of_day(since.unwrap_or(first)).with_timezone(&Utc);
     let until_t = end_of_day(until).with_timezone(&Utc);
-    let points =
-        ownhealth_ingest_structured::wearables::points(&mut *call.conn, pid, metric, since_t, until_t, "day").await?;
+    let series = ownhealth_ingest_structured::wearables::points_and_left_out(
+        &mut *call.conn,
+        pid,
+        metric,
+        since_t,
+        until_t,
+        "day",
+    )
+    .await?;
+    if let Some(note) = ownhealth_ingest_structured::wearables::left_out_note(&series, "en") {
+        limitations.push(json!(note));
+    }
+    let points = series.points;
     let apple: HashSet<i16> = sqlx::query_scalar::<_, i16>(
         "select id from wearable_source where profile_id = $1 and provider = 'apple_health'",
     )
@@ -674,7 +687,14 @@ pub async fn search_observations(call: &mut Call<'_>) -> ToolResult<Answer> {
                 Some(u) => u.date_naive(),
                 None => call.as_of.at.map_or(call.as_of.day, |a| a.date_naive()),
             };
-            let days = rollups(call, &metric, since.map(|s| s.date_naive()), until_day).await?;
+            let days = rollups(
+                call,
+                &metric,
+                since.map(|s| s.date_naive()),
+                until_day,
+                &mut limitations,
+            )
+            .await?;
             let take = if full { days.len() } else { 1 };
             for d in days.iter().take(take) {
                 results.push(json!({
@@ -998,7 +1018,7 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
             )
             .into());
         }
-        let days = rollups(call, &metric, since, until).await?;
+        let days = rollups(call, &metric, since, until, &mut limitations).await?;
         let raw: Vec<Pt> = days
             .iter()
             .map(|d| Pt {

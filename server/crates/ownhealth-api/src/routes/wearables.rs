@@ -238,7 +238,9 @@ async fn summary(
     let mut out: Vec<Value> = Vec::new();
     for metric in &present {
         let info = w::metric(metric);
-        let pts: Vec<Point> = w::points(&mut tx, perm.profile.id, metric, since, until, "day").await?;
+        let found = w::points_and_left_out(&mut tx, perm.profile.id, metric, since, until, "day").await?;
+        let note = w::left_out_note(&found, lang);
+        let pts: Vec<Point> = found.points;
         // dict keyed by date: a later point of the same day replaces the earlier one in place
         let mut points: BTreeMap<NaiveDate, Point> = BTreeMap::new();
         let mut order: Vec<NaiveDate> = Vec::new();
@@ -270,7 +272,7 @@ async fn summary(
             .collect();
         let newest = points.get(&newest_date);
         let coverage: f64 = order.iter().filter_map(|d| points.get(d)).map(|p| p.coverage).sum();
-        out.push(json!({
+        let mut entry = json!({
             "metric": metric,
             "label": label(&info, lang),
             "unit": info.unit,
@@ -281,7 +283,12 @@ async fn summary(
             "series": series,
             "coverage_pct": py_round(100.0 * coverage / days as f64, 1),
             "source": newest.and_then(|p| p.device.clone()),
-        }));
+        });
+        // only when an HRV vendor was left out, as on the one-metric series
+        if let Some(note) = note {
+            entry["limitations"] = json!([note]);
+        }
+        out.push(entry);
     }
     let shown: Vec<String> = out
         .iter()
