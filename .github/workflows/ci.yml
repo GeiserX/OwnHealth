@@ -78,32 +78,7 @@ jobs:
       # write (crates/ownhealth/tests/wording_all.rs), as its own step so a wording failure is named.
       - name: Wording lint
         run: cargo test -p ownhealth --test wording_all --locked
-      # TRIAL, removed before merge: cargo test and cargo-nextest on the same build, with test counts
-      - name: cargo test (trial, output kept for the count)
-        run: |
-          set -o pipefail
-          cargo test --workspace --locked 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
-      - name: cargo-nextest 0.9.152 (trial)
-        working-directory: .
-        run: |
-          curl -fsSL -o /tmp/nextest.tgz https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz
-          echo "d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a  /tmp/nextest.tgz" | sha256sum -c -
-          tar xzf /tmp/nextest.tgz -C "$HOME/.cargo/bin"
-      - name: cargo nextest run (trial)
-        run: |
-          set -o pipefail
-          cargo nextest run --workspace --locked --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/nextest.log"
-      - name: cargo test --doc (trial)
-        run: |
-          set -o pipefail
-          cargo test --doc --workspace --locked 2>&1 | tee "$RUNNER_TEMP/doc.log"
-      - name: Test counts (trial)
-        if: always()
-        run: |
-          sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/cargo-test.log" | awk '/^ *Running /{m="bin"} /^ *Doc-tests /{m="doc"} /^test result:/{for(i=1;i<=NF;i++){if($i~/^passed/)p[m]+=$(i-1); if($i~/^failed/)f[m]+=$(i-1); if($i~/^ignored/)ig[m]+=$(i-1)}} END{printf "cargo test: binaries %d run (%d passed, %d failed), %d ignored; doctests %d run\n", p["bin"]+f["bin"], p["bin"], f["bin"], ig["bin"], p["doc"]+f["doc"]}'
-          grep -E "Finished|Summary" "$RUNNER_TEMP/cargo-test.log" "$RUNNER_TEMP/nextest.log" | sed 's/\x1b\[[0-9;]*m//g'
-          sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/doc.log" | awk '/^test result:/{for(i=1;i<=NF;i++){if($i~/^passed/)p+=$(i-1); if($i~/^failed/)f+=$(i-1)}} END{printf "cargo test --doc: %d run\n", p+f}'
-          grep -E "SLOW|FLAKY|TRY [0-9]|FAIL" "$RUNNER_TEMP/nextest.log" | sed 's/\x1b\[[0-9;]*m//g' | head -40 || true
+      - run: cargo test --workspace --locked
 
   # The OCR engine (v0.2): the `ocr` feature links ONNX Runtime, so it gets its own lints, and the
   # real engine runs on the pinned models (scripts/fetch-ocr-models.sh, cached by their sums): the
