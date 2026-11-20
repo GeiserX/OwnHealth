@@ -836,11 +836,14 @@ fn bucket_key(d: NaiveDate, resolution: &str) -> NaiveDate {
 pub struct Pt {
     pub date: NaiveDate,
     pub v: Option<f64>,
+    /// The lowest and highest reading inside the point (a daily rollup), when it has them.
+    pub lo: Option<f64>,
+    pub hi: Option<f64>,
     pub n: Option<i64>,
     pub src: Option<String>,
 }
 
-/// Mean per bucket, with min, max, n and the src ids of the points inside.
+/// Mean per bucket, with the lowest and highest reading, n and the src ids of the points inside.
 pub fn aggregate(points: &[Pt], resolution: &str) -> Vec<Value> {
     let mut sorted: Vec<&Pt> = points.iter().collect();
     sorted.sort_by_key(|p| p.date);
@@ -872,8 +875,11 @@ pub fn aggregate(points: &[Pt], resolution: &str) -> Vec<Value> {
             }
         }
         let mean = fsum(&vals) / vals.len() as f64;
-        let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        // the extremes of the readings themselves, not of the day means: a spike inside one day shows
+        let lows = ps.iter().filter(|p| p.v.is_some()).filter_map(|p| p.lo.or(p.v));
+        let highs = ps.iter().filter(|p| p.v.is_some()).filter_map(|p| p.hi.or(p.v));
+        let min = lows.fold(f64::INFINITY, f64::min);
+        let max = highs.fold(f64::NEG_INFINITY, f64::max);
         let n: i64 = ps.iter().map(|p| p.n.filter(|n| *n != 0).unwrap_or(1)).sum();
         let src = if srcs.len() > 1 {
             json!(srcs.iter().take(5).collect::<Vec<_>>())
@@ -999,11 +1005,15 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
             .into());
         }
         let days = rollups(call, &metric, since, until).await?;
+        // a summed metric's point is the day total; its readings' extremes are not on that scale
+        let summed = ownhealth_ingest_structured::wearables::metric(&metric).agg == "sum";
         let raw: Vec<Pt> = days
             .iter()
             .map(|d| Pt {
                 date: d.t.date_naive(),
                 v: d.v_day,
+                lo: if summed { None } else { d.v_min },
+                hi: if summed { None } else { d.v_max },
                 n: Some(i64::from(d.n)),
                 src: d.src.clone(),
             })
@@ -1197,6 +1207,8 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
                 .map(|(r, c)| Pt {
                     date: r.effective_at.date_naive(),
                     v: in_unit(c).map(|d| dec_f64(&d)),
+                    lo: None,
+                    hi: None,
                     n: None,
                     src: Some(r.src_id.clone()),
                 })
@@ -1284,6 +1296,49 @@ mod tests {
         assert_eq!(window_start("P3Y", d), NaiveDate::from_ymd_opt(2023, 3, 28));
         assert_eq!(window_start("P10D", d), NaiveDate::from_ymd_opt(2026, 3, 21));
         assert_eq!(window_start("all", d), None);
+    }
+
+    #[test]
+    fn a_spike_inside_one_day_shows_in_the_weekly_max() {
+        let d = |day| NaiveDate::from_ymd_opt(2026, 11, day).unwrap();
+        let day = |date, v, lo, hi| Pt {
+            date,
+            v: Some(v),
+            lo: Some(lo),
+            hi: Some(hi),
+            n: Some(1),
+            src: None,
+        };
+        // Mon 2 to Wed 4 Nov 2026: the day means stay near 60, one reading on 3 Nov reaches 142
+        let week = aggregate(
+            &[
+                day(d(2), 60.0, 52.0, 71.0),
+                day(d(3), 64.0, 50.0, 142.0),
+                day(d(4), 59.0, 48.0, 70.0),
+            ],
+            "week",
+        );
+        assert_eq!(week.len(), 1);
+        assert_eq!(week[0]["value"], json!(61.0));
+        assert_eq!(week[0]["min"], json!(48.0));
+        assert_eq!(week[0]["max"], json!(142.0));
+        // a point without its own extremes (a lab value) still counts with its value
+        let labs = aggregate(
+            &[
+                Pt {
+                    date: d(2),
+                    v: Some(3.1),
+                    lo: None,
+                    hi: None,
+                    n: None,
+                    src: None,
+                },
+                day(d(3), 4.0, 3.5, 4.4),
+            ],
+            "week",
+        );
+        assert_eq!(labs[0]["min"], json!(3.1));
+        assert_eq!(labs[0]["max"], json!(4.4));
     }
 
     #[test]

@@ -495,6 +495,53 @@ async fn wearable_trend_fills_days_from_the_next_source() -> R {
 }
 
 #[tokio::test]
+async fn a_year_trend_keeps_the_real_lows_and_highs() -> R {
+    // three days of one week in November 2026: the day means stay near 60, one reading reaches 142
+    let w = world().await?;
+    let pid = w.pid("alex");
+    let sid: i16 = sqlx::query_scalar(
+        "insert into wearable_source (profile_id, provider, device) values ($1, 'apple_health', 'Watch') returning id",
+    )
+    .bind(pid)
+    .fetch_one(&w.db.pool)
+    .await?;
+    for (day, lo, avg, hi) in [
+        (2, 52.0_f32, 60.0_f32, 71.0_f32),
+        (3, 50.0, 64.0, 142.0),
+        (4, 48.0, 59.0, 70.0),
+    ] {
+        sqlx::query(
+            "insert into wearable_rollup (profile_id, metric, source_id, bucket, t, n, v_min, v_max, v_avg, v_sum, \
+             v_p10, v_p50, v_p90, coverage) values ($1, 'hr', $2, 'day', $3, 600, $4, $6, $5, $5, $4, $5, $6, 1)",
+        )
+        .bind(pid)
+        .bind(sid)
+        .bind(format!("2026-11-{day:02}T00:00:00Z").parse::<chrono::DateTime<chrono::Utc>>()?)
+        .bind(lo)
+        .bind(avg)
+        .bind(hi)
+        .execute(&w.db.pool)
+        .await?;
+    }
+    let c = w.connect_real(&w.tok().await?).await?;
+    let env = c
+        .call(
+            "get_trend",
+            json!({"profile": "alex", "code": "hr", "window": "P1Y", "as_of": "2026-11-12"}),
+        )
+        .await?
+        .ok();
+    eprintln!("{}", serde_json::to_string(&env["data"]["points"])?);
+    assert_eq!(env["data"]["resolution"], "week");
+    let points = arr(&env["data"]["points"]);
+    assert_eq!(points.len(), 1);
+    assert_eq!(points[0]["value"], json!(61.0));
+    assert_eq!(points[0]["min"], json!(48.0));
+    assert_eq!(points[0]["max"], json!(142.0));
+    Ok(())
+}
+
+#[tokio::test]
 async fn trend_names_medication_annotations_it_withholds() -> R {
     let w = world().await?;
     let c = w
