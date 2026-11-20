@@ -5,7 +5,8 @@
 //!
 //! With `OWNHEALTH_FHIR_OUT=<dir>` the demo test also writes Alex's and Carmen's Bundles there, for
 //! the HL7 validator job (.github/workflows/fhir-validate.yml). Carmen's carries a vaccine, a
-//! procedure and a medicine with no date, so the job sees how the export states a date it lacks.
+//! procedure and a medicine with no date, so the job sees how the export states a date it lacks. The
+//! panel test writes a Bundle whose lab panel had a component rejected and one the sheet leaves out.
 
 #[path = "auth_support.rs"]
 mod support;
@@ -481,5 +482,142 @@ async fn a_caregiver_exports_and_a_viewer_gets_records_and_labs_withheld() -> R 
     // the full zip stays the owner's
     let r = sam.post("/api/profiles/alex/export", &json!({"fmt": "zip"})).await?;
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{:?}", r.json);
+    Ok(())
+}
+
+/// A lab panel sent as one Observation becomes one row per component, each keeping the panel as its
+/// stored FHIR. The IPS carries that panel once, not once per row, and only with the components the
+/// sheet shows: Free T4 (its LOINC code is wrong, so it waits in review) is rejected, and Leukocytes
+/// is not a test the ips view lists. With `OWNHEALTH_FHIR_OUT=<dir>` the Bundle goes to the validator.
+#[tokio::test]
+async fn a_panel_is_one_entry_with_only_the_components_the_sheet_shows() -> R {
+    ownhealth_ingest_structured::register();
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let blobs = BlobStore::new(db.settings(dir.path())?.blobs_path())?;
+    let mut c = db.pool.acquire().await?;
+    let h = create_household(&mut c, "Ortega").await?;
+    let carmen = create_profile(
+        &mut c,
+        &ProfileIn {
+            household_id: h,
+            slug: "carmen".into(),
+            display_name: "Carmen Ortega".into(),
+            relationship: Some("self".into()),
+            birth_date: chrono::NaiveDate::from_ymd_opt(1958, 3, 2),
+            sex_at_birth: Some("female".into()),
+            country: Some("ES".into()),
+            user_id: None,
+            unit_pref: None,
+        },
+    )
+    .await?;
+    let user = ownhealth_core::access::create_user(&mut c, h, "Carmen Ortega", "en", None).await?;
+    let quantity = |code: &str, name: &str, value: f64, unit: &str| {
+        json!({
+            "code": {"coding": [{"system": "http://loinc.org", "code": code, "display": name}]},
+            "valueQuantity": {"value": value, "unit": unit, "system": "http://unitsofmeasure.org", "code": unit},
+        })
+    };
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "id": "labnorte-panel",
+        "type": "collection",
+        "entry": [{"fullUrl": "urn:uuid:5f0c2d1e-0000-4000-8000-000000000001", "resource": {
+            "resourceType": "Observation",
+            "id": "labnorte-panel-1",
+            "status": "final",
+            "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
+            "code": {"coding": [{"system": "http://loinc.org", "code": "24323-8", "display": "Comprehensive metabolic panel"}]},
+            "effectiveDateTime": "2026-10-01T09:00:00+02:00",
+            "component": [
+                quantity("2345-7", "Glucose", 94.0, "mg/dL"),
+                quantity("2160-0", "Creatinine", 1.0, "mg/dL"),
+                quantity("3024-6", "Free T4", 1.2, "ng/dL"),
+                quantity("1742-6", "ALT", 21.0, "U/L"),
+                quantity("6690-2", "Leukocytes", 6.2, "10*3/uL"),
+            ],
+        }}],
+    });
+    let bytes = serde_json::to_vec(&bundle)?;
+    let sha = blobs.put_bytes(&bytes)?;
+    let doc = create_document(
+        &mut c,
+        &NewDocument {
+            filename: Some("labnorte.json"),
+            ..NewDocument::upload(h, Some(carmen), &sha, "application/fhir+json", bytes.len() as i64)
+        },
+    )
+    .await?;
+    let (_, entries) = read_entries(&bytes, false)?;
+    let profile = get_profile(&mut c, carmen).await?.expect("carmen");
+    import_resources(
+        &mut c,
+        &entries,
+        &profile,
+        doc.id,
+        "labnorte-panel",
+        Some("matched"),
+        "FHIR",
+    )
+    .await?;
+    let held: Vec<Uuid> = sqlx::query_scalar("select id from review_item where profile_id = $1 and status = 'open'")
+        .bind(carmen)
+        .fetch_all(&mut *c)
+        .await?;
+    assert_eq!(held.len(), 1, "Free T4 waits in review");
+    ownhealth_core::review::reject(&mut c, held[0], user, "not my result").await?;
+    drop(c);
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "select loinc, src_id from observation where profile_id = $1 and status = 'current' order by loinc",
+    )
+    .bind(carmen)
+    .fetch_all(&db.pool)
+    .await?;
+    let src_of = |loinc: &str| {
+        rows.iter()
+            .find(|r| r.0 == loinc)
+            .map(|r| r.1.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(rows.len(), 4, "one row per accepted component: {rows:?}");
+
+    let out = export(&db, carmen, "en").await?;
+    if let Ok(dir) = std::env::var("OWNHEALTH_FHIR_OUT") {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(format!("{dir}/ips-panel-en.json"), out.to_bytes()?)?;
+    }
+    // the narrative cites each shown row; the coded panel names the first one
+    let shown = [src_of("2345-7"), src_of("2160-0"), src_of("1742-6")];
+    assert_eq!(out.srcs, shown, "{}", out.bundle);
+
+    let b = out.bundle;
+    let results = sections(&b)
+        .into_iter()
+        .find(|s| code(s) == "30954-2")
+        .expect("a Results section");
+    let refs = results["entry"].as_array().cloned().unwrap_or_default();
+    assert_eq!(refs.len(), 1, "{results}");
+    let panels: Vec<&Value> = b["entry"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| &e["resource"])
+        .filter(|r| r["resourceType"] == "Observation")
+        .collect();
+    assert_eq!(panels.len(), 1, "the panel is in the Bundle once: {b}");
+    assert_eq!(*target(&b, &refs[0]["reference"]), *panels[0]);
+    let components: Vec<&str> = panels[0]["component"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(code)
+        .collect();
+    assert_eq!(components, ["2345-7", "2160-0", "1742-6"], "{}", panels[0]);
+    assert_eq!(panels[0]["meta"]["source"], format!("urn:ownhealth:src:{}", shown[0]));
+    let div = results["text"]["div"].as_str().unwrap_or_default();
+    assert!(shown.iter().all(|s| div.contains(s.as_str())), "{div}");
+    assert!(!div.contains(&src_of("6690-2")), "{div}");
+    assert_eq!(dangling(&b), Vec::<String>::new());
     Ok(())
 }
