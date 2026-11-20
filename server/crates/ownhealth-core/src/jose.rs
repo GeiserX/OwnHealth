@@ -199,7 +199,12 @@ pub fn verify_es256(compact: &str, key: &VerifyingKey, max_len: usize) -> Result
         return Err(JoseError::Unsupported("alg"));
     }
     let deflate = zip_of(&header)?;
-    let signature = b64(signature).map_err(|_| JoseError::BadSignature)?;
+    // A signature that does not decode or is not 64 bytes is malformed; 64 bytes that are no
+    // valid r || s (a zero or out-of-range scalar) do not verify.
+    let signature = b64(signature)?;
+    if signature.len() != 64 {
+        return Err(JoseError::Malformed("the signature is not 64 bytes"));
+    }
     let signature = Signature::from_slice(&signature).map_err(|_| JoseError::BadSignature)?;
     let signing_input = &compact[..protected.len() + 1 + payload.len()];
     key.verify(signing_input.as_bytes(), &signature)
@@ -236,7 +241,15 @@ pub fn es256_key(jwk: &Value) -> Result<VerifyingKey, JoseError> {
     VerifyingKey::from_sec1_bytes(&sec1).map_err(|_| JoseError::Key("the point is not on P-256"))
 }
 
+/// The `N` dot-separated parts, each only base64url characters (no padding, space or line break),
+/// so a changed byte in a signed part is reported as malformed before any signature check.
 fn split<'a, const N: usize>(compact: &'a str, what: &'static str) -> Result<[&'a str; N], JoseError> {
+    if !compact
+        .bytes()
+        .all(|b| b == b'.' || b == b'-' || b == b'_' || b.is_ascii_alphanumeric())
+    {
+        return Err(JoseError::Malformed("a part is not base64url"));
+    }
     let parts: Vec<&str> = compact.split('.').collect();
     parts.try_into().map_err(|_| JoseError::Malformed(what))
 }
@@ -643,15 +656,62 @@ mod tests {
             Some(JoseError::BadSignature),
             "signature"
         );
-        // r = 0, s = 0, a short signature, and DER instead of raw r||s
-        for bad in [vec![0u8; 64], vec![1u8; 63], vec![0x30, 0x44, 0x02, 0x20]] {
+        // r = 0 and s = 0 is 64 bytes but no signature
+        let mut p = parts(SHC_JWS);
+        p[2] = b64(&[0u8; 64]);
+        assert_eq!(
+            verify_es256(&p.join("."), &key, MIB).err(),
+            Some(JoseError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn a_signature_that_is_not_64_bytes_is_malformed_even_with_the_real_one_inside() {
+        let key = es256_key(&shc_issuer_jwk()).expect("jwk");
+        let real = URL_SAFE_NO_PAD.decode(parts(SHC_JWS)[2].as_str()).expect("b64");
+        // the real r||s with one more byte would verify if the signature were cut to 64 bytes
+        let mut long = real.clone();
+        long.push(0);
+        let der = vec![0x30, 0x44, 0x02, 0x20];
+        for bad in [long, real[..63].to_vec(), der, Vec::new()] {
             let mut p = parts(SHC_JWS);
             p[2] = b64(&bad);
             assert_eq!(
                 verify_es256(&p.join("."), &key, MIB).err(),
-                Some(JoseError::BadSignature)
+                Some(JoseError::Malformed("the signature is not 64 bytes")),
+                "{} bytes",
+                bad.len()
             );
         }
+    }
+
+    #[test]
+    fn a_character_outside_base64url_in_any_part_is_malformed_not_a_bad_signature() {
+        let key = es256_key(&shc_issuer_jwk()).expect("jwk");
+        for part in 0..3 {
+            for intruder in ["\n", "\r\n", " ", "=", "+", "/", "%"] {
+                let mut p = parts(SHC_JWS);
+                let at = p[part].len() / 2;
+                p[part].insert_str(at, intruder);
+                let compact = p.join(".");
+                assert!(
+                    matches!(verify_es256(&compact, &key, MIB), Err(JoseError::Malformed(_))),
+                    "part {part}, {intruder:?}: {:?}",
+                    verify_es256(&compact, &key, MIB).err()
+                );
+                assert!(matches!(jws_header(&compact), Err(JoseError::Malformed(_))));
+                assert!(matches!(jws_unverified(&compact, MIB), Err(JoseError::Malformed(_))));
+            }
+        }
+        let jwe = key32(NODE_KEY);
+        for part in [0, 2, 3, 4] {
+            let mut p = parts(NODE_JWE_RAW);
+            let at = p[part].len() / 2;
+            p[part].insert(at, '\n');
+            assert!(matches!(decrypt(&jwe, &p.join("."), MIB), Err(JoseError::Malformed(_))));
+        }
+        // the clean card still verifies
+        assert!(verify_es256(SHC_JWS, &key, MIB).is_ok());
     }
 
     #[test]
