@@ -61,17 +61,35 @@ impl From<JoseError> for crate::error::Error {
 }
 
 /// A JWE that opened: its protected header (`cty` says what the plaintext is) and the plaintext.
-#[derive(Debug)]
+/// Its Debug shows the header and the plaintext length only: the plaintext is health data.
 pub struct Decrypted {
     pub header: Header,
     pub plaintext: Vec<u8>,
 }
 
+impl std::fmt::Debug for Decrypted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Decrypted")
+            .field("header", &self.header)
+            .field("plaintext_len", &self.plaintext.len())
+            .finish()
+    }
+}
+
 /// A JWS that verified: its protected header and the payload, inflated when `zip` was `DEF`.
-#[derive(Debug)]
+/// Its Debug shows the header and the payload length only: the payload is health data.
 pub struct Verified {
     pub header: Header,
     pub payload: Vec<u8>,
+}
+
+impl std::fmt::Debug for Verified {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Verified")
+            .field("header", &self.header)
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
 }
 
 /// A compact JWE (`dir`, `A256GCM`) of `plaintext`, with a fresh random IV. `cty` goes in the
@@ -374,6 +392,26 @@ mod tests {
             encrypt(&key, b"x", None, false).expect("a"),
             encrypt(&key, b"x", None, false).expect("b")
         );
+    }
+
+    #[test]
+    fn debug_shows_the_header_and_the_length_never_the_health_data() {
+        // "Rivera" as the bytes a derived Debug of a Vec<u8> prints
+        let rivera = "82, 105, 118, 101, 114, 97";
+        let key = key32(NODE_KEY);
+        let opened = format!("{:?}", decrypt(&key, NODE_JWE_RAW, MIB).expect("decrypt"));
+        assert!(!opened.contains(rivera), "{opened}");
+        assert!(!opened.contains("Rivera"), "{opened}");
+        assert!(opened.contains("application/fhir+json"), "{opened}");
+        assert!(opened.contains(&format!("plaintext_len: {}", NODE_PLAINTEXT.len())), "{opened}");
+        let signer = signing_key(5);
+        let vk = es256_key(&jwk_of(&signer)).expect("jwk");
+        let compact = jws(&signer, json!({"alg": "ES256", "kid": "k1"}), NODE_PLAINTEXT.as_bytes());
+        let verified = format!("{:?}", verify_es256(&compact, &vk, MIB).expect("verify"));
+        assert!(!verified.contains(rivera), "{verified}");
+        assert!(!verified.contains("Rivera"), "{verified}");
+        assert!(verified.contains("k1"), "{verified}");
+        assert!(verified.contains(&format!("payload_len: {}", NODE_PLAINTEXT.len())), "{verified}");
     }
 
     #[test]
