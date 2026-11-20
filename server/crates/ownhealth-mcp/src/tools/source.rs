@@ -10,7 +10,7 @@ use ownhealth_core::Error;
 use ownhealth_core::access::effective_permission;
 use ownhealth_core::documents::document_is_sensitive;
 use ownhealth_core::provenance::{FACT_TABLES, resolve_src};
-use ownhealth_core::pyjson::row_to_json;
+use ownhealth_core::pyjson::{py_date, row_to_json};
 use ownhealth_core::text::untrusted;
 use serde_json::{Map, Value, json};
 use sqlx::AssertSqlSafe;
@@ -84,16 +84,24 @@ fn printed(table: &str, row: &Map<String, Value>, origin: &str) -> Value {
             "flag": w(row.get("printed_flag"), origin),
         });
     }
-    // A visit (encounter) has no name: its reason, else its clinic, is what was written.
-    for col in [
-        "name",
-        "text",
-        "substance",
-        "vaccine",
-        "description",
-        "reason_text",
-        "provider_name",
-    ] {
+    if table == "encounter" {
+        // A visit has no name: an agent needs why, where and when, each only when written.
+        let mut out = Map::new();
+        for (key, col) in [("reason", "reason_text"), ("provider", "provider_name")] {
+            if let Some(v) = row.get(col).filter(|v| !v.is_null()) {
+                out.insert(key.into(), w(Some(v), origin));
+            }
+        }
+        let start = row
+            .get("period_start")
+            .and_then(Value::as_str)
+            .and_then(parse_iso_datetime);
+        if let Some(dt) = start {
+            out.insert("date".into(), json!(py_date(&dt.with_timezone(&Utc).date_naive())));
+        }
+        return Value::Object(out);
+    }
+    for col in ["name", "text", "substance", "vaccine", "description"] {
         if let Some(v) = row.get(col).filter(|v| !v.is_null()) {
             return json!({"name": w(Some(v), origin)});
         }
