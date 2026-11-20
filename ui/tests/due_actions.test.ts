@@ -2,7 +2,7 @@
 // again", in one section only, and a new snooze starts no earlier than tomorrow.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { addDays, docLabel, dueGroups, evidenceDay, evidenceLimit, offersDocument, shownAgain, type DueItem } from '../src/lib/logic/due.ts';
+import { addDays, docLabel, documentEvidence, dueGroups, evidenceDay, evidenceLimit, offersDocument, shownAgain, type DueItem } from '../src/lib/logic/due.ts';
 
 const item = (key: string, status: DueItem['status'], extra: Partial<DueItem> = {}): DueItem => ({
 	key,
@@ -82,4 +82,53 @@ test('the evidence limit is the UTC day the server checks, even where the local 
 	assert.equal(evidenceLimit(now), '2026-11-12');
 	assert.equal(evidenceDay('2026-11-13', evidenceLimit(now)), null);
 	assert.equal(evidenceLimit(new Date('2026-11-13T00:30:00Z')), '2026-11-13');
+});
+
+// documents as GET /profiles/{p}/documents gives them, newest evidence first
+const apiDoc = (id: string, collected: string | null, reported: string | null, evidence: string | null, status = 'active') => ({
+	id,
+	household_id: 'h1',
+	profile_id: 'p1',
+	filename: { trust: 'untrusted_text', origin: 'document', text: `${id}.pdf` },
+	mime: 'application/pdf',
+	doc_type: 'imaging',
+	provider_name: 'LabNorte',
+	collected_at: collected,
+	reported_at: reported,
+	status,
+	pages: 1,
+	evidence_day: evidence
+});
+
+test('the Done picker offers a mammogram report dated only by its report date, with that day', () => {
+	const now = new Date('2026-11-21T10:00:00Z');
+	const docs = [
+		apiDoc('A_mamografia_solo_informe', null, '2026-11-08T09:30:00Z', '2026-11-08'),
+		apiDoc('LabNorte_2025-07-15', '2025-07-15T08:00:00Z', null, '2025-07-15'),
+		apiDoc('D_sin_fecha', null, null, null),
+		apiDoc('G_retirado', null, '2026-11-02T09:00:00Z', '2026-11-02', 'retracted')
+	];
+	assert.deepEqual(documentEvidence(docs, false, now), [
+		{ value: 'document:A_mamografia_solo_informe', label: 'A_mamografia_solo_informe.pdf · 2026-11-08' },
+		{ value: 'document:LabNorte_2025-07-15', label: 'LabNorte_2025-07-15.pdf · 2025-07-15' }
+	]);
+	// a document gap also takes the undated copy
+	assert.deepEqual(
+		documentEvidence(docs, true, now).map((o) => o.value),
+		['document:A_mamografia_solo_informe', 'document:LabNorte_2025-07-15', 'document:D_sin_fecha']
+	);
+});
+
+test('the Done picker leaves out a report of the next UTC day, even where the local day is already that day', () => {
+	const tz = process.env.TZ;
+	process.env.TZ = 'Europe/Madrid';
+	try {
+		// 00:30 in Madrid on 21 November is still 20 November on the server, which refuses a report of the 21st
+		const now = new Date('2026-11-20T23:30:00Z');
+		const docs = [apiDoc('J_informe_hoy_local', null, '2026-11-21T00:05:00Z', '2026-11-21'), apiDoc('I_informe', null, '2026-11-20T00:15:00Z', '2026-11-20')];
+		assert.deepEqual(documentEvidence(docs, false, now).map((o) => o.value), ['document:I_informe']);
+	} finally {
+		if (tz === undefined) delete process.env.TZ;
+		else process.env.TZ = tz;
+	}
 });

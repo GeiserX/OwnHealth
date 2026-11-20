@@ -162,6 +162,20 @@ export function evidenceDay(v: unknown, today: string): string | null {
 }
 
 /**
+ * The documents the Done evidence list offers, as options: active ones with an evidence day (the
+ * collection day, else the report day) on or before the server's today `evidenceLimit(now)`, and for
+ * a document gap also the undated ones. The list comes newest evidence first, as the server sorts it.
+ */
+export function documentEvidence(
+	items: { id: string; status: string; filename?: { text: string } | string | null; doc_type?: string | null; evidence_day?: string | null }[],
+	anyDocument: boolean,
+	now = new Date()
+): { value: string; label: string }[] {
+	const limit = evidenceLimit(now);
+	return items.filter((d) => offersDocument(d, limit, anyDocument)).map((d) => ({ value: `document:${d.id}`, label: docLabel(d) }));
+}
+
+/**
  * The last day the server takes as `done` evidence: its own today, on the UTC calendar. East of UTC
  * the browser's local day can already be tomorrow there, and a record of that day would be refused.
  */
