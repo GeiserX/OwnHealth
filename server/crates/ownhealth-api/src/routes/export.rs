@@ -99,6 +99,10 @@ async fn export(
         .and_then(Value::as_object)
         .map_or(0, |m| m.values().filter_map(Value::as_u64).sum());
     let files = manifest.get("files").and_then(Value::as_array).map_or(0, Vec::len);
+    tx.commit().await?;
+    // the audit chain links a row at commit, which a repeatable read snapshot cannot do, so the row
+    // goes in its own transaction, still before any byte of the export is sent
+    let mut tx = rt.pool.begin().await?;
     write_audit(
         &mut tx,
         &AuditEvent {

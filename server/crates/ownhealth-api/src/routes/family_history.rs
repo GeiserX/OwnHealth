@@ -412,11 +412,14 @@ async fn pedigree(State(rt): State<Runtime>, caller: Caller, Path(p): Path<Strin
     let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
     let rows = shown(&mut tx, &caller.0, &perm).await?;
     let ids: Vec<String> = rows.iter().map(|r| r.member.id.to_string()).collect();
-    audit(&mut tx, &caller.0, &perm, "read", &ids).await?;
     let today = ownhealth_core::access::today_utc();
     // the guideline patterns of these same relatives (ownhealth.family/v1), for the patterns card
     let patterns =
         ownhealth_rules::family::build_document(&mut tx, &caller.0, &perm.profile, &perm.scopes, today).await?;
+    tx.commit().await?;
+    // the audit chain links a row at commit, which a repeatable read snapshot cannot do
+    let mut tx = rt.pool.begin().await?;
+    audit(&mut tx, &caller.0, &perm, "read", &ids).await?;
     tx.commit().await?;
     let cat = family::catalog()?;
     let nodes: Vec<Value> = rows
