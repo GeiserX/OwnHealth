@@ -271,6 +271,28 @@ async fn get_source_lifecycle() -> R {
 }
 
 #[tokio::test]
+async fn get_source_prints_a_visit_reason_else_its_clinic() -> R {
+    let w = world().await?;
+    let alex = w.pid("alex");
+    let mut conn = w.conn().await?;
+    let visit = json!({"profile_id": alex, "class": "AMB", "provider_name": "Centro de Salud Norte",
+                       "period_start": "2026-09-10T09:00:00+00:00", "reason_text": "Dolor de rodilla"});
+    let with_reason = add_record_json(&mut conn, "visit", visit, alex).await?;
+    let visit = json!({"profile_id": alex, "provider_name": "LabNorte", "period_start": "2026-10-02T08:30:00+00:00"});
+    let clinic_only = add_record_json(&mut conn, "visit", visit, alex).await?;
+    let c = w.connect(&w.tok().await?).await?;
+    let env = c.call("get_source", json!({"src_id": with_reason})).await?.ok();
+    assert_eq!(env["data"]["fact"]["table"], "encounter");
+    assert_eq!(
+        env["data"]["printed"]["name"],
+        json!({"trust": "untrusted_text", "origin": "person_note", "text": "Dolor de rodilla"})
+    );
+    let env = c.call("get_source", json!({"src_id": clinic_only})).await?.ok();
+    assert_eq!(env["data"]["printed"]["name"]["text"], "LabNorte");
+    Ok(())
+}
+
+#[tokio::test]
 async fn genome_findings_and_lookup() -> R {
     let w = world().await?;
     let c = w.connect(&w.tok().await?).await?;

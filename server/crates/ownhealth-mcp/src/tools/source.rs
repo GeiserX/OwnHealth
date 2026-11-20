@@ -84,7 +84,16 @@ fn printed(table: &str, row: &Map<String, Value>, origin: &str) -> Value {
             "flag": w(row.get("printed_flag"), origin),
         });
     }
-    for col in ["name", "text", "substance", "vaccine", "description"] {
+    // A visit (encounter) has no name: its reason, else its clinic, is what was written.
+    for col in [
+        "name",
+        "text",
+        "substance",
+        "vaccine",
+        "description",
+        "reason_text",
+        "provider_name",
+    ] {
         if let Some(v) = row.get(col).filter(|v| !v.is_null()) {
             return json!({"name": w(Some(v), origin)});
         }
