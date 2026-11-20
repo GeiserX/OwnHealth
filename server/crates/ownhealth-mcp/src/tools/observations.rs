@@ -585,8 +585,14 @@ async fn rollups(
         "day",
     )
     .await?;
-    if let Some(note) = ownhealth_ingest_structured::wearables::left_out_note(&series, "en") {
-        limitations.push(json!(note));
+    // device names come from imports (security-privacy.md section 5 row 1): wrapped, never in the sentence;
+    // fhir_note is the origin of other imported text with no document (origin_of)
+    if let Some((shown, names)) = ownhealth_ingest_structured::wearables::left_out_names(&series) {
+        limitations.push(json!({
+            "note": ownhealth_ingest_structured::wearables::LEFT_OUT_SENTENCE,
+            "shown": wrap(Some(shown), "fhir_note"),
+            "left_out": names.iter().map(|n| wrap(Some(n), "fhir_note")).collect::<Vec<_>>(),
+        }));
     }
     let points = series.points;
     let apple: HashSet<i16> = sqlx::query_scalar::<_, i16>(

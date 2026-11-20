@@ -544,9 +544,9 @@ pub async fn points_and_left_out(
     })
 }
 
-/// The limitation line of a one-source series that left a source out: which it shows and which not.
-/// A left-out name equal to the shown one (two sources of one device) is not repeated.
-pub fn left_out_note(series: &Series, lang: &str) -> Option<String> {
+/// The source a one-source series shows and the other names it left out, when it left one out. A
+/// left-out name equal to the shown one (two sources of one device) is not repeated.
+pub fn left_out_names(series: &Series) -> Option<(&str, Vec<&str>)> {
     let shown = series.shown.as_deref().filter(|_| !series.left_out.is_empty())?;
     let mut names: Vec<&str> = Vec::new();
     for n in &series.left_out {
@@ -554,6 +554,17 @@ pub fn left_out_note(series: &Series, lang: &str) -> Option<String> {
             names.push(n);
         }
     }
+    Some((shown, names))
+}
+
+/// The same limitation without the names, for MCP: device names come from imports, so the agent gets
+/// them beside this sentence as untrusted text.
+pub const LEFT_OUT_SENTENCE: &str =
+    "HRV from one source only (shown). Not mixed with HRV from other sources in this window (left_out).";
+
+/// The limitation line of a one-source series that left a source out: which it shows and which not.
+pub fn left_out_note(series: &Series, lang: &str) -> Option<String> {
+    let (shown, names) = left_out_names(series)?;
     let rest = if names.is_empty() {
         String::new()
     } else {
@@ -578,7 +589,7 @@ pub fn phrases() -> Value {
         ..series.clone()
     };
     json!({
-        "en": [left_out_note(&series, "en"), left_out_note(&same, "en")],
+        "en": [left_out_note(&series, "en"), left_out_note(&same, "en"), Some(LEFT_OUT_SENTENCE.to_string())],
         "es": [left_out_note(&series, "es"), left_out_note(&same, "es")],
     })
 }
