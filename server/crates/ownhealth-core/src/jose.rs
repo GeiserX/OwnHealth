@@ -54,6 +54,9 @@ pub enum JoseError {
     Key(&'static str),
 }
 
+/// Every variant becomes one `Error::Invalid(String)`. A caller that answers differently per
+/// variant (the SHC and SHL receivers: a wrong passcode key, an expired link, a bomb, a bad
+/// signature) must match on the [`JoseError`] before it uses `?`.
 impl From<JoseError> for crate::error::Error {
     fn from(e: JoseError) -> Self {
         crate::error::Error::Invalid(e.to_string())
@@ -192,6 +195,10 @@ pub fn jws_unverified(compact: &str, max_len: usize) -> Result<(Header, Vec<u8>)
 /// Verify a compact JWS with `alg: ES256` against `key` and return its payload, inflated when the
 /// header says `zip: DEF`. The payload must fit in `max_len` bytes. A high-S signature verifies:
 /// RFC 7518 has no low-S rule and WebCrypto signers emit one about half the time.
+///
+/// The key was chosen from unverified data ([`jws_header`] or [`jws_unverified`]). After this
+/// returns, the caller must check that the verified payload `iss` is the issuer whose JWKS gave
+/// `key`: otherwise any issuer's key signs for any other issuer.
 pub fn verify_es256(compact: &str, key: &VerifyingKey, max_len: usize) -> Result<Verified, JoseError> {
     let [protected, payload, signature] = split::<3>(compact, "a JWS has three parts")?;
     let header = parse_header(protected)?;
