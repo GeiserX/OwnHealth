@@ -17,7 +17,7 @@
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
-	import { addDays, docLabel, dueColor, dueGroups, evidenceDay, evidenceLimit, isOpen, type DueDecisionIn, type DueDoc, type DueItem } from '#lib/logic/due';
+	import { addDays, docLabel, dueColor, dueGroups, evidenceDay, evidenceLimit, isOpen, offersDocument, type DueDecisionIn, type DueDoc, type DueItem } from '#lib/logic/due';
 	import { todayIso } from '#lib/logic/people';
 	import { currentProfile } from '#lib/state/app.svelte';
 	import Tabs from './next-draw/Tabs.svelte';
@@ -144,9 +144,7 @@
 			...imm.items.filter(recDay).map(rec('immunization', t('due_f_vaccine'))),
 			...proc.items.filter(recDay).map(rec('procedure', t('due_f_procedure'))),
 			...docs.items
-				// a document needs a clinical date to count, and this list knows only its collection day; for a
-				// document gap any copy that came counts, from its upload day when it has no date
-				.filter((d) => d.status === 'active' && (day(d.collected_at) || (anyDocument && !d.collected_at)))
+				.filter((d) => offersDocument(d, limit, anyDocument))
 				.map((d) => ({ value: `document:${d.id}`, label: docLabel(d), group: t('due_ev_document') }))
 		];
 	}

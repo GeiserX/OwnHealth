@@ -136,11 +136,20 @@ export function dueGroups(items: DueItem[]): { id: 'again' | 'open' | 'done' | '
 
 /**
  * The label of a document in the Done evidence list: its file name (untrusted text from the
- * document, shown as plain text), else its type, else the start of its id, and its day.
+ * document, shown as plain text), else its type, else the start of its id, and its evidence day.
  */
-export function docLabel(d: { id: string; filename?: { text: string } | string | null; doc_type?: string | null; collected_at?: string | null }): string {
+export function docLabel(d: { id: string; filename?: { text: string } | string | null; doc_type?: string | null; evidence_day?: string | null }): string {
 	const name = typeof d.filename === 'string' ? d.filename : d.filename?.text;
-	return [name || d.doc_type || d.id.slice(0, 8), d.collected_at?.slice(0, 10)].filter(Boolean).join(' · ');
+	return [name || d.doc_type || d.id.slice(0, 8), d.evidence_day?.slice(0, 10)].filter(Boolean).join(' · ');
+}
+
+/**
+ * Whether the Done evidence list offers a document. It needs an evidence day (its collection day,
+ * else its report day) on or before `today`, as the server checks it. For a document gap, any
+ * active copy counts: one with no day counts from its upload day.
+ */
+export function offersDocument(d: { status: string; evidence_day?: string | null }, today: string, anyDocument: boolean): boolean {
+	return d.status === 'active' && (!!evidenceDay(d.evidence_day, today) || (anyDocument && !d.evidence_day));
 }
 
 /**
