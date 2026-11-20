@@ -581,6 +581,7 @@ Output:
 ```
 
 - `status` is the lifecycle: `provisional` (still in the review queue), `current`, `superseded` (with `superseded_by`) or `retracted` (with reason); `gone` means deleted in the UI. An id the token's profiles do not own returns `unknown`, the same as an id that never existed, so ids do not leak existence.
+- `printed` holds what was written, as untrusted text. A lab value has `name`, `value`, `unit`, `range` and `flag`. A visit has `reason`, `provider` (the clinic) and `date` (the day it started), each only when recorded, for example `{"reason": {"trust": "untrusted_text", "origin": "person_note", "text": "Dolor de rodilla"}, "provider": {…}, "date": "2026-09-10"}`. Other records have a `name`.
 - `location` and `crop_url` exist only for values read from a document. Other sources fill `import` instead and set `location` to null: for FHIR the resource type and id plus a JSON pointer, for Apple Health the record type and start time in `export.xml`, for genome facts the facts file and finding id, for manual entries the user and time of entry (architecture.md `src.kind`).
 - `crop_url` is a UI deep link that needs a logged-in session. It is not a bearer capability and gives nothing to whoever holds the URL alone.
 - `extraction.accepted` is `auto` when the row met the auto-accept rule (ingestion.md section 9: every check passed, row confidence at least 0.95, the source allows it, the identity matches) or `person` with `confirmed_at` when someone confirmed it in the queue.
