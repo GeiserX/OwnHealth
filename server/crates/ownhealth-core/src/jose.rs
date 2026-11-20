@@ -243,7 +243,7 @@ fn capped(body: Vec<u8>, deflate: bool, max_len: usize) -> Result<Vec<u8>, JoseE
     let out = if deflate {
         let mut out = Vec::new();
         flate2::read::DeflateDecoder::new(body.as_slice())
-            .take(max_len as u64 + 1)
+            .take((max_len as u64).saturating_add(1))
             .read_to_end(&mut out)
             .map_err(|_| JoseError::Malformed("zip DEF content is not DEFLATE"))?;
         out
@@ -481,6 +481,20 @@ mod tests {
         // DEF that is not DEFLATE
         let junk = jwe_with_header(&key, json!({"alg": "dir", "enc": "A256GCM", "zip": "DEF"}), &[0xff; 32]);
         assert!(matches!(decrypt(&key, &junk, MIB), Err(JoseError::Malformed(_))));
+    }
+
+    #[test]
+    fn a_cap_of_usize_max_inflates_everything_and_never_wraps_to_zero() {
+        // `max_len + 1` overflowed here: a panic in debug, and in release a take(0) that returned
+        // an empty plaintext as if it had opened.
+        let key = [3u8; KEY_LEN];
+        let body = br#"{"resourceType":"Bundle"}"#.repeat(20);
+        let compact = encrypt(&key, &body, None, true).expect("encrypt");
+        assert_eq!(decrypt(&key, &compact, usize::MAX).expect("decrypt").plaintext, body);
+        let signer = signing_key(5);
+        let vk = es256_key(&jwk_of(&signer)).expect("jwk");
+        let jws = jws(&signer, json!({"alg": "ES256", "zip": "DEF"}), &raw_deflate(&body));
+        assert_eq!(verify_es256(&jws, &vk, usize::MAX).expect("verify").payload, body);
     }
 
     // ---- JWS ----
