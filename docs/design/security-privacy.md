@@ -205,7 +205,7 @@ A profile without a login (a minor, an elderly parent) is managed through `guard
 
 For a family member who is hospitalised, unconscious or dead.
 
-1. The owner pre-designates emergency contacts and what they would see (default: summary, records, labs, medications; not `read:sensitive`, not genome raw).
+1. The owner pre-designates emergency contacts and what they would see (default: summary, records, labs, medications; not `read:sensitive`, not genome raw). Designating a contact needs an active calendar feed.
 2. A contact requests access with a reason.
 3. The owner is notified at once and can reject. If not rejected within the delay (default 48 hours, configurable 12 to 168), a read-only grant opens for 14 days, once the owner's calendar feed has been fetched since the request; until then the request stays requested.
 4. Every step and every read during the grant is in the audit log, shown to the owner at next login.
@@ -249,15 +249,15 @@ Sealed mode is cut from 1.0 (later). It protects the blobs and sensitive free te
 
 ### 7.3 Crypto-shredding
 
-Deleting a profile destroys its wrapped DEK. Its blobs become unreadable everywhere, including in backups, once no retained backup still holds that wrapped DEK. Typed rows are deleted with SQL and stay in older Postgres dumps, pre-migration dumps included, until those are pruned. The delete screen states the date at which the last backup holding the profile expires and offers "prune backups now".
+Deleting a profile destroys its wrapped DEK and rewrites the keyring at once. Its blobs and connector tokens become unreadable at once, backups included: `pg_dump` leaves out the `profile_key` table, and the keyring sits on its own mount outside every backup and versioned copy. The limit: a keyring copy taken before the delete reopens the profile, so the delete screen says every older copy of the keyring must be destroyed. Typed rows are deleted with SQL and stay in older Postgres dumps, pre-migration dumps included, until those are pruned. The delete screen states the date at which the last dump holding those rows expires and offers "prune backups now".
 
 ## 8. Backups
 
-- One command: `ownhealth backup` runs `pg_dump -Fc`, the blob directory and (v1.0) the wrapped-DEK table into restic (BSD-2-Clause) on any restic backend (S3-compatible, SFTP, local disk). Orthanc storage and index join the same run when the `imaging` profile is on.
-- The restic password and (from v1.0) the KEK are never inside the backup. The setup page refuses to mark backups "configured" until the user confirms the restic password is in a password manager; from v1.0, when profile keys exist, it asks the same for the KEK. Each is shown once.
+- One command: `ownhealth backup` runs `pg_dump -Fc` and the blob directory into restic (BSD-2-Clause) on any restic backend (S3-compatible, SFTP, local disk). Orthanc storage and index join the same run when the `imaging` profile is on.
+- The restic password and (from v1.0) the KEK are never inside the backup. From v1.0 the dump leaves out the wrapped-DEK table, and the keyring is never in restic (section 7.3). The setup page refuses to mark backups "configured" until the user confirms the restic password is in a password manager; from v1.0, when profile keys exist, it asks the same for the KEK. Each is shown once.
 - **Restore test**, weekly by default: restore the latest snapshot into a throwaway compose project, then compare row counts per table, every blob hash, each profile's `state_hash` and, when the `imaging` profile is on, the imaging inventory (Orthanc study, series and instance counts and each instance's hash, read from the restored Orthanc) against the values recorded in that backup's manifest ([architecture.md section 14](architecture.md#14-backup-and-restore)), not against the live instance, which may have changed since. A mismatch is an alert on the dashboard. We ship a broken-snapshot fixture so the test is seen to fail.
 - A backup that has never passed a restore test is shown as "untested", not as a backup.
-- Retention default: 7 daily, 4 weekly, 12 monthly. This retention is also the crypto-shredding window (section 7.3).
+- Retention default: 7 daily, 4 weekly, 12 monthly. This retention is how long a deleted profile's typed rows stay in dumps (section 7.3).
 - Pre-migration dumps sit outside restic, on their own volume, and each is deleted 14 days after its migration succeeded ([architecture.md section 13](architecture.md#13-upgrades-and-migrations)). The expiry date a purge or profile delete shows counts them, and "prune backups now" deletes them along with the restic snapshots.
 
 https://restic.readthedocs.io/
