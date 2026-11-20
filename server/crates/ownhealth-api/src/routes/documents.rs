@@ -198,6 +198,10 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// When a document counts as `done` evidence: its collection time, else its report time, the rule
+/// prevention::evidence applies.
+const EVIDENCE_AT: &str = "coalesce(d.collected_at, d.reported_at)";
+
 /// `GET /profiles/{p}/documents` for a resolved caller.
 pub async fn list_for(
     conn: &mut PgConnection,
@@ -253,10 +257,12 @@ pub async fn list_for(
     } else {
         String::new()
     };
+    // one rule for the evidence day and the order, so the newest evidence comes first and a report
+    // dated only by its report date is never cut by the limit behind older collection-dated files
     let sql = format!(
-        "select {COLS}, coalesce(d.collected_at, d.reported_at)::date as evidence_day{snippet} \
+        "select {COLS}, {EVIDENCE_AT}::date as evidence_day{snippet} \
          from document d where {} and ($4::text is null or true) \
-         order by d.collected_at desc nulls last, d.created_at desc limit $2",
+         order by {EVIDENCE_AT} desc nulls last, d.created_at desc limit $2",
         wh.join(" and ")
     );
     let rows: Vec<PgRow> = sqlx::query(sqlx::AssertSqlSafe(sql))
