@@ -1,10 +1,11 @@
 //! Outbound HTTP for the few places OwnHealth fetches anything: a client's CIMD document (lane E), a
 //! Paperless original (lane B), a Nightscout site (lane D), and the POSTs of a connector (a token or
-//! refresh request, an SHL manifest). connectors.md 6.3 rule 7 and
-//! security-privacy.md 16: every name is resolved first and every address must be public, unless the
-//! person ticked "on my network" for that host (`allow_private`); the connection then goes to exactly
-//! the addresses we checked (no second lookup, so no DNS rebinding, and no proxy from the environment),
-//! redirects are not followed, and the body is capped in bytes and time.
+//! refresh request, an SHL manifest). This is the address half of connectors.md 6.3 rule 7 and
+//! security-privacy.md 16; the declared-host check sits in the connector client (slice 13). Every
+//! name is resolved first and every address must be public, unless the person ticked "on my
+//! network" for that host (`allow_private`); the connection then goes to exactly the addresses we
+//! checked (no second lookup, so no DNS rebinding, and no proxy from the environment), redirects
+//! are not followed, and the body is capped in bytes and time.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
@@ -44,9 +45,11 @@ impl Egress {
         }
     }
 
-    /// A connector vendor (a SMART or Blue Button token endpoint, Dexcom, an SHL manifest): https
-    /// only, public addresses only, 15 s, 1 MiB. Like every profile it never follows a redirect, so a
-    /// token request is never sent on to another host.
+    /// A connector vendor's small answers (a token, refresh or revoke request, an SHL manifest):
+    /// https only, public addresses only, 15 s, 1 MiB. A data pull sets its own cap by struct update
+    /// (`Egress { max_bytes: .., ..Egress::connector() }`): 30 days of Dexcom readings is about
+    /// 2.6 MB. Like every profile it never follows a redirect, so a token request is never sent on
+    /// to another host.
     pub fn connector() -> Egress {
         Egress {
             allow_private: false,
@@ -189,6 +192,17 @@ async fn send(
         return Err(NetError::BadUrl);
     }
     let host = parsed.host_str().ok_or(NetError::BadUrl)?.to_string();
+    // reqwest appends a header, never replaces it: a caller's copy of these would go out twice or
+    // disagree with the body
+    for (k, _) in headers {
+        let k = k.to_ascii_lowercase();
+        if ["content-type", "content-length", "host", "transfer-encoding"].contains(&k.as_str()) {
+            return Err(NetError::Http {
+                host,
+                message: format!("the {k} header is set here, not by the caller"),
+            });
+        }
+    }
     let port = parsed.port_or_known_default().ok_or(NetError::BadUrl)?;
     let addrs = resolve_checked(&host, port, egress.allow_private).await?;
     // "on my network" allows plain http to the person's network only: a token sent to a public
@@ -694,6 +708,81 @@ mod tests {
             "{stdout}{}",
             String::from_utf8_lossy(&out.stderr)
         );
+        Ok(())
+    }
+
+    /// The helper sets the content type and the framing headers; a caller's copy would go out as a
+    /// second header, or disagree with the body. It is refused before any lookup or connection.
+    #[tokio::test]
+    async fn a_caller_header_that_clashes_with_the_body_is_refused_and_nothing_is_sent() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let lan = Egress {
+            allow_private: true,
+            https_only: false,
+            ..Egress::connector()
+        };
+        let url = format!("http://127.0.0.1:{port}/token");
+        for name in ["Content-Type", "content-length", "HOST", "Transfer-Encoding"] {
+            assert_eq!(
+                post_form(&url, &lan, &[(name, "x")], &[("grant_type", "refresh_token")]).await,
+                Err(NetError::Http {
+                    host: "127.0.0.1".into(),
+                    message: format!(
+                        "the {} header is set here, not by the caller",
+                        name.to_ascii_lowercase()
+                    ),
+                })
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), listener.accept())
+                .await
+                .is_err(),
+            "a request went out"
+        );
+        Ok(())
+    }
+
+    /// The timeout covers the whole exchange, body included: a vendor that sends its headers and
+    /// then one byte every 100 ms is cut at the timeout, not kept alive byte by byte.
+    #[tokio::test]
+    async fn a_slow_drip_body_is_cut_at_the_total_timeout() -> anyhow::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let drip = tokio::spawn(async move {
+            let Ok((mut s, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            if s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 30\r\n\r\n")
+                .await
+                .is_err()
+            {
+                return;
+            }
+            for _ in 0..30 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if s.write_all(b"x").await.is_err() {
+                    return;
+                }
+            }
+        });
+        let quick = Egress {
+            allow_private: true,
+            https_only: false,
+            timeout: Duration::from_millis(300),
+            ..Egress::connector()
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(
+            post_form(&format!("http://127.0.0.1:{port}/token"), &quick, &[], &[]).await,
+            Err(NetError::Timeout("127.0.0.1".into()))
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drip.abort();
         Ok(())
     }
 }
