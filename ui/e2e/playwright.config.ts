@@ -1,6 +1,8 @@
 // Browser checks (`pnpm run e2e`): Playwright on Chromium, dark scheme, against the real server that
 // serve.sh starts on a fresh demo database. Needs `pnpm build` (server/static), the debug server binary
-// (`cargo build -p ownhealth`, or OWNHEALTH_E2E_BIN) and the shared test Postgres (scripts/test-db.sh).
+// (`cargo build -p ownhealth`, or OWNHEALTH_E2E_BIN), the shared test Postgres (scripts/test-db.sh)
+// and Chromium (`pnpm exec playwright install chromium`, once). The e2e script type-checks this folder
+// (e2e/tsconfig.json) before it runs the tests.
 import { defineConfig, devices } from '@playwright/test';
 
 const port = Number(process.env.OWNHEALTH_E2E_PORT ?? 8190);

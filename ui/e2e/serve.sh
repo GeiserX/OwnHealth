@@ -8,7 +8,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 bin=${OWNHEALTH_E2E_BIN:-$root/server/target/debug/ownhealth}
 port=${OWNHEALTH_E2E_PORT:-8190}
-admin=${OWNHEALTH_TEST_ADMIN_URL:-postgresql://postgres:postgres@127.0.0.1:55432/postgres}
+admin=postgresql://postgres:postgres@127.0.0.1:55432/postgres # ownhealth-testpg, where psql_admin runs
 db="oh_e2e_$(openssl rand -hex 6)"
 data=$(mktemp -d)
 pid=""

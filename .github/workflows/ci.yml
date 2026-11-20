@@ -193,6 +193,13 @@ jobs:
       - run: bash scripts/test-db.sh
       - run: pnpm run e2e
         working-directory: ui
+      - name: Keep the traces and screenshots of a red run
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-test-results
+          path: ui/e2e/test-results
+          if-no-files-found: ignore
 
   # The black-box suite (contract-tests/): HTTP and MCP tests with goldens recorded from 0.1.1, on a
   # fresh demo database in the shared test Postgres that scripts/test-db.sh starts.
