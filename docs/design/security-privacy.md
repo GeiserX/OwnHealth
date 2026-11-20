@@ -207,14 +207,14 @@ For a family member who is hospitalised, unconscious or dead.
 
 1. The owner pre-designates emergency contacts and what they would see (default: summary, records, labs, medications; not `read:sensitive`, not genome raw).
 2. A contact requests access with a reason.
-3. The owner is notified at once and can reject. If not rejected within the delay (default 48 hours, configurable 12 to 168), a read-only grant opens for 14 days.
+3. The owner is notified at once and can reject. If not rejected within the delay (default 48 hours, configurable 12 to 168), a read-only grant opens for 14 days, once the owner's calendar feed has been fetched since the request; until then the request stays requested.
 4. Every step and every read during the grant is in the audit log, shown to the owner at next login.
 
 ```mermaid
 stateDiagram-v2
   [*] --> Requested: contact asks
   Requested --> Rejected: owner rejects
-  Requested --> Active: delay passes
+  Requested --> Active: delay passed and feed fetched
   Active --> Expired: 14 days
   Active --> Revoked: owner revokes
   Rejected --> [*]
