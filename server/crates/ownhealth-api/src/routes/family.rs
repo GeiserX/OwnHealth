@@ -19,6 +19,7 @@ use ownhealth_core::access::{
 };
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::pyjson::{parse_datetime, pydantic_datetime_utc};
+use ownhealth_inbox::folder;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
@@ -713,6 +714,15 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     for sha in &result.blobs {
         if let Err(e) = rt.blobs.delete(sha) {
             tracing::warn!(error = %e, "blob delete failed");
+        }
+    }
+    // the profile's drops and filed copies in the folder inboxes
+    for f in result.folders.clone() {
+        let (settings, slug) = (rt.settings.clone(), slug.to_string());
+        match tokio::task::spawn_blocking(move || folder::forget_profile(&settings, &f.config, &slug, f.own)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "removing a deleted profile's folder failed"),
+            Err(e) => tracing::warn!(error = %e, "removing a deleted profile's folder failed"),
         }
     }
     Ok(json!({"deleted": slug, "rows": result.rows_json(), "blobs": result.blobs.len()}))

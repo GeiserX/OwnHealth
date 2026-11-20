@@ -8,13 +8,17 @@ mod support;
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
 use ownhealth_core::Runtime;
 use ownhealth_core::blobs::sha256_hex_to_bytes;
+use ownhealth_core::demo_pdf::{LabReport, LabRow, lab_report_pdf};
 use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::provenance::{SrcIn, create_src};
 use ownhealth_core::secrets::{SecretBox, SecretString, store_secret};
+use ownhealth_core::sources::{self, NewSource};
+use ownhealth_inbox::folder::poll_root;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use support::Env;
@@ -517,5 +521,98 @@ async fn mail_a_household_mailbox_filed_to_the_person_goes_too() -> R {
         .await?;
     assert_eq!(quarantined, vec![q3]);
     assert_eq!(r.json["rows"]["quarantine_item"], json!(1), "{}", r.json);
+    Ok(())
+}
+
+/// A folder inbox Alex set up on `subdir` of the inbox folder.
+async fn folder_source(env: &Env, subdir: &str, profile: Option<Uuid>) -> anyhow::Result<sources::Source> {
+    let mut c = env.pool().acquire().await?;
+    let id = sources::create_source(
+        &mut c,
+        &NewSource {
+            profile_id: profile,
+            config: json!({"subdir": subdir}),
+            created_by: Some(env.user("alex")),
+            ..NewSource::new(env.fam().household_id, "folder", subdir)
+        },
+    )
+    .await?;
+    Ok(sources::get_source(&mut c, id).await?.expect("source"))
+}
+
+#[tokio::test]
+async fn the_scanner_folder_keeps_no_copy_of_the_persons_files() -> R {
+    use std::os::unix::fs::symlink;
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    let (alex, user) = (env.profile("alex"), env.user("alex"));
+    // a household scanner folder, and Alex's own one whose root files are Alex's
+    let shared = folder_source(&env, "estudio", None).await?;
+    let own = folder_source(&env, "alex-movil", Some(alex)).await?;
+    let (root, own_root) = (inbox.join("estudio"), inbox.join("alex-movil"));
+    let report = |id: &str| {
+        lab_report_pdf(&LabReport {
+            lab: "LabNorte",
+            title: "Informe",
+            patient: "RIVERA, ALEX",
+            birth: "01/02/1984",
+            collected: "14/09/2026",
+            report_id: id,
+            pages: vec![vec![LabRow::new("Glucosa", "88", "mg/dL", "70 - 110")]],
+        })
+        .0
+    };
+    for (dir, id) in [
+        (root.join("alex"), "LN-1"),
+        (root.join("sam"), "LN-2"),
+        (own_root.clone(), "LN-3"),
+    ] {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join(format!("{id}.pdf")), report(id))?;
+    }
+    for (source, dir) in [(&shared, &root), (&own, &own_root)] {
+        poll_root(env.pool(), &env.rt.blobs, source, dir, Duration::ZERO).await?;
+    }
+    assert!(root.join(".done/alex/LN-1.pdf").is_file());
+    assert!(own_root.join(".done/_root/LN-3.pdf").is_file());
+    // Alex only views Sam's profile: Sam's drop stays for Sam's own inbox
+    assert!(root.join("sam/LN-2.pdf").is_file());
+    // a copy that failed earlier, a new drop not read yet, and links someone left where Alex's
+    // files go: the links go, never what they point at
+    let outside = env.dir.path().join("elsewhere");
+    std::fs::create_dir_all(&outside)?;
+    std::fs::write(outside.join("keep.txt"), "not Alex's")?;
+    std::fs::create_dir_all(root.join(".failed"))?;
+    symlink(&outside, root.join(".failed/alex"))?;
+    std::fs::write(root.join("alex/nuevo.pdf"), report("LN-4"))?;
+    symlink(outside.join("keep.txt"), root.join("alex/enlace.txt"))?;
+    std::fs::create_dir_all(own_root.join(".failed/_root"))?;
+    std::fs::write(own_root.join(".failed/_root/roto.pdf"), b"%PDF-1.7 broken")?;
+    let docs: Vec<String> = sqlx::query_scalar("select encode(blob_sha256, 'hex') from document where profile_id = $1")
+        .bind(alex)
+        .fetch_all(env.pool())
+        .await?;
+    assert_eq!(docs.len(), 2);
+
+    let mut me = env.as_user(user).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+
+    let gone = |p: &Path| std::fs::symlink_metadata(p).is_err();
+    for p in [
+        root.join("alex"),
+        root.join(".done/alex"),
+        root.join(".failed/alex"),
+        own_root.join(".done/_root"),
+        own_root.join(".failed/_root"),
+    ] {
+        assert!(gone(&p), "{} is still there", p.display());
+    }
+    assert!(outside.join("keep.txt").is_file(), "a link was followed");
+    assert!(root.join("sam/LN-2.pdf").is_file(), "Sam's drop went too");
+    let left = stored(env.rt.blobs.root());
+    assert!(docs.iter().all(|d| !left.contains(d)), "{left:?}");
     Ok(())
 }

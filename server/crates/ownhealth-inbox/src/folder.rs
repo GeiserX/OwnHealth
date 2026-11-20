@@ -73,6 +73,64 @@ fn subdir(config: &serde_json::Value) -> Result<Option<&Path>> {
     Ok(Some(p))
 }
 
+/// After a profile is deleted, remove its files from a folder source: its drop folder
+/// `<root>/<slug>/` and the copies filed in `.done/<slug>/` and `.failed/<slug>/`, plus `.done/_root/`
+/// and `.failed/_root/` when the source was the profile's own (its root files went to that profile).
+/// The paths are built from the checked subdir and slug only. Nothing is followed: a link in the way
+/// is removed, never its target, and a folder reached through a link below the root is left alone.
+pub fn forget_profile(settings: &Settings, config: &serde_json::Value, slug: &str, own: bool) -> Result<()> {
+    if slug.is_empty()
+        || !slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(Error::Invalid("not a profile's short name".into()));
+    }
+    let Some(base) = settings.inbox_dir.clone() else {
+        return Ok(());
+    };
+    let root = match subdir(config)? {
+        Some(sub) => base.join(sub),
+        None => base,
+    };
+    let mut gone = vec![vec![slug], vec![DONE_DIR, slug], vec![FAILED_DIR, slug]];
+    if own {
+        gone.extend([vec![DONE_DIR, ROOT_BUCKET], vec![FAILED_DIR, ROOT_BUCKET]]);
+    }
+    let mut first = None;
+    for parts in gone {
+        if let Err(e) = remove_below(&root, &parts) {
+            first.get_or_insert(e);
+        }
+    }
+    first.map_or(Ok(()), |e| Err(e.into()))
+}
+
+/// Remove `root/<parts>` without following a link: a link among the parents stops it, and a link at
+/// the end is removed itself.
+fn remove_below(root: &Path, parts: &[&str]) -> std::io::Result<()> {
+    let mut path = root.to_path_buf();
+    for (i, part) in parts.iter().enumerate() {
+        path.push(part);
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let last = i + 1 == parts.len();
+        if meta.file_type().is_symlink() {
+            return if last { std::fs::remove_file(&path) } else { Ok(()) };
+        }
+        if !meta.is_dir() {
+            return Ok(());
+        }
+        if last {
+            return std::fs::remove_dir_all(&path);
+        }
+    }
+    Ok(())
+}
+
 /// Checks a `folder` source config before it is saved.
 pub fn check_config(config: &serde_json::Value) -> Result<()> {
     subdir(config).map(|_| ())

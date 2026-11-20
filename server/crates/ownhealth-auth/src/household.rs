@@ -669,11 +669,22 @@ async fn still_referenced(conn: &mut PgConnection, sha: &[u8]) -> Result<bool> {
 }
 
 /// What `delete_profile` removed: rows per table (only tables with rows) and the blob hashes nobody
-/// references any more, which the caller deletes after the transaction commits.
+/// references any more, which the caller deletes after the transaction commits, with the profile's
+/// folders of the folder inboxes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deleted {
     pub rows: Vec<(String, u64)>,
     pub blobs: Vec<String>,
+    /// The household's folder inboxes, read before the delete: their folders may hold the profile's files.
+    pub folders: Vec<FolderInbox>,
+}
+
+/// A folder inbox's settings, and whether it was the deleted profile's own (its root files were the
+/// profile's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderInbox {
+    pub config: Value,
+    pub own: bool,
 }
 
 impl Deleted {
@@ -731,6 +742,14 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     .execute(&mut *conn)
     .await?
     .rows_affected();
+    // The folder inboxes whose folders hold the profile's files: the caller removes them after the commit.
+    let folders: Vec<(Value, bool)> = sqlx::query_as(
+        "select s.config, coalesce(s.profile_id = $1, false) from source s join profile p \
+         on p.household_id = s.household_id where p.id = $1 and s.kind = 'folder' order by s.created_at",
+    )
+    .bind(profile_id)
+    .fetch_all(&mut *conn)
+    .await?;
     // candidate_row -> observation -> src -> candidate_row is a cycle: cut it first.
     sqlx::query(
         "update candidate_row set observation_id = null where observation_id in \
@@ -833,6 +852,10 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     Ok(Deleted {
         rows: counts.into_iter().filter(|(_, n)| *n > 0).collect(),
         blobs: orphans,
+        folders: folders
+            .into_iter()
+            .map(|(config, own)| FolderInbox { config, own })
+            .collect(),
     })
 }
 
