@@ -337,6 +337,8 @@ export interface WearableMetric {
 	coverage_pct: number;
 	/** device of the newest point; each day comes from the highest-priority source that has data */
 	source: string;
+	/** only when an HRV source was left out of this entry */
+	limitations?: string[];
 }
 
 /** GET /profiles/{p}/wearables/{metric}?window=&resolution= */
@@ -362,6 +364,8 @@ export interface WearableSeries {
 		source_id: number;
 		device: string | null;
 	}[];
+	/** only when an HRV source was left out of this series */
+	limitations?: string[];
 }
 
 export interface WearablesSummary {
