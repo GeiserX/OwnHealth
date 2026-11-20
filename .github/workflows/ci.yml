@@ -50,6 +50,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
+          # PRs read main's caches and never write their own: a per-PR cache evicts main's (10 GB repo cap)
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: PostgreSQL 17 client and restic 0.18.0, the versions the image ships (ownhealth-ops tests)
         working-directory: .
         run: |
@@ -116,6 +118,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: ocr
       - name: PDFium (pinned, sha256-checked)
         working-directory: .
@@ -171,6 +174,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           package_json_file: ui/package.json
@@ -216,6 +220,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: PDFium (pinned, sha256-checked)
         run: bash scripts/fetch-pdfium.sh linux-x64
       - run: mkdir -p server/static
