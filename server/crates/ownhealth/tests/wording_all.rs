@@ -34,6 +34,9 @@ const SOURCES: &[(&str, Source)] = &[
     ("timeline", |_| {
         Box::pin(async { Ok(vec![ownhealth_api::routes::timeline::phrases()]) })
     }),
+    ("wearables_left_out", |_| {
+        Box::pin(async { Ok(vec![ownhealth_ingest_structured::wearables::phrases()]) })
+    }),
     ("clinvar_alerts", |_| Box::pin(clinvar_alerts())),
     ("due", |s| Box::pin(due(s))),
     ("calculators", |s| Box::pin(calculators(s))),

@@ -562,20 +562,39 @@ struct Day {
 }
 
 /// Daily rollups of one metric, newest first, one source per day: the best source that has the day
-/// (source_priority, then the default order), as the REST summary picks them.
+/// (source_priority, then the default order), as the REST summary picks them. An HRV series is one
+/// source's, and the source it left out goes in `limitations`.
 async fn rollups(
     call: &mut Call<'_>,
     metric: &str,
     since: Option<NaiveDate>,
     until: NaiveDate,
+    limitations: &mut Vec<Value>,
 ) -> ToolResult<Vec<Day>> {
     let pid = call.profile_id()?;
     // window "all": from year 1, which Postgres can store (chrono's minimum it cannot)
     let first = NaiveDate::from_ymd_opt(1, 1, 1).unwrap_or(NaiveDate::MIN);
     let since_t = start_of_day(since.unwrap_or(first)).with_timezone(&Utc);
     let until_t = end_of_day(until).with_timezone(&Utc);
-    let points =
-        ownhealth_ingest_structured::wearables::points(&mut *call.conn, pid, metric, since_t, until_t, "day").await?;
+    let series = ownhealth_ingest_structured::wearables::points_and_left_out(
+        &mut *call.conn,
+        pid,
+        metric,
+        since_t,
+        until_t,
+        "day",
+    )
+    .await?;
+    // device names come from imports (security-privacy.md section 5 row 1): wrapped, never in the sentence;
+    // fhir_note is the origin of other imported text with no document (origin_of)
+    if let Some((shown, names)) = ownhealth_ingest_structured::wearables::left_out_names(&series) {
+        limitations.push(json!({
+            "note": ownhealth_ingest_structured::wearables::LEFT_OUT_SENTENCE,
+            "shown": wrap(Some(shown), "fhir_note"),
+            "left_out": names.iter().map(|n| wrap(Some(n), "fhir_note")).collect::<Vec<_>>(),
+        }));
+    }
+    let points = series.points;
     let apple: HashSet<i16> = sqlx::query_scalar::<_, i16>(
         "select id from wearable_source where profile_id = $1 and provider = 'apple_health'",
     )
@@ -677,7 +696,14 @@ pub async fn search_observations(call: &mut Call<'_>) -> ToolResult<Answer> {
                 Some(u) => u.date_naive(),
                 None => call.as_of.at.map_or(call.as_of.day, |a| a.date_naive()),
             };
-            let days = rollups(call, &metric, since.map(|s| s.date_naive()), until_day).await?;
+            let days = rollups(
+                call,
+                &metric,
+                since.map(|s| s.date_naive()),
+                until_day,
+                &mut limitations,
+            )
+            .await?;
             let take = if full { days.len() } else { 1 };
             for d in days.iter().take(take) {
                 results.push(json!({
@@ -1026,7 +1052,7 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
             )
             .into());
         }
-        let days = rollups(call, &metric, since, until).await?;
+        let days = rollups(call, &metric, since, until, &mut limitations).await?;
         // a summed metric's point is the day total; its readings' extremes are not on that scale
         let summed = ownhealth_ingest_structured::wearables::metric(&metric).agg == "sum";
         let raw: Vec<Pt> = days

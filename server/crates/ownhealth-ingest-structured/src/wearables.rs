@@ -10,7 +10,11 @@
 //! series takes, for each day, the highest-priority source that has data that day. That stops an
 //! iPhone and an Apple Watch both counting the same steps. A `source_priority` row overrides the
 //! default order (Watch, then iPhone, then anything else).
+//!
+//! HRV is the exception: each vendor measures it its own way, so an HRV series takes one source for
+//! the whole window (the best one with data there) and names the sources it left out.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -192,6 +196,15 @@ pub fn default_rank(device: Option<&str>) -> i32 {
 
 /// Source ids for one metric, best first: the profile's source_priority row, then the default order.
 pub async fn priority(conn: &mut PgConnection, profile_id: Uuid, metric: &str) -> Result<Vec<i16>> {
+    Ok(order(conn, profile_id, metric)
+        .await?
+        .into_iter()
+        .map(|s| s.0)
+        .collect())
+}
+
+/// `priority`, each source with its default rank, or None when the source_priority row places it.
+async fn order(conn: &mut PgConnection, profile_id: Uuid, metric: &str) -> Result<Vec<(i16, Option<i32>)>> {
     let sources: Vec<(i16, Option<String>)> =
         sqlx::query_as("select id, device from wearable_source where profile_id = $1 order by id")
             .bind(profile_id)
@@ -206,7 +219,11 @@ pub async fn priority(conn: &mut PgConnection, profile_id: Uuid, metric: &str) -
             .unwrap_or_default();
     let mut rest: Vec<&(i16, Option<String>)> = sources.iter().filter(|s| !explicit.contains(&s.0)).collect();
     rest.sort_by_key(|s| (default_rank(s.1.as_deref()), s.0));
-    Ok(explicit.iter().copied().chain(rest.into_iter().map(|s| s.0)).collect())
+    Ok(explicit
+        .iter()
+        .map(|s| (*s, None))
+        .chain(rest.into_iter().map(|s| (s.0, Some(default_rank(s.1.as_deref())))))
+        .collect())
 }
 
 pub async fn set_priority(conn: &mut PgConnection, profile_id: Uuid, metric: &str, source_ids: &[i16]) -> Result<()> {
@@ -390,8 +407,24 @@ fn real(v: Option<f32>) -> Option<f64> {
     v.and_then(|x| f32_json(x).as_f64())
 }
 
+/// Metrics whose value depends on the vendor's own method: a series uses one source, never a mix.
+pub fn one_source(metric_key: &str) -> bool {
+    metric_key.starts_with("hrv_")
+}
+
+/// A series and the sources with data in the window that it left out (HRV only), best first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Series {
+    pub points: Vec<Point>,
+    /// The device name, else the provider, of each source left out.
+    pub left_out: Vec<String>,
+    /// The same name for the one source an HRV series shows; None for every other metric.
+    pub shown: Option<String>,
+}
+
 /// One point per bucket with data, taken from the best source that has that bucket. Buckets without
-/// data are absent; callers fill gaps if they draw them.
+/// data are absent; callers fill gaps if they draw them. An HRV series takes every point from one
+/// source: the best one with data in the window.
 pub async fn points(
     conn: &mut PgConnection,
     profile_id: Uuid,
@@ -400,14 +433,37 @@ pub async fn points(
     until: DateTime<Utc>,
     resolution: &str,
 ) -> Result<Vec<Point>> {
+    Ok(
+        points_and_left_out(conn, profile_id, metric_key, since, until, resolution)
+            .await?
+            .points,
+    )
+}
+
+/// `points`, plus the sources an HRV series left out.
+pub async fn points_and_left_out(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    metric_key: &str,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+    resolution: &str,
+) -> Result<Series> {
     let info = metric(metric_key);
-    let rank: HashMap<i16, usize> = priority(&mut *conn, profile_id, metric_key)
-        .await?
-        .into_iter()
+    let order = order(&mut *conn, profile_id, metric_key).await?;
+    let rank: HashMap<i16, usize> = order.iter().enumerate().map(|(i, s)| (s.0, i)).collect();
+    // an explicit place is its own; a default rank is shared by every source that has it
+    let place: HashMap<i16, (u8, i64)> = order
+        .iter()
         .enumerate()
-        .map(|(i, s)| (s, i))
+        .map(|(i, s)| {
+            (
+                s.0,
+                s.1.map_or((0, i64::try_from(i).unwrap_or(i64::MAX)), |r| (1, i64::from(r))),
+            )
+        })
         .collect();
-    let rows: Vec<RollupRow> = sqlx::query_as(
+    let mut rows: Vec<RollupRow> = sqlx::query_as(
         "select r.t, r.source_id, r.n, r.v_min, r.v_max, r.v_avg, r.v_sum, r.v_p10, r.v_p50, r.v_p90, r.coverage, \
          ws.device from wearable_rollup r join wearable_source ws on ws.id = r.source_id \
          where r.profile_id = $1 and r.metric = $2 and r.bucket = $3 and r.t >= $4 and r.t <= $5 order by r.t",
@@ -417,9 +473,32 @@ pub async fn points(
     .bind(resolution)
     .bind(since)
     .bind(until)
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
     .await?;
     let rank_of = |s: i16| rank.get(&s).copied().unwrap_or(99);
+    // each source's points in the window and its newest one
+    let mut seen: HashMap<i16, (usize, DateTime<Utc>)> = HashMap::new();
+    for r in &rows {
+        let e = seen.entry(r.1).or_insert((0, r.0));
+        e.0 += 1;
+        e.1 = e.1.max(r.0);
+    }
+    // HRV source order: its place, then more points in the window, then the newest point, then id
+    let key = |s: i16| {
+        let (n, newest) = seen.get(&s).copied().unwrap_or((0, DateTime::<Utc>::MIN_UTC));
+        (place.get(&s).copied().unwrap_or((2, 0)), Reverse(n), Reverse(newest), s)
+    };
+    let mut left_out: Vec<i16> = Vec::new();
+    let chosen = seen
+        .keys()
+        .copied()
+        .min_by_key(|s| key(*s))
+        .filter(|_| one_source(metric_key));
+    if let Some(chosen) = chosen {
+        left_out = seen.keys().copied().filter(|s| *s != chosen).collect();
+        left_out.sort_by_key(|s| key(*s));
+        rows.retain(|r| r.1 == chosen);
+    }
     let mut best: BTreeMap<DateTime<Utc>, RollupRow> = BTreeMap::new();
     for r in rows {
         match best.get(&r.0) {
@@ -429,7 +508,19 @@ pub async fn points(
             }
         }
     }
-    Ok(best
+    let names: Vec<(i16, String)> = match chosen {
+        None => Vec::new(),
+        Some(c) => {
+            sqlx::query_as("select id, coalesce(device, provider) from wearable_source where id = any($1)")
+                .bind(left_out.iter().copied().chain([c]).collect::<Vec<i16>>())
+                .fetch_all(&mut *conn)
+                .await?
+        }
+    };
+    let name = |id: i16| names.iter().find(|n| n.0 == id).map(|n| n.1.clone());
+    let shown = chosen.and_then(name);
+    let left_out = left_out.iter().filter_map(|id| name(*id)).collect();
+    let points = best
         .into_values()
         .map(|r| Point {
             t: r.0,
@@ -445,7 +536,62 @@ pub async fn points(
             source_id: r.1,
             device: r.11,
         })
-        .collect())
+        .collect();
+    Ok(Series {
+        points,
+        left_out,
+        shown,
+    })
+}
+
+/// The source a one-source series shows and the other names it left out, when it left one out. A
+/// left-out name equal to the shown one (two sources of one device) is not repeated.
+pub fn left_out_names(series: &Series) -> Option<(&str, Vec<&str>)> {
+    let shown = series.shown.as_deref().filter(|_| !series.left_out.is_empty())?;
+    let mut names: Vec<&str> = Vec::new();
+    for n in &series.left_out {
+        if n != shown && !names.contains(&n.as_str()) {
+            names.push(n);
+        }
+    }
+    Some((shown, names))
+}
+
+/// The same limitation without the names, for MCP: device names come from imports, so the agent gets
+/// them beside this sentence as untrusted text.
+pub const LEFT_OUT_SENTENCE: &str =
+    "HRV from one source only (shown). Not mixed with HRV from other sources in this window (left_out).";
+
+/// The limitation line of a one-source series that left a source out: which it shows and which not.
+pub fn left_out_note(series: &Series, lang: &str) -> Option<String> {
+    let (shown, names) = left_out_names(series)?;
+    let rest = if names.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", names.join(", "))
+    };
+    Some(if lang == "es" {
+        format!("VFC de una sola fuente: {shown}. No se mezcla con la VFC de otras fuentes en este periodo{rest}.")
+    } else {
+        format!("HRV from one source only: {shown}. Not mixed with HRV from other sources in this window{rest}.")
+    })
+}
+
+/// Every text this module writes for a person, for the wording lint.
+pub fn phrases() -> Value {
+    let series = Series {
+        points: Vec::new(),
+        left_out: vec!["Whoop 4.0".into()],
+        shown: Some("Oura Ring".into()),
+    };
+    let same = Series {
+        left_out: vec!["Oura Ring".into()],
+        ..series.clone()
+    };
+    json!({
+        "en": [left_out_note(&series, "en"), left_out_note(&same, "en"), Some(LEFT_OUT_SENTENCE.to_string())],
+        "es": [left_out_note(&series, "es"), left_out_note(&same, "es")],
+    })
 }
 
 /// Python's `wearables.series` as JSON: `t`, `value`, `min`, `max`, `mean`, `median`, `p10`, `p90`,
@@ -533,4 +679,31 @@ pub async fn devices(
 
 pub fn day_start(d: NaiveDate) -> DateTime<Utc> {
     d.and_hms_opt(0, 0, 0).map_or(DateTime::<Utc>::MIN_UTC, |n| n.and_utc())
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+
+    fn series(shown: &str, left_out: &[&str]) -> Series {
+        Series {
+            points: Vec::new(),
+            left_out: left_out.iter().map(|s| (*s).to_string()).collect(),
+            shown: Some(shown.into()),
+        }
+    }
+
+    /// Two sources of one vendor, or of one name: the note never blames a vendor nor repeats the name.
+    #[test]
+    fn the_note_names_only_other_sources() {
+        for lang in ["en", "es"] {
+            let same = left_out_note(&series("Apple Watch", &["Apple Watch"]), lang).unwrap_or_default();
+            assert_eq!(same.matches("Apple Watch").count(), 1, "{same}");
+            assert!(!same.contains("vendor") && !same.contains("fabricante"), "{same}");
+            let two =
+                left_out_note(&series("Oura Ring", &["oura", "Whoop 4.0", "Whoop 4.0"]), lang).unwrap_or_default();
+            assert!(two.ends_with(": oura, Whoop 4.0."), "{two}");
+        }
+        assert!(left_out_note(&series("Oura Ring", &[]), "en").is_none());
+    }
 }
