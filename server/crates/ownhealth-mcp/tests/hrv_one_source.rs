@@ -63,6 +63,13 @@ async fn an_agent_sees_one_hrv_vendor_and_mixed_resting_hr() -> R {
     // the same count of days each: the vendor with the newest day
     assert_eq!(values(&hrv, "points"), vec![Some(71.0); 5], "{hrv}");
     assert!(names_left_out(&hrv), "{hrv}");
+    // the lows and highs are the kept vendor's too, never the left-out one's
+    let stats = &hrv["data"]["stats"];
+    assert_eq!(
+        (stats["min"].as_f64(), stats["max"].as_f64()),
+        (Some(71.0), Some(71.0)),
+        "{hrv}"
+    );
     let found = c
         .call(
             "search_observations",
