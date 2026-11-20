@@ -284,7 +284,7 @@ Ships in 0.4.0. Measured exit criteria, and the test behind each deliverable: [v
 **Records/connectors**
 - [ ] US SMART on FHIR patient standalone launch (PKCE) for Epic, Oracle Health, athenahealth, eClinicalWorks, MEDITECH, NextGen, VA Lighthouse; endpoint directory built from vendor Brands bundles. Each vendor ships with an honest "verified live" status: 1.0 needs Epic verified live, and the other six are verified one by one after 1.0.
 - [ ] Bring-your-own client wizard: the self-hoster registers a read-only, patient-facing US Core/USCDI client per vendor, with a client secret (a JWKS only when the instance is public, [connectors.md section 7](design/connectors.md#7-us-smart-on-fhir-registration-strategy)). A shared project client is an open decision (below).
-- [ ] CMS Blue Button 2.0 (CARIN BB, `ExplanationOfBenefit`, `Coverage`), bring-your-own registered confidential client. Claims are stored with the pull and counted. Nobody reviews them one by one: each run makes one grouped review item per resource type, and the source card shows the claim count.
+- [ ] CMS Blue Button 2.0 (CARIN BB, `ExplanationOfBenefit`, `Coverage`), bring-your-own registered confidential client. Claims are stored with the pull and counted. Nobody reviews them one by one: every unmapped type (`Coverage`, `ExplanationOfBenefit`) lands in one grouped review item per run and type, `Patient` imports as usual, and the source card shows the claim count.
 - [ ] C-CDA import (US CCD) through an open CDA-to-FHIR mapper.
 - [ ] SMART Health Links and SMART Health Cards receiver (QR scan or paste).
 - [ ] Refresh-token rotation persisted atomically before use.
@@ -313,12 +313,12 @@ Ships in 0.4.0. Measured exit criteria, and the test behind each deliverable: [v
 **Security/Privacy**
 - [ ] Per-profile data keys (DEKs) for blobs, genome files and connector tokens, wrapped by a household key; crypto-shredding on profile deletion.
 - [ ] Hash-chained audit log, user-visible.
-- [ ] Break-glass for family: a grant that activates after a delay unless the owner cancels it; every use audited and notified. The owner hears at request time through an event in their calendar feed and the in-app outbox, the only outbound channels before v2.
+- [ ] Break-glass for family: a grant that activates after a delay unless the owner cancels it; every use audited and notified. The owner hears at request time through an event in their calendar feed, the only outbound channel before v2. Every step also lands in the in-app outbox.
 - [ ] Threat model updated for live connectors and sharing; external security review before tagging 1.0.
 
 **MCP**
 - [ ] Agent session report, moved from v0.3: it needs a consent switch for logged sessions (rule 2 of "How we decide"), and `audit_event` does not yet record `not_assessed` counts or argument width.
-- [ ] Sidecar vendor metrics (Oura, Whoop, Polar, Withings, Dexcom) in `search_observations` and `get_trend`, each once its terms allow it (Wearables above), with a min/max envelope for long windows.
+- [ ] Sidecar (Oura, Whoop, Polar, Withings) and native Dexcom metrics in `search_observations` and `get_trend`, each once its terms allow it (Wearables above), with a min/max envelope for long windows.
 
 **Ops/Distribution**
 - [ ] Upgrade path tested from every 0.x release to 1.0 with no data loss.
@@ -336,7 +336,7 @@ Every row names the test that proves it. A row that also says **Live** needs one
 | Area | Criterion |
 |---|---|
 | SMART | In CI, an axum fake SMART server (`ownhealth-ingest-structured/tests/smart_fake.rs`) serves a synthetic US Core patient: the launch connects, the import lands, and 30 daily refreshes under an injected clock rotate the token with no re-consent. The `connector_oauth` tests show that a reused refresh token gives `invalid_grant` and marks the source for re-consent, never silently. The `smart-launcher` workflow runs a real PKCE launch against the digest-pinned SMART launcher. **Live:** an Epic sandbox patient refreshes daily for 30 days without re-consent. |
-| Blue Button | Against an axum fake that serves the CARIN BB STU 2.1 example claims, every `Patient`, `Coverage` and `ExplanationOfBenefit` is counted, stored in the run's bundle blob and visible on the source card and in one grouped review item per type: resources served equals resources counted, so 0 silent drops. **Live:** a sandbox synthetic beneficiary gives the same equality. |
+| Blue Button | Against an axum fake that serves the CARIN BB STU 2.1 example claims, every `Patient`, `Coverage` and `ExplanationOfBenefit` is counted, stored in the run's bundle blob and visible on the source card, `Patient` imports as usual, and each unmapped type (`Coverage`, `ExplanationOfBenefit`) lands in one grouped review item per run and type: resources served equals resources counted, so 0 silent drops. **Live:** a sandbox synthetic beneficiary gives the same equality. |
 | Wearables | In CI, 30 simulated days with scripted gaps, under an injected clock, against the Open Wearables and Dexcom fakes: 0 missed gap alerts, 0 false ones, every alert closes on recovery, and the Polar alert fires within 24 h of a missed sync. The `wearables` workflow runs the poller once against a seeded Open Wearables 0.11.0 container: samples arrive for Oura, Whoop, Polar and Withings, and 0 for Strava and Garmin. **Live:** 30 days on the Dexcom sandbox with 0 missed gap alerts. |
 | Imaging | The `imaging` workflow imports a generated CD of 2,000 images and opens the study in headless Chromium (`ui/e2e/imaging.spec.ts`): from the click to the first drawn frame takes <5 s on the runner. The import time is measured and reported, not gated. **Live:** a real hospital CD reports both times the same way. |
 | Sharing | `ui/e2e/shl.spec.ts`: an SHL created in the UI opens in a pinned reference SHL viewer, and returns 404 after its expiry and after revoke. The server tests refuse a bearer token on every share route, and no MCP tool can create a link. |
@@ -358,7 +358,7 @@ Every row names the test that proves it. A row that also says **Live** needs one
 | Microsoft FHIR-Converter for C-CDA | It needs the .NET runtime in core. A Rust port of an Apache-2.0 C-CDA mapper replaces it. |
 | Shipping vendor Brands or endpoint files in the repo, or fetching them by default | Epic's terms allow distribution by link only, and Oracle's endpoint list has no licence. Each instance downloads them itself, only after a person opens the US connection wizard. |
 | SMART API-access content inside a received SHL | It is a live API grant, so it would be a second connector path. The receiver lists it as not imported, with a reason. |
-| Sealed mode, secretstream and encrypted free text from the security design | 1.0 asks for per-profile keys for blobs, genome files and connector tokens only. The security design is updated to match. |
+| Sealed mode, secretstream and encrypted free text from the security design | 1.0 asks for per-profile keys for blobs, genome files and connector tokens only. The security design will be updated to match (the threat model deliverable above). |
 | A retry queue for vendor token revocation after a profile delete | The queue would have to keep the deleted person's token. Revocation runs once before the delete. A failure is audited and shown with the vendor's own revoke page, and the token is deleted either way. |
 | An English fallback for strings missing in the new languages | It would hide missing translations ("nothing silent"). The new languages land after every UI change, so their completeness checks stay strict. |
 | Live verification of all seven SMART vendors as a 1.0 gate | Six of them need developer accounts opened one by one. 1.0 ships each vendor's honest status, and verification continues after the tag. |
