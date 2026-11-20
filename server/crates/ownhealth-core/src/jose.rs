@@ -435,7 +435,10 @@ mod tests {
         assert!(!opened.contains(rivera), "{opened}");
         assert!(!opened.contains("Rivera"), "{opened}");
         assert!(opened.contains("application/fhir+json"), "{opened}");
-        assert!(opened.contains(&format!("plaintext_len: {}", NODE_PLAINTEXT.len())), "{opened}");
+        assert!(
+            opened.contains(&format!("plaintext_len: {}", NODE_PLAINTEXT.len())),
+            "{opened}"
+        );
         let signer = signing_key(5);
         let vk = es256_key(&jwk_of(&signer)).expect("jwk");
         let compact = jws(&signer, json!({"alg": "ES256", "kid": "k1"}), NODE_PLAINTEXT.as_bytes());
@@ -443,7 +446,10 @@ mod tests {
         assert!(!verified.contains(rivera), "{verified}");
         assert!(!verified.contains("Rivera"), "{verified}");
         assert!(verified.contains("k1"), "{verified}");
-        assert!(verified.contains(&format!("payload_len: {}", NODE_PLAINTEXT.len())), "{verified}");
+        assert!(
+            verified.contains(&format!("payload_len: {}", NODE_PLAINTEXT.len())),
+            "{verified}"
+        );
     }
 
     #[test]
@@ -630,7 +636,10 @@ mod tests {
         assert_eq!(jws_unverified(&gzip, MIB).err(), Some(JoseError::Unsupported("zip")));
         let crit = jws(&signer, json!({"alg": "ES256", "crit": ["b64"]}), b"{}");
         assert_eq!(jws_unverified(&crit, MIB).err(), Some(JoseError::Unsupported("crit")));
-        assert!(matches!(jws_unverified(NODE_JWE_RAW, MIB), Err(JoseError::Malformed(_))));
+        assert!(matches!(
+            jws_unverified(NODE_JWE_RAW, MIB),
+            Err(JoseError::Malformed(_))
+        ));
     }
 
     #[test]
