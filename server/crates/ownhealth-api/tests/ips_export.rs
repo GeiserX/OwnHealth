@@ -483,3 +483,108 @@ async fn a_caregiver_exports_and_a_viewer_gets_records_and_labs_withheld() -> R 
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{:?}", r.json);
     Ok(())
 }
+
+/// A lab panel sent as one Observation with three components becomes three rows (one per value), each
+/// keeping the panel as its stored FHIR. The IPS carries that panel once, with its three components,
+/// not once per row.
+#[tokio::test]
+async fn a_three_component_panel_is_one_entry_in_the_ips() -> R {
+    ownhealth_ingest_structured::register();
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let blobs = BlobStore::new(db.settings(dir.path())?.blobs_path())?;
+    let mut c = db.pool.acquire().await?;
+    let h = create_household(&mut c, "Ortega").await?;
+    let carmen = create_profile(
+        &mut c,
+        &ProfileIn {
+            household_id: h,
+            slug: "carmen".into(),
+            display_name: "Carmen Ortega".into(),
+            relationship: Some("self".into()),
+            birth_date: chrono::NaiveDate::from_ymd_opt(1958, 3, 2),
+            sex_at_birth: Some("female".into()),
+            country: Some("ES".into()),
+            user_id: None,
+            unit_pref: None,
+        },
+    )
+    .await?;
+    let quantity = |code: &str, name: &str, value: u32, unit: &str| {
+        json!({
+            "code": {"coding": [{"system": "http://loinc.org", "code": code, "display": name}]},
+            "valueQuantity": {"value": value, "unit": unit, "system": "http://unitsofmeasure.org", "code": unit},
+        })
+    };
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "id": "labnorte-panel",
+        "type": "collection",
+        "entry": [{"fullUrl": "urn:uuid:5f0c2d1e-0000-4000-8000-000000000001", "resource": {
+            "resourceType": "Observation",
+            "id": "labnorte-panel-1",
+            "status": "final",
+            "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
+            "code": {"coding": [{"system": "http://loinc.org", "code": "24323-8", "display": "Comprehensive metabolic panel"}]},
+            "effectiveDateTime": "2026-10-01T09:00:00+02:00",
+            "component": [
+                quantity("2345-7", "Glucose", 94, "mg/dL"),
+                quantity("2160-0", "Creatinine", 1, "mg/dL"),
+                quantity("1742-6", "ALT", 21, "U/L"),
+            ],
+        }}],
+    });
+    let bytes = serde_json::to_vec(&bundle)?;
+    let sha = blobs.put_bytes(&bytes)?;
+    let doc = create_document(
+        &mut c,
+        &NewDocument {
+            filename: Some("labnorte.json"),
+            ..NewDocument::upload(h, Some(carmen), &sha, "application/fhir+json", bytes.len() as i64)
+        },
+    )
+    .await?;
+    let (_, entries) = read_entries(&bytes, false)?;
+    let profile = get_profile(&mut c, carmen).await?.expect("carmen");
+    import_resources(
+        &mut c,
+        &entries,
+        &profile,
+        doc.id,
+        "labnorte-panel",
+        Some("matched"),
+        "FHIR",
+    )
+    .await?;
+    drop(c);
+    let rows: i64 = sqlx::query_scalar("select count(*) from observation where profile_id = $1 and status = 'current'")
+        .bind(carmen)
+        .fetch_one(&db.pool)
+        .await?;
+    assert_eq!(rows, 3, "one row per component");
+
+    let b = export(&db, carmen, "en").await?.bundle;
+    let results = sections(&b)
+        .into_iter()
+        .find(|s| code(s) == "30954-2")
+        .expect("a Results section");
+    let refs = results["entry"].as_array().cloned().unwrap_or_default();
+    assert_eq!(refs.len(), 1, "{results}");
+    let panels: Vec<&Value> = b["entry"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| &e["resource"])
+        .filter(|r| r["resourceType"] == "Observation")
+        .collect();
+    assert_eq!(panels.len(), 1, "the panel is in the Bundle once: {b}");
+    assert_eq!(*target(&b, &refs[0]["reference"]), *panels[0]);
+    assert_eq!(
+        panels[0]["component"].as_array().map(Vec::len),
+        Some(3),
+        "{}",
+        panels[0]
+    );
+    assert_eq!(dangling(&b), Vec::<String>::new());
+    Ok(())
+}

@@ -8,7 +8,8 @@
 //!                 Problems 11450-4, Allergies 48765-2, Medications 10160-0   (required)
 //!                 Immunizations 11369-6, Results 30954-2, Procedures 47519-4 (recommended)
 //!   Patient      the profile
-//!   one entry per row the sheet shows: the row's stored FHIR, codes as received
+//!   one entry per row the sheet shows: the row's stored FHIR, codes as received (a panel sent as
+//!                one Observation goes in once, with its components, though each is its own row)
 //! ```
 //!
 //! - every entry's `id` is its row id, its `meta.source` is `urn:ownhealth:src:<src id>`, and it
@@ -507,6 +508,7 @@ pub async fn build(
     // the rows each section shows, then their stored FHIR
     let mut chosen: Vec<Vec<&Value>> = Vec::new();
     let mut found: Vec<Vec<Map<String, Value>>> = Vec::new();
+    let mut again: HashSet<String> = HashSet::new();
     for s in &SECTIONS {
         let list: Vec<&Value> = model[s.list]
             .as_array()
@@ -517,7 +519,25 @@ pub async fn build(
             .filter_map(|r| r.get("id").and_then(Value::as_str))
             .filter_map(|i| Uuid::parse_str(i).ok())
             .collect();
-        found.push(rows(&mut *conn, s.table, &ids).await?);
+        let found_here = rows(&mut *conn, s.table, &ids).await?;
+        // a panel sent as one Observation is stored whole on each of its component rows: the first
+        // row the list shows carries it, the others are only words in the narrative
+        let mut carried: Vec<&Map<String, Value>> = Vec::new();
+        for r in &list {
+            let Some(Value::Object(fhir)) = found_here
+                .iter()
+                .find(|row| row.get("id").and_then(Value::as_str) == Some(st(r, "id")))
+                .and_then(|row| row.get("fhir"))
+            else {
+                continue;
+            };
+            if carried.contains(&fhir) {
+                again.insert(st(r, "id").to_string());
+            } else {
+                carried.push(fhir);
+            }
+        }
+        found.push(found_here);
         chosen.push(list);
     }
     let mut inside: HashSet<String> = HashSet::from([patient_url.clone()]);
@@ -525,6 +545,7 @@ pub async fn build(
         inside.extend(
             f.iter()
                 .filter_map(|r| r.get("id").and_then(Value::as_str))
+                .filter(|i| !again.contains(*i))
                 .map(|i| format!("urn:uuid:{i}")),
         );
     }
@@ -537,18 +558,28 @@ pub async fn build(
         let mut refs = Vec::new();
         for r in list {
             let id = st(r, "id");
-            let Some((rid, res)) = rows
-                .iter()
-                .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
-                .and_then(|row| entry(row, &patient_url, &inside))
-            else {
-                continue;
+            // a component row whose panel an earlier row carries: its src and words, no entry
+            let res = if again.contains(id) {
+                None
+            } else {
+                let Some(res) = rows
+                    .iter()
+                    .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+                    .and_then(|row| entry(row, &patient_url, &inside))
+                else {
+                    continue;
+                };
+                Some(res)
             };
             if let Some(src) = r.get("src").and_then(Value::as_str)
                 && !srcs.iter().any(|x| x == src)
             {
                 srcs.push(src.to_string());
             }
+            let Some((rid, res)) = res else {
+                shown.push(r);
+                continue;
+            };
             refs.push(json!({"reference": format!("urn:uuid:{rid}")}));
             entries.push(res);
             shown.push(r);
