@@ -177,6 +177,18 @@ pub fn jws_header(compact: &str) -> Result<Header, JoseError> {
     parse_header(protected)
 }
 
+/// The protected header and the payload of a compact JWS, NOT verified: only for choosing the
+/// issuer (the payload `iss`) and the key (`kid`) before [`verify_es256`]. Nothing it returns is
+/// trusted, so never import or show it. The payload is inflated under the same `max_len` cap, and
+/// `zip` and `crit` are refused as in [`verify_es256`].
+pub fn jws_unverified(compact: &str, max_len: usize) -> Result<(Header, Vec<u8>), JoseError> {
+    let [protected, payload, _] = split::<3>(compact, "a JWS has three parts")?;
+    let header = parse_header(protected)?;
+    let deflate = zip_of(&header)?;
+    let payload = capped(b64(payload)?, deflate, max_len)?;
+    Ok((header, payload))
+}
+
 /// Verify a compact JWS with `alg: ES256` against `key` and return its payload, inflated when the
 /// header says `zip: DEF`. The payload must fit in `max_len` bytes. A high-S signature verifies:
 /// RFC 7518 has no low-S rule and WebCrypto signers emit one about half the time.
@@ -569,6 +581,36 @@ mod tests {
             claims["vc"]["credentialSubject"]["fhirBundle"]["resourceType"],
             "Bundle"
         );
+    }
+
+    #[test]
+    fn jws_unverified_names_the_issuer_and_kid_under_the_same_cap() {
+        let (header, payload) = jws_unverified(SHC_JWS, MIB).expect("unverified");
+        assert_eq!(header["kid"], "3Kfdg-XwP-7gXyywtUfUADwBumDOPKMQx-iELL11W9s");
+        assert_eq!(hex::encode(Sha256::digest(&payload)), SHC_PAYLOAD_SHA256);
+        let claims: Value = serde_json::from_slice(&payload).expect("json");
+        assert_eq!(claims["iss"], "https://spec.smarthealth.cards/examples/issuer");
+        // nothing is verified: a broken signature still names the issuer, verify_es256 refuses it
+        let mut p = parts(SHC_JWS);
+        p[2] = b64(&[1u8; 64]);
+        let forged = p.join(".");
+        assert_eq!(jws_unverified(&forged, MIB).expect("unverified").1, payload);
+        let key = es256_key(&shc_issuer_jwk()).expect("jwk");
+        assert_eq!(verify_es256(&forged, &key, MIB).err(), Some(JoseError::BadSignature));
+        // the inflate cap, zip and crit hold before any key is chosen
+        let signer = signing_key(8);
+        let bomb = jws(
+            &signer,
+            json!({"alg": "ES256", "zip": "DEF"}),
+            &raw_deflate(&vec![b'a'; 64 * MIB]),
+        );
+        assert_eq!(jws_unverified(&bomb, MIB).err(), Some(JoseError::TooLarge(MIB)));
+        assert_eq!(jws_unverified(SHC_JWS, 10).err(), Some(JoseError::TooLarge(10)));
+        let gzip = jws(&signer, json!({"alg": "ES256", "zip": "GZIP"}), b"{}");
+        assert_eq!(jws_unverified(&gzip, MIB).err(), Some(JoseError::Unsupported("zip")));
+        let crit = jws(&signer, json!({"alg": "ES256", "crit": ["b64"]}), b"{}");
+        assert_eq!(jws_unverified(&crit, MIB).err(), Some(JoseError::Unsupported("crit")));
+        assert!(matches!(jws_unverified(NODE_JWE_RAW, MIB), Err(JoseError::Malformed(_))));
     }
 
     #[test]
