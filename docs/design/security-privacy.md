@@ -30,7 +30,7 @@ flowchart LR
   Inbox[Email, watched folder, Paperless] --> JOBS
   JOBS --> PG & BL
   OW <--> Vendors[(Wearable vendor APIs)]
-  App -- ciphertext only, v1.0 --> SH[(SHL host the user controls)]
+  Viewer[Doctor opening an SHL] -- link routes only, ciphertext, v1.0 --> RP
   PG & BL -. restic .-> BK[(Backup target)]
 ```
 
@@ -58,7 +58,7 @@ Four lines cross a trust boundary and carry most of the risk:
 
 | Actor | Goal / path | Mitigation | Phase | Residual risk we accept |
 |---|---|---|---|---|
-| Remote attacker | Reach the app from the internet | Default bind `127.0.0.1`; docs put it behind a reverse proxy on LAN or VPN; MCP validates `Origin`; SHL ciphertext goes to a host the user controls, and we run none | v0.1 | A self-hoster who port-forwards the app; we warn in the setup checklist |
+| Remote attacker | Reach the app from the internet | Default bind `127.0.0.1`; docs put it behind a reverse proxy on LAN or VPN; MCP validates `Origin`; from v1.0 a public site block exposes only the SHL link routes, and we run no share host | v0.1 | A self-hoster who port-forwards the app; we warn in the setup checklist |
 | Remote attacker | Exploit a parser (PDF, DICOM, zip, XML) | Parsers run in the job loop with size and page limits, zip-slip and zip-bomb checks, `defusedxml`, no shell-outs with user paths; container `read_only`, `cap_drop: ALL`, non-root, `no-new-privileges` | v0.1 | Memory-safety bugs in native PDF/OCR libraries |
 | Household member | Read another member's data, or a category hidden from them | Per-profile grants intersected with categories and the profile owner's locks; one authorization function used by UI, REST, MCP and export; "who can see my data" page | v0.1 | The server admin can read everything (they hold the disk, and from v1.0 the KEK) |
 | Household member | Read a minor's or partner's data after a relationship changes | Grants revocable by the profile owner; ownership transfer at majority; audit visible to the owner | v0.1 / v0.3 | Copies already taken |
@@ -205,16 +205,16 @@ A profile without a login (a minor, an elderly parent) is managed through `guard
 
 For a family member who is hospitalised, unconscious or dead.
 
-1. The owner pre-designates emergency contacts and what they would see (default: summary, records, labs, medications; not `read:sensitive`, not genome raw).
+1. The owner pre-designates emergency contacts and what they would see (default: summary, records, labs, medications; not `read:sensitive`, not genome raw). Designating a contact needs an active calendar feed.
 2. A contact requests access with a reason.
-3. The owner is notified at once and can reject. If not rejected within the delay (default 48 hours, configurable 12 to 168), a read-only grant opens for 14 days.
+3. The owner is notified at once and can reject. If not rejected within the delay (default 48 hours, configurable 12 to 168), a read-only grant opens for 14 days, once the owner's calendar feed has been fetched since the request; until then the request stays requested.
 4. Every step and every read during the grant is in the audit log, shown to the owner at next login.
 
 ```mermaid
 stateDiagram-v2
   [*] --> Requested: contact asks
   Requested --> Rejected: owner rejects
-  Requested --> Active: delay passes
+  Requested --> Active: delay passed and feed fetched
   Active --> Expired: 14 days
   Active --> Revoked: owner revokes
   Rejected --> [*]
@@ -236,28 +236,28 @@ Successor and inheritance of data after death is a v2 item.
 ### 7.2 v1.0: per-profile data keys
 
 - Each profile gets a random 256-bit data key (DEK). DEKs are stored wrapped by the household key-encryption key (KEK).
-- Encrypted with the profile DEK: blobs (documents, genome facts file, VCF), and free-text fields tagged sensitive. Blobs use streaming AEAD (XChaCha20-Poly1305 secretstream). The tabix VCF is decrypted to a tmpfs file for lookups and removed after.
+- Encrypted with the profile DEK: blobs (documents, genome facts file, VCF) and the profile's connector tokens. Blobs use chunked AES-GCM. XChaCha20-Poly1305 secretstream and DEK-encrypted sensitive free text are cut from 1.0 (later). The tabix VCF is decrypted to a tmpfs file for lookups and removed after.
 - Not encrypted with the DEK: typed observation values, codes and dates, because trends and the deterministic status are SQL over them. They rely on disk encryption.
 - Blob addresses become `HMAC(profile key, sha256(plaintext))`, so identical files across profiles do not reveal that two people hold the same document.
 
 | KEK mode | How | Works unattended | Default |
 |---|---|---|---|
 | Key file | 32 random bytes in a docker secret (`OWNHEALTH_KEK_FILE`), also stored in the household's password manager | Yes: MCP, jobs and imports run after a reboot | Yes |
-| Sealed | KEK derived with Argon2id from a passphrase typed after each start; until then the app serves only an unlock page, MCP returns 503, jobs wait | No | Opt-in |
+| Sealed | KEK derived with Argon2id from a passphrase typed after each start; until then the app serves only an unlock page, MCP returns 503, jobs wait | No | Cut from 1.0 (later) |
 
-Sealed mode protects the blobs and sensitive free text on a seized running-then-powered-off server. It does not replace full-disk encryption: typed values, codes and dates sit outside the DEK, so disk encryption stays a requirement in sealed mode too. It costs availability: an agent cannot read anything after a power cut until someone unlocks.
+Sealed mode is cut from 1.0 (later). It protects the blobs and sensitive free text on a seized running-then-powered-off server. It does not replace full-disk encryption: typed values, codes and dates sit outside the DEK, so disk encryption stays a requirement in sealed mode too. It costs availability: an agent cannot read anything after a power cut until someone unlocks.
 
 ### 7.3 Crypto-shredding
 
-Deleting a profile destroys its wrapped DEK. Its blobs become unreadable everywhere, including in backups, once no retained backup still holds that wrapped DEK. Typed rows are deleted with SQL and stay in older Postgres dumps, pre-migration dumps included, until those are pruned. The delete screen states the date at which the last backup holding the profile expires and offers "prune backups now".
+Deleting a profile destroys its wrapped DEK and rewrites the keyring at once. Its blobs and connector tokens become unreadable at once, backups included: `pg_dump` leaves out the `profile_key` table, and the keyring sits on its own mount outside every backup and versioned copy. The limit: a keyring copy taken before the delete reopens the profile, so the delete screen says every older copy of the keyring must be destroyed. Typed rows are deleted with SQL and stay in older Postgres dumps, pre-migration dumps included, until those are pruned. The delete screen states the date at which the last dump holding those rows expires and offers "prune backups now".
 
 ## 8. Backups
 
-- One command: `ownhealth backup` runs `pg_dump -Fc`, the blob directory and (v1.0) the wrapped-DEK table into restic (BSD-2-Clause) on any restic backend (S3-compatible, SFTP, local disk). Orthanc storage and index join the same run when the `imaging` profile is on.
-- The restic password and (from v1.0) the KEK are never inside the backup. The setup page refuses to mark backups "configured" until the user confirms the restic password is in a password manager; from v1.0, when profile keys exist, it asks the same for the KEK. Each is shown once.
+- One command: `ownhealth backup` runs `pg_dump -Fc` and the blob directory into restic (BSD-2-Clause) on any restic backend (S3-compatible, SFTP, local disk). Orthanc storage and index join the same run when the `imaging` profile is on.
+- The restic password and (from v1.0) the KEK are never inside the backup. From v1.0 the dump leaves out the wrapped-DEK table, and the keyring is never in restic (section 7.3). The setup page refuses to mark backups "configured" until the user confirms the restic password is in a password manager; from v1.0, when profile keys exist, it asks the same for the KEK. Each is shown once.
 - **Restore test**, weekly by default: restore the latest snapshot into a throwaway compose project, then compare row counts per table, every blob hash, each profile's `state_hash` and, when the `imaging` profile is on, the imaging inventory (Orthanc study, series and instance counts and each instance's hash, read from the restored Orthanc) against the values recorded in that backup's manifest ([architecture.md section 14](architecture.md#14-backup-and-restore)), not against the live instance, which may have changed since. A mismatch is an alert on the dashboard. We ship a broken-snapshot fixture so the test is seen to fail.
 - A backup that has never passed a restore test is shown as "untested", not as a backup.
-- Retention default: 7 daily, 4 weekly, 12 monthly. This retention is also the crypto-shredding window (section 7.3).
+- Retention default: 7 daily, 5 weekly, 12 monthly. This retention is how long a deleted profile's typed rows stay in dumps (section 7.3).
 - Pre-migration dumps sit outside restic, on their own volume, and each is deleted 14 days after its migration succeeded ([architecture.md section 13](architecture.md#13-upgrades-and-migrations)). The expiry date a purge or profile delete shows counts them, and "prune backups now" deletes them along with the restic snapshots.
 
 https://restic.readthedocs.io/
@@ -293,9 +293,9 @@ What we do on our side:
 **SMART Health Links, UI only, v1.0.**
 
 - The user selects what to share (IPS summary, chosen labs, chosen documents) in the UI, with step-up auth.
-- The app builds the FHIR bundle, encrypts it locally (JWE `dir` + `A256GCM`, 32-byte random key) and uploads only ciphertext to a host the user controls. The key lives in the URL `#fragment`, which never reaches the host.
-- The project runs no share host and no relay. The host is either the user's own instance reached through a tunnel (Tailscale Funnel, Cloudflare Tunnel), or a static or S3-compatible host the user owns. Only the second keeps the home network free of any public ingress.
-- Default expiry 7 days; optional passcode (flag `P`) with an attempt limit; revocation deletes the object. A plain static host cannot count passcode attempts, so the passcode needs the instance as host (unverified per host type).
+- The app builds the FHIR bundle, encrypts it locally (JWE `dir` + `A256GCM`, 32-byte random key) and stores only ciphertext, which the instance serves itself. The key lives in the URL `#fragment`, which never reaches the server.
+- The project runs no share host and no relay. The instance serves its own links. The reverse proxy's link-only site block filters the paths, and the tunnel (Tailscale Funnel, Cloudflare Tunnel) points at that site block's port, never at the app port. A static or S3 host is not used in 1.0: it cannot count passcode attempts or keep the access log.
+- Default expiry 7 days; optional passcode (flag `P`) with an attempt limit; revocation deletes the object. The instance counts the passcode attempts.
 - Whether we also publish a reference share-host component for users to run is open (section 15).
 - No MCP tool can create, list or extend a share (section 4.2, row 3).
 
@@ -372,7 +372,7 @@ https://eur-lex.europa.eu/eli/reg/2025/327/oj
 | Vendor | Term | Our decision |
 |---|---|---|
 | Strava | API Agreement and Policy from June 2026: §5.3 bans AI use including ingestion into a context window; §5.16 bans aggregators and MCP servers exposing Strava data | Never build a Strava API connector. Import only the user's own bulk export file |
-| Oura | API and MCP Agreement effective 2026-06-08 restricts AI processing (unverified wording) | Read the primary text before the v1.0 connector; ship it only if user-directed processing in a user-chosen agent is allowed |
+| Oura | API and MCP Agreement effective 2026-06-08 restricts AI processing (unverified wording) | The v1.0 connector ships; its data reaches MCP, the rule-pack markers and the calculators only once its connector page quotes the primary terms and they show no AI ban |
 | Garmin | Health API is business-only; AI processing reportedly allowed with disclosure and consent (unverified) | Exports and phone hubs only |
 | Others via Open Wearables | Each self-hoster registers their own OAuth app and accepts the vendor's terms | Setup docs link each vendor's terms |
 
@@ -432,10 +432,10 @@ https://huggingface.co/PaddlePaddle/PaddleOCR-VL
 ## 15. Open decisions
 
 1. **Break-glass delay.** Default 48 hours here; 24 hours is the other candidate.
-2. **KEK default.** Key file by default, sealed mode opt-in. Reverse it if most users run on hardware that is often physically exposed.
+2. **KEK default.** Key file in 1.0; sealed mode is cut from 1.0 (later). When it lands, make it the default only if most users run on hardware that is often physically exposed.
 3. **Remote MCP clients.** Vendor-cloud connectors need public reachability. Do we document a hardened public setup, or only support local clients and VPN?
 4. **Sensitive sub-scopes.** `read:sensitive` covers mental, reproductive and sexual health together. Split it (e.g. reproductive alone, for cycle data in v2) only if a real grant needs the split.
-5. **Reference share host.** We run no share host; the ciphertext goes to a host the user controls. Open: do we also publish a small reference component for users to run, or only document compatible hosts?
+5. **Reference share host.** We run no share host; each instance serves its own links. Open: do we also publish a small reference share-host component for users to run?
 6. **MDR position.** Needs a lawyer's reading of "commercial activity" before v0.1 ships `check_drug` PGx output, and again before the v0.3 calculators.
 7. **Unverified licences** to confirm before shipping tables: UCUM, CPIC, ClinPGx, Orthanc OHIF plugin, the OCR model cards other than PaddleOCR-VL.
 

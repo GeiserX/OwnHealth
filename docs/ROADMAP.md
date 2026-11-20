@@ -282,42 +282,43 @@ Ships in 0.4.0. Measured exit criteria, and the test behind each deliverable: [v
 ### Deliverables
 
 **Records/connectors**
-- [ ] US SMART on FHIR patient standalone launch (PKCE) for Epic, Oracle Health, athenahealth, eClinicalWorks, MEDITECH, NextGen, VA Lighthouse; endpoint directory built from vendor Brands bundles.
-- [ ] Bring-your-own client wizard: the self-hoster registers a read-only, patient-facing US Core/USCDI client per vendor. A shared project client is an open decision (below).
-- [ ] CMS Blue Button 2.0 (CARIN BB, `ExplanationOfBenefit`, `Coverage`), bring-your-own registered confidential client.
+- [ ] US SMART on FHIR patient standalone launch (PKCE) for Epic, Oracle Health, athenahealth, eClinicalWorks, MEDITECH, NextGen, VA Lighthouse; endpoint directory built from vendor Brands bundles. Each vendor ships with an honest "verified live" status: 1.0 needs Epic verified live, and the other six are verified one by one after 1.0.
+- [ ] Bring-your-own client wizard: the self-hoster registers a read-only, patient-facing US Core/USCDI client per vendor, with a client secret (a JWKS only when the instance is public, [connectors.md section 7](design/connectors.md#7-us-smart-on-fhir-registration-strategy)). A shared project client is an open decision (below).
+- [ ] CMS Blue Button 2.0 (CARIN BB, `ExplanationOfBenefit`, `Coverage`), bring-your-own registered confidential client. Claims are stored with the pull and counted. Nobody reviews them one by one: every unmapped type (`Coverage`, `ExplanationOfBenefit`) lands in one grouped review item per run and type, `Patient` matches the profile, as in every FHIR import, and the source card shows the claim count.
 - [ ] C-CDA import (US CCD) through an open CDA-to-FHIR mapper.
 - [ ] SMART Health Links and SMART Health Cards receiver (QR scan or paste).
 - [ ] Refresh-token rotation persisted atomically before use.
 - [ ] GEDCOM import (structure only), moved from v0.3: typing 6 to 10 relatives by hand works for a household, and a GEDCOM file is mostly free text about living people that we would have to prove we never store.
 
 **Wearables**
-- [ ] `wearables` profile: Open Wearables (MIT) sidecar, pinned release, pulled over its REST API. The sidecar's Strava provider is disabled, and the `openwearables` connector drops any sample whose provider is `strava`.
-- [ ] Oura, Whoop v2, Polar AccessLink, Withings, Dexcom v3 through the sidecar; guided per-provider setup page (redirect URI, scopes).
+- [ ] `wearables` profile: Open Wearables (MIT) sidecar, pinned at 0.11.0, pulled over its REST API. Its ingest is an allowlist: Oura, Whoop, Polar and Withings. Every other provider is off in the sidecar, and the `openwearables` connector drops and counts any sample from a provider outside the list (Strava and Garmin included).
+- [ ] Oura, Whoop v2, Polar AccessLink and Withings through the sidecar; guided per-provider setup page (redirect URI, scopes).
+- [ ] Dexcom v3 as a native connector, not through the sidecar: Open Wearables 0.11.0 has no Dexcom provider.
+- [ ] Each vendor's data reaches MCP, the rule-pack markers and the calculators only once its connector page quotes the primary terms and they show no AI ban. Until then it is shown in the UI and over REST only.
 - [ ] Polar and Dexcom rolling windows: scheduled syncs from day one, alert on a sync gap.
 - [ ] File importers: Garmin "Export Your Data" (FIT + JSON), Google Takeout Fitbit, Strava bulk export, LibreView and Dexcom Clarity CSV.
 - [ ] Vendor scores (readiness, recovery, Body Battery) stored apart from measurements, tagged `computed_by: provider`.
 - [ ] HRV tagged by method; never compared across vendors.
 
 **Imaging**
-- [ ] `imaging` profile: Orthanc + OHIF as separate containers.
+- [ ] `imaging` profile: one Orthanc container with its OHIF plugin, not a separate OHIF container (rule 6 of "How we decide"). The viewer runs in a sandboxed origin and reads DICOMweb through a short-lived capability path, never with the session cookie.
 - [ ] DICOM import from CD folders and zips; study linked to its report document and to the timeline.
 
 **UI**
-- [ ] SMART Health Links sharing from the UI only: scope picker, expiry, optional PIN, access log, revoke. The ciphertext goes to a host the user controls (the instance behind a tunnel, or their own static or S3 host); the project runs no share host.
+- [ ] SMART Health Links sharing from the UI only: scope picker, expiry, optional PIN, access log, revoke. The instance serves the ciphertext itself, through a public site block that exposes only the link routes. Everything else stays private. The project runs no share host.
 - [ ] ICE card: printable wallet card, offline QR with minimal plain text, optional SHL QR for the full IPS.
 - [ ] Household overview: one row per member with flags and overdue items.
 - [ ] Connections screen: status, last sync, token expiry per source.
 
 **Security/Privacy**
-- [ ] Per-profile data keys (DEKs) for blobs and genome files, wrapped by a household key; crypto-shredding on profile deletion.
+- [ ] Per-profile data keys (DEKs) for blobs, genome files and connector tokens, wrapped by a household key; crypto-shredding on profile deletion.
 - [ ] Hash-chained audit log, user-visible.
-- [ ] Break-glass for family: a grant that activates after a delay unless the owner cancels it; every use audited and notified.
-- [ ] Threat model updated for live connectors and sharing; external security review before tagging 1.0.
+- [ ] Break-glass for family: a grant that activates after a delay unless the owner cancels it; every use audited and notified. The owner hears at request time through an event in their calendar feed, the only outbound channel before v2. A grant activates only once its delay has passed and the owner's calendar feed has been fetched since the request, so a grant cannot open before the owner's calendar has received the request. Every step also lands in the in-app outbox.
+- [ ] Threat model and security design updated for live connectors, sharing and the 1.0 key scope; external security review before tagging 1.0.
 
 **MCP**
-- [ ] `get_imaging_studies` if logged sessions show the need (metadata and report only, no pixel data).
 - [ ] Agent session report, moved from v0.3: it needs a consent switch for logged sessions (rule 2 of "How we decide"), and `audit_event` does not yet record `not_assessed` counts or argument width.
-- [ ] Sidecar vendor metrics (Oura, Whoop, Polar, Withings, Dexcom) in `search_observations` and `get_trend`, with LTTB or min/max downsampling for long windows.
+- [ ] Sidecar (Oura, Whoop, Polar, Withings) and native Dexcom metrics in `search_observations` and `get_trend`, each once its terms allow it (Wearables above), with a min/max envelope for long windows.
 
 **Ops/Distribution**
 - [ ] Upgrade path tested from every 0.x release to 1.0 with no data loss.
@@ -330,16 +331,37 @@ Ships in 0.4.0. Measured exit criteria, and the test behind each deliverable: [v
 
 ### Exit criteria
 
+Every row names the test that proves it. A row that also says **Live** needs one run on real sandbox accounts or a real server. CI cannot do that run, because tests never reach the internet and the credentials are the household's. Its evidence goes in `docs/v1.0-exit-criteria.md`.
+
 | Area | Criterion |
 |---|---|
-| SMART | An Epic sandbox patient connects, imports US Core resources, and refreshes daily for 30 days without re-consent. |
-| Blue Button | A sandbox synthetic beneficiary imports claims with 0 silent drops. |
-| Wearables | 30 days of Oura, Withings and Dexcom sandbox sync with 0 missed gap alerts; Polar gap alert fires within 24 h of a missed sync. |
-| Imaging | A DICOM CD with 2,000 images imports and its study opens in OHIF in <5 s on a LAN. |
-| Sharing | An SHL created in the UI opens in a reference SHL viewer, expires on time, and returns nothing after revoke; no MCP call can create one. |
-| Keys | After crypto-shredding Sam Rivera's profile, a test cannot decrypt any of Sam's blobs from a backup. |
-| Break-glass | A grant activates exactly after its delay, cancels cleanly, and writes audit + notification on every use. |
-| Upgrade | Fixture databases from 0.1, 0.2 and 0.3 migrate to 1.0 with identical `state_hash` for unchanged data. |
+| SMART | In CI, an axum fake SMART server (`ownhealth-ingest-structured/tests/smart_fake.rs`) serves a synthetic US Core patient: the launch connects, the import lands, and 30 daily refreshes under an injected clock rotate the token with no re-consent. The `connector_oauth` tests show that a reused refresh token gives `invalid_grant` and marks the source for re-consent, never silently. The `smart-launcher` workflow runs a real PKCE launch against the digest-pinned SMART launcher. **Live:** an Epic sandbox patient refreshes daily for 30 days without re-consent. |
+| Blue Button | Against an axum fake that serves the CARIN BB STU 2.1 example claims, every `Patient`, `Coverage` and `ExplanationOfBenefit` is counted, stored in the run's bundle blob and visible on the source card, `Patient` matches the profile, as in every FHIR import, and each unmapped type (`Coverage`, `ExplanationOfBenefit`) lands in one grouped review item per run and type: resources served equals resources counted, so 0 silent drops. **Live:** a sandbox synthetic beneficiary gives the same equality. |
+| Wearables | In CI, 30 simulated days with scripted gaps, under an injected clock, against the Open Wearables and Dexcom fakes: 0 missed gap alerts, 0 false ones, every alert closes on recovery, and the Polar alert fires within 24 h of a missed sync. The `wearables` workflow runs the poller once against a seeded Open Wearables 0.11.0 container: samples arrive for Oura, Whoop, Polar and Withings, and 0 for Strava and Garmin. **Live:** 30 days on the Dexcom sandbox with 0 missed gap alerts. |
+| Imaging | The `imaging` workflow imports a generated CD of 2,000 images and opens the study in headless Chromium (`ui/e2e/imaging.spec.ts`): from the click to the first drawn frame takes <5 s on the runner. The import time is measured and reported, not gated. **Live:** a real hospital CD reports both times the same way. |
+| Sharing | `ui/e2e/shl.spec.ts`: an SHL created in the UI opens in a pinned reference SHL viewer, and returns 404 after its expiry and after revoke. The server tests refuse a bearer token on every share route, and no MCP tool can create a link. |
+| Keys | Back up Alex and Sam Rivera, crypto-shred Sam's profile, then restore the old backup with the current keyring and key: every Sam blob fails to decrypt and every Alex blob opens. A second test records the limit: a keyring copy taken before the delete reopens Sam, which is why the keyring is never kept in a versioned copy. |
+| Break-glass | Server tests under an injected clock: a grant activates at its delay (±1 s) once the owner's feed has been fetched since the request, a grant whose feed was not fetched stays requested past its delay, a feed fetched after the delay activates the grant at the next access or sweep, a cancelled request never activates, and a contact's normal grant comes back unchanged after expiry and after revoke. The owner's calendar feed shows the request at once, and every step writes an audit row and an outbox entry. In an e2e test, the owner cancels a request and nothing activates. A second request activates, and each use shows in the owner's outbox. |
+| Upgrade | `ownhealth-ops/tests/upgrade_fixtures.rs` restores fixture databases written by the released 0.1.1, 0.2.0, 0.3.0 and 0.4.0 images (0.1.1 covers 0.1.0: same migrations) and migrates each one to 1.0. Each fixture is compared only with itself: its `state_hash` per profile equals its own recorded 1.0 golden, and its truth-table rows and referenced blobs are unchanged. For 0.4.0, the hash in its backup manifest also equals the migrated hash, because 1.0 keeps rule pack 0.2.0. No fixture is compared with another: demo seeds draw random `src` ids, and the state body hashes them. |
+
+### Cut from 1.0
+
+| Cut | Why |
+|---|---|
+| `get_imaging_studies` MCP tool | No recorded agent session shows the gap (rule 2 of "How we decide"). The agent session report is what will produce that evidence. |
+| A separate OHIF container | It needs our own OHIF image, a Node build in the release and one more container. The Orthanc OHIF plugin sets its base path at run time and adds no container or RAM (rule 6). |
+| SHL ciphertext on a static or S3 host | A static host cannot count passcode attempts, and the SHL spec requires a lifetime limit even under parallel attempts. It also cannot keep the access log. |
+| Ingesting Open Wearables providers beyond Oura, Whoop, Polar and Withings | The roadmap names four vendors, and no connector page checks the others' terms. Garmin and Fitbit history still comes in through their export importers. |
+| The Open Wearables web portal and svix-server containers | Neither is needed to pull data: we call the sidecar's REST API with an API key. |
+| A rule-pack bump | It would move every `state_hash` again and break the 0.4.0 half of the Upgrade row. New outputs (vendor scores, the session report, connection state) are separate tables or derived documents. |
+| LTTB downsampling | A true min/max envelope from the existing rollups is simpler and keeps the extremes visible. |
+| Microsoft FHIR-Converter for C-CDA | It needs the .NET runtime in core. A Rust port of an Apache-2.0 C-CDA mapper replaces it. |
+| Shipping vendor Brands or endpoint files in the repo, or fetching them by default | Epic's terms allow distribution by link only, and Oracle's endpoint list has no licence. Each instance downloads them itself, only after a person opens the US connection wizard. |
+| SMART API-access content inside a received SHL | It is a live API grant, so it would be a second connector path. The receiver lists it as not imported, with a reason. |
+| Sealed mode, secretstream and encrypted free text from the security design | 1.0 asks for per-profile keys for blobs, genome files and connector tokens only. The security design marks them as cut from 1.0. |
+| A retry queue for vendor token revocation after a profile delete | The queue would have to keep the deleted person's token. Revocation runs once before the delete. A failure is audited and shown with the vendor's own revoke page, and the token is deleted either way. |
+| An English fallback for strings missing in the new languages | It would hide missing translations ("nothing silent"). The new languages land after every UI change, so their completeness checks stay strict. |
+| Live verification of all seven SMART vendors as a 1.0 gate | Six of them need developer accounts opened one by one. 1.0 ships each vendor's honest status, and verification continues after the tag. |
 
 ---
 
@@ -498,6 +520,8 @@ Inside a phase, order is set by these signals, strongest first:
 
 **MCP evaluation for 0.4.0.** No candidate tool (`timeline`, `what_changed_since`, `list_conditions`, `get_medications`, or any other) is added in 0.4.0, because no recorded agent session shows a gap. The new 0.4.0 reads go through `get_health_status` sections, `get_genome_findings` and MCP resources. The logged-session report that would supply this evidence waits for the consent switch that rule 2 requires (v1.0).
 
+**MCP evaluation for 1.0.** No new MCP tool lands in 1.0, `get_imaging_studies` included, because no recorded agent session shows a gap. 1.0 ships the consent switch and the session report that rule 2 needs, so the evidence for the next tool can exist. New 1.0 data reaches agents only through the existing tools: sidecar and Dexcom metrics through `search_observations` and `get_trend`, once their terms allow it. Imaging studies stay off MCP until a session shows the need. They already sit under `read:records`, so that tool would stay small.
+
 What does not move the roadmap: a feature a rival has, a request with no sample, a model release.
 
 ---
@@ -507,9 +531,9 @@ What does not move the roadmap: a feature a rival has, a request with no sample,
 | Decision | Options | Note |
 |---|---|---|
 | US SMART client strategy | bring-your-own client wizard vs also a shared project public client with a static relay page | We ship bring-your-own in v1.0. A shared client puts our name on the consent screen and needs a relay we run, so it stays open ([connectors.md section 7](design/connectors.md#7-us-smart-on-fhir-registration-strategy)). |
-| SHL ciphertext host | a host the user controls vs a reference share-host component we publish | We ship "a host the user controls" (the instance behind a tunnel, or their own static or S3 host). A reference component is open. |
+| SHL ciphertext host | the instance itself vs a static or S3 host vs a reference share-host component we publish | Decided for 1.0: the instance serves its own links through a link-only public site block, because only a live server can count passcode attempts and keep the access log. A reference component stays open. |
 | Unofficial wearable libraries (python-garminconnect, pydexcom Share, Eight Sleep) | never vs community plugins with ToS warnings | Not in the core plan; fragile and ToS-risky. |
-| Oura and Withings terms | ship in v1.0 vs hold | Oura's 2026 agreement reportedly restricts AI processing (unverified); a Withings+ requirement for new accounts is reported (unverified). Read primaries before shipping. |
+| Oura and Withings terms | ship in v1.0 vs hold | We ship the connectors in v1.0 and show their data in the UI and over REST. Each vendor's data reaches MCP, the rule-pack markers and the calculators only once its connector page quotes the primary terms and they show no AI ban. Oura's 2026 agreement reportedly restricts AI processing (unverified); a Withings+ requirement for new accounts is reported (unverified). |
 | Emergency card timing | v1.0 vs earlier | We keep the ICE card in v1.0, next to SHL sharing. |
 | Notifications timing and library | v2 vs v0.3 with reminders; Apprise vs per-channel code | Reminders exist from v0.3 but deliver via ICS until v2. |
 | LOINC distribution | curated subset in repo vs install-time download | Depends on the Regenstrief notice terms for a public repo. |

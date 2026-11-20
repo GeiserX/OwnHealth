@@ -323,7 +323,7 @@ Ranked by value divided by effort. The phase column matches our roadmap (ROADMAP
 | 13 | SMART on FHIR patient-access sync; C-CDA/CCD/XDM and Epic EHI import | Syntropy, Strand, Mere | v1.0 |
 | 14 | Wearable OAuth through Open Wearables instead of our own connectors | Open Wearables | v1.0 |
 | 15 | Imaging: Orthanc + OHIF, studies linked to the radiology report | none in PHRs | v1.0 |
-| 16 | Share links: time-limited and revocable, created from the UI only (never over MCP) | HealthLog | v1.0 (SMART Health Links; ciphertext on a host the user controls, we run no share host) |
+| 16 | Share links: time-limited and revocable, created from the UI only (never over MCP) | HealthLog | v1.0 (SMART Health Links; the instance serves the ciphertext itself, we run no share host) |
 | 17 | Correlations and context: weather, pollen, daylight; symptom-to-data correlation; PHQ-9 and GAD-7 questionnaires | HealthLog, Bearable, Exist | v2 |
 | 18 | One-command trial with a synthetic demo family and measured public claims | Mirobody, Strand (Synthea) | v0.1 |
 
@@ -354,6 +354,6 @@ https://www.strava.com/legal/api_policy
 - **Mirobody resolver upstream.** We start from their resolver bundle: Apache-2.0 overlays (`resolver_overrides.tsv`, `recall_synonyms.tsv`) plus LOINC 2.83 content under the LOINC License and UCUM under the UCUM License. Open: do we track upstream releases or fork once? Tracking inherits their CN/JA-first alias priorities.
 - **Orthanc licence fit.** Orthanc is GPL/AGPL and runs as a separate container in the `imaging` profile. Check that shipping it in our compose file fits AGPL-3.0-or-later.
 - **Open Wearables footprint.** It is built for B2B (developer portal, API keys, its own storage). Measure what the `wearables` sidecar costs a single household before v1.0, and how many vendor OAuth apps a self-hoster must still register.
-- **Oura and Garmin AI terms.** Oura's 2026 API and MCP agreement reportedly restricts AI use (unverified); Garmin reportedly allows it with disclosure and consent (unverified). Read both primaries before the v1.0 connectors.
+- **Oura and Garmin AI terms.** Oura's 2026 API and MCP agreement reportedly restricts AI use (unverified); Garmin reportedly allows it with disclosure and consent (unverified). Read both primaries before their data reaches MCP, the rule-pack markers and the calculators; the v1.0 connectors ship either way.
 - **Findings schema for other pipelines.** `ownhealth.genome-facts/v1` is OwnGenome's contract. Open: document it well enough that gnomancer or GeneChat annotations could emit it too.
 - **Commercial claims.** Claims for InsideTracker, Levels, Bearable, Exist.io, Gyroscope and Humanity are unverified; check them before quoting them elsewhere.

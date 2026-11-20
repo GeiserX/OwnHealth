@@ -115,7 +115,10 @@ pub static TREND_SPEC: ToolSpec = ToolSpec {
     description: "One lab analyte (LOINC code or name) or wearable metric (e.g. 'hr_resting') over a window such as \
 P3Y, downsampled to fit, with coverage and change statistics and medication start/stop annotations. \
 Points keep the printed value and unit beside the canonical one; every point has a src id. Analytes \
-that arrived under two LOINC codes are both kept and named in codes. Missing is not normal.",
+that arrived under two LOINC codes are both kept and named in codes. A bucketed point's min and max are the \
+lowest and highest single reading, on day points too; for a summed metric (steps, sleep, energy, distance) \
+they are the lowest and highest day total. n counts readings. stats.min and stats.max follow the points. \
+Missing is not normal.",
     input_schema: trend_schema,
     any_scope: &["read:labs", "read:vitals", "read:wearables"],
     all_scopes: &[],
@@ -843,6 +846,25 @@ pub fn stats_of(mut series: Vec<(NaiveDate, f64)>) -> Value {
     Value::Object(out)
 }
 
+/// Stats min and max follow the points: the lowest point min and the highest point max, or the point's
+/// `key` value where it has no min or max. Without this a bucketed trend's stats give the range of the
+/// bucket means, below the extremes its own points show.
+fn stats_follow_points(mut stats: Value, points: &[Value], key: &str) -> Value {
+    let value = |p: &Value, k: &str| p.get(k).and_then(Value::as_f64);
+    let with_value = || points.iter().filter(|p| value(p, key).is_some());
+    let lo = with_value()
+        .filter_map(|p| value(p, "min").or(value(p, key)))
+        .reduce(f64::min);
+    let hi = with_value()
+        .filter_map(|p| value(p, "max").or(value(p, key)))
+        .reduce(f64::max);
+    if let (Some(lo), Some(hi), Value::Object(out)) = (lo, hi, &mut stats) {
+        out.insert("min".into(), json!(lo));
+        out.insert("max".into(), json!(hi));
+    }
+    stats
+}
+
 fn bucket_key(d: NaiveDate, resolution: &str) -> NaiveDate {
     match resolution {
         "week" => d - Duration::days(i64::from(d.weekday().num_days_from_monday())),
@@ -856,11 +878,14 @@ fn bucket_key(d: NaiveDate, resolution: &str) -> NaiveDate {
 pub struct Pt {
     pub date: NaiveDate,
     pub v: Option<f64>,
+    /// The lowest and highest reading inside the point (a daily rollup), when it has them.
+    pub lo: Option<f64>,
+    pub hi: Option<f64>,
     pub n: Option<i64>,
     pub src: Option<String>,
 }
 
-/// Mean per bucket, with min, max, n and the src ids of the points inside.
+/// Mean per bucket, with the lowest and highest reading, n and the src ids of the points inside.
 pub fn aggregate(points: &[Pt], resolution: &str) -> Vec<Value> {
     let mut sorted: Vec<&Pt> = points.iter().collect();
     sorted.sort_by_key(|p| p.date);
@@ -892,8 +917,11 @@ pub fn aggregate(points: &[Pt], resolution: &str) -> Vec<Value> {
             }
         }
         let mean = fsum(&vals) / vals.len() as f64;
-        let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        // the extremes of the readings themselves, not of the day means: a spike inside one day shows
+        let lows = ps.iter().filter(|p| p.v.is_some()).filter_map(|p| p.lo.or(p.v));
+        let highs = ps.iter().filter(|p| p.v.is_some()).filter_map(|p| p.hi.or(p.v));
+        let min = lows.fold(f64::INFINITY, f64::min);
+        let max = highs.fold(f64::NEG_INFINITY, f64::max);
         let n: i64 = ps.iter().map(|p| p.n.filter(|n| *n != 0).unwrap_or(1)).sum();
         let src = if srcs.len() > 1 {
             json!(srcs.iter().take(5).collect::<Vec<_>>())
@@ -1019,11 +1047,15 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
             .into());
         }
         let days = rollups(call, &metric, since, until, &mut limitations).await?;
+        // a summed metric's point is the day total; its readings' extremes are not on that scale
+        let summed = ownhealth_ingest_structured::wearables::metric(&metric).agg == "sum";
         let raw: Vec<Pt> = days
             .iter()
             .map(|d| Pt {
                 date: d.t.date_naive(),
                 v: d.v_day,
+                lo: if summed { None } else { d.v_min },
+                hi: if summed { None } else { d.v_max },
                 n: Some(i64::from(d.n)),
                 src: d.src.clone(),
             })
@@ -1058,6 +1090,7 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
                 Some((d, p.get("value")?.as_f64()?))
             })
             .collect();
+        let stats = stats_follow_points(stats_of(series), &points, "value");
         let annotations = med_annotations(call, since, until).await?;
         data.insert("name".into(), json!(metric));
         data.insert("codes".into(), json!([metric]));
@@ -1066,7 +1099,7 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
         data.insert("resolution".into(), json!(resolution));
         data.insert("coverage_pct".into(), json!(coverage.min(100)));
         data.insert("points".into(), Value::Array(newest_first(points)));
-        data.insert("stats".into(), stats_of(series));
+        data.insert("stats".into(), stats);
         data.insert("annotations".into(), Value::Array(annotations));
         if days.iter().any(|d| d.src.is_none()) {
             limitations.push(json!(
@@ -1217,6 +1250,8 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
                 .map(|(r, c)| Pt {
                     date: r.effective_at.date_naive(),
                     v: in_unit(c).map(|d| dec_f64(&d)),
+                    lo: None,
+                    hi: None,
                     n: None,
                     src: Some(r.src_id.clone()),
                 })
@@ -1232,6 +1267,7 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
                 Some((d, p.get(stat_key)?.as_f64()?))
             })
             .collect();
+        let stats = stats_follow_points(stats_of(series), &points, stat_key);
         let with_canonical = raw_points.iter().filter(|p| p.contains_key("canonical")).count();
         let name = match rows.last() {
             Some(r) => json!(r.alias_group),
@@ -1252,7 +1288,7 @@ pub async fn get_trend(call: &mut Call<'_>) -> ToolResult<Answer> {
         data.insert("resolution".into(), json!(resolution));
         data.insert("coverage_pct".into(), json!(coverage));
         data.insert("points".into(), Value::Array(newest_first(points)));
-        data.insert("stats".into(), stats_of(series));
+        data.insert("stats".into(), stats);
         data.insert("annotations".into(), Value::Array(annotations));
         if rows.is_empty() {
             data.insert("not_measured".into(), Value::Bool(true));
@@ -1304,6 +1340,79 @@ mod tests {
         assert_eq!(window_start("P3Y", d), NaiveDate::from_ymd_opt(2023, 3, 28));
         assert_eq!(window_start("P10D", d), NaiveDate::from_ymd_opt(2026, 3, 21));
         assert_eq!(window_start("all", d), None);
+    }
+
+    #[test]
+    fn a_spike_inside_one_day_shows_in_the_weekly_max() {
+        let d = |day| NaiveDate::from_ymd_opt(2026, 11, day).unwrap();
+        let day = |date, v, lo, hi| Pt {
+            date,
+            v: Some(v),
+            lo: Some(lo),
+            hi: Some(hi),
+            n: Some(1),
+            src: None,
+        };
+        // Mon 2 to Wed 4 Nov 2026: the day means stay near 60, one reading on 3 Nov reaches 142
+        let week = aggregate(
+            &[
+                day(d(2), 60.0, 52.0, 71.0),
+                day(d(3), 64.0, 50.0, 142.0),
+                day(d(4), 59.0, 48.0, 70.0),
+            ],
+            "week",
+        );
+        assert_eq!(week.len(), 1);
+        assert_eq!(week[0]["value"], json!(61.0));
+        assert_eq!(week[0]["min"], json!(48.0));
+        assert_eq!(week[0]["max"], json!(142.0));
+        // a point without its own extremes (a lab value) still counts with its value
+        let labs = aggregate(
+            &[
+                Pt {
+                    date: d(2),
+                    v: Some(3.1),
+                    lo: None,
+                    hi: None,
+                    n: None,
+                    src: None,
+                },
+                day(d(3), 4.0, 3.5, 4.4),
+            ],
+            "week",
+        );
+        assert_eq!(labs[0]["min"], json!(3.1));
+        assert_eq!(labs[0]["max"], json!(4.4));
+    }
+
+    #[test]
+    fn stats_min_and_max_follow_the_points() {
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        let lab = |date, v| Pt {
+            date,
+            v: Some(v),
+            lo: None,
+            hi: None,
+            n: None,
+            src: None,
+        };
+        // two lab values in March (3.0 and 5.0) and one in May: the March mean is 4.0
+        let points = aggregate(&[lab(d(3, 2), 3.0), lab(d(3, 20), 5.0), lab(d(5, 4), 4.2)], "month");
+        let series = vec![(d(3, 1), 4.0), (d(5, 1), 4.2)];
+        let stats = stats_follow_points(stats_of(series), &points, "value");
+        assert_eq!(stats["min"], json!(3.0));
+        assert_eq!(stats["max"], json!(5.0));
+        // raw lab points carry no min or max: the stats key's own value counts
+        let raw = vec![
+            json!({"canonical": 3.1}),
+            json!({"canonical": 4.0}),
+            json!({"value": 9.9}),
+        ];
+        let stats = stats_follow_points(json!({"n": 2}), &raw, "canonical");
+        assert_eq!(stats["min"], json!(3.1));
+        assert_eq!(stats["max"], json!(4.0));
+        // no points: the stats stay as they were
+        assert_eq!(stats_follow_points(json!({"n": 0}), &[], "value"), json!({"n": 0}));
     }
 
     #[test]
