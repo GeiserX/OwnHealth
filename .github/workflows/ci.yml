@@ -226,14 +226,48 @@ jobs:
       - run: mkdir -p server/static
       - run: bash contract-tests/run.sh rust
 
+  # Which runners the docker job builds on. Main and manual runs always build both platforms. A PR
+  # builds amd64 always, and arm64 too when it changes a build input: the Dockerfile and what it
+  # copies to build (scripts, manifests, lock files, vendored libraries, the OCR crate), the
+  # toolchain, or a workflow. A PR that changes only Rust or Svelte source builds the same way on
+  # both platforms, and the arm64 pair still runs on main after the merge.
+  docker-runners:
+    runs-on: ubuntu-latest
+    outputs:
+      runners: ${{ steps.pick.outputs.runners }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+          fetch-depth: 2 # the PR merge commit and its first parent, the base branch
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          both='["ubuntu-latest","ubuntu-24.04-arm"]'
+          if [ "$EVENT" != pull_request ]; then
+            echo "runners=$both" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed"
+          echo "$(wc -l < "$RUNNER_TEMP/changed") files changed"
+          inputs='^(Dockerfile|\.dockerignore|scripts/|ui/package\.json$|ui/pnpm-lock\.yaml$|server/vendor/|server/crates/ownhealth-ocr/|\.github/workflows/)|(^|/)(Cargo\.(toml|lock)|rust-toolchain[^/]*|RUST_TOOLCHAIN)$'
+          if grep -E "$inputs" "$RUNNER_TEMP/changed"; then
+            echo "runners=$both" >> "$GITHUB_OUTPUT"
+          else
+            echo "no build input changed: amd64 only"
+            echo 'runners=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
   # Both platforms and both variants the release publishes, each on its own native runner: the arm64
   # PDFium build and its shared libraries are checked here, not only on a developer's machine. The
   # ocr variant (`--target ocr`) must also read the demo's scanned page.
   docker:
+    needs: docker-runners
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        runner: ${{ fromJSON(needs.docker-runners.outputs.runners) }}
         variant: [default, ocr]
         include:
           - variant: default
