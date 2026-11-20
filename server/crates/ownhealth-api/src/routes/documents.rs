@@ -254,7 +254,8 @@ pub async fn list_for(
         String::new()
     };
     let sql = format!(
-        "select {COLS}{snippet} from document d where {} and ($4::text is null or true) \
+        "select {COLS}, coalesce(d.collected_at, d.reported_at)::date as evidence_day{snippet} \
+         from document d where {} and ($4::text is null or true) \
          order by d.collected_at desc nulls last, d.created_at desc limit $2",
         wh.join(" and ")
     );
@@ -275,7 +276,14 @@ pub async fn list_for(
         } else {
             None
         };
-        items.push(Value::Object(summary(&j, snip)));
+        let mut item = summary(&j, snip);
+        // the day this document counts as `done` evidence from: its collection day, else its report
+        // day, the rule prevention::evidence applies
+        item.insert(
+            "evidence_day".into(),
+            j.get("evidence_day").cloned().unwrap_or(Value::Null),
+        );
+        items.push(Value::Object(item));
     }
     let action = if q.is_some() { "search" } else { "read" };
     audit(
