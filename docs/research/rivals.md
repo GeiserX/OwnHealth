@@ -323,7 +323,7 @@ Ranked by value divided by effort. The phase column matches our roadmap (ROADMAP
 | 13 | SMART on FHIR patient-access sync; C-CDA/CCD/XDM and Epic EHI import | Syntropy, Strand, Mere | v1.0 |
 | 14 | Wearable OAuth through Open Wearables instead of our own connectors | Open Wearables | v1.0 |
 | 15 | Imaging: Orthanc + OHIF, studies linked to the radiology report | none in PHRs | v1.0 |
-| 16 | Share links: time-limited and revocable, created from the UI only (never over MCP) | HealthLog | v1.0 (SMART Health Links; ciphertext on a host the user controls, we run no share host) |
+| 16 | Share links: time-limited and revocable, created from the UI only (never over MCP) | HealthLog | v1.0 (SMART Health Links; the instance serves the ciphertext itself, we run no share host) |
 | 17 | Correlations and context: weather, pollen, daylight; symptom-to-data correlation; PHQ-9 and GAD-7 questionnaires | HealthLog, Bearable, Exist | v2 |
 | 18 | One-command trial with a synthetic demo family and measured public claims | Mirobody, Strand (Synthea) | v0.1 |
 

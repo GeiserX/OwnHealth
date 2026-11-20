@@ -293,8 +293,8 @@ What we do on our side:
 **SMART Health Links, UI only, v1.0.**
 
 - The user selects what to share (IPS summary, chosen labs, chosen documents) in the UI, with step-up auth.
-- The app builds the FHIR bundle, encrypts it locally (JWE `dir` + `A256GCM`, 32-byte random key) and stores only ciphertext, which the instance serves itself. The key lives in the URL `#fragment`, which never reaches the host.
-- The project runs no share host and no relay. The instance serves its own links, reached through a tunnel (Tailscale Funnel, Cloudflare Tunnel), and its public site block exposes only the link routes. A static or S3 host is not used in 1.0: it cannot count passcode attempts or keep the access log.
+- The app builds the FHIR bundle, encrypts it locally (JWE `dir` + `A256GCM`, 32-byte random key) and stores only ciphertext, which the instance serves itself. The key lives in the URL `#fragment`, which never reaches the server.
+- The project runs no share host and no relay. The instance serves its own links. The reverse proxy's link-only site block filters the paths, and the tunnel (Tailscale Funnel, Cloudflare Tunnel) points at that site block's port, never at the app port. A static or S3 host is not used in 1.0: it cannot count passcode attempts or keep the access log.
 - Default expiry 7 days; optional passcode (flag `P`) with an attempt limit; revocation deletes the object. The instance counts the passcode attempts.
 - Whether we also publish a reference share-host component for users to run is open (section 15).
 - No MCP tool can create, list or extend a share (section 4.2, row 3).
