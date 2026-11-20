@@ -1,5 +1,6 @@
 //! Outbound HTTP for the few places OwnHealth fetches anything: a client's CIMD document (lane E), a
-//! Paperless original (lane B), a Nightscout site (lane D). connectors.md 6.3 rule 7 and
+//! Paperless original (lane B), a Nightscout site (lane D), and the POSTs of a connector (a token or
+//! refresh request, an SHL manifest). connectors.md 6.3 rule 7 and
 //! security-privacy.md 16: every name is resolved first and every address must be public, unless the
 //! person ticked "on my network" for that host (`allow_private`); the connection then goes to exactly
 //! the addresses we checked (no second lookup, so no DNS rebinding, and no proxy from the environment),
@@ -40,6 +41,18 @@ impl Egress {
             https_only: !allow_private,
             timeout: Duration::from_secs(30),
             max_bytes: 50 * 1024 * 1024,
+        }
+    }
+
+    /// A connector vendor (a SMART or Blue Button token endpoint, Dexcom, an SHL manifest): https
+    /// only, public addresses only, 15 s, 1 MiB. Like every profile it never follows a redirect, so a
+    /// token request is never sent on to another host.
+    pub fn connector() -> Egress {
+        Egress {
+            allow_private: false,
+            https_only: true,
+            timeout: Duration::from_secs(15),
+            max_bytes: 1024 * 1024,
         }
     }
 
@@ -156,9 +169,15 @@ pub async fn resolve_checked(host: &str, port: u16, allow_private: bool) -> Resu
     Ok(addrs)
 }
 
-/// Send a GET under `egress`: the checks every fetch shares. Returns the response and the host, for
-/// error messages.
-async fn send(url: &str, egress: &Egress, headers: &[(&str, &str)]) -> Result<(reqwest::Response, String), NetError> {
+/// Send one request under `egress`: the checks every fetch shares. `body` is the content type and the
+/// bytes of a POST. Returns the response and the host, for error messages.
+async fn send(
+    method: reqwest::Method,
+    url: &str,
+    egress: &Egress,
+    headers: &[(&str, &str)],
+    body: Option<(&str, Vec<u8>)>,
+) -> Result<(reqwest::Response, String), NetError> {
     let parsed = url::Url::parse(url).map_err(|_| NetError::BadUrl)?;
     match parsed.scheme() {
         "https" => {}
@@ -186,9 +205,12 @@ async fn send(url: &str, egress: &Egress, headers: &[(&str, &str)]) -> Result<(r
         .resolve_to_addrs(&host, &addrs)
         .build()
         .map_err(http)?;
-    let mut req = client.get(parsed.clone());
+    let mut req = client.request(method, parsed.clone());
     for (k, v) in headers {
         req = req.header(*k, *v);
+    }
+    if let Some((content_type, bytes)) = body {
+        req = req.header(reqwest::header::CONTENT_TYPE, content_type).body(bytes);
     }
     let resp = req.send().await.map_err(http)?;
     if resp.content_length().is_some_and(|n| n > egress.max_bytes as u64) {
@@ -210,14 +232,47 @@ fn body_error(host: &str, e: reqwest::Error) -> NetError {
 
 /// GET `url` under `egress`, with extra request headers (a token for the person's own service).
 pub async fn get(url: &str, egress: &Egress, headers: &[(&str, &str)]) -> Result<Fetched, NetError> {
-    let (mut resp, host) = send(url, egress, headers).await?;
+    let (resp, host) = send(reqwest::Method::GET, url, egress, headers, None).await?;
+    read(resp, &host, egress).await
+}
+
+/// POST `fields` as `application/x-www-form-urlencoded` under `egress` (an OAuth token or refresh
+/// request). The content type is set here; `headers` adds the rest (`accept`, a basic auth).
+pub async fn post_form(
+    url: &str,
+    egress: &Egress,
+    headers: &[(&str, &str)],
+    fields: &[(&str, &str)],
+) -> Result<Fetched, NetError> {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(fields)
+        .finish();
+    let body = Some(("application/x-www-form-urlencoded", body.into_bytes()));
+    let (resp, host) = send(reqwest::Method::POST, url, egress, headers, body).await?;
+    read(resp, &host, egress).await
+}
+
+/// POST `body` as `application/json` under `egress` (an SHL manifest request).
+pub async fn post_json(
+    url: &str,
+    egress: &Egress,
+    headers: &[(&str, &str)],
+    body: &serde_json::Value,
+) -> Result<Fetched, NetError> {
+    let body = Some(("application/json", body.to_string().into_bytes()));
+    let (resp, host) = send(reqwest::Method::POST, url, egress, headers, body).await?;
+    read(resp, &host, egress).await
+}
+
+/// Read a response into a [`Fetched`], cutting the body at `egress.max_bytes`.
+async fn read(mut resp: reqwest::Response, host: &str, egress: &Egress) -> Result<Fetched, NetError> {
     let header =
         |name: reqwest::header::HeaderName| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(String::from);
     let content_type = header(reqwest::header::CONTENT_TYPE);
     let cache_control = header(reqwest::header::CACHE_CONTROL);
     let status = resp.status().as_u16();
     let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| body_error(&host, e))? {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| body_error(host, e))? {
         if body.len() + chunk.len() > egress.max_bytes {
             return Err(NetError::TooLarge(egress.max_bytes));
         }
@@ -237,7 +292,7 @@ pub async fn get(url: &str, egress: &Egress, headers: &[(&str, &str)]) -> Result
 /// file is left for the caller to delete.
 pub async fn download(url: &str, egress: &Egress, dest: &std::path::Path) -> Result<(u16, u64), NetError> {
     use tokio::io::AsyncWriteExt;
-    let (mut resp, host) = send(url, egress, &[]).await?;
+    let (mut resp, host) = send(reqwest::Method::GET, url, egress, &[], None).await?;
     let status = resp.status().as_u16();
     if status != 200 {
         return Ok((status, 0));
@@ -410,6 +465,188 @@ mod tests {
             download(&url, &Egress::reference_file(false), &dest).await,
             Err(NetError::NotHttps)
         );
+        Ok(())
+    }
+
+    /// A fake vendor: reads each request in full (head and body), hands it to the test, then answers.
+    async fn fake(answers: Vec<String>) -> anyhow::Result<(u16, tokio::sync::mpsc::UnboundedReceiver<String>)> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            for answer in answers {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let Ok(n) = s.read(&mut buf).await else { return };
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&req).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().to_string())
+                            })
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if req.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let _ = tx.send(String::from_utf8_lossy(&req).to_string());
+                let _ = s.write_all(answer.as_bytes()).await;
+            }
+        });
+        Ok((port, rx))
+    }
+
+    /// Token, refresh and SHL manifest requests: https only, public addresses only, 15 s, 1 MiB.
+    #[tokio::test]
+    async fn a_connector_post_goes_only_to_a_public_https_address() {
+        let c = Egress::connector();
+        assert_eq!(
+            (c.allow_private, c.https_only, c.timeout, c.max_bytes),
+            (false, true, Duration::from_secs(15), 1024 * 1024)
+        );
+        let form = [("grant_type", "refresh_token"), ("refresh_token", "fake-refresh")];
+        assert_eq!(
+            post_form("https://127.0.0.1:9/token", &c, &[], &form).await,
+            Err(NetError::PrivateAddress("127.0.0.1".into()))
+        );
+        assert_eq!(
+            post_form("https://localhost:9/token", &c, &[], &form).await,
+            Err(NetError::PrivateAddress("localhost".into()))
+        );
+        assert_eq!(
+            post_json("https://[fd00::1]:9/manifest", &c, &[], &serde_json::json!({})).await,
+            Err(NetError::PrivateAddress("[fd00::1]".into()))
+        );
+        assert_eq!(
+            post_json("http://example.com/manifest", &c, &[], &serde_json::json!({})).await,
+            Err(NetError::NotHttps)
+        );
+    }
+
+    /// The form and JSON bodies arrive encoded, a redirect is not followed (the secret in the body is
+    /// never sent on to another host), and an oversize answer is cut.
+    #[tokio::test]
+    async fn a_post_sends_its_body_once_and_the_answer_is_capped() -> anyhow::Result<()> {
+        let (port, mut seen) = fake(vec![
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}".to_string(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_string(),
+            format!("HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n{}", "x".repeat(5000)),
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1388\r\n".to_string()
+                + &"y".repeat(5000)
+                + "\r\n0\r\n\r\n",
+        ])
+        .await?;
+        let other = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let other_port = other.local_addr()?.port();
+        let (redirect_port, _redirect_seen) = fake(vec![format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{other_port}/token\r\nContent-Length: 0\r\n\r\n"
+        )])
+        .await?;
+        // the fake is on loopback over http, so the test widens only those two fields
+        let lan = Egress {
+            allow_private: true,
+            https_only: false,
+            max_bytes: 1000,
+            ..Egress::connector()
+        };
+        let url = format!("http://127.0.0.1:{port}/token");
+        let ok = post_form(
+            &url,
+            &lan,
+            &[("accept", "application/json")],
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", "a b&c"),
+                ("redirect_uri", "https://app.test/cb"),
+            ],
+        )
+        .await?;
+        assert_eq!((ok.status, ok.body.as_slice()), (200, &b"{}"[..]));
+        let req = seen.recv().await.expect("form request");
+        assert!(req.starts_with("POST /token "), "{req}");
+        assert!(
+            req.to_ascii_lowercase()
+                .contains("content-type: application/x-www-form-urlencoded\r\n"),
+            "{req}"
+        );
+        assert!(
+            req.ends_with(
+                "\r\n\r\ngrant_type=authorization_code&code=a+b%26c&redirect_uri=https%3A%2F%2Fapp.test%2Fcb"
+            ),
+            "{req}"
+        );
+
+        let body = serde_json::json!({"recipient": "Alex Rivera", "passcode": "fake-1234"});
+        assert_eq!(post_json(&url, &lan, &[], &body).await?.body, b"ok");
+        let req = seen.recv().await.expect("json request");
+        assert!(req.starts_with("POST /token "), "{req}");
+        assert!(
+            req.to_ascii_lowercase().contains("content-type: application/json\r\n"),
+            "{req}"
+        );
+        assert!(
+            req.ends_with(r#"{"recipient":"Alex Rivera","passcode":"fake-1234"}"#),
+            "{req}"
+        );
+
+        // cut on the declared length and on the streamed length
+        assert_eq!(post_form(&url, &lan, &[], &[]).await, Err(NetError::TooLarge(1000)));
+        assert_eq!(post_form(&url, &lan, &[], &[]).await, Err(NetError::TooLarge(1000)));
+
+        let moved = post_form(
+            &format!("http://127.0.0.1:{redirect_port}/token"),
+            &lan,
+            &[],
+            &[("client_secret", "fake-secret")],
+        )
+        .await?;
+        assert_eq!(moved.status, 307);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), other.accept())
+                .await
+                .is_err(),
+            "the redirect target was contacted"
+        );
+        Ok(())
+    }
+
+    /// A vendor that never answers costs the timeout, not a stuck poller.
+    #[tokio::test]
+    async fn a_post_to_a_silent_vendor_times_out() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let hold = tokio::spawn(async move {
+            let kept = listener.accept().await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            drop(kept);
+        });
+        let quick = Egress {
+            allow_private: true,
+            https_only: false,
+            timeout: Duration::from_millis(300),
+            ..Egress::connector()
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(
+            post_form(&format!("http://127.0.0.1:{port}/token"), &quick, &[], &[]).await,
+            Err(NetError::Timeout("127.0.0.1".into()))
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        hold.abort();
         Ok(())
     }
 
