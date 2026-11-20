@@ -589,19 +589,40 @@ pub const BLOB_COLUMNS: &[(&str, &[&str], &str)] = &[
         &["words_blob"],
         "document_id in (select id from document where profile_id = $1)",
     ),
-    // a Health Auto Export push, a Gadgetbridge export: the raw bytes a profile's source handed us
+    // The raw bytes an inbox handed us: a push or export of the profile's own source (Health Auto
+    // Export, Gadgetbridge), and what a household inbox (a shared mailbox, Paperless, the scanner
+    // folder) filed to the profile: the item of one of its documents, the whole .eml of a mail filed or
+    // released to it, a structured file whose document the importer made (the item names no document),
+    // and a file in the profile's folder of a scanner folder.
     (
         "source_item",
         &["blob_sha256"],
-        "source_id in (select id from source where profile_id = $1)",
+        "source_id in (select id from source where profile_id = $1) \
+         or document_id in (select id from document where profile_id = $1) \
+         or quarantine_id in (select id from quarantine_item where released_document_ids \
+            && array(select id from document where profile_id = $1)) \
+         or (document_id is null and blob_sha256 in (select blob_sha256 from document where profile_id = $1)) \
+         or (source_id in (select s.id from source s join profile p on p.household_id = s.household_id \
+            where p.id = $1 and s.kind = 'folder') \
+            and starts_with(external_id, (select slug from profile where id = $1) || '/'))",
     ),
-    // mail held on a profile's own mailbox
+    // mail held on a profile's own mailbox, and mail a person released into the profile
     (
         "quarantine_item",
         &["raw_blob"],
-        "source_id in (select id from source where profile_id = $1)",
+        "source_id in (select id from source where profile_id = $1) \
+         or released_document_ids && array(select id from document where profile_id = $1)",
     ),
 ];
+
+/// The condition of `table` in [`BLOB_COLUMNS`].
+fn owned(table: &str) -> &'static str {
+    BLOB_COLUMNS
+        .iter()
+        .find(|(t, _, _)| *t == table)
+        .map_or("false", |(_, _, owned)| owned)
+}
+
 /// Blob columns that never belong to one profile, so a profile delete leaves them alone. None yet.
 pub const HOUSEHOLD_BLOB_COLUMNS: &[(&str, &str)] = &[];
 const KEEP: [&str; 3] = ["profile", "profile_grant", "audit_event"];
@@ -682,14 +703,34 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     .bind(profile_id)
     .fetch_all(&mut *conn)
     .await?;
-    // Mail held on the profile's own mailbox: `quarantine_item.source_id` is set null when the source
-    // goes, which would keep the message and its raw blob.
-    let held =
-        sqlx::query("delete from quarantine_item where source_id in (select id from source where profile_id = $1)")
-            .bind(profile_id)
-            .execute(&mut *conn)
-            .await?
-            .rows_affected();
+    // A household inbox stays, and so do its items, but the bytes it filed to the profile are the
+    // profile's. A scanner folder item names the person's short name and file name, and the file itself
+    // goes, so the item goes. A mailbox or Paperless item keeps only its message or document id, so the
+    // next poll does not import it again into another profile. This runs before the documents and the
+    // released mail go, since the conditions read them.
+    let items = owned("source_item");
+    sqlx::query(AssertSqlSafe(format!(
+        "delete from source_item where source_id in (select id from source where kind = 'folder') and ({items})"
+    )))
+    .bind(profile_id)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "update source_item set blob_sha256 = null where blob_sha256 is not null and ({items})"
+    )))
+    .bind(profile_id)
+    .execute(&mut *conn)
+    .await?;
+    // Mail held on the profile's own mailbox (`quarantine_item.source_id` is set null when the source
+    // goes, which would keep the message and its raw blob), and mail released into the profile.
+    let held = sqlx::query(AssertSqlSafe(format!(
+        "delete from quarantine_item where {}",
+        owned("quarantine_item")
+    )))
+    .bind(profile_id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
     // candidate_row -> observation -> src -> candidate_row is a cycle: cut it first.
     sqlx::query(
         "update candidate_row set observation_id = null where observation_id in \
