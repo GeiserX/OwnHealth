@@ -682,6 +682,17 @@ mod tests {
     }
 
     #[test]
+    fn a_signature_part_that_does_not_decode_is_malformed() {
+        let key = es256_key(&shc_issuer_jwk()).expect("jwk");
+        let mut p = parts(SHC_JWS);
+        p[2] = p[2][..85].to_string(); // base64url characters only, but 85 % 4 == 1
+        assert_eq!(
+            verify_es256(&p.join("."), &key, MIB).err(),
+            Some(JoseError::Malformed("not base64url"))
+        );
+    }
+
+    #[test]
     fn a_signature_that_is_not_64_bytes_is_malformed_even_with_the_real_one_inside() {
         let key = es256_key(&shc_issuer_jwk()).expect("jwk");
         let real = URL_SAFE_NO_PAD.decode(parts(SHC_JWS)[2].as_str()).expect("b64");
