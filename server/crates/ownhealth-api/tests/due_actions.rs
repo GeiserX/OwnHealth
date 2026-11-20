@@ -729,13 +729,22 @@ async fn the_document_list_puts_a_new_report_first_however_many_older_files_ther
         .bind(reported.map(at))
         .fetch_one(&a.db.pool)
     };
-    let both = insert("both", Some(today - Duration::days(10)), Some(today - Duration::days(2))).await?;
+    let both = insert(
+        "both",
+        Some(today - Duration::days(10)),
+        Some(today - Duration::days(2)),
+    )
+    .await?;
     let report_only = insert("report-only", None, Some(today - Duration::days(1))).await?;
     let (s, v) = send(&a, "alex", "GET", "/profiles/carmen/documents", None).await?;
     assert_eq!(s, StatusCode::OK, "{v}");
     let items = v["items"].as_array().cloned().unwrap_or_default();
     assert_eq!(items.len(), 100, "the default limit holds");
-    let first: Vec<_> = items.iter().take(2).map(|d| (d["id"].clone(), d["evidence_day"].clone())).collect();
+    let first: Vec<_> = items
+        .iter()
+        .take(2)
+        .map(|d| (d["id"].clone(), d["evidence_day"].clone()))
+        .collect();
     assert_eq!(
         first,
         vec![
