@@ -849,7 +849,7 @@ Each is added only when real agent sessions show the eight tools are not enough.
 | `what_changed_since` | Structured diff of two stored status snapshots | Agents call `get_health_status` with two `as_of` values and diff by hand in more than a few sessions |
 | `get_medications` | Current and past meds and supplements as separate lists, with reasons for stopping | Medication questions need history that `get_health_status` does not carry; the v0.3 medication lane lands |
 | `list_conditions` | Problem list with verification state and sources | The problem list grows past what fits in the status snapshot |
-| `get_imaging_studies` | Studies, reports, impressions, OHIF link, no pixels | The v1.0 `imaging` profile ships |
+| `get_imaging_studies` | Studies, reports, impressions, OHIF link, no pixels | A recorded session shows the need, after the v1.0 `imaging` profile ships |
 | `get_family_hints` | Cross-profile hints shared by the source profile | v0.3 family history and pedigree ship |
 | MCP Apps trend chart (`ui://ownhealth/trend`) | Chart rendering in hosts that support it | A main client renders `ui://` resources and people ask for charts in chat |
 | `fhir_search` | Raw FHIR-shaped query for power users | Requests from users who need fields no tool returns |
