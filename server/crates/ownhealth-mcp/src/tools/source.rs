@@ -88,7 +88,8 @@ fn printed(table: &str, row: &Map<String, Value>, origin: &str) -> Value {
         // A visit has no name: an agent needs why, where and when, each only when written.
         let mut out = Map::new();
         for (key, col) in [("reason", "reason_text"), ("provider", "provider_name")] {
-            if let Some(v) = row.get(col).filter(|v| !v.is_null()) {
+            // null or blank is not written, as the REST title treats it
+            if let Some(v) = row.get(col).filter(|v| !v.is_null() && v.as_str() != Some("")) {
                 out.insert(key.into(), w(Some(v), origin));
             }
         }

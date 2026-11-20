@@ -298,6 +298,15 @@ async fn get_source_prints_a_visit_reason_clinic_and_date() -> R {
     );
     let env = c.call("get_source", json!({"src_id": bare})).await?.ok();
     assert_eq!(env["data"]["printed"], json!({"date": "2026-10-20"}));
+    // a blank reason counts as not written, as the REST title treats it
+    let visit = json!({"profile_id": alex, "provider_name": "Centro de Salud Norte",
+                       "period_start": "2026-10-25T09:00:00+00:00", "reason_text": ""});
+    let blank = add_record_json(&mut conn, "visit", visit, alex).await?;
+    let env = c.call("get_source", json!({"src_id": blank})).await?.ok();
+    assert_eq!(
+        env["data"]["printed"],
+        json!({"provider": note("Centro de Salud Norte"), "date": "2026-10-25"})
+    );
 
     // a lab value keeps its five printed fields
     let env = c.call("get_source", json!({"src_id": w.s("vitd")})).await?.ok();
