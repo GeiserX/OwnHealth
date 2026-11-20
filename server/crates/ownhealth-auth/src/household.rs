@@ -742,6 +742,16 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     .execute(&mut *conn)
     .await?
     .rows_affected();
+    // A Paperless tag rule that files to the profile goes; the household inbox keeps its other rules.
+    sqlx::query(
+        "update source set config = jsonb_set(config, '{profile_by_tag}', coalesce((select jsonb_object_agg(k, v) \
+         from jsonb_each(config->'profile_by_tag') e(k, v) where v <> to_jsonb($1::uuid::text)), '{}'::jsonb)) \
+         where jsonb_typeof(config->'profile_by_tag') = 'object' \
+         and exists (select 1 from jsonb_each(config->'profile_by_tag') e(k, v) where v = to_jsonb($1::uuid::text))",
+    )
+    .bind(profile_id)
+    .execute(&mut *conn)
+    .await?;
     // The folder inboxes whose folders hold the profile's files: the caller removes them after the commit.
     let folders: Vec<(Value, bool)> = sqlx::query_as(
         "select s.config, coalesce(s.profile_id = $1, false) from source s join profile p \

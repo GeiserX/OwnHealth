@@ -447,6 +447,41 @@ async fn a_file_that_reached_the_person_through_a_household_inbox_goes_too() -> 
 }
 
 #[tokio::test]
+async fn a_paperless_tag_rule_stops_naming_the_person() -> R {
+    let env = Env::new(true).await?;
+    let (alex, sam) = (env.profile("alex"), env.profile("sam"));
+    let paperless = household_source(
+        &env,
+        "paperless",
+        json!({"base_url": "https://paperless.rivera.example", "health_tag": 3,
+               "profile_by_tag": {"9": alex, "4": sam}}),
+    )
+    .await?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    // the tag rule that filed to Alex goes, Sam's stays, and no inbox setting names Alex any more
+    let config: Value = sqlx::query_scalar("select config from source where id = $1")
+        .bind(paperless)
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(config["profile_by_tag"], json!({"4": sam}), "{config}");
+    assert_eq!(
+        config["base_url"],
+        json!("https://paperless.rivera.example"),
+        "{config}"
+    );
+    assert_eq!(
+        env.scalar_i64(&format!(
+            "select count(*) from source where config::text like '%{alex}%'"
+        ))
+        .await?,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn mail_a_household_mailbox_filed_to_the_person_goes_too() -> R {
     let env = Env::new(true).await?;
     let (alex, household) = (env.profile("alex"), env.fam().household_id);
