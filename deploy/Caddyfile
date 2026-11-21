@@ -18,3 +18,43 @@
 	}
 	reverse_proxy app:8080
 }
+
+# The public site block for SMART Health Links (docs/design/security-privacy.md section 11). It
+# passes only the link routes to the app: the manifest (POST, and its CORS preflight) and the file
+# (GET). Everything else, the app, /login, /api, /mcp and /dicom-web included, gets 404 here.
+# Nothing reaches this block until you point a tunnel (Tailscale Funnel, Cloudflare Tunnel) at its
+# port, never at the app port or the site above, and set OWNHEALTH_SHARE_URL in .env to the public
+# https address the tunnel gives (the app writes it into every link).
+http://:{$OWNHEALTH_SHARE_PORT:8090} {
+	@manifest {
+		method POST OPTIONS
+		path_regexp ^/api/shl/[A-Za-z0-9_-]{43}$
+	}
+	@file {
+		method GET
+		path_regexp ^/api/shl/[A-Za-z0-9_-]{43}/file/[A-Za-z0-9_-]{43}$
+	}
+	# Open Wearables vendor callbacks (Oura, Withings): off unless OWNHEALTH_OW_CALLBACK=true.
+	@ow {
+		method GET
+		path_regexp ^/ow/api/v1/oauth/[a-z0-9_-]+/callback$
+		expression {$OWNHEALTH_OW_CALLBACK:false}
+	}
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+	handle @manifest {
+		reverse_proxy app:8080
+	}
+	handle @file {
+		reverse_proxy app:8080
+	}
+	handle @ow {
+		reverse_proxy app:8080
+	}
+	handle {
+		respond 404
+	}
+}

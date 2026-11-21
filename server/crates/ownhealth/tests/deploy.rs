@@ -9,6 +9,11 @@
 //! - What the two compose files hand the app container, rendered by `docker compose config`: the app
 //!   binds 0.0.0.0, connects as the non-owner role and does not migrate; the admin service migrates as
 //!   the owner; the homelab app gets no backup credentials. Skipped without docker compose.
+//! - The public site block of deploy/Caddyfile, run in the caddy image compose.homelab.yaml pins, in
+//!   front of a stub upstream: it passes only the SMART Health Link routes (the manifest POST and
+//!   its preflight, the file GET) and answers 404 to everything else, /login, /api, /mcp and
+//!   /dicom-web included. The Open Wearables callback line passes only when switched on. Skipped
+//!   without docker; the image is pulled when missing.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -317,5 +322,158 @@ fn homelab_app_gets_no_backup_credentials() -> R {
         env_str(&old["admin"], "RESTIC_REPOSITORY"),
         "s3:https://s3.example.lan/old"
     );
+    Ok(())
+}
+
+// -------------------------------------------------------------- share block ----
+
+/// The caddy image compose.homelab.yaml runs.
+fn caddy_image() -> anyhow::Result<String> {
+    let compose = std::fs::read_to_string(root().join("deploy/compose.homelab.yaml"))?;
+    compose
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("image: caddy:").map(|tag| format!("caddy:{tag}")))
+        .ok_or_else(|| anyhow::anyhow!("no caddy image in compose.homelab.yaml"))
+}
+
+/// A container that is removed when dropped, whatever happened.
+struct Container(String);
+
+impl Drop for Container {
+    fn drop(&mut self) {
+        let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
+    }
+}
+
+/// deploy/Caddyfile in `image`, with a stub on app:8080 that names each request it receives.
+/// Returns the container and the host address of the share port.
+fn caddy(image: &str, ow_callback: bool) -> anyhow::Result<(Container, String)> {
+    let name = format!("oh-share-block-{}", uuid::Uuid::new_v4().simple());
+    let caddyfile = std::fs::read_to_string(root().join("deploy/Caddyfile"))?
+        + "\nhttp://:8080 {\n\trespond \"upstream {method} {uri}\" 200\n}\n";
+    let mut create = Command::new("docker");
+    create.args(["create", "--name", &name, "--add-host", "app:127.0.0.1"]);
+    create.args([
+        "-p",
+        "127.0.0.1::8090",
+        "-e",
+        "OWNHEALTH_DOMAIN=http://private.test:8081",
+    ]);
+    if ow_callback {
+        create.args(["-e", "OWNHEALTH_OW_CALLBACK=true"]);
+    }
+    let out = create.arg(image).output()?;
+    anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let c = Container(name.clone());
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("Caddyfile");
+    std::fs::write(&file, caddyfile)?;
+    let target = format!("{name}:/etc/caddy/Caddyfile");
+    anyhow::ensure!(
+        ok(Command::new("docker").args(["cp"]).arg(&file).arg(&target)),
+        "docker cp"
+    );
+    anyhow::ensure!(ok(Command::new("docker").args(["start", &name])), "docker start");
+    let port = Command::new("docker").args(["port", &name, "8090/tcp"]).output()?;
+    let addr = String::from_utf8(port.stdout)?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    anyhow::ensure!(!addr.is_empty(), "no published port");
+    for _ in 0..100 {
+        if fetch(&addr, "GET", "/")?.0 != 0 {
+            return Ok((c, addr));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let logs = Command::new("docker").args(["logs", &name]).output()?;
+    anyhow::bail!("caddy did not answer: {}", String::from_utf8_lossy(&logs.stderr))
+}
+
+/// (status, body) of one request through curl; status 0 when nothing answered.
+fn fetch(addr: &str, method: &str, path: &str) -> anyhow::Result<(u16, String)> {
+    // --path-as-is: curl would otherwise resolve a `..` itself before sending
+    let mut curl = Command::new("curl");
+    curl.args(["-s", "--path-as-is", "-m", "5", "-o", "-", "-w", "\n%{http_code}"]);
+    if method == "HEAD" {
+        curl.arg("-I");
+    } else {
+        curl.args(["-X", method]);
+    }
+    let out = curl.arg(format!("http://{addr}{path}")).output()?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (body, code) = text.rsplit_once('\n').unwrap_or(("", "0"));
+    Ok((code.trim().parse().unwrap_or(0), body.to_string()))
+}
+
+/// The share host exposes the three link routes and nothing else (security-privacy.md section 11).
+#[test]
+fn the_public_share_block_passes_only_the_link_routes() -> R {
+    if !ok(Command::new("docker").args(["info"])) {
+        eprintln!("docker not available: skipped");
+        return Ok(());
+    }
+    let image = caddy_image()?;
+    let have = ok(Command::new("docker").args(["image", "inspect", &image]));
+    anyhow::ensure!(
+        have || ok(Command::new("docker").args(["pull", &image])),
+        "docker pull {image}"
+    );
+    let id = "I91rhba3VsuGXGchcnr6VHlQFKxfE28kuZ0ssbEuxno";
+    let ticket = "Y9xwkUdtmN9wwoJoN3ffJIhX2UGvCL1JnlPVNL3kDWM";
+    let manifest = format!("/api/shl/{id}");
+    let file = format!("/api/shl/{id}/file/{ticket}");
+    let ow = "/ow/api/v1/oauth/oura/callback?code=synthetic";
+    let mut cases: Vec<(String, String, bool)> = [("POST", &manifest), ("OPTIONS", &manifest), ("GET", &file)]
+        .into_iter()
+        .map(|(m, p)| (m.to_string(), p.clone(), true))
+        .collect();
+    for (m, p) in [
+        ("GET", "/"),
+        ("GET", "/login"),
+        ("GET", "/api/me"),
+        ("POST", "/api/auth/login/begin"),
+        ("GET", "/api/profiles/me/shl"),
+        ("POST", "/api/profiles/me/shl"),
+        ("POST", "/mcp"),
+        ("GET", "/mcp"),
+        ("GET", "/dicom-web/studies"),
+        ("GET", "/healthz"),
+        ("GET", "/api/ics/oh_ics_abcdefgh_x.ics"),
+        ("GET", manifest.as_str()),
+        ("POST", file.as_str()),
+        ("HEAD", file.as_str()),
+        ("POST", "/api/shl/short"),
+        ("POST", &format!("/api/shl/{id}/../../me")),
+        ("POST", &format!("{manifest}/extra")),
+        ("GET", ow),
+    ] {
+        cases.push((m.to_string(), p.to_string(), false));
+    }
+    let (c, addr) = caddy(&image, false)?;
+    for (m, p, through) in &cases {
+        let (code, body) = fetch(&addr, m, p)?;
+        if *through {
+            assert_eq!(code, 200, "{m} {p}: {body}");
+            assert!(body.starts_with(&format!("upstream {m} /api/shl/")), "{m} {p}: {body}");
+        } else {
+            assert_eq!(code, 404, "{m} {p}: {body}");
+            assert!(!body.contains("upstream"), "{m} {p}: {body}");
+        }
+    }
+    drop(c);
+    // the Open Wearables callback line, switched on: that one GET passes, nothing else changes
+    let (_c, addr) = caddy(&image, true)?;
+    let (code, body) = fetch(&addr, "GET", ow)?;
+    assert_eq!(
+        (code, body.starts_with("upstream GET /ow/api/v1/oauth/oura/callback")),
+        (200, true),
+        "{body}"
+    );
+    for (m, p) in [("POST", ow), ("GET", "/ow/api/v1/users"), ("GET", "/api/me")] {
+        assert_eq!(fetch(&addr, m, p)?.0, 404, "{m} {p}");
+    }
     Ok(())
 }
