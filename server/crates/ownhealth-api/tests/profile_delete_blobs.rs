@@ -1500,10 +1500,124 @@ async fn an_inbox_folder_the_server_cannot_resolve_keeps_the_files() -> R {
     let failed = inbox.join("estudio/.failed/_root/factura.pdf");
     std::fs::create_dir_all(failed.parent().expect("parent"))?;
     std::fs::write(&failed, b"%PDF-1.7 synthetic failed scan")?;
+    ownhealth_inbox::register();
     std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000))?;
-    let kept = delete_alex_and_keep(&env, &failed, "a file while another inbox could not be resolved").await;
+    let kept = async {
+        delete_alex_and_keep(&env, &failed, "a file while another inbox could not be resolved").await?;
+        // the cleanup counts as failed, not done: its retry waits
+        let job: Option<(String, Option<String>)> =
+            sqlx::query_as("select state, payload->>'slug' from job where kind = 'folder.forget'")
+                .fetch_optional(env.pool())
+                .await?;
+        assert_eq!(
+            job,
+            Some(("queued".to_string(), Some("alex".to_string()))),
+            "the cleanup ended as done while a folder could not be resolved"
+        );
+        // the retry covers Alex's own inbox too, not only the unreadable one
+        let estudio = env
+            .scalar_i64(
+                "select count(*) from job, jsonb_array_elements(payload->'folders') f \
+                 where kind = 'folder.forget' and f->'config'->>'subdir' = 'estudio'",
+            )
+            .await?;
+        assert_eq!(
+            estudio, 1,
+            "Alex's inbox counted as cleaned while another inbox could not be resolved"
+        );
+        // while the folder stays unreadable, the retry runs out and shows in the household's review queue
+        sqlx::query("update job set max_attempts = 1 where kind = 'folder.forget'")
+            .execute(env.pool())
+            .await?;
+        assert_eq!(run_forget(&env).await?, 1);
+        assert!(
+            failed.is_file(),
+            "the retry removed a file while another inbox could not be resolved"
+        );
+        let state: String = sqlx::query_scalar("select state from job where kind = 'folder.forget'")
+            .fetch_one(env.pool())
+            .await?;
+        assert_eq!(state, "dead");
+        let items: Vec<Option<Uuid>> =
+            sqlx::query_scalar("select household_id from review_item where kind = 'job_failed'")
+                .fetch_all(env.pool())
+                .await?;
+        assert_eq!(items, vec![Some(env.fam().household_id)]);
+        Ok(())
+    }
+    .await;
     std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755))?;
     kept
+}
+
+#[tokio::test]
+async fn a_broken_inbox_in_another_household_does_not_keep_this_delete_files() -> R {
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    std::fs::create_dir_all(inbox.join("estudio/alex"))?;
+    // another household's inbox folder is a link loop, so the server can neither resolve nor read it
+    std::os::unix::fs::symlink(inbox.join("bucle-b"), inbox.join("bucle-a"))?;
+    std::os::unix::fs::symlink(inbox.join("bucle-a"), inbox.join("bucle-b"))?;
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    folder_source(&env, "estudio", Some(env.profile("alex"))).await?;
+    let mut c = env.pool().acquire().await?;
+    let ortega = ownhealth_core::access::create_household(&mut c, "Familia Ortega").await?;
+    drop(c);
+    sqlx::query("insert into source (household_id, kind, label, config) values ($1, 'folder', 'Bucle', $2)")
+        .bind(ortega)
+        .bind(json!({"subdir": "bucle-a"}))
+        .execute(env.pool())
+        .await?;
+    let scan = inbox.join("estudio/alex/escaneo.pdf");
+    std::fs::write(&scan, b"%PDF-1.7 synthetic scan")?;
+    let failed = inbox.join("estudio/.failed/_root/factura.pdf");
+    std::fs::create_dir_all(failed.parent().expect("parent"))?;
+    std::fs::write(&failed, b"%PDF-1.7 synthetic failed scan")?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert!(!scan.exists(), "a broken inbox of another household kept Alex's drop");
+    assert!(
+        !failed.exists(),
+        "a broken inbox of another household kept Alex's own failed file"
+    );
+    assert_eq!(
+        env.scalar_i64("select count(*) from job where kind = 'folder.forget'")
+            .await?,
+        0,
+        "a done cleanup left a retry"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_drop_that_is_a_link_to_another_inbox_loses_only_the_persons_copies() -> R {
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    std::fs::create_dir_all(inbox.join("estudio"))?;
+    std::fs::create_dir_all(inbox.join("escaner"))?;
+    // Alex's drop estudio/alex is a link to the folder of the escaner inbox
+    std::os::unix::fs::symlink(inbox.join("escaner"), inbox.join("estudio/alex"))?;
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    folder_source(&env, "estudio", None).await?;
+    folder_source(&env, "escaner", None).await?;
+    let theirs = inbox.join("escaner/otra.pdf");
+    std::fs::write(&theirs, b"%PDF-1.7 a file of the escaner inbox")?;
+    let copy = inbox.join("estudio/.done/alex/2026-11/escaneo.pdf");
+    std::fs::create_dir_all(copy.parent().expect("parent"))?;
+    std::fs::write(&copy, b"%PDF-1.7 Alex's filed copy")?;
+    delete_alex_and_keep(&env, &theirs, "a file of the inbox the drop links to").await?;
+    assert!(
+        !copy.exists(),
+        "Alex's filed copy stayed because the drop links to another inbox"
+    );
+    assert!(
+        inbox.join("estudio/alex").symlink_metadata().is_err(),
+        "the drop link stayed"
+    );
+    Ok(())
 }
 
 #[tokio::test]

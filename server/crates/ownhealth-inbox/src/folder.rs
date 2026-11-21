@@ -166,6 +166,7 @@ pub async fn queue_forget(
 /// short name now lives in the household, or in a household whose folder inbox reads the same folder,
 /// or when a folder inbox now reads a folder inside `<slug>/`. It keeps `_root` when a folder inbox, in
 /// any household, now reads that folder. "The same folder" is the real one on disk ([`what_to_remove`]).
+/// A folder fails, so its retry stays, while it or another folder inbox of the household cannot be read.
 pub async fn forget_folders(
     pool: &PgPool,
     settings: &Settings,
@@ -203,7 +204,7 @@ pub async fn forget_folders(
         let (named, readers) = (named.clone(), readers.clone());
         // the checks read the disk too, so they run off the async runtime with the removal
         let run = move || {
-            let (slug_folders, root_buckets) = what_to_remove(&s, household_id, &sl, &named, &readers, &c, own);
+            let (slug_folders, root_buckets) = what_to_remove(&s, household_id, &sl, &named, &readers, &c, own)?;
             forget_profile(&s, &c, &sl, slug_folders, root_buckets)
         };
         match tokio::task::spawn_blocking(run).await {
@@ -232,8 +233,11 @@ fn rel(config: &serde_json::Value) -> Option<PathBuf> {
 /// What one folder inbox may lose of a deleted profile: (`slug_folders`, `root_buckets`) for
 /// [`forget_profile`], by the rules of [`forget_folders`]. Another inbox reads the same folder, or a
 /// folder inside the drop, when its settings say so or when its real folder on disk does: through a
-/// link, or a letter-case variant on a file system that ignores case. An inbox folder whose place
-/// cannot be read counts as the same folder, so the files stay.
+/// link, or a letter-case variant on a file system that ignores case. The drop's own last part is not
+/// followed, the way forget_profile removes a drop that is a link and never its target. An error when
+/// this inbox's folder, or the folder of another inbox of the same household, cannot be read: the files
+/// stay, and the retry waits, then shows in the household's review queue. An inbox of another household
+/// whose folder cannot be read reads no file either, so it keeps nothing here.
 fn what_to_remove(
     settings: &Settings,
     household_id: Uuid,
@@ -242,33 +246,31 @@ fn what_to_remove(
     readers: &[(Uuid, PathBuf)],
     config: &serde_json::Value,
     own: bool,
-) -> (bool, bool) {
+) -> Result<(bool, bool)> {
     let Some(mine) = rel(config) else {
         // forget_profile refuses the settings itself
-        return (true, own);
+        return Ok((true, own));
     };
     let Some(base) = settings.inbox_dir.as_deref() else {
         // no inbox folder, so forget_profile has nothing to remove
-        return (false, false);
+        return Ok((false, false));
     };
-    let drop = mine.join(slug);
-    let (mine_at, drop_at) = (real(&base.join(&mine)), real(&base.join(&drop)));
-    // whether a reader's real folder is `to` (`exact`) or a folder inside it
-    let leads = |r: &Path, to: &Option<PathBuf>, exact: bool| match (real(&base.join(r)), to) {
-        (Some(at), Some(to)) if exact => at == *to,
-        (Some(at), Some(to)) => at.starts_with(to),
-        _ => true,
-    };
-    let on_it: Vec<Uuid> = readers
-        .iter()
-        .filter(|(_, r)| *r == mine || leads(r, &mine_at, true))
-        .map(|(h, _)| *h)
-        .collect();
+    let unreadable = || Error::Invalid("a folder inbox's folder cannot be read: its files stay until it can".into());
+    let mine_at = real(&base.join(&mine)).ok_or_else(unreadable)?;
+    let (drop, drop_at) = (mine.join(slug), mine_at.join(slug));
+    let (mut on_it, mut inside) = (Vec::new(), false);
+    for (h, r) in readers {
+        let at = real(&base.join(r));
+        if at.is_none() && *h == household_id {
+            return Err(unreadable());
+        }
+        if *r == mine || at.as_ref() == Some(&mine_at) {
+            on_it.push(*h);
+        }
+        inside |= r.starts_with(&drop) || at.is_some_and(|at| at.starts_with(&drop_at));
+    }
     let taken = named.iter().any(|h| *h == household_id || on_it.contains(h));
-    let inside = readers
-        .iter()
-        .any(|(_, r)| r.starts_with(&drop) || leads(r, &drop_at, false));
-    (!taken && !inside, own && on_it.is_empty())
+    Ok((!taken && !inside, own && on_it.is_empty()))
 }
 
 /// Where `path` leads on disk: the real path of the longest part of it that exists (links followed,
