@@ -92,7 +92,7 @@ fn strip_secrets(v: &mut Value, found: &mut Vec<Value>) {
         Value::Object(m) => {
             let keys: Vec<String> = m.keys().filter(|k| is_secret_field(k)).cloned().collect();
             for k in keys {
-                if let Some(x) = m.remove(&k) {
+                if let Some(x) = m.shift_remove(&k) {
                     found.push(x);
                 }
             }
