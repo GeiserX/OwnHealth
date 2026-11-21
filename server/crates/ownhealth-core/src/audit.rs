@@ -823,4 +823,189 @@ mod tests {
         assert!(err.to_string().contains("no longer a plain table"), "{err}");
         Ok(())
     }
+
+    // ------------------------------------------------------- round 3 review tests ----
+
+    /// The check on a new connection, so it starts with the database's own settings.
+    async fn check_new(db: &TestDb) -> anyhow::Result<ChainCheck> {
+        let mut c = sqlx::PgConnection::connect(&db.url).await?;
+        let r = verify_chain(&mut c).await;
+        c.close().await?;
+        Ok(r?)
+    }
+
+    /// The chain function links rows of public.audit_event and nothing else. Attached to another
+    /// table, it raises before it reads the row, so no cast of that row ever runs as its owner.
+    #[tokio::test]
+    async fn the_chain_function_refuses_any_other_table() -> anyhow::Result<()> {
+        let (db, _) = chained(2).await?;
+        let err = owner_sql(
+            &db,
+            "create temp table t (like public.audit_event); \
+             create trigger x after insert on t for each row execute function public.oh_audit_chain_link(); \
+             insert into t (id, ts, actor_kind, via, action) values (424242, pg_catalog.now(), 'user', 'ui', 'read');",
+        )
+        .await
+        .expect_err("the chain function must refuse a table other than audit_event");
+        assert!(err.to_string().contains("links public.audit_event only"), "{err}");
+        let links: i64 = sqlx::query_scalar("select count(*) from audit_chain")
+            .fetch_one(&db.pool)
+            .await?;
+        assert_eq!(links, 2);
+        Ok(())
+    }
+
+    /// Every SECURITY DEFINER function the migrations make: no role but its owner may call it, and it
+    /// looks names up in pg_catalog only (Postgres never searches pg_temp for functions or operators).
+    #[tokio::test]
+    async fn security_definer_functions_are_closed_to_other_roles() -> anyhow::Result<()> {
+        let db = TestDb::new().await?;
+        let rows: Vec<(String, Option<Vec<String>>, bool)> = sqlx::query_as(
+            "select p.oid::regprocedure::text, p.proconfig, exists (select 1 \
+               from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a \
+              where a.grantee <> p.proowner and a.privilege_type = 'EXECUTE') \
+             from pg_proc p join pg_namespace n on n.oid = p.pronamespace \
+             where p.prosecdef and n.nspname not in ('pg_catalog', 'information_schema') order by 1",
+        )
+        .fetch_all(&db.pool)
+        .await?;
+        assert!(!rows.is_empty(), "no SECURITY DEFINER function found");
+        for (f, config, others_execute) in rows {
+            assert_eq!(config, Some(vec!["search_path=pg_catalog, pg_temp".to_string()]), "{f}");
+            assert!(!others_execute, "{f}: a role other than its owner can call it");
+        }
+        Ok(())
+    }
+
+    /// The owner puts public ahead of pg_catalog for the database and adds its own `=` for bigint,
+    /// true whenever the query is the check's search for unlinked rows. The row added behind the
+    /// chain must still be named.
+    #[tokio::test]
+    async fn an_owner_operator_does_not_hide_a_row_added_behind_the_chain() -> anyhow::Result<()> {
+        let (db, _) = chained(5).await?;
+        tamper(
+            &db,
+            "insert into audit_event (actor_kind, via, action, rows_out) values ('system', 'job', 'purge', 77)",
+        )
+        .await?;
+        let added: i64 = sqlx::query_scalar("select max(id) from audit_event")
+            .fetch_one(&db.pool)
+            .await?;
+        assert_eq!(
+            check_new(&db).await?.broken,
+            broke(None, Some(added), ChainBreakKind::Unlinked)
+        );
+        owner_sql(
+            &db,
+            &format!(
+                "create function public.oh_eq(bigint, bigint) returns boolean language sql volatile as $f$ \
+                   select $1 operator(pg_catalog.=) $2 \
+                       or pg_catalog.strpos(pg_catalog.current_query(), 'not exists') > 0 $f$; \
+                 create operator public.= (leftarg = bigint, rightarg = bigint, function = public.oh_eq); \
+                 alter database \"{}\" set search_path = public, pg_catalog",
+                db.name
+            ),
+        )
+        .await?;
+        let c = check_new(&db).await?;
+        assert_eq!(c.broken, broke(None, Some(added), ChainBreakKind::Unlinked), "{c:?}");
+        Ok(())
+    }
+
+    /// The same path with an always-true `=` for "char" would let a partitioned table that holds the
+    /// old row pass as a plain one.
+    #[tokio::test]
+    async fn an_owner_operator_does_not_pass_a_partitioned_table_as_plain() -> anyhow::Result<()> {
+        let (db, ids) = chained(5).await?;
+        let x = ids[2];
+        owner_sql(
+            &db,
+            &format!(
+                "create function public.oh_t(\"char\", \"char\") returns boolean language sql as $f$ select true $f$; \
+                 create operator public.= (leftarg = \"char\", rightarg = \"char\", function = public.oh_t); \
+                 alter database \"{n}\" set search_path = public, pg_catalog; \
+                 create table oh_shadow as select * from audit_event where id = {x}; \
+                 set session_replication_role = replica; update audit_event set rows_out = 999 where id = {x}; \
+                 set session_replication_role = origin; \
+                 create schema oh_p; \
+                 alter table audit_event rename to audit_event_t; \
+                 create table audit_event (like audit_event_t) partition by range (id); \
+                 create table oh_p.part partition of audit_event default; \
+                 insert into oh_p.part select * from audit_event_t where id <> {x} union all select * from oh_shadow;",
+                n = db.name
+            ),
+        )
+        .await?;
+        let err = check_new(&db)
+            .await
+            .expect_err("a partitioned audit_event must stop the check");
+        assert!(err.to_string().contains("no longer a plain table"), "{err}");
+        Ok(())
+    }
+
+    /// The owner gives a hashed column a type of its own, with its own cast to json. The check would
+    /// then hash a value the row does not hold, so such a column stops the check.
+    #[tokio::test]
+    async fn an_owner_column_type_stops_the_check() -> anyhow::Result<()> {
+        let (db, _) = chained(5).await?;
+        let mut tx = db.pool.begin().await?;
+        let x = write_audit(&mut tx, &AuditEvent::new("user", "ui", "purge")).await?;
+        tx.commit().await?;
+        let fake = "re\u{430}d"; // looks like "read"
+        owner_sql(
+            &db,
+            &format!(
+                "create type public.\"TEXT\" as enum ('read', 'purge', '{fake}'); \
+                 alter table audit_event alter column action type public.\"TEXT\" \
+                   using action::pg_catalog.text::public.\"TEXT\"; \
+                 create function public.oh_j(public.\"TEXT\") returns json language sql immutable as $f$ \
+                   select pg_catalog.to_json(case when $1::pg_catalog.text = '{fake}' then 'purge' \
+                     else $1::pg_catalog.text end) $f$; \
+                 create cast (public.\"TEXT\" as json) with function public.oh_j(public.\"TEXT\"); \
+                 create function public.oh_jb(public.\"TEXT\") returns jsonb language sql immutable as $f$ \
+                   select pg_catalog.to_jsonb(case when $1::pg_catalog.text = '{fake}' then 'purge' \
+                     else $1::pg_catalog.text end) $f$; \
+                 create cast (public.\"TEXT\" as jsonb) with function public.oh_jb(public.\"TEXT\");"
+            ),
+        )
+        .await?;
+        tamper(&db, &format!("update audit_event set action = '{fake}' where id = {x}")).await?;
+        let err = check_new(&db)
+            .await
+            .expect_err("an owner type on a hashed column must stop the check");
+        assert!(err.to_string().contains("no longer a plain table"), "{err}");
+        Ok(())
+    }
+
+    /// A generated column is computed by an expression the owner writes, so it stops the check too.
+    #[tokio::test]
+    async fn a_generated_column_stops_the_check() -> anyhow::Result<()> {
+        let (db, _) = chained(2).await?;
+        owner_sql(
+            &db,
+            "alter table audit_chain add column oh_g int generated always as (1) stored",
+        )
+        .await?;
+        let err = check_new(&db)
+            .await
+            .expect_err("a generated column must stop the check");
+        assert!(err.to_string().contains("no longer a plain table"), "{err}");
+        Ok(())
+    }
+
+    /// The check runs in a transaction of its own, a savepoint inside the caller's, and leaves the
+    /// caller's settings as they were.
+    #[tokio::test]
+    async fn the_check_leaves_the_callers_transaction_as_it_was() -> anyhow::Result<()> {
+        let (db, _) = chained(2).await?;
+        let mut tx = db.pool.begin().await?;
+        sqlx::query("set local search_path = public").execute(&mut *tx).await?;
+        assert!(verify_chain(&mut tx).await?.ok());
+        let path: String = sqlx::query_scalar("select current_setting('search_path')")
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(path, "public");
+        tx.rollback().await?;
+        Ok(())
+    }
 }

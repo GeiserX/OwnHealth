@@ -197,6 +197,129 @@ async fn app_role_can_append_and_read_but_not_rewrite_the_audit_log() -> R {
     result
 }
 
+/// Drop the test database, then the role, which then owns nothing.
+async fn drop_db_and_role(db: TestDb, role: &str) -> R {
+    let name = db.name.clone();
+    drop(db);
+    let mut admin = PgConnection::connect(&admin_url()).await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!("drop role if exists \"{role}\"")))
+        .execute(&mut admin)
+        .await?;
+    let left: i64 = sqlx::query_scalar("select count(*) from pg_database where datname = $1")
+        .bind(&name)
+        .fetch_one(&mut admin)
+        .await?;
+    assert_eq!(left, 0);
+    Ok(())
+}
+
+/// The app role, with the grants app-role.sql gives, tries to run its own code as the owner of the
+/// SECURITY DEFINER chain function: it attaches the function to a temp table of its own and gives
+/// that table an implicit cast to audit_event, which the function would call. The owner is a
+/// superuser in both compose files.
+async fn check_no_code_as_the_owner(db: &TestDb, role: &str, password: &str) -> R {
+    let done = apply_role_sql(&db.name, role, password)?;
+    anyhow::ensure!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    let mut app = PgConnection::connect(&url(&db.name, Some((role, password)))).await?;
+    sqlx::raw_sql("create temp table oh_log (who text, su boolean); grant all on oh_log to public")
+        .execute(&mut app)
+        .await?;
+    let attack = sqlx::raw_sql(
+        "create temp table t (like public.audit_event); \
+         create function pg_temp.f(r t) returns public.audit_event language plpgsql as $f$ \
+           declare e public.audit_event; begin \
+             insert into pg_temp.oh_log select current_user, rolsuper from pg_catalog.pg_roles \
+              where rolname = current_user; \
+             select * into e from public.audit_event order by id limit 1; return e; end $f$; \
+         create cast (t as public.audit_event) with function pg_temp.f(t) as implicit; \
+         create trigger x after insert on t for each row execute function public.oh_audit_chain_link(); \
+         insert into t (id, ts, actor_kind, via, action) values (424242, pg_catalog.now(), 'user', 'ui', 'read');",
+    )
+    .execute(&mut app)
+    .await;
+    let ran_as: Vec<(String, bool)> = sqlx::query_as("select who, su from pg_temp.oh_log")
+        .fetch_all(&mut app)
+        .await?;
+    app.close().await?;
+    let forged: i64 = sqlx::query_scalar("select count(*) from audit_chain where event_id = 424242")
+        .fetch_one(&db.pool)
+        .await?;
+    assert!(ran_as.is_empty(), "the app role's code ran as {ran_as:?}");
+    assert_eq!(forged, 0, "the app role wrote a chain link");
+    let e = attack.expect_err("the app role must not attach the chain function to its own table");
+    assert!(
+        e.to_string()
+            .contains("permission denied for function oh_audit_chain_link"),
+        "{e}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn app_role_cannot_run_code_as_the_owner() -> R {
+    let has_docker = ok(Command::new("docker").args(["exec", CONTAINER, "true"]));
+    if !host_psql() && !has_docker {
+        eprintln!("no psql 15+ and no test container: skipped");
+        return Ok(());
+    }
+    let db = TestDb::new().await?;
+    let role = format!("oh_test_app_{}", ownhealth_core::ids::token_hex(4));
+    let password = ownhealth_core::ids::token_hex(16);
+    let result = check_no_code_as_the_owner(&db, &role, &password).await;
+    drop_db_and_role(db, &role).await?;
+    result
+}
+
+/// app-role.sh applies app-role.sql as one transaction, so a failed step leaves nothing behind.
+/// Run statement by statement, the blanket grant commits before the revoke on audit_chain, and the
+/// app role can write chain links in between. A REVOKE refused by an event trigger stands in for
+/// any failure after that grant.
+#[tokio::test]
+async fn app_role_script_keeps_nothing_when_a_step_fails() -> R {
+    if !host_psql() {
+        eprintln!("no psql 15+ on PATH: skipped");
+        return Ok(());
+    }
+    let db = TestDb::new().await?;
+    let role = format!("oh_test_app_{}", ownhealth_core::ids::token_hex(4));
+    let password = ownhealth_core::ids::token_hex(16);
+    let result: R = async {
+        let mut owner = PgConnection::connect(&db.url).await?;
+        sqlx::raw_sql(
+            "create function oh_no_revoke() returns event_trigger language plpgsql as $f$ \
+               begin raise exception 'oh_test: revoke refused'; end $f$; \
+             create event trigger oh_no_revoke on ddl_command_start when tag in ('REVOKE') \
+               execute function oh_no_revoke();",
+        )
+        .execute(&mut owner)
+        .await?;
+        owner.close().await?;
+        let out = Command::new("sh")
+            .arg(root().join("deploy/db/app-role.sh"))
+            .env("OWNHEALTH_DATABASE_URL", url(&db.name, None))
+            .env("OWNHEALTH_DB_PASSWORD", "")
+            .env_remove("OWNHEALTH_DB_PASSWORD_FILE")
+            .env("OWNHEALTH_APP_DB_PASSWORD", &password)
+            .env_remove("OWNHEALTH_APP_DB_PASSWORD_FILE")
+            .env("OWNHEALTH_APP_DB_ROLE", &role)
+            .output()?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        anyhow::ensure!(!out.status.success(), "app-role.sh must fail: {stderr}");
+        anyhow::ensure!(stderr.contains("revoke refused"), "{stderr}");
+        let mut admin = PgConnection::connect(&admin_url()).await?;
+        let left: i64 = sqlx::query_scalar("select count(*) from pg_roles where rolname = $1")
+            .bind(&role)
+            .fetch_one(&mut admin)
+            .await?;
+        admin.close().await?;
+        anyhow::ensure!(left == 0, "the failed run left the role {role} behind");
+        Ok(())
+    }
+    .await;
+    drop_db_and_role(db, &role).await?;
+    result
+}
+
 // ------------------------------------------------------------------ compose ----
 
 fn has_compose() -> bool {
