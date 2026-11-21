@@ -90,7 +90,8 @@ pub struct Stored {
     pub qualifier: Option<String>,
     pub components: Option<Value>,
     pub computed_by: String,
-    /// The connection that brought the score, `{id, label}`; null once that connection is removed.
+    /// The connection that brought the score, `{id, label}`; null once that connection is removed or
+    /// moved to another person.
     pub source: Option<Value>,
 }
 
@@ -198,14 +199,16 @@ pub async fn write(conn: &mut PgConnection, profile_id: Uuid, source_id: Uuid, s
 }
 
 /// The profile's scores from `since` on, by provider, category, connection and time, each with the
-/// connection that brought it. A connection of another household is never named, even on a row that
-/// got past `write`.
+/// connection that brought it. The read names only a connection that `write` would still accept: a
+/// connection of another household, or one moved since to another person, is never named, and its
+/// scores stay with no connection.
 pub async fn list(conn: &mut PgConnection, profile_id: Uuid, since: DateTime<Utc>) -> Result<Vec<Stored>> {
     Ok(sqlx::query_as(
         "select v.provider, v.category, v.t, v.value, v.qualifier, v.components, v.computed_by, \
          case when s.id is null then null else jsonb_build_object('id', s.id, 'label', s.label) end as source \
          from vendor_score v join profile p on p.id = v.profile_id \
          left join source s on s.id = v.source_id and s.household_id = p.household_id \
+         and (s.profile_id is null or s.profile_id = v.profile_id) \
          where v.profile_id = $1 and v.t >= $2 order by v.provider, v.category, s.label, v.source_id, v.t",
     )
     .bind(profile_id)

@@ -10,7 +10,7 @@ export interface VendorScore {
 	qualifier: string | null;
 	components: Record<string, unknown> | null;
 	computed_by: 'provider';
-	/** The connection that brought the score; null once that connection is removed. */
+	/** The connection that brought the score; null once that connection is removed or moved to another person. */
 	source: { id: string; label: string } | null;
 }
 

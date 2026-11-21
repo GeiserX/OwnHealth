@@ -7,7 +7,7 @@ mod common;
 use chrono::{Datelike, TimeZone, Utc};
 use common::{Env, R};
 use ownhealth_core::demo::create_rivera_family;
-use ownhealth_core::sources::{self, NewSource};
+use ownhealth_core::sources::{self, NewSource, SourcePatch};
 use ownhealth_devices::scores::{self, CATEGORIES, Score};
 use ownhealth_devices::store::{self, Conflict, Sample};
 use ownhealth_ingest_structured::wearables;
@@ -487,6 +487,47 @@ async fn the_read_never_shows_another_households_connection() -> R {
         vec![(62.0, Some(json!({"id": own, "label": "test inbox"}))), (40.0, None)],
         "the other household's connection is not named"
     );
+    Ok(())
+}
+
+/// A connection later moved to another person of the household no longer names the scores it brought
+/// before: they stay, but they never show the new person's label or id. A connection that becomes a
+/// household one still names them.
+#[tokio::test]
+async fn a_connection_moved_to_another_person_no_longer_names_the_old_scores() -> R {
+    let env = Env::new().await?;
+    let (sam, lucia) = (env.fam.profile("sam"), env.fam.profile("lucia"));
+    let mut c = env.db.pool.acquire().await?;
+    let sams = env.source("gadgetbridge", Some("sam"), json!({}), None).await?.id;
+    let household = env.source("gadgetbridge", None, json!({}), None).await?.id;
+    let to_household = env.source("gadgetbridge", Some("sam"), json!({}), None).await?.id;
+    let mut morning = garmin_morning(62.0);
+    for src in [sams, household, to_household] {
+        scores::write(&mut c, sam, src, std::slice::from_ref(&morning)).await?;
+        morning.t += chrono::TimeDelta::hours(1);
+    }
+    let move_to = |profile: Option<uuid::Uuid>, label: &str| SourcePatch {
+        label: Some(label.into()),
+        profile_id: Some(profile),
+        ..SourcePatch::default()
+    };
+    sources::update_source(&mut c, sams, &move_to(Some(lucia), "Lucía's watch")).await?;
+    sources::update_source(&mut c, household, &move_to(Some(lucia), "Lucía's ring")).await?;
+    sources::update_source(&mut c, to_household, &move_to(None, "Hall scale")).await?;
+    let since = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).single().unwrap_or_default();
+    let got: Vec<Option<serde_json::Value>> = scores::list(&mut c, sam, since)
+        .await?
+        .into_iter()
+        .map(|r| r.source)
+        .collect();
+    assert_eq!(
+        got,
+        vec![Some(json!({"id": to_household, "label": "Hall scale"})), None, None],
+        "Sam's scores never name the connections that are now Lucía's"
+    );
+    // the moved connection can no longer bring Sam a score
+    let w = scores::write(&mut c, sam, sams, &[garmin_morning(63.0)]).await;
+    assert!(matches!(w, Err(ownhealth_core::Error::Provenance(_))), "{w:?}");
     Ok(())
 }
 
