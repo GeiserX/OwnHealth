@@ -1506,6 +1506,71 @@ async fn an_inbox_folder_the_server_cannot_resolve_keeps_the_files() -> R {
     kept
 }
 
+#[tokio::test]
+async fn a_new_inbox_inside_the_drop_keeps_its_files() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    ownhealth_inbox::register();
+    folder_source(&env, "estudio", Some(env.profile("alex"))).await?;
+    let root = inbox.join("estudio");
+    let locked = root.join(".done/_root/2026-11");
+    std::fs::create_dir_all(&locked)?;
+    std::fs::write(locked.join("escaneo-anterior.pdf"), b"%PDF-1.7 synthetic filed scan")?;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500))?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    // before the retry runs, a new shared inbox starts reading estudio/alex
+    sqlx::query("insert into source (household_id, kind, label, config) values ($1, 'folder', 'Nuevo', '{\"subdir\": \"estudio/alex\"}')")
+        .bind(env.fam().household_id)
+        .execute(env.pool())
+        .await?;
+    let drop = root.join("alex/escaneo-nuevo.pdf");
+    std::fs::create_dir_all(drop.parent().expect("parent"))?;
+    std::fs::write(&drop, b"%PDF-1.7 a scan of the new inbox")?;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))?;
+    assert_eq!(run_forget(&env).await?, 1);
+    assert!(drop.is_file(), "the retry removed the new inbox's scan");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_namesake_in_an_unrelated_household_does_not_keep_the_copies() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    ownhealth_inbox::register();
+    folder_source(&env, "estudio", None).await?;
+    let root = inbox.join("estudio");
+    let locked = root.join(".done/alex/2026-11");
+    std::fs::create_dir_all(&locked)?;
+    std::fs::write(locked.join("escaneo-anterior.pdf"), b"%PDF-1.7 synthetic filed scan")?;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500))?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    // another household, with no folder inbox on estudio, has a person whose short name is alex
+    let mut c = env.pool().acquire().await?;
+    let ortega = ownhealth_core::access::create_household(&mut c, "Familia Ortega").await?;
+    drop(c);
+    sqlx::query("insert into profile (household_id, slug, display_name) values ($1, 'alex', 'Alex Ortega')")
+        .bind(ortega)
+        .execute(env.pool())
+        .await?;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))?;
+    assert_eq!(run_forget(&env).await?, 1);
+    assert!(
+        !root.join(".done/alex").exists(),
+        "a namesake in an unrelated household kept the deleted Alex's filed copies"
+    );
+    Ok(())
+}
+
 /// Make every audit row of `resource_type` fail, the way a full disk or a broken database would.
 async fn fail_audit(env: &Env, resource_type: &str) -> R {
     sqlx::query(sqlx::AssertSqlSafe(format!(
