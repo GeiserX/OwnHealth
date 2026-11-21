@@ -106,7 +106,7 @@ async fn a_card_waits_for_the_person_to_approve_its_issuer_host() -> R {
     assert_eq!(
         v,
         json!({"status": "needs_approval",
-               "issuers": [{"iss": "https://issuer.labnorte.example", "host": "issuer.labnorte.example"}]})
+               "hosts": [{"host": "issuer.labnorte.example", "issuers": ["https://issuer.labnorte.example"]}]})
     );
     // approving another host changes nothing
     let (_, v) = send(
@@ -132,11 +132,11 @@ async fn a_card_waits_for_the_person_to_approve_its_issuer_host() -> R {
 }
 
 #[tokio::test]
-async fn an_approved_issuer_on_a_private_address_is_refused_without_a_connection() -> R {
+async fn an_approved_issuer_name_on_a_private_address_is_refused_without_a_connection() -> R {
     let a = app().await?;
     let (port, hits) = listener().await?;
-    let text = shc_text(&unsigned_card(&format!("https://127.0.0.1:{port}")));
-    let host = format!("127.0.0.1:{port}");
+    let text = shc_text(&unsigned_card(&format!("https://localhost:{port}")));
+    let host = format!("localhost:{port}");
     let (s, v) = send(
         &a,
         "alex",
@@ -147,7 +147,7 @@ async fn an_approved_issuer_on_a_private_address_is_refused_without_a_connection
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     assert_eq!(v["detail"]["code"], "shc_refused");
     assert_eq!(v["detail"]["reason"], "private_issuer");
-    assert_eq!(v["detail"]["iss"], format!("https://127.0.0.1:{port}"));
+    assert_eq!(v["detail"]["iss"], format!("https://localhost:{port}"));
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(
         hits.load(std::sync::atomic::Ordering::SeqCst),
@@ -155,6 +155,21 @@ async fn an_approved_issuer_on_a_private_address_is_refused_without_a_connection
         "the private address was contacted"
     );
     assert_eq!(documents(&a).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_literal_private_address_is_refused_before_the_person_is_asked() -> R {
+    let a = app().await?;
+    let (port, hits) = listener().await?;
+    let text = shc_text(&unsigned_card(&format!("https://127.0.0.1:{port}")));
+    let (s, v) = send(&a, "alex", &[("profile", "alex"), ("text", &text)], None).await?;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert_eq!(
+        (v["detail"]["reason"].clone(), v["detail"]["detail"].clone()),
+        (json!("private_issuer"), json!("127.0.0.1"))
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     Ok(())
 }
 

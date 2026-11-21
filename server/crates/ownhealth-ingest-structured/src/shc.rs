@@ -10,9 +10,12 @@
 //! 3. [`verify`] fetches `<iss>/.well-known/jwks.json` through `net::get` under the connector
 //!    egress guard (https, public addresses only, no redirects, 1 MiB, 15 s), verifies the ES256
 //!    signature with `jose.rs`, and checks the kid, nbf, exp, revocation and credential type.
-//! 4. [`receive`] runs them for one person. Nothing is fetched until the person approved every
-//!    issuer host. Nothing is stored until every card verified. Then the input bytes become one
-//!    document on channel `shc`, and each card's FHIR bundle goes to `fhir::import_resources`.
+//! 4. [`check`] runs them for one import: one question per issuer host, nothing fetched until the
+//!    person approved every host, each issuer's keys and revocation list fetched once, and the whole
+//!    check stopped after [`VERIFY_LIMIT`]. It holds no database connection.
+//! 5. [`store`] keeps the verified cards for one person: the input bytes become one document on
+//!    channel `shc`, named for its signer and date, and each card's FHIR bundle goes to
+//!    `fhir::import_resources`. A card already stored, in any form, adds no second document.
 //!
 //! A verified card proves which issuer key signed it. It never proves that the issuer deserves
 //! trust, so the UI says "signed by <iss>" and nothing more.
@@ -51,8 +54,49 @@ pub const MAX_CARDS: usize = 20;
 const HEALTH_CARD: &str = "https://smarthealth.cards#health-card";
 /// RFC 7519 4.1.5 lets a verifier allow "some small leeway" on `nbf` for clock skew.
 const NBF_LEEWAY_SECONDS: i64 = 300;
-/// A photo larger than this on its long side is scaled down before the QR search.
-const MAX_PHOTO_SIDE: u32 = 2000;
+/// The QR search runs at this long side, then at half and a quarter of it ([`search_sizes`]).
+const MAX_SEARCH_SIDE: u32 = 4000;
+/// A photo larger than this on a side is refused from its header, before it is decoded.
+pub const MAX_PHOTO_SIDE: u32 = 8192;
+/// The most memory the photo decoder may take: an 8192 x 8192 photo in RGB, with room.
+const MAX_PHOTO_ALLOC: u64 = 192 * 1024 * 1024;
+/// Every reason code, as the UI lists them (ui/src/lib/logic/shc.ts SHC_REASONS).
+pub const REASONS: [&str; 19] = [
+    "no_card",
+    "photo_too_large",
+    "numeric",
+    "chunk_missing",
+    "chunks_unread",
+    "too_many",
+    "not_jws",
+    "header",
+    "payload",
+    "issuer",
+    "private_issuer",
+    "keys",
+    "unknown_kid",
+    "key",
+    "bad_signature",
+    "expired",
+    "not_yet",
+    "revoked",
+    "revocation_list",
+];
+/// Every detail code of a keys or revocation-list refusal (ui/src/lib/logic/shc.ts SHC_DETAILS):
+/// what went wrong, never the server's own text. `http` stands for `http_<status>`.
+pub const DETAILS: [&str; 9] = [
+    "dns",
+    "timeout",
+    "connect",
+    "too_large",
+    "not_json",
+    "not_jwks",
+    "not_crl",
+    "other_kid",
+    "http",
+];
+/// The whole verification of one import stops after this.
+pub const VERIFY_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Why a card was not imported. Each message names what was wrong, never a key or a payload.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -66,7 +110,15 @@ pub enum Refusal {
     ChunkMissing { missing: usize, total: usize },
     #[error("more than {MAX_CARDS} cards came in one import")]
     TooMany,
-    #[error("the card is not a compact JWS")]
+    #[error("the photo is larger than {MAX_PHOTO_SIDE} pixels on a side")]
+    PhotoTooLarge,
+    #[error("{found} of the {total} QR codes of a split card could be read")]
+    ChunksUnread { found: usize, total: usize },
+    /// The detail is one of [`DETAILS`]. A card is refused when its issuer's list cannot be read,
+    /// because then nothing shows that the issuer did not revoke it.
+    #[error("the issuer's revocation list could not be read ({0})")]
+    RevocationList(String),
+    #[error("the card is damaged and cannot be read")]
     NotJws,
     #[error("the card's header does not meet the SMART Health Cards rules: {0}")]
     Header(&'static str),
@@ -76,7 +128,8 @@ pub enum Refusal {
     Issuer,
     #[error("{0} has a private, loopback or link-local address, so its keys were not fetched")]
     PrivateIssuer(String),
-    #[error("the issuer's keys could not be fetched: {0}")]
+    /// The detail is one of [`DETAILS`].
+    #[error("the issuer's keys could not be fetched ({0})")]
     Keys(String),
     #[error("the issuer publishes no key with this card's kid")]
     UnknownKid,
@@ -112,6 +165,9 @@ impl Refusal {
             Refusal::Expired(_) => "expired",
             Refusal::NotYet(_) => "not_yet",
             Refusal::Revoked => "revoked",
+            Refusal::PhotoTooLarge => "photo_too_large",
+            Refusal::ChunksUnread { .. } => "chunks_unread",
+            Refusal::RevocationList(_) => "revocation_list",
         }
     }
 
@@ -119,8 +175,13 @@ impl Refusal {
     /// the keys could not be fetched.
     pub fn detail(&self) -> Option<String> {
         match self {
-            Refusal::Expired(d) | Refusal::NotYet(d) | Refusal::PrivateIssuer(d) | Refusal::Keys(d) => Some(d.clone()),
+            Refusal::Expired(d)
+            | Refusal::NotYet(d)
+            | Refusal::PrivateIssuer(d)
+            | Refusal::Keys(d)
+            | Refusal::RevocationList(d) => Some(d.clone()),
             Refusal::ChunkMissing { missing, total } => Some(format!("{missing}/{total}")),
+            Refusal::ChunksUnread { found, total } => Some(format!("{found}/{total}")),
             _ => None,
         }
     }
@@ -128,25 +189,33 @@ impl Refusal {
 
 /// Every text this module writes for a person, for the wording lint.
 pub fn phrases() -> Value {
-    let all = [
+    let all = samples();
+    json!({ "en": all.iter().map(ToString::to_string).collect::<Vec<_>>() })
+}
+
+/// One refusal of each kind, in [`REASONS`] order.
+fn samples() -> Vec<Refusal> {
+    vec![
         Refusal::NoCard("photo"),
+        Refusal::PhotoTooLarge,
         Refusal::Numeric,
         Refusal::ChunkMissing { missing: 2, total: 3 },
+        Refusal::ChunksUnread { found: 2, total: 3 },
         Refusal::TooMany,
         Refusal::NotJws,
         Refusal::Header("zip is not DEF"),
         Refusal::Payload("nbf"),
         Refusal::Issuer,
         Refusal::PrivateIssuer("127.0.0.1".into()),
-        Refusal::Keys("HTTP 404".into()),
+        Refusal::Keys("http_404".into()),
         Refusal::UnknownKid,
         Refusal::Key("kid is not the key's thumbprint"),
         Refusal::BadSignature,
         Refusal::Expired("2026-01-01".into()),
         Refusal::NotYet("2026-01-01".into()),
         Refusal::Revoked,
-    ];
-    json!({ "en": all.iter().map(ToString::to_string).collect::<Vec<_>>() })
+        Refusal::RevocationList("not_crl".into()),
+    ]
 }
 
 // ------------------------------------------------------------------ reading ----
@@ -169,10 +238,9 @@ pub struct Input {
 /// Read pasted text, a file or a photo into its cards. CPU work (a photo's QR search), no network.
 pub fn read(bytes: &[u8]) -> std::result::Result<Input, Refusal> {
     if let Some(mime) = photo_mime(bytes) {
-        let texts = qr_texts(bytes)?;
         return Ok(Input {
             form: Form::Photo(mime),
-            cards: from_shc_texts(&texts, "photo")?,
+            cards: photo_cards(bytes)?,
         });
     }
     let text = std::str::from_utf8(bytes).map_err(|_| Refusal::NoCard("file"))?;
@@ -183,10 +251,11 @@ pub fn read(bytes: &[u8]) -> std::result::Result<Input, Refusal> {
             cards: from_file(text)?,
         });
     }
+    // each shc:/ starts a code, also when codes are pasted back to back with no space between them
     let words: Vec<String> = text
-        .split_whitespace()
-        .filter(|w| w.starts_with("shc:/"))
-        .map(str::to_string)
+        .split("shc:/")
+        .skip(1)
+        .map(|rest| format!("shc:/{}", rest.split_whitespace().next().unwrap_or_default()))
         .collect();
     Ok(Input {
         form: Form::Text,
@@ -221,35 +290,94 @@ fn from_file(text: &str) -> std::result::Result<Vec<String>, Refusal> {
     Ok(cards)
 }
 
-/// Every QR code in the photo whose text starts with `shc:/`.
-fn qr_texts(bytes: &[u8]) -> std::result::Result<Vec<String>, Refusal> {
-    let no_card = || Refusal::NoCard("photo");
+/// The cards in a photo of one or more QR codes. The photo is searched at up to 4000 px on its long
+/// side, then at half and a quarter of that, until the codes found make whole cards: a printed card
+/// photographed close is read at full size, a phone photo of a sheet often only once it is smaller.
+fn photo_cards(bytes: &[u8]) -> std::result::Result<Vec<String>, Refusal> {
+    let img = decode_photo(bytes)?;
+    let mut sizes = search_sizes(img.width(), img.height()).into_iter();
+    let Some((w, h)) = sizes.next() else {
+        return Err(Refusal::NoCard("photo"));
+    };
+    let base = if (w, h) == img.dimensions() {
+        img
+    } else {
+        image::imageops::thumbnail(&img, w, h)
+    };
+    let mut found = std::collections::BTreeSet::new();
+    found.extend(qr_texts(&base));
+    let mut got = from_shc_texts(&found.iter().cloned().collect::<Vec<_>>(), "photo");
+    for (w, h) in sizes {
+        if got.is_ok() {
+            break;
+        }
+        found.extend(qr_texts(&image::imageops::thumbnail(&base, w, h)));
+        got = from_shc_texts(&found.iter().cloned().collect::<Vec<_>>(), "photo");
+    }
+    got
+}
+
+/// Decode a photo to grayscale. A photo over [`MAX_PHOTO_SIDE`] on a side, or one that would take
+/// more than [`MAX_PHOTO_ALLOC`] to decode, is refused from its header.
+fn decode_photo(bytes: &[u8]) -> std::result::Result<image::GrayImage, Refusal> {
+    let no_card = |_| Refusal::NoCard("photo");
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|_| no_card())?;
+        .map_err(no_card)?;
     let mut limits = image::Limits::default();
-    limits.max_alloc = Some(256 * 1024 * 1024);
+    limits.max_image_width = Some(MAX_PHOTO_SIDE);
+    limits.max_image_height = Some(MAX_PHOTO_SIDE);
+    limits.max_alloc = Some(MAX_PHOTO_ALLOC);
     reader.limits(limits);
-    let mut img = reader.decode().map_err(|_| no_card())?.to_luma8();
-    if img.width().max(img.height()) > MAX_PHOTO_SIDE {
-        let scale = f64::from(MAX_PHOTO_SIDE) / f64::from(img.width().max(img.height()));
-        let (w, h) = (
-            (f64::from(img.width()) * scale).round() as u32,
-            (f64::from(img.height()) * scale).round() as u32,
-        );
-        img = image::imageops::thumbnail(&img, w.max(1), h.max(1));
+    match reader.decode() {
+        Ok(img) => Ok(img.to_luma8()),
+        Err(image::ImageError::Limits(_)) => Err(Refusal::PhotoTooLarge),
+        Err(_) => Err(Refusal::NoCard("photo")),
     }
-    let mut prepared = rqrr::PreparedImage::prepare(img);
-    let texts: Vec<String> = prepared
-        .detect_grids()
-        .iter()
-        .filter_map(|g| g.decode().ok().map(|(_, text)| text))
-        .filter(|t| t.starts_with("shc:/"))
-        .collect();
-    if texts.is_empty() {
-        return Err(no_card());
+}
+
+/// Every QR code in one grayscale image whose text starts with `shc:/`. rxing's multi-code reader,
+/// trying harder, QR only.
+fn qr_texts(img: &image::GrayImage) -> Vec<String> {
+    let mut hints = rxing::DecodeHints::default()
+        .with(rxing::DecodeHintValue::TryHarder(true))
+        .with(rxing::DecodeHintValue::PossibleFormats(
+            std::collections::HashSet::from([rxing::BarcodeFormat::QR_CODE]),
+        ));
+    rxing::helpers::detect_multiple_in_luma_with_hints(img.as_raw().clone(), img.width(), img.height(), &mut hints)
+        .map(|found| {
+            found
+                .into_iter()
+                .map(|r| r.getText().to_string())
+                .filter(|t| t.starts_with("shc:/"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The sizes the QR search runs at for a photo of `w` x `h`: fitted to 4000 px on its long side,
+/// then 2000 and 1000 px for each of those the photo is larger than.
+pub fn search_sizes(w: u32, h: u32) -> Vec<(u32, u32)> {
+    let fit = |w: u32, h: u32, side: u32| {
+        let long = w.max(h);
+        if long <= side {
+            return (w, h);
+        }
+        let scale = |n: u32| {
+            u32::try_from(u64::from(n) * u64::from(side) / u64::from(long))
+                .unwrap_or(1)
+                .max(1)
+        };
+        (scale(w), scale(h))
+    };
+    let (w, h) = fit(w, h, MAX_SEARCH_SIDE);
+    let mut sizes = vec![(w, h)];
+    for side in [MAX_SEARCH_SIDE / 2, MAX_SEARCH_SIDE / 4] {
+        if w.max(h) > side {
+            sizes.push(fit(w, h, side));
+        }
     }
-    Ok(texts)
+    sizes
 }
 
 /// "Encoding QRs": each `shc:/` text is one card, or one chunk `shc:/<C>/<N>/` of a card split
@@ -284,6 +412,13 @@ fn from_shc_texts(texts: &[String], what: &'static str) -> std::result::Result<V
     }
     if let Some(n) = total {
         if let Some(missing) = (1..=n).find(|c| !chunks.contains_key(c)) {
+            // a photo that shows only some codes is most often a photo taken too far away
+            if what == "photo" {
+                return Err(Refusal::ChunksUnread {
+                    found: chunks.len(),
+                    total: n,
+                });
+            }
             return Err(Refusal::ChunkMissing { missing, total: n });
         }
         cards.push(chunks.into_values().collect());
@@ -416,8 +551,21 @@ fn claims(payload: &[u8]) -> std::result::Result<Read, Refusal> {
 }
 
 /// "Determining keys associated with an issuer": `iss` SHALL use https and SHALL NOT end in `/`.
+/// An `iss` whose host is a literal private, loopback or link-local address is refused here, so the
+/// person is never asked about it. A name is never looked up here: that waits for the person's yes,
+/// and the egress guard checks every address it resolves to.
 fn issuer_of(iss: &str) -> std::result::Result<Issuer, Refusal> {
     let url = url::Url::parse(iss).map_err(|_| Refusal::Issuer)?;
+    let ip = match url.host() {
+        Some(url::Host::Ipv4(ip)) => Some(std::net::IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => Some(std::net::IpAddr::V6(ip)),
+        _ => None,
+    };
+    if let Some(ip) = ip
+        && !net::is_public(ip)
+    {
+        return Err(Refusal::PrivateIssuer(ip.to_string()));
+    }
     let host = url.host_str().filter(|h| !h.is_empty()).ok_or(Refusal::Issuer)?;
     if url.scheme() != "https"
         || iss.ends_with('/')
@@ -463,6 +611,13 @@ pub fn public(url: &str) -> (String, Egress) {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Card {
     pub iss: String,
+    /// The host the person approved.
+    pub host: String,
+    /// SHA-256 of the compact JWS, hex.
+    pub jws_sha: String,
+    /// The patient the card names, as the card says it: untrusted text.
+    pub name: Option<String>,
+    pub birth_date: Option<String>,
     pub kid: String,
     pub issued: DateTime<Utc>,
     pub expires: Option<DateTime<Utc>>,
@@ -470,24 +625,50 @@ pub struct Card {
     pub bundle: Value,
 }
 
-/// Each issuer's JWKS, fetched once per import.
+/// Each issuer's JWKS and each (issuer, kid) revocation list, fetched once per import.
 #[derive(Default)]
 pub struct Keys {
     jwks: HashMap<String, Value>,
+    crl: HashMap<(String, String), Value>,
 }
 
-async fn fetch_json(url: &str, route: &Route) -> std::result::Result<Value, Refusal> {
+/// Why a fetch gave no JSON: a private address, or one of [`DETAILS`].
+enum Fetch {
+    Private(String),
+    Failed(String),
+}
+
+async fn fetch_json(url: &str, route: &Route) -> std::result::Result<Value, Fetch> {
     let (from, egress) = route(url);
     let got = net::get(&from, &egress, &[("accept", "application/json")])
         .await
         .map_err(|e| match e {
-            NetError::PrivateAddress(host) => Refusal::PrivateIssuer(host),
-            other => Refusal::Keys(other.to_string()),
+            NetError::PrivateAddress(host) => Fetch::Private(host),
+            NetError::Resolve(_) => Fetch::Failed("dns".into()),
+            NetError::Timeout(_) => Fetch::Failed("timeout".into()),
+            NetError::TooLarge(_) => Fetch::Failed("too_large".into()),
+            NetError::BadUrl | NetError::NotHttps | NetError::Http { .. } | NetError::Write(_) => {
+                Fetch::Failed("connect".into())
+            }
         })?;
     if got.status != 200 {
-        return Err(Refusal::Keys(format!("HTTP {}", got.status)));
+        return Err(Fetch::Failed(format!("http_{}", got.status)));
     }
-    serde_json::from_slice(&got.body).map_err(|_| Refusal::Keys("the answer is not JSON".into()))
+    serde_json::from_slice(&got.body).map_err(|_| Fetch::Failed("not_json".into()))
+}
+
+fn keys_refusal(f: Fetch) -> Refusal {
+    match f {
+        Fetch::Private(host) => Refusal::PrivateIssuer(host),
+        Fetch::Failed(code) => Refusal::Keys(code),
+    }
+}
+
+fn list_refusal(f: Fetch) -> Refusal {
+    match f {
+        Fetch::Private(host) => Refusal::PrivateIssuer(host),
+        Fetch::Failed(code) => Refusal::RevocationList(code),
+    }
 }
 
 /// The RFC 7638 thumbprint of an EC public key: SHA-256 of `{"crv","kty","x","y"}` in that order,
@@ -540,7 +721,9 @@ pub async fn verify(
     let kid = kid_of(&header)?;
     let unverified = issuer(jws)?;
     if !keys.jwks.contains_key(&unverified.iss) {
-        let jwks = fetch_json(&format!("{}/.well-known/jwks.json", unverified.iss), route).await?;
+        let jwks = fetch_json(&format!("{}/.well-known/jwks.json", unverified.iss), route)
+            .await
+            .map_err(keys_refusal)?;
         keys.jwks.insert(unverified.iss.clone(), jwks);
     }
     let jwks = &keys.jwks[&unverified.iss];
@@ -548,12 +731,13 @@ pub async fn verify(
     let jwk = jwks
         .get("keys")
         .and_then(Value::as_array)
-        .ok_or(Refusal::Keys("the answer is not a JWKS".into()))?
+        .ok_or(Refusal::Keys("not_jwks".into()))?
         .iter()
         .find(|k| k.get("kid").and_then(Value::as_str) == Some(kid.as_str()))
-        .ok_or(Refusal::UnknownKid)?;
-    check_key(jwk, &kid)?;
-    let key = jose::es256_key(jwk).map_err(|_| Refusal::Key("it is not a P-256 point"))?;
+        .ok_or(Refusal::UnknownKid)?
+        .clone();
+    check_key(&jwk, &kid)?;
+    let key = jose::es256_key(&jwk).map_err(|_| Refusal::Key("it is not a P-256 point"))?;
     let verified = jose::verify_es256(jws, &key, MAX_PAYLOAD).map_err(jose_refusal)?;
     let Read { claims, .. } = claims(&verified.payload)?;
     // jose.rs: the verified iss must be the issuer whose JWKS gave the key
@@ -570,16 +754,35 @@ pub async fn verify(
     {
         return Err(Refusal::Expired(day(exp)));
     }
-    // "Revocation": a key with crlVersion has a revocation list; a card with a rid in it is rejected
+    // "Revocation": a key with crlVersion has a revocation list at <iss>/.well-known/crl/<kid>.json,
+    // `{"kid", "method", "ctr", "rids": [...]}`; a card with a rid in it is rejected. A list that
+    // cannot be read, is not a list or is another key's refuses the card: it proves nothing.
     if jwk.get("crlVersion").is_some()
         && let Some(rid) = &claims.rid
     {
-        let crl = fetch_json(&format!("{}/.well-known/crl/{kid}.json", unverified.iss), route).await?;
-        if revoked(&crl, rid, claims.nbf) {
+        let at = (unverified.iss.clone(), kid.clone());
+        if !keys.crl.contains_key(&at) {
+            let crl = fetch_json(&format!("{}/.well-known/crl/{kid}.json", unverified.iss), route)
+                .await
+                .map_err(list_refusal)?;
+            if !crl.get("rids").is_some_and(Value::is_array) {
+                return Err(Refusal::RevocationList("not_crl".into()));
+            }
+            if crl.get("kid").and_then(Value::as_str) != Some(kid.as_str()) {
+                return Err(Refusal::RevocationList("other_kid".into()));
+            }
+            keys.crl.insert(at.clone(), crl);
+        }
+        if revoked(&keys.crl[&at], rid, claims.nbf) {
             return Err(Refusal::Revoked);
         }
     }
+    let (name, birth_date) = subject(&claims.bundle);
     Ok(Card {
+        host: unverified.host.clone(),
+        jws_sha: hex::encode(Sha256::digest(jws.as_bytes())),
+        name,
+        birth_date,
         iss: claims.iss,
         kid,
         issued: claims.nbf,
@@ -587,6 +790,36 @@ pub async fn verify(
         types: claims.types,
         bundle: claims.bundle,
     })
+}
+
+/// The patient a card names, as the card says it (untrusted): `name[0].text`, else its given names
+/// and family, and `birthDate`.
+fn subject(bundle: &Value) -> (Option<String>, Option<String>) {
+    let patient = bundle.get("entry").and_then(Value::as_array).and_then(|e| {
+        e.iter()
+            .filter_map(|e| e.get("resource"))
+            .find(|r| r.get("resourceType").and_then(Value::as_str) == Some("Patient"))
+    });
+    let Some(p) = patient else {
+        return (None, None);
+    };
+    let name = p.pointer("/name/0").and_then(|n| {
+        n.get("text").and_then(Value::as_str).map(str::to_string).or_else(|| {
+            let mut parts: Vec<&str> = n
+                .get("given")
+                .and_then(Value::as_array)
+                .map(|g| g.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            parts.extend(n.get("family").and_then(Value::as_str));
+            (!parts.is_empty()).then(|| parts.join(" "))
+        })
+    });
+    let born = p.get("birthDate").and_then(Value::as_str).map(str::to_string);
+    (name.map(|n| clip(&n, 120)), born.map(|b| clip(&b, 10)))
+}
+
+fn clip(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
 }
 
 /// "Revocation": a `rids` entry is the rid, or `<rid>.<timestamp>`, which revokes only cards whose
@@ -608,7 +841,7 @@ fn revoked(crl: &Value, rid: &str, nbf: DateTime<Utc>) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     /// Nothing was fetched or stored: the person has not approved these issuer hosts yet.
-    NeedsApproval(Vec<Issuer>),
+    NeedsApproval(Vec<Ask>),
     /// Nothing was stored. `iss` is the issuer the refused card names, when it got that far.
     Refused {
         refusal: Refusal,
@@ -624,6 +857,23 @@ pub struct Imported {
     pub created: bool,
     pub cards: Vec<Card>,
     pub summary: ImportSummary,
+    /// The weakest identity result of the cards: matched, hinted, missing or mismatch.
+    pub identity: String,
+}
+
+/// One question for the person: may OwnHealth fetch keys from this host, for these issuers?
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ask {
+    pub host: String,
+    pub issuers: Vec<String>,
+}
+
+/// What came of checking one import, before anything is stored.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Checked {
+    NeedsApproval(Vec<Ask>),
+    Refused { refusal: Refusal, iss: Option<String> },
+    Verified(Vec<Card>),
 }
 
 /// The identity results of `fhir::import_resources`, the weakest first.
@@ -641,7 +891,70 @@ pub struct Received<'a> {
     pub approved: &'a [String],
 }
 
-/// Receive one import for `profile` at `now`.
+/// Check one import: who signed each card, whether the person approved its host, and every check of
+/// [`verify`]. No database.
+pub async fn check(input: &Input, approved: &[String], route: &Route, now: DateTime<Utc>) -> Checked {
+    check_within(input, approved, route, now, VERIFY_LIMIT).await
+}
+
+/// [`check`], stopped after `limit`: an issuer that stalls answers, one after another, would
+/// otherwise hold the import for 15 s per fetch.
+pub async fn check_within(
+    input: &Input,
+    approved: &[String],
+    route: &Route,
+    now: DateTime<Utc>,
+    limit: std::time::Duration,
+) -> Checked {
+    let mut issuers = Vec::new();
+    for jws in &input.cards {
+        match issuer(jws) {
+            Ok(i) => issuers.push(i),
+            Err(refusal) => return Checked::Refused { refusal, iss: None },
+        }
+    }
+    // one question per host: the person approves where the keys come from, and two issuers on one
+    // host share it
+    let mut asks: Vec<Ask> = Vec::new();
+    for i in issuers.iter().filter(|i| !approved.contains(&i.host)) {
+        match asks.iter_mut().find(|a| a.host == i.host) {
+            Some(a) if !a.issuers.contains(&i.iss) => a.issuers.push(i.iss.clone()),
+            Some(_) => {}
+            None => asks.push(Ask {
+                host: i.host.clone(),
+                issuers: vec![i.iss.clone()],
+            }),
+        }
+    }
+    if !asks.is_empty() {
+        return Checked::NeedsApproval(asks);
+    }
+    let mut at: Option<String> = None;
+    let verified = tokio::time::timeout(limit, async {
+        let mut keys = Keys::default();
+        let mut cards = Vec::new();
+        for (jws, i) in input.cards.iter().zip(&issuers) {
+            at = Some(i.iss.clone());
+            match verify(jws, &mut keys, route, now).await {
+                Ok(card) => cards.push(card),
+                Err(refusal) => {
+                    return Checked::Refused {
+                        refusal,
+                        iss: Some(i.iss.clone()),
+                    };
+                }
+            }
+        }
+        Checked::Verified(cards)
+    })
+    .await;
+    verified.unwrap_or(Checked::Refused {
+        refusal: Refusal::Keys("timeout".into()),
+        iss: at,
+    })
+}
+
+/// Receive one import for `profile` at `now`: [`check`], then [`store`].
 pub async fn receive(
     conn: &mut PgConnection,
     blobs: &BlobStore,
@@ -650,82 +963,158 @@ pub async fn receive(
     route: &Route,
     now: DateTime<Utc>,
 ) -> Result<Outcome> {
-    let Received {
-        bytes,
-        filename,
-        input,
-        approved,
-    } = *received;
-    let mut issuers = Vec::new();
-    for jws in &input.cards {
-        match issuer(jws) {
-            Ok(i) => issuers.push(i),
-            Err(refusal) => return Ok(Outcome::Refused { refusal, iss: None }),
-        }
-    }
-    let mut waiting: Vec<Issuer> = Vec::new();
-    for i in &issuers {
-        if !approved.contains(&i.host) && !waiting.contains(i) {
-            waiting.push(i.clone());
-        }
-    }
-    if !waiting.is_empty() {
-        return Ok(Outcome::NeedsApproval(waiting));
-    }
-    let mut keys = Keys::default();
-    let mut cards = Vec::new();
-    for (jws, i) in input.cards.iter().zip(&issuers) {
-        match verify(jws, &mut keys, route, now).await {
-            Ok(card) => cards.push(card),
-            Err(refusal) => {
-                return Ok(Outcome::Refused {
-                    refusal,
-                    iss: Some(i.iss.clone()),
-                });
-            }
-        }
-    }
+    Ok(match check(received.input, received.approved, route, now).await {
+        Checked::NeedsApproval(asks) => Outcome::NeedsApproval(asks),
+        Checked::Refused { refusal, iss } => Outcome::Refused { refusal, iss },
+        Checked::Verified(cards) => Outcome::Imported(store(conn, blobs, profile, received, cards).await?),
+    })
+}
 
-    let (mime, default_name) = match input.form {
-        Form::Text => ("text/plain", "smart-health-card.txt"),
-        Form::File => (MIME, "health-card.smart-health-card"),
-        Form::Photo("image/png") => ("image/png", "health-card.png"),
-        Form::Photo(other) => (other, "health-card.jpg"),
+/// What a document shows of each card it holds: at most this many rows per card.
+const MAX_ENTRIES: usize = 50;
+
+/// The rows of a card as its document shows them: type, date and a short text for each resource
+/// except the Patient.
+fn entries(bundle: &Value) -> Vec<Value> {
+    let text_of = |c: &Value| {
+        c.get("text")
+            .or_else(|| c.pointer("/coding/0/display"))
+            .or_else(|| c.pointer("/coding/0/code"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
     };
-    let sha = blobs.put_bytes(bytes).map_err(|e| Error::Other(e.into()))?;
-    let doc = create_document(
-        &mut *conn,
-        &NewDocument {
-            filename: Some(filename.filter(|f| !f.is_empty()).unwrap_or(default_name)),
-            channel: CHANNEL,
-            ..NewDocument::upload(
-                profile.household_id,
-                Some(profile.id),
-                &sha,
-                mime,
-                i64::try_from(bytes.len()).unwrap_or(i64::MAX),
-            )
-        },
-    )
-    .await?;
-    let signed: Vec<Value> = cards
-        .iter()
-        .map(|c| json!({"iss": c.iss, "kid": c.kid, "issued": c.issued, "expires": c.expires}))
-        .collect();
-    sqlx::query("update document set flags = flags || jsonb_build_object('shc', cast($1 as jsonb)) where id = $2")
-        .bind(Value::from(signed))
-        .bind(doc.id)
-        .execute(&mut *conn)
-        .await?;
+    bundle
+        .get("entry")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.get("resource"))
+        .filter(|r| r.get("resourceType").and_then(Value::as_str) != Some("Patient"))
+        .take(MAX_ENTRIES)
+        .map(|r| {
+            let date = ["occurrenceDateTime", "effectiveDateTime", "issued"]
+                .iter()
+                .find_map(|k| r.get(*k).and_then(Value::as_str))
+                .map(|d| clip(d, 10));
+            let what = r.get("vaccineCode").or_else(|| r.get("code")).and_then(text_of);
+            let value = r
+                .pointer("/valueQuantity/value")
+                .map(|v| {
+                    let unit = r
+                        .pointer("/valueQuantity/unit")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    format!("{v} {unit}").trim().to_string()
+                })
+                .or_else(|| r.get("valueString").and_then(Value::as_str).map(str::to_string))
+                .or_else(|| r.get("valueCodeableConcept").and_then(text_of));
+            let text = match (what, value) {
+                (Some(w), Some(v)) => Some(format!("{w}: {v}")),
+                (w, v) => w.or(v),
+            };
+            json!({
+                "type": r.get("resourceType").and_then(Value::as_str),
+                "date": date,
+                "text": text.map(|t| clip(&t, 120)),
+            })
+        })
+        .collect()
+}
 
-    let mut summary = ImportSummary::new(doc.id.to_string());
+/// Store verified cards for `profile`: one document on channel `shc`, and each card's bundle. Run
+/// it in the transaction that checked the person may import for `profile`.
+///
+/// The document is named `SMART Health Card · <host> · <issued>` (a file or photo keeps the name it
+/// came with), its provider is the signing host and its date the card's `nbf`. When an active
+/// document of this person already holds every card, that document is used again and nothing new
+/// is stored.
+pub async fn store(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    profile: &Profile,
+    received: &Received<'_>,
+    cards: Vec<Card>,
+) -> Result<Imported> {
+    let Received {
+        bytes, filename, input, ..
+    } = *received;
+    let held: Vec<Value> = cards.iter().map(|c| json!({"jws": c.jws_sha})).collect();
+    let earlier: Option<Uuid> = sqlx::query_scalar(
+        "select id from document where coalesce(profile_id, household_id) = coalesce($1, $2) \
+         and status = 'active' and flags -> 'shc' @> cast($3 as jsonb) order by created_at limit 1",
+    )
+    .bind(Some(profile.id))
+    .bind(profile.household_id)
+    .bind(Value::from(held))
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    let mut hosts: Vec<&str> = Vec::new();
+    for c in &cards {
+        if !hosts.contains(&c.host.as_str()) {
+            hosts.push(&c.host);
+        }
+    }
+    let hosts = hosts.join(", ");
+    let issued = cards.iter().map(|c| c.issued).min();
+    let (document_id, created) = match earlier {
+        Some(id) => (id, false),
+        None => {
+            let mime = match input.form {
+                Form::Text => "text/plain",
+                Form::File => MIME,
+                Form::Photo(m) => m,
+            };
+            let named = format!("SMART Health Card · {hosts} · {}", issued.map(day).unwrap_or_default());
+            let name = match (input.form, filename.filter(|f| !f.trim().is_empty())) {
+                (Form::Text, _) | (_, None) => named,
+                (_, Some(given)) => given.to_string(),
+            };
+            let sha = blobs.put_bytes(bytes).map_err(|e| Error::Other(e.into()))?;
+            let doc = create_document(
+                &mut *conn,
+                &NewDocument {
+                    filename: Some(&name),
+                    channel: CHANNEL,
+                    ..NewDocument::upload(
+                        profile.household_id,
+                        Some(profile.id),
+                        &sha,
+                        mime,
+                        i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+                    )
+                },
+            )
+            .await?;
+            let signed: Vec<Value> = cards
+                .iter()
+                .map(|c| {
+                    json!({"iss": c.iss, "host": c.host, "kid": c.kid, "issued": c.issued,
+                        "expires": c.expires, "jws": c.jws_sha, "entries": entries(&c.bundle)})
+                })
+                .collect();
+            sqlx::query(
+                "update document set flags = flags || jsonb_build_object('shc', cast($1 as jsonb)), \
+                 provider_name = $2, reported_at = $3 where id = $4",
+            )
+            .bind(Value::from(signed))
+            .bind(&hosts)
+            .bind(issued)
+            .bind(doc.id)
+            .execute(&mut *conn)
+            .await?;
+            (doc.id, doc.created)
+        }
+    };
+
+    let mut summary = ImportSummary::new(document_id.to_string());
     let mut identity: Option<String> = None;
     for (jws, card) in input.cards.iter().zip(&cards) {
         let bundle = serde_json::to_vec(&card.bundle)?;
         let (_, entries) = fhir::read_entries(&bundle, false)?;
         let key = format!("shc-{}", &hex::encode(Sha256::digest(jws.as_bytes()))[..16]);
-        let (one, who) =
-            fhir::import_resources(&mut *conn, &entries, profile, doc.id, &key, None, "SMART Health Card").await?;
+        let label = format!("SMART Health Card · {}", card.host);
+        let (one, who) = fhir::import_resources(&mut *conn, &entries, profile, document_id, &key, None, &label).await?;
         summary.accepted += one.accepted;
         summary.queued += one.queued;
         summary.skipped += one.skipped;
@@ -737,13 +1126,17 @@ pub async fn receive(
             identity = Some(who);
         }
     }
-    fhir::mark_imported(&mut *conn, doc.id, &summary, identity.as_deref()).await?;
-    Ok(Outcome::Imported(Imported {
-        document_id: doc.id,
-        created: doc.created,
+    // a card stored before keeps the import summary it got then
+    if earlier.is_none() {
+        fhir::mark_imported(&mut *conn, document_id, &summary, identity.as_deref()).await?;
+    }
+    Ok(Imported {
+        document_id,
+        created,
         cards,
         summary,
-    }))
+        identity: identity.unwrap_or_else(|| "missing".into()),
+    })
 }
 
 #[cfg(test)]
@@ -791,10 +1184,6 @@ mod tests {
                 host: "issuer.labnorte.example".into()
             })
         );
-        assert_eq!(
-            issuer_of("https://127.0.0.1:8443/shc").map(|i| i.host),
-            Ok("127.0.0.1:8443".into())
-        );
         for bad in [
             "http://issuer.labnorte.example",
             "https://issuer.labnorte.example/",
@@ -814,5 +1203,50 @@ mod tests {
         assert!(revoked(&crl, "lHKzqFUMjhs", at(1_636_977_599)));
         assert!(!revoked(&crl, "lHKzqFUMjhs", at(1_636_977_600)));
         assert!(!revoked(&crl, "other", at(1)));
+    }
+
+    /// The QR search runs at most at 4000 px, then at 2000 and 1000 px when the photo is larger.
+    #[test]
+    fn a_photo_is_searched_at_4000_then_2000_then_1000_pixels() {
+        assert_eq!(search_sizes(4968, 2160), vec![(4000, 1739), (2000, 869), (1000, 434)]);
+        assert_eq!(search_sizes(6000, 8000), vec![(3000, 4000), (1500, 2000), (750, 1000)]);
+        assert_eq!(search_sizes(1080, 1107), vec![(1080, 1107), (975, 1000)]);
+        assert_eq!(search_sizes(800, 600), vec![(800, 600)]);
+    }
+
+    #[test]
+    fn a_literal_private_address_is_not_an_issuer_to_ask_about() {
+        for (iss, ip) in [
+            ("https://10.0.0.1", "10.0.0.1"),
+            ("https://192.168.1.20:8443/shc", "192.168.1.20"),
+            ("https://[fe80::1]", "fe80::1"),
+        ] {
+            assert_eq!(issuer_of(iss), Err(Refusal::PrivateIssuer(ip.into())), "{iss}");
+        }
+        assert_eq!(
+            issuer_of("https://8.8.8.8:8443/shc").map(|i| i.host),
+            Ok("8.8.8.8:8443".into())
+        );
+    }
+
+    /// The quoted values of `export const <name> = [ ... ]` in a TypeScript file.
+    fn ts_list(ts: &str, name: &str) -> Vec<String> {
+        let start = ts
+            .find(&format!("export const {name} = ["))
+            .unwrap_or_else(|| panic!("no {name}"));
+        let body = &ts[start..];
+        let body = &body[..body.find(']').unwrap_or(body.len())];
+        body.split('\'').skip(1).step_by(2).map(str::to_string).collect()
+    }
+
+    /// The UI words every refusal and every detail code the server sends (ui/src/lib/logic/shc.ts).
+    #[test]
+    fn the_ui_lists_every_refusal_and_detail_code() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../ui/src/lib/logic/shc.ts");
+        let ts = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert_eq!(ts_list(&ts, "SHC_REASONS"), REASONS.to_vec());
+        assert_eq!(ts_list(&ts, "SHC_DETAILS"), DETAILS.to_vec());
+        let codes: Vec<&str> = samples().iter().map(Refusal::code).collect();
+        assert_eq!(codes, REASONS.to_vec(), "one sample per refusal, in REASONS order");
     }
 }
