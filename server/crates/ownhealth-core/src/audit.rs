@@ -512,4 +512,130 @@ mod tests {
         assert_eq!(check(&db.pool).await?.verified, 4);
         Ok(())
     }
+
+    // ------------------------------------------------------- round 1 review tests ----
+
+    #[tokio::test]
+    async fn every_v1_column_is_hashed() -> anyhow::Result<()> {
+        for set in [
+            "ts = ts + interval '1 microsecond'",
+            "actor_kind = 'system'",
+            "actor_id = gen_random_uuid()",
+            "token_id = gen_random_uuid()",
+            "client = 'x'",
+            "via = 'job'",
+            "action = 'export'",
+            "tool = 'x'",
+            "profile_id = gen_random_uuid()",
+            "resource_type = 'x'",
+            "resource_ids = array['x']",
+            "src_ids = array['x']",
+            "args_summary = 'x'",
+            "result_kind = 'x'",
+            "rows_out = 77",
+            "bytes_out = 77",
+            "withheld = '{\"x\": 1}'",
+            "protocol_version = 'x'",
+            "ip = '10.0.0.8'",
+            "user_agent = 'x'",
+            "not_assessed_n = 3",
+            "arg_bytes = 3",
+        ] {
+            let (db, ids) = chained(2).await?;
+            tamper(&db, &format!("update audit_event set {set} where id = {}", ids[1])).await?;
+            assert_eq!(
+                check(&db.pool).await?.broken,
+                broke(Some(2), Some(ids[1]), ChainBreakKind::Hash),
+                "{set}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_hash_does_not_depend_on_the_session_time_zone() -> anyhow::Result<()> {
+        let db = TestDb::new().await?;
+        let mut c = sqlx::PgConnection::connect(&db.url).await?;
+        sqlx::query("set timezone = 'America/New_York'").execute(&mut c).await?;
+        let mut tx = c.begin().await?;
+        write_audit(&mut tx, &AuditEvent::new("system", "job", "read")).await?;
+        tx.commit().await?;
+        sqlx::query("set timezone = 'Asia/Kolkata'").execute(&mut c).await?;
+        let r = verify_chain(&mut c).await?;
+        assert!(r.ok() && r.verified == 1, "{r:?}");
+        c.close().await?;
+        Ok(())
+    }
+
+    /// Edit row 2, then patch only its own link hash and the next link's prev_hash.
+    async fn patch_one_link(formula: &str) -> anyhow::Result<ChainCheck> {
+        let (db, ids) = chained(4).await?;
+        tamper(
+            &db,
+            &format!(
+                "update audit_event set rows_out = 999 where id = {x}; \
+                 update audit_chain c set hash = {formula} from audit_event e where e.id = c.event_id and c.seq = 2; \
+                 update audit_chain set prev_hash = (select hash from audit_chain where seq = 2) where seq = 3",
+                x = ids[1]
+            ),
+        )
+        .await?;
+        check(&db.pool).await
+    }
+
+    #[tokio::test]
+    async fn a_patched_link_breaks_the_rest_of_the_chain() -> anyhow::Result<()> {
+        for formula in ["sha256(c.prev_hash || oh_audit_row_v1(e))", "sha256(oh_audit_row_v1(e))"] {
+            let c = patch_one_link(formula).await?;
+            assert!(!c.ok(), "{formula}: {c:?}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_serializable_audit_is_refused() -> anyhow::Result<()> {
+        let db = TestDb::new().await?;
+        let mut tx = db.pool.begin().await?;
+        sqlx::query("set transaction isolation level serializable")
+            .execute(&mut *tx)
+            .await?;
+        write_audit(&mut tx, &AuditEvent::new("user", "export", "export")).await?;
+        let err = tx.commit().await.expect_err("a serializable audit row must not commit");
+        assert!(err.to_string().contains("read committed"), "{err}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn audit_rows_committed_at_the_same_moment_all_get_a_link() -> anyhow::Result<()> {
+        // no shared row: only the chain lock keeps two commits from taking the same head
+        const WRITERS: usize = 16;
+        const ROUNDS: usize = 5;
+        let db = TestDb::new().await?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(u32::try_from(WRITERS)?)
+            .connect(&db.url)
+            .await?;
+        for _ in 0..ROUNDS {
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(WRITERS));
+            let mut tasks = Vec::new();
+            for _ in 0..WRITERS {
+                let (pool, barrier) = (pool.clone(), barrier.clone());
+                tasks.push(tokio::spawn(async move {
+                    let mut tx = pool.begin().await?;
+                    write_audit(&mut tx, &AuditEvent::new("system", "job", "read")).await?;
+                    barrier.wait().await;
+                    tx.commit().await?;
+                    anyhow::Ok(())
+                }));
+            }
+            for t in futures::future::join_all(tasks).await {
+                t??;
+            }
+        }
+        pool.close().await;
+        let c = check(&db.pool).await?;
+        assert!(c.ok(), "{c:?}");
+        assert_eq!(c.verified, i64::try_from(WRITERS * ROUNDS)?);
+        Ok(())
+    }
 }
