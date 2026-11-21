@@ -52,6 +52,9 @@ jobs:
           workspaces: server
           # PRs read main's caches and never write their own: a per-PR cache evicts main's (10 GB repo cap)
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # rust-cache hashes Cargo.lock and the member manifests, not this root one, so a [profile]
+          # change would never reach main's cache; its hash in the key gives a fresh cache instead
+          key: ${{ hashFiles('server/Cargo.toml') }}
       - name: PostgreSQL 17 client and restic 0.18.0, the versions the image ships (ownhealth-ops tests)
         working-directory: .
         run: |
@@ -119,7 +122,7 @@ jobs:
         with:
           workspaces: server
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: ocr
+          key: ocr-${{ hashFiles('server/Cargo.toml') }}
       - name: PDFium (pinned, sha256-checked)
         working-directory: .
         run: bash scripts/fetch-pdfium.sh linux-x64
@@ -175,6 +178,7 @@ jobs:
         with:
           workspaces: server
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ${{ hashFiles('server/Cargo.toml') }}
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           package_json_file: ui/package.json
@@ -221,6 +225,7 @@ jobs:
         with:
           workspaces: server
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ${{ hashFiles('server/Cargo.toml') }}
       - name: PDFium (pinned, sha256-checked)
         run: bash scripts/fetch-pdfium.sh linux-x64
       - run: mkdir -p server/static
