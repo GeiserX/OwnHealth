@@ -866,3 +866,27 @@ async fn the_retry_is_queued_in_the_delete_transaction() -> R {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_demo_delete_leaves_the_real_inbox_alone() -> R {
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.settings.demo = true;
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    // the demo stack shares ./inbox with the real install, and the demo's scanner folder reads its root:
+    // inbox/alex/ belongs to the real install's Alex, not to the demo's
+    folder_source(&env, "", None).await?;
+    let real = inbox.join("alex/escaneo-real.pdf");
+    let filed = inbox.join(".done/alex/escaneo-real-anterior.pdf");
+    for p in [&real, &filed] {
+        std::fs::create_dir_all(p.parent().expect("parent"))?;
+        std::fs::write(p, b"%PDF-1.7 the real install's scan")?;
+    }
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert!(real.is_file(), "the demo delete removed the real install's unread scan");
+    assert!(filed.is_file(), "the demo delete removed the real install's filed scan");
+    Ok(())
+}
