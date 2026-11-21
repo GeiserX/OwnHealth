@@ -247,6 +247,50 @@ async fn deleting_a_profile_leaves_none_of_its_files_or_credentials() -> R {
         .bind(pdf_pass)
         .execute(&mut *c)
         .await?;
+    // a sender rule on Alex's own mailbox that files to Sam, with its PDF password: the rule goes with
+    // Alex's mailbox, so its password goes too
+    let sams_pass = store_secret(
+        &mut c,
+        &sb,
+        household,
+        "pdf_password",
+        Some("DNI de Sam"),
+        &SecretString::new("pdf-pass-sam-not-real"),
+    )
+    .await?;
+    let rule: Uuid = sqlx::query_scalar(
+        "insert into sender_rule (source_id, pattern, profile_id) values ($1::uuid, 'clinica.example', $2) \
+         returning id",
+    )
+    .bind(&own_mail)
+    .bind(sam)
+    .fetch_one(&mut *c)
+    .await?;
+    sqlx::query("insert into pdf_password_rule (sender_rule_id, secret_id) values ($1, $2)")
+        .bind(rule)
+        .bind(sams_pass)
+        .execute(&mut *c)
+        .await?;
+    // Sam's Health Auto Export inbox received the very same push body: one file for both inboxes
+    let sams_hae: Uuid = sqlx::query_scalar(
+        "insert into source (household_id, profile_id, kind, label) \
+         values ($1, $2, 'health_auto_export', 'iPhone de Sam') returning id",
+    )
+    .bind(household)
+    .bind(sam)
+    .fetch_one(&mut *c)
+    .await?;
+    let alex_push: String =
+        sqlx::query_scalar("select encode(blob_sha256, 'hex') from source_item where source_id = $1::uuid")
+            .bind(&hae)
+            .fetch_one(&mut *c)
+            .await?;
+    sqlx::query("insert into source_item (source_id, external_id, blob_sha256) values ($1, $2, $3)")
+        .bind(sams_hae)
+        .bind(format!("push:{alex_push}"))
+        .bind(sha256_hex_to_bytes(&alex_push)?)
+        .execute(&mut *c)
+        .await?;
     drop(c);
 
     let home_secret: Uuid = sqlx::query_scalar("select secret_id from source where id = $1::uuid")
@@ -259,26 +303,26 @@ async fn deleting_a_profile_leaves_none_of_its_files_or_credentials() -> R {
         .put_bytes(b"From: y@unknown.example\r\n\r\nheld for the household")?;
     let before = stored(env.rt.blobs.root());
     assert_eq!(before.len(), 12, "{before:?}");
-    assert_eq!(env.scalar_i64("select count(*) from secret").await?, 4);
+    assert_eq!(env.scalar_i64("select count(*) from secret").await?, 5);
 
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
 
-    // what stays: the gVCF Sam's import names, Sam's facts, and the household mailbox's mail
+    // what stays: the gVCF Sam's import names, Sam's facts, Sam's push, and the household mailbox's mail
     let after = stored(env.rt.blobs.root());
     let sams_facts: String =
         sqlx::query_scalar("select encode(facts_blob, 'hex') from genome_dataset where profile_id = $1")
             .bind(sam)
             .fetch_one(env.pool())
             .await?;
-    assert_eq!(after, BTreeSet::from([gvcf, sams_facts, home_eml]));
-    assert_eq!(r.json["blobs"], json!(before.len() - 3), "{}", r.json);
+    assert_eq!(after, BTreeSet::from([gvcf, sams_facts, alex_push, home_eml]));
+    assert_eq!(r.json["blobs"], json!(before.len() - 4), "{}", r.json);
     // what stays of the credentials: the household mailbox's password, nothing of Alex's
     let left: Vec<Uuid> = sqlx::query_scalar("select id from secret")
         .fetch_all(env.pool())
         .await?;
     assert_eq!(left, vec![home_secret]);
-    assert_eq!(r.json["rows"]["secret"], json!(3), "{}", r.json);
+    assert_eq!(r.json["rows"]["secret"], json!(4), "{}", r.json);
     assert_eq!(r.json["rows"]["quarantine_item"], json!(1), "{}", r.json);
     assert_eq!(
         env.scalar_i64(&format!(
