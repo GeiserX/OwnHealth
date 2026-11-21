@@ -1734,10 +1734,15 @@ async fn a_rerun_with_no_short_name_ends_as_skipped() -> R {
 }
 
 /// Make every audit row of `resource_type` fail, the way a full disk or a broken database would.
+/// Each refusal counts in a sequence, which a rollback does not undo ([`refused_audits`]).
 async fn fail_audit(env: &Env, resource_type: &str) -> R {
+    sqlx::query("create sequence test_fail_audit_refused")
+        .execute(env.pool())
+        .await?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "create function test_fail_audit() returns trigger language plpgsql as $$ begin \
-         if new.resource_type = '{resource_type}' then raise exception 'the audit is down'; end if; \
+         if new.resource_type = '{resource_type}' then \
+         perform nextval('test_fail_audit_refused'); raise exception 'the audit is down'; end if; \
          return new; end $$"
     )))
     .execute(env.pool())
@@ -1749,6 +1754,12 @@ async fn fail_audit(env: &Env, resource_type: &str) -> R {
     .execute(env.pool())
     .await?;
     Ok(())
+}
+
+/// How many audit rows [`fail_audit`] refused.
+async fn refused_audits(env: &Env) -> anyhow::Result<i64> {
+    env.scalar_i64("select case when is_called then last_value else 0 end from test_fail_audit_refused")
+        .await
 }
 
 #[tokio::test]
@@ -1764,7 +1775,14 @@ async fn the_folder_retry_is_queued_in_the_delete_transaction() -> R {
     fail_audit(&env, "profile").await?;
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
-    assert_ne!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        (r.status, &r.json["detail"]["code"]),
+        (StatusCode::INTERNAL_SERVER_ERROR, &json!("internal")),
+        "{}",
+        r.json
+    );
+    // it failed on the refused audit row, the last step before the commit, not on something earlier
+    assert_eq!(refused_audits(&env).await?, 1, "the delete failed before its audit row");
     assert_eq!(
         env.scalar_i64("select count(*) from profile where slug = 'alex'")
             .await?,
