@@ -185,15 +185,27 @@ pub async fn build_with_evaluation(
     as_of: NaiveDate,
     known_at: Option<DateTime<Utc>>,
 ) -> Result<(Value, engine::Evaluation)> {
+    let (body, ev) = evaluate_state(&mut *conn, profile_id, as_of, known_at).await?;
+    if known_at.is_none() {
+        store_snapshot(&mut *conn, profile_id, &body, &*load_pack()?).await?;
+    }
+    Ok((body, ev))
+}
+
+/// `build_with_evaluation` without its write: a read-only transaction can run it, and the caller
+/// stores the body (`store_snapshot`) once that transaction is over.
+pub async fn evaluate_state(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    as_of: NaiveDate,
+    known_at: Option<DateTime<Utc>>,
+) -> Result<(Value, engine::Evaluation)> {
     let pack = load_pack()?;
     let ev = engine::evaluate(&mut *conn, profile_id, as_of, &pack, known_at, None).await?;
     let mut body = body_from(&ev, &pack);
     let hash = state_hash(&body)?;
     if let Some(m) = body.as_object_mut() {
         m.insert("state_hash".into(), json!(hash));
-    }
-    if known_at.is_none() {
-        store_snapshot(&mut *conn, profile_id, &body, &pack).await?;
     }
     Ok((body, ev))
 }

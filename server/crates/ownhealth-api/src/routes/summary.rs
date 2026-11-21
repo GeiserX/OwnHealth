@@ -65,7 +65,8 @@ async fn summary_pdf(
             )
             .done()?;
     }
-    let mut tx = rt.pool.begin().await?;
+    // every read of the sheet from one snapshot; its two writes come after, in their own transaction
+    let mut tx = summary::begin_read(&rt.pool).await?;
     let perm = Caller(p.clone())
         .require(&mut tx, &profile, Some("read:summary"), None)
         .await?;
@@ -77,7 +78,8 @@ async fn summary_pdf(
         sensitive_open: body.include_sensitive && gate.sensitive && !gate.minor,
         as_of,
     };
-    let model = summary::build_for(&mut tx, Some(&p), perm.profile.id, &perm.scopes, &opts).await?;
+    let (model, state) = summary::read_for(&mut tx, Some(&p), perm.profile.id, &perm.scopes, &opts).await?;
+    tx.commit().await?;
     let mut sheet = ownhealth_ops::summary_pdf::render(&model);
     // the ids the paper shows, not those of rows cut to fit two pages
     let srcs = std::mem::take(&mut sheet.printed);
@@ -103,6 +105,9 @@ async fn summary_pdf(
         "minor_rule": model["withheld"]["minor_rule"],
     }));
     e.ip = meta.ip.clone();
+    let pack = ownhealth_rules::load_pack().map_err(ownhealth_core::Error::from)?;
+    let mut tx = rt.pool.begin().await?;
+    ownhealth_rules::store_snapshot(&mut tx, perm.profile.id, &state, &pack).await?;
     write_audit(&mut tx, &e).await?;
     tx.commit().await?;
     let filename = format!(
