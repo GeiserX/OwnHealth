@@ -890,3 +890,40 @@ async fn a_demo_delete_leaves_the_real_inbox_alone() -> R {
     assert!(filed.is_file(), "the demo delete removed the real install's filed scan");
     Ok(())
 }
+
+#[tokio::test]
+async fn an_inbox_item_of_someone_else_with_the_same_bytes_stays() -> R {
+    let env = Env::new(true).await?;
+    let (alex, sam, household) = (env.profile("alex"), env.profile("sam"), env.fam().household_id);
+    // Alex uploaded a file whose bytes Sam's own Health Auto Export inbox also received as a push
+    let body = "{\"data\": {\"metrics\": []}}";
+    let (_, sha) = document(&env, alex, body, "application/json").await?;
+    let sams: Uuid = sqlx::query_scalar(
+        "insert into source (household_id, profile_id, kind, label) \
+         values ($1, $2, 'health_auto_export', 'iPhone de Sam') returning id",
+    )
+    .bind(household)
+    .bind(sam)
+    .fetch_one(env.pool())
+    .await?;
+    item(&env, sams, &format!("push:{sha}"), &sha, None, None).await?;
+    // and so did a household inbox of another household on this server
+    let mut c = env.pool().acquire().await?;
+    let ortega = ownhealth_core::access::create_household(&mut c, "Familia Ortega").await?;
+    drop(c);
+    let theirs: Uuid = sqlx::query_scalar(
+        "insert into source (household_id, kind, label) values ($1, 'paperless', 'Paperless Ortega') returning id",
+    )
+    .bind(ortega)
+    .fetch_one(env.pool())
+    .await?;
+    item(&env, theirs, "5", &sha, None, None).await?;
+
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(items(&env, sams).await?, vec![(format!("push:{sha}"), Some(sha.clone()))]);
+    assert_eq!(items(&env, theirs).await?, vec![("5".into(), Some(sha.clone()))]);
+    assert!(stored(env.rt.blobs.root()).contains(&sha), "Sam's push file went with Alex");
+    Ok(())
+}

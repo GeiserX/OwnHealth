@@ -594,8 +594,8 @@ pub const BLOB_COLUMNS: &[(&str, &[&str], &str)] = &[
     // The raw bytes an inbox handed us: a push or export of the profile's own source (Health Auto
     // Export, Gadgetbridge), and what a household inbox (a shared mailbox, Paperless, the scanner
     // folder) filed to the profile: the item of one of its documents, the whole .eml of a mail filed or
-    // released to it, a structured file whose document the importer made (the item names no document),
-    // and a file in the profile's folder of a scanner folder.
+    // released to it, a structured file of its household's inboxes whose document the importer made (the
+    // item names no document), and a file in the profile's folder of a scanner folder.
     (
         "source_item",
         &["blob_sha256"],
@@ -603,7 +603,9 @@ pub const BLOB_COLUMNS: &[(&str, &[&str], &str)] = &[
          or document_id in (select id from document where profile_id = $1) \
          or quarantine_id in (select id from quarantine_item where released_document_ids \
             && array(select id from document where profile_id = $1)) \
-         or (document_id is null and blob_sha256 in (select blob_sha256 from document where profile_id = $1)) \
+         or (document_id is null and blob_sha256 in (select blob_sha256 from document where profile_id = $1) \
+            and source_id in (select s.id from source s join profile p on p.household_id = s.household_id \
+            where p.id = $1 and s.profile_id is null)) \
          or (source_id in (select s.id from source s join profile p on p.household_id = s.household_id \
             where p.id = $1 and s.kind = 'folder') \
             and starts_with(external_id, (select slug from profile where id = $1) || '/'))",
