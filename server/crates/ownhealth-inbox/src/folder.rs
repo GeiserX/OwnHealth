@@ -78,7 +78,8 @@ fn subdir(config: &serde_json::Value) -> Result<Option<&Path>> {
 /// plus `.done/_root/` and `.failed/_root/` when `root_buckets` (the source was the profile's own, so its
 /// root files went to that profile). [`forget_folders`] decides both, so a new person or a new folder
 /// inbox that took over a name keeps its files. The paths are built from the checked subdir and slug
-/// only. Nothing is followed: a link in the way is removed, never its target,
+/// only. A root that leads out of the inbox folder is skipped, never an error: OwnHealth never filed
+/// anything there. Nothing below the root is followed: a link in the way is removed, never its target,
 /// and a folder reached through a link below the root is left alone.
 pub fn forget_profile(
     settings: &Settings,
@@ -99,7 +100,18 @@ pub fn forget_profile(
     };
     let root = match subdir(config)? {
         Some(sub) => base.join(sub),
-        None => base,
+        None => base.clone(),
+    };
+    // the same test as check_root: the root must resolve inside the inbox folder
+    let root = match (root.canonicalize(), base.canonicalize()) {
+        (Ok(root), Ok(base)) if root.starts_with(&base) => root,
+        (Ok(_), Ok(_)) => {
+            tracing::warn!("a folder inbox leads out of the inbox folder: its folders are left alone");
+            return Ok(());
+        }
+        // no folder, so nothing to remove
+        (Err(e), _) | (_, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        (Err(e), _) | (_, Err(e)) => return Err(e.into()),
     };
     let mut gone = Vec::new();
     if slug_folders {

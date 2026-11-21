@@ -1342,3 +1342,35 @@ async fn a_new_folder_inbox_on_the_same_folder_keeps_its_files() -> R {
     assert!(theirs.is_file(), "the retry removed the other household's alex scan");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_folder_inbox_linked_out_of_the_inbox_keeps_outside_files() -> R {
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    let outside = env.dir.path().join("nas-familia");
+    std::fs::create_dir_all(&inbox)?;
+    for part in ["alex", ".done/alex", ".failed/alex"] {
+        std::fs::create_dir_all(outside.join(part))?;
+        std::fs::write(outside.join(part).join("foto-personal.jpg"), b"not an OwnHealth file")?;
+    }
+    std::os::unix::fs::symlink(&outside, inbox.join("escaneos"))?;
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    folder_source(&env, "escaneos", None).await?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    for part in ["alex", ".done/alex", ".failed/alex"] {
+        assert!(
+            outside.join(part).join("foto-personal.jpg").is_file(),
+            "the delete removed a file outside the inbox folder: {part}"
+        );
+    }
+    // the skip is quiet: no retry waits on a folder it will never clean
+    assert_eq!(
+        env.scalar_i64("select count(*) from job where kind = 'folder.forget'")
+            .await?,
+        0
+    );
+    Ok(())
+}
