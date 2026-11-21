@@ -431,8 +431,16 @@ async fn serve_file(rt: &Runtime, id: &str, ticket: &str, meta: &Meta) -> Result
     )
     .await?;
     tx.commit().await?;
-    // ".files.location links": content-type application/jose, the body a compact JWE
-    Ok(([(header::CONTENT_TYPE, "application/jose")], jwe).into_response())
+    // ".files.location links": content-type application/jose, the body a compact JWE; health data,
+    // so no cache keeps it
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/jose"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        jwe,
+    )
+        .into_response())
 }
 
 /// A HEAD would take one of the hour's answers and write a log row, and deliver no file.
@@ -529,7 +537,7 @@ fn link_out(r: &Listed, sharing: bool) -> Value {
 /// take a category away do it at once (migration 1270's triggers); a grant that runs out by itself
 /// has no write, so the list (and the scheduler) settle it before reading.
 async fn end_unshareable(conn: &mut PgConnection, profile_id: Uuid) -> R<()> {
-    sqlx::query("select shl_end_unshareable($1, 'access_changed')")
+    sqlx::query("select shl_end_unshareable($1)")
         .bind(profile_id)
         .execute(conn)
         .await?;
@@ -679,13 +687,9 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
     e.resource_ids = Some(vec![link_id.to_string()]);
     e.src_ids = Some(sealed.ips.srcs.clone());
     e.rows_out = Some(i32::try_from(sealed.ips.srcs.len()).unwrap_or(i32::MAX));
-    // the creator reads their own audit events, so the sensitive count follows the answer's rule below
-    let may_count = perm.scopes.contains("read:sensitive");
-    e.withheld = Some(if may_count {
-        json!({"by_scope": sealed.ips.withheld, "sensitive": sensitive})
-    } else {
-        json!({"by_scope": sealed.ips.withheld})
-    });
+    // never the sensitive count: other managers of the profile read this row too, with scopes of
+    // their own, and the creator already saw it in the answer when they may
+    e.withheld = Some(json!({"by_scope": sealed.ips.withheld}));
     e.args_summary = Some(format!(
         "categories={};days={days};flag={flag};lang={lang}",
         categories.join(",")
@@ -707,7 +711,7 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
     // file never says. A creator without read:sensitive gets no count at all, not even 0: a 0 would
     // tell them there is nothing to hide (security-privacy.md: harm inside the household)
     let mut out = json!({"link": link_out(&row, true), "shlink": link});
-    if may_count {
+    if perm.scopes.contains("read:sensitive") {
         out["left_out"] = json!({"sensitive": sensitive});
     }
     Ok(answer(StatusCode::CREATED, out, &[]))

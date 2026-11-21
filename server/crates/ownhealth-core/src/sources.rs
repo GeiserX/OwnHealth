@@ -581,7 +581,7 @@ pub async fn scheduler_tick(ctx: &JobContext) -> Result<Vec<i64>> {
 /// out by itself (`shl_end_unshareable`: a lock or a changed grant does that at the write). Returns the
 /// files deleted.
 pub async fn sweep_link_files(conn: &mut PgConnection) -> Result<u64> {
-    sqlx::query("select shl_end_unshareable(null, 'access_changed')")
+    sqlx::query("select shl_end_unshareable(null)")
         .execute(&mut *conn)
         .await?;
     let done = sqlx::query(

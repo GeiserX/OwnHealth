@@ -63,21 +63,23 @@ create index on shl_access (shl_id, at);
 -- routes/shl.rs live() checks on every request: the creator holds an owner or guardian grant on the
 -- profile that is not break-glass and not expired, the creator's login is open, and every category of
 -- the link is in the grant and not in the profile's locks (the owner's own locks too). Links already
--- revoked, expired or out of attempts are left as they are. `target` null: every profile (the
--- scheduler, for grants that run out by themselves). Returns the links ended.
-create function shl_end_unshareable(target uuid, why text) returns int language plpgsql as $$
+-- revoked, expired or out of attempts are left as they are. The reason is `locked` when a lock closes a
+-- category of the link, else `access_changed`. `target` null: every profile (the scheduler, for grants
+-- that run out by themselves). Returns the links ended.
+create function shl_end_unshareable(target uuid) returns int language plpgsql as $$
 declare
   n int;
 begin
   with ended as (
-    update shl s set revoked_at = now(), revoked_reason = why
-    where (target is null or s.profile_id = target)
+    update shl s set revoked_at = now(),
+      revoked_reason = case when s.categories && p.locks then 'locked' else 'access_changed' end
+    from profile p
+    where p.id = s.profile_id and (target is null or s.profile_id = target)
       and s.revoked_at is null and s.expires_at > now()
       and (s.attempts_left is null or s.attempts_left > 0)
       and not exists (
         select 1 from profile_grant g
         join app_user u on u.id = g.user_id
-        join profile p on p.id = g.profile_id
         where g.user_id = s.created_by and g.profile_id = s.profile_id
           and g.role in ('owner', 'guardian') and not g.break_glass
           and (g.expires_at is null or g.expires_at > now()) and u.disabled_at is null
@@ -89,19 +91,32 @@ begin
 end $$;
 
 -- Every write that can take a category from a creator runs the rule for that profile: a lock change,
--- a grant changed or removed, a login closed. A profile being deleted takes its links with it.
+-- a grant changed or removed, a login closed. A profile being deleted takes its links with it. A grant
+-- that had already run out ended its creator's links at that moment, even when no sweep or list has
+-- marked them yet, so any write to it (an extension included) first ends them, in the same
+-- transaction, before the new row counts. Its deadline is read on the clock, not at the start of the
+-- writing transaction.
 create function shl_on_access_change() returns trigger language plpgsql as $$
 begin
   if tg_table_name = 'profile' then
-    perform shl_end_unshareable(new.id, 'locked');
+    perform shl_end_unshareable(new.id);
   elsif tg_table_name = 'profile_grant' and tg_op = 'DELETE' then
     if exists (select 1 from profile where id = old.profile_id) then
-      perform shl_end_unshareable(old.profile_id, 'access_changed');
+      perform shl_end_unshareable(old.profile_id);
     end if;
   elsif tg_table_name = 'profile_grant' then
-    perform shl_end_unshareable(new.profile_id, 'access_changed');
+    if old.expires_at <= clock_timestamp() then
+      with ended as (
+        update shl s set revoked_at = now(), revoked_reason = 'access_changed'
+        where s.created_by = old.user_id and s.profile_id = old.profile_id
+          and s.revoked_at is null and s.expires_at > now()
+          and (s.attempts_left is null or s.attempts_left > 0)
+        returning s.id)
+      delete from shl_file f using ended e where f.shl_id = e.id;
+    end if;
+    perform shl_end_unshareable(new.profile_id);
   else
-    perform shl_end_unshareable(s.profile_id, 'access_changed')
+    perform shl_end_unshareable(s.profile_id)
       from (select distinct profile_id from shl where created_by = new.id and revoked_at is null) s;
   end if;
   return null;

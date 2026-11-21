@@ -104,7 +104,7 @@ pub async fn seal(
 /// health, reproductive or sexual health): the current rows so tagged in the sections whose domain
 /// the link carries. No link carries `read:sensitive`, so none of them is ever in the file. The
 /// person creating the link sees the count only when they hold `read:sensitive` (routes/shl.rs
-/// create); the recipient never does, and the audit row always keeps it.
+/// create); the recipient never does, and neither does the audit row, which other managers read.
 pub async fn sensitive_left_out(conn: &mut PgConnection, profile_id: Uuid, scopes: &Scopes) -> Result<i64> {
     let mut n = 0;
     for (table, domain) in ips::section_tables() {
