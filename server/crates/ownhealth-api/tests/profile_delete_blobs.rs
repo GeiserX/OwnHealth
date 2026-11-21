@@ -473,6 +473,19 @@ async fn a_file_that_reached_the_person_through_a_household_inbox_goes_too() -> 
     )
     .await?;
     item(&env, folder, "alex/notas.odt:48:1", &odt, None, None).await?;
+    // another household's scanner folder has a person with the same short name; that item is theirs
+    let mut c = env.pool().acquire().await?;
+    let ortega = ownhealth_core::access::create_household(&mut c, "Familia Ortega").await?;
+    drop(c);
+    let their_folder: Uuid = sqlx::query_scalar(
+        "insert into source (household_id, kind, label, config) \
+         values ($1, 'folder', 'Escáner Ortega', '{\"subdir\": \"ortega\"}') returning id",
+    )
+    .bind(ortega)
+    .fetch_one(env.pool())
+    .await?;
+    let theirs = env.rt.blobs.put_bytes(b"synthetic notes of the other household's alex")?;
+    item(&env, their_folder, "alex/notas.odt:51:1", &theirs, None, None).await?;
 
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
@@ -493,10 +506,11 @@ async fn a_file_that_reached_the_person_through_a_household_inbox_goes_too() -> 
     // items go too
     assert_eq!(items(&env, folder).await?, vec![]);
     assert_eq!(
-        env.scalar_i64("select count(*) from source_item where external_id like 'alex/%'")
-            .await?,
-        0
+        items(&env, their_folder).await?,
+        vec![("alex/notas.odt:51:1".into(), Some(theirs.clone()))],
+        "the other household's item went with Alex"
     );
+    assert!(left.contains(&theirs), "the other household's file went with Alex");
     Ok(())
 }
 
