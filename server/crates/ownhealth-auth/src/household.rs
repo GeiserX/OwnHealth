@@ -593,13 +593,16 @@ pub const BLOB_COLUMNS: &[(&str, &[&str], &str)] = &[
     ),
     // The raw bytes an inbox handed us: a push or export of the profile's own source (Health Auto
     // Export, Gadgetbridge), and what a household inbox (a shared mailbox, Paperless, the scanner
-    // folder) filed to the profile: the item of one of its documents, the whole .eml of a mail filed or
-    // released to it, a structured file of its household's inboxes whose document the importer made (the
-    // item names no document), and a file in the profile's folder of a scanner folder.
+    // folder) filed to the profile: an item the inbox routed to it (a mail with nothing to import keeps
+    // its .eml and no document), the item of one of its documents, the whole .eml of a mail released to
+    // it, a structured file of its household's inboxes whose document the importer made (the item names
+    // no document; rows older than migration 1249 have no profile), and a file in the profile's folder
+    // of a scanner folder.
     (
         "source_item",
         &["blob_sha256"],
-        "source_id in (select id from source where profile_id = $1) \
+        "profile_id = $1 \
+         or source_id in (select id from source where profile_id = $1) \
          or document_id in (select id from document where profile_id = $1) \
          or quarantine_id in (select id from quarantine_item where released_document_ids \
             && array(select id from document where profile_id = $1)) \
@@ -734,8 +737,10 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     .bind(profile_id)
     .execute(&mut *conn)
     .await?;
+    // The item forgets the profile too, or the delete of every profile_id row below would take it.
     sqlx::query(AssertSqlSafe(format!(
-        "update source_item set blob_sha256 = null where blob_sha256 is not null and ({items})"
+        "update source_item set blob_sha256 = null, profile_id = null \
+         where (blob_sha256 is not null or profile_id is not null) and ({items})"
     )))
     .bind(profile_id)
     .execute(&mut *conn)

@@ -60,7 +60,8 @@ pub async fn seen_item(conn: &mut PgConnection, source_id: Uuid, external_id: &s
     .await?)
 }
 
-/// Remember an item. True when it was new; a second call for the same id changes nothing.
+/// Remember an item, with the profile it was filed to (none for held mail). True when it was new; a
+/// second call for the same id changes nothing.
 pub async fn record_item(
     conn: &mut PgConnection,
     source_id: Uuid,
@@ -68,17 +69,19 @@ pub async fn record_item(
     blob_sha256: Option<&str>,
     document_id: Option<Uuid>,
     quarantine_id: Option<Uuid>,
+    profile_id: Option<Uuid>,
 ) -> Result<bool> {
     let sha = blob_sha256.map(sha256_hex_to_bytes).transpose()?;
     let n = sqlx::query(
-        "insert into source_item (source_id, external_id, blob_sha256, document_id, quarantine_id) \
-         values ($1, $2, $3, $4, $5) on conflict do nothing",
+        "insert into source_item (source_id, external_id, blob_sha256, document_id, quarantine_id, profile_id) \
+         values ($1, $2, $3, $4, $5, $6) on conflict do nothing",
     )
     .bind(source_id)
     .bind(external_id)
     .bind(sha)
     .bind(document_id)
     .bind(quarantine_id)
+    .bind(profile_id)
     .execute(conn)
     .await?
     .rows_affected();

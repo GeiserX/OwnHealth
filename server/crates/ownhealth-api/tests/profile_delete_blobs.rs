@@ -927,3 +927,42 @@ async fn an_inbox_item_of_someone_else_with_the_same_bytes_stays() -> R {
     assert!(stored(env.rt.blobs.root()).contains(&sha), "Sam's push file went with Alex");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_mail_with_nothing_to_import_goes_with_the_person() -> R {
+    let env = Env::new(true).await?;
+    let alex = env.profile("alex");
+    let mailbox = household_source(&env, "email", json!({})).await?;
+    sqlx::query(
+        "insert into sender_rule (source_id, pattern, profile_id, trust_unauthenticated) \
+         values ($1, 'labnorte.example', $2, true)",
+    )
+    .bind(mailbox)
+    .bind(alex)
+    .execute(env.pool())
+    .await?;
+    // an allowed sender's notice with only a body: nothing becomes a document, the whole .eml is kept
+    let raw = "From: Resultados LabNorte <resultados@labnorte.example>\r\n\
+               To: salud@rivera.example\r\n\
+               Subject: Sus resultados ya estan disponibles\r\n\
+               Message-ID: <aviso-77@labnorte.example>\r\n\
+               Date: Fri, 20 Nov 2026 09:00:00 +0100\r\n\
+               MIME-Version: 1.0\r\n\
+               Content-Type: text/plain; charset=utf-8\r\n\r\n\
+               Sus resultados de Alex Rivera ya estan disponibles en el portal de LabNorte.\r\n";
+    let mut c = env.pool().acquire().await?;
+    let source = sources::get_source(&mut c, mailbox).await?.expect("mailbox");
+    let out = ownhealth_inbox::email::ingest_message(&mut c, &env.rt.blobs, None, &source, raw.as_bytes(), None).await?;
+    drop(c);
+    assert!(out.document_ids.is_empty(), "{out:?}");
+    let eml = env.rt.blobs.put_bytes(raw.as_bytes())?;
+    assert_eq!(items(&env, mailbox).await?, vec![("mid:aviso-77@labnorte.example".into(), Some(eml.clone()))]);
+
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert!(!stored(env.rt.blobs.root()).contains(&eml), "the notice to Alex is still on disk: {}", r.json);
+    // the mailbox still knows the message, so the next poll does not import it again
+    assert_eq!(items(&env, mailbox).await?, vec![("mid:aviso-77@labnorte.example".into(), None)]);
+    Ok(())
+}
