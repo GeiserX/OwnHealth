@@ -4,7 +4,7 @@
 
 mod common;
 
-use chrono::{TimeZone, Utc};
+use chrono::{Datelike, TimeZone, Utc};
 use common::{Env, R};
 use ownhealth_core::demo::create_rivera_family;
 use ownhealth_core::sources::{self, NewSource};
@@ -365,6 +365,31 @@ async fn a_mapping_error_keeps_none_of_the_batch() -> R {
     assert_eq!(n, 0, "no batch with a mapping error keeps a score");
     // the connection is still usable after the failed batches
     assert_eq!(scores::write(&mut c, sam, src.id, &batch[..2]).await?.written, 2);
+    Ok(())
+}
+
+/// One write is one transaction, also when Postgres itself refuses a score after the others were
+/// inserted: here the last score's time is before 4713 BC, past the range of a timestamptz.
+#[tokio::test]
+async fn a_database_error_on_the_last_score_keeps_none_of_the_batch() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let src = env.source("gadgetbridge", Some("sam"), json!({}), None).await?;
+    let mut c = env.db.pool.acquire().await?;
+    let mut too_old = score("activity", 1, 90.0, None);
+    too_old.t = Utc.with_ymd_and_hms(-5000, 1, 1, 0, 0, 0).single().unwrap_or_default();
+    assert_eq!(too_old.t.year(), -5000, "the test time is really out of range");
+    let batch = vec![
+        score("readiness", 1, 82.0, Some("Good")),
+        score("sleep", 1, 88.0, None),
+        too_old,
+    ];
+    let w = scores::write(&mut c, sam, src.id, &batch).await;
+    assert!(w.is_err(), "Postgres took a time from 5000 BC: {w:?}");
+    let n = env
+        .count("select count(*) from vendor_score where profile_id = $1", sam)
+        .await?;
+    assert_eq!(n, 0, "the scores inserted before the refused one are not kept");
     Ok(())
 }
 
