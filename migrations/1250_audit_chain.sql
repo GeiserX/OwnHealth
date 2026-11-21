@@ -5,8 +5,8 @@
 alter table audit_event add column not_assessed_n int, add column arg_bytes int;
 
 -- One link per audit_event, in commit order: hash = sha256(prev_hash || oh_audit_row_v1(event)),
--- and the first link's prev_hash is 32 zero bytes. Append-only, like audit_event, so the app role
--- can only add links (deploy/db/app-role.sql revokes the rest from every oh_append_only table).
+-- and the first link's prev_hash is 32 zero bytes. Append-only, like audit_event. Only the trigger
+-- below writes links, as the owner: deploy/db/app-role.sql leaves the app role SELECT alone here.
 -- No foreign key to audit_event: one would answer a TRUNCATE of audit_event before its append-only
 -- trigger does, and verify_chain names a link whose event is gone anyway.
 create table audit_chain (
@@ -32,7 +32,9 @@ $$;
 -- and it is taken only at commit, after the transaction's own work, so it waits on nothing else.
 -- A repeatable read snapshot cannot see a link committed after it began: it would take a stale head
 -- and fail on seq only when another commit raced it, so such a transaction is refused every time.
-create function oh_audit_chain_link() returns trigger language plpgsql as $$
+-- It runs as the owner, with a fixed search_path, so the app role needs no right on audit_chain.
+create function oh_audit_chain_link() returns trigger language plpgsql
+  security definer set search_path = pg_catalog, public, pg_temp as $$
 declare
   head audit_chain;
   prev bytea;
@@ -51,9 +53,8 @@ end $$;
 create constraint trigger audit_event_chain after insert on audit_event
   deferrable initially deferred for each row execute function oh_audit_chain_link();
 
--- The rows already written, in id order. The table lock keeps a running older app from adding an
--- event this loop would miss.
-lock table audit_event in exclusive mode;
+-- The rows already written, in id order. The ALTER TABLE above holds an ACCESS EXCLUSIVE lock on
+-- audit_event until this migration commits, so a running older app cannot add an event the loop misses.
 do $$
 declare
   e audit_event;
