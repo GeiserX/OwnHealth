@@ -1442,7 +1442,14 @@ async fn a_link_inside_the_inbox_to_the_same_folder_keeps_the_other_inbox_files(
     let theirs = inbox.join("estudio/.failed/_root/factura.pdf");
     std::fs::create_dir_all(theirs.parent().expect("parent"))?;
     std::fs::write(&theirs, b"%PDF-1.7 a file the shared inbox could not read")?;
-    delete_alex_and_keep(&env, &theirs, "the shared inbox's failed file through a link").await
+    let unread = inbox.join("estudio/nuevo.pdf");
+    std::fs::write(&unread, b"%PDF-1.7 a scan the shared inbox has not read yet")?;
+    delete_alex_and_keep(&env, &theirs, "the shared inbox's failed file through a link").await?;
+    assert!(
+        unread.is_file(),
+        "the delete removed a file the shared inbox has not read yet"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -1708,6 +1715,41 @@ async fn an_inbox_set_below_a_file_does_not_hold_up_the_cleanup() -> R {
             .await?,
         0,
         "an inbox set below a file left a retry"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_unread_files_of_the_persons_own_inbox_go_too() -> R {
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    let root = inbox.join("estudio");
+    std::fs::create_dir_all(root.join("sam"))?;
+    std::fs::write(env.dir.path().join("fuera.pdf"), b"a file outside the inbox folder")?;
+    std::os::unix::fs::symlink(env.dir.path().join("fuera.pdf"), root.join("enlace.pdf"))?;
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    // Alex's own inbox: a file in its root goes to Alex, and the poll has not read these yet
+    folder_source(&env, "estudio", Some(env.profile("alex"))).await?;
+    let unread = [root.join("analitica.pdf"), root.join(".analitica.pdf.part")];
+    for f in &unread {
+        std::fs::write(f, b"%PDF-1.7 Alex's scan, not read yet")?;
+    }
+    // Sam's drop in the same folder is Sam's
+    let sams = root.join("sam/escaneo.pdf");
+    std::fs::write(&sams, b"%PDF-1.7 Sam's scan")?;
+    delete_alex_and_keep(&env, &sams, "Sam's drop").await?;
+    for f in &unread {
+        assert!(!f.exists(), "Alex's unread file stayed: {}", f.display());
+    }
+    assert!(
+        root.join("enlace.pdf").symlink_metadata().is_ok() && env.dir.path().join("fuera.pdf").is_file(),
+        "the delete removed a link or its target"
+    );
+    assert_eq!(
+        env.scalar_i64("select count(*) from job where kind = 'folder.forget'")
+            .await?,
+        0
     );
     Ok(())
 }
