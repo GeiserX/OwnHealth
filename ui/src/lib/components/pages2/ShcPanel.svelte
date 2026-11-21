@@ -2,17 +2,17 @@
 	// SMART Health Card receive (slice 22): pasted shc:/ text, a .smart-health-card file or a photo of
 	// the QR code. The server fetches an issuer's keys only for a host the person said yes to here, and
 	// a verified card shows who signed it ("signed by <iss>"), never that the signer deserves trust.
-	import { receiveCard, type ShcAnswer, type ShcIssuer, type ShcSource } from '#lib/api/shc';
+	import { receiveCard, type ShcAnswer, type ShcHost, type ShcSource } from '#lib/api/shc';
 	import { t } from '#lib/i18n/index.svelte';
 	import { errRaw, errText, tf } from '#lib/components/pages1/util.svelte';
 	import { day } from '#lib/components/pages2/fmt';
-	import { refusalKey } from '#lib/logic/shc';
+	import { identityWarning, refusalKey, refusalVars } from '#lib/logic/shc';
 
 	let { profile, profileName, ondone }: { profile: string; profileName: string; ondone: (documentId: string) => void } = $props();
 
 	let text = $state('');
 	let source = $state<ShcSource | null>(null);
-	let asking = $state<ShcIssuer[]>([]);
+	let asking = $state<ShcHost[]>([]);
 	let approved = $state<string[]>([]);
 	let answer = $state<ShcAnswer | null>(null);
 	let declined = $state<string | null>(null);
@@ -31,7 +31,7 @@
 		try {
 			const res = await receiveCard(profile, s, approve);
 			approved = approve;
-			if (res.status === 'needs_approval') asking = res.issuers;
+			if (res.status === 'needs_approval') asking = res.hosts;
 			else answer = res;
 			if (res.status === 'imported') ondone(res.document_id);
 		} catch (e) {
@@ -57,8 +57,14 @@
 		if (f) send({ file: f }, []);
 	}
 
-	const refusal = (a: ShcAnswer & { status: 'refused' }) =>
-		tf(refusalKey(a.reason), { iss: a.iss ?? '', detail: a.detail ?? '' });
+	const refusal = (a: ShcAnswer & { status: 'refused' }) => tf(refusalKey(a.reason), refusalVars(a.reason, a.detail, a.iss, t));
+	// a card that names someone else, or no one we could match, says so before its rows are accepted
+	const warning = $derived.by(() => {
+		if (answer?.status !== 'imported') return null;
+		const named = answer.cards.find((c) => c.name) ?? answer.cards[0] ?? { name: null, birth_date: null };
+		const w = identityWarning(answer.identity, named, profileName);
+		return w ? tf(w.key, w.vars) : null;
+	});
 </script>
 
 <section class="card shc" aria-label={t('shc_title')}>
@@ -77,8 +83,9 @@
 	{#each asking as i (i.host)}
 		<div class="ask" role="group" aria-label={t('shc_ask_t')}>
 			<div style="font-weight:600">{t('shc_ask_t')}</div>
-			<div class="muted">{t('shc_ask_signed')} <span class="mono">{i.iss}</span></div>
-			<div class="muted">{tf('shc_ask_d', { host: i.host })}</div>
+			<div class="muted">{t('shc_ask_signed')}</div>
+			{#each i.issuers as iss (iss)}<div class="mono" style="font-size:12px">{iss}</div>{/each}
+			<div class="muted" style="margin-top:4px">{tf('shc_ask_d', { host: i.host })}</div>
 			<div class="p2row" style="margin-top:8px">
 				<button class="btn pri" onclick={() => approve(i.host)} disabled={busy}>{tf('shc_approve', { host: i.host })}</button>
 				<button class="btn" onclick={() => decline(i.host)} disabled={busy}>{t('shc_decline')}</button>
@@ -91,9 +98,10 @@
 		<div class="p2err" role="alert" style="margin-top:8px" title={answer.message}>{refusal(answer)}</div>
 	{/if}
 	{#if answer?.status === 'imported'}
+		{#if warning}<div class="p2err" role="alert" style="margin-top:8px">{warning}</div>{/if}
 		<div class="done" role="status">
 			{#each answer.cards as c, n (n)}
-				<div><span class="pill p-ok"><i aria-hidden="true"></i>{t('shc_signed_by')}</span> <span class="mono">{c.iss}</span></div>
+				<div><span class="chip">{t('shc_signed_by')}</span> <span class="mono">{c.iss}</span></div>
 				<div class="dim" style="font-size:11.5px">{tf('shc_issued', { date: day(c.issued) })}{#if c.expires} · {tf('shc_expires', { date: day(c.expires) })}{/if}</div>
 			{/each}
 			<div style="margin-top:6px">{tf('shc_summary', { accepted: answer.summary.accepted, queued: answer.summary.queued, skipped: answer.summary.skipped })}</div>
@@ -133,5 +141,12 @@
 	}
 	.ask {
 		border-color: rgba(224, 168, 74, 0.55);
+	}
+	/* a long host wraps inside the card on a phone instead of running off it */
+	.ask .btn {
+		white-space: normal;
+		overflow-wrap: anywhere;
+		text-align: left;
+		max-width: 100%;
 	}
 </style>

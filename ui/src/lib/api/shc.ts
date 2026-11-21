@@ -4,12 +4,14 @@ import { ApiError } from './core';
 import type { Uuid } from './types';
 import { app } from '#lib/state/app.svelte';
 
-export type ShcIssuer = { iss: string; host: string };
-export type ShcCard = { iss: string; issued: string; expires: string | null; types: string[] };
+/** One question: may OwnHealth fetch keys from this host, for these issuers? */
+export type ShcHost = { host: string; issuers: string[] };
+/** `name` and `birth_date` are what the card says, not checked against anything. */
+export type ShcCard = { iss: string; host: string; issued: string; expires: string | null; types: string[]; name: string | null; birth_date: string | null };
 export type ShcSummary = { document_id: string; accepted: number; queued: number; skipped: number; reasons: Record<string, number> };
 export type ShcAnswer =
-	| { status: 'needs_approval'; issuers: ShcIssuer[] }
-	| { status: 'imported'; document_id: Uuid; created: boolean; cards: ShcCard[]; summary: ShcSummary }
+	| { status: 'needs_approval'; hosts: ShcHost[] }
+	| { status: 'imported'; document_id: Uuid; created: boolean; identity: string; cards: ShcCard[]; summary: ShcSummary }
 	| { status: 'refused'; reason: string; iss: string | null; detail: string | null; message: string };
 
 /** What the person gave: pasted shc:/ text, or a .smart-health-card file or QR photo. */
