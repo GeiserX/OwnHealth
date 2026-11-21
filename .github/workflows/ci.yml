@@ -251,6 +251,9 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
         run: |
+          # A step without `shell:` runs under bash -e with no pipefail: without it a failing git diff
+          # below would read as "no input changed"
+          set -o pipefail
           both='["ubuntu-latest","ubuntu-24.04-arm"]'
           if [ "$EVENT" != pull_request ]; then
             echo "runners=$both" >> "$GITHUB_OUTPUT"; exit 0
