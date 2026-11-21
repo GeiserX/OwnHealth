@@ -36,14 +36,15 @@ use zip::{CompressionMethod, ZipWriter};
 pub const FORMAT: &str = "ownhealth.export/v1";
 pub const LIFECYCLE_TAG: &str = "urn:ownhealth:lifecycle";
 /// Not part of a person's export: access control and secrets, inbox configuration (v0.2: token hashes,
-/// secret references, routing rules), calendar feed tokens (v0.3), and tables that only repeat the
-/// profile.
-const SKIP_RAW: [&str; 6] = [
+/// secret references, routing rules), calendar feed tokens (v0.3), SMART Health Links (v1.0: id hashes,
+/// passcode hashes, ciphertext), and tables that only repeat the profile.
+const SKIP_RAW: [&str; 7] = [
     "profile",
     "profile_grant",
     "api_token",
     "calendar_feed",
     "sender_rule",
+    "shl",
     "source",
 ];
 /// These name the person `patient`, not `subject`.

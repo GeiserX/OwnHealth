@@ -27,6 +27,7 @@ pub mod oauth;
 pub mod observations;
 pub mod records;
 pub mod review;
+pub mod shl;
 pub mod status;
 pub mod summary;
 pub mod timeline;
@@ -62,6 +63,7 @@ pub fn all() -> Router<Runtime> {
         .merge(observations::router())
         .merge(records::router())
         .merge(review::router())
+        .merge(shl::router())
         .merge(status::router())
         .merge(summary::router())
         .merge(timeline::router())

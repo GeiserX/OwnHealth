@@ -47,6 +47,9 @@ pub struct Settings {
     pub ocr_models_dir: PathBuf,
     /// `OWNHEALTH_INBOX_DIR`: the watched folder root (`<root>/<profile-slug>/`).
     pub inbox_dir: Option<PathBuf>,
+    /// `OWNHEALTH_SHARE_URL`: the public origin of the link-only site block (deploy/Caddyfile), which
+    /// every SMART Health Link points at. Unset: sharing is off.
+    pub share_url: Option<String>,
 }
 
 impl Default for Settings {
@@ -74,6 +77,7 @@ impl Default for Settings {
             ocr: false,
             ocr_models_dir: PathBuf::from("/opt/ownhealth/ocr-models"),
             inbox_dir: None,
+            share_url: None,
         }
     }
 }
@@ -101,6 +105,7 @@ impl fmt::Debug for Settings {
             .field("ocr", &self.ocr)
             .field("ocr_models_dir", &self.ocr_models_dir)
             .field("inbox_dir", &self.inbox_dir)
+            .field("share_url", &self.share_url)
             .finish_non_exhaustive()
     }
 }
@@ -245,6 +250,7 @@ impl Settings {
                 .map(PathBuf::from)
                 .unwrap_or(d.ocr_models_dir),
             inbox_dir: env_or(env, "INBOX_DIR")?.map(PathBuf::from),
+            share_url: env_or(env, "SHARE_URL")?.map(|u| u.trim_end_matches('/').to_string()),
         })
     }
 

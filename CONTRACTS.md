@@ -52,6 +52,8 @@ All routes are under `/api`, JSON, and resolve `{p}` as a profile slug, `me` or 
 | G | export.rs | `POST /profiles/{p}/export` `{fmt}` | step-up; answers the zip itself |
 | G | auth.rs | `/auth/state`, `/auth/setup/{begin,finish,password}`, `/auth/login/{begin,finish}`, `/auth/recovery`, `/auth/password/login`, `/auth/step-up/{begin,finish}`, `/auth/passkeys` (GET, `/begin`, `/finish`, `DELETE /{id}`), `/auth/recovery-codes`, `/auth/invite/{code}`, `/auth/enroll/{begin,finish,password}`, `/auth/oidc/{login,callback}` | 403 `step_up_required`, 403 `csrf_failed` |
 | H | timeline.rs | `GET /profiles/{p}/timeline?types=&from=&to=&as_of=&lang=` | |
+| v1.0 sharing | shl.rs | `GET`/`POST /profiles/{p}/shl` `{categories?, days?, passcode?, label?, lang?}` ; `GET /profiles/{p}/shl/{id}/access` ; `DELETE /profiles/{p}/shl/{id}` | owner or guardian only, never break-glass; create needs step-up and answers `{link, shlink}` once (the key exists only in the link); revoke deletes the file |
+| v1.0 sharing | shl.rs | `POST /shl/{id}` `{recipient, passcode?}` ; `GET /shl/{id}/file/{ticket}` | public, no cookie, CORS: the SMART Health Links manifest (401 `{remainingAttempts}`, 404 once revoked, expired or out of attempts, 429) and the file (`application/jose`, for at most 1 h); the only routes deploy/Caddyfile's public site block passes |
 | J | app-level | `GET /metrics` (Prometheus, outside `/api`) | |
 
 The TypeScript shapes for every route are in `ui/src/lib/api/types.ts`; the client functions are in

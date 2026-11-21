@@ -3821,6 +3821,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-extra",
+ "base64 0.22.1",
  "chrono",
  "http",
  "icalendar",
@@ -4153,6 +4154,7 @@ name = "ownhealth-ops"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "futures",
  "hex",
@@ -4160,6 +4162,7 @@ dependencies = [
  "ownhealth-auth",
  "ownhealth-core",
  "ownhealth-rules",
+ "rand 0.10.3",
  "regex",
  "rust_decimal",
  "serde_json",
