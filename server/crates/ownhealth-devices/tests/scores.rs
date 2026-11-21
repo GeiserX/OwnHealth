@@ -345,7 +345,25 @@ async fn a_mapping_error_keeps_none_of_the_batch() -> R {
         .count("select count(*) from vendor_score where profile_id = $1", sam)
         .await?;
     assert_eq!(n, 0, "the scores before the bad one are not kept");
-    // the connection is still usable after the failed batch
+    // a mapping error fails the batch even on a score that a quirk would drop anyway
+    let mut bad_provider = score("sleep", 2, f64::NAN, None);
+    bad_provider.provider = "Oura Ring".into();
+    let mut nul_mood = score("mood", 2, 5.0, Some("Go\u{0}od"));
+    nul_mood.components = Some(json!({"x\u{0}": 1}));
+    for (bad, what) in [
+        (score("mood", 2, f64::NAN, None), "an unknown category with a NaN"),
+        (score("mood", 2, 1e10, None), "an unknown category past ±1e9"),
+        (nul_mood, "an unknown category with a NUL"),
+        (bad_provider, "a malformed provider with a NaN"),
+    ] {
+        let w = scores::write(&mut c, sam, src.id, &[batch[0].clone(), bad]).await;
+        assert!(w.is_err(), "{what} was dropped as a quirk: {w:?}");
+    }
+    let n = env
+        .count("select count(*) from vendor_score where profile_id = $1", sam)
+        .await?;
+    assert_eq!(n, 0, "no batch with a mapping error keeps a score");
+    // the connection is still usable after the failed batches
     assert_eq!(scores::write(&mut c, sam, src.id, &batch[..2]).await?.written, 2);
     Ok(())
 }

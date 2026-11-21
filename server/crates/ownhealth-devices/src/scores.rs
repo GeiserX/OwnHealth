@@ -104,6 +104,13 @@ pub struct Written {
     pub dropped: u64,
 }
 
+/// True when `p` is a provider key the `vendor_score.provider` CHECK accepts (`^[a-z0-9_]{1,40}$`).
+fn is_provider(p: &str) -> bool {
+    (1..=40).contains(&p.len())
+        && p.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// True when a string in `v`, a key or a value at any depth, holds U+0000, which Postgres cannot store.
 fn has_nul(v: &Value) -> bool {
     match v {
@@ -123,7 +130,8 @@ fn has_nul(v: &Value) -> bool {
 /// The batch is one transaction. One vendor quirk never fails it: a value that is not finite (or past
 /// ±1e9) and a U+0000 in the qualifier or the components drop that score and count it, `components`
 /// that are not a JSON object are left out, and a qualifier is cut to `QUALIFIER_MAX` characters. An
-/// unknown category or a malformed provider is a mapping bug: it fails the batch and keeps none of it.
+/// unknown category or a malformed provider is a mapping bug: it fails the batch and keeps none of it,
+/// even when that score also has a quirk.
 pub async fn write(conn: &mut PgConnection, profile_id: Uuid, source_id: Uuid, scores: &[Score]) -> Result<Written> {
     let mut tx = conn.begin().await?;
     let ours: bool = sqlx::query_scalar(
@@ -138,6 +146,19 @@ pub async fn write(conn: &mut PgConnection, profile_id: Uuid, source_id: Uuid, s
         return Err(Error::Provenance(
             "a vendor score must come from a connection of its own profile or of its household".into(),
         ));
+    }
+    // A mapping error fails the batch even on a score that a quirk below would drop: the same rules
+    // as the `provider` and `category` CHECKs of vendor_score.
+    if let Some(s) = scores
+        .iter()
+        .find(|s| !is_provider(&s.provider) || !CATEGORIES.contains(&s.category.as_str()))
+    {
+        return Err(Error::Invalid(format!(
+            "a vendor score has provider {:?} and category {:?}: a provider is 1 to 40 lowercase letters, digits or '_', and a category one of {}",
+            s.provider,
+            s.category,
+            CATEGORIES.join(", ")
+        )));
     }
     let mut out = Written::default();
     for s in scores {
