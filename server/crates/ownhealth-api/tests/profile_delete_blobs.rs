@@ -32,13 +32,21 @@ type R = anyhow::Result<()>;
 /// 32 bytes of 0x0b, base64. Test-only key.
 const KEY: &str = "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws=";
 
-/// Every file in the blob store, by its sha256 hex name.
+/// Every file in the blob store, by its sha256 hex name. A folder of the store it cannot list fails
+/// the test, so a file there never reads as removed.
 fn stored(root: &Path) -> BTreeSet<String> {
     fn walk(dir: &Path, out: &mut BTreeSet<String>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for e in entries.flatten() {
+        let fail = |e: std::io::Error| -> ! { panic!("cannot list the blob store at {}: {e}", dir.display()) };
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            // nothing stored yet
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => fail(e),
+        };
+        for e in entries {
+            let e = e.unwrap_or_else(|e| fail(e));
             let p = e.path();
-            if p.is_dir() {
+            if e.file_type().unwrap_or_else(|e| fail(e)).is_dir() {
                 walk(&p, out);
             } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
                 out.insert(name.to_string());
@@ -1754,6 +1762,18 @@ async fn the_unread_files_of_the_persons_own_inbox_go_too() -> R {
     Ok(())
 }
 
+#[test]
+fn stored_fails_on_a_folder_it_cannot_list() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shard = dir.path().join("sha256/ab");
+    std::fs::create_dir_all(&shard).expect("shard");
+    std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o000)).expect("lock");
+    let listed = std::panic::catch_unwind(|| stored(dir.path()));
+    std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o755)).expect("unlock");
+    assert!(listed.is_err(), "an unreadable folder of the store read as empty");
+}
+
 #[tokio::test]
 async fn a_drop_that_is_a_link_to_another_inbox_loses_only_the_persons_copies() -> R {
     let mut env = Env::new(true).await?;
@@ -1975,6 +1995,12 @@ async fn a_done_delete_answers_success_when_its_last_audit_fails() -> R {
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "a done delete answered a failure: {}", r.json);
+    // the route did write the audit row of the files, and that row was the one refused
+    assert_eq!(
+        refused_audits(&env).await?,
+        1,
+        "the delete never wrote its files' audit row"
+    );
     assert_eq!(
         (&r.json["deleted"], &r.json["blobs"], &r.json["blobs_pending"]),
         (&json!("alex"), &json!(1), &json!(0)),
