@@ -761,7 +761,13 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     }
     .await;
     if let Err(e) = said {
-        tracing::warn!(error = ?e, "could not audit what a done delete did with the files");
+        tracing::warn!(
+            error = ?e,
+            profile_id = %profile_id,
+            removed,
+            pending,
+            "could not audit what a done delete did with the files"
+        );
     }
     Ok(json!({"deleted": slug, "rows": result.rows_json(), "blobs": removed, "blobs_pending": pending}))
 }
