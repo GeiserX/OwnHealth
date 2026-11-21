@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 use crate::jobs::{self, EnqueueOptions, Job, JobContext, JobError};
 
 /// The `source.kind` check constraint.
-pub const SOURCE_KINDS: [&str; 9] = [
+pub const SOURCE_KINDS: [&str; 14] = [
     "email",
     "folder",
     "paperless",
@@ -34,7 +34,15 @@ pub const SOURCE_KINDS: [&str; 9] = [
     "gadgetbridge",
     "nightscout",
     "clinvar",
+    "smart",
+    "bluebutton",
+    "brands",
+    "openwearables",
+    "dexcom",
 ];
+/// Kinds a connector makes through its own route (the OAuth launch, the brands directory, the Open
+/// Wearables setup), never POST /api/inboxes.
+pub const CONNECTOR_KINDS: [&str; 5] = ["smart", "bluebutton", "brands", "openwearables", "dexcom"];
 pub const POLL_JOB: &str = "source.poll";
 /// How often the scheduler looks for due sources.
 pub const SCHEDULER_SECONDS: u64 = 30;

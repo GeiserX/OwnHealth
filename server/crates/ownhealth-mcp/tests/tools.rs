@@ -271,6 +271,66 @@ async fn get_source_lifecycle() -> R {
 }
 
 #[tokio::test]
+async fn get_source_prints_a_visit_reason_clinic_and_date() -> R {
+    let w = world().await?;
+    let alex = w.pid("alex");
+    let mut conn = w.conn().await?;
+    let visit = json!({"profile_id": alex, "class": "AMB", "provider_name": "Centro de Salud Norte",
+                       "period_start": "2026-09-10T09:00:00+00:00", "reason_text": "Dolor de rodilla"});
+    let both = add_record_json(&mut conn, "visit", visit, alex).await?;
+    let visit = json!({"profile_id": alex, "provider_name": "LabNorte", "period_start": "2026-10-02T08:30:00+00:00"});
+    let clinic_only = add_record_json(&mut conn, "visit", visit, alex).await?;
+    let visit = json!({"profile_id": alex, "period_start": "2026-10-20T11:00:00+00:00"});
+    let bare = add_record_json(&mut conn, "visit", visit, alex).await?;
+    let c = w.connect(&w.tok().await?).await?;
+    let note = |t: &str| json!({"trust": "untrusted_text", "origin": "person_note", "text": t});
+
+    let env = c.call("get_source", json!({"src_id": both})).await?.ok();
+    assert_eq!(env["data"]["fact"]["table"], "encounter");
+    assert_eq!(
+        env["data"]["printed"],
+        json!({"reason": note("Dolor de rodilla"), "provider": note("Centro de Salud Norte"), "date": "2026-09-10"})
+    );
+    let env = c.call("get_source", json!({"src_id": clinic_only})).await?.ok();
+    assert_eq!(
+        env["data"]["printed"],
+        json!({"provider": note("LabNorte"), "date": "2026-10-02"})
+    );
+    let env = c.call("get_source", json!({"src_id": bare})).await?.ok();
+    assert_eq!(env["data"]["printed"], json!({"date": "2026-10-20"}));
+    // a blank reason counts as not written, as the REST title treats it
+    let visit = json!({"profile_id": alex, "provider_name": "Centro de Salud Norte",
+                       "period_start": "2026-10-25T09:00:00+00:00", "reason_text": ""});
+    let blank = add_record_json(&mut conn, "visit", visit, alex).await?;
+    let env = c.call("get_source", json!({"src_id": blank})).await?.ok();
+    assert_eq!(
+        env["data"]["printed"],
+        json!({"provider": note("Centro de Salud Norte"), "date": "2026-10-25"})
+    );
+
+    // a lab value keeps its five printed fields
+    let env = c.call("get_source", json!({"src_id": w.s("vitd")})).await?.ok();
+    let keys: Vec<&String> = env["data"]["printed"]
+        .as_object()
+        .map(|m| m.keys().collect())
+        .unwrap_or_default();
+    assert_eq!(keys, ["name", "value", "unit", "range", "flag"]);
+
+    // a visit tagged sensitive stays unknown to a token without read:sensitive
+    let visit = json!({"profile_id": alex, "provider_name": "Salud Mental Norte",
+                       "period_start": "2026-10-21T10:00:00+00:00", "sensitivity": ["mental_health"]});
+    let tagged = add_record_json(&mut conn, "visit", visit, alex).await?;
+    let env = c.call("get_source", json!({"src_id": tagged})).await?.ok();
+    assert_eq!(env["data"]["printed"]["date"], "2026-10-21");
+    let c = w.connect(&w.tok_scopes(without(&["read:sensitive"])).await?).await?;
+    assert_eq!(
+        c.call("get_source", json!({"src_id": tagged})).await?.err()["code"],
+        "unknown"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn genome_findings_and_lookup() -> R {
     let w = world().await?;
     let c = w.connect(&w.tok().await?).await?;

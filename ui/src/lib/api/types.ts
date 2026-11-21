@@ -441,6 +441,7 @@ export interface DocumentSummary {
 	flags: Record<string, unknown>;
 	open_review: number;
 	snippet: UntrustedText | null; // full-text search hit, UI only
+	evidence_day?: IsoDate | null; // the list only: the collection day, else the report day
 }
 
 export interface DocumentDetail extends DocumentSummary {
