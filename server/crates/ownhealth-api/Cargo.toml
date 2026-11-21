@@ -40,6 +40,8 @@ ownhealth-auth = { workspace = true, features = ["testing"] }
 ownhealth-core = { workspace = true, features = ["testing"] }
 ownhealth-rules = { workspace = true, features = ["testing"] }
 anyhow.workspace = true
+base64.workspace = true
+flate2.workspace = true
 icalendar.workspace = true
 regex.workspace = true
 tempfile.workspace = true

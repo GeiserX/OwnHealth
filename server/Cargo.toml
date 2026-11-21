@@ -89,6 +89,8 @@ async-imap = { version = "0.12", default-features = false, features = ["runtime-
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2"
 lopdf = { version = "=0.47.0", default-features = false }
+# v1.0: reads the QR code of a SMART Health Card from a photo (slice 22)
+rqrr = { version = "0.11", default-features = false, features = ["img"] }
 mail-parser = "1"
 # OCR engine: PaddleOCR PP-OCRv5 ONNX on ONNX Runtime (ort). Only the `ocr` feature of the binary builds it.
 oar-ocr = { version = "=0.10.2", default-features = false, features = ["download-binaries", "simd"] }
@@ -99,6 +101,8 @@ webpki-roots = "1"
 
 # tests
 proptest = { version = "1.8", default-features = false, features = ["std"] }
+# draws the QR codes the SMART Health Card tests read back with rqrr (tests only)
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
 tempfile = "3"
 # an independent RFC 5545 parser for the calendar feed tests (ownhealth-api ics_feed.rs)
 icalendar = { version = "0.17", default-features = false, features = ["parser"] }
