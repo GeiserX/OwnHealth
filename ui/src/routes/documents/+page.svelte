@@ -11,6 +11,7 @@
 	import { ApiError } from '#lib/api/core';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { day, plain } from '#lib/components/pages2/fmt';
+	import { documentYears } from '#lib/logic/documents';
 	import { t } from '#lib/i18n/index.svelte';
 	import { currentProfile } from '#lib/state/app.svelte';
 
@@ -65,16 +66,7 @@
 	const denied = $derived(docs.error instanceof ApiError && docs.error.status === 403);
 	const canText = $derived(prof?.scopes.includes('read:documents_text') ?? false);
 	const rows = $derived(docs.data ?? []);
-	const byYear = $derived.by(() => {
-		const out: [string, DocumentSummary[]][] = [];
-		for (const d of rows) {
-			const y = d.collected_at?.slice(0, 4) ?? t('i2_undated');
-			const last = out[out.length - 1];
-			if (last && last[0] === y) last[1].push(d);
-			else out.push([y, [d]]);
-		}
-		return out;
-	});
+	const byYear = $derived(documentYears(rows, t('i2_undated')));
 	let retractBusy = $state(false);
 	async function retract(id: string) {
 		if (retractBusy) return;
@@ -141,7 +133,7 @@
 					<tr class="yr-row"><td colspan="7">{year}</td></tr>
 					{#each list as d (d.id)}
 						<tr class:gone={d.status === 'retracted'}>
-							<td class="num" style="white-space:nowrap">{day(d.collected_at)}</td>
+							<td class="num" style="white-space:nowrap">{day(d.evidence_day)}</td>
 							<td><span class="chip">{t('i2_dt_' + (d.doc_type ?? 'other'))}</span></td>
 							<td class="doc">
 								<a href={documentFileUrl(d.id)} target="_blank" rel="noopener">{plain(d.filename) || d.id.slice(0, 8)}</a>
