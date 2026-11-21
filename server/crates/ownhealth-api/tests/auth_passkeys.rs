@@ -429,7 +429,7 @@ async fn a_422_never_repeats_a_password() -> R {
     let r = c
         .post(
             "/api/auth/password/login",
-            &json!({"name": "Alex Rivera", "password": 55_214_455}),
+            &json!({"name": "Alex Rivera", "password": 55_214_455}), // ggignore: synthetic test value
         )
         .await?;
     assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);

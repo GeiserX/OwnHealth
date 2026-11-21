@@ -1159,7 +1159,7 @@ async fn a_creator_without_read_sensitive_gets_no_sensitive_count() -> R {
 async fn a_422_on_a_link_create_never_repeats_the_passcode() -> R {
     let env = env().await?;
     let mut alex = env.as_user(env.user("alex")).await?;
-    let secret = "SECRET-r63a-9137";
+    let secret = "SECRET-r63a-9137"; // ggignore: synthetic test value
     let r = alex
         .post("/api/profiles/alex/shl", &json!({"passcode": secret, "days": "7"}))
         .await?;

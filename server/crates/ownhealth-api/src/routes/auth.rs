@@ -1611,7 +1611,7 @@ mod tests {
             "value_error",
             vec![json!("body")],
             "invalid type: integer `55214455`, expected a string",
-            json!({"name": "x", "password": 55_214_455, "more": [{"api_token": "t-1"}]}),
+            json!({"name": "x", "password": 55_214_455, "more": [{"api_token": "t-1"}]}), // ggignore: synthetic test value
             None,
         );
         redact_entry(&mut body);
