@@ -108,6 +108,32 @@ pub struct DocumentRef {
     pub reactivated: bool,
 }
 
+/// The `document_source.channel` check constraint: how one arrival came in.
+pub const CHANNELS: [&str; 22] = [
+    "upload",
+    "fhir",
+    "apple_health",
+    "email",
+    "folder",
+    "paperless",
+    "manual",
+    "genome",
+    "demo",
+    "share",
+    "shortcut",
+    "health_auto_export",
+    "gadgetbridge",
+    "nightscout",
+    "smart",
+    "bluebutton",
+    "shl",
+    "shc",
+    "ccda",
+    "openwearables",
+    "dexcom",
+    "imaging",
+];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewDocument<'a> {
     pub household_id: Uuid,
@@ -116,7 +142,7 @@ pub struct NewDocument<'a> {
     pub mime: &'a str,
     pub size_bytes: i64,
     pub filename: Option<&'a str>,
-    /// upload | email | folder | api | ...
+    /// One of [`CHANNELS`].
     pub channel: &'a str,
     pub source_ref: Option<&'a str>,
     pub pages: Option<i32>,

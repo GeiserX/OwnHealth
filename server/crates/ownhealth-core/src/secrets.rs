@@ -18,7 +18,15 @@ use crate::config::Settings;
 use crate::error::{Error, Result};
 
 /// The `secret.purpose` check constraint.
-pub const PURPOSES: [&str; 4] = ["imap_password", "paperless_token", "nightscout_token", "pdf_password"];
+pub const PURPOSES: [&str; 7] = [
+    "imap_password",
+    "paperless_token",
+    "nightscout_token",
+    "pdf_password",
+    "connector_refresh_token",
+    "connector_client_secret",
+    "openwearables_api_key",
+];
 
 const VERSION: u8 = 1;
 const NONCE_LEN: usize = 12;

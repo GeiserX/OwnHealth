@@ -192,17 +192,22 @@ async fn manages_profile(conn: &mut PgConnection, p: &Principal, profile_id: Uui
 }
 
 /// A source of the caller's household that the caller manages (its profile, if it has one).
+/// A connector source is not an inbox: like a source of another household, it is unknown here.
 async fn managed_source(conn: &mut PgConnection, p: &Principal, id: &str) -> R<Source> {
     let id = parse_id(id)?;
     let household = manager(conn, p).await?;
     let source = match sources::get_source(conn, id).await? {
-        Some(s) if s.household_id == household => s,
+        Some(s) if s.household_id == household && !is_connector(&s.kind) => s,
         _ => return Err(Error::NotFound("Unknown source.".into()).into()),
     };
     if let Some(profile) = source.profile_id {
         manages_profile(conn, p, profile).await?;
     }
     Ok(source)
+}
+
+fn is_connector(kind: &str) -> bool {
+    sources::CONNECTOR_KINDS.contains(&kind)
 }
 
 async fn audit(conn: &mut PgConnection, p: &Principal, action: &str, s: &Source) -> R<()> {
@@ -278,6 +283,7 @@ async fn list(State(rt): State<Runtime>, caller: Caller) -> R {
     let out: Vec<Value> = sources::list_sources(&mut conn, household)
         .await?
         .iter()
+        .filter(|s| !is_connector(&s.kind))
         .filter_map(|s| {
             let h = *health.get(&s.id)?;
             let q = (s.kind == "email").then(|| held.get(&s.id).copied().unwrap_or(0));
@@ -321,6 +327,12 @@ fn check_label(label: &str) -> Result<String, Error> {
 async fn create(State(rt): State<Runtime>, Caller(p): Caller, Body(b): Body<SourceIn>) -> R {
     if !sources::SOURCE_KINDS.contains(&b.kind.as_str()) {
         return Err(Error::Invalid(format!("unknown source kind {:?}", b.kind)).into());
+    }
+    if is_connector(&b.kind) {
+        return Err(Error::Invalid(
+            "this kind of source is a connection, not an inbox, and cannot be added here".into(),
+        )
+        .into());
     }
     let label = check_label(&b.label)?;
     let config = b.config.unwrap_or_else(|| json!({}));

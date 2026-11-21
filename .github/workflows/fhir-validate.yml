@@ -74,7 +74,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
-          key: fhir-validate
+          # PRs read main's caches and never write their own: a per-PR cache evicts main's (10 GB repo cap)
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: fhir-validate-${{ hashFiles('server/Cargo.toml') }}
       - run: mkdir -p static
       - name: Export the Rivera family history and import it back
         run: cargo test -p ownhealth-api --test family_fhir --locked

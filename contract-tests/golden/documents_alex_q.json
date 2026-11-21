@@ -3,6 +3,7 @@
     "[]": {
       "collected_at": "datetime_Z",
       "doc_type": "=lab_report",
+      "evidence_day": "date",
       "filename": {
         "origin": "=filename",
         "text": "string",
