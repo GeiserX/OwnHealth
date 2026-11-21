@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fmtScoreDay, inWindow, MAX_DAYS, providerLabel, scoreDecimals, scoreRows, scoreSpanDays, windowChoices, type VendorScore } from '../src/routes/wearables/scores.ts';
+import { fmtScoreDay, inWindow, MAX_DAYS, measurementDays, providerLabel, scoreDecimals, scoreRows, scoreSpanDays, windowChoices, type VendorScore } from '../src/routes/wearables/scores.ts';
 
 const watch = { id: 'b1c2', label: "Sam's Gadgetbridge" };
 const s = (provider: string, category: string, t: string, value: number, qualifier: string | null = null, source: VendorScore['source'] = watch): VendorScore => ({
@@ -124,4 +124,23 @@ test('vendor scores: the page counts the scores\' span in its window list, and t
 	assert.match(card, /vendor-scores`, \{ days: MAX_DAYS \}/);
 	assert.match(card, /span = scoreSpanDays\(all, Date\.now\(\)\)/);
 	assert.match(card, /scoreRows\(inWindow\(all, days, Date\.now\(\)\)\)/);
+});
+
+test('vendor scores: a year picked for the scores never labels 90 days of measurements as a year', () => {
+	// the wearables summary sends at most 90 days of each series
+	assert.equal(measurementDays(365, 90), 90);
+	assert.equal(measurementDays(30, 90), 30);
+	assert.equal(measurementDays(30, 12), 12);
+	assert.equal(measurementDays(7, 0), 7);
+	const page = readFileSync(new URL('../src/routes/wearables/+page.svelte', import.meta.url), 'utf8');
+	assert.match(page, /const mDays = \$derived\(measurementDays\(days, span\)\);/);
+	// the charts, their averages, their labels and the subtitle use the measurement days; the card gets the window
+	assert.match(page, /m\.series\.slice\(-mDays\)/);
+	assert.match(page, /avg: mDays === 30 && m\.avg_30d != null/);
+	assert.match(page, /w: windowWord\(mDays\)/);
+	assert.match(page, /n: mDays \}\)\}/);
+	assert.match(page, /tf\('h1_w_sub', \{ name: profile\?\.display_name \?\? '', d: mDays \}\)/);
+	assert.doesNotMatch(page, /slice\(-days\)|windowWord\(days\)|n: days \}|d: days \}/);
+	const dict = readFileSync(new URL('../src/lib/i18n/dict.ts', import.meta.url), 'utf8');
+	assert.equal(dict.split('\t\th1_wn: "{n} d",').length, 3, 'h1_wn once in en and once in es');
 });

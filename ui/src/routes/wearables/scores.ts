@@ -44,6 +44,13 @@ export function windowChoices(span: number): number[] {
 	return [7, 30, 365].filter((d) => d === 7 || span >= d);
 }
 
+/** The days the measurement charts show and label for the chosen window: the window, cut to the longest
+ * measurement series (the wearables summary sends at most 90 days). The scores card keeps the whole
+ * window, so a year of scores never labels 90 days of measurements as a year. */
+export function measurementDays(days: number, span: number): number {
+	return span > 0 ? Math.min(days, span) : days;
+}
+
 /** The server's categories (ownhealth-devices scores::CATEGORIES), in the order the card lists them. */
 export const CATEGORIES = ['readiness', 'recovery', 'sleep', 'activity', 'stress', 'strain', 'body_battery'] as const;
 

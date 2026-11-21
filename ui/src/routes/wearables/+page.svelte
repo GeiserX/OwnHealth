@@ -17,7 +17,7 @@
 	import { ago } from '#lib/components/pages2/fmt';
 	import { currentProfile } from '#lib/state/app.svelte';
 	import VendorScores from './VendorScores.svelte';
-	import { windowChoices } from './scores';
+	import { measurementDays, windowChoices } from './scores';
 
 	// How each known metric draws, as in the mockup. Unknown metrics get a plain line.
 	// `max` and `minSpan` keep an axis honest: SpO2 never passes 100 %, and a 1 bpm change is not a cliff.
@@ -69,18 +69,20 @@
 	const devices = $derived((w.data?.devices ?? []).filter((d) => d.last_sample != null));
 	const providerName = (p: string) => (t('fu_k_' + p) === 'fu_k_' + p ? p : t('fu_k_' + p));
 	const localTime = (iso: string) => new Intl.DateTimeFormat(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
-	const windowWord = (d: number) => t(d === 7 ? 'h1_w7' : d === 30 ? 'h1_w30' : 'h1_w1y');
+	const windowWord = (d: number) => (d === 7 ? t('h1_w7') : d === 30 ? t('h1_w30') : d === 365 ? t('h1_w1y') : tf('h1_wn', { n: d }));
 	// The longest series, or the vendor scores' own span, decides which windows make sense; never offer a
 	// window the data cannot fill.
 	const span = $derived(Math.max(0, ...metrics.map((m) => m.series.length)));
 	let scoreSpan = $state(0);
 	const windows = $derived(windowChoices(Math.max(span, scoreSpan)));
+	// The days the measurement charts really show: a year opened by the scores is cut to the longest series.
+	const mDays = $derived(measurementDays(days, span));
 	const fmtDay = (d: string) => new Intl.DateTimeFormat(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(d));
 
 	function chart(m: WearableMetric) {
 		const look = LOOK[m.metric] ?? { color: C.accent };
 		const k = look.scale ?? 1;
-		const ser = m.series.slice(-days);
+		const ser = m.series.slice(-mDays);
 		const vals = ser.map((p) => (p.value == null ? null : +(p.value * k).toFixed(2)));
 		const nums = vals.filter((v): v is number => v != null);
 		if (!nums.length) return null;
@@ -93,7 +95,7 @@
 		// The average and the coverage of the days on screen; the server's 30-day average only for 30 days.
 		const st = sliceStats(ser.map((p) => p.value));
 		return {
-			avg: days === 30 && m.avg_30d != null ? m.avg_30d : st.avg,
+			avg: mDays === 30 && m.avg_30d != null ? m.avg_30d : st.avg,
 			coverage: st.coverage,
 			series: [{ vals, color: look.color, dots: !look.bars, sw: look.sw }],
 			yMin: lo,
@@ -119,7 +121,7 @@
 <div class="ph">
 	<div>
 		<h1>{t('title_wear')}</h1>
-		<div class="sub">{tf('h1_w_sub', { name: profile?.display_name ?? '', d: days })}</div>
+		<div class="sub">{tf('h1_w_sub', { name: profile?.display_name ?? '', d: mDays })}</div>
 	</div>
 	<div class="right">
 		<PhaseChip phase="Apple Health v0.1" /><PhaseChip phase="Nightscout v0.2" /><PhaseChip phase="Oura, Withings v1.0" />
@@ -163,7 +165,7 @@
 			<div class="card">
 				<h3>
 					{m.label}
-					<span class="r" title={c ? tf('h1_latest', { v: fmtVal(m, m.latest, c.k, c.unit) }) : undefined}>{#if c}{tf('h1_avg_w', { v: fmtVal(m, c.avg, c.k, c.unit), w: windowWord(days) })}{/if}</span>
+					<span class="r" title={c ? tf('h1_latest', { v: fmtVal(m, m.latest, c.k, c.unit) }) : undefined}>{#if c}{tf('h1_avg_w', { v: fmtVal(m, c.avg, c.k, c.unit), w: windowWord(mDays) })}{/if}</span>
 				</h3>
 				{#if c}
 					<TrendChart
@@ -174,7 +176,7 @@
 						xlabels={c.xlabels}
 						bars={c.bars}
 						fmt={c.fmt}
-						label={tf('h1_chart_w', { label: m.label, avg: fmtVal(m, c.avg, c.k, c.unit), n: days })}
+						label={tf('h1_chart_w', { label: m.label, avg: fmtVal(m, c.avg, c.k, c.unit), n: mDays })}
 					/>
 				{:else}
 					<div class="empty">{t('h1_nomark')}</div>
