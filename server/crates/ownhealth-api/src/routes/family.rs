@@ -770,12 +770,14 @@ async fn settle(rt: &Runtime, job: Option<i64>, key: &str, left: Vec<Value>) {
             .execute(&rt.pool)
             .await
     } else {
-        sqlx::query("update job set payload = jsonb_set(payload, array[$2::text], $3) where id = $1 and state = 'queued'")
-            .bind(job)
-            .bind(key)
-            .bind(Value::Array(left))
-            .execute(&rt.pool)
-            .await
+        sqlx::query(
+            "update job set payload = jsonb_set(payload, array[$2::text], $3) where id = $1 and state = 'queued'",
+        )
+        .bind(job)
+        .bind(key)
+        .bind(Value::Array(left))
+        .execute(&rt.pool)
+        .await
     };
     if let Err(e) = done {
         tracing::warn!(error = %e, job, "could not trim a delete's retry: it redoes everything");

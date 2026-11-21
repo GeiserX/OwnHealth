@@ -29,9 +29,7 @@ use ownhealth_core::arrive::{Arrival, Arrived, arrive};
 use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::config::Settings;
 use ownhealth_core::error::{Error, Result};
-use ownhealth_core::jobs::{
-    EnqueueOptions, HandlerResult, Job, JobContext, JobError, enqueue, register_handler,
-};
+use ownhealth_core::jobs::{EnqueueOptions, HandlerResult, Job, JobContext, JobError, enqueue, register_handler};
 use ownhealth_core::sources::{RunOutcome, RunProblem, Source};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -168,7 +166,11 @@ async fn forget_job(ctx: JobContext, job: Job) -> HandlerResult {
     if ctx.settings.demo {
         return Ok(Some(serde_json::json!({"skipped": "demo"})));
     }
-    let slug = job.payload.get("slug").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let slug = job
+        .payload
+        .get("slug")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
     let folders: Vec<(serde_json::Value, bool)> = job
         .payload
         .get("folders")

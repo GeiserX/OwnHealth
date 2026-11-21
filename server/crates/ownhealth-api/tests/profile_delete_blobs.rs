@@ -484,7 +484,10 @@ async fn a_file_that_reached_the_person_through_a_household_inbox_goes_too() -> 
     .bind(ortega)
     .fetch_one(env.pool())
     .await?;
-    let theirs = env.rt.blobs.put_bytes(b"synthetic notes of the other household's alex")?;
+    let theirs = env
+        .rt
+        .blobs
+        .put_bytes(b"synthetic notes of the other household's alex")?;
     item(&env, their_folder, "alex/notas.odt:51:1", &theirs, None, None).await?;
 
     let mut me = env.as_user(env.user("alex")).await?;
@@ -956,16 +959,13 @@ async fn a_demo_delete_leaves_the_real_inbox_alone() -> R {
     );
     ownhealth_inbox::register();
     let mut c = env.pool().acquire().await?;
-    ownhealth_inbox::folder::queue_forget(
-        &mut c,
-        env.fam().household_id,
-        "alex",
-        &[(json!({}), false)],
-    )
-    .await?;
+    ownhealth_inbox::folder::queue_forget(&mut c, env.fam().household_id, "alex", &[(json!({}), false)]).await?;
     drop(c);
     assert_eq!(run_forget(&env).await?, 1);
-    assert!(real.is_file() && filed.is_file(), "a demo retry removed the real install's scans");
+    assert!(
+        real.is_file() && filed.is_file(),
+        "a demo retry removed the real install's scans"
+    );
     Ok(())
 }
 
@@ -1069,13 +1069,7 @@ async fn an_item_filed_to_someone_else_keeps_its_file() -> R {
     let paperless = household_source(&env, "paperless", json!({})).await?;
     // Alex uploaded a file; the household Paperless later filed the same bytes to Sam, whose
     // structured import is still queued, so the item names Sam and no document yet
-    let (_, sha) = document(
-        &env,
-        alex,
-        "{\"synthetic\": \"LabNorte export\"}",
-        "application/json",
-    )
-    .await?;
+    let (_, sha) = document(&env, alex, "{\"synthetic\": \"LabNorte export\"}", "application/json").await?;
     item(&env, paperless, "41", &sha, None, None).await?;
     sqlx::query("update source_item set profile_id = $1 where source_id = $2")
         .bind(sam)
