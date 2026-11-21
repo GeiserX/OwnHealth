@@ -44,9 +44,16 @@ export function windowChoices(span: number): number[] {
 	return [7, 30, 365].filter((d) => d === 7 || span >= d);
 }
 
+/** The dictionary key that names a window of `d` days, and the number for its `{n}`: '7 d', '30 d' and
+ * '1 y' for the windows the page offers, 'n d' for any other, such as the 90 days of measurements shown
+ * under a year picked for the scores. */
+export function windowWordKey(d: number): ['h1_w7' | 'h1_w30' | 'h1_w1y' | 'h1_wn', number] {
+	return [d === 7 ? 'h1_w7' : d === 30 ? 'h1_w30' : d === 365 ? 'h1_w1y' : 'h1_wn', d];
+}
+
 /** The days the measurement charts show and label for the chosen window: the window, cut to the longest
- * measurement series (the wearables summary sends at most 90 days). The scores card keeps the whole
- * window, so a year of scores never labels 90 days of measurements as a year. */
+ * measurement series. The route takes 7 to 366 days, and the page asks it for its default of 90. The
+ * scores card keeps the whole window, so a year of scores never labels 90 days of measurements as a year. */
 export function measurementDays(days: number, span: number): number {
 	return span > 0 ? Math.min(days, span) : days;
 }

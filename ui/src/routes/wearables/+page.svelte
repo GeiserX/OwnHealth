@@ -17,7 +17,7 @@
 	import { ago } from '#lib/components/pages2/fmt';
 	import { currentProfile } from '#lib/state/app.svelte';
 	import VendorScores from './VendorScores.svelte';
-	import { measurementDays, windowChoices } from './scores';
+	import { measurementDays, windowChoices, windowWordKey } from './scores';
 
 	// How each known metric draws, as in the mockup. Unknown metrics get a plain line.
 	// `max` and `minSpan` keep an axis honest: SpO2 never passes 100 %, and a 1 bpm change is not a cliff.
@@ -69,7 +69,10 @@
 	const devices = $derived((w.data?.devices ?? []).filter((d) => d.last_sample != null));
 	const providerName = (p: string) => (t('fu_k_' + p) === 'fu_k_' + p ? p : t('fu_k_' + p));
 	const localTime = (iso: string) => new Intl.DateTimeFormat(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
-	const windowWord = (d: number) => (d === 7 ? t('h1_w7') : d === 30 ? t('h1_w30') : d === 365 ? t('h1_w1y') : tf('h1_wn', { n: d }));
+	const windowWord = (d: number) => {
+		const [key, n] = windowWordKey(d);
+		return tf(key, { n });
+	};
 	// The longest series, or the vendor scores' own span, decides which windows make sense; never offer a
 	// window the data cannot fill.
 	const span = $derived(Math.max(0, ...metrics.map((m) => m.series.length)));
@@ -128,7 +131,7 @@
 		{#if windows.length > 1}
 			<div class="seg" role="group" aria-label={t('title_wear')}>
 				{#each windows as d (d)}
-					<button class:on={days === d} aria-pressed={days === d} onclick={() => (days = d)}>{t(d === 7 ? 'h1_w7' : d === 30 ? 'h1_w30' : 'h1_w1y')}</button>
+					<button class:on={days === d} aria-pressed={days === d} onclick={() => (days = d)}>{windowWord(d)}</button>
 				{/each}
 			</div>
 		{/if}

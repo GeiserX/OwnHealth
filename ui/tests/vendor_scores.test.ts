@@ -3,7 +3,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fmtScoreDay, inWindow, MAX_DAYS, measurementDays, providerLabel, scoreDecimals, scoreRows, scoreSpanDays, windowChoices, type VendorScore } from '../src/routes/wearables/scores.ts';
+import { dict as strings } from '../src/lib/i18n/dict.ts';
+import {
+	fmtScoreDay,
+	inWindow,
+	MAX_DAYS,
+	measurementDays,
+	providerLabel,
+	scoreDecimals,
+	scoreRows,
+	scoreSpanDays,
+	windowChoices,
+	windowWordKey,
+	type VendorScore
+} from '../src/routes/wearables/scores.ts';
 
 const watch = { id: 'b1c2', label: "Sam's Gadgetbridge" };
 const s = (provider: string, category: string, t: string, value: number, qualifier: string | null = null, source: VendorScore['source'] = watch): VendorScore => ({
@@ -127,7 +140,7 @@ test('vendor scores: the page counts the scores\' span in its window list, and t
 });
 
 test('vendor scores: a year picked for the scores never labels 90 days of measurements as a year', () => {
-	// the wearables summary sends at most 90 days of each series
+	// the page asks the wearables summary for its default 90 days of each series
 	assert.equal(measurementDays(365, 90), 90);
 	assert.equal(measurementDays(30, 90), 30);
 	assert.equal(measurementDays(30, 12), 12);
@@ -143,4 +156,18 @@ test('vendor scores: a year picked for the scores never labels 90 days of measur
 	assert.doesNotMatch(page, /slice\(-days\)|windowWord\(days\)|n: days \}|d: days \}/);
 	const dict = readFileSync(new URL('../src/lib/i18n/dict.ts', import.meta.url), 'utf8');
 	assert.equal(dict.split('\t\th1_wn: "{n} d",').length, 3, 'h1_wn once in en and once in es');
+});
+
+test('vendor scores: a window is named by its own days, so 90 days of measurements never read "1 y"', () => {
+	const word = (lang: 'en' | 'es', d: number) => {
+		const [key, n] = windowWordKey(d);
+		return (strings[lang] as Record<string, string>)[key].replace('{n}', String(n));
+	};
+	assert.deepEqual([7, 30, 90, 365, 12].map((d) => word('en', d)), ['7 d', '30 d', '90 d', '1 y', '12 d']);
+	assert.deepEqual([7, 30, 90, 365, 12].map((d) => word('es', d)), ['7 d', '30 d', '90 d', '1 a', '12 d']);
+	// the page names every window, the buttons included, through windowWordKey and maps none itself
+	const page = readFileSync(new URL('../src/routes/wearables/+page.svelte', import.meta.url), 'utf8');
+	assert.match(page, /const windowWord = \(d: number\) => \{\s*const \[key, n\] = windowWordKey\(d\);\s*return tf\(key, \{ n \}\);\s*\};/);
+	assert.match(page, /\{windowWord\(d\)\}<\/button>/);
+	assert.doesNotMatch(page, /h1_w7|h1_w30|h1_w1y|h1_wn/, 'no window word is mapped on the page');
 });
