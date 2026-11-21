@@ -1419,6 +1419,93 @@ async fn a_folder_inbox_linked_out_of_the_inbox_keeps_outside_files() -> R {
     Ok(())
 }
 
+/// Delete Alex and expect `kept` to survive it.
+async fn delete_alex_and_keep(env: &Env, kept: &Path, what: &str) -> R {
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert!(kept.is_file(), "the delete removed {what}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_link_inside_the_inbox_to_the_same_folder_keeps_the_other_inbox_files() -> R {
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    std::fs::create_dir_all(inbox.join("estudio"))?;
+    std::os::unix::fs::symlink(inbox.join("estudio"), inbox.join("consulta"))?;
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    // Alex's own inbox reads estudio; the household's shared inbox reads consulta, a link to estudio
+    folder_source(&env, "estudio", Some(env.profile("alex"))).await?;
+    folder_source(&env, "consulta", None).await?;
+    let theirs = inbox.join("estudio/.failed/_root/factura.pdf");
+    std::fs::create_dir_all(theirs.parent().expect("parent"))?;
+    std::fs::write(&theirs, b"%PDF-1.7 a file the shared inbox could not read")?;
+    delete_alex_and_keep(&env, &theirs, "the shared inbox's failed file through a link").await
+}
+
+#[tokio::test]
+async fn a_letter_case_variant_of_the_same_folder_keeps_the_other_inbox_files() -> R {
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    std::fs::create_dir_all(inbox.join("estudio"))?;
+    if !inbox.join("Estudio").is_dir() {
+        // a file system that tells letter cases apart: Estudio is another folder
+        return Ok(());
+    }
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    folder_source(&env, "Estudio", Some(env.profile("alex"))).await?;
+    folder_source(&env, "estudio", None).await?;
+    let theirs = inbox.join("estudio/.failed/_root/factura.pdf");
+    std::fs::create_dir_all(theirs.parent().expect("parent"))?;
+    std::fs::write(&theirs, b"%PDF-1.7 a file the shared inbox could not read")?;
+    delete_alex_and_keep(
+        &env,
+        &theirs,
+        "the shared inbox's failed file through a letter-case variant",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn an_inbox_on_a_folder_not_made_yet_inside_the_drop_keeps_the_drop() -> R {
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    std::fs::create_dir_all(inbox.join("estudio/alex"))?;
+    std::os::unix::fs::symlink(inbox.join("estudio/alex"), inbox.join("escaner"))?;
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    folder_source(&env, "estudio", None).await?;
+    // a second inbox reads escaner/nuevo: estudio/alex/nuevo once someone makes it
+    folder_source(&env, "escaner/nuevo", None).await?;
+    let drop = inbox.join("estudio/alex/escaneo.pdf");
+    std::fs::write(&drop, b"%PDF-1.7 synthetic scan")?;
+    delete_alex_and_keep(&env, &drop, "the drop that another inbox will read a folder of").await
+}
+
+#[tokio::test]
+async fn an_inbox_folder_the_server_cannot_resolve_keeps_the_files() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    let closed = inbox.join("cerrado");
+    std::fs::create_dir_all(closed.join("escaner"))?;
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    folder_source(&env, "estudio", Some(env.profile("alex"))).await?;
+    // the server cannot see where cerrado/escaner leads, so it could be estudio
+    folder_source(&env, "cerrado/escaner", None).await?;
+    let failed = inbox.join("estudio/.failed/_root/factura.pdf");
+    std::fs::create_dir_all(failed.parent().expect("parent"))?;
+    std::fs::write(&failed, b"%PDF-1.7 synthetic failed scan")?;
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000))?;
+    let kept = delete_alex_and_keep(&env, &failed, "a file while another inbox could not be resolved").await;
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755))?;
+    kept
+}
+
 /// Make every audit row of `resource_type` fail, the way a full disk or a broken database would.
 async fn fail_audit(env: &Env, resource_type: &str) -> R {
     sqlx::query(sqlx::AssertSqlSafe(format!(

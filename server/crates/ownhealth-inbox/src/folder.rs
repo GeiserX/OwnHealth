@@ -165,7 +165,7 @@ pub async fn queue_forget(
 /// delete's own try and on every retry. It keeps `<slug>/` and its filed copies when a profile with that
 /// short name now lives in the household, or in a household whose folder inbox reads the same folder,
 /// or when a folder inbox now reads a folder inside `<slug>/`. It keeps `_root` when a folder inbox, in
-/// any household, now reads that folder.
+/// any household, now reads that folder. "The same folder" is the real one on disk ([`what_to_remove`]).
 pub async fn forget_folders(
     pool: &PgPool,
     settings: &Settings,
@@ -192,30 +192,21 @@ pub async fn forget_folders(
             return folders;
         }
     };
-    let rel = |config: &serde_json::Value| {
-        subdir(config)
-            .ok()
-            .map(|p| p.map(Path::to_path_buf).unwrap_or_default())
-    };
     let readers: Vec<(Uuid, PathBuf)> = readers
         .into_iter()
         .filter_map(|(h, config)| rel(&config).map(|p| (h, p)))
         .collect();
+    let (named, readers) = (std::sync::Arc::new(named), std::sync::Arc::new(readers));
     let mut failed = Vec::new();
     for (config, own) in folders {
-        let (slug_folders, root_buckets) = match rel(&config) {
-            Some(mine) => {
-                let drop = mine.join(slug);
-                let on_it: Vec<Uuid> = readers.iter().filter(|(_, r)| *r == mine).map(|(h, _)| *h).collect();
-                let taken = named.iter().any(|h| *h == household_id || on_it.contains(h));
-                let inside = readers.iter().any(|(_, r)| r.starts_with(&drop));
-                (!taken && !inside, own && on_it.is_empty())
-            }
-            // forget_profile refuses the settings itself
-            None => (true, own),
-        };
         let (s, c, sl) = (settings.clone(), config.clone(), slug.to_string());
-        match tokio::task::spawn_blocking(move || forget_profile(&s, &c, &sl, slug_folders, root_buckets)).await {
+        let (named, readers) = (named.clone(), readers.clone());
+        // the checks read the disk too, so they run off the async runtime with the removal
+        let run = move || {
+            let (slug_folders, root_buckets) = what_to_remove(&s, household_id, &sl, &named, &readers, &c, own);
+            forget_profile(&s, &c, &sl, slug_folders, root_buckets)
+        };
+        match tokio::task::spawn_blocking(run).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "removing a deleted profile's folder failed: a job retries it");
@@ -228,6 +219,74 @@ pub async fn forget_folders(
         }
     }
     failed
+}
+
+/// A folder inbox's settings as a path below the inbox folder ("" for the root), or None when they do
+/// not parse.
+fn rel(config: &serde_json::Value) -> Option<PathBuf> {
+    subdir(config)
+        .ok()
+        .map(|p| p.map(Path::to_path_buf).unwrap_or_default())
+}
+
+/// What one folder inbox may lose of a deleted profile: (`slug_folders`, `root_buckets`) for
+/// [`forget_profile`], by the rules of [`forget_folders`]. Another inbox reads the same folder, or a
+/// folder inside the drop, when its settings say so or when its real folder on disk does: through a
+/// link, or a letter-case variant on a file system that ignores case. An inbox folder whose place
+/// cannot be read counts as the same folder, so the files stay.
+fn what_to_remove(
+    settings: &Settings,
+    household_id: Uuid,
+    slug: &str,
+    named: &[Uuid],
+    readers: &[(Uuid, PathBuf)],
+    config: &serde_json::Value,
+    own: bool,
+) -> (bool, bool) {
+    let Some(mine) = rel(config) else {
+        // forget_profile refuses the settings itself
+        return (true, own);
+    };
+    let Some(base) = settings.inbox_dir.as_deref() else {
+        // no inbox folder, so forget_profile has nothing to remove
+        return (false, false);
+    };
+    let drop = mine.join(slug);
+    let (mine_at, drop_at) = (real(&base.join(&mine)), real(&base.join(&drop)));
+    // whether a reader's real folder is `to` (`exact`) or a folder inside it
+    let leads = |r: &Path, to: &Option<PathBuf>, exact: bool| match (real(&base.join(r)), to) {
+        (Some(at), Some(to)) if exact => at == *to,
+        (Some(at), Some(to)) => at.starts_with(to),
+        _ => true,
+    };
+    let on_it: Vec<Uuid> = readers
+        .iter()
+        .filter(|(_, r)| *r == mine || leads(r, &mine_at, true))
+        .map(|(h, _)| *h)
+        .collect();
+    let taken = named.iter().any(|h| *h == household_id || on_it.contains(h));
+    let inside = readers
+        .iter()
+        .any(|(_, r)| r.starts_with(&drop) || leads(r, &drop_at, false));
+    (!taken && !inside, own && on_it.is_empty())
+}
+
+/// Where `path` leads on disk: the real path of the longest part of it that exists (links followed,
+/// letter case as stored), then the rest as written, which is where a folder not made yet would be
+/// made. None when a part of it cannot be read.
+fn real(path: &Path) -> Option<PathBuf> {
+    let mut rest = Vec::new();
+    let mut at = path;
+    loop {
+        match at.canonicalize() {
+            Ok(found) => return Some(rest.iter().rev().fold(found, |p, part| p.join(part))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                rest.push(at.file_name()?);
+                at = at.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 async fn forget_job(ctx: JobContext, job: Job) -> HandlerResult {
