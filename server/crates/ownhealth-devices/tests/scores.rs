@@ -50,6 +50,10 @@ const SCORE_LIKE: [&str; 30] = [
 /// Measurements that look close: each one is still accepted.
 const MEASUREMENTS: [&str; 4] = ["hr_recovery", "sleep_deep", "stride_length", "hrv_rmssd_night"];
 
+/// Keys that hold no score word but are not plain (a capital, a '-', a '.', a space, a leading digit or
+/// '_'): only the plain-key rule refuses them.
+const NOT_PLAIN: [&str; 7] = ["Hr", "HeartRate", "hr-rest", "hr.rest", "hr rest", "1hr", "_hr"];
+
 fn sample(metric: &'static str, source: i16) -> Sample {
     Sample {
         metric,
@@ -75,10 +79,21 @@ async fn a_score_like_series_key_never_reaches_wearable_sample() -> R {
             "{key} reached wearable_sample: {msg}"
         );
     }
+    for key in NOT_PLAIN {
+        let err = store::write(&mut c, sam, None, vec![sample(key, src)], Conflict::Keep).await;
+        let msg = format!("{err:?}");
+        assert!(
+            err.is_err() && msg.contains("wearable_sample_not_a_vendor_score"),
+            "{key} is not a plain key, yet it reached wearable_sample: {msg}"
+        );
+    }
     let n = env
         .count("select count(*) from wearable_sample where profile_id = $1", sam)
         .await?;
-    assert_eq!(n, 0, "no vendor score is stored as a sample");
+    assert_eq!(
+        n, 0,
+        "no vendor score and no key that is not plain is stored as a sample"
+    );
     let mut keys: Vec<&'static str> = wearables::METRICS.iter().map(|m| m.0).collect();
     keys.extend(MEASUREMENTS);
     for key in &keys {
@@ -98,6 +113,11 @@ fn is_score_key_is_the_same_rule_as_the_check() {
     }
     for key in wearables::METRICS.iter().map(|m| m.0).chain(MEASUREMENTS) {
         assert!(!scores::is_score_key(key), "{key}");
+    }
+    // no score word in them, so only the plain-key rule keeps them out
+    for key in NOT_PLAIN {
+        assert!(!scores::is_score_key(key), "{key} holds a score word");
+        assert!(!scores::is_sample_key(key), "{key} is not a plain key");
     }
 }
 
@@ -227,19 +247,22 @@ async fn one_vendor_quirk_does_not_fail_the_write() -> R {
     let mut list_parts = score("sleep", 2, 80.0, None);
     list_parts.components = Some(json!([1, 2]));
     let long = score("activity", 2, 90.0, Some(&"Very good ".repeat(10)));
+    // a finite number past the table's ±1e9 range
+    let huge = score("strain", 2, 1e10, None);
     let batch = vec![
         nan,
         null_parts,
         list_parts,
         long,
+        huge,
         score("sleep", 3, 88.0, Some("Optimal")),
     ];
     let w = scores::write(&mut c, sam, src.id, &batch).await;
     assert!(w.is_ok(), "{w:?}");
     assert_eq!(
         w?,
-        scores::Written { written: 4, dropped: 1 },
-        "the value that is not a number is dropped and counted"
+        scores::Written { written: 4, dropped: 2 },
+        "the value that is not a number and the value past ±1e9 are dropped and counted"
     );
     let rows: Vec<(String, f64, Option<serde_json::Value>, Option<String>)> = sqlx::query_as(
         "select category, value, components, qualifier from vendor_score where profile_id = $1 order by t, category",
