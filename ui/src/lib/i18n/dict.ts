@@ -3417,7 +3417,7 @@ export const dict = {
 		shc_signed_by: "Firmada por",
 		shc_issued: "Emitida el {date}",
 		shc_expires: "caduca el {date}",
-		shc_summary: "{accepted} añadidos · {queued} por revisar · {skipped} ya estaban",
+		shc_summary: "Añadidos: {accepted} · Por revisar: {queued} · Ya estaban: {skipped}",
 		shc_open_timeline: "Abrir la cronología",
 		shc_open_doc: "Abrir el documento de la tarjeta",
 		shc_r_no_card: "No hay ninguna SMART Health Card en este texto, archivo o foto.",
