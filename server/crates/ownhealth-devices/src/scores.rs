@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use ownhealth_core::{Error, Result};
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::PgConnection;
+use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
 /// The `vendor_score.category` CHECK, in the order the Wearables page lists them.
@@ -99,8 +99,19 @@ pub struct Stored {
 pub struct Written {
     /// Rows inserted or changed.
     pub written: u64,
-    /// Scores left out because their value is not a finite number in the table's range.
+    /// Scores left out because their value is not a finite number in the table's range, or their
+    /// qualifier or components hold U+0000.
     pub dropped: u64,
+}
+
+/// True when a string in `v`, a key or a value at any depth, holds U+0000, which Postgres cannot store.
+fn has_nul(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.contains('\0'),
+        Value::Array(a) => a.iter().any(has_nul),
+        Value::Object(o) => o.iter().any(|(k, v)| k.contains('\0') || has_nul(v)),
+        _ => false,
+    }
 }
 
 /// Store `scores` for one profile, brought by the connection `source_id`. A score already stored for
@@ -109,17 +120,19 @@ pub struct Written {
 /// The connection must be the profile's own, or a household connection (no profile) of the profile's
 /// household: a score never names another person's or another household's connection.
 ///
-/// One vendor quirk never fails the batch: a value that is not finite (or past ±1e9) is dropped and
-/// counted, `components` that are not a JSON object are left out, and a qualifier is cut to
-/// `QUALIFIER_MAX` characters. An unknown category or a malformed provider is a mapping bug and fails.
+/// The batch is one transaction. One vendor quirk never fails it: a value that is not finite (or past
+/// ±1e9) and a U+0000 in the qualifier or the components drop that score and count it, `components`
+/// that are not a JSON object are left out, and a qualifier is cut to `QUALIFIER_MAX` characters. An
+/// unknown category or a malformed provider is a mapping bug: it fails the batch and keeps none of it.
 pub async fn write(conn: &mut PgConnection, profile_id: Uuid, source_id: Uuid, scores: &[Score]) -> Result<Written> {
+    let mut tx = conn.begin().await?;
     let ours: bool = sqlx::query_scalar(
         "select exists(select 1 from source s join profile p on p.household_id = s.household_id \
          where s.id = $2 and p.id = $1 and (s.profile_id is null or s.profile_id = $1))",
     )
     .bind(profile_id)
     .bind(source_id)
-    .fetch_one(&mut *conn)
+    .fetch_one(&mut *tx)
     .await?;
     if !ours {
         return Err(Error::Provenance(
@@ -128,7 +141,9 @@ pub async fn write(conn: &mut PgConnection, profile_id: Uuid, source_id: Uuid, s
     }
     let mut out = Written::default();
     for s in scores {
-        if !s.value.is_finite() || s.value.abs() > 1e9 {
+        let nul =
+            s.qualifier.as_deref().is_some_and(|q| q.contains('\0')) || s.components.as_ref().is_some_and(has_nul);
+        if !s.value.is_finite() || s.value.abs() > 1e9 || nul {
             out.dropped += 1;
             continue;
         }
@@ -153,10 +168,11 @@ pub async fn write(conn: &mut PgConnection, profile_id: Uuid, source_id: Uuid, s
         .bind(s.value)
         .bind(qualifier)
         .bind(components)
-        .execute(&mut *conn)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
     }
+    tx.commit().await?;
     Ok(out)
 }
 

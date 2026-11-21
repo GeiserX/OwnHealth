@@ -293,6 +293,63 @@ async fn one_vendor_quirk_does_not_fail_the_write() -> R {
     Ok(())
 }
 
+/// A U+0000 that Postgres cannot store, in a qualifier or anywhere in `components`, drops that score and
+/// counts it; the rest of the batch is written.
+#[tokio::test]
+async fn a_nul_character_drops_its_score_not_the_batch() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let src = env.source("gadgetbridge", Some("sam"), json!({}), None).await?;
+    let mut c = env.db.pool.acquire().await?;
+    let nul_word = score("readiness", 1, 80.0, Some("Go\u{0}od"));
+    let mut nul_value = score("readiness", 2, 81.0, None);
+    nul_value.components = Some(json!({"hrv_balance": {"note": "x\u{0}"}}));
+    let mut nul_key = score("readiness", 3, 82.0, None);
+    nul_key.components = Some(json!({"hrv\u{0}balance": 78}));
+    let mut nul_in_list = score("readiness", 4, 83.0, None);
+    nul_in_list.components = Some(json!({"tags": ["a", "\u{0}"]}));
+    let batch = vec![
+        nul_word,
+        nul_value,
+        nul_key,
+        nul_in_list,
+        score("sleep", 5, 88.0, Some("Optimal")),
+    ];
+    let w = scores::write(&mut c, sam, src.id, &batch).await;
+    assert!(w.is_ok(), "{w:?}");
+    assert_eq!(w?, scores::Written { written: 1, dropped: 4 });
+    let rows: Vec<(String, f64)> =
+        sqlx::query_as("select category, value from vendor_score where profile_id = $1 order by t")
+            .bind(sam)
+            .fetch_all(&mut *c)
+            .await?;
+    assert_eq!(rows, vec![("sleep".to_string(), 88.0)]);
+    Ok(())
+}
+
+/// One write is one transaction: a mapping bug in the middle of a batch keeps none of it.
+#[tokio::test]
+async fn a_mapping_error_keeps_none_of_the_batch() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let src = env.source("gadgetbridge", Some("sam"), json!({}), None).await?;
+    let mut c = env.db.pool.acquire().await?;
+    let batch = vec![
+        score("readiness", 1, 82.0, Some("Good")),
+        score("sleep", 1, 88.0, None),
+        score("mood", 1, 5.0, None),
+        score("activity", 1, 90.0, None),
+    ];
+    assert!(scores::write(&mut c, sam, src.id, &batch).await.is_err());
+    let n = env
+        .count("select count(*) from vendor_score where profile_id = $1", sam)
+        .await?;
+    assert_eq!(n, 0, "the scores before the bad one are not kept");
+    // the connection is still usable after the failed batch
+    assert_eq!(scores::write(&mut c, sam, src.id, &batch[..2]).await?.written, 2);
+    Ok(())
+}
+
 /// A score names a connection of its own person, or a household connection of its own household,
 /// never another person's or another household's.
 #[tokio::test]
