@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use futures::TryStreamExt;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::PgConnection;
+use sqlx::{AssertSqlSafe, PgConnection};
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -180,19 +180,31 @@ impl ChainCheck {
     }
 }
 
+/// The bytes a link hashes, version 1, for the audit_event row `e`: the expression of
+/// `oh_audit_row_v1` in migrations/1250_audit_chain.sql, written out again with every function taken
+/// from pg_catalog. The database owner can replace `oh_audit_row_v1`, but not these, so the check
+/// never trusts a function the owner controls. A test keeps the two copies equal.
+const ROW_V1: &str = "pg_catalog.convert_to(pg_catalog.jsonb_build_array('v1', e.id, e.ts at time zone 'UTC', \
+    e.actor_kind, e.actor_id, e.token_id, e.client, e.via, e.action, e.tool, e.profile_id, e.resource_type, \
+    e.resource_ids, e.src_ids, e.args_summary, e.result_kind, e.rows_out, e.bytes_out, e.withheld, \
+    e.protocol_version, e.ip::text, e.user_agent, e.not_assessed_n, e.arg_bytes)::text, 'UTF8')";
+
 /// Recompute the audit chain (migrations/1250_audit_chain.sql) from seq 1 and name the first link
-/// that does not hold. A rewrite of the whole chain from some row on still verifies here: only the
-/// head kept outside the database (backups) shows that.
+/// that does not hold: an edited, deleted or reordered row, or a row added behind the chain.
+///
+/// It cannot see what leaves a consistent chain behind: the newest rows removed together with their
+/// links, both tables emptied, or the whole chain re-hashed from some row on. Only a head kept
+/// outside the database (the backup anchor) shows those.
 pub async fn verify_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
     type Link = (i64, i64, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
     let mut prev = vec![0u8; 32];
     let mut head: Option<(i64, Vec<u8>)> = None;
     let mut verified = 0_i64;
-    let mut links = sqlx::query_as::<_, Link>(
-        "select c.seq, c.event_id, c.prev_hash, c.hash, case when e.id is not null then oh_audit_row_v1(e) end \
-         from audit_chain c left join audit_event e on e.id = c.event_id order by c.seq",
-    )
-    .fetch(&mut *conn);
+    let sql = format!(
+        "select c.seq, c.event_id, c.prev_hash, c.hash, case when e.id is not null then {ROW_V1} end \
+         from public.audit_chain c left join public.audit_event e on e.id = c.event_id order by c.seq"
+    );
+    let mut links = sqlx::query_as::<_, Link>(AssertSqlSafe(sql)).fetch(&mut *conn);
     while let Some((seq, event_id, prev_hash, hash, row)) = links.try_next().await? {
         let kind = if seq != verified + 1 {
             Some(ChainBreakKind::MissingLink)
@@ -221,7 +233,8 @@ pub async fn verify_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
     drop(links);
     // an event and its link commit together, so a visible event with no link was added behind it
     let unlinked: Option<i64> = sqlx::query_scalar(
-        "select min(e.id) from audit_event e where not exists (select 1 from audit_chain c where c.event_id = e.id)",
+        "select min(e.id) from public.audit_event e \
+         where not exists (select 1 from public.audit_chain c where c.event_id = e.id)",
     )
     .fetch_one(conn)
     .await?;
@@ -515,6 +528,59 @@ mod tests {
 
     // ------------------------------------------------------- round 1 review tests ----
 
+    /// Run `sql` as the database owner with the triggers on.
+    async fn owner_sql(db: &TestDb, sql: &str) -> anyhow::Result<()> {
+        let mut c = sqlx::PgConnection::connect(&db.url).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string())).execute(&mut c).await?;
+        c.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_swapped_row_function_does_not_hide_an_old_edit() -> anyhow::Result<()> {
+        let (db, ids) = chained(5).await?;
+        let x = ids[2];
+        // the owner edits a row, then makes the row function return the bytes the row had before
+        owner_sql(
+            &db,
+            &format!(
+                "create table oh_probe as select e.id, oh_audit_row_v1(e) as b from audit_event e where e.id = {x}; \
+                 set session_replication_role = replica; update audit_event set rows_out = 999 where id = {x}; \
+                 set session_replication_role = origin; \
+                 alter function oh_audit_row_v1(audit_event) rename to oh_audit_row_v1_real; \
+                 create function oh_audit_row_v1(e audit_event) returns bytea language sql stable as $f$ \
+                   select coalesce((select b from oh_probe where id = e.id), oh_audit_row_v1_real(e)) $f$"
+            ),
+        )
+        .await?;
+        let c = check(&db.pool).await?;
+        assert_eq!(c.broken, broke(Some(3), Some(x), ChainBreakKind::Hash), "{c:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rows_linked_after_a_function_swap_are_still_protected() -> anyhow::Result<()> {
+        let (db, ids) = chained(2).await?;
+        let last = ids[1];
+        // the owner makes every later row hash to nothing, then edits one of those rows
+        owner_sql(
+            &db,
+            &format!(
+                "alter function oh_audit_row_v1(audit_event) rename to oh_audit_row_v1_real; \
+                 create function oh_audit_row_v1(e audit_event) returns bytea language sql stable as $f$ \
+                   select case when e.id <= {last} then oh_audit_row_v1_real(e) else ''::bytea end $f$"
+            ),
+        )
+        .await?;
+        let mut tx = db.pool.begin().await?;
+        let id = write_audit(&mut tx, &AuditEvent::new("user", "export", "export")).await?;
+        tx.commit().await?;
+        tamper(&db, &format!("update audit_event set action = 'read' where id = {id}")).await?;
+        let c = check(&db.pool).await?;
+        assert_eq!(c.broken, broke(Some(3), Some(id), ChainBreakKind::Hash), "{c:?}");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn every_v1_column_is_hashed() -> anyhow::Result<()> {
         for set in [
@@ -636,6 +702,45 @@ mod tests {
         let c = check(&db.pool).await?;
         assert!(c.ok(), "{c:?}");
         assert_eq!(c.verified, i64::try_from(WRITERS * ROUNDS)?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_check_hashes_the_same_bytes_as_the_row_function() -> anyhow::Result<()> {
+        let db = TestDb::new().await?;
+        // nulls, odd text, an IPv6 address and a network, microsecond and whole-second times, nested jsonb
+        owner_sql(
+            &db,
+            r#"insert into audit_event (ts, actor_kind, actor_id, token_id, client, via, action, tool, profile_id,
+               resource_type, resource_ids, src_ids, args_summary, result_kind, rows_out, bytes_out, withheld,
+               protocol_version, ip, user_agent, not_assessed_n, arg_bytes) values
+               ('2026-11-20 21:13:46.123456+00', 'token', gen_random_uuid(), gen_random_uuid(), 'Claude "Code"',
+                'mcp', 'read', 'get_trend', gen_random_uuid(), 'observation', array['a"b', 'c\d', E'line\nbreak'],
+                array[]::text[], E'tab\there \u0001 ñ ¿ 漢字 😀', 'ok', -1, 2147483647,
+                '{"z": [1.50, null, true], "a": {"é": "x"}, "bb": 1e3}', '2026-07-28', '2001:db8::1',
+                E'agent/1.0 \\ \x7f', 2, 41),
+               ('2026-01-01 00:00:00.000001+05:30', 'system', null, null, null, 'job', 'purge', null, null, null,
+                null, null, null, null, null, null, null, null, '10.0.0.0/24', null, null, null),
+               (default, 'user', null, null, '', 'ui', 'read', null, null, null, null, null, '', null, 0, 0, '[]',
+                null, '::1', '', 0, 0)"#,
+        )
+        .await?;
+        let rows: Vec<(i64, Vec<u8>, Vec<u8>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "select e.id, oh_audit_row_v1(e), {ROW_V1} from audit_event e order by e.id"
+        )))
+        .fetch_all(&db.pool)
+        .await?;
+        assert_eq!(rows.len(), 3);
+        for (id, function, check) in rows {
+            assert_eq!(
+                String::from_utf8_lossy(&function),
+                String::from_utf8_lossy(&check),
+                "event {id}"
+            );
+            assert_eq!(function, check, "event {id}");
+        }
+        let c = check(&db.pool).await?;
+        assert!(c.ok() && c.verified == 3, "{c:?}");
         Ok(())
     }
 }
