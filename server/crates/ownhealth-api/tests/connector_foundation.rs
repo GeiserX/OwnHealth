@@ -245,3 +245,88 @@ async fn a_connector_source_stays_out_of_every_inbox_route() -> R {
     assert_eq!(one.status, StatusCode::OK, "{}", one.json);
     Ok(())
 }
+
+#[tokio::test]
+async fn changing_a_client_secret_deletes_the_old_one() -> R {
+    let env = env().await?;
+    let (household, client, old) = client_with_secret(&env).await?;
+    let sb = SecretBox::from_settings(&env.settings)?;
+    let mut conn = env.pool().acquire().await?;
+    let new = store_secret(
+        &mut conn,
+        &sb,
+        household,
+        "connector_client_secret",
+        Some("Blue Button"),
+        &SecretString::new("fake-client-secret-two"),
+    )
+    .await?;
+    sqlx::query("update connector_client set client_secret_id = $2 where id = $1")
+        .bind(client)
+        .bind(new)
+        .execute(&mut *conn)
+        .await?;
+    let left: Vec<Uuid> = sqlx::query_scalar("select id from secret order by created_at")
+        .fetch_all(&mut *conn)
+        .await?;
+    assert_eq!(left, vec![new], "the replaced client secret outlived the change");
+    // the reverse: an update that keeps the secret keeps it
+    sqlx::query("update connector_client set client_secret_id = $2, redirect_uri = 'https://ownhealth.rivera.example/cb' where id = $1")
+        .bind(client)
+        .bind(new)
+        .execute(&mut *conn)
+        .await?;
+    assert_eq!(env.scalar_i64("select count(*) from secret").await?, 1);
+    let _ = old;
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_client_per_vendor_and_issuer() -> R {
+    let env = env().await?;
+    let household: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(env.profile("alex"))
+        .fetch_one(env.pool())
+        .await?;
+    let insert = |vendor: &'static str, issuer: Option<&'static str>| {
+        sqlx::query(
+            "insert into connector_client (household_id, vendor, issuer, client_id, redirect_uri) \
+             values ($1, $2, $3, 'fake-client-id', 'https://ownhealth.rivera.example/cb')",
+        )
+        .bind(household)
+        .bind(vendor)
+        .bind(issuer)
+    };
+    insert("meditech", Some("https://fhir.hospital-norte.example"))
+        .execute(env.pool())
+        .await?;
+    insert("meditech", Some("https://fhir.hospital-sur.example"))
+        .execute(env.pool())
+        .await?;
+    insert("epic", None).execute(env.pool()).await?;
+    for (vendor, issuer) in [
+        ("epic", None),
+        ("meditech", Some("https://fhir.hospital-norte.example")),
+    ] {
+        let refused = insert(vendor, issuer)
+            .execute(env.pool())
+            .await
+            .expect_err("a second client for the same vendor and issuer");
+        let code = refused.as_database_error().and_then(|e| e.code()).unwrap_or_default();
+        assert_eq!(code, "23505", "{vendor}: {refused}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn finding_the_sources_of_a_client_uses_an_index() -> R {
+    let env = env().await?;
+    let n = env
+        .scalar_i64(
+            "select count(*) from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0] \
+             where i.indrelid = 'source'::regclass and a.attname = 'connector_client_id'",
+        )
+        .await?;
+    assert_eq!(n, 1, "no index leads with source.connector_client_id");
+    Ok(())
+}
