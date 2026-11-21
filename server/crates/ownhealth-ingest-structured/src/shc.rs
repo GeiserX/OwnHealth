@@ -774,12 +774,10 @@ pub async fn verify(
         return Err(Refusal::Expired(day(exp)));
     }
     // "Revocation": a key with crlVersion has a revocation list at <iss>/.well-known/crl/<kid>.json,
-    // `{"kid", "method", "ctr", "rids": [...]}`; a card with a rid in it is rejected. A list that
-    // cannot be read, is not a list, is another key's or is older than the key's crlVersion refuses the
-    // card: it proves nothing.
-    if jwk.get("crlVersion").is_some()
-        && let Some(rid) = &claims.rid
-    {
+    // `{"kid", "method", "ctr", "rids": [...]}`, and verifiers SHALL download it whether or not the
+    // card has a rid; a card with a rid in it is rejected. A list that cannot be read, is not a list,
+    // is another key's or is older than the key's crlVersion refuses the card: it proves nothing.
+    if jwk.get("crlVersion").is_some() {
         let at = (unverified.iss.clone(), kid.clone());
         if !keys.crl.contains_key(&at) {
             let crl = fetch_json(&format!("{}/.well-known/crl/{kid}.json", unverified.iss), route)
@@ -799,7 +797,9 @@ pub async fn verify(
             }
             keys.crl.insert(at.clone(), crl);
         }
-        if revoked(&keys.crl[&at], rid, claims.nbf) {
+        if let Some(rid) = &claims.rid
+            && revoked(&keys.crl[&at], rid, claims.nbf)
+        {
             return Err(Refusal::Revoked);
         }
     }

@@ -837,6 +837,29 @@ async fn a_card_whose_revocation_list_cannot_be_read_is_refused() -> R {
     Ok(())
 }
 
+/// "Revocation" (SHC 1.4.0): when the key has `crlVersion`, verifiers SHALL download the list, with
+/// no condition on the card's rid. A card with no rid is refused when the list cannot be read, and
+/// imported when it can.
+#[tokio::test]
+async fn a_card_without_a_rid_is_checked_against_the_list_too() -> R {
+    let k = test_key(7);
+    let mut jwk = k.jwk.clone();
+    jwk["crlVersion"] = json!(1);
+    let jws = card(&k, &payload(ISS, day(-1), None));
+    let jwks = ("/.well-known/jwks.json".to_string(), json!({"keys": [jwk]}).to_string());
+    let (port, _) = serve(vec![jwks]).await?;
+    assert_eq!(
+        verify_at(&jws, port).await.map(|_| ()),
+        Err(Refusal::RevocationList("http_404".into())),
+        "no list"
+    );
+    let crl = json!({"kid": k.kid(), "method": "rid", "ctr": 1, "rids": ["AQPCj4wwk6Mt"]});
+    let (port, hits) = site(json!({"keys": [jwk]}), Some((k.kid(), crl))).await?;
+    assert_eq!(verify_at(&jws, port).await.map(|_| ()), Ok(()), "a readable list");
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "the keys and the list");
+    Ok(())
+}
+
 /// "Revocation": a key's `crlVersion` is the list's update counter. A list whose `ctr` is lower is
 /// an old copy, and it cannot show that the card was not revoked since.
 #[tokio::test]
