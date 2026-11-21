@@ -872,8 +872,13 @@ async fn a_revocation_list_older_than_the_key_says_is_refused() -> R {
         (json!(1), Err(Refusal::RevocationList("old_list".into()))),
         (json!(2), Ok(())),
         (json!("3"), Ok(())),
+        (Value::Null, Err(Refusal::RevocationList("old_list".into()))),
     ] {
-        let crl = json!({"kid": k.kid(), "method": "rid", "ctr": ctr, "rids": []});
+        let mut crl = json!({"kid": k.kid(), "method": "rid", "ctr": ctr, "rids": []});
+        // a list with no `ctr` at all cannot show it is at least as new as the key says
+        if ctr.is_null() {
+            crl.as_object_mut().expect("object").shift_remove("ctr");
+        }
         let (port, _) = site(json!({"keys": [jwk]}), Some((k.kid(), crl))).await?;
         assert_eq!(verify_at(&jws, port).await.map(|_| ()), want, "ctr {ctr}");
     }
@@ -1135,5 +1140,57 @@ async fn the_same_card_in_another_form_adds_no_second_document() -> R {
     assert_eq!((again.document_id, again.created), (first.document_id, false));
     assert_eq!((again.summary.accepted, again.summary.skipped), (0, 1));
     assert_eq!(documents(&mut tx, profile.id).await?, 1);
+    Ok(())
+}
+
+/// Two forms of one card sent at the same moment (the text and the file) wait for each other on
+/// the per-profile lock, so the second finds the document of the first instead of making another.
+// ---- r64a race probe (reviewer only, never committed) ----
+#[tokio::test]
+async fn two_forms_of_one_card_stored_at_once_share_a_document() -> R {
+    let env = Env::new().await?;
+    let mut setup = env.tx().await?;
+    let fam = family(&mut setup).await?;
+    let profile = get_profile(&mut setup, fam.profile("alex")).await?.expect("alex");
+    setup.commit().await?;
+    let k = test_key(7);
+    let (port, _) = site(json!({"keys": [k.jwk]}), None).await?;
+    let jws = card(&k, &payload(ISS, day(-30), None));
+    let text = format!("shc:/{}", digits(&jws));
+    let file = json!({"verifiableCredential": [jws]}).to_string();
+    let approved = [HOST.to_string()];
+    let ti = shc::read(text.as_bytes())?;
+    let fi = shc::read(file.as_bytes())?;
+    let Checked::Verified(ct) = shc::check(&ti, &approved, &local(port), now()).await else {
+        panic!("t")
+    };
+    let Checked::Verified(cf) = shc::check(&fi, &approved, &local(port), now()).await else {
+        panic!("f")
+    };
+    let rt = Received {
+        bytes: text.as_bytes(),
+        filename: None,
+        input: &ti,
+        approved: &approved,
+    };
+    let rf = Received {
+        bytes: file.as_bytes(),
+        filename: Some("c.smart-health-card"),
+        input: &fi,
+        approved: &approved,
+    };
+    let mut a = env.tx().await?;
+    let mut b = env.tx().await?;
+    shc::store(&mut a, &env.blobs, &profile, &rt, ct).await?;
+    let (got_b, done_a) = tokio::join!(shc::store(&mut b, &env.blobs, &profile, &rf, cf), async {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        a.commit().await
+    });
+    done_a?;
+    got_b?;
+    b.commit().await?;
+    let mut c = env.db.pool.acquire().await?;
+    let n = documents(&mut c, profile.id).await?;
+    assert_eq!(n, 1, "two forms of one card stored at once made {n} documents");
     Ok(())
 }
