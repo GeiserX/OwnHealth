@@ -1571,6 +1571,54 @@ async fn a_namesake_in_an_unrelated_household_does_not_keep_the_copies() -> R {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_missing_inbox_folder_leaves_nothing_to_retry() -> R {
+    let mut env = Env::new(true).await?;
+    // the folder inbox is set up, but its folder was never made
+    env.settings.inbox_dir = Some(env.dir.path().join("inbox"));
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    folder_source(&env, "estudio", None).await?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        env.scalar_i64("select count(*) from job where kind = 'folder.forget'")
+            .await?,
+        0,
+        "a folder that does not exist left a retry"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rerun_with_no_short_name_ends_as_skipped() -> R {
+    let mut env = Env::new(true).await?;
+    env.settings.inbox_dir = Some(env.dir.path().join("inbox"));
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    ownhealth_inbox::register();
+    // an operator reruns a folder retry that ended once, so its short name is gone
+    let mut c = env.pool().acquire().await?;
+    ownhealth_core::jobs::enqueue(
+        &mut c,
+        "folder.forget",
+        &json!({"household_id": env.fam().household_id,
+                "folders": [{"config": {"subdir": "estudio"}, "own": false}]}),
+        ownhealth_core::jobs::EnqueueOptions::default(),
+    )
+    .await?;
+    drop(c);
+    assert_eq!(run_forget(&env).await?, 1);
+    let (state, result): (String, Option<Value>) =
+        sqlx::query_as("select state, result from job where kind = 'folder.forget'")
+            .fetch_one(env.pool())
+            .await?;
+    assert_eq!(
+        (state.as_str(), result),
+        ("done", Some(json!({"skipped": "no short name"})))
+    );
+    Ok(())
+}
+
 /// Make every audit row of `resource_type` fail, the way a full disk or a broken database would.
 async fn fail_audit(env: &Env, resource_type: &str) -> R {
     sqlx::query(sqlx::AssertSqlSafe(format!(
