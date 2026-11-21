@@ -335,14 +335,17 @@
 {/if}
 
 {#if showShc && prof}
-	<ShcPanel
-		profile={prof.slug}
-		profileName={prof.display_name}
-		ondone={() => {
-			load();
-			refreshReviewTotal();
-		}}
-	/>
+	<!-- a new profile gets a new panel: no card or question carries over to it -->
+	{#key prof.slug}
+		<ShcPanel
+			profile={prof.slug}
+			profileName={prof.display_name}
+			ondone={() => {
+				load();
+				refreshReviewTotal();
+			}}
+		/>
+	{/key}
 {/if}
 
 <div class="inbox">

@@ -25,7 +25,7 @@ export const SHC_REASONS = [
 ] as const;
 
 /** Why the issuer's keys or revocation list could not be read (shc::DETAILS); `http` is `http_<status>`. */
-export const SHC_DETAILS = ['dns', 'timeout', 'connect', 'too_large', 'not_json', 'not_jwks', 'not_crl', 'other_kid', 'http'] as const;
+export const SHC_DETAILS = ['dns', 'timeout', 'connect', 'too_large', 'not_json', 'not_jwks', 'not_crl', 'other_kid', 'old_list', 'http'] as const;
 
 /** The dict key for a refusal reason; a reason this UI does not know gets the general sentence. */
 export function refusalKey(reason: string): string {
@@ -62,13 +62,16 @@ export function refusalVars(reason: string, detail: string | null, iss: string |
 export type ShcSubject = { name: string | null; birth_date: string | null };
 
 /**
- * The warning for a card that may be someone else's, or null when the card names this profile's
- * person. `identity` is the server's matched, hinted, missing or mismatch.
+ * The warning for cards that may be someone else's, or null when they name this profile's person.
+ * `identity` is the server's matched, hinted, missing or mismatch, one result for all the cards, so
+ * only a single card is named.
  */
-export function identityWarning(identity: string, card: ShcSubject, profile: string): { key: string; vars: Record<string, string> } | null {
+export function identityWarning(identity: string, cards: ShcSubject[], profile: string): { key: string; vars: Record<string, string> } | null {
 	if (identity === 'matched') return null;
-	if (identity === 'mismatch' && card.name && card.birth_date) return { key: 'shc_w_other', vars: { name: card.name, birth: card.birth_date, profile } };
-	if (identity === 'mismatch' && card.name) return { key: 'shc_w_other_name', vars: { name: card.name, profile } };
+	const [card] = cards;
+	if (identity === 'mismatch' && cards.length > 1) return { key: 'shc_w_batch', vars: { profile } };
+	if (identity === 'mismatch' && card?.name && card.birth_date) return { key: 'shc_w_other', vars: { name: card.name, birth: card.birth_date, profile } };
+	if (identity === 'mismatch' && card?.name) return { key: 'shc_w_other_name', vars: { name: card.name, profile } };
 	return { key: 'shc_w_unsure', vars: { profile } };
 }
 

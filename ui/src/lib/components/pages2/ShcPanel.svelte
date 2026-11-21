@@ -61,8 +61,7 @@
 	// a card that names someone else, or no one we could match, says so before its rows are accepted
 	const warning = $derived.by(() => {
 		if (answer?.status !== 'imported') return null;
-		const named = answer.cards.find((c) => c.name) ?? answer.cards[0] ?? { name: null, birth_date: null };
-		const w = identityWarning(answer.identity, named, profileName);
+		const w = identityWarning(answer.identity, answer.cards, profileName);
 		return w ? tf(w.key, w.vars) : null;
 	});
 </script>

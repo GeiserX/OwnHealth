@@ -39,17 +39,27 @@ test('a photo with only some codes of a split card says how many could be read',
 	assert.equal(fill(tables.es.shc_r_chunks_unread, refusalVars('chunks_unread', '2/3', null, words('es'))), 'Se pudieron leer 2 de 3 códigos. Haz una foto más cercana de toda la hoja.');
 });
 
+test('a missing code of a split card is named by its number', () => {
+	assert.equal(fill(tables.en.shc_r_chunk_missing, refusalVars('chunk_missing', '2/3', null, words('en'))), 'This card is split over several QR codes, and code 2 is missing.');
+	assert.equal(fill(tables.es.shc_r_chunk_missing, refusalVars('chunk_missing', '2/3', null, words('es'))), 'Esta tarjeta está repartida en varios códigos QR y falta el código 2.');
+});
+
 test('a card for someone else says whose it is, before anything is accepted', () => {
 	const carmen = { name: 'Carmen Ortega', birth_date: '1955-01-30' };
-	assert.equal(identityWarning('matched', carmen, 'Alex Rivera'), null);
-	const w = identityWarning('mismatch', carmen, 'Alex Rivera');
+	assert.equal(identityWarning('matched', [carmen], 'Alex Rivera'), null);
+	const w = identityWarning('mismatch', [carmen], 'Alex Rivera');
 	assert.ok(w);
 	assert.equal(fill(tables.en[w.key], w.vars), 'This card names Carmen Ortega, born 1955-01-30, not Alex Rivera. Its rows wait in review.');
 	assert.equal(fill(tables.es[w.key], w.vars), 'Esta tarjeta es de Carmen Ortega (fecha de nacimiento: 1955-01-30), no de Alex Rivera. Sus filas esperan en revisión.');
 	for (const id of ['missing', 'hinted', 'mismatch']) {
-		const x = identityWarning(id, { name: null, birth_date: null }, 'Alex Rivera');
+		const x = identityWarning(id, [{ name: null, birth_date: null }], 'Alex Rivera');
 		assert.ok(x && tables.en[x.key] && tables.es[x.key], id);
 	}
+	// in a file of several cards the server gives one result for all, so no card is named
+	const alex = { name: 'Alex Rivera', birth_date: '1979-05-14' };
+	const batch = identityWarning('mismatch', [alex, carmen], 'Alex Rivera');
+	assert.equal(batch && fill(tables.en[batch.key], batch.vars), 'One of these cards may be for someone other than Alex Rivera. Its rows wait in review.');
+	assert.equal(batch && fill(tables.es[batch.key], batch.vars), 'Alguna de estas tarjetas puede ser de otra persona, no de Alex Rivera. Sus filas esperan en revisión.');
 });
 
 test('a card document lists its cards from the document flags, and any other document none', () => {
