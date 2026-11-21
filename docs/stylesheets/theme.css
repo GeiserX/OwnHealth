@@ -1,0 +1,226 @@
+/* docs/stylesheets/theme.css: the OwnHealth docs site.
+ *
+ * PLACEHOLDER COLOURS. The site takes its two colours from the banner, and the
+ * banner is not picked yet. Until it is, the two values below are the web
+ * app's own dark palette (docs/mockup/index.html: --bg #0f1115 and --accent
+ * #6ea8fe). When the banner is picked, replace --oh-bg with its background and
+ * --oh-accent with its accent, then set --oh-link-light to the accent's hue
+ * darkened until it passes 4.5:1 on white. Nothing else in this file names a
+ * colour.
+ *
+ * zensical.toml sets `primary: custom` and `accent: custom`, so the theme
+ * paints nothing until the Material variables below exist. The modern variant
+ * has no coloured header band: in the dark scheme the header and the page are
+ * one surface, and in the light scheme the header is white with dark text, so
+ * any light-on-dark rule is scoped to [data-md-color-scheme="slate"].
+ * Telegram-Archive's theme.css is the base; the class prefix here is `oh-`.
+ */
+:root {
+  --oh-bg: #0f1115; /* PLACEHOLDER: banner background */
+  --oh-accent: #6ea8fe; /* PLACEHOLDER: banner accent */
+  --oh-link-light: #1d5fc4; /* PLACEHOLDER: the accent darkened, 6.0:1 on white */
+  --oh-surface: color-mix(in srgb, var(--oh-bg) 88%, #ffffff);
+  --oh-text: #e6e8ee;
+  --oh-muted: #9aa3b2;
+
+  --md-primary-fg-color: var(--oh-bg);
+  --md-primary-fg-color--light: var(--oh-surface);
+  --md-primary-fg-color--dark: color-mix(in srgb, var(--oh-bg) 70%, #000000);
+  --md-primary-bg-color: var(--oh-text);
+  --md-primary-bg-color--light: var(--oh-muted);
+
+  --md-accent-fg-color: var(--oh-accent);
+  --md-accent-fg-color--transparent: color-mix(in srgb, var(--oh-accent) 10%, transparent);
+}
+
+/* Dark scheme: the page body uses the banner background too. */
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: var(--oh-bg);
+  --md-code-bg-color: var(--oh-surface);
+  --md-typeset-a-color: var(--oh-accent);
+}
+
+/* Light scheme: the accent on white is too faint for body links and hovers. */
+[data-md-color-scheme="default"] {
+  --md-typeset-a-color: var(--oh-link-light);
+  --md-accent-fg-color: var(--oh-link-light);
+}
+
+/* Header: a fixed logo size, the mark and the name close, the name heavy. */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 1.6rem;
+  width: 1.6rem;
+}
+
+.md-header__button.md-logo {
+  padding-right: 0.2rem;
+}
+
+.md-header__title {
+  margin-left: 0.2rem;
+}
+
+.md-header__topic:first-child .md-ellipsis {
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+[data-md-color-scheme="slate"] .md-header__topic:first-child .md-ellipsis {
+  color: var(--oh-text);
+}
+
+/* Buttons: outline in the link colour. The primary colour is the page
+   background in the dark scheme, so a default button would read as text. */
+.md-typeset .md-button {
+  color: var(--md-typeset-a-color);
+  border-color: var(--md-typeset-a-color);
+  border-radius: 0.5rem;
+}
+
+.md-typeset .md-button:focus,
+.md-typeset .md-button:hover {
+  background-color: var(--md-typeset-a-color);
+  border-color: var(--md-typeset-a-color);
+  color: #ffffff;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .md-button:focus,
+[data-md-color-scheme="slate"] .md-typeset .md-button:hover,
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary {
+  color: var(--oh-bg);
+}
+
+.md-typeset .md-button--primary {
+  background-color: var(--md-typeset-a-color);
+  border-color: var(--md-typeset-a-color);
+  color: #ffffff;
+}
+
+/* Grid cards: the border takes the link colour on hover. */
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid > .card {
+  border-radius: 0.5rem;
+}
+
+.md-typeset .grid.cards > ul > li:focus-within,
+.md-typeset .grid.cards > ul > li:hover,
+.md-typeset .grid > .card:focus-within,
+.md-typeset .grid > .card:hover {
+  border-color: var(--md-typeset-a-color);
+}
+
+/* The home page keeps an H1 for search, screen readers and the browser tab,
+   hidden visually once the banner shows the name.
+   Use it as: # OwnHealth { .oh-visually-hidden } */
+.md-typeset h1.oh-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Identifiers in tables (LOINC codes, scope names, env vars) do not wrap
+   mid-word. */
+.md-typeset table:not([class]) code {
+  word-break: normal;
+}
+
+/* Screenshots: a thin frame so a dark screenshot does not melt into the dark
+   page. */
+.md-typeset .oh-shot img,
+.md-typeset img.oh-shot {
+  border: 1px solid color-mix(in srgb, var(--oh-muted) 30%, transparent);
+  border-radius: 0.5rem;
+}
+
+/* A gallery of screenshots with captions: three in a row on a wide screen,
+   one on a phone. */
+.md-typeset .oh-gallery {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.8rem;
+  margin: 1em 0;
+}
+
+.md-typeset .oh-gallery figure {
+  margin: 0;
+}
+
+.md-typeset .oh-gallery img {
+  border: 1px solid color-mix(in srgb, var(--oh-muted) 30%, transparent);
+  border-radius: 0.4rem;
+}
+
+/* Hero (home proposal A): pitch on the left, the dashboard on the right. */
+.md-typeset .oh-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 1.6rem;
+  align-items: center;
+  margin: 0.4rem 0 1.6rem;
+  /* A grid sits beside the floated edit and copy buttons and loses their
+     width; clearing them gives the hero the full column. */
+  clear: both;
+}
+
+/* The big first line of a home page (proposals A and C). */
+.md-typeset .oh-hero__title {
+  font-size: 2.2em;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.6em;
+}
+
+.md-typeset .oh-hero img {
+  border: 1px solid color-mix(in srgb, var(--oh-muted) 30%, transparent);
+  border-radius: 0.6rem;
+}
+
+/* Status line: pre-alpha, version, licence. Always visible, never alarming. */
+.md-typeset .oh-status {
+  display: inline-block;
+  padding: 0.15em 0.7em;
+  border: 1px solid color-mix(in srgb, var(--md-typeset-a-color) 50%, transparent);
+  border-radius: 1em;
+  font-size: 0.8em;
+  color: var(--md-typeset-a-color);
+}
+
+/* Two columns (home proposal C): what you see, what your agent sees. */
+.md-typeset .oh-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.2rem;
+  margin: 1em 0;
+  clear: both;
+}
+
+/* Code in a half-width column wraps instead of scrolling out of sight. */
+.md-typeset .oh-split pre > code {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.md-typeset .oh-split > div {
+  padding: 0.2rem 1rem 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--oh-muted) 25%, transparent);
+  border-radius: 0.6rem;
+}
+
+@media screen and (max-width: 59.9844em) {
+  .md-typeset .oh-hero,
+  .md-typeset .oh-split {
+    grid-template-columns: 1fr;
+  }
+
+  .md-typeset .oh-gallery {
+    grid-template-columns: 1fr;
+  }
+}
