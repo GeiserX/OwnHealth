@@ -1,6 +1,7 @@
 <script lang="ts">
 	// Port of the mockup's spark(): grey line, last point in the status colour, optional range band.
 	import { C } from './colors';
+	import { sparkBounds } from './spark';
 	import type { Status } from '#lib/api/types';
 
 	let { values, status = 'ok', w = 74, h = 24, band = null }: {
@@ -13,8 +14,7 @@
 
 	const geo = $derived.by(() => {
 		const vals = values.length ? values : [0];
-		const mn = Math.min(...vals, band ? band[0] : Infinity);
-		const mx = Math.max(...vals, band ? band[1] : -Infinity);
+		const [mn, mx] = sparkBounds(vals, band);
 		const sx = (i: number) => 2 + (i * (w - 6)) / Math.max(1, vals.length - 1);
 		const sy = (v: number) => h - 3 - ((v - mn) / (mx - mn || 1)) * (h - 6);
 		const pts = vals.map((v, i) => `${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(' ');
