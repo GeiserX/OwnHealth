@@ -4,7 +4,7 @@
 //! |---|---|---|
 //! | `POST /ingest/health-auto-export` | `Authorization: Bearer oh_ing_...` (or `X-OwnHealth-Secret`) of a `health_auto_export` source | Health Auto Export JSON v2 -> `{seen, new, duplicate}` |
 //! | `GET /profiles/{p}/cgm/summary?days=14&end=` | session, `read:wearables` | the CGM summary (`ownhealth_devices::cgm::CgmSummary`) with its LOINC codes |
-//! | `GET /profiles/{p}/vendor-scores?days=30` | session, `read:wearables` | the vendor's own scores (`ownhealth_devices::scores::Stored`), each tagged with its provider |
+//! | `GET /profiles/{p}/vendor-scores?days=30` | session, `read:wearables` | the vendor's own scores (`ownhealth_devices::scores::Stored`), each tagged with its provider and its connection |
 //!
 //! The Gadgetbridge export goes through the normal upload (`POST /ingest/upload`, sniffed as
 //! `gadgetbridge_db`); a Nightscout site is a `nightscout` source (`/inboxes`).

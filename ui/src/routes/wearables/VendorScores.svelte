@@ -30,12 +30,14 @@
 				<NotReady error={s.error} onretry={load} />
 			{:else}
 				<ul class="vs">
-					{#each rows as r (r.category + '/' + r.provider)}
+					{#each rows as r (r.category + '/' + r.provider + '/' + (r.source?.id ?? ''))}
 						{@const who = providerLabel(r.provider)}
 						<li>
 							<div class="vs-name">
 								<div style="font-weight:600">{t('vs_c_' + r.category) === 'vs_c_' + r.category ? r.category : t('vs_c_' + r.category)}</div>
-								<div class="dim" style="font-size:11px">{tf('vs_by', { p: who })} · {fmtDay(r.latest.t)}</div>
+								<div class="dim" style="font-size:11px">
+									{tf('vs_by', { p: who })} · {r.source ? tf('vs_via', { s: r.source.label }) : t('vs_no_source')} · {fmtDay(r.latest.t)}
+								</div>
 							</div>
 							{#if r.values.length > 1}<Sparkline values={r.values} status="accent" />{/if}
 							<div class="vs-val">

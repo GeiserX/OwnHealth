@@ -134,17 +134,18 @@ fn score(category: &str, day: u32, value: f64, qualifier: Option<&str>) -> Score
 async fn scores_are_stored_apart_tagged_by_provider_and_a_repull_updates_in_place() -> R {
     let env = Env::new().await?;
     let sam = env.fam.profile("sam");
+    let src = env.source("gadgetbridge", Some("sam"), json!({}), None).await?.id;
     let mut c = env.db.pool.acquire().await?;
     let batch = vec![
         score("readiness", 1, 82.0, Some("Good")),
         score("readiness", 2, 74.0, None),
         score("sleep", 2, 88.0, Some("Optimal")),
     ];
-    assert_eq!(scores::write(&mut c, sam, None, &batch).await?, 3);
+    assert_eq!(scores::write(&mut c, sam, src, &batch).await?, 3);
     // the same pull again changes nothing; a new value for one morning replaces it
-    assert_eq!(scores::write(&mut c, sam, None, &batch).await?, 0);
+    assert_eq!(scores::write(&mut c, sam, src, &batch).await?, 0);
     let again = vec![score("readiness", 2, 76.0, Some("Fair"))];
-    assert_eq!(scores::write(&mut c, sam, None, &again).await?, 1);
+    assert_eq!(scores::write(&mut c, sam, src, &again).await?, 1);
     let since = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).single().unwrap_or_default();
     let rows = scores::list(&mut c, sam, since).await?;
     let got: Vec<(&str, f64, Option<&str>, &str)> = rows
@@ -174,7 +175,56 @@ async fn scores_are_stored_apart_tagged_by_provider_and_a_repull_updates_in_plac
     assert_eq!(n, 0);
     // an unknown category is refused
     let bad = vec![score("mood", 3, 5.0, None)];
-    assert!(scores::write(&mut c, sam, None, &bad).await.is_err());
+    assert!(scores::write(&mut c, sam, src, &bad).await.is_err());
+    Ok(())
+}
+
+fn garmin_morning(value: f64) -> Score {
+    Score {
+        provider: "garmin".into(),
+        category: "body_battery".into(),
+        t: Utc.with_ymd_and_hms(2026, 11, 20, 8, 0, 0).single().unwrap_or_default(),
+        value,
+        qualifier: None,
+        components: None,
+    }
+}
+
+/// Two connections that both bring Garmin's Body Battery for the same moment keep a row each, and the
+/// read names the connection of every row.
+#[tokio::test]
+async fn two_connections_with_the_same_score_keep_a_row_each() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let gb = env.source("gadgetbridge", Some("sam"), json!({}), None).await?;
+    let hae = env.source("health_auto_export", Some("sam"), json!({}), None).await?;
+    let mut c = env.db.pool.acquire().await?;
+    scores::write(&mut c, sam, gb.id, &[garmin_morning(62.0)]).await?;
+    scores::write(&mut c, sam, hae.id, &[garmin_morning(64.0)]).await?;
+    let rows: Vec<(Option<uuid::Uuid>, f64)> =
+        sqlx::query_as("select source_id, value from vendor_score where profile_id = $1 order by value")
+            .bind(sam)
+            .fetch_all(&mut *c)
+            .await?;
+    assert_eq!(rows, vec![(Some(gb.id), 62.0), (Some(hae.id), 64.0)]);
+    Ok(())
+}
+
+/// Removing a connection keeps the scores it brought; they no longer name it.
+#[tokio::test]
+async fn removing_the_connection_keeps_its_scores() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let src = env.source("gadgetbridge", Some("sam"), json!({}), None).await?;
+    let mut c = env.db.pool.acquire().await?;
+    scores::write(&mut c, sam, src.id, &[garmin_morning(62.0)]).await?;
+    assert!(ownhealth_core::sources::delete_source(&mut c, src.id).await?);
+    let rows: Vec<(Option<uuid::Uuid>, f64)> =
+        sqlx::query_as("select source_id, value from vendor_score where profile_id = $1")
+            .bind(sam)
+            .fetch_all(&mut *c)
+            .await?;
+    assert_eq!(rows, vec![(None, 62.0)]);
     Ok(())
 }
 

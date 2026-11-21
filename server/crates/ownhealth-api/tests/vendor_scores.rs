@@ -48,9 +48,9 @@ async fn get(a: &App, who: &str, uri: &str) -> anyhow::Result<(StatusCode, Value
     Ok((status, serde_json::from_slice(&bytes).unwrap_or(Value::Null)))
 }
 
-/// Sam's watch and ring: Garmin Body Battery and Oura readiness over the last days, and one Oura
-/// readiness from 60 days ago.
-async fn seed(a: &App) -> R {
+/// Sam's watch and ring, brought by one Gadgetbridge connection: Garmin Body Battery and Oura
+/// readiness over the last days, and one Oura readiness from 60 days ago.
+async fn seed(a: &App) -> anyhow::Result<uuid::Uuid> {
     let now = Utc::now();
     let s = |provider: &str, category: &str, days_ago: i64, value: f64, qualifier: Option<&str>| Score {
         provider: provider.into(),
@@ -67,14 +67,22 @@ async fn seed(a: &App) -> R {
         s("garmin", "body_battery", 1, 62.0, None),
     ];
     let mut c = a.rt.pool.acquire().await?;
-    scores::write(&mut c, a.family.profile("sam"), None, &batch).await?;
-    Ok(())
+    let src = ownhealth_core::sources::create_source(
+        &mut c,
+        &ownhealth_core::sources::NewSource {
+            profile_id: Some(a.family.profile("sam")),
+            ..ownhealth_core::sources::NewSource::new(a.family.household_id, "gadgetbridge", "Sam's Gadgetbridge")
+        },
+    )
+    .await?;
+    scores::write(&mut c, a.family.profile("sam"), src, &batch).await?;
+    Ok(src)
 }
 
 #[tokio::test]
 async fn the_vendor_scores_come_back_labelled_with_their_provider_and_apart_from_measurements() -> R {
     let a = app().await?;
-    seed(&a).await?;
+    let src = seed(&a).await?;
     let (s, body) = get(&a, "sam", "/profiles/sam/vendor-scores").await?;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(body["days"], json!(30));
@@ -100,6 +108,12 @@ async fn the_vendor_scores_come_back_labelled_with_their_provider_and_apart_from
         "the 60-day-old score is outside the default 30 days"
     );
     assert!(rows.iter().all(|r| r["computed_by"] == json!("provider")));
+    // each score names the connection that brought it
+    assert!(
+        rows.iter()
+            .all(|r| r["source"] == json!({"id": src, "label": "Sam's Gadgetbridge"})),
+        "{body}"
+    );
     let (_, year) = get(&a, "sam", "/profiles/sam/vendor-scores?days=365").await?;
     assert_eq!(year["scores"].as_array().map(Vec::len), Some(4));
     // the measurements never see them

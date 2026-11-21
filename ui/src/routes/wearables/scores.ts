@@ -10,6 +10,8 @@ export interface VendorScore {
 	qualifier: string | null;
 	components: Record<string, unknown> | null;
 	computed_by: 'provider';
+	/** The connection that brought the score; null once that connection is removed. */
+	source: { id: string; label: string } | null;
 }
 
 export interface VendorScores {
@@ -23,16 +25,18 @@ export const CATEGORIES = ['readiness', 'recovery', 'sleep', 'activity', 'stress
 export interface ScoreRow {
 	provider: string;
 	category: string;
+	source: VendorScore['source'];
 	latest: VendorScore;
 	/** The window's values, oldest first, for the sparkline. */
 	values: number[];
 }
 
-/** One row per provider and category: categories in CATEGORIES order (unknown ones last), then provider. */
+/** One row per provider, category and connection: categories in CATEGORIES order (unknown ones last),
+ * then provider, then connection. Two connections that bring the same vendor's score keep a row each. */
 export function scoreRows(scores: VendorScore[]): ScoreRow[] {
 	const groups = new Map<string, VendorScore[]>();
 	for (const s of scores) {
-		const key = `${s.category}\u0000${s.provider}`;
+		const key = `${s.category}\u0000${s.provider}\u0000${s.source?.id ?? ''}`;
 		groups.set(key, [...(groups.get(key) ?? []), s]);
 	}
 	const rank = (c: string) => {
@@ -42,9 +46,15 @@ export function scoreRows(scores: VendorScore[]): ScoreRow[] {
 	return [...groups.values()]
 		.map((g) => {
 			const sorted = [...g].sort((a, b) => Date.parse(a.t) - Date.parse(b.t));
-			return { provider: g[0].provider, category: g[0].category, latest: sorted[sorted.length - 1], values: sorted.map((s) => s.value) };
+			return { provider: g[0].provider, category: g[0].category, source: g[0].source, latest: sorted[sorted.length - 1], values: sorted.map((s) => s.value) };
 		})
-		.sort((a, b) => rank(a.category) - rank(b.category) || a.category.localeCompare(b.category) || a.provider.localeCompare(b.provider));
+		.sort(
+			(a, b) =>
+				rank(a.category) - rank(b.category) ||
+				a.category.localeCompare(b.category) ||
+				a.provider.localeCompare(b.provider) ||
+				(a.source?.label ?? '\uffff').localeCompare(b.source?.label ?? '\uffff')
+		);
 }
 
 // Brand names are never translated.

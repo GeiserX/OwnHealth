@@ -5,7 +5,9 @@
 -- go into wearable_sample: they live here, tagged computed_by 'provider', with the provider's name.
 -- The rule pack, the calculators and MCP never read this table; only the Wearables page shows it.
 --
--- One row per profile, provider, category and time, so a re-pull updates the row in place.
+-- One row per profile, connection, provider, category and time, so a re-pull updates the row in place
+-- and two connections that bring the same vendor keep a row each. `source_id` is the connection that
+-- brought the score; removing the connection keeps the score, which then names no connection.
 -- `qualifier` is the vendor's own word for the score ("Optimal"), `components` its contributors.
 -- Not a clinical row: no lifecycle trigger. Deleting the profile deletes its scores.
 create table vendor_score (
@@ -20,7 +22,7 @@ create table vendor_score (
   qualifier text check (char_length(qualifier) <= 80),
   components jsonb check (jsonb_typeof(components) = 'object'),
   computed_by text not null default 'provider' check (computed_by = 'provider'),
-  unique (profile_id, provider, category, t));
+  unique (profile_id, source_id, provider, category, t));
 
 -- The guard: a series key that names a vendor score cannot reach wearable_sample. A key must be plain
 -- (lowercase letters, digits and '_', starting with a letter), so 'BodyBattery', 'body-battery' and
