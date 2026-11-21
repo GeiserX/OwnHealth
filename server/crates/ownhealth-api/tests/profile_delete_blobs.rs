@@ -1438,6 +1438,35 @@ async fn fail_audit(env: &Env, resource_type: &str) -> R {
 }
 
 #[tokio::test]
+async fn the_folder_retry_is_queued_in_the_delete_transaction() -> R {
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    folder_source(&env, "estudio", None).await?;
+    std::fs::create_dir_all(inbox.join("estudio/alex"))?;
+    std::fs::write(inbox.join("estudio/alex/escaneo.pdf"), b"%PDF-1.7 synthetic scan")?;
+    // the delete fails before its commit, so nothing of it may stay
+    fail_audit(&env, "profile").await?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_ne!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        env.scalar_i64("select count(*) from profile where slug = 'alex'")
+            .await?,
+        1
+    );
+    assert_eq!(
+        env.scalar_i64("select count(*) from job where kind = 'folder.forget'")
+            .await?,
+        0,
+        "a retry outlived the rolled-back delete: it would remove a live person's folders"
+    );
+    assert!(inbox.join("estudio/alex/escaneo.pdf").is_file());
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_done_delete_answers_success_when_its_last_audit_fails() -> R {
     let env = Env::new(true).await?;
     let (_, report) = document(
@@ -1463,5 +1492,25 @@ async fn a_done_delete_answers_success_when_its_last_audit_fails() -> R {
             .await?,
         0
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_file_already_missing_is_not_counted_as_removed() -> R {
+    let env = Env::new(true).await?;
+    let alex = env.profile("alex");
+    let (_, gone) = document(&env, alex, "%PDF-1.7 synthetic report already gone", "application/pdf").await?;
+    let (_, here) = document(&env, alex, "%PDF-1.7 synthetic LabNorte report", "application/pdf").await?;
+    std::fs::remove_file(env.rt.blobs.path(&gone)?)?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        (&r.json["blobs"], &r.json["blobs_pending"]),
+        (&json!(1), &json!(0)),
+        "a file that was already missing counted as removed: {}",
+        r.json
+    );
+    assert!(!stored(env.rt.blobs.root()).contains(&here));
     Ok(())
 }
