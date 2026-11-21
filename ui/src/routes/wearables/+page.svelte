@@ -17,6 +17,7 @@
 	import { ago } from '#lib/components/pages2/fmt';
 	import { currentProfile } from '#lib/state/app.svelte';
 	import VendorScores from './VendorScores.svelte';
+	import { windowChoices } from './scores';
 
 	// How each known metric draws, as in the mockup. Unknown metrics get a plain line.
 	// `max` and `minSpan` keep an axis honest: SpO2 never passes 100 %, and a 1 bpm change is not a cliff.
@@ -69,9 +70,11 @@
 	const providerName = (p: string) => (t('fu_k_' + p) === 'fu_k_' + p ? p : t('fu_k_' + p));
 	const localTime = (iso: string) => new Intl.DateTimeFormat(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
 	const windowWord = (d: number) => t(d === 7 ? 'h1_w7' : d === 30 ? 'h1_w30' : 'h1_w1y');
-	// The longest series decides which windows make sense; never offer a window the data cannot fill.
+	// The longest series, or the vendor scores' own span, decides which windows make sense; never offer a
+	// window the data cannot fill.
 	const span = $derived(Math.max(0, ...metrics.map((m) => m.series.length)));
-	const windows = $derived([7, 30, 365].filter((d) => d === 7 || span >= d));
+	let scoreSpan = $state(0);
+	const windows = $derived(windowChoices(Math.max(span, scoreSpan)));
 	const fmtDay = (d: string) => new Intl.DateTimeFormat(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(d));
 
 	function chart(m: WearableMetric) {
@@ -227,7 +230,7 @@
 </div>
 
 <!-- The vendor's own scores, apart from the measurements above (slice 27). -->
-<VendorScores slug={profile?.slug} {days} />
+<VendorScores slug={profile?.slug} {days} bind:span={scoreSpan} />
 
 <style>
 	.cgm {

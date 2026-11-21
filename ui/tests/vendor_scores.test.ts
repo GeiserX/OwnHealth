@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fmtScoreDay, providerLabel, scoreDecimals, scoreRows, type VendorScore } from '../src/routes/wearables/scores.ts';
+import { fmtScoreDay, inWindow, MAX_DAYS, providerLabel, scoreDecimals, scoreRows, scoreSpanDays, windowChoices, type VendorScore } from '../src/routes/wearables/scores.ts';
 
 const watch = { id: 'b1c2', label: "Sam's Gadgetbridge" };
 const s = (provider: string, category: string, t: string, value: number, qualifier: string | null = null, source: VendorScore['source'] = watch): VendorScore => ({
@@ -50,7 +50,7 @@ test('vendor scores: brand names stay as the vendor writes them, values as it se
 
 test('vendor scores: the Wearables page shows the card apart, and every card word exists in es and en', () => {
 	const page = readFileSync(new URL('../src/routes/wearables/+page.svelte', import.meta.url), 'utf8');
-	assert.match(page, /<VendorScores slug=\{profile\?\.slug\} \{days\} \/>/);
+	assert.match(page, /<VendorScores slug=\{profile\?\.slug\} \{days\} bind:span=\{scoreSpan\} \/>/);
 	const dict = readFileSync(new URL('../src/lib/i18n/dict.ts', import.meta.url), 'utf8');
 	const keys = ['vs_title', 'vs_by_vendor', 'vs_by', 'vs_word', 'vs_via', 'vs_no_source', 'vs_note', 'i2_rt_vendor_score'].concat(
 		['readiness', 'recovery', 'sleep', 'activity', 'stress', 'strain', 'body_battery'].map((c) => 'vs_c_' + c)
@@ -96,4 +96,32 @@ test('vendor scores: two connections that bring the same vendor keep a row each,
 	);
 	const card = readFileSync(new URL('../src/routes/wearables/VendorScores.svelte', import.meta.url), 'utf8');
 	assert.match(card, /tf\('vs_via', \{ s: r\.source\.label \}\)/, 'the card names the connection');
+});
+
+test('vendor scores: a profile with a year of scores and no long measurement series can pick a year', () => {
+	const now = Date.parse('2026-11-21T12:00:00Z');
+	const day = (n: number) => new Date(now - n * 86_400_000).toISOString();
+	const year = Array.from({ length: 365 }, (_, n) => s('oura', 'readiness', day(n + 0.25), 70 + (n % 20)));
+	assert.equal(scoreSpanDays(year, now), 365);
+	// no measurement series at all (span 0), or one of the summary's 90 days: the scores still open a year
+	assert.deepEqual(windowChoices(Math.max(0, scoreSpanDays(year, now))), [7, 30, 365]);
+	assert.deepEqual(windowChoices(Math.max(90, scoreSpanDays(year, now))), [7, 30, 365]);
+	// three weeks of scores fill no 30-day window; none at all leave the measurements to decide
+	assert.deepEqual(windowChoices(scoreSpanDays(year.slice(0, 21), now)), [7]);
+	assert.equal(scoreSpanDays([], now), 0);
+	assert.deepEqual(windowChoices(Math.max(40, scoreSpanDays([], now))), [7, 30]);
+	// the card shows the chosen window of the year it read, as the route would send it
+	assert.equal(inWindow(year, 7, now).length, 7);
+	assert.equal(inWindow(year, 30, now).length, 30);
+	assert.equal(inWindow(year, 365, now).length, 365);
+	assert.equal(MAX_DAYS, 365);
+});
+
+test('vendor scores: the page counts the scores\' span in its window list, and the card reads the whole year', () => {
+	const page = readFileSync(new URL('../src/routes/wearables/+page.svelte', import.meta.url), 'utf8');
+	assert.match(page, /const windows = \$derived\(windowChoices\(Math\.max\(span, scoreSpan\)\)\);/);
+	const card = readFileSync(new URL('../src/routes/wearables/VendorScores.svelte', import.meta.url), 'utf8');
+	assert.match(card, /vendor-scores`, \{ days: MAX_DAYS \}/);
+	assert.match(card, /span = scoreSpanDays\(all, Date\.now\(\)\)/);
+	assert.match(card, /scoreRows\(inWindow\(all, days, Date\.now\(\)\)\)/);
 });

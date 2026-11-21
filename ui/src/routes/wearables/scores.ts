@@ -19,6 +19,31 @@ export interface VendorScores {
 	scores: VendorScore[];
 }
 
+/** The longest window the route serves (`days` 1 to 365). The card reads it all once and shows the
+ * page's window of it, so the page can offer a window as long as the scores reach. */
+export const MAX_DAYS = 365;
+
+const DAY_MS = 86_400_000;
+
+/** How many days back the oldest score reaches from `now`, rounded up; 0 with no score. */
+export function scoreSpanDays(scores: VendorScore[], now: number): number {
+	let oldest = Infinity;
+	for (const s of scores) oldest = Math.min(oldest, Date.parse(s.t));
+	return Number.isFinite(oldest) ? Math.max(0, Math.ceil((now - oldest) / DAY_MS)) : 0;
+}
+
+/** The scores of the last `days` before `now`, as the route sends them for that window. */
+export function inWindow(scores: VendorScore[], days: number, now: number): VendorScore[] {
+	const since = now - days * DAY_MS;
+	return scores.filter((s) => Date.parse(s.t) >= since);
+}
+
+/** The windows the Wearables page offers: 7 days always, 30 days and a year once the longest span, of a
+ * measurement series or of the vendor scores, fills them. */
+export function windowChoices(span: number): number[] {
+	return [7, 30, 365].filter((d) => d === 7 || span >= d);
+}
+
 /** The server's categories (ownhealth-devices scores::CATEGORIES), in the order the card lists them. */
 export const CATEGORIES = ['readiness', 'recovery', 'sleep', 'activity', 'stress', 'strain', 'body_battery'] as const;
 

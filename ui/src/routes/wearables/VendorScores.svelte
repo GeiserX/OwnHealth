@@ -1,24 +1,29 @@
 <script lang="ts">
 	// The vendor scores card of the Wearables page (GET /profiles/{p}/vendor-scores): the vendor's own
 	// numbers, each labelled with who computed it, apart from the measurement charts. Hidden while
-	// there is none; a failed read shows its error instead of hiding.
+	// there is none; a failed read shows its error instead of hiding. It reads the route's whole year once
+	// and shows the page's window of it; `span` tells the page how many days back the scores reach, so
+	// the page offers a window the scores fill even when no measurement series is that long.
 	import { get, p } from '#lib/api/core';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import { Loader, tf } from '#lib/components/pages1/util.svelte';
 	import Sparkline from '#lib/components/Sparkline.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
-	import { fmtScoreDay, providerLabel, scoreDecimals, scoreRows, type VendorScores } from './scores';
+	import { fmtScoreDay, inWindow, MAX_DAYS, providerLabel, scoreDecimals, scoreRows, scoreSpanDays, type VendorScores } from './scores';
 
-	let { slug, days }: { slug: string | undefined; days: number } = $props();
+	let { slug, days, span = $bindable(0) }: { slug: string | undefined; days: number; span?: number } = $props();
 
 	const s = new Loader<VendorScores>();
 	function load() {
-		const d = days;
-		if (slug) s.run(() => get<VendorScores>(`${p(slug)}/vendor-scores`, { days: d }), `${slug}/${d}`);
+		if (slug) s.run(() => get<VendorScores>(`${p(slug)}/vendor-scores`, { days: MAX_DAYS }), slug);
 	}
 	$effect(load);
 
-	const rows = $derived(scoreRows(s.data?.scores ?? []));
+	const all = $derived(s.data?.scores ?? []);
+	$effect(() => {
+		span = scoreSpanDays(all, Date.now());
+	});
+	const rows = $derived(scoreRows(inWindow(all, days, Date.now())));
 	const fmtDay = (iso: string) => fmtScoreDay(iso, i18n.lang);
 </script>
 
