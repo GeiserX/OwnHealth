@@ -256,8 +256,9 @@ jobs:
             echo "runners=$both" >> "$GITHUB_OUTPUT"; exit 0
           fi
           # --no-renames lists both paths of a move, so a file moved out of an input path still counts;
-          # core.quotePath=false prints a non-ASCII path as itself, not quoted, so the anchors still match
-          git -c core.quotePath=false diff --no-renames --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed"
+          # -z prints every path as itself (git quotes non-ASCII, tabs, quotes and backslashes otherwise,
+          # and a quoted path misses the anchors), and tr makes it one path per line again
+          git diff -z --no-renames --name-only HEAD^1 HEAD | tr '\0' '\n' > "$RUNNER_TEMP/changed"
           echo "$(wc -l < "$RUNNER_TEMP/changed") files changed"
           inputs='^(Dockerfile|\.dockerignore|scripts/|ui/package\.json$|ui/pnpm-lock\.yaml$|ui/\.npmrc$|server/vendor/|server/crates/ownhealth-ocr/|\.github/workflows/)|(^|/)(Cargo\.(toml|lock)|build\.rs|rust-toolchain[^/]*|RUST_TOOLCHAIN)$|(^|/)\.cargo/'
           # grep exits 1 for no match and 2 for an error (a broken pattern): an error must not read as
