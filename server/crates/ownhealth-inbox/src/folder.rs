@@ -109,8 +109,8 @@ pub fn forget_profile(
             tracing::warn!("a folder inbox leads out of the inbox folder: its folders are left alone");
             return Ok(());
         }
-        // no folder, so nothing to remove
-        (Err(e), _) | (_, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        // no folder (or a file in the way), so nothing to remove
+        (Err(e), _) | (_, Err(e)) if gone(&e) => return Ok(()),
         (Err(e), _) | (_, Err(e)) => return Err(e.into()),
     };
     let mut gone = Vec::new();
@@ -166,7 +166,8 @@ pub async fn queue_forget(
 /// short name now lives in the household, or in a household whose folder inbox reads the same folder,
 /// or when a folder inbox now reads a folder inside `<slug>/`. It keeps `_root` when a folder inbox, in
 /// any household, now reads that folder. "The same folder" is the real one on disk ([`what_to_remove`]).
-/// A folder fails, so its retry stays, while it or another folder inbox of the household cannot be read.
+/// A folder fails, so its retry stays, while it or another folder inbox of the household cannot be read,
+/// and while it would lose its root files and a folder inbox of another household cannot be read.
 pub async fn forget_folders(
     pool: &PgPool,
     settings: &Settings,
@@ -233,11 +234,13 @@ fn rel(config: &serde_json::Value) -> Option<PathBuf> {
 /// What one folder inbox may lose of a deleted profile: (`slug_folders`, `root_buckets`) for
 /// [`forget_profile`], by the rules of [`forget_folders`]. Another inbox reads the same folder, or a
 /// folder inside the drop, when its settings say so or when its real folder on disk does: through a
-/// link, or a letter-case variant on a file system that ignores case. The drop's own last part is not
-/// followed, the way forget_profile removes a drop that is a link and never its target. An error when
-/// this inbox's folder, or the folder of another inbox of the same household, cannot be read: the files
-/// stay, and the retry waits, then shows in the household's review queue. An inbox of another household
-/// whose folder cannot be read reads no file either, so it keeps nothing here.
+/// link, or a letter-case variant on a file system that ignores case. A drop that is a link is not
+/// followed, the way forget_profile removes it and never its target; a drop that is a folder counts by
+/// its spelling on disk. An error when this inbox's folder, or the folder of another inbox of the same
+/// household, cannot be read: the files stay, and the retry waits, then shows in the household's review
+/// queue. The same when the root files would go and the folder of an inbox of another household cannot
+/// be read, since it may lead here and those may be its only copies. Otherwise such an inbox keeps
+/// nothing here, so it never holds up the deletes of other households.
 fn what_to_remove(
     settings: &Settings,
     household_id: Uuid,
@@ -257,32 +260,53 @@ fn what_to_remove(
     };
     let unreadable = || Error::Invalid("a folder inbox's folder cannot be read: its files stay until it can".into());
     let mine_at = real(&base.join(&mine)).ok_or_else(unreadable)?;
-    let (drop, drop_at) = (mine.join(slug), mine_at.join(slug));
-    let (mut on_it, mut inside) = (Vec::new(), false);
+    let drop = mine.join(slug);
+    let drop_at = match std::fs::symlink_metadata(mine_at.join(slug)) {
+        Ok(m) if m.is_dir() => mine_at.join(slug).canonicalize().map_err(|_| unreadable())?,
+        Ok(_) => mine_at.join(slug),
+        Err(e) if gone(&e) => mine_at.join(slug),
+        Err(_) => return Err(unreadable()),
+    };
+    let (mut on_it, mut inside, mut unknown) = (Vec::new(), false, false);
     for (h, r) in readers {
         let at = real(&base.join(r));
-        if at.is_none() && *h == household_id {
-            return Err(unreadable());
+        if at.is_none() {
+            if *h == household_id {
+                return Err(unreadable());
+            }
+            unknown = true;
         }
         if *r == mine || at.as_ref() == Some(&mine_at) {
             on_it.push(*h);
         }
         inside |= r.starts_with(&drop) || at.is_some_and(|at| at.starts_with(&drop_at));
     }
+    let root_buckets = own && on_it.is_empty();
+    if root_buckets && unknown {
+        return Err(unreadable());
+    }
     let taken = named.iter().any(|h| *h == household_id || on_it.contains(h));
-    Ok((!taken && !inside, own && on_it.is_empty()))
+    Ok((!taken && !inside, root_buckets))
+}
+
+/// A path that leads to nothing: no such file, or a part of it is a file, which has nothing below it.
+fn gone(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
 }
 
 /// Where `path` leads on disk: the real path of the longest part of it that exists (links followed,
 /// letter case as stored), then the rest as written, which is where a folder not made yet would be
-/// made. None when a part of it cannot be read.
+/// made (a path below a file leads nowhere, the same). None when a part of it cannot be read.
 fn real(path: &Path) -> Option<PathBuf> {
     let mut rest = Vec::new();
     let mut at = path;
     loop {
         match at.canonicalize() {
             Ok(found) => return Some(rest.iter().rev().fold(found, |p, part| p.join(part))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e) if gone(&e) => {
                 rest.push(at.file_name()?);
                 at = at.parent()?;
             }
