@@ -718,10 +718,10 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
             stuck.push(sha.clone());
         }
     }
-    if !stuck.is_empty()
-        && let Err(e) = household::retry_unlink(&rt.pool, result.household_id, &stuck).await
+    if let Some(job) = result.unlink_job
+        && let Err(e) = household::settle_unlink(&rt.pool, job, &stuck).await
     {
-        tracing::error!(error = %e, "could not queue the retry of a blob delete");
+        tracing::warn!(error = %e, "could not trim the retry of a blob delete: it checks every file again");
     }
     // the profile's drops and filed copies in the folder inboxes
     for f in result.folders.clone() {

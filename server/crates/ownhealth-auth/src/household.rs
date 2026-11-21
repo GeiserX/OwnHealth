@@ -677,9 +677,10 @@ async fn still_referenced(conn: &mut PgConnection, sha: &[u8]) -> Result<bool> {
 /// folders of the folder inboxes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deleted {
-    pub household_id: Uuid,
     pub rows: Vec<(String, u64)>,
     pub blobs: Vec<String>,
+    /// The queued retry of `blobs`, for the caller to trim after its own unlinks.
+    pub unlink_job: Option<i64>,
     /// The household's folder inboxes, read before the delete: their folders may hold the profile's files.
     pub folders: Vec<FolderInbox>,
 }
@@ -765,10 +766,6 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     .bind(profile_id)
     .fetch_all(&mut *conn)
     .await?;
-    let household_id: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
-        .bind(profile_id)
-        .fetch_one(&mut *conn)
-        .await?;
     // candidate_row -> observation -> src -> candidate_row is a cycle: cut it first.
     sqlx::query(
         "update candidate_row set observation_id = null where observation_id in \
@@ -868,8 +865,25 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
         }
     }
     orphans.sort();
+    // The retry of a file the caller cannot remove after the commit (a busy or read-only disk), queued
+    // here so it commits with the rows: a crash between the commit and the unlinks leaves the job.
+    // The caller trims it to the files that stuck, or drops it when none did.
+    let unlink_job = if orphans.is_empty() {
+        None
+    } else {
+        enqueue(
+            &mut *conn,
+            UNLINK_JOB,
+            &json!({"blobs": orphans}),
+            EnqueueOptions {
+                run_after: Some(chrono::Utc::now() + chrono::Duration::seconds(60)),
+                ..EnqueueOptions::default()
+            },
+        )
+        .await?
+    };
     Ok(Deleted {
-        household_id,
+        unlink_job,
         rows: counts.into_iter().filter(|(_, n)| *n > 0).collect(),
         blobs: orphans,
         folders: folders
@@ -879,17 +893,23 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     })
 }
 
-/// Queue a retry for the files a profile delete could not remove after its commit (a busy or
-/// read-only disk). The job checks each one again, so a file a new arrival named since stays.
-pub async fn retry_unlink(pool: &PgPool, household_id: Uuid, blobs: &[String]) -> Result<Option<i64>> {
-    let mut conn = pool.acquire().await?;
-    Ok(enqueue(
-        &mut conn,
-        UNLINK_JOB,
-        &json!({"household_id": household_id, "blobs": blobs}),
-        EnqueueOptions::default(),
-    )
-    .await?)
+/// After the caller's unlinks: keep the queued retry for the files that stuck, or drop it when every
+/// file went. The job checks each file again, so a file a new arrival named since stays. A retry that
+/// runs out of attempts stays as a dead job with a review item for the operator.
+pub async fn settle_unlink(pool: &PgPool, job_id: i64, stuck: &[String]) -> Result<()> {
+    if stuck.is_empty() {
+        sqlx::query("delete from job where id = $1 and state = 'queued'")
+            .bind(job_id)
+            .execute(pool)
+            .await?;
+    } else {
+        sqlx::query("update job set payload = $2 where id = $1 and state = 'queued'")
+            .bind(job_id)
+            .bind(json!({"blobs": stuck}))
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {

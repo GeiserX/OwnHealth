@@ -670,8 +670,12 @@ async fn the_scanner_folder_keeps_no_copy_of_the_persons_files() -> R {
     symlink(&outside, root.join(".failed/alex"))?;
     std::fs::write(root.join("alex/nuevo.pdf"), report("LN-4"))?;
     symlink(outside.join("keep.txt"), root.join("alex/enlace.txt"))?;
-    std::fs::create_dir_all(own_root.join(".failed/_root"))?;
-    std::fs::write(own_root.join(".failed/_root/roto.pdf"), b"%PDF-1.7 broken")?;
+    // a parent folder that is a link: `.failed` of Alex's own inbox points outside the inbox, at a folder
+    // that happens to hold a `_root` of its own; nothing is deleted through it
+    let parent = env.dir.path().join("elsewhere-parent");
+    std::fs::create_dir_all(parent.join("_root"))?;
+    std::fs::write(parent.join("_root/keep.pdf"), b"%PDF-1.7 not in the inbox")?;
+    symlink(&parent, own_root.join(".failed"))?;
     let docs: Vec<String> = sqlx::query_scalar("select encode(blob_sha256, 'hex') from document where profile_id = $1")
         .bind(alex)
         .fetch_all(env.pool())
@@ -688,50 +692,81 @@ async fn the_scanner_folder_keeps_no_copy_of_the_persons_files() -> R {
         root.join(".done/alex"),
         root.join(".failed/alex"),
         own_root.join(".done/_root"),
-        own_root.join(".failed/_root"),
     ] {
         assert!(gone(&p), "{} is still there", p.display());
     }
     assert!(outside.join("keep.txt").is_file(), "a link was followed");
+    assert!(parent.join("_root/keep.pdf").is_file(), "the delete went through a linked parent folder");
+    assert!(own_root.join(".failed").is_symlink(), "the linked parent folder went");
     assert!(root.join("sam/LN-2.pdf").is_file(), "Sam's drop went too");
     let left = stored(env.rt.blobs.root());
     assert!(docs.iter().all(|d| !left.contains(d)), "{left:?}");
     Ok(())
 }
 
-#[tokio::test]
-async fn a_file_the_delete_could_not_remove_goes_on_the_retry() -> R {
-    let env = Env::new(true).await?;
-    ownhealth_auth::register();
-    let (alex, sam) = (env.profile("alex"), env.profile("sam"));
+/// Alex's report whose file the disk will not let go yet (a folder sits where the file should be).
+async fn stuck_report(env: &Env) -> anyhow::Result<(String, std::path::PathBuf)> {
     let (_, stuck) = document(
-        &env,
-        alex,
+        env,
+        env.profile("alex"),
         "%PDF-1.7 synthetic report the disk would not let go",
         "application/pdf",
     )
     .await?;
+    let path = env.rt.blobs.path(&stuck)?;
+    std::fs::remove_file(&path)?;
+    std::fs::create_dir_all(path.join("busy"))?;
+    Ok((stuck, path))
+}
+
+/// The unlink job's state, attempts, and whether it waits for a later run.
+async fn unlink_state(env: &Env) -> anyhow::Result<(String, i32, bool)> {
+    Ok(sqlx::query_as("select state, attempts, run_after > now() from job where kind = $1")
+        .bind(UNLINK_JOB)
+        .fetch_one(env.pool())
+        .await?)
+}
+
+/// Run the unlink job now.
+async fn run_unlink(env: &Env) -> anyhow::Result<usize> {
+    sqlx::query("update job set run_after = now() where kind = $1 and state = 'queued'")
+        .bind(UNLINK_JOB)
+        .execute(env.pool())
+        .await?;
+    let ctx = JobContext::new(env.pool().clone(), Arc::new(env.settings.clone()), env.rt.blobs.clone());
+    Ok(drain(&ctx, "core", 5, Some(&[UNLINK_JOB.to_string()])).await?)
+}
+
+#[tokio::test]
+async fn a_file_the_delete_could_not_remove_goes_on_the_retry() -> R {
+    let env = Env::new(true).await?;
+    ownhealth_auth::register();
+    let sam = env.profile("sam");
+    let (stuck, path) = stuck_report(&env).await?;
     let (_, again) = document(
         &env,
-        alex,
+        env.profile("alex"),
         "%PDF-1.7 synthetic report Sam uploads again later",
         "application/pdf",
     )
     .await?;
-    // the file cannot be removed right now (a folder where the file should be)
-    let path = env.rt.blobs.path(&stuck)?;
-    std::fs::remove_file(&path)?;
-    std::fs::create_dir_all(path.join("busy"))?;
 
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
     assert_eq!(r.json["blobs"], json!(2), "{}", r.json);
+    // the job names only the file still on disk, and carries file hashes and nothing else
     let queued: Value = sqlx::query_scalar("select payload from job where kind = $1")
         .bind(UNLINK_JOB)
         .fetch_one(env.pool())
         .await?;
-    assert_eq!(queued["blobs"], json!([stuck.clone()]), "{queued}");
+    assert_eq!(queued, json!({"blobs": [stuck.clone()]}));
+    assert_eq!(unlink_state(&env).await?, ("queued".into(), 0, true));
+
+    // the first retry fails too: the job waits for another try
+    assert_eq!(run_unlink(&env).await?, 1);
+    assert_eq!(unlink_state(&env).await?, ("queued".into(), 1, true));
+    assert!(path.is_dir(), "the stuck file went without the retry");
 
     // the disk lets go; meanwhile Sam uploads the other report, so its file is named again
     std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
@@ -753,22 +788,81 @@ async fn a_file_the_delete_could_not_remove_goes_on_the_retry() -> R {
         "application/pdf",
     )
     .await?;
-    let ctx = JobContext::new(env.pool().clone(), Arc::new(env.settings.clone()), env.rt.blobs.clone());
-    let ran = drain(&ctx, "core", 5, Some(&[UNLINK_JOB.to_string()])).await?;
-    assert_eq!(ran, 1);
+    assert_eq!(run_unlink(&env).await?, 1);
 
     let left = stored(env.rt.blobs.root());
     assert!(!left.contains(&stuck), "the retry left Alex's file");
     assert!(left.contains(&again), "the retry removed a file Sam's document names");
-    let state: String = sqlx::query_scalar("select state from job where kind = $1")
-        .bind(UNLINK_JOB)
-        .fetch_one(env.pool())
-        .await?;
-    assert_eq!(state, "done");
+    assert_eq!(unlink_state(&env).await?.0, "done");
     let audit: Vec<(String, Option<String>)> =
         sqlx::query_as("select via, args_summary from audit_event where action = 'purge' and actor_kind = 'system'")
             .fetch_all(env.pool())
             .await?;
     assert_eq!(audit, vec![("job".into(), Some("blobs=1".into()))]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_retry_that_runs_out_of_attempts_stays_for_the_operator() -> R {
+    let env = Env::new(true).await?;
+    ownhealth_auth::register();
+    let (_, path) = stuck_report(&env).await?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    sqlx::query("update job set max_attempts = 1 where kind = $1")
+        .bind(UNLINK_JOB)
+        .execute(env.pool())
+        .await?;
+    assert_eq!(run_unlink(&env).await?, 1);
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("select state, last_error from job where kind = $1")
+            .bind(UNLINK_JOB)
+            .fetch_one(env.pool())
+            .await?;
+    assert_eq!(state, "dead");
+    assert!(error.is_some_and(|e| e.contains("could not be removed")));
+    // a system item in the review queue says so; the file is still listed in the job
+    let items: Vec<(Option<Uuid>, Value)> =
+        sqlx::query_as("select household_id, payload from review_item where kind = 'job_failed'")
+            .fetch_all(env.pool())
+            .await?;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].0, None);
+    assert_eq!(items[0].1["kind"], json!(UNLINK_JOB));
+    assert!(path.is_dir());
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_retry_is_queued_in_the_delete_transaction() -> R {
+    let env = Env::new(true).await?;
+    let alex = env.profile("alex");
+    let (_, report) = document(&env, alex, "%PDF-1.7 synthetic LabNorte report", "application/pdf").await?;
+    let mut tx = env.pool().begin().await?;
+    let deleted = ownhealth_auth::household::delete_profile(&mut tx, alex)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    assert_eq!(deleted.blobs, vec![report.clone()]);
+    // inside the transaction the job is there already, and it waits so the delete removes the file first
+    let (payload, waits): (Value, bool) =
+        sqlx::query_as("select payload, run_after > now() from job where kind = $1")
+            .bind(UNLINK_JOB)
+            .fetch_one(&mut *tx)
+            .await?;
+    assert_eq!(payload, json!({"blobs": [report]}));
+    assert!(waits);
+    // a crash before the commit loses both the delete and the job
+    tx.rollback().await?;
+    assert_eq!(
+        env.scalar_i64(&format!("select count(*) from job where kind = '{UNLINK_JOB}'"))
+            .await?,
+        0
+    );
+    assert_eq!(
+        env.scalar_i64(&format!("select count(*) from profile where id = '{alex}'"))
+            .await?,
+        1
+    );
     Ok(())
 }
