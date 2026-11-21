@@ -180,7 +180,7 @@ pub async fn store_snapshot(conn: &mut PgConnection, profile_id: Uuid, body: &Va
 /// Store the body that a REPEATABLE READ transaction read, unless another transaction stored the
 /// day's row after this one's snapshot began. Postgres then refuses the upsert with 40001 (or
 /// 23505 on a first insert of the day), so the newer row stays and a late print never writes over
-/// it. A savepoint keeps the transaction usable for its audit row; any other error is returned.
+/// it. A savepoint keeps the transaction usable, so the read still commits; any other error is returned.
 pub async fn store_read_snapshot(conn: &mut PgConnection, profile_id: Uuid, body: &Value) -> Result<()> {
     let pack = load_pack()?;
     sqlx::query("savepoint read_snapshot").execute(&mut *conn).await?;

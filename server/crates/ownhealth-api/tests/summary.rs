@@ -521,3 +521,78 @@ async fn the_sheet_is_read_in_a_repeatable_read_transaction() -> R {
     assert_eq!(isolation, "repeatable read");
     Ok(())
 }
+
+/// The audit row is stamped with the moment the read began, not with the moment it is written:
+/// here the audit write waits on a lock for 1.5 s after the sheet was read.
+#[tokio::test]
+async fn the_audit_row_carries_the_time_the_read_began() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let pool = env.pool().clone();
+    for (path, tool, body) in [
+        (
+            "/api/profiles/alex/summary.pdf",
+            PRINT,
+            json!({"lang": "es", "specialty": "gp"}),
+        ),
+        ("/api/profiles/alex/export", IPS, json!({"fmt": "ips", "lang": "es"})),
+    ] {
+        let clock = || sqlx::query_scalar::<_, DateTime<Utc>>("select clock_timestamp()").fetch_one(&pool);
+        let sent_at = clock().await?;
+        let mut lock = pool.begin().await?;
+        sqlx::query("lock table audit_event in access exclusive mode")
+            .execute(&mut *lock)
+            .await?;
+        let hold = async {
+            wait_for_a_lock_on(&pool, "audit_event").await?;
+            let waiting_at = clock().await?;
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            lock.rollback().await?;
+            anyhow::Ok(waiting_at)
+        };
+        let (asked, held) = tokio::join!(alex.post(path, &body), hold);
+        let waiting_at = held?;
+        assert_eq!(asked?.status, StatusCode::OK, "{tool}");
+        let (_, at) = last_audit(&env, tool).await?;
+        assert!(
+            sent_at <= at && at < waiting_at,
+            "{tool}: stamped at the read, {sent_at} <= {at} < {waiting_at}"
+        );
+        assert!(
+            waiting_at - at < chrono::Duration::seconds(1),
+            "{tool}: the read began just before the wait"
+        );
+    }
+    Ok(())
+}
+
+/// The audit chain (slice 12) links a row only from a READ COMMITTED transaction. A trigger with
+/// that rule stands in for it here: the sheet and the Bundle still go out, each with its row.
+#[tokio::test]
+async fn the_audit_row_is_written_in_a_read_committed_transaction() -> R {
+    let env = env().await?;
+    sqlx::raw_sql(
+        "create function read_committed_only() returns trigger language plpgsql as $$ begin \
+           if current_setting('transaction_isolation') <> 'read committed' then \
+             raise exception 'audit_event is written only in read committed transactions'; \
+           end if; return new; end $$; \
+         create trigger read_committed_only before insert on audit_event \
+           for each row execute function read_committed_only();",
+    )
+    .execute(env.pool())
+    .await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    for (path, tool, body) in [
+        (
+            "/api/profiles/alex/summary.pdf",
+            PRINT,
+            json!({"lang": "en", "specialty": "gp"}),
+        ),
+        ("/api/profiles/alex/export", IPS, json!({"fmt": "ips", "lang": "en"})),
+    ] {
+        let r = alex.post(path, &body).await?;
+        assert_eq!(r.status, StatusCode::OK, "{tool}: {:?}", r.json);
+        last_audit(&env, tool).await?;
+    }
+    Ok(())
+}

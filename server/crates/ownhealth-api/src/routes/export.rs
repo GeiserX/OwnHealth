@@ -24,7 +24,7 @@ use axum::routing::post;
 use ownhealth_auth::household::require_manage;
 use ownhealth_core::Runtime;
 use ownhealth_core::access::today_utc;
-use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::audit::{AuditEvent, write_audit, write_audit_at};
 use ownhealth_ops::export::{blocking, export_profile};
 use ownhealth_rules::summary::LANGS;
 use serde::Deserialize;
@@ -146,17 +146,21 @@ async fn ips(
 ) -> R {
     let lang = lang.unwrap_or_else(|| p.lang.clone());
     Check::body().literal("lang", Some(&lang), &LANGS).done()?;
-    // the summary behind the Bundle reads one snapshot, and its writes come last, as on the sheet
+    // the summary behind the Bundle reads one snapshot and stores its state, as on the sheet
     let mut tx = ownhealth_rules::summary::begin_read(&rt.pool).await?;
+    let read_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("select now()").fetch_one(&mut *tx).await?;
     let perm = Caller(p.clone())
         .require(&mut tx, &profile, Some("read:summary"), None)
         .await?;
     let today = today_utc();
     let (out, state) = ownhealth_ops::ips::read(&mut tx, perm.profile.id, &perm.scopes, &lang, today).await?;
+    ownhealth_rules::store_read_snapshot(&mut tx, perm.profile.id, &state).await?;
+    tx.commit().await?;
     let bytes = out.to_bytes()?;
     let entries = out.bundle["entry"].as_array().map_or(0, Vec::len);
-    ownhealth_rules::store_read_snapshot(&mut tx, perm.profile.id, &state).await?;
-    write_audit(
+    // the audit row commits before the Bundle goes out, stamped with the start of the read
+    let mut tx = rt.pool.begin().await?;
+    write_audit_at(
         &mut tx,
         &AuditEvent {
             actor_id: p.user_id,
@@ -172,6 +176,7 @@ async fn ips(
             ip: meta.ip.clone(),
             ..AuditEvent::new("user", "export", "export")
         },
+        Some(read_at),
     )
     .await?;
     tx.commit().await?;

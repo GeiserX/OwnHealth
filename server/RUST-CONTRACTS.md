@@ -93,7 +93,10 @@ The Python rules (CONTRACTS.md section 3) hold, with these Rust names:
   `core::observations::commit_observation` / `core::records::add_record` with `accepted_by = "person"`.
   No lane writes `observation` or the record tables with raw SQL.
 - Every fact has provenance: `core::provenance::SrcIn` / `SrcRef`.
-- Every read a person or agent makes writes one `core::audit::write_audit` row in the same transaction.
+- Every read a person or agent makes writes one `core::audit::write_audit` row in the same transaction. A read that
+  runs in a REPEATABLE READ snapshot (the doctor summary, the IPS export) writes its row instead in its own READ
+  COMMITTED transaction (`write_audit_at`), stamped with the start of the read, and that row commits before the
+  response goes out.
 - Every permission check goes through `core::access::require` / `effective_permission`.
 - Status words come only from lane E. Free text going out over MCP is `core::text::untrusted(text, origin)`.
 - Domain functions take `&mut sqlx::PgConnection` (a `Transaction` derefs to it); the caller owns the
