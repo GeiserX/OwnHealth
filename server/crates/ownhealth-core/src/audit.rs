@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{AssertSqlSafe, PgConnection};
+use sqlx::{AssertSqlSafe, Connection, PgConnection};
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -213,17 +213,40 @@ const PLAIN_TABLES: &str = "select pg_catalog.count(*) from pg_catalog.pg_class 
 /// links, both tables emptied, or the whole chain re-hashed from some row on. Only a head kept
 /// outside the database (the backup anchor) shows those.
 ///
-/// It refuses to run when either table is no longer a plain table (see `PLAIN_TABLES`). It cannot
-/// catch a superuser: a superuser can make the database answer any query however it likes, and
-/// this check can only ask that same database.
+/// It runs as one transaction of its own (a savepoint when the caller already holds one) and rolls
+/// it back at the end. The transaction first sets `search_path` to pg_catalog, so no operator or
+/// function of the owner's takes part in a comparison. Then it locks both tables, so neither can be
+/// renamed or swapped until the check ends (that needs ACCESS EXCLUSIVE). Then it runs the guard,
+/// and it refuses to go on when either table is no longer a plain table (see `PLAIN_TABLES`). Only
+/// then does it read.
+///
+/// So it holds against the app role, and against an owner who edits rows with plain SQL or with the
+/// tricks we know. An owner can always change what the database answers, and a superuser can make
+/// it answer any query however it likes; this check can only ask that same database. Only a head
+/// kept outside the database proves the history against the owner.
 pub async fn verify_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
-    let plain: i64 = sqlx::query_scalar(PLAIN_TABLES).fetch_one(&mut *conn).await?;
-    if plain != 2 {
-        return Err(anyhow::anyhow!(
+    let mut tx = conn.begin().await?;
+    sqlx::raw_sql(
+        "set local search_path = pg_catalog, pg_temp; \
+         lock table public.audit_event, public.audit_chain in access share mode",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let plain: i64 = sqlx::query_scalar(PLAIN_TABLES).fetch_one(&mut *tx).await?;
+    let check = if plain == 2 {
+        read_chain(&mut tx).await
+    } else {
+        Err(anyhow::anyhow!(
             "the audit log cannot be checked: public.audit_event or public.audit_chain is no longer a plain table"
         )
-        .into());
-    }
+        .into())
+    };
+    tx.rollback().await?;
+    check
+}
+
+/// The reads of `verify_chain`, inside its transaction, after the guard.
+async fn read_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
     type Link = (i64, i64, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
     let mut prev = vec![0u8; 32];
     let mut head: Option<(i64, Vec<u8>)> = None;
