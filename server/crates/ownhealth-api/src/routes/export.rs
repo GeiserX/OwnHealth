@@ -154,8 +154,7 @@ async fn ips(
         .await?;
     let today = today_utc();
     let (out, state) = ownhealth_ops::ips::read(&mut tx, perm.profile.id, &perm.scopes, &lang, today).await?;
-    ownhealth_rules::store_read_snapshot(&mut tx, perm.profile.id, &state).await?;
-    tx.commit().await?;
+    ownhealth_rules::commit_read(tx, perm.profile.id, &state).await?;
     let bytes = out.to_bytes()?;
     let entries = out.bundle["entry"].as_array().map_or(0, Vec::len);
     // the audit row commits before the Bundle goes out, stamped with the start of the read

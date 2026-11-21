@@ -651,14 +651,14 @@ pub async fn build_for(
 
 /// A transaction that reads one sheet from one snapshot: REPEATABLE READ, so a correction saved
 /// during the print shows on all of the sheet or none of it. It ends by storing the state it read
-/// (`store_read_snapshot`). The audit row follows in a READ COMMITTED transaction of its own,
+/// (`crate::commit_read`). The audit row follows in a READ COMMITTED transaction of its own,
 /// stamped with this one's start (`now()` in it), and commits before the sheet goes out.
 pub async fn begin_read(pool: &PgPool) -> sqlx::Result<Transaction<'static, Postgres>> {
     pool.begin_with("begin isolation level repeatable read").await
 }
 
 /// `build_for` without its one write: the model, and the state body it was read from. The caller
-/// stores the body with `store_read_snapshot` in the same transaction (`begin_read`).
+/// stores the body and ends the transaction (`begin_read`) with `crate::commit_read`.
 pub async fn read_for(
     conn: &mut PgConnection,
     viewer: Option<&Principal>,

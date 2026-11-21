@@ -34,7 +34,7 @@ use ownhealth_core::access::{Scopes, today_utc};
 use ownhealth_core::jobs::{self, Job, JobContext, JobError};
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, Postgres, Transaction};
 use uuid::Uuid;
 
 pub use ownhealth_core::canonical::{canonical_json, state_hash};
@@ -177,30 +177,23 @@ pub async fn store_snapshot(conn: &mut PgConnection, profile_id: Uuid, body: &Va
     Ok(row.is_some())
 }
 
-/// Store the body that a REPEATABLE READ transaction read, unless another transaction stored the
-/// day's row after this one's snapshot began. Postgres then refuses the upsert with 40001 (or
-/// 23505 on a first insert of the day), so the newer row stays and a late print never writes over
-/// it. A savepoint keeps the transaction usable, so the read still commits; any other error is returned.
-pub async fn store_read_snapshot(conn: &mut PgConnection, profile_id: Uuid, body: &Value) -> Result<()> {
-    let pack = load_pack()?;
-    sqlx::query("savepoint read_snapshot").execute(&mut *conn).await?;
-    match store_snapshot(&mut *conn, profile_id, body, &pack).await {
+/// Store the state a REPEATABLE READ transaction read, then end that transaction. If another
+/// transaction stored the day's row after this one's snapshot began, Postgres refuses the upsert
+/// with 40001. Dropping the write is then safe: the stored row is newer than the one read, and the
+/// caller already holds all it read, so the transaction rolls back and the request goes on. Any
+/// other error is returned.
+pub async fn commit_read(mut tx: Transaction<'_, Postgres>, profile_id: Uuid, body: &Value) -> Result<()> {
+    match store_snapshot(&mut tx, profile_id, body, &*load_pack()?).await {
+        Ok(_) => tx.commit().await?,
         Err(Error::Db(e))
             if e.as_database_error()
                 .and_then(|d| d.code())
-                .is_some_and(|c| c == "40001" || c == "23505") =>
+                .is_some_and(|c| c == "40001") =>
         {
-            sqlx::query("rollback to savepoint read_snapshot")
-                .execute(&mut *conn)
-                .await?;
+            tx.rollback().await?;
         }
-        stored => {
-            stored?;
-        }
+        Err(e) => return Err(e),
     }
-    sqlx::query("release savepoint read_snapshot")
-        .execute(&mut *conn)
-        .await?;
     Ok(())
 }
 
@@ -220,7 +213,7 @@ pub async fn build_with_evaluation(
 }
 
 /// `build_with_evaluation` without its write: the caller reads the whole sheet first, then stores
-/// the body (`store_read_snapshot`) in the same transaction.
+/// the body and ends the transaction with `commit_read`.
 pub async fn evaluate_state(
     conn: &mut PgConnection,
     profile_id: Uuid,

@@ -465,7 +465,8 @@ async fn a_correction_saved_during_an_ips_export_never_mixes_two_states() -> R {
     Ok(())
 }
 
-/// A print that read an older state never stores it over a newer one saved while it waited.
+/// A print that read an older state never stores it over a newer one saved while it waited. Its
+/// write is dropped, and it still answers with the sheet it read and its audit row.
 async fn a_newer_state_is_kept(path: &str, tool: &str, body: Value, meanwhile: Meanwhile) -> R {
     let env = env().await?;
     let mut alex = env.as_user(env.user("alex")).await?;
@@ -477,6 +478,28 @@ async fn a_newer_state_is_kept(path: &str, tool: &str, body: Value, meanwhile: M
         Some(hex(&newer)),
         "the newer state stays stored"
     );
+    let text = if race.bytes.starts_with(b"%PDF-") {
+        let text = lines(&race.bytes);
+        let own: String = hex(&race.hash).chars().take(12).collect();
+        assert!(
+            text.iter().any(|l| l.contains(&own)),
+            "the sheet carries the state it read: {text:#?}"
+        );
+        text.join("\n")
+    } else {
+        String::from_utf8_lossy(&race.bytes).into_owned()
+    };
+    assert_eq!(
+        [VACCINE, CONDITION, PROCEDURE].map(|w| text.contains(w)),
+        [false; 3],
+        "the answer is the state it read, not the newer one"
+    );
+    let rows: i64 = sqlx::query_scalar("select count(*) from audit_event where tool = $1 and resource_ids[1] = $2")
+        .bind(tool)
+        .bind(&race.hash)
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(rows, 1, "one audit row, for the state it sent");
     Ok(())
 }
 
@@ -511,6 +534,47 @@ async fn a_newer_state_saved_during_an_ips_export_is_kept() -> R {
 }
 
 /// The sheet is read from one snapshot: its transaction is REPEATABLE READ.
+/// Only a newer stored state lets a print drop its write: any other failure of the store fails the
+/// request, and nothing is sent or logged.
+#[tokio::test]
+async fn a_failed_state_store_fails_the_request() -> R {
+    let env = env().await?;
+    sqlx::raw_sql(
+        "create function no_snapshot() returns trigger language plpgsql as $$ begin \
+           raise exception 'no room for a snapshot' using errcode = '53100'; end $$; \
+         create trigger no_snapshot before insert or update on state_snapshot \
+           for each row execute function no_snapshot();",
+    )
+    .execute(env.pool())
+    .await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    for (path, tool, body) in [
+        (
+            "/api/profiles/alex/summary.pdf",
+            PRINT,
+            json!({"lang": "en", "specialty": "gp"}),
+        ),
+        ("/api/profiles/alex/export", IPS, json!({"fmt": "ips", "lang": "en"})),
+    ] {
+        sqlx::query("delete from state_snapshot where profile_id = $1")
+            .bind(env.profile("alex"))
+            .execute(env.pool())
+            .await?;
+        let r = alex.post(path, &body).await?;
+        assert_eq!(r.status, StatusCode::INTERNAL_SERVER_ERROR, "{tool}: {:?}", r.json);
+        assert!(
+            !r.bytes.starts_with(b"%PDF-") && !String::from_utf8_lossy(&r.bytes).contains("\"Bundle\""),
+            "{tool}: nothing is sent"
+        );
+        let rows: i64 = sqlx::query_scalar("select count(*) from audit_event where tool = $1")
+            .bind(tool)
+            .fetch_one(env.pool())
+            .await?;
+        assert_eq!(rows, 0, "{tool}: nothing is logged");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_sheet_is_read_in_a_repeatable_read_transaction() -> R {
     let env = Env::new(true).await?;

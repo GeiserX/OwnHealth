@@ -517,7 +517,7 @@ pub async fn build(
 }
 
 /// `build` without its one write: the Bundle, and the state body it was read from. The caller
-/// stores the body with `store_read_snapshot` in the same transaction (`summary::begin_read`).
+/// stores the body and ends the transaction (`summary::begin_read`) with `commit_read`.
 pub async fn read(
     conn: &mut PgConnection,
     profile_id: Uuid,

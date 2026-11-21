@@ -81,8 +81,7 @@ async fn summary_pdf(
         as_of,
     };
     let (model, state) = summary::read_for(&mut tx, Some(&p), perm.profile.id, &perm.scopes, &opts).await?;
-    ownhealth_rules::store_read_snapshot(&mut tx, perm.profile.id, &state).await?;
-    tx.commit().await?;
+    ownhealth_rules::commit_read(tx, perm.profile.id, &state).await?;
     let mut sheet = ownhealth_ops::summary_pdf::render(&model);
     // the ids the paper shows, not those of rows cut to fit two pages
     let srcs = std::mem::take(&mut sheet.printed);
