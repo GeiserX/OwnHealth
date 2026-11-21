@@ -15,6 +15,12 @@
           "=other"
         ]
       },
+      "evidence_day": {
+        "|": [
+          "date",
+          "null"
+        ]
+      },
       "filename": {
         "origin": "=filename",
         "text": "string",

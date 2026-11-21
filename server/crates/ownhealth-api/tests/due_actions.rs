@@ -662,6 +662,100 @@ async fn evidence_without_a_day_or_from_the_future_is_refused() -> R {
     Ok(())
 }
 
+/// A report that carries only its report date (no collection date) is offered by the Done picker:
+/// the document list gives its evidence day, and choosing it marks the item done.
+#[tokio::test]
+async fn a_document_dated_only_by_its_report_date_is_listed_with_its_day_and_counts_as_done() -> R {
+    let a = app().await?;
+    let reported = today_utc() - Duration::days(3);
+    let doc: Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, reported_at) \
+         select household_id, id, decode(repeat('cd', 32), 'hex'), 'application/pdf', 1, $2 from profile \
+         where id = $1 returning id",
+    )
+    .bind(a.family.profile("carmen"))
+    .bind(reported.and_hms_opt(9, 30, 0).unwrap_or_default().and_utc())
+    .fetch_one(&a.db.pool)
+    .await?;
+    let (s, v) = send(&a, "alex", "GET", "/profiles/carmen/documents", None).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let item = v["items"]
+        .as_array()
+        .and_then(|l| l.iter().find(|d| d["id"] == doc.to_string()))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(item["collected_at"], Value::Null, "{item}");
+    assert_eq!(item["evidence_day"], json!(iso(reported)), "{item}");
+    let body = json!({"kind": "done", "evidence": {"table": "document", "id": doc}});
+    let (s, v) = decide(&a, "alex", "carmen", KEY, body).await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let d = due(&a, "alex", "carmen", today_utc()).await?;
+    let row = find(&d, "items", KEY).cloned().unwrap_or_default();
+    assert_eq!(
+        (row["status"].as_str(), row["decision"]["kind"].as_str()),
+        (Some("up_to_date"), Some("done")),
+        "{row}"
+    );
+    Ok(())
+}
+
+/// The document list sorts by the evidence day, the day the Done picker shows: a new report dated
+/// only by its report date comes first and is never cut by the default limit of 100, however many
+/// older collection-dated files the profile holds. With both dates, the collection day wins.
+#[tokio::test]
+async fn the_document_list_puts_a_new_report_first_however_many_older_files_there_are() -> R {
+    let a = app().await?;
+    let carmen = a.family.profile("carmen");
+    let today = today_utc();
+    let at = |d: NaiveDate| d.and_hms_opt(9, 30, 0).unwrap_or_default().and_utc();
+    sqlx::query(
+        "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, collected_at) \
+         select p.household_id, p.id, sha256(convert_to('old-' || g, 'UTF8')), 'application/pdf', 1, \
+         $2 - g * interval '1 day' from profile p, generate_series(1, 100) g where p.id = $1",
+    )
+    .bind(carmen)
+    .bind(at(today - Duration::days(3000)))
+    .execute(&a.db.pool)
+    .await?;
+    let insert = |sha: &'static str, collected: Option<NaiveDate>, reported: Option<NaiveDate>| {
+        sqlx::query_scalar::<_, Uuid>(
+            "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, collected_at, reported_at) \
+             select household_id, id, sha256(convert_to($2, 'UTF8')), 'application/pdf', 1, $3, $4 from profile \
+             where id = $1 returning id",
+        )
+        .bind(carmen)
+        .bind(sha)
+        .bind(collected.map(at))
+        .bind(reported.map(at))
+        .fetch_one(&a.db.pool)
+    };
+    let both = insert(
+        "both",
+        Some(today - Duration::days(10)),
+        Some(today - Duration::days(2)),
+    )
+    .await?;
+    let report_only = insert("report-only", None, Some(today - Duration::days(1))).await?;
+    let (s, v) = send(&a, "alex", "GET", "/profiles/carmen/documents", None).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let items = v["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(items.len(), 100, "the default limit holds");
+    let first: Vec<_> = items
+        .iter()
+        .take(2)
+        .map(|d| (d["id"].clone(), d["evidence_day"].clone()))
+        .collect();
+    assert_eq!(
+        first,
+        vec![
+            (json!(report_only.to_string()), json!(iso(today - Duration::days(1)))),
+            (json!(both.to_string()), json!(iso(today - Duration::days(10)))),
+        ],
+        "the newest evidence day comes first, and the collection day wins over the report day"
+    );
+    Ok(())
+}
+
 /// A caregiver whose grant leaves out read:labs cannot see a lab gap, so they can neither probe for
 /// it nor hide it, nor undo a decision about it.
 #[tokio::test]
