@@ -50,6 +50,11 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
+          # PRs read main's caches and never write their own: a per-PR cache evicts main's (10 GB repo cap)
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # rust-cache hashes Cargo.lock and the member manifests, not this root one, so a [profile]
+          # change would never reach main's cache; its hash in the key gives a fresh cache instead
+          key: ${{ hashFiles('server/Cargo.toml') }}
       - name: PostgreSQL 17 client and restic 0.18.0, the versions the image ships (ownhealth-ops tests)
         working-directory: .
         run: |
@@ -116,7 +121,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
-          key: ocr
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ocr-${{ hashFiles('server/Cargo.toml') }}
       - name: PDFium (pinned, sha256-checked)
         working-directory: .
         run: bash scripts/fetch-pdfium.sh linux-x64
@@ -171,6 +177,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ${{ hashFiles('server/Cargo.toml') }}
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           package_json_file: ui/package.json
@@ -216,19 +224,69 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ${{ hashFiles('server/Cargo.toml') }}
       - name: PDFium (pinned, sha256-checked)
         run: bash scripts/fetch-pdfium.sh linux-x64
       - run: mkdir -p server/static
       - run: bash contract-tests/run.sh rust
 
+  # Which runners the docker job builds on. Main and manual runs always build both platforms. A PR
+  # builds amd64 always, and arm64 too when it changes a build input: the Dockerfile and what it
+  # copies to build (scripts, Cargo manifests, lock files, build.rs, .cargo config, ui/.npmrc,
+  # vendored libraries, the OCR crate), the toolchain, or a workflow. A PR that changes only Rust or Svelte source builds the same way on
+  # both platforms, and the arm64 pair still runs on main after the merge.
+  docker-runners:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      runners: ${{ steps.pick.outputs.runners }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+          fetch-depth: 2 # the PR merge commit and its first parent, the base branch
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          # A step without `shell:` runs under bash -e with no pipefail: without it a failing git diff
+          # below would read as "no input changed"
+          set -o pipefail
+          both='["ubuntu-latest","ubuntu-24.04-arm"]'
+          if [ "$EVENT" != pull_request ]; then
+            echo "runners=$both" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # --no-renames lists both paths of a move, so a file moved out of an input path still counts;
+          # -z prints every path as itself (git quotes non-ASCII, tabs, quotes and backslashes otherwise,
+          # and a quoted path misses the anchors), and tr makes it one path per line again
+          git diff -z --no-renames --name-only HEAD^1 HEAD | tr '\0' '\n' > "$RUNNER_TEMP/changed"
+          echo "$(wc -l < "$RUNNER_TEMP/changed") files changed"
+          inputs='^(Dockerfile|\.dockerignore|scripts/|ui/package\.json$|ui/pnpm-lock\.yaml$|ui/\.npmrc$|server/vendor/|server/crates/ownhealth-ocr/|\.github/workflows/)|(^|/)(Cargo\.(toml|lock)|build\.rs|rust-toolchain[^/]*|RUST_TOOLCHAIN)$|(^|/)\.cargo/'
+          # grep exits 1 for no match and 2 for an error (a broken pattern): an error must not read as
+          # "no input changed"
+          rc=0
+          grep -E "$inputs" "$RUNNER_TEMP/changed" || rc=$?
+          if [ "$rc" -gt 1 ]; then
+            echo "::error::grep failed with exit $rc: the inputs pattern is broken"
+            exit 1
+          elif [ "$rc" -eq 0 ]; then
+            echo "runners=$both" >> "$GITHUB_OUTPUT"
+          else
+            echo "no build input changed: amd64 only"
+            echo 'runners=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
   # Both platforms and both variants the release publishes, each on its own native runner: the arm64
   # PDFium build and its shared libraries are checked here, not only on a developer's machine. The
   # ocr variant (`--target ocr`) must also read the demo's scanned page.
   docker:
+    needs: docker-runners
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        runner: ${{ fromJSON(needs.docker-runners.outputs.runners) }}
         variant: [default, ocr]
         include:
           - variant: default

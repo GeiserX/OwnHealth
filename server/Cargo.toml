@@ -130,6 +130,24 @@ debug = false
 [profile.dev.package.scrypt]
 opt-level = 3
 
+# The OCR eval set (ownhealth-ocr tests/eval) draws, tilts, blurs, JPEG-encodes and deflates 40+ pages
+# at 200 dpi. ocr_off took 371 s on CI unoptimised and 44 to 55 s with these settings (214 s and 34 s
+# on a local arm64 build). IEEE arithmetic with no fast-math at any opt-level, so no test outcome changes.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.zlib-rs]
+opt-level = 3
+# the generator itself (tests/eval, ingest-pdf tests/support) is compiled into the OCR crate's tests;
+# 1 gives most of the speed of 3 for a tenth of its compile time
+[profile.dev.package.ownhealth-ocr]
+opt-level = 1
+
 [profile.release]
 lto = "thin"
 codegen-units = 4
