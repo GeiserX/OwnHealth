@@ -34,10 +34,13 @@ export interface ScoreRow {
 /** One row per provider, category and connection: categories in CATEGORIES order (unknown ones last),
  * then provider, then connection. Two connections that bring the same vendor's score keep a row each. */
 export function scoreRows(scores: VendorScore[]): ScoreRow[] {
-	const groups = new Map<string, VendorScore[]>();
+	// Linear in the number of scores: each one is pushed onto its group once, with its time parsed once.
+	const groups = new Map<string, { ms: number; s: VendorScore }[]>();
 	for (const s of scores) {
 		const key = `${s.category}\u0000${s.provider}\u0000${s.source?.id ?? ''}`;
-		groups.set(key, [...(groups.get(key) ?? []), s]);
+		let g = groups.get(key);
+		if (!g) groups.set(key, (g = []));
+		g.push({ ms: Date.parse(s.t), s });
 	}
 	const rank = (c: string) => {
 		const i = (CATEGORIES as readonly string[]).indexOf(c);
@@ -45,8 +48,9 @@ export function scoreRows(scores: VendorScore[]): ScoreRow[] {
 	};
 	return [...groups.values()]
 		.map((g) => {
-			const sorted = [...g].sort((a, b) => Date.parse(a.t) - Date.parse(b.t));
-			return { provider: g[0].provider, category: g[0].category, source: g[0].source, latest: sorted[sorted.length - 1], values: sorted.map((s) => s.value) };
+			const first = g[0].s;
+			g.sort((a, b) => a.ms - b.ms);
+			return { provider: first.provider, category: first.category, source: first.source, latest: g[g.length - 1].s, values: g.map((x) => x.s.value) };
 		})
 		.sort(
 			(a, b) =>
