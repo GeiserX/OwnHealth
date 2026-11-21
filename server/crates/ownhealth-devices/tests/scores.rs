@@ -6,6 +6,8 @@ mod common;
 
 use chrono::{TimeZone, Utc};
 use common::{Env, R};
+use ownhealth_core::demo::create_rivera_family;
+use ownhealth_core::sources::{self, NewSource};
 use ownhealth_devices::scores::{self, CATEGORIES, Score};
 use ownhealth_devices::store::{self, Conflict, Sample};
 use ownhealth_ingest_structured::wearables;
@@ -264,6 +266,103 @@ async fn one_vendor_quirk_does_not_fail_the_write() -> R {
             ("sleep", 80.0, false, 0),
             ("sleep", 88.0, true, 7)
         ]
+    );
+    Ok(())
+}
+
+/// A score names a connection of its own person, or a household connection of its own household,
+/// never another person's or another household's.
+#[tokio::test]
+async fn a_score_never_names_another_persons_or_households_connection() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let mut c = env.db.pool.acquire().await?;
+    let ortega = create_rivera_family(&mut c, &format!("Ortega {}", ownhealth_core::ids::token_hex(3))).await?;
+    let new_source = |household, profile: Option<uuid::Uuid>, label: &'static str| NewSource {
+        profile_id: profile,
+        ..NewSource::new(household, "gadgetbridge", label)
+    };
+    let lucias = sources::create_source(
+        &mut c,
+        &new_source(env.fam.household_id, Some(env.fam.profile("lucia")), "Lucía's"),
+    )
+    .await?;
+    let other_house = sources::create_source(&mut c, &new_source(ortega.household_id, None, "Other house")).await?;
+    let other_sams = sources::create_source(
+        &mut c,
+        &new_source(ortega.household_id, Some(ortega.profile("sam")), "Other Sam"),
+    )
+    .await?;
+    for (src, what) in [
+        (lucias, "Lucía's connection"),
+        (other_house, "another household's connection"),
+        (other_sams, "another household's Sam's connection"),
+    ] {
+        let w = scores::write(&mut c, sam, src, &[garmin_morning(62.0)]).await;
+        assert!(
+            matches!(w, Err(ownhealth_core::Error::Provenance(_))),
+            "Sam's score was written with {what}: {w:?}"
+        );
+    }
+    let n = env
+        .count("select count(*) from vendor_score where profile_id = $1", sam)
+        .await?;
+    assert_eq!(n, 0, "no score names a connection that is not Sam's");
+    // Sam's own connection, and a household connection of Sam's household, are fine
+    let own = env.source("gadgetbridge", Some("sam"), json!({}), None).await?.id;
+    let household = env.source("gadgetbridge", None, json!({}), None).await?.id;
+    assert_eq!(
+        scores::write(&mut c, sam, own, &[garmin_morning(62.0)]).await?.written,
+        1
+    );
+    assert_eq!(
+        scores::write(&mut c, sam, household, &[garmin_morning(63.0)])
+            .await?
+            .written,
+        1
+    );
+    Ok(())
+}
+
+/// Even a row that names another household's connection (written past `write`) never shows that
+/// connection's label or id.
+#[tokio::test]
+async fn the_read_never_shows_another_households_connection() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let mut c = env.db.pool.acquire().await?;
+    let ortega = create_rivera_family(&mut c, &format!("Ortega {}", ownhealth_core::ids::token_hex(3))).await?;
+    let theirs = sources::create_source(
+        &mut c,
+        &NewSource::new(
+            ortega.household_id,
+            "gadgetbridge",
+            "Carmen Ortega's watch (other house)",
+        ),
+    )
+    .await?;
+    let own = env.source("gadgetbridge", Some("sam"), json!({}), None).await?.id;
+    for (src, v) in [(theirs, 40.0), (own, 62.0)] {
+        sqlx::query(
+            "insert into vendor_score (profile_id, source_id, provider, category, t, value) \
+             values ($1, $2, 'garmin', 'body_battery', now(), $3)",
+        )
+        .bind(sam)
+        .bind(src)
+        .bind(v)
+        .execute(&mut *c)
+        .await?;
+    }
+    let since = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).single().unwrap_or_default();
+    let got: Vec<(f64, Option<serde_json::Value>)> = scores::list(&mut c, sam, since)
+        .await?
+        .into_iter()
+        .map(|r| (r.value, r.source))
+        .collect();
+    assert_eq!(
+        got,
+        vec![(62.0, Some(json!({"id": own, "label": "test inbox"}))), (40.0, None)],
+        "the other household's connection is not named"
     );
     Ok(())
 }

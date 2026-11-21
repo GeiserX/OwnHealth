@@ -7,7 +7,7 @@
 //! The rule pack, the calculators and MCP never read them; only the Wearables page shows them.
 
 use chrono::{DateTime, Utc};
-use ownhealth_core::Result;
+use ownhealth_core::{Error, Result};
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgConnection;
@@ -106,10 +106,26 @@ pub struct Written {
 /// Store `scores` for one profile, brought by the connection `source_id`. A score already stored for
 /// the same connection, provider, category and time takes the new value, qualifier and components.
 ///
+/// The connection must be the profile's own, or a household connection (no profile) of the profile's
+/// household: a score never names another person's or another household's connection.
+///
 /// One vendor quirk never fails the batch: a value that is not finite (or past ±1e9) is dropped and
 /// counted, `components` that are not a JSON object are left out, and a qualifier is cut to
 /// `QUALIFIER_MAX` characters. An unknown category or a malformed provider is a mapping bug and fails.
 pub async fn write(conn: &mut PgConnection, profile_id: Uuid, source_id: Uuid, scores: &[Score]) -> Result<Written> {
+    let ours: bool = sqlx::query_scalar(
+        "select exists(select 1 from source s join profile p on p.household_id = s.household_id \
+         where s.id = $2 and p.id = $1 and (s.profile_id is null or s.profile_id = $1))",
+    )
+    .bind(profile_id)
+    .bind(source_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !ours {
+        return Err(Error::Provenance(
+            "a vendor score must come from a connection of its own profile or of its household".into(),
+        ));
+    }
     let mut out = Written::default();
     for s in scores {
         if !s.value.is_finite() || s.value.abs() > 1e9 {
@@ -145,12 +161,14 @@ pub async fn write(conn: &mut PgConnection, profile_id: Uuid, source_id: Uuid, s
 }
 
 /// The profile's scores from `since` on, by provider, category, connection and time, each with the
-/// connection that brought it.
+/// connection that brought it. A connection of another household is never named, even on a row that
+/// got past `write`.
 pub async fn list(conn: &mut PgConnection, profile_id: Uuid, since: DateTime<Utc>) -> Result<Vec<Stored>> {
     Ok(sqlx::query_as(
         "select v.provider, v.category, v.t, v.value, v.qualifier, v.components, v.computed_by, \
          case when s.id is null then null else jsonb_build_object('id', s.id, 'label', s.label) end as source \
-         from vendor_score v left join source s on s.id = v.source_id \
+         from vendor_score v join profile p on p.id = v.profile_id \
+         left join source s on s.id = v.source_id and s.household_id = p.household_id \
          where v.profile_id = $1 and v.t >= $2 order by v.provider, v.category, s.label, v.source_id, v.t",
     )
     .bind(profile_id)
