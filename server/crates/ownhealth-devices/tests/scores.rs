@@ -141,11 +141,11 @@ async fn scores_are_stored_apart_tagged_by_provider_and_a_repull_updates_in_plac
         score("readiness", 2, 74.0, None),
         score("sleep", 2, 88.0, Some("Optimal")),
     ];
-    assert_eq!(scores::write(&mut c, sam, src, &batch).await?, 3);
+    assert_eq!(scores::write(&mut c, sam, src, &batch).await?.written, 3);
     // the same pull again changes nothing; a new value for one morning replaces it
-    assert_eq!(scores::write(&mut c, sam, src, &batch).await?, 0);
+    assert_eq!(scores::write(&mut c, sam, src, &batch).await?.written, 0);
     let again = vec![score("readiness", 2, 76.0, Some("Fair"))];
-    assert_eq!(scores::write(&mut c, sam, src, &again).await?, 1);
+    assert_eq!(scores::write(&mut c, sam, src, &again).await?.written, 1);
     let since = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).single().unwrap_or_default();
     let rows = scores::list(&mut c, sam, since).await?;
     let got: Vec<(&str, f64, Option<&str>, &str)> = rows
@@ -207,6 +207,64 @@ async fn two_connections_with_the_same_score_keep_a_row_each() -> R {
             .fetch_all(&mut *c)
             .await?;
     assert_eq!(rows, vec![(Some(gb.id), 62.0), (Some(hae.id), 64.0)]);
+    Ok(())
+}
+
+/// A vendor quirk in one score never fails the batch: a value that is not a number is dropped, an
+/// empty or non-object `components` is left out, a long qualifier is cut.
+#[tokio::test]
+async fn one_vendor_quirk_does_not_fail_the_write() -> R {
+    let env = Env::new().await?;
+    let sam = env.fam.profile("sam");
+    let src = env.source("gadgetbridge", Some("sam"), json!({}), None).await?;
+    let mut c = env.db.pool.acquire().await?;
+    let mut nan = score("readiness", 1, f64::NAN, None);
+    nan.t = Utc.with_ymd_and_hms(2026, 11, 1, 5, 0, 0).single().unwrap_or_default();
+    let mut null_parts = score("readiness", 2, 74.0, None);
+    null_parts.components = Some(serde_json::Value::Null);
+    let mut list_parts = score("sleep", 2, 80.0, None);
+    list_parts.components = Some(json!([1, 2]));
+    let long = score("activity", 2, 90.0, Some(&"Very good ".repeat(10)));
+    let batch = vec![
+        nan,
+        null_parts,
+        list_parts,
+        long,
+        score("sleep", 3, 88.0, Some("Optimal")),
+    ];
+    let w = scores::write(&mut c, sam, src.id, &batch).await;
+    assert!(w.is_ok(), "{w:?}");
+    assert_eq!(
+        w?,
+        scores::Written { written: 4, dropped: 1 },
+        "the value that is not a number is dropped and counted"
+    );
+    let rows: Vec<(String, f64, Option<serde_json::Value>, Option<String>)> = sqlx::query_as(
+        "select category, value, components, qualifier from vendor_score where profile_id = $1 order by t, category",
+    )
+    .bind(sam)
+    .fetch_all(&mut *c)
+    .await?;
+    let got: Vec<(&str, f64, bool, usize)> = rows
+        .iter()
+        .map(|(cat, v, comp, q)| {
+            (
+                cat.as_str(),
+                *v,
+                comp.is_some(),
+                q.as_deref().map_or(0, |q| q.chars().count()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("activity", 90.0, true, 80),
+            ("readiness", 74.0, false, 0),
+            ("sleep", 80.0, false, 0),
+            ("sleep", 88.0, true, 7)
+        ]
+    );
     Ok(())
 }
 

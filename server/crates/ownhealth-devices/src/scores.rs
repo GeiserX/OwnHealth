@@ -40,6 +40,9 @@ pub const SCORE_WORDS: [&str; 9] = [
     "performance",
 ];
 
+/// The longest qualifier the table keeps (the `vendor_score.qualifier` CHECK).
+pub const QUALIFIER_MAX: usize = 80;
+
 /// True when `metric` names a vendor score, so it belongs in `vendor_score`, never `wearable_sample`:
 /// the key, lowercased with everything but letters and digits taken out, contains a word of
 /// `SCORE_WORDS` or starts with `recovery` (`hr_recovery` is a measurement).
@@ -91,13 +94,34 @@ pub struct Stored {
     pub source: Option<Value>,
 }
 
+/// What a write did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Written {
+    /// Rows inserted or changed.
+    pub written: u64,
+    /// Scores left out because their value is not a finite number in the table's range.
+    pub dropped: u64,
+}
+
 /// Store `scores` for one profile, brought by the connection `source_id`. A score already stored for
 /// the same connection, provider, category and time takes the new value, qualifier and components.
-/// Returns the rows inserted or changed.
-pub async fn write(conn: &mut PgConnection, profile_id: Uuid, source_id: Uuid, scores: &[Score]) -> Result<u64> {
-    let mut n = 0;
-    for s in scores.iter().filter(|s| s.value.is_finite()) {
-        n += sqlx::query(
+///
+/// One vendor quirk never fails the batch: a value that is not finite (or past ±1e9) is dropped and
+/// counted, `components` that are not a JSON object are left out, and a qualifier is cut to
+/// `QUALIFIER_MAX` characters. An unknown category or a malformed provider is a mapping bug and fails.
+pub async fn write(conn: &mut PgConnection, profile_id: Uuid, source_id: Uuid, scores: &[Score]) -> Result<Written> {
+    let mut out = Written::default();
+    for s in scores {
+        if !s.value.is_finite() || s.value.abs() > 1e9 {
+            out.dropped += 1;
+            continue;
+        }
+        let components = s.components.as_ref().filter(|c| c.is_object());
+        let qualifier = s
+            .qualifier
+            .as_deref()
+            .map(|q| q.chars().take(QUALIFIER_MAX).collect::<String>());
+        out.written += sqlx::query(
             "insert into vendor_score (profile_id, source_id, provider, category, t, value, qualifier, components) \
              values ($1, $2, $3, $4, $5, $6, $7, $8) \
              on conflict (profile_id, source_id, provider, category, t) do update \
@@ -111,13 +135,13 @@ pub async fn write(conn: &mut PgConnection, profile_id: Uuid, source_id: Uuid, s
         .bind(&s.category)
         .bind(s.t)
         .bind(s.value)
-        .bind(&s.qualifier)
-        .bind(&s.components)
+        .bind(qualifier)
+        .bind(components)
         .execute(&mut *conn)
         .await?
         .rows_affected();
     }
-    Ok(n)
+    Ok(out)
 }
 
 /// The profile's scores from `since` on, by provider, category, connection and time, each with the
