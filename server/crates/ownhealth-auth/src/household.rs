@@ -595,9 +595,9 @@ pub const BLOB_COLUMNS: &[(&str, &[&str], &str)] = &[
     // Export, Gadgetbridge), and what a household inbox (a shared mailbox, Paperless, the scanner
     // folder) filed to the profile: an item the inbox routed to it (a mail with nothing to import keeps
     // its .eml and no document), the item of one of its documents, the whole .eml of a mail released to
-    // it, a structured file of its household's inboxes whose document the importer made (the item names
-    // no document; rows older than migration 1249 have no profile), and a file in the profile's folder
-    // of a scanner folder.
+    // it, a structured file of its household's inboxes whose document the importer made (only for an item
+    // that names no profile: rows older than migration 1249; an item that names someone else is theirs),
+    // and a file in the profile's folder of a scanner folder.
     (
         "source_item",
         &["blob_sha256"],
@@ -606,7 +606,8 @@ pub const BLOB_COLUMNS: &[(&str, &[&str], &str)] = &[
          or document_id in (select id from document where profile_id = $1) \
          or quarantine_id in (select id from quarantine_item where released_document_ids \
             && array(select id from document where profile_id = $1)) \
-         or (document_id is null and blob_sha256 in (select blob_sha256 from document where profile_id = $1) \
+         or (document_id is null and profile_id is null \
+            and blob_sha256 in (select blob_sha256 from document where profile_id = $1) \
             and source_id in (select s.id from source s join profile p on p.household_id = s.household_id \
             where p.id = $1 and s.profile_id is null)) \
          or (source_id in (select s.id from source s join profile p on p.household_id = s.household_id \

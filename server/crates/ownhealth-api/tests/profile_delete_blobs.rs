@@ -986,3 +986,39 @@ async fn a_mail_with_nothing_to_import_goes_with_the_person() -> R {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn an_item_filed_to_someone_else_keeps_its_file() -> R {
+    let env = Env::new(true).await?;
+    let (alex, sam) = (env.profile("alex"), env.profile("sam"));
+    let paperless = household_source(&env, "paperless", json!({})).await?;
+    // Alex uploaded a file; the household Paperless later filed the same bytes to Sam, whose
+    // structured import is still queued, so the item names Sam and no document yet
+    let (_, sha) = document(
+        &env,
+        alex,
+        "{\"synthetic\": \"LabNorte export\"}",
+        "application/json",
+    )
+    .await?;
+    item(&env, paperless, "41", &sha, None, None).await?;
+    sqlx::query("update source_item set profile_id = $1 where source_id = $2")
+        .bind(sam)
+        .bind(paperless)
+        .execute(env.pool())
+        .await?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        items(&env, paperless).await?,
+        vec![("41".into(), Some(sha.clone()))],
+        "Sam's item lost its file"
+    );
+    assert!(
+        stored(env.rt.blobs.root()).contains(&sha),
+        "Sam's queued file went with Alex: {}",
+        r.json
+    );
+    Ok(())
+}
