@@ -511,13 +511,27 @@ pub async fn build(
     lang: &str,
     as_of: NaiveDate,
 ) -> Result<Ips> {
+    let (ips, state) = read(&mut *conn, profile_id, scopes, lang, as_of).await?;
+    ownhealth_rules::store_snapshot(&mut *conn, profile_id, &state, &*ownhealth_rules::load_pack()?).await?;
+    Ok(ips)
+}
+
+/// `build` without its one write: the Bundle, and the state body it was read from for the caller
+/// to store (`store_snapshot`) once a read-only transaction (`summary::begin_read`) is over.
+pub async fn read(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    scopes: &Scopes,
+    lang: &str,
+    as_of: NaiveDate,
+) -> Result<(Ips, Value)> {
     let opts = Options {
         lang: lang.into(),
         specialty: SPECIALTY.into(),
         sensitive_open: false,
         as_of,
     };
-    let model = summary::build(&mut *conn, profile_id, scopes, &opts).await?;
+    let (model, state) = summary::read_for(&mut *conn, None, profile_id, scopes, &opts).await?;
     let empty = Map::new();
     let labels = model.get("labels").and_then(Value::as_object).unwrap_or(&empty);
     let (name, birth, sex): (String, Option<NaiveDate>, Option<String>) =
@@ -700,12 +714,13 @@ pub async fn build(
         "timestamp": format!("{date}T00:00:00Z"),
         "entry": entry,
     });
-    Ok(Ips {
+    let ips = Ips {
         bundle,
         srcs,
         state_hash: st(&model, "state_hash").to_string(),
         withheld: json!(withheld),
-    })
+    };
+    Ok((ips, state))
 }
 
 #[cfg(test)]

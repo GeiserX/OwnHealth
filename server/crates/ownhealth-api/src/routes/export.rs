@@ -146,14 +146,19 @@ async fn ips(
 ) -> R {
     let lang = lang.unwrap_or_else(|| p.lang.clone());
     Check::body().literal("lang", Some(&lang), &LANGS).done()?;
-    let mut tx = rt.pool.begin().await?;
+    // the summary behind the Bundle reads one snapshot, as the printed sheet does
+    let mut tx = ownhealth_rules::summary::begin_read(&rt.pool).await?;
     let perm = Caller(p.clone())
         .require(&mut tx, &profile, Some("read:summary"), None)
         .await?;
     let today = today_utc();
-    let out = ownhealth_ops::ips::build(&mut tx, perm.profile.id, &perm.scopes, &lang, today).await?;
+    let (out, state) = ownhealth_ops::ips::read(&mut tx, perm.profile.id, &perm.scopes, &lang, today).await?;
+    tx.commit().await?;
     let bytes = out.to_bytes()?;
     let entries = out.bundle["entry"].as_array().map_or(0, Vec::len);
+    let pack = ownhealth_rules::load_pack().map_err(ownhealth_core::Error::from)?;
+    let mut tx = rt.pool.begin().await?;
+    ownhealth_rules::store_snapshot(&mut tx, perm.profile.id, &state, &pack).await?;
     write_audit(
         &mut tx,
         &AuditEvent {

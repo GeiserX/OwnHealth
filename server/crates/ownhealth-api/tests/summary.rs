@@ -329,6 +329,32 @@ async fn a_correction_saved_during_a_print_never_mixes_two_states_on_one_sheet()
     Ok(())
 }
 
+/// The IPS export is built from the same summary, so it holds one state too.
+#[tokio::test]
+async fn a_correction_saved_during_an_ips_export_never_mixes_two_states() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let (path, body) = ("/api/profiles/alex/export", json!({"fmt": "ips", "lang": "en"}));
+    let has = |bytes: &[u8], what: &str| String::from_utf8_lossy(bytes).contains(what);
+    let bundle = ask_during_a_correction(&env, &mut alex, path, &body).await?;
+    assert_eq!(
+        has(&bundle, VACCINE),
+        has(&bundle, PROCEDURE),
+        "one state in the Bundle"
+    );
+    assert!(
+        !has(&bundle, VACCINE),
+        "the Bundle holds the state from when the export began"
+    );
+    the_state_named_is_stored(&env, "POST /api/profiles/export").await?;
+    let bundle = alex.post(path, &body).await?.bytes;
+    assert!(
+        has(&bundle, VACCINE) && has(&bundle, PROCEDURE),
+        "the next export shows the correction"
+    );
+    Ok(())
+}
+
 /// The sheet's transaction is one snapshot that cannot write: a write inside it fails.
 #[tokio::test]
 async fn the_sheet_is_read_in_a_repeatable_read_read_only_transaction() -> R {
