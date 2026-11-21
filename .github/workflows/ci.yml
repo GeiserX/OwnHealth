@@ -238,6 +238,7 @@ jobs:
   # both platforms, and the arm64 pair still runs on main after the merge.
   docker-runners:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       runners: ${{ steps.pick.outputs.runners }}
     steps:
