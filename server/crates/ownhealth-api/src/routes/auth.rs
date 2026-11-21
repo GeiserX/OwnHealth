@@ -61,14 +61,26 @@ impl IntoResponse for Fail {
     }
 }
 
-/// The words that make a field secret: a field named with one of them (`password`, `new_password`,
-/// `api_token`, `pinCode`) is never repeated in a 422, on any route.
-const SECRET_WORDS: [&str; 5] = ["passcode", "password", "pin", "secret", "token"];
+/// The names that make a field secret: a field named with one of them (`password`, `new_password`,
+/// `api_token`, `pinCode`, `passCode`, `recovery-code`) is never repeated in a 422, on any route. A
+/// name matches as one word or as two adjacent words joined (`pass_code` is `passcode`). A bare `code`
+/// is secret only on the routes that take a recovery or invite code (`CodeBody`, `Fail::hiding`):
+/// elsewhere it is a clinical code.
+const SECRET_NAMES: [&str; 8] = [
+    "passcode",
+    "password",
+    "pin",
+    "secret",
+    "token",
+    "recoverycode",
+    "invitecode",
+    "enrollcode",
+];
 
-/// True when a field name holds one of SECRET_WORDS as a word. Words split at `_`, `-` and the other
-/// non-alphanumerics, at lower-to-upper (`apiToken`), and before the last capital of an acronym
-/// that a word follows (`PINCode` is `pin` and `code`).
-fn is_secret_field(name: &str) -> bool {
+/// The words of a field name, lower case. Words split at `_`, `-` and the other non-alphanumerics,
+/// at lower-to-upper (`apiToken`), and before the last capital of an acronym that a word follows
+/// (`PINCode` is `pin` and `code`).
+fn name_words(name: &str) -> Vec<String> {
     let chars: Vec<char> = name.chars().collect();
     let mut words: Vec<String> = vec![String::new()];
     for (i, &ch) in chars.iter().enumerate() {
@@ -87,22 +99,34 @@ fn is_secret_field(name: &str) -> bool {
             w.push(ch.to_ascii_lowercase());
         }
     }
-    words.iter().any(|w| SECRET_WORDS.contains(&w.as_str()))
+    words.retain(|w| !w.is_empty());
+    words
+}
+
+/// True when a field name holds one of SECRET_NAMES as a word, or as two adjacent words joined.
+fn is_secret_field(name: &str) -> bool {
+    let words = name_words(name);
+    let joined = words.windows(2).map(|w| w.concat());
+    words
+        .iter()
+        .cloned()
+        .chain(joined)
+        .any(|w| SECRET_NAMES.contains(&w.as_str()))
 }
 
 /// Remove every secret field from a value, at any depth, and collect what they held.
-fn strip_secrets(v: &mut Value, found: &mut Vec<Value>) {
+fn strip_secrets(v: &mut Value, secret: &dyn Fn(&str) -> bool, found: &mut Vec<Value>) {
     match v {
         Value::Object(m) => {
-            let keys: Vec<String> = m.keys().filter(|k| is_secret_field(k)).cloned().collect();
+            let keys: Vec<String> = m.keys().filter(|k| secret(k)).cloned().collect();
             for k in keys {
                 if let Some(x) = m.shift_remove(&k) {
                     found.push(x);
                 }
             }
-            m.values_mut().for_each(|x| strip_secrets(x, found));
+            m.values_mut().for_each(|x| strip_secrets(x, secret, found));
         }
-        Value::Array(a) => a.iter_mut().for_each(|x| strip_secrets(x, found)),
+        Value::Array(a) => a.iter_mut().for_each(|x| strip_secrets(x, secret, found)),
         _ => {}
     }
 }
@@ -111,17 +135,22 @@ fn strip_secrets(v: &mut Value, found: &mut Vec<Value>) {
 /// echoed as input loses its secret fields, and a message that quotes a secret value (serde names
 /// the value of a field of the wrong type) quotes `[redacted]` instead.
 fn redact_entry(e: &mut Value) {
+    redact_entry_by(e, &is_secret_field);
+}
+
+/// `redact_entry` with `secret` telling which field names are secret.
+fn redact_entry_by(e: &mut Value, secret: &dyn Fn(&str) -> bool) {
     let about_secret = e["loc"]
         .as_array()
         .and_then(|l| l.last())
         .and_then(Value::as_str)
-        .is_some_and(is_secret_field);
+        .is_some_and(secret);
     let mut found = Vec::new();
     if let Some(input) = e.get_mut("input") {
         if about_secret {
             found.push(std::mem::replace(input, Value::Null));
         } else {
-            strip_secrets(input, &mut found);
+            strip_secrets(input, secret, &mut found);
         }
     }
     let Some(msg) = e["msg"].as_str() else { return };
@@ -139,6 +168,29 @@ fn redact_entry(e: &mut Value) {
         }
     }
     e["msg"] = json!(clean);
+}
+
+impl Fail {
+    /// The same answer with the fields named `names` secret too, whatever their letter case and
+    /// separators: a route whose `code` is a recovery or invite code hides it as it hides a password.
+    pub fn hiding(self, names: &[&str]) -> Fail {
+        match self {
+            Fail::Invalid(mut errors) => {
+                let flat = |k: &str| name_words(k).concat();
+                let secret = |k: &str| is_secret_field(k) || names.iter().any(|n| flat(k) == flat(n));
+                errors.iter_mut().for_each(|e| redact_entry_by(e, &secret));
+                Fail::Invalid(errors)
+            }
+            other => other,
+        }
+    }
+}
+
+/// The field of the recovery and enroll routes that holds a way in.
+const CODE: [&str; 1] = ["code"];
+
+fn hide_code(f: Fail) -> Fail {
+    f.hiding(&CODE)
 }
 
 impl From<ApiError> for Fail {
@@ -398,6 +450,18 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
         serde_json::from_value(value.clone())
             .map(Body)
             .map_err(|e| Fail::Invalid(vec![serde_entry(&e, value)]))
+    }
+}
+
+/// A JSON body whose `code` field is a recovery or invite code: a 422 hides it as it hides a password.
+pub struct CodeBody<T>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for CodeBody<T> {
+    type Rejection = Fail;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Body(b) = Body::<T>::from_request(req, state).await.map_err(hide_code)?;
+        Ok(CodeBody(b))
     }
 }
 
@@ -978,8 +1042,11 @@ pub struct RecoveryIn {
 }
 
 /// Log in with one recovery code. It is used up; the session has no step-up until a new login.
-async fn recovery_login(State(rt): State<Runtime>, _: Public, meta: Meta, Body(body): Body<RecoveryIn>) -> R {
-    Check::body().len("code", Some(&body.code), 1, 40).done()?;
+async fn recovery_login(State(rt): State<Runtime>, _: Public, meta: Meta, CodeBody(body): CodeBody<RecoveryIn>) -> R {
+    Check::body()
+        .len("code", Some(&body.code), 1, 40)
+        .done()
+        .map_err(hide_code)?;
     let mut tx = rt.pool.begin().await?;
     let Some(user_id) = recovery::use_code(&mut tx, &body.code).await? else {
         return Err(detail(
@@ -1266,8 +1333,11 @@ fn invite_invalid() -> Fail {
     )
 }
 
-async fn enroll_begin(State(rt): State<Runtime>, _: Public, Body(body): Body<EnrollIn>) -> R {
-    Check::body().len("code", Some(&body.code), 10, 80).done()?;
+async fn enroll_begin(State(rt): State<Runtime>, _: Public, CodeBody(body): CodeBody<EnrollIn>) -> R {
+    Check::body()
+        .len("code", Some(&body.code), 10, 80)
+        .done()
+        .map_err(hide_code)?;
     require_passkeys(&rt.settings)?;
     let mut tx = rt.pool.begin().await?;
     let ch = household::peek_invite(&mut tx, &body.code)
@@ -1292,10 +1362,15 @@ async fn enrolled(
     Ok((json!({"user_id": user_id, "recovery_codes": codes}), cookie))
 }
 
-async fn enroll_finish(State(rt): State<Runtime>, _: Public, meta: Meta, Body(body): Body<EnrollFinishIn>) -> R {
+async fn enroll_finish(
+    State(rt): State<Runtime>,
+    _: Public,
+    meta: Meta,
+    CodeBody(body): CodeBody<EnrollFinishIn>,
+) -> R {
     let mut c = Check::body();
     body.credential.check(&mut c);
-    c.len("code", Some(&body.code), 10, 80).done()?;
+    c.len("code", Some(&body.code), 10, 80).done().map_err(hide_code)?;
     let mut tx = rt.pool.begin().await?;
     let reg =
         passkeys::verify_registration(&mut tx, &body.credential.credential(), &rp(&rt.settings), &["enroll"]).await?;
@@ -1309,11 +1384,17 @@ async fn enroll_finish(State(rt): State<Runtime>, _: Public, meta: Meta, Body(bo
     Ok(answer(StatusCode::OK, out, &[cookie]))
 }
 
-async fn enroll_password(State(rt): State<Runtime>, _: Public, meta: Meta, Body(body): Body<EnrollPasswordIn>) -> R {
+async fn enroll_password(
+    State(rt): State<Runtime>,
+    _: Public,
+    meta: Meta,
+    CodeBody(body): CodeBody<EnrollPasswordIn>,
+) -> R {
     Check::body()
         .len("code", Some(&body.code), 10, 80)
         .len("password", Some(&body.password), password::MIN_LENGTH, 256)
-        .done()?;
+        .done()
+        .map_err(hide_code)?;
     require_no_passkeys(&rt.settings)?;
     let mut tx = rt.pool.begin().await?;
     let user_id = household::redeem_invite(&mut tx, &body.code).await?;
@@ -1608,6 +1689,14 @@ mod tests {
             "PINCode",
             "APIToken",
             "userPIN",
+            "passCode",
+            "passWord",
+            "pass_code",
+            "Pass-Word",
+            "recovery-code",
+            "RecoveryCode",
+            "invite_code",
+            "enrollCode",
         ] {
             assert!(is_secret_field(name), "{name}");
         }
@@ -1620,6 +1709,10 @@ mod tests {
             "tokenizer",
             "passwordless",
             "HTTPStatus",
+            "code",
+            "zip_code",
+            "pass",
+            "passage_code",
         ] {
             assert!(!is_secret_field(name), "{name}");
         }
