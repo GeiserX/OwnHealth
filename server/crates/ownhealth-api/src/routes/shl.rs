@@ -151,13 +151,18 @@ struct Live {
 /// count of incorrect passcodes even in the face of parallel requests). A link out of attempts is
 /// disabled, so not live. The creator's right to share is checked on every request, as the
 /// calendar feed re-checks its creator: the role, and every category the link carries against the
-/// creator's categories today minus the profile's locks today. The deadlines are read on the clock
-/// once the row lock is held (`clock_timestamp()`, re-read after a wait for the lock), never at the
-/// transaction's start, so a request that waited past a deadline is refused.
+/// creator's categories today minus the profile's locks today. The row lock comes first, in its own
+/// statement, and every condition is read after it on the clock (`clock_timestamp()`), never at the
+/// transaction's start: Postgres re-checks a FOR UPDATE row's conditions after a wait only when the
+/// holder changed the row, so a request that waited past a deadline behind a lock alone would pass.
 async fn live(conn: &mut PgConnection, id: &str) -> Result<Option<Live>, ApiError> {
     if !share::is_segment(id) {
         return Ok(None);
     }
+    sqlx::query("select 1 from shl where manifest_sha256 = $1 for update")
+        .bind(share::sha256(id))
+        .execute(&mut *conn)
+        .await?;
     type Row = (
         Uuid,
         Uuid,
@@ -177,8 +182,7 @@ async fn live(conn: &mut PgConnection, id: &str) -> Result<Option<Live>, ApiErro
          where s.manifest_sha256 = $1 and s.revoked_at is null and s.expires_at > clock_timestamp() \
          and (s.attempts_left is null or s.attempts_left > 0) \
          and u.disabled_at is null and g.role = any($2) and not g.break_glass \
-         and (g.expires_at is null or g.expires_at > clock_timestamp()) \
-         for update of s",
+         and (g.expires_at is null or g.expires_at > clock_timestamp())",
     )
     .bind(share::sha256(id))
     .bind(&ROLES[..])
@@ -607,9 +611,21 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
         return Err(ApiError::new(StatusCode::CONFLICT, "share_url_too_long", msg("long")).into());
     }
     let mut tx = rt.pool.begin().await?;
+    let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
+    let first = sharer(&mut tx, &caller, &p).await?;
+    // Hold the profile, the creator's grant and login until this link commits: a lock, a grant
+    // change or a closed login then waits for it, and its trigger (migration 1270) sees the link and
+    // ends it. A write that committed first is seen by the second read below, made under the hold.
+    sqlx::query(
+        "select 1 from profile p join profile_grant g on g.profile_id = p.id join app_user u on u.id = g.user_id \
+         where p.id = $1 and g.user_id = $2 for share of p, g, u",
+    )
+    .bind(first.profile.id)
+    .bind(user)
+    .execute(&mut *tx)
+    .await?;
     let perm = sharer(&mut tx, &caller, &p).await?;
     sessions::require_step_up(&mut tx, &caller.0, sessions::STEP_UP_SECONDS).await?;
-    let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
     let open = open_categories(&perm);
     // a summary is what a link carries: read:summary comes with every link
     if !open.contains("read:summary") {
@@ -663,7 +679,13 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
     e.resource_ids = Some(vec![link_id.to_string()]);
     e.src_ids = Some(sealed.ips.srcs.clone());
     e.rows_out = Some(i32::try_from(sealed.ips.srcs.len()).unwrap_or(i32::MAX));
-    e.withheld = Some(json!({"by_scope": sealed.ips.withheld, "sensitive": sensitive}));
+    // the creator reads their own audit events, so the sensitive count follows the answer's rule below
+    let may_count = perm.scopes.contains("read:sensitive");
+    e.withheld = Some(if may_count {
+        json!({"by_scope": sealed.ips.withheld, "sensitive": sensitive})
+    } else {
+        json!({"by_scope": sealed.ips.withheld})
+    });
     e.args_summary = Some(format!(
         "categories={};days={days};flag={flag};lang={lang}",
         categories.join(",")
@@ -685,7 +707,7 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
     // file never says. A creator without read:sensitive gets no count at all, not even 0: a 0 would
     // tell them there is nothing to hide (security-privacy.md: harm inside the household)
     let mut out = json!({"link": link_out(&row, true), "shlink": link});
-    if perm.scopes.contains("read:sensitive") {
+    if may_count {
         out["left_out"] = json!({"sensitive": sensitive});
     }
     Ok(answer(StatusCode::CREATED, out, &[]))

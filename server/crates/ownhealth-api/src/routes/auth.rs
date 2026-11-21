@@ -65,20 +65,24 @@ impl IntoResponse for Fail {
 /// `api_token`, `pinCode`) is never repeated in a 422, on any route.
 const SECRET_WORDS: [&str; 5] = ["passcode", "password", "pin", "secret", "token"];
 
-/// True when a field name holds one of SECRET_WORDS as a word (split at `_`, `-` and lower-to-upper).
+/// True when a field name holds one of SECRET_WORDS as a word. Words split at `_`, `-` and the other
+/// non-alphanumerics, at lower-to-upper (`apiToken`), and before the last capital of an acronym
+/// that a word follows (`PINCode` is `pin` and `code`).
 fn is_secret_field(name: &str) -> bool {
+    let chars: Vec<char> = name.chars().collect();
     let mut words: Vec<String> = vec![String::new()];
-    let mut prev_lower = false;
-    for ch in name.chars() {
+    for (i, &ch) in chars.iter().enumerate() {
         if !ch.is_ascii_alphanumeric() {
             words.push(String::new());
-            prev_lower = false;
             continue;
         }
-        if ch.is_ascii_uppercase() && prev_lower {
+        let prev = i.checked_sub(1).and_then(|j| chars.get(j)).copied();
+        let next = chars.get(i + 1).copied();
+        let after_lower = prev.is_some_and(|p| p.is_ascii_lowercase());
+        let acronym_end = prev.is_some_and(|p| p.is_ascii_uppercase()) && next.is_some_and(|n| n.is_ascii_lowercase());
+        if ch.is_ascii_uppercase() && (after_lower || acronym_end) {
             words.push(String::new());
         }
-        prev_lower = ch.is_ascii_lowercase();
         if let Some(w) = words.last_mut() {
             w.push(ch.to_ascii_lowercase());
         }
@@ -1601,10 +1605,22 @@ mod tests {
             "pinCode",
             "client-secret",
             "PIN",
+            "PINCode",
+            "APIToken",
+            "userPIN",
         ] {
             assert!(is_secret_field(name), "{name}");
         }
-        for name in ["name", "pinned", "spinner", "days", "tokenizer", "passwordless"] {
+        for name in [
+            "name",
+            "pinned",
+            "Pinned",
+            "spinner",
+            "days",
+            "tokenizer",
+            "passwordless",
+            "HTTPStatus",
+        ] {
             assert!(!is_secret_field(name), "{name}");
         }
         let mut body = error_entry(

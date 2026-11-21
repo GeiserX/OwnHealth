@@ -565,13 +565,14 @@ pub async fn enqueue_poll(conn: &mut PgConnection, source_id: Uuid) -> Result<Op
     .await?)
 }
 
-/// One scheduler pass: `add_default_sources`, `sweep_link_files`, then `schedule_due`. Returns the
-/// jobs added.
+/// One scheduler pass: `add_default_sources`, `schedule_due`, then `sweep_link_files`, so a sweep
+/// that waits on a lock or fails never holds back the due polls. Returns the jobs added.
 pub async fn scheduler_tick(ctx: &JobContext) -> Result<Vec<i64>> {
     add_default_sources(ctx).await?;
     let mut conn = ctx.pool.acquire().await?;
+    let added = schedule_due(&mut conn).await?;
     sweep_link_files(&mut conn).await?;
-    schedule_due(&mut conn).await
+    Ok(added)
 }
 
 /// Delete the sealed file of every SMART Health Link that can no longer open (migration 1270): past

@@ -1126,7 +1126,8 @@ async fn reading_the_links_and_their_access_log_is_audited() -> R {
 
 /// The count of sensitive items a link leaves out reaches only a creator who may read them. A
 /// guardian whose grant lacks read:sensitive gets no count at all, not even 0, so the answer says
-/// nothing about whether such records exist. The audit row keeps the number.
+/// nothing about whether such records exist. The creator reads their own audit events, so the audit
+/// row follows the same rule.
 #[tokio::test]
 async fn a_creator_without_read_sensitive_gets_no_sensitive_count() -> R {
     let env = env().await?;
@@ -1134,22 +1135,28 @@ async fn a_creator_without_read_sensitive_gets_no_sensitive_count() -> R {
     let lucia = env.profile("lucia");
     condition(&env, lucia, "SYNTH-SENSITIVE-50-LUCIA", &["reproductive"]).await?;
     let records = json!({"categories": ["read:records"]});
-    // the control: a guardian whose grant holds read:sensitive sees the count
+    let audited = "select (withheld->>'sensitive')::bigint from audit_event where action = 'shl.create' \
+                   order by id desc limit 1";
+    // the control: a guardian whose grant holds read:sensitive sees the count, and so does the audit
     let (made, _) = share(&mut alex, "lucia", records.clone()).await?;
     assert_eq!(made["left_out"], json!({"sensitive": 1}), "{made:?}");
+    assert_eq!(
+        env.scalar_i64(audited).await?,
+        1,
+        "the audit row counts for this creator"
+    );
     // the same guardian without read:sensitive
     let mut c = env.pool().acquire().await?;
     let narrowed = scope_set(["read:summary", "read:labs", "read:records"]);
     set_grant(&mut c, env.user("alex"), lucia, "guardian", Some(&narrowed), None, None).await?;
     let (made, _) = share(&mut alex, "lucia", records).await?;
     assert!(made.get("left_out").is_none(), "no count, not even 0: {made:?}");
-    let kept = env
-        .scalar_i64(
-            "select (withheld->>'sensitive')::bigint from audit_event where action = 'shl.create' \
-             order by id desc limit 1",
-        )
-        .await?;
-    assert_eq!(kept, 1, "the audit row keeps the number");
+    let left: Option<bool> = sqlx::query_scalar(
+        "select withheld ? 'sensitive' from audit_event where action = 'shl.create' order by id desc limit 1",
+    )
+    .fetch_one(&mut *c)
+    .await?;
+    assert_eq!(left, Some(false), "the audit row has no count either");
     Ok(())
 }
 
@@ -1420,5 +1427,114 @@ async fn a_file_request_that_waits_past_its_ticket_hour_is_refused() -> R {
     holder.commit().await?;
     let r = waiting.await??;
     assert_eq!(r.status, StatusCode::NOT_FOUND, "{:?}", r.json);
+    Ok(())
+}
+
+/// A manifest request that waits on the link's row lock past the link's expiry is refused. The
+/// holder only locks the row, and Postgres re-checks a FOR UPDATE row's conditions after a wait only
+/// when the holder changed it, so the conditions are read after the lock is taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_manifest_request_that_waits_past_the_link_expiry_is_refused() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let (made, pl) = share(&mut alex, "alex", json!({})).await?;
+    let id = made["link"]["id"].as_str().unwrap_or_default().to_string();
+    sqlx::query("update shl set expires_at = clock_timestamp() + interval '1 second' where id = $1::uuid")
+        .bind(&id)
+        .execute(env.pool())
+        .await?;
+    // someone else holds the link's row (another manifest request, say) across its expiry
+    let mut holder = env.pool().begin().await?;
+    sqlx::query("select 1 from shl where id = $1::uuid for update")
+        .bind(&id)
+        .execute(&mut *holder)
+        .await?;
+    let path = path_of(pl["url"].as_str().unwrap_or_default());
+    let body = json!({"recipient": "Dr. Carmen Ortega, LabNorte"});
+    let mut c = env.anon();
+    let waiting = tokio::spawn(async move { c.send(Method::POST, &path, Some(&body), &[]).await });
+    tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+    holder.commit().await?;
+    let r = waiting.await??;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{:?}", r.json);
+    Ok(())
+}
+
+/// A link made while a lock on its category is being written never gets past the lock. Creation
+/// holds the profile and the creator's grant, so it waits for the lock to commit, then reads the
+/// lock and refuses; a lock that comes second waits for the link, and its trigger ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_made_while_a_lock_is_written_waits_for_it_and_is_refused() -> R {
+    let env = env().await?;
+    let mut locker = env.pool().begin().await?;
+    sqlx::query("update profile set locks = array['read:labs'] where id = $1")
+        .bind(env.profile("alex"))
+        .execute(&mut *locker)
+        .await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let making = tokio::spawn(async move {
+        alex.post(
+            "/api/profiles/alex/shl",
+            &json!({"categories": ["read:labs"], "label": "racing"}),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    locker.commit().await?;
+    let r = making.await??;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{:?}", r.json);
+    assert_eq!(r.json["detail"]["code"], "category_closed", "{:?}", r.json);
+    Ok(())
+}
+
+async fn idle_poller(
+    _c: JobContext,
+    _s: ownhealth_core::sources::Source,
+) -> Result<ownhealth_core::sources::RunOutcome, ownhealth_core::jobs::JobError> {
+    Ok(ownhealth_core::sources::RunOutcome::default())
+}
+
+/// A sweep that waits on a lock does not hold back the inbox polls that are due: the scheduler
+/// queues them first, then sweeps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sweep_that_waits_does_not_hold_back_the_due_polls() -> R {
+    use ownhealth_core::sources::{self, NewSource};
+    let env = env().await?;
+    // a test-only kind: the registry is process-wide, and no other test here makes such a source
+    sources::register_poller("gadgetbridge", |c, s| Box::pin(idle_poller(c, s)));
+    let mut c = env.pool().acquire().await?;
+    let household: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(env.profile("alex"))
+        .fetch_one(&mut *c)
+        .await?;
+    sources::create_source(
+        &mut c,
+        &NewSource {
+            poll_seconds: Some(300),
+            ..NewSource::new(household, "gadgetbridge", "Pulsera de Alex")
+        },
+    )
+    .await?;
+    // the sweep revokes and deletes on shl, so a lock on the table makes it wait
+    let mut holder = env.pool().begin().await?;
+    sqlx::query("lock table shl in exclusive mode")
+        .execute(&mut *holder)
+        .await?;
+    let ctx = job_ctx(&env);
+    let tick = tokio::spawn(async move { sources::scheduler_tick(&ctx).await });
+    let mut queued = 0_i64;
+    for _ in 0..40 {
+        queued = sqlx::query_scalar("select count(*) from job where kind = $1")
+            .bind(sources::POLL_JOB)
+            .fetch_one(&mut *c)
+            .await?;
+        if queued > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    holder.commit().await?;
+    tick.await??;
+    assert_eq!(queued, 1, "the due poll waited behind the sweep");
     Ok(())
 }

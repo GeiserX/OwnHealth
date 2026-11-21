@@ -170,10 +170,11 @@ mod tests {
             with,
             json!({"url": "https://share.example/api/shl/x", "key": "k", "exp": 1_800_000_000, "flag": "P", "label": "LabNorte"})
         );
+        // the whole object, so a payload that fails to decode (Null) cannot pass as "no flag, no label"
         let without = decode(&shlink("https://share.example/api/shl/x", "k", 1, false, None));
-        assert!(
-            without.get("flag").is_none() && without.get("label").is_none(),
-            "{without}"
+        assert_eq!(
+            without,
+            json!({"url": "https://share.example/api/shl/x", "key": "k", "exp": 1})
         );
     }
 }

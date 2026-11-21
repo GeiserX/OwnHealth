@@ -197,7 +197,14 @@ pub fn check_share_url(value: &str) -> Result<String> {
         ))
     };
     let origin = value.trim().trim_end_matches('/');
-    let url = url::Url::parse(origin).map_err(|_| refuse("is not a URL"))?;
+    // a value that does not parse may still hold a password, so this one message never prints it
+    let url = url::Url::parse(origin).map_err(|_| {
+        Error::Invalid(
+            "OWNHEALTH_SHARE_URL is not a URL. Set it to the public https address of the share port, \
+             such as https://share.example.org, or leave it unset to keep sharing off."
+                .into(),
+        )
+    })?;
     // every link and QR code would repeat it, and a browser refuses such a URL: refused without
     // printing the value, which holds the secret
     if !url.username().is_empty() || url.password().is_some() {
@@ -223,7 +230,9 @@ pub fn check_share_url(value: &str) -> Result<String> {
     if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
         return Err(refuse("has more than a scheme, a host and a port"));
     }
-    Ok(origin.to_string())
+    // the parsed origin, not the text: `https:share.example.org` parses, and links built on the text
+    // would lack the `//` and resolve against the page's own host
+    Ok(url.origin().ascii_serialization())
 }
 
 /// Parse `OWNHEALTH_TRUSTED_PROXIES`: addresses (`172.18.0.3`) or ranges (`172.16.0.0/12`).
@@ -427,6 +436,8 @@ mod tests {
             ("http://127.0.0.1:18090", "http://127.0.0.1:18090"),
             ("http://localhost:8090/", "http://localhost:8090"),
             ("http://[::1]:8090", "http://[::1]:8090"),
+            // parses without the `//`: the links carry the parsed origin, never the text
+            ("https:share.example.org", "https://share.example.org"),
         ] {
             assert_eq!(share(given).ok().flatten().as_deref(), Some(kept), "{given}");
         }
@@ -457,6 +468,14 @@ mod tests {
                 "{creds}: {err}"
             );
         }
+        // a value that does not parse (a port that is not a number) is refused without being printed
+        let err = share("https://user:hunter2@share.example.org:port")
+            .expect_err("bad port")
+            .to_string();
+        assert!(
+            err.contains("OWNHEALTH_SHARE_URL is not a URL") && !err.contains("hunter2"),
+            "{err}"
+        );
         assert_eq!(share("").ok().flatten(), None, "empty keeps sharing off");
     }
 
