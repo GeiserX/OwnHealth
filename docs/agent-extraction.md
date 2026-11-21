@@ -1,6 +1,6 @@
 # Agent-assisted extraction with Claude Code
 
-Some documents arrive with no text OwnHealth can read: a phone photo of a lab report, a flatbed scan, a page in a layout no template knows. With the [`ocr` profile](../deploy/README.md#inboxes-and-ocr) on, OwnHealth reads scans itself. Without it, or when OCR fails, those documents wait as **pending**. This walkthrough has your own agent, here Claude Code, read them through MCP and propose the values. OwnHealth has no model of its own, and no document is sent anywhere except to the agent you connect.
+Some documents arrive with no text OwnHealth can read: a phone photo of a lab report, a flatbed scan, a page in a layout no template knows. With the [`ocr` profile](https://github.com/GeiserX/OwnHealth/blob/main/deploy/README.md#inboxes-and-ocr) on, OwnHealth reads scans itself. Without it, or when OCR fails, those documents wait as **pending**. This walkthrough has your own agent, here Claude Code, read them through MCP and propose the values. OwnHealth has no model of its own, and no document is sent anywhere except to the agent you connect.
 
 The agent never writes a value. It proposes, OwnHealth checks every row against the page, and you confirm each one in the review queue.
 

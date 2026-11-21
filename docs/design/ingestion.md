@@ -145,7 +145,7 @@ A page's text layer is usable when all hold:
 |---|---|---|
 | pdfplumber (pdfminer.six) | MIT | Words with bbox, font name, size and fill colour; table heuristics. Default reader. |
 | pypdfium2 | Apache-2.0 / BSD-3 | Page rasterization for OCR, crops for the review UI, fast char boxes (detail of the word-bbox API unverified) |
-| PyMuPDF | AGPL-3.0 | Licence-compatible with our AGPL, but not used: we chose pdfplumber + pypdfium2 ([PLAN.md](../PLAN.md)) |
+| PyMuPDF | AGPL-3.0 | Licence-compatible with our AGPL, but not used: we chose pdfplumber + pypdfium2 ([PLAN.md](https://github.com/GeiserX/OwnHealth/blob/main/docs/PLAN.md)) |
 
 Font colour, size and position are kept per word, because the injection checks in section 10 need them.
 

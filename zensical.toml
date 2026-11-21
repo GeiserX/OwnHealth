@@ -1,0 +1,231 @@
+# zensical.toml for a GeiserX repo. Copy to the repo root, then:
+#   1. replace OwnHealth, OwnHealth and The health data layer you own: labs, records, wearables and genome in one self-hosted store, with a web dashboard and an MCP server for your own agent.;
+#   2. delete every nav line whose page the repo does not have (the post-build
+#      site-check fails on a nav entry for a missing file, so a stale nav
+#      cannot deploy);
+#   3. copy templates/docs-theme.css to docs/stylesheets/theme.css and put the
+#      banner's two colours in it;
+#   4. write `zensical==<pin>` to docs/requirements-docs.txt, the pin being the one
+#      in templates/requirements-docs.txt (exact; bump it on purpose, after
+#      `ZENSICAL_VERSION=<new> bash validate-zensical.sh` passes);
+#   5. copy templates/scripts/site-check.py to .github/scripts/site-check.py;
+#   6. a docs site that lives under a product site (DeclaRenta, biblical-atlas)
+#      sets site_url to that subpath and site_dir to the product artifact's
+#      docs/ directory (there is no --site-dir flag).
+# The docs/ contract this file assumes is in new-repo/README-STANDARD.md.
+#
+# Mermaid diagrams load mermaid from unpkg at view time, on pages that have
+# one, exactly as Material does today; nothing else is fetched from a third party.
+#
+# Build: `python -m zensical build --clean --strict`, then
+# `python -I .github/scripts/site-check.py site`. Never the bare `zensical`
+# command: `python -m` puts the repo root on sys.path, which the awesome lists'
+# Markdown extension needs, and one command for every repo is one less thing
+# to get wrong.
+
+[project]
+site_name = "OwnHealth"
+site_url = "https://geiserx.github.io/OwnHealth/"
+site_description = "The health data layer you own: labs, records, wearables and genome in one self-hosted store, with a web dashboard and an MCP server for your own agent."
+repo_url = "https://github.com/GeiserX/OwnHealth"
+repo_name = "GeiserX/OwnHealth"
+edit_uri = "edit/main/docs/"
+
+# A warning is a broken link or a broken anchor. Both fail the build, locally
+# and in CI, so nobody has to remember --strict. What Zensical does not check
+# (a page in no nav entry, a nav entry for a missing file, a missing image, a
+# /rooted link) is checked by .github/scripts/site-check.py after the build.
+strict = true
+
+extra_css = ["stylesheets/theme.css"]
+
+# Files under docs/ that are not pages. Zensical publishes every file in docs/
+# whether or not it is in the nav, so anything that is not a page must be
+# listed here. The patterns follow the docs/ contract: a page is a lowercase
+# kebab-case .md file; anything with a capital letter (ROADMAP.md, CHANGELOG.md,
+# GOAL.md, DESIGN.md) is a repo-facing note, and design/, research/ and notes/
+# hold material read on GitHub. Add a line for any other per-repo note.
+# OwnHealth, per the docs/ contract (README-STANDARD D1, D7):
+# - recipes/README.md and calculators/README.md are the two section indexes, so
+#   they are published as recipes/ and calculators/ (Zensical treats a README.md
+#   as its folder's index) while GitHub still renders them in the tree view;
+# - v0.1-, v0.2- and v0.3-exit-criteria.md have a dot in the name, so they are
+#   neither pages nor notes by name; they are measured results for ROADMAP.md
+#   and stay on GitHub with it;
+# - mockup/index.html is the self-contained clickable mockup, not a site page;
+#   its screenshots under mockup/screenshots/ are published for the home page;
+# - design/ is published (the nav lists its pages explicitly): it is the
+#   how-it-works material a reader needs to trust the app. research/ stays a note.
+exclude_docs = """
+[A-Z]*.md
+!recipes/README.md
+!calculators/README.md
+v0.*-exit-criteria.md
+mockup/index.html
+mockup/README.md
+research/
+notes/
+requirements-docs.txt
+"""
+
+# One entry per canonical page, in the contract's order. Delete the lines for
+# pages the repo does not have. A repo-specific page goes after the canonical
+# one it extends (a `Metrics` page after Usage, a `Security` page after
+# Configuration). The nav title must equal the page's H1. A section is a
+# nested list: { "Get started" = [ { "Run with Docker" = "getting-started/docker.md" } ] }.
+nav = [
+  { "Home" = "index.md" },
+  { "Get started" = [
+    { "Quick start" = "quickstart.md" },
+    { "Recipes" = [
+      "recipes/README.md",
+      { "Email" = "recipes/email.md" },
+      { "Paperless-ngx" = "recipes/paperless-ngx.md" },
+      { "Scanner to folder" = "recipes/scanner-to-folder.md" },
+      { "Health Auto Export" = "recipes/health-auto-export.md" },
+      { "Gadgetbridge" = "recipes/gadgetbridge.md" },
+      { "Nightscout" = "recipes/nightscout.md" },
+      { "iOS Shortcut" = "recipes/ios-shortcut.md" },
+      { "claude.ai remote connector" = "recipes/claude-connector.md" },
+    ] },
+    { "Agent-assisted extraction with Claude Code" = "agent-extraction.md" },
+  ] },
+  { "Reference" = [
+    { "MCP tool reference" = "mcp-tools.md" },
+    { "Calculators" = [
+      "calculators/README.md",
+      { "eGFR: CKD-EPI 2021" = "calculators/ckd-epi-2021.md" },
+      { "FIB-4" = "calculators/fib-4.md" },
+      { "HOMA-IR" = "calculators/homa-ir.md" },
+      { "SCORE2 and SCORE2-OP" = "calculators/score2.md" },
+      { "PREVENT" = "calculators/prevent.md" },
+      { "Reference change value (RCV)" = "calculators/rcv.md" },
+      { "Personal baseline (usual level)" = "calculators/baseline.md" },
+    ] },
+    { "Guideline files: how to add a country" = "guidelines.md" },
+    { "OCR benchmark" = "ocr-benchmark.md" },
+  ] },
+  { "How it works" = [
+    { "Architecture and data model" = "design/architecture.md" },
+    { "Ingestion and normalization" = "design/ingestion.md" },
+    { "Connectors: where the data comes from" = "design/connectors.md" },
+    { "MCP server design" = "design/mcp.md" },
+    { "Genome data in OwnHealth" = "design/genomics.md" },
+    { "Security, privacy and regulation" = "design/security-privacy.md" },
+  ] },
+  # Home page proposals. The picked one becomes index.md with a plain
+  # `git mv`; the other file and this section go in the same commit.
+  { "Home proposals" = [
+    { "Home B: docs first" = "home-b.md" },
+    { "Home C: you and your agent" = "home-c.md" },
+  ] },
+]
+
+# Both are Zensical's defaults; written out so a future default change cannot
+# silently switch them off.
+[project.validation]
+invalid_links = true
+invalid_link_anchors = true
+
+[project.theme]
+language = "en"  # "es" for a Spanish repo: it changes the UI strings, not the content.
+# Zensical's own look (Lucide icons, no coloured header band). `classic` is
+# the old Material look; it stays available but new sites do not use it.
+variant = "modern"
+# System fonts, nothing from Google: no reader's browser talks to a third
+# party for a typeface, and the build downloads nothing. The alternative, the
+# privacy plugin self-hosting Inter and JetBrains Mono, downloads 27 files on
+# every cold build and failed 4 strict builds out of about 100 on 2026-11-02
+# ("[privacy] Couldn't retrieve https://fonts.googleapis.com/... timeout:
+# global"); CI builds are always cold, so that would be a check that goes red
+# on Google's latency.
+font = false
+# Uncomment when the repo has them. Both live under docs/images/.
+# logo = "images/logo.svg"
+# favicon = "images/icon.svg"
+features = [
+  "navigation.tabs",
+  "navigation.sections",
+  "navigation.expand",
+  # A section's README.md is its index: the section title opens it.
+  "navigation.indexes",
+  "navigation.top",
+  # Page changes load only the content, with a thin progress bar on slow links.
+  # Browser-checked on 2026-11-02 (Telegram-Archive): a mermaid diagram still
+  # renders after an instant page change. Needs site_url.
+  "navigation.instant",
+  "navigation.instant.progress",
+  "content.code.copy",
+  "content.action.edit",
+  # "Copy as Markdown" on every page; the llmstxt plugin below writes the copies.
+  "content.action.copy",
+  # Only search.highlight has code behind it in the Zensical UI: search.suggest
+  # and search.share name nothing in its templates or bundle (read 2026-11-02,
+  # zensical_ui 0.0.41), and site-check.py rejects a feature the UI does not know.
+  "search.highlight",
+  "toc.follow",
+]
+icon.repo = "fontawesome/brands/github"
+
+# Dark first: the first palette entry is the default, and the banners are dark.
+[[project.theme.palette]]
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to dark mode"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/GeiserX/OwnHealth"
+[[project.extra.social]]
+icon = "fontawesome/brands/docker"
+link = "https://hub.docker.com/r/drumsergio/ownhealth"
+
+[project.plugins.search]
+
+
+# site/llms.txt plus a Markdown copy of every page (site/<page>/index.md), the
+# source of the "Copy as Markdown" button. An agent reads the docs without
+# scraping HTML.
+[project.plugins.llmstxt]
+sections.Documentation = ["*.md", "*/*.md"]
+
+# When a page is renamed (installation.md -> getting-started.md), keep the old
+# URL alive. Built in, nothing to install. The stub keeps the path and the
+# #fragment; a query string on the old URL is dropped (no repo needs one).
+# [project.plugins.redirects.redirect_maps]
+# "installation.md" = "getting-started.md"
+
+[project.markdown_extensions]
+admonition = {}
+pymdownx.details = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.highlight.anchor_linenums = true
+pymdownx.inlinehilite = {}
+# base_path includes the repository root, so a page can include a file that
+# ships (docker-compose.yml, .env.example) word for word with
+# `--8<-- "docker-compose.yml"`. A copied example drifts from the real file;
+# an included one cannot. check_paths makes a missing include fail the build
+# instead of rendering an empty block.
+pymdownx.snippets.base_path = [".", "docs"]
+pymdownx.snippets.check_paths = true
+pymdownx.mark = {}
+attr_list = {}
+md_in_html = {}
+# Renders :material-xxx: and :lucide-xxx: shortcodes as icons. The grid cards
+# on index.md use them; without this they print as literal text.
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+tables = {}
+toc.permalink = true

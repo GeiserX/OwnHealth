@@ -2,7 +2,7 @@
 
 Genome findings come from [OwnGenome](https://github.com/GeiserX/OwnGenome), our sibling project in the Own* family. It runs a whole-genome or chip analysis on your own hardware and writes the results to files. OwnHealth ingests its `genome-facts.json` and serves it next to your labs and medications. If you have a genome or a chip file and no findings yet, run OwnGenome first.
 
-Status: design, pre-alpha. This page says how genome data enters OwnHealth, how it is stored, what the web page and the MCP server return, and what we will not do. Phases follow the [roadmap](../ROADMAP.md): v0.1 (facts ingest, VCF lookups, `check_drug` with PGx, current medications and labs), v0.3 (chip input, ClinVar diff, `check_drug` widened, CPIC/PharmCAT staleness, family view), v1.0 (per-profile keys), v2 (relatedness QC across profiles, FHIR Genomics Reporting export), moonshots (Phenopackets).
+Status: design, pre-alpha. This page says how genome data enters OwnHealth, how it is stored, what the web page and the MCP server return, and what we will not do. Phases follow the [roadmap](https://github.com/GeiserX/OwnHealth/blob/main/docs/ROADMAP.md): v0.1 (facts ingest, VCF lookups, `check_drug` with PGx, current medications and labs), v0.3 (chip input, ClinVar diff, `check_drug` widened, CPIC/PharmCAT staleness, family view), v1.0 (per-profile keys), v2 (relatedness QC across profiles, FHIR Genomics Reporting export), moonshots (Phenopackets).
 
 ## 1. Division of labour
 
