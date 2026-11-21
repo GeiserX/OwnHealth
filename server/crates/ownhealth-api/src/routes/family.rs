@@ -734,7 +734,7 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
             }
         }
     }
-    let failed = folder::forget_folders(&rt.settings, slug, folders).await;
+    let failed = folder::forget_folders(&rt.pool, &rt.settings, result.household_id, slug, folders).await;
     let failed: Vec<Value> = failed
         .into_iter()
         .map(|(config, own)| json!({"config": config, "own": own}))

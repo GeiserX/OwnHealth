@@ -74,11 +74,19 @@ fn subdir(config: &serde_json::Value) -> Result<Option<&Path>> {
 }
 
 /// After a profile is deleted, remove its files from a folder source: its drop folder
-/// `<root>/<slug>/` and the copies filed in `.done/<slug>/` and `.failed/<slug>/`, plus `.done/_root/`
-/// and `.failed/_root/` when the source was the profile's own (its root files went to that profile).
-/// The paths are built from the checked subdir and slug only. Nothing is followed: a link in the way
-/// is removed, never its target, and a folder reached through a link below the root is left alone.
-pub fn forget_profile(settings: &Settings, config: &serde_json::Value, slug: &str, own: bool) -> Result<()> {
+/// `<root>/<slug>/` and the copies filed in `.done/<slug>/` and `.failed/<slug>/` when `slug_folders`,
+/// plus `.done/_root/` and `.failed/_root/` when `root_buckets` (the source was the profile's own, so its
+/// root files went to that profile). [`forget_folders`] decides both, so a new person or a new folder
+/// inbox that took over a name keeps its files. The paths are built from the checked subdir and slug
+/// only. Nothing is followed: a link in the way is removed, never its target,
+/// and a folder reached through a link below the root is left alone.
+pub fn forget_profile(
+    settings: &Settings,
+    config: &serde_json::Value,
+    slug: &str,
+    slug_folders: bool,
+    root_buckets: bool,
+) -> Result<()> {
     if slug.is_empty()
         || !slug
             .bytes()
@@ -93,8 +101,11 @@ pub fn forget_profile(settings: &Settings, config: &serde_json::Value, slug: &st
         Some(sub) => base.join(sub),
         None => base,
     };
-    let mut gone = vec![vec![slug], vec![DONE_DIR, slug], vec![FAILED_DIR, slug]];
-    if own {
+    let mut gone = Vec::new();
+    if slug_folders {
+        gone.extend([vec![slug], vec![DONE_DIR, slug], vec![FAILED_DIR, slug]]);
+    }
+    if root_buckets {
         gone.extend([vec![DONE_DIR, ROOT_BUCKET], vec![FAILED_DIR, ROOT_BUCKET]]);
     }
     let mut first = None;
@@ -138,15 +149,63 @@ pub async fn queue_forget(
 }
 
 /// Run [`forget_profile`] on each folder inbox off the async runtime; returns the ones that failed.
+/// The short name is free again once the delete commits, so it checks each folder first, on the
+/// delete's own try and on every retry. It keeps `<slug>/` and its filed copies when a profile with that
+/// short name now lives in the household, or in a household whose folder inbox reads the same folder,
+/// or when a folder inbox now reads a folder inside `<slug>/`. It keeps `_root` when a folder inbox, in
+/// any household, now reads that folder.
 pub async fn forget_folders(
+    pool: &PgPool,
     settings: &Settings,
+    household_id: Uuid,
     slug: &str,
     folders: Vec<(serde_json::Value, bool)>,
 ) -> Vec<(serde_json::Value, bool)> {
+    if folders.is_empty() {
+        return folders;
+    }
+    let live: sqlx::Result<(Vec<Uuid>, Vec<(Uuid, serde_json::Value)>)> = async {
+        let named = sqlx::query_scalar("select household_id from profile where slug = $1")
+            .bind(slug)
+            .fetch_all(pool)
+            .await?;
+        let readers = sqlx::query_as("select household_id, config from source where kind = 'folder'")
+            .fetch_all(pool)
+            .await?;
+        Ok((named, readers))
+    }
+    .await;
+    let (named, readers) = match live {
+        Ok(live) => live,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not check who uses the folders now: a job retries them");
+            return folders;
+        }
+    };
+    let rel = |config: &serde_json::Value| {
+        subdir(config)
+            .ok()
+            .map(|p| p.map(Path::to_path_buf).unwrap_or_default())
+    };
+    let readers: Vec<(Uuid, PathBuf)> = readers
+        .into_iter()
+        .filter_map(|(h, config)| rel(&config).map(|p| (h, p)))
+        .collect();
     let mut failed = Vec::new();
     for (config, own) in folders {
+        let (slug_folders, root_buckets) = match rel(&config) {
+            Some(mine) => {
+                let drop = mine.join(slug);
+                let on_it: Vec<Uuid> = readers.iter().filter(|(_, r)| *r == mine).map(|(h, _)| *h).collect();
+                let taken = named.iter().any(|h| *h == household_id || on_it.contains(h));
+                let inside = readers.iter().any(|(_, r)| r.starts_with(&drop));
+                (!taken && !inside, own && on_it.is_empty())
+            }
+            // forget_profile refuses the settings itself
+            None => (true, own),
+        };
         let (s, c, sl) = (settings.clone(), config.clone(), slug.to_string());
-        match tokio::task::spawn_blocking(move || forget_profile(&s, &c, &sl, own)).await {
+        match tokio::task::spawn_blocking(move || forget_profile(&s, &c, &sl, slug_folders, root_buckets)).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "removing a deleted profile's folder failed: a job retries it");
@@ -166,11 +225,8 @@ async fn forget_job(ctx: JobContext, job: Job) -> HandlerResult {
     if ctx.settings.demo {
         return Ok(Some(serde_json::json!({"skipped": "demo"})));
     }
-    let slug = job
-        .payload
-        .get("slug")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
+    let slug = job.str("slug").unwrap_or_default();
+    let household_id = job.uuid("household_id")?;
     let folders: Vec<(serde_json::Value, bool)> = job
         .payload
         .get("folders")
@@ -185,7 +241,7 @@ async fn forget_job(ctx: JobContext, job: Job) -> HandlerResult {
         })
         .unwrap_or_default();
     let n = folders.len();
-    let failed = forget_folders(&ctx.settings, slug, folders).await;
+    let failed = forget_folders(&ctx.pool, &ctx.settings, household_id, slug, folders).await;
     if !failed.is_empty() {
         return Err(JobError::retry(format!(
             "{} folder inboxes could not be cleaned yet",

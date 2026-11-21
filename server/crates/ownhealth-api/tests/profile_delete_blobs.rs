@@ -1245,3 +1245,100 @@ async fn a_folder_cleanup_that_fails_is_retried() -> R {
     assert_eq!(state, "done");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_new_person_with_the_same_short_name_keeps_their_drop() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    ownhealth_inbox::register();
+    folder_source(&env, "estudio", None).await?;
+    let root = inbox.join("estudio");
+    let locked = root.join(".done/alex/2026-11");
+    std::fs::create_dir_all(&locked)?;
+    std::fs::write(locked.join("escaneo-anterior.pdf"), b"%PDF-1.7 synthetic filed scan")?;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500))?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        env.scalar_i64("select count(*) from job where kind = 'folder.forget' and state = 'queued'")
+            .await?,
+        1
+    );
+    // a minute later the household adds a new person with the short name alex, who drops a scan
+    sqlx::query("insert into profile (household_id, slug, display_name) values ($1, 'alex', 'Alex Ortega')")
+        .bind(env.fam().household_id)
+        .execute(env.pool())
+        .await?;
+    let drop = root.join("alex/escaneo-nuevo.pdf");
+    std::fs::create_dir_all(drop.parent().expect("parent"))?;
+    std::fs::write(&drop, b"%PDF-1.7 the new Alex scan, not read yet")?;
+    // the disk lets go of the old file and the retry runs
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))?;
+    assert_eq!(run_forget(&env).await?, 1);
+    assert!(drop.is_file(), "the retry removed the new Alex unread scan");
+    assert!(
+        locked.join("escaneo-anterior.pdf").is_file(),
+        "the retry removed a filed copy that the new Alex may own"
+    );
+    let state: String = sqlx::query_scalar("select state from job where kind = 'folder.forget'")
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(state, "done");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_new_folder_inbox_on_the_same_folder_keeps_its_files() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    ownhealth_inbox::register();
+    // Alex's own folder inbox: its root files went to Alex, so .done/_root and .failed/_root are Alex's
+    folder_source(&env, "estudio", Some(env.profile("alex"))).await?;
+    let root = inbox.join("estudio");
+    let locked = root.join(".done/_root/2026-11");
+    std::fs::create_dir_all(&locked)?;
+    std::fs::write(locked.join("escaneo-anterior.pdf"), b"%PDF-1.7 synthetic filed scan")?;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500))?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        env.scalar_i64("select count(*) from job where kind = 'folder.forget' and state = 'queued'")
+            .await?,
+        1
+    );
+    // another household now reads the same folder, with a person whose short name is alex
+    let mut c = env.pool().acquire().await?;
+    let ortega = ownhealth_core::access::create_household(&mut c, "Familia Ortega").await?;
+    drop(c);
+    sqlx::query(
+        "insert into source (household_id, kind, label, config) \
+         values ($1, 'folder', 'Escáner Ortega', '{\"subdir\": \"estudio\"}')",
+    )
+    .bind(ortega)
+    .execute(env.pool())
+    .await?;
+    sqlx::query("insert into profile (household_id, slug, display_name) values ($1, 'alex', 'Alex Ortega')")
+        .bind(ortega)
+        .execute(env.pool())
+        .await?;
+    let failed = root.join(".failed/_root/factura.pdf");
+    std::fs::create_dir_all(failed.parent().expect("parent"))?;
+    std::fs::write(&failed, b"%PDF-1.7 a file the new inbox could not read")?;
+    let theirs = root.join("alex/escaneo-ortega.pdf");
+    std::fs::create_dir_all(theirs.parent().expect("parent"))?;
+    std::fs::write(&theirs, b"%PDF-1.7 the other household's alex scan")?;
+    // the disk lets go of the old file and the retry runs
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))?;
+    assert_eq!(run_forget(&env).await?, 1);
+    assert!(failed.is_file(), "the retry removed the new inbox's failed file");
+    assert!(theirs.is_file(), "the retry removed the other household's alex scan");
+    Ok(())
+}
