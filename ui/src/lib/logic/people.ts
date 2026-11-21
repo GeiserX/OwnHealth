@@ -62,6 +62,11 @@ export function matrixRowLabel(
 }
 
 /** True when a profile already carries this name (case and spacing ignored). A note, never a block. */
+/** The line shown after a profile delete: files still waiting for the retry are named, never hidden. */
+export function deletedNoteKey(pending: number): 'st_deleted' | 'st_deleted_pending' {
+	return pending > 0 ? 'st_deleted_pending' : 'st_deleted';
+}
+
 export function nameTaken(name: string, profiles: { display_name: string }[]): boolean {
 	const n = name.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
 	return !!n && profiles.some((p) => p.display_name.trim().replace(/\s+/g, ' ').toLocaleLowerCase() === n);
