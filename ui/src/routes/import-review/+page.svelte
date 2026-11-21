@@ -33,6 +33,7 @@
 	import PageView, { type Box } from '#lib/components/pages2/PageView.svelte';
 	import ReviewRow from '#lib/components/pages2/ReviewRow.svelte';
 	import UploadPanel from '#lib/components/pages2/UploadPanel.svelte';
+	import ShcPanel from '#lib/components/pages2/ShcPanel.svelte';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
@@ -46,6 +47,7 @@
 	let confirmDup = $state(false);
 	const doc = new Loader<DocumentDetail>();
 	let showUpload = $state(false);
+	let showShc = $state(false);
 	let busy = $state(false);
 	let actionError = $state<{ text: string; raw: string } | null>(null);
 	// "Document withdrawn: …" after a person rejects a whole document.
@@ -302,6 +304,7 @@
 <PageHeader title={t('nav_imp')} sub={t('i2_imp_sub')}>
 	{#snippet right()}
 		<PhaseChip phase={t('i2_imp_ph1')} /><PhaseChip phase={t('i2_imp_ph2')} />
+		<button class="btn" onclick={() => (showShc = !showShc)} aria-expanded={showShc}>{t('shc_btn')}</button>
 		<button class="btn pri" onclick={() => (showUpload = !showUpload)} aria-expanded={showUpload}>{t('i2_upload')}</button>
 	{/snippet}
 </PageHeader>
@@ -316,6 +319,17 @@
 			load();
 			refreshReviewTotal();
 			if (ids[0]) goto(`?doc=${ids[0]}`);
+		}}
+	/>
+{/if}
+
+{#if showShc && prof}
+	<ShcPanel
+		profile={prof.slug}
+		profileName={prof.display_name}
+		ondone={() => {
+			load();
+			refreshReviewTotal();
 		}}
 	/>
 {/if}
