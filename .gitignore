@@ -30,3 +30,6 @@ server/data/
 
 # Scratch notes between parallel build lanes
 .lanes/
+
+# Docs site build output (zensical build)
+/site/
