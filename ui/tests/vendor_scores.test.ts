@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { providerLabel, scoreDecimals, scoreRows, type VendorScore } from '../src/routes/wearables/scores.ts';
+import { fmtScoreDay, providerLabel, scoreDecimals, scoreRows, type VendorScore } from '../src/routes/wearables/scores.ts';
 
 const s = (provider: string, category: string, t: string, value: number, qualifier: string | null = null): VendorScore => ({
 	provider,
@@ -54,4 +54,15 @@ test('vendor scores: the Wearables page shows the card apart, and every card wor
 		['readiness', 'recovery', 'sleep', 'activity', 'stress', 'strain', 'body_battery'].map((c) => 'vs_c_' + c)
 	);
 	for (const k of keys) assert.equal(dict.split(`\t\t${k}: `).length, 3, `${k} once in en and once in es`);
+});
+
+test('vendor scores: a score keyed at midnight UTC shows its own day west of UTC, as the charts do', () => {
+	const tz = process.env.TZ;
+	process.env.TZ = 'America/New_York';
+	try {
+		assert.equal(fmtScoreDay('2026-11-21T00:00:00Z', 'en'), '21 Nov');
+		assert.equal(fmtScoreDay('2026-11-21T00:00:00Z', 'es'), '21 nov');
+	} finally {
+		process.env.TZ = tz;
+	}
 });

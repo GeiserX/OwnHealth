@@ -69,3 +69,9 @@ export function providerLabel(p: string): string {
 export function scoreDecimals(v: number): number {
 	return Number.isInteger(v) ? 0 : 1;
 }
+
+/** A score's day, as the card prints it next to the vendor: in UTC, like the measurement charts of the
+ * same page, so a score keyed at midnight UTC keeps its day in a browser west of UTC. */
+export function fmtScoreDay(iso: string, lang: string): string {
+	return new Intl.DateTimeFormat(lang === 'es' ? 'es-ES' : 'en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(iso));
+}

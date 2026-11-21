@@ -7,7 +7,7 @@
 	import { Loader, tf } from '#lib/components/pages1/util.svelte';
 	import Sparkline from '#lib/components/Sparkline.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
-	import { providerLabel, scoreDecimals, scoreRows, type VendorScores } from './scores';
+	import { fmtScoreDay, providerLabel, scoreDecimals, scoreRows, type VendorScores } from './scores';
 
 	let { slug, days }: { slug: string | undefined; days: number } = $props();
 
@@ -19,7 +19,7 @@
 	$effect(load);
 
 	const rows = $derived(scoreRows(s.data?.scores ?? []));
-	const fmtDay = (iso: string) => new Intl.DateTimeFormat(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { day: 'numeric', month: 'short' }).format(new Date(iso));
+	const fmtDay = (iso: string) => fmtScoreDay(iso, i18n.lang);
 </script>
 
 {#if s.error || rows.length}
