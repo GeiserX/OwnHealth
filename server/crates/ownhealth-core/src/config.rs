@@ -189,15 +189,16 @@ pub fn parse_queues(value: &str) -> Result<Vec<String>> {
 /// `OWNHEALTH_SHARE_URL` as the links carry it: an origin without a trailing slash. A recipient's
 /// name and the passcode travel to it, so it is https; plain http only reaches a loopback host
 /// (a tunnel or a test on the same machine). A path, query, fragment, user name or password is refused.
+/// No refusal prints the value: a user and password typed without `https://` parse as a scheme and a
+/// path, so no parse can be trusted to find them first.
 pub fn check_share_url(value: &str) -> Result<String> {
     let refuse = |why: &str| {
         Error::Invalid(format!(
-            "OWNHEALTH_SHARE_URL={value:?} {why}. Set it to the public https address of the share \
-             port, such as https://share.example.org, or leave it unset to keep sharing off."
+            "OWNHEALTH_SHARE_URL {why}. Set it to the public https address of the share port, such as \
+             https://share.example.org, or leave it unset to keep sharing off."
         ))
     };
     let origin = value.trim().trim_end_matches('/');
-    // a value that does not parse may still hold a password, so this one message never prints it
     let url = url::Url::parse(origin).map_err(|_| {
         Error::Invalid(
             "OWNHEALTH_SHARE_URL is not a URL. Set it to the public https address of the share port, \
@@ -205,8 +206,7 @@ pub fn check_share_url(value: &str) -> Result<String> {
                 .into(),
         )
     })?;
-    // every link and QR code would repeat it, and a browser refuses such a URL: refused without
-    // printing the value, which holds the secret
+    // every link and QR code would repeat it, and a browser refuses such a URL
     if !url.username().is_empty() || url.password().is_some() {
         return Err(Error::Invalid(
             "OWNHEALTH_SHARE_URL carries a user name or password. Take it out: every link and QR code \
@@ -476,6 +476,18 @@ mod tests {
             err.contains("OWNHEALTH_SHARE_URL is not a URL") && !err.contains("hunter2"),
             "{err}"
         );
+        // without `https://` the user and password parse as a scheme and a path, and still never print
+        for typo in [
+            "user:hunter2@share.example.org",
+            "share:hunter2@share.example.org:443",
+            "https://user:hunter2@",
+        ] {
+            let err = share(typo).expect_err(typo).to_string();
+            assert!(
+                err.contains("OWNHEALTH_SHARE_URL") && !err.contains("hunter2"),
+                "{typo}: {err}"
+            );
+        }
         assert_eq!(share("").ok().flatten(), None, "empty keeps sharing off");
     }
 
