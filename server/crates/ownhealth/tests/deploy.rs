@@ -396,9 +396,21 @@ fn fetch(addr: &str, method: &str, path: &str) -> anyhow::Result<(u16, String)> 
 }
 
 fn fetch_with(addr: &str, method: &str, path: &str, headers: &[&str]) -> anyhow::Result<(u16, String)> {
-    // --path-as-is: curl would otherwise resolve a `..` itself before sending
+    // --path-as-is: curl would otherwise resolve a `..` itself before sending; --noproxy: an
+    // http_proxy in the environment must not answer for the container on loopback
     let mut curl = Command::new("curl");
-    curl.args(["-s", "--path-as-is", "-m", "5", "-o", "-", "-w", "\n%{http_code}"]);
+    curl.args([
+        "-s",
+        "--path-as-is",
+        "--noproxy",
+        "*",
+        "-m",
+        "5",
+        "-o",
+        "-",
+        "-w",
+        "\n%{http_code}",
+    ]);
     for h in headers {
         curl.args(["-H", h]);
     }
