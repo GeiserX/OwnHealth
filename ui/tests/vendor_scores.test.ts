@@ -5,8 +5,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dict as strings } from '../src/lib/i18n/dict.ts';
 import {
+	DEFAULT_DAYS,
 	fmtScoreDay,
 	inWindow,
+	keepWindow,
 	MAX_DAYS,
 	measurementDays,
 	providerLabel,
@@ -132,10 +134,10 @@ test('vendor scores: a profile with a year of scores and no long measurement ser
 
 test('vendor scores: the page counts the scores\' span in its window list, and the card reads the whole year', () => {
 	const page = readFileSync(new URL('../src/routes/wearables/+page.svelte', import.meta.url), 'utf8');
-	assert.match(page, /const windows = \$derived\(windowChoices\(Math\.max\(span, scoreSpan\)\)\);/);
+	assert.match(page, /const windows = \$derived\(windowChoices\(Math\.max\(span, scoreSpan \?\? 0\)\)\);/);
 	const card = readFileSync(new URL('../src/routes/wearables/VendorScores.svelte', import.meta.url), 'utf8');
 	assert.match(card, /vendor-scores`, \{ days: MAX_DAYS \}/);
-	assert.match(card, /span = scoreSpanDays\(all, Date\.now\(\)\)/);
+	assert.match(card, /span = s\.loading \? null : scoreSpanDays\(all, Date\.now\(\)\)/);
 	assert.match(card, /scoreRows\(inWindow\(all, days, Date\.now\(\)\)\)/);
 });
 
@@ -170,4 +172,28 @@ test('vendor scores: a window is named by its own days, so 90 days of measuremen
 	assert.match(page, /const windowWord = \(d: number\) => \{\s*const \[key, n\] = windowWordKey\(d\);\s*return tf\(key, \{ n \}\);\s*\};/);
 	assert.match(page, /\{windowWord\(d\)\}<\/button>/);
 	assert.doesNotMatch(page, /h1_w7|h1_w30|h1_w1y|h1_wn/, 'no window word is mapped on the page');
+});
+
+test('vendor scores: a profile switch keeps the chosen window while it can, and presses the longest one left when it cannot', () => {
+	// While the two reads of the new profile run, the window list is short (7 days only) and not final.
+	const switchTo = (days: number, windows: number[]) => [[[7], false], [[7], false], [windows, true]].reduce((d, [w, ready]) => keepWindow(d, w as number[], ready as boolean), days);
+	// a year picked on a profile with a year of scores, then a profile with 90 days: 30 days, pressed
+	assert.equal(switchTo(365, [7, 30]), 30);
+	// and back: the 30 days stay on the profile with a year, which offers the year again
+	assert.equal(switchTo(30, [7, 30, 365]), 30);
+	// a year picked, then another profile with a year of scores: the loading moment never drops the year
+	assert.equal(switchTo(365, [7, 30, 365]), 365);
+	assert.equal(switchTo(7, [7, 30, 365]), 7);
+	// a profile with less than 30 days offers no choice: the page's first window, cut by the charts to the data
+	assert.equal(switchTo(365, [7]), DEFAULT_DAYS);
+	assert.equal(switchTo(7, [7]), DEFAULT_DAYS);
+	assert.equal(DEFAULT_DAYS, 30);
+	// the page keeps `days` through keepWindow once its summary is read and the card has its span, and the
+	// card gives no span (null) while its read runs
+	const page = readFileSync(new URL('../src/routes/wearables/+page.svelte', import.meta.url), 'utf8');
+	assert.match(page, /let days = \$state\(DEFAULT_DAYS\);/);
+	assert.match(page, /days = keepWindow\(days, windows, !w\.loading && scoreSpan != null\);/);
+	assert.match(page, /windowChoices\(Math\.max\(span, scoreSpan \?\? 0\)\)/);
+	const card = readFileSync(new URL('../src/routes/wearables/VendorScores.svelte', import.meta.url), 'utf8');
+	assert.match(card, /span = s\.loading \? null : scoreSpanDays\(all, Date\.now\(\)\);/);
 });

@@ -11,7 +11,7 @@
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
 	import { fmtScoreDay, inWindow, MAX_DAYS, providerLabel, scoreDecimals, scoreRows, scoreSpanDays, type VendorScores } from './scores';
 
-	let { slug, days, span = $bindable(0) }: { slug: string | undefined; days: number; span?: number } = $props();
+	let { slug, days, span = $bindable(null) }: { slug: string | undefined; days: number; span?: number | null } = $props();
 
 	const s = new Loader<VendorScores>();
 	function load() {
@@ -20,8 +20,9 @@
 	$effect(load);
 
 	const all = $derived(s.data?.scores ?? []);
+	// No span while the read runs: the page keeps its window until the span is known.
 	$effect(() => {
-		span = scoreSpanDays(all, Date.now());
+		span = s.loading ? null : scoreSpanDays(all, Date.now());
 	});
 	const rows = $derived(scoreRows(inWindow(all, days, Date.now())));
 	const fmtDay = (iso: string) => fmtScoreDay(iso, i18n.lang);

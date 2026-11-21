@@ -17,7 +17,7 @@
 	import { ago } from '#lib/components/pages2/fmt';
 	import { currentProfile } from '#lib/state/app.svelte';
 	import VendorScores from './VendorScores.svelte';
-	import { measurementDays, windowChoices, windowWordKey } from './scores';
+	import { DEFAULT_DAYS, keepWindow, measurementDays, windowChoices, windowWordKey } from './scores';
 
 	// How each known metric draws, as in the mockup. Unknown metrics get a plain line.
 	// `max` and `minSpan` keep an axis honest: SpO2 never passes 100 %, and a 1 bpm change is not a cliff.
@@ -42,7 +42,7 @@
 	const profile = $derived(currentProfile());
 	const w = new Loader<WearablesSummary>();
 	const cgm = new Loader<CgmSummary>();
-	let days = $state(30);
+	let days = $state(DEFAULT_DAYS);
 
 	function load() {
 		const slug = profile?.slug;
@@ -74,10 +74,15 @@
 		return tf(key, { n });
 	};
 	// The longest series, or the vendor scores' own span, decides which windows make sense; never offer a
-	// window the data cannot fill.
+	// window the data cannot fill. The card gives no span (null) while it reads.
 	const span = $derived(Math.max(0, ...metrics.map((m) => m.series.length)));
-	let scoreSpan = $state(0);
-	const windows = $derived(windowChoices(Math.max(span, scoreSpan)));
+	let scoreSpan = $state<number | null>(null);
+	const windows = $derived(windowChoices(Math.max(span, scoreSpan ?? 0)));
+	// After a profile switch the chosen window may be one the new profile cannot fill: once both reads are
+	// in, the page falls back to the longest window it offers. Never while one runs, when the list is short.
+	$effect(() => {
+		days = keepWindow(days, windows, !w.loading && scoreSpan != null);
+	});
 	// The days the measurement charts really show: a year opened by the scores is cut to the longest series.
 	const mDays = $derived(measurementDays(days, span));
 	const fmtDay = (d: string) => new Intl.DateTimeFormat(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(d));

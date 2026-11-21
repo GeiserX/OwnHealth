@@ -44,6 +44,19 @@ export function windowChoices(span: number): number[] {
 	return [7, 30, 365].filter((d) => d === 7 || span >= d);
 }
 
+/** The page's window before any choice. */
+export const DEFAULT_DAYS = 30;
+
+/** The window the page shows once both reads of a profile are in (`ready`): the chosen one while the page
+ * offers it, else the longest it offers, pressed. With no choice to offer (7 days only) it is
+ * DEFAULT_DAYS, which the charts cut to the data. While a read runs the list is short and not final, so
+ * the choice stays: a switch between two profiles with a year of scores keeps the year. */
+export function keepWindow(days: number, windows: number[], ready: boolean): number {
+	if (!ready) return days;
+	if (windows.length < 2) return DEFAULT_DAYS;
+	return windows.includes(days) ? days : windows[windows.length - 1];
+}
+
 /** The dictionary key that names a window of `d` days, and the number for its `{n}`: '7 d', '30 d' and
  * '1 y' for the windows the page offers, 'n d' for any other, such as the 90 days of measurements shown
  * under a year picked for the scores. */
