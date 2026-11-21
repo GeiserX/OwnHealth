@@ -131,11 +131,22 @@ async fn check_app_role(db: &TestDb, role: &str, password: &str) -> R {
         .fetch_one(&mut app)
         .await?;
     assert!(n >= 1);
+    // the row still gets its chain link, which only the owner's trigger function writes
+    let linked: i64 = sqlx::query_scalar(
+        "select count(*) from audit_chain c join audit_event e on e.id = c.event_id where e.action = 'test'",
+    )
+    .fetch_one(&mut app)
+    .await?;
+    assert_eq!(linked, 1);
     sqlx::query("select count(*) from profile").execute(&mut app).await?; // ordinary tables stay usable
     for sql in [
         "update audit_event set action = 'rewritten'",
         "delete from audit_event",
         "truncate audit_event",
+        "insert into audit_chain (seq, event_id, prev_hash, hash) values (999999, 999999, '\\x00', '\\x00')",
+        "update audit_chain set hash = prev_hash",
+        "delete from audit_chain",
+        "truncate audit_chain",
     ] {
         let e = refused(&mut app, sql).await?;
         assert!(e.contains("permission denied"), "{sql}: {e}");
