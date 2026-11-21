@@ -9,7 +9,9 @@ mod support;
 
 use std::collections::BTreeSet;
 
-use axum::http::{Method, StatusCode};
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{Method, Request, StatusCode};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ownhealth_api::routes::shl::{ATTEMPTS, RATE_PER_HOUR};
@@ -19,6 +21,7 @@ use ownhealth_core::jose;
 use ownhealth_ops::shl::CONTENT_TYPE;
 use serde_json::{Value, json};
 use support::{Client, Env, Resp};
+use tower::ServiceExt;
 use uuid::Uuid;
 
 type R = anyhow::Result<()>;
@@ -88,10 +91,10 @@ async fn open(env: &Env, pl: &Value, passcode: Option<&str>) -> anyhow::Result<V
     Ok(d.plaintext)
 }
 
-/// The IPS the owner would export today with these categories.
+/// The IPS a link of these categories carries today.
 async fn ips(env: &Env, profile: Uuid, scopes: &[&str]) -> anyhow::Result<Vec<u8>> {
     let mut tx = env.pool().begin().await?;
-    let out = ownhealth_ops::ips::build(&mut tx, profile, &scope_set(scopes), "en", today_utc()).await?;
+    let out = ownhealth_ops::ips::build_link(&mut tx, profile, &scope_set(scopes), "en", today_utc()).await?;
     tx.commit().await?;
     Ok(out.to_bytes()?)
 }
@@ -210,7 +213,7 @@ async fn the_file_is_the_ips_of_the_link_s_categories_minus_the_profile_s_locks(
         .await?;
     assert_eq!(
         (r.status, r.code()),
-        (StatusCode::FORBIDDEN, "forbidden"),
+        (StatusCode::FORBIDDEN, "category_closed"),
         "{:?}",
         r.json
     );
@@ -323,8 +326,22 @@ async fn revoke_and_expiry_answer_404_and_revoke_deletes_the_file() -> R {
     assert_eq!(manifest(&env, &pl, None).await?.status, StatusCode::NOT_FOUND);
     assert_eq!(env.anon().get(&loc).await?.status, StatusCode::NOT_FOUND);
     assert_eq!(env.scalar_i64("select count(*) from shl_file").await?, 0);
+    // a second revoke (a double click) answers the same and changes nothing
+    let audited = env
+        .scalar_i64("select count(*) from audit_event where action = 'shl.revoke'")
+        .await?;
     let r = alex.delete(&format!("/api/profiles/alex/shl/{id}")).await?;
-    assert_eq!(r.status, StatusCode::NOT_FOUND, "a link is revoked once");
+    assert_eq!(
+        (r.status, r.json["revoked"].clone()),
+        (StatusCode::OK, json!(true)),
+        "{:?}",
+        r.json
+    );
+    assert_eq!(
+        env.scalar_i64("select count(*) from audit_event where action = 'shl.revoke'")
+            .await?,
+        audited
+    );
     let listed = alex.get("/api/profiles/alex/shl").await?;
     assert_eq!(listed.json["items"][0]["active"], false);
 
@@ -373,7 +390,10 @@ async fn no_plaintext_and_no_key_is_stored_on_the_server() -> R {
         .unwrap_or_default()
         .to_string();
     let ticket = loc.rsplit('/').next().unwrap_or_default().to_string();
-    let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+    let hex = |b: &[u8]| -> String { b.iter().map(|b| format!("{b:02x}")).collect() };
+    let key_hex = hex(&key);
+    // a bytea column prints as hex: the id or the ticket stored as raw bytes would show only so
+    let (id_hex, ticket_hex) = (hex(id.as_bytes()), hex(ticket.as_bytes()));
     let tables: Vec<String> = sqlx::query_scalar(
         "select table_name::text from information_schema.tables where table_schema = current_schema() \
          and table_type = 'BASE TABLE' order by 1",
@@ -390,7 +410,9 @@ async fn no_plaintext_and_no_key_is_stored_on_the_server() -> R {
             ("key", pl["key"].as_str().unwrap_or("?")),
             ("key hex", &key_hex),
             ("manifest id", &id),
+            ("manifest id hex", &id_hex),
             ("ticket", &ticket),
+            ("ticket hex", &ticket_hex),
             ("passcode", PIN),
         ] {
             assert!(!text.contains(needle), "the {what} is in table {t}");
@@ -479,10 +501,11 @@ async fn a_viewer_a_caregiver_and_a_break_glass_contact_are_each_refused() -> R 
                 .await?;
             assert_eq!(
                 (r.status, r.code()),
-                (StatusCode::FORBIDDEN, "forbidden"),
+                (StatusCode::FORBIDDEN, "not_sharer"),
                 "{m} {p}: {:?}",
                 r.json
             );
+            assert!(!r.json.to_string().contains("read:"), "no scope name: {:?}", r.json);
         }
     }
     assert_eq!(env.scalar_i64("select count(*) from shl").await?, 0);
@@ -589,7 +612,464 @@ async fn a_link_answers_a_limited_number_of_times_an_hour() -> R {
     .await?;
     let r = manifest(&env, &pl, None).await?;
     assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(r.header("retry-after"), "600");
     assert_eq!(r.header("access-control-allow-origin"), "*");
+    // the hour filled just now: room again in about an hour
+    let wait: i64 = r.header("retry-after").parse()?;
+    assert!((3590..=3600).contains(&wait), "{wait}");
+    // the same answers 601 s old: room again 2999 s from now, not after a fixed 600 s
+    sqlx::query("update shl_access set at = at - interval '601 seconds'")
+        .execute(env.pool())
+        .await?;
+    let r = manifest(&env, &pl, None).await?;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
+    let wait: i64 = r.header("retry-after").parse()?;
+    assert!((2990..=2999).contains(&wait), "{wait}");
+    // one answer older than the hour makes room
+    sqlx::query("update shl_access set at = now() - interval '61 minutes' where id = (select min(id) from shl_access)")
+        .execute(env.pool())
+        .await?;
+    assert_eq!(manifest(&env, &pl, None).await?.status, StatusCode::OK);
+    Ok(())
+}
+
+/// A manifest request from `peer`, with an X-Forwarded-For header when given: the TCP peer the
+/// server sees is the proxy in front of it, or the client itself.
+async fn manifest_from(env: &Env, pl: &Value, peer: &str, xff: Option<&str>) -> anyhow::Result<StatusCode> {
+    let body = json!({"recipient": "Dr. Carmen Ortega, LabNorte"});
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri(path_of(pl["url"].as_str().unwrap_or_default()))
+        .header("host", "testserver")
+        .header("content-type", "application/json");
+    if let Some(x) = xff {
+        req = req.header("x-forwarded-for", x);
+    }
+    let mut req = req.body(Body::from(serde_json::to_vec(&body)?))?;
+    req.extensions_mut()
+        .insert(ConnectInfo(peer.parse::<std::net::SocketAddr>()?));
+    Ok(env.anon().app.oneshot(req).await?.status())
+}
+
+/// The access log names the client, never the proxy hop: X-Forwarded-For counts only when the
+/// direct peer is a trusted proxy (OWNHEALTH_TRUSTED_PROXIES), and what the client wrote into the
+/// header itself stays left of the address the proxy saw. Documentation addresses (RFC 5737).
+#[tokio::test]
+async fn the_access_log_keeps_the_client_address_and_trusts_only_a_trusted_proxy() -> R {
+    let mut env = env().await?;
+    env.settings.trusted_proxies = vec!["172.16.0.0/12".parse()?];
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let (made, pl) = share(&mut alex, "alex", json!({})).await?;
+    let id = made["link"]["id"].as_str().unwrap_or_default().to_string();
+    // Caddy (172.18.0.3) forwards for the tunnel hop (172.18.0.1), which forwards for the client
+    let chain = "198.51.100.66, 203.0.113.9, 172.18.0.1";
+    assert_eq!(
+        manifest_from(&env, &pl, "172.18.0.3:40000", Some(chain)).await?,
+        StatusCode::OK
+    );
+    // a peer that is no proxy: its own address, whatever header it sends
+    assert_eq!(
+        manifest_from(&env, &pl, "198.51.100.20:40000", Some("203.0.113.77")).await?,
+        StatusCode::OK
+    );
+    let r = alex.get(&format!("/api/profiles/alex/shl/{id}/access")).await?;
+    let ips: Vec<&str> = r.json["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| i["ip"].as_str())
+        .collect();
+    assert_eq!(ips, ["198.51.100.20", "203.0.113.9"], "{:?}", r.json);
+    let audited: Vec<Option<String>> =
+        sqlx::query_scalar("select host(ip) from audit_event where actor_kind = 'share' order by id")
+            .fetch_all(env.pool())
+            .await?;
+    assert_eq!(audited, [Some("203.0.113.9".into()), Some("198.51.100.20".into())]);
+    // no trusted proxy configured: the peer, header or not
+    env.settings.trusted_proxies.clear();
+    assert_eq!(
+        manifest_from(&env, &pl, "172.18.0.3:40000", Some(chain)).await?,
+        StatusCode::OK
+    );
+    let last: Option<String> = sqlx::query_scalar("select host(ip) from shl_access order by id desc limit 1")
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(last.as_deref(), Some("172.18.0.3"));
+    Ok(())
+}
+
+/// A lock set, or the creator's grant narrowed, after the link was made stops that link at once:
+/// the manifest and a file location handed out before both answer 404 (the rule "a lock means
+/// never out of the house" holds for links already out, not only new ones).
+#[tokio::test]
+async fn a_lock_or_a_narrower_grant_stops_a_link_already_out() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    // the owner's own lock
+    let (made, pl) = share(&mut alex, "alex", json!({"categories": ["read:labs"]})).await?;
+    assert_eq!(made["link"]["categories"], json!(["read:labs", "read:summary"]));
+    let m = manifest(&env, &pl, None).await?;
+    assert_eq!(m.status, StatusCode::OK);
+    let mut c = env.pool().acquire().await?;
+    set_locks(&mut c, env.profile("alex"), &scope_set(["read:labs"])).await?;
+    assert_eq!(manifest(&env, &pl, None).await?.status, StatusCode::NOT_FOUND);
+    assert_eq!(env.anon().get(&location(&m)).await?.status, StatusCode::NOT_FOUND);
+    // a link without the locked category keeps working: the lock stops only what it closes
+    set_locks(&mut c, env.profile("alex"), &scope_set(Vec::<&str>::new())).await?;
+    let (_, records) = share(&mut alex, "alex", json!({"categories": ["read:records"]})).await?;
+    set_locks(&mut c, env.profile("alex"), &scope_set(["read:labs"])).await?;
+    assert_eq!(manifest(&env, &records, None).await?.status, StatusCode::OK);
+
+    // a guardian whose categories on Lucía shrink
+    let (_, pl) = share(&mut alex, "lucia", json!({"categories": ["read:labs"]})).await?;
+    assert_eq!(manifest(&env, &pl, None).await?.status, StatusCode::OK);
+    sqlx::query(
+        "update profile_grant set categories = array['read:summary', 'read:records'] \
+         where user_id = $1 and profile_id = $2",
+    )
+    .bind(env.user("alex"))
+    .bind(env.profile("lucia"))
+    .execute(env.pool())
+    .await?;
+    assert_eq!(manifest(&env, &pl, None).await?.status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// The creator's login disabled, the creator's grant expired, or the grant turned into break-glass:
+/// the link stops.
+#[tokio::test]
+async fn a_disabled_creator_or_an_expired_grant_stops_the_link() -> R {
+    let env = env().await?;
+    // Sam is Lucía's guardian; the same grant becomes break-glass
+    let mut sam = env.as_user(env.user("sam")).await?;
+    let (_, by_sam) = share(&mut sam, "lucia", json!({})).await?;
+    assert_eq!(manifest(&env, &by_sam, None).await?.status, StatusCode::OK);
+    sqlx::query(
+        "update profile_grant set break_glass = true, expires_at = now() + interval '14 days' \
+         where user_id = $1 and profile_id = $2",
+    )
+    .bind(env.user("sam"))
+    .bind(env.profile("lucia"))
+    .execute(env.pool())
+    .await?;
+    assert_eq!(manifest(&env, &by_sam, None).await?.status, StatusCode::NOT_FOUND);
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let (_, pl) = share(&mut alex, "lucia", json!({})).await?;
+    let (_, own) = share(&mut alex, "alex", json!({})).await?;
+    assert_eq!(manifest(&env, &pl, None).await?.status, StatusCode::OK);
+    sqlx::query(
+        "update profile_grant set expires_at = now() - interval '1 second' where user_id = $1 and profile_id = $2",
+    )
+    .bind(env.user("alex"))
+    .bind(env.profile("lucia"))
+    .execute(env.pool())
+    .await?;
+    assert_eq!(manifest(&env, &pl, None).await?.status, StatusCode::NOT_FOUND);
+    assert_eq!(manifest(&env, &own, None).await?.status, StatusCode::OK);
+    sqlx::query("update app_user set disabled_at = now() where id = $1")
+        .bind(env.user("alex"))
+        .execute(env.pool())
+        .await?;
+    assert_eq!(manifest(&env, &own, None).await?.status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// A location ticket opens the file of its own link only: a ticket from link A on link B's path is
+/// 404, so a ticket never skips B's passcode.
+#[tokio::test]
+async fn a_ticket_opens_only_its_own_link() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let (_, a) = share(&mut alex, "alex", json!({})).await?;
+    let (_, b) = share(&mut alex, "alex", json!({"passcode": PIN})).await?;
+    let ticket_a = location(&manifest(&env, &a, None).await?)
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let b_path = path_of(b["url"].as_str().unwrap_or_default());
+    let r = env.anon().get(&format!("{b_path}/file/{ticket_a}")).await?;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    // the control: the same ticket on its own link opens
+    let a_path = path_of(a["url"].as_str().unwrap_or_default());
+    assert_eq!(
+        env.anon().get(&format!("{a_path}/file/{ticket_a}")).await?.status,
+        StatusCode::OK
+    );
+    // every link has its own random key, and never a constant one
+    assert_ne!(key_of(&a)?, key_of(&b)?);
+    assert_ne!(key_of(&a)?, [0u8; jose::KEY_LEN]);
+    // a location never outlives its link: one 10 minutes from its end gets a 10-minute location
+    sqlx::query("update shl set expires_at = now() + interval '10 minutes'")
+        .execute(env.pool())
+        .await?;
+    assert_eq!(manifest(&env, &a, None).await?.status, StatusCode::OK);
+    let ok = env
+        .scalar_i64(
+            "select count(*) from shl_access a join shl s on s.id = a.shl_id \
+             where a.id = (select max(id) from shl_access where ticket_sha256 is not null) \
+             and a.ticket_expires_at <= s.expires_at",
+        )
+        .await?;
+    assert_eq!(ok, 1);
+    Ok(())
+}
+
+/// Sharing turned off (OWNHEALTH_SHARE_URL unset) stops what was handed out before: a file location
+/// is 404 too, and a manifest request is 404 before its body is read.
+#[tokio::test]
+async fn turning_sharing_off_stops_locations_already_handed_out() -> R {
+    let mut env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let (_, pl) = share(&mut alex, "alex", json!({})).await?;
+    let m = manifest(&env, &pl, None).await?;
+    assert_eq!(env.anon().get(&location(&m)).await?.status, StatusCode::OK);
+    env.settings.share_url = None;
+    assert_eq!(env.anon().get(&location(&m)).await?.status, StatusCode::NOT_FOUND);
+    let path = path_of(pl["url"].as_str().unwrap_or_default());
+    let r = env.anon().send(Method::POST, &path, Some(&json!({})), &[]).await?;
+    assert_eq!((r.status, r.code()), (StatusCode::NOT_FOUND, "unknown"), "{:?}", r.json);
+    // with sharing on, an unknown link is 404 whatever the body
+    env.settings.share_url = Some(SHARE.into());
+    let r = env
+        .anon()
+        .send(
+            Method::POST,
+            &format!("/api/shl/{}", "A".repeat(43)),
+            Some(&json!({})),
+            &[],
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// A request with no passcode on a link that needs one costs no attempt, but the owner sees it in
+/// the access log and it counts toward the hourly limit.
+#[tokio::test]
+async fn a_request_without_the_passcode_is_logged_and_limited() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let (made, pl) = share(&mut alex, "alex", json!({"passcode": PIN})).await?;
+    let id = made["link"]["id"].as_str().unwrap_or_default().to_string();
+    for _ in 0..RATE_PER_HOUR {
+        let r = manifest(&env, &pl, None).await?;
+        assert_eq!(r.json, json!({"remainingAttempts": ATTEMPTS}));
+    }
+    let r = manifest(&env, &pl, None).await?;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
+    let r = alex.get(&format!("/api/profiles/alex/shl/{id}/access")).await?;
+    let kinds: BTreeSet<&str> = r.json["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| i["kind"].as_str())
+        .collect();
+    assert_eq!(kinds, BTreeSet::from(["passcode_missing"]));
+    assert_eq!(r.json["items"].as_array().map(Vec::len), Some(RATE_PER_HOUR as usize));
+    let denied = env
+        .scalar_i64("select count(*) from audit_event where action = 'shl.passcode_missing' and result_kind = 'denied'")
+        .await?;
+    assert_eq!(denied, RATE_PER_HOUR);
+    Ok(())
+}
+
+/// A link out of passcode attempts is dead: a location it gave out before is 404, and its file is
+/// deleted at once. The file of an expired link goes with the scheduler's next pass.
+#[tokio::test]
+async fn a_locked_out_or_expired_link_loses_its_file() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let (made, pl) = share(&mut alex, "alex", json!({"passcode": PIN})).await?;
+    let locked = made["link"]["id"].as_str().unwrap_or_default().to_string();
+    let m = manifest(&env, &pl, Some(PIN)).await?;
+    for _ in 0..ATTEMPTS {
+        manifest(&env, &pl, Some(WRONG)).await?;
+    }
+    assert_eq!(env.anon().get(&location(&m)).await?.status, StatusCode::NOT_FOUND);
+    let files = |id: String| {
+        let pool = env.pool().clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("select count(*) from shl_file where shl_id = $1::uuid")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+        }
+    };
+    assert_eq!(files(locked.clone()).await?, 0, "locked out: the file is gone");
+
+    let (made, _) = share(&mut alex, "alex", json!({})).await?;
+    let expired = made["link"]["id"].as_str().unwrap_or_default().to_string();
+    let (made, _) = share(&mut alex, "alex", json!({})).await?;
+    let live = made["link"]["id"].as_str().unwrap_or_default().to_string();
+    sqlx::query("update shl set expires_at = now() - interval '1 second' where id = $1::uuid")
+        .bind(&expired)
+        .execute(env.pool())
+        .await?;
+    let mut c = env.pool().acquire().await?;
+    ownhealth_core::sources::sweep_link_files(&mut c).await?;
+    assert_eq!(files(expired).await?, 0, "expired: the sweep deleted it");
+    assert_eq!(files(live).await?, 1, "a live link keeps its file");
+    Ok(())
+}
+
+/// The recipient has no account: a section the person did not share says it is not in this link,
+/// never "this account cannot read them", and every link's Composition carries the same one
+/// sentence about what a link holds, in the link's language.
+#[tokio::test]
+async fn the_recipient_reads_not_shared_and_the_same_notice_on_every_link() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    for (lang, not_in, notice, account) in [
+        (
+            "en",
+            "Not included in this link.",
+            "This summary holds only what the person chose to share, and never a sensitive category.",
+            "this account",
+        ),
+        (
+            "es",
+            "No se incluye en este enlace.",
+            "Este resumen contiene solo lo que la persona eligió compartir, y nunca una categoría sensible.",
+            "esta cuenta",
+        ),
+    ] {
+        for cats in [json!(["read:labs"]), json!(["read:labs", "read:records"])] {
+            let (_, pl) = share(&mut alex, "alex", json!({"lang": lang, "categories": cats})).await?;
+            let bundle: Value = serde_json::from_slice(&open(&env, &pl, None).await?)?;
+            let comp = &bundle["entry"][0]["resource"];
+            let narratives: Vec<String> = comp["section"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|s| s["text"]["div"].as_str().unwrap_or_default().to_string())
+                .collect();
+            assert!(
+                narratives.iter().all(|d| !d.contains(account)),
+                "{lang} {cats}: {narratives:?}"
+            );
+            let withheld = narratives.iter().filter(|d| d.contains(not_in)).count();
+            assert_eq!(withheld > 0, cats.as_array().map(Vec::len) == Some(1), "{lang} {cats}");
+            let shown = comp["text"]["div"].as_str().unwrap_or_default();
+            assert!(shown.contains(notice), "{lang} {cats}: {shown}");
+        }
+    }
+    Ok(())
+}
+
+/// The person creating a link sees how many sensitive items it leaves out; the recipient's file
+/// never names them and reads the same either way.
+#[tokio::test]
+async fn the_creator_sees_how_many_sensitive_items_stay_home() -> R {
+    ownhealth_ops::register();
+    ownhealth_ingest_structured::register();
+    let env = env().await?;
+    assert!(seed_demo(env.pool(), &env.settings, &env.rt.blobs, false).await?);
+    let (owner, profile): (Uuid, Uuid) = sqlx::query_as(
+        "select g.user_id, p.id from profile_grant g join profile p on p.id = g.profile_id \
+         join household h on h.id = p.household_id where h.name = $1 and p.slug = 'alex' and g.role = 'owner'",
+    )
+    .bind(DEMO_HOUSEHOLD)
+    .fetch_one(env.pool())
+    .await?;
+    let mut alex = env.as_user(owner).await?;
+    let pid = profile.to_string();
+    let count = |made: &Value| made["left_out"]["sensitive"].as_i64().unwrap_or(-1);
+    let labs = json!({"lang": "en", "categories": ["read:labs"]});
+    let (made, pl) = share(&mut alex, &pid, json!({"lang": "en"})).await?;
+    let all0 = count(&made);
+    let labs0 = count(&share(&mut alex, &pid, labs.clone()).await?.0);
+    assert!(all0 >= 0 && labs0 >= 0, "{made:?}");
+    let before: Value = serde_json::from_slice(&open(&env, &pl, None).await?)?;
+    // two new synthetic conditions, copies of a current one: a plain twin and one tagged mental health
+    for (text, tag) in [("SYNTH-PLAIN-50", "{}"), ("SYNTH-SENSITIVE-50", "{mental_health}")] {
+        sqlx::query(
+            "insert into condition (profile_id, text, clinical_status, verification_status, src_id, accepted_by, \
+             status, sensitivity, fhir) select profile_id, $2, 'active', 'confirmed', src_id, accepted_by, 'current', \
+             $3::text[], jsonb_set(fhir, '{code}', jsonb_build_object('text', $2::text)) from condition \
+             where profile_id = $1 and status = 'current' order by id limit 1",
+        )
+        .bind(profile)
+        .bind(text)
+        .bind(tag)
+        .execute(env.pool())
+        .await?;
+    }
+    let (made, pl) = share(&mut alex, &pid, json!({"lang": "en"})).await?;
+    assert_eq!(count(&made), all0 + 1, "{made:?}");
+    let after = String::from_utf8(open(&env, &pl, None).await?)?;
+    assert!(
+        after.contains("SYNTH-PLAIN-50"),
+        "a control that can fail: the plain twin is in the link"
+    );
+    assert!(
+        !after.contains("SYNTH-SENSITIVE-50"),
+        "the sensitive one left the house"
+    );
+    let after: Value = serde_json::from_str(&after)?;
+    assert_eq!(
+        after["entry"][0]["resource"]["text"], before["entry"][0]["resource"]["text"],
+        "the notice is the same with or without anything left out"
+    );
+    // labs only: the condition is in no section the link carries
+    assert_eq!(count(&share(&mut alex, &pid, labs).await?.0), labs0);
+    Ok(())
+}
+
+/// The refusals a person can meet each have their own code, and none shows an internal scope name.
+#[tokio::test]
+async fn a_closed_category_and_a_locked_summary_have_their_own_code() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let mut c = env.pool().acquire().await?;
+    set_locks(&mut c, env.profile("alex"), &scope_set(["read:labs"])).await?;
+    let r = alex
+        .post("/api/profiles/alex/shl", &json!({"categories": ["read:labs"]}))
+        .await?;
+    assert_eq!(
+        (r.status, r.code()),
+        (StatusCode::FORBIDDEN, "category_closed"),
+        "{:?}",
+        r.json
+    );
+    set_locks(&mut c, env.profile("alex"), &scope_set(["read:summary"])).await?;
+    let r = alex
+        .post("/api/profiles/alex/shl", &json!({"categories": ["read:labs"]}))
+        .await?;
+    assert_eq!(
+        (r.status, r.code()),
+        (StatusCode::FORBIDDEN, "category_closed"),
+        "{:?}",
+        r.json
+    );
+    assert!(!r.json.to_string().contains("read:"), "no scope name: {:?}", r.json);
+    assert!(r.json.to_string().contains("summary is locked"), "{:?}", r.json);
+    // the owner still lists and revokes with the summary locked
+    assert_eq!(alex.get("/api/profiles/alex/shl").await?.status, StatusCode::OK);
+    Ok(())
+}
+
+/// Reading the link list and a link's access log (recipients, addresses) writes one audit row each,
+/// as every read of the profile does.
+#[tokio::test]
+async fn reading_the_links_and_their_access_log_is_audited() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let (made, _) = share(&mut alex, "alex", json!({})).await?;
+    let id = made["link"]["id"].as_str().unwrap_or_default().to_string();
+    assert_eq!(alex.get("/api/profiles/alex/shl").await?.status, StatusCode::OK);
+    let r = alex.get(&format!("/api/profiles/alex/shl/{id}/access")).await?;
+    assert_eq!(r.status, StatusCode::OK);
+    let rows: Vec<(String, String, Option<Vec<String>>)> = sqlx::query_as(
+        "select actor_kind, action, resource_ids from audit_event where action in ('shl.list', 'shl.access') order by id",
+    )
+    .fetch_all(env.pool())
+    .await?;
+    assert_eq!(
+        rows,
+        [
+            ("user".to_string(), "shl.list".to_string(), None),
+            ("user".to_string(), "shl.access".to_string(), Some(vec![id]))
+        ]
+    );
     Ok(())
 }

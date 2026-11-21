@@ -565,11 +565,26 @@ pub async fn enqueue_poll(conn: &mut PgConnection, source_id: Uuid) -> Result<Op
     .await?)
 }
 
-/// One scheduler pass: `add_default_sources`, then `schedule_due`. Returns the jobs added.
+/// One scheduler pass: `add_default_sources`, `sweep_link_files`, then `schedule_due`. Returns the
+/// jobs added.
 pub async fn scheduler_tick(ctx: &JobContext) -> Result<Vec<i64>> {
     add_default_sources(ctx).await?;
     let mut conn = ctx.pool.acquire().await?;
+    sweep_link_files(&mut conn).await?;
     schedule_due(&mut conn).await
+}
+
+/// Delete the sealed file of every SMART Health Link that can no longer open (migration 1270): past
+/// its expiry, or out of passcode attempts. Revoke and the last wrong passcode delete theirs at once;
+/// this catches expiry, which no request marks. Returns the files deleted.
+pub async fn sweep_link_files(conn: &mut PgConnection) -> Result<u64> {
+    let done = sqlx::query(
+        "delete from shl_file f using shl s where s.id = f.shl_id \
+         and (s.expires_at <= now() or s.attempts_left = 0)",
+    )
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected())
 }
 
 /// Every SCHEDULER_SECONDS: `scheduler_tick`. Stops when `stop` turns true.

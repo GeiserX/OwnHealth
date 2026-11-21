@@ -7,7 +7,8 @@
 --
 -- Access control and ciphertext, not clinical rows: no lifecycle trigger, and a person's export leaves
 -- the tables out (ownhealth-ops export.rs SKIP_RAW). Deleting the profile removes its links, files and
--- access log. Revoking a link deletes its file.
+-- access log. Revoking a link deletes its file, and so does running out of passcode attempts; the
+-- scheduler deletes the files of expired links.
 create table shl (
   id uuid primary key default gen_random_uuid(),
   profile_id uuid not null references profile on delete cascade,
@@ -35,13 +36,15 @@ create table shl_file (
   created_at timestamptz not null default now());
 create index on shl_file (shl_id);
 
--- One row per answer to a recipient: a manifest, a file, or a wrong passcode. A manifest row carries
--- the sha256 of its file location ticket, which opens the file for at most one hour.
+-- One row per answer to a recipient: a manifest, a file, a wrong passcode, or a request with no
+-- passcode on a link that needs one (it costs no attempt, but the owner sees it and it counts toward
+-- the hourly limit). A manifest row carries the sha256 of its file location ticket, which opens the
+-- file for at most one hour. ip is the client address (behind a trusted proxy, the one it forwarded).
 create table shl_access (
   id bigint generated always as identity primary key,
   shl_id uuid not null references shl on delete cascade,
   at timestamptz not null default now(),
-  kind text not null check (kind in ('manifest', 'file', 'passcode_wrong')),
+  kind text not null check (kind in ('manifest', 'file', 'passcode_wrong', 'passcode_missing')),
   recipient text not null check (char_length(recipient) between 1 and 200),
   ip inet,
   user_agent text,

@@ -22,10 +22,14 @@
 //! owner's own locks included), limited to `ownhealth_ops::shl::SHAREABLE`: never `read:sensitive`
 //! or a genome scope. A viewer, a caregiver and a break-glass grant never share, and an access
 //! token never reaches these routes (`Caller` refuses it). No MCP tool creates, lists or extends a
-//! link (section 4.2). A link answers only while it is live, its creator may still share the
-//! profile, and the creator's login is open. Each public answer writes one shl_access row (the
-//! access log the owner reads) and one audit row (actor share, via share). A link answers
-//! RATE_PER_HOUR times an hour; past that it says 429 with Retry-After.
+//! link (section 4.2). A link answers only while it is live, sharing is on, its creator may still
+//! share the profile with every category the link carries (a lock set or a grant narrowed after
+//! creation stops it), and the creator's login is open. Each public answer writes one shl_access
+//! row (the access log the owner reads, with the client address: behind a proxy listed in
+//! OWNHEALTH_TRUSTED_PROXIES, the one it forwarded) and one audit row (actor share, via share). A
+//! link answers RATE_PER_HOUR times in any hour; past that it says 429 with Retry-After, the
+//! seconds until the hour has room again. A link out of passcode attempts, or past its expiry,
+//! loses its file.
 
 use axum::Router;
 use axum::body::Bytes;
@@ -37,7 +41,7 @@ use chrono::{DateTime, Duration, Utc};
 use ownhealth_auth::password::{check_password_async, hash_password_async};
 use ownhealth_auth::sessions;
 use ownhealth_core::Runtime;
-use ownhealth_core::access::{Permission, Principal, Scopes, today_utc};
+use ownhealth_core::access::{Permission, Principal, Scopes, effective_permission, today_utc};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_ops::shl::{self as share, CONTENT_TYPE, LABEL_MAX, SHAREABLE, URL_MAX};
 use ownhealth_rules::summary::LANGS;
@@ -72,6 +76,7 @@ fn msg(key: &str) -> &'static str {
         "long" => "OWNHEALTH_SHARE_URL is too long for a SMART Health Link (128 characters with the path).",
         "role" => "Only the profile's owner or a guardian shares it.",
         "category" => "This category is closed for you on this profile, so a link cannot carry it.",
+        "summary" => "This profile's summary is locked, so it cannot be shared.",
         "recipient" => "The manifest request needs a recipient.",
         "passcode" => "The passcode is not right.",
         "rate" => "This link answers 60 times an hour.",
@@ -86,6 +91,7 @@ pub fn phrases() -> Value {
         "long",
         "role",
         "category",
+        "summary",
         "recipient",
         "passcode",
         "rate",
@@ -139,17 +145,32 @@ struct Live {
 /// The live link of a manifest id, or None, with its row locked FOR UPDATE: two requests for one
 /// link run one after the other, so the passcode count below holds under parallel attempts
 /// ("SMART Health Link Manifest Request", design note: servers need to enforce a total lifetime
-/// count of incorrect passcodes even in the face of parallel requests).
+/// count of incorrect passcodes even in the face of parallel requests). A link out of attempts is
+/// disabled, so not live. The creator's right to share is checked on every request, as the
+/// calendar feed re-checks its creator: the role, and every category the link carries against the
+/// creator's categories today minus the profile's locks today.
 async fn live(conn: &mut PgConnection, id: &str) -> Result<Option<Live>, ApiError> {
     if !share::is_segment(id) {
         return Ok(None);
     }
-    type Row = (Uuid, Uuid, Uuid, Option<String>, Option<i32>, DateTime<Utc>);
+    type Row = (
+        Uuid,
+        Uuid,
+        Uuid,
+        Uuid,
+        Option<String>,
+        Option<i32>,
+        DateTime<Utc>,
+        Vec<String>,
+    );
     let row: Option<Row> = sqlx::query_as(
-        "select s.id, s.profile_id, s.created_by, s.passcode_hash, s.attempts_left, s.expires_at from shl s \
+        "select s.id, s.profile_id, s.created_by, p.household_id, s.passcode_hash, s.attempts_left, s.expires_at, \
+         s.categories from shl s \
+         join profile p on p.id = s.profile_id \
          join app_user u on u.id = s.created_by \
          join profile_grant g on g.user_id = s.created_by and g.profile_id = s.profile_id \
          where s.manifest_sha256 = $1 and s.revoked_at is null and s.expires_at > now() \
+         and (s.attempts_left is null or s.attempts_left > 0) \
          and u.disabled_at is null and g.role = any($2) and not g.break_glass \
          and (g.expires_at is null or g.expires_at > now()) \
          for update of s",
@@ -158,40 +179,66 @@ async fn live(conn: &mut PgConnection, id: &str) -> Result<Option<Live>, ApiErro
     .bind(&ROLES[..])
     .fetch_optional(&mut *conn)
     .await?;
-    Ok(row.map(|r| Live {
+    let Some(r) = row else { return Ok(None) };
+    // as the calendar feed does: a creator who may no longer read the profile makes the link gone
+    let creator = Principal::session(r.2, r.3);
+    let Ok(perm) = effective_permission(&mut *conn, &creator, r.1).await else {
+        return Ok(None);
+    };
+    let open = open_categories(&perm);
+    if !r.7.iter().all(|c| open.contains(c)) {
+        return Ok(None);
+    }
+    Ok(Some(Live {
         id: r.0,
         profile_id: r.1,
         created_by: r.2,
-        passcode_hash: r.3,
-        attempts_left: r.4,
-        expires_at: r.5,
+        passcode_hash: r.4,
+        attempts_left: r.5,
+        expires_at: r.6,
     }))
 }
 
-/// 429 once the link answered RATE_PER_HOUR times in the last hour.
+/// 429 once the link answered RATE_PER_HOUR times in the last hour. Retry-After is the wait until
+/// the RATE_PER_HOUR-th newest answer is an hour old, the first moment the hour has room again.
 async fn rate_limited(conn: &mut PgConnection, link: Uuid) -> Result<Option<Response>, ApiError> {
-    let recent: i64 =
-        sqlx::query_scalar("select count(*) from shl_access where shl_id = $1 and at > now() - interval '1 hour'")
-            .bind(link)
-            .fetch_one(&mut *conn)
-            .await?;
-    if recent < RATE_PER_HOUR {
-        return Ok(None);
-    }
+    let wait: Option<i64> = sqlx::query_scalar(
+        "select ceil(extract(epoch from at + interval '1 hour' - now()))::bigint from shl_access \
+         where shl_id = $1 and at > now() - interval '1 hour' order by at desc offset $2 limit 1",
+    )
+    .bind(link)
+    .bind(RATE_PER_HOUR - 1)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(wait) = wait else { return Ok(None) };
     let mut res = ApiError::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", msg("rate")).into_response();
     res.headers_mut()
-        .insert(header::RETRY_AFTER, HeaderValue::from_static("600"));
+        .insert(header::RETRY_AFTER, HeaderValue::from(wait.clamp(1, LOCATION_SECONDS)));
     Ok(Some(res))
 }
 
+/// Who asked: the client address and the user agent.
+struct Asker {
+    ip: Option<String>,
+    user_agent: Option<String>,
+}
+
+impl Asker {
+    fn of(rt: &Runtime, meta: &Meta) -> Asker {
+        Asker {
+            ip: meta.client_ip(&rt.settings.trusted_proxies),
+            user_agent: meta.user_agent.clone(),
+        }
+    }
+}
+
 /// One shl_access row and one audit row. Free text goes to the audit log only as a hash.
-#[allow(clippy::too_many_arguments)]
 async fn log_access(
     conn: &mut PgConnection,
     link: &Live,
     kind: &str,
     recipient: &str,
-    meta: &Meta,
+    who: &Asker,
     ticket: Option<(&str, DateTime<Utc>)>,
     bytes_out: usize,
 ) -> Result<(), ApiError> {
@@ -202,22 +249,22 @@ async fn log_access(
     .bind(link.id)
     .bind(kind)
     .bind(recipient)
-    .bind(meta.ip.as_deref())
-    .bind(meta.user_agent.as_deref())
+    .bind(who.ip.as_deref())
+    .bind(who.user_agent.as_deref())
     .bind(ticket.map(|(t, _)| share::sha256(t)))
     .bind(ticket.map(|(_, exp)| exp))
     .execute(&mut *conn)
     .await?;
     let mut e = AuditEvent::new("share", "share", &format!("shl.{kind}"));
     e.actor_id = Some(link.created_by);
-    e.ip = meta.ip.clone();
-    e.user_agent = meta.user_agent.clone();
+    e.ip = who.ip.clone();
+    e.user_agent = who.user_agent.clone();
     e.tool = Some("shl".into());
     e.profile_id = Some(link.profile_id);
     e.resource_type = Some("shl".into());
     e.resource_ids = Some(vec![link.id.to_string()]);
     e.args_summary = Some(format!("recipient_sha256={}", &hex(&share::sha256(recipient))[..16]));
-    e.result_kind = Some(if kind == "passcode_wrong" { "denied" } else { "ok" }.into());
+    e.result_kind = Some(if kind.starts_with("passcode_") { "denied" } else { "ok" }.into());
     e.bytes_out = Some(i32::try_from(bytes_out).unwrap_or(i32::MAX));
     write_audit(conn, &e).await?;
     Ok(())
@@ -243,22 +290,20 @@ async fn manifest(State(rt): State<Runtime>, meta: Meta, Path(id): Path<String>,
 }
 
 async fn serve_manifest(rt: &Runtime, id: &str, meta: &Meta, body: &[u8]) -> Result<Response, ApiError> {
-    let input: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-    let Some(who) = recipient(&input["recipient"]) else {
-        return Err(ApiError::new(StatusCode::BAD_REQUEST, "bad_request", msg("recipient")));
-    };
+    // sharing off, or no such link: 404 before anything about the request is read
     let share_url = rt.settings.share_url.clone().ok_or_else(gone)?;
     let mut tx = rt.pool.begin().await?;
     let link = live(&mut tx, id).await?.ok_or_else(gone)?;
+    let input: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let Some(recipient) = recipient(&input["recipient"]) else {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "bad_request", msg("recipient")));
+    };
     if let Some(res) = rate_limited(&mut tx, link.id).await? {
         return Ok(res);
     }
+    let who = Asker::of(rt, meta);
     if let Some(hash) = &link.passcode_hash {
         let left = link.attempts_left.unwrap_or(0);
-        // the link is disabled once the lifetime count is spent: not active, so 404
-        if left <= 0 {
-            return Err(gone());
-        }
         let given = input["passcode"].as_str().filter(|p| !p.is_empty());
         let right = match given {
             Some(p) => check_password_async(p, Some(hash.clone())).await?,
@@ -266,7 +311,8 @@ async fn serve_manifest(rt: &Runtime, id: &str, meta: &Meta, body: &[u8]) -> Res
         };
         if !right {
             // "SMART Health Link Manifest Request": an invalid passcode gets 401 with
-            // remainingAttempts. A request with no passcode guessed nothing, so it costs none.
+            // remainingAttempts. A request with no passcode guessed nothing, so it costs no
+            // attempt; it is still logged, and counts toward the hourly limit.
             let remaining = if given.is_some() {
                 let n: i32 = sqlx::query_scalar(
                     "update shl set attempts_left = attempts_left - 1 where id = $1 returning attempts_left",
@@ -274,9 +320,17 @@ async fn serve_manifest(rt: &Runtime, id: &str, meta: &Meta, body: &[u8]) -> Res
                 .bind(link.id)
                 .fetch_one(&mut *tx)
                 .await?;
-                log_access(&mut tx, &link, "passcode_wrong", &who, meta, None, 0).await?;
+                log_access(&mut tx, &link, "passcode_wrong", &recipient, &who, None, 0).await?;
+                if n == 0 {
+                    // disabled for good: its file has no reader left
+                    sqlx::query("delete from shl_file where shl_id = $1")
+                        .bind(link.id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
                 n
             } else {
+                log_access(&mut tx, &link, "passcode_missing", &recipient, &who, None, 0).await?;
                 left
             };
             tx.commit().await?;
@@ -315,8 +369,8 @@ async fn serve_manifest(rt: &Runtime, id: &str, meta: &Meta, body: &[u8]) -> Res
         &mut tx,
         &link,
         "manifest",
+        &recipient,
         &who,
-        meta,
         Some((&ticket, until)),
         text.len(),
     )
@@ -333,19 +387,20 @@ async fn file(State(rt): State<Runtime>, meta: Meta, Path((id, ticket)): Path<(S
 }
 
 async fn serve_file(rt: &Runtime, id: &str, ticket: &str, meta: &Meta) -> Result<Response, ApiError> {
-    if !share::is_segment(ticket) {
+    // sharing turned off stops locations already handed out too
+    if rt.settings.share_url.is_none() || !share::is_segment(ticket) {
         return Err(gone());
     }
     let mut tx = rt.pool.begin().await?;
     let link = live(&mut tx, id).await?.ok_or_else(gone)?;
-    let who: Option<String> = sqlx::query_scalar(
+    let recipient: Option<String> = sqlx::query_scalar(
         "select recipient from shl_access where shl_id = $1 and ticket_sha256 = $2 and ticket_expires_at > now()",
     )
     .bind(link.id)
     .bind(share::sha256(ticket))
     .fetch_optional(&mut *tx)
     .await?;
-    let who = who.ok_or_else(gone)?;
+    let recipient = recipient.ok_or_else(gone)?;
     if let Some(res) = rate_limited(&mut tx, link.id).await? {
         return Ok(res);
     }
@@ -355,7 +410,16 @@ async fn serve_file(rt: &Runtime, id: &str, ticket: &str, meta: &Meta) -> Result
             .fetch_optional(&mut *tx)
             .await?;
     let jwe = jwe.ok_or_else(gone)?;
-    log_access(&mut tx, &link, "file", &who, meta, None, jwe.len()).await?;
+    log_access(
+        &mut tx,
+        &link,
+        "file",
+        &recipient,
+        &Asker::of(rt, meta),
+        None,
+        jwe.len(),
+    )
+    .await?;
     tx.commit().await?;
     // ".files.location links": content-type application/jose, the body a compact JWE
     Ok(([(header::CONTENT_TYPE, "application/jose")], jwe).into_response())
@@ -369,9 +433,9 @@ async fn no_head() -> Response {
 // ------------------------------------------------------------------- managing ----
 
 /// The profile as someone who may share it: owner or guardian, never break-glass. A viewer and a
-/// caregiver are refused the same way.
+/// caregiver are refused the same way, `not_sharer`. What a link may carry is `open_categories`.
 async fn sharer(conn: &mut PgConnection, caller: &Caller, p: &str) -> Result<Permission, ApiError> {
-    let perm = caller.require(conn, p, Some("read:summary"), None).await?;
+    let perm = caller.require(conn, p, None, None).await?;
     let grant: Option<bool> = sqlx::query_scalar(
         "select break_glass from profile_grant where user_id = $1 and profile_id = $2 and role = any($3)",
     )
@@ -381,7 +445,7 @@ async fn sharer(conn: &mut PgConnection, caller: &Caller, p: &str) -> Result<Per
     .fetch_optional(&mut *conn)
     .await?;
     if grant != Some(false) {
-        return Err(ownhealth_core::Error::access_denied("forbidden", msg("role")).into());
+        return Err(ownhealth_core::Error::access_denied("not_sharer", msg("role")).into());
     }
     Ok(perm)
 }
@@ -438,7 +502,7 @@ async fn audit(
     p: &Principal,
     perm: &Permission,
     action: &str,
-    id: Uuid,
+    id: Option<Uuid>,
     args: String,
 ) -> R<()> {
     let mut e = AuditEvent::new("user", "ui", action);
@@ -446,21 +510,32 @@ async fn audit(
     e.tool = Some("shl".into());
     e.profile_id = Some(perm.profile.id);
     e.resource_type = Some("shl".into());
-    e.resource_ids = Some(vec![id.to_string()]);
+    e.resource_ids = id.map(|i| vec![i.to_string()]);
     e.args_summary = Some(args);
     write_audit(conn, &e).await?;
     Ok(())
 }
 
+/// Each read writes one audit row, as every read of the profile does.
 async fn list(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>) -> R {
-    let mut conn = rt.pool.acquire().await?;
-    let perm = sharer(&mut conn, &caller, &p).await?;
+    let mut tx = rt.pool.begin().await?;
+    let perm = sharer(&mut tx, &caller, &p).await?;
     let rows: Vec<Listed> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "select {COLS} from shl s where s.profile_id = $1 order by s.created_at desc, s.id"
     )))
     .bind(perm.profile.id)
-    .fetch_all(&mut *conn)
+    .fetch_all(&mut *tx)
     .await?;
+    audit(
+        &mut tx,
+        &caller.0,
+        &perm,
+        "shl.list",
+        None,
+        format!("rows={}", rows.len()),
+    )
+    .await?;
+    tx.commit().await?;
     ok(json!({"items": rows.iter().map(link_out).collect::<Vec<_>>()}))
 }
 
@@ -498,16 +573,20 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
     sessions::require_step_up(&mut tx, &caller.0, sessions::STEP_UP_SECONDS).await?;
     let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
     let open = open_categories(&perm);
+    // a summary is what a link carries: read:summary comes with every link
+    if !open.contains("read:summary") {
+        return Err(ownhealth_core::Error::access_denied("category_closed", msg("summary")).into());
+    }
     let mut scopes: Scopes = match &b.categories {
         Some(c) => c.iter().cloned().collect(),
         None => open.clone(),
     };
-    // a summary is what a link carries: read:summary comes with every link
     scopes.insert("read:summary".into());
     if !scopes.is_subset(&open) {
-        return Err(ownhealth_core::Error::access_denied("forbidden", msg("category")).into());
+        return Err(ownhealth_core::Error::access_denied("category_closed", msg("category")).into());
     }
     let sealed = share::seal(&mut tx, perm.profile.id, &scopes, &lang, today_utc()).await?;
+    let sensitive = share::sensitive_left_out(&mut tx, perm.profile.id, &scopes).await?;
     let passcode_hash = match b.passcode.as_deref() {
         Some(pc) => Some(hash_password_async(pc).await?),
         None => None,
@@ -546,7 +625,7 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
     e.resource_ids = Some(vec![link_id.to_string()]);
     e.src_ids = Some(sealed.ips.srcs.clone());
     e.rows_out = Some(i32::try_from(sealed.ips.srcs.len()).unwrap_or(i32::MAX));
-    e.withheld = Some(json!({"by_scope": sealed.ips.withheld}));
+    e.withheld = Some(json!({"by_scope": sealed.ips.withheld, "sensitive": sensitive}));
     e.args_summary = Some(format!(
         "categories={};days={days};flag={flag};lang={lang}",
         categories.join(",")
@@ -564,18 +643,19 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
         flag == "P",
         b.label.as_deref(),
     );
+    // the person creating the link sees what stays home; the recipient's file never says
     Ok(answer(
         StatusCode::CREATED,
-        json!({"link": link_out(&row), "shlink": link}),
+        json!({"link": link_out(&row), "shlink": link, "left_out": {"sensitive": sensitive}}),
         &[],
     ))
 }
 
-/// One link of the profile, locked, while it is not revoked.
-async fn one(conn: &mut PgConnection, perm: &Permission, id: &str) -> R<Uuid> {
+/// One link of the profile, locked: its id, and whether it is already revoked.
+async fn one(conn: &mut PgConnection, perm: &Permission, id: &str) -> R<(Uuid, bool)> {
     let id = Uuid::parse_str(id).map_err(|_| ApiError::not_found())?;
-    let found: Option<Uuid> =
-        sqlx::query_scalar("select id from shl where id = $1 and profile_id = $2 and revoked_at is null for update")
+    let found: Option<(Uuid, bool)> =
+        sqlx::query_as("select id, revoked_at is not null from shl where id = $1 and profile_id = $2 for update")
             .bind(id)
             .bind(perm.profile.id)
             .fetch_optional(conn)
@@ -584,8 +664,8 @@ async fn one(conn: &mut PgConnection, perm: &Permission, id: &str) -> R<Uuid> {
 }
 
 async fn access(State(rt): State<Runtime>, caller: Caller, Path((p, id)): Path<(String, String)>) -> R {
-    let mut conn = rt.pool.acquire().await?;
-    let perm = sharer(&mut conn, &caller, &p).await?;
+    let mut tx = rt.pool.begin().await?;
+    let perm = sharer(&mut tx, &caller, &p).await?;
     let id = Uuid::parse_str(&id).map_err(|_| ApiError::not_found())?;
     type Row = (DateTime<Utc>, String, String, Option<String>, Option<String>);
     let rows: Vec<Row> = sqlx::query_as(
@@ -594,8 +674,18 @@ async fn access(State(rt): State<Runtime>, caller: Caller, Path((p, id)): Path<(
     )
     .bind(id)
     .bind(perm.profile.id)
-    .fetch_all(&mut *conn)
+    .fetch_all(&mut *tx)
     .await?;
+    audit(
+        &mut tx,
+        &caller.0,
+        &perm,
+        "shl.access",
+        Some(id),
+        format!("rows={}", rows.len()),
+    )
+    .await?;
+    tx.commit().await?;
     let items: Vec<Value> = rows
         .iter()
         .map(|r| json!({"at": r.0, "kind": r.1, "recipient": r.2, "ip": r.3, "user_agent": r.4}))
@@ -604,11 +694,15 @@ async fn access(State(rt): State<Runtime>, caller: Caller, Path((p, id)): Path<(
 }
 
 /// Revoking only takes access away, so it needs no step-up. security-privacy.md section 11:
-/// revocation deletes the object.
+/// revocation deletes the object. A second revoke (a double click) answers the same and changes
+/// nothing.
 async fn revoke(State(rt): State<Runtime>, caller: Caller, Path((p, id)): Path<(String, String)>) -> R {
     let mut tx = rt.pool.begin().await?;
     let perm = sharer(&mut tx, &caller, &p).await?;
-    let id = one(&mut tx, &perm, &id).await?;
+    let (id, revoked) = one(&mut tx, &perm, &id).await?;
+    if revoked {
+        return ok(json!({"id": id, "revoked": true}));
+    }
     sqlx::query("update shl set revoked_at = now() where id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -617,7 +711,7 @@ async fn revoke(State(rt): State<Runtime>, caller: Caller, Path((p, id)): Path<(
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    audit(&mut tx, &caller.0, &perm, "shl.revoke", id, String::new()).await?;
+    audit(&mut tx, &caller.0, &perm, "shl.revoke", Some(id), String::new()).await?;
     tx.commit().await?;
     ok(json!({"id": id, "revoked": true}))
 }
