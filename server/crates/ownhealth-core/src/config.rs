@@ -188,7 +188,7 @@ pub fn parse_queues(value: &str) -> Result<Vec<String>> {
 
 /// `OWNHEALTH_SHARE_URL` as the links carry it: an origin without a trailing slash. A recipient's
 /// name and the passcode travel to it, so it is https; plain http only reaches a loopback host
-/// (a tunnel or a test on the same machine). A path, query, fragment or user part is refused.
+/// (a tunnel or a test on the same machine). A path, query, fragment, user name or password is refused.
 pub fn check_share_url(value: &str) -> Result<String> {
     let refuse = |why: &str| {
         Error::Invalid(format!(
@@ -198,6 +198,16 @@ pub fn check_share_url(value: &str) -> Result<String> {
     };
     let origin = value.trim().trim_end_matches('/');
     let url = url::Url::parse(origin).map_err(|_| refuse("is not a URL"))?;
+    // every link and QR code would repeat it, and a browser refuses such a URL: refused without
+    // printing the value, which holds the secret
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::Invalid(
+            "OWNHEALTH_SHARE_URL carries a user name or password. Take it out: every link and QR code \
+             would repeat it. Set it to the public https address of the share port, such as \
+             https://share.example.org, or leave it unset to keep sharing off."
+                .into(),
+        ));
+    }
     let loopback = match url.host() {
         Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
@@ -210,7 +220,7 @@ pub fn check_share_url(value: &str) -> Result<String> {
         "http" => return Err(refuse("uses http: only https may carry a passcode off this machine")),
         _ => return Err(refuse("is not an https address")),
     }
-    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() {
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
         return Err(refuse("has more than a scheme, a host and a port"));
     }
     Ok(origin.to_string())
@@ -433,6 +443,18 @@ mod tests {
             assert!(
                 err.contains("OWNHEALTH_SHARE_URL") && err.contains("https"),
                 "{bad}: {err}"
+            );
+        }
+        // a user or a password would be copied into every link and QR code: refused, and said plainly
+        for creds in [
+            "https://:hunter2@share.example.org",
+            "https://user:hunter2@share.example.org",
+            "https://user@share.example.org",
+        ] {
+            let err = share(creds).expect_err(creds).to_string();
+            assert!(
+                err.contains("user name or password") && !err.contains("hunter2"),
+                "{creds}: {err}"
             );
         }
         assert_eq!(share("").ok().flatten(), None, "empty keeps sharing off");
