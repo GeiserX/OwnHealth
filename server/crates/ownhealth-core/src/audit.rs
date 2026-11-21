@@ -199,12 +199,19 @@ const ROW_V1: &str = "pg_catalog.convert_to(pg_catalog.jsonb_build_array('v1', e
     e.protocol_version, e.ip::text, e.user_agent, e.not_assessed_n, e.arg_bytes)::text, 'UTF8')";
 
 /// The check reads both tables by name, so it first makes sure each is still a plain table with no
-/// row-level security and no rules. Otherwise the owner could put a view in its place that shows the
-/// check the old row and the app the edited one. A non-superuser owner cannot change pg_catalog.
+/// row-level security, no rules and no generated column, and that every column has a built-in type
+/// (one in pg_catalog, made at initdb: an oid below FirstNormalObjectId, 16384). Otherwise the owner
+/// could put a view in its place that shows the check the old row and the app the edited one, or give
+/// a column a type of its own whose cast to json shows the check a value the row does not hold. A
+/// non-superuser owner cannot change pg_catalog.
 const PLAIN_TABLES: &str = "select pg_catalog.count(*) from pg_catalog.pg_class c \
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace \
     where n.nspname = 'public' and c.relname in ('audit_event', 'audit_chain') \
-    and c.relkind = 'r' and not c.relrowsecurity and not c.relhasrules";
+    and c.relkind = 'r' and not c.relrowsecurity and not c.relhasrules \
+    and not exists (select 1 from pg_catalog.pg_attribute a join pg_catalog.pg_type t on t.oid = a.atttypid \
+      where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped \
+      and (t.oid >= 16384::pg_catalog.oid or t.typnamespace <> 'pg_catalog'::pg_catalog.regnamespace \
+           or a.attgenerated <> ''))";
 
 /// Recompute the audit chain (migrations/1250_audit_chain.sql) from seq 1 and name the first link
 /// that does not hold: an edited, deleted or reordered row, or a row added behind the chain.
