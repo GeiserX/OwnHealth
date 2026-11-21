@@ -734,7 +734,7 @@ Budgets are editable per token in the UI. A "fact" is one row with a `src` id. T
 
 ### 9.5 Audit log
 
-Append-only table `audit_event`, written in the same transaction as the read:
+Append-only table `audit_event`, written in the same transaction as the read. A read that runs in a REPEATABLE READ snapshot (the doctor summary, the IPS export) writes its row instead in its own READ COMMITTED transaction, stamped with the start of the read, and that row commits before the response goes out:
 
 | Field | Example |
 |---|---|
