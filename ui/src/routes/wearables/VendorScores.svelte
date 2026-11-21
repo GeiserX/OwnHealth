@@ -40,7 +40,10 @@
 							{#if r.values.length > 1}<Sparkline values={r.values} status="accent" />{/if}
 							<div class="vs-val">
 								<b class="num">{fmtNum(r.latest.value, scoreDecimals(r.latest.value))}</b>
-								{#if r.latest.qualifier}<div class="dim" style="font-size:11px" title={tf('vs_word', { p: who })}>“{r.latest.qualifier}”</div>{/if}
+								{#if r.latest.qualifier}
+									<div class="dim" style="font-size:11px">“{r.latest.qualifier}”</div>
+									<div class="dim" style="font-size:10px">{tf('vs_word', { p: who })}</div>
+								{/if}
 							</div>
 						</li>
 					{/each}

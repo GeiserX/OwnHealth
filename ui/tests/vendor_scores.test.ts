@@ -66,3 +66,12 @@ test('vendor scores: a score keyed at midnight UTC shows its own day west of UTC
 		process.env.TZ = tz;
 	}
 });
+
+test("vendor scores: the vendor's own word is attributed on screen, not only in a hover title", () => {
+	const card = readFileSync(new URL('../src/routes/wearables/VendorScores.svelte', import.meta.url), 'utf8');
+	assert.doesNotMatch(card, /title=\{tf\('vs_word'/, 'a phone cannot show a title');
+	assert.match(card, />[^<]*\{tf\('vs_word', \{ p: who \}\)\}/, 'the attribution is text in the card');
+	const dict = readFileSync(new URL('../src/lib/i18n/dict.ts', import.meta.url), 'utf8');
+	assert.match(dict, /\t\tvs_word: "palabra de \{p\}",/, 'es names the vendor next to its word');
+	assert.match(dict, /\t\tvs_word: "\{p\}'s word",/, 'en too');
+});
