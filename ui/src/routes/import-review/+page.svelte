@@ -33,6 +33,9 @@
 	import PageView, { type Box } from '#lib/components/pages2/PageView.svelte';
 	import ReviewRow from '#lib/components/pages2/ReviewRow.svelte';
 	import UploadPanel from '#lib/components/pages2/UploadPanel.svelte';
+	import ShcPanel from '#lib/components/pages2/ShcPanel.svelte';
+	import ShcDocument from '#lib/components/pages2/ShcDocument.svelte';
+	import { shcCards } from '#lib/logic/shc';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
@@ -46,6 +49,7 @@
 	let confirmDup = $state(false);
 	const doc = new Loader<DocumentDetail>();
 	let showUpload = $state(false);
+	let showShc = $state(false);
 	let busy = $state(false);
 	let actionError = $state<{ text: string; raw: string } | null>(null);
 	// "Document withdrawn: …" after a person rejects a whole document.
@@ -155,6 +159,8 @@
 	};
 	const pg = (i: ReviewItem) => Number((i.payload as { page_no?: number }).page_no ?? 1);
 	const pinfo = $derived(doc.data?.pages_info.find((p) => p.page_no === pageNo) ?? null);
+	// a SMART Health Card document: its rows came from the signed card, so it has no pages to show
+	const shcDoc = $derived(shcCards(doc.data?.flags));
 	const boxes = $derived<Box[]>([
 		...rows
 			.filter((i) => pg(i) === pageNo && Array.isArray((i.payload as { bbox?: number[] }).bbox))
@@ -282,6 +288,11 @@
 			const d = (queue.data?.docs ?? []).find((x) => x.id === i.document_id);
 			return tf('i2_cr_t', { name: String((p.observation as { printed_name?: string })?.printed_name ?? ''), doc: d ? docLabel(d) : '—' });
 		}
+		// A row from a FHIR bundle or a SMART Health Card names its source: the card's signer, type and day.
+		if (i.kind === 'fhir_unmapped') {
+			const label = (p.src as { label?: string } | undefined)?.label;
+			if (label) return String(label);
+		}
 		// A scan's chip already says what it is; the line names the file.
 		if (i.kind === 'pending_document' && i.document_id && docName(i.document_id)) return docName(i.document_id);
 		return t('i2_kind_' + i.kind);
@@ -297,11 +308,14 @@
 		}
 		return '';
 	}
+	// why a row waits, in the reader's language
+	const reasonsText = (i: ReviewItem) => i.reasons.map((r) => kindWord('i2_reason_', r)).join(' · ');
 </script>
 
 <PageHeader title={t('nav_imp')} sub={t('i2_imp_sub')}>
 	{#snippet right()}
 		<PhaseChip phase={t('i2_imp_ph1')} /><PhaseChip phase={t('i2_imp_ph2')} />
+		<button class="btn" onclick={() => (showShc = !showShc)} aria-expanded={showShc}>{t('shc_btn')}</button>
 		<button class="btn pri" onclick={() => (showUpload = !showUpload)} aria-expanded={showUpload}>{t('i2_upload')}</button>
 	{/snippet}
 </PageHeader>
@@ -318,6 +332,20 @@
 			if (ids[0]) goto(`?doc=${ids[0]}`);
 		}}
 	/>
+{/if}
+
+{#if showShc && prof}
+	<!-- a new profile gets a new panel: no card or question carries over to it -->
+	{#key prof.slug}
+		<ShcPanel
+			profile={prof.slug}
+			profileName={prof.display_name}
+			ondone={() => {
+				load();
+				refreshReviewTotal();
+			}}
+		/>
+	{/key}
 {/if}
 
 <div class="inbox">
@@ -384,7 +412,9 @@
 				<NotReady error={doc.error} />
 			{:else if doc.data && docFailed}
 				<div class="empty">{t('i2_doc_failed')}</div>
-			{:else if doc.data && pinfo && docId}
+			{:else if doc.data && docId && doc.data.id === docId && shcDoc}
+				<ShcDocument cards={shcDoc} queued={Number((doc.data.flags?.import as { queued?: number } | undefined)?.queued ?? 0)} photo={doc.data.mime.startsWith('image/') ? documentFileUrl(docId) : null} />
+			{:else if doc.data && pinfo && docId && doc.data.id === docId}
 				<PageView documentId={docId} page={pageNo} width={pinfo.width_pt} height={pinfo.height_pt} {boxes} {selected} {zoom} onpick={pick} />
 			{:else if doc.data && docId && doc.data.mime.startsWith('image/')}
 				<img class="scan" src={documentFileUrl(docId)} alt={tf('i2_scan_alt', { doc: plain(doc.data.filename) })} />
@@ -501,6 +531,7 @@
 								<div class="dim" style="font-size:11.5px">{line.rows.map((r) => String((r.payload as { observation?: { printed_name?: string } }).observation?.printed_name ?? '')).filter(Boolean).join(' · ')}</div>
 							{:else}
 								<div>{it.kind === 'agent_proposal' ? '◆ ' : ''}{otherTitle(it)}</div>
+								{#if it.kind === 'fhir_unmapped' && it.reasons.length}<div style="font-size:11.5px;color:var(--watch)">{reasonsText(it)}</div>{/if}
 								{#if prows}
 									<ProposalRows rows={prows} {busy} documentId={it.document_id} onaccept={(edits) => act(() => acceptReview(it.id, edits))} onreject={() => act(() => rejectReview(it.id, 'rejected in review'))} />
 								{:else if otherText(it)}<pre class="p2untrusted" style="margin-top:4px">{otherText(it)}</pre>{/if}

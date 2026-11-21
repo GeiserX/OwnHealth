@@ -14,10 +14,10 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderValue, header};
 use axum::response::IntoResponse;
 use axum::routing::post;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use ownhealth_core::Runtime;
 use ownhealth_core::access::{majority, today_utc};
-use ownhealth_core::audit::write_audit;
+use ownhealth_core::audit::write_audit_at;
 use ownhealth_rules::summary::{self, LANGS, Options, SPECIALTIES};
 use serde::Deserialize;
 use serde_json::json;
@@ -65,7 +65,10 @@ async fn summary_pdf(
             )
             .done()?;
     }
-    let mut tx = rt.pool.begin().await?;
+    // every read of the sheet from one snapshot, which ends by storing the state it read
+    let mut tx = summary::begin_read(&rt.pool).await?;
+    // the start of the read (now() is the transaction's start): the time the audit row carries
+    let read_at: DateTime<Utc> = sqlx::query_scalar("select now()").fetch_one(&mut *tx).await?;
     let perm = Caller(p.clone())
         .require(&mut tx, &profile, Some("read:summary"), None)
         .await?;
@@ -77,7 +80,8 @@ async fn summary_pdf(
         sensitive_open: body.include_sensitive && gate.sensitive && !gate.minor,
         as_of,
     };
-    let model = summary::build_for(&mut tx, Some(&p), perm.profile.id, &perm.scopes, &opts).await?;
+    let (model, state) = summary::read_for(&mut tx, Some(&p), perm.profile.id, &perm.scopes, &opts).await?;
+    ownhealth_rules::commit_read(tx, perm.profile.id, &state).await?;
     let mut sheet = ownhealth_ops::summary_pdf::render(&model);
     // the ids the paper shows, not those of rows cut to fit two pages
     let srcs = std::mem::take(&mut sheet.printed);
@@ -103,7 +107,10 @@ async fn summary_pdf(
         "minor_rule": model["withheld"]["minor_rule"],
     }));
     e.ip = meta.ip.clone();
-    write_audit(&mut tx, &e).await?;
+    // the audit row commits before a byte goes out, in a READ COMMITTED transaction of its own (the
+    // audit chain links a row only from one), stamped with the start of the read
+    let mut tx = rt.pool.begin().await?;
+    write_audit_at(&mut tx, &e, Some(read_at)).await?;
     tx.commit().await?;
     let filename = format!(
         "ownhealth-summary-{}-{}-{}-{}.pdf",

@@ -516,7 +516,9 @@ pub async fn build(
     lang: &str,
     as_of: NaiveDate,
 ) -> Result<Ips> {
-    build_in(conn, profile_id, scopes, lang, as_of, false).await
+    let (ips, state) = read_in(&mut *conn, profile_id, scopes, lang, as_of, false).await?;
+    ownhealth_rules::store_snapshot(&mut *conn, profile_id, &state, &*ownhealth_rules::load_pack()?).await?;
+    Ok(ips)
 }
 
 /// The IPS a SMART Health Link carries. The reader has no account, so a section the person did not
@@ -531,24 +533,38 @@ pub async fn build_link(
     lang: &str,
     as_of: NaiveDate,
 ) -> Result<Ips> {
-    build_in(conn, profile_id, scopes, lang, as_of, true).await
+    let (ips, state) = read_in(&mut *conn, profile_id, scopes, lang, as_of, true).await?;
+    ownhealth_rules::store_snapshot(&mut *conn, profile_id, &state, &*ownhealth_rules::load_pack()?).await?;
+    Ok(ips)
 }
 
-async fn build_in(
+/// `build` without its one write: the Bundle, and the state body it was read from. The caller
+/// stores the body and ends the transaction (`summary::begin_read`) with `commit_read`.
+pub async fn read(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    scopes: &Scopes,
+    lang: &str,
+    as_of: NaiveDate,
+) -> Result<(Ips, Value)> {
+    read_in(conn, profile_id, scopes, lang, as_of, false).await
+}
+
+async fn read_in(
     conn: &mut PgConnection,
     profile_id: Uuid,
     scopes: &Scopes,
     lang: &str,
     as_of: NaiveDate,
     link: bool,
-) -> Result<Ips> {
+) -> Result<(Ips, Value)> {
     let opts = Options {
         lang: lang.into(),
         specialty: SPECIALTY.into(),
         sensitive_open: false,
         as_of,
     };
-    let model = summary::build(&mut *conn, profile_id, scopes, &opts).await?;
+    let (model, state) = summary::read_for(&mut *conn, None, profile_id, scopes, &opts).await?;
     let empty = Map::new();
     let labels = model.get("labels").and_then(Value::as_object).unwrap_or(&empty);
     let (name, birth, sex): (String, Option<NaiveDate>, Option<String>) =
@@ -741,12 +757,13 @@ async fn build_in(
         "timestamp": format!("{date}T00:00:00Z"),
         "entry": entry,
     });
-    Ok(Ips {
+    let ips = Ips {
         bundle,
         srcs,
         state_hash: st(&model, "state_hash").to_string(),
         withheld: json!(withheld),
-    })
+    };
+    Ok((ips, state))
 }
 
 #[cfg(test)]
