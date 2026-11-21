@@ -28,7 +28,7 @@ use ownhealth_core::records::list_records;
 use ownhealth_core::{Error, Result};
 use ownhealth_genome::{FindingsQuery, Gate};
 use serde_json::{Map, Value, json};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::engine::{Point, date_of, iso, str_of};
@@ -644,6 +644,28 @@ pub async fn build_for(
     scopes: &Scopes,
     opts: &Options,
 ) -> Result<Value> {
+    let (model, state) = read_for(&mut *conn, viewer, profile_id, scopes, opts).await?;
+    crate::store_snapshot(&mut *conn, profile_id, &state, &*load_pack()?).await?;
+    Ok(model)
+}
+
+/// A transaction that reads one sheet from one snapshot: REPEATABLE READ, so a correction saved
+/// during the print shows on all of the sheet or none of it. It ends by storing the state it read
+/// (`crate::commit_read`). The audit row follows in a READ COMMITTED transaction of its own,
+/// stamped with this one's start (`now()` in it), and commits before the sheet goes out.
+pub async fn begin_read(pool: &PgPool) -> sqlx::Result<Transaction<'static, Postgres>> {
+    pool.begin_with("begin isolation level repeatable read").await
+}
+
+/// `build_for` without its one write: the model, and the state body it was read from. The caller
+/// stores the body and ends the transaction (`begin_read`) with `crate::commit_read`.
+pub async fn read_for(
+    conn: &mut PgConnection,
+    viewer: Option<&Principal>,
+    profile_id: Uuid,
+    scopes: &Scopes,
+    opts: &Options,
+) -> Result<(Value, Value)> {
     let lang = if opts.lang == "es" { "es" } else { "en" };
     let pack = load_pack()?;
     let d = data()?;
@@ -653,7 +675,7 @@ pub async fn build_for(
         .find(|s| s.id == opts.specialty)
         .ok_or_else(|| Error::Invalid(format!("unknown specialty {:?}", opts.specialty)))?;
     let l = labels(&d.templates, lang);
-    let (body, ev) = crate::build_with_evaluation(&mut *conn, profile_id, opts.as_of, None).await?;
+    let (body, ev) = crate::evaluate_state(&mut *conn, profile_id, opts.as_of, None).await?;
     let rendered = render_with(&pack, &body, lang, "as_reported", "full", Some(scopes))?;
     let allowed = |s: &str| scopes.contains(s);
     let (labs_ok, records_ok, genome_ok) = (allowed("read:labs"), allowed("read:records"), allowed("read:genome"));
@@ -828,7 +850,7 @@ pub async fn build_for(
     let ids = cited(&model);
     model["sources"] = json!(sources(&mut *conn, &ids, &l).await?);
     model["labels"] = Value::Object(l);
-    Ok(model)
+    Ok((model, body))
 }
 
 /// The src ids a model cites (rows, flags, markers and their previous values), first-seen order.

@@ -6,6 +6,7 @@
 
 use std::net::IpAddr;
 
+use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgConnection;
@@ -79,12 +80,18 @@ pub fn hash_arg(value: &str) -> String {
 }
 
 pub async fn write_audit(conn: &mut PgConnection, e: &AuditEvent) -> Result<i64> {
+    write_audit_at(conn, e, None).await
+}
+
+/// `write_audit` with the row's time given: a read done in an earlier transaction is logged at the
+/// moment that read began (`at`), not at the moment its row is written. `None` is now().
+pub async fn write_audit_at(conn: &mut PgConnection, e: &AuditEvent, at: Option<DateTime<Utc>>) -> Result<i64> {
     let ip = parse_ip(e.ip.as_deref()).map(|a| a.to_string());
     Ok(sqlx::query_scalar(
         "insert into audit_event (actor_kind, actor_id, token_id, client, via, action, tool, profile_id, \
          resource_type, resource_ids, src_ids, args_summary, result_kind, rows_out, bytes_out, withheld, \
-         protocol_version, ip, user_agent) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-         $15, $16, $17, cast($18 as inet), $19) returning id",
+         protocol_version, ip, user_agent, ts) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, \
+         $14, $15, $16, $17, cast($18 as inet), $19, coalesce($20, now())) returning id",
     )
     .bind(&e.actor_kind)
     .bind(e.actor_id)
@@ -105,6 +112,7 @@ pub async fn write_audit(conn: &mut PgConnection, e: &AuditEvent) -> Result<i64>
     .bind(&e.protocol_version)
     .bind(ip)
     .bind(&e.user_agent)
+    .bind(at)
     .fetch_one(conn)
     .await?)
 }

@@ -62,10 +62,18 @@ async fn model(s: &Seeded, pid: Uuid, scopes: &Scopes, o: &Options) -> anyhow::R
 
 async fn model_as(s: &Seeded, viewer: &str, pid: Uuid, scopes: &Scopes, o: &Options) -> anyhow::Result<Value> {
     let viewer = session(s, viewer).await?;
-    let mut tx = s.pool().begin().await?;
-    let m = summary::build_for(&mut tx, Some(&viewer), pid, scopes, o).await?;
+    let mut tx = read_only(s).await?;
+    let (m, _) = summary::read_for(&mut tx, Some(&viewer), pid, scopes, o).await?;
     tx.commit().await?;
     Ok(m)
+}
+
+/// A REPEATABLE READ, READ ONLY transaction: the sheet's read path writes nothing, so a write
+/// added to any specialty's sheet fails these tests, not a print.
+async fn read_only(s: &Seeded) -> anyhow::Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+    Ok(s.pool()
+        .begin_with("begin isolation level repeatable read, read only")
+        .await?)
 }
 
 fn condition(kind: &str, onset_age: i32) -> FamilyCondition {
@@ -724,8 +732,8 @@ async fn a_relative_linked_to_a_profile_the_viewer_cannot_read_feeds_no_pattern(
     assert_eq!(rules(&by_alex), ["fam.ascvd"]);
     let by_sam = model_as(&s, "sam", s.pid("lucia"), &all_scopes(), &o).await?;
     assert_eq!(rules(&by_sam), Vec::<String>::new());
-    let mut tx = s.pool().begin().await?;
-    let none = summary::build(&mut tx, s.pid("lucia"), &all_scopes(), &o).await?;
+    let mut tx = read_only(&s).await?;
+    let (none, _) = summary::read_for(&mut tx, None, s.pid("lucia"), &all_scopes(), &o).await?;
     tx.commit().await?;
     assert_eq!(rules(&none), Vec::<String>::new());
     // without read:records there is no family or due slot; without read:labs no calculators
