@@ -127,8 +127,8 @@ debug = false
 opt-level = 3
 
 # The OCR eval set (ownhealth-ocr tests/eval) draws, tilts, blurs, JPEG-encodes and deflates 40+ pages
-# at 200 dpi. Unoptimised, ocr_off spent 6 minutes there; these settings cut it to well under one.
-# Same arithmetic, so the same bytes: no golden or test outcome changes.
+# at 200 dpi. ocr_off took 371 s on CI unoptimised and 44 to 55 s with these settings (214 s and 34 s
+# on a local arm64 build). IEEE arithmetic with no fast-math at any opt-level, so no test outcome changes.
 [profile.dev.package.image]
 opt-level = 3
 [profile.dev.package.zune-jpeg]
