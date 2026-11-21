@@ -53,11 +53,88 @@ impl IntoResponse for Fail {
     fn into_response(self) -> Response {
         match self {
             Fail::Api(e) => e.into_response(),
-            Fail::Invalid(errors) => {
+            Fail::Invalid(mut errors) => {
+                errors.iter_mut().for_each(redact_entry);
                 (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"detail": errors}))).into_response()
             }
         }
     }
+}
+
+/// The words that make a field secret: a field named with one of them (`password`, `new_password`,
+/// `api_token`, `pinCode`) is never repeated in a 422, on any route.
+const SECRET_WORDS: [&str; 5] = ["passcode", "password", "pin", "secret", "token"];
+
+/// True when a field name holds one of SECRET_WORDS as a word (split at `_`, `-` and lower-to-upper).
+fn is_secret_field(name: &str) -> bool {
+    let mut words: Vec<String> = vec![String::new()];
+    let mut prev_lower = false;
+    for ch in name.chars() {
+        if !ch.is_ascii_alphanumeric() {
+            words.push(String::new());
+            prev_lower = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && prev_lower {
+            words.push(String::new());
+        }
+        prev_lower = ch.is_ascii_lowercase();
+        if let Some(w) = words.last_mut() {
+            w.push(ch.to_ascii_lowercase());
+        }
+    }
+    words.iter().any(|w| SECRET_WORDS.contains(&w.as_str()))
+}
+
+/// Remove every secret field from a value, at any depth, and collect what they held.
+fn strip_secrets(v: &mut Value, found: &mut Vec<Value>) {
+    match v {
+        Value::Object(m) => {
+            let keys: Vec<String> = m.keys().filter(|k| is_secret_field(k)).cloned().collect();
+            for k in keys {
+                if let Some(x) = m.remove(&k) {
+                    found.push(x);
+                }
+            }
+            m.values_mut().for_each(|x| strip_secrets(x, found));
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| strip_secrets(x, found)),
+        _ => {}
+    }
+}
+
+/// One 422 entry without a secret in it: an entry about a secret field loses its input, a body
+/// echoed as input loses its secret fields, and a message that quotes a secret value (serde names
+/// the value of a field of the wrong type) quotes `[redacted]` instead.
+fn redact_entry(e: &mut Value) {
+    let about_secret = e["loc"]
+        .as_array()
+        .and_then(|l| l.last())
+        .and_then(Value::as_str)
+        .is_some_and(is_secret_field);
+    let mut found = Vec::new();
+    if let Some(input) = e.get_mut("input") {
+        if about_secret {
+            found.push(std::mem::replace(input, Value::Null));
+        } else {
+            strip_secrets(input, &mut found);
+        }
+    }
+    let Some(msg) = e["msg"].as_str() else { return };
+    let mut clean = msg.to_string();
+    for v in found.iter().filter_map(|v| match v {
+        Value::String(t) => Some(t.clone()),
+        Value::Number(_) | Value::Bool(_) => Some(v.to_string()),
+        _ => None,
+    }) {
+        if v.is_empty() {
+            continue;
+        }
+        for quoted in [format!("{v:?}"), format!("\"{v}\""), format!("`{v}`"), format!("'{v}'")] {
+            clean = clean.replace(&quoted, "\"[redacted]\"");
+        }
+    }
+    e["msg"] = json!(clean);
 }
 
 impl From<ApiError> for Fail {
@@ -1513,6 +1590,53 @@ pub fn router() -> Router<Runtime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_422_entry_never_carries_a_secret() {
+        for name in [
+            "passcode",
+            "password",
+            "new_password",
+            "api_token",
+            "pinCode",
+            "client-secret",
+            "PIN",
+        ] {
+            assert!(is_secret_field(name), "{name}");
+        }
+        for name in ["name", "pinned", "spinner", "days", "tokenizer", "passwordless"] {
+            assert!(!is_secret_field(name), "{name}");
+        }
+        let mut body = error_entry(
+            "value_error",
+            vec![json!("body")],
+            "invalid type: integer `55214455`, expected a string",
+            json!({"name": "x", "password": 55_214_455, "more": [{"api_token": "t-1"}]}),
+            None,
+        );
+        redact_entry(&mut body);
+        assert_eq!(body["input"], json!({"name": "x", "more": [{}]}));
+        assert_eq!(body["msg"], "invalid type: integer \"[redacted]\", expected a string");
+        let mut field = error_entry(
+            "string_too_long",
+            vec![json!("body"), json!("password")],
+            "too long",
+            json!("hunter2"),
+            None,
+        );
+        redact_entry(&mut field);
+        assert_eq!(field["input"], Value::Null);
+        // a field that is not secret comes back as it was
+        let mut plain = error_entry(
+            "literal_error",
+            vec![json!("body"), json!("lang")],
+            "bad",
+            json!("fr"),
+            None,
+        );
+        redact_entry(&mut plain);
+        assert_eq!(plain["input"], "fr");
+    }
 
     fn xff(v: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
