@@ -516,8 +516,8 @@ pub async fn build(
     Ok(ips)
 }
 
-/// `build` without its one write: the Bundle, and the state body it was read from for the caller
-/// to store (`store_snapshot`) once a read-only transaction (`summary::begin_read`) is over.
+/// `build` without its one write: the Bundle, and the state body it was read from. The caller
+/// stores the body with `store_read_snapshot` in the same transaction (`summary::begin_read`).
 pub async fn read(
     conn: &mut PgConnection,
     profile_id: Uuid,

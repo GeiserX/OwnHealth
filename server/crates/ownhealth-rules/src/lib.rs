@@ -177,6 +177,33 @@ pub async fn store_snapshot(conn: &mut PgConnection, profile_id: Uuid, body: &Va
     Ok(row.is_some())
 }
 
+/// Store the body that a REPEATABLE READ transaction read, unless another transaction stored the
+/// day's row after this one's snapshot began. Postgres then refuses the upsert with 40001 (or
+/// 23505 on a first insert of the day), so the newer row stays and a late print never writes over
+/// it. A savepoint keeps the transaction usable for its audit row; any other error is returned.
+pub async fn store_read_snapshot(conn: &mut PgConnection, profile_id: Uuid, body: &Value) -> Result<()> {
+    let pack = load_pack()?;
+    sqlx::query("savepoint read_snapshot").execute(&mut *conn).await?;
+    match store_snapshot(&mut *conn, profile_id, body, &pack).await {
+        Err(Error::Db(e))
+            if e.as_database_error()
+                .and_then(|d| d.code())
+                .is_some_and(|c| c == "40001" || c == "23505") =>
+        {
+            sqlx::query("rollback to savepoint read_snapshot")
+                .execute(&mut *conn)
+                .await?;
+        }
+        stored => {
+            stored?;
+        }
+    }
+    sqlx::query("release savepoint read_snapshot")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 /// The body and the evaluation behind it: the dashboard renders from the same evaluation the hash
 /// covers. Stores the snapshot for the current view (`known_at` None).
 pub async fn build_with_evaluation(
@@ -192,8 +219,8 @@ pub async fn build_with_evaluation(
     Ok((body, ev))
 }
 
-/// `build_with_evaluation` without its write: a read-only transaction can run it, and the caller
-/// stores the body (`store_snapshot`) once that transaction is over.
+/// `build_with_evaluation` without its write: the caller reads the whole sheet first, then stores
+/// the body (`store_read_snapshot`) in the same transaction.
 pub async fn evaluate_state(
     conn: &mut PgConnection,
     profile_id: Uuid,

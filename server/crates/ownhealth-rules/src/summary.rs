@@ -650,15 +650,14 @@ pub async fn build_for(
 }
 
 /// A transaction that reads one sheet from one snapshot: REPEATABLE READ, so a correction saved
-/// during the print shows on all of the sheet or none of it, and READ ONLY, so nothing is written
-/// in it (`read_for`, then the audit row and `store_snapshot` in a transaction of their own).
+/// during the print shows on all of the sheet or none of it. The sheet's writes come last in it
+/// (`store_read_snapshot`, then the audit row), so the audit row carries the time the read began.
 pub async fn begin_read(pool: &PgPool) -> sqlx::Result<Transaction<'static, Postgres>> {
-    pool.begin_with("begin isolation level repeatable read, read only")
-        .await
+    pool.begin_with("begin isolation level repeatable read").await
 }
 
-/// `build_for` without its one write: the model, and the state body it was read from for the
-/// caller to store (`store_snapshot`) once a read-only transaction (`begin_read`) is over.
+/// `build_for` without its one write: the model, and the state body it was read from. The caller
+/// stores the body with `store_read_snapshot` in the same transaction (`begin_read`).
 pub async fn read_for(
     conn: &mut PgConnection,
     viewer: Option<&Principal>,

@@ -6,6 +6,8 @@
 mod support;
 
 use axum::http::StatusCode;
+use chrono::{DateTime, Utc};
+use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::provenance::{SrcIn, SrcRef};
 use ownhealth_core::records::{RecordIn, RecordOptions, add_record};
 use ownhealth_genome::synthetic;
@@ -237,73 +239,160 @@ async fn wait_for_a_lock_on(pool: &sqlx::PgPool, table: &str) -> R {
 
 const VACCINE: &str = "Tetanus booster 7f3a";
 const PROCEDURE: &str = "Knee arthroscopy 7f3a";
+/// A condition is part of the hashed state, so the correction moves the state hash.
+const CONDITION: &str = "Asthma 7f3a";
+const PRINT: &str = "POST /api/profiles/{p}/summary.pdf";
+const IPS: &str = "POST /api/profiles/export";
 
-/// Alex asks for `path` while a correction is saved: the request reads the vaccines, then waits to
-/// read the procedures (another writer holds that table); meanwhile a vaccine and a procedure are
-/// saved in one transaction, which then commits and lets the request go on.
-async fn ask_during_a_correction(
-    env: &Env,
-    alex: &mut support::Client,
-    path: &str,
-    body: &Value,
-) -> anyhow::Result<Vec<u8>> {
-    let (pool, pid, by) = (env.pool().clone(), env.profile("alex"), env.user("alex"));
-    let mut other = pool.begin().await?;
-    sqlx::query("lock table procedure in access exclusive mode")
-        .execute(&mut *other)
-        .await?;
-    let correct = async move {
-        wait_for_a_lock_on(&pool, "procedure").await?;
-        let src = SrcRef::New(SrcIn {
-            profile_id: Some(pid),
-            ..SrcIn::manual(Some(by))
-        });
-        for (kind, row) in [
-            (
-                "immunization",
-                json!({"profile_id": pid, "vaccine": VACCINE, "occurred": "2026-11-02"}),
-            ),
-            (
-                "procedure",
-                json!({"profile_id": pid, "text": PROCEDURE, "performed": "2026-11-02"}),
-            ),
-        ] {
-            add_record(
-                &mut other,
-                &RecordIn::from_json(kind, row)?,
-                &src,
-                RecordOptions::new("person"),
-            )
-            .await?;
-        }
-        other.commit().await?;
-        anyhow::Ok(())
-    };
-    let (asked, saved) = tokio::join!(alex.post(path, body), correct);
-    saved?;
-    let asked = asked?;
-    assert_eq!(asked.status, StatusCode::OK, "{:?}", asked.json);
-    Ok(asked.bytes)
+/// What else happens while the request waits.
+#[derive(Clone, Copy, PartialEq)]
+enum Meanwhile {
+    Nothing,
+    /// A reader saves the corrected state over the day's older row, as a dashboard view does.
+    StoreOverAnOlderRow,
+    /// The same, when the day has no row yet.
+    StoreTheFirstRow,
 }
 
-/// The hash the newest audit row of `tool` names is the hash of a stored state.
-async fn the_state_named_is_stored(env: &Env, tool: &str) -> R {
-    let hash: Vec<String> =
-        sqlx::query_scalar("select resource_ids from audit_event where tool = $1 order by id desc limit 1")
+/// What a request asked during a correction left behind.
+struct Race {
+    bytes: Vec<u8>,
+    /// The state hash and time of the request's audit row.
+    hash: String,
+    at: DateTime<Utc>,
+    /// The time of the correction's audit row.
+    corrected_at: DateTime<Utc>,
+    /// The hash the reader stored during the wait.
+    newer: Option<String>,
+}
+
+fn hex(hash: &str) -> &str {
+    hash.split_once(':').map_or(hash, |(_, x)| x)
+}
+
+/// The hash of the profile's newest stored state.
+async fn stored(env: &Env, slug: &str) -> anyhow::Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "select encode(state_hash, 'hex') from state_snapshot where profile_id = $1 order by as_of desc limit 1",
+    )
+    .bind(env.profile(slug))
+    .fetch_optional(env.pool())
+    .await?)
+}
+
+/// The state hash and time of the newest audit row of `tool`.
+async fn last_audit(env: &Env, tool: &str) -> anyhow::Result<(String, DateTime<Utc>)> {
+    let (ids, at): (Vec<String>, DateTime<Utc>) =
+        sqlx::query_as("select resource_ids, ts from audit_event where tool = $1 order by id desc limit 1")
             .bind(tool)
             .fetch_one(env.pool())
             .await?;
-    let hex = hash[0].split_once(':').map_or(hash[0].as_str(), |(_, x)| x);
-    let stored: i64 = sqlx::query_scalar("select count(*) from state_snapshot where encode(state_hash, 'hex') = $1")
-        .bind(hex)
-        .fetch_one(env.pool())
-        .await?;
-    assert_eq!(stored, 1, "state {hash:?} is stored");
-    Ok(())
+    Ok((ids[0].clone(), at))
 }
 
-/// A correction saved while a sheet prints lands on all of the sheet or on none of it: the sheet
-/// holds the state from when the print began, and the next print shows the correction.
+/// Alex asks for `path` while a correction is saved. The request reads the vaccines, then waits to
+/// read the procedures, because another writer holds that table. Meanwhile a vaccine and a
+/// condition are saved with their audit row, then the procedure lands and the lock goes.
+async fn ask_during_a_correction(
+    env: &Env,
+    alex: &mut support::Client,
+    (path, tool): (&str, &str),
+    body: &Value,
+    meanwhile: Meanwhile,
+) -> anyhow::Result<Race> {
+    let (pool, pid, by) = (env.pool().clone(), env.profile("alex"), env.user("alex"));
+    let today = ownhealth_core::access::today_utc();
+    match meanwhile {
+        Meanwhile::Nothing => {}
+        Meanwhile::StoreOverAnOlderRow => {
+            ownhealth_rules::build_state(&mut *pool.acquire().await?, pid, today, None).await?;
+            anyhow::ensure!(stored(env, "alex").await?.is_some(), "the day has a row");
+        }
+        Meanwhile::StoreTheFirstRow => {
+            sqlx::query("delete from state_snapshot where profile_id = $1")
+                .bind(pid)
+                .execute(&pool)
+                .await?;
+        }
+    }
+    let src = SrcRef::New(SrcIn {
+        profile_id: Some(pid),
+        ..SrcIn::manual(Some(by))
+    });
+    let add = async |conn: &mut sqlx::PgConnection, kind: &str, row: Value| -> R {
+        add_record(
+            conn,
+            &RecordIn::from_json(kind, row)?,
+            &src,
+            RecordOptions::new("person"),
+        )
+        .await?;
+        Ok(())
+    };
+    let mut lock = pool.begin().await?;
+    sqlx::query("lock table procedure in access exclusive mode")
+        .execute(&mut *lock)
+        .await?;
+    let correct = async {
+        wait_for_a_lock_on(&pool, "procedure").await?;
+        let mut c = pool.begin().await?;
+        add(
+            &mut c,
+            "immunization",
+            json!({"profile_id": pid, "vaccine": VACCINE, "occurred": "2026-11-02"}),
+        )
+        .await?;
+        let condition =
+            json!({"profile_id": pid, "text": CONDITION, "onset": "2026-11-02", "verification_status": "confirmed"});
+        add(&mut c, "condition", condition).await?;
+        let id = write_audit(
+            &mut c,
+            &AuditEvent {
+                actor_id: Some(by),
+                profile_id: Some(pid),
+                tool: Some("correction".into()),
+                ..AuditEvent::new("user", "ui", "write")
+            },
+        )
+        .await?;
+        let corrected_at: DateTime<Utc> = sqlx::query_scalar("select ts from audit_event where id = $1")
+            .bind(id)
+            .fetch_one(&mut *c)
+            .await?;
+        c.commit().await?;
+        let newer = match meanwhile {
+            Meanwhile::Nothing => None,
+            _ => {
+                let state = ownhealth_rules::build_state(&mut *pool.acquire().await?, pid, today, None).await?;
+                Some(state["state_hash"].as_str().unwrap_or_default().to_string())
+            }
+        };
+        add(
+            &mut lock,
+            "procedure",
+            json!({"profile_id": pid, "text": PROCEDURE, "performed": "2026-11-02"}),
+        )
+        .await?;
+        lock.commit().await?;
+        anyhow::Ok((corrected_at, newer))
+    };
+    let (asked, saved) = tokio::join!(alex.post(path, body), correct);
+    let (corrected_at, newer) = saved?;
+    let asked = asked?;
+    assert_eq!(asked.status, StatusCode::OK, "{:?}", asked.json);
+    let (hash, at) = last_audit(env, tool).await?;
+    Ok(Race {
+        bytes: asked.bytes,
+        hash,
+        at,
+        corrected_at,
+        newer,
+    })
+}
+
+/// A correction saved while a sheet prints lands on all of the sheet or on none of it. The sheet
+/// holds the state from when the print began, and its audit row says so: it is older than the
+/// correction's row. That state is the one stored, and the next print shows the correction.
 #[tokio::test]
 async fn a_correction_saved_during_a_print_never_mixes_two_states_on_one_sheet() -> R {
     let env = env().await?;
@@ -313,18 +402,32 @@ async fn a_correction_saved_during_a_print_never_mixes_two_states_on_one_sheet()
         json!({"lang": "en", "specialty": "gp"}),
     );
     let shows = |text: &[String], what: &str| text.iter().any(|l| l.contains(what));
-    let text = lines(&ask_during_a_correction(&env, &mut alex, path, &body).await?);
-    let (vaccine, procedure) = (shows(&text, VACCINE), shows(&text, PROCEDURE));
-    assert_eq!(vaccine, procedure, "one state on the sheet: {text:#?}");
-    assert!(
-        !vaccine,
-        "the sheet shows the state from when the print began: {text:#?}"
+    let race = ask_during_a_correction(&env, &mut alex, (path, PRINT), &body, Meanwhile::Nothing).await?;
+    let text = lines(&race.bytes);
+    let parts = [VACCINE, CONDITION, PROCEDURE].map(|w| shows(&text, w));
+    assert_eq!(
+        parts, [false; 3],
+        "one state on the sheet, from when the print began: {text:#?}"
     );
-    the_state_named_is_stored(&env, "POST /api/profiles/{p}/summary.pdf").await?;
-    let text = lines(&alex.post(path, &body).await?.bytes);
     assert!(
-        shows(&text, VACCINE) && shows(&text, PROCEDURE),
+        race.at < race.corrected_at,
+        "the print is logged before the correction it does not show"
+    );
+    assert_eq!(
+        stored(&env, "alex").await?.as_deref(),
+        Some(hex(&race.hash)),
+        "the state read is the state stored"
+    );
+    let text = lines(&alex.post(path, &body).await?.bytes);
+    assert_eq!(
+        [VACCINE, CONDITION, PROCEDURE].map(|w| shows(&text, w)),
+        [true; 3],
         "the next print shows the correction: {text:#?}"
+    );
+    assert_ne!(
+        last_audit(&env, PRINT).await?.0,
+        race.hash,
+        "the correction moved the state"
     );
     Ok(())
 }
@@ -336,40 +439,85 @@ async fn a_correction_saved_during_an_ips_export_never_mixes_two_states() -> R {
     let mut alex = env.as_user(env.user("alex")).await?;
     let (path, body) = ("/api/profiles/alex/export", json!({"fmt": "ips", "lang": "en"}));
     let has = |bytes: &[u8], what: &str| String::from_utf8_lossy(bytes).contains(what);
-    let bundle = ask_during_a_correction(&env, &mut alex, path, &body).await?;
+    let race = ask_during_a_correction(&env, &mut alex, (path, IPS), &body, Meanwhile::Nothing).await?;
+    let parts = [VACCINE, CONDITION, PROCEDURE].map(|w| has(&race.bytes, w));
+    assert_eq!(parts, [false; 3], "one state in the Bundle, from when the export began");
+    assert!(
+        race.at < race.corrected_at,
+        "the export is logged before the correction it does not show"
+    );
     assert_eq!(
-        has(&bundle, VACCINE),
-        has(&bundle, PROCEDURE),
-        "one state in the Bundle"
+        stored(&env, "alex").await?.as_deref(),
+        Some(hex(&race.hash)),
+        "the state read is the state stored"
     );
-    assert!(
-        !has(&bundle, VACCINE),
-        "the Bundle holds the state from when the export began"
-    );
-    the_state_named_is_stored(&env, "POST /api/profiles/export").await?;
     let bundle = alex.post(path, &body).await?.bytes;
-    assert!(
-        has(&bundle, VACCINE) && has(&bundle, PROCEDURE),
+    assert_eq!(
+        [VACCINE, CONDITION, PROCEDURE].map(|w| has(&bundle, w)),
+        [true; 3],
         "the next export shows the correction"
+    );
+    assert_ne!(
+        last_audit(&env, IPS).await?.0,
+        race.hash,
+        "the correction moved the state"
     );
     Ok(())
 }
 
-/// The sheet's transaction is one snapshot that cannot write: a write inside it fails.
+/// A print that read an older state never stores it over a newer one saved while it waited.
+async fn a_newer_state_is_kept(path: &str, tool: &str, body: Value, meanwhile: Meanwhile) -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let race = ask_during_a_correction(&env, &mut alex, (path, tool), &body, meanwhile).await?;
+    let newer = race.newer.unwrap_or_default();
+    assert_ne!(newer, race.hash, "the reader saved the corrected state");
+    assert_eq!(
+        stored(&env, "alex").await?.as_deref(),
+        Some(hex(&newer)),
+        "the newer state stays stored"
+    );
+    Ok(())
+}
+
 #[tokio::test]
-async fn the_sheet_is_read_in_a_repeatable_read_read_only_transaction() -> R {
+async fn a_newer_state_saved_during_a_print_is_kept() -> R {
+    let body = json!({"lang": "en", "specialty": "gp"});
+    a_newer_state_is_kept(
+        "/api/profiles/alex/summary.pdf",
+        PRINT,
+        body,
+        Meanwhile::StoreOverAnOlderRow,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_first_state_of_the_day_saved_during_a_print_is_kept() -> R {
+    let body = json!({"lang": "en", "specialty": "gp"});
+    a_newer_state_is_kept(
+        "/api/profiles/alex/summary.pdf",
+        PRINT,
+        body,
+        Meanwhile::StoreTheFirstRow,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_newer_state_saved_during_an_ips_export_is_kept() -> R {
+    let body = json!({"fmt": "ips", "lang": "en"});
+    a_newer_state_is_kept("/api/profiles/alex/export", IPS, body, Meanwhile::StoreOverAnOlderRow).await
+}
+
+/// The sheet is read from one snapshot: its transaction is REPEATABLE READ.
+#[tokio::test]
+async fn the_sheet_is_read_in_a_repeatable_read_transaction() -> R {
     let env = Env::new(true).await?;
     let mut tx = ownhealth_rules::summary::begin_read(env.pool()).await?;
-    let (isolation, read_only): (String, String) =
-        sqlx::query_as("select current_setting('transaction_isolation'), current_setting('transaction_read_only')")
-            .fetch_one(&mut *tx)
-            .await?;
-    assert_eq!((isolation.as_str(), read_only.as_str()), ("repeatable read", "on"));
-    let err = sqlx::query("update profile set display_name = display_name")
-        .execute(&mut *tx)
-        .await
-        .expect_err("a write in the sheet's transaction");
-    let code = err.as_database_error().and_then(|e| e.code()).map(|c| c.to_string());
-    assert_eq!(code.as_deref(), Some("25006"), "read_only_sql_transaction: {err}");
+    let isolation: String = sqlx::query_scalar("select current_setting('transaction_isolation')")
+        .fetch_one(&mut *tx)
+        .await?;
+    assert_eq!(isolation, "repeatable read");
     Ok(())
 }
