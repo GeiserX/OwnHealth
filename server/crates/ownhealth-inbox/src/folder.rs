@@ -176,20 +176,18 @@ pub async fn forget_folders(
     if folders.is_empty() {
         return folders;
     }
-    let live: sqlx::Result<(Vec<Uuid>, Vec<(Uuid, serde_json::Value)>)> = async {
-        let named = sqlx::query_scalar("select household_id from profile where slug = $1")
-            .bind(slug)
+    // the households with a profile of that short name, and every folder inbox with its household
+    let named: sqlx::Result<Vec<Uuid>> = sqlx::query_scalar("select household_id from profile where slug = $1")
+        .bind(slug)
+        .fetch_all(pool)
+        .await;
+    let readers: sqlx::Result<Vec<(Uuid, serde_json::Value)>> =
+        sqlx::query_as("select household_id, config from source where kind = 'folder'")
             .fetch_all(pool)
-            .await?;
-        let readers = sqlx::query_as("select household_id, config from source where kind = 'folder'")
-            .fetch_all(pool)
-            .await?;
-        Ok((named, readers))
-    }
-    .await;
-    let (named, readers) = match live {
-        Ok(live) => live,
-        Err(e) => {
+            .await;
+    let (named, readers) = match (named, readers) {
+        (Ok(named), Ok(readers)) => (named, readers),
+        (Err(e), _) | (_, Err(e)) => {
             tracing::warn!(error = %e, "could not check who uses the folders now: a job retries them");
             return folders;
         }
