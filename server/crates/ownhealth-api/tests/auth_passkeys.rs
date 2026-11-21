@@ -530,3 +530,17 @@ async fn a_422_hides_a_secret_field_in_any_spelling() -> R {
     assert_eq!(r.json["detail"][0]["input"], json!({"name": 7}), "{:?}", r.json);
     Ok(())
 }
+
+/// A body that is not a JSON object is never sent back: it may be a password or a code typed alone.
+#[tokio::test]
+async fn a_422_never_repeats_a_body_that_is_not_an_object() -> R {
+    let env = Env::new(false).await?;
+    let mut c = env.anon_at(LAN);
+    let secret = "test-value-ffff-gggg";
+    for body in [json!(secret), json!([secret]), json!([{"password": secret}])] {
+        let r = c.post("/api/auth/password/login", &body).await?;
+        assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+        assert!(!r.json.to_string().contains(secret), "{:?}", r.json);
+    }
+    Ok(())
+}

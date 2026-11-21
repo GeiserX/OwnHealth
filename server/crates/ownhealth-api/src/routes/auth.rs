@@ -443,7 +443,8 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
                 "model_attributes_type",
                 vec![json!("body")],
                 "Input should be a valid dictionary or object to extract fields from",
-                value,
+                // never sent back: a body that is not an object may be a password or a code alone
+                Value::Null,
                 None,
             )]));
         }
