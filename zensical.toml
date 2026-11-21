@@ -113,6 +113,12 @@ nav = [
     { "Genome data in OwnHealth" = "design/genomics.md" },
     { "Security, privacy and regulation" = "design/security-privacy.md" },
   ] },
+  # Home page proposals. The picked one becomes index.md with a plain
+  # `git mv`; the other file and this section go in the same commit.
+  { "Home proposals" = [
+    { "Home B: docs first" = "home-b.md" },
+    { "Home C: you and your agent" = "home-c.md" },
+  ] },
 ]
 
 # Both are Zensical's defaults; written out so a future default change cannot
