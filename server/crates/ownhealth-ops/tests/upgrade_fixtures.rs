@@ -219,6 +219,22 @@ async fn upgrade(version: &str) -> anyhow::Result<()> {
         "{version}: the fixture has no observations: {truth_before:?}"
     );
     let refs_before = referenced_blobs(&mut c).await?;
+    // audit rows in the shape every old release wrote (the fixtures hold none), so the upgrade
+    // links real values: addresses, arrays, a withheld object and odd text. Synthetic only.
+    sqlx::raw_sql(
+        r#"insert into audit_event (actor_kind, actor_id, token_id, client, via, action, tool, profile_id,
+           resource_type, resource_ids, src_ids, args_summary, result_kind, rows_out, bytes_out, withheld,
+           protocol_version, ip, user_agent) values
+           ('token', gen_random_uuid(), gen_random_uuid(), 'Claude Code', 'mcp', 'read', 'get_health_status',
+            gen_random_uuid(), 'observation', array['obs-1', 'obs-2'], array['src_a12'], 'h:0123456789ab', 'ok', 2,
+            512, '{"minor": 1, "sensitive": ["genome"]}', '2025-11-25', '2001:db8::7', 'agente "ñ" \ ¿'),
+           ('user', gen_random_uuid(), null, null, 'export', 'export', 'POST /api/profiles/export', gen_random_uuid(),
+            null, null, null, null, 'ok', 40, 81920, null, null, '10.0.0.7', 'Navegador'),
+           ('system', null, null, null, 'job', 'purge', null, null, null, null, null, null, 'error', null, null,
+            null, null, null, null)"#,
+    )
+    .execute(&mut *c)
+    .await?;
     drop(c);
 
     let all = embedded()?;
@@ -234,6 +250,15 @@ async fn upgrade(version: &str) -> anyhow::Result<()> {
         .await?;
     let head: Vec<i32> = all.iter().map(|m| m.version).collect();
     assert_eq!(applied, head, "{version}: not every HEAD migration is applied");
+
+    // every audit row the old release wrote is linked, and the chain holds
+    let (events, links): (i64, i64) =
+        sqlx::query_as("select (select count(*) from audit_event), (select count(*) from audit_chain)")
+            .fetch_one(&mut *c)
+            .await?;
+    assert_eq!((events, links), (3, 3), "{version}: audit rows and chain links");
+    let chain = ownhealth_core::audit::verify_chain(&mut c).await?;
+    assert!(chain.ok() && chain.verified == 3, "{version}: {chain:?}");
 
     let truth_after = truth(&mut c, Some(&truth_before)).await?;
     for (table, before) in &truth_before {
