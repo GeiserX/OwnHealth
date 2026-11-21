@@ -29,7 +29,9 @@ use ownhealth_core::arrive::{Arrival, Arrived, arrive};
 use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::config::Settings;
 use ownhealth_core::error::{Error, Result};
-use ownhealth_core::jobs::{JobContext, JobError};
+use ownhealth_core::jobs::{
+    EnqueueOptions, HandlerResult, Job, JobContext, JobError, enqueue, register_handler,
+};
 use ownhealth_core::sources::{RunOutcome, RunProblem, Source};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -104,6 +106,91 @@ pub fn forget_profile(settings: &Settings, config: &serde_json::Value, slug: &st
         }
     }
     first.map_or(Ok(()), |e| Err(e.into()))
+}
+
+/// The job that retries removing a deleted profile's files from the folder inboxes when the first try
+/// after the delete failed (a busy or read-only disk).
+pub const FORGET_JOB: &str = "folder.forget";
+
+/// Queue the retry of [`forget_profile`] for each folder inbox (its settings, and whether it was the
+/// profile's own), in the delete's own transaction. It waits a minute, so the delete's own try comes
+/// first; the caller then drops it, or keeps it when a folder could not be cleaned. The payload holds the
+/// household (a retry that runs out of attempts shows in its review queue), the short name and the
+/// inbox settings, never a file name.
+pub async fn queue_forget(
+    conn: &mut sqlx::PgConnection,
+    household_id: Uuid,
+    slug: &str,
+    folders: &[(serde_json::Value, bool)],
+) -> Result<Option<i64>> {
+    let folders: Vec<serde_json::Value> = folders
+        .iter()
+        .map(|(config, own)| serde_json::json!({"config": config, "own": own}))
+        .collect();
+    Ok(enqueue(
+        conn,
+        FORGET_JOB,
+        &serde_json::json!({"household_id": household_id, "slug": slug, "folders": folders}),
+        EnqueueOptions {
+            run_after: Some(chrono::Utc::now() + chrono::Duration::seconds(60)),
+            ..EnqueueOptions::default()
+        },
+    )
+    .await?)
+}
+
+/// Run [`forget_profile`] on each folder inbox off the async runtime; returns the ones that failed.
+pub async fn forget_folders(
+    settings: &Settings,
+    slug: &str,
+    folders: Vec<(serde_json::Value, bool)>,
+) -> Vec<(serde_json::Value, bool)> {
+    let mut failed = Vec::new();
+    for (config, own) in folders {
+        let (s, c, sl) = (settings.clone(), config.clone(), slug.to_string());
+        match tokio::task::spawn_blocking(move || forget_profile(&s, &c, &sl, own)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "removing a deleted profile's folder failed: a job retries it");
+                failed.push((config, own));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "removing a deleted profile's folder failed: a job retries it");
+                failed.push((config, own));
+            }
+        }
+    }
+    failed
+}
+
+async fn forget_job(ctx: JobContext, job: Job) -> HandlerResult {
+    // The demo never reads a folder, and its stack shares the inbox folder with the real install.
+    if ctx.settings.demo {
+        return Ok(Some(serde_json::json!({"skipped": "demo"})));
+    }
+    let slug = job.payload.get("slug").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let folders: Vec<(serde_json::Value, bool)> = job
+        .payload
+        .get("folders")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|f| {
+                    let own = f.get("own").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                    (f.get("config").cloned().unwrap_or_default(), own)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let n = folders.len();
+    let failed = forget_folders(&ctx.settings, slug, folders).await;
+    if !failed.is_empty() {
+        return Err(JobError::retry(format!(
+            "{} folder inboxes could not be cleaned yet",
+            failed.len()
+        )));
+    }
+    Ok(Some(serde_json::json!({"folders": n})))
 }
 
 /// Remove `root/<parts>` without following a link: a link among the parents stops it, and a link at
@@ -666,6 +753,7 @@ fn demo_hook<'c>(
 
 pub fn register() {
     ownhealth_core::sources::register_poller("folder", |ctx, source| Box::pin(poll_folder(ctx, source)));
+    register_handler(FORGET_JOB, |ctx, job| Box::pin(forget_job(ctx, job)));
     ownhealth_core::demo::register_demo_hook("inbox_folder", 1020, demo_hook);
 }
 

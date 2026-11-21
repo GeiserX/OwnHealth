@@ -694,10 +694,23 @@ async fn put_sensitive(
 
 // ------------------------------------------------------------------- deletion ----
 
-/// Own transaction, so the blob files go only after the rows are gone for good.
+/// Own transaction, so the blob files go only after the rows are gone for good. The retries of the files
+/// and folders that cannot go at once are queued in it too, so they survive a crash after the commit.
 async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug: &str) -> R<Value> {
     let mut tx = rt.pool.begin().await?;
     let result: Deleted = household::delete_profile(&mut tx, profile_id).await.map_err(fail)?;
+    // The profile's drops and filed copies in the folder inboxes. The demo never reads a folder, and
+    // its stack shares the inbox folder with the real install, so a demo delete leaves it alone.
+    let folders: Vec<(Value, bool)> = if rt.settings.demo {
+        Vec::new()
+    } else {
+        result.folders.iter().map(|f| (f.config.clone(), f.own)).collect()
+    };
+    let forget_job = if folders.is_empty() {
+        None
+    } else {
+        folder::queue_forget(&mut tx, result.household_id, slug, &folders).await?
+    };
     audit(
         &mut tx,
         p,
@@ -705,40 +718,68 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
             resource_type: Some("profile"),
             resource_ids: Some(vec![profile_id.to_string()]),
             rows_out: Some(i32::try_from(result.total_rows()).unwrap_or(i32::MAX)),
-            args_summary: Some(format!("blobs={}", result.blobs.len())),
             ..Audit::new("purge", "DELETE /api/profiles", Some(profile_id))
         },
     )
     .await?;
     tx.commit().await?;
-    let mut stuck = Vec::new();
+    let (mut removed, mut stuck) = (0usize, Vec::new());
     for sha in &result.blobs {
-        if let Err(e) = rt.blobs.delete(sha) {
-            tracing::warn!(error = %e, "blob delete failed: a job retries it");
-            stuck.push(sha.clone());
+        match rt.blobs.delete(sha) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "blob delete failed: a job retries it");
+                stuck.push(Value::from(sha.as_str()));
+            }
         }
     }
-    if let Some(job) = result.unlink_job
-        && let Err(e) = household::settle_unlink(&rt.pool, job, &stuck).await
-    {
-        tracing::warn!(error = %e, "could not trim the retry of a blob delete: it checks every file again");
-    }
-    // The profile's drops and filed copies in the folder inboxes. The demo never reads a folder, and
-    // its stack shares the inbox folder with the real install, so a demo delete leaves it alone.
-    let folders = if rt.settings.demo {
-        Vec::new()
+    let failed = folder::forget_folders(&rt.settings, slug, folders).await;
+    let failed: Vec<Value> = failed
+        .into_iter()
+        .map(|(config, own)| json!({"config": config, "own": own}))
+        .collect();
+    settle(rt, result.unlink_job, "blobs", stuck.clone()).await;
+    settle(rt, forget_job, "folders", failed).await;
+    // what really happened to the files: removed now, and waiting for the retry
+    let pending = stuck.len();
+    let mut conn = rt.pool.acquire().await?;
+    audit(
+        &mut conn,
+        p,
+        Audit {
+            resource_type: Some("blob"),
+            resource_ids: Some(vec![profile_id.to_string()]),
+            rows_out: Some(i32::try_from(removed).unwrap_or(i32::MAX)),
+            args_summary: Some(format!("blobs={removed} pending={pending}")),
+            ..Audit::new("purge", "DELETE /api/profiles", Some(profile_id))
+        },
+    )
+    .await?;
+    Ok(json!({"deleted": slug, "rows": result.rows_json(), "blobs": removed, "blobs_pending": pending}))
+}
+
+/// After the delete's own try: drop the queued retry when nothing is left, or keep it with only what
+/// is left under `key`. A failure here is only logged: the retry then redoes everything, and each step
+/// of it is safe to repeat.
+async fn settle(rt: &Runtime, job: Option<i64>, key: &str, left: Vec<Value>) {
+    let Some(job) = job else { return };
+    let done = if left.is_empty() {
+        sqlx::query("delete from job where id = $1 and state = 'queued'")
+            .bind(job)
+            .execute(&rt.pool)
+            .await
     } else {
-        result.folders.clone()
+        sqlx::query("update job set payload = jsonb_set(payload, array[$2::text], $3) where id = $1 and state = 'queued'")
+            .bind(job)
+            .bind(key)
+            .bind(Value::Array(left))
+            .execute(&rt.pool)
+            .await
     };
-    for f in folders {
-        let (settings, slug) = (rt.settings.clone(), slug.to_string());
-        match tokio::task::spawn_blocking(move || folder::forget_profile(&settings, &f.config, &slug, f.own)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!(error = %e, "removing a deleted profile's folder failed"),
-            Err(e) => tracing::warn!(error = %e, "removing a deleted profile's folder failed"),
-        }
+    if let Err(e) = done {
+        tracing::warn!(error = %e, job, "could not trim a delete's retry: it redoes everything");
     }
-    Ok(json!({"deleted": slug, "rows": result.rows_json(), "blobs": result.blobs.len()}))
 }
 
 /// Hard delete of the profile's rows and files. `confirm` must repeat the slug. Older backups still

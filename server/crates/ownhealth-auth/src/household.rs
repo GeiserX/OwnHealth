@@ -18,7 +18,7 @@ use ownhealth_core::blobs::sha256_hex_to_bytes;
 use ownhealth_core::jobs::{EnqueueOptions, HandlerResult, Job, JobContext, JobError, enqueue, register_handler};
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
-use sqlx::{AssertSqlSafe, Connection, PgConnection, PgPool};
+use sqlx::{AssertSqlSafe, Connection, PgConnection};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
@@ -685,6 +685,7 @@ async fn still_referenced(conn: &mut PgConnection, sha: &[u8]) -> Result<bool> {
 /// folders of the folder inboxes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deleted {
+    pub household_id: Uuid,
     pub rows: Vec<(String, u64)>,
     pub blobs: Vec<String>,
     /// The queued retry of `blobs`, for the caller to trim after its own unlinks.
@@ -777,6 +778,10 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     .bind(profile_id.simple().to_string())
     .execute(&mut *conn)
     .await?;
+    let household_id: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(profile_id)
+        .fetch_one(&mut *conn)
+        .await?;
     // The folder inboxes whose folders hold the profile's files: the caller removes them after the commit.
     let folders: Vec<(Value, bool)> = sqlx::query_as(
         "select s.config, coalesce(s.profile_id = $1, false) from source s join profile p \
@@ -893,7 +898,8 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
         enqueue(
             &mut *conn,
             UNLINK_JOB,
-            &json!({"blobs": orphans}),
+            // the household, so a retry that runs out of attempts shows in its review queue
+            &json!({"household_id": household_id, "blobs": orphans}),
             EnqueueOptions {
                 run_after: Some(chrono::Utc::now() + chrono::Duration::seconds(60)),
                 ..EnqueueOptions::default()
@@ -902,6 +908,7 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
         .await?
     };
     Ok(Deleted {
+        household_id,
         unlink_job,
         rows: counts.into_iter().filter(|(_, n)| *n > 0).collect(),
         blobs: orphans,
@@ -910,25 +917,6 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
             .map(|(config, own)| FolderInbox { config, own })
             .collect(),
     })
-}
-
-/// After the caller's unlinks: keep the queued retry for the files that stuck, or drop it when every
-/// file went. The job checks each file again, so a file a new arrival named since stays. A retry that
-/// runs out of attempts stays as a dead job with a review item for the operator.
-pub async fn settle_unlink(pool: &PgPool, job_id: i64, stuck: &[String]) -> Result<()> {
-    if stuck.is_empty() {
-        sqlx::query("delete from job where id = $1 and state = 'queued'")
-            .bind(job_id)
-            .execute(pool)
-            .await?;
-    } else {
-        sqlx::query("update job set payload = $2 where id = $1 and state = 'queued'")
-            .bind(job_id)
-            .bind(json!({"blobs": stuck}))
-            .execute(pool)
-            .await?;
-    }
-    Ok(())
 }
 
 async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {

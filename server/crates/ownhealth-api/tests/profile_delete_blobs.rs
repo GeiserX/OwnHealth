@@ -334,6 +334,13 @@ async fn deleting_a_profile_leaves_none_of_its_files_or_credentials() -> R {
         .await?,
         1
     );
+    // every file went at once, so no retry waits
+    assert_eq!(r.json["blobs_pending"], json!(0), "{}", r.json);
+    assert_eq!(
+        env.scalar_i64("select count(*) from job where kind in ('blobs.unlink', 'folder.forget')")
+            .await?,
+        0
+    );
     Ok(())
 }
 
@@ -767,13 +774,29 @@ async fn a_file_the_delete_could_not_remove_goes_on_the_retry() -> R {
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
-    assert_eq!(r.json["blobs"], json!(2), "{}", r.json);
-    // the job names only the file still on disk, and carries file hashes and nothing else
+    // the response and the audit say what happened: one file removed now, one waiting for the retry
+    assert_eq!(
+        (&r.json["blobs"], &r.json["blobs_pending"]),
+        (&json!(1), &json!(1)),
+        "{}",
+        r.json
+    );
+    let said: Vec<Option<String>> = sqlx::query_scalar(
+        "select args_summary from audit_event where action = 'purge' and resource_type = 'blob' \
+         and actor_kind <> 'system'",
+    )
+    .fetch_all(env.pool())
+    .await?;
+    assert_eq!(said, vec![Some("blobs=1 pending=1".into())]);
+    // the job names only the file still on disk, and carries the household and file hashes only
     let queued: Value = sqlx::query_scalar("select payload from job where kind = $1")
         .bind(UNLINK_JOB)
         .fetch_one(env.pool())
         .await?;
-    assert_eq!(queued, json!({"blobs": [stuck.clone()]}));
+    assert_eq!(
+        queued,
+        json!({"household_id": env.fam().household_id, "blobs": [stuck.clone()]})
+    );
     assert_eq!(unlink_state(&env).await?, ("queued".into(), 0, true));
 
     // the first retry fails too: the job waits for another try
@@ -834,15 +857,24 @@ async fn a_retry_that_runs_out_of_attempts_stays_for_the_operator() -> R {
         .await?;
     assert_eq!(state, "dead");
     assert!(error.is_some_and(|e| e.contains("could not be removed")));
-    // a system item in the review queue says so; the file is still listed in the job
+    // an item of the household's review queue says so; the file is still listed in the job
     let items: Vec<(Option<Uuid>, Value)> =
         sqlx::query_as("select household_id, payload from review_item where kind = 'job_failed'")
             .fetch_all(env.pool())
             .await?;
     assert_eq!(items.len(), 1, "{items:?}");
-    assert_eq!(items[0].0, None);
+    assert_eq!(items[0].0, Some(env.fam().household_id));
     assert_eq!(items[0].1["kind"], json!(UNLINK_JOB));
     assert!(path.is_dir());
+    // and the household's owner sees it in the review list
+    let r = me.get("/api/review?kind=job_failed").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    let shown: Vec<&Value> = r.json["items"]
+        .as_array()
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    assert_eq!(shown.len(), 1, "{}", r.json);
+    assert_eq!(shown[0]["payload"]["kind"], json!(UNLINK_JOB), "{}", r.json);
     Ok(())
 }
 
@@ -861,7 +893,10 @@ async fn the_retry_is_queued_in_the_delete_transaction() -> R {
         .bind(UNLINK_JOB)
         .fetch_one(&mut *tx)
         .await?;
-    assert_eq!(payload, json!({"blobs": [report]}));
+    assert_eq!(
+        payload,
+        json!({"household_id": env.fam().household_id, "blobs": [report]})
+    );
     assert!(waits);
     // a crash before the commit loses both the delete and the job
     tx.rollback().await?;
@@ -899,6 +934,24 @@ async fn a_demo_delete_leaves_the_real_inbox_alone() -> R {
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
     assert!(real.is_file(), "the demo delete removed the real install's unread scan");
     assert!(filed.is_file(), "the demo delete removed the real install's filed scan");
+    // and it leaves no retry that would remove them later; a retry queued anyway does nothing in the demo
+    assert_eq!(
+        env.scalar_i64("select count(*) from job where kind = 'folder.forget'")
+            .await?,
+        0
+    );
+    ownhealth_inbox::register();
+    let mut c = env.pool().acquire().await?;
+    ownhealth_inbox::folder::queue_forget(
+        &mut c,
+        env.fam().household_id,
+        "alex",
+        &[(json!({}), false)],
+    )
+    .await?;
+    drop(c);
+    assert_eq!(run_forget(&env).await?, 1);
+    assert!(real.is_file() && filed.is_file(), "a demo retry removed the real install's scans");
     Ok(())
 }
 
@@ -1120,5 +1173,67 @@ async fn a_push_an_inbox_received_for_someone_else_keeps_its_file() -> R {
         "Sam's push lost its file"
     );
     assert!(stored(env.rt.blobs.root()).contains(&sha), "Sam's push went with Alex");
+    Ok(())
+}
+
+/// Run the folder cleanup retry now.
+async fn run_forget(env: &Env) -> anyhow::Result<usize> {
+    sqlx::query("update job set run_after = now() where kind = 'folder.forget' and state = 'queued'")
+        .execute(env.pool())
+        .await?;
+    let ctx = JobContext::new(env.pool().clone(), Arc::new(env.settings.clone()), env.rt.blobs.clone());
+    Ok(drain(&ctx, "core", 5, Some(&["folder.forget".to_string()])).await?)
+}
+
+#[tokio::test]
+async fn a_folder_cleanup_that_fails_is_retried() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    ownhealth_inbox::register();
+    folder_source(&env, "estudio", None).await?;
+    let root = inbox.join("estudio");
+    // Alex's drop, and a filed copy the disk will not let go yet (its folder is read-only)
+    std::fs::create_dir_all(root.join("alex"))?;
+    std::fs::write(root.join("alex/escaneo.pdf"), b"%PDF-1.7 synthetic scan")?;
+    let locked = root.join(".done/alex/2026-11");
+    std::fs::create_dir_all(&locked)?;
+    std::fs::write(locked.join("escaneo-anterior.pdf"), b"%PDF-1.7 synthetic filed scan")?;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500))?;
+
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert!(!root.join("alex").exists(), "the drop folder stays");
+    assert!(locked.join("escaneo-anterior.pdf").is_file());
+    // the retry waits with the household, the short name and the folder inbox's settings
+    let (payload, state, waits): (Value, String, bool) =
+        sqlx::query_as("select payload, state, run_after > now() from job where kind = 'folder.forget'")
+            .fetch_one(env.pool())
+            .await?;
+    assert_eq!(
+        payload,
+        json!({"household_id": env.fam().household_id, "slug": "alex",
+               "folders": [{"config": {"subdir": "estudio"}, "own": false}]})
+    );
+    assert_eq!((state.as_str(), waits), ("queued", true));
+
+    // the first retry fails too and waits again; then the disk lets go and the retry finishes
+    assert_eq!(run_forget(&env).await?, 1);
+    let (state, attempts): (String, i32) =
+        sqlx::query_as("select state, attempts from job where kind = 'folder.forget'")
+            .fetch_one(env.pool())
+            .await?;
+    assert_eq!((state.as_str(), attempts), ("queued", 1));
+    assert!(locked.join("escaneo-anterior.pdf").is_file());
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))?;
+    assert_eq!(run_forget(&env).await?, 1);
+    assert!(!root.join(".done/alex").exists(), "the retry left Alex's filed copy");
+    let state: String = sqlx::query_scalar("select state from job where kind = 'folder.forget'")
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(state, "done");
     Ok(())
 }
