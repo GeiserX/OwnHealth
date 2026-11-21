@@ -696,7 +696,10 @@ async fn the_scanner_folder_keeps_no_copy_of_the_persons_files() -> R {
         assert!(gone(&p), "{} is still there", p.display());
     }
     assert!(outside.join("keep.txt").is_file(), "a link was followed");
-    assert!(parent.join("_root/keep.pdf").is_file(), "the delete went through a linked parent folder");
+    assert!(
+        parent.join("_root/keep.pdf").is_file(),
+        "the delete went through a linked parent folder"
+    );
     assert!(own_root.join(".failed").is_symlink(), "the linked parent folder went");
     assert!(root.join("sam/LN-2.pdf").is_file(), "Sam's drop went too");
     let left = stored(env.rt.blobs.root());
@@ -721,10 +724,12 @@ async fn stuck_report(env: &Env) -> anyhow::Result<(String, std::path::PathBuf)>
 
 /// The unlink job's state, attempts, and whether it waits for a later run.
 async fn unlink_state(env: &Env) -> anyhow::Result<(String, i32, bool)> {
-    Ok(sqlx::query_as("select state, attempts, run_after > now() from job where kind = $1")
-        .bind(UNLINK_JOB)
-        .fetch_one(env.pool())
-        .await?)
+    Ok(
+        sqlx::query_as("select state, attempts, run_after > now() from job where kind = $1")
+            .bind(UNLINK_JOB)
+            .fetch_one(env.pool())
+            .await?,
+    )
 }
 
 /// Run the unlink job now.
@@ -815,11 +820,10 @@ async fn a_retry_that_runs_out_of_attempts_stays_for_the_operator() -> R {
         .execute(env.pool())
         .await?;
     assert_eq!(run_unlink(&env).await?, 1);
-    let (state, error): (String, Option<String>) =
-        sqlx::query_as("select state, last_error from job where kind = $1")
-            .bind(UNLINK_JOB)
-            .fetch_one(env.pool())
-            .await?;
+    let (state, error): (String, Option<String>) = sqlx::query_as("select state, last_error from job where kind = $1")
+        .bind(UNLINK_JOB)
+        .fetch_one(env.pool())
+        .await?;
     assert_eq!(state, "dead");
     assert!(error.is_some_and(|e| e.contains("could not be removed")));
     // a system item in the review queue says so; the file is still listed in the job
@@ -845,11 +849,10 @@ async fn the_retry_is_queued_in_the_delete_transaction() -> R {
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     assert_eq!(deleted.blobs, vec![report.clone()]);
     // inside the transaction the job is there already, and it waits so the delete removes the file first
-    let (payload, waits): (Value, bool) =
-        sqlx::query_as("select payload, run_after > now() from job where kind = $1")
-            .bind(UNLINK_JOB)
-            .fetch_one(&mut *tx)
-            .await?;
+    let (payload, waits): (Value, bool) = sqlx::query_as("select payload, run_after > now() from job where kind = $1")
+        .bind(UNLINK_JOB)
+        .fetch_one(&mut *tx)
+        .await?;
     assert_eq!(payload, json!({"blobs": [report]}));
     assert!(waits);
     // a crash before the commit loses both the delete and the job
@@ -922,9 +925,15 @@ async fn an_inbox_item_of_someone_else_with_the_same_bytes_stays() -> R {
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
-    assert_eq!(items(&env, sams).await?, vec![(format!("push:{sha}"), Some(sha.clone()))]);
+    assert_eq!(
+        items(&env, sams).await?,
+        vec![(format!("push:{sha}"), Some(sha.clone()))]
+    );
     assert_eq!(items(&env, theirs).await?, vec![("5".into(), Some(sha.clone()))]);
-    assert!(stored(env.rt.blobs.root()).contains(&sha), "Sam's push file went with Alex");
+    assert!(
+        stored(env.rt.blobs.root()).contains(&sha),
+        "Sam's push file went with Alex"
+    );
     Ok(())
 }
 
@@ -952,17 +961,28 @@ async fn a_mail_with_nothing_to_import_goes_with_the_person() -> R {
                Sus resultados de Alex Rivera ya estan disponibles en el portal de LabNorte.\r\n";
     let mut c = env.pool().acquire().await?;
     let source = sources::get_source(&mut c, mailbox).await?.expect("mailbox");
-    let out = ownhealth_inbox::email::ingest_message(&mut c, &env.rt.blobs, None, &source, raw.as_bytes(), None).await?;
+    let out =
+        ownhealth_inbox::email::ingest_message(&mut c, &env.rt.blobs, None, &source, raw.as_bytes(), None).await?;
     drop(c);
     assert!(out.document_ids.is_empty(), "{out:?}");
     let eml = env.rt.blobs.put_bytes(raw.as_bytes())?;
-    assert_eq!(items(&env, mailbox).await?, vec![("mid:aviso-77@labnorte.example".into(), Some(eml.clone()))]);
+    assert_eq!(
+        items(&env, mailbox).await?,
+        vec![("mid:aviso-77@labnorte.example".into(), Some(eml.clone()))]
+    );
 
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
-    assert!(!stored(env.rt.blobs.root()).contains(&eml), "the notice to Alex is still on disk: {}", r.json);
+    assert!(
+        !stored(env.rt.blobs.root()).contains(&eml),
+        "the notice to Alex is still on disk: {}",
+        r.json
+    );
     // the mailbox still knows the message, so the next poll does not import it again
-    assert_eq!(items(&env, mailbox).await?, vec![("mid:aviso-77@labnorte.example".into(), None)]);
+    assert_eq!(
+        items(&env, mailbox).await?,
+        vec![("mid:aviso-77@labnorte.example".into(), None)]
+    );
     Ok(())
 }

@@ -725,7 +725,11 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     }
     // The profile's drops and filed copies in the folder inboxes. The demo never reads a folder, and
     // its stack shares the inbox folder with the real install, so a demo delete leaves it alone.
-    let folders = if rt.settings.demo { Vec::new() } else { result.folders.clone() };
+    let folders = if rt.settings.demo {
+        Vec::new()
+    } else {
+        result.folders.clone()
+    };
     for f in folders {
         let (settings, slug) = (rt.settings.clone(), slug.to_string());
         match tokio::task::spawn_blocking(move || folder::forget_profile(&settings, &f.config, &slug, f.own)).await {

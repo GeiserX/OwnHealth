@@ -793,7 +793,16 @@ pub async fn ingest_message(
             }
             Routing::Quarantine { reason } => {
                 out.quarantine_id = Some(hold(&mut *conn, source, &parsed, &raw_sha, reason).await?);
-                record_item(&mut *conn, source.id, &ext, Some(&raw_sha), None, out.quarantine_id, None).await?;
+                record_item(
+                    &mut *conn,
+                    source.id,
+                    &ext,
+                    Some(&raw_sha),
+                    None,
+                    out.quarantine_id,
+                    None,
+                )
+                .await?;
                 return Ok(out);
             }
         },
