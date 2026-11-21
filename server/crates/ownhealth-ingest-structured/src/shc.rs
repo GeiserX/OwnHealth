@@ -84,7 +84,7 @@ pub const REASONS: [&str; 19] = [
 ];
 /// Every detail code of a keys or revocation-list refusal (ui/src/lib/logic/shc.ts SHC_DETAILS):
 /// what went wrong, never the server's own text. `http` stands for `http_<status>`.
-pub const DETAILS: [&str; 9] = [
+pub const DETAILS: [&str; 10] = [
     "dns",
     "timeout",
     "connect",
@@ -93,6 +93,7 @@ pub const DETAILS: [&str; 9] = [
     "not_jwks",
     "not_crl",
     "other_kid",
+    "old_list",
     "http",
 ];
 /// The whole verification of one import stops after this.
@@ -536,6 +537,19 @@ fn claims(payload: &[u8]) -> std::result::Result<Read, Refusal> {
         .filter(|b| b.get("resourceType").and_then(Value::as_str) == Some("Bundle"))
         .cloned()
         .ok_or(Refusal::Payload("there is no FHIR Bundle"))?;
+    // every resource must name its type, or the import cannot read it: refused here, before anything
+    // is stored
+    let typed = |e: &Value| {
+        e.get("resource")
+            .is_none_or(|r| r.get("resourceType").is_some_and(Value::is_string))
+    };
+    if !bundle
+        .get("entry")
+        .and_then(Value::as_array)
+        .is_none_or(|e| e.iter().all(typed))
+    {
+        return Err(Refusal::Payload("a bundle entry has no resource type"));
+    }
     let rid = vc.get("rid").and_then(Value::as_str).map(str::to_string);
     Ok(Read {
         claims: Claims {
@@ -642,19 +656,24 @@ async fn fetch_json(url: &str, route: &Route) -> std::result::Result<Value, Fetc
     let (from, egress) = route(url);
     let got = net::get(&from, &egress, &[("accept", "application/json")])
         .await
-        .map_err(|e| match e {
-            NetError::PrivateAddress(host) => Fetch::Private(host),
-            NetError::Resolve(_) => Fetch::Failed("dns".into()),
-            NetError::Timeout(_) => Fetch::Failed("timeout".into()),
-            NetError::TooLarge(_) => Fetch::Failed("too_large".into()),
-            NetError::BadUrl | NetError::NotHttps | NetError::Http { .. } | NetError::Write(_) => {
-                Fetch::Failed("connect".into())
-            }
-        })?;
+        .map_err(fetch_failure)?;
     if got.status != 200 {
         return Err(Fetch::Failed(format!("http_{}", got.status)));
     }
     serde_json::from_slice(&got.body).map_err(|_| Fetch::Failed("not_json".into()))
+}
+
+/// The detail code of a network error: what went wrong, never its text.
+fn fetch_failure(e: NetError) -> Fetch {
+    match e {
+        NetError::PrivateAddress(host) => Fetch::Private(host),
+        NetError::Resolve(_) => Fetch::Failed("dns".into()),
+        NetError::Timeout(_) => Fetch::Failed("timeout".into()),
+        NetError::TooLarge(_) => Fetch::Failed("too_large".into()),
+        NetError::BadUrl | NetError::NotHttps | NetError::Http { .. } | NetError::Write(_) => {
+            Fetch::Failed("connect".into())
+        }
+    }
 }
 
 fn keys_refusal(f: Fetch) -> Refusal {
@@ -756,7 +775,8 @@ pub async fn verify(
     }
     // "Revocation": a key with crlVersion has a revocation list at <iss>/.well-known/crl/<kid>.json,
     // `{"kid", "method", "ctr", "rids": [...]}`; a card with a rid in it is rejected. A list that
-    // cannot be read, is not a list or is another key's refuses the card: it proves nothing.
+    // cannot be read, is not a list, is another key's or is older than the key's crlVersion refuses the
+    // card: it proves nothing.
     if jwk.get("crlVersion").is_some()
         && let Some(rid) = &claims.rid
     {
@@ -770,6 +790,12 @@ pub async fn verify(
             }
             if crl.get("kid").and_then(Value::as_str) != Some(kid.as_str()) {
                 return Err(Refusal::RevocationList("other_kid".into()));
+            }
+            // `crlVersion` is the list's update counter: a list with a lower `ctr` is an old copy
+            if let Some(version) = jwk.get("crlVersion").and_then(counter)
+                && crl.get("ctr").and_then(counter).is_none_or(|ctr| ctr < version)
+            {
+                return Err(Refusal::RevocationList("old_list".into()));
             }
             keys.crl.insert(at.clone(), crl);
         }
@@ -790,6 +816,11 @@ pub async fn verify(
         types: claims.types,
         bundle: claims.bundle,
     })
+}
+
+/// A counter written as a number or as a string of digits (the spec's template quotes it).
+fn counter(v: &Value) -> Option<u64> {
+    v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
 /// The patient a card names, as the card says it (untrusted): `name[0].text`, else its given names
@@ -1039,6 +1070,11 @@ pub async fn store(
         bytes, filename, input, ..
     } = *received;
     let held: Vec<Value> = cards.iter().map(|c| json!({"jws": c.jws_sha})).collect();
+    // one store per profile at a time, so two forms of one card sent together share a document
+    sqlx::query("select pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("shc.store:{}", profile.id))
+        .execute(&mut *conn)
+        .await?;
     let earlier: Option<Uuid> = sqlx::query_scalar(
         "select id from document where coalesce(profile_id, household_id) = coalesce($1, $2) \
          and status = 'active' and flags -> 'shc' @> cast($3 as jsonb) order by created_at limit 1",
@@ -1203,6 +1239,33 @@ mod tests {
         assert!(revoked(&crl, "lHKzqFUMjhs", at(1_636_977_599)));
         assert!(!revoked(&crl, "lHKzqFUMjhs", at(1_636_977_600)));
         assert!(!revoked(&crl, "other", at(1)));
+    }
+
+    /// Every network error has its detail code; a lookup that fails is `dns`.
+    #[test]
+    fn each_network_error_has_a_detail_code() {
+        let code = |e| match fetch_failure(e) {
+            Fetch::Private(h) => format!("private {h}"),
+            Fetch::Failed(c) => c,
+        };
+        assert_eq!(code(NetError::Resolve("issuer.example".into())), "dns");
+        assert_eq!(code(NetError::Timeout("issuer.example".into())), "timeout");
+        assert_eq!(code(NetError::TooLarge(1)), "too_large");
+        assert_eq!(code(NetError::PrivateAddress("10.0.0.1".into())), "private 10.0.0.1");
+        for e in [
+            NetError::BadUrl,
+            NetError::NotHttps,
+            NetError::Write("w".into()),
+            NetError::Http {
+                host: "h".into(),
+                message: "m".into(),
+            },
+        ] {
+            assert_eq!(code(e), "connect");
+        }
+        for d in ["dns", "timeout", "too_large", "connect", "old_list"] {
+            assert!(DETAILS.contains(&d), "{d}");
+        }
     }
 
     /// The QR search runs at most at 4000 px, then at 2000 and 1000 px when the photo is larger.

@@ -150,10 +150,14 @@ async fn receive(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<J
 
     // the permission comes first, so a person who may not import never makes us fetch anything; the
     // connection goes back to the pool before any issuer is contacted
-    {
+    let chosen = {
         let mut conn = rt.pool.acquire().await?;
-        caller.require(&mut conn, &profile, None, Some("import")).await?;
-    }
+        caller
+            .require(&mut conn, &profile, None, Some("import"))
+            .await?
+            .profile
+            .id
+    };
     let read = {
         let bytes = bytes.clone();
         tokio::task::spawn_blocking(move || shc::read(&bytes))
@@ -175,8 +179,11 @@ async fn receive(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<J
         approved: &approved,
     };
     let mut tx = rt.pool.begin().await?;
-    // checked again in the transaction that stores: the grant may have changed during the fetches
-    let perm = caller.require(&mut tx, &profile, None, Some("import")).await?;
+    // checked again in the transaction that stores, for the same profile: the grant may have changed
+    // during the fetches, and a name could now resolve to another profile
+    let perm = caller
+        .require(&mut tx, &chosen.to_string(), None, Some("import"))
+        .await?;
     let got = shc::store(&mut tx, &rt.blobs, &perm.profile, &received, cards).await?;
     let mut audit = AuditEvent::new(principal.actor_kind(), "ui", "import");
     audit.actor_id = principal.user_id;
@@ -236,10 +243,15 @@ mod tests {
             "mapped without dev auth"
         );
         let (url, egress) = issuer_route(true, Some(MAP))(jwks);
-        assert_eq!(
-            (url.as_str(), egress.allow_private, egress.https_only),
-            ("http://127.0.0.1:1/.well-known/jwks.json", true, false)
-        );
+        // a release build (`cargo test --release`) has no dev map
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                (url.as_str(), egress.allow_private, egress.https_only),
+                ("http://127.0.0.1:1/.well-known/jwks.json", true, false)
+            );
+        } else {
+            assert_eq!((url.as_str(), egress.allow_private), (jwks, false));
+        }
         let evil = "https://issuer.labnorte.example.evil/.well-known/jwks.json";
         let (url, egress) = issuer_route(true, Some(MAP))(evil);
         assert_eq!(

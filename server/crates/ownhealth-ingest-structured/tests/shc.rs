@@ -837,6 +837,41 @@ async fn a_card_whose_revocation_list_cannot_be_read_is_refused() -> R {
     Ok(())
 }
 
+/// "Revocation": a key's `crlVersion` is the list's update counter. A list whose `ctr` is lower is
+/// an old copy, and it cannot show that the card was not revoked since.
+#[tokio::test]
+async fn a_revocation_list_older_than_the_key_says_is_refused() -> R {
+    let k = test_key(7);
+    let mut jwk = k.jwk.clone();
+    jwk["crlVersion"] = json!(2);
+    let jws = with_rid(&k, "AQPCj4wwk6Mt");
+    for (ctr, want) in [
+        (json!(1), Err(Refusal::RevocationList("old_list".into()))),
+        (json!(2), Ok(())),
+        (json!("3"), Ok(())),
+    ] {
+        let crl = json!({"kid": k.kid(), "method": "rid", "ctr": ctr, "rids": []});
+        let (port, _) = site(json!({"keys": [jwk]}), Some((k.kid(), crl))).await?;
+        assert_eq!(verify_at(&jws, port).await.map(|_| ()), want, "ctr {ctr}");
+    }
+    Ok(())
+}
+
+/// A bundle entry with no resource type cannot be imported, so the card is refused before anything
+/// is stored.
+#[tokio::test]
+async fn a_bundle_entry_without_a_resource_type_is_refused() -> R {
+    let k = test_key(7);
+    let (port, _) = site(json!({"keys": [k.jwk]}), None).await?;
+    let mut b = bundle();
+    b["entry"][1]["resource"] = json!({"status": "completed"});
+    assert_eq!(
+        verify_at(&card(&k, &payload_of(ISS, day(-1), None, b)), port).await,
+        Err(Refusal::Payload("a bundle entry has no resource type"))
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_reason_the_keys_could_not_be_fetched_is_a_code() -> R {
     let k = test_key(7);
@@ -857,11 +892,6 @@ async fn the_reason_the_keys_could_not_be_fetched_is_a_code() -> R {
     }
     let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await?.local_addr()?.port();
     assert_eq!(verify_at(&jws, closed).await, Err(Refusal::Keys("connect".into())));
-    let nowhere = card(&k, &payload("https://issuer.invalid", day(-1), None));
-    assert_eq!(
-        shc::verify(&nowhere, &mut Keys::default(), &shc::public, now()).await,
-        Err(Refusal::Keys("dns".into()))
-    );
     Ok(())
 }
 
