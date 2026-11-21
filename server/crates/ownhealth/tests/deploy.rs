@@ -11,9 +11,10 @@
 //!   the owner; the homelab app gets no backup credentials. Skipped without docker compose.
 //! - The public site block of deploy/Caddyfile, run in the caddy image compose.homelab.yaml pins, in
 //!   front of a stub upstream: it passes only the SMART Health Link routes (the manifest POST and
-//!   its preflight, the file GET) and answers 404 to everything else, /login, /api, /mcp and
-//!   /dicom-web included. The Open Wearables callback line passes only when switched on. Skipped
-//!   without docker; the image is pulled when missing.
+//!   its preflight, the file GET), always in their canonical form whatever raw path the client
+//!   wrote, and answers 404 to everything else, /login, /api, /mcp and /dicom-web included. It keeps
+//!   the X-Forwarded-For of the tunnel in front of it. Skipped without docker; the image is pulled
+//!   when missing.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -345,12 +346,12 @@ impl Drop for Container {
     }
 }
 
-/// deploy/Caddyfile in `image`, with a stub on app:8080 that names each request it receives.
-/// Returns the container and the host address of the share port.
-fn caddy(image: &str, ow_callback: bool) -> anyhow::Result<(Container, String)> {
+/// deploy/Caddyfile in `image`, with a stub on app:8080 that names each request it receives and the
+/// X-Forwarded-For it came with. Returns the container and the host address of the share port.
+fn caddy(image: &str) -> anyhow::Result<(Container, String)> {
     let name = format!("oh-share-block-{}", uuid::Uuid::new_v4().simple());
     let caddyfile = std::fs::read_to_string(root().join("deploy/Caddyfile"))?
-        + "\nhttp://:8080 {\n\trespond \"upstream {method} {uri}\" 200\n}\n";
+        + "\nhttp://:8080 {\n\trespond \"upstream {method} {uri} xff={header.X-Forwarded-For}\" 200\n}\n";
     let mut create = Command::new("docker");
     create.args(["create", "--name", &name, "--add-host", "app:127.0.0.1"]);
     create.args([
@@ -359,9 +360,6 @@ fn caddy(image: &str, ow_callback: bool) -> anyhow::Result<(Container, String)> 
         "-e",
         "OWNHEALTH_DOMAIN=http://private.test:8081",
     ]);
-    if ow_callback {
-        create.args(["-e", "OWNHEALTH_OW_CALLBACK=true"]);
-    }
     let out = create.arg(image).output()?;
     anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let c = Container(name.clone());
@@ -394,9 +392,16 @@ fn caddy(image: &str, ow_callback: bool) -> anyhow::Result<(Container, String)> 
 
 /// (status, body) of one request through curl; status 0 when nothing answered.
 fn fetch(addr: &str, method: &str, path: &str) -> anyhow::Result<(u16, String)> {
+    fetch_with(addr, method, path, &[])
+}
+
+fn fetch_with(addr: &str, method: &str, path: &str, headers: &[&str]) -> anyhow::Result<(u16, String)> {
     // --path-as-is: curl would otherwise resolve a `..` itself before sending
     let mut curl = Command::new("curl");
     curl.args(["-s", "--path-as-is", "-m", "5", "-o", "-", "-w", "\n%{http_code}"]);
+    for h in headers {
+        curl.args(["-H", h]);
+    }
     if method == "HEAD" {
         curl.arg("-I");
     } else {
@@ -409,6 +414,9 @@ fn fetch(addr: &str, method: &str, path: &str) -> anyhow::Result<(u16, String)> 
 }
 
 /// The share host exposes the three link routes and nothing else (security-privacy.md section 11).
+/// Caddy matches the cleaned path, so every raw path that cleans to a link route (`..`, `//`, `./`,
+/// `%2F`, an encoded letter) must reach the app as the canonical route and nothing else, never as
+/// the raw path the app would route elsewhere (the UI's login page, the calendar feed).
 #[test]
 fn the_public_share_block_passes_only_the_link_routes() -> R {
     if !ok(Command::new("docker").args(["info"])) {
@@ -422,58 +430,105 @@ fn the_public_share_block_passes_only_the_link_routes() -> R {
         "docker pull {image}"
     );
     let id = "I91rhba3VsuGXGchcnr6VHlQFKxfE28kuZ0ssbEuxno";
-    let ticket = "Y9xwkUdtmN9wwoJoN3ffJIhX2UGvCL1JnlPVNL3kDWM";
-    let manifest = format!("/api/shl/{id}");
-    let file = format!("/api/shl/{id}/file/{ticket}");
-    let ow = "/ow/api/v1/oauth/oura/callback?code=synthetic";
-    let mut cases: Vec<(String, String, bool)> = [("POST", &manifest), ("OPTIONS", &manifest), ("GET", &file)]
-        .into_iter()
-        .map(|(m, p)| (m.to_string(), p.clone(), true))
-        .collect();
-    for (m, p) in [
-        ("GET", "/"),
-        ("GET", "/login"),
-        ("GET", "/api/me"),
-        ("POST", "/api/auth/login/begin"),
-        ("GET", "/api/profiles/me/shl"),
-        ("POST", "/api/profiles/me/shl"),
-        ("POST", "/mcp"),
-        ("GET", "/mcp"),
-        ("GET", "/dicom-web/studies"),
-        ("GET", "/healthz"),
-        ("GET", "/api/ics/oh_ics_abcdefgh_x.ics"),
-        ("GET", manifest.as_str()),
-        ("POST", file.as_str()),
-        ("HEAD", file.as_str()),
-        ("POST", "/api/shl/short"),
-        ("POST", &format!("/api/shl/{id}/../../me")),
-        ("POST", &format!("{manifest}/extra")),
-        ("GET", ow),
+    let t = "Y9xwkUdtmN9wwoJoN3ffJIhX2UGvCL1JnlPVNL3kDWM";
+    let m = format!("/api/shl/{id}");
+    let f = format!("/api/shl/{id}/file/{t}");
+    // (method, raw path, the request line the app must get)
+    let mut through: Vec<(&str, String, String)> = vec![
+        ("POST", m.clone(), format!("POST {m}")),
+        ("OPTIONS", m.clone(), format!("OPTIONS {m}")),
+        ("GET", f.clone(), format!("GET {f}")),
+        ("GET", format!("{f}?x=1"), format!("GET {f}")),
+        ("POST", format!("{m}?x=1"), format!("POST {m}")),
+        ("POST", format!("//api/shl/{id}"), format!("POST {m}")),
+        ("POST", format!("/api//shl/{id}"), format!("POST {m}")),
+        ("POST", format!("/./api/shl/{id}"), format!("POST {m}")),
+        ("POST", format!("/api/shl/./{id}"), format!("POST {m}")),
+        ("POST", format!("/x/../api/shl/{id}"), format!("POST {m}")),
+        ("POST", format!("/api%2Fshl%2F{id}"), format!("POST {m}")),
+        ("POST", format!("/api/%73hl/{id}"), format!("POST {m}")),
+        ("GET", format!("/login/../api/shl/{id}/file/{t}"), format!("GET {f}")),
+        ("GET", format!("/./api/shl/{id}/file/{t}"), format!("GET {f}")),
+        ("GET", format!("/api/shl/{id}%2Ffile%2F{t}"), format!("GET {f}")),
+        (
+            "GET",
+            format!("/api/ics/x%2F..%2F..%2Fshl%2F{id}%2Ffile%2F{t}"),
+            format!("GET {f}"),
+        ),
+        (
+            "POST",
+            format!("/api/shl/%41{}", &id[1..]),
+            format!("POST /api/shl/A{}", &id[1..]),
+        ),
+    ];
+    through.sort();
+    let mut refused: Vec<(&str, String)> = Vec::new();
+    for p in [
+        "/".to_string(),
+        "/login".into(),
+        "/index.html".into(),
+        "/_app/version.json".into(),
+        "/mcp".into(),
+        "/healthz".into(),
+        "/metrics".into(),
+        "/api".into(),
+        "/api/".into(),
+        "/api/me".into(),
+        "/api/auth/state".into(),
+        "/api/auth/login/begin".into(),
+        "/api/profiles".into(),
+        "/api/profiles/me/shl".into(),
+        "/api/ics/oh_ics_abcdefgh_x.ics".into(),
+        "/dicom-web".into(),
+        "/dicom-web/studies".into(),
+        "/ow/api/v1/oauth/oura/callback?code=synthetic".into(),
+        "/api/shl".into(),
+        "/api/shl/".into(),
+        "/api/shl/short".into(),
+        format!("{m}/"),
+        format!("{m}/extra"),
+        format!("{m}/file"),
+        format!("{m}/file/"),
+        format!("{m}/file/short"),
+        format!("{f}/"),
+        format!("{f}/x"),
+        format!("/API/shl/{id}"),
+        format!("{m};x"),
+        format!("{m}/../../me"),
+        format!("{f}/../../../../me"),
+        format!("/api/shl/{}%2F..%2Fme", &id[..40]),
+        format!("/api/shl/{}%2F", &id[..41]),
+        "/api/shl/%2e%2e%2fprofiles%2fme%2fshl".into(),
+        "/api/shl/..%2F..%2Fapi%2Fme".into(),
     ] {
-        cases.push((m.to_string(), p.to_string(), false));
+        refused.push(("GET", p.clone()));
+        refused.push(("POST", p));
     }
-    let (c, addr) = caddy(&image, false)?;
-    for (m, p, through) in &cases {
-        let (code, body) = fetch(&addr, m, p)?;
-        if *through {
-            assert_eq!(code, 200, "{m} {p}: {body}");
-            assert!(body.starts_with(&format!("upstream {m} /api/shl/")), "{m} {p}: {body}");
-        } else {
-            assert_eq!(code, 404, "{m} {p}: {body}");
-            assert!(!body.contains("upstream"), "{m} {p}: {body}");
-        }
+    for method in ["GET", "PUT", "PATCH", "DELETE", "HEAD"] {
+        refused.push((method, m.clone()));
     }
-    drop(c);
-    // the Open Wearables callback line, switched on: that one GET passes, nothing else changes
-    let (_c, addr) = caddy(&image, true)?;
-    let (code, body) = fetch(&addr, "GET", ow)?;
-    assert_eq!(
-        (code, body.starts_with("upstream GET /ow/api/v1/oauth/oura/callback")),
-        (200, true),
-        "{body}"
-    );
-    for (m, p) in [("POST", ow), ("GET", "/ow/api/v1/users"), ("GET", "/api/me")] {
-        assert_eq!(fetch(&addr, m, p)?.0, 404, "{m} {p}");
+    for method in ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+        refused.push((method, f.clone()));
     }
+    let (_c, addr) = caddy(&image)?;
+    for (method, path, line) in &through {
+        let (code, body) = fetch(&addr, method, path)?;
+        let got = body.split(" xff=").next().unwrap_or_default();
+        assert_eq!(
+            (code, got),
+            (200, format!("upstream {line}").as_str()),
+            "{method} {path}"
+        );
+    }
+    for (method, path) in &refused {
+        let (code, body) = fetch(&addr, method, path)?;
+        assert_eq!(code, 404, "{method} {path}: {body}");
+        assert!(!body.contains("upstream"), "{method} {path}: {body}");
+    }
+    // the tunnel's X-Forwarded-For goes on, with the hop Caddy saw after it; the app trusts that
+    // chain only from the proxies in OWNHEALTH_TRUSTED_PROXIES
+    let (_, body) = fetch_with(&addr, "POST", &m, &["X-Forwarded-For: 203.0.113.9"])?;
+    let xff = body.split(" xff=").nth(1).unwrap_or_default();
+    assert!(xff.starts_with("203.0.113.9, "), "{body}");
     Ok(())
 }

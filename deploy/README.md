@@ -6,7 +6,7 @@ This folder holds the homelab setup and the backup recipe. For a first look on o
 |---|---|
 | [compose.homelab.yaml](compose.homelab.yaml) | The app, Postgres 17 and Caddy with HTTPS, and the `ocr` worker when that profile is on. Secrets are files, the containers are read-only |
 | [db/app-role.sh](db/app-role.sh) | Gives the app its own database role, which owns no table and cannot rewrite the audit log |
-| [Caddyfile](Caddyfile) | HTTPS for `OWNHEALTH_DOMAIN`, open to the LAN and a Tailscale tailnet only |
+| [Caddyfile](Caddyfile) | HTTPS for `OWNHEALTH_DOMAIN`, open to the LAN and a Tailscale tailnet only, and the share listener that answers only the SMART Health Link routes |
 | [env.homelab.example](env.homelab.example) | The `.env` for the homelab compose |
 | [restic.env.example](restic.env.example) | The `restic.env`: the backup repository and its keys, read by the `admin` service only |
 | [restic/backup.sh](restic/backup.sh) | Nightly backup into a restic repository, with retention |
@@ -52,6 +52,19 @@ Open `https://<OWNHEALTH_DOMAIN>` and create the first account with a passkey. W
 **Who can connect.** The Caddyfile answers 403 to every address outside the private ranges and the Tailscale range `100.64.0.0/10`. Keep it that way unless you mean to put health data on the public internet. The check works only if Caddy sees the real client address. Rootless Docker, and Docker's userland proxy for IPv6 clients when the compose network has no IPv6, hand Caddy a private gateway address instead, so every client passes. On such a host, or one with a public address, also close ports 80 and 443 (TCP and UDP) to the internet in the host firewall or the router, and check from outside that the name does not answer. The claude.ai connector is the one case that needs a public endpoint: [its recipe](../docs/recipes/claude-connector.md) opens only the four paths it uses and keeps the rest behind a login.
 
 **Your own reverse proxy.** If one already runs on the host, drop the `caddy` service, give `app` a port such as `127.0.0.1:8080:8080`, and point your proxy at it. Set `OWNHEALTH_BASE_URL` to the HTTPS address people open.
+
+## Sharing a summary
+
+A person can share a scoped summary with a doctor through a SMART Health Link: a link, or its QR code, plus an optional PIN. The doctor's viewer fetches the summary from your instance, so the link routes must answer from the internet while the rest of OwnHealth stays on your network. Sharing is off until you set it up.
+
+1. Caddy listens for the links on port 8090 inside its container. Compose publishes it on `127.0.0.1:8090` of the host, never on the network. Set `OWNHEALTH_SHARE_PORT` in `.env` if 8090 is taken on the host.
+2. Point a tunnel on the same host at `http://127.0.0.1:8090`. With Tailscale Funnel: `tailscale funnel --bg 8090`. With Cloudflare Tunnel: a public hostname whose service is `http://localhost:8090`. Never point it at the app or at port 443.
+3. Set `OWNHEALTH_SHARE_URL` in `.env` to the https address the tunnel gives, such as `https://share.example.org`. The app refuses to start with an http address, except one on localhost, and with anything after the host and port.
+4. `docker compose up -d`.
+
+What goes public: `POST /api/shl/<id>` (and its CORS preflight) and `GET /api/shl/<id>/file/<ticket>`, each rewritten to its canonical path. Every other path on the tunnel gets 404 from Caddy, including `/`, `/login`, `/api`, `/mcp` and `/dicom-web`. A link answers only while it is live and its creator may still share what it carries, and at most 60 times an hour. The access log the person reads names each recipient's address: Caddy keeps the address the tunnel forwards, and the app trusts that header only from the proxies in `OWNHEALTH_TRUSTED_PROXIES` (the compose network).
+
+Check it from outside: `curl -i https://share.example.org/login` answers 404, and a link the app makes opens in a SMART Health Links viewer. To turn sharing off again, remove `OWNHEALTH_SHARE_URL` and run `docker compose up -d`: every link and every file address already handed out then answers 404.
 
 ## Inboxes and OCR
 
