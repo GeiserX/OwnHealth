@@ -5,7 +5,7 @@
 #[path = "auth_support.rs"]
 mod support;
 
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use ownhealth_core::Runtime;
 use ownhealth_core::secrets::{SecretBox, SecretString, store_secret};
 use ownhealth_core::sources::CONNECTOR_KINDS;
@@ -35,6 +35,13 @@ async fn the_inbox_route_refuses_every_connector_kind() -> R {
         let r = c.post("/api/inboxes", &body).await?;
         assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{kind}: {}", r.json);
         assert_eq!(r.code(), "invalid", "{kind}: {}", r.json);
+        let message = r.json["detail"]["message"].as_str().unwrap_or_default();
+        assert!(!message.is_empty(), "{kind}: no message in {}", r.json);
+        assert!(!message.contains(kind), "{kind}: the raw kind is in {message:?}");
+        assert!(
+            !message.contains("its own connection"),
+            "{kind}: a route that does not exist: {message:?}"
+        );
     }
     assert_eq!(env.scalar_i64("select count(*) from source").await?, 0);
     // the reverse: a kind the route owns is still made there
@@ -168,5 +175,73 @@ async fn a_source_shows_its_reconsent_and_expiry_state() -> R {
     .fetch_one(env.pool())
     .await?;
     assert_eq!(row, (true, true, true));
+    Ok(())
+}
+
+/// A connector source as the connector launch (slice 13) will leave it: a client and a reconnect state.
+async fn connector_source(env: &Env) -> anyhow::Result<Uuid> {
+    let (household, client, _) = client_with_secret(env).await?;
+    Ok(sqlx::query_scalar(
+        "insert into source (household_id, profile_id, kind, label, connector_client_id, reconsent_needed_at) \
+         values ($1, $2, 'smart', 'Hospital LabNorte', $3, now()) returning id",
+    )
+    .bind(household)
+    .bind(env.profile("alex"))
+    .bind(client)
+    .fetch_one(env.pool())
+    .await?)
+}
+
+#[tokio::test]
+async fn a_connector_source_stays_out_of_every_inbox_route() -> R {
+    let env = env().await?;
+    let id = connector_source(&env).await?;
+    let mut c = env.as_user(env.user("alex")).await?;
+
+    let list = c.get("/api/inboxes").await?;
+    assert_eq!(list.status, StatusCode::OK, "{}", list.json);
+    let listed = list
+        .json
+        .as_array()
+        .is_some_and(|a| a.iter().any(|s| s["id"] == id.to_string().as_str()));
+    assert!(!listed, "the inbox list shows a connector source: {}", list.json);
+
+    let path = format!("/api/inboxes/{id}");
+    let answers = [
+        ("get", c.get(&path).await?),
+        (
+            "patch",
+            c.send(
+                Method::PATCH,
+                &path,
+                Some(&json!({"label": "Otro", "profile_id": env.profile("lucia")})),
+                &[],
+            )
+            .await?,
+        ),
+        ("runs", c.get(&format!("{path}/runs")).await?),
+        ("token", c.post0(&format!("{path}/token")).await?),
+        ("sync", c.post0(&format!("{path}/sync")).await?),
+        ("delete", c.delete(&path).await?),
+    ];
+    for (route, r) in answers {
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{route}: {}", r.json);
+    }
+    let row: (String, Option<Uuid>, Option<String>) =
+        sqlx::query_as("select label, profile_id, token_prefix from source where id = $1")
+            .bind(id)
+            .fetch_one(env.pool())
+            .await?;
+    assert_eq!(row, ("Hospital LabNorte".into(), Some(env.profile("alex")), None));
+
+    // the Connections screen reads the health routes, so they keep the source
+    let health = c.get("/api/inboxes/health").await?;
+    let in_health = health
+        .json
+        .as_array()
+        .is_some_and(|a| a.iter().any(|s| s["id"] == id.to_string().as_str()));
+    assert!(in_health, "the health list lost the connector source: {}", health.json);
+    let one = c.get(&format!("{path}/health")).await?;
+    assert_eq!(one.status, StatusCode::OK, "{}", one.json);
     Ok(())
 }
