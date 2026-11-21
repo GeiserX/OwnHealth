@@ -576,8 +576,13 @@ pub async fn scheduler_tick(ctx: &JobContext) -> Result<Vec<i64>> {
 
 /// Delete the sealed file of every SMART Health Link that can no longer open (migration 1270): past
 /// its expiry, or out of passcode attempts. Revoke and the last wrong passcode delete theirs at once;
-/// this catches expiry, which no request marks. Returns the files deleted.
+/// this catches expiry, which no request marks. It first revokes the links whose creator's grant ran
+/// out by itself (`shl_end_unshareable`: a lock or a changed grant does that at the write). Returns the
+/// files deleted.
 pub async fn sweep_link_files(conn: &mut PgConnection) -> Result<u64> {
+    sqlx::query("select shl_end_unshareable(null, 'access_changed')")
+        .execute(&mut *conn)
+        .await?;
     let done = sqlx::query(
         "delete from shl_file f using shl s where s.id = f.shl_id \
          and (s.expires_at <= now() or s.attempts_left = 0)",

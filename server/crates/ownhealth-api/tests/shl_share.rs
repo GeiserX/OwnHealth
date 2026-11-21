@@ -15,9 +15,15 @@ use axum::http::{Method, Request, StatusCode};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ownhealth_api::routes::shl::{ATTEMPTS, RATE_PER_HOUR};
-use ownhealth_core::access::{scope_set, set_locks, today_utc};
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use ownhealth_core::access::{scope_set, set_grant, set_locks, today_utc};
 use ownhealth_core::demo::{DEMO_HOUSEHOLD, seed_demo};
+use ownhealth_core::jobs::JobContext;
 use ownhealth_core::jose;
+use ownhealth_core::provenance::{SrcIn, SrcRef};
+use ownhealth_core::records::{RecordIn, RecordOptions, add_record};
 use ownhealth_ops::shl::CONTENT_TYPE;
 use serde_json::{Value, json};
 use support::{Client, Env, Resp};
@@ -89,6 +95,40 @@ async fn open(env: &Env, pl: &Value, passcode: Option<&str>) -> anyhow::Result<V
     let d = jose::decrypt(&key_of(pl)?, &jwe, 1 << 24).map_err(|e| anyhow::anyhow!("{e}"))?;
     assert_eq!(d.header["cty"], CONTENT_TYPE);
     Ok(d.plaintext)
+}
+
+/// The scheduler's context on the test database.
+fn job_ctx(env: &Env) -> JobContext {
+    JobContext::new(env.pool().clone(), Arc::new(env.settings.clone()), env.rt.blobs.clone())
+}
+
+/// (state, reason) of the link labelled `label` in a profile's list.
+async fn state_of(c: &mut Client, p: &str, label: &str) -> anyhow::Result<(Value, Value)> {
+    let r = c.get(&format!("/api/profiles/{p}/shl")).await?;
+    let item = r.json["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|i| i["label"] == label)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no link {label}: {:?}", r.json))?;
+    Ok((item["state"].clone(), item["reason"].clone()))
+}
+
+/// A condition of `profile` added the way a person adds one, tagged `sensitivity`.
+async fn condition(env: &Env, profile: Uuid, text: &str, sensitivity: &[&str]) -> R {
+    let record = RecordIn::from_json(
+        "condition",
+        json!({"profile_id": profile, "text": text, "verification_status": "confirmed", "sensitivity": sensitivity}),
+    )?;
+    let src = SrcRef::New(SrcIn {
+        profile_id: Some(profile),
+        label: Some("synthetic test condition".into()),
+        ..SrcIn::manual(None)
+    });
+    let mut c = env.pool().acquire().await?;
+    add_record(&mut c, &record, &src, RecordOptions::new("person")).await?;
+    Ok(())
 }
 
 /// The IPS a link of these categories carries today.
@@ -301,11 +341,21 @@ async fn the_link_manifest_and_file_follow_the_shl_spec() -> R {
     let r = env.anon().send(Method::HEAD, &location(&m), None, &[]).await?;
     assert_eq!(r.status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(env.scalar_i64("select count(*) from shl_access").await?, before);
-    // ".files.location links": the lifetime SHALL NOT exceed one hour (the spec's number, not ours)
-    let secs = env
-        .scalar_i64("select max(extract(epoch from ticket_expires_at - at))::bigint from shl_access")
-        .await?;
-    assert!(secs <= 3600 && secs > 3540, "{secs}");
+    // ".files.location links": the lifetime SHALL NOT exceed one hour (the spec's number, not ours),
+    // measured from the moment the ticket was issued: inside the window around a fresh manifest
+    let issued_from = Utc::now();
+    assert_eq!(manifest(&env, &pl, None).await?.status, StatusCode::OK);
+    let issued_to = Utc::now();
+    let until: DateTime<Utc> = sqlx::query_scalar(
+        "select ticket_expires_at from shl_access where ticket_expires_at is not null order by id desc limit 1",
+    )
+    .fetch_one(env.pool())
+    .await?;
+    let hour = chrono::Duration::seconds(3600);
+    assert!(
+        until >= issued_from + hour && until <= issued_to + hour,
+        "{issued_from} .. {issued_to} -> {until}"
+    );
     let f = env.anon().get(&location(&m)).await?;
     assert_eq!(f.status, StatusCode::OK);
     assert_eq!(f.header("access-control-allow-origin"), "*");
@@ -343,7 +393,12 @@ async fn revoke_and_expiry_answer_404_and_revoke_deletes_the_file() -> R {
         audited
     );
     let listed = alex.get("/api/profiles/alex/shl").await?;
-    assert_eq!(listed.json["items"][0]["active"], false);
+    assert_eq!(
+        (&listed.json["items"][0]["state"], &listed.json["items"][0]["reason"]),
+        (&json!("revoked"), &json!("person")),
+        "{:?}",
+        listed.json
+    );
 
     // expiry: the link, and a location it gave out before
     let (made, pl) = share(&mut alex, "alex", json!({})).await?;
@@ -905,9 +960,15 @@ async fn a_locked_out_or_expired_link_loses_its_file() -> R {
         .bind(&expired)
         .execute(env.pool())
         .await?;
-    let mut c = env.pool().acquire().await?;
-    ownhealth_core::sources::sweep_link_files(&mut c).await?;
-    assert_eq!(files(expired).await?, 0, "expired: the sweep deleted it");
+    // the scheduler's own pass, not the sweep called by hand: unhooking the sweep from the
+    // scheduler leaves the file, and fails here
+    assert_eq!(
+        files(expired.clone()).await?,
+        1,
+        "a control that can fail: the file is still there"
+    );
+    ownhealth_core::sources::scheduler_tick(&job_ctx(&env)).await?;
+    assert_eq!(files(expired).await?, 0, "expired: the scheduler's sweep deleted it");
     assert_eq!(files(live).await?, 1, "a live link keeps its file");
     Ok(())
 }
@@ -980,20 +1041,9 @@ async fn the_creator_sees_how_many_sensitive_items_stay_home() -> R {
     let labs0 = count(&share(&mut alex, &pid, labs.clone()).await?.0);
     assert!(all0 >= 0 && labs0 >= 0, "{made:?}");
     let before: Value = serde_json::from_slice(&open(&env, &pl, None).await?)?;
-    // two new synthetic conditions, copies of a current one: a plain twin and one tagged mental health
-    for (text, tag) in [("SYNTH-PLAIN-50", "{}"), ("SYNTH-SENSITIVE-50", "{mental_health}")] {
-        sqlx::query(
-            "insert into condition (profile_id, text, clinical_status, verification_status, src_id, accepted_by, \
-             status, sensitivity, fhir) select profile_id, $2, 'active', 'confirmed', src_id, accepted_by, 'current', \
-             $3::text[], jsonb_set(fhir, '{code}', jsonb_build_object('text', $2::text)) from condition \
-             where profile_id = $1 and status = 'current' order by id limit 1",
-        )
-        .bind(profile)
-        .bind(text)
-        .bind(tag)
-        .execute(env.pool())
-        .await?;
-    }
+    // two new synthetic conditions, added as a person adds them: a plain twin and one tagged mental health
+    condition(&env, profile, "SYNTH-PLAIN-50", &[]).await?;
+    condition(&env, profile, "SYNTH-SENSITIVE-50", &["mental_health"]).await?;
     let (made, pl) = share(&mut alex, &pid, json!({"lang": "en"})).await?;
     assert_eq!(count(&made), all0 + 1, "{made:?}");
     let after = String::from_utf8(open(&env, &pl, None).await?)?;
@@ -1071,5 +1121,280 @@ async fn reading_the_links_and_their_access_log_is_audited() -> R {
             ("user".to_string(), "shl.access".to_string(), Some(vec![id]))
         ]
     );
+    Ok(())
+}
+
+/// The count of sensitive items a link leaves out reaches only a creator who may read them. A
+/// guardian whose grant lacks read:sensitive gets no count at all, not even 0, so the answer says
+/// nothing about whether such records exist. The audit row keeps the number.
+#[tokio::test]
+async fn a_creator_without_read_sensitive_gets_no_sensitive_count() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let lucia = env.profile("lucia");
+    condition(&env, lucia, "SYNTH-SENSITIVE-50-LUCIA", &["reproductive"]).await?;
+    let records = json!({"categories": ["read:records"]});
+    // the control: a guardian whose grant holds read:sensitive sees the count
+    let (made, _) = share(&mut alex, "lucia", records.clone()).await?;
+    assert_eq!(made["left_out"], json!({"sensitive": 1}), "{made:?}");
+    // the same guardian without read:sensitive
+    let mut c = env.pool().acquire().await?;
+    let narrowed = scope_set(["read:summary", "read:labs", "read:records"]);
+    set_grant(&mut c, env.user("alex"), lucia, "guardian", Some(&narrowed), None, None).await?;
+    let (made, _) = share(&mut alex, "lucia", records).await?;
+    assert!(made.get("left_out").is_none(), "no count, not even 0: {made:?}");
+    let kept = env
+        .scalar_i64(
+            "select (withheld->>'sensitive')::bigint from audit_event where action = 'shl.create' \
+             order by id desc limit 1",
+        )
+        .await?;
+    assert_eq!(kept, 1, "the audit row keeps the number");
+    Ok(())
+}
+
+/// A body of the wrong shape answers 422 without the passcode in it: not in `input`, not in `msg`.
+/// The rest of the body still comes back, so the redaction is as narrow as the secret.
+#[tokio::test]
+async fn a_422_on_a_link_create_never_repeats_the_passcode() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let secret = "SECRET-r63a-9137";
+    let r = alex
+        .post("/api/profiles/alex/shl", &json!({"passcode": secret, "days": "7"}))
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert!(!r.json.to_string().contains(secret), "{:?}", r.json);
+    assert_eq!(r.json["detail"][0]["input"]["days"], "7", "{:?}", r.json);
+    // a passcode of the wrong type: serde names the value in its message
+    let r = alex
+        .post("/api/profiles/alex/shl", &json!({"passcode": 91_378_642}))
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert!(!r.json.to_string().contains("91378642"), "{:?}", r.json);
+    // too long: the handler's own rule never echoed it, and still does not
+    let long = format!("SECRET-{}", "x".repeat(70));
+    let r = alex.post("/api/profiles/alex/shl", &json!({"passcode": long})).await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert!(!r.json.to_string().contains("SECRET-"), "{:?}", r.json);
+    Ok(())
+}
+
+/// The person's list says what a recipient would meet: active, paused while sharing is off,
+/// revoked (by the person, by a lock, or because the creator lost a category it carries), expired,
+/// or locked out after the last wrong passcode.
+#[tokio::test]
+async fn the_list_shows_the_state_each_link_really_has() -> R {
+    let mut env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let id = |made: &Value| made["link"]["id"].as_str().unwrap_or_default().to_string();
+    let records = |label: &str| json!({"label": label, "categories": ["read:records"]});
+    share(&mut alex, "alex", records("active")).await?;
+    let (made, _) = share(&mut alex, "alex", records("revoked")).await?;
+    alex.delete(&format!("/api/profiles/alex/shl/{}", id(&made))).await?;
+    let (made, _) = share(&mut alex, "alex", records("expired")).await?;
+    sqlx::query("update shl set expires_at = now() - interval '1 second' where id = $1::uuid")
+        .bind(id(&made))
+        .execute(env.pool())
+        .await?;
+    let (_, pl) = share(&mut alex, "alex", json!({"label": "locked out", "passcode": PIN})).await?;
+    for _ in 0..ATTEMPTS {
+        manifest(&env, &pl, Some(WRONG)).await?;
+    }
+    share(&mut alex, "alex", json!({"label": "lock", "categories": ["read:labs"]})).await?;
+    share(
+        &mut alex,
+        "lucia",
+        json!({"label": "narrowed", "categories": ["read:labs"]}),
+    )
+    .await?;
+    let mut c = env.pool().acquire().await?;
+    set_locks(&mut c, env.profile("alex"), &scope_set(["read:labs"])).await?;
+    let narrowed = scope_set(["read:summary", "read:records"]);
+    set_grant(
+        &mut c,
+        env.user("alex"),
+        env.profile("lucia"),
+        "guardian",
+        Some(&narrowed),
+        None,
+        None,
+    )
+    .await?;
+
+    let want = [
+        ("active", json!("active"), Value::Null),
+        ("revoked", json!("revoked"), json!("person")),
+        ("expired", json!("expired"), Value::Null),
+        ("locked out", json!("locked_out"), Value::Null),
+        ("lock", json!("revoked"), json!("locked")),
+    ];
+    for (label, state, reason) in &want {
+        assert_eq!(
+            state_of(&mut alex, "alex", label).await?,
+            (state.clone(), reason.clone()),
+            "{label}"
+        );
+    }
+    assert_eq!(
+        state_of(&mut alex, "lucia", "narrowed").await?,
+        (json!("revoked"), json!("access_changed"))
+    );
+    // the list never says active for a link that answers 404: the old field is gone
+    let r = alex.get("/api/profiles/alex/shl").await?;
+    assert!(r.json["items"][0].get("active").is_none(), "{:?}", r.json);
+
+    // sharing off pauses what is live, and changes nothing else
+    env.settings.share_url = None;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    assert_eq!(
+        state_of(&mut alex, "alex", "active").await?,
+        (json!("paused"), json!("sharing_off"))
+    );
+    assert_eq!(
+        state_of(&mut alex, "alex", "revoked").await?,
+        (json!("revoked"), json!("person"))
+    );
+    Ok(())
+}
+
+/// A lock ends a link; it does not pause it. Locking a category revokes every link that carries
+/// it at that moment, and so does narrowing a creator's grant below a category a link carries.
+/// Lifting the lock or widening the grant again brings back neither the link nor a file location
+/// it handed out, and the file is deleted at once. A link without the category keeps working.
+#[tokio::test]
+async fn a_lock_or_a_narrowed_grant_ends_a_link_for_good() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let mut c = env.pool().acquire().await?;
+    let files = |id: String| {
+        let pool = env.pool().clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("select count(*) from shl_file where shl_id = $1::uuid")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+        }
+    };
+    let none = scope_set(Vec::<&str>::new());
+
+    let (made, labs) = share(&mut alex, "alex", json!({"categories": ["read:labs"]})).await?;
+    let labs_id = made["link"]["id"].as_str().unwrap_or_default().to_string();
+    let (_, records) = share(
+        &mut alex,
+        "alex",
+        json!({"label": "records", "categories": ["read:records"]}),
+    )
+    .await?;
+    let loc = location(&manifest(&env, &labs, None).await?);
+    set_locks(&mut c, env.profile("alex"), &scope_set(["read:labs"])).await?;
+    assert_eq!(files(labs_id.clone()).await?, 0, "the lock deleted the file at once");
+    set_locks(&mut c, env.profile("alex"), &none).await?;
+    assert_eq!(
+        manifest(&env, &labs, None).await?.status,
+        StatusCode::NOT_FOUND,
+        "unlocking brings nothing back"
+    );
+    assert_eq!(env.anon().get(&loc).await?.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        manifest(&env, &records, None).await?.status,
+        StatusCode::OK,
+        "the lock ends only what it closes"
+    );
+    assert_eq!(
+        state_of(&mut alex, "alex", "records").await?,
+        (json!("active"), Value::Null)
+    );
+
+    // a guardian's grant on Lucía narrowed below labs, then widened again
+    let (_, pl) = share(&mut alex, "lucia", json!({"categories": ["read:labs"]})).await?;
+    let loc = location(&manifest(&env, &pl, None).await?);
+    let narrowed = scope_set(["read:summary", "read:records"]);
+    set_grant(
+        &mut c,
+        env.user("alex"),
+        env.profile("lucia"),
+        "guardian",
+        Some(&narrowed),
+        None,
+        None,
+    )
+    .await?;
+    set_grant(
+        &mut c,
+        env.user("alex"),
+        env.profile("lucia"),
+        "guardian",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(
+        manifest(&env, &pl, None).await?.status,
+        StatusCode::NOT_FOUND,
+        "widening brings nothing back"
+    );
+    assert_eq!(env.anon().get(&loc).await?.status, StatusCode::NOT_FOUND);
+
+    // a grant that runs out by itself: no write marks it, so the list and the scheduler end the link
+    let (_, pl) = share(&mut alex, "lucia", json!({"label": "runs out"})).await?;
+    sqlx::query(
+        "update profile_grant set expires_at = clock_timestamp() + interval '1 second' \
+         where user_id = $1 and profile_id = $2",
+    )
+    .bind(env.user("alex"))
+    .bind(env.profile("lucia"))
+    .execute(env.pool())
+    .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(manifest(&env, &pl, None).await?.status, StatusCode::NOT_FOUND);
+    ownhealth_core::sources::scheduler_tick(&job_ctx(&env)).await?;
+    set_grant(
+        &mut c,
+        env.user("alex"),
+        env.profile("lucia"),
+        "guardian",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(
+        manifest(&env, &pl, None).await?.status,
+        StatusCode::NOT_FOUND,
+        "a new grant brings nothing back"
+    );
+    let reason: Option<String> = sqlx::query_scalar("select revoked_reason from shl where label = 'runs out'")
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(reason.as_deref(), Some("access_changed"));
+    Ok(())
+}
+
+/// A file request that waits on the link's row lock past its ticket's hour is refused: the deadline
+/// is read on the clock once the lock is held, not at the start of the request's transaction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_request_that_waits_past_its_ticket_hour_is_refused() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let (made, pl) = share(&mut alex, "alex", json!({})).await?;
+    let id = made["link"]["id"].as_str().unwrap_or_default().to_string();
+    let loc = location(&manifest(&env, &pl, None).await?);
+    sqlx::query("update shl_access set ticket_expires_at = clock_timestamp() + interval '1 second' where ticket_sha256 is not null")
+        .execute(env.pool())
+        .await?;
+    // someone else holds the link's row (a manifest request, say) across the ticket's deadline
+    let mut holder = env.pool().begin().await?;
+    sqlx::query("select 1 from shl where id = $1::uuid for update")
+        .bind(&id)
+        .execute(&mut *holder)
+        .await?;
+    let mut c = env.anon();
+    let waiting = tokio::spawn(async move { c.get(&loc).await });
+    tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+    holder.commit().await?;
+    let r = waiting.await??;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{:?}", r.json);
     Ok(())
 }

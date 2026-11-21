@@ -102,8 +102,9 @@ pub async fn seal(
 
 /// How many records a link of these categories leaves out because they are sensitive (mental
 /// health, reproductive or sexual health): the current rows so tagged in the sections whose domain
-/// the link carries. No link carries `read:sensitive`, so none of them is ever in the file; the
-/// person creating the link sees the count, the recipient never does.
+/// the link carries. No link carries `read:sensitive`, so none of them is ever in the file. The
+/// person creating the link sees the count only when they hold `read:sensitive` (routes/shl.rs
+/// create); the recipient never does, and the audit row always keeps it.
 pub async fn sensitive_left_out(conn: &mut PgConnection, profile_id: Uuid, scopes: &Scopes) -> Result<i64> {
     let mut n = 0;
     for (table, domain) in ips::section_tables() {

@@ -9,7 +9,8 @@
 //! GET     /api/shl/{id}/file/{ticket}        public: the file (application/jose), at most 1 h after the manifest
 //! GET     /api/profiles/{p}/shl              owner or guardian    the profile's links
 //! POST    /api/profiles/{p}/shl              owner or guardian + step-up
-//!                                            {categories?, days?, passcode?, label?, lang?} -> {link, shlink}
+//!                                            {categories?, days?, passcode?, label?, lang?}
+//!                                            -> {link, shlink, left_out?}
 //! GET     /api/profiles/{p}/shl/{id}/access  owner or guardian    who opened it, newest first
 //! DELETE  /api/profiles/{p}/shl/{id}         owner or guardian    revoke: the file is deleted
 //! ```
@@ -24,7 +25,9 @@
 //! token never reaches these routes (`Caller` refuses it). No MCP tool creates, lists or extends a
 //! link (section 4.2). A link answers only while it is live, sharing is on, its creator may still
 //! share the profile with every category the link carries (a lock set or a grant narrowed after
-//! creation stops it), and the creator's login is open. Each public answer writes one shl_access
+//! creation stops it), and the creator's login is open. A lock set or a grant narrowed below a
+//! category a link carries also revokes that link at once (migration 1270, shl_end_unshareable), so
+//! lifting the lock later brings nothing back. Each public answer writes one shl_access
 //! row (the access log the owner reads, with the client address: behind a proxy listed in
 //! OWNHEALTH_TRUSTED_PROXIES, the one it forwarded) and one audit row (actor share, via share). A
 //! link answers RATE_PER_HOUR times in any hour; past that it says 429 with Retry-After, the
@@ -79,7 +82,7 @@ fn msg(key: &str) -> &'static str {
         "summary" => "This profile's summary is locked, so it cannot be shared.",
         "recipient" => "The manifest request needs a recipient.",
         "passcode" => "The passcode is not right.",
-        "rate" => "This link answers 60 times an hour.",
+        "rate" => "This link answers at most 60 times an hour.",
         _ => "No such link.",
     }
 }
@@ -148,7 +151,9 @@ struct Live {
 /// count of incorrect passcodes even in the face of parallel requests). A link out of attempts is
 /// disabled, so not live. The creator's right to share is checked on every request, as the
 /// calendar feed re-checks its creator: the role, and every category the link carries against the
-/// creator's categories today minus the profile's locks today.
+/// creator's categories today minus the profile's locks today. The deadlines are read on the clock
+/// once the row lock is held (`clock_timestamp()`, re-read after a wait for the lock), never at the
+/// transaction's start, so a request that waited past a deadline is refused.
 async fn live(conn: &mut PgConnection, id: &str) -> Result<Option<Live>, ApiError> {
     if !share::is_segment(id) {
         return Ok(None);
@@ -169,10 +174,10 @@ async fn live(conn: &mut PgConnection, id: &str) -> Result<Option<Live>, ApiErro
          join profile p on p.id = s.profile_id \
          join app_user u on u.id = s.created_by \
          join profile_grant g on g.user_id = s.created_by and g.profile_id = s.profile_id \
-         where s.manifest_sha256 = $1 and s.revoked_at is null and s.expires_at > now() \
+         where s.manifest_sha256 = $1 and s.revoked_at is null and s.expires_at > clock_timestamp() \
          and (s.attempts_left is null or s.attempts_left > 0) \
          and u.disabled_at is null and g.role = any($2) and not g.break_glass \
-         and (g.expires_at is null or g.expires_at > now()) \
+         and (g.expires_at is null or g.expires_at > clock_timestamp()) \
          for update of s",
     )
     .bind(share::sha256(id))
@@ -394,7 +399,8 @@ async fn serve_file(rt: &Runtime, id: &str, ticket: &str, meta: &Meta) -> Result
     let mut tx = rt.pool.begin().await?;
     let link = live(&mut tx, id).await?.ok_or_else(gone)?;
     let recipient: Option<String> = sqlx::query_scalar(
-        "select recipient from shl_access where shl_id = $1 and ticket_sha256 = $2 and ticket_expires_at > now()",
+        "select recipient from shl_access where shl_id = $1 and ticket_sha256 = $2 \
+         and ticket_expires_at > clock_timestamp()",
     )
     .bind(link.id)
     .bind(share::sha256(ticket))
@@ -482,19 +488,48 @@ type Listed = (
     Option<DateTime<Utc>>,
     i64,
     Option<DateTime<Utc>>,
+    Option<String>,
 );
 
 const COLS: &str = "s.id, s.label, s.flag, s.attempts_left, s.categories, s.lang, s.created_at, s.expires_at, \
                     s.revoked_at, (select count(*) from shl_access a where a.shl_id = s.id and a.kind = 'manifest'), \
-                    (select max(a.at) from shl_access a where a.shl_id = s.id)";
+                    (select max(a.at) from shl_access a where a.shl_id = s.id), s.revoked_reason";
 
-fn link_out(r: &Listed) -> Value {
+/// What a recipient would meet, and why: `active`; `paused` while sharing is off on the instance
+/// (reason `sharing_off`; it comes back when sharing is on again); `revoked` (reason `person`,
+/// `locked` or `access_changed`, for good); `expired`; `locked_out` after the last wrong passcode.
+fn state(r: &Listed, sharing: bool) -> (&'static str, Option<&str>) {
+    if r.8.is_some() {
+        ("revoked", r.11.as_deref())
+    } else if r.7 <= Utc::now() {
+        ("expired", None)
+    } else if r.3 == Some(0) {
+        ("locked_out", None)
+    } else if !sharing {
+        ("paused", Some("sharing_off"))
+    } else {
+        ("active", None)
+    }
+}
+
+fn link_out(r: &Listed, sharing: bool) -> Value {
+    let (state, reason) = state(r, sharing);
     json!({
         "id": r.0, "label": r.1, "passcode": r.2 == "P", "attempts_left": r.3, "categories": r.4,
         "lang": r.5, "created_at": r.6, "expires_at": r.7, "revoked_at": r.8,
-        "active": r.8.is_none() && r.7 > Utc::now() && r.3 != Some(0),
-        "opened": r.9, "last_access_at": r.10,
+        "state": state, "reason": reason, "opened": r.9, "last_access_at": r.10,
     })
+}
+
+/// Revoke the profile's links whose creator may no longer share what they carry. The writes that
+/// take a category away do it at once (migration 1270's triggers); a grant that runs out by itself
+/// has no write, so the list (and the scheduler) settle it before reading.
+async fn end_unshareable(conn: &mut PgConnection, profile_id: Uuid) -> R<()> {
+    sqlx::query("select shl_end_unshareable($1, 'access_changed')")
+        .bind(profile_id)
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 async fn audit(
@@ -516,10 +551,12 @@ async fn audit(
     Ok(())
 }
 
-/// Each read writes one audit row, as every read of the profile does.
+/// Each read writes one audit row, as every read of the profile does. Each link says the state a
+/// recipient would meet (`state`).
 async fn list(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>) -> R {
     let mut tx = rt.pool.begin().await?;
     let perm = sharer(&mut tx, &caller, &p).await?;
+    end_unshareable(&mut tx, perm.profile.id).await?;
     let rows: Vec<Listed> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "select {COLS} from shl s where s.profile_id = $1 order by s.created_at desc, s.id"
     )))
@@ -536,7 +573,8 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>) 
     )
     .await?;
     tx.commit().await?;
-    ok(json!({"items": rows.iter().map(link_out).collect::<Vec<_>>()}))
+    let sharing = rt.settings.share_url.is_some();
+    ok(json!({"items": rows.iter().map(|r| link_out(r, sharing)).collect::<Vec<_>>()}))
 }
 
 /// The key and the manifest id are in this answer and nowhere else, ever.
@@ -643,12 +681,14 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
         flag == "P",
         b.label.as_deref(),
     );
-    // the person creating the link sees what stays home; the recipient's file never says
-    Ok(answer(
-        StatusCode::CREATED,
-        json!({"link": link_out(&row), "shlink": link, "left_out": {"sensitive": sensitive}}),
-        &[],
-    ))
+    // the person creating the link sees what stays home, when they may read it; the recipient's
+    // file never says. A creator without read:sensitive gets no count at all, not even 0: a 0 would
+    // tell them there is nothing to hide (security-privacy.md: harm inside the household)
+    let mut out = json!({"link": link_out(&row, true), "shlink": link});
+    if perm.scopes.contains("read:sensitive") {
+        out["left_out"] = json!({"sensitive": sensitive});
+    }
+    Ok(answer(StatusCode::CREATED, out, &[]))
 }
 
 /// One link of the profile, locked: its id, and whether it is already revoked.
@@ -703,7 +743,7 @@ async fn revoke(State(rt): State<Runtime>, caller: Caller, Path((p, id)): Path<(
     if revoked {
         return ok(json!({"id": id, "revoked": true}));
     }
-    sqlx::query("update shl set revoked_at = now() where id = $1")
+    sqlx::query("update shl set revoked_at = now(), revoked_reason = 'person' where id = $1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
