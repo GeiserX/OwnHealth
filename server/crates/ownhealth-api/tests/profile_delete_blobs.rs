@@ -1418,3 +1418,50 @@ async fn a_folder_inbox_linked_out_of_the_inbox_keeps_outside_files() -> R {
     );
     Ok(())
 }
+
+/// Make every audit row of `resource_type` fail, the way a full disk or a broken database would.
+async fn fail_audit(env: &Env, resource_type: &str) -> R {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "create function test_fail_audit() returns trigger language plpgsql as $$ begin \
+         if new.resource_type = '{resource_type}' then raise exception 'the audit is down'; end if; \
+         return new; end $$"
+    )))
+    .execute(env.pool())
+    .await?;
+    sqlx::query(
+        "create trigger test_fail_audit before insert on audit_event for each row \
+         execute function test_fail_audit()",
+    )
+    .execute(env.pool())
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_done_delete_answers_success_when_its_last_audit_fails() -> R {
+    let env = Env::new(true).await?;
+    let (_, report) = document(
+        &env,
+        env.profile("alex"),
+        "%PDF-1.7 synthetic LabNorte report",
+        "application/pdf",
+    )
+    .await?;
+    fail_audit(&env, "blob").await?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "a done delete answered a failure: {}", r.json);
+    assert_eq!(
+        (&r.json["deleted"], &r.json["blobs"], &r.json["blobs_pending"]),
+        (&json!("alex"), &json!(1), &json!(0)),
+        "{}",
+        r.json
+    );
+    assert!(!stored(env.rt.blobs.root()).contains(&report));
+    assert_eq!(
+        env.scalar_i64("select count(*) from profile where slug = 'alex'")
+            .await?,
+        0
+    );
+    Ok(())
+}

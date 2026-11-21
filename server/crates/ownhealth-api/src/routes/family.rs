@@ -743,19 +743,26 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     settle(rt, forget_job, "folders", failed).await;
     // what really happened to the files: removed now, and waiting for the retry
     let pending = stuck.len();
-    let mut conn = rt.pool.acquire().await?;
-    audit(
-        &mut conn,
-        p,
-        Audit {
-            resource_type: Some("blob"),
-            resource_ids: Some(vec![profile_id.to_string()]),
-            rows_out: Some(i32::try_from(removed).unwrap_or(i32::MAX)),
-            args_summary: Some(format!("blobs={removed} pending={pending}")),
-            ..Audit::new("purge", "DELETE /api/profiles", Some(profile_id))
-        },
-    )
-    .await?;
+    // The delete is done: a failure from here on is only logged, never shown as a failed delete.
+    let said = async {
+        let mut conn = rt.pool.acquire().await?;
+        audit(
+            &mut conn,
+            p,
+            Audit {
+                resource_type: Some("blob"),
+                resource_ids: Some(vec![profile_id.to_string()]),
+                rows_out: Some(i32::try_from(removed).unwrap_or(i32::MAX)),
+                args_summary: Some(format!("blobs={removed} pending={pending}")),
+                ..Audit::new("purge", "DELETE /api/profiles", Some(profile_id))
+            },
+        )
+        .await
+    }
+    .await;
+    if let Err(e) = said {
+        tracing::warn!(error = ?e, "could not audit what a done delete did with the files");
+    }
     Ok(json!({"deleted": slug, "rows": result.rows_json(), "blobs": removed, "blobs_pending": pending}))
 }
 
