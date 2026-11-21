@@ -3825,6 +3825,7 @@ dependencies = [
  "chrono",
  "http",
  "icalendar",
+ "ipnet",
  "ownhealth-auth",
  "ownhealth-core",
  "ownhealth-devices",

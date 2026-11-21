@@ -9,7 +9,7 @@
 //! other lane G routers: tokens, family, audit, export.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Path, Query, Request, State};
@@ -374,6 +374,39 @@ impl Meta {
     pub fn cookie(&self, name: &str) -> Option<String> {
         self.cookies.get(name).map(|c| c.value().to_string())
     }
+
+    /// The client's address: the peer, unless the peer is a trusted proxy (`trusted`, from
+    /// OWNHEALTH_TRUSTED_PROXIES). Then `X-Forwarded-For` is read from the right, past every trusted
+    /// hop, so a client cannot name itself by sending the header: what it wrote sits left of the
+    /// address the first trusted proxy saw.
+    pub fn client_ip(&self, trusted: &[ipnet::IpNet]) -> Option<String> {
+        client_ip(self.ip.as_deref(), &self.headers, trusted)
+    }
+}
+
+pub fn client_ip(peer: Option<&str>, headers: &HeaderMap, trusted: &[ipnet::IpNet]) -> Option<String> {
+    let is_trusted = |ip: &IpAddr| trusted.iter().any(|n| n.contains(ip));
+    let peer_ip: IpAddr = peer?.parse().ok()?;
+    if !is_trusted(&peer_ip) {
+        return Some(peer_ip.to_string());
+    }
+    let hops: Vec<&str> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .collect();
+    let mut client = peer_ip;
+    for hop in hops.iter().rev() {
+        // past an unreadable hop nothing is trusted: keep the last address a trusted proxy gave
+        let Ok(ip) = hop.parse::<IpAddr>() else { break };
+        client = ip;
+        if !is_trusted(&ip) {
+            break;
+        }
+    }
+    Some(client.to_string())
 }
 
 /// `dependencies=[Public]`: the same-origin check of the public login routes (no principal yet).
@@ -1475,4 +1508,59 @@ pub fn router() -> Router<Runtime> {
         .route("/auth/enroll/password", post(enroll_password))
         .route("/auth/oidc/login", get(oidc_login))
         .route("/auth/oidc/callback", get(oidc_callback))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn xff(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", v.parse().expect("header"));
+        h
+    }
+
+    /// Documentation addresses only (RFC 5737): the client 203.0.113.9 behind a tunnel and Caddy.
+    #[test]
+    fn x_forwarded_for_counts_only_behind_a_trusted_proxy() {
+        let trusted: Vec<ipnet::IpNet> = vec!["172.16.0.0/12".parse().expect("net")];
+        // the peer is the trusted proxy: the first untrusted hop from the right
+        let chain = xff("203.0.113.9, 172.18.0.1");
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &chain, &trusted).as_deref(),
+            Some("203.0.113.9")
+        );
+        // a client that sends its own header stays left of the address the proxy saw
+        let spoof = xff("198.51.100.66, 203.0.113.9, 172.18.0.1");
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &spoof, &trusted).as_deref(),
+            Some("203.0.113.9")
+        );
+        // the peer is not trusted: its header means nothing
+        assert_eq!(
+            client_ip(Some("198.51.100.20"), &chain, &trusted).as_deref(),
+            Some("198.51.100.20")
+        );
+        // no trusted proxy configured: the peer, whatever the header says
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &chain, &[]).as_deref(),
+            Some("172.18.0.3")
+        );
+        // every hop trusted, or no header: the last address a trusted proxy gave
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &xff("172.18.0.1"), &trusted).as_deref(),
+            Some("172.18.0.1")
+        );
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &HeaderMap::new(), &trusted).as_deref(),
+            Some("172.18.0.3")
+        );
+        // an unreadable hop stops the walk at the last trusted one
+        let junk = xff("203.0.113.9, not-an-ip, 172.18.0.1");
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &junk, &trusted).as_deref(),
+            Some("172.18.0.1")
+        );
+        assert_eq!(client_ip(None, &chain, &trusted), None);
+    }
 }
