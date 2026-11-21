@@ -249,7 +249,7 @@ async fn check_no_code_as_the_owner(db: &TestDb, role: &str, password: &str) -> 
     let e = attack.expect_err("the app role must not attach the chain function to its own table");
     assert!(
         e.to_string()
-            .contains("permission denied for function oh_audit_chain_link"),
+            .contains("permission denied for function public.oh_audit_chain_link"),
         "{e}"
     );
     Ok(())

@@ -32,24 +32,32 @@ $$;
 -- and it is taken only at commit, after the transaction's own work, so it waits on nothing else.
 -- A repeatable read snapshot cannot see a link committed after it began: it would take a stale head
 -- and fail on seq only when another commit raced it, so such a transaction is refused every time.
--- It runs as the owner, with a fixed search_path, so the app role needs no right on audit_chain.
+-- It runs as the owner, so the app role needs no right on audit_chain. No other role may call it or
+-- attach it to a table (PUBLIC loses EXECUTE below), it looks names up in pg_catalog only, and it
+-- refuses every table but public.audit_event before it reads the row: a row of another table could
+-- reach a cast to audit_event that its creator wrote, and that cast would then run as the owner.
 create function oh_audit_chain_link() returns trigger language plpgsql
-  security definer set search_path = pg_catalog, public, pg_temp as $$
+  security definer set search_path = pg_catalog, pg_temp as $$
 declare
-  head audit_chain;
+  head public.audit_chain;
   prev bytea;
 begin
+  if tg_relid <> 'public.audit_event'::regclass then
+    raise exception 'oh_audit_chain_link links public.audit_event only'
+      using errcode = 'wrong_object_type';
+  end if;
   if current_setting('transaction_isolation') <> 'read committed' then
     raise exception 'audit_event is written only in read committed transactions'
       using errcode = 'feature_not_supported';
   end if;
   perform pg_advisory_xact_lock(hashtext('ownhealth.audit_chain'));
-  select * into head from audit_chain order by seq desc limit 1;
+  select * into head from public.audit_chain order by seq desc limit 1;
   prev := coalesce(head.hash, decode(repeat('00', 32), 'hex'));
-  insert into audit_chain (seq, event_id, prev_hash, hash)
-    values (coalesce(head.seq, 0) + 1, new.id, prev, sha256(prev || oh_audit_row_v1(new)));
+  insert into public.audit_chain (seq, event_id, prev_hash, hash)
+    values (coalesce(head.seq, 0) + 1, new.id, prev, sha256(prev || public.oh_audit_row_v1(new)));
   return null;
 end $$;
+revoke all on function oh_audit_chain_link() from public;
 create constraint trigger audit_event_chain after insert on audit_event
   deferrable initially deferred for each row execute function oh_audit_chain_link();
 

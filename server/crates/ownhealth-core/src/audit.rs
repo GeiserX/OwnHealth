@@ -598,7 +598,7 @@ mod tests {
             &format!(
                 "alter function oh_audit_row_v1(audit_event) rename to oh_audit_row_v1_real; \
                  create function oh_audit_row_v1(e audit_event) returns bytea language sql stable as $f$ \
-                   select case when e.id <= {last} then oh_audit_row_v1_real(e) else ''::bytea end $f$"
+                   select case when e.id <= {last} then public.oh_audit_row_v1_real(e) else ''::bytea end $f$"
             ),
         )
         .await?;
@@ -800,10 +800,15 @@ mod tests {
             ),
         )
         .await?;
-        // the app keeps writing through the view
+        // an audit write through the view fails at commit: the chain function links
+        // public.audit_event only, and the table under the view is no longer that table
         let mut tx = db.pool.begin().await?;
         write_audit(&mut tx, &AuditEvent::new("user", "ui", "read")).await?;
-        tx.commit().await?;
+        let err = tx
+            .commit()
+            .await
+            .expect_err("the chain function must refuse the renamed table");
+        assert!(err.to_string().contains("links public.audit_event only"), "{err}");
         let err = check(&db.pool)
             .await
             .expect_err("a view in place of audit_event must stop the check");
