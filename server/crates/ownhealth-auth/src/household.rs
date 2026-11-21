@@ -763,14 +763,18 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
         .execute(&mut *conn)
         .await?
         .rows_affected();
-    // A Paperless tag rule that files to the profile goes; the household inbox keeps its other rules.
+    // A Paperless tag rule that files to the profile goes; the household inbox keeps its other rules. The
+    // settings route takes any id form `Uuid::parse_str` reads (hyphens or not, braces, a URN), so the
+    // value is compared without those; a value that is no id at all stays and never stops the delete.
     sqlx::query(
         "update source set config = jsonb_set(config, '{profile_by_tag}', coalesce((select jsonb_object_agg(k, v) \
-         from jsonb_each(config->'profile_by_tag') e(k, v) where v <> to_jsonb($1::uuid::text)), '{}'::jsonb)) \
+         from jsonb_each(config->'profile_by_tag') e(k, v) \
+         where regexp_replace(lower(v #>> '{}'), '^urn:uuid:|[{}-]', '', 'g') is distinct from $1), '{}'::jsonb)) \
          where jsonb_typeof(config->'profile_by_tag') = 'object' \
-         and exists (select 1 from jsonb_each(config->'profile_by_tag') e(k, v) where v = to_jsonb($1::uuid::text))",
+         and exists (select 1 from jsonb_each(config->'profile_by_tag') e(k, v) \
+         where regexp_replace(lower(v #>> '{}'), '^urn:uuid:|[{}-]', '', 'g') = $1)",
     )
-    .bind(profile_id)
+    .bind(profile_id.simple().to_string())
     .execute(&mut *conn)
     .await?;
     // The folder inboxes whose folders hold the profile's files: the caller removes them after the commit.

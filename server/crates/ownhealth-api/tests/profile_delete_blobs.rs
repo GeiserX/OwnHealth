@@ -500,19 +500,27 @@ async fn a_paperless_tag_rule_stops_naming_the_person() -> R {
     let paperless = household_source(
         &env,
         "paperless",
+        // the settings route accepts any form Uuid::parse_str reads, so a rule can name Alex without
+        // hyphens, in braces or as a URN; a value that is no id at all must not stop the delete
         json!({"base_url": "https://paperless.rivera.example", "health_tag": 3,
-               "profile_by_tag": {"9": alex, "4": sam}}),
+               "profile_by_tag": {"9": alex, "4": sam, "5": alex.simple().to_string(),
+                                  "6": alex.braced().to_string(), "7": alex.urn().to_string(),
+                                  "8": "no-es-un-id"}}),
     )
     .await?;
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
-    // the tag rule that filed to Alex goes, Sam's stays, and no inbox setting names Alex any more
+    // the tag rules that filed to Alex go, Sam's stays, and no inbox setting names Alex any more
     let config: Value = sqlx::query_scalar("select config from source where id = $1")
         .bind(paperless)
         .fetch_one(env.pool())
         .await?;
-    assert_eq!(config["profile_by_tag"], json!({"4": sam}), "{config}");
+    assert_eq!(
+        config["profile_by_tag"],
+        json!({"4": sam, "8": "no-es-un-id"}),
+        "{config}"
+    );
     assert_eq!(
         config["base_url"],
         json!("https://paperless.rivera.example"),
