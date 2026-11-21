@@ -14,9 +14,11 @@ use ownhealth_core::access::{
     set_grant,
 };
 use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::blobs::sha256_hex_to_bytes;
+use ownhealth_core::jobs::{EnqueueOptions, HandlerResult, Job, JobContext, JobError, enqueue, register_handler};
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
-use sqlx::{AssertSqlSafe, Connection, PgConnection};
+use sqlx::{AssertSqlSafe, Connection, PgConnection, PgPool};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
@@ -623,6 +625,8 @@ fn owned(table: &str) -> &'static str {
         .map_or("false", |(_, _, owned)| owned)
 }
 
+/// The job that retries removing the files a profile delete could not remove at once.
+pub const UNLINK_JOB: &str = "blobs.unlink";
 /// Blob columns that never belong to one profile, so a profile delete leaves them alone. None yet.
 pub const HOUSEHOLD_BLOB_COLUMNS: &[(&str, &str)] = &[];
 const KEEP: [&str; 3] = ["profile", "profile_grant", "audit_event"];
@@ -673,6 +677,7 @@ async fn still_referenced(conn: &mut PgConnection, sha: &[u8]) -> Result<bool> {
 /// folders of the folder inboxes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deleted {
+    pub household_id: Uuid,
     pub rows: Vec<(String, u64)>,
     pub blobs: Vec<String>,
     /// The household's folder inboxes, read before the delete: their folders may hold the profile's files.
@@ -760,6 +765,10 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     .bind(profile_id)
     .fetch_all(&mut *conn)
     .await?;
+    let household_id: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(profile_id)
+        .fetch_one(&mut *conn)
+        .await?;
     // candidate_row -> observation -> src -> candidate_row is a cycle: cut it first.
     sqlx::query(
         "update candidate_row set observation_id = null where observation_id in \
@@ -860,6 +869,7 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     }
     orphans.sort();
     Ok(Deleted {
+        household_id,
         rows: counts.into_iter().filter(|(_, n)| *n > 0).collect(),
         blobs: orphans,
         folders: folders
@@ -867,6 +877,66 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
             .map(|(config, own)| FolderInbox { config, own })
             .collect(),
     })
+}
+
+/// Queue a retry for the files a profile delete could not remove after its commit (a busy or
+/// read-only disk). The job checks each one again, so a file a new arrival named since stays.
+pub async fn retry_unlink(pool: &PgPool, household_id: Uuid, blobs: &[String]) -> Result<Option<i64>> {
+    let mut conn = pool.acquire().await?;
+    Ok(enqueue(
+        &mut conn,
+        UNLINK_JOB,
+        &json!({"household_id": household_id, "blobs": blobs}),
+        EnqueueOptions::default(),
+    )
+    .await?)
+}
+
+async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {
+    let shas: Vec<String> = job
+        .payload
+        .get("blobs")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default();
+    let mut conn = ctx.pool.acquire().await?;
+    let (mut removed, mut failed) = (0i32, 0usize);
+    for sha in &shas {
+        let Ok(bytes) = sha256_hex_to_bytes(sha) else {
+            continue;
+        };
+        if still_referenced(&mut conn, &bytes).await? {
+            continue;
+        }
+        match ctx.blobs.delete(sha) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "blob delete failed again");
+                failed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        write_audit(
+            &mut conn,
+            &AuditEvent {
+                resource_type: Some("blob".into()),
+                rows_out: Some(removed),
+                args_summary: Some(format!("blobs={removed}")),
+                ..AuditEvent::new("system", "job", "purge")
+            },
+        )
+        .await?;
+    }
+    if failed > 0 {
+        return Err(JobError::retry(format!("{failed} files could not be removed yet")));
+    }
+    Ok(Some(json!({"removed": removed})))
+}
+
+pub fn register() {
+    register_handler(UNLINK_JOB, |ctx, job| Box::pin(unlink_job(ctx, job)));
 }
 
 /// Slugs of profiles nobody else could manage once this login closes (no other owner or guardian;

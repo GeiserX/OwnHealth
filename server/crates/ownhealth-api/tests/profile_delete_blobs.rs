@@ -8,13 +8,16 @@ mod support;
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
+use ownhealth_auth::household::UNLINK_JOB;
 use ownhealth_core::Runtime;
 use ownhealth_core::blobs::sha256_hex_to_bytes;
 use ownhealth_core::demo_pdf::{LabReport, LabRow, lab_report_pdf};
 use ownhealth_core::documents::{NewDocument, create_document};
+use ownhealth_core::jobs::{JobContext, drain};
 use ownhealth_core::provenance::{SrcIn, create_src};
 use ownhealth_core::secrets::{SecretBox, SecretString, store_secret};
 use ownhealth_core::sources::{self, NewSource};
@@ -693,5 +696,79 @@ async fn the_scanner_folder_keeps_no_copy_of_the_persons_files() -> R {
     assert!(root.join("sam/LN-2.pdf").is_file(), "Sam's drop went too");
     let left = stored(env.rt.blobs.root());
     assert!(docs.iter().all(|d| !left.contains(d)), "{left:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_file_the_delete_could_not_remove_goes_on_the_retry() -> R {
+    let env = Env::new(true).await?;
+    ownhealth_auth::register();
+    let (alex, sam) = (env.profile("alex"), env.profile("sam"));
+    let (_, stuck) = document(
+        &env,
+        alex,
+        "%PDF-1.7 synthetic report the disk would not let go",
+        "application/pdf",
+    )
+    .await?;
+    let (_, again) = document(
+        &env,
+        alex,
+        "%PDF-1.7 synthetic report Sam uploads again later",
+        "application/pdf",
+    )
+    .await?;
+    // the file cannot be removed right now (a folder where the file should be)
+    let path = env.rt.blobs.path(&stuck)?;
+    std::fs::remove_file(&path)?;
+    std::fs::create_dir_all(path.join("busy"))?;
+
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(r.json["blobs"], json!(2), "{}", r.json);
+    let queued: Value = sqlx::query_scalar("select payload from job where kind = $1")
+        .bind(UNLINK_JOB)
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(queued["blobs"], json!([stuck.clone()]), "{queued}");
+
+    // the disk lets go; meanwhile Sam uploads the other report, so its file is named again
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+    std::fs::remove_dir_all(&path)?;
+    assert_eq!(
+        env.rt
+            .blobs
+            .put_bytes(b"%PDF-1.7 synthetic report the disk would not let go")?,
+        stuck
+    );
+    sqlx::query("update job set payload = jsonb_set(payload, '{blobs}', payload->'blobs' || to_jsonb($1::text))")
+        .bind(&again)
+        .execute(env.pool())
+        .await?;
+    document(
+        &env,
+        sam,
+        "%PDF-1.7 synthetic report Sam uploads again later",
+        "application/pdf",
+    )
+    .await?;
+    let ctx = JobContext::new(env.pool().clone(), Arc::new(env.settings.clone()), env.rt.blobs.clone());
+    let ran = drain(&ctx, "core", 5, Some(&[UNLINK_JOB.to_string()])).await?;
+    assert_eq!(ran, 1);
+
+    let left = stored(env.rt.blobs.root());
+    assert!(!left.contains(&stuck), "the retry left Alex's file");
+    assert!(left.contains(&again), "the retry removed a file Sam's document names");
+    let state: String = sqlx::query_scalar("select state from job where kind = $1")
+        .bind(UNLINK_JOB)
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(state, "done");
+    let audit: Vec<(String, Option<String>)> =
+        sqlx::query_as("select via, args_summary from audit_event where action = 'purge' and actor_kind = 'system'")
+            .fetch_all(env.pool())
+            .await?;
+    assert_eq!(audit, vec![("job".into(), Some("blobs=1".into()))]);
     Ok(())
 }

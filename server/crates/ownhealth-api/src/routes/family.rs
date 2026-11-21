@@ -711,10 +711,17 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     )
     .await?;
     tx.commit().await?;
+    let mut stuck = Vec::new();
     for sha in &result.blobs {
         if let Err(e) = rt.blobs.delete(sha) {
-            tracing::warn!(error = %e, "blob delete failed");
+            tracing::warn!(error = %e, "blob delete failed: a job retries it");
+            stuck.push(sha.clone());
         }
+    }
+    if !stuck.is_empty()
+        && let Err(e) = household::retry_unlink(&rt.pool, result.household_id, &stuck).await
+    {
+        tracing::error!(error = %e, "could not queue the retry of a blob delete");
     }
     // the profile's drops and filed copies in the folder inboxes
     for f in result.folders.clone() {
