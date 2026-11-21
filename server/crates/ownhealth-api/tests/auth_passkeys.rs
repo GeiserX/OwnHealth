@@ -398,3 +398,60 @@ async fn bodies_are_validated_like_fastapi() -> R {
     );
     Ok(())
 }
+
+/// A 422 never repeats a secret field (passcode, password, pin, secret, token), on any route: not
+/// in `input`, not in `msg`. The other fields still come back.
+#[tokio::test]
+async fn a_422_never_repeats_a_password() -> R {
+    let env = Env::new(false).await?;
+    let mut c = env.anon_at(LAN);
+    let secret = "SECRET-login-5521";
+    for body in [
+        json!({"name": 7, "password": secret}),
+        json!({"password": secret}),
+        json!({"name": "Alex Rivera", "password": secret, "nested": {"api_token": secret}, "extra": [{"pin": secret}]}),
+    ] {
+        let r = c.post("/api/auth/password/login", &body).await?;
+        if r.status == StatusCode::UNPROCESSABLE_ENTITY {
+            assert!(!r.json.to_string().contains(secret), "{body}: {:?}", r.json);
+        }
+    }
+    let r = c
+        .post("/api/auth/password/login", &json!({"name": 7, "password": secret}))
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert_eq!(
+        r.json["detail"][0]["input"]["name"], 7,
+        "the rest still comes back: {:?}",
+        r.json
+    );
+    // a password of the wrong type: serde names the value in its message
+    let r = c
+        .post(
+            "/api/auth/password/login",
+            &json!({"name": "Alex Rivera", "password": 55_214_455}), // ggignore: synthetic test value
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert!(!r.json.to_string().contains("55214455"), "{:?}", r.json);
+    // a field check of the handler (too long) on the password
+    let long = format!("SECRET-{}", "x".repeat(300));
+    let r = c
+        .post(
+            "/api/auth/password/login",
+            &json!({"name": "Alex Rivera", "password": long}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert!(!r.json.to_string().contains("SECRET-"), "{:?}", r.json);
+    // first run with a password
+    let r = c
+        .post(
+            "/api/auth/setup/password",
+            &json!({"display_name": 5, "password": secret}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert!(!r.json.to_string().contains(secret), "{:?}", r.json);
+    Ok(())
+}

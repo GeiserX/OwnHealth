@@ -9,7 +9,7 @@
 //! other lane G routers: tokens, family, audit, export.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Path, Query, Request, State};
@@ -53,11 +53,92 @@ impl IntoResponse for Fail {
     fn into_response(self) -> Response {
         match self {
             Fail::Api(e) => e.into_response(),
-            Fail::Invalid(errors) => {
+            Fail::Invalid(mut errors) => {
+                errors.iter_mut().for_each(redact_entry);
                 (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"detail": errors}))).into_response()
             }
         }
     }
+}
+
+/// The words that make a field secret: a field named with one of them (`password`, `new_password`,
+/// `api_token`, `pinCode`) is never repeated in a 422, on any route.
+const SECRET_WORDS: [&str; 5] = ["passcode", "password", "pin", "secret", "token"];
+
+/// True when a field name holds one of SECRET_WORDS as a word. Words split at `_`, `-` and the other
+/// non-alphanumerics, at lower-to-upper (`apiToken`), and before the last capital of an acronym
+/// that a word follows (`PINCode` is `pin` and `code`).
+fn is_secret_field(name: &str) -> bool {
+    let chars: Vec<char> = name.chars().collect();
+    let mut words: Vec<String> = vec![String::new()];
+    for (i, &ch) in chars.iter().enumerate() {
+        if !ch.is_ascii_alphanumeric() {
+            words.push(String::new());
+            continue;
+        }
+        let prev = i.checked_sub(1).and_then(|j| chars.get(j)).copied();
+        let next = chars.get(i + 1).copied();
+        let after_lower = prev.is_some_and(|p| p.is_ascii_lowercase());
+        let acronym_end = prev.is_some_and(|p| p.is_ascii_uppercase()) && next.is_some_and(|n| n.is_ascii_lowercase());
+        if ch.is_ascii_uppercase() && (after_lower || acronym_end) {
+            words.push(String::new());
+        }
+        if let Some(w) = words.last_mut() {
+            w.push(ch.to_ascii_lowercase());
+        }
+    }
+    words.iter().any(|w| SECRET_WORDS.contains(&w.as_str()))
+}
+
+/// Remove every secret field from a value, at any depth, and collect what they held.
+fn strip_secrets(v: &mut Value, found: &mut Vec<Value>) {
+    match v {
+        Value::Object(m) => {
+            let keys: Vec<String> = m.keys().filter(|k| is_secret_field(k)).cloned().collect();
+            for k in keys {
+                if let Some(x) = m.shift_remove(&k) {
+                    found.push(x);
+                }
+            }
+            m.values_mut().for_each(|x| strip_secrets(x, found));
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| strip_secrets(x, found)),
+        _ => {}
+    }
+}
+
+/// One 422 entry without a secret in it: an entry about a secret field loses its input, a body
+/// echoed as input loses its secret fields, and a message that quotes a secret value (serde names
+/// the value of a field of the wrong type) quotes `[redacted]` instead.
+fn redact_entry(e: &mut Value) {
+    let about_secret = e["loc"]
+        .as_array()
+        .and_then(|l| l.last())
+        .and_then(Value::as_str)
+        .is_some_and(is_secret_field);
+    let mut found = Vec::new();
+    if let Some(input) = e.get_mut("input") {
+        if about_secret {
+            found.push(std::mem::replace(input, Value::Null));
+        } else {
+            strip_secrets(input, &mut found);
+        }
+    }
+    let Some(msg) = e["msg"].as_str() else { return };
+    let mut clean = msg.to_string();
+    for v in found.iter().filter_map(|v| match v {
+        Value::String(t) => Some(t.clone()),
+        Value::Number(_) | Value::Bool(_) => Some(v.to_string()),
+        _ => None,
+    }) {
+        if v.is_empty() {
+            continue;
+        }
+        for quoted in [format!("{v:?}"), format!("\"{v}\""), format!("`{v}`"), format!("'{v}'")] {
+            clean = clean.replace(&quoted, "\"[redacted]\"");
+        }
+    }
+    e["msg"] = json!(clean);
 }
 
 impl From<ApiError> for Fail {
@@ -374,6 +455,39 @@ impl Meta {
     pub fn cookie(&self, name: &str) -> Option<String> {
         self.cookies.get(name).map(|c| c.value().to_string())
     }
+
+    /// The client's address: the peer, unless the peer is a trusted proxy (`trusted`, from
+    /// OWNHEALTH_TRUSTED_PROXIES). Then `X-Forwarded-For` is read from the right, past every trusted
+    /// hop, so a client cannot name itself by sending the header: what it wrote sits left of the
+    /// address the first trusted proxy saw.
+    pub fn client_ip(&self, trusted: &[ipnet::IpNet]) -> Option<String> {
+        client_ip(self.ip.as_deref(), &self.headers, trusted)
+    }
+}
+
+pub fn client_ip(peer: Option<&str>, headers: &HeaderMap, trusted: &[ipnet::IpNet]) -> Option<String> {
+    let is_trusted = |ip: &IpAddr| trusted.iter().any(|n| n.contains(ip));
+    let peer_ip: IpAddr = peer?.parse().ok()?;
+    if !is_trusted(&peer_ip) {
+        return Some(peer_ip.to_string());
+    }
+    let hops: Vec<&str> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .collect();
+    let mut client = peer_ip;
+    for hop in hops.iter().rev() {
+        // past an unreadable hop nothing is trusted: keep the last address a trusted proxy gave
+        let Ok(ip) = hop.parse::<IpAddr>() else { break };
+        client = ip;
+        if !is_trusted(&ip) {
+            break;
+        }
+    }
+    Some(client.to_string())
 }
 
 /// `dependencies=[Public]`: the same-origin check of the public login routes (no principal yet).
@@ -1475,4 +1589,118 @@ pub fn router() -> Router<Runtime> {
         .route("/auth/enroll/password", post(enroll_password))
         .route("/auth/oidc/login", get(oidc_login))
         .route("/auth/oidc/callback", get(oidc_callback))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_422_entry_never_carries_a_secret() {
+        for name in [
+            "passcode",
+            "password",
+            "new_password",
+            "api_token",
+            "pinCode",
+            "client-secret",
+            "PIN",
+            "PINCode",
+            "APIToken",
+            "userPIN",
+        ] {
+            assert!(is_secret_field(name), "{name}");
+        }
+        for name in [
+            "name",
+            "pinned",
+            "Pinned",
+            "spinner",
+            "days",
+            "tokenizer",
+            "passwordless",
+            "HTTPStatus",
+        ] {
+            assert!(!is_secret_field(name), "{name}");
+        }
+        let mut body = error_entry(
+            "value_error",
+            vec![json!("body")],
+            "invalid type: integer `55214455`, expected a string",
+            json!({"name": "x", "password": 55_214_455, "more": [{"api_token": "t-1"}]}), // ggignore: synthetic test value
+            None,
+        );
+        redact_entry(&mut body);
+        assert_eq!(body["input"], json!({"name": "x", "more": [{}]}));
+        assert_eq!(body["msg"], "invalid type: integer \"[redacted]\", expected a string");
+        let mut field = error_entry(
+            "string_too_long",
+            vec![json!("body"), json!("password")],
+            "too long",
+            json!("hunter2"),
+            None,
+        );
+        redact_entry(&mut field);
+        assert_eq!(field["input"], Value::Null);
+        // a field that is not secret comes back as it was
+        let mut plain = error_entry(
+            "literal_error",
+            vec![json!("body"), json!("lang")],
+            "bad",
+            json!("fr"),
+            None,
+        );
+        redact_entry(&mut plain);
+        assert_eq!(plain["input"], "fr");
+    }
+
+    fn xff(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", v.parse().expect("header"));
+        h
+    }
+
+    /// Documentation addresses only (RFC 5737): the client 203.0.113.9 behind a tunnel and Caddy.
+    #[test]
+    fn x_forwarded_for_counts_only_behind_a_trusted_proxy() {
+        let trusted: Vec<ipnet::IpNet> = vec!["172.16.0.0/12".parse().expect("net")];
+        // the peer is the trusted proxy: the first untrusted hop from the right
+        let chain = xff("203.0.113.9, 172.18.0.1");
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &chain, &trusted).as_deref(),
+            Some("203.0.113.9")
+        );
+        // a client that sends its own header stays left of the address the proxy saw
+        let spoof = xff("198.51.100.66, 203.0.113.9, 172.18.0.1");
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &spoof, &trusted).as_deref(),
+            Some("203.0.113.9")
+        );
+        // the peer is not trusted: its header means nothing
+        assert_eq!(
+            client_ip(Some("198.51.100.20"), &chain, &trusted).as_deref(),
+            Some("198.51.100.20")
+        );
+        // no trusted proxy configured: the peer, whatever the header says
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &chain, &[]).as_deref(),
+            Some("172.18.0.3")
+        );
+        // every hop trusted, or no header: the last address a trusted proxy gave
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &xff("172.18.0.1"), &trusted).as_deref(),
+            Some("172.18.0.1")
+        );
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &HeaderMap::new(), &trusted).as_deref(),
+            Some("172.18.0.3")
+        );
+        // an unreadable hop stops the walk at the last trusted one
+        let junk = xff("203.0.113.9, not-an-ip, 172.18.0.1");
+        assert_eq!(
+            client_ip(Some("172.18.0.3"), &junk, &trusted).as_deref(),
+            Some("172.18.0.1")
+        );
+        assert_eq!(client_ip(None, &chain, &trusted), None);
+    }
 }
