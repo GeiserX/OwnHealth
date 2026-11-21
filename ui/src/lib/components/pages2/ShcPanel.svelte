@@ -94,7 +94,7 @@
 
 	{#if declined}<div class="p2err" role="alert" style="margin-top:8px">{tf('shc_declined', { host: declined })}</div>{/if}
 	{#if answer?.status === 'refused'}
-		<div class="p2err" role="alert" style="margin-top:8px" title={answer.message}>{refusal(answer)}</div>
+		<div class="p2err" role="alert" style="margin-top:8px">{refusal(answer)}</div>
 	{/if}
 	{#if answer?.status === 'imported'}
 		{#if warning}<div class="p2err" role="alert" style="margin-top:8px">{warning}</div>{/if}
