@@ -179,9 +179,11 @@ pub async fn store_snapshot(conn: &mut PgConnection, profile_id: Uuid, body: &Va
 
 /// Store the state a REPEATABLE READ transaction read, then end that transaction. If another
 /// transaction stored the day's row after this one's snapshot began, Postgres refuses the upsert
-/// with 40001. Dropping the write is then safe: the stored row is newer than the one read, and the
-/// caller already holds all it read, so the transaction rolls back and the request goes on. Any
-/// other error is returned.
+/// with 40001. The write is then dropped: the caller already holds all it read, so the
+/// transaction rolls back and the request goes on. The stored row is the other transaction's,
+/// which is usually but not always newer than the one read (an older print can store first); the
+/// snapshot keeps one row per profile, day and pack, and nothing reads it by hash yet. Any other
+/// error is returned.
 pub async fn commit_read(mut tx: Transaction<'_, Postgres>, profile_id: Uuid, body: &Value) -> Result<()> {
     match store_snapshot(&mut tx, profile_id, body, &*load_pack()?).await {
         Ok(_) => tx.commit().await?,

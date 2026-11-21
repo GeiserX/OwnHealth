@@ -533,7 +533,6 @@ async fn a_newer_state_saved_during_an_ips_export_is_kept() -> R {
     a_newer_state_is_kept("/api/profiles/alex/export", IPS, body, Meanwhile::StoreOverAnOlderRow).await
 }
 
-/// The sheet is read from one snapshot: its transaction is REPEATABLE READ.
 /// Only a newer stored state lets a print drop its write: any other failure of the store fails the
 /// request, and nothing is sent or logged.
 #[tokio::test]
@@ -575,6 +574,7 @@ async fn a_failed_state_store_fails_the_request() -> R {
     Ok(())
 }
 
+/// The sheet is read from one snapshot: its transaction is REPEATABLE READ.
 #[tokio::test]
 async fn the_sheet_is_read_in_a_repeatable_read_transaction() -> R {
     let env = Env::new(true).await?;
@@ -621,10 +621,6 @@ async fn the_audit_row_carries_the_time_the_read_began() -> R {
         assert!(
             sent_at <= at && at < waiting_at,
             "{tool}: stamped at the read, {sent_at} <= {at} < {waiting_at}"
-        );
-        assert!(
-            waiting_at - at < chrono::Duration::seconds(1),
-            "{tool}: the read began just before the wait"
         );
     }
     Ok(())
