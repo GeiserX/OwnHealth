@@ -228,8 +228,8 @@ jobs:
 
   # Which runners the docker job builds on. Main and manual runs always build both platforms. A PR
   # builds amd64 always, and arm64 too when it changes a build input: the Dockerfile and what it
-  # copies to build (scripts, manifests, lock files, vendored libraries, the OCR crate), the
-  # toolchain, or a workflow. A PR that changes only Rust or Svelte source builds the same way on
+  # copies to build (scripts, Cargo manifests, lock files, build.rs, .cargo config, ui/.npmrc,
+  # vendored libraries, the OCR crate), the toolchain, or a workflow. A PR that changes only Rust or Svelte source builds the same way on
   # both platforms, and the arm64 pair still runs on main after the merge.
   docker-runners:
     runs-on: ubuntu-latest
@@ -251,7 +251,7 @@ jobs:
           fi
           git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed"
           echo "$(wc -l < "$RUNNER_TEMP/changed") files changed"
-          inputs='^(Dockerfile|\.dockerignore|scripts/|ui/package\.json$|ui/pnpm-lock\.yaml$|server/vendor/|server/crates/ownhealth-ocr/|\.github/workflows/)|(^|/)(Cargo\.(toml|lock)|rust-toolchain[^/]*|RUST_TOOLCHAIN)$'
+          inputs='^(Dockerfile|\.dockerignore|scripts/|ui/package\.json$|ui/pnpm-lock\.yaml$|ui/\.npmrc$|server/vendor/|server/crates/ownhealth-ocr/|\.github/workflows/)|(^|/)(Cargo\.(toml|lock)|build\.rs|rust-toolchain[^/]*|RUST_TOOLCHAIN)$|(^|/)\.cargo/'
           if grep -E "$inputs" "$RUNNER_TEMP/changed"; then
             echo "runners=$both" >> "$GITHUB_OUTPUT"
           else
