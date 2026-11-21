@@ -1239,10 +1239,54 @@ async fn a_folder_cleanup_that_fails_is_retried() -> R {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))?;
     assert_eq!(run_forget(&env).await?, 1);
     assert!(!root.join(".done/alex").exists(), "the retry left Alex's filed copy");
-    let state: String = sqlx::query_scalar("select state from job where kind = 'folder.forget'")
-        .fetch_one(env.pool())
-        .await?;
+    let (state, payload): (String, Value) =
+        sqlx::query_as("select state, payload from job where kind = 'folder.forget'")
+            .fetch_one(env.pool())
+            .await?;
     assert_eq!(state, "done");
+    // the job row stays, without the person's short name
+    assert_eq!(
+        payload,
+        json!({"household_id": env.fam().household_id,
+               "folders": [{"config": {"subdir": "estudio"}, "own": false}]})
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_folder_retry_that_runs_out_shows_in_review_without_the_name() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    ownhealth_inbox::register();
+    folder_source(&env, "estudio", None).await?;
+    let locked = inbox.join("estudio/.done/alex/2026-11");
+    std::fs::create_dir_all(&locked)?;
+    std::fs::write(locked.join("escaneo-anterior.pdf"), b"%PDF-1.7 synthetic filed scan")?;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500))?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    sqlx::query("update job set max_attempts = 1 where kind = 'folder.forget'")
+        .execute(env.pool())
+        .await?;
+    assert_eq!(run_forget(&env).await?, 1);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))?;
+    let (state, payload): (String, Value) =
+        sqlx::query_as("select state, payload from job where kind = 'folder.forget'")
+            .fetch_one(env.pool())
+            .await?;
+    assert_eq!(state, "dead");
+    assert!(
+        payload.get("slug").is_none(),
+        "a dead job kept the short name: {payload}"
+    );
+    let items: Vec<Option<Uuid>> = sqlx::query_scalar("select household_id from review_item where kind = 'job_failed'")
+        .fetch_all(env.pool())
+        .await?;
+    assert_eq!(items, vec![Some(env.fam().household_id)]);
     Ok(())
 }
 

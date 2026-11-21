@@ -237,7 +237,10 @@ async fn forget_job(ctx: JobContext, job: Job) -> HandlerResult {
     if ctx.settings.demo {
         return Ok(Some(serde_json::json!({"skipped": "demo"})));
     }
-    let slug = job.str("slug").unwrap_or_default();
+    // a job that ended once has no short name left: nothing to redo
+    let Some(slug) = job.str("slug") else {
+        return Ok(Some(serde_json::json!({"skipped": "no short name"})));
+    };
     let household_id = job.uuid("household_id")?;
     let folders: Vec<(serde_json::Value, bool)> = job
         .payload
@@ -254,6 +257,14 @@ async fn forget_job(ctx: JobContext, job: Job) -> HandlerResult {
         .unwrap_or_default();
     let n = folders.len();
     let failed = forget_folders(&ctx.pool, &ctx.settings, household_id, slug, folders).await;
+    let last = failed.is_empty() || job.attempts >= job.max_attempts;
+    if last {
+        // the job ends now, done or dead, and its row stays: it keeps no trace of the person's name
+        sqlx::query("update job set payload = payload - 'slug' where id = $1")
+            .bind(job.id)
+            .execute(&ctx.pool)
+            .await?;
+    }
     if !failed.is_empty() {
         return Err(JobError::retry(format!(
             "{} folder inboxes could not be cleaned yet",
