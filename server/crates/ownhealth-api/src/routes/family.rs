@@ -735,6 +735,7 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
         }
     }
     let failed = folder::forget_folders(&rt.pool, &rt.settings, result.household_id, slug, folders).await;
+    let folders_pending = failed.len();
     let failed: Vec<Value> = failed
         .into_iter()
         .map(|(config, own)| json!({"config": config, "own": own}))
@@ -769,7 +770,9 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
             "could not audit what a done delete did with the files"
         );
     }
-    Ok(json!({"deleted": slug, "rows": result.rows_json(), "blobs": removed, "blobs_pending": pending}))
+    Ok(
+        json!({"deleted": slug, "rows": result.rows_json(), "blobs": removed, "blobs_pending": pending, "folders_pending": folders_pending}),
+    )
 }
 
 /// After the delete's own try: drop the queued retry when nothing is left, or keep it with only what

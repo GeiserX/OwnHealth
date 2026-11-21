@@ -2,6 +2,7 @@
   "blobs": "int",
   "blobs_pending": "int",
   "deleted": "string",
+  "folders_pending": "int",
   "rows": {
     "observation": "int",
     "src": "int"

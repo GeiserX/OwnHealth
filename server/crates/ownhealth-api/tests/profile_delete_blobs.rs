@@ -1222,6 +1222,12 @@ async fn a_folder_cleanup_that_fails_is_retried() -> R {
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        r.json["folders_pending"],
+        json!(1),
+        "the answer hides the waiting folder cleanup: {}",
+        r.json
+    );
     assert!(!root.join("alex").exists(), "the drop folder stays");
     assert!(locked.join("escaneo-anterior.pdf").is_file());
     // the retry waits with the household, the short name and the folder inbox's settings

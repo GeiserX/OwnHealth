@@ -62,14 +62,14 @@ export function matrixRowLabel(
 }
 
 /** True when a profile already carries this name (case and spacing ignored). A note, never a block. */
-/** The line shown after a profile delete: files still waiting for the retry are named, never hidden. */
-export function deletedNoteKey(pending: number): 'st_deleted' | 'st_deleted_pending' {
-	return pending > 0 ? 'st_deleted_pending' : 'st_deleted';
-}
-
 export function nameTaken(name: string, profiles: { display_name: string }[]): boolean {
 	const n = name.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
 	return !!n && profiles.some((p) => p.display_name.trim().replace(/\s+/g, ' ').toLocaleLowerCase() === n);
+}
+
+/** The line shown after a profile delete: files or folders still waiting for the retry are said, never hidden. */
+export function deletedNoteKey(blobsPending: number, foldersPending: number): 'st_deleted' | 'st_deleted_pending' {
+	return blobsPending > 0 || foldersPending > 0 ? 'st_deleted_pending' : 'st_deleted';
 }
 
 /** The origin of a link when it differs from the page's own (an OWNHEALTH_BASE_URL the person may not reach), else null. */
