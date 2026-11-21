@@ -531,7 +531,9 @@ mod tests {
     /// Run `sql` as the database owner with the triggers on.
     async fn owner_sql(db: &TestDb, sql: &str) -> anyhow::Result<()> {
         let mut c = sqlx::PgConnection::connect(&db.url).await?;
-        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string())).execute(&mut c).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
+            .execute(&mut c)
+            .await?;
         c.close().await?;
         Ok(())
     }
@@ -651,7 +653,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_patched_link_breaks_the_rest_of_the_chain() -> anyhow::Result<()> {
-        for formula in ["sha256(c.prev_hash || oh_audit_row_v1(e))", "sha256(oh_audit_row_v1(e))"] {
+        for formula in [
+            "sha256(c.prev_hash || oh_audit_row_v1(e))",
+            "sha256(oh_audit_row_v1(e))",
+        ] {
             let c = patch_one_link(formula).await?;
             assert!(!c.ok(), "{formula}: {c:?}");
         }

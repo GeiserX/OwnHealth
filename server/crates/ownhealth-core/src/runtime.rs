@@ -73,7 +73,9 @@ mod tests {
         sqlx::query("set transaction isolation level repeatable read")
             .execute(&mut *tx)
             .await?;
-        let level: String = sqlx::query_scalar("show transaction_isolation").fetch_one(&mut *tx).await?;
+        let level: String = sqlx::query_scalar("show transaction_isolation")
+            .fetch_one(&mut *tx)
+            .await?;
         tx.rollback().await?;
         assert_eq!(level, "repeatable read");
         rt.pool.close().await;
