@@ -22,9 +22,15 @@ create table vendor_score (
   computed_by text not null default 'provider' check (computed_by = 'provider'),
   unique (profile_id, provider, category, t));
 
--- The guard: a series key that names a vendor score cannot reach wearable_sample. A key is refused
--- when one of its words (split on '_') is readiness, battery, stress, strain or score, or when its
--- first word is recovery ("hr_recovery" is a measurement). ownhealth-devices scores::is_score_key is
--- the same rule in Rust, and its tests check that both agree.
+-- The guard: a series key that names a vendor score cannot reach wearable_sample. A key must be plain
+-- (lowercase letters, digits and '_', starting with a letter), so 'BodyBattery', 'body-battery' and
+-- 'stress.level' are refused as they are. Then the key, lowercased with everything but letters and
+-- digits taken out, is refused when it contains one of the score words, or starts with recovery
+-- ("hr_recovery" is a measurement). hrv_status and training_status are Garmin's verdicts, so 'status'
+-- is a score word. ownhealth-devices scores::is_sample_key is the same rule in Rust, and its tests
+-- check that both agree.
 alter table wearable_sample add constraint wearable_sample_not_a_vendor_score check (
-  metric !~ '(^|_)(readiness|battery|stress|strain|score)(_|$)' and metric !~ '^recovery(_|$)');
+  metric ~ '^[a-z][a-z0-9_]*$'
+  and lower(regexp_replace(metric, '[^A-Za-z0-9]', '', 'g'))
+    !~ '(readiness|battery|stress|strain|score|charge|resilience|status|performance)'
+  and lower(regexp_replace(metric, '[^A-Za-z0-9]', '', 'g')) !~ '^recovery');

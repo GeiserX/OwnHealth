@@ -12,8 +12,25 @@ use ownhealth_ingest_structured::wearables;
 use serde_json::json;
 
 /// Keys a connector could use for a vendor's score: each one is refused by wearable_sample.
-const SCORE_LIKE: [&str; 13] = [
+const SCORE_LIKE: [&str; 30] = [
     "body_battery",
+    "bodybattery",
+    "BodyBattery",
+    "body_Battery",
+    "bodyBattery",
+    "body-battery",
+    "stresslevel",
+    "stress.level",
+    "STRESS",
+    "readinessScore",
+    "Readiness",
+    "sleepScore",
+    "nightly_recharge",
+    "ans_charge",
+    "resilience",
+    "hrv_status",
+    "training_status",
+    "sleep_performance",
     "garmin_body_battery",
     "stress",
     "stress_level",
@@ -158,5 +175,87 @@ async fn scores_are_stored_apart_tagged_by_provider_and_a_repull_updates_in_plac
     // an unknown category is refused
     let bad = vec![score("mood", 3, 5.0, None)];
     assert!(scores::write(&mut c, sam, None, &bad).await.is_err());
+    Ok(())
+}
+
+/// The CHECK on wearable_sample, as Postgres prints it.
+async fn guard(env: &Env) -> anyhow::Result<String> {
+    Ok(sqlx::query_scalar(
+        "select pg_get_constraintdef(oid) from pg_constraint where conrelid = 'wearable_sample'::regclass \
+         and conname = 'wearable_sample_not_a_vendor_score'",
+    )
+    .fetch_one(&env.db.pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn the_guard_lists_exactly_the_rust_score_words() -> R {
+    let env = Env::new().await?;
+    let def = guard(&env).await?;
+    let group = def
+        .split('\'')
+        .find(|p| p.starts_with('(') && p.contains('|'))
+        .unwrap_or_default();
+    let mut listed: Vec<&str> = group.trim_matches(|c| c == '(' || c == ')').split('|').collect();
+    listed.sort_unstable();
+    let mut ours = scores::SCORE_WORDS.to_vec();
+    ours.sort_unstable();
+    assert_eq!(listed, ours, "{def}");
+    Ok(())
+}
+
+/// The CHECK and `is_sample_key` give the same verdict on one shared list of names: every key the
+/// slice knows, each score word plain, inside a key, at either end, in capitals and joined, and keys
+/// that are not plain.
+#[tokio::test]
+async fn the_guard_and_is_sample_key_agree_on_every_name() -> R {
+    let env = Env::new().await?;
+    let def = guard(&env).await?;
+    let expr = def.strip_prefix("CHECK ").unwrap_or(&def);
+    let mut names: Vec<String> = SCORE_LIKE
+        .iter()
+        .chain(&MEASUREMENTS)
+        .copied()
+        .chain(wearables::METRICS.iter().map(|m| m.0))
+        .map(String::from)
+        .collect();
+    for w in scores::SCORE_WORDS.iter().chain(&["recovery"]) {
+        let cap = format!("{}{}", w[..1].to_uppercase(), &w[1..]);
+        names.extend([
+            w.to_string(),
+            format!("x_{w}"),
+            format!("{w}_x"),
+            format!("x{w}"),
+            format!("{w}2"),
+            w.to_uppercase(),
+            format!("day{cap}"),
+            format!("day-{w}"),
+        ]);
+    }
+    names.extend(
+        [
+            "",
+            "Hr",
+            "1hr",
+            "_hr",
+            "hr-rest",
+            "hr.rest",
+            "hr rest",
+            "hr_é",
+            "hr_recovery",
+            "heart_rate_recovery",
+        ]
+        .map(String::from),
+    );
+    let q = format!("select {expr} from (select $1::text as metric) s");
+    for name in &names {
+        let db: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(q.clone()))
+            .bind(name)
+            .fetch_one(&env.db.pool)
+            .await?;
+        assert_eq!(db, scores::is_sample_key(name), "{name:?}: the CHECK says {db}");
+    }
+    // and the list holds both verdicts
+    assert!(names.iter().any(|n| scores::is_sample_key(n)) && names.iter().any(|n| !scores::is_sample_key(n)));
     Ok(())
 }

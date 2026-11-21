@@ -1,7 +1,7 @@
 //! Vendor scores (migration 1220): readiness, recovery, sleep and activity scores, stress, strain and
 //! Body Battery are the vendor's numbers, computed with its own method. They are stored apart from
 //! measurements, in `vendor_score`, tagged `computed_by = 'provider'` with the provider's name, and
-//! never written into `wearable_sample` (a CHECK there refuses a key `is_score_key` names).
+//! never written into `wearable_sample` (a CHECK there refuses a key that `is_sample_key` refuses).
 //!
 //! The rule pack, the calculators and MCP never read them; only the Wearables page shows them.
 
@@ -23,14 +23,42 @@ pub const CATEGORIES: [&str; 7] = [
     "body_battery",
 ];
 
-/// Words that mark a series key as a vendor score, wherever they stand in the key.
-const SCORE_WORDS: [&str; 5] = ["readiness", "battery", "stress", "strain", "score"];
+/// Words that mark a series key as a vendor score, wherever they stand in the key and however it is
+/// spelled ('BodyBattery', 'body-battery', 'stresslevel'). The same list as the CHECK
+/// `wearable_sample_not_a_vendor_score`. 'charge' covers Polar's Nightly Recharge and ANS charge,
+/// 'status' Garmin's HRV status and training status, 'performance' WHOOP's sleep performance.
+pub const SCORE_WORDS: [&str; 9] = [
+    "readiness",
+    "battery",
+    "stress",
+    "strain",
+    "score",
+    "charge",
+    "resilience",
+    "status",
+    "performance",
+];
 
 /// True when `metric` names a vendor score, so it belongs in `vendor_score`, never `wearable_sample`:
-/// one of its words (split on '_') is in `SCORE_WORDS`, or its first word is `recovery`
-/// (`hr_recovery` is a measurement). The same rule as the CHECK `wearable_sample_not_a_vendor_score`.
+/// the key, lowercased with everything but letters and digits taken out, contains a word of
+/// `SCORE_WORDS` or starts with `recovery` (`hr_recovery` is a measurement).
 pub fn is_score_key(metric: &str) -> bool {
-    metric.split('_').any(|w| SCORE_WORDS.contains(&w)) || metric.split('_').next() == Some("recovery")
+    let k: String = metric
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    SCORE_WORDS.iter().any(|w| k.contains(w)) || k.starts_with("recovery")
+}
+
+/// True when `metric` may be stored in `wearable_sample`: a plain key (a lowercase letter, then
+/// lowercase letters, digits and '_') that is not a vendor score. The same rule as the CHECK
+/// `wearable_sample_not_a_vendor_score`.
+pub fn is_sample_key(metric: &str) -> bool {
+    let mut chars = metric.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !is_score_key(metric)
 }
 
 /// One score as a connector maps it.
