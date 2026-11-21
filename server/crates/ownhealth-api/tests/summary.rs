@@ -523,7 +523,7 @@ async fn the_sheet_is_read_in_a_repeatable_read_transaction() -> R {
 }
 
 /// The audit row is stamped with the moment the read began, not with the moment it is written:
-/// here the audit write waits on a lock for 1.5 s after the sheet was read.
+/// here the read waits 1.5 s on a lock before its audit row is written.
 #[tokio::test]
 async fn the_audit_row_carries_the_time_the_read_began() -> R {
     let env = env().await?;
@@ -540,11 +540,11 @@ async fn the_audit_row_carries_the_time_the_read_began() -> R {
         let clock = || sqlx::query_scalar::<_, DateTime<Utc>>("select clock_timestamp()").fetch_one(&pool);
         let sent_at = clock().await?;
         let mut lock = pool.begin().await?;
-        sqlx::query("lock table audit_event in access exclusive mode")
+        sqlx::query("lock table procedure in access exclusive mode")
             .execute(&mut *lock)
             .await?;
         let hold = async {
-            wait_for_a_lock_on(&pool, "audit_event").await?;
+            wait_for_a_lock_on(&pool, "procedure").await?;
             let waiting_at = clock().await?;
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             lock.rollback().await?;
