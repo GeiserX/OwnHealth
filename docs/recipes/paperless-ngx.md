@@ -73,7 +73,7 @@ If nothing arrives:
 - Runs that succeed but import nothing: log in to Paperless as `ownhealth` and look for the documents tagged `health`. If you see none, the user has no view permission on them (step 1).
 - A document tagged after the fact arrives through the **Document Updated** trigger, or at the latest with the next 15-minute pull. That includes documents you tag or share with the bulk editor, which changes neither their modified date nor fires a trigger: each pull also lists the ids of every `health` document and fetches the ones OwnHealth has not seen.
 
-To alert on a stalled inbox, see [Monitoring the inboxes](../../deploy/README.md#monitoring-the-inboxes).
+To alert on a stalled inbox, see [Monitoring the inboxes](https://github.com/GeiserX/OwnHealth/blob/main/deploy/README.md#monitoring-the-inboxes).
 
 ## Notes
 

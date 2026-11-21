@@ -45,7 +45,7 @@ If the push fails:
 - `403 wrong_inbox`: the token belongs to another kind of source.
 - No run at all: the phone cannot reach the server, or iOS did not let the app run. Open the app to push now.
 
-To be told when pushes stop, alert on the source's last successful sync: [Monitoring the inboxes](../../deploy/README.md#monitoring-the-inboxes). A push source is never marked stale by OwnHealth itself (it has no schedule), so alert on the time since the last success instead.
+To be told when pushes stop, alert on the source's last successful sync: [Monitoring the inboxes](https://github.com/GeiserX/OwnHealth/blob/main/deploy/README.md#monitoring-the-inboxes). A push source is never marked stale by OwnHealth itself (it has no schedule), so alert on the time since the last success instead.
 
 ## Notes
 

@@ -13,4 +13,4 @@ Step-by-step setups for the inboxes and connections added in 0.3.0.
 | [iOS Shortcut](ios-shortcut.md) | Share a photo or PDF from an iPhone straight into OwnHealth |
 | [claude.ai connector](claude-connector.md) | claude.ai reads OwnHealth through MCP, over a tunnel, with OAuth |
 
-For scans without the `ocr` profile, see [agent-assisted extraction](../agent-extraction.md). For alerts when an inbox stops syncing, see [Monitoring the inboxes](../../deploy/README.md#monitoring-the-inboxes).
+For scans without the `ocr` profile, see [agent-assisted extraction](../agent-extraction.md). For alerts when an inbox stops syncing, see [Monitoring the inboxes](https://github.com/GeiserX/OwnHealth/blob/main/deploy/README.md#monitoring-the-inboxes).

@@ -1,7 +1,7 @@
 # Guideline files: how to add a country
 
 The Due screen lists the screenings and vaccines that a country's guideline lists for a person's age
-and sex. Each country is one YAML file in [data/prevention/](../data/prevention). You can add your
+and sex. Each country is one YAML file in [data/prevention/](https://github.com/GeiserX/OwnHealth/tree/main/data/prevention). You can add your
 country's schedule without writing Rust. You write the file, and a maintainer adds the code lines
 and the test if you ask in the pull request.
 
@@ -13,7 +13,7 @@ tells the person what to do.
 | File | What it holds |
 |---|---|
 | `pack.yaml` | The country list (`countries`, ISO 3166-1 alpha-2 code to file), the days ahead that read as upcoming (90), and the answers a person can give about themselves (`answer_keys`) |
-| `<cc>.yaml` | One country: its header and its rows, for example [es.yaml](../data/prevention/es.yaml) and [us.yaml](../data/prevention/us.yaml) |
+| `<cc>.yaml` | One country: its header and its rows, for example [es.yaml](https://github.com/GeiserX/OwnHealth/blob/main/data/prevention/es.yaml) and [us.yaml](https://github.com/GeiserX/OwnHealth/blob/main/data/prevention/us.yaml) |
 | `evidence.yaml` | What counts as done for a screening: names, SNOMED CT and LOINC codes |
 | `vaccines.tsv` | What counts as a dose of each vaccine: CVX codes and names in English and Spanish |
 | `templates.yaml` | The sentences that the Due screen shows beside a row, in English and Spanish |
@@ -144,7 +144,7 @@ Never put a default in a row to avoid one of these. A row that cannot be checked
 ## Lab-type screening lives in the rule pack
 
 The rule pack already checks the screenings that are lab tests, such as hepatitis C antibody,
-Lp(a), lipids and HbA1c. They are in [data/rules/pack/screening.yaml](../data/rules/pack/screening.yaml)
+Lp(a), lipids and HbA1c. They are in [data/rules/pack/screening.yaml](https://github.com/GeiserX/OwnHealth/blob/main/data/rules/pack/screening.yaml)
 and in the recency rules of the other pack files. Each one has that one home. A country file names
 the pack rule by id and gives its own source and link:
 
@@ -162,7 +162,7 @@ pull request. Its hash is pinned, and a pack change is its own release step.
 ## The reviewer of record
 
 Every country file names one reviewer of record in `reviewer`, and
-[.github/CODEOWNERS](../.github/CODEOWNERS) names the same person for the file. GitHub asks that
+[.github/CODEOWNERS](https://github.com/GeiserX/OwnHealth/blob/main/.github/CODEOWNERS) names the same person for the file. GitHub asks that
 person to review every pull request that changes the file. The reviewer checks each row against the
 source, then sets `reviewed` to that day.
 
@@ -196,7 +196,7 @@ open an issue. We then put their name in `reviewer` and their GitHub account in 
      cd ..
      ```
 
-   The test database is in [AGENTS.md](../AGENTS.md#dev-commands).
+   The test database is in [AGENTS.md](https://github.com/GeiserX/OwnHealth/blob/main/AGENTS.md#dev-commands).
 6. From the repository root, check the links with `bash scripts/cite-links.sh`. It lists each dead link and exits with 1 when it finds one.
 7. Open the pull request ready for review. Give the source and its terms (a row in the licence
    table above), and say which steps you want the maintainer to do.
@@ -206,8 +206,8 @@ does the rest in your pull request.
 
 ## The weekly link check
 
-[.github/workflows/cite-links.yml](../.github/workflows/cite-links.yml) runs
-[scripts/cite-links.sh](../scripts/cite-links.sh) every Monday and on demand. It fetches every
+[.github/workflows/cite-links.yml](https://github.com/GeiserX/OwnHealth/blob/main/.github/workflows/cite-links.yml) runs
+[scripts/cite-links.sh](https://github.com/GeiserX/OwnHealth/blob/main/scripts/cite-links.sh) every Monday and on demand. It fetches every
 `https://` link in the YAML, JSON and TSV files under `data/`. A link is dead when its host does not
 resolve or refuses the connection, or when it answers 404 or 410. Then the run goes red and one issue, "Dead links in the cited data
 files", lists each dead link and the files that cite it. The issue updates each week and closes when
