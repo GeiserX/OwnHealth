@@ -322,6 +322,13 @@ async fn create(State(rt): State<Runtime>, Caller(p): Caller, Body(b): Body<Sour
     if !sources::SOURCE_KINDS.contains(&b.kind.as_str()) {
         return Err(Error::Invalid(format!("unknown source kind {:?}", b.kind)).into());
     }
+    if sources::CONNECTOR_KINDS.contains(&b.kind.as_str()) {
+        return Err(Error::Invalid(format!(
+            "a {} source is added through its own connection, not here",
+            b.kind
+        ))
+        .into());
+    }
     let label = check_label(&b.label)?;
     let config = b.config.unwrap_or_else(|| json!({}));
     check_config(&b.kind, &config)?;

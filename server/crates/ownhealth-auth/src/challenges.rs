@@ -10,6 +10,17 @@ use crate::{AuthError, AuthResult};
 
 /// Five minutes.
 pub const TTL_SECONDS: i64 = 300;
+/// The `auth_challenge.purpose` check constraint.
+pub const PURPOSES: [&str; 8] = [
+    "setup",
+    "register",
+    "login",
+    "step_up",
+    "enroll",
+    "invite",
+    "oidc",
+    "connector",
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Challenge {

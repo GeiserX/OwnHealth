@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::ids::{is_src_id, new_src_id};
 use crate::pyjson::{py_date, row_to_json};
 
-pub const SRC_KINDS: [&str; 8] = [
+pub const SRC_KINDS: [&str; 9] = [
     "document_region",
     "fhir_import",
     "apple_health",
@@ -24,6 +24,7 @@ pub const SRC_KINDS: [&str; 8] = [
     "device",
     "agent_proposal",
     "calculated",
+    "dicom",
 ];
 
 /// Tables whose rows carry src_id, in lookup order for `resolve_src`.
