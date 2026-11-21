@@ -69,3 +69,56 @@ fn the_reader_takes_every_quoted_value() {
     let want: BTreeSet<String> = ["email", "health_auto_export"].iter().map(|s| s.to_string()).collect();
     assert_eq!(quoted(def), want);
 }
+
+/// The values migration 1200 adds for the v1.0 connectors. The mirror alone would stay green if one of
+/// them left both the CHECK and its constant; this list keeps each one.
+#[test]
+fn every_v1_value_is_in_its_constant() {
+    let added: [(&str, &[&str], Vec<&str>); 6] = [
+        (
+            "source.kind",
+            &["smart", "bluebutton", "brands", "openwearables", "dexcom"],
+            sources::SOURCE_KINDS.to_vec(),
+        ),
+        (
+            "secret.purpose",
+            &[
+                "connector_refresh_token",
+                "connector_client_secret",
+                "openwearables_api_key",
+            ],
+            secrets::PURPOSES.to_vec(),
+        ),
+        ("auth_challenge.purpose", &["connector"], challenges::PURPOSES.to_vec()),
+        (
+            "document_source.channel",
+            &[
+                "smart",
+                "bluebutton",
+                "shl",
+                "shc",
+                "ccda",
+                "openwearables",
+                "dexcom",
+                "imaging",
+            ],
+            documents::CHANNELS.to_vec(),
+        ),
+        ("src.kind", &["dicom"], provenance::SRC_KINDS.to_vec()),
+        (
+            "review_item.kind",
+            &["source_gap", "fhir_unmapped_summary", "family_proposal"],
+            review::REVIEW_KINDS.to_vec(),
+        ),
+    ];
+    let missing: Vec<String> = added
+        .iter()
+        .flat_map(|(list, values, constant)| {
+            values
+                .iter()
+                .filter(|v| !constant.contains(v))
+                .map(move |v| format!("{list}: {v}"))
+        })
+        .collect();
+    assert!(missing.is_empty(), "v1.0 values missing: {missing:?}");
+}

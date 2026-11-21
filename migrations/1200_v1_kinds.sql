@@ -37,9 +37,9 @@ alter table review_item add constraint review_item_kind_check check (kind in ('c
 
 -- ------------------------------------------------------------ connector clients ----
 -- The app a household registered with one vendor (SMART, Blue Button, Dexcom): one client serves every
--- member's source of that vendor. issuer is the authorization server the client belongs to, or null when
--- one client id works with every server of the vendor. A public client has no secret. Each member's
--- refresh token stays in source.secret_id.
+-- member's source of that vendor and issuer. issuer is the authorization server the client belongs to, or
+-- null when one client id works with every server of the vendor. Then the household has one client for
+-- that vendor. A public client has no secret. Each member's refresh token stays in source.secret_id.
 create table connector_client (
   id uuid primary key default gen_random_uuid(),
   household_id uuid not null references household on delete cascade,
@@ -49,9 +49,9 @@ create table connector_client (
   client_secret_id uuid references secret on delete restrict,
   redirect_uri text not null,
   created_at timestamptz not null default now(),
-  unique (household_id, vendor));
+  unique nulls not distinct (household_id, vendor, issuer));
 
--- A client's secret goes with the client.
+-- A client's secret goes with the client, and a replaced secret goes at once.
 create function connector_client_drop_secret() returns trigger language plpgsql as $$
 begin
   delete from secret where id = old.client_secret_id;
@@ -59,6 +59,9 @@ begin
 end $$;
 create trigger connector_client_drop_secret after delete on connector_client
   for each row when (old.client_secret_id is not null) execute function connector_client_drop_secret();
+create trigger connector_client_swap_secret after update of client_secret_id on connector_client
+  for each row when (old.client_secret_id is not null and old.client_secret_id is distinct from new.client_secret_id)
+  execute function connector_client_drop_secret();
 
 -- --------------------------------------------------------- connection state ----
 -- reconsent_needed_at: the vendor refused the token; the person must connect again (reconnect clears it).
@@ -69,3 +72,4 @@ alter table source
   add column reconsent_needed_at timestamptz,
   add column grant_expires_at timestamptz,
   add column access_expires_at timestamptz;
+create index on source (connector_client_id);
