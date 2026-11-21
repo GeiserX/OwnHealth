@@ -3,6 +3,7 @@
 // spread the whole series into one call.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { sparkBounds } from '../src/lib/components/spark.ts';
 import { scoreRows, type VendorScore } from '../src/routes/wearables/scores.ts';
 
@@ -40,4 +41,11 @@ test('vendor scores: the sparkline bounds of 200,000 values, with and without a 
 	assert.deepEqual(sparkBounds(values, null), [-3, 104]);
 	assert.deepEqual(sparkBounds(values, [-10, 50]), [-10, 104]);
 	assert.deepEqual(sparkBounds([3], null), [3, 3]);
+});
+
+test('vendor scores: the sparkline takes its bounds from sparkBounds, never from a spread', () => {
+	const line = readFileSync(new URL('../src/lib/components/Sparkline.svelte', import.meta.url), 'utf8');
+	assert.match(line, /import \{ sparkBounds \} from '\.\/spark';/);
+	assert.match(line, /const \[mn, mx\] = sparkBounds\(vals, band\);/);
+	assert.doesNotMatch(line, /\.\.\.\s*vals|Math\.(min|max)\(\s*\.\.\./, 'no series is spread into one call');
 });
