@@ -1337,19 +1337,39 @@ async fn a_lock_or_a_narrowed_grant_ends_a_link_for_good() -> R {
     );
     assert_eq!(env.anon().get(&loc).await?.status, StatusCode::NOT_FOUND);
 
-    // a grant that runs out by itself: no write marks it, so the list and the scheduler end the link
+    // a grant that runs out by itself: no write marks it, so the scheduler ends the link, and so
+    // does the list when it is read before the scheduler's next pass
+    let run_out = |label: &'static str| {
+        let pool = env.pool().clone();
+        let (user, profile) = (env.user("alex"), env.profile("lucia"));
+        async move {
+            sqlx::query(
+                "update profile_grant set expires_at = clock_timestamp() + interval '1 second' \
+                 where user_id = $1 and profile_id = $2",
+            )
+            .bind(user)
+            .bind(profile)
+            .execute(&pool)
+            .await?;
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            sqlx::query_scalar::<_, Option<String>>("select revoked_reason from shl where label = $1")
+                .bind(label)
+                .fetch_one(&pool)
+                .await
+        }
+    };
     let (_, pl) = share(&mut alex, "lucia", json!({"label": "runs out"})).await?;
-    sqlx::query(
-        "update profile_grant set expires_at = clock_timestamp() + interval '1 second' \
-         where user_id = $1 and profile_id = $2",
-    )
-    .bind(env.user("alex"))
-    .bind(env.profile("lucia"))
-    .execute(env.pool())
-    .await?;
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(
+        run_out("runs out").await?,
+        None,
+        "a control that can fail: nothing marked it yet"
+    );
     assert_eq!(manifest(&env, &pl, None).await?.status, StatusCode::NOT_FOUND);
     ownhealth_core::sources::scheduler_tick(&job_ctx(&env)).await?;
+    let reason: Option<String> = sqlx::query_scalar("select revoked_reason from shl where label = 'runs out'")
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(reason.as_deref(), Some("access_changed"), "the scheduler ended it");
     set_grant(
         &mut c,
         env.user("alex"),
@@ -1365,10 +1385,14 @@ async fn a_lock_or_a_narrowed_grant_ends_a_link_for_good() -> R {
         StatusCode::NOT_FOUND,
         "a new grant brings nothing back"
     );
-    let reason: Option<String> = sqlx::query_scalar("select revoked_reason from shl where label = 'runs out'")
-        .fetch_one(env.pool())
-        .await?;
-    assert_eq!(reason.as_deref(), Some("access_changed"));
+    // the list, read by Lucía's other guardian before any scheduler pass
+    share(&mut alex, "lucia", json!({"label": "runs out too"})).await?;
+    assert_eq!(run_out("runs out too").await?, None);
+    let mut sam = env.as_user(env.user("sam")).await?;
+    assert_eq!(
+        state_of(&mut sam, "lucia", "runs out too").await?,
+        (json!("revoked"), json!("access_changed"))
+    );
     Ok(())
 }
 
