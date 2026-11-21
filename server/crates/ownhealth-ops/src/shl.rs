@@ -88,7 +88,7 @@ pub async fn seal(
     lang: &str,
     as_of: NaiveDate,
 ) -> Result<Sealed> {
-    let out = ips::build(conn, profile_id, scopes, lang, as_of).await?;
+    let out = ips::build_link(conn, profile_id, scopes, lang, as_of).await?;
     let bytes = out.to_bytes()?;
     let mut key = [0u8; jose::KEY_LEN];
     rand::fill(&mut key[..]);
@@ -98,6 +98,30 @@ pub async fn seal(
         jwe,
         ips: out,
     })
+}
+
+/// How many records a link of these categories leaves out because they are sensitive (mental
+/// health, reproductive or sexual health): the current rows so tagged in the sections whose domain
+/// the link carries. No link carries `read:sensitive`, so none of them is ever in the file; the
+/// person creating the link sees the count, the recipient never does.
+pub async fn sensitive_left_out(conn: &mut PgConnection, profile_id: Uuid, scopes: &Scopes) -> Result<i64> {
+    let mut n = 0;
+    for (table, domain) in ips::section_tables() {
+        if !scopes.contains(&format!("read:{domain}")) {
+            continue;
+        }
+        let sql = format!(
+            "select count(*) from {table} where profile_id = $1 and cardinality(sensitivity) > 0 and {}",
+            ownhealth_core::lifecycle::visible_sql("", "$2")
+        );
+        let c: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .bind(profile_id)
+            .bind(None::<chrono::DateTime<chrono::Utc>>)
+            .fetch_one(&mut *conn)
+            .await?;
+        n += c;
+    }
+    Ok(n)
 }
 
 /// "Construct a SMART Health Link Payload": `url`, `key`, `exp` (epoch seconds), `flag` (P when a

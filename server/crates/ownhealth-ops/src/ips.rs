@@ -503,6 +503,11 @@ fn patient(id: Uuid, name: &str, birth: Option<NaiveDate>, sex: Option<&str>) ->
     Value::Object(p)
 }
 
+/// (table, domain) of each section: what a link would carry under that domain's scope.
+pub fn section_tables() -> impl Iterator<Item = (&'static str, &'static str)> {
+    SECTIONS.iter().map(|s| (s.table, s.domain))
+}
+
 /// The IPS Bundle of one profile as the caller may read it, on `as_of`, in `lang` (es or en).
 pub async fn build(
     conn: &mut PgConnection,
@@ -510,6 +515,32 @@ pub async fn build(
     scopes: &Scopes,
     lang: &str,
     as_of: NaiveDate,
+) -> Result<Ips> {
+    build_in(conn, profile_id, scopes, lang, as_of, false).await
+}
+
+/// The IPS a SMART Health Link carries. The reader has no account, so a section the person did not
+/// share says it is not in this link (never "this account cannot read them"), and the Composition
+/// says, in one fixed sentence on every link, that it holds only what the person chose to share and
+/// never a sensitive category. The sentence is the same whether anything was left out or not, so it
+/// reveals nothing.
+pub async fn build_link(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    scopes: &Scopes,
+    lang: &str,
+    as_of: NaiveDate,
+) -> Result<Ips> {
+    build_in(conn, profile_id, scopes, lang, as_of, true).await
+}
+
+async fn build_in(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    scopes: &Scopes,
+    lang: &str,
+    as_of: NaiveDate,
+    link: bool,
 ) -> Result<Ips> {
     let opts = Options {
         lang: lang.into(),
@@ -646,10 +677,10 @@ pub async fn build(
         let why = if withheld.contains(&s.domain) {
             label(
                 labels,
-                if s.domain == "labs" {
-                    "withheld.labs"
-                } else {
-                    "withheld.records"
+                match (link, s.domain) {
+                    (true, _) => "ips.link_withheld",
+                    (false, "labs") => "withheld.labs",
+                    (false, _) => "withheld.records",
                 },
             )
         } else {
@@ -665,8 +696,14 @@ pub async fn build(
 
     let date = as_of.format("%Y-%m-%d").to_string();
     let doc_type = coded("document")?;
-    let composition = |id: &str| {
+    let notice = link.then(|| {
         json!({
+            "status": "additional",
+            "div": format!("<div xmlns=\"{XHTML}\"><p>{}</p></div>", escape(label(labels, "ips.link_notice"))),
+        })
+    });
+    let composition = |id: &str| {
+        let mut c = json!({
             "resourceType": "Composition",
             "id": id,
             "language": lang,
@@ -677,7 +714,11 @@ pub async fn build(
             "author": [{"reference": patient_url}],
             "title": label(labels, "ips.title"),
             "section": sections,
-        })
+        });
+        if let Some(n) = &notice {
+            c["text"] = n.clone();
+        }
+        c
     };
     // ids follow the content: the same rows, words and date give the same document
     // (serialized in entry order: stored FHIR may hold floats, which the canonical form refuses)
