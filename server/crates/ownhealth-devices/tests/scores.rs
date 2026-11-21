@@ -268,6 +268,29 @@ async fn one_vendor_quirk_does_not_fail_the_write() -> R {
     Ok(())
 }
 
+/// The read is one person's: Sam never sees Lucía's scores, and Lucía never sees Sam's.
+#[tokio::test]
+async fn the_read_returns_only_the_profiles_own_scores() -> R {
+    let env = Env::new().await?;
+    let (sam, lucia) = (env.fam.profile("sam"), env.fam.profile("lucia"));
+    let mut c = env.db.pool.acquire().await?;
+    let gb = env.source("gadgetbridge", Some("sam"), json!({}), None).await?;
+    let gl = env.source("gadgetbridge", Some("lucia"), json!({}), None).await?;
+    scores::write(&mut c, sam, gb.id, &[garmin_morning(62.0)]).await?;
+    scores::write(
+        &mut c,
+        lucia,
+        gl.id,
+        &[garmin_morning(35.0), score("readiness", 2, 70.0, None)],
+    )
+    .await?;
+    let since = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).single().unwrap_or_default();
+    let values = |rows: Vec<scores::Stored>| rows.iter().map(|r| r.value).collect::<Vec<_>>();
+    assert_eq!(values(scores::list(&mut c, sam, since).await?), vec![62.0]);
+    assert_eq!(values(scores::list(&mut c, lucia, since).await?), vec![35.0, 70.0]);
+    Ok(())
+}
+
 /// Removing a connection keeps the scores it brought; they no longer name it.
 #[tokio::test]
 async fn removing_the_connection_keeps_its_scores() -> R {
