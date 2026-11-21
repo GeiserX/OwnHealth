@@ -7,9 +7,11 @@ alter table audit_event add column not_assessed_n int, add column arg_bytes int;
 -- One link per audit_event, in commit order: hash = sha256(prev_hash || oh_audit_row_v1(event)),
 -- and the first link's prev_hash is 32 zero bytes. Append-only, like audit_event, so the app role
 -- can only add links (deploy/db/app-role.sql revokes the rest from every oh_append_only table).
+-- No foreign key to audit_event: one would answer a TRUNCATE of audit_event before its append-only
+-- trigger does, and verify_chain names a link whose event is gone anyway.
 create table audit_chain (
   seq bigint primary key,
-  event_id bigint not null unique references audit_event,
+  event_id bigint not null unique,
   prev_hash bytea not null,
   hash bytea not null);
 create trigger audit_chain_no_update before update or delete on audit_chain
