@@ -1,5 +1,6 @@
 -- The app's own Postgres role: it reads and writes rows, owns nothing, and cannot change history.
--- Run as the database owner after every migration (app-role.sh does). Safe to run any number of times.
+-- Run as the database owner after every migration (app-role.sh does, as one transaction). Safe to run any
+-- number of times.
 --
 --   psql variables: app_role (the role name)
 --   environment:    OWNHEALTH_APP_ROLE_PASSWORD (its password, read with \getenv so it never sits in argv)

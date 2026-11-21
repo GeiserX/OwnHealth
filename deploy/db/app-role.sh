@@ -1,6 +1,7 @@
 #!/bin/sh
 # Create or update the app's Postgres role and its grants (app-role.sql). Runs in the `admin` service of
-# compose.yaml, connected as the database owner, after `ownhealth migrate` and around a restore.
+# compose.yaml, connected as the database owner, after `ownhealth migrate` and around a restore. The whole
+# file is one transaction (-1): the app role never holds the blanket grant without the revokes after it.
 #
 #   OWNHEALTH_DATABASE_URL                the owner's URL, without the password
 #   OWNHEALTH_DB_PASSWORD[_FILE]          the owner's password
@@ -18,5 +19,5 @@ if [ -z "$OWNHEALTH_APP_ROLE_PASSWORD" ]; then
   exit 1
 fi
 export PGPASSWORD OWNHEALTH_APP_ROLE_PASSWORD
-exec psql "$OWNHEALTH_DATABASE_URL" -X -q -v ON_ERROR_STOP=1 \
+exec psql "$OWNHEALTH_DATABASE_URL" -X -q -1 -v ON_ERROR_STOP=1 \
   -v app_role="${OWNHEALTH_APP_DB_ROLE:-ownhealth_app}" -f "$(dirname "$0")/app-role.sql"

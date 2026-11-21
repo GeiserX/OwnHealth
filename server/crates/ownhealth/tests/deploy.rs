@@ -294,15 +294,18 @@ async fn app_role_script_keeps_nothing_when_a_step_fails() -> R {
         .execute(&mut owner)
         .await?;
         owner.close().await?;
-        let out = Command::new("sh")
-            .arg(root().join("deploy/db/app-role.sh"))
-            .env("OWNHEALTH_DATABASE_URL", url(&db.name, None))
-            .env("OWNHEALTH_DB_PASSWORD", "")
-            .env_remove("OWNHEALTH_DB_PASSWORD_FILE")
-            .env("OWNHEALTH_APP_DB_PASSWORD", &password)
-            .env_remove("OWNHEALTH_APP_DB_PASSWORD_FILE")
-            .env("OWNHEALTH_APP_DB_ROLE", &role)
-            .output()?;
+        let run = || {
+            Command::new("sh")
+                .arg(root().join("deploy/db/app-role.sh"))
+                .env("OWNHEALTH_DATABASE_URL", url(&db.name, None))
+                .env("OWNHEALTH_DB_PASSWORD", "")
+                .env_remove("OWNHEALTH_DB_PASSWORD_FILE")
+                .env("OWNHEALTH_APP_DB_PASSWORD", &password)
+                .env_remove("OWNHEALTH_APP_DB_PASSWORD_FILE")
+                .env("OWNHEALTH_APP_DB_ROLE", &role)
+                .output()
+        };
+        let out = run()?;
         let stderr = String::from_utf8_lossy(&out.stderr);
         anyhow::ensure!(!out.status.success(), "app-role.sh must fail: {stderr}");
         anyhow::ensure!(stderr.contains("revoke refused"), "{stderr}");
@@ -313,6 +316,24 @@ async fn app_role_script_keeps_nothing_when_a_step_fails() -> R {
             .await?;
         admin.close().await?;
         anyhow::ensure!(left == 0, "the failed run left the role {role} behind");
+        // without the failure, the same single transaction runs through and gives the role its rights
+        let mut owner = PgConnection::connect(&db.url).await?;
+        sqlx::raw_sql("drop event trigger oh_no_revoke")
+            .execute(&mut owner)
+            .await?;
+        let out = run()?;
+        anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let rights: (bool, bool) = sqlx::query_as(
+            "select has_table_privilege($1, 'audit_event', 'insert'), has_table_privilege($1, 'audit_chain', 'insert')",
+        )
+        .bind(&role)
+        .fetch_one(&mut owner)
+        .await?;
+        owner.close().await?;
+        anyhow::ensure!(
+            rights == (true, false),
+            "insert on audit_event, audit_chain: {rights:?}"
+        );
         Ok(())
     }
     .await;
