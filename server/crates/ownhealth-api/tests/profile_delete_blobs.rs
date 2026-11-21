@@ -1022,3 +1022,95 @@ async fn an_item_filed_to_someone_else_keeps_its_file() -> R {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_released_mail_with_only_a_body_goes_with_the_person() -> R {
+    let env = Env::new(true).await?;
+    let mailbox = household_source(&env, "email", json!({})).await?;
+    // a new sender, so the household mailbox holds the notice; a person releases it into Alex
+    let raw = "From: Avisos Clinica Nueva <avisos@clinica-nueva.example>\r\n\
+               To: salud@rivera.example\r\n\
+               Subject: Cita confirmada\r\n\
+               Message-ID: <aviso-88@clinica-nueva.example>\r\n\
+               Date: Fri, 20 Nov 2026 10:00:00 +0100\r\n\
+               MIME-Version: 1.0\r\n\
+               Content-Type: text/plain; charset=utf-8\r\n\r\n\
+               La cita de Alex Rivera queda confirmada para el lunes.\r\n";
+    let mut c = env.pool().acquire().await?;
+    let source = sources::get_source(&mut c, mailbox).await?.expect("mailbox");
+    let held = ownhealth_inbox::email::ingest_message(&mut c, &env.rt.blobs, None, &source, raw.as_bytes(), None)
+        .await?
+        .quarantine_id
+        .expect("held");
+    drop(c);
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me
+        .post(
+            &format!("/api/inboxes/quarantine/{held}/release"),
+            &json!({"profile_id": env.profile("alex")}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(r.json["document_ids"], json!([]), "{}", r.json);
+    let eml = env.rt.blobs.put_bytes(raw.as_bytes())?;
+
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert!(
+        !stored(env.rt.blobs.root()).contains(&eml),
+        "the released notice is still on disk: {}",
+        r.json
+    );
+    assert_eq!(
+        env.scalar_i64(&format!("select count(*) from quarantine_item where id = '{held}'"))
+            .await?,
+        0,
+        "the released notice's sender and subject stay"
+    );
+    // the mailbox still knows the message, so the next poll does not import it again
+    assert_eq!(
+        items(&env, mailbox).await?,
+        vec![("mid:aviso-88@clinica-nueva.example".into(), None)]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_push_an_inbox_received_for_someone_else_keeps_its_file() -> R {
+    let env = Env::new(true).await?;
+    let (alex, sam) = (env.profile("alex"), env.profile("sam"));
+    let mut c = env.pool().acquire().await?;
+    let id = sources::create_source(
+        &mut c,
+        &NewSource {
+            profile_id: Some(alex),
+            created_by: Some(env.user("alex")),
+            ..NewSource::new(env.fam().household_id, "health_auto_export", "iPad de casa")
+        },
+    )
+    .await?;
+    // the iPad pushed for Alex, then the inbox moved to Sam and the same body came again for Sam
+    let body = b"{\"data\": {\"metrics\": [], \"workouts\": []}}";
+    let source = sources::get_source(&mut c, id).await?.expect("source");
+    ownhealth_devices::hae::import_push(&mut c, &env.rt.blobs, &source, body).await?;
+    sqlx::query("update source set profile_id = $1 where id = $2")
+        .bind(sam)
+        .bind(id)
+        .execute(&mut *c)
+        .await?;
+    let source = sources::get_source(&mut c, id).await?.expect("source");
+    ownhealth_devices::hae::import_push(&mut c, &env.rt.blobs, &source, body).await?;
+    drop(c);
+    let sha = env.rt.blobs.put_bytes(body)?;
+
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        items(&env, id).await?,
+        vec![(format!("push:{sha}"), Some(sha.clone()))],
+        "Sam's push lost its file"
+    );
+    assert!(stored(env.rt.blobs.root()).contains(&sha), "Sam's push went with Alex");
+    Ok(())
+}

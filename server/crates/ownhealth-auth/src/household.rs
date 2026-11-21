@@ -614,12 +614,14 @@ pub const BLOB_COLUMNS: &[(&str, &[&str], &str)] = &[
             where p.id = $1 and s.kind = 'folder') \
             and starts_with(external_id, (select slug from profile where id = $1) || '/'))",
     ),
-    // mail held on a profile's own mailbox, and mail a person released into the profile
+    // mail held on a profile's own mailbox, and mail a person released into the profile (its documents,
+    // or its item when nothing in it became a document)
     (
         "quarantine_item",
         &["raw_blob"],
         "source_id in (select id from source where profile_id = $1) \
-         or released_document_ids && array(select id from document where profile_id = $1)",
+         or released_document_ids && array(select id from document where profile_id = $1) \
+         or id in (select quarantine_id from source_item where profile_id = $1 and quarantine_id is not null)",
     ),
 ];
 
@@ -730,7 +732,15 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     // profile's. A scanner folder item names the person's short name and file name, and the file itself
     // goes, so the item goes. A mailbox or Paperless item keeps only its message or document id, so the
     // next poll does not import it again into another profile. This runs before the documents and the
-    // released mail go, since the conditions read them.
+    // released mail go, since the conditions read them. The held mail is picked first: a message released
+    // with nothing to import is found through its item, which the update below detaches.
+    let mail: Vec<Uuid> = sqlx::query_scalar(AssertSqlSafe(format!(
+        "select id from quarantine_item where {}",
+        owned("quarantine_item")
+    )))
+    .bind(profile_id)
+    .fetch_all(&mut *conn)
+    .await?;
     let items = owned("source_item");
     sqlx::query(AssertSqlSafe(format!(
         "delete from source_item where source_id in (select id from source where kind = 'folder') and ({items})"
@@ -748,14 +758,11 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     .await?;
     // Mail held on the profile's own mailbox (`quarantine_item.source_id` is set null when the source
     // goes, which would keep the message and its raw blob), and mail released into the profile.
-    let held = sqlx::query(AssertSqlSafe(format!(
-        "delete from quarantine_item where {}",
-        owned("quarantine_item")
-    )))
-    .bind(profile_id)
-    .execute(&mut *conn)
-    .await?
-    .rows_affected();
+    let held = sqlx::query("delete from quarantine_item where id = any($1)")
+        .bind(&mail)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
     // A Paperless tag rule that files to the profile goes; the household inbox keeps its other rules.
     sqlx::query(
         "update source set config = jsonb_set(config, '{profile_by_tag}', coalesce((select jsonb_object_agg(k, v) \
