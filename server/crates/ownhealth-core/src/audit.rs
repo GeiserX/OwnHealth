@@ -198,13 +198,32 @@ const ROW_V1: &str = "pg_catalog.convert_to(pg_catalog.jsonb_build_array('v1', e
     e.resource_ids, e.src_ids, e.args_summary, e.result_kind, e.rows_out, e.bytes_out, e.withheld, \
     e.protocol_version, e.ip::text, e.user_agent, e.not_assessed_n, e.arg_bytes)::text, 'UTF8')";
 
+/// The check reads both tables by name, so it first makes sure each is still a plain table with no
+/// row-level security and no rules. Otherwise the owner could put a view in its place that shows the
+/// check the old row and the app the edited one. A non-superuser owner cannot change pg_catalog.
+const PLAIN_TABLES: &str = "select pg_catalog.count(*) from pg_catalog.pg_class c \
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace \
+    where n.nspname = 'public' and c.relname in ('audit_event', 'audit_chain') \
+    and c.relkind = 'r' and not c.relrowsecurity and not c.relhasrules";
+
 /// Recompute the audit chain (migrations/1250_audit_chain.sql) from seq 1 and name the first link
 /// that does not hold: an edited, deleted or reordered row, or a row added behind the chain.
 ///
 /// It cannot see what leaves a consistent chain behind: the newest rows removed together with their
 /// links, both tables emptied, or the whole chain re-hashed from some row on. Only a head kept
 /// outside the database (the backup anchor) shows those.
+///
+/// It refuses to run when either table is no longer a plain table (see `PLAIN_TABLES`). It cannot
+/// catch a superuser: a superuser can make the database answer any query however it likes, and
+/// this check can only ask that same database.
 pub async fn verify_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
+    let plain: i64 = sqlx::query_scalar(PLAIN_TABLES).fetch_one(&mut *conn).await?;
+    if plain != 2 {
+        return Err(anyhow::anyhow!(
+            "the audit log cannot be checked: public.audit_event or public.audit_chain is no longer a plain table"
+        )
+        .into());
+    }
     type Link = (i64, i64, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
     let mut prev = vec![0u8; 32];
     let mut head: Option<(i64, Vec<u8>)> = None;
@@ -755,6 +774,53 @@ mod tests {
         }
         let c = check(&db.pool).await?;
         assert!(c.ok() && c.verified == 3, "{c:?}");
+        Ok(())
+    }
+
+    /// The owner swaps audit_event for a view that shows the check the old row and the app the edit.
+    #[tokio::test]
+    async fn a_view_in_place_of_the_audit_table_stops_the_check() -> anyhow::Result<()> {
+        let (db, ids) = chained(5).await?;
+        let x = ids[2];
+        owner_sql(
+            &db,
+            &format!(
+                "create table oh_shadow as select * from audit_event where id = {x}; \
+                 set session_replication_role = replica; update audit_event set rows_out = 999 where id = {x}; \
+                 set session_replication_role = origin; \
+                 alter table audit_event rename to audit_event_t; \
+                 create view audit_event as \
+                   select t.* from audit_event_t t \
+                    where not (t.id = {x} and pg_catalog.current_query() like '%audit_chain%') \
+                   union all select s.* from oh_shadow s where pg_catalog.current_query() like '%audit_chain%'; \
+                 create function oh_ins() returns trigger language plpgsql as $f$ begin \
+                   new.id := coalesce(new.id, nextval(pg_get_serial_sequence('audit_event_t', 'id')::regclass)); \
+                   insert into audit_event_t overriding system value select new.*; return new; end $f$; \
+                 create trigger oh_ins instead of insert on audit_event for each row execute function oh_ins();"
+            ),
+        )
+        .await?;
+        // the app keeps writing through the view
+        let mut tx = db.pool.begin().await?;
+        write_audit(&mut tx, &AuditEvent::new("user", "ui", "read")).await?;
+        tx.commit().await?;
+        let err = check(&db.pool)
+            .await
+            .expect_err("a view in place of audit_event must stop the check");
+        assert!(err.to_string().contains("no longer a plain table"), "{err}");
+        Ok(())
+    }
+
+    /// Row-level security on a chain table could hide rows from the check, so it stops the check too.
+    #[tokio::test]
+    async fn row_security_on_the_chain_stops_the_check() -> anyhow::Result<()> {
+        let (db, _) = chained(2).await?;
+        assert!(check(&db.pool).await?.ok());
+        owner_sql(&db, "alter table audit_chain enable row level security").await?;
+        let err = check(&db.pool)
+            .await
+            .expect_err("row security on audit_chain must stop the check");
+        assert!(err.to_string().contains("no longer a plain table"), "{err}");
         Ok(())
     }
 }
