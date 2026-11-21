@@ -1727,41 +1727,6 @@ async fn an_inbox_set_below_a_file_does_not_hold_up_the_cleanup() -> R {
     Ok(())
 }
 
-#[tokio::test]
-async fn the_unread_files_of_the_persons_own_inbox_go_too() -> R {
-    let mut env = Env::new(true).await?;
-    let inbox = env.dir.path().join("inbox");
-    let root = inbox.join("estudio");
-    std::fs::create_dir_all(root.join("sam"))?;
-    std::fs::write(env.dir.path().join("fuera.pdf"), b"a file outside the inbox folder")?;
-    std::os::unix::fs::symlink(env.dir.path().join("fuera.pdf"), root.join("enlace.pdf"))?;
-    env.settings.inbox_dir = Some(inbox.clone());
-    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
-    // Alex's own inbox: a file in its root goes to Alex, and the poll has not read these yet
-    folder_source(&env, "estudio", Some(env.profile("alex"))).await?;
-    let unread = [root.join("analitica.pdf"), root.join(".analitica.pdf.part")];
-    for f in &unread {
-        std::fs::write(f, b"%PDF-1.7 Alex's scan, not read yet")?;
-    }
-    // Sam's drop in the same folder is Sam's
-    let sams = root.join("sam/escaneo.pdf");
-    std::fs::write(&sams, b"%PDF-1.7 Sam's scan")?;
-    delete_alex_and_keep(&env, &sams, "Sam's drop").await?;
-    for f in &unread {
-        assert!(!f.exists(), "Alex's unread file stayed: {}", f.display());
-    }
-    assert!(
-        root.join("enlace.pdf").symlink_metadata().is_ok() && env.dir.path().join("fuera.pdf").is_file(),
-        "the delete removed a link or its target"
-    );
-    assert_eq!(
-        env.scalar_i64("select count(*) from job where kind = 'folder.forget'")
-            .await?,
-        0
-    );
-    Ok(())
-}
-
 #[test]
 fn stored_fails_on_a_folder_it_cannot_list() {
     use std::os::unix::fs::PermissionsExt;
@@ -1772,6 +1737,31 @@ fn stored_fails_on_a_folder_it_cannot_list() {
     let listed = std::panic::catch_unwind(|| stored(dir.path()));
     std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o755)).expect("unlock");
     assert!(listed.is_err(), "an unreadable folder of the store read as empty");
+}
+
+/// The delete removes what OwnHealth filed (.done, .failed) and the person's drop, never the loose
+/// files in the root of a folder inbox: the same folder can be another inbox's drop, and it holds
+/// files the poller never reads (.stignore, .DS_Store).
+#[tokio::test]
+async fn the_loose_files_in_the_persons_own_inbox_root_stay() -> R {
+    let mut env = Env::new(true).await?;
+    let inbox = env.dir.path().join("inbox");
+    let root = inbox.join("estudio");
+    std::fs::create_dir_all(root.join("sam"))?;
+    env.settings.inbox_dir = Some(inbox.clone());
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    folder_source(&env, "estudio", Some(env.profile("alex"))).await?;
+    let loose = [root.join("analitica.pdf"), root.join(".stignore")];
+    for f in &loose {
+        std::fs::write(f, b"a loose file in the inbox root")?;
+    }
+    let sams = root.join("sam/escaneo.pdf");
+    std::fs::write(&sams, b"%PDF-1.7 Sam's scan")?;
+    delete_alex_and_keep(&env, &sams, "Sam's drop").await?;
+    for f in &loose {
+        assert!(f.is_file(), "the delete removed a loose root file: {}", f.display());
+    }
+    Ok(())
 }
 
 #[tokio::test]

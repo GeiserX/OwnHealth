@@ -75,9 +75,8 @@ fn subdir(config: &serde_json::Value) -> Result<Option<&Path>> {
 
 /// After a profile is deleted, remove its files from a folder source: its drop folder
 /// `<root>/<slug>/` and the copies filed in `.done/<slug>/` and `.failed/<slug>/` when `slug_folders`,
-/// plus `.done/_root/`, `.failed/_root/` and the files not read yet in the root when `root_buckets` (the
-/// source was the profile's own, so its root files went to that profile; a folder or a link in the root
-/// stays). [`forget_folders`] decides both, so a new person or a new folder
+/// plus `.done/_root/` and `.failed/_root/` when `root_buckets` (the source was the profile's own, so its
+/// root files went to that profile). [`forget_folders`] decides both, so a new person or a new folder
 /// inbox that took over a name keeps its files. The paths are built from the checked subdir and slug
 /// only. A root that leads out of the inbox folder is skipped, never an error: OwnHealth never filed
 /// anything there. Nothing below the root is followed: a link in the way is removed, never its target,
@@ -127,24 +126,7 @@ pub fn forget_profile(
             first.get_or_insert(e);
         }
     }
-    if root_buckets && let Err(e) = remove_root_files(&root) {
-        first.get_or_insert(e);
-    }
     first.map_or(Ok(()), |e| Err(e.into()))
-}
-
-/// Remove the files directly in `root`, never a folder or a link.
-fn remove_root_files(root: &Path) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            match std::fs::remove_file(entry.path()) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-                _ => {}
-            }
-        }
-    }
-    Ok(())
 }
 
 /// The job that retries removing a deleted profile's files from the folder inboxes when the first try
