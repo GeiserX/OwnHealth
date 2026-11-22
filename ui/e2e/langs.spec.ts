@@ -31,7 +31,7 @@ test('the picker lists every registry language and switches the page to each', a
 });
 
 // The language choices that reach the server send registry codes: the family invite (the new login's
-// locale), the summary sheet, the next-draw sheet and a new share link. Each offers every language once, by code, named in itself.
+// locale), the summary sheet, the next-draw sheet, a new share link and the gap letter. Each offers every language once, by code, named in itself.
 test('the family invite offers every registry language by its code', async ({ page }) => {
 	await page.goto('/family?lang=en');
 	await page.locator('.ph .right .btn.pri').click();
@@ -67,4 +67,14 @@ test('a new share link offers every registry language by its code', async ({ pag
 	const options = await select.evaluate((s: HTMLSelectElement) => [...s.options].map((o) => [o.value, o.text.trim()]));
 	expect(options).toEqual(LANGS.map((l) => [l.code, l.name]));
 	await expect(select).toHaveValue('es');
+});
+
+test('the gap letter offers every registry language by its code', async ({ page }) => {
+	await page.goto('/timeline?lang=en');
+	const letter = page.locator('.letter').first();
+	await expect(letter).toBeVisible();
+	const chips = await letter
+		.locator('a.chip')
+		.evaluateAll((as) => as.map((a) => [new URL((a as HTMLAnchorElement).href).searchParams.get('lang'), a.textContent?.trim() ?? '', a.getAttribute('lang')]));
+	expect(chips).toEqual(LANGS.map((l) => [l.code, l.name, l.code]));
 });
