@@ -698,6 +698,34 @@ async fn a_box_without_the_profile_keys_refuses_before_it_spends_the_refresh_tok
     Ok(())
 }
 
+/// A process whose keyring cannot open the profile's key (another OWNHEALTH_SECRETS_KEY than the one
+/// that made it) can still read a token sealed under the secrets key. It opens the profile's key
+/// before the request and refuses, so the vendor never rotates a token it could not store.
+#[tokio::test]
+async fn a_keyring_that_cannot_open_the_profiles_key_refuses_before_it_spends_the_refresh_token() -> R {
+    let s = setup().await?;
+    let (id, _) = s.connect(None, t0()).await?;
+    let secret = secret_of(&s.db, id).await?;
+    let mut c = s.db.pool.acquire().await?;
+    let token = read_secret(&mut c, &s.sb, s.fam.household_id, secret).await?;
+    replace_secret(&mut c, &s.sb, secret, &token).await?;
+    drop(c);
+    assert_eq!(sealed_head(&s.db, secret).await?.0, 1);
+    oauth::forget(id);
+    let other_kek = Kek::from_base64(&random_secrets_key())?;
+    let wrong =
+        SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(other_kek, s.db.url.clone()))));
+    let r = oauth::access_token(&s.db.pool, &wrong, id, &egress(), t0() + Duration::hours(2)).await;
+    assert_eq!(refused_code(r), "profile_keys_missing");
+    assert_eq!(s.fake.book().refresh_calls, 0, "the refresh token was sent");
+    assert_eq!(s.reconsent(id).await?, None);
+    assert_eq!(s.refresh_token(id).await?.as_deref(), Some(token.expose()));
+    // the token is as it was, and a box with the right keys refreshes it
+    s.refresh(id, t0() + Duration::hours(2)).await?;
+    assert_eq!(s.fake.book().refresh_calls, 1);
+    Ok(())
+}
+
 // ----------------------------------------------------------------- refresh ----
 
 #[tokio::test]

@@ -968,6 +968,18 @@ pub async fn access_token(
         None => None,
     }
     .ok_or_else(|| refused("client_gone", "The vendor client of this connection is gone."))?;
+    // The rotated token is sealed under the profile's key: open that key now. A keyring that cannot
+    // open it (another OWNHEALTH_SECRETS_KEY, the key row unreadable) could still read a token sealed
+    // under the secrets key, and the vendor would rotate a token this process cannot store.
+    if let Some(p) = profile
+        && let Err(e) = secrets::open_profile_key(sb, p).await
+    {
+        tracing::warn!(error = %e, profile = %p, "the profile's key does not open here, so the refresh waits");
+        return Err(refused(
+            "profile_keys_missing",
+            "This process cannot open the profile's key, so it cannot store this connection's next token.",
+        ));
+    }
     let refresh = secrets::read_secret(&mut tx, sb, household, secret_id).await?;
     let req = TokenRequest::new(
         &client,

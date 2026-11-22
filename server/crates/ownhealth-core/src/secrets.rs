@@ -207,6 +207,12 @@ async fn profile_dek(sb: &SecretBox, profile: Uuid, create: bool) -> Result<Arc<
         .ok_or_else(|| Error::Invalid("the profile's key is gone, so its stored secret no longer opens".into()))
 }
 
+/// Open `profile`'s data key (a profile with none gets one): a caller checks that it can seal under
+/// the key before it does work whose result must be sealed there.
+pub async fn open_profile_key(sb: &SecretBox, profile: Uuid) -> Result<()> {
+    profile_dek(sb, profile, true).await.map(|_| ())
+}
+
 /// `value` sealed for row `id` under `profile`'s data key (version 2).
 async fn seal_for_profile(
     sb: &SecretBox,
