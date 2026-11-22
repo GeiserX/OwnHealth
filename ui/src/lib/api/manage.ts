@@ -3,7 +3,9 @@
 // lane F (mcp_usage.py). Review and uploads are in core.ts.
 import { del, get, p, post, put, request, requestBlob } from './core';
 import type {
+	AuditChainOut,
 	AuditOut,
+	AuditWhoOut,
 	AuthState,
 	DocumentDetail,
 	DocumentSummary,
@@ -64,6 +66,8 @@ export const revokeToken = (id: Uuid) => del<{ id: Uuid; revoked: true }>(`/toke
 export const getTokenUsage = (id: Uuid) => get<TokenUsage>(`/tokens/${id}/usage`);
 
 export const listAudit = (q: { profile?: string; limit?: number; before?: number; via?: string } = {}) => get<{ items: AuditOut[] }>('/audit', q);
+export const getAuditChain = () => get<AuditChainOut>('/audit/chain');
+export const listAuditWho = (profile: string) => get<AuditWhoOut>('/audit/who', { profile });
 
 export const getHousehold = () => get<Household>('/household');
 // People (backend api/family.py): a profile without a login, an invite for a new login, deleting a profile.

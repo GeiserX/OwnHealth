@@ -488,6 +488,21 @@ export interface AuditOut {
 	withheld?: Record<string, unknown> | null;
 }
 
+/** GET /api/audit/chain: how far the hash chain holds, and the head the last backup kept outside the database. */
+export interface AuditChainOut {
+	ok: boolean;
+	verified: number; // entries checked from the first one
+	broken: { seq: number | null; kind: 'hash' | 'prev_hash' | 'missing_link' | 'missing_event' | 'unlinked' | 'uncheckable' } | null;
+	anchor: { state: 'none' | 'ok' | 'mismatch' | 'unreadable'; seq: number | null; at: IsoDateTime | null };
+}
+
+/** GET /api/audit/who?profile=: one row per actor and channel on that profile. */
+export interface AuditWhoOut {
+	profile: string;
+	scope: 'everyone' | 'own'; // own: the person only views this profile, so the rows are their own actions
+	items: { actor: string; actor_kind: string; via: string; events: number; first_ts: IsoDateTime; last_ts: IsoDateTime }[];
+}
+
 export interface TokenUsageDay {
 	calls: number;
 	facts: number;

@@ -13,6 +13,7 @@ port=${OWNHEALTH_E2E_PORT:-8190}
 admin=postgresql://postgres:postgres@127.0.0.1:55432/postgres # ownhealth-testpg, where psql_admin runs
 db="${OWNHEALTH_E2E_DB:-oh_e2e_$(openssl rand -hex 6)}"
 data=$(mktemp -d)
+anchor=${OWNHEALTH_E2E_ANCHOR_DIR:-$data/anchor} # the audit checks write the backup's anchor here
 pid=""
 created="" # set once this run made the database: a name that already exists is never dropped
 
@@ -24,7 +25,7 @@ psql_admin() { docker exec ownhealth-testpg psql -U postgres -qAtc "$1" >/dev/nu
 cleanup() {
   if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
   if [ -n "$created" ]; then psql_admin "drop database if exists \"$db\" with (force)" || true; fi
-  rm -rf "$data"
+  rm -rf "$data" "$anchor"
 }
 trap cleanup EXIT
 trap 'exit 143' TERM INT
@@ -35,6 +36,7 @@ created=1
 
 export OWNHEALTH_DATABASE_URL="${admin%/*}/$db"
 export OWNHEALTH_DATA_DIR="$data"
+export OWNHEALTH_ANCHOR_DIR="$anchor"
 export OWNHEALTH_STATIC_DIR="$root/server/static"
 export OWNHEALTH_DEMO=1 OWNHEALTH_DEV_AUTH=1
 export OWNHEALTH_HOST=127.0.0.1 OWNHEALTH_PORT="$port"

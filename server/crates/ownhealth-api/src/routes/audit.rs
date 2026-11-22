@@ -43,6 +43,21 @@ struct Row {
     profile_slug: Option<String>,
 }
 
+/// The name a log row shows for its actor.
+fn actor_label(kind: &str, user_name: Option<&str>, token_label: Option<&str>, client: Option<&str>) -> String {
+    match kind {
+        // a row the server wrote with no token (a replayed OAuth code) still names its app
+        "token" => format!(
+            "{} (token)",
+            token_label
+                .or(client.filter(|c| !c.is_empty()))
+                .unwrap_or("deleted token")
+        ),
+        "system" => "OwnHealth".into(),
+        _ => user_name.unwrap_or("unknown").to_string(),
+    }
+}
+
 async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Query(q): Query<validate::Params>) -> R {
     let mut e = validate::Errors::new();
     let limit = e.int("query", &q, "limit", 100, Some(1), Some(500));
@@ -92,18 +107,12 @@ async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Q
     let items: Vec<Value> = rows
         .into_iter()
         .map(|r| {
-            let actor = match r.actor_kind.as_str() {
-                // a row the server wrote with no token (a replayed OAuth code) still names its app
-                "token" => format!(
-                    "{} (token)",
-                    r.token_label
-                        .as_deref()
-                        .or(r.client.as_deref().filter(|c| !c.is_empty()))
-                        .unwrap_or("deleted token")
-                ),
-                "system" => "OwnHealth".into(),
-                _ => r.user_name.clone().unwrap_or_else(|| "unknown".into()),
-            };
+            let actor = actor_label(
+                &r.actor_kind,
+                r.user_name.as_deref(),
+                r.token_label.as_deref(),
+                r.client.as_deref(),
+            );
             json!({
                 "id": r.id,
                 "ts": pydantic_datetime_utc(&r.ts),
@@ -132,6 +141,76 @@ async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Q
     ok(json!({"items": items, "next_before": next}))
 }
 
+/// The state of the whole log, for every signed-in person: how far the hash chain holds, the first
+/// entry that does not, and whether the head the last backup anchored outside the database is still
+/// in it (ownhealth-ops `audit_status`). Counts and verdicts only, never a hash, a path or an entry.
+async fn audit_chain(State(rt): State<Runtime>, SessionCaller(_p): SessionCaller) -> R {
+    let mut conn = rt.pool.acquire().await?;
+    ok(ownhealth_ops::audit_status(&rt.settings, &mut conn).await?)
+}
+
+#[derive(sqlx::FromRow)]
+struct WhoRow {
+    actor_kind: String,
+    via: String,
+    events: i64,
+    first_ts: DateTime<Utc>,
+    last_ts: DateTime<Utc>,
+    user_name: Option<String>,
+    token_label: Option<String>,
+    client: Option<String>,
+}
+
+/// Who saw one profile's data: one row per actor and channel, with how many log entries it has on
+/// that profile and when the first and the last were. The same rows as the log: everyone on a
+/// profile the person manages, only their own actions on a profile they just view, and nothing on a
+/// profile they hold no grant on (404, as everywhere).
+async fn audit_who(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Query(q): Query<validate::Params>) -> R {
+    let Some(slug) = validate::param(&q, "profile").filter(|s| !s.is_empty()) else {
+        return Err(detail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "bad_input",
+            "Say which profile: ?profile=<slug>.",
+        ));
+    };
+    let mut tx = rt.pool.begin().await?;
+    let perm = Caller(p.clone()).require(&mut tx, slug, None, None).await?;
+    let pid = perm.profile.id;
+    let everyone = can_manage(&perm);
+    let rows: Vec<WhoRow> = sqlx::query_as(
+        "select e.actor_kind, e.via, count(*) as events, min(e.ts) as first_ts, max(e.ts) as last_ts, \
+         min(u.display_name) as user_name, min(t.label) as token_label, min(e.client) as client \
+         from audit_event e left join app_user u on u.id = e.actor_id left join api_token t on t.id = e.token_id \
+         where e.profile_id = $1 and ($2 or e.actor_id = $3) \
+         group by e.actor_kind, e.actor_id, e.token_id, e.client, e.via order by max(e.id) desc",
+    )
+    .bind(pid)
+    .bind(everyone)
+    .bind(p.user_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "actor": actor_label(&r.actor_kind, r.user_name.as_deref(), r.token_label.as_deref(), r.client.as_deref()),
+                "actor_kind": r.actor_kind,
+                "via": r.via,
+                "events": r.events,
+                "first_ts": pydantic_datetime_utc(&r.first_ts),
+                "last_ts": pydantic_datetime_utc(&r.last_ts),
+            })
+        })
+        .collect();
+    // "own": the person only views this profile, so the rows are their own actions on it.
+    let scope = if everyone { "everyone" } else { "own" };
+    ok(json!({"profile": perm.profile.slug, "scope": scope, "items": items}))
+}
+
 pub fn router() -> Router<Runtime> {
-    Router::new().route("/audit", get(audit_log))
+    Router::new()
+        .route("/audit", get(audit_log))
+        .route("/audit/chain", get(audit_chain))
+        .route("/audit/who", get(audit_who))
 }

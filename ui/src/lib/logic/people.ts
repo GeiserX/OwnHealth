@@ -102,6 +102,36 @@ export function lastSignIn(passkeys: number, password: boolean, oidc: boolean): 
 
 export type AuditRow = { via: string; actor: string; action: string; tool: string | null; result_kind: string | null; rows_out: number | null; bytes_out: number | null };
 
+/** The two lines the audit card shows about the log itself: does the hash chain hold, and does it still
+ * match the head the last backup kept outside the database. Each is a dict key, its values and a pill
+ * tone; `at` stays an ISO time for the caller to format. */
+export type ChainLine = { key: string; vars: Record<string, string | number>; tone: 'p-ok' | 'p-watch' | 'p-out' | 'p-info' };
+export function chainLines(c: {
+	verified: number;
+	broken: { seq: number | null; kind: string } | null;
+	anchor: { state: string; seq: number | null; at: string | null };
+}): ChainLine[] {
+	const n = c.verified;
+	const chain: ChainLine = !c.broken
+		? n
+			? { key: 'au_chain_ok', vars: { n }, tone: 'p-ok' }
+			: { key: 'au_chain_empty', vars: {}, tone: 'p-info' }
+		: c.broken.kind === 'uncheckable'
+			? { key: 'au_chain_uncheckable', vars: {}, tone: 'p-out' }
+			: { key: 'au_chain_broken_' + c.broken.kind, vars: { n, seq: c.broken.seq ?? n + 1 }, tone: 'p-out' };
+	const a = c.anchor;
+	const vars = { seq: a.seq ?? 0, at: a.at ?? '' };
+	const anchor: ChainLine =
+		a.state === 'ok'
+			? { key: 'au_anchor_ok', vars, tone: 'p-ok' }
+			: a.state === 'mismatch'
+				? { key: 'au_anchor_mismatch', vars, tone: 'p-out' }
+				: a.state === 'unreadable'
+					? { key: 'au_anchor_unreadable', vars, tone: 'p-out' }
+					: { key: 'au_anchor_none', vars, tone: 'p-info' };
+	return [chain, anchor];
+}
+
 /** 'agents' keeps what agents did over MCP; 'all' keeps every row, page views included. */
 export function auditRows<T extends { via: string }>(rows: T[] | null | undefined, mode: 'agents' | 'all'): T[] {
 	return mode === 'all' ? (rows ?? []) : (rows ?? []).filter((a) => a.via === 'mcp');
