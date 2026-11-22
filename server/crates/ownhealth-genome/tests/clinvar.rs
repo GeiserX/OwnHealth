@@ -283,6 +283,7 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     // The review item names nothing: the gene and classes come from the gated events route.
     assert_eq!(planted[0]["withheld"], false);
     assert_eq!(planted[0]["summary"], "A result you carry changed in ClinVar.");
+    assert_eq!(planted[0]["summary_en"], planted[0]["summary"]);
     assert_eq!(
         planted[0]["summary_es"],
         "Ha cambiado en ClinVar un resultado que tienes."
@@ -338,6 +339,7 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     assert_eq!(sf.len(), 1);
     assert_eq!(sf[0]["withheld"], true);
     assert_eq!(sf[0]["summary"], "A withheld result changed in ClinVar.");
+    assert_eq!(sf[0]["summary_en"], sf[0]["summary"]);
     assert_eq!(
         sf[0]["summary_es"],
         "Ha cambiado en ClinVar un resultado que está oculto."
@@ -372,6 +374,7 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
             .as_str()
             .is_some_and(|s| s.ends_with("merece una prueba clínica."))
     );
+    assert_eq!(sam[0]["summary_en"], sam[0]["summary"]);
     assert!(alerts_of(&mut c, e.profile("lucia")).await?.is_empty());
 
     // get_genome_findings' clinvar_now: the CFTR finding now reads what release two says.

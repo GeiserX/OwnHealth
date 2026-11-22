@@ -20,7 +20,7 @@ use ownhealth_genome::{NOTICE, couple, gate_for};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use super::super::auth::{R, detail, ok};
+use super::super::auth::{Check, R, detail, ok};
 use crate::extract::Caller;
 
 const TOOL: &str = "GET /api/genome/carrier-couple";
@@ -99,7 +99,7 @@ pub async fn carrier_couple(rt: &Runtime, principal: &Principal, a: &str, b: &st
     Ok(json!({
         "a": who(&pa),
         "b": who(&pb),
-        "lang": if lang == "es" { "es" } else { "en" },
+        "lang": ownhealth_core::langs::lang_or_default(lang),
         "rules": couple::rules_version(),
         "rows": joined.rows,
         "withheld": {"sensitive": joined.withheld},
@@ -114,7 +114,11 @@ async fn carrier_couple_route(
     Query(q): Query<HashMap<String, String>>,
 ) -> R {
     let arg = |k: &str| q.get(k).map_or("", String::as_str);
-    ok(carrier_couple(&rt, &c, arg("a"), arg("b"), arg("lang")).await?)
+    let mut check = Check::query();
+    // an absent lang reads English, the default this route has answered with since 0.4.0
+    let lang = check.query_lang(q.get("lang").map(String::as_str)).unwrap_or("en");
+    check.done()?;
+    ok(carrier_couple(&rt, &c, arg("a"), arg("b"), lang).await?)
 }
 
 pub fn router() -> Router<Runtime> {

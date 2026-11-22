@@ -32,6 +32,7 @@ use ownhealth_core::Runtime;
 use ownhealth_core::access::{Permission, Principal, accessible_profiles, effective_permission};
 use ownhealth_core::audit::{AuditEvent, write_audit, write_audit_at};
 use ownhealth_core::family::{self, Catalog, LinkChange, Member, MemberIn};
+use ownhealth_core::langs::LANGS;
 use ownhealth_core::provenance::{SrcIn, SrcRef};
 use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
@@ -171,15 +172,28 @@ async fn shown(conn: &mut PgConnection, principal: &Principal, perm: &Permission
     Ok(out)
 }
 
+/// `base` with each registry language's text of a catalog name under `<prefix><lang>` (`en`,
+/// `short_en`), the UI's `Localized` and `Suffixed`. A registry language the catalog lacks is null
+/// here, never another language's text; `tests/langs.rs` names it.
+fn with_texts(mut base: Value, prefix: &str, texts: Option<&[(&'static str, &str)]>) -> Value {
+    if let Some(m) = base.as_object_mut() {
+        for l in LANGS {
+            let text = texts.and_then(|t| t.iter().find(|(c, _)| *c == l)).map(|(_, t)| *t);
+            m.insert(format!("{prefix}{l}"), json!(text));
+        }
+    }
+    base
+}
+
 fn catalog_out(cat: &Catalog) -> Value {
     json!({
         "version": cat.version,
-        "relationships": cat.relationships.iter().map(|r| json!({
-            "code": r.code, "en": r.en, "es": r.es, "generation": r.generation, "side": r.side, "sex": r.sex,
-        })).collect::<Vec<_>>(),
-        "conditions": cat.conditions.iter().map(|c| json!({
-            "kind": c.kind, "en": c.en, "es": c.es, "short_en": c.short_en, "short_es": c.short_es, "group": c.group,
-        })).collect::<Vec<_>>(),
+        "relationships": cat.relationships.iter().map(|r| with_texts(json!({
+            "code": r.code, "generation": r.generation, "side": r.side, "sex": r.sex,
+        }), "", Some(&r.names()))).collect::<Vec<_>>(),
+        "conditions": cat.conditions.iter().map(|c| with_texts(with_texts(json!({
+            "kind": c.kind, "group": c.group,
+        }), "", Some(&c.names())), "short_", Some(&c.shorts()))).collect::<Vec<_>>(),
     })
 }
 
@@ -446,21 +460,21 @@ async fn pedigree(State(rt): State<Runtime>, caller: Caller, Path(p): Path<Strin
                     .iter()
                     .map(|c| {
                         let k = cat.condition(&c.kind);
-                        json!({
+                        let row = json!({
                             "kind": c.kind,
                             "text": c.text,
-                            "en": k.map(|k| k.en.as_str()), "es": k.map(|k| k.es.as_str()),
-                            "short_en": k.map(|k| k.short_en.as_str()), "short_es": k.map(|k| k.short_es.as_str()),
                             "group": k.map(|k| k.group.as_str()),
                             "onset_age": c.onset_age, "onset_approx": c.onset_approx,
-                        })
+                        });
+                        let row = with_texts(row, "", k.map(|k| k.names()).as_ref().map(|n| &n[..]));
+                        with_texts(row, "short_", k.map(|k| k.shorts()).as_ref().map(|n| &n[..]))
                     })
                     .collect()
             };
             Some(json!({
                 "id": m.id,
                 "relationship": rel.code,
-                "label": {"en": rel.en, "es": rel.es},
+                "label": with_texts(json!({}), "", Some(&rel.names())),
                 "generation": rel.generation,
                 "side": rel.side,
                 "degree": rel.degree,

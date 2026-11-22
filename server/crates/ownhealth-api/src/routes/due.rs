@@ -96,8 +96,8 @@ async fn get_due(
 ) -> R {
     let mut check = Check::query();
     let as_of = parse_date(&q, &mut check);
+    let lang = check.query_lang(q.get("lang").map(String::as_str));
     check.done()?;
-    let lang = q.get("lang").filter(|v| !v.is_empty()).map(String::as_str);
     ok(due(&rt, &c, &p, as_of, lang).await?)
 }
 
@@ -397,15 +397,23 @@ async fn answers_out(conn: &mut PgConnection, perm: &Permission, lang: &str) -> 
     Ok(json!({"items": items}))
 }
 
+/// The `lang` of the answers routes, refused before anything is read or written.
+fn answers_lang(q: &HashMap<String, String>) -> R<Option<&'static str>> {
+    let mut check = Check::query();
+    let lang = check.query_lang(q.get("lang").map(String::as_str));
+    check.done()?;
+    Ok(lang)
+}
+
 async fn list_answers(
     State(rt): State<Runtime>,
     caller: Caller,
     Path(p): Path<String>,
     Query(q): Query<HashMap<String, String>>,
-) -> Answer {
+) -> R<(StatusCode, Json<Value>)> {
+    let lang = answers_lang(&q)?.unwrap_or(caller.0.lang.as_str());
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
-    let lang = q.get("lang").map_or(caller.0.lang.as_str(), String::as_str);
     let out = answers_out(&mut tx, &perm, lang).await?;
     let mut ev = event(&caller.0, perm.profile.id, "GET /api/profiles/{p}/prevention-answers");
     ev.resource_type = Some("prevention_answer".into());
@@ -420,7 +428,9 @@ async fn put_answers(
     Path(p): Path<String>,
     Query(q): Query<HashMap<String, String>>,
     body: Result<Json<Value>, JsonRejection>,
-) -> Answer {
+) -> R<(StatusCode, Json<Value>)> {
+    // the reply speaks the screen's language, as the GET does
+    let lang = answers_lang(&q)?.unwrap_or(caller.0.lang.as_str());
     let body = body_object(body)?;
     let pack = ownhealth_rules::load_pack().map_err(ownhealth_core::Error::from)?;
     let prev = prevention::load(&pack)?;
@@ -430,12 +440,13 @@ async fn put_answers(
             return Err(bad_input(
                 "unknown_answer",
                 format!("{k}: not one of {}.", prev.answer_keys.join(", ")),
-            ));
+            )
+            .into());
         }
         let v = match v {
             Value::Null => None,
             Value::String(s) if s == "yes" || s == "no" => Some(s.clone()),
-            _ => return Err(bad_input("bad_input", format!("{k}: \"yes\", \"no\" or null."))),
+            _ => return Err(bad_input("bad_input", format!("{k}: \"yes\", \"no\" or null.")).into()),
         };
         wanted.push((k.clone(), v));
     }
@@ -497,8 +508,6 @@ async fn put_answers(
     if !ids.is_empty() {
         audit(&mut tx, &caller.0, &perm, "prevention_answer", &ids, keys.join(" ")).await?;
     }
-    // the reply speaks the screen's language, as the GET does
-    let lang = q.get("lang").map_or(caller.0.lang.as_str(), String::as_str);
     let out = answers_out(&mut tx, &perm, lang).await?;
     tx.commit().await?;
     Ok((StatusCode::OK, Json(out)))

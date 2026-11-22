@@ -661,3 +661,35 @@ async fn the_audit_row_is_written_in_a_read_committed_transaction() -> R {
     }
     Ok(())
 }
+
+/// A stored locale the registry lacks (an older install, or a rollback after a language PR) prints
+/// in the default language: only a `lang` the caller sent can be refused.
+#[tokio::test]
+async fn a_stored_locale_outside_the_registry_prints_in_the_default() -> R {
+    let env = env().await?;
+    sqlx::query("update app_user set locale = 'de' where id = $1")
+        .bind(env.user("alex"))
+        .execute(env.pool())
+        .await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let r = alex
+        .post("/api/profiles/alex/summary.pdf", &json!({"specialty": "gp"}))
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let r = alex
+        .post(
+            "/api/profiles/alex/summary.pdf",
+            &json!({"lang": "de", "specialty": "gp"}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(r.json["detail"][0]["loc"], json!(["body", "lang"]), "{:?}", r.json);
+    // the IPS export reads the same way
+    let r = alex.post("/api/profiles/alex/export", &json!({"fmt": "ips"})).await?;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let r = alex
+        .post("/api/profiles/alex/export", &json!({"fmt": "ips", "lang": "de"}))
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    Ok(())
+}

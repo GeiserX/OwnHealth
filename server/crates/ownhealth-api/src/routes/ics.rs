@@ -55,19 +55,32 @@ const DETAILS: [&str; 2] = ["generic", "named"];
 /// The statuses an event is made for.
 const OPEN: [&str; 3] = ["overdue", "due", "upcoming"];
 
-/// The title of every event of a generic feed, per language.
+/// The title of every event of a generic feed, per registry language.
+const GENERIC_TITLE: &[(&str, &str)] = &[
+    ("es", "OwnHealth: 1 elemento pendiente"),
+    ("en", "OwnHealth: 1 item due"),
+];
+
 fn generic_title(lang: &str) -> &'static str {
-    if lang == "es" {
-        "OwnHealth: 1 elemento pendiente"
-    } else {
-        "OwnHealth: 1 item due"
-    }
+    ownhealth_core::langs::pick(GENERIC_TITLE, lang)
+}
+
+/// The registry languages the feed's own title lacks.
+pub fn missing_langs(langs: &[&str]) -> Vec<String> {
+    ownhealth_core::langs::missing(&ownhealth_core::langs::codes(GENERIC_TITLE), langs)
+        .into_iter()
+        .map(|l| format!("calendar feed title has no `{l}` text"))
+        .collect()
 }
 
 /// Every sentence the feed writes itself, for the wording gate (the named titles and reasons are the
 /// Due screen's, linted there).
 pub fn phrases() -> Value {
-    json!({"en": {"generic": generic_title("en")}, "es": {"generic": generic_title("es")}})
+    GENERIC_TITLE
+        .iter()
+        .map(|(l, t)| (l.to_string(), json!({"generic": t})))
+        .collect::<serde_json::Map<String, Value>>()
+        .into()
 }
 
 // ------------------------------------------------------------------ the feed ----
@@ -312,7 +325,7 @@ async fn serve(rt: &Runtime, file: &str, meta: Meta) -> Result<Response, ApiErro
     let today = today_utc();
     let doc = prevention::build_document(&mut tx, f.profile_id, today).await?;
     let pack = ownhealth_rules::load_pack().map_err(ownhealth_core::Error::from)?;
-    let lang = if f.locale == "es" { "es" } else { "en" };
+    let lang = ownhealth_core::langs::lang_or_default(&f.locale);
     let rendered = prevention::render(&doc, &pack, lang, &perm.scopes)?;
     let named = f.detail == "named";
     let list = events(&rendered, f.profile_id, today, named, lang);

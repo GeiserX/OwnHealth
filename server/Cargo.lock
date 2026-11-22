@@ -3929,6 +3929,7 @@ dependencies = [
  "ownhealth-ocr",
  "ownhealth-ops",
  "ownhealth-rules",
+ "regex",
  "rust-embed",
  "serde_json",
  "sqlx",

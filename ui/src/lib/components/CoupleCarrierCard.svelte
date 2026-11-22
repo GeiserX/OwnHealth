@@ -1,6 +1,7 @@
 <script lang="ts" module>
 	// GET /api/genome/carrier-couple (routes/genome/couple.rs). The texts come from the server in the
 	// reader's language (data/genome/couple.json), so they stay under the wording lint.
+	import type { Lang } from '#lib/i18n/langs';
 	export type CoupleSide = {
 		state: 'carrier' | 'other_finding' | 'not_detected' | 'not_stated' | 'probed_only' | 'not_assessed' | 'no_genome';
 		label: string;
@@ -25,7 +26,7 @@
 	export type CoupleView = {
 		a: { profile: string; name: string };
 		b: { profile: string; name: string };
-		lang: 'es' | 'en';
+		lang: Lang;
 		rules: string;
 		rows: CoupleRow[];
 		withheld: { sensitive: number };

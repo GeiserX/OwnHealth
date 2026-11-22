@@ -2,7 +2,7 @@
 	// The timeline's Gaps card (mockup screen #timeline): visits with no report on file and long stretches
 	// with no records, from GET /profiles/{p}/gaps (ownhealth.gaps/v1). Each gap names the src that raised it
 	// and cites its rule; a visit gap in a country with a letter template links the printable access-request
-	// letter in Spanish and in English. The same gaps are items of the Due list, where they can be snoozed,
+	// letter in every registry language. The same gaps are items of the Due list, where they can be snoozed,
 	// marked done or dismissed: a gap decided there is listed dimmed under the open ones, with what was
 	// decided, and only open gaps count. The server's own day is the day of the list, as for the letter,
 	// so a gap listed here always has its letter. `stamp` changes when the timeline reloads, so a new
@@ -14,6 +14,7 @@
 	import { Loader, tf } from '#lib/components/pages1/util.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { LANGS } from '#lib/i18n/langs';
 
 	let { profile, stamp }: { profile: string; stamp?: unknown } = $props();
 	const gaps = new Loader<Gaps>();
@@ -33,11 +34,6 @@
 	// what the person decided on the Due list
 	const decided = (g: GapItem) =>
 		g.decision?.kind === 'snooze' ? tf('gap_snoozed', { d: g.decision.until ?? '' }) : g.decision?.kind === 'done' ? t('gap_done') : t('gap_dismissed');
-
-	const LETTER_LANGS: [string, string][] = [
-		['es', 'Español'],
-		['en', 'English']
-	];
 </script>
 
 <div class="card">
@@ -59,8 +55,8 @@
 							{#if g.letter}
 								<span class="letter">
 									{t('gap_letter')}:
-									{#each LETTER_LANGS as [lang, name] (lang)}
-										<a class="chip" href={gapLetterUrl(profile, g.key, lang)} target="_blank" rel="noopener" title={t('gap_letter_t')} lang={lang}>{name}</a>
+									{#each LANGS as l (l.code)}
+										<a class="chip" href={gapLetterUrl(profile, g.key, l.code)} target="_blank" rel="noopener" title={t('gap_letter_t')} lang={l.code}>{l.name}</a>
 									{/each}
 								</span>
 							{:else}

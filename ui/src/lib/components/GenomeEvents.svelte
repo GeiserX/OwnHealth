@@ -34,7 +34,7 @@
 
 	const v = $derived(view.data);
 	let open = $state<string | null>(null);
-	const lang = $derived(i18n.lang === 'es' ? 'es' : 'en');
+	const lang = $derived(i18n.lang);
 	// The OwnGenome command, kept on one line so it reads as one command.
 	const RECHECK = 'bin/og recheck --sample <name> --rerun';
 	const rerun = $derived((v?.rerun?.[lang] ?? '').split(RECHECK));

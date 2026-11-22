@@ -54,11 +54,12 @@ impl StatusParams {
     fn from_query(q: &HashMap<String, String>) -> R<StatusParams> {
         let mut check = Check::query();
         let as_of = parse_date(q, &mut check);
+        let lang = check.query_lang(q.get("lang").map(String::as_str));
         check.done()?;
         let text = |k: &str| q.get(k).filter(|v| !v.is_empty()).cloned();
         Ok(StatusParams {
             as_of,
-            lang: text("lang"),
+            lang: lang.map(String::from),
             units: text("units"),
             identity_mode: text("identity_mode"),
         })

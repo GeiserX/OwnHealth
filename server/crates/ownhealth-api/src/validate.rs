@@ -7,13 +7,35 @@ use axum::http::{HeaderMap, header};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::routes::auth::{Fail, R, error_entry};
+use ownhealth_core::langs::LANGS;
+
+use crate::routes::auth::{Fail, R, error_entry, literal_expected};
 
 /// A query string as pairs; for a scalar parameter the last value wins, as Starlette reads it.
 pub type Params = Vec<(String, String)>;
 
 pub fn param<'a>(q: &'a [(String, String)], key: &str) -> Option<&'a str> {
     q.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
+/// The `lang` query parameter, one rule on every REST route that reads it: a registry language, or
+/// None when it is absent or empty, so the route keeps its own default. Any other code (`fr`, `EN`,
+/// `en-US`) is the 422 `literal_error` entry, never a silent other language. MCP never comes here:
+/// it speaks `langs::mcp_lang`.
+pub fn lang(value: Option<&str>) -> Result<Option<&'static str>, Value> {
+    let Some(v) = value.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    LANGS.iter().copied().find(|l| *l == v).map(Some).ok_or_else(|| {
+        let expected = literal_expected(&LANGS);
+        error_entry(
+            "literal_error",
+            vec![json!("query"), json!("lang")],
+            &format!("Input should be {expected}"),
+            json!(v),
+            Some(json!({"expected": expected})),
+        )
+    })
 }
 
 /// pydantic prints a float bound without a trailing `.0` (`le=4.0` -> "4").
@@ -40,6 +62,14 @@ impl Errors {
 
     pub fn missing(&mut self, loc: Vec<Value>, input: Value) {
         self.push("missing", loc, "Field required", input, None);
+    }
+
+    /// The `lang` query parameter ([`lang`]), collected with the other parameters.
+    pub fn query_lang(&mut self, q: &[(String, String)]) -> Option<&'static str> {
+        lang(param(q, "lang")).unwrap_or_else(|e| {
+            self.0.push(e);
+            None
+        })
     }
 
     pub fn done(self) -> R<()> {

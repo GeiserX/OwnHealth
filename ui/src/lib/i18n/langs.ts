@@ -32,6 +32,9 @@ export const LANGS = [
 
 export type Lang = (typeof LANGS)[number]['code'];
 
+/** The languages MCP speaks (`api_token.lang`), es and en whatever LANGS holds (server `MCP_LANGS`). */
+export type McpLang = 'es' | 'en';
+
 /** A server text in every registry language: `{ es, en }`. */
 export type Localized<T = string> = Record<Lang, T>;
 /** The same under a stem: `Suffixed<'short'>` is `{ short_es, short_en }`. */
@@ -53,12 +56,16 @@ export function intlLocale(lang: Lang): string {
 	return byCode.get(lang)!.intl;
 }
 
-/** The first language: `?lang=`, then the saved choice, then the browser's language, else English. */
+/** The language of a browser whose languages the registry lacks (server `BROWSER_DEFAULT`; a server
+ * test keeps the two equal). */
+export const BROWSER_DEFAULT: Lang = 'en';
+
+/** The first language: `?lang=`, then the saved choice, then the browser's language, else BROWSER_DEFAULT. */
 export function pickLang(query: string | null, saved: string | null, browser: string | undefined): Lang {
 	if (isLang(query)) return query;
 	if (isLang(saved)) return saved;
 	const base = browser?.toLowerCase().split('-')[0];
-	return isLang(base) ? base : 'en';
+	return isLang(base) ? base : BROWSER_DEFAULT;
 }
 
 /** What a table lacks against English: keys missing, keys with empty text, and keys English has not. */

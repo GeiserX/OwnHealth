@@ -347,3 +347,21 @@ async fn the_summary_names_the_hrv_vendor_left_out() -> R {
     assert!(entry("hr_resting").get("limitations").is_none(), "{body}");
     Ok(())
 }
+
+/// A `lang` the registry does not hold is refused; an empty one counts as absent, as on every REST
+/// route.
+#[tokio::test]
+async fn a_lang_outside_the_registry_is_refused_and_an_empty_one_reads_the_default() -> R {
+    let a = app().await?;
+    for uri in [
+        "/profiles/lucia/wearables/summary?as_of=2026-11-07",
+        "/profiles/lucia/wearables/steps?window=P30D&as_of=2026-11-07",
+    ] {
+        let (s, b) = get(&a, "sam", &format!("{uri}&lang=fr")).await?;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{uri}: {b}");
+        assert_eq!(b["detail"][0]["type"], "literal_error", "{b}");
+        let (s, b) = get(&a, "sam", &format!("{uri}&lang=")).await?;
+        assert_eq!(s, StatusCode::OK, "{uri}: {b}");
+    }
+    Ok(())
+}

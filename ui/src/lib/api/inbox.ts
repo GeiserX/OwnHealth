@@ -139,8 +139,8 @@ export interface OAuthRequestOut {
 	client_uri?: string | null;
 	logo_uri?: string | null;
 	redirect_uri: string;
-	/** Requested scopes; labels in es and en when the server sends them. */
-	scopes: (Scope | { scope: Scope; en?: string; es?: string })[];
+	/** Offered scopes; each screen word comes from the UI dictionary (`fu_sc_*`). */
+	scopes: (Scope | { scope: Scope })[];
 	profiles: { id: Uuid; slug: string; display_name: string }[];
 	default_days?: number;
 	max_days?: number;

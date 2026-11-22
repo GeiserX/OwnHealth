@@ -282,7 +282,7 @@ pub async fn check_drug(
 ) -> Result<Value> {
     let pack = load_pack()?;
     let snap = cpic_snapshot()?;
-    let lang = if lang == "es" { "es" } else { "en" };
+    let lang = ownhealth_core::langs::lang_or_default(lang);
     let resolved = resolve(&pack, snap, drug).ok_or_else(|| Error::NotFound(format!("Unknown drug '{drug}'.")))?;
     let key = resolved["name"].as_str().unwrap_or_default().to_string();
     let drug_id = resolved["cpic_drug_id"].as_str().map(str::to_string);

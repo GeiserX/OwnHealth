@@ -1,7 +1,7 @@
 // REST API types. This file mirrors CONTRACTS.md "REST API": change both together.
 // Ids are UUID strings, dates ISO 8601 strings, decimals arrive as JSON numbers or strings.
 
-import type { Lang } from '../i18n/langs';
+import type { Lang, Localized, McpLang } from '../i18n/langs';
 
 export type Uuid = string;
 export type IsoDate = string; // 2026-11-07
@@ -464,7 +464,7 @@ export interface TokenOut {
 	profiles: string[]; // slugs
 	default_profile: string | null;
 	identity_mode: 'full' | 'pseudonymous' | 'minimal';
-	lang: 'es' | 'en';
+	lang: McpLang;
 	units: 'si' | 'conventional' | 'as_reported';
 	limits: Record<string, number>;
 	created_at: IsoDateTime;
@@ -657,7 +657,7 @@ export interface GenomeEvent {
 	release_to: string;
 	unconfirmed: boolean;
 	created_at: IsoDateTime;
-	text: { en: string; es: string };
+	text: Localized;
 	withheld?: 'minor' | 'sensitive';
 	alerted?: boolean;
 	kind?:
@@ -681,8 +681,8 @@ export interface GenomeEvents {
 	release?: string | null;
 	/** The household's weekly ClinVar check is on. */
 	weekly?: boolean;
-	/** Where a reclassified call is made again: OwnGenome's command, in both languages. */
-	rerun?: { en: string; es: string };
+	/** Where a reclassified call is made again: OwnGenome's command, in every registry language. */
+	rerun?: Localized;
 }
 
 export interface GenomeView {

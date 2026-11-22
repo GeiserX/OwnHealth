@@ -11,7 +11,7 @@
 	import { Loader, errText, tf } from '#lib/components/pages1/util.svelte';
 	import { plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
-	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { t } from '#lib/i18n/index.svelte';
 	import LangButtons from '#lib/components/LangButtons.svelte';
 	import { consentDefaults, consentProblem } from '#lib/logic/inbox';
 	import { byOrder, byScopeOrder } from '#lib/logic/people';
@@ -57,9 +57,8 @@
 	function scopeOf(s: ReqScope): Scope {
 		return typeof s === 'string' ? s : s.scope;
 	}
-	// The server's own wording when it sends one, else ours.
+	// The scope's words from the dictionary, else the scope itself.
 	function words(s: ReqScope): string {
-		if (typeof s !== 'string' && s[i18n.lang]) return s[i18n.lang] as string;
 		const k = 'fu_sc_' + scopeOf(s).replace(':', '_');
 		return t(k) !== k ? t(k) : scopeOf(s);
 	}

@@ -19,6 +19,7 @@
 	import { ago, day, stamp } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { LANGS, type Lang } from '#lib/i18n/langs';
 	import { copyText } from '#lib/logic/inbox';
 	import { currentProfile } from '#lib/state/app.svelte';
 	import { createLink, linkAccess, listLinks, revokeLink } from './api';
@@ -40,7 +41,7 @@
 	let picked = $state<string[]>([...PICKS]);
 	let days = $state(DEFAULT_DAYS);
 	let pin = $state('');
-	let lang = $state<'es' | 'en'>(i18n.lang);
+	let lang = $state<Lang>(i18n.lang);
 	let busy = $state(false);
 	let error = $state<{ text: string; raw: string } | null>(null);
 	type Made = { id: string; label: string | null; shlink: string; pin: boolean; leftOut: number | null; qr: { size: number; path: string } };
@@ -232,8 +233,7 @@
 				<label
 					>{t('shl_lang')}
 					<select class="p2in" bind:value={lang}>
-						<option value="es">Español</option>
-						<option value="en">English</option>
+						{#each LANGS as l (l.code)}<option value={l.code}>{l.name}</option>{/each}
 					</select>
 				</label>
 			</div>

@@ -160,3 +160,17 @@ async fn a_token_without_read_records_sees_no_condition_or_medicine_in_a_risk_re
     );
     Ok(())
 }
+
+/// A `lang` the registry does not hold is refused; an empty one counts as absent, as on every REST
+/// route.
+#[tokio::test]
+async fn a_lang_outside_the_registry_is_refused_and_an_empty_one_reads_the_default() -> R {
+    let (_s, _dir, _rt, app) = env().await?;
+    let (st, b) = get(&app, "/api/profiles/alex/calculators?as_of=2026-11-07&lang=fr").await?;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
+    assert_eq!(b["detail"][0]["type"], "literal_error", "{b}");
+    assert_eq!(b["detail"][0]["loc"], serde_json::json!(["query", "lang"]), "{b}");
+    let (st, b) = get(&app, "/api/profiles/alex/calculators?as_of=2026-11-07&lang=").await?;
+    assert_eq!((st, &b["lang"]), (StatusCode::OK, &serde_json::json!("es")), "{b}");
+    Ok(())
+}

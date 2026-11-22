@@ -611,7 +611,7 @@ fn family_rows(doc: &Value, ids: &[String], lang: &str) -> Result<Vec<Value>> {
             for code in i["rel"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                 let name = cat
                     .relationship(code)
-                    .map_or(code, |r| if lang == "es" { r.es.as_str() } else { r.en.as_str() });
+                    .map_or(code, |r| ownhealth_core::langs::pick(&r.names(), lang));
                 if !rel.iter().any(|n| n == name) {
                     rel.push(name.to_string());
                 }
@@ -667,11 +667,7 @@ pub async fn read_for(
     scopes: &Scopes,
     opts: &Options,
 ) -> Result<(Value, Value)> {
-    let lang = if LANGS.contains(&opts.lang.as_str()) {
-        opts.lang.as_str()
-    } else {
-        "en"
-    };
+    let lang = ownhealth_core::langs::lang_or_default(&opts.lang);
     let pack = load_pack()?;
     let d = data()?;
     let spec = d

@@ -36,6 +36,29 @@ pub struct Metric {
     pub label_es: String,
 }
 
+impl Metric {
+    /// The label in each language [`METRICS`] carries, for `langs::pick`.
+    pub fn labels(&self) -> [(&'static str, &str); 2] {
+        [("es", &self.label_es), ("en", &self.label_en)]
+    }
+}
+
+/// The registry languages the metric labels and the left-out line lack: [`METRICS`] carries es and
+/// en, so a registry language beyond them is named here (`tests/langs.rs`).
+pub fn missing_langs(langs: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> =
+        ownhealth_core::langs::missing(&ownhealth_core::langs::codes(&metric("steps").labels()), langs)
+            .into_iter()
+            .map(|l| format!("wearable metric labels have no `{l}` text"))
+            .collect();
+    out.extend(
+        ownhealth_core::langs::missing(&ownhealth_core::langs::codes(LEFT_OUT), langs)
+            .into_iter()
+            .map(|l| format!("the left-out line has no `{l}` text")),
+    );
+    out
+}
+
 type Spec = (
     &'static str,
     &'static str,
@@ -562,6 +585,19 @@ pub fn left_out_names(series: &Series) -> Option<(&str, Vec<&str>)> {
 pub const LEFT_OUT_SENTENCE: &str =
     "HRV from one source only (shown). Not mixed with HRV from other sources in this window (left_out).";
 
+/// The limitation line of a one-source series per registry language; `{shown}` is the source shown,
+/// `{rest}` the list of the others (empty, or `: a, b`).
+const LEFT_OUT: &[(&str, &str)] = &[
+    (
+        "es",
+        "VFC de una sola fuente: {shown}. No se mezcla con la VFC de otras fuentes en este periodo{rest}.",
+    ),
+    (
+        "en",
+        "HRV from one source only: {shown}. Not mixed with HRV from other sources in this window{rest}.",
+    ),
+];
+
 /// The limitation line of a one-source series that left a source out: which it shows and which not.
 pub fn left_out_note(series: &Series, lang: &str) -> Option<String> {
     let (shown, names) = left_out_names(series)?;
@@ -570,11 +606,11 @@ pub fn left_out_note(series: &Series, lang: &str) -> Option<String> {
     } else {
         format!(": {}", names.join(", "))
     };
-    Some(if lang == "es" {
-        format!("VFC de una sola fuente: {shown}. No se mezcla con la VFC de otras fuentes en este periodo{rest}.")
-    } else {
-        format!("HRV from one source only: {shown}. Not mixed with HRV from other sources in this window{rest}.")
-    })
+    // split, not replace: a device name is imported text and may hold a placeholder itself
+    let t = ownhealth_core::langs::pick(LEFT_OUT, lang);
+    let (head, tail) = t.split_once("{shown}").unwrap_or((t, ""));
+    let (mid, end) = tail.split_once("{rest}").unwrap_or((tail, ""));
+    Some(format!("{head}{shown}{mid}{rest}{end}"))
 }
 
 /// Every text this module writes for a person, for the wording lint.
@@ -588,10 +624,17 @@ pub fn phrases() -> Value {
         left_out: vec!["Oura Ring".into()],
         ..series.clone()
     };
-    json!({
-        "en": [left_out_note(&series, "en"), left_out_note(&same, "en"), Some(LEFT_OUT_SENTENCE.to_string())],
-        "es": [left_out_note(&series, "es"), left_out_note(&same, "es")],
-    })
+    let mut out: serde_json::Map<String, Value> = LEFT_OUT
+        .iter()
+        .map(|(l, _)| {
+            (
+                l.to_string(),
+                json!([left_out_note(&series, l), left_out_note(&same, l)]),
+            )
+        })
+        .collect();
+    out.insert("mcp".into(), json!([LEFT_OUT_SENTENCE]));
+    Value::Object(out)
 }
 
 /// Python's `wearables.series` as JSON: `t`, `value`, `min`, `max`, `mean`, `median`, `p10`, `p90`,
