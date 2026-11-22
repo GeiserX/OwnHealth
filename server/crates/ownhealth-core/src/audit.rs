@@ -1203,4 +1203,47 @@ mod tests {
         }
         anyhow::bail!("the edit never committed while the check was reading")
     }
+
+    /// The check locks both tables before its guard looks at them. A swap that holds its lock while
+    /// the check starts and commits after it lands before the guard runs, and the guard then sees
+    /// the view in the table's place. Without the lock the guard would pass on the table it saw
+    /// first, and the read would wait for the swap and read the view.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_swap_that_commits_as_the_check_starts_stops_the_check() -> anyhow::Result<()> {
+        let (db, _) = chained(3).await?;
+        let mut b = sqlx::PgConnection::connect(&db.url).await?;
+        let mut swap = b.begin().await?;
+        sqlx::raw_sql(
+            "alter table audit_event rename to audit_event_t; \
+             create view audit_event as select * from audit_event_t",
+        )
+        .execute(&mut *swap)
+        .await?;
+        let mut a = sqlx::PgConnection::connect(&db.url).await?;
+        let pid: i32 = sqlx::query_scalar("select pg_backend_pid()").fetch_one(&mut a).await?;
+        let checker = tokio::spawn(async move {
+            let r = verify_chain(&mut a).await;
+            (r, a)
+        });
+        // the check waits for the swap's lock
+        loop {
+            let waiting: bool =
+                sqlx::query_scalar("select exists (select 1 from pg_locks where pid = $1 and not granted)")
+                    .bind(pid)
+                    .fetch_one(&db.pool)
+                    .await?;
+            if waiting {
+                break;
+            }
+            anyhow::ensure!(!checker.is_finished(), "the check did not wait for the swap");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        swap.commit().await?;
+        let (r, a) = checker.await?;
+        a.close().await?;
+        b.close().await?;
+        let err = r.expect_err("a view swapped in as the check starts must stop it");
+        assert!(err.to_string().contains("no longer a plain table"), "{err}");
+        Ok(())
+    }
 }
