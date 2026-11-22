@@ -23,7 +23,7 @@
 	import type { InboxSource } from '#lib/api/inbox';
 	import AgentContext from '#lib/components/inbox/AgentContext.svelte';
 	import ProposalRows from '#lib/components/inbox/ProposalRows.svelte';
-	import { inboxSummary, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding } from '#lib/logic/inbox';
+	import { FHIR_ITEM_KINDS, fhirTileSource, inboxSummary, latestJob, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, unmappedSummary } from '#lib/logic/inbox';
 	import { ApiError } from '#lib/api/core';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import PageHeader from '#lib/components/PageHeader.svelte';
@@ -44,7 +44,7 @@
 	const THRESHOLD = 0.95;
 	const prof = $derived(currentProfile());
 	// sources is null when the inbox list failed for another reason than "not yours to manage".
-	const queue = new Loader<{ items: ReviewItem[]; docs: DocumentSummary[]; jobs: JobInfo[]; sources: InboxSource[] | null }>();
+	const queue = new Loader<{ items: ReviewItem[]; docs: DocumentSummary[]; fhirDoc: DocumentSummary | null; jobs: JobInfo[]; sources: InboxSource[] | null }>();
 	// "Not a duplicate? reject" waits for a second click: it retracts this document.
 	let confirmDup = $state(false);
 	const doc = new Loader<DocumentDetail>();
@@ -79,15 +79,17 @@
 		const slug = prof?.slug;
 		if (!slug) return;
 		queue.run(async () => {
-			const [r, d, j, s] = await Promise.all([
+			const [r, d, f, j, s] = await Promise.all([
 				listReview({ status: 'open', profile: slug }),
 				listDocuments(slug).catch(() => ({ items: [] as DocumentSummary[] })),
+				// the FHIR tile's newest import, whatever the evidence order of the list above puts first
+				listDocuments(slug, { latest: 'fhir', limit: 1 }).then((x) => x.items[0] ?? null, () => null),
 				listJobs().catch(() => ({ jobs: [] as JobInfo[] })),
 				// The inbox tile; a viewer who cannot manage sources (403) just sees the setup tile. Any other
 				// failure leaves the tile at '—' rather than claiming there is no inbox.
 				listInboxes().catch((e) => (e instanceof ApiError && e.status === 403 ? { items: [] as InboxSource[] } : { items: null }))
 			]);
-			return { items: r.items, docs: d.items, jobs: j.jobs, sources: s.items };
+			return { items: r.items, docs: d.items, fhirDoc: f, jobs: j.jobs, sources: s.items };
 		}, slug);
 	}
 	$effect(() => {
@@ -251,14 +253,18 @@
 		});
 
 	// Inbox tiles: what each channel left in the queue, and its newest import.
-	const latest = (kind: string) => (queue.data?.jobs ?? []).find((j) => j.kind === kind) ?? null;
+	const docOf = (id: string | null) => (queue.data?.docs ?? []).find((x) => x.id === id) ?? null;
+	// this profile's newest job of a kind: the jobs list holds every profile the caller may read
+	const latest = (kind: string) => latestJob(queue.data?.jobs ?? [], kind, prof?.id);
 	const latestDoc = (type: string) => (queue.data?.docs ?? []).find((d) => d.doc_type === type) ?? null;
 	const count = (...kinds: string[]) => items.filter((i) => kinds.includes(i.kind)).length;
+	// A connector pull runs no import job: the tile then names the newest FHIR document itself.
+	const fhir = $derived(fhirTileSource(latest('import.fhir_bundle'), queue.data?.fhirDoc ?? null));
 	const tiles = $derived([
 		{ k: 'i2_in_lab', d: latest('import.pdf'), doc: latestDoc('lab_report'), n: count('candidate_row', 'document_identity', 'amended_report', 'pending_document') },
 		// An Apple Health export goes straight in; nothing from it waits for review.
 		{ k: 'i2_in_apple', d: latest('import.apple_health'), doc: (queue.data?.docs ?? []).find((x) => x.flags?.apple_health) ?? null, n: 0 },
-		{ k: 'i2_in_fhir', d: latest('import.fhir_bundle'), n: count('fhir_unmapped') },
+		{ k: 'i2_in_fhir', d: fhir.job, doc: fhir.doc, n: count(...FHIR_ITEM_KINDS) },
 		{ k: 'i2_in_genome', d: latest('import.genome_facts'), doc: latestDoc('genomics'), n: count('genome_reinterpretation') },
 		{ k: 'i2_in_agent', d: null, n: count('agent_proposal'), sub: 'write:propose' },
 	]);
@@ -273,7 +279,6 @@
 		return name || when ? [name, when].filter(Boolean).join(' · ') : t('i2_in_none');
 	}
 
-	const docOf = (id: string | null) => (queue.data?.docs ?? []).find((x) => x.id === id) ?? null;
 	const docLabel = (d: DocumentSummary) => `${plain(d.filename) || d.provider_name || d.id.slice(0, 8)}`;
 	const kindWord = (prefix: string, v: string) => (t(prefix + v) !== prefix + v ? t(prefix + v) : v);
 	function otherTitle(i: ReviewItem): string {
@@ -293,6 +298,9 @@
 			const label = (p.src as { label?: string } | undefined)?.label;
 			if (label) return String(label);
 		}
+		// A connector pull's resources of one type we do not show yet: one line with their count.
+		const grouped = unmappedSummary(i);
+		if (grouped) return tp('i2_fus_t', grouped.count, { type: grouped.type, source: grouped.source || '—', n: fmtNum(grouped.count) });
 		// A scan's chip already says what it is; the line names the file.
 		if (i.kind === 'pending_document' && i.document_id && docName(i.document_id)) return docName(i.document_id);
 		return t('i2_kind_' + i.kind);
@@ -532,6 +540,7 @@
 							{:else}
 								<div>{it.kind === 'agent_proposal' ? '◆ ' : ''}{otherTitle(it)}</div>
 								{#if it.kind === 'fhir_unmapped' && it.reasons.length}<div style="font-size:11.5px;color:var(--watch)">{reasonsText(it)}</div>{/if}
+								{#if it.kind === 'fhir_unmapped_summary'}<div class="dim" style="font-size:11.5px">{t('i2_fus_d')}</div>{/if}
 								{#if prows}
 									<ProposalRows rows={prows} {busy} documentId={it.document_id} onaccept={(edits) => act(() => acceptReview(it.id, edits))} onreject={() => act(() => rejectReview(it.id, 'rejected in review'))} />
 								{:else if otherText(it)}<pre class="p2untrusted" style="margin-top:4px">{otherText(it)}</pre>{/if}
@@ -551,6 +560,10 @@
 									<button class="btn sm pri" onclick={() => enter(it.id)} aria-expanded="false">{t('me_enter')}</button>
 								{/if}
 								<button class="btn sm no" onclick={() => (confirmDismiss = it.id)} disabled={busy}>{t('i2_dismiss')}</button>
+							{:else if it.kind === 'fhir_unmapped_summary'}
+								<!-- the pulled bundle, through the document route that checks this profile like the queue does -->
+								{#if it.document_id}<a class="btn sm" href={documentFileUrl(it.document_id)} target="_blank" rel="noopener">{t('i2_fus_open')}</a>{/if}
+								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>
 							{:else if (it.kind === 'agent_proposal' && !prows) || it.kind === 'fhir_unmapped'}
 								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
 								<button class="btn sm no" onclick={() => act(() => rejectReview(it.id, 'rejected in review'))} disabled={busy}>{t('i2_reject')}</button>
