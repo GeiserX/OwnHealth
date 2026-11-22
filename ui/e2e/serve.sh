@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # The server the browser checks run against (Playwright's webServer starts it, then stops it with
 # SIGTERM): the debug binary on a fresh database in the shared test Postgres (scripts/test-db.sh),
-# seeded with the synthetic demo household, serving the UI build from server/static. The database
-# and the data folder are dropped on exit. OWNHEALTH_E2E_DB names the database (the tests seed rows
-# into it); connector requests may reach a fake vendor on loopback (OWNHEALTH_DEV_CONNECTOR_LOOPBACK).
+# seeded with the synthetic demo household, serving the UI build from server/static. The data folder,
+# and the database when this run created it, are dropped on exit. OWNHEALTH_E2E_DB names the database
+# (the tests seed rows into it); connector requests may reach a fake vendor on loopback
+# (OWNHEALTH_DEV_CONNECTOR_LOOPBACK).
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -13,6 +14,7 @@ admin=postgresql://postgres:postgres@127.0.0.1:55432/postgres # ownhealth-testpg
 db="${OWNHEALTH_E2E_DB:-oh_e2e_$(openssl rand -hex 6)}"
 data=$(mktemp -d)
 pid=""
+created="" # set once this run made the database: a name that already exists is never dropped
 
 [ -x "$bin" ] || { echo "no server binary at $bin: cargo build -p ownhealth (or set OWNHEALTH_E2E_BIN)" >&2; exit 1; }
 [ -f "$root/server/static/index.html" ] || { echo "no UI build in server/static: pnpm build" >&2; exit 1; }
@@ -21,7 +23,7 @@ psql_admin() { docker exec ownhealth-testpg psql -U postgres -qAtc "$1" >/dev/nu
 
 cleanup() {
   if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
-  psql_admin "drop database if exists \"$db\" with (force)" || true
+  if [ -n "$created" ]; then psql_admin "drop database if exists \"$db\" with (force)" || true; fi
   rm -rf "$data"
 }
 trap cleanup EXIT
@@ -29,6 +31,7 @@ trap 'exit 143' TERM INT
 
 bash "$root/scripts/test-db.sh" >/dev/null
 psql_admin "create database \"$db\""
+created=1
 
 export OWNHEALTH_DATABASE_URL="${admin%/*}/$db"
 export OWNHEALTH_DATA_DIR="$data"
