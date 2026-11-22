@@ -16,6 +16,7 @@
 	import Pedigree from '#lib/components/Pedigree.svelte';
 	import FamilyConsent from '#lib/components/FamilyConsent.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { LANGS } from '#lib/i18n/langs';
 	import { roleCell } from '#lib/logic/grants';
 	import { backSummary, giveBackGrant, lapsed, localDay, type FormerAccess } from '#lib/logic/transfer';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
@@ -48,7 +49,7 @@
 	// The error shows in the form that failed: 'relative' or 'invite'.
 	let error = $state<{ where: string; text: string; raw: string } | null>(null);
 	let nr = $state({ display_name: '', relationship: 'child', role: 'guardian', birth_date: '', sex_at_birth: '', country: 'ES' });
-	let inv = $state({ display_name: '', locale: i18n.lang as 'es' | 'en', claim_profile: '' });
+	let inv = $state({ display_name: '', locale: i18n.lang, claim_profile: '' });
 	let invited = $state<{ name: string; url: string; code: string; days: number } | null>(null);
 	// null: not tried yet; false: the browser refused the clipboard and the link is selected instead.
 	let copied = $state<boolean | null>(null);
@@ -200,7 +201,7 @@
 		<div class="p2row">
 			<label style="flex:1;min-width:180px">{t('fm_name')}<input class="p2in" bind:value={inv.display_name} required maxlength="80" /></label>
 			<label>{t('fm_lang')}
-				<select class="p2in" bind:value={inv.locale}><option value="es">Español</option><option value="en">English</option></select>
+				<select class="p2in" bind:value={inv.locale}>{#each LANGS as l (l.code)}<option value={l.code}>{l.name}</option>{/each}</select>
 			</label>
 			<label>{t('fm_claim')}
 				<select class="p2in" bind:value={inv.claim_profile}>

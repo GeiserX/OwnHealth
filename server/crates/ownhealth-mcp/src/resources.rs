@@ -171,11 +171,7 @@ async fn make_call<'c>(
             at: Some(at),
             label: as_of.label,
         },
-        lang: if ["es", "en"].contains(&principal.lang.as_str()) {
-            principal.lang.clone()
-        } else {
-            "es".into()
-        },
+        lang: ownhealth_core::langs::mcp_lang(&principal.lang).into(),
         units: principal.units.clone(),
         mode: redact::stricter(&principal.identity_mode, None),
         offset: 0,

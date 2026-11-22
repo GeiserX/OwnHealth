@@ -12,6 +12,7 @@
 	import { axisTicks } from '#lib/logic/axis';
 	import { cgmBands } from '#lib/logic/inbox';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
+	import { intlLocale } from '#lib/i18n/langs';
 	import { hoursMinutes } from '#lib/logic/duration';
 	import { sliceStats } from '#lib/logic/health';
 	import { ago } from '#lib/components/pages2/fmt';
@@ -68,7 +69,7 @@
 	// A device whose samples were all retracted feeds nothing: it is not listed.
 	const devices = $derived((w.data?.devices ?? []).filter((d) => d.last_sample != null));
 	const providerName = (p: string) => (t('fu_k_' + p) === 'fu_k_' + p ? p : t('fu_k_' + p));
-	const localTime = (iso: string) => new Intl.DateTimeFormat(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
+	const localTime = (iso: string) => new Intl.DateTimeFormat(intlLocale(i18n.lang), { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
 	const windowWord = (d: number) => {
 		const [key, n] = windowWordKey(d);
 		return tf(key, { n });
@@ -85,7 +86,7 @@
 	});
 	// The days the measurement charts really show: a year opened by the scores is cut to the longest series.
 	const mDays = $derived(measurementDays(days, span));
-	const fmtDay = (d: string) => new Intl.DateTimeFormat(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(d));
+	const fmtDay = (d: string) => new Intl.DateTimeFormat(intlLocale(i18n.lang), { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(d));
 
 	function chart(m: WearableMetric) {
 		const look = LOOK[m.metric] ?? { color: C.accent };

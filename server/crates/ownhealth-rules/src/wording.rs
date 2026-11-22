@@ -1,116 +1,155 @@
 //! Wording lint (`state/wording.py`): information, never advice. Finds imperative or prescriptive
-//! phrases (en, es) in any output we write ourselves. A verbatim quote (`quote`) is not ours and is
-//! skipped only when its object names where it comes from (a non-empty `cite`, `url` or `source`);
-//! wrapped untrusted text is skipped by default; everything else must have 0 hits.
+//! phrases (one pattern table per language, `PATTERNS`) in any output we write ourselves. A verbatim
+//! quote (`quote`) is not ours and is skipped only when its object names where it comes from (a
+//! non-empty `cite`, `url` or `source`); wrapped untrusted text is skipped by default; everything else
+//! must have 0 hits.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
 use serde_json::Value;
 
-/// Prescriptive anywhere in a sentence.
-const ANYWHERE: [&str; 9] = [
-    r"\byou (?:should|must|need to|have to|ought to)\b",
-    r"\b(?:should|must)\b",
-    r"\bdo not\b",
-    r"\bdon['’]?t\b",
-    r"\bnever (?:take|use|stop|start)\b",
-    r"\bdeb(?:e|es|en|ería|erías|erían)\b",
-    r"\b(?:tiene|tienes|tienen) que\b",
-    r"\bhay que\b",
-    r"\bno (?:tome|tomes|tomen|use|uses|deje|dejes)\b",
+/// One language's imperative patterns. Every text is checked against every language's patterns:
+/// a text does not say which language it is in, and a phrase is advice in whichever one it reads.
+pub struct Patterns {
+    pub lang: &'static str,
+    /// Prescriptive anywhere in a sentence (regular expressions).
+    pub anywhere: &'static [&'static str],
+    /// Imperative when a sentence starts with it.
+    pub start_verbs: &'static [&'static str],
+}
+
+/// The per-language table. A language joins `ownhealth_core::langs::LANGS` only with its own entry
+/// here (`missing_patterns`, tested in `tests/langs.rs`).
+pub const PATTERNS: [Patterns; 2] = [
+    Patterns {
+        lang: "en",
+        anywhere: &[
+            r"\byou (?:should|must|need to|have to|ought to)\b",
+            r"\b(?:should|must)\b",
+            r"\bdo not\b",
+            r"\bdon['’]?t\b",
+            r"\bnever (?:take|use|stop|start)\b",
+        ],
+        start_verbs: &[
+            "take",
+            "stop",
+            "start",
+            "avoid",
+            "increase",
+            "decrease",
+            "reduce",
+            "lower",
+            "raise",
+            "switch",
+            "consider",
+            "use",
+            "skip",
+            "discontinue",
+            "ask",
+            "see",
+            "talk",
+            "call",
+            "discuss",
+            "check",
+            "recheck",
+            "retest",
+            "get",
+            "keep",
+            "continue",
+            "try",
+            "eat",
+            "drink",
+            "limit",
+            "add",
+            "remove",
+            "double",
+            "halve",
+            "measure",
+            "schedule",
+            "book",
+            "contact",
+            "go",
+        ],
+    },
+    Patterns {
+        lang: "es",
+        anywhere: &[
+            r"\bdeb(?:e|es|en|ería|erías|erían)\b",
+            r"\b(?:tiene|tienes|tienen) que\b",
+            r"\bhay que\b",
+            r"\bno (?:tome|tomes|tomen|use|uses|deje|dejes)\b",
+        ],
+        start_verbs: &[
+            "tome",
+            "toma",
+            "tomen",
+            "deje",
+            "deja",
+            "evite",
+            "evita",
+            "suspenda",
+            "suspende",
+            "empiece",
+            "empieza",
+            "aumente",
+            "aumenta",
+            "reduzca",
+            "reduce",
+            "baje",
+            "cambie",
+            "cambia",
+            "use",
+            "usa",
+            "consulte",
+            "consulta",
+            "pregunte",
+            "pregunta",
+            "hable",
+            "habla",
+            "coméntalo",
+            "comente",
+            "comenta",
+            "repita",
+            "repite",
+            "mida",
+            "mide",
+            "pida",
+            "pide",
+            "vaya",
+            "acuda",
+            "llame",
+            "evitar",
+            "suspender",
+            "tomar",
+            "dejar de",
+            "no tomar",
+            "reducir",
+            "aumentar",
+        ],
+    },
 ];
 
-/// Imperative when a sentence starts with it.
-const START_VERBS: [&str; 83] = [
-    "take",
-    "stop",
-    "start",
-    "avoid",
-    "increase",
-    "decrease",
-    "reduce",
-    "lower",
-    "raise",
-    "switch",
-    "consider",
-    "use",
-    "skip",
-    "discontinue",
-    "ask",
-    "see",
-    "talk",
-    "call",
-    "discuss",
-    "check",
-    "recheck",
-    "retest",
-    "get",
-    "keep",
-    "continue",
-    "try",
-    "eat",
-    "drink",
-    "limit",
-    "add",
-    "remove",
-    "double",
-    "halve",
-    "measure",
-    "schedule",
-    "book",
-    "contact",
-    "go",
-    "tome",
-    "toma",
-    "tomen",
-    "deje",
-    "deja",
-    "evite",
-    "evita",
-    "suspenda",
-    "suspende",
-    "empiece",
-    "empieza",
-    "aumente",
-    "aumenta",
-    "reduzca",
-    "reduce",
-    "baje",
-    "cambie",
-    "cambia",
-    "use",
-    "usa",
-    "consulte",
-    "consulta",
-    "pregunte",
-    "pregunta",
-    "hable",
-    "habla",
-    "coméntalo",
-    "comente",
-    "comenta",
-    "repita",
-    "repite",
-    "mida",
-    "mide",
-    "pida",
-    "pide",
-    "vaya",
-    "acuda",
-    "llame",
-    "evitar",
-    "suspender",
-    "tomar",
-    "dejar de",
-    "no tomar",
-    "reducir",
-    "aumentar",
-];
+/// The languages of `langs` with no patterns of their own.
+pub fn missing_patterns<'a>(langs: &[&'a str]) -> Vec<&'a str> {
+    langs
+        .iter()
+        .filter(|l| {
+            !PATTERNS
+                .iter()
+                .any(|p| p.lang == **l && !p.anywhere.is_empty() && !p.start_verbs.is_empty())
+        })
+        .copied()
+        .collect()
+}
 
-static ANY: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(&format!("(?i){}", ANYWHERE.join("|"))).ok());
+fn joined(part: fn(&Patterns) -> &'static [&'static str]) -> String {
+    PATTERNS.iter().flat_map(part).copied().collect::<Vec<_>>().join("|")
+}
+
+static ANY: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(&format!("(?i){}", joined(|p| p.anywhere))).ok());
 static START: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(&format!(r"(?i)^(?:{})\b", START_VERBS.join("|"))).ok());
+    LazyLock::new(|| Regex::new(&format!(r"(?i)^(?:{})\b", joined(|p| p.start_verbs))).ok());
 static SPLIT: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"(?:[.;:!?·()\n]|\s[-–—]\s)+").ok());
 
 pub const SKIP_KEYS: [&str; 1] = ["quote"];
@@ -166,5 +205,21 @@ fn walk(obj: &Value, skip: &[&str], path: &str, out: &mut Vec<(String, String)>)
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tables are slices, so the compiler no longer counts them, and a dropped pattern leaves every
+    /// other test green. Changing a count here is a decision: name the pattern added or removed.
+    #[test]
+    fn every_language_keeps_its_pattern_counts() {
+        let counts: Vec<(&str, usize, usize)> = PATTERNS
+            .iter()
+            .map(|p| (p.lang, p.anywhere.len(), p.start_verbs.len()))
+            .collect();
+        assert_eq!(counts, [("en", 5, 38), ("es", 4, 45)]);
     }
 }

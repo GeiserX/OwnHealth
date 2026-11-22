@@ -39,7 +39,8 @@ use crate::rendering::render_with;
 
 pub const SCHEMA: &str = "ownhealth.summary/v1";
 pub const SPECIALTIES: [&str; 5] = ["gp", "cardiology", "endocrinology", "hematology", "ips"];
-pub const LANGS: [&str; 2] = ["en", "es"];
+/// The sheet languages: the registry (`ownhealth_core::langs`).
+pub use ownhealth_core::langs::LANGS;
 
 /// The shipped files, compiled in.
 pub const FILES: [(&str, &str); 2] = [
@@ -666,7 +667,11 @@ pub async fn read_for(
     scopes: &Scopes,
     opts: &Options,
 ) -> Result<(Value, Value)> {
-    let lang = if opts.lang == "es" { "es" } else { "en" };
+    let lang = if LANGS.contains(&opts.lang.as_str()) {
+        opts.lang.as_str()
+    } else {
+        "en"
+    };
     let pack = load_pack()?;
     let d = data()?;
     let spec = d
@@ -1003,14 +1008,18 @@ mod tests {
     }
 
     /// A flow mapping splits at a comma: `{en: Flags, by rank, es: ...}` reads as `en: Flags` and a
-    /// key `by rank`. Every template is exactly its two languages.
+    /// key `by rank`. Every template is exactly the registry languages (`LANGS`).
     #[test]
     fn every_template_is_one_text_in_each_language() -> Result<()> {
         fn walk(v: &Value, at: &str, bad: &mut Vec<String>) {
             let Some(m) = v.as_object() else { return };
-            if m.contains_key("en") || m.contains_key("es") {
+            if LANGS.iter().any(|l| m.contains_key(*l)) {
                 let keys: Vec<&str> = m.keys().map(String::as_str).collect();
-                if keys != ["en", "es"] || m.values().any(|t| !t.is_string()) {
+                let mut want = LANGS.to_vec();
+                want.sort_unstable();
+                let mut got = keys.clone();
+                got.sort_unstable();
+                if got != want || m.values().any(|t| !t.is_string()) {
                     bad.push(format!("{at}: {keys:?}"));
                 }
                 return;
