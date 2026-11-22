@@ -52,10 +52,16 @@ services:
       OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # seals inbox passwords and tokens (v0.2)
       OWNHEALTH_BASE_URL: https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
       OWNHEALTH_INBOX_DIR: /inbox # the watched folder: ./inbox/<profile>/ on the host
+      # The `imaging` profile (below): Orthanc's address, empty when imaging is off, and its password.
+      OWNHEALTH_ORTHANC_URL: ${OWNHEALTH_ORTHANC_URL:-}
+      OWNHEALTH_ORTHANC_PASSWORD_FILE: /run/secrets/imaging/orthanc_password
     secrets: [app_db_password, secret_key, secrets_key]
     volumes:
       - ownhealth-data:/data
       - ./inbox:/inbox
+      # Only the Orthanc password, from its own folder: a secret listed above must exist even with
+      # imaging off, and the app must not see the other files in secrets/.
+      - ./secrets/imaging:/run/secrets/imaging:ro
     # No published port: only Caddy reaches the app, on the compose network.
     read_only: true
     tmpfs: [/tmp]
@@ -90,6 +96,37 @@ services:
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  # `imaging` profile (v1.0): Orthanc keeps the DICOM studies and serves the OHIF viewer, to the app
+  # only. It publishes no port, and Caddy does not reach it: the app checks every viewer request first
+  # (docs/design/architecture.md section 4). Turn it on: `openssl rand -hex 32 >
+  # secrets/imaging/orthanc_password`, then two lines in .env: COMPOSE_PROFILES=imaging (with OCR too:
+  # COMPOSE_PROFILES=ocr,imaging) and OWNHEALTH_ORTHANC_URL=http://orthanc:8042.
+  orthanc:
+    profiles: [imaging]
+    image: orthancteam/orthanc:26.11.1
+    restart: unless-stopped
+    # Orthanc's one account is the app's. Its password comes from the secret, never from this file.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        export ORTHANC__REGISTERED_USERS="{\"ownhealth\": \"$$(cat /run/secrets/orthanc_password)\"}" &&
+        exec /docker-entrypoint.sh /tmp/orthanc.json
+    environment:
+      ORTHANC__AUTHENTICATION_ENABLED: "true"
+      ORTHANC__DICOM_SERVER_ENABLED: "false" # studies arrive from the app over HTTP, never over DICOM
+      DICOM_WEB_PLUGIN_ENABLED: "true"
+      ORTHANC__DICOM_WEB__ENABLE_METADATA_CACHE: "true"
+      OHIF_PLUGIN_ENABLED: "true"
+      # The plugin's default data source, dicom-json, reads Orthanc-id routes that the app refuses.
+      ORTHANC__OHIF__DATA_SOURCE: dicom-web
+    secrets: [orthanc_password]
+    volumes:
+      - ownhealth-orthanc:/var/lib/orthanc/db
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE] # the image starts as root and writes into folders its orthanc user owns
     security_opt: ["no-new-privileges:true"]
 
   db:
@@ -134,9 +171,12 @@ secrets:
     file: ./secrets/secrets_key # inbox credentials at rest; keep a copy with the restic password
   restic_password:
     file: ./secrets/restic_password # keep a copy in your password manager: without it the backup is useless
+  orthanc_password:
+    file: ./secrets/imaging/orthanc_password # the imaging profile only; the app reads the same file
 
 volumes:
   ownhealth-data:
   ownhealth-pg:
+  ownhealth-orthanc:
   caddy-data:
   caddy-config:

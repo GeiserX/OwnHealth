@@ -4,14 +4,15 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::Router;
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::{Extension, Router};
 use ownhealth_api::ApiError;
-use ownhealth_core::config::{DEV_SECRET_KEY, Settings};
+use ownhealth_api::routes::imaging_proxy::{self, Imaging, OrthancConfig};
+use ownhealth_core::config::{DEV_SECRET_KEY, ProcessEnv, Settings};
 use ownhealth_core::{Error, Runtime, demo, jobs, migrate};
 use serde_json::json;
 use tokio::sync::watch;
@@ -30,7 +31,13 @@ pub fn check_secret_key(settings: &Settings) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The app with imaging off.
 pub fn build_app(rt: Runtime) -> Router {
+    build_app_with(rt, Imaging::new(None))
+}
+
+/// The app; `imaging` holds the Orthanc settings (None: imaging off) and the open viewer links.
+pub fn build_app_with(rt: Runtime, imaging: Arc<Imaging>) -> Router {
     let ui = Arc::new(Ui::from_settings(rt.settings.static_dir.as_deref()));
     let web = Router::new()
         .nest(
@@ -42,6 +49,8 @@ pub fn build_app(rt: Runtime) -> Router {
                 HeaderValue::from_static("no-store"),
             )),
         )
+        // The imaging viewer (/ohif) and its DICOMweb proxy (/dicom-web): never the UI fallback.
+        .merge(imaging_proxy::viewer_router())
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .fallback(move |uri: Uri| {
@@ -50,6 +59,7 @@ pub fn build_app(rt: Runtime) -> Router {
         })
         .with_state(rt.clone());
     web.merge(ownhealth_mcp::router(rt))
+        .layer(Extension(imaging))
         .layer(middleware::from_fn(access_log))
 }
 
@@ -177,14 +187,16 @@ pub async fn shutdown_signal() {
 
 pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     check_secret_key(&settings)?;
+    // Imaging is on when OWNHEALTH_ORTHANC_URL is set; a URL without a password stops the start.
+    let orthanc = OrthancConfig::from_env(&ProcessEnv)?;
     let addr = format!("{}:{}", settings.host, settings.port);
     let rt = Runtime::new(settings)?;
     let background = start(&rt).await?;
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!(%addr, version = VERSION, "listening");
+    tracing::info!(%addr, version = VERSION, imaging = orthanc.is_some(), "listening");
     axum::serve(
         listener,
-        build_app(rt).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        build_app_with(rt, Imaging::new(orthanc)).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await?;

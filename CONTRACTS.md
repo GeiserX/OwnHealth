@@ -53,6 +53,7 @@ All routes are under `/api`, JSON, and resolve `{p}` as a profile slug, `me` or 
 | G | auth.rs | `/auth/state`, `/auth/setup/{begin,finish,password}`, `/auth/login/{begin,finish}`, `/auth/recovery`, `/auth/password/login`, `/auth/step-up/{begin,finish}`, `/auth/passkeys` (GET, `/begin`, `/finish`, `DELETE /{id}`), `/auth/recovery-codes`, `/auth/invite/{code}`, `/auth/enroll/{begin,finish,password}`, `/auth/oidc/{login,callback}` | 403 `step_up_required`, 403 `csrf_failed` |
 | H | timeline.rs | `GET /profiles/{p}/timeline?types=&from=&to=&as_of=&lang=` | |
 | J | app-level | `GET /metrics` (Prometheus, outside `/api`) | |
+| C | imaging_proxy.rs | `POST /profiles/{p}/imaging/studies/{uid}/open` ; `GET /ohif/t/{capability}/...` and `GET /dicom-web/t/{capability}/...` (outside `/api`) | a browser session with `read:records` only (a token gets 403 `forbidden`); returns `{viewer_url, expires_in}`, a one-hour link bound to the session and the study; one `imaging.open` audit row per study per session; design in docs/design/architecture.md "Imaging viewer and DICOMweb proxy" |
 
 The TypeScript shapes for every route are in `ui/src/lib/api/types.ts`; the client functions are in
 `ui/src/lib/api/{core,health,manage}.ts`. A server change that alters a response shape updates the type in

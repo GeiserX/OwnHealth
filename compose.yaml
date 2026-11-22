@@ -46,6 +46,9 @@ services:
       OWNHEALTH_DEV_AUTH: ${OWNHEALTH_DEV_AUTH:-}
       # The watched folder (v0.2): a scanner or a synced phone folder drops files in ./inbox/<profile>/.
       OWNHEALTH_INBOX_DIR: /inbox
+      # The `imaging` profile (below): where Orthanc is, and the app's password there. Empty: imaging off.
+      OWNHEALTH_ORTHANC_URL: ${OWNHEALTH_ORTHANC_URL:-}
+      OWNHEALTH_ORTHANC_PASSWORD: ${OWNHEALTH_ORTHANC_PASSWORD:-}
     ports:
       - "127.0.0.1:${OWNHEALTH_HTTP_PORT:-8080}:8080"
     volumes:
@@ -81,6 +84,34 @@ services:
     volumes:
       - ownhealth-data:/data
 
+  # `imaging` profile (v1.0): Orthanc keeps the DICOM studies and serves the OHIF viewer, to the app
+  # only. It publishes no port: the app checks every viewer request first (docs/design/architecture.md
+  # section 4). Turn it on with three lines in .env: COMPOSE_PROFILES=imaging (with OCR too:
+  # COMPOSE_PROFILES=ocr,imaging), OWNHEALTH_ORTHANC_URL=http://orthanc:8042 and
+  # OWNHEALTH_ORTHANC_PASSWORD=<the output of `openssl rand -hex 32`>.
+  orthanc:
+    profiles: [imaging]
+    image: orthancteam/orthanc:26.11.1
+    restart: unless-stopped
+    # Orthanc's one account is the app's. Its password comes from the secret, never from this file.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        export ORTHANC__REGISTERED_USERS="{\"ownhealth\": \"$$(cat /run/secrets/orthanc_password)\"}" &&
+        exec /docker-entrypoint.sh /tmp/orthanc.json
+    environment:
+      ORTHANC__AUTHENTICATION_ENABLED: "true"
+      ORTHANC__DICOM_SERVER_ENABLED: "false" # studies arrive from the app over HTTP, never over DICOM
+      DICOM_WEB_PLUGIN_ENABLED: "true"
+      ORTHANC__DICOM_WEB__ENABLE_METADATA_CACHE: "true"
+      OHIF_PLUGIN_ENABLED: "true"
+      # The plugin's default data source, dicom-json, reads Orthanc-id routes that the app refuses.
+      ORTHANC__OHIF__DATA_SOURCE: dicom-web
+    secrets: [orthanc_password]
+    volumes:
+      - ownhealth-orthanc:/var/lib/orthanc/db
+
   db:
     image: postgres:17.11
     restart: unless-stopped
@@ -96,6 +127,11 @@ services:
     volumes:
       - ownhealth-pg:/var/lib/postgresql/data
 
+secrets:
+  orthanc_password:
+    environment: OWNHEALTH_ORTHANC_PASSWORD # read only when the imaging profile is on
+
 volumes:
   ownhealth-data:
   ownhealth-pg:
+  ownhealth-orthanc:
