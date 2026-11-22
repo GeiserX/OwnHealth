@@ -380,7 +380,10 @@ async fn restore_refuses_another_key_or_none_before_it_loads_anything() -> R {
     other.secrets_key = None;
     let err = err_text(ownhealth_ops::restore(&other, &l.archive).await);
     assert!(
-        err.contains("OWNHEALTH_SECRETS_KEY is not set") && !err.contains('\n'),
+        err.contains("OWNHEALTH_SECRETS_KEY is not set")
+            && err.contains("the key the backup was made with")
+            && !err.contains("openssl rand")
+            && !err.contains('\n'),
         "{err}"
     );
     assert_eq!(public_tables(&db).await?, 0);

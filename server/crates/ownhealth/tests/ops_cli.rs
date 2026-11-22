@@ -156,6 +156,115 @@ async fn cli_refuses_to_start_without_the_secrets_key() -> R {
         );
     }
     assert!(!dir.path().join("backup").exists());
+    // a restore needs the key the backup was made with: a new one never opens it
+    for args in [
+        vec!["restore", backup.as_str()],
+        vec!["verify-restore", backup.as_str()],
+    ] {
+        let out = Command::new(BIN)
+            .args(&args)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("OWNHEALTH_DATABASE_URL", &s.database_url)
+            .env("OWNHEALTH_DATA_DIR", &s.data_dir)
+            .output()?;
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} started: {err}");
+        assert_eq!(err.trim_end().lines().count(), 1, "{args:?}: {err}");
+        assert!(
+            err.contains("OWNHEALTH_SECRETS_KEY is not set")
+                && err.contains("the key the backup was made with")
+                && !err.contains("openssl rand"),
+            "{args:?}: {err}"
+        );
+    }
+    Ok(())
+}
+
+/// `cmd` run until it exits or `secs` pass (then killed): its exit status, if it ended, and stderr.
+fn run_for(mut cmd: Command, secs: u64) -> anyhow::Result<(Option<std::process::ExitStatus>, String)> {
+    let mut child = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let status = loop {
+        if let Some(s) = child.try_wait()? {
+            break Some(s);
+        }
+        if std::time::Instant::now() > until {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    let mut err = String::new();
+    if let Some(mut e) = child.stderr.take() {
+        std::io::Read::read_to_string(&mut e, &mut err)?;
+    }
+    Ok((status, err))
+}
+
+/// A start with a well-formed OWNHEALTH_SECRETS_KEY that is not the one the stored profile keys were
+/// made with is refused before anything listens or writes a key: new profiles would otherwise get
+/// keys the right key never opens. A fresh install, with no profile key yet, starts.
+#[tokio::test]
+async fn cli_refuses_to_start_with_another_secrets_key() -> R {
+    let dir = tempfile::tempdir()?;
+    let db = TestDb::new().await?;
+    let right = db.settings(&dir.path().join("live"))?;
+    // a fresh install starts and stores its first profile keys
+    let out = ownhealth(&right, &["demo-seed"])?;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let keys = || async {
+        let rows: Vec<(Vec<u8>, i64)> =
+            sqlx::query_as("select kek_fingerprint, count(*) from profile_key group by 1 order by 1")
+                .fetch_all(&db.pool)
+                .await?;
+        anyhow::Ok(rows)
+    };
+    let before = keys().await?;
+    assert_eq!(before.len(), 1, "{before:?}");
+    let mut wrong = right.clone();
+    wrong.secrets_key = Some(ownhealth_core::testing::random_secrets_key());
+    let port = std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port()
+        .to_string();
+    for args in [vec!["worker"], vec!["serve"], vec!["demo-seed", "--force"]] {
+        let mut cmd = Command::new(BIN);
+        cmd.args(&args)
+            .env("OWNHEALTH_DATABASE_URL", &wrong.database_url)
+            .env("OWNHEALTH_DATA_DIR", &wrong.data_dir)
+            .env("OWNHEALTH_ANCHOR_DIR", wrong.anchor_path())
+            .env(
+                "OWNHEALTH_SECRETS_KEY",
+                wrong.secrets_key.as_deref().unwrap_or_default(),
+            )
+            .env("OWNHEALTH_DEV_AUTH", "1")
+            .env("OWNHEALTH_HOST", "127.0.0.1")
+            .env("OWNHEALTH_PORT", &port)
+            .env_remove("OWNHEALTH_ANCHOR_DIR_FILE")
+            .env_remove("OWNHEALTH_SECRETS_KEY_FILE");
+        let (status, err) = run_for(cmd, 30)?;
+        assert!(status.is_some(), "{args:?} kept running with another key: {err}");
+        assert!(!status.is_some_and(|s| s.success()), "{args:?} succeeded: {err}");
+        let line = err.trim_end().lines().last().unwrap_or_default().to_string();
+        assert!(
+            line.starts_with("error: ")
+                && line.contains("OWNHEALTH_SECRETS_KEY")
+                && line.contains("deploy/README.md")
+                && !line.contains(wrong.secrets_key.as_deref().unwrap_or("-"))
+                && !line.contains(right.secrets_key.as_deref().unwrap_or("-")),
+            "{args:?}: {err}"
+        );
+        assert!(!err.contains("listening"), "{args:?} listened: {err}");
+    }
+    assert_eq!(keys().await?, before, "a key was stored under another key");
+    // the right key still starts
+    let out = ownhealth(&right, &["demo-seed"])?;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     Ok(())
 }
 

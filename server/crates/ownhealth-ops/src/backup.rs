@@ -823,7 +823,11 @@ fn backup_key(settings: &Settings, manifest: &Value) -> Result<Option<Kek>> {
     };
     if let Some(want) = manifest["keys"]["kek_fingerprint"].as_str() {
         let Some(k) = &kek else {
-            return Err(ops_error(keys::MISSING_KEY));
+            // a new key never opens a backup: name the one it was made with
+            return Err(ops_error(format!(
+                "OWNHEALTH_SECRETS_KEY is not set: set the key the backup was made with (fingerprint {want}), \
+                 see deploy/README.md"
+            )));
         };
         let have = hex::encode(k.fingerprint());
         if have != want {
