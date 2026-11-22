@@ -122,7 +122,7 @@
 		width: 100%;
 		box-sizing: border-box;
 		margin-top: 4px;
-		background: var(--bg2, #0b0d11);
+		background: var(--bg2, #091017);
 		color: var(--text);
 		border: 1px solid var(--line2);
 		border-radius: 6px;

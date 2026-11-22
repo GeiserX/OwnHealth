@@ -1,4 +1,5 @@
 <script lang="ts">
+	import BrandMark from '#lib/components/BrandMark.svelte';
 	// The page an invite link opens (/enroll?code=…): who the invite is for, then a passkey (or the
 	// password fallback on a plain-HTTP LAN address, or OIDC), then the recovery codes once.
 	import '#lib/components/pages2/pages2.css';
@@ -41,7 +42,7 @@
 
 <div class="login">
 	<div class="brand" style="justify-content:center">
-		<div class="logo"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6" /></svg></div>
+		<div class="logo"><BrandMark /></div>
 		<div>OwnHealth<small>{t('selfhosted')} · v{__APP_VERSION__}</small></div>
 	</div>
 	<div class="seg" role="group" aria-label={t('lang_label')} style="align-self:center">

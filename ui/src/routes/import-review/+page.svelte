@@ -502,14 +502,14 @@
 			{/each}
 			{#each docProposals as p (p.item.id)}
 				<div class="prop">
-					<div style="font-size:12px"><span class="chip" style="color:var(--accent);border-color:rgba(110,168,254,.5)">{t('i2_agent_chip')}</span> ◆ {otherTitle(p.item)}</div>
+					<div style="font-size:12px"><span class="chip" style="color:var(--accent);border-color:rgba(60,186,221,.5)">{t('i2_agent_chip')}</span> ◆ {otherTitle(p.item)}</div>
 					<ProposalRows rows={p.rows} {busy} onaccept={(edits) => act(() => acceptReview(p.item.id, edits))} onreject={() => act(() => rejectReview(p.item.id, 'rejected in review'))} />
 					<AgentContext item={p.item} docName={docNameOf} />
 				</div>
 			{/each}
 			<div style="padding:10px 12px;display:flex;flex-direction:column;gap:6px">
 				{#if agentCount}
-					<div class="muted" style="font-size:11.5px"><span class="chip" style="color:var(--accent);border-color:rgba(110,168,254,.5)">{t('i2_agent_chip')}</span> {t('i2_agent_note')}</div>
+					<div class="muted" style="font-size:11.5px"><span class="chip" style="color:var(--accent);border-color:rgba(60,186,221,.5)">{t('i2_agent_chip')}</span> {t('i2_agent_note')}</div>
 				{/if}
 				{#if untrusted}
 					<div class="muted" style="font-size:11.5px" role="note">
@@ -532,7 +532,7 @@
 					{@const it = line.item}
 					{@const prows = proposalRows(it)}
 					<tr class:agent={it.kind === 'agent_proposal'} id="oi-{it.id.slice(0, 8)}">
-						<td class="kindcol" style="width:1%"><span class="chip" title={it.kind} style={it.kind === 'agent_proposal' ? 'color:var(--accent);border-color:rgba(110,168,254,.5)' : ''}>{t('i2_kind_' + it.kind)}</span></td>
+						<td class="kindcol" style="width:1%"><span class="chip" title={it.kind} style={it.kind === 'agent_proposal' ? 'color:var(--accent);border-color:rgba(60,186,221,.5)' : ''}>{t('i2_kind_' + it.kind)}</span></td>
 						<td class="mtxt">
 							{#if line.rows}
 								<div>{tp('i2_doc_rows', line.rows.length, { doc: docNameOf(line.document_id) || '—' })}</div>
@@ -609,7 +609,7 @@
 		white-space: nowrap;
 	}
 	tr.agent td {
-		background: rgba(110, 168, 254, 0.05);
+		background: rgba(60, 186, 221, 0.05);
 	}
 	.imp {
 		grid-template-columns: 430px minmax(0, 1fr);
@@ -711,7 +711,7 @@
 			width: 100%;
 		}
 		tr.agent {
-			background: rgba(110, 168, 254, 0.05);
+			background: rgba(60, 186, 221, 0.05);
 		}
 		tr.agent td {
 			background: none;
@@ -723,7 +723,7 @@
 	.prop {
 		padding: 8px 12px;
 		border-top: 1px solid var(--line);
-		background: rgba(110, 168, 254, 0.05);
+		background: rgba(60, 186, 221, 0.05);
 	}
 	a.lnkt:hover {
 		border-color: var(--line2);

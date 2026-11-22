@@ -219,7 +219,7 @@
 {/if}
 
 <div class="disc">
-	<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 8v.5M12 11v5" /></svg>
+	<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3cbadd" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 8v.5M12 11v5" /></svg>
 	<div style="flex:1 1 300px"><b>{t('i2_disc_b')}</b> {t('i2_disc')}</div>
 	{#if drug && prof}<span class="mono mcp-snip" style="margin-left:auto;font-size:11px;color:var(--muted)">MCP: check_drug(profile="{prof.slug}", drug="{drug}")</span>{/if}
 </div>
@@ -245,7 +245,7 @@
 		gap: 10px;
 		align-items: center;
 		padding: 5px 0;
-		border-top: 1px solid #20252f;
+		border-top: 1px solid #1c2632;
 	}
 	.lab:first-of-type {
 		border-top: 0;
@@ -256,7 +256,7 @@
 	.dpwg {
 		margin-top: 10px;
 		padding-top: 8px;
-		border-top: 1px solid #20252f;
+		border-top: 1px solid #1c2632;
 	}
 	.chip.untrusted {
 		font-size: 10px;

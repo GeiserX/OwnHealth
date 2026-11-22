@@ -1,4 +1,5 @@
 <script lang="ts">
+	import BrandMark from '#lib/components/BrandMark.svelte';
 	// The app shell from the mockup: sidebar (brand, household profiles, views), top bar, main view.
 	import '#lib/styles/app.css';
 	import { onMount, tick, type Snippet } from 'svelte';
@@ -144,7 +145,7 @@
 	<aside class="side" class:fade={sideFade} bind:this={sideEl} onscroll={measureSide}>
 		<div class="brand">
 			<div class="logo">
-				<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6" /></svg>
+				<BrandMark />
 			</div>
 			<div>OwnHealth<small>{t('selfhosted')} · v{__APP_VERSION__}</small></div>
 		</div>

@@ -85,7 +85,7 @@
 		<NotReady error={recs.error} onretry={load} />
 	{:else}
 		{#each recs.data ?? [] as r (r.id)}
-			<div style="padding:5px 0;border-top:1px solid #20252f">
+			<div style="padding:5px 0;border-top:1px solid #1c2632">
 				<div class="p2row">
 					<div style="flex:1;min-width:0">
 						<b>{r.title || kindName(kind)}</b>

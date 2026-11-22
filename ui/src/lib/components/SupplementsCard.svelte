@@ -184,7 +184,7 @@
 		gap: 12px;
 		align-items: flex-start;
 		padding: 9px 0;
-		border-top: 1px solid #20252f;
+		border-top: 1px solid #1c2632;
 	}
 	.row:first-of-type {
 		border-top: 0;

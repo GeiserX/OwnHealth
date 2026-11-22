@@ -1177,7 +1177,7 @@ fn refusal_page(e: &ApiError, lang: &'static str, base_url: &str) -> Response {
     let home = html_escape(&format!("{}/", base_url.trim_end_matches('/')));
     let html = format!(
         "<!doctype html><html lang=\"{tag}\"><meta charset=\"utf-8\"><title>OwnHealth</title>\
-         <body style=\"background:#0f1115;color:#e6e8ee;font:15px system-ui;padding:2rem\"><p>{}</p>\
+         <body style=\"background:#0c141c;color:#e6e8ee;font:15px system-ui;padding:2rem\"><p>{}</p>\
          <p><a href=\"{home}\" style=\"color:#8ab4ff\">{back}</a></p></body></html>",
         html_escape(message)
     );
