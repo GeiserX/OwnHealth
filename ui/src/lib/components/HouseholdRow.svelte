@@ -1,7 +1,8 @@
 <script lang="ts">
-	// One member in the home page's household overview: flags, overdue items and stale values from the
-	// member's own status and Due list, as the signed-in person's grant lets them see it. A count is
-	// never coloured alone: the column header names it, and a zero the grant may hide says so.
+	// One member in the home page's household overview: flags from the member's status, overdue items
+	// from the Due list and stale values from the member's dashboard, as the signed-in person's grant
+	// lets them see it. A count is never coloured alone: the column header names it, and a zero the
+	// grant may hide says so, under the name, where it wraps on a phone.
 	import { ApiError } from '#lib/api';
 	import type { ProfileSummary } from '#lib/api/types';
 	import { C } from '#lib/components/colors';
@@ -15,11 +16,21 @@
 		current,
 		counts,
 		error,
-		onopen
-	}: { profile: ProfileSummary; color: string; current: boolean; counts: MemberCounts | null; error: unknown; onopen: (slug: string) => void } = $props();
+		onopen,
+		onretry
+	}: {
+		profile: ProfileSummary;
+		color: string;
+		current: boolean;
+		counts: MemberCounts | null;
+		error: unknown;
+		onopen: (slug: string) => void;
+		onretry: (slug: string) => void;
+	} = $props();
 
-	// A grant without the summary answers 403: the row is not shared, not empty.
-	const locked = $derived(error instanceof ApiError && error.status === 403);
+	// A grant without the summary answers 403, and a grant revoked while the page is open answers
+	// profile_not_granted: the row is not shared, not empty and not an outage.
+	const locked = $derived(error instanceof ApiError && (error.status === 403 || error.code === 'profile_not_granted'));
 	const cell = (n: number, c: string) => (n ? `color:${c};font-weight:600` : '');
 </script>
 
@@ -28,23 +39,25 @@
 		<button class="who" type="button" aria-label={tf('hh_open', { name: profile.display_name })} aria-current={current ? 'true' : undefined} onclick={() => onopen(profile.slug)}>
 			<span class="av" style="background:{color}" aria-hidden="true">{profile.initials}</span><span>{profile.display_name}</span>
 		</button>
+		{#if counts}
+			{#if counts.withheld.length}<div class="note dim" title={tf('h1_withheld_sys', { scope: counts.withheld.join(', ') })}><span aria-hidden="true">🔒</span> {tf('hh_partial', { scope: counts.withheld.join(', ') })}</div>
+			{:else if counts.noData}<div class="note dim">{t('h1_nomark')}</div>{/if}
+		{:else if locked}<div class="note"><span class="chip" title={tf('h1_withheld_sys', { scope: 'read:summary' })}><span aria-hidden="true">🔒</span> {t('h1_locked')}</span></div>
+		{:else if error}
+			<div class="note" role="status">
+				<b>{t('h1_na')}</b> <span class="dim">{tf('h1_na_d', { code: errCode(error) })}</span>
+				<button class="btn sm" type="button" onclick={() => onretry(profile.slug)}>{t('retry')}</button>
+			</div>
+		{:else}<div class="note dim">{t('loading')}</div>{/if}
 	</td>
 	{#if counts}
 		<td class="num" style={cell(counts.flags, C.out)}>{counts.flags}</td>
 		<td class="num" style={cell(counts.overdue, C.out)}>{counts.overdue}</td>
 		<td class="num" style={cell(counts.stale, C.stale)}>{counts.stale}</td>
-		<td class="hh-left">
-			{#if counts.withheld.length}<span class="dim" title={tf('h1_withheld_sys', { scope: counts.withheld.join(', ') })}>🔒 {tf('hh_partial', { scope: counts.withheld.join(', ') })}</span>{/if}
-		</td>
 	{:else}
 		<td class="num dim">—</td>
 		<td class="num dim">—</td>
 		<td class="num dim">—</td>
-		<td class="hh-left">
-			{#if locked}<span class="chip" title={tf('h1_withheld_sys', { scope: 'read:summary' })}>🔒 {t('h1_locked')}</span>
-			{:else if error}<span class="dim">{errCode(error)}</span>
-			{:else}<span class="dim">{t('loading')}</span>{/if}
-		</td>
 	{/if}
 </tr>
 
@@ -60,8 +73,13 @@
 		width: 1%;
 		white-space: nowrap;
 	}
-	td.hh-left {
+	.note {
+		margin: 2px 0 0 30px;
 		font-size: 11.5px;
+		overflow-wrap: anywhere;
+	}
+	.note .btn {
+		margin-left: 4px;
 	}
 	tr.on td {
 		background: rgba(110, 168, 254, 0.06);

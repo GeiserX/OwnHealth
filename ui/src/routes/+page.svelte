@@ -2,7 +2,7 @@
 	// Health at a glance (mockup screen #dashboard). Everything shown comes from GET /profiles/{p}/dashboard
 	// (lane E): status words, markers, sparklines, changes, due items. The page never computes a status.
 	import { untrack } from 'svelte';
-	import { getDashboard, getDue, getStatus, listReview } from '#lib/api';
+	import { getDashboard, getStatus, listReview } from '#lib/api';
 	import type { Dashboard, ReviewItem, Status, SystemCard } from '#lib/api/types';
 	import { C } from '#lib/components/colors';
 	import HouseholdRow from '#lib/components/HouseholdRow.svelte';
@@ -16,14 +16,20 @@
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
 	import { dateParts, dueCard, dueCardView, dueScreenOpen, gapShortKey, lockedScopes, partialScopes } from '#lib/logic/due';
-	import { memberCounts, showHousehold, type MemberCounts, type StatusCounts } from '#lib/logic/household';
+	import { memberCounts, showHousehold, type DashboardCounts, type MemberCounts, type StatusCounts } from '#lib/logic/household';
 	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
 
 	// Household overview: one row per profile the person can see (GET /me lists only those), counted
-	// from each profile's own status and Due list, which answer within the person's grant.
+	// from each profile's own status and dashboard, which answer within the person's grant.
 	const members = $derived(app.me?.profiles ?? []);
 	let hhRows = $state<Record<string, { counts: MemberCounts | null; error: unknown }>>({});
 	let hhRun = 0;
+	function loadMember(slug: string, run: number, lang: string) {
+		Promise.all([getStatus(slug), getDashboard(slug, lang)]).then(
+			([s, d]) => run === hhRun && (hhRows[slug] = { counts: memberCounts(s as StatusCounts, d as DashboardCounts), error: null }),
+			(e) => run === hhRun && (hhRows[slug] = { counts: null, error: e })
+		);
+	}
 	function loadHousehold() {
 		const list = members;
 		if (!showHousehold(list)) return;
@@ -31,12 +37,12 @@
 		const lang = untrack(() => i18n.lang);
 		const run = ++hhRun;
 		hhRows = {};
-		for (const p of list) {
-			Promise.all([getStatus(p.slug), getDue(p.slug, lang)]).then(
-				([s, d]) => run === hhRun && (hhRows[p.slug] = { counts: memberCounts(s as StatusCounts, d), error: null }),
-				(e) => run === hhRun && (hhRows[p.slug] = { counts: null, error: e })
-			);
-		}
+		for (const p of list) loadMember(p.slug, run, lang);
+	}
+	/** A retry reloads that member's row only; the others keep what they show. */
+	function retryMember(slug: string) {
+		delete hhRows[slug];
+		loadMember(slug, hhRun, i18n.lang);
 	}
 	$effect(loadHousehold);
 
@@ -111,15 +117,14 @@
 
 {#if showHousehold(members)}
 	<section class="card hh" aria-labelledby="hh-t">
-		<h3 id="hh-t">{t('hh_t')}<span class="r">{t('hh_sub')}</span></h3>
-		<table>
+		<h3><span id="hh-t">{t('hh_t')}</span><span class="r">{t('hh_sub')}</span></h3>
+		<table aria-labelledby="hh-t">
 			<thead>
 				<tr>
 					<th scope="col">{t('hh_member')}</th>
 					<th scope="col" class="num">{t('hh_flags')}</th>
 					<th scope="col" class="num">{t('hh_overdue')}</th>
 					<th scope="col" class="num">{t('hh_stale')}</th>
-					<th scope="col"><span class="sr-only">{t('hh_note')}</span></th>
 				</tr>
 			</thead>
 			<tbody>
@@ -131,6 +136,7 @@
 						counts={hhRows[p.slug]?.counts ?? null}
 						error={hhRows[p.slug]?.error ?? null}
 						onopen={setProfile}
+						onretry={retryMember}
 					/>
 				{/each}
 			</tbody>

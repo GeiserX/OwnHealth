@@ -1,18 +1,28 @@
 // The household overview on the home page: one row per profile the signed-in person can see, built
 // from that profile's status (GET /profiles/{p}/status, the body get_health_status serves) and its
-// Due document (GET /profiles/{p}/due). Both answer within the caller's grant, so a row never counts
-// what the person may not see; these helpers only count and name what the grant left out.
+// dashboard (GET /profiles/{p}/dashboard, what the member's own home page shows). Both answer within
+// the caller's grant, so a row never counts what the person may not see; these helpers only count
+// and name what the grant left out.
 
 /** The parts of the rendered status this view reads. */
 export interface StatusCounts {
-	data?: { flags?: unknown[]; stale?: unknown[] };
+	data?: {
+		flags?: unknown[];
+		stale?: unknown[];
+		data_freshness?: Record<string, unknown>;
+		medications?: unknown[];
+		supplements?: unknown[];
+		active_conditions?: unknown[];
+	};
 	withheld?: { by_scope?: string[] };
 }
 
-/** The parts of the Due document this view reads. */
-export interface DueCounts {
-	items?: { status: string }[];
-	withheld_scopes?: string[];
+/** The parts of the dashboard this view reads. */
+export interface DashboardCounts {
+	systems?: { withheld?: boolean; markers?: { stale?: boolean }[] }[];
+	/** The Due list, the same items GET /profiles/{p}/due answers. */
+	prevention_due?: { status: string }[];
+	prevention_withheld?: string[];
 }
 
 /** One member's row: what is flagged, what is overdue, what is out of date, and what is not shared. */
@@ -22,21 +32,35 @@ export interface MemberCounts {
 	stale: number;
 	/** The scopes this access lacks for a full row ('read:labs'), sorted; empty when nothing is left out. */
 	withheld: string[];
+	/** Nothing at all is recorded for the member, and nothing is left out: the zeros are not "up to date". */
+	noData: boolean;
 }
 
+/** The scopes whose data feeds a column: flags (labs, genome, records), overdue (records, labs), stale (labs, wearables). */
+const FEEDS = new Set(['read:labs', 'read:records', 'read:genome', 'read:wearables']);
+
+const some = (l: unknown[] | undefined) => (l?.length ?? 0) > 0;
+
 /**
- * The counts of one member. The status names a left-out domain as 'labs' or 'records'; the Due
- * document names a scope. Both become scopes, once each, so the row can say a zero is partial.
+ * The counts of one member. Stale is what the member's dashboard marks stale (lab and wearable
+ * values); the status alone lists lab recency only. The status names a left-out domain as 'labs' or
+ * 'records'; the dashboard names a scope. Both become scopes, once each, so the row can say a zero is
+ * partial.
  */
-export function memberCounts(status: StatusCounts, due: DueCounts): MemberCounts {
+export function memberCounts(status: StatusCounts, dash: DashboardCounts): MemberCounts {
 	const scopes = new Set<string>();
 	for (const d of status.withheld?.by_scope ?? []) scopes.add(d.startsWith('read:') ? d : `read:${d}`);
-	for (const s of due.withheld_scopes ?? []) scopes.add(s);
+	for (const s of dash.prevention_withheld ?? []) scopes.add(s);
+	const withheld = [...scopes].filter((s) => FEEDS.has(s)).sort();
+	const data = status.data ?? {};
+	const recorded =
+		Object.keys(data.data_freshness ?? {}).length > 0 || some(data.medications) || some(data.supplements) || some(data.active_conditions);
 	return {
-		flags: status.data?.flags?.length ?? 0,
-		overdue: (due.items ?? []).filter((i) => i.status === 'overdue').length,
-		stale: status.data?.stale?.length ?? 0,
-		withheld: [...scopes].sort()
+		flags: data.flags?.length ?? 0,
+		overdue: (dash.prevention_due ?? []).filter((i) => i.status === 'overdue').length,
+		stale: (dash.systems ?? []).reduce((n, s) => n + (s.withheld ? 0 : (s.markers ?? []).filter((m) => m.stale).length), 0),
+		withheld,
+		noData: !recorded && withheld.length === 0
 	};
 }
 
