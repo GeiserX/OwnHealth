@@ -36,6 +36,8 @@
 	import ShcPanel from '#lib/components/pages2/ShcPanel.svelte';
 	import ShcDocument from '#lib/components/pages2/ShcDocument.svelte';
 	import { shcCards } from '#lib/logic/shc';
+	import { fitDocLines } from '#lib/logic/fit_import';
+	import FitResult from '#lib/components/pages2/FitResult.svelte';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
@@ -163,6 +165,8 @@
 	const pinfo = $derived(doc.data?.pages_info.find((p) => p.page_no === pageNo) ?? null);
 	// a SMART Health Card document: its rows came from the signed card, so it has no pages to show
 	const shcDoc = $derived(shcCards(doc.data?.flags));
+	// a FIT activity file: what it holds, and that its route was not stored
+	const fitDoc = $derived(fitDocLines(doc.data?.flags));
 	const boxes = $derived<Box[]>([
 		...rows
 			.filter((i) => pg(i) === pageNo && Array.isArray((i.payload as { bbox?: number[] }).bbox))
@@ -427,6 +431,8 @@
 			{:else if doc.data && docId && doc.data.mime.startsWith('image/')}
 				<img class="scan" src={documentFileUrl(docId)} alt={tf('i2_scan_alt', { doc: plain(doc.data.filename) })} />
 				<div class="note" style="margin-top:6px">{t('i2_no_pages_image')}</div>
+			{:else if doc.data && docId && doc.data.id === docId && fitDoc}
+				<FitResult lines={fitDoc} label={plain(doc.data.filename)} />
 			{:else if doc.data && !doc.data.pages_info.length}
 				<div class="empty">{t('i2_no_pages')}</div>
 			{:else}

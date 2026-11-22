@@ -3,7 +3,7 @@
 // file reads as our sentence in each registry language, never as the server's English.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FIT_REASONS, fitLines } from '../src/lib/logic/fit_import.ts';
+import { FIT_REASONS, fitDocId, fitDocLines, fitHidden, fitLines } from '../src/lib/logic/fit_import.ts';
 import { errKey } from '../src/lib/logic/errors.ts';
 import { LANGS } from '../src/lib/i18n/langs.ts';
 import { dict } from '../src/lib/i18n/dict.ts';
@@ -71,6 +71,9 @@ test('every FIT text exists in every registry language, with its plural and sing
 	const keys = [
 		'i2_ik_fit',
 		'i2_ik_fit_gz',
+		'fu_k_fit',
+		'i2_fit_hidden',
+		'i2_dt_wearables',
 		'i2_fit_device',
 		'i2_fit_gps',
 		'err_fit_cut',
@@ -88,5 +91,64 @@ test('every FIT text exists in every registry language, with its plural and sing
 	for (const k of keys.filter((k) => k.startsWith('i2_fit_') && !k.endsWith('_one'))) {
 		assert.notEqual(en[k], es[k], k);
 		if (en[k].includes('{n}')) assert.ok(es[k].includes('{n}') && !en[k + '_one'].includes('{n}'), k);
+	}
+});
+
+test('the reason lines say what was left out, in en and es', () => {
+	const en = dict.en as Record<string, string>;
+	const es = dict.es as Record<string, string>;
+	const want: [string, string, string][] = [
+		['i2_fit_r_bad_time', '{n} with a time before 2000 or in the future', '{n} con una hora anterior a 2000 o en el futuro'],
+		['i2_fit_r_bad_time_one', '1 with a time before 2000 or in the future', '1 con una hora anterior a 2000 o en el futuro'],
+		['i2_fit_r_bad_value', '{n} values outside a plausible range', '{n} valores fuera de un rango plausible'],
+		['i2_fit_r_bad_value_one', '1 value outside a plausible range', '1 valor fuera de un rango plausible'],
+		['i2_fit_r_other', '{n} not imported ({code})', '{n} sin importar ({code})'],
+		['i2_fit_r_other_one', '1 not imported ({code})', '1 sin importar ({code})'],
+		[
+			'i2_fit_r_over_limit',
+			'{n} past what one file holds (7 days of heart rate, 1,000 activities): not stored',
+			'{n} más allá de lo que admite un archivo (7 días de frecuencia cardiaca, 1000 actividades): sin guardar'
+		],
+		['i2_fit_hidden', 'What this file brought is shared only with people who can see Wearables.', 'Lo que ha traído este archivo solo lo ven quienes pueden ver Wearables.'],
+		['fu_k_fit', 'FIT file', 'Archivo FIT']
+	];
+	for (const [k, e, s] of want) {
+		assert.equal(en[k], e, `en ${k}`);
+		assert.equal(es[k], s, `es ${k}`);
+	}
+	// an upload the server does not know names FIT and Gadgetbridge among the files it takes
+	assert.match(en.err_unsupported_file, /Gadgetbridge database, a FIT activity file/);
+	assert.match(es.err_unsupported_file, /base de datos de Gadgetbridge, un archivo de actividad FIT/);
+});
+
+test('a FIT document shows what its file holds, from its flags', () => {
+	assert.deepEqual(fitDocLines({ fit: run.fit, import: { queued: 0 } }), fitLines({ fit: run.fit }));
+	assert.equal((fitDocLines({ fit: run.fit }) ?? []).at(-1)?.key, 'i2_fit_gps');
+	for (const f of [null, undefined, {}, { gadgetbridge: {} }, { fit: null }]) assert.equal(fitDocLines(f), null, JSON.stringify(f));
+});
+
+test('an import.fit result hidden from this member gets its one dim line, nothing else does', () => {
+	assert.equal(fitHidden({ kind: 'import.fit', state: 'done', result: null }), true);
+	for (const j of [
+		undefined,
+		{ kind: 'import.fit', state: 'done', result: run },
+		{ kind: 'import.fit', state: 'running', result: null },
+		{ kind: 'import.fit', state: 'dead', result: null },
+		{ kind: 'import.gadgetbridge', state: 'done', result: null }
+	]) {
+		assert.equal(fitHidden(j), false, JSON.stringify(j));
+	}
+});
+
+test('a finished import.fit upload links to the document its job made, nothing else does', () => {
+	assert.equal(fitDocId({ kind: 'import.fit', state: 'done', result: run }), 'd1');
+	for (const j of [
+		undefined,
+		{ kind: 'import.fit', state: 'done', result: null },
+		{ kind: 'import.fit', state: 'running', result: run },
+		{ kind: 'import.fit', state: 'done', result: { ...run, document_id: '' } },
+		{ kind: 'import.gadgetbridge', state: 'done', result: run }
+	]) {
+		assert.equal(fitDocId(j), undefined, JSON.stringify(j));
 	}
 });

@@ -5,6 +5,9 @@
 // (fixtures/fit, checked against it by ownhealth-devices tests/fit.rs).
 import { expect, test, type Page } from '@playwright/test';
 
+// screenshots go to the run's own output folder (e2e/test-results), never into ui/
+const shot = (page: Page, name: string) => page.screenshot({ path: test.info().outputPath(name), fullPage: true });
+
 const UPLOAD = { en: 'Upload', es: 'Subir' } as const;
 
 /** Upload a fixture to Lucía from the import screen; returns the row of that file. */
@@ -23,7 +26,7 @@ test('a run shows what it brought and that its route was left out, and the same 
 	page.on('pageerror', (e) => errors.push(e.message));
 	await upload(page, 'en', 'lucia-run-gps.fit');
 	await expect(page.locator('section.up').getByText('FIT activity', { exact: true })).toBeVisible();
-	const lines = page.getByRole('list', { name: 'lucia-run-gps.fit' }).getByRole('listitem');
+	const lines = page.locator('section.up').getByRole('list', { name: 'lucia-run-gps.fit' }).getByRole('listitem');
 	await expect(lines).toHaveText(
 		[
 			'1 activity read',
@@ -35,9 +38,27 @@ test('a run shows what it brought and that its route was left out, and the same 
 		],
 		{ timeout: 60_000 }
 	);
-	await page.screenshot({ path: 'test-results/fit-run-en.png', fullPage: true });
+	await shot(page, 'fit-run-en.png');
+	// the finished upload opens its document; after a reload (panel closed) the document itself still says
+	// what the file holds and that the route is gone
+	await page.locator('section.up').getByRole('link', { name: 'lucia-run-gps.fit' }).click();
+	await expect(page).toHaveURL(/[?&]doc=/);
+	await page.reload();
+	await expect(page.locator('section.up')).toHaveCount(0);
+	await expect(page.getByRole('list', { name: 'lucia-run-gps.fit' }).getByRole('listitem')).toHaveText(
+		[
+			'1 activity read',
+			'30 minutes of heart rate imported',
+			'1 walking or running distance imported',
+			'1 activity energy total imported',
+			'Device: OwnHealth Test Watch',
+			'The route (GPS positions) in the file was not stored'
+		],
+		{ timeout: 30_000 }
+	);
+	await shot(page, 'fit-document-en.png');
 	await upload(page, 'en', 'lucia-run-gps.fit');
-	const again = page.getByRole('list', { name: 'lucia-run-gps.fit' }).getByRole('listitem');
+	const again = page.locator('section.up').getByRole('list', { name: 'lucia-run-gps.fit' }).getByRole('listitem');
 	await expect(again.nth(1)).toHaveText('0 minutes of heart rate imported', { timeout: 60_000 });
 	await expect(again.nth(4)).toHaveText('32 already stored: not added again');
 	// the watch is one of Lucía's devices, named by the file
@@ -60,7 +81,7 @@ test('a gzipped ride in Spanish brings heart rate and energy, and says why its d
 		],
 		{ timeout: 60_000 }
 	);
-	await page.screenshot({ path: 'test-results/fit-ride-es.png', fullPage: true });
+	await shot(page, 'fit-ride-es.png');
 });
 
 test('a cut file and a course are refused with a reason in each language', async ({ page }) => {
@@ -68,7 +89,7 @@ test('a cut file and a course are refused with a reason in each language', async
 	await expect(cut).toContainText('This FIT file is cut short, so it cannot be read.', { timeout: 60_000 });
 	const course = await upload(page, 'es', 'lucia-course.fit');
 	await expect(course).toContainText('Este archivo FIT no contiene ninguna actividad', { timeout: 60_000 });
-	await page.screenshot({ path: 'test-results/fit-refused-es.png', fullPage: true });
+	await shot(page, 'fit-refused-es.png');
 	// no reason ever shows as the server's English
 	await expect(page.locator('section.up')).not.toContainText('PermanentJobError');
 	await expect(page.locator('section.up')).not.toContainText('holds no activity');

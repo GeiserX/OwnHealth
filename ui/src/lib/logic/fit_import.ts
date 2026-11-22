@@ -3,7 +3,7 @@
 // Pure: tests/fit_import.test.ts runs it under node; FitResult.svelte turns each line into text with tp/tf.
 
 /** The reasons the importer counts a sample as not imported, in the order the panel lists them. */
-export const FIT_REASONS = ['duplicate', 'other_sport_distance', 'bad_value', 'bad_time'] as const;
+export const FIT_REASONS = ['duplicate', 'other_sport_distance', 'bad_value', 'bad_time', 'over_limit'] as const;
 
 /** The counts of the result's `fit` details, each with its dictionary key. */
 const COUNTS = [
@@ -43,4 +43,23 @@ export function fitLines(result: unknown): FitLine[] | null {
 	if (typeof details.device === 'string' && details.device.trim()) lines.push({ key: 'i2_fit_device', vars: { device: details.device.trim() } });
 	if (details.gps_left_out === true) lines.push({ key: 'i2_fit_gps' });
 	return lines;
+}
+
+/** The lines of a FIT document (`flags.fit`, what the file holds): the document view shows them. */
+export function fitDocLines(flags: unknown): FitLine[] | null {
+	if (!flags || typeof flags !== 'object') return null;
+	return fitLines({ fit: (flags as Record<string, unknown>).fit });
+}
+
+/** An import.fit job that ended with its result hidden from this member (no read:wearables there). */
+export function fitHidden(job: { kind?: string; state?: string; result?: unknown } | undefined): boolean {
+	return !!job && job.kind === 'import.fit' && job.state === 'done' && (job.result === null || job.result === undefined);
+}
+
+/** The document a finished import.fit upload made (the job result names it; the upload answer cannot, as
+ * the job creates it). Undefined for any other job, or one whose result is hidden from this member. */
+export function fitDocId(job: { kind?: string; state?: string; result?: unknown } | undefined): string | undefined {
+	if (!job || job.kind !== 'import.fit' || job.state !== 'done') return undefined;
+	const id = (job.result as Record<string, unknown> | null | undefined)?.document_id;
+	return typeof id === 'string' && id ? id : undefined;
 }
