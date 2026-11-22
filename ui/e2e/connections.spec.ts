@@ -66,6 +66,8 @@ test('a person connects a record, sees a short grant, reconnects after the vendo
 	await expect(card).toContainText(fake);
 	await expect(card).toContainText('Alex Rivera');
 	await expect(card).toContainText('renewed by itself');
+	const reconnectButton = card.getByRole('button', { name: 'Reconnect' });
+	await expect(reconnectButton).toHaveClass(/\bpri\b/); // a short grant makes Reconnect the main button
 
 	// the vendor refused the refresh token: the screen asks for a new sign-in
 	sql(`update source set reconsent_needed_at = now() where id = '${source}'`);
@@ -74,6 +76,10 @@ test('a person connects a record, sees a short grant, reconnects after the vendo
 	await expect(card.locator('.pill')).toHaveText('Out');
 	await expect(card).toContainText('The vendor no longer accepts this connection.');
 	await expect(page.locator('.tiles .ib').nth(1).locator('.c')).toHaveText('1');
+	await expect(reconnectButton).toHaveClass(/\bpri\b/);
+	// the refresh token is refused, so the access token left is not renewed by itself
+	await expect(card).toContainText('not renewed');
+	await expect(card).not.toContainText('renewed by itself');
 
 	// the reverse path: Reconnect, the vendor, the callback, and the flag is gone
 	await card.getByRole('button', { name: 'Reconnect' }).click();
@@ -81,16 +87,21 @@ test('a person connects a record, sees a short grant, reconnects after the vendo
 	await expect(card).toHaveAttribute('data-state', 'ok');
 	await expect(card.locator('.pill')).toHaveText('OK');
 	await expect(card).not.toContainText('no longer accepts');
+	await expect(reconnectButton).not.toHaveClass(/\bpri\b/); // all is well again: Reconnect is a plain button
 	expect(sql(`select reconsent_needed_at is null from source where id = '${source}'`)).toBe('t');
 	await expect(page.locator('.tiles .ib').nth(1).locator('.c')).toHaveText('0');
 
-	// an open sync-gap alert links to review
+	// an open sync-gap alert links to the review queue of Alex's profile, even with Sam's on screen
 	sql(
 		`insert into review_item (household_id, profile_id, kind, ref_table, ref_id, payload) select household_id, id, 'source_gap', 'source', '${source}', '{}' from profile where id = '${profile}'`
 	);
+	await page.evaluate(() => localStorage.setItem('oh.profile', 'sam'));
 	await page.reload();
 	await expect(card).toContainText('1 sync gap alert is open.');
-	await expect(card.getByRole('link', { name: 'Open in review →' })).toHaveAttribute('href', '/import-review');
+	await card.getByRole('link', { name: 'Open in review →' }).click();
+	await expect(page).toHaveURL(`${app}/import-review`);
+	await expect(page.getByText('Sync gap in a connection').first()).toBeVisible();
+	await page.goBack();
 
 	// the same card in Spanish
 	await page.goto('/connections?lang=es');
@@ -105,9 +116,78 @@ test('a person connects a record, sees a short grant, reconnects after the vendo
 	await card.getByRole('group').getByRole('button', { name: 'Disconnect' }).click();
 	await expect(card).toContainText('Hospital LabNorte is disconnected, and the vendor revoked the access.');
 	await expect(card).toHaveAttribute('data-state', 'off');
+	await expect(card.locator('b[id^="con-"]')).toBeFocused(); // the button that had focus is gone
+	await expect(card.getByRole('button', { name: 'Disconnect' })).toHaveCount(0);
+	// switched off: the pill says Off beside the real last sync, and no grant or token dates are shown
+	await expect(card.locator('.pill')).toHaveText('Off');
+	await expect(card).not.toContainText('Sign-in ends');
+	await expect(card).not.toContainText('Access token');
 	expect(sql("select count(*) from secret where purpose = 'connector_refresh_token'")).toBe('0');
 	const book = (await (await page.request.get(`${fake}/__book`)).json()) as { grants: number; revoked: number };
 	expect(book).toMatchObject({ grants: 2, revoked: 1 });
+	expect(errors).toEqual([]);
+});
+
+test('the clock moves while the page is open, a disconnect names where to revoke, and a refused one stays on screen', async ({ page }) => {
+	const errors = collectPageErrors(page);
+	expect(source, 'the first test connected a record').not.toBe('');
+	await page.clock.install();
+	await page.goto('/connections?lang=en');
+	const card = page.getByRole('article', { name: 'Hospital LabNorte' });
+	await expect(card).toHaveAttribute('data-state', 'off');
+	// Reconnect switches it on again (the fake's later grants last 90 days)
+	await card.getByRole('button', { name: 'Reconnect' }).click();
+	await expect(card).toHaveAttribute('data-state', 'ok');
+
+	// a grant that reaches the 7-day mark while the page is open turns to Watch without a reload, and an
+	// access token past its time reads none
+	sql(
+		`update source set grant_expires_at = now() + interval '7 days 3 minutes', access_expires_at = now() + interval '3 minutes' where id = '${source}'`
+	);
+	await page.reload();
+	await expect(card).toHaveAttribute('data-state', 'ok');
+	await expect(card).toContainText('renewed by itself');
+	await page.clock.fastForward('06:00');
+	await expect(card).toHaveAttribute('data-state', 'grant_soon');
+	await expect(card).toContainText('Access token none held now');
+
+	// the vendor gave its own revocation page: the note links to it
+	const revoke = 'https://vendor.example/revoke';
+	let answer: { revocation: string; revoke_page: string | null } = { revocation: 'failed', revoke_page: revoke };
+	await page.route(`**/api/connectors/${source}`, (route) =>
+		route.request().method() === 'DELETE' ? route.fulfill({ json: { id: source, ...answer } }) : route.continue()
+	);
+	const disconnect = async () => {
+		await card.getByRole('button', { name: 'Disconnect' }).click();
+		await card.getByRole('group').getByRole('button', { name: 'Disconnect' }).click();
+	};
+	await disconnect();
+	await expect(card.getByRole('link', { name: "The vendor's revocation page ↗" })).toHaveAttribute('href', revoke);
+	// no page from the vendor: the note names the server where the access ends
+	answer = { revocation: 'not_offered', revoke_page: null };
+	await disconnect();
+	await expect(card).toContainText(`the access ends only on the vendor's own site for ${fake}.`);
+
+	// refused, and the card is gone after the reload: the refusal shows above the list, with focus
+	await page.unroute(`**/api/connectors/${source}`);
+	let gone = false;
+	await page.route(`**/api/connectors/${source}`, (route) => {
+		if (route.request().method() !== 'DELETE') return route.continue();
+		gone = true;
+		return route.fulfill({ status: 403, json: { detail: { code: 'forbidden', message: 'The role guardian cannot manage this profile.' } } });
+	});
+	await page.route('**/api/inboxes/health', (route) => (gone ? route.fulfill({ json: [] }) : route.continue()));
+	await disconnect();
+	const alert = page.getByRole('alert');
+	await expect(alert).toHaveText('Hospital LabNorte: Only an owner or guardian of the profile connects its records.');
+	await expect(alert).toBeFocused();
+	await page.unrouteAll();
+
+	// an address naming a connection this person does not see shows no success note
+	await page.goto('/connections?connected=00000000-0000-0000-0000-000000000000&lang=en');
+	await expect(card).toBeVisible();
+	await expect(page).toHaveURL(`${app}/connections`);
+	await expect(page.locator('.p2ok')).toHaveCount(0);
 	expect(errors).toEqual([]);
 });
 
@@ -127,6 +207,10 @@ for (const lang of ['en', 'es'] as const) {
 			await expect(alert).toContainText(c[lang]);
 			await expect(page).toHaveURL(`${app}/connections`);
 		}
+		// Done closes the message and leaves keyboard focus on the page heading
+		await page.getByRole('alert').getByRole('button', { name: lang === 'en' ? 'Done' : 'Hecho' }).click();
+		await expect(page.getByRole('alert')).toHaveCount(0);
+		await expect(page.getByRole('heading', { level: 1 })).toBeFocused();
 		expect(errors).toEqual([]);
 	});
 }

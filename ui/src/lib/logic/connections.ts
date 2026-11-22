@@ -26,27 +26,31 @@ export interface ConnectionRow {
 	last_run_status: 'ok' | 'partial' | 'error' | null;
 	last_run_problems: number;
 	last_run_problem: string | null;
-	/** The vendor refused the token: the person must sign in again. */
-	reconsent_needed_at: string | null;
-	/** When the person's consent at the vendor ends. */
-	grant_expires_at: string | null;
-	/** When the current access token ends (it is refreshed by itself before that). */
-	access_expires_at: string | null;
-	/** Open sync-gap alerts of this source in the review queue. */
-	open_gaps: number;
-	/** The server the connection talks to (SMART: the FHIR base URL); null for an inbox. */
-	server: string | null;
 	/** The caller owns or guards the profile, so may reconnect or disconnect it. Absent for a source token. */
 	can_manage?: boolean;
+	// The fields below come only with can_manage true (routes/inboxes.rs); the screen lists only those rows.
+	/** When the source was made, and its poll interval: with no run yet, it has no data until one interval passed. */
+	created_at?: string;
+	poll_seconds?: number | null;
+	/** The vendor refused the token: the person must sign in again. */
+	reconsent_needed_at?: string | null;
+	/** When the person's consent at the vendor ends. */
+	grant_expires_at?: string | null;
+	/** When the current access token ends (it is refreshed by itself before that). */
+	access_expires_at?: string | null;
+	/** Open sync-gap alerts of this source on its own profile, in the review queue. */
+	open_gaps?: number;
+	/** The server the connection talks to (SMART: the FHIR base URL); null for an inbox. */
+	server?: string | null;
 }
 
 export type ConnectionState = 'reconsent' | 'expired' | 'grant_soon' | 'off' | 'out' | 'partial' | 'stale' | 'nodata' | 'ok';
-export type StatusWord = 'ok' | 'watch' | 'out' | 'stale' | 'nodata';
+export type StatusWord = 'ok' | 'watch' | 'out' | 'stale' | 'nodata' | 'off';
 
 const DAY = 86_400_000;
 
 /** Whole days from `now` to `iso`, rounded up (a grant ending in 2.1 days has 3 days left); null without a date. */
-export function daysLeft(iso: string | null, now = new Date()): number | null {
+export function daysLeft(iso: string | null | undefined, now = new Date()): number | null {
 	if (!iso) return null;
 	return Math.ceil((new Date(iso).getTime() - now.getTime()) / DAY);
 }
@@ -62,7 +66,7 @@ export function connectionState(r: ConnectionRow, now = new Date()): ConnectionS
 	return sourceStatus(r, now);
 }
 
-/** The status word each state shows (information, never advice: OK, Watch, Out, Stale, No data). */
+/** The status word each state shows (information, never advice: OK, Watch, Out, Stale, No data, Off as on the Inbox screen). */
 export function statusWord(s: ConnectionState): StatusWord {
 	switch (s) {
 		case 'reconsent':
@@ -75,6 +79,7 @@ export function statusWord(s: ConnectionState): StatusWord {
 		case 'stale':
 			return 'stale';
 		case 'off':
+			return 'off';
 		case 'nodata':
 			return 'nodata';
 		default:
@@ -84,6 +89,9 @@ export function statusWord(s: ConnectionState): StatusWord {
 
 /** A state that only a new sign-in at the vendor fixes. */
 export const wantsReconnect = (s: ConnectionState): boolean => s === 'reconsent' || s === 'expired' || s === 'grant_soon';
+
+/** The access token is renewed by itself only while the vendor still accepts the connection. */
+export const renewsItself = (s: ConnectionState): boolean => s !== 'reconsent' && s !== 'expired' && s !== 'off';
 
 /** The vendor has a sign-in to send the person back to, and the person manages the profile. */
 export const canReconnect = (r: ConnectionRow): boolean => OAUTH_KINDS.includes(r.kind) && r.can_manage === true;

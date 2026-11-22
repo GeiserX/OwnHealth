@@ -11,6 +11,7 @@ import {
 	connectionState,
 	connectorErrorKey,
 	daysLeft,
+	renewsItself,
 	shownConnections,
 	statusWord,
 	wantsReconnect,
@@ -41,6 +42,8 @@ const conn = (over: Partial<ConnectionRow> = {}): ConnectionRow => ({
 	open_gaps: 0,
 	server: 'https://fhir.labnorte.example/r4',
 	can_manage: true,
+	created_at: inDays(-30),
+	poll_seconds: 86_400,
 	...over
 });
 
@@ -63,6 +66,10 @@ test('a grant that ends soon shows before it ends, and one that ended asks for a
 	assert.equal(statusWord('grant_soon'), 'watch');
 	assert.equal(wantsReconnect('grant_soon'), true);
 	assert.equal(daysLeft(soon.grant_expires_at, NOW), 3);
+	// the edges: exactly seven days left is already soon, and part of a day counts as a whole day
+	assert.equal(connectionState(conn({ grant_expires_at: inDays(GRANT_SOON_DAYS) }), NOW), 'grant_soon');
+	assert.equal(daysLeft(inDays(2.1), NOW), 3);
+	assert.equal(daysLeft(inDays(3), NOW), 3);
 	assert.equal(connectionState(conn({ grant_expires_at: inDays(GRANT_SOON_DAYS + 1) }), NOW), 'ok');
 	assert.equal(connectionState(conn({ grant_expires_at: inDays(-0.5) }), NOW), 'expired');
 	assert.equal(statusWord('expired'), 'out');
@@ -74,12 +81,27 @@ test('a grant that ends soon shows before it ends, and one that ended asks for a
 
 test('the run states read as the five status words', () => {
 	assert.equal(connectionState(conn({ enabled: false }), NOW), 'off');
-	assert.equal(statusWord('off'), 'nodata');
+	// switched off reads Off, as on the Inbox screen, never No data beside a real last sync
+	assert.equal(statusWord('off'), 'off');
 	assert.equal(connectionState(conn({ consecutive_failures: 2, last_run_status: 'error', last_success_at: inDays(-2), last_error_at: inDays(-0.1), last_error: 'vendor_unreachable' }), NOW), 'out');
 	assert.equal(connectionState(conn({ last_run_status: 'partial', last_run_problems: 1 }), NOW), 'partial');
 	assert.equal(statusWord('partial'), 'watch');
 	assert.equal(connectionState(conn({ stale: true }), NOW), 'stale');
 	assert.equal(connectionState(conn({ last_run_at: null, last_success_at: null, last_run_status: null }), NOW), 'nodata');
+});
+
+test('a connection made a moment ago has no data yet; one that never synced for a whole interval is stale', () => {
+	// what the server sends right after the callback: no run yet, and its stale flag already set
+	const fresh = { last_run_at: null, last_success_at: null, last_run_status: null, stale: true } as const;
+	assert.equal(connectionState(conn({ ...fresh, created_at: inDays(-1 / 1440) }), NOW), 'nodata');
+	assert.equal(statusWord(connectionState(conn({ ...fresh, created_at: inDays(-1 / 1440) }), NOW)), 'nodata');
+	assert.equal(connectionState(conn({ ...fresh, created_at: inDays(-2) }), NOW), 'stale');
+});
+
+test('the access token is said to renew by itself only while the vendor still accepts the connection', () => {
+	assert.equal(renewsItself('ok'), true);
+	assert.equal(renewsItself('grant_soon'), true);
+	for (const s of ['reconsent', 'expired', 'off'] as const) assert.equal(renewsItself(s), false, s);
 });
 
 test('the screen lists only connections of profiles the person manages, and Reconnect only where the vendor signs in', () => {
@@ -120,6 +142,12 @@ const codes = new Set<string>();
 for (const m of routes.matchAll(/back\(&state, "([a-z_]+)"\)/g)) codes.add(m[1]);
 for (const m of routes.matchAll(/ApiError::new\(\s*StatusCode::\w+,\s*"([a-z_]+)"/g)) codes.add(m[1]);
 for (const m of core.matchAll(/refused\(\s*"([a-z_]+)"/g)) codes.add(m[1]);
+
+test('a sync-gap alert has a title in es and en, so Open in review lands on words', () => {
+	const en = dict.en as Record<string, string>;
+	const es = dict.es as Record<string, string>;
+	assert.ok(en.i2_kind_source_gap && es.i2_kind_source_gap && en.i2_kind_source_gap !== es.i2_kind_source_gap);
+});
 
 test('every connector code reads in es and en', () => {
 	// the gate can fail: the callback codes PR 69 fixed are all found

@@ -4,6 +4,7 @@
 	// open sync-gap alerts, and Reconnect. The connector callback lands here with ?connected=<id> or
 	// ?connector_error=<code>. The add wizard (slice 19) launches new connections.
 	import '#lib/components/pages2/pages2.css';
+	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { ApiError } from '#lib/api/core';
@@ -23,19 +24,33 @@
 		connectionState,
 		connectorErrorKey,
 		daysLeft,
+		renewsItself,
 		shownConnections,
 		statusWord,
 		wantsReconnect,
 		type ConnectionRow,
 		type ConnectionState
 	} from '#lib/logic/connections';
-	import { app } from '#lib/state/app.svelte';
+	import { app, setProfile } from '#lib/state/app.svelte';
+
+	// One clock for every date on the screen: it moves on each minute and on each load, so a grant that
+	// ends while the page is open reads ended, and an access token past its time reads none.
+	let now = $state(new Date());
+	$effect(() => {
+		const timer = setInterval(() => (now = new Date()), 60_000);
+		return () => clearInterval(timer);
+	});
 
 	const rows = new Loader<ConnectionRow[]>();
-	const load = () => {
-		rows.run(async () => shownConnections(await listSourceHealth()));
-	};
-	$effect(load);
+	const load = () =>
+		rows.run(async () => {
+			const list = shownConnections(await listSourceHealth());
+			now = new Date();
+			return list;
+		});
+	$effect(() => {
+		load();
+	});
 
 	const has = (k: string) => k in dict.en;
 	const codeText = (code: string) => tf(connectorErrorKey(code, has), { code });
@@ -49,9 +64,9 @@
 		goto('/connections', { replace: true, shallow: true });
 	});
 	const connectedId = $derived(outcome && 'connected' in outcome ? outcome.connected : null);
+	// the note shows only for a connection this person sees listed, never for any id in the address
 	const connectedLabel = $derived(connectedId ? (rows.data?.find((r) => r.id === connectedId)?.label ?? null) : null);
 
-	const now = $derived(rows.data ? new Date() : new Date());
 	const states = $derived(new Map((rows.data ?? []).map((r) => [r.id, connectionState(r, now)] as const)));
 	const attention = $derived([...states.values()].filter(wantsReconnect).length);
 	const lastSync = $derived(
@@ -61,16 +76,22 @@
 			.sort()
 			.at(-1) ?? null
 	);
+	// Open in review shows the queue of the connection's own profile, so the alert is there.
+	const reviewOf = (r: ConnectionRow) => {
+		const slug = app.me?.profiles.find((p) => p.id === r.profile_id)?.slug;
+		if (slug) setProfile(slug);
+	};
 	const profileName = (id: string | null) => (id ? (app.me?.profiles.find((p) => p.id === id)?.display_name ?? '—') : t('con_household'));
 	const time = (iso: string) => new Date(iso).toLocaleTimeString(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
 
-	const PILL = { ok: 'p-ok', watch: 'p-watch', out: 'p-out', stale: 'p-stale', nodata: 'p-stale' } as const;
-	const WORD = { ok: 'fu_st_ok', watch: 'watch', out: 'fu_st_out', stale: 'fu_st_stale', nodata: 'fu_st_nodata' } as const;
+	const PILL = { ok: 'p-ok', watch: 'p-watch', out: 'p-out', stale: 'p-stale', nodata: 'p-stale', off: 'p-stale' } as const;
+	const WORD = { ok: 'fu_st_ok', watch: 'watch', out: 'fu_st_out', stale: 'fu_st_stale', nodata: 'fu_st_nodata', off: 'fu_st_off' } as const;
 
 	let busy = $state<string | null>(null);
 	let confirming = $state<string | null>(null);
-	// What the last action on one card did, shown in that card.
-	let card = $state<{ id: string; error?: { text: string; raw: string }; done?: DisconnectOut } | null>(null);
+	// What the last action on one card did, shown in that card; above the list when the card is gone.
+	let card = $state<{ id: string; label: string; error?: { text: string; raw: string }; done?: DisconnectOut } | null>(null);
+	const orphan = $derived(card?.error && rows.data && !rows.data.some((r) => r.id === card?.id) ? card : null);
 
 	const failure = (e: unknown) => ({ text: e instanceof ApiError && has('con_err_' + e.code) ? codeText(e.code) : errText(e), raw: errRaw(e) });
 
@@ -82,7 +103,7 @@
 			// the vendor's sign-in; its callback brings the browser back here
 			location.assign(authorize_url);
 		} catch (e) {
-			card = { id: r.id, error: failure(e) };
+			card = { id: r.id, label: r.label, error: failure(e) };
 			busy = null;
 		}
 	}
@@ -92,15 +113,34 @@
 		card = null;
 		try {
 			const done = await disconnectConnector(r.id);
-			card = { id: r.id, done };
+			card = { id: r.id, label: r.label, done };
 			confirming = null;
 		} catch (e) {
-			card = { id: r.id, error: failure(e) };
+			card = { id: r.id, label: r.label, error: failure(e) };
 		} finally {
 			busy = null;
-			load();
+		}
+		await load();
+		// the Disconnect button is gone: keyboard focus goes to the card's name, or to the message above
+		// the list when the card is gone too
+		await tick();
+		(document.getElementById('con-' + r.id) ?? document.getElementById('con-orphan'))?.focus();
+	}
+
+	async function dismissOutcome() {
+		outcome = null;
+		await tick();
+		const h = document.querySelector<HTMLElement>('h1');
+		if (h) {
+			h.tabIndex = -1;
+			h.focus();
 		}
 	}
+
+	const revocationText = (r: ConnectionRow, done: DisconnectOut) =>
+		(done.revocation === 'failed' || done.revocation === 'not_offered') && !done.revoke_page && r.server
+			? tf('con_rev_' + done.revocation + '_at', { label: r.label, server: r.server })
+			: tf('con_rev_' + done.revocation, { label: r.label });
 
 	const stateLine = (r: ConnectionRow, s: ConnectionState): { text: string; tone: string } | null => {
 		const n = daysLeft(r.grant_expires_at, now) ?? 0;
@@ -131,16 +171,19 @@
 <div class="inbox tiles">
 	<div class="ib"><div><div class="k">{t('con_count')}</div><div class="dim d">{t('con_count_d')}</div></div><span class="c" class:dim={!rows.data}>{rows.data?.length ?? '—'}</span></div>
 	<div class="ib"><div><div class="k">{t('con_attention')}</div><div class="dim d">{t('con_attention_d')}</div></div><span class="c" style="color:{attention ? 'var(--out)' : 'var(--dim)'}">{rows.data ? attention : '—'}</span></div>
-	<div class="ib"><div><div class="k">{t('fu_last_ok')}</div><div class="dim d">{t('fu_last_ok_d')}</div></div><span class="c num" class:dim={!lastSync} style="font-size:12.5px;font-weight:560;white-space:nowrap">{!rows.data ? '—' : lastSync ? ago(lastSync) : t('i2_never')}</span></div>
+	<div class="ib"><div><div class="k">{t('fu_last_ok')}</div><div class="dim d">{t('con_last_ok_d')}</div></div><span class="c num" class:dim={!lastSync} style="font-size:12.5px;font-weight:560;white-space:nowrap">{!rows.data ? '—' : lastSync ? ago(lastSync) : t('i2_never')}</span></div>
 </div>
 
 {#if outcome && 'error' in outcome}
 	<div class="p2err" role="alert" style="margin-bottom:8px" data-code={outcome.error}>
 		{codeText(outcome.error)}
-		<button class="btn sm" style="margin-left:8px" onclick={() => (outcome = null)}>{t('fu_done')}</button>
+		<button class="btn sm" style="margin-left:8px" onclick={dismissOutcome}>{t('fu_done')}</button>
 	</div>
-{:else if outcome}
-	<div class="p2ok" role="status" style="margin-bottom:8px">{connectedLabel ? tf('con_connected', { label: connectedLabel }) : t('con_connected_any')}</div>
+{:else if connectedLabel}
+	<div class="p2ok" role="status" style="margin-bottom:8px">{tf('con_connected', { label: connectedLabel })}</div>
+{/if}
+{#if orphan?.error}
+	<div class="p2err" role="alert" id="con-orphan" tabindex="-1" style="margin-bottom:8px" title={orphan.error.raw}>{orphan.label}: {orphan.error.text}</div>
 {/if}
 
 {#if rows.error}
@@ -160,7 +203,7 @@
 			<article class="card conn" class:just={connectedId === r.id} aria-labelledby="con-{r.id}" data-state={s}>
 				<div class="hd">
 					<div style="min-width:0">
-						<b id="con-{r.id}">{r.label}</b>
+						<b id="con-{r.id}" tabindex="-1">{r.label}</b>
 						<div class="dim kind">{t('con_k_' + r.kind)}</div>
 					</div>
 					<span class="pill {PILL[word]}"><i aria-hidden="true"></i>{t(WORD[word])}</span>
@@ -176,13 +219,13 @@
 						<dt>{t('con_server')}</dt>
 						<dd class="mono srv">{r.server}</dd>
 					{/if}
-					{#if canReconnect(r) || r.grant_expires_at}
+					{#if r.enabled && (canReconnect(r) || r.grant_expires_at)}
 						<dt>{t('con_grant')}</dt>
 						<dd class="grant" style={s === 'expired' ? 'color:var(--out)' : s === 'grant_soon' ? 'color:var(--watch)' : ''}>
 							{#if r.grant_expires_at && left != null && left > 0}{tp('con_left', left, { date: day(r.grant_expires_at) })}{:else if r.grant_expires_at}{day(r.grant_expires_at)}{:else}<span class="dim">{t('con_grant_none')}</span>{/if}
 						</dd>
 						<dt>{t('con_access')}</dt>
-						<dd>{#if r.access_expires_at && new Date(r.access_expires_at) > now}{tf('con_access_until', { time: time(r.access_expires_at) })}{:else}<span class="dim">{t('con_access_none')}</span>{/if}</dd>
+						<dd>{#if r.access_expires_at && new Date(r.access_expires_at) > now}{tf(renewsItself(s) ? 'con_access_until' : 'con_access_until_kept', { time: time(r.access_expires_at) })}{:else}<span class="dim">{t('con_access_none')}</span>{/if}</dd>
 					{/if}
 				</dl>
 				{#if line}<div class="note state" role="status" style="color:{line.tone}">{line.text}</div>{/if}
@@ -191,8 +234,8 @@
 				{:else if s === 'partial'}
 					<div class="note" role="status" style="color:var(--watch);overflow-wrap:anywhere">⚠ {tp('fu_partial_n', r.last_run_problems ?? 0)} {#if r.last_run_problem}<span class="mono">{r.last_run_problem}</span>{/if}</div>
 				{/if}
-				{#if r.open_gaps > 0}
-					<div class="note gaps" role="status">{tp('con_gaps', r.open_gaps)} <a href="/import-review">{t('con_gaps_go')} →</a></div>
+				{#if r.open_gaps}
+					<div class="note gaps" role="status">{tp('con_gaps', r.open_gaps)} <a href="/import-review" onclick={() => reviewOf(r)}>{t('con_gaps_go')} →</a></div>
 				{/if}
 				{#if canReconnect(r)}
 					<div class="acts">
@@ -208,7 +251,7 @@
 				{#if card?.id === r.id && card.error}<div class="p2err" role="alert" title={card.error.raw}>{card.error.text}</div>{/if}
 				{#if card?.id === r.id && card.done}
 					<div class={card.done.revocation === 'revoked' || card.done.revocation === 'no_token' ? 'p2ok' : 'note'} role="status" style="font-size:12px;{card.done.revocation === 'failed' || card.done.revocation === 'not_offered' ? 'color:var(--watch)' : ''}">
-						{tf('con_rev_' + card.done.revocation, { label: r.label })}
+						{revocationText(r, card.done)}
 						{#if card.done.revoke_page}<a href={card.done.revoke_page} target="_blank" rel="noopener noreferrer">{t('con_revoke_page')} ↗</a>{/if}
 					</div>
 				{/if}
