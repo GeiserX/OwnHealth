@@ -229,9 +229,11 @@ async fn state_hashes(conn: &mut PgConnection, as_of: NaiveDate) -> Result<Vec<(
     Ok(out)
 }
 
-/// Every blob a document or genome dataset row points at, with its owner (the profile, or a document
-/// with no profile yet under its own item key), so verify can tell a blob the live store had already
-/// lost from one the backup lost.
+/// Every blob a document, genome dataset, held mail or inbox item row points at, with its owner (the
+/// profile, or a document with no profile yet or a held mail under its own item key), so verify can
+/// tell a blob the live store had already lost from one the backup lost. An inbox item's raw bytes
+/// belong to the profile it was filed to, else to its held mail ([`BlobOwner::of_item`]); a mail
+/// released or deleted from the hold no longer needs its held copy.
 async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(BlobOwner, String)>> {
     let cols: Vec<String> = sqlx::query_scalar(
         "select column_name::text from information_schema.columns where table_schema = 'public' \
@@ -247,6 +249,13 @@ async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(BlobOwner, Str
         cols.iter()
             .map(|c| format!("select profile_id, null::uuid, \"{c}\" from genome_dataset")),
     );
+    parts.push("select null::uuid, id, raw_blob from quarantine_item where status = 'held'".into());
+    parts.push(
+        "select i.profile_id, i.quarantine_id, i.blob_sha256 from source_item i \
+         left join quarantine_item q on q.id = i.quarantine_id \
+         where i.profile_id is not null or i.quarantine_id is null or q.status = 'held'"
+            .into(),
+    );
     let q = format!(
         "select distinct p, d, encode(h, 'hex') from ({}) x where h is not null order by 3, 1, 2",
         parts.join(" union ")
@@ -255,14 +264,7 @@ async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(BlobOwner, Str
         sqlx::query_as(AssertSqlSafe(q)).fetch_all(&mut *conn).await?;
     Ok(rows
         .into_iter()
-        .map(|(p, d, h)| {
-            let owner = match (p, d) {
-                (Some(p), _) => BlobOwner::Profile(p),
-                (None, Some(d)) => BlobOwner::Pending(d),
-                (None, None) => BlobOwner::Reference,
-            };
-            (owner, h)
-        })
+        .map(|(p, d, h)| (BlobOwner::of_item(p, d), h))
         .collect())
 }
 

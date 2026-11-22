@@ -87,7 +87,8 @@ impl BlobOwner {
     }
 
     /// The owner of an inbox item's raw bytes (`source_item.blob_sha256`): the profile it was filed
-    /// to, else the held mail it is, else nobody (rows from before slice 46, in the plain layout).
+    /// to, else the held mail it is, else nobody (rows from before slice 46, in the plain layout). The
+    /// backup reads the owner of every referenced row this way (`ownhealth_ops` `referenced_blobs`).
     pub fn of_item(profile_id: Option<Uuid>, quarantine_id: Option<Uuid>) -> BlobOwner {
         match (profile_id, quarantine_id) {
             (Some(p), _) => BlobOwner::Profile(p),
