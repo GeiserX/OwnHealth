@@ -872,6 +872,57 @@ async fn a_zone_replacement_runs_the_other_export_again_after_its_run_still_mark
 }
 
 #[tokio::test]
+async fn a_zone_replacement_runs_the_other_export_again_when_its_follow_up_is_still_marked_running() -> R {
+    let env = Env::new().await?;
+    let a = clarity_at(&every_5("2026-11-14", 10, 11));
+    let b = clarity_at(&every_5("2026-11-14", 11, 12));
+    for (name, bytes) in [("a.csv", &a), ("b.csv", &b)] {
+        let (_, id) = upload(&env, "lucia", name, bytes).await?;
+        assert_eq!(job(&env, id).await?.0, "done", "{name}");
+    }
+    let b_doc: Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'b.csv'")
+        .bind(env.fam.profile("lucia"))
+        .fetch_one(&env.db.pool)
+        .await?;
+    // two earlier requests for b.csv: its run again and the follow-up queued after it have both
+    // committed, and neither job is marked done yet, so both keys are held
+    let key = format!("{}:reimport:{b_doc}", cgm_csv::JOB);
+    let kinds = [cgm_csv::JOB.to_string()];
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        let key = match held.last() {
+            Some(r) => format!("{key}:after:{r}"),
+            None => key.clone(),
+        };
+        let mut c = env.db.pool.acquire().await?;
+        jobs::enqueue(
+            &mut c,
+            cgm_csv::JOB,
+            &json!({"document_id": b_doc.to_string()}),
+            jobs::EnqueueOptions::dedupe(&key),
+        )
+        .await?;
+        drop(c);
+        let claimed = jobs::claim(&env.db.pool, "core", "test-worker", Some(&kinds[..]))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no job to claim"))?;
+        held.push(claimed.id);
+    }
+    // a third request, a.csv again from a Madrid browser, still runs b.csv once more
+    upload_in_zone(&env, "lucia", "a.csv", &a, "Europe/Madrid").await?;
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    let r = owned(&env, "lucia").await?;
+    let count = |name: &str| r.iter().filter(|x| x.0 == name).count();
+    assert_eq!((count("a.csv"), count("b.csv")), (24, 24), "{r:?}");
+    let states: Vec<String> = sqlx::query_scalar("select state from job where id = any($1) order by id")
+        .bind(&held)
+        .fetch_all(&env.db.pool)
+        .await?;
+    assert_eq!(states, ["running", "running"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_retraction_after_a_zone_change_reads_the_others_in_their_own_zone() -> R {
     let env = Env::new().await?;
     // two exports read in Madrid; then the zone of a new run changes (here: none), and one is retracted

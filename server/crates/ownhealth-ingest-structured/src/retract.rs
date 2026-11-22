@@ -142,31 +142,37 @@ pub async fn reimport_kind(conn: &mut PgConnection, document_id: Uuid, kind: &st
     Ok(())
 }
 
-/// Queue `job` for the document `id`, to run after this transaction. A job still queued under the same
-/// key is enough: it starts after this transaction removed its samples, so its writes see that. A job
-/// of that key that is running may have written before, so one more run is queued after it.
+/// Queue `job` for the document `id`, to run after this transaction. A job still queued for it is
+/// enough: it starts after this transaction removed its samples, so its writes see that. A job for it
+/// that is running may have written before (its work commits before it is marked done), so one more run
+/// is queued after the newest of them, under a key no other job holds.
 async fn queue_after(conn: &mut PgConnection, job: &str, id: Uuid) -> Result<()> {
     use ownhealth_core::jobs::{EnqueueOptions, enqueue};
-    let key = format!("{job}:reimport:{id}");
+    let base = format!("{job}:reimport:{id}");
     let payload = json!({"document_id": id.to_string()});
-    if enqueue(&mut *conn, job, &payload, EnqueueOptions::dedupe(&key))
-        .await?
-        .is_some()
-    {
-        return Ok(());
-    }
-    let running: Option<i64> = sqlx::query_scalar("select id from job where dedupe_key = $1 and state = 'running'")
-        .bind(&key)
+    // a job that finishes between the look and the enqueue frees its key, so look again
+    for _ in 0..3 {
+        let held: Option<(String, i64)> = sqlx::query_as(
+            "select state, id from job where (dedupe_key = $1 or starts_with(dedupe_key, $1 || ':after:')) \
+             and state in ('queued', 'running') order by state = 'queued' desc, id desc limit 1",
+        )
+        .bind(&base)
         .fetch_optional(&mut *conn)
         .await?;
-    // none running: the key is held by a queued job, or its running job finished meanwhile and the key
-    // is free again
-    let key = match running {
-        Some(r) => format!("{key}:after:{r}"),
-        None => key,
-    };
-    enqueue(&mut *conn, job, &payload, EnqueueOptions::dedupe(&key)).await?;
-    Ok(())
+        let key = match held {
+            Some((state, _)) if state == "queued" => return Ok(()),
+            Some((_, running)) => format!("{base}:after:{running}"),
+            None => base.clone(),
+        };
+        if enqueue(&mut *conn, job, &payload, EnqueueOptions::dedupe(&key))
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
+    let why = std::io::Error::other(format!("could not queue {job} again for {id}"));
+    Err(ownhealth_core::Error::Other(why.into()))
 }
 
 /// Hold the lock on one profile's exports of one kind (`flag`) until this transaction ends. A CGM
