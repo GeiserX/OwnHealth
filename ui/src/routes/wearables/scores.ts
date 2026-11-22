@@ -2,6 +2,8 @@
 // are the vendor's own numbers. The Wearables page shows them in their own card, one row per provider
 // and category, and never next to the measurements.
 
+import { intlLocale, type Lang } from '../../lib/i18n/langs.ts';
+
 export interface VendorScore {
 	provider: string;
 	category: string;
@@ -138,6 +140,6 @@ export function scoreDecimals(v: number): number {
 
 /** A score's day, as the card prints it next to the vendor: in UTC, like the measurement charts of the
  * same page, so a score keyed at midnight UTC keeps its day in a browser west of UTC. */
-export function fmtScoreDay(iso: string, lang: string): string {
-	return new Intl.DateTimeFormat(lang === 'es' ? 'es-ES' : 'en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(iso));
+export function fmtScoreDay(iso: string, lang: Lang): string {
+	return new Intl.DateTimeFormat(intlLocale(lang), { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(iso));
 }

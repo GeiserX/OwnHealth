@@ -29,3 +29,23 @@ test('the picker lists every registry language and switches the page to each', a
 	}
 	expect(errors).toEqual([]);
 });
+
+// The two language choices that reach the server send registry codes: the family invite (the new
+// login's locale) and the summary sheet. Each offers every language once, by code, named in itself.
+test('the family invite offers every registry language by its code', async ({ page }) => {
+	await page.goto('/family?lang=en');
+	await page.locator('.ph .right .btn.pri').click();
+	const invite = page.locator('form[aria-labelledby=fm-inv-h] select').first();
+	await expect(invite).toBeVisible();
+	const options = await invite.evaluate((s: HTMLSelectElement) => [...s.options].map((o) => [o.value, o.text.trim()]));
+	expect(options).toEqual(LANGS.map((l) => [l.code, l.name]));
+});
+
+test('the summary sheet offers every registry language by its code', async ({ page }) => {
+	const want = LANGS.map((l) => [l.code, l.name]);
+	await page.goto('/summary?lang=en');
+	const radios = page.locator('input[type=radio][name=lang]');
+	await expect(radios).toHaveCount(LANGS.length);
+	const values = await radios.evaluateAll((rs) => rs.map((r) => [(r as HTMLInputElement).value, r.parentElement?.textContent?.trim() ?? '']));
+	expect(values).toEqual(want);
+});
