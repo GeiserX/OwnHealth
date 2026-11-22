@@ -26,7 +26,8 @@ import type {
 
 export const getWearables = (profile: string, lang?: string) => get<WearablesSummary>(`${p(profile)}/wearables/summary`, { lang });
 
-export const listDocuments = (profile: string, q: { q?: string; type?: string } = {}) =>
+/** `latest: 'fhir'`: only the documents a FHIR import read (a file or a connector pull), the newest stored first. */
+export const listDocuments = (profile: string, q: { q?: string; type?: string; latest?: 'fhir'; limit?: number } = {}) =>
 	get<{ items: DocumentSummary[] }>(`${p(profile)}/documents`, q);
 export const getDocument = (id: Uuid) => get<DocumentDetail>(`/documents/${id}`);
 export const pageImageUrl = (id: Uuid, page: number) => `/api/documents/${id}/pages/${page}.png`;

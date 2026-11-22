@@ -683,7 +683,14 @@ async fn cgm_glucose_answers_to_its_names_and_loinc() -> R {
 async fn status_counts_open_review_rows_it_may_read() -> R {
     let w = world().await?;
     let pid = w.pid("alex");
-    for kind in ["candidate_row", "candidate_row", "fhir_unmapped", "job_failed"] {
+    // a pull's grouped item waits for a person too, like a file's fhir_unmapped item
+    for kind in [
+        "candidate_row",
+        "candidate_row",
+        "fhir_unmapped",
+        "fhir_unmapped_summary",
+        "job_failed",
+    ] {
         sqlx::query(
             "insert into review_item (household_id, profile_id, kind, payload) \
              select household_id, id, $2, '{}' from profile where id = $1",
@@ -695,7 +702,7 @@ async fn status_counts_open_review_rows_it_may_read() -> R {
     }
     let c = w.connect(&w.tok().await?).await?;
     let env = c.call("get_health_status", json!({"profile": "alex"})).await?.ok();
-    assert_eq!(env["data"]["review_open"], json!(3));
+    assert_eq!(env["data"]["review_open"], json!(4));
     let c = w
         .connect(&w.tok_scopes(scopes(&["read:summary", "read:labs"])).await?)
         .await?;

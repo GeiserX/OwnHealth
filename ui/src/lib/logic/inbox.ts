@@ -513,6 +513,44 @@ export function nearDuplicateOf<T extends { kind: string; document_id: string | 
 	return items.find((i) => i.kind === 'near_duplicate' && i.document_id === documentId && (i.status ?? 'open') === 'open') ?? null;
 }
 
+/**
+ * A connector pull's grouped item (fhir_unmapped_summary): the resource type, how many came, and the
+ * connection's name. Null for any other item, or when the payload does not say a type and a count.
+ */
+export function unmappedSummary(item: { kind: string; payload: Record<string, unknown> }): { type: string; count: number; source: string } | null {
+	if (item.kind !== 'fhir_unmapped_summary') return null;
+	const p = item.payload;
+	const type = typeof p.resource_type === 'string' ? p.resource_type : '';
+	const count = typeof p.count === 'number' && Number.isInteger(p.count) && p.count > 0 ? p.count : 0;
+	if (!type || !count) return null;
+	const label = (p.source as { label?: unknown } | null | undefined)?.label;
+	return { type, count, source: typeof label === 'string' ? label : '' };
+}
+
+/** The review kinds a FHIR import leaves in the queue: one per resource from a file, and a pull's grouped item. */
+export const FHIR_ITEM_KINDS = ['fhir_unmapped', 'fhir_unmapped_summary'];
+
+/** The newest job of `kind` for one profile: `/jobs` lists the jobs of every profile the caller may read, newest first. */
+export function latestJob<J extends { kind: string; profile_id: string | null }>(jobs: J[], kind: string, profileId: string | null | undefined): J | null {
+	return jobs.find((j) => j.kind === kind && !!profileId && j.profile_id === profileId) ?? null;
+}
+
+/**
+ * What the FHIR tile names as the newest import. `newest` is the newest document a FHIR import read,
+ * a file or a connector pull (the server's `latest=fhir`), so the tile still names a pull once its
+ * items are handled. A file runs an `import.fhir_bundle` job, a pull runs none: the job is named when
+ * it read that document (its result names it), or while it still runs.
+ */
+export function fhirTileSource<J extends { state: string; document_id: string | null; result: Record<string, unknown> | null }, D extends { id: string }>(
+	job: J | null,
+	newest: D | null
+): { job: J | null; doc: D | null } {
+	const running = job?.state === 'queued' || job?.state === 'running';
+	const read = job?.document_id ?? (typeof job?.result?.document_id === 'string' ? job.result.document_id : null);
+	if (!newest || (job && (read === newest.id || running))) return { job, doc: null };
+	return { job: null, doc: newest };
+}
+
 // ---------------------------------------------------------------- OAuth ----
 
 /** Nothing is pre-checked beyond read:summary (mcp.md 2.2), and no profile is pre-checked. */

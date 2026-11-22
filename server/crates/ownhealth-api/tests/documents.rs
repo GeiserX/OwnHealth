@@ -286,7 +286,7 @@ async fn tokens_need_their_scopes_and_other_households_see_nothing() -> R {
     );
     // without read:documents_text a search matches filenames only, and returns no snippet
     let list = async |c: &mut sqlx::PgConnection, q: &str| -> anyhow::Result<Value> {
-        list_for(c, &p, "alex", Some(q), None, 100)
+        list_for(c, &p, "alex", Some(q), None, 100, false)
             .await
             .map_err(|e| anyhow::anyhow!("{e:?}"))
     };

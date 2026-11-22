@@ -15,11 +15,15 @@
 //! - A resource already imported with the same JSON is skipped; one that changed upstream goes to
 //!   review with reason `conflict`, and accepting it supersedes the old version. "The same resource"
 //!   means the same type/id from the same issuer (`issuer_key`).
+//! - A connector pull ([`import_pull`]) first asks the source's `source_item` ledger, keyed
+//!   `<type>/<id>@<versionId or sha>` (and the Medication's sha for a medicine named only by
+//!   reference), and skips what the source sent before; its unmapped resources become one
+//!   `fhir_unmapped_summary` item per type (connectors.md 6.2).
 
 pub mod mapping;
 pub mod synthetic;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use futures::future::BoxFuture;
@@ -34,6 +38,7 @@ use ownhealth_core::records::{RecordIn, RecordOptions, add_record, supersede_rec
 use ownhealth_core::review::{ReviewItem, ReviewItemIn, RouteFact, create_item, route_fact};
 use ownhealth_core::{Error, Result};
 use ownhealth_normalize as normalize;
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{AssertSqlSafe, PgConnection};
@@ -175,6 +180,235 @@ pub async fn mark_imported(
     Ok(())
 }
 
+// ---------------------------------------------------------- connector pulls ----
+
+/// What one connector pull brought (connectors.md 6.2, "One bundle per pull"). Every entry of the
+/// bundle is counted once: `seen = new + duplicate + context`, so nothing leaves without a number.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PullSummary {
+    pub summary: ImportSummary,
+    /// Entries in the bundle.
+    pub seen: i64,
+    /// Resources imported this time: sent for the first time, or in a new version.
+    pub new: i64,
+    /// Resources not imported again: this source sent them before, in a pull that still holds them,
+    /// or a fact or an open review item of another import already holds them.
+    pub duplicate: i64,
+    /// Context for the others (Patient, Practitioner, DiagnosticReport, ...): read, kept in the bundle.
+    pub context: i64,
+    /// Entries per resource type, context included.
+    pub counted: BTreeMap<String, i64>,
+}
+
+/// A summary item lists this many import refs; the stored bundle holds every resource.
+const SUMMARY_REFS: usize = 20;
+
+/// The note of a resource whose type has no table.
+const UNMAPPED_TYPE: &str = "stored, not projected";
+
+/// Context for the others: read for references and identity, kept in the stored bundle, not imported.
+fn is_context(rtype: &str) -> bool {
+    mapping::SUPPORTING.contains(&rtype) || rtype == "DiagnosticReport"
+}
+
+/// `sha-<16 hex>` of a resource's JSON, keys sorted.
+fn json_sha(r: &Value) -> String {
+    format!(
+        "sha-{}",
+        &hex::encode(Sha256::digest(py::dumps_sorted(r).as_bytes()))[..16]
+    )
+}
+
+/// The id a resource is known by in this importer: its own, or a hash of its JSON when it has none.
+fn resource_id(r: &Value) -> String {
+    py::get_truthy(Some(r), "id").map_or_else(|| json_sha(r), |id| py::py_str(Some(id)))
+}
+
+/// What a server writes into `meta` about its own copy, not about the resource: when it last stored
+/// it, its version counter and the system it came from. Blue Button sends `lastUpdated` and no
+/// `versionId`, and restamps it when it reloads its data. `meta.tag` and `meta.security` stay in:
+/// they label the resource itself (adjudicated, restricted).
+const SERVER_META: [&str; 3] = ["lastUpdated", "versionId", "source"];
+
+/// [`json_sha`] of a resource without [`SERVER_META`], so a server that only restamps a resource
+/// sends the same item again.
+fn content_sha(r: &Value) -> String {
+    let mut r = r.clone();
+    let emptied = match r.get_mut("meta") {
+        Some(Value::Object(meta)) => {
+            for k in SERVER_META {
+                meta.shift_remove(k);
+            }
+            meta.is_empty()
+        }
+        _ => false,
+    };
+    if emptied && let Some(o) = r.as_object_mut() {
+        o.shift_remove("meta");
+    }
+    json_sha(&r)
+}
+
+/// The `source_item` key of a pulled resource: `<type>/<id>@<versionId>`, or `@sha-<16 hex>` of its
+/// content ([`content_sha`]: the JSON without `meta.lastUpdated`, `meta.versionId` and `meta.source`)
+/// when the server sends no version. A changed resource is a new item either way; a restamped one is
+/// not.
+pub fn pull_key(r: &Value) -> String {
+    let version = r
+        .get("meta")
+        .and_then(|m| m.get("versionId"))
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| content_sha(r), String::from);
+    let id = py::get_truthy(Some(r), "id").map_or_else(|| content_sha(r), |id| py::py_str(Some(id)));
+    format!("{}/{id}@{version}", py::py_str(r.get("resourceType")))
+}
+
+/// The connector run a [`Run`] imports for: its source, its bundle and the unmapped resources it
+/// groups.
+struct Pull<'a> {
+    source_id: Uuid,
+    kind: &'a str,
+    label: &'a str,
+    sha: &'a str,
+    /// resource type -> the resources of that type with no table, in this run
+    unmapped: BTreeMap<String, Unmapped>,
+}
+
+/// What a run did with each entry, counted once each; how many of its resources OwnHealth does not
+/// project (no table, not readable, or skipped by the mapper); and how many are sensitive, whatever
+/// the run did with them. Both counts include duplicates.
+#[derive(Debug, Clone, Copy, Default)]
+struct Tally {
+    new: i64,
+    duplicate: i64,
+    context: i64,
+    unprojected: i64,
+    sensitive: i64,
+}
+
+#[derive(Default)]
+struct Unmapped {
+    count: i64,
+    notes: BTreeMap<String, i64>,
+    refs: Vec<String>,
+    /// their ledger keys, written once the summary item is
+    keys: BTreeSet<String>,
+}
+
+/// What [`Run::import_one`] did with a resource, for the ledger.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Held {
+    /// This import holds it now: a fact, a review item, or the mapper's skip.
+    Here,
+    /// Waits for the summary item of its type ([`Run::queue_grouped`]).
+    Grouped,
+    /// Not imported: a fact or an open review item of another import holds it. The ledger stays
+    /// silent, so a later pull imports it once that one is gone (retracted, dismissed).
+    Elsewhere,
+}
+
+/// A bundle a connector pulled for the profile of its source, already stored as that profile's
+/// document (bytes first). The import is the file one, with these differences:
+///
+/// - Each resource is looked up in `source_item` as [`pull_key`] first. One this source sent before,
+///   in a pull that still holds it, is skipped as a duplicate, so the next pull never brings back what
+///   a person dismissed, and a new version is imported once. The ledger names this pull only for what
+///   it holds: a resource that a fact or an open item of another import holds is left out, and comes
+///   in on a later pull once that one is gone. An Observation is keyed row by row, so each component
+///   of a panel follows that rule on its own. A medicine named only by `medicationReference` is
+///   keyed with the Medication it points at, so a pull that first brings that Medication imports it
+///   once.
+/// - Resources of a type with no table become one `fhir_unmapped_summary` item per type, with their
+///   count, the bundle as its document and a sample of their refs, in place of one item each. Their
+///   ledger rows are written after that item. A mapped type that does not project (an Observation
+///   without a value) stays one `fhir_unmapped` item with its note, as from a file.
+/// - A bundle that holds resources OwnHealth does not project is flagged `unprojected`: nothing read
+///   them for sensitivity, so `documents::document_is_sensitive` keeps the file behind read:sensitive.
+///   A bundle that holds a sensitive resource is flagged `sensitive` the same way, read from every
+///   entry before the ledger or the dedupe can skip it: the mapped value's sensitivity, or a
+///   sensitive `meta.security` label on any resource, context included. A daily pull of the same
+///   sensitive fact imports nothing new, and its file holds that fact all the same.
+///
+/// The caller owns the transaction (RUST-CONTRACTS.md), and runs one pull per source at a time: the
+/// ledger is read, then written, with no lock in between. The `source.poll` job's dedupe key gives
+/// that order. A file import ([`import_fhir`]) keeps one item per resource and writes no ledger.
+pub async fn import_pull(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    source_id: Uuid,
+    document_id: Uuid,
+) -> Result<PullSummary> {
+    let (profile_id, sha, mime, filename, flags): (Option<Uuid>, String, String, Option<String>, Value) =
+        sqlx::query_as(
+            "select profile_id, encode(blob_sha256, 'hex'), mime, filename, flags from document where id = $1",
+        )
+        .bind(document_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let profile_id =
+        profile_id.ok_or_else(|| Error::Invalid("a pull is stored on the profile of its connection".into()))?;
+    let (kind, label, source_profile): (String, String, Option<Uuid>) =
+        sqlx::query_as("select kind, label, profile_id from source where id = $1")
+            .bind(source_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("unknown source {source_id}")))?;
+    if source_profile != Some(profile_id) {
+        return Err(Error::Invalid(
+            "a pull is stored on the profile of its connection".into(),
+        ));
+    }
+    let profile = get_profile(&mut *conn, profile_id)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("unknown profile {profile_id}")))?;
+    let ndjson = mime == "application/fhir+ndjson" || filename.unwrap_or_default().to_lowercase().ends_with(".ndjson");
+    let (bundle_id, entries) = read_entries(&blobs.get_bytes(BlobOwner::Profile(profile_id), &sha)?, ndjson)?;
+    let key = bundle_id.unwrap_or_else(|| format!("doc-{}", &sha[..12]));
+    let imported_before = flags.get("import").is_some_and(|d| truthy(Some(d)));
+    if !imported_before {
+        // These bytes were pulled and then retracted (the retraction cleared the import flag), and
+        // the same bytes brought the document back: what the ledger says it brought is gone.
+        ownhealth_core::dedup::forget_pulled_by(&mut *conn, source_id, document_id).await?;
+    }
+    let pull = Pull {
+        source_id,
+        kind: &kind,
+        label: &label,
+        sha: &sha,
+        unmapped: BTreeMap::new(),
+    };
+    let (summary, identity, tally) =
+        import_with(conn, &entries, &profile, document_id, &key, None, &label, Some(pull)).await?;
+    if tally.unprojected > 0 || tally.sensitive > 0 {
+        let count = |n: i64| (n > 0).then_some(n);
+        sqlx::query(
+            "update document set flags = flags || jsonb_strip_nulls(jsonb_build_object('unprojected', $1::bigint, \
+             'sensitive', $2::bigint)) where id = $3",
+        )
+        .bind(count(tally.unprojected))
+        .bind(count(tally.sensitive))
+        .bind(document_id)
+        .execute(&mut *conn)
+        .await?;
+    }
+    if !imported_before {
+        mark_imported(conn, document_id, &summary, Some(&identity)).await?;
+    }
+    let mut counted: BTreeMap<String, i64> = BTreeMap::new();
+    for e in &entries {
+        *counted.entry(e.rtype().to_string()).or_default() += 1;
+    }
+    Ok(PullSummary {
+        summary,
+        seen: entries.len() as i64,
+        new: tally.new,
+        duplicate: tally.duplicate,
+        context: tally.context,
+        counted,
+    })
+}
+
 // ----------------------------------------------------------------- importer ----
 
 /// Import resources into one profile. `identity` is computed from the Patient when not given (Apple
@@ -188,6 +422,23 @@ pub async fn import_resources(
     identity: Option<&str>,
     label: &str,
 ) -> Result<(ImportSummary, String)> {
+    let (summary, identity, _) =
+        import_with(conn, entries, profile, document_id, bundle_key, identity, label, None).await?;
+    Ok((summary, identity))
+}
+
+/// [`import_resources`], for a file (`pull` None) or for a connector pull.
+#[allow(clippy::too_many_arguments)]
+async fn import_with(
+    conn: &mut PgConnection,
+    entries: &[Entry],
+    profile: &Profile,
+    document_id: Uuid,
+    bundle_key: &str,
+    identity: Option<&str>,
+    label: &str,
+    pull: Option<Pull<'_>>,
+) -> Result<(ImportSummary, String, Tally)> {
     if let Some(e) = entries
         .iter()
         .find(|e| !e.resource.is_object() || !e.resource["resourceType"].is_string())
@@ -254,11 +505,15 @@ pub async fn import_resources(
         report_keys,
         issuer,
         summary: ImportSummary::new(document_id.to_string()),
+        pull,
+        tally: Tally::default(),
     };
     for e in entries {
         run.one(conn, e).await?;
     }
-    Ok((run.summary, identity))
+    run.queue_grouped(conn).await?;
+    let (summary, tally) = (run.summary, run.tally);
+    Ok((summary, identity, tally))
 }
 
 struct Index<'a>(HashMap<String, &'a Value>);
@@ -332,6 +587,9 @@ struct Run<'a> {
     report_keys: HashMap<String, String>,
     issuer: Option<String>,
     summary: ImportSummary,
+    /// Set for a connector pull: the `source_item` ledger and grouped unmapped resources.
+    pull: Option<Pull<'a>>,
+    tally: Tally,
 }
 
 impl Run<'_> {
@@ -381,32 +639,42 @@ impl Run<'_> {
 
     /// (skip, superseded candidate). Same JSON imported before: skip. Changed at the same issuer: a
     /// conflict check naming the version it would replace. Another issuer's id: a separate fact.
+    /// `medicine` is the (name, code) a medication read from the Medication it references: the stored
+    /// JSON is the request alone, so a changed Medication behind an unchanged request is a change too.
     async fn dedupe(
         &self,
         conn: &mut PgConnection,
         table: &str,
         tail: &str,
         resource: &Value,
+        medicine: Option<(&str, Option<&str>)>,
         checks: &mut Vec<Check>,
     ) -> Result<(bool, Option<Uuid>)> {
         if self.pending(&mut *conn, tail).await? {
             return Ok((true, None));
         }
+        let same_medicine = if medicine.is_some() {
+            " and f.name = $6 and f.code is not distinct from $7"
+        } else {
+            ""
+        };
         let sql = format!(
-            "select f.id, f.fhir = $5 as same_json, (s.document_id = $3 or (cast($4 as text) is not null \
+            "select f.id, f.fhir = $5{same_medicine} as same_json, (s.document_id = $3 or (cast($4 as text) is not null \
              and d.flags->>'fhir_issuer' = $4)) as same_issuer \
              from {table} f join src s on s.id = f.src_id left join document d on d.id = s.document_id \
              where f.profile_id = $1 and s.kind = 'fhir_import' and f.status in ('current', 'provisional') \
              and s.import_ref like $2"
         );
-        let existing: Vec<(Uuid, Option<bool>, Option<bool>)> = sqlx::query_as(AssertSqlSafe(sql.as_str()))
+        let mut query = sqlx::query_as::<_, (Uuid, Option<bool>, Option<bool>)>(AssertSqlSafe(sql.as_str()))
             .bind(self.profile.id)
             .bind(like(tail))
             .bind(self.document_id)
             .bind(&self.issuer)
-            .bind(resource)
-            .fetch_all(conn)
-            .await?;
+            .bind(resource);
+        if let Some((name, code)) = medicine {
+            query = query.bind(name).bind(code);
+        }
+        let existing = query.fetch_all(conn).await?;
         if existing.iter().any(|(_, same, _)| *same == Some(true)) {
             return Ok((true, None));
         }
@@ -418,6 +686,22 @@ impl Run<'_> {
             return Ok((false, Some(*id)));
         }
         Ok((false, None))
+    }
+
+    /// A pull's resource of a type with no table: counted into its type's summary item
+    /// ([`Self::queue_grouped`]), its ledger key with it.
+    fn group_unmapped(&mut self, e: &Entry, reference: &str, key: &str) {
+        let Some(pull) = self.pull.as_mut() else {
+            return;
+        };
+        let group = pull.unmapped.entry(e.rtype().to_string()).or_default();
+        group.count += 1;
+        *group.notes.entry(UNMAPPED_TYPE.to_string()).or_default() += 1;
+        if group.refs.len() < SUMMARY_REFS {
+            group.refs.push(reference.to_string());
+        }
+        group.keys.insert(key.to_string());
+        self.count(&["unmapped".to_string()]);
     }
 
     async fn queue_unmapped(&mut self, conn: &mut PgConnection, e: &Entry, note: &str, reference: &str) -> Result<()> {
@@ -447,24 +731,181 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// A pull's resources of types with no table: one `fhir_unmapped_summary` item per type, with
+    /// the count, the notes, the source and the first refs. The pulled bundle is the item's document
+    /// and holds every resource as received. Review accepts none: a person reads it and dismisses it.
+    /// The ledger rows of a type are written after its item, so a failed write leaves them unpulled
+    /// even on a connection with no transaction.
+    async fn queue_grouped(&mut self, conn: &mut PgConnection) -> Result<()> {
+        let Some(pull) = self.pull.as_mut() else {
+            return Ok(());
+        };
+        let groups = std::mem::take(&mut pull.unmapped);
+        let (source_id, sha) = (pull.source_id, pull.sha.to_string());
+        let source = json!({"id": source_id.to_string(), "kind": pull.kind, "label": pull.label});
+        for (rtype, group) in groups {
+            let payload = json!({
+                "projection": null,
+                "resource_type": rtype,
+                "count": group.count,
+                "notes": group.notes,
+                "source": source,
+                "import_refs": group.refs,
+            });
+            create_item(
+                &mut *conn,
+                &ReviewItemIn {
+                    kind: "fhir_unmapped_summary".into(),
+                    household_id: Some(self.profile.household_id),
+                    profile_id: Some(self.profile.id),
+                    document_id: Some(self.document_id),
+                    reasons: vec!["unmapped".into()],
+                    payload,
+                    ..ReviewItemIn::default()
+                },
+            )
+            .await?;
+            self.summary.queued += 1;
+            for key in &group.keys {
+                ownhealth_core::dedup::record_pulled(
+                    &mut *conn,
+                    source_id,
+                    key,
+                    &sha,
+                    self.document_id,
+                    self.profile.id,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn one(&mut self, conn: &mut PgConnection, e: &Entry) -> Result<()> {
         let r = &e.resource;
         let rtype = e.rtype();
-        if mapping::SUPPORTING.contains(&rtype) || rtype == "DiagnosticReport" {
+        let pulled = self.pull.as_ref().map(|p| (p.source_id, p.sha.to_string()));
+        // a pull's bundle holds every entry as received, whatever this run does with it below
+        let labelled = pulled.is_some() && !mapping::sensitivity(r).is_empty();
+        if is_context(rtype) {
+            self.tally.context += 1;
+            self.tally.sensitive += i64::from(labelled);
             return Ok(()); // context for the others; kept in the stored bundle
         }
-        let rid = match py::get_truthy(Some(r), "id") {
-            Some(id) => py::py_str(Some(id)),
-            None => format!(
-                "sha-{}",
-                &hex::encode(Sha256::digest(py::dumps_sorted(r).as_bytes()))[..16]
-            ),
+        let m = self.map(e);
+        let Some((source_id, sha)) = pulled else {
+            self.import_one(&mut *conn, e, m, "").await?;
+            return Ok(());
         };
-        let tail = format!("{rtype}/{rid}");
+        if labelled || mapped_sensitive(m.as_ref()) {
+            self.tally.sensitive += 1;
+        }
+        if matches!(m, None | Some(Mapped::Unmapped(_) | Mapped::Skip(_))) {
+            // the bundle holds it as received, and nothing read it for sensitivity
+            self.tally.unprojected += 1;
+        }
+        // A pull asks the source's ledger first: a resource it sent before, in this version, in a
+        // pull that still holds it, is not imported again, whatever a person did with it since. One
+        // this run already grouped (twice in the bundle) waits for its summary's ledger row.
+        let key = self.ledger_key(r);
+        let m = match m {
+            Some(Mapped::Observations(rows)) => return self.pull_rows(conn, e, rows, &key, source_id, &sha).await,
+            other => other,
+        };
+        let grouped = self
+            .pull
+            .as_ref()
+            .is_some_and(|p| p.unmapped.get(rtype).is_some_and(|g| g.keys.contains(&key)));
+        if grouped || ownhealth_core::dedup::pulled_before(&mut *conn, source_id, &key, self.profile.id).await? {
+            self.tally.duplicate += 1;
+            self.skipped("duplicate");
+            return Ok(());
+        }
+        match self.import_one(&mut *conn, e, m, &key).await? {
+            Held::Here => {
+                self.tally.new += 1;
+                ownhealth_core::dedup::record_pulled(
+                    &mut *conn,
+                    source_id,
+                    &key,
+                    &sha,
+                    self.document_id,
+                    self.profile.id,
+                )
+                .await?;
+            }
+            Held::Grouped => self.tally.new += 1,
+            Held::Elsewhere => self.tally.duplicate += 1,
+        }
+        Ok(())
+    }
+
+    /// A pull's Observation, row by row: each row (the value, or a panel's component) has its own
+    /// ledger key, `<key><suffix>` (`#component1`). A component a person dismissed stays gone while a
+    /// sibling still waits in review, and a component an open item or another import's fact holds
+    /// gets no row, so it comes in once that one is gone. A single value keeps the resource's key.
+    async fn pull_rows(
+        &mut self,
+        conn: &mut PgConnection,
+        e: &Entry,
+        rows: Vec<mapping::ObsRow>,
+        key: &str,
+        source_id: Uuid,
+        sha: &str,
+    ) -> Result<()> {
+        let tail = format!("{}/{}", e.rtype(), resource_id(&e.resource));
         let reference = format!("{}/{tail}", self.bundle_key);
+        let mut here = false;
+        for row in rows {
+            let row_key = format!("{key}{}", row.suffix);
+            if ownhealth_core::dedup::pulled_before(&mut *conn, source_id, &row_key, self.profile.id).await? {
+                self.skipped("duplicate");
+                continue;
+            }
+            let (t, rf) = (format!("{tail}{}", row.suffix), format!("{reference}{}", row.suffix));
+            if self.observation(&mut *conn, e, &row, &t, &rf).await? {
+                here = true;
+                ownhealth_core::dedup::record_pulled(
+                    &mut *conn,
+                    source_id,
+                    &row_key,
+                    sha,
+                    self.document_id,
+                    self.profile.id,
+                )
+                .await?;
+            }
+        }
+        if here {
+            self.tally.new += 1;
+        } else {
+            self.tally.duplicate += 1;
+        }
+        Ok(())
+    }
+
+    /// [`pull_key`], plus what the mapping read besides the resource. A medication named only by
+    /// `medicationReference` maps from the Medication it points at, so its key carries that
+    /// Medication's [`content_sha`], or `+unresolved` when the bundle does not hold it: a later pull
+    /// that brings the Medication imports the request once, and an unchanged one stays a duplicate.
+    fn ledger_key(&self, r: &Value) -> String {
+        let key = pull_key(r);
+        if !by_reference(r) {
+            return key;
+        }
+        let reference = r["medicationReference"].get("reference").and_then(Value::as_str);
+        match self.index.resolve(reference) {
+            Some(medication) => format!("{key}+{}", content_sha(medication)),
+            None => format!("{key}+unresolved"),
+        }
+    }
+
+    /// The mapper's reading of a resource; None for a type with no table.
+    fn map(&self, e: &Entry) -> Option<Mapped> {
+        let r = &e.resource;
         let pid = self.profile.id;
         let index = self.index;
-        let m = match rtype {
+        match e.rtype() {
             "Observation" => Some(mapping::observation(r)),
             "Condition" => Some(mapping::condition(r, pid)),
             "AllergyIntolerance" => Some(mapping::allergy(r, pid)),
@@ -474,34 +915,54 @@ impl Run<'_> {
             "MedicationStatement" | "MedicationRequest" => Some(mapping::medication(r, pid, |x| index.resolve(x))),
             "FamilyMemberHistory" => Some(mapping::family_member_history(r, pid)),
             _ => None,
-        };
-        match m {
+        }
+    }
+
+    /// Import one resource as `m` maps it. `key` is its ledger key in a pull (empty for a file).
+    /// Says whether this import holds it now, for the ledger.
+    async fn import_one(&mut self, conn: &mut PgConnection, e: &Entry, m: Option<Mapped>, key: &str) -> Result<Held> {
+        let rid = resource_id(&e.resource);
+        let tail = format!("{}/{rid}", e.rtype());
+        let reference = format!("{}/{tail}", self.bundle_key);
+        let held = |here: bool| if here { Held::Here } else { Held::Elsewhere };
+        if matches!(m, None | Some(Mapped::Unmapped(_))) && self.pending(&mut *conn, &tail).await? {
+            self.skipped("duplicate");
+            return Ok(Held::Elsewhere);
+        }
+        Ok(match m {
+            // a pull groups the types with no table: one item per type once the run ends
+            None if self.pull.is_some() => {
+                self.group_unmapped(e, &reference, key);
+                Held::Grouped
+            }
             None => {
-                if self.pending(&mut *conn, &tail).await? {
-                    self.skipped("duplicate");
-                } else {
-                    self.queue_unmapped(conn, e, "stored, not projected", &reference)
-                        .await?;
-                }
+                self.queue_unmapped(conn, e, UNMAPPED_TYPE, &reference).await?;
+                Held::Here
             }
-            Some(Mapped::Skip(reason)) => self.skipped(&format!("skip:{reason}")),
             Some(Mapped::Unmapped(note)) => {
-                if self.pending(&mut *conn, &tail).await? {
-                    self.skipped("duplicate");
-                } else {
-                    self.queue_unmapped(conn, e, &note, &reference).await?;
-                }
+                self.queue_unmapped(conn, e, &note, &reference).await?;
+                Held::Here
             }
+            Some(Mapped::Skip(reason)) => {
+                self.skipped(&format!("skip:{reason}"));
+                Held::Here
+            }
+            // a pull imports Observations row by row instead ([`Self::pull_rows`])
             Some(Mapped::Observations(rows)) => {
+                let mut here = true;
                 for row in rows {
                     let (t, rf) = (format!("{tail}{}", row.suffix), format!("{reference}{}", row.suffix));
-                    self.observation(&mut *conn, e, &row, &t, &rf).await?;
+                    here &= self.observation(&mut *conn, e, &row, &t, &rf).await?;
                 }
+                held(here)
             }
-            Some(Mapped::Record { record, checks }) => self.record(conn, e, &record, checks, &tail, &reference).await?,
-            Some(Mapped::Family { member, checks }) => self.family(conn, e, &member, checks, &tail, &reference).await?,
-        }
-        Ok(())
+            Some(Mapped::Record { record, checks }) => {
+                held(self.record(conn, e, &record, checks, &tail, &reference).await?)
+            }
+            Some(Mapped::Family { member, checks }) => {
+                held(self.family(conn, e, &member, checks, &tail, &reference).await?)
+            }
+        })
     }
 
     async fn observation(
@@ -511,15 +972,15 @@ impl Run<'_> {
         row: &mapping::ObsRow,
         tail: &str,
         reference: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let resource = &e.resource;
         let mut checks = row.checks.clone();
         let (skip, previous) = self
-            .dedupe(&mut *conn, "observation", tail, resource, &mut checks)
+            .dedupe(&mut *conn, "observation", tail, resource, None, &mut checks)
             .await?;
         if skip {
             self.skipped("duplicate");
-            return Ok(());
+            return Ok(false);
         }
         let base_tail = tail.split('#').next().unwrap_or(tail);
         let (obs, norm_checks) = self.normalize(&mut *conn, row, resource, base_tail).await?;
@@ -545,7 +1006,7 @@ impl Run<'_> {
         )
         .await?;
         self.summary.count(&result);
-        Ok(())
+        Ok(true)
     }
 
     /// Received codes win; lane A fills the derived layer (alias group, canonical unit) when it can.
@@ -638,13 +1099,17 @@ impl Run<'_> {
         mut checks: Vec<Check>,
         tail: &str,
         reference: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        let medicine = match record {
+            RecordIn::Medication(m) if by_reference(&e.resource) => Some((m.name.as_str(), m.code.as_deref())),
+            _ => None,
+        };
         let (skip, previous) = self
-            .dedupe(&mut *conn, record.table(), tail, &e.resource, &mut checks)
+            .dedupe(&mut *conn, record.table(), tail, &e.resource, medicine, &mut checks)
             .await?;
         if skip {
             self.skipped("duplicate");
-            return Ok(());
+            return Ok(false);
         }
         let allowance = if checks.iter().all(|c| c.ok) {
             "structured_valid"
@@ -656,7 +1121,7 @@ impl Run<'_> {
         if decision.auto {
             add_record(conn, record, &SrcRef::New(src), RecordOptions::new("import")).await?;
             self.summary.accepted += 1;
-            return Ok(());
+            return Ok(true);
         }
         let payload = json!({
             "projection": "record",
@@ -686,7 +1151,7 @@ impl Run<'_> {
         .await?;
         self.summary.queued += 1;
         self.count(&decision.reasons);
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -700,13 +1165,13 @@ impl Run<'_> {
         mut checks: Vec<Check>,
         tail: &str,
         reference: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let (skip, previous) = self
-            .dedupe(&mut *conn, family::TABLE, tail, &e.resource, &mut checks)
+            .dedupe(&mut *conn, family::TABLE, tail, &e.resource, None, &mut checks)
             .await?;
         if skip {
             self.skipped("duplicate");
-            return Ok(());
+            return Ok(false);
         }
         let allowance = if checks.iter().all(|c| c.ok) {
             "structured_valid"
@@ -718,7 +1183,7 @@ impl Run<'_> {
         if decision.auto {
             family::add(conn, member, &SrcRef::New(src), "import", None, None).await?;
             self.summary.accepted += 1;
-            return Ok(());
+            return Ok(true);
         }
         let payload = json!({
             "projection": "family_member",
@@ -747,7 +1212,27 @@ impl Run<'_> {
         .await?;
         self.summary.queued += 1;
         self.count(&decision.reasons);
-        Ok(())
+        Ok(true)
+    }
+}
+
+/// A medication that names its medicine only through `medicationReference`: the mapper reads the
+/// Medication it points at (`mapping::medication`).
+fn by_reference(r: &Value) -> bool {
+    matches!(
+        r.get("resourceType").and_then(Value::as_str),
+        Some("MedicationStatement" | "MedicationRequest")
+    ) && r.get("medicationCodeableConcept").is_none_or(Value::is_null)
+        && truthy(r.get("medicationReference"))
+}
+
+/// Whether the mapper read `m` as sensitive: a record's or a relative's own tags. An Observation's
+/// tags are its resource's `meta.security`, which [`Run::one`] reads for every entry.
+fn mapped_sensitive(m: Option<&Mapped>) -> bool {
+    match m {
+        Some(Mapped::Record { record, .. }) => !record.common().sensitivity.is_empty(),
+        Some(Mapped::Family { member, .. }) => !member.sensitivity.is_empty(),
+        _ => false,
     }
 }
 
