@@ -89,3 +89,13 @@ test.describe('a browser that reports an old zone name', () => {
 		await expect(lines.getByText('Times read in Asia/Kolkata', { exact: true })).toBeVisible({ timeout: 60_000 });
 	});
 });
+
+test.describe('a browser in a zone the tz database links to another', () => {
+	// the tz database links Europe/Oslo to Europe/Berlin (the same rules since 1970); Postgres knows both
+	test.use({ timezoneId: 'Europe/Oslo' });
+
+	test('uploads, and the export is read in the zone the browser named', async ({ page }) => {
+		const lines = await upload(page, 'es', 'clarity-es-mmol.csv');
+		await expect(lines.getByText('Horas leídas en Europe/Oslo', { exact: true })).toBeVisible({ timeout: 60_000 });
+	});
+});

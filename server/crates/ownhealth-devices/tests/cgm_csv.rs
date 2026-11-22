@@ -791,34 +791,66 @@ async fn a_server_zone_with_an_old_name_reads_the_times_in_its_current_zone() ->
 }
 
 #[tokio::test]
-async fn a_zone_postgres_knows_by_two_names_is_read_by_its_current_name() -> R {
+async fn a_zone_postgres_knows_keeps_its_name_and_its_other_names_replace_nothing() -> R {
     let env = Env::new().await?;
-    // a Postgres that ships its own zone files knows an old name and its current name both
-    let known: i64 =
-        sqlx::query_scalar("select count(*) from pg_timezone_names where name in ('Europe/Belfast', 'Europe/London')")
-            .fetch_one(&env.db.pool)
-            .await?;
+    // a Postgres that ships its own zone files knows an old name and its current name both, and the
+    // zones the tz database merged into another (Europe/Oslo into Europe/Berlin)
+    let known: i64 = sqlx::query_scalar(
+        "select count(*) from pg_timezone_names where name in ('Europe/Belfast', 'Europe/London', 'Europe/Oslo', 'UTC')",
+    )
+    .fetch_one(&env.db.pool)
+    .await?;
     assert_eq!(
-        known, 2,
+        known, 4,
         "this Postgres lacks one of the names: the two-name case is no longer covered"
     );
+    // the name the browser or the server sent is the name the person reads back, when Postgres knows it
     let mut c = env.db.pool.acquire().await?;
-    let (server, _) = cgm_csv::known_zones(&mut c, Some("Europe/Belfast"), None).await?;
+    for zone in [
+        "Europe/Belfast",
+        "Europe/Oslo",
+        "Atlantic/Reykjavik",
+        "Europe/Amsterdam",
+        "UTC",
+    ] {
+        assert_eq!(
+            cgm_csv::known_zone(&mut c, Some(zone)).await?.as_deref(),
+            Some(zone),
+            "{zone}"
+        );
+    }
     drop(c);
-    assert_eq!(server.as_deref(), Some("Europe/London"));
     let bytes = fixture("clarity-en-mgdl.csv")?;
-    let result = upload_in_zone(&env, "lucia", "clarity.csv", &bytes, "Europe/Belfast").await?;
-    assert_eq!(result["cgm_csv"]["timezone"], json!("Europe/London"), "{result}");
-    // an export saved under the old name is in the same zone as the current name: nothing is replaced
-    sqlx::query(
-        "update document set flags = jsonb_set(flags, '{cgm_csv,timezone}', '\"Europe/Belfast\"') where profile_id = $1",
-    )
-    .bind(env.fam.profile("lucia"))
-    .execute(&env.db.pool)
-    .await?;
-    let result = upload_in_zone(&env, "lucia", "clarity.csv", &bytes, "Europe/London").await?;
+    let result = upload_in_zone(&env, "lucia", "clarity.csv", &bytes, "Europe/Oslo").await?;
+    assert_eq!(result["cgm_csv"]["timezone"], json!("Europe/Oslo"), "{result}");
+    let flags: Value = sqlx::query_scalar("select flags->'cgm_csv'->'timezone' from document where profile_id = $1")
+        .bind(env.fam.profile("lucia"))
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(flags, json!("Europe/Oslo"));
+    // 20:00:17 in Oslo in November is 19:00:17 UTC (CET, +60)
+    assert_eq!(
+        readings(&env, "lucia").await?[0],
+        (utc(2026, 11, 14, 19, 0, 17), 120.0, Some(60))
+    );
+    // the same file from a browser in Berlin: one zone by another name, so nothing is replaced
+    let result = upload_in_zone(&env, "lucia", "clarity.csv", &bytes, "Europe/Berlin").await?;
     assert_eq!(result["cgm_csv"].get("replaced"), None, "{result}");
     assert_eq!(result["reasons"]["duplicate"], json!(8), "{result}");
+    // an export saved under an old name Postgres no longer ships (an install whose Postgres knew it),
+    // uploaded again under the current one: the same zone, nothing is replaced
+    let result = upload_in_zone(&env, "sam", "clarity.csv", &bytes, "Asia/Kolkata").await?;
+    assert_eq!(result["cgm_csv"]["timezone"], json!("Asia/Kolkata"), "{result}");
+    sqlx::query(
+        "update document set flags = jsonb_set(flags, '{cgm_csv,timezone}', '\"Asia/Calcutta\"') where profile_id = $1",
+    )
+    .bind(env.fam.profile("sam"))
+    .execute(&env.db.pool)
+    .await?;
+    let result = upload_in_zone(&env, "sam", "clarity.csv", &bytes, "Asia/Kolkata").await?;
+    assert_eq!(result["cgm_csv"].get("replaced"), None, "{result}");
+    assert_eq!(result["reasons"]["duplicate"], json!(8), "{result}");
+    assert_eq!(readings(&env, "sam").await?.len(), 8);
     Ok(())
 }
 

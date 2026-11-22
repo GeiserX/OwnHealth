@@ -30,8 +30,10 @@
 //! the zone the browser sent with the upload (`timezone` in the job payload), with Postgres's zone
 //! rules, and each reading keeps the offset that applied (`tz_offset_min`). An old zone name that the
 //! tz database links to a current one (`Asia/Calcutta`, which Chromium still reports) reads as the
-//! current one (`data/tz/backward`), since the Debian Postgres image ships only current names; a
-//! Postgres that knows both names reads the current one too, so one zone has one name. A zone
+//! current one (`data/tz/backward`), since the Debian Postgres image ships only current names. A name
+//! Postgres knows keeps that name, so the line that says which zone read the file names the zone the
+//! person is in (`Europe/Oslo`, which the tz database links to `Europe/Berlin`). Two names the tz
+//! database links are one zone: the same file uploaded again under the other name replaces nothing. A zone
 //! Postgres does not know by either name is no zone; it never refuses an upload. With neither zone, a
 //! time is read as UTC and keeps no offset: the rule the PDF and FHIR importers apply to a time without
 //! an offset. The zone used is a property of the file
@@ -56,8 +58,9 @@
 //! `duplicate`. Retracting a file queues the profile's other CGM exports for import again
 //! (`retract::retract_document_facts`), so the readings they share come back as theirs. A file whose
 //! readings are replaced because it was uploaded in another zone does the same: the instants it left
-//! may hold readings of another export. A retraction of a CGM export takes the lock its imports hold
-//! (`retract::lock_exports`) first, so it waits for a running import and then removes what it wrote.
+//! may hold readings of another export. A retraction or a move of a CGM export takes the lock its
+//! imports hold (`retract::lock_export_of`) before anything else, so it waits for a running import and
+//! then removes what it wrote.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read as _;
@@ -778,13 +781,15 @@ pub fn zone_link_target(name: &str) -> Option<&'static str> {
     })
 }
 
-/// The zone `name` as Postgres knows it: the current name of an old one ([`zone_link_target`]) when
-/// Postgres knows that, else the name itself. Else none, as for a name over 64 characters.
+/// The zone `name` as Postgres knows it: the name itself when Postgres knows it, so a person reads back
+/// the zone their browser or the server named (`Europe/Oslo` stays `Europe/Oslo`, though the tz
+/// database links it to `Europe/Berlin`); else the current name of an old one ([`zone_link_target`])
+/// when Postgres knows that. Else none, as for a name over 64 characters.
 pub async fn known_zone(conn: &mut PgConnection, name: Option<&str>) -> Result<Option<String>> {
     let Some(name) = name.map(str::trim).filter(|z| !z.is_empty() && z.len() <= 64) else {
         return Ok(None);
     };
-    let names: Vec<&str> = zone_link_target(name).into_iter().chain([name]).collect();
+    let names: Vec<&str> = [name].into_iter().chain(zone_link_target(name)).collect();
     let known: Option<String> = sqlx::query_scalar(
         "select n from unnest(cast($1 as text[])) with ordinality as x(n, i) \
          where exists (select 1 from pg_timezone_names where name = x.n) order by x.i limit 1",
@@ -846,7 +851,7 @@ pub fn zone_choice<'a>(server: Option<&'a str>, upload: Option<&'a str>) -> Opti
 }
 
 /// The server's zone (`OWNHEALTH_TIMEZONE`, passed in as `server`) and the upload's, each as Postgres
-/// knows it ([`known_zone`]): an old name of either reads as its current one, an unknown one is none.
+/// knows it ([`known_zone`]): an old name Postgres lacks reads as its current one, an unknown one is none.
 pub async fn known_zones(
     conn: &mut PgConnection,
     server: Option<&str>,
@@ -940,12 +945,11 @@ async fn import_in(
         .get("cgm_csv")
         .filter(|d| d.is_object())
         .map(|d| d.get("timezone").and_then(Value::as_str).map(str::to_string));
+    // two names the tz database links (an old name and its current one, or a zone merged into another)
+    // are one zone: the same rules since 1970
+    let same = |z: &str| zone_link_target(z).unwrap_or(z).to_string();
     let (zone, replace): (Option<String>, bool) = match (read, &before) {
-        // a zone saved under its old name is the same zone
-        (Read::Upload(Some(z)), Some(b)) => (
-            Some(z.to_string()),
-            b.as_deref().map(|b| zone_link_target(b).unwrap_or(b)) != Some(z),
-        ),
+        (Read::Upload(Some(z)), Some(b)) => (Some(z.to_string()), b.as_deref().map(same) != Some(same(z))),
         (Read::Upload(None) | Read::Again(_), Some(b)) => (b.clone(), false),
         (Read::Upload(z) | Read::Again(z), None) => (z.map(str::to_string), false),
     };
