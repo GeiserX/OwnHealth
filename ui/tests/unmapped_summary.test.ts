@@ -3,7 +3,7 @@
 // and never prints a raw key.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fhirTileSource, unmappedSummary } from '../src/lib/logic/inbox.ts';
+import { fhirTileSource, latestJob, unmappedSummary } from '../src/lib/logic/inbox.ts';
 import { dict } from '../src/lib/i18n/dict.ts';
 
 const item = (payload: Record<string, unknown>, kind = 'fhir_unmapped_summary') => ({ kind, payload });
@@ -54,4 +54,16 @@ test('the FHIR tile names the newest FHIR document, a pull’s bundle too: a pul
 	assert.deepEqual(fhirTileSource({ state: 'failed', document_id: null, result: null }, pull), { job: null, doc: pull });
 	assert.deepEqual(fhirTileSource(job, null), { job, doc: null });
 	assert.deepEqual(fhirTileSource(null, null), { job: null, doc: null });
+});
+
+test('a tile takes the newest job of its own profile, never another profile’s', () => {
+	const jobs = [
+		{ id: 3, kind: 'import.fhir_bundle', profile_id: 'sam' },
+		{ id: 2, kind: 'import.pdf', profile_id: 'alex' },
+		{ id: 1, kind: 'import.fhir_bundle', profile_id: 'alex' }
+	];
+	assert.equal(latestJob(jobs, 'import.fhir_bundle', 'alex')?.id, 1);
+	assert.equal(latestJob(jobs, 'import.fhir_bundle', 'sam')?.id, 3);
+	assert.equal(latestJob(jobs, 'import.genome_facts', 'alex'), null);
+	assert.equal(latestJob(jobs, 'import.fhir_bundle', undefined), null);
 });

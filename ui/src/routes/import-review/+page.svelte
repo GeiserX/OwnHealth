@@ -23,7 +23,7 @@
 	import type { InboxSource } from '#lib/api/inbox';
 	import AgentContext from '#lib/components/inbox/AgentContext.svelte';
 	import ProposalRows from '#lib/components/inbox/ProposalRows.svelte';
-	import { FHIR_ITEM_KINDS, fhirTileSource, inboxSummary, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, unmappedSummary } from '#lib/logic/inbox';
+	import { FHIR_ITEM_KINDS, fhirTileSource, inboxSummary, latestJob, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, unmappedSummary } from '#lib/logic/inbox';
 	import { ApiError } from '#lib/api/core';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import PageHeader from '#lib/components/PageHeader.svelte';
@@ -254,7 +254,8 @@
 
 	// Inbox tiles: what each channel left in the queue, and its newest import.
 	const docOf = (id: string | null) => (queue.data?.docs ?? []).find((x) => x.id === id) ?? null;
-	const latest = (kind: string) => (queue.data?.jobs ?? []).find((j) => j.kind === kind) ?? null;
+	// this profile's newest job of a kind: the jobs list holds every profile the caller may read
+	const latest = (kind: string) => latestJob(queue.data?.jobs ?? [], kind, prof?.id);
 	const latestDoc = (type: string) => (queue.data?.docs ?? []).find((d) => d.doc_type === type) ?? null;
 	const count = (...kinds: string[]) => items.filter((i) => kinds.includes(i.kind)).length;
 	// A connector pull runs no import job: the tile then names the newest FHIR document itself.

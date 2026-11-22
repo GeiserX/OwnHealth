@@ -1163,3 +1163,52 @@ async fn a_daily_pull_of_a_labelled_result_stays_sensitive() -> R {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_changed_medicine_behind_an_unchanged_prescription_is_a_change() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let (_, first) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("a", vec![prescription(), medicine()]),
+    )
+    .await?;
+    assert_eq!((first.new, first.summary.accepted), (1, 1), "{first:?}");
+    // the server corrects the Medication; the request itself is the same JSON
+    let mut stronger = medicine();
+    stronger["code"] = json!({"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "314077", "display": "Lisinopril 20 MG Oral Tablet"}]});
+    let (_, changed) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("b", vec![prescription(), stronger.clone()]),
+    )
+    .await?;
+    assert_eq!((changed.new, changed.summary.queued), (1, 1), "{changed:?}");
+    let held = open_items(&mut tx, p).await?;
+    assert_eq!(held.len(), 1);
+    assert!(held[0].reasons.iter().any(|r| r == "conflict"), "{:?}", held[0].reasons);
+    assert_eq!(held[0].payload["record"]["name"], "Lisinopril 20 MG Oral Tablet");
+    // the same corrected Medication again: nothing new
+    let (_, again) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("c", vec![prescription(), stronger]),
+    )
+    .await?;
+    assert_eq!(
+        (again.new, again.duplicate, again.summary.queued),
+        (0, 1, 0),
+        "{again:?}"
+    );
+    Ok(())
+}

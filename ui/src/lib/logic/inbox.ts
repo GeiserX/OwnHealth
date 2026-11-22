@@ -530,6 +530,11 @@ export function unmappedSummary(item: { kind: string; payload: Record<string, un
 /** The review kinds a FHIR import leaves in the queue: one per resource from a file, and a pull's grouped item. */
 export const FHIR_ITEM_KINDS = ['fhir_unmapped', 'fhir_unmapped_summary'];
 
+/** The newest job of `kind` for one profile: `/jobs` lists the jobs of every profile the caller may read, newest first. */
+export function latestJob<J extends { kind: string; profile_id: string | null }>(jobs: J[], kind: string, profileId: string | null | undefined): J | null {
+	return jobs.find((j) => j.kind === kind && !!profileId && j.profile_id === profileId) ?? null;
+}
+
 /**
  * What the FHIR tile names as the newest import. `newest` is the newest document a FHIR import read,
  * a file or a connector pull (the server's `latest=fhir`), so the tile still names a pull once its

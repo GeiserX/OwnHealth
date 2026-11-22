@@ -61,6 +61,10 @@ test('a pull’s grouped item reads in en and es, opens its bundle and is dismis
 	await expect.poll(() => sql(jobOf), { timeout: 20_000 }).toBe('done');
 	sql(`delete from job where kind = 'import.fhir_bundle' and payload->>'blob_sha256' = '${sha}'`);
 	expect(sql(jobOf)).toBe('');
+	// another profile's FHIR import still runs: it never names this profile's tile
+	const samJob = sql(
+		`insert into job (kind, payload, state, locked_by, locked_until) select 'import.fhir_bundle', jsonb_build_object('profile_id', id::text, 'household_id', household_id::text, 'blob_sha256', repeat('0', 64), 'filename', 'Sam ips.json'), 'running', 'e2e', now() + interval '1 hour' from profile where slug = 'sam' returning id`
+	);
 	const claims = seedSummary(doc, 'ExplanationOfBenefit', 12000);
 	const cover = seedSummary(doc, 'Coverage', 1);
 
@@ -81,6 +85,7 @@ test('a pull’s grouped item reads in en and es, opens its bundle and is dismis
 	expect(Number(fhirOpen)).toBeGreaterThanOrEqual(2);
 	// with no import job, the tile names the newest FHIR document: the pull's bundle
 	await expect(tile).toContainText('Hospital LabNorte · pull.json');
+	await expect(tile).not.toContainText('Sam ips.json');
 
 	// the bundle opens through the document route, as the person who sees this queue
 	const open = row.getByRole('link', { name: 'Open the downloaded file' });
@@ -108,5 +113,6 @@ test('a pull’s grouped item reads in en and es, opens its bundle and is dismis
 	await page.reload();
 	await expect(tile).toContainText('Hospital LabNorte · pull.json');
 	await expect(tile).not.toContainText('nada importado aún');
+	sql(`delete from job where id = ${samJob}`);
 	expect(errors).toEqual([]);
 });

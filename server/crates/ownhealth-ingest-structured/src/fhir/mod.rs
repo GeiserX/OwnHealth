@@ -639,32 +639,42 @@ impl Run<'_> {
 
     /// (skip, superseded candidate). Same JSON imported before: skip. Changed at the same issuer: a
     /// conflict check naming the version it would replace. Another issuer's id: a separate fact.
+    /// `medicine` is the (name, code) a medication read from the Medication it references: the stored
+    /// JSON is the request alone, so a changed Medication behind an unchanged request is a change too.
     async fn dedupe(
         &self,
         conn: &mut PgConnection,
         table: &str,
         tail: &str,
         resource: &Value,
+        medicine: Option<(&str, Option<&str>)>,
         checks: &mut Vec<Check>,
     ) -> Result<(bool, Option<Uuid>)> {
         if self.pending(&mut *conn, tail).await? {
             return Ok((true, None));
         }
+        let same_medicine = if medicine.is_some() {
+            " and f.name = $6 and f.code is not distinct from $7"
+        } else {
+            ""
+        };
         let sql = format!(
-            "select f.id, f.fhir = $5 as same_json, (s.document_id = $3 or (cast($4 as text) is not null \
+            "select f.id, f.fhir = $5{same_medicine} as same_json, (s.document_id = $3 or (cast($4 as text) is not null \
              and d.flags->>'fhir_issuer' = $4)) as same_issuer \
              from {table} f join src s on s.id = f.src_id left join document d on d.id = s.document_id \
              where f.profile_id = $1 and s.kind = 'fhir_import' and f.status in ('current', 'provisional') \
              and s.import_ref like $2"
         );
-        let existing: Vec<(Uuid, Option<bool>, Option<bool>)> = sqlx::query_as(AssertSqlSafe(sql.as_str()))
+        let mut query = sqlx::query_as::<_, (Uuid, Option<bool>, Option<bool>)>(AssertSqlSafe(sql.as_str()))
             .bind(self.profile.id)
             .bind(like(tail))
             .bind(self.document_id)
             .bind(&self.issuer)
-            .bind(resource)
-            .fetch_all(conn)
-            .await?;
+            .bind(resource);
+        if let Some((name, code)) = medicine {
+            query = query.bind(name).bind(code);
+        }
+        let existing = query.fetch_all(conn).await?;
         if existing.iter().any(|(_, same, _)| *same == Some(true)) {
             return Ok((true, None));
         }
@@ -880,12 +890,7 @@ impl Run<'_> {
     /// that brings the Medication imports the request once, and an unchanged one stays a duplicate.
     fn ledger_key(&self, r: &Value) -> String {
         let key = pull_key(r);
-        let by_reference = matches!(
-            r.get("resourceType").and_then(Value::as_str),
-            Some("MedicationStatement" | "MedicationRequest")
-        ) && r.get("medicationCodeableConcept").is_none_or(Value::is_null)
-            && truthy(r.get("medicationReference"));
-        if !by_reference {
+        if !by_reference(r) {
             return key;
         }
         let reference = r["medicationReference"].get("reference").and_then(Value::as_str);
@@ -971,7 +976,7 @@ impl Run<'_> {
         let resource = &e.resource;
         let mut checks = row.checks.clone();
         let (skip, previous) = self
-            .dedupe(&mut *conn, "observation", tail, resource, &mut checks)
+            .dedupe(&mut *conn, "observation", tail, resource, None, &mut checks)
             .await?;
         if skip {
             self.skipped("duplicate");
@@ -1095,8 +1100,12 @@ impl Run<'_> {
         tail: &str,
         reference: &str,
     ) -> Result<bool> {
+        let medicine = match record {
+            RecordIn::Medication(m) if by_reference(&e.resource) => Some((m.name.as_str(), m.code.as_deref())),
+            _ => None,
+        };
         let (skip, previous) = self
-            .dedupe(&mut *conn, record.table(), tail, &e.resource, &mut checks)
+            .dedupe(&mut *conn, record.table(), tail, &e.resource, medicine, &mut checks)
             .await?;
         if skip {
             self.skipped("duplicate");
@@ -1158,7 +1167,7 @@ impl Run<'_> {
         reference: &str,
     ) -> Result<bool> {
         let (skip, previous) = self
-            .dedupe(&mut *conn, family::TABLE, tail, &e.resource, &mut checks)
+            .dedupe(&mut *conn, family::TABLE, tail, &e.resource, None, &mut checks)
             .await?;
         if skip {
             self.skipped("duplicate");
@@ -1205,6 +1214,16 @@ impl Run<'_> {
         self.count(&decision.reasons);
         Ok(true)
     }
+}
+
+/// A medication that names its medicine only through `medicationReference`: the mapper reads the
+/// Medication it points at (`mapping::medication`).
+fn by_reference(r: &Value) -> bool {
+    matches!(
+        r.get("resourceType").and_then(Value::as_str),
+        Some("MedicationStatement" | "MedicationRequest")
+    ) && r.get("medicationCodeableConcept").is_none_or(Value::is_null)
+        && truthy(r.get("medicationReference"))
 }
 
 /// Whether the mapper read `m` as sensitive: a record's or a relative's own tags. An Observation's
