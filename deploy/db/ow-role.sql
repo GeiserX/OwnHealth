@@ -3,8 +3,8 @@
 -- the sidecar starts, every time. Safe to run any number of times.
 --
 --   psql variables: ow_role (the role name), ow_db (its database)
---   environment:    OPENWEARABLES_DB_PASSWORD (its password, read with \getenv so it never sits in argv):
---                   from openwearables.env (compose.yaml) or secrets/ow_db_password (homelab file)
+--   environment:    OPENWEARABLES_DB_PASSWORD (its password, read with \getenv so it never sits in argv),
+--                   from openwearables.env next to .env (both compose files)
 --
 -- The sidecar is a cache of vendor data, and it holds the vendor tokens. Its role is a plain login: no
 -- superuser, no CREATEDB, no CREATEROLE. It owns its own database, so OW's migrations can create their
@@ -14,11 +14,11 @@
 \getenv ow_password OPENWEARABLES_DB_PASSWORD
 \if :{?ow_password}
 \else
-  do $$ begin raise exception 'OPENWEARABLES_DB_PASSWORD is not set: put it in openwearables.env (compose.yaml) or secrets/ow_db_password (homelab)'; end $$;
+  do $$ begin raise exception 'OPENWEARABLES_DB_PASSWORD is not set: put it in openwearables.env, next to .env'; end $$;
 \endif
 select :'ow_password' = '' as ow_password_empty \gset
 \if :ow_password_empty
-  do $$ begin raise exception 'OPENWEARABLES_DB_PASSWORD is empty: put it in openwearables.env (compose.yaml) or secrets/ow_db_password (homelab)'; end $$;
+  do $$ begin raise exception 'OPENWEARABLES_DB_PASSWORD is empty: put it in openwearables.env, next to .env'; end $$;
 \endif
 
 select format('create role %I login', :'ow_role')

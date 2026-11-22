@@ -403,8 +403,6 @@ const OW_QUIET: [(&str, &str); 5] = [
     ("OTEL_ENABLED", "false"),
     ("OUTGOING_WEBHOOKS_ENABLED", "false"),
 ];
-/// The only docker secrets a sidecar service may hold (homelab).
-const OW_SECRETS: [&str; 3] = ["ow_db_password", "ow_secret_key", "ow_admin_password"];
 
 fn ow_image_is_pinned(image: &str) -> bool {
     image
@@ -446,7 +444,7 @@ fn wearables_env(extra: &str) -> String {
     format!("{extra}COMPOSE_PROFILES=ocr,wearables\n")
 }
 
-/// The quickstart's openwearables.env, with fresh random values. The homelab reads secrets/ instead.
+/// openwearables.env, next to .env in both compose files, with fresh random values.
 fn openwearables_env(ow_db_password: &str) -> String {
     let mut env = String::new();
     for (k, v) in [
@@ -476,11 +474,7 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
         }
 
         let ow_pw = ownhealth_core::ids::token_hex(16);
-        let files = if case == "quickstart" {
-            vec![("openwearables.env", openwearables_env(&ow_pw))]
-        } else {
-            vec![]
-        };
+        let files = [("openwearables.env", openwearables_env(&ow_pw))];
         let doc = render_doc(&compose, &env_file, &wearables_env(extra), &files)?;
         let services = &doc["services"];
         // OW's secrets reach the sidecar only, never OwnHealth's own containers (the OCR worker included)
@@ -492,10 +486,11 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
                 .collect();
             assert!(leaked.is_empty(), "{case}: {s} gets {leaked:?}");
         }
-        // ...and the quickstart sidecar gets them from openwearables.env (the homelab reads secrets/)
+        // ...and the sidecar gets them from openwearables.env, an env file compose may find missing:
+        // no OW service holds a docker secret of its own, whose file compose would need at create time
         for s in ["ow-db-init", "ow-app", "ow-worker", "ow-beat"] {
-            let got = env_str(&services[s], "OPENWEARABLES_DB_PASSWORD") == ow_pw;
-            assert_eq!(got, case == "quickstart", "{case}: {s} OPENWEARABLES_DB_PASSWORD");
+            let got = env_str(&services[s], "OPENWEARABLES_DB_PASSWORD");
+            assert_eq!(got, ow_pw, "{case}: {s} OPENWEARABLES_DB_PASSWORD");
         }
         for s in OW_ALL {
             let svc = &services[s];
@@ -521,10 +516,7 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
                 .flatten()
                 .filter_map(|v| v["source"].as_str().or(v.as_str()).map(str::to_string))
                 .collect();
-            assert!(
-                secrets.iter().all(|x| OW_SECRETS.contains(&x.as_str())),
-                "{case}: {s} gets the secrets {secrets:?}"
-            );
+            assert!(secrets.is_empty(), "{case}: {s} gets the secrets {secrets:?}");
         }
         for s in OW_SERVICES {
             let svc = &services[s];
@@ -605,6 +597,14 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
 
         let init = &services["ow-db-init"];
         assert!(strings(&init["command"]).join(" ").contains("ow-role.sql"), "{case}");
+        let init_secrets: Vec<String> = init["secrets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v["source"].as_str().map(str::to_string))
+            .collect();
+        let owner_only: &[&str] = if case == "homelab" { &["db_password"] } else { &[] };
+        assert_eq!(init_secrets, owner_only, "{case}: ow-db-init secrets");
         assert_eq!(
             init["depends_on"]["app"]["condition"], "service_healthy",
             "{case}: ow-db-init must wait for the app, so that its failure cannot stop it"
@@ -757,8 +757,7 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
     std::fs::create_dir_all(dir.join("inbox"))?;
     std::fs::copy(root().join("deploy/db/ow-role.sql"), dir.join("deploy/db/ow-role.sql"))?;
     let ow_pw = token_hex(16);
-    let mut env = std::fs::read_to_string(env_file)? + &wearables_env(extra);
-    // OW's secret is missing at first (no openwearables.env, an empty secrets/ow_db_password)
+    let mut env = std::fs::read_to_string(env_file)? + extra;
     let owner_pw = if case == "quickstart" {
         // the app's own key, and any free host port for it
         env += &format!("OWNHEALTH_SECRET_KEY={}\nOWNHEALTH_HTTP_PORT=0\n", token_hex(32));
@@ -773,17 +772,22 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
             ("secret_key", token_hex(32)),
             ("secrets_key", format!("{}0=", token_hex(21))), // 32 bytes in standard base64
             ("restic_password", token_hex(16)),
-            ("ow_db_password", String::new()),
-            ("ow_secret_key", token_hex(32)),
-            ("ow_admin_password", token_hex(16)),
         ] {
             std::fs::write(s.join(name), value)?;
         }
         owner
     };
-    std::fs::write(dir.join(".env"), env)?;
+    // OwnHealth runs before the profile is on
+    std::fs::write(dir.join(".env"), &env)?;
+    project.ok(&["up", "-d", "--wait", "app"])?;
+    let before = project.service("app")?;
 
-    // A broken OW secret stops the sidecar only: the app is up and healthy, and stays so
+    // The profile goes on with OW's secret missing (homelab: no openwearables.env) or empty
+    // (quickstart). The .env edit recreates the app; the sidecar stops, the new app is up and healthy.
+    std::fs::write(dir.join(".env"), env + &wearables_env(""))?;
+    if case == "quickstart" {
+        std::fs::write(dir.join("openwearables.env"), openwearables_env(""))?;
+    }
     let first = project.run(&UP)?;
     let out = String::from_utf8_lossy(&first.stdout).to_string() + &String::from_utf8_lossy(&first.stderr);
     assert!(
@@ -797,12 +801,15 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
         app["State"],
         app["Health"]
     );
+    assert_ne!(app["ID"], before["ID"], "{case}: the profile edit to .env should recreate the app");
+    let init_log = project.run(&["logs", "--no-color", "ow-db-init"])?;
+    let init_log = String::from_utf8_lossy(&init_log.stdout).to_string() + &String::from_utf8_lossy(&init_log.stderr);
+    assert!(
+        init_log.contains("OPENWEARABLES_DB_PASSWORD is") && init_log.contains("openwearables.env"),
+        "{case}: ow-db-init does not name the missing secret: {init_log}"
+    );
     // the secret set: the next start brings the sidecar up and leaves the app as it was
-    if case == "quickstart" {
-        std::fs::write(dir.join("openwearables.env"), openwearables_env(&ow_pw))?;
-    } else {
-        std::fs::write(dir.join("secrets/ow_db_password"), &ow_pw)?;
-    }
+    std::fs::write(dir.join("openwearables.env"), openwearables_env(&ow_pw))?;
     project.ok(&UP)?;
     assert_eq!(
         project.service("app")?["ID"],
@@ -907,10 +914,10 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
     Ok(())
 }
 
-/// The profile for real, from both compose files: a missing OW secret stops the sidecar and leaves the
-/// app up, setting it later does not recreate the app, OW's migrations run on Postgres 17 as its
-/// restricted role, the role cannot connect to the health database, the running sidecar has
-/// telemetry, Sentry, OTLP and webhooks off, and nothing is published on the host. It pulls the OW
+/// The profile for real, from both compose files: turning it on with OW's secret missing or empty
+/// stops the sidecar and leaves the (recreated) app up, setting the secret later does not recreate
+/// the app, OW's migrations run on Postgres 17 as its restricted role, the role cannot connect to the
+/// health database, the running sidecar has telemetry, Sentry, OTLP and webhooks off, and nothing is published on the host. It pulls the OW
 /// image and takes minutes, so it runs in CI (`CI` set) or with OWNHEALTH_TEST_WEARABLES=1.
 #[test]
 fn wearables_profile_comes_up_as_the_restricted_role() -> R {

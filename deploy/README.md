@@ -88,17 +88,18 @@ Scans that arrived while OCR was off are not lost: each time the `ocr` worker st
 
 The `wearables` profile runs the Open Wearables sidecar (OW 0.11.0, pinned by digest), which holds the Oura, Whoop, Polar and Withings logins. It publishes no port and sends no usage data. Its own database lives on the same Postgres, and its role cannot open the health database.
 
-**Turn it on.** Add `wearables` to the `COMPOSE_PROFILES` line in `.env`: `COMPOSE_PROFILES=ocr,wearables` with OCR on, otherwise `COMPOSE_PROFILES=wearables`. A second `COMPOSE_PROFILES` line replaces the first, so OCR would stop. Then create the three secrets and start:
+**Turn it on.** First put OW's three secrets in `openwearables.env`, next to `.env`. Never put them in `.env`: every OwnHealth container reads that file.
 
 ```sh
-for f in ow_db_password ow_secret_key ow_admin_password; do openssl rand -hex 32 > secrets/$f; done
-chmod 644 secrets/ow_*   # every OW service drops all capabilities, so it cannot read a mode-600 file
-docker compose up -d
+for k in DB_PASSWORD SECRET_KEY ADMIN_PASSWORD; do echo "OPENWEARABLES_$k=$(openssl rand -hex 32)"; done > openwearables.env
+chmod 600 openwearables.env   # compose reads it, not the containers
 ```
 
-The one-shot `ow-db-init` creates the `openwearables` database and role, then OW migrates its tables. It starts only once the app is healthy, so a missing or unreadable OW secret stops the sidecar and never OwnHealth: `docker compose up -d` then reports `ow-db-init`, and `docker compose logs ow-db-init` names the secret.
+Then add `wearables` to the `COMPOSE_PROFILES` line in `.env`: `COMPOSE_PROFILES=ocr,wearables` with OCR on, otherwise `COMPOSE_PROFILES=wearables`. A second `COMPOSE_PROFILES` line replaces the first, so OCR would stop. Start it with `docker compose up -d`.
 
-**Change its database password.** Write the new `secrets/ow_db_password` and run `docker compose up -d`, which sets it on the role. Then run `docker compose restart ow-app ow-worker ow-beat`: they read the file only when they start.
+The one-shot `ow-db-init` creates the `openwearables` database and role, then OW migrates its tables. It starts only once the app is healthy. So if `openwearables.env` is missing, or a line in it is empty, only the sidecar stops: OwnHealth keeps running, and `docker compose logs ow-db-init ow-app` names the missing variable. Fix the file and run `docker compose up -d` again.
+
+**Change its database password.** Write the new `OPENWEARABLES_DB_PASSWORD` in `openwearables.env` and run `docker compose up -d`. It sets the new password on the role and recreates the sidecar with it.
 
 **Turn it off.** Take `wearables` out of `COMPOSE_PROFILES`, then `docker compose stop ow-app ow-worker ow-beat ow-redis`. An `up -d` without the profile leaves the running sidecar alone. Its database stays in the `ownhealth-pg` volume, so turning the profile on again keeps the vendor connections.
 
