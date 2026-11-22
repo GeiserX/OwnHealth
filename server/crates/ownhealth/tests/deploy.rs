@@ -625,6 +625,19 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
     Ok(())
 }
 
+/// openwearables.env holds OW's secrets next to .env, so git and the image build skip it as they skip
+/// .env (the control).
+#[test]
+fn openwearables_env_is_ignored_like_dot_env() -> R {
+    for f in [".gitignore", ".dockerignore"] {
+        let body = std::fs::read_to_string(root().join(f))?;
+        for name in [".env", "openwearables.env"] {
+            assert!(body.lines().any(|l| l.trim() == name), "{f} does not list {name}");
+        }
+    }
+    Ok(())
+}
+
 /// A compose project of its own, taken down with its volumes when dropped.
 struct Project {
     name: String,
