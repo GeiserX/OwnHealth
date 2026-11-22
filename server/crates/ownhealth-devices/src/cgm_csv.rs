@@ -36,8 +36,9 @@
 //! database links are one zone: the same file uploaded again under the other name replaces nothing,
 //! and its result names the zone the file keeps. A zone
 //! Postgres does not know by either name is no zone; it never refuses an upload. With neither zone, a
-//! time is read as UTC and keeps no offset: the rule the PDF and FHIR importers apply to a time without
-//! an offset. The zone used is a property of the file
+//! file never read before is read as UTC and its times keep no offset: the rule the PDF and FHIR
+//! importers apply to a time without an offset. A file read before keeps its zone. The zone used is a
+//! property of the file
 //! (`flags.cgm_csv.timezone`): an import again after a retraction or a move reads the file in that zone
 //! (by its current name when Postgres no longer knows the stored one), and the
 //! same file uploaded again in another zone has its own readings replaced, so one copy stays, at the
