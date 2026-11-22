@@ -91,7 +91,8 @@ async fn test_me_profiles_and_roles() -> R {
             "is_self",
             "unit_pref",
             "genome_sensitive_ui",
-            "scopes"
+            "scopes",
+            "break_glass"
         ]
     );
     let scopes = me["profiles"][0]["scopes"].as_array().cloned().unwrap_or_default();

@@ -5,12 +5,23 @@ export interface NavItem {
 	mockup: string; // hash in docs/mockup/index.html
 	icon: string; // SVG inner markup from the mockup
 	countFromReview?: boolean;
+	/** Shown only to someone who may share at least one profile (owner or guardian). */
+	sharers?: boolean;
 }
 
 export const NAV: NavItem[] = [
 	{ path: '/', key: 'nav_dash', mockup: 'dashboard', icon: '<path d="M3 13h8V3H3zM13 21h8V11h-8zM3 21h8v-6H3zM13 3v6h8V3z"/>' },
 	// 0.4.0: the printed doctor summary (not one of the ten mockup screens; mockup #doctor-summary)
 	{ path: '/summary', key: 'sum_nav', mockup: 'doctor-summary', icon: '<path d="M6 3h9l3 3v15H6z"/><path d="M9 10h6M9 14h6M9 18h4"/>' },
+	// v1.0: SMART Health Links the owner or a guardian sends to a doctor (not a mockup screen; a link
+	// carries what #doctor-summary prints). /share is the inbound share target, so this is /links.
+	{
+		path: '/links',
+		key: 'shl_nav',
+		mockup: 'doctor-summary',
+		icon: '<path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/>',
+		sharers: true
+	},
 	{ path: '/biomarkers', key: 'nav_bio', mockup: 'biomarker', icon: '<path d="M3 3v18h18"/><path d="m7 15 4-5 3 3 5-6"/>' },
 	{ path: '/timeline', key: 'nav_tl', mockup: 'timeline', icon: '<path d="M12 3v18M7 7h5M12 12h5M7 17h5"/>' },
 	{
@@ -68,3 +79,6 @@ export const NAV: NavItem[] = [
 	},
 	{ path: '/mcp-access', key: 'nav_mcp', mockup: 'mcp-access', icon: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>' }
 ];
+
+/** The views menu of a person: Share links only when they may share at least one profile. */
+export const navFor = (sharer: boolean): NavItem[] => NAV.filter((n) => !n.sharers || sharer);
