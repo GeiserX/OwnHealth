@@ -564,6 +564,8 @@ async fn a_search_must_name_exactly_the_one_study() -> R {
         format!("studies?StudyInstanceUID={ALEX_CT}&0020000D={CARMEN_MR}"),
         "studies?StudyInstanceUID=1.2.826.*".to_string(),
         format!("studies/{ALEX_CT}/series?StudyInstanceUID={CARMEN_MR}"),
+        format!("studies/{ALEX_CT}/series?SeriesInstanceUID=*"),
+        format!("studies/{ALEX_CT}/series/{ALEX_SERIES}/instances?SOPInstanceUID=1.2.*"),
     ] {
         let (s, _, body) = w.viewer_get(&dw(&cap, &rest), None).await?;
         assert_eq!(s, StatusCode::FORBIDDEN, "{rest}");
@@ -607,6 +609,9 @@ async fn orthanc_ids_wado_uri_and_root_searches_are_refused() -> R {
         "servers".to_string(),
         "info".to_string(),
         format!("studies/{ALEX_CT}/series/{ORTHANC_ID}/metadata"),
+        // A whole study or series download: never, only the reads the viewer makes.
+        format!("studies/{ALEX_CT}"),
+        format!("studies/{ALEX_CT}/series/{ALEX_SERIES}"),
     ] {
         let (s, _, body) = w.viewer_get(&dw(&cap, &rest), None).await?;
         assert_eq!(s, StatusCode::FORBIDDEN, "{rest}");
@@ -837,6 +842,29 @@ async fn the_preflight_allows_get_from_origin_null_without_credentials() -> R {
     assert_eq!(hv(&h, "access-control-allow-methods"), "GET");
     assert_eq!(hv(&h, "access-control-allow-credentials"), "");
     assert!(w.orthanc.seen().is_empty());
+    Ok(())
+}
+
+/// A top-level visit to a viewer URL in a normal tab carries the session cookie: the proxy reads it
+/// nowhere and never passes it on to Orthanc.
+#[tokio::test]
+async fn a_cookie_on_a_viewer_request_never_reaches_orthanc() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let cap = w.open(&cookie, "alex", ALEX_CT).await?;
+    w.orthanc.clear();
+    for rest in [
+        format!("studies/{ALEX_CT}/series/{ALEX_SERIES}/metadata"),
+        format!("studies/{ALEX_CT}/series/{ALEX_SERIES}/instances/{ALEX_INSTANCE}/frames/1"),
+    ] {
+        let (s, _, _) = w.viewer_get(&dw(&cap, &rest), Some(&cookie)).await?;
+        assert_eq!(s, StatusCode::OK, "{rest}");
+    }
+    let (s, _, _) = w.viewer_get(&format!("/ohif/t/{cap}/viewer"), Some(&cookie)).await?;
+    assert_eq!(s, StatusCode::OK);
+    let seen = w.orthanc.seen();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert!(seen.iter().all(|r| !r.cookie), "{seen:?}");
     Ok(())
 }
 
