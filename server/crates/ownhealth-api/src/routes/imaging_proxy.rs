@@ -6,9 +6,9 @@
 //!    session (or dev auth) with `read:records` on the profile. Access tokens never get a link. The answer
 //!    is a viewer link that carries a capability: 32 random bytes, valid for one hour, bound to that
 //!    session and to that one study. Links live in memory only, found by the token's hash; opening the
-//!    same study again in the same session gives the same live link back, and one session holds at most
-//!    [`LINKS_PER_HOLDER`] (its oldest goes first). The first open of a study in a session writes one
-//!    `imaging.open` audit row.
+//!    same study again in the same session gives the same live link back (a new one in its last 10
+//!    minutes, unless the server is full), and one session holds at most [`LINKS_PER_HOLDER`] (its
+//!    oldest goes first). The first open of a study in a session writes one `imaging.open` audit row.
 //!
 //!    Orthanc keys a study by PatientID plus StudyInstanceUID, so two patients' studies can share a UID,
 //!    and its DICOMweb plugin then serves both under `/studies/{uid}`. The link is therefore bound to
@@ -225,20 +225,24 @@ impl Imaging {
 
     /// A link for `holder` to the study: the holder's live one when it has [`REUSE_LEFT`] or more,
     /// else a new one (dropping the holder's oldest past [`LINKS_PER_HOLDER`]). Returns the token and
-    /// the time it has left; None when the server holds [`MAX_LINKS`] already.
+    /// the time it has left. When the server holds [`MAX_LINKS`] already, the holder's live link to
+    /// the study is handed back however little it has left, and None when there is none.
     fn mint(&self, holder: Holder, profile_id: Uuid, study_uid: &str, orthanc_id: &str) -> Option<(String, Duration)> {
         let mut links = self.links.lock().ok()?;
         let now = Instant::now();
         links.retain(|_, l| l.expires > now);
-        let live = links.values().find(|l| {
-            l.holder == holder
-                && l.profile_id == profile_id
-                && l.study_uid == study_uid
-                && l.orthanc_id == orthanc_id
-                && l.expires >= now + REUSE_LEFT
-        });
-        if let Some(l) = live {
-            return Some((l.token.clone(), l.expires - now));
+        let live = links
+            .values()
+            .filter(|l| {
+                l.holder == holder
+                    && l.profile_id == profile_id
+                    && l.study_uid == study_uid
+                    && l.orthanc_id == orthanc_id
+            })
+            .max_by_key(|l| l.expires)
+            .map(|l| (l.token.clone(), l.expires - now));
+        if live.as_ref().is_some_and(|(_, left)| *left >= REUSE_LEFT) {
+            return live;
         }
         let mut held: Vec<(Instant, Vec<u8>)> = links
             .iter()
@@ -252,7 +256,7 @@ impl Imaging {
             }
         }
         if links.len() >= MAX_LINKS {
-            return None;
+            return live;
         }
         let token = ownhealth_auth::token_urlsafe(32);
         links.insert(
@@ -1297,6 +1301,25 @@ mod tests {
         let short = Imaging::with_ttl(None, REUSE_LEFT - Duration::from_secs(1));
         let (b, _) = short.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
         assert_ne!(short.mint(holder(1), p, "1.2.3", "o1").map(|(t, _)| t), Some(b));
+    }
+
+    #[test]
+    fn a_full_server_still_hands_back_a_live_link_near_its_end() {
+        // Every link here has less than REUSE_LEFT left, so a second open would make a new one.
+        let imaging = Imaging::with_ttl(None, REUSE_LEFT - Duration::from_secs(1));
+        let p = Uuid::from_u128(7);
+        let (a, ..) = imaging.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
+        let mut n = 2;
+        while imaging
+            .mint(holder(n as u128 / 40 + 2), p, &format!("1.2.{n}"), "o")
+            .is_some()
+        {
+            n += 1;
+            assert!(n <= MAX_LINKS + 1, "the server never filled up");
+        }
+        // Full: the same open gets its live link back, not a refusal; a new study still waits.
+        assert_eq!(imaging.mint(holder(1), p, "1.2.3", "o1").map(|(t, ..)| t), Some(a));
+        assert!(imaging.mint(holder(1), p, "1.2.4", "o1").is_none());
     }
 
     #[test]
