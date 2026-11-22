@@ -497,6 +497,8 @@ job "ocr.document" on queue "ocr": {document_id, pages, why}; writes ocr_run, wo
 hae::import_push(conn, &BlobStore, &Source, body) -> Result<RunOutcome>
 gadgetbridge job "import.gadgetbridge" (core sniffs "SQLite format 3\0" as gadgetbridge_db)
 nightscout::poll_nightscout(JobContext, Source)          // poller "nightscout"
+fit job "import.fit" (core sniffs the .FIT header, gzipped or not, as fit or fit_gz; v1.0 slice 29)
+fit::import_fit(conn, &BlobStore, document_id, source_id) -> Result<(ImportSummary, Value)>
 cgm::summarize(&[(DateTime, f64)], start, end, interval_minutes) -> Result<CgmSummary>
 cgm::cgm_summary(conn, profile_id, end, days) -> Result<CgmSummary>
 

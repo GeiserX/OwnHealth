@@ -24,6 +24,7 @@ pub type UploadKind = &'static str;
 pub fn job_kind(kind: &str) -> Option<&'static str> {
     Some(match kind {
         "pdf" => "import.pdf",
+        "fit" | "fit_gz" => "import.fit",
         "apple_health_zip" => "import.apple_health",
         "fhir_json" | "fhir_ndjson" => "import.fhir_bundle",
         "genome_facts" => "import.genome_facts",
@@ -35,6 +36,8 @@ pub fn job_kind(kind: &str) -> Option<&'static str> {
 pub fn mime(kind: &str) -> Option<&'static str> {
     Some(match kind {
         "pdf" => "application/pdf",
+        "fit" => "application/vnd.ant.fit",
+        "fit_gz" => "application/gzip",
         "fhir_json" => "application/fhir+json",
         "fhir_ndjson" => "application/fhir+ndjson",
         "apple_health_zip" => "application/zip",
@@ -50,6 +53,17 @@ fn zip_has_export_xml(path: &Path) -> Option<bool> {
     let file = std::fs::File::open(path).ok()?;
     let archive = zip::ZipArchive::new(file).ok()?;
     Some(archive.file_names().any(|n| n.is_ok_and(|n| n.ends_with("export.xml"))))
+}
+
+/// A FIT file header: its size (12 or 14 bytes), then `.FIT` at bytes 8 to 11.
+fn is_fit_header(head: &[u8]) -> bool {
+    head.len() >= 12 && matches!(head[0], 12 | 14) && &head[8..12] == b".FIT"
+}
+
+/// A gzip stream whose first unpacked bytes are a FIT header (only those 12 bytes are unpacked).
+fn gzip_holds_fit(head: &[u8]) -> bool {
+    let mut first = [0u8; 12];
+    flate2::read::MultiGzDecoder::new(head).read_exact(&mut first).is_ok() && is_fit_header(&first)
 }
 
 /// Classify an upload from its name and first bytes (and, for zips, its member list).
@@ -77,6 +91,13 @@ pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKin
     }
     if name.ends_with(".tbi") {
         return "tbi";
+    }
+    // a FIT activity file (slice 29), as the device wrote it or gzipped: before the gzip rule below
+    if is_fit_header(head) {
+        return "fit";
+    }
+    if head.starts_with(b"\x1f\x8b") && gzip_holds_fit(head) {
+        return "fit_gz";
     }
     if name.ends_with(".vcf.gz") || name.ends_with(".vcf.bgz") || head.starts_with(b"\x1f\x8b") {
         return "vcf";

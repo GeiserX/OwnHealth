@@ -90,7 +90,7 @@ Email-in and the watched folder carry the highest prompt-injection exposure: any
 | CSV with column mapper | Lab portals, spreadsheets people already keep, vendor CSV exports | Saved mapping per source (column → LOINC, unit, date format) | v2 (with the HL7 v2 importer) |
 | DICOM (CD, zip, folder) | Hospital CDs, private imaging portals | Pushed to Orthanc (`imaging` profile); report text linked to the study | v1.0 |
 | Google Takeout (Fitbit) | takeout.google.com | Lenient per-metric JSON/CSV parser; layout changes over time | v1.0 |
-| Garmin "Export Your Data" | Garmin account GDPR export: FIT + JSON | FIT via `fitdecode` | v1.0 |
+| Garmin "Export Your Data" | Garmin account GDPR export: FIT + JSON | FIT via `fitparser` (MIT): heart rate per minute, distance and energy per activity, never a position (`ownhealth_devices::fit`); the JSON files later | v1.0 |
 | Gadgetbridge SQLite | Android app, fully offline, no vendor cloud | Read device tables by device type | v0.2 |
 | Vendor GDPR exports (Clue JSON, Flo, Natural Cycles, Samsung Health CSV, Huawei, Withings CSV, Polar Flow, Dexcom Clarity CSV, LibreView CSV) | Account settings or a GDPR Art. 15/20 request | One small parser each, registered as a T1 connector | LibreView and Dexcom Clarity CSV v1.0; cycle, nutrition and training exports v2; the rest not scheduled |
 | Taiwan My Health Bank (HTML/XML/JSON) | NHI portal download | JSON parser | v2 |
