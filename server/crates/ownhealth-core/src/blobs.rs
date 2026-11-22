@@ -143,7 +143,8 @@ impl BlobStore {
     }
 
     /// A path in the store's own tmp directory for a spool or a download, under `name` (one file
-    /// name, no directory, refused otherwise). `sweep_tmp` removes leftovers named `upload-*`.
+    /// name, no directory, refused otherwise). `sweep_tmp` removes leftovers named `upload-*` or
+    /// `push-*`; a name reused on every run (`clinvar-<source>.vcf.gz`) is overwritten instead.
     pub fn staging_path(&self, name: &str) -> Result<PathBuf, BlobError> {
         if Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
             return Err(BlobError::BadName(name.to_string()));
@@ -295,8 +296,9 @@ impl BlobStore {
     }
 
     /// Remove upload spools a killed process left in `root/tmp`: regular files named `upload-*`
-    /// (the import route) or 32 hex characters (`put_reader`) last modified more than `older_than`
-    /// ago. The age bound leaves another process's live upload alone. Returns how many went.
+    /// (the import route), `push-*` (the push inboxes) or 32 hex characters (`put_reader`) last
+    /// modified more than `older_than` ago. The age bound leaves another process's live upload
+    /// alone. Returns how many went.
     pub fn sweep_tmp(&self, older_than: std::time::Duration) -> io::Result<usize> {
         let dir = self.root.join("tmp");
         let entries = match fs::read_dir(&dir) {
@@ -310,7 +312,8 @@ impl BlobStore {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let ours = name.starts_with("upload-") || (name.len() == 32 && name.bytes().all(|c| c.is_ascii_hexdigit()));
+            let spool = name.starts_with("upload-") || name.starts_with("push-");
+            let ours = spool || (name.len() == 32 && name.bytes().all(|c| c.is_ascii_hexdigit()));
             let meta = entry.metadata()?;
             if !ours || !meta.is_file() {
                 continue;
@@ -437,6 +440,7 @@ mod tests {
         let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
         for (name, old) in [
             ("upload-0123abcd".to_string(), true),
+            ("push-0123abcd".to_string(), true),
             ("a".repeat(32), true),
             ("upload-fresh".to_string(), false),
             ("notes.txt".to_string(), true),
@@ -447,7 +451,7 @@ mod tests {
             }
         }
         let one_hour = std::time::Duration::from_secs(3600);
-        assert_eq!(store.sweep_tmp(one_hour)?, 2);
+        assert_eq!(store.sweep_tmp(one_hour)?, 3);
         let mut left = Vec::new();
         for e in fs::read_dir(&tmp)? {
             left.push(e?.file_name().to_string_lossy().into_owned());
