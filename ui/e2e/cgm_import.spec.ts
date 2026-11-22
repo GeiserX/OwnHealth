@@ -65,3 +65,15 @@ test('a LibreView export in Spanish names the column it did not read', async ({ 
 		{ timeout: 60_000 }
 	);
 });
+
+test.describe('a browser that reports an old zone name', () => {
+	// Chromium names India Asia/Calcutta, which the Debian Postgres image does not ship
+	test.use({ timezoneId: 'Asia/Kolkata' });
+
+	test('uploads, and the export is read in the current name of its zone', async ({ page }) => {
+		const lines = await upload(page, 'en', 'clarity-de-mmol.csv');
+		const zone = await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+		expect(zone, 'this Chromium reports the current name: the old-name case is no longer covered').toBe('Asia/Calcutta');
+		await expect(lines.getByText('Times read in Asia/Kolkata', { exact: true })).toBeVisible({ timeout: 60_000 });
+	});
+});

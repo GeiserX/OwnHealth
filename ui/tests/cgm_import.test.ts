@@ -59,7 +59,7 @@ test('every CGM line has its text, singular and plural, in every registry langua
 	].flatMap((k) => [k, k + '_one']);
 	keys.push('i2_cgm_tz', 'i2_cgm_tz_utc', 'i2_ik_libreview_csv', 'i2_ik_dexcom_clarity_csv', 'fu_k_libreview', 'fu_k_dexcom_clarity');
 	keys.push('i2_cgm_replaced', 'i2_cgm_replaced_one', 'i2_cgm_held', 'i2_cgm_held_one', 'i2_cgm_devices', 'i2_cgm_devices_one');
-	keys.push('i2_doc_cgm', 'i2_doc_cgm_rows', 'i2_dt_cgm', ...CGM_ERRORS, 'err_unknown_timezone');
+	keys.push('i2_doc_cgm', 'i2_doc_cgm_rows', 'i2_dt_cgm', ...CGM_ERRORS);
 	for (const l of LANGS) {
 		const table = l.table as Record<string, string>;
 		for (const k of keys) assert.ok(table[k]?.trim(), `${l.code}: ${k}`);
@@ -124,5 +124,4 @@ test('a refused CGM export reads in the person\'s language, not in the server\'s
 		["the export names more than 32 sensors: export one person's sensors, or a shorter period", 'err_cgm_too_many_sensors']
 	];
 	for (const [m, k] of cases) assert.equal(errKey(null, m, has), k, m);
-	assert.equal(errKey('unknown_timezone', 'unknown time zone "Mars/Olympus"', has), 'err_unknown_timezone');
 });

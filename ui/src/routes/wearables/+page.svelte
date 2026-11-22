@@ -158,7 +158,7 @@
 		{#each devices as d (d.source_id)}
 			<div class="dev">
 				<div style="flex:1;min-width:0">
-					<div style="font-weight:600">{d.device ?? providerName(d.provider)}{#if ids[d.source_id]} <span class="dim num" style="font-weight:400;font-size:11px">· {ids[d.source_id]}</span>{/if}</div>
+					<div style="font-weight:600">{d.device ?? providerName(d.provider)}{#if ids[d.source_id]}<span class="dim num" style="font-weight:400;font-size:11px">{' · '}{ids[d.source_id]}</span>{/if}</div>
 					<div class="dim" style="font-size:11px" title={d.last_sample ? localTime(d.last_sample) : undefined}>
 						{#if d.device}{providerName(d.provider)}{' · '}{/if}<span style="white-space:nowrap">{tf('h1_last_sample', { d: ago(d.last_sample) })}</span>
 					</div>
