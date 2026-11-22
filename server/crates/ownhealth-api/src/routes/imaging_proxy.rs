@@ -177,44 +177,56 @@ struct Link {
     checked: Instant,
 }
 
-/// The imaging state of one app: the Orthanc settings (None: imaging off) and the open viewer links.
+/// The imaging state of one app: Orthanc's settings and the client that calls it (None: imaging
+/// off), and the open viewer links.
 pub struct Imaging {
-    orthanc: Option<OrthancConfig>,
-    http: reqwest::Client,
+    orthanc: Option<(OrthancConfig, reqwest::Client)>,
     ttl: Duration,
     recheck: Duration,
     links: Mutex<HashMap<Vec<u8>, Link>>,
 }
 
 impl Imaging {
-    pub fn new(orthanc: Option<OrthancConfig>) -> Arc<Imaging> {
-        Imaging::with_ttl(orthanc, CAPABILITY_TTL)
+    /// Imaging with Orthanc at `orthanc` (None: off). An error when the client for Orthanc does not
+    /// build, so the app does not start without its timeouts.
+    pub fn new(orthanc: Option<OrthancConfig>) -> Result<Arc<Imaging>, Error> {
+        Imaging::with_times(orthanc, CAPABILITY_TTL, ORTHANC_RECHECK)
     }
 
-    /// `new` with another link lifetime (tests).
-    pub fn with_ttl(orthanc: Option<OrthancConfig>, ttl: Duration) -> Arc<Imaging> {
-        Imaging::with_times(orthanc, ttl, ORTHANC_RECHECK)
+    /// Imaging off: no Orthanc, and no client for it.
+    pub fn off() -> Arc<Imaging> {
+        Imaging::build(None, CAPABILITY_TTL, ORTHANC_RECHECK)
     }
 
     /// `new` with another link lifetime and Orthanc recheck interval (tests: zero asks every time).
-    pub fn with_times(orthanc: Option<OrthancConfig>, ttl: Duration, recheck: Duration) -> Arc<Imaging> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .read_timeout(Duration::from_secs(60))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or_default();
+    pub fn with_times(orthanc: Option<OrthancConfig>, ttl: Duration, recheck: Duration) -> Result<Arc<Imaging>, Error> {
+        let orthanc = match orthanc {
+            None => None,
+            Some(config) => {
+                let http = reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(5))
+                    .read_timeout(Duration::from_secs(60))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|e| Error::Invalid(format!("the HTTP client for Orthanc does not start: {e}")))?;
+                Some((config, http))
+            }
+        };
+        Ok(Imaging::build(orthanc, ttl, recheck))
+    }
+
+    fn build(orthanc: Option<(OrthancConfig, reqwest::Client)>, ttl: Duration, recheck: Duration) -> Arc<Imaging> {
         Arc::new(Imaging {
             orthanc,
-            http,
             ttl,
             recheck,
             links: Mutex::default(),
         })
     }
 
-    fn orthanc(&self) -> Result<&OrthancConfig, ApiError> {
-        self.orthanc.as_ref().ok_or_else(|| {
+    /// Orthanc's settings and the client that calls it.
+    fn orthanc(&self) -> Result<(&OrthancConfig, &reqwest::Client), ApiError> {
+        self.orthanc.as_ref().map(|(c, h)| (c, h)).ok_or_else(|| {
             ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "imaging_off",
@@ -597,9 +609,8 @@ async fn authorize(rt: &Runtime, imaging: &Imaging, token: &str) -> Result<Autho
 
 /// Orthanc's `/tools/lookup` must find exactly one study under `uid`, and it must be `orthanc_id`.
 async fn bind_check(imaging: &Imaging, uid: &str, orthanc_id: &str) -> Result<(), ApiError> {
-    let orthanc = imaging.orthanc()?;
-    let upstream = imaging
-        .http
+    let (orthanc, http) = imaging.orthanc()?;
+    let upstream = http
         .post(format!("{}/tools/lookup", orthanc.url))
         .basic_auth(&orthanc.user, Some(&orthanc.password))
         .body(uid.to_string())
@@ -669,9 +680,8 @@ async fn viewer_file(rt: &Runtime, ext: Option<&Extension<Arc<Imaging>>>, req: &
     }
     let ok = authorize(rt, imaging, token).await?;
     touch(rt, ok.touch).await?;
-    let orthanc = imaging.orthanc()?;
-    let upstream = imaging
-        .http
+    let (orthanc, http) = imaging.orthanc()?;
+    let upstream = http
         .get(format!("{}/ohif/{file}", orthanc.url))
         .basic_auth(&orthanc.user, Some(&orthanc.password))
         .send()
@@ -739,9 +749,8 @@ async fn proxy(rt: &Runtime, ext: Option<&Extension<Arc<Imaging>>>, req: &Parts)
     }
     // Every check passed: only now does the request count as activity.
     touch(rt, session).await?;
-    let orthanc = imaging.orthanc()?;
-    let mut call = imaging
-        .http
+    let (orthanc, http) = imaging.orthanc()?;
+    let mut call = http
         .get(format!("{}/dicom-web/{target}", orthanc.url))
         .basic_auth(&orthanc.user, Some(&orthanc.password));
     if let Some(accept) = req
@@ -1306,7 +1315,7 @@ mod tests {
 
     #[test]
     fn a_second_open_of_the_study_reuses_the_live_link() {
-        let imaging = Imaging::new(None);
+        let imaging = Imaging::off();
         let p = Uuid::from_u128(7);
         let (a, left, fresh) = imaging.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
         assert_eq!((left, fresh), (CAPABILITY_TTL, true));
@@ -1330,7 +1339,7 @@ mod tests {
             Some(a.clone())
         );
         // A link close to its end is not handed out again.
-        let short = Imaging::with_ttl(None, REUSE_LEFT - Duration::from_secs(1));
+        let short = Imaging::build(None, REUSE_LEFT - Duration::from_secs(1), ORTHANC_RECHECK);
         let (b, ..) = short.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
         assert_ne!(short.mint(holder(1), p, "1.2.3", "o1").map(|(t, ..)| t), Some(b));
     }
@@ -1338,7 +1347,7 @@ mod tests {
     #[test]
     fn a_full_server_still_hands_back_a_live_link_near_its_end() {
         // Every link here has less than REUSE_LEFT left, so a second open would make a new one.
-        let imaging = Imaging::with_ttl(None, REUSE_LEFT - Duration::from_secs(1));
+        let imaging = Imaging::build(None, REUSE_LEFT - Duration::from_secs(1), ORTHANC_RECHECK);
         let p = Uuid::from_u128(7);
         let (a, ..) = imaging.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
         let mut n = 2;
@@ -1365,7 +1374,7 @@ mod tests {
 
     #[test]
     fn one_person_cannot_use_up_the_links_of_everyone() {
-        let imaging = Imaging::new(None);
+        let imaging = Imaging::off();
         let p = Uuid::from_u128(7);
         let mut first = String::new();
         let mut last = String::new();

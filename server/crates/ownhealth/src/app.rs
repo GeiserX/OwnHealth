@@ -33,7 +33,7 @@ pub fn check_secret_key(settings: &Settings) -> anyhow::Result<()> {
 
 /// The app with imaging off.
 pub fn build_app(rt: Runtime) -> Router {
-    build_app_with(rt, Imaging::new(None))
+    build_app_with(rt, Imaging::off())
 }
 
 /// The app; `imaging` holds the Orthanc settings (None: imaging off) and the open viewer links.
@@ -189,14 +189,16 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     check_secret_key(&settings)?;
     // Imaging is on when OWNHEALTH_ORTHANC_URL is set; a URL without a password stops the start.
     let orthanc = OrthancConfig::from_env(&ProcessEnv)?;
+    let imaging_on = orthanc.is_some();
+    let imaging = Imaging::new(orthanc)?;
     let addr = format!("{}:{}", settings.host, settings.port);
     let rt = Runtime::new(settings)?;
     let background = start(&rt).await?;
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!(%addr, version = VERSION, imaging = orthanc.is_some(), "listening");
+    tracing::info!(%addr, version = VERSION, imaging = imaging_on, "listening");
     axum::serve(
         listener,
-        build_app_with(rt, Imaging::new(orthanc)).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        build_app_with(rt, imaging).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await?;

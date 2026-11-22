@@ -253,7 +253,7 @@ impl World {
             user: "ownhealth".into(),
             password: PASSWORD.into(),
         });
-        let app = build_app_with(rt, Imaging::with_times(config, ttl, recheck));
+        let app = build_app_with(rt, Imaging::with_times(config, ttl, recheck)?);
         let w = World {
             db,
             _dir: dir,
