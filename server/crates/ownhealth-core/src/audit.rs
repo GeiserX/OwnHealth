@@ -1085,6 +1085,13 @@ mod tests {
     /// A table that inherits from a chain table, or one a chain table inherits from, could hand the
     /// check rows the guard never looked at (a foreign table child can answer each query its own
     /// way), so either stops the check.
+    ///
+    /// The reads use `only` as well, and no test here pins it: the guard refuses any child that
+    /// exists when it runs. `only` is for a child created between the guard and the read.
+    /// `create table ... inherits` takes SHARE UPDATE EXCLUSIVE on the parent, which does not wait
+    /// for the check's ACCESS SHARE lock, so such a child can appear while the check runs. `only`
+    /// keeps its rows out of that read, and the next check's guard refuses the child. A test would
+    /// have to hold the check between its guard and its read, and the code has no hook for that.
     #[tokio::test]
     async fn an_inheritance_tree_stops_the_check() -> anyhow::Result<()> {
         for sql in [
