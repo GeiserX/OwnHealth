@@ -225,9 +225,16 @@ impl Imaging {
 
     /// A link for `holder` to the study: the holder's live one when it has [`REUSE_LEFT`] or more,
     /// else a new one (dropping the holder's oldest past [`LINKS_PER_HOLDER`]). Returns the token and
-    /// the time it has left. When the server holds [`MAX_LINKS`] already, the holder's live link to
-    /// the study is handed back however little it has left, and None when there is none.
-    fn mint(&self, holder: Holder, profile_id: Uuid, study_uid: &str, orthanc_id: &str) -> Option<(String, Duration)> {
+    /// the time it has left, and whether the link is new. When the server holds [`MAX_LINKS`]
+    /// already, the holder's live link to the study is handed back however little it has left, and
+    /// None when there is none.
+    fn mint(
+        &self,
+        holder: Holder,
+        profile_id: Uuid,
+        study_uid: &str,
+        orthanc_id: &str,
+    ) -> Option<(String, Duration, bool)> {
         let mut links = self.links.lock().ok()?;
         let now = Instant::now();
         links.retain(|_, l| l.expires > now);
@@ -240,8 +247,8 @@ impl Imaging {
                     && l.orthanc_id == orthanc_id
             })
             .max_by_key(|l| l.expires)
-            .map(|l| (l.token.clone(), l.expires - now));
-        if live.as_ref().is_some_and(|(_, left)| *left >= REUSE_LEFT) {
+            .map(|l| (l.token.clone(), l.expires - now, false));
+        if live.as_ref().is_some_and(|(_, left, _)| *left >= REUSE_LEFT) {
             return live;
         }
         let mut held: Vec<(Instant, Vec<u8>)> = links
@@ -271,7 +278,14 @@ impl Imaging {
                 checked: now,
             },
         );
-        Some((token, self.ttl))
+        Some((token, self.ttl, true))
+    }
+
+    /// Takes back a new link whose open did not complete.
+    fn revoke(&self, token: &str) {
+        if let Ok(mut links) = self.links.lock() {
+            links.remove(&ownhealth_auth::sha256(token));
+        }
     }
 
     /// Orthanc confirmed the link's study again just now.
@@ -437,27 +451,43 @@ async fn open(
     .bind(&marker)
     .fetch_one(&mut *tx)
     .await?;
-    if !seen {
+    let event = (!seen).then(|| {
         let mut e = AuditEvent::new(principal.actor_kind(), "ui", AUDIT_ACTION);
         e.actor_id = principal.user_id;
         e.profile_id = Some(profile_id);
         e.resource_type = Some("imaging_study".into());
         e.resource_ids = Some(vec![uid.clone()]);
         e.args_summary = Some(marker);
-        write_audit(&mut tx, &e).await?;
-    }
-    tx.commit().await?;
-    let (token, left) = imaging.mint(holder, profile_id, &uid, &orthanc_id).ok_or_else(|| {
+        e
+    });
+    // The link first: when the server is full, the 503 rolls the transaction back and logs no open.
+    // A new link whose audit row does not commit is taken back.
+    let (token, left, fresh) = imaging.mint(holder, profile_id, &uid, &orthanc_id).ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "too_many_viewer_links",
             "Too many viewer links are open. Try again later.",
         )
     })?;
+    if let Err(e) = commit_open(tx, event.as_ref()).await {
+        if fresh {
+            imaging.revoke(&token);
+        }
+        return Err(e);
+    }
     Ok(Json(json!({
         "viewer_url": format!("/ohif/t/{token}/viewer?StudyInstanceUIDs={uid}"),
         "expires_in": left.as_secs(),
     })))
+}
+
+/// The open's audit row (None: the session opened the study before), then the commit.
+async fn commit_open(mut tx: sqlx::Transaction<'_, sqlx::Postgres>, event: Option<&AuditEvent>) -> ApiResult<()> {
+    if let Some(e) = event {
+        write_audit(&mut tx, e).await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 /// The Orthanc id the profile's record of the study names, or why the study does not open.
@@ -1278,29 +1308,31 @@ mod tests {
     fn a_second_open_of_the_study_reuses_the_live_link() {
         let imaging = Imaging::new(None);
         let p = Uuid::from_u128(7);
-        let (a, left) = imaging.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
-        assert_eq!(left, CAPABILITY_TTL);
+        let (a, left, fresh) = imaging.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
+        assert_eq!((left, fresh), (CAPABILITY_TTL, true));
         assert_eq!(
-            imaging.mint(holder(1), p, "1.2.3", "o1").map(|(t, _)| t),
-            Some(a.clone())
+            imaging
+                .mint(holder(1), p, "1.2.3", "o1")
+                .map(|(t, _, fresh)| (t, fresh)),
+            Some((a.clone(), false))
         );
         // Another session, another study or another Orthanc study: a new link.
         assert_ne!(
-            imaging.mint(holder(2), p, "1.2.3", "o1").map(|(t, _)| t),
+            imaging.mint(holder(2), p, "1.2.3", "o1").map(|(t, ..)| t),
             Some(a.clone())
         );
         assert_ne!(
-            imaging.mint(holder(1), p, "1.2.4", "o1").map(|(t, _)| t),
+            imaging.mint(holder(1), p, "1.2.4", "o1").map(|(t, ..)| t),
             Some(a.clone())
         );
         assert_ne!(
-            imaging.mint(holder(1), p, "1.2.3", "o2").map(|(t, _)| t),
+            imaging.mint(holder(1), p, "1.2.3", "o2").map(|(t, ..)| t),
             Some(a.clone())
         );
         // A link close to its end is not handed out again.
         let short = Imaging::with_ttl(None, REUSE_LEFT - Duration::from_secs(1));
-        let (b, _) = short.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
-        assert_ne!(short.mint(holder(1), p, "1.2.3", "o1").map(|(t, _)| t), Some(b));
+        let (b, ..) = short.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
+        assert_ne!(short.mint(holder(1), p, "1.2.3", "o1").map(|(t, ..)| t), Some(b));
     }
 
     #[test]
@@ -1318,8 +1350,17 @@ mod tests {
             assert!(n <= MAX_LINKS + 1, "the server never filled up");
         }
         // Full: the same open gets its live link back, not a refusal; a new study still waits.
-        assert_eq!(imaging.mint(holder(1), p, "1.2.3", "o1").map(|(t, ..)| t), Some(a));
+        assert_eq!(
+            imaging
+                .mint(holder(1), p, "1.2.3", "o1")
+                .map(|(t, _, fresh)| (t, fresh)),
+            Some((a.clone(), false))
+        );
         assert!(imaging.mint(holder(1), p, "1.2.4", "o1").is_none());
+        // An open whose audit row does not commit takes its new link back.
+        assert!(imaging.lookup(&a).is_some());
+        imaging.revoke(&a);
+        assert!(imaging.lookup(&a).is_none());
     }
 
     #[test]
@@ -1329,7 +1370,7 @@ mod tests {
         let mut first = String::new();
         let mut last = String::new();
         for i in 0..MAX_LINKS + 50 {
-            let (t, _) = imaging.mint(holder(1), p, &format!("1.2.{i}"), "o").unwrap_or_default();
+            let (t, ..) = imaging.mint(holder(1), p, &format!("1.2.{i}"), "o").unwrap_or_default();
             assert!(!t.is_empty(), "link {i} refused");
             if i == 0 {
                 first = t.clone();
