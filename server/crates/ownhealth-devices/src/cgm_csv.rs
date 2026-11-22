@@ -63,6 +63,8 @@
 //! may hold readings of another export. A retraction or a move of a CGM export takes the lock its
 //! imports hold (`retract::lock_export_of`) before anything else, so it waits for a running import and
 //! then removes what it wrote.
+//! An upload takes its profile's lock before it touches the document row, so the same file uploaded
+//! again never holds the row while it waits for a move or a retraction that holds the lock.
 //! A moved export is imported again on its new profile (`import.cgm_csv` of the stored document).
 //! A run that waited for the lock while a move committed takes the new owner's lock before it reads or
 //! writes anything.
@@ -1160,7 +1162,15 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     let mime = documents::mime("libreview_csv").unwrap_or("text/csv");
     // a retraction queues `{document_id}`; an upload carries the blob and the browser's zone
     let stored = job.str("document_id").is_some_and(|d| !d.is_empty());
+    // the profile the job is for: an upload's, or the one a move took the export to
+    let profile = job.str("profile_id").and_then(|p| Uuid::parse_str(p).ok());
     let mut tx = ctx.pool.begin().await?;
+    if !stored && let Some(p) = profile {
+        // the profile's export lock before the document row: the same file uploaded again links its
+        // arrival to the stored row (a foreign key share lock on it), and a move or a retraction of that
+        // row holds this lock while it waits for the row (retract::lock_export_of)
+        ownhealth_ingest_structured::retract::lock_exports(&mut tx, p, "cgm_csv").await?;
+    }
     let doc = document_of_type(&mut tx, &ctx.blobs, &job.payload, mime, &channel, WEARABLES_DOC_TYPE).await?;
     let server = std::env::var("OWNHEALTH_TIMEZONE").ok();
     let (server, browser) = known_zones(&mut tx, server.as_deref(), job.str("timezone")).await?;

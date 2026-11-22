@@ -1383,3 +1383,50 @@ async fn retracting_a_cgm_export_queues_no_other_csv_document() -> R {
     assert_eq!(queued, vec![clarity.to_string()]);
     Ok(())
 }
+
+/// The same export uploaded again while a move or a retraction of it holds its export lock and has not yet
+/// locked its row (`retract::lock_export_of`, then the row): the upload waits for that lock before it
+/// touches the document row. Before, it linked the arrival to the row first (a foreign key share lock),
+/// then waited for the lock, while the move waited for the row: a deadlock (40P01).
+#[tokio::test]
+async fn an_upload_again_while_a_move_holds_the_export_lock_waits_before_the_row() -> R {
+    let env = Env::new().await?;
+    let lucia = env.fam.profile("lucia");
+    let b = clarity_at(&every_5("2026-11-14", 11, 12));
+    let (_, id) = upload(&env, "lucia", "b.csv", &b).await?;
+    assert_eq!(job(&env, id).await?.0, "done");
+    let doc: Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'b.csv'")
+        .bind(lucia)
+        .fetch_one(&env.db.pool)
+        .await?;
+    // a move of the export holds its export lock, as the assign route takes it first
+    let mut moving = env.db.pool.begin().await?;
+    ownhealth_ingest_structured::retract::lock_export_of(&mut moving, doc).await?;
+    // the same file uploaded again: its job waits for Lucía's export lock
+    let (_, again) = upload(&env, "lucia", "b.csv", &b).await?;
+    let ctx = env.ctx.clone();
+    let run = tokio::spawn(async move { jobs::drain(&ctx, "core", 1, None).await });
+    let mut seen = false;
+    for _ in 0..100 {
+        if waiting_for_exports_of(&env, lucia).await? > 0 {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    anyhow::ensure!(seen, "the upload again never waited for Lucía's export lock");
+    // the move locks the row, as lock_owner and assign_document do, and commits
+    sqlx::query("select id from document where id = $1 for update")
+        .bind(doc)
+        .execute(&mut *moving)
+        .await?;
+    moving.commit().await?;
+    run.await??;
+    let (state, attempts, err): (String, i32, Option<String>) =
+        sqlx::query_as("select state, attempts, last_error from job where id = $1")
+            .bind(again)
+            .fetch_one(&env.db.pool)
+            .await?;
+    assert_eq!((state.as_str(), attempts, err), ("done", 1, None));
+    Ok(())
+}
