@@ -24,7 +24,6 @@ use ownhealth_core::jobs::JobContext;
 use ownhealth_core::jose;
 use ownhealth_core::provenance::{SrcIn, SrcRef};
 use ownhealth_core::records::{RecordIn, RecordOptions, add_record};
-use ownhealth_ops::shl::CONTENT_TYPE;
 use serde_json::{Value, json};
 use support::{Client, Env, Resp};
 use tower::ServiceExt;
@@ -36,6 +35,8 @@ const SHARE: &str = "https://share.rivera.test";
 /// Obviously fake test passcodes.
 const PIN: &str = "test-pin-1234";
 const WRONG: &str = "test-pin-0000";
+/// The content type of a link's file, as viewers compare it.
+const FHIR_JSON: &str = "application/fhir+json";
 
 async fn env() -> anyhow::Result<Env> {
     let mut env = Env::new(true).await?;
@@ -93,7 +94,8 @@ async fn open(env: &Env, pl: &Value, passcode: Option<&str>) -> anyhow::Result<V
     assert_eq!(f.header("content-type"), "application/jose");
     let jwe = String::from_utf8(f.bytes)?;
     let d = jose::decrypt(&key_of(pl)?, &jwe, 1 << 24).map_err(|e| anyhow::anyhow!("{e}"))?;
-    assert_eq!(d.header["cty"], CONTENT_TYPE);
+    // the JWE says the same type as the manifest (FHIRsmith and kill-the-clipboard compare them)
+    assert_eq!(d.header["cty"], FHIR_JSON);
     Ok(d.plaintext)
 }
 
@@ -319,7 +321,9 @@ async fn the_link_manifest_and_file_follow_the_shl_spec() -> R {
     assert_eq!(m.header("access-control-allow-origin"), "*");
     assert_eq!(m.json["status"], "finalized");
     assert_eq!(m.json["files"].as_array().map(Vec::len), Some(1));
-    assert_eq!(m.json["files"][0]["contentType"], CONTENT_TYPE);
+    // the bare type: shc-web-reader, IPSviewer and kill-the-clipboard compare the whole string, and
+    // "files array" lets the fhirVersion parameter out (a client then assumes 4.0.1, which it is)
+    assert_eq!(m.json["files"][0]["contentType"], FHIR_JSON);
     assert!(
         m.json["files"][0]["location"]
             .as_str()
@@ -564,6 +568,36 @@ async fn a_viewer_a_caregiver_and_a_break_glass_contact_are_each_refused() -> R 
         }
     }
     assert_eq!(env.scalar_i64("select count(*) from shl").await?, 0);
+    // /me says which grant is break-glass, so the page offers no form and no menu item it refuses
+    let mut sam = env.as_user(env.user("sam")).await?;
+    for path in ["/api/me", "/api/profiles"] {
+        let r = sam.get(path).await?;
+        let list = if path == "/api/me" {
+            &r.json["profiles"]
+        } else {
+            &r.json
+        };
+        let bg: Vec<(String, bool)> = list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                (
+                    p["slug"].as_str().unwrap_or_default().to_string(),
+                    p["break_glass"] == true,
+                )
+            })
+            .collect();
+        assert!(bg.contains(&("lucia".into(), true)), "{path}: {bg:?}");
+        assert!(bg.iter().all(|(s, b)| *b == (s == "lucia")), "{path}: {bg:?}");
+        assert!(
+            list.as_array()
+                .into_iter()
+                .flatten()
+                .all(|p| p["break_glass"].is_boolean()),
+            "{path}"
+        );
+    }
     let mut alex = env.as_user(env.user("alex")).await?;
     share(&mut alex, "alex", json!({})).await?;
     share(&mut alex, "lucia", json!({})).await?;
@@ -1087,7 +1121,7 @@ async fn a_closed_category_and_a_locked_summary_have_their_own_code() -> R {
         .await?;
     assert_eq!(
         (r.status, r.code()),
-        (StatusCode::FORBIDDEN, "category_closed"),
+        (StatusCode::FORBIDDEN, "summary_closed"),
         "{:?}",
         r.json
     );
@@ -1095,6 +1129,67 @@ async fn a_closed_category_and_a_locked_summary_have_their_own_code() -> R {
     assert!(r.json.to_string().contains("summary is locked"), "{:?}", r.json);
     // the owner still lists and revokes with the summary locked
     assert_eq!(alex.get("/api/profiles/alex/shl").await?.status, StatusCode::OK);
+    // a guardian whose grant leaves the summary out meets the same code, with the cause that is true
+    let lucia = env.profile("lucia");
+    let narrowed = scope_set(["read:labs", "read:records"]);
+    set_grant(&mut c, env.user("alex"), lucia, "guardian", Some(&narrowed), None, None).await?;
+    let r = alex.post("/api/profiles/lucia/shl", &json!({})).await?;
+    assert_eq!(
+        (r.status, r.code()),
+        (StatusCode::FORBIDDEN, "summary_closed"),
+        "{:?}",
+        r.json
+    );
+    assert!(!r.json.to_string().contains("locked"), "no lock on Lucía: {:?}", r.json);
+    assert!(r.json.to_string().contains("access to this profile"), "{:?}", r.json);
+    Ok(())
+}
+
+/// The list names what a new link of this person may carry on the profile (`open`, what create
+/// accepts), so the page offers nothing the create refuses: the owner's own lock and a narrower
+/// grant each take a category away, and without the summary nothing can be shared.
+#[tokio::test]
+async fn the_list_names_the_categories_a_new_link_may_carry() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let all = json!(["read:labs", "read:records", "read:summary"]);
+    assert_eq!(alex.get("/api/profiles/alex/shl").await?.json["open"], all);
+    assert_eq!(alex.get("/api/profiles/lucia/shl").await?.json["open"], all);
+    // the owner's own lock
+    let mut c = env.pool().acquire().await?;
+    set_locks(&mut c, env.profile("alex"), &scope_set(["read:labs"])).await?;
+    let open = alex.get("/api/profiles/alex/shl").await?.json["open"].clone();
+    assert_eq!(open, json!(["read:records", "read:summary"]));
+    // what the list names is accepted, what it leaves out is refused
+    share(&mut alex, "alex", json!({"categories": open})).await?;
+    let r = alex
+        .post("/api/profiles/alex/shl", &json!({"categories": ["read:labs"]}))
+        .await?;
+    assert_eq!(r.code(), "category_closed", "{:?}", r.json);
+    // a guardian whose grant leaves the summary out: nothing can be shared
+    let narrowed = scope_set(["read:labs", "read:records"]);
+    set_grant(
+        &mut c,
+        env.user("alex"),
+        env.profile("lucia"),
+        "guardian",
+        Some(&narrowed),
+        None,
+        None,
+    )
+    .await?;
+    let open = alex.get("/api/profiles/lucia/shl").await?.json["open"].clone();
+    assert_eq!(open, json!(["read:labs", "read:records"]));
+    let r = alex
+        .post("/api/profiles/lucia/shl", &json!({"categories": open}))
+        .await?;
+    assert_eq!(r.code(), "summary_closed", "{:?}", r.json);
+    // a lock on the summary does the same for the owner
+    set_locks(&mut c, env.profile("alex"), &scope_set(["read:summary"])).await?;
+    assert_eq!(
+        alex.get("/api/profiles/alex/shl").await?.json["open"],
+        json!(["read:labs", "read:records"])
+    );
     Ok(())
 }
 

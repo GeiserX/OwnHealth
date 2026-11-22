@@ -81,6 +81,7 @@ fn msg(key: &str) -> &'static str {
         "role" => "Only the profile's owner or a guardian shares it.",
         "category" => "This category is closed for you on this profile, so a link cannot carry it.",
         "summary" => "This profile's summary is locked, so it cannot be shared.",
+        "summary_grant" => "Your access to this profile does not include its summary, and every link carries it.",
         "recipient" => "The manifest request needs a recipient.",
         "passcode" => "The passcode is not right.",
         "rate" => "This link answers at most 60 times an hour.",
@@ -96,6 +97,7 @@ pub fn phrases() -> Value {
         "role",
         "category",
         "summary",
+        "summary_grant",
         "recipient",
         "passcode",
         "rate",
@@ -565,7 +567,8 @@ async fn audit(
 }
 
 /// Each read writes one audit row, as every read of the profile does. Each link says the state a
-/// recipient would meet (`state`).
+/// recipient would meet (`state`). `open` is what a new link of this caller may carry, so a form
+/// offers exactly what create accepts; without `read:summary` in it, no link can be made.
 async fn list(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>) -> R {
     let mut tx = rt.pool.begin().await?;
     let perm = sharer(&mut tx, &caller, &p).await?;
@@ -587,7 +590,10 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>) 
     .await?;
     tx.commit().await?;
     let sharing = rt.settings.share_url.is_some();
-    ok(json!({"items": rows.iter().map(|r| link_out(r, sharing)).collect::<Vec<_>>()}))
+    ok(json!({
+        "items": rows.iter().map(|r| link_out(r, sharing)).collect::<Vec<_>>(),
+        "open": open_categories(&perm),
+    }))
 }
 
 /// The key and the manifest id are in this answer and nowhere else, ever.
@@ -640,9 +646,15 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
     let perm = sharer(&mut tx, &caller, &p).await?;
     sessions::require_step_up(&mut tx, &caller.0, sessions::STEP_UP_SECONDS).await?;
     let open = open_categories(&perm);
-    // a summary is what a link carries: read:summary comes with every link
+    // a summary is what a link carries: read:summary comes with every link. The message names the
+    // cause that holds: a lock on the profile, or a grant without the summary.
     if !open.contains("read:summary") {
-        return Err(ownhealth_core::Error::access_denied("category_closed", msg("summary")).into());
+        let why = if perm.profile.locks().contains("read:summary") {
+            "summary"
+        } else {
+            "summary_grant"
+        };
+        return Err(ownhealth_core::Error::access_denied("summary_closed", msg(why)).into());
     }
     let mut scopes: Scopes = match &b.categories {
         Some(c) => c.iter().cloned().collect(),

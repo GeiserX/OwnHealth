@@ -66,6 +66,7 @@ pub fn profile_summary(perm: &Permission, principal: &Principal, on: NaiveDate, 
         "unit_pref": p.unit_pref,
         "genome_sensitive_ui": p.genome_sensitive_ui,
         "scopes": scopes,
+        "break_glass": perm.break_glass,
     })
 }
 

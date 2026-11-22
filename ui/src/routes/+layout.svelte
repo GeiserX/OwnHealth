@@ -7,7 +7,8 @@
 	import { ApiError, getMe } from '#lib/api/core';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import LangButtons from '#lib/components/LangButtons.svelte';
-	import { NAV } from '#lib/nav';
+	import { NAV, navFor } from '#lib/nav';
+	import { sharesAny } from './links/logic';
 	import { isTypingTarget } from '#lib/logic/keys';
 	import { searchTarget } from '#lib/logic/search';
 	import LoginScreen from '#lib/components/pages2/LoginScreen.svelte';
@@ -159,7 +160,7 @@
 		</div>
 		<div class="plabel">{t('views')}</div>
 		<nav class="menu">
-			{#each NAV as n (n.path)}
+			{#each navFor(sharesAny(me?.profiles)) as n (n.path)}
 				<a href={n.path} class:on={active(n.path)} aria-current={active(n.path) ? 'page' : undefined}>
 					<svg viewBox="0 0 24 24" aria-hidden="true">{@html n.icon}</svg>{t(n.key)}
 					{#if n.countFromReview && me?.review_open}<span class="cnt num" title={t('toreview_hh')}>{me.review_open}</span>{/if}
