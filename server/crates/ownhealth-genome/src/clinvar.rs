@@ -25,7 +25,7 @@ use std::sync::LazyLock;
 
 use chrono::NaiveDate;
 use ownhealth_core::access::{get_profile, majority, today};
-use ownhealth_core::blobs::{BlobOwner, BlobStore, LocalCopy};
+use ownhealth_core::blobs::{BlobOwner, BlobReader, BlobStore};
 use ownhealth_core::review::{ReviewItemIn, create_item};
 use ownhealth_core::{Error, Result};
 use serde::Serialize;
@@ -297,15 +297,18 @@ fn bad_file(what: &str, message: impl std::fmt::Display) -> Error {
 /// A gzipped file or plain text. ClinVar ships `clinvar.vcf.gz` bgzipped, which is a run of gzip
 /// members; a copy compressed again with plain `gzip` is one member. The multi-member reader reads both.
 fn open_text(path: &Path) -> io::Result<Box<dyn BufRead + Send>> {
-    let mut magic = [0u8; 2];
-    let n = File::open(path)?.read(&mut magic)?;
-    let f = File::open(path)?;
-    Ok(if n == 2 && magic == [0x1f, 0x8b] {
-        Box::new(io::BufReader::new(flate2::read::MultiGzDecoder::new(
-            io::BufReader::new(f),
-        )))
+    text_reader(File::open(path)?)
+}
+
+/// [`open_text`] over any reader read front to back, such as a stored blob: the gzip magic is
+/// peeked from the buffer, so nothing is read twice and no copy goes to disk.
+fn text_reader(r: impl Read + Send + 'static) -> io::Result<Box<dyn BufRead + Send>> {
+    let mut r = io::BufReader::new(r);
+    let head = r.fill_buf()?;
+    Ok(if head.len() >= 2 && head[..2] == [0x1f, 0x8b] {
+        Box::new(io::BufReader::new(flate2::bufread::MultiGzDecoder::new(r)))
     } else {
-        Box::new(io::BufReader::new(f))
+        Box::new(r)
     })
 }
 
@@ -413,8 +416,13 @@ pub struct VcfAlleles {
 
 impl VcfAlleles {
     pub fn open(path: &Path, label: &str) -> Result<VcfAlleles> {
+        VcfAlleles::from_reader(File::open(path).map_err(|e| bad_file(label, e))?, label)
+    }
+
+    /// The calls VCF read front to back from `r`, such as a stored blob (gzipped or plain).
+    pub fn from_reader(r: impl Read + Send + 'static, label: &str) -> Result<VcfAlleles> {
         Ok(VcfAlleles {
-            reader: open_text(path).map_err(|e| bad_file(label, e))?,
+            reader: text_reader(r).map_err(|e| bad_file(label, e))?,
             line: String::new(),
             queue: Default::default(),
             last: (0, 0),
@@ -788,12 +796,13 @@ async fn diff_dataset(
     }
     let sites = fact_sites(&mut tx, ds.id).await?;
     let label = format!("the calls VCF of dataset {}", ds.id);
-    let vcf_copy: Result<Option<LocalCopy>> = ds
+    // read in place, front to back: a sealed VCF is decrypted as it is read, never copied to disk
+    let vcf_calls: Result<Option<BlobReader>> = ds
         .vcf
         .as_ref()
         .map(|sha| {
             blobs
-                .with_local_copy(BlobOwner::Profile(ds.profile_id), sha)
+                .open_seek(BlobOwner::Profile(ds.profile_id), sha)
                 .map_err(|e| bad_file(&label, e))
         })
         .transpose();
@@ -806,12 +815,11 @@ async fn diff_dataset(
     // The outer error is the release's and stops the run; the inner one is this dataset's calls VCF,
     // which must not stop the other datasets.
     let read = blocking(move || -> Result<Result<Vec<Carried>>> {
-        // the copy lives until the release has been read against it
-        let copy = match vcf_copy {
+        let calls = match vcf_calls {
             Ok(c) => c,
             Err(e) => return Ok(Err(e)),
         };
-        let person: Box<dyn Alleles> = match copy.as_ref().map(|p| VcfAlleles::open(p.path(), &label)).transpose() {
+        let person: Box<dyn Alleles> = match calls.map(|r| VcfAlleles::from_reader(r, &label)).transpose() {
             Ok(Some(v)) => Box::new(v),
             Ok(None) => Box::new(FactAlleles::new(fact_alleles)),
             Err(e) => return Ok(Err(e)),
