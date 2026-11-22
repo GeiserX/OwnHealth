@@ -121,8 +121,53 @@ test('the reason lines say what was left out, in en and es', () => {
 	assert.match(es.err_unsupported_file, /base de datos de Gadgetbridge, un archivo de actividad FIT/);
 });
 
+test('a file past what one file holds says so by its reason, in en and es', () => {
+	const big = { ...run, reasons: { over_limit: 3 } };
+	assert.deepEqual(
+		(fitLines(big) ?? []).filter((l) => l.key.startsWith('i2_fit_r_')),
+		[{ key: 'i2_fit_r_over_limit', n: 3 }]
+	);
+	const en = dict.en as Record<string, string>;
+	const es = dict.es as Record<string, string>;
+	assert.equal(en.i2_fit_r_over_limit.replace('{n}', '3'), '3 past what one file holds (7 days of heart rate, 1,000 activities): not stored');
+	assert.equal(es.i2_fit_r_over_limit.replace('{n}', '3'), '3 más allá de lo que admite un archivo (7 días de frecuencia cardiaca, 1000 actividades): sin guardar');
+});
+
+test('a FIT document says what its file holds, not what an import added', () => {
+	// the second upload of one activity added nothing, while its document holds the activity
+	const again = { ...run, reasons: { duplicate: 32 }, fit: { ...run.fit, heart_rate_minutes: 0, distances: 0, energy: 0 } };
+	assert.deepEqual((fitLines(again) ?? []).slice(1, 4), [
+		{ key: 'i2_fit_hr', n: 0 },
+		{ key: 'i2_fit_distance', n: 0 },
+		{ key: 'i2_fit_energy', n: 0 }
+	]);
+	assert.deepEqual(fitDocLines({ fit: run.fit }), [
+		{ key: 'i2_fit_activities', n: 1 },
+		{ key: 'i2_fit_doc_hr', n: 30 },
+		{ key: 'i2_fit_doc_distance', n: 1 },
+		{ key: 'i2_fit_doc_energy', n: 1 },
+		{ key: 'i2_fit_device', vars: { device: 'OwnHealth Test Watch' } },
+		{ key: 'i2_fit_gps' }
+	]);
+	const en = dict.en as Record<string, string>;
+	const es = dict.es as Record<string, string>;
+	const want: [string, string, string][] = [
+		['i2_fit_doc_hr', '{n} minutes of heart rate in this file', '{n} minutos de frecuencia cardiaca en este archivo'],
+		['i2_fit_doc_hr_one', '1 minute of heart rate in this file', '1 minuto de frecuencia cardiaca en este archivo'],
+		['i2_fit_doc_distance', '{n} walking or running distances in this file', '{n} distancias caminando o corriendo en este archivo'],
+		['i2_fit_doc_distance_one', '1 walking or running distance in this file', '1 distancia caminando o corriendo en este archivo'],
+		['i2_fit_doc_energy', '{n} activity energy totals in this file', '{n} totales de energía de actividad en este archivo'],
+		['i2_fit_doc_energy_one', '1 activity energy total in this file', '1 total de energía de actividad en este archivo']
+	];
+	for (const [k, e, s] of want) {
+		assert.equal(en[k], e, `en ${k}`);
+		assert.equal(es[k], s, `es ${k}`);
+		for (const l of LANGS) assert.ok((l.table as Record<string, string>)[k]?.trim(), `${l.code} ${k}`);
+	}
+});
+
 test('a FIT document shows what its file holds, from its flags', () => {
-	assert.deepEqual(fitDocLines({ fit: run.fit, import: { queued: 0 } }), fitLines({ fit: run.fit }));
+	assert.deepEqual(fitDocLines({ fit: run.fit, import: { queued: 0 } }), fitDocLines({ fit: run.fit }));
 	assert.equal((fitDocLines({ fit: run.fit }) ?? []).at(-1)?.key, 'i2_fit_gps');
 	for (const f of [null, undefined, {}, { gadgetbridge: {} }, { fit: null }]) assert.equal(fitDocLines(f), null, JSON.stringify(f));
 });

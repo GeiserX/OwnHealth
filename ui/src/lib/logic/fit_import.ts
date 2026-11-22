@@ -5,11 +5,18 @@
 /** The reasons the importer counts a sample as not imported, in the order the panel lists them. */
 export const FIT_REASONS = ['duplicate', 'other_sport_distance', 'bad_value', 'bad_time', 'over_limit'] as const;
 
-/** The counts of the result's `fit` details, each with its dictionary key. */
+/** The counts of the result's `fit` details, each with its dictionary key: what this import added. */
 const COUNTS = [
 	['heart_rate_minutes', 'i2_fit_hr'],
 	['distances', 'i2_fit_distance'],
 	['energy', 'i2_fit_energy']
+] as const;
+
+/** The same counts on a FIT document (`flags.fit`): what its file holds, whatever an import added. */
+const DOC_COUNTS = [
+	['heart_rate_minutes', 'i2_fit_doc_hr'],
+	['distances', 'i2_fit_doc_distance'],
+	['energy', 'i2_fit_doc_energy']
 ] as const;
 
 /** One line: a dictionary key, with its count (plural forms) and its placeholders. */
@@ -22,14 +29,14 @@ export interface FitLine {
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
 /** The lines of an import.fit job result; null for any other result (or one hidden from this member). */
-export function fitLines(result: unknown): FitLine[] | null {
+export function fitLines(result: unknown, counts: typeof COUNTS | typeof DOC_COUNTS = COUNTS): FitLine[] | null {
 	if (!result || typeof result !== 'object') return null;
 	const r = result as Record<string, unknown>;
 	const d = r.fit;
 	if (!d || typeof d !== 'object') return null;
 	const details = d as Record<string, unknown>;
 	const lines: FitLine[] = [{ key: 'i2_fit_activities', n: num(details.activities) }];
-	for (const [field, key] of COUNTS) lines.push({ key, n: num(details[field]) });
+	for (const [field, key] of counts) lines.push({ key, n: num(details[field]) });
 	const reasons = r.reasons && typeof r.reasons === 'object' ? (r.reasons as Record<string, unknown>) : {};
 	for (const k of FIT_REASONS) {
 		const n = num(reasons[k]);
@@ -48,7 +55,7 @@ export function fitLines(result: unknown): FitLine[] | null {
 /** The lines of a FIT document (`flags.fit`, what the file holds): the document view shows them. */
 export function fitDocLines(flags: unknown): FitLine[] | null {
 	if (!flags || typeof flags !== 'object') return null;
-	return fitLines({ fit: (flags as Record<string, unknown>).fit });
+	return fitLines({ fit: (flags as Record<string, unknown>).fit }, DOC_COUNTS);
 }
 
 /** An import.fit job that ended with its result hidden from this member (no read:wearables there). */

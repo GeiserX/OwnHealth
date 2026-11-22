@@ -48,9 +48,9 @@ test('a run shows what it brought and that its route was left out, and the same 
 	await expect(page.getByRole('list', { name: 'lucia-run-gps.fit' }).getByRole('listitem')).toHaveText(
 		[
 			'1 activity read',
-			'30 minutes of heart rate imported',
-			'1 walking or running distance imported',
-			'1 activity energy total imported',
+			'30 minutes of heart rate in this file',
+			'1 walking or running distance in this file',
+			'1 activity energy total in this file',
 			'Device: OwnHealth Test Watch',
 			'The route (GPS positions) in the file was not stored'
 		],
