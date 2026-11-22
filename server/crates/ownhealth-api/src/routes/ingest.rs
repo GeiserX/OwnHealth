@@ -117,7 +117,10 @@ async fn read_form(rt: &Runtime, req: Request, file_fields: &[&str]) -> R<Form> 
                 .filter(|f| !f.is_empty())
                 .unwrap_or("shared")
                 .to_string();
-            let path = rt.blobs.staging_path(&format!("push-{}", ids::token_hex(16)));
+            let path = rt
+                .blobs
+                .staging_path(&format!("push-{}", ids::token_hex(16)))
+                .map_err(Error::from)?;
             out.files.push(Spool {
                 filename,
                 path: path.clone(),

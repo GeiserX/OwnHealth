@@ -21,6 +21,8 @@ pub enum BlobError {
     NotFound(String),
     #[error("not a sha256 hex digest")]
     BadHash,
+    #[error("not a plain file name: {0:?}")]
+    BadName(String),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -30,6 +32,7 @@ impl From<BlobError> for crate::Error {
         match e {
             BlobError::NotFound(h) => crate::Error::NotFound(format!("blob {h}")),
             BlobError::BadHash => crate::Error::Invalid("not a sha256 hex digest".into()),
+            BlobError::BadName(n) => crate::Error::Invalid(format!("not a plain file name: {n:?}")),
             BlobError::Io(e) => crate::Error::Io(e),
         }
     }
@@ -140,13 +143,12 @@ impl BlobStore {
     }
 
     /// A path in the store's own tmp directory for a spool or a download, under `name` (one file
-    /// name, no directory). `sweep_tmp` removes leftovers named `upload-*`.
-    pub fn staging_path(&self, name: &str) -> PathBuf {
-        debug_assert!(
-            Path::new(name).file_name() == Some(std::ffi::OsStr::new(name)),
-            "{name}"
-        );
-        self.root.join("tmp").join(name)
+    /// name, no directory, refused otherwise). `sweep_tmp` removes leftovers named `upload-*`.
+    pub fn staging_path(&self, name: &str) -> Result<PathBuf, BlobError> {
+        if Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
+            return Err(BlobError::BadName(name.to_string()));
+        }
+        Ok(self.root.join("tmp").join(name))
     }
 
     fn land(&self, tmp: &Path, h: &str) -> Result<(), BlobError> {
@@ -375,13 +377,27 @@ mod tests {
     }
 
     #[test]
-    fn staging_paths_sit_in_tmp_under_their_own_name() -> io::Result<()> {
+    fn staging_paths_sit_in_tmp_under_their_own_name() -> Result<(), BlobError> {
         let dir = tempfile::tempdir()?;
         let store = BlobStore::new(dir.path())?;
-        let p = store.staging_path("upload-0123abcd");
+        let p = store.staging_path("upload-0123abcd")?;
         assert_eq!(p, dir.path().join("tmp").join("upload-0123abcd"));
         File::create(&p)?.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200))?;
         assert_eq!(store.sweep_tmp(std::time::Duration::from_secs(3600))?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn staging_path_takes_one_plain_file_name_only() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = BlobStore::new(dir.path())?;
+        for bad in ["../x", "/x", "a/b", "", ".", "..", "x/"] {
+            assert!(matches!(store.staging_path(bad), Err(BlobError::BadName(_))), "{bad:?}");
+        }
+        assert_eq!(
+            store.staging_path("push-ab12")?,
+            dir.path().join("tmp").join("push-ab12")
+        );
         Ok(())
     }
 

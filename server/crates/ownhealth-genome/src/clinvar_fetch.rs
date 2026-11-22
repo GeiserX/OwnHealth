@@ -120,7 +120,10 @@ pub async fn poll_clinvar(ctx: JobContext, source: Source) -> Result<RunOutcome,
                 .filter(|u| !u.is_empty())
                 .unwrap_or(DEFAULT_URL);
             // One name per source, so a run cut off by a restart leaves no second copy behind.
-            let dest = ctx.blobs.staging_path(&format!("clinvar-{}.vcf.gz", source.id));
+            let dest = ctx
+                .blobs
+                .staging_path(&format!("clinvar-{}.vcf.gz", source.id))
+                .map_err(|e| JobError::permanent(e.to_string()))?;
             let guard = Downloaded(dest.clone());
             match net::download(url, &Egress::reference_file(cfg.allow_private), &dest).await {
                 Ok((200, _)) => {}
