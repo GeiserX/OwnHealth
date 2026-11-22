@@ -4,15 +4,21 @@
 // and Chromium (`pnpm exec playwright install chromium`, once). The e2e script type-checks this folder
 // (e2e/tsconfig.json) before it runs the tests. shl.spec.ts also opens share links in a reference
 // SMART Health Links viewer, which shl-viewer.sh builds once (git and npm, a few minutes) and serves.
+// The connections checks also start fake-vendor.mjs, a fake SMART vendor on loopback, and seed rows
+// with psql into the database serve.sh creates: its name is picked here, so the workers know it too.
 import { defineConfig, devices } from '@playwright/test';
 
 const port = Number(process.env.OWNHEALTH_E2E_PORT ?? 8190);
 const viewerPort = Number(process.env.OWNHEALTH_E2E_VIEWER_PORT ?? port + 1);
 const baseURL = `http://127.0.0.1:${port}`;
-// One database name for the server and the tests (shl.spec.ts ends a link's life in it). Set here
-// once: the test workers inherit it, and their own load of this file keeps it.
-process.env.OWNHEALTH_E2E_DB ??= `oh_e2e_${Math.random().toString(16).slice(2, 14)}`;
+const fakePort = Number(process.env.OWNHEALTH_E2E_FAKE_PORT ?? port + 1000);
+process.env.OWNHEALTH_E2E_PORT = String(port);
+process.env.OWNHEALTH_E2E_FAKE_PORT = String(fakePort);
 process.env.OWNHEALTH_E2E_VIEWER_PORT ??= String(viewerPort);
+// One database name for the server and the tests (shl.spec.ts ends a link's life in it, the
+// connections checks seed rows with psql). The workers load this file again and inherit the
+// runner's environment, so they keep this name.
+process.env.OWNHEALTH_E2E_DB ??= `oh_e2e_${Math.random().toString(16).slice(2, 14)}`;
 
 export default defineConfig({
 	testDir: '.',
@@ -23,6 +29,15 @@ export default defineConfig({
 	use: { baseURL, colorScheme: 'dark', trace: 'retain-on-failure' },
 	projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'], colorScheme: 'dark' } }],
 	webServer: [
+		{
+			command: 'node fake-vendor.mjs',
+			url: `http://127.0.0.1:${fakePort}/.well-known/smart-configuration`,
+			env: { OWNHEALTH_E2E_FAKE_PORT: String(fakePort) },
+			reuseExistingServer: false,
+			timeout: 30_000,
+			stdout: 'ignore',
+			stderr: 'pipe'
+		},
 		{
 			command: 'bash serve.sh',
 			url: `${baseURL}/readyz`,
