@@ -604,6 +604,7 @@ async fn a_gzipped_upload_is_stored_as_the_plain_file_without_its_route() -> R {
             &fw::run_with_gps(),
             &fit::read_fit(&fw::run_with_gps())?.position_fields
         )?
+        .0
     );
     assert!(!exists(&env, &upload_sha));
     Ok(())
@@ -919,5 +920,268 @@ async fn a_compressed_file_over_the_limit_is_too_large_not_damaged() -> R {
     assert_eq!(state, "dead");
     let err = err.unwrap_or_default();
     assert!(err.contains("larger than 32 MB"), "{err}");
+    Ok(())
+}
+
+/// Developer data index 0 and the description of its field `number`, `name`, which declares itself the
+/// profile field `field` of message `mesg` (`field_description` fields 14 and 15; 0xFFFF is no message).
+fn describe_native(w: &mut fw::Writer, number: u8, base: u8, name: &str, mesg: u16, field: u8) {
+    w.define(3, fw::DEVELOPER_DATA_ID, &[(3, 1, fw::UINT8)]);
+    w.data(3, &[fw::V::U8(0)]);
+    w.define(
+        3,
+        fw::FIELD_DESCRIPTION,
+        &[
+            (0, 1, fw::UINT8),
+            (1, 1, fw::UINT8),
+            (2, 1, fw::UINT8),
+            (3, 16, fw::STRING),
+            (14, 2, fw::UINT16),
+            (15, 1, fw::UINT8),
+        ],
+    );
+    w.data(
+        3,
+        &[
+            fw::V::U8(0),
+            fw::V::U8(number),
+            fw::V::U8(base),
+            fw::V::Str(name, 16),
+            fw::V::U16(mesg),
+            fw::V::U8(field),
+        ],
+    );
+}
+
+/// How often `needle` occurs in `hay`.
+fn copies(hay: &[u8], needle: &[u8]) -> usize {
+    hay.windows(needle.len()).filter(|w| *w == needle).count()
+}
+
+const LAP: u16 = 19;
+
+#[tokio::test]
+async fn a_developer_field_that_stands_for_a_profile_position_is_blanked_whatever_its_name() -> R {
+    let env = Env::new().await?;
+    let mut w = fw::Writer::default();
+    fw::file_id(&mut w, 4, fw::SERIAL, fw::WATCH, fw::RUN_START);
+    // neutral names: record.position_lat, a lap's start_position_lat, record field 1 (position_long)
+    // named only by its field, and record.heart_rate, which is no position
+    describe_native(&mut w, 0, fw::SINT32, "pos_y", fw::RECORD, 0);
+    describe_native(&mut w, 1, fw::SINT32, "start_y", LAP, 3);
+    describe_native(&mut w, 2, fw::SINT32, "x2", 0xFFFF, 1);
+    describe_native(&mut w, 3, fw::UINT8, "hr2", fw::RECORD, 3);
+    w.define_dev(
+        1,
+        fw::RECORD,
+        &[(253, 4, fw::UINT32), (3, 1, fw::UINT8)],
+        &[(0, 4, 0), (1, 4, 0), (2, 4, 0), (3, 1, 0)],
+    );
+    let (lat, lon) = (fw::semicircles(fw::LAT0), fw::semicircles(fw::LON0));
+    for i in 0..10i64 {
+        w.data(
+            1,
+            &[
+                fw::V::U32(fw::fit_time(fw::RUN_START + 30 * i)),
+                fw::V::U8(140),
+                fw::V::I32(lat),
+                fw::V::I32(lat + 1),
+                fw::V::I32(lon),
+                fw::V::U8(141),
+            ],
+        );
+    }
+    let file = w.finish();
+    // the checks can fail: the file holds the route
+    let needles = [lat.to_le_bytes(), (lat + 1).to_le_bytes(), lon.to_le_bytes()];
+    for n in &needles {
+        assert_eq!(copies(&file, n), 10);
+    }
+    let (state, result, err) = import(&env, &file, "app.fit").await?;
+    assert_eq!(state, "done", "{err:?}");
+    assert_eq!(result["fit"]["gps_left_out"], json!(true), "{result}");
+    let bytes = stored(&env, &result["document_id"]).await?.bytes;
+    for n in &needles {
+        assert_eq!(copies(&bytes, n), 0);
+    }
+    // the rest stays: the heart rate and the developer field that stands for it
+    let kept = fields(&bytes)?;
+    assert!(kept.iter().any(|(n, v)| n == "heart_rate" && v == "140"), "{kept:?}");
+    assert!(kept.iter().any(|(n, v)| n == "hr2" && v == "141"), "{kept:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn developer_positions_written_before_their_description_are_blanked_too() -> R {
+    let env = Env::new().await?;
+    let lat = fw::LAT0.to_le_bytes();
+    // values before and after the description, and values before a description that comes last
+    for (case, after, start) in [
+        ("before and after", true, fw::RUN_START),
+        ("before only", false, fw::RUN_START + 3600),
+    ] {
+        let mut w = fw::Writer::default();
+        fw::file_id(&mut w, 4, fw::SERIAL, fw::WATCH, start);
+        w.define(5, fw::DEVELOPER_DATA_ID, &[(3, 1, fw::UINT8)]);
+        w.data(5, &[fw::V::U8(0)]);
+        let record = |w: &mut fw::Writer, from: i64| {
+            w.define_dev(1, fw::RECORD, &[(253, 4, fw::UINT32), (3, 1, fw::UINT8)], &[(0, 8, 0)]);
+            for i in from..from + 5 {
+                w.data(
+                    1,
+                    &[
+                        fw::V::U32(fw::fit_time(start + 30 * i)),
+                        fw::V::U8(140),
+                        fw::V::F64(fw::LAT0),
+                    ],
+                );
+            }
+        };
+        record(&mut w, 0);
+        w.describe(3, 0, fw::FLOAT64, "Latitude");
+        if after {
+            record(&mut w, 5);
+        }
+        let file = w.finish();
+        assert_eq!(copies(&file, &lat), if after { 10 } else { 5 }, "{case}");
+        let (state, result, err) = import(&env, &file, &format!("{case}.fit")).await?;
+        assert_eq!(state, "done", "{case}: {err:?}");
+        assert_eq!(result["fit"]["gps_left_out"], json!(true), "{case}: {result}");
+        let bytes = stored(&env, &result["document_id"]).await?.bytes;
+        assert_eq!(copies(&bytes, &lat), 0, "{case}");
+        assert!(
+            fields(&bytes)?.iter().any(|(n, v)| n == "heart_rate" && v == "140"),
+            "{case}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_profile_position_field_in_the_table_is_one_fitparser_names_a_position() -> R {
+    for (mesg, field) in fit::PROFILE_POSITIONS {
+        let mut w = fw::Writer::default();
+        fw::file_id(&mut w, 4, fw::SERIAL, fw::WATCH, fw::RUN_START);
+        w.define(1, mesg, &[(field, 4, fw::SINT32)]);
+        w.data(1, &[fw::V::I32(fw::semicircles(fw::LAT0))]);
+        let names: Vec<String> = fitparser::from_bytes(&w.finish())?
+            .iter()
+            .filter(|r| r.kind().as_u16() == mesg)
+            .flat_map(|r| r.fields().iter().map(|f| f.name().to_string()))
+            .collect();
+        assert!(names.iter().any(|n| position_key(n)), "({mesg}, {field}): {names:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_excluded_ride_does_not_take_the_start_of_a_run() -> R {
+    let env = Env::new().await?;
+    let mut w = fw::Writer::default();
+    fw::file_id(&mut w, 4, fw::SERIAL, fw::WATCH, fw::RUN_START);
+    w.define(
+        2,
+        fw::SESSION,
+        &[
+            (2, 4, fw::UINT32),
+            (5, 1, fw::ENUM),
+            (7, 4, fw::UINT32),
+            (9, 4, fw::UINT32),
+            (11, 2, fw::UINT16),
+        ],
+    );
+    // a ride with a distance and no energy (its distance is not walking or running), then a run
+    for (sport, kcal) in [(fw::CYCLING, 0xFFFFu16), (fw::RUNNING, 300)] {
+        w.data(
+            2,
+            &[
+                fw::V::U32(fw::fit_time(fw::RUN_START)),
+                fw::V::U8(sport),
+                fw::V::U32(1_800_000),
+                fw::V::U32(500_000),
+                fw::V::U16(kcal),
+            ],
+        );
+    }
+    let (state, result, err) = import(&env, &w.finish(), "ride-and-run.fit").await?;
+    assert_eq!(state, "done", "{err:?}");
+    assert_eq!(result["reasons"], json!({"other_sport_distance": 1}), "{result}");
+    let end = Some(at(fw::RUN_START + 1800));
+    assert_eq!(rows(&env, "distance").await?, [(at(fw::RUN_START), end, 5.0)]);
+    assert_eq!(rows(&env, "active_energy").await?, [(at(fw::RUN_START), end, 300.0)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_document_of_the_same_bytes_stored_before_becomes_a_wearables_document() -> R {
+    let env = Env::new().await?;
+    // the stored copy of this run, uploaded first under a photo's name, so read:records opens it
+    let run = fw::run_with_gps();
+    let kept = fit::strip(&run, &fit::read_fit(&run)?.position_fields)?.0;
+    let sha = env.blobs.put_bytes(&kept)?;
+    let photo: Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes) \
+         values ($1, $2, decode($3, 'hex'), 'run.heic', 'image/heic', $4) returning id",
+    )
+    .bind(env.fam.household_id)
+    .bind(env.fam.profile("lucia"))
+    .bind(&sha)
+    .bind(i64::try_from(kept.len())?)
+    .fetch_one(&env.db.pool)
+    .await?;
+    let (state, result, err) = import(&env, &run, "run.fit").await?;
+    assert_eq!(state, "done", "{err:?}");
+    assert_eq!(result["document_id"], json!(photo), "{result}");
+    let doc_type: Option<String> = sqlx::query_scalar("select doc_type from document where id = $1")
+        .bind(photo)
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(doc_type.as_deref(), Some("wearables"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_last_of_two_imports_of_one_upload_deletes_it() -> R {
+    let env = Env::new().await?;
+    let run = fw::run_with_gps();
+    let sha = env.blobs.put_bytes(&run)?;
+    let mut c = env.db.pool.acquire().await?;
+    let mut ids = Vec::new();
+    for who in ["lucia", "alex"] {
+        let payload = json!({
+            "profile_id": env.fam.profile(who).to_string(),
+            "household_id": env.fam.household_id.to_string(),
+            "blob_sha256": sha,
+            "filename": "run.fit",
+        });
+        ids.push(jobs::enqueue(&mut c, fit::JOB, &payload, EnqueueOptions::default()).await?);
+    }
+    drop(c);
+    let set = |id: Option<i64>, running: bool| {
+        let pool = env.db.pool.clone();
+        async move {
+            sqlx::query(if running {
+                "update job set state = 'running', locked_by = 'another worker', \
+                 locked_until = now() + interval '10 minutes' where id = $1"
+            } else {
+                "update job set state = 'queued', locked_by = null, locked_until = null where id = $1"
+            })
+            .bind(id)
+            .execute(&pool)
+            .await?;
+            anyhow::Ok(())
+        }
+    };
+    // Alex's import runs on another worker while Lucía's ends: Lucía's leaves the bytes to it
+    set(ids[1], true).await?;
+    let (state, _, err) = job(&env, ids[0]).await?;
+    assert_eq!(state, "done", "{err:?}");
+    assert!(exists(&env, &sha), "the bytes another import reads were deleted");
+    // Alex's ends while Lucía's row still reads running (a worker writes done after its handler)
+    set(ids[0], true).await?;
+    set(ids[1], false).await?;
+    let (state, _, err) = job(&env, ids[1]).await?;
+    assert_eq!(state, "done", "{err:?}");
+    assert!(!exists(&env, &sha), "the last import left the upload");
     Ok(())
 }

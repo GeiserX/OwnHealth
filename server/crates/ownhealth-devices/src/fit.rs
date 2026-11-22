@@ -26,7 +26,9 @@
 //! messages, with its checksums written again), gzip unpacked, and the uploaded bytes are deleted
 //! from the blob store. A refused upload is deleted too. Either way the bytes stay only while another
 //! row still holds them (a document, an inbox item, a held mail, or an import of them that is still
-//! queued).
+//! queued or running); of two imports of one upload, the last to end deletes it. A developer field is
+//! blanked when its description names a position or says it stands for a profile position field
+//! ([`PROFILE_POSITIONS`]), even when the description comes after its values.
 //!
 //! Times: FIT timestamps are UTC (seconds since 1989-12-31 00:00 UTC), so no time zone is read or
 //! guessed and samples keep no offset. A time before 2000 (a device whose clock was never set writes
@@ -97,6 +99,67 @@ const MAX_NAME: usize = 80;
 const FIELD_DESCRIPTION: u16 = 206;
 const NMEA_SENTENCE: u16 = 177;
 const NMEA_TEXT: u8 = 1;
+/// The fields of `field_description` that name the profile field a developer field stands for.
+const NATIVE_MESG: u8 = 14;
+const NATIVE_FIELD: u8 = 15;
+/// Every position field of the FIT profile (fitparser 0.12) as (global message number, field number):
+/// record, lap, session, split, segment lap and point, course point, climb, jump, GPS metadata and
+/// weather. A developer field that declares itself one of these (`field_description` fields 14 and 15)
+/// is a position whatever it is named.
+pub const PROFILE_POSITIONS: [(u16, u8); 46] = [
+    (18, 3),
+    (18, 4),
+    (18, 29),
+    (18, 30),
+    (18, 31),
+    (18, 32),
+    (18, 38),
+    (18, 39),
+    (19, 3),
+    (19, 4),
+    (19, 5),
+    (19, 6),
+    (19, 27),
+    (19, 28),
+    (19, 29),
+    (19, 30),
+    (20, 0),
+    (20, 1),
+    (32, 2),
+    (32, 3),
+    (128, 10),
+    (128, 11),
+    (142, 3),
+    (142, 4),
+    (142, 5),
+    (142, 6),
+    (142, 25),
+    (142, 26),
+    (142, 27),
+    (142, 28),
+    (150, 1),
+    (150, 2),
+    (160, 1),
+    (160, 2),
+    (285, 5),
+    (285, 6),
+    (312, 17),
+    (312, 18),
+    (312, 19),
+    (312, 20),
+    (312, 21),
+    (312, 22),
+    (312, 23),
+    (312, 24),
+    (317, 0),
+    (317, 1),
+];
+
+/// Whether the profile field `field` of message `mesg` holds a position (an NMEA sentence holds one as
+/// text).
+fn native_position(mesg: u16, field: u8) -> bool {
+    PROFILE_POSITIONS.contains(&(mesg, field)) || (mesg, field) == (NMEA_SENTENCE, NMEA_TEXT)
+}
 
 /// The device that made the file (its first `file_id`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -441,17 +504,42 @@ struct Definition {
     developer: Vec<(u8, usize, u8)>,
 }
 
+/// What a `field_description` says of one developer field: its base type, whether its name says
+/// position, and the profile field it stands for (`native_mesg_num`, `native_field_num`).
+struct Described {
+    base: u8,
+    named: bool,
+    natives: Vec<(Option<u16>, u8)>,
+}
+
+impl Described {
+    /// Whether this developer field, in a message of number `global`, holds a position: by its name,
+    /// or by the profile field it stands for (in the message it names, else in its own message).
+    fn position(&self, global: u16) -> bool {
+        self.named
+            || self
+                .natives
+                .iter()
+                .any(|(mesg, field)| native_position(mesg.unwrap_or(global), *field))
+    }
+}
+
 fn layout() -> Error {
     unreadable("its messages do not fit its header")
 }
 
 /// The FIT file `bytes` (unpacked, read by [`read_fit`] first) with every position blanked: each
-/// profile field in `fields` ([`Read::position_fields`]) and each developer field whose description
-/// names a position get the invalid value of their base type, in every message. Nothing else changes
-/// but the checksum at the end of each file in the chain, which is written again; a 14-byte header's
-/// own checksum covers only the header, which stays as it was.
-pub fn strip(bytes: &[u8], fields: &BTreeSet<(u16, u8)>) -> Result<Vec<u8>> {
+/// profile field in `fields` ([`Read::position_fields`]) and each developer field that holds a
+/// position get the invalid value of their base type, in every message. A developer field holds a
+/// position when its `field_description` names one, or says the field stands for a profile position
+/// field (its fields 14 and 15), wherever in the file that description comes: each file of the chain is
+/// read twice, once for its descriptions and once to blank. Nothing else changes but the checksum at
+/// the end of each file in the chain, which is written again; a 14-byte header's own checksum covers
+/// only the header, which stays as it was. Also says whether a developer field held a position, which
+/// the parser cannot tell for a field described after its values or named neutrally.
+pub fn strip(bytes: &[u8], fields: &BTreeSet<(u16, u8)>) -> Result<(Vec<u8>, bool)> {
     let mut out = bytes.to_vec();
+    let mut developer_positions = false;
     let mut at = 0usize;
     while at < out.len() {
         if out.len() < at + 12 {
@@ -464,110 +552,148 @@ pub fn strip(bytes: &[u8], fields: &BTreeSet<(u16, u8)>) -> Result<Vec<u8>> {
         if end + 2 > out.len() {
             return Err(layout());
         }
-        let mut defs: HashMap<u8, Definition> = HashMap::new();
-        // (developer data index, field number) -> (base type, name)
-        let mut described: HashMap<(u8, u8), (u8, String)> = HashMap::new();
-        let mut p = start;
-        while p < end {
-            let head = out[p];
-            p += 1;
-            if head & 0xC0 == 0x40 {
-                // a definition message
-                let local = head & 0x0F;
-                if p + 5 > end {
-                    return Err(layout());
-                }
-                let big_endian = out[p + 1] == 1;
-                let g = [out[p + 2], out[p + 3]];
-                let global = if big_endian {
-                    u16::from_be_bytes(g)
-                } else {
-                    u16::from_le_bytes(g)
-                };
-                let n = usize::from(out[p + 4]);
-                p += 5;
-                if p + 3 * n > end {
-                    return Err(layout());
-                }
-                let fields: Vec<(u8, usize, u8)> = (0..n)
-                    .map(|i| (out[p + 3 * i], usize::from(out[p + 3 * i + 1]), out[p + 3 * i + 2]))
-                    .collect();
-                p += 3 * n;
-                let mut developer = Vec::new();
-                if head & 0x20 != 0 {
-                    if p >= end {
-                        return Err(layout());
-                    }
-                    let m = usize::from(out[p]);
-                    p += 1;
-                    if p + 3 * m > end {
-                        return Err(layout());
-                    }
-                    developer = (0..m)
-                        .map(|i| (out[p + 3 * i], usize::from(out[p + 3 * i + 1]), out[p + 3 * i + 2]))
-                        .collect();
-                    p += 3 * m;
-                }
-                defs.insert(
-                    local,
-                    Definition {
-                        global,
-                        big_endian,
-                        fields,
-                        developer,
-                    },
-                );
-                continue;
-            }
-            // a data message: a compressed timestamp header names its local type in bits 5 and 6
-            let local = if head & 0x80 != 0 {
-                (head >> 5) & 0x03
-            } else {
-                head & 0x0F
-            };
-            let def = defs.get(&local).ok_or_else(layout)?;
-            let mut description: [Option<u8>; 3] = [None; 3];
-            let mut name = None;
-            for &(num, size, base) in &def.fields {
-                if p + size > end {
-                    return Err(layout());
-                }
-                let value = &mut out[p..p + size];
-                if def.global == FIELD_DESCRIPTION {
-                    match num {
-                        0..=2 if size >= 1 => description[usize::from(num)] = Some(value[0]),
-                        3 => {
-                            let s = value.split(|b| *b == 0).next().unwrap_or_default();
-                            name = Some(String::from_utf8_lossy(s).into_owned());
-                        }
-                        _ => {}
-                    }
-                }
-                if fields.contains(&(def.global, num)) {
-                    blank(value, base, def.big_endian);
-                }
-                p += size;
-            }
-            for &(num, size, index) in &def.developer {
-                if p + size > end {
-                    return Err(layout());
-                }
-                if let Some((base, n)) = described.get(&(index, num))
-                    && is_position(n, true)
-                {
-                    blank(&mut out[p..p + size], *base, def.big_endian);
-                }
-                p += size;
-            }
-            if let ([Some(index), Some(num), Some(base)], Some(n)) = (description, name) {
-                described.insert((index, num), (base, n));
-            }
+        // (developer data index, field number) -> what its descriptions in this file say
+        let mut described: HashMap<(u8, u8), Described> = HashMap::new();
+        for blanking in [false, true] {
+            developer_positions |= walk_messages(&mut out[..end], start, fields, &mut described, blanking)?;
         }
         let crc = crc16(&out[at..end]);
         out[end..end + 2].copy_from_slice(&crc.to_le_bytes());
         at = end + 2;
     }
-    Ok(out)
+    Ok((out, developer_positions))
+}
+
+/// Read the messages of one file of a chain (`out[start..]`, its data up to `out.len()`). The first
+/// pass (`blanking` false) only gathers every `field_description` into `described`; the second blanks
+/// the profile fields in `profile` and every developer field that holds a position, and says whether
+/// there was one.
+fn walk_messages(
+    out: &mut [u8],
+    start: usize,
+    profile: &BTreeSet<(u16, u8)>,
+    described: &mut HashMap<(u8, u8), Described>,
+    blanking: bool,
+) -> Result<bool> {
+    let end = out.len();
+    let mut defs: HashMap<u8, Definition> = HashMap::new();
+    let mut developer_positions = false;
+    let mut p = start;
+    while p < end {
+        let head = out[p];
+        p += 1;
+        if head & 0xC0 == 0x40 {
+            // a definition message
+            let local = head & 0x0F;
+            if p + 5 > end {
+                return Err(layout());
+            }
+            let big_endian = out[p + 1] == 1;
+            let g = [out[p + 2], out[p + 3]];
+            let global = if big_endian {
+                u16::from_be_bytes(g)
+            } else {
+                u16::from_le_bytes(g)
+            };
+            let n = usize::from(out[p + 4]);
+            p += 5;
+            if p + 3 * n > end {
+                return Err(layout());
+            }
+            let fields: Vec<(u8, usize, u8)> = (0..n)
+                .map(|i| (out[p + 3 * i], usize::from(out[p + 3 * i + 1]), out[p + 3 * i + 2]))
+                .collect();
+            p += 3 * n;
+            let mut developer = Vec::new();
+            if head & 0x20 != 0 {
+                if p >= end {
+                    return Err(layout());
+                }
+                let m = usize::from(out[p]);
+                p += 1;
+                if p + 3 * m > end {
+                    return Err(layout());
+                }
+                developer = (0..m)
+                    .map(|i| (out[p + 3 * i], usize::from(out[p + 3 * i + 1]), out[p + 3 * i + 2]))
+                    .collect();
+                p += 3 * m;
+            }
+            defs.insert(
+                local,
+                Definition {
+                    global,
+                    big_endian,
+                    fields,
+                    developer,
+                },
+            );
+            continue;
+        }
+        // a data message: a compressed timestamp header names its local type in bits 5 and 6
+        let local = if head & 0x80 != 0 {
+            (head >> 5) & 0x03
+        } else {
+            head & 0x0F
+        };
+        let def = defs.get(&local).ok_or_else(layout)?;
+        let mut description: [Option<u8>; 3] = [None; 3];
+        let (mut name, mut native_mesg, mut native_field) = (None, None, None);
+        for &(num, size, base) in &def.fields {
+            if p + size > end {
+                return Err(layout());
+            }
+            let value = &mut out[p..p + size];
+            if def.global == FIELD_DESCRIPTION && !blanking {
+                match num {
+                    0..=2 if size >= 1 => description[usize::from(num)] = Some(value[0]),
+                    3 => {
+                        let s = value.split(|b| *b == 0).next().unwrap_or_default();
+                        name = Some(String::from_utf8_lossy(s).into_owned());
+                    }
+                    NATIVE_MESG if size >= 2 => {
+                        let b = [value[0], value[1]];
+                        let m = if def.big_endian {
+                            u16::from_be_bytes(b)
+                        } else {
+                            u16::from_le_bytes(b)
+                        };
+                        native_mesg = (m != u16::MAX).then_some(m);
+                    }
+                    NATIVE_FIELD if size >= 1 => native_field = (value[0] != u8::MAX).then_some(value[0]),
+                    _ => {}
+                }
+            }
+            if blanking && profile.contains(&(def.global, num)) {
+                blank(value, base, def.big_endian);
+            }
+            p += size;
+        }
+        for &(num, size, index) in &def.developer {
+            if p + size > end {
+                return Err(layout());
+            }
+            if blanking
+                && let Some(d) = described.get(&(index, num))
+                && d.position(def.global)
+            {
+                blank(&mut out[p..p + size], d.base, def.big_endian);
+                developer_positions = true;
+            }
+            p += size;
+        }
+        if let [Some(index), Some(num), Some(base)] = description {
+            // one field described twice in a file: a position if either description says so
+            let d = described.entry((index, num)).or_insert(Described {
+                base,
+                named: false,
+                natives: Vec::new(),
+            });
+            d.named |= name.as_deref().is_some_and(|n| is_position(n, true));
+            d.natives.extend(native_field.map(|f| (native_mesg, f)));
+        }
+    }
+    Ok(developer_positions)
 }
 
 /// The FIT protocol's CRC-16 of `bytes`.
@@ -630,11 +756,12 @@ pub fn samples(read: &Read, latest: DateTime<Utc>) -> (Vec<Sample>, BTreeMap<&'s
             bump("bad_time", values);
             continue;
         }
-        // two activities of one file that start together: the first one counts
-        if !starts.insert(start) {
+        // two activities of one file that start together: the first one that brings a sample counts
+        if starts.contains(&start) {
             bump("duplicate", values);
             continue;
         }
+        let before = out.len();
         if has_distance {
             let km = s.distance_m.unwrap_or_default() / 1000.0;
             let walking = s.sport.as_deref().is_some_and(|sp| DISTANCE_SPORTS.contains(&sp));
@@ -667,6 +794,10 @@ pub fn samples(read: &Read, latest: DateTime<Utc>) -> (Vec<Sample>, BTreeMap<&'s
             } else {
                 bump("bad_value", 1);
             }
+        }
+        // an activity that brought nothing (a ride's distance, values out of range) keeps no start
+        if out.len() > before {
+            starts.insert(start);
         }
     }
     (out, reasons)
@@ -796,9 +927,11 @@ async fn import_read(
         "energy": count("active_energy"),
         "device": device.name,
     });
-    // an import again reads the stored copy, which holds no position: what the upload said stays
+    // an import again reads the stored copy, which holds no position: what the upload said stays. A
+    // document of the same bytes stored before under another type (a photo's name) holds wearables now.
     let gps_left_out: bool = sqlx::query_scalar(
-        "update document set collected_at = coalesce($2, collected_at), flags = flags || jsonb_build_object('fit', \
+        "update document set doc_type = $5, collected_at = coalesce($2, collected_at), \
+         flags = flags || jsonb_build_object('fit', \
          $3::jsonb || jsonb_build_object('gps_left_out', coalesce((flags->'fit'->>'gps_left_out')::boolean, false) or $4)) \
          where id = $1 returning (flags->'fit'->>'gps_left_out')::boolean",
     )
@@ -806,6 +939,7 @@ async fn import_read(
     .bind(started)
     .bind(&holds)
     .bind(read.positions)
+    .bind(WEARABLES_DOC_TYPE)
     .fetch_one(&mut *conn)
     .await?;
     let mut summary = ImportSummary::new(document_id.to_string());
@@ -858,14 +992,21 @@ async fn import_upload(ctx: &JobContext, job: &Job, channel: &str, source_id: Op
     let gzipped = raw.starts_with(&[0x1f, 0x8b]);
     let (read, kept) = blocking(move || {
         let bytes = unpack(raw)?;
-        let read = read_fit(&bytes)?;
-        let kept = strip(&bytes, &read.position_fields)?;
+        let mut read = read_fit(&bytes)?;
+        let (kept, developer_positions) = strip(&bytes, &read.position_fields)?;
+        // a developer field described after its values, or named neutrally, is a position only strip sees
+        read.positions |= developer_positions;
         Ok((read, kept))
     })
     .await
     .map_err(job_error)?;
     let (all, reasons) = activity(&read).map_err(job_error)?;
-    let kept_sha = ctx.blobs.put_bytes(&kept).map_err(|e| JobError::from(Error::from(e)))?;
+    // the write syncs the file to disk: off the async threads too; a disk error may heal on a retry
+    let blobs = ctx.blobs.clone();
+    let kept_sha = tokio::task::spawn_blocking(move || blobs.put_bytes(&kept))
+        .await
+        .map_err(|e| JobError::from(Error::Other(anyhow::anyhow!("FIT write task failed: {e}"))))?
+        .map_err(|e| JobError::from(Error::from(e)))?;
     let mut stored = payload.clone();
     stored["blob_sha256"] = json!(kept_sha);
     // the stored copy is the plain file: a .fit.gz upload keeps its name without .gz
@@ -887,16 +1028,24 @@ async fn import_upload(ctx: &JobContext, job: &Job, channel: &str, source_id: Op
 }
 
 /// Delete uploaded FIT bytes from the blob store unless another row still holds them: a document, an
-/// inbox item, a held mail, or another import of them that is still queued or running.
+/// inbox item, a held mail, or another import of them that is still queued or running and has not let
+/// them go. A job lets them go first (`upload_released` in its payload: it has stored its copy or been
+/// refused for good, so it never reads them again), then looks. Of two imports that end together, the
+/// one that looks last sees the other let go, so the last one deletes the upload, although a worker
+/// marks a job done only after its handler returns.
 async fn forget_upload(ctx: &JobContext, sha: &str, job_id: i64) {
     let done: Result<()> = async {
         let mut conn = ctx.pool.acquire().await?;
+        sqlx::query("update job set payload = payload || '{\"upload_released\": true}'::jsonb where id = $1")
+            .bind(job_id)
+            .execute(&mut *conn)
+            .await?;
         let held: bool = sqlx::query_scalar(
             "select exists (select 1 from document where blob_sha256 = decode($1, 'hex')) \
              or exists (select 1 from source_item where blob_sha256 = decode($1, 'hex')) \
              or exists (select 1 from quarantine_item where raw_blob = decode($1, 'hex')) \
              or exists (select 1 from job where id <> $2 and state in ('queued', 'running') \
-                and payload->>'blob_sha256' = $1)",
+                and payload->>'blob_sha256' = $1 and payload->'upload_released' is null)",
         )
         .bind(sha)
         .bind(job_id)
