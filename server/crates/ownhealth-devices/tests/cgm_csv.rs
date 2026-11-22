@@ -459,3 +459,352 @@ async fn an_export_without_a_glucose_column_fails_for_good_and_writes_nothing() 
     );
     Ok(())
 }
+
+/// A Clarity export with these EGV rows: (local time, source device id, mg/dL).
+fn clarity_rows(rows: &[(String, String, u32)]) -> Vec<u8> {
+    let mut text = String::from(
+        "Index,Timestamp (YYYY-MM-DDThh:mm:ss),Event Type,Event Subtype,Patient Info,Device Info,Source Device ID,\
+         Glucose Value (mg/dL),Insulin Value (u),Carb Value (grams),Duration (hh:mm:ss),\
+         Glucose Rate of Change (mg/dL/min),Transmitter Time (Long Integer),Transmitter ID\n",
+    );
+    for (i, (t, dev, v)) in rows.iter().enumerate() {
+        text.push_str(&format!(
+            "{},{t},EGV,,,,{dev},{v},,,,,{},8M4TQZ\n",
+            i + 1,
+            9_000_000 + 300 * i
+        ));
+    }
+    text.into_bytes()
+}
+
+/// The install-wide wearable source counter: (last value, called).
+async fn source_counter(env: &Env) -> anyhow::Result<(i64, bool)> {
+    Ok(
+        sqlx::query_as("select last_value, is_called from wearable_source_id_seq")
+            .fetch_one(&env.db.pool)
+            .await?,
+    )
+}
+
+#[tokio::test]
+async fn a_file_that_names_too_many_sensors_is_refused_before_it_writes() -> R {
+    let env = Env::new().await?;
+    // every reading from its own "sensor": each would take a wearable source id of the whole install
+    let rows: Vec<(String, String, u32)> = (0..33)
+        .map(|k| {
+            (
+                format!("2026-11-14T{:02}:{:02}:00", 8 + k / 12, 5 * (k % 12)),
+                format!("dev-{k}"),
+                100,
+            )
+        })
+        .collect();
+    let before = source_counter(&env).await?;
+    let (_, id) = upload(&env, "lucia", "many.csv", &clarity_rows(&rows)).await?;
+    let (state, _, err) = job(&env, id).await?;
+    assert_eq!(state, "dead", "{err:?}");
+    assert!(
+        err.as_deref().unwrap_or_default().contains("more than 32 sensors"),
+        "{err:?}"
+    );
+    // nothing was written, and the counter of source ids did not move
+    assert_eq!(source_counter(&env).await?, before);
+    assert_eq!(
+        env.count(
+            "select count(*) from wearable_source where profile_id = $1",
+            env.fam.profile("lucia")
+        )
+        .await?,
+        0
+    );
+    // 32 sensors is still a file
+    let (_, id) = upload(&env, "lucia", "ok.csv", &clarity_rows(&rows[..32])).await?;
+    assert_eq!(job(&env, id).await?.0, "done");
+    Ok(())
+}
+
+#[test]
+fn device_names_and_serials_from_the_file_are_cut() -> R {
+    let long = "G".repeat(300);
+    let mut text = String::from_utf8(fixture("libreview-en-mgdl.csv")?)?;
+    text = text
+        .replace("FreeStyle Libre 3", &long)
+        .replace("0B5A1C2D-7E3F-4A90-8C61-5D2E0F1A9C3B", &long);
+    let p = cgm_csv::parse(text.as_bytes())?;
+    assert_eq!(p.devices.len(), 1);
+    assert_eq!(p.devices[0].name.chars().count(), 80);
+    assert_eq!(p.devices[0].external_id.as_deref().map(|s| s.chars().count()), Some(80));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_file_cut_inside_its_last_reading_counts_it_as_cut() -> R {
+    let env = Env::new().await?;
+    // LibreView cut inside the value 131 of its fifth reading: the last record is "...,0,13"
+    let text = String::from_utf8(fixture("libreview-en-mgdl.csv")?)?;
+    let at = text.find(",0,131,").map(|i| i + ",0,13".len()).unwrap_or_default();
+    let (_, id) = upload(&env, "lucia", "libre-cut.csv", &text.as_bytes()[..at]).await?;
+    let (state, result, err) = job(&env, id).await?;
+    assert_eq!(state, "done", "{err:?}");
+    assert_eq!(result["accepted"], json!(4), "{result}");
+    assert_eq!(result["reasons"], json!({"cut_row": 1}), "{result}");
+    assert!(!values(&readings(&env, "lucia").await?).contains(&13.0));
+    // Clarity cut inside its last reading, 133
+    let env = Env::new().await?;
+    let text = String::from_utf8(fixture("clarity-en-mgdl.csv")?)?;
+    let at = text
+        .find("Android G7,133,")
+        .map(|i| i + "Android G7,13".len())
+        .unwrap_or_default();
+    let (_, id) = upload(&env, "lucia", "clarity-cut.csv", &text.as_bytes()[..at]).await?;
+    let (_, result, _) = job(&env, id).await?;
+    assert_eq!(result["accepted"], json!(7), "{result}");
+    assert_eq!(result["reasons"]["cut_row"], json!(1), "{result}");
+    assert!(!values(&readings(&env, "lucia").await?).contains(&13.0));
+    // a whole last row without a final line break is a reading, and so is one cut after its value
+    let env = Env::new().await?;
+    let mut bytes = clarity_rows(&[("2026-11-14T08:00:00".into(), "iOS G7".into(), 101)]);
+    bytes.pop();
+    let (_, id) = upload(&env, "lucia", "no-newline.csv", &bytes).await?;
+    let (_, result, _) = job(&env, id).await?;
+    assert_eq!(
+        (result["accepted"].clone(), result["reasons"].clone()),
+        (json!(1), json!({})),
+        "{result}"
+    );
+    let env = Env::new().await?;
+    let at = text
+        .find("Android G7,133,")
+        .map(|i| i + "Android G7,133,,".len())
+        .unwrap_or_default();
+    let (_, id) = upload(&env, "lucia", "cut-after.csv", &text.as_bytes()[..at]).await?;
+    let (_, result, _) = job(&env, id).await?;
+    assert_eq!(result["accepted"], json!(8), "{result}");
+    Ok(())
+}
+
+/// Enqueue the upload job of a stored blob as the upload route does, with the browser's zone.
+async fn upload_in_zone(env: &Env, slug: &str, name: &str, bytes: &[u8], zone: &str) -> anyhow::Result<Value> {
+    let sha = env.blobs.put_bytes(bytes)?;
+    let mut c = env.db.pool.acquire().await?;
+    let id = jobs::enqueue(
+        &mut c,
+        cgm_csv::JOB,
+        &json!({
+            "profile_id": env.fam.profile(slug).to_string(),
+            "household_id": env.fam.household_id.to_string(),
+            "blob_sha256": sha,
+            "filename": name,
+            "timezone": zone,
+        }),
+        jobs::EnqueueOptions::default(),
+    )
+    .await?;
+    drop(c);
+    let (state, result, err) = job(env, id).await?;
+    assert_eq!(state, "done", "{err:?}");
+    Ok(result)
+}
+
+#[tokio::test]
+async fn the_browser_zone_reads_the_times_when_the_server_has_none() -> R {
+    let env = Env::new().await?;
+    let result = upload_in_zone(
+        &env,
+        "lucia",
+        "clarity.csv",
+        &fixture("clarity-en-mgdl.csv")?,
+        "Europe/Madrid",
+    )
+    .await?;
+    assert_eq!(result["cgm_csv"]["timezone"], json!("Europe/Madrid"), "{result}");
+    let r = readings(&env, "lucia").await?;
+    // 20:00:17 in Madrid in November is 19:00:17 UTC (CET, +60)
+    assert_eq!(r[0], (utc(2026, 11, 14, 19, 0, 17), 120.0, Some(60)));
+    let flags: Value = sqlx::query_scalar("select flags->'cgm_csv'->'timezone' from document where profile_id = $1")
+        .bind(env.fam.profile("lucia"))
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(flags, json!("Europe/Madrid"));
+    // a zone Postgres does not know is no zone: the job reads the times as UTC
+    let env = Env::new().await?;
+    let result = upload_in_zone(
+        &env,
+        "lucia",
+        "clarity.csv",
+        &fixture("clarity-en-mgdl.csv")?,
+        "Mars/Olympus",
+    )
+    .await?;
+    assert_eq!(result["cgm_csv"]["timezone"], Value::Null, "{result}");
+    assert_eq!(readings(&env, "lucia").await?[0].0, utc(2026, 11, 14, 20, 0, 17));
+    Ok(())
+}
+
+/// Each reading of the profile's CGM exports with the file that owns it.
+async fn owned(env: &Env, slug: &str) -> anyhow::Result<Vec<(String, DateTime<Utc>, f32)>> {
+    Ok(sqlx::query_as(
+        "select d.filename, s.t, s.v from wearable_sample s join document d on d.id = s.document_id \
+         where s.profile_id = $1 and s.metric = 'glucose_cgm' order by d.filename, s.t",
+    )
+    .bind(env.fam.profile(slug))
+    .fetch_all(&env.db.pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn the_same_file_again_in_another_zone_replaces_its_readings() -> R {
+    let env = Env::new().await?;
+    let bytes = fixture("clarity-en-mgdl.csv")?;
+    import_in_zone(&env, "lucia", &bytes, None).await?;
+    assert_eq!(readings(&env, "lucia").await?[0].0, utc(2026, 11, 14, 20, 0, 17));
+    // the browser now says Madrid: the file is read again in Madrid and keeps one copy of each reading
+    let result = import_in_zone(&env, "lucia", &bytes, Some("Europe/Madrid")).await?;
+    assert_eq!(result["accepted"], json!(8), "{result}");
+    let r = readings(&env, "lucia").await?;
+    assert_eq!(r.len(), 8, "{r:?}");
+    assert_eq!(r[0], (utc(2026, 11, 14, 19, 0, 17), 120.0, Some(60)));
+    assert!(r.iter().all(|x| x.2 == Some(60)), "{r:?}");
+    let flags: Value = sqlx::query_scalar("select flags from document where profile_id = $1")
+        .bind(env.fam.profile("lucia"))
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(flags["cgm_csv"]["timezone"], json!("Europe/Madrid"), "{flags}");
+    assert_eq!(flags["cgm_csv"]["replaced"], json!(8), "{flags}");
+    assert_eq!(flags["import"]["accepted"], json!(8), "{flags}");
+    // the same zone again changes nothing
+    let result = import_in_zone(&env, "lucia", &bytes, Some("Europe/Madrid")).await?;
+    assert_eq!(result["reasons"]["duplicate"], json!(8), "{result}");
+    assert_eq!(readings(&env, "lucia").await?.len(), 8);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_retraction_after_a_zone_change_reads_the_others_in_their_own_zone() -> R {
+    let env = Env::new().await?;
+    // two exports read in Madrid; then the zone of a new run changes (here: none), and one is retracted
+    import_in_zone(&env, "lucia", &fixture("clarity-en-mgdl.csv")?, Some("Europe/Madrid")).await?;
+    let sha = env.blobs.put_bytes(&fixture("libreview-en-mgdl.csv")?)?;
+    let mut c = env.db.pool.acquire().await?;
+    let other = ownhealth_ingest_structured::jobs::document_for(
+        &mut c,
+        &env.blobs,
+        &json!({"profile_id": env.fam.profile("lucia").to_string(), "household_id": env.fam.household_id.to_string(),
+                "blob_sha256": sha, "filename": "libre.csv"}),
+        "text/csv",
+        "upload",
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    cgm_csv::import_cgm_csv(&mut c, &env.blobs, other, None, Some("Europe/Madrid")).await?;
+    let before = owned(&env, "lucia").await?;
+    assert_eq!(before.len(), 8 + 13);
+    sqlx::query("update document set status = 'retracted' where id = $1")
+        .bind(other)
+        .execute(&mut *c)
+        .await?;
+    ownhealth_ingest_structured::retract::retract_document_facts(&mut c, other, "wrong file").await?;
+    drop(c);
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    // the Clarity export is read again in Madrid, the zone of its file: nothing moves, nothing doubles
+    let after = owned(&env, "lucia").await?;
+    let clarity: Vec<_> = before.into_iter().filter(|x| x.0 == "clarity.csv").collect();
+    assert_eq!(after, clarity);
+    Ok(())
+}
+
+/// The English Clarity fixture with two more readings, and 99 instead of 150 at 20:40:17.
+fn clarity_longer_with_another_value() -> anyhow::Result<Vec<u8>> {
+    let text = String::from_utf8(clarity_with_more(2)?)?;
+    Ok(text.replace("Android G7,150,", "Android G7,99,").into_bytes())
+}
+
+#[tokio::test]
+async fn the_first_file_keeps_a_reading_another_file_holds_with_another_value() -> R {
+    let env = Env::new().await?;
+    import(&env, "clarity-en-mgdl.csv").await?;
+    let (_, id) = upload(&env, "lucia", "longer.csv", &clarity_longer_with_another_value()?).await?;
+    let (_, result, _) = job(&env, id).await?;
+    assert_eq!(result["accepted"], json!(2), "{result}");
+    let t = utc(2026, 11, 14, 20, 40, 17);
+    let r = owned(&env, "lucia").await?;
+    assert_eq!(
+        r.iter().filter(|x| x.1 == t).collect::<Vec<_>>(),
+        vec![&("clarity-en-mgdl.csv".to_string(), t, 150.0)]
+    );
+    // retracting the longer file leaves every reading of the first one where it was
+    let longer: Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'longer.csv'")
+        .bind(env.fam.profile("lucia"))
+        .fetch_one(&env.db.pool)
+        .await?;
+    let mut c = env.db.pool.acquire().await?;
+    sqlx::query("update document set status = 'retracted' where id = $1")
+        .bind(longer)
+        .execute(&mut *c)
+        .await?;
+    ownhealth_ingest_structured::retract::retract_document_facts(&mut c, longer, "wrong file").await?;
+    drop(c);
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    let first: Vec<_> = r.into_iter().filter(|x| x.0 == "clarity-en-mgdl.csv").collect();
+    assert_eq!(first.len(), 8);
+    assert_eq!(owned(&env, "lucia").await?, first);
+    Ok(())
+}
+
+#[tokio::test]
+async fn retracting_a_cgm_export_queues_no_other_csv_document() -> R {
+    use ownhealth_ingest_structured::apple_health::synthetic::{ExportSpec, write_export_to};
+    let env = Env::new().await?;
+    // an Apple Health export whose ECGs become text/csv documents of the profile
+    let mut zip = std::io::Cursor::new(Vec::new());
+    write_export_to(
+        &mut zip,
+        &ExportSpec {
+            days: 2,
+            end: chrono::NaiveDate::from_ymd_opt(2026, 11, 7).unwrap_or_default(),
+            birth_date: chrono::NaiveDate::from_ymd_opt(2017, 6, 21).unwrap_or_default(),
+            ecg_count: 1,
+            ..ExportSpec::default()
+        },
+    )?;
+    let (kind, id) = upload(&env, "lucia", "export.zip", &zip.into_inner()).await?;
+    assert_eq!(kind, "apple_health_zip");
+    assert_eq!(job(&env, id).await?.0, "done");
+    let ecg: Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and doc_type = 'ecg'")
+        .bind(env.fam.profile("lucia"))
+        .fetch_one(&env.db.pool)
+        .await?;
+    // an ECG carries no import summary today; give it one, as a later CSV importer would, so only the
+    // cgm_csv flag tells it apart from a CGM export
+    sqlx::query("update document set flags = flags || '{\"import\": {\"accepted\": 0}}' where id = $1")
+        .bind(ecg)
+        .execute(&env.db.pool)
+        .await?;
+    import(&env, "clarity-en-mgdl.csv").await?;
+    let (_, id) = upload(&env, "lucia", "libre.csv", &fixture("libreview-en-mgdl.csv")?).await?;
+    assert_eq!(job(&env, id).await?.0, "done");
+    let libre: Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'libre.csv'")
+        .bind(env.fam.profile("lucia"))
+        .fetch_one(&env.db.pool)
+        .await?;
+    let mut c = env.db.pool.acquire().await?;
+    sqlx::query("update document set status = 'retracted' where id = $1")
+        .bind(libre)
+        .execute(&mut *c)
+        .await?;
+    ownhealth_ingest_structured::retract::retract_document_facts(&mut c, libre, "wrong file").await?;
+    let queued: Vec<String> = sqlx::query_scalar(
+        "select payload->>'document_id' from job where kind = 'import.cgm_csv' and payload ? 'document_id' \
+         and state = 'queued'",
+    )
+    .fetch_all(&mut *c)
+    .await?;
+    let clarity: Uuid =
+        sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'clarity-en-mgdl.csv'")
+            .bind(env.fam.profile("lucia"))
+            .fetch_one(&mut *c)
+            .await?;
+    // the other CGM export is read again; the ECG is not a CGM export and is left alone
+    assert_eq!(queued, vec![clarity.to_string()]);
+    Ok(())
+}

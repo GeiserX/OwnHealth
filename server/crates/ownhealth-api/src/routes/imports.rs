@@ -2,9 +2,14 @@
 //! output) and the import jobs they start.
 //!
 //! ```text
-//! POST /api/imports   multipart: profile, files (one or more)
+//! POST /api/imports   multipart: profile, files (one or more), timezone (optional, the browser's IANA zone)
 //! GET  /api/jobs      ?ids=1,2,3&limit=50   import jobs of the caller's profiles, newest first
 //! ```
+//!
+//! `timezone` reads a CGM export's wall-clock times when the server has no `OWNHEALTH_TIMEZONE`; a zone
+//! the time zone database does not know is refused (422 `unknown_timezone`) before anything is stored.
+//! A job whose result holds wearables data (`import.cgm_csv`, `import.gadgetbridge`) shows its result
+//! only to a caller with `read:wearables` on its profile; the others see the job without it.
 //!
 //! Files are spooled to disk while the form is read, then land in the blob store once the caller may
 //! import on the profile; the dispatcher creates documents and enqueues each lane's import job.
@@ -17,7 +22,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use ownhealth_core::access::accessible_profiles;
 use ownhealth_core::audit::{AuditEvent, write_audit};
-use ownhealth_core::documents::{StoredFile, dispatch_upload};
+use ownhealth_core::documents::{StoredFile, dispatch_upload_in_zone};
 use ownhealth_core::pyjson::row_to_json;
 use ownhealth_core::{Error, Runtime, ids};
 use serde_json::{Value, json};
@@ -84,6 +89,7 @@ async fn spool(field: &mut axum::extract::multipart::Field<'_>, path: &std::path
 async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Json<Value>> {
     let principal = &caller.0;
     let mut profile: Option<String> = None;
+    let mut timezone: Option<String> = None;
     let mut files: Vec<Spool> = Vec::new();
     // a body that is not multipart has neither field, which FastAPI reports as two missing fields
     if let Ok(mut form) = Multipart::from_request(req, &rt).await {
@@ -102,6 +108,10 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
                 Some("profile") => {
                     let bytes = read_capped(&mut field).await?;
                     profile = Some(String::from_utf8(bytes).map_err(|_| bad_body())?);
+                }
+                Some("timezone") if !is_file => {
+                    let bytes = read_capped(&mut field).await?;
+                    timezone = Some(String::from_utf8(bytes).map_err(|_| bad_body())?);
                 }
                 Some("files") => {
                     let filename = field
@@ -139,6 +149,17 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
 
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &profile, None, Some("import")).await?;
+    let asked = timezone.as_deref().map(str::trim).filter(|z| !z.is_empty());
+    let zone = ownhealth_devices::cgm_csv::known_zone(&mut tx, asked.filter(|z| z.len() <= 64)).await?;
+    if let Some(z) = asked
+        && zone.is_none()
+    {
+        return Err(Fail::Api(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown_timezone",
+            format!("unknown time zone {:?}", z.chars().take(64).collect::<String>()),
+        )));
+    }
     let mut stored = Vec::with_capacity(files.len());
     for f in &files {
         let blobs = rt.blobs.clone();
@@ -154,13 +175,14 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
         });
     }
     drop(files);
-    let result = match dispatch_upload(
+    let result = match dispatch_upload_in_zone(
         &mut tx,
         &rt.blobs,
         perm.profile.household_id,
         perm.profile.id,
         &stored,
         principal.user_id,
+        zone.as_deref(),
     )
     .await
     {
@@ -195,6 +217,9 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     Ok(Json(result))
 }
 
+/// The job kinds whose result holds wearables data: shown with `read:wearables` on the profile only.
+const WEARABLE_RESULTS: [&str; 2] = ["import.cgm_csv", "import.gadgetbridge"];
+
 /// Import jobs of the caller's profiles, newest first; `ids=1,2,3` to poll specific ones.
 async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>) -> R<Json<Value>> {
     let mut e = Errors::new();
@@ -208,9 +233,11 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
             .collect()
     });
     let mut tx = rt.pool.begin().await?;
-    let pids: Vec<String> = accessible_profiles(&mut tx, &caller.0)
-        .await?
+    let perms = accessible_profiles(&mut tx, &caller.0).await?;
+    let pids: Vec<String> = perms.iter().map(|p| p.profile.id.to_string()).collect();
+    let wearables: Vec<String> = perms
         .iter()
+        .filter(|p| p.has("read:wearables"))
         .map(|p| p.profile.id.to_string())
         .collect();
     let rows = sqlx::query(
@@ -232,6 +259,12 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         .collect::<Result<Vec<_>, _>>()?;
     for j in &mut jobs {
         pydantic_datetimes(j, &["created_at", "finished_at"]);
+        // what a wearables import brought (counts, sensors, Low and High) is wearables data
+        let kind = j.get("kind").and_then(Value::as_str).unwrap_or_default();
+        let profile = j.get("profile_id").and_then(Value::as_str).unwrap_or_default();
+        if WEARABLE_RESULTS.contains(&kind) && !wearables.iter().any(|w| w == profile) {
+            j["result"] = Value::Null;
+        }
     }
     Ok(Json(json!({"jobs": jobs})))
 }

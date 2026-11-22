@@ -163,6 +163,7 @@ register_accept_handler(kind, AcceptHandler)       // section 6
 // documents
 sniff(filename, head, blob_path) -> &'static str; create_document(conn, &NewDocument) -> DocumentRef
 dispatch_upload(conn, &BlobStore, household, profile, &[StoredFile], actor) -> Value   // {"items": [...]}
+dispatch_upload_in_zone(conn, &BlobStore, household, profile, &[StoredFile], actor, zone) -> Value   // the browser's zone, carried by a CGM job (`timezone`)
 sensitive_document_sql(doc) -> String; document_is_sensitive(conn, id) -> bool
 // audit
 write_audit(conn, &AuditEvent) -> i64; hash_arg(value) -> "h:<12 hex>"; list_audit(conn, profiles, actor, limit, before)
@@ -497,7 +498,8 @@ job "ocr.document" on queue "ocr": {document_id, pages, why}; writes ocr_run, wo
 hae::import_push(conn, &BlobStore, &Source, body) -> Result<RunOutcome>
 gadgetbridge job "import.gadgetbridge" (core sniffs "SQLite format 3\0" as gadgetbridge_db)
 cgm_csv job "import.cgm_csv" (core sniffs the header row as libreview_csv or dexcom_clarity_csv; v1.0 slice 28)
-cgm_csv::import_cgm_csv(conn, &BlobStore, document_id, source_id, zone) -> Result<(ImportSummary, Value)>
+cgm_csv::import_cgm_csv(conn, &BlobStore, document_id, source_id, zone) -> Result<(ImportSummary, Value)>   // an upload; another zone replaces the file's readings
+cgm_csv::import_cgm_csv_again(conn, &BlobStore, document_id, source_id, fallback) -> Result<(ImportSummary, Value)>   // in the file's own zone
 nightscout::poll_nightscout(JobContext, Source)          // poller "nightscout"
 cgm::summarize(&[(DateTime, f64)], start, end, interval_minutes) -> Result<CgmSummary>
 cgm::cgm_summary(conn, profile_id, end, days) -> Result<CgmSummary>

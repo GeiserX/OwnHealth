@@ -25,20 +25,33 @@
 //! (`below_sensor_range`, `above_sensor_range`).
 //!
 //! Times: the exports print local wall-clock times without an offset. They are read in the install's
-//! time zone (`OWNHEALTH_TIMEZONE`, the zone the MCP day budget already uses) with Postgres's zone
-//! rules, and each reading keeps the offset that applied (`tz_offset_min`). Without that setting, or
-//! with a zone Postgres does not know, a time is read as UTC and keeps no offset: the rule the PDF and
-//! FHIR importers apply to a time without an offset. On the night the clocks go back, the times of the
-//! repeated hour are ambiguous: those readings are counted (`ambiguous_time`), not guessed. A time in the
-//! hour the clocks skip in spring is not a local time (`nonexistent_time`). Two readings of one sensor at
-//! one instant keep the first (`repeated_time`).
+//! time zone (`OWNHEALTH_TIMEZONE`, the zone the MCP day budget already uses) when it is set, else in
+//! the zone the browser sent with the upload (`timezone` in the job payload), with Postgres's zone
+//! rules, and each reading keeps the offset that applied (`tz_offset_min`). A zone Postgres does not
+//! know is no zone. With neither, a time is read as UTC and keeps no offset: the rule the PDF and FHIR
+//! importers apply to a time without an offset. The zone used is a property of the file
+//! (`flags.cgm_csv.timezone`): an import again after a retraction reads the file in that zone, and the
+//! same file uploaded again in another zone has its own readings replaced, so one copy stays, at the
+//! new instants. On the night the clocks go back, the times of the repeated hour are ambiguous: those
+//! readings are counted (`ambiguous_time`), not guessed. A time in the hour the clocks skip in spring is
+//! not a local time (`nonexistent_time`). Two readings of one sensor at one instant keep the first
+//! (`repeated_time`).
+//!
+//! A file cut short (a download that stopped) ends without a line break inside its last row: when that
+//! row stops at or before the cell this importer reads, it is counted (`cut_row`), not read, so a value
+//! cut from 131 to 13 is never stored. A last row that holds every cell this importer reads stays a
+//! reading, line break or not.
+//!
+//! Each sensor of the file becomes a `wearable_source`, whose id is a counter of the whole install: a
+//! file that names more than [`MAX_DEVICES`] sensors is refused before anything is written. Device names
+//! and serials are cut to 80 characters.
 //!
 //! Re-import: `Conflict::Keep`, the first file to bring a reading owns it. The same file again, or a
 //! longer export that holds it, adds only readings that are not stored yet; the rest count as
 //! `duplicate`. Retracting a file queues the profile's other CGM exports for import again
 //! (`retract::retract_document_facts`), so the readings they share come back as theirs.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read as _;
 
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
@@ -69,7 +82,11 @@ pub const MAX_READINGS: usize = 5_000_000;
 pub const GLUCOSE_G_PER_MOL: f64 = 180.156;
 /// A number outside this range (mg/dL) is not a glucose reading.
 const PLAUSIBLE_MG_DL: (f64, f64) = (10.0, 1000.0);
-/// Unknown column names kept in the result, each cut to this many characters.
+/// Sensors one file may name. Each one takes a `wearable_source` id, a smallint counter shared by the
+/// whole install that a rolled-back import does not give back.
+pub const MAX_DEVICES: usize = 32;
+/// Unknown column names kept in the result; these, device names and serials are cut to `MAX_NAME`
+/// characters.
 const MAX_UNKNOWN: usize = 20;
 const MAX_NAME: usize = 80;
 /// Local times sent to Postgres at a time.
@@ -267,6 +284,11 @@ fn one_of(names: &[&str], key: &str) -> bool {
     names.contains(&key)
 }
 
+/// A name from the file, cut to `MAX_NAME` characters.
+fn cut(s: &str) -> String {
+    s.chars().take(MAX_NAME).collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     Time,
@@ -348,13 +370,7 @@ fn columns(vendor: Vendor, header: &csv::StringRecord) -> Result<Columns> {
             Some(Role::Glucose(u, t)) if !c.glucose.iter().any(|g| g.2 == t) => c.glucose.push((i, u, t)),
             Some(Role::Glucose(..)) | None => {
                 if c.unknown.len() < MAX_UNKNOWN {
-                    let shown: String = cell
-                        .trim()
-                        .trim_start_matches('\u{feff}')
-                        .chars()
-                        .take(MAX_NAME)
-                        .collect();
-                    c.unknown.push(shown);
+                    c.unknown.push(cut(cell.trim().trim_start_matches('\u{feff}')));
                 }
             }
             Some(Role::Known) => {}
@@ -432,13 +448,15 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
         .flexible(true)
         .trim(csv::Trim::All)
         .from_reader(text[offset..].as_bytes());
-    let mut records = rdr.records();
+    let mut records = rdr.records().peekable();
     let header = records
         .next()
         .ok_or_else(|| not_cgm("no header row"))?
         .map_err(|e| not_cgm(&e.to_string()))?;
     let cols = columns(vendor, &header)?;
     let (time_col, kind_col) = (cols.time.unwrap_or(0), cols.kind.unwrap_or(0));
+    // a download that stopped ends inside its last row, with no line break after it
+    let whole = text.ends_with(['\n', '\r']);
 
     let mut skipped: BTreeMap<&'static str, i64> = BTreeMap::new();
     let mut other_rows = 0i64;
@@ -447,9 +465,16 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
     // Clarity's header block: source device id -> device name
     let mut names: HashMap<String, String> = HashMap::new();
     let mut pending: Vec<(usize, String, f64)> = Vec::new();
-    for rec in records {
+    while let Some(rec) = records.next() {
         let rec = rec.map_err(|e| not_cgm(&e.to_string()))?;
         let cell = |i: Option<usize>| i.and_then(|i| rec.get(i)).unwrap_or("");
+        // the cut last row: shorter than the header, and it stops at or before the cell `i`
+        let cut_at = |i: usize| !whole && rec.len() < header.len() && i + 1 >= rec.len();
+        let last = records.peek().is_none();
+        if last && cut_at(time_col.max(kind_col)) {
+            bump(&mut skipped, "cut_row");
+            continue;
+        }
         let kind = cell(Some(kind_col));
         let (col, unit) = match vendor {
             Vendor::LibreView => {
@@ -471,7 +496,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
                     if one_of(CLARITY_DEVICE_ROW, &kind.to_lowercase()) {
                         let (src, info) = (cell(cols.device), cell(cols.device_info));
                         if !src.is_empty() && !info.is_empty() {
-                            names.entry(src.to_string()).or_insert_with(|| info.to_string());
+                            names.entry(cut(src)).or_insert_with(|| cut(info));
                         }
                     }
                     continue;
@@ -484,6 +509,10 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
                 (col, unit)
             }
         };
+        if last && cut_at(col) {
+            bump(&mut skipped, "cut_row");
+            continue;
+        }
         let mg = match glucose(cell(Some(col)), unit) {
             Glucose::Mg(v) => v,
             Glucose::Low => {
@@ -499,11 +528,20 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
                 continue;
             }
         };
-        let key = (cell(cols.device).to_string(), cell(cols.serial).to_string());
-        let device = *device_ids.entry(key.clone()).or_insert_with(|| {
-            devices.push(key);
-            devices.len() - 1
-        });
+        let key = (cut(cell(cols.device)), cut(cell(cols.serial)));
+        let device = match device_ids.get(&key) {
+            Some(d) => *d,
+            None => {
+                if devices.len() == MAX_DEVICES {
+                    return Err(Error::Upload(format!(
+                        "the export names more than {MAX_DEVICES} sensors: export one person's sensors, or a shorter period"
+                    )));
+                }
+                devices.push(key.clone());
+                device_ids.insert(key, devices.len() - 1);
+                devices.len() - 1
+            }
+        };
         pending.push((device, cell(Some(time_col)).to_string(), mg));
         if pending.len() > MAX_READINGS {
             return Err(Error::Upload(format!(
@@ -734,14 +772,82 @@ pub async fn instants(conn: &mut PgConnection, zone: Option<&str>, locals: &[Nai
     Ok(out)
 }
 
-/// Import a stored CGM export document into its profile, reading its local times in `zone`. Returns the
-/// summary and the details the import result shows (`cgm_csv`).
+/// The zone a run reads the file's times in.
+#[derive(Debug, Clone, Copy)]
+enum Read<'a> {
+    /// An upload, in this zone. A file read before in another zone has its own readings replaced; with
+    /// no zone at all, a file read before keeps its zone.
+    Upload(Option<&'a str>),
+    /// An import again of a stored document (a retraction elsewhere queued it): the zone the file was
+    /// first read in, or this one for a file never read.
+    Again(Option<&'a str>),
+}
+
+/// The zone an upload's times are read in: the server's (`OWNHEALTH_TIMEZONE`) when it is set, else the
+/// browser's, sent with the upload. Both are checked with [`known_zone`] first.
+pub fn zone_choice<'a>(server: Option<&'a str>, upload: Option<&'a str>) -> Option<&'a str> {
+    server.or(upload)
+}
+
+/// Import an uploaded CGM export document into its profile, reading its local times in `zone`. Returns
+/// the summary and the details the import result shows (`cgm_csv`). The same file read before in
+/// another zone has its own readings replaced (`replaced`, `replaced_timezone`).
 pub async fn import_cgm_csv(
     conn: &mut PgConnection,
     blobs: &BlobStore,
     document_id: Uuid,
     source_id: Option<Uuid>,
     zone: Option<&str>,
+) -> Result<(ImportSummary, Value)> {
+    import_in(conn, blobs, document_id, source_id, Read::Upload(zone)).await
+}
+
+/// Import a stored CGM export again (a retraction of another export queued it), in the zone its file
+/// was first read in (`flags.cgm_csv.timezone`); `fallback` for a file never read.
+pub async fn import_cgm_csv_again(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    document_id: Uuid,
+    source_id: Option<Uuid>,
+    fallback: Option<&str>,
+) -> Result<(ImportSummary, Value)> {
+    import_in(conn, blobs, document_id, source_id, Read::Again(fallback)).await
+}
+
+/// Delete the readings a document owns and rebuild the rollups they fed. Returns how many went.
+async fn delete_own(conn: &mut PgConnection, profile_id: Uuid, document_id: Uuid) -> Result<i64> {
+    let gone: Vec<(String, i16, DateTime<Utc>)> =
+        sqlx::query_as("delete from wearable_sample where document_id = $1 returning metric, source_id, t")
+            .bind(document_id)
+            .fetch_all(&mut *conn)
+            .await?;
+    let (Some(lo), Some(hi)) = (gone.iter().map(|g| g.2).min(), gone.iter().map(|g| g.2).max()) else {
+        return Ok(0);
+    };
+    let metrics: Vec<String> = gone
+        .iter()
+        .map(|g| g.0.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let sources: Vec<i16> = gone.iter().map(|g| g.1).collect::<BTreeSet<_>>().into_iter().collect();
+    ownhealth_ingest_structured::wearables::recompute_rollups_between(
+        &mut *conn,
+        profile_id,
+        Some(&metrics),
+        Some(&sources),
+        Some((lo, hi)),
+    )
+    .await?;
+    Ok(gone.len() as i64)
+}
+
+async fn import_in(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    document_id: Uuid,
+    source_id: Option<Uuid>,
+    read: Read<'_>,
 ) -> Result<(ImportSummary, Value)> {
     let (profile_id, sha, flags, status): (Option<Uuid>, String, Value, String) =
         sqlx::query_as("select profile_id, encode(blob_sha256, 'hex'), flags, status from document where id = $1")
@@ -754,8 +860,18 @@ pub async fn import_cgm_csv(
         s.reasons.insert("retracted".into(), 1);
         return Ok((s, Value::Null));
     }
+    // the zone the file was read in before, if it was read: Some(None) is UTC
+    let before: Option<Option<String>> = flags
+        .get("cgm_csv")
+        .filter(|d| d.is_object())
+        .map(|d| d.get("timezone").and_then(Value::as_str).map(str::to_string));
+    let (zone, replace): (Option<String>, bool) = match (read, &before) {
+        (Read::Upload(Some(z)), Some(b)) => (Some(z.to_string()), b.as_deref() != Some(z)),
+        (Read::Upload(None) | Read::Again(_), Some(b)) => (b.clone(), false),
+        (Read::Upload(z) | Read::Again(z), None) => (z.map(str::to_string), false),
+    };
     // imported before (the same file uploaded again): read again, and every reading counts as stored
-    let again = flags.get("import").is_some_and(Value::is_object);
+    let again = !replace && flags.get("import").is_some_and(Value::is_object);
     let profile_id = profile_id.ok_or_else(|| Error::Invalid("the document has no profile".into()))?;
     let profile = get_profile(&mut *conn, profile_id)
         .await?
@@ -774,6 +890,12 @@ pub async fn import_cgm_csv(
     let parsed = tokio::task::spawn_blocking(move || parse(&bytes))
         .await
         .map_err(|e| Error::Other(anyhow::anyhow!("CGM export read task failed: {e}")))??;
+    // read in another zone before: its readings leave, and the file brings them at the new instants
+    let replaced = if replace {
+        delete_own(&mut *conn, profile.id, document_id).await?
+    } else {
+        0
+    };
     let provider = parsed.vendor.provider();
     let mut sources = Vec::with_capacity(parsed.devices.len());
     for d in &parsed.devices {
@@ -790,7 +912,7 @@ pub async fn import_cgm_csv(
         );
     }
     let locals: Vec<NaiveDateTime> = parsed.readings.iter().map(|r| r.local).collect();
-    let at = instants(&mut *conn, zone, &locals).await?;
+    let at = instants(&mut *conn, zone.as_deref(), &locals).await?;
     let mut reasons = parsed.skipped.clone();
     let latest = Utc::now() + Duration::days(1);
     let mut seen: HashSet<(i16, DateTime<Utc>)> = HashSet::new();
@@ -825,17 +947,27 @@ pub async fn import_cgm_csv(
     summary.accepted = w.new;
     summary.skipped = reasons.values().sum();
     summary.reasons = reasons.into_iter().map(|(k, n)| (k.to_string(), n)).collect();
-    let details = json!({
+    // the readings this file holds now, for the document screen: its own, not those another file owns
+    let held: i64 = sqlx::query_scalar("select count(*) from wearable_sample where document_id = $1")
+        .bind(document_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let mut details = json!({
         "vendor": provider,
         "unit": parsed.unit.label(),
         "readings": w.new,
         "duplicates": w.duplicate(),
+        "held": held,
         "devices": parsed.devices.iter().map(|d| d.name.clone()).collect::<Vec<_>>(),
         "unknown_columns": parsed.unknown_columns,
         "other_rows": parsed.other_rows,
         "timezone": zone,
         "again": again,
     });
+    if replace {
+        details["replaced"] = json!(replaced);
+        details["replaced_timezone"] = json!(before.flatten());
+    }
     if !again {
         sqlx::query(
             "update document set flags = flags || jsonb_build_object('cgm_csv', cast($1 as jsonb)) where id = $2",
@@ -857,15 +989,22 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
         .to_string();
     let source_id = job.str("source_id").and_then(|s| Uuid::parse_str(s).ok());
     let mime = documents::mime("libreview_csv").unwrap_or("text/csv");
+    // a retraction queues `{document_id}`; an upload carries the blob and the browser's zone
+    let stored = job.str("document_id").is_some_and(|d| !d.is_empty());
     let mut tx = ctx.pool.begin().await?;
     let doc = document_for(&mut tx, &ctx.blobs, &job.payload, mime, &channel).await?;
-    let zone = known_zone(&mut tx, std::env::var("OWNHEALTH_TIMEZONE").ok().as_deref()).await?;
-    let (summary, details) = import_cgm_csv(&mut tx, &ctx.blobs, doc, source_id, zone.as_deref())
-        .await
-        .map_err(|e| match e {
-            Error::Upload(m) | Error::Invalid(m) => JobError::permanent(m),
-            other => JobError::from(other),
-        })?;
+    let server = known_zone(&mut tx, std::env::var("OWNHEALTH_TIMEZONE").ok().as_deref()).await?;
+    let done = if stored {
+        import_cgm_csv_again(&mut tx, &ctx.blobs, doc, source_id, server.as_deref()).await
+    } else {
+        let browser = known_zone(&mut tx, job.str("timezone")).await?;
+        let zone = zone_choice(server.as_deref(), browser.as_deref());
+        import_cgm_csv(&mut tx, &ctx.blobs, doc, source_id, zone).await
+    };
+    let (summary, details) = done.map_err(|e| match e {
+        Error::Upload(m) | Error::Invalid(m) => JobError::permanent(m),
+        other => JobError::from(other),
+    })?;
     tx.commit().await?;
     let mut out = summary.to_value();
     out["cgm_csv"] = details;
@@ -986,6 +1125,16 @@ mod tests {
             ]),
             vec![dt(2026, 11, 14, 6, 3), None, None, None, None]
         );
+    }
+
+    #[test]
+    fn the_server_zone_wins_over_the_browser_zone() {
+        assert_eq!(
+            zone_choice(Some("Europe/Madrid"), Some("America/New_York")),
+            Some("Europe/Madrid")
+        );
+        assert_eq!(zone_choice(None, Some("America/New_York")), Some("America/New_York"));
+        assert_eq!(zone_choice(None, None), None);
     }
 
     #[test]

@@ -689,9 +689,9 @@ pub async fn devices(
     until: DateTime<Utc>,
 ) -> Result<Vec<Value>> {
     let days = ((until.date_naive() - since.date_naive()).num_days() + 1).max(1);
-    type DeviceRow = (i16, String, Option<String>, Option<DateTime<Utc>>, f32);
+    type DeviceRow = (i16, String, Option<String>, Option<String>, Option<DateTime<Utc>>, f32);
     let rows: Vec<DeviceRow> = sqlx::query_as(
-        "select ws.id, ws.provider, ws.device, \
+        "select ws.id, ws.provider, ws.device, ws.external_id, \
          (select max(coalesce(t_end, t)) from wearable_sample where source_id = ws.id) as last_sample, \
          (select coalesce(sum(c), 0) from (select max(coverage) as c from wearable_rollup where source_id = ws.id \
            and bucket = 'day' and t >= $2 and t <= $3 group by t) d) as cov \
@@ -705,19 +705,32 @@ pub async fn devices(
     Ok(rows
         .into_iter()
         // a source whose samples were all retracted is not a device the person still has data from
-        .filter(|row| row.3.is_some())
-        .map(|(id, provider, device, last, cov)| {
+        .filter(|row| row.4.is_some())
+        .map(|(id, provider, device, external_id, last, cov)| {
             let cov = real(Some(cov)).unwrap_or(0.0);
             json!({
                 "source_id": id,
                 "provider": provider,
                 "device": device,
+                // the end of the device's own id (a sensor serial), so two sensors of one name differ
+                "device_id": short_id(external_id.as_deref()),
                 // sent by the annotated REST summary: pydantic writes UTC as `Z`
                 "last_sample": last.map(|l| pydantic_datetime_utc(&l)),
                 "coverage_pct": crate::py::round(100.0 * cov / days as f64, 1),
             })
         })
         .collect())
+}
+
+/// A device's own id as a tile shows it: whole up to 12 characters, else its last 6 after an ellipsis.
+pub fn short_id(id: Option<&str>) -> Option<String> {
+    let id = id.map(str::trim).filter(|s| !s.is_empty())?;
+    let n = id.chars().count();
+    Some(if n <= 12 {
+        id.to_string()
+    } else {
+        format!("…{}", id.chars().skip(n - 6).collect::<String>())
+    })
 }
 
 pub fn day_start(d: NaiveDate) -> DateTime<Utc> {
@@ -727,6 +740,17 @@ pub fn day_start(d: NaiveDate) -> DateTime<Utc> {
 #[cfg(test)]
 mod note_tests {
     use super::*;
+
+    #[test]
+    fn a_device_id_is_shown_by_its_end() {
+        assert_eq!(short_id(Some("iOS G7")).as_deref(), Some("iOS G7"));
+        assert_eq!(
+            short_id(Some("0B5A1C2D-7E3F-4A90-8C61-5D2E0F1A9C3B")).as_deref(),
+            Some("…1A9C3B")
+        );
+        assert_eq!(short_id(Some("  ")), None);
+        assert_eq!(short_id(None), None);
+    }
 
     fn series(shown: &str, left_out: &[&str]) -> Series {
         Series {

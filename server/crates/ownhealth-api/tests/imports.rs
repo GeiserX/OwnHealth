@@ -180,3 +180,136 @@ async fn test_jobs_limit_is_checked_at_the_edge() -> R {
     assert_eq!(s, StatusCode::OK);
     Ok(())
 }
+
+/// A synthetic Dexcom Clarity export with one reading.
+const CLARITY: &[u8] = b"Index,Timestamp (YYYY-MM-DDThh:mm:ss),Event Type,Event Subtype,Patient Info,Device Info,\
+Source Device ID,Glucose Value (mg/dL),Insulin Value (u),Carb Value (grams),Duration (hh:mm:ss),\
+Glucose Rate of Change (mg/dL/min),Transmitter Time (Long Integer),Transmitter ID\n\
+1,2026-11-14T20:00:17,EGV,,,,iOS G7,120,,,,,3456000,7Q2RLX\n";
+
+#[tokio::test]
+async fn a_cgm_upload_carries_the_browser_zone_and_an_unknown_zone_is_refused() -> R {
+    let a = app().await?;
+    let (s, v) = a
+        .upload(
+            "alex",
+            &[("profile", "lucia"), ("timezone", "Europe/Madrid")],
+            &[("clarity.csv", CLARITY)],
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let job = v["items"][0]["job_id"].as_i64().unwrap_or_default();
+    let zone: Option<String> = sqlx::query_scalar("select payload->>'timezone' from job where id = $1")
+        .bind(job)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    assert_eq!(zone.as_deref(), Some("Europe/Madrid"));
+    // a zone the time zone database does not know is refused, and nothing is stored or queued
+    let jobs = a.count("select count(*) from job").await?;
+    let (s, v) = a
+        .upload(
+            "alex",
+            &[("profile", "lucia"), ("timezone", "Mars/Olympus")],
+            &[("other.csv", b"x")],
+        )
+        .await?;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert_eq!(v["detail"]["code"], "unknown_timezone", "{v}");
+    assert_eq!(a.count("select count(*) from job").await?, jobs);
+    // no zone, or an empty one, is an upload as before
+    let (s, v) = a
+        .upload(
+            "alex",
+            &[("profile", "lucia"), ("timezone", "")],
+            &[("pdf.pdf", &glucose_pdf("LN-TZ"))],
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    Ok(())
+}
+
+/// A finished CGM import job of a profile, with the details its result carries.
+async fn cgm_job(a: &lane_i::App, slug: &str) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(
+        "insert into job (kind, state, payload, result) values ('import.cgm_csv', 'done', \
+         jsonb_build_object('profile_id', $1::text, 'filename', 'clarity.csv'), \
+         '{\"accepted\": 8, \"skipped\": 2, \"reasons\": {\"below_sensor_range\": 1}, \
+           \"cgm_csv\": {\"vendor\": \"dexcom_clarity\", \"readings\": 8, \"devices\": [\"Dexcom G7\"]}}') returning id",
+    )
+    .bind(a.family.profile(slug).to_string())
+    .fetch_one(&a.rt.pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn a_cgm_import_result_reaches_only_those_who_may_read_wearables() -> R {
+    let a = app().await?;
+    // alex is carmen's caregiver (no read:wearables) and lucia's guardian (every scope)
+    let (carmen, lucia) = (cgm_job(&a, "carmen").await?, cgm_job(&a, "lucia").await?);
+    let (s, v) = a.get("alex", &format!("/jobs?ids={carmen},{lucia}")).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let by_id = |id: i64| {
+        v["jobs"]
+            .as_array()
+            .and_then(|j| j.iter().find(|x| x["id"] == json!(id)).cloned())
+            .unwrap_or_default()
+    };
+    // the caregiver keeps what any member saw before (the job, its state and file), not what it brought
+    assert_eq!(by_id(carmen)["state"], "done", "{v}");
+    assert_eq!(by_id(carmen)["filename"], "clarity.csv", "{v}");
+    assert_eq!(by_id(carmen)["result"], serde_json::Value::Null, "{v}");
+    assert_eq!(by_id(lucia)["result"]["cgm_csv"]["readings"], json!(8), "{v}");
+    // with read:wearables on carmen, the result is there
+    let mut c = a.conn().await?;
+    let cats = ownhealth_core::access::scope_set(["read:summary", "read:records", "read:wearables"]);
+    ownhealth_core::access::set_grant(
+        &mut c,
+        a.family.user("alex"),
+        a.family.profile("carmen"),
+        "caregiver",
+        Some(&cats),
+        None,
+        None,
+    )
+    .await?;
+    drop(c);
+    let (_, v) = a.get("alex", &format!("/jobs?ids={carmen}")).await?;
+    assert_eq!(v["jobs"][0]["result"]["reasons"]["below_sensor_range"], json!(1), "{v}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cgm_document_shows_its_counts_only_to_those_who_may_read_wearables() -> R {
+    let a = app().await?;
+    let doc: uuid::Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, filename, doc_type, flags) \
+         values ($1, $2, sha256('x'::bytea), 'text/csv', 1, 'clarity.csv', 'other', \
+         '{\"import\": {\"accepted\": 8, \"reasons\": {\"below_sensor_range\": 1}}, \
+           \"cgm_csv\": {\"vendor\": \"dexcom_clarity\", \"readings\": 8, \"devices\": [\"Dexcom G7\"]}}') returning id",
+    )
+    .bind(a.family.household_id)
+    .bind(a.family.profile("carmen"))
+    .fetch_one(&a.rt.pool)
+    .await?;
+    let (s, v) = a.get("alex", &format!("/documents/{doc}")).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // the caregiver reads what the file is, not what it brought
+    assert_eq!(v["flags"]["cgm_csv"], json!({"vendor": "dexcom_clarity"}), "{v}");
+    assert_eq!(v["flags"].get("import"), None, "{v}");
+    let (_, l) = a.get("alex", "/profiles/carmen/documents").await?;
+    assert_eq!(
+        l["items"][0]["flags"]["cgm_csv"],
+        json!({"vendor": "dexcom_clarity"}),
+        "{l}"
+    );
+    // on lucia, whose guardian holds every scope, alex reads it all
+    sqlx::query("update document set profile_id = $1 where id = $2")
+        .bind(a.family.profile("lucia"))
+        .bind(doc)
+        .execute(&a.rt.pool)
+        .await?;
+    let (_, v) = a.get("alex", &format!("/documents/{doc}")).await?;
+    assert_eq!(v["flags"]["cgm_csv"]["readings"], json!(8), "{v}");
+    assert_eq!(v["flags"]["import"]["accepted"], json!(8), "{v}");
+    Ok(())
+}

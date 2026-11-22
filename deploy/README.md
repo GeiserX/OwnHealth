@@ -104,6 +104,8 @@ The one-shot `ow-db-init` creates the `openwearables` database and role, then OW
 
 **Turn it off.** Take `wearables` out of `COMPOSE_PROFILES`, then `docker compose stop ow-app ow-worker ow-beat ow-redis`. An `up -d` without the profile leaves the running sidecar alone. Its database stays in the `ownhealth-pg` volume, so turning the profile on again keeps the vendor connections.
 
+**Time zone of CGM exports.** A LibreView or Dexcom Clarity CSV export prints local times without an offset. Set `OWNHEALTH_TIMEZONE` in `.env` to the household's IANA zone, such as `OWNHEALTH_TIMEZONE=Europe/Madrid`, and every export is read in it. Unset, each export is read in the zone of the browser it was uploaded from, and the upload result names that zone. Each export keeps the zone it was read in. Importing it again, for example after another export is retracted, uses that zone. Uploading the same file in another zone replaces its readings, so they are never stored twice.
+
 **Restore.** `ownhealth backup` leaves OW's database out, because it is a cache of vendor data. After a restore onto new volumes, `docker compose up -d` with the profile on creates an empty one, and every vendor has to be connected again: the logins were only in that database.
 
 ## Monitoring the inboxes

@@ -368,7 +368,22 @@ pub async fn dispatch_upload(
     household_id: Uuid,
     profile_id: Uuid,
     files: &[StoredFile],
+    actor_user: Option<Uuid>,
+) -> Result<Value> {
+    dispatch_upload_in_zone(conn, blobs, household_id, profile_id, files, actor_user, None).await
+}
+
+/// [`dispatch_upload`] with the time zone the browser sent (an IANA name the caller checked): a CGM
+/// export's job carries it (`timezone`), to read the export's wall-clock times when the server has no
+/// `OWNHEALTH_TIMEZONE`.
+pub async fn dispatch_upload_in_zone(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    household_id: Uuid,
+    profile_id: Uuid,
+    files: &[StoredFile],
     _actor_user: Option<Uuid>,
+    zone: Option<&str>,
 ) -> Result<Value> {
     let mut kinds: Vec<(&StoredFile, UploadKind)> = Vec::new();
     for f in files {
@@ -444,6 +459,11 @@ pub async fn dispatch_upload(
                 });
                 if *kind == "fhir_ndjson" {
                     payload["format"] = json!("ndjson");
+                }
+                if job == "import.cgm_csv"
+                    && let Some(z) = zone
+                {
+                    payload["timezone"] = json!(z);
                 }
                 if *kind == "genome_facts" {
                     let attached: Map<String, Value> = kinds
