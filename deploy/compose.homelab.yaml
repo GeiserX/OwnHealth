@@ -55,6 +55,9 @@ services:
       # The `imaging` profile (below): Orthanc's address, empty when imaging is off, and its password.
       OWNHEALTH_ORTHANC_URL: ${OWNHEALTH_ORTHANC_URL:-}
       OWNHEALTH_ORTHANC_PASSWORD_FILE: /run/secrets/imaging/orthanc_password
+      # Only Caddy reaches the app, from the compose network, so its X-Forwarded-For names the client
+      # (the share link access log keeps that address).
+      OWNHEALTH_TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
     secrets: [app_db_password, secret_key, secrets_key]
     volumes:
       - ownhealth-data:/data
@@ -155,6 +158,9 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp"
+      # The SMART Health Link listener, for a tunnel on this host only (deploy/README.md, Sharing a
+      # summary). It answers the two link routes and 404 to everything else.
+      - "127.0.0.1:${OWNHEALTH_SHARE_PORT:-8090}:8090"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

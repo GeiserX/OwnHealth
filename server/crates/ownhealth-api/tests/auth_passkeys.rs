@@ -398,3 +398,149 @@ async fn bodies_are_validated_like_fastapi() -> R {
     );
     Ok(())
 }
+
+/// A 422 never repeats a secret field (passcode, password, pin, secret, token), on any route: not
+/// in `input`, not in `msg`. The other fields still come back.
+#[tokio::test]
+async fn a_422_never_repeats_a_password() -> R {
+    let env = Env::new(false).await?;
+    let mut c = env.anon_at(LAN);
+    let secret = "SECRET-login-5521";
+    for body in [
+        json!({"name": 7, "password": secret}),
+        json!({"password": secret}),
+        json!({"name": "Alex Rivera", "password": secret, "nested": {"api_token": secret}, "extra": [{"pin": secret}]}),
+    ] {
+        let r = c.post("/api/auth/password/login", &body).await?;
+        if r.status == StatusCode::UNPROCESSABLE_ENTITY {
+            assert!(!r.json.to_string().contains(secret), "{body}: {:?}", r.json);
+        }
+    }
+    let r = c
+        .post("/api/auth/password/login", &json!({"name": 7, "password": secret}))
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert_eq!(
+        r.json["detail"][0]["input"]["name"], 7,
+        "the rest still comes back: {:?}",
+        r.json
+    );
+    // a password of the wrong type: serde names the value in its message
+    let r = c
+        .post(
+            "/api/auth/password/login",
+            &json!({"name": "Alex Rivera", "password": 55_214_455}), // ggignore: synthetic test value
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert!(!r.json.to_string().contains("55214455"), "{:?}", r.json);
+    // a field check of the handler (too long) on the password
+    let long = format!("SECRET-{}", "x".repeat(300));
+    let r = c
+        .post(
+            "/api/auth/password/login",
+            &json!({"name": "Alex Rivera", "password": long}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert!(!r.json.to_string().contains("SECRET-"), "{:?}", r.json);
+    // first run with a password
+    let r = c
+        .post(
+            "/api/auth/setup/password",
+            &json!({"display_name": 5, "password": secret}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert!(!r.json.to_string().contains(secret), "{:?}", r.json);
+    Ok(())
+}
+
+/// A recovery code or an invite code is a way in, so a 4xx never repeats it, as it never repeats a
+/// password: not on the recovery route, not on the three enroll routes, not in `input` and not in
+/// `msg`. The codes here are made up; the rule does not depend on a code being valid.
+#[tokio::test]
+async fn a_422_never_repeats_a_recovery_or_an_invite_code() -> R {
+    let env = Env::new(false).await?;
+    let mut c = env.anon_at(LAN);
+    let code = "test-code-aaaa-bbbb-cccc";
+    let three = format!("{code} {code} {code}");
+    let long = format!("{code}-{}", "z".repeat(80));
+    for (path, body) in [
+        // three codes pasted at once: too long for one
+        ("/api/auth/recovery", json!({"code": three})),
+        ("/api/auth/recovery", json!({"code": [code]})),
+        ("/api/auth/recovery", json!({"code": {"value": code}})),
+        ("/api/auth/enroll/begin", json!({"code": [code]})),
+        ("/api/auth/enroll/begin", json!({"code": long})),
+        // no credential: serde names the missing field and the whole body comes back as input
+        ("/api/auth/enroll/finish", json!({"code": code})),
+        ("/api/auth/enroll/finish", json!({"code": long, "credential": {}})),
+        (
+            "/api/auth/enroll/password",
+            json!({"code": long, "password": "a long synthetic pass"}),
+        ),
+        (
+            "/api/auth/enroll/password",
+            json!({"code": [code], "password": "a long synthetic pass"}),
+        ),
+    ] {
+        let r = c.post(path, &body).await?;
+        assert_eq!(
+            r.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{path} {body}: {:?}",
+            r.json
+        );
+        assert!(!r.json.to_string().contains(code), "{path} {body}: {:?}", r.json);
+    }
+    // the redaction is as narrow as the secret: the other fields of the body still come back
+    let r = c
+        .post("/api/auth/enroll/finish", &json!({"code": code, "label": "laptop"}))
+        .await?;
+    assert_eq!(r.json["detail"][0]["input"]["label"], "laptop", "{:?}", r.json);
+    Ok(())
+}
+
+/// A secret field is found whatever its letter case and separators: `passCode`, `pass_word`,
+/// `Pass-Code`, `recovery-code` and `invite_code` are never repeated, on any route.
+#[tokio::test]
+async fn a_422_hides_a_secret_field_in_any_spelling() -> R {
+    let env = Env::new(false).await?;
+    let mut c = env.anon_at(LAN);
+    let secret = "test-value-dddd-eeee";
+    let mut body = json!({"name": 7});
+    for field in [
+        "passCode",
+        "passWord",
+        "pass_code",
+        "pass_word",
+        "Pass-Code",
+        "recovery-code",
+        "recoveryCode",
+        "invite_code",
+        "InviteCode",
+        "enroll_code",
+    ] {
+        body[field] = json!(secret);
+    }
+    let r = c.post("/api/auth/password/login", &body).await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+    assert!(!r.json.to_string().contains(secret), "{:?}", r.json);
+    assert_eq!(r.json["detail"][0]["input"], json!({"name": 7}), "{:?}", r.json);
+    Ok(())
+}
+
+/// A body that is not a JSON object is never sent back: it may be a password or a code typed alone.
+#[tokio::test]
+async fn a_422_never_repeats_a_body_that_is_not_an_object() -> R {
+    let env = Env::new(false).await?;
+    let mut c = env.anon_at(LAN);
+    let secret = "test-value-ffff-gggg";
+    for body in [json!(secret), json!([secret]), json!([{"password": secret}])] {
+        let r = c.post("/api/auth/password/login", &body).await?;
+        assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", r.json);
+        assert!(!r.json.to_string().contains(secret), "{:?}", r.json);
+    }
+    Ok(())
+}

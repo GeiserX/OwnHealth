@@ -16,9 +16,10 @@ use support::Env;
 
 type R = anyhow::Result<()>;
 
-/// Routes reachable without a login: the login itself, and the calendar feed, whose secret is in its
-/// path (ics_feed.rs checks that a wrong one gets 404).
-const PUBLIC: [&str; 16] = [
+/// Routes reachable without a login: the login itself, the calendar feed, whose secret is in its
+/// path (ics_feed.rs checks that a wrong one gets 404), and a SMART Health Link's manifest and file,
+/// whose secrets are in theirs (shl_share.rs checks the 404s).
+const PUBLIC: [&str; 18] = [
     "/auth/state",
     "/auth/setup/begin",
     "/auth/setup/finish",
@@ -35,6 +36,8 @@ const PUBLIC: [&str; 16] = [
     "/auth/oidc/login",
     "/auth/oidc/callback",
     "/ics/{file}",
+    "/shl/{id}",
+    "/shl/{id}/file/{ticket}",
 ];
 
 /// Routes the imaging viewer is served on, outside `/api`: no login resolves there, a viewer link does
