@@ -1312,12 +1312,20 @@ async fn an_upload_stays_while_a_backup_copies_the_files_and_goes_after() -> R {
     sqlx::query("select pg_catalog.pg_advisory_lock(pg_catalog.hashtext('ownhealth.blob_copy'))")
         .execute(&mut *backup)
         .await?;
+    let backup_pid: i32 = sqlx::query_scalar("select pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *backup)
+        .await?;
     let ctx = env.ctx.clone();
     let worker = tokio::spawn(async move { jobs::drain(&ctx, "core", 5, None).await });
-    let waiting = "select count(*) from pg_locks where locktype = 'advisory' and not granted";
+    // only a session that this backup's copy lock blocks counts: the cluster is shared with other
+    // test databases, whose waiters must not end the loop
+    let waiting = "select count(*) from pg_catalog.pg_stat_activity where $1 = any(pg_catalog.pg_blocking_pids(pid))";
     let started = std::time::Instant::now();
     loop {
-        let n: i64 = sqlx::query_scalar(waiting).fetch_one(&env.db.pool).await?;
+        let n: i64 = sqlx::query_scalar(waiting)
+            .bind(backup_pid)
+            .fetch_one(&env.db.pool)
+            .await?;
         if n > 0 {
             break;
         }
