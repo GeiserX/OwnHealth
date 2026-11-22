@@ -854,6 +854,14 @@ async fn a_zone_postgres_knows_keeps_its_name_and_its_other_names_replace_nothin
     assert_eq!(result["cgm_csv"]["timezone"], json!("Asia/Calcutta"), "{result}");
     assert_eq!(result["reasons"]["duplicate"], json!(8), "{result}");
     assert_eq!(readings(&env, "sam").await?.len(), 8);
+    // the other way round: read first under the current name, then uploaded under a name linked to it
+    let result = upload_in_zone(&env, "alex", "clarity.csv", &bytes, "Europe/Berlin").await?;
+    assert_eq!(result["cgm_csv"]["timezone"], json!("Europe/Berlin"), "{result}");
+    let result = upload_in_zone(&env, "alex", "clarity.csv", &bytes, "Europe/Oslo").await?;
+    assert_eq!(result["cgm_csv"].get("replaced"), None, "{result}");
+    assert_eq!(result["cgm_csv"]["timezone"], json!("Europe/Berlin"), "{result}");
+    assert_eq!(result["reasons"]["duplicate"], json!(8), "{result}");
+    assert_eq!(readings(&env, "alex").await?.len(), 8);
     Ok(())
 }
 
@@ -906,6 +914,25 @@ async fn a_stored_zone_postgres_no_longer_knows_is_read_in_its_current_name() ->
     Ok(())
 }
 
+/// Whether a backend of this test's database waits on a lock of the kind `event` (`transactionid`,
+/// `advisory`) within 10 seconds.
+async fn waits_on(env: &Env, event: &str) -> anyhow::Result<bool> {
+    for _ in 0..100 {
+        let n: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity where datname = current_database() \
+             and wait_event_type = 'Lock' and wait_event = $1",
+        )
+        .bind(event)
+        .fetch_one(&env.db.pool)
+        .await?;
+        if n > 0 {
+            return Ok(true);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Ok(false)
+}
+
 #[tokio::test]
 async fn a_retraction_while_the_export_is_read_again_leaves_none_of_its_readings() -> R {
     let env = Env::new().await?;
@@ -952,7 +979,10 @@ async fn a_retraction_while_the_export_is_read_again_leaves_none_of_its_readings
     .await?;
     let ctx = env.ctx.clone();
     let run = tokio::spawn(async move { jobs::drain(&ctx, "core", 5, None).await });
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    anyhow::ensure!(
+        waits_on(&env, "transactionid").await?,
+        "the run again never waited on the held reading"
+    );
     // the retraction of b.csv as the route runs it: its facts first, then its status
     let pool = env.db.pool.clone();
     let retraction = tokio::spawn(async move {
@@ -965,7 +995,11 @@ async fn a_retraction_while_the_export_is_read_again_leaves_none_of_its_readings
         tx.commit().await?;
         anyhow::Ok(())
     });
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    // the retraction waits for the run's export lock; only then is the held reading let go
+    anyhow::ensure!(
+        waits_on(&env, "advisory").await?,
+        "the retraction never waited for the running import's export lock"
+    );
     hold.rollback().await?;
     run.await??;
     retraction.await??;
