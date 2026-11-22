@@ -244,6 +244,22 @@ async fn the_sweep_waits_for_a_backups_copy_and_the_next_one_removes_the_folder(
 async fn a_folder_the_sweep_cannot_remove_leaves_the_next_one_to_go() -> anyhow::Result<()> {
     use std::fs::{Permissions, set_permissions};
     use std::os::unix::fs::PermissionsExt;
+    // As root (or with CAP_DAC_OVERRIDE) a read-only folder does not stop a removal, so nothing here
+    // can make the sweep fail: say so and stop.
+    let probe = tempfile::tempdir()?;
+    let ro = probe.path().join("read-only");
+    std::fs::create_dir(&ro)?;
+    std::fs::write(ro.join("entry"), b"probe")?;
+    set_permissions(&ro, Permissions::from_mode(0o555))?;
+    let removable = std::fs::remove_file(ro.join("entry")).is_ok();
+    set_permissions(&ro, Permissions::from_mode(0o755))?;
+    if removable {
+        eprintln!(
+            "skipped: this runner removes entries from a read-only folder (root or CAP_DAC_OVERRIDE), \
+             so the sweep cannot be made to fail"
+        );
+        return Ok(());
+    }
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let kek = Kek::from_base64(&random_secrets_key())?;
