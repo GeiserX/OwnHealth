@@ -203,3 +203,72 @@ async fn an_item_key_with_no_item_is_shredded_after_a_day_and_its_folder_swept()
     assert!(keys[0].starts_with(&format!("pending/{}/", young.simple())), "{keys:?}");
     Ok(())
 }
+
+/// While a backup copies the blob tree (it holds the copy lock from before its database snapshot
+/// until the copy ends), the sweep removes nothing: the snapshot may still name a folder whose key
+/// went after it. The next sweep after the copy removes the folder.
+#[tokio::test]
+async fn the_sweep_waits_for_a_backups_copy_and_the_next_one_removes_the_folder() -> anyhow::Result<()> {
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let kek = Kek::from_base64(&random_secrets_key())?;
+    let app = BlobStore::with_keys(dir.path(), Arc::new(Keyring::new(kek, db.url.clone())))?;
+    let settled = Uuid::new_v4();
+    app.put_bytes(BlobOwner::Pending(settled), b"From: LabNorte, released mail")?;
+    let mut tx = db.pool.begin().await?;
+    shred_pending(&mut tx, &[settled]).await?;
+    tx.commit().await?;
+    let folder = dir.path().join("pending").join(settled.simple().to_string());
+    let mut backup = db.pool.acquire().await?;
+    sqlx::query("select pg_catalog.pg_advisory_lock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(&mut *backup)
+        .await?;
+    let mut c = db.pool.acquire().await?;
+    assert_eq!(
+        app.sweep_unkeyed(&mut c).await?,
+        0,
+        "the sweep ran while a backup copied the files"
+    );
+    assert!(folder.is_dir());
+    sqlx::query("select pg_catalog.pg_advisory_unlock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(&mut *backup)
+        .await?;
+    assert_eq!(app.sweep_unkeyed(&mut c).await?, 1);
+    assert!(!folder.exists());
+    Ok(())
+}
+
+/// A folder the sweep cannot remove does not keep the others: every one gets its try, then the sweep
+/// reports the failure, and a later sweep removes the folder once it can go.
+#[tokio::test]
+async fn a_folder_the_sweep_cannot_remove_leaves_the_next_one_to_go() -> anyhow::Result<()> {
+    use std::fs::{Permissions, set_permissions};
+    use std::os::unix::fs::PermissionsExt;
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let kek = Kek::from_base64(&random_secrets_key())?;
+    let app = BlobStore::with_keys(dir.path(), Arc::new(Keyring::new(kek, db.url.clone())))?;
+    let (deleted, settled) = (Uuid::new_v4(), Uuid::new_v4());
+    app.put_bytes(
+        BlobOwner::Profile(deleted),
+        b"Alex Rivera, lipid panel of a deleted profile",
+    )?;
+    app.put_bytes(BlobOwner::Pending(settled), b"From: LabNorte, released mail")?;
+    let mut tx = db.pool.begin().await?;
+    shred(&mut tx, deleted).await?;
+    shred_pending(&mut tx, &[settled]).await?;
+    tx.commit().await?;
+    // the sweep tries profile folders first: this one cannot go while its files cannot be unlinked
+    let stuck = dir.path().join("enc").join(deleted.simple().to_string());
+    let next = dir.path().join("pending").join(settled.simple().to_string());
+    set_permissions(&stuck, Permissions::from_mode(0o555))?;
+    let mut c = db.pool.acquire().await?;
+    let swept = app.sweep_unkeyed(&mut c).await;
+    set_permissions(&stuck, Permissions::from_mode(0o755))?;
+    assert!(swept.is_err(), "a folder that did not go was not reported: {swept:?}");
+    assert!(stuck.is_dir());
+    assert!(!next.exists(), "one folder that could not go kept the next one");
+    assert_eq!(app.sweep_unkeyed(&mut c).await?, 1);
+    assert!(!stuck.exists());
+    Ok(())
+}

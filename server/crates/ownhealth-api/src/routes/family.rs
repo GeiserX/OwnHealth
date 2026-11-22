@@ -731,7 +731,20 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     tx.commit().await?;
     let (mut removed, mut stuck) = (0usize, Vec::new());
     let owner = ownhealth_core::blobs::BlobOwner::Profile(profile_id);
+    // A backup copying the files now may still name every file of the profile: then they all stay,
+    // and the retry job removes them once the copy is done.
+    let guard = match removal_guard(rt).await {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not take the blob removal lock: a job removes the files");
+            None
+        }
+    };
     for sha in &result.blobs {
+        if guard.is_none() {
+            stuck.push(Value::from(sha.as_str()));
+            continue;
+        }
         match rt.blobs.delete(owner, sha) {
             Ok(true) => removed += 1,
             Ok(false) => {}
@@ -742,15 +755,27 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
         }
     }
     // The profile's key went with its rows, so its sealed files no longer open; the rest of them (a
-    // file another profile also holds, which keeps its own copy) go with the profile's folder. When
-    // the folder stays, the retry job stays whole and removes it.
-    let folder_left = match rt.blobs.forget_profile(profile_id) {
-        Ok(_) => false,
-        Err(e) => {
+    // file another profile also holds, which keeps its own copy) go with the profile's folder, and the
+    // folders of its held mail go too (their keys went in the delete). When a folder stays, the retry
+    // job stays whole and removes it.
+    let mut folder_left = guard.is_none();
+    if guard.is_some() {
+        if let Err(e) = rt.blobs.forget_profile(profile_id) {
             tracing::warn!(error = %e, "removing the profile's sealed files failed; they no longer open, a job retries it");
-            true
+            folder_left = true;
         }
-    };
+        for mail in &result.mail {
+            if let Err(e) = rt.blobs.forget_pending(*mail) {
+                tracing::warn!(error = %e, "removing a held mail's sealed files failed; they no longer open, a job retries it");
+                folder_left = true;
+            }
+        }
+    }
+    if let Some(tx) = guard
+        && let Err(e) = tx.commit().await
+    {
+        tracing::warn!(error = %e, "could not end the blob removal lock");
+    }
     let failed = folder::forget_folders(&rt.pool, &rt.settings, result.household_id, slug, folders).await;
     let folders_pending = failed.len();
     let failed: Vec<Value> = failed
@@ -794,6 +819,16 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
         out["connectors"] = Value::Array(revoked);
     }
     Ok(out)
+}
+
+/// The removal side of the blob copy lock, in a transaction of its own: None while a backup copies
+/// the files (`blobs::removal_lock`).
+async fn removal_guard(
+    rt: &Runtime,
+) -> Result<Option<sqlx::Transaction<'static, sqlx::Postgres>>, ownhealth_core::Error> {
+    let mut tx = rt.pool.begin().await?;
+    let free = ownhealth_core::blobs::removal_lock(&mut tx, false).await?;
+    Ok(free.then_some(tx))
 }
 
 /// After the delete's own try: drop the queued retry when nothing is left, or keep it with only what

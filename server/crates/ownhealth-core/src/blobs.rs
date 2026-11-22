@@ -16,7 +16,12 @@
 //! upgrades keeps every older file. A store that seals hashes such a plain file before it serves it
 //! for a profile or an item (once per process while the file stays the same), so a file planted at the
 //! plain path never stands in for a sealed one. A sealed folder whose key is gone (a deleted profile, a
-//! settled item) is removed by [`BlobStore::sweep_unkeyed`]. The same bytes stored twice for one owner are kept once; two profiles that
+//! settled item) is removed by [`BlobStore::sweep_unkeyed`].
+//!
+//! A backup copies the files after its database snapshot, so a file a row of that snapshot names must
+//! stay until the copy has it. The backup holds the copy lock ([`hold_for_copy`]) from before the
+//! snapshot until its copy ends; every removal of a file that such a row may name takes the other side
+//! of it ([`removal_lock`]), and leaves the file for later while a backup holds it. The same bytes stored twice for one owner are kept once; two profiles that
 //! store the same bytes each get their own sealed copy. A blob is never modified after it lands.
 //! Access control lives on the rows that reference a hash (document, genome_dataset); a hash on its
 //! own grants nothing.
@@ -362,11 +367,60 @@ fn slot_rel(slot: Slot) -> PathBuf {
 }
 
 /// The [`tree_files`] key of a slot's sealed file at `address`.
+/// The key in a blob tree of the file `sha256` sealed under `dek` in `slot`: what a backup lists
+/// for it when the key comes from the backup's own snapshot instead of the live store.
+pub fn sealed_key(slot: Slot, dek: &Dek, sha256: &str) -> Result<String, BlobError> {
+    Ok(slot_key(slot, &dek.address(&sha_array(sha256)?)))
+}
+
 fn slot_key(slot: Slot, address: &str) -> String {
     match slot {
         Slot::Profile(p) => format!("{}/{address}", p.simple()),
         Slot::Pending(i) => format!("pending/{}/{address}", i.simple()),
     }
+}
+
+fn lock_error(e: sqlx::Error) -> BlobError {
+    BlobError::Io(io::Error::other(e))
+}
+
+/// Hold the copy lock on `conn`'s own session, for a backup: it waits for the removals in progress,
+/// then keeps every new one out until [`end_copy`] or until the session ends. Take it before the
+/// database snapshot and end it once the blob files are copied.
+pub async fn hold_for_copy(conn: &mut sqlx::PgConnection) -> Result<(), BlobError> {
+    sqlx::query("select pg_catalog.pg_advisory_lock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(conn)
+        .await
+        .map_err(lock_error)?;
+    Ok(())
+}
+
+/// Let removals run again after [`hold_for_copy`].
+pub async fn end_copy(conn: &mut sqlx::PgConnection) -> Result<(), BlobError> {
+    sqlx::query("select pg_catalog.pg_advisory_unlock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(conn)
+        .await
+        .map_err(lock_error)?;
+    Ok(())
+}
+
+/// Take the removal side of the copy lock in `conn`'s open transaction, before removing blob files
+/// that a row of a backup's snapshot may still name; it goes when the transaction ends. Removals do
+/// not wait on each other. With `wait`, wait while a backup copies the files (a job); without, answer
+/// false at once while one does, and leave the files for later: the sweep removes a folder whose key
+/// is gone, a retry the rest.
+pub async fn removal_lock(conn: &mut sqlx::PgConnection, wait: bool) -> Result<bool, BlobError> {
+    if wait {
+        sqlx::query("select pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtext('ownhealth.blob_copy'))")
+            .execute(conn)
+            .await
+            .map_err(lock_error)?;
+        return Ok(true);
+    }
+    sqlx::query_scalar("select pg_catalog.pg_try_advisory_xact_lock_shared(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .fetch_one(conn)
+        .await
+        .map_err(lock_error)
 }
 
 impl BlobStore {
@@ -872,6 +926,27 @@ impl BlobStore {
         }
     }
 
+    /// [`BlobStore::forget_slot`] for a slot whose key is gone (a deleted profile, a settled item),
+    /// unless a backup is copying the files: the key leaves this process either way, and the folder
+    /// stays for the sweep, which removes it once the copy is done. `Some(true)` when the folder went,
+    /// `Some(false)` when there was none, `None` when it stays.
+    pub async fn forget_settled(&self, conn: &mut sqlx::PgConnection, slot: Slot) -> Result<Option<bool>, BlobError> {
+        use sqlx::Connection;
+        if let Some(keys) = &self.keys {
+            keys.forget_slot(slot);
+        }
+        let mut tx = conn.begin().await.map_err(lock_error)?;
+        if !removal_lock(&mut tx, false).await? {
+            return Ok(None);
+        }
+        let store = self.clone();
+        let gone = tokio::task::spawn_blocking(move || store.forget_slot(slot))
+            .await
+            .map_err(|e| BlobError::Io(io::Error::other(e)))??;
+        tx.commit().await.map_err(lock_error)?;
+        Ok(Some(gone))
+    }
+
     /// Every slot with a sealed folder in this store: `enc/<profile>` and `pending/<item>`. A folder
     /// whose name is no id is left out (and stays: nothing here made it).
     pub fn sealed_slots(&self) -> io::Result<Vec<Slot>> {
@@ -905,13 +980,19 @@ impl BlobStore {
     /// file never opens again; this removes it. A folder is made only after its key is stored
     /// (`Keyring::dek_for` commits the key first), and a shredded key never comes back, so a live
     /// folder is never removed. Keys of pending items that no longer wait are shredded first
-    /// (`keys::shred_pending_orphans`). Only a store whose keys live in the database sweeps. Returns
-    /// how many folders went.
+    /// (`keys::shred_pending_orphans`). While a backup copies the files, the sweep removes nothing
+    /// ([`removal_lock`]): the next one does. Only a store whose keys live in the database sweeps.
+    /// Returns how many folders went, or the first folder that could not go, after it tried them all.
     pub async fn sweep_unkeyed(&self, conn: &mut sqlx::PgConnection) -> Result<usize, BlobError> {
+        use sqlx::Connection;
         let Some(keys) = self.keys.as_ref().filter(|k| k.stored()) else {
             return Ok(0);
         };
         crate::keys::shred_pending_orphans(&mut *conn).await?;
+        let mut tx = conn.begin().await.map_err(lock_error)?;
+        if !removal_lock(&mut tx, false).await? {
+            return Ok(0);
+        }
         let store = self.clone();
         let slots = tokio::task::spawn_blocking(move || store.sealed_slots())
             .await
@@ -919,24 +1000,35 @@ impl BlobStore {
         if slots.is_empty() {
             return Ok(0);
         }
-        let live = crate::keys::live(conn, &slots).await?;
+        let live = crate::keys::live(&mut tx, &slots).await?;
         let gone: Vec<Slot> = slots.into_iter().filter(|s| !live.contains(s)).collect();
         for slot in &gone {
             keys.forget_slot(*slot);
         }
+        // every folder gets its try: one that cannot go does not keep the others; the first failure
+        // is the answer once all were tried
         let store = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut removed = 0;
+        let (removed, failed) = tokio::task::spawn_blocking(move || {
+            let (mut removed, mut failed) = (0, None);
             for slot in gone {
-                if store.forget_slot(slot)? {
-                    removed += 1;
+                match store.forget_slot(slot) {
+                    Ok(true) => removed += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "a sealed folder whose key is gone could not be removed");
+                        failed.get_or_insert(e);
+                    }
                 }
             }
-            Ok::<_, io::Error>(removed)
+            (removed, failed)
         })
         .await
-        .map_err(|e| BlobError::Io(io::Error::other(e)))?
-        .map_err(BlobError::Io)
+        .map_err(|e| BlobError::Io(io::Error::other(e)))?;
+        tx.commit().await.map_err(lock_error)?;
+        match failed {
+            Some(e) => Err(BlobError::Io(e)),
+            None => Ok(removed),
+        }
     }
 
     /// Remove upload spools a killed process left in `root/tmp`: regular files named `upload-*`

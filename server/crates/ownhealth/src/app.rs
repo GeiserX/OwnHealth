@@ -189,6 +189,7 @@ pub async fn start(rt: &Runtime) -> Result<Background, Error> {
     }
     check_profile_keys(rt).await?;
     sweep_spools(rt);
+    sweep_unkeyed(rt).await;
     if rt.settings.demo {
         demo::seed_demo(&rt.pool, &rt.settings, &rt.blobs, false).await?;
     }

@@ -2237,3 +2237,118 @@ async fn a_sealed_folder_the_delete_could_not_remove_goes_on_the_retry() -> R {
     assert_eq!(unlink_state(&env).await?.0, "done");
     Ok(())
 }
+
+/// Mail held on the profile's own mailbox, sealed under its own item key; returns its id.
+async fn sealed_held_mail(env: &Env, profile: Uuid, raw: &str) -> anyhow::Result<Uuid> {
+    let mailbox = household_source(env, "email", json!({})).await?;
+    sqlx::query("update source set profile_id = $1 where id = $2")
+        .bind(profile)
+        .bind(mailbox)
+        .execute(env.pool())
+        .await?;
+    let q = Uuid::new_v4();
+    let sha = env.rt.blobs.put_bytes(BlobOwner::Pending(q), raw.as_bytes())?;
+    sqlx::query(
+        "insert into quarantine_item (id, household_id, source_id, raw_blob, reason) \
+         values ($1, $2, $3, $4, 'sender_not_allowed')",
+    )
+    .bind(q)
+    .bind(env.fam().household_id)
+    .bind(mailbox)
+    .bind(sha256_hex_to_bytes(&sha)?)
+    .execute(env.pool())
+    .await?;
+    Ok(q)
+}
+
+/// The held mail of a deleted profile loses its key in the delete, and its sealed folder goes with
+/// the delete itself, not at a later sweep.
+#[tokio::test]
+async fn deleting_a_profile_shreds_its_held_mails_key_and_removes_its_folder() -> R {
+    let env = Env::new(true).await?;
+    let alex = env.profile("alex");
+    let q = sealed_held_mail(&env, alex, "From: nueva@clinica.example\r\n\r\nheld for Alex").await?;
+    let folder = env
+        .rt
+        .settings
+        .blobs_path()
+        .join("pending")
+        .join(q.simple().to_string());
+    assert!(folder.is_dir());
+    let live = format!("select count(*) from pending_key where item_id = '{q}' and wrapped_dek is not null");
+    assert_eq!(env.scalar_i64(&live).await?, 1);
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        env.scalar_i64(&live).await?,
+        0,
+        "the held mail's key outlived its profile"
+    );
+    assert!(
+        !folder.exists(),
+        "the held mail's sealed folder stayed after the delete"
+    );
+    Ok(())
+}
+
+/// A profile delete while a backup copies the files: the backup's snapshot may still name every
+/// file of the profile, so they stay until the copy ends, and the retry removes them after.
+#[tokio::test]
+async fn a_delete_while_a_backup_copies_leaves_the_files_to_the_retry() -> R {
+    ownhealth_auth::register();
+    let env = Env::new(true).await?;
+    let (alex, household) = (env.profile("alex"), env.fam().household_id);
+    let bytes = b"%PDF-1.7 synthetic LabNorte report, sealed".to_vec();
+    let sha = env.rt.blobs.put_bytes(BlobOwner::Profile(alex), &bytes)?;
+    let mut c = env.pool().acquire().await?;
+    create_document(
+        &mut c,
+        &NewDocument::upload(
+            household,
+            Some(alex),
+            &sha,
+            "application/pdf",
+            i64::try_from(bytes.len())?,
+        ),
+    )
+    .await?;
+    drop(c);
+    let (_, plain) = document(
+        &env,
+        alex,
+        "%PDF-1.7 synthetic report stored before the keys",
+        "application/pdf",
+    )
+    .await?;
+    let q = sealed_held_mail(&env, alex, "From: nueva@clinica.example\r\n\r\nheld for Alex").await?;
+    let blobs = env.rt.settings.blobs_path();
+    let (enc, pending) = (
+        blobs.join("enc").join(alex.simple().to_string()),
+        blobs.join("pending").join(q.simple().to_string()),
+    );
+    assert!(enc.is_dir() && pending.is_dir() && stored(&blobs).contains(&plain));
+    // a backup holds the copy lock from before its snapshot until its copy of the files ends
+    let mut backup = env.pool().acquire().await?;
+    sqlx::query("select pg_catalog.pg_advisory_lock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(&mut *backup)
+        .await?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert!(
+        enc.is_dir() && pending.is_dir() && stored(&blobs).contains(&plain),
+        "a file went while a backup was copying the files"
+    );
+    assert_eq!(unlink_state(&env).await?.0, "queued", "nothing will remove the files");
+    sqlx::query("select pg_catalog.pg_advisory_unlock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(&mut *backup)
+        .await?;
+    drop(backup);
+    run_unlink(&env).await?;
+    assert!(!enc.exists(), "the profile's sealed folder stayed");
+    assert!(!pending.exists(), "the held mail's sealed folder stayed");
+    assert!(!stored(&blobs).contains(&plain), "the plain file stayed");
+    assert_eq!(unlink_state(&env).await?.0, "done");
+    Ok(())
+}

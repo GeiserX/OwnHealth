@@ -608,7 +608,11 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     }
     let url = settings.sqlx_url();
     let anchor_path = anchor_file(settings);
-    let lock = anchor_lock(&url).await?;
+    let mut lock = anchor_lock(&url).await?;
+    // From before the snapshot until the copy of the files below: a file a row of the snapshot names
+    // stays (a held mail released, a profile deleted or a document moved meanwhile leaves its files
+    // for later), so the copy has every one of them.
+    blobs::hold_for_copy(&mut lock).await?;
     let anchored = read_anchor(&anchor_path)?;
     let mut conn = PgConnection::connect(&url).await?;
     let mut tx = conn.begin_with("begin isolation level repeatable read").await?;
@@ -649,6 +653,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     let dump = cmd.stdout(out).stderr(Stdio::piped()).spawn()?;
     let facts = async {
         let referenced = referenced_blobs(&mut tx).await?;
+        let wrapped = keys::stored_all(&mut tx).await?;
         let migrations: Vec<i32> = sqlx::query_scalar("select version from schema_migrations order by 1")
             .fetch_all(&mut *tx)
             .await?;
@@ -658,7 +663,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             .await?;
         let as_of = Utc::now().date_naive();
         let states = state_hashes(&mut tx, as_of).await?;
-        Ok::<_, Error>((referenced, migrations, tables, kept, as_of, states))
+        Ok::<_, Error>((referenced, wrapped, migrations, tables, kept, as_of, states))
     }
     .await;
     // The dump must finish before the exporting transaction ends, whatever the facts did.
@@ -666,7 +671,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // build_state may store snapshots; the backup leaves the database as it was.
     tx.rollback().await?;
     conn.close().await?;
-    let (referenced, migrations, tables, kept, as_of, states) = facts?;
+    let (referenced, wrapped, migrations, tables, kept, as_of, states) = facts?;
     if !done.status.success() {
         return Err(ops_error(format!(
             "pg_dump failed: {}",
@@ -675,10 +680,12 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     }
 
     // Blobs are written before the rows that reference them commit, so every blob the snapshot can
-    // see exists by now. Later blobs are harmless extras.
+    // see exists by now, and none of them went since (the copy lock above). Later blobs are harmless
+    // extras.
     let store = BlobStore::for_settings(settings)?;
     let tree = dest.join("blobs");
     store.copy_into(&tree)?;
+    blobs::end_copy(&mut lock).await?;
     let mut files = blobs::tree_files(&tree)?;
     // A file that is not where its name puts it is never read and no restore places it: it stays out
     // of the backup and its manifest, so it cannot stand in for the file its name stands for.
@@ -701,11 +708,33 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             plain.push(key);
         }
     }
-    // where each referenced blob sits: its owner's sealed copy, or the plain one
+    // Where each referenced blob sits in this backup: its owner's sealed copy, or the plain one. The
+    // keys come from the snapshot and the files from the copy, never from the live store, where a
+    // delete after the copy may already have shredded a key or removed a folder.
+    let deks: HashMap<keys::Slot, keys::Dek> = match &settings.secrets_key {
+        Some(_) => {
+            let kek = Kek::from_settings(settings)?;
+            wrapped
+                .iter()
+                .map(|(slot, w, fp)| Ok((*slot, kek.unwrap_slot(*slot, fp, w)?)))
+                .collect::<Result<_>>()?
+        }
+        None => HashMap::new(),
+    };
     let mut referenced: Vec<String> = referenced
         .iter()
-        .map(|(owner, sha)| store.key_of(*owner, sha))
-        .collect::<std::result::Result<_, _>>()?;
+        .map(|(owner, sha)| {
+            if let Some(slot) = owner.slot()
+                && let Some(dek) = deks.get(&slot)
+            {
+                let key = blobs::sealed_key(slot, dek, sha)?;
+                if files.contains_key(&key) {
+                    return Ok(key);
+                }
+            }
+            Ok(blobs::sha256_hex(sha)?)
+        })
+        .collect::<Result<_>>()?;
     referenced.sort();
     referenced.dedup();
     let key_facts = match &settings.secrets_key {

@@ -128,7 +128,11 @@ BlobStore::for_settings(&settings) / ::new(root) (plain) / ::with_keys(root, Arc
         .open_seek / .open_async / .with_local_copy / .get_bytes / .exists / .size (owner, sha)
         .rekey(from, to, sha) .delete(owner, sha) .forget_profile(id) .forget_pending(item)
         .sweep_unkeyed(conn)   // removes enc/ and pending/ folders whose key row is gone or a tombstone
+        .forget_settled(conn, slot)   // a settled item's or deleted profile's folder, unless a backup copies
         .files / .copy_into / .key_of / .place, blobs::tree_files(root)   // backup and restore
+// the copy lock: a backup holds it from before its snapshot until its blob copy ends; a removal of files
+// a snapshot row may name takes the other side, waits (jobs) or leaves the files for later (routes, sweep)
+blobs::hold_for_copy(conn) / blobs::end_copy(conn) / blobs::removal_lock(tx, wait) -> bool
 // keys: KEK = HKDF-SHA256(OWNHEALTH_SECRETS_KEY); a random DEK per profile, wrapped in profile_key, and per
 // pending item (Slot::Pending), wrapped in pending_key
 Kek::from_settings / .fingerprint(); Keyring::new(kek, url) .dek(profile, create) .dek_for(slot, create);

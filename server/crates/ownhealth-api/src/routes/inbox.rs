@@ -23,6 +23,7 @@ use ownhealth_auth::household::{can_manage, require_manage};
 use ownhealth_auth::sessions;
 use ownhealth_core::access::{Principal, accessible_profiles};
 use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::keys::Slot;
 use ownhealth_core::quarantine::{self, QuarantineItem};
 use ownhealth_core::secrets::{SecretBox, SecretString};
 use ownhealth_core::sources::{Source, get_source};
@@ -202,12 +203,21 @@ async fn delete_held(State(rt): State<Runtime>, Caller(p): Caller, Path(id): Pat
 }
 
 /// After a release or a delete committed (and shredded the item's key): the held message's sealed
-/// copy. A failure is left to the sweep (`BlobStore::sweep_unkeyed`).
+/// copy. While a backup copies the files it stays, and so does it after a failure: the sweep removes
+/// it (`BlobStore::sweep_unkeyed`).
 async fn forget_held(rt: &Runtime, id: Uuid) {
-    let blobs = rt.blobs.clone();
-    match tokio::task::spawn_blocking(move || blobs.forget_pending(id)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!(error = %e, "a settled held mail's sealed copy stays until the sweep"),
+    let forgot = async {
+        let mut conn = rt.pool.acquire().await?;
+        rt.blobs
+            .forget_settled(&mut conn, Slot::Pending(id))
+            .await
+            .map_err(Error::from)
+    };
+    match forgot.await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            tracing::info!("a backup is copying the files: a settled held mail's sealed copy stays until the sweep")
+        }
         Err(e) => tracing::warn!(error = %e, "a settled held mail's sealed copy stays until the sweep"),
     }
 }

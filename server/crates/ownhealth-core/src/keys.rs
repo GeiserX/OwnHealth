@@ -947,10 +947,10 @@ pub async fn check_start(conn: &mut PgConnection, kek: &Kek) -> Result<(), KeyEr
     )))
 }
 
-/// Every stored data key opened with `kek`: (keys that open, the profiles and items whose key does
-/// not). For verify-restore and restore, which must not trust a backup the configured key cannot
-/// read. A shredded row holds no key and is not counted.
-pub async fn check_all(conn: &mut PgConnection, kek: &Kek) -> Result<(usize, Vec<Uuid>), KeyError> {
+/// Every data key the database holds, as (slot, `wrapped_dek`, `kek_fingerprint`); a shredded row
+/// holds no key and is left out. A backup reads them in its snapshot, so the files it names are
+/// the ones its own rows open, whatever a delete did to the live rows meanwhile.
+pub async fn stored_all(conn: &mut PgConnection) -> Result<Vec<(Slot, Vec<u8>, Vec<u8>)>, KeyError> {
     let mut rows: Vec<(Slot, Vec<u8>, Vec<u8>)> = sqlx::query_as::<_, (Uuid, Vec<u8>, Vec<u8>)>(
         "select profile_id, wrapped_dek, kek_fingerprint from profile_key where wrapped_dek is not null \
          order by profile_id",
@@ -969,6 +969,14 @@ pub async fn check_all(conn: &mut PgConnection, kek: &Kek) -> Result<(usize, Vec
         .await?;
         rows.extend(pending.into_iter().map(|(id, w, f)| (Slot::Pending(id), w, f)));
     }
+    Ok(rows)
+}
+
+/// Every stored data key opened with `kek`: (keys that open, the profiles and items whose key does
+/// not). For verify-restore and restore, which must not trust a backup the configured key cannot
+/// read. A shredded row holds no key and is not counted.
+pub async fn check_all(conn: &mut PgConnection, kek: &Kek) -> Result<(usize, Vec<Uuid>), KeyError> {
+    let rows = stored_all(conn).await?;
     let mut bad = Vec::new();
     for (slot, wrapped, fp) in &rows {
         if kek.unwrap_slot(*slot, fp, wrapped).is_err() {
