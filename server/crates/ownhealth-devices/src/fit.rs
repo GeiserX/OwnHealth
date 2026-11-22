@@ -533,7 +533,9 @@ fn layout() -> Error {
 /// position get the invalid value of their base type, in every message. A developer field holds a
 /// position when its `field_description` names one, or says the field stands for a profile position
 /// field (its fields 14 and 15), wherever in the file that description comes: each file of the chain is
-/// read twice, once for its descriptions and once to blank. Nothing else changes but the checksum at
+/// read twice, once for its descriptions and once to blank. A developer field that its own file of the
+/// chain never describes is blanked as well: no reader can name it, and a lenient one could read it by
+/// the description of another file. Nothing else changes but the checksum at
 /// the end of each file in the chain, which is written again; a 14-byte header's own checksum covers
 /// only the header, which stays as it was. Also says whether a developer field held a position, which
 /// the parser cannot tell for a field described after its values or named neutrally.
@@ -566,8 +568,8 @@ pub fn strip(bytes: &[u8], fields: &BTreeSet<(u16, u8)>) -> Result<(Vec<u8>, boo
 
 /// Read the messages of one file of a chain (`out[start..]`, its data up to `out.len()`). The first
 /// pass (`blanking` false) only gathers every `field_description` into `described`; the second blanks
-/// the profile fields in `profile` and every developer field that holds a position, and says whether
-/// there was one.
+/// the profile fields in `profile`, every developer field that holds a position and every one this file
+/// does not describe, and says whether it blanked a developer field.
 fn walk_messages(
     out: &mut [u8],
     start: usize,
@@ -673,12 +675,21 @@ fn walk_messages(
             if p + size > end {
                 return Err(layout());
             }
-            if blanking
-                && let Some(d) = described.get(&(index, num))
-                && d.position(def.global)
-            {
-                blank(&mut out[p..p + size], d.base, def.big_endian);
-                developer_positions = true;
+            if blanking {
+                match described.get(&(index, num)) {
+                    Some(d) if d.position(def.global) => {
+                        blank(&mut out[p..p + size], d.base, def.big_endian);
+                        developer_positions = true;
+                    }
+                    Some(_) => {}
+                    // no description in its own file: nothing that follows the protocol names these
+                    // bytes, but a lenient reader could take a description from another file of the
+                    // chain, so they go too (0xFF, the invalid value of a byte field)
+                    None => {
+                        out[p..p + size].fill(0xFF);
+                        developer_positions = true;
+                    }
+                }
             }
             p += size;
         }

@@ -978,16 +978,18 @@ async fn a_developer_field_that_stands_for_a_profile_position_is_blanked_whateve
     let mut w = fw::Writer::default();
     fw::file_id(&mut w, 4, fw::SERIAL, fw::WATCH, fw::RUN_START);
     // neutral names: record.position_lat, a lap's start_position_lat, record field 1 (position_long)
-    // named only by its field, and record.heart_rate, which is no position
+    // named only by its field, record.heart_rate, which is no position, and the text of an NMEA
+    // sentence (nmea_sentence.sentence, 177/1), which holds one
     describe_native(&mut w, 0, fw::SINT32, "pos_y", fw::RECORD, 0);
     describe_native(&mut w, 1, fw::SINT32, "start_y", LAP, 3);
     describe_native(&mut w, 2, fw::SINT32, "x2", 0xFFFF, 1);
     describe_native(&mut w, 3, fw::UINT8, "hr2", fw::RECORD, 3);
+    describe_native(&mut w, 4, fw::STRING, "txt", 177, 1);
     w.define_dev(
         1,
         fw::RECORD,
         &[(253, 4, fw::UINT32), (3, 1, fw::UINT8)],
-        &[(0, 4, 0), (1, 4, 0), (2, 4, 0), (3, 1, 0)],
+        &[(0, 4, 0), (1, 4, 0), (2, 4, 0), (3, 1, 0), (4, 40, 0)],
     );
     let (lat, lon) = (fw::semicircles(fw::LAT0), fw::semicircles(fw::LON0));
     for i in 0..10i64 {
@@ -1000,6 +1002,7 @@ async fn a_developer_field_that_stands_for_a_profile_position_is_blanked_whateve
                 fw::V::I32(lat + 1),
                 fw::V::I32(lon),
                 fw::V::U8(141),
+                fw::V::Str("$GPGGA,080000,4024.918,N,00341.070,W", 40),
             ],
         );
     }
@@ -1009,6 +1012,8 @@ async fn a_developer_field_that_stands_for_a_profile_position_is_blanked_whateve
     for n in &needles {
         assert_eq!(copies(&file, n), 10);
     }
+    let nmea = b"4024.918";
+    assert_eq!(copies(&file, nmea), 10);
     let (state, result, err) = import(&env, &file, "app.fit").await?;
     assert_eq!(state, "done", "{err:?}");
     assert_eq!(result["fit"]["gps_left_out"], json!(true), "{result}");
@@ -1016,6 +1021,7 @@ async fn a_developer_field_that_stands_for_a_profile_position_is_blanked_whateve
     for n in &needles {
         assert_eq!(copies(&bytes, n), 0);
     }
+    assert_eq!(copies(&bytes, nmea), 0, "the NMEA text stays");
     // the rest stays: the heart rate and the developer field that stands for it
     let kept = fields(&bytes)?;
     assert!(kept.iter().any(|(n, v)| n == "heart_rate" && v == "140"), "{kept:?}");
@@ -1152,6 +1158,20 @@ async fn a_document_of_the_same_bytes_stored_before_becomes_a_wearables_document
     Ok(())
 }
 
+/// Mark the import job `id` as running on another worker, or as queued again.
+async fn hold(env: &Env, id: Option<i64>, running: bool) -> anyhow::Result<()> {
+    sqlx::query(if running {
+        "update job set state = 'running', locked_by = 'another worker', \
+         locked_until = now() + interval '10 minutes' where id = $1"
+    } else {
+        "update job set state = 'queued', locked_by = null, locked_until = null where id = $1"
+    })
+    .bind(id)
+    .execute(&env.db.pool)
+    .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_last_of_two_imports_of_one_upload_deletes_it() -> R {
     let env = Env::new().await?;
@@ -1170,21 +1190,7 @@ async fn the_last_of_two_imports_of_one_upload_deletes_it() -> R {
         ids.push(jobs::enqueue(&mut c, fit::JOB, &payload, EnqueueOptions::default()).await?);
     }
     drop(c);
-    let set = |id: Option<i64>, running: bool| {
-        let pool = env.db.pool.clone();
-        async move {
-            sqlx::query(if running {
-                "update job set state = 'running', locked_by = 'another worker', \
-                 locked_until = now() + interval '10 minutes' where id = $1"
-            } else {
-                "update job set state = 'queued', locked_by = null, locked_until = null where id = $1"
-            })
-            .bind(id)
-            .execute(&pool)
-            .await?;
-            anyhow::Ok(())
-        }
-    };
+    let set = |id: Option<i64>, running: bool| hold(&env, id, running);
     // Alex's import runs on another worker while Lucía's ends: Lucía's leaves the bytes to it
     set(ids[1], true).await?;
     let (state, _, err) = job(&env, ids[0]).await?;
@@ -1202,5 +1208,93 @@ async fn the_last_of_two_imports_of_one_upload_deletes_it() -> R {
         !exists(&env, &sha) && !exists_for(&env, "alex", &sha),
         "the last import left the upload"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_last_of_two_imports_of_one_upload_by_one_profile_deletes_it() -> R {
+    let env = Env::new().await?;
+    let run = fw::run_with_gps();
+    // Lucía uploads the same bytes twice: one sealed copy, two imports
+    let sha = put(&env, "lucia", &run)?;
+    let mut c = env.db.pool.acquire().await?;
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let payload = json!({
+            "profile_id": env.fam.profile("lucia").to_string(),
+            "household_id": env.fam.household_id.to_string(),
+            "blob_sha256": sha,
+            "filename": "run.fit",
+        });
+        ids.push(jobs::enqueue(&mut c, fit::JOB, &payload, EnqueueOptions::default()).await?);
+    }
+    drop(c);
+    // the second import runs on another worker while the first ends: the first leaves the bytes to it
+    hold(&env, ids[1], true).await?;
+    let (state, _, err) = job(&env, ids[0]).await?;
+    assert_eq!(state, "done", "{err:?}");
+    assert!(exists(&env, &sha), "the bytes the second import reads were deleted");
+    // the second ends while the first's row still reads running: it let the bytes go, so they go now
+    hold(&env, ids[0], true).await?;
+    hold(&env, ids[1], false).await?;
+    let (state, _, err) = job(&env, ids[1]).await?;
+    assert_eq!(state, "done", "{err:?}");
+    assert!(!exists(&env, &sha), "the last import left the upload");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_developer_field_its_own_file_never_describes_is_blanked() -> R {
+    let env = Env::new().await?;
+    let lat = fw::LAT0.to_le_bytes();
+    // five records of developer field (0, 0) holding a latitude, in a file that describes no developer field
+    let undescribed = |start: i64| {
+        let mut w = fw::Writer::default();
+        fw::file_id(&mut w, 4, fw::SERIAL, fw::WATCH, start);
+        w.define(5, fw::DEVELOPER_DATA_ID, &[(3, 1, fw::UINT8)]);
+        w.data(5, &[fw::V::U8(0)]);
+        w.define_dev(1, fw::RECORD, &[(253, 4, fw::UINT32), (3, 1, fw::UINT8)], &[(0, 8, 0)]);
+        for i in 0..5 {
+            w.data(
+                1,
+                &[
+                    fw::V::U32(fw::fit_time(start + 30 * i)),
+                    fw::V::U8(140),
+                    fw::V::F64(fw::LAT0),
+                ],
+            );
+        }
+        w.finish()
+    };
+    // a chain: the first file names field (0, 0) Latitude, the second uses it with no description of
+    // its own, so no reader that follows the protocol can name those bytes
+    let mut w = fw::Writer::default();
+    fw::file_id(&mut w, 4, fw::SERIAL, fw::WATCH, fw::RUN_START);
+    w.describe(3, 0, fw::FLOAT64, "Latitude");
+    w.define_dev(1, fw::RECORD, &[(253, 4, fw::UINT32), (3, 1, fw::UINT8)], &[(0, 8, 0)]);
+    for i in 0..5 {
+        w.data(
+            1,
+            &[
+                fw::V::U32(fw::fit_time(fw::RUN_START + 30 * i)),
+                fw::V::U8(140),
+                fw::V::F64(fw::LAT0),
+            ],
+        );
+    }
+    let mut chain = w.finish();
+    chain.extend(undescribed(fw::RUN_START + 3600));
+    for (case, file) in [("chain", chain), ("alone", undescribed(fw::RUN_START + 7200))] {
+        assert_eq!(copies(&file, &lat), if case == "chain" { 10 } else { 5 }, "{case}");
+        let (state, result, err) = import(&env, &file, &format!("{case}.fit")).await?;
+        assert_eq!(state, "done", "{case}: {err:?}");
+        assert_eq!(result["fit"]["gps_left_out"], json!(true), "{case}: {result}");
+        let bytes = stored(&env, &result["document_id"]).await?.bytes;
+        assert_eq!(copies(&bytes, &lat), 0, "{case}");
+        assert!(
+            fields(&bytes)?.iter().any(|(n, v)| n == "heart_rate" && v == "140"),
+            "{case}"
+        );
+    }
     Ok(())
 }
