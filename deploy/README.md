@@ -243,13 +243,21 @@ Migrations are forward-only and run at start, in the `admin` service, before the
 **The secrets key (from 1.0).** OwnHealth now encrypts each profile's documents and genome files, so every command except `migrate` and `healthcheck` refuses to start without `OWNHEALTH_SECRETS_KEY` and prints one line that says how to make one. Keep the key you have: it already encrypts your inbox secrets, and a new one would lock them.
 
 - Homelab: the new `compose.homelab.yaml` gives `secrets/secrets_key` to `admin` and `ocr` as well as the app (backups and restores open the encrypted files). The file exists since 0.3.0, so take the new compose file and nothing else changes.
-- Quickstart (`compose.yaml`): the key now comes from the file `secrets/secrets_key`, never from `.env`. Move the value you have, then delete the `OWNHEALTH_SECRETS_KEY=` line from `.env`:
+- Quickstart (`compose.yaml`): the key now comes from the file `secrets/secrets_key`, never from `.env`. These steps keep a key file you already have, move the value from `.env` when there is no file, and make a new key only when neither has one. Then delete the `OWNHEALTH_SECRETS_KEY=` line from `.env`:
 
 ```sh
 mkdir -p -m 700 secrets
-sed -n 's/^OWNHEALTH_SECRETS_KEY=//p' .env | tr -d '\n' > secrets/secrets_key && chmod 644 secrets/secrets_key
-test -s secrets/secrets_key || openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key   # .env had none
+if test -s secrets/secrets_key; then
+  echo "secrets/secrets_key is there: keeping it"
+elif grep -q '^OWNHEALTH_SECRETS_KEY=.' .env; then
+  sed -n 's/^OWNHEALTH_SECRETS_KEY=//p' .env | tr -d '\n' > secrets/secrets_key
+else
+  openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key   # neither had a key
+fi
+chmod 644 secrets/secrets_key
 ```
+
+If OwnHealth then stops with "does not open ... of the ... profile keys", the key is not the one the install was made with. Nothing was changed: put the original key back in `secrets/secrets_key` (from the old `.env`, or from the copy you keep with the backups) and start again. A new key never opens files already stored.
 
 Files stored before the upgrade stay where they are and open as before; files stored after it are encrypted. A later release adds a job you start yourself that encrypts the older files too. Take a backup after the upgrade and keep the key next to the restic password.
 
@@ -258,7 +266,8 @@ Files stored before the upgrade stay where they are and open as before; files st
 **To 0.3.0.** Take the new `compose.homelab.yaml` (it adds the `ocr` worker, the inbox folder and the `secrets_key` secret), then before `docker compose up -d`:
 
 ```sh
-openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key && chmod 644 secrets/secrets_key
+test -s secrets/secrets_key || openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key   # keep a key you have
+chmod 644 secrets/secrets_key
 mkdir -p inbox && sudo chown 10001:10001 inbox
 ```
 
