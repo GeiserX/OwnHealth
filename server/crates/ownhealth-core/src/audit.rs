@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{AssertSqlSafe, Connection, PgConnection};
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// One audit row. `actor_kind`: user | token | share | system; `via`: ui | api | mcp | job | share |
 /// export; `action`: read | search | propose | export | grant_change | login | purge | review | import ...
@@ -224,8 +224,8 @@ const PLAIN_TABLES: &str = "select pg_catalog.count(*) from pg_catalog.pg_class 
 /// it back at the end. The transaction first sets `search_path` to pg_catalog, so no operator or
 /// function of the owner's takes part in a comparison. Then it locks both tables, so neither can be
 /// renamed or swapped until the check ends (that needs ACCESS EXCLUSIVE). Then it runs the guard,
-/// and it refuses to go on when either table is no longer a plain table (see `PLAIN_TABLES`). Only
-/// then does it read.
+/// and it refuses to go on when either table is no longer a plain table (see `PLAIN_TABLES`):
+/// `Error::AuditUncheckable`. Only then does it read.
 ///
 /// So it holds against the app role, and against an owner who edits rows with plain SQL or with the
 /// tricks we know. An owner can always change what the database answers, and a superuser can make
@@ -243,10 +243,10 @@ pub async fn verify_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
     let check = if plain == 2 {
         read_chain(&mut tx).await
     } else {
-        Err(anyhow::anyhow!(
+        Err(Error::AuditUncheckable(
             "the audit log cannot be checked: public.audit_event or public.audit_chain is no longer a plain table"
-        )
-        .into())
+                .into(),
+        ))
     };
     tx.rollback().await?;
     check
@@ -1041,6 +1041,20 @@ mod tests {
             .await?;
         assert_eq!(path, "public");
         tx.rollback().await?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------- round 4 review tests ----
+
+    /// The guard's refusal is an error of its own, apart from a database failure.
+    #[tokio::test]
+    async fn a_table_the_check_cannot_trust_is_its_own_error() -> anyhow::Result<()> {
+        let (db, _) = chained(2).await?;
+        owner_sql(&db, "alter table audit_chain enable row level security").await?;
+        let err = verify_chain(&mut *db.pool.acquire().await?)
+            .await
+            .expect_err("row security on audit_chain must stop the check");
+        assert!(matches!(err, Error::AuditUncheckable(_)), "{err:?}");
         Ok(())
     }
 }
