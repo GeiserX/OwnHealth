@@ -205,10 +205,27 @@ pub fn header_key(cell: &str) -> String {
     c.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
-/// The CGM export kind a header line names, if it is one.
+/// The cells of one CSV line split at `d`, as a CSV reader splits them: a separator inside a quoted cell
+/// (`"Notes,Event Type"`) splits nothing, and the quotes stay for [`header_key`] to take off.
+fn csv_cells(line: &str, d: char) -> Vec<&str> {
+    let (mut cells, mut start, mut quoted) = (Vec::new(), 0, false);
+    for (i, c) in line.char_indices() {
+        if c == '"' {
+            quoted = !quoted;
+        } else if c == d && !quoted {
+            cells.push(&line[start..i]);
+            start = i + c.len_utf8();
+        }
+    }
+    cells.push(&line[start..]);
+    cells
+}
+
+/// The CGM export kind a header line names, if it is one. A name inside a quoted cell with other text
+/// (`"Notes,Event Type,Details"`) is not a header cell, as the importer's CSV reader reads it.
 pub fn cgm_csv_kind(line: &str) -> Option<UploadKind> {
     let d = char::from(csv_delimiter(line));
-    let cells: Vec<String> = line.split(d).map(header_key).collect();
+    let cells: Vec<String> = csv_cells(line, d).into_iter().map(header_key).collect();
     let has = |names: &[&str]| cells.iter().any(|c| names.contains(&c.as_str()));
     CGM_CSV_KINDS.iter().find_map(|(kind, time, types)| {
         let time_ok = if time.is_empty() {
@@ -773,6 +790,33 @@ mod tests {
         assert_eq!(
             cgm_csv_kind(&format!("{clarity},\"Notes;;;;;\"")),
             Some("dexcom_clarity_csv")
+        );
+    }
+
+    #[test]
+    fn a_header_name_inside_a_quoted_cell_names_no_cgm_export() {
+        // one quoted cell that holds a separator and a CGM header name is one cell, as the importer's
+        // CSV reader reads it: the sniffer queues no CGM job the import would then refuse
+        let clarity = "Index,Timestamp (YYYY-MM-DDThh:mm:ss),\"Notes,Event Type,Details\"";
+        assert_eq!(cgm_csv_kind(clarity), None);
+        let libre = "Device,Device Timestamp,\"Notes,Record Type\"";
+        assert_eq!(cgm_csv_kind(libre), None);
+        assert_eq!(
+            sniff(
+                "notes.csv",
+                format!("{clarity}\n1,2026-11-14T20:00:17,x\n").as_bytes(),
+                None
+            ),
+            "unknown"
+        );
+        // quoted header cells, a quoted cell with a separator and an escaped quote, still name the export
+        assert_eq!(
+            cgm_csv_kind("\"Index\",\"Timestamp (YYYY-MM-DDThh:mm:ss)\",\"Event Type\",\"a, \"\"b\"\"\""),
+            Some("dexcom_clarity_csv")
+        );
+        assert_eq!(
+            cgm_csv_kind("Gerät;Seriennummer;\"Gerätezeitstempel\";Aufzeichnungstyp;\"x;y\""),
+            Some("libreview_csv")
         );
     }
 
