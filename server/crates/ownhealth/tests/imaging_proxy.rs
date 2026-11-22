@@ -6,6 +6,7 @@
 //! has its own test, and each one checks that Orthanc never saw the request. A fake Orthanc stands in
 //! for the real one: it builds absolute URLs from the Host header it gets, as Orthanc does.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,7 +16,7 @@ use axum::extract::Request;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use ownhealth::app::build_app_with;
-use ownhealth_api::routes::imaging_proxy::{AUDIT_ACTION, Imaging, OrthancConfig, VIEWER_CSP};
+use ownhealth_api::routes::imaging_proxy::{AUDIT_ACTION, DICOMWEB_CSP, Imaging, OrthancConfig, VIEWER_CSP};
 use ownhealth_auth::sessions;
 use ownhealth_auth::tokens::{TokenIn, create_token};
 use ownhealth_core::Runtime;
@@ -35,6 +36,7 @@ const ALEX_SERIES: &str = "1.2.826.0.1.3680043.10.999.1.1";
 const ALEX_INSTANCE: &str = "1.2.826.0.1.3680043.10.999.1.1.1";
 const CARMEN_MR: &str = "1.2.826.0.1.3680043.10.999.2";
 const LUCIA_XR: &str = "1.2.826.0.1.3680043.10.999.3";
+const SAM_US: &str = "1.2.826.0.1.3680043.10.999.4";
 const ORTHANC_ID: &str = "522ef0ce-f5570074-52b2faa2-781ae81c-c87098aa";
 
 /// One request the fake Orthanc received.
@@ -47,30 +49,61 @@ struct Seen {
     accept: Option<String>,
 }
 
+/// The Orthanc studies by StudyInstanceUID: Orthanc keys a study by PatientID and UID, so one UID can
+/// name two studies (two patients).
+type Studies = Arc<Mutex<HashMap<String, Vec<String>>>>;
+
 #[derive(Clone)]
 struct FakeOrthanc {
     url: String,
+    /// Every request but the UID lookups: what could carry image data.
     seen: Arc<Mutex<Vec<Seen>>>,
+    /// The bodies of `POST /tools/lookup`.
+    lookups: Arc<Mutex<Vec<String>>>,
+    studies: Studies,
 }
 
 impl FakeOrthanc {
     async fn start() -> anyhow::Result<FakeOrthanc> {
         let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
-        let log = seen.clone();
+        let lookups: Arc<Mutex<Vec<String>>> = Arc::default();
+        let studies: Studies = Arc::default();
+        let (log, looked, known) = (seen.clone(), lookups.clone(), studies.clone());
         let app = Router::new().fallback(move |req: Request| {
-            let log = log.clone();
-            async move { fake_answer(&log, req) }
+            let (log, looked, known) = (log.clone(), looked.clone(), known.clone());
+            async move {
+                if req.method() == Method::POST && req.uri().path() == "/tools/lookup" {
+                    return fake_lookup(&looked, &known, req).await;
+                }
+                fake_answer(&log, req)
+            }
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}", listener.local_addr()?);
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        Ok(FakeOrthanc { url, seen })
+        Ok(FakeOrthanc {
+            url,
+            seen,
+            lookups,
+            studies,
+        })
     }
 
     fn seen(&self) -> Vec<Seen> {
         self.seen.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    fn lookups(&self) -> Vec<String> {
+        self.lookups.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// One more Orthanc study under `uid`.
+    fn add_study(&self, uid: &str, orthanc_id: &str) {
+        if let Ok(mut s) = self.studies.lock() {
+            s.entry(uid.to_string()).or_default().push(orthanc_id.to_string());
+        }
     }
 
     fn clear(&self) {
@@ -78,6 +111,31 @@ impl FakeOrthanc {
             s.clear();
         }
     }
+}
+
+/// `POST /tools/lookup` as Orthanc answers it: every resource whose DICOM UID is the body.
+async fn fake_lookup(
+    looked: &Mutex<Vec<String>>,
+    known: &Mutex<HashMap<String, Vec<String>>>,
+    req: Request,
+) -> Response {
+    let body = to_bytes(req.into_body(), 1 << 16).await.unwrap_or_default();
+    let uid = String::from_utf8_lossy(&body).trim().to_string();
+    if let Ok(mut l) = looked.lock() {
+        l.push(uid.clone());
+    }
+    let ids = known
+        .lock()
+        .map(|k| k.get(&uid).cloned().unwrap_or_default())
+        .unwrap_or_default();
+    let found: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({"ID": id, "Path": format!("/studies/{id}"), "Type": "Study"}))
+        .collect();
+    let mut r = (StatusCode::OK, Value::Array(found).to_string()).into_response();
+    r.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    r
 }
 
 fn fake_answer(log: &Mutex<Vec<Seen>>, req: Request) -> Response {
@@ -135,6 +193,13 @@ fn fake_answer(log: &Mutex<Vec<Seen>>, req: Request) -> Response {
                 "http://{host}/dicom-web/studies/{ALEX_CT}/series/{ALEX_SERIES}/instances/{ALEX_INSTANCE}/bulk/7fe00010")}
         }]));
     }
+    if path.ends_with("/rendered") && path.contains("/instances/") {
+        // An encapsulated PDF, rendered: bytes the uploader chose.
+        let mut r = (StatusCode::OK, "%PDF-1.4\n<html><script>alert(1)</script>").into_response();
+        r.headers_mut()
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/pdf"));
+        return r;
+    }
     if path.contains("/frames/") {
         let mut r = (StatusCode::OK, "--b\r\n\r\nPIXELS\r\n--b--").into_response();
         r.headers_mut().insert(
@@ -176,7 +241,8 @@ impl World {
             user: "ownhealth".into(),
             password: PASSWORD.into(),
         });
-        let app = build_app_with(rt, Imaging::with_ttl(config, ttl));
+        // Orthanc is asked again on every proxied request (no cache), so a change shows at once.
+        let app = build_app_with(rt, Imaging::with_times(config, ttl, Duration::ZERO));
         let w = World {
             db,
             _dir: dir,
@@ -187,11 +253,15 @@ impl World {
         w.add_study("alex", ALEX_CT, "current").await?;
         w.add_study("carmen", CARMEN_MR, "current").await?;
         w.add_study("lucia", LUCIA_XR, "current").await?;
+        w.add_study("sam", SAM_US, "current").await?;
         Ok(w)
     }
 
+    /// A study in `slug`'s records, held by Orthanc as `orthanc-<slug>`.
     async fn add_study(&self, slug: &str, uid: &str, status: &str) -> R {
         let profile = self.fam.profile(slug);
+        let orthanc_id = format!("orthanc-{slug}");
+        self.orthanc.add_study(uid, &orthanc_id);
         let src = format!("src_dicom_{}", slug);
         sqlx::query(
             "insert into src (id, profile_id, kind, actor_kind, label) values ($1, $2, 'dicom', 'system', 'synthetic CD') \
@@ -202,11 +272,12 @@ impl World {
         .execute(&self.db.pool)
         .await?;
         sqlx::query(
-            "insert into imaging_study (profile_id, study_instance_uid, modality, status, src_id, fhir) \
-             values ($1, $2, 'CT', $3, $4, '{}')",
+            "insert into imaging_study (profile_id, study_instance_uid, orthanc_id, modality, status, src_id, fhir) \
+             values ($1, $2, $3, 'CT', $4, $5, '{}')",
         )
         .bind(profile)
         .bind(uid)
+        .bind(&orthanc_id)
         .bind(status)
         .bind(&src)
         .execute(&self.db.pool)
@@ -289,6 +360,25 @@ impl World {
             .header(header::CONTENT_TYPE, "application/dicom")
             .body(Body::from("DICM"))?;
         Ok(self.call(req).await?.0)
+    }
+
+    /// Seconds since `slug`'s sessions were last seen.
+    async fn idle(&self, slug: &str) -> anyhow::Result<f64> {
+        Ok(sqlx::query_scalar(
+            "select extract(epoch from now() - max(last_seen_at))::float8 from user_session where user_id = $1",
+        )
+        .bind(self.fam.user(slug))
+        .fetch_one(&self.db.pool)
+        .await?)
+    }
+
+    async fn set_idle(&self, slug: &str, secs: i32) -> R {
+        sqlx::query("update user_session set last_seen_at = now() - make_interval(secs => $2) where user_id = $1")
+            .bind(self.fam.user(slug))
+            .bind(f64::from(secs))
+            .execute(&self.db.pool)
+            .await?;
+        Ok(())
     }
 
     async fn audit_rows(&self, uid: &str) -> anyhow::Result<i64> {
@@ -774,6 +864,74 @@ async fn a_lost_grant_or_an_ended_session_ends_the_link() -> R {
     Ok(())
 }
 
+/// A disabled user's links end at once.
+#[tokio::test]
+async fn a_disabled_user_ends_the_link() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let cap = w.open(&cookie, "alex", ALEX_CT).await?;
+    let series = dw(&cap, &format!("studies/{ALEX_CT}/series"));
+    assert_eq!(w.viewer_get(&series, None).await?.0, StatusCode::OK);
+    sqlx::query("update app_user set disabled_at = now() where id = $1")
+        .bind(w.fam.user("alex"))
+        .execute(&w.db.pool)
+        .await?;
+    let (s, _, body) = w.viewer_get(&series, None).await?;
+    assert_eq!(
+        (s, code(&body).as_str()),
+        (StatusCode::FORBIDDEN, "viewer_link_invalid")
+    );
+    Ok(())
+}
+
+/// A session idle for more than 30 minutes ends its links too.
+#[tokio::test]
+async fn an_idle_session_ends_the_link() -> R {
+    let w = World::new().await?;
+    let sam = w.session("sam").await?;
+    let cap = w.open(&sam, "sam", SAM_US).await?;
+    let series = dw(&cap, &format!("studies/{SAM_US}/series"));
+    assert_eq!(w.viewer_get(&series, None).await?.0, StatusCode::OK);
+    w.set_idle("sam", 31 * 60).await?;
+    w.orthanc.clear();
+    let (s, _, body) = w.viewer_get(&series, None).await?;
+    assert_eq!(
+        (s, code(&body).as_str()),
+        (StatusCode::FORBIDDEN, "viewer_link_invalid")
+    );
+    assert!(w.orthanc.seen().is_empty());
+    Ok(())
+}
+
+/// A long read: the viewer's requests count as activity (at most once a minute), so the session does
+/// not go idle under a person who is still reading. The link's own hour still ends it.
+#[tokio::test]
+async fn reading_in_the_viewer_keeps_the_session_alive() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let cap = w.open(&cookie, "alex", ALEX_CT).await?;
+    let series = dw(&cap, &format!("studies/{ALEX_CT}/series"));
+    // 25 minutes without the app: a viewer request makes the session fresh again.
+    w.set_idle("alex", 25 * 60).await?;
+    assert_eq!(w.viewer_get(&series, None).await?.0, StatusCode::OK);
+    let idle = w.idle("alex").await?;
+    assert!(idle < 5.0, "{idle}");
+    // Within a minute of the last touch, a request writes nothing.
+    w.set_idle("alex", 30).await?;
+    assert_eq!(w.viewer_get(&series, None).await?.0, StatusCode::OK);
+    let idle = w.idle("alex").await?;
+    assert!((29.0..60.0).contains(&idle), "{idle}");
+    // The viewer files count too.
+    w.set_idle("alex", 20 * 60).await?;
+    assert_eq!(
+        w.viewer_get(&format!("/ohif/t/{cap}/viewer"), None).await?.0,
+        StatusCode::OK
+    );
+    let idle = w.idle("alex").await?;
+    assert!(idle < 5.0, "{idle}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn every_viewer_page_is_sandboxed_even_a_refusal() -> R {
     for on in [true, false] {
@@ -845,6 +1003,88 @@ async fn the_preflight_allows_get_from_origin_null_without_credentials() -> R {
     Ok(())
 }
 
+/// Orthanc keys a study by PatientID plus StudyInstanceUID, so a second patient's study can arrive
+/// under the same UID (a crafted CD, a modality that reuses UIDs). The link is bound to the one Orthanc
+/// study the record names: with two under the UID, nothing passes, neither at the open nor later.
+#[tokio::test]
+async fn two_orthanc_studies_under_one_uid_pass_nothing() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let cap = w.open(&cookie, "alex", ALEX_CT).await?;
+    let series = dw(&cap, &format!("studies/{ALEX_CT}/series"));
+    assert_eq!(w.viewer_get(&series, None).await?.0, StatusCode::OK);
+
+    w.orthanc.add_study(ALEX_CT, "orthanc-another-patient");
+    w.orthanc.clear();
+    for rest in [
+        format!("studies/{ALEX_CT}/series"),
+        format!("studies?StudyInstanceUID={ALEX_CT}"),
+        format!("studies/{ALEX_CT}/series/{ALEX_SERIES}/instances/{ALEX_INSTANCE}/metadata"),
+        format!("studies/{ALEX_CT}/series/{ALEX_SERIES}/instances/{ALEX_INSTANCE}/frames/1"),
+    ] {
+        let (s, _, body) = w.viewer_get(&dw(&cap, &rest), None).await?;
+        assert_eq!(
+            (s, code(&body).as_str()),
+            (StatusCode::FORBIDDEN, "study_not_bound"),
+            "{rest}"
+        );
+    }
+    let (s, v) = w.open_with(Auth::Cookie(&cookie), "alex", ALEX_CT).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["detail"]["code"], "study_not_bound");
+    let other = w.session("alex").await?;
+    let (s, v) = w.open_with(Auth::Cookie(&other), "alex", ALEX_CT).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("study_not_bound"))
+    );
+    assert_eq!(w.audit_rows(ALEX_CT).await?, 1); // the refused open logged nothing
+    assert!(w.orthanc.seen().is_empty(), "{:?}", w.orthanc.seen());
+    // Orthanc was asked which studies carry the UID, and only that.
+    assert!(w.orthanc.lookups().len() >= 4, "{:?}", w.orthanc.lookups());
+    assert!(w.orthanc.lookups().iter().all(|u| u == ALEX_CT));
+
+    // One study, but not the one the record names: refused too.
+    sqlx::query("update imaging_study set orthanc_id = 'orthanc-somebody-else' where study_instance_uid = $1")
+        .bind(LUCIA_XR)
+        .execute(&w.db.pool)
+        .await?;
+    let (s, v) = w.open_with(Auth::Cookie(&cookie), "lucia", LUCIA_XR).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("study_not_bound"))
+    );
+    // A record whose Orthanc study is not known yet opens nothing.
+    sqlx::query("update imaging_study set orthanc_id = null where study_instance_uid = $1")
+        .bind(LUCIA_XR)
+        .execute(&w.db.pool)
+        .await?;
+    let (s, v) = w.open_with(Auth::Cookie(&cookie), "lucia", LUCIA_XR).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("study_not_bound"))
+    );
+    // A record that moves to another Orthanc study after the open ends the link.
+    let carmen = w.open(&cookie, "carmen", CARMEN_MR).await?;
+    let carmen_series = dw(&carmen, &format!("studies/{CARMEN_MR}/series"));
+    assert_eq!(w.viewer_get(&carmen_series, None).await?.0, StatusCode::OK);
+    w.orthanc.add_study(CARMEN_MR, "orthanc-carmen-again");
+    sqlx::query("update imaging_study set orthanc_id = 'orthanc-carmen-again' where study_instance_uid = $1")
+        .bind(CARMEN_MR)
+        .execute(&w.db.pool)
+        .await?;
+    w.orthanc.clear();
+    let (s, _, body) = w.viewer_get(&carmen_series, None).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(
+        ["study_not_available", "study_not_bound"].contains(&code(&body).as_str()),
+        "{}",
+        code(&body)
+    );
+    assert!(w.orthanc.seen().is_empty(), "{:?}", w.orthanc.seen());
+    Ok(())
+}
+
 /// A top-level visit to a viewer URL in a normal tab carries the session cookie: the proxy reads it
 /// nowhere and never passes it on to Orthanc.
 #[tokio::test]
@@ -865,6 +1105,65 @@ async fn a_cookie_on_a_viewer_request_never_reaches_orthanc() -> R {
     let seen = w.orthanc.seen();
     assert_eq!(seen.len(), 3, "{seen:?}");
     assert!(seen.iter().all(|r| !r.cookie), "{seen:?}");
+    Ok(())
+}
+
+/// Opening the same study again in the same session hands back the live link: a person who opens it
+/// a hundred times holds one link, and the audit shows one open.
+#[tokio::test]
+async fn opening_a_study_again_in_the_session_reuses_its_link() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let cap = w.open(&cookie, "alex", ALEX_CT).await?;
+    for _ in 0..3 {
+        assert_eq!(w.open(&cookie, "alex", ALEX_CT).await?, cap);
+    }
+    let other = w.session("alex").await?;
+    assert_ne!(w.open(&other, "alex", ALEX_CT).await?, cap);
+    assert_ne!(w.open(&cookie, "carmen", CARMEN_MR).await?, cap);
+    assert_eq!(w.audit_rows(ALEX_CT).await?, 2);
+    Ok(())
+}
+
+/// What Orthanc sends back is the uploader's bytes. Opened as a page, an answer is sandboxed with no
+/// rights at all, and anything that is not an image or DICOM is a download.
+#[tokio::test]
+async fn a_dicomweb_answer_never_runs_as_a_page_of_the_app() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let cap = w.open(&cookie, "alex", ALEX_CT).await?;
+    let rendered = dw(
+        &cap,
+        &format!("studies/{ALEX_CT}/series/{ALEX_SERIES}/instances/{ALEX_INSTANCE}/rendered"),
+    );
+    let (s, h, _) = w.viewer_get(&rendered, None).await?;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(hv(&h, "content-type"), "application/pdf");
+    assert_eq!(hv(&h, "content-security-policy"), DICOMWEB_CSP);
+    assert_eq!(hv(&h, "content-disposition"), "attachment");
+    assert_eq!(hv(&h, "x-content-type-options"), "nosniff");
+    assert!(DICOMWEB_CSP.starts_with("sandbox;"), "{DICOMWEB_CSP}");
+    // The viewer's own reads: a search (JSON) and frames (multipart) stay inline, sandboxed.
+    for rest in [
+        format!("studies?StudyInstanceUID={ALEX_CT}"),
+        format!("studies/{ALEX_CT}/series/{ALEX_SERIES}/instances/{ALEX_INSTANCE}/frames/1"),
+    ] {
+        let (s, h, _) = w.viewer_get(&dw(&cap, &rest), None).await?;
+        assert_eq!(s, StatusCode::OK, "{rest}");
+        assert_eq!(hv(&h, "content-security-policy"), DICOMWEB_CSP, "{rest}");
+        assert_eq!(hv(&h, "content-disposition"), "", "{rest}");
+    }
+    // Refusals and preflights carry it too.
+    let (s, h, _) = w.viewer_get(&dw(&cap, "studies"), None).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(hv(&h, "content-security-policy"), DICOMWEB_CSP);
+    let req = Request::builder()
+        .method(Method::OPTIONS)
+        .uri(dw(&cap, "studies"))
+        .header(header::ORIGIN, "null")
+        .body(Body::empty())?;
+    let (_, h, _) = w.call(req).await?;
+    assert_eq!(hv(&h, "content-security-policy"), DICOMWEB_CSP);
     Ok(())
 }
 

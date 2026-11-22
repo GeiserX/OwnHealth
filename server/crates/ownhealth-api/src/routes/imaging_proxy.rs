@@ -5,8 +5,16 @@
 //! 1. A person opens one study: `POST /api/profiles/{p}/imaging/studies/{uid}/open`, from a browser
 //!    session (or dev auth) with `read:records` on the profile. Access tokens never get a link. The answer
 //!    is a viewer link that carries a capability: 32 random bytes, valid for one hour, bound to that
-//!    session and to that one study. Only its hash is kept, in memory. The first open of a study in a
-//!    session writes one `imaging.open` audit row.
+//!    session and to that one study. Links live in memory only, found by the token's hash; opening the
+//!    same study again in the same session gives the same live link back, and one session holds at most
+//!    [`LINKS_PER_HOLDER`] (its oldest goes first). The first open of a study in a session writes one
+//!    `imaging.open` audit row.
+//!
+//!    Orthanc keys a study by PatientID plus StudyInstanceUID, so two patients' studies can share a UID,
+//!    and its DICOMweb plugin then serves both under `/studies/{uid}`. The link is therefore bound to
+//!    the Orthanc study the record names (`imaging_study.orthanc_id`): at the open, and again before
+//!    proxied reads (at most [`ORTHANC_RECHECK`] apart), Orthanc's `/tools/lookup` must find exactly one
+//!    study under the UID, with that id. Anything else passes nothing.
 //! 2. The viewer (OHIF, served by Orthanc's plugin) runs under `/ohif/t/<capability>/`. Every `/ohif`
 //!    answer carries [`VIEWER_CSP`]: `sandbox allow-scripts` puts the page in an opaque origin, so the
 //!    session cookie never reaches its requests and it cannot read `/api`, and `connect-src 'self'` keeps
@@ -14,11 +22,18 @@
 //!    worker, workers only from `blob:` URLs), and its DICOMweb roots point at `/dicom-web/t/<capability>`.
 //! 3. The proxy answers CORS for `Origin: null`, without credentials, and allows GET only. Every request
 //!    is checked again: the capability is live, its session is live, the session can still read the
-//!    profile (`read:records`), and the study is still in that profile and not retracted. The study UID
-//!    comes from the path, or from a search that names exactly that one UID. WADO-URI, a bare study list,
-//!    root searches, Orthanc ids (`/instances/{id}`, `ohif-dicom-json`) and whole-study downloads are
-//!    refused. Orthanc's own absolute URLs in its JSON answers are turned into links through the
-//!    capability, so the viewer never learns where Orthanc is.
+//!    profile (`read:records`), and the study is still in that profile, not retracted, and still the
+//!    same Orthanc study. A viewer request counts as activity for the session (at most once a minute),
+//!    so a long read does not go idle; the link's own hour still bounds it. The study UID comes from
+//!    the path, or from a search that names exactly that one UID. WADO-URI, a bare study list, root
+//!    searches, Orthanc ids (`/instances/{id}`, `ohif-dicom-json`) and whole-study or whole-series
+//!    downloads are refused. Every answer carries [`DICOMWEB_CSP`], so one opened as a page runs nothing,
+//!    and one that is not an image or DICOM is a download.
+//!
+//!    Orthanc's absolute URLs in its JSON answers are turned into links through the capability. The
+//!    part headers inside a multipart answer (`Content-Location` of each frame) are passed as they come
+//!    and still name Orthanc's internal address (`http://orthanc:8042` in compose); the viewer cannot
+//!    use it, because `connect-src 'self'` keeps it on this server and Orthanc publishes no port.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -51,9 +66,18 @@ pub const CAPABILITY_TTL: Duration = Duration::from_secs(3600);
 pub const AUDIT_ACTION: &str = "imaging.open";
 /// More open links than this (after expired ones are dropped) refuses new ones.
 const MAX_LINKS: usize = 10_000;
-/// Orthanc's JSON answers (QIDO, metadata) are read whole to rewrite its URLs; a series of thousands
-/// of instances stays far below this.
-const MAX_JSON_BYTES: usize = 256 << 20;
+/// Live links one session (or dev user) holds; a new one drops that holder's oldest, so one person
+/// cannot use up [`MAX_LINKS`] for everyone.
+pub const LINKS_PER_HOLDER: usize = 50;
+/// A second open of the same study reuses the live link while it has at least this long left.
+const REUSE_LEFT: Duration = Duration::from_secs(600);
+/// How long a link's check against Orthanc's `/tools/lookup` stands before a proxied read asks again.
+pub const ORTHANC_RECHECK: Duration = Duration::from_secs(5);
+/// Orthanc's JSON answers (QIDO, metadata) are read whole to rewrite its URLs, and the rewrite copies
+/// them twice; a series of thousands of instances stays far below this.
+const MAX_JSON_BYTES: usize = 64 << 20;
+/// A viewer request counts as session activity at most this often.
+const TOUCH_EVERY_SECS: i32 = 60;
 
 /// Every `/ohif` answer, refusals included. `sandbox allow-scripts` (no `allow-same-origin`) runs the
 /// viewer in an opaque origin. OHIF needs inline scripts, `eval` (its WebAssembly codecs) and workers
@@ -63,6 +87,10 @@ pub const VIEWER_CSP: &str = "sandbox allow-scripts; default-src 'none'; \
     style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; \
     connect-src 'self'; media-src 'self' blob:; manifest-src 'self'; frame-ancestors 'self'; \
     base-uri 'none'; form-action 'none'";
+
+/// Every `/dicom-web` answer. The viewer reads them with fetch, where a CSP does nothing; a person (or a
+/// script in the viewer) who opens one as a page gets a document with no rights at all.
+pub const DICOMWEB_CSP: &str = "sandbox; default-src 'none'";
 
 /// Where Orthanc is. `OWNHEALTH_ORTHANC_URL` (Orthanc's root, `http://orthanc:8042` in compose) turns
 /// imaging on; the password comes from `OWNHEALTH_ORTHANC_PASSWORD_FILE` (a docker secret) or
@@ -137,10 +165,16 @@ impl Holder {
 
 #[derive(Debug, Clone)]
 struct Link {
+    /// The capability itself, so a second open of the study in the session can hand it back.
+    token: String,
     holder: Holder,
     profile_id: Uuid,
     study_uid: String,
+    /// The one Orthanc study the record named at the open.
+    orthanc_id: String,
     expires: Instant,
+    /// When Orthanc last confirmed that the UID names that study only.
+    checked: Instant,
 }
 
 /// The imaging state of one app: the Orthanc settings (None: imaging off) and the open viewer links.
@@ -148,6 +182,7 @@ pub struct Imaging {
     orthanc: Option<OrthancConfig>,
     http: reqwest::Client,
     ttl: Duration,
+    recheck: Duration,
     links: Mutex<HashMap<Vec<u8>, Link>>,
 }
 
@@ -158,6 +193,11 @@ impl Imaging {
 
     /// `new` with another link lifetime (tests).
     pub fn with_ttl(orthanc: Option<OrthancConfig>, ttl: Duration) -> Arc<Imaging> {
+        Imaging::with_times(orthanc, ttl, ORTHANC_RECHECK)
+    }
+
+    /// `new` with another link lifetime and Orthanc recheck interval (tests: zero asks every time).
+    pub fn with_times(orthanc: Option<OrthancConfig>, ttl: Duration, recheck: Duration) -> Arc<Imaging> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .read_timeout(Duration::from_secs(60))
@@ -168,6 +208,7 @@ impl Imaging {
             orthanc,
             http,
             ttl,
+            recheck,
             links: Mutex::default(),
         })
     }
@@ -182,16 +223,60 @@ impl Imaging {
         })
     }
 
-    fn mint(&self, link: Link) -> Option<String> {
-        let token = ownhealth_auth::token_urlsafe(32);
+    /// A link for `holder` to the study: the holder's live one when it has [`REUSE_LEFT`] or more,
+    /// else a new one (dropping the holder's oldest past [`LINKS_PER_HOLDER`]). Returns the token and
+    /// the time it has left; None when the server holds [`MAX_LINKS`] already.
+    fn mint(&self, holder: Holder, profile_id: Uuid, study_uid: &str, orthanc_id: &str) -> Option<(String, Duration)> {
         let mut links = self.links.lock().ok()?;
         let now = Instant::now();
         links.retain(|_, l| l.expires > now);
+        let live = links.values().find(|l| {
+            l.holder == holder
+                && l.profile_id == profile_id
+                && l.study_uid == study_uid
+                && l.orthanc_id == orthanc_id
+                && l.expires >= now + REUSE_LEFT
+        });
+        if let Some(l) = live {
+            return Some((l.token.clone(), l.expires - now));
+        }
+        let mut held: Vec<(Instant, Vec<u8>)> = links
+            .iter()
+            .filter(|(_, l)| l.holder == holder)
+            .map(|(k, l)| (l.expires, k.clone()))
+            .collect();
+        if held.len() >= LINKS_PER_HOLDER {
+            held.sort();
+            for (_, key) in held.iter().take(held.len() + 1 - LINKS_PER_HOLDER) {
+                links.remove(key);
+            }
+        }
         if links.len() >= MAX_LINKS {
             return None;
         }
-        links.insert(ownhealth_auth::sha256(&token), link);
-        Some(token)
+        let token = ownhealth_auth::token_urlsafe(32);
+        links.insert(
+            ownhealth_auth::sha256(&token),
+            Link {
+                token: token.clone(),
+                holder,
+                profile_id,
+                study_uid: study_uid.to_string(),
+                orthanc_id: orthanc_id.to_string(),
+                expires: now + self.ttl,
+                checked: now,
+            },
+        );
+        Some((token, self.ttl))
+    }
+
+    /// Orthanc confirmed the link's study again just now.
+    fn mark_checked(&self, token: &str) {
+        if let Ok(mut links) = self.links.lock()
+            && let Some(l) = links.get_mut(&ownhealth_auth::sha256(token))
+        {
+            l.checked = Instant::now();
+        }
     }
 
     fn lookup(&self, token: &str) -> Option<Link> {
@@ -254,6 +339,13 @@ fn retracted() -> ApiError {
     refused("study_retracted", "This study was retracted.")
 }
 
+fn not_bound() -> ApiError {
+    refused(
+        "study_not_bound",
+        "OwnHealth cannot tell this study apart in the image store, so the viewer shows none of it.",
+    )
+}
+
 fn not_in_link() -> ApiError {
     refused("study_not_in_link", "This viewer link opens one study only.")
 }
@@ -311,7 +403,7 @@ async fn open(
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
     let profile_id = perm.profile.id;
-    match study_status(&mut tx, profile_id, &uid).await? {
+    let orthanc_id = match study_row(&mut tx, profile_id, &uid).await? {
         None => {
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
@@ -319,9 +411,11 @@ async fn open(
                 "This profile has no study with that UID.",
             ));
         }
-        Some(s) if s == "retracted" => return Err(retracted()),
-        Some(_) => {}
-    }
+        Some((s, _)) if s == "retracted" => return Err(retracted()),
+        Some((_, None)) => return Err(not_bound()),
+        Some((_, Some(id))) => id,
+    };
+    bind_check(imaging, &uid, &orthanc_id).await?;
     // One audit row per study per session: the lock makes two opens at once write one row.
     let marker = holder.marker();
     sqlx::query("select pg_advisory_xact_lock(hashtext($1))")
@@ -349,50 +443,62 @@ async fn open(
         write_audit(&mut tx, &e).await?;
     }
     tx.commit().await?;
-    let token = imaging
-        .mint(Link {
-            holder,
-            profile_id,
-            study_uid: uid.clone(),
-            expires: Instant::now() + imaging.ttl,
-        })
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "too_many_viewer_links",
-                "Too many viewer links are open. Try again later.",
-            )
-        })?;
+    let (token, left) = imaging.mint(holder, profile_id, &uid, &orthanc_id).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too_many_viewer_links",
+            "Too many viewer links are open. Try again later.",
+        )
+    })?;
     Ok(Json(json!({
         "viewer_url": format!("/ohif/t/{token}/viewer?StudyInstanceUIDs={uid}"),
-        "expires_in": imaging.ttl.as_secs(),
+        "expires_in": left.as_secs(),
     })))
 }
 
-/// The study's status in that profile; a live row wins over a retracted one.
-async fn study_status(conn: &mut PgConnection, profile_id: Uuid, uid: &str) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar(
-        "select status from imaging_study where profile_id = $1 and study_instance_uid = $2 \
-         order by status = 'retracted' limit 1",
-    )
-    .bind(profile_id)
-    .bind(uid)
-    .fetch_optional(conn)
-    .await
+/// The study's status and Orthanc id in that profile (`study_instance_uid` is unique).
+async fn study_row(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    uid: &str,
+) -> Result<Option<(String, Option<String>)>, sqlx::Error> {
+    sqlx::query_as("select status, orthanc_id from imaging_study where profile_id = $1 and study_instance_uid = $2")
+        .bind(profile_id)
+        .bind(uid)
+        .fetch_optional(conn)
+        .await
 }
 
 /// The principal of a live session, by id: the same rules as `sessions::resolve_session` (not revoked,
-/// not expired, not idle, user not disabled), without refreshing it: viewing does not extend a session.
+/// not expired, not idle, user not disabled). A viewer request is activity, so it refreshes
+/// `last_seen_at`, but at most once a minute: a long read does not go idle, and a busy viewer does not
+/// write a row per frame. The session's 12-hour end and the link's hour still hold.
 async fn live_session(conn: &mut PgConnection, session_id: Uuid) -> Result<Option<Principal>, sqlx::Error> {
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "select s.user_id, u.household_id from user_session s join app_user u on u.id = s.user_id \
+    let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
+        "select s.user_id, u.household_id, s.last_seen_at < now() - make_interval(secs => $3) \
+         from user_session s join app_user u on u.id = s.user_id \
          where s.id = $1 and s.revoked_at is null and s.expires_at > now() \
          and s.last_seen_at > now() - make_interval(mins => $2) and u.disabled_at is null",
     )
     .bind(session_id)
     .bind(IDLE_MINUTES as i32)
-    .fetch_optional(conn)
+    .bind(f64::from(TOUCH_EVERY_SECS))
+    .fetch_optional(&mut *conn)
     .await?;
+    let Some((user, household, stale)) = row else {
+        return Ok(None);
+    };
+    if stale {
+        sqlx::query(
+            "update user_session set last_seen_at = now() \
+             where id = $1 and last_seen_at < now() - make_interval(secs => $2)",
+        )
+        .bind(session_id)
+        .bind(f64::from(TOUCH_EVERY_SECS))
+        .execute(&mut *conn)
+        .await?;
+    }
+    let row = Some((user, household));
     Ok(row.map(|(user, household)| Principal {
         session_id: Some(session_id),
         ..Principal::session(user, household)
@@ -416,11 +522,44 @@ async fn authorize(rt: &Runtime, imaging: &Imaging, token: &str) -> Result<Link,
         Ok(_) | Err(Error::AccessDenied { .. }) => return Err(study_not_available()),
         Err(e) => return Err(e.into()),
     }
-    match study_status(&mut conn, link.profile_id, &link.study_uid).await? {
+    match study_row(&mut conn, link.profile_id, &link.study_uid).await? {
         None => Err(study_not_available()),
-        Some(s) if s == "retracted" => Err(retracted()),
+        Some((s, _)) if s == "retracted" => Err(retracted()),
+        Some((_, id)) if id.as_deref() != Some(link.orthanc_id.as_str()) => Err(study_not_available()),
         Some(_) => Ok(link),
     }
+}
+
+/// Orthanc's `/tools/lookup` must find exactly one study under `uid`, and it must be `orthanc_id`.
+async fn bind_check(imaging: &Imaging, uid: &str, orthanc_id: &str) -> Result<(), ApiError> {
+    let orthanc = imaging.orthanc()?;
+    let upstream = imaging
+        .http
+        .post(format!("{}/tools/lookup", orthanc.url))
+        .basic_auth(&orthanc.user, Some(&orthanc.password))
+        .body(uid.to_string())
+        .send()
+        .await
+        .map_err(|_| orthanc_down())?;
+    check_orthanc_auth(&upstream)?;
+    if !upstream.status().is_success() {
+        return Err(orthanc_down());
+    }
+    let found: Vec<Value> =
+        serde_json::from_slice(&read_limited(upstream, 1 << 20).await?).map_err(|_| orthanc_down())?;
+    let studies: Vec<&str> = found
+        .iter()
+        .filter(|r| r["Type"] == "Study")
+        .filter_map(|r| r["ID"].as_str())
+        .collect();
+    if studies != [orthanc_id] {
+        tracing::warn!(
+            studies = studies.len(),
+            "Orthanc does not hold exactly the recorded study under its UID: the viewer shows none of it"
+        );
+        return Err(not_bound());
+    }
+    Ok(())
 }
 
 /// `/ohif/*`: the viewer's files from Orthanc's OHIF plugin, under a live link only.
@@ -494,9 +633,14 @@ async fn dicomweb(State(rt): State<Runtime>, imaging: Option<Extension<Arc<Imagi
             Err(e) => e.into_response(),
         }
     };
+    let has_body = res.status() != StatusCode::NO_CONTENT;
     let h = res.headers_mut();
     // CORS for the sandboxed viewer, never with credentials.
     h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("null"));
+    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(DICOMWEB_CSP));
+    if has_body && !inline_type(h.get(header::CONTENT_TYPE)) {
+        h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+    }
     common_headers(h);
     if res.status() == StatusCode::METHOD_NOT_ALLOWED {
         res.headers_mut().insert(header::ALLOW, HeaderValue::from_static("GET"));
@@ -519,6 +663,10 @@ async fn proxy(rt: &Runtime, ext: Option<&Extension<Arc<Imaging>>>, req: &Parts)
     let Query(query) = Query::<Vec<(String, String)>>::try_from_uri(&req.uri)
         .map_err(|_| dicomweb_refused("the query does not parse."))?;
     let target = dicomweb_target(rest, &query, &link.study_uid)?;
+    if link.checked.elapsed() >= imaging.recheck {
+        bind_check(imaging, &link.study_uid, &link.orthanc_id).await?;
+        imaging.mark_checked(token);
+    }
     let orthanc = imaging.orthanc()?;
     let mut call = imaging
         .http
@@ -620,6 +768,25 @@ fn dicomweb_target(rest: &str, query: &[(String, String)], study_uid: &str) -> R
         .map(|(k, v)| format!("{}={}", query_encode(k), query_encode(v)))
         .collect();
     Ok(format!("{rest}?{}", encoded.join("&")))
+}
+
+/// Types a browser may show inline from `/dicom-web`: images, video, DICOM, JSON and DICOMweb's
+/// multipart. Anything else (an encapsulated PDF, text) is a download.
+fn inline_type(ctype: Option<&HeaderValue>) -> bool {
+    let ct = ctype
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    [
+        "image/",
+        "video/",
+        "application/dicom",
+        "application/json",
+        "multipart/related",
+    ]
+    .iter()
+    .any(|p| ct.starts_with(p))
 }
 
 /// What may follow `studies/{uid}/`: the reads OHIF makes (metadata, searches inside the study, frames,
@@ -960,5 +1127,66 @@ mod tests {
         assert!(js.contains("var root = \"https://h.test/dicom-web/t/T\";"));
         assert!(js.contains("config.routerBasename = \"/ohif/t/T/\";"));
         assert!(js.contains("config.showStudyList = false;"));
+    }
+
+    fn holder(n: u128) -> Holder {
+        Holder::Session(Uuid::from_u128(n))
+    }
+
+    #[test]
+    fn a_second_open_of_the_study_reuses_the_live_link() {
+        let imaging = Imaging::new(None);
+        let p = Uuid::from_u128(7);
+        let (a, left) = imaging.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
+        assert_eq!(left, CAPABILITY_TTL);
+        assert_eq!(
+            imaging.mint(holder(1), p, "1.2.3", "o1").map(|(t, _)| t),
+            Some(a.clone())
+        );
+        // Another session, another study or another Orthanc study: a new link.
+        assert_ne!(
+            imaging.mint(holder(2), p, "1.2.3", "o1").map(|(t, _)| t),
+            Some(a.clone())
+        );
+        assert_ne!(
+            imaging.mint(holder(1), p, "1.2.4", "o1").map(|(t, _)| t),
+            Some(a.clone())
+        );
+        assert_ne!(
+            imaging.mint(holder(1), p, "1.2.3", "o2").map(|(t, _)| t),
+            Some(a.clone())
+        );
+        // A link close to its end is not handed out again.
+        let short = Imaging::with_ttl(None, REUSE_LEFT - Duration::from_secs(1));
+        let (b, _) = short.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
+        assert_ne!(short.mint(holder(1), p, "1.2.3", "o1").map(|(t, _)| t), Some(b));
+    }
+
+    #[test]
+    fn one_person_cannot_use_up_the_links_of_everyone() {
+        let imaging = Imaging::new(None);
+        let p = Uuid::from_u128(7);
+        let mut first = String::new();
+        let mut last = String::new();
+        for i in 0..MAX_LINKS + 50 {
+            let (t, _) = imaging.mint(holder(1), p, &format!("1.2.{i}"), "o").unwrap_or_default();
+            assert!(!t.is_empty(), "link {i} refused");
+            if i == 0 {
+                first = t.clone();
+            }
+            last = t;
+        }
+        let held = imaging.links.lock().map(|l| l.len()).unwrap_or_default();
+        assert_eq!(held, LINKS_PER_HOLDER);
+        assert!(imaging.lookup(&first).is_none(), "the oldest link went first");
+        assert!(imaging.lookup(&last).is_some());
+        // Everyone else still gets a link.
+        assert!(imaging.mint(holder(2), p, "1.2.3", "o").is_some());
+    }
+
+    #[test]
+    fn a_json_answer_is_capped_well_below_the_memory_of_a_small_box() {
+        // The proxy buffers it and the URL rewrite copies it twice, with many requests in flight.
+        assert!((32 << 20..=64 << 20).contains(&MAX_JSON_BYTES), "{MAX_JSON_BYTES}");
     }
 }
