@@ -4,3 +4,7 @@ version: 2
 secret:
   ignored-paths:
     - server/crates/ownhealth-api/tests/auth_python_rows.json
+  # The made-up Orthanc password in the imaging config test (server/crates/ownhealth/tests/imaging_proxy.rs).
+  ignored-matches:
+    - name: synthetic Orthanc password in the imaging config test
+      match: from-env
