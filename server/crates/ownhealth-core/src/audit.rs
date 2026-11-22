@@ -199,7 +199,8 @@ const ROW_V1: &str = "pg_catalog.convert_to(pg_catalog.jsonb_build_array('v1', e
     e.withheld::text, e.protocol_version, e.ip::text, e.user_agent, e.not_assessed_n, e.arg_bytes)::text, 'UTF8')";
 
 /// The check reads both tables by name, so it first makes sure each is still a plain table with no
-/// row-level security, no rules and no generated column, and that every column has a built-in type
+/// row-level security, no rules, no generated column, no child table and no parent table, and that
+/// every column has a built-in type
 /// (one in pg_catalog, made at initdb: an oid below FirstNormalObjectId, 16384). Otherwise the owner
 /// could put a view in its place that shows the check the old row and the app the edited one, or give
 /// a column a type of its own whose cast to json shows the check a value the row does not hold. A
@@ -208,6 +209,7 @@ const PLAIN_TABLES: &str = "select pg_catalog.count(*) from pg_catalog.pg_class 
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace \
     where n.nspname = 'public' and c.relname in ('audit_event', 'audit_chain') \
     and c.relkind = 'r' and not c.relrowsecurity and not c.relhasrules \
+    and not exists (select 1 from pg_catalog.pg_inherits i where i.inhparent = c.oid or i.inhrelid = c.oid) \
     and not exists (select 1 from pg_catalog.pg_attribute a join pg_catalog.pg_type t on t.oid = a.atttypid \
       where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped \
       and (t.oid >= 16384::pg_catalog.oid or t.typnamespace <> 'pg_catalog'::pg_catalog.regnamespace \
@@ -260,7 +262,7 @@ async fn read_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
     let mut verified = 0_i64;
     let sql = format!(
         "select c.seq, c.event_id, c.prev_hash, c.hash, case when e.id is not null then {ROW_V1} end \
-         from public.audit_chain c left join public.audit_event e on e.id = c.event_id order by c.seq"
+         from only public.audit_chain c left join only public.audit_event e on e.id = c.event_id order by c.seq"
     );
     let mut links = sqlx::query_as::<_, Link>(AssertSqlSafe(sql)).fetch(&mut *conn);
     while let Some((seq, event_id, prev_hash, hash, row)) = links.try_next().await? {
@@ -291,8 +293,8 @@ async fn read_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
     drop(links);
     // an event and its link commit together, so a visible event with no link was added behind it
     let unlinked: Option<i64> = sqlx::query_scalar(
-        "select min(e.id) from public.audit_event e \
-         where not exists (select 1 from public.audit_chain c where c.event_id = e.id)",
+        "select min(e.id) from only public.audit_event e \
+         where not exists (select 1 from only public.audit_chain c where c.event_id = e.id)",
     )
     .fetch_one(conn)
     .await?;
@@ -1048,6 +1050,24 @@ mod tests {
     }
 
     // ------------------------------------------------------- round 4 review tests ----
+
+    /// A table that inherits from a chain table, or one a chain table inherits from, could hand the
+    /// check rows the guard never looked at (a foreign table child can answer each query its own
+    /// way), so either stops the check.
+    #[tokio::test]
+    async fn an_inheritance_tree_stops_the_check() -> anyhow::Result<()> {
+        for sql in [
+            "create table oh_child () inherits (audit_event)",
+            "create table oh_parent (like audit_chain); alter table audit_chain inherit oh_parent",
+        ] {
+            let (db, _) = chained(2).await?;
+            assert!(check(&db.pool).await?.ok(), "{sql}");
+            owner_sql(&db, sql).await?;
+            let err = check(&db.pool).await.expect_err(sql);
+            assert!(err.to_string().contains("no longer a plain table"), "{sql}: {err}");
+        }
+        Ok(())
+    }
 
     /// SQL NULL and JSON null in withheld are different bytes, and so are two arrays that differ
     /// only in their lower bound.
