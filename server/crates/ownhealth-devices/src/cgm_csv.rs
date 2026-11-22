@@ -62,6 +62,9 @@
 //! may hold readings of another export. A retraction or a move of a CGM export takes the lock its
 //! imports hold (`retract::lock_export_of`) before anything else, so it waits for a running import and
 //! then removes what it wrote.
+//!
+//! Low and High rows count toward [`MAX_READINGS`], and only dates from 2000 on decide the order of day
+//! and month.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read as _;
@@ -88,7 +91,7 @@ pub const LIBREVIEW: &str = "libreview";
 pub const CLARITY: &str = "dexcom_clarity";
 /// The largest export read: years of 5-minute readings fit many times over.
 pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
-/// Readings one file may hold.
+/// Readings one file may hold, its Low and High rows counted with them.
 pub const MAX_READINGS: usize = 5_000_000;
 /// The molar mass of D-glucose C6H12O6 in g/mol (data/terminology/molar/molar_mass.tsv, PubChem 5793).
 pub const GLUCOSE_G_PER_MOL: f64 = 180.156;
@@ -103,6 +106,8 @@ const MAX_UNKNOWN: usize = 20;
 const MAX_NAME: usize = 80;
 /// Local times sent to Postgres at a time.
 const ZONE_CHUNK: usize = 20_000;
+/// A reading dated before this year is a bad time, and its date says nothing of the file's day order.
+const EARLIEST_YEAR: i32 = 2000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Vendor {
@@ -442,6 +447,11 @@ fn bump(m: &mut BTreeMap<&'static str, i64>, reason: &'static str) {
 
 /// Read an export. Pure and blocking: call it from `spawn_blocking`.
 pub fn parse(bytes: &[u8]) -> Result<Parsed> {
+    parse_capped(bytes, MAX_READINGS)
+}
+
+/// [`parse`], refusing a file of more than `cap` readings.
+fn parse_capped(bytes: &[u8], cap: usize) -> Result<Parsed> {
     let text = documents::decode_text(bytes);
     let mut offset = 0usize;
     let mut found = None;
@@ -477,8 +487,15 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
     // Clarity's header block: source device id -> device name
     let mut names: HashMap<String, String> = HashMap::new();
     let mut pending: Vec<(usize, String, f64)> = Vec::new();
-    // the times of Low and High rows: no reading, but their dates still tell the order of day and month
-    let mut out_of_range: Vec<String> = Vec::new();
+    // Low and High rows: no reading, but they count toward the cap, and a LibreView row's date still
+    // tells the order of day and month (Clarity's ISO times need no such hint)
+    let mut out_of_range = 0usize;
+    let mut hints: Vec<Stamp> = Vec::new();
+    let too_many = || {
+        Error::Upload(format!(
+            "the export holds more than {cap} readings: export a shorter period"
+        ))
+    };
     while let Some(rec) = records.next() {
         let rec = rec.map_err(|e| not_cgm(&e.to_string()))?;
         let cell = |i: Option<usize>| i.and_then(|i| rec.get(i)).unwrap_or("");
@@ -529,20 +546,28 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
             bump(&mut skipped, "cut_row");
             continue;
         }
-        let mg = match glucose(cell(Some(col)), unit) {
-            Glucose::Mg(v) => v,
-            Glucose::Low => {
-                bump(&mut skipped, "below_sensor_range");
-                out_of_range.push(cell(Some(time_col)).to_string());
-                continue;
-            }
-            Glucose::High => {
-                bump(&mut skipped, "above_sensor_range");
-                out_of_range.push(cell(Some(time_col)).to_string());
-                continue;
-            }
+        let outside = match glucose(cell(Some(col)), unit) {
+            Glucose::Mg(v) => Ok(v),
+            Glucose::Low => Err("below_sensor_range"),
+            Glucose::High => Err("above_sensor_range"),
             Glucose::Bad => {
                 bump(&mut skipped, "bad_value");
+                continue;
+            }
+        };
+        let mg = match outside {
+            Ok(v) => v,
+            Err(reason) => {
+                bump(&mut skipped, reason);
+                out_of_range += 1;
+                if pending.len() + out_of_range > cap {
+                    return Err(too_many());
+                }
+                if vendor == Vendor::LibreView
+                    && let Some(s) = stamp(cell(Some(time_col)))
+                {
+                    hints.push(s);
+                }
                 continue;
             }
         };
@@ -561,20 +586,15 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
             }
         };
         pending.push((device, cell(Some(time_col)).to_string(), mg));
-        if pending.len() > MAX_READINGS {
-            return Err(Error::Upload(format!(
-                "the export holds more than {MAX_READINGS} readings: export a shorter period"
-            )));
+        if pending.len() + out_of_range > cap {
+            return Err(too_many());
         }
     }
     let times: Vec<Option<NaiveDateTime>> = match vendor {
         Vendor::Clarity => pending.iter().map(|p| iso_time(&p.1)).collect(),
-        Vendor::LibreView => libre_times_with(
-            &pending.iter().map(|p| p.1.as_str()).collect::<Vec<_>>(),
-            &out_of_range.iter().map(String::as_str).collect::<Vec<_>>(),
-        ),
+        Vendor::LibreView => libre_times_with(&pending.iter().map(|p| p.1.as_str()).collect::<Vec<_>>(), &hints),
     };
-    let earliest = NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or_default();
+    let earliest = NaiveDate::from_ymd_opt(EARLIEST_YEAR, 1, 1).unwrap_or_default();
     let mut readings = Vec::with_capacity(pending.len());
     for ((device, _, mg_dl), local) in pending.into_iter().zip(times) {
         match local.filter(|l| l.date() >= earliest) {
@@ -703,12 +723,14 @@ fn date_of(s: &Stamp, day_first: bool) -> Option<NaiveDate> {
 /// Whether the file writes the day before the month. A first number above 12 says day first, a second
 /// above 12 month first. When no number says it, the order whose dates span fewer days wins (a 14-day
 /// export read the wrong way round spans months), and on a tie a 12-hour clock means the US order. Only
-/// stamps that are a date in at least one order count: one impossible date (`99/01`) decides nothing,
-/// and stays a bad time.
+/// stamps that are a date in at least one order, from 2000 on (the earliest reading kept), count: one
+/// impossible date (`99/01`) or one dated 1999 decides nothing, and stays a bad time.
 fn day_first(stamps: &[Stamp]) -> bool {
     let dm: Vec<&Stamp> = stamps
         .iter()
-        .filter(|s| !s.year_first && (date_of(s, true).is_some() || date_of(s, false).is_some()))
+        .filter(|s| {
+            !s.year_first && s.y >= EARLIEST_YEAR && (date_of(s, true).is_some() || date_of(s, false).is_some())
+        })
         .collect();
     if dm.iter().any(|s| s.a > 12) {
         return true;
@@ -739,14 +761,9 @@ fn libre_times(raw: &[&str]) -> Vec<Option<NaiveDateTime>> {
 
 /// [`libre_times`], with the times of the file's other rows (`hints`, its Low and High rows) also
 /// deciding the order of day and month.
-fn libre_times_with(raw: &[&str], hints: &[&str]) -> Vec<Option<NaiveDateTime>> {
+fn libre_times_with(raw: &[&str], hints: &[Stamp]) -> Vec<Option<NaiveDateTime>> {
     let stamps: Vec<Option<Stamp>> = raw.iter().map(|s| stamp(s)).collect();
-    let known: Vec<Stamp> = stamps
-        .iter()
-        .flatten()
-        .copied()
-        .chain(hints.iter().filter_map(|s| stamp(s)))
-        .collect();
+    let known: Vec<Stamp> = stamps.iter().flatten().chain(hints).copied().collect();
     let df = day_first(&known);
     stamps
         .iter()
@@ -1265,6 +1282,42 @@ mod tests {
             vec![dt(2026, 11, 12, 10, 0), dt(2026, 11, 12, 10, 15)]
         );
         assert_eq!(p.skipped, BTreeMap::from([("below_sensor_range", 1)]));
+        Ok(())
+    }
+
+    #[test]
+    fn a_date_before_2000_does_not_decide_the_order_of_the_file() -> Result<()> {
+        // US readings on 11/12, which read either way; a Low row dated 13/01/1999 would say day first
+        let head = "Device,Serial Number,Device Timestamp,Record Type,Historic Glucose mg/dL\n\
+            FreeStyle Libre 3,SN1,11-12-2026 10:00 AM,0,112\nFreeStyle Libre 3,SN1,11-12-2026 10:15 AM,0,118\n";
+        let nov_12 = vec![dt(2026, 11, 12, 10, 0), dt(2026, 11, 12, 10, 15)];
+        let p = parse(format!("{head}FreeStyle Libre 3,SN1,13-01-1999 03:00 AM,0,Low\n").as_bytes())?;
+        assert_eq!(p.readings.iter().map(|r| Some(r.local)).collect::<Vec<_>>(), nov_12);
+        assert_eq!(p.skipped, BTreeMap::from([("below_sensor_range", 1)]));
+        // a reading dated 1999 decides nothing either, and is a bad time
+        let p = parse(format!("{head}FreeStyle Libre 3,SN1,13-01-1999 03:00 AM,0,99\n").as_bytes())?;
+        assert_eq!(p.readings.iter().map(|r| Some(r.local)).collect::<Vec<_>>(), nov_12);
+        assert_eq!(p.skipped, BTreeMap::from([("bad_time", 1)]));
+        Ok(())
+    }
+
+    #[test]
+    fn low_and_high_rows_count_toward_the_reading_cap() -> Result<()> {
+        let libre = "Device,Serial Number,Device Timestamp,Record Type,Historic Glucose mg/dL\n\
+            FreeStyle Libre 3,SN1,14-11-2026 10:00,0,112\nFreeStyle Libre 3,SN1,14-11-2026 10:15,0,Low\n\
+            FreeStyle Libre 3,SN1,14-11-2026 10:30,0,High\n";
+        let clarity = format!(
+            "{CLARITY_HEAD}1,2026-11-14T08:00:00,EGV,,,,iOS G7,101\n2,2026-11-14T08:05:00,EGV,,,,iOS G7,Low\n\
+             3,2026-11-14T08:10:00,EGV,,,,iOS G7,High\n"
+        );
+        for text in [libre, clarity.as_str()] {
+            let refused = parse_capped(text.as_bytes(), 2).map(|p| p.readings.len());
+            assert!(
+                matches!(&refused, Err(Error::Upload(m)) if m.contains("more than 2 readings")),
+                "{refused:?}"
+            );
+            assert_eq!(parse_capped(text.as_bytes(), 3)?.readings.len(), 1);
+        }
         Ok(())
     }
 
