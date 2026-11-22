@@ -1,9 +1,11 @@
 <script lang="ts">
 	// Health at a glance (mockup screen #dashboard). Everything shown comes from GET /profiles/{p}/dashboard
 	// (lane E): status words, markers, sparklines, changes, due items. The page never computes a status.
-	import { getDashboard, listReview } from '#lib/api';
+	import { untrack } from 'svelte';
+	import { getDashboard, getStatus, listReview } from '#lib/api';
 	import type { Dashboard, ReviewItem, Status, SystemCard } from '#lib/api/types';
 	import { C } from '#lib/components/colors';
+	import HouseholdRow from '#lib/components/HouseholdRow.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
 	import { openSource } from '#lib/components/pages1/source.svelte';
@@ -14,7 +16,35 @@
 	import StatusChip from '#lib/components/StatusChip.svelte';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
 	import { dateParts, dueCard, dueCardView, dueScreenOpen, gapShortKey, lockedScopes, partialScopes } from '#lib/logic/due';
-	import { app, currentProfile } from '#lib/state/app.svelte';
+	import { memberCounts, showHousehold, type DashboardCounts, type MemberCounts, type StatusCounts } from '#lib/logic/household';
+	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
+
+	// Household overview: one row per profile the person can see (GET /me lists only those), counted
+	// from each profile's own status and dashboard, which answer within the person's grant.
+	const members = $derived(app.me?.profiles ?? []);
+	let hhRows = $state<Record<string, { counts: MemberCounts | null; error: unknown }>>({});
+	let hhRun = 0;
+	function loadMember(slug: string, run: number, lang: string) {
+		Promise.all([getStatus(slug), getDashboard(slug, lang)]).then(
+			([s, d]) => run === hhRun && (hhRows[slug] = { counts: memberCounts(s as StatusCounts, d as DashboardCounts), error: null }),
+			(e) => run === hhRun && (hhRows[slug] = { counts: null, error: e })
+		);
+	}
+	function loadHousehold() {
+		const list = members;
+		if (!showHousehold(list)) return;
+		// the counts do not depend on the language, so a language switch does not fetch them again
+		const lang = untrack(() => i18n.lang);
+		const run = ++hhRun;
+		hhRows = {};
+		for (const p of list) loadMember(p.slug, run, lang);
+	}
+	/** A retry reloads that member's row only; the others keep what they show. */
+	function retryMember(slug: string) {
+		delete hhRows[slug];
+		loadMember(slug, hhRun, i18n.lang);
+	}
+	$effect(loadHousehold);
 
 	// The rule pack ships inside the package. The link names only the system's pack file, never the rule that fired.
 	const RULES_URL = 'https://github.com/GeiserX/OwnHealth/blob/main/data/rules/pack/';
@@ -84,6 +114,35 @@
 		<a class="btn" href="/summary">{t('prep')}</a>
 	</div>
 </div>
+
+{#if showHousehold(members)}
+	<section class="card hh" aria-labelledby="hh-t">
+		<h3><span id="hh-t">{t('hh_t')}</span><span class="r">{t('hh_sub')}</span></h3>
+		<table aria-labelledby="hh-t">
+			<thead>
+				<tr>
+					<th scope="col">{t('hh_member')}</th>
+					<th scope="col" class="num">{t('hh_flags')}</th>
+					<th scope="col" class="num">{t('hh_overdue')}</th>
+					<th scope="col" class="num">{t('hh_stale')}</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each members as p, i (p.slug)}
+					<HouseholdRow
+						profile={p}
+						color={AVATAR_COLORS[i % AVATAR_COLORS.length]}
+						current={p.slug === profile?.slug}
+						counts={hhRows[p.slug]?.counts ?? null}
+						error={hhRows[p.slug]?.error ?? null}
+						onopen={setProfile}
+						onretry={retryMember}
+					/>
+				{/each}
+			</tbody>
+		</table>
+	</section>
+{/if}
 
 {#if !profile}
 	<div class="card">
@@ -235,3 +294,29 @@
 {/if}
 
 <SourcePanel />
+
+<style>
+	.hh {
+		margin-bottom: 12px;
+	}
+	.hh table {
+		width: 100%;
+		border-collapse: collapse;
+	}
+	.hh th {
+		text-align: left;
+		font-size: 11px;
+		font-weight: 500;
+		color: var(--muted);
+		padding: 0 8px 4px;
+	}
+	.hh th.num {
+		text-align: right;
+		white-space: nowrap;
+	}
+	@media (max-width: 600px) {
+		.hh th {
+			padding: 0 5px 4px;
+		}
+	}
+</style>
