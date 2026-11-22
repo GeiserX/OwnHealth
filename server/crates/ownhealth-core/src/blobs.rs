@@ -90,16 +90,7 @@ pub fn sha256_hex_to_bytes(h: &str) -> Result<Vec<u8>, BlobError> {
 
 /// Where blobs live is this module's business: no caller gets a raw path or the store's root, so the
 /// per-profile encryption and the S3 backend can change the layout without touching callers.
-///
-/// ```compile_fail,E0624
-/// let store = ownhealth_core::blobs::BlobStore::new("unused").unwrap();
-/// let _ = store.path(&"0".repeat(64));
-/// ```
-///
-/// ```compile_fail,E0599
-/// let store = ownhealth_core::blobs::BlobStore::new("unused").unwrap();
-/// let _ = store.root();
-/// ```
+/// `tests/blob_paths.rs` holds the rest of the code to that.
 #[derive(Debug, Clone)]
 pub struct BlobStore {
     root: PathBuf,
