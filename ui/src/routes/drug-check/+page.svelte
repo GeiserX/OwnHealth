@@ -195,7 +195,7 @@
 <style>
 	.medrow {
 		padding: 7px 0;
-		border-top: 1px solid #20252f;
+		border-top: 1px solid #1c2632;
 	}
 	.medrow:first-of-type {
 		border-top: 0;

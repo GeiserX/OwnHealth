@@ -94,7 +94,7 @@
 		}
 	}
 	tr.on td {
-		background: rgba(110, 168, 254, 0.06);
+		background: rgba(60, 186, 221, 0.06);
 	}
 	.who {
 		display: flex;
