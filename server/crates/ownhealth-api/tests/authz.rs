@@ -16,9 +16,11 @@ use support::Env;
 
 type R = anyhow::Result<()>;
 
-/// Routes reachable without a login: the login itself, and the calendar feed, whose secret is in its
-/// path (ics_feed.rs checks that a wrong one gets 404).
-const PUBLIC: [&str; 16] = [
+/// Routes reachable without a login: the login itself, the calendar feed, whose secret is in its
+/// path (ics_feed.rs checks that a wrong one gets 404), and the connector callback, which a vendor
+/// sends the browser to and which counts only with the binder cookie and session that started the
+/// launch (connectors.rs checks every refusal).
+const PUBLIC: [&str; 17] = [
     "/auth/state",
     "/auth/setup/begin",
     "/auth/setup/finish",
@@ -34,6 +36,7 @@ const PUBLIC: [&str; 16] = [
     "/auth/enroll/password",
     "/auth/oidc/login",
     "/auth/oidc/callback",
+    "/connectors/callback",
     "/ics/{file}",
 ];
 
