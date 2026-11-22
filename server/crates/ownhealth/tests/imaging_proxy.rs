@@ -830,12 +830,15 @@ async fn a_deleted_profile_ends_the_link() -> R {
 
 #[tokio::test]
 async fn an_expired_link_is_refused() -> R {
-    let w = World::with(Duration::from_millis(200), true).await?;
+    // Long enough that the first read is well inside it on a slow runner too.
+    let ttl = Duration::from_secs(2);
+    let w = World::with(ttl, true).await?;
     let cookie = w.session("alex").await?;
     let cap = w.open(&cookie, "alex", ALEX_CT).await?;
+    let ends = std::time::Instant::now() + ttl; // the link was made before this
     let series = dw(&cap, &format!("studies/{ALEX_CT}/series"));
     assert_eq!(w.viewer_get(&series, None).await?.0, StatusCode::OK);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep_until((ends + Duration::from_millis(200)).into()).await;
     w.orthanc.clear();
     let (s, _, body) = w.viewer_get(&series, None).await?;
     assert_eq!(s, StatusCode::FORBIDDEN);
