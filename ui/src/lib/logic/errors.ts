@@ -21,6 +21,8 @@ const PATTERNS: [RegExp, string][] = [
 	[/^the export holds more than \d+ readings/i, 'err_cgm_too_many'],
 	[/^the export is larger than \d+ MB/i, 'err_cgm_too_large'],
 	[/^the export names more than \d+ sensors/i, 'err_cgm_too_many_sensors'],
+	[/^this file is already stored on this profile as another kind of document/i, 'err_cgm_other_type'],
+	[/^this file was read in the time zone .*, which this database does not know/i, 'err_cgm_zone_unknown'],
 	[/^not a decimal|^the value is not a number/i, 'err_decimal'],
 	[/^the date is in the future/i, 'err_future_date'],
 	[/^the birth date is in the future/i, 'err_birth_future'],

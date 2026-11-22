@@ -7,7 +7,14 @@ import { CGM_REASONS, cgmDoc, cgmLines, tileIds } from '../src/lib/logic/cgm_imp
 import { errKey } from '../src/lib/logic/errors.ts';
 import { LANGS } from '../src/lib/i18n/langs.ts';
 
-const CGM_ERRORS = ['err_cgm_unreadable', 'err_cgm_too_many', 'err_cgm_too_large', 'err_cgm_too_many_sensors'];
+const CGM_ERRORS = [
+	'err_cgm_unreadable',
+	'err_cgm_too_many',
+	'err_cgm_too_large',
+	'err_cgm_too_many_sensors',
+	'err_cgm_other_type',
+	'err_cgm_zone_unknown'
+];
 
 const clarity = {
 	document_id: 'd1',
@@ -121,7 +128,12 @@ test('a refused CGM export reads in the person\'s language, not in the server\'s
 		['not a readable LibreView or Dexcom Clarity export: no glucose column in mg/dL or mmol/L', 'err_cgm_unreadable'],
 		['the export holds more than 5000000 readings: export a shorter period', 'err_cgm_too_many'],
 		['the export is larger than 256 MB: export a shorter period', 'err_cgm_too_large'],
-		["the export names more than 32 sensors: export one person's sensors, or a shorter period", 'err_cgm_too_many_sensors']
+		["the export names more than 32 sensors: export one person's sensors, or a shorter period", 'err_cgm_too_many_sensors'],
+		[
+			'this file is already stored on this profile as another kind of document, so it is not read as a CGM export',
+			'err_cgm_other_type'
+		],
+		['this file was read in the time zone Asia/Calcutta, which this database does not know', 'err_cgm_zone_unknown']
 	];
 	for (const [m, k] of cases) assert.equal(errKey(null, m, has), k, m);
 });
