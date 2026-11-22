@@ -507,7 +507,26 @@ impl BlobStore {
 
     /// Stream into the store for `owner`. Returns (sha256 hex of the plaintext, size). Same bytes
     /// twice for one owner: one file.
-    pub fn put_reader(&self, owner: BlobOwner, mut reader: impl Read) -> Result<(String, u64), BlobError> {
+    pub fn put_reader(&self, owner: BlobOwner, reader: impl Read) -> Result<(String, u64), BlobError> {
+        self.put_expecting(owner, reader, None)
+    }
+
+    /// `put_reader`, and with `expect` the bytes must hash to it: otherwise only the staging file goes
+    /// and nothing lands, so a copy whose source holds other bytes never replaces or removes a file.
+    fn put_expecting(
+        &self,
+        owner: BlobOwner,
+        mut reader: impl Read,
+        expect: Option<&str>,
+    ) -> Result<(String, u64), BlobError> {
+        let mismatch = |h: &str| {
+            expect.is_some_and(|e| e != h).then(|| {
+                BlobError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a blob read back with other bytes than its sha256",
+                ))
+            })
+        };
         let sealing = self.sealing(owner)?;
         let tmp = self.root.join("tmp").join(tmp_name());
         let result = (|| {
@@ -524,6 +543,9 @@ impl BlobStore {
                     out.write_all(&s.feed(&buf[..n])?)?;
                 }
                 let (last, header, sha, size) = s.finish()?;
+                if let Some(e) = mismatch(&hex::encode(sha)) {
+                    return Err(e);
+                }
                 out.write_all(&last)?;
                 out.seek(SeekFrom::Start(0))?;
                 out.write_all(&header)?;
@@ -546,6 +568,9 @@ impl BlobStore {
                 out.flush()?;
                 out.sync_all()?;
                 let h = hex::encode(digest.finalize());
+                if let Some(e) = mismatch(&h) {
+                    return Err(e);
+                }
                 self.land(&tmp, &h)?;
                 (h, size)
             };
@@ -744,20 +769,22 @@ impl BlobStore {
     }
 
     /// Store `from`'s blob for `to` as well, for a document that moved to another profile: read under
-    /// `from`, written under `to`, the bytes checked against their sha256. The `from` copy stays (its
-    /// profile's delete removes it). True when a copy was made; false when `to` already reads it.
+    /// `from`, written under `to`, the bytes checked against their sha256 before anything lands. The
+    /// `from` copy stays (the move's drop job removes it). True when a copy was made; false when `to`
+    /// already holds it: a sealed copy for a profile this store seals, any copy otherwise (a plain
+    /// file of the same bytes is no copy under the profile's key).
     pub fn rekey(&self, from: BlobOwner, to: BlobOwner, sha256: &str) -> Result<bool, BlobError> {
-        if from == to || self.find(to, sha256)?.is_some() {
+        if from == to {
             return Ok(false);
         }
-        let (h, _) = self.put_reader(to, self.open_seek(from, sha256)?)?;
-        if h != sha256_hex(sha256)? {
-            let _ = self.delete(to, &h);
-            return Err(BlobError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "a blob read back with other bytes than its sha256",
-            )));
+        let seals_to = matches!(to, BlobOwner::Profile(_)) && self.keys.is_some();
+        match self.find(to, sha256)? {
+            Some(Found::Sealed { .. }) => return Ok(false),
+            Some(Found::Plain(_)) if !seals_to => return Ok(false),
+            _ => {}
         }
+        let h = sha256_hex(sha256)?;
+        self.put_expecting(to, self.open_seek(from, sha256)?, Some(&h))?;
         Ok(true)
     }
 
@@ -767,7 +794,7 @@ impl BlobStore {
         let mut gone = self.drop_sealed(owner, sha256)?;
         let p = self.path(sha256)?;
         if p.exists() {
-            set_mode(&p, 0o640)?;
+            // no chmod first: a backup's hard link shares the inode and keeps its 0440
             fs::remove_file(p)?;
             gone = true;
         }
@@ -780,7 +807,7 @@ impl BlobStore {
         let Some(Found::Sealed { path, .. }) = self.find(owner, sha256)? else {
             return Ok(false);
         };
-        set_mode(&path, 0o640)?;
+        // no chmod first: a backup's hard link shares the inode and keeps its 0440
         fs::remove_file(path)?;
         Ok(true)
     }
@@ -874,8 +901,10 @@ impl BlobStore {
         let parent = target.parent().unwrap_or(&self.root);
         fs::create_dir_all(parent)?;
         let part = parent.join(format!(".{}.part", key.replace('/', "-")));
-        fs::copy(from, &part)?;
-        fs::rename(&part, &target)?;
+        if let Err(e) = fs::copy(from, &part).and_then(|_| fs::rename(&part, &target)) {
+            let _ = fs::remove_file(&part);
+            return Err(e.into());
+        }
         set_mode(&target, 0o440)?;
         Ok(true)
     }
@@ -919,41 +948,37 @@ fn tree_rel(key: &str) -> Option<PathBuf> {
 
 /// Every blob file of the tree at `root` (a store, or a backup's `blobs/`), in path order, keyed the
 /// way a backup manifest lists it: a plain blob by its file name (its sha256), a sealed one as
-/// `<profile>/<file name>` (its address). A file elsewhere under `enc/` gets a key no manifest lists.
+/// `<profile>/<file name>` (its address). A file that is not where its key puts it (another shard, a
+/// name that is no key, a file elsewhere under `enc/`) is keyed `?/<its path in the tree>`: no manifest
+/// lists that key and no restore places it, and it never replaces the file its name stands for.
 pub fn tree_files(root: &Path) -> io::Result<BTreeMap<String, PathBuf>> {
     let mut out = BTreeMap::new();
-    let plain = root.join("sha256");
-    let mut files = Vec::new();
-    if plain.is_dir() {
-        walk(&plain, &mut files)?;
-    }
-    files.sort();
-    for p in files {
-        if let Some(name) = p.file_name() {
-            out.insert(name.to_string_lossy().into_owned(), p);
+    for part in ["sha256", "enc"] {
+        let dir = root.join(part);
+        let mut files = Vec::new();
+        if dir.is_dir() {
+            walk(&dir, &mut files)?;
         }
-    }
-    let sealed = root.join("enc");
-    let mut files = Vec::new();
-    if sealed.is_dir() {
-        walk(&sealed, &mut files)?;
-    }
-    files.sort();
-    for p in files {
-        let rel = p.strip_prefix(&sealed).unwrap_or(&p);
-        let profile = rel
-            .components()
-            .next()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned());
-        let name = p
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let key = match profile {
-            Some(pid) if rel.components().count() > 1 => format!("{pid}/{name}"),
-            _ => format!("?/{name}"),
-        };
-        out.insert(key, p);
+        files.sort();
+        for p in files {
+            let rel = p.strip_prefix(root).unwrap_or(&p).to_path_buf();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let key = match part {
+                "sha256" => name,
+                _ => match p.strip_prefix(&dir).ok().and_then(|r| r.components().next()) {
+                    Some(pid) => format!("{}/{name}", pid.as_os_str().to_string_lossy()),
+                    None => name,
+                },
+            };
+            let key = match tree_rel(&key) {
+                Some(at) if at == rel => key,
+                _ => format!("?/{}", rel.to_string_lossy()),
+            };
+            out.insert(key, p);
+        }
     }
     Ok(out)
 }
@@ -1449,9 +1474,10 @@ mod tests {
         assert!(store.rekey(from, to, &h)?);
         assert_eq!(store.get_bytes(to, &h)?, b"Sam Rivera, filed to Alex by mistake");
         assert!(!store.rekey(from, to, &h)?, "copied twice");
-        // a plain blob any owner reads needs no copy; a missing one is not found
+        // a pending item's plain file is sealed for the profile it moves to; a missing one is not found
         let plain = store.put_bytes(BlobOwner::Pending(Uuid::new_v4()), b"held scan")?;
-        assert!(!store.rekey(BlobOwner::Pending(Uuid::nil()), to, &plain)?);
+        assert!(store.rekey(BlobOwner::Pending(Uuid::nil()), to, &plain)?);
+        assert!(store.key_of(to, &plain)?.contains('/'));
         assert!(matches!(
             store.rekey(from, to, &"0".repeat(64)),
             Err(BlobError::NotFound(_))
@@ -1515,7 +1541,131 @@ mod tests {
             );
         }
         fs::write(backup.join("enc").join("stray"), b"x")?;
-        assert!(tree_files(&backup)?.contains_key("?/stray"));
+        assert!(tree_files(&backup)?.contains_key("?/enc/stray"));
+        Ok(())
+    }
+
+    /// A place that fails removes its `.part` file, so a stale one never blocks the next restore.
+    #[test]
+    fn a_failed_place_leaves_no_part_file() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = BlobStore::new(dir.path().join("live"))?;
+        let sha = store.put_bytes(BlobOwner::Reference, b"reference table")?;
+        let from = dir.path().join("from");
+        fs::write(&from, b"reference table")?;
+        let fresh = BlobStore::new(dir.path().join("fresh"))?;
+        let target = plain_at(&dir.path().join("fresh"), &sha);
+        fs::create_dir_all(target.parent().unwrap_or(dir.path()))?;
+        let part = target.with_file_name(format!(".{sha}.part"));
+        fs::write(&part, b"half")?;
+        set_mode(&part, 0o440)?; // a copy cannot write it
+        assert!(fresh.place(&sha, &from).is_err());
+        assert!(!part.exists(), "the failed place left its .part file");
+        assert!(fresh.place(&sha, &from)?);
+        assert_eq!(fs::read(&target)?, b"reference table");
+        Ok(())
+    }
+
+    /// The plain layout's path of `sha`, for tests that plant a file there.
+    fn plain_at(root: &Path, sha: &str) -> PathBuf {
+        root.join("sha256").join(&sha[..2]).join(&sha[2..4]).join(sha)
+    }
+
+    #[test]
+    fn a_move_to_a_keyed_profile_skips_only_when_it_holds_a_sealed_copy() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(dir.path())?;
+        let (from, to) = (BlobOwner::Profile(Uuid::new_v4()), BlobOwner::Profile(Uuid::new_v4()));
+        let data = b"Lucia Rivera, LabNorte panel";
+        let h = store.put_bytes(from, data)?;
+        // a legacy plain file of the same bytes is no copy under the new profile's key
+        assert_eq!(store.put_bytes(BlobOwner::Reference, data)?, h);
+        assert!(store.rekey(from, to, &h)?, "skipped on a plain copy");
+        assert!(
+            store.key_of(to, &h)?.contains('/'),
+            "the new profile has no sealed copy"
+        );
+        assert!(!store.rekey(from, to, &h)?, "copied twice");
+        // a store that seals nothing keeps skipping on the plain copy
+        let plain = BlobStore::new(dir.path().join("plain"))?;
+        let h = plain.put_bytes(from, data)?;
+        assert!(!plain.rekey(from, to, &h)?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_move_whose_source_has_other_bytes_lands_nothing() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(dir.path())?;
+        let to = BlobOwner::Profile(Uuid::new_v4());
+        let other = b"Carmen Ortega, a report another record names";
+        // a plain copy of these bytes that another record holds
+        let held = store.put_bytes(BlobOwner::Reference, other)?;
+        // a file that claims another hash but holds those bytes
+        let claimed = hex::encode(Sha256::digest(b"what the file should hold"));
+        let at = plain_at(dir.path(), &claimed);
+        fs::create_dir_all(at.parent().unwrap_or(dir.path()))?;
+        fs::write(&at, other)?;
+        assert!(matches!(
+            store.rekey(BlobOwner::Reference, to, &claimed),
+            Err(BlobError::Io(e)) if e.kind() == io::ErrorKind::InvalidData
+        ));
+        assert_eq!(
+            store.get_bytes(BlobOwner::Reference, &held)?,
+            other,
+            "the held copy went"
+        );
+        // the plain copy still answers for `to`; a sealed one must not have landed
+        assert!(files_under(&dir.path().join("enc")).is_empty(), "a copy landed");
+        assert!(files_under(&dir.path().join("tmp")).is_empty(), "a staging file stayed");
+        Ok(())
+    }
+
+    #[test]
+    fn removing_a_copy_leaves_the_mode_of_its_backup_link() -> Result<(), BlobError> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(&dir.path().join("live"))?;
+        let p = BlobOwner::Profile(Uuid::new_v4());
+        let sealed = store.put_bytes(p, b"Sam Rivera, visit notes")?;
+        let plain = store.put_bytes(BlobOwner::Reference, b"reference table")?;
+        let backup = dir.path().join("backup");
+        store.copy_into(&backup)?;
+        assert!(store.drop_sealed(p, &sealed)?);
+        assert!(store.delete(BlobOwner::Reference, &plain)?);
+        let links = files_under(&backup);
+        assert_eq!(links.len(), 2);
+        for f in links {
+            assert_eq!(fs::metadata(&f)?.permissions().mode() & 0o777, 0o440, "{}", f.display());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_misplaced_file_never_stands_in_for_the_one_its_name_says() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(dir.path())?;
+        let p = Uuid::new_v4();
+        let plain = store.put_bytes(BlobOwner::Reference, b"reference table")?;
+        store.put_bytes(BlobOwner::Profile(p), b"Alex Rivera, lipid panel")?;
+        let files = tree_files(dir.path())?;
+        let sealed = files.keys().find(|k| k.contains('/')).cloned().unwrap_or_default();
+        // the same names in a shard their hash does not name, sorted after the right ones
+        let (pid, address) = sealed.split_once('/').unwrap_or_default();
+        let stray_plain = dir.path().join("sha256/zz/zz").join(&plain);
+        let stray_sealed = dir.path().join("enc").join(pid).join("zz/zz").join(address);
+        for f in [&stray_plain, &stray_sealed] {
+            fs::create_dir_all(f.parent().unwrap_or(dir.path()))?;
+            fs::write(f, b"planted")?;
+        }
+        let files = tree_files(dir.path())?;
+        assert_eq!(files[&plain], plain_at(dir.path(), &plain));
+        assert_eq!(
+            files[&sealed],
+            files_under(&dir.path().join("enc").join(pid).join(&address[..2]))[0]
+        );
+        let misplaced: Vec<&String> = files.keys().filter(|k| k.starts_with("?/")).collect();
+        assert_eq!(misplaced.len(), 2, "{files:?}");
         Ok(())
     }
 }
