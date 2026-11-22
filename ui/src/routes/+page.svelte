@@ -314,4 +314,9 @@
 		text-align: right;
 		white-space: nowrap;
 	}
+	@media (max-width: 600px) {
+		.hh th {
+			padding: 0 5px 4px;
+		}
+	}
 </style>

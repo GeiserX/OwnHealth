@@ -81,6 +81,15 @@
 	.note .btn {
 		margin-left: 4px;
 	}
+	/* a phone: the note takes the full width of the name cell, so a scope breaks between words */
+	@media (max-width: 600px) {
+		td {
+			padding: 5px 5px;
+		}
+		.note {
+			margin-left: 0;
+		}
+	}
 	tr.on td {
 		background: rgba(110, 168, 254, 0.06);
 	}
