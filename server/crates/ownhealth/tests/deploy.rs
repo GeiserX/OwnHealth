@@ -425,18 +425,20 @@ fn strings(v: &Value) -> Vec<String> {
     }
 }
 
-/// The .env lines that turn the profile on, for a render or a real start. The quickstart takes the
-/// sidecar's secrets from .env (fresh random values here); the homelab reads them from files.
-fn wearables_env(case: &str, extra: &str, ow_db_password: &str) -> String {
-    let mut env = format!("{extra}COMPOSE_PROFILES=wearables\n");
-    if case == "quickstart" {
-        for (k, v) in [
-            ("OPENWEARABLES_DB_PASSWORD", ow_db_password.to_string()),
-            ("OPENWEARABLES_SECRET_KEY", ownhealth_core::ids::token_hex(32)),
-            ("OPENWEARABLES_ADMIN_PASSWORD", ownhealth_core::ids::token_hex(16)),
-        ] {
-            env += &format!("{k}={v}\n");
-        }
+/// The .env lines that turn the profile on, next to the `ocr` one, for a render or a real start.
+fn wearables_env(extra: &str) -> String {
+    format!("{extra}COMPOSE_PROFILES=ocr,wearables\n")
+}
+
+/// The quickstart's openwearables.env, with fresh random values. The homelab reads secrets/ instead.
+fn openwearables_env(ow_db_password: &str) -> String {
+    let mut env = String::new();
+    for (k, v) in [
+        ("OPENWEARABLES_DB_PASSWORD", ow_db_password.to_string()),
+        ("OPENWEARABLES_SECRET_KEY", ownhealth_core::ids::token_hex(32)),
+        ("OPENWEARABLES_ADMIN_PASSWORD", ownhealth_core::ids::token_hex(16)),
+    ] {
+        env += &format!("{k}={v}\n");
     }
     env
 }
@@ -457,13 +459,28 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
             assert!(off.get(s).is_none(), "{case}: {s} starts without the wearables profile");
         }
 
-        let doc = render_doc(
-            &compose,
-            &env_file,
-            &wearables_env(case, extra, &ownhealth_core::ids::token_hex(16)),
-            &[],
-        )?;
+        let ow_pw = ownhealth_core::ids::token_hex(16);
+        let files = if case == "quickstart" {
+            vec![("openwearables.env", openwearables_env(&ow_pw))]
+        } else {
+            vec![]
+        };
+        let doc = render_doc(&compose, &env_file, &wearables_env(extra), &files)?;
         let services = &doc["services"];
+        // OW's secrets reach the sidecar only, never OwnHealth's own containers (the OCR worker included)
+        for s in ["admin", "app", "ocr"] {
+            assert!(services[s].is_object(), "{case}: no {s} service");
+            let leaked: Vec<String> = strings(&services[s]["environment"])
+                .into_iter()
+                .filter(|k| k.starts_with("OPENWEARABLES_"))
+                .collect();
+            assert!(leaked.is_empty(), "{case}: {s} gets {leaked:?}");
+        }
+        // ...and the quickstart sidecar gets them from openwearables.env (the homelab reads secrets/)
+        for s in ["ow-db-init", "ow-app", "ow-worker", "ow-beat"] {
+            let got = env_str(&services[s], "OPENWEARABLES_DB_PASSWORD") == ow_pw;
+            assert_eq!(got, case == "quickstart", "{case}: {s} OPENWEARABLES_DB_PASSWORD");
+        }
         for s in OW_ALL {
             let svc = &services[s];
             assert!(svc.is_object(), "{case}: no {s} service");
@@ -674,10 +691,10 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
         }
         owner
     };
-    std::fs::write(
-        dir.join(".env"),
-        std::fs::read_to_string(env_file)? + &wearables_env(case, extra, &ow_pw),
-    )?;
+    std::fs::write(dir.join(".env"), std::fs::read_to_string(env_file)? + &wearables_env(extra))?;
+    if case == "quickstart" {
+        std::fs::write(dir.join("openwearables.env"), openwearables_env(&ow_pw))?;
+    }
 
     project.ok(&["up", "-d", "ow-app", "ow-worker", "ow-beat"])?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(480);

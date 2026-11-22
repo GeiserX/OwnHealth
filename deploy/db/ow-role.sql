@@ -3,21 +3,22 @@
 -- the sidecar starts, every time. Safe to run any number of times.
 --
 --   psql variables: ow_role (the role name), ow_db (its database)
---   environment:    OPENWEARABLES_ROLE_PASSWORD (its password, read with \getenv so it never sits in argv)
+--   environment:    OPENWEARABLES_DB_PASSWORD (its password, read with \getenv so it never sits in argv):
+--                   from openwearables.env (compose.yaml) or secrets/ow_db_password (homelab file)
 --
 -- The sidecar is a cache of vendor data, and it holds the vendor tokens. Its role is a plain login: no
 -- superuser, no CREATEDB, no CREATEROLE. It owns its own database, so OW's migrations can create their
 -- tables there, and it can connect to no other database: this script takes PUBLIC's default CONNECT
 -- away from every other database of this server (ownhealth, postgres, template1). So run it only
 -- against the Postgres that the compose file bundles, never a shared server.
-\getenv ow_password OPENWEARABLES_ROLE_PASSWORD
+\getenv ow_password OPENWEARABLES_DB_PASSWORD
 \if :{?ow_password}
 \else
-  do $$ begin raise exception 'OPENWEARABLES_ROLE_PASSWORD is not set'; end $$;
+  do $$ begin raise exception 'OPENWEARABLES_DB_PASSWORD is not set: put it in openwearables.env (compose.yaml) or secrets/ow_db_password (homelab)'; end $$;
 \endif
 select :'ow_password' = '' as ow_password_empty \gset
 \if :ow_password_empty
-  do $$ begin raise exception 'OPENWEARABLES_ROLE_PASSWORD is empty'; end $$;
+  do $$ begin raise exception 'OPENWEARABLES_DB_PASSWORD is empty: put it in openwearables.env (compose.yaml) or secrets/ow_db_password (homelab)'; end $$;
 \endif
 
 select format('create role %I login', :'ow_role')

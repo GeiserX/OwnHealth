@@ -144,8 +144,8 @@ services:
       - sh
       - -c
       - >-
-        PGPASSWORD=$$(cat /run/secrets/db_password) && OPENWEARABLES_ROLE_PASSWORD=$$(cat /run/secrets/ow_db_password) &&
-        export PGPASSWORD OPENWEARABLES_ROLE_PASSWORD &&
+        PGPASSWORD=$$(cat /run/secrets/db_password) && OPENWEARABLES_DB_PASSWORD=$$(cat /run/secrets/ow_db_password) &&
+        export PGPASSWORD OPENWEARABLES_DB_PASSWORD &&
         exec psql postgresql://ownhealth@db:5432/ownhealth -X -q -v ON_ERROR_STOP=1
         -v ow_role=openwearables -v ow_db=openwearables -f /opt/ow-role.sql
     secrets: [db_password, ow_db_password]
