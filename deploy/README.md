@@ -159,9 +159,11 @@ A push inbox has no schedule, so OwnHealth never marks it stale; the second rule
 
 - `db.dump`: `pg_dump -Fc` of the database.
 - `blobs/`: the original documents and genome files, hard-linked from the data volume, so the staging copy costs no space.
-- `manifest.json`: app version, migrations, row count per table, the list of blob hashes and the `state_hash` of every profile.
+- `manifest.json`: app version, migrations, row count per table, the list of blob hashes, the `state_hash` of every profile, and the head of the audit log (`audit_chain`: the number and hash of its newest entry, and how far the hash chain holds).
 
-The dump, the row counts and the state hashes come from one database snapshot. A backup taken while someone imports a lab report is still consistent.
+The dump, the row counts, the state hashes and the audit head come from one database snapshot. A backup taken while someone imports a lab report is still consistent.
+
+**The audit anchor.** Each backup also writes the audit head to `audit-head.json`, outside the database: in `OWNHEALTH_ANCHOR_DIR`, or `/data/anchor` on the data volume by default. The file is replaced atomically and only its owner can read it. The backup refuses a folder or file that is a symlink, or that another user or group may write. The next backup first checks that this entry of the live log still has the same hash. Someone with the database owner's rights can edit an entry and hash the whole log again, so that the log checks out on its own; the anchor catches that. When the check fails, the backup stops before it writes anything and exits 1 with the entry it expected, and the audit page on MCP & access shows the mismatch. Find out what changed first. If the database was restored from an older backup by hand (`ownhealth restore` resets the anchor itself, see Restore), that explains it. Then move `audit-head.json` aside and keep it as evidence: the next backup anchors the log as it is now. The first backup finds no anchor, checks nothing, and writes one. Two backups never move the anchor at once, and a backup only moves it forward. A log the page shows as broken, or that cannot be checked at all, does not stop the backups: the manifest records it, and the anchor stays where it was. A broken log is never anchored again, so the anchor stays at the last head that held. It moves on only once the whole log holds again, for example after the changed entry is put back as it was. Moving `audit-head.json` aside does not change that: the next backup then acts as a first backup, and a first backup anchors only a log that holds.
 
 `restic/backup.sh` writes that directory, takes one restic snapshot of it, deletes the staging copy and applies retention (7 daily, 5 weekly, 12 monthly; set `OWNHEALTH_RESTIC_KEEP` to change it). restic encrypts and deduplicates, so a nightly run only uploads what changed.
 
@@ -183,7 +185,7 @@ A backup that was never restored counts as missing. `restic/restore-test.sh` pro
 
 1. restic restores the snapshot into `/data/backups/restore`.
 2. `ownhealth verify-restore` loads the dump into a scratch database `<db>_restore_check`.
-3. It compares the row count of every table with the manifest, hashes every blob again, rebuilds the state of every profile and compares each `state_hash` with the manifest.
+3. It compares the row count of every table with the manifest, hashes every blob again, rebuilds the state of every profile and compares each `state_hash` with the manifest. It checks the restored audit log too: it must end at the head the manifest recorded, and hold as far as it held then.
 4. It drops the scratch database and the restored files.
 
 It prints a JSON report and exits 1 on any difference.
@@ -215,7 +217,7 @@ docker compose up -d db
 docker compose up -d
 ```
 
-`restore.sh` runs in a one-off admin container before the app starts. It refuses a database that already has tables, so it cannot overwrite a running instance. After loading the dump and the blobs it rebuilds every profile's state and compares the `state_hash` with the manifest; the same hash means the restored data is the data you backed up. It exits 1 if anything differs.
+`restore.sh` runs in a one-off admin container before the app starts. It refuses a database that already has tables, so it cannot overwrite a running instance. After loading the dump and the blobs it rebuilds every profile's state and compares the `state_hash` with the manifest; the same hash means the restored data is the data you backed up. It exits 1 if anything differs. When everything matches and the backup's audit log held, it sets the audit anchor to the head of that backup (`audit_anchor` in its report), so the audit page and the next backup compare against the log as restored. It checks the anchor folder as a backup does: when the folder or file is a symlink, or another user or group may write it, the restore still succeeds but sets no anchor, and `audit_anchor_error` in its report says why.
 
 Restore with the OwnHealth version that made the backup (`app_version` in the manifest), then upgrade. A newer rule pack can change a `state_hash` on purpose, and the check would report it as a difference.
 

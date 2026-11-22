@@ -207,11 +207,19 @@ const ROW_V1: &str = "pg_catalog.convert_to(pg_catalog.jsonb_build_array('v1', e
 /// non-superuser owner cannot change pg_catalog.
 /// The columns the check reads as keys and hashes must still be NOT NULL: audit_event.id, since the
 /// search for unlinked events never sees an event with a null id, and the four audit_chain columns.
+/// audit_chain.seq must still carry a valid unique index of its own, with the built-in operator
+/// class: without it the owner can add a second link with the seq a backup anchored, and a read of
+/// that link could find the copy he planted (`verify_chain_with`).
 const PLAIN_TABLES: &str = "select pg_catalog.count(*) from pg_catalog.pg_class c \
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace \
     where n.nspname = 'public' and c.relname in ('audit_event', 'audit_chain') \
     and c.relkind = 'r' and not c.relrowsecurity and not c.relhasrules \
     and not exists (select 1 from pg_catalog.pg_inherits i where i.inhparent = c.oid or i.inhrelid = c.oid) \
+    and (c.relname <> 'audit_chain' or exists (select 1 from pg_catalog.pg_index x \
+      join pg_catalog.pg_attribute k on k.attrelid = c.oid and k.attnum = x.indkey[0] \
+      where x.indrelid = c.oid and x.indisunique and x.indisvalid and x.indnkeyatts = 1 \
+      and x.indpred is null and x.indexprs is null and k.attname = 'seq' \
+      and x.indclass[0] < 16384::pg_catalog.oid)) \
     and not exists (select 1 from pg_catalog.pg_attribute a where a.attrelid = c.oid and not a.attnotnull \
       and (c.relname = 'audit_event' and a.attname = 'id' \
            or c.relname = 'audit_chain' and a.attname in ('seq', 'event_id', 'prev_hash', 'hash'))) \
@@ -239,17 +247,40 @@ const PLAIN_TABLES: &str = "select pg_catalog.count(*) from pg_catalog.pg_class 
 /// tricks we know. An owner can always change what the database answers, and a superuser can make
 /// it answer any query however it likes; this check can only ask that same database. Only a head
 /// kept outside the database proves the history against the owner.
+///
+/// It runs with no parallel workers: a full check of a large log with parallel hash joins can fill
+/// the shared memory of a stock Postgres container and fail other queries while it runs.
 pub async fn verify_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
+    Ok(verify_chain_with(conn, None).await?.check)
+}
+
+/// What `verify_chain_with` read in its guarded transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainRead {
+    /// What `verify_chain` found.
+    pub check: ChainCheck,
+    /// The newest link (seq, hash), whether the chain holds up to it or not.
+    pub newest: Option<(i64, Vec<u8>)>,
+    /// The hash of the link the caller asked for, None when no link has that seq.
+    pub link: Option<Vec<u8>>,
+}
+
+/// `verify_chain`, plus two reads in the same transaction, after the same guard and with the same
+/// search_path: the newest link, and the hash of link `link` (the head a backup anchored). Two links
+/// with that seq stop the check (`Error::AuditUncheckable`): the guard already refuses a table whose
+/// seq has no unique index, and the read does not trust that alone.
+pub async fn verify_chain_with(conn: &mut PgConnection, link: Option<i64>) -> Result<ChainRead> {
     let mut tx = conn.begin().await?;
     sqlx::raw_sql(
         "set local search_path = pg_catalog, pg_temp; \
+         set local max_parallel_workers_per_gather = 0; \
          lock table public.audit_event, public.audit_chain in access share mode",
     )
     .execute(&mut *tx)
     .await?;
     let plain: i64 = sqlx::query_scalar(PLAIN_TABLES).fetch_one(&mut *tx).await?;
-    let check = if plain == 2 {
-        read_chain(&mut tx).await
+    let read = if plain == 2 {
+        read_all(&mut tx, link).await
     } else {
         Err(Error::AuditUncheckable(
             "the audit log cannot be checked: public.audit_event or public.audit_chain is no longer a plain table"
@@ -257,7 +288,31 @@ pub async fn verify_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
         ))
     };
     tx.rollback().await?;
-    check
+    read
+}
+
+async fn read_all(conn: &mut PgConnection, link: Option<i64>) -> Result<ChainRead> {
+    let check = read_chain(&mut *conn).await?;
+    let newest = sqlx::query_as("select seq, hash from only public.audit_chain order by seq desc limit 1")
+        .fetch_optional(&mut *conn)
+        .await?;
+    let link = match link {
+        None => None,
+        Some(seq) => {
+            let mut hashes: Vec<Vec<u8>> =
+                sqlx::query_scalar("select hash from only public.audit_chain where seq = $1 limit 2")
+                    .bind(seq)
+                    .fetch_all(&mut *conn)
+                    .await?;
+            if hashes.len() > 1 {
+                return Err(Error::AuditUncheckable(format!(
+                    "the audit log cannot be checked: more than one link in public.audit_chain has seq {seq}"
+                )));
+            }
+            hashes.pop()
+        }
+    };
+    Ok(ChainRead { check, newest, link })
 }
 
 /// The reads of `verify_chain`, inside its transaction, after the guard. One statement: every link
@@ -1410,6 +1465,77 @@ mod tests {
             matches!(&guard, Err(Error::AuditUncheckable(m)) if m.contains("no longer a plain table")),
             "the guard must refuse a nullable audit_event.id: {guard:?}"
         );
+        Ok(())
+    }
+
+    // ------------------------------------------------- PR 75 round 1 review tests ----
+
+    /// A second link with the seq a backup anchored, planted with the primary key dropped, must not
+    /// pass for that link: the guard refuses a seq with no unique index, and the read on its own
+    /// refuses two links with one seq.
+    #[tokio::test]
+    async fn a_second_link_with_the_anchored_seq_stops_the_check() -> anyhow::Result<()> {
+        let (db, _) = chained(3).await?;
+        let r = verify_chain_with(&mut *db.pool.acquire().await?, Some(2)).await?;
+        assert!(
+            r.check.ok() && r.link.is_some() && r.newest.as_ref().map(|n| n.0) == Some(3),
+            "{r:?}"
+        );
+        owner_sql(&db, "alter table audit_chain drop constraint audit_chain_pkey").await?;
+        tamper(
+            &db,
+            "insert into audit_chain (seq, event_id, prev_hash, hash) values (2, -1, '\\x00', '\\x00')",
+        )
+        .await?;
+        let guard = verify_chain_with(&mut *db.pool.acquire().await?, Some(2)).await;
+        assert!(
+            matches!(&guard, Err(Error::AuditUncheckable(m)) if m.contains("no longer a plain table")),
+            "the guard must refuse a seq with no unique index: {guard:?}"
+        );
+        let mut c = sqlx::PgConnection::connect(&db.url).await?;
+        let mut tx = c.begin().await?;
+        sqlx::raw_sql("set local search_path = pg_catalog, pg_temp")
+            .execute(&mut *tx)
+            .await?;
+        let read = read_all(&mut tx, Some(2)).await;
+        tx.rollback().await?;
+        c.close().await?;
+        assert!(
+            matches!(&read, Err(Error::AuditUncheckable(m)) if m.contains("more than one link")),
+            "the read must refuse two links with one seq: {read:?}"
+        );
+        Ok(())
+    }
+
+    /// A unique index the owner puts back in place of the key, but on another column or partial,
+    /// does not count.
+    #[tokio::test]
+    async fn only_a_full_unique_index_on_seq_counts() -> anyhow::Result<()> {
+        let (db, _) = chained(2).await?;
+        for (what, sql) in [
+            (
+                "partial",
+                "alter table audit_chain drop constraint audit_chain_pkey; \
+                 create unique index audit_chain_seq_part on audit_chain (seq) where seq > 1",
+            ),
+            (
+                "two columns",
+                "drop index audit_chain_seq_part; create unique index audit_chain_seq_two on audit_chain (seq, event_id)",
+            ),
+        ] {
+            owner_sql(&db, sql).await?;
+            let r = check(&db.pool).await;
+            assert!(
+                matches!(&r, Err(e) if e.to_string().contains("no longer a plain table")),
+                "{what}: {r:?}"
+            );
+        }
+        owner_sql(
+            &db,
+            "drop index audit_chain_seq_two; create unique index audit_chain_seq on audit_chain (seq)",
+        )
+        .await?;
+        assert!(check(&db.pool).await?.ok(), "a plain unique index on seq is enough");
         Ok(())
     }
 }

@@ -527,13 +527,13 @@ pub async fn build_document(
     with_hints(doc, hints)
 }
 
-/// The words of one template in both languages, as the pedigree's labels are.
+/// The words of one template in every registry language, as the pedigree's labels are.
 fn both(v: Option<&Value>) -> Value {
-    json!({"en": v.and_then(|v| v.get("en")), "es": v.and_then(|v| v.get("es"))})
+    ownhealth_core::langs::per_lang(|l| v.and_then(|v| v.get(l)).cloned().unwrap_or(Value::Null))
 }
 
 /// The document with its words: every item gains `title` and `why`, and `reason` for one that could
-/// not be checked, each as `{en, es}` so the screen can switch language without a new request.
+/// not be checked, each with one text per registry language so the screen can switch language without a new request.
 pub fn render(doc: &Value) -> Result<Value> {
     let pat = load()?;
     let t = |part: &str, key: &str| both(pat.templates.get(part).and_then(|p| p.get(key)));
@@ -1096,7 +1096,7 @@ fn render_hint(rules: &HintRules, h: &Value) -> Value {
                 .and_then(Value::as_str)
                 .map(|s| s.replace("{gene}", gene))
         };
-        json!({"en": fill("en"), "es": fill("es")})
+        ownhealth_core::langs::per_lang(|l| json!(fill(l)))
     };
     let mut m = h.as_object().cloned().unwrap_or_default();
     m.insert("title".into(), t("title"));

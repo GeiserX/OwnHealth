@@ -56,7 +56,7 @@ use ownhealth_auth::sessions::IDLE_MINUTES;
 use ownhealth_core::access::{Principal, PrincipalKind, effective_permission};
 use ownhealth_core::audit::{AuditEvent, hash_arg, write_audit};
 use ownhealth_core::config::Env;
-use ownhealth_core::{Error, Runtime};
+use ownhealth_core::{Error, Runtime, langs};
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -1037,79 +1037,118 @@ fn common_headers(h: &mut HeaderMap) {
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
 }
 
-/// The language of a page under `/ohif`, picked as the app picks it with nothing saved: the browser's
-/// first language, Spanish when it is Spanish, else English; with no `Accept-Language`, the server's
-/// default (`OWNHEALTH_DEFAULT_LOCALE`). A sandboxed page cannot read the app's saved choice.
-fn page_lang(headers: &HeaderMap, default: &str) -> Lang {
+/// The language of a page under `/ohif`, picked as the app picks it with nothing saved (`pickLang`
+/// in `ui/src/lib/i18n/langs.ts`): the browser's first language when the registry has it, else
+/// [`langs::BROWSER_DEFAULT`]; with no `Accept-Language`, the server's default
+/// (`OWNHEALTH_DEFAULT_LOCALE`, read as a tag: `en-GB` is English), else the registry default. A
+/// sandboxed page cannot read the app's saved choice.
+fn page_lang(headers: &HeaderMap, default: &str) -> &'static str {
     let first = headers
         .get(header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|t| t.trim().to_ascii_lowercase())
+        .and_then(|v| v.split([',', ';']).next())
+        .map(str::trim)
         .filter(|t| !t.is_empty());
-    match first.as_deref().unwrap_or(default) {
-        t if t.starts_with("es") => Lang::Es,
-        _ => Lang::En,
+    match first {
+        Some(tag) => langs::of_tag(tag).unwrap_or(langs::BROWSER_DEFAULT),
+        None => langs::of_tag(default).unwrap_or(langs::LANGS[0]),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Lang {
-    En,
-    Es,
-}
-
-/// The words of every refusal page, (code, English, Spanish). A code not here gets the last line.
-const REFUSALS: &[(&str, &str, &str)] = &[
+/// The words of every refusal page by code, in every registry language. A code not here gets the
+/// last row.
+const REFUSALS: &[(&str, &[(&str, &str)])] = &[
     (
         "viewer_link_invalid",
-        "This viewer link is not valid any more. A link works for one hour, and only while you stay signed in to OwnHealth; opening the study there again gives a new one.",
-        "Este enlace del visor ya no sirve. Un enlace dura una hora, y solo mientras sigues con la sesión iniciada en OwnHealth; al abrir allí el estudio otra vez se crea uno nuevo.",
+        &[
+            (
+                "es",
+                "Este enlace del visor ya no sirve. Un enlace dura una hora, y solo mientras sigues con la sesión iniciada en OwnHealth; al abrir allí el estudio otra vez se crea uno nuevo.",
+            ),
+            (
+                "en",
+                "This viewer link is not valid any more. A link works for one hour, and only while you stay signed in to OwnHealth; opening the study there again gives a new one.",
+            ),
+        ],
     ),
     (
         "viewer_link_missing",
-        "The viewer opens from a study in OwnHealth.",
-        "El visor se abre desde un estudio en OwnHealth.",
+        &[
+            ("es", "El visor se abre desde un estudio en OwnHealth."),
+            ("en", "The viewer opens from a study in OwnHealth."),
+        ],
     ),
     (
         "viewer_file_refused",
-        "This is not a file of the viewer.",
-        "Esto no es un archivo del visor.",
+        &[
+            ("es", "Esto no es un archivo del visor."),
+            ("en", "This is not a file of the viewer."),
+        ],
     ),
     (
         "study_not_available",
-        "This study is not available to you.",
-        "Este estudio no está disponible para ti.",
+        &[
+            ("es", "Este estudio no está disponible para ti."),
+            ("en", "This study is not available to you."),
+        ],
     ),
     (
         "study_retracted",
-        "This study was retracted.",
-        "Este estudio se retiró.",
+        &[("es", "Este estudio se retiró."), ("en", "This study was retracted.")],
     ),
     (
         "imaging_off",
-        "Imaging is off on this server.",
-        "Las imágenes médicas están desactivadas en este servidor.",
+        &[
+            ("es", "Las imágenes médicas están desactivadas en este servidor."),
+            ("en", "Imaging is off on this server."),
+        ],
     ),
-    ("method_not_allowed", "The viewer only reads.", "El visor solo lee."),
+    (
+        "method_not_allowed",
+        &[("es", "El visor solo lee."), ("en", "The viewer only reads.")],
+    ),
     (
         "",
-        "The viewer cannot open this study now.",
-        "El visor no puede abrir este estudio ahora.",
+        &[
+            ("es", "El visor no puede abrir este estudio ahora."),
+            ("en", "The viewer cannot open this study now."),
+        ],
     ),
 ];
+
+/// The registry languages a refusal page or its link back lacks (`tests/langs.rs`).
+pub fn missing_langs(want: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (code, texts) in REFUSALS {
+        out.extend(
+            langs::missing(&langs::codes(texts), want)
+                .into_iter()
+                .map(|l| format!("refusal page {code:?} has no `{l}` text")),
+        );
+    }
+    out.extend(
+        langs::missing(&langs::codes(BACK), want)
+            .into_iter()
+            .map(|l| format!("the refusal page's link back has no `{l}` text")),
+    );
+    out
+}
 
 /// Every text a refusal page can show (the wording lint reads them).
 pub fn phrases() -> Value {
     let pages: Vec<Value> = REFUSALS
         .iter()
-        .map(|(code, en, es)| json!({"code": code, "en": en, "es": es}))
+        .map(|(code, texts)| {
+            let mut m: serde_json::Map<String, Value> = texts.iter().map(|(l, t)| (l.to_string(), json!(t))).collect();
+            m.insert("code".into(), json!(code));
+            Value::Object(m)
+        })
         .collect();
-    json!({"pages": pages, "back": [BACK.0, BACK.1]})
+    json!({"pages": pages, "back": BACK.iter().map(|(_, t)| *t).collect::<Vec<_>>()})
 }
 
-/// The link back to the app, (English, Spanish).
-const BACK: (&str, &str) = ("Back to OwnHealth", "Volver a OwnHealth");
+/// The link back to the app, in every registry language.
+const BACK: &[(&str, &str)] = &[("es", "Volver a OwnHealth"), ("en", "Back to OwnHealth")];
 
 fn html_escape(s: &str) -> String {
     s.chars()
@@ -1126,17 +1165,15 @@ fn html_escape(s: &str) -> String {
 
 /// A refusal under `/ohif` is a page too, sandboxed like the viewer, in the person's language, with a
 /// link back to the app (a sandboxed page may still navigate itself).
-fn refusal_page(e: &ApiError, lang: Lang, base_url: &str) -> Response {
-    let (_, en, es) = REFUSALS
+fn refusal_page(e: &ApiError, lang: &'static str, base_url: &str) -> Response {
+    let texts = REFUSALS
         .iter()
-        .find(|(code, _, _)| *code == e.code)
+        .find(|(code, _)| *code == e.code)
         .or_else(|| REFUSALS.last())
-        .copied()
-        .unwrap_or(("", "", ""));
-    let (tag, message, back) = match lang {
-        Lang::Es => ("es", es, BACK.1),
-        Lang::En => ("en", en, BACK.0),
-    };
+        .map_or(&[][..], |(_, t)| *t);
+    let tag = lang;
+    let message = if texts.is_empty() { "" } else { langs::pick(texts, lang) };
+    let back = langs::pick(BACK, lang);
     let home = html_escape(&format!("{}/", base_url.trim_end_matches('/')));
     let html = format!(
         "<!doctype html><html lang=\"{tag}\"><meta charset=\"utf-8\"><title>OwnHealth</title>\
@@ -1464,17 +1501,23 @@ mod tests {
             );
             m
         };
-        assert_eq!(page_lang(&h("es-ES,en;q=0.8"), "en"), Lang::Es);
-        assert_eq!(page_lang(&h("en-US,es;q=0.8"), "es"), Lang::En);
-        assert_eq!(page_lang(&h("de"), "es"), Lang::En);
-        assert_eq!(page_lang(&HeaderMap::new(), "es"), Lang::Es);
-        assert_eq!(page_lang(&HeaderMap::new(), "en"), Lang::En);
-        // Every refusal has both languages, and the fallback is last.
-        assert!(
-            REFUSALS
-                .iter()
-                .all(|(_, en, es)| !en.is_empty() && !es.is_empty() && en != es)
-        );
+        assert_eq!(page_lang(&h("es-ES,en;q=0.8"), "en"), "es");
+        assert_eq!(page_lang(&h("es;q=0.9,en;q=0.8"), "en"), "es");
+        assert_eq!(page_lang(&h("en-US,es;q=0.8"), "es"), "en");
+        assert_eq!(page_lang(&h("xx"), "es"), "en");
+        assert_eq!(page_lang(&h("est"), "es"), "en");
+        assert_eq!(page_lang(&HeaderMap::new(), "es"), "es");
+        assert_eq!(page_lang(&HeaderMap::new(), "en"), "en");
+        // OWNHEALTH_DEFAULT_LOCALE is read as a tag, as before the registry
+        assert_eq!(page_lang(&HeaderMap::new(), "en-GB"), "en");
+        assert_eq!(page_lang(&HeaderMap::new(), "es_ES"), "es");
+        assert_eq!(page_lang(&HeaderMap::new(), "xx"), ownhealth_core::langs::LANGS[0]);
+        // Every refusal has a different text per registry language, and the fallback is last.
+        assert_eq!(missing_langs(&ownhealth_core::langs::LANGS), Vec::<String>::new());
+        assert!(REFUSALS.iter().all(|(_, t)| {
+            let texts: std::collections::BTreeSet<&str> = t.iter().map(|(_, s)| *s).collect();
+            texts.len() == t.len() && !texts.contains("")
+        }));
         assert_eq!(REFUSALS.last().map(|r| r.0), Some(""));
     }
 }

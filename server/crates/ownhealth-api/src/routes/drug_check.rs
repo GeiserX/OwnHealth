@@ -65,15 +65,18 @@ pub async fn drug_check(rt: &Runtime, principal: &Principal, p: &str, drug: &str
     Ok(out)
 }
 
-/// `drug: str = Query(..., min_length=1, max_length=80)`: a missing or bad drug answers 422.
-fn drug_param(q: &HashMap<String, String>) -> R<String> {
+/// `drug: str = Query(..., min_length=1, max_length=80)`: a missing or bad drug answers 422, as a
+/// `lang` outside the registry does.
+fn params(q: &HashMap<String, String>) -> R<(String, Option<&'static str>)> {
     let mut check = Check::query();
     let drug = q.get("drug");
     if drug.is_none() {
         check.push("missing", "drug", "Field required", Value::Null);
     }
-    check.len("drug", drug.map(String::as_str), 1, 80).done()?;
-    Ok(drug.cloned().unwrap_or_default())
+    check.len("drug", drug.map(String::as_str), 1, 80);
+    let lang = check.query_lang(q.get("lang").map(String::as_str));
+    check.done()?;
+    Ok((drug.cloned().unwrap_or_default(), lang))
 }
 
 async fn get_drug_check(
@@ -82,8 +85,8 @@ async fn get_drug_check(
     Path(p): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> R {
-    let drug = drug_param(&q)?;
-    ok(drug_check(&rt, &c, &p, &drug, q.get("lang").map(String::as_str)).await?)
+    let (drug, lang) = params(&q)?;
+    ok(drug_check(&rt, &c, &p, &drug, lang).await?)
 }
 
 pub fn router() -> Router<Runtime> {

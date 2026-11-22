@@ -396,15 +396,12 @@ pub fn build(
             .get("answers")
             .and_then(|a| a.get(k))
             .and_then(|a| a.get("question"));
-        if ["en", "es"].iter().any(|l| {
-            q.and_then(|q| q.get(*l))
+        if let Some(lang) = ownhealth_core::langs::LANGS.iter().find(|l| {
+            q.and_then(|q| q.get(**l))
                 .and_then(Value::as_str)
                 .is_none_or(|s| s.trim().is_empty())
         }) {
-            return Err(err(
-                "templates.yaml",
-                format!("answer {k} has no question in en and es"),
-            ));
+            return Err(err("templates.yaml", format!("answer {k} has no question in {lang}")));
         }
     }
     let tsv = String::from_utf8(read("vaccines.tsv")?).map_err(|e| err("vaccines.tsv", e))?;
@@ -516,6 +513,28 @@ pub fn load_dir(dir: &Path, pack: &Pack) -> std::result::Result<Prevention, Cite
 }
 
 /// The shipped files, read once.
+/// The registry languages a vaccine name lacks: `vaccines.tsv` has the columns `label_en` and
+/// `label_es`, so a registry language beyond them is named here (`tests/langs.rs`). The YAML files
+/// are checked with the rest of `data/`.
+pub fn missing_langs(pack: &Pack, langs: &[&str]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for g in load(pack)?.groups.values().filter(|g| g.vaccine) {
+        let have: Vec<&str> = g
+            .name
+            .as_object()
+            .into_iter()
+            .flat_map(|m| m.keys())
+            .map(String::as_str)
+            .collect();
+        out.extend(
+            ownhealth_core::langs::missing(&have, langs)
+                .into_iter()
+                .map(|l| format!("vaccines.tsv {} has no `label_{l}`", g.id)),
+        );
+    }
+    Ok(out)
+}
+
 pub fn load(pack: &Pack) -> Result<&'static Prevention> {
     static LOADED: OnceLock<std::result::Result<Prevention, String>> = OnceLock::new();
     let loaded = LOADED.get_or_init(|| {
@@ -1057,7 +1076,7 @@ pub fn question(prev: &Prevention, key: &str, lang: &str) -> Option<String> {
             .get("answers")
             .and_then(|a| a.get(key))
             .and_then(|a| a.get("question")),
-        if lang == "es" { "es" } else { "en" },
+        lang,
     )
 }
 
@@ -1296,10 +1315,7 @@ fn fill(template: &str, params: &[(&str, String)]) -> String {
 
 fn pick(v: Option<&Value>, lang: &str) -> Option<String> {
     let v = v?;
-    v.get(lang)
-        .or_else(|| v.get("en"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
+    ownhealth_core::langs::lookup(lang, |l| v.get(l).and_then(Value::as_str)).map(str::to_string)
 }
 
 /// The document in one language for one caller: every item (shown or `hidden`) gains `title` and
@@ -1308,7 +1324,7 @@ fn pick(v: Option<&Value>, lang: &str) -> Option<String> {
 /// need are named in `withheld_scopes`. Without read:records `prevention_hash` is left out too.
 pub fn render(doc: &Value, pack: &Pack, lang: &str, scopes: &Scopes) -> Result<Value> {
     let prev = load(pack)?;
-    let lang = if lang == "es" { "es" } else { "en" };
+    let lang = ownhealth_core::langs::lang_or_default(lang);
     let rules = doc
         .get("country")
         .and_then(Value::as_str)

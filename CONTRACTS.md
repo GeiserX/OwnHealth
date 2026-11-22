@@ -19,6 +19,17 @@ All routes are under `/api`, JSON, and resolve `{p}` as a profile slug, `me` or 
 `unknown`, 409 for lifecycle and review conflicts, 415 `unsupported_upload`. A router module is
 `server/crates/ownhealth-api/src/routes/<file>.rs` with a `router()` that `routes.rs` merges.
 
+`lang`, on every route that takes it, is a registry language (`ownhealth_core::langs::LANGS`, today
+`es` or `en`, exact and lower case). Any other value, `fr`, `EN` and `en-US` included, is 422
+`literal_error` at `["query", "lang"]` (`["body", "lang"]` for a body field), never a silent other
+language. An empty `lang=` counts as absent. An absent `lang` keeps the route's default: English on
+the timeline and the couple view; the first registry language (Spanish) on observations, the trend
+and wearables; the caller's own language on the others (status, dashboard, drug check, next draw and
+its sheet, calculators, due, prevention answers, gaps and the gap letter, and the summary sheet,
+export and share link bodies). A stored language outside the registry reads the first registry
+language: only a `lang` the caller sent is refused. MCP tools take no REST `lang`; they speak the
+token's `mcp_lang`.
+
 | Owner | File (`routes/`) | Route | Notes |
 |---|---|---|---|
 | foundation | core.rs | `GET /me` | user, household, locale, dev flag; each profile has its `role`, `scopes` and `break_glass` (an emergency grant, which never shares) |

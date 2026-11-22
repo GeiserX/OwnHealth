@@ -329,4 +329,7 @@ test('a reinterpretation alert reads in the screen language', () => {
 	assert.equal(reinterpText(p, 'en'), 'A result you carry changed in ClinVar.');
 	// An item with only the English text still shows it rather than nothing.
 	assert.equal(reinterpText({ summary: 'A result you carry changed in ClinVar.' }, 'es'), 'A result you carry changed in ClinVar.');
+	// The server writes summary_<lang> for every registry language: a third one reads its own text.
+	assert.equal(reinterpText({ ...p, summary_en: 'EN', summary_xx: 'XX' }, 'xx'), 'XX');
+	assert.equal(reinterpText({ ...p, summary_en: 'EN' }, 'en'), 'EN');
 });

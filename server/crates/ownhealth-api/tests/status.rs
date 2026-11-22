@@ -215,3 +215,41 @@ async fn no_grant_no_status() -> R {
     assert!([StatusCode::FORBIDDEN, StatusCode::NOT_FOUND].contains(&res.status()));
     Ok(())
 }
+
+/// A `lang` the registry does not hold is refused on status, dashboard and drug check; an empty
+/// one counts as absent, and an absent one reads the caller's language (Alex's is Spanish).
+#[tokio::test]
+async fn a_lang_outside_the_registry_is_refused_and_an_empty_one_reads_the_default() -> R {
+    let e = env().await?;
+    for route in [
+        "status?as_of=2026-11-07&",
+        "dashboard?as_of=2026-11-07&",
+        "drug-check?drug=clopidogrel&",
+    ] {
+        for bad in ["fr", "en-US"] {
+            let (code, b) = e.get(&format!("/api/profiles/alex/{route}lang={bad}")).await?;
+            assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY, "{route}{bad}: {b}");
+            assert_eq!(b["detail"][0]["type"], "literal_error", "{b}");
+            assert_eq!(b["detail"][0]["loc"], serde_json::json!(["query", "lang"]), "{b}");
+        }
+    }
+    let (_, es) = e.get("/api/profiles/alex/drug-check?drug=clopidogrel&lang=es").await?;
+    let (_, en) = e.get("/api/profiles/alex/drug-check?drug=clopidogrel&lang=en").await?;
+    assert_ne!(es["guidance"], en["guidance"], "the guidance is localized");
+    for tail in ["", "&lang="] {
+        let (code, d) = e
+            .get(&format!("/api/profiles/alex/drug-check?drug=clopidogrel{tail}"))
+            .await?;
+        assert_eq!(code, StatusCode::OK, "{tail}: {d}");
+        assert_eq!(d["guidance"], es["guidance"], "{tail}");
+        let (code, s) = e
+            .get(&format!("/api/profiles/alex/status?as_of=2026-11-07{tail}"))
+            .await?;
+        assert_eq!(
+            (code, &s["lang"]),
+            (StatusCode::OK, &serde_json::json!("es")),
+            "{tail}: {s}"
+        );
+    }
+    Ok(())
+}

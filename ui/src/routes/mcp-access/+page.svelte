@@ -2,9 +2,9 @@
 	// Mockup screen #mcp-access: personal access tokens for MCP clients (create, scope, revoke, last
 	// used), the Claude Code connection snippet, the append-only audit log, egress budget, the tools.
 	import '#lib/components/pages2/pages2.css';
-	import { getTokenUsage, listAudit, listTokens, revokeToken } from '#lib/api';
+	import { getAuditChain, getTokenUsage, listAudit, listAuditWho, listTokens, revokeToken } from '#lib/api';
 	import { listConsents, type OAuthConsentOut } from '#lib/api/inbox';
-	import type { AuditOut, TokenOut, TokenUsage } from '#lib/api/types';
+	import type { AuditChainOut, AuditOut, AuditWhoOut, TokenOut, TokenUsage } from '#lib/api/types';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
@@ -14,7 +14,7 @@
 	import { ago, day, int, plain, stamp } from '#lib/components/pages2/fmt';
 	import { fmtNum, t } from '#lib/i18n/index.svelte';
 	import { copyText } from '#lib/logic/inbox';
-	import { auditActionKey, auditActor, auditDetail, auditOut, auditResult, auditRows, auditWhat, liveConsents } from '#lib/logic/people';
+	import { auditActionKey, auditActor, auditDetail, auditOut, auditResult, auditRows, auditWhat, chainLines, liveConsents } from '#lib/logic/people';
 	import { app } from '#lib/state/app.svelte';
 
 	// Each tool and the scopes it needs (docs/design/mcp.md 2.3). `any` lists alternatives, `note` adds
@@ -38,7 +38,12 @@
 	const audit = new Loader<AuditOut[]>();
 	const usage = new Loader<TokenUsage>();
 	const consents = new Loader<OAuthConsentOut[]>();
+	const chain = new Loader<AuditChainOut>();
+	const who = new Loader<AuditWhoOut>();
 	let auditProfile = $state('');
+	// Who saw a profile's data: the person's own profile first.
+	let whoPicked = $state('');
+	const whoProfile = $derived(whoPicked || (app.me?.profiles.find((x) => x.is_self) ?? app.me?.profiles[0])?.slug || '');
 	let auditMode = $state<'agents' | 'all'>('agents');
 	let creating = $state(false);
 	let fresh = $state<{ token: TokenOut; plaintext: string } | null>(null);
@@ -55,10 +60,21 @@
 	const loadAudit = () =>
 		audit.run(async () => (await listAudit({ limit: 60, profile: auditProfile || undefined, via: auditMode === 'agents' ? 'mcp' : undefined })).items);
 	const loadConsents = () => consents.run(async () => (await listConsents()).items);
+	const loadChain = () => chain.run(getAuditChain);
+	const loadWho = () => {
+		if (whoProfile) who.run(() => listAuditWho(whoProfile));
+	};
 	$effect(() => {
 		loadTokens();
 		loadConsents();
+		loadChain();
 	});
+	$effect(() => {
+		void whoProfile;
+		loadWho();
+	});
+	const pillKey = { 'p-ok': 'au_pill_ok', 'p-out': 'au_pill_out', 'p-watch': 'au_pill_out', 'p-info': 'au_pill_info' } as const;
+	const viaText = (v: string) => (t('au_via_' + v) === 'au_via_' + v ? v : t('au_via_' + v));
 	$effect(() => {
 		void [auditProfile, auditMode];
 		loadAudit();
@@ -220,6 +236,18 @@
 					</select>
 				</span>
 			</h3>
+			<div class="integ" role="group" aria-live="polite" aria-label={t('au_integrity')}>
+				<div class="dim">{t('au_integrity')}</div>
+				{#if chain.error}
+					<NotReady error={chain.error} onretry={loadChain} />
+				{:else if !chain.data}
+					<div class="muted">{t('loading')}</div>
+				{:else}
+					{#each chainLines(chain.data, int) as l (l.key)}
+						<div class="line"><span class="pill {l.tone}"><i aria-hidden="true"></i>{t(pillKey[l.tone])}</span><span>{tf(l.key, { ...l.vars, at: day(String(l.vars.at ?? '')) })}{#if l.tail}{' '}{tf(l.tail, l.vars)}{/if}</span></div>
+					{/each}
+				{/if}
+			</div>
 			{#if audit.error}
 				<NotReady error={audit.error} onretry={loadAudit} />
 			{:else}
@@ -228,13 +256,13 @@
 						<thead><tr><th>{t('i2_a_time')}</th><th>{t('i2_a_who')}</th><th>{t('i2_a_tool')}</th><th>{t('profile')}</th><th>{t('i2_a_result')}</th><th style="text-align:right">{t('i2_a_out')}</th><th>{t('i2_a_res')}</th></tr></thead>
 						<tbody>
 							{#each shownAudit as a (a.id)}
-								{@const who = auditActor(a.actor, appNames)}
+								{@const by = auditActor(a.actor, appNames)}
 								{@const res = auditResult(a.result_kind)}
 								{@const out = auditOut(a)}
 								{@const w = what(a)}
 								<tr>
 									<td class="num muted" title={a.ts}>{stamp(a.ts)}</td>
-									<td data-label={t('i2_a_who')}><div class="cl" style="max-width:160px" title={who.raw}>{who.label}{a.via === 'mcp' ? '' : ` · ${a.via}`}</div></td>
+									<td data-label={t('i2_a_who')}><div class="cl" style="max-width:160px" title={by.raw}>{by.label}{a.via === 'mcp' ? '' : ` · ${a.via}`}</div></td>
 									<td data-label={t('i2_a_tool')}><div class="cl" class:mono={w.code} style="max-width:170px" title={a.tool ?? a.action}>{w.text}</div></td>
 									<td data-label={t('profile')}>{a.profile ?? '—'}</td>
 									<!-- Result sits before the free-width columns so a denied call is never pushed off the card. -->
@@ -244,6 +272,45 @@
 								</tr>
 							{:else}
 								<tr><td colspan="7"><div class="empty">{audit.loading || !audit.data ? t('loading') : auditMode === 'agents' ? t('i2_audit_none_agents') : t('i2_audit_none')}</div></td></tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{/if}
+		</section>
+		<section class="card" style="padding:8px 6px 2px" aria-labelledby="who-h">
+			<h3 style="padding:0 8px">
+				<span id="who-h">{whoProfile ? tf('au_who', { name: name(whoProfile) }) : t('au_who_h0')}</span>
+				{#if whoProfile}
+					<span class="r p2row">
+						{t('au_who_d')}
+						<select class="p2in" value={whoProfile} onchange={(e) => (whoPicked = e.currentTarget.value)} aria-label={t('au_who_pick')}>
+							{#each app.me?.profiles ?? [] as p (p.id)}<option value={p.slug}>{p.display_name}</option>{/each}
+						</select>
+					</span>
+				{/if}
+			</h3>
+			{#if app.me && !whoProfile}
+				<div class="empty">{t('h1_noprofile')}</div>
+			{:else if who.error}
+				<NotReady error={who.error} onretry={loadWho} />
+			{:else}
+				{#if who.data?.profile === whoProfile && who.data.scope === 'own'}<div class="note" style="padding:0 8px 4px">{t('au_who_own')}</div>{/if}
+				<div class="tscroll">
+					<table class="t nw stack">
+						<thead><tr><th>{t('i2_a_who')}</th><th>{t('au_who_via')}</th><th style="text-align:right">{t('au_who_entries')}</th><th>{t('au_who_first')}</th><th>{t('au_who_last')}</th></tr></thead>
+						<tbody>
+							{#each who.data?.profile === whoProfile ? who.data.items : [] as w}
+								{@const label = auditActor(w.actor, appNames)}
+								<tr>
+									<td data-label={t('i2_a_who')}><div class="cl" style="max-width:200px" title={label.raw}>{label.label}</div></td>
+									<td data-label={t('au_who_via')}>{viaText(w.via)}</td>
+									<td class="num" style="text-align:right" data-label={t('au_who_entries')}>{int(w.events)}</td>
+									<td class="num muted" data-label={t('au_who_first')} title={w.first_ts}>{stamp(w.first_ts)}</td>
+									<td class="num muted" data-label={t('au_who_last')} title={w.last_ts}>{stamp(w.last_ts)}</td>
+								</tr>
+							{:else}
+								<tr><td colspan="5"><div class="empty">{who.loading || who.data?.profile !== whoProfile ? t('loading') : who.data.scope === 'own' ? t('au_who_none_own') : t('au_who_none')}</div></td></tr>
 							{/each}
 						</tbody>
 					</table>
@@ -351,6 +418,22 @@
 			display: inline-block;
 			vertical-align: bottom;
 		}
+	}
+	.integ {
+		margin: 0 8px 8px;
+		padding: 6px 8px;
+		border: 1px solid var(--line2);
+		border-radius: 8px;
+		font-size: 12px;
+	}
+	.integ .line {
+		display: flex;
+		gap: 8px;
+		align-items: baseline;
+		margin-top: 4px;
+	}
+	.integ .pill {
+		flex: none;
 	}
 	.cl {
 		overflow: hidden;

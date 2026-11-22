@@ -345,6 +345,15 @@ impl Check {
         self
     }
 
+    /// The `lang` query parameter (`crate::validate::lang`): a registry language, or None when it is
+    /// absent or empty.
+    pub fn query_lang(&mut self, value: Option<&str>) -> Option<&'static str> {
+        crate::validate::lang(value).unwrap_or_else(|e| {
+            self.errors.push(e);
+            None
+        })
+    }
+
     /// `input` is the value as sent (pydantic reports `"0"` for a string, `0` for a number).
     pub fn range(&mut self, field: &str, value: i64, input: Value, ge: i64, le: i64) -> &mut Check {
         if value < ge {

@@ -78,6 +78,27 @@ pub struct Group {
     pub name_es: String,
 }
 
+impl Group {
+    /// The analyte's name in each language the table carries, for `langs::pick`.
+    pub fn names(&self) -> [(&'static str, &str); 2] {
+        [("es", &self.name_es), ("en", &self.name_en)]
+    }
+}
+
+/// The registry languages the analyte names lack: the table's columns are `name_es` and `name_en`,
+/// so a registry language beyond them is named here (`tests/langs.rs`).
+pub fn missing_langs(langs: &[&str]) -> Vec<String> {
+    let have: Vec<&str> = groups()
+        .values()
+        .next()
+        .map(|g| g.names().iter().map(|(c, _)| *c).collect())
+        .unwrap_or_default();
+    ownhealth_core::langs::missing(&have, langs)
+        .into_iter()
+        .map(|l| format!("analyte names have no `name_{l}` column"))
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Alias {
     pub alias: String,

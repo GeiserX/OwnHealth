@@ -1,7 +1,7 @@
 // REST API types. This file mirrors CONTRACTS.md "REST API": change both together.
 // Ids are UUID strings, dates ISO 8601 strings, decimals arrive as JSON numbers or strings.
 
-import type { Lang } from '../i18n/langs';
+import type { Lang, Localized, McpLang } from '../i18n/langs';
 
 export type Uuid = string;
 export type IsoDate = string; // 2026-11-07
@@ -465,7 +465,7 @@ export interface TokenOut {
 	profiles: string[]; // slugs
 	default_profile: string | null;
 	identity_mode: 'full' | 'pseudonymous' | 'minimal';
-	lang: 'es' | 'en';
+	lang: McpLang;
 	units: 'si' | 'conventional' | 'as_reported';
 	limits: Record<string, number>;
 	created_at: IsoDateTime;
@@ -491,6 +491,21 @@ export interface AuditOut {
 	src_ids?: string[];
 	args_summary?: string | null; // codes and ids only; free text is hashed
 	withheld?: Record<string, unknown> | null;
+}
+
+/** GET /api/audit/chain: how far the hash chain holds, and the head the last backup kept outside the database. */
+export interface AuditChainOut {
+	ok: boolean;
+	verified: number; // entries checked from the first one
+	broken: { seq: number | null; kind: 'hash' | 'prev_hash' | 'missing_link' | 'missing_event' | 'unlinked' | 'uncheckable' } | null;
+	anchor: { state: 'none' | 'ok' | 'mismatch' | 'unreadable' | 'unchecked'; seq: number | null; at: IsoDateTime | null }; // unchecked: the log itself cannot be checked
+}
+
+/** GET /api/audit/who?profile=: one row per actor and channel on that profile. */
+export interface AuditWhoOut {
+	profile: string;
+	scope: 'everyone' | 'own'; // own: the person only views this profile, so the rows are their own actions
+	items: { actor: string; actor_kind: string; via: string; events: number; first_ts: IsoDateTime; last_ts: IsoDateTime }[];
 }
 
 export interface TokenUsageDay {
@@ -643,7 +658,7 @@ export interface GenomeEvent {
 	release_to: string;
 	unconfirmed: boolean;
 	created_at: IsoDateTime;
-	text: { en: string; es: string };
+	text: Localized;
 	withheld?: 'minor' | 'sensitive';
 	alerted?: boolean;
 	kind?:
@@ -667,8 +682,8 @@ export interface GenomeEvents {
 	release?: string | null;
 	/** The household's weekly ClinVar check is on. */
 	weekly?: boolean;
-	/** Where a reclassified call is made again: OwnGenome's command, in both languages. */
-	rerun?: { en: string; es: string };
+	/** Where a reclassified call is made again: OwnGenome's command, in every registry language. */
+	rerun?: Localized;
 }
 
 export interface GenomeView {
