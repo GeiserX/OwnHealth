@@ -9,7 +9,9 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 bin=${OWNHEALTH_E2E_BIN:-$root/server/target/debug/ownhealth}
 port=${OWNHEALTH_E2E_PORT:-8190}
 admin=postgresql://postgres:postgres@127.0.0.1:55432/postgres # ownhealth-testpg, where psql_admin runs
-db="oh_e2e_$(openssl rand -hex 6)"
+# playwright.config.ts names the database, so shl.spec.ts can reach it; a run by hand gets its own
+db=${OWNHEALTH_E2E_DB:-oh_e2e_$(openssl rand -hex 6)}
+[[ $db =~ ^oh_e2e_[a-z0-9]+$ ]] || { echo "OWNHEALTH_E2E_DB must look like oh_e2e_<hex>: $db" >&2; exit 1; }
 data=$(mktemp -d)
 pid=""
 
@@ -35,6 +37,8 @@ export OWNHEALTH_STATIC_DIR="$root/server/static"
 export OWNHEALTH_DEMO=1 OWNHEALTH_DEV_AUTH=1
 export OWNHEALTH_HOST=127.0.0.1 OWNHEALTH_PORT="$port"
 export OWNHEALTH_BASE_URL="http://127.0.0.1:$port"
+# share links on: a loopback http address is the one plain-http share address the app accepts
+export OWNHEALTH_SHARE_URL="http://127.0.0.1:$port"
 export OWNHEALTH_SECRET_KEY="$(openssl rand -hex 48)"
 export RUST_LOG="${RUST_LOG:-warn}" # the access log stays out of the test output; errors still show
 
