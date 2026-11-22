@@ -929,6 +929,40 @@ async fn reading_in_the_viewer_keeps_the_session_alive() -> R {
     );
     let idle = w.idle("alex").await?;
     assert!(idle < 5.0, "{idle}");
+
+    // A refused request is no activity: a link that authorizes nothing any more, or a request the
+    // proxy refuses, leaves the session to go idle.
+    let lucia = w.open(&cookie, "lucia", LUCIA_XR).await?;
+    sqlx::query("update profile_grant set categories = array['read:summary'] where user_id = $1 and profile_id = $2")
+        .bind(w.fam.user("alex"))
+        .bind(w.fam.profile("lucia"))
+        .execute(&w.db.pool)
+        .await?;
+    for (path, why) in [
+        (dw(&lucia, &format!("studies/{LUCIA_XR}/series")), "study_not_available"),
+        (format!("/ohif/t/{lucia}/viewer"), "study_not_available"),
+        (dw(&cap, &format!("studies/{ALEX_CT}")), "dicomweb_refused"),
+        (dw(&cap, &format!("studies/{CARMEN_MR}/series")), "study_not_in_link"),
+    ] {
+        w.set_idle("alex", 25 * 60).await?;
+        let (s, _, body) = w.viewer_get(&path, None).await?;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{path}");
+        if path.starts_with("/dicom-web/") {
+            assert_eq!(code(&body), why, "{path}");
+        }
+        let idle = w.idle("alex").await?;
+        assert!(
+            idle >= 25.0 * 60.0,
+            "{path}: a refused request refreshed the session ({idle})"
+        );
+    }
+    // Nor does a study Orthanc cannot tell apart any more.
+    w.orthanc.add_study(ALEX_CT, "orthanc-another-patient");
+    w.set_idle("alex", 25 * 60).await?;
+    let (s, _, body) = w.viewer_get(&series, None).await?;
+    assert_eq!((s, code(&body).as_str()), (StatusCode::FORBIDDEN, "study_not_bound"));
+    let idle = w.idle("alex").await?;
+    assert!(idle >= 25.0 * 60.0, "study_not_bound refreshed the session ({idle})");
     Ok(())
 }
 

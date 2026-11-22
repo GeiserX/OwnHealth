@@ -23,11 +23,11 @@
 //! 3. The proxy answers CORS for `Origin: null`, without credentials, and allows GET only. Every request
 //!    is checked again: the capability is live, its session is live, the session can still read the
 //!    profile (`read:records`), and the study is still in that profile, not retracted, and still the
-//!    same Orthanc study. A viewer request counts as activity for the session (at most once a minute),
-//!    so a long read does not go idle; the link's own hour still bounds it. The study UID comes from
-//!    the path, or from a search that names exactly that one UID. WADO-URI, a bare study list, root
-//!    searches, Orthanc ids (`/instances/{id}`, `ohif-dicom-json`) and whole-study or whole-series
-//!    downloads are refused. Every answer carries [`DICOMWEB_CSP`], so one opened as a page runs nothing,
+//!    same Orthanc study. A viewer request that passes every check counts as activity for the session
+//!    (at most once a minute; a refused one does not), so a long read does not go idle; the link's own
+//!    hour still bounds it. The study UID comes from the path, or from a search that names exactly that
+//!    one UID. WADO-URI, a bare study list, root searches, Orthanc ids (`/instances/{id}`,
+//!    `ohif-dicom-json`) and whole-study or whole-series downloads are refused. Every answer carries [`DICOMWEB_CSP`], so one opened as a page runs nothing,
 //!    and one that is not an image or DICOM is a download.
 //!
 //!    Orthanc's absolute URLs in its JSON answers are turned into links through the capability. The
@@ -470,10 +470,9 @@ async fn study_row(
 }
 
 /// The principal of a live session, by id: the same rules as `sessions::resolve_session` (not revoked,
-/// not expired, not idle, user not disabled). A viewer request is activity, so it refreshes
-/// `last_seen_at`, but at most once a minute: a long read does not go idle, and a busy viewer does not
-/// write a row per frame. The session's 12-hour end and the link's hour still hold.
-async fn live_session(conn: &mut PgConnection, session_id: Uuid) -> Result<Option<Principal>, sqlx::Error> {
+/// not expired, not idle, user not disabled), and whether its `last_seen_at` is over a minute old. It
+/// writes nothing: only a request that passes every check counts as activity ([`touch`]).
+async fn live_session(conn: &mut PgConnection, session_id: Uuid) -> Result<Option<(Principal, bool)>, sqlx::Error> {
     let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
         "select s.user_id, u.household_id, s.last_seen_at < now() - make_interval(secs => $3) \
          from user_session s join app_user u on u.id = s.user_id \
@@ -485,35 +484,53 @@ async fn live_session(conn: &mut PgConnection, session_id: Uuid) -> Result<Optio
     .bind(f64::from(TOUCH_EVERY_SECS))
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((user, household, stale)) = row else {
-        return Ok(None);
-    };
-    if stale {
-        sqlx::query(
-            "update user_session set last_seen_at = now() \
-             where id = $1 and last_seen_at < now() - make_interval(secs => $2)",
-        )
-        .bind(session_id)
-        .bind(f64::from(TOUCH_EVERY_SECS))
-        .execute(&mut *conn)
-        .await?;
-    }
-    let row = Some((user, household));
-    Ok(row.map(|(user, household)| Principal {
-        session_id: Some(session_id),
-        ..Principal::session(user, household)
+    Ok(row.map(|(user, household, stale)| {
+        let principal = Principal {
+            session_id: Some(session_id),
+            ..Principal::session(user, household)
+        };
+        (principal, stale)
     }))
 }
 
+/// A viewer request that passed every check counts as activity for its session: it refreshes
+/// `last_seen_at`, but at most once a minute, so a long read does not go idle and a busy viewer does
+/// not write a row per frame. A refused request refreshes nothing. The session's 12-hour end and the
+/// link's hour still hold.
+async fn touch(rt: &Runtime, session: Option<Uuid>) -> Result<(), ApiError> {
+    let Some(session_id) = session else {
+        return Ok(());
+    };
+    sqlx::query(
+        "update user_session set last_seen_at = now() \
+         where id = $1 and last_seen_at < now() - make_interval(secs => $2)",
+    )
+    .bind(session_id)
+    .bind(f64::from(TOUCH_EVERY_SECS))
+    .execute(&rt.pool)
+    .await?;
+    Ok(())
+}
+
+/// A link that passed [`authorize`], and the session to refresh once the request passes its own
+/// checks too (None: nothing to refresh, or refreshed within the minute).
+struct Authorized {
+    link: Link,
+    touch: Option<Uuid>,
+}
+
 /// Every check a viewer request passes, each time.
-async fn authorize(rt: &Runtime, imaging: &Imaging, token: &str) -> Result<Link, ApiError> {
+async fn authorize(rt: &Runtime, imaging: &Imaging, token: &str) -> Result<Authorized, ApiError> {
     let link = imaging.lookup(token).ok_or_else(link_invalid)?;
     let mut conn = rt.pool.acquire().await?;
-    let principal = match link.holder {
-        Holder::Session(id) => live_session(&mut conn, id).await?,
-        Holder::Dev(user) if rt.settings.dev_auth => {
-            dev_principal(&mut conn).await?.filter(|p| p.user_id == Some(user))
-        }
+    let (principal, touch) = match link.holder {
+        Holder::Session(id) => live_session(&mut conn, id)
+            .await?
+            .map(|(p, stale)| (p, stale.then_some(id))),
+        Holder::Dev(user) if rt.settings.dev_auth => dev_principal(&mut conn)
+            .await?
+            .filter(|p| p.user_id == Some(user))
+            .map(|p| (p, None)),
         Holder::Dev(_) => None,
     }
     .ok_or_else(link_invalid)?;
@@ -526,7 +543,7 @@ async fn authorize(rt: &Runtime, imaging: &Imaging, token: &str) -> Result<Link,
         None => Err(study_not_available()),
         Some((s, _)) if s == "retracted" => Err(retracted()),
         Some((_, id)) if id.as_deref() != Some(link.orthanc_id.as_str()) => Err(study_not_available()),
-        Some(_) => Ok(link),
+        Some(_) => Ok(Authorized { link, touch }),
     }
 }
 
@@ -602,7 +619,8 @@ async fn viewer_file(rt: &Runtime, ext: Option<&Extension<Arc<Imaging>>>, req: &
     if !is_viewer_file(file) {
         return Err(refused("viewer_file_refused", "This is not a file of the viewer."));
     }
-    authorize(rt, imaging, token).await?;
+    let ok = authorize(rt, imaging, token).await?;
+    touch(rt, ok.touch).await?;
     let orthanc = imaging.orthanc()?;
     let upstream = imaging
         .http
@@ -663,7 +681,7 @@ async fn proxy(rt: &Runtime, ext: Option<&Extension<Arc<Imaging>>>, req: &Parts)
         .strip_prefix("/dicom-web/t/")
         .and_then(|r| r.split_once('/'))
         .ok_or_else(ApiError::not_found)?;
-    let link = authorize(rt, imaging, token).await?;
+    let Authorized { link, touch: session } = authorize(rt, imaging, token).await?;
     let Query(query) = Query::<Vec<(String, String)>>::try_from_uri(&req.uri)
         .map_err(|_| dicomweb_refused("the query does not parse."))?;
     let target = dicomweb_target(rest, &query, &link.study_uid)?;
@@ -671,6 +689,8 @@ async fn proxy(rt: &Runtime, ext: Option<&Extension<Arc<Imaging>>>, req: &Parts)
         bind_check(imaging, &link.study_uid, &link.orthanc_id).await?;
         imaging.mark_checked(token);
     }
+    // Every check passed: only now does the request count as activity.
+    touch(rt, session).await?;
     let orthanc = imaging.orthanc()?;
     let mut call = imaging
         .http
