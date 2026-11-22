@@ -137,14 +137,45 @@ pub async fn reimport_kind(conn: &mut PgConnection, document_id: Uuid, kind: &st
     .fetch_all(&mut *conn)
     .await?;
     for id in others {
-        let key = format!("{job}:reimport:{id}");
-        ownhealth_core::jobs::enqueue(
-            &mut *conn,
-            job,
-            &json!({"document_id": id.to_string()}),
-            ownhealth_core::jobs::EnqueueOptions::dedupe(&key),
-        )
-        .await?;
+        queue_after(&mut *conn, job, id).await?;
     }
+    Ok(())
+}
+
+/// Queue `job` for the document `id`, to run after this transaction. A job still queued under the same
+/// key is enough: it starts after this transaction removed its samples, so its writes see that. A job
+/// of that key that is running may have written before, so one more run is queued after it.
+async fn queue_after(conn: &mut PgConnection, job: &str, id: Uuid) -> Result<()> {
+    use ownhealth_core::jobs::{EnqueueOptions, enqueue};
+    let key = format!("{job}:reimport:{id}");
+    let payload = json!({"document_id": id.to_string()});
+    if enqueue(&mut *conn, job, &payload, EnqueueOptions::dedupe(&key))
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let running: Option<i64> = sqlx::query_scalar("select id from job where dedupe_key = $1 and state = 'running'")
+        .bind(&key)
+        .fetch_optional(&mut *conn)
+        .await?;
+    // none running: the key is held by a queued job, or its running job finished meanwhile and the key
+    // is free again
+    let key = match running {
+        Some(r) => format!("{key}:after:{r}"),
+        None => key,
+    };
+    enqueue(&mut *conn, job, &payload, EnqueueOptions::dedupe(&key)).await?;
+    Ok(())
+}
+
+/// Hold the lock on one profile's exports of one kind (`flag`) until this transaction ends. A CGM
+/// import takes it first, so two imports of one profile never interleave: one that replaces its own
+/// readings and queues the others again never races another's run.
+pub async fn lock_exports(conn: &mut PgConnection, profile_id: Uuid, flag: &str) -> Result<()> {
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("ownhealth:exports:{flag}:{profile_id}"))
+        .execute(conn)
+        .await?;
     Ok(())
 }

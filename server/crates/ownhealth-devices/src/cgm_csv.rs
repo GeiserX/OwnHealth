@@ -893,6 +893,15 @@ async fn import_in(
     source_id: Option<Uuid>,
     read: Read<'_>,
 ) -> Result<(ImportSummary, Value)> {
+    // one CGM import of a profile at a time: a run that replaces its readings and queues the others
+    // again never interleaves with another's run (retract::lock_exports)
+    let owner: Option<Uuid> = sqlx::query_scalar("select profile_id from document where id = $1")
+        .bind(document_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    if let Some(owner) = owner {
+        ownhealth_ingest_structured::retract::lock_exports(&mut *conn, owner, "cgm_csv").await?;
+    }
     let (profile_id, sha, flags, status): (Option<Uuid>, String, Value, String) =
         sqlx::query_as("select profile_id, encode(blob_sha256, 'hex'), flags, status from document where id = $1")
             .bind(document_id)

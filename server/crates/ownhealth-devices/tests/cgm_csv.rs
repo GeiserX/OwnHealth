@@ -829,6 +829,49 @@ async fn a_zone_replacement_brings_back_what_an_overlapping_export_holds() -> R 
 }
 
 #[tokio::test]
+async fn a_zone_replacement_runs_the_other_export_again_after_its_run_still_marked_running() -> R {
+    let env = Env::new().await?;
+    let a = clarity_at(&every_5("2026-11-14", 10, 11));
+    let b = clarity_at(&every_5("2026-11-14", 11, 12));
+    for (name, bytes) in [("a.csv", &a), ("b.csv", &b)] {
+        let (_, id) = upload(&env, "lucia", name, bytes).await?;
+        assert_eq!(job(&env, id).await?.0, "done", "{name}");
+    }
+    let b_doc: Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'b.csv'")
+        .bind(env.fam.profile("lucia"))
+        .fetch_one(&env.db.pool)
+        .await?;
+    // a run of b.csv again (after a retraction) has committed, but its job is not marked done yet: it
+    // still holds the key a new request for b.csv would take
+    let mut c = env.db.pool.acquire().await?;
+    let key = format!("{}:reimport:{b_doc}", cgm_csv::JOB);
+    jobs::enqueue(
+        &mut c,
+        cgm_csv::JOB,
+        &json!({"document_id": b_doc.to_string()}),
+        jobs::EnqueueOptions::dedupe(&key),
+    )
+    .await?;
+    drop(c);
+    let kinds = [cgm_csv::JOB.to_string()];
+    let held = jobs::claim(&env.db.pool, "core", "test-worker", Some(&kinds[..]))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no job to claim"))?;
+    // a.csv again from a Madrid browser leaves 11:00 to 11:55 UTC: one more run of b.csv brings them
+    upload_in_zone(&env, "lucia", "a.csv", &a, "Europe/Madrid").await?;
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    let r = owned(&env, "lucia").await?;
+    let count = |name: &str| r.iter().filter(|x| x.0 == name).count();
+    assert_eq!((count("a.csv"), count("b.csv")), (24, 24), "{r:?}");
+    let state: String = sqlx::query_scalar("select state from job where id = $1")
+        .bind(held.id)
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(state, "running");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_retraction_after_a_zone_change_reads_the_others_in_their_own_zone() -> R {
     let env = Env::new().await?;
     // two exports read in Madrid; then the zone of a new run changes (here: none), and one is retracted
