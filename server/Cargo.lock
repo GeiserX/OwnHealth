@@ -3971,6 +3971,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "zip 9.4.2",
 ]
