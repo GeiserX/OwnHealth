@@ -103,7 +103,7 @@ You need Docker with Compose v2. Clone the repository, fill four secrets in `.en
 
 - It does not diagnose. It keeps records and shows values with the formulas and sources they come from.
 - It does not tell anyone what to take or stop. A pharmacogenomic result quotes the published guideline and links it.
-- It sends nothing anywhere. The app listens on `127.0.0.1` until you put a reverse proxy in front.
+- It has no cloud of its own. The app listens on `127.0.0.1` until you put a reverse proxy in front. An agent you connect over MCP sends what it reads to that agent's model provider, so pick one you trust with medical data.
 
 ## Privacy and security
 
