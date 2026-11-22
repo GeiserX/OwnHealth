@@ -270,7 +270,8 @@ async fn import_inner(
         display_name: r.try_get("display_name")?,
         birth_date: r.try_get("birth_date")?,
     };
-    store_pages(&mut *conn, blobs, document_id, &ext, ocr_in).await?;
+    let owner = BlobOwner::of_document(doc.profile_id, doc.id);
+    store_pages(&mut *conn, blobs, owner, document_id, &ext, ocr_in).await?;
     let near = near_duplicate(&mut *conn, blobs, &doc).await?;
     let cls = &ext.cls;
     let identity = identity_match(
@@ -645,6 +646,7 @@ async fn tokio_blocking_extract(data: Vec<u8>, pdf: bool, ocr: Option<Vec<PageMo
 async fn store_pages(
     conn: &mut PgConnection,
     blobs: &BlobStore,
+    owner: BlobOwner,
     document_id: Uuid,
     ext: &Extraction,
     ocr: Option<&OcrPages>,
@@ -668,7 +670,7 @@ async fn store_pages(
             "height": page.height,
             "words": page.words.iter().map(|w| w.as_dict()).collect::<Vec<_>>(),
         });
-        let words_sha = blobs.put_bytes(&serde_json::to_vec(&layer)?)?;
+        let words_sha = blobs.put_bytes(owner, &serde_json::to_vec(&layer)?)?;
         sqlx::query(
             "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok, words_blob, \
              flags, text_content, fts, word_layer, text_simhash) values ($1, $2, $3, $4, $5, $6, $7, $8, \
@@ -1026,6 +1028,7 @@ pub(crate) async fn accept_amended(
 /// Accepting the suggestion moves the document to the profile named on its pages and re-imports it.
 pub(crate) async fn accept_identity(
     conn: &mut PgConnection,
+    blobs: &BlobStore,
     item: &ReviewItem,
     user_id: Uuid,
     edits: Option<&Value>,
@@ -1041,7 +1044,7 @@ pub(crate) async fn accept_identity(
     let document_id = item
         .document_id
         .ok_or_else(|| Error::Review("document_identity item without a document".into()))?;
-    assign_document(conn, document_id, target, user_id, Some(item.id)).await?;
+    assign_document(conn, blobs, document_id, target, user_id, Some(item.id)).await?;
     Ok(Vec::new())
 }
 
@@ -1059,8 +1062,12 @@ fn reimport_kind(mime: &str) -> &'static str {
 /// Everything the old reading brought in (observations, records, wearable samples) is withdrawn.
 /// Returns the new import job id (None when the profile did not change). A refusal (another
 /// household, the file already on that profile, a genome-facts file) is `Error::Review` (409).
+/// The files move to the new profile's key in the same transaction, from the owner the locked row
+/// holds, and the removal of the old copies is queued with it
+/// (`ownhealth_core::documents::rekey_document`): every move path re-keys, and the re-import opens them.
 pub async fn assign_document(
     conn: &mut PgConnection,
+    blobs: &BlobStore,
     document_id: Uuid,
     profile_id: Uuid,
     user_id: Uuid,
@@ -1117,6 +1124,8 @@ pub async fn assign_document(
         .bind(document_id)
         .execute(&mut *conn)
         .await?;
+    // the new profile's key must open the files before the re-import reads them
+    ownhealth_core::documents::rekey_document(&mut *conn, blobs, document_id, doc.profile_id, Some(profile_id)).await?;
     let key = format!("{kind}:{document_id}:{profile_id}");
     Ok(enqueue(
         conn,

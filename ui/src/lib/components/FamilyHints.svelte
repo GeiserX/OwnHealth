@@ -47,8 +47,8 @@
 		margin: 0;
 		align-items: flex-start;
 		padding: 8px 11px;
-		border-color: rgba(110, 168, 254, 0.45);
-		background: linear-gradient(90deg, rgba(110, 168, 254, 0.12), rgba(110, 168, 254, 0.03));
+		border-color: rgba(60, 186, 221, 0.45);
+		background: linear-gradient(90deg, rgba(60, 186, 221, 0.12), rgba(60, 186, 221, 0.03));
 		color: var(--accent);
 	}
 	.hint > div {

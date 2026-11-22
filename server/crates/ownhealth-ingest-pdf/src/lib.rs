@@ -119,7 +119,7 @@ pub fn register() {
     register_accept_handler("amended_report", |conn, item, user, edits| {
         Box::pin(import::accept_amended(conn, item, user, edits))
     });
-    register_accept_handler("document_identity", |conn, item, user, edits| {
-        Box::pin(import::accept_identity(conn, item, user, edits))
+    ownhealth_core::review::register_moving_accept_handler("document_identity", |conn, blobs, item, user, edits| {
+        Box::pin(import::accept_identity(conn, blobs, item, user, edits))
     });
 }

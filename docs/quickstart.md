@@ -1,6 +1,6 @@
 # Quick start
 
-From nothing to your first lab report in OwnHealth, on one machine, in about ten minutes. For a homelab with HTTPS, a real name and backups, follow [deploy/README.md](../deploy/README.md) afterwards.
+From nothing to your first lab report in OwnHealth, on one machine, in about ten minutes. For a homelab with HTTPS, a real name and backups, follow [deploy/README.md](https://github.com/GeiserX/OwnHealth/blob/main/deploy/README.md) afterwards.
 
 ## What you need
 
@@ -17,7 +17,8 @@ cp .env.example .env
 openssl rand -hex 32     # paste as OWNHEALTH_DB_PASSWORD in .env
 openssl rand -hex 32     # paste as OWNHEALTH_APP_DB_PASSWORD in .env
 openssl rand -hex 48     # paste as OWNHEALTH_SECRET_KEY in .env
-openssl rand -base64 32  # paste as OWNHEALTH_SECRETS_KEY in .env (encrypts inbox passwords and tokens)
+mkdir -m 700 secrets && openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key && chmod 644 secrets/secrets_key
+                         # seals every profile's files and inbox secrets: keep a copy with your backups
 mkdir -p inbox && sudo chown 10001:10001 inbox   # the watched folder; the app runs as user 10001
 docker compose up -d
 ```
@@ -85,11 +86,11 @@ Open http://localhost:8081. It needs the same `.env` as step 1 and runs beside y
 | Logs | `docker compose logs -f app` |
 | Stop | `docker compose down` (your data stays in the volumes) |
 | Update | set the new version in `compose.yaml`, then `docker compose pull && docker compose up -d` |
-| Back up | [deploy/README.md](../deploy/README.md#backups) |
+| Back up | [deploy/README.md](https://github.com/GeiserX/OwnHealth/blob/main/deploy/README.md#backups) |
 | Delete everything | `docker compose down -v` (removes the volumes: all records and documents) |
 
 ## Good to know
 
 - OwnHealth keeps records and shows values with the formulas and sources they come from. It is information, not diagnosis.
-- Only synthetic data belongs in bug reports and pull requests. See [CONTRIBUTING.md](../CONTRIBUTING.md).
+- Only synthetic data belongs in bug reports and pull requests. See [CONTRIBUTING.md](https://github.com/GeiserX/OwnHealth/blob/main/CONTRIBUTING.md).
 - What we protect, and from whom: [design/security-privacy.md](design/security-privacy.md#3-threat-model).

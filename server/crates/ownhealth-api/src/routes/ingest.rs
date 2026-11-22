@@ -22,6 +22,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use ownhealth_core::arrive::Arrived;
 use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::documents::StoredFile;
 use ownhealth_core::sources::{RunOutcome, RunProblem, Source, begin_run, finish_run};
 use ownhealth_core::{Error, Runtime, ids};
@@ -125,7 +126,8 @@ async fn read_form(rt: &Runtime, req: Request, file_fields: &[&str]) -> R<Form> 
                 filename,
                 path: path.clone(),
             });
-            let mut f = tokio::fs::File::create(&path).await.map_err(Error::from)?;
+            // plaintext until the store takes it: readable by this user only
+            let mut f = ownhealth_core::blobs::create_spool(&path).await.map_err(Error::from)?;
             while let Some(chunk) = field.chunk().await.map_err(|_| bad_body("The form is broken."))? {
                 f.write_all(&chunk).await.map_err(Error::from)?;
             }
@@ -154,11 +156,11 @@ async fn read_form(rt: &Runtime, req: Request, file_fields: &[&str]) -> R<Form> 
 }
 
 /// Put the spooled files in the blob store (off the async threads).
-async fn store(rt: &Runtime, files: &[Spool]) -> R<Vec<StoredFile>> {
+async fn store(rt: &Runtime, owner: BlobOwner, files: &[Spool]) -> R<Vec<StoredFile>> {
     let mut stored = Vec::with_capacity(files.len());
     for f in files {
         let (blobs, path) = (rt.blobs.clone(), f.path.clone());
-        let (sha256, size) = tokio::task::spawn_blocking(move || blobs.put_file(&path))
+        let (sha256, size) = tokio::task::spawn_blocking(move || blobs.put_file(owner, &path))
             .await
             .map_err(|e| Error::Other(e.into()))?
             .map_err(|e| Error::Other(e.into()))?;
@@ -193,7 +195,7 @@ async fn share_target(State(rt): State<Runtime>, caller: Caller, headers: Header
         .unwrap_or_else(|| "me".into());
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, profile.trim(), None, Some("import")).await?;
-    let stored = store(&rt, &form.files).await?;
+    let stored = store(&rt, BlobOwner::Profile(perm.profile.id), &form.files).await?;
     drop(form);
     let arrived = share::ingest_files(
         &mut tx,
@@ -228,7 +230,7 @@ async fn shortcut_push(rt: &Runtime, source: &Source, req: Request) -> R<(RunOut
         ))
     })?;
     let form = read_form(rt, req, &["file", "files"]).await?;
-    let stored = store(rt, &form.files).await?;
+    let stored = store(rt, BlobOwner::Profile(profile_id), &form.files).await?;
     drop(form);
     let mut tx = rt.pool.begin().await?;
     let arrived = share::ingest_files(

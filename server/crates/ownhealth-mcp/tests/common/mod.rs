@@ -429,7 +429,7 @@ async fn lab_document(
         report_id: "LN-T",
         pages: vec![rows],
     });
-    let sha = blobs.put_bytes(&pdf)?;
+    let sha = blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &pdf)?;
     let mut d = NewDocument::upload(
         family.household_id,
         Some(family.profiles["alex"]),

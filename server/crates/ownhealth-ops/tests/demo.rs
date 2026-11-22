@@ -12,7 +12,7 @@ async fn demo_seed_matches_the_alex_fixture() -> anyhow::Result<()> {
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
-    let blobs = BlobStore::new(settings.blobs_path())?;
+    let blobs = BlobStore::for_settings(&settings)?;
     assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
     assert!(!seed_demo(&db.pool, &settings, &blobs, false).await?); // once
     let p = &db.pool;
@@ -120,7 +120,7 @@ async fn a_forced_second_seed_gets_generated_src_ids() -> anyhow::Result<()> {
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
-    let blobs = BlobStore::new(settings.blobs_path())?;
+    let blobs = BlobStore::for_settings(&settings)?;
     assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
     assert!(seed_demo(&db.pool, &settings, &blobs, true).await?);
     let households: i64 = sqlx::query_scalar("select count(*) from household where name = $1")

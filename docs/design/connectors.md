@@ -409,7 +409,7 @@ Plan: v0.1 reads any FHIR R4 bundle, so an EU PS bundle already imports as gener
 Phases above follow the roadmap. These questions are still open:
 
 1. **Dexcom:** decided. Native T2 connector in v1.0, because Open Wearables 0.11.0 has no Dexcom provider. Nightscout stays the other path.
-2. **Oura's 2026 API and MCP agreement.** Oura ships through the sidecar in v1.0 and shows in the UI and over REST. MCP, the rule-pack markers and the calculators withhold it until its connector page quotes terms with no AI ban ([ROADMAP open decisions](../ROADMAP.md#open-decisions)).
+2. **Oura's 2026 API and MCP agreement.** Oura ships through the sidecar in v1.0 and shows in the UI and over REST. MCP, the rule-pack markers and the calculators withhold it until its connector page quotes terms with no AI ban ([ROADMAP open decisions](https://github.com/GeiserX/OwnHealth/blob/main/docs/ROADMAP.md#open-decisions)).
 3. **US SMART shared client (option A).** It would need a static relay page on a domain we run. It holds no data and has no backend, but it is still infrastructure run for users, and we run none today. Bring-your-own ships in v1.0 either way.
 4. **Plugin isolation.** Run T3 plugins on the user's desktop, posting files with a per-plugin ingest token (default), or add a fourth `plugins` compose profile next to `ocr`, `imaging` and `wearables`?
 5. **Withings+ requirement** for new accounts and the **Fitbit / Google Health API** status: both unverified today; recheck before v1.0.

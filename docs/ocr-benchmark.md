@@ -1,7 +1,7 @@
 # OCR benchmark
 
 This is how well the `ocr` image reads scanned and photographed lab slips, and how fast it does it on
-a CPU. It covers the v0.2 OCR exit criteria in [ROADMAP.md](ROADMAP.md): row F1 of at least 0.90 on
+a CPU. It covers the v0.2 OCR exit criteria in [ROADMAP.md](https://github.com/GeiserX/OwnHealth/blob/main/docs/ROADMAP.md): row F1 of at least 0.90 on
 the scanned and photographed eval set, CPU throughput measured and published, and nothing silent.
 
 ## Result
@@ -83,7 +83,7 @@ images are never committed.
   in the F1. It is still routed to review as a row, so it is not lost. The spike measured the weak
   spot: accented letters (recall 0.53). Rows are matched on folded names, so an accent alone does
   not cost a row.
-- **One engine.** Only the shipped engine runs in this harness. The OCR spike ([server/SPIKES-v0.2.md](../server/SPIKES-v0.2.md))
+- **One engine.** Only the shipped engine runs in this harness. The OCR spike ([server/SPIKES-v0.2.md](https://github.com/GeiserX/OwnHealth/blob/main/server/SPIKES-v0.2.md))
   compared the other candidates on word recall: PP-OCRv5 server, PP-OCRv6 small and ocrs. To rank
   another model set on row F1, put its files in a models directory under the names
   `scripts/fetch-ocr-models.sh` uses and run the harness on that directory.

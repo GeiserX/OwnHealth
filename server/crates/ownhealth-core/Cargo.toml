@@ -22,6 +22,8 @@ chrono.workspace = true
 flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
 ipnet.workspace = true
 # ES256 verify for SMART Health Cards (jose.rs); the version ownhealth-auth testing already locks
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
@@ -42,6 +44,7 @@ tracing.workspace = true
 unicode-normalization.workspace = true
 url.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 zip.workspace = true
 
 [dev-dependencies]

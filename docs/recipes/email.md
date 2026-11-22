@@ -94,7 +94,7 @@ If allowed mail is held as `auth_failed`:
 - The trusted authserv-id does not match what your server writes (step 1), or the field is empty.
 - The sender's domain failed DKIM and SPF at your server. Ask the sender, or release the message once.
 
-To alert on a stalled mailbox, see [Monitoring the inboxes](../../deploy/README.md#monitoring-the-inboxes).
+To alert on a stalled mailbox, see [Monitoring the inboxes](https://github.com/GeiserX/OwnHealth/blob/main/deploy/README.md#monitoring-the-inboxes).
 
 ## Notes
 

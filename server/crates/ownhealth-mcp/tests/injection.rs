@@ -329,7 +329,9 @@ async fn lane_b_injection_fixtures() -> R {
         let data = std::fs::read(&fixture)?;
         let kind = ownhealth_core::documents::sniff(&name, &data[..data.len().min(4096)], None);
         assert_eq!(kind, "pdf", "{name}: only PDF fixtures are expected here");
-        let sha = w.rt.blobs.put_bytes(&data)?;
+        let sha =
+            w.rt.blobs
+                .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &data)?;
         let mut d = ownhealth_core::documents::NewDocument::upload(
             w.family.household_id,
             Some(w.pid("alex")),

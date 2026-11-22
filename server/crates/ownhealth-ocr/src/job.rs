@@ -281,6 +281,7 @@ fn row_check(pages: &[OcrPage]) -> ownhealth_ingest_pdf::OcrRowCheck {
 async fn record_run(
     conn: &mut PgConnection,
     blobs: &BlobStore,
+    owner: BlobOwner,
     document_id: Uuid,
     page_no: i32,
     models_sha256: &str,
@@ -290,7 +291,7 @@ async fn record_run(
         Ok(p) => {
             let layer = json!({"engine": format!("{} {}", p.engine, p.engine_version), "width": p.width_pt,
                                "height": p.height_pt, "words": p.words});
-            let sha = blobs.put_bytes(&serde_json::to_vec(&layer)?)?;
+            let sha = blobs.put_bytes(owner, &serde_json::to_vec(&layer)?)?;
             (
                 "done",
                 Some(hex::decode(sha).map_err(|e| Error::Other(e.into()))?),
@@ -389,7 +390,7 @@ pub async fn ocr_document(ctx: &JobContext, document_id: Uuid, pages: &[i32]) ->
 
     let mut tx = ctx.pool.begin().await?;
     for (page_no, page) in &read {
-        record_run(&mut tx, &ctx.blobs, document_id, *page_no, &models_sha256, page).await?;
+        record_run(&mut tx, &ctx.blobs, owner, document_id, *page_no, &models_sha256, page).await?;
         if let Err(e) = page {
             tracing::warn!(%document_id, page_no, error = %e, "OCR could not read a page");
         }
@@ -611,7 +612,7 @@ mod tests {
         photo.extend(&jpeg[2..]);
         let dir = tempfile::tempdir()?;
         let blobs = BlobStore::new(dir.path())?;
-        let sha = blobs.put_bytes(&photo)?;
+        let sha = blobs.put_bytes(BlobOwner::Reference, &photo)?;
         let (rgb, w, h, _) = page_image(&blobs, BlobOwner::Profile(Uuid::nil()), &sha, false, 1)?;
         assert_eq!((w, h, rgb.len()), (200, 300, 200 * 300 * 3));
         Ok(())

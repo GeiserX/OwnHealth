@@ -1,17 +1,14 @@
 //! Where blobs live is `blobs.rs`'s business (plan, shared foundations 5): no production code
 //! outside the store gets the blob folder from `Settings::blobs_path()` or builds a path inside the
 //! store's own layout. The per-profile encryption (slice 46) and the S3 backend (slice 64) change
-//! that layout, so a new raw use would read the wrong bytes. Only `runtime.rs` (which opens the
-//! store) and `backup.rs` (which walks the folder itself until slice 46) may. A new use fails here.
+//! that layout, so a new raw use would read the wrong bytes. Only the store itself may; the backup
+//! copies, lists and places files through it (`BlobStore::copy_into`, `tree_files`, `place`). A new
+//! use fails here.
 
 use std::path::{Path, PathBuf};
 
 /// Files that may reach the blob folder directly, relative to `server/crates`.
-const ALLOWED: &[&str] = &[
-    "ownhealth-core/src/blobs.rs",
-    "ownhealth-core/src/runtime.rs",
-    "ownhealth-ops/src/backup.rs",
-];
+const ALLOWED: &[&str] = &["ownhealth-core/src/blobs.rs"];
 
 /// What a raw use looks like in source.
 const RAW: &[&str] = &["blobs_path(", "join(\"sha256\")", "\"blobs/sha256"];
@@ -81,21 +78,20 @@ fn no_production_code_outside_the_store_reaches_the_blob_folder() {
     );
     assert!(
         found.is_empty(),
-        "raw blob paths outside blobs.rs, runtime.rs and backup.rs (use the BlobStore read API):\n{}",
+        "raw blob paths outside blobs.rs (use the BlobStore API):\n{}",
         found.join("\n")
     );
 }
 
-/// The scan sees the uses it allows: without the allow list it reports runtime.rs and backup.rs.
+/// The scan sees the use it allows: without the allow list it reports blobs.rs.
 #[test]
 fn the_scan_finds_the_allowed_uses_when_they_are_not_allowed() {
     let (found, _) = raw_uses(&crates_dir(), &[]);
-    for file in ["ownhealth-core/src/runtime.rs:", "ownhealth-ops/src/backup.rs:"] {
-        assert!(
-            found.iter().any(|f| f.starts_with(file)),
-            "{file} not seen in {found:#?}"
-        );
-    }
+    let file = "ownhealth-core/src/blobs.rs:";
+    assert!(
+        found.iter().any(|f| f.starts_with(file)),
+        "{file} not seen in {found:#?}"
+    );
 }
 
 #[test]
@@ -125,9 +121,12 @@ fn a_planted_use_is_reported_and_test_code_is_not() {
 #[test]
 fn the_store_keeps_its_path_helpers_private() {
     let src = std::fs::read_to_string(crates_dir().join("ownhealth-core/src/blobs.rs")).expect("blobs.rs");
-    for name in ["path", "open"] {
-        let sig = format!("fn {name}(&self, sha256: &str)");
-        let decls: Vec<&str> = src.lines().filter(|l| l.contains(&sig)).map(str::trim).collect();
+    for (name, sig) in [
+        ("path", "fn path(&self, sha256: &str)"),
+        ("sealed_path", "fn sealed_path(&self, profile: Uuid, address: &str)"),
+        ("find", "fn find(&self, owner: BlobOwner, sha256: &str)"),
+    ] {
+        let decls: Vec<&str> = src.lines().filter(|l| l.contains(sig)).map(str::trim).collect();
         let private = decls.len() == 1 && decls[0].starts_with("fn ");
         assert!(private, "blobs.rs: `{name}` must be declared once, private: {decls:?}");
     }

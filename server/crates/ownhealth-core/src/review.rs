@@ -20,6 +20,7 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::acceptance::{Check, DEFAULT_THRESHOLD, auto_accept, failed_reasons};
+use crate::blobs::BlobStore;
 use crate::error::{Error, Result};
 use crate::observations::{CommitOptions, ObservationIn, commit_observation, supersede_observation};
 use crate::provenance::{SrcIn, SrcRef, region_label};
@@ -126,6 +127,26 @@ static ACCEPT_HANDLERS: LazyLock<RwLock<HashMap<String, AcceptHandler>>> = LazyL
     m.insert("candidate_row".into(), accept_candidate_boxed);
     RwLock::new(m)
 });
+
+/// An [`AcceptHandler`] that also gets the blob store, for a kind whose accept moves files to another
+/// profile's key (`document_identity`): [`accept_with`] runs it, [`accept`] refuses it.
+pub type MovingAcceptHandler = for<'c> fn(
+    &'c mut PgConnection,
+    &'c BlobStore,
+    &'c ReviewItem,
+    Uuid,
+    Option<&'c Value>,
+) -> BoxFuture<'c, Result<Vec<Uuid>>>;
+
+static MOVING_HANDLERS: LazyLock<RwLock<HashMap<String, MovingAcceptHandler>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Register the accept handler of a kind whose accept moves files (see [`MovingAcceptHandler`]).
+pub fn register_moving_accept_handler(kind: &str, handler: MovingAcceptHandler) {
+    if let Ok(mut m) = MOVING_HANDLERS.write() {
+        m.insert(kind.to_string(), handler);
+    }
+}
 
 /// Register the accept handler of one review kind (lanes call this from their `register()`).
 pub fn register_accept_handler(kind: &str, handler: AcceptHandler) {
@@ -568,15 +589,40 @@ async fn accept_candidate(
     Ok(vec![committed.id])
 }
 
-/// Accept an open item (with optional edits). Returns the ids of the rows it created.
+/// Accept an open item (with optional edits). Returns the ids of the rows it created. A kind whose
+/// accept moves files needs the blob store: [`accept_with`].
 pub async fn accept(conn: &mut PgConnection, item_id: Uuid, user_id: Uuid, edits: Option<&Value>) -> Result<Vec<Uuid>> {
+    accept_in(conn, None, item_id, user_id, edits).await
+}
+
+/// [`accept`] with the blob store, which a `document_identity` accept needs to move the document's
+/// files to the new profile's key.
+pub async fn accept_with(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    item_id: Uuid,
+    user_id: Uuid,
+    edits: Option<&Value>,
+) -> Result<Vec<Uuid>> {
+    accept_in(conn, Some(blobs), item_id, user_id, edits).await
+}
+
+async fn accept_in(
+    conn: &mut PgConnection,
+    blobs: Option<&BlobStore>,
+    item_id: Uuid,
+    user_id: Uuid,
+    edits: Option<&Value>,
+) -> Result<Vec<Uuid>> {
     let item = lock_item(&mut *conn, item_id, "open").await?;
-    let handler = accept_handler(&item.kind).ok_or_else(|| {
-        Error::Review(format!(
+    let moving = MOVING_HANDLERS.read().ok().and_then(|m| m.get(&item.kind).copied());
+    let handler = accept_handler(&item.kind);
+    if moving.is_none() && handler.is_none() {
+        return Err(Error::Review(format!(
             "items of kind {} cannot be accepted; dismiss them instead",
             item.kind
-        ))
-    })?;
+        )));
+    }
     let edits = edits.filter(|e| !e.is_null() && e.as_object().is_none_or(|m| !m.is_empty()));
     if item.kind != "document_identity"
         && let Some(Value::Object(e)) = edits
@@ -592,7 +638,17 @@ pub async fn accept(conn: &mut PgConnection, item_id: Uuid, user_id: Uuid, edits
             return Err(Error::Review(format!("edits cannot change {}", fixed.join(", "))));
         }
     }
-    let created = handler(&mut *conn, &item, user_id, edits).await?;
+    let created = match (moving, handler, blobs) {
+        (Some(h), _, Some(blobs)) => h(&mut *conn, blobs, &item, user_id, edits).await?,
+        (Some(_), _, None) => {
+            return Err(Error::Other(anyhow::anyhow!(
+                "items of kind {} move files: accept them with the blob store",
+                item.kind
+            )));
+        }
+        (None, Some(h), _) => h(&mut *conn, &item, user_id, edits).await?,
+        (None, None, _) => Vec::new(), // refused above
+    };
     sqlx::query("update review_item set status = 'accepted', decided_by = $1, decided_at = now(), result_ids = $2 where id = $3")
         .bind(user_id)
         .bind(&created)

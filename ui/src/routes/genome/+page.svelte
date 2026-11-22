@@ -496,7 +496,7 @@
 		color: var(--watch);
 	}
 	.promo {
-		border-color: rgba(110, 168, 254, 0.35);
+		border-color: rgba(60, 186, 221, 0.35);
 	}
 	.cov > span:first-child {
 		flex: 1;

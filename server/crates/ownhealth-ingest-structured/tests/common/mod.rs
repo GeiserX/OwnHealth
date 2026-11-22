@@ -27,7 +27,7 @@ impl Env {
         ownhealth_ingest_structured::register();
         let db = TestDb::new().await?;
         let dir = tempfile::tempdir()?;
-        let blobs = BlobStore::new(dir.path().join("blobs"))?;
+        let blobs = BlobStore::for_settings(&db.settings(dir.path())?)?;
         Ok(Env { db, dir, blobs })
     }
 
@@ -50,7 +50,7 @@ pub async fn store_doc(
     filename: &str,
     mime: &str,
 ) -> anyhow::Result<Uuid> {
-    let sha = blobs.put_bytes(data)?;
+    let sha = blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Profile(fam.profile(slug)), data)?;
     let d = create_document(
         conn,
         &NewDocument {

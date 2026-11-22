@@ -37,8 +37,9 @@ pub struct Settings {
     pub age_of_majority: i32,
     pub host: String,
     pub port: u16,
-    /// `OWNHEALTH_SECRETS_KEY`: 32 bytes, standard base64, that seal inbox credentials at rest
-    /// (`secrets::SecretBox`). Unset: sources that need a stored secret cannot be saved.
+    /// `OWNHEALTH_SECRETS_KEY`: 32 bytes, standard base64. It seals inbox credentials at rest
+    /// (`secrets::SecretBox`) and derives the key that wraps every profile's data key (`keys::Kek`).
+    /// Required by every command that reads or writes health data (`require_secrets_key`).
     pub secrets_key: Option<String>,
     /// `OWNHEALTH_OCR`: the `ocr` compose profile is on, so unread pages go to the `ocr` queue instead of
     /// waiting as pending.
@@ -335,6 +336,14 @@ impl Settings {
         })
     }
 
+    /// The one-line refusal of a start without a usable OWNHEALTH_SECRETS_KEY: since 1.0 every
+    /// profile's files are encrypted under keys it wraps, so nothing may run without it.
+    pub fn require_secrets_key(&self) -> Result<()> {
+        crate::keys::Kek::from_settings(self)
+            .map(|_| ())
+            .map_err(|e| Error::Invalid(e.0))
+    }
+
     pub fn blobs_path(&self) -> PathBuf {
         self.blob_dir.clone().unwrap_or_else(|| self.data_dir.join("blobs"))
     }
@@ -407,6 +416,37 @@ mod tests {
         let e = env(&[("OWNHEALTH_QUEUES", "core,ocrr")]);
         let err = Settings::from(&e).expect_err("refused");
         assert!(err.to_string().contains("OWNHEALTH_QUEUES"));
+    }
+
+    #[test]
+    fn the_secrets_key_is_required_with_a_one_line_fix() {
+        let err = Settings::default().require_secrets_key().expect_err("refused");
+        let text = err.to_string();
+        assert!(text.starts_with("OWNHEALTH_SECRETS_KEY is not set"), "{text}");
+        assert!(
+            text.contains("openssl rand -base64 32") && !text.contains('\n'),
+            "{text}"
+        );
+        let bad = Settings {
+            secrets_key: Some("not-base64!".into()),
+            ..Settings::default()
+        };
+        assert!(
+            bad.require_secrets_key()
+                .expect_err("refused")
+                .to_string()
+                .contains("base64")
+        );
+        let mut secret = [0u8; 32];
+        rand::fill(&mut secret[..]);
+        let good = Settings {
+            secrets_key: Some(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                secret,
+            )),
+            ..Settings::default()
+        };
+        assert!(good.require_secrets_key().is_ok());
     }
 
     #[test]

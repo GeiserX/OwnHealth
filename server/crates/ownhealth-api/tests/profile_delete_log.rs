@@ -30,7 +30,10 @@ async fn a_lost_file_audit_is_logged_by_profile_id_with_the_counts_and_no_name()
     let env = Env::new(true).await?;
     let alex = env.profile("alex");
     let report = b"%PDF-1.7 synthetic LabNorte report";
-    let sha = env.rt.blobs.put_bytes(report)?;
+    let sha = env
+        .rt
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, report)?;
     let mut c = env.pool().acquire().await?;
     create_document(
         &mut c,

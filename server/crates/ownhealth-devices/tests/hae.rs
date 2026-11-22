@@ -405,3 +405,44 @@ async fn push_bodies_older_than_the_keep_window_are_removed() -> R {
     assert!(rows > 0);
     Ok(())
 }
+
+/// Two people's inboxes got the same push body, so each holds a sealed copy under their own key. A
+/// copy goes once that person's pushes no longer name it, whoever else still holds the same bytes.
+#[tokio::test]
+async fn each_persons_copy_of_a_shared_push_goes_with_their_own_last_push() -> R {
+    let env = Env::new().await?;
+    let (alex, sam) = (env.fam.profile("alex"), env.fam.profile("sam"));
+    let mine = env.source("health_auto_export", Some("alex"), json!({}), None).await?;
+    let theirs = env.source("health_auto_export", Some("sam"), json!({}), None).await?;
+    let body = push(start() + Duration::hours(3));
+    import(&env, &mine, &body).await?;
+    import(&env, &theirs, &body).await?;
+    let sha: String = sqlx::query_scalar("select encode(blob_sha256, 'hex') from source_item where source_id = $1")
+        .bind(mine.id)
+        .fetch_one(&env.db.pool)
+        .await?;
+    let owner = ownhealth_core::blobs::BlobOwner::Profile;
+    assert!(env.blobs.exists(owner(alex), &sha) && env.blobs.exists(owner(sam), &sha));
+    let age = |src: uuid::Uuid| {
+        sqlx::query("update source_item set seen_at = now() - make_interval(days => $2) where source_id = $1")
+            .bind(src)
+            .bind(i32::try_from(hae::PUSH_KEEP_DAYS).unwrap_or(i32::MAX) + 1)
+            .execute(&env.db.pool)
+    };
+    // Alex's push expires first: his copy goes, Sam's stays
+    age(mine.id).await?;
+    import(&env, &mine, &push(start() + Duration::hours(4))).await?;
+    assert!(
+        !env.blobs.exists(owner(alex), &sha),
+        "Alex's copy stayed after his last push went"
+    );
+    assert!(env.blobs.exists(owner(sam), &sha), "Sam's push still names his copy");
+    // then Sam's: his copy goes too
+    age(theirs.id).await?;
+    import(&env, &theirs, &push(start() + Duration::hours(5))).await?;
+    assert!(
+        !env.blobs.exists(owner(sam), &sha),
+        "Sam's copy stayed after his last push went"
+    );
+    Ok(())
+}

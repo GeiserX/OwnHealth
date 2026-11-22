@@ -34,6 +34,7 @@ export OWNHEALTH_DEMO=1 OWNHEALTH_DEV_AUTH=1 OWNHEALTH_RUN_JOBS=1
 export OWNHEALTH_HOST=127.0.0.1 OWNHEALTH_PORT="$port"
 export OWNHEALTH_BASE_URL="http://127.0.0.1:$port"
 export OWNHEALTH_SECRET_KEY="$(openssl rand -hex 48)"
+export OWNHEALTH_SECRETS_KEY="$(openssl rand -base64 32)" # a new one each run: it seals the profiles' files
 
 case "$which" in
   rust)

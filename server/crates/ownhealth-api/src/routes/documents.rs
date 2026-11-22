@@ -466,7 +466,12 @@ async fn document_file(
     })?;
     tx.commit().await?;
     let mime = doc.str("mime").unwrap_or("application/octet-stream");
-    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
+    // the file opened (open_async checks a sealed file's first and last record), so a record that
+    // fails later can only end the stream: the status went out, so the log is where it shows
+    let stream = futures::TryStreamExt::inspect_err(tokio_util::io::ReaderStream::new(file), move |e| {
+        tracing::error!(document = %document_id, error = %e, "a document's file stopped part way through");
+    });
+    let body = axum::body::Body::from_stream(stream);
     Ok((
         file_headers(mime),
         [
@@ -607,14 +612,19 @@ async fn assign(
     e.done()?;
     let profile = profile.unwrap_or_default();
     let mut tx = rt.pool.begin().await?;
+    // The row lock first: a move running at the same time commits before the owner is read here, so
+    // the permission check and the re-key (in assign_document) both see the owner it left.
+    ownhealth_core::documents::lock_owner(&mut tx, document_id).await?;
     let doc = visible_document(&mut tx, principal, document_id, None, false).await?;
     if !doc.perm.can("import") {
         let msg = format!("The role {} cannot import on this profile.", doc.perm.role);
         return Err(Error::access_denied("forbidden", msg).into());
     }
     let target = caller.require(&mut tx, &profile, None, Some("import")).await?;
+    // it re-keys the files and queues the removal of the old copies in this transaction
     let job_id = ownhealth_ingest_pdf::assign_document(
         &mut tx,
+        &rt.blobs,
         document_id,
         target.profile.id,
         principal.user_id.unwrap_or_default(),

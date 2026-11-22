@@ -312,6 +312,8 @@ Ships in 0.4.0. Measured exit criteria, and the test behind each deliverable: [v
 
 **Security/Privacy**
 - [ ] Per-profile data keys (DEKs) for blobs, genome files and connector tokens, wrapped by a household key; crypto-shredding on profile deletion.
+  - [x] Part 1: each profile's documents and genome files are sealed under its own key, wrapped by the instance key (`OWNHEALTH_SECRETS_KEY`); deleting a profile deletes its key, so the live files no longer open; backup, verify-restore and restore keep the files sealed. Backups still hold the wrapped keys, so a backup taken before a delete opens that profile's files until it expires.
+  - [ ] Part 2: the wrapped keys kept out of the dump and backed up apart from it, so a delete also closes older backups; pending inbox items under their own key and re-keyed on assignment, connector tokens under the profile key, and an operator-started job that seals the files an older install stored in the plain layout.
 - [ ] Hash-chained audit log, user-visible.
 - [ ] Break-glass for family: a grant that activates after a delay unless the owner cancels it; every use audited and notified. The owner hears at request time through an event in their calendar feed, the only outbound channel before v2. A grant activates only once its delay has passed and the owner's calendar feed has been fetched since the request, so a grant cannot open before the owner's calendar has received the request. Every step also lands in the in-app outbox.
 - [ ] Threat model and security design updated for live connectors, sharing and the 1.0 key scope; external security review before tagging 1.0.

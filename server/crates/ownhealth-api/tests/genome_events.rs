@@ -67,7 +67,12 @@ async fn env() -> anyhow::Result<Env> {
     let mut c = db.pool.acquire().await?;
     let fam = create_rivera_family(&mut c, "Rivera").await?;
     let raw = synthetic::alex_raw_files()?;
-    let (facts, att) = synthetic::with_files(&synthetic::alex_facts(), &rt.blobs, &raw)?;
+    let (facts, att) = synthetic::with_files(
+        &synthetic::alex_facts(),
+        &rt.blobs,
+        ownhealth_core::blobs::BlobOwner::Reference,
+        &raw,
+    )?;
     let (doc, _) = synthetic::seed_genome(
         &mut c,
         &rt.blobs,

@@ -38,6 +38,7 @@ async fn a_030_database_migrates_and_takes_decisions_with_every_state_hash_kept(
     migrate(&db.pool, &old).await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
+    // 0.3.0 had no profile keys: its files are in the plain layout
     let blobs = BlobStore::new(settings.blobs_path())?;
     let mut tx = db.pool.begin().await?;
     let family = create_rivera_family(&mut tx, "Rivera (0.3.0)").await?;

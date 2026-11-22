@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::LazyLock;
 
-use ownhealth_core::blobs::{BlobError, BlobOwner, BlobStore, LocalCopy};
+use ownhealth_core::blobs::{BlobError, BlobOwner, BlobReader, BlobStore};
 use ownhealth_core::pyjson::py_isoformat_utc;
 use ownhealth_core::{Error, Result};
 use regex::Regex;
@@ -127,8 +127,8 @@ fn contig_names(chrom: &str) -> Vec<String> {
 
 /// A raw file the dataset row names but the store lost is the server's fault, not a 404: the person
 /// gets "the server failed" and only the operator's log names the file.
-fn local_copy(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<LocalCopy> {
-    blobs.with_local_copy(owner, sha).map_err(|e| match e {
+fn raw_reader(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<BlobReader> {
+    blobs.open_seek(owner, sha).map_err(|e| match e {
         BlobError::NotFound(h) => Error::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("raw genome file {h} is missing from the blob store"),
@@ -137,16 +137,15 @@ fn local_copy(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<LocalCop
     })
 }
 
-/// A tabix reader with the local copies it reads from: they must live as long as the reader does.
+/// A tabix reader over the stored blobs, read in place: a sealed genome file is decrypted record
+/// by record as the lookup seeks, never copied whole to disk.
 struct Opened {
     vf: VcfFile,
-    _copies: [LocalCopy; 2],
 }
 
 fn open(blobs: &BlobStore, owner: BlobOwner, data: &str, index: &str) -> Result<Opened> {
-    let copies = [local_copy(blobs, owner, data)?, local_copy(blobs, owner, index)?];
-    let vf = VcfFile::open(copies[0].path(), copies[1].path())?;
-    Ok(Opened { vf, _copies: copies })
+    let vf = VcfFile::from_readers(raw_reader(blobs, owner, data)?, raw_reader(blobs, owner, index)?)?;
+    Ok(Opened { vf })
 }
 
 fn fetch(vf: &mut VcfFile, chrom: &str, start: i64, end: i64) -> Result<Vec<Record>> {

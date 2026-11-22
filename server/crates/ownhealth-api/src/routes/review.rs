@@ -285,6 +285,14 @@ async fn accept(
     };
     let mut tx = rt.pool.begin().await?;
     let found = review::get_item(&mut tx, item_id).await?;
+    // accepting a document_identity item moves its document: lock the row first, as the assign route
+    // does, so a move running at the same time commits before this one reads the owner
+    if let Some(found) = &found
+        && found.kind == "document_identity"
+        && let Some(d) = found.document_id
+    {
+        ownhealth_core::documents::lock_owner(&mut tx, d).await?;
+    }
     let item = check(&mut tx, principal, found).await?;
     if item.kind == "document_identity" {
         // accepting moves the document: the target needs the same check as POST /documents/{id}/assign
@@ -298,7 +306,15 @@ async fn accept(
             caller.require(&mut tx, &t, None, Some("import")).await?;
         }
     }
-    let created = review::accept(&mut tx, item_id, principal.user_id.unwrap_or_default(), edits.as_ref()).await?;
+    // a document_identity accept moves the document, its files with it (ingest-pdf assign_document)
+    let created = review::accept_with(
+        &mut tx,
+        &rt.blobs,
+        item_id,
+        principal.user_id.unwrap_or_default(),
+        edits.as_ref(),
+    )
+    .await?;
     audit(&mut tx, principal, &item, "review_accept").await?;
     tx.commit().await?;
     Ok(Json(

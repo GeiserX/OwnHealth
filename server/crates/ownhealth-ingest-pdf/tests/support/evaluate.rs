@@ -50,7 +50,7 @@ pub async fn import_slip(
     pdf: &[u8],
     truth: &Value,
 ) -> anyhow::Result<(Uuid, ImportSummary)> {
-    let sha = blobs.put_bytes(pdf)?;
+    let sha = blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, pdf)?;
     let person = truth["person"].as_str().unwrap_or("alex");
     let filename = format!("{name}.pdf");
     let doc = create_document(

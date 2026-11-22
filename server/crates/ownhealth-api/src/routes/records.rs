@@ -734,7 +734,8 @@ async fn add_label(
     ownhealth_core::lifecycle::lock_current(&mut tx, "medication_statement", record_id).await?;
     let blobs = rt.blobs.clone();
     let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-    let sha = tokio::task::spawn_blocking(move || blobs.put_bytes(&bytes))
+    let owner = ownhealth_core::blobs::BlobOwner::Profile(perm.profile.id);
+    let sha = tokio::task::spawn_blocking(move || blobs.put_bytes(owner, &bytes))
         .await
         .map_err(|e| ownhealth_core::Error::Other(e.into()))?
         .map_err(|e| ownhealth_core::Error::Other(e.into()))?;

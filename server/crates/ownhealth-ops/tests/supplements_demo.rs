@@ -39,7 +39,7 @@ async fn the_supplements_hook_adds_a_label_and_two_decisions_and_moves_no_state_
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
-    let blobs = BlobStore::new(settings.blobs_path())?;
+    let blobs = BlobStore::for_settings(&settings)?;
     let mut tx = db.pool.begin().await?;
     let family = create_rivera_family(&mut tx, "Rivera (supplements)").await?;
     let mut ctx = DemoContext {
@@ -134,7 +134,7 @@ async fn the_export_keeps_the_decision_and_the_link_to_the_label_photo() -> anyh
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
-    let blobs = BlobStore::new(settings.blobs_path())?;
+    let blobs = BlobStore::for_settings(&settings)?;
     let mut tx = db.pool.begin().await?;
     let family = create_rivera_family(&mut tx, "Rivera (supplements export)").await?;
     let mut ctx = DemoContext {

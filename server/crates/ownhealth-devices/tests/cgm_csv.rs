@@ -6,6 +6,7 @@ mod common;
 
 use chrono::{DateTime, TimeZone, Utc};
 use common::{Env, R};
+use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::documents::{self, StoredFile};
 use ownhealth_core::jobs;
 use ownhealth_devices::cgm_csv;
@@ -24,7 +25,7 @@ fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
 
 /// Upload one file to a profile as the app does: sniff, enqueue. Returns (kind, job id).
 async fn upload(env: &Env, slug: &str, name: &str, bytes: &[u8]) -> anyhow::Result<(String, Option<i64>)> {
-    let sha = env.blobs.put_bytes(bytes)?;
+    let sha = env.blobs.put_bytes(BlobOwner::Profile(env.fam.profile(slug)), bytes)?;
     let mut c = env.db.pool.acquire().await?;
     let out = documents::dispatch_upload(
         &mut c,
@@ -374,7 +375,7 @@ fn every_5(day: &str, h0: u32, h1: u32) -> Vec<String> {
 
 /// Store the bytes as a document of `slug` and import it with the given install time zone.
 async fn import_in_zone(env: &Env, slug: &str, bytes: &[u8], zone: Option<&str>) -> anyhow::Result<Value> {
-    let sha = env.blobs.put_bytes(bytes)?;
+    let sha = env.blobs.put_bytes(BlobOwner::Profile(env.fam.profile(slug)), bytes)?;
     let mut c = env.db.pool.acquire().await?;
     let payload = json!({
         "profile_id": env.fam.profile(slug).to_string(),
@@ -585,7 +586,7 @@ async fn a_file_cut_inside_its_last_reading_counts_it_as_cut() -> R {
 
 /// Enqueue the upload job of a stored blob as the upload route does, with the browser's zone.
 async fn upload_in_zone(env: &Env, slug: &str, name: &str, bytes: &[u8], zone: &str) -> anyhow::Result<Value> {
-    let sha = env.blobs.put_bytes(bytes)?;
+    let sha = env.blobs.put_bytes(BlobOwner::Profile(env.fam.profile(slug)), bytes)?;
     let mut c = env.db.pool.acquire().await?;
     let id = jobs::enqueue(
         &mut c,
@@ -684,7 +685,7 @@ async fn a_retraction_after_a_zone_change_reads_the_others_in_their_own_zone() -
     let env = Env::new().await?;
     // two exports read in Madrid; then the zone of a new run changes (here: none), and one is retracted
     import_in_zone(&env, "lucia", &fixture("clarity-en-mgdl.csv")?, Some("Europe/Madrid")).await?;
-    let sha = env.blobs.put_bytes(&fixture("libreview-en-mgdl.csv")?)?;
+    let sha = env.blobs.put_bytes(BlobOwner::Profile(env.fam.profile("lucia")), &fixture("libreview-en-mgdl.csv")?)?;
     let mut c = env.db.pool.acquire().await?;
     let other = ownhealth_ingest_structured::jobs::document_for(
         &mut c,

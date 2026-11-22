@@ -26,7 +26,7 @@ async fn demo() -> anyhow::Result<Demo> {
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
-    let blobs = BlobStore::new(settings.blobs_path())?;
+    let blobs = BlobStore::for_settings(&settings)?;
     let mut tx = db.pool.begin().await?;
     let family = create_rivera_family(&mut tx, "Rivera (gaps)").await?;
     let mut ctx = DemoContext {

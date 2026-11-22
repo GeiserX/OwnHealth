@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::blobs::{BlobOwner, BlobStore, sha256_hex_to_bytes};
+use crate::blobs::{BlobError, BlobOwner, BlobStore, sha256_hex_to_bytes};
 use crate::error::{Error, Result};
 use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
@@ -56,6 +56,11 @@ fn zip_has_export_xml(path: &Path) -> Option<bool> {
     Some(archive.file_names().any(|n| n.is_ok_and(|n| n.ends_with("export.xml"))))
 }
 
+/// Whether `head` starts a zip, the one kind `sniff` reads further than the first bytes of.
+pub fn is_zip(head: &[u8]) -> bool {
+    head.starts_with(b"PK\x03\x04")
+}
+
 /// Classify an upload from its name and first bytes (and, for zips, its member list).
 pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKind {
     let name = filename.to_lowercase();
@@ -72,7 +77,7 @@ pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKin
     if head.starts_with(b"SQLite format 3\0") {
         return "gadgetbridge_db";
     }
-    if head.starts_with(b"PK\x03\x04") {
+    if is_zip(head) {
         // Truncated or corrupt: refused like any unknown file.
         return match blob_path.and_then(zip_has_export_xml) {
             Some(true) => "apple_health_zip",
@@ -274,9 +279,33 @@ fn short_filename(f: Option<&str>) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// The lock an upload of `sha256` for `profile` takes shared ([`create_document`], held until its
+/// transaction ends) and the removal of that profile's copy of the bytes takes exclusive
+/// (`ownhealth_auth::household::drop_moved_copies`): the removal never runs while an upload that names
+/// the same bytes is in flight, and it sees the upload's row once it commits.
+pub async fn lock_blob(conn: &mut PgConnection, profile: Uuid, sha256: &str, shared: bool) -> Result<()> {
+    let sql = if shared {
+        "select pg_advisory_xact_lock_shared(hashtextextended($1, 0))"
+    } else {
+        "select pg_advisory_xact_lock(hashtextextended($1, 0))"
+    };
+    sqlx::query(sql)
+        .bind(format!(
+            "ownhealth.blob:{}:{}",
+            profile.simple(),
+            sha256.to_ascii_lowercase()
+        ))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Insert a document or return the existing one for the same profile and bytes.
 pub async fn create_document(conn: &mut PgConnection, d: &NewDocument<'_>) -> Result<DocumentRef> {
     let sha = sha256_hex_to_bytes(d.blob_sha256)?;
+    if let Some(p) = d.profile_id {
+        lock_blob(&mut *conn, p, d.blob_sha256, true).await?;
+    }
     let row: Option<(Uuid, String)> = sqlx::query_as(
         "select id, status from document where coalesce(profile_id, household_id) = coalesce($1, $2) and blob_sha256 = $3",
     )
@@ -390,8 +419,10 @@ pub async fn dispatch_upload_in_zone(
         let owner = BlobOwner::Profile(profile_id);
         let mut head = Vec::with_capacity(4096);
         blobs.open_seek(owner, &f.sha256)?.take(4096).read_to_end(&mut head)?;
-        let copy = blobs.with_local_copy(owner, &f.sha256)?;
-        kinds.push((f, sniff(&f.filename, &head, Some(copy.path()))));
+        let copy = is_zip(&head)
+            .then(|| blobs.with_local_copy(owner, &f.sha256))
+            .transpose()?;
+        kinds.push((f, sniff(&f.filename, &head, copy.as_ref().map(|c| c.path()))));
     }
     let has_facts = kinds.iter().any(|(_, k)| *k == "genome_facts");
     let mut items = Vec::new();
@@ -547,6 +578,93 @@ pub async fn document_is_sensitive(conn: &mut PgConnection, document_id: Uuid) -
         .fetch_one(conn)
         .await?;
     Ok(v.unwrap_or(false))
+}
+
+/// The blobs of a document that moved, and the owner they were stored for before.
+/// `ownhealth_auth::household::drop_moved_copies` removes that owner's copies once the move commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moved {
+    pub from: BlobOwner,
+    pub shas: Vec<String>,
+}
+
+/// The job that removes a moved document's copies under the profile it left. [`rekey_document`] queues
+/// it in the move's transaction, so a crash or an error after the commit leaves it to a retry.
+pub const DROP_MOVED_JOB: &str = "blobs.drop_moved";
+
+/// Lock document `document_id`'s row for a move, and return the profile it has now (None: no profile,
+/// or no such document). A move reads the owner here, before its permission check and its re-key, so
+/// two moves at once see each other's result.
+pub async fn lock_owner(conn: &mut PgConnection, document_id: Uuid) -> Result<Option<Uuid>> {
+    Ok(
+        sqlx::query_scalar::<_, Option<Uuid>>("select profile_id from document where id = $1 for update")
+            .bind(document_id)
+            .fetch_optional(conn)
+            .await?
+            .flatten(),
+    )
+}
+
+/// After document `document_id` moved from profile `from` to `to` (`None`: no profile): every blob of
+/// the document (the file, its page layers and images, its OCR layers) is stored for `to` as well, so
+/// the new profile's key opens them, and the removal of `from`'s copies is queued
+/// ([`DROP_MOVED_JOB`]). Run it in the transaction of the move, with `from` read under the document's
+/// row lock, before the commit: the re-import the move queues reads them as `to`'s.
+pub async fn rekey_document(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    document_id: Uuid,
+    from: Option<Uuid>,
+    to: Option<Uuid>,
+) -> Result<Moved> {
+    let old = BlobOwner::of_document(from, document_id);
+    if from == to {
+        return Ok(Moved {
+            from: old,
+            shas: Vec::new(),
+        });
+    }
+    let shas: Vec<String> = sqlx::query_scalar(
+        "select distinct encode(h, 'hex') from (select blob_sha256 as h from document where id = $1 \
+         union all select words_blob from document_page where document_id = $1 \
+         union all select image_blob from document_page where document_id = $1 \
+         union all select words_blob from ocr_run where document_id = $1) x where h is not null",
+    )
+    .bind(document_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let new = BlobOwner::of_document(to, document_id);
+    let blobs = blobs.clone();
+    let moved = tokio::task::spawn_blocking(move || {
+        for sha in &shas {
+            match blobs.rekey(old, new, sha) {
+                Ok(_) => {}
+                // lost before the move: nothing to copy, and the read reports it as before
+                Err(BlobError::NotFound(_)) => {
+                    tracing::warn!(%document_id, "a blob of a moved document is missing from the store");
+                }
+                Err(e) => return Err(Error::from(e)),
+            }
+        }
+        Ok(Moved { from: old, shas })
+    })
+    .await
+    .map_err(|e| Error::Other(anyhow::anyhow!("blob re-key task failed: {e}")))??;
+    if let (BlobOwner::Profile(p), false) = (moved.from, moved.shas.is_empty()) {
+        let household: Uuid = sqlx::query_scalar("select household_id from document where id = $1")
+            .bind(document_id)
+            .fetch_one(&mut *conn)
+            .await?;
+        // the household, so a retry that runs out of attempts shows in its review queue
+        enqueue(
+            &mut *conn,
+            DROP_MOVED_JOB,
+            &json!({"household_id": household, "profile_id": p, "document_id": document_id, "blobs": moved.shas}),
+            EnqueueOptions::default(),
+        )
+        .await?;
+    }
+    Ok(moved)
 }
 
 #[cfg(test)]

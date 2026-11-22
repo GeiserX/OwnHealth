@@ -95,6 +95,6 @@
 	}
 	.box.on {
 		outline-width: 3px;
-		box-shadow: 0 0 0 4px rgba(110, 168, 254, 0.25);
+		box-shadow: 0 0 0 4px rgba(60, 186, 221, 0.25);
 	}
 </style>

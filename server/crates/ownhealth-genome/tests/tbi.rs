@@ -94,7 +94,12 @@ async fn an_import_with_a_crafted_index_fails_as_invalid_and_writes_nothing() ->
             file.index = crafted_tbi(0x7fff_ffff)?;
         }
     }
-    let (facts, att) = synthetic::with_files(&synthetic::alex_facts(), &e.blobs, &raw)?;
+    let (facts, att) = synthetic::with_files(
+        &synthetic::alex_facts(),
+        &e.blobs,
+        ownhealth_core::blobs::BlobOwner::Reference,
+        &raw,
+    )?;
     let mut tx = e.db.pool.begin().await?;
     let err = match e.seed(&mut tx, "alex", &facts, &att).await {
         Err(Error::Invalid(m)) => m,

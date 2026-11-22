@@ -21,8 +21,8 @@
 	</div>
 </div>
 
-<div class="banner" style="border-color:rgba(110,168,254,.45);background:linear-gradient(90deg,rgba(110,168,254,.12),rgba(110,168,254,.03))" role="status">
-	<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 8v.5M12 11v5" /></svg>
+<div class="banner" style="border-color:rgba(60,186,221,.45);background:linear-gradient(90deg,rgba(60,186,221,.12),rgba(60,186,221,.03))" role="status">
+	<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3cbadd" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 8v.5M12 11v5" /></svg>
 	<div>
 		<b>{t('h1_img_soon')}</b>
 		<div class="muted" style="font-size:12px">{t('h1_img_d')}</div>

@@ -72,10 +72,13 @@ fn labnorte() -> Vec<u8> {
     .0
 }
 
-/// The LabNorte report imported for Alex, committed; returns the document id.
+/// The LabNorte report imported for Alex, committed, its files sealed under his key; returns the
+/// document id.
 async fn imported(a: &App) -> anyhow::Result<Uuid> {
     let pdf = labnorte();
-    let sha = a.rt.blobs.put_bytes(&pdf)?;
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(a.fam.profile("alex")), &pdf)?;
     let mut tx = a.rt.pool.begin().await?;
     let doc = create_document(
         &mut tx,
@@ -313,6 +316,16 @@ async fn tokens_need_their_scopes_and_other_households_see_nothing() -> R {
 async fn assign_and_retract() -> R {
     let a = app().await?;
     let doc = imported(&a).await?;
+    // how many of each profile's sealed files the store holds
+    let sealed = |p: Uuid| -> anyhow::Result<usize> {
+        let prefix = format!("{}/", p.simple());
+        let files = ownhealth_core::blobs::tree_files(&a.rt.settings.blobs_path())?;
+        Ok(files.keys().filter(|k| k.starts_with(&prefix)).count())
+    };
+    let (alex, lucia) = (a.fam.profile("alex"), a.fam.profile("lucia"));
+    let before = sealed(alex)?;
+    assert!(before > 1, "the report and its page layers, sealed for Alex");
+    assert_eq!(sealed(lucia)?, 0);
     let r = post(
         &a,
         "alex",
@@ -327,7 +340,22 @@ async fn assign_and_retract() -> R {
         .bind(doc)
         .fetch_one(&a.rt.pool)
         .await?;
-    assert_eq!(owner, Some(a.fam.profile("lucia")));
+    assert_eq!(owner, Some(lucia));
+    // the files moved to Lucía's key, and none stays under Alex's once the queued removal ran
+    assert_eq!(sealed(lucia)?, before);
+    drop_moved(&a).await?;
+    assert_eq!((sealed(alex)?, sealed(lucia)?), (0, before));
+    let f = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
+    assert_eq!(f.status, StatusCode::OK);
+    let sha: String = sqlx::query_scalar("select encode(blob_sha256, 'hex') from document where id = $1")
+        .bind(doc)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    // the store checks the sha256 of every copy it writes, so these are the report's own bytes
+    let theirs =
+        a.rt.blobs
+            .get_bytes(ownhealth_core::blobs::BlobOwner::Profile(lucia), &sha)?;
+    assert!(!theirs.is_empty() && f.bytes == theirs);
     let current: i64 =
         sqlx::query_scalar("select count(*) from observation where document_id = $1 and status = 'current'")
             .bind(doc)
@@ -360,7 +388,7 @@ async fn assign_and_retract() -> R {
 }
 
 async fn upload(a: &App, pdf: &[u8]) -> anyhow::Result<Value> {
-    let sha = a.rt.blobs.put_bytes(pdf)?;
+    let sha = a.rt.blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, pdf)?;
     let mut tx = a.rt.pool.begin().await?;
     let out = dispatch_upload(
         &mut tx,
@@ -457,7 +485,9 @@ async fn doc_with(a: &App, who: &str, sensitivity: &[&str]) -> anyhow::Result<Uu
     use ownhealth_core::provenance::{SrcIn, SrcRef};
     let pid = a.fam.profile(who);
     let bytes = [SLIP, format!("{sensitivity:?}").as_bytes()].concat();
-    let sha = a.rt.blobs.put_bytes(&bytes)?;
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &bytes)?;
     let mut tx = a.rt.pool.begin().await?;
     let doc = create_document(
         &mut tx,
@@ -578,12 +608,73 @@ async fn a_document_whose_file_is_gone_answers_404() -> R {
         .bind(doc)
         .fetch_one(&a.rt.pool)
         .await?;
-    assert!(a.rt.blobs.delete(&sha)?);
+    assert!(a.rt.blobs.delete(ownhealth_core::blobs::BlobOwner::Reference, &sha)?);
     let r = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
     let body = String::from_utf8_lossy(&r.bytes).into_owned();
     assert_eq!(r.status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(r.json()["detail"]["code"], "unknown", "{body}");
     assert!(!body.contains(&sha[..12]), "{body}");
+    Ok(())
+}
+
+/// A sealed file that no longer opens (a changed byte in its first record, or its last) answers
+/// 500 before any byte goes out, never a 200 that stops part way, and the body names no hash and no
+/// path.
+#[tokio::test]
+async fn a_sealed_file_that_does_not_open_answers_500_before_any_byte() -> R {
+    let a = app().await?;
+    let doc = imported(&a).await?;
+    let sha: String = sqlx::query_scalar("select encode(blob_sha256, 'hex') from document where id = $1")
+        .bind(doc)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let ok = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
+    assert_eq!(ok.status, StatusCode::OK);
+    let mut files = Vec::new();
+    let mut todo = vec![a._dir.path().join("blobs").join("enc")];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d)? {
+            let p = e?.path();
+            if p.is_dir() {
+                todo.push(p);
+            } else {
+                files.push(p);
+            }
+        }
+    }
+    // the document's file and its page images: change each the same way
+    assert!(!files.is_empty());
+    let good: Vec<Vec<u8>> = files.iter().map(std::fs::read).collect::<Result<_, _>>()?;
+    let put = |change: &dyn Fn(&mut Vec<u8>)| -> R {
+        for (f, g) in files.iter().zip(&good) {
+            let mut bytes = g.clone();
+            change(&mut bytes);
+            std::fs::set_permissions(f, std::os::unix::fs::PermissionsExt::from_mode(0o640))?;
+            std::fs::write(f, &bytes)?;
+        }
+        Ok(())
+    };
+    let first_record = |b: &mut Vec<u8>| b[ownhealth_core::keys::HEADER + 3] ^= 1;
+    let last_tag = |b: &mut Vec<u8>| {
+        let at = b.len() - 2;
+        b[at] ^= 1;
+    };
+    for (what, change) in [
+        ("first record", &first_record as &dyn Fn(&mut Vec<u8>)),
+        ("last tag", &last_tag),
+    ] {
+        put(change)?;
+        let r = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
+        let body = String::from_utf8_lossy(&r.bytes).into_owned();
+        assert_eq!(r.status, StatusCode::INTERNAL_SERVER_ERROR, "{what}: {body}");
+        assert_eq!(r.json()["detail"]["code"], "internal", "{body}");
+        assert!(!body.contains(&sha[..12]) && !body.contains("blobs"), "{body}");
+    }
+    put(&|_| {})?;
+    assert_eq!(
+        get(&a, "alex", &format!("/documents/{doc}/file")).await?.bytes,
+        ok.bytes
+    );
     Ok(())
 }
 
@@ -607,5 +698,158 @@ async fn document_bytes_are_never_kept_in_the_browser_cache() -> R {
         .unwrap_or_default();
     assert_eq!(len, r.bytes.len().to_string());
     assert!(r.bytes.starts_with(SLIP));
+    Ok(())
+}
+
+/// How many of `p`'s sealed files the store holds.
+fn sealed_of(a: &App, p: Uuid) -> anyhow::Result<usize> {
+    let prefix = format!("{}/", p.simple());
+    let files = ownhealth_core::blobs::tree_files(&a.rt.settings.blobs_path())?;
+    Ok(files.keys().filter(|k| k.starts_with(&prefix)).count())
+}
+
+/// Run the queued removals of moved documents' old copies.
+async fn drop_moved(a: &App) -> anyhow::Result<usize> {
+    ownhealth_auth::register();
+    let kinds = ["blobs.drop_moved".to_string()];
+    Ok(ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 10, Some(&kinds)).await?)
+}
+
+/// The move commits with a queued job that removes the old profile's copies, so a crash or an
+/// error right after the commit leaves them to a retry, never under the old key for good.
+#[tokio::test]
+async fn a_move_queues_the_removal_of_the_old_copies_with_its_commit() -> R {
+    let a = app().await?;
+    let doc = imported(&a).await?;
+    let (alex, lucia) = (a.fam.profile("alex"), a.fam.profile("lucia"));
+    let before = sealed_of(&a, alex)?;
+    let r = post(
+        &a,
+        "alex",
+        &format!("/documents/{doc}/assign"),
+        json!({"profile": "lucia"}),
+    )
+    .await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json());
+    let queued: Vec<Value> =
+        sqlx::query_scalar("select payload from job where kind = 'blobs.drop_moved' and state = 'queued'")
+            .fetch_all(&a.rt.pool)
+            .await?;
+    assert_eq!(queued.len(), 1, "no retry of the old copies' removal was queued");
+    assert_eq!(queued[0]["profile_id"], json!(alex));
+    assert_eq!(drop_moved(&a).await?, 1);
+    assert_eq!((sealed_of(&a, alex)?, sealed_of(&a, lucia)?), (0, before));
+    Ok(())
+}
+
+/// Two moves of one document at once: the second reads the owner the first left, under the row
+/// lock, so it copies from that profile and removes that profile's copies, not the stale owner's.
+#[tokio::test]
+async fn a_move_reads_the_owner_under_the_document_lock() -> R {
+    let a = app().await?;
+    let doc = imported(&a).await?;
+    let (alex, lucia) = (a.fam.profile("alex"), a.fam.profile("lucia"));
+    let before = sealed_of(&a, alex)?;
+    // the first move holds the document row while the second request arrives
+    let mut first = a.rt.pool.begin().await?;
+    ownhealth_ingest_pdf::assign_document(&mut first, &a.rt.blobs, doc, lucia, a.fam.user("alex"), None).await?;
+    let path = format!("/documents/{doc}/assign");
+    let (second, committed) = tokio::join!(post(&a, "alex", &path, json!({"profile": "alex"})), async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        first.commit().await
+    });
+    committed?;
+    let second = second?;
+    assert_eq!(second.status, StatusCode::OK, "{}", second.json());
+    drop_moved(&a).await?;
+    assert_eq!(
+        sealed_of(&a, lucia)?,
+        0,
+        "Lucía keeps copies of a document she no longer holds"
+    );
+    assert_eq!(sealed_of(&a, alex)?, before);
+    let f = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
+    assert_eq!(f.status, StatusCode::OK);
+    Ok(())
+}
+
+/// Accepting a document_identity item moves the document like the assign route does: the new
+/// profile opens its files, and the old profile's copies go.
+#[tokio::test]
+async fn accepting_a_document_identity_moves_the_files_to_the_new_key() -> R {
+    let a = app().await?;
+    let doc = imported(&a).await?;
+    let (alex, lucia) = (a.fam.profile("alex"), a.fam.profile("lucia"));
+    let before = sealed_of(&a, alex)?;
+    let mut c = a.rt.pool.acquire().await?;
+    let item = ownhealth_core::review::create_item(
+        &mut c,
+        &ownhealth_core::review::ReviewItemIn {
+            kind: "document_identity".into(),
+            household_id: Some(a.fam.household_id),
+            profile_id: Some(alex),
+            document_id: Some(doc),
+            payload: json!({"suggested_profile_id": lucia.to_string()}),
+            reasons: vec!["name_mismatch".into()],
+            ..Default::default()
+        },
+    )
+    .await?;
+    drop(c);
+    let r = post(&a, "alex", &format!("/review/{item}/accept"), json!({})).await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json());
+    drop_moved(&a).await?;
+    assert_eq!((sealed_of(&a, alex)?, sealed_of(&a, lucia)?), (0, before));
+    let sha: String = sqlx::query_scalar("select encode(blob_sha256, 'hex') from document where id = $1")
+        .bind(doc)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    assert!(
+        !a.rt
+            .blobs
+            .get_bytes(ownhealth_core::blobs::BlobOwner::Profile(lucia), &sha)?
+            .is_empty()
+    );
+    Ok(())
+}
+
+/// The old profile's copy is removed only once no document of that profile names the same bytes,
+/// checked under a lock an upload of those bytes takes too: an upload still in flight keeps it.
+#[tokio::test]
+async fn removing_an_old_copy_waits_for_an_upload_of_the_same_bytes() -> R {
+    let a = app().await?;
+    let lucia = a.fam.profile("lucia");
+    let bytes = b"%PDF-1.7 synthetic LabNorte report Lucia uploads again".to_vec();
+    let owner = ownhealth_core::blobs::BlobOwner::Profile(lucia);
+    // her copy from a document that moved to someone else
+    let sha = a.rt.blobs.put_bytes(owner, &bytes)?;
+    // her new upload of the same bytes: the row is written, not committed yet
+    let mut up = a.rt.pool.begin().await?;
+    create_document(
+        &mut up,
+        &NewDocument::upload(
+            a.fam.household_id,
+            Some(lucia),
+            &sha,
+            "application/pdf",
+            bytes.len() as i64,
+        ),
+    )
+    .await?;
+    let mut c = a.rt.pool.acquire().await?;
+    let moved = ownhealth_core::documents::Moved {
+        from: owner,
+        shas: vec![sha.clone()],
+    };
+    let (dropped, committed) = tokio::join!(
+        ownhealth_auth::household::drop_moved_copies(&mut c, &a.rt.blobs, moved),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            up.commit().await
+        }
+    );
+    committed?;
+    assert_eq!(dropped.map_err(|e| anyhow::anyhow!("{e}"))?, 0);
+    assert_eq!(a.rt.blobs.get_bytes(owner, &sha)?, bytes, "the upload lost its file");
     Ok(())
 }

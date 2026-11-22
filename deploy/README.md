@@ -33,7 +33,7 @@ openssl rand -base64 32 | tr -d '\n' > secrets/db_password
 openssl rand -base64 32 | tr -d '\n' > secrets/app_db_password
 openssl rand -base64 48 | tr -d '\n' > secrets/secret_key
 openssl rand -base64 32 | tr -d '\n' > secrets/restic_password
-openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key     # seals inbox passwords and tokens
+openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key     # seals the profiles' files and inbox secrets
 chmod 644 secrets/*                           # the containers run as their own users; the folder stays 700
 mkdir -m 755 secrets/imaging                  # the app mounts it; the imaging profile's password goes here
 
@@ -47,7 +47,7 @@ Open `https://<OWNHEALTH_DOMAIN>` and create the first account with a passkey. W
 
 **Store the restic password in your password manager now.** The backup is encrypted with it and it is not inside the backup. Without it, the backup cannot be read.
 
-**Store `secrets/secrets_key` there too.** It encrypts the passwords and tokens OwnHealth keeps for its inboxes (an IMAP password, a Paperless or Nightscout token, PDF passwords). The backup holds them only in encrypted form. Restored with another key, those inboxes stop until you enter their secrets again.
+**Store `secrets/secrets_key` there too.** Each profile's documents and genome files are encrypted under that profile's own key, and those keys are encrypted under this one. It also encrypts the passwords and tokens OwnHealth keeps for its inboxes (an IMAP password, a Paperless or Nightscout token, PDF passwords). The backup holds all of them only in encrypted form, so without this key the backup cannot be read. OwnHealth refuses to start without it.
 
 **HTTPS.** Caddy gets a certificate on its own when `OWNHEALTH_DOMAIN` is a public DNS name. For a name only your LAN knows, put `tls internal` in the site block of the Caddyfile and trust Caddy's root certificate on your devices, or use a Caddy build with your DNS provider's challenge plugin. Passkeys need HTTPS on a real name, so plain HTTP on an IP address does not work past the first look.
 
@@ -159,9 +159,9 @@ A push inbox has no schedule, so OwnHealth never marks it stale; the second rule
 
 `ownhealth backup` writes three parts into one directory.
 
-- `db.dump`: `pg_dump -Fc` of the database.
-- `blobs/`: the original documents and genome files, hard-linked from the data volume, so the staging copy costs no space.
-- `manifest.json`: app version, migrations, row count per table, the list of blob hashes, the `state_hash` of every profile, and the head of the audit log (`audit_chain`: the number and hash of its newest entry, and how far the hash chain holds).
+- `db.dump`: `pg_dump -Fc` of the database. It includes each profile's key, encrypted under `secrets/secrets_key`. So a backup taken before you delete a profile still opens that profile's files, until retention removes the snapshot.
+- `blobs/`: the original documents and genome files, hard-linked from the data volume, so the staging copy costs no space. A profile's files stay encrypted under its key, in `blobs/enc/`.
+- `manifest.json`: app version, migrations, row count per table, the list of blob hashes, the hash of each encrypted file's bytes, the fingerprint of the secrets key (never the key), the `state_hash` of every profile, and the head of the audit log (`audit_chain`: the number and hash of its newest entry, and how far the hash chain holds).
 
 The dump, the row counts, the state hashes and the audit head come from one database snapshot. A backup taken while someone imports a lab report is still consistent.
 
@@ -187,7 +187,7 @@ A backup that was never restored counts as missing. `restic/restore-test.sh` pro
 
 1. restic restores the snapshot into `/data/backups/restore`.
 2. `ownhealth verify-restore` loads the dump into a scratch database `<db>_restore_check`.
-3. It compares the row count of every table with the manifest, hashes every blob again, rebuilds the state of every profile and compares each `state_hash` with the manifest. It checks the restored audit log too: it must end at the head the manifest recorded, and hold as far as it held then.
+3. It compares the row count of every table with the manifest, hashes every blob again, rebuilds the state of every profile and compares each `state_hash` with the manifest. An encrypted file the manifest does not list counts as corrupt. It opens every profile's key with the configured secrets key (`keys` in the report). It checks the restored audit log too: it must end at the head the manifest recorded, and hold as far as it held then.
 4. It drops the scratch database and the restored files.
 
 It prints a JSON report and exits 1 on any difference.
@@ -200,7 +200,8 @@ It prints a JSON report and exits 1 on any difference.
   "profiles": {
     "2f42707f-20c9-406c-b04a-d17c398b68a6": {"expected": "sha256:5c61…", "actual": "sha256:5c61…", "ok": true}
   },
-  "blobs": {"checked": 27, "missing": [], "corrupt": []}
+  "blobs": {"checked": 27, "missing": [], "corrupt": []},
+  "keys": {"checked": 4, "failed": [], "ok": true}
 }
 ```
 
@@ -219,7 +220,7 @@ docker compose up -d db
 docker compose up -d
 ```
 
-`restore.sh` runs in a one-off admin container before the app starts. It refuses a database that already has tables, so it cannot overwrite a running instance. After loading the dump and the blobs it rebuilds every profile's state and compares the `state_hash` with the manifest; the same hash means the restored data is the data you backed up. It exits 1 if anything differs. When everything matches and the backup's audit log held, it sets the audit anchor to the head of that backup (`audit_anchor` in its report), so the audit page and the next backup compare against the log as restored. It checks the anchor folder as a backup does: when the folder or file is a symlink, or another user or group may write it, the restore still succeeds but sets no anchor, and `audit_anchor_error` in its report says why.
+`restore.sh` runs in a one-off admin container before the app starts. It refuses a database that already has tables, so it cannot overwrite a running instance. It needs the secrets key the backup was made with: with another key, or none, it stops before it loads anything and names the fingerprint it expected. After loading the dump and the blobs it rebuilds every profile's state and compares the `state_hash` with the manifest; the same hash means the restored data is the data you backed up. It exits 1 if anything differs. When everything matches and the backup's audit log held, it sets the audit anchor to the head of that backup (`audit_anchor` in its report), so the audit page and the next backup compare against the log as restored. It checks the anchor folder as a backup does: when the folder or file is a symlink, or another user or group may write it, the restore still succeeds but sets no anchor, and `audit_anchor_error` in its report says why.
 
 Restore with the OwnHealth version that made the backup (`app_version` in the manifest), then upgrade. A newer rule pack can change a `state_hash` on purpose, and the check would report it as a difference.
 
@@ -241,12 +242,34 @@ Migrations are forward-only and run at start, in the `admin` service, before the
 
 **The imaging folder (from 1.0).** The new `compose.homelab.yaml` mounts `secrets/imaging` into the app, with the `imaging` profile on or off. Create the folder before the first `docker compose up -d` with that file: `mkdir -m 755 secrets/imaging`. If Docker started first, it made the folder as root: `sudo chown "$(id -u):$(id -g)" secrets/imaging && chmod 755 secrets/imaging`. To turn imaging on, follow the comment above the `orthanc` service in `compose.homelab.yaml`: it writes `secrets/imaging/orthanc_password` with mode 644.
 
+**The secrets key (from 1.0).** OwnHealth now encrypts each profile's documents and genome files, so every command except `migrate` and `healthcheck` refuses to start without `OWNHEALTH_SECRETS_KEY` and prints one line that says how to make one. Keep the key you have: it already encrypts your inbox secrets, and a new one would lock them.
+
+- Homelab: the new `compose.homelab.yaml` gives `secrets/secrets_key` to `admin` and `ocr` as well as the app (backups and restores open the encrypted files). The file exists since 0.3.0, so take the new compose file and nothing else changes.
+- Quickstart (`compose.yaml`): the key now comes from the file `secrets/secrets_key`, never from `.env`. These steps keep a key file you already have, move the value from `.env` when there is no file, and make a new key only when neither has one. Then delete the `OWNHEALTH_SECRETS_KEY=` line from `.env`:
+
+```sh
+mkdir -p -m 700 secrets
+if test -s secrets/secrets_key; then
+  echo "secrets/secrets_key is there: keeping it"
+elif grep -q '^OWNHEALTH_SECRETS_KEY=.' .env; then
+  sed -n 's/^OWNHEALTH_SECRETS_KEY=//p' .env | tr -d '\n' > secrets/secrets_key
+else
+  openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key   # neither had a key
+fi
+chmod 644 secrets/secrets_key
+```
+
+If OwnHealth then stops with "does not open ... of the ... profile keys", the key is not the one the install was made with. Nothing was changed: put the original key back in `secrets/secrets_key` (from the old `.env`, or from the copy you keep with the backups) and start again. A new key never opens files already stored.
+
+Files stored before the upgrade stay where they are and open as before; files stored after it are encrypted. A later release adds a job you start yourself that encrypts the older files too. Take a backup after the upgrade and keep the key next to the restic password.
+
 **To 0.4.0.** After the backup, set `admin` and `app` to `drumsergio/ownhealth:0.4.0` and `ocr` to `drumsergio/ownhealth:0.4.0-ocr`; nothing else in the compose files changes. Rule pack 0.2.0 moves every profile's `state_hash` once, so restore a backup made before the upgrade with 0.3.0, as above. For the same reason, `restore-test.sh` on a snapshot made before the upgrade reports every profile's `state_hash` as different; run `./deploy/restic/backup.sh` once after the upgrade, so the restore test checks a 0.4.0 snapshot. A household with a genome starts downloading NCBI's weekly ClinVar file (about 200 MB, no personal data in the request); turn it off in Settings, or set a local file path on a server without internet.
 
 **To 0.3.0.** Take the new `compose.homelab.yaml` (it adds the `ocr` worker, the inbox folder and the `secrets_key` secret), then before `docker compose up -d`:
 
 ```sh
-openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key && chmod 644 secrets/secrets_key
+test -s secrets/secrets_key || openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key   # keep a key you have
+chmod 644 secrets/secrets_key
 mkdir -p inbox && sudo chown 10001:10001 inbox
 ```
 
