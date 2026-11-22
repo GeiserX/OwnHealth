@@ -67,7 +67,8 @@
 //! again never holds the row while it waits for a move or a retraction that holds the lock.
 //! A moved export is imported again on its new profile (`import.cgm_csv` of the stored document).
 //! A run that waited for the lock while a move committed takes the new owner's lock before it reads or
-//! writes anything.
+//! writes anything. A move's run for a profile the export has left since (it moved on before the run
+//! began) reads nothing and returns no details: the later move queued the new owner's own run.
 //!
 //! Low and High rows count toward [`MAX_READINGS`], and only dates from 2000 on decide the order of day
 //! and month.
@@ -897,19 +898,23 @@ pub async fn import_cgm_csv(
     source_id: Option<Uuid>,
     zone: Option<&str>,
 ) -> Result<(ImportSummary, Value)> {
-    import_in(conn, blobs, document_id, source_id, Read::Upload(zone)).await
+    import_in(conn, blobs, document_id, source_id, Read::Upload(zone), None).await
 }
 
-/// Import a stored CGM export again (a retraction of another export queued it), in the zone its file
-/// was first read in (`flags.cgm_csv.timezone`); `fallback` for a file never read.
+/// Import a stored CGM export again (a retraction of another export queued it, or a move), in the zone
+/// its file was first read in (`flags.cgm_csv.timezone`); `fallback` for a file never read. `profile` is
+/// the profile a move queued the run for: when the export has moved on to another profile since, the run
+/// reads nothing and returns no details (its result shows to those who read `profile`), and the run the
+/// later move queued for the new owner imports it.
 pub async fn import_cgm_csv_again(
     conn: &mut PgConnection,
     blobs: &BlobStore,
     document_id: Uuid,
     source_id: Option<Uuid>,
     fallback: Option<&str>,
+    profile: Option<Uuid>,
 ) -> Result<(ImportSummary, Value)> {
-    import_in(conn, blobs, document_id, source_id, Read::Again(fallback)).await
+    import_in(conn, blobs, document_id, source_id, Read::Again(fallback), profile).await
 }
 
 /// The zone a file was read in before (`flags.cgm_csv.timezone`), as Postgres knows it now
@@ -961,6 +966,7 @@ async fn import_in(
     document_id: Uuid,
     source_id: Option<Uuid>,
     read: Read<'_>,
+    queued_for: Option<Uuid>,
 ) -> Result<(ImportSummary, Value)> {
     // one CGM import of a profile at a time: a run that replaces its readings and queues the others
     // again never interleaves with another's run (retract::lock_exports). A move that committed while
@@ -982,6 +988,16 @@ async fn import_in(
             _ => break row,
         }
     };
+    if let Some(p) = queued_for
+        && profile_id != Some(p)
+    {
+        // a move's run, for a profile the export has left since: its result shows to those who read
+        // that profile, so it reads nothing of the new owner's (no counts, no duplicates against its
+        // readings); the move that took the export there queued the new owner's own run
+        let mut s = ImportSummary::new(document_id.to_string());
+        s.reasons.insert("moved".into(), 1);
+        return Ok((s, Value::Null));
+    }
     if status != "active" {
         // retracted while its import (again) waited in the queue: it brings nothing back
         let mut s = ImportSummary::new(document_id.to_string());
@@ -1175,7 +1191,7 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     let server = std::env::var("OWNHEALTH_TIMEZONE").ok();
     let (server, browser) = known_zones(&mut tx, server.as_deref(), job.str("timezone")).await?;
     let done = if stored {
-        import_cgm_csv_again(&mut tx, &ctx.blobs, doc, source_id, server.as_deref()).await
+        import_cgm_csv_again(&mut tx, &ctx.blobs, doc, source_id, server.as_deref(), profile).await
     } else {
         let zone = zone_choice(server.as_deref(), browser.as_deref());
         import_cgm_csv(&mut tx, &ctx.blobs, doc, source_id, zone).await

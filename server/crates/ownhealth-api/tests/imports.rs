@@ -933,6 +933,75 @@ async fn moving_a_cgm_export_while_its_import_runs_waits_for_the_import() -> R {
     Ok(())
 }
 
+/// An export that moved on before the job of its first move ran (Lucía to Alex, then back to Lucía): that
+/// job is Alex's (its payload names her, and /jobs shows its result to those who read Alex's wearables),
+/// so it reads nothing of the export, now Lucía's, and its result counts none of Lucía's readings. The
+/// job of the second move imports the export for Lucía.
+#[tokio::test]
+async fn the_job_of_a_move_the_export_has_left_reads_nothing_of_its_new_owner() -> R {
+    let a = app().await?;
+    ownhealth_devices::register();
+    let kinds = ["import.cgm_csv".to_string()];
+    let (alex, lucia) = (a.family.profile("alex"), a.family.profile("lucia"));
+    // Lucía holds another export with the same reading, and the export that moves
+    let longer = [CLARITY, b"2,2026-11-14T20:05:17,EGV,,,,iOS G7,121,,,,,3456300,7Q2RLX\n"].concat();
+    for (name, bytes) in [("longer.csv", longer.as_slice()), ("clarity.csv", CLARITY)] {
+        let (s, v) = a
+            .upload(
+                "alex",
+                &[("profile", "lucia"), ("timezone", "Europe/Madrid")],
+                &[(name, bytes)],
+            )
+            .await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?;
+    }
+    let doc: uuid::Uuid =
+        sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'clarity.csv'")
+            .bind(lucia)
+            .fetch_one(&a.rt.pool)
+            .await?;
+    // two moves before any job runs: to Alex, then back to Lucía
+    let path = format!("/documents/{doc}/assign");
+    for to in ["alex", "lucia"] {
+        let (s, v) = a.post("alex", &path, Some(json!({"profile": to}))).await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+    }
+    ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?;
+    let result = |profile: uuid::Uuid| {
+        let a = &a;
+        async move {
+            let r: (String, serde_json::Value) = sqlx::query_as(
+                "select state, coalesce(result, 'null') from job where kind = 'import.cgm_csv' \
+                 and payload->>'document_id' = $1 and payload->>'profile_id' = $2",
+            )
+            .bind(doc.to_string())
+            .bind(profile.to_string())
+            .fetch_one(&a.rt.pool)
+            .await?;
+            anyhow::Ok(r)
+        }
+    };
+    let (state, moved) = result(alex).await?;
+    assert_eq!(state, "done", "{moved}");
+    assert_eq!(moved["cgm_csv"], serde_json::Value::Null, "{moved}");
+    assert_eq!(
+        (&moved["accepted"], &moved["reasons"]),
+        (&json!(0), &json!({"moved": 1})),
+        "{moved}"
+    );
+    let (state, back) = result(lucia).await?;
+    assert_eq!(state, "done", "{back}");
+    assert_eq!(back["cgm_csv"]["duplicates"], json!(1), "{back}");
+    let (owner, imported): (Option<uuid::Uuid>, bool) =
+        sqlx::query_as("select profile_id, flags ? 'cgm_csv' and flags ? 'import' from document where id = $1")
+            .bind(doc)
+            .fetch_one(&a.rt.pool)
+            .await?;
+    assert_eq!((owner, imported), (Some(lucia), true));
+    Ok(())
+}
+
 /// The same bytes stored before as a document of another type (a CSV kept as a record), then uploaded as
 /// a CGM export: the CGM import attaches no reading to that row and says why. A document of another type
 /// that carries CGM import flags (one stored before this rule) still needs read:wearables to be listed,

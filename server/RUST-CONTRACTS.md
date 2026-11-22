@@ -520,7 +520,7 @@ hae::import_push(conn, &BlobStore, &Source, body) -> Result<RunOutcome>
 gadgetbridge job "import.gadgetbridge" (core sniffs "SQLite format 3\0" as gadgetbridge_db)
 cgm_csv job "import.cgm_csv" (core sniffs the header row as libreview_csv or dexcom_clarity_csv; v1.0 slice 28)
 cgm_csv::import_cgm_csv(conn, &BlobStore, document_id, source_id, zone) -> Result<(ImportSummary, Value)>   // an upload; another zone replaces the file's readings
-cgm_csv::import_cgm_csv_again(conn, &BlobStore, document_id, source_id, fallback) -> Result<(ImportSummary, Value)>   // in the file's own zone
+cgm_csv::import_cgm_csv_again(conn, &BlobStore, document_id, source_id, fallback, profile) -> Result<(ImportSummary, Value)>   // in the file's own zone; nothing for a `profile` the export has left
 nightscout::poll_nightscout(JobContext, Source)          // poller "nightscout"
 fit job "import.fit" (core sniffs the .FIT header, gzipped or not, as fit or fit_gz; v1.0 slice 29)
 fit::import_fit(conn, &BlobStore, document_id, source_id) -> Result<(ImportSummary, Value)>
