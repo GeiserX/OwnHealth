@@ -512,6 +512,20 @@ export function nearDuplicateOf<T extends { kind: string; document_id: string | 
 	return items.find((i) => i.kind === 'near_duplicate' && i.document_id === documentId && (i.status ?? 'open') === 'open') ?? null;
 }
 
+/**
+ * A connector pull's grouped item (fhir_unmapped_summary): the resource type, how many came, and the
+ * connection's name. Null for any other item, or when the payload does not say a type and a count.
+ */
+export function unmappedSummary(item: { kind: string; payload: Record<string, unknown> }): { type: string; count: number; source: string } | null {
+	if (item.kind !== 'fhir_unmapped_summary') return null;
+	const p = item.payload;
+	const type = typeof p.resource_type === 'string' ? p.resource_type : '';
+	const count = typeof p.count === 'number' && Number.isInteger(p.count) && p.count > 0 ? p.count : 0;
+	if (!type || !count) return null;
+	const label = (p.source as { label?: unknown } | null | undefined)?.label;
+	return { type, count, source: typeof label === 'string' ? label : '' };
+}
+
 // ---------------------------------------------------------------- OAuth ----
 
 /** Nothing is pre-checked beyond read:summary (mcp.md 2.2), and no profile is pre-checked. */

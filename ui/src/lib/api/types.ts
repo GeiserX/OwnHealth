@@ -107,7 +107,8 @@ export interface ReviewItem {
 		| 'pending_document'
 		| 'restore_check_failed'
 		| 'near_duplicate'
-		| 'encrypted_document';
+		| 'encrypted_document'
+		| 'fhir_unmapped_summary';
 	profile_id: Uuid | null;
 	status: 'open' | 'accepted' | 'rejected' | 'dismissed';
 	reasons: string[];

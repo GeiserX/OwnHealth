@@ -23,7 +23,7 @@
 	import type { InboxSource } from '#lib/api/inbox';
 	import AgentContext from '#lib/components/inbox/AgentContext.svelte';
 	import ProposalRows from '#lib/components/inbox/ProposalRows.svelte';
-	import { inboxSummary, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding } from '#lib/logic/inbox';
+	import { inboxSummary, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, unmappedSummary } from '#lib/logic/inbox';
 	import { ApiError } from '#lib/api/core';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import PageHeader from '#lib/components/PageHeader.svelte';
@@ -258,7 +258,7 @@
 		{ k: 'i2_in_lab', d: latest('import.pdf'), doc: latestDoc('lab_report'), n: count('candidate_row', 'document_identity', 'amended_report', 'pending_document') },
 		// An Apple Health export goes straight in; nothing from it waits for review.
 		{ k: 'i2_in_apple', d: latest('import.apple_health'), doc: (queue.data?.docs ?? []).find((x) => x.flags?.apple_health) ?? null, n: 0 },
-		{ k: 'i2_in_fhir', d: latest('import.fhir_bundle'), n: count('fhir_unmapped') },
+		{ k: 'i2_in_fhir', d: latest('import.fhir_bundle'), n: count('fhir_unmapped', 'fhir_unmapped_summary') },
 		{ k: 'i2_in_genome', d: latest('import.genome_facts'), doc: latestDoc('genomics'), n: count('genome_reinterpretation') },
 		{ k: 'i2_in_agent', d: null, n: count('agent_proposal'), sub: 'write:propose' },
 	]);
@@ -293,6 +293,9 @@
 			const label = (p.src as { label?: string } | undefined)?.label;
 			if (label) return String(label);
 		}
+		// A connector pull's resources of one type we do not show yet: one line with their count.
+		const grouped = unmappedSummary(i);
+		if (grouped) return tp('i2_fus_t', grouped.count, { type: grouped.type, source: grouped.source || '—' });
 		// A scan's chip already says what it is; the line names the file.
 		if (i.kind === 'pending_document' && i.document_id && docName(i.document_id)) return docName(i.document_id);
 		return t('i2_kind_' + i.kind);
@@ -532,6 +535,7 @@
 							{:else}
 								<div>{it.kind === 'agent_proposal' ? '◆ ' : ''}{otherTitle(it)}</div>
 								{#if it.kind === 'fhir_unmapped' && it.reasons.length}<div style="font-size:11.5px;color:var(--watch)">{reasonsText(it)}</div>{/if}
+								{#if it.kind === 'fhir_unmapped_summary'}<div class="dim" style="font-size:11.5px">{t('i2_fus_d')}</div>{/if}
 								{#if prows}
 									<ProposalRows rows={prows} {busy} documentId={it.document_id} onaccept={(edits) => act(() => acceptReview(it.id, edits))} onreject={() => act(() => rejectReview(it.id, 'rejected in review'))} />
 								{:else if otherText(it)}<pre class="p2untrusted" style="margin-top:4px">{otherText(it)}</pre>{/if}
@@ -551,6 +555,10 @@
 									<button class="btn sm pri" onclick={() => enter(it.id)} aria-expanded="false">{t('me_enter')}</button>
 								{/if}
 								<button class="btn sm no" onclick={() => (confirmDismiss = it.id)} disabled={busy}>{t('i2_dismiss')}</button>
+							{:else if it.kind === 'fhir_unmapped_summary'}
+								<!-- the pulled bundle, through the document route that checks this profile like the queue does -->
+								{#if it.document_id}<a class="btn sm" href={documentFileUrl(it.document_id)} target="_blank" rel="noopener">{t('i2_fus_open')}</a>{/if}
+								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>
 							{:else if (it.kind === 'agent_proposal' && !prows) || it.kind === 'fhir_unmapped'}
 								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
 								<button class="btn sm no" onclick={() => act(() => rejectReview(it.id, 'rejected in review'))} disabled={busy}>{t('i2_reject')}</button>
