@@ -50,14 +50,29 @@ function secretsOf(link: string, pin?: string): { all: string[]; key: string; id
 	return { all, key: p.key, id };
 }
 
-/** No secret of the link in a request URL (but the viewer navigations the test makes itself, and
- * the manifest POST the viewer makes by design), nor in the OwnHealth page's console, history or
- * storage once the person left the page; the viewer's console holds neither the PIN nor the key. */
+/** The requests that carry a link's pieces by design: the viewer navigations the test makes (the
+ * viewer's own page, the link after '#'), and the viewer's manifest POST and file GETs to the app's
+ * own SHL endpoint, on its exact origin and path. A request anywhere else is a leak. */
+function exempt(u: string, manifest: string): boolean {
+	if (u.startsWith(`${VIEWER}/#`)) return true;
+	const url = new URL(u);
+	const m = new URL(manifest);
+	if (url.origin !== m.origin || url.search || url.hash) return false;
+	const file = `${m.pathname}/file/`;
+	return url.pathname === m.pathname || (url.pathname.startsWith(file) && /^[A-Za-z0-9_-]{43}$/.test(url.pathname.slice(file.length)));
+}
+
+/** No secret of the link in a request URL (but the exempt ones above), nor in the OwnHealth page's
+ * console, history or storage once the person left the page; the viewer's console holds neither the
+ * PIN nor the key. */
 async function assertNoLeak(page: Page, link: string, pin?: string) {
 	const { all, key, id } = secretsOf(link, pin);
+	const manifest = payload(link).url;
 	const has = (s: string, list: string[]) => list.some((x) => x && s.includes(x));
-	const own = (u: string) => u.startsWith(`${VIEWER}/#`) || u.endsWith(`/api/shl/${id}`) || u.includes(`/api/shl/${id}/file/`);
-	expect(seen.urls.filter((u) => !own(u) && has(u, all))).toEqual([]);
+	const leaked = (urls: string[]) => urls.filter((u) => !exempt(u, manifest) && has(u, all));
+	// the control: the manifest id sent to another origin is a leak
+	expect(leaked([`https://collector.invalid/api/shl/${id}`])).toHaveLength(1);
+	expect(leaked(seen.urls)).toEqual([]);
 	expect(seen.urls.filter((u) => has(u, [key, ...(pin ? [pin] : [])]))).toEqual([]);
 	expect(seen.appLogs.filter((l) => has(l, all))).toEqual([]);
 	expect(seen.viewerLogs.filter((l) => has(l, [key, ...(pin ? [pin] : [])]))).toEqual([]);
@@ -250,6 +265,27 @@ test('control: the same link with a wrong key shows the viewer error, never the 
 	await openInViewer(viewer, wrong);
 	await expect(viewer.getByText(/decrypt|operation failed/i)).toBeVisible();
 	await expect(viewer.getByText('Alex Rivera')).toHaveCount(0);
+});
+
+test('control: the leak check exempts only the viewer page and the exact SHL endpoint of the app', async ({ baseURL }) => {
+	const id = 'a'.repeat(43);
+	const manifest = new URL(`/api/shl/${id}`, baseURL).href;
+	const file = `${manifest}/file/${'b'.repeat(43)}`;
+	expect(exempt(manifest, manifest)).toBe(true);
+	expect(exempt(file, manifest)).toBe(true);
+	expect(exempt(`${VIEWER}/#shlink:/x`, manifest)).toBe(true);
+	const other = new URL(manifest);
+	other.port = String(Number(other.port) + 1);
+	for (const u of [
+		`https://collector.invalid/api/shl/${id}`,
+		`https://collector.invalid/api/shl/${id}/file/${'b'.repeat(43)}`,
+		other.href,
+		`${manifest}?copy=1`,
+		new URL(`/elsewhere/api/shl/${id}`, baseURL).href,
+		`${manifest}/file/${'b'.repeat(43)}/more`,
+		`${VIEWER}/collect?u=${id}`
+	])
+		expect(exempt(u, manifest), u).toBe(false);
 });
 
 test('a viewer of a profile gets no form, the server refuses a link anyway, and a made link leaves with the profile', async ({ page, request }) => {

@@ -158,14 +158,23 @@ test('qrPath draws one rectangle per run of dark modules, inside the quiet zone'
 const UPSTREAM = '239c01a99206650266402e8fe5dd34739e7d4e7190df215412fa0d3e2365afa2';
 const vendored = readFileSync(new URL('../src/routes/links/qrcodegen.ts', import.meta.url), 'utf8');
 
-test('qrcodegen.ts is the upstream file plus `export` on its three namespaces', () => {
-	const lines = vendored.split('\n');
+/** The file as upstream ships it, whatever line endings the checkout gave it (git may write CRLF). */
+function upstreamOf(text: string): { header: number; exports: number; sha: string } {
+	const lines = text.replace(/\r\n/g, '\n').split('\n');
 	const header = lines.findIndex((l) => !l.startsWith('//'));
-	assert.equal(header, 4, 'a four-line provenance header');
 	const body = lines.slice(header).join('\n');
-	assert.equal((body.match(/^export namespace /gm) ?? []).length, 3);
 	const upstream = body.replace(/^export namespace /gm, 'namespace ');
-	assert.equal(createHash('sha256').update(upstream).digest('hex'), UPSTREAM);
+	return { header, exports: (body.match(/^export namespace /gm) ?? []).length, sha: createHash('sha256').update(upstream).digest('hex') };
+}
+
+test('qrcodegen.ts is the upstream file plus `export` on its three namespaces', () => {
+	const got = upstreamOf(vendored);
+	assert.equal(got.header, 4, 'a four-line provenance header');
+	assert.equal(got.exports, 3);
+	assert.equal(got.sha, UPSTREAM);
+	// a CRLF checkout of the same file passes; a changed encoder does not
+	assert.equal(upstreamOf(vendored.replace(/\r?\n/g, '\r\n')).sha, UPSTREAM, 'CRLF checkout');
+	assert.notEqual(upstreamOf(vendored.replace('Ecc.MEDIUM', 'Ecc.LOW')).sha, UPSTREAM, 'the control: an edit');
 });
 
 test('a share link encodes into a QR code with its three finder patterns', async () => {
