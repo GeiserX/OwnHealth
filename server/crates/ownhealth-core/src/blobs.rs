@@ -59,8 +59,11 @@ impl BlobOwner {
 }
 
 /// A blob as a file on local disk, for readers that need a path (SQLite, zip, tabix). The path is
-/// good while this value lives. In the plain layout it is the stored file itself.
+/// good while this value lives, so keep it for as long as any reader opened from the path is in
+/// use: a copy the encryption layer writes is gone once this drops. In the plain layout it is the
+/// stored file itself.
 #[derive(Debug)]
+#[must_use = "the path is good only while the LocalCopy lives"]
 pub struct LocalCopy {
     path: PathBuf,
 }
@@ -376,6 +379,22 @@ mod tests {
             store.with_local_copy(owner(), "nope"),
             Err(BlobError::BadHash)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn dropping_a_local_copy_leaves_the_stored_blob() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = BlobStore::new(dir.path())?;
+        let data = b"##fileformat=VCFv4.2 synthetic Rivera calls";
+        let h = store.put_bytes(data)?;
+        let copy = store.with_local_copy(owner(), &h)?;
+        assert_eq!(fs::read(copy.path())?, data);
+        drop(copy);
+        assert_eq!(store.get_bytes(owner(), &h)?, data);
+        assert!(store.exists(owner(), &h));
+        let again = store.with_local_copy(owner(), &h)?;
+        assert_eq!(fs::read(again.path())?, data);
         Ok(())
     }
 

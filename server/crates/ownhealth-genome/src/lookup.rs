@@ -137,9 +137,16 @@ fn local_copy(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<LocalCop
     })
 }
 
-fn open(blobs: &BlobStore, owner: BlobOwner, data: &str, index: &str) -> Result<VcfFile> {
-    let (data, index) = (local_copy(blobs, owner, data)?, local_copy(blobs, owner, index)?);
-    Ok(VcfFile::open(data.path(), index.path())?)
+/// A tabix reader with the local copies it reads from: they must live as long as the reader does.
+struct Opened {
+    vf: VcfFile,
+    _copies: [LocalCopy; 2],
+}
+
+fn open(blobs: &BlobStore, owner: BlobOwner, data: &str, index: &str) -> Result<Opened> {
+    let copies = [local_copy(blobs, owner, data)?, local_copy(blobs, owner, index)?];
+    let vf = VcfFile::open(copies[0].path(), copies[1].path())?;
+    Ok(Opened { vf, _copies: copies })
 }
 
 fn fetch(vf: &mut VcfFile, chrom: &str, start: i64, end: i64) -> Result<Vec<Record>> {
@@ -302,7 +309,7 @@ fn call_at(
         }
         return Ok(status("not_covered", "absent", "raw_genome_not_on_file"));
     };
-    let calls = fetch(&mut open(blobs, owner, vcf, tbi)?, chrom, pos, pos)?;
+    let calls = fetch(&mut open(blobs, owner, vcf, tbi)?.vf, chrom, pos, pos)?;
     if let Some(rec) = pick(&calls, pos, alt) {
         return Ok(from_record(rec, "vcf"));
     }
@@ -310,7 +317,7 @@ fn call_at(
         let (Some(sites), Some(sites_tbi)) = (ds.sites.as_deref(), ds.sites_tbi.as_deref()) else {
             return Ok(status("not_on_array", "absent", "not_in_array_calls_no_site_list"));
         };
-        let probed = fetch(&mut open(blobs, owner, sites, sites_tbi)?, chrom, pos, pos)?;
+        let probed = fetch(&mut open(blobs, owner, sites, sites_tbi)?.vf, chrom, pos, pos)?;
         if probed.iter().any(|r| r.pos == pos) {
             return Ok(status("no_call", "chip_sites", "probed_not_called"));
         }
@@ -325,7 +332,7 @@ fn call_at(
     let (Some(gvcf), Some(gvcf_tbi)) = (ds.gvcf.as_deref(), ds.gvcf_tbi.as_deref()) else {
         return Ok(status("no_call", "absent", "variant_only_vcf_absence_unknown"));
     };
-    let records = fetch(&mut open(blobs, owner, gvcf, gvcf_tbi)?, chrom, pos, pos)?;
+    let records = fetch(&mut open(blobs, owner, gvcf, gvcf_tbi)?.vf, chrom, pos, pos)?;
     if let Some(rec) = pick(&records, pos, alt) {
         return Ok(from_record(rec, "gvcf"));
     }
@@ -760,10 +767,10 @@ fn region_answer(
         let (Some(vcf), Some(tbi)) = (ds.vcf.as_deref(), ds.tbi.as_deref()) else {
             continue;
         };
-        let mut vf = open(blobs, owner, vcf, tbi)?;
+        let mut opened = open(blobs, owner, vcf, tbi)?;
         let label = source_label(ds);
         for (s, e) in &parts {
-            for rec in fetch(&mut vf, &chrom, *s, *e)? {
+            for rec in fetch(&mut opened.vf, &chrom, *s, *e)? {
                 if is_block(&rec) || !(*s <= rec.pos && rec.pos <= *e) {
                     continue;
                 }

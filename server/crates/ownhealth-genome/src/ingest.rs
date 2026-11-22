@@ -238,12 +238,10 @@ fn chip_errors(blobs: &BlobStore, owner: BlobOwner, doc: &Value, has_sites: bool
     let (Some(f), true) = (file, has_sites) else {
         return Ok(chip_site_errors(doc, None));
     };
-    let vf = VcfFile::open(
-        blobs.with_local_copy(owner, s(f, "sha256").unwrap_or_default())?.path(),
-        blobs
-            .with_local_copy(owner, s(f, "index_sha256").unwrap_or_default())?
-            .path(),
-    )?;
+    // both copies live until the site list has been probed
+    let data = blobs.with_local_copy(owner, s(f, "sha256").unwrap_or_default())?;
+    let index = blobs.with_local_copy(owner, s(f, "index_sha256").unwrap_or_default())?;
+    let vf = VcfFile::open(data.path(), index.path())?;
     let vf = RefCell::new(vf);
     let probed = |chrom: &str, pos: i64| -> bool {
         let c = norm_chrom(chrom);

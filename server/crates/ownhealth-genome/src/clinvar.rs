@@ -799,12 +799,16 @@ async fn diff_dataset(
     // The outer error is the release's and stops the run; the inner one is this dataset's calls VCF,
     // which must not stop the other datasets.
     let read = blocking(move || -> Result<Result<Vec<Carried>>> {
-        let person: Box<dyn Alleles> =
-            match vcf_copy.and_then(|p| p.map(|p| VcfAlleles::open(p.path(), &label)).transpose()) {
-                Ok(Some(v)) => Box::new(v),
-                Ok(None) => Box::new(FactAlleles::new(fact_alleles)),
-                Err(e) => return Ok(Err(e)),
-            };
+        // the copy lives until the release has been read against it
+        let copy = match vcf_copy {
+            Ok(c) => c,
+            Err(e) => return Ok(Err(e)),
+        };
+        let person: Box<dyn Alleles> = match copy.as_ref().map(|p| VcfAlleles::open(p.path(), &label)).transpose() {
+            Ok(Some(v)) => Box::new(v),
+            Ok(None) => Box::new(FactAlleles::new(fact_alleles)),
+            Err(e) => return Ok(Err(e)),
+        };
         let mut person = Watched {
             inner: person,
             failed: false,
