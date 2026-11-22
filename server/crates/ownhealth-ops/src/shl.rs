@@ -26,8 +26,11 @@ use crate::ips::{self, Ips};
 /// The categories a link can carry: what the IPS reads. `read:sensitive` and the genome scopes are
 /// never among them, so a sensitive record or a genome finding never leaves through a link.
 pub const SHAREABLE: [&str; 3] = ["read:labs", "read:records", "read:summary"];
-/// "files array": FHIR, with the fhirVersion parameter servers SHOULD send.
-pub const CONTENT_TYPE: &str = "application/fhir+json;fhirVersion=4.0.1";
+/// "files array": a FHIR bundle is `application/fhir+json`. The page lets servers add a fhirVersion
+/// parameter (a SHOULD) and says a client without one MAY assume 4.0.1, which is what the IPS is. We
+/// send the bare type: the reference viewer (shc-web-reader), IPSviewer and kill-the-clipboard
+/// compare the whole string and skip or refuse a file with the parameter. The JWE `cty` is the same.
+pub const CONTENT_TYPE: &str = "application/fhir+json";
 /// "Establish a SMART Health Link Manifest URL": the url SHALL NOT exceed 128 characters.
 pub const URL_MAX: usize = 128;
 /// "Construct a SMART Health Link Payload": the label is no longer than 80 characters.

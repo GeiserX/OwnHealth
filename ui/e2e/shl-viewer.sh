@@ -1,20 +1,16 @@
 #!/usr/bin/env bash
 # The reference SMART Health Links viewer that shl.spec.ts opens links in: shc-web-reader of The
-# Commons Project (MIT), pinned at a commit, with one patch (below). `serve <port>` builds it once (a
-# few minutes; the build stays in node_modules/.cache, or under OWNHEALTH_SHL_VIEWER_DIR) and serves
-# the static build on 127.0.0.1 without a request log. Playwright starts it as its second webServer.
+# Commons Project (MIT), pinned at a commit and built as it is, with no patch. `serve <port>` builds it
+# once (a few minutes; the build stays in node_modules/.cache, or under OWNHEALTH_SHL_VIEWER_DIR) and
+# serves the static build on 127.0.0.1 without a request log. Playwright starts it as its second
+# webServer. The viewer compares a file's contentType with "application/fhir+json" as a whole string,
+# so the e2e also proves OwnHealth sends exactly that (ownhealth-ops shl.rs CONTENT_TYPE).
 set -euo pipefail
 
 repo=https://github.com/the-commons-project/shc-web-reader.git
 commit=3824aa69e6874ab9695ddb9c8041d0e6708ce35b # 2026-09-11, reads JWE with raw DEFLATE (its PR 148)
 here=$(cd "$(dirname "$0")" && pwd)
-# The one patch: at this commit (and on its develop branch) the viewer compares a manifest file's
-# contentType with "application/fhir+json" as a whole string, so it skips a file of
-# "application/fhir+json;fhirVersion=4.0.1", which "SMART Health Link Manifest File" lets a server send
-# (servers SHOULD populate fhirVersion) and OwnHealth sends. The patch compares the type without its
-# parameters. Its name is part of the build folder, so a build without it is never reused.
-patch=ctype-params-1
-dir=${OWNHEALTH_SHL_VIEWER_DIR:-$here/../node_modules/.cache/shl-viewer}/$commit-$patch
+dir=${OWNHEALTH_SHL_VIEWER_DIR:-$here/../node_modules/.cache/shl-viewer}/$commit
 port=${2:-8191}
 
 build() {
@@ -25,11 +21,7 @@ build() {
   git -C "$dir/src" fetch -q --depth 1 "$repo" "$commit"
   git -C "$dir/src" checkout -q FETCH_HEAD
   [ "$(git -C "$dir/src" rev-parse HEAD)" = "$commit" ] || { echo "the viewer is not at $commit" >&2; exit 1; }
-  local shx=$dir/src/src/lib/SHX.js
-  local from='const contentType = shlFiles[i].contentType;'
-  [ "$(grep -cF "$from" "$shx")" = 1 ] || { echo "the viewer patch no longer applies" >&2; exit 1; }
-  sed -i.orig 's/const contentType = shlFiles\[i\]\.contentType;/const contentType = shlFiles[i].contentType.split(";")[0].trim();/' "$shx"
-  [ "$(grep -cF 'shlFiles[i].contentType.split(";")[0].trim();' "$shx")" = 1 ] || { echo "the viewer patch failed" >&2; exit 1; }
+  [ -z "$(git -C "$dir/src" status --porcelain)" ] || { echo "the viewer source is not the pinned commit as it is" >&2; exit 1; }
   # Its lockfile names one dependency by a git+ssh URL. A CI runner has no GitHub key, so that one
   # fetch goes over https, for this command only (never in a git config file). CI=false: the viewer's
   # own lint warnings are not ours to fail on.
