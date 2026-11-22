@@ -32,6 +32,9 @@ export const LANGS = [
 
 export type Lang = (typeof LANGS)[number]['code'];
 
+/** The languages MCP speaks (`api_token.lang`), es and en whatever LANGS holds (server `MCP_LANGS`). */
+export type McpLang = 'es' | 'en';
+
 /** A server text in every registry language: `{ es, en }`. */
 export type Localized<T = string> = Record<Lang, T>;
 /** The same under a stem: `Suffixed<'short'>` is `{ short_es, short_en }`. */

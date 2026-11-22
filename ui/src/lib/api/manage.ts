@@ -58,7 +58,7 @@ export const createToken = (body: {
 	default_profile?: string;
 	days?: number;
 	identity_mode?: TokenOut['identity_mode'];
-	lang?: 'es' | 'en';
+	lang?: TokenOut['lang'];
 	units?: TokenOut['units'];
 }) => post<{ token: TokenOut; plaintext: string }>('/tokens', body);
 export const revokeToken = (id: Uuid) => del<{ id: Uuid; revoked: true }>(`/tokens/${id}`);

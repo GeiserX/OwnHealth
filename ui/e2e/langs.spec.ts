@@ -30,8 +30,8 @@ test('the picker lists every registry language and switches the page to each', a
 	expect(errors).toEqual([]);
 });
 
-// The two language choices that reach the server send registry codes: the family invite (the new
-// login's locale) and the summary sheet. Each offers every language once, by code, named in itself.
+// The language choices that reach the server send registry codes: the family invite (the new login's
+// locale), the summary sheet, the next-draw sheet and a new share link. Each offers every language once, by code, named in itself.
 test('the family invite offers every registry language by its code', async ({ page }) => {
 	await page.goto('/family?lang=en');
 	await page.locator('.ph .right .btn.pri').click();
@@ -48,4 +48,23 @@ test('the summary sheet offers every registry language by its code', async ({ pa
 	await expect(radios).toHaveCount(LANGS.length);
 	const values = await radios.evaluateAll((rs) => rs.map((r) => [(r as HTMLInputElement).value, r.parentElement?.textContent?.trim() ?? '']));
 	expect(values).toEqual(want);
+});
+
+test('the next-draw sheet offers every registry language by its code', async ({ page }) => {
+	await page.goto('/due/next-draw?lang=en');
+	const radios = page.locator('input[type=radio][name=nd-lang]');
+	await expect(radios).toHaveCount(LANGS.length);
+	const values = await radios.evaluateAll((rs) => rs.map((r) => [(r as HTMLInputElement).value, r.parentElement?.textContent?.trim() ?? '']));
+	expect(values).toEqual(LANGS.map((l) => [l.code, l.name]));
+	// the sheet starts in the screen's language
+	await expect(radios.and(page.locator(':checked'))).toHaveValue('en');
+});
+
+test('a new share link offers every registry language by its code', async ({ page }) => {
+	await page.goto('/links?lang=es');
+	const select = page.getByLabel('Idioma del resumen');
+	await expect(select).toBeVisible();
+	const options = await select.evaluate((s: HTMLSelectElement) => [...s.options].map((o) => [o.value, o.text.trim()]));
+	expect(options).toEqual(LANGS.map((l) => [l.code, l.name]));
+	await expect(select).toHaveValue('es');
 });
