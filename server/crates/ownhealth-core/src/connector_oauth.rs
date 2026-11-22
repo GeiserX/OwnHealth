@@ -925,16 +925,6 @@ pub async fn access_token(
         return Ok(t);
     }
     let kinds: Vec<&str> = OAUTH_KINDS.to_vec();
-    // the profile's key before the row lock: a profile delete holds its key row, then waits on this
-    // source row, and a first key lookup under the lock would wait on the delete
-    let owner: Option<Uuid> = sqlx::query_scalar("select profile_id from source where id = $1")
-        .bind(source_id)
-        .fetch_optional(pool)
-        .await?
-        .flatten();
-    if let Some(p) = owner {
-        secrets::prepare_profile_key(sb, p).await;
-    }
     let mut tx = pool.begin().await?;
     let row: Option<Locked> = sqlx::query_as(
         "select household_id, profile_id, secret_id, connector_client_id, config, reconsent_needed_at, enabled \
@@ -952,6 +942,15 @@ pub async fn access_token(
     }
     if !enabled {
         return Err(refused("disconnected", "This connection is switched off."));
+    }
+    // A profile's rotated token is sealed under the profile's key. Without the keys this process
+    // could read an older token sealed under the secrets key, spend it at the vendor, and then fail
+    // to store the new one: refuse before the request, so the stored token stays good.
+    if profile.is_some() && !sb.has_keys() {
+        return Err(refused(
+            "profile_keys_missing",
+            "This process has no profile keys, so it cannot store this connection's next token.",
+        ));
     }
     // another refresh finished while this one waited for the lock
     if let Some(t) = cached(source_id, now) {
@@ -994,12 +993,20 @@ pub async fn access_token(
     // the second caller may read the token as soon as the lock goes, so it is in memory first
     remember(source_id, &t, now);
     let stored: Result<(), OAuthError> = async {
-        if let Some(r) = &t.refresh {
-            // under the profile's key, also when the token it replaces was sealed under the secrets key
-            match profile {
-                Some(p) => secrets::replace_profile_secret(&mut tx, sb, secret_id, p, r).await?,
-                None => secrets::replace_secret(&mut tx, sb, secret_id, r).await?,
+        // A profile's token goes under the profile's key, also when the token it replaces was sealed
+        // under the secrets key; a vendor that does not rotate keeps the same token, which is sealed
+        // again under the profile's key once. The key lookup runs on a connection of its own and waits
+        // only on the profile's key row, which a profile delete takes only after it removed the source
+        // rows, so the source row held here cannot close a cycle with a delete.
+        match (profile, &t.refresh) {
+            (Some(p), Some(r)) => secrets::replace_profile_secret(&mut tx, sb, secret_id, p, r).await?,
+            (Some(p), None) => {
+                if !secrets::sealed_for_profile(&mut tx, secret_id, p).await? {
+                    secrets::replace_profile_secret(&mut tx, sb, secret_id, p, &refresh).await?;
+                }
             }
+            (None, Some(r)) => secrets::replace_secret(&mut tx, sb, secret_id, r).await?,
+            (None, None) => {}
         }
         sqlx::query(
             "update source set access_expires_at = $2, grant_expires_at = coalesce($3, grant_expires_at) \

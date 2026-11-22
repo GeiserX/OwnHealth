@@ -940,6 +940,9 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
     counts.push(("secret".into(), sealed));
     // The key is shredded, not deleted, in this transaction: a key write that races the delete then
     // refuses instead of making a new one. Keys a profile create left behind when it rolled back go too.
+    // This comes after the profile's source rows went: a token refresh holds its source row while it
+    // looks the key up on a connection of its own (`connector_oauth::access_token`), so the delete must
+    // not hold this key row while it waits for that source row.
     let shredded = keys::shred(&mut *conn, profile_id).await.map_err(Error::from)?;
     counts.push(("profile_key".into(), shredded));
     keys::shred_orphans(&mut *conn).await.map_err(Error::from)?;

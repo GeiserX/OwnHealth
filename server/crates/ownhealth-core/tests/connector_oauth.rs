@@ -633,6 +633,71 @@ async fn a_token_sealed_under_the_secrets_key_still_works_and_the_next_refresh_s
     Ok(())
 }
 
+/// A vendor that never rotates keeps the token it gave at the start: a token sealed under the secrets
+/// key before slice 46 is sealed again under the profile's key at the next refresh, once, so a
+/// profile delete leaves it unreadable too.
+#[tokio::test]
+async fn a_token_a_vendor_never_rotates_is_sealed_under_the_profile_at_the_next_refresh() -> R {
+    let s = setup().await?;
+    s.fake.set(|b| b.rotate = false);
+    let (id, _) = s.connect(None, t0()).await?;
+    let secret = secret_of(&s.db, id).await?;
+    let mut c = s.db.pool.acquire().await?;
+    let token = read_secret(&mut c, &s.sb, s.fam.household_id, secret).await?;
+    replace_secret(&mut c, &s.sb, secret, &token).await?;
+    drop(c);
+    assert_eq!(sealed_head(&s.db, secret).await?.0, 1);
+    oauth::forget(id);
+    s.refresh(id, t0() + Duration::hours(2)).await?;
+    assert_eq!(
+        sealed_head(&s.db, secret).await?,
+        (2, Some(s.alex())),
+        "the token stayed under the secrets key"
+    );
+    assert_eq!(s.refresh_token(id).await?.as_deref(), Some(token.expose()));
+    // sealed once: the next refresh leaves the row as it is
+    let before: Vec<u8> = sqlx::query_scalar("select ciphertext from secret where id = $1")
+        .bind(secret)
+        .fetch_one(&s.db.pool)
+        .await?;
+    oauth::forget(id);
+    s.refresh(id, t0() + Duration::hours(4)).await?;
+    let after: Vec<u8> = sqlx::query_scalar("select ciphertext from secret where id = $1")
+        .bind(secret)
+        .fetch_one(&s.db.pool)
+        .await?;
+    assert_eq!(
+        before, after,
+        "a token already under the profile's key was sealed again"
+    );
+    Ok(())
+}
+
+/// A process that holds no profile keys (a box built without them) never refreshes a profile's
+/// connection: the vendor would rotate the refresh token, and the new one could not be stored under
+/// the profile's key. It refuses before the request, so the token stays good and no consent is asked.
+#[tokio::test]
+async fn a_box_without_the_profile_keys_refuses_before_it_spends_the_refresh_token() -> R {
+    let s = setup().await?;
+    let (id, _) = s.connect(None, t0()).await?;
+    let secret = secret_of(&s.db, id).await?;
+    // a row from before slice 46, which such a box could read
+    let mut c = s.db.pool.acquire().await?;
+    let token = read_secret(&mut c, &s.sb, s.fam.household_id, secret).await?;
+    replace_secret(&mut c, &s.sb, secret, &token).await?;
+    drop(c);
+    oauth::forget(id);
+    let keyless = SecretBox::new(&[5u8; 32])?;
+    let r = oauth::access_token(&s.db.pool, &keyless, id, &egress(), t0() + Duration::hours(2)).await;
+    assert_eq!(refused_code(r), "profile_keys_missing");
+    assert_eq!(s.fake.book().refresh_calls, 0, "the refresh token was sent");
+    assert_eq!(s.reconsent(id).await?, None);
+    // the token is as it was, and a box with the keys refreshes it
+    s.refresh(id, t0() + Duration::hours(2)).await?;
+    assert_eq!(s.fake.book().refresh_calls, 1);
+    Ok(())
+}
+
 // ----------------------------------------------------------------- refresh ----
 
 #[tokio::test]

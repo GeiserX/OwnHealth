@@ -137,6 +137,11 @@ impl SecretBox {
         SecretBox::from_base64(settings.secrets_key.as_deref().ok_or_else(not_configured)?)
     }
 
+    /// Whether this box carries the keyring a profile's secrets are sealed with.
+    pub fn has_keys(&self) -> bool {
+        self.keys.is_some()
+    }
+
     pub fn fingerprint(&self) -> &[u8; 8] {
         &self.fingerprint
     }
@@ -200,16 +205,6 @@ async fn profile_dek(sb: &SecretBox, profile: Uuid, create: bool) -> Result<Arc<
         .await
         .map_err(|e| Error::Other(anyhow::anyhow!("key lookup task failed: {e}")))??
         .ok_or_else(|| Error::Invalid("the profile's key is gone, so its stored secret no longer opens".into()))
-}
-
-/// Look up `profile`'s data key now, before a caller takes a row lock that a profile delete also
-/// waits on: the lookup runs on a connection of its own and waits on the key row a delete holds, so
-/// doing it under such a lock could stall both. Making the key here is what a later seal would do;
-/// a failure is left to that later call.
-pub async fn prepare_profile_key(sb: &SecretBox, profile: Uuid) {
-    if sb.keys.is_some() {
-        let _ = profile_dek(sb, profile, true).await;
-    }
 }
 
 /// `value` sealed for row `id` under `profile`'s data key (version 2).
@@ -316,6 +311,15 @@ pub async fn replace_profile_secret(
         .execute(conn)
         .await?;
     Ok(())
+}
+
+/// True when secret `id` is sealed under `profile`'s data key (version 2 naming that profile).
+pub async fn sealed_for_profile(conn: &mut PgConnection, id: Uuid, profile: Uuid) -> Result<bool> {
+    let sealed: Option<Vec<u8>> = sqlx::query_scalar("select ciphertext from secret where id = $1")
+        .bind(id)
+        .fetch_optional(conn)
+        .await?;
+    Ok(sealed.is_some_and(|s| s.first() == Some(&PROFILE_VERSION) && s.get(1..17) == Some(profile.as_bytes())))
 }
 
 /// Replace the value of an existing secret (a changed password), keeping its id and purpose.
