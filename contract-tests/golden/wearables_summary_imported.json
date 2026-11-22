@@ -3,6 +3,7 @@
     "[]": {
       "coverage_pct": "float",
       "device": "string",
+      "device_id": "null",
       "last_sample": "datetime_Z",
       "provider": "string",
       "source_id": "int"
