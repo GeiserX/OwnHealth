@@ -671,7 +671,8 @@ impl Project {
             .unwrap_or_default()
     }
 
-    /// psql in the db container, over TCP so the password is checked.
+    /// psql in the db container to `db`, its compose-network address, as from any other container:
+    /// pg_hba trusts loopback only, so this login checks the password.
     fn psql(&self, user: &str, password: &str, db: &str, sql: &str) -> anyhow::Result<Output> {
         self.run(&[
             "exec",
@@ -681,7 +682,7 @@ impl Project {
             "db",
             "psql",
             "-h",
-            "127.0.0.1",
+            "db",
             "-U",
             user,
             "-d",
@@ -852,9 +853,16 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
         "{case}: the OW role connects to its own database only"
     );
 
-    // the OW role reaches its own database and is refused at the health database's door
+    // the OW role reaches its own database with its password and not with another one, and is
+    // refused at the health database's door
     let own = project.psql("openwearables", &ow_pw, "openwearables", "select 1")?;
     assert!(own.status.success(), "{case}: {}", String::from_utf8_lossy(&own.stderr));
+    let wrong = project.psql("openwearables", &token_hex(16), "openwearables", "select 1")?;
+    let err = String::from_utf8_lossy(&wrong.stderr);
+    assert!(
+        !wrong.status.success() && err.contains("password authentication failed"),
+        "{case}: the OW role got in with a wrong password: {err}"
+    );
     let health = project.psql("openwearables", &ow_pw, "ownhealth", "select 1")?;
     let err = String::from_utf8_lossy(&health.stderr);
     assert!(
