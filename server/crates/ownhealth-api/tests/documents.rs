@@ -924,3 +924,44 @@ async fn removing_an_old_copy_waits_for_an_upload_of_the_same_bytes() -> R {
     assert_eq!(a.rt.blobs.get_bytes(owner, &sha)?, bytes, "the upload lost its file");
     Ok(())
 }
+
+/// A document with no profile that waits more than a day keeps its key and its file through the
+/// sweep: only an item that no longer waits loses its key after a day.
+#[tokio::test]
+async fn a_document_with_no_profile_waiting_two_days_keeps_its_key_through_the_sweep() -> R {
+    use ownhealth_core::blobs::{BlobOwner, BlobStore};
+    let a = app().await?;
+    let pdf = labnorte();
+    let scratch = tempfile::tempdir()?;
+    let sha = BlobStore::new(scratch.path())?.put_bytes(BlobOwner::Reference, &pdf)?;
+    let mut c = a.rt.pool.acquire().await?;
+    let doc = create_document(
+        &mut c,
+        &NewDocument {
+            filename: Some("unassigned.pdf"),
+            pages: Some(3),
+            ..NewDocument::upload(a.fam.household_id, None, &sha, "application/pdf", pdf.len() as i64)
+        },
+    )
+    .await?
+    .id;
+    assert_eq!(a.rt.blobs.put_bytes(BlobOwner::Pending(doc), &pdf)?, sha);
+    sqlx::query("update pending_key set created_at = now() - interval '2 days' where item_id = $1")
+        .bind(doc)
+        .execute(&mut *c)
+        .await?;
+    assert_eq!(
+        a.rt.blobs.sweep_unkeyed(&mut c).await?,
+        0,
+        "the sweep removed a waiting document"
+    );
+    let live: i64 =
+        sqlx::query_scalar("select count(*) from pending_key where item_id = $1 and wrapped_dek is not null")
+            .bind(doc)
+            .fetch_one(&mut *c)
+            .await?;
+    assert_eq!(live, 1, "the sweep shredded the key of a document still waiting");
+    let fresh = BlobStore::for_settings(&a.rt.settings)?;
+    assert!(fresh.get_bytes(BlobOwner::Pending(doc), &sha)? == pdf);
+    Ok(())
+}

@@ -1347,3 +1347,41 @@ fn the_committed_locked_fixture_opens_only_with_its_password() -> R {
     ));
     Ok(())
 }
+
+/// A held mail that waits more than a day for a person keeps its key and its file through the
+/// sweep: only an item that no longer waits loses its key after a day.
+#[tokio::test]
+async fn a_held_mail_waiting_two_days_keeps_its_key_and_file_through_the_sweep() -> R {
+    use ownhealth_core::blobs::BlobOwner;
+    let env = Env::new().await?;
+    let source = env.mailbox(json!({})).await?;
+    let raw = Mail::new("old-1@clinica-norte.example", "citas@clinica-norte.example").build();
+    let qid = env
+        .ingest(&source, &raw)
+        .await?
+        .quarantine_id
+        .ok_or_else(|| anyhow::anyhow!("not held"))?;
+    sqlx::query("update pending_key set created_at = now() - interval '2 days' where item_id = $1")
+        .bind(qid)
+        .execute(&env.db.pool)
+        .await?;
+    let mut c = env.db.pool.acquire().await?;
+    assert_eq!(
+        env.ctx.blobs.sweep_unkeyed(&mut c).await?,
+        0,
+        "the sweep removed a held mail"
+    );
+    let live: i64 =
+        sqlx::query_scalar("select count(*) from pending_key where item_id = $1 and wrapped_dek is not null")
+            .bind(qid)
+            .fetch_one(&mut *c)
+            .await?;
+    assert_eq!(live, 1, "the sweep shredded the key of a mail still held");
+    let sha: String = sqlx::query_scalar("select encode(raw_blob, 'hex') from quarantine_item where id = $1")
+        .bind(qid)
+        .fetch_one(&mut *c)
+        .await?;
+    let fresh = BlobStore::for_settings(&env.ctx.settings)?;
+    assert_eq!(fresh.get_bytes(BlobOwner::Pending(qid), &sha)?, raw);
+    Ok(())
+}
