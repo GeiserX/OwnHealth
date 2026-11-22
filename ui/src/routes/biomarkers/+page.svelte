@@ -337,7 +337,7 @@
 							{@const shape = shapeOf(p.lab)}
 							<g
 								fill={ptColor(p)}
-								stroke="#0f1115"
+								stroke="#0c141c"
 								stroke-width="1.5"
 								style="cursor:pointer"
 								role="button"
@@ -373,9 +373,9 @@
 								<!-- A wide bar holds its label; a narrow one prints it after its end, or in the list under the chart. -->
 								{@const wide = b.x2 - b.x > b.label.length * 5.6 + 12}
 								{@const after = b.x2 + 6 + b.label.length * 5.6 < W - pr}
-								<rect x={b.x} y={my + b.row * 14} width={Math.max(4, b.x2 - b.x)} height="12" rx="3" fill={C.accent} opacity=".55"><title>{b.label}{b.ongoing ? ' · ' + t('h1_ongoing') : ''}</title></rect>
+								<rect x={b.x} y={my + b.row * 14} width={Math.max(4, b.x2 - b.x)} height="12" rx="3" fill={C.accent} opacity=".85"><title>{b.label}{b.ongoing ? ' · ' + t('h1_ongoing') : ''}</title></rect>
 								{#if b.ongoing}<path d="M{b.x2 - 1} {my + b.row * 14 + 2}l5 4-5 4z" fill={C.accent} opacity=".8" />{/if}
-								{#if wide}<text x={b.x + 6} y={my + b.row * 14 + 9.5} fill="#0c1222" font-size="10" font-weight="600">{b.label}</text>
+								{#if wide}<text x={b.x + 6} y={my + b.row * 14 + 9.5} fill="#0f1e2e" font-size="10" font-weight="600">{b.label}</text>
 								{:else if after}<text x={b.x2 + (b.ongoing ? 9 : 4)} y={my + b.row * 14 + 9.5} fill="#8a93a5" font-size="10">{b.label}</text>{/if}
 							{/each}
 							{#if geo.bars.some((b) => !b.span)}<text x={pl - 7} y={my + 37 + extra} fill={C.axis} font-size="10.5" text-anchor="end">{t('h1_ev_row')}</text>{/if}
@@ -522,14 +522,14 @@
 					<div class="card">
 						<h3>{t('h1_related')}</h3>
 						{#each related as m (m.alias_group)}
-							<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #20252f">
+							<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #1c2632">
 								<a style="flex:1;color:inherit" href="/biomarkers?code={encodeURIComponent(m.alias_group)}">{m.name}</a>
 								<span class="num" style="color:{m.status === 'ok' ? 'inherit' : C[m.status]};font-weight:600">{numText(m.value)} {unitLabel(m.unit)}<span class="sr-only"> · {t(m.status)}</span></span>
 								{#if m.spark.length}<Sparkline values={m.spark} status={m.status} w={60} h={20} />{/if}
 							</div>
 						{/each}
 						{#each calcRows as c (c.id)}
-							<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #20252f">
+							<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #1c2632">
 								<span style="flex:1" title={c.latestOk.name}>{c.latestOk.short}</span>
 								<span class="num" style="font-weight:600;white-space:nowrap">{numText(c.latestOk.value ?? '')} {calcUnit(c.latestOk.unit)}</span>
 								<span class="dim" style="font-size:11px;white-space:nowrap">calc · {c.latestOk.date}</span>
@@ -555,7 +555,7 @@
 		<span class="mono">{p.printed}</span><br />
 		<span class="num" style="white-space:nowrap">{p.date}</span> · {p.lab ?? '—'}{p.method ? ' · ' + methodLabel(p.method) : ''}<br />
 		<span class="dim">{t('h1_printed_range')} {rangeOf(p)}{p.loinc ? ' · LOINC ' + p.loinc : ''}</span><br />
-		<span style="color:#6ea8fe;white-space:nowrap">{tf('h1_open_page', { p: sourceLabel(p.src_label ?? p.src, t('src_manual')) })}</span>
+		<span style="color:#3cbadd;white-space:nowrap">{tf('h1_open_page', { p: sourceLabel(p.src_label ?? p.src, t('src_manual')) })}</span>
 	</Tip>
 {/if}
 

@@ -55,4 +55,4 @@ If the pull fails, the source's last error says why: `401` or `403` means the to
 
 - One source per person and site.
 - OwnHealth only reads. It never writes treatments, profiles or notes back to Nightscout.
-- To be told when readings stop arriving, see [Monitoring the inboxes](../../deploy/README.md#monitoring-the-inboxes).
+- To be told when readings stop arriving, see [Monitoring the inboxes](https://github.com/GeiserX/OwnHealth/blob/main/deploy/README.md#monitoring-the-inboxes).

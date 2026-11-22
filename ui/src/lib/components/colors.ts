@@ -5,8 +5,8 @@ export const C = {
 	out: '#ef6b73',
 	stale: '#9aa3b2',
 	nodata: '#7a8394',
-	accent: '#6ea8fe',
-	grid: '#232833',
+	accent: '#3cbadd',
+	grid: '#1f2b37',
 	axis: '#7a8394',
 	line: '#7d8798'
 } as const;

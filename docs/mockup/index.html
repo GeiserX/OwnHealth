@@ -7,9 +7,9 @@
 <title>OwnHealth · clickable mockup</title>
 <style>
 :root{
-  --bg:#0f1115;--surface:#161a21;--raised:#1d222c;--hover:#232937;--line:#2a303c;--line2:#343b49;
+  --bg:#0c141c;--surface:#131c26;--raised:#1a2430;--hover:#202c39;--line:#2a3644;--line2:#33404f;
   --text:#e6e8ee;--muted:#9aa3b2;--dim:#7a8394;
-  --accent:#6ea8fe;--accent-bg:rgba(110,168,254,.13);
+  --accent:#3cbadd;--accent-bg:rgba(60,186,221,.13);
   --ok:#3fb68b;--ok-bg:rgba(63,182,139,.14);
   --watch:#e0a84a;--watch-bg:rgba(224,168,74,.14);
   --out:#ef6b73;--out-bg:rgba(239,107,115,.14);
@@ -25,16 +25,17 @@ button{font:inherit;color:inherit;cursor:pointer}
 .muted{color:var(--muted)}.dim{color:var(--dim)}
 .app{display:grid;grid-template-columns:220px 1fr;height:100vh}
 /* sidebar */
-.side{background:#12151b;border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 10px;gap:10px;overflow:auto}
+.side{background:#0f1820;border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 10px;gap:10px;overflow:auto}
 .brand{display:flex;align-items:center;gap:9px;padding:2px 6px 8px;font-weight:650;font-size:15px;letter-spacing:.2px}
 .brand small{display:block;font-weight:400;color:var(--dim);font-size:11px;letter-spacing:0}
+.brand .own{color:var(--accent)}
 .logo{width:28px;height:28px;border-radius:8px;background:var(--accent-bg);display:grid;place-items:center}
 .plabel{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);padding:6px 8px 2px}
 .profiles{display:flex;flex-direction:column;gap:2px}
 .prof{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:8px;border:1px solid transparent;background:none;text-align:left;width:100%}
 .prof:hover{background:var(--hover)}
 .prof.on{background:var(--raised);border-color:var(--line2)}
-.av{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:650;color:#0f1115;flex:none}
+.av{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:650;color:#0c141c;flex:none}
 .prof .nm{font-size:12.5px;line-height:1.2}.prof .rl{font-size:11px;color:var(--dim)}
 .prof .bdg{margin-left:auto;font-size:10.5px;padding:1px 6px;border-radius:9px;background:var(--watch-bg);color:var(--watch)}
 nav.menu{display:flex;flex-direction:column;gap:1px}
@@ -47,7 +48,7 @@ nav.menu .cnt{margin-left:auto;font-size:10.5px;background:var(--watch-bg);color
 .side .foot{margin-top:auto;font-size:11px;color:var(--dim);padding:8px;border-top:1px solid var(--line);line-height:1.5}
 /* top bar */
 .main{display:flex;flex-direction:column;min-width:0;height:100vh}
-.top{height:52px;flex:none;display:flex;align-items:center;gap:14px;padding:0 20px;border-bottom:1px solid var(--line);background:rgba(15,17,21,.9)}
+.top{height:52px;flex:none;display:flex;align-items:center;gap:14px;padding:0 20px;border-bottom:1px solid var(--line);background:rgba(12,20,28,.9)}
 .search{flex:1;max-width:520px;display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:0 10px;height:34px}
 .search input{flex:1;background:none;border:0;outline:0;color:var(--text);font:inherit}
 .kbd{font-size:10.5px;border:1px solid var(--line2);border-radius:4px;padding:0 5px;color:var(--dim)}
@@ -80,15 +81,15 @@ button.chip{padding:3px 9px;font-size:12px}
 .src svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:1.8}
 .btn{white-space:nowrap;background:var(--raised);border:1px solid var(--line2);border-radius:8px;padding:5px 11px;font-size:12px;color:var(--text);display:inline-flex;align-items:center;gap:6px}
 .btn:hover{background:var(--hover)}
-.btn.pri{background:var(--accent);border-color:var(--accent);color:#0c1222;font-weight:600}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#0f1e2e;font-weight:600}
 .btn.sm{padding:2px 8px;font-size:11.5px}
 .btn.ok{color:var(--ok)}.btn.no{color:var(--out)}
 table.t{width:100%;border-collapse:collapse;font-size:12.5px}
 .t.nw td,.t.nw th{white-space:nowrap;padding:6px 7px}
 .t th{text-align:left;font-weight:520;color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:6px 8px;border-bottom:1px solid var(--line)}
-.t td{padding:6px 8px;border-bottom:1px solid #20252f;vertical-align:middle}
-.t tr:hover td{background:#1a1f28}
-.phase{white-space:nowrap;font-size:10.5px;color:var(--accent);border:1px solid rgba(110,168,254,.35);border-radius:5px;padding:0 6px;font-weight:550}
+.t td{padding:6px 8px;border-bottom:1px solid #1c2632;vertical-align:middle}
+.t tr:hover td{background:#172029}
+.phase{white-space:nowrap;font-size:10.5px;color:var(--accent);border:1px solid rgba(60,186,221,.35);border-radius:5px;padding:0 6px;font-weight:550}
 .note{font-size:11.5px;color:var(--muted);display:flex;gap:6px;align-items:flex-start}
 .note svg{flex:none;margin-top:2px}
 .banner{display:flex;gap:12px;align-items:center;padding:10px 14px;border-radius:var(--r);border:1px solid rgba(224,168,74,.4);background:linear-gradient(90deg,rgba(224,168,74,.12),rgba(224,168,74,.04));margin-bottom:12px}
@@ -106,7 +107,7 @@ table.t{width:100%;border-collapse:collapse;font-size:12.5px}
 .sc .hd{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .sc .hd b{font-size:13px;font-weight:620}
 .sc .hd .pill{margin-left:auto}
-.mk{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"n v" "s g";align-items:center;column-gap:8px;padding:5px 0 4px;border-top:1px solid #20252f}
+.mk{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"n v" "s g";align-items:center;column-gap:8px;padding:5px 0 4px;border-top:1px solid #1c2632}
 .mk .n{grid-area:n;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mk .v{grid-area:v}.mk .s{grid-area:s;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;line-height:1}.mk .g{grid-area:g;text-align:right;line-height:0}
 .mk:first-of-type{border-top:0}
 .mk .n{font-size:12.5px;line-height:1.15}
@@ -116,7 +117,7 @@ table.t{width:100%;border-collapse:collapse;font-size:12.5px}
 .sc .ft{margin-top:auto;padding-top:6px;gap:8px;white-space:nowrap;font-size:10.5px;color:var(--dim);display:flex;justify-content:space-between}
 .chg{display:grid;grid-template-columns:1fr auto auto;gap:6px 10px;align-items:center;font-size:12.5px}
 .arrow-up{color:var(--out)}.arrow-dn{color:var(--ok)}
-.due{display:flex;gap:10px;align-items:center;padding:6px 0;border-top:1px solid #20252f}
+.due{display:flex;gap:10px;align-items:center;padding:6px 0;border-top:1px solid #1c2632}
 .due:first-of-type{border-top:0}
 .due .ic{width:26px;height:26px;border-radius:7px;background:var(--raised);display:grid;place-items:center;flex:none}
 .due .ic svg{width:14px;height:14px;stroke:var(--muted);fill:none;stroke-width:1.7}
@@ -129,7 +130,7 @@ table.t{width:100%;border-collapse:collapse;font-size:12.5px}
 .kv .big{font-size:30px;font-weight:650;line-height:1}
 .legend{display:flex;gap:14px;font-size:11.5px;color:var(--muted);flex-wrap:wrap}
 .legend span{display:inline-flex;align-items:center;gap:5px}
-.calc{border-top:1px solid #20252f;padding:8px 0}
+.calc{border-top:1px solid #1c2632;padding:8px 0}
 .calc:first-of-type{border-top:0}
 .calc .row{display:flex;align-items:baseline;gap:8px}
 .calc .val{margin-left:auto;font-size:17px;font-weight:650}
@@ -143,7 +144,7 @@ table.t{width:100%;border-collapse:collapse;font-size:12.5px}
 .ev .rail{position:relative}
 .ev .rail:before{content:"";position:absolute;left:11px;top:0;bottom:0;width:2px;background:var(--line)}
 .ev .dot{position:absolute;left:3px;top:8px;width:18px;height:18px;border-radius:50%;display:grid;place-items:center;border:2px solid var(--bg)}
-.ev .dot svg{width:10px;height:10px;stroke:#0f1115;fill:none;stroke-width:2.4}
+.ev .dot svg{width:10px;height:10px;stroke:#0c141c;fill:none;stroke-width:2.4}
 .ev .body{background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:7px 12px;margin:3px 0;display:flex;gap:12px;align-items:center}
 .ev .body .t1{font-weight:580}
 .ev .body .t2{font-size:11.5px;color:var(--muted)}
@@ -160,23 +161,23 @@ table.t{width:100%;border-collapse:collapse;font-size:12.5px}
 .lock{background:repeating-linear-gradient(135deg,#1a1e26 0 8px,#181c23 8px 16px)}
 /* drug */
 .drug{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:14px}
-blockquote{margin:8px 0;padding:8px 12px;border-left:3px solid var(--accent);background:#141a26;border-radius:0 8px 8px 0;color:#d5dae4}
-.disc{display:flex;gap:10px;align-items:center;padding:10px 14px;border-radius:var(--r);background:var(--accent-bg);border:1px solid rgba(110,168,254,.35);margin-top:12px}
+blockquote{margin:8px 0;padding:8px 12px;border-left:3px solid var(--accent);background:var(--raised);border-radius:0 8px 8px 0;color:#d5dae4}
+.disc{display:flex;gap:10px;align-items:center;padding:10px 14px;border-radius:var(--r);background:var(--accent-bg);border:1px solid rgba(60,186,221,.35);margin-top:12px}
 /* wearables */
 .wg{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
 .devs{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
 .dev{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:9px 12px;display:flex;gap:10px;align-items:center}
-.bar{height:6px;border-radius:3px;background:#262c38;overflow:hidden}
+.bar{height:6px;border-radius:3px;background:#23303c;overflow:hidden}
 .bar>i{display:block;height:100%;background:var(--accent)}
 /* imaging */
 .img{display:grid;grid-template-columns:250px 1fr 330px;gap:12px;height:calc(100vh - 52px - 40px - 52px)}
 .study{padding:9px 10px;border-radius:8px;border:1px solid transparent}
 .study.on{background:var(--raised);border-color:var(--line2)}
 .viewer{background:#000;border:1px solid var(--line);border-radius:var(--r);display:flex;flex-direction:column;overflow:hidden}
-.vtool{display:flex;gap:4px;padding:6px 8px;background:#0b0c0f;border-bottom:1px solid #1d2028}
-.vtool span{font-size:11px;color:#aeb5c2;padding:3px 8px;border-radius:5px;background:#16181d}
-.vtool span.on{background:#253047;color:#cfe0ff}
-.thumbs{display:flex;gap:6px;padding:8px;background:#0b0c0f;border-top:1px solid #1d2028}
+.vtool{display:flex;gap:4px;padding:6px 8px;background:#090e13;border-bottom:1px solid #1a232d}
+.vtool span{font-size:11px;color:#aeb5c2;padding:3px 8px;border-radius:5px;background:#131b24}
+.vtool span.on{background:var(--accent-bg);color:var(--accent)}
+.thumbs{display:flex;gap:6px;padding:8px;background:#090e13;border-top:1px solid #1a232d}
 .thumbs div{width:84px;border:1px solid #2a2f3a;border-radius:5px;overflow:hidden;font-size:10px;color:#9aa3b2;text-align:center}
 .thumbs div.on{border-color:var(--accent)}
 /* import */
@@ -188,14 +189,14 @@ blockquote{margin:8px 0;padding:8px 12px;border-left:3px solid var(--accent);bac
 .page table{width:100%;border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:10.5px}
 .page td,.page th{padding:3px 4px;border-bottom:1px solid #ddd;text-align:left}
 .page th{border-bottom:1.5px solid #666;font-size:9.5px;text-transform:uppercase;color:#444}
-.bb{outline:2px solid rgba(110,168,254,.9);background:rgba(110,168,254,.16)}
+.bb{outline:2px solid rgba(60,186,221,.9);background:rgba(60,186,221,.16)}
 .bb-w{outline:2px solid rgba(224,168,74,.95);background:rgba(224,168,74,.2)}
-.bb-a{outline:2px dashed rgba(110,168,254,.95);background:rgba(110,168,254,.08)}
+.bb-a{outline:2px dashed rgba(60,186,221,.95);background:rgba(60,186,221,.08)}
 .bb-x{outline:2px solid rgba(239,107,115,.95);background:rgba(239,107,115,.14)}
-.xr{display:grid;grid-template-columns:20px minmax(0,1.1fr) minmax(0,1.25fr) minmax(0,1.2fr) 88px 118px;gap:4px 8px;align-items:center;padding:6px 10px;border-bottom:1px solid #20252f;font-size:12.3px}
+.xr{display:grid;grid-template-columns:20px minmax(0,1.1fr) minmax(0,1.25fr) minmax(0,1.2fr) 88px 118px;gap:4px 8px;align-items:center;padding:6px 10px;border-bottom:1px solid #1c2632;font-size:12.3px}
 .xr.h{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);padding:6px 10px}
 .xr.low{background:rgba(224,168,74,.07)}
-.xr.agent{background:rgba(110,168,254,.07)}
+.xr.agent{background:rgba(60,186,221,.07)}
 .xr.bad{background:rgba(239,107,115,.08)}
 .conf{display:flex;align-items:center;gap:5px;font-size:11.5px}
 .conf .bar{width:38px}
@@ -206,27 +207,27 @@ blockquote{margin:8px 0;padding:8px 12px;border-left:3px solid var(--accent);bac
 .mcard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;display:flex;gap:10px;align-items:center}
 .gm td,.gm th{text-align:center}.gm td:first-child,.gm th:first-child{text-align:left}
 .sw{width:30px;height:17px;border-radius:9px;background:var(--accent);position:relative;flex:none}
-.sw:after{content:"";position:absolute;right:2px;top:2px;width:13px;height:13px;border-radius:50%;background:#0f1115}
+.sw:after{content:"";position:absolute;right:2px;top:2px;width:13px;height:13px;border-radius:50%;background:#0c141c}
 .sw.off{background:#3a4150}.sw.off:after{left:2px;right:auto;background:#9aa3b2}
-.set{display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid #20252f}
+.set{display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid #1c2632}
 .set:first-of-type{border-top:0}
 /* mcp */
 .mcp{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px}
-pre.code{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:6px 0 0;white-space:pre-wrap;overflow-wrap:break-word;color:#cfd6e3}
-.tool{display:flex;gap:8px;align-items:center;padding:5px 0;border-top:1px solid #20252f}
+pre.code{background:#091017;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:6px 0 0;white-space:pre-wrap;overflow-wrap:break-word;color:#cfd6e3}
+.tool{display:flex;gap:8px;align-items:center;padding:5px 0;border-top:1px solid #1c2632}
 .tool:first-of-type{border-top:0}
 .tool code{color:var(--text);font-size:12px}
-.meter{height:10px;border-radius:5px;background:#262c38;overflow:hidden;display:flex}
+.meter{height:10px;border-radius:5px;background:#23303c;overflow:hidden;display:flex}
 .meter i{display:block;height:100%}
-.tip{position:fixed;pointer-events:none;background:#0b0d11;border:1px solid var(--line2);border-radius:7px;padding:6px 9px;font-size:11.5px;display:none;z-index:9;max-width:280px}
+.tip{position:fixed;pointer-events:none;background:#091017;border:1px solid var(--line2);border-radius:7px;padding:6px 9px;font-size:11.5px;display:none;z-index:9;max-width:280px}
 </style>
 </head>
 <body>
 <div class="app">
   <aside class="side">
     <div class="brand">
-      <div class="logo"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg></div>
-      <div>OwnHealth<small>self-hosted · v0.1 mockup</small></div>
+      <div class="logo"><svg width="28" height="28" viewBox="24 24 464 464" aria-hidden="true" style="display:block"><rect x="24" y="24" width="464" height="464" rx="132" fill="#eef4f6"/><path d="m158.7 358.3q-29 0-51.2-13.1t-34.9-36.1-12.6-52.7q0-29.9 12.6-52.9t34.7-36.1 50.8-13.1 50.8 13.1 34.8 36.1 12.6 52.9q0 29.7-12.5 52.7t-34.5 36.1-50.6 13.1zm0-41.8q15.8 0 27.9-7.6t18.7-21.3 6.7-31.2q0-17.8-6.9-31.4t-19.1-21.5q-12-7.8-27.9-7.8t-27.9 7.8-19 21.5-7 31.4q0 17.5 7 31.2t19.3 21.3 28.2 7.6z" fill="#0e7490"/><path d="m279 354.9v-197.8h45.4v76.2h82.2v-75.9h45.4v197.5h-45.4v-79.8h-82.2v79.8z" fill="#0f1e2e"/></svg></div>
+      <div><span class="own">Own</span>Health<small>self-hosted · v0.1 mockup</small></div>
     </div>
     <div class="plabel" data-i18n="household">Household</div>
     <div class="profiles" id="profiles"></div>
@@ -255,7 +256,7 @@ pre.code{background:#0b0d11;border:1px solid var(--line);border-radius:8px;paddi
 "use strict";
 /* ---------- state ---------- */
 const S={lang:"en",profile:"alex",unit:"mg",showApoe:false,tlTypes:new Set(),tlCountries:new Set(),sw:{}};
-const C={ok:"#3fb68b",watch:"#e0a84a",out:"#ef6b73",stale:"#9aa3b2",accent:"#6ea8fe",grid:"#232833",axis:"#7a8394"};
+const C={ok:"#3fb68b",watch:"#e0a84a",out:"#ef6b73",stale:"#9aa3b2",accent:"#3cbadd",grid:"#1f2b37",axis:"#7a8394"};
 const PROFILES=[
   {id:"alex",name:"Alex Rivera",role:"r_owner|47",av:"AR",col:"#6ea8fe",flags:4},
   {id:"sam",name:"Sam Rivera",role:"r_viewer|45",av:"SR",col:"#3fb68b",flags:1},
@@ -449,7 +450,7 @@ function ldlChart(){
   g+=`<polyline points="${pts.map(p=>p.join(",")).join(" ")}" fill="none" stroke="#8792a6" stroke-width="1.6"/>`;
   LDL.forEach((r,i)=>{const st=ldlStatus(r[1],r[4]);const [x,y]=pts[i];const c=C[st];
     const shape=r[2].startsWith("Quest")?`<circle cx="${x}" cy="${y}" r="5.5"/>`:r[2]==="LabNorte"?`<rect x="${x-5}" y="${y-5}" width="10" height="10" rx="1.5"/>`:r[2]==="Labor Berlin"?`<path d="M${x} ${y-7}L${x+7} ${y}L${x} ${y+7}L${x-7} ${y}Z"/>`:`<path d="M${x} ${y-6.5}L${x+6.5} ${y+5}L${x-6.5} ${y+5}Z"/>`;
-    g+=`<g fill="${c}" stroke="#0f1115" stroke-width="1.5" data-i="${i}" class="pt" style="cursor:pointer" tabindex="0" role="img" aria-label="${r[0]}: ${cv(r[1])} ${U()}">${shape}</g>`;
+    g+=`<g fill="${c}" stroke="#0c141c" stroke-width="1.5" data-i="${i}" class="pt" style="cursor:pointer" tabindex="0" role="img" aria-label="${r[0]}: ${cv(r[1])} ${U()}">${shape}</g>`;
     if(i===LDL.length-1||i===10)g+=`<text x="${x}" y="${y-11}" fill="${C.text||"#e6e8ee"}" font-size="11" font-weight="600" text-anchor="middle">${cv(r[1])}</text>`;
   });
   // med bars
@@ -457,7 +458,7 @@ function ldlChart(){
   g+=`<text x="${pl-7}" y="${my+9}" fill="${C.axis}" font-size="10.5" text-anchor="end">Meds</text>`;
   g+=`<rect x="${sx(yfrac("2022-06-20"))}" y="${my}" width="${sx(yfrac("2025-12-01"))-sx(yfrac("2022-06-20"))}" height="12" rx="3" fill="${C.accent}" opacity=".55"/>`;
   g+=`<rect x="${sx(yfrac("2026-03-10"))}" y="${my}" width="${sx(yfrac("2026-11-07"))-sx(yfrac("2026-03-10"))}" height="12" rx="3" fill="${C.accent}" opacity=".55"/>`;
-  g+=`<text x="${sx(yfrac("2022-06-20"))+6}" y="${my+9.5}" fill="#0c1222" font-size="10" font-weight="600">Atorvastatin 20 mg</text>`;
+  g+=`<text x="${sx(yfrac("2022-06-20"))+6}" y="${my+9.5}" fill="#0f1e2e" font-size="10" font-weight="600">Atorvastatin 20 mg</text>`;
   g+=`<text x="${sx(yfrac("2025-12-01"))+2}" y="${my+26}" fill="#8a93a5" font-size="10">paused (myalgia)</text>`;
   g+=`<text x="${pl-7}" y="${my+37}" fill="${C.axis}" font-size="10.5" text-anchor="end">Events</text>`;
   g+=`<circle cx="${sx(yfrac("2025-11-18"))}" cy="${my+33}" r="4" fill="#c39bd3"/><text x="${sx(yfrac("2025-11-18"))-7}" y="${my+37}" fill="#8a93a5" font-size="10" text-anchor="end">knee injury, ibuprofen</text>`;
@@ -494,7 +495,7 @@ function biomarker(){
     <div class="calc"><div class="row"><b>SCORE2, 10-year cardiovascular risk</b><span class="val dim" style="font-size:12px;font-weight:500">no data</span></div><div class="note" style="margin-top:2px">Example of a refusal: Not computed: no smoking status on record.</div><button class="btn sm" style="margin-top:6px">Record smoking status</button></div>
     <div class="note" style="margin-top:4px">Published formulas run on your recorded values. A family history flag (father, MI at 52) is not part of either score.</div></div>
    <div class="card"><h3>Related markers</h3>
-    ${[["ApoB","88 mg/dL","ok",[121,84,80,86,88]],["Non-HDL-C","128 mg/dL","ok",[192,121,115,138,128]],["Lp(a)","142 nmol/L","out",[138,142]],["Triglycerides","154 mg/dL","watch",[131,118,140,149,154]]].map(m=>`<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #20252f"><span style="flex:1">${m[0]}</span><span class="num" style="color:${m[2]==="ok"?"inherit":C[m[2]]};font-weight:600">${m[1]}</span>${spark(m[3],m[2],{w:60,h:20})}</div>`).join("")}
+    ${[["ApoB","88 mg/dL","ok",[121,84,80,86,88]],["Non-HDL-C","128 mg/dL","ok",[192,121,115,138,128]],["Lp(a)","142 nmol/L","out",[138,142]],["Triglycerides","154 mg/dL","watch",[131,118,140,149,154]]].map(m=>`<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #1c2632"><span style="flex:1">${m[0]}</span><span class="num" style="color:${m[2]==="ok"?"inherit":C[m[2]]};font-weight:600">${m[1]}</span>${spark(m[3],m[2],{w:60,h:20})}</div>`).join("")}
     <div class="note" style="margin-top:6px">Genome context, from OwnGenome: LPA rs10455872 A/G (E2, medium) fits the raised Lp(a). PCSK9: no loss-of-function variant.</div></div>
   </div></div>`;
 }
@@ -645,17 +646,17 @@ function drug(){
     ${[["Atorvastatin","20 mg","1 tablet daily · every evening · since <span class='num'>2026-03-10</span>","Reason: hypercholesterolaemia · Prescribed by: Dr. Synthetic",[["info","SLCO1B1 · Decreased function"]],["ATC C10AA05"],"Rx · src_m02"],
        ["Cenobamate","50 mg","1 tablet · at night · since <span class='num'>2026-04-01</span>","",[["watch","CYP2C19 inhibitor (moderate)"]],["ATC N03AX25"],"Rx · src_m05"],
        ["Vitamin D3","1000 IU <span class='chip'>Supplement</span>","1 capsule · once a day · since <span class='num'>2025-10-01</span>","",[],[],"entered by hand"]]
-      .map(m=>`<div style="padding:7px 0;border-top:1px solid #20252f"><div style="display:flex;gap:8px;align-items:flex-start"><div style="flex:1"><div><b>${m[0]}</b> ${m[1]}</div><div class="muted" style="font-size:12px;margin-top:2px">${m[2]}</div>${m[3]?`<div class="dim" style="font-size:12px">${m[3]}</div>`:""}<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px">${m[4].map(b=>pill(b[0],b[1])).join("")}${m[5].map(c=>`<span class="chip mono" title="Codes as the source sent them">${c}</span>`).join("")}${src(m[6])}</div></div><button class="btn sm">Correct</button></div></div>`).join("")}</div>
+      .map(m=>`<div style="padding:7px 0;border-top:1px solid #1c2632"><div style="display:flex;gap:8px;align-items:flex-start"><div style="flex:1"><div><b>${m[0]}</b> ${m[1]}</div><div class="muted" style="font-size:12px;margin-top:2px">${m[2]}</div>${m[3]?`<div class="dim" style="font-size:12px">${m[3]}</div>`:""}<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px">${m[4].map(b=>pill(b[0],b[1])).join("")}${m[5].map(c=>`<span class="chip mono" title="Codes as the source sent them">${c}</span>`).join("")}${src(m[6])}</div></div><button class="btn sm">Correct</button></div></div>`).join("")}</div>
    <div class="card"><h3>History</h3><div class="dim" style="font-size:11.5px;margin:-4px 0 6px">every course and version, grouped by medicine</div>
     ${[["Cenobamate",[["2026-04-01 → ongoing","Taking","50 mg · 1 tablet · at night",""]]],
        ["Atorvastatin",[["2026-03-10 → ongoing","Taking","20 mg · 1 tablet daily",""],["2022-06-20 → 2025-12-01","Stopped","20 mg · 1 tablet daily","Reason: paused"]]],
        ["Vitamin D3",[["2025-10-01 → ongoing","Taking","1000 IU · once a day",""],["2025-10-01","Corrected","400 IU · once a day","dose corrected"]]]]
-      .map(g=>`<div style="padding:7px 0;border-top:1px solid #20252f"><b>${g[0]}</b><ol style="list-style:none;margin:4px 0 0;padding:0 0 0 10px;border-left:2px solid var(--line2);font-size:12px;display:grid;gap:3px">${g[1].map(e=>`<li style="${e[1]==="Corrected"?"opacity:.7":""}"><span class="num">${e[0]}</span> <span class="muted">· ${e[1]} · ${e[2]}${e[3]?" · "+e[3]:""}</span></li>`).join("")}</ol></div>`).join("")}</div>
+      .map(g=>`<div style="padding:7px 0;border-top:1px solid #1c2632"><b>${g[0]}</b><ol style="list-style:none;margin:4px 0 0;padding:0 0 0 10px;border-left:2px solid var(--line2);font-size:12px;display:grid;gap:3px">${g[1].map(e=>`<li style="${e[1]==="Corrected"?"opacity:.7":""}"><span class="num">${e[0]}</span> <span class="muted">· ${e[1]} · ${e[2]}${e[3]?" · "+e[3]:""}</span></li>`).join("")}</ol></div>`).join("")}</div>
   </div>
   <div class="card" style="margin-bottom:14px"><h3>Supplements and decisions</h3><div class="dim" style="font-size:11.5px;margin:-4px 0 6px">The decision recorded on each supplement, with a photo of its label. A recorded choice, not a recommendation.</div>
    ${[["Vitamin D3","2000 IU","ok","Taking","keep","2026-04-02","I take it from November to March",true],
       ["Omega-3","1000 mg","stale","Stopped","do not buy again","2026-02-11","The capsules are too large",false]]
-     .map(m=>`<div style="display:flex;gap:12px;align-items:flex-start;padding:9px 0;border-top:1px solid #20252f">${m[7]?`<div title="Open the label photo" style="width:64px;height:64px;border-radius:8px;border:1px solid var(--line2);background:#f3ecdc;display:grid;align-content:center;justify-items:center;gap:3px;flex:none"><i style="display:block;width:64px;height:12px;background:#e0a13a;margin-top:-6px"></i><b style="color:#2a2a2a;font-size:8px;letter-spacing:.04em">VITAMINA D3</b><b style="color:#b55a12;font-size:11px">2000 UI</b></div>`:`<div style="width:64px;height:64px;border-radius:8px;border:1px solid var(--line2);display:grid;place-items:center;color:var(--muted);flex:none"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="6" width="18" height="14" rx="2"/><circle cx="12" cy="13" r="3.5"/><path d="M8 6l1.5-2h5L16 6"/></svg></div>`}<div style="flex:1"><div><b>${m[0]}</b> ${m[1]} ${pill(m[2],m[3])}</div><div style="font-size:12px;margin-top:3px">Decision: <b>${m[4]}</b> <span class="muted">· on ${m[5]}</span> ${src("entered by hand")}</div><div class="dim" style="font-size:12px">Reason: ${m[6]}</div><div style="display:flex;gap:8px;margin-top:7px;flex-wrap:wrap"><div class="seg">${["keep","stop","do not buy again"].map(d=>`<button class="${d===m[4]?"on":""}">${d}</button>`).join("")}</div><button class="btn sm">${m[7]?"New label photo":"Add label photo"}</button></div></div></div>`).join("")}</div>
+     .map(m=>`<div style="display:flex;gap:12px;align-items:flex-start;padding:9px 0;border-top:1px solid #1c2632">${m[7]?`<div title="Open the label photo" style="width:64px;height:64px;border-radius:8px;border:1px solid var(--line2);background:#f3ecdc;display:grid;align-content:center;justify-items:center;gap:3px;flex:none"><i style="display:block;width:64px;height:12px;background:#e0a13a;margin-top:-6px"></i><b style="color:#2a2a2a;font-size:8px;letter-spacing:.04em">VITAMINA D3</b><b style="color:#b55a12;font-size:11px">2000 UI</b></div>`:`<div style="width:64px;height:64px;border-radius:8px;border:1px solid var(--line2);display:grid;place-items:center;color:var(--muted);flex:none"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="6" width="18" height="14" rx="2"/><circle cx="12" cy="13" r="3.5"/><path d="M8 6l1.5-2h5L16 6"/></svg></div>`}<div style="flex:1"><div><b>${m[0]}</b> ${m[1]} ${pill(m[2],m[3])}</div><div style="font-size:12px;margin-top:3px">Decision: <b>${m[4]}</b> <span class="muted">· on ${m[5]}</span> ${src("entered by hand")}</div><div class="dim" style="font-size:12px">Reason: ${m[6]}</div><div style="display:flex;gap:8px;margin-top:7px;flex-wrap:wrap"><div class="seg">${["keep","stop","do not buy again"].map(d=>`<button class="${d===m[4]?"on":""}">${d}</button>`).join("")}</div><button class="btn sm">${m[7]?"New label photo":"Add label photo"}</button></div></div></div>`).join("")}</div>
   <h2 style="font-size:15px;font-weight:620;margin:4px 0 10px">Check a drug</h2>
   <div class="search" style="max-width:none;height:42px;margin-bottom:12px;background:var(--raised)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9aa3b2" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input value="clopidogrel" style="font-size:15px"><span class="chip">Plavix</span><span class="chip">antiplatelet</span></div>
   <div class="drug"><div class="grid" style="align-content:start">
@@ -671,13 +672,13 @@ function drug(){
     <blockquote>Recommendation shown verbatim from the CPIC 2022 guideline, neurovascular section. <span class="dim">Classification: moderate</span></blockquote>
     <div class="dim" style="font-size:11px">Lee CR et al. CPIC guideline for CYP2C19 and clopidogrel therapy: 2022 update. Clin Pharmacol Ther 2022 · https://pubmed.ncbi.nlm.nih.gov/35034351/ · https://cpicpgx.org/guidelines/guideline-for-clopidogrel-and-cyp2c19/</div>
     <div class="note" style="margin-top:8px">The indication decides which recommendation applies. The app does not know the indication, so it shows both.</div>
-    <div style="margin-top:10px;padding-top:8px;border-top:1px solid #20252f"><div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em">DPWG 4 · CYP2C19 Intermediate Metabolizer (genotype)</div>
+    <div style="margin-top:10px;padding-top:8px;border-top:1px solid #1c2632"><div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em">DPWG 4 · CYP2C19 Intermediate Metabolizer (genotype)</div>
     <blockquote>"Synthetic paraphrase: the genome file's own DPWG text for this phenotype sits here." <span class="chip" style="font-size:10px;color:var(--watch);border-color:rgba(224,168,74,.45)">untrusted</span></blockquote>
     <div class="dim" style="font-size:11px">Quoted from the genome file as received, for the genotype phenotype. <span class="phase">v0.3</span></div></div></div>
    <div class="card"><h3>Phenoconversion <span class="r">rule pgx_phenoconversion.yaml v0.2.0 · FDA CYP inhibitor table</span></h3>
     <div style="display:flex;gap:10px;align-items:center"><span class="pill p-stale"><i></i>Not computed</span><span>You take <b>cenobamate</b> 50 mg, a moderate CYP2C19 inhibitor in the FDA table. CPIC has no conversion rule for CYP2C19, so the effect on your phenotype is not computed. The genotype phenotype above stays as called.</span></div></div>
    <div class="card"><h3>Relevant labs <span class="r">latest</span></h3>
-    ${[["Platelets","231 ×10⁹/L","ok","LabNorte · 2026-09-14 · p1"],["Haemoglobin","15.1 g/dL","ok","LabNorte · 2026-09-14 · p1"],["eGFR (CKD-EPI 2021)","94 mL/min/1.73m²","ok","calc · 2026-09-14"],["ALT","24 U/L","ok","LabNorte · 2026-09-14 · p1"]].map(l=>`<div style="display:flex;gap:10px;align-items:center;padding:5px 0;border-top:1px solid #20252f"><span style="flex:1">${l[0]}</span>${src(l[3])}<span class="num" style="font-weight:600;width:130px;text-align:right">${l[1]}</span>${pill(l[2])}</div>`).join("")}</div>
+    ${[["Platelets","231 ×10⁹/L","ok","LabNorte · 2026-09-14 · p1"],["Haemoglobin","15.1 g/dL","ok","LabNorte · 2026-09-14 · p1"],["eGFR (CKD-EPI 2021)","94 mL/min/1.73m²","ok","calc · 2026-09-14"],["ALT","24 U/L","ok","LabNorte · 2026-09-14 · p1"]].map(l=>`<div style="display:flex;gap:10px;align-items:center;padding:5px 0;border-top:1px solid #1c2632"><span style="flex:1">${l[0]}</span>${src(l[3])}<span class="num" style="font-weight:600;width:130px;text-align:right">${l[1]}</span>${pill(l[2])}</div>`).join("")}</div>
   </div>
   <div class="grid" style="align-content:start">
    <div class="card"><h3>Current medicines and supplements</h3>
@@ -689,7 +690,7 @@ function drug(){
     <div class="note" style="margin-top:6px">not_assessed: drug-drug interactions (no open-licence source configured).</div></div>
    <div class="card"><h3>Allergies and intolerances</h3><div class="muted">No drug allergy on record · statin myalgia 2025 (intolerance, not allergy)</div></div>
   </div></div>
-  <div class="disc"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v.5M12 11v5"/></svg>
+  <div class="disc"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3cbadd" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v.5M12 11v5"/></svg>
    <div><b>Information, not diagnosis. Discuss with your prescriber</b> before starting, stopping or changing any medicine. This page quotes published guidelines; it does not recommend a treatment.</div>
    <span class="mono" style="margin-left:auto;font-size:11px;color:var(--muted);white-space:nowrap">MCP: check_drug(profile="alex", drug="clopidogrel")</span></div>`;
 }
@@ -720,7 +721,7 @@ function wearables(){
     <div style="display:flex;height:26px;border-radius:6px;overflow:hidden;margin:8px 0 6px">
      <div style="width:0.5%;background:#a33b44"></div><div style="width:1.5%;background:#ef6b73"></div><div style="width:94%;background:#3fb68b;display:grid;place-items:center;color:#0c1a14;font-weight:700;font-size:12px">94% in range</div><div style="width:3.5%;background:#e0a84a"></div><div style="width:0.5%;background:#c97b2a"></div></div>
     <div class="legend" style="font-size:11px;flex-wrap:nowrap;gap:10px"><span>&lt;54: 0.5%</span><span>54-69: 1.5%</span><span style="color:var(--ok)">70-180: 94%</span><span>181-250: 3.5%</span><span>&gt;250: 0.5%</span></div>
-    <div style="border-top:1px solid #20252f;margin-top:10px;padding-top:8px"><h3 style="margin-bottom:2px">Blood pressure, AM / PM<span class="r">avg 122/77 AM · 127/80 PM</span></h3>
+    <div style="border-top:1px solid #1c2632;margin-top:10px;padding-top:8px"><h3 style="margin-bottom:2px">Blood pressure, AM / PM<span class="r">avg 122/77 AM · 127/80 PM</span></h3>
     ${tsChart({h:150,series:[{vals:sys,color:"#8fb4f6",dots:true},{vals:sysPm,color:"#c39bd3",dots:true},{vals:dia,color:"#8fb4f6",dash:true},{vals:diaPm,color:"#c39bd3",dash:true}],yMin:60,yMax:140,ticks:[60,80,100,120,140],xlabels:[[0,"Oct 25"],[13,"Nov 7"]],refLine:130})}
     <div style="display:flex;justify-content:space-between">${src("Withings BPM · 26 readings")}<span class="legend" style="font-size:11px"><span style="color:#8fb4f6">● AM</span><span style="color:#c39bd3">● PM</span><span>dashed: diastolic</span></span></div></div>
    </div>
@@ -774,7 +775,7 @@ function imaging(){
      <p style="margin:0 0 8px"><b>Hallazgos.</b> Rotura horizontal del cuerno posterior del menisco interno que alcanza la superficie articular inferior. Menisco externo sin alteraciones. Ligamentos cruzados y colaterales íntegros. Leve derrame articular. Cartílago femorotibial conservado.</p>
      <p style="margin:0 0 8px"><b>Impresión.</b> Rotura del cuerno posterior del menisco interno. Derrame articular leve.</p>
     </div>
-    <div style="border-top:1px solid #20252f;padding-top:8px;margin-top:4px">
+    <div style="border-top:1px solid #1c2632;padding-top:8px;margin-top:4px">
      <table class="t" style="font-size:11.5px"><tbody>
       <tr><td class="dim">Modality</td><td>MR</td></tr><tr><td class="dim">StudyInstanceUID</td><td class="mono" style="font-size:10.5px">1.2.826.0.1.3680043.…4417</td></tr>
       <tr><td class="dim">Series / instances</td><td>3 / 412</td></tr><tr><td class="dim">Stored</td><td>Orthanc · 186 MB · sha256 verified</td></tr>
@@ -836,7 +837,7 @@ function importReview(){
       <div class="conf">${r[6]==="bad"?'<span class="pill p-out"><i></i>quarantined</span>':`<div class="bar"><i style="width:${r[5]*100}%;background:${r[5]>.9?C.ok:C.watch}"></i></div><span class="num">${r[5].toFixed(2)}</span>`}</div>
       <div class="acts" style="justify-content:flex-end">${r[6]==="bad"?'<button class="btn sm">View</button><button class="btn sm no">Discard</button>':'<button class="btn sm ok">✓</button><button class="btn sm">Edit</button><button class="btn sm no">✕</button>'}</div>${r[7]?`<div style="grid-column:2/-1;font-size:11px;color:${r[6]==="bad"?C.out:r[6]==="agent"?C.accent:C.watch}">${r[6]==="agent"?"◆ ":r[6]==="bad"?"⚠ ":"● "}${r[7]}</div>`:""}</div>`).join("")}
     <div style="padding:10px 12px;display:flex;flex-direction:column;gap:6px">
-     <div class="muted" style="font-size:11.5px"><span class="chip" style="color:var(--accent);border-color:rgba(110,168,254,.5)">agent</span> Token "Claude Code · laptop" called <span class="mono">propose(kind="observations")</span> at 2026-11-07 06:58 after reading page 3 via <span class="mono">get_document_page</span> <span class="phase">v0.2</span>. Validation: LOINC exists, UCUM converts, value plausible, value found in the page word layer.</div>
+     <div class="muted" style="font-size:11.5px"><span class="chip" style="color:var(--accent);border-color:rgba(60,186,221,.5)">agent</span> Token "Claude Code · laptop" called <span class="mono">propose(kind="observations")</span> at 2026-11-07 06:58 after reading page 3 via <span class="mono">get_document_page</span> <span class="phase">v0.2</span>. Validation: LOINC exists, UCUM converts, value plausible, value found in the page word layer.</div>
      <div class="muted" style="font-size:11.5px"><span class="chip" style="color:var(--out);border-color:rgba(239,107,115,.5)">untrusted</span> The Observaciones block contains instructions aimed at an AI. It stays in the document, is marked <span class="mono">trust: untrusted_text</span>, and is never imported as a value. No MCP tool can share or export data.</div>
     </div>
    </div>
@@ -844,8 +845,8 @@ function importReview(){
 }
 /* ---------- 9. family ---------- */
 function pedigree(){
-  const sq=(x,y,o={})=>`<rect x="${x-18}" y="${y-18}" width="36" height="36" fill="${o.fill||"#1d222c"}" stroke="${o.ring||"#9aa3b2"}" stroke-width="${o.ring?3:1.6}"/>`;
-  const ci=(x,y,o={})=>`<circle cx="${x}" cy="${y}" r="19" fill="${o.fill||"#1d222c"}" stroke="${o.ring||"#9aa3b2"}" stroke-width="${o.ring?3:1.6}"/>`;
+  const sq=(x,y,o={})=>`<rect x="${x-18}" y="${y-18}" width="36" height="36" fill="${o.fill||"#1a2430"}" stroke="${o.ring||"#9aa3b2"}" stroke-width="${o.ring?3:1.6}"/>`;
+  const ci=(x,y,o={})=>`<circle cx="${x}" cy="${y}" r="19" fill="${o.fill||"#1a2430"}" stroke="${o.ring||"#9aa3b2"}" stroke-width="${o.ring?3:1.6}"/>`;
   const dot=(x,y)=>`<circle cx="${x}" cy="${y}" r="5" fill="#e0a84a"/>`;
   const lab=(x,y,l1,l2,c="#e6e8ee")=>`<text x="${x}" y="${y}" fill="${c}" font-size="12" text-anchor="middle" font-weight="600">${l1}</text><text x="${x}" y="${y+14}" fill="#9aa3b2" font-size="10.5" text-anchor="middle">${l2}</text>`;
   let g="";
@@ -865,7 +866,7 @@ function pedigree(){
   // gen III
   g+=ci(395,298,{ring:"#e0a84a"})+lab(395,338,"Lucía Rivera","9 · minor · no carrier data shown");
   // legend
-  g+=`<g transform="translate(600,250)"><circle cx="8" cy="0" r="5" fill="#e0a84a"/><text x="20" y="4" fill="#9aa3b2" font-size="11">carrier (GJB2)</text><rect x="1" y="16" width="14" height="14" fill="#4a2a30" stroke="#9aa3b2"/><text x="20" y="27" fill="#9aa3b2" font-size="11">affected (CVD)</text><circle cx="8" cy="48" r="7" fill="none" stroke="#6ea8fe" stroke-width="3"/><text x="20" y="52" fill="#9aa3b2" font-size="11">app profile</text><line x1="0" y1="72" x2="16" y2="72" stroke="#5a6272" stroke-dasharray="4 3"/><text x="20" y="76" fill="#9aa3b2" font-size="11">other family</text></g>`;
+  g+=`<g transform="translate(600,250)"><circle cx="8" cy="0" r="5" fill="#e0a84a"/><text x="20" y="4" fill="#9aa3b2" font-size="11">carrier (GJB2)</text><rect x="1" y="16" width="14" height="14" fill="#4a2a30" stroke="#9aa3b2"/><text x="20" y="27" fill="#9aa3b2" font-size="11">affected (CVD)</text><circle cx="8" cy="48" r="7" fill="none" stroke="#3cbadd" stroke-width="3"/><text x="20" y="52" fill="#9aa3b2" font-size="11">app profile</text><line x1="0" y1="72" x2="16" y2="72" stroke="#5a6272" stroke-dasharray="4 3"/><text x="20" y="76" fill="#9aa3b2" font-size="11">other family</text></g>`;
   return `<svg width="100%" viewBox="0 0 760 360">${g}</svg>`;
 }
 function family(){
@@ -880,7 +881,7 @@ function family(){
   <div class="fam"><div class="grid" style="align-content:start">
    <div class="card"><h3>Pedigree<span class="r">standard symbols · names can be hidden</span></h3><div class="muted" style="font-size:12px;display:flex;gap:10px;align-items:center;margin-bottom:6px"><span class="sw"></span>Hide names <span class="dim">on by default, so a screenshot or a printout shows no names</span><span style="flex:1"></span><button class="btn">Add to family history</button></div>${pedigree()}<div class="dim" style="font-size:11.5px">Click a relative to edit them: relationship, year of birth, age at death, conditions with age at onset, and the link to their own profile here.</div></div>
    <div class="card"><h3>Family patterns<span class="r">from guidelines and family history guidance · information, not a diagnosis</span></h3><div style="border:1px solid var(--watch);background:var(--watch-bg);border-radius:8px;padding:6px 9px"><div style="font-size:12.5px"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--watch);margin-right:6px"></span><b>Heart or artery disease at a young age in a parent or sibling</b></div><div class="muted" style="font-size:12px">The guideline lists a parent or sibling with heart or artery disease before 55 (men) or 65 (women) as a risk-enhancing factor.</div><div class="dim" style="font-size:11px;margin-top:4px;display:flex;gap:8px;flex-wrap:wrap">Father · MI <span class="chip">ACC/AHA 2026 dyslipidemia, Table 13</span><span class="mono" style="font-size:10px">fam.ascvd</span></div></div><div class="dim" style="font-size:11.5px;margin-top:6px">Picking a pattern rings its relatives in the pedigree. Patterns read the condition picked from the list and its age at onset. A condition written in by hand (other) never counts.</div><div class="mono dim" style="font-size:10px;margin-top:4px">patterns.yaml 0.1.0</div></div>
-   <div class="card"><h3>Hints from relatives<span class="r">shared by a relative · information, not a diagnosis</span></h3><div class="banner" style="margin:0;align-items:flex-start;border-color:rgba(110,168,254,.45);background:linear-gradient(90deg,rgba(110,168,254,.12),rgba(110,168,254,.03))"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v.5M12 11v5"/></svg>
+   <div class="card"><h3>Hints from relatives<span class="r">shared by a relative · information, not a diagnosis</span></h3><div class="banner" style="margin:0;align-items:flex-start;border-color:rgba(60,186,221,.45);background:linear-gradient(90deg,rgba(60,186,221,.12),rgba(60,186,221,.03))"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3cbadd" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v.5M12 11v5"/></svg>
     <div><b style="font-size:12.5px">A first-degree relative has LDL cholesterol of 190 mg/dL (4.9 mmol/L) or more</b><div class="muted" style="font-size:12px">The guideline treats LDL cholesterol of 190 mg/dL (4.9 mmol/L) or more as severe hypercholesterolemia, which can be inherited, and describes lipid testing in the family.</div><div class="dim" style="font-size:11px;margin-top:4px;display:flex;gap:8px;flex-wrap:wrap">Relative: Mother <span class="chip">AHA/ACC 2018 cholesterol guideline</span><span class="mono" style="font-size:10px">lab.ldl_fh</span></div></div></div><div class="dim" style="font-size:11.5px;margin-top:6px">A relative chose to let this result feed a hint here. It names no person, value or date, and it goes away as soon as they stop sharing. A genetic finding reads "A relative shared a genetic finding" where sensitive results are off; minors are never a source, and never get a genetic hint.</div></div>
   </div>
   <div class="grid" style="align-content:start">
@@ -1068,7 +1069,7 @@ function wire(){
   const hd=document.getElementById("hideapoe");if(hd)hd.onclick=e=>{e.preventDefault();S.showApoe=false;render()};
   const cp=document.getElementById("copy");if(cp)cp.onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText(document.getElementById("snip").textContent);cp.textContent="Copied"};
   const svg=document.getElementById("ldl");
-  if(svg)svg.querySelectorAll(".pt").forEach(p=>{const r=LDL[+p.dataset.i];p.onmousemove=e=>tip(e,`<b>${cv(r[1])} ${U()}</b> · ${pill(ldlStatus(r[1],r[4]))}<br>${r[0]} · ${r[2]} (${r[3]}) · ${r[7]}<br><span class="dim">printed range ${r[4]} mg/dL · LOINC ${r[5]}</span><br><span style="color:#6ea8fe">open source page ${r[6]} →</span>`);p.onmouseleave=e=>tip(e,null);p.onfocus=()=>{const b=p.getBoundingClientRect();p.onmousemove({clientX:b.right,clientY:b.bottom})};p.onblur=e=>tip(e,null)});
+  if(svg)svg.querySelectorAll(".pt").forEach(p=>{const r=LDL[+p.dataset.i];p.onmousemove=e=>tip(e,`<b>${cv(r[1])} ${U()}</b> · ${pill(ldlStatus(r[1],r[4]))}<br>${r[0]} · ${r[2]} (${r[3]}) · ${r[7]}<br><span class="dim">printed range ${r[4]} mg/dL · LOINC ${r[5]}</span><br><span style="color:#3cbadd">open source page ${r[6]} →</span>`);p.onmouseleave=e=>tip(e,null);p.onfocus=()=>{const b=p.getBoundingClientRect();p.onmousemove({clientX:b.right,clientY:b.bottom})};p.onblur=e=>tip(e,null)});
   const key=f=>e=>{if(e.key===" "||e.key==="Enter"){e.preventDefault();if(!e.repeat)f()}};
   const rt=location.hash.slice(1)||"dashboard";
   document.querySelectorAll(".sw[role=switch]").forEach((w,i)=>{const k=rt+":"+i;if(k in S.sw){w.classList.toggle("off",!S.sw[k]);w.setAttribute("aria-checked",String(S.sw[k]))}const t=()=>{const off=w.classList.toggle("off");w.setAttribute("aria-checked",String(!off));S.sw[k]=!off};w.onclick=t;w.onkeydown=key(t);const l=w.nextElementSibling&&w.nextElementSibling.querySelector("div");if(l)w.setAttribute("aria-label",l.textContent)});
