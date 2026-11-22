@@ -138,7 +138,33 @@ test('a person sees rows only for the members their grants cover', async ({ brow
 		const lucia = rowOf(page, 'Lucía Rivera');
 		await expect(lucia).toContainText(locked);
 		await expect(lucia.getByRole('cell').nth(1)).toHaveText('—');
+		// the lock is decoration: a screen reader hears the words, not the emoji
+		for (const row of [rowOf(page, 'Alex Rivera'), lucia]) {
+			await expect(row.getByText('🔒')).toHaveAttribute('aria-hidden', 'true');
+			expect(await row.ariaSnapshot()).not.toContain('🔒');
+		}
 	}
+	await pat.close();
+});
+
+test('a member whose grant goes away while the page is open reads Not shared, not an error', async ({ browser, baseURL }) => {
+	const pat = await invited(browser, baseURL!, [
+		{ profile: 'alex', role: 'viewer' },
+		{ profile: 'lucia', role: 'viewer' }
+	]);
+	const page = await pat.newPage();
+	// Pat holds no grant on Sam, so Sam's status is the server's own answer for a grant that is gone
+	const gone = await page.request.get('/api/profiles/sam/status');
+	expect([gone.status(), (await gone.json()).detail.code]).toEqual([404, 'profile_not_granted']);
+	await page.route('**/api/profiles/alex/status*', async (route) =>
+		route.fulfill({ response: await route.fetch({ url: route.request().url().replace('/profiles/alex/', '/profiles/sam/') }) })
+	);
+	await page.goto('/?lang=en');
+	const alex = rowOf(page, 'Alex Rivera');
+	await expect(alex).toContainText('Not shared');
+	await expect(alex).not.toContainText('Could not load');
+	await expect(alex.getByRole('cell').nth(1)).toHaveText('—');
+	await expect(rowOf(page, 'Lucía Rivera').getByRole('cell').nth(1)).toHaveText(/^\d+$/);
 	await pat.close();
 });
 
