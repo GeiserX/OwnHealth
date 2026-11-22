@@ -44,7 +44,7 @@
 	const THRESHOLD = 0.95;
 	const prof = $derived(currentProfile());
 	// sources is null when the inbox list failed for another reason than "not yours to manage".
-	const queue = new Loader<{ items: ReviewItem[]; docs: DocumentSummary[]; jobs: JobInfo[]; sources: InboxSource[] | null }>();
+	const queue = new Loader<{ items: ReviewItem[]; docs: DocumentSummary[]; fhirDoc: DocumentSummary | null; jobs: JobInfo[]; sources: InboxSource[] | null }>();
 	// "Not a duplicate? reject" waits for a second click: it retracts this document.
 	let confirmDup = $state(false);
 	const doc = new Loader<DocumentDetail>();
@@ -79,15 +79,17 @@
 		const slug = prof?.slug;
 		if (!slug) return;
 		queue.run(async () => {
-			const [r, d, j, s] = await Promise.all([
+			const [r, d, f, j, s] = await Promise.all([
 				listReview({ status: 'open', profile: slug }),
 				listDocuments(slug).catch(() => ({ items: [] as DocumentSummary[] })),
+				// the FHIR tile's newest import, whatever the evidence order of the list above puts first
+				listDocuments(slug, { latest: 'fhir', limit: 1 }).then((x) => x.items[0] ?? null, () => null),
 				listJobs().catch(() => ({ jobs: [] as JobInfo[] })),
 				// The inbox tile; a viewer who cannot manage sources (403) just sees the setup tile. Any other
 				// failure leaves the tile at '—' rather than claiming there is no inbox.
 				listInboxes().catch((e) => (e instanceof ApiError && e.status === 403 ? { items: [] as InboxSource[] } : { items: null }))
 			]);
-			return { items: r.items, docs: d.items, jobs: j.jobs, sources: s.items };
+			return { items: r.items, docs: d.items, fhirDoc: f, jobs: j.jobs, sources: s.items };
 		}, slug);
 	}
 	$effect(() => {
@@ -255,13 +257,13 @@
 	const latest = (kind: string) => (queue.data?.jobs ?? []).find((j) => j.kind === kind) ?? null;
 	const latestDoc = (type: string) => (queue.data?.docs ?? []).find((d) => d.doc_type === type) ?? null;
 	const count = (...kinds: string[]) => items.filter((i) => kinds.includes(i.kind)).length;
-	// A connector pull runs no import job: the tile then names the bundle of its newest item.
-	const fhir = $derived(fhirTileSource(latest('import.fhir_bundle'), items));
+	// A connector pull runs no import job: the tile then names the newest FHIR document itself.
+	const fhir = $derived(fhirTileSource(latest('import.fhir_bundle'), queue.data?.fhirDoc ?? null));
 	const tiles = $derived([
 		{ k: 'i2_in_lab', d: latest('import.pdf'), doc: latestDoc('lab_report'), n: count('candidate_row', 'document_identity', 'amended_report', 'pending_document') },
 		// An Apple Health export goes straight in; nothing from it waits for review.
 		{ k: 'i2_in_apple', d: latest('import.apple_health'), doc: (queue.data?.docs ?? []).find((x) => x.flags?.apple_health) ?? null, n: 0 },
-		{ k: 'i2_in_fhir', d: fhir.job, doc: docOf(fhir.documentId), n: count(...FHIR_ITEM_KINDS) },
+		{ k: 'i2_in_fhir', d: fhir.job, doc: fhir.doc, n: count(...FHIR_ITEM_KINDS) },
 		{ k: 'i2_in_genome', d: latest('import.genome_facts'), doc: latestDoc('genomics'), n: count('genome_reinterpretation') },
 		{ k: 'i2_in_agent', d: null, n: count('agent_proposal'), sub: 'write:propose' },
 	]);

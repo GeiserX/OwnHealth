@@ -1,8 +1,9 @@
 // The review page shows the one item a connector pull files per resource type the app does not show
 // yet (fhir_unmapped_summary), in en and es: the connection, the count and the type, a link to the
 // pulled bundle through the document route the profile's queue already uses, and Dismiss. No raw key
-// shows. The poller is slice 15, so the bundle is uploaded and the item is seeded with psql into the
-// database serve.sh made, as the importer writes it.
+// shows. The FHIR tile names the pull's bundle, before and after its items are handled. The poller is
+// slice 15, so the bundle is uploaded, its import job is removed (a pull runs none), and the item is
+// seeded with psql into the database serve.sh made, as the importer writes it.
 import { expect, test, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 
@@ -55,6 +56,11 @@ test('a pull’s grouped item reads in en and es, opens its bundle and is dismis
 	const docOf = () => sql(`select d.id from document d join profile p on p.id = d.profile_id where p.slug = 'alex' and d.blob_sha256 = decode('${sha}', 'hex')`);
 	await expect.poll(docOf, { timeout: 20_000 }).toMatch(/^[0-9a-f-]{36}$/);
 	const doc = docOf();
+	// a connector pull runs no import job: once it is done, drop it, so only the document names the import
+	const jobOf = `select state from job where kind = 'import.fhir_bundle' and payload->>'blob_sha256' = '${sha}'`;
+	await expect.poll(() => sql(jobOf), { timeout: 20_000 }).toBe('done');
+	sql(`delete from job where kind = 'import.fhir_bundle' and payload->>'blob_sha256' = '${sha}'`);
+	expect(sql(jobOf)).toBe('');
 	const claims = seedSummary(doc, 'ExplanationOfBenefit', 12000);
 	const cover = seedSummary(doc, 'Coverage', 1);
 
@@ -70,8 +76,11 @@ test('a pull’s grouped item reads in en and es, opens its bundle and is dismis
 	const fhirOpen = sql(
 		`select count(*) from review_item r join profile p on p.id = r.profile_id where p.slug = 'alex' and r.status = 'open' and r.kind in ('fhir_unmapped', 'fhir_unmapped_summary')`
 	);
-	await expect(page.locator('.ib', { hasText: 'FHIR / IPS' }).locator('.c')).toHaveText(fhirOpen);
+	const tile = page.locator('.ib', { hasText: 'FHIR / IPS' });
+	await expect(tile.locator('.c')).toHaveText(fhirOpen);
 	expect(Number(fhirOpen)).toBeGreaterThanOrEqual(2);
+	// with no import job, the tile names the newest FHIR document: the pull's bundle
+	await expect(tile).toContainText('Hospital LabNorte · pull.json');
 
 	// the bundle opens through the document route, as the person who sees this queue
 	const open = row.getByRole('link', { name: 'Open the downloaded file' });
@@ -93,5 +102,11 @@ test('a pull’s grouped item reads in en and es, opens its bundle and is dismis
 	await row.getByRole('button', { name: 'Descartar' }).click();
 	await expect(row).toHaveCount(0);
 	expect(sql(`select status from review_item where id = '${claims}'`)).toBe('dismissed');
+	await page.locator(`#oi-${cover.slice(0, 8)}`).getByRole('button', { name: 'Descartar' }).click();
+	await expect(page.locator(`#oi-${cover.slice(0, 8)}`)).toHaveCount(0);
+	// every item of the pull handled: the tile still names its bundle, never "nothing imported yet"
+	await page.reload();
+	await expect(tile).toContainText('Hospital LabNorte · pull.json');
+	await expect(tile).not.toContainText('nada importado aún');
 	expect(errors).toEqual([]);
 });

@@ -34,17 +34,24 @@ test('every summary text exists in es and en, with the count in the plural and t
 	}
 });
 
-test('the FHIR tile names a pull’s bundle: a pull runs no import job', () => {
-	const summary = { kind: 'fhir_unmapped_summary', document_id: 'pull-doc', created_at: '2026-11-22T09:00:00Z' };
-	const other = { kind: 'candidate_row', document_id: 'pdf-doc', created_at: '2026-11-22T10:00:00Z' };
-	// no job at all: the pull's document, never "nothing imported yet"
-	assert.deepEqual(fhirTileSource(null, [summary, other]), { job: null, documentId: 'pull-doc' });
-	const job = { created_at: '2026-11-21T08:00:00Z', finished_at: '2026-11-21T08:00:05+00:00' };
-	// a file job older than the pull's item: still the pull
-	assert.deepEqual(fhirTileSource(job, [summary]), { job: null, documentId: 'pull-doc' });
-	// a newer job wins, and with no FHIR item the job stays
-	const later = { created_at: '2026-11-22T11:00:00Z', finished_at: '2026-11-22T11:00:02Z' };
-	assert.deepEqual(fhirTileSource(later, [summary]), { job: later, documentId: null });
-	assert.deepEqual(fhirTileSource(job, [other]), { job, documentId: null });
-	assert.deepEqual(fhirTileSource(null, []), { job: null, documentId: null });
+test('the FHIR tile names the newest FHIR document, a pull’s bundle too: a pull runs no import job', () => {
+	const pull = { id: 'pull-doc' };
+	// no job at all: the pull's document, never "nothing imported yet", open items or not
+	assert.deepEqual(fhirTileSource(null, pull), { job: null, doc: pull });
+	// a file job that read another, older document: the pull
+	const job = { state: 'done', document_id: null, result: { document_id: 'file-doc' } };
+	assert.deepEqual(fhirTileSource(job, pull), { job: null, doc: pull });
+	// the job that read the newest document is named (a FHIR job's result names it), and so is one that still runs
+	const read = { state: 'done', document_id: null, result: { document_id: 'pull-doc', accepted: 3 } };
+	assert.deepEqual(fhirTileSource(read, pull), { job: read, doc: null });
+	const named = { state: 'done', document_id: 'pull-doc', result: null };
+	assert.deepEqual(fhirTileSource(named, pull), { job: named, doc: null });
+	for (const state of ['queued', 'running']) {
+		const runs = { state, document_id: null, result: null };
+		assert.deepEqual(fhirTileSource(runs, pull), { job: runs, doc: null }, state);
+	}
+	// a failed file job does not hide the pulls after it
+	assert.deepEqual(fhirTileSource({ state: 'failed', document_id: null, result: null }, pull), { job: null, doc: pull });
+	assert.deepEqual(fhirTileSource(job, null), { job, doc: null });
+	assert.deepEqual(fhirTileSource(null, null), { job: null, doc: null });
 });
