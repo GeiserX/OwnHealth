@@ -10,7 +10,7 @@
 //! | `GET /inboxes/{id}/runs?limit=` | recent runs and their errors |
 //! | `POST /inboxes/{id}/token` | a new push token, shown once (step-up) |
 //! | `POST /inboxes/{id}/sync` | poll now |
-//! | `GET /inboxes/health` | `[{id, kind, label, profile_id, enabled, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, stale, last_run_status, last_run_problems, last_run_problem, reconsent_needed_at, grant_expires_at, access_expires_at, open_gaps, server, can_manage}]` |
+//! | `GET /inboxes/health` | `[{id, kind, label, profile_id, enabled, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, stale, last_run_status, last_run_problems, last_run_problem, can_manage}]`, plus `created_at, poll_seconds, reconsent_needed_at, grant_expires_at, access_expires_at, open_gaps, server` when `can_manage` |
 //! | `GET /inboxes/{id}/health` | one source's row; a session, or that source's own `oh_ing_` token |
 //!
 //! Both health routes take `?format=prometheus` and answer in the Prometheus text format, so a
@@ -18,10 +18,12 @@
 //! syncing. A person sees the sources of the profiles they can open, plus the household-wide ones when
 //! they own or guard a profile. A source token sees its own source and nothing else.
 //!
-//! The Connections screen (v1.0) reads the same rows: `reconsent_needed_at`, `grant_expires_at`,
-//! `access_expires_at` and `server` of each connection, its open sync-gap alerts (`open_gaps`), and
-//! `can_manage`, true when the person manages the source's profile (for a household-wide source: any
-//! profile of the household), so it lists and reconnects only those. A source token gets no `can_manage`.
+//! The Connections screen (v1.0) reads the same rows. `can_manage` is true when the person manages the
+//! source's profile (for a household-wide source: any profile of the household), so the screen lists
+//! and reconnects only those. Only then does the row also carry `created_at` and `poll_seconds`,
+//! `reconsent_needed_at`, `grant_expires_at`, `access_expires_at`, `server`, and the open sync-gap
+//! alerts filed on the source's profile (`open_gaps`): a viewer is sent no more than before v1.0. A
+//! source token gets none of them and no `can_manage`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -37,7 +39,7 @@ use ownhealth_auth::sessions;
 use ownhealth_core::access::{Principal, accessible_profiles};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::secrets::{self, SecretBox, SecretString};
-use ownhealth_core::sources::{self, NewSource, Source, SourceHealth, SourcePatch, TOKEN_PREFIX};
+use ownhealth_core::sources::{self, ManagedHealth, NewSource, Source, SourceHealth, SourcePatch, TOKEN_PREFIX};
 use ownhealth_core::{Error, Runtime};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
@@ -596,11 +598,14 @@ impl FromRequestParts<Runtime> for HealthCaller {
     }
 }
 
-/// A health row as it goes out: for a person, whether they manage the source's profile.
+/// A health row as it goes out: for a person, whether they manage the source's profile, and only
+/// when they do, the connection's dates, server and open alerts.
 #[derive(Serialize)]
 struct HealthOut<'a> {
     #[serde(flatten)]
     row: &'a SourceHealth,
+    #[serde(flatten)]
+    managed: Option<&'a ManagedHealth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     can_manage: Option<bool>,
 }
@@ -611,6 +616,7 @@ fn out(rows: &[(SourceHealth, Option<bool>)]) -> (Vec<HealthOut<'_>>, Vec<Source
         .iter()
         .map(|(row, can_manage)| HealthOut {
             row,
+            managed: (*can_manage == Some(true)).then_some(&row.managed),
             can_manage: *can_manage,
         })
         .collect();
@@ -793,11 +799,15 @@ mod tests {
             last_run_status: Some("partial".into()),
             last_run_problems: 1,
             last_run_problem: Some("move_failed: could not move scan.pdf".into()),
-            reconsent_needed_at: None,
-            grant_expires_at: None,
-            access_expires_at: None,
-            open_gaps: 0,
-            server: Some("https://fhir.labnorte.example/r4".into()),
+            managed: ManagedHealth {
+                created_at: Utc.timestamp_opt(1_762_600_000, 0).single().unwrap_or_default(),
+                poll_seconds: Some(60),
+                reconsent_needed_at: None,
+                grant_expires_at: None,
+                access_expires_at: None,
+                open_gaps: 0,
+                server: Some("https://fhir.labnorte.example/r4".into()),
+            },
         }
     }
 

@@ -105,6 +105,17 @@ impl T {
     }
 }
 
+/// The fields a health row carries only for a person who manages the source.
+const CONNECTION_FIELDS: [&str; 7] = [
+    "reconsent_needed_at",
+    "grant_expires_at",
+    "access_expires_at",
+    "open_gaps",
+    "server",
+    "created_at",
+    "poll_seconds",
+];
+
 /// The health row of `id` as `c` reads it, or null when it is not listed.
 async fn row(c: &mut Client, id: Uuid) -> anyhow::Result<Value> {
     let r = c.get("/api/inboxes/health").await?;
@@ -184,8 +195,17 @@ async fn only_a_person_who_manages_the_profile_is_told_they_may_reconnect() -> R
     let seen = row(&mut s, id).await?;
     assert_eq!(seen["kind"], "smart", "{seen}");
     assert_eq!(seen["can_manage"], false, "{seen}");
+    // the connection's dates, server and alerts are for the people who manage it
+    for k in CONNECTION_FIELDS {
+        assert!(seen.get(k).is_none(), "a viewer is sent {k}: {seen}");
+    }
     let r = s.post0(&format!("/api/connectors/{id}/reconnect")).await?;
-    assert_ne!(r.status, StatusCode::OK, "{}", r.json);
+    assert!(
+        matches!(r.status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+        "{} {}",
+        r.status,
+        r.json
+    );
     // a household-wide inbox: Alex owns a profile, so he manages it; it names no server
     let folder: Uuid = sqlx::query_scalar(
         "insert into source (household_id, kind, label, config) select household_id, 'folder', 'Escáner', '{}' \
@@ -220,8 +240,71 @@ async fn open_sync_gap_alerts_of_a_connection_are_counted_and_closed_ones_are_no
         .execute(t.env.pool())
         .await?;
     }
+    // another kind of item on the same source, and a gap filed on Carmen's profile that names Alex's
+    // connection, are not this connection's alerts either
+    for (profile, kind) in [("alex", "job_failed"), ("carmen", "source_gap")] {
+        sqlx::query(
+            "insert into review_item (household_id, profile_id, kind, ref_table, ref_id, payload) \
+             select household_id, id, $3, 'source', $2, '{}' from profile where id = $1",
+        )
+        .bind(t.env.profile(profile))
+        .bind(id)
+        .bind(kind)
+        .execute(t.env.pool())
+        .await?;
+    }
     // two open alerts of this connection: the dismissed one and another source's alert do not count
     let r = row(&mut a, id).await?;
     assert_eq!(r["open_gaps"], 2, "{r}");
+    // Sam views Alex's profile but is sent no count of its review items
+    let mut s = t.browser("sam").await?;
+    let seen = row(&mut s, id).await?;
+    assert!(seen.get("open_gaps").is_none(), "{seen}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_connection_made_a_moment_ago_says_when_it_was_made_and_how_often_it_syncs() -> R {
+    let t = setup().await?;
+    let mut a = t.browser("alex").await?;
+    let id = t.connect(&mut a, t.env.profile("alex")).await?;
+    let r = row(&mut a, id).await?;
+    // no run yet: the screen reads No data until one poll interval has passed since created_at
+    assert_eq!((r["last_run_at"].clone(), r["stale"].clone()), (Value::Null, Value::Bool(true)), "{r}");
+    let made = at(&r["created_at"]).ok_or_else(|| anyhow::anyhow!("no created_at: {r}"))?;
+    assert!((Utc::now() - made).num_minutes().abs() < 5, "{r}");
+    assert!(r["poll_seconds"].as_i64().is_some_and(|s| s > 0), "{r}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_guardian_stops_managing_a_connection_once_its_person_has_a_login() -> R {
+    let t = setup().await?;
+    let mut a = t.browser("alex").await?;
+    // Alex guards Lucia, who has no login: he manages her connection
+    let id = t.connect(&mut a, t.env.profile("lucia")).await?;
+    assert_eq!(row(&mut a, id).await?["can_manage"], true);
+    // Lucia gets her own login: she manages her profile now, and Alex still sees the row, read-only
+    let household = t.env.fam().household_id;
+    let mut c = t.env.pool().acquire().await?;
+    let lucia = ownhealth_core::access::create_user(&mut c, household, "Lucía Rivera", "es", None).await?;
+    sqlx::query("update profile set user_id = $1 where id = $2")
+        .bind(lucia)
+        .bind(t.env.profile("lucia"))
+        .execute(&mut *c)
+        .await?;
+    drop(c);
+    let seen = row(&mut a, id).await?;
+    assert_eq!(seen["can_manage"], false, "{seen}");
+    for k in CONNECTION_FIELDS {
+        assert!(seen.get(k).is_none(), "{k}: {seen}");
+    }
+    let r = a.post0(&format!("/api/connectors/{id}/reconnect")).await?;
+    assert!(
+        matches!(r.status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+        "{} {}",
+        r.status,
+        r.json
+    );
     Ok(())
 }
