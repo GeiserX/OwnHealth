@@ -21,6 +21,7 @@ pub mod ids;
 pub mod ingest;
 pub mod jobs;
 pub mod jose;
+pub mod langs;
 pub mod lifecycle;
 pub mod migrate;
 pub mod net;

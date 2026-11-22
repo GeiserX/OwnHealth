@@ -6,15 +6,18 @@
 //! rows:                         # optional; every row names its source
 //!   - id: example.one
 //!     cite: https://...         # https, never http
-//! templates:                    # anywhere in the file: a mapping with `en` or `es` is a template
+//! templates:                    # anywhere in the file: a mapping with a language key is a template
 //!   example.one: {en: "...", es: "..."}
 //! ```
 //!
-//! `load` refuses a file without a version, a row without an https `cite`, a template missing its
-//! `en` or `es` text, and a template the wording lint flags. Area loaders add their own checks on top.
+//! `load` refuses a file without a version, a row without an https `cite`, a template missing the
+//! text of a registry language (`ownhealth_core::langs::LANGS`), and a template the wording lint
+//! flags. Area loaders add their own checks on top.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
+use ownhealth_core::langs::{LANGS, LOCALES};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -91,11 +94,66 @@ pub fn read_doc(path: &Path) -> Result<Value, CitedError> {
     parse(path, &bytes)
 }
 
-/// Every string that is the `en` or `es` value of a mapping, with its json path.
+/// Every string that is the text of a language in a mapping (`en: ...`, or `short_en: ...`), with its
+/// json path. Every code in the registry or planned for it counts, so the wording lint reads a new
+/// language from its first string.
 pub fn localized(doc: &Value) -> Vec<(String, String)> {
     let mut out = Vec::new();
     walk_localized(doc, "$", &mut out);
     out
+}
+
+/// Every text a registry language lacks: for each mapping with a language key (`en`) or a
+/// language-suffixed key (`short_en`), one line per language of `langs` whose text is missing or
+/// empty, `"<path> has no `<key>` text"`. Pass `ownhealth_core::langs::LANGS`; a test passes a
+/// dummy language to prove the check sees every mapping.
+pub fn missing_langs(doc: &Value, langs: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    walk_missing(doc, "$", langs, &mut out);
+    out
+}
+
+/// A key that names a language: a code in the registry, planned for it, or in `extra`.
+fn is_code(key: &str, extra: &[&str]) -> bool {
+    LANGS.contains(&key) || LOCALES.contains(&key) || extra.contains(&key)
+}
+
+/// `short` for `short_en`.
+fn suffix_stem<'a>(key: &'a str, extra: &[&str]) -> Option<&'a str> {
+    key.rsplit_once('_')
+        .filter(|(stem, code)| !stem.is_empty() && is_code(code, extra))
+        .map(|(stem, _)| stem)
+}
+
+fn walk_missing(v: &Value, path: &str, langs: &[&str], out: &mut Vec<String>) {
+    match v {
+        Value::Object(m) => {
+            let has = |key: &str| m.get(key).and_then(Value::as_str).is_some_and(|t| !t.trim().is_empty());
+            let stems: BTreeSet<&str> = m.keys().filter_map(|k| suffix_stem(k, langs)).collect();
+            let mut wanted: Vec<String> = Vec::new();
+            if m.keys().any(|k| is_code(k, langs)) {
+                wanted.extend(langs.iter().map(|l| l.to_string()));
+            }
+            for stem in stems {
+                wanted.extend(langs.iter().map(|l| format!("{stem}_{l}")));
+            }
+            out.extend(
+                wanted
+                    .into_iter()
+                    .filter(|k| !has(k))
+                    .map(|k| format!("{path} has no `{k}` text")),
+            );
+            for (k, v) in m {
+                walk_missing(v, &format!("{path}.{k}"), langs, out);
+            }
+        }
+        Value::Array(a) => {
+            for (i, v) in a.iter().enumerate() {
+                walk_missing(v, &format!("{path}[{i}]"), langs, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn parse(path: &Path, bytes: &[u8]) -> Result<Value, CitedError> {
@@ -118,8 +176,8 @@ fn walk_localized(v: &Value, path: &str, out: &mut Vec<(String, String)>) {
         Value::Object(m) => {
             for (k, v) in m {
                 let at = format!("{path}.{k}");
-                match (k.as_str(), v) {
-                    ("en" | "es", Value::String(s)) => out.push((at, s.clone())),
+                match v {
+                    Value::String(s) if is_code(k, &[]) || suffix_stem(k, &[]).is_some() => out.push((at, s.clone())),
                     _ => walk_localized(v, &at, out),
                 }
             }
@@ -136,8 +194,8 @@ fn walk_localized(v: &Value, path: &str, out: &mut Vec<(String, String)>) {
 fn check_templates(v: &Value, path: &str, name: &str) -> Result<(), CitedError> {
     match v {
         Value::Object(m) => {
-            if m.contains_key("en") || m.contains_key("es") {
-                for lang in ["en", "es"] {
+            if m.keys().any(|k| is_code(k, &[])) {
+                for lang in LANGS {
                     let text = m
                         .get(lang)
                         .and_then(Value::as_str)

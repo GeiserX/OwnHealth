@@ -39,7 +39,8 @@ use crate::rendering::render_with;
 
 pub const SCHEMA: &str = "ownhealth.summary/v1";
 pub const SPECIALTIES: [&str; 5] = ["gp", "cardiology", "endocrinology", "hematology", "ips"];
-pub const LANGS: [&str; 2] = ["en", "es"];
+/// The sheet languages: the registry (`ownhealth_core::langs`).
+pub use ownhealth_core::langs::LANGS;
 
 /// The shipped files, compiled in.
 pub const FILES: [(&str, &str); 2] = [
@@ -666,7 +667,11 @@ pub async fn read_for(
     scopes: &Scopes,
     opts: &Options,
 ) -> Result<(Value, Value)> {
-    let lang = if opts.lang == "es" { "es" } else { "en" };
+    let lang = if LANGS.contains(&opts.lang.as_str()) {
+        opts.lang.as_str()
+    } else {
+        "en"
+    };
     let pack = load_pack()?;
     let d = data()?;
     let spec = d

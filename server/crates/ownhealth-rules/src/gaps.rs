@@ -44,8 +44,8 @@ use crate::prevention::words;
 
 pub const SCHEMA: &str = "ownhealth.gaps/v1";
 pub const RULES: [&str; 2] = ["visit_without_report", "records_hole"];
-/// The letter languages.
-pub const LANGS: [&str; 2] = ["es", "en"];
+/// The letter languages: the registry (`ownhealth_core::langs`).
+pub use ownhealth_core::langs::LANGS;
 /// The prefix of a gap's key on the Due list.
 pub const DUE_PREFIX: &str = "gap:";
 
@@ -516,7 +516,7 @@ fn template(g: &Gaps, kind: &str, rule: &str, lang: &str) -> String {
 /// `withheld_scopes`; without read:records `gaps_hash` is left out too.
 pub fn render(doc: &Value, lang: &str, scopes: &Scopes) -> Result<Value> {
     let g = load()?;
-    let lang = if lang == "es" { "es" } else { "en" };
+    let lang = if LANGS.contains(&lang) { lang } else { "en" };
     let mut whole = doc.as_object().cloned().unwrap_or_default();
     let mut withheld = 0;
     let mut lacking = BTreeSet::new();

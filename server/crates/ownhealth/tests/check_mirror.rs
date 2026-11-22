@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use ownhealth_auth::challenges;
 use ownhealth_core::testing::TestDb;
-use ownhealth_core::{documents, provenance, review, secrets, sources};
+use ownhealth_core::{documents, langs, provenance, review, secrets, sources};
 
 /// (table, constraint, the Rust constant that writers check against).
 fn mirrors() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
@@ -25,6 +25,7 @@ fn mirrors() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
         ),
         ("src", "src_kind_check", provenance::SRC_KINDS.to_vec()),
         ("review_item", "review_item_kind_check", review::REVIEW_KINDS.to_vec()),
+        ("app_user", "app_user_locale_check", langs::LOCALES.to_vec()),
     ]
 }
 

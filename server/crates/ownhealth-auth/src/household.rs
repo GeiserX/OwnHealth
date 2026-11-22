@@ -107,8 +107,9 @@ pub async fn users_exist(conn: &mut PgConnection) -> Result<bool> {
         .await?)
 }
 
+/// A registry language (`ownhealth_core::langs::LANGS`), else the default, es.
 fn locale_or_es(locale: &str) -> &str {
-    if matches!(locale, "es" | "en") { locale } else { "es" }
+    ownhealth_core::langs::lang_or_default(locale)
 }
 
 // ------------------------------------------------------------------ first run ----
