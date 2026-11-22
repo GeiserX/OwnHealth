@@ -4,8 +4,11 @@
 	// The link and its QR code show once, right after it is made, and live only in this page's memory:
 	// the server keeps no copy of the key. Each link says its state, who opened it, and can be revoked.
 	// The PIN input has no name, so no form submit can ever put it in a URL; it is cleared once used.
+	// What the form offers is what the server will accept: the list answer's `open` categories.
+	import { tick } from 'svelte';
 	import '#lib/components/pages2/pages2.css';
-	import type { ShlAccess, ShlCreated, ShlLink } from '#lib/api/types';
+	import { ApiError } from '#lib/api/core';
+	import type { ShlAccess, ShlCreated, ShlLink, ShlList } from '#lib/api/types';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import PageHeader from '#lib/components/PageHeader.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
@@ -17,16 +20,19 @@
 	import { copyText } from '#lib/logic/inbox';
 	import { currentProfile } from '#lib/state/app.svelte';
 	import { createLink, linkAccess, listLinks, revokeLink } from './api';
-	import { DAYS, DEFAULT_DAYS, PICKS, PIN_MAX, accessKey, categoriesFor, mayShare, pinProblem, revocable, shownCategories, stateOf } from './logic';
+	import { DAYS, DEFAULT_DAYS, PICKS, accessKey, canShare, categoriesFor, expiryKey, mayShare, pinProblem, revocable, shownCategories, stateOf } from './logic';
 	import { qrOf } from './qr';
 
 	const prof = $derived(currentProfile());
 	const slug = $derived(prof?.slug ?? '');
 	const name = $derived(prof?.display_name ?? '');
-	const sharer = $derived(mayShare(prof?.role));
-	const held = $derived((prof?.scopes ?? []) as string[]);
+	const sharer = $derived(mayShare(prof?.role, prof?.break_glass));
 
-	const links = new Loader<ShlLink[]>();
+	const links = new Loader<ShlList>();
+	// what a new link may carry, from the server (routes/shl.rs open_categories)
+	const open = $derived((links.data?.open ?? []) as string[]);
+	// the server refuses this person on this profile even when /me looked fine (a grant changed since)
+	const refused = $derived(links.error instanceof ApiError && links.error.code === 'not_sharer');
 	const log = new Loader<ShlAccess[]>();
 	let label = $state('');
 	let picked = $state<string[]>([...PICKS]);
@@ -39,11 +45,13 @@
 	let fresh = $state<{ id: string; label: string | null; shlink: string; pin: boolean; leftOut: number | null; qr: { size: number; path: string } } | null>(null);
 	let copied = $state<boolean | null>(null);
 	let linkEl: HTMLElement | undefined = $state();
+	let madeEl: HTMLElement | undefined = $state();
 	let confirming = $state<string | null>(null);
 	let logOf = $state<string | null>(null);
 	let rowError = $state<{ id: string; text: string; raw: string } | null>(null);
 
-	const load = () => links.run(async () => (await listLinks(slug)).items, slug);
+	const load = () => links.run(() => listLinks(slug), slug);
+	// another profile: nothing typed or made for the last one stays on screen
 	$effect(() => {
 		const s = slug;
 		const ok = sharer;
@@ -52,24 +60,31 @@
 		confirming = null;
 		logOf = null;
 		error = null;
+		label = '';
+		pin = '';
+		picked = [...PICKS];
 		if (s && ok) load();
 	});
 	const pinWrong = $derived(pinProblem(pin));
 
 	async function make() {
+		// the profile this link is for: an answer that lands after a switch belongs to that one
+		const s = slug;
 		busy = true;
 		error = null;
 		try {
 			const typed = pin;
 			const made: ShlCreated = await withStepUp(() =>
-				createLink(slug, {
-					categories: categoriesFor(picked, held),
+				createLink(s, {
+					categories: categoriesFor(picked, open),
 					days,
 					passcode: typed || undefined,
 					label: label.trim() || undefined,
 					lang
 				})
 			);
+			// another profile is on screen now: the link shows only in its own profile's list
+			if (slug !== s) return;
 			fresh = {
 				id: made.link.id,
 				label: made.link.label,
@@ -82,23 +97,33 @@
 			pin = '';
 			label = '';
 			load();
+			await tick();
+			madeEl?.focus();
 		} catch (e) {
+			if (slug !== s) return;
 			error = { text: errText(e), raw: errRaw(e) };
+			// a lock or a grant changed since the page loaded: ask again what may be shared
+			if (e instanceof ApiError && (e.code === 'category_closed' || e.code === 'summary_closed')) load();
 		} finally {
 			busy = false;
 		}
 	}
 	async function revoke(x: ShlLink) {
+		const s = slug;
 		busy = true;
 		rowError = null;
 		try {
-			await revokeLink(slug, x.id);
+			await revokeLink(s, x.id);
+			if (slug !== s) return;
 			confirming = null;
 			if (fresh?.id === x.id) fresh = null;
 			load();
 			if (logOf === x.id) openLog(x.id);
+			// the Revoke button is gone: keep the keyboard on the same row
+			await tick();
+			document.getElementById(`shl-log-${x.id}`)?.focus();
 		} catch (e) {
-			rowError = { id: x.id, text: errText(e), raw: errRaw(e) };
+			if (slug === s) rowError = { id: x.id, text: errText(e), raw: errRaw(e) };
 		} finally {
 			busy = false;
 		}
@@ -111,6 +136,7 @@
 		if (fresh) copied = await copyText(typeof navigator === 'undefined' ? null : navigator.clipboard, fresh.shlink, linkEl);
 	}
 	const title = (x: { label: string | null }) => x.label ?? t('shl_nolabel');
+	const madeTitle = (x: { label: string | null }) => (x.label ? tf('shl_made', { label: x.label }) : t('shl_made0'));
 	const cat = (c: string) => t('shl_c_' + c.replace('read:', ''));
 	// One line of what a link carries, one of its dates and use.
 	function carries(x: ShlLink): string {
@@ -119,21 +145,33 @@
 		return parts.join(' · ');
 	}
 	function when(x: ShlLink): string {
-		const parts = [`${t('i2_added')} ${day(x.created_at)}`, `${x.state === 'expired' ? t('shl_expired_on') : t('shl_expires')} ${day(x.expires_at)}`];
+		const parts = [`${t('shl_created')} ${day(x.created_at)}`, `${t(expiryKey(x, Date.now()))} ${day(x.expires_at)}`];
 		parts.push(x.opened ? tp('shl_opened', x.opened) : t('shl_opened0'));
 		if (x.last_access_at) parts.push(`${t('shl_last')} ${ago(x.last_access_at)}`);
 		return parts.join(' · ');
 	}
 </script>
 
-<PageHeader title={t('shl_nav')} sub={name && sharer ? tf('shl_sub', { name }) : undefined} />
+<PageHeader title={t('shl_nav')} sub={name && sharer && !refused ? tf('shl_sub', { name }) : undefined} />
 
-{#if prof && !sharer}
+{#if !prof}
+	<div class="card"><div class="empty" role="status">{t('fu_oa_noprofiles')}</div></div>
+{:else if prof.break_glass}
+	<div class="card"><div class="empty" role="status">{tf('shl_who_bg', { name })}</div></div>
+{:else if !sharer || refused}
 	<div class="card"><div class="empty" role="status">{tf('shl_who_no', { name })}</div></div>
-{:else if prof}
+{:else}
 	<div class="sl-wrap">
+		<!-- in the page from the start, so a screen reader announces the new link when it appears -->
+		<div class="sr-only" aria-live="polite">{fresh ? madeTitle(fresh) : ''}</div>
+		{#if links.data && !canShare(open)}
+			<div class="card"><div class="empty" role="status">{tf('shl_summary_closed', { name })}</div></div>
+		{:else if links.data}
 		<section class="card p2form" aria-labelledby="shl-new">
-			<h3 id="shl-new">{t('shl_new')}<span class="r">{t('i2_tok_stepup')}</span></h3>
+			<div class="sl-head">
+				<h3 id="shl-new">{t('shl_new')}</h3>
+				<span class="dim sl-small" id="shl-new-d">{t('i2_tok_stepup')}</span>
+			</div>
 			<label
 				>{t('shl_label')}
 				<input class="p2in" maxlength="80" autocomplete="off" placeholder={t('shl_label_ph')} bind:value={label} />
@@ -142,10 +180,12 @@
 				<legend>{t('shl_what')}</legend>
 				<label class="sl-chk"><input type="checkbox" checked disabled />{t('shl_c_summary')}</label>
 				{#each PICKS as c (c)}
-					<label class="sl-chk" class:dim={!held.includes(c)}>
-						<input type="checkbox" value={c} bind:group={picked} disabled={!held.includes(c)} />{cat(c)}
-						{#if !held.includes(c)}<span class="dim">· {t('shl_c_closed')}</span>{/if}
-					</label>
+					{#if open.includes(c)}
+						<label class="sl-chk"><input type="checkbox" value={c} bind:group={picked} />{cat(c)}</label>
+					{:else}
+						<!-- closed for this person on this profile: shown, never ticked, never sent -->
+						<label class="sl-chk dim"><input type="checkbox" disabled />{cat(c)}<span class="dim">· {t('shl_c_closed')}</span></label>
+					{/if}
 				{/each}
 				<div class="note">{t('shl_never')}</div>
 			</fieldset>
@@ -166,18 +206,20 @@
 			</div>
 			<label
 				>{t('shl_pin')}
-				<input class="p2in" type="password" autocomplete="off" spellcheck="false" maxlength={PIN_MAX} aria-invalid={!!pinWrong} aria-describedby="shl-pin-d" bind:value={pin} />
+				<!-- no maxlength: it counts UTF-16 units, the server counts characters (pinProblem) -->
+				<input class="p2in" type="password" autocomplete="off" spellcheck="false" aria-invalid={!!pinWrong} aria-describedby="shl-pin-d" bind:value={pin} />
 			</label>
 			<div class="note" id="shl-pin-d">{pinWrong ? t(pinWrong) : t('shl_pin_d')}</div>
 			{#if error}<div class="p2err" role="alert" title={error.raw}>{error.text}</div>{/if}
 			<div class="p2row">
-				<button class="btn pri" disabled={busy || !!pinWrong} aria-busy={busy} onclick={make}>{busy ? t('shl_making') : t('shl_make')}</button>
+				<button class="btn pri" disabled={busy || !!pinWrong} aria-busy={busy} aria-describedby="shl-new-d" onclick={make}>{busy ? t('shl_making') : t('shl_make')}</button>
 			</div>
 		</section>
+		{/if}
 
 		{#if fresh}
-			<section class="card sl-fresh" aria-labelledby="shl-made" aria-live="polite">
-				<h3 id="shl-made">{fresh.label ? tf('shl_made', { label: fresh.label }) : t('shl_made0')}</h3>
+			<section class="card sl-fresh" aria-labelledby="shl-made">
+				<h3 id="shl-made" tabindex="-1" bind:this={madeEl}>{madeTitle(fresh)}</h3>
 				<div class="sl-made">
 					<svg class="sl-qr" viewBox="0 0 {fresh.qr.size} {fresh.qr.size}" role="img" aria-label={t('shl_qr')} shape-rendering="crispEdges">
 						<rect width={fresh.qr.size} height={fresh.qr.size} fill="#fff" />
@@ -205,7 +247,7 @@
 				<div class="empty">{t('loading')}</div>
 			{:else}
 				<ul class="sl-list">
-					{#each links.data as x (x.id)}
+					{#each links.data.items as x (x.id)}
 						{@const st = stateOf(x)}
 						<li data-testid="shl-row">
 							<div class="sl-row">
@@ -219,7 +261,7 @@
 									<div class="dim sl-small">{when(x)}</div>
 								</div>
 								<div class="sl-acts">
-									<button class="btn sm" aria-expanded={logOf === x.id} aria-label="{t('shl_log')} · {title(x)}" onclick={() => (logOf === x.id ? (logOf = null) : openLog(x.id))}>{t('shl_log')}</button>
+									<button class="btn sm" id="shl-log-{x.id}" aria-expanded={logOf === x.id} aria-label="{t('shl_log')} · {title(x)}" onclick={() => (logOf === x.id ? (logOf = null) : openLog(x.id))}>{t('shl_log')}</button>
 									{#if revocable(x)}
 										<button class="btn sm no" disabled={busy} aria-expanded={confirming === x.id} aria-label="{t('i2_revoke')} · {title(x)}" onclick={() => (confirming = x.id)}>{t('i2_revoke')}</button>
 									{/if}
@@ -295,6 +337,16 @@
 		gap: 6px;
 		font-size: 12.5px;
 		color: var(--text);
+	}
+	.sl-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 4px 8px;
+		margin-bottom: 8px;
+	}
+	.sl-head h3 {
+		margin: 0;
 	}
 	.sl-two {
 		display: grid;

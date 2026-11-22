@@ -5,18 +5,26 @@ import type { Role, ShlAccess, ShlCategory, ShlLink } from '#lib/api/types';
 /** The roles routes/shl.rs lets share (`ROLES`). A break-glass grant is refused there too. */
 export const SHARER_ROLES: readonly Role[] = ['owner', 'guardian'];
 
-export const mayShare = (role: Role | null | undefined): boolean => !!role && SHARER_ROLES.includes(role);
+/** Whether this grant may share the profile: owner or guardian, and not a break-glass grant. */
+export const mayShare = (role: Role | null | undefined, breakGlass?: boolean | null): boolean => !!role && SHARER_ROLES.includes(role) && !breakGlass;
 
 /** Whether the views menu shows Share links: at least one profile this person may share. */
-export const sharesAny = (profiles: readonly { role: Role }[] | null | undefined): boolean => (profiles ?? []).some((p) => mayShare(p.role));
+export const sharesAny = (profiles: readonly { role: Role; break_glass?: boolean }[] | null | undefined): boolean =>
+	(profiles ?? []).some((p) => mayShare(p.role, p.break_glass));
 
 /** The categories a person picks. read:summary comes with every link (routes/shl.rs create). */
 export const PICKS: readonly ShlCategory[] = ['read:labs', 'read:records'];
 
-/** The body's categories: the summary plus each pick this person holds on the profile. */
-export function categoriesFor(picked: readonly string[], held: readonly string[]): ShlCategory[] {
-	return ['read:summary', ...PICKS.filter((c) => picked.includes(c) && held.includes(c))];
+/**
+ * The body's categories: the summary plus each pick the server says a link of this person may carry
+ * (`open` of GET /profiles/{p}/shl: their categories minus the profile's locks, the owner's too).
+ */
+export function categoriesFor(picked: readonly string[], open: readonly string[]): ShlCategory[] {
+	return ['read:summary', ...PICKS.filter((c) => picked.includes(c) && open.includes(c))];
 }
+
+/** Whether any link can be made: every link carries the summary, so it must be open. */
+export const canShare = (open: readonly string[]): boolean => open.includes('read:summary');
 
 /** A link's categories in the order the form lists them, the summary first. */
 export function shownCategories(cats: readonly string[]): ShlCategory[] {
@@ -42,6 +50,10 @@ export function stateOf(link: Pick<ShlLink, 'state' | 'reason'>): { key: string;
 	const tone = link.state === 'active' ? 'p-ok' : link.state === 'paused' ? 'p-watch' : 'p-out';
 	return { key: 'shl_st_' + link.state, why: link.reason ? 'shl_why_' + link.reason : null, tone };
 }
+
+/** The word before a link's expiry date: past dates read as past, whatever else ended the link. */
+export const expiryKey = (link: Pick<ShlLink, 'expires_at'>, now: number): string =>
+	Date.parse(link.expires_at) <= now ? 'shl_expired_on' : 'shl_expires';
 
 /** Whether a Revoke button still does something: a revoked, expired or locked-out link is over. */
 export const revocable = (link: Pick<ShlLink, 'state'>): boolean => link.state === 'active' || link.state === 'paused';

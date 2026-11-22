@@ -47,6 +47,8 @@ export interface ProfileSummary {
 	unit_pref: 'si' | 'conventional' | 'as_reported';
 	genome_sensitive_ui: boolean;
 	scopes: Scope[];
+	/** an emergency grant: it reads, and never shares (routes/shl.rs) */
+	break_glass: boolean;
 	flags?: number; // added by lane E when the status snapshot exists
 }
 
@@ -905,6 +907,8 @@ export interface ShlLink {
 }
 export interface ShlList {
 	items: ShlLink[];
+	/** what a new link of this person may carry on the profile; without read:summary, nothing */
+	open: ShlCategory[];
 }
 /** POST /profiles/{p}/shl body. */
 export interface ShlCreateIn {
