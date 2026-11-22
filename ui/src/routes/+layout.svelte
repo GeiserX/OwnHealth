@@ -5,8 +5,10 @@
 	import { afterNavigate, goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { ApiError, getMe } from '#lib/api/core';
-	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
-	import { NAV } from '#lib/nav';
+	import { i18n, t } from '#lib/i18n/index.svelte';
+	import LangButtons from '#lib/components/LangButtons.svelte';
+	import { NAV, navFor } from '#lib/nav';
+	import { sharesAny } from './links/logic';
 	import { isTypingTarget } from '#lib/logic/keys';
 	import { searchTarget } from '#lib/logic/search';
 	import LoginScreen from '#lib/components/pages2/LoginScreen.svelte';
@@ -158,7 +160,7 @@
 		</div>
 		<div class="plabel">{t('views')}</div>
 		<nav class="menu">
-			{#each NAV as n (n.path)}
+			{#each navFor(sharesAny(me?.profiles)) as n (n.path)}
 				<a href={n.path} class:on={active(n.path)} aria-current={active(n.path) ? 'page' : undefined}>
 					<svg viewBox="0 0 24 24" aria-hidden="true">{@html n.icon}</svg>{t(n.key)}
 					{#if n.countFromReview && me?.review_open}<span class="cnt num" title={t('toreview_hh')}>{me.review_open}</span>{/if}
@@ -187,8 +189,7 @@
 				{#if me}<b class="num" style="color:var(--watch)">{me.review_open}</b>{:else}<b class="dim">—</b>{/if}
 			</a>
 			<div class="seg" role="group" aria-label={t('lang_label')}>
-				<button class:on={i18n.lang === 'es'} aria-pressed={i18n.lang === 'es'} onclick={() => setLang('es')}>ES</button>
-				<button class:on={i18n.lang === 'en'} aria-pressed={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
+				<LangButtons />
 			</div>
 			{#if me}<a class="av" href="/settings" style="background:#6ea8fe;text-decoration:none" title={me.user.display_name} aria-label={`${t('i2_settings')} · ${me.user.display_name}`}>{me.user.display_name.split(' ').map((w) => w[0]).slice(0, 2).join('')}</a>{/if}
 		</header>

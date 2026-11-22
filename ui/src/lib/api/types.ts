@@ -1,6 +1,8 @@
 // REST API types. This file mirrors CONTRACTS.md "REST API": change both together.
 // Ids are UUID strings, dates ISO 8601 strings, decimals arrive as JSON numbers or strings.
 
+import type { Lang, Localized, McpLang } from '../i18n/langs';
+
 export type Uuid = string;
 export type IsoDate = string; // 2026-11-07
 export type IsoDateTime = string; // 2026-11-07T07:12:00Z
@@ -47,11 +49,13 @@ export interface ProfileSummary {
 	unit_pref: 'si' | 'conventional' | 'as_reported';
 	genome_sensitive_ui: boolean;
 	scopes: Scope[];
+	/** an emergency grant: it reads, and never shares (routes/shl.rs) */
+	break_glass: boolean;
 	flags?: number; // added by lane E when the status snapshot exists
 }
 
 export interface Me {
-	user: { id: Uuid; display_name: string; locale: 'es' | 'en' };
+	user: { id: Uuid; display_name: string; locale: Lang };
 	household: { id: Uuid; name: string };
 	auth: { kind: 'session' | 'token' | 'dev' };
 	profiles: ProfileSummary[];
@@ -105,7 +109,8 @@ export interface ReviewItem {
 		| 'pending_document'
 		| 'restore_check_failed'
 		| 'near_duplicate'
-		| 'encrypted_document';
+		| 'encrypted_document'
+		| 'fhir_unmapped_summary';
 	profile_id: Uuid | null;
 	status: 'open' | 'accepted' | 'rejected' | 'dismissed';
 	reasons: string[];
@@ -441,6 +446,7 @@ export interface DocumentSummary {
 	flags: Record<string, unknown>;
 	open_review: number;
 	snippet: UntrustedText | null; // full-text search hit, UI only
+	evidence_day?: IsoDate | null; // the list only: the collection day, else the report day
 }
 
 export interface DocumentDetail extends DocumentSummary {
@@ -459,7 +465,7 @@ export interface TokenOut {
 	profiles: string[]; // slugs
 	default_profile: string | null;
 	identity_mode: 'full' | 'pseudonymous' | 'minimal';
-	lang: 'es' | 'en';
+	lang: McpLang;
 	units: 'si' | 'conventional' | 'as_reported';
 	limits: Record<string, number>;
 	created_at: IsoDateTime;
@@ -487,6 +493,21 @@ export interface AuditOut {
 	withheld?: Record<string, unknown> | null;
 }
 
+/** GET /api/audit/chain: how far the hash chain holds, and the head the last backup kept outside the database. */
+export interface AuditChainOut {
+	ok: boolean;
+	verified: number; // entries checked from the first one
+	broken: { seq: number | null; kind: 'hash' | 'prev_hash' | 'missing_link' | 'missing_event' | 'unlinked' | 'uncheckable' } | null;
+	anchor: { state: 'none' | 'ok' | 'mismatch' | 'unreadable' | 'unchecked'; seq: number | null; at: IsoDateTime | null }; // unchecked: the log itself cannot be checked
+}
+
+/** GET /api/audit/who?profile=: one row per actor and channel on that profile. */
+export interface AuditWhoOut {
+	profile: string;
+	scope: 'everyone' | 'own'; // own: the person only views this profile, so the rows are their own actions
+	items: { actor: string; actor_kind: string; via: string; events: number; first_ts: IsoDateTime; last_ts: IsoDateTime }[];
+}
+
 export interface TokenUsageDay {
 	calls: number;
 	facts: number;
@@ -507,7 +528,7 @@ export interface Household {
 	members: {
 		user_id: Uuid;
 		display_name: string;
-		locale?: 'es' | 'en';
+		locale?: Lang;
 		logins?: { passkeys: number; oidc: boolean; password: boolean };
 		enrolled?: boolean; // false: invited, has not logged in yet
 		invite_pending?: boolean;
@@ -535,7 +556,7 @@ export interface AuthState {
 	user: {
 		id: Uuid;
 		display_name: string;
-		locale: 'es' | 'en';
+		locale: Lang;
 		passkeys: number;
 		recovery_codes_left: number;
 		oidc_linked: boolean;
@@ -637,7 +658,7 @@ export interface GenomeEvent {
 	release_to: string;
 	unconfirmed: boolean;
 	created_at: IsoDateTime;
-	text: { en: string; es: string };
+	text: Localized;
 	withheld?: 'minor' | 'sensitive';
 	alerted?: boolean;
 	kind?:
@@ -661,8 +682,8 @@ export interface GenomeEvents {
 	release?: string | null;
 	/** The household's weekly ClinVar check is on. */
 	weekly?: boolean;
-	/** Where a reclassified call is made again: OwnGenome's command, in both languages. */
-	rerun?: { en: string; es: string };
+	/** Where a reclassified call is made again: OwnGenome's command, in every registry language. */
+	rerun?: Localized;
 }
 
 export interface GenomeView {
@@ -874,4 +895,69 @@ export interface NextDraw {
 	sections: NextDrawSection[];
 	/** the words of the sheet (title, notice, empty, ...) */
 	labels: Record<string, string>;
+}
+
+// ------------------------------------------------- SMART Health Links (shl.rs) ----
+
+/** The categories a link can carry (ownhealth_ops::shl::SHAREABLE). */
+export type ShlCategory = 'read:summary' | 'read:labs' | 'read:records';
+/** What a recipient would meet: `paused` while sharing is off on the instance, `revoked` for good. */
+export type ShlState = 'active' | 'paused' | 'revoked' | 'expired' | 'locked_out';
+/** Why: `sharing_off` (paused); `person`, `locked` or `access_changed` (revoked). */
+export type ShlReason = 'sharing_off' | 'person' | 'locked' | 'access_changed';
+
+/** One link in GET /profiles/{p}/shl. */
+export interface ShlLink {
+	id: Uuid;
+	label: string | null;
+	passcode: boolean;
+	attempts_left: number | null;
+	categories: ShlCategory[];
+	lang: Lang;
+	created_at: IsoDateTime;
+	expires_at: IsoDateTime;
+	revoked_at: IsoDateTime | null;
+	state: ShlState;
+	reason: ShlReason | null;
+	/** manifests served */
+	opened: number;
+	last_access_at: IsoDateTime | null;
+}
+export interface ShlList {
+	items: ShlLink[];
+	/** what a new link of this person may carry on the profile; without read:summary, nothing */
+	open: ShlCategory[];
+}
+/** POST /profiles/{p}/shl body. */
+export interface ShlCreateIn {
+	categories?: ShlCategory[];
+	days?: number;
+	passcode?: string;
+	label?: string;
+	lang?: Lang;
+}
+/** POST /profiles/{p}/shl answer, once: the key exists only in `shlink`. */
+export interface ShlCreated {
+	link: ShlLink;
+	/** shlink:/<base64url payload> */
+	shlink: string;
+	/** present only when the creator may read sensitive records */
+	left_out?: { sensitive: number };
+}
+/** One answer to a recipient in GET /profiles/{p}/shl/{id}/access, newest first. */
+export interface ShlAccess {
+	at: IsoDateTime;
+	kind: 'manifest' | 'file' | 'passcode_wrong' | 'passcode_missing';
+	recipient: string;
+	/** the client address (behind a trusted proxy, the one it forwarded) */
+	ip: string | null;
+	user_agent: string | null;
+}
+export interface ShlAccessList {
+	items: ShlAccess[];
+}
+/** DELETE /profiles/{p}/shl/{id} answer, the same on a second revoke. */
+export interface ShlRevoked {
+	id: Uuid;
+	revoked: true;
 }

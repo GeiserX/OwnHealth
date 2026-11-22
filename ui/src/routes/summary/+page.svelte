@@ -10,11 +10,12 @@
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { LANGS, type Lang } from '#lib/i18n/langs';
 	import { currentProfile } from '#lib/state/app.svelte';
 
 	const prof = $derived(currentProfile());
 	let specialty = $state<SummarySpecialty>('gp');
-	let lang = $state<'es' | 'en'>(i18n.lang === 'es' ? 'es' : 'en');
+	let lang = $state<Lang>(i18n.lang);
 	let sensitive = $state(false);
 	let busy = $state(false);
 	let error = $state<unknown>(null);
@@ -117,8 +118,9 @@
 		</fieldset>
 		<fieldset>
 			<legend>{t('sum_lang')}</legend>
-			<label class="opt"><input type="radio" name="lang" value="es" bind:group={lang} />Español</label>
-			<label class="opt"><input type="radio" name="lang" value="en" bind:group={lang} />English</label>
+			{#each LANGS as l (l.code)}
+				<label class="opt"><input type="radio" name="lang" value={l.code} bind:group={lang} />{l.name}</label>
+			{/each}
 		</fieldset>
 		{#if canGenome}
 			<fieldset>

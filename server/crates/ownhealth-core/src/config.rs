@@ -47,6 +47,17 @@ pub struct Settings {
     pub ocr_models_dir: PathBuf,
     /// `OWNHEALTH_INBOX_DIR`: the watched folder root (`<root>/<profile-slug>/`).
     pub inbox_dir: Option<PathBuf>,
+    /// `OWNHEALTH_SHARE_URL`: the public origin of the link-only site block (deploy/Caddyfile), which
+    /// every SMART Health Link points at. Unset: sharing is off. https, or http on a loopback host
+    /// ([`check_share_url`]).
+    pub share_url: Option<String>,
+    /// `OWNHEALTH_TRUSTED_PROXIES`: comma-separated addresses or CIDR ranges of the proxies in front
+    /// of the app. Only a request whose direct peer is one of them has its `X-Forwarded-For` read for
+    /// the client address. Empty: the peer address is the client address.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// `OWNHEALTH_ANCHOR_DIR`: where each backup writes the audit chain head it anchored, outside the
+    /// database (ownhealth-ops backup.rs). Unset: `<data_dir>/anchor`.
+    pub anchor_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -74,6 +85,9 @@ impl Default for Settings {
             ocr: false,
             ocr_models_dir: PathBuf::from("/opt/ownhealth/ocr-models"),
             inbox_dir: None,
+            share_url: None,
+            trusted_proxies: Vec::new(),
+            anchor_dir: None,
         }
     }
 }
@@ -101,6 +115,9 @@ impl fmt::Debug for Settings {
             .field("ocr", &self.ocr)
             .field("ocr_models_dir", &self.ocr_models_dir)
             .field("inbox_dir", &self.inbox_dir)
+            .field("share_url", &self.share_url)
+            .field("trusted_proxies", &self.trusted_proxies)
+            .field("anchor_dir", &self.anchor_dir)
             .finish_non_exhaustive()
     }
 }
@@ -174,6 +191,73 @@ pub fn parse_queues(value: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// `OWNHEALTH_SHARE_URL` as the links carry it: an origin without a trailing slash. A recipient's
+/// name and the passcode travel to it, so it is https; plain http only reaches a loopback host
+/// (a tunnel or a test on the same machine). A path, query, fragment, user name or password is refused.
+/// No refusal prints the value: a user and password typed without `https://` parse as a scheme and a
+/// path, so no parse can be trusted to find them first.
+pub fn check_share_url(value: &str) -> Result<String> {
+    let refuse = |why: &str| {
+        Error::Invalid(format!(
+            "OWNHEALTH_SHARE_URL {why}. Set it to the public https address of the share port, such as \
+             https://share.example.org, or leave it unset to keep sharing off."
+        ))
+    };
+    let origin = value.trim().trim_end_matches('/');
+    let url = url::Url::parse(origin).map_err(|_| {
+        Error::Invalid(
+            "OWNHEALTH_SHARE_URL is not a URL. Set it to the public https address of the share port, \
+             such as https://share.example.org, or leave it unset to keep sharing off."
+                .into(),
+        )
+    })?;
+    // every link and QR code would repeat it, and a browser refuses such a URL
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::Invalid(
+            "OWNHEALTH_SHARE_URL carries a user name or password. Take it out: every link and QR code \
+             would repeat it. Set it to the public https address of the share port, such as \
+             https://share.example.org, or leave it unset to keep sharing off."
+                .into(),
+        ));
+    }
+    let loopback = match url.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => return Err(refuse("has no host")),
+    };
+    match url.scheme() {
+        "https" => {}
+        "http" if loopback => {}
+        "http" => return Err(refuse("uses http: only https may carry a passcode off this machine")),
+        _ => return Err(refuse("is not an https address")),
+    }
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return Err(refuse("has more than a scheme, a host and a port"));
+    }
+    // the parsed origin, not the text: `https:share.example.org` parses, and links built on the text
+    // would lack the `//` and resolve against the page's own host
+    Ok(url.origin().ascii_serialization())
+}
+
+/// Parse `OWNHEALTH_TRUSTED_PROXIES`: addresses (`172.18.0.3`) or ranges (`172.16.0.0/12`).
+pub fn parse_trusted_proxies(value: &str) -> Result<Vec<ipnet::IpNet>> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| {
+            v.parse::<ipnet::IpNet>()
+                .or_else(|_| v.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+                .map_err(|_| {
+                    Error::Invalid(format!(
+                        "OWNHEALTH_TRUSTED_PROXIES: {v:?} is not an address or a range such as 172.16.0.0/12"
+                    ))
+                })
+        })
+        .collect()
+}
+
 /// Python's `urllib.parse.quote(s, safe='')`.
 fn quote_all(s: &str) -> String {
     let mut out = String::new();
@@ -245,11 +329,19 @@ impl Settings {
                 .map(PathBuf::from)
                 .unwrap_or(d.ocr_models_dir),
             inbox_dir: env_or(env, "INBOX_DIR")?.map(PathBuf::from),
+            share_url: env_or(env, "SHARE_URL")?.map(|u| check_share_url(&u)).transpose()?,
+            trusted_proxies: parse_trusted_proxies(&env_or(env, "TRUSTED_PROXIES")?.unwrap_or_default())?,
+            anchor_dir: env_or(env, "ANCHOR_DIR")?.map(PathBuf::from),
         })
     }
 
     pub fn blobs_path(&self) -> PathBuf {
         self.blob_dir.clone().unwrap_or_else(|| self.data_dir.join("blobs"))
+    }
+
+    /// The folder of the audit anchor file: `OWNHEALTH_ANCHOR_DIR`, or `<data_dir>/anchor`.
+    pub fn anchor_path(&self) -> PathBuf {
+        self.anchor_dir.clone().unwrap_or_else(|| self.data_dir.join("anchor"))
     }
 
     /// The URL for sqlx: `postgresql+psycopg://` (accepted by the Python app) becomes `postgresql://`.
@@ -343,5 +435,85 @@ mod tests {
         assert_eq!(s.base_url, "https://health.example");
         assert_eq!(s.blobs_path(), PathBuf::from("./data/blobs"));
         assert_eq!(sqlx_url("postgresql+psycopg://u@h/d"), "postgresql://u@h/d");
+    }
+
+    /// The share address carries a recipient's name and a passcode: https, or http on loopback only.
+    #[test]
+    fn the_share_url_is_https_or_loopback_http_and_only_an_origin() {
+        let share = |v: &str| Settings::from(&env(&[("OWNHEALTH_SHARE_URL", v)])).map(|s| s.share_url);
+        for (given, kept) in [
+            ("https://share.example.org/", "https://share.example.org"),
+            ("https://share.example.org:8443", "https://share.example.org:8443"),
+            ("http://127.0.0.1:18090", "http://127.0.0.1:18090"),
+            ("http://localhost:8090/", "http://localhost:8090"),
+            ("http://[::1]:8090", "http://[::1]:8090"),
+            // parses without the `//`: the links carry the parsed origin, never the text
+            ("https:share.example.org", "https://share.example.org"),
+        ] {
+            assert_eq!(share(given).ok().flatten().as_deref(), Some(kept), "{given}");
+        }
+        for bad in [
+            "http://example.org",
+            "http://192.168.1.20:8090",
+            "ftp://share.example.org",
+            "share.example.org",
+            "https://share.example.org/links",
+            "https://share.example.org/?x=1",
+            "https://user@share.example.org",
+        ] {
+            let err = share(bad).expect_err(bad).to_string();
+            assert!(
+                err.contains("OWNHEALTH_SHARE_URL") && err.contains("https"),
+                "{bad}: {err}"
+            );
+        }
+        // a user or a password would be copied into every link and QR code: refused, and said plainly
+        for creds in [
+            "https://:hunter2@share.example.org",
+            "https://user:hunter2@share.example.org",
+            "https://user@share.example.org",
+        ] {
+            let err = share(creds).expect_err(creds).to_string();
+            assert!(
+                err.contains("user name or password") && !err.contains("hunter2"),
+                "{creds}: {err}"
+            );
+        }
+        // a value that does not parse (a port that is not a number) is refused without being printed
+        let err = share("https://user:hunter2@share.example.org:port")
+            .expect_err("bad port")
+            .to_string();
+        assert!(
+            err.contains("OWNHEALTH_SHARE_URL is not a URL") && !err.contains("hunter2"),
+            "{err}"
+        );
+        // without `https://` the user and password parse as a scheme and a path, and still never print
+        for typo in [
+            "user:hunter2@share.example.org",
+            "share:hunter2@share.example.org:443",
+            "https://user:hunter2@",
+        ] {
+            let err = share(typo).expect_err(typo).to_string();
+            assert!(
+                err.contains("OWNHEALTH_SHARE_URL") && !err.contains("hunter2"),
+                "{typo}: {err}"
+            );
+        }
+        assert_eq!(share("").ok().flatten(), None, "empty keeps sharing off");
+    }
+
+    #[test]
+    fn trusted_proxies_are_addresses_or_ranges() {
+        let e = env(&[("OWNHEALTH_TRUSTED_PROXIES", " 172.16.0.0/12, 10.0.0.7 ,fc00::/7")]);
+        let got: Vec<String> = Settings::from(&e)
+            .expect("settings")
+            .trusted_proxies
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(got, ["172.16.0.0/12", "10.0.0.7/32", "fc00::/7"]);
+        assert!(Settings::from(&env(&[])).expect("settings").trusted_proxies.is_empty());
+        let err = Settings::from(&env(&[("OWNHEALTH_TRUSTED_PROXIES", "caddy")])).expect_err("refused");
+        assert!(err.to_string().contains("OWNHEALTH_TRUSTED_PROXIES"));
     }
 }

@@ -130,6 +130,17 @@ const ES: Words = Words {
     ],
 };
 
+/// The words of every registry language, read with `langs::pick`.
+const WORDS: &[(&str, &Words)] = &[("es", &ES), ("en", &EN)];
+
+/// The registry languages the timeline's words lack (`tests/langs.rs`).
+pub fn missing_langs(langs: &[&str]) -> Vec<String> {
+    ownhealth_core::langs::missing(&ownhealth_core::langs::codes(WORDS), langs)
+        .into_iter()
+        .map(|l| format!("timeline words have no `{l}` table"))
+        .collect()
+}
+
 impl Words {
     /// A stored status word in this language; any other text stays as it is.
     fn word(&self, v: Option<String>) -> Option<String> {
@@ -140,7 +151,7 @@ impl Words {
     }
 }
 
-/// Every fixed phrase the timeline writes, in both languages, for the wording gate (`wording_all.rs`).
+/// Every fixed phrase the timeline writes, in every language, for the wording gate (`wording_all.rs`).
 pub fn phrases() -> Value {
     let one = |w: &Words| {
         let mut v = vec![
@@ -150,7 +161,11 @@ pub fn phrases() -> Value {
         v.extend(w.enums.iter().map(|(_, t)| *t));
         v
     };
-    json!({"en": one(&EN), "es": one(&ES)})
+    WORDS
+        .iter()
+        .map(|(l, w)| (l.to_string(), json!(one(w))))
+        .collect::<serde_json::Map<String, Value>>()
+        .into()
 }
 
 /// What is true now on a clinical table aliased `a`: current, not superseded, sensitive only if allowed.
@@ -661,8 +676,9 @@ async fn timeline(
     let from = e.date(&q, "from");
     let to = e.date(&q, "to");
     let as_of = e.date(&q, "as_of");
+    // an absent lang reads English, the default this route has answered with since 0.4.0
+    let lang = e.query_lang(&q).unwrap_or("en");
     e.done()?;
-    let lang = param(&q, "lang").unwrap_or("en");
     let types = param(&q, "types").filter(|t| !t.is_empty());
 
     let mut tx = rt.pool.begin().await?;
@@ -681,7 +697,7 @@ async fn timeline(
     }
     let want: BTreeSet<&str> = asked.iter().copied().filter(|k| perm.has(scope(k))).collect();
     let withheld: Vec<&str> = asked.difference(&want).copied().collect();
-    let t = if lang == "es" { &ES } else { &EN };
+    let t = ownhealth_core::langs::pick(WORDS, lang);
     let sens = perm.has("read:sensitive");
     let pid = perm.profile.id;
 

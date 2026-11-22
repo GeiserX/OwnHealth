@@ -21,7 +21,7 @@ use std::io::{self, Read, Seek, Write};
 
 use chrono::{DateTime, Datelike, NaiveDate, Timelike, Utc};
 use futures::TryStreamExt;
-use ownhealth_core::blobs::{BlobError, BlobStore};
+use ownhealth_core::blobs::{BlobError, BlobOwner, BlobStore};
 use ownhealth_core::pyjson::{py_date, py_isoformat_utc};
 use ownhealth_core::{Error, Result};
 use regex::Regex;
@@ -36,15 +36,19 @@ use zip::{CompressionMethod, ZipWriter};
 pub const FORMAT: &str = "ownhealth.export/v1";
 pub const LIFECYCLE_TAG: &str = "urn:ownhealth:lifecycle";
 /// Not part of a person's export: access control and secrets, inbox configuration (v0.2: token hashes,
-/// secret references, routing rules), calendar feed tokens (v0.3), and tables that only repeat the
-/// profile.
-const SKIP_RAW: [&str; 6] = [
+/// secret references, routing rules), calendar feed tokens (v0.3), inbox bookkeeping (what an inbox
+/// already handed over, so it never imports it twice: message and Paperless ids, folder keys, file
+/// hashes), SMART Health Links (v1.0: id hashes, passcode hashes, ciphertext), and tables that only
+/// repeat the profile.
+const SKIP_RAW: [&str; 8] = [
     "profile",
     "profile_grant",
     "api_token",
     "calendar_feed",
     "sender_rule",
+    "shl",
     "source",
+    "source_item",
 ];
 /// These name the person `patient`, not `subject`.
 const PATIENT_FIELD: [&str; 3] = ["AllergyIntolerance", "FamilyMemberHistory", "Immunization"];
@@ -168,12 +172,12 @@ impl<W: Write + Seek> Writer<W> {
     }
 
     /// Copy one blob in. False when the store does not have it (the caller records the gap).
-    fn blob(&mut self, path: &str, blobs: &BlobStore, sha: &str) -> Result<bool> {
+    fn blob(&mut self, path: &str, blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<bool> {
         if self.paths.contains(path) {
             return Ok(true);
         }
         // opened before the zip entry, so a vanished blob leaves no stub
-        let mut src = match blobs.open(sha) {
+        let mut src = match blobs.open_seek(owner, sha) {
             Ok(f) => f,
             Err(BlobError::NotFound(_)) => return Ok(false),
             Err(e) => return Err(e.into()),
@@ -448,7 +452,7 @@ pub async fn export_profile<W: Write + Seek>(
             "content": [{"attachment": {"contentType": mime, "url": path, "title": filename, "size": size}}],
         });
         w.line("fhir/DocumentReference.ndjson", &doc)?;
-        if !blocking(|| w.blob(&path, blobs, &sha))? {
+        if !blocking(|| w.blob(&path, blobs, BlobOwner::Profile(profile_id), &sha))? {
             missing.push(json!({"path": path, "source_blob": sha}));
         }
     }
@@ -518,7 +522,7 @@ pub async fn export_profile<W: Write + Seek>(
         for ((_, name), sha) in GENOME_FILES.iter().zip(shas) {
             if let Some(sha) = sha {
                 let path = format!("genome/{gid}/{name}");
-                if !blocking(|| w.blob(&path, blobs, &sha))? {
+                if !blocking(|| w.blob(&path, blobs, BlobOwner::Profile(profile_id), &sha))? {
                     missing.push(json!({"path": path, "source_blob": sha}));
                 }
             }
@@ -529,7 +533,9 @@ pub async fn export_profile<W: Write + Seek>(
     for table in &raw_tables {
         let path = format!("ownhealth/{table}.ndjson");
         w.touch(&path);
-        let q = format!("select to_jsonb(t) from {} t where profile_id = $1", quote(table));
+        // `t.*`, not `t`: in a table with a column named t (wearable_sample, wearable_rollup,
+        // vendor_score), `to_jsonb(t)` reads that column and each line would be a bare timestamp
+        let q = format!("select to_jsonb(t.*) from {} t where profile_id = $1", quote(table));
         let mut rows = sqlx::query_scalar::<_, Value>(AssertSqlSafe(q))
             .bind(profile_id)
             .fetch(&mut *conn);
@@ -545,7 +551,7 @@ pub async fn export_profile<W: Write + Seek>(
         let path = "ownhealth/medication_label.ndjson";
         w.touch(path);
         let mut rows = sqlx::query_scalar::<_, Value>(
-            "select to_jsonb(l) from medication_label l join medication_statement m on m.id = l.medication_id \
+            "select to_jsonb(l.*) from medication_label l join medication_statement m on m.id = l.medication_id \
              where m.profile_id = $1 order by l.medication_id, l.document_id",
         )
         .bind(profile_id)

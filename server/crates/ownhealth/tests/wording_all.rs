@@ -11,6 +11,8 @@ use std::pin::Pin;
 
 use common::{Seeded, as_of, seeded};
 use ownhealth_core::access::all_scopes;
+// Every registry language: a language added there is linted by every source below.
+use ownhealth_core::langs::LANGS;
 use ownhealth_genome::clinvar::{self, Before, EventText};
 use ownhealth_rules::cited;
 use ownhealth_rules::wording::{SKIP_KEYS, imperative_phrases, lint};
@@ -23,7 +25,6 @@ type Source = for<'a> fn(&'a Seeded) -> Out<'a>;
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../data");
 const SLUGS: [&str; 4] = ["alex", "sam", "lucia", "carmen"];
-const LANGS: [&str; 2] = ["en", "es"];
 
 /// Every user-facing output we compute. One line per source.
 const SOURCES: &[(&str, Source)] = &[
@@ -49,6 +50,15 @@ const SOURCES: &[(&str, Source)] = &[
     ("ips", |s| Box::pin(ips_narratives(s))),
     ("calendar_feed", |_| {
         Box::pin(async { Ok(vec![ownhealth_api::routes::ics::phrases()]) })
+    }),
+    ("shl", |_| {
+        Box::pin(async { Ok(vec![ownhealth_api::routes::shl::phrases()]) })
+    }),
+    ("imaging_viewer", |_| {
+        Box::pin(async { Ok(vec![ownhealth_api::routes::imaging_proxy::phrases()]) })
+    }),
+    ("shc", |_| {
+        Box::pin(async { Ok(vec![ownhealth_ingest_structured::shc::phrases()]) })
     }),
 ];
 
@@ -505,7 +515,7 @@ async fn couple_carrier() -> anyhow::Result<Vec<Value>> {
 /// The printed doctor summary's model, every profile, specialty and language (its PDF text layer is
 /// linted in `summary_pdf.rs`).
 async fn summaries(s: &Seeded) -> anyhow::Result<Vec<Value>> {
-    use ownhealth_rules::summary::{LANGS, Options, SPECIALTIES, build};
+    use ownhealth_rules::summary::{Options, SPECIALTIES, build};
     let mut tx = s.pool().begin().await?;
     let mut out = Vec::new();
     for slug in SLUGS {

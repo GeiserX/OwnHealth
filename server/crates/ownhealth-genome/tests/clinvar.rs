@@ -278,6 +278,7 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     // The review item names nothing: the gene and classes come from the gated events route.
     assert_eq!(planted[0]["withheld"], false);
     assert_eq!(planted[0]["summary"], "A result you carry changed in ClinVar.");
+    assert_eq!(planted[0]["summary_en"], planted[0]["summary"]);
     assert_eq!(
         planted[0]["summary_es"],
         "Ha cambiado en ClinVar un resultado que tienes."
@@ -333,6 +334,7 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
     assert_eq!(sf.len(), 1);
     assert_eq!(sf[0]["withheld"], true);
     assert_eq!(sf[0]["summary"], "A withheld result changed in ClinVar.");
+    assert_eq!(sf[0]["summary_en"], sf[0]["summary"]);
     assert_eq!(
         sf[0]["summary_es"],
         "Ha cambiado en ClinVar un resultado que está oculto."
@@ -367,6 +369,7 @@ async fn two_releases_fire_exactly_on_the_three_alert_classes() -> R {
             .as_str()
             .is_some_and(|s| s.ends_with("merece una prueba clínica."))
     );
+    assert_eq!(sam[0]["summary_en"], sam[0]["summary"]);
     assert!(alerts_of(&mut c, e.profile("lucia")).await?.is_empty());
 
     // get_genome_findings' clinvar_now: the CFTR finding now reads what release two says.
@@ -520,7 +523,13 @@ async fn unsort_alex_calls(e: &Env, c: &mut PgConnection) -> anyhow::Result<()> 
     .bind(e.profile("alex"))
     .fetch_one(&mut *c)
     .await?;
-    let path = e.blobs.path(&sha)?;
+    let path = e
+        .dir
+        .path()
+        .join("blobs/sha256")
+        .join(&sha[..2])
+        .join(&sha[2..4])
+        .join(&sha);
     let mut text = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tAR-01\n".to_string();
     text.push_str("chrM\t100\t.\tA\tG\t50\tPASS\t.\tGT\t1/1\n");
     for r in alex_calls() {

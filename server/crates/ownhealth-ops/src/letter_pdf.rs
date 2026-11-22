@@ -44,7 +44,7 @@ fn blank(w: &mut Writer, label: &str) {
 
 /// The letter as a PDF.
 pub fn render(g: &Gaps, letter: &Letter, l: &LetterIn) -> Vec<u8> {
-    let lang = if l.lang == "es" { "es" } else { "en" };
+    let lang = ownhealth_core::langs::lang_or_default(l.lang);
     let t = |k: &str| pick(&g.letter_text[k], lang);
     let p = [
         ("name", l.name.to_string()),

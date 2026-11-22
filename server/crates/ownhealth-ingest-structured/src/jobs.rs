@@ -2,7 +2,7 @@
 //! the uploaded file as a document, then import it, in one transaction.
 
 use ownhealth_core::Error;
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::jobs::{Job, JobContext, JobError};
 use serde_json::Value;
@@ -35,15 +35,16 @@ pub async fn document_for(
         .get("blob_sha256")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty());
-    let Some(sha) = sha.filter(|s| blobs.exists(s)) else {
+    let household_id = uuid_field(payload, "household_id")?;
+    let profile_id = uuid_field(payload, "profile_id")?;
+    let owner = BlobOwner::Profile(profile_id);
+    let Some(sha) = sha.filter(|s| blobs.exists(owner, s)) else {
         return Err(JobError::permanent(format!(
             "{}: the uploaded file is not in the blob store",
             py::py_str(payload.get("filename"))
         )));
     };
-    let household_id = uuid_field(payload, "household_id")?;
-    let profile_id = uuid_field(payload, "profile_id")?;
-    let size = blobs.size(sha).map_err(|e| JobError::from(Error::from(e)))? as i64;
+    let size = blobs.size(owner, sha).map_err(|e| JobError::from(Error::from(e)))? as i64;
     let filename = payload.get("filename").and_then(Value::as_str);
     let doc = create_document(
         conn,

@@ -52,10 +52,19 @@ services:
       OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # seals inbox passwords and tokens (v0.2)
       OWNHEALTH_BASE_URL: https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
       OWNHEALTH_INBOX_DIR: /inbox # the watched folder: ./inbox/<profile>/ on the host
+      # The `imaging` profile (below): Orthanc's address, empty when imaging is off, and its password.
+      OWNHEALTH_ORTHANC_URL: ${OWNHEALTH_ORTHANC_URL:-}
+      OWNHEALTH_ORTHANC_PASSWORD_FILE: /run/secrets/imaging/orthanc_password
+      # Only Caddy reaches the app, from the compose network, so its X-Forwarded-For names the client
+      # (the share link access log keeps that address).
+      OWNHEALTH_TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
     secrets: [app_db_password, secret_key, secrets_key]
     volumes:
       - ownhealth-data:/data
       - ./inbox:/inbox
+      # Only the Orthanc password, from its own folder: a secret listed above must exist even with
+      # imaging off, and the app must not see the other files in secrets/.
+      - ./secrets/imaging:/run/secrets/imaging:ro
     # No published port: only Caddy reaches the app, on the compose network.
     read_only: true
     tmpfs: [/tmp]
@@ -92,6 +101,38 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
 
+  # `imaging` profile (v1.0): Orthanc keeps the DICOM studies and serves the OHIF viewer, to the app
+  # only. It publishes no port, and Caddy does not reach it: the app checks every viewer request first
+  # (docs/design/architecture.md section 4). Turn it on with the password file:
+  #   mkdir -p secrets/imaging && openssl rand -hex 32 > secrets/imaging/orthanc_password && chmod 644 secrets/imaging/orthanc_password
+  # then two lines in .env: COMPOSE_PROFILES=imaging (with OCR too: COMPOSE_PROFILES=ocr,imaging) and
+  # OWNHEALTH_ORTHANC_URL=http://orthanc:8042.
+  orthanc:
+    profiles: [imaging]
+    image: orthancteam/orthanc:26.11.1
+    restart: unless-stopped
+    # Orthanc's one account is the app's. Its password comes from the secret, never from this file.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        export ORTHANC__REGISTERED_USERS="{\"ownhealth\": \"$$(cat /run/secrets/orthanc_password)\"}" &&
+        exec /docker-entrypoint.sh /tmp/orthanc.json
+    environment:
+      ORTHANC__AUTHENTICATION_ENABLED: "true"
+      ORTHANC__DICOM_SERVER_ENABLED: "false" # studies arrive from the app over HTTP, never over DICOM
+      DICOM_WEB_PLUGIN_ENABLED: "true"
+      ORTHANC__DICOM_WEB__ENABLE_METADATA_CACHE: "true"
+      OHIF_PLUGIN_ENABLED: "true"
+      # The plugin's default data source, dicom-json, reads Orthanc-id routes that the app refuses.
+      ORTHANC__OHIF__DATA_SOURCE: dicom-web
+    secrets: [orthanc_password]
+    volumes:
+      - ownhealth-orthanc:/var/lib/orthanc/db
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE] # the image starts as root and writes into folders its orthanc user owns
+    security_opt: ["no-new-privileges:true"]
+
   db:
     image: postgres:17.11
     restart: unless-stopped
@@ -107,6 +148,7 @@ services:
       retries: 10
     volumes:
       - ownhealth-pg:/var/lib/postgresql/data
+    networks: [default, ow-db] # ow-db: the wearables sidecar's only way to OwnHealth's side
 
   caddy:
     image: caddy:2.11.9
@@ -118,10 +160,170 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp"
+      # The SMART Health Link listener, for a tunnel on this host only (deploy/README.md, Sharing a
+      # summary). It answers the two link routes and 404 to everything else.
+      - "127.0.0.1:${OWNHEALTH_SHARE_PORT:-8090}:8090"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+
+  # `wearables` profile (v1.0): the Open Wearables sidecar (MIT), which holds the Oura, Whoop, Polar and
+  # Withings logins; the app pulls from its REST API. Turn it on (deploy/README.md, "Wearables"):
+  # - put three lines in openwearables.env, next to .env and never in it, so OwnHealth's own containers
+  #   never hold them: OPENWEARABLES_DB_PASSWORD, OPENWEARABLES_SECRET_KEY and OPENWEARABLES_ADMIN_PASSWORD
+  #   (long random strings, e.g. `openssl rand -hex 32`). Compose reads it, so it can stay mode 600;
+  # - then add wearables to COMPOSE_PROFILES in .env: COMPOSE_PROFILES=wearables, or ocr,wearables with
+  #   OCR on, and run `docker compose up -d`.
+  # - A missing openwearables.env or an empty line in it stops the sidecar, never the app: ow-db-init
+  #   starts only once the app is healthy, and the sidecar's log names the missing variable.
+  # - After a change to openwearables.env, `docker compose up -d` recreates the sidecar and sets the new
+  #   database password on its role.
+  # - Quiet: no usage pings, no Sentry, no OTLP export, no outgoing webhooks. It calls only the vendors.
+  # - Fenced off: no published port (Caddy does not route to it), none of OwnHealth's secrets, and its
+  #   own database and role on the same Postgres (deploy/db/ow-role.sql). That role cannot connect to
+  #   the ownhealth database. OW's database is a cache, so `ownhealth backup` leaves it out.
+  # - Off OwnHealth's network: the sidecar shares only ow-db with OwnHealth, and db is the one OwnHealth
+  #   container on it, so OW and the app cannot reach each other. OW reaches the vendors through
+  #   ow-egress.
+  # - Redis is OW's Celery broker, on an internal network that only the sidecar joins. It keeps nothing
+  #   on disk: a restart drops queued syncs, and beat queues them again.
+  ow-db-init:
+    profiles: [wearables]
+    image: postgres:17.11
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+      # the sidecar starts only once OwnHealth is up: a broken OW secret stops OW, never the app
+      app:
+        condition: service_healthy
+    # an optional env file, never a docker secret: compose binds a secret's file when it creates the
+    # container, so a missing one would fail the whole `up -d` before the recreated app starts
+    env_file: &ow-env-file
+      - path: openwearables.env # OW's secrets, for the four sidecar services only
+        required: false # without it ow-db-init stops and names the missing variable
+    command:
+      - sh
+      - -c
+      - >-
+        PGPASSWORD=$$(cat /run/secrets/db_password) && export PGPASSWORD &&
+        exec psql postgresql://ownhealth@db:5432/ownhealth -X -q -v ON_ERROR_STOP=1
+        -v ow_role=openwearables -v ow_db=openwearables -f /opt/ow-role.sql
+    secrets: [db_password]
+    volumes:
+      - ./deploy/db/ow-role.sql:/opt/ow-role.sql:ro
+    networks: [ow-db]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  ow-app:
+    profiles: [wearables]
+    image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
+    restart: unless-stopped
+    depends_on:
+      ow-db-init:
+        condition: service_completed_successfully
+      ow-redis:
+        condition: service_started
+    env_file: *ow-env-file
+    environment: &ow-env
+      ENVIRONMENT: production
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: openwearables
+      DB_USER: openwearables
+      REDIS_HOST: ow-redis
+      UV_CACHE_DIR: /tmp/uv # the root filesystem is read-only
+      TELEMETRY_ENABLED: "false"
+      DO_NOT_TRACK: "1"
+      SENTRY_ENABLED: "false"
+      OTEL_ENABLED: "false"
+      OUTGOING_WEBHOOKS_ENABLED: "false"
+    # OW reads DB_PASSWORD, SECRET_KEY and ADMIN_PASSWORD, so the shell takes them from openwearables.env,
+    # then runs migrations, seeds, and the API on :8000 (not published)
+    command:
+      - sh
+      - -c
+      - >-
+        DB_PASSWORD="$${OPENWEARABLES_DB_PASSWORD:?set it in openwearables.env}" &&
+        SECRET_KEY="$${OPENWEARABLES_SECRET_KEY:?set it in openwearables.env}" &&
+        ADMIN_PASSWORD="$${OPENWEARABLES_ADMIN_PASSWORD:?set it in openwearables.env}" &&
+        export DB_PASSWORD SECRET_KEY ADMIN_PASSWORD && exec scripts/start/app.sh
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 300s
+    networks: [ow-db, wearables, ow-egress]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  ow-worker:
+    profiles: [wearables]
+    image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
+    restart: unless-stopped
+    depends_on:
+      ow-app:
+        condition: service_healthy # OW's migrations ran
+    env_file: *ow-env-file
+    environment: *ow-env
+    command:
+      - sh
+      - -c
+      - >-
+        DB_PASSWORD="$${OPENWEARABLES_DB_PASSWORD:?set it in openwearables.env}" &&
+        SECRET_KEY="$${OPENWEARABLES_SECRET_KEY:?set it in openwearables.env}" &&
+        export DB_PASSWORD SECRET_KEY && exec scripts/start/worker.sh
+    networks: [ow-db, wearables, ow-egress]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  ow-beat:
+    profiles: [wearables]
+    image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
+    restart: unless-stopped
+    depends_on:
+      ow-app:
+        condition: service_healthy
+    env_file: *ow-env-file
+    environment: *ow-env
+    command:
+      - sh
+      - -c
+      - >-
+        DB_PASSWORD="$${OPENWEARABLES_DB_PASSWORD:?set it in openwearables.env}" &&
+        SECRET_KEY="$${OPENWEARABLES_SECRET_KEY:?set it in openwearables.env}" &&
+        export DB_PASSWORD SECRET_KEY && exec scripts/start/beat.sh
+    networks: [ow-db, wearables]
+    # not read-only: celery beat keeps its schedule file in its working directory
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  ow-redis:
+    profiles: [wearables]
+    image: redis:8.10.3
+    restart: unless-stopped
+    user: redis # the image's own user, so the entrypoint needs no capability to switch to it
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks: [wearables]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  wearables:
+    internal: true # no route out: Redis reaches nothing, and only the sidecar reaches Redis
+  ow-db:
+    internal: true # db and the sidecar only: OW reaches Postgres, and no other OwnHealth container
+  ow-egress: # the sidecar's way out to the vendors' APIs; no OwnHealth container joins it
 
 secrets:
   db_password:
@@ -134,9 +336,12 @@ secrets:
     file: ./secrets/secrets_key # inbox credentials at rest; keep a copy with the restic password
   restic_password:
     file: ./secrets/restic_password # keep a copy in your password manager: without it the backup is useless
+  orthanc_password:
+    file: ./secrets/imaging/orthanc_password # the imaging profile only; the app reads the same file
 
 volumes:
   ownhealth-data:
   ownhealth-pg:
+  ownhealth-orthanc:
   caddy-data:
   caddy-config:

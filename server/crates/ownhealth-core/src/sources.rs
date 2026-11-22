@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 use crate::jobs::{self, EnqueueOptions, Job, JobContext, JobError};
 
 /// The `source.kind` check constraint.
-pub const SOURCE_KINDS: [&str; 9] = [
+pub const SOURCE_KINDS: [&str; 14] = [
     "email",
     "folder",
     "paperless",
@@ -34,7 +34,15 @@ pub const SOURCE_KINDS: [&str; 9] = [
     "gadgetbridge",
     "nightscout",
     "clinvar",
+    "smart",
+    "bluebutton",
+    "brands",
+    "openwearables",
+    "dexcom",
 ];
+/// Kinds a connector makes through its own route (the OAuth launch, the brands directory, the Open
+/// Wearables setup), never POST /api/inboxes.
+pub const CONNECTOR_KINDS: [&str; 5] = ["smart", "bluebutton", "brands", "openwearables", "dexcom"];
 pub const POLL_JOB: &str = "source.poll";
 /// How often the scheduler looks for due sources.
 pub const SCHEDULER_SECONDS: u64 = 30;
@@ -412,6 +420,30 @@ pub struct SourceHealth {
     /// error that stopped it.
     pub last_run_problems: i32,
     pub last_run_problem: Option<String>,
+    /// What only a person who manages the source is sent (routes::inboxes adds it per caller).
+    #[sqlx(flatten)]
+    #[serde(skip_serializing)]
+    pub managed: ManagedHealth,
+}
+
+/// The part of a health row for the people who manage the source, for the Connections screen (v1.0,
+/// connectors.md 6.2). A viewer of the profile, or the source's own token, is not sent it.
+#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+pub struct ManagedHealth {
+    /// With `poll_seconds`: a source with no run yet that was made less than one interval ago has
+    /// no data yet, it is not stale.
+    pub created_at: DateTime<Utc>,
+    pub poll_seconds: Option<i32>,
+    /// The vendor refused the token and the person must sign in again; when the person's grant at the
+    /// vendor ends; when the current access token ends. None for an inbox.
+    pub reconsent_needed_at: Option<DateTime<Utc>>,
+    pub grant_expires_at: Option<DateTime<Utc>>,
+    pub access_expires_at: Option<DateTime<Utc>>,
+    /// Open sync-gap alerts of this source on its own profile: `source_gap` review items with
+    /// `ref_table = 'source'`.
+    pub open_gaps: i32,
+    /// The server a connection talks to (`config.endpoints.issuer`; SMART: the FHIR base URL).
+    pub server: Option<String>,
 }
 
 pub async fn source_health(conn: &mut PgConnection, household_id: Uuid) -> Result<Vec<SourceHealth>> {
@@ -422,7 +454,12 @@ pub async fn source_health(conn: &mut PgConnection, household_id: Uuid) -> Resul
            s.last_success_at < now() - make_interval(secs => s.poll_seconds * $2))) as stale, \
          r.status as last_run_status, coalesce(jsonb_array_length(r.errors), 0)::int4 as last_run_problems, \
          left(coalesce((r.errors -> 0 ->> 'code') || ': ' || (r.errors -> 0 ->> 'message'), r.error), 500) \
-           as last_run_problem \
+           as last_run_problem, \
+         s.created_at, s.poll_seconds, s.reconsent_needed_at, s.grant_expires_at, s.access_expires_at, \
+         (select count(*)::int4 from review_item g where g.household_id = s.household_id and g.status = 'open' \
+           and g.kind = 'source_gap' and g.ref_table = 'source' and g.ref_id = s.id \
+           and g.profile_id is not distinct from s.profile_id) as open_gaps, \
+         s.config -> 'endpoints' ->> 'issuer' as server \
          from source s left join lateral (select status, errors, error from source_run \
            where source_id = s.id and finished_at is not null order by started_at desc, id desc limit 1) r on true \
          where s.household_id = $1 order by s.kind, s.label",
@@ -557,11 +594,32 @@ pub async fn enqueue_poll(conn: &mut PgConnection, source_id: Uuid) -> Result<Op
     .await?)
 }
 
-/// One scheduler pass: `add_default_sources`, then `schedule_due`. Returns the jobs added.
+/// One scheduler pass: `add_default_sources`, `schedule_due`, then `sweep_link_files`, so a sweep
+/// that waits on a lock or fails never holds back the due polls. Returns the jobs added.
 pub async fn scheduler_tick(ctx: &JobContext) -> Result<Vec<i64>> {
     add_default_sources(ctx).await?;
     let mut conn = ctx.pool.acquire().await?;
-    schedule_due(&mut conn).await
+    let added = schedule_due(&mut conn).await?;
+    sweep_link_files(&mut conn).await?;
+    Ok(added)
+}
+
+/// Delete the sealed file of every SMART Health Link that can no longer open (migration 1270): past
+/// its expiry, or out of passcode attempts. Revoke and the last wrong passcode delete theirs at once;
+/// this catches expiry, which no request marks. It first revokes the links whose creator's grant ran
+/// out by itself (`shl_end_unshareable`: a lock or a changed grant does that at the write). Returns the
+/// files deleted.
+pub async fn sweep_link_files(conn: &mut PgConnection) -> Result<u64> {
+    sqlx::query("select shl_end_unshareable(null)")
+        .execute(&mut *conn)
+        .await?;
+    let done = sqlx::query(
+        "delete from shl_file f using shl s where s.id = f.shl_id \
+         and (s.expires_at <= now() or s.attempts_left = 0)",
+    )
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected())
 }
 
 /// Every SCHEDULER_SECONDS: `scheduler_tick`. Stops when `stop` turns true.

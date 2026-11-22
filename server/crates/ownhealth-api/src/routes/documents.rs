@@ -25,6 +25,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use ownhealth_core::access::{Permission, Principal, ProfileRef, effective_permission, require};
 use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::blobs::{BlobError, BlobOwner};
 use ownhealth_core::documents::{document_is_sensitive, sensitive_document_sql};
 use ownhealth_core::pyjson::{parse_datetime, pydantic_datetime, row_to_json};
 use ownhealth_core::{Error, Runtime};
@@ -194,11 +195,39 @@ pub async fn visible_document(
     })
 }
 
+/// Whether `GET /documents/{id}/file` serves this document to `perm` (the caller's permission on its
+/// profile): the scope its type needs, and read:sensitive when it is sensitive, as
+/// [`visible_document`] decides. A review item that only points at its document (a pull's
+/// `fhir_unmapped_summary`) shows on the same terms.
+pub async fn file_opens(conn: &mut PgConnection, perm: &Permission, document_id: Uuid) -> Result<bool, ApiError> {
+    let doc_type: Option<Option<String>> = sqlx::query_scalar("select doc_type from document where id = $1")
+        .bind(document_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let Some(doc_type) = doc_type else {
+        return Ok(false);
+    };
+    if !perm.scopes.contains(scope_for(doc_type.as_deref())) {
+        return Ok(false);
+    }
+    Ok(perm.has("read:sensitive") || !document_is_sensitive(conn, document_id).await?)
+}
+
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// `GET /profiles/{p}/documents` for a resolved caller.
+/// When a document counts as `done` evidence: its collection time, else its report time, the rule
+/// prevention::evidence applies.
+const EVIDENCE_AT: &str = "coalesce(d.collected_at, d.reported_at)";
+
+/// What a document a FHIR import read carries: the issuer of its resources, written by every FHIR
+/// file import and connector pull. An Apple Health export has its own tile.
+const FHIR_IMPORT: &str = "(d.flags->'fhir_issuer' is not null and d.flags->'apple_health' is null)";
+
+/// `GET /profiles/{p}/documents` for a resolved caller. `fhir_newest` (`latest=fhir`) lists only the
+/// documents a FHIR import read, the newest stored first: a connector pull carries no date, so the
+/// evidence order would put it behind every dated document.
 pub async fn list_for(
     conn: &mut PgConnection,
     principal: &Principal,
@@ -206,6 +235,7 @@ pub async fn list_for(
     q: Option<&str>,
     doc_type: Option<&str>,
     limit: i64,
+    fhir_newest: bool,
 ) -> Result<Value, ApiError> {
     let r = match Uuid::parse_str(p) {
         Ok(id) => ProfileRef::Id(id),
@@ -232,6 +262,9 @@ pub async fn list_for(
         wh.push("d.doc_type is distinct from 'lab_report'".into());
     }
     wh.push("($3::text is null or d.doc_type = $3)".into());
+    if fhir_newest {
+        wh.push(FHIR_IMPORT.into());
+    }
     if q.is_some() {
         // page text is searchable only with read:documents_text; the filename always is
         wh.push(if with_text {
@@ -253,9 +286,17 @@ pub async fn list_for(
     } else {
         String::new()
     };
+    // one rule for the evidence day and the order, so the newest evidence comes first and a report
+    // dated only by its report date is never cut by the limit behind older collection-dated files
+    let order = if fhir_newest {
+        "d.created_at desc, d.id".to_string()
+    } else {
+        format!("{EVIDENCE_AT} desc nulls last, d.created_at desc")
+    };
     let sql = format!(
-        "select {COLS}{snippet} from document d where {} and ($4::text is null or true) \
-         order by d.collected_at desc nulls last, d.created_at desc limit $2",
+        "select {COLS}, {EVIDENCE_AT}::date as evidence_day{snippet} \
+         from document d where {} and ($4::text is null or true) \
+         order by {order} limit $2",
         wh.join(" and ")
     );
     let rows: Vec<PgRow> = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -275,7 +316,14 @@ pub async fn list_for(
         } else {
             None
         };
-        items.push(Value::Object(summary(&j, snip)));
+        let mut item = summary(&j, snip);
+        // the day this document counts as `done` evidence from: its collection day, else its report
+        // day, the rule prevention::evidence applies
+        item.insert(
+            "evidence_day".into(),
+            j.get("evidence_day").cloned().unwrap_or(Value::Null),
+        );
+        items.push(Value::Object(item));
     }
     let action = if q.is_some() { "search" } else { "read" };
     audit(
@@ -299,10 +347,20 @@ async fn list_documents(
     let mut e = Errors::new();
     let q = e.str_max(&qs, "q", 200);
     let limit = e.int("query", &qs, "limit", 100, Some(1), Some(500));
+    let latest = param(&qs, "latest");
+    if let Some(v) = latest.filter(|v| *v != "fhir") {
+        e.push(
+            "literal_error",
+            vec![json!("query"), json!("latest")],
+            "Input should be 'fhir'",
+            json!(v),
+            Some(json!({"expected": "'fhir'"})),
+        );
+    }
     e.done()?;
     let doc_type = param(&qs, "type");
     let mut tx = rt.pool.begin().await?;
-    let out = list_for(&mut tx, &principal, &p, q, doc_type, limit).await?;
+    let out = list_for(&mut tx, &principal, &p, q, doc_type, limit, latest.is_some()).await?;
     tx.commit().await?;
     Ok(Json(out))
 }
@@ -389,9 +447,13 @@ async fn document_file(
     )
     .await?;
     // an Apple Health zip runs to hundreds of MB: stream it from disk, never hold it in memory
-    let path = rt.blobs.path(&doc.blob_sha256).map_err(|e| Error::Other(e.into()))?;
-    let file = tokio::fs::File::open(&path).await.map_err(|e| Error::Other(e.into()))?;
-    let size = file.metadata().await.map_err(|e| Error::Other(e.into()))?.len();
+    let owner = BlobOwner::Profile(doc.perm.profile.id);
+    let opened = rt.blobs.open_async(owner, &doc.blob_sha256).await;
+    let (file, size) = opened.map_err(|e| match e {
+        // the row is there but its file is not: say so without the hash
+        BlobError::NotFound(_) => Error::NotFound("This document's file is not stored any more.".into()),
+        e => Error::from(e),
+    })?;
     tx.commit().await?;
     let mime = doc.str("mime").unwrap_or("application/octet-stream");
     let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
@@ -441,10 +503,15 @@ async fn page_png(
     if doc.str("mime") != Some("application/pdf") || !(1..=pages).contains(&i64::from(page_no)) {
         return Err(unknown("No such page.").into());
     }
-    let (blobs, sha) = (rt.blobs.clone(), doc.blob_sha256.clone());
-    let png = tokio::task::spawn_blocking(move || ownhealth_ingest_pdf::render_page_png(&blobs, &sha, page_no, scale))
-        .await
-        .map_err(|e| Error::Other(e.into()))??;
+    let (blobs, sha, owner) = (
+        rt.blobs.clone(),
+        doc.blob_sha256.clone(),
+        BlobOwner::Profile(doc.perm.profile.id),
+    );
+    let png =
+        tokio::task::spawn_blocking(move || ownhealth_ingest_pdf::render_page_png(&blobs, owner, &sha, page_no, scale))
+            .await
+            .map_err(|e| Error::Other(e.into()))??;
     audit(
         &mut tx,
         &principal,

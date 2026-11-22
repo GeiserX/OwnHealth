@@ -590,3 +590,41 @@ async fn test_pretty_unit_and_bad_query_values() -> R {
     );
     Ok(())
 }
+
+/// A `lang` the registry does not hold is refused on the list and the trend; an empty one counts as
+/// absent, and an absent one reads Spanish, these routes' default.
+#[tokio::test]
+async fn a_lang_outside_the_registry_is_refused_and_an_empty_one_reads_the_default() -> R {
+    let a = app().await?;
+    seed(&a).await?;
+    for route in [
+        "/profiles/alex/observations?",
+        "/profiles/alex/trend?code=LOINC:13457-7&window=P5Y&",
+    ] {
+        for bad in ["fr", "en-US"] {
+            let (s, out) = get(&a, "alex", &format!("{route}lang={bad}")).await?;
+            assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{route}{bad}: {out}");
+            assert_eq!(
+                (&out["detail"][0]["type"], &out["detail"][0]["loc"]),
+                (&json!("literal_error"), &json!(["query", "lang"])),
+                "{out}"
+            );
+        }
+    }
+    for tail in ["", "&lang="] {
+        let uri = format!("/profiles/alex/trend?code=LOINC:13457-7&window=P5Y{tail}");
+        let (s, t) = get(&a, "alex", &uri).await?;
+        assert_eq!(s, StatusCode::OK, "{uri}: {t}");
+        assert!(
+            t["limitations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|x| x.as_str().unwrap_or_default().contains("masa molar de C27H46O")),
+            "{uri}: {t}"
+        );
+        let (s, out) = get(&a, "alex", &format!("/profiles/alex/observations?q=LDL{tail}")).await?;
+        assert_eq!(s, StatusCode::OK, "{tail}: {out}");
+    }
+    Ok(())
+}

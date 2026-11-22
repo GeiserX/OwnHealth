@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use ownhealth_core::Error;
 use ownhealth_core::acceptance::Check;
 use ownhealth_core::arrive::{OCR_JOB, enqueue_ocr, set_ocr_state};
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::config::Settings;
 use ownhealth_core::jobs::{self, Job, JobContext, JobError};
 use ownhealth_ingest_pdf::textlayer::{PWord, PageModel, injection_hits};
@@ -128,13 +128,19 @@ async fn pages_to_read(conn: &mut PgConnection, document_id: Uuid, pages: &[i32]
 }
 
 /// One page as RGB pixels and the dpi they stand for.
-fn page_image(blobs: &BlobStore, doc_sha: &str, pdf: bool, page_no: i32) -> Result<(Vec<u8>, u32, u32, f64), OcrError> {
+fn page_image(
+    blobs: &BlobStore,
+    owner: BlobOwner,
+    doc_sha: &str,
+    pdf: bool,
+    page_no: i32,
+) -> Result<(Vec<u8>, u32, u32, f64), OcrError> {
     let (img, dpi) = if pdf {
-        let png = render_page_png(blobs, doc_sha, page_no, OCR_DPI / 72.0)?;
+        let png = render_page_png(blobs, owner, doc_sha, page_no, OCR_DPI / 72.0)?;
         let img = image::load_from_memory(&png).map_err(|e| OcrError::Engine(e.to_string()))?;
         (img, OCR_DPI)
     } else {
-        let data = blobs.get_bytes(doc_sha).map_err(Error::from)?;
+        let data = blobs.get_bytes(owner, doc_sha).map_err(Error::from)?;
         // upright (EXIF orientation applied) and size-capped, like the pHash of the same photo
         let img = decode_image(&data)?;
         // a photo has no dpi worth trusting: scale it to an A4-wide page, which is what the table
@@ -154,6 +160,7 @@ type PageRead = (i32, Result<OcrPage, String>);
 fn read_pages(
     settings: &Settings,
     blobs: &BlobStore,
+    owner: BlobOwner,
     doc_sha: &str,
     pdf: bool,
     pages: &[i32],
@@ -168,7 +175,7 @@ fn read_pages(
     let out = pages
         .iter()
         .map(|&p| {
-            let page = page_image(blobs, doc_sha, pdf, p).and_then(|(rgb, w, h, dpi)| read(&rgb, w, h, dpi, p));
+            let page = page_image(blobs, owner, doc_sha, pdf, p).and_then(|(rgb, w, h, dpi)| read(&rgb, w, h, dpi, p));
             (p, page.map_err(|e| e.to_string()))
         })
         .collect();
@@ -367,6 +374,7 @@ pub async fn ocr_document(ctx: &JobContext, document_id: Uuid, pages: &[i32]) ->
     set_ocr_state(&mut conn, document_id, "running").await?;
     drop(conn);
 
+    let owner = BlobOwner::of_document(doc.profile_id, document_id);
     let (settings, blobs, sha, pdf) = (
         Arc::clone(&ctx.settings),
         ctx.blobs.clone(),
@@ -375,7 +383,7 @@ pub async fn ocr_document(ctx: &JobContext, document_id: Uuid, pages: &[i32]) ->
     );
     let pages_todo = todo.clone();
     let (read, models_sha256) =
-        tokio::task::spawn_blocking(move || read_pages(&settings, &blobs, &sha, pdf, &pages_todo))
+        tokio::task::spawn_blocking(move || read_pages(&settings, &blobs, owner, &sha, pdf, &pages_todo))
             .await
             .map_err(|e| JobError::retry(format!("OCR task failed: {e}")))?;
 
@@ -604,7 +612,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let blobs = BlobStore::new(dir.path())?;
         let sha = blobs.put_bytes(&photo)?;
-        let (rgb, w, h, _) = page_image(&blobs, &sha, false, 1)?;
+        let (rgb, w, h, _) = page_image(&blobs, BlobOwner::Profile(Uuid::nil()), &sha, false, 1)?;
         assert_eq!((w, h, rgb.len()), (200, 300, 200 * 300 * 3));
         Ok(())
     }

@@ -34,7 +34,7 @@ use ownhealth_core::access::{Scopes, today_utc};
 use ownhealth_core::jobs::{self, Job, JobContext, JobError};
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, Postgres, Transaction};
 use uuid::Uuid;
 
 pub use ownhealth_core::canonical::{canonical_json, state_hash};
@@ -177,9 +177,46 @@ pub async fn store_snapshot(conn: &mut PgConnection, profile_id: Uuid, body: &Va
     Ok(row.is_some())
 }
 
+/// Store the state a REPEATABLE READ transaction read, then end that transaction. If another
+/// transaction stored the day's row after this one's snapshot began, Postgres refuses the upsert
+/// with 40001. The write is then dropped: the caller already holds all it read, so the
+/// transaction rolls back and the request goes on. The stored row is the other transaction's,
+/// which is usually but not always newer than the one read (an older print can store first); the
+/// snapshot keeps one row per profile, day and pack, and nothing reads it by hash yet. Any other
+/// error is returned.
+pub async fn commit_read(mut tx: Transaction<'_, Postgres>, profile_id: Uuid, body: &Value) -> Result<()> {
+    match store_snapshot(&mut tx, profile_id, body, &*load_pack()?).await {
+        Ok(_) => tx.commit().await?,
+        Err(Error::Db(e))
+            if e.as_database_error()
+                .and_then(|d| d.code())
+                .is_some_and(|c| c == "40001") =>
+        {
+            tx.rollback().await?;
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(())
+}
+
 /// The body and the evaluation behind it: the dashboard renders from the same evaluation the hash
 /// covers. Stores the snapshot for the current view (`known_at` None).
 pub async fn build_with_evaluation(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    as_of: NaiveDate,
+    known_at: Option<DateTime<Utc>>,
+) -> Result<(Value, engine::Evaluation)> {
+    let (body, ev) = evaluate_state(&mut *conn, profile_id, as_of, known_at).await?;
+    if known_at.is_none() {
+        store_snapshot(&mut *conn, profile_id, &body, &*load_pack()?).await?;
+    }
+    Ok((body, ev))
+}
+
+/// `build_with_evaluation` without its write: the caller reads the whole sheet first, then stores
+/// the body and ends the transaction with `commit_read`.
+pub async fn evaluate_state(
     conn: &mut PgConnection,
     profile_id: Uuid,
     as_of: NaiveDate,
@@ -191,9 +228,6 @@ pub async fn build_with_evaluation(
     let hash = state_hash(&body)?;
     if let Some(m) = body.as_object_mut() {
         m.insert("state_hash".into(), json!(hash));
-    }
-    if known_at.is_none() {
-        store_snapshot(&mut *conn, profile_id, &body, &pack).await?;
     }
     Ok((body, ev))
 }

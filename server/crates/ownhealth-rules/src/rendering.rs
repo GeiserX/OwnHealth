@@ -92,7 +92,7 @@ pub fn render_with(
     identity_mode: &str,
     scopes: Option<&Scopes>,
 ) -> Result<Value> {
-    let lang = if lang == "es" { "es" } else { "en" };
+    let lang = ownhealth_core::langs::lang_or_default(lang);
     let as_of = body
         .get("as_of")
         .and_then(Value::as_str)

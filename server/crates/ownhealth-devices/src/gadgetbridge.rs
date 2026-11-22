@@ -38,7 +38,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
 use ownhealth_core::access::get_profile;
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::error::{Error, Result};
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::jobs::{self, Job, JobContext, JobError};
@@ -301,8 +301,8 @@ pub async fn import_gadgetbridge(
     let profile = get_profile(&mut *conn, profile_id)
         .await?
         .ok_or_else(|| Error::NotFound(format!("unknown profile {profile_id}")))?;
-    let path = blobs.path(&sha)?;
-    let mut read = tokio::task::spawn_blocking(move || read_db(&path))
+    let copy = blobs.with_local_copy(BlobOwner::Profile(profile.id), &sha)?;
+    let mut read = tokio::task::spawn_blocking(move || read_db(copy.path()))
         .await
         .map_err(|e| Error::Other(anyhow::anyhow!("gadgetbridge read task failed: {e}")))??;
     let mut ids: HashMap<i64, i16> = HashMap::new();

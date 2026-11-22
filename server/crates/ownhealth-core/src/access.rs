@@ -198,6 +198,8 @@ pub struct Permission {
     pub profile: Profile,
     pub role: String,
     pub scopes: Scopes,
+    /// An emergency grant (profile_grant.break_glass): it reads, and it never shares.
+    pub break_glass: bool,
 }
 
 impl Permission {
@@ -253,19 +255,24 @@ pub async fn effective_permission(
     {
         return Err(not_granted());
     }
-    let grant: Option<(String, Vec<String>)> = sqlx::query_as(
-        "select role, categories from profile_grant where user_id = $1 and profile_id = $2 \
+    let grant: Option<(String, Vec<String>, bool)> = sqlx::query_as(
+        "select role, categories, break_glass from profile_grant where user_id = $1 and profile_id = $2 \
          and (expires_at is null or expires_at > now())",
     )
     .bind(user_id)
     .bind(profile_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((role, categories)) = grant else {
+    let Some((role, categories, break_glass)) = grant else {
         return Err(not_granted());
     };
     let scopes = effective_scopes(&principal.scopes, &scope_set(&categories), &profile.locks(), &role);
-    Ok(Permission { profile, role, scopes })
+    Ok(Permission {
+        profile,
+        role,
+        scopes,
+        break_glass,
+    })
 }
 
 #[derive(sqlx::FromRow)]
@@ -274,6 +281,7 @@ struct GrantedProfile {
     profile: Profile,
     role: String,
     categories: Vec<String>,
+    break_glass: bool,
 }
 
 /// Every profile the principal may reach, in slug order, with role and effective scopes.
@@ -283,7 +291,7 @@ pub async fn accessible_profiles(conn: &mut PgConnection, principal: &Principal)
     };
     let cols: Vec<String> = PROFILE_COLS.split(',').map(|c| format!("p.{}", c.trim())).collect();
     let sql = format!(
-        "select {}, g.role, g.categories from profile_grant g join profile p on p.id = g.profile_id \
+        "select {}, g.role, g.categories, g.break_glass from profile_grant g join profile p on p.id = g.profile_id \
          where g.user_id = $1 and (g.expires_at is null or g.expires_at > now()) order by p.slug",
         cols.join(", ")
     );
@@ -310,6 +318,7 @@ pub async fn accessible_profiles(conn: &mut PgConnection, principal: &Principal)
                 profile: r.profile,
                 role: r.role,
                 scopes,
+                break_glass: r.break_glass,
             }
         })
         .collect())

@@ -19,9 +19,20 @@ All routes are under `/api`, JSON, and resolve `{p}` as a profile slug, `me` or 
 `unknown`, 409 for lifecycle and review conflicts, 415 `unsupported_upload`. A router module is
 `server/crates/ownhealth-api/src/routes/<file>.rs` with a `router()` that `routes.rs` merges.
 
+`lang`, on every route that takes it, is a registry language (`ownhealth_core::langs::LANGS`, today
+`es` or `en`, exact and lower case). Any other value, `fr`, `EN` and `en-US` included, is 422
+`literal_error` at `["query", "lang"]` (`["body", "lang"]` for a body field), never a silent other
+language. An empty `lang=` counts as absent. An absent `lang` keeps the route's default: English on
+the timeline and the couple view; the first registry language (Spanish) on observations, the trend
+and wearables; the caller's own language on the others (status, dashboard, drug check, next draw and
+its sheet, calculators, due, prevention answers, gaps and the gap letter, and the summary sheet,
+export and share link bodies). A stored language outside the registry reads the first registry
+language: only a `lang` the caller sent is refused. MCP tools take no REST `lang`; they speak the
+token's `mcp_lang`.
+
 | Owner | File (`routes/`) | Route | Notes |
 |---|---|---|---|
-| foundation | core.rs | `GET /me` | user, household, locale, dev flag |
+| foundation | core.rs | `GET /me` | user, household, locale, dev flag; each profile has its `role`, `scopes` and `break_glass` (an emergency grant, which never shares) |
 | foundation | core.rs | `GET /profiles` | `ProfileSummary[]` the caller can read, with role and scopes |
 | foundation | core.rs | `GET /sources/{src_id}` | mcp.md 5.7 shape; `unknown` 404 when not visible |
 | foundation | review.rs | `GET /review?status=&profile=&kind=&document_id=` | |
@@ -33,7 +44,7 @@ All routes are under `/api`, JSON, and resolve `{p}` as a profile slug, `me` or 
 | A | observations.rs | `GET /profiles/{p}/observations?q=&loinc=&alias_group=&category=&from=&to=&units=&lang=` | `{items: ObservationOut[]}` |
 | A | observations.rs | `GET /profiles/{p}/trend?code=&window=P3Y&units=&lang=` | `Trend` (mcp.md 5.3 shape) |
 | A | observations.rs | `POST /aliases` | `{profile, alias, alias_group, lang?, loinc?, unit?, specimen?}`, action `review`; re-derives the household |
-| B | documents.rs | `GET /profiles/{p}/documents?q=&type=` ; `GET /documents/{id}` | |
+| B | documents.rs | `GET /profiles/{p}/documents?q=&type=&limit=&latest=fhir` ; `GET /documents/{id}` | `latest=fhir`: only documents a FHIR import read, newest stored first |
 | B | documents.rs | `GET /documents/{id}/file` ; `/pages/{n}.png` ; `/pages/{n}/words` | words need `read:documents_text` for tokens |
 | B | documents.rs | `POST /documents/{id}/assign` `{profile}` ; `POST /documents/{id}/retract` `{reason}` | |
 | C | records.rs | `GET`/`POST /profiles/{p}/records/{kind}` ; `POST .../{kind}/{id}/correct` ; `.../{id}/retract` | |
@@ -52,7 +63,10 @@ All routes are under `/api`, JSON, and resolve `{p}` as a profile slug, `me` or 
 | G | export.rs | `POST /profiles/{p}/export` `{fmt}` | step-up; answers the zip itself |
 | G | auth.rs | `/auth/state`, `/auth/setup/{begin,finish,password}`, `/auth/login/{begin,finish}`, `/auth/recovery`, `/auth/password/login`, `/auth/step-up/{begin,finish}`, `/auth/passkeys` (GET, `/begin`, `/finish`, `DELETE /{id}`), `/auth/recovery-codes`, `/auth/invite/{code}`, `/auth/enroll/{begin,finish,password}`, `/auth/oidc/{login,callback}` | 403 `step_up_required`, 403 `csrf_failed` |
 | H | timeline.rs | `GET /profiles/{p}/timeline?types=&from=&to=&as_of=&lang=` | |
+| v1.0 sharing | shl.rs | `GET`/`POST /profiles/{p}/shl` `{categories?, days?, passcode?, label?, lang?}` ; `GET /profiles/{p}/shl/{id}/access` ; `DELETE /profiles/{p}/shl/{id}` | owner or guardian only, never break-glass (else 403 `not_sharer`); a category no link can carry (outside `SHAREABLE`, such as `read:genome` or `read:sensitive`) is 422 `literal_error`, a shareable category this creator cannot share on this profile (a lock, a narrower grant) is 403 `category_closed`, and a summary closed to them (a lock on it, or a grant without it; every link carries it) is 403 `summary_closed`; the list answers `{items, open}`, where `open` is what a new link of this caller may carry (their categories minus the profile's locks, the owner's own too, within `SHAREABLE`), so a form offers exactly what create accepts; create needs step-up and answers `{link, shlink, left_out?: {sensitive}}` once (the key exists only in the link; `left_out.sensitive` counts the sensitive records left out, and is absent unless the creator holds `read:sensitive`; the audit row never holds it); each listed link has `state` (`active`, `paused` while sharing is off, `revoked`, `expired`, `locked_out`) and `reason` (`sharing_off`; for revoked `person`, `locked` or `access_changed`); a lock on a category, or a grant narrowed below it, revokes every link that carries it for good (a grant that ran out ends its links even when it is extended before any sweep); revoke deletes the file and answers the same twice; list and access are audited; a 422 never repeats a passcode, password, pin, secret or token field, on any route and in any spelling (`passCode`, `pass_code`), nor a recovery or invite code (`recovery_code`, `invite_code`, and `code` on the recovery and enroll routes) |
+| v1.0 sharing | shl.rs | `POST /shl/{id}` `{recipient, passcode?}` ; `GET /shl/{id}/file/{ticket}` | public, no cookie, CORS: the SMART Health Links manifest (401 `{remainingAttempts}`; 404 while sharing is off, once revoked, expired or out of attempts, or once the creator may no longer share every category it carries (a lock or a narrower grant revokes it at once, for good); 429 with Retry-After in seconds until the hour has room) and the file (`application/jose`, for at most 1 h); the only routes deploy/Caddyfile's public site block passes, each rewritten to its canonical path |
 | J | app-level | `GET /metrics` (Prometheus, outside `/api`) | |
+| C | imaging_proxy.rs | `POST /profiles/{p}/imaging/studies/{uid}/open` ; `GET /ohif/t/{capability}/...` and `GET /dicom-web/t/{capability}/...` (outside `/api`) | a browser session with `read:records` only (a token gets 403 `forbidden`); returns `{viewer_url, expires_in}`, a one-hour link bound to the session, the study and its one Orthanc study (a second open of the study in the same session returns the same live link, with the seconds it has left, and a new one in its last 10 minutes unless the server is full; one session holds at most 50 links); 403 `study_not_bound` unless Orthanc holds exactly that one study under the UID; one `imaging.open` audit row per study per session; design in docs/design/architecture.md "Imaging viewer and DICOMweb proxy" |
 
 The TypeScript shapes for every route are in `ui/src/lib/api/types.ts`; the client functions are in
 `ui/src/lib/api/{core,health,manage}.ts`. A server change that alters a response shape updates the type in

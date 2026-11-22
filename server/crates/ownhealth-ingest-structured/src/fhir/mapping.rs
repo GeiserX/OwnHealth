@@ -967,7 +967,7 @@ pub fn family_member_history(r: &Value, profile_id: Uuid) -> Mapped {
             _ => None,
         };
         let mut text = concept_text(c.get("code")).filter(|t| !t.is_empty());
-        if known.is_some_and(|k| text.as_deref() == Some(k.en.as_str())) {
+        if known.is_some_and(|k| text.as_deref() == Some(k.fhir_text())) {
             text = None; // the name we write ourselves, not a received one
         }
         let kind = known.map_or("other", |k| k.kind.as_str());

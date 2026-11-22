@@ -7,6 +7,7 @@
 // square male, circle female, diamond unknown, a slash for deceased, a fill when a condition is
 // recorded, an arrow at the proband).
 import type { Pedigree, PedigreeNode, Sex } from '#lib/api/family';
+import type { Lang } from '#lib/i18n/langs';
 
 export const SLOT_PX = 10;
 export const GAP = 120;
@@ -65,13 +66,13 @@ function clip(s: string): string {
 	return s.length > MAX_CHARS ? s.slice(0, MAX_CHARS - 1).trimEnd() + '…' : s;
 }
 
-function conditionLine(c: PedigreeNode['conditions'][number], lang: 'es' | 'en'): string {
-	const name = c.text ?? (lang === 'es' ? c.short_es : c.short_en) ?? c.kind;
+function conditionLine(c: PedigreeNode['conditions'][number], lang: Lang): string {
+	const name = c.text ?? c[`short_${lang}`] ?? c.kind;
 	return c.onset_age == null ? name : `${name} ${c.onset_approx ? '~' : ''}${c.onset_age}`;
 }
 
-function conditionFull(c: PedigreeNode['conditions'][number], lang: 'es' | 'en'): string {
-	const name = c.text ?? (lang === 'es' ? c.es : c.en) ?? c.kind;
+function conditionFull(c: PedigreeNode['conditions'][number], lang: Lang): string {
+	const name = c.text ?? c[lang] ?? c.kind;
 	return c.onset_age == null ? name : `${name} (${c.onset_approx ? '~' : ''}${c.onset_age})`;
 }
 
@@ -84,7 +85,7 @@ interface Item {
 	seq: number;
 }
 
-export function layout(ped: Pedigree, lang: 'es' | 'en', hideNames: boolean, words: Words): Layout {
+export function layout(ped: Pedigree, lang: Lang, hideNames: boolean, words: Words): Layout {
 	const items: Item[] = [
 		{ node: null, gen: 0, slot: ped.profile.slot, union: ped.profile.union, child_of: ped.profile.child_of, seq: -1 },
 		...ped.nodes.map((n, i) => ({ node: n, gen: n.generation, slot: n.slot, union: n.union, child_of: n.child_of, seq: i }))

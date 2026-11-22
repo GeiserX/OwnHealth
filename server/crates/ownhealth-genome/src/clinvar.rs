@@ -20,12 +20,12 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{self, BufRead, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::LazyLock;
 
 use chrono::NaiveDate;
 use ownhealth_core::access::{get_profile, majority, today};
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore, LocalCopy};
 use ownhealth_core::review::{ReviewItemIn, create_item};
 use ownhealth_core::{Error, Result};
 use serde::Serialize;
@@ -71,14 +71,21 @@ pub fn templates() -> Vec<(String, String, String)> {
     out
 }
 
+/// The review item's sentence in every registry language, `summary_<lang>`, and `summary` in English
+/// for the readers of items written before the registry (the UI reads `summary_<lang>` first).
+fn with_summaries(payload: &mut Value, withheld: bool, unconfirmed: bool) {
+    payload["summary"] = json!(review_summary(withheld, unconfirmed, "en"));
+    for lang in ownhealth_core::langs::LANGS {
+        payload[format!("summary_{lang}")] = json!(review_summary(withheld, unconfirmed, lang));
+    }
+}
+
 fn tpl(key: &str, lang: &str) -> String {
-    let lang = if lang == "es" { "es" } else { "en" };
-    TEMPLATES
-        .get(key)
-        .and_then(|t| t.get(lang))
-        .and_then(Value::as_str)
-        .unwrap_or(key)
-        .to_string()
+    ownhealth_core::langs::lookup(lang, |l| {
+        TEMPLATES.get(key).and_then(|t| t.get(l)).and_then(Value::as_str)
+    })
+    .unwrap_or(key)
+    .to_string()
 }
 
 // ------------------------------------------------------------- policy ----
@@ -781,10 +788,14 @@ async fn diff_dataset(
     }
     let sites = fact_sites(&mut tx, ds.id).await?;
     let label = format!("the calls VCF of dataset {}", ds.id);
-    let vcf_path: Result<Option<PathBuf>> = ds
+    let vcf_copy: Result<Option<LocalCopy>> = ds
         .vcf
         .as_ref()
-        .map(|sha| blobs.path(sha).map_err(|e| bad_file(&label, e)))
+        .map(|sha| {
+            blobs
+                .with_local_copy(BlobOwner::Profile(ds.profile_id), sha)
+                .map_err(|e| bad_file(&label, e))
+        })
         .transpose();
     let fact_alleles: Vec<(Key, String, String)> = sites
         .iter()
@@ -795,8 +806,12 @@ async fn diff_dataset(
     // The outer error is the release's and stops the run; the inner one is this dataset's calls VCF,
     // which must not stop the other datasets.
     let read = blocking(move || -> Result<Result<Vec<Carried>>> {
-        let person: Box<dyn Alleles> = match vcf_path.and_then(|p| p.map(|p| VcfAlleles::open(&p, &label)).transpose())
-        {
+        // the copy lives until the release has been read against it
+        let copy = match vcf_copy {
+            Ok(c) => c,
+            Err(e) => return Ok(Err(e)),
+        };
+        let person: Box<dyn Alleles> = match copy.as_ref().map(|p| VcfAlleles::open(p.path(), &label)).transpose() {
             Ok(Some(v)) => Box::new(v),
             Ok(None) => Box::new(FactAlleles::new(fact_alleles)),
             Err(e) => return Ok(Err(e)),
@@ -946,15 +961,14 @@ async fn diff_dataset(
         // Nothing that names the variant or the way its class moved goes into the item: a reviewer
         // may lack read:genome or read:sensitive, and the subject's switch may change later. The kind
         // stays on genome_event, read through the gated events route by event_id.
-        let payload = json!({
+        let mut payload = json!({
             "event_id": event_id,
             "withheld": withheld,
             "unconfirmed": unconfirmed,
-            "summary": review_summary(withheld, unconfirmed, "en"),
-            "summary_es": review_summary(withheld, unconfirmed, "es"),
             "release_from": release_from,
             "release_to": release_to,
         });
+        with_summaries(&mut payload, withheld, unconfirmed);
         // The same change seen through another dataset of this profile already has its item, open or
         // already decided: a dismissed alert is not raised again. An item whose genome file was
         // retracted no longer stands for the change. Datasets run non-chip first within one run; an
@@ -1068,8 +1082,7 @@ pub async fn hand_over_alerts(conn: &mut PgConnection, document_id: Uuid) -> Res
         let withheld = payload["withheld"].as_bool().unwrap_or(true);
         payload["event_id"] = json!(event_id);
         payload["unconfirmed"] = json!(unconfirmed);
-        payload["summary"] = json!(review_summary(withheld, unconfirmed, "en"));
-        payload["summary_es"] = json!(review_summary(withheld, unconfirmed, "es"));
+        with_summaries(&mut payload, withheld, unconfirmed);
         sqlx::query("update review_item set ref_id = $2, document_id = $3, payload = $4 where id = $1")
             .bind(item)
             .bind(event_id)

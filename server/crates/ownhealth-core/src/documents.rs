@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::blobs::{BlobStore, sha256_hex_to_bytes};
+use crate::blobs::{BlobOwner, BlobStore, sha256_hex_to_bytes};
 use crate::error::{Error, Result};
 use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
@@ -108,6 +108,32 @@ pub struct DocumentRef {
     pub reactivated: bool,
 }
 
+/// The `document_source.channel` check constraint: how one arrival came in.
+pub const CHANNELS: [&str; 22] = [
+    "upload",
+    "fhir",
+    "apple_health",
+    "email",
+    "folder",
+    "paperless",
+    "manual",
+    "genome",
+    "demo",
+    "share",
+    "shortcut",
+    "health_auto_export",
+    "gadgetbridge",
+    "nightscout",
+    "smart",
+    "bluebutton",
+    "shl",
+    "shc",
+    "ccda",
+    "openwearables",
+    "dexcom",
+    "imaging",
+];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewDocument<'a> {
     pub household_id: Uuid,
@@ -116,7 +142,7 @@ pub struct NewDocument<'a> {
     pub mime: &'a str,
     pub size_bytes: i64,
     pub filename: Option<&'a str>,
-    /// upload | email | folder | api | ...
+    /// One of [`CHANNELS`].
     pub channel: &'a str,
     pub source_ref: Option<&'a str>,
     pub pages: Option<i32>,
@@ -256,10 +282,11 @@ pub async fn dispatch_upload(
 ) -> Result<Value> {
     let mut kinds: Vec<(&StoredFile, UploadKind)> = Vec::new();
     for f in files {
-        let path = blobs.path(&f.sha256)?;
+        let owner = BlobOwner::Profile(profile_id);
         let mut head = Vec::with_capacity(4096);
-        std::fs::File::open(&path)?.take(4096).read_to_end(&mut head)?;
-        kinds.push((f, sniff(&f.filename, &head, Some(&path))));
+        blobs.open_seek(owner, &f.sha256)?.take(4096).read_to_end(&mut head)?;
+        let copy = blobs.with_local_copy(owner, &f.sha256)?;
+        kinds.push((f, sniff(&f.filename, &head, Some(copy.path()))));
     }
     let has_facts = kinds.iter().any(|(_, k)| *k == "genome_facts");
     let mut items = Vec::new();
@@ -356,6 +383,10 @@ const SENSITIVE_FACT_TABLES: [&str; 7] = [
     "note",
 ];
 
+/// The payload keys of a held review row whose value carries `sensitivity`: `candidate_row`
+/// (`observation`), and a FHIR import's held record (`record`) or relative (`member`).
+const HELD_VALUES: [&str; 3] = ["observation", "record", "member"];
+
 /// The rule of `document_is_sensitive` as a SQL boolean over `doc` (a bind like `$1` or a column
 /// like `d.id`), for queries that must leave sensitive documents out.
 pub fn sensitive_document_sql(doc: &str) -> String {
@@ -369,21 +400,36 @@ pub fn sensitive_document_sql(doc: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" or ");
+    // a held row's value: a candidate row's observation, a FHIR import's record or relative
+    let held = HELD_VALUES
+        .iter()
+        .map(|k| {
+            format!(
+                "(jsonb_typeof(r.payload->'{k}'->'sensitivity') = 'array' \
+                 and jsonb_array_length(r.payload->'{k}'->'sensitivity') > 0)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" or ");
     format!(
         "(exists (select 1 from observation o left join src s on s.id = o.src_id \
          where (o.document_id = {doc} or s.document_id = {doc}) and cardinality(o.sensitivity) > 0) \
-         or exists (select 1 from review_item r where r.document_id = {doc} \
-         and jsonb_typeof(r.payload->'observation'->'sensitivity') = 'array' \
-         and jsonb_array_length(r.payload->'observation'->'sensitivity') > 0) \
+         or exists (select 1 from review_item r where r.document_id = {doc} and ({held})) \
          or exists (select 1 from medication_label l join medication_statement m on m.id = l.medication_id \
          where l.document_id = {doc} and cardinality(m.sensitivity) > 0) \
+         or exists (select 1 from document u where u.id = {doc} \
+         and (u.flags->'unprojected' is not null or u.flags->'sensitive' is not null)) \
          or {via_src})"
     )
 }
 
 /// True when any value read from this document is sensitive (mental health, reproductive, sexual
 /// health), whatever its status: the original file and its page text still hold it. Held review
-/// rows count too. Without read:sensitive the file, the page renders and the words stay closed.
+/// rows count too: an observation, a record or a relative. So does a connector's bundle that holds
+/// resources OwnHealth does not project (`flags.unprojected`, written by the FHIR pull): nothing
+/// read them for sensitivity, so the file fails closed. A bundle the pull read a sensitive resource
+/// in is `flags.sensitive`, even when the ledger or the dedupe imported nothing from it. Without
+/// read:sensitive the file, the page renders and the words stay closed.
 pub async fn document_is_sensitive(conn: &mut PgConnection, document_id: Uuid) -> Result<bool> {
     let sql = format!("select {}", sensitive_document_sql("$1::uuid"));
     let v: Option<bool> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))

@@ -10,8 +10,9 @@
 //! POST /api/review/bulk-accept         {"document_id": uuid, "min_row_conf": 0.0}
 //! ```
 //!
-//! An item on a profile the caller cannot review, or whose held values the caller's scopes would not
-//! show, answers 404 like an unknown id.
+//! An item on a profile the caller cannot review, whose held values the caller's scopes would not
+//! show, or whose document the caller could not open (a pull's grouped item), answers 404 like an
+//! unknown id.
 
 use std::collections::HashMap;
 
@@ -129,6 +130,15 @@ fn visible(item: &ReviewItem, perm: &Permission) -> bool {
     })
 }
 
+/// A pull's grouped item carries no values: it points at the bundle that holds them. It shows to
+/// whoever can open that bundle, so its link never answers 403.
+async fn opens_document(conn: &mut PgConnection, item: &ReviewItem, perm: &Permission) -> R<bool> {
+    match (item.kind.as_str(), item.document_id) {
+        ("fhir_unmapped_summary", Some(doc)) => Ok(crate::routes::documents::file_opens(conn, perm, doc).await?),
+        _ => Ok(true),
+    }
+}
+
 fn no_item() -> Fail {
     Fail::Api(ApiError::new(
         StatusCode::NOT_FOUND,
@@ -161,7 +171,7 @@ async fn check(conn: &mut PgConnection, principal: &Principal, item: Option<Revi
     if !perm.can("review") {
         return Err(cannot_review(&perm));
     }
-    if !visible(&item, &perm) {
+    if !visible(&item, &perm) || !opens_document(conn, &item, &perm).await? {
         return Err(no_item());
     }
     Ok(item)
@@ -210,13 +220,19 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
     )
     .await?;
     let by_profile: HashMap<Uuid, &Permission> = perms.iter().map(|p| (p.profile.id, p)).collect();
-    let shown: Vec<&ReviewItem> = items
-        .iter()
-        .filter(|i| match i.profile_id {
+    let mut shown: Vec<&ReviewItem> = Vec::new();
+    for i in &items {
+        let show = match i.profile_id {
             None => true,
-            Some(pid) => by_profile.get(&pid).is_some_and(|p| visible(i, p)),
-        })
-        .collect();
+            Some(pid) => match by_profile.get(&pid) {
+                Some(p) => visible(i, p) && opens_document(&mut tx, i, p).await?,
+                None => false,
+            },
+        };
+        if show {
+            shown.push(i);
+        }
+    }
     let household = principal.household_id.unwrap_or_default();
     let open = review::count_open(&mut tx, household, Some(&pids)).await?;
     tx.commit().await?;

@@ -25,7 +25,7 @@ pub mod pdf_password;
 use chrono::{DateTime, Utc};
 use mail_parser::MessageParser;
 use ownhealth_core::arrive::{Arrival, Arrived, arrive, store_bytes};
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::dedup::{record_item, seen_item};
 use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::error::{Error, Result};
@@ -596,7 +596,7 @@ pub async fn retry_locked(
         let passwords = passwords_for(&mut *conn, Some(sb), household_id, sender_rule_id).await?;
         let b = blobs.clone();
         let unlock = blocking(move || {
-            let locked = b.get_bytes(&sha).map_err(Error::from)?;
+            let locked = b.get_bytes(BlobOwner::Profile(profile_id), &sha).map_err(Error::from)?;
             pdf_password::unlock(&locked, &passwords)
         })
         .await?;
@@ -793,7 +793,16 @@ pub async fn ingest_message(
             }
             Routing::Quarantine { reason } => {
                 out.quarantine_id = Some(hold(&mut *conn, source, &parsed, &raw_sha, reason).await?);
-                record_item(&mut *conn, source.id, &ext, Some(&raw_sha), None, out.quarantine_id).await?;
+                record_item(
+                    &mut *conn,
+                    source.id,
+                    &ext,
+                    Some(&raw_sha),
+                    None,
+                    out.quarantine_id,
+                    None,
+                )
+                .await?;
                 return Ok(out);
             }
         },
@@ -813,6 +822,7 @@ pub async fn ingest_message(
         Some(&raw_sha),
         out.document_ids.first().copied(),
         None,
+        Some(profile_id),
     )
     .await?;
     Ok(out)
@@ -860,7 +870,7 @@ pub async fn hold_too_large(
     }
     let (sha, _) = store_bytes(blobs, owned).await?;
     out.quarantine_id = Some(hold(&mut *conn, source, &parsed, &sha, "too_large").await?);
-    record_item(&mut *conn, source.id, &ext, Some(&sha), None, out.quarantine_id).await?;
+    record_item(&mut *conn, source.id, &ext, Some(&sha), None, out.quarantine_id, None).await?;
     Ok(out)
 }
 
@@ -947,7 +957,12 @@ pub async fn release(
     }
     let sha = item.raw_sha256_hex();
     let b = blobs.clone();
-    let raw = blocking(move || b.get_bytes(&sha).map_err(Error::from)).await?;
+    // the raw message is still the held item's, whichever profile it is released into
+    let raw = blocking(move || {
+        b.get_bytes(BlobOwner::Pending(quarantine_id), &sha)
+            .map_err(Error::from)
+    })
+    .await?;
     let out = ingest_message(&mut *conn, blobs, sb, &source, &raw, Some(profile_id)).await?;
     quarantine::mark_released(&mut *conn, quarantine_id, user_id, &out.document_ids).await?;
     Ok(out)

@@ -6,6 +6,9 @@ mod lane_i;
 
 use http::StatusCode;
 use lane_i::{App, R, app, item, lab_document};
+use ownhealth_core::documents::{NewDocument, create_document};
+use ownhealth_core::sources::{NewSource, create_source};
+use ownhealth_ingest_structured::fhir::import_pull;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -337,5 +340,189 @@ async fn test_bulk_accept_takes_only_clean_rows_of_a_document() -> R {
     .fetch_one(&a.rt.pool)
     .await?;
     assert_eq!(rows, 1);
+    Ok(())
+}
+
+/// Carmen's connection to her hospital.
+async fn carmen_source(a: &App) -> anyhow::Result<Uuid> {
+    let fam = &a.family;
+    let mut c = a.conn().await?;
+    Ok(create_source(
+        &mut c,
+        &NewSource {
+            profile_id: Some(fam.profile("carmen")),
+            ..NewSource::new(fam.household_id, "smart", "Hospital LabNorte")
+        },
+    )
+    .await?)
+}
+
+/// What a connector poller does for Carmen: the answer stored as her document, then the import.
+async fn carmen_pull(a: &App, resources: Vec<Value>) -> anyhow::Result<Uuid> {
+    let source = carmen_source(a).await?;
+    carmen_pull_from(a, source, "pull-1", resources).await
+}
+
+/// One pull of `source` whose Bundle.id is `page`.
+async fn carmen_pull_from(a: &App, source: Uuid, page: &str, resources: Vec<Value>) -> anyhow::Result<Uuid> {
+    let fam = &a.family;
+    let carmen = fam.profile("carmen");
+    let mut c = a.conn().await?;
+    let entries: Vec<Value> = resources
+        .into_iter()
+        .map(|r| {
+            let url = format!(
+                "https://fhir.labnorte.example/r4/{}/{}",
+                r["resourceType"].as_str().unwrap_or_default(),
+                r["id"].as_str().unwrap_or_default()
+            );
+            json!({"fullUrl": url, "resource": r})
+        })
+        .collect();
+    let bytes =
+        serde_json::to_vec(&json!({"resourceType": "Bundle", "id": page, "type": "searchset", "entry": entries}))?;
+    let sha = a.rt.blobs.put_bytes(&bytes)?;
+    let doc = create_document(
+        &mut c,
+        &NewDocument {
+            filename: Some("Hospital LabNorte · pull.json"),
+            channel: "smart",
+            source_id: Some(source),
+            ..NewDocument::upload(
+                fam.household_id,
+                Some(carmen),
+                &sha,
+                "application/fhir+json",
+                bytes.len() as i64,
+            )
+        },
+    )
+    .await?;
+    import_pull(&mut c, &a.rt.blobs, source, doc.id).await?;
+    Ok(doc.id)
+}
+
+/// Alex's categories on Carmen's profile (alex is her caregiver).
+async fn alex_on_carmen(a: &App, categories: &[&str]) -> R {
+    sqlx::query("update profile_grant set categories = $3 where user_id = $1 and profile_id = $2")
+        .bind(a.family.user("alex"))
+        .bind(a.family.profile("carmen"))
+        .bind(categories.iter().map(|c| c.to_string()).collect::<Vec<_>>())
+        .execute(&a.rt.pool)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_a_pull_summary_shows_only_to_who_can_open_its_bundle() -> R {
+    let a = app().await?;
+    // a claim: OwnHealth projects no claims, so nothing read its diagnosis for sensitivity
+    let claim = json!({"resourceType": "ExplanationOfBenefit", "id": "eob-1", "status": "active", "use": "claim",
+        "patient": {"reference": "Patient/carmen"},
+        "diagnosis": [{"sequence": 1, "diagnosisCodeableConcept": {"text": "VIH, control"}}]});
+    let doc = carmen_pull(&a, vec![claim]).await?;
+    let summary: Uuid =
+        sqlx::query_scalar("select id from review_item where document_id = $1 and kind = 'fhir_unmapped_summary'")
+            .bind(doc)
+            .fetch_one(&a.rt.pool)
+            .await?;
+    let file = format!("/documents/{doc}/file");
+    let listed = |v: &Value| {
+        v["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|i| i["id"] == json!(summary))
+    };
+    // a caregiver with read:records and no read:sensitive: the bundle and its item stay closed
+    let (s, v) = a.get("alex", &file).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["detail"]["code"], "insufficient_scope");
+    let (_, queue) = a.get("alex", "/review?profile=carmen").await?;
+    assert!(!listed(&queue), "{queue}");
+    assert_eq!(queue["withheld"], json!(1));
+    assert_eq!(
+        a.get("alex", &format!("/review/{summary}")).await?.0,
+        StatusCode::NOT_FOUND
+    );
+    // read:sensitive without read:records (the scope of the bundle): still closed
+    alex_on_carmen(&a, &["read:summary", "read:labs", "read:sensitive"]).await?;
+    assert_eq!(a.get("alex", &file).await?.0, StatusCode::FORBIDDEN);
+    assert!(!listed(&a.get("alex", "/review?profile=carmen").await?.1));
+    // both: the bundle opens, and the item shows and can be dismissed
+    alex_on_carmen(&a, &["read:summary", "read:records", "read:sensitive"]).await?;
+    let (s, v) = a.get("alex", &file).await?;
+    assert_eq!((s, &v["id"]), (StatusCode::OK, &json!("pull-1")), "{v}");
+    assert!(listed(&a.get("alex", "/review?profile=carmen").await?.1));
+    let (s, v) = a.post("alex", &format!("/review/{summary}/dismiss"), None).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_a_daily_pull_of_a_sensitive_fact_stays_closed_without_read_sensitive() -> R {
+    let a = app().await?;
+    let hiv = json!({"resourceType": "Condition", "id": "hiv",
+        "meta": {"versionId": "1", "security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "HIV"}]},
+        "clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+        "verificationStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}]},
+        "code": {"coding": [{"system": "http://snomed.info/sct", "code": "86406008", "display": "Human immunodeficiency virus infection"}]},
+        "subject": {"reference": "Patient/carmen"}, "onsetDateTime": "2019-04"});
+    let patient = json!({"resourceType": "Patient", "id": "carmen", "name": [{"family": "Ortega", "given": ["Carmen"]}],
+        "birthDate": "1955-01-30", "gender": "female"});
+    let source = carmen_source(&a).await?;
+    let day1 = carmen_pull_from(&a, source, "day-1", vec![patient.clone(), hiv.clone()]).await?;
+    let day2 = carmen_pull_from(&a, source, "day-2", vec![patient, hiv]).await?;
+    // alex, her caregiver, has no read:sensitive: neither day's bundle opens
+    for doc in [day1, day2] {
+        let (s, v) = a.get("alex", &format!("/documents/{doc}/file")).await?;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{doc}: {v}");
+    }
+    alex_on_carmen(&a, &["read:summary", "read:records", "read:sensitive"]).await?;
+    assert_eq!(
+        a.get("alex", &format!("/documents/{day2}/file")).await?.0,
+        StatusCode::OK
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_the_newest_fhir_import_is_named_however_many_dated_documents_come_first() -> R {
+    let a = app().await?;
+    let fam = &a.family;
+    let carmen = fam.profile("carmen");
+    let source = carmen_source(&a).await?;
+    let first = carmen_pull_from(&a, source, "day-1", vec![]).await?;
+    let second = carmen_pull_from(&a, source, "day-2", vec![]).await?;
+    // a dated report, stored after the pulls: the list puts it first, and pulls carry no date
+    let mut c = a.conn().await?;
+    let sha = a.rt.blobs.put_bytes(b"%PDF-1.7 report")?;
+    let report = create_document(
+        &mut c,
+        &NewDocument::upload(fam.household_id, Some(carmen), &sha, "application/pdf", 15),
+    )
+    .await?;
+    sqlx::query("update document set collected_at = now() where id = $1")
+        .bind(report.id)
+        .execute(&mut *c)
+        .await?;
+    drop(c);
+    let ids = |v: &Value| -> Vec<Value> {
+        v["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|i| i["id"].clone())
+            .collect()
+    };
+    let (s, v) = a.get("alex", "/profiles/carmen/documents?limit=1").await?;
+    assert_eq!((s, ids(&v)), (StatusCode::OK, vec![json!(report.id)]), "{v}");
+    // latest=fhir: FHIR imports only, the newest stored first
+    let (s, v) = a.get("alex", "/profiles/carmen/documents?latest=fhir&limit=1").await?;
+    assert_eq!((s, ids(&v)), (StatusCode::OK, vec![json!(second)]), "{v}");
+    let (_, v) = a.get("alex", "/profiles/carmen/documents?latest=fhir").await?;
+    assert_eq!(ids(&v), [json!(second), json!(first)], "{v}");
+    let (s, v) = a.get("alex", "/profiles/carmen/documents?latest=pdf").await?;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     Ok(())
 }

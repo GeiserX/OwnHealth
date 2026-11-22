@@ -66,14 +66,14 @@ flowchart LR
 Rules that follow from the diagram:
 
 - The UI, the REST API and the MCP server call the same query functions through the same `authz` function. Anything the UI can show, MCP returns under the same check, and vice versa. There is no second permission model.
-- Orthanc, OHIF and Open Wearables are never exposed directly. Orthanc has no notion of our profiles, so the app proxies `/dicom-web/*` and checks that the StudyInstanceUID belongs to a profile the caller can read.
+- Orthanc, OHIF and Open Wearables are never exposed directly. Orthanc has no notion of our profiles, so the app proxies `/dicom-web/*` and checks that the StudyInstanceUID belongs to a profile the caller can read. How the viewer and the proxy work is in [section 4](#imaging-viewer-and-dicomweb-proxy).
 - OwnGenome runs elsewhere. OwnHealth never runs a genome engine; it imports OwnGenome's output.
 
 ## 3. Process model
 
 | Part | How it runs |
 |---|---|
-| HTTP server | axum on tokio, one process. Routes: `/api/*`, `/mcp`, `/.well-known/*`, `/healthz`, `/readyz`, `/metrics`, and the static UI at `/` |
+| HTTP server | axum on tokio, one process. Routes: `/api/*`, `/mcp`, `/.well-known/*`, `/healthz`, `/readyz`, `/metrics`, the imaging viewer and its proxy at `/ohif/*` and `/dicom-web/*`, and the static UI at `/` |
 | MCP | rmcp's streamable HTTP service mounted at `/mcp`. Spec 2026-07-28 is stateless (no `initialize` handshake, no `Mcp-Session-Id`), so no session affinity is needed. We keep the 2025-11-25 fallback for older clients |
 | Job loop | `N` tokio tasks started with the server (default `N=2`). Each claims one job, runs it, commits. CPU-bound and file-bound steps (PDF text layer, Apple Health XML, rollups, export zips) run on tokio's blocking threads so they never stall requests |
 | OCR | Not in the default image. The `ocr` profile runs the same code from the image variant `drumsergio/ownhealth:<version>-ocr` (the engine, PaddleOCR PP-OCRv5 on ONNX Runtime, and its models) as `ownhealth worker` with `OWNHEALTH_QUEUES=ocr`: no HTTP server, only the job loop for the `ocr` queue |
@@ -91,7 +91,7 @@ Libraries in the core: axum, tower and tokio; sqlx for Postgres (queries checked
 | (default) | `app`, `db` | app under 400 MB image; app plus Postgres about 0.5 GB RAM idle | v0.1 |
 | `ocr` | `ocr` worker: PaddleOCR PP-OCRv5 mobile detection and Latin recognition, ONNX on ONNX Runtime, CPU (an ONNX Runtime GPU provider is optional) | 436 MB unpacked against 364 MB for the default image (arm64, 0.3.0); worker peak RSS 240 MB reading the demo's scanned page (arm64) | v0.2 (0.3.0) |
 | `imaging` | `orthanc` with the DICOMweb and OHIF plugins | 100 to 300 MB RAM idle | v1.0 |
-| `wearables` | `open-wearables` plus its own Postgres and Redis | brings Redis and Celery, but only inside the profile | v1.0 |
+| `wearables` | Open Wearables `ow-app`, `ow-worker` and `ow-beat` (`themomentum/open-wearables-backend:0.11.0`, pinned by digest), `ow-redis` (Redis 8) and the one-shot `ow-db-init`. Its database and role live on the existing Postgres 17 | brings Redis and Celery, but only inside the profile | v1.0 |
 
 The core never needs Redis, a JVM or a GPU. Postgres can be the user's own server: the app needs only stock PostgreSQL 17 with no extensions beyond `pgcrypto`.
 
@@ -156,26 +156,50 @@ services:
 
   orthanc:
     profiles: [imaging]
-    image: orthancteam/orthanc:25.8.0        # placeholder tag, confirm at release
+    image: orthancteam/orthanc:26.11.1
     restart: unless-stopped
+    # one account, the app's; its password comes from the secret, never from the compose file
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        export ORTHANC__REGISTERED_USERS="{\"ownhealth\": \"$$(cat /run/secrets/orthanc_password)\"}" &&
+        exec /docker-entrypoint.sh /tmp/orthanc.json
     environment:
-      DICOM_WEB_PLUGIN_ENABLED: "true"
-      OHIF_PLUGIN_ENABLED: "true"
       ORTHANC__AUTHENTICATION_ENABLED: "true"
+      ORTHANC__DICOM_SERVER_ENABLED: "false"   # studies arrive from the app over HTTP
+      DICOM_WEB_PLUGIN_ENABLED: "true"
+      ORTHANC__DICOM_WEB__ENABLE_METADATA_CACHE: "true"
+      OHIF_PLUGIN_ENABLED: "true"
+      ORTHANC__OHIF__DATA_SOURCE: dicom-web     # the default, dicom-json, reads Orthanc-id routes
+    secrets: [orthanc_password]
     volumes: [orthanc:/var/lib/orthanc/db]
-    # no ports: only the app reaches it on the compose network
+    # no ports: only the app reaches it on the compose network. The app gets
+    # OWNHEALTH_ORTHANC_URL=http://orthanc:8042 and the same password.
 
-  open-wearables:
+  ow-app:   # and ow-worker, ow-beat (same image), ow-redis, and the one-shot ow-db-init
     profiles: [wearables]
-    image: openwearables/open-wearables:0.0.0   # placeholder, image name and tag unverified
+    image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
     restart: unless-stopped
-    # its own db and redis services go here, inside the same profile
+    # no ports, off the app's network: it shares only ow-db with OwnHealth, where db is the one other
+    # container; its own database and role on that db (deploy/db/ow-role.sql)
 
 secrets:
   db_password: { file: ./secrets/db_password }
   restic_password: { file: ./secrets/restic_password }   # also in your password manager
+  orthanc_password: { file: ./secrets/imaging/orthanc_password }   # imaging profile only
 volumes: { blobs: {}, backups: {}, pg: {}, orthanc: {} }
 ```
+
+### Imaging viewer and DICOMweb proxy
+
+The OHIF viewer comes from Orthanc's OHIF plugin, and Orthanc answers only the app. The app is the boundary (`ownhealth-api/src/routes/imaging_proxy.rs`):
+
+1. **Open.** `POST /api/profiles/{p}/imaging/studies/{uid}/open` needs a browser session with `read:records` on the profile. An access token never gets a link. The answer is a viewer link with a capability: 32 random bytes, valid for one hour, bound to that session and to that one study. Links live in memory only, found by the token's hash, so a restart ends every link. Opening the same study again in the same session gives the same live link back (a new one in its last 10 minutes, unless the server is full). One session holds at most 50 links, and a new one drops that session's oldest, so one person cannot use up the server's links for everyone. The first open of a study in a session writes one `imaging.open` audit row.
+2. **One Orthanc study.** Orthanc keys a study by PatientID plus StudyInstanceUID, so two patients' studies can share a UID (a crafted CD, or a modality that reuses UIDs). Its DICOMweb plugin then serves both under `/studies/{uid}`. The link is therefore bound to the Orthanc study that the record names (`imaging_study.orthanc_id`). At the open, and again before proxied reads (at most 5 seconds apart), Orthanc's `/tools/lookup` must find exactly one study under the UID, with that id. Anything else passes nothing (`study_not_bound`), and a record with no Orthanc id opens nothing. A second study that arrives under the UID after a check can still pass until the next check, for up to 5 seconds. The app is Orthanc's only writer, so its importer closes that window: under a lock, it reads PatientID and StudyInstanceUID from each file before it sends the file to Orthanc, and when Orthanc already holds that UID under another study or patient, the file goes to review instead.
+3. **Viewer.** The viewer runs under `/ohif/t/<capability>/`. Every `/ohif` answer carries `Content-Security-Policy: sandbox allow-scripts` and `connect-src 'self'`. The page then runs in an opaque origin: the session cookie never reaches its requests, it cannot read `/api`, and it can connect only to this server. OHIF cannot use cookies, storage, a service worker or workers from a server URL there, so the app puts small shims before the plugin's `app-config.js`. After it, the app sets the DICOMweb roots to `/dicom-web/t/<capability>`, turns off the study list, and turns off the investigational-use banner and the onboarding tour (the sandbox forgets that they were seen). A refused page is in Spanish or English, picked from the browser's language as the app picks it, with a link back to the app.
+4. **Proxy.** `/dicom-web/t/<capability>/` allows GET only and answers CORS for `Origin: null`, without credentials. It checks every request again: the link, the session, `read:records` on the profile, and that the study is still in that profile, not retracted and still the same Orthanc study. A viewer request that passes every check counts as activity for the session, at most once a minute (a refused one does not), so a long read does not end at the 30-minute idle limit; the link's hour still ends it. The study UID comes from the path, or from a search that names exactly that one UID. The proxy refuses WADO-URI, a bare study list, root searches, Orthanc ids (`/instances/{id}`, `ohif-dicom-json`), whole-study and whole-series downloads and dot segments. It sends Orthanc only `Accept` and its own account, never the person's cookie. Orthanc writes absolute URLs from the Host it gets, so the proxy rewrites those in JSON answers into links through the capability. The part headers inside a multipart answer (each frame's `Content-Location`) still name Orthanc's internal address; the viewer cannot use it, because `connect-src 'self'` keeps it on this server and Orthanc publishes no port. Every answer carries `Content-Security-Policy: sandbox; default-src 'none'`, so an answer opened as a page runs nothing, and an answer that is not an image, video, DICOM, JSON or multipart is a download (`Content-Disposition: attachment`).
+5. **What the sandbox cannot stop.** A script that runs in the viewer (through an OHIF or codec bug and a hostile file) can still reach outside hosts in three ways that CSP does not cover: it can navigate its own tab (there is no `navigate-to`), the browser may prefetch DNS names, and WebRTC can open a connection. Through these it could send out the capability and what it read. That is one study, and only while the session and the link live. It cannot read the app's pages or `/api`, because those need the cookie and the app's origin. So the app must open the viewer with `noopener`, and must never trust a message from it.
 
 ## 5. Code repository layout
 
@@ -841,7 +865,7 @@ Every gate has a known-bad fixture that must turn it red (a mutated conversion f
 ## 17. Open decisions
 
 1. **Blob dedup vs per-profile keys (v1.0).** Content addressing by plaintext hash dedups across profiles; per-profile encryption for crypto-shredding needs per-profile copies. Proposal: key the path by `sha256(profile_id || plaintext hash)` once keys arrive, and accept the duplicate storage.
-2. **Open Wearables sidecar footprint.** It brings its own Postgres, Redis, Celery and user model. We keep Redis out of the core, and the profile keeps it out of the default install, but we should confirm the sidecar's image name, tag and REST API before v1.0 (unverified).
+2. **Open Wearables sidecar footprint.** It brings Redis, Celery and its own user model, all inside the `wearables` profile, so the default install has none of them. It does not bring its own Postgres: its database and a restricted role live on the existing Postgres 17. The image is `themomentum/open-wearables-backend:0.11.0`, pinned by digest. Its REST API is still to confirm before v1.0 (unverified).
 3. **Orthanc OHIF plugin license and tags.** The plugin's license is unverified; if it is a problem, OHIF runs as its own static container (MIT) behind our proxy.
 4. **Restic inside the app image** makes the image larger and gives the app process the restic password. The other option is a one-shot backup container, which would be a fourth compose profile; we keep three profiles, so we chose the in-image binary.
 5. **Single process vs a split worker.** The `ocr` profile already uses a worker role. If Apple Health imports block the API in practice, we may run the core job loop as a second container from the same image too.

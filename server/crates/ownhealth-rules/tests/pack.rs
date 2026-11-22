@@ -183,7 +183,7 @@ fn a_template_missing_spanish_is_refused() -> R {
         .err()
         .map(|e| e.to_string())
         .unwrap_or_default();
-    assert!(err.contains("en and es"), "{err}");
+    assert!(err.contains("template notice needs es"), "{err}");
     Ok(())
 }
 

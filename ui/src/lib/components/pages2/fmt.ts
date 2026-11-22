@@ -1,5 +1,6 @@
 // Formatting helpers for the lane I-ui-2 pages.
 import { i18n, t } from '#lib/i18n/index.svelte';
+import { intlLocale } from '#lib/i18n/langs';
 
 /** '2026-11-07' from an ISO date-time. */
 export const day = (v: string | null | undefined): string => (v ? v.slice(0, 10) : '—');
@@ -28,7 +29,7 @@ export function ago(iso: string | null | undefined, now = new Date()): string {
 
 /** Thousands with the language's separator: 1,840 / 1.840. */
 export const int = (n: number | null | undefined): string =>
-	n == null ? '—' : new Intl.NumberFormat(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { useGrouping: 'always' } as Intl.NumberFormatOptions).format(n);
+	n == null ? '—' : new Intl.NumberFormat(intlLocale(i18n.lang), { useGrouping: 'always' } as Intl.NumberFormatOptions).format(n);
 
 /** Text of an untrusted field, for display as plain text (Svelte escapes it). */
 export const plain = (v: { text: string } | string | null | undefined): string => (v == null ? '' : typeof v === 'string' ? v : v.text);

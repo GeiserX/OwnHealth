@@ -13,6 +13,7 @@ use ownhealth_core::config::Settings;
 use ownhealth_core::demo::seed_demo;
 use ownhealth_core::testing::TestDb;
 use serde_json::Value;
+use sqlx::Connection;
 
 type R = anyhow::Result<()>;
 
@@ -31,11 +32,15 @@ async fn seeded(dir: &Path) -> anyhow::Result<(TestDb, Settings)> {
     Ok((db, settings))
 }
 
+/// The binary on this fixture's database and data folder. The anchor folder is the fixture's too,
+/// whatever the environment that runs the tests sets.
 fn ownhealth(s: &Settings, args: &[&str]) -> anyhow::Result<Output> {
     Ok(Command::new(BIN)
         .args(args)
         .env("OWNHEALTH_DATABASE_URL", &s.database_url)
         .env("OWNHEALTH_DATA_DIR", &s.data_dir)
+        .env("OWNHEALTH_ANCHOR_DIR", s.anchor_path())
+        .env_remove("OWNHEALTH_ANCHOR_DIR_FILE")
         .output()?)
 }
 
@@ -66,6 +71,45 @@ async fn cli_verify_restore_exits_non_zero_on_a_mismatch() -> R {
     Ok(())
 }
 
+/// The audit anchor seen from cron: once the database owner has edited an entry and hashed the log
+/// again, `ownhealth backup` exits 1 with one line that says why, and writes no backup.
+#[tokio::test]
+async fn cli_backup_exits_non_zero_when_the_anchored_head_no_longer_matches() -> R {
+    let dir = tempfile::tempdir()?;
+    let (db, s) = seeded(dir.path()).await?;
+    let mut c = db.pool.acquire().await?;
+    let read = ownhealth_core::audit::AuditEvent::new("system", "job", "read");
+    ownhealth_core::audit::write_audit(&mut c, &read).await?;
+    drop(c);
+    let first = dir.path().join("b1");
+    let out = ownhealth(&s, &["backup", &first.display().to_string()])?;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(s.anchor_path().join("audit-head.json").is_file());
+    sqlx::raw_sql(
+        "alter table audit_event disable trigger user; alter table audit_chain disable trigger user; \
+         update audit_event set tool = 'rewritten' where id = (select min(id) from audit_event); \
+         do $$ declare c record; prev bytea := decode(repeat('00', 32), 'hex'); h bytea; begin \
+           for c in select seq, event_id from audit_chain order by seq loop \
+             select sha256(prev || oh_audit_row_v1(e)) into h from audit_event e where e.id = c.event_id; \
+             update audit_chain set prev_hash = prev, hash = h where seq = c.seq; \
+             prev := h; \
+           end loop; end $$; \
+         alter table audit_event enable trigger user; alter table audit_chain enable trigger user",
+    )
+    .execute(&db.pool)
+    .await?;
+    let second = dir.path().join("b2");
+    let out = ownhealth(&s, &["backup", &second.display().to_string()])?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("error: backup refused: the audit log no longer matches"),
+        "{stderr}"
+    );
+    assert!(!second.join("manifest.json").exists());
+    Ok(())
+}
+
 #[tokio::test]
 async fn cli_reads_the_database_url_from_its_file() -> R {
     let dir = tempfile::tempdir()?;
@@ -83,6 +127,50 @@ async fn cli_reads_the_database_url_from_its_file() -> R {
         .output()?;
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     Ok(())
+}
+
+/// `migrate` runs only as the owner of the database. Run by another role, a superuser here, the
+/// tables and the SECURITY DEFINER chain function would belong to that role, and the database owner,
+/// who owns schema public, could drop them and put its own in their place. The control hands the
+/// database to the migrating role, and the same command then runs.
+#[tokio::test]
+async fn cli_migrate_refuses_a_database_it_does_not_own() -> R {
+    let dir = tempfile::tempdir()?;
+    let db = TestDb::empty().await?;
+    let s = db.settings(&dir.path().join("live"))?;
+    let owner = format!("oh_test_own_{}", ownhealth_core::ids::token_hex(4));
+    let mut admin = sqlx::PgConnection::connect(&ownhealth_core::testing::admin_url()).await?;
+    let result: R = async {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "create role \"{owner}\" nologin; alter database \"{}\" owner to \"{owner}\"",
+            db.name
+        )))
+        .execute(&mut admin)
+        .await?;
+        let out = ownhealth(&s, &["migrate"])?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        anyhow::ensure!(out.status.code() == Some(1), "migrate must refuse: {stderr}");
+        anyhow::ensure!(stderr.contains(&format!("owner of database {}", db.name)), "{stderr}");
+        let tables: i64 = sqlx::query_scalar("select count(*) from pg_tables where schemaname = 'public'")
+            .fetch_one(&db.pool)
+            .await?;
+        anyhow::ensure!(tables == 0, "the refused run made {tables} tables");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "alter database \"{}\" owner to current_user",
+            db.name
+        )))
+        .execute(&mut admin)
+        .await?;
+        let out = ownhealth(&s, &["migrate"])?;
+        anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        Ok(())
+    }
+    .await;
+    drop(db);
+    sqlx::query(sqlx::AssertSqlSafe(format!("drop role if exists \"{owner}\"")))
+        .execute(&mut admin)
+        .await?;
+    result
 }
 
 fn restic() -> Option<PathBuf> {
@@ -116,6 +204,7 @@ fn env_for(s: &Settings, tmp: &Path) -> Env {
         ("OWNHEALTH_RUN", String::new()),
         ("OWNHEALTH_DATABASE_URL", s.database_url.clone()),
         ("OWNHEALTH_DATA_DIR", s.data_dir.display().to_string()),
+        ("OWNHEALTH_ANCHOR_DIR", s.anchor_path().display().to_string()),
         ("OWNHEALTH_BACKUP_STAGING", tmp.join("staging").display().to_string()),
         ("OWNHEALTH_RESTORE_DIR", tmp.join("restore").display().to_string()),
         ("RESTIC_REPOSITORY", tmp.join("repo").display().to_string()),
@@ -132,6 +221,7 @@ fn run(cmd: impl AsRef<std::ffi::OsStr>, env: &Env, args: &[&str]) -> anyhow::Re
     Ok(Command::new(cmd)
         .args(args)
         .envs(env.vars.iter().map(|(k, v)| (k, v)))
+        .env_remove("OWNHEALTH_ANCHOR_DIR_FILE")
         .output()?)
 }
 

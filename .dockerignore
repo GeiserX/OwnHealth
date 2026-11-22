@@ -16,6 +16,7 @@ data/*
 docs
 .git
 .env
+openwearables.env
 server/static
 server/target
 server/vendor

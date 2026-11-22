@@ -6,8 +6,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use chrono::{SubsecRound, Utc};
-use ownhealth_core::Result;
 use ownhealth_core::access::Scopes;
+use ownhealth_core::{Result, langs};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde_json::{Map, Value, json};
@@ -19,15 +19,29 @@ use crate::num::{self, num, to_f64};
 use crate::pack::{P, Pack, cpic_snapshot, int, text, truthy};
 use crate::rendering::window_months;
 
-const COUNTRIES: [(&str, &str, &str); 7] = [
-    ("ES", "Spain", "España"),
-    ("PT", "Portugal", "Portugal"),
-    ("FR", "France", "Francia"),
-    ("DE", "Germany", "Alemania"),
-    ("IT", "Italy", "Italia"),
-    ("GB", "United Kingdom", "Reino Unido"),
-    ("US", "United States", "Estados Unidos"),
+/// A country's name per language: (code, its name in each registry language).
+const COUNTRIES: &[(&str, &[(&str, &str)])] = &[
+    ("ES", &[("es", "España"), ("en", "Spain")]),
+    ("PT", &[("es", "Portugal"), ("en", "Portugal")]),
+    ("FR", &[("es", "Francia"), ("en", "France")]),
+    ("DE", &[("es", "Alemania"), ("en", "Germany")]),
+    ("IT", &[("es", "Italia"), ("en", "Italy")]),
+    ("GB", &[("es", "Reino Unido"), ("en", "United Kingdom")]),
+    ("US", &[("es", "Estados Unidos"), ("en", "United States")]),
 ];
+
+/// The registry languages a country name lacks.
+pub fn missing_langs(langs: &[&str]) -> Vec<String> {
+    COUNTRIES
+        .iter()
+        .flat_map(|(code, names)| {
+            langs::missing(&langs::codes(names), langs)
+                .into_iter()
+                .map(move |l| format!("country {code} has no `{l}` name"))
+        })
+        .collect()
+}
+
 const NORMAL_PHENOTYPES: [&str; 4] = ["normal metabolizer", "normal function", "indeterminate", "no result"];
 
 fn f(v: Option<Decimal>) -> Value {
@@ -49,18 +63,6 @@ pub fn actionable_phenotype(phenotype: Option<&str>) -> bool {
     !p.is_empty() && !NORMAL_PHENOTYPES.contains(&p.as_str()) && !p.ends_with("negative")
 }
 
-fn grouped(n: i64) -> String {
-    let digits = n.unsigned_abs().to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(' ');
-        }
-        out.push(c);
-    }
-    if n < 0 { format!("-{out}") } else { out }
-}
-
 fn value_of(m: &Marker, spec: &Map<String, Value>, lang: &str) -> (String, String) {
     if m.source == "wearables" {
         let unit = spec.get("unit").map(text).unwrap_or_default();
@@ -72,12 +74,7 @@ fn value_of(m: &Marker, spec: &Map<String, Value>, lang: &str) -> (String, Strin
             return (format!("{}:{:02}", whole.div_euclid(60), whole.rem_euclid(60)), unit);
         }
         if spec.get("agg").and_then(Value::as_str) == Some("sum30") {
-            let shown = if lang == "es" {
-                num::localized(&whole.to_string(), lang)
-            } else {
-                grouped(whole)
-            };
-            return (shown, unit);
+            return (num::count(whole, lang), unit);
         }
         return (num::localized(&num(&v), lang), unit);
     }
@@ -133,11 +130,7 @@ fn marker_row(m: &Marker, spec: &Map<String, Value>, pack: &Pack, lang: &str, so
     let (value, unit) = value_of(m, spec, lang);
     if m.source == "wearables" {
         let Some(w) = &m.wearable else { return Value::Null };
-        let name = spec
-            .get(lang)
-            .filter(|v| truthy(v))
-            .or_else(|| spec.get("en").filter(|v| truthy(v)))
-            .map_or_else(|| m.key.clone(), text);
+        let name = langs::lookup(lang, |l| spec.get(l).filter(|v| truthy(v))).map_or_else(|| m.key.clone(), text);
         let newest = iso(w.newest);
         let label = [
             sources.get(&w.source).map(String::as_str),
@@ -220,7 +213,7 @@ pub async fn build_dashboard(
     lang: &str,
     scopes: &Scopes,
 ) -> Result<Value> {
-    let lang = if lang == "es" { "es" } else { "en" };
+    let lang = ownhealth_core::langs::lang_or_default(lang);
     let as_of = ev.as_of;
     let max_markers = usize::try_from(int(pack.dashboard.get("max_markers_per_card")).unwrap_or(3)).unwrap_or(3);
     let labs_ok = scopes.contains("read:labs");
@@ -244,12 +237,7 @@ pub async fn build_dashboard(
                 }
             }
         }
-        let name = def
-            .names
-            .get(lang)
-            .filter(|v| truthy(v))
-            .or_else(|| def.names.get("en").filter(|v| truthy(v)))
-            .map_or_else(|| s.key.clone(), text);
+        let name = langs::lookup(lang, |l| def.names.get(l).filter(|v| truthy(v))).map_or_else(|| s.key.clone(), text);
         let mut card = Map::new();
         card.insert("key".into(), json!(s.key));
         card.insert("name".into(), json!(name));
@@ -528,8 +516,8 @@ pub async fn build_dashboard(
         parts.push(age.to_string());
     }
     if let Some(country) = prof.country.as_deref().filter(|c| !c.is_empty()) {
-        parts.push(match COUNTRIES.iter().find(|(code, _, _)| *code == country) {
-            Some((_, en, es)) => (if lang == "es" { es } else { en }).to_string(),
+        parts.push(match COUNTRIES.iter().find(|(code, _)| *code == country) {
+            Some((_, names)) => langs::pick(names, lang).to_string(),
             None => country.to_string(),
         });
     }

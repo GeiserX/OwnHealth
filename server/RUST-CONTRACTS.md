@@ -93,7 +93,10 @@ The Python rules (CONTRACTS.md section 3) hold, with these Rust names:
   `core::observations::commit_observation` / `core::records::add_record` with `accepted_by = "person"`.
   No lane writes `observation` or the record tables with raw SQL.
 - Every fact has provenance: `core::provenance::SrcIn` / `SrcRef`.
-- Every read a person or agent makes writes one `core::audit::write_audit` row in the same transaction.
+- Every read a person or agent makes writes one `core::audit::write_audit` row in the same transaction. A read that
+  runs in a REPEATABLE READ snapshot (the doctor summary, the IPS and zip exports, the pedigree) writes its row
+  instead in its own READ COMMITTED transaction (`write_audit_at`), stamped with the start of the read, and that row
+  commits before the response goes out.
 - Every permission check goes through `core::access::require` / `effective_permission`.
 - Status words come only from lane E. Free text going out over MCP is `core::text::untrusted(text, origin)`.
 - Domain functions take `&mut sqlx::PgConnection` (a `Transaction` derefs to it); the caller owns the
@@ -204,6 +207,7 @@ Each crate's `src/lib.rs` documents them. The shapes:
 | | `render_page_png(blobs, sha, page_no, scale) -> Result<Vec<u8>>` (blocking) | I |
 | | `ground_value(conn, blobs, document_id, page_no, name, value) -> Result<Option<[f64; 4]>>` | F |
 | ingest-structured (C) | `fhir::import_fhir`, `apple_health::import_apple_health` `-> Result<ImportSummary>` | jobs |
+| | `fhir::import_pull(conn, blobs, source_id, document_id) -> Result<PullSummary>`: a connector's stored bundle; `source_item` keyed `<type>/<id>@<versionId or sha>` (the sha leaves out `meta.lastUpdated`, `versionId`, `source`), an Observation keyed row by row (`#component<n>`), a medicine named by reference keyed with its Medication's sha (or `unresolved`), one `fhir_unmapped_summary` per type with no table; `flags.unprojected` and `flags.sensitive` (any entry labelled or mapped sensitive, read before the ledger skips it) make the bundle sensitive. The caller owns the transaction and runs one pull per source at a time (the `source.poll` dedupe key) | connector pollers |
 | | `apple_health::rebuild_rollups(conn, profile, metric) -> Result<i64>` | H |
 | | `manual::add_manual_observation(conn, &ManualObservation) -> Result<Committed>` | I |
 | | `wearables::series(conn, profile, metric, since, until, resolution) -> Result<Value>`; `metric_info(key)` | E, I |
@@ -436,7 +440,8 @@ arrive(conn, &BlobStore, &Arrival) -> Result<Arrived>
 enqueue_ocr(conn, document_id, pages: &[i32], why) -> Result<Option<i64>>   // queue "ocr", job "ocr.document"
 set_ocr_state(conn, document_id, "not_needed"|"pending"|"queued"|"running"|"done"|"failed"|"off")
 
-// core::dedup: level 0 seen_item/record_item; level 1 existing_document; level 2 below; level 3 match
+// core::dedup: level 0 seen_item/record_item (pulls: pulled_before/record_pulled/forget_pulled_by);
+//   level 1 existing_document; level 2 below; level 3 match
 simhash64(text) -> Option<u64>; phash64(gray, w, h) -> Option<u64>; hamming(a, b)
 store_page_fingerprint(conn, document_id, page_no, phash, simhash)
 find_near_duplicate(conn, document_id) -> Result<Option<NearDuplicate>>   // same profile, earlier, other bytes

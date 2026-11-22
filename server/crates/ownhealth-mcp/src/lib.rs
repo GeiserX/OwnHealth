@@ -256,11 +256,7 @@ impl ServerHandler for OwnHealthMcp {
                 None,
             ));
         };
-        let lang = if ["es", "en"].contains(&principal.lang.as_str()) {
-            principal.lang.as_str()
-        } else {
-            "es"
-        };
+        let lang = ownhealth_core::langs::mcp_lang(&principal.lang);
         let v =
             prompts::render(spec, request.arguments.as_ref(), lang).map_err(|m| ErrorData::invalid_params(m, None))?;
         let r: GetPromptResult = complete(v)?;

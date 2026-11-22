@@ -197,11 +197,7 @@ pub fn group_units(alias_group: &str) -> Option<Vec<(String, String)>> {
 
 pub fn display_name(alias_group: &str, lang: &str) -> Option<String> {
     let g = tables::groups().get(alias_group)?;
-    Some(if lang == "es" {
-        g.name_es.clone()
-    } else {
-        g.name_en.clone()
-    })
+    Some(ownhealth_core::langs::pick(&g.names(), lang).to_string())
 }
 
 fn pow10(n: u32) -> BigInt {

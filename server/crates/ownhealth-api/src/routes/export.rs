@@ -24,7 +24,7 @@ use axum::routing::post;
 use ownhealth_auth::household::require_manage;
 use ownhealth_core::Runtime;
 use ownhealth_core::access::today_utc;
-use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::audit::{AuditEvent, write_audit_at};
 use ownhealth_ops::export::{blocking, export_profile};
 use ownhealth_rules::summary::LANGS;
 use serde::Deserialize;
@@ -81,6 +81,8 @@ async fn export(
     sqlx::query("set transaction isolation level repeatable read")
         .execute(&mut *tx)
         .await?;
+    // the start of the read (now() is the transaction's start): the time the audit row carries
+    let read_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("select now()").fetch_one(&mut *tx).await?;
     let perm = require_manage(Caller(p.clone()).require(&mut tx, &profile, None, None).await?)?;
     let tmp_dir = rt.settings.data_dir.join("tmp");
     let path = tmp_dir.join(format!("export-{}.zip", Uuid::new_v4().simple()));
@@ -99,7 +101,12 @@ async fn export(
         .and_then(Value::as_object)
         .map_or(0, |m| m.values().filter_map(Value::as_u64).sum());
     let files = manifest.get("files").and_then(Value::as_array).map_or(0, Vec::len);
-    write_audit(
+    tx.commit().await?;
+    // the audit chain links a row at commit, which a repeatable read snapshot cannot do, so the row
+    // goes in its own transaction, still before any byte of the export is sent, stamped with the
+    // start of the read
+    let mut tx = rt.pool.begin().await?;
+    write_audit_at(
         &mut tx,
         &AuditEvent {
             actor_id: p.user_id,
@@ -113,6 +120,7 @@ async fn export(
             ip: meta.ip.clone(),
             ..AuditEvent::new("user", "export", "export")
         },
+        Some(read_at),
     )
     .await?;
     tx.commit().await?;
@@ -144,17 +152,23 @@ async fn ips(
     profile: String,
     lang: Option<String>,
 ) -> R {
-    let lang = lang.unwrap_or_else(|| p.lang.clone());
+    // only a lang the caller sent can be refused, as on the summary sheet
+    let lang = lang.unwrap_or_else(|| ownhealth_core::langs::lang_or_default(&p.lang).to_string());
     Check::body().literal("lang", Some(&lang), &LANGS).done()?;
-    let mut tx = rt.pool.begin().await?;
+    // the summary behind the Bundle reads one snapshot and stores its state, as on the sheet
+    let mut tx = ownhealth_rules::summary::begin_read(&rt.pool).await?;
+    let read_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("select now()").fetch_one(&mut *tx).await?;
     let perm = Caller(p.clone())
         .require(&mut tx, &profile, Some("read:summary"), None)
         .await?;
     let today = today_utc();
-    let out = ownhealth_ops::ips::build(&mut tx, perm.profile.id, &perm.scopes, &lang, today).await?;
+    let (out, state) = ownhealth_ops::ips::read(&mut tx, perm.profile.id, &perm.scopes, &lang, today).await?;
+    ownhealth_rules::commit_read(tx, perm.profile.id, &state).await?;
     let bytes = out.to_bytes()?;
     let entries = out.bundle["entry"].as_array().map_or(0, Vec::len);
-    write_audit(
+    // the audit row commits before the Bundle goes out, stamped with the start of the read
+    let mut tx = rt.pool.begin().await?;
+    write_audit_at(
         &mut tx,
         &AuditEvent {
             actor_id: p.user_id,
@@ -170,6 +184,7 @@ async fn ips(
             ip: meta.ip.clone(),
             ..AuditEvent::new("user", "export", "export")
         },
+        Some(read_at),
     )
     .await?;
     tx.commit().await?;

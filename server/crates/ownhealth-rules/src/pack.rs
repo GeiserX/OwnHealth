@@ -186,12 +186,13 @@ impl Pack {
             .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
     }
 
-    /// The display name of an alias group in `lang` (en as the fallback), or the group itself.
+    /// The display name of an alias group in `lang` (`langs::lookup`: the registry default as the
+    /// fallback), or the group itself.
     pub fn name(&self, group: &str, lang: &str) -> String {
         match self.analytes.get(group).and_then(Value::as_object) {
             Some(a) if !a.is_empty() => {
-                let pick = |k: &str| a.get(k).filter(|v| truthy(v)).map(text);
-                pick(lang).or_else(|| pick("en")).unwrap_or_else(|| "None".into())
+                ownhealth_core::langs::lookup(lang, |l| a.get(l).filter(|v| truthy(v)).map(text))
+                    .unwrap_or_else(|| "None".into())
             }
             _ => group.to_string(),
         }
@@ -216,11 +217,8 @@ impl Pack {
             .filter(|t| truthy(t))
             .or_else(|| self.templates.get(key))
             .ok_or_else(|| PackError(format!("no template {key}")))?;
-        let s = t
-            .get(lang)
-            .filter(|v| truthy(v))
-            .or_else(|| t.get("en"))
-            .ok_or_else(|| PackError(format!("template {key} has no en text")))?;
+        let s = ownhealth_core::langs::lookup(lang, |l| t.get(l).filter(|v| truthy(v)))
+            .ok_or_else(|| PackError(format!("template {key} has no {lang} text")))?;
         py_format(&text(s), params)
     }
 }
@@ -369,8 +367,8 @@ fn check(pack: &Pack) -> PackResult<()> {
         }
     }
     for (key, t) in &pack.templates {
-        if t.get("en").is_none() || t.get("es").is_none() {
-            return Err(PackError(format!("template {key} needs en and es")));
+        if let Some(lang) = ownhealth_core::langs::LANGS.iter().find(|l| t.get(**l).is_none()) {
+            return Err(PackError(format!("template {key} needs {lang}")));
         }
     }
     Ok(())

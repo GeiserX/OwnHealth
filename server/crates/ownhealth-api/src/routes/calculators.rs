@@ -55,8 +55,8 @@ async fn get_calculators(
 ) -> R {
     let mut check = Check::query();
     let as_of = parse_date(&q, &mut check);
+    let lang = check.query_lang(q.get("lang").map(String::as_str));
     check.done()?;
-    let lang = q.get("lang").filter(|v| !v.is_empty()).map(String::as_str);
     ok(calculators(&rt, &c, &p, as_of, lang).await?)
 }
 

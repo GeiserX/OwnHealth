@@ -1,7 +1,9 @@
 //! Three-level dedup (ingestion.md 4, ROADMAP v0.2), plus the per-source ledger in front of it.
 //!
-//! 0. **Source item**: the source's own id for an item (Message-ID, Paperless id, folder path + size
-//!    + mtime) was seen already: nothing is stored again ([`seen_item`], [`record_item`]).
+//! 0. **Source item**: the source's own id for an item (Message-ID, Paperless id, folder path, size
+//!    and mtime) was seen already: nothing is stored again ([`seen_item`], [`record_item`]). A
+//!    connector pull keys each resource it brought, `<type>/<id>@<versionId or sha>`, and imports only
+//!    the ones its source did not send before ([`pulled_before`], [`record_pulled`]).
 //! 1. **File hash**: the same bytes for the same profile are one document with one more
 //!    `document_source` row (`documents::create_document` does it; [`existing_document`] asks).
 //! 2. **Document fingerprint**: per page a 64-bit pHash of the rendered page (Hamming <= 6) and a
@@ -60,7 +62,10 @@ pub async fn seen_item(conn: &mut PgConnection, source_id: Uuid, external_id: &s
     .await?)
 }
 
-/// Remember an item. True when it was new; a second call for the same id changes nothing.
+/// Remember an item, with the profile it was filed to (none for held mail). True when it was new. A
+/// second call for the same id changes nothing, except the profile: the item names the profile it was
+/// last filed to (a held message released into a profile, a push that came again after its inbox moved
+/// to another profile), so a profile delete takes only the files that are that profile's.
 pub async fn record_item(
     conn: &mut PgConnection,
     source_id: Uuid,
@@ -68,21 +73,83 @@ pub async fn record_item(
     blob_sha256: Option<&str>,
     document_id: Option<Uuid>,
     quarantine_id: Option<Uuid>,
+    profile_id: Option<Uuid>,
 ) -> Result<bool> {
     let sha = blob_sha256.map(sha256_hex_to_bytes).transpose()?;
-    let n = sqlx::query(
-        "insert into source_item (source_id, external_id, blob_sha256, document_id, quarantine_id) \
-         values ($1, $2, $3, $4, $5) on conflict do nothing",
+    let inserted: Option<bool> = sqlx::query_scalar(
+        "insert into source_item (source_id, external_id, blob_sha256, document_id, quarantine_id, profile_id) \
+         values ($1, $2, $3, $4, $5, $6) on conflict (source_id, external_id) do update \
+         set profile_id = excluded.profile_id where excluded.profile_id is not null \
+         and source_item.profile_id is distinct from excluded.profile_id returning (xmax = 0)",
     )
     .bind(source_id)
     .bind(external_id)
     .bind(sha)
     .bind(document_id)
     .bind(quarantine_id)
+    .bind(profile_id)
+    .fetch_optional(conn)
+    .await?;
+    Ok(inserted == Some(true))
+}
+
+/// A connector pull's level 0: the source sent this item before, and the pull that brought it still
+/// holds it (that document is active and still on this profile). An item whose pull was retracted or
+/// moved to another profile counts as new, so the next pull brings it back.
+pub async fn pulled_before(
+    conn: &mut PgConnection,
+    source_id: Uuid,
+    external_id: &str,
+    profile_id: Uuid,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "select exists (select 1 from source_item i join document d on d.id = i.document_id \
+         where i.source_id = $1 and i.external_id = $2 and d.status = 'active' and d.profile_id = $3)",
+    )
+    .bind(source_id)
+    .bind(external_id)
+    .bind(profile_id)
+    .fetch_one(conn)
+    .await?)
+}
+
+/// Remember a pulled item and the pull that brought it. An item that comes back (its earlier pull was
+/// retracted) names the newer pull from now on.
+pub async fn record_pulled(
+    conn: &mut PgConnection,
+    source_id: Uuid,
+    external_id: &str,
+    blob_sha256: &str,
+    document_id: Uuid,
+    profile_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        "insert into source_item (source_id, external_id, blob_sha256, document_id, profile_id) \
+         values ($1, $2, $3, $4, $5) on conflict (source_id, external_id) do update \
+         set blob_sha256 = excluded.blob_sha256, document_id = excluded.document_id, \
+         profile_id = excluded.profile_id, seen_at = now()",
+    )
+    .bind(source_id)
+    .bind(external_id)
+    .bind(sha256_hex_to_bytes(blob_sha256)?)
+    .bind(document_id)
+    .bind(profile_id)
     .execute(conn)
-    .await?
-    .rows_affected();
-    Ok(n == 1)
+    .await?;
+    Ok(())
+}
+
+/// A retracted pull that the same bytes brought back is one document again, with none of its facts:
+/// its ledger rows no longer hold anything, so they stop pointing at it. Returns how many.
+pub async fn forget_pulled_by(conn: &mut PgConnection, source_id: Uuid, document_id: Uuid) -> Result<u64> {
+    Ok(
+        sqlx::query("update source_item set document_id = null where source_id = $1 and document_id = $2")
+            .bind(source_id)
+            .bind(document_id)
+            .execute(conn)
+            .await?
+            .rows_affected(),
+    )
 }
 
 // --------------------------------------------------- level 1: file hash ----

@@ -128,3 +128,14 @@ test('fill from household: a refused row does not keep the later rows out', asyn
 	assert.equal(failed, refused);
 	assert.equal(await addEach(['sam'], async () => {}), undefined);
 });
+
+test('a condition reads in the drawing language: IAM in es, MI in en', () => {
+	for (const [lang, want, other] of [
+		['es', 'IAM 52', 'MI 52'],
+		['en', 'MI 52', 'IAM 52']
+	] as const) {
+		const f = layout(rivera, lang, false, words).nodes.find((n) => n.id === 'f')!;
+		assert.ok(f.lines.includes(want) && !f.lines.includes(other), `${lang}: ${f.lines.join(' | ')}`);
+		assert.ok(f.title.includes(lang === 'es' ? 'padre' : 'father'), `${lang}: ${f.title}`);
+	}
+});

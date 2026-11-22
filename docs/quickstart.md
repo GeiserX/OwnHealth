@@ -35,6 +35,8 @@ curl -s http://localhost:8080/healthz    # {"status":"ok","version":"..."}
 
 `admin` is a one-shot container: it runs the migrations as the database owner `ownhealth`, gives the app its own role `ownhealth_app`, and exits. The app connects as `ownhealth_app`, which can add to the audit log but not change or delete it.
 
+`ownhealth migrate` runs only as the owner of the database and stops with an error for any other role, a superuser included. The owner can replace anything in schema `public`, so migrations run by another role would leave the audit chain trusting objects the owner can swap.
+
 The app listens on `127.0.0.1:8080` only. Nothing on your network can reach it until you put a reverse proxy in front.
 
 ## 2. Create your account

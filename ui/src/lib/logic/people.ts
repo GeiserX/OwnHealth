@@ -67,6 +67,11 @@ export function nameTaken(name: string, profiles: { display_name: string }[]): b
 	return !!n && profiles.some((p) => p.display_name.trim().replace(/\s+/g, ' ').toLocaleLowerCase() === n);
 }
 
+/** The line shown after a profile delete: files or folders still waiting for the retry are said, never hidden. */
+export function deletedNoteKey(blobsPending: number, foldersPending: number): 'st_deleted' | 'st_deleted_pending' {
+	return blobsPending > 0 || foldersPending > 0 ? 'st_deleted_pending' : 'st_deleted';
+}
+
 /** The origin of a link when it differs from the page's own (an OWNHEALTH_BASE_URL the person may not reach), else null. */
 export function foreignOrigin(url: string, here: string): string | null {
 	try {
@@ -96,6 +101,54 @@ export function lastSignIn(passkeys: number, password: boolean, oidc: boolean): 
 // ---- the audit log on MCP & access ----
 
 export type AuditRow = { via: string; actor: string; action: string; tool: string | null; result_kind: string | null; rows_out: number | null; bytes_out: number | null };
+
+/** The two lines the audit card shows about the log itself: does the hash chain hold, and does it still
+ * match the head the last backup kept outside the database. Each is a dict key, its values and a pill
+ * tone; `num` formats the entry numbers (the page passes its number formatter), and `at` stays an ISO
+ * time for the caller to format. While the anchor does not hold, the chain line never reads as
+ * verified, broken or not: the entries may link up, but the log no longer reaches the copy the
+ * backup kept, or that copy cannot be read to compare. A broken line names the break in `key` and
+ * says how far that leaves the log in `tail`, a second sentence the page shows after it. */
+export type ChainLine = { key: string; vars: Record<string, string | number>; tone: 'p-ok' | 'p-watch' | 'p-out' | 'p-info'; tail?: string };
+export function chainLines(
+	c: {
+		verified: number;
+		broken: { seq: number | null; kind: string } | null;
+		anchor: { state: string; seq: number | null; at: string | null };
+	},
+	num: (n: number) => string = String
+): ChainLine[] {
+	const n = num(c.verified);
+	const a = c.anchor;
+	const chain: ChainLine = c.broken
+		? c.broken.kind === 'uncheckable'
+			? { key: 'au_chain_uncheckable', vars: {}, tone: 'p-out' }
+			: {
+					key: 'au_chain_broken_' + c.broken.kind,
+					vars: { n, seq: num(c.broken.seq ?? c.verified + 1) },
+					tone: 'p-out',
+					tail: a.state === 'mismatch' ? 'au_chain_upto_mismatch' : a.state === 'unreadable' ? 'au_chain_upto_unreadable' : 'au_chain_upto'
+				}
+		: a.state === 'mismatch'
+			? { key: 'au_chain_unanchored', vars: { n }, tone: 'p-out' }
+			: a.state === 'unreadable'
+				? { key: 'au_chain_uncompared', vars: { n }, tone: 'p-out' }
+				: c.verified
+					? { key: 'au_chain_ok', vars: { n }, tone: 'p-ok' }
+					: { key: 'au_chain_empty', vars: {}, tone: 'p-info' };
+	const vars = { seq: num(a.seq ?? 0), at: a.at ?? '' };
+	const anchor: ChainLine =
+		a.state === 'ok'
+			? { key: 'au_anchor_ok', vars, tone: 'p-ok' }
+			: a.state === 'mismatch'
+				? { key: 'au_anchor_mismatch', vars, tone: 'p-out' }
+				: a.state === 'unreadable'
+					? { key: 'au_anchor_unreadable', vars, tone: 'p-out' }
+					: a.state === 'unchecked'
+						? { key: 'au_anchor_unchecked', vars, tone: 'p-out' }
+						: { key: 'au_anchor_none', vars, tone: 'p-info' };
+	return [chain, anchor];
+}
 
 /** 'agents' keeps what agents did over MCP; 'all' keeps every row, page views included. */
 export function auditRows<T extends { via: string }>(rows: T[] | null | undefined, mode: 'agents' | 'all'): T[] {

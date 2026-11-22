@@ -30,8 +30,9 @@ use axum::{Json, Router};
 use chrono::Datelike;
 use ownhealth_core::Runtime;
 use ownhealth_core::access::{Permission, Principal, accessible_profiles, effective_permission};
-use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::audit::{AuditEvent, write_audit, write_audit_at};
 use ownhealth_core::family::{self, Catalog, LinkChange, Member, MemberIn};
+use ownhealth_core::langs::LANGS;
 use ownhealth_core::provenance::{SrcIn, SrcRef};
 use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
@@ -76,6 +77,11 @@ async fn audit(
     action: &str,
     ids: &[String],
 ) -> Result<(), ApiError> {
+    write_audit(conn, &event(principal, perm, action, ids)).await?;
+    Ok(())
+}
+
+fn event(principal: &Principal, perm: &Permission, action: &str, ids: &[String]) -> AuditEvent {
     let via = if principal.kind == ownhealth_core::access::PrincipalKind::Token {
         "api"
     } else {
@@ -89,8 +95,7 @@ async fn audit(
     ev.resource_type = Some(family::TABLE.into());
     ev.resource_ids = Some(ids.to_vec());
     ev.rows_out = Some(i32::try_from(ids.len()).unwrap_or(i32::MAX));
-    write_audit(conn, &ev).await?;
-    Ok(())
+    ev
 }
 
 /// The linked profile as the caller may see it: `Some((slug, name))` when readable.
@@ -167,15 +172,28 @@ async fn shown(conn: &mut PgConnection, principal: &Principal, perm: &Permission
     Ok(out)
 }
 
+/// `base` with each registry language's text of a catalog name under `<prefix><lang>` (`en`,
+/// `short_en`), the UI's `Localized` and `Suffixed`. A registry language the catalog lacks is null
+/// here, never another language's text; `tests/langs.rs` names it.
+fn with_texts(mut base: Value, prefix: &str, texts: Option<&[(&'static str, &str)]>) -> Value {
+    if let Some(m) = base.as_object_mut() {
+        for l in LANGS {
+            let text = texts.and_then(|t| t.iter().find(|(c, _)| *c == l)).map(|(_, t)| *t);
+            m.insert(format!("{prefix}{l}"), json!(text));
+        }
+    }
+    base
+}
+
 fn catalog_out(cat: &Catalog) -> Value {
     json!({
         "version": cat.version,
-        "relationships": cat.relationships.iter().map(|r| json!({
-            "code": r.code, "en": r.en, "es": r.es, "generation": r.generation, "side": r.side, "sex": r.sex,
-        })).collect::<Vec<_>>(),
-        "conditions": cat.conditions.iter().map(|c| json!({
-            "kind": c.kind, "en": c.en, "es": c.es, "short_en": c.short_en, "short_es": c.short_es, "group": c.group,
-        })).collect::<Vec<_>>(),
+        "relationships": cat.relationships.iter().map(|r| with_texts(json!({
+            "code": r.code, "generation": r.generation, "side": r.side, "sex": r.sex,
+        }), "", Some(&r.names()))).collect::<Vec<_>>(),
+        "conditions": cat.conditions.iter().map(|c| with_texts(with_texts(json!({
+            "kind": c.kind, "group": c.group,
+        }), "", Some(&c.names())), "short_", Some(&c.shorts()))).collect::<Vec<_>>(),
     })
 }
 
@@ -409,14 +427,20 @@ async fn pedigree(State(rt): State<Runtime>, caller: Caller, Path(p): Path<Strin
     sqlx::query("set transaction isolation level repeatable read")
         .execute(&mut *tx)
         .await?;
+    // the start of the read (now() is the transaction's start): the time the audit row carries
+    let read_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("select now()").fetch_one(&mut *tx).await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
     let rows = shown(&mut tx, &caller.0, &perm).await?;
     let ids: Vec<String> = rows.iter().map(|r| r.member.id.to_string()).collect();
-    audit(&mut tx, &caller.0, &perm, "read", &ids).await?;
     let today = ownhealth_core::access::today_utc();
     // the guideline patterns of these same relatives (ownhealth.family/v1), for the patterns card
     let patterns =
         ownhealth_rules::family::build_document(&mut tx, &caller.0, &perm.profile, &perm.scopes, today).await?;
+    tx.commit().await?;
+    // the audit chain links a row at commit, which a repeatable read snapshot cannot do, so the row
+    // goes in its own transaction, stamped with the start of the read
+    let mut tx = rt.pool.begin().await?;
+    write_audit_at(&mut tx, &event(&caller.0, &perm, "read", &ids), Some(read_at)).await?;
     tx.commit().await?;
     let cat = family::catalog()?;
     let nodes: Vec<Value> = rows
@@ -436,21 +460,21 @@ async fn pedigree(State(rt): State<Runtime>, caller: Caller, Path(p): Path<Strin
                     .iter()
                     .map(|c| {
                         let k = cat.condition(&c.kind);
-                        json!({
+                        let row = json!({
                             "kind": c.kind,
                             "text": c.text,
-                            "en": k.map(|k| k.en.as_str()), "es": k.map(|k| k.es.as_str()),
-                            "short_en": k.map(|k| k.short_en.as_str()), "short_es": k.map(|k| k.short_es.as_str()),
                             "group": k.map(|k| k.group.as_str()),
                             "onset_age": c.onset_age, "onset_approx": c.onset_approx,
-                        })
+                        });
+                        let row = with_texts(row, "", k.map(|k| k.names()).as_ref().map(|n| &n[..]));
+                        with_texts(row, "short_", k.map(|k| k.shorts()).as_ref().map(|n| &n[..]))
                     })
                     .collect()
             };
             Some(json!({
                 "id": m.id,
                 "relationship": rel.code,
-                "label": {"en": rel.en, "es": rel.es},
+                "label": with_texts(json!({}), "", Some(&rel.names())),
                 "generation": rel.generation,
                 "side": rel.side,
                 "degree": rel.degree,

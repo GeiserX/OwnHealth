@@ -3,7 +3,7 @@
 	// GET /profiles/{p}/next-draw (read:labs). The server joins the overdue retests, the tests never
 	// measured and the last values outside the lab range, lists each once with every reason, and groups
 	// them by the preparation a cited source describes; this page shows them. The same list prints as a
-	// PDF request for the doctor (GET .../next-draw.pdf), in either language, with or without the name.
+	// PDF request for the doctor (GET .../next-draw.pdf), in any registry language, with or without the name.
 	import '#lib/components/pages2/pages2.css';
 	import { getNextDraw, nextDrawPdf } from '#lib/api';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
@@ -13,6 +13,7 @@
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { LANGS, type Lang } from '#lib/i18n/langs';
 	import type { NextDraw } from '#lib/api/types';
 	import { todayIso } from '#lib/logic/people';
 	import { currentProfile } from '#lib/state/app.svelte';
@@ -28,7 +29,7 @@
 	$effect(load);
 
 	// The printed request: its own language (the doctor's, maybe not the reader's) and the name choice.
-	let lang = $state<'es' | 'en'>(i18n.lang === 'es' ? 'es' : 'en');
+	let lang = $state<Lang>(i18n.lang);
 	let hide = $state(false);
 	let pdf = $state<{ url: string; filename: string } | null>(null);
 	let pdfErr = $state<unknown>(null);
@@ -39,7 +40,7 @@
 		pdf = null;
 	}
 	// another profile or option makes another sheet; only the latest request fills the preview
-	async function makePdf(slug: string, l: 'es' | 'en', h: boolean) {
+	async function makePdf(slug: string, l: Lang, h: boolean) {
 		const mine = ++seq;
 		busy = true;
 		pdfErr = null;
@@ -132,8 +133,9 @@
 			<h3 id="nd-opts">{t('due_draw_opts')}</h3>
 			<fieldset>
 				<legend>{t('due_draw_lang')}</legend>
-				<label class="opt"><input type="radio" name="nd-lang" value="es" bind:group={lang} />Español</label>
-				<label class="opt"><input type="radio" name="nd-lang" value="en" bind:group={lang} />English</label>
+				{#each LANGS as l (l.code)}
+					<label class="opt"><input type="radio" name="nd-lang" value={l.code} bind:group={lang} />{l.name}</label>
+				{/each}
 			</fieldset>
 			<fieldset>
 				<label class="opt"><input type="checkbox" bind:checked={hide} aria-describedby="nd-hide-d" />{t('due_draw_hide')}</label>

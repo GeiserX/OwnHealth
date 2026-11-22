@@ -2,8 +2,11 @@
 // Backends: lane C (wearables.py, records.py), lane B (documents.py), lane G (tokens.py, audit.py, family.py),
 // lane F (mcp_usage.py). Review and uploads are in core.ts.
 import { del, get, p, post, put, request, requestBlob } from './core';
+import type { Lang } from '../i18n/langs';
 import type {
+	AuditChainOut,
 	AuditOut,
+	AuditWhoOut,
 	AuthState,
 	DocumentDetail,
 	DocumentSummary,
@@ -23,7 +26,8 @@ import type {
 
 export const getWearables = (profile: string, lang?: string) => get<WearablesSummary>(`${p(profile)}/wearables/summary`, { lang });
 
-export const listDocuments = (profile: string, q: { q?: string; type?: string } = {}) =>
+/** `latest: 'fhir'`: only the documents a FHIR import read (a file or a connector pull), the newest stored first. */
+export const listDocuments = (profile: string, q: { q?: string; type?: string; latest?: 'fhir'; limit?: number } = {}) =>
 	get<{ items: DocumentSummary[] }>(`${p(profile)}/documents`, q);
 export const getDocument = (id: Uuid) => get<DocumentDetail>(`/documents/${id}`);
 export const pageImageUrl = (id: Uuid, page: number) => `/api/documents/${id}/pages/${page}.png`;
@@ -57,13 +61,15 @@ export const createToken = (body: {
 	default_profile?: string;
 	days?: number;
 	identity_mode?: TokenOut['identity_mode'];
-	lang?: 'es' | 'en';
+	lang?: TokenOut['lang'];
 	units?: TokenOut['units'];
 }) => post<{ token: TokenOut; plaintext: string }>('/tokens', body);
 export const revokeToken = (id: Uuid) => del<{ id: Uuid; revoked: true }>(`/tokens/${id}`);
 export const getTokenUsage = (id: Uuid) => get<TokenUsage>(`/tokens/${id}/usage`);
 
 export const listAudit = (q: { profile?: string; limit?: number; before?: number; via?: string } = {}) => get<{ items: AuditOut[] }>('/audit', q);
+export const getAuditChain = () => get<AuditChainOut>('/audit/chain');
+export const listAuditWho = (profile: string) => get<AuditWhoOut>('/audit/who', { profile });
 
 export const getHousehold = () => get<Household>('/household');
 // People (backend api/family.py): a profile without a login, an invite for a new login, deleting a profile.
@@ -77,21 +83,21 @@ export type RelativeIn = {
 	slug?: string | null;
 };
 export const addRelative = (body: RelativeIn) => post<{ id: Uuid; slug: string }>('/household/profiles', body);
-export const inviteMember = (body: { display_name: string; locale: 'es' | 'en'; claim_profile?: string | null }) =>
+export const inviteMember = (body: { display_name: string; locale: Lang; claim_profile?: string | null }) =>
 	post<{ user_id: Uuid; code: string; url: string; expires_in_days: number }>('/household/invites', body);
 /** Needs a fresh step-up; `confirm` repeats the slug. */
 export const deleteProfile = (slug: string) =>
-	request<{ deleted: string; rows: number; blobs: number }>('DELETE', p(slug), { query: { confirm: slug } });
+	request<{ deleted: string; rows: number; blobs: number; blobs_pending: number; folders_pending: number }>('DELETE', p(slug), { query: { confirm: slug } });
 /** Full export: FHIR R4 NDJSON plus the original files in one zip. Needs a fresh step-up. */
 export const exportProfile = (slug: string) => requestBlob('POST', `${p(slug)}/export`, { fmt: 'zip' }, `ownhealth-${slug}.zip`);
 /** The views of the printed doctor summary (data/summary/specialties.yaml), in their order; `ips` is the IPS export's printed twin. */
 export const SUMMARY_SPECIALTIES = ['gp', 'cardiology', 'endocrinology', 'hematology', 'ips'] as const;
 export type SummarySpecialty = (typeof SUMMARY_SPECIALTIES)[number];
 /** The printed doctor summary (two A4 pages, a PDF). Needs a fresh step-up. */
-export const printSummary = (slug: string, body: { lang: 'es' | 'en'; specialty: SummarySpecialty; include_sensitive: boolean }) =>
+export const printSummary = (slug: string, body: { lang: Lang; specialty: SummarySpecialty; include_sensitive: boolean }) =>
 	requestBlob('POST', `${p(slug)}/summary.pdf`, body, `ownhealth-summary-${slug}.pdf`);
 /** The International Patient Summary as a FHIR document Bundle (JSON), in the sheet's language. Needs a fresh step-up. */
-export const exportIps = (slug: string, lang: 'es' | 'en') => requestBlob('POST', `${p(slug)}/export`, { fmt: 'ips', lang }, `ownhealth-ips-${slug}.json`);
+export const exportIps = (slug: string, lang: Lang) => requestBlob('POST', `${p(slug)}/export`, { fmt: 'ips', lang }, `ownhealth-ips-${slug}.json`);
 export const setLocks = (profile: string, locks: Scope[]) => put<{ ok: true }>(`${p(profile)}/locks`, { locks });
 
 // ---- lane I-ui-2: genome, drug check, documents, review helpers, auth, settings ----
@@ -119,7 +125,7 @@ export const putSensitive = (profile: string, body: { ui?: boolean; agents?: boo
 
 // auth (lane G, api/auth.py). WebAuthn options and credentials travel as JSON (base64url).
 type Json = Record<string, unknown>;
-type Setup = { household_name?: string; display_name: string; locale: 'es' | 'en'; birth_date?: string | null; sex_at_birth?: string | null; country?: string | null };
+type Setup = { household_name?: string; display_name: string; locale: Lang; birth_date?: string | null; sex_at_birth?: string | null; country?: string | null };
 export const getAuthState = () => get<AuthState>('/auth/state');
 // Enrolment from an invite link (/enroll?code=).
 export type InviteInfo = { display_name: string; household: string; claims_profile: boolean; passkeys_possible: boolean; password_allowed: boolean; oidc: boolean };

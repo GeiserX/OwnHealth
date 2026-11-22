@@ -147,7 +147,10 @@ async fn files_route_by_profile_folder_and_move_to_done_or_failed() -> R {
     // the link's target was never even read into the blob store
     use sha2::Digest as _;
     let outside_sha = hex::encode(sha2::Sha256::digest(std::fs::read(&outside)?));
-    assert!(!e.blobs.exists(&outside_sha));
+    assert!(!e.blobs.exists(
+        ownhealth_core::blobs::BlobOwner::Profile(e.fam.profile("lucia")),
+        &outside_sha
+    ));
 
     // a second pass finds nothing new
     let o = poll_root(&e.db.pool, &e.blobs, &e.source, &e.inbox, Duration::ZERO).await?;

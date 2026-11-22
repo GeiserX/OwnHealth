@@ -16,9 +16,12 @@ use support::Env;
 
 type R = anyhow::Result<()>;
 
-/// Routes reachable without a login: the login itself, and the calendar feed, whose secret is in its
-/// path (ics_feed.rs checks that a wrong one gets 404).
-const PUBLIC: [&str; 16] = [
+/// Routes reachable without a login: the login itself, the calendar feed, whose secret is in its
+/// path (ics_feed.rs checks that a wrong one gets 404), a SMART Health Link's manifest and file,
+/// whose secrets are in theirs (shl_share.rs checks the 404s), and the connector callback, which a
+/// vendor sends the browser to and which counts only with the binder cookie and session that started
+/// the launch (connectors.rs checks every refusal).
+const PUBLIC: [&str; 19] = [
     "/auth/state",
     "/auth/setup/begin",
     "/auth/setup/finish",
@@ -34,7 +37,21 @@ const PUBLIC: [&str; 16] = [
     "/auth/enroll/password",
     "/auth/oidc/login",
     "/auth/oidc/callback",
+    "/connectors/callback",
     "/ics/{file}",
+    "/shl/{id}",
+    "/shl/{id}/file/{ticket}",
+];
+
+/// Routes the imaging viewer is served on, outside `/api`: no login resolves there, a viewer link does
+/// (routes/imaging_proxy.rs, checked by crates/ownhealth/tests/imaging_proxy.rs).
+const VIEWER: [&str; 6] = [
+    "/ohif",
+    "/ohif/",
+    "/ohif/{*rest}",
+    "/dicom-web",
+    "/dicom-web/",
+    "/dicom-web/{*rest}",
 ];
 
 const METHODS: [Method; 5] = [Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE];
@@ -84,7 +101,7 @@ async fn every_route_resolves_the_caller() -> R {
     let mut anon = env.anon();
     let mut leaks = Vec::new();
     for path in route_paths()? {
-        if PUBLIC.contains(&path.as_str()) {
+        if PUBLIC.contains(&path.as_str()) || VIEWER.contains(&path.as_str()) {
             continue;
         }
         let mut routed = false;
@@ -114,7 +131,12 @@ async fn every_route_resolves_the_caller() -> R {
 #[tokio::test]
 async fn public_list_is_exact() -> R {
     let paths = route_paths()?;
-    let stale: Vec<&str> = PUBLIC.iter().copied().filter(|p| !paths.contains(*p)).collect();
+    let stale: Vec<&str> = PUBLIC
+        .iter()
+        .chain(&VIEWER)
+        .copied()
+        .filter(|p| !paths.contains(*p))
+        .collect();
     assert!(stale.is_empty(), "stale entries: {stale:?}");
     let env = Env::new(false).await?;
     let mut anon = env.anon();

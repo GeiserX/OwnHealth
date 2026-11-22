@@ -350,7 +350,7 @@ async fn rows(conn: &mut PgConnection, table: &str, ids: &[Uuid]) -> Result<Vec<
         return Ok(Vec::new());
     }
     let sql = format!(
-        "select to_jsonb(t) || jsonb_build_object('import_ref', s.import_ref) from {table} t \
+        "select to_jsonb(t.*) || jsonb_build_object('import_ref', s.import_ref) from {table} t \
          left join src s on s.id = t.src_id where t.id = any($1)"
     );
     let found: Vec<Value> = sqlx::query_scalar(AssertSqlSafe(sql)).bind(ids).fetch_all(conn).await?;
@@ -503,6 +503,11 @@ fn patient(id: Uuid, name: &str, birth: Option<NaiveDate>, sex: Option<&str>) ->
     Value::Object(p)
 }
 
+/// (table, domain) of each section: what a link would carry under that domain's scope.
+pub fn section_tables() -> impl Iterator<Item = (&'static str, &'static str)> {
+    SECTIONS.iter().map(|s| (s.table, s.domain))
+}
+
 /// The IPS Bundle of one profile as the caller may read it, on `as_of`, in `lang` (es or en).
 pub async fn build(
     conn: &mut PgConnection,
@@ -511,13 +516,55 @@ pub async fn build(
     lang: &str,
     as_of: NaiveDate,
 ) -> Result<Ips> {
+    let (ips, state) = read_in(&mut *conn, profile_id, scopes, lang, as_of, false).await?;
+    ownhealth_rules::store_snapshot(&mut *conn, profile_id, &state, &*ownhealth_rules::load_pack()?).await?;
+    Ok(ips)
+}
+
+/// The IPS a SMART Health Link carries. The reader has no account, so a section the person did not
+/// share says it is not in this link (never "this account cannot read them"), and the Composition
+/// says, in one fixed sentence on every link, that it holds only what the person chose to share and
+/// never a sensitive category. The sentence is the same whether anything was left out or not, so it
+/// reveals nothing.
+pub async fn build_link(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    scopes: &Scopes,
+    lang: &str,
+    as_of: NaiveDate,
+) -> Result<Ips> {
+    let (ips, state) = read_in(&mut *conn, profile_id, scopes, lang, as_of, true).await?;
+    ownhealth_rules::store_snapshot(&mut *conn, profile_id, &state, &*ownhealth_rules::load_pack()?).await?;
+    Ok(ips)
+}
+
+/// `build` without its one write: the Bundle, and the state body it was read from. The caller
+/// stores the body and ends the transaction (`summary::begin_read`) with `commit_read`.
+pub async fn read(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    scopes: &Scopes,
+    lang: &str,
+    as_of: NaiveDate,
+) -> Result<(Ips, Value)> {
+    read_in(conn, profile_id, scopes, lang, as_of, false).await
+}
+
+async fn read_in(
+    conn: &mut PgConnection,
+    profile_id: Uuid,
+    scopes: &Scopes,
+    lang: &str,
+    as_of: NaiveDate,
+    link: bool,
+) -> Result<(Ips, Value)> {
     let opts = Options {
         lang: lang.into(),
         specialty: SPECIALTY.into(),
         sensitive_open: false,
         as_of,
     };
-    let model = summary::build(&mut *conn, profile_id, scopes, &opts).await?;
+    let (model, state) = summary::read_for(&mut *conn, None, profile_id, scopes, &opts).await?;
     let empty = Map::new();
     let labels = model.get("labels").and_then(Value::as_object).unwrap_or(&empty);
     let (name, birth, sex): (String, Option<NaiveDate>, Option<String>) =
@@ -646,10 +693,10 @@ pub async fn build(
         let why = if withheld.contains(&s.domain) {
             label(
                 labels,
-                if s.domain == "labs" {
-                    "withheld.labs"
-                } else {
-                    "withheld.records"
+                match (link, s.domain) {
+                    (true, _) => "ips.link_withheld",
+                    (false, "labs") => "withheld.labs",
+                    (false, _) => "withheld.records",
                 },
             )
         } else {
@@ -665,8 +712,14 @@ pub async fn build(
 
     let date = as_of.format("%Y-%m-%d").to_string();
     let doc_type = coded("document")?;
-    let composition = |id: &str| {
+    let notice = link.then(|| {
         json!({
+            "status": "additional",
+            "div": format!("<div xmlns=\"{XHTML}\"><p>{}</p></div>", escape(label(labels, "ips.link_notice"))),
+        })
+    });
+    let composition = |id: &str| {
+        let mut c = json!({
             "resourceType": "Composition",
             "id": id,
             "language": lang,
@@ -677,7 +730,11 @@ pub async fn build(
             "author": [{"reference": patient_url}],
             "title": label(labels, "ips.title"),
             "section": sections,
-        })
+        });
+        if let Some(n) = &notice {
+            c["text"] = n.clone();
+        }
+        c
     };
     // ids follow the content: the same rows, words and date give the same document
     // (serialized in entry order: stored FHIR may hold floats, which the canonical form refuses)
@@ -700,12 +757,13 @@ pub async fn build(
         "timestamp": format!("{date}T00:00:00Z"),
         "entry": entry,
     });
-    Ok(Ips {
+    let ips = Ips {
         bundle,
         srcs,
         state_hash: st(&model, "state_hash").to_string(),
         withheld: json!(withheld),
-    })
+    };
+    Ok((ips, state))
 }
 
 #[cfg(test)]

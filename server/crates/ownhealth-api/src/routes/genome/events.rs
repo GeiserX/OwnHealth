@@ -112,7 +112,7 @@ pub async fn events(rt: &Runtime, principal: &Principal, p: &str) -> R<Value> {
             "release_to": r.release_to,
             "unconfirmed": unconfirmed,
             "created_at": py_isoformat_utc(&r.created_at),
-            "text": {"en": summary(&text, "en"), "es": summary(&text, "es")},
+            "text": ownhealth_core::langs::per_lang(|l| json!(summary(&text, l))),
         });
         match reason {
             Some(why) => {
@@ -160,7 +160,7 @@ pub async fn events(rt: &Runtime, principal: &Principal, p: &str) -> R<Value> {
         "withheld": withheld,
         "release": release.map(|d| d.to_string()),
         "weekly": weekly,
-        "rerun": {"en": rerun_text("en"), "es": rerun_text("es")},
+        "rerun": ownhealth_core::langs::per_lang(|l| json!(rerun_text(l))),
     }))
 }
 

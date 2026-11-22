@@ -59,6 +59,7 @@
   "profiles": {
     "[]": {
       "age": "int",
+      "break_glass": "bool",
       "can_manage": "bool",
       "claimed": "bool",
       "country": "string",

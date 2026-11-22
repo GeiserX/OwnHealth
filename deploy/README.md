@@ -4,9 +4,10 @@ This folder holds the homelab setup and the backup recipe. For a first look on o
 
 | File | What it is |
 |---|---|
-| [compose.homelab.yaml](compose.homelab.yaml) | The app, Postgres 17 and Caddy with HTTPS, and the `ocr` worker when that profile is on. Secrets are files, the containers are read-only |
+| [compose.homelab.yaml](compose.homelab.yaml) | The app, Postgres 17 and Caddy with HTTPS, and the `ocr` worker and the Open Wearables sidecar when those profiles are on. Secrets are files, the containers are read-only |
 | [db/app-role.sh](db/app-role.sh) | Gives the app its own database role, which owns no table and cannot rewrite the audit log |
-| [Caddyfile](Caddyfile) | HTTPS for `OWNHEALTH_DOMAIN`, open to the LAN and a Tailscale tailnet only |
+| [db/ow-role.sql](db/ow-role.sql) | Gives the Open Wearables sidecar (`wearables` profile) its own database, and a role that cannot open the health database |
+| [Caddyfile](Caddyfile) | HTTPS for `OWNHEALTH_DOMAIN`, open to the LAN and a Tailscale tailnet only, and the share listener that answers only the SMART Health Link routes |
 | [env.homelab.example](env.homelab.example) | The `.env` for the homelab compose |
 | [restic.env.example](restic.env.example) | The `restic.env`: the backup repository and its keys, read by the `admin` service only |
 | [restic/backup.sh](restic/backup.sh) | Nightly backup into a restic repository, with retention |
@@ -34,6 +35,7 @@ openssl rand -base64 48 | tr -d '\n' > secrets/secret_key
 openssl rand -base64 32 | tr -d '\n' > secrets/restic_password
 openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key     # seals inbox passwords and tokens
 chmod 644 secrets/*                           # the containers run as their own users; the folder stays 700
+mkdir -m 755 secrets/imaging                  # the app mounts it; the imaging profile's password goes here
 
 docker compose up -d
 docker compose run --rm admin restic init     # once, creates the backup repository
@@ -53,6 +55,19 @@ Open `https://<OWNHEALTH_DOMAIN>` and create the first account with a passkey. W
 
 **Your own reverse proxy.** If one already runs on the host, drop the `caddy` service, give `app` a port such as `127.0.0.1:8080:8080`, and point your proxy at it. Set `OWNHEALTH_BASE_URL` to the HTTPS address people open.
 
+## Sharing a summary
+
+A person can share a scoped summary with a doctor through a SMART Health Link: a link, or its QR code, plus an optional PIN. The doctor's viewer fetches the summary from your instance, so the link routes must answer from the internet while the rest of OwnHealth stays on your network. Sharing is off until you set it up.
+
+1. Caddy listens for the links on port 8090 inside its container. Compose publishes it on `127.0.0.1:8090` of the host, never on the network. Set `OWNHEALTH_SHARE_PORT` in `.env` if 8090 is taken on the host.
+2. Point a tunnel on the same host at the share port: 8090, or the `OWNHEALTH_SHARE_PORT` you set in `.env`. Compose reads `.env`, but your shell does not, so if you changed the port, run `export OWNHEALTH_SHARE_PORT=<port>` first. With Tailscale Funnel: `tailscale funnel --bg ${OWNHEALTH_SHARE_PORT:-8090}`. With Cloudflare Tunnel: a public hostname whose service is `http://localhost:<port>`, with that same port. Never point it at the app or at port 443. The tunnel must add its own hop to `X-Forwarded-For`, so the connecting address comes after any value the client sent. A tunnel that passes the client's header through unchanged lets a recipient write any address into the access log. Tailscale Funnel and Cloudflare Tunnel are safe. An ssh `-R` forward or a raw TCP tunnel is not.
+3. Set `OWNHEALTH_SHARE_URL` in `.env` to the https address the tunnel gives, such as `https://share.example.org`. The app refuses to start with an http address, except one on localhost, with a user name or password in it, and with anything after the host and port.
+4. `docker compose up -d`.
+
+What goes public: `POST /api/shl/<id>` (and its CORS preflight) and `GET /api/shl/<id>/file/<ticket>`, each rewritten to its canonical path. Every other path on the tunnel gets 404 from Caddy, including `/`, `/login`, `/api`, `/mcp` and `/dicom-web`. A link answers only while it is live and its creator may still share what it carries, and at most 60 times an hour. Locking a category, or narrowing a grant below it, revokes every link that carries it for good: lifting the lock brings none back. The access log the person reads names each recipient's address: Caddy keeps the address the tunnel forwards, and the app trusts that header only from the proxies in `OWNHEALTH_TRUSTED_PROXIES` (the compose network).
+
+Check it from outside: `curl -i https://share.example.org/login` answers 404, and a link the app makes opens in a SMART Health Links viewer. To turn sharing off again, remove `OWNHEALTH_SHARE_URL` and run `docker compose up -d`: every link and every file address already handed out then answers 404.
+
 ## Inboxes and OCR
 
 Since 0.3.0, documents and device data can arrive without an upload: a mailbox, a watched folder, Paperless-ngx, an iOS Shortcut, Health Auto Export, Nightscout. You add each one in the app, under **Inbox**. The setup for each is in [docs/recipes](../docs/recipes/README.md).
@@ -70,9 +85,30 @@ then `docker compose up -d`. The worker is the same program from the image varia
 
 Scans that arrived while OCR was off are not lost: each time the `ocr` worker starts with `OWNHEALTH_OCR=1`, it queues every scan and photo still waiting as a pending document for pages without text, and takes it off the pending list. Pages OCR then cannot read go back on it.
 
+## Wearables
+
+The `wearables` profile runs the Open Wearables sidecar (OW 0.11.0, pinned by digest), which holds the Oura, Whoop, Polar and Withings logins. It publishes no port and sends no usage data. Its own database lives on the same Postgres, and its role cannot open the health database.
+
+**Turn it on.** On an install made before 1.0, get the new files first: `git -C src pull && cp -r src/deploy/db deploy/`, then copy the new `src/deploy/compose.homelab.yaml` over `compose.yaml` and carry over any edits of your own. Then put OW's three secrets in `openwearables.env`, next to `.env`. Never put them in `.env`: every OwnHealth container reads that file.
+
+```sh
+for k in DB_PASSWORD SECRET_KEY ADMIN_PASSWORD; do echo "OPENWEARABLES_$k=$(openssl rand -hex 32)"; done > openwearables.env
+chmod 600 openwearables.env   # compose reads it, not the containers
+```
+
+Then add `wearables` to the `COMPOSE_PROFILES` line in `.env`: `COMPOSE_PROFILES=ocr,wearables` with OCR on, otherwise `COMPOSE_PROFILES=wearables`. A second `COMPOSE_PROFILES` line replaces the first, so OCR would stop. Start it with `docker compose up -d`.
+
+The one-shot `ow-db-init` creates the `openwearables` database and role, then OW migrates its tables. It starts only once the app is healthy. So if `openwearables.env` is missing, or a line in it is empty, only the sidecar stops: OwnHealth keeps running, and `docker compose logs ow-db-init ow-app` names the missing variable. Fix the file and run `docker compose up -d` again.
+
+**Change its database password.** Write the new `OPENWEARABLES_DB_PASSWORD` in `openwearables.env` and run `docker compose up -d`. It sets the new password on the role and recreates the sidecar with it.
+
+**Turn it off.** Take `wearables` out of `COMPOSE_PROFILES`, then `docker compose stop ow-app ow-worker ow-beat ow-redis`. An `up -d` without the profile leaves the running sidecar alone. Its database stays in the `ownhealth-pg` volume, so turning the profile on again keeps the vendor connections.
+
+**Restore.** `ownhealth backup` leaves OW's database out, because it is a cache of vendor data. After a restore onto new volumes, `docker compose up -d` with the profile on creates an empty one, and every vendor has to be connected again: the logins were only in that database.
+
 ## Monitoring the inboxes
 
-`GET /api/inboxes/health` lists every inbox you can see with its last run, its last successful sync, its last error, the failed runs in a row, and `stale`: switched on, polled, and no success for three poll intervals. `last_run_status` is `ok`, `partial` (some items were skipped or failed) or `error`, with `last_run_problems` and the first problem as `last_run_problem` (a code and a short message, never the content of a mail or document). A run in which every item failed counts as an error: the failed-runs count goes up and the last successful sync stays where it was. Add `?format=prometheus` for the Prometheus text format. Labels carry the source id and kind only, never names or error text:
+`GET /api/inboxes/health` lists every inbox you can see with its last run, its last successful sync, its last error, the failed runs in a row, and `stale`: switched on, polled, and no success for three poll intervals. `last_run_status` is `ok`, `partial` (some items were skipped or failed) or `error`, with `last_run_problems` and the first problem as `last_run_problem` (a code and a short message, never the content of a mail or document). A run in which every item failed counts as an error: the failed-runs count goes up and the last successful sync stays where it was. For a person, each row says `can_manage`: the Connections screen (v1.0) lists and reconnects only those rows. Only those rows also carry `created_at`, `poll_seconds`, `reconsent_needed_at` (the vendor refused the token, so someone must sign in again), `grant_expires_at`, `access_expires_at`, the connection's `server`, and `open_gaps`, the open sync-gap alerts filed on the source's profile. A viewer and a source token get none of them. Add `?format=prometheus` for the Prometheus text format. Labels carry the source id and kind only, never names or error text:
 
 ```text
 ownhealth_source_enabled{source="…",kind="email"} 1
@@ -123,9 +159,11 @@ A push inbox has no schedule, so OwnHealth never marks it stale; the second rule
 
 - `db.dump`: `pg_dump -Fc` of the database.
 - `blobs/`: the original documents and genome files, hard-linked from the data volume, so the staging copy costs no space.
-- `manifest.json`: app version, migrations, row count per table, the list of blob hashes and the `state_hash` of every profile.
+- `manifest.json`: app version, migrations, row count per table, the list of blob hashes, the `state_hash` of every profile, and the head of the audit log (`audit_chain`: the number and hash of its newest entry, and how far the hash chain holds).
 
-The dump, the row counts and the state hashes come from one database snapshot. A backup taken while someone imports a lab report is still consistent.
+The dump, the row counts, the state hashes and the audit head come from one database snapshot. A backup taken while someone imports a lab report is still consistent.
+
+**The audit anchor.** Each backup also writes the audit head to `audit-head.json`, outside the database: in `OWNHEALTH_ANCHOR_DIR`, or `/data/anchor` on the data volume by default. The file is replaced atomically and only its owner can read it. The backup refuses a folder or file that is a symlink, or that another user or group may write. The next backup first checks that this entry of the live log still has the same hash. Someone with the database owner's rights can edit an entry and hash the whole log again, so that the log checks out on its own; the anchor catches that. When the check fails, the backup stops before it writes anything and exits 1 with the entry it expected, and the audit page on MCP & access shows the mismatch. Find out what changed first. If the database was restored from an older backup by hand (`ownhealth restore` resets the anchor itself, see Restore), that explains it. Then move `audit-head.json` aside and keep it as evidence: the next backup anchors the log as it is now. The first backup finds no anchor, checks nothing, and writes one. Two backups never move the anchor at once, and a backup only moves it forward. A log the page shows as broken, or that cannot be checked at all, does not stop the backups: the manifest records it, and the anchor stays where it was. A broken log is never anchored again, so the anchor stays at the last head that held. It moves on only once the whole log holds again, for example after the changed entry is put back as it was. Moving `audit-head.json` aside does not change that: the next backup then acts as a first backup, and a first backup anchors only a log that holds.
 
 `restic/backup.sh` writes that directory, takes one restic snapshot of it, deletes the staging copy and applies retention (7 daily, 5 weekly, 12 monthly; set `OWNHEALTH_RESTIC_KEEP` to change it). restic encrypts and deduplicates, so a nightly run only uploads what changed.
 
@@ -147,7 +185,7 @@ A backup that was never restored counts as missing. `restic/restore-test.sh` pro
 
 1. restic restores the snapshot into `/data/backups/restore`.
 2. `ownhealth verify-restore` loads the dump into a scratch database `<db>_restore_check`.
-3. It compares the row count of every table with the manifest, hashes every blob again, rebuilds the state of every profile and compares each `state_hash` with the manifest.
+3. It compares the row count of every table with the manifest, hashes every blob again, rebuilds the state of every profile and compares each `state_hash` with the manifest. It checks the restored audit log too: it must end at the head the manifest recorded, and hold as far as it held then.
 4. It drops the scratch database and the restored files.
 
 It prints a JSON report and exits 1 on any difference.
@@ -179,7 +217,7 @@ docker compose up -d db
 docker compose up -d
 ```
 
-`restore.sh` runs in a one-off admin container before the app starts. It refuses a database that already has tables, so it cannot overwrite a running instance. After loading the dump and the blobs it rebuilds every profile's state and compares the `state_hash` with the manifest; the same hash means the restored data is the data you backed up. It exits 1 if anything differs.
+`restore.sh` runs in a one-off admin container before the app starts. It refuses a database that already has tables, so it cannot overwrite a running instance. After loading the dump and the blobs it rebuilds every profile's state and compares the `state_hash` with the manifest; the same hash means the restored data is the data you backed up. It exits 1 if anything differs. When everything matches and the backup's audit log held, it sets the audit anchor to the head of that backup (`audit_anchor` in its report), so the audit page and the next backup compare against the log as restored. It checks the anchor folder as a backup does: when the folder or file is a symlink, or another user or group may write it, the restore still succeeds but sets no anchor, and `audit_anchor_error` in its report says why.
 
 Restore with the OwnHealth version that made the backup (`app_version` in the manifest), then upgrade. A newer rule pack can change a `state_hash` on purpose, and the check would report it as a difference.
 
@@ -198,6 +236,8 @@ docker compose pull && docker compose up -d
 ```
 
 Migrations are forward-only and run at start, in the `admin` service, before the app comes up. To go back to an older version, restore the backup you took before the upgrade.
+
+**The imaging folder (from 1.0).** The new `compose.homelab.yaml` mounts `secrets/imaging` into the app, with the `imaging` profile on or off. Create the folder before the first `docker compose up -d` with that file: `mkdir -m 755 secrets/imaging`. If Docker started first, it made the folder as root: `sudo chown "$(id -u):$(id -g)" secrets/imaging && chmod 755 secrets/imaging`. To turn imaging on, follow the comment above the `orthanc` service in `compose.homelab.yaml`: it writes `secrets/imaging/orthanc_password` with mode 644.
 
 **To 0.4.0.** After the backup, set `admin` and `app` to `drumsergio/ownhealth:0.4.0` and `ocr` to `drumsergio/ownhealth:0.4.0-ocr`; nothing else in the compose files changes. Rule pack 0.2.0 moves every profile's `state_hash` once, so restore a backup made before the upgrade with 0.3.0, as above. For the same reason, `restore-test.sh` on a snapshot made before the upgrade reports every profile's `state_hash` as different; run `./deploy/restic/backup.sh` once after the upgrade, so the restore test checks a 0.4.0 snapshot. A household with a genome starts downloading NCBI's weekly ClinVar file (about 200 MB, no personal data in the request); turn it off in Settings, or set a local file path on a server without internet.
 
