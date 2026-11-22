@@ -852,3 +852,314 @@ async fn a_claim_twice_in_one_bundle_is_counted_once() -> R {
     assert_eq!(items[0].payload["count"], 2, "{}", items[0].payload);
     Ok(())
 }
+
+/// HIV, coded and labelled sensitive: auto-accepted as a sensitive condition.
+fn hiv() -> Value {
+    json!({"resourceType": "Condition", "id": "hiv",
+           "meta": {"versionId": "1", "security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "HIV"}]},
+           "clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+           "verificationStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}]},
+           "code": {"coding": [{"system": "http://snomed.info/sct", "code": "86406008", "display": "Human immunodeficiency virus infection"}]},
+           "subject": {"reference": "Patient/alex-rivera"}, "onsetDateTime": "2019-04"})
+}
+
+#[tokio::test]
+async fn a_daily_pull_of_a_sensitive_fact_stays_sensitive() -> R {
+    // day 2 brings the same condition in a new envelope: the ledger skips it, and the file still holds it
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let (first, day1) = pull(&mut tx, &env.blobs, &fam, source, &searchset("a", vec![hiv()])).await?;
+    let (second, day2) = pull(&mut tx, &env.blobs, &fam, source, &searchset("b", vec![hiv()])).await?;
+    assert_eq!((day1.new, day2.new, day2.duplicate), (1, 0, 1), "{day1:?} {day2:?}");
+    use ownhealth_core::documents::document_is_sensitive;
+    assert!(document_is_sensitive(&mut tx, first).await?);
+    assert!(
+        document_is_sensitive(&mut tx, second).await?,
+        "the second bundle holds the HIV condition too"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pull_of_a_sensitive_fact_a_file_holds_is_sensitive() -> R {
+    // the file's fact holds the condition, so the pull imports nothing; its bundle holds it all the same
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let file = store_doc(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        "alex",
+        &searchset("file", vec![hiv()]),
+        "ips.json",
+        JSON,
+    )
+    .await?;
+    import_fhir(&mut tx, &env.blobs, file).await?;
+    let (doc, got) = pull(&mut tx, &env.blobs, &fam, source, &searchset("a", vec![hiv()])).await?;
+    assert_eq!((got.new, got.duplicate), (0, 1), "{got:?}");
+    use ownhealth_core::documents::document_is_sensitive;
+    assert!(document_is_sensitive(&mut tx, file).await?);
+    assert!(
+        document_is_sensitive(&mut tx, doc).await?,
+        "the pull bundle holds the HIV condition"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_context_resource_labelled_sensitive_makes_the_pull_sensitive() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let report = json!({"resourceType": "DiagnosticReport", "id": "dr-1", "status": "final",
+        "meta": {"versionId": "1", "security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "HIV"}]},
+        "code": {"text": "Carga viral VIH"}, "subject": {"reference": "Patient/alex-rivera"},
+        "conclusion": "VIH positivo, carga viral detectable"});
+    let (doc, got) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("a", vec![report, htn("1", "2015-03")]),
+    )
+    .await?;
+    assert_eq!((got.new, got.context), (1, 2), "{got:?}");
+    use ownhealth_core::documents::document_is_sensitive;
+    assert!(document_is_sensitive(&mut tx, doc).await?, "the report is labelled HIV");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pull_of_plain_facts_stays_readable_day_after_day() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let (first, _) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("a", vec![htn("1", "2015-03")]),
+    )
+    .await?;
+    let (second, day2) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("b", vec![htn("1", "2015-03")]),
+    )
+    .await?;
+    assert_eq!(day2.duplicate, 1, "{day2:?}");
+    use ownhealth_core::documents::document_is_sensitive;
+    assert!(!document_is_sensitive(&mut tx, first).await?);
+    assert!(!document_is_sensitive(&mut tx, second).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unprojected_new_version_held_back_by_an_open_older_one_arrives_after_the_dismiss() -> R {
+    // a mapped type that does not project goes through the pending() check of import_one, not through
+    // record()'s dedupe
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let mut v2 = ldl_pending();
+    v2["meta"]["versionId"] = json!("2");
+    v2["dataAbsentReason"] = json!({"text": "Muestra insuficiente"});
+    pull(&mut tx, &env.blobs, &fam, source, &searchset("a", vec![ldl_pending()])).await?;
+    let held = open_items(&mut tx, p).await?;
+    assert_eq!(kinds(&held), [pair("fhir_unmapped", "Observation")]);
+    let (_, waiting) = pull(&mut tx, &env.blobs, &fam, source, &searchset("b", vec![v2.clone()])).await?;
+    assert_eq!(waiting.summary.queued, 0, "{waiting:?}");
+    review::dismiss(&mut tx, held[0].id, fam.user("alex"), Some("old")).await?;
+    let (_, after) = pull(&mut tx, &env.blobs, &fam, source, &searchset("c", vec![v2.clone()])).await?;
+    assert_eq!((after.new, after.summary.queued), (1, 1), "{after:?}");
+    let (_, later) = pull(&mut tx, &env.blobs, &fam, source, &searchset("d", vec![v2])).await?;
+    assert_eq!((later.new, later.duplicate), (0, 1), "{later:?}");
+    Ok(())
+}
+
+/// A blood pressure panel in a unit nobody knows: both components wait in review.
+fn bp(version: &str) -> Value {
+    json!({"resourceType": "Observation", "id": "bp-1", "meta": {"versionId": version}, "status": "final",
+    "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+    "code": {"coding": [{"system": "http://loinc.org", "code": "85354-9", "display": "Blood pressure panel"}]},
+    "subject": {"reference": "Patient/alex-rivera"}, "effectiveDateTime": "2026-02-01T09:00:00Z",
+    "component": [
+      {"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6", "display": "Systolic"}]}, "valueQuantity": {"value": 128, "unit": "zorks", "code": "zorks"}},
+      {"code": {"coding": [{"system": "http://loinc.org", "code": "8462-4", "display": "Diastolic"}]}, "valueQuantity": {"value": 82, "unit": "zorks", "code": "zorks"}}
+    ]})
+}
+
+fn diastolic(items: &[ReviewItem]) -> Vec<Uuid> {
+    items
+        .iter()
+        .filter(|i| {
+            i.payload["src"]["import_ref"]
+                .as_str()
+                .unwrap_or("")
+                .contains("#component1")
+        })
+        .map(|i| i.id)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_dismissed_component_stays_gone_while_its_sibling_waits() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let (_, first) = pull(&mut tx, &env.blobs, &fam, source, &searchset("a", vec![bp("1")])).await?;
+    assert_eq!(first.summary.queued, 2, "{first:?}");
+    // the person keeps the systolic open and dismisses the diastolic
+    for id in diastolic(&open_items(&mut tx, p).await?) {
+        review::dismiss(&mut tx, id, fam.user("alex"), Some("seen")).await?;
+    }
+    // version 2 brings the diastolic once (a new version); the next pulls bring nothing
+    let mut queued = vec![];
+    for page in ["b", "c", "d"] {
+        let (_, got) = pull(&mut tx, &env.blobs, &fam, source, &searchset(page, vec![bp("2")])).await?;
+        queued.push(got.summary.queued);
+        for id in diastolic(&open_items(&mut tx, p).await?) {
+            review::dismiss(&mut tx, id, fam.user("alex"), Some("seen")).await?;
+        }
+    }
+    assert_eq!(queued, [1, 0, 0], "a dismissed component comes back every pull");
+    // the person dismisses the old systolic: its version 2, held back until now, comes in once
+    for i in open_items(&mut tx, p).await? {
+        review::dismiss(&mut tx, i.id, fam.user("alex"), Some("old")).await?;
+    }
+    let (_, freed) = pull(&mut tx, &env.blobs, &fam, source, &searchset("e", vec![bp("2")])).await?;
+    let open = open_items(&mut tx, p).await?;
+    assert_eq!((freed.new, freed.summary.queued, open.len()), (1, 1, 1), "{freed:?}");
+    assert!(
+        open[0].payload["src"]["import_ref"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("bp-1#component0")
+    );
+    let (_, later) = pull(&mut tx, &env.blobs, &fam, source, &searchset("f", vec![bp("2")])).await?;
+    assert_eq!(
+        (later.new, later.duplicate, later.summary.queued),
+        (0, 1, 0),
+        "{later:?}"
+    );
+    Ok(())
+}
+
+/// A prescription that names its medicine through a Medication resource.
+fn prescription() -> Value {
+    json!({"resourceType": "MedicationRequest", "id": "rx-1", "meta": {"versionId": "1"}, "status": "active",
+           "intent": "order", "medicationReference": {"reference": "Medication/med-1"},
+           "subject": {"reference": "Patient/alex-rivera"}, "authoredOn": "2026-01-10"})
+}
+
+fn medicine() -> Value {
+    json!({"resourceType": "Medication", "id": "med-1",
+           "code": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "314076", "display": "Lisinopril 10 MG Oral Tablet"}]}})
+}
+
+#[tokio::test]
+async fn a_prescription_whose_medicine_was_missing_imports_once_the_medicine_comes() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    // the server left the Medication out: nothing names the medicine, the request waits as unmapped
+    let (_, first) = pull(&mut tx, &env.blobs, &fam, source, &searchset("a", vec![prescription()])).await?;
+    assert_eq!((first.new, first.summary.queued), (1, 1), "{first:?}");
+    let held = open_items(&mut tx, p).await?;
+    assert_eq!(kinds(&held), [pair("fhir_unmapped", "MedicationRequest")]);
+    review::dismiss(&mut tx, held[0].id, fam.user("alex"), Some("no medicine named")).await?;
+    // the same request, still without its Medication: nothing new
+    let (_, again) = pull(&mut tx, &env.blobs, &fam, source, &searchset("b", vec![prescription()])).await?;
+    assert_eq!(
+        (again.new, again.duplicate, again.summary.queued),
+        (0, 1, 0),
+        "{again:?}"
+    );
+    // the same request with its Medication: it maps now, and imports once
+    let (_, resolved) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("c", vec![prescription(), medicine()]),
+    )
+    .await?;
+    assert_eq!(resolved.new, 1, "{resolved:?}");
+    let meds = list_records(&mut tx, "medication", p, None, true).await?.len() + open_items(&mut tx, p).await?.len();
+    assert_eq!(meds, 1, "one medication, accepted or held");
+    let (_, later) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("d", vec![prescription(), medicine()]),
+    )
+    .await?;
+    assert_eq!((later.new, later.duplicate), (0, 1), "{later:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_relative_tagged_sensitive_by_our_own_export_keeps_every_pull_of_it_sensitive() -> R {
+    // our export writes the exact tag in meta.tag, with no HL7 label: only the mapped relative says it
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let mother = json!({"resourceType": "FamilyMemberHistory", "id": "mth", "meta": {"versionId": "1",
+            "tag": [{"system": "urn:ownhealth:sensitivity", "code": "reproductive"}]},
+        "status": "completed", "patient": {"reference": "Patient/alex-rivera"},
+        "relationship": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v3-RoleCode", "code": "MTH"}]},
+        "condition": [{"code": {"text": "Endometriosis"}}]});
+    let (first, _) = pull(&mut tx, &env.blobs, &fam, source, &searchset("a", vec![mother.clone()])).await?;
+    let (second, again) = pull(&mut tx, &env.blobs, &fam, source, &searchset("b", vec![mother])).await?;
+    assert_eq!(again.duplicate, 1, "{again:?}");
+    use ownhealth_core::documents::document_is_sensitive;
+    assert!(document_is_sensitive(&mut tx, first).await?);
+    assert!(
+        document_is_sensitive(&mut tx, second).await?,
+        "the second bundle holds the relative too"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_daily_pull_of_a_labelled_result_stays_sensitive() -> R {
+    // an Observation's tags are its meta.security labels: the ledger skips it on day 2
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let load = json!({"resourceType": "Observation", "id": "vl-1", "status": "final",
+        "meta": {"versionId": "1", "security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "HIV"}]},
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "20447-9", "display": "HIV 1 RNA [#/volume] (viral load)"}]},
+        "subject": {"reference": "Patient/alex-rivera"}, "effectiveDateTime": "2026-02-01T09:00:00Z",
+        "valueQuantity": {"value": 40, "unit": "copies/mL", "system": "http://unitsofmeasure.org", "code": "{copies}/mL"}});
+    let (first, _) = pull(&mut tx, &env.blobs, &fam, source, &searchset("a", vec![load.clone()])).await?;
+    let (second, again) = pull(&mut tx, &env.blobs, &fam, source, &searchset("b", vec![load])).await?;
+    assert_eq!(again.duplicate, 1, "{again:?}");
+    use ownhealth_core::documents::document_is_sensitive;
+    assert!(document_is_sensitive(&mut tx, first).await?);
+    assert!(
+        document_is_sensitive(&mut tx, second).await?,
+        "the second bundle holds the result too"
+    );
+    Ok(())
+}

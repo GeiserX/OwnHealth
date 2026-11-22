@@ -762,3 +762,67 @@ async fn a_visit_with_a_rejected_end_never_exports_it() -> R {
     assert_eq!(visits[0]["fhir"]["id"], "alex-enc-1"); // the rest of the received JSON is kept
     Ok(())
 }
+
+#[tokio::test]
+async fn a_held_sensitive_record_or_relative_makes_its_file_sensitive() -> R {
+    // no Patient in the file, so nothing auto-accepts: the labelled condition and relative wait in
+    // review, and their files hold them all the same
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let bundle = |id: &str, r: Value| {
+        serde_json::to_vec(&json!({"resourceType": "Bundle", "id": id, "type": "collection",
+            "entry": [{"fullUrl": format!("urn:uuid:{id}"), "resource": r}]}))
+        .unwrap_or_default()
+    };
+    let hiv = json!({"resourceType": "Condition", "id": "hiv",
+        "meta": {"security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "HIV"}]},
+        "code": {"coding": [{"system": "http://snomed.info/sct", "code": "86406008", "display": "Human immunodeficiency virus infection"}]},
+        "subject": {"reference": "Patient/alex-rivera"}, "onsetDateTime": "2019-04"});
+    let mother = json!({"resourceType": "FamilyMemberHistory", "id": "mth", "status": "completed",
+        "meta": {"security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "PSY"}]},
+        "patient": {"reference": "Patient/alex-rivera"},
+        "relationship": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v3-RoleCode", "code": "MTH"}]},
+        "condition": [{"code": {"text": "Depresión"}}]});
+    let plain = json!({"resourceType": "Condition", "id": "htn",
+        "code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}]},
+        "subject": {"reference": "Patient/alex-rivera"}, "onsetDateTime": "2015-03"});
+    use ownhealth_core::documents::document_is_sensitive;
+    let mut docs = vec![];
+    for (name, r) in [("hiv", hiv), ("mth", mother), ("htn", plain)] {
+        let doc = store_doc(
+            &mut tx,
+            &env.blobs,
+            &fam,
+            "alex",
+            &bundle(name, r),
+            &format!("{name}.json"),
+            JSON,
+        )
+        .await?;
+        let s = import_fhir(&mut tx, &env.blobs, doc).await?;
+        assert_eq!((s.accepted, s.queued), (0, 1), "{name}: {s:?}");
+        docs.push(doc);
+    }
+    let held = review::list_items(
+        &mut tx,
+        &ItemQuery {
+            profile_ids: Some(vec![p]),
+            status: Some("open".into()),
+            ..ItemQuery::default()
+        },
+    )
+    .await?;
+    assert_eq!(held.len(), 3);
+    assert!(document_is_sensitive(&mut tx, docs[0]).await?, "a held HIV condition");
+    assert!(
+        document_is_sensitive(&mut tx, docs[1]).await?,
+        "a held relative labelled PSY"
+    );
+    assert!(
+        !document_is_sensitive(&mut tx, docs[2]).await?,
+        "a held plain condition"
+    );
+    Ok(())
+}

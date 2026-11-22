@@ -339,7 +339,7 @@ SMART on FHIR, Blue Button and Dexcom share one OAuth core. Each registers its k
 - **Refresh is atomic.** One transaction locks the source row `FOR UPDATE`, posts the refresh, stores the new refresh token, and commits. Only then is the access token used. A reply with no new refresh token keeps the old one. A rejected token (`invalid_grant`) sets `reconsent_needed_at`, and a reconnect clears it.
 - **Expiry is visible.** `grant_expires_at`, `access_expires_at` and `reconsent_needed_at` on `source` feed the Connections screen.
 - **Delete revokes first.** Before a profile delete, the route calls each vendor's revocation endpoint once, best effort. A failure is audited and shown with the vendor's own revoke page. The token is deleted either way.
-- **One bundle per pull.** Every pull stores what the server sent as one profile-owned blob before it imports anything. Resources are deduped in `source_item` as `<type>/<id>@<versionId or sha>`. Resource types we do not map become one grouped review item per run and type, with a count, never one item each.
+- **One bundle per pull.** Every pull stores what the server sent as one profile-owned blob before it imports anything. Resources are deduped in `source_item` as `<type>/<id>@<versionId or sha>`, plus the referenced Medication's sha (or `unresolved`) for a medicine named only by reference. Resource types we do not map become one grouped review item per run and type, with a count, never one item each.
 
 ### 6.3 Contract rules
 

@@ -16,8 +16,9 @@
 //!   review with reason `conflict`, and accepting it supersedes the old version. "The same resource"
 //!   means the same type/id from the same issuer (`issuer_key`).
 //! - A connector pull ([`import_pull`]) first asks the source's `source_item` ledger, keyed
-//!   `<type>/<id>@<versionId or sha>`, and skips what the source sent before; its unmapped resources
-//!   become one `fhir_unmapped_summary` item per type (connectors.md 6.2).
+//!   `<type>/<id>@<versionId or sha>` (and the Medication's sha for a medicine named only by
+//!   reference), and skips what the source sent before; its unmapped resources become one
+//!   `fhir_unmapped_summary` item per type (connectors.md 6.2).
 
 pub mod mapping;
 pub mod synthetic;
@@ -274,14 +275,16 @@ struct Pull<'a> {
     unmapped: BTreeMap<String, Unmapped>,
 }
 
-/// What a run did with each entry, counted once each, and how many of its resources OwnHealth does
-/// not project (no table, not readable, or skipped by the mapper), duplicates included.
+/// What a run did with each entry, counted once each; how many of its resources OwnHealth does not
+/// project (no table, not readable, or skipped by the mapper); and how many are sensitive, whatever
+/// the run did with them. Both counts include duplicates.
 #[derive(Debug, Clone, Copy, Default)]
 struct Tally {
     new: i64,
     duplicate: i64,
     context: i64,
     unprojected: i64,
+    sensitive: i64,
 }
 
 #[derive(Default)]
@@ -312,13 +315,20 @@ enum Held {
 ///   in a pull that still holds it, is skipped as a duplicate, so the next pull never brings back what
 ///   a person dismissed, and a new version is imported once. The ledger names this pull only for what
 ///   it holds: a resource that a fact or an open item of another import holds is left out, and comes
-///   in on a later pull once that one is gone.
+///   in on a later pull once that one is gone. An Observation is keyed row by row, so each component
+///   of a panel follows that rule on its own. A medicine named only by `medicationReference` is
+///   keyed with the Medication it points at, so a pull that first brings that Medication imports it
+///   once.
 /// - Resources of a type with no table become one `fhir_unmapped_summary` item per type, with their
 ///   count, the bundle as its document and a sample of their refs, in place of one item each. Their
 ///   ledger rows are written after that item. A mapped type that does not project (an Observation
 ///   without a value) stays one `fhir_unmapped` item with its note, as from a file.
 /// - A bundle that holds resources OwnHealth does not project is flagged `unprojected`: nothing read
 ///   them for sensitivity, so `documents::document_is_sensitive` keeps the file behind read:sensitive.
+///   A bundle that holds a sensitive resource is flagged `sensitive` the same way, read from every
+///   entry before the ledger or the dedupe can skip it: the mapped value's sensitivity, or a
+///   sensitive `meta.security` label on any resource, context included. A daily pull of the same
+///   sensitive fact imports nothing new, and its file holds that fact all the same.
 ///
 /// The caller owns the transaction (RUST-CONTRACTS.md), and runs one pull per source at a time: the
 /// ledger is read, then written, with no lock in between. The `source.poll` job's dedupe key gives
@@ -370,12 +380,17 @@ pub async fn import_pull(
     };
     let (summary, identity, tally) =
         import_with(conn, &entries, &profile, document_id, &key, None, &label, Some(pull)).await?;
-    if tally.unprojected > 0 {
-        sqlx::query("update document set flags = flags || jsonb_build_object('unprojected', $1::bigint) where id = $2")
-            .bind(tally.unprojected)
-            .bind(document_id)
-            .execute(&mut *conn)
-            .await?;
+    if tally.unprojected > 0 || tally.sensitive > 0 {
+        let count = |n: i64| (n > 0).then_some(n);
+        sqlx::query(
+            "update document set flags = flags || jsonb_strip_nulls(jsonb_build_object('unprojected', $1::bigint, \
+             'sensitive', $2::bigint)) where id = $3",
+        )
+        .bind(count(tally.unprojected))
+        .bind(count(tally.sensitive))
+        .bind(document_id)
+        .execute(&mut *conn)
+        .await?;
     }
     if !imported_before {
         mark_imported(conn, document_id, &summary, Some(&identity)).await?;
@@ -759,15 +774,22 @@ impl Run<'_> {
     async fn one(&mut self, conn: &mut PgConnection, e: &Entry) -> Result<()> {
         let r = &e.resource;
         let rtype = e.rtype();
+        let pulled = self.pull.as_ref().map(|p| (p.source_id, p.sha.to_string()));
+        // a pull's bundle holds every entry as received, whatever this run does with it below
+        let labelled = pulled.is_some() && !mapping::sensitivity(r).is_empty();
         if is_context(rtype) {
             self.tally.context += 1;
+            self.tally.sensitive += i64::from(labelled);
             return Ok(()); // context for the others; kept in the stored bundle
         }
         let m = self.map(e);
-        let Some((source_id, sha)) = self.pull.as_ref().map(|p| (p.source_id, p.sha.to_string())) else {
+        let Some((source_id, sha)) = pulled else {
             self.import_one(&mut *conn, e, m, "").await?;
             return Ok(());
         };
+        if labelled || mapped_sensitive(m.as_ref()) {
+            self.tally.sensitive += 1;
+        }
         if matches!(m, None | Some(Mapped::Unmapped(_) | Mapped::Skip(_))) {
             // the bundle holds it as received, and nothing read it for sensitivity
             self.tally.unprojected += 1;
@@ -775,7 +797,11 @@ impl Run<'_> {
         // A pull asks the source's ledger first: a resource it sent before, in this version, in a
         // pull that still holds it, is not imported again, whatever a person did with it since. One
         // this run already grouped (twice in the bundle) waits for its summary's ledger row.
-        let key = pull_key(r);
+        let key = self.ledger_key(r);
+        let m = match m {
+            Some(Mapped::Observations(rows)) => return self.pull_rows(conn, e, rows, &key, source_id, &sha).await,
+            other => other,
+        };
         let grouped = self
             .pull
             .as_ref()
@@ -802,6 +828,71 @@ impl Run<'_> {
             Held::Elsewhere => self.tally.duplicate += 1,
         }
         Ok(())
+    }
+
+    /// A pull's Observation, row by row: each row (the value, or a panel's component) has its own
+    /// ledger key, `<key><suffix>` (`#component1`). A component a person dismissed stays gone while a
+    /// sibling still waits in review, and a component an open item or another import's fact holds
+    /// gets no row, so it comes in once that one is gone. A single value keeps the resource's key.
+    async fn pull_rows(
+        &mut self,
+        conn: &mut PgConnection,
+        e: &Entry,
+        rows: Vec<mapping::ObsRow>,
+        key: &str,
+        source_id: Uuid,
+        sha: &str,
+    ) -> Result<()> {
+        let tail = format!("{}/{}", e.rtype(), resource_id(&e.resource));
+        let reference = format!("{}/{tail}", self.bundle_key);
+        let mut here = false;
+        for row in rows {
+            let row_key = format!("{key}{}", row.suffix);
+            if ownhealth_core::dedup::pulled_before(&mut *conn, source_id, &row_key, self.profile.id).await? {
+                self.skipped("duplicate");
+                continue;
+            }
+            let (t, rf) = (format!("{tail}{}", row.suffix), format!("{reference}{}", row.suffix));
+            if self.observation(&mut *conn, e, &row, &t, &rf).await? {
+                here = true;
+                ownhealth_core::dedup::record_pulled(
+                    &mut *conn,
+                    source_id,
+                    &row_key,
+                    sha,
+                    self.document_id,
+                    self.profile.id,
+                )
+                .await?;
+            }
+        }
+        if here {
+            self.tally.new += 1;
+        } else {
+            self.tally.duplicate += 1;
+        }
+        Ok(())
+    }
+
+    /// [`pull_key`], plus what the mapping read besides the resource. A medication named only by
+    /// `medicationReference` maps from the Medication it points at, so its key carries that
+    /// Medication's [`content_sha`], or `+unresolved` when the bundle does not hold it: a later pull
+    /// that brings the Medication imports the request once, and an unchanged one stays a duplicate.
+    fn ledger_key(&self, r: &Value) -> String {
+        let key = pull_key(r);
+        let by_reference = matches!(
+            r.get("resourceType").and_then(Value::as_str),
+            Some("MedicationStatement" | "MedicationRequest")
+        ) && r.get("medicationCodeableConcept").is_none_or(Value::is_null)
+            && truthy(r.get("medicationReference"));
+        if !by_reference {
+            return key;
+        }
+        let reference = r["medicationReference"].get("reference").and_then(Value::as_str);
+        match self.index.resolve(reference) {
+            Some(medication) => format!("{key}+{}", content_sha(medication)),
+            None => format!("{key}+unresolved"),
+        }
     }
 
     /// The mapper's reading of a resource; None for a type with no table.
@@ -851,6 +942,7 @@ impl Run<'_> {
                 self.skipped(&format!("skip:{reason}"));
                 Held::Here
             }
+            // a pull imports Observations row by row instead ([`Self::pull_rows`])
             Some(Mapped::Observations(rows)) => {
                 let mut here = true;
                 for row in rows {
@@ -1112,6 +1204,16 @@ impl Run<'_> {
         self.summary.queued += 1;
         self.count(&decision.reasons);
         Ok(true)
+    }
+}
+
+/// Whether the mapper read `m` as sensitive: a record's or a relative's own tags. An Observation's
+/// tags are its resource's `meta.security`, which [`Run::one`] reads for every entry.
+fn mapped_sensitive(m: Option<&Mapped>) -> bool {
+    match m {
+        Some(Mapped::Record { record, .. }) => !record.common().sensitivity.is_empty(),
+        Some(Mapped::Family { member, .. }) => !member.sensitivity.is_empty(),
+        _ => false,
     }
 }
 

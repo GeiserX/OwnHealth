@@ -221,7 +221,13 @@ fn hex(b: &[u8]) -> String {
 /// prevention::evidence applies.
 const EVIDENCE_AT: &str = "coalesce(d.collected_at, d.reported_at)";
 
-/// `GET /profiles/{p}/documents` for a resolved caller.
+/// What a document a FHIR import read carries: the issuer of its resources, written by every FHIR
+/// file import and connector pull. An Apple Health export has its own tile.
+const FHIR_IMPORT: &str = "(d.flags->'fhir_issuer' is not null and d.flags->'apple_health' is null)";
+
+/// `GET /profiles/{p}/documents` for a resolved caller. `fhir_newest` (`latest=fhir`) lists only the
+/// documents a FHIR import read, the newest stored first: a connector pull carries no date, so the
+/// evidence order would put it behind every dated document.
 pub async fn list_for(
     conn: &mut PgConnection,
     principal: &Principal,
@@ -229,6 +235,7 @@ pub async fn list_for(
     q: Option<&str>,
     doc_type: Option<&str>,
     limit: i64,
+    fhir_newest: bool,
 ) -> Result<Value, ApiError> {
     let r = match Uuid::parse_str(p) {
         Ok(id) => ProfileRef::Id(id),
@@ -255,6 +262,9 @@ pub async fn list_for(
         wh.push("d.doc_type is distinct from 'lab_report'".into());
     }
     wh.push("($3::text is null or d.doc_type = $3)".into());
+    if fhir_newest {
+        wh.push(FHIR_IMPORT.into());
+    }
     if q.is_some() {
         // page text is searchable only with read:documents_text; the filename always is
         wh.push(if with_text {
@@ -278,10 +288,15 @@ pub async fn list_for(
     };
     // one rule for the evidence day and the order, so the newest evidence comes first and a report
     // dated only by its report date is never cut by the limit behind older collection-dated files
+    let order = if fhir_newest {
+        "d.created_at desc, d.id".to_string()
+    } else {
+        format!("{EVIDENCE_AT} desc nulls last, d.created_at desc")
+    };
     let sql = format!(
         "select {COLS}, {EVIDENCE_AT}::date as evidence_day{snippet} \
          from document d where {} and ($4::text is null or true) \
-         order by {EVIDENCE_AT} desc nulls last, d.created_at desc limit $2",
+         order by {order} limit $2",
         wh.join(" and ")
     );
     let rows: Vec<PgRow> = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -332,10 +347,20 @@ async fn list_documents(
     let mut e = Errors::new();
     let q = e.str_max(&qs, "q", 200);
     let limit = e.int("query", &qs, "limit", 100, Some(1), Some(500));
+    let latest = param(&qs, "latest");
+    if let Some(v) = latest.filter(|v| *v != "fhir") {
+        e.push(
+            "literal_error",
+            vec![json!("query"), json!("latest")],
+            "Input should be 'fhir'",
+            json!(v),
+            Some(json!({"expected": "'fhir'"})),
+        );
+    }
     e.done()?;
     let doc_type = param(&qs, "type");
     let mut tx = rt.pool.begin().await?;
-    let out = list_for(&mut tx, &principal, &p, q, doc_type, limit).await?;
+    let out = list_for(&mut tx, &principal, &p, q, doc_type, limit, latest.is_some()).await?;
     tx.commit().await?;
     Ok(Json(out))
 }
