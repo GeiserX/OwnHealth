@@ -11,13 +11,14 @@
 //! ```
 //!
 //! `load` refuses a file without a version, a row without an https `cite`, a template missing the
-//! text of a registry language (`ownhealth_core::langs::LANGS`), and a template the wording lint
-//! flags. Area loaders add their own checks on top.
+//! text of a registry language (`ownhealth_core::langs::LANGS`), a language-suffixed family
+//! (`short_en`) missing one of its registry texts (`short_es`), and a template the wording lint flags.
+//! Area loaders add their own checks on top.
 //!
 //! A language key is any code of `ownhealth_core::langs::LOCALES`, so the planned `de`, `fr`, `ca`,
 //! `it` and `pt` count too, and so does a key that ends in `_<code>`. A data key such as `ca`
 //! (calcium) or `pt` (prothrombin time), or one like `ratio_it` or `dose_pt`, reads as a language: its
-//! mapping becomes a template that must carry every registry language, and the file is refused. Name
+//! mapping must carry every registry language (`es`, or `ratio_es`), and the file is refused. Name
 //! such keys another way (`calcium`, `pt_inr`).
 
 use std::collections::BTreeSet;
@@ -86,6 +87,9 @@ pub fn load_bytes(path: &Path, bytes: &[u8]) -> Result<CitedFile, CitedError> {
         Some(_) => return Err(CitedError(format!("{name}: `rows` is not a list"))),
     };
     check_templates(&doc, "$", &name.to_string())?;
+    if let Some(gap) = missing_langs(&doc, &LANGS).into_iter().next() {
+        return Err(CitedError(format!("{name}: {gap}")));
+    }
     Ok(CitedFile {
         version,
         sha256: hex::encode(Sha256::digest(bytes)),
@@ -226,4 +230,43 @@ fn check_templates(v: &Value, path: &str, name: &str) -> Result<(), CitedError> 
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_yaml(body: &str) -> Result<CitedFile, CitedError> {
+        load_bytes(Path::new("t.yaml"), body.as_bytes())
+    }
+
+    /// A `_<code>` key makes its mapping a template family: one text short of the registry and
+    /// `load` refuses the file, as a bare code does.
+    #[test]
+    fn load_refuses_a_suffixed_key_without_every_registry_language() {
+        let head = "version: \"t 0.1.0\"\n";
+        assert!(
+            load_yaml(&format!(
+                "{head}templates:\n  a: {{short_en: Text., short_es: Texto.}}\n"
+            ))
+            .is_ok()
+        );
+        for (body, want) in [
+            (
+                "templates:\n  a: {short_en: Text.}\n",
+                "t.yaml: $.templates.a has no `short_es` text",
+            ),
+            ("ratio_it: 3\n", "t.yaml: $ has no `ratio_es` text"),
+            ("dose_pt: Texto.\n", "t.yaml: $ has no `dose_es` text"),
+            (
+                "templates:\n  a: {ca: Calcium.}\n",
+                "t.yaml: $.templates.a has no `es` text",
+            ),
+        ] {
+            match load_yaml(&format!("{head}{body}")) {
+                Ok(_) => panic!("{body:?} loaded"),
+                Err(e) => assert_eq!(e.to_string(), want, "{body:?}"),
+            }
+        }
+    }
 }
