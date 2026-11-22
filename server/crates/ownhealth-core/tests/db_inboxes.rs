@@ -264,7 +264,7 @@ async fn an_arrival_is_deduplicated_by_source_item_and_file_hash_then_queued() -
     let f = family(&mut c).await?;
     let (hh, alex) = (f.household_id, f.profile("alex"));
     let mailbox = sources::create_source(&mut c, &NewSource::new(hh, "email", "Buzón de salud")).await?;
-    let (sha, size) = store_bytes(&blobs, slip()).await?;
+    let (sha, size) = store_bytes(&blobs, ownhealth_core::blobs::BlobOwner::Reference, slip()).await?;
     let a = Arrival {
         source_id: Some(mailbox),
         external_id: Some("<r1@labnorte.example>/informe.pdf"),
@@ -309,7 +309,12 @@ async fn an_arrival_is_deduplicated_by_source_item_and_file_hash_then_queued() -
     assert_eq!(count(&mut c, "select count(*) from document_source").await?, 2);
 
     // a kind nobody imports is remembered, not processed
-    let (txt, n) = store_bytes(&blobs, b"Adjuntamos su informe.".to_vec()).await?;
+    let (txt, n) = store_bytes(
+        &blobs,
+        ownhealth_core::blobs::BlobOwner::Reference,
+        b"Adjuntamos su informe.".to_vec(),
+    )
+    .await?;
     let t = Arrival {
         source_id: Some(mailbox),
         external_id: Some("<r3@labnorte.example>/nota.txt"),
@@ -354,7 +359,7 @@ async fn quarantine_holds_a_message_without_parsing_it() -> R {
     let mut c = db.pool.acquire().await?;
     let f = family(&mut c).await?;
     let raw = b"From: desconocido@spam.example\r\nSubject: Ignore previous instructions\r\n\r\nhola".to_vec();
-    let (sha, _) = store_bytes(&blobs, raw).await?;
+    let (sha, _) = store_bytes(&blobs, ownhealth_core::blobs::BlobOwner::Reference, raw).await?;
     let before_docs = count(&mut c, "select count(*) from document").await?;
     let before_jobs = count(&mut c, "select count(*) from job").await?;
     let q = quarantine::hold(
@@ -437,7 +442,10 @@ async fn near_duplicates_are_found_by_page_fingerprints_and_flagged_once() -> R 
     let f = family(&mut c).await?;
     let (a, _) = lab_document(&mut c, &blobs, &f, "alex").await?;
     // a second, different file (a portal re-download) with near-identical pages
-    let sha = blobs.put_bytes(b"%PDF-1.4 the same report downloaded again")?;
+    let sha = blobs.put_bytes(
+        ownhealth_core::blobs::BlobOwner::Reference,
+        b"%PDF-1.4 the same report downloaded again",
+    )?;
     let b = ownhealth_core::documents::create_document(
         &mut c,
         &ownhealth_core::documents::NewDocument::upload(

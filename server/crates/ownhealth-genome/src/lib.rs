@@ -238,7 +238,12 @@ fn demo_imported_at() -> Option<DateTime<Utc>> {
 /// example, and Lucía's facts to show the minor rule. All synthetic.
 async fn demo_seed(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result<()> {
     let raw = synthetic::alex_raw_files()?;
-    let (alex, attachments) = synthetic::with_files(&synthetic::alex_facts(), &ctx.blobs, &raw)?;
+    let (alex, attachments) = synthetic::with_files(
+        &synthetic::alex_facts(),
+        &ctx.blobs,
+        BlobOwner::Profile(ctx.family.profile("alex")),
+        &raw,
+    )?;
     let people = [
         ("alex", alex, attachments),
         ("sam", synthetic::sam_facts(), Vec::new()),

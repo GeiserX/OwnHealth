@@ -13,6 +13,7 @@ use std::io::Cursor;
 use chrono::NaiveDate;
 use futures::future::BoxFuture;
 use ownhealth_core::access::get_profile;
+use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::demo::DemoContext;
 use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::{Error, Result};
@@ -56,7 +57,9 @@ async fn document(
     filename: &str,
     mime: &str,
 ) -> Result<Uuid> {
-    let sha = ctx.blobs.put_bytes(data)?;
+    let sha = ctx
+        .blobs
+        .put_bytes(BlobOwner::Profile(ctx.family.profile(slug)), data)?;
     let doc = create_document(
         conn,
         &NewDocument {

@@ -72,10 +72,13 @@ fn labnorte() -> Vec<u8> {
     .0
 }
 
-/// The LabNorte report imported for Alex, committed; returns the document id.
+/// The LabNorte report imported for Alex, committed, its files sealed under his key; returns the
+/// document id.
 async fn imported(a: &App) -> anyhow::Result<Uuid> {
     let pdf = labnorte();
-    let sha = a.rt.blobs.put_bytes(&pdf)?;
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(a.fam.profile("alex")), &pdf)?;
     let mut tx = a.rt.pool.begin().await?;
     let doc = create_document(
         &mut tx,
@@ -313,6 +316,16 @@ async fn tokens_need_their_scopes_and_other_households_see_nothing() -> R {
 async fn assign_and_retract() -> R {
     let a = app().await?;
     let doc = imported(&a).await?;
+    // how many of each profile's sealed files the store holds
+    let sealed = |p: Uuid| -> anyhow::Result<usize> {
+        let prefix = format!("{}/", p.simple());
+        let files = ownhealth_core::blobs::tree_files(&a.rt.settings.blobs_path())?;
+        Ok(files.keys().filter(|k| k.starts_with(&prefix)).count())
+    };
+    let (alex, lucia) = (a.fam.profile("alex"), a.fam.profile("lucia"));
+    let before = sealed(alex)?;
+    assert!(before > 1, "the report and its page layers, sealed for Alex");
+    assert_eq!(sealed(lucia)?, 0);
     let r = post(
         &a,
         "alex",
@@ -327,7 +340,20 @@ async fn assign_and_retract() -> R {
         .bind(doc)
         .fetch_one(&a.rt.pool)
         .await?;
-    assert_eq!(owner, Some(a.fam.profile("lucia")));
+    assert_eq!(owner, Some(lucia));
+    // the files moved to Lucía's key, and none stays under Alex's
+    assert_eq!((sealed(alex)?, sealed(lucia)?), (0, before));
+    let f = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
+    assert_eq!(f.status, StatusCode::OK);
+    let sha: String = sqlx::query_scalar("select encode(blob_sha256, 'hex') from document where id = $1")
+        .bind(doc)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    // the store checks the sha256 of every copy it writes, so these are the report's own bytes
+    let theirs =
+        a.rt.blobs
+            .get_bytes(ownhealth_core::blobs::BlobOwner::Profile(lucia), &sha)?;
+    assert!(!theirs.is_empty() && f.bytes == theirs);
     let current: i64 =
         sqlx::query_scalar("select count(*) from observation where document_id = $1 and status = 'current'")
             .bind(doc)
@@ -360,7 +386,7 @@ async fn assign_and_retract() -> R {
 }
 
 async fn upload(a: &App, pdf: &[u8]) -> anyhow::Result<Value> {
-    let sha = a.rt.blobs.put_bytes(pdf)?;
+    let sha = a.rt.blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, pdf)?;
     let mut tx = a.rt.pool.begin().await?;
     let out = dispatch_upload(
         &mut tx,
@@ -457,7 +483,9 @@ async fn doc_with(a: &App, who: &str, sensitivity: &[&str]) -> anyhow::Result<Uu
     use ownhealth_core::provenance::{SrcIn, SrcRef};
     let pid = a.fam.profile(who);
     let bytes = [SLIP, format!("{sensitivity:?}").as_bytes()].concat();
-    let sha = a.rt.blobs.put_bytes(&bytes)?;
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &bytes)?;
     let mut tx = a.rt.pool.begin().await?;
     let doc = create_document(
         &mut tx,
@@ -578,7 +606,7 @@ async fn a_document_whose_file_is_gone_answers_404() -> R {
         .bind(doc)
         .fetch_one(&a.rt.pool)
         .await?;
-    assert!(a.rt.blobs.delete(&sha)?);
+    assert!(a.rt.blobs.delete(ownhealth_core::blobs::BlobOwner::Reference, &sha)?);
     let r = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
     let body = String::from_utf8_lossy(&r.bytes).into_owned();
     assert_eq!(r.status, StatusCode::NOT_FOUND, "{body}");

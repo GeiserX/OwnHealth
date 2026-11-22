@@ -13,7 +13,7 @@ use std::io;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::{Error, Result};
@@ -666,13 +666,19 @@ pub fn alex_raw_files() -> io::Result<Vec<(String, RawFile)>> {
     ])
 }
 
-/// Put raw files into the blob store and list them in a copy of the facts. Returns (facts, attachments).
-pub fn with_files(doc: &Value, blobs: &BlobStore, raw: &[(String, RawFile)]) -> Result<(Value, Vec<(String, String)>)> {
+/// Put `owner`'s raw files into the blob store and list them in a copy of the facts. Returns (facts,
+/// attachments).
+pub fn with_files(
+    doc: &Value,
+    blobs: &BlobStore,
+    owner: BlobOwner,
+    raw: &[(String, RawFile)],
+) -> Result<(Value, Vec<(String, String)>)> {
     let mut doc = doc.clone();
     let mut attachments = Vec::new();
     for (role, file) in raw {
-        let sha = blobs.put_bytes(&file.data)?;
-        let isha = blobs.put_bytes(&file.index)?;
+        let sha = blobs.put_bytes(owner, &file.data)?;
+        let isha = blobs.put_bytes(owner, &file.index)?;
         if let Some(files) = doc.get_mut("files").and_then(Value::as_array_mut) {
             files.push(json!({
                 "role": role,
@@ -710,7 +716,7 @@ pub async fn seed_genome(
     imported_at: Option<DateTime<Utc>>,
 ) -> Result<(Uuid, ImportSummary)> {
     let data = facts_bytes(facts)?;
-    let sha = blobs.put_bytes(&data)?;
+    let sha = blobs.put_bytes(BlobOwner::Profile(profile_id), &data)?;
     let doc = NewDocument {
         filename: Some(filename),
         channel: "genome",

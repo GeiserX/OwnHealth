@@ -20,6 +20,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Run the web app, MCP server and job loop. Needs OWNHEALTH_DATABASE_URL and OWNHEALTH_SECRET_KEY.
+    /// Every command but migrate and healthcheck also needs OWNHEALTH_SECRETS_KEY.
     Serve,
     /// Apply pending database migrations. Needs OWNHEALTH_DATABASE_URL.
     Migrate,
@@ -119,6 +120,11 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
     // Every command, not only those that build a Runtime: backup and verify-restore compute state
     // hashes, and the minor rule in them must match the server's.
     ownhealth_core::access::set_env_majority(settings.age_of_majority);
+    // Every profile's files are sealed under a key made from OWNHEALTH_SECRETS_KEY, so nothing that
+    // reads or writes them starts without it. migrate and healthcheck never open a blob.
+    if !matches!(cmd, Cmd::Migrate | Cmd::Healthcheck) {
+        settings.require_secrets_key()?;
+    }
     match cmd {
         Cmd::Serve => {
             app::serve(settings).await?;

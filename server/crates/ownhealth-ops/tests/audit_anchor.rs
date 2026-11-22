@@ -494,6 +494,7 @@ async fn a_restore_anchors_the_head_it_restored() -> R {
 
     let fresh = TestDb::empty().await?;
     let mut settings = fresh.settings(&l.dir.path().join("fresh"))?;
+    settings.secrets_key = l.settings.secrets_key.clone(); // the key the backup was made under
     settings.anchor_dir = Some(l.settings.anchor_path()); // the same data volume
     let report = ownhealth_ops::restore(&settings, &older).await?;
     assert_eq!(report["ok"], true, "{report:#}");
@@ -539,6 +540,7 @@ async fn a_restore_does_not_anchor_in_a_folder_others_may_write() -> R {
         fs::set_permissions(&shared, fs::Permissions::from_mode(m))?;
         let fresh = TestDb::empty().await?;
         let mut settings = fresh.settings(&l.dir.path().join(format!("fresh-{m:o}")))?;
+        settings.secrets_key = l.settings.secrets_key.clone(); // the key the backup was made under
         settings.anchor_dir = Some(dir);
         let report = ownhealth_ops::restore(&settings, &older).await?;
         assert_eq!(report["ok"], true, "{why}: {report:#}");

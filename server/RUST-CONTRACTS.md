@@ -120,9 +120,15 @@ Runtime::new(settings) / Runtime::with_pool(settings, pool) / rt.job_context()
 // migrate: forward-only, checksum-locked, Python's schema_migrations bookkeeping and advisory lock
 migrate::embedded() -> Vec<Migration>; migrate(pool, &[Migration]) -> Vec<i32>; migrate_embedded(pool)
 migrate::pending(conn, &[Migration]) -> Vec<i32>
-// blobs: blobs/sha256/ab/cd/<hash>, mode 0440, tmp + rename
-BlobStore::new(root) .put_bytes(&[u8]) -> String .put_reader / .put_async / .put_file -> (String, u64)
-        .open / .get_bytes / .path / .exists / .size / .delete
+// blobs: plain blobs/sha256/ab/cd/<hash>; a profile's sealed blobs/enc/<profile>/ab/cd/<address>
+// (keys.rs); mode 0440, tmp + rename. Every call names the owner (BlobOwner); reads take both layouts
+BlobStore::for_settings(&settings) / ::new(root) (plain) / ::with_keys(root, Arc<Keyring>)
+        .put_bytes(owner, &[u8]) -> String .put_reader / .put_async / .put_file -> (String, u64)
+        .open_seek / .open_async / .with_local_copy / .get_bytes / .exists / .size (owner, sha)
+        .rekey(from, to, sha) .delete(owner, sha) .forget_profile(id)
+        .files / .copy_into / .key_of / .place, blobs::tree_files(root)   // backup and restore
+// keys: KEK = HKDF-SHA256(OWNHEALTH_SECRETS_KEY); a random DEK per profile, wrapped in profile_key
+Kek::from_settings / .fingerprint(); Keyring::new(kek, url) .dek(profile, create); keys::check_all
 // canonical: byte-identical to Python (tests/parity_fixtures.rs checks a Python-made fixture)
 canonical::canonical_json(&Value) -> Result<Vec<u8>>   // floats refused
 canonical::state_hash(&Value) -> Result<String>        // "sha256:<hex>" of the body without state_hash
@@ -294,7 +300,9 @@ failed attempt (`RuntimeError: handler panicked: ...`), never a dead worker.
 | invite code | `sha256(code)` |
 | session | cookie `oh_session` = `token_urlsafe(32)`, HttpOnly, SameSite=Lax, Secure when the base URL is https; row `secret_sha256 = sha256(secret)`; idle 30 min, absolute 12 h, step-up 300 s |
 | passkey row | credential id, raw COSE public key, sign count (SPIKES.md c) |
-| blob | `<data_dir>/blobs/sha256/<2>/<2>/<sha256 hex>`, mode 0440 |
+| blob | plain `<data_dir>/blobs/sha256/<2>/<2>/<sha256 hex>`; sealed `<data_dir>/blobs/enc/<profile uuid, simple>/<2>/<2>/<address>`, address = hex HMAC-SHA256 of the sha256 under the profile's name key; mode 0440 |
+| sealed blob | `OHB\x01` + salt16 + prefix7 + binding32, then 64 KiB records, each AES-256-GCM with a 16-byte tag; nonce = prefix7 + record number (u32 BE) + last-record flag; record and binding keys = HKDF(DEK, salt) |
+| profile key | `profile_key.wrapped_dek` = version 1 + nonce12 + AES-256-GCM(KEK, DEK32, aad "ownhealth profile dek v1" + profile id) + tag16; `kek_fingerprint` = HMAC(KEK, "ownhealth kek fingerprint v1")[..8] |
 | src id | `^src_[a-z0-9_]+$`, `src_` + 8 random chars from the core alphabet |
 | state_hash | `sha256:` + hex sha256 of RFC 8785 canonical JSON of the body without `state_hash` |
 | job | kinds in `jobs::JOB_KINDS`; backoff 2^attempts x 30 s; lease 300 s, heartbeat 60 s, reaper every 60 s; `last_error` `"<Type>: <message>"` cut at 500 chars; a dead job files one `job_failed` review item |

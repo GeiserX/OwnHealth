@@ -48,7 +48,7 @@ async fn lab_document(
             LabRow::new("Vitamina D", &ownhealth_core::ids::token_hex(3), "ng/mL", "30 - 100").flagged("L"),
         ]],
     });
-    let sha = blobs.put_bytes(&pdf)?;
+    let sha = blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &pdf)?;
     let doc = create_document(
         c,
         &NewDocument {
@@ -305,7 +305,10 @@ async fn a_large_export_does_not_stall_the_runtime() -> R {
     let f = create_rivera_family(&mut c, "Rivera (export)").await?;
     let size = 128u64 << 20;
     let bytes = ownhealth_core::ids::token_hex(8).into_bytes();
-    let (sha, n) = blobs.put_reader(bytes.as_slice().chain(std::io::repeat(7).take(size)))?;
+    let (sha, n) = blobs.put_reader(
+        ownhealth_core::blobs::BlobOwner::Reference,
+        bytes.as_slice().chain(std::io::repeat(7).take(size)),
+    )?;
     create_document(
         &mut c,
         &NewDocument {

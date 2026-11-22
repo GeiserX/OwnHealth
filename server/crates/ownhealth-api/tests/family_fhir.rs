@@ -101,7 +101,7 @@ async fn import_fresh(
         },
     )
     .await?;
-    let sha = blobs.put_bytes(ndjson)?;
+    let sha = blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, ndjson)?;
     let doc = create_document(
         &mut *c,
         &NewDocument {
@@ -123,7 +123,7 @@ async fn the_rivera_pedigree_exports_and_imports_back_with_nothing_dropped() -> 
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
-    let blobs = BlobStore::new(settings.blobs_path())?;
+    let blobs = BlobStore::for_settings(&settings)?;
     assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
     let mut c = db.pool.acquire().await?;
     let alex: Uuid = sqlx::query_scalar(
@@ -241,7 +241,7 @@ async fn the_rivera_pedigree_exports_and_imports_back_with_nothing_dropped() -> 
     assert_eq!(essence(&back), essence(&now));
     // importing the same file again adds nothing
     let profile = get_profile(&mut c, fresh).await?.expect("fresh");
-    let sha = blobs.put_bytes(&ndjson)?;
+    let sha = blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &ndjson)?;
     let doc2 = create_document(
         &mut c,
         &NewDocument {
@@ -285,7 +285,7 @@ async fn an_edit_made_in_review_is_what_the_export_carries() -> anyhow::Result<(
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
-    let blobs = BlobStore::new(settings.blobs_path())?;
+    let blobs = BlobStore::for_settings(&settings)?;
     assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
     let mut c = db.pool.acquire().await?;
     let (alex, user): (Uuid, Uuid) = sqlx::query_as(
@@ -298,7 +298,7 @@ async fn an_edit_made_in_review_is_what_the_export_carries() -> anyhow::Result<(
     // no Patient in the file: the identity is not matched, so the relative waits in review
     let fmh = br#"{"resourceType":"FamilyMemberHistory","id":"uncle-1","status":"completed","patient":{"reference":"Patient/x"},"relationship":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/v3-RoleCode","code":"PUNCLE"}]},"bornDate":"1948"}"#;
     let profile = get_profile(&mut c, alex).await?.expect("alex");
-    let sha = blobs.put_bytes(fmh)?;
+    let sha = blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, fmh)?;
     let doc = create_document(
         &mut c,
         &NewDocument {

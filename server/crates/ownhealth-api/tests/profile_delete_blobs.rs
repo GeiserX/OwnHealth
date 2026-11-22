@@ -14,7 +14,7 @@ use std::time::Duration;
 use axum::http::{Method, StatusCode};
 use ownhealth_auth::household::UNLINK_JOB;
 use ownhealth_core::Runtime;
-use ownhealth_core::blobs::sha256_hex_to_bytes;
+use ownhealth_core::blobs::{BlobOwner, sha256_hex_to_bytes};
 use ownhealth_core::demo_pdf::{LabReport, LabRow, lab_report_pdf};
 use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::jobs::{JobContext, drain};
@@ -130,7 +130,11 @@ async fn deleting_a_profile_leaves_none_of_its_files_or_credentials() -> R {
         env.user("alex"),
         env.fam().household_id,
     );
-    let put = |bytes: &str| env.rt.blobs.put_bytes(bytes.as_bytes());
+    let put = |bytes: &str| {
+        env.rt
+            .blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, bytes.as_bytes())
+    };
     let mut c = env.pool().acquire().await?;
 
     // a WGS import with its gVCF and index; Sam's import holds the very same gVCF file
@@ -288,7 +292,8 @@ async fn deleting_a_profile_leaves_none_of_its_files_or_credentials() -> R {
         .bind(sams_pass)
         .execute(&mut *c)
         .await?;
-    // Sam's Health Auto Export inbox received the very same push body: one file for both inboxes
+    // Sam's Health Auto Export inbox received the very same push body: each profile keeps its own
+    // copy, sealed under its own key
     let sams_hae: Uuid = sqlx::query_scalar(
         "insert into source (household_id, profile_id, kind, label) \
          values ($1, $2, 'health_auto_export', 'iPhone de Sam') returning id",
@@ -309,31 +314,38 @@ async fn deleting_a_profile_leaves_none_of_its_files_or_credentials() -> R {
         .execute(&mut *c)
         .await?;
     drop(c);
+    let push_body = env.rt.blobs.get_bytes(BlobOwner::Profile(alex), &alex_push)?;
+    assert_eq!(env.rt.blobs.put_bytes(BlobOwner::Profile(sam), &push_body)?, alex_push);
+    let sealed = |p: Uuid| env.rt.settings.blobs_path().join("enc").join(p.simple().to_string());
+    assert!(sealed(alex).is_dir(), "Alex's push is not sealed");
 
     let home_secret: Uuid = sqlx::query_scalar("select secret_id from source where id = $1::uuid")
         .bind(&home_mail)
         .fetch_one(env.pool())
         .await?;
-    let home_eml = env
-        .rt
-        .blobs
-        .put_bytes(b"From: y@unknown.example\r\n\r\nheld for the household")?;
+    let home_eml = env.rt.blobs.put_bytes(
+        ownhealth_core::blobs::BlobOwner::Reference,
+        b"From: y@unknown.example\r\n\r\nheld for the household",
+    )?;
     let before = stored(&env.rt.settings.blobs_path());
-    assert_eq!(before.len(), 12, "{before:?}");
+    assert_eq!(before.len(), 11, "{before:?}"); // and the push, sealed for each of them
     assert_eq!(env.scalar_i64("select count(*) from secret").await?, 5);
 
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
 
-    // what stays: the gVCF Sam's import names, Sam's facts, Sam's push, and the household mailbox's mail
+    // what stays: the gVCF Sam's import names, Sam's facts, Sam's own copy of the push, and the
+    // household mailbox's mail; Alex's sealed files go with his key
     let after = stored(&env.rt.settings.blobs_path());
     let sams_facts: String =
         sqlx::query_scalar("select encode(facts_blob, 'hex') from genome_dataset where profile_id = $1")
             .bind(sam)
             .fetch_one(env.pool())
             .await?;
-    assert_eq!(after, BTreeSet::from([gvcf, sams_facts, alex_push, home_eml]));
-    assert_eq!(r.json["blobs"], json!(before.len() - 4), "{}", r.json);
+    assert_eq!(after, BTreeSet::from([gvcf, sams_facts, home_eml]));
+    assert_eq!(r.json["blobs"], json!(before.len() - 3), "{}", r.json);
+    assert!(!sealed(alex).exists(), "Alex's sealed files stayed");
+    assert_eq!(env.rt.blobs.get_bytes(BlobOwner::Profile(sam), &alex_push)?, push_body);
     // what stays of the credentials: the household mailbox's password, nothing of Alex's
     let left: Vec<Uuid> = sqlx::query_scalar("select id from secret")
         .fetch_all(env.pool())
@@ -358,6 +370,45 @@ async fn deleting_a_profile_leaves_none_of_its_files_or_credentials() -> R {
     Ok(())
 }
 
+/// The profile's files are sealed under its own key: the delete takes the key row and the profile's
+/// folder of sealed files, so a copy anywhere (a backup, a disk image) no longer opens. Sam's sealed
+/// copy of the same bytes stays, under his key.
+#[tokio::test]
+async fn deleting_a_profile_deletes_its_key_and_its_sealed_files() -> R {
+    let env = Env::new(true).await?;
+    let (alex, sam, household) = (env.profile("alex"), env.profile("sam"), env.fam().household_id);
+    let bytes = b"%PDF-1.7 synthetic LabNorte report, sealed".to_vec();
+    let mut c = env.pool().acquire().await?;
+    let mut sha = String::new();
+    for p in [alex, sam] {
+        sha = env.rt.blobs.put_bytes(BlobOwner::Profile(p), &bytes)?;
+        create_document(
+            &mut c,
+            &NewDocument::upload(household, Some(p), &sha, "application/pdf", i64::try_from(bytes.len())?),
+        )
+        .await?;
+    }
+    drop(c);
+    let folder = |p: Uuid| env.rt.settings.blobs_path().join("enc").join(p.simple().to_string());
+    assert!(folder(alex).is_dir() && folder(sam).is_dir());
+    assert!(
+        stored(&env.rt.settings.blobs_path()).is_empty(),
+        "a profile's file went to the plain layout"
+    );
+    let keys = "select count(*) from profile_key where profile_id = ";
+    assert_eq!(env.scalar_i64(&format!("{keys}'{alex}'")).await?, 1);
+
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(env.scalar_i64(&format!("{keys}'{alex}'")).await?, 0);
+    assert!(!folder(alex).exists(), "Alex's sealed files stayed");
+    assert!(!env.rt.blobs.exists(BlobOwner::Profile(alex), &sha));
+    assert_eq!(env.rt.blobs.get_bytes(BlobOwner::Profile(sam), &sha)?, bytes);
+    assert_eq!(env.scalar_i64(&format!("{keys}'{sam}'")).await?, 1);
+    Ok(())
+}
+
 /// A household inbox (no profile of its own) that routes each item by a rule.
 async fn household_source(env: &Env, kind: &str, config: Value) -> anyhow::Result<Uuid> {
     Ok(sqlx::query_scalar(
@@ -374,7 +425,10 @@ async fn household_source(env: &Env, kind: &str, config: Value) -> anyhow::Resul
 
 /// A document of `profile` holding `bytes`; returns its id and file hash.
 async fn document(env: &Env, profile: Uuid, bytes: &str, mime: &str) -> anyhow::Result<(Uuid, String)> {
-    let sha = env.rt.blobs.put_bytes(bytes.as_bytes())?;
+    let sha = env
+        .rt
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, bytes.as_bytes())?;
     let mut c = env.pool().acquire().await?;
     let doc = create_document(
         &mut c,
@@ -473,10 +527,10 @@ async fn a_file_that_reached_the_person_through_a_household_inbox_goes_too() -> 
         "application/pdf",
     )
     .await?;
-    let odt = env
-        .rt
-        .blobs
-        .put_bytes(b"synthetic notes Alex dropped in the scanner folder")?;
+    let odt = env.rt.blobs.put_bytes(
+        ownhealth_core::blobs::BlobOwner::Reference,
+        b"synthetic notes Alex dropped in the scanner folder",
+    )?;
     item(
         &env,
         folder,
@@ -498,10 +552,10 @@ async fn a_file_that_reached_the_person_through_a_household_inbox_goes_too() -> 
     .bind(ortega)
     .fetch_one(env.pool())
     .await?;
-    let theirs = env
-        .rt
-        .blobs
-        .put_bytes(b"synthetic notes of the other household's alex")?;
+    let theirs = env.rt.blobs.put_bytes(
+        ownhealth_core::blobs::BlobOwner::Reference,
+        b"synthetic notes of the other household's alex",
+    )?;
     item(&env, their_folder, "alex/notas.odt:51:1", &theirs, None, None).await?;
 
     let mut me = env.as_user(env.user("alex")).await?;
@@ -579,7 +633,11 @@ async fn mail_a_household_mailbox_filed_to_the_person_goes_too() -> R {
     let env = Env::new(true).await?;
     let (alex, household) = (env.profile("alex"), env.fam().household_id);
     let mailbox = household_source(&env, "email", json!({})).await?;
-    let put = |bytes: &str| env.rt.blobs.put_bytes(bytes.as_bytes());
+    let put = |bytes: &str| {
+        env.rt
+            .blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, bytes.as_bytes())
+    };
     let hold = |eml: String, status: &'static str, released: Option<Uuid>| {
         sqlx::query_scalar::<_, Uuid>(
             "insert into quarantine_item (household_id, source_id, raw_blob, reason, status, released_document_ids) \
@@ -819,14 +877,15 @@ async fn a_file_the_delete_could_not_remove_goes_on_the_retry() -> R {
     .fetch_all(env.pool())
     .await?;
     assert_eq!(said, vec![Some("blobs=1 pending=1".into())]);
-    // the job names only the file still on disk, and carries the household and file hashes only
+    // the job names only the file still on disk, and carries the household, the profile (whose
+    // sealed folder the retry removes too) and file hashes only
     let queued: Value = sqlx::query_scalar("select payload from job where kind = $1")
         .bind(UNLINK_JOB)
         .fetch_one(env.pool())
         .await?;
     assert_eq!(
         queued,
-        json!({"household_id": env.fam().household_id, "blobs": [stuck.clone()]})
+        json!({"household_id": env.fam().household_id, "profile_id": env.profile("alex"), "blobs": [stuck.clone()]})
     );
     assert_eq!(unlink_state(&env).await?, ("queued".into(), 0, true));
 
@@ -839,9 +898,10 @@ async fn a_file_the_delete_could_not_remove_goes_on_the_retry() -> R {
     std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
     std::fs::remove_dir_all(&path)?;
     assert_eq!(
-        env.rt
-            .blobs
-            .put_bytes(b"%PDF-1.7 synthetic report the disk would not let go")?,
+        env.rt.blobs.put_bytes(
+            ownhealth_core::blobs::BlobOwner::Reference,
+            b"%PDF-1.7 synthetic report the disk would not let go"
+        )?,
         stuck
     );
     sqlx::query("update job set payload = jsonb_set(payload, '{blobs}', payload->'blobs' || to_jsonb($1::text))")
@@ -926,7 +986,7 @@ async fn the_retry_is_queued_in_the_delete_transaction() -> R {
         .await?;
     assert_eq!(
         payload,
-        json!({"household_id": env.fam().household_id, "blobs": [report]})
+        json!({"household_id": env.fam().household_id, "profile_id": alex, "blobs": [report]})
     );
     assert!(waits);
     // a crash before the commit loses both the delete and the job
@@ -1054,7 +1114,10 @@ async fn a_mail_with_nothing_to_import_goes_with_the_person() -> R {
         ownhealth_inbox::email::ingest_message(&mut c, &env.rt.blobs, None, &source, raw.as_bytes(), None).await?;
     drop(c);
     assert!(out.document_ids.is_empty(), "{out:?}");
-    let eml = env.rt.blobs.put_bytes(raw.as_bytes())?;
+    let eml = env
+        .rt
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, raw.as_bytes())?;
     assert_eq!(
         items(&env, mailbox).await?,
         vec![("mid:aviso-77@labnorte.example".into(), Some(eml.clone()))]
@@ -1135,7 +1198,10 @@ async fn a_released_mail_with_only_a_body_goes_with_the_person() -> R {
         .await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
     assert_eq!(r.json["document_ids"], json!([]), "{}", r.json);
-    let eml = env.rt.blobs.put_bytes(raw.as_bytes())?;
+    let eml = env
+        .rt
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, raw.as_bytes())?;
 
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
@@ -1184,7 +1250,10 @@ async fn a_push_an_inbox_received_for_someone_else_keeps_its_file() -> R {
     let source = sources::get_source(&mut c, id).await?.expect("source");
     ownhealth_devices::hae::import_push(&mut c, &env.rt.blobs, &source, body).await?;
     drop(c);
-    let sha = env.rt.blobs.put_bytes(body)?;
+    let sha = env
+        .rt
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, body)?;
 
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;

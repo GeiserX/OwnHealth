@@ -22,7 +22,12 @@ async fn env() -> anyhow::Result<Env> {
     let env = Env::new(true).await?;
     let mut c = env.pool().acquire().await?;
     let raw = synthetic::alex_raw_files()?;
-    let (facts, att) = synthetic::with_files(&synthetic::alex_facts(), &env.rt.blobs, &raw)?;
+    let (facts, att) = synthetic::with_files(
+        &synthetic::alex_facts(),
+        &env.rt.blobs,
+        ownhealth_core::blobs::BlobOwner::Reference,
+        &raw,
+    )?;
     for (slug, facts, att) in [("alex", facts, att), ("lucia", synthetic::lucia_facts(), Vec::new())] {
         synthetic::seed_genome(
             &mut c,

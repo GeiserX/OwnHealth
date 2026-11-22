@@ -135,7 +135,12 @@ async fn seed_alex(e: &Env, c: &mut PgConnection) -> anyhow::Result<()> {
         "calls_vcf".to_string(),
         write_vcf("AR-01.vcf.gz", &alex_calls(), "AR-01")?,
     )];
-    let (facts, att) = synthetic::with_files(&synthetic::alex_facts(), &e.blobs, &raw)?;
+    let (facts, att) = synthetic::with_files(
+        &synthetic::alex_facts(),
+        &e.blobs,
+        ownhealth_core::blobs::BlobOwner::Reference,
+        &raw,
+    )?;
     e.seed(c, "alex", &facts, &att).await?;
     Ok(())
 }

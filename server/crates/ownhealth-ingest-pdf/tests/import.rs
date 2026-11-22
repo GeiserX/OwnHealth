@@ -131,6 +131,9 @@ async fn report_for_another_family_member_never_auto_accepts() -> R {
     );
 
     accept(&mut c, uuid(&ident[0]["id"]), e.fam.user("alex"), None).await?; // the person confirms the suggestion
+    // as POST /review/{id}/accept does: the files move to Lucía's key
+    let (alex, lucia) = (Some(e.fam.profile("alex")), Some(e.fam.profile("lucia")));
+    ownhealth_core::documents::rekey_document(&mut c, &e.blobs, doc, alex, lucia).await?;
     assert_eq!(
         uuid(&document(&mut c, doc).await?["profile_id"]),
         e.fam.profile("lucia")
@@ -181,7 +184,7 @@ async fn scanned_pdf_and_image_wait_as_pending_documents() -> R {
     assert_eq!(runs, 0);
 
     // any PNG will do: a page render of the scan
-    let sha = e.blobs.put_bytes(&pdf)?;
+    let sha = e.blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &pdf)?;
     let png = render_page_png(
         &e.blobs,
         ownhealth_core::blobs::BlobOwner::Profile(e.fam.profile("alex")),
@@ -481,7 +484,7 @@ async fn import_pdf_job_runs_through_the_queue() -> R {
     fake_normalizer();
     let e = env().await?;
     let (pdf, truth) = slip("de-01-basic");
-    let sha = e.blobs.put_bytes(&pdf)?;
+    let sha = e.blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &pdf)?;
     let mut c = e.conn().await?;
     let out = ownhealth_core::documents::dispatch_upload(
         &mut c,
@@ -580,7 +583,7 @@ async fn with_ocr_on_scans_and_images_go_to_the_ocr_queue_not_to_review() -> R {
     let (pdf, _) = slip("es-scan");
     let scan = e.store_pdf(&mut c, &pdf, "report.pdf").await?;
     import_pdf_opts(&mut c, &e.blobs, scan, false, on).await?;
-    let sha = e.blobs.put_bytes(&pdf)?;
+    let sha = e.blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &pdf)?;
     let png = render_page_png(
         &e.blobs,
         ownhealth_core::blobs::BlobOwner::Profile(e.fam.profile("alex")),

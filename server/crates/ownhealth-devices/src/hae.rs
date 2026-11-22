@@ -289,10 +289,11 @@ pub async fn import_push(
     if body.len() > MAX_BODY_BYTES {
         return Err(Error::Invalid("the push is larger than 50 MB".into()));
     }
-    let (sha, _) = ownhealth_core::arrive::store_bytes(blobs, body.to_vec()).await?;
+    let owner = ownhealth_core::blobs::BlobOwner::Profile(profile_id);
+    let (sha, _) = ownhealth_core::arrive::store_bytes(blobs, owner, body.to_vec()).await?;
     let item = format!("push:{sha}");
     ownhealth_core::dedup::record_item(&mut *conn, source.id, &item, Some(&sha), None, None, Some(profile_id)).await?;
-    prune_pushes(&mut *conn, blobs, source.id, &item).await?;
+    prune_pushes(&mut *conn, blobs, owner, source.id, &item).await?;
     let raw = body.to_vec();
     let parsed = tokio::task::spawn_blocking(move || parse(&raw))
         .await
@@ -353,7 +354,13 @@ pub async fn import_push(
 
 /// Remove this source's push bodies older than `PUSH_KEEP_DAYS`, and their blobs when no other row
 /// (another inbox's item, a document, a held mail) still holds the same bytes.
-async fn prune_pushes(conn: &mut PgConnection, blobs: &BlobStore, source_id: uuid::Uuid, current: &str) -> Result<()> {
+async fn prune_pushes(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    owner: ownhealth_core::blobs::BlobOwner,
+    source_id: uuid::Uuid,
+    current: &str,
+) -> Result<()> {
     let gone: Vec<Option<String>> = sqlx::query_scalar(
         "delete from source_item where (source_id, external_id) in (select source_id, external_id \
          from source_item where source_id = $1 and external_id like 'push:%' and external_id <> $2 \
@@ -375,7 +382,7 @@ async fn prune_pushes(conn: &mut PgConnection, blobs: &BlobStore, source_id: uui
         .fetch_one(&mut *conn)
         .await?;
         if !held {
-            blobs.delete(&sha)?;
+            blobs.delete(owner, &sha)?;
         }
     }
     Ok(())

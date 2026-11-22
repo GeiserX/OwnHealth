@@ -63,7 +63,9 @@ async fn import_lucia(a: &App) -> R {
     let mut buf = Cursor::new(Vec::new());
     write_export_to(&mut buf, &spec)?;
     let data = buf.into_inner();
-    let sha = a.rt.blobs.put_bytes(&data)?;
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &data)?;
     let mut tx = a.rt.pool.begin().await?;
     let doc = create_document(
         &mut tx,

@@ -282,12 +282,36 @@ async fn accept(
             caller.require(&mut tx, &t, None, Some("import")).await?;
         }
     }
+    // a document_identity accept moves the document: the profile it had before
+    let moved = match (item.kind.as_str(), item.document_id) {
+        ("document_identity", Some(d)) => Some((d, document_profile(&mut tx, d).await?)),
+        _ => None,
+    };
     let created = review::accept(&mut tx, item_id, principal.user_id.unwrap_or_default(), edits.as_ref()).await?;
+    let mut copies = None;
+    if let Some((d, from)) = moved {
+        // the new profile's key must open the file before the re-import reads it
+        let to = document_profile(&mut tx, d).await?;
+        copies = Some(ownhealth_core::documents::rekey_document(&mut tx, &rt.blobs, d, from, to).await?);
+    }
     audit(&mut tx, principal, &item, "review_accept").await?;
     tx.commit().await?;
+    if let Some(m) = copies {
+        super::documents::drop_moved_copies(&rt, m).await;
+    }
     Ok(Json(
         json!({"id": item_id, "status": "accepted", "result_ids": created}),
     ))
+}
+
+async fn document_profile(conn: &mut sqlx::PgConnection, document_id: Uuid) -> ownhealth_core::Result<Option<Uuid>> {
+    Ok(
+        sqlx::query_scalar::<_, Option<Uuid>>("select profile_id from document where id = $1")
+            .bind(document_id)
+            .fetch_optional(conn)
+            .await?
+            .flatten(),
+    )
 }
 
 async fn reject(

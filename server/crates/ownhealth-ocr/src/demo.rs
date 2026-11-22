@@ -32,7 +32,7 @@ pub async fn seed_demo(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result
     let png = tokio::task::spawn_blocking(move || -> Result<(String, i64)> {
         let png = render_page_png(&blobs, owner, &hex::encode(sha), 1, DEMO_DPI / 72.0)?;
         let size = png.len() as i64;
-        Ok((blobs.put_bytes(&png)?, size))
+        Ok((blobs.put_bytes(owner, &png)?, size))
     })
     .await
     .map_err(|e| Error::Io(std::io::Error::other(format!("demo render task failed: {e}"))))??;

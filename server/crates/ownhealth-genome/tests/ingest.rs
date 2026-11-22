@@ -144,8 +144,16 @@ async fn a_vcf_whose_sha256_differs_is_refused_and_nothing_is_written() -> R {
     let e = env().await?;
     let mut tx = e.db.pool.begin().await?;
     let raw = synthetic::alex_raw_files()?;
-    let (facts, mut att) = synthetic::with_files(&synthetic::alex_facts(), &e.blobs, &raw)?;
-    let stranger = e.blobs.put_bytes(b"\x1f\x8b not the file the facts describe")?;
+    let (facts, mut att) = synthetic::with_files(
+        &synthetic::alex_facts(),
+        &e.blobs,
+        ownhealth_core::blobs::BlobOwner::Reference,
+        &raw,
+    )?;
+    let stranger = e.blobs.put_bytes(
+        ownhealth_core::blobs::BlobOwner::Reference,
+        b"\x1f\x8b not the file the facts describe",
+    )?;
     for (name, sha) in att.iter_mut() {
         if name == "AR-01.vcf.gz" {
             *sha = stranger.clone();
@@ -164,7 +172,12 @@ async fn corrupted_blob_bytes_are_refused() -> R {
     let e = env().await?;
     let mut c = e.conn().await?;
     let raw = synthetic::alex_raw_files()?;
-    let (facts, att) = synthetic::with_files(&synthetic::alex_facts(), &e.blobs, &raw)?;
+    let (facts, att) = synthetic::with_files(
+        &synthetic::alex_facts(),
+        &e.blobs,
+        ownhealth_core::blobs::BlobOwner::Reference,
+        &raw,
+    )?;
     let sha = facts["files"][0]["sha256"].as_str().unwrap_or_default().to_string();
     let path = e
         .dir
@@ -225,6 +238,9 @@ async fn the_same_file_on_another_profile_is_refused() -> R {
         .bind(e.profile("sam"))
         .bind(doc)
         .execute(&mut *c)
+        .await?;
+    // the same file uploaded to Sam: his own sealed copy
+    ownhealth_core::documents::rekey_document(&mut c, &e.blobs, doc, Some(e.profile("alex")), Some(e.profile("sam")))
         .await?;
     let err = import_err(import_genome_facts(&mut c, &e.blobs, doc, &[], None).await);
     assert!(err.contains("already imported for another profile"), "{err}");
@@ -300,18 +316,23 @@ async fn upload_job_end_to_end() -> R {
     let e = env().await?;
     ownhealth_genome::register();
     let raw = synthetic::alex_raw_files()?;
-    let (facts, _) = synthetic::with_files(&synthetic::alex_facts(), &e.blobs, &raw)?;
+    let (facts, _) = synthetic::with_files(
+        &synthetic::alex_facts(),
+        &e.blobs,
+        ownhealth_core::blobs::BlobOwner::Reference,
+        &raw,
+    )?;
     let data = serde_json::to_vec(&facts)?;
     let mut files = vec![StoredFile {
         filename: "AR-01_genome_facts.json".into(),
-        sha256: e.blobs.put_bytes(&data)?,
+        sha256: e.blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &data)?,
         size: data.len() as i64,
     }];
     for (_, f) in &raw {
         for (name, bytes) in [(f.name.clone(), &f.data), (f.index_name(), &f.index)] {
             files.push(StoredFile {
                 filename: name,
-                sha256: e.blobs.put_bytes(bytes)?,
+                sha256: e.blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, bytes)?,
                 size: bytes.len() as i64,
             });
         }
@@ -321,7 +342,7 @@ async fn upload_job_end_to_end() -> R {
     let bad = serde_json::to_vec(&lucia_bad)?;
     let bad_file = StoredFile {
         filename: "bad.json".into(),
-        sha256: e.blobs.put_bytes(&bad)?,
+        sha256: e.blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &bad)?,
         size: bad.len() as i64,
     };
     let (alex, lucia) = (e.profile("alex"), e.profile("lucia"));
@@ -501,7 +522,7 @@ async fn chip_imputed_typed_sites_are_checked_against_the_site_list() -> R {
         if probed.is_some() {
             raw.push(("chip_sites".into(), synthetic::write_vcf("s.vcf.gz", &sites, "SAMPLE")?));
         }
-        let (facts, att) = synthetic::with_files(&doc, &e.blobs, &raw)?;
+        let (facts, att) = synthetic::with_files(&doc, &e.blobs, ownhealth_core::blobs::BlobOwner::Reference, &raw)?;
         let mut tx = c.begin().await?;
         let result = e.seed(&mut tx, "lucia", &facts, &att).await;
         if probed == Some(true) {

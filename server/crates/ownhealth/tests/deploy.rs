@@ -984,6 +984,9 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
     let owner_pw = if case == "quickstart" {
         // the app's own key, and any free host port for it
         env += &format!("OWNHEALTH_SECRET_KEY={}\nOWNHEALTH_HTTP_PORT=0\n", token_hex(32));
+        // the profile key's root, the one file secret of compose.yaml
+        std::fs::create_dir_all(dir.join("secrets"))?;
+        std::fs::write(dir.join("secrets/secrets_key"), format!("{}0=", token_hex(21)))?;
         "x".to_string() // OWNHEALTH_DB_PASSWORD in cases()
     } else {
         let s = dir.join("secrets");

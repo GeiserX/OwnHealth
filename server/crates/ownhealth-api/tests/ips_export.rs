@@ -97,7 +97,7 @@ async fn demo() -> anyhow::Result<(TestDb, tempfile::TempDir, BlobStore)> {
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
-    let blobs = BlobStore::new(settings.blobs_path())?;
+    let blobs = BlobStore::for_settings(&settings)?;
     assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
     Ok((db, dir, blobs))
 }
@@ -277,7 +277,7 @@ async fn alex_exports_an_ips_that_imports_back_with_the_same_values_and_units() 
     )
     .await?;
     let bytes = out.to_bytes()?;
-    let sha = blobs.put_bytes(&bytes)?;
+    let sha = blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &bytes)?;
     let doc = create_document(
         &mut c,
         &NewDocument {
@@ -494,7 +494,7 @@ async fn a_panel_is_one_entry_with_only_the_components_the_sheet_shows() -> R {
     ownhealth_ingest_structured::register();
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
-    let blobs = BlobStore::new(db.settings(dir.path())?.blobs_path())?;
+    let blobs = BlobStore::for_settings(&db.settings(dir.path())?)?;
     let mut c = db.pool.acquire().await?;
     let h = create_household(&mut c, "Ortega").await?;
     let carmen = create_profile(
@@ -540,7 +540,7 @@ async fn a_panel_is_one_entry_with_only_the_components_the_sheet_shows() -> R {
         }}],
     });
     let bytes = serde_json::to_vec(&bundle)?;
-    let sha = blobs.put_bytes(&bytes)?;
+    let sha = blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &bytes)?;
     let doc = create_document(
         &mut c,
         &NewDocument {

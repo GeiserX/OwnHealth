@@ -43,7 +43,12 @@ async fn genome_family() -> anyhow::Result<Env> {
     let mut c = db.pool.acquire().await?;
     let fam = create_rivera_family(&mut c, "Rivera").await?;
     let raw = synthetic::alex_raw_files()?;
-    let (facts, att) = synthetic::with_files(&synthetic::alex_facts(), &rt.blobs, &raw)?;
+    let (facts, att) = synthetic::with_files(
+        &synthetic::alex_facts(),
+        &rt.blobs,
+        ownhealth_core::blobs::BlobOwner::Reference,
+        &raw,
+    )?;
     for (slug, facts, att) in [("alex", facts, att), ("lucia", synthetic::lucia_facts(), Vec::new())] {
         synthetic::seed_genome(
             &mut c,
@@ -408,7 +413,7 @@ async fn a_lost_raw_genome_file_is_a_server_error_that_names_no_hash() -> R {
     .bind(env.fam.profile("alex"))
     .fetch_one(&env.db.pool)
     .await?;
-    assert!(env.rt.blobs.delete(&vcf)?);
+    assert!(env.rt.blobs.delete(ownhealth_core::blobs::BlobOwner::Reference, &vcf)?);
     for q in ["rsid=rs4244285", "region=chr1:11796000-11797000"] {
         let (s, body) = env
             .get(&alex, &format!("/api/profiles/alex/genome/variant?{q}"))

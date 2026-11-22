@@ -205,7 +205,10 @@ pub async fn lab_document(conn: &mut PgConnection, app: &App, slug: &str) -> any
             LabRow::new("Vitamina D", "24", "ng/mL", "30 - 100").flagged("L"),
         ]],
     });
-    let sha = app.rt.blobs.put_bytes(&pdf)?;
+    let sha = app
+        .rt
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &pdf)?;
     let r = create_document(
         conn,
         &NewDocument {

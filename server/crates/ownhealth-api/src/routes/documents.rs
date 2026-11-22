@@ -568,6 +568,15 @@ async fn assign(
         None,
     )
     .await?;
+    // the new profile's key must open the file before the re-import reads it
+    let moved = ownhealth_core::documents::rekey_document(
+        &mut tx,
+        &rt.blobs,
+        document_id,
+        Some(doc.perm.profile.id),
+        Some(target.profile.id),
+    )
+    .await?;
     audit(
         &mut tx,
         principal,
@@ -578,9 +587,23 @@ async fn assign(
     )
     .await?;
     tx.commit().await?;
+    drop_moved_copies(&rt, moved).await;
     Ok(Json(
         json!({"document_id": document_id, "profile": target.profile.slug, "job_id": job_id}),
     ))
+}
+
+/// After a move committed: the old profile's copies of the document's files. The move stands either
+/// way, so a failure is logged and the copy stays under the old profile's key until that profile is
+/// deleted.
+pub(crate) async fn drop_moved_copies(rt: &Runtime, moved: ownhealth_core::documents::Moved) {
+    let gone = async {
+        let mut c = rt.pool.acquire().await?;
+        ownhealth_auth::household::drop_moved_copies(&mut c, &rt.blobs, moved).await
+    };
+    if let Err(e) = gone.await {
+        tracing::warn!(error = %e, "a moved document's files stay under the profile it left");
+    }
 }
 
 /// Soft delete with a reason: the document leaves the vault, its values are retracted, its open

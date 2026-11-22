@@ -222,8 +222,8 @@ fn check_raw_file(blobs: &BlobStore, owner: BlobOwner, files: &[(String, String)
         }
     }
     let [(sha, path), (idx, _)] = files;
-    let (data, index) = (blobs.with_local_copy(owner, sha)?, blobs.with_local_copy(owner, idx)?);
-    let opened = VcfFile::open(data.path(), index.path()).and_then(|mut vf| vf.check_header());
+    let (data, index) = (blobs.open_seek(owner, sha)?, blobs.open_seek(owner, idx)?);
+    let opened = VcfFile::from_readers(data, index).and_then(|mut vf| vf.check_header());
     if let Err(e) = opened {
         return Err(import_error(format!(
             "{path}: not a bgzipped VCF with a tabix index ({e})"
@@ -238,10 +238,9 @@ fn chip_errors(blobs: &BlobStore, owner: BlobOwner, doc: &Value, has_sites: bool
     let (Some(f), true) = (file, has_sites) else {
         return Ok(chip_site_errors(doc, None));
     };
-    // both copies live until the site list has been probed
-    let data = blobs.with_local_copy(owner, s(f, "sha256").unwrap_or_default())?;
-    let index = blobs.with_local_copy(owner, s(f, "index_sha256").unwrap_or_default())?;
-    let vf = VcfFile::open(data.path(), index.path())?;
+    let data = blobs.open_seek(owner, s(f, "sha256").unwrap_or_default())?;
+    let index = blobs.open_seek(owner, s(f, "index_sha256").unwrap_or_default())?;
+    let vf = VcfFile::from_readers(data, index)?;
     let vf = RefCell::new(vf);
     let probed = |chrom: &str, pos: i64| -> bool {
         let c = norm_chrom(chrom);

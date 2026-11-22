@@ -27,7 +27,7 @@ async fn seeded(dir: &Path) -> anyhow::Result<(TestDb, Settings)> {
     ownhealth_ops::register();
     let db = TestDb::new().await?;
     let settings = db.settings(&dir.join("live"))?;
-    let blobs = BlobStore::new(settings.blobs_path())?;
+    let blobs = BlobStore::for_settings(&settings)?;
     assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
     Ok((db, settings))
 }
@@ -40,7 +40,9 @@ fn ownhealth(s: &Settings, args: &[&str]) -> anyhow::Result<Output> {
         .env("OWNHEALTH_DATABASE_URL", &s.database_url)
         .env("OWNHEALTH_DATA_DIR", &s.data_dir)
         .env("OWNHEALTH_ANCHOR_DIR", s.anchor_path())
+        .env("OWNHEALTH_SECRETS_KEY", s.secrets_key.as_deref().unwrap_or_default())
         .env_remove("OWNHEALTH_ANCHOR_DIR_FILE")
+        .env_remove("OWNHEALTH_SECRETS_KEY_FILE")
         .output()?)
 }
 
@@ -129,6 +131,34 @@ async fn cli_reads_the_database_url_from_its_file() -> R {
     Ok(())
 }
 
+/// Without OWNHEALTH_SECRETS_KEY the app, the worker and the backup refuse to start, with one line
+/// that says how to make one; migrate (above) needs none.
+#[tokio::test]
+async fn cli_refuses_to_start_without_the_secrets_key() -> R {
+    let dir = tempfile::tempdir()?;
+    let db = TestDb::new().await?;
+    let s = db.settings(&dir.path().join("live"))?;
+    let backup = dir.path().join("backup").display().to_string();
+    for args in [vec!["serve"], vec!["worker"], vec!["backup", backup.as_str()]] {
+        let out = Command::new(BIN)
+            .args(&args)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("OWNHEALTH_DATABASE_URL", &s.database_url)
+            .env("OWNHEALTH_DATA_DIR", &s.data_dir)
+            .output()?;
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} started: {err}");
+        assert_eq!(err.trim_end().lines().count(), 1, "{args:?}: {err}");
+        assert!(
+            err.contains("OWNHEALTH_SECRETS_KEY is not set") && err.contains("openssl rand -base64 32"),
+            "{args:?}: {err}"
+        );
+    }
+    assert!(!dir.path().join("backup").exists());
+    Ok(())
+}
+
 /// `migrate` runs only as the owner of the database. Run by another role, a superuser here, the
 /// tables and the SECURITY DEFINER chain function would belong to that role, and the database owner,
 /// who owns schema public, could drop them and put its own in their place. The control hands the
@@ -205,6 +235,7 @@ fn env_for(s: &Settings, tmp: &Path) -> Env {
         ("OWNHEALTH_DATABASE_URL", s.database_url.clone()),
         ("OWNHEALTH_DATA_DIR", s.data_dir.display().to_string()),
         ("OWNHEALTH_ANCHOR_DIR", s.anchor_path().display().to_string()),
+        ("OWNHEALTH_SECRETS_KEY", s.secrets_key.clone().unwrap_or_default()),
         ("OWNHEALTH_BACKUP_STAGING", tmp.join("staging").display().to_string()),
         ("OWNHEALTH_RESTORE_DIR", tmp.join("restore").display().to_string()),
         ("RESTIC_REPOSITORY", tmp.join("repo").display().to_string()),
@@ -222,6 +253,7 @@ fn run(cmd: impl AsRef<std::ffi::OsStr>, env: &Env, args: &[&str]) -> anyhow::Re
         .args(args)
         .envs(env.vars.iter().map(|(k, v)| (k, v)))
         .env_remove("OWNHEALTH_ANCHOR_DIR_FILE")
+        .env_remove("OWNHEALTH_SECRETS_KEY_FILE")
         .output()?)
 }
 
@@ -259,7 +291,8 @@ async fn backup_then_restore_test_then_restore_into_a_fresh_stack() -> R {
     assert!(!tmp.path().join("restore").exists());
 
     let fresh_db = TestDb::empty().await?;
-    let fresh = fresh_db.settings(&tmp.path().join("fresh"))?;
+    let mut fresh = fresh_db.settings(&tmp.path().join("fresh"))?;
+    fresh.secrets_key = s.secrets_key.clone(); // the key the backup was made under
     let restored = script("restore.sh", &env_for(&fresh, tmp.path()))?;
     assert!(restored.status.success(), "{}", text(&restored));
     let fresh_report: Value = serde_json::from_slice(&restored.stdout)?;

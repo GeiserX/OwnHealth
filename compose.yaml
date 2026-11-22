@@ -1,4 +1,5 @@
-# OwnHealth: the app and its Postgres. `cp .env.example .env`, set the secrets, `docker compose up -d`.
+# OwnHealth: the app and its Postgres. `cp .env.example .env`, set the secrets, write the key file
+# secrets/secrets_key (docs/quickstart.md), `docker compose up -d`.
 name: ownhealth
 
 # Two database roles. `ownhealth` owns the tables: the one-shot `admin` service uses it to migrate and
@@ -18,9 +19,11 @@ services:
     environment:
       OWNHEALTH_DATABASE_URL: postgresql://ownhealth@db:5432/ownhealth
       OWNHEALTH_DATA_DIR: /data
+      OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # backups and restores open the sealed files
     command: ["sh", "-c", "ownhealth migrate && sh /opt/ownhealth-db/app-role.sh"]
     healthcheck:
       disable: true
+    secrets: [secrets_key]
     volumes:
       - ownhealth-data:/data
 
@@ -41,6 +44,7 @@ services:
       OWNHEALTH_DB_PASSWORD: ${OWNHEALTH_APP_DB_PASSWORD:?set OWNHEALTH_APP_DB_PASSWORD in .env}
       OWNHEALTH_RUN_MIGRATIONS: "0" # the admin service migrated as the owner
       OWNHEALTH_DATA_DIR: /data
+      OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key
       # Throwaway demo only (docs/quickstart.md step 5); empty means off.
       OWNHEALTH_DEMO: ${OWNHEALTH_DEMO:-}
       OWNHEALTH_DEV_AUTH: ${OWNHEALTH_DEV_AUTH:-}
@@ -51,6 +55,7 @@ services:
       OWNHEALTH_ORTHANC_PASSWORD: ${OWNHEALTH_ORTHANC_PASSWORD:-}
     ports:
       - "127.0.0.1:${OWNHEALTH_HTTP_PORT:-8080}:8080"
+    secrets: [secrets_key]
     volumes:
       - ownhealth-data:/data
       - ./inbox:/inbox
@@ -77,10 +82,12 @@ services:
       OWNHEALTH_DB_PASSWORD: ${OWNHEALTH_APP_DB_PASSWORD:?set OWNHEALTH_APP_DB_PASSWORD in .env}
       OWNHEALTH_RUN_MIGRATIONS: "0"
       OWNHEALTH_DATA_DIR: /data
+      OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key
       OWNHEALTH_QUEUES: ocr
     command: ["ownhealth", "worker"]
     healthcheck:
       disable: true # a worker serves no /healthz
+    secrets: [secrets_key]
     volumes:
       - ownhealth-data:/data
 
@@ -255,6 +262,10 @@ networks:
   ow-egress: # the sidecar's way out to the vendors' APIs; no OwnHealth container joins it
 
 secrets:
+  # The key every profile's files and the inboxes' secrets are sealed under. Compose refuses to start
+  # without the file. Keep a copy with your backups: without it they cannot be read.
+  secrets_key:
+    file: ./secrets/secrets_key
   orthanc_password:
     environment: OWNHEALTH_ORTHANC_PASSWORD # read only when the imaging profile is on
 

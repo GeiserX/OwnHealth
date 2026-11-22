@@ -27,7 +27,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use ownhealth_core::access::Profile;
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::jose::{self, JoseError};
@@ -1106,7 +1106,9 @@ pub async fn store(
                 (Form::Text, _) | (_, None) => named,
                 (_, Some(given)) => given.to_string(),
             };
-            let sha = blobs.put_bytes(bytes).map_err(|e| Error::Other(e.into()))?;
+            let sha = blobs
+                .put_bytes(BlobOwner::Profile(profile.id), bytes)
+                .map_err(|e| Error::Other(e.into()))?;
             let doc = create_document(
                 &mut *conn,
                 &NewDocument {

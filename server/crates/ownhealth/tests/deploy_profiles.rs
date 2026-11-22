@@ -5,8 +5,8 @@
 //!   start one from `drumsergio/ownhealth:<app tag>-ocr`, as `ownhealth worker` on the `ocr` queue only,
 //!   connected as the non-owner role, sharing the app's data volume. Rendered by `docker compose
 //!   config`; skipped without docker compose.
-//! - The homelab app seals inbox secrets with a key from a secret file, and the OCR worker gets no
-//!   backup credentials.
+//! - In both files the admin service, the app and the OCR worker read the secrets key from a secret
+//!   file, never from a value in the file or .env, and the OCR worker gets no backup credentials.
 //! - With `COMPOSE_PROFILES=imaging` both files start Orthanc with DICOMweb and the OHIF plugin, the
 //!   `dicom-web` data source and authentication on, its password a docker secret, no published port.
 //!   Without the profile there is no Orthanc, and with no Orthanc URL set imaging stays off in the app.
@@ -180,22 +180,39 @@ fn the_ocr_profile_adds_one_worker_on_the_ocr_queue() -> R {
 }
 
 #[test]
-fn homelab_app_seals_inbox_secrets_with_a_key_file_and_mounts_the_watched_folder() -> R {
+fn every_blob_service_reads_the_secrets_key_from_a_file_and_the_app_mounts_the_watched_folder() -> R {
     if !has_compose() {
         eprintln!("docker compose not available: skipped");
         return Ok(());
     }
     let [(_, compose, env_file, extra), (_, quick, quick_env, quick_extra)] = cases();
     let services = render(&compose, &env_file, extra)?;
-    let app = &services["app"];
-    assert_eq!(env_str(app, "OWNHEALTH_SECRETS_KEY_FILE"), "/run/secrets/secrets_key");
-    let secrets: Vec<String> = app["secrets"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|s| s["source"].as_str().map(str::to_string))
-        .collect();
-    assert!(secrets.contains(&"secrets_key".to_string()), "{secrets:?}");
+    // every service that opens a blob holds the key, as a file: the binary refuses to start without it
+    for (case, file, env, extra) in cases() {
+        let on = render(&file, &env, &format!("{extra}COMPOSE_PROFILES=ocr\n"))?;
+        for svc in ["admin", "app", "ocr"] {
+            let s = &on[svc];
+            assert_eq!(
+                env_str(s, "OWNHEALTH_SECRETS_KEY_FILE"),
+                "/run/secrets/secrets_key",
+                "{case} {svc}"
+            );
+            assert!(
+                env_str(s, "OWNHEALTH_SECRETS_KEY").is_empty(),
+                "{case} {svc}: a key value"
+            );
+            let secrets: Vec<String> = s["secrets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s["source"].as_str().map(str::to_string))
+                .collect();
+            assert!(
+                secrets.contains(&"secrets_key".to_string()),
+                "{case} {svc}: {secrets:?}"
+            );
+        }
+    }
     for (case, services) in [
         ("homelab", services.clone()),
         ("quickstart", render(&quick, &quick_env, quick_extra)?),

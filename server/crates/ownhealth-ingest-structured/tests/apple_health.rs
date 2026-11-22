@@ -432,7 +432,9 @@ async fn upload_dispatch_runs_the_job() -> R {
         birth_date: d(1981, 2, 2),
         ..spec(3)
     });
-    let sha = env.blobs.put_bytes(&data)?;
+    let sha = env
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(fam.profile("sam")), &data)?;
     let mut tx = env.tx().await?;
     let out = dispatch_upload(
         &mut tx,

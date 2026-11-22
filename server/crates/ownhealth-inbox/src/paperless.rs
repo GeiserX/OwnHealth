@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use ownhealth_core::Runtime;
 use ownhealth_core::arrive::{Arrival, Arrived, arrive, store_bytes};
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::config::Settings;
 use ownhealth_core::dedup::seen_item;
 use ownhealth_core::error::{Error, Result};
@@ -271,7 +271,7 @@ async fn pull(
     let profile_id = profile_for(&mut conn, source, cfg, &meta.tags).await?;
     drop(conn);
     let data = client.original(meta.id).await?;
-    let (sha, size) = store_bytes(blobs, data).await?;
+    let (sha, size) = store_bytes(blobs, BlobOwner::Profile(profile_id), data).await?;
     let fallback = format!("paperless-{}", meta.id);
     let filename = meta
         .original_file_name

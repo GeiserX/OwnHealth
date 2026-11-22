@@ -730,8 +730,9 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     .await?;
     tx.commit().await?;
     let (mut removed, mut stuck) = (0usize, Vec::new());
+    let owner = ownhealth_core::blobs::BlobOwner::Profile(profile_id);
     for sha in &result.blobs {
-        match rt.blobs.delete(sha) {
+        match rt.blobs.delete(owner, sha) {
             Ok(true) => removed += 1,
             Ok(false) => {}
             Err(e) => {
@@ -739,6 +740,12 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
                 stuck.push(Value::from(sha.as_str()));
             }
         }
+    }
+    // The profile's key went with its rows, so its sealed files no longer open; the rest of them (a
+    // file another profile also holds, which keeps its own copy) go with the profile's folder. The
+    // retry job removes the folder again when one is queued.
+    if let Err(e) = rt.blobs.forget_profile(profile_id) {
+        tracing::warn!(error = %e, "removing the profile's sealed files failed; they no longer open");
     }
     let failed = folder::forget_folders(&rt.pool, &rt.settings, result.household_id, slug, folders).await;
     let folders_pending = failed.len();

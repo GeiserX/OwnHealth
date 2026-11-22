@@ -14,7 +14,8 @@ use ownhealth_core::access::{
     set_grant,
 };
 use ownhealth_core::audit::{AuditEvent, write_audit};
-use ownhealth_core::blobs::sha256_hex_to_bytes;
+use ownhealth_core::blobs::{BlobOwner, BlobStore, sha256_hex_to_bytes};
+use ownhealth_core::documents::Moved;
 use ownhealth_core::jobs::{EnqueueOptions, HandlerResult, Job, JobContext, JobError, enqueue, register_handler};
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
@@ -666,6 +667,38 @@ async fn profile_blobs(conn: &mut PgConnection, profile_id: Uuid) -> Result<BTre
     Ok(shas)
 }
 
+/// Once a document's move committed: the copies of its files stored for the profile it left, unless
+/// a row of that profile still names the same bytes. A copy left behind would stay readable under the
+/// old profile's key after the new profile is deleted. Returns how many files went.
+pub async fn drop_moved_copies(conn: &mut PgConnection, blobs: &BlobStore, moved: Moved) -> Result<usize> {
+    let BlobOwner::Profile(profile_id) = moved.from else {
+        return Ok(0); // a pending item's file is plain: nothing sealed to drop
+    };
+    let mut gone = 0;
+    'next: for sha in &moved.shas {
+        let bytes = sha256_hex_to_bytes(sha)?;
+        for (table, cols, owned) in BLOB_COLUMNS {
+            let cond: Vec<String> = cols.iter().map(|c| format!("{c} = $2")).collect();
+            let sql = format!(
+                "select 1 from {table} where ({owned}) and ({}) limit 1",
+                cond.join(" or ")
+            );
+            let hit: Option<i32> = sqlx::query_scalar(AssertSqlSafe(sql))
+                .bind(profile_id)
+                .bind(&bytes)
+                .fetch_optional(&mut *conn)
+                .await?;
+            if hit.is_some() {
+                continue 'next;
+            }
+        }
+        if blobs.drop_sealed(moved.from, sha)? {
+            gone += 1;
+        }
+    }
+    Ok(gone)
+}
+
 async fn still_referenced(conn: &mut PgConnection, sha: &[u8]) -> Result<bool> {
     for (table, cols, _) in BLOB_COLUMNS {
         let cond: Vec<String> = cols.iter().map(|c| format!("{c} = $1")).collect();
@@ -900,7 +933,7 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
             &mut *conn,
             UNLINK_JOB,
             // the household, so a retry that runs out of attempts shows in its review queue
-            &json!({"household_id": household_id, "blobs": orphans}),
+            &json!({"household_id": household_id, "profile_id": profile_id, "blobs": orphans}),
             EnqueueOptions {
                 run_after: Some(chrono::Utc::now() + chrono::Duration::seconds(60)),
                 ..EnqueueOptions::default()
@@ -927,8 +960,21 @@ async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
+    // the profile's sealed files: its key went with its rows, so they no longer open, and they go here
+    let profile = job
+        .payload
+        .get("profile_id")
+        .and_then(Value::as_str)
+        .and_then(|p| Uuid::parse_str(p).ok());
+    let owner = profile.map_or(BlobOwner::Reference, BlobOwner::Profile);
     let mut conn = ctx.pool.acquire().await?;
     let (mut removed, mut failed) = (0i32, 0usize);
+    if let Some(p) = profile
+        && let Err(e) = ctx.blobs.forget_profile(p)
+    {
+        tracing::warn!(error = %e, "removing a deleted profile's sealed files failed again");
+        failed += 1;
+    }
     for sha in &shas {
         let Ok(bytes) = sha256_hex_to_bytes(sha) else {
             continue;
@@ -936,7 +982,7 @@ async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {
         if still_referenced(&mut conn, &bytes).await? {
             continue;
         }
-        match ctx.blobs.delete(sha) {
+        match ctx.blobs.delete(owner, sha) {
             Ok(true) => removed += 1,
             Ok(false) => {}
             Err(e) => {

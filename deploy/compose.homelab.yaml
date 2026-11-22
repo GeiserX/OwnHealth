@@ -23,11 +23,12 @@ services:
       OWNHEALTH_DB_PASSWORD_FILE: /run/secrets/db_password
       OWNHEALTH_APP_DB_PASSWORD_FILE: /run/secrets/app_db_password
       OWNHEALTH_SECRET_KEY_FILE: /run/secrets/secret_key
+      OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # backups and restores open the sealed files
       RESTIC_PASSWORD_FILE: /run/secrets/restic_password
     command: ["sh", "-c", "ownhealth migrate && sh /opt/ownhealth-db/app-role.sh"]
     healthcheck:
       disable: true
-    secrets: [db_password, app_db_password, secret_key, restic_password]
+    secrets: [db_password, app_db_password, secret_key, secrets_key, restic_password]
     volumes:
       - ownhealth-data:/data # blobs, and /data/backups for the restic staging directory
     read_only: true
@@ -49,7 +50,7 @@ services:
       OWNHEALTH_DB_PASSWORD_FILE: /run/secrets/app_db_password
       OWNHEALTH_RUN_MIGRATIONS: "0" # the admin service migrated as the owner
       OWNHEALTH_SECRET_KEY_FILE: /run/secrets/secret_key
-      OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # seals inbox passwords and tokens (v0.2)
+      OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # seals every profile's files and the inbox secrets
       OWNHEALTH_BASE_URL: https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
       OWNHEALTH_INBOX_DIR: /inbox # the watched folder: ./inbox/<profile>/ on the host
       # The `imaging` profile (below): Orthanc's address, empty when imaging is off, and its password.
@@ -89,11 +90,12 @@ services:
       OWNHEALTH_DB_PASSWORD_FILE: /run/secrets/app_db_password
       OWNHEALTH_RUN_MIGRATIONS: "0"
       OWNHEALTH_SECRET_KEY_FILE: /run/secrets/secret_key
+      OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key
       OWNHEALTH_QUEUES: ocr
     command: ["ownhealth", "worker"]
     healthcheck:
       disable: true # a worker serves no /healthz
-    secrets: [app_db_password, secret_key]
+    secrets: [app_db_password, secret_key, secrets_key]
     volumes:
       - ownhealth-data:/data
     read_only: true
@@ -333,7 +335,7 @@ secrets:
   secret_key:
     file: ./secrets/secret_key
   secrets_key:
-    file: ./secrets/secrets_key # inbox credentials at rest; keep a copy with the restic password
+    file: ./secrets/secrets_key # profile files and inbox credentials at rest; keep a copy with the restic password
   restic_password:
     file: ./secrets/restic_password # keep a copy in your password manager: without it the backup is useless
   orthanc_password:

@@ -53,15 +53,26 @@ impl TestDb {
         Ok(TestDb { name, url, pool })
     }
 
-    /// Settings pointing at this database, with dev auth on, jobs off and blobs under `data_dir`.
+    /// Settings pointing at this database, with dev auth on, jobs off and blobs under `data_dir`, and
+    /// an OWNHEALTH_SECRETS_KEY made at run time (so a Runtime on them seals profile blobs, as the app
+    /// does). A test that needs the same key twice copies `secrets_key`.
     pub fn settings(&self, data_dir: &Path) -> anyhow::Result<Settings> {
         let mut env: HashMap<String, String> = HashMap::new();
+        env.insert("OWNHEALTH_SECRETS_KEY".into(), random_secrets_key());
         env.insert("OWNHEALTH_DATABASE_URL".into(), self.url.clone());
         env.insert("OWNHEALTH_DATA_DIR".into(), data_dir.display().to_string());
         env.insert("OWNHEALTH_DEV_AUTH".into(), "1".into());
         env.insert("OWNHEALTH_RUN_JOBS".into(), "0".into());
         Ok(Settings::from(&env)?)
     }
+}
+
+/// A new OWNHEALTH_SECRETS_KEY value: 32 random bytes in base64, made at run time so no key is
+/// ever written in a file.
+pub fn random_secrets_key() -> String {
+    let mut key = [0u8; 32];
+    rand::fill(&mut key[..]);
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key)
 }
 
 impl Drop for TestDb {

@@ -34,7 +34,7 @@ impl Env {
         let dir = tempfile::tempdir()?;
         let mut settings = db.settings(dir.path())?;
         settings.secrets_key = Some(TEST_SECRETS_KEY.into());
-        let blobs = BlobStore::new(dir.path().join("blobs"))?;
+        let blobs = BlobStore::for_settings(&settings)?;
         let ctx = JobContext::new(db.pool.clone(), Arc::new(settings), blobs.clone());
         let mut c = db.pool.acquire().await?;
         let fam = create_rivera_family(&mut c, &format!("Rivera {}", ownhealth_core::ids::token_hex(3))).await?;

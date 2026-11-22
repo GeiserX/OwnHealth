@@ -13,7 +13,7 @@ use serde_json::json;
 fn stored(blobs: &BlobStore, name: &str, bytes: &[u8]) -> anyhow::Result<StoredFile> {
     Ok(StoredFile {
         filename: name.into(),
-        sha256: blobs.put_bytes(bytes)?,
+        sha256: blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Reference, bytes)?,
         size: bytes.len() as i64,
     })
 }
