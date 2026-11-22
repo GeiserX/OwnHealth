@@ -710,14 +710,15 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     }
     // Where each referenced blob sits in this backup: its owner's sealed copy, or the plain one. The
     // keys come from the snapshot and the files from the copy, never from the live store, where a
-    // delete after the copy may already have shredded a key or removed a folder.
+    // delete after the copy may already have shredded a key or removed a folder. A key that does not
+    // open names no sealed file here; verify-restore reports it.
     let deks: HashMap<keys::Slot, keys::Dek> = match &settings.secrets_key {
         Some(_) => {
             let kek = Kek::from_settings(settings)?;
             wrapped
                 .iter()
-                .map(|(slot, w, fp)| Ok((*slot, kek.unwrap_slot(*slot, fp, w)?)))
-                .collect::<Result<_>>()?
+                .filter_map(|(slot, w, fp)| Some((*slot, kek.unwrap_slot(*slot, fp, w).ok()?)))
+                .collect()
         }
         None => HashMap::new(),
     };
