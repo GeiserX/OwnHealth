@@ -1912,3 +1912,26 @@ async fn the_file_answer_is_never_cached() -> R {
     assert_eq!(f.header("cache-control"), "no-store");
     Ok(())
 }
+
+/// A stored locale outside the registry (migration 1280 lets `app_user.locale` hold every planned
+/// language) never reaches `shl.lang`: a link made with no `lang` takes the registry default.
+#[tokio::test]
+async fn a_link_with_no_lang_takes_a_registry_language() -> R {
+    let env = env().await?;
+    sqlx::query("update app_user set locale = $1 where id = $2")
+        .bind("de")
+        .bind(env.user("alex"))
+        .execute(env.pool())
+        .await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let r = alex
+        .post("/api/profiles/alex/shl", &json!({"label": "Dr", "days": 7}))
+        .await?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.json);
+    let lang: String = sqlx::query_scalar("select lang from shl where label = $1")
+        .bind("Dr")
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(lang, ownhealth_core::langs::LANGS[0]);
+    Ok(())
+}
