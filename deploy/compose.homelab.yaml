@@ -52,15 +52,16 @@ services:
       OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # seals inbox passwords and tokens (v0.2)
       OWNHEALTH_BASE_URL: https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
       OWNHEALTH_INBOX_DIR: /inbox # the watched folder: ./inbox/<profile>/ on the host
-      # Only Caddy reaches the app, from the compose network, so its X-Forwarded-For names the client
-      # (the share link access log keeps that address).
+      # Caddy reaches the app from the compose network, so its X-Forwarded-For names the client (the
+      # share link access log keeps that address). With the wearables profile on, the OW containers
+      # share that network and these ranges, so the log would also take an address they forward.
       OWNHEALTH_TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
     secrets: [app_db_password, secret_key, secrets_key]
     volumes:
       - ownhealth-data:/data
       - ./inbox:/inbox
     # No published port: from outside, only Caddy reaches the app. With the wearables profile on, the
-    # sidecar shares the compose network and reaches app:8080 too, with no more access than any client.
+    # sidecar shares the compose network and reaches app:8080 too; it needs a login like any client.
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
