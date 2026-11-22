@@ -99,7 +99,14 @@ test('the audit card shows the log verified, anchored, rewritten and broken, in 
 	sql("insert into audit_event (actor_kind, via, action, tool) values ('system', 'job', 'read', 'e2e')"); // on no profile
 	await page.goto('/mcp-access?lang=es');
 	const integridad = page.getByRole('group', { name: 'El propio registro' });
-	await expect(integridad.getByText(new RegExp(`La entrada ${last[0]} se cambió después de escribirse\\. Las entradas hasta la ${Number(last[0]) - 1} están verificadas\\.`))).toBeVisible();
+	// a break on top of the rewrite: the line names the break and never says the entries before it
+	// are verified, because those are the rewritten ones
+	await expect(
+		integridad.getByText(
+			`La entrada ${last[0]} se cambió después de escribirse. Además, el registro ya no coincide con la copia guardada fuera de la base de datos (abajo), así que no se puede confiar en ninguna de sus entradas.`
+		)
+	).toBeVisible();
+	await expect(integridad.getByText(/verificad/)).toHaveCount(0);
 	await expect(integridad.getByText(new RegExp(`Ya no coincide con la entrada ${seq} `))).toBeVisible();
 
 	// undo: the rows as they were and the chain hashed again give back the anchored hash

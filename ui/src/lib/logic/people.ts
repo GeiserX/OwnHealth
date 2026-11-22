@@ -106,8 +106,10 @@ export type AuditRow = { via: string; actor: string; action: string; tool: strin
  * match the head the last backup kept outside the database. Each is a dict key, its values and a pill
  * tone; `num` formats the entry numbers (the page passes its number formatter), and `at` stays an ISO
  * time for the caller to format. While the anchor does not hold, the chain line never reads as
- * verified: the entries may link up, but the log no longer reaches the copy the backup kept. */
-export type ChainLine = { key: string; vars: Record<string, string | number>; tone: 'p-ok' | 'p-watch' | 'p-out' | 'p-info' };
+ * verified, broken or not: the entries may link up, but the log no longer reaches the copy the
+ * backup kept, or that copy cannot be read to compare. A broken line names the break in `key` and
+ * says how far that leaves the log in `tail`, a second sentence the page shows after it. */
+export type ChainLine = { key: string; vars: Record<string, string | number>; tone: 'p-ok' | 'p-watch' | 'p-out' | 'p-info'; tail?: string };
 export function chainLines(
 	c: {
 		verified: number;
@@ -118,16 +120,22 @@ export function chainLines(
 ): ChainLine[] {
 	const n = num(c.verified);
 	const a = c.anchor;
-	const anchorFails = a.state === 'mismatch' || a.state === 'unreadable';
 	const chain: ChainLine = c.broken
 		? c.broken.kind === 'uncheckable'
 			? { key: 'au_chain_uncheckable', vars: {}, tone: 'p-out' }
-			: { key: 'au_chain_broken_' + c.broken.kind, vars: { n, seq: num(c.broken.seq ?? c.verified + 1) }, tone: 'p-out' }
-		: anchorFails
+			: {
+					key: 'au_chain_broken_' + c.broken.kind,
+					vars: { n, seq: num(c.broken.seq ?? c.verified + 1) },
+					tone: 'p-out',
+					tail: a.state === 'mismatch' ? 'au_chain_upto_mismatch' : a.state === 'unreadable' ? 'au_chain_upto_unreadable' : 'au_chain_upto'
+				}
+		: a.state === 'mismatch'
 			? { key: 'au_chain_unanchored', vars: { n }, tone: 'p-out' }
-			: c.verified
-				? { key: 'au_chain_ok', vars: { n }, tone: 'p-ok' }
-				: { key: 'au_chain_empty', vars: {}, tone: 'p-info' };
+			: a.state === 'unreadable'
+				? { key: 'au_chain_uncompared', vars: { n }, tone: 'p-out' }
+				: c.verified
+					? { key: 'au_chain_ok', vars: { n }, tone: 'p-ok' }
+					: { key: 'au_chain_empty', vars: {}, tone: 'p-info' };
 	const vars = { seq: num(a.seq ?? 0), at: a.at ?? '' };
 	const anchor: ChainLine =
 		a.state === 'ok'

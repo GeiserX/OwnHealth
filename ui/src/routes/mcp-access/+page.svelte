@@ -244,7 +244,7 @@
 					<div class="muted">{t('loading')}</div>
 				{:else}
 					{#each chainLines(chain.data, int) as l (l.key)}
-						<div class="line"><span class="pill {l.tone}"><i aria-hidden="true"></i>{t(pillKey[l.tone])}</span><span>{tf(l.key, { ...l.vars, at: day(String(l.vars.at ?? '')) })}</span></div>
+						<div class="line"><span class="pill {l.tone}"><i aria-hidden="true"></i>{t(pillKey[l.tone])}</span><span>{tf(l.key, { ...l.vars, at: day(String(l.vars.at ?? '')) })}{#if l.tail}{' '}{tf(l.tail, l.vars)}{/if}</span></div>
 					{/each}
 				{/if}
 			</div>

@@ -13,6 +13,12 @@ const fill = (lang: 'en' | 'es', key: string, vars: Record<string, string | numb
 
 const anchor = { state: 'ok', seq: 40, at: '2026-11-22' };
 
+/** A line as the page shows it: its key, then its tail sentence when it has one. */
+const render = (lang: 'en' | 'es', l: { key: string; vars: Record<string, string | number>; tail?: string }) =>
+	[l.key, ...(l.tail ? [l.tail] : [])].map((k) => fill(lang, k, l.vars)).join(' ');
+
+const KINDS = ['hash', 'prev_hash', 'missing_link', 'missing_event', 'unlinked'];
+
 test('a held chain with a matching anchor reads as two OK lines', () => {
 	const lines = chainLines({ verified: 42, broken: null, anchor });
 	assert.deepEqual(
@@ -29,21 +35,62 @@ test('a held chain with a matching anchor reads as two OK lines', () => {
 test('a changed entry turns the chain line into a problem that names it', () => {
 	const [chain] = chainLines({ verified: 6, broken: { seq: 7, kind: 'hash' }, anchor });
 	assert.deepEqual([chain.key, chain.tone, chain.vars], ['au_chain_broken_hash', 'p-out', { n: '6', seq: '7' }]);
-	assert.equal(fill('en', chain.key, chain.vars), 'Entry 7 was changed after it was written. Entries up to 6 are verified.');
+	assert.equal(render('en', chain), 'Entry 7 was changed after it was written. Entries up to 6 are verified.');
+	assert.equal(render('es', chain), 'La entrada 7 se cambió después de escribirse. Las entradas hasta la 6 están verificadas.');
+});
+
+test('a broken log that no longer matches its anchor, or cannot be compared with it, names the break and never reads as verified', () => {
+	const said = {
+		mismatch: { en: /no longer matches the copy kept outside the database/, es: /ya no coincide con la copia guardada fuera de la base de datos/ },
+		unreadable: { en: /cannot be compared with the copy kept outside the database/, es: /no se puede comparar con la copia guardada fuera de la base de datos/ }
+	};
+	for (const state of ['mismatch', 'unreadable'] as const) {
+		for (const kind of KINDS) {
+			const [chain] = chainLines({ verified: 6, broken: { seq: kind === 'unlinked' ? null : 7, kind }, anchor: { ...anchor, state } });
+			assert.equal(chain.tone, 'p-out', `${state} ${kind}`);
+			for (const lang of ['en', 'es'] as const) {
+				const text = render(lang, chain);
+				assert.doesNotMatch(text, /verifi/i, `${state} ${kind} ${lang}: ${text}`);
+				assert.match(text, said[state][lang], `${state} ${kind} ${lang}: ${text}`);
+			}
+			// the break itself is still named first
+			const alone = fill('en', 'au_chain_broken_' + kind, chain.vars);
+			assert.ok(render('en', chain).startsWith(alone), `${state} ${kind}`);
+		}
+	}
+	const [hash] = chainLines({ verified: 6, broken: { seq: 7, kind: 'hash' }, anchor: { ...anchor, state: 'mismatch' } });
+	assert.match(render('en', hash), /^Entry 7 was changed after it was written\. /);
+	assert.match(render('es', hash), /^La entrada 7 se cambió después de escribirse\. /);
+});
+
+test('an unreadable anchor says the log cannot be compared with it, not that it no longer matches', () => {
+	const [chain] = chainLines({ verified: 42, broken: null, anchor: { ...anchor, state: 'unreadable' } });
+	assert.equal(chain.tone, 'p-out');
+	const en = render('en', chain);
+	const es = render('es', chain);
+	assert.match(en, /cannot be compared with the copy kept outside the database/, en);
+	assert.doesNotMatch(en, /no longer matches/, en);
+	assert.match(es, /no se puede comparar con la copia guardada fuera de la base de datos/, es);
+	assert.doesNotMatch(es, /ya no coincide/, es);
+	const [mismatch] = chainLines({ verified: 42, broken: null, anchor: { ...anchor, state: 'mismatch' } });
+	assert.match(render('en', mismatch), /no longer matches the copy kept outside the database/);
 });
 
 test('a rewritten log that holds again never reads as verified while the anchor does not match', () => {
-	for (const state of ['mismatch', 'unreadable']) {
+	for (const [state, key] of [
+		['mismatch', 'au_chain_unanchored'],
+		['unreadable', 'au_chain_uncompared']
+	]) {
 		const lines = chainLines({ verified: 42, broken: null, anchor: { ...anchor, state } });
 		assert.deepEqual(
 			lines.map((l) => [l.key, l.tone]),
 			[
-				['au_chain_unanchored', 'p-out'],
+				[key, 'p-out'],
 				[`au_anchor_${state}`, 'p-out']
 			],
 			state
 		);
-		for (const lang of ['en', 'es'] as const) assert.doesNotMatch(fill(lang, lines[0].key, lines[0].vars), /^(Every|Todas)/, `${state} ${lang}`);
+		for (const lang of ['en', 'es'] as const) assert.doesNotMatch(render(lang, lines[0]), /^(Every|Todas)/, `${state} ${lang}`);
 	}
 	const [, mismatch] = chainLines({ verified: 42, broken: null, anchor: { ...anchor, state: 'mismatch' } });
 	const text = fill('en', mismatch.key, { ...mismatch.vars, at: '2026-11-22' });
@@ -91,16 +138,19 @@ test('every state has words in en and es with no placeholder left', () => {
 		{ verified: 0, broken: { seq: null, kind: 'uncheckable' }, anchor: { state: 'unreadable', seq: null, at: null } },
 		{ verified: 0, broken: { seq: null, kind: 'uncheckable' }, anchor: { ...anchor, state: 'unchecked' } },
 		{ verified: 5, broken: null, anchor: { ...anchor, state: 'mismatch' } },
-		...['hash', 'prev_hash', 'missing_link', 'missing_event', 'unlinked'].map((kind) => ({
-			verified: 3,
-			broken: { seq: kind === 'unlinked' ? null : 4, kind },
-			anchor
-		}))
+		{ verified: 5, broken: null, anchor: { ...anchor, state: 'unreadable' } },
+		...['ok', 'mismatch', 'unreadable'].flatMap((state) =>
+			KINDS.map((kind) => ({
+				verified: 3,
+				broken: { seq: kind === 'unlinked' ? null : 4, kind },
+				anchor: { ...anchor, state }
+			}))
+		)
 	];
 	for (const c of cases) {
 		for (const l of chainLines(c)) {
 			for (const lang of ['en', 'es'] as const) {
-				const text = fill(lang, l.key, { ...l.vars, at: '2026-11-22' });
+				const text = render(lang, { ...l, vars: { ...l.vars, at: '2026-11-22' } });
 				assert.ok(!/\{\w+\}/.test(text), `${lang} ${l.key}: ${text}`);
 			}
 		}
