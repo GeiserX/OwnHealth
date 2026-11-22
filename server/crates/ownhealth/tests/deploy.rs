@@ -607,13 +607,22 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
             .filter(|s| !OW_ALL.contains(s) && *s != "db")
             .flat_map(&nets)
             .collect();
-        assert!(ours.contains(&"default".to_string()), "{case}: the app's own network: {ours:?}");
+        assert!(
+            ours.contains(&"default".to_string()),
+            "{case}: the app's own network: {ours:?}"
+        );
         for s in OW_ALL {
             for n in nets(s) {
-                assert!(n == "ow-db" || !ours.contains(&n), "{case}: {s} shares {n} with OwnHealth");
+                assert!(
+                    n == "ow-db" || !ours.contains(&n),
+                    "{case}: {s} shares {n} with OwnHealth"
+                );
             }
         }
-        assert!(!ours.contains(&"ow-db".to_string()), "{case}: an OwnHealth service is on ow-db");
+        assert!(
+            !ours.contains(&"ow-db".to_string()),
+            "{case}: an OwnHealth service is on ow-db"
+        );
         assert!(nets("db").contains(&"ow-db".to_string()), "{case}: db is not on ow-db");
         assert_eq!(doc["networks"]["ow-db"]["internal"], true, "{case}: ow-db network");
         for s in ["ow-db-init", "ow-app", "ow-worker", "ow-beat"] {
@@ -857,7 +866,10 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
         app["State"],
         app["Health"]
     );
-    assert_ne!(app["ID"], before["ID"], "{case}: the profile edit to .env should recreate the app");
+    assert_ne!(
+        app["ID"], before["ID"],
+        "{case}: the profile edit to .env should recreate the app"
+    );
     let init_log = project.run(&["logs", "--no-color", "ow-db-init"])?;
     let init_log = String::from_utf8_lossy(&init_log.stdout).to_string() + &String::from_utf8_lossy(&init_log.stderr);
     assert!(
