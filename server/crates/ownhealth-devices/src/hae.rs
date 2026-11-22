@@ -352,8 +352,9 @@ pub async fn import_push(
     })
 }
 
-/// Remove this source's push bodies older than `PUSH_KEEP_DAYS`, and their blobs when no other row
-/// (another inbox's item, a document, a held mail) still holds the same bytes.
+/// Remove this source's push bodies older than `PUSH_KEEP_DAYS`. The profile's own copy of a body goes
+/// once no row of that profile still names the same bytes (another of its inboxes, a document of it);
+/// the shared plain copy goes once no row at all does (another person's inbox, a held mail).
 async fn prune_pushes(
     conn: &mut PgConnection,
     blobs: &BlobStore,
@@ -372,17 +373,26 @@ async fn prune_pushes(
     .bind(PRUNE_BATCH)
     .fetch_all(&mut *conn)
     .await?;
+    let profile = match owner {
+        ownhealth_core::blobs::BlobOwner::Profile(p) => Some(p),
+        _ => None,
+    };
     for sha in gone.into_iter().flatten() {
-        let held: bool = sqlx::query_scalar(
-            "select exists (select 1 from source_item where blob_sha256 = decode($1, 'hex')) \
+        let (mine, held): (bool, bool) = sqlx::query_as(
+            "select exists (select 1 from source_item where blob_sha256 = decode($1, 'hex') and profile_id = $2) \
+             or exists (select 1 from document where blob_sha256 = decode($1, 'hex') and profile_id = $2), \
+             exists (select 1 from source_item where blob_sha256 = decode($1, 'hex')) \
              or exists (select 1 from document where blob_sha256 = decode($1, 'hex')) \
              or exists (select 1 from quarantine_item where raw_blob = decode($1, 'hex'))",
         )
         .bind(&sha)
+        .bind(profile)
         .fetch_one(&mut *conn)
         .await?;
         if !held {
             blobs.delete(owner, &sha)?;
+        } else if !mine {
+            blobs.drop_sealed(owner, &sha)?;
         }
     }
     Ok(())
