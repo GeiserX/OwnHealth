@@ -24,6 +24,7 @@ pub type UploadKind = &'static str;
 pub fn job_kind(kind: &str) -> Option<&'static str> {
     Some(match kind {
         "pdf" => "import.pdf",
+        "fit" | "fit_gz" => "import.fit",
         "apple_health_zip" => "import.apple_health",
         "fhir_json" | "fhir_ndjson" => "import.fhir_bundle",
         "genome_facts" => "import.genome_facts",
@@ -35,6 +36,8 @@ pub fn job_kind(kind: &str) -> Option<&'static str> {
 pub fn mime(kind: &str) -> Option<&'static str> {
     Some(match kind {
         "pdf" => "application/pdf",
+        "fit" => "application/vnd.ant.fit",
+        "fit_gz" => "application/gzip",
         "fhir_json" => "application/fhir+json",
         "fhir_ndjson" => "application/fhir+ndjson",
         "apple_health_zip" => "application/zip",
@@ -55,6 +58,17 @@ fn zip_has_export_xml(path: &Path) -> Option<bool> {
 /// Whether `head` starts a zip, the one kind `sniff` reads further than the first bytes of.
 pub fn is_zip(head: &[u8]) -> bool {
     head.starts_with(b"PK\x03\x04")
+}
+
+/// A FIT file header: its size (12 or 14 bytes), then `.FIT` at bytes 8 to 11.
+fn is_fit_header(head: &[u8]) -> bool {
+    head.len() >= 12 && matches!(head[0], 12 | 14) && &head[8..12] == b".FIT"
+}
+
+/// A gzip stream whose first unpacked bytes are a FIT header (only those 12 bytes are unpacked).
+fn gzip_holds_fit(head: &[u8]) -> bool {
+    let mut first = [0u8; 12];
+    flate2::read::MultiGzDecoder::new(head).read_exact(&mut first).is_ok() && is_fit_header(&first)
 }
 
 /// Classify an upload from its name and first bytes (and, for zips, its member list).
@@ -82,6 +96,15 @@ pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKin
     }
     if name.ends_with(".tbi") {
         return "tbi";
+    }
+    // a FIT activity file (slice 29), as the device wrote it or gzipped: before the gzip rule below
+    if is_fit_header(head) {
+        return "fit";
+    }
+    // a .fit.gz name goes to the FIT importer even when its first block does not unpack, so a damaged
+    // one is refused as a damaged FIT file
+    if head.starts_with(b"\x1f\x8b") && (gzip_holds_fit(head) || name.ends_with(".fit.gz")) {
+        return "fit_gz";
     }
     if name.ends_with(".vcf.gz") || name.ends_with(".vcf.bgz") || head.starts_with(b"\x1f\x8b") {
         return "vcf";
@@ -111,6 +134,34 @@ pub struct DocumentRef {
     pub id: Uuid,
     pub created: bool,
     pub reactivated: bool,
+}
+
+/// The `document.doc_type` check constraint (migration 1221; `check_mirror.rs` keeps them equal).
+pub const DOC_TYPES: [&str; 8] = [
+    "lab_report",
+    "imaging_report",
+    "discharge",
+    "prescription",
+    "genomics",
+    "ecg",
+    "other",
+    WEARABLES_DOC_TYPE,
+];
+
+/// The `doc_type` of a raw wearables export: a FIT activity file (`import.fit`) and a Gadgetbridge
+/// database (`import.gadgetbridge`) today. Every wearables importer stores its file with this type, so a
+/// wearables document needs `read:wearables` (not `read:records`) to be listed, opened or downloaded:
+/// it holds every reading, and a FIT file held the route.
+pub const WEARABLES_DOC_TYPE: &str = "wearables";
+
+/// Whether the document `doc` (a table alias, like `d`) is part of the medical record, as a SQL
+/// boolean: every document but a raw wearables export. A wearables export is dated by its first
+/// activity, but a run is no medical record, and its readings are on the Wearables screen under
+/// read:wearables. So every reader that takes documents by date or cites them (the timeline, the
+/// record gaps and their visits, the evidence of a Due decision) leaves wearables exports out through
+/// this one rule.
+pub fn record_document_sql(doc: &str) -> String {
+    format!("{doc}.doc_type is distinct from '{WEARABLES_DOC_TYPE}'")
 }
 
 /// The `document_source.channel` check constraint: how one arrival came in.

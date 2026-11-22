@@ -24,6 +24,7 @@ fn mirrors() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
             documents::CHANNELS.to_vec(),
         ),
         ("src", "src_kind_check", provenance::SRC_KINDS.to_vec()),
+        ("document", "document_doc_type_check", documents::DOC_TYPES.to_vec()),
         ("review_item", "review_item_kind_check", review::REVIEW_KINDS.to_vec()),
         ("app_user", "app_user_locale_check", langs::LOCALES.to_vec()),
         ("api_token", "api_token_lang_check", langs::MCP_LANGS.to_vec()),

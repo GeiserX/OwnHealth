@@ -8,6 +8,10 @@
 //!
 //! Files are spooled to disk while the form is read, then land in the blob store once the caller may
 //! import on the profile; the dispatcher creates documents and enqueues each lane's import job.
+//!
+//! A job's `result` counts what its import brought. The result of a wearables import
+//! ([`WEARABLE_JOBS`]) is shown only to a caller who may read wearables on that profile; anyone else
+//! with a grant there sees the job with `result: null`.
 
 use std::path::PathBuf;
 
@@ -198,6 +202,9 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     Ok(Json(result))
 }
 
+/// The import jobs whose result counts a profile's wearable samples and names its devices.
+pub const WEARABLE_JOBS: [&str; 2] = ["import.fit", "import.gadgetbridge"];
+
 /// Import jobs of the caller's profiles, newest first; `ids=1,2,3` to poll specific ones.
 async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>) -> R<Json<Value>> {
     let mut e = Errors::new();
@@ -211,9 +218,11 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
             .collect()
     });
     let mut tx = rt.pool.begin().await?;
-    let pids: Vec<String> = accessible_profiles(&mut tx, &caller.0)
-        .await?
+    let perms = accessible_profiles(&mut tx, &caller.0).await?;
+    let pids: Vec<String> = perms.iter().map(|p| p.profile.id.to_string()).collect();
+    let wearables: Vec<String> = perms
         .iter()
+        .filter(|p| p.has("read:wearables"))
         .map(|p| p.profile.id.to_string())
         .collect();
     let rows = sqlx::query(
@@ -235,6 +244,13 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         .collect::<Result<Vec<_>, _>>()?;
     for j in &mut jobs {
         pydantic_datetimes(j, &["created_at", "finished_at"]);
+        let wearable = j["kind"].as_str().is_some_and(|k| WEARABLE_JOBS.contains(&k));
+        let may_read = j["profile_id"]
+            .as_str()
+            .is_some_and(|p| wearables.iter().any(|w| w == p));
+        if wearable && !may_read {
+            j["result"] = Value::Null;
+        }
     }
     Ok(Json(json!({"jobs": jobs})))
 }
