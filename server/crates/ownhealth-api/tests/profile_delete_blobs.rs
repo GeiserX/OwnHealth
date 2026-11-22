@@ -32,14 +32,14 @@ type R = anyhow::Result<()>;
 /// 32 bytes of 0x0b, base64. Test-only key.
 const KEY: &str = "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws=";
 
-/// Every file in the blob store, by its sha256 hex name. A folder of the store it cannot list fails
-/// the test, so a file there never reads as removed.
 /// Where the plain layout keeps a blob, for tests that break the file on disk.
 fn blob_file(env: &Env, sha: &str) -> std::path::PathBuf {
     let root = env.rt.settings.blobs_path();
     root.join("sha256").join(&sha[..2]).join(&sha[2..4]).join(sha)
 }
 
+/// Every file in the blob store, by its sha256 hex name. A folder of the store it cannot list fails
+/// the test, so a file there never reads as removed.
 fn stored(root: &Path) -> BTreeSet<String> {
     fn walk(dir: &Path, out: &mut BTreeSet<String>) {
         let fail = |e: std::io::Error| -> ! { panic!("cannot list the blob store at {}: {e}", dir.display()) };
