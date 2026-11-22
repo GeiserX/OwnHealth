@@ -587,42 +587,6 @@ async fn a_cgm_import_result_reaches_only_those_who_may_read_wearables() -> R {
     Ok(())
 }
 
-#[tokio::test]
-async fn a_cgm_document_shows_its_counts_only_to_those_who_may_read_wearables() -> R {
-    let a = app().await?;
-    let doc: uuid::Uuid = sqlx::query_scalar(
-        "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, filename, doc_type, flags) \
-         values ($1, $2, sha256('x'::bytea), 'text/csv', 1, 'clarity.csv', 'other', \
-         '{\"import\": {\"accepted\": 8, \"reasons\": {\"below_sensor_range\": 1}}, \
-           \"cgm_csv\": {\"vendor\": \"dexcom_clarity\", \"readings\": 8, \"devices\": [\"Dexcom G7\"]}}') returning id",
-    )
-    .bind(a.family.household_id)
-    .bind(a.family.profile("carmen"))
-    .fetch_one(&a.rt.pool)
-    .await?;
-    let (s, v) = a.get("alex", &format!("/documents/{doc}")).await?;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    // the caregiver reads what the file is, not what it brought
-    assert_eq!(v["flags"]["cgm_csv"], json!({"vendor": "dexcom_clarity"}), "{v}");
-    assert_eq!(v["flags"].get("import"), None, "{v}");
-    let (_, l) = a.get("alex", "/profiles/carmen/documents").await?;
-    assert_eq!(
-        l["items"][0]["flags"]["cgm_csv"],
-        json!({"vendor": "dexcom_clarity"}),
-        "{l}"
-    );
-    // on lucia, whose guardian holds every scope, alex reads it all
-    sqlx::query("update document set profile_id = $1 where id = $2")
-        .bind(a.family.profile("lucia"))
-        .bind(doc)
-        .execute(&a.rt.pool)
-        .await?;
-    let (_, v) = a.get("alex", &format!("/documents/{doc}")).await?;
-    assert_eq!(v["flags"]["cgm_csv"]["readings"], json!(8), "{v}");
-    assert_eq!(v["flags"]["import"]["accepted"], json!(8), "{v}");
-    Ok(())
-}
-
 /// Sam's grant on Alex, as these categories.
 async fn grant_sam(a: &App, categories: &[&str]) -> R {
     sqlx::query("update profile_grant set categories = $3 where user_id = $1 and profile_id = $2")
@@ -1050,6 +1014,9 @@ async fn a_document_with_cgm_flags_needs_read_wearables_whatever_its_type() -> R
     grant_sam(&a, &["read:summary", "read:records", "read:labs", "read:wearables"]).await?;
     let (_, v) = a.get("sam", "/profiles/alex/documents").await?;
     assert!(listed(&v), "{v}");
+    let (s, v) = a.get("sam", &format!("/documents/{doc}")).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["flags"]["cgm_csv"]["readings"], json!(1), "{v}");
     let (s, _, body) = file_as(&a, "sam", doc).await?;
     assert_eq!((s, body.as_slice()), (StatusCode::OK, CLARITY));
     Ok(())

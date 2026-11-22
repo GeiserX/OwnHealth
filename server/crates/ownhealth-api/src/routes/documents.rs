@@ -88,11 +88,10 @@ fn unknown(message: &str) -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "unknown", message)
 }
 
-/// A document as the list and the detail show it. `wearables`: the caller reads wearables on its
-/// profile; without it, a CGM export says what it is (`flags.cgm_csv.vendor`) and not what it brought
-/// (its counts, sensors and import summary).
-fn summary(row: &Map<String, Value>, snippet: Option<&str>, wearables: bool) -> Map<String, Value> {
-    let mut flags: Map<String, Value> = row
+/// A document as the list and the detail show it. A CGM export's flags (its counts, sensors and import
+/// summary) reach only a caller who may read wearables: [`scope_for`] lets no one else list or open it.
+fn summary(row: &Map<String, Value>, snippet: Option<&str>) -> Map<String, Value> {
+    let flags: Map<String, Value> = row
         .get("flags")
         .and_then(Value::as_object)
         .map(|f| {
@@ -102,13 +101,6 @@ fn summary(row: &Map<String, Value>, snippet: Option<&str>, wearables: bool) -> 
                 .collect()
         })
         .unwrap_or_default();
-    if !wearables && let Some(cgm) = flags.get("cgm_csv").cloned() {
-        flags.shift_remove("import");
-        flags.insert(
-            "cgm_csv".into(),
-            json!({"vendor": cgm.get("vendor").cloned().unwrap_or(Value::Null)}),
-        );
-    }
     let mut out = Map::new();
     for k in ["id", "profile_id"] {
         out.insert(k.into(), row.get(k).cloned().unwrap_or(Value::Null));
@@ -360,7 +352,7 @@ pub async fn list_for(
         } else {
             None
         };
-        let mut item = summary(&j, snip, perm.has("read:wearables"));
+        let mut item = summary(&j, snip);
         // the day this document counts as `done` evidence from: its collection day, else its report
         // day, the rule prevention::evidence applies
         item.insert(
@@ -439,7 +431,7 @@ async fn get_document(
     )
     .await?;
     tx.commit().await?;
-    let mut out = summary(&doc.row, None, doc.perm.has("read:wearables"));
+    let mut out = summary(&doc.row, None);
     out.insert("mime".into(), doc.row.get("mime").cloned().unwrap_or(Value::Null));
     out.insert(
         "size_bytes".into(),
