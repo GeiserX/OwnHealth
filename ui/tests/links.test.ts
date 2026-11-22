@@ -16,6 +16,8 @@ const page = readFileSync(new URL('../src/routes/links/+page.svelte', import.met
 const STATES = ['active', 'paused', 'revoked', 'expired', 'locked_out'] as const;
 const REASONS = ['sharing_off', 'person', 'locked', 'access_changed'] as const;
 const KINDS = ['manifest', 'file', 'passcode_wrong', 'passcode_missing'] as const;
+// an expiry far from every `now` the tests pass
+const LATER = '2099-01-01T00:00:00Z';
 
 test('only an owner or a guardian may share, and the menu shows Share links only to them', () => {
 	assert.ok(mayShare('owner') && mayShare('guardian'));
@@ -79,7 +81,30 @@ test('a link row says when it was made in words for a link, and a past expiry as
 	assert.equal(expiryKey({ expires_at: '2026-11-29T12:00:00Z' }, now), 'shl_expires');
 	assert.equal(expiryKey({ expires_at: '2026-11-22T11:59:59Z' }, now), 'shl_expired_on');
 	assert.equal(expiryKey({ expires_at: '2026-11-22T12:00:00Z' }, now), 'shl_expired_on');
-	assert.match(page, /t\(expiryKey\(x, Date\.now\(\)\)\)/, 'every state, a revoked or locked-out link too');
+	assert.match(page, /t\(expiryKey\(x, now\)\)/, 'every state, a revoked or locked-out link too');
+});
+
+test('a link whose expiry passes while the page is open reads expired, without Revoke, on the next minute', () => {
+	const now = Date.parse('2026-11-22T12:00:00Z');
+	const soon = '2026-11-22T12:00:30Z';
+	const past = '2026-11-22T11:59:59Z';
+	// before its expiry the server's word stands
+	for (const s of STATES) assert.equal(stateOf({ state: s, reason: null, expires_at: soon }, now).key, 'shl_st_' + s, s);
+	// after it, a live or locked-out link has expired, as the server would now say (routes/shl.rs state)
+	for (const s of ['active', 'paused', 'locked_out'] as const) {
+		const x = { state: s, reason: s === 'paused' ? ('sharing_off' as const) : null, expires_at: past };
+		assert.deepEqual(stateOf(x, now), { key: 'shl_st_expired', why: null, tone: 'p-out' }, s);
+		assert.equal(revocable(x, now), false, s);
+	}
+	// a revoked link stays revoked, with its reason
+	assert.deepEqual(stateOf({ state: 'revoked', reason: 'person', expires_at: past }, now), { key: 'shl_st_revoked', why: 'shl_why_person', tone: 'p-out' });
+	assert.equal(revocable({ state: 'active', expires_at: soon }, now), true);
+	// one clock for the rows, moved each minute and cleared when the page goes
+	assert.match(page, /setInterval\(\(\) => \(now = Date\.now\(\)\), 60_000\)/);
+	assert.match(page, /return \(\) => clearInterval\(/);
+	assert.match(page, /stateOf\(x, now\)/);
+	assert.match(page, /revocable\(x, now\)/);
+	assert.doesNotMatch(page, /Date\.now\(\)\)\)/, 'no row reads the time by itself');
 });
 
 test('the step-up note is not part of a heading, and the new link has a live region and the focus', () => {
@@ -94,15 +119,15 @@ test('the step-up note is not part of a heading, and the new link has a live reg
 
 test('every state, reason and access event has words in es and en, and only a live link can be revoked', () => {
 	for (const s of STATES) {
-		const st = stateOf({ state: s, reason: null });
+		const st = stateOf({ state: s, reason: null, expires_at: LATER }, 0);
 		for (const lang of ['en', 'es']) assert.ok(tables[lang][st.key], `${lang} ${st.key}`);
-		assert.equal(revocable({ state: s }), s === 'active' || s === 'paused', s);
+		assert.equal(revocable({ state: s, expires_at: LATER }, 0), s === 'active' || s === 'paused', s);
 	}
-	assert.equal(stateOf({ state: 'active', reason: null }).tone, 'p-ok');
-	assert.equal(stateOf({ state: 'paused', reason: 'sharing_off' }).tone, 'p-watch');
-	assert.equal(stateOf({ state: 'revoked', reason: 'person' }).tone, 'p-out');
+	assert.equal(stateOf({ state: 'active', reason: null, expires_at: LATER }, 0).tone, 'p-ok');
+	assert.equal(stateOf({ state: 'paused', reason: 'sharing_off', expires_at: LATER }, 0).tone, 'p-watch');
+	assert.equal(stateOf({ state: 'revoked', reason: 'person', expires_at: LATER }, 0).tone, 'p-out');
 	for (const r of REASONS) {
-		const why = stateOf({ state: 'revoked', reason: r }).why ?? '';
+		const why = stateOf({ state: 'revoked', reason: r, expires_at: LATER }, 0).why ?? '';
 		for (const lang of ['en', 'es']) assert.ok(tables[lang][why], `${lang} ${why}`);
 	}
 	for (const k of KINDS) for (const lang of ['en', 'es']) assert.ok(tables[lang][accessKey(k)], `${lang} ${k}`);

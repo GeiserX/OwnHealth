@@ -45,18 +45,30 @@ export function pinProblem(pin: string): string | null {
 	return n === 0 || (n >= PIN_MIN && n <= PIN_MAX) ? null : 'shl_pin_len';
 }
 
-/** The words and the colour of a link's state. */
-export function stateOf(link: Pick<ShlLink, 'state' | 'reason'>): { key: string; why: string | null; tone: string } {
-	const tone = link.state === 'active' ? 'p-ok' : link.state === 'paused' ? 'p-watch' : 'p-out';
-	return { key: 'shl_st_' + link.state, why: link.reason ? 'shl_why_' + link.reason : null, tone };
+/**
+ * A link's state at `now`: the server's word, until the expiry passes on a page left open. Then a live
+ * or locked-out link has expired, as routes/shl.rs `state` would say now; a revoked one stays revoked.
+ */
+export function stateAt(link: Pick<ShlLink, 'state' | 'reason' | 'expires_at'>, now: number): Pick<ShlLink, 'state' | 'reason'> {
+	return link.state !== 'revoked' && Date.parse(link.expires_at) <= now ? { state: 'expired', reason: null } : link;
+}
+
+/** The words and the colour of a link's state at `now`. */
+export function stateOf(link: Pick<ShlLink, 'state' | 'reason' | 'expires_at'>, now: number): { key: string; why: string | null; tone: string } {
+	const { state, reason } = stateAt(link, now);
+	const tone = state === 'active' ? 'p-ok' : state === 'paused' ? 'p-watch' : 'p-out';
+	return { key: 'shl_st_' + state, why: reason ? 'shl_why_' + reason : null, tone };
 }
 
 /** The word before a link's expiry date: past dates read as past, whatever else ended the link. */
 export const expiryKey = (link: Pick<ShlLink, 'expires_at'>, now: number): string =>
 	Date.parse(link.expires_at) <= now ? 'shl_expired_on' : 'shl_expires';
 
-/** Whether a Revoke button still does something: a revoked, expired or locked-out link is over. */
-export const revocable = (link: Pick<ShlLink, 'state'>): boolean => link.state === 'active' || link.state === 'paused';
+/** Whether a Revoke button still does something at `now`: a revoked, expired or locked-out link is over. */
+export function revocable(link: Pick<ShlLink, 'state' | 'expires_at'>, now: number): boolean {
+	const { state } = stateAt({ ...link, reason: null }, now);
+	return state === 'active' || state === 'paused';
+}
 
 /** The words of one access log row. */
 export const accessKey = (kind: ShlAccess['kind']): string => 'shl_ax_' + kind;

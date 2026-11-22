@@ -304,19 +304,26 @@ test('a viewer of a profile gets no form, the server refuses a link anyway, and 
 	await expect(page.locator('svg.sl-qr')).toHaveCount(0);
 });
 
-test('a link made just before a profile switch never shows as the next profile\'s link', async ({ page }) => {
-	await page.goto('/links?lang=en');
-	await expect(page.getByRole('heading', { name: 'Links of Alex Rivera' })).toBeVisible();
-	// hold the create answer until the person is on Lucía's page
+/** Holds every create answer of Alex's profile until the test releases it. */
+async function holdCreate(page: Page): Promise<() => void> {
 	let release = () => {};
 	const held = new Promise<void>((r) => (release = r));
 	await page.route('**/api/profiles/alex/shl', async (route) => {
 		if (route.request().method() === 'POST') await held;
 		await route.fallback();
 	});
+	return release;
+}
+
+test('a link made just before a profile switch never shows as the next profile\'s link, and shows once back on its own', async ({ page }) => {
+	await page.goto('/links?lang=en');
+	await expect(page.getByRole('heading', { name: 'Links of Alex Rivera' })).toBeVisible();
+	// hold the create answer until the person is on Lucía's page
+	const release = await holdCreate(page);
 	const label = 'Made for Alex, switched (e2e)';
+	const pin = secret();
 	await page.getByLabel(/^Label/).fill(label);
-	await page.getByLabel(/^PIN/).fill(secret());
+	await page.getByLabel(/^PIN/).fill(pin);
 	await page.getByRole('button', { name: 'Create link', exact: true }).click();
 	await expect(page.getByRole('button', { name: 'Creating…' })).toBeVisible();
 	await page.getByRole('button', { name: 'Lucía Rivera', exact: true }).click();
@@ -333,10 +340,128 @@ test('a link made just before a profile switch never shows as the next profile\'
 	await expect(page.locator('svg.sl-qr')).toHaveCount(0);
 	await expect(page.getByTestId('shl-row').filter({ hasText: label })).toHaveCount(0);
 	await expect(page.locator('.sr-only[aria-live="polite"]')).toHaveText('');
-	// the link is Alex's, in Alex's list
+	// back on Alex: the link is in Alex's list, and the one copy of its key shows there, with its QR
+	await page.getByRole('button', { name: 'Alex Rivera', exact: true }).click();
+	await expect(page.getByTestId('shl-row').filter({ hasText: label })).toBeVisible();
+	await expect(page.getByRole('heading', { name: `The link “${label}” is ready` })).toBeVisible();
+	await expect(page.locator('.sr-only[aria-live="polite"]')).toHaveText(`The link “${label}” is ready`);
+	const link = (await page.getByTestId('shl-link').textContent())?.trim() ?? '';
+	expect(payload(link).label).toBe(label);
+	await expect(page.locator('svg.sl-qr')).toHaveCount(1);
+	const viewer = await page.context().newPage();
+	expect(await readQr(page, viewer)).toBe(link);
+	await viewer.close();
+	// once: after another switch away and back it is gone, as any link shown once
+	await page.getByRole('button', { name: 'Lucía Rivera', exact: true }).click();
+	await expect(page.getByRole('heading', { name: 'Links of Lucía Rivera' })).toBeVisible();
+	await expect(page.getByTestId('shl-link')).toHaveCount(0);
 	await page.getByRole('button', { name: 'Alex Rivera', exact: true }).click();
 	await expect(page.getByTestId('shl-row').filter({ hasText: label })).toBeVisible();
 	await expect(page.getByTestId('shl-link')).toHaveCount(0);
+	await assertNoLeak(page, link, pin);
+});
+
+test('a link answered after a switch away and back shows on its profile and leaves the new draft alone', async ({ page }) => {
+	await page.goto('/links?lang=en');
+	await expect(page.getByRole('heading', { name: 'Links of Alex Rivera' })).toBeVisible();
+	const release = await holdCreate(page);
+	const label = 'First draft, away and back (e2e)';
+	await page.getByLabel(/^Label/).fill(label);
+	await page.getByRole('button', { name: 'Create link', exact: true }).click();
+	await expect(page.getByRole('button', { name: 'Creating…' })).toBeVisible();
+	await page.getByRole('button', { name: 'Lucía Rivera', exact: true }).click();
+	await expect(page.getByRole('heading', { name: 'Links of Lucía Rivera' })).toBeVisible();
+	await page.getByRole('button', { name: 'Alex Rivera', exact: true }).click();
+	await expect(page.getByRole('heading', { name: 'Links of Alex Rivera' })).toBeVisible();
+	// a new draft, typed while the first link is still on its way
+	const pin = secret();
+	await page.getByLabel(/^Label/).fill('Second draft (e2e)');
+	await page.getByLabel(/^PIN/).fill(pin);
+	const answered = page.waitForResponse((r) => r.url().endsWith('/api/profiles/alex/shl') && r.request().method() === 'POST');
+	release();
+	expect((await answered).status()).toBe(201);
+	await expect(page.getByRole('heading', { name: `The link “${label}” is ready` })).toBeVisible();
+	await expect(page.getByLabel(/^Label/)).toHaveValue('Second draft (e2e)');
+	await expect(page.getByLabel(/^PIN/)).toHaveValue(pin);
+});
+
+test('after a step-up the link carries what the person confirmed when they pressed Create', async ({ page }) => {
+	await page.goto('/links?lang=en');
+	await expect(page.getByRole('heading', { name: 'Links of Alex Rivera' })).toBeVisible();
+	// the server asks once for a fresh login, the start of that step-up waits, and a password ends it
+	const bodies: unknown[] = [];
+	await page.route('**/api/profiles/alex/shl', async (route) => {
+		if (route.request().method() !== 'POST') return route.fallback();
+		bodies.push(route.request().postDataJSON());
+		if (bodies.length === 1) return route.fulfill({ status: 403, json: { detail: { code: 'step_up_required', message: 'Confirm it is you.' } } });
+		await route.fallback();
+	});
+	let begin = () => {};
+	const begun = new Promise<void>((r) => (begin = r));
+	await page.route('**/api/auth/step-up/begin', async (route) => {
+		await begun;
+		await route.fulfill({ json: { method: 'password' } });
+	});
+	await page.route('**/api/auth/step-up/finish', (route) => route.fulfill({ json: { ok: true, valid_seconds: 300 } }));
+	const label = 'Confirmed as typed (e2e)';
+	await page.getByLabel(/^Label/).fill(label);
+	await page.getByRole('checkbox', { name: /^Records/ }).uncheck();
+	await page.getByRole('button', { name: 'Create link', exact: true }).click();
+	await expect(page.getByRole('button', { name: 'Creating…' })).toBeVisible();
+	// the form changes before the step-up dialog opens
+	await page.getByRole('checkbox', { name: /^Records/ }).check();
+	await page.getByLabel(/^Label/).fill('Changed after Create (e2e)');
+	await page.getByLabel('Expires after').selectOption({ label: '90 days' });
+	begin();
+	const dialog = page.locator('dialog[open]');
+	await dialog.getByLabel('Password').fill('not-checked-here');
+	await dialog.getByRole('button', { name: 'Confirm' }).click();
+	await expect(page.getByRole('heading', { name: `The link “${label}” is ready` })).toBeVisible();
+	expect(bodies).toHaveLength(2);
+	expect(bodies[1]).toEqual(bodies[0]);
+	expect(bodies[1]).toMatchObject({ categories: ['read:summary', 'read:labs'], days: 7, label });
+	await expect(page.getByTestId('shl-row').filter({ hasText: label }).getByText('Summary · Lab results')).toBeVisible();
+});
+
+test('copy feedback shows only for the link that was copied', async ({ page }) => {
+	await page.goto('/links?lang=en');
+	const first = await makeLink(page, { label: 'Copied first (e2e)', make: 'Create link', ready: /Copied first/ });
+	// the clipboard answers when the test says so
+	await page.evaluate(() => {
+		const w = window as unknown as { releaseClip?: () => void; clipped?: string };
+		Object.defineProperty(navigator.clipboard, 'writeText', {
+			value: (text: string) => new Promise<void>((r) => (w.releaseClip = () => ((w.clipped = text), r())))
+		});
+	});
+	await page.getByRole('button', { name: 'Copy', exact: true }).click();
+	await page.waitForFunction(() => !!(window as unknown as { releaseClip?: () => void }).releaseClip);
+	await makeLink(page, { label: 'Copied second (e2e)', make: 'Create link', ready: /Copied second/ });
+	await page.evaluate(() => (window as unknown as { releaseClip: () => void }).releaseClip());
+	expect(await page.evaluate(() => (window as unknown as { clipped?: string }).clipped)).toBe(first);
+	// let the page handle the late answer, then read the button of the second link
+	await page.evaluate(() => new Promise((r) => setTimeout(r, 100)));
+	await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeVisible();
+	await expect(page.getByRole('button', { name: 'Copied', exact: true })).toHaveCount(0);
+});
+
+test('a link whose expiry passes while the page is open turns expired, without Revoke, within a minute', async ({ page, request }) => {
+	await page.goto('/links?lang=en');
+	const label = 'Ends while open (e2e)';
+	await makeLink(page, { label, make: 'Create link', ready: /Ends while open/ });
+	const items = (await (await request.get('/api/profiles/alex/shl')).json()).items as { id: string; label: string }[];
+	const id = items.find((x) => x.label === label)?.id ?? '';
+	expect(id).toMatch(/^[0-9a-f-]{36}$/);
+	psql(`update shl set expires_at = now() + interval '30 seconds' where id = '${id}'`);
+	// a page clock the test can move, from now
+	await page.clock.install();
+	await page.goto('/links?lang=en');
+	const row = page.getByTestId('shl-row').filter({ hasText: label });
+	await expect(row.locator('.pill')).toHaveText('Active');
+	await expect(row.getByRole('button', { name: `Revoke · ${label}` })).toBeVisible();
+	await page.clock.fastForward('01:05');
+	await expect(row.locator('.pill')).toHaveText('Expired');
+	await expect(row.getByText(/ · expired /)).toBeVisible();
+	await expect(row.getByRole('button', { name: `Revoke · ${label}` })).toHaveCount(0);
 });
 
 test('the form offers only what the server accepts: a lock of the owner, a closed summary, a break-glass grant', async ({ page }) => {

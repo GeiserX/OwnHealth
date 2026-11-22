@@ -2,13 +2,15 @@
 	// Share links: the owner or a guardian sends the profile's summary to a doctor as a SMART Health
 	// Link (backend routes/shl.rs). New link: what it carries, expiry, an optional PIN, the language.
 	// The link and its QR code show once, right after it is made, and live only in this page's memory:
-	// the server keeps no copy of the key. Each link says its state, who opened it, and can be revoked.
+	// the server keeps no copy of the key. A link answered after the person moved to another profile
+	// waits in that memory and shows once when its own profile is on screen again, never on another.
+	// Each link says its state, who opened it, and can be revoked.
 	// The PIN input has no name, so no form submit can ever put it in a URL; it is cleared once used.
 	// What the form offers is what the server will accept: the list answer's `open` categories.
 	import { tick } from 'svelte';
 	import '#lib/components/pages2/pages2.css';
 	import { ApiError } from '#lib/api/core';
-	import type { ShlAccess, ShlCreated, ShlLink, ShlList } from '#lib/api/types';
+	import type { ShlAccess, ShlCreateIn, ShlCreated, ShlLink, ShlList } from '#lib/api/types';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import PageHeader from '#lib/components/PageHeader.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
@@ -41,21 +43,45 @@
 	let lang = $state<'es' | 'en'>(i18n.lang);
 	let busy = $state(false);
 	let error = $state<{ text: string; raw: string } | null>(null);
+	type Made = { id: string; label: string | null; shlink: string; pin: boolean; leftOut: number | null; qr: { size: number; path: string } };
 	// The link just made: in this page's memory only, gone on reload or on another profile.
-	let fresh = $state<{ id: string; label: string | null; shlink: string; pin: boolean; leftOut: number | null; qr: { size: number; path: string } } | null>(null);
+	let fresh = $state<Made | null>(null);
+	// Links answered while another profile was on screen, by the profile they were made for. Never in
+	// storage; each one leaves this map the moment it shows.
+	const waiting = new Map<string, Made>();
+	// Moves on every profile switch: an answer knows whether the person is still in the visit that asked.
+	let visit = 0;
 	let copied = $state<boolean | null>(null);
+	// One clock for the rows: a link whose expiry passes while the page is open reads expired.
+	let now = $state(Date.now());
+	$effect(() => {
+		const timer = setInterval(() => (now = Date.now()), 60_000);
+		return () => clearInterval(timer);
+	});
 	let linkEl: HTMLElement | undefined = $state();
 	let madeEl: HTMLElement | undefined = $state();
 	let confirming = $state<string | null>(null);
 	let logOf = $state<string | null>(null);
 	let rowError = $state<{ id: string; text: string; raw: string } | null>(null);
 
-	const load = () => links.run(() => listLinks(slug), slug);
-	// another profile: nothing typed or made for the last one stays on screen
+	const load = () =>
+		links.run(async () => {
+			const list = await listLinks(slug);
+			now = Date.now();
+			return list;
+		}, slug);
+	// another profile: nothing typed or made for the last one stays on screen; a link made for this
+	// one while it was away shows now, once
 	$effect(() => {
 		const s = slug;
 		const ok = sharer;
+		visit++;
 		fresh = null;
+		const kept = ok ? waiting.get(s) : undefined;
+		if (kept) {
+			fresh = kept;
+			waiting.delete(s);
+		}
 		copied = null;
 		confirming = null;
 		logOf = null;
@@ -68,24 +94,17 @@
 	const pinWrong = $derived(pinProblem(pin));
 
 	async function make() {
-		// the profile this link is for: an answer that lands after a switch belongs to that one
+		// the profile this link is for, and the visit that asked: an answer that lands later belongs to them
 		const s = slug;
+		const v = visit;
+		// what the person confirmed by pressing Create: a step-up retry sends this same body
+		const body: ShlCreateIn = { categories: categoriesFor(picked, open), days, passcode: pin || undefined, label: label.trim() || undefined, lang };
 		busy = true;
 		error = null;
 		try {
-			const typed = pin;
-			const made: ShlCreated = await withStepUp(() =>
-				createLink(s, {
-					categories: categoriesFor(picked, open),
-					days,
-					passcode: typed || undefined,
-					label: label.trim() || undefined,
-					lang
-				})
-			);
-			// another profile is on screen now: the link shows only in its own profile's list
-			if (slug !== s) return;
-			fresh = {
+			const made: ShlCreated = await withStepUp(() => createLink(s, body));
+			// the server has the link now, and this is the only copy of its key: never drop it
+			const m: Made = {
 				id: made.link.id,
 				label: made.link.label,
 				shlink: made.shlink,
@@ -93,6 +112,16 @@
 				leftOut: made.left_out?.sensitive ?? null,
 				qr: qrOf(made.shlink)
 			};
+			if (visit !== v) {
+				// the person moved: show it on its own profile, leave any new draft alone
+				if (slug === s && sharer) {
+					fresh = m;
+					copied = null;
+					load();
+				} else waiting.set(s, m);
+				return;
+			}
+			fresh = m;
 			copied = null;
 			pin = '';
 			label = '';
@@ -100,7 +129,7 @@
 			await tick();
 			madeEl?.focus();
 		} catch (e) {
-			if (slug !== s) return;
+			if (visit !== v) return;
 			error = { text: errText(e), raw: errRaw(e) };
 			// a lock or a grant changed since the page loaded: ask again what may be shared
 			if (e instanceof ApiError && (e.code === 'category_closed' || e.code === 'summary_closed')) load();
@@ -133,7 +162,11 @@
 		log.run(async () => (await linkAccess(slug, id)).items, id);
 	}
 	async function copy() {
-		if (fresh) copied = await copyText(typeof navigator === 'undefined' ? null : navigator.clipboard, fresh.shlink, linkEl);
+		const f = fresh;
+		if (!f) return;
+		const ok = await copyText(typeof navigator === 'undefined' ? null : navigator.clipboard, f.shlink, linkEl);
+		// the feedback is for the link that was copied: another one may be on screen by now
+		if (fresh?.id === f.id) copied = ok;
 	}
 	const title = (x: { label: string | null }) => x.label ?? t('shl_nolabel');
 	const madeTitle = (x: { label: string | null }) => (x.label ? tf('shl_made', { label: x.label }) : t('shl_made0'));
@@ -141,11 +174,11 @@
 	// One line of what a link carries, one of its dates and use.
 	function carries(x: ShlLink): string {
 		const parts = shownCategories(x.categories).map((c) => t('shl_s_' + c.replace('read:', '')));
-		if (x.passcode) parts.push(x.attempts_left !== null && revocable(x) ? `${t('shl_pin_on')} (${tp('shl_tries', x.attempts_left)})` : t('shl_pin_on'));
+		if (x.passcode) parts.push(x.attempts_left !== null && revocable(x, now) ? `${t('shl_pin_on')} (${tp('shl_tries', x.attempts_left)})` : t('shl_pin_on'));
 		return parts.join(' · ');
 	}
 	function when(x: ShlLink): string {
-		const parts = [`${t('shl_created')} ${day(x.created_at)}`, `${t(expiryKey(x, Date.now()))} ${day(x.expires_at)}`];
+		const parts = [`${t('shl_created')} ${day(x.created_at)}`, `${t(expiryKey(x, now))} ${day(x.expires_at)}`];
 		parts.push(x.opened ? tp('shl_opened', x.opened) : t('shl_opened0'));
 		if (x.last_access_at) parts.push(`${t('shl_last')} ${ago(x.last_access_at)}`);
 		return parts.join(' · ');
@@ -248,7 +281,7 @@
 			{:else}
 				<ul class="sl-list">
 					{#each links.data.items as x (x.id)}
-						{@const st = stateOf(x)}
+						{@const st = stateOf(x, now)}
 						<li data-testid="shl-row">
 							<div class="sl-row">
 								<div class="sl-main">
@@ -262,7 +295,7 @@
 								</div>
 								<div class="sl-acts">
 									<button class="btn sm" id="shl-log-{x.id}" aria-expanded={logOf === x.id} aria-label="{t('shl_log')} · {title(x)}" onclick={() => (logOf === x.id ? (logOf = null) : openLog(x.id))}>{t('shl_log')}</button>
-									{#if revocable(x)}
+									{#if revocable(x, now)}
 										<button class="btn sm no" disabled={busy} aria-expanded={confirming === x.id} aria-label="{t('i2_revoke')} · {title(x)}" onclick={() => (confirming = x.id)}>{t('i2_revoke')}</button>
 									{/if}
 								</div>
