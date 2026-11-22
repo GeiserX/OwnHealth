@@ -32,11 +32,15 @@ async fn seeded(dir: &Path) -> anyhow::Result<(TestDb, Settings)> {
     Ok((db, settings))
 }
 
+/// The binary on this fixture's database and data folder. The anchor folder is the fixture's too,
+/// whatever the environment that runs the tests sets.
 fn ownhealth(s: &Settings, args: &[&str]) -> anyhow::Result<Output> {
     Ok(Command::new(BIN)
         .args(args)
         .env("OWNHEALTH_DATABASE_URL", &s.database_url)
         .env("OWNHEALTH_DATA_DIR", &s.data_dir)
+        .env("OWNHEALTH_ANCHOR_DIR", s.anchor_path())
+        .env_remove("OWNHEALTH_ANCHOR_DIR_FILE")
         .output()?)
 }
 
@@ -200,6 +204,7 @@ fn env_for(s: &Settings, tmp: &Path) -> Env {
         ("OWNHEALTH_RUN", String::new()),
         ("OWNHEALTH_DATABASE_URL", s.database_url.clone()),
         ("OWNHEALTH_DATA_DIR", s.data_dir.display().to_string()),
+        ("OWNHEALTH_ANCHOR_DIR", s.anchor_path().display().to_string()),
         ("OWNHEALTH_BACKUP_STAGING", tmp.join("staging").display().to_string()),
         ("OWNHEALTH_RESTORE_DIR", tmp.join("restore").display().to_string()),
         ("RESTIC_REPOSITORY", tmp.join("repo").display().to_string()),
@@ -216,6 +221,7 @@ fn run(cmd: impl AsRef<std::ffi::OsStr>, env: &Env, args: &[&str]) -> anyhow::Re
     Ok(Command::new(cmd)
         .args(args)
         .envs(env.vars.iter().map(|(k, v)| (k, v)))
+        .env_remove("OWNHEALTH_ANCHOR_DIR_FILE")
         .output()?)
 }
 

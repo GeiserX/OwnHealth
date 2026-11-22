@@ -60,6 +60,11 @@ async fn anchor_head(env: &Env, tamper: bool) -> anyhow::Result<i64> {
     };
     let dir = env.settings.anchor_path();
     std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt; // a backup refuses a folder others may write
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     let body =
         json!({"schema": "ownhealth.audit-anchor/v1", "seq": seq, "hash": hash, "at": "2026-11-22T08:00:00+00:00"});
     std::fs::write(dir.join("audit-head.json"), serde_json::to_vec(&body)?)?;
@@ -82,6 +87,9 @@ async fn the_chain_state_turns_broken_when_a_row_is_edited() -> R {
     assert_eq!(r.json["anchor"]["state"], "none");
 
     let seq = edit_newest(&env).await?;
+    // The page reuses a verdict for up to a minute while the newest entry and the anchor stay the
+    // same; a new entry moves the newest one, so the page checks again at once.
+    read(&env, "sam", "alex", 1).await?;
     let r = alex.get("/api/audit/chain").await?;
     assert_eq!(r.json["ok"], false, "{}", r.json);
     assert_eq!(r.json["broken"], json!({"seq": seq, "kind": "hash"}));

@@ -144,9 +144,13 @@ async fn audit_log(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Q
 /// The state of the whole log, for every signed-in person: how far the hash chain holds, the first
 /// entry that does not, and whether the head the last backup anchored outside the database is still
 /// in it (ownhealth-ops `audit_status`). Counts and verdicts only, never a hash, a path or an entry.
+/// One full check runs at a time and a young verdict is reused (`audit_status_shared`), so loads in
+/// parallel cannot make the database read the whole log over and over.
+///
+/// No audit row: it reads no profile's data, only the verdict on the log, and `GET /api/audit` and
+/// `/api/audit/who`, which read the log itself, write none either.
 async fn audit_chain(State(rt): State<Runtime>, SessionCaller(_p): SessionCaller) -> R {
-    let mut conn = rt.pool.acquire().await?;
-    ok(ownhealth_ops::audit_status(&rt.settings, &mut conn).await?)
+    ok(ownhealth_ops::audit_status_shared(&rt.settings, &rt.pool).await?)
 }
 
 #[derive(sqlx::FromRow)]

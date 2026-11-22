@@ -225,7 +225,7 @@ async fn a_rewritten_and_rehashed_log_passes_verify_but_fails_the_next_backup() 
         before,
         "a refused backup leaves the anchor alone"
     );
-    assert!(!l.dest("b2").join("manifest.json").exists() && !l.dest("b2").join("db.dump").exists());
+    assert!(!l.dest("b2").exists(), "a refused backup makes no destination folder");
 
     let s = l.status().await?;
     assert_eq!(s["ok"], false, "{s:#}");
@@ -307,6 +307,234 @@ async fn an_edited_row_shows_as_broken_and_the_manifest_records_it() -> R {
     let m = manifest(&dest)?;
     assert_eq!(m["audit_chain"]["broken"]["seq"], seq, "{m:#}");
     assert_eq!(m["audit_chain"]["verified"], seq - 1);
+    assert!(!l.anchor_file().exists(), "a broken log is never anchored");
+    Ok(())
+}
+
+/// A break after the last anchor: the backup goes on, but the anchor stays where it was, so the
+/// break cannot carry a rewrite past it.
+#[tokio::test]
+async fn a_broken_log_keeps_the_previous_anchor() -> R {
+    let l = live().await?;
+    l.backup("b1").await?;
+    let before = fs::read(l.anchor_file())?;
+    add_events(&l, 2).await?;
+    l.edit_without_rehash().await?;
+    l.backup("b2").await?;
+    assert_eq!(
+        fs::read(l.anchor_file())?,
+        before,
+        "the anchor did not move onto a broken log"
+    );
+    assert_eq!(l.status().await?["anchor"]["state"], "ok");
+    Ok(())
+}
+
+/// The decoy (review PR 75, H1): the owner rewrites the oldest entry and hashes the chain again, then
+/// drops the key and plants a second link with the anchored seq and the anchored hash. The anchor
+/// check must not read the decoy, and the backup must not move the anchor onto the rehashed head;
+/// once the decoy is gone again, the rewrite still shows.
+#[tokio::test]
+async fn a_decoy_link_at_the_anchored_entry_does_not_launder_a_rewrite() -> R {
+    let l = live().await?;
+    l.backup("b1").await?;
+    let before = fs::read(l.anchor_file())?;
+    let (seq, hash) = l.head().await?;
+    add_events(&l, 2).await?;
+    l.rewrite_and_rehash().await?;
+    // the update puts the real link after the decoy in the table, so a plain read finds the decoy first
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "alter table audit_chain disable trigger user; \
+         alter table audit_chain drop constraint audit_chain_pkey; \
+         insert into audit_chain (seq, event_id, prev_hash, hash) \
+           values ({seq}, -1, decode(repeat('00', 32), 'hex'), decode('{hash}', 'hex')); \
+         update audit_chain set hash = hash where seq = {seq} and event_id > 0; \
+         alter table audit_chain enable trigger user"
+    )))
+    .execute(&l.db.pool)
+    .await?;
+    let s = l.status().await?;
+    assert_eq!(s["ok"], false, "{s:#}");
+    assert_ne!(
+        s["anchor"]["state"], "ok",
+        "the decoy passed for the anchored entry: {s:#}"
+    );
+
+    // the health data is still backed up, the manifest says the log could not be checked, and the
+    // anchor stays where it was
+    let dest = l.backup("b2").await?;
+    assert_eq!(manifest(&dest)?["audit_chain"]["broken"]["kind"], "uncheckable");
+    assert_eq!(fs::read(l.anchor_file())?, before, "the anchor moved past the rewrite");
+
+    // the owner takes the decoy away and puts the key back: the rehashed log holds on its own, and
+    // the anchor still catches it
+    sqlx::raw_sql(
+        "alter table audit_chain disable trigger user; delete from audit_chain where event_id = -1; \
+         alter table audit_chain add primary key (seq); alter table audit_chain enable trigger user",
+    )
+    .execute(&l.db.pool)
+    .await?;
+    assert!(verify_chain(&mut *l.db.pool.acquire().await?).await?.ok());
+    assert_eq!(l.status().await?["anchor"]["state"], "mismatch");
+    let err = err_text(l.backup("b3").await);
+    assert!(err.contains("no longer matches"), "{err}");
+    Ok(())
+}
+
+/// An uncheckable log (row security switched on) is treated like a broken one: the backup still runs
+/// (audit damage never stops the health backups), the manifest records it, the anchor stays, and
+/// the page says the anchor cannot be compared.
+#[tokio::test]
+async fn an_uncheckable_log_does_not_stop_the_backup() -> R {
+    let l = live().await?;
+    l.backup("b1").await?;
+    let before = fs::read(l.anchor_file())?;
+    add_events(&l, 1).await?;
+    sqlx::raw_sql("alter table audit_chain enable row level security")
+        .execute(&l.db.pool)
+        .await?;
+    let dest = l.backup("b2").await?;
+    let m = manifest(&dest)?;
+    assert_eq!(m["audit_chain"]["broken"]["kind"], "uncheckable", "{m:#}");
+    assert_eq!(fs::read(l.anchor_file())?, before);
+    let s = l.status().await?;
+    assert_eq!(
+        (
+            s["ok"].clone(),
+            s["broken"]["kind"].clone(),
+            s["anchor"]["state"].clone()
+        ),
+        (Value::Bool(false), Value::from("uncheckable"), Value::from("unchecked")),
+        "{s:#}"
+    );
+    Ok(())
+}
+
+/// Two backups at once (CodeRabbit on PR 75): one reads and replaces the anchor at a time, so a
+/// backup that began with an older head cannot finish last and put that head over a newer one. A
+/// backup that starts while another holds the anchor waits, then anchors the head it sees.
+#[tokio::test]
+async fn a_backup_waits_for_the_one_that_holds_the_anchor() -> R {
+    use sqlx::Connection;
+    let l = live().await?;
+    l.backup("b1").await?;
+    let mut other = sqlx::PgConnection::connect(&l.db.url).await?;
+    sqlx::query("select pg_advisory_lock(hashtext('ownhealth.audit_anchor'))")
+        .execute(&mut other)
+        .await?;
+    let (settings, dest) = (l.settings.clone(), l.dest("b2"));
+    let waiting = tokio::spawn(async move { ownhealth_ops::backup(&settings, &dest).await });
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(!waiting.is_finished(), "the second backup did not wait");
+    add_events(&l, 2).await?; // while it waits: the head it anchors is the newer one
+    sqlx::query("select pg_advisory_unlock(hashtext('ownhealth.audit_anchor'))")
+        .execute(&mut other)
+        .await?;
+    waiting.await??;
+    let (seq, hash) = l.head().await?;
+    let a = anchor(&l)?;
+    assert_eq!(
+        (a["seq"].clone(), a["hash"].clone()),
+        (Value::from(seq), Value::from(hash))
+    );
+    other.close().await?;
+    Ok(())
+}
+
+/// The anchor folder and file belong to the backup's user alone. A symlinked folder is never
+/// followed (nor its target's mode changed), and a folder or file others may write is refused.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_anchor_folder_others_may_write_is_refused() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut l = live().await?;
+    let shared = l.dir.path().join("shared");
+    fs::create_dir_all(&shared)?;
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o755))?;
+    let link = l.dir.path().join("anchor-link");
+    std::os::unix::fs::symlink(&shared, &link)?;
+    l.settings.anchor_dir = Some(link);
+    let err = err_text(l.backup("b1").await);
+    assert!(err.contains("the anchor folder is a symlink"), "{err}");
+    assert_eq!(mode(&shared)?, 0o755, "the target of the symlink was changed");
+    assert_eq!(l.status().await?["anchor"]["state"], "unreadable");
+
+    l.settings.anchor_dir = Some(shared.clone());
+    l.backup("b2").await?;
+    assert_eq!(mode(&shared)?, 0o755, "a folder that was there keeps its mode");
+    for (path, m, why) in [
+        (shared.clone(), 0o777, "the anchor folder is world-writable"),
+        (shared.clone(), 0o775, "the anchor folder is group-writable"),
+        (
+            shared.join("audit-head.json"),
+            0o666,
+            "the anchor file is world-writable",
+        ),
+    ] {
+        let was = mode(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(m))?;
+        let err = err_text(l.backup(&format!("b-{m:o}")).await);
+        assert!(err.contains(why), "{why}: {err}");
+        assert_eq!(l.status().await?["anchor"]["state"], "unreadable", "{why}");
+        fs::set_permissions(&path, fs::Permissions::from_mode(was))?;
+    }
+    Ok(())
+}
+
+/// A normal restore of an older backup (review PR 75, F2): the restored log ends at that backup's
+/// head, so the restore sets the anchor there, and the page does not read as a rewrite.
+#[tokio::test]
+async fn a_restore_anchors_the_head_it_restored() -> R {
+    let l = live().await?;
+    let older = l.backup("b1").await?;
+    let (seq, hash) = l.head().await?;
+    add_events(&l, 2).await?;
+    l.backup("b2").await?;
+    assert_ne!(anchor(&l)?["seq"], seq, "the newer backup moved the anchor on");
+
+    let fresh = TestDb::empty().await?;
+    let mut settings = fresh.settings(&l.dir.path().join("fresh"))?;
+    settings.anchor_dir = Some(l.settings.anchor_path()); // the same data volume
+    let report = ownhealth_ops::restore(&settings, &older).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert_eq!(report["audit_anchor"]["seq"], seq, "{report:#}");
+    let a = anchor(&l)?;
+    assert_eq!(
+        (a["seq"].clone(), a["hash"].clone(), a["at"].clone()),
+        (
+            Value::from(seq),
+            Value::from(hash),
+            manifest(&older)?["created_at"].clone()
+        )
+    );
+    let mut c = fresh.pool.acquire().await?;
+    let s = ownhealth_ops::audit_status(&settings, &mut c).await?;
+    assert_eq!(
+        (s["ok"].clone(), s["anchor"]["state"].clone()),
+        (Value::Bool(true), Value::from("ok")),
+        "{s:#}"
+    );
+    Ok(())
+}
+
+/// The page's check (review PR 75, M1): loads at once run one full check, and a young verdict is
+/// reused while the newest entry and the anchor stay the same. A new entry checks again.
+#[tokio::test]
+async fn page_loads_at_once_run_one_full_check() -> R {
+    let l = live().await?;
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..10 {
+        let (settings, pool) = (l.settings.clone(), l.db.pool.clone());
+        set.spawn(async move { ownhealth_ops::audit_status_shared(&settings, &pool).await });
+    }
+    while let Some(r) = set.join_next().await {
+        assert_eq!(r??["ok"], true);
+    }
+    assert_eq!(ownhealth_ops::audit_status_checks(&l.settings).await, 1);
+    add_events(&l, 1).await?;
+    let s = ownhealth_ops::audit_status_shared(&l.settings, &l.db.pool).await?;
+    assert_eq!(s["verified"], l.head().await?.0);
+    assert_eq!(ownhealth_ops::audit_status_checks(&l.settings).await, 2);
     Ok(())
 }
 
@@ -324,6 +552,11 @@ async fn verify_restore_checks_the_head_in_the_manifest() -> R {
         (
             "seq",
             Value::from(original["audit_chain"]["seq"].as_i64().unwrap_or(0) + 1),
+        ),
+        // an entry edited with no rehash keeps the head, and only `verified` tells
+        (
+            "verified",
+            Value::from(original["audit_chain"]["verified"].as_i64().unwrap_or(0) - 1),
         ),
     ] {
         let mut m = original.clone();

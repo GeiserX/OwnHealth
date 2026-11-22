@@ -18,22 +18,25 @@
 //! dumps anything, the backup checks that link N of the live chain still has the hash H the previous
 //! anchor holds, and refuses when it does not. A database owner can edit a row and hash the chain
 //! again from there, and `verify_chain` then passes; that check is what catches it. The first backup
-//! finds no anchor, checks nothing and writes one. The audit page runs the same check
-//! (`audit_status`).
+//! finds no anchor, checks nothing and writes one. A backup moves the anchor only onto a log that
+//! holds, and only forward; a restore that passed its checks sets it to the restored head. The
+//! audit page runs the same check (`audit_status`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 use chrono::{NaiveDate, SecondsFormat, Utc};
-use ownhealth_core::audit::{ChainBreakKind, ChainCheck, verify_chain};
+use ownhealth_core::audit::{ChainBreakKind, ChainRead, verify_chain_with};
 use ownhealth_core::config::Settings;
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{AssertSqlSafe, Connection, PgConnection};
+use sqlx::{AssertSqlSafe, Connection, PgConnection, PgPool};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -336,9 +339,46 @@ fn anchor_unreadable(path: &Path, why: &str) -> Error {
     ))
 }
 
+/// Only the owner may change the anchor or its folder: a symlink, or a folder or file that another
+/// user or group may write, could hold a head someone else put there. The check looks at the path
+/// itself and never follows a symlink.
+#[cfg(unix)]
+fn owner_writes_only(path: &Path, folder: bool) -> std::result::Result<bool, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+    };
+    let what = if folder { "the anchor folder" } else { "the anchor file" };
+    if meta.file_type().is_symlink() {
+        return Err(format!("{what} is a symlink"));
+    }
+    if folder != meta.is_dir() {
+        return Err(format!("{what} is not a {}", if folder { "folder" } else { "file" }));
+    }
+    match meta.permissions().mode() & 0o022 {
+        0 => Ok(true),
+        0o020 => Err(format!("{what} is group-writable")),
+        _ => Err(format!("{what} is world-writable")),
+    }
+}
+
+#[cfg(not(unix))]
+fn owner_writes_only(path: &Path, _folder: bool) -> std::result::Result<bool, String> {
+    Ok(path.exists())
+}
+
 /// None only when no backup has written one yet. Anything else that is not a valid anchor is an
 /// error, never "no anchor yet": a damaged file must not silently restart the anchoring.
 fn read_anchor(path: &Path) -> Result<Option<Anchor>> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let checked = owner_writes_only(dir, true).and_then(|_| owner_writes_only(path, false));
+    match checked {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        Err(why) => return Err(anchor_unreadable(path, &why)),
+    }
     let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -360,9 +400,10 @@ fn read_anchor(path: &Path) -> Result<Option<Anchor>> {
     }
 }
 
-/// Replace the anchor in `dir` atomically: a new file only the owner may read (0600, in a 0700
-/// folder), written and synced under a temporary name, then renamed over the old one and the folder
-/// synced. A crash leaves the old anchor or the new one, never half of either.
+/// Replace the anchor in `dir` atomically: a new file only the owner may read (0600), written and
+/// synced under a temporary name, then renamed over the old one and the folder synced. A crash
+/// leaves the old anchor or the new one, never half of either. A missing folder is made 0700; a
+/// folder that is there keeps its mode (`read_anchor` already refused one others may write).
 fn write_anchor(dir: &Path, a: &Anchor) -> Result<()> {
     let body = serde_json::to_string_pretty(&json!({
         "schema": ANCHOR_SCHEMA,
@@ -372,11 +413,15 @@ fn write_anchor(dir: &Path, a: &Anchor) -> Result<()> {
     }))? + "\n";
     let tmp = dir.join(format!(".{ANCHOR_FILE}.{}.tmp", ownhealth_core::ids::token_hex(6)));
     let written = (|| -> std::io::Result<()> {
-        fs::create_dir_all(dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        if fs::symlink_metadata(dir).is_err() {
+            let mut b = fs::DirBuilder::new();
+            b.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                b.mode(0o700);
+            }
+            b.create(dir)?;
         }
         let mut opts = fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -400,23 +445,16 @@ fn write_anchor(dir: &Path, a: &Anchor) -> Result<()> {
     })
 }
 
-/// The hash link `seq` holds in this snapshot, if the link is there.
-async fn link_hash(conn: &mut PgConnection, seq: i64) -> Result<Option<Vec<u8>>> {
-    Ok(
-        sqlx::query_scalar("select hash from only public.audit_chain where seq = $1")
-            .bind(seq)
-            .fetch_optional(conn)
-            .await?,
-    )
-}
-
-/// Link `a.seq` still holds the hash the anchor kept. A rewrite at or before it changes that hash
-/// (each link hashes the one before it), and so does removing it.
-async fn anchor_holds(conn: &mut PgConnection, a: &Anchor) -> Result<bool> {
-    if a.seq == 0 {
-        return Ok(true);
-    }
-    Ok(link_hash(conn, a.seq).await?.as_deref() == Some(a.hash.as_slice()))
+/// One backup or restore at a time reads and replaces the anchor: a session advisory lock on the
+/// database, held from the anchor read to the anchor write. Without it a backup that started
+/// earlier, with an older head, could finish last and put its lower head over a newer one. Closing
+/// the connection releases it, so a backup that fails on the way leaves nothing locked.
+async fn anchor_lock(url: &str) -> Result<PgConnection> {
+    let mut conn = PgConnection::connect(url).await?;
+    sqlx::query("select pg_catalog.pg_advisory_lock(pg_catalog.hashtext('ownhealth.audit_anchor'))")
+        .execute(&mut conn)
+        .await?;
+    Ok(conn)
 }
 
 fn anchor_mismatch(path: &Path, a: &Anchor) -> Error {
@@ -441,46 +479,67 @@ fn break_kind(k: ChainBreakKind) -> &'static str {
     }
 }
 
-/// What `verify_chain` found and the newest link, in one snapshot: the manifest's `audit_chain`.
-async fn chain_facts(conn: &mut PgConnection) -> Result<(ChainCheck, Option<(i64, Vec<u8>)>)> {
-    let check = verify_chain(&mut *conn).await?;
-    let last = sqlx::query_as("select seq, hash from only public.audit_chain order by seq desc limit 1")
-        .fetch_optional(&mut *conn)
-        .await?;
-    Ok((check, last))
+/// `verify_chain_with` for the anchored link (seq 0 needs no read), with an uncheckable log as None:
+/// like a broken one, it does not stop a backup or the page.
+async fn chain_read(conn: &mut PgConnection, anchored: Option<&Anchor>) -> Result<Option<ChainRead>> {
+    match verify_chain_with(conn, anchored.map(|a| a.seq).filter(|s| *s > 0)).await {
+        Ok(r) => Ok(Some(r)),
+        Err(Error::AuditUncheckable(why)) => {
+            tracing::warn!("audit chain: {why}");
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
-fn chain_json(check: &ChainCheck, last: Option<&(i64, Vec<u8>)>) -> Value {
-    json!({
-        "seq": last.map_or(0, |l| l.0),
-        "hash": last.map(|l| hex::encode(&l.1)),
-        "verified": check.verified,
-        "broken": check.broken.as_ref().map(|b| json!({"seq": b.seq, "event_id": b.event_id, "kind": break_kind(b.kind)})),
-    })
+/// The anchored link is still in the chain with the hash the anchor kept. None: the log cannot be
+/// checked, so neither can the anchor.
+fn anchor_holds(read: Option<&ChainRead>, a: &Anchor) -> Option<bool> {
+    read.map(|r| a.seq == 0 || r.link.as_deref() == Some(a.hash.as_slice()))
+}
+
+/// The manifest's `audit_chain`: the newest link and what `verify_chain` found, or `uncheckable`.
+fn chain_json(read: Option<&ChainRead>) -> Value {
+    match read {
+        Some(r) => json!({
+            "seq": r.newest.as_ref().map_or(0, |l| l.0),
+            "hash": r.newest.as_ref().map(|l| hex::encode(&l.1)),
+            "verified": r.check.verified,
+            "broken": r.check.broken.as_ref().map(|b| json!({"seq": b.seq, "event_id": b.event_id, "kind": break_kind(b.kind)})),
+        }),
+        None => json!({
+            "seq": null,
+            "hash": null,
+            "verified": 0,
+            "broken": {"seq": null, "event_id": null, "kind": "uncheckable"},
+        }),
+    }
 }
 
 /// The audit page's state of the log (`GET /api/audit/chain`): how far `verify_chain` holds, the
-/// first link that does not, and whether the head the last backup anchored is still in the chain.
-/// The anchor's hash and path stay out: the page only needs the verdict.
+/// first link that does not, and whether the head the last backup anchored is still in the chain
+/// (`unchecked` while the log itself cannot be checked). The anchor's hash and path stay out: the
+/// page only needs the verdict.
 pub async fn audit_status(settings: &Settings, conn: &mut PgConnection) -> Result<Value> {
-    let (verified, broken) = match verify_chain(&mut *conn).await {
-        Ok(c) => (
-            c.verified,
-            c.broken.map(|b| json!({"seq": b.seq, "kind": break_kind(b.kind)})),
+    let anchored = read_anchor(&anchor_file(settings));
+    let read = chain_read(&mut *conn, anchored.as_ref().ok().and_then(Option::as_ref)).await?;
+    let (verified, broken) = match &read {
+        Some(r) => (
+            r.check.verified,
+            r.check
+                .broken
+                .as_ref()
+                .map(|b| json!({"seq": b.seq, "kind": break_kind(b.kind)})),
         ),
-        Err(Error::AuditUncheckable(why)) => {
-            tracing::warn!("audit chain: {why}");
-            (0, Some(json!({"seq": null, "kind": "uncheckable"})))
-        }
-        Err(e) => return Err(e),
+        None => (0, Some(json!({"seq": null, "kind": "uncheckable"}))),
     };
-    let anchor = match read_anchor(&anchor_file(settings)) {
+    let anchor = match anchored {
         Ok(None) => json!({"state": "none", "seq": null, "at": null}),
         Ok(Some(a)) => {
-            let state = if anchor_holds(&mut *conn, &a).await? {
-                "ok"
-            } else {
-                "mismatch"
+            let state = match anchor_holds(read.as_ref(), &a) {
+                Some(true) => "ok",
+                Some(false) => "mismatch",
+                None => "unchecked",
             };
             json!({"state": state, "seq": a.seq, "at": a.at})
         }
@@ -493,47 +552,112 @@ pub async fn audit_status(settings: &Settings, conn: &mut PgConnection) -> Resul
     Ok(json!({"ok": ok, "verified": verified, "broken": broken, "anchor": anchor}))
 }
 
+/// How long the page reuses a verdict while the newest link and the anchor file stay the same.
+const VERDICT_FOR: Duration = Duration::from_secs(60);
+
+/// What a reused verdict must still match: the newest link, and the anchor file's bytes.
+type Print = (Option<(i64, Vec<u8>)>, Option<Vec<u8>>);
+
+#[derive(Default)]
+struct VerdictSlot {
+    last: Option<(Instant, Print, Value)>,
+    checks: u64,
+}
+
+type SharedSlot = Arc<tokio::sync::Mutex<VerdictSlot>>;
+
+/// One slot per database and anchor file, so two instances in one process (the tests) never share
+/// a verdict.
+static VERDICTS: LazyLock<std::sync::Mutex<HashMap<(String, PathBuf), SharedSlot>>> = LazyLock::new(Default::default);
+
+fn verdict_slot(settings: &Settings) -> SharedSlot {
+    let mut slots = VERDICTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    slots
+        .entry((settings.sqlx_url(), anchor_file(settings)))
+        .or_default()
+        .clone()
+}
+
+/// `audit_status` for the page, which every signed-in person may load. A full check reads the whole
+/// log, so only one runs at a time, and a verdict younger than a minute is reused while the newest
+/// link and the anchor file are what they were. A new entry, a rehash or a new anchor checks again
+/// at once; an edit with no new entry shows within the minute. Callers wait for the running check
+/// without holding a pooled connection.
+pub async fn audit_status_shared(settings: &Settings, pool: &PgPool) -> Result<Value> {
+    let shared = verdict_slot(settings);
+    let mut slot = shared.lock().await;
+    let mut conn = pool.acquire().await?;
+    let newest = sqlx::query_as("select seq, hash from only public.audit_chain order by seq desc limit 1")
+        .fetch_optional(&mut *conn)
+        .await?;
+    let print: Print = (newest, fs::read(anchor_file(settings)).ok());
+    if let Some((at, p, v)) = &slot.last
+        && at.elapsed() < VERDICT_FOR
+        && *p == print
+    {
+        return Ok(v.clone());
+    }
+    let v = audit_status(settings, &mut conn).await?;
+    slot.checks += 1;
+    slot.last = Some((Instant::now(), print, v.clone()));
+    Ok(v)
+}
+
+/// How many full checks `audit_status_shared` ran for this database and anchor (for tests).
+#[doc(hidden)]
+pub async fn audit_status_checks(settings: &Settings) -> u64 {
+    verdict_slot(settings).lock().await.checks
+}
+
 /// Write a consistent backup directory at `dest` (must be missing or empty). Returns `dest`.
 ///
 /// It refuses, before it writes anything, when the previous anchor no longer holds (see the module
-/// doc), or cannot be read. A chain that `verify_chain` finds broken does not stop it: a broken link
-/// stays broken, so refusing would stop every later backup of the health data. The manifest records
-/// the break, the audit page shows it, and the anchor pins the chain as it is from then on.
+/// doc), or cannot be read. A chain that `verify_chain` finds broken, or cannot check, does not stop
+/// it: a broken link stays broken, so refusing would stop every later backup of the health data. The
+/// manifest records the break, the audit page shows it, and the anchor stays as it was: a backup
+/// moves the anchor only onto a log that holds, and only forward.
 pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     if dest.exists() && fs::read_dir(dest)?.next().is_some() {
         return Err(ops_error(format!("{} is not empty", dest.display())));
     }
-    fs::create_dir_all(dest)?;
-    owner_only(dest)?;
     let url = settings.sqlx_url();
     let anchor_path = anchor_file(settings);
+    let lock = anchor_lock(&url).await?;
     let anchored = read_anchor(&anchor_path)?;
     let mut conn = PgConnection::connect(&url).await?;
     let mut tx = conn.begin_with("begin isolation level repeatable read").await?;
+    // The lock comes first: the snapshot is taken by the first statement that reads, so neither audit
+    // table can be renamed, swapped or altered between the snapshot and the end of the backup.
+    sqlx::raw_sql("lock table public.audit_event, public.audit_chain in access share mode")
+        .execute(&mut *tx)
+        .await?;
     // pg_dump reads the snapshot this transaction exported, so the dump, the counts, the state
     // hashes and the audit head all describe the same instant even while the app keeps writing.
     let snapshot: String = sqlx::query_scalar("select pg_export_snapshot()")
         .fetch_one(&mut *tx)
         .await?;
-    // Neither audit table can be renamed, swapped or altered until the backup ends.
-    sqlx::raw_sql("lock table public.audit_event, public.audit_chain in access share mode")
-        .execute(&mut *tx)
-        .await?;
+    let read = chain_read(&mut tx, anchored.as_ref()).await?;
     if let Some(a) = &anchored
-        && !anchor_holds(&mut tx, a).await?
+        && anchor_holds(read.as_ref(), a) == Some(false)
     {
         return Err(anchor_mismatch(&anchor_path, a));
     }
-    let (chain, last) = chain_facts(&mut tx).await?;
-    if let Some(b) = &chain.broken {
-        let at = b
-            .seq
-            .map_or_else(|| "an entry with no link".to_string(), |s| format!("entry {s}"));
+    let broken = match &read {
+        Some(r) => r.check.broken.as_ref().map(|b| {
+            let at = b
+                .seq
+                .map_or_else(|| "an entry with no link".to_string(), |s| format!("entry {s}"));
+            format!("broken at {at} ({})", break_kind(b.kind))
+        }),
+        None => Some("cannot be checked".to_string()),
+    };
+    if let Some(why) = &broken {
         tracing::warn!(
-            "the audit log is broken at {at} ({}): the backup goes on and its manifest records it",
-            break_kind(b.kind)
+            "the audit log {why}: the backup goes on, its manifest records it, and the anchor stays as it was"
         );
     }
+    fs::create_dir_all(dest)?;
+    owner_only(dest)?;
     let out = fs::File::create(dest.join("db.dump"))?;
     let mut cmd = pg_command("pg_dump", dump_args(&url, &snapshot))?;
     let dump = cmd.stdout(out).stderr(Stdio::piped()).spawn()?;
@@ -576,7 +700,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     let manifest = json!({
         "schema": MANIFEST_SCHEMA,
         "created_at": created_at,
-        "audit_chain": chain_json(&chain, last.as_ref()),
+        "audit_chain": chain_json(read.as_ref()),
         "app_version": env!("CARGO_PKG_VERSION"),
         "migrations": migrations,
         "rules_version": ownhealth_rules::rules_version()?,
@@ -593,16 +717,22 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     let text = serde_json::to_string_pretty(&sort_keys(manifest))? + "\n";
     fs::write(dest.join("manifest.json"), text)?;
     owner_only(dest)?;
-    // Last, once the backup is whole: the next backup checks the live chain against this head.
-    let (seq, hash) = last.unwrap_or((0, vec![0; 32]));
-    write_anchor(
-        &settings.anchor_path(),
-        &Anchor {
-            seq,
-            hash,
-            at: created_at,
-        },
-    )?;
+    // Last, once the backup is whole: the next backup checks the live chain against this head. Only
+    // a log that holds moves the anchor, and only forward (see `anchor_lock`).
+    if let Some(r) = read.as_ref().filter(|r| r.check.ok()) {
+        let (seq, hash) = r.newest.clone().unwrap_or((0, vec![0; 32]));
+        if anchored.as_ref().is_none_or(|a| seq > a.seq) {
+            write_anchor(
+                &settings.anchor_path(),
+                &Anchor {
+                    seq,
+                    hash,
+                    at: created_at,
+                },
+            )?;
+        }
+    }
+    lock.close().await?;
     Ok(dest.to_path_buf())
 }
 
@@ -683,8 +813,8 @@ async fn compare(url: &str, manifest: &Value, blob_root: &Path) -> Result<Value>
     let counts = table_counts(&mut tx).await?; // before build_state, which may add state_snapshot rows
     let actual_chain = match expected_chain {
         Some(_) => {
-            let (check, last) = chain_facts(&mut tx).await?;
-            Some(chain_json(&check, last.as_ref()))
+            let read = chain_read(&mut tx, None).await?;
+            Some(chain_json(read.as_ref()))
         }
         None => None,
     };
@@ -740,7 +870,13 @@ async fn compare(url: &str, manifest: &Value, blob_root: &Path) -> Result<Value>
 }
 
 /// Load a backup into the configured, empty database and blob directory, then check it.
-/// Returns the same report as `verify_restore`, computed on the restored instance.
+/// Returns the same report as `verify_restore`, computed on the restored instance, plus
+/// `audit_anchor`: the head it anchored, or null.
+///
+/// When every check passed and the backup's log held, the restored log now ends at the head the
+/// manifest recorded, so the anchor is set to that head: the next backup and the audit page compare
+/// against the log as restored, not against a newer head the restored database never had. Otherwise
+/// the anchor stays as it was.
 pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
     let manifest = read_manifest(archive)?;
     let url = settings.sqlx_url();
@@ -777,7 +913,31 @@ pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
             fs::rename(&part, &target)?;
         }
     }
-    compare(&url, &manifest, &root).await
+    let lock = anchor_lock(&url).await?;
+    let mut report = compare(&url, &manifest, &root).await?;
+    let head = &manifest["audit_chain"];
+    let hash = head["hash"]
+        .as_str()
+        .and_then(|h| hex::decode(h).ok())
+        .or_else(|| (head["seq"] == json!(0)).then(|| vec![0; 32])); // an empty log
+    let anchored = match (head["seq"].as_i64(), hash) {
+        (Some(seq), Some(hash)) if report["ok"] == json!(true) && head["broken"].is_null() => {
+            let at = manifest["created_at"].as_str().unwrap_or_default().to_string();
+            write_anchor(
+                &settings.anchor_path(),
+                &Anchor {
+                    seq,
+                    hash,
+                    at: at.clone(),
+                },
+            )?;
+            json!({"seq": seq, "at": at})
+        }
+        _ => Value::Null,
+    };
+    lock.close().await?;
+    report["audit_anchor"] = anchored;
+    Ok(report)
 }
 
 /// The scratch database of verify-restore. A new database lets PUBLIC connect, and the server may
