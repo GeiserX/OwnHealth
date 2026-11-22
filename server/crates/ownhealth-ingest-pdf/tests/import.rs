@@ -7,7 +7,7 @@ mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ownhealth_core::review::accept;
+use ownhealth_core::review::{accept, accept_with};
 use ownhealth_ingest_pdf::{ground_value, import_pdf, page_words, render_page_png};
 use serde_json::{Value, json};
 use sqlx::PgConnection;
@@ -130,10 +130,8 @@ async fn report_for_another_family_member_never_auto_accepts() -> R {
         json!(e.fam.profile("lucia").to_string())
     );
 
-    accept(&mut c, uuid(&ident[0]["id"]), e.fam.user("alex"), None).await?; // the person confirms the suggestion
-    // as POST /review/{id}/accept does: the files move to Lucía's key
-    let (alex, lucia) = (Some(e.fam.profile("alex")), Some(e.fam.profile("lucia")));
-    ownhealth_core::documents::rekey_document(&mut c, &e.blobs, doc, alex, lucia).await?;
+    // the person confirms the suggestion; the files move to Lucía's key with it
+    accept_with(&mut c, &e.blobs, uuid(&ident[0]["id"]), e.fam.user("alex"), None).await?;
     assert_eq!(
         uuid(&document(&mut c, doc).await?["profile_id"]),
         e.fam.profile("lucia")

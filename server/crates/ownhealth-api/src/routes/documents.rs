@@ -602,27 +602,23 @@ async fn assign(
     e.done()?;
     let profile = profile.unwrap_or_default();
     let mut tx = rt.pool.begin().await?;
+    // The row lock first: a move running at the same time commits before the owner is read here, so
+    // the permission check and the re-key (in assign_document) both see the owner it left.
+    ownhealth_core::documents::lock_owner(&mut tx, document_id).await?;
     let doc = visible_document(&mut tx, principal, document_id, None, false).await?;
     if !doc.perm.can("import") {
         let msg = format!("The role {} cannot import on this profile.", doc.perm.role);
         return Err(Error::access_denied("forbidden", msg).into());
     }
     let target = caller.require(&mut tx, &profile, None, Some("import")).await?;
+    // it re-keys the files and queues the removal of the old copies in this transaction
     let job_id = ownhealth_ingest_pdf::assign_document(
         &mut tx,
+        &rt.blobs,
         document_id,
         target.profile.id,
         principal.user_id.unwrap_or_default(),
         None,
-    )
-    .await?;
-    // the new profile's key must open the file before the re-import reads it
-    let moved = ownhealth_core::documents::rekey_document(
-        &mut tx,
-        &rt.blobs,
-        document_id,
-        Some(doc.perm.profile.id),
-        Some(target.profile.id),
     )
     .await?;
     audit(
@@ -635,23 +631,9 @@ async fn assign(
     )
     .await?;
     tx.commit().await?;
-    drop_moved_copies(&rt, moved).await;
     Ok(Json(
         json!({"document_id": document_id, "profile": target.profile.slug, "job_id": job_id}),
     ))
-}
-
-/// After a move committed: the old profile's copies of the document's files. The move stands either
-/// way, so a failure is logged and the copy stays under the old profile's key until that profile is
-/// deleted.
-pub(crate) async fn drop_moved_copies(rt: &Runtime, moved: ownhealth_core::documents::Moved) {
-    let gone = async {
-        let mut c = rt.pool.acquire().await?;
-        ownhealth_auth::household::drop_moved_copies(&mut c, &rt.blobs, moved).await
-    };
-    if let Err(e) = gone.await {
-        tracing::warn!(error = %e, "a moved document's files stay under the profile it left");
-    }
 }
 
 /// Soft delete with a reason: the document leaves the vault, its values are retracted, its open

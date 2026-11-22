@@ -1028,6 +1028,7 @@ pub(crate) async fn accept_amended(
 /// Accepting the suggestion moves the document to the profile named on its pages and re-imports it.
 pub(crate) async fn accept_identity(
     conn: &mut PgConnection,
+    blobs: &BlobStore,
     item: &ReviewItem,
     user_id: Uuid,
     edits: Option<&Value>,
@@ -1043,7 +1044,7 @@ pub(crate) async fn accept_identity(
     let document_id = item
         .document_id
         .ok_or_else(|| Error::Review("document_identity item without a document".into()))?;
-    assign_document(conn, document_id, target, user_id, Some(item.id)).await?;
+    assign_document(conn, blobs, document_id, target, user_id, Some(item.id)).await?;
     Ok(Vec::new())
 }
 
@@ -1061,10 +1062,12 @@ fn reimport_kind(mime: &str) -> &'static str {
 /// Everything the old reading brought in (observations, records, wearable samples) is withdrawn.
 /// Returns the new import job id (None when the profile did not change). A refusal (another
 /// household, the file already on that profile, a genome-facts file) is `Error::Review` (409).
-/// The caller moves the files to the new profile's key in the same transaction
-/// (`ownhealth_core::documents::rekey_document`), or the re-import cannot open them.
+/// The files move to the new profile's key in the same transaction, from the owner the locked row
+/// holds, and the removal of the old copies is queued with it
+/// (`ownhealth_core::documents::rekey_document`): every move path re-keys, and the re-import opens them.
 pub async fn assign_document(
     conn: &mut PgConnection,
+    blobs: &BlobStore,
     document_id: Uuid,
     profile_id: Uuid,
     user_id: Uuid,
@@ -1121,6 +1124,8 @@ pub async fn assign_document(
         .bind(document_id)
         .execute(&mut *conn)
         .await?;
+    // the new profile's key must open the files before the re-import reads them
+    ownhealth_core::documents::rekey_document(&mut *conn, blobs, document_id, doc.profile_id, Some(profile_id)).await?;
     let key = format!("{kind}:{document_id}:{profile_id}");
     Ok(enqueue(
         conn,

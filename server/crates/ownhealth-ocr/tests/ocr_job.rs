@@ -629,9 +629,8 @@ async fn a_scan_moved_to_another_profile_is_read_again_for_it() -> anyhow::Resul
     assert_eq!(o.accepted + o.review, o.truth, "{o:?}");
 
     let sam = e.fam.profile("sam");
-    ownhealth_ingest_pdf::assign_document(&mut c, doc, sam, e.fam.user("alex"), None).await?;
-    // as POST /documents/{id}/assign does: the files move to Sam's key
-    ownhealth_core::documents::rekey_document(&mut c, &e.blobs, doc, Some(e.fam.profile("alex")), Some(sam)).await?;
+    // the move re-seals the files under Sam's key
+    ownhealth_ingest_pdf::assign_document(&mut c, &e.blobs, doc, sam, e.fam.user("alex"), None).await?;
     // the forced import.pdf the move queued, with the `ocr` profile on
     let s = import_pdf_opts(
         &mut c,
@@ -690,10 +689,8 @@ async fn a_photo_moved_to_another_profile_is_read_again_for_it() -> anyhow::Resu
     assert_eq!(o.accepted + o.review, o.truth, "{o:?}");
 
     let to = e.fam.profile(if person == "sam" { "alex" } else { "sam" });
-    let from = e.fam.profile(person);
-    ownhealth_ingest_pdf::assign_document(&mut c, doc, to, e.fam.user("alex"), None).await?;
-    // as POST /documents/{id}/assign does: the files move to the new profile's key
-    ownhealth_core::documents::rekey_document(&mut c, &e.blobs, doc, Some(from), Some(to)).await?;
+    // the move re-seals the files under the new profile's key
+    ownhealth_ingest_pdf::assign_document(&mut c, &e.blobs, doc, to, e.fam.user("alex"), None).await?;
     let s = import_pdf_opts(
         &mut c,
         &e.blobs,
