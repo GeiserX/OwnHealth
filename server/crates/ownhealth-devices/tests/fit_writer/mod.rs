@@ -16,12 +16,16 @@ pub const UINT16: u8 = 0x84;
 pub const SINT32: u8 = 0x85;
 pub const UINT32: u8 = 0x86;
 pub const UINT32Z: u8 = 0x8C;
+pub const FLOAT64: u8 = 0x89;
 
 // global message numbers
 pub const FILE_ID: u16 = 0;
 pub const SESSION: u16 = 18;
 pub const RECORD: u16 = 20;
 pub const ACTIVITY: u16 = 34;
+pub const NMEA_SENTENCE: u16 = 177;
+pub const FIELD_DESCRIPTION: u16 = 206;
+pub const DEVELOPER_DATA_ID: u16 = 207;
 
 // sports
 pub const RUNNING: u8 = 1;
@@ -66,6 +70,7 @@ pub enum V<'a> {
     U16(u16),
     U32(u32),
     I32(i32),
+    F64(f64),
     Str(&'a str, usize),
 }
 
@@ -76,6 +81,7 @@ impl V<'_> {
             V::U16(v) => v.to_le_bytes().to_vec(),
             V::U32(v) => v.to_le_bytes().to_vec(),
             V::I32(v) => v.to_le_bytes().to_vec(),
+            V::F64(v) => v.to_le_bytes().to_vec(),
             V::Str(s, n) => {
                 let mut b = s.as_bytes().to_vec();
                 b.resize(*n, 0);
@@ -100,6 +106,31 @@ impl Writer {
             self.body.extend([*n, *size, *base]);
         }
         self
+    }
+
+    /// A definition with developer fields as (number, size, developer data index) after its own fields.
+    pub fn define_dev(&mut self, local: u8, global: u16, fields: &[(u8, u8, u8)], dev: &[(u8, u8, u8)]) -> &mut Self {
+        self.define(local, global, fields);
+        if let Some(h) = self.body.len().checked_sub(6 + 3 * fields.len()) {
+            self.body[h] |= 0x20;
+        }
+        self.body.push(u8::try_from(dev.len()).unwrap_or_default());
+        for (n, size, index) in dev {
+            self.body.extend([*n, *size, *index]);
+        }
+        self
+    }
+
+    /// Developer data index 0 and the description of its field `number`: `name`, of base type `base`.
+    pub fn describe(&mut self, local: u8, number: u8, base: u8, name: &str) -> &mut Self {
+        self.define(local, DEVELOPER_DATA_ID, &[(3, 1, UINT8)]);
+        self.data(local, &[V::U8(0)]);
+        self.define(
+            local,
+            FIELD_DESCRIPTION,
+            &[(0, 1, UINT8), (1, 1, UINT8), (2, 1, UINT8), (3, 16, STRING)],
+        );
+        self.data(local, &[V::U8(0), V::U8(number), V::U8(base), V::Str(name, 16)])
     }
 
     /// A data message of a defined local type, its values in the definition's order.
