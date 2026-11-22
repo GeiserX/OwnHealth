@@ -55,6 +55,8 @@
   --md-default-bg-color--lightest: rgb(238 244 246 / 12%);
   --md-typeset-a-color: var(--oh-teal);
   --md-accent-fg-color: var(--oh-teal);
+  /* The active nav link's tint: 6% keeps the teal text at 4.6:1 (10% gave 4.49). */
+  --md-accent-fg-color--transparent: color-mix(in srgb, var(--oh-accent) 6%, transparent);
 }
 
 /* Header: a fixed logo size, the mark and the name close. logo.svg keeps its
@@ -110,11 +112,50 @@
   color: var(--oh-text);
 }
 
-/* Buttons: outline in the link colour. The primary colour is the page
-   background in the dark scheme, so a default button would read as text. */
+/* The phone drawer repeats the name beside the logo: the same two halves, in
+   each scheme's colours. The title is the theme's flex row: the halves go
+   after the logo (order 1), and the row gap moves onto "Own" so the hidden
+   text in between adds no space. */
+.md-nav--primary > .md-nav__title[for="__drawer"] {
+  font-size: 0;
+  gap: 0;
+}
+
+.md-nav--primary > .md-nav__title[for="__drawer"]::before,
+.md-nav--primary > .md-nav__title[for="__drawer"]::after {
+  font-size: 0.8rem;
+  font-weight: 800;
+  order: 1;
+}
+
+.md-nav--primary > .md-nav__title[for="__drawer"]::before {
+  content: "Own";
+  content: "Own" / "";
+  margin-left: 0.4rem;
+  color: var(--oh-teal);
+}
+
+.md-nav--primary > .md-nav__title[for="__drawer"]::after {
+  content: "Health";
+  content: "Health" / "";
+  color: var(--oh-ink);
+}
+
+[data-md-color-scheme="slate"] .md-nav--primary > .md-nav__title[for="__drawer"]::before {
+  color: var(--oh-accent);
+}
+
+[data-md-color-scheme="slate"] .md-nav--primary > .md-nav__title[for="__drawer"]::after {
+  color: var(--oh-text);
+}
+
+/* Buttons: outline in the link colour, on no fill (the theme's grey fill took
+   the light-scheme text to 4.3:1). The primary colour is the page background
+   in the dark scheme, so a default button would read as text. */
 .md-typeset .md-button {
   color: var(--md-typeset-a-color);
-  border-color: var(--md-typeset-a-color);
+  background-color: transparent;
+  border: 0.1rem solid var(--md-typeset-a-color);
   border-radius: 0.5rem;
 }
 
