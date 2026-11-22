@@ -2,14 +2,15 @@
 # The server the browser checks run against (Playwright's webServer starts it, then stops it with
 # SIGTERM): the debug binary on a fresh database in the shared test Postgres (scripts/test-db.sh),
 # seeded with the synthetic demo household, serving the UI build from server/static. The database
-# and the data folder are dropped on exit.
+# and the data folder are dropped on exit. OWNHEALTH_E2E_DB names the database (the tests seed rows
+# into it); connector requests may reach a fake vendor on loopback (OWNHEALTH_DEV_CONNECTOR_LOOPBACK).
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 bin=${OWNHEALTH_E2E_BIN:-$root/server/target/debug/ownhealth}
 port=${OWNHEALTH_E2E_PORT:-8190}
 admin=postgresql://postgres:postgres@127.0.0.1:55432/postgres # ownhealth-testpg, where psql_admin runs
-db="oh_e2e_$(openssl rand -hex 6)"
+db="${OWNHEALTH_E2E_DB:-oh_e2e_$(openssl rand -hex 6)}"
 data=$(mktemp -d)
 pid=""
 
@@ -36,6 +37,8 @@ export OWNHEALTH_DEMO=1 OWNHEALTH_DEV_AUTH=1
 export OWNHEALTH_HOST=127.0.0.1 OWNHEALTH_PORT="$port"
 export OWNHEALTH_BASE_URL="http://127.0.0.1:$port"
 export OWNHEALTH_SECRET_KEY="$(openssl rand -hex 48)"
+export OWNHEALTH_SECRETS_KEY="$(openssl rand -base64 32)" # seals the connectors' refresh tokens
+export OWNHEALTH_DEV_CONNECTOR_LOOPBACK=1 # debug build with dev auth only: the fake vendor on loopback
 export RUST_LOG="${RUST_LOG:-warn}" # the access log stays out of the test output; errors still show
 
 "$bin" serve &
