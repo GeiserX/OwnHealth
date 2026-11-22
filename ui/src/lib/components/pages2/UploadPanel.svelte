@@ -7,6 +7,8 @@
 	import { t } from '#lib/i18n/index.svelte';
 	import { errRaw, errText, tf, tp } from '#lib/components/pages1/util.svelte';
 	import { poller } from '#lib/logic/poll';
+	import { fitLines } from '#lib/logic/fit_import';
+	import FitResult from './FitResult.svelte';
 
 	// ondone gets the documents the finished jobs made, in upload order; rowsOf counts a document's rows to review.
 	let {
@@ -108,7 +110,7 @@
 		<button class="btn pri" onclick={() => fileEl?.click()} disabled={busy}>{t('i2_up_files')}</button>
 		<button class="btn" onclick={() => dirEl?.click()} disabled={busy}>{t('i2_up_folder')}</button>
 		<span class="muted" style="font-size:12px">{t('i2_up_drop')}</span>
-		<input bind:this={fileEl} type="file" multiple hidden accept=".pdf,image/*,.heic,.zip,.json,.ndjson,.gz,.bgz,.tbi,.db,.sqlite,.sqlite3,application/vnd.sqlite3,application/x-sqlite3,application/octet-stream" onchange={(e) => send(files(e))} />
+		<input bind:this={fileEl} type="file" multiple hidden accept=".pdf,image/*,.heic,.zip,.json,.ndjson,.fit,.gz,.bgz,.tbi,.db,.sqlite,.sqlite3,application/vnd.sqlite3,application/x-sqlite3,application/octet-stream" onchange={(e) => send(files(e))} />
 		<input bind:this={dirEl} type="file" hidden {...{ webkitdirectory: true }} onchange={(e) => send(files(e), true)} />
 	</div>
 	<div class="note" style="margin-top:8px">
@@ -126,12 +128,14 @@
 					{@const j = i.job_id != null ? jobs[i.job_id] : undefined}
 					{@const d = docOf(i)}
 					{@const n = d && j?.state === 'done' ? rowsOf(d) : 0}
+					{@const fit = j?.state === 'done' ? fitLines(j.result) : null}
 					<tr>
 						<td style="overflow-wrap:anywhere">{#if d && (j?.state === 'done' || i.duplicate)}<a href="?doc={d}">{i.filename}</a>{:else}{i.filename}{/if}</td>
 						<td class="dim" title={i.kind}>{t('i2_ik_' + i.kind) !== 'i2_ik_' + i.kind ? t('i2_ik_' + i.kind) : i.kind}</td>
 						<td style="white-space:nowrap"><span class="pill {s.cls}"><i aria-hidden="true"></i>{s.word}</span>{#if n}<a class="dim" style="font-size:11.5px;margin-left:8px" href="?doc={d}">{tp('i2_up_rows', n)}</a>{/if}</td>
 						<td class="dim" style="font-size:11.5px" title={j?.last_error ?? undefined}>{j?.last_error ? errText(new Error(j.last_error)) : ''}</td>
 					</tr>
+					{#if fit}<tr><td colspan="4"><FitResult lines={fit} label={i.filename} /></td></tr>{/if}
 				{/each}
 			</tbody>
 		</table>
