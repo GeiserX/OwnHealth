@@ -825,11 +825,7 @@ async fn run(
     let token_id = principal.token_id.unwrap_or_default();
     let usage = limits::usage(&mut *conn, token_id, day).await?;
     let mode = redact::stricter(&principal.identity_mode, None);
-    let lang = if ["es", "en"].contains(&principal.lang.as_str()) {
-        principal.lang.clone()
-    } else {
-        "es".into()
-    };
+    let lang: String = ownhealth_core::langs::mcp_lang(&principal.lang).into();
     let majority = majority_of(&mut *conn, perm.as_ref()).await?;
     let mut call = Call {
         conn: &mut *conn,

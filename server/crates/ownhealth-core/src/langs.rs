@@ -13,9 +13,18 @@ pub const LANGS: [&str; 2] = ["es", "en"];
 /// for 1.0, so adding one needs no migration. `check_mirror.rs` keeps this equal to the CHECK.
 pub const LOCALES: [&str; 7] = ["es", "en", "de", "fr", "ca", "it", "pt"];
 
+/// The languages MCP speaks (`api_token.lang`; `check_mirror.rs` keeps this equal to its CHECK). They
+/// stay es/en whatever [`LANGS`] holds.
+pub const MCP_LANGS: [&str; 2] = ["es", "en"];
+
 /// `lang` when it is in the registry, else the default (the first entry).
 pub fn lang_or_default(lang: &str) -> &str {
     if LANGS.contains(&lang) { lang } else { LANGS[0] }
+}
+
+/// Any locale mapped onto an MCP language: itself when MCP speaks it, else the first entry (es).
+pub fn mcp_lang(lang: &str) -> &'static str {
+    MCP_LANGS.iter().copied().find(|l| *l == lang).unwrap_or(MCP_LANGS[0])
 }
 
 #[cfg(test)]
@@ -47,5 +56,16 @@ mod tests {
         for other in ["xx", "", "ES", "es-ES"] {
             assert_eq!(lang_or_default(other), "es", "{other}");
         }
+    }
+
+    #[test]
+    fn every_locale_maps_onto_an_mcp_language() {
+        for lang in MCP_LANGS {
+            assert_eq!(mcp_lang(lang), lang);
+        }
+        for other in LOCALES.iter().chain(&["xx", "", "EN"]) {
+            assert!(MCP_LANGS.contains(&mcp_lang(other)), "{other}");
+        }
+        assert_eq!(mcp_lang("de"), "es");
     }
 }

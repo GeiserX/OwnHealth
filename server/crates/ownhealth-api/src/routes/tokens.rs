@@ -11,6 +11,7 @@ use ownhealth_auth::tokens::{self, DEFAULT_DAYS, MAX_DAYS, TokenListed};
 use ownhealth_core::Runtime;
 use ownhealth_core::access::PAT_DEFAULT_SCOPES;
 use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::langs::{MCP_LANGS, mcp_lang};
 use ownhealth_core::pyjson::pydantic_datetime_utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -145,7 +146,7 @@ async fn create_my_token(
             Some(&body.identity_mode),
             &["full", "pseudonymous", "minimal"],
         )
-        .literal("lang", body.lang.as_deref(), &["es", "en"])
+        .literal("lang", body.lang.as_deref(), &MCP_LANGS)
         .literal("units", Some(&body.units), &["si", "conventional", "as_reported"])
         .done()?;
     let uid = user_of(&p)?;
@@ -165,7 +166,7 @@ async fn create_my_token(
             unique.push(*id);
         }
     }
-    let lang = body.lang.clone().unwrap_or_else(|| p.lang.clone());
+    let lang = body.lang.as_deref().unwrap_or_else(|| mcp_lang(&p.lang));
     let new = tokens::create_token(
         &mut tx,
         &tokens::TokenIn {
@@ -176,7 +177,7 @@ async fn create_my_token(
             default_profile: default,
             days,
             identity_mode: &body.identity_mode,
-            lang: &lang,
+            lang,
             units: &body.units,
         },
     )
