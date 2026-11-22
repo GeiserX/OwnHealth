@@ -14,7 +14,11 @@
 //!    and its DICOMweb plugin then serves both under `/studies/{uid}`. The link is therefore bound to
 //!    the Orthanc study the record names (`imaging_study.orthanc_id`): at the open, and again before
 //!    proxied reads (at most [`ORTHANC_RECHECK`] apart), Orthanc's `/tools/lookup` must find exactly one
-//!    study under the UID, with that id. Anything else passes nothing.
+//!    study under the UID, with that id. Anything else passes nothing. A second study that arrives
+//!    under the UID after a check can still pass until the next one, for up to [`ORTHANC_RECHECK`].
+//!    The app is Orthanc's only writer, so its importer closes that window: under a lock, it reads
+//!    PatientID and StudyInstanceUID from each file before it sends it, and a file whose UID Orthanc
+//!    already holds under another study goes to review instead.
 //! 2. The viewer (OHIF, served by Orthanc's plugin) runs under `/ohif/t/<capability>/`. Every `/ohif`
 //!    answer carries [`VIEWER_CSP`]: `sandbox allow-scripts` puts the page in an opaque origin, so the
 //!    session cookie never reaches its requests and it cannot read `/api`, and `connect-src 'self'` keeps

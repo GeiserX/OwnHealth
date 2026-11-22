@@ -103,9 +103,10 @@ services:
 
   # `imaging` profile (v1.0): Orthanc keeps the DICOM studies and serves the OHIF viewer, to the app
   # only. It publishes no port, and Caddy does not reach it: the app checks every viewer request first
-  # (docs/design/architecture.md section 4). Turn it on: `openssl rand -hex 32 >
-  # secrets/imaging/orthanc_password`, then two lines in .env: COMPOSE_PROFILES=imaging (with OCR too:
-  # COMPOSE_PROFILES=ocr,imaging) and OWNHEALTH_ORTHANC_URL=http://orthanc:8042.
+  # (docs/design/architecture.md section 4). Turn it on with the password file:
+  #   mkdir -p secrets/imaging && openssl rand -hex 32 > secrets/imaging/orthanc_password && chmod 644 secrets/imaging/orthanc_password
+  # then two lines in .env: COMPOSE_PROFILES=imaging (with OCR too: COMPOSE_PROFILES=ocr,imaging) and
+  # OWNHEALTH_ORTHANC_URL=http://orthanc:8042.
   orthanc:
     profiles: [imaging]
     image: orthancteam/orthanc:26.11.1
