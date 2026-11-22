@@ -179,10 +179,21 @@ pub fn decode_text(bytes: &[u8]) -> Cow<'_, str> {
 }
 
 /// The separator of a CSV header line: the one of `,` `;` and tab that splits it into the most cells.
+/// A separator inside a quoted cell (`"Notes;;"`) splits nothing, so it does not count.
 pub fn csv_delimiter(line: &str) -> u8 {
+    let mut quoted = false;
+    let outside: Vec<u8> = line
+        .bytes()
+        .filter(|b| {
+            if *b == b'"' {
+                quoted = !quoted;
+            }
+            !quoted
+        })
+        .collect();
     (*b",;\t")
         .into_iter()
-        .max_by_key(|d| line.bytes().filter(|b| b == d).count())
+        .max_by_key(|d| outside.iter().filter(|b| *b == d).count())
         .unwrap_or(b',')
 }
 
@@ -721,6 +732,21 @@ pub async fn rekey_document(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_separator_inside_quotes_does_not_pick_the_delimiter() {
+        let clarity = "Index,Timestamp (YYYY-MM-DDThh:mm:ss),Event Type,Glucose Value (mg/dL)";
+        assert_eq!(csv_delimiter(&format!("{clarity},\"Notes;;;;;\"")), b',');
+        assert_eq!(
+            csv_delimiter("Index;Timestamp (YYYY-MM-DDThh:mm:ss);Event Type;\"a,b,c,d,e\""),
+            b';'
+        );
+        assert_eq!(csv_delimiter("Index\tTimestamp\tEvent Type"), b'\t');
+        assert_eq!(
+            cgm_csv_kind(&format!("{clarity},\"Notes;;;;;\"")),
+            Some("dexcom_clarity_csv")
+        );
+    }
 
     #[test]
     fn sniff_matches_python() {

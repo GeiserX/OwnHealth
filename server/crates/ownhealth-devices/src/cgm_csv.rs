@@ -30,7 +30,8 @@
 //! the zone the browser sent with the upload (`timezone` in the job payload), with Postgres's zone
 //! rules, and each reading keeps the offset that applied (`tz_offset_min`). An old zone name that the
 //! tz database links to a current one (`Asia/Calcutta`, which Chromium still reports) reads as the
-//! current one (`data/tz/backward`), since the Debian Postgres image ships only current names. A zone
+//! current one (`data/tz/backward`), since the Debian Postgres image ships only current names; a
+//! Postgres that knows both names reads the current one too, so one zone has one name. A zone
 //! Postgres does not know by either name is no zone; it never refuses an upload. With neither zone, a
 //! time is read as UTC and keeps no offset: the rule the PDF and FHIR importers apply to a time without
 //! an offset. The zone used is a property of the file
@@ -55,7 +56,8 @@
 //! `duplicate`. Retracting a file queues the profile's other CGM exports for import again
 //! (`retract::retract_document_facts`), so the readings they share come back as theirs. A file whose
 //! readings are replaced because it was uploaded in another zone does the same: the instants it left
-//! may hold readings of another export.
+//! may hold readings of another export. A retraction of a CGM export takes the lock its imports hold
+//! (`retract::lock_exports`) first, so it waits for a running import and then removes what it wrote.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read as _;
@@ -471,6 +473,8 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
     // Clarity's header block: source device id -> device name
     let mut names: HashMap<String, String> = HashMap::new();
     let mut pending: Vec<(usize, String, f64)> = Vec::new();
+    // the times of Low and High rows: no reading, but their dates still tell the order of day and month
+    let mut out_of_range: Vec<String> = Vec::new();
     while let Some(rec) = records.next() {
         let rec = rec.map_err(|e| not_cgm(&e.to_string()))?;
         let cell = |i: Option<usize>| i.and_then(|i| rec.get(i)).unwrap_or("");
@@ -525,10 +529,12 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
             Glucose::Mg(v) => v,
             Glucose::Low => {
                 bump(&mut skipped, "below_sensor_range");
+                out_of_range.push(cell(Some(time_col)).to_string());
                 continue;
             }
             Glucose::High => {
                 bump(&mut skipped, "above_sensor_range");
+                out_of_range.push(cell(Some(time_col)).to_string());
                 continue;
             }
             Glucose::Bad => {
@@ -559,7 +565,10 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
     }
     let times: Vec<Option<NaiveDateTime>> = match vendor {
         Vendor::Clarity => pending.iter().map(|p| iso_time(&p.1)).collect(),
-        Vendor::LibreView => libre_times(&pending.iter().map(|p| p.1.as_str()).collect::<Vec<_>>()),
+        Vendor::LibreView => libre_times_with(
+            &pending.iter().map(|p| p.1.as_str()).collect::<Vec<_>>(),
+            &out_of_range.iter().map(String::as_str).collect::<Vec<_>>(),
+        ),
     };
     let earliest = NaiveDate::from_ymd_opt(2000, 1, 1).unwrap_or_default();
     let mut readings = Vec::with_capacity(pending.len());
@@ -719,9 +728,21 @@ fn day_first(stamps: &[Stamp]) -> bool {
 
 /// LibreView timestamps: `DD-MM-YYYY HH:MM`, `MM-DD-YYYY HH:MM`, `MM-DD-YYYY hh:mm AM`, with `-`, `/` or
 /// `.`, the order of day and month decided once for the whole file.
+#[cfg(test)]
 fn libre_times(raw: &[&str]) -> Vec<Option<NaiveDateTime>> {
+    libre_times_with(raw, &[])
+}
+
+/// [`libre_times`], with the times of the file's other rows (`hints`, its Low and High rows) also
+/// deciding the order of day and month.
+fn libre_times_with(raw: &[&str], hints: &[&str]) -> Vec<Option<NaiveDateTime>> {
     let stamps: Vec<Option<Stamp>> = raw.iter().map(|s| stamp(s)).collect();
-    let known: Vec<Stamp> = stamps.iter().flatten().copied().collect();
+    let known: Vec<Stamp> = stamps
+        .iter()
+        .flatten()
+        .copied()
+        .chain(hints.iter().filter_map(|s| stamp(s)))
+        .collect();
     let df = day_first(&known);
     stamps
         .iter()
@@ -757,13 +778,13 @@ pub fn zone_link_target(name: &str) -> Option<&'static str> {
     })
 }
 
-/// The zone `name` as Postgres knows it: the name itself, or the current name of an old one
-/// ([`zone_link_target`]). Else none, as for a name over 64 characters.
+/// The zone `name` as Postgres knows it: the current name of an old one ([`zone_link_target`]) when
+/// Postgres knows that, else the name itself. Else none, as for a name over 64 characters.
 pub async fn known_zone(conn: &mut PgConnection, name: Option<&str>) -> Result<Option<String>> {
     let Some(name) = name.map(str::trim).filter(|z| !z.is_empty() && z.len() <= 64) else {
         return Ok(None);
     };
-    let names: Vec<&str> = std::iter::once(name).chain(zone_link_target(name)).collect();
+    let names: Vec<&str> = zone_link_target(name).into_iter().chain([name]).collect();
     let known: Option<String> = sqlx::query_scalar(
         "select n from unnest(cast($1 as text[])) with ordinality as x(n, i) \
          where exists (select 1 from pg_timezone_names where name = x.n) order by x.i limit 1",
@@ -920,7 +941,11 @@ async fn import_in(
         .filter(|d| d.is_object())
         .map(|d| d.get("timezone").and_then(Value::as_str).map(str::to_string));
     let (zone, replace): (Option<String>, bool) = match (read, &before) {
-        (Read::Upload(Some(z)), Some(b)) => (Some(z.to_string()), b.as_deref() != Some(z)),
+        // a zone saved under its old name is the same zone
+        (Read::Upload(Some(z)), Some(b)) => (
+            Some(z.to_string()),
+            b.as_deref().map(|b| zone_link_target(b).unwrap_or(b)) != Some(z),
+        ),
         (Read::Upload(None) | Read::Again(_), Some(b)) => (b.clone(), false),
         (Read::Upload(z) | Read::Again(z), None) => (z.map(str::to_string), false),
     };
@@ -1212,6 +1237,32 @@ mod tests {
             libre_times(&["01/40/2026 08:00", "05/11/2026 08:00", "06/11/2026 08:00"]),
             vec![None, dt(2026, 11, 5, 8, 0), dt(2026, 11, 6, 8, 0)]
         );
+    }
+
+    #[test]
+    fn low_and_high_rows_also_decide_the_order_of_the_file() -> Result<()> {
+        // every reading is on 11-12, which reads either way; the Low row on 11-13 says month first
+        let text = "Device,Serial Number,Device Timestamp,Record Type,Historic Glucose mg/dL\n\
+            FreeStyle Libre 3,SN1,11-12-2026 10:00,0,112\nFreeStyle Libre 3,SN1,11-12-2026 10:15,0,118\n\
+            FreeStyle Libre 3,SN1,11-13-2026 03:00,0,Low\n";
+        let p = parse(text.as_bytes())?;
+        assert_eq!(
+            p.readings.iter().map(|r| Some(r.local)).collect::<Vec<_>>(),
+            vec![dt(2026, 11, 12, 10, 0), dt(2026, 11, 12, 10, 15)]
+        );
+        assert_eq!(p.skipped, BTreeMap::from([("below_sensor_range", 1)]));
+        Ok(())
+    }
+
+    #[test]
+    fn a_separator_inside_a_quoted_header_does_not_change_the_delimiter() -> Result<()> {
+        let p = parse(
+            "Index,Timestamp (YYYY-MM-DDThh:mm:ss),Event Type,Glucose Value (mg/dL),\"Notes;;;;;\"\n1,2026-11-14T08:00:00,EGV,98,x\n"
+                .as_bytes(),
+        )?;
+        assert_eq!(p.readings.len(), 1);
+        assert_eq!(p.unknown_columns, vec!["Notes;;;;;".to_string()]);
+        Ok(())
     }
 
     #[test]

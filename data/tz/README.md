@@ -7,8 +7,9 @@ domain, as the LICENSE file of that release says.
 
 Each `Link TARGET NAME` line maps an old or merged zone name to its current one. Browsers still report
 some old names (Chromium says `Asia/Calcutta` for `Asia/Kolkata`), while the Debian Postgres image ships
-only the current names. The CGM CSV importer (`ownhealth_devices::cgm_csv::known_zone`) reads a name
-Postgres does not know through this table.
+only the current names. The CGM CSV importer (`ownhealth_devices::cgm_csv::known_zone`) reads an old
+name as its current one through this table, also on a Postgres that knows both names, so one zone always
+has one name.
 
 To update: replace `backward` with the file of a newer release, and change the release and the sha256
 above.

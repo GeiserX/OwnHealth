@@ -791,6 +791,109 @@ async fn a_server_zone_with_an_old_name_reads_the_times_in_its_current_zone() ->
 }
 
 #[tokio::test]
+async fn a_zone_postgres_knows_by_two_names_is_read_by_its_current_name() -> R {
+    let env = Env::new().await?;
+    // a Postgres that ships its own zone files knows an old name and its current name both
+    let known: i64 =
+        sqlx::query_scalar("select count(*) from pg_timezone_names where name in ('Europe/Belfast', 'Europe/London')")
+            .fetch_one(&env.db.pool)
+            .await?;
+    assert_eq!(
+        known, 2,
+        "this Postgres lacks one of the names: the two-name case is no longer covered"
+    );
+    let mut c = env.db.pool.acquire().await?;
+    let (server, _) = cgm_csv::known_zones(&mut c, Some("Europe/Belfast"), None).await?;
+    drop(c);
+    assert_eq!(server.as_deref(), Some("Europe/London"));
+    let bytes = fixture("clarity-en-mgdl.csv")?;
+    let result = upload_in_zone(&env, "lucia", "clarity.csv", &bytes, "Europe/Belfast").await?;
+    assert_eq!(result["cgm_csv"]["timezone"], json!("Europe/London"), "{result}");
+    // an export saved under the old name is in the same zone as the current name: nothing is replaced
+    sqlx::query(
+        "update document set flags = jsonb_set(flags, '{cgm_csv,timezone}', '\"Europe/Belfast\"') where profile_id = $1",
+    )
+    .bind(env.fam.profile("lucia"))
+    .execute(&env.db.pool)
+    .await?;
+    let result = upload_in_zone(&env, "lucia", "clarity.csv", &bytes, "Europe/London").await?;
+    assert_eq!(result["cgm_csv"].get("replaced"), None, "{result}");
+    assert_eq!(result["reasons"]["duplicate"], json!(8), "{result}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_retraction_while_the_export_is_read_again_leaves_none_of_its_readings() -> R {
+    let env = Env::new().await?;
+    let b = clarity_at(&every_5("2026-11-14", 11, 12));
+    let (_, id) = upload(&env, "lucia", "b.csv", &b).await?;
+    assert_eq!(job(&env, id).await?.0, "done");
+    let doc: Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'b.csv'")
+        .bind(env.fam.profile("lucia"))
+        .fetch_one(&env.db.pool)
+        .await?;
+    // its run again is queued, as after another export's retraction, and its readings are gone
+    sqlx::query("delete from wearable_sample where document_id = $1")
+        .bind(doc)
+        .execute(&env.db.pool)
+        .await?;
+    sqlx::query("update document set flags = flags - 'import' where id = $1")
+        .bind(doc)
+        .execute(&env.db.pool)
+        .await?;
+    let mut c = env.db.pool.acquire().await?;
+    jobs::enqueue(
+        &mut c,
+        cgm_csv::JOB,
+        &json!({"document_id": doc.to_string()}),
+        jobs::EnqueueOptions::default(),
+    )
+    .await?;
+    drop(c);
+    // the run is held after it read b.csv as active: another transaction writes, uncommitted, a
+    // reading at b.csv's first instant, and the run's insert waits for it
+    let source: i16 =
+        sqlx::query_scalar("select id from wearable_source where profile_id = $1 and provider = 'dexcom_clarity'")
+            .bind(env.fam.profile("lucia"))
+            .fetch_one(&env.db.pool)
+            .await?;
+    let mut hold = env.db.pool.begin().await?;
+    sqlx::query(
+        "insert into wearable_sample (profile_id, metric, t, v, source_id) values ($1, 'glucose_cgm', $2, 1, $3)",
+    )
+    .bind(env.fam.profile("lucia"))
+    .bind(utc(2026, 11, 14, 11, 0, 0))
+    .bind(source)
+    .execute(&mut *hold)
+    .await?;
+    let ctx = env.ctx.clone();
+    let run = tokio::spawn(async move { jobs::drain(&ctx, "core", 5, None).await });
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    // the retraction of b.csv as the route runs it: its facts first, then its status
+    let pool = env.db.pool.clone();
+    let retraction = tokio::spawn(async move {
+        let mut tx = pool.begin().await?;
+        ownhealth_ingest_structured::retract::retract_document_facts(&mut tx, doc, "test").await?;
+        sqlx::query("update document set status = 'retracted', status_reason = 'test' where id = $1")
+            .bind(doc)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        anyhow::Ok(())
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    hold.rollback().await?;
+    run.await??;
+    retraction.await??;
+    let left: i64 = sqlx::query_scalar("select count(*) from wearable_sample where document_id = $1")
+        .bind(doc)
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(left, 0, "a retracted export still holds readings");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_zone_replacement_brings_back_what_an_overlapping_export_holds() -> R {
     let env = Env::new().await?;
     // two exports of one sensor read as UTC: a.csv 10:00 to 11:55, b.csv 11:00 to 12:55; a.csv came
