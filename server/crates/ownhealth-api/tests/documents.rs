@@ -612,7 +612,7 @@ async fn a_document_whose_file_is_gone_answers_404() -> R {
     let r = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
     let body = String::from_utf8_lossy(&r.bytes).into_owned();
     assert_eq!(r.status, StatusCode::NOT_FOUND, "{body}");
-    assert_eq!(r.json()["detail"]["code"], "unknown", "{body}");
+    assert_eq!(r.json()["detail"]["code"], "blob_missing", "{body}");
     assert!(!body.contains(&sha[..12]), "{body}");
     Ok(())
 }
