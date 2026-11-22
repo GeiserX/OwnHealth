@@ -366,13 +366,13 @@ fn slot_rel(slot: Slot) -> PathBuf {
     }
 }
 
-/// The [`tree_files`] key of a slot's sealed file at `address`.
 /// The key in a blob tree of the file `sha256` sealed under `dek` in `slot`: what a backup lists
 /// for it when the key comes from the backup's own snapshot instead of the live store.
 pub fn sealed_key(slot: Slot, dek: &Dek, sha256: &str) -> Result<String, BlobError> {
     Ok(slot_key(slot, &dek.address(&sha_array(sha256)?)))
 }
 
+/// The [`tree_files`] key of a slot's sealed file at `address`.
 fn slot_key(slot: Slot, address: &str) -> String {
     match slot {
         Slot::Profile(p) => format!("{}/{address}", p.simple()),
@@ -1015,7 +1015,8 @@ impl BlobStore {
                     Ok(true) => removed += 1,
                     Ok(false) => {}
                     Err(e) => {
-                        tracing::warn!(error = %e, "a sealed folder whose key is gone could not be removed");
+                        // a Slot prints its ids only, never a hash or a key
+                        tracing::warn!(error = %e, ?slot, "a sealed folder whose key is gone could not be removed");
                         failed.get_or_insert(e);
                     }
                 }
