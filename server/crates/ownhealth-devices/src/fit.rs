@@ -1045,7 +1045,8 @@ async fn import_upload(ctx: &JobContext, job: &Job, channel: &str, source_id: Op
 /// one that looks last sees the other let go, so the last one deletes the upload, although a worker
 /// marks a job done only after its handler returns. Each profile keeps its own sealed copy of the
 /// bytes: this profile's copy goes once no row of the profile holds it, and the plain copy once no
-/// row holds it at all (as `hae::prune_pushes`).
+/// row holds it at all (as `hae::prune_pushes`). The check and the delete wait while a backup copies
+/// the files (`blobs::removal_lock`): the backup's snapshot may still show a row that held the bytes.
 async fn forget_upload(ctx: &JobContext, profile_id: Uuid, sha: &str, job_id: i64) {
     let done: Result<()> = async {
         let mut conn = ctx.pool.acquire().await?;
@@ -1053,6 +1054,8 @@ async fn forget_upload(ctx: &JobContext, profile_id: Uuid, sha: &str, job_id: i6
             .bind(job_id)
             .execute(&mut *conn)
             .await?;
+        let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+        ownhealth_core::blobs::removal_lock(&mut tx, true).await?;
         let holders = "from job where id <> $2 and state in ('queued', 'running') \
                        and payload->>'blob_sha256' = $1 and payload->'upload_released' is null";
         let (mine, held): (bool, bool) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -1068,7 +1071,7 @@ async fn forget_upload(ctx: &JobContext, profile_id: Uuid, sha: &str, job_id: i6
         .bind(job_id)
         .bind(profile_id)
         .bind(profile_id.to_string())
-        .fetch_one(&mut *conn)
+        .fetch_one(&mut *tx)
         .await?;
         let owner = BlobOwner::Profile(profile_id);
         if !held {
@@ -1076,6 +1079,7 @@ async fn forget_upload(ctx: &JobContext, profile_id: Uuid, sha: &str, job_id: i6
         } else if !mine {
             ctx.blobs.drop_sealed(owner, sha)?;
         }
+        tx.commit().await?;
         Ok(())
     }
     .await;

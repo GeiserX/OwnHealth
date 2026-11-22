@@ -1298,3 +1298,46 @@ async fn a_developer_field_its_own_file_never_describes_is_blanked() -> R {
     }
     Ok(())
 }
+
+/// A backup copying the files holds the copy lock from before its snapshot until its copy ends: the
+/// snapshot may still show a row that held the uploaded bytes, so the import deletes its upload only
+/// after the copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upload_stays_while_a_backup_copies_the_files_and_goes_after() -> R {
+    let env = Env::new().await?;
+    let run = fw::run_with_gps();
+    let upload_sha = put(&env, "lucia", &run)?;
+    let id = upload(&env, &run, "run.fit").await?;
+    let mut backup = env.db.pool.acquire().await?;
+    sqlx::query("select pg_catalog.pg_advisory_lock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(&mut *backup)
+        .await?;
+    let ctx = env.ctx.clone();
+    let worker = tokio::spawn(async move { jobs::drain(&ctx, "core", 5, None).await });
+    let waiting = "select count(*) from pg_locks where locktype = 'advisory' and not granted";
+    let started = std::time::Instant::now();
+    loop {
+        let n: i64 = sqlx::query_scalar(waiting).fetch_one(&env.db.pool).await?;
+        if n > 0 {
+            break;
+        }
+        anyhow::ensure!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "the import never waited for the copy"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        exists(&env, &upload_sha),
+        "the upload went while a backup was copying the files"
+    );
+    sqlx::query("select pg_catalog.pg_advisory_unlock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(&mut *backup)
+        .await?;
+    drop(backup);
+    worker.await??;
+    let (state, _, err) = job(&env, id).await?;
+    assert_eq!(state, "done", "{err:?}");
+    assert!(!exists(&env, &upload_sha), "the upload stayed after the copy");
+    Ok(())
+}
