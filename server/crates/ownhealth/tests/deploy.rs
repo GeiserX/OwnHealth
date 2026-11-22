@@ -136,14 +136,14 @@ async fn check_app_role(db: &TestDb, role: &str, password: &str) -> R {
     let n: i64 = sqlx::query_scalar("select count(*) from audit_event")
         .fetch_one(&mut app)
         .await?;
-    assert!(n >= 1);
+    anyhow::ensure!(n >= 1, "the app role reads no audit row");
     // the row still gets its chain link, which only the owner's trigger function writes
     let linked: i64 = sqlx::query_scalar(
         "select count(*) from audit_chain c join audit_event e on e.id = c.event_id where e.action = 'test'",
     )
     .fetch_one(&mut app)
     .await?;
-    assert_eq!(linked, 1);
+    anyhow::ensure!(linked == 1, "chain links of the app role's row: {linked}");
     sqlx::query("select count(*) from profile").execute(&mut app).await?; // ordinary tables stay usable
     for sql in [
         "update audit_event set action = 'rewritten'",
@@ -155,14 +155,14 @@ async fn check_app_role(db: &TestDb, role: &str, password: &str) -> R {
         "truncate audit_chain",
     ] {
         let e = refused(&mut app, sql).await?;
-        assert!(e.contains("permission denied"), "{sql}: {e}");
+        anyhow::ensure!(e.contains("permission denied"), "{sql}: {e}");
     }
     for sql in [
         "alter table audit_event disable trigger all",
         "drop trigger audit_event_no_update on audit_event",
     ] {
         let e = refused(&mut app, sql).await?;
-        assert!(e.contains("must be owner"), "{sql}: {e}");
+        anyhow::ensure!(e.contains("must be owner"), "{sql}: {e}");
     }
     app.close().await?;
 
@@ -250,10 +250,13 @@ async fn check_no_code_as_the_owner(db: &TestDb, role: &str, password: &str) -> 
     let forged: i64 = sqlx::query_scalar("select count(*) from audit_chain where event_id = 424242")
         .fetch_one(&db.pool)
         .await?;
-    assert!(ran_as.is_empty(), "the app role's code ran as {ran_as:?}");
-    assert_eq!(forged, 0, "the app role wrote a chain link");
-    let e = attack.expect_err("the app role must not attach the chain function to its own table");
-    assert!(
+    // checks that return their failure, so the caller still drops the role
+    anyhow::ensure!(ran_as.is_empty(), "the app role's code ran as {ran_as:?}");
+    anyhow::ensure!(forged == 0, "the app role wrote a chain link");
+    let Err(e) = attack else {
+        anyhow::bail!("the app role must not attach the chain function to its own table");
+    };
+    anyhow::ensure!(
         e.to_string()
             .contains("permission denied for function public.oh_audit_chain_link"),
         "{e}"
