@@ -1048,8 +1048,13 @@ pub(crate) async fn accept_identity(
     Ok(Vec::new())
 }
 
-/// Structured files run their own import again; everything else (PDF, image) the PDF one.
-fn reimport_kind(mime: &str) -> &'static str {
+/// Structured files run their own import again; everything else (PDF, image) the PDF one. A CGM export
+/// (`cgm`: its flags hold `cgm_csv`) runs the CGM import of the stored document, which reads the file in
+/// the zone it keeps.
+fn reimport_kind(mime: &str, cgm: bool) -> &'static str {
+    if cgm {
+        return "import.cgm_csv";
+    }
     match mime {
         "application/fhir+json" | "application/fhir+ndjson" => "import.fhir_bundle",
         "application/zip" => "import.apple_health",
@@ -1115,7 +1120,11 @@ pub async fn assign_document(
     for item_id in open {
         dismiss(&mut *conn, item_id, user_id, Some("document moved to another profile")).await?;
     }
-    let kind = reimport_kind(&doc.mime);
+    let cgm: bool = sqlx::query_scalar("select flags ? 'cgm_csv' from document where id = $1")
+        .bind(document_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let kind = reimport_kind(&doc.mime, cgm);
     if doc.doc_type.as_deref() == Some("genomics") {
         return Err(Error::Review(
             "a genome-facts file cannot move; retract it and upload it to the right profile".into(),

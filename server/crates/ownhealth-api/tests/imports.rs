@@ -893,19 +893,23 @@ async fn moving_a_cgm_export_while_its_import_runs_waits_for_the_import() -> R {
     ownhealth_ingest_structured::retract::lock_exports(&mut import, alex, "cgm_csv").await?;
     let path = format!("/documents/{doc}/assign");
     let (moved, imported) = tokio::join!(a.post("alex", &path, Some(json!({"profile": "lucia"}))), async {
-        // once the move waits for the lock, the import writes the document row and commits
+        // once the move waits for the lock, the import writes the document row and commits; a move that
+        // never waits fails the test
+        let mut waited = false;
         for _ in 0..100 {
             let waiting: i64 = sqlx::query_scalar(
                 "select count(*) from pg_stat_activity where datname = current_database() \
-                 and wait_event_type = 'Lock' and wait_event = 'advisory'",
+                 and wait_event_type = 'Lock' and wait_event = 'advisory' and query like '%pg_advisory_xact_lock%'",
             )
             .fetch_one(&a.rt.pool)
             .await?;
             if waiting > 0 {
+                waited = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        anyhow::ensure!(waited, "the move never waited for the running import's export lock");
         sqlx::query("update document set flags = flags || '{\"cgm_csv_seen\": true}' where id = $1")
             .bind(doc)
             .execute(&mut *import)
@@ -922,5 +926,27 @@ async fn moving_a_cgm_export_while_its_import_runs_waits_for_the_import() -> R {
             .fetch_one(&a.rt.pool)
             .await?;
     assert_eq!((owner, seen), (Some(a.family.profile("lucia")), true));
+    // the move imports the export again for Lucía, in the zone its file was read in (Madrid, +60)
+    ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, None).await?;
+    let jobs: Vec<(String, String)> = sqlx::query_as(
+        "select kind, state from job where payload->>'document_id' = $1 and payload->>'profile_id' = $2",
+    )
+    .bind(doc.to_string())
+    .bind(a.family.profile("lucia").to_string())
+    .fetch_all(&a.rt.pool)
+    .await?;
+    assert_eq!(jobs, [("import.cgm_csv".to_string(), "done".to_string())]);
+    let held: Vec<(uuid::Uuid, chrono::DateTime<chrono::Utc>, Option<i16>)> =
+        sqlx::query_as("select profile_id, t, tz_offset_min from wearable_sample where document_id = $1")
+            .bind(doc)
+            .fetch_all(&a.rt.pool)
+            .await?;
+    let at = chrono::DateTime::parse_from_rfc3339("2026-11-14T19:00:17Z")?.with_timezone(&chrono::Utc);
+    assert_eq!(held, [(a.family.profile("lucia"), at, Some(60))]);
+    let zone: serde_json::Value = sqlx::query_scalar("select flags->'cgm_csv'->'timezone' from document where id = $1")
+        .bind(doc)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    assert_eq!(zone, json!("Europe/Madrid"));
     Ok(())
 }

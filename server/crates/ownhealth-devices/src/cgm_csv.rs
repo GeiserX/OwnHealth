@@ -63,6 +63,7 @@
 //! may hold readings of another export. A retraction or a move of a CGM export takes the lock its
 //! imports hold (`retract::lock_export_of`) before anything else, so it waits for a running import and
 //! then removes what it wrote.
+//! A moved export is imported again on its new profile (`import.cgm_csv` of the stored document).
 //!
 //! Low and High rows count toward [`MAX_READINGS`], and only dates from 2000 on decide the order of day
 //! and month.

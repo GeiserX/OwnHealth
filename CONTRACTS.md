@@ -46,7 +46,7 @@ token's `mcp_lang`.
 | A | observations.rs | `POST /aliases` | `{profile, alias, alias_group, lang?, loinc?, unit?, specimen?}`, action `review`; re-derives the household |
 | B | documents.rs | `GET /profiles/{p}/documents?q=&type=&limit=&latest=fhir` ; `GET /documents/{id}` | `latest=fhir`: only documents a FHIR import read, newest stored first |
 | B | documents.rs | `GET /documents/{id}/file` ; `/pages/{n}.png` ; `/pages/{n}/words` | words need `read:documents_text` for tokens |
-| B | documents.rs | `POST /documents/{id}/assign` `{profile}` ; `POST /documents/{id}/retract` `{reason}` | |
+| B | documents.rs | `POST /documents/{id}/assign` `{profile}` ; `POST /documents/{id}/retract` `{reason}` | a moved CGM export (`flags.cgm_csv`) is imported again on its new profile by `import.cgm_csv`, in the zone its file keeps |
 | C | records.rs | `GET`/`POST /profiles/{p}/records/{kind}` ; `POST .../{kind}/{id}/correct` ; `.../{id}/retract` | |
 | C | records.rs | `POST /profiles/{p}/manual-observations` | |
 | C | records.rs | `POST /profiles/{p}/records/medication/{id}/label` multipart `file` | a label photo (PNG, JPEG or WebP, at most 15 MiB) stored as a document (doc_type `other`, no job) and linked to the current version; write role; medication reads list `labels` |
