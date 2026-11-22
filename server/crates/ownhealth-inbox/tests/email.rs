@@ -795,8 +795,10 @@ async fn a_held_message_opens_only_through_its_item_key_and_moves_under_the_prof
         .quarantine_id
         .ok_or_else(|| anyhow::anyhow!("not held"))?;
     assert_eq!(env.n(live).await?, 1);
+    let mut tx = env.db.pool.begin().await?;
+    quarantine::mark_deleted(&mut tx, q2, user).await?;
+    tx.commit().await?;
     let mut c = env.db.pool.acquire().await?;
-    quarantine::mark_deleted(&mut c, q2, user).await?;
     assert_eq!(env.n(live).await?, 0, "the item key outlived the delete");
     // the sweep takes both settled items' folders, and nothing else
     let before = blob_keys(&env, &format!("{}/", carmen.simple()))?;
