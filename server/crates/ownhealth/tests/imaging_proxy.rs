@@ -61,6 +61,8 @@ struct FakeOrthanc {
     /// The bodies of `POST /tools/lookup`.
     lookups: Arc<Mutex<Vec<String>>>,
     studies: Studies,
+    /// While a test holds this for writing, `/tools/lookup` waits before it answers.
+    pause: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl FakeOrthanc {
@@ -68,12 +70,15 @@ impl FakeOrthanc {
         let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
         let lookups: Arc<Mutex<Vec<String>>> = Arc::default();
         let studies: Studies = Arc::default();
-        let (log, looked, known) = (seen.clone(), lookups.clone(), studies.clone());
+        let pause: Arc<tokio::sync::RwLock<()>> = Arc::default();
+        let (log, looked, known, paused) = (seen.clone(), lookups.clone(), studies.clone(), pause.clone());
         let app = Router::new().fallback(move |req: Request| {
-            let (log, looked, known) = (log.clone(), looked.clone(), known.clone());
+            let (log, looked, known, paused) = (log.clone(), looked.clone(), known.clone(), paused.clone());
             async move {
                 if req.method() == Method::POST && req.uri().path() == "/tools/lookup" {
-                    return fake_lookup(&looked, &known, req).await;
+                    let answer = fake_lookup(&looked, &known, req).await;
+                    let _wait = paused.read().await;
+                    return answer;
                 }
                 fake_answer(&log, req)
             }
@@ -88,6 +93,7 @@ impl FakeOrthanc {
             seen,
             lookups,
             studies,
+            pause,
         })
     }
 
@@ -313,14 +319,7 @@ impl World {
 
     /// `POST /api/profiles/{slug}/imaging/studies/{uid}/open` from our own origin.
     async fn open_with(&self, auth: Auth<'_>, slug: &str, uid: &str) -> anyhow::Result<(StatusCode, Value)> {
-        let mut b = Request::post(format!("/api/profiles/{slug}/imaging/studies/{uid}/open"))
-            .header(header::HOST, "health.test")
-            .header(header::ORIGIN, BASE);
-        b = match auth {
-            Auth::Cookie(c) => b.header(header::COOKIE, format!("{}={c}", sessions::COOKIE)),
-            Auth::Bearer(t) => b.header(header::AUTHORIZATION, format!("Bearer {t}")),
-        };
-        let (s, _, body) = self.call(b.body(Body::empty())?).await?;
+        let (s, _, body) = self.call(open_request(auth, slug, uid)?).await?;
         Ok((s, serde_json::from_slice(&body).unwrap_or(Value::Null)))
     }
 
@@ -400,6 +399,18 @@ impl World {
 enum Auth<'a> {
     Cookie(&'a str),
     Bearer(&'a str),
+}
+
+/// `POST /api/profiles/{slug}/imaging/studies/{uid}/open` from our own origin.
+fn open_request(auth: Auth<'_>, slug: &str, uid: &str) -> anyhow::Result<Request<Body>> {
+    let b = Request::post(format!("/api/profiles/{slug}/imaging/studies/{uid}/open"))
+        .header(header::HOST, "health.test")
+        .header(header::ORIGIN, BASE);
+    let b = match auth {
+        Auth::Cookie(c) => b.header(header::COOKIE, format!("{}={c}", sessions::COOKIE)),
+        Auth::Bearer(t) => b.header(header::AUTHORIZATION, format!("Bearer {t}")),
+    };
+    Ok(b.body(Body::empty())?)
 }
 
 fn hv<'h>(h: &'h HeaderMap, name: &str) -> &'h str {
@@ -1162,6 +1173,47 @@ async fn the_orthanc_check_is_asked_again_once_its_time_is_up() -> R {
         );
     }
     assert!(w.orthanc.seen().is_empty(), "{:?}", w.orthanc.seen());
+    Ok(())
+}
+
+/// The open asks Orthanc with no database connection or transaction held, so a slow Orthanc cannot
+/// use up the pool. When it writes the audit row, the record must still name the study Orthanc just
+/// confirmed.
+#[tokio::test]
+async fn an_open_holds_nothing_in_the_database_while_orthanc_answers() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let hold = w.orthanc.pause.clone().write_owned().await;
+    let (app, req) = (w.app.clone(), open_request(Auth::Cookie(&cookie), "alex", ALEX_CT)?);
+    let open = tokio::spawn(async move { app.oneshot(req).await });
+    for _ in 0..500 {
+        if !w.orthanc.lookups().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(w.orthanc.lookups(), [ALEX_CT], "the open is waiting on Orthanc");
+    let in_transaction: i64 = sqlx::query_scalar(
+        "select count(*) from pg_stat_activity where datname = current_database() \
+         and state like 'idle in transaction%' and pid <> pg_backend_pid()",
+    )
+    .fetch_one(&w.db.pool)
+    .await?;
+    assert_eq!(in_transaction, 0, "a transaction stays open while Orthanc answers");
+    // The record moves to another Orthanc study while Orthanc answers: the open links nothing.
+    sqlx::query("update imaging_study set orthanc_id = 'orthanc-alex-again' where study_instance_uid = $1")
+        .bind(ALEX_CT)
+        .execute(&w.db.pool)
+        .await?;
+    drop(hold);
+    let res = open.await??;
+    let status = res.status();
+    let body = to_bytes(res.into_body(), 1 << 16).await?;
+    assert_eq!(
+        (status, code(&body).as_str()),
+        (StatusCode::FORBIDDEN, "study_not_bound")
+    );
+    assert_eq!(w.audit_rows(ALEX_CT).await?, 0);
     Ok(())
 }
 

@@ -400,22 +400,22 @@ async fn open(
             "This is not a DICOM StudyInstanceUID.",
         ));
     }
-    let mut tx = rt.pool.begin().await?;
-    let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
-    let profile_id = perm.profile.id;
-    let orthanc_id = match study_row(&mut tx, profile_id, &uid).await? {
-        None => {
-            return Err(ApiError::new(
-                StatusCode::NOT_FOUND,
-                "study_not_found",
-                "This profile has no study with that UID.",
-            ));
-        }
-        Some((s, _)) if s == "retracted" => return Err(retracted()),
-        Some((_, None)) => return Err(not_bound()),
-        Some((_, Some(id))) => id,
+    // A short read first. Orthanc's answer can take up to a minute, and nothing in the database is
+    // held while it comes: no connection, no transaction.
+    let (profile_id, orthanc_id) = {
+        let mut conn = rt.pool.acquire().await?;
+        let perm = caller.require(&mut conn, &p, Some("read:records"), None).await?;
+        let profile_id = perm.profile.id;
+        (profile_id, bound_study(&mut conn, profile_id, &uid).await?)
     };
     bind_check(imaging, &uid, &orthanc_id).await?;
+    // Then the same checks again in the audit transaction: the record must still name the Orthanc
+    // study that Orthanc just confirmed.
+    let mut tx = rt.pool.begin().await?;
+    let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
+    if perm.profile.id != profile_id || bound_study(&mut tx, profile_id, &uid).await? != orthanc_id {
+        return Err(not_bound());
+    }
     // One audit row per study per session: the lock makes two opens at once write one row.
     let marker = holder.marker();
     sqlx::query("select pg_advisory_xact_lock(hashtext($1))")
@@ -454,6 +454,20 @@ async fn open(
         "viewer_url": format!("/ohif/t/{token}/viewer?StudyInstanceUIDs={uid}"),
         "expires_in": left.as_secs(),
     })))
+}
+
+/// The Orthanc id the profile's record of the study names, or why the study does not open.
+async fn bound_study(conn: &mut PgConnection, profile_id: Uuid, uid: &str) -> Result<String, ApiError> {
+    match study_row(conn, profile_id, uid).await? {
+        None => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "study_not_found",
+            "This profile has no study with that UID.",
+        )),
+        Some((s, _)) if s == "retracted" => Err(retracted()),
+        Some((_, None)) => Err(not_bound()),
+        Some((_, Some(id))) => Ok(id),
+    }
 }
 
 /// The study's status and Orthanc id in that profile (`study_instance_uid` is unique).
