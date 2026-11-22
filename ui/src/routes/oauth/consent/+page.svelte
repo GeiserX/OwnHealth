@@ -11,7 +11,8 @@
 	import { Loader, errText, tf } from '#lib/components/pages1/util.svelte';
 	import { plain } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
-	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
+	import { i18n, t } from '#lib/i18n/index.svelte';
+	import LangButtons from '#lib/components/LangButtons.svelte';
 	import { consentDefaults, consentProblem } from '#lib/logic/inbox';
 	import { byOrder, byScopeOrder } from '#lib/logic/people';
 	import { app } from '#lib/state/app.svelte';
@@ -112,8 +113,7 @@
 	<div class="cbar">
 		<div class="brand"><div class="logo sm" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6ea8fe" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-5 4 10 2-5h6" /></svg></div>OwnHealth</div>
 		<div class="seg" role="group" aria-label={t('lang_label')}>
-			<button class:on={i18n.lang === 'es'} aria-pressed={i18n.lang === 'es'} onclick={() => setLang('es')}>ES</button>
-			<button class:on={i18n.lang === 'en'} aria-pressed={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
+			<LangButtons />
 		</div>
 	</div>
 	{#if refusedCode}

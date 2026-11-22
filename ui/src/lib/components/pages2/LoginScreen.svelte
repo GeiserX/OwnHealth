@@ -6,7 +6,8 @@
 	import { getAuthState, loginBegin, loginFinish, passwordLogin, recoveryLogin, setupBegin, setupFinish, setupPassword } from '#lib/api';
 	import type { AuthState } from '#lib/api/types';
 	import { Loader, errText } from '#lib/components/pages1/util.svelte';
-	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
+	import { i18n, t } from '#lib/i18n/index.svelte';
+	import LangButtons from '#lib/components/LangButtons.svelte';
 	import { todayIso } from '#lib/logic/people';
 	import { createPasskey, usePasskey } from './webauthn';
 
@@ -79,8 +80,7 @@
 		<div>OwnHealth<small>{t('selfhosted')} · v{__APP_VERSION__}</small></div>
 	</div>
 	<div class="seg" role="group" aria-label={t('lang_label')} style="align-self:center">
-		<button class:on={i18n.lang === 'es'} aria-pressed={i18n.lang === 'es'} onclick={() => setLang('es')}>ES</button>
-		<button class:on={i18n.lang === 'en'} aria-pressed={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
+		<LangButtons />
 	</div>
 
 	{#if st.error}

@@ -7,7 +7,7 @@
 	import { i18n, t } from '#lib/i18n/index.svelte';
 
 	let { hints, relLabel }: { hints: FamilyHint[]; relLabel: (code: string) => string } = $props();
-	const lang = $derived(i18n.lang as 'es' | 'en');
+	const lang = $derived(i18n.lang);
 </script>
 
 <section class="card" aria-labelledby="fam-hint-h">

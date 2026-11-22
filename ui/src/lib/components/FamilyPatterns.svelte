@@ -18,7 +18,7 @@
 		selected?: string | null;
 	} = $props();
 
-	const lang = $derived(i18n.lang as 'es' | 'en');
+	const lang = $derived(i18n.lang);
 	// the relatives, then the conditions the pattern matched: "Tío paterno · padre · IAM"
 	const who = (p: { rel: string[]; kinds: string[] }) =>
 		[...[...new Set(p.rel)].map((r) => relLabel(r)), ...p.kinds.map((k) => kindLabel(k))].join(' · ');

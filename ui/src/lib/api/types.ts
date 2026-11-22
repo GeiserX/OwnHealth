@@ -1,6 +1,8 @@
 // REST API types. This file mirrors CONTRACTS.md "REST API": change both together.
 // Ids are UUID strings, dates ISO 8601 strings, decimals arrive as JSON numbers or strings.
 
+import type { Lang } from '../i18n/langs';
+
 export type Uuid = string;
 export type IsoDate = string; // 2026-11-07
 export type IsoDateTime = string; // 2026-11-07T07:12:00Z
@@ -51,7 +53,7 @@ export interface ProfileSummary {
 }
 
 export interface Me {
-	user: { id: Uuid; display_name: string; locale: 'es' | 'en' };
+	user: { id: Uuid; display_name: string; locale: Lang };
 	household: { id: Uuid; name: string };
 	auth: { kind: 'session' | 'token' | 'dev' };
 	profiles: ProfileSummary[];
@@ -508,7 +510,7 @@ export interface Household {
 	members: {
 		user_id: Uuid;
 		display_name: string;
-		locale?: 'es' | 'en';
+		locale?: Lang;
 		logins?: { passkeys: number; oidc: boolean; password: boolean };
 		enrolled?: boolean; // false: invited, has not logged in yet
 		invite_pending?: boolean;
@@ -536,7 +538,7 @@ export interface AuthState {
 	user: {
 		id: Uuid;
 		display_name: string;
-		locale: 'es' | 'en';
+		locale: Lang;
 		passkeys: number;
 		recovery_codes_left: number;
 		oidc_linked: boolean;
@@ -893,7 +895,7 @@ export interface ShlLink {
 	passcode: boolean;
 	attempts_left: number | null;
 	categories: ShlCategory[];
-	lang: 'es' | 'en';
+	lang: Lang;
 	created_at: IsoDateTime;
 	expires_at: IsoDateTime;
 	revoked_at: IsoDateTime | null;
@@ -912,7 +914,7 @@ export interface ShlCreateIn {
 	days?: number;
 	passcode?: string;
 	label?: string;
-	lang?: 'es' | 'en';
+	lang?: Lang;
 }
 /** POST /profiles/{p}/shl answer, once: the key exists only in `shlink`. */
 export interface ShlCreated {
