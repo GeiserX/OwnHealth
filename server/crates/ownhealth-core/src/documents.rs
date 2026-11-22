@@ -149,6 +149,16 @@ pub const DOC_TYPES: [&str; 8] = [
 /// it holds every reading, and a FIT file held the route.
 pub const WEARABLES_DOC_TYPE: &str = "wearables";
 
+/// Whether the document `doc` (a table alias, like `d`) is part of the medical record, as a SQL
+/// boolean: every document but a raw wearables export. A wearables export is dated by its first
+/// activity, but a run is no medical record, and its readings are on the Wearables screen under
+/// read:wearables. So every reader that takes documents by date or cites them (the timeline, the
+/// record gaps and their visits, the evidence of a Due decision) leaves wearables exports out through
+/// this one rule.
+pub fn record_document_sql(doc: &str) -> String {
+    format!("{doc}.doc_type is distinct from '{WEARABLES_DOC_TYPE}'")
+}
+
 /// The `document_source.channel` check constraint: how one arrival came in.
 pub const CHANNELS: [&str; 22] = [
     "upload",

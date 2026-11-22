@@ -371,6 +371,22 @@ async fn a_wearables_document_needs_read_wearables_to_be_listed_opened_or_downlo
     assert_eq!(ids, want);
     let (s, _) = a.get("sam", &format!("/documents/{letter}")).await?;
     assert_eq!(s, StatusCode::FORBIDDEN);
+    // wearables only: the list holds the exports, as each one opens by its id
+    grant(&["read:summary", "read:wearables"]).await?;
+    let (s, v) = a.get("sam", "/profiles/alex/documents").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let mut ids = listed(&v);
+    ids.sort();
+    assert_eq!(ids, want);
+    // none of the three: the refusal names every scope that lists documents
+    grant(&["read:summary"]).await?;
+    let (s, v) = a.get("sam", "/profiles/alex/documents").await?;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(
+        v.to_string()
+            .contains("This needs read:labs, read:records or read:wearables."),
+        "{v}"
+    );
     Ok(())
 }
 
@@ -420,5 +436,147 @@ async fn the_migration_moves_stored_wearables_exports_to_their_type() -> R {
         types.push(t.unwrap_or_default());
     }
     assert_eq!(types, ["wearables", "wearables", "wearables", "other"]);
+    Ok(())
+}
+
+/// A document of Alex dated `day`, of `doc_type`, with an optional provider.
+async fn dated_document(
+    a: &App,
+    name: &str,
+    day: &str,
+    doc_type: &str,
+    provider: Option<&str>,
+) -> anyhow::Result<uuid::Uuid> {
+    let alex = a.family.profile("alex");
+    let sha = a.rt.blobs.put_bytes(name.as_bytes())?;
+    Ok(sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type, \
+         provider_name, collected_at) \
+         values ($1, $2, decode($3, 'hex'), $4, 'application/octet-stream', 8, $5, $6, ($7::date)::timestamptz) \
+         returning id",
+    )
+    .bind(a.family.household_id)
+    .bind(alex)
+    .bind(&sha)
+    .bind(name)
+    .bind(doc_type)
+    .bind(provider)
+    .bind(day)
+    .fetch_one(&a.rt.pool)
+    .await?)
+}
+
+/// Sam's grant on Alex, as these categories.
+async fn grant_sam(a: &App, categories: &[&str]) -> R {
+    sqlx::query("update profile_grant set categories = $3 where user_id = $1 and profile_id = $2")
+        .bind(a.family.user("sam"))
+        .bind(a.family.profile("alex"))
+        .bind(categories)
+        .execute(&a.rt.pool)
+        .await?;
+    Ok(())
+}
+
+/// A FIT document is dated by its first activity, but a run is no medical record: monthly runs hide no
+/// hole in the record, no gap cites one to a member who may not read wearables, a run with the
+/// provider's name clears no visit, and a run is no evidence that a gap was closed.
+#[tokio::test]
+async fn a_wearables_export_is_no_record_fact_and_no_gap_cites_it() -> R {
+    let a = app().await?;
+    grant_sam(&a, &["read:summary", "read:records"]).await?;
+    let letter = dated_document(&a, "letter-a.pdf", "2001-01-10", "other", None).await?;
+    dated_document(&a, "letter-b.pdf", "2003-06-10", "other", None).await?;
+    let mut runs = Vec::new();
+    for m in 0..28 {
+        let (y, mo) = (2001 + (m + 1) / 12, (m + 1) % 12 + 1);
+        let day = format!("{y}-{mo:02}-15");
+        runs.push(dated_document(&a, &format!("run-{m}.fit"), &day, "wearables", None).await?);
+    }
+    let holes = |v: &serde_json::Value| -> Vec<String> {
+        v["items"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["rule"] == "records_hole")
+                    .filter_map(|i| i["key"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let uri = "/profiles/alex/gaps?lang=en&as_of=2004-01-01";
+    for who in ["sam", "alex"] {
+        let (s, v) = a.get(who, uri).await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        // the 881 days between the two letters are still a hole, whatever the runs say
+        assert_eq!(holes(&v), ["hole:2001-01-10:2003-06-10"], "{who}: {v}");
+        let body = v.to_string();
+        assert!(runs.iter().all(|r| !body.contains(&r.to_string())), "{who}: {v}");
+    }
+    // a run is no evidence that the hole was closed; the letter that bounds it is
+    let due = "/profiles/alex/due/gap:hole:2001-01-10:2003-06-10/decision";
+    let (s, v) = a
+        .post(
+            "alex",
+            due,
+            Some(json!({"kind": "done", "evidence": {"table": "document", "id": runs[20]}})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert!(v.to_string().contains("evidence_refused"), "{v}");
+    let (s, v) = a
+        .post(
+            "alex",
+            due,
+            Some(json!({"kind": "done", "evidence": {"table": "document", "id": letter}})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    // a visit typed by hand with no report: a run that names the clinic on that day clears nothing
+    let body = json!({"period_start": "2002-03-05T09:30:00Z", "reason_text": "Knee",
+                      "provider_name": "Clínica Sur"});
+    let (s, v) = a.post("alex", "/profiles/alex/records/visit", Some(body)).await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    dated_document(&a, "clinic-run.fit", "2002-03-05", "wearables", Some("Clínica Sur")).await?;
+    let (_, v) = a.get("alex", uri).await?;
+    let visits: Vec<&serde_json::Value> = v["items"]
+        .as_array()
+        .map(|a| a.iter().filter(|i| i["rule"] == "visit_without_report").collect())
+        .unwrap_or_default();
+    assert_eq!(visits.len(), 1, "{v}");
+    // the control: the clinic's own report clears it
+    dated_document(&a, "clinic-report.pdf", "2002-03-05", "other", Some("Clínica Sur")).await?;
+    let (_, v) = a.get("alex", uri).await?;
+    assert!(
+        v["items"]
+            .as_array()
+            .is_some_and(|a| a.iter().all(|i| i["rule"] != "visit_without_report")),
+        "{v}"
+    );
+    Ok(())
+}
+
+/// The timeline shows the documents of the record, never a raw wearables export, to a member with
+/// read:records and to the owner alike.
+#[tokio::test]
+async fn the_timeline_shows_no_wearables_export() -> R {
+    let a = app().await?;
+    grant_sam(&a, &["read:summary", "read:records"]).await?;
+    let letter = dated_document(&a, "letter.pdf", "2024-03-01", "other", None).await?;
+    let run = dated_document(&a, "run.fit", "2024-03-02", "wearables", None).await?;
+    for who in ["sam", "alex"] {
+        let (s, v) = a.get(who, "/profiles/alex/timeline").await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let docs: Vec<String> = v["events"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|e| e["type"] == "document")
+                    .filter_map(|e| e["document_id"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(docs.contains(&letter.to_string()), "{who}: {v}");
+        assert!(!v.to_string().contains(&run.to_string()), "{who}: {v}");
+    }
     Ok(())
 }

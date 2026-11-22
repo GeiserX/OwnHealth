@@ -26,7 +26,7 @@ use axum::{Json, Router};
 use chrono::NaiveDate;
 use ownhealth_core::Runtime;
 use ownhealth_core::audit::{AuditEvent, write_audit};
-use ownhealth_core::documents::sensitive_document_sql;
+use ownhealth_core::documents::{record_document_sql, sensitive_document_sql};
 use ownhealth_core::pyjson::py_date;
 use serde_json::{Value, json};
 use sqlx::postgres::PgRow;
@@ -451,8 +451,9 @@ async fn documents(conn: &mut PgConnection, pid: Uuid, sens: bool, t: &Words) ->
         "select d.id, d.doc_type, d.filename, d.provider_name, coalesce(d.collected_at, d.reported_at)::date as day \
          from document d where d.profile_id = $1 and d.status = 'active' \
          and d.doc_type is distinct from 'lab_report' and d.doc_type is distinct from 'genomics' \
-         and d.doc_type is distinct from 'wearables'{hide} \
-         order by d.id"
+         and {record}{hide} \
+         order by d.id",
+        record = record_document_sql("d"),
     );
     let mut out = Vec::new();
     for r in rows(conn, &sql, pid).await? {

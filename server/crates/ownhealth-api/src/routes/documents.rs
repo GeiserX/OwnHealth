@@ -27,7 +27,9 @@ use axum::{Json, Router};
 use ownhealth_core::access::{Permission, Principal, ProfileRef, effective_permission, require};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::blobs::{BlobError, BlobOwner};
-use ownhealth_core::documents::{WEARABLES_DOC_TYPE, document_is_sensitive, sensitive_document_sql};
+use ownhealth_core::documents::{
+    WEARABLES_DOC_TYPE, document_is_sensitive, record_document_sql, sensitive_document_sql,
+};
 use ownhealth_core::pyjson::{parse_datetime, pydantic_datetime, row_to_json};
 use ownhealth_core::{Error, Runtime};
 use serde_json::{Map, Value, json};
@@ -243,9 +245,17 @@ pub async fn list_for(
         Err(_) => ProfileRef::Name(p),
     };
     let perm = require(&mut *conn, principal, r, None, None).await?;
-    let (labs, records) = (perm.has("read:labs"), perm.has("read:records"));
-    if !labs && !records {
-        return Err(Error::access_denied("insufficient_scope", "This needs read:labs or read:records.").into());
+    let (labs, records, wearables) = (
+        perm.has("read:labs"),
+        perm.has("read:records"),
+        perm.has("read:wearables"),
+    );
+    if !labs && !records && !wearables {
+        return Err(Error::access_denied(
+            "insufficient_scope",
+            "This needs read:labs, read:records or read:wearables.",
+        )
+        .into());
     }
     let q = q.filter(|q| !q.is_empty());
     let with_text = q.is_some() && perm.has("read:documents_text");
@@ -264,10 +274,11 @@ pub async fn list_for(
     }
     if records {
         types.push(format!(
-            "(d.doc_type is null or d.doc_type not in ('lab_report', '{WEARABLES_DOC_TYPE}'))"
+            "(d.doc_type is distinct from 'lab_report' and {})",
+            record_document_sql("d")
         ));
     }
-    if perm.has("read:wearables") {
+    if wearables {
         types.push(format!("d.doc_type = '{WEARABLES_DOC_TYPE}'"));
     }
     wh.push(format!("({})", types.join(" or ")));
