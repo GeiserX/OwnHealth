@@ -115,6 +115,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      # the sidecar starts only once OwnHealth is up: a broken OW secret stops OW, never the app
+      app:
+        condition: service_healthy
     env_file: &ow-env-file
       - path: openwearables.env # OW's secrets, for the four sidecar services only
         required: false # without it ow-db-init stops and names the missing variable

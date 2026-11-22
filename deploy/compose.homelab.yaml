@@ -140,6 +140,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      # the sidecar starts only once OwnHealth is up: a broken OW secret stops OW, never the app
+      app:
+        condition: service_healthy
     command:
       - sh
       - -c

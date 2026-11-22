@@ -544,6 +544,10 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
         let init = &services["ow-db-init"];
         assert!(strings(&init["command"]).join(" ").contains("ow-role.sql"), "{case}");
         assert_eq!(
+            init["depends_on"]["app"]["condition"], "service_healthy",
+            "{case}: ow-db-init must wait for the app, so that its failure cannot stop it"
+        );
+        assert_eq!(
             services["ow-app"]["depends_on"]["ow-db-init"]["condition"], "service_completed_successfully",
             "{case}"
         );
@@ -600,6 +604,11 @@ impl Project {
             return Ok(serde_json::from_str(&out)?);
         }
         Ok(out.lines().filter_map(|l| serde_json::from_str(l).ok()).collect())
+    }
+
+    /// The `ps -a` entry of one service's container (Null when it has none).
+    fn service(&self, s: &str) -> anyhow::Result<Value> {
+        Ok(self.ps()?.into_iter().find(|c| c["Service"] == s).unwrap_or(Value::Null))
     }
 
     fn logs(&self) -> String {
@@ -664,8 +673,13 @@ print(s.telemetry_enabled, s.SENTRY_ENABLED, s.otel_enabled, s.outgoing_webhooks
       'send-telemetry-ping' in beat, 'roll-up-queued-days' in beat)"
 );
 
+/// What an operator's `docker compose up -d` starts, less Caddy (host ports 80 and 443) and the OCR
+/// worker (another image).
+const UP: [&str; 6] = ["up", "-d", "app", "ow-app", "ow-worker", "ow-beat"];
+
 fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
-    let tag = ownhealth_core::ids::token_hex(4);
+    use ownhealth_core::ids::token_hex;
+    let tag = token_hex(4);
     let project = Project {
         name: format!("oh-wear-{case}-{tag}"),
         dir: tempfile::tempdir()?,
@@ -673,30 +687,61 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
     let dir = project.dir.path();
     std::fs::copy(compose, dir.join("compose.yaml"))?;
     std::fs::create_dir_all(dir.join("deploy/db"))?;
+    std::fs::create_dir_all(dir.join("inbox"))?;
     std::fs::copy(root().join("deploy/db/ow-role.sql"), dir.join("deploy/db/ow-role.sql"))?;
-    let ow_pw = ownhealth_core::ids::token_hex(16);
+    let ow_pw = token_hex(16);
+    let mut env = std::fs::read_to_string(env_file)? + &wearables_env(extra);
+    // OW's secret is missing at first (no openwearables.env, an empty secrets/ow_db_password)
     let owner_pw = if case == "quickstart" {
+        // the app's own key, and any free host port for it
+        env += &format!("OWNHEALTH_SECRET_KEY={}\nOWNHEALTH_HTTP_PORT=0\n", token_hex(32));
         "x".to_string() // OWNHEALTH_DB_PASSWORD in cases()
     } else {
         let s = dir.join("secrets");
         std::fs::create_dir_all(&s)?;
-        let owner = ownhealth_core::ids::token_hex(16);
+        let owner = token_hex(16);
         for (name, value) in [
             ("db_password", owner.clone()),
-            ("ow_db_password", ow_pw.clone()),
-            ("ow_secret_key", ownhealth_core::ids::token_hex(32)),
-            ("ow_admin_password", ownhealth_core::ids::token_hex(16)),
+            ("app_db_password", token_hex(16)),
+            ("secret_key", token_hex(32)),
+            ("secrets_key", format!("{}0=", token_hex(21))), // 32 bytes in standard base64
+            ("restic_password", token_hex(16)),
+            ("ow_db_password", String::new()),
+            ("ow_secret_key", token_hex(32)),
+            ("ow_admin_password", token_hex(16)),
         ] {
             std::fs::write(s.join(name), value)?;
         }
         owner
     };
-    std::fs::write(dir.join(".env"), std::fs::read_to_string(env_file)? + &wearables_env(extra))?;
+    std::fs::write(dir.join(".env"), env)?;
+
+    // A broken OW secret stops the sidecar only: the app is up and healthy, and stays so
+    let first = project.run(&UP)?;
+    let out = String::from_utf8_lossy(&first.stdout).to_string() + &String::from_utf8_lossy(&first.stderr);
+    assert!(
+        !first.status.success() && out.contains("ow-db-init"),
+        "{case}: up with a broken OW secret: {out}"
+    );
+    let app = project.service("app")?;
+    assert!(
+        app["State"] == "running" && app["Health"] == "healthy",
+        "{case}: the app after a failed ow-db-init: {} {}\n{out}",
+        app["State"],
+        app["Health"]
+    );
+    // the secret set: the next start brings the sidecar up and leaves the app as it was
     if case == "quickstart" {
         std::fs::write(dir.join("openwearables.env"), openwearables_env(&ow_pw))?;
+    } else {
+        std::fs::write(dir.join("secrets/ow_db_password"), &ow_pw)?;
     }
-
-    project.ok(&["up", "-d", "ow-app", "ow-worker", "ow-beat"])?;
+    project.ok(&UP)?;
+    assert_eq!(
+        project.service("app")?["ID"],
+        app["ID"],
+        "{case}: setting OW's secret recreated the app"
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(480);
     loop {
         let ps = project.ps()?;
@@ -772,7 +817,7 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
             "{case}: {s} settings"
         );
     }
-    for c in project.ps()? {
+    for c in project.ps()?.into_iter().filter(|c| OW_ALL.iter().any(|s| c["Service"] == *s)) {
         let published: Vec<&Value> = c["Publishers"]
             .as_array()
             .into_iter()
@@ -784,7 +829,8 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
     Ok(())
 }
 
-/// The profile for real, from both compose files: OW's migrations run on Postgres 17 as its
+/// The profile for real, from both compose files: a missing OW secret stops the sidecar and leaves the
+/// app up, setting it later does not recreate the app, OW's migrations run on Postgres 17 as its
 /// restricted role, the role cannot connect to the health database, the running sidecar has
 /// telemetry, Sentry, OTLP and webhooks off, and nothing is published on the host. It pulls the OW
 /// image and takes minutes, so it runs in CI (`CI` set) or with OWNHEALTH_TEST_WEARABLES=1.
