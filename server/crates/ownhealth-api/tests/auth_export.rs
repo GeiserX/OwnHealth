@@ -44,7 +44,10 @@ async fn seed(env: &Env, slug: &str, value: Option<&str>) -> anyhow::Result<Stri
             LabRow::new("Vitamina D", value.unwrap_or(&random), "ng/mL", "30 - 100").flagged("L"),
         ]],
     });
-    let sha = env.rt.blobs.put_bytes(&pdf)?;
+    let sha = env
+        .rt
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &pdf)?;
     let mut c = env.pool().acquire().await?;
     let pid = env.profile(slug);
     create_document(

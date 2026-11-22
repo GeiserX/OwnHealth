@@ -7,6 +7,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use ownhealth_core::acceptance::{Check, DEFAULT_THRESHOLD};
+use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::demo::DemoContext;
 use ownhealth_core::demo_pdf::{LabReport, LabRow, PAGE_H, PAGE_W, lab_report_pdf};
 use ownhealth_core::documents::{NewDocument, create_document};
@@ -572,7 +573,7 @@ async fn add_document(
     pdf: &[u8],
     pages: usize,
 ) -> Result<Uuid> {
-    let sha = ctx.blobs.put_bytes(pdf)?;
+    let sha = ctx.blobs.put_bytes(BlobOwner::Profile(ctx.family.profile(slug)), pdf)?;
     let filename = format!("{LAB}_{day}.pdf");
     let doc = create_document(
         conn,
@@ -874,7 +875,9 @@ async fn seed_visits(conn: &mut PgConnection, ctx: &DemoContext) -> Result<()> {
     // A dated report that is not a lab report, so the timeline shows a document event.
     let day = "2024-02-14";
     let pdf = ecg_pdf();
-    let sha = ctx.blobs.put_bytes(&pdf)?;
+    let sha = ctx
+        .blobs
+        .put_bytes(BlobOwner::Profile(ctx.family.profile("alex")), &pdf)?;
     let filename = format!("ECG_Hospital_Norte_{day}.pdf");
     let doc = create_document(
         conn,
@@ -1336,7 +1339,7 @@ pub async fn seed_supplements(conn: &mut PgConnection, ctx: &mut DemoContext) ->
     )
     .await?;
     let png = demo_label_png()?;
-    let sha = ctx.blobs.put_bytes(&png)?;
+    let sha = ctx.blobs.put_bytes(BlobOwner::Profile(alex), &png)?;
     let doc = create_document(
         conn,
         &NewDocument {

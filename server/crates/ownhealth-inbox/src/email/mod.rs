@@ -516,7 +516,7 @@ async fn arrive_bytes(
     bytes: Vec<u8>,
     derived_from: Option<Uuid>,
 ) -> Result<Arrived> {
-    let (sha, size) = store_bytes(blobs, bytes).await?;
+    let (sha, size) = store_bytes(blobs, BlobOwner::Profile(t.profile_id), bytes).await?;
     arrive(
         conn,
         blobs,
@@ -635,7 +635,7 @@ async fn arrive_locked(
     let tried = passwords.len();
     let locked = part.bytes;
     let (unlock, locked) = blocking(move || Ok((pdf_password::unlock(&locked, &passwords)?, locked))).await?;
-    let (sha, size) = store_bytes(blobs, locked).await?;
+    let (sha, size) = store_bytes(blobs, BlobOwner::Profile(t.profile_id), locked).await?;
     let original = create_document(
         &mut *conn,
         &NewDocument {
@@ -779,7 +779,8 @@ pub async fn ingest_message(
         out.duplicates = 1;
         return Ok(out);
     }
-    let (raw_sha, _) = store_bytes(blobs, owned.clone()).await?;
+    // stored before it is routed, so it has no profile yet: held under its inbox, in the plain layout
+    let (raw_sha, _) = store_bytes(blobs, BlobOwner::Pending(source.id), owned.clone()).await?;
     let rules = list_rules(&mut *conn, source.id).await?;
     let (rule, profile_id) = match released_to {
         Some(p) => (
@@ -868,7 +869,7 @@ pub async fn hold_too_large(
         out.duplicates = 1;
         return Ok(out);
     }
-    let (sha, _) = store_bytes(blobs, owned).await?;
+    let (sha, _) = store_bytes(blobs, BlobOwner::Pending(source.id), owned).await?;
     out.quarantine_id = Some(hold(&mut *conn, source, &parsed, &sha, "too_large").await?);
     record_item(&mut *conn, source.id, &ext, Some(&sha), None, out.quarantine_id, None).await?;
     Ok(out)
@@ -1187,7 +1188,12 @@ async fn seed_demo(conn: &mut PgConnection, ctx: &mut ownhealth_core::demo::Demo
     .await?;
     let raw = demo_message();
     let blobs = ctx.blobs.clone();
-    let sha = blocking(move || blobs.put_bytes(&raw).map_err(Error::from)).await?;
+    let sha = blocking(move || {
+        blobs
+            .put_bytes(BlobOwner::Pending(source_id), &raw)
+            .map_err(Error::from)
+    })
+    .await?;
     let source = ownhealth_core::sources::get_source(&mut *conn, source_id)
         .await?
         .ok_or_else(|| Error::NotFound("demo mailbox".into()))?;

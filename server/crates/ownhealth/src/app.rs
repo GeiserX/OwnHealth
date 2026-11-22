@@ -78,13 +78,40 @@ async fn access_log(req: Request, next: Next) -> Response {
     res
 }
 
-/// Remove upload spools older than an hour that a killed process left behind.
+/// Remove upload spools and decrypted copies older than an hour that a killed process left behind.
 pub fn sweep_spools(rt: &Runtime) {
     match rt.blobs.sweep_tmp(std::time::Duration::from_secs(3600)) {
         Ok(0) => {}
         Ok(n) => tracing::info!(removed = n, "removed stale upload spools"),
         Err(e) => tracing::warn!(error = %e, "could not sweep upload spools"),
     }
+}
+
+/// `sweep_spools` every 10 minutes until `stop`: a spool a killed process left goes about an hour
+/// later, not only at the next start.
+pub fn spool_sweeper(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandle<()> {
+    let rt = rt.clone();
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(600));
+        every.tick().await; // the start already swept
+        loop {
+            tokio::select! {
+                _ = every.tick() => sweep_spools(&rt),
+                _ = stop.changed() => return,
+            }
+        }
+    })
+}
+
+/// Refuse to go on when OWNHEALTH_SECRETS_KEY does not open the profile keys the database holds,
+/// before anything listens, runs a job or stores a key (`keys::check_start`). A database with no
+/// profile key yet passes.
+pub async fn check_profile_keys(rt: &Runtime) -> Result<(), Error> {
+    if let Some(kek) = rt.blobs.kek() {
+        let mut conn = rt.pool.acquire().await?;
+        ownhealth_core::keys::check_start(&mut conn, kek).await?;
+    }
+    Ok(())
 }
 
 async fn healthz() -> Json<serde_json::Value> {
@@ -141,21 +168,23 @@ pub async fn start(rt: &Runtime) -> Result<Background, Error> {
             tracing::info!(?applied, "applied migrations");
         }
     }
+    check_profile_keys(rt).await?;
     sweep_spools(rt);
     if rt.settings.demo {
         demo::seed_demo(&rt.pool, &rt.settings, &rt.blobs, false).await?;
     }
     let (stop, rx) = watch::channel(false);
-    let workers = if rt.settings.run_jobs {
+    let mut workers = if rt.settings.run_jobs {
         let mut w = jobs::start_workers(&rt.job_context(), rx.clone());
         w.push(tokio::spawn(ownhealth_core::sources::scheduler_loop(
             rt.job_context(),
-            rx,
+            rx.clone(),
         )));
         w
     } else {
         Vec::new()
     };
+    workers.push(spool_sweeper(rt, rx));
     Ok(Background { stop, workers })
 }
 

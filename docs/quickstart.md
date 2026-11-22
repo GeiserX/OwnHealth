@@ -17,7 +17,8 @@ cp .env.example .env
 openssl rand -hex 32     # paste as OWNHEALTH_DB_PASSWORD in .env
 openssl rand -hex 32     # paste as OWNHEALTH_APP_DB_PASSWORD in .env
 openssl rand -hex 48     # paste as OWNHEALTH_SECRET_KEY in .env
-openssl rand -base64 32  # paste as OWNHEALTH_SECRETS_KEY in .env (encrypts inbox passwords and tokens)
+mkdir -m 700 secrets && openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key && chmod 644 secrets/secrets_key
+                         # seals every profile's files and inbox secrets: keep a copy with your backups
 mkdir -p inbox && sudo chown 10001:10001 inbox   # the watched folder; the app runs as user 10001
 docker compose up -d
 ```

@@ -60,9 +60,10 @@ num-traits = "0.2"
 unicode-normalization = "0.1"
 
 # hashing and secrets
-aes-gcm = "0.11"
+aes-gcm = { version = "0.11", features = ["zeroize"] }
 sha2 = "0.11"
 hmac = "0.13"
+hkdf = "0.13"
 hex = "0.4"
 base64 = "0.22"
 rand = "0.10"
@@ -82,6 +83,7 @@ schemars = "1"
 pdfium-render = { version = "0.9.5", default-features = false, features = ["thread_safe", "pdfium_8125"] }
 quick-xml = "0.42"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+zeroize = "1.9"
 noodles = { version = "0.119", features = ["bgzf", "core", "csi", "tabix", "vcf"] }
 flate2 = "1.1"
 # FIT activity files (slice 29); MIT

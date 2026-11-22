@@ -51,6 +51,7 @@ async fn a_030_database_migrates_diffs_clinvar_and_deletes_a_profile_with_every_
     migrate(&db.pool, &old).await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
+    // 0.3.0 had no profile keys: its files are in the plain layout
     let blobs = BlobStore::new(settings.blobs_path())?;
     assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
     let profiles: BTreeMap<String, Uuid> = sqlx::query_as::<_, (String, Uuid)>("select slug, id from profile")

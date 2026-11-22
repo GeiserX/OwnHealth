@@ -402,7 +402,12 @@ async fn thousand(e: &Env, c: &mut PgConnection) -> anyhow::Result<Vec<String>> 
         ("carmen", "CO-01", "wgs", wgs_raw, "0".repeat(37)),
         ("sam", "SR-CHIP", "chip", chip_raw, "1".repeat(37)),
     ] {
-        let (doc, att) = synthetic::with_files(&facts(sample, assay, &fp), &e.blobs, &raw)?;
+        let (doc, att) = synthetic::with_files(
+            &facts(sample, assay, &fp),
+            &e.blobs,
+            ownhealth_core::blobs::BlobOwner::Reference,
+            &raw,
+        )?;
         e.seed(c, slug, &doc, &att).await?;
     }
     Ok(rows.into_iter().map(|r| r.rsid).collect())
@@ -468,7 +473,12 @@ async fn htslib_made_files_answer_the_same() -> R {
             },
         ),
     ];
-    let (facts, att) = synthetic::with_files(&synthetic::alex_facts(), &e.blobs, &raw)?;
+    let (facts, att) = synthetic::with_files(
+        &synthetic::alex_facts(),
+        &e.blobs,
+        ownhealth_core::blobs::BlobOwner::Reference,
+        &raw,
+    )?;
     let (_, summary) = e.seed(&mut c, "alex", &facts, &att).await?;
     assert!(summary.reasons.is_empty(), "{:?}", summary.reasons);
     let alex = e.profile("alex");

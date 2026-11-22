@@ -6,8 +6,16 @@
 //! ```text
 //! <dest>/manifest.json    app version, migrations, row counts, blob list, state_hash per profile
 //! <dest>/db.dump          pg_dump -Fc, taken from the same database snapshot as the counts and hashes
-//! <dest>/blobs/sha256/..  the blob store, hard-linked when on the same disk (blobs never change)
+//! <dest>/blobs/..         the blob store, hard-linked when on the same disk (blobs never change)
 //! ```
+//!
+//! A profile's files are sealed under its key (slice 46, `ownhealth_core::keys`), and the backup
+//! keeps them sealed: the wrapped keys travel in the dump, and only OWNHEALTH_SECRETS_KEY opens them.
+//! So a backup taken before a profile delete still opens that profile's files until retention drops
+//! it; keeping `profile_key` out of the dump is later work (security-privacy.md 7.3).
+//! The manifest lists each sealed file under `<profile>/<address>` with the sha256 of its bytes on
+//! disk, so a check finds a changed or added file without the key, and records the key's
+//! fingerprint (never the key), so a restore under another key refuses before it loads anything.
 //!
 //! pg_dump and pg_restore come from PATH, or from the directory in OWNHEALTH_PG_BINDIR. They read and
 //! write only stdin and stdout, so a wrapper that runs them in another container works too.
@@ -32,7 +40,9 @@ use std::time::{Duration, Instant};
 
 use chrono::{NaiveDate, SecondsFormat, Utc};
 use ownhealth_core::audit::{ChainBreakKind, ChainRead, verify_chain_with};
+use ownhealth_core::blobs::{self, BlobOwner, BlobStore};
 use ownhealth_core::config::Settings;
+use ownhealth_core::keys::{self, Kek};
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -188,32 +198,6 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
-fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            walk_files(&path, out)?;
-        } else if path.is_file() {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// Every file under `<root>/sha256`, by file name, in path order.
-fn blob_files(root: &Path) -> Result<BTreeMap<String, PathBuf>> {
-    let base = root.join("sha256");
-    let mut files = Vec::new();
-    if base.is_dir() {
-        walk_files(&base, &mut files)?;
-    }
-    files.sort();
-    Ok(files
-        .into_iter()
-        .filter_map(|p| Some((p.file_name()?.to_string_lossy().into_owned(), p)))
-        .collect())
-}
-
 async fn table_counts(conn: &mut PgConnection) -> Result<BTreeMap<String, i64>> {
     let names: Vec<String> =
         sqlx::query_scalar("select tablename::text from pg_tables where schemaname = 'public' order by 1")
@@ -243,43 +227,25 @@ async fn state_hashes(conn: &mut PgConnection, as_of: NaiveDate) -> Result<Vec<(
     Ok(out)
 }
 
-/// Every blob hash a document or genome dataset row points at, so verify can tell a blob the live
-/// store had already lost from one the backup lost.
-async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<String>> {
+/// Every blob a document or genome dataset row points at, with the profile that owns it, so verify
+/// can tell a blob the live store had already lost from one the backup lost.
+async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(Option<Uuid>, String)>> {
     let cols: Vec<String> = sqlx::query_scalar(
         "select column_name::text from information_schema.columns where table_schema = 'public' \
          and table_name = 'genome_dataset' and data_type = 'bytea' and column_name like '%\\_blob'",
     )
     .fetch_all(&mut *conn)
     .await?;
-    let mut parts = vec!["select blob_sha256 as h from document".to_string()];
-    parts.extend(cols.iter().map(|c| format!("select \"{c}\" from genome_dataset")));
+    let mut parts = vec!["select profile_id as p, blob_sha256 as h from document".to_string()];
+    parts.extend(
+        cols.iter()
+            .map(|c| format!("select profile_id, \"{c}\" from genome_dataset")),
+    );
     let q = format!(
-        "select distinct encode(h, 'hex') from ({}) x where h is not null order by 1",
+        "select distinct p, encode(h, 'hex') from ({}) x where h is not null order by 2, 1",
         parts.join(" union ")
     );
-    Ok(sqlx::query_scalar(AssertSqlSafe(q)).fetch_all(&mut *conn).await?)
-}
-
-fn link_or_copy(src: &Path, dst: &Path) -> Result<()> {
-    if fs::hard_link(src, dst).is_err() {
-        fs::copy(src, dst)?;
-    }
-    Ok(())
-}
-
-fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let (from, to) = (entry.path(), dst.join(entry.file_name()));
-        if from.is_dir() {
-            copy_tree(&from, &to)?;
-        } else {
-            link_or_copy(&from, &to)?;
-        }
-    }
-    Ok(())
+    Ok(sqlx::query_as(AssertSqlSafe(q)).fetch_all(&mut *conn).await?)
 }
 
 /// Recursively sorted keys: Python's `json.dumps(..., sort_keys=True)`.
@@ -667,9 +633,12 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             .fetch_all(&mut *tx)
             .await?;
         let tables = table_counts(&mut tx).await?;
+        let kept: i64 = sqlx::query_scalar("select count(*) from profile_key where wrapped_dek is not null")
+            .fetch_one(&mut *tx)
+            .await?;
         let as_of = Utc::now().date_naive();
         let states = state_hashes(&mut tx, as_of).await?;
-        Ok::<_, Error>((referenced, migrations, tables, as_of, states))
+        Ok::<_, Error>((referenced, migrations, tables, kept, as_of, states))
     }
     .await;
     // The dump must finish before the exporting transaction ends, whatever the facts did.
@@ -677,7 +646,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // build_state may store snapshots; the backup leaves the database as it was.
     tx.rollback().await?;
     conn.close().await?;
-    let (referenced, migrations, tables, as_of, states) = facts?;
+    let (referenced, migrations, tables, kept, as_of, states) = facts?;
     if !done.status.success() {
         return Err(ops_error(format!(
             "pg_dump failed: {}",
@@ -687,15 +656,45 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
 
     // Blobs are written before the rows that reference them commit, so every blob the snapshot can
     // see exists by now. Later blobs are harmless extras.
-    let src = settings.blobs_path().join("sha256");
-    if src.is_dir() {
-        copy_tree(&src, &dest.join("blobs").join("sha256"))?;
-    }
-    let files = blob_files(&dest.join("blobs"))?;
+    let store = BlobStore::for_settings(settings)?;
+    let tree = dest.join("blobs");
+    store.copy_into(&tree)?;
+    let mut files = blobs::tree_files(&tree)?;
+    // A file that is not where its name puts it is never read and no restore places it: it stays out
+    // of the backup and its manifest, so it cannot stand in for the file its name stands for.
+    files.retain(|key, p| {
+        let stray = key.starts_with("?/");
+        if stray {
+            tracing::warn!(file = %key, "a blob file is not where its name puts it: left out of the backup");
+            let _ = fs::remove_file(p);
+        }
+        !stray
+    });
     let mut bytes = 0u64;
-    for p in files.values() {
+    let mut plain = Vec::new();
+    let mut sealed = Map::new();
+    for (key, p) in &files {
         bytes += fs::metadata(p)?.len();
+        if key.contains('/') {
+            sealed.insert(key.clone(), Value::String(sha256_file(p)?));
+        } else {
+            plain.push(key);
+        }
     }
+    // where each referenced blob sits: its owner's sealed copy, or the plain one
+    let mut referenced: Vec<String> = referenced
+        .iter()
+        .map(|(pid, sha)| store.key_of(pid.map_or(BlobOwner::Reference, BlobOwner::Profile), sha))
+        .collect::<std::result::Result<_, _>>()?;
+    referenced.sort();
+    referenced.dedup();
+    let key_facts = match &settings.secrets_key {
+        Some(_) => json!({
+            "kek_fingerprint": hex::encode(Kek::from_settings(settings)?.fingerprint()),
+            "profiles": kept,
+        }),
+        None => Value::Null,
+    };
     let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false);
     let manifest = json!({
         "schema": MANIFEST_SCHEMA,
@@ -709,9 +708,11 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
         "blobs": {
             "count": files.len(),
             "bytes": bytes,
-            "sha256": files.keys().collect::<Vec<_>>(),
+            "sha256": plain,
+            "sealed": sealed,
             "referenced": referenced,
         },
+        "keys": key_facts,
         "state_hash": states.into_iter().map(|(p, h)| (p, Value::String(h))).collect::<Map<String, Value>>(),
     });
     let text = serde_json::to_string_pretty(&sort_keys(manifest))? + "\n";
@@ -786,23 +787,80 @@ fn str_list(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn check_blobs(manifest: &Value, root: &Path) -> Result<Value> {
-    let files = blob_files(root)?;
+/// The sha256 of each sealed file's bytes on disk, as the manifest lists them.
+fn sealed_list(manifest: &Value) -> BTreeMap<String, String> {
+    manifest["blobs"]["sealed"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A blob file that is not what the manifest says: a plain one whose bytes have another sha256, a
+/// sealed one whose bytes changed, or a sealed one the manifest does not list (a plain file names its
+/// own hash, a sealed one cannot be checked without the key).
+fn corrupt_file(key: &str, path: &Path, listed: &BTreeSet<String>, sealed: &BTreeMap<String, String>) -> Result<bool> {
+    Ok(if key.contains('/') {
+        sealed.get(key) != Some(&sha256_file(path)?)
+    } else {
+        listed.contains(key) && sha256_file(path)? != key
+    })
+}
+
+/// Every blob file a backup must hold: the plain and sealed files its manifest lists, and the ones the
+/// database references (older manifests have no "referenced").
+fn expected_blobs(manifest: &Value) -> BTreeSet<String> {
+    let mut expected: BTreeSet<String> = str_list(&manifest["blobs"]["sha256"]).into_iter().collect();
+    expected.extend(sealed_list(manifest).into_keys());
+    expected.extend(str_list(&manifest["blobs"]["referenced"]));
+    expected
+}
+
+fn check_blobs(manifest: &Value, files: &BTreeMap<String, PathBuf>) -> Result<Value> {
     let listed: BTreeSet<String> = str_list(&manifest["blobs"]["sha256"]).into_iter().collect();
-    let mut expected = listed.clone();
-    expected.extend(str_list(&manifest["blobs"]["referenced"])); // older manifests have no "referenced"
+    let sealed = sealed_list(manifest);
+    let expected = expected_blobs(manifest);
     let missing: Vec<&String> = expected.iter().filter(|s| !files.contains_key(*s)).collect();
     let mut corrupt = Vec::new();
-    for (sha, p) in &files {
-        if listed.contains(sha) && &sha256_file(p)? != sha {
-            corrupt.push(sha.clone());
+    for (key, p) in files {
+        if corrupt_file(key, p, &listed, &sealed)? {
+            corrupt.push(key.clone());
         }
     }
     Ok(json!({"checked": files.len(), "missing": missing, "corrupt": corrupt}))
 }
 
+/// The key a backup is read with: the configured one, which must be the key the backup was made
+/// under. Checked before anything is loaded.
+fn backup_key(settings: &Settings, manifest: &Value) -> Result<Option<Kek>> {
+    let kek = match &settings.secrets_key {
+        Some(_) => Some(Kek::from_settings(settings)?),
+        None => None,
+    };
+    if let Some(want) = manifest["keys"]["kek_fingerprint"].as_str() {
+        let Some(k) = &kek else {
+            // a new key never opens a backup: name the one it was made with
+            return Err(ops_error(format!(
+                "OWNHEALTH_SECRETS_KEY is not set: set the key the backup was made with (fingerprint {want}), \
+                 see deploy/README.md"
+            )));
+        };
+        let have = hex::encode(k.fingerprint());
+        if have != want {
+            return Err(ops_error(format!(
+                "this backup was made under another OWNHEALTH_SECRETS_KEY (fingerprint {want}; the configured \
+                 key has {have}): set the key the backup was made with"
+            )));
+        }
+    }
+    Ok(kek)
+}
+
 /// Row counts, blob hashes and state_hash per profile against the manifest.
-async fn compare(url: &str, manifest: &Value, blob_root: &Path) -> Result<Value> {
+async fn compare(url: &str, manifest: &Value, files: &BTreeMap<String, PathBuf>, kek: Option<&Kek>) -> Result<Value> {
     let as_of_text = manifest["as_of"].as_str().unwrap_or_default();
     let as_of = NaiveDate::parse_from_str(as_of_text, "%Y-%m-%d")
         .map_err(|e| ops_error(format!("bad as_of {as_of_text:?} in the manifest: {e}")))?;
@@ -817,6 +875,18 @@ async fn compare(url: &str, manifest: &Value, blob_root: &Path) -> Result<Value>
             Some(chain_json(read.as_ref()))
         }
         None => None,
+    };
+    // every wrapped profile key must open under the configured key, or its files are lost (a dump
+    // from before 1.0 has no key table: nothing to open)
+    let keyed: bool = sqlx::query_scalar("select to_regclass('public.profile_key') is not null")
+        .fetch_one(&mut *tx)
+        .await?;
+    let key_check = match kek.filter(|_| keyed) {
+        Some(k) => {
+            let (opened, failed) = keys::check_all(&mut tx, k).await?;
+            json!({"checked": opened + failed.len(), "failed": failed, "ok": failed.is_empty()})
+        }
+        None => Value::Null,
     };
     let states = state_hashes(&mut tx, as_of).await?;
     tx.commit().await?;
@@ -853,12 +923,13 @@ async fn compare(url: &str, manifest: &Value, blob_root: &Path) -> Result<Value>
             profiles.insert(pid.clone(), json!({"expected": null, "actual": h, "ok": false}));
         }
     }
-    let blobs = check_blobs(manifest, blob_root)?;
+    let blobs = check_blobs(manifest, files)?;
     let ok = tables.is_empty()
         && profiles.values().all(|p| p["ok"] == json!(true))
         && blobs["missing"].as_array().is_some_and(Vec::is_empty)
         && blobs["corrupt"].as_array().is_some_and(Vec::is_empty)
-        && (audit.is_null() || audit["ok"] == json!(true));
+        && (audit.is_null() || audit["ok"] == json!(true))
+        && (key_check.is_null() || key_check["ok"] == json!(true));
     Ok(json!({
         "ok": ok,
         "as_of": as_of_text,
@@ -866,6 +937,7 @@ async fn compare(url: &str, manifest: &Value, blob_root: &Path) -> Result<Value>
         "profiles": profiles,
         "blobs": blobs,
         "audit_chain": audit,
+        "keys": key_check,
     }))
 }
 
@@ -880,6 +952,7 @@ async fn compare(url: &str, manifest: &Value, blob_root: &Path) -> Result<Value>
 /// `audit_anchor_error` says why.
 pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
     let manifest = read_manifest(archive)?;
+    let kek = backup_key(settings, &manifest)?;
     let url = settings.sqlx_url();
     let mut conn = PgConnection::connect(&url).await?;
     let tables: i64 = sqlx::query_scalar("select count(*) from pg_tables where schemaname = 'public'")
@@ -891,31 +964,36 @@ pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
             "the target database is not empty: restore needs a fresh instance (new volume, app not started)",
         ));
     }
-    // Check every blob before the database is loaded: a corrupt one found after pg_restore would
-    // leave a populated database that a second attempt refuses as "not empty".
-    let backup_blobs = blob_files(&archive.join("blobs"))?;
-    for (sha, path) in &backup_blobs {
-        if &sha256_file(path)? != sha {
-            return Err(ops_error(format!("blob {sha} in the backup is corrupt")));
+    // Check every blob before the database is loaded: a corrupt or missing one found after pg_restore
+    // would leave a populated database that a second attempt refuses as "not empty".
+    let backup_blobs = blobs::tree_files(&archive.join("blobs"))?;
+    if let Some(gone) = expected_blobs(&manifest)
+        .into_iter()
+        .find(|k| !backup_blobs.contains_key(k))
+    {
+        return Err(ops_error(format!(
+            "blob {gone} the manifest lists is missing from the backup"
+        )));
+    }
+    // A sealed file the manifest does not list is refused too: without the key nothing else shows
+    // that it was added.
+    let sealed = sealed_list(&manifest);
+    for (key, path) in &backup_blobs {
+        let whole = match key.contains('/') {
+            true => sealed.get(key) == Some(&sha256_file(path)?),
+            false => sha256_file(path)? == *key,
+        };
+        if !whole {
+            return Err(ops_error(format!("blob {key} in the backup is corrupt")));
         }
     }
     pg_restore(&url, archive).await?;
-    let root = settings.blobs_path();
-    for (sha, path) in &backup_blobs {
-        if sha.len() < 4 {
-            continue;
-        }
-        let target = root.join("sha256").join(&sha[..2]).join(&sha[2..4]).join(sha);
-        if !target.exists() {
-            let parent = target.parent().unwrap_or(&root);
-            fs::create_dir_all(parent)?;
-            let part = parent.join(format!(".{sha}.part")); // copied whole, then renamed: never a truncated blob
-            fs::copy(path, &part)?;
-            fs::rename(&part, &target)?;
-        }
+    let store = BlobStore::for_settings(settings)?;
+    for (key, path) in &backup_blobs {
+        store.place(key, path)?;
     }
     let lock = anchor_lock(&url).await?;
-    let mut report = compare(&url, &manifest, &root).await?;
+    let mut report = compare(&url, &manifest, &store.files()?, kek.as_ref()).await?;
     let head = &manifest["audit_chain"];
     let hash = head["hash"]
         .as_str()
@@ -976,6 +1054,8 @@ async fn create_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
 /// `ok` is true only when every row count, every blob hash and every profile's state_hash match.
 pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value> {
     let manifest = read_manifest(archive)?;
+    let kek = backup_key(settings, &manifest)?;
+    let files = blobs::tree_files(&archive.join("blobs"))?;
     let live = settings.sqlx_url();
     let scratch = format!("{}_restore_check", db_name(&live));
     let drop = format!("drop database if exists \"{scratch}\" with (force)");
@@ -985,7 +1065,7 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
     let target = with_db(&live, &scratch);
     let result = async {
         pg_restore(&target, archive).await?;
-        compare(&target, &manifest, &archive.join("blobs")).await
+        compare(&target, &manifest, &files, kek.as_ref()).await
     }
     .await;
     let dropped = sqlx::query(AssertSqlSafe(drop)).execute(&mut admin).await;

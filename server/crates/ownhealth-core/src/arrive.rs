@@ -88,12 +88,12 @@ pub enum Arrived {
     Unsupported { kind: UploadKind },
 }
 
-/// Put bytes in the blob store off the async runtime. Returns `(sha256 hex, size)`.
-pub async fn store_bytes(blobs: &BlobStore, data: Vec<u8>) -> Result<(String, u64)> {
+/// Put `owner`'s bytes in the blob store off the async runtime. Returns `(sha256 hex, size)`.
+pub async fn store_bytes(blobs: &BlobStore, owner: BlobOwner, data: Vec<u8>) -> Result<(String, u64)> {
     let blobs = blobs.clone();
     tokio::task::spawn_blocking(move || {
         let n = data.len() as u64;
-        blobs.put_bytes(&data).map(|sha| (sha, n))
+        blobs.put_bytes(owner, &data).map(|sha| (sha, n))
     })
     .await
     .map_err(|e| Error::Other(anyhow::anyhow!("blob write task failed: {e}")))?
@@ -105,8 +105,11 @@ async fn sniff_blob(blobs: &BlobStore, owner: BlobOwner, sha256: &str, filename:
     tokio::task::spawn_blocking(move || -> Result<UploadKind> {
         let mut head = Vec::with_capacity(4096);
         blobs.open_seek(owner, &sha256)?.take(4096).read_to_end(&mut head)?;
-        let copy = blobs.with_local_copy(owner, &sha256)?;
-        Ok(sniff(&filename, &head, Some(copy.path())))
+        // only a zip's member list needs the whole file on disk: a sealed blob is not decrypted for the rest
+        let copy = crate::documents::is_zip(&head)
+            .then(|| blobs.with_local_copy(owner, &sha256))
+            .transpose()?;
+        Ok(sniff(&filename, &head, copy.as_ref().map(|c| c.path())))
     })
     .await
     .map_err(|e| Error::Other(anyhow::anyhow!("sniff task failed: {e}")))?

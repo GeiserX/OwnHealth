@@ -40,6 +40,10 @@ pub enum Error {
     /// apart from a database that is down. HTTP 500, as any other server fault.
     #[error("{0}")]
     AuditUncheckable(String),
+    /// A profile key that does not open, or cannot be read or stored (`keys.rs`). Its message names
+    /// no key. HTTP 500, as any other server fault.
+    #[error(transparent)]
+    Key(#[from] crate::keys::KeyError),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]

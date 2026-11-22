@@ -730,8 +730,9 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     .await?;
     tx.commit().await?;
     let (mut removed, mut stuck) = (0usize, Vec::new());
+    let owner = ownhealth_core::blobs::BlobOwner::Profile(profile_id);
     for sha in &result.blobs {
-        match rt.blobs.delete(sha) {
+        match rt.blobs.delete(owner, sha) {
             Ok(true) => removed += 1,
             Ok(false) => {}
             Err(e) => {
@@ -740,13 +741,25 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
             }
         }
     }
+    // The profile's key went with its rows, so its sealed files no longer open; the rest of them (a
+    // file another profile also holds, which keeps its own copy) go with the profile's folder. When
+    // the folder stays, the retry job stays whole and removes it.
+    let folder_left = match rt.blobs.forget_profile(profile_id) {
+        Ok(_) => false,
+        Err(e) => {
+            tracing::warn!(error = %e, "removing the profile's sealed files failed; they no longer open, a job retries it");
+            true
+        }
+    };
     let failed = folder::forget_folders(&rt.pool, &rt.settings, result.household_id, slug, folders).await;
     let folders_pending = failed.len();
     let failed: Vec<Value> = failed
         .into_iter()
         .map(|(config, own)| json!({"config": config, "own": own}))
         .collect();
-    settle(rt, result.unlink_job, "blobs", stuck.clone()).await;
+    if !folder_left {
+        settle(rt, result.unlink_job, "blobs", stuck.clone()).await;
+    }
     settle(rt, forget_job, "folders", failed).await;
     // what really happened to the files: removed now, and waiting for the retry
     let pending = stuck.len();

@@ -29,7 +29,9 @@ async fn scanned_page(w: &World) -> anyhow::Result<Uuid> {
         report_id: "LN-SCAN",
         pages: vec![rows],
     });
-    let pdf_sha = w.rt.blobs.put_bytes(&pdf)?;
+    let pdf_sha =
+        w.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &pdf)?;
     let (blobs, owner) = (
         w.rt.blobs.clone(),
         ownhealth_core::blobs::BlobOwner::Profile(w.family.profile("alex")),
@@ -37,7 +39,9 @@ async fn scanned_page(w: &World) -> anyhow::Result<Uuid> {
     let png =
         tokio::task::spawn_blocking(move || ownhealth_ingest_pdf::render_page_png(&blobs, owner, &pdf_sha, 1, 2.0))
             .await??;
-    let sha = w.rt.blobs.put_bytes(&png)?;
+    let sha =
+        w.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &png)?;
     let mut c = w.conn().await?;
     let mut d = NewDocument::upload(
         w.family.household_id,
@@ -67,7 +71,10 @@ async fn scanned_page(w: &World) -> anyhow::Result<Uuid> {
 async fn ocr_words(w: &World, doc: Uuid, words: &[(&str, [f64; 4])]) -> R {
     let layer = json!({"words": words.iter().map(|(t, b)| json!({
         "text": t, "x0": b[0], "top": b[1], "x1": b[2], "bottom": b[3]})).collect::<Vec<_>>()});
-    let sha = w.rt.blobs.put_bytes(layer.to_string().as_bytes())?;
+    let sha = w.rt.blobs.put_bytes(
+        ownhealth_core::blobs::BlobOwner::Reference,
+        layer.to_string().as_bytes(),
+    )?;
     sqlx::query(
         "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok, words_blob, word_layer) \
          values ($1, 1, 595, 842, false, decode($2, 'hex'), 'ocr') on conflict (document_id, page_no) do update \

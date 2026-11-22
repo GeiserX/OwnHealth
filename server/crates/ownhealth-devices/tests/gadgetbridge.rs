@@ -80,7 +80,9 @@ fn build(path: &Path) -> rusqlite::Result<()> {
 }
 
 async fn upload(env: &Env, bytes: Vec<u8>, slug: &str) -> anyhow::Result<Option<i64>> {
-    let sha = env.blobs.put_bytes(&bytes)?;
+    let sha = env
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(env.fam.profile(slug)), &bytes)?;
     let mut c = env.db.pool.acquire().await?;
     let payload = json!({
         "profile_id": env.fam.profile(slug).to_string(),

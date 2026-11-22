@@ -292,7 +292,9 @@ async fn a_wearables_document_needs_read_wearables_to_be_listed_opened_or_downlo
         ),
         ("letter.pdf", "application/pdf", "other", &b"a letter"[..]),
     ] {
-        let sha = a.rt.blobs.put_bytes(bytes)?;
+        let sha =
+            a.rt.blobs
+                .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(alex), bytes)?;
         let id: uuid::Uuid = sqlx::query_scalar(
             "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type) \
              values ($1, $2, decode($3, 'hex'), $4, $5, $6, $7) returning id",
@@ -410,7 +412,10 @@ async fn the_migration_moves_stored_wearables_exports_to_their_type() -> R {
     .into_iter()
     .enumerate()
     {
-        let sha = a.rt.blobs.put_bytes(format!("export {i}").as_bytes())?;
+        let sha = a.rt.blobs.put_bytes(
+            ownhealth_core::blobs::BlobOwner::Profile(alex),
+            format!("export {i}").as_bytes(),
+        )?;
         let id: uuid::Uuid = sqlx::query_scalar(
             "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, doc_type, flags) \
              values ($1, $2, decode($3, 'hex'), $4, 8, 'other', $5) returning id",
@@ -448,7 +453,9 @@ async fn dated_document(
     provider: Option<&str>,
 ) -> anyhow::Result<uuid::Uuid> {
     let alex = a.family.profile("alex");
-    let sha = a.rt.blobs.put_bytes(name.as_bytes())?;
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(alex), name.as_bytes())?;
     Ok(sqlx::query_scalar(
         "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type, \
          provider_name, collected_at) \

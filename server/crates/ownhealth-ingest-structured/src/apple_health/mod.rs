@@ -458,7 +458,7 @@ async fn store_ecg(
     data: &[u8],
     parent: Uuid,
 ) -> Result<()> {
-    let sha = blobs.put_bytes(data)?;
+    let sha = blobs.put_bytes(BlobOwner::Profile(profile_id), data)?;
     let filename = name.rsplit('/').next().unwrap_or(name);
     let r = create_document(
         &mut *conn,

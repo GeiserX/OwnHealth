@@ -38,7 +38,7 @@ pub async fn env() -> anyhow::Result<Env> {
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
     let settings = db.settings(dir.path())?;
-    let blobs = BlobStore::new(dir.path().join("blobs"))?;
+    let blobs = BlobStore::for_settings(&settings)?;
     let mut c = db.pool.acquire().await?;
     let fam = create_rivera_family(&mut c, "Rivera").await?;
     drop(c);
@@ -65,7 +65,9 @@ impl Env {
         mime: &str,
         filename: &str,
     ) -> anyhow::Result<Uuid> {
-        let sha = self.blobs.put_bytes(data)?;
+        let sha = self
+            .blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(self.fam.profile(slug)), data)?;
         let d = NewDocument {
             filename: Some(filename),
             ..NewDocument::upload(

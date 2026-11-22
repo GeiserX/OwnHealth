@@ -25,7 +25,7 @@ pub struct Env {
 pub async fn env() -> anyhow::Result<Env> {
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
-    let blobs = BlobStore::new(dir.path().join("blobs"))?;
+    let blobs = BlobStore::for_settings(&db.settings(dir.path())?)?;
     let mut c = db.pool.acquire().await?;
     let fam = create_rivera_family(&mut c, "Rivera").await?;
     drop(c);
@@ -65,7 +65,12 @@ impl Env {
     /// Alex's facts and raw files imported. Returns (document_id, facts, summary).
     pub async fn alex_genome(&self, conn: &mut PgConnection) -> anyhow::Result<(Uuid, Value, ImportSummary)> {
         let raw = synthetic::alex_raw_files()?;
-        let (facts, attachments) = synthetic::with_files(&synthetic::alex_facts(), &self.blobs, &raw)?;
+        let (facts, attachments) = synthetic::with_files(
+            &synthetic::alex_facts(),
+            &self.blobs,
+            ownhealth_core::blobs::BlobOwner::Profile(self.profile("alex")),
+            &raw,
+        )?;
         let (doc, summary) = self.seed(conn, "alex", &facts, &attachments).await?;
         Ok((doc, facts, summary))
     }

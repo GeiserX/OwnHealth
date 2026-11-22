@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let n = if db {
         let test_db = TestDb::new().await?;
         let blobs = BlobStore::new(tmp.path().join("blobs"))?;
-        let (sha, size) = blobs.put_file(&path)?;
+        let (sha, size) = blobs.put_file(ownhealth_core::blobs::BlobOwner::Reference, &path)?;
         let mut tx = test_db.pool.begin().await?;
         let fam = create_rivera_family(&mut tx, "Rivera mem").await?;
         let doc = create_document(

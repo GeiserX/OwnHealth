@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 async fn upload(env: &Env, bytes: &[u8], filename: &str) -> anyhow::Result<Option<i64>> {
-    let sha = env.blobs.put_bytes(bytes)?;
+    let sha = put(env, "lucia", bytes)?;
     let mut c = env.db.pool.acquire().await?;
     let payload = json!({
         "profile_id": env.fam.profile("lucia").to_string(),
@@ -517,15 +517,26 @@ fn fields(bytes: &[u8]) -> anyhow::Result<Vec<(String, String)>> {
 }
 
 fn exists(env: &Env, sha: &str) -> bool {
+    exists_for(env, "lucia", sha)
+}
+
+fn exists_for(env: &Env, who: &str, sha: &str) -> bool {
     env.blobs
-        .exists(ownhealth_core::blobs::BlobOwner::Profile(env.fam.profile("lucia")), sha)
+        .exists(ownhealth_core::blobs::BlobOwner::Profile(env.fam.profile(who)), sha)
+}
+
+/// Store bytes for one profile, as the upload route does.
+fn put(env: &Env, who: &str, bytes: &[u8]) -> anyhow::Result<String> {
+    Ok(env
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(env.fam.profile(who)), bytes)?)
 }
 
 #[tokio::test]
 async fn the_stored_file_holds_no_position_and_the_upload_is_deleted() -> R {
     let env = Env::new().await?;
     let run = fw::run_with_gps();
-    let upload_sha = env.blobs.put_bytes(&run)?;
+    let upload_sha = put(&env, "lucia", &run)?;
     let (state, result, err) = import(&env, &run, "run.fit").await?;
     assert_eq!(state, "done", "{err:?}");
     let Stored {
@@ -584,7 +595,7 @@ async fn the_stored_file_holds_no_position_and_the_upload_is_deleted() -> R {
 async fn a_gzipped_upload_is_stored_as_the_plain_file_without_its_route() -> R {
     let env = Env::new().await?;
     let gz = fw::gzip(&fw::run_with_gps());
-    let upload_sha = env.blobs.put_bytes(&gz)?;
+    let upload_sha = put(&env, "lucia", &gz)?;
     let (state, result, err) = import(&env, &gz, "Morning run.fit.gz").await?;
     assert_eq!(state, "done", "{err:?}");
     let Stored { bytes, kind, .. } = stored(&env, &result["document_id"]).await?;
@@ -653,13 +664,14 @@ async fn a_refused_upload_is_deleted_and_bytes_another_import_waits_for_stay() -
     let env = Env::new().await?;
     // a course is positions only: refused, and nothing of it stays
     let course = fw::course();
-    let course_sha = env.blobs.put_bytes(&course)?;
+    let course_sha = put(&env, "lucia", &course)?;
     let (state, _, _) = import(&env, &course, "course.fit").await?;
     assert_eq!(state, "dead");
     assert!(!exists(&env, &course_sha));
     // the same run for two people, both queued: the first import leaves the bytes to the second
     let run = fw::run_with_gps();
-    let sha = env.blobs.put_bytes(&run)?;
+    let sha = put(&env, "lucia", &run)?;
+    put(&env, "alex", &run)?;
     let mut c = env.db.pool.acquire().await?;
     let mut ids = Vec::new();
     for who in ["lucia", "alex"] {
@@ -677,7 +689,7 @@ async fn a_refused_upload_is_deleted_and_bytes_another_import_waits_for_stay() -
         let (state, _, err) = job(&env, id).await?;
         assert_eq!(state, "done", "{err:?}");
     }
-    assert!(!exists(&env, &sha));
+    assert!(!exists(&env, &sha) && !exists_for(&env, "alex", &sha));
     assert_eq!(
         env.count(
             "select count(*) from document where household_id = $1 and doc_type = 'wearables'",
@@ -1118,7 +1130,7 @@ async fn a_document_of_the_same_bytes_stored_before_becomes_a_wearables_document
     // the stored copy of this run, uploaded first under a photo's name, so read:records opens it
     let run = fw::run_with_gps();
     let kept = fit::strip(&run, &fit::read_fit(&run)?.position_fields)?.0;
-    let sha = env.blobs.put_bytes(&kept)?;
+    let sha = put(&env, "lucia", &kept)?;
     let photo: Uuid = sqlx::query_scalar(
         "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes) \
          values ($1, $2, decode($3, 'hex'), 'run.heic', 'image/heic', $4) returning id",
@@ -1144,7 +1156,8 @@ async fn a_document_of_the_same_bytes_stored_before_becomes_a_wearables_document
 async fn the_last_of_two_imports_of_one_upload_deletes_it() -> R {
     let env = Env::new().await?;
     let run = fw::run_with_gps();
-    let sha = env.blobs.put_bytes(&run)?;
+    let sha = put(&env, "lucia", &run)?;
+    put(&env, "alex", &run)?;
     let mut c = env.db.pool.acquire().await?;
     let mut ids = Vec::new();
     for who in ["lucia", "alex"] {
@@ -1176,12 +1189,18 @@ async fn the_last_of_two_imports_of_one_upload_deletes_it() -> R {
     set(ids[1], true).await?;
     let (state, _, err) = job(&env, ids[0]).await?;
     assert_eq!(state, "done", "{err:?}");
-    assert!(exists(&env, &sha), "the bytes another import reads were deleted");
+    assert!(
+        exists_for(&env, "alex", &sha),
+        "the bytes another import reads were deleted"
+    );
     // Alex's ends while Lucía's row still reads running (a worker writes done after its handler)
     set(ids[0], true).await?;
     set(ids[1], false).await?;
     let (state, _, err) = job(&env, ids[1]).await?;
     assert_eq!(state, "done", "{err:?}");
-    assert!(!exists(&env, &sha), "the last import left the upload");
+    assert!(
+        !exists(&env, &sha) && !exists_for(&env, "alex", &sha),
+        "the last import left the upload"
+    );
     Ok(())
 }

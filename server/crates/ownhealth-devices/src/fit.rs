@@ -1003,7 +1003,7 @@ async fn import_upload(ctx: &JobContext, job: &Job, channel: &str, source_id: Op
     let (all, reasons) = activity(&read).map_err(job_error)?;
     // the write syncs the file to disk: off the async threads too; a disk error may heal on a retry
     let blobs = ctx.blobs.clone();
-    let kept_sha = tokio::task::spawn_blocking(move || blobs.put_bytes(&kept))
+    let kept_sha = tokio::task::spawn_blocking(move || blobs.put_bytes(owner, &kept))
         .await
         .map_err(|e| JobError::from(Error::Other(anyhow::anyhow!("FIT write task failed: {e}"))))?
         .map_err(|e| JobError::from(Error::from(e)))?;
@@ -1020,7 +1020,7 @@ async fn import_upload(ctx: &JobContext, job: &Job, channel: &str, source_id: Op
         .map_err(job_error)?;
     tx.commit().await?;
     if kept_sha != sha {
-        forget_upload(ctx, sha, job.id).await;
+        forget_upload(ctx, profile_id, sha, job.id).await;
     }
     let mut out = summary.to_value();
     out["fit"] = details;
@@ -1032,27 +1032,38 @@ async fn import_upload(ctx: &JobContext, job: &Job, channel: &str, source_id: Op
 /// them go. A job lets them go first (`upload_released` in its payload: it has stored its copy or been
 /// refused for good, so it never reads them again), then looks. Of two imports that end together, the
 /// one that looks last sees the other let go, so the last one deletes the upload, although a worker
-/// marks a job done only after its handler returns.
-async fn forget_upload(ctx: &JobContext, sha: &str, job_id: i64) {
+/// marks a job done only after its handler returns. Each profile keeps its own sealed copy of the
+/// bytes: this profile's copy goes once no row of the profile holds it, and the plain copy once no
+/// row holds it at all (as `hae::prune_pushes`).
+async fn forget_upload(ctx: &JobContext, profile_id: Uuid, sha: &str, job_id: i64) {
     let done: Result<()> = async {
         let mut conn = ctx.pool.acquire().await?;
         sqlx::query("update job set payload = payload || '{\"upload_released\": true}'::jsonb where id = $1")
             .bind(job_id)
             .execute(&mut *conn)
             .await?;
-        let held: bool = sqlx::query_scalar(
-            "select exists (select 1 from document where blob_sha256 = decode($1, 'hex')) \
+        let holders = "from job where id <> $2 and state in ('queued', 'running') \
+                       and payload->>'blob_sha256' = $1 and payload->'upload_released' is null";
+        let (mine, held): (bool, bool) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "select exists (select 1 from document where blob_sha256 = decode($1, 'hex') and profile_id = $3) \
+             or exists (select 1 from source_item where blob_sha256 = decode($1, 'hex') and profile_id = $3) \
+             or exists (select 1 {holders} and payload->>'profile_id' = $4), \
+             exists (select 1 from document where blob_sha256 = decode($1, 'hex')) \
              or exists (select 1 from source_item where blob_sha256 = decode($1, 'hex')) \
              or exists (select 1 from quarantine_item where raw_blob = decode($1, 'hex')) \
-             or exists (select 1 from job where id <> $2 and state in ('queued', 'running') \
-                and payload->>'blob_sha256' = $1 and payload->'upload_released' is null)",
-        )
+             or exists (select 1 {holders})"
+        )))
         .bind(sha)
         .bind(job_id)
+        .bind(profile_id)
+        .bind(profile_id.to_string())
         .fetch_one(&mut *conn)
         .await?;
+        let owner = BlobOwner::Profile(profile_id);
         if !held {
-            ctx.blobs.delete(sha)?;
+            ctx.blobs.delete(owner, sha)?;
+        } else if !mine {
+            ctx.blobs.drop_sealed(owner, sha)?;
         }
         Ok(())
     }
@@ -1072,10 +1083,13 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     if !ownhealth_ingest_structured::py::truthy(job.payload.get("document_id")) {
         let out = import_upload(&ctx, &job, &channel, source_id).await;
         // a refused upload keeps nothing: it may hold a route
-        if let (Err(e), Some(sha)) = (&out, job.str("blob_sha256"))
-            && e.permanent
+        if let (Err(e), Some(sha), Some(profile_id)) = (
+            &out,
+            job.str("blob_sha256"),
+            job.str("profile_id").and_then(|s| Uuid::parse_str(s).ok()),
+        ) && e.permanent
         {
-            forget_upload(&ctx, sha, job.id).await;
+            forget_upload(&ctx, profile_id, sha, job.id).await;
         }
         return out;
     }

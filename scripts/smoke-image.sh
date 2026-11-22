@@ -77,9 +77,13 @@ for _ in $(seq 1 60); do docker exec "$db" pg_isready -U postgres >/dev/null 2>&
 db_url="postgresql://postgres:ci@$db:5432/postgres"
 ocr_flag=""
 if [ "$variant" = ocr ]; then ocr_flag=1; fi
+# a new key each run, passed by name so its value never shows on a command line; app and worker share it
+OWNHEALTH_SECRETS_KEY="$(openssl rand -base64 32)"
+export OWNHEALTH_SECRETS_KEY
 docker run -d --name "$app" --network "$net" -v "$vol:/data" -p "127.0.0.1:$port:8080" \
   -e OWNHEALTH_DATABASE_URL="$db_url" \
   -e OWNHEALTH_SECRET_KEY="$(openssl rand -hex 48)" \
+  -e OWNHEALTH_SECRETS_KEY \
   -e OWNHEALTH_OCR="$ocr_flag" \
   -e OWNHEALTH_DEMO=1 "$img" >/dev/null
 for _ in $(seq 1 90); do curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -95,6 +99,7 @@ if [ "$variant" = ocr ]; then
   docker run -d --name "$worker" --network "$net" -v "$vol:/data" \
     -e OWNHEALTH_DATABASE_URL="$db_url" \
     -e OWNHEALTH_RUN_MIGRATIONS=0 \
+    -e OWNHEALTH_SECRETS_KEY \
     -e OWNHEALTH_QUEUES=ocr "$img" ownhealth worker >/dev/null
   sql() { docker exec "$db" psql -U postgres -tAc "$1"; }
   done_jobs=0
@@ -115,6 +120,8 @@ if [ "$variant" = ocr ]; then
   echo "ocr ok: $done_jobs job(s)"
 fi
 
+# the demo's files went to the sealed layout
+test -n "$(docker exec "$app" ls -A /data/blobs/enc)" || { echo "no sealed blob in /data/blobs/enc" >&2; exit 1; }
 docker exec "$app" ownhealth backup /data/backups/smoke >/dev/null
 report=$(docker exec "$app" ownhealth verify-restore /data/backups/smoke)
 grep -q '"ok": true' <<<"$report"

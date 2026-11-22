@@ -33,8 +33,10 @@ impl Runtime {
         Runtime::with_pool(settings, pool)
     }
 
+    /// With OWNHEALTH_SECRETS_KEY set, the blob store seals every profile's files under that
+    /// profile's key ([`BlobStore::for_settings`]).
     pub fn with_pool(settings: Settings, pool: PgPool) -> anyhow::Result<Runtime> {
-        let blobs = BlobStore::new(settings.blobs_path())?;
+        let blobs = BlobStore::for_settings(&settings)?;
         crate::access::set_env_majority(settings.age_of_majority);
         Ok(Runtime {
             settings: Arc::new(settings),

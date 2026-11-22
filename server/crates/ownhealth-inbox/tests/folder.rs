@@ -43,7 +43,7 @@ struct Env {
 async fn env(default_profile: Option<&str>) -> anyhow::Result<Env> {
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
-    let blobs = BlobStore::new(dir.path().join("blobs"))?;
+    let blobs = BlobStore::for_settings(&db.settings(dir.path())?)?;
     let inbox = dir.path().join("inbox");
     std::fs::create_dir_all(&inbox)?;
     let mut c = db.pool.acquire().await?;
@@ -261,7 +261,7 @@ async fn the_demo_folder_source_never_polls_even_with_an_inbox_dir() -> R {
     folder::register();
     let db = TestDb::new().await?;
     let dir = tempfile::tempdir()?;
-    let blobs = BlobStore::new(dir.path().join("blobs"))?;
+    let blobs = BlobStore::for_settings(&db.settings(dir.path())?)?;
     let mut settings = db.settings(dir.path())?;
     settings.inbox_dir = Some(dir.path().join("inbox"));
     assert!(ownhealth_core::demo::seed_demo(&db.pool, &settings, &blobs, false).await?);

@@ -247,7 +247,12 @@ async fn as_of_before_the_import_sees_nothing() -> R {
     let e = env().await?;
     let mut c = e.conn().await?;
     let raw = synthetic::alex_raw_files()?;
-    let (facts, att) = synthetic::with_files(&synthetic::alex_facts(), &e.blobs, &raw)?;
+    let (facts, att) = synthetic::with_files(
+        &synthetic::alex_facts(),
+        &e.blobs,
+        ownhealth_core::blobs::BlobOwner::Reference,
+        &raw,
+    )?;
     let at = Utc.with_ymd_and_hms(2026, 10, 2, 8, 0, 0).single();
     synthetic::seed_genome(
         &mut c,

@@ -26,7 +26,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use ownhealth_core::arrive::{Arrival, Arrived, arrive};
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::config::Settings;
 use ownhealth_core::error::{Error, Result};
 use ownhealth_core::jobs::{EnqueueOptions, HandlerResult, Job, JobContext, JobError, enqueue, register_handler};
@@ -502,7 +502,7 @@ fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
 
 /// Read a scanned file into the blob store from one open handle. None when the handle is not the
 /// file the scan saw (swapped, for a link or anything else) or the file changed while we read it.
-fn read_stable(blobs: &BlobStore, f: &Ready) -> std::io::Result<Option<(String, u64)>> {
+fn read_stable(blobs: &BlobStore, owner: BlobOwner, f: &Ready) -> std::io::Result<Option<(String, u64)>> {
     let file = match open_no_follow(&f.path) {
         Ok(file) => file,
         // a link put in its place (O_NOFOLLOW), or the file is gone: not the file the scan saw
@@ -515,7 +515,7 @@ fn read_stable(blobs: &BlobStore, f: &Ready) -> std::io::Result<Option<(String, 
     if !same(&file.metadata()?)? {
         return Ok(None);
     }
-    let (sha, size) = blobs.put_reader(&file).map_err(std::io::Error::other)?;
+    let (sha, size) = blobs.put_reader(owner, &file).map_err(std::io::Error::other)?;
     if size != f.size || !same(&file.metadata()?)? {
         return Ok(None);
     }
@@ -711,7 +711,8 @@ async fn take(pool: &PgPool, blobs: &BlobStore, source: &Source, f: &Ready) -> R
         Route::NotManaged => return Ok(Taken::NotManaged),
     };
     let (b, g) = (blobs.clone(), f.clone());
-    let Some((sha, size)) = blocking(move || read_stable(&b, &g)).await? else {
+    let owner = BlobOwner::Profile(profile_id);
+    let Some((sha, size)) = blocking(move || read_stable(&b, owner, &g)).await? else {
         return Ok(Taken::Left);
     };
     let key = f.key();
@@ -964,7 +965,7 @@ mod tests {
         f.size = std::fs::metadata(&secret)?.len();
         std::fs::remove_file(&f.path)?;
         std::os::unix::fs::symlink(&secret, &f.path)?;
-        assert_eq!(read_stable(&blobs, &f)?, None);
+        assert_eq!(read_stable(&blobs, BlobOwner::Reference, &f)?, None);
         Ok(())
     }
 
@@ -988,7 +989,7 @@ mod tests {
         assert!(status.success(), "mkfifo");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(read_stable(&blobs, &f).map_err(|e| e.to_string()));
+            let _ = tx.send(read_stable(&blobs, BlobOwner::Reference, &f).map_err(|e| e.to_string()));
         });
         let got = rx
             .recv_timeout(Duration::from_secs(5))

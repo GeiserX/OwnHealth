@@ -1,12 +1,13 @@
 //! Bgzipped, tabix-indexed VCFs with noodles: what `pysam.VariantFile(..., index_filename=...)` did.
 //!
-//! The index is read from its own path (blob names are hashes). `fetch` answers the records that
+//! The index is read from its own path or reader (blob names are hashes); the data from any reader
+//! that seeks, so an encrypted blob is read in place, record by record. `fetch` answers the records that
 //! overlap a 1-based closed range the way htslib's tabix iterator does: a record spans POS to its
 //! INFO/END, else to POS + len(REF) - 1. Only the first sample is read; the fields the lookups need
 //! are parsed from the text line.
 
 use std::fs::File;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, Read, Seek, Write};
 use std::path::Path;
 
 use noodles::bgzf;
@@ -106,10 +107,13 @@ fn invalid(message: &str) -> io::Error {
 /// noodles allocate more than the file holds (a huge n_bin aborted the process on allocation).
 /// htslib refuses such files too ("could not open index").
 pub fn read_tabix(path: &Path) -> io::Result<tabix::Index> {
+    read_tabix_from(File::open(path)?)
+}
+
+/// `read_tabix` of an index read from `index`.
+pub fn read_tabix_from(index: impl Read) -> io::Result<tabix::Index> {
     let mut compressed = Vec::new();
-    File::open(path)?
-        .take(MAX_INDEX_BYTES + 1)
-        .read_to_end(&mut compressed)?;
+    index.take(MAX_INDEX_BYTES + 1).read_to_end(&mut compressed)?;
     let mut raw = Vec::new();
     bgzf::io::Reader::new(&compressed[..])
         .take(MAX_INDEX_BYTES + 1)
@@ -186,16 +190,25 @@ fn read_line_bounded<R: BufRead>(reader: &mut R, line: &mut String) -> io::Resul
     Ok(n)
 }
 
+/// A reader the bgzf layer can seek in: a file, or a sealed blob.
+pub trait ReadSeek: Read + Seek + Send {}
+impl<T: Read + Seek + Send> ReadSeek for T {}
+
 /// A bgzipped VCF opened with its tabix index.
 pub struct VcfFile {
-    reader: bgzf::io::Reader<File>,
+    reader: bgzf::io::Reader<Box<dyn ReadSeek>>,
     index: tabix::Index,
 }
 
 impl VcfFile {
     pub fn open(data: &Path, index: &Path) -> io::Result<VcfFile> {
-        let index = read_tabix(index)?;
-        let reader = bgzf::io::Reader::new(File::open(data)?);
+        VcfFile::from_readers(File::open(data)?, File::open(index)?)
+    }
+
+    /// The same from readers: `data` is the bgzipped VCF (read in place, with seeks), `index` its .tbi.
+    pub fn from_readers(data: impl Read + Seek + Send + 'static, index: impl Read) -> io::Result<VcfFile> {
+        let index = read_tabix_from(index)?;
+        let reader = bgzf::io::Reader::new(Box::new(data) as Box<dyn ReadSeek>);
         Ok(VcfFile { reader, index })
     }
 

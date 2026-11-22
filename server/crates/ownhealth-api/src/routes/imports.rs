@@ -21,6 +21,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use ownhealth_core::access::accessible_profiles;
 use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::documents::{StoredFile, dispatch_upload};
 use ownhealth_core::pyjson::row_to_json;
 use ownhealth_core::{Error, Runtime, ids};
@@ -77,7 +78,8 @@ async fn read_capped(field: &mut axum::extract::multipart::Field<'_>) -> R<Vec<u
 }
 
 async fn spool(field: &mut axum::extract::multipart::Field<'_>, path: &std::path::Path) -> R<()> {
-    let mut out = tokio::fs::File::create(path).await.map_err(Error::from)?;
+    // the upload is plaintext until the store takes it: readable by this user only
+    let mut out = ownhealth_core::blobs::create_spool(path).await.map_err(Error::from)?;
     while let Some(chunk) = field.chunk().await.map_err(|_| bad_body())? {
         out.write_all(&chunk).await.map_err(Error::from)?;
     }
@@ -147,7 +149,8 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     for f in &files {
         let blobs = rt.blobs.clone();
         let path = f.path.clone();
-        let (sha256, size) = tokio::task::spawn_blocking(move || blobs.put_file(&path))
+        let owner = BlobOwner::Profile(perm.profile.id);
+        let (sha256, size) = tokio::task::spawn_blocking(move || blobs.put_file(owner, &path))
             .await
             .map_err(|e| Error::Other(e.into()))?
             .map_err(|e| Error::Other(e.into()))?;

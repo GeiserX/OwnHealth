@@ -166,6 +166,8 @@ fn backup_hash(db: &TestDb, dir: &std::path::Path, years: &str, lucia: Uuid) -> 
         .env("OWNHEALTH_DATABASE_URL", &db.url)
         .env("OWNHEALTH_DATA_DIR", dir.join("live"))
         .env("OWNHEALTH_AGE_OF_MAJORITY", years)
+        .env("OWNHEALTH_SECRETS_KEY", ownhealth_core::testing::random_secrets_key())
+        .env_remove("OWNHEALTH_SECRETS_KEY_FILE")
         .output()?;
     anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let m: Value = serde_json::from_slice(&std::fs::read(archive.join("manifest.json"))?)?;

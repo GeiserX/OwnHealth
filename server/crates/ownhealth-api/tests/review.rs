@@ -381,7 +381,9 @@ async fn carmen_pull_from(a: &App, source: Uuid, page: &str, resources: Vec<Valu
         .collect();
     let bytes =
         serde_json::to_vec(&json!({"resourceType": "Bundle", "id": page, "type": "searchset", "entry": entries}))?;
-    let sha = a.rt.blobs.put_bytes(&bytes)?;
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(carmen), &bytes)?;
     let doc = create_document(
         &mut c,
         &NewDocument {
@@ -496,7 +498,9 @@ async fn test_the_newest_fhir_import_is_named_however_many_dated_documents_come_
     let second = carmen_pull_from(&a, source, "day-2", vec![]).await?;
     // a dated report, stored after the pulls: the list puts it first, and pulls carry no date
     let mut c = a.conn().await?;
-    let sha = a.rt.blobs.put_bytes(b"%PDF-1.7 report")?;
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(carmen), b"%PDF-1.7 report")?;
     let report = create_document(
         &mut c,
         &NewDocument::upload(fam.household_id, Some(carmen), &sha, "application/pdf", 15),

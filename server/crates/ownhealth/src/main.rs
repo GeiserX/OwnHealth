@@ -20,6 +20,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Run the web app, MCP server and job loop. Needs OWNHEALTH_DATABASE_URL and OWNHEALTH_SECRET_KEY.
+    /// Every command but migrate and healthcheck also needs OWNHEALTH_SECRETS_KEY.
     Serve,
     /// Apply pending database migrations. Needs OWNHEALTH_DATABASE_URL.
     Migrate,
@@ -119,6 +120,15 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
     // Every command, not only those that build a Runtime: backup and verify-restore compute state
     // hashes, and the minor rule in them must match the server's.
     ownhealth_core::access::set_env_majority(settings.age_of_majority);
+    // Every profile's files are sealed under a key made from OWNHEALTH_SECRETS_KEY, so nothing that
+    // reads or writes them starts without it. migrate and healthcheck never open a blob.
+    if !matches!(cmd, Cmd::Migrate | Cmd::Healthcheck) {
+        // a restore needs the key the backup was made with: a new one never opens it
+        if settings.secrets_key.is_none() && matches!(cmd, Cmd::Restore { .. } | Cmd::VerifyRestore { .. }) {
+            anyhow::bail!(ownhealth_core::keys::MISSING_BACKUP_KEY);
+        }
+        settings.require_secrets_key()?;
+    }
     match cmd {
         Cmd::Serve => {
             app::serve(settings).await?;
@@ -150,6 +160,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
         Cmd::DemoSeed { force } => {
             let rt = Runtime::new(settings)?;
             migrate::migrate_embedded(&rt.pool).await?;
+            app::check_profile_keys(&rt).await?;
             if demo::seed_demo(&rt.pool, &rt.settings, &rt.blobs, force).await? {
                 println!("demo household seeded");
             } else {
@@ -159,6 +170,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
         }
         Cmd::ClinvarDiff { path } => {
             let rt = Runtime::new(settings)?;
+            app::check_profile_keys(&rt).await?;
             let r = ownhealth_genome::clinvar::diff_release(&rt.pool, &rt.blobs, &path).await?;
             println!("{}", serde_json::to_string_pretty(&r)?);
             // A dataset that could not be read is reported and the others still run; the exit code
@@ -171,6 +183,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
         }
         Cmd::Worker => {
             let rt = Runtime::new(settings)?;
+            app::check_profile_keys(&rt).await?;
             app::sweep_spools(&rt);
             // OCR turned on after scans arrived (or a 0.2.0 database): queue the scans that wait
             if rt.settings.ocr && rt.settings.queues.iter().any(|q| q == "ocr") {
@@ -181,7 +194,8 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
                 }
             }
             let (stop, rx) = tokio::sync::watch::channel(false);
-            let workers = jobs::start_workers(&rt.job_context(), rx);
+            let mut workers = jobs::start_workers(&rt.job_context(), rx.clone());
+            workers.push(app::spool_sweeper(&rt, rx));
             app::shutdown_signal().await;
             let _ = stop.send(true);
             for w in workers {

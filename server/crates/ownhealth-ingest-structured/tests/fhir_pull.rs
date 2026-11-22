@@ -108,7 +108,7 @@ async fn store_pull(
     source: Uuid,
     bytes: &[u8],
 ) -> anyhow::Result<Uuid> {
-    let sha = blobs.put_bytes(bytes)?;
+    let sha = blobs.put_bytes(ownhealth_core::blobs::BlobOwner::Profile(fam.profile("alex")), bytes)?;
     let doc = create_document(
         conn,
         &NewDocument {

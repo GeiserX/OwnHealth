@@ -40,7 +40,7 @@ impl Env {
         let mut settings: Settings = db.settings(dir.path())?;
         settings.secrets_key = Some(base64(&[9u8; 32]));
         let sb = SecretBox::from_settings(&settings)?;
-        let blobs = BlobStore::new(settings.blobs_path())?;
+        let blobs = BlobStore::for_settings(&settings)?;
         let ctx = JobContext::new(db.pool.clone(), Arc::new(settings), blobs);
         let mut c = db.pool.acquire().await?;
         let fam = create_rivera_family(&mut c, "Rivera").await?;

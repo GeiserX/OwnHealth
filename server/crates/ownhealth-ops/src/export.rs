@@ -40,9 +40,10 @@ pub const LIFECYCLE_TAG: &str = "urn:ownhealth:lifecycle";
 /// already handed over, so it never imports it twice: message and Paperless ids, folder keys, file
 /// hashes), SMART Health Links (v1.0: id hashes, passcode hashes, ciphertext), and tables that only
 /// repeat the profile.
-const SKIP_RAW: [&str; 8] = [
+const SKIP_RAW: [&str; 9] = [
     "profile",
     "profile_grant",
+    "profile_key",
     "api_token",
     "calendar_feed",
     "sender_rule",
