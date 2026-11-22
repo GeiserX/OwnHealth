@@ -8,7 +8,7 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 use futures::future::BoxFuture;
 use ownhealth_core::acceptance::{Check, DEFAULT_THRESHOLD, failed_reasons};
 use ownhealth_core::arrive::{enqueue_ocr, set_ocr_state};
-use ownhealth_core::blobs::{BlobStore, sha256_hex_to_bytes};
+use ownhealth_core::blobs::{BlobOwner, BlobStore, sha256_hex_to_bytes};
 use ownhealth_core::dedup::{
     NearDuplicate, ObservationMatch, find_near_duplicate, flag_near_duplicate, link_observation, match_observation,
     simhash64, store_page_fingerprint,
@@ -236,7 +236,7 @@ async fn import_inner(
             return Ok(summary);
         }
     }
-    let data = blobs.get_bytes(&hex::encode(&doc.blob_sha256))?;
+    let data = blobs.get_bytes(BlobOwner::Profile(profile_id), &hex::encode(&doc.blob_sha256))?;
     if doc.mime != "application/pdf" && ocr_in.is_none() {
         if opts.ocr {
             if force {
@@ -563,9 +563,10 @@ fn bump(s: &mut ImportSummary, reason: &str) {
 /// simhash still counts. A photo or scan stored as an image is hashed as its one page.
 async fn near_duplicate(conn: &mut PgConnection, blobs: &BlobStore, doc: &Doc) -> Result<Option<NearDuplicate>> {
     let (blobs, sha) = (blobs.clone(), hex::encode(&doc.blob_sha256));
+    let owner = BlobOwner::of_document(doc.profile_id, doc.id);
     let image = doc.mime.starts_with("image/");
     let hashes = tokio::task::spawn_blocking(move || -> Result<Vec<Option<u64>>> {
-        let data = blobs.get_bytes(&sha)?;
+        let data = blobs.get_bytes(owner, &sha)?;
         if image {
             crate::pages::image_phash(&data)
         } else {

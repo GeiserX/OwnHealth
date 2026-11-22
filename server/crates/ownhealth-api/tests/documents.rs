@@ -569,6 +569,24 @@ async fn search_without_read_sensitive_neither_matches_nor_quotes_a_sensitive_pa
     Ok(())
 }
 
+/// A document whose stored file is gone answers 404, not "the server failed", and names no hash.
+#[tokio::test]
+async fn a_document_whose_file_is_gone_answers_404() -> R {
+    let a = app().await?;
+    let doc = doc_with(&a, "alex", &[]).await?;
+    let sha: String = sqlx::query_scalar("select encode(blob_sha256, 'hex') from document where id = $1")
+        .bind(doc)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    assert!(a.rt.blobs.delete(&sha)?);
+    let r = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
+    let body = String::from_utf8_lossy(&r.bytes).into_owned();
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(r.json()["detail"]["code"], "unknown", "{body}");
+    assert!(!body.contains(&sha[..12]), "{body}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn document_bytes_are_never_kept_in_the_browser_cache() -> R {
     let a = app().await?;

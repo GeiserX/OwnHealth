@@ -30,9 +30,13 @@ async fn scanned_page(w: &World) -> anyhow::Result<Uuid> {
         pages: vec![rows],
     });
     let pdf_sha = w.rt.blobs.put_bytes(&pdf)?;
-    let blobs = w.rt.blobs.clone();
+    let (blobs, owner) = (
+        w.rt.blobs.clone(),
+        ownhealth_core::blobs::BlobOwner::Profile(w.family.profile("alex")),
+    );
     let png =
-        tokio::task::spawn_blocking(move || ownhealth_ingest_pdf::render_page_png(&blobs, &pdf_sha, 1, 2.0)).await??;
+        tokio::task::spawn_blocking(move || ownhealth_ingest_pdf::render_page_png(&blobs, owner, &pdf_sha, 1, 2.0))
+            .await??;
     let sha = w.rt.blobs.put_bytes(&png)?;
     let mut c = w.conn().await?;
     let mut d = NewDocument::upload(

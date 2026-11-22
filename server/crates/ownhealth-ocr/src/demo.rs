@@ -22,13 +22,15 @@ pub async fn seed_demo(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result
     else {
         return Ok(());
     };
-    let sha: Vec<u8> = sqlx::query_scalar("select blob_sha256 from document where id = $1")
-        .bind(report)
-        .fetch_one(&mut *conn)
-        .await?;
+    let (profile_id, sha): (Option<uuid::Uuid>, Vec<u8>) =
+        sqlx::query_as("select profile_id, blob_sha256 from document where id = $1")
+            .bind(report)
+            .fetch_one(&mut *conn)
+            .await?;
+    let owner = ownhealth_core::blobs::BlobOwner::of_document(profile_id, report);
     let blobs = ctx.blobs.clone();
     let png = tokio::task::spawn_blocking(move || -> Result<(String, i64)> {
-        let png = render_page_png(&blobs, &hex::encode(sha), 1, DEMO_DPI / 72.0)?;
+        let png = render_page_png(&blobs, owner, &hex::encode(sha), 1, DEMO_DPI / 72.0)?;
         let size = png.len() as i64;
         Ok((blobs.put_bytes(&png)?, size))
     })

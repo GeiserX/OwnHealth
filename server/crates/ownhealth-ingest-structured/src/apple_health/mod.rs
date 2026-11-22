@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use ownhealth_core::access::get_profile;
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::provenance::{SrcIn, SrcRef, ensure_src};
@@ -216,7 +216,9 @@ pub async fn import_apple_health(
         .await?
         .ok_or_else(|| Error::NotFound(format!("unknown profile {profile_id}")))?;
     let mut summary = ImportSummary::new(document_id.to_string());
-    let path = blobs.path(&sha)?;
+    // `copy` keeps `path` good until the import ends
+    let copy = blobs.with_local_copy(BlobOwner::Profile(profile.id), &sha)?;
+    let path = copy.path().to_path_buf();
     let m = {
         let p = path.clone();
         tokio::task::spawn_blocking(move || members(&p))
