@@ -270,7 +270,11 @@ async fn a_connection_made_a_moment_ago_says_when_it_was_made_and_how_often_it_s
     let id = t.connect(&mut a, t.env.profile("alex")).await?;
     let r = row(&mut a, id).await?;
     // no run yet: the screen reads No data until one poll interval has passed since created_at
-    assert_eq!((r["last_run_at"].clone(), r["stale"].clone()), (Value::Null, Value::Bool(true)), "{r}");
+    assert_eq!(
+        (r["last_run_at"].clone(), r["stale"].clone()),
+        (Value::Null, Value::Bool(true)),
+        "{r}"
+    );
     let made = at(&r["created_at"]).ok_or_else(|| anyhow::anyhow!("no created_at: {r}"))?;
     assert!((Utc::now() - made).num_minutes().abs() < 5, "{r}");
     assert!(r["poll_seconds"].as_i64().is_some_and(|s| s > 0), "{r}");
