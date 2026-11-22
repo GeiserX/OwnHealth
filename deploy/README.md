@@ -157,7 +157,7 @@ A push inbox has no schedule, so OwnHealth never marks it stale; the second rule
 
 `ownhealth backup` writes three parts into one directory.
 
-- `db.dump`: `pg_dump -Fc` of the database. It includes each profile's key, encrypted under `secrets/secrets_key`. So a backup taken before you delete a profile still opens that profile's files, until retention removes the snapshot.
+- `db.dump`: `pg_dump -Fc` of the database. It includes each profile's key, encrypted under `secrets/secrets_key`. So a backup taken before you delete a profile still opens that profile's files, until retention removes the snapshot. The same goes for each held mail's key: a backup taken before you delete a held mail still opens that mail.
 - `blobs/`: the original documents and genome files, hard-linked from the data volume, so the staging copy costs no space. A profile's files stay encrypted under its key, in `blobs/enc/`.
 - `manifest.json`: app version, migrations, row count per table, the list of blob hashes, the hash of each encrypted file's bytes, the fingerprint of the secrets key (never the key), the `state_hash` of every profile, and the head of the audit log (`audit_chain`: the number and hash of its newest entry, and how far the hash chain holds).
 
