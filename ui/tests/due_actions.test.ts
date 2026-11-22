@@ -3,6 +3,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { addDays, docLabel, documentEvidence, dueGroups, evidenceDay, evidenceLimit, offersDocument, shownAgain, type DueItem } from '../src/lib/logic/due.ts';
+import { errKey } from '../src/lib/logic/errors.ts';
+import { LANGS } from '../src/lib/i18n/langs.ts';
+import { dict } from '../src/lib/i18n/dict.ts';
 
 const item = (key: string, status: DueItem['status'], extra: Partial<DueItem> = {}): DueItem => ({
 	key,
@@ -130,5 +133,33 @@ test('the Done picker leaves out a report of the next UTC day, even where the lo
 	} finally {
 		if (tz === undefined) delete process.env.TZ;
 		else process.env.TZ = tz;
+	}
+});
+
+test('the Done picker never offers a wearables export, which the server refuses as evidence, but offers a report of the same day', () => {
+	const now = new Date('2026-11-21T10:00:00Z');
+	const run = { ...apiDoc('alex-2018-run', '2018-06-15T07:00:00Z', null, '2018-06-15'), doc_type: 'wearables' };
+	const report = { ...apiDoc('LabNorte_2018-06-15', '2018-06-15T08:00:00Z', null, '2018-06-15'), doc_type: 'lab_report' };
+	for (const anyDocument of [false, true]) {
+		assert.deepEqual(documentEvidence([run, report], anyDocument, now).map((o) => o.value), ['document:LabNorte_2018-06-15']);
+		assert.equal(offersDocument(run, '2026-11-21', anyDocument), false);
+		assert.equal(offersDocument({ ...run, evidence_day: null }, '2026-11-21', anyDocument), false);
+		assert.equal(offersDocument(report, '2026-11-21', anyDocument), true);
+	}
+});
+
+test('a refused Done evidence reads as our sentence in every registry language, never as the server English', () => {
+	const has = (k: string) => k in dict.en;
+	const cases: [string, string, string][] = [
+		['evidence_refused', 'The evidence is not a current, non-sensitive record or an active document of this profile.', 'err_evidence_refused'],
+		['evidence_undated', 'The evidence needs the day it was done, today or earlier.', 'err_evidence_undated']
+	];
+	const en = dict.en as Record<string, string>;
+	const es = dict.es as Record<string, string>;
+	for (const [code, message, key] of cases) {
+		assert.equal(errKey(code, message, has), key, code);
+		for (const l of LANGS) assert.ok((l.table as Record<string, string>)[key]?.trim(), `${l.code} ${key}`);
+		assert.notEqual(es[key], en[key], key);
+		assert.notEqual(es[key], message, key);
 	}
 });
