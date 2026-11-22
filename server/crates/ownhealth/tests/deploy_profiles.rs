@@ -1,4 +1,5 @@
-//! v0.2 Ops: the `ocr` compose profile and the image variant behind it, checked from outside the app.
+//! v0.2 Ops: the `ocr` and `imaging` compose profiles and the image variant behind OCR, checked from
+//! outside the app.
 //!
 //! - Without the profile neither compose file starts an OCR worker; with `COMPOSE_PROFILES=ocr` both
 //!   start one from `drumsergio/ownhealth:<app tag>-ocr`, as `ownhealth worker` on the `ocr` queue only,
@@ -6,6 +7,9 @@
 //!   config`; skipped without docker compose.
 //! - The homelab app seals inbox secrets with a key from a secret file, and the OCR worker gets no
 //!   backup credentials.
+//! - With `COMPOSE_PROFILES=imaging` both files start Orthanc with DICOMweb and the OHIF plugin, the
+//!   `dicom-web` data source and authentication on, its password a docker secret, no published port.
+//!   Without the profile there is no Orthanc, and with no Orthanc URL set imaging stays off in the app.
 //! - The Dockerfile's default target has no OCR engine and no models; `--target ocr` has both.
 
 use std::collections::HashMap;
@@ -260,5 +264,116 @@ fn the_default_image_has_no_ocr_engine_and_the_ocr_target_has_engine_and_models(
         Settings::default().ocr_models_dir,
         PathBuf::from("/opt/ownhealth/ocr-models")
     );
+    Ok(())
+}
+
+/// v1.0 imaging: Orthanc with DICOMweb and the OHIF plugin, only with the profile. The viewer reads
+/// DICOMweb (the plugin's default, dicom-json, reads Orthanc-id routes the app's proxy refuses), auth is
+/// on with the one account's password from a docker secret, the metadata cache is on, and no port is
+/// published: only the app reaches it. The app learns Orthanc's address and password from the same
+/// .env lines, and starts with imaging off when they are not there.
+#[test]
+fn the_imaging_profile_runs_orthanc_for_the_app_only() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    use ownhealth_api::routes::imaging_proxy::OrthancConfig;
+    for (case, compose, env_file, extra) in cases() {
+        let off = render(&compose, &env_file, extra)?;
+        assert!(
+            off.get("orthanc").is_none(),
+            "{case}: Orthanc starts without the profile"
+        );
+        let app_env: HashMap<String, String> = off["app"]["environment"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+            .collect();
+        assert!(
+            OrthancConfig::from_env(&app_env)?.is_none(),
+            "{case}: imaging is off by default"
+        );
+
+        let on = render(
+            &compose,
+            &env_file,
+            &format!(
+                "{extra}COMPOSE_PROFILES=imaging\nOWNHEALTH_ORTHANC_URL=http://orthanc:8042\n\
+                 OWNHEALTH_ORTHANC_PASSWORD=synthetic-password\n"
+            ),
+        )?;
+        let (app, orthanc) = (&on["app"], &on["orthanc"]);
+        assert_eq!(orthanc["image"], "orthancteam/orthanc:26.11.1", "{case}");
+        for (key, value) in [
+            ("ORTHANC__OHIF__DATA_SOURCE", "dicom-web"),
+            ("OHIF_PLUGIN_ENABLED", "true"),
+            ("DICOM_WEB_PLUGIN_ENABLED", "true"),
+            ("ORTHANC__AUTHENTICATION_ENABLED", "true"),
+            ("ORTHANC__DICOM_WEB__ENABLE_METADATA_CACHE", "true"),
+            ("ORTHANC__DICOM_SERVER_ENABLED", "false"),
+        ] {
+            assert_eq!(env_str(orthanc, key), value, "{case}: {key}");
+        }
+        assert!(orthanc.get("ports").is_none(), "{case}: Orthanc publishes no port");
+        let secrets: Vec<&str> = orthanc["secrets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s["source"].as_str())
+            .collect();
+        assert_eq!(secrets, ["orthanc_password"], "{case}");
+        let entry = strings(&orthanc["entrypoint"]).join(" ");
+        assert!(
+            entry.contains("$(cat /run/secrets/orthanc_password)"),
+            "{case}: {entry}"
+        );
+        assert!(
+            entry.contains("exec /docker-entrypoint.sh /tmp/orthanc.json"),
+            "{case}: {entry}"
+        );
+        let leaked: Vec<&String> = orthanc["environment"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(k, v)| {
+                k.contains("REGISTERED_USERS") || v.as_str().is_some_and(|v| v.contains("synthetic-password"))
+            })
+            .map(|(k, _)| k)
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "{case}: the password stays out of the environment: {leaked:?}"
+        );
+        assert!(
+            volume_sources(orthanc)
+                .iter()
+                .any(|v| v.ends_with("ownhealth-orthanc:/var/lib/orthanc/db")),
+            "{case}: {:?}",
+            volume_sources(orthanc)
+        );
+        assert_eq!(env_str(app, "OWNHEALTH_ORTHANC_URL"), "http://orthanc:8042", "{case}");
+        if case == "homelab" {
+            assert_eq!(
+                env_str(app, "OWNHEALTH_ORTHANC_PASSWORD_FILE"),
+                "/run/secrets/imaging/orthanc_password",
+                "{case}"
+            );
+            assert!(
+                volume_sources(app)
+                    .iter()
+                    .any(|v| v.ends_with("secrets/imaging:/run/secrets/imaging")),
+                "{case}: {:?}",
+                volume_sources(app)
+            );
+        } else {
+            assert_eq!(
+                env_str(app, "OWNHEALTH_ORTHANC_PASSWORD"),
+                "synthetic-password",
+                "{case}"
+            );
+        }
+    }
     Ok(())
 }
