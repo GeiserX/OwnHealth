@@ -764,14 +764,21 @@ mod tests {
             for _ in 0..WRITERS {
                 let (pool, barrier) = (pool.clone(), barrier.clone());
                 tasks.push(tokio::spawn(async move {
-                    let mut tx = pool.begin().await?;
-                    write_audit(&mut tx, &AuditEvent::new("system", "job", "read")).await?;
+                    let written = async {
+                        let mut tx = pool.begin().await?;
+                        write_audit(&mut tx, &AuditEvent::new("system", "job", "read")).await?;
+                        anyhow::Ok(tx)
+                    }
+                    .await;
+                    // every writer reaches the barrier, so one that failed cannot leave the rest waiting
                     barrier.wait().await;
-                    tx.commit().await?;
+                    written?.commit().await?;
                     anyhow::Ok(())
                 }));
             }
-            for t in futures::future::join_all(tasks).await {
+            let all =
+                tokio::time::timeout(std::time::Duration::from_secs(60), futures::future::join_all(tasks)).await?;
+            for t in all {
                 t??;
             }
         }
