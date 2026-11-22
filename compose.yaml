@@ -95,6 +95,133 @@ services:
       retries: 10
     volumes:
       - ownhealth-pg:/var/lib/postgresql/data
+    networks: [default, ow-db] # ow-db: the wearables sidecar's only way to OwnHealth's side
+
+  # `wearables` profile (v1.0): the Open Wearables sidecar (MIT), which holds the Oura, Whoop, Polar and
+  # Withings logins; the app pulls from its REST API. Turn it on in two steps:
+  # - add wearables to COMPOSE_PROFILES in .env: COMPOSE_PROFILES=wearables, or ocr,wearables with OCR on;
+  # - put three lines in openwearables.env, next to .env and never in it, so OwnHealth's own containers
+  #   never hold them: OPENWEARABLES_DB_PASSWORD, OPENWEARABLES_SECRET_KEY and OPENWEARABLES_ADMIN_PASSWORD
+  #   (long random strings, e.g. `openssl rand -hex 32`).
+  # - Quiet: no usage pings, no Sentry, no OTLP export, no outgoing webhooks. It calls only the vendors.
+  # - Fenced off: no published port, none of OwnHealth's secrets (never .env), and its own database and
+  #   role on the same Postgres (deploy/db/ow-role.sql). That role cannot connect to the ownhealth
+  #   database. OW's database is a cache, so `ownhealth backup` leaves it out.
+  # - Off OwnHealth's network: the sidecar shares only ow-db with OwnHealth, and db is the one OwnHealth
+  #   container on it, so OW and the app cannot reach each other. OW reaches the vendors through
+  #   ow-egress.
+  # - Redis is OW's Celery broker, on an internal network that only the sidecar joins. It keeps nothing
+  #   on disk: a restart drops queued syncs, and beat queues them again.
+  ow-db-init:
+    profiles: [wearables]
+    image: postgres:17.11
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+      # the sidecar starts only once OwnHealth is up: a broken OW secret stops OW, never the app
+      app:
+        condition: service_healthy
+    env_file: &ow-env-file
+      - path: openwearables.env # OW's secrets, for the four sidecar services only
+        required: false # without it ow-db-init stops and names the missing variable
+    environment:
+      PGPASSWORD: ${OWNHEALTH_DB_PASSWORD:-}
+    command: ["psql", "postgresql://ownhealth@db:5432/ownhealth", "-X", "-q", "-v", "ON_ERROR_STOP=1",
+              "-v", "ow_role=openwearables", "-v", "ow_db=openwearables", "-f", "/opt/ow-role.sql"]
+    volumes:
+      - ./deploy/db/ow-role.sql:/opt/ow-role.sql:ro
+    networks: [ow-db]
+
+  ow-app:
+    profiles: [wearables]
+    image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
+    restart: unless-stopped
+    depends_on:
+      ow-db-init:
+        condition: service_completed_successfully
+      ow-redis:
+        condition: service_started
+    env_file: *ow-env-file
+    environment: &ow-env
+      ENVIRONMENT: production
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: openwearables
+      DB_USER: openwearables
+      REDIS_HOST: ow-redis
+      TELEMETRY_ENABLED: "false"
+      DO_NOT_TRACK: "1"
+      SENTRY_ENABLED: "false"
+      OTEL_ENABLED: "false"
+      OUTGOING_WEBHOOKS_ENABLED: "false"
+    # OW reads DB_PASSWORD, SECRET_KEY and ADMIN_PASSWORD, so the shell takes them from openwearables.env,
+    # then runs migrations, seeds, and the API on :8000 (not published)
+    command:
+      - sh
+      - -c
+      - >-
+        DB_PASSWORD="$${OPENWEARABLES_DB_PASSWORD:?set it in openwearables.env}" &&
+        SECRET_KEY="$${OPENWEARABLES_SECRET_KEY:?set it in openwearables.env}" &&
+        ADMIN_PASSWORD="$${OPENWEARABLES_ADMIN_PASSWORD:?set it in openwearables.env}" &&
+        export DB_PASSWORD SECRET_KEY ADMIN_PASSWORD && exec scripts/start/app.sh
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 300s
+    networks: [ow-db, wearables, ow-egress]
+
+  ow-worker:
+    profiles: [wearables]
+    image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
+    restart: unless-stopped
+    depends_on:
+      ow-app:
+        condition: service_healthy # OW's migrations ran
+    env_file: *ow-env-file
+    environment: *ow-env
+    command:
+      - sh
+      - -c
+      - >-
+        DB_PASSWORD="$${OPENWEARABLES_DB_PASSWORD:?set it in openwearables.env}" &&
+        SECRET_KEY="$${OPENWEARABLES_SECRET_KEY:?set it in openwearables.env}" &&
+        export DB_PASSWORD SECRET_KEY && exec scripts/start/worker.sh
+    networks: [ow-db, wearables, ow-egress]
+
+  ow-beat:
+    profiles: [wearables]
+    image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
+    restart: unless-stopped
+    depends_on:
+      ow-app:
+        condition: service_healthy
+    env_file: *ow-env-file
+    environment: *ow-env
+    command:
+      - sh
+      - -c
+      - >-
+        DB_PASSWORD="$${OPENWEARABLES_DB_PASSWORD:?set it in openwearables.env}" &&
+        SECRET_KEY="$${OPENWEARABLES_SECRET_KEY:?set it in openwearables.env}" &&
+        export DB_PASSWORD SECRET_KEY && exec scripts/start/beat.sh
+    networks: [ow-db, wearables]
+
+  ow-redis:
+    profiles: [wearables]
+    image: redis:8.10.3
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks: [wearables]
+
+networks:
+  wearables:
+    internal: true # no route out: Redis reaches nothing, and only the sidecar reaches Redis
+  ow-db:
+    internal: true # db and the sidecar only: OW reaches Postgres, and no other OwnHealth container
+  ow-egress: # the sidecar's way out to the vendors' APIs; no OwnHealth container joins it
 
 volumes:
   ownhealth-data:

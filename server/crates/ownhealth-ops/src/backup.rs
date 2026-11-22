@@ -527,6 +527,20 @@ pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
     compare(&url, &manifest, &root).await
 }
 
+/// The scratch database of verify-restore. A new database lets PUBLIC connect, and the server may
+/// hold other roles (the wearables sidecar's own one), so only the owner may open this one.
+async fn create_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
+    sqlx::query(AssertSqlSafe(format!("create database \"{scratch}\"")))
+        .execute(&mut *admin)
+        .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "revoke connect, temporary on database \"{scratch}\" from public"
+    )))
+    .execute(&mut *admin)
+    .await?;
+    Ok(())
+}
+
 /// Restore into a scratch database `<db>_restore_check`, compare with the manifest, drop it.
 /// `ok` is true only when every row count, every blob hash and every profile's state_hash match.
 pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value> {
@@ -536,9 +550,7 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
     let drop = format!("drop database if exists \"{scratch}\" with (force)");
     let mut admin = PgConnection::connect(&live).await?;
     sqlx::query(AssertSqlSafe(drop.clone())).execute(&mut admin).await?;
-    sqlx::query(AssertSqlSafe(format!("create database \"{scratch}\"")))
-        .execute(&mut admin)
-        .await?;
+    create_scratch(&mut admin, &scratch).await?;
     let target = with_db(&live, &scratch);
     let result = async {
         pg_restore(&target, archive).await?;
@@ -555,6 +567,57 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// While verify-restore holds its scratch database, a plain role of the same server cannot open
+    /// it, nor make temporary tables there.
+    #[tokio::test]
+    async fn the_scratch_database_is_closed_to_other_roles() -> anyhow::Result<()> {
+        use ownhealth_core::ids::token_hex;
+        let db = ownhealth_core::testing::TestDb::empty().await?;
+        let scratch = format!("{}_restore_check", db.name);
+        let (role, password) = (format!("oh_plain_{}", token_hex(4)), token_hex(16));
+        let mut admin = PgConnection::connect(&db.url).await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "create role \"{role}\" login password '{password}'"
+        )))
+        .execute(&mut admin)
+        .await?;
+        let created = create_scratch(&mut admin, &scratch).await;
+        let (scheme, rest) = db.url.split_once("://").unwrap_or(("postgres", &db.url));
+        let host = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+        let plain = with_db(&format!("{scheme}://{role}:{password}@{host}"), &scratch);
+        let opened = match PgConnection::connect(&plain).await {
+            Ok(conn) => {
+                conn.close().await?;
+                "connected".to_string()
+            }
+            Err(e) => e.to_string(),
+        };
+        let temp: Option<bool> = sqlx::query_scalar("select has_database_privilege($1, $2, 'TEMPORARY')")
+            .bind(&role)
+            .bind(&scratch)
+            .fetch_one(&mut admin)
+            .await
+            .ok();
+        for sql in [
+            format!("drop database if exists \"{scratch}\" with (force)"),
+            format!("drop role if exists \"{role}\""),
+        ] {
+            sqlx::query(AssertSqlSafe(sql)).execute(&mut admin).await?;
+        }
+        admin.close().await?;
+        created?;
+        assert!(
+            opened.contains("permission denied for database"),
+            "a plain role opened the scratch database: {opened}"
+        );
+        assert_eq!(
+            temp,
+            Some(false),
+            "a plain role may make temporary tables in the scratch database"
+        );
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
