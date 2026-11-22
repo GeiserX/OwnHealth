@@ -180,3 +180,84 @@ async fn test_jobs_limit_is_checked_at_the_edge() -> R {
     assert_eq!(s, StatusCode::OK);
     Ok(())
 }
+
+/// A wearables import's result counts samples and names devices: only a member who may read wearables
+/// on the profile sees it. Anyone else with a grant there still sees the job, with no result.
+#[tokio::test]
+async fn a_wearables_import_result_shows_only_to_members_who_may_read_wearables() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let result = json!({"accepted": 32, "fit": {"heart_rate_minutes": 30, "device": "OwnHealth Test Watch"}});
+    let mut ids = Vec::new();
+    for kind in ["import.fit", "import.gadgetbridge", "import.pdf"] {
+        let id: i64 = sqlx::query_scalar(
+            "insert into job (kind, state, payload, result) values ($1, 'done', \
+             jsonb_build_object('profile_id', $2::text, 'filename', 'run.fit'), $3) returning id",
+        )
+        .bind(kind)
+        .bind(alex.to_string())
+        .bind(&result)
+        .fetch_one(&a.rt.pool)
+        .await?;
+        ids.push(id);
+    }
+    let uri = format!(
+        "/jobs?ids={}",
+        ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+    );
+    let results = |v: &serde_json::Value| -> Vec<(String, serde_json::Value)> {
+        v["jobs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|j| (j["kind"].as_str().unwrap_or_default().to_string(), j["result"].clone()))
+            .collect()
+    };
+    let grant = |sql: &'static str| {
+        let pool = a.rt.pool.clone();
+        let (sam, alex) = (a.family.profile("sam"), alex);
+        async move {
+            let user: uuid::Uuid = sqlx::query_scalar("select user_id from profile where id = $1")
+                .bind(sam)
+                .fetch_one(&pool)
+                .await?;
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(user)
+                .bind(alex)
+                .execute(&pool)
+                .await?;
+            anyhow::Ok(())
+        }
+    };
+    // the owner, and sam while his grant on alex holds wearables: every result
+    grant(
+        "update profile_grant set categories = array_append(array_remove(categories, 'read:wearables'), \
+         'read:wearables') where user_id = $1 and profile_id = $2",
+    )
+    .await?;
+    for who in ["alex", "sam"] {
+        let (s, v) = a.get(who, &uri).await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert!(results(&v).iter().all(|(_, r)| *r == result), "{who}: {v}");
+    }
+    // without wearables, sam sees the jobs, and the wearables results are gone
+    grant(
+        "update profile_grant set categories = array_remove(categories, 'read:wearables') \
+         where user_id = $1 and profile_id = $2",
+    )
+    .await?;
+    let (s, v) = a.get("sam", &uri).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(
+        results(&v),
+        [
+            ("import.pdf".to_string(), result.clone()),
+            ("import.gadgetbridge".to_string(), serde_json::Value::Null),
+            ("import.fit".to_string(), serde_json::Value::Null),
+        ]
+    );
+    let (_, owner) = a.get("alex", &uri).await?;
+    assert!(results(&owner).iter().all(|(_, r)| *r == result), "{owner}");
+    Ok(())
+}
