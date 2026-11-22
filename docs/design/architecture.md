@@ -91,7 +91,7 @@ Libraries in the core: axum, tower and tokio; sqlx for Postgres (queries checked
 | (default) | `app`, `db` | app under 400 MB image; app plus Postgres about 0.5 GB RAM idle | v0.1 |
 | `ocr` | `ocr` worker: PaddleOCR PP-OCRv5 mobile detection and Latin recognition, ONNX on ONNX Runtime, CPU (an ONNX Runtime GPU provider is optional) | 436 MB unpacked against 364 MB for the default image (arm64, 0.3.0); worker peak RSS 240 MB reading the demo's scanned page (arm64) | v0.2 (0.3.0) |
 | `imaging` | `orthanc` with the DICOMweb and OHIF plugins | 100 to 300 MB RAM idle | v1.0 |
-| `wearables` | `open-wearables` plus its own Postgres and Redis | brings Redis and Celery, but only inside the profile | v1.0 |
+| `wearables` | Open Wearables `ow-app`, `ow-worker` and `ow-beat` (`themomentum/open-wearables-backend:0.11.0`, pinned by digest), `ow-redis` (Redis 8) and the one-shot `ow-db-init`. Its database and role live on the existing Postgres 17 | brings Redis and Celery, but only inside the profile | v1.0 |
 
 The core never needs Redis, a JVM or a GPU. Postgres can be the user's own server: the app needs only stock PostgreSQL 17 with no extensions beyond `pgcrypto`.
 
@@ -177,11 +177,12 @@ services:
     # no ports: only the app reaches it on the compose network. The app gets
     # OWNHEALTH_ORTHANC_URL=http://orthanc:8042 and the same password.
 
-  open-wearables:
+  ow-app:   # and ow-worker, ow-beat (same image), ow-redis, and the one-shot ow-db-init
     profiles: [wearables]
-    image: openwearables/open-wearables:0.0.0   # placeholder, image name and tag unverified
+    image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
     restart: unless-stopped
-    # its own db and redis services go here, inside the same profile
+    # no ports, off the app's network: it shares only ow-db with OwnHealth, where db is the one other
+    # container; its own database and role on that db (deploy/db/ow-role.sql)
 
 secrets:
   db_password: { file: ./secrets/db_password }
@@ -864,7 +865,7 @@ Every gate has a known-bad fixture that must turn it red (a mutated conversion f
 ## 17. Open decisions
 
 1. **Blob dedup vs per-profile keys (v1.0).** Content addressing by plaintext hash dedups across profiles; per-profile encryption for crypto-shredding needs per-profile copies. Proposal: key the path by `sha256(profile_id || plaintext hash)` once keys arrive, and accept the duplicate storage.
-2. **Open Wearables sidecar footprint.** It brings its own Postgres, Redis, Celery and user model. We keep Redis out of the core, and the profile keeps it out of the default install, but we should confirm the sidecar's image name, tag and REST API before v1.0 (unverified).
+2. **Open Wearables sidecar footprint.** It brings Redis, Celery and its own user model, all inside the `wearables` profile, so the default install has none of them. It does not bring its own Postgres: its database and a restricted role live on the existing Postgres 17. The image is `themomentum/open-wearables-backend:0.11.0`, pinned by digest. Its REST API is still to confirm before v1.0 (unverified).
 3. **Orthanc OHIF plugin license and tags.** The plugin's license is unverified; if it is a problem, OHIF runs as its own static container (MIT) behind our proxy.
 4. **Restic inside the app image** makes the image larger and gives the app process the restic password. The other option is a one-shot backup container, which would be a fourth compose profile; we keep three profiles, so we chose the in-image binary.
 5. **Single process vs a split worker.** The `ocr` profile already uses a worker role. If Apple Health imports block the API in practice, we may run the core job loop as a second container from the same image too.

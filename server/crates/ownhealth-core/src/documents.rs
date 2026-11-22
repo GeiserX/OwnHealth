@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::blobs::{BlobStore, sha256_hex_to_bytes};
+use crate::blobs::{BlobOwner, BlobStore, sha256_hex_to_bytes};
 use crate::error::{Error, Result};
 use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
@@ -282,10 +282,11 @@ pub async fn dispatch_upload(
 ) -> Result<Value> {
     let mut kinds: Vec<(&StoredFile, UploadKind)> = Vec::new();
     for f in files {
-        let path = blobs.path(&f.sha256)?;
+        let owner = BlobOwner::Profile(profile_id);
         let mut head = Vec::with_capacity(4096);
-        std::fs::File::open(&path)?.take(4096).read_to_end(&mut head)?;
-        kinds.push((f, sniff(&f.filename, &head, Some(&path))));
+        blobs.open_seek(owner, &f.sha256)?.take(4096).read_to_end(&mut head)?;
+        let copy = blobs.with_local_copy(owner, &f.sha256)?;
+        kinds.push((f, sniff(&f.filename, &head, Some(copy.path()))));
     }
     let has_facts = kinds.iter().any(|(_, k)| *k == "genome_facts");
     let mut items = Vec::new();

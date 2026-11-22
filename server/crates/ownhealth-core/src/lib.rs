@@ -9,6 +9,7 @@ pub mod audit;
 pub mod blobs;
 pub mod canonical;
 pub mod config;
+pub mod connector_oauth;
 pub mod dedup;
 pub mod demo;
 pub mod demo_pdf;

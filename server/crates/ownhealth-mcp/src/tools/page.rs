@@ -189,6 +189,7 @@ pub fn render_lines(lines: &[(String, [f64; 4])], max_chars: usize) -> (String, 
 /// A PNG of the page at 150 dpi, scaled down to 1600 px a side (CPU work, off the async threads).
 async fn page_png(
     blobs: ownhealth_core::blobs::BlobStore,
+    owner: ownhealth_core::blobs::BlobOwner,
     blob: String,
     mime: String,
     page: i32,
@@ -200,9 +201,9 @@ async fn page_png(
             if let Some((w, h)) = size_pt {
                 scale = scale.min(f64::from(IMAGE_MAX_PX) / w.max(h).max(1.0));
             }
-            ownhealth_ingest_pdf::render_page_png(&blobs, &blob, page, scale)?
+            ownhealth_ingest_pdf::render_page_png(&blobs, owner, &blob, page, scale)?
         } else {
-            blobs.get_bytes(&blob)?
+            blobs.get_bytes(owner, &blob)?
         };
         let img = image::load_from_memory(&png).map_err(|e| Error::Invalid(format!("unreadable page image: {e}")))?;
         let img = if img.width() > IMAGE_MAX_PX || img.height() > IMAGE_MAX_PX {
@@ -391,7 +392,16 @@ pub async fn get_document_page(call: &mut Call<'_>) -> ToolResult<Answer> {
     if include.iter().any(|i| i == "image") {
         if call.mode == "full" {
             let size = meta.as_ref().map(|(w, h, _)| (f64::from(*w), f64::from(*h)));
-            match page_png(blobs, hex::encode(&doc.blob), doc.mime.clone(), page_no, size).await {
+            match page_png(
+                blobs,
+                ownhealth_core::blobs::BlobOwner::Profile(doc.profile_id),
+                hex::encode(&doc.blob),
+                doc.mime.clone(),
+                page_no,
+                size,
+            )
+            .await
+            {
                 Ok((png, w, h)) => {
                     data.insert("image".into(), json!({"mime": "image/png", "width": w, "height": h}));
                     extra.push(json!({

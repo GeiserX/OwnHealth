@@ -25,7 +25,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use futures::future::BoxFuture;
 use ownhealth_core::acceptance::{Check, DEFAULT_THRESHOLD, auto_accept};
 use ownhealth_core::access::{Profile, get_profile};
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::family::{self, MemberIn};
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::observations::ObservationIn;
@@ -150,7 +150,7 @@ pub async fn import_fhir(conn: &mut PgConnection, blobs: &BlobStore, document_id
         .await?
         .ok_or_else(|| Error::NotFound(format!("unknown profile {profile_id}")))?;
     let ndjson = mime == "application/fhir+ndjson" || filename.unwrap_or_default().to_lowercase().ends_with(".ndjson");
-    let (bundle_id, entries) = read_entries(&blobs.get_bytes(&sha)?, ndjson)?;
+    let (bundle_id, entries) = read_entries(&blobs.get_bytes(BlobOwner::Profile(profile_id), &sha)?, ndjson)?;
     let key = bundle_id.unwrap_or_else(|| format!("doc-{}", &sha[..12]));
     let (summary, identity) = import_resources(conn, &entries, &profile, document_id, &key, None, "FHIR").await?;
     mark_imported(conn, document_id, &summary, Some(&identity)).await?;

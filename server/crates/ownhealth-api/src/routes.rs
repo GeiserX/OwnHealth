@@ -6,6 +6,7 @@ use ownhealth_core::Runtime;
 pub mod audit;
 pub mod auth;
 pub mod calculators;
+pub mod connectors;
 pub mod core;
 pub mod devices;
 pub mod documents;
@@ -42,6 +43,7 @@ pub fn all() -> Router<Runtime> {
         .merge(audit::router())
         .merge(auth::router())
         .merge(calculators::router())
+        .merge(connectors::router())
         .merge(core::router())
         .merge(devices::router())
         .merge(documents::router())

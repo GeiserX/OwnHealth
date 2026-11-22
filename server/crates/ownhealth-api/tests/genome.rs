@@ -396,6 +396,33 @@ async fn variant_over_http_for_a_person_and_no_genome_is_404() -> R {
     Ok(())
 }
 
+/// A raw file the dataset row names but the store lost is the server's fault: the person gets the
+/// plain "the server failed" answer, never a 404 that names a blob hash.
+#[tokio::test]
+async fn a_lost_raw_genome_file_is_a_server_error_that_names_no_hash() -> R {
+    let env = genome_family().await?;
+    let alex = env.login("alex", true).await?;
+    let vcf: String = sqlx::query_scalar(
+        "select encode(vcf_blob, 'hex') from genome_dataset where profile_id = $1 and vcf_blob is not null",
+    )
+    .bind(env.fam.profile("alex"))
+    .fetch_one(&env.db.pool)
+    .await?;
+    assert!(env.rt.blobs.delete(&vcf)?);
+    for q in ["rsid=rs4244285", "region=chr1:11796000-11797000"] {
+        let (s, body) = env
+            .get(&alex, &format!("/api/profiles/alex/genome/variant?{q}"))
+            .await?;
+        assert_eq!(
+            (s, &body["detail"]["code"]),
+            (StatusCode::INTERNAL_SERVER_ERROR, &json!("internal")),
+            "{q}: {body}"
+        );
+        assert!(!body.to_string().contains(&vcf[..12]), "{q}: {body}");
+    }
+    Ok(())
+}
+
 fn arr_has(v: &Value, s: &str) -> bool {
     v.as_array().is_some_and(|a| a.iter().any(|x| x == s))
 }

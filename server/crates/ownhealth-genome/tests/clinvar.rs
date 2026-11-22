@@ -520,7 +520,13 @@ async fn unsort_alex_calls(e: &Env, c: &mut PgConnection) -> anyhow::Result<()> 
     .bind(e.profile("alex"))
     .fetch_one(&mut *c)
     .await?;
-    let path = e.blobs.path(&sha)?;
+    let path = e
+        .dir
+        .path()
+        .join("blobs/sha256")
+        .join(&sha[..2])
+        .join(&sha[2..4])
+        .join(&sha);
     let mut text = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tAR-01\n".to_string();
     text.push_str("chrM\t100\t.\tA\tG\t50\tPASS\t.\tGT\t1/1\n");
     for r in alex_calls() {
