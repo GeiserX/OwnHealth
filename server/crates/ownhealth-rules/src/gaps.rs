@@ -31,7 +31,7 @@ use chrono::NaiveDate;
 use ownhealth_core::Result;
 use ownhealth_core::access::{Profile, Scopes};
 use ownhealth_core::canonical::canonical_json;
-use ownhealth_core::documents::sensitive_document_sql;
+use ownhealth_core::documents::{record_document_sql, sensitive_document_sql};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{AssertSqlSafe, PgConnection};
@@ -268,6 +268,9 @@ fn live(a: &str) -> String {
     format!("{a}.status = 'current' and {a}.superseded_at is null and cardinality({a}.sensitivity) = 0")
 }
 
+/// The dated facts of the record: clinical rows and documents. A wearables export is dated by its run
+/// but is no record ([`record_document_sql`]): it closes no hole, and no hole cites it to a member who
+/// may not read wearables.
 async fn facts(conn: &mut PgConnection, pid: Uuid, as_of: NaiveDate) -> Result<Vec<Fact>> {
     let sql = format!(
         "select day, src, null::uuid as doc, lab from ( \
@@ -287,13 +290,14 @@ async fn facts(conn: &mut PgConnection, pid: Uuid, as_of: NaiveDate) -> Result<V
          union all \
          select coalesce(d.collected_at, d.reported_at)::date, null, d.id, false from document d \
            where d.profile_id = $1 and d.status = 'active' and coalesce(d.collected_at, d.reported_at)::date <= $2 \
-           and not {sens}",
+           and {record} and not {sens}",
         o = live("o"),
         c = live("c"),
         m = live("m"),
         i = live("i"),
         p = live("p"),
         e = live("e"),
+        record = record_document_sql("d"),
         sens = sensitive_document_sql("d.id"),
     );
     let rows: Vec<(NaiveDate, Option<String>, Option<Uuid>, bool)> = sqlx::query_as(AssertSqlSafe(sql))
@@ -334,14 +338,15 @@ async fn visits(conn: &mut PgConnection, pid: Uuid, as_of: NaiveDate) -> Result<
         .await?)
 }
 
-/// Active, non-sensitive documents with a provider and a day up to `as_of`: (day, provider). A
-/// sensitive one clears no gap, or the gap's absence would tell a caller without read:sensitive that it
-/// exists.
+/// Active, non-sensitive documents of the record with a provider and a day up to `as_of`: (day,
+/// provider). A sensitive one clears no gap, or the gap's absence would tell a caller without
+/// read:sensitive that it exists; a wearables export ([`record_document_sql`]) is no record.
 async fn provider_documents(conn: &mut PgConnection, pid: Uuid, as_of: NaiveDate) -> Result<Vec<(NaiveDate, String)>> {
     let sql = format!(
         "select coalesce(d.collected_at, d.reported_at)::date, d.provider_name from document d \
          where d.profile_id = $1 and d.status = 'active' and nullif(trim(d.provider_name), '') is not null \
-         and coalesce(d.collected_at, d.reported_at)::date <= $2 and not {}",
+         and coalesce(d.collected_at, d.reported_at)::date <= $2 and {} and not {}",
+        record_document_sql("d"),
         sensitive_document_sql("d.id")
     );
     Ok(sqlx::query_as(AssertSqlSafe(sql))

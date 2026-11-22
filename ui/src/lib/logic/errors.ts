@@ -28,7 +28,12 @@ const PATTERNS: [RegExp, string][] = [
 	[/^the country is two letters/i, 'err_country'],
 	[/^failed to fetch$|networkerror|load failed/i, 'err_no_connection'],
 	[/source is switched off/i, 'err_switched_off'],
-	[/demo never reads the inbox folder/i, 'err_demo_folder']
+	[/demo never reads the inbox folder/i, 'err_demo_folder'],
+	// a FIT activity file the import refused (slice 29)
+	[/^not a readable FIT file: it is cut short/i, 'err_fit_cut'],
+	[/^not a readable FIT file/i, 'err_fit_damaged'],
+	[/^the FIT file holds no activity/i, 'err_fit_empty'],
+	[/^the FIT file is larger than/i, 'err_fit_too_big']
 ];
 
 // The browser's WebAuthn refusals (a DOMException name), which it words in its own language.

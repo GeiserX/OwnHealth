@@ -28,6 +28,19 @@ pub async fn document_for(
     mime: &str,
     channel: &str,
 ) -> Result<Uuid, JobError> {
+    document_of_type(conn, blobs, payload, mime, channel, "other").await
+}
+
+/// [`document_for`], with the `doc_type` a new document gets (a wearables importer gives
+/// `ownhealth_core::documents::WEARABLES_DOC_TYPE`).
+pub async fn document_of_type(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    payload: &Value,
+    mime: &str,
+    channel: &str,
+    doc_type: &str,
+) -> Result<Uuid, JobError> {
     if py::truthy(payload.get("document_id")) {
         return uuid_field(payload, "document_id");
     }
@@ -51,7 +64,7 @@ pub async fn document_for(
         &NewDocument {
             filename,
             channel,
-            doc_type: Some("other"),
+            doc_type: Some(doc_type),
             ..NewDocument::upload(household_id, Some(profile_id), sha, mime, size)
         },
     )

@@ -111,14 +111,14 @@ a file depends only on files with lower numbers, and two files never share a num
 refuses to start). Prefer using the 0001 tables; add columns only when the design needs them.
 
 Some CHECK constraints list allowed values: `source.kind`, `secret.purpose`, `auth_challenge.purpose`,
-`document_source.channel`, `src.kind` and `review_item.kind`. A migration re-creates such a CHECK with
+`document_source.channel`, `src.kind`, `review_item.kind` and `document.doc_type`. A migration re-creates such a CHECK with
 the full union of every value shipped so far. A list with only one lane's values silently drops the
 values of the other lanes. From 1200 on, each of these lists has a Rust constant, and
 `server/crates/ownhealth/tests/check_mirror.rs` fails when a CHECK and its constant differ.
 The migrator applies every missing file in number order. On a fresh database or a release upgrade
 the highest-numbered re-creation runs last and wins. A dev database that already ran a higher file
-applies a lower file that merged late last, so that file wins there. In v1.0 only 1200 changes these
-six lists. A later value goes into a new file numbered above every file that re-creates that CHECK,
+applies a lower file that merged late last, so that file wins there. In v1.0 1200 changes the first
+six lists, and 1221 adds `wearables` to `document.doc_type`. A later value goes into a new file numbered above every file that re-creates that CHECK,
 and `check_mirror.rs` is the gate.
 
 Lifecycle rule for every clinical table: only `status`, `status_reason` and `superseded_at` change after

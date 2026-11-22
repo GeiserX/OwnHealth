@@ -5,7 +5,7 @@ mod lane_i;
 
 use axum::body::Body;
 use http::{Request, StatusCode, header};
-use lane_i::{R, app, glucose_pdf};
+use lane_i::{App, R, app, glucose_pdf};
 use serde_json::json;
 
 fn blob_count(dir: &std::path::Path) -> anyhow::Result<usize> {
@@ -257,6 +257,298 @@ async fn cgm_job(a: &lane_i::App, slug: &str) -> anyhow::Result<i64> {
     .await?)
 }
 
+/// A wearables import's result counts samples and names devices: only a member who may read wearables
+/// on the profile sees it. Anyone else with a grant there still sees the job, with no result.
+#[tokio::test]
+async fn a_wearables_import_result_shows_only_to_members_who_may_read_wearables() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let result = json!({"accepted": 32, "fit": {"heart_rate_minutes": 30, "device": "OwnHealth Test Watch"}});
+    let mut ids = Vec::new();
+    for kind in ["import.fit", "import.gadgetbridge", "import.pdf"] {
+        let id: i64 = sqlx::query_scalar(
+            "insert into job (kind, state, payload, result) values ($1, 'done', \
+             jsonb_build_object('profile_id', $2::text, 'filename', 'run.fit'), $3) returning id",
+        )
+        .bind(kind)
+        .bind(alex.to_string())
+        .bind(&result)
+        .fetch_one(&a.rt.pool)
+        .await?;
+        ids.push(id);
+    }
+    let uri = format!(
+        "/jobs?ids={}",
+        ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+    );
+    let results = |v: &serde_json::Value| -> Vec<(String, serde_json::Value)> {
+        v["jobs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|j| (j["kind"].as_str().unwrap_or_default().to_string(), j["result"].clone()))
+            .collect()
+    };
+    let grant = |sql: &'static str| {
+        let pool = a.rt.pool.clone();
+        let (sam, alex) = (a.family.profile("sam"), alex);
+        async move {
+            let user: uuid::Uuid = sqlx::query_scalar("select user_id from profile where id = $1")
+                .bind(sam)
+                .fetch_one(&pool)
+                .await?;
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(user)
+                .bind(alex)
+                .execute(&pool)
+                .await?;
+            anyhow::Ok(())
+        }
+    };
+    // the owner, and sam while his grant on alex holds wearables: every result
+    grant(
+        "update profile_grant set categories = array_append(array_remove(categories, 'read:wearables'), \
+         'read:wearables') where user_id = $1 and profile_id = $2",
+    )
+    .await?;
+    for who in ["alex", "sam"] {
+        let (s, v) = a.get(who, &uri).await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert!(results(&v).iter().all(|(_, r)| *r == result), "{who}: {v}");
+    }
+    // without wearables, sam sees the jobs, and the wearables results are gone
+    grant(
+        "update profile_grant set categories = array_remove(categories, 'read:wearables') \
+         where user_id = $1 and profile_id = $2",
+    )
+    .await?;
+    let (s, v) = a.get("sam", &uri).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(
+        results(&v),
+        [
+            ("import.pdf".to_string(), result.clone()),
+            ("import.gadgetbridge".to_string(), serde_json::Value::Null),
+            ("import.fit".to_string(), serde_json::Value::Null),
+        ]
+    );
+    let (_, owner) = a.get("alex", &uri).await?;
+    assert!(results(&owner).iter().all(|(_, r)| *r == result), "{owner}");
+    Ok(())
+}
+
+/// `GET /documents/{id}/file` as `who`: status, headers and the bytes.
+async fn file_as(a: &App, who: &str, id: uuid::Uuid) -> anyhow::Result<(StatusCode, http::HeaderMap, Vec<u8>)> {
+    let req = Request::get(format!("/documents/{id}/file"))
+        .header(header::COOKIE, a.cookie(who).await?)
+        .body(Body::empty())?;
+    a.send_raw(req).await
+}
+
+/// A raw wearables export (a FIT activity file, a Gadgetbridge database) holds every reading of a device,
+/// and a FIT file held the route: it is listed, opened and downloaded only with `read:wearables`;
+/// `read:records` is not enough. The answer is the one every document type gives for a missing scope.
+#[tokio::test]
+async fn a_wearables_document_needs_read_wearables_to_be_listed_opened_or_downloaded() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let household: uuid::Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(alex)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let mut docs = Vec::new();
+    for (name, mime, doc_type, bytes) in [
+        ("run.fit", "application/vnd.ant.fit", "wearables", &b"a FIT file"[..]),
+        (
+            "Gadgetbridge.db",
+            "application/vnd.sqlite3",
+            "wearables",
+            &b"a Gadgetbridge database"[..],
+        ),
+        ("letter.pdf", "application/pdf", "other", &b"a letter"[..]),
+    ] {
+        let sha =
+            a.rt.blobs
+                .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(alex), bytes)?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type) \
+             values ($1, $2, decode($3, 'hex'), $4, $5, $6, $7) returning id",
+        )
+        .bind(household)
+        .bind(alex)
+        .bind(&sha)
+        .bind(name)
+        .bind(mime)
+        .bind(i64::try_from(bytes.len())?)
+        .bind(doc_type)
+        .fetch_one(&a.rt.pool)
+        .await?;
+        docs.push((id, bytes));
+    }
+    let [(fit, _), (gadgetbridge, _), (letter, _)] = docs[..] else {
+        anyhow::bail!("three documents");
+    };
+    let grant = |categories: &'static [&'static str]| {
+        let pool = a.rt.pool.clone();
+        let (sam, alex) = (a.family.profile("sam"), alex);
+        async move {
+            let user: uuid::Uuid = sqlx::query_scalar("select user_id from profile where id = $1")
+                .bind(sam)
+                .fetch_one(&pool)
+                .await?;
+            sqlx::query("update profile_grant set categories = $3 where user_id = $1 and profile_id = $2")
+                .bind(user)
+                .bind(alex)
+                .bind(categories)
+                .execute(&pool)
+                .await?;
+            anyhow::Ok(())
+        }
+    };
+    let listed = |v: &serde_json::Value| -> Vec<String> {
+        v["items"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|d| d["id"].as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    // records and labs, no wearables: the letter only
+    grant(&["read:summary", "read:records", "read:labs"]).await?;
+    let (s, v) = a.get("sam", "/profiles/alex/documents").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(listed(&v), [letter.to_string()]);
+    for (id, bytes) in &docs[..2] {
+        let (s, v) = a.get("sam", &format!("/documents/{id}")).await?;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+        assert!(v.to_string().contains("This needs read:wearables."), "{v}");
+        let (s, _, body) = file_as(&a, "sam", *id).await?;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert!(!body.windows(bytes.len()).any(|w| w == *bytes), "the bytes went out");
+    }
+    // with wearables: all three, and the files
+    grant(&["read:summary", "read:records", "read:labs", "read:wearables"]).await?;
+    let (_, v) = a.get("sam", "/profiles/alex/documents").await?;
+    let mut ids = listed(&v);
+    ids.sort();
+    let mut want = vec![fit.to_string(), gadgetbridge.to_string(), letter.to_string()];
+    want.sort();
+    assert_eq!(ids, want);
+    for (id, bytes) in &docs {
+        let (s, v) = a.get("sam", &format!("/documents/{id}")).await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let (s, _, body) = file_as(&a, "sam", *id).await?;
+        assert_eq!((s, body.as_slice()), (StatusCode::OK, *bytes));
+    }
+    // wearables without records: the exports, not the letter
+    grant(&["read:summary", "read:labs", "read:wearables"]).await?;
+    let (_, v) = a.get("sam", "/profiles/alex/documents").await?;
+    let mut ids = listed(&v);
+    ids.sort();
+    let mut want = vec![fit.to_string(), gadgetbridge.to_string()];
+    want.sort();
+    assert_eq!(ids, want);
+    let (s, _) = a.get("sam", &format!("/documents/{letter}")).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // wearables only: the list holds the exports, as each one opens by its id
+    grant(&["read:summary", "read:wearables"]).await?;
+    let (s, v) = a.get("sam", "/profiles/alex/documents").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let mut ids = listed(&v);
+    ids.sort();
+    assert_eq!(ids, want);
+    // none of the three: the refusal names every scope that lists documents
+    grant(&["read:summary"]).await?;
+    let (s, v) = a.get("sam", "/profiles/alex/documents").await?;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(
+        v.to_string()
+            .contains("This needs read:labs, read:records or read:wearables."),
+        "{v}"
+    );
+    Ok(())
+}
+
+/// Migration 1221 moves the wearables exports stored before it to `doc_type` `wearables`: a Gadgetbridge
+/// import (its flag or its mime) and a FIT file; any other document keeps its type.
+#[tokio::test]
+async fn the_migration_moves_stored_wearables_exports_to_their_type() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let household: uuid::Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(alex)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let mut ids = Vec::new();
+    for (i, (mime, flags)) in [
+        ("application/octet-stream", json!({"gadgetbridge": {"devices": 1}})),
+        ("application/vnd.sqlite3", json!({})),
+        ("application/vnd.ant.fit", json!({})),
+        ("application/pdf", json!({})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sha = a.rt.blobs.put_bytes(
+            ownhealth_core::blobs::BlobOwner::Profile(alex),
+            format!("export {i}").as_bytes(),
+        )?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, doc_type, flags) \
+             values ($1, $2, decode($3, 'hex'), $4, 8, 'other', $5) returning id",
+        )
+        .bind(household)
+        .bind(alex)
+        .bind(&sha)
+        .bind(mime)
+        .bind(&flags)
+        .fetch_one(&a.rt.pool)
+        .await?;
+        ids.push(id);
+    }
+    sqlx::raw_sql(include_str!("../../../../migrations/1221_wearables_documents.sql"))
+        .execute(&a.rt.pool)
+        .await?;
+    let mut types = Vec::new();
+    for id in &ids {
+        let t: Option<String> = sqlx::query_scalar("select doc_type from document where id = $1")
+            .bind(id)
+            .fetch_one(&a.rt.pool)
+            .await?;
+        types.push(t.unwrap_or_default());
+    }
+    assert_eq!(types, ["wearables", "wearables", "wearables", "other"]);
+    Ok(())
+}
+
+/// A document of Alex dated `day`, of `doc_type`, with an optional provider.
+async fn dated_document(
+    a: &App,
+    name: &str,
+    day: &str,
+    doc_type: &str,
+    provider: Option<&str>,
+) -> anyhow::Result<uuid::Uuid> {
+    let alex = a.family.profile("alex");
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(alex), name.as_bytes())?;
+    Ok(sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type, \
+         provider_name, collected_at) \
+         values ($1, $2, decode($3, 'hex'), $4, 'application/octet-stream', 8, $5, $6, ($7::date)::timestamptz) \
+         returning id",
+    )
+    .bind(a.family.household_id)
+    .bind(alex)
+    .bind(&sha)
+    .bind(name)
+    .bind(doc_type)
+    .bind(provider)
+    .bind(day)
+    .fetch_one(&a.rt.pool)
+    .await?)
+}
+
 #[tokio::test]
 async fn a_cgm_import_result_reaches_only_those_who_may_read_wearables() -> R {
     let a = app().await?;
@@ -327,5 +619,120 @@ async fn a_cgm_document_shows_its_counts_only_to_those_who_may_read_wearables() 
     let (_, v) = a.get("alex", &format!("/documents/{doc}")).await?;
     assert_eq!(v["flags"]["cgm_csv"]["readings"], json!(8), "{v}");
     assert_eq!(v["flags"]["import"]["accepted"], json!(8), "{v}");
+    Ok(())
+}
+
+/// Sam's grant on Alex, as these categories.
+async fn grant_sam(a: &App, categories: &[&str]) -> R {
+    sqlx::query("update profile_grant set categories = $3 where user_id = $1 and profile_id = $2")
+        .bind(a.family.user("sam"))
+        .bind(a.family.profile("alex"))
+        .bind(categories)
+        .execute(&a.rt.pool)
+        .await?;
+    Ok(())
+}
+
+/// A FIT document is dated by its first activity, but a run is no medical record: monthly runs hide no
+/// hole in the record, no gap cites one to a member who may not read wearables, a run with the
+/// provider's name clears no visit, and a run is no evidence that a gap was closed.
+#[tokio::test]
+async fn a_wearables_export_is_no_record_fact_and_no_gap_cites_it() -> R {
+    let a = app().await?;
+    grant_sam(&a, &["read:summary", "read:records"]).await?;
+    let letter = dated_document(&a, "letter-a.pdf", "2001-01-10", "other", None).await?;
+    dated_document(&a, "letter-b.pdf", "2003-06-10", "other", None).await?;
+    let mut runs = Vec::new();
+    for m in 0..28 {
+        let (y, mo) = (2001 + (m + 1) / 12, (m + 1) % 12 + 1);
+        let day = format!("{y}-{mo:02}-15");
+        runs.push(dated_document(&a, &format!("run-{m}.fit"), &day, "wearables", None).await?);
+    }
+    let holes = |v: &serde_json::Value| -> Vec<String> {
+        v["items"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["rule"] == "records_hole")
+                    .filter_map(|i| i["key"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let uri = "/profiles/alex/gaps?lang=en&as_of=2004-01-01";
+    for who in ["sam", "alex"] {
+        let (s, v) = a.get(who, uri).await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        // the 881 days between the two letters are still a hole, whatever the runs say
+        assert_eq!(holes(&v), ["hole:2001-01-10:2003-06-10"], "{who}: {v}");
+        let body = v.to_string();
+        assert!(runs.iter().all(|r| !body.contains(&r.to_string())), "{who}: {v}");
+    }
+    // a run is no evidence that the hole was closed; the letter that bounds it is
+    let due = "/profiles/alex/due/gap:hole:2001-01-10:2003-06-10/decision";
+    let (s, v) = a
+        .post(
+            "alex",
+            due,
+            Some(json!({"kind": "done", "evidence": {"table": "document", "id": runs[20]}})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert!(v.to_string().contains("evidence_refused"), "{v}");
+    let (s, v) = a
+        .post(
+            "alex",
+            due,
+            Some(json!({"kind": "done", "evidence": {"table": "document", "id": letter}})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    // a visit typed by hand with no report: a run that names the clinic on that day clears nothing
+    let body = json!({"period_start": "2002-03-05T09:30:00Z", "reason_text": "Knee",
+                      "provider_name": "Clínica Sur"});
+    let (s, v) = a.post("alex", "/profiles/alex/records/visit", Some(body)).await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    dated_document(&a, "clinic-run.fit", "2002-03-05", "wearables", Some("Clínica Sur")).await?;
+    let (_, v) = a.get("alex", uri).await?;
+    let visits: Vec<&serde_json::Value> = v["items"]
+        .as_array()
+        .map(|a| a.iter().filter(|i| i["rule"] == "visit_without_report").collect())
+        .unwrap_or_default();
+    assert_eq!(visits.len(), 1, "{v}");
+    // the control: the clinic's own report clears it
+    dated_document(&a, "clinic-report.pdf", "2002-03-05", "other", Some("Clínica Sur")).await?;
+    let (_, v) = a.get("alex", uri).await?;
+    assert!(
+        v["items"]
+            .as_array()
+            .is_some_and(|a| a.iter().all(|i| i["rule"] != "visit_without_report")),
+        "{v}"
+    );
+    Ok(())
+}
+
+/// The timeline shows the documents of the record, never a raw wearables export, to a member with
+/// read:records and to the owner alike.
+#[tokio::test]
+async fn the_timeline_shows_no_wearables_export() -> R {
+    let a = app().await?;
+    grant_sam(&a, &["read:summary", "read:records"]).await?;
+    let letter = dated_document(&a, "letter.pdf", "2024-03-01", "other", None).await?;
+    let run = dated_document(&a, "run.fit", "2024-03-02", "wearables", None).await?;
+    for who in ["sam", "alex"] {
+        let (s, v) = a.get(who, "/profiles/alex/timeline").await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let docs: Vec<String> = v["events"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|e| e["type"] == "document")
+                    .filter_map(|e| e["document_id"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(docs.contains(&letter.to_string()), "{who}: {v}");
+        assert!(!v.to_string().contains(&run.to_string()), "{who}: {v}");
+    }
     Ok(())
 }

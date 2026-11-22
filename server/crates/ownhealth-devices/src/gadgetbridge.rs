@@ -43,7 +43,7 @@ use ownhealth_core::error::{Error, Result};
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::jobs::{self, Job, JobContext, JobError};
 use ownhealth_ingest_structured::fhir::mark_imported;
-use ownhealth_ingest_structured::jobs::document_for;
+use ownhealth_ingest_structured::jobs::document_of_type;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use sqlx::PgConnection;
@@ -394,7 +394,15 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
         .to_string();
     let source_id = job.str("source_id").and_then(|s| Uuid::parse_str(s).ok());
     let mut tx = ctx.pool.begin().await?;
-    let doc = document_for(&mut tx, &ctx.blobs, &job.payload, "application/vnd.sqlite3", &channel).await?;
+    let doc = document_of_type(
+        &mut tx,
+        &ctx.blobs,
+        &job.payload,
+        "application/vnd.sqlite3",
+        &channel,
+        ownhealth_core::documents::WEARABLES_DOC_TYPE,
+    )
+    .await?;
     let summary = import_gadgetbridge(&mut tx, &ctx.blobs, doc, source_id)
         .await
         .map_err(|e| match e {

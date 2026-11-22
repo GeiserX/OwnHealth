@@ -10,6 +10,7 @@
 //! | `store` | the one write path into `wearable_sample`, idempotent, then the rollups |
 //! | `scores` | vendor scores (readiness, Body Battery, ...) in `vendor_score`, tagged `computed_by` provider, never samples |
 //! | `synthetic`, `demo` | synthetic CGM for the demo seed (order 1040) and the tests |
+//! | `fit` | FIT activity files (`import.fit`, sniffed as `fit` or `fit_gz` on upload): heart rate per minute, distance and energy per activity, never a position |
 //!
 //! Samples go to `wearable_sample` through lane C's (0.2.0) wearables store, with a `wearable_source`
 //! row linked to the connector `source` (`wearable_source.source_id`). Raw pushes and files are stored
@@ -18,6 +19,7 @@
 pub mod cgm;
 pub mod cgm_csv;
 pub mod demo;
+pub mod fit;
 pub mod gadgetbridge;
 pub mod hae;
 pub mod nightscout;
@@ -33,6 +35,7 @@ pub fn register() {
     gadgetbridge::register();
     cgm_csv::register();
     nightscout::register();
+    fit::register();
     ownhealth_core::demo::register_demo_hook("devices_cgm", demo::ORDER, demo::seed_boxed);
 }
 

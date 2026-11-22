@@ -848,8 +848,8 @@ impl Evidence {
 
 /// The evidence a `done` decision points at, when it still holds: a record of this profile that is
 /// current now (following its corrections to the version that replaced it) and not tagged sensitive,
-/// or an active document of this profile. None when it was retracted, never existed, belongs to
-/// another profile or is sensitive.
+/// or an active document of this profile's record (not a wearables export). None when it was
+/// retracted, never existed, belongs to another profile or is sensitive.
 pub async fn evidence(
     conn: &mut PgConnection,
     profile_id: uuid::Uuid,
@@ -857,10 +857,12 @@ pub async fn evidence(
     id: uuid::Uuid,
 ) -> Result<Option<Evidence>> {
     let found: Option<(Option<NaiveDate>, Option<String>, Option<NaiveDate>)> = if table == "document" {
-        sqlx::query_as(
-            "select coalesce(collected_at, reported_at)::date, null::text, (created_at at time zone 'UTC')::date \
-             from document where id = $1 and profile_id = $2 and status = 'active'",
-        )
+        // a wearables export is no record: a run is evidence of nothing here
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "select coalesce(d.collected_at, d.reported_at)::date, null::text, (d.created_at at time zone 'UTC')::date \
+             from document d where d.id = $1 and d.profile_id = $2 and d.status = 'active' and {}",
+            ownhealth_core::documents::record_document_sql("d")
+        )))
         .bind(id)
         .bind(profile_id)
         .fetch_optional(&mut *conn)

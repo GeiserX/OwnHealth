@@ -88,6 +88,8 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 zeroize = "1.9"
 noodles = { version = "0.119", features = ["bgzf", "core", "csi", "tabix", "vcf"] }
 flate2 = "1.1"
+# FIT activity files (slice 29); MIT
+fitparser = "0.12"
 # v0.2 inboxes (SPIKES-v0.2.md)
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

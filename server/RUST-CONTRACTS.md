@@ -509,6 +509,9 @@ cgm_csv job "import.cgm_csv" (core sniffs the header row as libreview_csv or dex
 cgm_csv::import_cgm_csv(conn, &BlobStore, document_id, source_id, zone) -> Result<(ImportSummary, Value)>   // an upload; another zone replaces the file's readings
 cgm_csv::import_cgm_csv_again(conn, &BlobStore, document_id, source_id, fallback) -> Result<(ImportSummary, Value)>   // in the file's own zone
 nightscout::poll_nightscout(JobContext, Source)          // poller "nightscout"
+fit job "import.fit" (core sniffs the .FIT header, gzipped or not, as fit or fit_gz; v1.0 slice 29)
+fit::import_fit(conn, &BlobStore, document_id, source_id) -> Result<(ImportSummary, Value)>
+fit::strip(bytes, &Read::position_fields) -> Result<Vec<u8>>    // the stored copy: every position the invalid value
 cgm::summarize(&[(DateTime, f64)], start, end, interval_minutes) -> Result<CgmSummary>
 cgm::cgm_summary(conn, profile_id, end, days) -> Result<CgmSummary>
 

@@ -9,11 +9,13 @@
 //! `timezone` reads a CGM export's wall-clock times when the server has no `OWNHEALTH_TIMEZONE`. An old
 //! name the tz database links to a current one (`Asia/Calcutta`) travels as the current name; a zone
 //! still unknown travels as no zone, and the upload goes in all the same.
-//! A job whose result holds wearables data (`import.cgm_csv`, `import.gadgetbridge`) shows its result
-//! only to a caller with `read:wearables` on its profile; the others see the job without it.
 //!
 //! Files are spooled to disk while the form is read, then land in the blob store once the caller may
 //! import on the profile; the dispatcher creates documents and enqueues each lane's import job.
+//!
+//! A job's `result` counts what its import brought. The result of a wearables import
+//! ([`WEARABLE_JOBS`]) is shown only to a caller who may read wearables on that profile; anyone else
+//! with a grant there sees the job with `result: null`.
 
 use std::path::PathBuf;
 
@@ -212,8 +214,9 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     Ok(Json(result))
 }
 
-/// The job kinds whose result holds wearables data: shown with `read:wearables` on the profile only.
-const WEARABLE_RESULTS: [&str; 2] = ["import.cgm_csv", "import.gadgetbridge"];
+/// The import jobs whose result counts a profile's wearable samples and names its devices (a CGM
+/// export's result also counts its Low and High readings).
+pub const WEARABLE_JOBS: [&str; 3] = ["import.fit", "import.gadgetbridge", "import.cgm_csv"];
 
 /// Import jobs of the caller's profiles, newest first; `ids=1,2,3` to poll specific ones.
 async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>) -> R<Json<Value>> {
@@ -254,10 +257,11 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         .collect::<Result<Vec<_>, _>>()?;
     for j in &mut jobs {
         pydantic_datetimes(j, &["created_at", "finished_at"]);
-        // what a wearables import brought (counts, sensors, Low and High) is wearables data
-        let kind = j.get("kind").and_then(Value::as_str).unwrap_or_default();
-        let profile = j.get("profile_id").and_then(Value::as_str).unwrap_or_default();
-        if WEARABLE_RESULTS.contains(&kind) && !wearables.iter().any(|w| w == profile) {
+        let wearable = j["kind"].as_str().is_some_and(|k| WEARABLE_JOBS.contains(&k));
+        let may_read = j["profile_id"]
+            .as_str()
+            .is_some_and(|p| wearables.iter().any(|w| w == p));
+        if wearable && !may_read {
             j["result"] = Value::Null;
         }
     }

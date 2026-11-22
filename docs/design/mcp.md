@@ -99,7 +99,7 @@ https://datatracker.ietf.org/doc/html/rfc9207
 | `read:summary` | Status snapshot, profile list, freshness | `get_health_status` |
 | `read:labs` | Lab observations | `search_observations`, `get_trend`, `check_drug` (labs part, optional) |
 | `read:vitals` | BP, weight, temperature, manual and device vitals | `search_observations`, `get_trend` |
-| `read:wearables` | Wearable samples and rollups | `search_observations`, `get_trend` |
+| `read:wearables` | Wearable samples and rollups, and the raw wearables exports (documents of type `wearables`: FIT activity files, Gadgetbridge databases) | `search_observations`, `get_trend` |
 | `read:records` | Conditions, medications, supplements, allergies, encounters, documents metadata | `check_drug` (current medications and phenoconversion), `get_source` for record facts |
 | `read:genome` | Curated genome facts (`genome-facts.json`) | `get_genome_findings`, `check_drug` (PGx part) |
 | `read:genome_raw` | Per-position lookups in the tabix VCF | `lookup_variant` |

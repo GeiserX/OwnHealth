@@ -143,12 +143,17 @@ export function docLabel(d: { id: string; filename?: { text: string } | string |
 	return [name || d.doc_type || d.id.slice(0, 8), d.evidence_day?.slice(0, 10)].filter(Boolean).join(' · ');
 }
 
+/** The doc_type of a raw wearables export (a FIT file): no record, so the server refuses it as evidence. */
+export const WEARABLES_DOC_TYPE = 'wearables';
+
 /**
  * Whether the Done evidence list offers a document. It needs an evidence day (its collection day,
  * else its report day) on or before `today`, as the server checks it. For a document gap, any
- * active copy counts: one with no day counts from its upload day.
+ * active copy counts: one with no day counts from its upload day. A wearables export is never
+ * offered: the server keeps it out of the record (`record_document_sql`) and refuses it.
  */
-export function offersDocument(d: { status: string; evidence_day?: string | null }, today: string, anyDocument: boolean): boolean {
+export function offersDocument(d: { status: string; doc_type?: string | null; evidence_day?: string | null }, today: string, anyDocument: boolean): boolean {
+	if (d.doc_type === WEARABLES_DOC_TYPE) return false;
 	return d.status === 'active' && (!!evidenceDay(d.evidence_day, today) || (anyDocument && !d.evidence_day));
 }
 
@@ -164,7 +169,8 @@ export function evidenceDay(v: unknown, today: string): string | null {
 /**
  * The documents the Done evidence list offers, as options: active ones with an evidence day (the
  * collection day, else the report day) on or before the server's today `evidenceLimit(now)`, and for
- * a document gap also the undated ones. The list comes newest evidence first, as the server sorts it.
+ * a document gap also the undated ones; never a wearables export. The list comes newest evidence
+ * first, as the server sorts it.
  */
 export function documentEvidence(
 	items: { id: string; status: string; filename?: { text: string } | string | null; doc_type?: string | null; evidence_day?: string | null }[],
