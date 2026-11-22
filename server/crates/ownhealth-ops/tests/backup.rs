@@ -614,7 +614,8 @@ async fn verify_restore_fails_when_a_profile_key_does_not_open() -> R {
 
 /// verify-restore counts a held mail's raw message among the files the database needs, under the
 /// mail's own key: a held mail whose file is gone fails the check, also when the dump still holds
-/// the mail's key. The message of a mail deleted from the hold is no longer needed.
+/// the mail's key and when its inbox was removed. The message of a mail deleted from the hold is no
+/// longer needed.
 #[tokio::test]
 async fn verify_restore_fails_when_a_held_mails_file_is_gone() -> R {
     use ownhealth_core::quarantine::{self, QuarantineIn};
@@ -685,6 +686,17 @@ async fn verify_restore_fails_when_a_held_mails_file_is_gone() -> R {
         report["ok"], true,
         "a deleted mail's message counted as needed: {report:#}"
     );
+    // the inbox is removed: its items go with it (on delete cascade) and the held mail stays with no
+    // inbox, so only the hold itself names the file
+    sqlx::query("delete from source where id = $1")
+        .bind(mailbox)
+        .execute(&l.db.pool)
+        .await?;
+    let items: i64 = sqlx::query_scalar("select count(*) from source_item where quarantine_id = $1")
+        .bind(kept)
+        .fetch_one(&l.db.pool)
+        .await?;
+    assert_eq!(items, 0);
     // the held mail's file is lost from the store
     assert!(store.forget_pending(kept)?);
     let a3 = ownhealth_ops::backup(&l.settings, &l.dir.path().join("b3").join("staging")).await?;
