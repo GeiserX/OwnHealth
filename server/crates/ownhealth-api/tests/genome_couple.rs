@@ -459,3 +459,33 @@ async fn another_finding_in_the_gene_is_never_read_as_not_detected() -> R {
     );
     Ok(())
 }
+
+/// A `lang` the registry does not hold is refused; an empty one counts as absent, and an absent one
+/// reads English, this route's default since 0.4.0.
+#[tokio::test]
+async fn a_lang_outside_the_registry_is_refused_and_an_empty_one_reads_the_default() -> R {
+    let env = env().await?;
+    env.share_sam_genome().await?;
+    for bad in ["fr", "en-US"] {
+        let (s, body) = env.get("alex", &format!("{URI}&lang={bad}")).await?;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{bad}: {body}");
+        assert_eq!(
+            (&body["detail"][0]["type"], &body["detail"][0]["loc"]),
+            (&json!("literal_error"), &json!(["query", "lang"])),
+            "{body}"
+        );
+    }
+    for uri in [URI.to_string(), format!("{URI}&lang=")] {
+        let (s, body) = env.get("alex", &uri).await?;
+        assert_eq!(s, StatusCode::OK, "{uri}: {body}");
+        assert_eq!(body["lang"], "en", "{uri}");
+        assert!(
+            row(&body, "CFTR")["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not assessed is not the same as not a carrier"),
+            "{uri}: {body}"
+        );
+    }
+    Ok(())
+}

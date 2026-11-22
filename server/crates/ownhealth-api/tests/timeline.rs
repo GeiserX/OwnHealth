@@ -239,3 +239,34 @@ async fn test_timeline_filters_scopes_and_access() -> R {
     );
     Ok(())
 }
+
+/// A `lang` the registry does not hold is refused, as on every REST route; an empty one counts as
+/// absent, and an absent one reads English, this route's default since 0.4.0.
+#[tokio::test]
+async fn a_lang_outside_the_registry_is_refused_and_an_empty_one_reads_the_default() -> R {
+    let a = app().await?;
+    seed(&a).await?;
+    for bad in ["fr", "en-US", "EN"] {
+        let (s, out) = a.get("alex", &format!("/profiles/alex/timeline?lang={bad}")).await?;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{bad}: {out}");
+        assert_eq!(
+            (
+                &out["detail"][0]["type"],
+                &out["detail"][0]["loc"],
+                &out["detail"][0]["input"]
+            ),
+            (&json!("literal_error"), &json!(["query", "lang"]), &json!(bad)),
+            "{out}"
+        );
+    }
+    for uri in ["/profiles/alex/timeline", "/profiles/alex/timeline?lang="] {
+        let (s, out) = a.get("alex", uri).await?;
+        assert_eq!(s, StatusCode::OK, "{uri}: {out}");
+        let titles: Vec<String> = events(&out).iter().map(|e| strs(e, "title")).collect();
+        assert!(
+            titles.iter().any(|t| t == "Lab report · 2 results"),
+            "{uri}: {titles:?}"
+        );
+    }
+    Ok(())
+}

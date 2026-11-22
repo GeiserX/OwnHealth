@@ -96,10 +96,11 @@ fn literal<'a>(q: &'a [(String, String)], key: &str, allowed: &[&'a str], msg: &
     }
 }
 
-/// `lang`: a registry language, the default when absent.
+/// `lang` (`validate::lang`): a registry language, the first one when absent.
 fn lang_param(q: &[(String, String)]) -> Result<&'static str, Failure> {
-    let msg = format!("Input should be {}", super::auth::literal_expected(&LANGS));
-    literal(q, "lang", &LANGS, &msg).map(ownhealth_core::langs::lang_or_default)
+    crate::validate::lang(param(q, "lang"))
+        .map(|l| l.unwrap_or(LANGS[0]))
+        .map_err(Failure::Validation)
 }
 
 fn date_param(q: &[(String, String)], key: &str) -> Result<Option<NaiveDate>, Failure> {

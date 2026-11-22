@@ -676,9 +676,9 @@ async fn timeline(
     let from = e.date(&q, "from");
     let to = e.date(&q, "to");
     let as_of = e.date(&q, "as_of");
-    e.done()?;
     // an absent lang reads English, the default this route has answered with since 0.4.0
-    let lang = param(&q, "lang").unwrap_or("en");
+    let lang = e.query_lang(&q).unwrap_or("en");
+    e.done()?;
     let types = param(&q, "types").filter(|t| !t.is_empty());
 
     let mut tx = rt.pool.begin().await?;

@@ -92,6 +92,13 @@ fn param<'a>(q: &'a [(String, String)], key: &str) -> Option<&'a str> {
     q.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 
+/// `lang` (`validate::lang`): a registry language, the first one when absent.
+fn lang_param(q: &[(String, String)]) -> Result<&'static str, Failure> {
+    crate::validate::lang(param(q, "lang"))
+        .map(|l| l.unwrap_or(ownhealth_core::langs::LANGS[0]))
+        .map_err(|e| Failure::Validation(Validation(e)))
+}
+
 fn units_param(q: &[(String, String)]) -> Result<&str, Failure> {
     match param(q, "units") {
         None => Ok("as_reported"),
@@ -329,7 +336,7 @@ async fn observations(
     let from = date_param(&q, "from")?;
     let to = date_param(&q, "to")?;
     let text_q = non_empty(param(&q, "q"));
-    let lang = ownhealth_core::langs::lang_or_default(param(&q, "lang").unwrap_or_default());
+    let lang = lang_param(&q)?;
     let category = param(&q, "category");
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, None, None).await?;
@@ -568,7 +575,7 @@ async fn trend(
     };
     let window = param(&q, "window").unwrap_or("P3Y");
     let units = units_param(&q)?;
-    let lang = ownhealth_core::langs::lang_or_default(param(&q, "lang").unwrap_or_default());
+    let lang = lang_param(&q)?;
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, None, None).await?;
     let cats = allowed(&perm, None)?;

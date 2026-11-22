@@ -152,7 +152,8 @@ async fn ips(
     profile: String,
     lang: Option<String>,
 ) -> R {
-    let lang = lang.unwrap_or_else(|| p.lang.clone());
+    // only a lang the caller sent can be refused, as on the summary sheet
+    let lang = lang.unwrap_or_else(|| ownhealth_core::langs::lang_or_default(&p.lang).to_string());
     Check::body().literal("lang", Some(&lang), &LANGS).done()?;
     // the summary behind the Bundle reads one snapshot and stores its state, as on the sheet
     let mut tx = ownhealth_rules::summary::begin_read(&rt.pool).await?;

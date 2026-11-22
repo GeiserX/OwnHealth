@@ -69,7 +69,7 @@ pub async fn plan(
 
 struct Params {
     as_of: Option<NaiveDate>,
-    lang: Option<String>,
+    lang: Option<&'static str>,
     hide_name: bool,
 }
 
@@ -78,10 +78,11 @@ fn params(q: &HashMap<String, String>) -> R<Params> {
     let as_of = parse_date(q, &mut check);
     let hide = q.get("hide_name").map(String::as_str);
     check.literal("hide_name", hide, &["0", "1", "true", "false"]);
+    let lang = check.query_lang(q.get("lang").map(String::as_str));
     check.done()?;
     Ok(Params {
         as_of,
-        lang: q.get("lang").filter(|v| !v.is_empty()).cloned(),
+        lang,
         hide_name: matches!(hide, Some("1" | "true")),
     })
 }
@@ -93,7 +94,7 @@ async fn get_plan(
     Query(q): Query<HashMap<String, String>>,
 ) -> R {
     let q = params(&q)?;
-    ok(plan(&rt, &c, &p, q.as_of, q.lang.as_deref()).await?)
+    ok(plan(&rt, &c, &p, q.as_of, q.lang).await?)
 }
 
 async fn get_pdf(
@@ -105,7 +106,7 @@ async fn get_pdf(
 ) -> R {
     let q = params(&q)?;
     let as_of = q.as_of.unwrap_or_else(today_utc);
-    let lang = ownhealth_core::langs::lang_or_default(q.lang.as_deref().unwrap_or(&c.lang));
+    let lang = ownhealth_core::langs::lang_or_default(q.lang.unwrap_or(&c.lang));
     let mut tx = rt.pool.begin().await?;
     let (mut model, perm) = rendered(&mut tx, &c, &p, as_of, lang).await?;
     model["person"] = next_draw::person(&perm.profile, as_of, lang, q.hide_name)?;

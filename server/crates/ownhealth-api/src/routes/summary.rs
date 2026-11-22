@@ -47,7 +47,12 @@ async fn summary_pdf(
     Path(profile): Path<String>,
     Body(body): Body<SummaryIn>,
 ) -> R {
-    let lang = body.lang.clone().unwrap_or_else(|| p.lang.clone());
+    // only a lang the caller sent can be refused: a stored locale outside the registry (a planned
+    // language, migration 1280) prints in the default
+    let lang = body
+        .lang
+        .clone()
+        .unwrap_or_else(|| ownhealth_core::langs::lang_or_default(&p.lang).to_string());
     Check::body()
         .literal("lang", Some(&lang), &LANGS)
         .literal("specialty", Some(&body.specialty), &SPECIALTIES)

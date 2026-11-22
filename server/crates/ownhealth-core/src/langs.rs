@@ -31,7 +31,8 @@ pub const MCP_LANGS: [&str; 2] = ["es", "en"];
 pub const BROWSER_DEFAULT: &str = "en";
 
 /// `lang` when it is in the registry, else the default (the first entry). This is the one rule for
-/// a code the registry does not know, in every renderer.
+/// a code the registry does not know, in every renderer. A REST `lang` outside the registry never
+/// reaches one: `ownhealth_api::validate::lang` answers 422 for it (CONTRACTS.md section 5).
 pub fn lang_or_default(lang: &str) -> &'static str {
     LANGS.iter().copied().find(|l| *l == lang).unwrap_or(LANGS[0])
 }
@@ -148,7 +149,7 @@ mod tests {
         assert_eq!(of_tag("es-ES"), Some("es"));
         assert_eq!(of_tag(" EN_gb"), Some("en"));
         assert_eq!(of_tag("en"), Some("en"));
-        for other in ["de", "est", "", "e"] {
+        for other in ["xx", "est", "", "e"] {
             assert_eq!(of_tag(other), None, "{other}");
         }
     }
@@ -168,10 +169,12 @@ mod tests {
 
     #[test]
     fn missing_names_each_language_a_source_lacks() {
-        assert_eq!(missing(&["es", "en"], &LANGS), Vec::<&str>::new());
-        assert_eq!(missing(&["es", "en"], &["es", "en", "xx"]), ["xx"]);
-        assert_eq!(missing(&["en"], &LANGS), ["es"]);
-        assert_eq!(codes(&[("es", 1), ("en", 2)]), ["es", "en"]);
+        assert_eq!(missing(&LANGS, &LANGS), Vec::<&str>::new());
+        let mut more = LANGS.to_vec();
+        more.push("xx");
+        assert_eq!(missing(&LANGS, &more), ["xx"]);
+        assert_eq!(missing(&LANGS[1..], &LANGS), [LANGS[0]]);
+        assert_eq!(codes(&[("xx", 1), ("yy", 2)]), ["xx", "yy"]);
     }
 
     #[test]

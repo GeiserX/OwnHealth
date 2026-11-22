@@ -186,12 +186,13 @@ impl Pack {
             .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
     }
 
-    /// The display name of an alias group in `lang` (en as the fallback), or the group itself.
+    /// The display name of an alias group in `lang` (`langs::lookup`: the registry default as the
+    /// fallback), or the group itself.
     pub fn name(&self, group: &str, lang: &str) -> String {
         match self.analytes.get(group).and_then(Value::as_object) {
             Some(a) if !a.is_empty() => {
-                let pick = |k: &str| a.get(k).filter(|v| truthy(v)).map(text);
-                pick(lang).or_else(|| pick("en")).unwrap_or_else(|| "None".into())
+                ownhealth_core::langs::lookup(lang, |l| a.get(l).filter(|v| truthy(v)).map(text))
+                    .unwrap_or_else(|| "None".into())
             }
             _ => group.to_string(),
         }

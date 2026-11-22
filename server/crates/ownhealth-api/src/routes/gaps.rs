@@ -27,7 +27,7 @@ use axum::routing::get;
 use ownhealth_core::Runtime;
 use ownhealth_core::access::{majority, today_utc};
 use ownhealth_core::audit::write_audit;
-use ownhealth_rules::gaps::{self, LANGS};
+use ownhealth_rules::gaps;
 use serde_json::{Value, json};
 
 use super::auth::{Check, R, ok};
@@ -35,10 +35,8 @@ use super::status::{event, parse_date};
 use crate::error::ApiError;
 use crate::extract::Caller;
 
-fn lang_of<'a>(q: &'a HashMap<String, String>, check: &mut Check) -> Option<&'a str> {
-    let lang = q.get("lang").filter(|v| !v.is_empty()).map(String::as_str);
-    check.literal("lang", lang, &LANGS);
-    lang
+fn lang_of(q: &HashMap<String, String>, check: &mut Check) -> Option<&'static str> {
+    check.query_lang(q.get("lang").map(String::as_str))
 }
 
 async fn get_gaps(

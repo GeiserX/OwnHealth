@@ -1040,7 +1040,8 @@ fn common_headers(h: &mut HeaderMap) {
 /// The language of a page under `/ohif`, picked as the app picks it with nothing saved (`pickLang`
 /// in `ui/src/lib/i18n/langs.ts`): the browser's first language when the registry has it, else
 /// [`langs::BROWSER_DEFAULT`]; with no `Accept-Language`, the server's default
-/// (`OWNHEALTH_DEFAULT_LOCALE`). A sandboxed page cannot read the app's saved choice.
+/// (`OWNHEALTH_DEFAULT_LOCALE`, read as a tag: `en-GB` is English), else the registry default. A
+/// sandboxed page cannot read the app's saved choice.
 fn page_lang(headers: &HeaderMap, default: &str) -> &'static str {
     let first = headers
         .get(header::ACCEPT_LANGUAGE)
@@ -1050,7 +1051,7 @@ fn page_lang(headers: &HeaderMap, default: &str) -> &'static str {
         .filter(|t| !t.is_empty());
     match first {
         Some(tag) => langs::of_tag(tag).unwrap_or(langs::BROWSER_DEFAULT),
-        None => langs::lang_or_default(default),
+        None => langs::of_tag(default).unwrap_or(langs::LANGS[0]),
     }
 }
 
@@ -1503,10 +1504,14 @@ mod tests {
         assert_eq!(page_lang(&h("es-ES,en;q=0.8"), "en"), "es");
         assert_eq!(page_lang(&h("es;q=0.9,en;q=0.8"), "en"), "es");
         assert_eq!(page_lang(&h("en-US,es;q=0.8"), "es"), "en");
-        assert_eq!(page_lang(&h("de"), "es"), "en");
+        assert_eq!(page_lang(&h("xx"), "es"), "en");
         assert_eq!(page_lang(&h("est"), "es"), "en");
         assert_eq!(page_lang(&HeaderMap::new(), "es"), "es");
         assert_eq!(page_lang(&HeaderMap::new(), "en"), "en");
+        // OWNHEALTH_DEFAULT_LOCALE is read as a tag, as before the registry
+        assert_eq!(page_lang(&HeaderMap::new(), "en-GB"), "en");
+        assert_eq!(page_lang(&HeaderMap::new(), "es_ES"), "es");
+        assert_eq!(page_lang(&HeaderMap::new(), "xx"), ownhealth_core::langs::LANGS[0]);
         // Every refusal has a different text per registry language, and the fallback is last.
         assert_eq!(missing_langs(&ownhealth_core::langs::LANGS), Vec::<String>::new());
         assert!(REFUSALS.iter().all(|(_, t)| {

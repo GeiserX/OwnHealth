@@ -76,8 +76,9 @@ fn cite(id: &str) -> Value {
 
 /// One template in `lang` (a registry language, else the default) with `{name}` filled in.
 pub fn text(key: &str, lang: &str, vars: &[(&str, &str)]) -> String {
-    let lang = ownhealth_core::langs::lang_or_default(lang);
-    let mut s = DATA.templates[key][lang].as_str().unwrap_or(key).to_string();
+    let mut s = ownhealth_core::langs::lookup(lang, |l| DATA.templates[key][l].as_str())
+        .unwrap_or(key)
+        .to_string();
     for (k, v) in vars {
         s = s.replace(&format!("{{{k}}}"), v);
     }

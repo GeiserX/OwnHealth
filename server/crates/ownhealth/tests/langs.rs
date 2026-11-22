@@ -135,21 +135,27 @@ fn the_ui_registry_lists_the_server_languages_in_order() -> R {
     Ok(())
 }
 
-/// A pick of es or en written into the code: a comparison with the code, a lookup of one of them,
-/// a two-language literal list, or an es/en field read (`r.es`, `info.label_en`).
-const BY_HAND: &str = r#"(==|!=) ?"e[sn]"|\{ ?"e[sn]": |get\("e[sn]"\)|(unwrap_or|map_or)\("e[sn]"|starts_with\("e[sn]"\)|\["e[sn]", "e[sn]"\]|"e[sn]" \| "e[sn]"|\.([a-z]+_)?e[sn]\b"#;
+/// A pick of es or en written into the code: a comparison with the code either way round, a match
+/// arm, a lookup or a call with one of them (`get("en")`, `pick("es")`), a two-language literal list,
+/// or an es/en field read (`r.es`, `info.label_en`).
+const BY_HAND: &str = r#"(==|!=) ?"e[sn]"|"e[sn]" ?(==|!=)|"e[sn]" *=>|\("e[sn]"\)|\{ ?"e[sn]": |(unwrap_or|map_or)\("e[sn]"|\["e[sn]", "e[sn]"\]|"e[sn]" \| "e[sn]"|\.([a-z]+_)?e[sn]\b"#;
 
 /// The lines allowed to name es or en, each with its reason: MCP speaks es/en by design, the
 /// registry itself, and the readers of what arrives (a document's or a resource's language, a printed
-/// number), which are not the person's language.
+/// number), which are not the person's language. An entry with a line allows exactly that line
+/// (trimmed); one without allows the whole file or folder. An entry that allows nothing fails the
+/// scan, so the list cannot go stale.
 const ALLOWED: &[(&str, &str)] = &[
     ("ownhealth-core/src/langs.rs", ""),
     ("ownhealth-mcp/", ""),
     // the language a lab report is printed in, as the PDF reader recognizes it
     (
         "ownhealth-ingest-pdf/src/extract.rs",
-        r#"Some(l @ ("es" | "en" | "de" | "fr")) => l"#,
+        r#"Some(l @ ("es" | "en" | "de" | "fr")) => l,"#,
     ),
+    // the full-text search configuration of the language a document is printed in
+    ("ownhealth-ingest-pdf/src/import.rs", r#"Some("es") => "spanish","#),
+    ("ownhealth-ingest-pdf/src/import.rs", r#"Some("en") => "english","#),
     // the language a received FHIR resource declares, for the normalizer's number parsing
     (
         "ownhealth-ingest-structured/src/fhir/mod.rs",
@@ -164,7 +170,14 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
     // the catalogs whose fields are es and en, read only through their per-language accessors,
     // which `text_tables` below checks against the registry
-    ("ownhealth-core/src/family.rs", r#"[("es", &self."#),
+    (
+        "ownhealth-core/src/family.rs",
+        r#"[("es", &self.es), ("en", &self.en)]"#,
+    ),
+    (
+        "ownhealth-core/src/family.rs",
+        r#"[("es", &self.short_es), ("en", &self.short_en)]"#,
+    ),
     (
         "ownhealth-normalize/src/tables.rs",
         r#"[("es", &self.name_es), ("en", &self.name_en)]"#,
@@ -174,32 +187,65 @@ const ALLOWED: &[(&str, &str)] = &[
         r#"[("es", &self.label_es), ("en", &self.label_en)]"#,
     ),
     // the FHIR text we store is English whatever the reader's language (`fhir_text`)
-    ("ownhealth-core/src/family.rs", "        &self.en"),
+    ("ownhealth-core/src/family.rs", "&self.en"),
     // the vaccine names as `vaccines.tsv` holds them, checked by `prevention::missing_langs`
     (
         "ownhealth-rules/src/prevention.rs",
         r#"name: json!({"en": label_en.trim(), "es": label_es.trim()}),"#,
     ),
     // English-only phrase lists for the wording lint, never shown in a language
-    ("ownhealth-api/src/routes/shl.rs", r#"json!({"en": keys.iter()"#),
-    ("ownhealth-ingest-structured/src/shc.rs", r#"json!({ "en": all.iter()"#),
+    (
+        "ownhealth-api/src/routes/shl.rs",
+        r#"json!({"en": keys.iter().map(|k| (k.to_string(), json!(msg(k)))).collect::<serde_json::Map<_, _>>()})"#,
+    ),
+    (
+        "ownhealth-ingest-structured/src/shc.rs",
+        r#"json!({ "en": all.iter().map(ToString::to_string).collect::<Vec<_>>() })"#,
+    ),
     // an absent `lang` on the timeline and the couple view reads English, their REST default since
     // 0.4.0
     (
         "ownhealth-api/src/routes/timeline.rs",
-        r#"let lang = param(&q, "lang").unwrap_or("en");"#,
+        r#"let lang = e.query_lang(&q).unwrap_or("en");"#,
     ),
     (
         "ownhealth-api/src/routes/genome/couple.rs",
-        r#"let lang = q.get("lang").map_or("en", String::as_str);"#,
+        r#"let lang = check.query_lang(q.get("lang").map(String::as_str)).unwrap_or("en");"#,
     ),
 ];
 
-/// Every line of the server's sources, tests left out, that picks es or en by hand.
-fn picks_by_hand() -> anyhow::Result<Vec<String>> {
+/// A line without its `//` comment; a `//` inside a string literal (a URL) is code.
+fn code_of(line: &str) -> &str {
+    let b = line.as_bytes();
+    let (mut i, mut in_str) = (0, false);
+    while i < b.len() {
+        match (in_str, b[i]) {
+            (true, b'\\') => i += 1,
+            (true, b'"') => in_str = false,
+            (false, b'\'') if b.get(i + 1) == Some(&b'"') && b.get(i + 2) == Some(&b'\'') => i += 2,
+            (false, b'"') => in_str = true,
+            (false, b'/') if b.get(i + 1) == Some(&b'/') => return &line[..i],
+            _ => {}
+        }
+        i += 1;
+    }
+    line
+}
+
+/// The ALLOWED entry that allows `line` of the file `name`.
+fn allowed_by(name: &str, line: &str) -> Option<usize> {
+    ALLOWED
+        .iter()
+        .position(|(f, l)| name.starts_with(f) && (l.is_empty() || line.trim() == *l))
+}
+
+/// Every line of the server's sources, tests left out, that picks es or en by hand, and every
+/// ALLOWED entry that allows no line.
+fn picks_by_hand() -> anyhow::Result<(Vec<String>, Vec<String>)> {
     let re = regex::Regex::new(BY_HAND)?;
     let root = PathBuf::from(CRATES);
     let mut out = Vec::new();
+    let mut used = vec![false; ALLOWED.len()];
     let mut dirs = vec![root.clone()];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(&dir)? {
@@ -219,28 +265,33 @@ fn picks_by_hand() -> anyhow::Result<Vec<String>> {
                 if line.trim_start().starts_with("#[cfg(test)]") {
                     break;
                 }
-                let code = line.split("//").next().unwrap_or_default();
-                if !re.is_match(code) {
+                if !re.is_match(code_of(line)) {
                     continue;
                 }
-                let allowed = ALLOWED
-                    .iter()
-                    .any(|(f, l)| name.starts_with(f) && (l.is_empty() || line.contains(l)));
-                if !allowed {
-                    out.push(format!("{name}:{}: {}", n + 1, line.trim()));
+                match allowed_by(&name, line) {
+                    Some(i) => used[i] = true,
+                    None => out.push(format!("{name}:{}: {}", n + 1, line.trim())),
                 }
             }
         }
     }
     out.sort();
-    Ok(out)
+    let stale = ALLOWED
+        .iter()
+        .zip(used)
+        .filter(|(_, u)| !u)
+        .map(|((f, l), _)| format!("{f}: {l}"))
+        .collect();
+    Ok((out, stale))
 }
 
 /// A renderer picks its text through `ownhealth_core::langs` (`lookup`, `pick`), so a registry
 /// language never falls back to es or en without a test seeing it.
 #[test]
 fn no_server_code_picks_es_or_en_by_hand() -> R {
-    assert_eq!(picks_by_hand()?, Vec::<String>::new());
+    let (picks, stale) = picks_by_hand()?;
+    assert_eq!(picks, Vec::<String>::new());
+    assert_eq!(stale, Vec::<String>::new(), "ALLOWED entries that match no line");
     // the control: the scan sees each form of a pick
     let re = regex::Regex::new(BY_HAND)?;
     for pick in [
@@ -252,23 +303,52 @@ fn no_server_code_picks_es_or_en_by_hand() -> R {
         r#"info.label_es.clone()"#,
         r#"t if t.starts_with("es") => Lang::Es,"#,
         r#""rerun": {"en": rerun_text("en"), "es": rerun_text("es")},"#,
+        r#"let t = match lang { "es" => &ES, _ => &EN };"#,
+        r#""en"=> &EN,"#,
+        r#"if "es" == lang { "es" } else { "en" }"#,
+        r#"if "en" != lang {"#,
+        r#"pick(lang).or_else(|| pick("en"))"#,
     ] {
-        assert!(re.is_match(pick), "{pick}");
+        assert!(re.is_match(code_of(pick)), "{pick}");
     }
-    for fine in [r#"lookup(lang, |l| v.get(l))"#, r#"x.enumerate()"#, r#"self.ess"#] {
-        assert!(!re.is_match(fine), "{fine}");
+    for fine in [
+        r#"lookup(lang, |l| v.get(l))"#,
+        r#"x.enumerate()"#,
+        r#"self.ess"#,
+        r#"pick(&ROWS, lang)"#,
+    ] {
+        assert!(!re.is_match(code_of(fine)), "{fine}");
     }
+    // a comment is not code, but a `//` inside a string does not end the line
+    assert!(re.is_match(code_of(r#"let u = "https://x.example"; if lang == "es" {}"#)));
+    assert!(re.is_match(code_of(r#"let c = '"'; if lang == "es" {}"#)));
+    assert!(!re.is_match(code_of(r#"let x = 1; // if lang == "es""#)));
+    assert!(!re.is_match(code_of(r#"let u = "a \" b"; // lang == "es""#)));
+    // an allowed line allows only itself, not a longer line holding it
+    assert!(allowed_by("ownhealth-core/src/family.rs", "        &self.en").is_some());
+    assert!(allowed_by("ownhealth-core/src/family.rs", "        &self.en.trim()").is_none());
+    assert!(allowed_by("ownhealth-rules/src/pack.rs", "        &self.en").is_none());
+    assert!(allowed_by("ownhealth-mcp/src/tools/mod.rs", r#"if lang == "es" {"#).is_some());
     Ok(())
 }
 
+/// One table's gaps, or its load error as one row, so a failing source never hides the others.
+fn gaps_of<E: std::fmt::Display>(r: Result<Vec<String>, E>) -> Vec<String> {
+    r.unwrap_or_else(|e| vec![format!("cannot load: {e}")])
+}
+
 /// Every text a renderer keeps in code or in a catalog with fixed language fields, by name: each
-/// names the languages of `langs` it lacks. A new table adds one line here.
-fn text_tables(langs: &[&str]) -> anyhow::Result<Vec<(&'static str, Vec<String>)>> {
-    let pack = load_pack()?;
-    Ok(vec![
+/// names the languages of `langs` it lacks. A source that fails to load (the rules pack refuses to
+/// load while a registry language lacks a template) is one row, and every other table is still
+/// listed. A new table adds one line here.
+fn text_tables(
+    langs: &[&str],
+    pack: &anyhow::Result<std::sync::Arc<ownhealth_rules::Pack>>,
+) -> Vec<(&'static str, Vec<String>)> {
+    vec![
         (
             "family catalog",
-            ownhealth_core::family::catalog()?.missing_langs(langs),
+            gaps_of(ownhealth_core::family::catalog().map(|c| c.missing_langs(langs))),
         ),
         ("analyte names", ownhealth_normalize::tables::missing_langs(langs)),
         (
@@ -278,7 +358,13 @@ fn text_tables(langs: &[&str]) -> anyhow::Result<Vec<(&'static str, Vec<String>)
         ("countries", ownhealth_rules::glance::missing_langs(langs)),
         ("numbers", ownhealth_rules::num::missing_langs(langs)),
         ("calculators", ownhealth_rules::calc::missing_langs(langs)),
-        ("vaccines", ownhealth_rules::prevention::missing_langs(&pack, langs)?),
+        (
+            "vaccines",
+            match pack {
+                Ok(p) => gaps_of(ownhealth_rules::prevention::missing_langs(p, langs)),
+                Err(e) => vec![format!("cannot load the rules pack: {e}")],
+            },
+        ),
         ("timeline", ownhealth_api::routes::timeline::missing_langs(langs)),
         ("calendar feed", ownhealth_api::routes::ics::missing_langs(langs)),
         (
@@ -286,25 +372,55 @@ fn text_tables(langs: &[&str]) -> anyhow::Result<Vec<(&'static str, Vec<String>)
             ownhealth_api::routes::imaging_proxy::missing_langs(langs),
         ),
         ("trend", ownhealth_api::routes::observations::missing_langs(langs)),
-    ])
+    ]
 }
 
 #[test]
-fn every_text_table_has_every_registry_language() -> R {
-    let gaps: Vec<String> = text_tables(&LANGS)?.into_iter().flat_map(|(_, m)| m).collect();
+fn every_text_table_has_every_registry_language() {
+    let pack = load_pack().map_err(anyhow::Error::from);
+    let gaps: Vec<String> = text_tables(&LANGS, &pack)
+        .into_iter()
+        .flat_map(|(name, m)| m.into_iter().map(move |g| format!("{name}: {g}")))
+        .collect();
     assert_eq!(gaps, Vec::<String>::new());
-    Ok(())
 }
 
 /// The control: a dummy language is missing from every table, so a language PR that adds its code
-/// to the registry without the texts goes red here, naming each table.
+/// to the registry without the texts goes red here, naming each table, even while the rules pack
+/// refuses to load.
 #[test]
-fn a_dummy_language_is_missing_from_every_text_table() -> R {
+fn a_dummy_language_is_missing_from_every_text_table() {
     let mut langs = LANGS.to_vec();
     langs.push("xx");
-    for (name, missing) in text_tables(&langs)? {
+    let pack = load_pack().map_err(anyhow::Error::from);
+    let tables = text_tables(&langs, &pack);
+    assert_eq!(tables.len(), 11);
+    for (name, missing) in tables {
         assert!(!missing.is_empty(), "{name} does not see the dummy language");
         assert!(missing.iter().all(|m| m.contains("xx")), "{name}: {missing:?}");
     }
+    let broken = text_tables(&langs, &Err(anyhow::anyhow!("template status.ok needs xx")));
+    let names: Vec<&str> = broken.iter().map(|(n, _)| *n).collect();
+    assert_eq!(names.len(), 11, "{names:?}");
+    for (name, missing) in &broken {
+        assert!(!missing.is_empty(), "{name}");
+        if *name == "vaccines" {
+            assert_eq!(missing, &["cannot load the rules pack: template status.ok needs xx"]);
+        } else {
+            assert!(missing.iter().all(|m| m.contains("xx")), "{name}: {missing:?}");
+        }
+    }
+}
+
+/// The server's default for a browser whose languages the registry lacks is the UI's (`pickLang`).
+#[test]
+fn the_browser_default_is_the_uis() -> R {
+    let src = std::fs::read_to_string(UI_LANGS)?;
+    let ui = src
+        .split("export const BROWSER_DEFAULT: Lang = '")
+        .nth(1)
+        .and_then(|rest| rest.split_once('\''))
+        .map(|(code, _)| code);
+    assert_eq!(ui, Some(ownhealth_core::langs::BROWSER_DEFAULT));
     Ok(())
 }

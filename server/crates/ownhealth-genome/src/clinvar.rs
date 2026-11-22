@@ -81,13 +81,11 @@ fn with_summaries(payload: &mut Value, withheld: bool, unconfirmed: bool) {
 }
 
 fn tpl(key: &str, lang: &str) -> String {
-    let lang = ownhealth_core::langs::lang_or_default(lang);
-    TEMPLATES
-        .get(key)
-        .and_then(|t| t.get(lang))
-        .and_then(Value::as_str)
-        .unwrap_or(key)
-        .to_string()
+    ownhealth_core::langs::lookup(lang, |l| {
+        TEMPLATES.get(key).and_then(|t| t.get(l)).and_then(Value::as_str)
+    })
+    .unwrap_or(key)
+    .to_string()
 }
 
 // ------------------------------------------------------------- policy ----
