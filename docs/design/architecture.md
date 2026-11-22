@@ -169,7 +169,8 @@ services:
     profiles: [wearables]
     image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
     restart: unless-stopped
-    # no ports; its own database and role on the db service above (deploy/db/ow-role.sql)
+    # no ports, off the app's network: it shares only ow-db with OwnHealth, where db is the one other
+    # container; its own database and role on that db (deploy/db/ow-role.sql)
 
 secrets:
   db_password: { file: ./secrets/db_password }

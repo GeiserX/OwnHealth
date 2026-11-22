@@ -52,16 +52,14 @@ services:
       OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # seals inbox passwords and tokens (v0.2)
       OWNHEALTH_BASE_URL: https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
       OWNHEALTH_INBOX_DIR: /inbox # the watched folder: ./inbox/<profile>/ on the host
-      # Caddy reaches the app from the compose network, so its X-Forwarded-For names the client (the
-      # share link access log keeps that address). With the wearables profile on, the OW containers
-      # share that network and these ranges, so the log would also take an address they forward.
+      # Only Caddy reaches the app, from the compose network, so its X-Forwarded-For names the client
+      # (the share link access log keeps that address).
       OWNHEALTH_TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
     secrets: [app_db_password, secret_key, secrets_key]
     volumes:
       - ownhealth-data:/data
       - ./inbox:/inbox
-    # No published port: from outside, only Caddy reaches the app. With the wearables profile on, the
-    # sidecar shares the compose network and reaches app:8080 too; it needs a login like any client.
+    # No published port: only Caddy reaches the app, on the compose network.
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -112,6 +110,7 @@ services:
       retries: 10
     volumes:
       - ownhealth-pg:/var/lib/postgresql/data
+    networks: [default, ow-db] # ow-db: the wearables sidecar's only way to OwnHealth's side
 
   caddy:
     image: caddy:2.11.9
@@ -146,6 +145,9 @@ services:
   # - Fenced off: no published port (Caddy does not route to it), none of OwnHealth's secrets, and its
   #   own database and role on the same Postgres (deploy/db/ow-role.sql). That role cannot connect to
   #   the ownhealth database. OW's database is a cache, so `ownhealth backup` leaves it out.
+  # - Off OwnHealth's network: the sidecar shares only ow-db with OwnHealth, and db is the one OwnHealth
+  #   container on it, so OW and the app cannot reach each other. OW reaches the vendors through
+  #   ow-egress.
   # - Redis is OW's Celery broker, on an internal network that only the sidecar joins. It keeps nothing
   #   on disk: a restart drops queued syncs, and beat queues them again.
   ow-db-init:
@@ -173,6 +175,7 @@ services:
     secrets: [db_password]
     volumes:
       - ./deploy/db/ow-role.sql:/opt/ow-role.sql:ro
+    networks: [ow-db]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -202,7 +205,7 @@ services:
       OTEL_ENABLED: "false"
       OUTGOING_WEBHOOKS_ENABLED: "false"
     # OW reads DB_PASSWORD, SECRET_KEY and ADMIN_PASSWORD, so the shell takes them from openwearables.env,
-    # then runs migrations, seeds, and the API on :8000 (compose network only)
+    # then runs migrations, seeds, and the API on :8000 (not published)
     command:
       - sh
       - -c
@@ -217,7 +220,7 @@ services:
       timeout: 5s
       retries: 6
       start_period: 300s
-    networks: [default, wearables]
+    networks: [ow-db, wearables, ow-egress]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -239,7 +242,7 @@ services:
         DB_PASSWORD="$${OPENWEARABLES_DB_PASSWORD:?set it in openwearables.env}" &&
         SECRET_KEY="$${OPENWEARABLES_SECRET_KEY:?set it in openwearables.env}" &&
         export DB_PASSWORD SECRET_KEY && exec scripts/start/worker.sh
-    networks: [default, wearables]
+    networks: [ow-db, wearables, ow-egress]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -261,7 +264,7 @@ services:
         DB_PASSWORD="$${OPENWEARABLES_DB_PASSWORD:?set it in openwearables.env}" &&
         SECRET_KEY="$${OPENWEARABLES_SECRET_KEY:?set it in openwearables.env}" &&
         export DB_PASSWORD SECRET_KEY && exec scripts/start/beat.sh
-    networks: [default, wearables]
+    networks: [ow-db, wearables]
     # not read-only: celery beat keeps its schedule file in its working directory
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -280,6 +283,9 @@ services:
 networks:
   wearables:
     internal: true # no route out: Redis reaches nothing, and only the sidecar reaches Redis
+  ow-db:
+    internal: true # db and the sidecar only: OW reaches Postgres, and no other OwnHealth container
+  ow-egress: # the sidecar's way out to the vendors' APIs; no OwnHealth container joins it
 
 secrets:
   db_password:

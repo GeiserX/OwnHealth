@@ -595,6 +595,39 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
             "{case}: wearables network"
         );
 
+        // The sidecar shares no network with OwnHealth's own containers except ow-db, which holds db
+        // and the sidecar only: OW cannot reach the app (so it cannot forward a client address to it),
+        // only Postgres, where its role opens nothing but its own database.
+        let nets = |s: &str| strings(&services[s]["networks"]);
+        let ours: Vec<String> = services
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(s, _)| s.as_str())
+            .filter(|s| !OW_ALL.contains(s) && *s != "db")
+            .flat_map(&nets)
+            .collect();
+        assert!(ours.contains(&"default".to_string()), "{case}: the app's own network: {ours:?}");
+        for s in OW_ALL {
+            for n in nets(s) {
+                assert!(n == "ow-db" || !ours.contains(&n), "{case}: {s} shares {n} with OwnHealth");
+            }
+        }
+        assert!(!ours.contains(&"ow-db".to_string()), "{case}: an OwnHealth service is on ow-db");
+        assert!(nets("db").contains(&"ow-db".to_string()), "{case}: db is not on ow-db");
+        assert_eq!(doc["networks"]["ow-db"]["internal"], true, "{case}: ow-db network");
+        for s in ["ow-db-init", "ow-app", "ow-worker", "ow-beat"] {
+            assert!(nets(s).contains(&"ow-db".to_string()), "{case}: {s} cannot reach db");
+        }
+        // ow-app and ow-worker call the vendors, so they keep one network with a way out
+        for s in ["ow-app", "ow-worker"] {
+            assert!(
+                nets(s).iter().any(|n| doc["networks"][n.as_str()]["internal"] != true),
+                "{case}: {s} has no way out: {:?}",
+                nets(s)
+            );
+        }
+
         let init = &services["ow-db-init"];
         assert!(strings(&init["command"]).join(" ").contains("ow-role.sql"), "{case}");
         let init_secrets: Vec<String> = init["secrets"]
@@ -752,6 +785,16 @@ beat = celery_app.conf.beat_schedule or {}
 print(s.telemetry_enabled, s.SENTRY_ENABLED, s.otel_enabled, s.outgoing_webhooks_enabled,
       'send-telemetry-ping' in beat, 'roll-up-queued-days' in beat)"
 );
+
+/// Tries a TCP connection to each `host:port` argument, 3 s each; prints `host:port open|closed`.
+const PROBE_PY: &str = "import socket, sys
+for t in sys.argv[1:]:
+    h, p = t.rsplit(':', 1)
+    try:
+        socket.create_connection((h, int(p)), 3).close()
+        print(t, 'open')
+    except OSError:
+        print(t, 'closed')";
 
 /// What an operator's `docker compose up -d` starts, less Caddy (host ports 80 and 443) and the OCR
 /// worker (another image).
@@ -911,6 +954,36 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
             "{case}: {s} settings"
         );
     }
+    // off OwnHealth's network: from each sidecar container, db answers, and the app answers neither by
+    // its name nor by any of its addresses
+    let app_id = project.service("app")?["ID"].as_str().unwrap_or_default().to_string();
+    let inspect = Command::new("docker")
+        .args([
+            "inspect",
+            "-f",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
+            &app_id,
+        ])
+        .output()?;
+    anyhow::ensure!(inspect.status.success(), "{}", String::from_utf8_lossy(&inspect.stderr));
+    let app_ips: Vec<String> = String::from_utf8_lossy(&inspect.stdout)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    anyhow::ensure!(!app_ips.is_empty(), "{case}: the app has no address");
+    let mut targets = vec!["db:5432".to_string(), "app:8080".to_string()];
+    targets.extend(app_ips.iter().map(|ip| format!("{ip}:8080")));
+    let want: Vec<String> = targets
+        .iter()
+        .map(|t| format!("{t} {}", if t == "db:5432" { "open" } else { "closed" }))
+        .collect();
+    for s in OW_SERVICES {
+        let mut args = vec!["exec", "-T", s, "python", "-c", PROBE_PY];
+        args.extend(targets.iter().map(String::as_str));
+        let got = project.ok(&args)?;
+        assert_eq!(got.lines().collect::<Vec<_>>(), want, "{case}: what {s} reaches");
+    }
+
     for c in project
         .ps()?
         .into_iter()
@@ -930,8 +1003,9 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
 /// The profile for real, from both compose files: turning it on with OW's secret missing or empty
 /// stops the sidecar and leaves the (recreated) app up, setting the secret later does not recreate
 /// the app, OW's migrations run on Postgres 17 as its restricted role, the role cannot connect to the
-/// health database, the running sidecar has telemetry, Sentry, OTLP and webhooks off, and nothing is published on the host. It pulls the OW
-/// image and takes minutes, so it runs in CI (`CI` set) or with OWNHEALTH_TEST_WEARABLES=1.
+/// health database, the running sidecar has telemetry, Sentry, OTLP and webhooks off, it reaches db
+/// but not the app, and nothing is published on the host. It pulls the OW image and takes minutes,
+/// so it runs in CI (`CI` set) or with OWNHEALTH_TEST_WEARABLES=1.
 #[test]
 fn wearables_profile_comes_up_as_the_restricted_role() -> R {
     let wanted = std::env::var_os("CI").is_some() || std::env::var_os("OWNHEALTH_TEST_WEARABLES").is_some();
