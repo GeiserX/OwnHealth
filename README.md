@@ -13,7 +13,7 @@ There is no chat agent and no AI model inside OwnHealth. The agent is yours, and
 You run it yourself.
 
 <p align="center">
-  <img src="docs/mockup/screenshots/01-dashboard.png" alt="OwnHealth: the family dashboard in the dark theme, with synthetic data" width="800">
+  <img src="https://raw.githubusercontent.com/GeiserX/OwnHealth/main/docs/images/screenshots/dashboard.png" alt="OwnHealth: the family dashboard in the dark theme, with synthetic data" width="800">
 </p>
 
 **Status: pre-alpha.** Expect breaking changes before 1.0. Upgrades keep your data: see the [changelog](CHANGELOG.md).
