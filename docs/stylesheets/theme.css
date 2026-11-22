@@ -1,24 +1,27 @@
 /* docs/stylesheets/theme.css: the OwnHealth docs site.
  *
- * PLACEHOLDER COLOURS. The site takes its two colours from the banner, and the
- * banner is not picked yet. Until it is, the two values below are the web
- * app's own dark palette (docs/mockup/index.html: --bg #0f1115 and --accent
- * #6ea8fe). When the banner is picked, replace --oh-bg with its background and
- * --oh-accent with its accent, then set --oh-link-light to the accent's hue
- * darkened until it passes 4.5:1 on white. Nothing else in this file names a
- * colour.
+ * The colours come from the picked banner, Figtree in the Tide scheme
+ * (docs/images/banner.svg): background #eef4f6, teal #0e7490, ink navy
+ * #0f1e2e. The web app uses the same family (ui/src/lib/styles/app.css).
+ *
+ * Light scheme: the page and the header are the Tide background, and links are
+ * the banner teal, 4.8:1 on it (5.4:1 on white).
+ * Dark scheme: the page is the Tide navy, and links are the teal lightened for
+ * a dark page, #3cbadd, 7.4:1 on the navy (the app's --accent).
  *
  * zensical.toml sets `primary: custom` and `accent: custom`, so the theme
  * paints nothing until the Material variables below exist. The modern variant
- * has no coloured header band: in the dark scheme the header and the page are
- * one surface, and in the light scheme the header is white with dark text, so
- * any light-on-dark rule is scoped to [data-md-color-scheme="slate"].
- * Telegram-Archive's theme.css is the base; the class prefix here is `oh-`.
+ * has no coloured header band: the header is the page background seen through
+ * a blur, so each scheme sets the page background and its translucent header
+ * shades. Telegram-Archive's theme.css is the base; the class prefix here is
+ * `oh-`.
  */
 :root {
-  --oh-bg: #0f1115; /* PLACEHOLDER: banner background */
-  --oh-accent: #6ea8fe; /* PLACEHOLDER: banner accent */
-  --oh-link-light: #1d5fc4; /* PLACEHOLDER: the accent darkened, 6.0:1 on white */
+  --oh-tide: #eef4f6; /* banner background */
+  --oh-teal: #0e7490; /* banner accent: the O, "Own", light-scheme links */
+  --oh-ink: #0f1e2e; /* banner ink: the H, "Health", the dark-scheme page */
+  --oh-bg: var(--oh-ink);
+  --oh-accent: #3cbadd; /* the teal lightened for the navy page, 7.4:1 */
   --oh-surface: color-mix(in srgb, var(--oh-bg) 88%, #ffffff);
   --oh-text: #e6e8ee;
   --oh-muted: #9aa3b2;
@@ -33,20 +36,29 @@
   --md-accent-fg-color--transparent: color-mix(in srgb, var(--oh-accent) 10%, transparent);
 }
 
-/* Dark scheme: the page body uses the banner background too. */
+/* Dark scheme: the page is the Tide navy; the header shades are that navy,
+   translucent, so the blur shows the page under it. */
 [data-md-color-scheme="slate"] {
   --md-default-bg-color: var(--oh-bg);
+  --md-default-bg-color--light: rgb(15 30 46 / 70%);
+  --md-default-bg-color--lighter: rgb(15 30 46 / 30%);
+  --md-default-bg-color--lightest: rgb(15 30 46 / 12%);
   --md-code-bg-color: var(--oh-surface);
   --md-typeset-a-color: var(--oh-accent);
 }
 
-/* Light scheme: the accent on white is too faint for body links and hovers. */
+/* Light scheme: the page is the Tide background, links the banner teal. */
 [data-md-color-scheme="default"] {
-  --md-typeset-a-color: var(--oh-link-light);
-  --md-accent-fg-color: var(--oh-link-light);
+  --md-default-bg-color: var(--oh-tide);
+  --md-default-bg-color--light: rgb(238 244 246 / 70%);
+  --md-default-bg-color--lighter: rgb(238 244 246 / 30%);
+  --md-default-bg-color--lightest: rgb(238 244 246 / 12%);
+  --md-typeset-a-color: var(--oh-teal);
+  --md-accent-fg-color: var(--oh-teal);
 }
 
-/* Header: a fixed logo size, the mark and the name close, the name heavy. */
+/* Header: a fixed logo size, the mark and the name close. logo.svg keeps its
+   light plate, because the navy H would vanish on the dark-scheme header. */
 .md-header__button.md-logo img,
 .md-header__button.md-logo svg {
   height: 1.6rem;
@@ -61,12 +73,40 @@
   margin-left: 0.2rem;
 }
 
+/* The site name drawn like the banner wordmark: heavy, "Own" in teal and
+   "Health" in ink. Figtree is not loaded (the site uses system fonts, see
+   zensical.toml), so the colours and the weight carry the likeness. The two
+   halves are pseudo-elements over the hidden name; their alternative text is
+   empty, so a screen reader reads the real name once. Only the first topic is
+   styled: the second one is the page title, swapped in on scroll. */
 .md-header__topic:first-child .md-ellipsis {
+  font-size: 0;
   font-weight: 800;
   letter-spacing: -0.01em;
 }
 
-[data-md-color-scheme="slate"] .md-header__topic:first-child .md-ellipsis {
+.md-header__topic:first-child .md-ellipsis::before,
+.md-header__topic:first-child .md-ellipsis::after {
+  font-size: 0.9rem;
+}
+
+.md-header__topic:first-child .md-ellipsis::before {
+  content: "Own";
+  content: "Own" / "";
+  color: var(--oh-teal);
+}
+
+.md-header__topic:first-child .md-ellipsis::after {
+  content: "Health";
+  content: "Health" / "";
+  color: var(--oh-ink);
+}
+
+[data-md-color-scheme="slate"] .md-header__topic:first-child .md-ellipsis::before {
+  color: var(--oh-accent);
+}
+
+[data-md-color-scheme="slate"] .md-header__topic:first-child .md-ellipsis::after {
   color: var(--oh-text);
 }
 
@@ -157,7 +197,7 @@
   border-radius: 0.4rem;
 }
 
-/* Hero (home proposal A): pitch on the left, the dashboard on the right. */
+/* Hero: pitch on the left, the dashboard on the right. */
 .md-typeset .oh-hero {
   display: grid;
   grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
@@ -169,7 +209,7 @@
   clear: both;
 }
 
-/* The big first line of a home page (proposals A and C). */
+/* The big first line of the home page. */
 .md-typeset .oh-hero__title {
   font-size: 2.2em;
   font-weight: 800;
@@ -193,30 +233,8 @@
   color: var(--md-typeset-a-color);
 }
 
-/* Two columns (home proposal C): what you see, what your agent sees. */
-.md-typeset .oh-split {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1.2rem;
-  margin: 1em 0;
-  clear: both;
-}
-
-/* Code in a half-width column wraps instead of scrolling out of sight. */
-.md-typeset .oh-split pre > code {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.md-typeset .oh-split > div {
-  padding: 0.2rem 1rem 0.6rem;
-  border: 1px solid color-mix(in srgb, var(--oh-muted) 25%, transparent);
-  border-radius: 0.6rem;
-}
-
 @media screen and (max-width: 59.9844em) {
-  .md-typeset .oh-hero,
-  .md-typeset .oh-split {
+  .md-typeset .oh-hero {
     grid-template-columns: 1fr;
   }
 

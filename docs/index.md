@@ -5,7 +5,7 @@ hide:
 
 # OwnHealth { .oh-visually-hidden }
 
-<!-- Home proposal A, product landing. The picked banner goes above the hero. -->
+![OwnHealth](images/banner.svg)
 
 <div class="oh-hero" markdown>
 <div markdown>
@@ -19,7 +19,7 @@ Labs, records, wearables and genome in one self-hosted store, with a web dashboa
 [MCP tool reference](mcp-tools.md){ .md-button }
 </div>
 <div markdown>
-![Health at a glance: one card per body system for one person of the synthetic Rivera family, in the dark theme](mockup/screenshots/01-dashboard.png)
+![Health at a glance: the household and one card per body system for Alex, of the synthetic Rivera family](images/screenshots/dashboard.png)
 </div>
 </div>
 
@@ -49,32 +49,49 @@ There is no AI model inside OwnHealth and no account with anyone. The agent is y
 
 ## What it looks like
 
-These screens come from the [design mockup](https://github.com/GeiserX/OwnHealth/tree/main/docs/mockup), not from the running app. They show the synthetic Rivera family, and some show parts planned for later releases.
+These screens come from the running app with its demo household, the synthetic Rivera family.
 
 <div class="oh-gallery" markdown>
 <figure markdown>
-![LDL cholesterol from 2019 to 2026 across four labs, each lab's printed range, and every measurement with its source](mockup/screenshots/02-biomarker.png)
+![LDL cholesterol from 2021 to 2026, the usual level, the medicines taken, and every measurement with its source](images/screenshots/biomarker.png)
 <figcaption>A marker over the years</figcaption>
 </figure>
 <figure markdown>
-![A lab page with the read values boxed, and the extracted rows waiting for review](mockup/screenshots/08-import-review.png)
+![A lab page with the read values boxed, and the extracted rows waiting for review](images/screenshots/import-review.png)
 <figcaption>Import and review</figcaption>
 </figure>
 <figure markdown>
-![A drug check that quotes the CPIC guideline for a CYP2C19 genotype, next to the current medicines](mockup/screenshots/05-drug-check.png)
+![A drug check that quotes the CPIC guideline for a CYP2C19 genotype, next to the current medicines](images/screenshots/drug-check.png)
 <figcaption>Drug check</figcaption>
 </figure>
 <figure markdown>
-![The household: members, roles and the grants between them](mockup/screenshots/09-family.png)
+![The household: members, roles and the grants between them](images/screenshots/family.png)
 <figcaption>The family</figcaption>
 </figure>
 <figure markdown>
-![Tokens with their scopes, the claude mcp add command and the audit log](mockup/screenshots/10-mcp-access.png)
+![Tokens with their scopes, the claude mcp add command and the audit log](images/screenshots/mcp-access.png)
 <figcaption>MCP and access</figcaption>
 </figure>
 <figure markdown>
-![Visits, labs, medicines and vaccines on one timeline, filterable by country](mockup/screenshots/03-timeline.png)
+![Visits, labs, medicines and vaccines on one timeline, filterable by country](images/screenshots/timeline.png)
 <figcaption>Timeline</figcaption>
+</figure>
+</div>
+
+On a phone:
+
+<div class="oh-gallery" markdown>
+<figure markdown>
+![Health at a glance on a phone](images/screenshots/dashboard-mobile.png)
+<figcaption>Health at a glance</figcaption>
+</figure>
+<figure markdown>
+![Import and review on a phone: the extracted rows and their reasons](images/screenshots/import-review-mobile.png)
+<figcaption>Import and review</figcaption>
+</figure>
+<figure markdown>
+![LDL cholesterol over the years on a phone](images/screenshots/biomarker-mobile.png)
+<figcaption>A marker over the years</figcaption>
 </figure>
 </div>
 

@@ -52,8 +52,8 @@ extra_css = ["stylesheets/theme.css"]
 # - v0.1-, v0.2- and v0.3-exit-criteria.md have a dot in the name, so they are
 #   neither pages nor notes by name; they are measured results for ROADMAP.md
 #   and stay on GitHub with it;
-# - mockup/index.html is the self-contained clickable mockup, not a site page;
-#   its screenshots under mockup/screenshots/ are published for the home page;
+# - mockup/ is the self-contained clickable mockup and its screenshots, read on
+#   GitHub; the home page shows real-app screenshots from images/screenshots/;
 # - design/ is published (the nav lists its pages explicitly): it is the
 #   how-it-works material a reader needs to trust the app. research/ stays a note.
 exclude_docs = """
@@ -61,8 +61,7 @@ exclude_docs = """
 !recipes/README.md
 !calculators/README.md
 v0.*-exit-criteria.md
-mockup/index.html
-mockup/README.md
+mockup/
 research/
 notes/
 requirements-docs.txt
@@ -113,12 +112,6 @@ nav = [
     { "Genome data in OwnHealth" = "design/genomics.md" },
     { "Security, privacy and regulation" = "design/security-privacy.md" },
   ] },
-  # Home page proposals. The picked one becomes index.md with a plain
-  # `git mv`; the other file and this section go in the same commit.
-  { "Home proposals" = [
-    { "Home B: docs first" = "home-b.md" },
-    { "Home C: you and your agent" = "home-c.md" },
-  ] },
 ]
 
 # Both are Zensical's defaults; written out so a future default change cannot
@@ -140,9 +133,10 @@ variant = "modern"
 # global"); CI builds are always cold, so that would be a check that goes red
 # on Google's latency.
 font = false
-# Uncomment when the repo has them. Both live under docs/images/.
-# logo = "images/logo.svg"
-# favicon = "images/icon.svg"
+# The Figtree Tide mark. logo.svg keeps the light plate of icon.svg: the navy H
+# would vanish on the dark-scheme header.
+logo = "images/logo.svg"
+favicon = "images/icon.svg"
 features = [
   "navigation.tabs",
   "navigation.sections",
@@ -167,7 +161,8 @@ features = [
 ]
 icon.repo = "fontawesome/brands/github"
 
-# Dark first: the first palette entry is the default, and the banners are dark.
+# Dark first: the first palette entry is the default, and the app is dark-only,
+# so the docs open in the same Tide navy as the app.
 [[project.theme.palette]]
 scheme = "slate"
 primary = "custom"
