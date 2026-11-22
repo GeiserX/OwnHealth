@@ -11,6 +11,8 @@
 //!
 //! A profile's files are sealed under its key (slice 46, `ownhealth_core::keys`), and the backup
 //! keeps them sealed: the wrapped keys travel in the dump, and only OWNHEALTH_SECRETS_KEY opens them.
+//! So a backup taken before a profile delete still opens that profile's files until retention drops
+//! it; keeping `profile_key` out of the dump is later work (security-privacy.md 7.3).
 //! The manifest lists each sealed file under `<profile>/<address>` with the sha256 of its bytes on
 //! disk, so a check finds a changed or added file without the key, and records the key's
 //! fingerprint (never the key), so a restore under another key refuses before it loads anything.
@@ -631,7 +633,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             .fetch_all(&mut *tx)
             .await?;
         let tables = table_counts(&mut tx).await?;
-        let kept: i64 = sqlx::query_scalar("select count(*) from profile_key")
+        let kept: i64 = sqlx::query_scalar("select count(*) from profile_key where wrapped_dek is not null")
             .fetch_one(&mut *tx)
             .await?;
         let as_of = Utc::now().date_naive();
@@ -657,7 +659,17 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     let store = BlobStore::for_settings(settings)?;
     let tree = dest.join("blobs");
     store.copy_into(&tree)?;
-    let files = blobs::tree_files(&tree)?;
+    let mut files = blobs::tree_files(&tree)?;
+    // A file that is not where its name puts it is never read and no restore places it: it stays out
+    // of the backup and its manifest, so it cannot stand in for the file its name stands for.
+    files.retain(|key, p| {
+        let stray = key.starts_with("?/");
+        if stray {
+            tracing::warn!(file = %key, "a blob file is not where its name puts it: left out of the backup");
+            let _ = fs::remove_file(p);
+        }
+        !stray
+    });
     let mut bytes = 0u64;
     let mut plain = Vec::new();
     let mut sealed = Map::new();
@@ -798,12 +810,19 @@ fn corrupt_file(key: &str, path: &Path, listed: &BTreeSet<String>, sealed: &BTre
     })
 }
 
+/// Every blob file a backup must hold: the plain and sealed files its manifest lists, and the ones the
+/// database references (older manifests have no "referenced").
+fn expected_blobs(manifest: &Value) -> BTreeSet<String> {
+    let mut expected: BTreeSet<String> = str_list(&manifest["blobs"]["sha256"]).into_iter().collect();
+    expected.extend(sealed_list(manifest).into_keys());
+    expected.extend(str_list(&manifest["blobs"]["referenced"]));
+    expected
+}
+
 fn check_blobs(manifest: &Value, files: &BTreeMap<String, PathBuf>) -> Result<Value> {
     let listed: BTreeSet<String> = str_list(&manifest["blobs"]["sha256"]).into_iter().collect();
     let sealed = sealed_list(manifest);
-    let mut expected = listed.clone();
-    expected.extend(sealed.keys().cloned());
-    expected.extend(str_list(&manifest["blobs"]["referenced"])); // older manifests have no "referenced"
+    let expected = expected_blobs(manifest);
     let missing: Vec<&String> = expected.iter().filter(|s| !files.contains_key(*s)).collect();
     let mut corrupt = Vec::new();
     for (key, p) in files {
@@ -945,9 +964,17 @@ pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
             "the target database is not empty: restore needs a fresh instance (new volume, app not started)",
         ));
     }
-    // Check every blob before the database is loaded: a corrupt one found after pg_restore would
-    // leave a populated database that a second attempt refuses as "not empty".
+    // Check every blob before the database is loaded: a corrupt or missing one found after pg_restore
+    // would leave a populated database that a second attempt refuses as "not empty".
     let backup_blobs = blobs::tree_files(&archive.join("blobs"))?;
+    if let Some(gone) = expected_blobs(&manifest)
+        .into_iter()
+        .find(|k| !backup_blobs.contains_key(k))
+    {
+        return Err(ops_error(format!(
+            "blob {gone} the manifest lists is missing from the backup"
+        )));
+    }
     // A sealed file the manifest does not list is refused too: without the key nothing else shows
     // that it was added.
     let sealed = sealed_list(&manifest);

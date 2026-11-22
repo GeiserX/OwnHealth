@@ -235,7 +235,7 @@ async fn backup_writes_dump_blobs_and_a_manifest_with_every_profile() -> R {
         );
     }
     // the key's fingerprint, never the key
-    let keys: i64 = sqlx::query_scalar("select count(*) from profile_key")
+    let keys: i64 = sqlx::query_scalar("select count(*) from profile_key where wrapped_dek is not null")
         .fetch_one(&l.db.pool)
         .await?;
     assert_eq!(m["keys"]["profiles"], keys);
@@ -265,7 +265,7 @@ async fn restore_into_a_fresh_instance_gives_the_same_state_hash_for_every_profi
     let (db, fresh) = fresh(&l).await?;
     let report = ownhealth_ops::restore(&fresh, &l.archive).await?;
     assert_eq!(report["ok"], true, "{report:#}");
-    let keys: i64 = sqlx::query_scalar("select count(*) from profile_key")
+    let keys: i64 = sqlx::query_scalar("select count(*) from profile_key where wrapped_dek is not null")
         .fetch_one(&db.pool)
         .await?;
     assert!(
@@ -355,7 +355,8 @@ async fn verify_restore_fails_on_a_changed_missing_or_added_sealed_file() -> R {
     // a file no manifest lists, dropped into a profile's folder
     let added = files[changed].with_file_name("f".repeat(64));
     fs::write(&added, b"OHB\x01 planted")?;
-    let planted = format!("{}/{}", changed.split('/').next().unwrap_or_default(), "f".repeat(64));
+    // not where its name puts it, so it is keyed by its path and never stands in for another file
+    let planted = format!("?/{}", added.strip_prefix(bad.join("blobs"))?.display());
     let report = ownhealth_ops::verify_restore(&l.settings, &bad).await?;
     assert_eq!(report["ok"], false);
     let mut corrupt = vec![changed.clone(), planted];
@@ -520,5 +521,46 @@ async fn restore_checks_blobs_before_it_loads_the_database() -> R {
     // still empty, so a fixed backup can be restored into it
     assert_eq!(public_tables(&db).await?, 0);
     assert!(files(&fresh.blobs_path()).iter().all(|p| !name(p).ends_with(".part")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn restore_refuses_a_listed_file_that_is_missing_before_it_loads_anything() -> R {
+    let l = live().await?;
+    let bad = copy(&l)?;
+    let gone = sealed_keys(&manifest(&bad)?).remove(0);
+    fs::remove_file(&tree(&bad)?[&gone])?;
+    let (db, fresh) = fresh(&l).await?;
+    let err = err_text(ownhealth_ops::restore(&fresh, &bad).await);
+    assert!(
+        err.contains(&format!("blob {gone}")) && err.contains("missing"),
+        "{err}"
+    );
+    // still empty, so the backup can be restored once the file is back
+    assert_eq!(public_tables(&db).await?, 0);
+    assert!(tree_files(&fresh.blobs_path())?.is_empty());
+    Ok(())
+}
+
+/// The manifest's key fingerprint matches, but one stored profile key does not open under it (made
+/// under another key, or changed): its files are lost, so the check fails.
+#[tokio::test]
+async fn verify_restore_fails_when_a_profile_key_does_not_open() -> R {
+    use ownhealth_core::keys::{Dek, Kek};
+    let l = live().await?;
+    let kek = Kek::from_settings(&l.settings)?;
+    let stranger = Kek::from_base64(&ownhealth_core::testing::random_secrets_key())?;
+    let p = Uuid::new_v4();
+    sqlx::query("insert into profile_key (profile_id, wrapped_dek, kek_fingerprint) values ($1, $2, $3)")
+        .bind(p)
+        .bind(stranger.wrap(p, &Dek::generate())?)
+        .bind(&kek.fingerprint()[..])
+        .execute(&l.db.pool)
+        .await?;
+    let archive = ownhealth_ops::backup(&l.settings, &l.dir.path().join("backup").join("second")).await?;
+    let report = ownhealth_ops::verify_restore(&l.settings, &archive).await?;
+    assert_eq!(report["keys"]["failed"], serde_json::json!([p]), "{report:#}");
+    assert_eq!(report["keys"]["ok"], false);
+    assert_eq!(report["ok"], false, "{report:#}");
     Ok(())
 }
