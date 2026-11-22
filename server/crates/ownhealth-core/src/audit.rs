@@ -205,11 +205,16 @@ const ROW_V1: &str = "pg_catalog.convert_to(pg_catalog.jsonb_build_array('v1', e
 /// could put a view in its place that shows the check the old row and the app the edited one, or give
 /// a column a type of its own whose cast to json shows the check a value the row does not hold. A
 /// non-superuser owner cannot change pg_catalog.
+/// The columns the check reads as keys and hashes must still be NOT NULL: audit_event.id, since the
+/// search for unlinked events never sees an event with a null id, and the four audit_chain columns.
 const PLAIN_TABLES: &str = "select pg_catalog.count(*) from pg_catalog.pg_class c \
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace \
     where n.nspname = 'public' and c.relname in ('audit_event', 'audit_chain') \
     and c.relkind = 'r' and not c.relrowsecurity and not c.relhasrules \
     and not exists (select 1 from pg_catalog.pg_inherits i where i.inhparent = c.oid or i.inhrelid = c.oid) \
+    and not exists (select 1 from pg_catalog.pg_attribute a where a.attrelid = c.oid and not a.attnotnull \
+      and (c.relname = 'audit_event' and a.attname = 'id' \
+           or c.relname = 'audit_chain' and a.attname in ('seq', 'event_id', 'prev_hash', 'hash'))) \
     and not exists (select 1 from pg_catalog.pg_attribute a join pg_catalog.pg_type t on t.oid = a.atttypid \
       where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped \
       and (t.oid >= 16384::pg_catalog.oid or t.typnamespace <> 'pg_catalog'::pg_catalog.regnamespace \
@@ -256,11 +261,14 @@ pub async fn verify_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
 }
 
 /// The reads of `verify_chain`, inside its transaction, after the guard. One statement: every link
-/// in seq order, then one last row with no seq that holds the first event with no link. At READ
-/// COMMITTED each statement sees the commits made before it starts, so two statements could see
-/// the chain before a commit and the events after it. `only`: no row of another table takes part.
+/// in seq order, then one last row, marked 1 in the first column, that holds the first event with no
+/// link. At READ COMMITTED each statement sees the commits made before it starts, so two statements
+/// could see the chain before a commit and the events after it. `only`: no row of another table
+/// takes part. A link with a null column stops the check: the guard already refuses a nullable link
+/// column, and the read does not trust that alone.
 async fn read_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
     type Row = (
+        i32,
         Option<i64>,
         Option<i64>,
         Option<Vec<u8>>,
@@ -272,22 +280,26 @@ async fn read_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
     let mut verified = 0_i64;
     // an event and its link commit together, so a visible event with no link was added behind it
     let sql = format!(
-        "select c.seq, c.event_id, c.prev_hash, c.hash, case when e.id is not null then {ROW_V1} end \
+        "select 0, c.seq, c.event_id, c.prev_hash, c.hash, case when e.id is not null then {ROW_V1} end \
          from only public.audit_chain c left join only public.audit_event e on e.id = c.event_id \
-         union all select null, (select pg_catalog.min(e.id) from only public.audit_event e \
+         union all select 1, null, (select pg_catalog.min(e.id) from only public.audit_event e \
            where not exists (select 1 from only public.audit_chain c where c.event_id = e.id)), null, null, null \
-         order by 1"
+         order by 1, 2"
     );
     let mut rows = sqlx::query_as::<_, Row>(AssertSqlSafe(sql)).fetch(&mut *conn);
-    while let Some((seq, event_id, prev_hash, hash, row)) = rows.try_next().await? {
-        let (Some(seq), Some(event_id), Some(prev_hash), Some(hash)) = (seq, event_id, prev_hash, hash) else {
-            // the last row: seq is null only there, as audit_chain.seq is not null
+    while let Some((last, seq, event_id, prev_hash, hash, row)) = rows.try_next().await? {
+        if last != 0 {
             let broken = event_id.map(|id| ChainBreak {
                 seq: None,
                 event_id: Some(id),
                 kind: ChainBreakKind::Unlinked,
             });
             return Ok(ChainCheck { verified, head, broken });
+        }
+        let (Some(seq), Some(event_id), Some(prev_hash), Some(hash)) = (seq, event_id, prev_hash, hash) else {
+            return Err(Error::AuditUncheckable(
+                "the audit log cannot be checked: a link in public.audit_chain holds a null".into(),
+            ));
         };
         let kind = if seq != verified + 1 {
             Some(ChainBreakKind::MissingLink)
@@ -1244,6 +1256,147 @@ mod tests {
         b.close().await?;
         let err = r.expect_err("a view swapped in as the check starts must stop it");
         assert!(err.to_string().contains("no longer a plain table"), "{err}");
+        Ok(())
+    }
+
+    // ------------------------------------------------------- round 5 review tests ----
+
+    /// The read of `verify_chain` on its own: its search_path and a transaction of its own, but no
+    /// lock and no guard. So a test sees what the read does with a table the guard would refuse.
+    async fn read_alone(db: &TestDb) -> anyhow::Result<Result<ChainCheck>> {
+        let mut c = sqlx::PgConnection::connect(&db.url).await?;
+        let mut tx = c.begin().await?;
+        sqlx::raw_sql("set local search_path = pg_catalog, pg_temp")
+            .execute(&mut *tx)
+            .await?;
+        let r = read_chain(&mut tx).await;
+        tx.rollback().await?;
+        c.close().await?;
+        Ok(r)
+    }
+
+    /// A link column the owner made nullable stops the check twice over: the guard refuses the
+    /// table, and the read on its own refuses a link that holds a null. Neither may take that link
+    /// for the last row.
+    async fn a_null_in_a_link_stops_the_check(db: &TestDb, what: &str) -> anyhow::Result<()> {
+        let guard = verify_chain(&mut *db.pool.acquire().await?).await;
+        anyhow::ensure!(
+            matches!(&guard, Err(Error::AuditUncheckable(m)) if m.contains("no longer a plain table")),
+            "{what}: the guard must refuse a nullable link column: {guard:?}"
+        );
+        let read = read_alone(db).await?;
+        anyhow::ensure!(
+            matches!(&read, Err(Error::AuditUncheckable(m)) if m.contains("null")),
+            "{what}: the read must refuse a link with a null: {read:?}"
+        );
+        Ok(())
+    }
+
+    /// Q1: an event added behind the chain, then a link with a null event_id after the last link.
+    #[tokio::test]
+    async fn a_null_event_id_after_the_chain_does_not_hide_an_unlinked_event() -> anyhow::Result<()> {
+        let (db, _) = chained(5).await?;
+        tamper(
+            &db,
+            "insert into audit_event (actor_kind, via, action) values ('system', 'job', 'purge')",
+        )
+        .await?;
+        let added: i64 = sqlx::query_scalar("select max(id) from audit_event")
+            .fetch_one(&db.pool)
+            .await?;
+        assert_eq!(check(&db.pool).await?.broken, broke(None, Some(added), ChainBreakKind::Unlinked));
+        // the read on its own names it too, so the helper can tell a refusal from a broken read
+        assert_eq!(read_alone(&db).await??.broken, broke(None, Some(added), ChainBreakKind::Unlinked));
+        owner_sql(&db, "alter table audit_chain alter column event_id drop not null").await?;
+        tamper(
+            &db,
+            "insert into audit_chain (seq, event_id, prev_hash, hash) values (6, null, '\\x00', '\\x00')",
+        )
+        .await?;
+        a_null_in_a_link_stops_the_check(&db, "null event_id at seq 6").await
+    }
+
+    /// Q1b: a link with a null event_id inside the chain, and an edit of a row after it.
+    #[tokio::test]
+    async fn a_null_event_id_inside_the_chain_does_not_hide_a_later_edit() -> anyhow::Result<()> {
+        let (db, ids) = chained(6).await?;
+        owner_sql(&db, "alter table audit_chain alter column event_id drop not null").await?;
+        tamper(
+            &db,
+            &format!(
+                "update audit_event set rows_out = 999 where id = {}; \
+                 update audit_chain set event_id = null where seq = 3",
+                ids[4]
+            ),
+        )
+        .await?;
+        a_null_in_a_link_stops_the_check(&db, "null event_id at seq 3").await
+    }
+
+    /// Q1c: the primary key dropped, and a link with a null seq.
+    #[tokio::test]
+    async fn a_null_seq_does_not_hide_an_unlinked_event() -> anyhow::Result<()> {
+        let (db, _) = chained(5).await?;
+        tamper(
+            &db,
+            "insert into audit_event (actor_kind, via, action) values ('system', 'job', 'purge')",
+        )
+        .await?;
+        owner_sql(
+            &db,
+            "alter table audit_chain drop constraint audit_chain_pkey; \
+             alter table audit_chain alter column seq drop not null; \
+             alter table audit_chain alter column event_id drop not null",
+        )
+        .await?;
+        tamper(
+            &db,
+            "insert into audit_chain (seq, event_id, prev_hash, hash) values (null, null, '\\x00', '\\x00')",
+        )
+        .await?;
+        a_null_in_a_link_stops_the_check(&db, "null seq").await
+    }
+
+    /// Q2: a link with a null prev_hash, and an edit of a row after it. The check must not name
+    /// some other break in its place.
+    #[tokio::test]
+    async fn a_null_prev_hash_stops_the_check() -> anyhow::Result<()> {
+        let (db, ids) = chained(5).await?;
+        owner_sql(&db, "alter table audit_chain alter column prev_hash drop not null").await?;
+        tamper(
+            &db,
+            &format!(
+                "update audit_event set rows_out = 999 where id = {}; \
+                 update audit_chain set prev_hash = null where seq = 2",
+                ids[3]
+            ),
+        )
+        .await?;
+        a_null_in_a_link_stops_the_check(&db, "null prev_hash at seq 2").await
+    }
+
+    /// The mirror on audit_event: an event with a null id is never the smallest id with no link, so
+    /// the search for unlinked events cannot see it. The guard refuses a nullable audit_event.id.
+    #[tokio::test]
+    async fn a_null_event_id_column_stops_the_check() -> anyhow::Result<()> {
+        let (db, _) = chained(3).await?;
+        owner_sql(
+            &db,
+            "alter table audit_event alter column id drop identity; \
+             alter table audit_event drop constraint audit_event_pkey; \
+             alter table audit_event alter column id drop not null",
+        )
+        .await?;
+        tamper(
+            &db,
+            "insert into audit_event (id, actor_kind, via, action) values (null, 'system', 'job', 'purge')",
+        )
+        .await?;
+        let guard = verify_chain(&mut *db.pool.acquire().await?).await;
+        anyhow::ensure!(
+            matches!(&guard, Err(Error::AuditUncheckable(m)) if m.contains("no longer a plain table")),
+            "the guard must refuse a nullable audit_event.id: {guard:?}"
+        );
         Ok(())
     }
 }
