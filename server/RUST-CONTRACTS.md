@@ -207,6 +207,7 @@ Each crate's `src/lib.rs` documents them. The shapes:
 | | `render_page_png(blobs, sha, page_no, scale) -> Result<Vec<u8>>` (blocking) | I |
 | | `ground_value(conn, blobs, document_id, page_no, name, value) -> Result<Option<[f64; 4]>>` | F |
 | ingest-structured (C) | `fhir::import_fhir`, `apple_health::import_apple_health` `-> Result<ImportSummary>` | jobs |
+| | `fhir::import_pull(conn, blobs, source_id, document_id) -> Result<PullSummary>`: a connector's stored bundle; `source_item` keyed `<type>/<id>@<versionId or sha>`, one `fhir_unmapped_summary` per type | connector pollers |
 | | `apple_health::rebuild_rollups(conn, profile, metric) -> Result<i64>` | H |
 | | `manual::add_manual_observation(conn, &ManualObservation) -> Result<Committed>` | I |
 | | `wearables::series(conn, profile, metric, since, until, resolution) -> Result<Value>`; `metric_info(key)` | E, I |
@@ -439,7 +440,8 @@ arrive(conn, &BlobStore, &Arrival) -> Result<Arrived>
 enqueue_ocr(conn, document_id, pages: &[i32], why) -> Result<Option<i64>>   // queue "ocr", job "ocr.document"
 set_ocr_state(conn, document_id, "not_needed"|"pending"|"queued"|"running"|"done"|"failed"|"off")
 
-// core::dedup: level 0 seen_item/record_item; level 1 existing_document; level 2 below; level 3 match
+// core::dedup: level 0 seen_item/record_item (pulls: pulled_before/record_pulled/forget_pulled_by);
+//   level 1 existing_document; level 2 below; level 3 match
 simhash64(text) -> Option<u64>; phash64(gray, w, h) -> Option<u64>; hamming(a, b)
 store_page_fingerprint(conn, document_id, page_no, phash, simhash)
 find_near_duplicate(conn, document_id) -> Result<Option<NearDuplicate>>   // same profile, earlier, other bytes

@@ -15,11 +15,14 @@
 //! - A resource already imported with the same JSON is skipped; one that changed upstream goes to
 //!   review with reason `conflict`, and accepting it supersedes the old version. "The same resource"
 //!   means the same type/id from the same issuer (`issuer_key`).
+//! - A connector pull ([`import_pull`]) first asks the source's `source_item` ledger, keyed
+//!   `<type>/<id>@<versionId or sha>`, and skips what the source sent before; its unmapped resources
+//!   become one `fhir_unmapped_summary` item per type (connectors.md 6.2).
 
 pub mod mapping;
 pub mod synthetic;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use futures::future::BoxFuture;
@@ -34,6 +37,7 @@ use ownhealth_core::records::{RecordIn, RecordOptions, add_record, supersede_rec
 use ownhealth_core::review::{ReviewItem, ReviewItemIn, RouteFact, create_item, route_fact};
 use ownhealth_core::{Error, Result};
 use ownhealth_normalize as normalize;
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{AssertSqlSafe, PgConnection};
@@ -175,6 +179,158 @@ pub async fn mark_imported(
     Ok(())
 }
 
+// ---------------------------------------------------------- connector pulls ----
+
+/// What one connector pull brought (connectors.md 6.2, "One bundle per pull"). Every entry of the
+/// bundle is counted once: `seen = new + duplicate + context`, so nothing leaves without a number.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PullSummary {
+    pub summary: ImportSummary,
+    /// Entries in the bundle.
+    pub seen: i64,
+    /// Resources imported this time: sent for the first time, or in a new version.
+    pub new: i64,
+    /// Resources this source sent before, in a pull that still holds them: not imported again.
+    pub duplicate: i64,
+    /// Context for the others (Patient, Practitioner, DiagnosticReport, ...): read, kept in the bundle.
+    pub context: i64,
+    /// Entries per resource type, context included.
+    pub counted: BTreeMap<String, i64>,
+}
+
+/// A summary item lists this many import refs; the stored bundle holds every resource.
+const SUMMARY_REFS: usize = 20;
+
+/// Context for the others: read for references and identity, kept in the stored bundle, not imported.
+fn is_context(rtype: &str) -> bool {
+    mapping::SUPPORTING.contains(&rtype) || rtype == "DiagnosticReport"
+}
+
+/// `sha-<16 hex>` of a resource's JSON, keys sorted.
+fn json_sha(r: &Value) -> String {
+    format!(
+        "sha-{}",
+        &hex::encode(Sha256::digest(py::dumps_sorted(r).as_bytes()))[..16]
+    )
+}
+
+/// The id a resource is known by in this importer: its own, or a hash of its JSON when it has none.
+fn resource_id(r: &Value) -> String {
+    py::get_truthy(Some(r), "id").map_or_else(|| json_sha(r), |id| py::py_str(Some(id)))
+}
+
+/// The `source_item` key of a pulled resource: `<type>/<id>@<versionId>`, or `@sha-<16 hex>` of its
+/// JSON when the server sends no version, so a changed resource is a new item either way.
+pub fn pull_key(r: &Value) -> String {
+    let version = r
+        .get("meta")
+        .and_then(|m| m.get("versionId"))
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| json_sha(r), String::from);
+    format!("{}/{}@{version}", py::py_str(r.get("resourceType")), resource_id(r))
+}
+
+/// The connector run a [`Run`] imports for: its source, its bundle and the unmapped resources it
+/// groups.
+struct Pull<'a> {
+    source_id: Uuid,
+    kind: &'a str,
+    label: &'a str,
+    sha: &'a str,
+    /// resource type -> the unmapped resources of that type in this run
+    unmapped: BTreeMap<String, Unmapped>,
+}
+
+/// What a run did with each entry, counted once each.
+#[derive(Debug, Clone, Copy, Default)]
+struct Tally {
+    new: i64,
+    duplicate: i64,
+    context: i64,
+}
+
+#[derive(Default)]
+struct Unmapped {
+    count: i64,
+    notes: BTreeMap<String, i64>,
+    refs: Vec<String>,
+}
+
+/// A bundle a connector pulled for the profile of its source, already stored as that profile's
+/// document (bytes first). The import is the file one, with two differences:
+///
+/// - Each resource is looked up in `source_item` as [`pull_key`] first. One this source sent before,
+///   in a pull that still holds it, is skipped as a duplicate, so the next pull never brings back what
+///   a person dismissed, and a new version is imported once.
+/// - Resources we do not project become one `fhir_unmapped_summary` item per type, with their count,
+///   the bundle as its document and a sample of their refs, in place of one item each.
+///
+/// A file import ([`import_fhir`]) keeps one item per resource and writes no ledger.
+pub async fn import_pull(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    source_id: Uuid,
+    document_id: Uuid,
+) -> Result<PullSummary> {
+    let (profile_id, sha, mime, filename, flags): (Option<Uuid>, String, String, Option<String>, Value) =
+        sqlx::query_as(
+            "select profile_id, encode(blob_sha256, 'hex'), mime, filename, flags from document where id = $1",
+        )
+        .bind(document_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let profile_id =
+        profile_id.ok_or_else(|| Error::Invalid("a pull is stored on the profile of its connection".into()))?;
+    let (kind, label, source_profile): (String, String, Option<Uuid>) =
+        sqlx::query_as("select kind, label, profile_id from source where id = $1")
+            .bind(source_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("unknown source {source_id}")))?;
+    if source_profile != Some(profile_id) {
+        return Err(Error::Invalid(
+            "a pull is stored on the profile of its connection".into(),
+        ));
+    }
+    let profile = get_profile(&mut *conn, profile_id)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("unknown profile {profile_id}")))?;
+    let ndjson = mime == "application/fhir+ndjson" || filename.unwrap_or_default().to_lowercase().ends_with(".ndjson");
+    let (bundle_id, entries) = read_entries(&blobs.get_bytes(BlobOwner::Profile(profile_id), &sha)?, ndjson)?;
+    let key = bundle_id.unwrap_or_else(|| format!("doc-{}", &sha[..12]));
+    let imported_before = flags.get("import").is_some_and(|d| truthy(Some(d)));
+    if !imported_before {
+        // These bytes were pulled and then retracted (the retraction cleared the import flag), and
+        // the same bytes brought the document back: what the ledger says it brought is gone.
+        ownhealth_core::dedup::forget_pulled_by(&mut *conn, source_id, document_id).await?;
+    }
+    let pull = Pull {
+        source_id,
+        kind: &kind,
+        label: &label,
+        sha: &sha,
+        unmapped: BTreeMap::new(),
+    };
+    let (summary, identity, tally) =
+        import_with(conn, &entries, &profile, document_id, &key, None, &label, Some(pull)).await?;
+    if !imported_before {
+        mark_imported(conn, document_id, &summary, Some(&identity)).await?;
+    }
+    let mut counted: BTreeMap<String, i64> = BTreeMap::new();
+    for e in &entries {
+        *counted.entry(e.rtype().to_string()).or_default() += 1;
+    }
+    Ok(PullSummary {
+        summary,
+        seen: entries.len() as i64,
+        new: tally.new,
+        duplicate: tally.duplicate,
+        context: tally.context,
+        counted,
+    })
+}
+
 // ----------------------------------------------------------------- importer ----
 
 /// Import resources into one profile. `identity` is computed from the Patient when not given (Apple
@@ -188,6 +344,23 @@ pub async fn import_resources(
     identity: Option<&str>,
     label: &str,
 ) -> Result<(ImportSummary, String)> {
+    let (summary, identity, _) =
+        import_with(conn, entries, profile, document_id, bundle_key, identity, label, None).await?;
+    Ok((summary, identity))
+}
+
+/// [`import_resources`], for a file (`pull` None) or for a connector pull.
+#[allow(clippy::too_many_arguments)]
+async fn import_with(
+    conn: &mut PgConnection,
+    entries: &[Entry],
+    profile: &Profile,
+    document_id: Uuid,
+    bundle_key: &str,
+    identity: Option<&str>,
+    label: &str,
+    pull: Option<Pull<'_>>,
+) -> Result<(ImportSummary, String, Tally)> {
     if let Some(e) = entries
         .iter()
         .find(|e| !e.resource.is_object() || !e.resource["resourceType"].is_string())
@@ -254,11 +427,15 @@ pub async fn import_resources(
         report_keys,
         issuer,
         summary: ImportSummary::new(document_id.to_string()),
+        pull,
+        tally: Tally::default(),
     };
     for e in entries {
         run.one(conn, e).await?;
     }
-    Ok((run.summary, identity))
+    run.queue_grouped(conn).await?;
+    let (summary, tally) = (run.summary, run.tally);
+    Ok((summary, identity, tally))
 }
 
 struct Index<'a>(HashMap<String, &'a Value>);
@@ -332,6 +509,9 @@ struct Run<'a> {
     report_keys: HashMap<String, String>,
     issuer: Option<String>,
     summary: ImportSummary,
+    /// Set for a connector pull: the `source_item` ledger and grouped unmapped resources.
+    pull: Option<Pull<'a>>,
+    tally: Tally,
 }
 
 impl Run<'_> {
@@ -421,6 +601,17 @@ impl Run<'_> {
     }
 
     async fn queue_unmapped(&mut self, conn: &mut PgConnection, e: &Entry, note: &str, reference: &str) -> Result<()> {
+        if let Some(pull) = self.pull.as_mut() {
+            // a pull groups them: one item per type once the run ends (queue_grouped)
+            let group = pull.unmapped.entry(e.rtype().to_string()).or_default();
+            group.count += 1;
+            *group.notes.entry(note.to_string()).or_default() += 1;
+            if group.refs.len() < SUMMARY_REFS {
+                group.refs.push(reference.to_string());
+            }
+            self.count(&["unmapped".to_string()]);
+            return Ok(());
+        }
         let payload = json!({
             "projection": null,
             "note": note,
@@ -447,19 +638,76 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// A pull's unmapped resources: one `fhir_unmapped_summary` item per type, with the count, the
+    /// notes, the source and the first refs. The pulled bundle is the item's document and holds
+    /// every resource as received. Review accepts none: a person reads it and dismisses it.
+    async fn queue_grouped(&mut self, conn: &mut PgConnection) -> Result<()> {
+        let Some(pull) = self.pull.as_mut() else {
+            return Ok(());
+        };
+        let groups = std::mem::take(&mut pull.unmapped);
+        let source = json!({"id": pull.source_id.to_string(), "kind": pull.kind, "label": pull.label});
+        for (rtype, group) in groups {
+            let payload = json!({
+                "projection": null,
+                "resource_type": rtype,
+                "count": group.count,
+                "notes": group.notes,
+                "source": source,
+                "import_refs": group.refs,
+            });
+            create_item(
+                &mut *conn,
+                &ReviewItemIn {
+                    kind: "fhir_unmapped_summary".into(),
+                    household_id: Some(self.profile.household_id),
+                    profile_id: Some(self.profile.id),
+                    document_id: Some(self.document_id),
+                    reasons: vec!["unmapped".into()],
+                    payload,
+                    ..ReviewItemIn::default()
+                },
+            )
+            .await?;
+            self.summary.queued += 1;
+        }
+        Ok(())
+    }
+
     async fn one(&mut self, conn: &mut PgConnection, e: &Entry) -> Result<()> {
         let r = &e.resource;
         let rtype = e.rtype();
-        if mapping::SUPPORTING.contains(&rtype) || rtype == "DiagnosticReport" {
+        if is_context(rtype) {
+            self.tally.context += 1;
             return Ok(()); // context for the others; kept in the stored bundle
         }
-        let rid = match py::get_truthy(Some(r), "id") {
-            Some(id) => py::py_str(Some(id)),
-            None => format!(
-                "sha-{}",
-                &hex::encode(Sha256::digest(py::dumps_sorted(r).as_bytes()))[..16]
-            ),
+        // A pull asks the source's ledger first: a resource it sent before, in this version, in a
+        // pull that still holds it, is not imported again, whatever a person did with it since.
+        let pulled = match &self.pull {
+            Some(p) => {
+                let key = pull_key(r);
+                if ownhealth_core::dedup::pulled_before(&mut *conn, p.source_id, &key, self.profile.id).await? {
+                    self.tally.duplicate += 1;
+                    self.skipped("duplicate");
+                    return Ok(());
+                }
+                Some((p.source_id, p.sha.to_string(), key))
+            }
+            None => None,
         };
+        self.tally.new += 1;
+        self.import_one(&mut *conn, e).await?;
+        if let Some((source_id, sha, key)) = pulled {
+            ownhealth_core::dedup::record_pulled(&mut *conn, source_id, &key, &sha, self.document_id, self.profile.id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn import_one(&mut self, conn: &mut PgConnection, e: &Entry) -> Result<()> {
+        let r = &e.resource;
+        let rtype = e.rtype();
+        let rid = resource_id(r);
         let tail = format!("{rtype}/{rid}");
         let reference = format!("{}/{tail}", self.bundle_key);
         let pid = self.profile.id;
