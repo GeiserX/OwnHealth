@@ -123,6 +123,142 @@ services:
       - caddy-data:/data
       - caddy-config:/config
 
+  # `wearables` profile (v1.0): the Open Wearables sidecar (MIT), which holds the Oura, Whoop, Polar and
+  # Withings logins; the app pulls from its REST API. Turn it on with COMPOSE_PROFILES=wearables in .env
+  # and three more files in secrets/: ow_db_password, ow_secret_key and ow_admin_password (long random
+  # strings, e.g. `openssl rand -hex 32 > secrets/ow_secret_key`).
+  # - Quiet: no usage pings, no Sentry, no OTLP export, no outgoing webhooks. It calls only the vendors.
+  # - Fenced off: no published port (Caddy does not route to it), none of OwnHealth's secrets, and its
+  #   own database and role on the same Postgres (deploy/db/ow-role.sql). That role cannot connect to
+  #   the ownhealth database. OW's database is a cache, so `ownhealth backup` leaves it out.
+  # - Redis is OW's Celery broker, on an internal network that only the sidecar joins. It keeps nothing
+  #   on disk: a restart drops queued syncs, and beat queues them again.
+  ow-db-init:
+    profiles: [wearables]
+    image: postgres:17.11
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        PGPASSWORD=$$(cat /run/secrets/db_password) && OPENWEARABLES_ROLE_PASSWORD=$$(cat /run/secrets/ow_db_password) &&
+        export PGPASSWORD OPENWEARABLES_ROLE_PASSWORD &&
+        exec psql postgresql://ownhealth@db:5432/ownhealth -X -q -v ON_ERROR_STOP=1
+        -v ow_role=openwearables -v ow_db=openwearables -f /opt/ow-role.sql
+    secrets: [db_password, ow_db_password]
+    volumes:
+      - ./deploy/db/ow-role.sql:/opt/ow-role.sql:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  ow-app:
+    profiles: [wearables]
+    image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
+    restart: unless-stopped
+    depends_on:
+      ow-db-init:
+        condition: service_completed_successfully
+      ow-redis:
+        condition: service_started
+    environment: &ow-env
+      ENVIRONMENT: production
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: openwearables
+      DB_USER: openwearables
+      REDIS_HOST: ow-redis
+      UV_CACHE_DIR: /tmp/uv # the root filesystem is read-only
+      TELEMETRY_ENABLED: "false"
+      DO_NOT_TRACK: "1"
+      SENTRY_ENABLED: "false"
+      OTEL_ENABLED: "false"
+      OUTGOING_WEBHOOKS_ENABLED: "false"
+    # OW reads its secrets from the environment only, so the shell hands the files over, then runs
+    # migrations, seeds, and the API on :8000 (compose network only)
+    command:
+      - sh
+      - -c
+      - >-
+        DB_PASSWORD=$$(cat /run/secrets/ow_db_password) && SECRET_KEY=$$(cat /run/secrets/ow_secret_key) &&
+        ADMIN_PASSWORD=$$(cat /run/secrets/ow_admin_password) &&
+        : "$${DB_PASSWORD:?empty}" "$${SECRET_KEY:?empty}" "$${ADMIN_PASSWORD:?empty}" &&
+        export DB_PASSWORD SECRET_KEY ADMIN_PASSWORD && exec scripts/start/app.sh
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 300s
+    secrets: [ow_db_password, ow_secret_key, ow_admin_password]
+    networks: [default, wearables]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  ow-worker:
+    profiles: [wearables]
+    image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
+    restart: unless-stopped
+    depends_on:
+      ow-app:
+        condition: service_healthy # OW's migrations ran
+    environment: *ow-env
+    command:
+      - sh
+      - -c
+      - >-
+        DB_PASSWORD=$$(cat /run/secrets/ow_db_password) && SECRET_KEY=$$(cat /run/secrets/ow_secret_key) &&
+        : "$${DB_PASSWORD:?empty}" "$${SECRET_KEY:?empty}" &&
+        export DB_PASSWORD SECRET_KEY && exec scripts/start/worker.sh
+    secrets: [ow_db_password, ow_secret_key]
+    networks: [default, wearables]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  ow-beat:
+    profiles: [wearables]
+    image: themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
+    restart: unless-stopped
+    depends_on:
+      ow-app:
+        condition: service_healthy
+    environment: *ow-env
+    command:
+      - sh
+      - -c
+      - >-
+        DB_PASSWORD=$$(cat /run/secrets/ow_db_password) && SECRET_KEY=$$(cat /run/secrets/ow_secret_key) &&
+        : "$${DB_PASSWORD:?empty}" "$${SECRET_KEY:?empty}" &&
+        export DB_PASSWORD SECRET_KEY && exec scripts/start/beat.sh
+    secrets: [ow_db_password, ow_secret_key]
+    networks: [default, wearables]
+    # not read-only: celery beat keeps its schedule file in its working directory
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  ow-redis:
+    profiles: [wearables]
+    image: redis:8.10.3
+    restart: unless-stopped
+    user: redis # the image's own user, so the entrypoint needs no capability to switch to it
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks: [wearables]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  wearables:
+    internal: true # no route out: Redis reaches nothing, and only the sidecar reaches Redis
+
 secrets:
   db_password:
     file: ./secrets/db_password # the owner role's password (migrations, backups, restores)
@@ -134,6 +270,12 @@ secrets:
     file: ./secrets/secrets_key # inbox credentials at rest; keep a copy with the restic password
   restic_password:
     file: ./secrets/restic_password # keep a copy in your password manager: without it the backup is useless
+  ow_db_password:
+    file: ./secrets/ow_db_password # wearables profile: Open Wearables' database role
+  ow_secret_key:
+    file: ./secrets/ow_secret_key # wearables profile: signs OW's sessions and API keys
+  ow_admin_password:
+    file: ./secrets/ow_admin_password # wearables profile: OW's admin account
 
 volumes:
   ownhealth-data:
