@@ -1,6 +1,6 @@
 [package]
 name = "ownhealth-devices"
-description = "Lane D (v0.2): Health Auto Export push, Gadgetbridge database import, Nightscout pull, CGM summaries."
+description = "Lane D (v0.2): Health Auto Export push, Gadgetbridge database import, Nightscout pull, LibreView and Dexcom Clarity CSV import, CGM summaries."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,6 +15,7 @@ ownhealth-core.workspace = true
 ownhealth-ingest-structured.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+csv.workspace = true
 futures.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
@@ -28,4 +29,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 ownhealth-core = { workspace = true, features = ["testing"] }
+ownhealth-normalize.workspace = true
 axum.workspace = true

@@ -9,9 +9,9 @@
 //! cleared, so importing it again runs the import instead of returning the old summary.
 //!
 //! Samples another still-active export also holds belong to whichever export brought them first
-//! (Apple Health) or last (Gadgetbridge, whose exports are cumulative); they leave with that one. A
-//! retracted Gadgetbridge export queues the profile's other active exports for import again, so what
-//! they hold comes back.
+//! (Apple Health, CGM exports) or last (Gadgetbridge, whose exports are cumulative); they leave with
+//! that one. A retracted Gadgetbridge or CGM export queues the profile's other active exports of its
+//! kind for import again, so what they hold comes back.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -105,20 +105,33 @@ pub fn retract_document_facts<'c>(
     })
 }
 
-/// The Gadgetbridge exports of the same profile that are still active are imported again, so the
-/// samples the retracted export had adopted from them (`Conflict::Adopt`) come back with them.
+/// The upload kinds whose other exports are imported again when one is retracted, with the flag their
+/// import writes: Gadgetbridge (samples adopted with `Conflict::Adopt`) and the LibreView and Clarity
+/// CSV exports (one job for both; readings kept by the first file with `Conflict::Keep`).
+const REIMPORTED: [(&str, &str); 2] = [("gadgetbridge_db", "gadgetbridge"), ("libreview_csv", "cgm_csv")];
+
+/// The exports of the same kind and profile that are still active are imported again, so the samples
+/// the retracted export held in their place come back with them.
 async fn reimport_cumulative(conn: &mut PgConnection, document_id: Uuid) -> Result<()> {
-    let Some(job) = ownhealth_core::documents::job_kind("gadgetbridge_db") else {
+    for (kind, flag) in REIMPORTED {
+        reimport_kind(&mut *conn, document_id, kind, flag).await?;
+    }
+    Ok(())
+}
+
+async fn reimport_kind(conn: &mut PgConnection, document_id: Uuid, kind: &str, flag: &str) -> Result<()> {
+    let Some(job) = ownhealth_core::documents::job_kind(kind) else {
         return Ok(());
     };
-    let mime = ownhealth_core::documents::mime("gadgetbridge_db").unwrap_or_default();
+    let mime = ownhealth_core::documents::mime(kind).unwrap_or_default();
     let others: Vec<Uuid> = sqlx::query_scalar(
         "update document o set flags = o.flags - 'import' from document d where d.id = $1 and d.mime = $2 \
          and o.mime = $2 and o.profile_id = d.profile_id and o.id <> d.id and o.status = 'active' \
-         and o.flags ? 'import' returning o.id",
+         and o.flags ? 'import' and o.flags ? $3 returning o.id",
     )
     .bind(document_id)
     .bind(mime)
+    .bind(flag)
     .fetch_all(&mut *conn)
     .await?;
     for id in others {

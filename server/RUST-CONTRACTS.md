@@ -494,6 +494,8 @@ job "ocr.document" on queue "ocr": {document_id, pages, why}; writes ocr_run, wo
 // D: ownhealth_devices
 hae::import_push(conn, &BlobStore, &Source, body) -> Result<RunOutcome>
 gadgetbridge job "import.gadgetbridge" (core sniffs "SQLite format 3\0" as gadgetbridge_db)
+cgm_csv job "import.cgm_csv" (core sniffs the header row as libreview_csv or dexcom_clarity_csv; v1.0 slice 28)
+cgm_csv::import_cgm_csv(conn, &BlobStore, document_id, source_id, zone) -> Result<(ImportSummary, Value)>
 nightscout::poll_nightscout(JobContext, Source)          // poller "nightscout"
 cgm::summarize(&[(DateTime, f64)], start, end, interval_minutes) -> Result<CgmSummary>
 cgm::cgm_summary(conn, profile_id, end, days) -> Result<CgmSummary>

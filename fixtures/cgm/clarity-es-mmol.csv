@@ -1,0 +1,12 @@
+Índice,Marca de tiempo (AAAA-MM-DDThh:mm:ss),Tipo de evento,Subtipo de evento,Información del paciente,Información del dispositivo,ID del dispositivo de origen,Valor de glucosa (mmol/L),Valor de insulina (u),Valor de carbohidratos (gramos),Duración (hh:mm:ss),Tasa de cambio de glucosa (mmol/L/min),Hora del transmisor (número entero largo),ID del transmisor
+1,,Nombre,,Lucía,,,,,,,,,
+2,,Apellido,,Rivera,,,,,,,,,
+3,,Fecha de nacimiento,,2017-06-21,,,,,,,,,
+4,,Dispositivo,,,Dexcom G6,Android G6,,,,,,,
+5,,Alerta,Alto,,,Android G6,"13,9",,,,,,
+6,2026-11-14T13:00:02,EGV,,,,Android G6,"5,9",,,,,1200000,81R2KD
+7,2026-11-14T13:05:02,EGV,,,,Android G6,Bajo,,,,,1200300,81R2KD
+8,2026-11-14T13:10:02,EGV,,,,Android G6,"3,9",,,,,1200600,81R2KD
+9,2026-11-14T13:15:02,EGV,,,,Android G6,"10,0",,,,,1200900,81R2KD
+10,2026-11-14T13:20:02,EGV,,,,Android G6,Alto,,,,,1201200,81R2KD
+11,2026-11-14T13:25:02,EGV,,,,Android G6,"8,3",,,,,1201500,81R2KD

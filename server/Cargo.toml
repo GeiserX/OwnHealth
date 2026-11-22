@@ -47,6 +47,8 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
+# the LibreView and Dexcom Clarity CSV exports (slice 28)
+csv = "1.4"
 uuid = { version = "1.29", features = ["v4", "serde"] }
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
 rust_decimal = { version = "1.43", features = ["serde-with-str", "maths"] }

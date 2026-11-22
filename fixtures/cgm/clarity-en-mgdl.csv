@@ -1,0 +1,21 @@
+Index,Timestamp (YYYY-MM-DDThh:mm:ss),Event Type,Event Subtype,Patient Info,Device Info,Source Device ID,Glucose Value (mg/dL),Insulin Value (u),Carb Value (grams),Duration (hh:mm:ss),Glucose Rate of Change (mg/dL/min),Transmitter Time (Long Integer),Transmitter ID
+1,,FirstName,,Lucía,,,,,,,,,
+2,,LastName,,Rivera,,,,,,,,,
+3,,DateOfBirth,,2017-06-21,,,,,,,,,
+4,,Device,,,Dexcom G7,Android G7,,,,,,,
+5,,Alert,High,,,Android G7,250,,,,,,
+6,,Alert,Low,,,Android G7,70,,,,,,
+7,,Alert,Urgent Low,,,Android G7,55,,,,,,
+8,,Alert,Signal Loss,,,Android G7,,,,0:20:00,,,
+9,2026-11-14T20:00:17,EGV,,,,Android G7,120,,,,,3456000,7Q2RLX
+10,2026-11-14T20:05:17,EGV,,,,Android G7,69,,,,,3456300,7Q2RLX
+11,2026-11-14T20:10:17,EGV,,,,Android G7,70,,,,,3456600,7Q2RLX
+12,2026-11-14T20:12:00,Calibration,,,,Android G7,118,,,,,,
+13,2026-11-14T20:15:17,EGV,,,,Android G7,Low,,,,,3456900,7Q2RLX
+14,2026-11-14T20:20:17,EGV,,,,Android G7,88,,,,,3457200,7Q2RLX
+15,2026-11-14T20:25:17,EGV,,,,Android G7,180,,,,,3457500,7Q2RLX
+16,2026-11-14T20:30:17,EGV,,,,Android G7,181,,,,,3457800,7Q2RLX
+17,2026-11-14T20:35:17,EGV,,,,Android G7,High,,,,,3458100,7Q2RLX
+18,2026-11-14T20:40:17,EGV,,,,Android G7,150,,,,,3458400,7Q2RLX
+19,2026-11-14T20:45:17,EGV,,,,Android G7,133,,,,,3458700,7Q2RLX
+20,2026-11-14T20:55:00,Insulin,Fast-Acting,,,Android G7,,2.5,,,,,
