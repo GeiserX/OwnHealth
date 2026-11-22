@@ -436,8 +436,9 @@ async fn records(
     Ok(out)
 }
 
-/// Documents that are not lab reports (draws are lab events) or genome files (genome events), on the
-/// day they were collected, else reported. A document with neither date has no place on the timeline
+/// Documents that are not lab reports (draws are lab events), genome files (genome events) or raw
+/// wearables exports (their activities are on the Wearables screen, under read:wearables), on the day
+/// they were collected, else reported. A document with neither date has no place on the timeline
 /// (the day it was uploaded is not a day anything happened). A document with a sensitive fact is
 /// sensitive. A document has no `src`: it is its own source.
 async fn documents(conn: &mut PgConnection, pid: Uuid, sens: bool, t: &Words) -> R<Vec<Option<Event>>> {
@@ -449,7 +450,8 @@ async fn documents(conn: &mut PgConnection, pid: Uuid, sens: bool, t: &Words) ->
     let sql = format!(
         "select d.id, d.doc_type, d.filename, d.provider_name, coalesce(d.collected_at, d.reported_at)::date as day \
          from document d where d.profile_id = $1 and d.status = 'active' \
-         and d.doc_type is distinct from 'lab_report' and d.doc_type is distinct from 'genomics'{hide} \
+         and d.doc_type is distinct from 'lab_report' and d.doc_type is distinct from 'genomics' \
+         and d.doc_type is distinct from 'wearables'{hide} \
          order by d.id"
     );
     let mut out = Vec::new();

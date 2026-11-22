@@ -12,8 +12,9 @@
 //! POST /api/documents/{id}/retract              {"reason": "..."}
 //! ```
 //!
-//! Lab reports need `read:labs`, other documents `read:records`; page text and words also need
-//! `read:documents_text`. A document on a profile the caller cannot read answers 404 like an unknown
+//! Lab reports need `read:labs`, a raw wearables export (`doc_type` `wearables`: a FIT activity file,
+//! a Gadgetbridge database) `read:wearables`, other documents `read:records`; page text and words also
+//! need `read:documents_text`. A document on a profile the caller cannot read answers 404 like an unknown
 //! id. Every read writes one audit row. Filenames and page text are untrusted and go out marked as
 //! such.
 
@@ -26,7 +27,7 @@ use axum::{Json, Router};
 use ownhealth_core::access::{Permission, Principal, ProfileRef, effective_permission, require};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::blobs::{BlobError, BlobOwner};
-use ownhealth_core::documents::{document_is_sensitive, sensitive_document_sql};
+use ownhealth_core::documents::{WEARABLES_DOC_TYPE, document_is_sensitive, sensitive_document_sql};
 use ownhealth_core::pyjson::{parse_datetime, pydantic_datetime, row_to_json};
 use ownhealth_core::{Error, Runtime};
 use serde_json::{Map, Value, json};
@@ -65,10 +66,10 @@ fn untrusted(s: Option<&str>, origin: &str) -> Value {
 }
 
 fn scope_for(doc_type: Option<&str>) -> &'static str {
-    if doc_type == Some("lab_report") {
-        "read:labs"
-    } else {
-        "read:records"
+    match doc_type {
+        Some("lab_report") => "read:labs",
+        Some(WEARABLES_DOC_TYPE) => "read:wearables",
+        _ => "read:records",
     }
 }
 
@@ -256,11 +257,20 @@ pub async fn list_for(
         format!("not {}", sensitive_document_sql("d.id"))
     };
     let mut wh = vec!["d.profile_id = $1".to_string()];
-    if labs && !records {
-        wh.push("d.doc_type = 'lab_report'".into());
-    } else if records && !labs {
-        wh.push("d.doc_type is distinct from 'lab_report'".into());
+    // each type under the scope it needs (scope_for): a wearables export only with read:wearables
+    let mut types = Vec::new();
+    if labs {
+        types.push("d.doc_type = 'lab_report'".to_string());
     }
+    if records {
+        types.push(format!(
+            "(d.doc_type is null or d.doc_type not in ('lab_report', '{WEARABLES_DOC_TYPE}'))"
+        ));
+    }
+    if perm.has("read:wearables") {
+        types.push(format!("d.doc_type = '{WEARABLES_DOC_TYPE}'"));
+    }
+    wh.push(format!("({})", types.join(" or ")));
     wh.push("($3::text is null or d.doc_type = $3)".into());
     if fhir_newest {
         wh.push(FHIR_IMPORT.into());

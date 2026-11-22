@@ -96,7 +96,9 @@ pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKin
     if is_fit_header(head) {
         return "fit";
     }
-    if head.starts_with(b"\x1f\x8b") && gzip_holds_fit(head) {
+    // a .fit.gz name goes to the FIT importer even when its first block does not unpack, so a damaged
+    // one is refused as a damaged FIT file
+    if head.starts_with(b"\x1f\x8b") && (gzip_holds_fit(head) || name.ends_with(".fit.gz")) {
         return "fit_gz";
     }
     if name.ends_with(".vcf.gz") || name.ends_with(".vcf.bgz") || head.starts_with(b"\x1f\x8b") {
@@ -128,6 +130,24 @@ pub struct DocumentRef {
     pub created: bool,
     pub reactivated: bool,
 }
+
+/// The `document.doc_type` check constraint (migration 1221; `check_mirror.rs` keeps them equal).
+pub const DOC_TYPES: [&str; 8] = [
+    "lab_report",
+    "imaging_report",
+    "discharge",
+    "prescription",
+    "genomics",
+    "ecg",
+    "other",
+    WEARABLES_DOC_TYPE,
+];
+
+/// The `doc_type` of a raw wearables export: a FIT activity file (`import.fit`) and a Gadgetbridge
+/// database (`import.gadgetbridge`) today. Every wearables importer stores its file with this type, so a
+/// wearables document needs `read:wearables` (not `read:records`) to be listed, opened or downloaded:
+/// it holds every reading, and a FIT file held the route.
+pub const WEARABLES_DOC_TYPE: &str = "wearables";
 
 /// The `document_source.channel` check constraint: how one arrival came in.
 pub const CHANNELS: [&str; 22] = [

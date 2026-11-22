@@ -5,7 +5,7 @@ mod lane_i;
 
 use axum::body::Body;
 use http::{Request, StatusCode, header};
-use lane_i::{R, app, glucose_pdf};
+use lane_i::{App, R, app, glucose_pdf};
 use serde_json::json;
 
 fn blob_count(dir: &std::path::Path) -> anyhow::Result<usize> {
@@ -259,5 +259,166 @@ async fn a_wearables_import_result_shows_only_to_members_who_may_read_wearables(
     );
     let (_, owner) = a.get("alex", &uri).await?;
     assert!(results(&owner).iter().all(|(_, r)| *r == result), "{owner}");
+    Ok(())
+}
+
+/// `GET /documents/{id}/file` as `who`: status, headers and the bytes.
+async fn file_as(a: &App, who: &str, id: uuid::Uuid) -> anyhow::Result<(StatusCode, http::HeaderMap, Vec<u8>)> {
+    let req = Request::get(format!("/documents/{id}/file"))
+        .header(header::COOKIE, a.cookie(who).await?)
+        .body(Body::empty())?;
+    a.send_raw(req).await
+}
+
+/// A raw wearables export (a FIT activity file, a Gadgetbridge database) holds every reading of a device,
+/// and a FIT file held the route: it is listed, opened and downloaded only with `read:wearables`;
+/// `read:records` is not enough. The answer is the one every document type gives for a missing scope.
+#[tokio::test]
+async fn a_wearables_document_needs_read_wearables_to_be_listed_opened_or_downloaded() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let household: uuid::Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(alex)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let mut docs = Vec::new();
+    for (name, mime, doc_type, bytes) in [
+        ("run.fit", "application/vnd.ant.fit", "wearables", &b"a FIT file"[..]),
+        (
+            "Gadgetbridge.db",
+            "application/vnd.sqlite3",
+            "wearables",
+            &b"a Gadgetbridge database"[..],
+        ),
+        ("letter.pdf", "application/pdf", "other", &b"a letter"[..]),
+    ] {
+        let sha = a.rt.blobs.put_bytes(bytes)?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type) \
+             values ($1, $2, decode($3, 'hex'), $4, $5, $6, $7) returning id",
+        )
+        .bind(household)
+        .bind(alex)
+        .bind(&sha)
+        .bind(name)
+        .bind(mime)
+        .bind(i64::try_from(bytes.len())?)
+        .bind(doc_type)
+        .fetch_one(&a.rt.pool)
+        .await?;
+        docs.push((id, bytes));
+    }
+    let [(fit, _), (gadgetbridge, _), (letter, _)] = docs[..] else {
+        anyhow::bail!("three documents");
+    };
+    let grant = |categories: &'static [&'static str]| {
+        let pool = a.rt.pool.clone();
+        let (sam, alex) = (a.family.profile("sam"), alex);
+        async move {
+            let user: uuid::Uuid = sqlx::query_scalar("select user_id from profile where id = $1")
+                .bind(sam)
+                .fetch_one(&pool)
+                .await?;
+            sqlx::query("update profile_grant set categories = $3 where user_id = $1 and profile_id = $2")
+                .bind(user)
+                .bind(alex)
+                .bind(categories)
+                .execute(&pool)
+                .await?;
+            anyhow::Ok(())
+        }
+    };
+    let listed = |v: &serde_json::Value| -> Vec<String> {
+        v["items"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|d| d["id"].as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    // records and labs, no wearables: the letter only
+    grant(&["read:summary", "read:records", "read:labs"]).await?;
+    let (s, v) = a.get("sam", "/profiles/alex/documents").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(listed(&v), [letter.to_string()]);
+    for (id, bytes) in &docs[..2] {
+        let (s, v) = a.get("sam", &format!("/documents/{id}")).await?;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+        assert!(v.to_string().contains("This needs read:wearables."), "{v}");
+        let (s, _, body) = file_as(&a, "sam", *id).await?;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert!(!body.windows(bytes.len()).any(|w| w == *bytes), "the bytes went out");
+    }
+    // with wearables: all three, and the files
+    grant(&["read:summary", "read:records", "read:labs", "read:wearables"]).await?;
+    let (_, v) = a.get("sam", "/profiles/alex/documents").await?;
+    let mut ids = listed(&v);
+    ids.sort();
+    let mut want = vec![fit.to_string(), gadgetbridge.to_string(), letter.to_string()];
+    want.sort();
+    assert_eq!(ids, want);
+    for (id, bytes) in &docs {
+        let (s, v) = a.get("sam", &format!("/documents/{id}")).await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let (s, _, body) = file_as(&a, "sam", *id).await?;
+        assert_eq!((s, body.as_slice()), (StatusCode::OK, *bytes));
+    }
+    // wearables without records: the exports, not the letter
+    grant(&["read:summary", "read:labs", "read:wearables"]).await?;
+    let (_, v) = a.get("sam", "/profiles/alex/documents").await?;
+    let mut ids = listed(&v);
+    ids.sort();
+    let mut want = vec![fit.to_string(), gadgetbridge.to_string()];
+    want.sort();
+    assert_eq!(ids, want);
+    let (s, _) = a.get("sam", &format!("/documents/{letter}")).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+/// Migration 1221 moves the wearables exports stored before it to `doc_type` `wearables`: a Gadgetbridge
+/// import (its flag or its mime) and a FIT file; any other document keeps its type.
+#[tokio::test]
+async fn the_migration_moves_stored_wearables_exports_to_their_type() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let household: uuid::Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(alex)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let mut ids = Vec::new();
+    for (i, (mime, flags)) in [
+        ("application/octet-stream", json!({"gadgetbridge": {"devices": 1}})),
+        ("application/vnd.sqlite3", json!({})),
+        ("application/vnd.ant.fit", json!({})),
+        ("application/pdf", json!({})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sha = a.rt.blobs.put_bytes(format!("export {i}").as_bytes())?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, doc_type, flags) \
+             values ($1, $2, decode($3, 'hex'), $4, 8, 'other', $5) returning id",
+        )
+        .bind(household)
+        .bind(alex)
+        .bind(&sha)
+        .bind(mime)
+        .bind(&flags)
+        .fetch_one(&a.rt.pool)
+        .await?;
+        ids.push(id);
+    }
+    sqlx::raw_sql(include_str!("../../../../migrations/1221_wearables_documents.sql"))
+        .execute(&a.rt.pool)
+        .await?;
+    let mut types = Vec::new();
+    for id in &ids {
+        let t: Option<String> = sqlx::query_scalar("select doc_type from document where id = $1")
+            .bind(id)
+            .fetch_one(&a.rt.pool)
+            .await?;
+        types.push(t.unwrap_or_default());
+    }
+    assert_eq!(types, ["wearables", "wearables", "wearables", "other"]);
     Ok(())
 }
