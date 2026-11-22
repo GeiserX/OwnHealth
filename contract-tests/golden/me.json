@@ -10,6 +10,7 @@
   "profiles": {
     "[]": {
       "age": "int",
+      "break_glass": "bool",
       "country": "string",
       "display_name": "string",
       "genome_sensitive_ui": "bool",
