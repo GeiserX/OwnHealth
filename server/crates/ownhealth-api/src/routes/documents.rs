@@ -195,6 +195,24 @@ pub async fn visible_document(
     })
 }
 
+/// Whether `GET /documents/{id}/file` serves this document to `perm` (the caller's permission on its
+/// profile): the scope its type needs, and read:sensitive when it is sensitive, as
+/// [`visible_document`] decides. A review item that only points at its document (a pull's
+/// `fhir_unmapped_summary`) shows on the same terms.
+pub async fn file_opens(conn: &mut PgConnection, perm: &Permission, document_id: Uuid) -> Result<bool, ApiError> {
+    let doc_type: Option<Option<String>> = sqlx::query_scalar("select doc_type from document where id = $1")
+        .bind(document_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let Some(doc_type) = doc_type else {
+        return Ok(false);
+    };
+    if !perm.scopes.contains(scope_for(doc_type.as_deref())) {
+        return Ok(false);
+    }
+    Ok(perm.has("read:sensitive") || !document_is_sensitive(conn, document_id).await?)
+}
+
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
