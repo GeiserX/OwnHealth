@@ -13,3 +13,7 @@ declare module 'node:fs' {
 declare module 'node:os' {
 	export function tmpdir(): string;
 }
+// The CGM import checks upload the synthetic exports in the repository's fixtures/cgm folder.
+declare module 'node:url' {
+	export function fileURLToPath(url: URL): string;
+}

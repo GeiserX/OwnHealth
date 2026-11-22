@@ -132,7 +132,7 @@ export interface ReviewItem {
 
 export interface ImportItem {
 	filename: string;
-	kind: 'pdf' | 'image' | 'apple_health_zip' | 'fhir_json' | 'fhir_ndjson' | 'genome_facts' | 'vcf' | 'tbi';
+	kind: 'pdf' | 'image' | 'apple_health_zip' | 'fhir_json' | 'fhir_ndjson' | 'genome_facts' | 'vcf' | 'tbi' | 'libreview_csv' | 'dexcom_clarity_csv';
 	sha256: string;
 	document_id?: Uuid;
 	duplicate?: boolean;

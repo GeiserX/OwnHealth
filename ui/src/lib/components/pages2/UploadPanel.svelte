@@ -1,12 +1,14 @@
 <script lang="ts">
 	// Upload into the current profile: lab PDF or photo, Apple Health export.zip, FHIR / IPS bundle,
-	// or OwnGenome output (genome-facts.json plus its VCF and index, as files or the whole folder).
-	// Each file becomes an import job; this panel polls the jobs until they finish.
+	// a LibreView or Dexcom Clarity CSV export, or OwnGenome output (genome-facts.json plus its VCF and
+	// index, as files or the whole folder). Each file becomes an import job; this panel polls the jobs
+	// until they finish, and shows what a CGM export brought under its row.
 	import { listJobs, uploadFiles } from '#lib/api';
 	import type { ImportItem, JobInfo } from '#lib/api/types';
 	import { t } from '#lib/i18n/index.svelte';
 	import { errRaw, errText, tf, tp } from '#lib/components/pages1/util.svelte';
 	import { poller } from '#lib/logic/poll';
+	import { cgmLines, type CgmLine } from '#lib/logic/cgm_import';
 
 	// ondone gets the documents the finished jobs made, in upload order; rowsOf counts a document's rows to review.
 	let {
@@ -86,6 +88,7 @@
 		return { word: t('i2_job_' + j.state), cls: j.state === 'done' ? 'p-ok' : j.state === 'failed' || j.state === 'dead' ? 'p-out' : 'p-info' };
 	}
 	const files = (e: Event) => Array.from((e.currentTarget as HTMLInputElement).files ?? []);
+	const lineText = (l: CgmLine) => (l.n != null ? tp(l.key, l.n, l.vars) : tf(l.key, l.vars ?? {}));
 </script>
 
 <section
@@ -108,7 +111,7 @@
 		<button class="btn pri" onclick={() => fileEl?.click()} disabled={busy}>{t('i2_up_files')}</button>
 		<button class="btn" onclick={() => dirEl?.click()} disabled={busy}>{t('i2_up_folder')}</button>
 		<span class="muted" style="font-size:12px">{t('i2_up_drop')}</span>
-		<input bind:this={fileEl} type="file" multiple hidden accept=".pdf,image/*,.heic,.zip,.json,.ndjson,.gz,.bgz,.tbi,.db,.sqlite,.sqlite3,application/vnd.sqlite3,application/x-sqlite3,application/octet-stream" onchange={(e) => send(files(e))} />
+		<input bind:this={fileEl} type="file" multiple hidden accept=".pdf,image/*,.heic,.zip,.json,.ndjson,.gz,.bgz,.tbi,.db,.sqlite,.sqlite3,.csv,text/csv,application/vnd.sqlite3,application/x-sqlite3,application/octet-stream" onchange={(e) => send(files(e))} />
 		<input bind:this={dirEl} type="file" hidden {...{ webkitdirectory: true }} onchange={(e) => send(files(e), true)} />
 	</div>
 	<div class="note" style="margin-top:8px">
@@ -126,12 +129,22 @@
 					{@const j = i.job_id != null ? jobs[i.job_id] : undefined}
 					{@const d = docOf(i)}
 					{@const n = d && j?.state === 'done' ? rowsOf(d) : 0}
+					{@const cgm = j?.state === 'done' ? cgmLines(j.result) : null}
 					<tr>
 						<td style="overflow-wrap:anywhere">{#if d && (j?.state === 'done' || i.duplicate)}<a href="?doc={d}">{i.filename}</a>{:else}{i.filename}{/if}</td>
 						<td class="dim" title={i.kind}>{t('i2_ik_' + i.kind) !== 'i2_ik_' + i.kind ? t('i2_ik_' + i.kind) : i.kind}</td>
 						<td style="white-space:nowrap"><span class="pill {s.cls}"><i aria-hidden="true"></i>{s.word}</span>{#if n}<a class="dim" style="font-size:11.5px;margin-left:8px" href="?doc={d}">{tp('i2_up_rows', n)}</a>{/if}</td>
 						<td class="dim" style="font-size:11.5px" title={j?.last_error ?? undefined}>{j?.last_error ? errText(new Error(j.last_error)) : ''}</td>
 					</tr>
+					{#if cgm}
+						<tr>
+							<td colspan="4">
+								<ul class="cgm-lines" aria-label={i.filename}>
+									{#each cgm as l}<li class:dim={l.key !== 'i2_cgm_imported'}>{lineText(l)}</li>{/each}
+								</ul>
+							</td>
+						</tr>
+					{/if}
 				{/each}
 			</tbody>
 		</table>
@@ -148,5 +161,15 @@
 	.up.over {
 		border-color: var(--accent);
 		background: var(--accent-bg);
+	}
+	.cgm-lines {
+		margin: 0;
+		padding: 0 0 4px 0;
+		list-style: none;
+		font-size: 12px;
+		overflow-wrap: anywhere;
+	}
+	.cgm-lines li + li {
+		margin-top: 2px;
 	}
 </style>
