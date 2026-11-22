@@ -45,5 +45,6 @@ uuid.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 tempfile.workspace = true
 ownhealth-core = { path = ".", features = ["testing"] }
