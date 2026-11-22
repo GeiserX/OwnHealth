@@ -498,6 +498,7 @@ async fn a_restore_anchors_the_head_it_restored() -> R {
     let report = ownhealth_ops::restore(&settings, &older).await?;
     assert_eq!(report["ok"], true, "{report:#}");
     assert_eq!(report["audit_anchor"]["seq"], seq, "{report:#}");
+    assert_eq!(report["audit_anchor_error"], Value::Null, "{report:#}");
     let a = anchor(&l)?;
     assert_eq!(
         (a["seq"].clone(), a["hash"].clone(), a["at"].clone()),
@@ -514,6 +515,42 @@ async fn a_restore_anchors_the_head_it_restored() -> R {
         (Value::Bool(true), Value::from("ok")),
         "{s:#}"
     );
+    Ok(())
+}
+
+/// A restore checks the anchor folder as a backup does (review PR 75, N2): it never anchors through
+/// a symlinked folder or into one others may write. The restore itself still succeeds, and its
+/// report says why no anchor was set.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restore_does_not_anchor_in_a_folder_others_may_write() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let l = live().await?;
+    let older = l.backup("b1").await?;
+    let shared = l.dir.path().join("shared");
+    fs::create_dir_all(&shared)?;
+    let link = l.dir.path().join("anchor-link");
+    std::os::unix::fs::symlink(&shared, &link)?;
+    for (dir, m, why) in [
+        (link.clone(), 0o700, "the anchor folder is a symlink"),
+        (shared.clone(), 0o775, "the anchor folder is group-writable"),
+        (shared.clone(), 0o777, "the anchor folder is world-writable"),
+    ] {
+        fs::set_permissions(&shared, fs::Permissions::from_mode(m))?;
+        let fresh = TestDb::empty().await?;
+        let mut settings = fresh.settings(&l.dir.path().join(format!("fresh-{m:o}")))?;
+        settings.anchor_dir = Some(dir);
+        let report = ownhealth_ops::restore(&settings, &older).await?;
+        assert_eq!(report["ok"], true, "{why}: {report:#}");
+        assert_eq!(report["audit_anchor"], Value::Null, "{why}: {report:#}");
+        let said = report["audit_anchor_error"].as_str().unwrap_or_default();
+        assert!(said.contains(why), "{why}: {report:#}");
+        assert!(
+            !shared.join("audit-head.json").exists(),
+            "{why}: the restore wrote an anchor"
+        );
+        assert_eq!(mode(&shared)?, m, "{why}: the folder mode changed");
+    }
     Ok(())
 }
 

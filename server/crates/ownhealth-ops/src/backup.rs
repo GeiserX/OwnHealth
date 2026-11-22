@@ -876,7 +876,8 @@ async fn compare(url: &str, manifest: &Value, blob_root: &Path) -> Result<Value>
 /// When every check passed and the backup's log held, the restored log now ends at the head the
 /// manifest recorded, so the anchor is set to that head: the next backup and the audit page compare
 /// against the log as restored, not against a newer head the restored database never had. Otherwise
-/// the anchor stays as it was.
+/// the anchor stays as it was. A folder or file the backup would refuse gets no anchor either, and
+/// `audit_anchor_error` says why.
 pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
     let manifest = read_manifest(archive)?;
     let url = settings.sqlx_url();
@@ -923,15 +924,32 @@ pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
     let anchored = match (head["seq"].as_i64(), hash) {
         (Some(seq), Some(hash)) if report["ok"] == json!(true) && head["broken"].is_null() => {
             let at = manifest["created_at"].as_str().unwrap_or_default().to_string();
-            write_anchor(
-                &settings.anchor_path(),
-                &Anchor {
-                    seq,
-                    hash,
-                    at: at.clone(),
-                },
-            )?;
-            json!({"seq": seq, "at": at})
+            // The same folder and file check as `read_anchor`: a restore never anchors through a
+            // symlink or where others may write. The data is loaded by now, so a refused or failed
+            // anchor does not fail the restore; the report says why none was set.
+            let dir = settings.anchor_path();
+            let file = anchor_file(settings);
+            let written = owner_writes_only(&dir, true)
+                .and_then(|_| owner_writes_only(&file, false))
+                .map_err(|why| anchor_unreadable(&file, &why))
+                .and_then(|_| {
+                    write_anchor(
+                        &dir,
+                        &Anchor {
+                            seq,
+                            hash,
+                            at: at.clone(),
+                        },
+                    )
+                });
+            match written {
+                Ok(()) => json!({"seq": seq, "at": at}),
+                Err(e) => {
+                    tracing::warn!("restore: no audit anchor set: {e}");
+                    report["audit_anchor_error"] = Value::String(e.to_string());
+                    Value::Null
+                }
+            }
         }
         _ => Value::Null,
     };
