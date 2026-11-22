@@ -27,9 +27,12 @@
 //! Times: the exports print local wall-clock times without an offset. They are read in the install's
 //! time zone (`OWNHEALTH_TIMEZONE`, the zone the MCP day budget already uses) when it is set, else in
 //! the zone the browser sent with the upload (`timezone` in the job payload), with Postgres's zone
-//! rules, and each reading keeps the offset that applied (`tz_offset_min`). A zone Postgres does not
-//! know is no zone. With neither, a time is read as UTC and keeps no offset: the rule the PDF and FHIR
-//! importers apply to a time without an offset. The zone used is a property of the file
+//! rules, and each reading keeps the offset that applied (`tz_offset_min`). An old zone name that the
+//! tz database links to a current one (`Asia/Calcutta`, which Chromium still reports) reads as the
+//! current one (`data/tz/backward`), since the Debian Postgres image ships only current names. A zone
+//! Postgres does not know by either name is no zone; it never refuses an upload. With neither zone, a
+//! time is read as UTC and keeps no offset: the rule the PDF and FHIR importers apply to a time without
+//! an offset. The zone used is a property of the file
 //! (`flags.cgm_csv.timezone`): an import again after a retraction reads the file in that zone, and the
 //! same file uploaded again in another zone has its own readings replaced, so one copy stays, at the
 //! new instants. On the night the clocks go back, the times of the repeated hour are ambiguous: those
@@ -727,16 +730,38 @@ pub enum Instant {
     Missing,
 }
 
-/// The zone `name` when Postgres knows it, else none.
+/// The tz database's `backward` table (release 2026f, public domain): `Link TARGET NAME` lines from an
+/// old or merged zone name to its current one.
+const TZ_BACKWARD: &str = include_str!("../../../../data/tz/backward");
+
+/// The current name of an old zone name (`Asia/Calcutta` gives `Asia/Kolkata`), when the tz database
+/// links it. Browsers still report some old names, and the Debian Postgres image knows only the
+/// current ones.
+pub fn zone_link_target(name: &str) -> Option<&'static str> {
+    TZ_BACKWARD.lines().find_map(|line| {
+        let line = line.split('#').next().unwrap_or_default();
+        match line.split_whitespace().collect::<Vec<_>>()[..] {
+            ["Link", target, link] if link == name => Some(target),
+            _ => None,
+        }
+    })
+}
+
+/// The zone `name` as Postgres knows it: the name itself, or the current name of an old one
+/// ([`zone_link_target`]). Else none, as for a name over 64 characters.
 pub async fn known_zone(conn: &mut PgConnection, name: Option<&str>) -> Result<Option<String>> {
-    let Some(name) = name.map(str::trim).filter(|z| !z.is_empty()) else {
+    let Some(name) = name.map(str::trim).filter(|z| !z.is_empty() && z.len() <= 64) else {
         return Ok(None);
     };
-    let known: bool = sqlx::query_scalar("select exists (select 1 from pg_timezone_names where name = $1)")
-        .bind(name)
-        .fetch_one(conn)
-        .await?;
-    Ok(known.then(|| name.to_string()))
+    let names: Vec<&str> = std::iter::once(name).chain(zone_link_target(name)).collect();
+    let known: Option<String> = sqlx::query_scalar(
+        "select n from unnest(cast($1 as text[])) with ordinality as x(n, i) \
+         where exists (select 1 from pg_timezone_names where name = x.n) order by x.i limit 1",
+    )
+    .bind(&names)
+    .fetch_optional(conn)
+    .await?;
+    Ok(known)
 }
 
 /// Read local times in `zone` with Postgres's zone rules; without one, as UTC.
@@ -977,6 +1002,17 @@ async fn import_in(
         .execute(&mut *conn)
         .await?;
         mark_imported(conn, document_id, &summary, None).await?;
+    } else {
+        // an import again keeps the first summary, but the count of readings the file holds moves: it
+        // gains those a retracted export held before it
+        sqlx::query(
+            "update document set flags = jsonb_set(flags, '{cgm_csv,held}', to_jsonb(cast($1 as bigint))) \
+             where id = $2 and jsonb_typeof(flags->'cgm_csv') = 'object'",
+        )
+        .bind(held)
+        .bind(document_id)
+        .execute(&mut *conn)
+        .await?;
     }
     Ok((summary, details))
 }
@@ -1149,6 +1185,34 @@ mod tests {
                 external_id: None
             }]
         );
+        Ok(())
+    }
+
+    /// The Clarity header and a short EGV row that ends at its glucose cell (8 of the 14 cells).
+    const CLARITY_HEAD: &str = "Index,Timestamp (YYYY-MM-DDThh:mm:ss),Event Type,Event Subtype,Patient Info,Device Info,\
+        Source Device ID,Glucose Value (mg/dL),Insulin Value (u),Carb Value (grams),Duration (hh:mm:ss),\
+        Glucose Rate of Change (mg/dL/min),Transmitter Time (Long Integer),Transmitter ID\n";
+
+    #[test]
+    fn a_short_last_row_that_ends_with_a_line_break_is_a_reading() -> Result<()> {
+        // shorter than the header and ending at its value, but the line break says nothing was cut
+        let text =
+            format!("{CLARITY_HEAD}1,2026-11-14T08:00:00,EGV,,,,iOS G7,101\n2,2026-11-14T08:05:00,EGV,,,,iOS G7,104\n");
+        let p = parse(text.as_bytes())?;
+        assert_eq!(p.readings.len(), 2, "{:?}", p.skipped);
+        assert!(p.skipped.is_empty(), "{:?}", p.skipped);
+        Ok(())
+    }
+
+    #[test]
+    fn a_short_row_before_the_last_one_is_a_reading_without_a_final_line_break() -> Result<()> {
+        // the file has no final line break, but only its last row can be the one a download cut
+        let text = format!(
+            "{CLARITY_HEAD}1,2026-11-14T08:00:00,EGV,,,,iOS G7,101\n2,2026-11-14T08:05:00,EGV,,,,iOS G7,104,,,,,9000300,8M4TQZ"
+        );
+        let p = parse(text.as_bytes())?;
+        assert_eq!(p.readings.len(), 2, "{:?}", p.skipped);
+        assert!(p.skipped.is_empty(), "{:?}", p.skipped);
         Ok(())
     }
 }

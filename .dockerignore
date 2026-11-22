@@ -12,6 +12,7 @@ data/*
 !data/summary
 !data/terminology
 !data/timeline
+!data/tz
 !data/vendors
 docs
 .git

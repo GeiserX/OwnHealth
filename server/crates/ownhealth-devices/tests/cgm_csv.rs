@@ -322,6 +322,13 @@ async fn retracting_one_of_two_overlapping_exports_keeps_what_the_other_holds() 
     import(&env, "clarity-en-mgdl.csv").await?;
     let (_, id) = upload(&env, "lucia", "longer.csv", &clarity_with_more(2)?).await?;
     assert_eq!(job(&env, id).await?.0, "done");
+    let held: Value = sqlx::query_scalar(
+        "select flags->'cgm_csv'->'held' from document where profile_id = $1 and filename = 'longer.csv'",
+    )
+    .bind(env.fam.profile("lucia"))
+    .fetch_one(&env.db.pool)
+    .await?;
+    assert_eq!(held, json!(2));
     let first: Uuid =
         sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'clarity-en-mgdl.csv'")
             .bind(env.fam.profile("lucia"))
@@ -345,6 +352,50 @@ async fn retracting_one_of_two_overlapping_exports_keeps_what_the_other_holds() 
     .fetch_all(&env.db.pool)
     .await?;
     assert_eq!(owners, vec![("longer.csv".to_string(), 10)]);
+    // the retraction cleared its import summary, so it was imported anew: its document screen counts
+    // the 10 it holds now, 8 of them brought by this run
+    let flags: Value =
+        sqlx::query_scalar("select flags from document where profile_id = $1 and filename = 'longer.csv'")
+            .bind(env.fam.profile("lucia"))
+            .fetch_one(&env.db.pool)
+            .await?;
+    assert_eq!(flags["cgm_csv"]["held"], json!(10), "{flags}");
+    assert_eq!(flags["import"]["accepted"], json!(8), "{flags}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_file_imported_again_counts_the_readings_it_holds_now() -> R {
+    let env = Env::new().await?;
+    import(&env, "clarity-en-mgdl.csv").await?;
+    let longer = clarity_with_more(2)?;
+    let (_, id) = upload(&env, "lucia", "longer.csv", &longer).await?;
+    assert_eq!(job(&env, id).await?.0, "done");
+    let doc = |name: &'static str| {
+        sqlx::query_scalar::<_, Uuid>("select id from document where profile_id = $1 and filename = $2")
+            .bind(env.fam.profile("lucia"))
+            .bind(name)
+            .fetch_one(&env.db.pool)
+    };
+    let (first, other) = (doc("clarity-en-mgdl.csv").await?, doc("longer.csv").await?);
+    // the first file's readings pass to the longer one while its import summary stays (as another
+    // writer could do); the same file uploaded again is an import again, and still counts what it holds
+    sqlx::query("update wearable_sample set document_id = $2 where document_id = $1")
+        .bind(first)
+        .bind(other)
+        .execute(&env.db.pool)
+        .await?;
+    let (_, id) = upload(&env, "lucia", "longer.csv", &longer).await?;
+    let (_, result, _) = job(&env, id).await?;
+    assert_eq!(result["cgm_csv"]["again"], json!(true), "{result}");
+    let flags: Value = sqlx::query_scalar("select flags from document where id = $1")
+        .bind(other)
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(flags["cgm_csv"]["held"], json!(10), "{flags}");
+    // the summary of its first import stays
+    assert_eq!(flags["cgm_csv"]["readings"], json!(2), "{flags}");
+    assert_eq!(flags["import"]["accepted"], json!(2), "{flags}");
     Ok(())
 }
 
@@ -438,6 +489,23 @@ async fn local_times_are_read_in_the_install_zone_across_a_clock_change() -> R {
         cgm_csv::known_zone(&mut c, Some("Europe/Madrid")).await?.as_deref(),
         Some("Europe/Madrid")
     );
+    // the old names Chromium reports read as their current ones, which Postgres knows
+    for (old, current) in [
+        ("Asia/Calcutta", "Asia/Kolkata"),
+        ("America/Buenos_Aires", "America/Argentina/Buenos_Aires"),
+        ("Europe/Kiev", "Europe/Kyiv"),
+        ("Asia/Saigon", "Asia/Ho_Chi_Minh"),
+        ("Asia/Katmandu", "Asia/Kathmandu"),
+        ("America/Indianapolis", "America/Indiana/Indianapolis"),
+        ("Atlantic/Faeroe", "Atlantic/Faroe"),
+    ] {
+        assert_eq!(
+            cgm_csv::known_zone(&mut c, Some(old)).await?.as_deref(),
+            Some(current),
+            "{old}"
+        );
+    }
+    assert_eq!(cgm_csv::known_zone(&mut c, Some(&"A".repeat(65))).await?, None);
     Ok(())
 }
 
@@ -642,6 +710,25 @@ async fn the_browser_zone_reads_the_times_when_the_server_has_none() -> R {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_browser_zone_with_an_old_name_reads_the_times_in_its_current_zone() -> R {
+    let env = Env::new().await?;
+    // Chromium reports India as Asia/Calcutta, a name the Debian Postgres image does not ship
+    let result = upload_in_zone(
+        &env,
+        "lucia",
+        "clarity.csv",
+        &fixture("clarity-en-mgdl.csv")?,
+        "Asia/Calcutta",
+    )
+    .await?;
+    assert_eq!(result["cgm_csv"]["timezone"], json!("Asia/Kolkata"), "{result}");
+    // 20:00:17 in India is 14:30:17 UTC (IST, +330)
+    let r = readings(&env, "lucia").await?;
+    assert_eq!(r[0], (utc(2026, 11, 14, 14, 30, 17), 120.0, Some(330)));
+    Ok(())
+}
+
 /// Each reading of the profile's CGM exports with the file that owns it.
 async fn owned(env: &Env, slug: &str) -> anyhow::Result<Vec<(String, DateTime<Utc>, f32)>> {
     Ok(sqlx::query_as(
@@ -685,7 +772,10 @@ async fn a_retraction_after_a_zone_change_reads_the_others_in_their_own_zone() -
     let env = Env::new().await?;
     // two exports read in Madrid; then the zone of a new run changes (here: none), and one is retracted
     import_in_zone(&env, "lucia", &fixture("clarity-en-mgdl.csv")?, Some("Europe/Madrid")).await?;
-    let sha = env.blobs.put_bytes(BlobOwner::Profile(env.fam.profile("lucia")), &fixture("libreview-en-mgdl.csv")?)?;
+    let sha = env.blobs.put_bytes(
+        BlobOwner::Profile(env.fam.profile("lucia")),
+        &fixture("libreview-en-mgdl.csv")?,
+    )?;
     let mut c = env.db.pool.acquire().await?;
     let other = ownhealth_ingest_structured::jobs::document_for(
         &mut c,

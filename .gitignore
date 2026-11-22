@@ -27,6 +27,7 @@ server/vendor/
 !/data/summary/
 !/data/terminology/
 !/data/timeline/
+!/data/tz/
 !/data/vendors/
 server/data/
 .env

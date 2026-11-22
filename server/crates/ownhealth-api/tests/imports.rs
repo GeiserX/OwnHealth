@@ -187,43 +187,59 @@ Source Device ID,Glucose Value (mg/dL),Insulin Value (u),Carb Value (grams),Dura
 Glucose Rate of Change (mg/dL/min),Transmitter Time (Long Integer),Transmitter ID\n\
 1,2026-11-14T20:00:17,EGV,,,,iOS G7,120,,,,,3456000,7Q2RLX\n";
 
-#[tokio::test]
-async fn a_cgm_upload_carries_the_browser_zone_and_an_unknown_zone_is_refused() -> R {
-    let a = app().await?;
-    let (s, v) = a
-        .upload(
-            "alex",
-            &[("profile", "lucia"), ("timezone", "Europe/Madrid")],
-            &[("clarity.csv", CLARITY)],
-        )
-        .await?;
-    assert_eq!(s, StatusCode::OK, "{v}");
+/// The zone a CGM upload's job carries (`payload.timezone`).
+async fn job_zone(a: &lane_i::App, v: &serde_json::Value) -> anyhow::Result<Option<String>> {
     let job = v["items"][0]["job_id"].as_i64().unwrap_or_default();
-    let zone: Option<String> = sqlx::query_scalar("select payload->>'timezone' from job where id = $1")
+    Ok(sqlx::query_scalar("select payload->>'timezone' from job where id = $1")
         .bind(job)
         .fetch_one(&a.rt.pool)
-        .await?;
-    assert_eq!(zone.as_deref(), Some("Europe/Madrid"));
-    // a zone the time zone database does not know is refused, and nothing is stored or queued
-    let jobs = a.count("select count(*) from job").await?;
-    let (s, v) = a
-        .upload(
-            "alex",
-            &[("profile", "lucia"), ("timezone", "Mars/Olympus")],
-            &[("other.csv", b"x")],
-        )
-        .await?;
-    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
-    assert_eq!(v["detail"]["code"], "unknown_timezone", "{v}");
-    assert_eq!(a.count("select count(*) from job").await?, jobs);
+        .await?)
+}
+
+#[tokio::test]
+async fn a_cgm_upload_carries_the_browser_zone_and_no_zone_refuses_an_upload() -> R {
+    let a = app().await?;
+    let up = |zone: &'static str, name: &'static str, bytes: Vec<u8>| {
+        let a = &a;
+        async move {
+            a.upload(
+                "alex",
+                &[("profile", "lucia"), ("timezone", zone)],
+                &[(name, bytes.as_slice())],
+            )
+            .await
+        }
+    };
+    let (s, v) = up("Europe/Madrid", "clarity.csv", CLARITY.to_vec()).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(job_zone(&a, &v).await?.as_deref(), Some("Europe/Madrid"));
+    // Chromium names India Asia/Calcutta, which the Postgres image does not ship: a PDF goes in, and
+    // a CGM export is read in the zone's current name
+    let (s, v) = up("Asia/Calcutta", "labnorte.pdf", glucose_pdf("LN-TZ-IN")).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["items"][0]["kind"], "pdf", "{v}");
+    let (s, v) = up(
+        "Asia/Calcutta",
+        "india.csv",
+        [CLARITY, b"2,2026-11-14T20:05:17,EGV,,,,iOS G7,121,,,,,3456300,7Q2RLX\n"].concat(),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(job_zone(&a, &v).await?.as_deref(), Some("Asia/Kolkata"));
+    // a zone nobody knows refuses nothing: the upload goes in without one, as with no zone at all
+    let (s, v) = up("Mars/Olympus", "mars.pdf", glucose_pdf("LN-TZ-MARS")).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v) = up(
+        "Mars/Olympus",
+        "mars.csv",
+        [CLARITY, b"2,2026-11-14T20:10:17,EGV,,,,iOS G7,122,,,,,3456600,7Q2RLX\n"].concat(),
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["items"][0]["kind"], "dexcom_clarity_csv", "{v}");
+    assert_eq!(job_zone(&a, &v).await?, None);
     // no zone, or an empty one, is an upload as before
-    let (s, v) = a
-        .upload(
-            "alex",
-            &[("profile", "lucia"), ("timezone", "")],
-            &[("pdf.pdf", &glucose_pdf("LN-TZ"))],
-        )
-        .await?;
+    let (s, v) = up("", "pdf.pdf", glucose_pdf("LN-TZ")).await?;
     assert_eq!(s, StatusCode::OK, "{v}");
     Ok(())
 }

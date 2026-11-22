@@ -6,8 +6,9 @@
 //! GET  /api/jobs      ?ids=1,2,3&limit=50   import jobs of the caller's profiles, newest first
 //! ```
 //!
-//! `timezone` reads a CGM export's wall-clock times when the server has no `OWNHEALTH_TIMEZONE`; a zone
-//! the time zone database does not know is refused (422 `unknown_timezone`) before anything is stored.
+//! `timezone` reads a CGM export's wall-clock times when the server has no `OWNHEALTH_TIMEZONE`. An old
+//! name the tz database links to a current one (`Asia/Calcutta`) travels as the current name; a zone
+//! still unknown travels as no zone, and the upload goes in all the same.
 //! A job whose result holds wearables data (`import.cgm_csv`, `import.gadgetbridge`) shows its result
 //! only to a caller with `read:wearables` on its profile; the others see the job without it.
 //!
@@ -151,17 +152,8 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
 
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &profile, None, Some("import")).await?;
-    let asked = timezone.as_deref().map(str::trim).filter(|z| !z.is_empty());
-    let zone = ownhealth_devices::cgm_csv::known_zone(&mut tx, asked.filter(|z| z.len() <= 64)).await?;
-    if let Some(z) = asked
-        && zone.is_none()
-    {
-        return Err(Fail::Api(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unknown_timezone",
-            format!("unknown time zone {:?}", z.chars().take(64).collect::<String>()),
-        )));
-    }
+    // never a refusal: a zone Postgres does not know, even by its current name, is no zone
+    let zone = ownhealth_devices::cgm_csv::known_zone(&mut tx, timezone.as_deref()).await?;
     let mut stored = Vec::with_capacity(files.len());
     for f in &files {
         let blobs = rt.blobs.clone();

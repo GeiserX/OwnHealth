@@ -38,8 +38,8 @@ token's `mcp_lang`.
 | foundation | review.rs | `GET /review?status=&profile=&kind=&document_id=` | |
 | foundation | review.rs | `GET /review/{id}` ; `POST /review/{id}/accept` `{edits?}` ; `/reject` `{reason}` ; `/reopen` ; `/dismiss` `{reason?}` | action `review` |
 | foundation | review.rs | `POST /review/bulk-accept` `{document_id, min_row_conf}` | only items with no reasons |
-| foundation | imports.rs | `POST /imports` multipart `profile`, `files[]` | returns `{items: ImportItem[]}`; action `import` |
-| foundation | imports.rs | `GET /jobs?ids=1,2` | |
+| foundation | imports.rs | `POST /imports` multipart `profile`, `files[]`, `timezone?` | returns `{items: ImportItem[]}`; action `import`. `timezone` is the browser's IANA zone: a CGM export's job carries it and reads the file's times in it when the server has no `OWNHEALTH_TIMEZONE`. An old name (`Asia/Calcutta`) travels as its current one (`Asia/Kolkata`), and a zone Postgres does not know travels as none; a zone never refuses an upload |
+| foundation | imports.rs | `GET /jobs?ids=1,2` | the `result` of an `import.cgm_csv` or `import.gadgetbridge` job is `null` without `read:wearables` on the job's profile; the job itself stays visible |
 | — | app.rs | `GET /healthz`, `GET /readyz` (outside `/api`) | |
 | A | observations.rs | `GET /profiles/{p}/observations?q=&loinc=&alias_group=&category=&from=&to=&units=&lang=` | `{items: ObservationOut[]}` |
 | A | observations.rs | `GET /profiles/{p}/trend?code=&window=P3Y&units=&lang=` | `Trend` (mcp.md 5.3 shape) |
