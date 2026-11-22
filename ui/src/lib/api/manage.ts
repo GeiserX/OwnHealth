@@ -81,7 +81,7 @@ export const inviteMember = (body: { display_name: string; locale: 'es' | 'en'; 
 	post<{ user_id: Uuid; code: string; url: string; expires_in_days: number }>('/household/invites', body);
 /** Needs a fresh step-up; `confirm` repeats the slug. */
 export const deleteProfile = (slug: string) =>
-	request<{ deleted: string; rows: number; blobs: number }>('DELETE', p(slug), { query: { confirm: slug } });
+	request<{ deleted: string; rows: number; blobs: number; blobs_pending: number; folders_pending: number }>('DELETE', p(slug), { query: { confirm: slug } });
 /** Full export: FHIR R4 NDJSON plus the original files in one zip. Needs a fresh step-up. */
 export const exportProfile = (slug: string) => requestBlob('POST', `${p(slug)}/export`, { fmt: 'zip' }, `ownhealth-${slug}.zip`);
 /** The views of the printed doctor summary (data/summary/specialties.yaml), in their order; `ips` is the IPS export's printed twin. */
