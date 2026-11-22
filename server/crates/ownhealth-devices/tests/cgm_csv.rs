@@ -1430,3 +1430,102 @@ async fn an_upload_again_while_a_move_holds_the_export_lock_waits_before_the_row
     assert_eq!((state.as_str(), attempts, err), ("done", 1, None));
     Ok(())
 }
+
+/// A retraction that waited for the export lock while a move committed the export to another profile:
+/// the retraction takes the new owner's lock too, so the new owner's import (the move queued it) waits
+/// for the retraction and brings nothing back. Before, the retraction held the old owner's lock only and
+/// the import wrote the readings of an export the retraction then marked retracted.
+#[tokio::test]
+async fn a_retraction_that_waited_for_a_move_takes_the_new_owners_lock_too() -> R {
+    let env = Env::new().await?;
+    let (lucia, alex) = (env.fam.profile("lucia"), env.fam.profile("alex"));
+    let b = clarity_at(&every_5("2026-11-14", 11, 12));
+    let (_, id) = upload(&env, "lucia", "b.csv", &b).await?;
+    assert_eq!(job(&env, id).await?.0, "done");
+    let doc: Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'b.csv'")
+        .bind(lucia)
+        .fetch_one(&env.db.pool)
+        .await?;
+    env.blobs.put_bytes(BlobOwner::Profile(alex), &b)?;
+    // a move of the export holds Lucía's export lock (the assign route takes lock_export_of first)
+    let mut moving = env.db.pool.begin().await?;
+    ownhealth_ingest_structured::retract::lock_exports(&mut moving, lucia, "cgm_csv").await?;
+    // a retraction of the same export, as the route runs it; it pauses before its commit
+    let (facts_tx, facts_rx) = tokio::sync::oneshot::channel::<()>();
+    let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+    let pool = env.db.pool.clone();
+    let retraction = tokio::spawn(async move {
+        let mut tx = pool.begin().await?;
+        ownhealth_ingest_structured::retract::retract_document_facts(&mut tx, doc, "test").await?;
+        sqlx::query("update document set status = 'retracted', status_reason = 'test' where id = $1")
+            .bind(doc)
+            .execute(&mut *tx)
+            .await?;
+        let _ = facts_tx.send(());
+        let _ = go_rx.await;
+        tx.commit().await?;
+        anyhow::Ok(())
+    });
+    let mut seen = false;
+    for _ in 0..100 {
+        if waiting_for_exports_of(&env, lucia).await? > 0 {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    anyhow::ensure!(seen, "the retraction never waited for Lucía's lock");
+    // the move commits as assign_document does: Lucía's readings leave, the export is Alex's, and its
+    // import for Alex is queued
+    sqlx::query("delete from wearable_sample where document_id = $1")
+        .bind(doc)
+        .execute(&mut *moving)
+        .await?;
+    sqlx::query("update document set profile_id = $1, flags = flags - 'import' where id = $2")
+        .bind(alex)
+        .bind(doc)
+        .execute(&mut *moving)
+        .await?;
+    jobs::enqueue(
+        &mut moving,
+        cgm_csv::JOB,
+        &json!({"document_id": doc.to_string(), "profile_id": alex.to_string()}),
+        jobs::EnqueueOptions::default(),
+    )
+    .await?;
+    moving.commit().await?;
+    facts_rx.await?;
+    // the retraction holds Alex's lock as well: her import waits for it
+    let ctx = env.ctx.clone();
+    let run = tokio::spawn(async move { jobs::drain(&ctx, "core", 5, None).await });
+    let mut waited = false;
+    for _ in 0..100 {
+        if waiting_for_exports_of(&env, alex).await? > 0 {
+            waited = true;
+            break;
+        }
+        if run.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let _ = go_tx.send(());
+    retraction.await??;
+    run.await??;
+    anyhow::ensure!(
+        waited,
+        "Alex's import ran beside the retraction, which held Lucía's lock only"
+    );
+    let (status, held): (String, i64) = sqlx::query_as(
+        "select status, (select count(*) from wearable_sample where document_id = d.id) from document d where id = $1",
+    )
+    .bind(doc)
+    .fetch_one(&env.db.pool)
+    .await?;
+    assert_eq!(
+        (status.as_str(), held),
+        ("retracted", 0),
+        "a retracted export holds readings"
+    );
+    Ok(())
+}

@@ -180,17 +180,26 @@ async fn queue_after(conn: &mut PgConnection, job: &str, id: Uuid) -> Result<()>
 /// Hold [`lock_exports`] for document `document_id` when it is a CGM export (`flags.cgm_csv`); nothing
 /// for any other document. A running CGM import holds that lock and then writes its document row, so
 /// whatever retracts or moves a document takes this before any lock on the document's row: a move that
-/// held the row first would wait for the import while the import waits for the row (40P01).
+/// held the row first would wait for the import while the import waits for the row (40P01). A move that
+/// committed while this waited gives the export another owner, whose import the move queued: this then
+/// takes that owner's lock too, and reads the owner again, until the owner it read is one whose lock it
+/// holds (as the CGM import does).
 pub async fn lock_export_of(conn: &mut PgConnection, document_id: Uuid) -> Result<()> {
-    let cgm: Option<Option<Uuid>> =
-        sqlx::query_scalar("select profile_id from document where id = $1 and flags ? 'cgm_csv'")
-            .bind(document_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-    if let Some(profile_id) = cgm.flatten() {
-        lock_exports(conn, profile_id, "cgm_csv").await?;
+    let mut locked: Vec<Uuid> = Vec::new();
+    loop {
+        let cgm: Option<Option<Uuid>> =
+            sqlx::query_scalar("select profile_id from document where id = $1 and flags ? 'cgm_csv'")
+                .bind(document_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        match cgm.flatten() {
+            Some(owner) if !locked.contains(&owner) => {
+                lock_exports(&mut *conn, owner, "cgm_csv").await?;
+                locked.push(owner);
+            }
+            _ => return Ok(()),
+        }
     }
-    Ok(())
 }
 
 /// Hold the lock on one profile's exports of one kind (`flag`) until this transaction ends. A CGM
