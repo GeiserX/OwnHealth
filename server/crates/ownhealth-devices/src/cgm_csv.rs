@@ -38,7 +38,8 @@
 //! Postgres does not know by either name is no zone; it never refuses an upload. With neither zone, a
 //! time is read as UTC and keeps no offset: the rule the PDF and FHIR importers apply to a time without
 //! an offset. The zone used is a property of the file
-//! (`flags.cgm_csv.timezone`): an import again after a retraction reads the file in that zone, and the
+//! (`flags.cgm_csv.timezone`): an import again after a retraction or a move reads the file in that zone
+//! (by its current name when Postgres no longer knows the stored one), and the
 //! same file uploaded again in another zone has its own readings replaced, so one copy stays, at the
 //! new instants. On the night the clocks go back, the times of the repeated hour are ambiguous: those
 //! readings are counted (`ambiguous_time`), not guessed. A time in the hour the clocks skip in spring is
@@ -903,6 +904,21 @@ pub async fn import_cgm_csv_again(
     import_in(conn, blobs, document_id, source_id, Read::Again(fallback)).await
 }
 
+/// The zone a file was read in before (`flags.cgm_csv.timezone`), as Postgres knows it now
+/// ([`known_zone`]). None is UTC. A name Postgres does not know by either name fails for good: a retry
+/// cannot help, and reading the file in another zone would move its readings.
+async fn stored_zone(conn: &mut PgConnection, stored: Option<&str>) -> Result<Option<String>> {
+    let Some(name) = stored else {
+        return Ok(None);
+    };
+    match known_zone(conn, Some(name)).await? {
+        Some(z) => Ok(Some(z)),
+        None => Err(Error::Upload(format!(
+            "this file was read in the time zone {name}, which this database does not know"
+        ))),
+    }
+}
+
 /// Delete the readings a document owns and rebuild the rollups they fed. Returns how many went.
 async fn delete_own(conn: &mut PgConnection, profile_id: Uuid, document_id: Uuid) -> Result<i64> {
     let gone: Vec<(String, i16, DateTime<Utc>)> =
@@ -977,7 +993,11 @@ async fn import_in(
                 if replace { Some(z.to_string()) } else { b.clone() },
             )
         }
-        (Read::Upload(None) | Read::Again(_), Some(b)) => (b.clone(), false, b.clone()),
+        // the zone the file keeps, read in the name Postgres knows now: an old name an earlier Postgres
+        // knew (Asia/Calcutta) reads as its current one, and the file keeps the name it was read under
+        (Read::Upload(None) | Read::Again(_), Some(b)) => {
+            (stored_zone(&mut *conn, b.as_deref()).await?, false, b.clone())
+        }
         (Read::Upload(z) | Read::Again(z), None) => (z.map(str::to_string), false, z.map(str::to_string)),
     };
     // imported before (the same file uploaded again): read again, and every reading counts as stored

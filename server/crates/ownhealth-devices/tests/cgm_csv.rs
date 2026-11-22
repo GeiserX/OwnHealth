@@ -858,6 +858,55 @@ async fn a_zone_postgres_knows_keeps_its_name_and_its_other_names_replace_nothin
 }
 
 #[tokio::test]
+async fn a_stored_zone_postgres_no_longer_knows_is_read_in_its_current_name() -> R {
+    let env = Env::new().await?;
+    let bytes = fixture("clarity-en-mgdl.csv")?;
+    upload_in_zone(&env, "lucia", "clarity.csv", &bytes, "Asia/Kolkata").await?;
+    // an export saved under Asia/Calcutta by an install whose Postgres knew that name; this one does not
+    let lacks: bool =
+        sqlx::query_scalar("select not exists (select 1 from pg_timezone_names where name = 'Asia/Calcutta')")
+            .fetch_one(&env.db.pool)
+            .await?;
+    assert!(
+        lacks,
+        "this Postgres knows Asia/Calcutta: the case is no longer covered"
+    );
+    let doc: Uuid = sqlx::query_scalar(
+        "update document set flags = jsonb_set(flags, '{cgm_csv,timezone}', '\"Asia/Calcutta\"') - 'import' \
+         where profile_id = $1 returning id",
+    )
+    .bind(env.fam.profile("lucia"))
+    .fetch_one(&env.db.pool)
+    .await?;
+    // its run again is queued, as after another export's retraction, and its readings are gone
+    sqlx::query("delete from wearable_sample where document_id = $1")
+        .bind(doc)
+        .execute(&env.db.pool)
+        .await?;
+    let mut c = env.db.pool.acquire().await?;
+    let id = jobs::enqueue(
+        &mut c,
+        cgm_csv::JOB,
+        &json!({"document_id": doc.to_string()}),
+        jobs::EnqueueOptions::default(),
+    )
+    .await?;
+    drop(c);
+    let (state, _, err) = job(&env, id).await?;
+    assert_eq!(state, "done", "{err:?}");
+    // 20:00:17 in India is 14:30:17 UTC (IST, +330), and the file keeps the name it was read under
+    let r = readings(&env, "lucia").await?;
+    assert_eq!(r.len(), 8, "{r:?}");
+    assert_eq!(r[0], (utc(2026, 11, 14, 14, 30, 17), 120.0, Some(330)));
+    let zone: Value = sqlx::query_scalar("select flags->'cgm_csv'->'timezone' from document where id = $1")
+        .bind(doc)
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(zone, json!("Asia/Calcutta"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_retraction_while_the_export_is_read_again_leaves_none_of_its_readings() -> R {
     let env = Env::new().await?;
     let b = clarity_at(&every_5("2026-11-14", 11, 12));
