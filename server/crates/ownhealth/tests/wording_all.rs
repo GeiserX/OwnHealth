@@ -54,6 +54,9 @@ const SOURCES: &[(&str, Source)] = &[
     ("shl", |_| {
         Box::pin(async { Ok(vec![ownhealth_api::routes::shl::phrases()]) })
     }),
+    ("imaging_viewer", |_| {
+        Box::pin(async { Ok(vec![ownhealth_api::routes::imaging_proxy::phrases()]) })
+    }),
     ("shc", |_| {
         Box::pin(async { Ok(vec![ownhealth_ingest_structured::shc::phrases()]) })
     }),

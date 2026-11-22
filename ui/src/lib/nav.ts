@@ -53,6 +53,13 @@ export const NAV: NavItem[] = [
 		mockup: 'import-review',
 		icon: '<path d="M4 13h4l2 3h4l2-3h4"/><path d="M5 5h14l1 8v6H4v-6z"/>'
 	},
+	// v1.0: health records and devices that sign in at their vendor (not a mockup screen; it sits beside the Inbox).
+	{
+		path: '/connections',
+		key: 'con_nav',
+		mockup: 'import-review',
+		icon: '<path d="M9 15 15 9"/><path d="M11 6.5 13 4.5a4 4 0 0 1 6.5 6.5L17.5 13M13 17.5 11 19.5A4 4 0 0 1 4.5 13L6.5 11"/>'
+	},
 	{
 		path: '/family',
 		key: 'nav_fam',

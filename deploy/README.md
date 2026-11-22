@@ -35,6 +35,7 @@ openssl rand -base64 48 | tr -d '\n' > secrets/secret_key
 openssl rand -base64 32 | tr -d '\n' > secrets/restic_password
 openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key     # seals inbox passwords and tokens
 chmod 644 secrets/*                           # the containers run as their own users; the folder stays 700
+mkdir -m 755 secrets/imaging                  # the app mounts it; the imaging profile's password goes here
 
 docker compose up -d
 docker compose run --rm admin restic init     # once, creates the backup repository
@@ -107,7 +108,7 @@ The one-shot `ow-db-init` creates the `openwearables` database and role, then OW
 
 ## Monitoring the inboxes
 
-`GET /api/inboxes/health` lists every inbox you can see with its last run, its last successful sync, its last error, the failed runs in a row, and `stale`: switched on, polled, and no success for three poll intervals. `last_run_status` is `ok`, `partial` (some items were skipped or failed) or `error`, with `last_run_problems` and the first problem as `last_run_problem` (a code and a short message, never the content of a mail or document). A run in which every item failed counts as an error: the failed-runs count goes up and the last successful sync stays where it was. Add `?format=prometheus` for the Prometheus text format. Labels carry the source id and kind only, never names or error text:
+`GET /api/inboxes/health` lists every inbox you can see with its last run, its last successful sync, its last error, the failed runs in a row, and `stale`: switched on, polled, and no success for three poll intervals. `last_run_status` is `ok`, `partial` (some items were skipped or failed) or `error`, with `last_run_problems` and the first problem as `last_run_problem` (a code and a short message, never the content of a mail or document). A run in which every item failed counts as an error: the failed-runs count goes up and the last successful sync stays where it was. For a person, each row says `can_manage`: the Connections screen (v1.0) lists and reconnects only those rows. Only those rows also carry `created_at`, `poll_seconds`, `reconsent_needed_at` (the vendor refused the token, so someone must sign in again), `grant_expires_at`, `access_expires_at`, the connection's `server`, and `open_gaps`, the open sync-gap alerts filed on the source's profile. A viewer and a source token get none of them. Add `?format=prometheus` for the Prometheus text format. Labels carry the source id and kind only, never names or error text:
 
 ```text
 ownhealth_source_enabled{source="…",kind="email"} 1
@@ -233,6 +234,8 @@ docker compose pull && docker compose up -d
 ```
 
 Migrations are forward-only and run at start, in the `admin` service, before the app comes up. To go back to an older version, restore the backup you took before the upgrade.
+
+**The imaging folder (from 1.0).** The new `compose.homelab.yaml` mounts `secrets/imaging` into the app, with the `imaging` profile on or off. Create the folder before the first `docker compose up -d` with that file: `mkdir -m 755 secrets/imaging`. If Docker started first, it made the folder as root: `sudo chown "$(id -u):$(id -g)" secrets/imaging && chmod 755 secrets/imaging`. To turn imaging on, follow the comment above the `orthanc` service in `compose.homelab.yaml`: it writes `secrets/imaging/orthanc_password` with mode 644.
 
 **To 0.4.0.** After the backup, set `admin` and `app` to `drumsergio/ownhealth:0.4.0` and `ocr` to `drumsergio/ownhealth:0.4.0-ocr`; nothing else in the compose files changes. Rule pack 0.2.0 moves every profile's `state_hash` once, so restore a backup made before the upgrade with 0.3.0, as above. For the same reason, `restore-test.sh` on a snapshot made before the upgrade reports every profile's `state_hash` as different; run `./deploy/restic/backup.sh` once after the upgrade, so the restore test checks a 0.4.0 snapshot. A household with a genome starts downloading NCBI's weekly ClinVar file (about 200 MB, no personal data in the request); turn it off in Settings, or set a local file path on a server without internet.
 
