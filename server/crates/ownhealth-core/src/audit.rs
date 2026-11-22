@@ -1311,9 +1311,15 @@ mod tests {
         let added: i64 = sqlx::query_scalar("select max(id) from audit_event")
             .fetch_one(&db.pool)
             .await?;
-        assert_eq!(check(&db.pool).await?.broken, broke(None, Some(added), ChainBreakKind::Unlinked));
+        assert_eq!(
+            check(&db.pool).await?.broken,
+            broke(None, Some(added), ChainBreakKind::Unlinked)
+        );
         // the read on its own names it too, so the helper can tell a refusal from a broken read
-        assert_eq!(read_alone(&db).await??.broken, broke(None, Some(added), ChainBreakKind::Unlinked));
+        assert_eq!(
+            read_alone(&db).await??.broken,
+            broke(None, Some(added), ChainBreakKind::Unlinked)
+        );
         owner_sql(&db, "alter table audit_chain alter column event_id drop not null").await?;
         tamper(
             &db,
