@@ -236,9 +236,7 @@ fn fill(template: &str, params: &[(&str, String)]) -> String {
 }
 
 fn pick(v: &Value, lang: &str) -> String {
-    v.get(lang)
-        .or_else(|| v.get("en"))
-        .and_then(Value::as_str)
+    ownhealth_core::langs::lookup(lang, |l| v.get(l).and_then(Value::as_str))
         .unwrap_or_default()
         .to_string()
 }
@@ -252,7 +250,7 @@ pub fn label(key: &str, lang: &str) -> Result<String> {
 /// every item `name`, every reason `text`; `labels` holds the words of the screen and the sheet.
 pub fn render(plan: &Value, pack: &Pack, lang: &str) -> Result<Value> {
     let prep = load()?;
-    let lang = if lang == "es" { "es" } else { "en" };
+    let lang = ownhealth_core::langs::lang_or_default(lang);
     let t = |k: &str| pick(&prep.templates[k], lang);
     let mut out = plan.clone();
     for sec in out["sections"].as_array_mut().into_iter().flatten() {
@@ -332,7 +330,7 @@ pub fn render(plan: &Value, pack: &Pack, lang: &str) -> Result<Value> {
 /// Who the sheet is for, in words: `{name, sex, age, born}`, without the name and birth date when the
 /// person asked for a copy that hides them (`name` is then the blank to write it on).
 pub fn person(profile: &Profile, as_of: NaiveDate, lang: &str, hide_name: bool) -> Result<Value> {
-    let lang = if lang == "es" { "es" } else { "en" };
+    let lang = ownhealth_core::langs::lang_or_default(lang);
     let mut out = Map::new();
     if hide_name {
         out.insert(

@@ -329,7 +329,7 @@ async fn observations(
     let from = date_param(&q, "from")?;
     let to = date_param(&q, "to")?;
     let text_q = non_empty(param(&q, "q"));
-    let lang = param(&q, "lang").unwrap_or("es");
+    let lang = ownhealth_core::langs::lang_or_default(param(&q, "lang").unwrap_or_default());
     let category = param(&q, "category");
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, None, None).await?;
@@ -470,6 +470,79 @@ fn py_float(x: f64) -> String {
     }
 }
 
+/// The limitation lines of a trend in one language; `{name}` fields are filled in.
+struct Limits {
+    /// The points of one code among several codes or methods: one point, and `{n}`. `{what}` is the
+    /// LOINC long name, or with `own_name` the analyte's name in this language and its method; `{code}`
+    /// is `LOINC:<code>`, `{bare}` the code alone.
+    point: [&'static str; 2],
+    own_name: bool,
+    /// A method's words after the name (`, calculado`); any other method is printed as stored.
+    methods: &'static [(&'static str, &'static str)],
+    ranges: &'static str,
+    switched: &'static str,
+    /// `{from}` and `{to}` are units, `{how}` is [`Limits::molar`] or nothing.
+    converted: &'static str,
+    /// `{species}` (as a formula with `formula`) and `{g}`, the molar mass in this language's numbers.
+    molar: &'static str,
+    formula: bool,
+    /// One value and `{n}` values in a unit that does not convert to `{t}`.
+    skipped: [&'static str; 2],
+}
+
+/// The trend's limitation lines of every registry language, read with `langs::pick`.
+const LIMITS: &[(&str, &Limits)] = &[
+    (
+        "es",
+        &Limits {
+            point: [
+                "1 punto es {what} (LOINC {bare}).",
+                "{n} puntos son {what} (LOINC {bare}).",
+            ],
+            own_name: true,
+            methods: &[
+                ("calculated", ", calculado"),
+                ("direct", ", medida directa"),
+                ("fasting", ", en ayunas"),
+            ],
+            ranges: "Los laboratorios usan rangos de referencia distintos.",
+            switched: "Los dos últimos resultados son de otro método o laboratorio, así que el cambio no se compara con el valor de referencia del cambio.",
+            converted: "Los valores impresos en {from} se muestran convertidos a {to}{how}.",
+            molar: " con la masa molar de {species} ({g} g/mol)",
+            formula: true,
+            skipped: [
+                "1 valor en una unidad que no se convierte a {t} no se dibuja.",
+                "{n} valores en una unidad que no se convierte a {t} no se dibujan.",
+            ],
+        },
+    ),
+    (
+        "en",
+        &Limits {
+            point: ["1 point is {what} ({code}).", "{n} points are {what} ({code})."],
+            own_name: false,
+            methods: &[],
+            ranges: "Labs use different reference ranges.",
+            switched: "The last two results come from a different method or lab, so the change is not compared with the reference change value.",
+            converted: "Values printed in {from} are shown converted to {to}{how}.",
+            molar: " with the molar mass of {species} ({g} g/mol)",
+            formula: false,
+            skipped: [
+                "1 value in a unit that does not convert to {t} is not drawn.",
+                "{n} values in a unit that does not convert to {t} are not drawn.",
+            ],
+        },
+    ),
+];
+
+/// The registry languages the trend's limitation lines lack (`tests/langs.rs`).
+pub fn missing_langs(langs: &[&str]) -> Vec<String> {
+    ownhealth_core::langs::missing(&ownhealth_core::langs::codes(LIMITS), langs)
+        .into_iter()
+        .map(|l| format!("trend limitation lines have no `{l}` table"))
+        .collect()
+}
+
 /// The chemical formula of a molar-table species ('cholesterol C27H46O' -> 'C27H46O'), which reads
 /// the same in every language; the whole species when it has none.
 fn formula(species: &str) -> &str {
@@ -495,7 +568,7 @@ async fn trend(
     };
     let window = param(&q, "window").unwrap_or("P3Y");
     let units = units_param(&q)?;
-    let lang = param(&q, "lang").unwrap_or("es");
+    let lang = ownhealth_core::langs::lang_or_default(param(&q, "lang").unwrap_or_default());
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, None, None).await?;
     let cats = allowed(&perm, None)?;
@@ -635,7 +708,11 @@ async fn trend(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let es = lang == "es";
+    let w = ownhealth_core::langs::pick(LIMITS, lang);
+    let fill = |t: &str, vars: &[(&str, &str)]| {
+        vars.iter()
+            .fold(t.to_string(), |t, (k, v)| t.replace(&format!("{{{k}}}"), v))
+    };
     let pack = ownhealth_rules::load_pack().ok();
     let mut limitations: Vec<String> = Vec::new();
     let methods: BTreeSet<&str> = rows.iter().filter_map(|r| non_empty(r.method.as_deref())).collect();
@@ -649,37 +726,29 @@ async fn trend(
             if let Some(lc) = tables::loinc_codes().get(bare)
                 && n > 0
             {
-                limitations.push(if es {
-                    // the LOINC long name is English: the analyte's Spanish name, its method and the code
+                let what = if w.own_name {
+                    // the LOINC long name is English: the analyte's own name, its method and the code
                     let name = pack
                         .as_ref()
-                        .map_or_else(|| lc.alias_group.clone(), |p| p.name(&lc.alias_group, "es"));
+                        .map_or_else(|| lc.alias_group.clone(), |p| p.name(&lc.alias_group, lang));
                     let method = match lc.method.as_str() {
                         "" => String::new(),
-                        "calculated" => ", calculado".into(),
-                        "direct" => ", medida directa".into(),
-                        "fasting" => ", en ayunas".into(),
-                        m => format!(", {m}"),
+                        m => w
+                            .methods
+                            .iter()
+                            .find(|(k, _)| *k == m)
+                            .map_or_else(|| format!(", {m}"), |(_, t)| (*t).to_string()),
                     };
-                    format!(
-                        "{} {name}{method} (LOINC {bare}).",
-                        if n == 1 {
-                            "1 punto es".to_string()
-                        } else {
-                            format!("{n} puntos son")
-                        },
-                    )
+                    format!("{name}{method}")
                 } else {
-                    format!(
-                        "{} {} ({c}).",
-                        if n == 1 {
-                            "1 point is".to_string()
-                        } else {
-                            format!("{n} points are")
-                        },
-                        lc.long_name
-                    )
-                });
+                    lc.long_name.clone()
+                };
+                let t = w.point[usize::from(n != 1)];
+                let n = n.to_string();
+                limitations.push(fill(
+                    t,
+                    &[("n", &n), ("what", &what), ("code", c.as_str()), ("bare", bare)],
+                ));
             }
         }
     }
@@ -688,50 +757,37 @@ async fn trend(
         .filter_map(|r| non_empty(r.printed_ref_range.as_deref()))
         .collect();
     if ranges.len() > 1 {
-        limitations.push(if es {
-            "Los laboratorios usan rangos de referencia distintos.".into()
-        } else {
-            "Labs use different reference ranges.".into()
-        });
+        limitations.push(w.ranges.into());
     }
     let target_pretty = || target.as_deref().map(pretty_unit).unwrap_or_else(|| "None".into());
     for u in &converted {
         let m = tables::molar().get(&group).filter(|m| m.g_per_mol.is_some());
         let mass = m.map(|m| py_float(m.g_per_mol_text.parse::<f64>().unwrap_or(f64::NAN)));
-        if es {
-            let how = match (m, &mass) {
-                (Some(m), Some(g)) => format!(
-                    " con la masa molar de {} ({} g/mol)",
-                    formula(&m.species),
-                    ownhealth_rules::num::localized(g, "es")
-                ),
-                _ => String::new(),
-            };
-            limitations.push(format!(
-                "Los valores impresos en {} se muestran convertidos a {}{how}.",
-                pretty_unit(u),
-                target_pretty()
-            ));
-        } else {
-            let how = match (m, &mass) {
-                (Some(m), Some(g)) => format!(" with the molar mass of {} ({g} g/mol)", m.species),
-                _ => String::new(),
-            };
-            limitations.push(format!(
-                "Values printed in {} are shown converted to {}{how}.",
-                pretty_unit(u),
-                target_pretty()
-            ));
-        }
+        let how = match (m, &mass) {
+            (Some(m), Some(g)) => {
+                let species = if w.formula {
+                    formula(&m.species).to_string()
+                } else {
+                    m.species.clone()
+                };
+                let g = ownhealth_rules::num::localized(g, lang);
+                fill(w.molar, &[("species", &species), ("g", &g)])
+            }
+            _ => String::new(),
+        };
+        limitations.push(fill(
+            w.converted,
+            &[
+                ("from", pretty_unit(u).as_str()),
+                ("to", target_pretty().as_str()),
+                ("how", how.as_str()),
+            ],
+        ));
     }
     if skipped > 0 {
         let t = target_pretty();
-        limitations.push(match (es, skipped) {
-            (true, 1) => format!("1 valor en una unidad que no se convierte a {t} no se dibuja."),
-            (true, n) => format!("{n} valores en una unidad que no se convierte a {t} no se dibujan."),
-            (false, 1) => format!("1 value in a unit that does not convert to {t} is not drawn."),
-            (false, n) => format!("{n} values in a unit that does not convert to {t} are not drawn."),
-        });
+        let one = w.skipped[usize::from(skipped != 1)];
+        limitations.push(fill(one, &[("n", skipped.to_string().as_str()), ("t", t.as_str())]));
     }
     let mut annotations: Vec<Value> = Vec::new();
     if perm.has("read:records") {
@@ -787,11 +843,7 @@ async fn trend(
         }
     }
     if last_switched && rcv_pct.is_some() {
-        limitations.push(if es {
-            "Los dos últimos resultados son de otro método o laboratorio, así que el cambio no se compara con el valor de referencia del cambio.".into()
-        } else {
-            "The last two results come from a different method or lab, so the change is not compared with the reference change value.".into()
-        });
+        limitations.push(w.switched.into());
     }
     // the person's usual level before the last point, from the earlier points of the same key
     let baseline = match (rule_for("baseline"), rcv_rule, series.split_last()) {

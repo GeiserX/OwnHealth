@@ -224,7 +224,7 @@ pub fn parse(calculators: &str, units_text: &str) -> std::result::Result<Data, C
     let templates = doc.get("templates").cloned().unwrap_or(Value::Null);
     for section in templates.as_object().into_iter().flat_map(|m| m.values()) {
         for (key, t) in section.as_object().into_iter().flatten() {
-            for lang in ["en", "es"] {
+            for lang in ownhealth_core::langs::LANGS {
                 let text = t
                     .get(lang)
                     .and_then(Value::as_str)
@@ -700,8 +700,19 @@ fn group_name(data: &Data, group: &str, lang: &str) -> String {
     template(data, "group", group, lang).unwrap_or(group).to_string()
 }
 
+/// The word that joins the last two names of a list ("a, b and c"), per registry language.
+const AND: &[(&str, &str)] = &[("es", " y "), ("en", " and ")];
+
+/// The registry languages the list word lacks.
+pub fn missing_langs(langs: &[&str]) -> Vec<String> {
+    ownhealth_core::langs::missing(&ownhealth_core::langs::codes(AND), langs)
+        .into_iter()
+        .map(|l| format!("calculators list word has no `{l}` text"))
+        .collect()
+}
+
 fn fill(text: &str, params: &Map<String, Value>, data: &Data, lang: &str) -> String {
-    let and = if lang == "es" { " y " } else { " and " };
+    let and = ownhealth_core::langs::pick(AND, lang);
     let mut out = text.to_string();
     for (k, v) in params {
         let shown = match (k.as_str(), v) {
@@ -733,12 +744,12 @@ fn fill(text: &str, params: &Map<String, Value>, data: &Data, lang: &str) -> Str
     out
 }
 
-/// The document with the words in `lang` (es or en): each item gains `name` and `short`, its refusal as `text`,
+/// The document with the words in `lang` (a registry language, else the default): each item gains `name` and `short`, its refusal as `text`,
 /// `notes` (the band, then the limitations), the `system` and `shows_on` groups where it is
 /// listed, and a `name` on each input. The hash stays the document's.
 pub fn render(doc: &Value, lang: &str) -> Result<Value> {
     let data = data()?;
-    let lang = if lang == "en" { "en" } else { "es" };
+    let lang = ownhealth_core::langs::lang_or_default(lang);
     let mut out = doc.clone();
     if let Some(m) = out.as_object_mut() {
         m.insert("lang".into(), json!(lang));

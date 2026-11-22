@@ -95,7 +95,62 @@ pub struct Catalog {
     pub conditions: Vec<ConditionKind>,
 }
 
+impl Relationship {
+    /// The name in each language the catalog carries, for `langs::pick`.
+    pub fn names(&self) -> [(&'static str, &str); 2] {
+        [("es", &self.es), ("en", &self.en)]
+    }
+
+    /// The `text` of the FHIR relationship we store: English, whatever language the person reads.
+    pub fn fhir_text(&self) -> &str {
+        &self.en
+    }
+}
+
+impl ConditionKind {
+    /// The name in each language the catalog carries, for `langs::pick`.
+    pub fn names(&self) -> [(&'static str, &str); 2] {
+        [("es", &self.es), ("en", &self.en)]
+    }
+
+    /// The short name (the pedigree's label) in each language, for `langs::pick`.
+    pub fn shorts(&self) -> [(&'static str, &str); 2] {
+        [("es", &self.short_es), ("en", &self.short_en)]
+    }
+
+    /// The `text` of the FHIR condition we store: English, whatever language the person reads.
+    pub fn fhir_text(&self) -> &str {
+        &self.en
+    }
+}
+
 impl Catalog {
+    /// Every name, short name included, that has no text in one of `langs`: the catalog's fields
+    /// are es and en, so a registry language beyond them is named here (`tests/langs.rs`).
+    pub fn missing_langs(&self, langs: &[&str]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut check = |what: String, texts: &[(&'static str, &str)]| {
+            let have: Vec<&str> = texts
+                .iter()
+                .filter(|(_, t)| !t.trim().is_empty())
+                .map(|(c, _)| *c)
+                .collect();
+            out.extend(
+                crate::langs::missing(&have, langs)
+                    .into_iter()
+                    .map(|l| format!("{what} has no `{l}` text")),
+            );
+        };
+        for r in &self.relationships {
+            check(format!("relationship {}", r.code), &r.names());
+        }
+        for c in &self.conditions {
+            check(format!("condition {}", c.kind), &c.names());
+            check(format!("condition {} short", c.kind), &c.shorts());
+        }
+        out
+    }
+
     pub fn relationship(&self, code: &str) -> Option<&Relationship> {
         self.relationships.iter().find(|r| r.code == code)
     }
@@ -122,12 +177,12 @@ const GROUPS: [&str; 6] = [
 /// The couples of the drawing; the proband is in `self` and a child of `parents`.
 const UNIONS: [&str; 5] = ["pgp", "mgp", "parents", "self", "inlaws"];
 
-fn named(what: &str, key: &str, en: &str, es: &str, cite: &str) -> std::result::Result<(), String> {
+fn named(what: &str, key: &str, names: &[(&str, &str)], cite: &str) -> std::result::Result<(), String> {
     if !cite.starts_with("https://") {
         return Err(format!("{what} {key}: cite must be an https URL"));
     }
-    if en.trim().is_empty() || es.trim().is_empty() {
-        return Err(format!("{what} {key}: needs both an en and an es name"));
+    if let Some((lang, _)) = names.iter().find(|(_, t)| t.trim().is_empty()) {
+        return Err(format!("{what} {key}: needs a {lang} name"));
     }
     Ok(())
 }
@@ -139,7 +194,7 @@ pub fn load(relationships: &str, conditions: &str) -> std::result::Result<Catalo
     let cond: File<ConditionKind> = serde_yaml::from_str(conditions).map_err(|e| format!("conditions.yaml: {e}"))?;
     let mut seen = std::collections::BTreeSet::new();
     for r in &rel.rows {
-        named("relationship", &r.code, &r.en, &r.es, &r.cite)?;
+        named("relationship", &r.code, &r.names(), &r.cite)?;
         if !seen.insert(r.code.clone()) {
             return Err(format!("relationship {} appears twice", r.code));
         }
@@ -158,9 +213,9 @@ pub fn load(relationships: &str, conditions: &str) -> std::result::Result<Catalo
     let mut seen = std::collections::BTreeSet::new();
     let mut codes = std::collections::BTreeSet::new();
     for c in &cond.rows {
-        named("condition", &c.kind, &c.en, &c.es, &c.cite)?;
-        if c.short_en.trim().is_empty() || c.short_es.trim().is_empty() {
-            return Err(format!("condition {}: needs both short names", c.kind));
+        named("condition", &c.kind, &c.names(), &c.cite)?;
+        if let Some((lang, _)) = c.shorts().iter().find(|(_, t)| t.trim().is_empty()) {
+            return Err(format!("condition {}: needs a {lang} short name", c.kind));
         }
         if !seen.insert(c.kind.clone()) {
             return Err(format!("condition {} appears twice", c.kind));
@@ -372,7 +427,7 @@ pub fn fhir(m: &MemberIn) -> Result<Value> {
         .conditions
         .iter()
         .map(|c| {
-            let label = cat.condition(&c.kind).map(|k| k.en.as_str()).unwrap_or(c.kind.as_str());
+            let label = cat.condition(&c.kind).map_or(c.kind.as_str(), ConditionKind::fhir_text);
             let coding: Vec<Value> = match (system_url(c.code_system.as_deref()), &c.code) {
                 (Some(system), Some(code)) => vec![json!({"system": system, "code": code})],
                 _ => vec![],
@@ -423,7 +478,7 @@ pub fn fhir(m: &MemberIn) -> Result<Value> {
     r.insert("status".into(), json!("completed"));
     r.insert(
         "relationship".into(),
-        json!({"coding": [{"system": ROLE_CODE, "code": rel.code}], "text": rel.en}),
+        json!({"coding": [{"system": ROLE_CODE, "code": rel.code}], "text": rel.fhir_text()}),
     );
     r.insert("name".into(), json!(m.display_name));
     if let Some(s) = &m.sex_at_birth {

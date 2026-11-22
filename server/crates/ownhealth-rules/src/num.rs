@@ -12,13 +12,68 @@ pub fn num(d: &Decimal) -> String {
     d.to_string()
 }
 
-/// A plain printed number (`-1234.5`) as a person reading `lang` writes it. Spanish takes a decimal
-/// comma and a '.' between thousands from five integer digits on, as the UI's `fmtNum` (es-ES)
-/// does; anything else, and any other text, comes back as it is.
-pub fn localized(s: &str, lang: &str) -> String {
-    if lang != "es" {
-        return s.to_string();
+/// How one language writes a number: its decimal mark, the mark between thousands of a measured
+/// value with the integer length it starts at (None: never), and the same for a whole count (the
+/// dashboard's 30-day sums).
+#[derive(Debug, Clone, Copy)]
+pub struct Format {
+    decimal: char,
+    group: Option<(char, usize)>,
+    count_group: (char, usize),
+}
+
+/// The number format of every registry language (`ownhealth_core::langs::LANGS`), read with
+/// `langs::pick`; `tests/langs.rs` fails on a registry language without its row. Spanish follows the
+/// UI's `fmtNum` (es-ES): a decimal comma and a '.' between thousands from five integer digits on.
+pub const FORMATS: &[(&str, Format)] = &[
+    (
+        "es",
+        Format {
+            decimal: ',',
+            group: Some(('.', 5)),
+            count_group: ('.', 5),
+        },
+    ),
+    (
+        "en",
+        Format {
+            decimal: '.',
+            group: None,
+            count_group: (' ', 4),
+        },
+    ),
+];
+
+/// The registry languages [`FORMATS`] has no row for.
+pub fn missing_langs(langs: &[&str]) -> Vec<String> {
+    ownhealth_core::langs::missing(&ownhealth_core::langs::codes(FORMATS), langs)
+        .into_iter()
+        .map(|l| format!("number format has no `{l}` row"))
+        .collect()
+}
+
+fn grouped(int: &str, mark: char, from: usize) -> String {
+    let mut out = String::new();
+    for (i, c) in int.chars().enumerate() {
+        if int.len() >= from && i > 0 && (int.len() - i).is_multiple_of(3) {
+            out.push(mark);
+        }
+        out.push(c);
     }
+    out
+}
+
+/// A whole count (`12345`) as a person reading `lang` writes it.
+pub fn count(n: i64, lang: &str) -> String {
+    let (mark, from) = ownhealth_core::langs::pick(FORMATS, lang).count_group;
+    let sign = if n < 0 { "-" } else { "" };
+    format!("{sign}{}", grouped(&n.unsigned_abs().to_string(), mark, from))
+}
+
+/// A plain printed number (`-1234.5`) as a person reading `lang` writes it, by its [`FORMATS`] row;
+/// any other text comes back as it is.
+pub fn localized(s: &str, lang: &str) -> String {
+    let f = ownhealth_core::langs::pick(FORMATS, lang);
     let (sign, body) = match s.strip_prefix('-') {
         Some(rest) => ("-", rest),
         None => ("", s),
@@ -29,14 +84,12 @@ pub fn localized(s: &str, lang: &str) -> String {
         return s.to_string();
     }
     let mut out = String::from(sign);
-    for (i, c) in int.chars().enumerate() {
-        if int.len() >= 5 && i > 0 && (int.len() - i).is_multiple_of(3) {
-            out.push('.');
-        }
-        out.push(c);
+    match f.group {
+        Some((mark, from)) => out.push_str(&grouped(int, mark, from)),
+        None => out.push_str(int),
     }
     if !frac.is_empty() {
-        out.push(',');
+        out.push(f.decimal);
         out.push_str(frac);
     }
     out
@@ -114,6 +167,12 @@ mod tests {
         assert_eq!(localized("2.4", "en"), "2.4");
         assert_eq!(localized("< 75", "es"), "< 75");
         assert_eq!(localized("abc", "es"), "abc");
+        // a whole count, as the dashboard's 30-day sums print it
+        assert_eq!(count(1234, "es"), "1234");
+        assert_eq!(count(12345, "es"), "12.345");
+        assert_eq!(count(1234, "en"), "1 234");
+        assert_eq!(count(-1_234_567, "en"), "-1 234 567");
+        assert_eq!(count(999, "en"), "999");
     }
 
     #[test]

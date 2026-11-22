@@ -99,7 +99,7 @@ pub async fn carrier_couple(rt: &Runtime, principal: &Principal, a: &str, b: &st
     Ok(json!({
         "a": who(&pa),
         "b": who(&pb),
-        "lang": if lang == "es" { "es" } else { "en" },
+        "lang": ownhealth_core::langs::lang_or_default(lang),
         "rules": couple::rules_version(),
         "rows": joined.rows,
         "withheld": {"sensitive": joined.withheld},
@@ -114,7 +114,9 @@ async fn carrier_couple_route(
     Query(q): Query<HashMap<String, String>>,
 ) -> R {
     let arg = |k: &str| q.get(k).map_or("", String::as_str);
-    ok(carrier_couple(&rt, &c, arg("a"), arg("b"), arg("lang")).await?)
+    // an absent lang reads English, the default this route has answered with since 0.4.0
+    let lang = q.get("lang").map_or("en", String::as_str);
+    ok(carrier_couple(&rt, &c, arg("a"), arg("b"), lang).await?)
 }
 
 pub fn router() -> Router<Runtime> {

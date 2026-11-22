@@ -105,11 +105,7 @@ async fn get_pdf(
 ) -> R {
     let q = params(&q)?;
     let as_of = q.as_of.unwrap_or_else(today_utc);
-    let lang = if q.lang.as_deref().unwrap_or(&c.lang) == "es" {
-        "es"
-    } else {
-        "en"
-    };
+    let lang = ownhealth_core::langs::lang_or_default(q.lang.as_deref().unwrap_or(&c.lang));
     let mut tx = rt.pool.begin().await?;
     let (mut model, perm) = rendered(&mut tx, &c, &p, as_of, lang).await?;
     model["person"] = next_draw::person(&perm.profile, as_of, lang, q.hide_name)?;

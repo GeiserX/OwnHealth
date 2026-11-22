@@ -216,11 +216,8 @@ impl Pack {
             .filter(|t| truthy(t))
             .or_else(|| self.templates.get(key))
             .ok_or_else(|| PackError(format!("no template {key}")))?;
-        let s = t
-            .get(lang)
-            .filter(|v| truthy(v))
-            .or_else(|| t.get("en"))
-            .ok_or_else(|| PackError(format!("template {key} has no en text")))?;
+        let s = ownhealth_core::langs::lookup(lang, |l| t.get(l).filter(|v| truthy(v)))
+            .ok_or_else(|| PackError(format!("template {key} has no {lang} text")))?;
         py_format(&text(s), params)
     }
 }
@@ -369,8 +366,8 @@ fn check(pack: &Pack) -> PackResult<()> {
         }
     }
     for (key, t) in &pack.templates {
-        if t.get("en").is_none() || t.get("es").is_none() {
-            return Err(PackError(format!("template {key} needs en and es")));
+        if let Some(lang) = ownhealth_core::langs::LANGS.iter().find(|l| t.get(**l).is_none()) {
+            return Err(PackError(format!("template {key} needs {lang}")));
         }
     }
     Ok(())

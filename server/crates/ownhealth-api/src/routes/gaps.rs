@@ -87,7 +87,7 @@ async fn get_letter(
         .into());
     }
     let mut check = Check::query();
-    let lang = lang_of(&q, &mut check).unwrap_or(if c.lang == "es" { "es" } else { "en" });
+    let lang = lang_of(&q, &mut check).unwrap_or(ownhealth_core::langs::lang_or_default(&c.lang));
     // the language is the only input: nothing a person types reaches the letter or the audit row
     let mut extra: Vec<&String> = q.keys().filter(|k| *k != "lang").collect();
     extra.sort();

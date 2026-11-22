@@ -15,6 +15,7 @@ use chrono::{Days, NaiveDate, TimeDelta, Utc};
 use ownhealth_core::Runtime;
 use ownhealth_core::access::{Permission, Principal, PrincipalKind};
 use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::langs::LANGS;
 use ownhealth_core::pyjson::{py_date, pydantic_datetime_utc};
 use ownhealth_ingest_structured::py::round as py_round;
 use ownhealth_ingest_structured::wearables::{self as w, Point};
@@ -93,6 +94,12 @@ fn literal<'a>(q: &'a [(String, String)], key: &str, allowed: &[&'a str], msg: &
             ))
         }
     }
+}
+
+/// `lang`: a registry language, the default when absent.
+fn lang_param(q: &[(String, String)]) -> Result<&'static str, Failure> {
+    let msg = format!("Input should be {}", super::auth::literal_expected(&LANGS));
+    literal(q, "lang", &LANGS, &msg).map(ownhealth_core::langs::lang_or_default)
 }
 
 fn date_param(q: &[(String, String)], key: &str) -> Result<Option<NaiveDate>, Failure> {
@@ -202,11 +209,7 @@ fn r(v: Option<f64>, metric: &str) -> Value {
 }
 
 fn label(info: &w::Metric, lang: &str) -> String {
-    if lang == "es" {
-        info.label_es.clone()
-    } else {
-        info.label_en.clone()
-    }
+    ownhealth_core::langs::pick(&info.labels(), lang).to_string()
 }
 
 fn order_key(m: &str) -> (usize, String) {
@@ -225,7 +228,7 @@ async fn summary(
     Path(p): Path<String>,
     Query(q): Query<Vec<(String, String)>>,
 ) -> Answer {
-    let lang = literal(&q, "lang", &["es", "en"], "Input should be 'es' or 'en'")?;
+    let lang = lang_param(&q)?;
     let days = days_param(&q)?;
     let as_of = date_param(&q, "as_of")?;
     let mut tx = rt.pool.begin().await?;
@@ -311,7 +314,7 @@ async fn metric_series(
     let window = param(&q, "window").unwrap_or("P30D");
     let resolution = literal(&q, "resolution", &["day", "hour"], "Input should be 'day' or 'hour'")?;
     let as_of = date_param(&q, "as_of")?;
-    let lang = literal(&q, "lang", &["es", "en"], "Input should be 'es' or 'en'")?;
+    let lang = lang_param(&q)?;
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, Some("read:wearables"), None).await?;
     let days = window_days(window)?;

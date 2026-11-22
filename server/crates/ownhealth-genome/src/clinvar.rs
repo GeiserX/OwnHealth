@@ -71,8 +71,17 @@ pub fn templates() -> Vec<(String, String, String)> {
     out
 }
 
+/// The review item's sentence in every registry language, `summary_<lang>`, and `summary` in English
+/// for the readers of items written before the registry (the UI reads `summary_<lang>` first).
+fn with_summaries(payload: &mut Value, withheld: bool, unconfirmed: bool) {
+    payload["summary"] = json!(review_summary(withheld, unconfirmed, "en"));
+    for lang in ownhealth_core::langs::LANGS {
+        payload[format!("summary_{lang}")] = json!(review_summary(withheld, unconfirmed, lang));
+    }
+}
+
 fn tpl(key: &str, lang: &str) -> String {
-    let lang = if lang == "es" { "es" } else { "en" };
+    let lang = ownhealth_core::langs::lang_or_default(lang);
     TEMPLATES
         .get(key)
         .and_then(|t| t.get(lang))
@@ -954,15 +963,14 @@ async fn diff_dataset(
         // Nothing that names the variant or the way its class moved goes into the item: a reviewer
         // may lack read:genome or read:sensitive, and the subject's switch may change later. The kind
         // stays on genome_event, read through the gated events route by event_id.
-        let payload = json!({
+        let mut payload = json!({
             "event_id": event_id,
             "withheld": withheld,
             "unconfirmed": unconfirmed,
-            "summary": review_summary(withheld, unconfirmed, "en"),
-            "summary_es": review_summary(withheld, unconfirmed, "es"),
             "release_from": release_from,
             "release_to": release_to,
         });
+        with_summaries(&mut payload, withheld, unconfirmed);
         // The same change seen through another dataset of this profile already has its item, open or
         // already decided: a dismissed alert is not raised again. An item whose genome file was
         // retracted no longer stands for the change. Datasets run non-chip first within one run; an
@@ -1076,8 +1084,7 @@ pub async fn hand_over_alerts(conn: &mut PgConnection, document_id: Uuid) -> Res
         let withheld = payload["withheld"].as_bool().unwrap_or(true);
         payload["event_id"] = json!(event_id);
         payload["unconfirmed"] = json!(unconfirmed);
-        payload["summary"] = json!(review_summary(withheld, unconfirmed, "en"));
-        payload["summary_es"] = json!(review_summary(withheld, unconfirmed, "es"));
+        with_summaries(&mut payload, withheld, unconfirmed);
         sqlx::query("update review_item set ref_id = $2, document_id = $3, payload = $4 where id = $1")
             .bind(item)
             .bind(event_id)

@@ -224,9 +224,7 @@ impl Gaps {
 
 /// The text of one template in one language (en when the language has none).
 pub fn pick(v: &Value, lang: &str) -> String {
-    v.get(lang)
-        .or_else(|| v.get("en"))
-        .and_then(Value::as_str)
+    ownhealth_core::langs::lookup(lang, |l| v.get(l).and_then(Value::as_str))
         .unwrap_or_default()
         .to_string()
 }
@@ -516,7 +514,7 @@ fn template(g: &Gaps, kind: &str, rule: &str, lang: &str) -> String {
 /// `withheld_scopes`; without read:records `gaps_hash` is left out too.
 pub fn render(doc: &Value, lang: &str, scopes: &Scopes) -> Result<Value> {
     let g = load()?;
-    let lang = if LANGS.contains(&lang) { lang } else { "en" };
+    let lang = ownhealth_core::langs::lang_or_default(lang);
     let mut whole = doc.as_object().cloned().unwrap_or_default();
     let mut withheld = 0;
     let mut lacking = BTreeSet::new();
