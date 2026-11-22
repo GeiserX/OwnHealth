@@ -155,6 +155,22 @@ pub async fn migrate_embedded(pool: &PgPool) -> Result<Vec<i32>> {
 
 async fn migrate_locked(pool: &PgPool, migrations: &[Migration]) -> Result<Vec<i32>> {
     let mut conn = pool.acquire().await?;
+    // The objects a migration makes belong to the role that runs it. The database owner owns schema
+    // public and may drop anything in it, so with another migrating role it could put its own
+    // function where the audit chain's SECURITY DEFINER function trusts one, and run code as that role.
+    let (db, owner, user): (String, String, String) = sqlx::query_as(
+        "select d.datname::text, pg_catalog.pg_get_userbyid(d.datdba)::text, current_user::text \
+         from pg_catalog.pg_database d where d.datname = pg_catalog.current_database()",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if owner != user {
+        return Err(MigrationError(format!(
+            "migrations run only as the owner of database {db} ({owner}), not as {user}: connect as {owner}, \
+             or make {user} the owner"
+        ))
+        .into());
+    }
     sqlx::query(
         "create table if not exists schema_migrations ( version int primary key, name text not null, \
          checksum text not null, applied_at timestamptz not null default now())",

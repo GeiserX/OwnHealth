@@ -13,6 +13,7 @@ use ownhealth_core::config::Settings;
 use ownhealth_core::demo::seed_demo;
 use ownhealth_core::testing::TestDb;
 use serde_json::Value;
+use sqlx::Connection;
 
 type R = anyhow::Result<()>;
 
@@ -83,6 +84,50 @@ async fn cli_reads_the_database_url_from_its_file() -> R {
         .output()?;
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     Ok(())
+}
+
+/// `migrate` runs only as the owner of the database. Run by another role, a superuser here, the
+/// tables and the SECURITY DEFINER chain function would belong to that role, and the database owner,
+/// who owns schema public, could drop them and put its own in their place. The control hands the
+/// database to the migrating role, and the same command then runs.
+#[tokio::test]
+async fn cli_migrate_refuses_a_database_it_does_not_own() -> R {
+    let dir = tempfile::tempdir()?;
+    let db = TestDb::empty().await?;
+    let s = db.settings(&dir.path().join("live"))?;
+    let owner = format!("oh_test_own_{}", ownhealth_core::ids::token_hex(4));
+    let mut admin = sqlx::PgConnection::connect(&ownhealth_core::testing::admin_url()).await?;
+    let result: R = async {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "create role \"{owner}\" nologin; alter database \"{}\" owner to \"{owner}\"",
+            db.name
+        )))
+        .execute(&mut admin)
+        .await?;
+        let out = ownhealth(&s, &["migrate"])?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        anyhow::ensure!(out.status.code() == Some(1), "migrate must refuse: {stderr}");
+        anyhow::ensure!(stderr.contains(&format!("owner of database {}", db.name)), "{stderr}");
+        let tables: i64 = sqlx::query_scalar("select count(*) from pg_tables where schemaname = 'public'")
+            .fetch_one(&db.pool)
+            .await?;
+        anyhow::ensure!(tables == 0, "the refused run made {tables} tables");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "alter database \"{}\" owner to current_user",
+            db.name
+        )))
+        .execute(&mut admin)
+        .await?;
+        let out = ownhealth(&s, &["migrate"])?;
+        anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        Ok(())
+    }
+    .await;
+    drop(db);
+    sqlx::query(sqlx::AssertSqlSafe(format!("drop role if exists \"{owner}\"")))
+        .execute(&mut admin)
+        .await?;
+    result
 }
 
 fn restic() -> Option<PathBuf> {

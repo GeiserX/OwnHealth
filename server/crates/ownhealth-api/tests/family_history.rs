@@ -428,3 +428,74 @@ async fn the_family_names_pass_the_wording_lint() -> R {
     assert!(!ownhealth_rules::wording::lint(&json!({"es": "Debe hacerse una prueba"}), &[]).is_empty());
     Ok(())
 }
+
+/// The pedigree is read from one snapshot, and its audit row is written after the read, in a READ
+/// COMMITTED transaction of its own (the audit chain links rows only from one). The row must still
+/// carry the time the read began: here the read stalls on a lock while a relative is added, and the
+/// drawing, which leaves that relative out, must not be logged as later than the addition.
+#[tokio::test]
+async fn the_pedigree_audit_row_carries_the_time_the_read_began() -> R {
+    let a = app().await?;
+    mother(&a).await?;
+    let pool = a.db.pool.clone();
+    let clock = || sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>("select clock_timestamp()").fetch_one(&pool);
+    let sent_at = clock().await?;
+    let mut lock = pool.begin().await?;
+    sqlx::query("lock table family_member_link in access exclusive mode")
+        .execute(&mut *lock)
+        .await?;
+    let meanwhile = async {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !sqlx::query_scalar::<_, bool>(
+            "select exists (select 1 from pg_locks where relation = 'family_member_link'::regclass and not granted)",
+        )
+        .fetch_one(&pool)
+        .await?
+        {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "the pedigree never waited");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let stalled_at = clock().await?;
+        // Alex's father is added (no link, so the lock does not hold it up) while the pedigree waits
+        let alex = a.family.profile("alex");
+        let mut tx = pool.begin().await?;
+        family::add(
+            &mut tx,
+            &MemberIn::new(alex, "FTH"),
+            &manual(alex),
+            "person",
+            None,
+            None,
+        )
+        .await?;
+        let added_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("select now()").fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        lock.rollback().await?;
+        anyhow::Ok((stalled_at, added_at))
+    };
+    let (asked, held) = tokio::join!(send(&a, "alex", "GET", "/profiles/alex/pedigree", None), meanwhile);
+    let (stalled_at, added_at) = held?;
+    let (s, ped) = asked?;
+    assert_eq!(s, StatusCode::OK, "{ped}");
+    assert_eq!(
+        ped["nodes"].as_array().map(Vec::len),
+        Some(1),
+        "the drawing holds the state from when the read began"
+    );
+    let at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "select ts from audit_event where tool = 'family' and action = 'read' and profile_id = $1 \
+         order by id desc limit 1",
+    )
+    .bind(a.family.profile("alex"))
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        sent_at <= at && at < stalled_at && at < added_at,
+        "stamped at the read: {sent_at} <= {at} < {stalled_at} (stall), {added_at} (relative added)"
+    );
+    // the next read shows the father
+    let (_, ped) = send(&a, "alex", "GET", "/profiles/alex/pedigree", None).await?;
+    assert_eq!(ped["nodes"].as_array().map(Vec::len), Some(2));
+    Ok(())
+}
