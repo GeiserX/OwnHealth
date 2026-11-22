@@ -20,12 +20,12 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{self, BufRead, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::LazyLock;
 
 use chrono::NaiveDate;
 use ownhealth_core::access::{get_profile, majority, today};
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore, LocalCopy};
 use ownhealth_core::review::{ReviewItemIn, create_item};
 use ownhealth_core::{Error, Result};
 use serde::Serialize;
@@ -781,10 +781,14 @@ async fn diff_dataset(
     }
     let sites = fact_sites(&mut tx, ds.id).await?;
     let label = format!("the calls VCF of dataset {}", ds.id);
-    let vcf_path: Result<Option<PathBuf>> = ds
+    let vcf_copy: Result<Option<LocalCopy>> = ds
         .vcf
         .as_ref()
-        .map(|sha| blobs.path(sha).map_err(|e| bad_file(&label, e)))
+        .map(|sha| {
+            blobs
+                .with_local_copy(BlobOwner::Profile(ds.profile_id), sha)
+                .map_err(|e| bad_file(&label, e))
+        })
         .transpose();
     let fact_alleles: Vec<(Key, String, String)> = sites
         .iter()
@@ -795,12 +799,12 @@ async fn diff_dataset(
     // The outer error is the release's and stops the run; the inner one is this dataset's calls VCF,
     // which must not stop the other datasets.
     let read = blocking(move || -> Result<Result<Vec<Carried>>> {
-        let person: Box<dyn Alleles> = match vcf_path.and_then(|p| p.map(|p| VcfAlleles::open(&p, &label)).transpose())
-        {
-            Ok(Some(v)) => Box::new(v),
-            Ok(None) => Box::new(FactAlleles::new(fact_alleles)),
-            Err(e) => return Ok(Err(e)),
-        };
+        let person: Box<dyn Alleles> =
+            match vcf_copy.and_then(|p| p.map(|p| VcfAlleles::open(p.path(), &label)).transpose()) {
+                Ok(Some(v)) => Box::new(v),
+                Ok(None) => Box::new(FactAlleles::new(fact_alleles)),
+                Err(e) => return Ok(Err(e)),
+            };
         let mut person = Watched {
             inner: person,
             failed: false,

@@ -33,7 +33,7 @@ async fn test_upload_pdf_enqueues_import_and_job_list() -> R {
     let sha = item["sha256"].as_str().unwrap_or_default().to_string();
     assert!(a.rt.blobs.exists(&sha));
     // the spooled copies are gone
-    let left: Vec<_> = std::fs::read_dir(a.rt.blobs.root().join("tmp"))?.collect();
+    let left: Vec<_> = std::fs::read_dir(a.rt.settings.blobs_path().join("tmp"))?.collect();
     assert!(left.is_empty(), "{left:?}");
 
     let (_, again) = a.upload("alex", &[("profile", "alex")], &[("copy.pdf", &pdf)]).await?;
@@ -88,11 +88,11 @@ async fn test_upload_pdf_enqueues_import_and_job_list() -> R {
     assert_eq!(all["jobs"][0]["id"], json!(carmen_job)); // newest first
 
     // viewers cannot import, and nothing lands in the store for them
-    let before = blob_count(&a.rt.blobs.root().join("sha256"))?;
+    let before = blob_count(&a.rt.settings.blobs_path().join("sha256"))?;
     let other = glucose_pdf("LN-SAM");
     let (s, v) = a.upload("sam", &[("profile", "alex")], &[("x.pdf", &other)]).await?;
     assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
-    assert_eq!(blob_count(&a.rt.blobs.root().join("sha256"))?, before);
+    assert_eq!(blob_count(&a.rt.settings.blobs_path().join("sha256"))?, before);
 
     let (s, v) = a.upload("alex", &[("profile", "alex")], &[("x.txt", b"hello")]).await?;
     assert_eq!(s, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{v}");

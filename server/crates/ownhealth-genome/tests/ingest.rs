@@ -163,7 +163,13 @@ async fn corrupted_blob_bytes_are_refused() -> R {
     let raw = synthetic::alex_raw_files()?;
     let (facts, att) = synthetic::with_files(&synthetic::alex_facts(), &e.blobs, &raw)?;
     let sha = facts["files"][0]["sha256"].as_str().unwrap_or_default().to_string();
-    let path = e.blobs.path(&sha)?;
+    let path = e
+        .dir
+        .path()
+        .join("blobs/sha256")
+        .join(&sha[..2])
+        .join(&sha[2..4])
+        .join(&sha);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
     std::fs::write(&path, b"tampered")?;
     let err = import_err(e.seed(&mut c, "alex", &facts, &att).await);

@@ -65,7 +65,7 @@ async fn probes_answer_like_python() -> R {
     ownhealth_core::migrate::migrate_embedded(&db.pool).await?;
     let (s, b, _) = call(&app, get("/readyz")?).await?;
     assert_eq!((s, json_of(&b)), (StatusCode::OK, json!({"status": "ready"})));
-    std::fs::remove_dir_all(rt.blobs.root())?;
+    std::fs::remove_dir_all(rt.settings.blobs_path())?;
     let (s, b, _) = call(&app, get("/readyz")?).await?;
     assert_eq!(
         (s, json_of(&b)["detail"]["code"].clone()),

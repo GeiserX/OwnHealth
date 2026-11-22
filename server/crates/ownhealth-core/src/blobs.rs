@@ -6,11 +6,12 @@
 //! genome_dataset); a hash on its own grants nothing.
 
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use uuid::Uuid;
 
 const CHUNK: usize = 1024 * 1024;
 
@@ -34,6 +35,32 @@ impl From<BlobError> for crate::Error {
     }
 }
 
+/// Whose bytes a read is for. Every read names it, so the per-profile encryption can pick the key
+/// and the S3 backend the prefix without changing a caller. The plain layout reads every owner the
+/// same way. Access control stays on the rows that reference a hash: an owner here grants nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobOwner {
+    /// A profile's own data.
+    Profile(Uuid),
+    /// Bytes that arrived but have no profile yet, keyed by the item that holds them.
+    Pending(Uuid),
+    /// Reference data nobody owns.
+    Reference,
+}
+
+/// A blob as a file on local disk, for readers that need a path (SQLite, zip, tabix). The path is
+/// good while this value lives. In the plain layout it is the stored file itself.
+#[derive(Debug)]
+pub struct LocalCopy {
+    path: PathBuf,
+}
+
+impl LocalCopy {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// A sha256 given as hex (any case) or as 32 raw bytes, normalised to lowercase hex.
 pub fn sha256_hex(value: &str) -> Result<String, BlobError> {
     let v = value.to_ascii_lowercase();
@@ -48,6 +75,18 @@ pub fn sha256_hex_to_bytes(h: &str) -> Result<Vec<u8>, BlobError> {
     hex::decode(sha256_hex(h)?).map_err(|_| BlobError::BadHash)
 }
 
+/// Where blobs live is this module's business: no caller gets a raw path or the store's root, so the
+/// per-profile encryption and the S3 backend can change the layout without touching callers.
+///
+/// ```compile_fail,E0624
+/// let store = ownhealth_core::blobs::BlobStore::new("unused").unwrap();
+/// let _ = store.path(&"0".repeat(64));
+/// ```
+///
+/// ```compile_fail,E0599
+/// let store = ownhealth_core::blobs::BlobStore::new("unused").unwrap();
+/// let _ = store.root();
+/// ```
 #[derive(Debug, Clone)]
 pub struct BlobStore {
     root: PathBuf,
@@ -79,18 +118,28 @@ impl BlobStore {
         Ok(BlobStore { root })
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    pub fn path(&self, sha256: &str) -> Result<PathBuf, BlobError> {
+    fn path(&self, sha256: &str) -> Result<PathBuf, BlobError> {
         let h = sha256_hex(sha256)?;
         Ok(self.root.join("sha256").join(&h[0..2]).join(&h[2..4]).join(&h))
     }
 
-    /// The path of a hash given as the 32 bytes of a `bytea` column.
-    pub fn path_of_bytes(&self, sha256: &[u8]) -> Result<PathBuf, BlobError> {
-        self.path(&hex::encode(sha256))
+    /// Ok while the store can serve; otherwise the directory that is missing, for the operator.
+    pub fn health(&self) -> Result<(), String> {
+        if self.root.is_dir() {
+            Ok(())
+        } else {
+            Err(self.root.display().to_string())
+        }
+    }
+
+    /// A path in the store's own tmp directory for a spool or a download, under `name` (one file
+    /// name, no directory). `sweep_tmp` removes leftovers named `upload-*`.
+    pub fn staging_path(&self, name: &str) -> PathBuf {
+        debug_assert!(
+            Path::new(name).file_name() == Some(std::ffi::OsStr::new(name)),
+            "{name}"
+        );
+        self.root.join("tmp").join(name)
     }
 
     fn land(&self, tmp: &Path, h: &str) -> Result<(), BlobError> {
@@ -186,6 +235,32 @@ impl BlobStore {
         })
     }
 
+    /// The bytes of `owner`'s blob as a reader that can seek.
+    pub fn open_seek(&self, _owner: BlobOwner, sha256: &str) -> Result<impl Read + Seek + Send + 'static, BlobError> {
+        self.open(sha256)
+    }
+
+    /// The bytes of `owner`'s blob as an async reader, with their size, for streaming a response.
+    pub async fn open_async(
+        &self,
+        _owner: BlobOwner,
+        sha256: &str,
+    ) -> Result<(impl AsyncRead + Send + Unpin + 'static, u64), BlobError> {
+        let file = tokio::fs::File::from_std(self.open(sha256)?);
+        let size = file.metadata().await?.len();
+        Ok((file, size))
+    }
+
+    /// `owner`'s blob as a file on local disk, for readers that need a path.
+    pub fn with_local_copy(&self, _owner: BlobOwner, sha256: &str) -> Result<LocalCopy, BlobError> {
+        let path = self.path(sha256)?;
+        match fs::metadata(&path) {
+            Ok(_) => Ok(LocalCopy { path }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(BlobError::NotFound(sha256.to_ascii_lowercase())),
+            Err(e) => Err(BlobError::Io(e)),
+        }
+    }
+
     pub fn get_bytes(&self, sha256: &str) -> Result<Vec<u8>, BlobError> {
         let mut out = Vec::new();
         self.open(sha256)?.read_to_end(&mut out)?;
@@ -245,6 +320,88 @@ impl BlobStore {
 mod tests {
     use super::*;
 
+    fn owner() -> BlobOwner {
+        BlobOwner::Profile(uuid::Uuid::nil())
+    }
+
+    #[test]
+    fn open_seek_reads_from_any_offset() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = BlobStore::new(dir.path())?;
+        let h = store.put_bytes(b"Carmen Ortega, LabNorte")?;
+        let mut r = store.open_seek(owner(), &h)?;
+        r.seek(io::SeekFrom::Start(15))?;
+        let mut tail = String::new();
+        r.read_to_string(&mut tail)?;
+        assert_eq!(tail, "LabNorte");
+        assert!(matches!(
+            store.open_seek(owner(), &"0".repeat(64)),
+            Err(BlobError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.open_seek(owner(), "../etc/passwd"),
+            Err(BlobError::BadHash)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn local_copy_holds_the_bytes() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = BlobStore::new(dir.path())?;
+        let data = b"SQLite format 3\0 synthetic Rivera family export";
+        let h = store.put_bytes(data)?;
+        let copy = store.with_local_copy(BlobOwner::Reference, &h.to_uppercase())?;
+        assert_eq!(fs::read(copy.path())?, data);
+        assert!(matches!(
+            store.with_local_copy(owner(), &"0".repeat(64)),
+            Err(BlobError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.with_local_copy(owner(), "nope"),
+            Err(BlobError::BadHash)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn staging_paths_sit_in_tmp_under_their_own_name() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = BlobStore::new(dir.path())?;
+        let p = store.staging_path("upload-0123abcd");
+        assert_eq!(p, dir.path().join("tmp").join("upload-0123abcd"));
+        File::create(&p)?.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200))?;
+        assert_eq!(store.sweep_tmp(std::time::Duration::from_secs(3600))?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn health_names_the_missing_directory() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("blobs");
+        let store = BlobStore::new(&root)?;
+        assert_eq!(store.health(), Ok(()));
+        fs::remove_dir_all(&root)?;
+        assert_eq!(store.health(), Err(root.display().to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_async_streams_the_bytes_with_their_size() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = BlobStore::new(dir.path())?;
+        let h = store.put_bytes(b"LabNorte lipid panel")?;
+        let (mut r, size) = store.open_async(owner(), &h).await?;
+        let mut out = Vec::new();
+        r.read_to_end(&mut out).await?;
+        assert_eq!((out.as_slice(), size), (&b"LabNorte lipid panel"[..], 20));
+        assert!(matches!(
+            store.open_async(owner(), &"0".repeat(64)).await,
+            Err(BlobError::NotFound(_))
+        ));
+        Ok(())
+    }
+
     #[test]
     fn sweep_tmp_removes_only_old_spools() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
@@ -289,8 +446,7 @@ mod tests {
         assert_eq!(p, dir.path().join("sha256").join(&h1[..2]).join(&h1[2..4]).join(&h1));
         assert_eq!(store.get_bytes(&h1.to_uppercase()).expect("get"), data);
         assert_eq!(fs::read_dir(dir.path().join("tmp")).expect("tmp").count(), 0);
-        let raw = sha256_hex_to_bytes(&h1).expect("bytes");
-        assert_eq!(store.path_of_bytes(&raw).expect("path"), p);
+        assert_eq!(hex::encode(sha256_hex_to_bytes(&h1).expect("bytes")), h1);
     }
 
     #[test]

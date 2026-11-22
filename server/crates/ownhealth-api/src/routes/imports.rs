@@ -109,11 +109,7 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
                         .filter(|f| !f.is_empty())
                         .unwrap_or("upload")
                         .to_string();
-                    let path = rt
-                        .blobs
-                        .root()
-                        .join("tmp")
-                        .join(format!("upload-{}", ids::token_hex(16)));
+                    let path = rt.blobs.staging_path(&format!("upload-{}", ids::token_hex(16)));
                     // the Spool owns the file before it exists, so a failed read still removes it
                     files.push(Spool {
                         filename,

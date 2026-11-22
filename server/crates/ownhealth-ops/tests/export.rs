@@ -252,7 +252,7 @@ async fn a_missing_blob_is_listed_in_the_manifest() -> R {
     let mut c = db.pool.acquire().await?;
     let f = create_rivera_family(&mut c, "Rivera (export)").await?;
     let (_, sha, _) = lab_document(&mut c, &blobs, &f).await?;
-    std::fs::remove_file(blobs.path(&sha)?)?; // the row survives, the file is gone
+    std::fs::remove_file(dir.path().join("sha256").join(&sha[..2]).join(&sha[2..4]).join(&sha))?; // the row survives, the file is gone
     let mut out = Cursor::new(Vec::new());
     let manifest = export_profile(&mut c, &blobs, f.profile("alex"), &mut out, "zip").await?;
     let mut z = zip::ZipArchive::new(Cursor::new(out.into_inner()))?;

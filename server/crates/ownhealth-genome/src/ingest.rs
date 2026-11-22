@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::Read;
 
 use chrono::{DateTime, Utc};
-use ownhealth_core::blobs::{BlobStore, sha256_hex_to_bytes};
+use ownhealth_core::blobs::{BlobOwner, BlobStore, sha256_hex_to_bytes};
 use ownhealth_core::ids::short;
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::provenance::{SrcIn, SrcRef, ensure_src};
@@ -201,7 +201,7 @@ async fn raw_files(
                 (idx.to_string(), index_label.to_string()),
             ],
         );
-        blocking(move || check_raw_file(&store, &files)).await?;
+        blocking(move || check_raw_file(&store, BlobOwner::Profile(profile_id), &files)).await?;
         columns.insert(data_col, sha256_hex_to_bytes(sha)?);
         columns.insert(index_col, sha256_hex_to_bytes(idx)?);
     }
@@ -210,7 +210,7 @@ async fn raw_files(
 
 /// The stored bytes of a raw file and its index match their sha256, and they open as a bgzipped VCF
 /// with a tabix index. `files` is [(data sha, path), (index sha, index path)].
-fn check_raw_file(blobs: &BlobStore, files: &[(String, String); 2]) -> Result<()> {
+fn check_raw_file(blobs: &BlobStore, owner: BlobOwner, files: &[(String, String); 2]) -> Result<()> {
     for (want, label) in files {
         if rehash(blobs, want)? != *want {
             let head: String = want.chars().take(12).collect();
@@ -220,7 +220,8 @@ fn check_raw_file(blobs: &BlobStore, files: &[(String, String); 2]) -> Result<()
         }
     }
     let [(sha, path), (idx, _)] = files;
-    let opened = VcfFile::open(&blobs.path(sha)?, &blobs.path(idx)?).and_then(|mut vf| vf.check_header());
+    let (data, index) = (blobs.with_local_copy(owner, sha)?, blobs.with_local_copy(owner, idx)?);
+    let opened = VcfFile::open(data.path(), index.path()).and_then(|mut vf| vf.check_header());
     if let Err(e) = opened {
         return Err(import_error(format!(
             "{path}: not a bgzipped VCF with a tabix index ({e})"
@@ -230,14 +231,16 @@ fn check_raw_file(blobs: &BlobStore, files: &[(String, String); 2]) -> Result<()
 }
 
 /// Rule 7's site-list check, with the chip_sites file opened when it is on hand.
-fn chip_errors(blobs: &BlobStore, doc: &Value, has_sites: bool) -> Result<Vec<String>> {
+fn chip_errors(blobs: &BlobStore, owner: BlobOwner, doc: &Value, has_sites: bool) -> Result<Vec<String>> {
     let file = arr(doc, "files").iter().find(|f| s(f, "role") == Some("chip_sites"));
     let (Some(f), true) = (file, has_sites) else {
         return Ok(chip_site_errors(doc, None));
     };
     let vf = VcfFile::open(
-        &blobs.path(s(f, "sha256").unwrap_or_default())?,
-        &blobs.path(s(f, "index_sha256").unwrap_or_default())?,
+        blobs.with_local_copy(owner, s(f, "sha256").unwrap_or_default())?.path(),
+        blobs
+            .with_local_copy(owner, s(f, "index_sha256").unwrap_or_default())?
+            .path(),
     )?;
     let vf = RefCell::new(vf);
     let probed = |chrom: &str, pos: i64| -> bool {
@@ -398,7 +401,7 @@ pub async fn import(
     }
     let errors = {
         let (store, doc, has_sites) = (blobs.clone(), doc.clone(), raw.contains_key("sites_blob"));
-        blocking(move || chip_errors(&store, &doc, has_sites)).await?
+        blocking(move || chip_errors(&store, BlobOwner::Profile(profile_id), &doc, has_sites)).await?
     };
     if !errors.is_empty() {
         return Err(invalid(&filename, &errors));

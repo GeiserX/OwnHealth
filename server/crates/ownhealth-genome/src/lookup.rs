@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::LazyLock;
 
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::pyjson::py_isoformat_utc;
 use ownhealth_core::{Error, Result};
 use regex::Regex;
@@ -125,8 +125,12 @@ fn contig_names(chrom: &str) -> Vec<String> {
     out
 }
 
-fn open(blobs: &BlobStore, data: &str, index: &str) -> Result<VcfFile> {
-    Ok(VcfFile::open(&blobs.path(data)?, &blobs.path(index)?)?)
+fn open(blobs: &BlobStore, owner: BlobOwner, data: &str, index: &str) -> Result<VcfFile> {
+    let (data, index) = (
+        blobs.with_local_copy(owner, data)?,
+        blobs.with_local_copy(owner, index)?,
+    );
+    Ok(VcfFile::open(data.path(), index.path())?)
 }
 
 fn fetch(vf: &mut VcfFile, chrom: &str, start: i64, end: i64) -> Result<Vec<Record>> {
@@ -265,6 +269,7 @@ fn as_f64(v: Option<&Value>) -> Option<f64> {
 /// One source's answer at one site. Always returns a call_state in CALL_STATES.
 fn call_at(
     blobs: &BlobStore,
+    owner: BlobOwner,
     ds: &DatasetRow,
     site: &Site,
     cited: Option<&Value>,
@@ -288,7 +293,7 @@ fn call_at(
         }
         return Ok(status("not_covered", "absent", "raw_genome_not_on_file"));
     };
-    let calls = fetch(&mut open(blobs, vcf, tbi)?, chrom, pos, pos)?;
+    let calls = fetch(&mut open(blobs, owner, vcf, tbi)?, chrom, pos, pos)?;
     if let Some(rec) = pick(&calls, pos, alt) {
         return Ok(from_record(rec, "vcf"));
     }
@@ -296,7 +301,7 @@ fn call_at(
         let (Some(sites), Some(sites_tbi)) = (ds.sites.as_deref(), ds.sites_tbi.as_deref()) else {
             return Ok(status("not_on_array", "absent", "not_in_array_calls_no_site_list"));
         };
-        let probed = fetch(&mut open(blobs, sites, sites_tbi)?, chrom, pos, pos)?;
+        let probed = fetch(&mut open(blobs, owner, sites, sites_tbi)?, chrom, pos, pos)?;
         if probed.iter().any(|r| r.pos == pos) {
             return Ok(status("no_call", "chip_sites", "probed_not_called"));
         }
@@ -311,7 +316,7 @@ fn call_at(
     let (Some(gvcf), Some(gvcf_tbi)) = (ds.gvcf.as_deref(), ds.gvcf_tbi.as_deref()) else {
         return Ok(status("no_call", "absent", "variant_only_vcf_absence_unknown"));
     };
-    let records = fetch(&mut open(blobs, gvcf, gvcf_tbi)?, chrom, pos, pos)?;
+    let records = fetch(&mut open(blobs, owner, gvcf, gvcf_tbi)?, chrom, pos, pos)?;
     if let Some(rec) = pick(&records, pos, alt) {
         return Ok(from_record(rec, "gvcf"));
     }
@@ -508,6 +513,7 @@ pub async fn lookup(
             py_repr(r)
         ))));
     }
+    let owner = BlobOwner::Profile(profile_id);
     let datasets = current_datasets(&mut *conn, profile_id, None).await?;
     if datasets.is_empty() {
         return Ok(Err(GenomeQueryError::new(
@@ -530,7 +536,7 @@ pub async fn lookup(
             region.to_string(),
             cursor.map(str::to_string),
         );
-        return blocking(move || region_answer(&store, &datasets, &gate, &region, cursor.as_deref())).await;
+        return blocking(move || region_answer(&store, owner, &datasets, &gate, &region, cursor.as_deref())).await;
     }
     let site = match resolve(&mut *conn, &rows, rsid, hgvs).await? {
         Ok(s) => s,
@@ -598,7 +604,7 @@ pub async fn lookup(
     let answers = blocking(move || {
         per_source
             .iter()
-            .map(|(ds, cited, cov)| call_at(&store, ds, &at, cited.as_ref(), cov.as_ref()))
+            .map(|(ds, cited, cov)| call_at(&store, owner, ds, &at, cited.as_ref(), cov.as_ref()))
             .collect::<Result<Vec<_>>>()
     })
     .await?;
@@ -698,6 +704,7 @@ fn py_page<T: Clone>(items: &[T], offset: i64) -> Vec<T> {
 
 fn region_answer(
     blobs: &BlobStore,
+    owner: BlobOwner,
     datasets: &[DatasetRow],
     gate: &Gate,
     region: &str,
@@ -744,7 +751,7 @@ fn region_answer(
         let (Some(vcf), Some(tbi)) = (ds.vcf.as_deref(), ds.tbi.as_deref()) else {
             continue;
         };
-        let mut vf = open(blobs, vcf, tbi)?;
+        let mut vf = open(blobs, owner, vcf, tbi)?;
         let label = source_label(ds);
         for (s, e) in &parts {
             for rec in fetch(&mut vf, &chrom, *s, *e)? {

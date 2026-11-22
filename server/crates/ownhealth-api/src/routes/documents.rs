@@ -25,6 +25,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use ownhealth_core::access::{Permission, Principal, ProfileRef, effective_permission, require};
 use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::documents::{document_is_sensitive, sensitive_document_sql};
 use ownhealth_core::pyjson::{parse_datetime, pydantic_datetime, row_to_json};
 use ownhealth_core::{Error, Runtime};
@@ -403,9 +404,9 @@ async fn document_file(
     )
     .await?;
     // an Apple Health zip runs to hundreds of MB: stream it from disk, never hold it in memory
-    let path = rt.blobs.path(&doc.blob_sha256).map_err(|e| Error::Other(e.into()))?;
-    let file = tokio::fs::File::open(&path).await.map_err(|e| Error::Other(e.into()))?;
-    let size = file.metadata().await.map_err(|e| Error::Other(e.into()))?.len();
+    let owner = BlobOwner::Profile(doc.perm.profile.id);
+    let opened = rt.blobs.open_async(owner, &doc.blob_sha256).await;
+    let (file, size) = opened.map_err(|e| Error::Other(e.into()))?;
     tx.commit().await?;
     let mime = doc.str("mime").unwrap_or("application/octet-stream");
     let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
