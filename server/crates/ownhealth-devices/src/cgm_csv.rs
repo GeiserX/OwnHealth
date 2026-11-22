@@ -64,6 +64,8 @@
 //! imports hold (`retract::lock_export_of`) before anything else, so it waits for a running import and
 //! then removes what it wrote.
 //! A moved export is imported again on its new profile (`import.cgm_csv` of the stored document).
+//! A run that waited for the lock while a move committed takes the new owner's lock before it reads or
+//! writes anything.
 //!
 //! Low and High rows count toward [`MAX_READINGS`], and only dates from 2000 on decide the order of day
 //! and month.
@@ -959,21 +961,25 @@ async fn import_in(
     read: Read<'_>,
 ) -> Result<(ImportSummary, Value)> {
     // one CGM import of a profile at a time: a run that replaces its readings and queues the others
-    // again never interleaves with another's run (retract::lock_exports)
-    let owner: Option<Uuid> = sqlx::query_scalar("select profile_id from document where id = $1")
-        .bind(document_id)
-        .fetch_one(&mut *conn)
-        .await?;
-    if let Some(owner) = owner {
-        ownhealth_ingest_structured::retract::lock_exports(&mut *conn, owner, "cgm_csv").await?;
-    }
-    let (profile_id, sha, flags, status, doc_type): (Option<Uuid>, String, Value, String, Option<String>) =
-        sqlx::query_as(
+    // again never interleaves with another's run (retract::lock_exports). A move that committed while
+    // this run waited gives the document another owner: the run then takes that owner's lock too, and
+    // reads the row again, until the owner it read is one whose lock it holds.
+    let mut locked: Vec<Uuid> = Vec::new();
+    let (profile_id, sha, flags, status, doc_type) = loop {
+        let row: (Option<Uuid>, String, Value, String, Option<String>) = sqlx::query_as(
             "select profile_id, encode(blob_sha256, 'hex'), flags, status, doc_type from document where id = $1",
         )
         .bind(document_id)
         .fetch_one(&mut *conn)
         .await?;
+        match row.0 {
+            Some(owner) if !locked.contains(&owner) => {
+                ownhealth_ingest_structured::retract::lock_exports(&mut *conn, owner, "cgm_csv").await?;
+                locked.push(owner);
+            }
+            _ => break row,
+        }
+    };
     if status != "active" {
         // retracted while its import (again) waited in the queue: it brings nothing back
         let mut s = ImportSummary::new(document_id.to_string());

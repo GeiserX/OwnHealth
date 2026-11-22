@@ -940,6 +940,106 @@ async fn waits_on(env: &Env, event: &str) -> anyhow::Result<bool> {
     Ok(false)
 }
 
+/// How many backends wait for the CGM export lock of `profile` (`retract::lock_exports`), read from the
+/// lock table itself: a waiter leaves it the moment the lock is handed to it.
+async fn waiting_for_exports_of(env: &Env, profile: Uuid) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(
+        "select count(*) from pg_locks l, (select hashtextextended($1, 0) as k) x \
+         where l.locktype = 'advisory' and not l.granted and l.objsubid = 1 \
+         and l.database = (select oid from pg_database where datname = current_database()) \
+         and l.classid::bigint = (x.k >> 32) & 4294967295 and l.objid::bigint = x.k & 4294967295",
+    )
+    .bind(format!("ownhealth:exports:cgm_csv:{profile}"))
+    .fetch_one(&env.db.pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn a_run_again_that_waited_for_a_moved_export_takes_its_new_owners_lock() -> R {
+    let env = Env::new().await?;
+    let (lucia, alex) = (env.fam.profile("lucia"), env.fam.profile("alex"));
+    let b = clarity_at(&every_5("2026-11-14", 11, 12));
+    let (_, id) = upload(&env, "lucia", "b.csv", &b).await?;
+    assert_eq!(job(&env, id).await?.0, "done");
+    let doc: Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'b.csv'")
+        .bind(lucia)
+        .fetch_one(&env.db.pool)
+        .await?;
+    // the file under Alex's key too, as a move re-keys it
+    env.blobs.put_bytes(BlobOwner::Profile(alex), &b)?;
+    // its run again is queued, as after another export's retraction, and its readings are gone
+    sqlx::query("delete from wearable_sample where document_id = $1")
+        .bind(doc)
+        .execute(&env.db.pool)
+        .await?;
+    sqlx::query("update document set flags = flags - 'import' where id = $1")
+        .bind(doc)
+        .execute(&env.db.pool)
+        .await?;
+    let mut c = env.db.pool.acquire().await?;
+    jobs::enqueue(
+        &mut c,
+        cgm_csv::JOB,
+        &json!({"document_id": doc.to_string()}),
+        jobs::EnqueueOptions::default(),
+    )
+    .await?;
+    drop(c);
+    // a move of the export holds Lucía's export lock: the run waits for it
+    let mut moving = env.db.pool.begin().await?;
+    ownhealth_ingest_structured::retract::lock_exports(&mut moving, lucia, "cgm_csv").await?;
+    let ctx = env.ctx.clone();
+    let run = tokio::spawn(async move { jobs::drain(&ctx, "core", 5, None).await });
+    let mut seen = false;
+    for _ in 0..100 {
+        if waiting_for_exports_of(&env, lucia).await? > 0 {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    anyhow::ensure!(seen, "the run again never waited for Lucía's export lock");
+    // a retraction of Alex's runs and holds her lock; the move commits the export to Alex
+    let mut alexs = env.db.pool.begin().await?;
+    ownhealth_ingest_structured::retract::lock_exports(&mut alexs, alex, "cgm_csv").await?;
+    sqlx::query("update document set profile_id = $1 where id = $2")
+        .bind(alex)
+        .bind(doc)
+        .execute(&mut *moving)
+        .await?;
+    moving.commit().await?;
+    // the run reads Alex as the owner now: it waits for her lock before it writes
+    let mut waited = false;
+    for _ in 0..100 {
+        if waiting_for_exports_of(&env, alex).await? > 0 {
+            waited = true;
+            break;
+        }
+        if run.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let written: i64 = sqlx::query_scalar("select count(*) from wearable_sample where document_id = $1")
+        .bind(doc)
+        .fetch_one(&env.db.pool)
+        .await?;
+    alexs.rollback().await?;
+    run.await??;
+    anyhow::ensure!(
+        waited,
+        "the run wrote under Alex without her export lock ({written} readings committed while she held it)"
+    );
+    assert_eq!(written, 0);
+    let owners: Vec<(Uuid, i64)> =
+        sqlx::query_as("select profile_id, count(*) from wearable_sample where document_id = $1 group by profile_id")
+            .bind(doc)
+            .fetch_all(&env.db.pool)
+            .await?;
+    assert_eq!(owners, vec![(alex, 24)]);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_retraction_while_the_export_is_read_again_leaves_none_of_its_readings() -> R {
     let env = Env::new().await?;
