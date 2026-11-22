@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/GeiserX/OwnHealth/main/docs/images/banner.svg" alt="OwnHealth" width="800"></p>
+
 <h1 align="center">OwnHealth</h1>
 
 <p align="center">
