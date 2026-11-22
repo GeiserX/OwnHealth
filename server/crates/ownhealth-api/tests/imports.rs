@@ -865,3 +865,62 @@ async fn the_migration_moves_stored_cgm_exports_to_the_wearables_type() -> R {
     assert_eq!(types, ["wearables", "wearables", "other"]);
     Ok(())
 }
+
+/// A running CGM import holds its profile's export lock and then writes the document row. Moving that
+/// export through the API waits for the lock before it locks the row, so the move and the import run
+/// one after the other: neither is aborted as a deadlock (40P01).
+#[tokio::test]
+async fn moving_a_cgm_export_while_its_import_runs_waits_for_the_import() -> R {
+    let a = app().await?;
+    ownhealth_devices::register();
+    let (s, v) = a
+        .upload(
+            "alex",
+            &[("profile", "alex"), ("timezone", "Europe/Madrid")],
+            &[("clarity.csv", CLARITY)],
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let kinds = ["import.cgm_csv".to_string()];
+    ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?;
+    let alex = a.family.profile("alex");
+    let doc: uuid::Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and flags ? 'cgm_csv'")
+        .bind(alex)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    // an import of the profile's exports runs: it holds the lock
+    let mut import = a.rt.pool.begin().await?;
+    ownhealth_ingest_structured::retract::lock_exports(&mut import, alex, "cgm_csv").await?;
+    let path = format!("/documents/{doc}/assign");
+    let (moved, imported) = tokio::join!(a.post("alex", &path, Some(json!({"profile": "lucia"}))), async {
+        // once the move waits for the lock, the import writes the document row and commits
+        for _ in 0..100 {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_stat_activity where datname = current_database() \
+                 and wait_event_type = 'Lock' and wait_event = 'advisory'",
+            )
+            .fetch_one(&a.rt.pool)
+            .await?;
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        sqlx::query("update document set flags = flags || '{\"cgm_csv_seen\": true}' where id = $1")
+            .bind(doc)
+            .execute(&mut *import)
+            .await?;
+        import.commit().await?;
+        anyhow::Ok(())
+    });
+    imported?;
+    let (s, v) = moved?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (owner, seen): (Option<uuid::Uuid>, bool) =
+        sqlx::query_as("select profile_id, flags ? 'cgm_csv_seen' from document where id = $1")
+            .bind(doc)
+            .fetch_one(&a.rt.pool)
+            .await?;
+    assert_eq!((owner, seen), (Some(a.family.profile("lucia")), true));
+    Ok(())
+}

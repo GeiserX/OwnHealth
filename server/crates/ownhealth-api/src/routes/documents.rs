@@ -633,6 +633,8 @@ async fn assign(
     e.done()?;
     let profile = profile.unwrap_or_default();
     let mut tx = rt.pool.begin().await?;
+    // A CGM export's lock before its row: a running import of it holds that lock and then writes the row.
+    ownhealth_ingest_structured::retract::lock_export_of(&mut tx, document_id).await?;
     // The row lock first: a move running at the same time commits before the owner is read here, so
     // the permission check and the re-key (in assign_document) both see the owner it left.
     ownhealth_core::documents::lock_owner(&mut tx, document_id).await?;

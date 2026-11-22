@@ -34,14 +34,7 @@ pub fn retract_document_facts<'c>(
 ) -> BoxFuture<'c, Result<Value>> {
     Box::pin(async move {
         // a running import of a CGM export holds this lock: wait for it, so what it wrote leaves too
-        let cgm: Option<Option<Uuid>> =
-            sqlx::query_scalar("select profile_id from document where id = $1 and flags ? 'cgm_csv'")
-                .bind(document_id)
-                .fetch_optional(&mut *conn)
-                .await?;
-        if let Some(profile_id) = cgm.flatten() {
-            lock_exports(&mut *conn, profile_id, "cgm_csv").await?;
-        }
+        lock_export_of(&mut *conn, document_id).await?;
         let mut observations: Vec<Value> = Vec::new();
         let mut records = Map::new();
         let children: Vec<Uuid> = sqlx::query_scalar(
@@ -184,10 +177,27 @@ async fn queue_after(conn: &mut PgConnection, job: &str, id: Uuid) -> Result<()>
     Err(ownhealth_core::Error::Other(why.into()))
 }
 
+/// Hold [`lock_exports`] for document `document_id` when it is a CGM export (`flags.cgm_csv`); nothing
+/// for any other document. A running CGM import holds that lock and then writes its document row, so
+/// whatever retracts or moves a document takes this before any lock on the document's row: a move that
+/// held the row first would wait for the import while the import waits for the row (40P01).
+pub async fn lock_export_of(conn: &mut PgConnection, document_id: Uuid) -> Result<()> {
+    let cgm: Option<Option<Uuid>> =
+        sqlx::query_scalar("select profile_id from document where id = $1 and flags ? 'cgm_csv'")
+            .bind(document_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if let Some(profile_id) = cgm.flatten() {
+        lock_exports(conn, profile_id, "cgm_csv").await?;
+    }
+    Ok(())
+}
+
 /// Hold the lock on one profile's exports of one kind (`flag`) until this transaction ends. A CGM
 /// import takes it first, so two imports of one profile never interleave: one that replaces its own
-/// readings and queues the others again never races another's run. A retraction of a CGM export takes
-/// it before anything else, so it never misses the readings of an import still running.
+/// readings and queues the others again never races another's run. A retraction or a move of a CGM
+/// export takes it before anything else ([`lock_export_of`]), so it never misses the readings of an
+/// import still running.
 pub async fn lock_exports(conn: &mut PgConnection, profile_id: Uuid, flag: &str) -> Result<()> {
     sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!("ownhealth:exports:{flag}:{profile_id}"))

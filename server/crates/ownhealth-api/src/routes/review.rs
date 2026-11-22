@@ -291,6 +291,8 @@ async fn accept(
         && found.kind == "document_identity"
         && let Some(d) = found.document_id
     {
+        // a CGM export's lock before its row, as the assign route takes them
+        ownhealth_ingest_structured::retract::lock_export_of(&mut tx, d).await?;
         ownhealth_core::documents::lock_owner(&mut tx, d).await?;
     }
     let item = check(&mut tx, principal, found).await?;

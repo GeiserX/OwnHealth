@@ -1073,6 +1073,9 @@ pub async fn assign_document(
     user_id: Uuid,
     skip_item: Option<Uuid>,
 ) -> Result<Option<i64>> {
+    // a CGM export's lock before its row (a running import of it holds the lock, then writes the row);
+    // a caller that locked the row already took this lock before it, as the assign route does
+    ownhealth_ingest_structured::retract::lock_export_of(&mut *conn, document_id).await?;
     let doc = lock_document(&mut *conn, document_id)
         .await?
         .ok_or_else(|| Error::NotFound(format!("document {document_id} not found")))?;
