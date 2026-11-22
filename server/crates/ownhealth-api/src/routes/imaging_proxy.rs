@@ -775,10 +775,9 @@ async fn proxy(rt: &Runtime, ext: Option<&Extension<Arc<Imaging>>>, req: &Parts)
     let status = upstream.status();
     let ctype = upstream.headers().get(header::CONTENT_TYPE).cloned();
     let body = read_limited(upstream, MAX_JSON_BYTES).await?;
-    let from = format!("\"{}/dicom-web/", orthanc.url);
     let to = format!("\"{}/dicom-web/t/{token}/", rt.settings.base_url.trim_end_matches('/'));
     let body = match String::from_utf8(body) {
-        Ok(text) => text.replace(&from, &to).into_bytes(),
+        Ok(text) => rewrite_urls(&text, &orthanc.url, &to).into_bytes(),
         Err(e) => e.into_bytes(),
     };
     let mut res = Response::new(Body::from(body));
@@ -787,6 +786,34 @@ async fn proxy(rt: &Runtime, ext: Option<&Extension<Arc<Imaging>>>, req: &Parts)
         res.headers_mut().insert(header::CONTENT_TYPE, ct);
     }
     Ok(res)
+}
+
+/// Orthanc's absolute DICOMweb URLs in a JSON answer (each one a JSON string, so it starts with `"`),
+/// turned into `to`, a link through the capability. The plugin picks the scheme itself
+/// (`DicomWeb.Ssl`, forwarded headers), so `http` and `https` both match whatever scheme
+/// `orthanc_url` has. One pass, so a link already rewritten is never rewritten again.
+fn rewrite_urls(text: &str, orthanc_url: &str, to: &str) -> String {
+    let host = orthanc_url.split_once("://").map_or(orthanc_url, |(_, host)| host);
+    let tail = format!("://{host}/dicom-web/");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("\"http") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 5..];
+        let after = after.strip_prefix('s').unwrap_or(after);
+        match after.strip_prefix(tail.as_str()) {
+            Some(next) => {
+                out.push_str(to);
+                rest = next;
+            }
+            None => {
+                out.push_str("\"http");
+                rest = &rest[at + 5..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The Orthanc path and query for a viewer request, or why it is refused. The study comes from the path
@@ -1398,6 +1425,23 @@ mod tests {
     fn the_orthanc_check_stands_for_seconds_only() {
         // A study that arrives under the UID can pass until the next check, so the time stays short.
         assert!(ORTHANC_RECHECK <= Duration::from_secs(10), "{ORTHANC_RECHECK:?}");
+    }
+
+    #[test]
+    fn orthanc_urls_are_rewritten_whatever_scheme_the_plugin_writes() {
+        // The plugin picks its URLs' scheme itself (`DicomWeb.Ssl`, forwarded headers), so it need
+        // not be the one the app uses to reach Orthanc.
+        let to = "\"https://h.test/dicom-web/t/T/";
+        let body = r#"{"a":"http://orthanc:8042/dicom-web/studies/1","b":"https://orthanc:8042/dicom-web/studies/2","c":"http://other:8042/dicom-web/studies/3","d":"https"}"#;
+        let want = r#"{"a":"https://h.test/dicom-web/t/T/studies/1","b":"https://h.test/dicom-web/t/T/studies/2","c":"http://other:8042/dicom-web/studies/3","d":"https"}"#;
+        for orthanc in ["http://orthanc:8042", "https://orthanc:8042"] {
+            assert_eq!(rewrite_urls(body, orthanc, to), want, "{orthanc}");
+        }
+        // A link is never rewritten twice, even with the app and Orthanc on one name.
+        assert_eq!(
+            rewrite_urls(r#""https://h.test/dicom-web/x""#, "http://h.test", to),
+            r#""https://h.test/dicom-web/t/T/x""#
+        );
     }
 
     #[test]
