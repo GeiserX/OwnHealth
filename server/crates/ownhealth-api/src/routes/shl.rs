@@ -46,6 +46,7 @@ use ownhealth_auth::sessions;
 use ownhealth_core::Runtime;
 use ownhealth_core::access::{Permission, Principal, Scopes, effective_permission, today_utc};
 use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::langs::lang_or_default;
 use ownhealth_ops::shl::{self as share, CONTENT_TYPE, LABEL_MAX, SHAREABLE, URL_MAX};
 use ownhealth_rules::summary::LANGS;
 use serde::Deserialize;
@@ -597,7 +598,11 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>) 
 
 /// The key and the manifest id are in this answer and nowhere else, ever.
 async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>, Body(b): Body<CreateIn>) -> R {
-    let lang = b.lang.clone().unwrap_or_else(|| caller.0.lang.clone());
+    // the stored locale may be a planned language outside the registry (migration 1280)
+    let lang = b
+        .lang
+        .clone()
+        .unwrap_or_else(|| lang_or_default(&caller.0.lang).to_string());
     let days = b.days.unwrap_or(DEFAULT_DAYS);
     let mut check = Check::body();
     check.literal("lang", Some(&lang), &LANGS);

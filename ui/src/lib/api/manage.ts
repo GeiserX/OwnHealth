@@ -2,6 +2,7 @@
 // Backends: lane C (wearables.py, records.py), lane B (documents.py), lane G (tokens.py, audit.py, family.py),
 // lane F (mcp_usage.py). Review and uploads are in core.ts.
 import { del, get, p, post, put, request, requestBlob } from './core';
+import type { Lang } from '../i18n/langs';
 import type {
 	AuditChainOut,
 	AuditOut,
@@ -81,7 +82,7 @@ export type RelativeIn = {
 	slug?: string | null;
 };
 export const addRelative = (body: RelativeIn) => post<{ id: Uuid; slug: string }>('/household/profiles', body);
-export const inviteMember = (body: { display_name: string; locale: 'es' | 'en'; claim_profile?: string | null }) =>
+export const inviteMember = (body: { display_name: string; locale: Lang; claim_profile?: string | null }) =>
 	post<{ user_id: Uuid; code: string; url: string; expires_in_days: number }>('/household/invites', body);
 /** Needs a fresh step-up; `confirm` repeats the slug. */
 export const deleteProfile = (slug: string) =>
@@ -92,10 +93,10 @@ export const exportProfile = (slug: string) => requestBlob('POST', `${p(slug)}/e
 export const SUMMARY_SPECIALTIES = ['gp', 'cardiology', 'endocrinology', 'hematology', 'ips'] as const;
 export type SummarySpecialty = (typeof SUMMARY_SPECIALTIES)[number];
 /** The printed doctor summary (two A4 pages, a PDF). Needs a fresh step-up. */
-export const printSummary = (slug: string, body: { lang: 'es' | 'en'; specialty: SummarySpecialty; include_sensitive: boolean }) =>
+export const printSummary = (slug: string, body: { lang: Lang; specialty: SummarySpecialty; include_sensitive: boolean }) =>
 	requestBlob('POST', `${p(slug)}/summary.pdf`, body, `ownhealth-summary-${slug}.pdf`);
 /** The International Patient Summary as a FHIR document Bundle (JSON), in the sheet's language. Needs a fresh step-up. */
-export const exportIps = (slug: string, lang: 'es' | 'en') => requestBlob('POST', `${p(slug)}/export`, { fmt: 'ips', lang }, `ownhealth-ips-${slug}.json`);
+export const exportIps = (slug: string, lang: Lang) => requestBlob('POST', `${p(slug)}/export`, { fmt: 'ips', lang }, `ownhealth-ips-${slug}.json`);
 export const setLocks = (profile: string, locks: Scope[]) => put<{ ok: true }>(`${p(profile)}/locks`, { locks });
 
 // ---- lane I-ui-2: genome, drug check, documents, review helpers, auth, settings ----
@@ -123,7 +124,7 @@ export const putSensitive = (profile: string, body: { ui?: boolean; agents?: boo
 
 // auth (lane G, api/auth.py). WebAuthn options and credentials travel as JSON (base64url).
 type Json = Record<string, unknown>;
-type Setup = { household_name?: string; display_name: string; locale: 'es' | 'en'; birth_date?: string | null; sex_at_birth?: string | null; country?: string | null };
+type Setup = { household_name?: string; display_name: string; locale: Lang; birth_date?: string | null; sex_at_birth?: string | null; country?: string | null };
 export const getAuthState = () => get<AuthState>('/auth/state');
 // Enrolment from an invite link (/enroll?code=).
 export type InviteInfo = { display_name: string; household: string; claims_profile: boolean; passkeys_possible: boolean; password_allowed: boolean; oidc: boolean };

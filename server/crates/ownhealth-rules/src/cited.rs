@@ -6,15 +6,25 @@
 //! rows:                         # optional; every row names its source
 //!   - id: example.one
 //!     cite: https://...         # https, never http
-//! templates:                    # anywhere in the file: a mapping with `en` or `es` is a template
+//! templates:                    # anywhere in the file: a mapping with a language key is a template
 //!   example.one: {en: "...", es: "..."}
 //! ```
 //!
-//! `load` refuses a file without a version, a row without an https `cite`, a template missing its
-//! `en` or `es` text, and a template the wording lint flags. Area loaders add their own checks on top.
+//! `load` refuses a file without a version, a row without an https `cite`, a template missing the
+//! text of a registry language (`ownhealth_core::langs::LANGS`), a language-suffixed family
+//! (`short_en`) missing one of its registry texts (`short_es`), and a template the wording lint flags.
+//! Area loaders add their own checks on top.
+//!
+//! A language key is any code of `ownhealth_core::langs::LOCALES`, so the planned `de`, `fr`, `ca`,
+//! `it` and `pt` count too, and so does a key that ends in `_<code>`. A data key such as `ca`
+//! (calcium) or `pt` (prothrombin time), or one like `ratio_it` or `dose_pt`, reads as a language: its
+//! mapping must carry every registry language (`es`, or `ratio_es`), and the file is refused. Name
+//! such keys another way (`calcium`, `pt_inr`).
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
+use ownhealth_core::langs::{LANGS, LOCALES};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -77,6 +87,9 @@ pub fn load_bytes(path: &Path, bytes: &[u8]) -> Result<CitedFile, CitedError> {
         Some(_) => return Err(CitedError(format!("{name}: `rows` is not a list"))),
     };
     check_templates(&doc, "$", &name.to_string())?;
+    if let Some(gap) = missing_langs(&doc, &LANGS).into_iter().next() {
+        return Err(CitedError(format!("{name}: {gap}")));
+    }
     Ok(CitedFile {
         version,
         sha256: hex::encode(Sha256::digest(bytes)),
@@ -91,11 +104,66 @@ pub fn read_doc(path: &Path) -> Result<Value, CitedError> {
     parse(path, &bytes)
 }
 
-/// Every string that is the `en` or `es` value of a mapping, with its json path.
+/// Every string that is the text of a language in a mapping (`en: ...`, or `short_en: ...`), with its
+/// json path. Every code in the registry or planned for it counts, so the wording lint reads a new
+/// language from its first string.
 pub fn localized(doc: &Value) -> Vec<(String, String)> {
     let mut out = Vec::new();
     walk_localized(doc, "$", &mut out);
     out
+}
+
+/// Every text a registry language lacks: for each mapping with a language key (`en`) or a
+/// language-suffixed key (`short_en`), one line per language of `langs` whose text is missing or
+/// empty, `"<path> has no `<key>` text"`. Pass `ownhealth_core::langs::LANGS`; a test passes a
+/// dummy language to prove the check sees every mapping.
+pub fn missing_langs(doc: &Value, langs: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    walk_missing(doc, "$", langs, &mut out);
+    out
+}
+
+/// A key that names a language: a code in the registry, planned for it, or in `extra`.
+fn is_code(key: &str, extra: &[&str]) -> bool {
+    LANGS.contains(&key) || LOCALES.contains(&key) || extra.contains(&key)
+}
+
+/// `short` for `short_en`.
+fn suffix_stem<'a>(key: &'a str, extra: &[&str]) -> Option<&'a str> {
+    key.rsplit_once('_')
+        .filter(|(stem, code)| !stem.is_empty() && is_code(code, extra))
+        .map(|(stem, _)| stem)
+}
+
+fn walk_missing(v: &Value, path: &str, langs: &[&str], out: &mut Vec<String>) {
+    match v {
+        Value::Object(m) => {
+            let has = |key: &str| m.get(key).and_then(Value::as_str).is_some_and(|t| !t.trim().is_empty());
+            let stems: BTreeSet<&str> = m.keys().filter_map(|k| suffix_stem(k, langs)).collect();
+            let mut wanted: Vec<String> = Vec::new();
+            if m.keys().any(|k| is_code(k, langs)) {
+                wanted.extend(langs.iter().map(|l| l.to_string()));
+            }
+            for stem in stems {
+                wanted.extend(langs.iter().map(|l| format!("{stem}_{l}")));
+            }
+            out.extend(
+                wanted
+                    .into_iter()
+                    .filter(|k| !has(k))
+                    .map(|k| format!("{path} has no `{k}` text")),
+            );
+            for (k, v) in m {
+                walk_missing(v, &format!("{path}.{k}"), langs, out);
+            }
+        }
+        Value::Array(a) => {
+            for (i, v) in a.iter().enumerate() {
+                walk_missing(v, &format!("{path}[{i}]"), langs, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn parse(path: &Path, bytes: &[u8]) -> Result<Value, CitedError> {
@@ -118,8 +186,8 @@ fn walk_localized(v: &Value, path: &str, out: &mut Vec<(String, String)>) {
         Value::Object(m) => {
             for (k, v) in m {
                 let at = format!("{path}.{k}");
-                match (k.as_str(), v) {
-                    ("en" | "es", Value::String(s)) => out.push((at, s.clone())),
+                match v {
+                    Value::String(s) if is_code(k, &[]) || suffix_stem(k, &[]).is_some() => out.push((at, s.clone())),
                     _ => walk_localized(v, &at, out),
                 }
             }
@@ -136,8 +204,8 @@ fn walk_localized(v: &Value, path: &str, out: &mut Vec<(String, String)>) {
 fn check_templates(v: &Value, path: &str, name: &str) -> Result<(), CitedError> {
     match v {
         Value::Object(m) => {
-            if m.contains_key("en") || m.contains_key("es") {
-                for lang in ["en", "es"] {
+            if m.keys().any(|k| is_code(k, &[])) {
+                for lang in LANGS {
                     let text = m
                         .get(lang)
                         .and_then(Value::as_str)
@@ -162,4 +230,43 @@ fn check_templates(v: &Value, path: &str, name: &str) -> Result<(), CitedError> 
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_yaml(body: &str) -> Result<CitedFile, CitedError> {
+        load_bytes(Path::new("t.yaml"), body.as_bytes())
+    }
+
+    /// A `_<code>` key makes its mapping a template family: one text short of the registry and
+    /// `load` refuses the file, as a bare code does.
+    #[test]
+    fn load_refuses_a_suffixed_key_without_every_registry_language() {
+        let head = "version: \"t 0.1.0\"\n";
+        assert!(
+            load_yaml(&format!(
+                "{head}templates:\n  a: {{short_en: Text., short_es: Texto.}}\n"
+            ))
+            .is_ok()
+        );
+        for (body, want) in [
+            (
+                "templates:\n  a: {short_en: Text.}\n",
+                "t.yaml: $.templates.a has no `short_es` text",
+            ),
+            ("ratio_it: 3\n", "t.yaml: $ has no `ratio_es` text"),
+            ("dose_pt: Texto.\n", "t.yaml: $ has no `dose_es` text"),
+            (
+                "templates:\n  a: {ca: Calcium.}\n",
+                "t.yaml: $.templates.a has no `es` text",
+            ),
+        ] {
+            match load_yaml(&format!("{head}{body}")) {
+                Ok(_) => panic!("{body:?} loaded"),
+                Err(e) => assert_eq!(e.to_string(), want, "{body:?}"),
+            }
+        }
+    }
 }

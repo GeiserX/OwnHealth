@@ -6,7 +6,8 @@
 	import { enrollBegin, enrollFinish, enrollPassword, getInvite, type InviteInfo } from '#lib/api';
 	import { Loader, errText, tf } from '#lib/components/pages1/util.svelte';
 	import { createPasskey } from '#lib/components/pages2/webauthn';
-	import { i18n, setLang, t } from '#lib/i18n/index.svelte';
+	import { t } from '#lib/i18n/index.svelte';
+	import LangButtons from '#lib/components/LangButtons.svelte';
 
 	const code = $derived(page.url.searchParams.get('code') ?? '');
 	const inv = new Loader<InviteInfo>();
@@ -44,8 +45,7 @@
 		<div>OwnHealth<small>{t('selfhosted')} · v{__APP_VERSION__}</small></div>
 	</div>
 	<div class="seg" role="group" aria-label={t('lang_label')} style="align-self:center">
-		<button class:on={i18n.lang === 'es'} aria-pressed={i18n.lang === 'es'} onclick={() => setLang('es')}>ES</button>
-		<button class:on={i18n.lang === 'en'} aria-pressed={i18n.lang === 'en'} onclick={() => setLang('en')}>EN</button>
+		<LangButtons />
 	</div>
 
 	{#if !code}

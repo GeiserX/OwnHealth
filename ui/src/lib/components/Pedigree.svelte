@@ -45,7 +45,7 @@
 	$effect(() => {
 		if (pattern && patterns && !patterns.items.some((p) => p.rule === pattern)) pattern = null;
 	});
-	const lang = $derived(i18n.lang as 'es' | 'en');
+	const lang = $derived(i18n.lang);
 	const words = $derived({
 		proband: t('fam_proband'),
 		masked: t('fam_masked'),
@@ -67,7 +67,7 @@
 	};
 	const kindLabel = (kind: string) => {
 		const k = catalog?.conditions.find((x) => x.kind === kind);
-		return k ? k[lang === 'es' ? 'short_es' : 'short_en'] : kind;
+		return k ? k[`short_${lang}`] : kind;
 	};
 	// The founder's household relationships are relative to the founder, so only the founder fills from them.
 	const fill = $derived(

@@ -209,3 +209,61 @@ async fn only_a_person_in_the_browser_reaches_the_consent_routes() -> R {
     assert_eq!((r.status, r.code()), (StatusCode::NOT_FOUND, "oauth_disabled"));
     Ok(())
 }
+
+/// `app_user.locale` accepts every planned language (migration 1280), but `api_token.lang` stays es/en:
+/// MCP speaks only those two. A person stored as `de` still gets a token in an MCP language, from the
+/// OAuth exchange here and from POST /tokens with no `lang` below, never a CHECK violation (a 500).
+#[tokio::test]
+async fn a_locale_outside_the_mcp_languages_still_gets_a_token() -> R {
+    let env = Env::new(true).await?;
+    let alex = env.user("alex");
+    sqlx::query("update app_user set locale = $1 where id = $2")
+        .bind("de")
+        .bind(alex)
+        .execute(env.pool())
+        .await?;
+
+    let id = pending(&env, &["read:summary"]).await?;
+    let mut fresh = env.as_user(alex).await?;
+    let r = fresh
+        .post(
+            &format!("/api/oauth/requests/{id}/approve"),
+            &json!({"scopes": ["read:summary"], "profile_ids": [env.profile("alex")]}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    let code = param(r.json["redirect"].as_str().unwrap_or_default(), "code").unwrap_or_default();
+    let mut c = env.pool().acquire().await?;
+    let mcp = "https://testserver/mcp";
+    let out = oauth::exchange_code(&mut c, &code, CLIENT, CB, &"v".repeat(43), Some(mcp), mcp).await?;
+    assert!(out.is_ok(), "the exchange refused: {:?}", out.err());
+    let oauth_lang: String = sqlx::query_scalar("select lang from api_token where kind = 'oauth'")
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(oauth_lang, "es", "an OAuth token of a de person");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pat_with_no_lang_takes_an_mcp_language() -> R {
+    let env = Env::new(true).await?;
+    let alex = env.user("alex");
+    sqlx::query("update app_user set locale = $1 where id = $2")
+        .bind("de")
+        .bind(alex)
+        .execute(env.pool())
+        .await?;
+    let mut fresh = env.as_user(alex).await?;
+    let r = fresh
+        .post(
+            "/api/tokens",
+            &json!({"label": "Claude", "scopes": ["read:summary"], "profiles": ["alex"], "days": 30}),
+        )
+        .await?;
+    assert!(r.status.is_success(), "POST /tokens: {} {}", r.status, r.json);
+    let pat_lang: String = sqlx::query_scalar("select lang from api_token where label = 'Claude'")
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(pat_lang, "es", "a PAT of a de person, made with no lang");
+    Ok(())
+}

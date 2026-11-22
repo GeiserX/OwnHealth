@@ -357,7 +357,7 @@ fn es() -> String {
 async fn invite(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Body(body): Body<InviteIn>) -> R {
     Check::body()
         .len("display_name", Some(&body.display_name), 1, 80)
-        .literal("locale", Some(&body.locale), &["es", "en"])
+        .literal("locale", Some(&body.locale), &ownhealth_core::langs::LANGS)
         .done()?;
     let (Some(household_id), Some(uid)) = (p.household_id, p.user_id) else {
         return Err(ApiError::unauthenticated().into());

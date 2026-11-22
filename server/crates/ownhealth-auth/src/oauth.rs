@@ -918,10 +918,12 @@ async fn issue(conn: &mut PgConnection, c: &ConsentRow, resource: &str) -> Resul
             id
         }
         None => {
-            let lang: String = sqlx::query_scalar("select locale from app_user where id = $1")
+            let locale: String = sqlx::query_scalar("select locale from app_user where id = $1")
                 .bind(c.user_id)
                 .fetch_one(&mut *conn)
                 .await?;
+            // app_user.locale holds every planned language; api_token.lang only the MCP ones
+            let lang = ownhealth_core::langs::mcp_lang(&locale);
             sqlx::query_scalar(
                 "insert into api_token (user_id, label, prefix, secret_sha256, scopes, profile_ids, default_profile, \
                  identity_mode, lang, units, expires_at, kind, audience, oauth_client_id, consent_id) values \

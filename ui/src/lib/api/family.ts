@@ -1,6 +1,7 @@
 // Family history and the pedigree (v0.3 Insight): server/crates/ownhealth-api/src/routes/family_history.rs.
 import { del, get, p, post, put } from './core';
 import type { Uuid } from './types';
+import type { Localized, Suffixed } from '../i18n/langs';
 
 export type Sex = 'female' | 'male' | 'unknown';
 
@@ -34,26 +35,23 @@ export interface FamilyMember {
 
 export interface FamilyCatalog {
 	version: string;
-	relationships: { code: string; en: string; es: string; generation: number; side: string; sex: Sex | null }[];
-	conditions: { kind: string; en: string; es: string; short_en: string; short_es: string; group: string }[];
+	relationships: ({ code: string; generation: number; side: string; sex: Sex | null } & Localized)[];
+	conditions: ({ kind: string; group: string } & Localized & Suffixed<'short'>)[];
 }
 
-export interface PedigreeCondition {
+export type PedigreeCondition = {
 	kind: string;
 	text: string | null;
-	en: string | null;
-	es: string | null;
-	short_en: string | null;
-	short_es: string | null;
 	group: string | null;
 	onset_age: number | null;
 	onset_approx: boolean;
-}
+} & Localized<string | null> &
+	Suffixed<'short', string | null>;
 
 export interface PedigreeNode {
 	id: Uuid;
 	relationship: string;
-	label: { en: string; es: string };
+	label: Localized;
 	generation: number;
 	side: string;
 	degree: number;
@@ -101,9 +99,9 @@ export interface FamilyPattern {
 	rel: string[];
 	kinds: string[];
 	src: string[];
-	title: { en: string; es: string };
-	why: { en: string; es: string };
-	reason?: { en: string; es: string };
+	title: Localized;
+	why: Localized;
+	reason?: Localized;
 }
 
 export interface FamilyPatterns {
@@ -130,8 +128,8 @@ export interface FamilyHint {
 	basis: 'guideline' | 'pack_default';
 	source: string;
 	cite: string;
-	title: { en: string; es: string };
-	why: { en: string; es: string };
+	title: Localized;
+	why: Localized;
 }
 
 export type ShareCategory = 'labs' | 'cascade';

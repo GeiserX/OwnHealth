@@ -17,6 +17,7 @@
 	import { ago, day } from '#lib/components/pages2/fmt';
 	import { dict } from '#lib/i18n/dict';
 	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { intlLocale } from '#lib/i18n/langs';
 	import { afterColon } from '#lib/logic/format';
 	import {
 		callbackOutcome,
@@ -82,7 +83,7 @@
 		if (slug) setProfile(slug);
 	};
 	const profileName = (id: string | null) => (id ? (app.me?.profiles.find((p) => p.id === id)?.display_name ?? '—') : t('con_household'));
-	const time = (iso: string) => new Date(iso).toLocaleTimeString(i18n.lang === 'es' ? 'es-ES' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
+	const time = (iso: string) => new Date(iso).toLocaleTimeString(intlLocale(i18n.lang), { hour: '2-digit', minute: '2-digit' });
 
 	const PILL = { ok: 'p-ok', watch: 'p-watch', out: 'p-out', stale: 'p-stale', nodata: 'p-stale', off: 'p-stale' } as const;
 	const WORD = { ok: 'fu_st_ok', watch: 'watch', out: 'fu_st_out', stale: 'fu_st_stale', nodata: 'fu_st_nodata', off: 'fu_st_off' } as const;
