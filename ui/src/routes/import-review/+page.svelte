@@ -23,7 +23,7 @@
 	import type { InboxSource } from '#lib/api/inbox';
 	import AgentContext from '#lib/components/inbox/AgentContext.svelte';
 	import ProposalRows from '#lib/components/inbox/ProposalRows.svelte';
-	import { inboxSummary, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, unmappedSummary } from '#lib/logic/inbox';
+	import { FHIR_ITEM_KINDS, fhirTileSource, inboxSummary, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, unmappedSummary } from '#lib/logic/inbox';
 	import { ApiError } from '#lib/api/core';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import PageHeader from '#lib/components/PageHeader.svelte';
@@ -251,14 +251,17 @@
 		});
 
 	// Inbox tiles: what each channel left in the queue, and its newest import.
+	const docOf = (id: string | null) => (queue.data?.docs ?? []).find((x) => x.id === id) ?? null;
 	const latest = (kind: string) => (queue.data?.jobs ?? []).find((j) => j.kind === kind) ?? null;
 	const latestDoc = (type: string) => (queue.data?.docs ?? []).find((d) => d.doc_type === type) ?? null;
 	const count = (...kinds: string[]) => items.filter((i) => kinds.includes(i.kind)).length;
+	// A connector pull runs no import job: the tile then names the bundle of its newest item.
+	const fhir = $derived(fhirTileSource(latest('import.fhir_bundle'), items));
 	const tiles = $derived([
 		{ k: 'i2_in_lab', d: latest('import.pdf'), doc: latestDoc('lab_report'), n: count('candidate_row', 'document_identity', 'amended_report', 'pending_document') },
 		// An Apple Health export goes straight in; nothing from it waits for review.
 		{ k: 'i2_in_apple', d: latest('import.apple_health'), doc: (queue.data?.docs ?? []).find((x) => x.flags?.apple_health) ?? null, n: 0 },
-		{ k: 'i2_in_fhir', d: latest('import.fhir_bundle'), n: count('fhir_unmapped', 'fhir_unmapped_summary') },
+		{ k: 'i2_in_fhir', d: fhir.job, doc: docOf(fhir.documentId), n: count(...FHIR_ITEM_KINDS) },
 		{ k: 'i2_in_genome', d: latest('import.genome_facts'), doc: latestDoc('genomics'), n: count('genome_reinterpretation') },
 		{ k: 'i2_in_agent', d: null, n: count('agent_proposal'), sub: 'write:propose' },
 	]);
@@ -273,7 +276,6 @@
 		return name || when ? [name, when].filter(Boolean).join(' · ') : t('i2_in_none');
 	}
 
-	const docOf = (id: string | null) => (queue.data?.docs ?? []).find((x) => x.id === id) ?? null;
 	const docLabel = (d: DocumentSummary) => `${plain(d.filename) || d.provider_name || d.id.slice(0, 8)}`;
 	const kindWord = (prefix: string, v: string) => (t(prefix + v) !== prefix + v ? t(prefix + v) : v);
 	function otherTitle(i: ReviewItem): string {
@@ -295,7 +297,7 @@
 		}
 		// A connector pull's resources of one type we do not show yet: one line with their count.
 		const grouped = unmappedSummary(i);
-		if (grouped) return tp('i2_fus_t', grouped.count, { type: grouped.type, source: grouped.source || '—' });
+		if (grouped) return tp('i2_fus_t', grouped.count, { type: grouped.type, source: grouped.source || '—', n: fmtNum(grouped.count) });
 		// A scan's chip already says what it is; the line names the file.
 		if (i.kind === 'pending_document' && i.document_id && docName(i.document_id)) return docName(i.document_id);
 		return t('i2_kind_' + i.kind);

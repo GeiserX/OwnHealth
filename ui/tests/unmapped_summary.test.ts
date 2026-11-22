@@ -3,7 +3,7 @@
 // and never prints a raw key.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { unmappedSummary } from '../src/lib/logic/inbox.ts';
+import { fhirTileSource, unmappedSummary } from '../src/lib/logic/inbox.ts';
 import { dict } from '../src/lib/i18n/dict.ts';
 
 const item = (payload: Record<string, unknown>, kind = 'fhir_unmapped_summary') => ({ kind, payload });
@@ -32,4 +32,19 @@ test('every summary text exists in es and en, with the count in the plural and t
 		assert.match(d.i2_fus_t_one, /1 .*\{type\}/);
 		assert.match(d.i2_fus_t, /\{source\}/);
 	}
+});
+
+test('the FHIR tile names a pull’s bundle: a pull runs no import job', () => {
+	const summary = { kind: 'fhir_unmapped_summary', document_id: 'pull-doc', created_at: '2026-11-22T09:00:00Z' };
+	const other = { kind: 'candidate_row', document_id: 'pdf-doc', created_at: '2026-11-22T10:00:00Z' };
+	// no job at all: the pull's document, never "nothing imported yet"
+	assert.deepEqual(fhirTileSource(null, [summary, other]), { job: null, documentId: 'pull-doc' });
+	const job = { created_at: '2026-11-21T08:00:00Z', finished_at: '2026-11-21T08:00:05+00:00' };
+	// a file job older than the pull's item: still the pull
+	assert.deepEqual(fhirTileSource(job, [summary]), { job: null, documentId: 'pull-doc' });
+	// a newer job wins, and with no FHIR item the job stays
+	const later = { created_at: '2026-11-22T11:00:00Z', finished_at: '2026-11-22T11:00:02Z' };
+	assert.deepEqual(fhirTileSource(later, [summary]), { job: later, documentId: null });
+	assert.deepEqual(fhirTileSource(job, [other]), { job, documentId: null });
+	assert.deepEqual(fhirTileSource(null, []), { job: null, documentId: null });
 });

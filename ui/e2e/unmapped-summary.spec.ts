@@ -55,16 +55,23 @@ test('a pull’s grouped item reads in en and es, opens its bundle and is dismis
 	const docOf = () => sql(`select d.id from document d join profile p on p.id = d.profile_id where p.slug = 'alex' and d.blob_sha256 = decode('${sha}', 'hex')`);
 	await expect.poll(docOf, { timeout: 20_000 }).toMatch(/^[0-9a-f-]{36}$/);
 	const doc = docOf();
-	const claims = seedSummary(doc, 'ExplanationOfBenefit', 300);
+	const claims = seedSummary(doc, 'ExplanationOfBenefit', 12000);
 	const cover = seedSummary(doc, 'Coverage', 1);
 
 	await page.reload();
 	const row = page.locator(`#oi-${claims.slice(0, 8)}`);
 	await expect(row).toContainText('Stored resources without a mapping');
-	await expect(row).toContainText('Hospital LabNorte: 300 ExplanationOfBenefit resources stored as received');
+	// the count as the reader's language writes numbers
+	await expect(row).toContainText('Hospital LabNorte: 12,000 ExplanationOfBenefit resources stored as received');
 	await expect(row).toContainText('so they are not listed one by one');
 	await expect(page.locator(`#oi-${cover.slice(0, 8)}`)).toContainText('Hospital LabNorte: 1 Coverage resource stored as received');
 	await expect(page.locator('body')).not.toContainText(/i2_\w+/);
+	// the FHIR tile counts the grouped items with the per-resource ones
+	const fhirOpen = sql(
+		`select count(*) from review_item r join profile p on p.id = r.profile_id where p.slug = 'alex' and r.status = 'open' and r.kind in ('fhir_unmapped', 'fhir_unmapped_summary')`
+	);
+	await expect(page.locator('.ib', { hasText: 'FHIR / IPS' }).locator('.c')).toHaveText(fhirOpen);
+	expect(Number(fhirOpen)).toBeGreaterThanOrEqual(2);
 
 	// the bundle opens through the document route, as the person who sees this queue
 	const open = row.getByRole('link', { name: 'Open the downloaded file' });
@@ -77,7 +84,7 @@ test('a pull’s grouped item reads in en and es, opens its bundle and is dismis
 
 	await page.goto('/import-review?lang=es');
 	await expect(row).toContainText('Recursos guardados sin correspondencia');
-	await expect(row).toContainText('Hospital LabNorte: 300 recursos ExplanationOfBenefit guardados tal como llegaron');
+	await expect(row).toContainText('Hospital LabNorte: 12.000 recursos ExplanationOfBenefit guardados tal como llegaron');
 	await expect(row).toContainText('El archivo descargado los guarda todos.');
 	await expect(row.getByRole('link', { name: 'Abrir el archivo descargado' })).toBeVisible();
 	await expect(page.locator(`#oi-${cover.slice(0, 8)}`)).toContainText('1 recurso Coverage guardado tal como llegó');

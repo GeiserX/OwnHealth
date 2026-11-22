@@ -526,6 +526,23 @@ export function unmappedSummary(item: { kind: string; payload: Record<string, un
 	return { type, count, source: typeof label === 'string' ? label : '' };
 }
 
+/** The review kinds a FHIR import leaves in the queue: one per resource from a file, and a pull's grouped item. */
+export const FHIR_ITEM_KINDS = ['fhir_unmapped', 'fhir_unmapped_summary'];
+
+/**
+ * What the FHIR tile names as the newest import. A file runs an `import.fhir_bundle` job; a connector
+ * pull runs none, so a FHIR item newer than the job names its document instead.
+ */
+export function fhirTileSource<J extends { created_at: string; finished_at: string | null }>(
+	job: J | null,
+	items: { kind: string; document_id: string | null; created_at: string }[]
+): { job: J | null; documentId: string | null } {
+	const at = (s: string) => Date.parse(s) || 0;
+	const newest = items.filter((i) => FHIR_ITEM_KINDS.includes(i.kind) && i.document_id).reduce<(typeof items)[number] | null>((a, i) => (!a || at(i.created_at) > at(a.created_at) ? i : a), null);
+	if (newest && (!job || at(newest.created_at) > at(job.finished_at ?? job.created_at))) return { job: null, documentId: newest.document_id };
+	return { job, documentId: null };
+}
+
 // ---------------------------------------------------------------- OAuth ----
 
 /** Nothing is pre-checked beyond read:summary (mcp.md 2.2), and no profile is pre-checked. */
