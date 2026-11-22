@@ -34,6 +34,12 @@ const KEY: &str = "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws=";
 
 /// Every file in the blob store, by its sha256 hex name. A folder of the store it cannot list fails
 /// the test, so a file there never reads as removed.
+/// Where the plain layout keeps a blob, for tests that break the file on disk.
+fn blob_file(env: &Env, sha: &str) -> std::path::PathBuf {
+    let root = env.rt.settings.blobs_path();
+    root.join("sha256").join(&sha[..2]).join(&sha[2..4]).join(sha)
+}
+
 fn stored(root: &Path) -> BTreeSet<String> {
     fn walk(dir: &Path, out: &mut BTreeSet<String>) {
         let fail = |e: std::io::Error| -> ! { panic!("cannot list the blob store at {}: {e}", dir.display()) };
@@ -312,7 +318,7 @@ async fn deleting_a_profile_leaves_none_of_its_files_or_credentials() -> R {
         .rt
         .blobs
         .put_bytes(b"From: y@unknown.example\r\n\r\nheld for the household")?;
-    let before = stored(env.rt.blobs.root());
+    let before = stored(&env.rt.settings.blobs_path());
     assert_eq!(before.len(), 12, "{before:?}");
     assert_eq!(env.scalar_i64("select count(*) from secret").await?, 5);
 
@@ -320,7 +326,7 @@ async fn deleting_a_profile_leaves_none_of_its_files_or_credentials() -> R {
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
 
     // what stays: the gVCF Sam's import names, Sam's facts, Sam's push, and the household mailbox's mail
-    let after = stored(env.rt.blobs.root());
+    let after = stored(&env.rt.settings.blobs_path());
     let sams_facts: String =
         sqlx::query_scalar("select encode(facts_blob, 'hex') from genome_dataset where profile_id = $1")
             .bind(sam)
@@ -502,7 +508,7 @@ async fn a_file_that_reached_the_person_through_a_household_inbox_goes_too() -> 
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
 
-    let left = stored(env.rt.blobs.root());
+    let left = stored(&env.rt.settings.blobs_path());
     for sha in [&pdf7, &bundle, &scan_sha, &odt] {
         assert!(!left.contains(sha), "a file of Alex is still on disk: {sha} {}", r.json);
     }
@@ -617,7 +623,7 @@ async fn mail_a_household_mailbox_filed_to_the_person_goes_too() -> R {
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
 
-    let left = stored(env.rt.blobs.root());
+    let left = stored(&env.rt.settings.blobs_path());
     assert!(
         !left.contains(&eml),
         "the raw mail holding Alex's report is still on disk: {}",
@@ -742,7 +748,7 @@ async fn the_scanner_folder_keeps_no_copy_of_the_persons_files() -> R {
     );
     assert!(own_root.join(".failed").is_symlink(), "the linked parent folder went");
     assert!(root.join("sam/LN-2.pdf").is_file(), "Sam's drop went too");
-    let left = stored(env.rt.blobs.root());
+    let left = stored(&env.rt.settings.blobs_path());
     assert!(docs.iter().all(|d| !left.contains(d)), "{left:?}");
     Ok(())
 }
@@ -756,7 +762,7 @@ async fn stuck_report(env: &Env) -> anyhow::Result<(String, std::path::PathBuf)>
         "application/pdf",
     )
     .await?;
-    let path = env.rt.blobs.path(&stuck)?;
+    let path = blob_file(env, &stuck);
     std::fs::remove_file(&path)?;
     std::fs::create_dir_all(path.join("busy"))?;
     Ok((stuck, path))
@@ -851,7 +857,7 @@ async fn a_file_the_delete_could_not_remove_goes_on_the_retry() -> R {
     .await?;
     assert_eq!(run_unlink(&env).await?, 1);
 
-    let left = stored(env.rt.blobs.root());
+    let left = stored(&env.rt.settings.blobs_path());
     assert!(!left.contains(&stuck), "the retry left Alex's file");
     assert!(left.contains(&again), "the retry removed a file Sam's document names");
     assert_eq!(unlink_state(&env).await?.0, "done");
@@ -1014,7 +1020,7 @@ async fn an_inbox_item_of_someone_else_with_the_same_bytes_stays() -> R {
     );
     assert_eq!(items(&env, theirs).await?, vec![("5".into(), Some(sha.clone()))]);
     assert!(
-        stored(env.rt.blobs.root()).contains(&sha),
+        stored(&env.rt.settings.blobs_path()).contains(&sha),
         "Sam's push file went with Alex"
     );
     Ok(())
@@ -1058,7 +1064,7 @@ async fn a_mail_with_nothing_to_import_goes_with_the_person() -> R {
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
     assert!(
-        !stored(env.rt.blobs.root()).contains(&eml),
+        !stored(&env.rt.settings.blobs_path()).contains(&eml),
         "the notice to Alex is still on disk: {}",
         r.json
     );
@@ -1093,7 +1099,7 @@ async fn an_item_filed_to_someone_else_keeps_its_file() -> R {
         "Sam's item lost its file"
     );
     assert!(
-        stored(env.rt.blobs.root()).contains(&sha),
+        stored(&env.rt.settings.blobs_path()).contains(&sha),
         "Sam's queued file went with Alex: {}",
         r.json
     );
@@ -1134,7 +1140,7 @@ async fn a_released_mail_with_only_a_body_goes_with_the_person() -> R {
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
     assert!(
-        !stored(env.rt.blobs.root()).contains(&eml),
+        !stored(&env.rt.settings.blobs_path()).contains(&eml),
         "the released notice is still on disk: {}",
         r.json
     );
@@ -1188,7 +1194,10 @@ async fn a_push_an_inbox_received_for_someone_else_keeps_its_file() -> R {
         vec![(format!("push:{sha}"), Some(sha.clone()))],
         "Sam's push lost its file"
     );
-    assert!(stored(env.rt.blobs.root()).contains(&sha), "Sam's push went with Alex");
+    assert!(
+        stored(&env.rt.settings.blobs_path()).contains(&sha),
+        "Sam's push went with Alex"
+    );
     Ok(())
 }
 
@@ -2003,7 +2012,7 @@ async fn a_done_delete_answers_success_when_its_last_audit_fails() -> R {
         "{}",
         r.json
     );
-    assert!(!stored(env.rt.blobs.root()).contains(&report));
+    assert!(!stored(&env.rt.settings.blobs_path()).contains(&report));
     assert_eq!(
         env.scalar_i64("select count(*) from profile where slug = 'alex'")
             .await?,
@@ -2018,7 +2027,7 @@ async fn a_file_already_missing_is_not_counted_as_removed() -> R {
     let alex = env.profile("alex");
     let (_, gone) = document(&env, alex, "%PDF-1.7 synthetic report already gone", "application/pdf").await?;
     let (_, here) = document(&env, alex, "%PDF-1.7 synthetic LabNorte report", "application/pdf").await?;
-    std::fs::remove_file(env.rt.blobs.path(&gone)?)?;
+    std::fs::remove_file(blob_file(&env, &gone))?;
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
@@ -2028,6 +2037,6 @@ async fn a_file_already_missing_is_not_counted_as_removed() -> R {
         "a file that was already missing counted as removed: {}",
         r.json
     );
-    assert!(!stored(env.rt.blobs.root()).contains(&here));
+    assert!(!stored(&env.rt.settings.blobs_path()).contains(&here));
     Ok(())
 }
