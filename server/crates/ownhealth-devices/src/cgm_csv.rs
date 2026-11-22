@@ -2,7 +2,8 @@
 //! export file. Job kind `import.cgm_csv`, payload as the other structured importers (`{profile_id,
 //! household_id, blob_sha256, filename}`, or `{document_id}` for an import again); core sniffs the
 //! header row (`documents::CGM_CSV_KINDS`) as `libreview_csv` or `dexcom_clarity_csv`. The file
-//! becomes a `text/csv` document of the profile and owns the readings it brings.
+//! becomes a `text/csv` document of the profile (`doc_type` [`WEARABLES_DOC_TYPE`], so only a member
+//! who may read wearables lists, opens or downloads it) and owns the readings it brings.
 //!
 //! Columns are found by their header text, never by their position, in English, German and Spanish:
 //! - LibreView: `Device Timestamp`, `Record Type`, `Historic Glucose` (record type 0) and `Scan Glucose`
@@ -62,12 +63,12 @@ use std::io::Read as _;
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use ownhealth_core::access::get_profile;
 use ownhealth_core::blobs::{BlobOwner, BlobStore};
-use ownhealth_core::documents::{self, CLARITY_TIME_SUFFIX, header_key};
+use ownhealth_core::documents::{self, CLARITY_TIME_SUFFIX, WEARABLES_DOC_TYPE, header_key};
 use ownhealth_core::error::{Error, Result};
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::jobs::{self, Job, JobContext, JobError};
 use ownhealth_ingest_structured::fhir::mark_imported;
-use ownhealth_ingest_structured::jobs::document_for;
+use ownhealth_ingest_structured::jobs::document_of_type;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -1063,7 +1064,7 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     // a retraction queues `{document_id}`; an upload carries the blob and the browser's zone
     let stored = job.str("document_id").is_some_and(|d| !d.is_empty());
     let mut tx = ctx.pool.begin().await?;
-    let doc = document_for(&mut tx, &ctx.blobs, &job.payload, mime, &channel).await?;
+    let doc = document_of_type(&mut tx, &ctx.blobs, &job.payload, mime, &channel, WEARABLES_DOC_TYPE).await?;
     let server = std::env::var("OWNHEALTH_TIMEZONE").ok();
     let (server, browser) = known_zones(&mut tx, server.as_deref(), job.str("timezone")).await?;
     let done = if stored {

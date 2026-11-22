@@ -265,7 +265,7 @@ async fn a_wearables_import_result_shows_only_to_members_who_may_read_wearables(
     let alex = a.family.profile("alex");
     let result = json!({"accepted": 32, "fit": {"heart_rate_minutes": 30, "device": "OwnHealth Test Watch"}});
     let mut ids = Vec::new();
-    for kind in ["import.fit", "import.gadgetbridge", "import.pdf"] {
+    for kind in ["import.fit", "import.gadgetbridge", "import.cgm_csv", "import.pdf"] {
         let id: i64 = sqlx::query_scalar(
             "insert into job (kind, state, payload, result) values ($1, 'done', \
              jsonb_build_object('profile_id', $2::text, 'filename', 'run.fit'), $3) returning id",
@@ -329,6 +329,7 @@ async fn a_wearables_import_result_shows_only_to_members_who_may_read_wearables(
         results(&v),
         [
             ("import.pdf".to_string(), result.clone()),
+            ("import.cgm_csv".to_string(), serde_json::Value::Null),
             ("import.gadgetbridge".to_string(), serde_json::Value::Null),
             ("import.fit".to_string(), serde_json::Value::Null),
         ]
@@ -734,5 +735,133 @@ async fn the_timeline_shows_no_wearables_export() -> R {
         assert!(docs.contains(&letter.to_string()), "{who}: {v}");
         assert!(!v.to_string().contains(&run.to_string()), "{who}: {v}");
     }
+    Ok(())
+}
+
+/// The ids in a JSON answer's text: whether `id` appears anywhere in it.
+fn mentions(v: &serde_json::Value, id: uuid::Uuid) -> bool {
+    v.to_string().contains(&id.to_string())
+}
+
+/// A CGM CSV export holds every glucose reading of its sensors: its import stores it as a wearables
+/// document, so a member without read:wearables cannot list, open or download it, and no member sees it
+/// on the timeline or in the gaps; one with read:wearables lists, opens and downloads it.
+#[tokio::test]
+async fn a_cgm_export_is_a_wearables_document() -> R {
+    let a = app().await?;
+    ownhealth_devices::register();
+    let (s, v) = a
+        .upload(
+            "alex",
+            &[("profile", "alex"), ("timezone", "Europe/Madrid")],
+            &[("clarity.csv", CLARITY)],
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let kinds = ["import.cgm_csv".to_string()];
+    ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?;
+    let (doc, doc_type): (uuid::Uuid, Option<String>) =
+        sqlx::query_as("select id, doc_type from document where profile_id = $1 and filename = 'clarity.csv'")
+            .bind(a.family.profile("alex"))
+            .fetch_one(&a.rt.pool)
+            .await?;
+    assert_eq!(doc_type.as_deref(), Some("wearables"));
+    // dated, so the timeline and the gaps could show it
+    sqlx::query("update document set collected_at = '2024-03-02' where id = $1")
+        .bind(doc)
+        .execute(&a.rt.pool)
+        .await?;
+    let listed = |v: &serde_json::Value| {
+        v["items"]
+            .as_array()
+            .is_some_and(|i| i.iter().any(|d| d["id"] == json!(doc.to_string())))
+    };
+    let elsewhere = |who: &'static str| {
+        let a = &a;
+        async move {
+            let (s, t) = a.get(who, "/profiles/alex/timeline").await?;
+            assert_eq!(s, StatusCode::OK, "{t}");
+            let (s, g) = a.get(who, "/profiles/alex/gaps?lang=en").await?;
+            assert_eq!(s, StatusCode::OK, "{g}");
+            anyhow::Ok(mentions(&t, doc) || mentions(&g, doc))
+        }
+    };
+    // records and labs, no wearables: not listed, not opened, not downloaded
+    grant_sam(&a, &["read:summary", "read:records", "read:labs"]).await?;
+    let (s, v) = a.get("sam", "/profiles/alex/documents").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(!listed(&v), "{v}");
+    let (s, v) = a.get("sam", &format!("/documents/{doc}")).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(v.to_string().contains("This needs read:wearables."), "{v}");
+    let (s, _, body) = file_as(&a, "sam", doc).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(!body.windows(CLARITY.len()).any(|w| w == CLARITY), "the bytes went out");
+    assert!(!elsewhere("sam").await?);
+    // with wearables: listed, opened and downloaded; still no record fact on the timeline or in the gaps
+    grant_sam(&a, &["read:summary", "read:records", "read:labs", "read:wearables"]).await?;
+    let (_, v) = a.get("sam", "/profiles/alex/documents").await?;
+    assert!(listed(&v), "{v}");
+    let (s, v) = a.get("sam", &format!("/documents/{doc}")).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["flags"]["cgm_csv"]["readings"], json!(1), "{v}");
+    let (s, _, body) = file_as(&a, "sam", doc).await?;
+    assert_eq!((s, body.as_slice()), (StatusCode::OK, CLARITY));
+    assert!(!elsewhere("sam").await?);
+    assert!(!elsewhere("alex").await?);
+    // the control: the same document as a record shows on the owner's timeline
+    sqlx::query("update document set doc_type = 'other' where id = $1")
+        .bind(doc)
+        .execute(&a.rt.pool)
+        .await?;
+    assert!(elsewhere("alex").await?);
+    Ok(())
+}
+
+/// Migration 1291 moves the CGM CSV exports stored before it (`flags.cgm_csv`) to `doc_type`
+/// `wearables`; another CSV document keeps its type.
+#[tokio::test]
+async fn the_migration_moves_stored_cgm_exports_to_the_wearables_type() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let mut ids = Vec::new();
+    for (i, flags) in [
+        json!({"cgm_csv": {"vendor": "libreview", "readings": 13}, "import": {"accepted": 13}}),
+        json!({"cgm_csv": {"vendor": "dexcom_clarity"}}),
+        json!({"import": {"accepted": 0}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sha = a.rt.blobs.put_bytes(
+            ownhealth_core::blobs::BlobOwner::Profile(alex),
+            format!("csv {i}").as_bytes(),
+        )?;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "insert into document (household_id, profile_id, blob_sha256, mime, size_bytes, doc_type, flags) \
+             values ($1, $2, decode($3, 'hex'), 'text/csv', 5, 'other', $4) returning id",
+        )
+        .bind(a.family.household_id)
+        .bind(alex)
+        .bind(&sha)
+        .bind(&flags)
+        .fetch_one(&a.rt.pool)
+        .await?;
+        ids.push(id);
+    }
+    for _ in 0..2 {
+        sqlx::raw_sql(include_str!("../../../../migrations/1291_cgm_documents.sql"))
+            .execute(&a.rt.pool)
+            .await?;
+    }
+    let mut types = Vec::new();
+    for id in &ids {
+        let t: Option<String> = sqlx::query_scalar("select doc_type from document where id = $1")
+            .bind(id)
+            .fetch_one(&a.rt.pool)
+            .await?;
+        types.push(t.unwrap_or_default());
+    }
+    assert_eq!(types, ["wearables", "wearables", "other"]);
     Ok(())
 }
