@@ -19,10 +19,12 @@
 //! ```
 //!
 //! The record key is HKDF(DEK, salt), so a nonce never repeats under one key: the counter counts the
-//! records of one file, and every file has its own key. The last flag is part of the nonce, so a file
-//! cut at a record boundary fails on its new last record instead of reading short; the counter makes a
-//! reordered, repeated or dropped record fail. The binding is an HMAC over the owner and the plaintext
-//! sha256, so a file copied under another name or another profile does not open.
+//! records of one file, and every file has its own key. Every record but the last holds exactly 64 KiB;
+//! the last holds 1 to 64 KiB, and is empty only in an empty file. The last flag is part of the nonce,
+//! and the reader opens the last record before it hands out a byte, so a cut file fails when it opens
+//! instead of reading short; the counter makes a reordered, repeated or dropped record fail. The binding
+//! is an HMAC over the owner and the plaintext sha256, so a file copied under another name or another
+//! profile does not open.
 //!
 //! No key, DEK or record key is ever logged, printed or put in an error: `Debug` of every key type
 //! shows at most the KEK's fingerprint, and the key bytes are zeroed when they drop.
@@ -76,15 +78,14 @@ impl From<sqlx::Error> for KeyError {
     }
 }
 
-impl From<KeyError> for crate::Error {
-    fn from(e: KeyError) -> Self {
-        crate::Error::Other(anyhow::anyhow!(e.0))
-    }
-}
-
 /// The one line a missing key prints: what to set and how to make one.
 pub const MISSING_KEY: &str = "OWNHEALTH_SECRETS_KEY is not set: it encrypts every profile's files and inbox secrets; \
      generate one with `openssl rand -base64 32` and set it (or OWNHEALTH_SECRETS_KEY_FILE), see deploy/README.md";
+
+/// The one line `restore` and `verify-restore` print without a key: a new key never opens a backup.
+pub const MISSING_BACKUP_KEY: &str = "OWNHEALTH_SECRETS_KEY is not set: set the key the backup was made with \
+     (or OWNHEALTH_SECRETS_KEY_FILE); its fingerprint is keys.kek_fingerprint in the backup's manifest.json, \
+     and a new key never opens the backup, see deploy/README.md";
 
 fn hkdf32(ikm: &[u8], salt: Option<&[u8]>, info: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut out = Zeroizing::new([0u8; 32]);
@@ -195,10 +196,7 @@ impl Kek {
     /// changed byte is refused, without detail.
     pub fn unwrap(&self, profile: Uuid, fingerprint: &[u8], wrapped: &[u8]) -> Result<Dek, KeyError> {
         if fingerprint != self.fingerprint {
-            return Err(KeyError::new(
-                "the profile keys were made with another OWNHEALTH_SECRETS_KEY: start with the key this \
-                 install (or this backup) was made with",
-            ));
+            return Err(KeyError::new(WRONG_KEY));
         }
         let refused = || KeyError::new("a profile key does not open with this OWNHEALTH_SECRETS_KEY");
         if wrapped.len() != WRAPPED_LEN || wrapped[0] != WRAP_VERSION {
@@ -326,12 +324,17 @@ impl Sealer {
         }
     }
 
-    /// The sealed record of `chunk` (at most `RECORD` bytes). `last` marks the final record; nothing
-    /// may follow it.
+    /// The sealed record of `chunk`: exactly `RECORD` bytes, except the last record (`last`), which
+    /// holds 1 to `RECORD` bytes, or none in an empty file. Nothing may follow the last record.
     pub fn seal(&mut self, chunk: &[u8], last: bool) -> io::Result<Vec<u8>> {
-        if self.done || chunk.len() > RECORD {
+        let fits = if last {
+            chunk.len() <= RECORD && (self.counter == 0 || !chunk.is_empty())
+        } else {
+            chunk.len() == RECORD
+        };
+        if self.done || !fits {
             return Err(io::Error::other(
-                "a sealed blob takes records of at most 64 KiB, the last one once",
+                "a sealed blob takes records of exactly 64 KiB, then one last record of at most 64 KiB",
             ));
         }
         let prefix = &self.header[MAGIC.len() + SALT..MAGIC.len() + SALT + PREFIX];
@@ -388,7 +391,8 @@ impl<F> std::fmt::Debug for SealedReader<F> {
 const SEALED: u64 = (RECORD + TAG) as u64;
 
 impl<F: Read + Seek> SealedReader<F> {
-    /// Opens `file`, sealed for `owner` over plaintext whose sha256 is `sha`, and checks the binding.
+    /// Opens `file`, sealed for `owner` over plaintext whose sha256 is `sha`: checks the binding, and
+    /// opens the last record, so a file cut anywhere, or with a changed last record, fails here.
     pub fn open(mut file: F, dek: &Dek, owner: Uuid, sha: &[u8; 32]) -> io::Result<SealedReader<F>> {
         let total = file.seek(SeekFrom::End(0))?;
         file.seek(SeekFrom::Start(0))?;
@@ -407,12 +411,13 @@ impl<F: Read + Seek> SealedReader<F> {
         let body = total - HEADER as u64;
         let records = body.div_ceil(SEALED);
         let last_len = body - (records - 1) * SEALED;
-        if last_len < TAG as u64 || records > u64::from(u32::MAX) + 1 {
+        // an empty last record only in an empty file: after whole records, the length is a cut
+        if last_len < TAG as u64 || (records > 1 && last_len == TAG as u64) || records > u64::from(u32::MAX) + 1 {
             return Err(corrupt());
         }
         let mut prefix = [0u8; PREFIX];
         prefix.copy_from_slice(&header[MAGIC.len() + SALT..MAGIC.len() + SALT + PREFIX]);
-        Ok(SealedReader {
+        let mut reader = SealedReader {
             file,
             cipher,
             prefix,
@@ -422,7 +427,11 @@ impl<F: Read + Seek> SealedReader<F> {
             plain_len: body - records * TAG as u64,
             pos: 0,
             current: None,
-        })
+        };
+        // the last record says the file ends there: without this, a file cut to whole records plus
+        // 16 bytes would read short, and an empty file would never check its tag
+        reader.load(records - 1)?;
+        Ok(reader)
     }
 
     /// The plaintext size, from the file length (the records check it as they are read).
@@ -504,11 +513,19 @@ enum Source {
     Memory,
 }
 
+/// The keys this process opened, and how many times `forget` ran: a key read while `forget` ran is
+/// never kept, so a deleted profile's key cannot come back into the cache.
+#[derive(Default)]
+struct Cache {
+    keys: HashMap<Uuid, Arc<Dek>>,
+    forgets: u64,
+}
+
 /// The profile keys this process has opened, by profile, and where to find the others.
 pub struct Keyring {
     kek: Kek,
     source: Source,
-    cache: Mutex<HashMap<Uuid, Arc<Dek>>>,
+    cache: Mutex<Cache>,
 }
 
 impl std::fmt::Debug for Keyring {
@@ -523,7 +540,7 @@ impl Keyring {
         Keyring {
             kek,
             source: Source::Db(url.into()),
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(Cache::default()),
         }
     }
 
@@ -533,7 +550,7 @@ impl Keyring {
         Keyring {
             kek,
             source: Source::Memory,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(Cache::default()),
         }
     }
 
@@ -541,21 +558,42 @@ impl Keyring {
         &self.kek
     }
 
-    /// Drop the key this process kept for `profile` (its row went with the profile).
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Cache>, KeyError> {
+        self.cache
+            .lock()
+            .map_err(|_| KeyError::new("the keyring lock is poisoned"))
+    }
+
+    /// Drop the key this process kept for `profile`, after its row went with the profile. A lookup
+    /// that started before this call keeps nothing.
     pub fn forget(&self, profile: Uuid) {
         if let Ok(mut c) = self.cache.lock() {
-            c.remove(&profile);
+            c.keys.remove(&profile);
+            c.forgets = c.forgets.wrapping_add(1);
         }
     }
 
-    fn cached(&self, profile: Uuid) -> Option<Arc<Dek>> {
-        self.cache.lock().ok().and_then(|c| c.get(&profile).cloned())
+    /// The cached key of `profile`, and the `forget` count a lookup that starts now must see again.
+    fn cached(&self, profile: Uuid) -> Result<(Option<Arc<Dek>>, u64), KeyError> {
+        let c = self.lock()?;
+        Ok((c.keys.get(&profile).cloned(), c.forgets))
+    }
+
+    /// Keep `dek` for `profile` unless `forget` ran since the lookup began (`seen`): the check and
+    /// the insert hold one lock. The key goes back to the caller either way.
+    fn publish(&self, profile: Uuid, dek: Arc<Dek>, seen: u64) -> Result<Arc<Dek>, KeyError> {
+        let mut c = self.lock()?;
+        if c.forgets != seen {
+            return Ok(dek);
+        }
+        Ok(c.keys.entry(profile).or_insert(dek).clone())
     }
 
     /// The DEK of `profile`. With `create`, a profile with none gets one (two processes racing keep
     /// the first); without, None when the profile has none.
     pub fn dek(&self, profile: Uuid, create: bool) -> Result<Option<Arc<Dek>>, KeyError> {
-        if let Some(d) = self.cached(profile) {
+        let (cached, seen) = self.cached(profile)?;
+        if let Some(d) = cached {
             return Ok(Some(d));
         }
         let found = match &self.source {
@@ -576,12 +614,7 @@ impl Keyring {
         let Some(dek) = found else {
             return Ok(None);
         };
-        let dek = Arc::new(dek);
-        let mut cache = self
-            .cache
-            .lock()
-            .map_err(|_| KeyError::new("the keyring lock is poisoned"))?;
-        Ok(Some(cache.entry(profile).or_insert(dek).clone()))
+        Ok(Some(self.publish(profile, Arc::new(dek), seen)?))
     }
 }
 
@@ -592,7 +625,8 @@ type Stored = (Vec<u8>, Vec<u8>);
 /// and none is stored. Blob reads and writes are not async, so this runs on a thread of its own with
 /// its own connection: it never waits on the caller's pool or runtime. It runs once per profile per
 /// process. The row has no foreign key to `profile`: the profile may still be in the caller's open
-/// transaction.
+/// transaction. `new` is stored only while every stored key was made under the same KEK, so a key
+/// swapped while the app runs cannot add keys the right one never opens.
 fn side_lookup(
     url: &str,
     profile: Uuid,
@@ -600,35 +634,85 @@ fn side_lookup(
     fingerprint: [u8; 8],
 ) -> Result<Option<Stored>, KeyError> {
     let url = url.to_string();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| KeyError(format!("could not start the key lookup: {e}")))?;
-        rt.block_on(async move {
-            let mut conn = PgConnection::connect(&url).await?;
-            if let Some(wrapped) = &new {
-                sqlx::query(
-                    "insert into profile_key (profile_id, wrapped_dek, kek_fingerprint) values ($1, $2, $3) \
+    let lookup = std::thread::Builder::new()
+        .name("ownhealth-key-lookup".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| KeyError(format!("could not start the key lookup: {e}")))?;
+            rt.block_on(async move {
+                let mut conn = PgConnection::connect(&url).await?;
+                if let Some(wrapped) = &new {
+                    sqlx::query(
+                        "insert into profile_key (profile_id, wrapped_dek, kek_fingerprint) \
+                     select $1, $2, $3 where not exists (select 1 from profile_key where kek_fingerprint <> $3) \
                      on conflict (profile_id) do nothing",
-                )
-                .bind(profile)
-                .bind(wrapped)
-                .bind(&fingerprint[..])
-                .execute(&mut conn)
-                .await?;
-            }
-            let row: Option<(Vec<u8>, Vec<u8>)> =
-                sqlx::query_as("select wrapped_dek, kek_fingerprint from profile_key where profile_id = $1")
+                    )
                     .bind(profile)
-                    .fetch_optional(&mut conn)
+                    .bind(wrapped)
+                    .bind(&fingerprint[..])
+                    .execute(&mut conn)
                     .await?;
-            let _ = conn.close().await;
-            Ok(row)
+                }
+                let row: Option<(Vec<u8>, Vec<u8>)> =
+                    sqlx::query_as("select wrapped_dek, kek_fingerprint from profile_key where profile_id = $1")
+                        .bind(profile)
+                        .fetch_optional(&mut conn)
+                        .await?;
+                if row.is_none() && new.is_some() {
+                    let other: bool =
+                        sqlx::query_scalar("select exists (select 1 from profile_key where kek_fingerprint <> $1)")
+                            .bind(&fingerprint[..])
+                            .fetch_one(&mut conn)
+                            .await?;
+                    let _ = conn.close().await;
+                    return Err(if other {
+                        KeyError::new(WRONG_KEY)
+                    } else {
+                        KeyError::new("no key could be stored for the profile: it was deleted")
+                    });
+                }
+                let _ = conn.close().await;
+                Ok(row)
+            })
         })
-    })
-    .join()
-    .map_err(|_| KeyError::new("the key lookup stopped"))?
+        .map_err(|e| KeyError(format!("could not start the key lookup: {e}")))?;
+    lookup.join().map_err(|_| KeyError::new("the key lookup stopped"))?
+}
+
+/// The refusal of a key that is not the one the stored profile keys were made with.
+const WRONG_KEY: &str = "the profile keys were made with another OWNHEALTH_SECRETS_KEY: start with the key this \
+     install (or this backup) was made with";
+
+/// Refuses a start whose OWNHEALTH_SECRETS_KEY does not open every profile key the database holds,
+/// before anything serves or stores a key: files stored under keys the right key never opens would be
+/// lost. A database with no key yet (a fresh install, or one from before 1.0) passes.
+pub async fn check_start(conn: &mut PgConnection, kek: &Kek) -> Result<(), KeyError> {
+    let keyed: bool = sqlx::query_scalar("select to_regclass('public.profile_key') is not null")
+        .fetch_one(&mut *conn)
+        .await?;
+    if !keyed {
+        return Ok(());
+    }
+    let (opened, failed) = check_all(conn, kek).await?;
+    if failed.is_empty() {
+        return Ok(());
+    }
+    let made: Vec<Vec<u8>> = sqlx::query_scalar("select distinct kek_fingerprint from profile_key order by 1")
+        .fetch_all(&mut *conn)
+        .await?;
+    let made: Vec<String> = made.iter().map(hex::encode).collect();
+    Err(KeyError(format!(
+        "OWNHEALTH_SECRETS_KEY (fingerprint {have}) does not open {bad} of the {all} profile keys this \
+         install holds (made under fingerprint {made}): start with the key this install was made with, \
+         from secrets/secrets_key, the OWNHEALTH_SECRETS_KEY line of an older .env, or the copy kept \
+         with the backups; a new key never opens the files already stored, see deploy/README.md",
+        have = hex::encode(kek.fingerprint()),
+        bad = failed.len(),
+        all = opened + failed.len(),
+        made = made.join(", "),
+    )))
 }
 
 /// Every stored profile key opened with `kek`: (profiles that open, profiles that do not). For
@@ -797,11 +881,61 @@ mod tests {
         assert_ne!(a[HEADER..], b[HEADER..]);
         // within a file, every record has its own counter, and the last record its own flag
         let mut s = Sealer::new(&dek, owner);
-        let one = s.seal(&[0u8; 16], false).expect("seal");
-        let two = s.seal(&[0u8; 16], false).expect("seal");
-        let three = s.seal(&[0u8; 16], true).expect("seal");
+        let one = s.seal(&[0u8; RECORD], false).expect("seal");
+        let two = s.seal(&[0u8; RECORD], false).expect("seal");
+        let three = s.seal(&[0u8; RECORD], true).expect("seal");
         assert!(one != two && two != three && one != three);
         assert!(s.seal(b"after the last", true).is_err(), "a record after the last");
+    }
+
+    #[test]
+    fn only_the_last_record_may_be_short_and_only_an_empty_file_has_an_empty_one() {
+        let (dek, owner) = (Dek::generate(), Uuid::new_v4());
+        let mut s = Sealer::new(&dek, owner);
+        assert!(
+            s.seal(&[0u8; 16], false).is_err(),
+            "a short record that is not the last"
+        );
+        assert!(s.seal(&[], false).is_err(), "an empty record that is not the last");
+        s.seal(&[0u8; RECORD], false).expect("a full record");
+        assert!(s.seal(&[], true).is_err(), "an empty last record after a full one");
+        s.seal(&[1u8; 9], true).expect("a short last record");
+        // an empty file is one empty last record
+        Sealer::new(&dek, owner).seal(&[], true).expect("an empty file");
+    }
+
+    #[test]
+    fn a_file_cut_to_a_record_boundary_plus_one_tag_fails_when_it_opens() {
+        let (dek, owner) = (Dek::generate(), Uuid::new_v4());
+        let data = sample(3 * RECORD + 100);
+        let sha: [u8; 32] = Sha256::digest(&data).into();
+        let sealed = seal_all(&dek, owner, &data);
+        let boundary = |i: usize| HEADER + i * (RECORD + TAG);
+        // after 0, 1 or 2 whole records, the next 16 bytes as they were, or anything else
+        for records in 0..3 {
+            for junk in [false, true] {
+                let mut cut = sealed[..boundary(records) + TAG].to_vec();
+                if junk {
+                    cut[boundary(records)..].fill(0xa5);
+                }
+                let what = format!("{records} records + 16 bytes, junk {junk}");
+                let err = SealedReader::open(Cursor::new(cut.clone()), &dek, owner, &sha).expect_err(&what);
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{what}");
+                assert!(open_all(&dek, owner, &data, cut).is_err(), "{what}");
+            }
+        }
+        // a valid empty blob reads as nothing; with its tag changed it does not open
+        let empty = seal_all(&dek, owner, b"");
+        assert_eq!(empty.len(), HEADER + TAG);
+        assert_eq!(open_all(&dek, owner, b"", empty.clone()).expect("empty"), b"");
+        let mut bad = empty;
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        let empty_sha: [u8; 32] = Sha256::digest(b"").into();
+        assert!(
+            SealedReader::open(Cursor::new(bad), &dek, owner, &empty_sha).is_err(),
+            "a changed tag on an empty blob"
+        );
     }
 
     #[test]
@@ -862,6 +996,29 @@ mod tests {
         assert!(!shown.contains(&hex::encode(&a.key[..])) && !shown.contains(&hex::encode(&dek.key[..])));
         assert!(!shown.contains(&b64) && !shown.contains(&hex::encode(secret)));
         assert_eq!(shown.matches("***").count(), 2, "{shown}");
+    }
+
+    #[test]
+    fn a_key_read_while_forget_ran_is_never_kept() -> Result<(), KeyError> {
+        let ring = Keyring::in_memory(kek());
+        let p = Uuid::new_v4();
+        // a lookup began, then the profile was deleted and forgotten, then the lookup ended
+        let (none, seen) = ring.cached(p)?;
+        assert!(none.is_none());
+        ring.forget(p);
+        let late = ring.publish(p, Arc::new(Dek::generate()), seen)?;
+        assert!(
+            ring.cached(p)?.0.is_none(),
+            "a deleted profile's key came back into the cache"
+        );
+        // a lookup with no forget in between keeps its key, and the first one stays
+        let (_, seen) = ring.cached(p)?;
+        let kept = ring.publish(p, late.clone(), seen)?;
+        assert!(Arc::ptr_eq(&kept, &late));
+        let again = ring.publish(p, Arc::new(Dek::generate()), seen)?;
+        assert!(Arc::ptr_eq(&again, &late), "a second lookup replaced the kept key");
+        assert!(ring.cached(p)?.0.is_some_and(|c| Arc::ptr_eq(&c, &late)));
+        Ok(())
     }
 
     #[test]
