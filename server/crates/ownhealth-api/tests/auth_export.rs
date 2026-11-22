@@ -212,7 +212,11 @@ async fn a_failed_export_audit_leaves_no_zip_behind() -> R {
 async fn delete_profile() -> R {
     let env = Env::new(true).await?;
     let sha = seed(&env, "alex", None).await?;
-    assert!(env.rt.blobs.exists(&sha));
+    assert!(
+        env.rt
+            .blobs
+            .exists(ownhealth_core::blobs::BlobOwner::Profile(env.profile("alex")), &sha)
+    );
     let mut c = env.pool().acquire().await?;
     let sam_src = SrcRef::New(SrcIn::manual(Some(env.user("sam"))));
     let sams = commit_observation(
@@ -268,7 +272,11 @@ async fn delete_profile() -> R {
         .fetch_all(env.pool())
         .await?;
     assert!(actions.iter().any(|a| a == "read") && actions.iter().any(|a| a == "purge"));
-    assert!(!env.rt.blobs.exists(&sha));
+    assert!(
+        !env.rt
+            .blobs
+            .exists(ownhealth_core::blobs::BlobOwner::Profile(pid), &sha)
+    );
     // Sam's data is untouched
     let owner: Uuid = sqlx::query_scalar("select profile_id from observation where id = $1")
         .bind(sams.id)
@@ -363,7 +371,11 @@ async fn shared_blob_survives() -> R {
         .delete("/api/profiles/lucia?confirm=lucia")
         .await?;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
-    assert!(env.rt.blobs.exists(&sha));
+    assert!(
+        env.rt
+            .blobs
+            .exists(ownhealth_core::blobs::BlobOwner::Profile(env.profile("sam")), &sha)
+    );
     Ok(())
 }
 

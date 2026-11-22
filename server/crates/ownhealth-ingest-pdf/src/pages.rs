@@ -4,7 +4,7 @@
 use std::io::Write as _;
 use std::sync::LazyLock;
 
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::{Error, Result};
 use pdfium_render::prelude::*;
 use regex::Regex;
@@ -37,7 +37,7 @@ pub async fn page_words(
     page_no: i32,
 ) -> Result<Vec<Word>> {
     let row = sqlx::query(
-        "select p.words_blob, d.blob_sha256, d.mime from document d left join document_page p \
+        "select p.words_blob, d.blob_sha256, d.mime, d.profile_id from document d left join document_page p \
          on p.document_id = d.id and p.page_no = $2 where d.id = $1",
     )
     .bind(document_id)
@@ -47,8 +47,9 @@ pub async fn page_words(
     let Some(row) = row else { return Ok(Vec::new()) };
     let words_blob: Option<Vec<u8>> = row.try_get("words_blob")?;
     let mime: String = row.try_get("mime")?;
+    let owner = BlobOwner::of_document(row.try_get("profile_id")?, document_id);
     let words: Vec<Value> = if let Some(wb) = words_blob {
-        let layer: Value = serde_json::from_slice(&blobs.get_bytes(&hex::encode(wb))?)?;
+        let layer: Value = serde_json::from_slice(&blobs.get_bytes(owner, &hex::encode(wb))?)?;
         layer
             .get("words")
             .and_then(Value::as_array)
@@ -56,7 +57,7 @@ pub async fn page_words(
             .unwrap_or_default()
     } else if mime == "application/pdf" {
         let sha: Vec<u8> = row.try_get("blob_sha256")?;
-        let data = blobs.get_bytes(&hex::encode(sha))?;
+        let data = blobs.get_bytes(owner, &hex::encode(sha))?;
         let model = tokio::task::spawn_blocking(move || read_pdf(&data))
             .await
             .map_err(|e| Error::Other(anyhow::anyhow!("PDF read panicked: {e}")))??;
@@ -93,8 +94,14 @@ fn render_size(width: f64, height: f64, scale: f64) -> (i32, i32) {
 
 /// A PNG of one page, scale clamped to 0.5..4 and the size to `MAX_RENDER_PIXELS` (CPU work: call it
 /// from `spawn_blocking`). A page out of range is `Error::NotFound`.
-pub fn render_page_png(blobs: &BlobStore, blob_sha256: &str, page_no: i32, scale: f64) -> Result<Vec<u8>> {
-    let data = blobs.get_bytes(blob_sha256)?;
+pub fn render_page_png(
+    blobs: &BlobStore,
+    owner: BlobOwner,
+    blob_sha256: &str,
+    page_no: i32,
+    scale: f64,
+) -> Result<Vec<u8>> {
+    let data = blobs.get_bytes(owner, blob_sha256)?;
     let doc = pdfium()?.load_pdf_from_byte_slice(&data, None).map_err(pdf_error)?;
     let n = doc.pages().len() as i32;
     if !(1..=n).contains(&page_no) {

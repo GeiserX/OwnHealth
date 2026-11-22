@@ -456,10 +456,15 @@ async fn page_png(
     if doc.str("mime") != Some("application/pdf") || !(1..=pages).contains(&i64::from(page_no)) {
         return Err(unknown("No such page.").into());
     }
-    let (blobs, sha) = (rt.blobs.clone(), doc.blob_sha256.clone());
-    let png = tokio::task::spawn_blocking(move || ownhealth_ingest_pdf::render_page_png(&blobs, &sha, page_no, scale))
-        .await
-        .map_err(|e| Error::Other(e.into()))??;
+    let (blobs, sha, owner) = (
+        rt.blobs.clone(),
+        doc.blob_sha256.clone(),
+        BlobOwner::Profile(doc.perm.profile.id),
+    );
+    let png =
+        tokio::task::spawn_blocking(move || ownhealth_ingest_pdf::render_page_png(&blobs, owner, &sha, page_no, scale))
+            .await
+            .map_err(|e| Error::Other(e.into()))??;
     audit(
         &mut tx,
         &principal,

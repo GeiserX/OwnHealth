@@ -48,6 +48,13 @@ pub enum BlobOwner {
     Reference,
 }
 
+impl BlobOwner {
+    /// The owner of a document's bytes: its profile, or the document itself while it has none.
+    pub fn of_document(profile_id: Option<Uuid>, document_id: Uuid) -> BlobOwner {
+        profile_id.map_or(BlobOwner::Pending(document_id), BlobOwner::Profile)
+    }
+}
+
 /// A blob as a file on local disk, for readers that need a path (SQLite, zip, tabix). The path is
 /// good while this value lives. In the plain layout it is the stored file itself.
 #[derive(Debug)]
@@ -223,11 +230,12 @@ impl BlobStore {
         self.put_reader(File::open(path)?)
     }
 
-    pub fn exists(&self, sha256: &str) -> bool {
+    /// Whether `owner`'s blob is stored.
+    pub fn exists(&self, _owner: BlobOwner, sha256: &str) -> bool {
         self.path(sha256).map(|p| p.exists()).unwrap_or(false)
     }
 
-    pub fn open(&self, sha256: &str) -> Result<File, BlobError> {
+    fn open(&self, sha256: &str) -> Result<File, BlobError> {
         let p = self.path(sha256)?;
         File::open(&p).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => BlobError::NotFound(sha256.to_ascii_lowercase()),
@@ -261,13 +269,15 @@ impl BlobStore {
         }
     }
 
-    pub fn get_bytes(&self, sha256: &str) -> Result<Vec<u8>, BlobError> {
+    /// The bytes of `owner`'s blob, all in memory.
+    pub fn get_bytes(&self, _owner: BlobOwner, sha256: &str) -> Result<Vec<u8>, BlobError> {
         let mut out = Vec::new();
         self.open(sha256)?.read_to_end(&mut out)?;
         Ok(out)
     }
 
-    pub fn size(&self, sha256: &str) -> Result<u64, BlobError> {
+    /// The size of `owner`'s blob as its reader returns it.
+    pub fn size(&self, _owner: BlobOwner, sha256: &str) -> Result<u64, BlobError> {
         Ok(self.open(sha256)?.metadata()?.len())
     }
 
@@ -433,6 +443,25 @@ mod tests {
     }
 
     #[test]
+    fn every_read_names_its_owner() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = BlobStore::new(dir.path())?;
+        let h = store.put_bytes(b"Rivera family lipid panel")?;
+        assert!(store.exists(owner(), &h));
+        assert_eq!(store.size(owner(), &h)?, 25);
+        assert_eq!(
+            store.get_bytes(BlobOwner::Pending(Uuid::nil()), &h)?,
+            b"Rivera family lipid panel"
+        );
+        assert!(!store.exists(BlobOwner::Reference, &"0".repeat(64)));
+        assert!(matches!(
+            store.size(owner(), &"0".repeat(64)),
+            Err(BlobError::NotFound(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn put_dedupes_and_uses_sharded_path() {
         let dir = tempfile::tempdir().expect("tmp");
         let store = BlobStore::new(dir.path()).expect("store");
@@ -444,7 +473,7 @@ mod tests {
         assert_eq!(size, data.len() as u64);
         let p = store.path(&h1).expect("path");
         assert_eq!(p, dir.path().join("sha256").join(&h1[..2]).join(&h1[2..4]).join(&h1));
-        assert_eq!(store.get_bytes(&h1.to_uppercase()).expect("get"), data);
+        assert_eq!(store.get_bytes(owner(), &h1.to_uppercase()).expect("get"), data);
         assert_eq!(fs::read_dir(dir.path().join("tmp")).expect("tmp").count(), 0);
         assert_eq!(hex::encode(sha256_hex_to_bytes(&h1).expect("bytes")), h1);
     }
@@ -453,11 +482,14 @@ mod tests {
     fn missing_and_bad_hashes() {
         let dir = tempfile::tempdir().expect("tmp");
         let store = BlobStore::new(dir.path()).expect("store");
-        assert!(matches!(store.get_bytes(&"0".repeat(64)), Err(BlobError::NotFound(_))));
+        assert!(matches!(
+            store.get_bytes(owner(), &"0".repeat(64)),
+            Err(BlobError::NotFound(_))
+        ));
         assert!(matches!(store.path("../../etc/passwd"), Err(BlobError::BadHash)));
         let h = store.put_bytes(b"x").expect("put");
         assert!(store.delete(&h).expect("delete"));
-        assert!(!store.exists(&h));
+        assert!(!store.exists(owner(), &h));
     }
 
     #[tokio::test]

@@ -92,8 +92,8 @@ pub fn sensitivity_flags(fact: &Value) -> (bool, bool, bool) {
     (sensitive, adult_onset, category == "carrier")
 }
 
-fn rehash(blobs: &BlobStore, sha: &str) -> Result<String> {
-    let mut file = blobs.open(sha)?;
+fn rehash(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<String> {
+    let mut file = blobs.open_seek(owner, sha)?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -184,7 +184,9 @@ async fn raw_files(
         let path = s(f, "path").unwrap_or_default();
         let mut usable = true;
         for h in [sha, idx] {
-            if !(blobs.exists(h) && owned(&mut *conn, profile_id, h, attachments).await?) {
+            if !(blobs.exists(BlobOwner::Profile(profile_id), h)
+                && owned(&mut *conn, profile_id, h, attachments).await?)
+            {
                 usable = false;
                 break;
             }
@@ -212,7 +214,7 @@ async fn raw_files(
 /// with a tabix index. `files` is [(data sha, path), (index sha, index path)].
 fn check_raw_file(blobs: &BlobStore, owner: BlobOwner, files: &[(String, String); 2]) -> Result<()> {
     for (want, label) in files {
-        if rehash(blobs, want)? != *want {
+        if rehash(blobs, owner, want)? != *want {
             let head: String = want.chars().take(12).collect();
             return Err(import_error(format!(
                 "{label}: stored bytes do not match sha256 {head}…"
@@ -323,7 +325,7 @@ pub async fn import(
     let filename = filename
         .filter(|f| !f.is_empty())
         .unwrap_or_else(|| "genome-facts.json".into());
-    let bytes = blobs.get_bytes(&sha)?;
+    let bytes = blobs.get_bytes(BlobOwner::Profile(profile_id), &sha)?;
     let doc: Value = match std::str::from_utf8(&bytes)
         .map_err(|e| e.to_string())
         .and_then(|t| serde_json::from_str(t).map_err(|e| e.to_string()))

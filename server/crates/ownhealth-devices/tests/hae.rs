@@ -350,7 +350,10 @@ async fn push_bodies_older_than_the_keep_window_are_removed() -> R {
         .fetch_one(&env.db.pool)
     };
     let old_sha = sha_of(source.id).await?;
-    assert!(env.blobs.exists(&old_sha));
+    assert!(env.blobs.exists(
+        ownhealth_core::blobs::BlobOwner::Profile(env.fam.profile("alex")),
+        &old_sha
+    ));
     sqlx::query("update source_item set seen_at = now() - make_interval(days => $2) where source_id = $1")
         .bind(source.id)
         .bind(i32::try_from(hae::PUSH_KEEP_DAYS)? + 1)
@@ -374,9 +377,24 @@ async fn push_bodies_older_than_the_keep_window_are_removed() -> R {
             .fetch_all(&env.db.pool)
             .await?;
     assert_eq!(kept.len(), 1, "{kept:?}");
-    assert!(!env.blobs.exists(&old_sha), "the old push body is gone");
-    assert!(env.blobs.exists(&shared_sha), "another inbox still holds this body");
-    assert!(env.blobs.exists(&kept[0]));
+    assert!(
+        !env.blobs.exists(
+            ownhealth_core::blobs::BlobOwner::Profile(env.fam.profile("alex")),
+            &old_sha
+        ),
+        "the old push body is gone"
+    );
+    assert!(
+        env.blobs.exists(
+            ownhealth_core::blobs::BlobOwner::Profile(env.fam.profile("alex")),
+            &shared_sha
+        ),
+        "another inbox still holds this body"
+    );
+    assert!(env.blobs.exists(
+        ownhealth_core::blobs::BlobOwner::Profile(env.fam.profile("alex")),
+        &kept[0]
+    ));
     // the samples the pruned pushes brought stay
     let rows = env
         .count(

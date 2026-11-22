@@ -31,7 +31,10 @@ async fn test_upload_pdf_enqueues_import_and_job_list() -> R {
     assert_eq!(item["duplicate"], json!(false));
     assert_eq!(item["filename"], "labnorte.pdf");
     let sha = item["sha256"].as_str().unwrap_or_default().to_string();
-    assert!(a.rt.blobs.exists(&sha));
+    assert!(a.rt.blobs.exists(
+        ownhealth_core::blobs::BlobOwner::Profile(a.family.profile("alex")),
+        &sha
+    ));
     // the spooled copies are gone
     let left: Vec<_> = std::fs::read_dir(a.rt.settings.blobs_path().join("tmp"))?.collect();
     assert!(left.is_empty(), "{left:?}");

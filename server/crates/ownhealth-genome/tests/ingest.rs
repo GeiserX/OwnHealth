@@ -58,7 +58,10 @@ async fn import_stores_facts_coverage_and_raw_file_pointers() -> R {
         (Some("2026-09"), "OwnGenome 1.4.2")
     );
     assert!(src.starts_with("src_gd_"));
-    assert!(e.blobs.exists(&vcf) && e.blobs.exists(&tbi));
+    assert!(
+        e.blobs.exists(ownhealth_core::blobs::BlobOwner::Profile(alex), &vcf)
+            && e.blobs.exists(ownhealth_core::blobs::BlobOwner::Profile(alex), &tbi)
+    );
     let n_cov: i64 = sqlx::query_scalar("select count(*) from genome_coverage where dataset_id = $1")
         .bind(ds_id)
         .fetch_one(&mut *c)
