@@ -11,14 +11,24 @@
 //!
 //! pg_dump and pg_restore come from PATH, or from the directory in OWNHEALTH_PG_BINDIR. They read and
 //! write only stdin and stdout, so a wrapper that runs them in another container works too.
+//!
+//! The audit chain head (migrations/1250_audit_chain.sql) leaves the database with every backup: the
+//! manifest records the newest link (`audit_chain`: seq, hash, and what `verify_chain` found), and
+//! the backup writes the same seq and hash to `<OWNHEALTH_ANCHOR_DIR>/audit-head.json`. Before it
+//! dumps anything, the backup checks that link N of the live chain still has the hash H the previous
+//! anchor holds, and refuses when it does not. A database owner can edit a row and hash the chain
+//! again from there, and `verify_chain` then passes; that check is what catches it. The first backup
+//! finds no anchor, checks nothing and writes one. The audit page runs the same check
+//! (`audit_status`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use chrono::{NaiveDate, SecondsFormat, Utc};
+use ownhealth_core::audit::{ChainBreakKind, ChainCheck, verify_chain};
 use ownhealth_core::config::Settings;
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
@@ -28,6 +38,8 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 pub const MANIFEST_SCHEMA: &str = "ownhealth.backup/v1";
+pub const ANCHOR_SCHEMA: &str = "ownhealth.audit-anchor/v1";
+const ANCHOR_FILE: &str = "audit-head.json";
 
 /// A backup or restore step failed; the message says which and why (Python's `OpsError`).
 fn ops_error(msg: impl Into<String>) -> Error {
@@ -301,7 +313,192 @@ fn owner_only(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+// ------------------------------------------------------------------ audit anchor ----
+
+/// The head a backup anchored: link `seq` of the audit chain had hash `hash` at `at`. Seq 0 is the
+/// empty chain, which every chain extends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Anchor {
+    seq: i64,
+    hash: Vec<u8>,
+    at: String,
+}
+
+fn anchor_file(settings: &Settings) -> PathBuf {
+    settings.anchor_path().join(ANCHOR_FILE)
+}
+
+fn anchor_unreadable(path: &Path, why: &str) -> Error {
+    ops_error(format!(
+        "cannot read the audit anchor {}: {why}. Put back the copy you keep, or move this file aside \
+         (keep it) so the next backup anchors the log as it is now",
+        path.display()
+    ))
+}
+
+/// None only when no backup has written one yet. Anything else that is not a valid anchor is an
+/// error, never "no anchor yet": a damaged file must not silently restart the anchoring.
+fn read_anchor(path: &Path) -> Result<Option<Anchor>> {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anchor_unreadable(path, &e.to_string())),
+    };
+    let v: Value = serde_json::from_slice(&bytes).map_err(|e| anchor_unreadable(path, &e.to_string()))?;
+    let seq = v["seq"].as_i64().filter(|s| *s >= 0);
+    let hash = v["hash"]
+        .as_str()
+        .and_then(|h| hex::decode(h).ok())
+        .filter(|h| h.len() == 32);
+    match (v["schema"].as_str(), seq, hash) {
+        (Some(ANCHOR_SCHEMA), Some(seq), Some(hash)) => Ok(Some(Anchor {
+            seq,
+            hash,
+            at: v["at"].as_str().unwrap_or_default().to_string(),
+        })),
+        _ => Err(anchor_unreadable(path, &format!("it is not an {ANCHOR_SCHEMA} file"))),
+    }
+}
+
+/// Replace the anchor in `dir` atomically: a new file only the owner may read (0600, in a 0700
+/// folder), written and synced under a temporary name, then renamed over the old one and the folder
+/// synced. A crash leaves the old anchor or the new one, never half of either.
+fn write_anchor(dir: &Path, a: &Anchor) -> Result<()> {
+    let body = serde_json::to_string_pretty(&json!({
+        "schema": ANCHOR_SCHEMA,
+        "seq": a.seq,
+        "hash": hex::encode(&a.hash),
+        "at": a.at,
+    }))? + "\n";
+    let tmp = dir.join(format!(".{ANCHOR_FILE}.{}.tmp", ownhealth_core::ids::token_hex(6)));
+    let written = (|| -> std::io::Result<()> {
+        fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&tmp, dir.join(ANCHOR_FILE))?;
+        #[cfg(unix)]
+        fs::File::open(dir)?.sync_all()?; // the rename is on disk only once the folder is
+        Ok(())
+    })();
+    written.map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        ops_error(format!("cannot write the audit anchor in {}: {e}", dir.display()))
+    })
+}
+
+/// The hash link `seq` holds in this snapshot, if the link is there.
+async fn link_hash(conn: &mut PgConnection, seq: i64) -> Result<Option<Vec<u8>>> {
+    Ok(
+        sqlx::query_scalar("select hash from only public.audit_chain where seq = $1")
+            .bind(seq)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
+/// Link `a.seq` still holds the hash the anchor kept. A rewrite at or before it changes that hash
+/// (each link hashes the one before it), and so does removing it.
+async fn anchor_holds(conn: &mut PgConnection, a: &Anchor) -> Result<bool> {
+    if a.seq == 0 {
+        return Ok(true);
+    }
+    Ok(link_hash(conn, a.seq).await?.as_deref() == Some(a.hash.as_slice()))
+}
+
+fn anchor_mismatch(path: &Path, a: &Anchor) -> Error {
+    ops_error(format!(
+        "backup refused: the audit log no longer matches the head the last backup anchored ({}): \
+         entry {} is gone or holds another hash. Someone with database owner rights rewrote the log, \
+         or the database was restored from an older backup. Find out which first (the audit page \
+         shows it). Then move {} aside and keep it: the next backup anchors the log as it is now",
+        a.at,
+        a.seq,
+        path.display()
+    ))
+}
+
+fn break_kind(k: ChainBreakKind) -> &'static str {
+    match k {
+        ChainBreakKind::MissingLink => "missing_link",
+        ChainBreakKind::PrevHash => "prev_hash",
+        ChainBreakKind::MissingEvent => "missing_event",
+        ChainBreakKind::Hash => "hash",
+        ChainBreakKind::Unlinked => "unlinked",
+    }
+}
+
+/// What `verify_chain` found and the newest link, in one snapshot: the manifest's `audit_chain`.
+async fn chain_facts(conn: &mut PgConnection) -> Result<(ChainCheck, Option<(i64, Vec<u8>)>)> {
+    let check = verify_chain(&mut *conn).await?;
+    let last = sqlx::query_as("select seq, hash from only public.audit_chain order by seq desc limit 1")
+        .fetch_optional(&mut *conn)
+        .await?;
+    Ok((check, last))
+}
+
+fn chain_json(check: &ChainCheck, last: Option<&(i64, Vec<u8>)>) -> Value {
+    json!({
+        "seq": last.map_or(0, |l| l.0),
+        "hash": last.map(|l| hex::encode(&l.1)),
+        "verified": check.verified,
+        "broken": check.broken.as_ref().map(|b| json!({"seq": b.seq, "event_id": b.event_id, "kind": break_kind(b.kind)})),
+    })
+}
+
+/// The audit page's state of the log (`GET /api/audit/chain`): how far `verify_chain` holds, the
+/// first link that does not, and whether the head the last backup anchored is still in the chain.
+/// The anchor's hash and path stay out: the page only needs the verdict.
+pub async fn audit_status(settings: &Settings, conn: &mut PgConnection) -> Result<Value> {
+    let (verified, broken) = match verify_chain(&mut *conn).await {
+        Ok(c) => (
+            c.verified,
+            c.broken.map(|b| json!({"seq": b.seq, "kind": break_kind(b.kind)})),
+        ),
+        Err(Error::AuditUncheckable(why)) => {
+            tracing::warn!("audit chain: {why}");
+            (0, Some(json!({"seq": null, "kind": "uncheckable"})))
+        }
+        Err(e) => return Err(e),
+    };
+    let anchor = match read_anchor(&anchor_file(settings)) {
+        Ok(None) => json!({"state": "none", "seq": null, "at": null}),
+        Ok(Some(a)) => {
+            let state = if anchor_holds(&mut *conn, &a).await? {
+                "ok"
+            } else {
+                "mismatch"
+            };
+            json!({"state": state, "seq": a.seq, "at": a.at})
+        }
+        Err(e) => {
+            tracing::warn!("{e}");
+            json!({"state": "unreadable", "seq": null, "at": null})
+        }
+    };
+    let ok = broken.is_none() && matches!(anchor["state"].as_str(), Some("none" | "ok"));
+    Ok(json!({"ok": ok, "verified": verified, "broken": broken, "anchor": anchor}))
+}
+
 /// Write a consistent backup directory at `dest` (must be missing or empty). Returns `dest`.
+///
+/// It refuses, before it writes anything, when the previous anchor no longer holds (see the module
+/// doc), or cannot be read. A chain that `verify_chain` finds broken does not stop it: a broken link
+/// stays broken, so refusing would stop every later backup of the health data. The manifest records
+/// the break, the audit page shows it, and the anchor pins the chain as it is from then on.
 pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     if dest.exists() && fs::read_dir(dest)?.next().is_some() {
         return Err(ops_error(format!("{} is not empty", dest.display())));
@@ -309,33 +506,52 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     fs::create_dir_all(dest)?;
     owner_only(dest)?;
     let url = settings.sqlx_url();
+    let anchor_path = anchor_file(settings);
+    let anchored = read_anchor(&anchor_path)?;
     let mut conn = PgConnection::connect(&url).await?;
-    sqlx::raw_sql("begin isolation level repeatable read")
-        .execute(&mut conn)
-        .await?;
-    // pg_dump reads the snapshot this transaction exported, so the dump, the counts and the state
-    // hashes all describe the same instant even while the app keeps writing.
+    let mut tx = conn.begin_with("begin isolation level repeatable read").await?;
+    // pg_dump reads the snapshot this transaction exported, so the dump, the counts, the state
+    // hashes and the audit head all describe the same instant even while the app keeps writing.
     let snapshot: String = sqlx::query_scalar("select pg_export_snapshot()")
-        .fetch_one(&mut conn)
+        .fetch_one(&mut *tx)
         .await?;
+    // Neither audit table can be renamed, swapped or altered until the backup ends.
+    sqlx::raw_sql("lock table public.audit_event, public.audit_chain in access share mode")
+        .execute(&mut *tx)
+        .await?;
+    if let Some(a) = &anchored
+        && !anchor_holds(&mut tx, a).await?
+    {
+        return Err(anchor_mismatch(&anchor_path, a));
+    }
+    let (chain, last) = chain_facts(&mut tx).await?;
+    if let Some(b) = &chain.broken {
+        let at = b
+            .seq
+            .map_or_else(|| "an entry with no link".to_string(), |s| format!("entry {s}"));
+        tracing::warn!(
+            "the audit log is broken at {at} ({}): the backup goes on and its manifest records it",
+            break_kind(b.kind)
+        );
+    }
     let out = fs::File::create(dest.join("db.dump"))?;
     let mut cmd = pg_command("pg_dump", dump_args(&url, &snapshot))?;
     let dump = cmd.stdout(out).stderr(Stdio::piped()).spawn()?;
     let facts = async {
-        let referenced = referenced_blobs(&mut conn).await?;
+        let referenced = referenced_blobs(&mut tx).await?;
         let migrations: Vec<i32> = sqlx::query_scalar("select version from schema_migrations order by 1")
-            .fetch_all(&mut conn)
+            .fetch_all(&mut *tx)
             .await?;
-        let tables = table_counts(&mut conn).await?;
+        let tables = table_counts(&mut tx).await?;
         let as_of = Utc::now().date_naive();
-        let states = state_hashes(&mut conn, as_of).await?;
+        let states = state_hashes(&mut tx, as_of).await?;
         Ok::<_, Error>((referenced, migrations, tables, as_of, states))
     }
     .await;
     // The dump must finish before the exporting transaction ends, whatever the facts did.
     let done = dump.wait_with_output().await?;
     // build_state may store snapshots; the backup leaves the database as it was.
-    sqlx::raw_sql("rollback").execute(&mut conn).await?;
+    tx.rollback().await?;
     conn.close().await?;
     let (referenced, migrations, tables, as_of, states) = facts?;
     if !done.status.success() {
@@ -356,9 +572,11 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     for p in files.values() {
         bytes += fs::metadata(p)?.len();
     }
+    let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false);
     let manifest = json!({
         "schema": MANIFEST_SCHEMA,
-        "created_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false),
+        "created_at": created_at,
+        "audit_chain": chain_json(&chain, last.as_ref()),
         "app_version": env!("CARGO_PKG_VERSION"),
         "migrations": migrations,
         "rules_version": ownhealth_rules::rules_version()?,
@@ -375,6 +593,16 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     let text = serde_json::to_string_pretty(&sort_keys(manifest))? + "\n";
     fs::write(dest.join("manifest.json"), text)?;
     owner_only(dest)?;
+    // Last, once the backup is whole: the next backup checks the live chain against this head.
+    let (seq, hash) = last.unwrap_or((0, vec![0; 32]));
+    write_anchor(
+        &settings.anchor_path(),
+        &Anchor {
+            seq,
+            hash,
+            at: created_at,
+        },
+    )?;
     Ok(dest.to_path_buf())
 }
 
@@ -448,12 +676,29 @@ async fn compare(url: &str, manifest: &Value, blob_root: &Path) -> Result<Value>
     let as_of_text = manifest["as_of"].as_str().unwrap_or_default();
     let as_of = NaiveDate::parse_from_str(as_of_text, "%Y-%m-%d")
         .map_err(|e| ops_error(format!("bad as_of {as_of_text:?} in the manifest: {e}")))?;
+    // A backup from before the chain has no head to compare (older manifests, the upgrade fixtures).
+    let expected_chain = manifest.get("audit_chain").filter(|v| v.is_object());
     let mut conn = PgConnection::connect(url).await?;
     let mut tx = conn.begin().await?;
     let counts = table_counts(&mut tx).await?; // before build_state, which may add state_snapshot rows
+    let actual_chain = match expected_chain {
+        Some(_) => {
+            let (check, last) = chain_facts(&mut tx).await?;
+            Some(chain_json(&check, last.as_ref()))
+        }
+        None => None,
+    };
     let states = state_hashes(&mut tx, as_of).await?;
     tx.commit().await?;
     conn.close().await?;
+    // The restored chain must end at the head the backup recorded, and hold as far as it did then.
+    let audit = match (expected_chain, actual_chain) {
+        (Some(e), Some(a)) => {
+            let ok = ["seq", "hash", "verified"].iter().all(|k| e[k] == a[k]);
+            json!({"expected": e, "actual": a, "ok": ok})
+        }
+        _ => Value::Null,
+    };
 
     let mut tables = Map::new();
     if let Some(expected) = manifest["tables"].as_object() {
@@ -482,8 +727,16 @@ async fn compare(url: &str, manifest: &Value, blob_root: &Path) -> Result<Value>
     let ok = tables.is_empty()
         && profiles.values().all(|p| p["ok"] == json!(true))
         && blobs["missing"].as_array().is_some_and(Vec::is_empty)
-        && blobs["corrupt"].as_array().is_some_and(Vec::is_empty);
-    Ok(json!({"ok": ok, "as_of": as_of_text, "tables": tables, "profiles": profiles, "blobs": blobs}))
+        && blobs["corrupt"].as_array().is_some_and(Vec::is_empty)
+        && (audit.is_null() || audit["ok"] == json!(true));
+    Ok(json!({
+        "ok": ok,
+        "as_of": as_of_text,
+        "tables": tables,
+        "profiles": profiles,
+        "blobs": blobs,
+        "audit_chain": audit,
+    }))
 }
 
 /// Load a backup into the configured, empty database and blob directory, then check it.

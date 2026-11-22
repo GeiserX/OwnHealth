@@ -67,6 +67,45 @@ async fn cli_verify_restore_exits_non_zero_on_a_mismatch() -> R {
     Ok(())
 }
 
+/// The audit anchor seen from cron: once the database owner has edited an entry and hashed the log
+/// again, `ownhealth backup` exits 1 with one line that says why, and writes no backup.
+#[tokio::test]
+async fn cli_backup_exits_non_zero_when_the_anchored_head_no_longer_matches() -> R {
+    let dir = tempfile::tempdir()?;
+    let (db, s) = seeded(dir.path()).await?;
+    let mut c = db.pool.acquire().await?;
+    let read = ownhealth_core::audit::AuditEvent::new("system", "job", "read");
+    ownhealth_core::audit::write_audit(&mut c, &read).await?;
+    drop(c);
+    let first = dir.path().join("b1");
+    let out = ownhealth(&s, &["backup", &first.display().to_string()])?;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(s.anchor_path().join("audit-head.json").is_file());
+    sqlx::raw_sql(
+        "alter table audit_event disable trigger user; alter table audit_chain disable trigger user; \
+         update audit_event set tool = 'rewritten' where id = (select min(id) from audit_event); \
+         do $$ declare c record; prev bytea := decode(repeat('00', 32), 'hex'); h bytea; begin \
+           for c in select seq, event_id from audit_chain order by seq loop \
+             select sha256(prev || oh_audit_row_v1(e)) into h from audit_event e where e.id = c.event_id; \
+             update audit_chain set prev_hash = prev, hash = h where seq = c.seq; \
+             prev := h; \
+           end loop; end $$; \
+         alter table audit_event enable trigger user; alter table audit_chain enable trigger user",
+    )
+    .execute(&db.pool)
+    .await?;
+    let second = dir.path().join("b2");
+    let out = ownhealth(&s, &["backup", &second.display().to_string()])?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("error: backup refused: the audit log no longer matches"),
+        "{stderr}"
+    );
+    assert!(!second.join("manifest.json").exists());
+    Ok(())
+}
+
 #[tokio::test]
 async fn cli_reads_the_database_url_from_its_file() -> R {
     let dir = tempfile::tempdir()?;

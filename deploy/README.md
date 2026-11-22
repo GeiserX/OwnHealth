@@ -159,9 +159,11 @@ A push inbox has no schedule, so OwnHealth never marks it stale; the second rule
 
 - `db.dump`: `pg_dump -Fc` of the database.
 - `blobs/`: the original documents and genome files, hard-linked from the data volume, so the staging copy costs no space.
-- `manifest.json`: app version, migrations, row count per table, the list of blob hashes and the `state_hash` of every profile.
+- `manifest.json`: app version, migrations, row count per table, the list of blob hashes, the `state_hash` of every profile, and the head of the audit log (`audit_chain`: the number and hash of its newest entry, and how far the hash chain holds).
 
-The dump, the row counts and the state hashes come from one database snapshot. A backup taken while someone imports a lab report is still consistent.
+The dump, the row counts, the state hashes and the audit head come from one database snapshot. A backup taken while someone imports a lab report is still consistent.
+
+**The audit anchor.** Each backup also writes the audit head to `audit-head.json`, outside the database: in `OWNHEALTH_ANCHOR_DIR`, or `/data/anchor` on the data volume by default. The file is replaced atomically and only its owner can read it. The next backup first checks that this entry of the live log still has the same hash. Someone with the database owner's rights can edit an entry and hash the whole log again, so that the log checks out on its own; the anchor catches that. When the check fails, the backup stops before it writes anything and exits 1 with the entry it expected, and the audit page on MCP & access shows the mismatch. Find out what changed first. If you restored an older backup onto the same data volume, that explains it. Then move `audit-head.json` aside and keep it as evidence: the next backup anchors the log as it is now. The first backup finds no anchor, checks nothing, and writes one. A log the page already shows as broken does not stop the backups; the manifest records the break.
 
 `restic/backup.sh` writes that directory, takes one restic snapshot of it, deletes the staging copy and applies retention (7 daily, 5 weekly, 12 monthly; set `OWNHEALTH_RESTIC_KEEP` to change it). restic encrypts and deduplicates, so a nightly run only uploads what changed.
 
@@ -183,7 +185,7 @@ A backup that was never restored counts as missing. `restic/restore-test.sh` pro
 
 1. restic restores the snapshot into `/data/backups/restore`.
 2. `ownhealth verify-restore` loads the dump into a scratch database `<db>_restore_check`.
-3. It compares the row count of every table with the manifest, hashes every blob again, rebuilds the state of every profile and compares each `state_hash` with the manifest.
+3. It compares the row count of every table with the manifest, hashes every blob again, rebuilds the state of every profile and compares each `state_hash` with the manifest. It checks the restored audit log too: it must end at the head the manifest recorded, and hold as far as it held then.
 4. It drops the scratch database and the restored files.
 
 It prints a JSON report and exits 1 on any difference.

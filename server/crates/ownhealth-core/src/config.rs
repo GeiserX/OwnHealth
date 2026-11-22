@@ -55,6 +55,9 @@ pub struct Settings {
     /// of the app. Only a request whose direct peer is one of them has its `X-Forwarded-For` read for
     /// the client address. Empty: the peer address is the client address.
     pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// `OWNHEALTH_ANCHOR_DIR`: where each backup writes the audit chain head it anchored, outside the
+    /// database (ownhealth-ops backup.rs). Unset: `<data_dir>/anchor`.
+    pub anchor_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -84,6 +87,7 @@ impl Default for Settings {
             inbox_dir: None,
             share_url: None,
             trusted_proxies: Vec::new(),
+            anchor_dir: None,
         }
     }
 }
@@ -113,6 +117,7 @@ impl fmt::Debug for Settings {
             .field("inbox_dir", &self.inbox_dir)
             .field("share_url", &self.share_url)
             .field("trusted_proxies", &self.trusted_proxies)
+            .field("anchor_dir", &self.anchor_dir)
             .finish_non_exhaustive()
     }
 }
@@ -326,11 +331,17 @@ impl Settings {
             inbox_dir: env_or(env, "INBOX_DIR")?.map(PathBuf::from),
             share_url: env_or(env, "SHARE_URL")?.map(|u| check_share_url(&u)).transpose()?,
             trusted_proxies: parse_trusted_proxies(&env_or(env, "TRUSTED_PROXIES")?.unwrap_or_default())?,
+            anchor_dir: env_or(env, "ANCHOR_DIR")?.map(PathBuf::from),
         })
     }
 
     pub fn blobs_path(&self) -> PathBuf {
         self.blob_dir.clone().unwrap_or_else(|| self.data_dir.join("blobs"))
+    }
+
+    /// The folder of the audit anchor file: `OWNHEALTH_ANCHOR_DIR`, or `<data_dir>/anchor`.
+    pub fn anchor_path(&self) -> PathBuf {
+        self.anchor_dir.clone().unwrap_or_else(|| self.data_dir.join("anchor"))
     }
 
     /// The URL for sqlx: `postgresql+psycopg://` (accepted by the Python app) becomes `postgresql://`.

@@ -21,7 +21,7 @@ pub mod next_draw_pdf;
 pub mod shl;
 pub mod summary_pdf;
 
-pub use backup::{MANIFEST_SCHEMA, backup, restore, verify_restore};
+pub use backup::{MANIFEST_SCHEMA, audit_status, backup, restore, verify_restore};
 pub use demo_base::{demo_label_png, seed_base, seed_family, seed_supplements};
 
 use ownhealth_core::demo;
