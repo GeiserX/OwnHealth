@@ -58,10 +58,14 @@ pub enum BlobError {
     Io(#[from] io::Error),
 }
 
+/// What a caller hears when a stored file is gone. The REST layer answers it with its own code,
+/// `blob_missing` (HTTP 404), so a page says it in the person's language.
+pub const MISSING_FILE: &str = "A stored file is missing.";
+
 impl From<BlobError> for crate::Error {
     fn from(e: BlobError) -> Self {
         match e {
-            BlobError::NotFound => crate::Error::NotFound("A stored file is missing.".into()),
+            BlobError::NotFound => crate::Error::NotFound(MISSING_FILE.into()),
             BlobError::BadHash => crate::Error::Invalid("not a sha256 hex digest".into()),
             BlobError::BadName(n) => crate::Error::Invalid(format!("not a plain file name: {n:?}")),
             BlobError::Key(k) => k.into(),

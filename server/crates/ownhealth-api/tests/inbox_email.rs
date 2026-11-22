@@ -569,7 +569,8 @@ async fn a_backup_taken_while_a_held_mail_is_released_keeps_the_mail_and_restore
     Ok(())
 }
 
-/// A release that finds the held message's file gone answers 404 without naming the file's hash.
+/// A release that finds the held message's file gone answers 404 `blob_missing` without naming the
+/// file's hash.
 #[tokio::test]
 async fn a_release_whose_stored_message_is_gone_names_no_hash() -> R {
     let env = env().await?;
@@ -598,6 +599,8 @@ async fn a_release_whose_stored_message_is_gone_names_no_hash() -> R {
         )
         .await?;
     assert_eq!(r.status, StatusCode::NOT_FOUND, "{:?}", r.json);
+    // a code of its own, so a page says it in the person's language instead of the server's English
+    assert_eq!(r.json["detail"]["code"], "blob_missing", "{:?}", r.json);
     let body = r.json.to_string();
     assert!(!body.contains(&sha), "the answer names the file's hash: {body}");
     assert!(!body.contains(&sha[..12]), "the answer names the file's hash: {body}");

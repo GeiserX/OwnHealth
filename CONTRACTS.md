@@ -15,8 +15,8 @@ so older references keep pointing at the right section.
 
 All routes are under `/api`, JSON, and resolve `{p}` as a profile slug, `me` or a uuid through
 `core::access::require`. Errors are `{"detail": {"code": ..., "message": ..., ...}}`: 401 `unauthenticated`,
-403 `forbidden` with the missing scope or action, 404 `profile_not_granted` (with `allowed` slugs) or
-`unknown`, 409 for lifecycle and review conflicts, 415 `unsupported_upload`. A router module is
+403 `forbidden` with the missing scope or action, 404 `profile_not_granted` (with `allowed` slugs),
+`blob_missing` (the row is there, its stored file is not) or `unknown`, 409 for lifecycle and review conflicts, 415 `unsupported_upload`. A router module is
 `server/crates/ownhealth-api/src/routes/<file>.rs` with a `router()` that `routes.rs` merges.
 
 `lang`, on every route that takes it, is a registry language (`ownhealth_core::langs::LANGS`, today

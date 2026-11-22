@@ -267,6 +267,7 @@ Error mapping (`ApiError::from(core::Error)`), the same codes FastAPI answered:
 | `Review`, `Lifecycle`, `Provenance` | 409 | `conflict` |
 | `Upload` | 415 | `unsupported_upload` |
 | `Invalid` | 422 | `invalid` (a route that must match FastAPI's 422 body builds it itself) |
+| `NotFound` with `blobs::MISSING_FILE` (a row whose stored file is gone) | 404 | `blob_missing` |
 | `NotFound` | 404 | `unknown` |
 | anything else | 500 | `internal` (logged) |
 | no caller | 401 | `unauthenticated` |
