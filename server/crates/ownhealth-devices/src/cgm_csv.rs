@@ -33,7 +33,8 @@
 //! current one (`data/tz/backward`), since the Debian Postgres image ships only current names. A name
 //! Postgres knows keeps that name, so the line that says which zone read the file names the zone the
 //! person is in (`Europe/Oslo`, which the tz database links to `Europe/Berlin`). Two names the tz
-//! database links are one zone: the same file uploaded again under the other name replaces nothing. A zone
+//! database links are one zone: the same file uploaded again under the other name replaces nothing,
+//! and its result names the zone the file keeps. A zone
 //! Postgres does not know by either name is no zone; it never refuses an upload. With neither zone, a
 //! time is read as UTC and keeps no offset: the rule the PDF and FHIR importers apply to a time without
 //! an offset. The zone used is a property of the file
@@ -948,10 +949,19 @@ async fn import_in(
     // two names the tz database links (an old name and its current one, or a zone merged into another)
     // are one zone: the same rules since 1970
     let same = |z: &str| zone_link_target(z).unwrap_or(z).to_string();
-    let (zone, replace): (Option<String>, bool) = match (read, &before) {
-        (Read::Upload(Some(z)), Some(b)) => (Some(z.to_string()), b.as_deref().map(same) != Some(same(z))),
-        (Read::Upload(None) | Read::Again(_), Some(b)) => (b.clone(), false),
-        (Read::Upload(z) | Read::Again(z), None) => (z.map(str::to_string), false),
+    // `named` is the zone the result names: the file's own, when an upload sends another name of it
+    let (zone, replace, named): (Option<String>, bool, Option<String>) = match (read, &before) {
+        (Read::Upload(Some(z)), Some(b)) => {
+            let replace = b.as_deref().map(same) != Some(same(z));
+            // read in the name Postgres knows now, whichever name the file was read under before
+            (
+                Some(z.to_string()),
+                replace,
+                if replace { Some(z.to_string()) } else { b.clone() },
+            )
+        }
+        (Read::Upload(None) | Read::Again(_), Some(b)) => (b.clone(), false, b.clone()),
+        (Read::Upload(z) | Read::Again(z), None) => (z.map(str::to_string), false, z.map(str::to_string)),
     };
     // imported before (the same file uploaded again): read again, and every reading counts as stored
     let again = !replace && flags.get("import").is_some_and(Value::is_object);
@@ -1051,7 +1061,7 @@ async fn import_in(
         "devices": parsed.devices.iter().map(|d| d.name.clone()).collect::<Vec<_>>(),
         "unknown_columns": parsed.unknown_columns,
         "other_rows": parsed.other_rows,
-        "timezone": zone,
+        "timezone": named,
         "again": again,
     });
     if replace {

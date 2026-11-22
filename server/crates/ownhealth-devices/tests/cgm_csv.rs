@@ -837,6 +837,8 @@ async fn a_zone_postgres_knows_keeps_its_name_and_its_other_names_replace_nothin
     let result = upload_in_zone(&env, "lucia", "clarity.csv", &bytes, "Europe/Berlin").await?;
     assert_eq!(result["cgm_csv"].get("replaced"), None, "{result}");
     assert_eq!(result["reasons"]["duplicate"], json!(8), "{result}");
+    // and the result names the zone the file keeps, as the document screen beside it does
+    assert_eq!(result["cgm_csv"]["timezone"], json!("Europe/Oslo"), "{result}");
     // an export saved under an old name Postgres no longer ships (an install whose Postgres knew it),
     // uploaded again under the current one: the same zone, nothing is replaced
     let result = upload_in_zone(&env, "sam", "clarity.csv", &bytes, "Asia/Kolkata").await?;
@@ -849,6 +851,7 @@ async fn a_zone_postgres_knows_keeps_its_name_and_its_other_names_replace_nothin
     .await?;
     let result = upload_in_zone(&env, "sam", "clarity.csv", &bytes, "Asia/Kolkata").await?;
     assert_eq!(result["cgm_csv"].get("replaced"), None, "{result}");
+    assert_eq!(result["cgm_csv"]["timezone"], json!("Asia/Calcutta"), "{result}");
     assert_eq!(result["reasons"]["duplicate"], json!(8), "{result}");
     assert_eq!(readings(&env, "sam").await?.len(), 8);
     Ok(())
