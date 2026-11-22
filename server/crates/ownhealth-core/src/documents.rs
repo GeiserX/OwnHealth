@@ -189,9 +189,33 @@ fn short_filename(f: Option<&str>) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// The lock an upload of `sha256` for `profile` takes shared ([`create_document`], held until its
+/// transaction ends) and the removal of that profile's copy of the bytes takes exclusive
+/// (`ownhealth_auth::household::drop_moved_copies`): the removal never runs while an upload that names
+/// the same bytes is in flight, and it sees the upload's row once it commits.
+pub async fn lock_blob(conn: &mut PgConnection, profile: Uuid, sha256: &str, shared: bool) -> Result<()> {
+    let sql = if shared {
+        "select pg_advisory_xact_lock_shared(hashtextextended($1, 0))"
+    } else {
+        "select pg_advisory_xact_lock(hashtextextended($1, 0))"
+    };
+    sqlx::query(sql)
+        .bind(format!(
+            "ownhealth.blob:{}:{}",
+            profile.simple(),
+            sha256.to_ascii_lowercase()
+        ))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Insert a document or return the existing one for the same profile and bytes.
 pub async fn create_document(conn: &mut PgConnection, d: &NewDocument<'_>) -> Result<DocumentRef> {
     let sha = sha256_hex_to_bytes(d.blob_sha256)?;
+    if let Some(p) = d.profile_id {
+        lock_blob(&mut *conn, p, d.blob_sha256, true).await?;
+    }
     let row: Option<(Uuid, String)> = sqlx::query_as(
         "select id, status from document where coalesce(profile_id, household_id) = coalesce($1, $2) and blob_sha256 = $3",
     )
@@ -454,10 +478,28 @@ pub struct Moved {
     pub shas: Vec<String>,
 }
 
+/// The job that removes a moved document's copies under the profile it left. [`rekey_document`] queues
+/// it in the move's transaction, so a crash or an error after the commit leaves it to a retry.
+pub const DROP_MOVED_JOB: &str = "blobs.drop_moved";
+
+/// Lock document `document_id`'s row for a move, and return the profile it has now (None: no profile,
+/// or no such document). A move reads the owner here, before its permission check and its re-key, so
+/// two moves at once see each other's result.
+pub async fn lock_owner(conn: &mut PgConnection, document_id: Uuid) -> Result<Option<Uuid>> {
+    Ok(
+        sqlx::query_scalar::<_, Option<Uuid>>("select profile_id from document where id = $1 for update")
+            .bind(document_id)
+            .fetch_optional(conn)
+            .await?
+            .flatten(),
+    )
+}
+
 /// After document `document_id` moved from profile `from` to `to` (`None`: no profile): every blob of
 /// the document (the file, its page layers and images, its OCR layers) is stored for `to` as well, so
-/// the new profile's key opens them. Run it in the transaction of the move, before the commit: the
-/// re-import the move queues reads them as `to`'s.
+/// the new profile's key opens them, and the removal of `from`'s copies is queued
+/// ([`DROP_MOVED_JOB`]). Run it in the transaction of the move, with `from` read under the document's
+/// row lock, before the commit: the re-import the move queues reads them as `to`'s.
 pub async fn rekey_document(
     conn: &mut PgConnection,
     blobs: &BlobStore,
@@ -483,7 +525,7 @@ pub async fn rekey_document(
     .await?;
     let new = BlobOwner::of_document(to, document_id);
     let blobs = blobs.clone();
-    tokio::task::spawn_blocking(move || {
+    let moved = tokio::task::spawn_blocking(move || {
         for sha in &shas {
             match blobs.rekey(old, new, sha) {
                 Ok(_) => {}
@@ -497,7 +539,22 @@ pub async fn rekey_document(
         Ok(Moved { from: old, shas })
     })
     .await
-    .map_err(|e| Error::Other(anyhow::anyhow!("blob re-key task failed: {e}")))?
+    .map_err(|e| Error::Other(anyhow::anyhow!("blob re-key task failed: {e}")))??;
+    if let (BlobOwner::Profile(p), false) = (moved.from, moved.shas.is_empty()) {
+        let household: Uuid = sqlx::query_scalar("select household_id from document where id = $1")
+            .bind(document_id)
+            .fetch_one(&mut *conn)
+            .await?;
+        // the household, so a retry that runs out of attempts shows in its review queue
+        enqueue(
+            &mut *conn,
+            DROP_MOVED_JOB,
+            &json!({"household_id": household, "profile_id": p, "document_id": document_id, "blobs": moved.shas}),
+            EnqueueOptions::default(),
+        )
+        .await?;
+    }
+    Ok(moved)
 }
 
 #[cfg(test)]

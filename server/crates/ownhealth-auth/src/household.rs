@@ -15,8 +15,9 @@ use ownhealth_core::access::{
 };
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::blobs::{BlobOwner, BlobStore, sha256_hex_to_bytes};
-use ownhealth_core::documents::Moved;
+use ownhealth_core::documents::{DROP_MOVED_JOB, Moved, lock_blob};
 use ownhealth_core::jobs::{EnqueueOptions, HandlerResult, Job, JobContext, JobError, enqueue, register_handler};
+use ownhealth_core::keys;
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
 use sqlx::{AssertSqlSafe, Connection, PgConnection};
@@ -639,7 +640,9 @@ fn owned(table: &str) -> &'static str {
 pub const UNLINK_JOB: &str = "blobs.unlink";
 /// Blob columns that never belong to one profile, so a profile delete leaves them alone. None yet.
 pub const HOUSEHOLD_BLOB_COLUMNS: &[(&str, &str)] = &[];
-const KEEP: [&str; 3] = ["profile", "profile_grant", "audit_event"];
+/// `profile_key` is not deleted but shredded (`keys::shred`), so a key write that races the delete
+/// refuses instead of making a new key.
+const KEEP: [&str; 4] = ["profile", "profile_grant", "audit_event", "profile_key"];
 
 /// Every table with a profile_id column (other lanes add their own), minus the ones we keep.
 async fn profile_tables(conn: &mut PgConnection) -> Result<Vec<String>> {
@@ -669,34 +672,44 @@ async fn profile_blobs(conn: &mut PgConnection, profile_id: Uuid) -> Result<BTre
 
 /// Once a document's move committed: the copies of its files stored for the profile it left, unless
 /// a row of that profile still names the same bytes. A copy left behind would stay readable under the
-/// old profile's key after the new profile is deleted. Returns how many files went.
+/// old profile's key after the new profile is deleted. Each check and removal holds the lock an upload
+/// of the same bytes to that profile takes (`documents::lock_blob`), so an upload in flight keeps its
+/// file. Returns how many files went. The move queues this as [`DROP_MOVED_JOB`].
 pub async fn drop_moved_copies(conn: &mut PgConnection, blobs: &BlobStore, moved: Moved) -> Result<usize> {
     let BlobOwner::Profile(profile_id) = moved.from else {
         return Ok(0); // a pending item's file is plain: nothing sealed to drop
     };
     let mut gone = 0;
-    'next: for sha in &moved.shas {
-        let bytes = sha256_hex_to_bytes(sha)?;
-        for (table, cols, owned) in BLOB_COLUMNS {
-            let cond: Vec<String> = cols.iter().map(|c| format!("{c} = $2")).collect();
-            let sql = format!(
-                "select 1 from {table} where ({owned}) and ({}) limit 1",
-                cond.join(" or ")
-            );
-            let hit: Option<i32> = sqlx::query_scalar(AssertSqlSafe(sql))
-                .bind(profile_id)
-                .bind(&bytes)
-                .fetch_optional(&mut *conn)
-                .await?;
-            if hit.is_some() {
-                continue 'next;
-            }
-        }
-        if blobs.drop_sealed(moved.from, sha)? {
+    for sha in &moved.shas {
+        let mut tx = conn.begin().await?;
+        lock_blob(&mut tx, profile_id, sha, false).await?;
+        if !held_by(&mut tx, profile_id, sha).await? && blobs.drop_sealed(moved.from, sha)? {
             gone += 1;
         }
+        tx.commit().await?;
     }
     Ok(gone)
+}
+
+/// Whether a row of `profile_id` names the bytes `sha` (any blob column of [`BLOB_COLUMNS`]).
+async fn held_by(conn: &mut PgConnection, profile_id: Uuid, sha: &str) -> Result<bool> {
+    let bytes = sha256_hex_to_bytes(sha)?;
+    for (table, cols, owned) in BLOB_COLUMNS {
+        let cond: Vec<String> = cols.iter().map(|c| format!("{c} = $2")).collect();
+        let sql = format!(
+            "select 1 from {table} where ({owned}) and ({}) limit 1",
+            cond.join(" or ")
+        );
+        let hit: Option<i32> = sqlx::query_scalar(AssertSqlSafe(sql))
+            .bind(profile_id)
+            .bind(&bytes)
+            .fetch_optional(&mut *conn)
+            .await?;
+        if hit.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn still_referenced(conn: &mut PgConnection, sha: &[u8]) -> Result<bool> {
@@ -912,6 +925,11 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
         .await?
         .rows_affected();
     counts.push(("secret".into(), sealed));
+    // The key is shredded, not deleted, in this transaction: a key write that races the delete then
+    // refuses instead of making a new one. Keys a profile create left behind when it rolled back go too.
+    let shredded = keys::shred(&mut *conn, profile_id).await.map_err(Error::from)?;
+    counts.push(("profile_key".into(), shredded));
+    keys::shred_orphans(&mut *conn).await.map_err(Error::from)?;
     sqlx::query("delete from profile where id = $1")
         .bind(profile_id)
         .execute(&mut *conn)
@@ -923,24 +941,21 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
         }
     }
     orphans.sort();
-    // The retry of a file the caller cannot remove after the commit (a busy or read-only disk), queued
-    // here so it commits with the rows: a crash between the commit and the unlinks leaves the job.
-    // The caller trims it to the files that stuck, or drops it when none did.
-    let unlink_job = if orphans.is_empty() {
-        None
-    } else {
-        enqueue(
-            &mut *conn,
-            UNLINK_JOB,
-            // the household, so a retry that runs out of attempts shows in its review queue
-            &json!({"household_id": household_id, "profile_id": profile_id, "blobs": orphans}),
-            EnqueueOptions {
-                run_after: Some(chrono::Utc::now() + chrono::Duration::seconds(60)),
-                ..EnqueueOptions::default()
-            },
-        )
-        .await?
-    };
+    // The retry of a file the caller cannot remove after the commit (a busy or read-only disk), and of
+    // the profile's sealed folder, queued here so it commits with the rows: a crash between the commit
+    // and the unlinks leaves the job. Queued even with no plain file to remove, for the folder. The
+    // caller trims it to the files that stuck, or drops it when none did and the folder went.
+    let unlink_job = enqueue(
+        &mut *conn,
+        UNLINK_JOB,
+        // the household, so a retry that runs out of attempts shows in its review queue
+        &json!({"household_id": household_id, "profile_id": profile_id, "blobs": orphans}),
+        EnqueueOptions {
+            run_after: Some(chrono::Utc::now() + chrono::Duration::seconds(60)),
+            ..EnqueueOptions::default()
+        },
+    )
+    .await?;
     Ok(Deleted {
         household_id,
         unlink_job,
@@ -1009,8 +1024,35 @@ async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {
     Ok(Some(json!({"removed": removed})))
 }
 
+/// [`DROP_MOVED_JOB`]: the copies a moved document left under the profile it left. A failure waits for
+/// the next attempt; each step is safe to repeat.
+async fn drop_moved_job(ctx: JobContext, job: Job) -> HandlerResult {
+    let profile = job.uuid("profile_id")?;
+    let shas: Vec<String> = job
+        .payload
+        .get("blobs")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default();
+    let mut conn = ctx.pool.acquire().await?;
+    let moved = Moved {
+        from: BlobOwner::Profile(profile),
+        shas,
+    };
+    match drop_moved_copies(&mut conn, &ctx.blobs, moved).await {
+        Ok(removed) => Ok(Some(json!({"removed": removed}))),
+        Err(e) => {
+            tracing::warn!(error = %e, "removing a moved document's old copies failed");
+            Err(JobError::retry(
+                "the old copies of a moved document could not be removed yet",
+            ))
+        }
+    }
+}
+
 pub fn register() {
     register_handler(UNLINK_JOB, |ctx, job| Box::pin(unlink_job(ctx, job)));
+    register_handler(DROP_MOVED_JOB, |ctx, job| Box::pin(drop_moved_job(ctx, job)));
 }
 
 /// Slugs of profiles nobody else could manage once this login closes (no other owner or guardian;

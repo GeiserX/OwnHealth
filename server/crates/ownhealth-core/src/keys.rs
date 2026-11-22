@@ -626,7 +626,9 @@ type Stored = (Vec<u8>, Vec<u8>);
 /// its own connection: it never waits on the caller's pool or runtime. It runs once per profile per
 /// process. The row has no foreign key to `profile`: the profile may still be in the caller's open
 /// transaction. `new` is stored only while every stored key was made under the same KEK, so a key
-/// swapped while the app runs cannot add keys the right one never opens.
+/// swapped while the app runs cannot add keys the right one never opens. A deleted profile's row
+/// stays with no key ([`shred`]): the insert waits on a delete still in progress, then finds the row,
+/// so no key is ever made for a deleted profile (None without `new`, an error with it).
 fn side_lookup(
     url: &str,
     profile: Uuid,
@@ -655,11 +657,21 @@ fn side_lookup(
                     .execute(&mut conn)
                     .await?;
                 }
-                let row: Option<(Vec<u8>, Vec<u8>)> =
-                    sqlx::query_as("select wrapped_dek, kek_fingerprint from profile_key where profile_id = $1")
-                        .bind(profile)
-                        .fetch_optional(&mut conn)
-                        .await?;
+                let row: Option<StoredRow> = sqlx::query_as(
+                    // waits for a delete in progress, then reads the row it left
+                    "select wrapped_dek, kek_fingerprint from profile_key where profile_id = $1 for share",
+                )
+                .bind(profile)
+                .fetch_optional(&mut conn)
+                .await?;
+                if matches!(row, Some((None, _) | (_, None))) {
+                    let _ = conn.close().await;
+                    return match new {
+                        Some(_) => Err(KeyError::new("no key could be stored for the profile: it was deleted")),
+                        None => Ok(None),
+                    };
+                }
+                let row = row.and_then(|(w, f)| Some((w?, f?)));
                 if row.is_none() && new.is_some() {
                     let other: bool =
                         sqlx::query_scalar("select exists (select 1 from profile_key where kek_fingerprint <> $1)")
@@ -681,9 +693,45 @@ fn side_lookup(
     lookup.join().map_err(|_| KeyError::new("the key lookup stopped"))?
 }
 
+/// A `profile_key` row as stored: wrapped DEK and fingerprint, both null on a shredded key.
+type StoredRow = (Option<Vec<u8>>, Option<Vec<u8>>);
+
 /// The refusal of a key that is not the one the stored profile keys were made with.
 const WRONG_KEY: &str = "the profile keys were made with another OWNHEALTH_SECRETS_KEY: start with the key this \
      install (or this backup) was made with";
+
+/// Destroy `profile`'s key in the caller's transaction (the profile delete): the row stays with no
+/// key, so a key write that races the delete waits for it and then refuses ([`side_lookup`]). A
+/// profile that never stored a file gets the same row. Returns 1 when a key was there.
+pub async fn shred(conn: &mut PgConnection, profile: Uuid) -> Result<u64, KeyError> {
+    let had: Option<bool> =
+        sqlx::query_scalar("select wrapped_dek is not null from profile_key where profile_id = $1 for update")
+            .bind(profile)
+            .fetch_optional(&mut *conn)
+            .await?;
+    sqlx::query(
+        "insert into profile_key (profile_id) values ($1) \
+         on conflict (profile_id) do update set wrapped_dek = null, kek_fingerprint = null",
+    )
+    .bind(profile)
+    .execute(&mut *conn)
+    .await?;
+    Ok(u64::from(had == Some(true)))
+}
+
+/// Destroy the keys whose profile is gone without a delete (a profile create that rolled back after
+/// its first file), once a day old: a younger one may belong to a profile still in an open
+/// transaction. Returns how many went.
+pub async fn shred_orphans(conn: &mut PgConnection) -> Result<u64, KeyError> {
+    Ok(sqlx::query(
+        "update profile_key k set wrapped_dek = null, kek_fingerprint = null \
+         where k.wrapped_dek is not null and k.created_at < now() - interval '1 day' \
+         and not exists (select 1 from profile p where p.id = k.profile_id)",
+    )
+    .execute(conn)
+    .await?
+    .rows_affected())
+}
 
 /// Refuses a start whose OWNHEALTH_SECRETS_KEY does not open every profile key the database holds,
 /// before anything serves or stores a key: files stored under keys the right key never opens would be
@@ -699,9 +747,11 @@ pub async fn check_start(conn: &mut PgConnection, kek: &Kek) -> Result<(), KeyEr
     if failed.is_empty() {
         return Ok(());
     }
-    let made: Vec<Vec<u8>> = sqlx::query_scalar("select distinct kek_fingerprint from profile_key order by 1")
-        .fetch_all(&mut *conn)
-        .await?;
+    let made: Vec<Vec<u8>> = sqlx::query_scalar(
+        "select distinct kek_fingerprint from profile_key where kek_fingerprint is not null order by 1",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
     let made: Vec<String> = made.iter().map(hex::encode).collect();
     Err(KeyError(format!(
         "OWNHEALTH_SECRETS_KEY (fingerprint {have}) does not open {bad} of the {all} profile keys this \
@@ -716,12 +766,15 @@ pub async fn check_start(conn: &mut PgConnection, kek: &Kek) -> Result<(), KeyEr
 }
 
 /// Every stored profile key opened with `kek`: (profiles that open, profiles that do not). For
-/// verify-restore and restore, which must not trust a backup the configured key cannot read.
+/// verify-restore and restore, which must not trust a backup the configured key cannot read. A
+/// deleted profile's shredded row holds no key and is not counted.
 pub async fn check_all(conn: &mut PgConnection, kek: &Kek) -> Result<(usize, Vec<Uuid>), KeyError> {
-    let rows: Vec<(Uuid, Vec<u8>, Vec<u8>)> =
-        sqlx::query_as("select profile_id, wrapped_dek, kek_fingerprint from profile_key order by profile_id")
-            .fetch_all(&mut *conn)
-            .await?;
+    let rows: Vec<(Uuid, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "select profile_id, wrapped_dek, kek_fingerprint from profile_key where wrapped_dek is not null \
+         order by profile_id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
     let mut bad = Vec::new();
     for (pid, wrapped, fp) in &rows {
         if kek.unwrap(*pid, fp, wrapped).is_err() {

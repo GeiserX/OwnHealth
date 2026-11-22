@@ -395,7 +395,7 @@ async fn deleting_a_profile_deletes_its_key_and_its_sealed_files() -> R {
         stored(&env.rt.settings.blobs_path()).is_empty(),
         "a profile's file went to the plain layout"
     );
-    let keys = "select count(*) from profile_key where profile_id = ";
+    let keys = "select count(*) from profile_key where wrapped_dek is not null and profile_id = ";
     assert_eq!(env.scalar_i64(&format!("{keys}'{alex}'")).await?, 1);
 
     let mut me = env.as_user(env.user("alex")).await?;
@@ -2107,5 +2107,133 @@ async fn a_file_already_missing_is_not_counted_as_removed() -> R {
         r.json
     );
     assert!(!stored(&env.rt.settings.blobs_path()).contains(&here));
+    Ok(())
+}
+
+/// Live (not shredded) key rows of `p`.
+async fn live_keys(env: &Env, p: Uuid) -> anyhow::Result<i64> {
+    env.scalar_i64(&format!(
+        "select count(*) from profile_key where profile_id = '{p}' and wrapped_dek is not null"
+    ))
+    .await
+}
+
+/// A file write for a profile after its delete committed (a worker that read the profile before the
+/// delete) gets no key: none is made for a deleted profile, so no sealed file of it stays behind.
+#[tokio::test]
+async fn a_key_write_after_the_delete_is_refused() -> R {
+    let env = Env::new(true).await?;
+    let alex = env.profile("alex");
+    env.rt
+        .blobs
+        .put_bytes(BlobOwner::Profile(alex), b"%PDF-1.7 synthetic LabNorte report")?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    let late = env
+        .rt
+        .blobs
+        .put_bytes(BlobOwner::Profile(alex), b"%PDF-1.7 a late synthetic page");
+    assert!(late.is_err(), "a file was sealed for a deleted profile");
+    let keys = ownhealth_core::keys::Keyring::new(
+        ownhealth_core::keys::Kek::from_settings(&env.settings)?,
+        env.settings.sqlx_url(),
+    );
+    let made = tokio::task::spawn_blocking(move || keys.dek(alex, true)).await?;
+    assert!(made.is_err(), "a key was made for a deleted profile");
+    assert_eq!(live_keys(&env, alex).await?, 0);
+    let folder = env.rt.settings.blobs_path().join("enc").join(alex.simple().to_string());
+    assert!(!folder.exists(), "a sealed folder of the deleted profile is back");
+    Ok(())
+}
+
+/// A key row whose profile never committed (a rolled-back create) loses its key with the next
+/// profile delete, once it is a day old; a fresh one may belong to a profile still being made.
+#[tokio::test]
+async fn a_key_left_without_its_profile_goes_with_the_next_delete() -> R {
+    let env = Env::new(true).await?;
+    let kek = ownhealth_core::keys::Kek::from_settings(&env.settings)?;
+    let (old, fresh) = (Uuid::new_v4(), Uuid::new_v4());
+    for (p, age) in [(old, "2 days"), (fresh, "0 seconds")] {
+        let wrapped = kek.wrap(p, &ownhealth_core::keys::Dek::generate())?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "insert into profile_key (profile_id, wrapped_dek, kek_fingerprint, created_at) \
+             values ($1, $2, $3, now() - interval '{age}')"
+        )))
+        .bind(p)
+        .bind(wrapped)
+        .bind(&kek.fingerprint()[..])
+        .execute(env.pool())
+        .await?;
+    }
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(live_keys(&env, old).await?, 0, "the orphan key stayed");
+    assert_eq!(live_keys(&env, fresh).await?, 1);
+    Ok(())
+}
+
+/// Every file of the profile is shared, so no plain file goes, but its sealed folder must: the retry
+/// is queued all the same.
+#[tokio::test]
+async fn the_retry_is_queued_when_every_file_is_shared() -> R {
+    let env = Env::new(true).await?;
+    let (alex, sam, household) = (env.profile("alex"), env.profile("sam"), env.fam().household_id);
+    let bytes = b"%PDF-1.7 synthetic LabNorte report both hold".to_vec();
+    let mut c = env.pool().acquire().await?;
+    for p in [alex, sam] {
+        let sha = env.rt.blobs.put_bytes(BlobOwner::Profile(p), &bytes)?;
+        create_document(
+            &mut c,
+            &NewDocument::upload(household, Some(p), &sha, "application/pdf", i64::try_from(bytes.len())?),
+        )
+        .await?;
+    }
+    let mut tx = env.pool().begin().await?;
+    let deleted = ownhealth_auth::household::delete_profile(&mut tx, alex)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    assert!(deleted.blobs.is_empty());
+    assert!(deleted.unlink_job.is_some(), "no retry for the sealed folder");
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// The sealed folder cannot go at once (its parent is read-only): the retry stays queued until it
+/// removes the folder, although every file went.
+#[tokio::test]
+async fn a_sealed_folder_the_delete_could_not_remove_goes_on_the_retry() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new(true).await?;
+    ownhealth_auth::register();
+    let alex = env.profile("alex");
+    let sha = env
+        .rt
+        .blobs
+        .put_bytes(BlobOwner::Profile(alex), b"%PDF-1.7 synthetic LabNorte report")?;
+    let mut c = env.pool().acquire().await?;
+    create_document(
+        &mut c,
+        &NewDocument::upload(env.fam().household_id, Some(alex), &sha, "application/pdf", 34),
+    )
+    .await?;
+    drop(c);
+    let enc = env.rt.settings.blobs_path().join("enc");
+    let folder = enc.join(alex.simple().to_string());
+    std::fs::set_permissions(&enc, std::fs::Permissions::from_mode(0o555))?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    std::fs::set_permissions(&enc, std::fs::Permissions::from_mode(0o755))?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert!(folder.exists());
+    assert_eq!(
+        unlink_state(&env).await?.0,
+        "queued",
+        "the retry was dropped with the folder left"
+    );
+    assert_eq!(run_unlink(&env).await?, 1);
+    assert!(!folder.exists(), "the retry left the sealed folder");
+    assert_eq!(unlink_state(&env).await?.0, "done");
     Ok(())
 }
