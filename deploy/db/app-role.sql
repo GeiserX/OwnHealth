@@ -1,12 +1,14 @@
 -- The app's own Postgres role: it reads and writes rows, owns nothing, and cannot change history.
--- Run as the database owner after every migration (app-role.sh does). Safe to run any number of times.
+-- Run as the database owner after every migration (app-role.sh does, as one transaction). Safe to run any
+-- number of times.
 --
 --   psql variables: app_role (the role name)
 --   environment:    OWNHEALTH_APP_ROLE_PASSWORD (its password, read with \getenv so it never sits in argv)
 --
 -- The owner keeps the tables, so only the owner can ALTER, DISABLE TRIGGER or DROP them. The app role
 -- gets SELECT, INSERT, UPDATE, DELETE on every table, and loses UPDATE, DELETE and TRUNCATE on every
--- table guarded by oh_append_only() (audit_event): security-privacy.md section 9.
+-- table guarded by oh_append_only() (audit_event): security-privacy.md section 9. It also loses
+-- INSERT on audit_chain: only the owner's trigger function writes chain links.
 \getenv app_password OWNHEALTH_APP_ROLE_PASSWORD
 \if :{?app_password}
 \else
@@ -26,3 +28,5 @@ select format('grant usage, select on all sequences in schema public to %I', :'a
 select distinct format('revoke update, delete, truncate on %s from %I', t.tgrelid::regclass, :'app_role')
   from pg_trigger t join pg_proc p on p.oid = t.tgfoid
  where p.proname = 'oh_append_only' \gexec
+select format('revoke insert, update, delete, truncate on audit_chain from %I', :'app_role')
+ where to_regclass('public.audit_chain') is not null \gexec

@@ -35,6 +35,11 @@ pub enum Error {
     /// `not_implemented`. None may be left at release.
     #[error("not implemented yet: {0}")]
     NotImplemented(&'static str),
+    /// The audit chain cannot be checked: an audit table is no longer a plain table
+    /// (`audit::verify_chain`). Someone with the owner's rights changed it, so a caller can tell this
+    /// apart from a database that is down. HTTP 500, as any other server fault.
+    #[error("{0}")]
+    AuditUncheckable(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]

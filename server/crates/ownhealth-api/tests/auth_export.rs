@@ -460,3 +460,87 @@ async fn delete_account_checks_before_deleting() -> R {
     );
     Ok(())
 }
+
+/// Wait until a statement of another session waits for a lock on `table`; returns that moment.
+async fn blocked_on(pool: &sqlx::PgPool, table: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (waiting, at): (bool, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+            "select exists (select 1 from pg_locks where relation = cast($1 as regclass) and not granted), \
+             clock_timestamp()",
+        )
+        .bind(table)
+        .fetch_one(pool)
+        .await?;
+        if waiting {
+            return Ok(at);
+        }
+        anyhow::ensure!(std::time::Instant::now() < deadline, "no statement waited for {table}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// The zip is read from one snapshot, but its audit row is written after the read, in a READ
+/// COMMITTED transaction of its own (the audit chain links rows only from one). The row must still
+/// carry the time the read began: here the read stalls on a lock while a new value for Alex is saved,
+/// and the zip, which leaves that value out, must not be logged as later than it.
+#[tokio::test]
+async fn the_export_audit_row_carries_the_time_the_read_began() -> R {
+    let env = Env::new(true).await?;
+    seed(&env, "alex", None).await?;
+    let pool = env.pool().clone();
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let sent_at: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("select clock_timestamp()").fetch_one(&pool).await?;
+    let mut lock = pool.begin().await?;
+    // the last table the export reads; nothing the new value writes touches it
+    sqlx::query("lock table schema_migrations in access exclusive mode")
+        .execute(&mut *lock)
+        .await?;
+    let meanwhile = async {
+        let stalled_at = blocked_on(&pool, "schema_migrations").await?;
+        // a new LDL value for Alex, saved with its audit row while the export waits
+        let mut tx = pool.begin().await?;
+        let src = SrcRef::New(SrcIn::manual(Some(env.user("alex"))));
+        commit_observation(
+            &mut tx,
+            &obs(env.profile("alex"), "177", "2019-03-07")?,
+            &src,
+            CommitOptions::new("person"),
+        )
+        .await?;
+        let mut e = AuditEvent::new("user", "ui", "write");
+        e.profile_id = Some(env.profile("alex"));
+        write_audit(&mut tx, &e).await?;
+        let saved_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("select now()").fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        lock.rollback().await?;
+        anyhow::Ok((stalled_at, saved_at))
+    };
+    let zip = json!({"fmt": "zip"});
+    let (asked, held) = tokio::join!(alex.post("/api/profiles/alex/export", &zip), meanwhile);
+    let (stalled_at, saved_at) = held?;
+    let r = asked?;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let z = unzip(&r.bytes)?;
+    let observations =
+        String::from_utf8_lossy(z.get("fhir/Observation.ndjson").map_or(&[][..], Vec::as_slice)).to_string();
+    // the new value is the only one dated 2019-03-07
+    assert!(
+        !observations.contains("2019-03-07"),
+        "the zip holds the state from when the export began"
+    );
+    let manifest: Value = serde_json::from_slice(z.get("export-manifest.json").map_or(&[][..], Vec::as_slice))?;
+    let generated_at = chrono::DateTime::parse_from_rfc3339(manifest["generated_at"].as_str().unwrap_or_default())?;
+    let at: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("select ts from audit_event where action = 'export' and profile_id = $1")
+            .bind(env.profile("alex"))
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        sent_at <= at && at < stalled_at && at < saved_at && at <= generated_at,
+        "stamped at the read: {sent_at} <= {at} < {stalled_at} (stall), {saved_at} (new value), <= {generated_at} (manifest)"
+    );
+    Ok(())
+}
