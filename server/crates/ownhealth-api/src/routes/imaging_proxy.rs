@@ -1308,6 +1308,12 @@ mod tests {
     }
 
     #[test]
+    fn the_orthanc_check_stands_for_seconds_only() {
+        // A study that arrives under the UID can pass until the next check, so the time stays short.
+        assert!(ORTHANC_RECHECK <= Duration::from_secs(10), "{ORTHANC_RECHECK:?}");
+    }
+
+    #[test]
     fn a_json_answer_is_capped_well_below_the_memory_of_a_small_box() {
         // The proxy buffers it and the URL rewrite copies it twice, with many requests in flight.
         assert!((32 << 20..=64 << 20).contains(&MAX_JSON_BYTES), "{MAX_JSON_BYTES}");

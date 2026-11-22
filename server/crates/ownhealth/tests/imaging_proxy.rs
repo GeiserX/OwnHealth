@@ -225,6 +225,12 @@ impl World {
     }
 
     async fn with(ttl: Duration, imaging_on: bool) -> anyhow::Result<World> {
+        // Orthanc is asked again on every proxied request (no cache), so a change shows at once.
+        World::with_times(ttl, imaging_on, Duration::ZERO).await
+    }
+
+    /// `with`, and a check against Orthanc that stands for `recheck` (production: `ORTHANC_RECHECK`).
+    async fn with_times(ttl: Duration, imaging_on: bool, recheck: Duration) -> anyhow::Result<World> {
         let db = TestDb::new().await?;
         let dir = tempfile::tempdir()?;
         let mut settings = db.settings(dir.path())?;
@@ -241,8 +247,7 @@ impl World {
             user: "ownhealth".into(),
             password: PASSWORD.into(),
         });
-        // Orthanc is asked again on every proxied request (no cache), so a change shows at once.
-        let app = build_app_with(rt, Imaging::with_times(config, ttl, Duration::ZERO));
+        let app = build_app_with(rt, Imaging::with_times(config, ttl, recheck));
         let w = World {
             db,
             _dir: dir,
@@ -1115,6 +1120,47 @@ async fn two_orthanc_studies_under_one_uid_pass_nothing() -> R {
         "{}",
         code(&body)
     );
+    assert!(w.orthanc.seen().is_empty(), "{:?}", w.orthanc.seen());
+    Ok(())
+}
+
+/// In production a link's check against Orthanc stands for `ORTHANC_RECHECK`: reads inside that time
+/// ask Orthanc nothing, and the first read after it asks again. So a second study that arrives under
+/// the UID passes nothing once that time is up (here 1 s in place of 5 s).
+#[tokio::test]
+async fn the_orthanc_check_is_asked_again_once_its_time_is_up() -> R {
+    let recheck = Duration::from_secs(1);
+    let wait = recheck + Duration::from_millis(200);
+    let w = World::with_times(Duration::from_secs(3600), true, recheck).await?;
+    let cookie = w.session("alex").await?;
+    let cap = w.open(&cookie, "alex", ALEX_CT).await?;
+    let series = dw(&cap, &format!("studies/{ALEX_CT}/series"));
+    assert_eq!(w.orthanc.lookups().len(), 1, "the open asks Orthanc once");
+    assert_eq!(w.viewer_get(&series, None).await?.0, StatusCode::OK);
+    assert_eq!(w.orthanc.lookups().len(), 1, "a read just after the open asks nothing");
+
+    tokio::time::sleep(wait).await;
+    assert_eq!(w.viewer_get(&series, None).await?.0, StatusCode::OK);
+    assert_eq!(w.orthanc.lookups().len(), 2, "the first read after the time asks again");
+    assert_eq!(w.viewer_get(&series, None).await?.0, StatusCode::OK);
+    assert_eq!(w.orthanc.lookups().len(), 2, "and that answer stands for the next read");
+
+    // Another patient's study arrives under the UID. A read inside the time may still pass (the
+    // window the design states); the first one after it passes nothing.
+    w.orthanc.add_study(ALEX_CT, "orthanc-another-patient");
+    tokio::time::sleep(wait).await;
+    w.orthanc.clear();
+    for rest in [
+        format!("studies/{ALEX_CT}/series"),
+        format!("studies/{ALEX_CT}/series/{ALEX_SERIES}/instances/{ALEX_INSTANCE}/frames/1"),
+    ] {
+        let (s, _, body) = w.viewer_get(&dw(&cap, &rest), None).await?;
+        assert_eq!(
+            (s, code(&body).as_str()),
+            (StatusCode::FORBIDDEN, "study_not_bound"),
+            "{rest}"
+        );
+    }
     assert!(w.orthanc.seen().is_empty(), "{:?}", w.orthanc.seen());
     Ok(())
 }
