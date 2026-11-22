@@ -425,14 +425,20 @@ fn strings(v: &Value) -> Vec<String> {
     }
 }
 
-/// The .env lines that turn the profile on, for a render or a real start.
-fn wearables_env(case: &str, extra: &str) -> String {
-    let secrets = if case == "quickstart" {
-        "OPENWEARABLES_DB_PASSWORD=ow-db\nOPENWEARABLES_SECRET_KEY=ow-key\nOPENWEARABLES_ADMIN_PASSWORD=ow-admin\n"
-    } else {
-        ""
-    };
-    format!("{extra}COMPOSE_PROFILES=wearables\n{secrets}")
+/// The .env lines that turn the profile on, for a render or a real start. The quickstart takes the
+/// sidecar's secrets from .env (fresh random values here); the homelab reads them from files.
+fn wearables_env(case: &str, extra: &str, ow_db_password: &str) -> String {
+    let mut env = format!("{extra}COMPOSE_PROFILES=wearables\n");
+    if case == "quickstart" {
+        for (k, v) in [
+            ("OPENWEARABLES_DB_PASSWORD", ow_db_password.to_string()),
+            ("OPENWEARABLES_SECRET_KEY", ownhealth_core::ids::token_hex(32)),
+            ("OPENWEARABLES_ADMIN_PASSWORD", ownhealth_core::ids::token_hex(16)),
+        ] {
+            env += &format!("{k}={v}\n");
+        }
+    }
+    env
 }
 
 /// The profile as both compose files render it: off by default; when on, pinned, quiet, with no
@@ -451,7 +457,12 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
             assert!(off.get(s).is_none(), "{case}: {s} starts without the wearables profile");
         }
 
-        let doc = render_doc(&compose, &env_file, &wearables_env(case, extra), &[])?;
+        let doc = render_doc(
+            &compose,
+            &env_file,
+            &wearables_env(case, extra, &ownhealth_core::ids::token_hex(16)),
+            &[],
+        )?;
         let services = &doc["services"];
         for s in OW_ALL {
             let svc = &services[s];
@@ -646,26 +657,26 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
     std::fs::copy(compose, dir.join("compose.yaml"))?;
     std::fs::create_dir_all(dir.join("deploy/db"))?;
     std::fs::copy(root().join("deploy/db/ow-role.sql"), dir.join("deploy/db/ow-role.sql"))?;
-    let (owner_pw, ow_pw) = if case == "quickstart" {
-        ("x".to_string(), "ow-db".to_string())
+    let ow_pw = ownhealth_core::ids::token_hex(16);
+    let owner_pw = if case == "quickstart" {
+        "x".to_string() // OWNHEALTH_DB_PASSWORD in cases()
     } else {
         let s = dir.join("secrets");
         std::fs::create_dir_all(&s)?;
         let owner = ownhealth_core::ids::token_hex(16);
-        let ow = ownhealth_core::ids::token_hex(16);
         for (name, value) in [
             ("db_password", owner.clone()),
-            ("ow_db_password", ow.clone()),
+            ("ow_db_password", ow_pw.clone()),
             ("ow_secret_key", ownhealth_core::ids::token_hex(32)),
             ("ow_admin_password", ownhealth_core::ids::token_hex(16)),
         ] {
             std::fs::write(s.join(name), value)?;
         }
-        (owner, ow)
+        owner
     };
     std::fs::write(
         dir.join(".env"),
-        std::fs::read_to_string(env_file)? + &wearables_env(case, extra),
+        std::fs::read_to_string(env_file)? + &wearables_env(case, extra, &ow_pw),
     )?;
 
     project.ok(&["up", "-d", "ow-app", "ow-worker", "ow-beat"])?;
