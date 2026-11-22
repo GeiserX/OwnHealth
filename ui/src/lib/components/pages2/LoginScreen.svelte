@@ -78,7 +78,7 @@
 <div class="login">
 	<div class="brand" style="justify-content:center">
 		<div class="logo"><BrandMark /></div>
-		<div>OwnHealth<small>{t('selfhosted')} · v{__APP_VERSION__}</small></div>
+		<div><span class="own">Own</span>Health<small>{t('selfhosted')} · v{__APP_VERSION__}</small></div>
 	</div>
 	<div class="seg" role="group" aria-label={t('lang_label')} style="align-self:center">
 		<LangButtons />

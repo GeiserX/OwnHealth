@@ -33,6 +33,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 .side{background:#0f1820;border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 10px;gap:10px;overflow:auto}
 .brand{display:flex;align-items:center;gap:9px;padding:2px 6px 8px;font-weight:650;font-size:15px;letter-spacing:.2px}
 .brand small{display:block;font-weight:400;color:var(--dim);font-size:11px;letter-spacing:0}
+.brand .own{color:var(--accent)}
 .logo{width:28px;height:28px;border-radius:8px;background:var(--accent-bg);display:grid;place-items:center}
 .plabel{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);padding:6px 8px 2px}
 .profiles{display:flex;flex-direction:column;gap:2px}
@@ -179,7 +180,7 @@ table.t{width:100%;border-collapse:collapse;font-size:12.5px}
 .lock{background:repeating-linear-gradient(135deg,#1a1e26 0 8px,#181c23 8px 16px)}
 /* drug */
 .drug{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:14px}
-blockquote{margin:8px 0;padding:8px 12px;border-left:3px solid var(--accent);background:#141a26;border-radius:0 8px 8px 0;color:#d5dae4}
+blockquote{margin:8px 0;padding:8px 12px;border-left:3px solid var(--accent);background:var(--raised);border-radius:0 8px 8px 0;color:#d5dae4}
 .disc{display:flex;gap:10px;align-items:center;padding:10px 14px;border-radius:var(--r);background:var(--accent-bg);border:1px solid rgba(60,186,221,.35);margin-top:12px}
 /* wearables */
 .wg{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
@@ -194,7 +195,7 @@ blockquote{margin:8px 0;padding:8px 12px;border-left:3px solid var(--accent);bac
 .viewer{background:#000;border:1px solid var(--line);border-radius:var(--r);display:flex;flex-direction:column;overflow:hidden}
 .vtool{display:flex;gap:4px;padding:6px 8px;background:#090e13;border-bottom:1px solid #1a232d}
 .vtool span{font-size:11px;color:#aeb5c2;padding:3px 8px;border-radius:5px;background:#131b24}
-.vtool span.on{background:#253047;color:#cfe0ff}
+.vtool span.on{background:var(--accent-bg);color:var(--accent)}
 .thumbs{display:flex;gap:6px;padding:8px;background:#090e13;border-top:1px solid #1a232d}
 .thumbs div{width:84px;border:1px solid #2a2f3a;border-radius:5px;overflow:hidden;font-size:10px;color:#9aa3b2;text-align:center}
 .thumbs div.on{border-color:var(--accent)}

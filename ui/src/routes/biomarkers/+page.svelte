@@ -373,7 +373,7 @@
 								<!-- A wide bar holds its label; a narrow one prints it after its end, or in the list under the chart. -->
 								{@const wide = b.x2 - b.x > b.label.length * 5.6 + 12}
 								{@const after = b.x2 + 6 + b.label.length * 5.6 < W - pr}
-								<rect x={b.x} y={my + b.row * 14} width={Math.max(4, b.x2 - b.x)} height="12" rx="3" fill={C.accent} opacity=".55"><title>{b.label}{b.ongoing ? ' · ' + t('h1_ongoing') : ''}</title></rect>
+								<rect x={b.x} y={my + b.row * 14} width={Math.max(4, b.x2 - b.x)} height="12" rx="3" fill={C.accent} opacity=".85"><title>{b.label}{b.ongoing ? ' · ' + t('h1_ongoing') : ''}</title></rect>
 								{#if b.ongoing}<path d="M{b.x2 - 1} {my + b.row * 14 + 2}l5 4-5 4z" fill={C.accent} opacity=".8" />{/if}
 								{#if wide}<text x={b.x + 6} y={my + b.row * 14 + 9.5} fill="#0f1e2e" font-size="10" font-weight="600">{b.label}</text>
 								{:else if after}<text x={b.x2 + (b.ongoing ? 9 : 4)} y={my + b.row * 14 + 9.5} fill="#8a93a5" font-size="10">{b.label}</text>{/if}

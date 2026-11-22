@@ -111,7 +111,7 @@
 
 <div class="wrap">
 	<div class="cbar">
-		<div class="brand"><div class="logo sm" aria-hidden="true"><BrandMark /></div>OwnHealth</div>
+		<div class="brand"><div class="logo sm" aria-hidden="true"><BrandMark /></div><span class="own">Own</span>Health</div>
 		<div class="seg" role="group" aria-label={t('lang_label')}>
 			<LangButtons />
 		</div>

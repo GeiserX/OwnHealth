@@ -147,7 +147,7 @@
 			<div class="logo">
 				<BrandMark />
 			</div>
-			<div>OwnHealth<small>{t('selfhosted')} · v{__APP_VERSION__}</small></div>
+			<div><span class="own">Own</span>Health<small>{t('selfhosted')} · v{__APP_VERSION__}</small></div>
 		</div>
 		<div class="plabel">{t('household')}</div>
 		<div class="profiles">
