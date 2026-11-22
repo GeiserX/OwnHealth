@@ -21,10 +21,12 @@ create trigger audit_chain_no_truncate before truncate on audit_chain
 
 -- The bytes a link hashes, version 1: an explicit column list in a fixed order, the time in UTC,
 -- never select *. A column added to audit_event later joins the hash only through a v2 of this.
+-- The arrays and withheld go in as their text form: a JSON array drops an array's lower bound, and
+-- a jsonb element writes SQL NULL and JSON null the same way. As text, JSON null is the string "null".
 create function oh_audit_row_v1(e audit_event) returns bytea language sql stable as $$
   select convert_to(jsonb_build_array('v1', e.id, e.ts at time zone 'UTC', e.actor_kind, e.actor_id,
-    e.token_id, e.client, e.via, e.action, e.tool, e.profile_id, e.resource_type, e.resource_ids,
-    e.src_ids, e.args_summary, e.result_kind, e.rows_out, e.bytes_out, e.withheld,
+    e.token_id, e.client, e.via, e.action, e.tool, e.profile_id, e.resource_type, e.resource_ids::text,
+    e.src_ids::text, e.args_summary, e.result_kind, e.rows_out, e.bytes_out, e.withheld::text,
     e.protocol_version, e.ip::text, e.user_agent, e.not_assessed_n, e.arg_bytes)::text, 'UTF8')
 $$;
 

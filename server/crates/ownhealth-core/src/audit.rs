@@ -195,8 +195,8 @@ impl ChainCheck {
 /// never trusts a function the owner controls. A test keeps the two copies equal.
 const ROW_V1: &str = "pg_catalog.convert_to(pg_catalog.jsonb_build_array('v1', e.id, e.ts at time zone 'UTC', \
     e.actor_kind, e.actor_id, e.token_id, e.client, e.via, e.action, e.tool, e.profile_id, e.resource_type, \
-    e.resource_ids, e.src_ids, e.args_summary, e.result_kind, e.rows_out, e.bytes_out, e.withheld, \
-    e.protocol_version, e.ip::text, e.user_agent, e.not_assessed_n, e.arg_bytes)::text, 'UTF8')";
+    e.resource_ids::text, e.src_ids::text, e.args_summary, e.result_kind, e.rows_out, e.bytes_out, \
+    e.withheld::text, e.protocol_version, e.ip::text, e.user_agent, e.not_assessed_n, e.arg_bytes)::text, 'UTF8')";
 
 /// The check reads both tables by name, so it first makes sure each is still a plain table with no
 /// row-level security, no rules and no generated column, and that every column has a built-in type
@@ -771,7 +771,8 @@ mod tests {
     #[tokio::test]
     async fn the_check_hashes_the_same_bytes_as_the_row_function() -> anyhow::Result<()> {
         let db = TestDb::new().await?;
-        // nulls, odd text, an IPv6 address and a network, microsecond and whole-second times, nested jsonb
+        // nulls, odd text, an IPv6 address and a network, microsecond and whole-second times, nested jsonb,
+        // arrays with another lower bound or two dimensions, and a JSON null
         owner_sql(
             &db,
             r#"insert into audit_event (ts, actor_kind, actor_id, token_id, client, via, action, tool, profile_id,
@@ -785,7 +786,9 @@ mod tests {
                ('2026-01-01 00:00:00.000001+05:30', 'system', null, null, null, 'job', 'purge', null, null, null,
                 null, null, null, null, null, null, null, null, '10.0.0.0/24', null, null, null),
                (default, 'user', null, null, '', 'ui', 'read', null, null, null, null, null, '', null, 0, 0, '[]',
-                null, '::1', '', 0, 0)"#,
+                null, '::1', '', 0, 0),
+               (default, 'user', null, null, null, 'ui', 'read', null, null, null, '[0:1]={a,"NULL"}',
+                '{{a,b},{c,NULL}}', null, null, null, null, 'null', null, null, null, null, null)"#,
         )
         .await?;
         let rows: Vec<(i64, Vec<u8>, Vec<u8>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -793,7 +796,7 @@ mod tests {
         )))
         .fetch_all(&db.pool)
         .await?;
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         for (id, function, check) in rows {
             assert_eq!(
                 String::from_utf8_lossy(&function),
@@ -803,7 +806,7 @@ mod tests {
             assert_eq!(function, check, "event {id}");
         }
         let c = check(&db.pool).await?;
-        assert!(c.ok() && c.verified == 3, "{c:?}");
+        assert!(c.ok() && c.verified == 4, "{c:?}");
         Ok(())
     }
 
@@ -1045,6 +1048,40 @@ mod tests {
     }
 
     // ------------------------------------------------------- round 4 review tests ----
+
+    /// SQL NULL and JSON null in withheld are different bytes, and so are two arrays that differ
+    /// only in their lower bound.
+    #[tokio::test]
+    async fn null_kinds_and_array_bounds_are_hashed() -> anyhow::Result<()> {
+        for (withheld, set) in [
+            (None, "withheld = 'null'::jsonb"),
+            (Some(Value::Null), "withheld = null"),
+            (None, "resource_ids = '[0:0]={r}'"),
+            (None, "src_ids = '[2:2]={s}'"),
+        ] {
+            let db = TestDb::new().await?;
+            let mut e = AuditEvent::new("token", "mcp", "read");
+            e.resource_ids = Some(vec!["r".into()]);
+            e.src_ids = Some(vec!["s".into()]);
+            e.withheld.clone_from(&withheld);
+            let mut tx = db.pool.begin().await?;
+            let id = write_audit(&mut tx, &e).await?;
+            tx.commit().await?;
+            let sql_null: bool = sqlx::query_scalar("select withheld is null from audit_event where id = $1")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await?;
+            assert_eq!(sql_null, withheld.is_none(), "{set}");
+            assert!(check(&db.pool).await?.ok(), "{set}");
+            tamper(&db, &format!("update audit_event set {set} where id = {id}")).await?;
+            assert_eq!(
+                check(&db.pool).await?.broken,
+                broke(Some(1), Some(id), ChainBreakKind::Hash),
+                "{set}"
+            );
+        }
+        Ok(())
+    }
 
     /// The guard's refusal is an error of its own, apart from a database failure.
     #[tokio::test]
