@@ -1,3 +1,12 @@
+# The share listener below sits behind a tunnel on the same host, which reaches it through the
+# loopback port compose publishes. Caddy keeps the X-Forwarded-For that tunnel sends and adds the hop
+# it saw, so the app's access log names the recipient's address (OWNHEALTH_TRUSTED_PROXIES).
+{
+	servers :8090 {
+		trusted_proxies static private_ranges
+	}
+}
+
 # HTTPS in front of OwnHealth. Caddy gets a certificate for OWNHEALTH_DOMAIN by itself.
 # For a name that only exists on your LAN, replace the automatic certificate with `tls internal`
 # (Caddy's own CA; trust its root on your devices) or a DNS challenge plugin.
@@ -17,4 +26,40 @@
 		-Server
 	}
 	reverse_proxy app:8080
+}
+
+# The public site block for SMART Health Links (docs/design/security-privacy.md section 11). It
+# passes only the link routes to the app: the manifest (POST, and its CORS preflight) and the file
+# (GET). Everything else, the app, /login, /api, /mcp and /dicom-web included, gets 404 here.
+# Caddy matches the cleaned path, so a raw path such as /login/../api/shl/<id> also matches; each
+# route is therefore rewritten to its canonical form, without a query, before it goes upstream,
+# and the app never sees the path the client wrote.
+# compose.homelab.yaml publishes this port on 127.0.0.1 only. Point a tunnel (Tailscale Funnel,
+# Cloudflare Tunnel) at it, never at the app or the site above, and set OWNHEALTH_SHARE_URL in .env
+# to the public https address the tunnel gives (deploy/README.md, Sharing a summary).
+http://:8090 {
+	@manifest {
+		method POST OPTIONS
+		path_regexp m ^/api/shl/([A-Za-z0-9_-]{43})$
+	}
+	@file {
+		method GET
+		path_regexp f ^/api/shl/([A-Za-z0-9_-]{43})/file/([A-Za-z0-9_-]{43})$
+	}
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+	handle @manifest {
+		rewrite * /api/shl/{re.m.1}?
+		reverse_proxy app:8080
+	}
+	handle @file {
+		rewrite * /api/shl/{re.f.1}/file/{re.f.2}?
+		reverse_proxy app:8080
+	}
+	handle {
+		respond 404
+	}
 }

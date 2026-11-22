@@ -876,3 +876,66 @@ export interface NextDraw {
 	/** the words of the sheet (title, notice, empty, ...) */
 	labels: Record<string, string>;
 }
+
+// ------------------------------------------------- SMART Health Links (shl.rs) ----
+
+/** The categories a link can carry (ownhealth_ops::shl::SHAREABLE). */
+export type ShlCategory = 'read:summary' | 'read:labs' | 'read:records';
+/** What a recipient would meet: `paused` while sharing is off on the instance, `revoked` for good. */
+export type ShlState = 'active' | 'paused' | 'revoked' | 'expired' | 'locked_out';
+/** Why: `sharing_off` (paused); `person`, `locked` or `access_changed` (revoked). */
+export type ShlReason = 'sharing_off' | 'person' | 'locked' | 'access_changed';
+
+/** One link in GET /profiles/{p}/shl. */
+export interface ShlLink {
+	id: Uuid;
+	label: string | null;
+	passcode: boolean;
+	attempts_left: number | null;
+	categories: ShlCategory[];
+	lang: 'es' | 'en';
+	created_at: IsoDateTime;
+	expires_at: IsoDateTime;
+	revoked_at: IsoDateTime | null;
+	state: ShlState;
+	reason: ShlReason | null;
+	/** manifests served */
+	opened: number;
+	last_access_at: IsoDateTime | null;
+}
+export interface ShlList {
+	items: ShlLink[];
+}
+/** POST /profiles/{p}/shl body. */
+export interface ShlCreateIn {
+	categories?: ShlCategory[];
+	days?: number;
+	passcode?: string;
+	label?: string;
+	lang?: 'es' | 'en';
+}
+/** POST /profiles/{p}/shl answer, once: the key exists only in `shlink`. */
+export interface ShlCreated {
+	link: ShlLink;
+	/** shlink:/<base64url payload> */
+	shlink: string;
+	/** present only when the creator may read sensitive records */
+	left_out?: { sensitive: number };
+}
+/** One answer to a recipient in GET /profiles/{p}/shl/{id}/access, newest first. */
+export interface ShlAccess {
+	at: IsoDateTime;
+	kind: 'manifest' | 'file' | 'passcode_wrong' | 'passcode_missing';
+	recipient: string;
+	/** the client address (behind a trusted proxy, the one it forwarded) */
+	ip: string | null;
+	user_agent: string | null;
+}
+export interface ShlAccessList {
+	items: ShlAccess[];
+}
+/** DELETE /profiles/{p}/shl/{id} answer, the same on a second revoke. */
+export interface ShlRevoked {
+	id: Uuid;
+	revoked: true;
+}
