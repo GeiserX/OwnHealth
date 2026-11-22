@@ -37,13 +37,14 @@ const FRESHNESS_SCOPE: [(&str, &str); 5] = [
     ("genome", "read:genome"),
 ];
 /// The review kinds counted in `review_open`, each with the scope that reads what it would become.
-const REVIEW_SCOPE: [(&str, &str); 7] = [
+const REVIEW_SCOPE: [(&str, &str); 8] = [
     ("candidate_row", "read:labs"),
     ("amended_report", "read:labs"),
     ("rederive_diff", "read:labs"),
     ("agent_proposal", "read:summary"),
     ("document_identity", "read:summary"),
     ("fhir_unmapped", "read:records"),
+    ("fhir_unmapped_summary", "read:records"),
     ("genome_reinterpretation", "read:genome"),
 ];
 /// Keep a 5-year profile under 2 KB whole without paging: a flag keeps its template text and drops
