@@ -214,7 +214,12 @@ async fn raw_files(
 /// with a tabix index. `files` is [(data sha, path), (index sha, index path)].
 fn check_raw_file(blobs: &BlobStore, owner: BlobOwner, files: &[(String, String); 2]) -> Result<()> {
     for (want, label) in files {
-        if rehash(blobs, owner, want)? != *want {
+        // a store that seals refuses a changed file when it opens it: the same answer as a mismatch
+        let got = match rehash(blobs, owner, want) {
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData => None,
+            r => Some(r?),
+        };
+        if got.as_deref() != Some(want.as_str()) {
             let head: String = want.chars().take(12).collect();
             return Err(import_error(format!(
                 "{label}: stored bytes do not match sha256 {head}…"

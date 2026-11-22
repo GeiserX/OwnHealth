@@ -520,21 +520,10 @@ fn the_named_sentence_reads_well_for_every_class() {
     );
 }
 
-/// Alex's calls VCF rewritten in text order (chrM first, then chr1, chr10...), as some producers sort.
+/// Alex's calls VCF replaced by one in text order (chrM first, then chr1, chr10...), as some producers
+/// sort: stored as a blob of its own and named by the dataset, since a store that seals refuses a file
+/// changed in place.
 async fn unsort_alex_calls(e: &Env, c: &mut PgConnection) -> anyhow::Result<()> {
-    let sha: String = sqlx::query_scalar(
-        "select encode(vcf_blob, 'hex') from genome_dataset where profile_id = $1 and status = 'current'",
-    )
-    .bind(e.profile("alex"))
-    .fetch_one(&mut *c)
-    .await?;
-    let path = e
-        .dir
-        .path()
-        .join("blobs/sha256")
-        .join(&sha[..2])
-        .join(&sha[2..4])
-        .join(&sha);
     let mut text = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tAR-01\n".to_string();
     text.push_str("chrM\t100\t.\tA\tG\t50\tPASS\t.\tGT\t1/1\n");
     for r in alex_calls() {
@@ -543,11 +532,15 @@ async fn unsort_alex_calls(e: &Env, c: &mut PgConnection) -> anyhow::Result<()> 
             r.chrom, r.pos, r.reference, r.alt, r.gt
         ));
     }
-    let mut perms = std::fs::metadata(&path)?.permissions();
-    #[allow(clippy::permissions_set_readonly_false)]
-    perms.set_readonly(false);
-    std::fs::set_permissions(&path, perms)?;
-    std::fs::write(&path, text)?;
+    let sha = e.blobs.put_bytes(
+        ownhealth_core::blobs::BlobOwner::Profile(e.profile("alex")),
+        text.as_bytes(),
+    )?;
+    sqlx::query("update genome_dataset set vcf_blob = decode($1, 'hex') where profile_id = $2 and status = 'current'")
+        .bind(&sha)
+        .bind(e.profile("alex"))
+        .execute(&mut *c)
+        .await?;
     Ok(())
 }
 

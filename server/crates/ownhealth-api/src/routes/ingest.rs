@@ -126,7 +126,8 @@ async fn read_form(rt: &Runtime, req: Request, file_fields: &[&str]) -> R<Form> 
                 filename,
                 path: path.clone(),
             });
-            let mut f = tokio::fs::File::create(&path).await.map_err(Error::from)?;
+            // plaintext until the store takes it: readable by this user only
+            let mut f = ownhealth_core::blobs::create_spool(&path).await.map_err(Error::from)?;
             while let Some(chunk) = field.chunk().await.map_err(|_| bad_body("The form is broken."))? {
                 f.write_all(&chunk).await.map_err(Error::from)?;
             }

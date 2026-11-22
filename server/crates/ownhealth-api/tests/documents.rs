@@ -615,6 +615,67 @@ async fn a_document_whose_file_is_gone_answers_404() -> R {
     Ok(())
 }
 
+/// A sealed file that no longer opens (a changed byte in its first record, or its last) answers
+/// 500 before any byte goes out, never a 200 that stops part way, and the body names no hash and no
+/// path.
+#[tokio::test]
+async fn a_sealed_file_that_does_not_open_answers_500_before_any_byte() -> R {
+    let a = app().await?;
+    let doc = imported(&a).await?;
+    let sha: String = sqlx::query_scalar("select encode(blob_sha256, 'hex') from document where id = $1")
+        .bind(doc)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let ok = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
+    assert_eq!(ok.status, StatusCode::OK);
+    let mut files = Vec::new();
+    let mut todo = vec![a._dir.path().join("blobs").join("enc")];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d)? {
+            let p = e?.path();
+            if p.is_dir() {
+                todo.push(p);
+            } else {
+                files.push(p);
+            }
+        }
+    }
+    // the document's file and its page images: change each the same way
+    assert!(!files.is_empty());
+    let good: Vec<Vec<u8>> = files.iter().map(std::fs::read).collect::<Result<_, _>>()?;
+    let put = |change: &dyn Fn(&mut Vec<u8>)| -> R {
+        for (f, g) in files.iter().zip(&good) {
+            let mut bytes = g.clone();
+            change(&mut bytes);
+            std::fs::set_permissions(f, std::os::unix::fs::PermissionsExt::from_mode(0o640))?;
+            std::fs::write(f, &bytes)?;
+        }
+        Ok(())
+    };
+    let first_record = |b: &mut Vec<u8>| b[ownhealth_core::keys::HEADER + 3] ^= 1;
+    let last_tag = |b: &mut Vec<u8>| {
+        let at = b.len() - 2;
+        b[at] ^= 1;
+    };
+    for (what, change) in [
+        ("first record", &first_record as &dyn Fn(&mut Vec<u8>)),
+        ("last tag", &last_tag),
+    ] {
+        put(change)?;
+        let r = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
+        let body = String::from_utf8_lossy(&r.bytes).into_owned();
+        assert_eq!(r.status, StatusCode::INTERNAL_SERVER_ERROR, "{what}: {body}");
+        assert_eq!(r.json()["detail"]["code"], "internal", "{body}");
+        assert!(!body.contains(&sha[..12]) && !body.contains("blobs"), "{body}");
+    }
+    put(&|_| {})?;
+    assert_eq!(
+        get(&a, "alex", &format!("/documents/{doc}/file")).await?.bytes,
+        ok.bytes
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn document_bytes_are_never_kept_in_the_browser_cache() -> R {
     let a = app().await?;

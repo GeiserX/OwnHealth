@@ -456,7 +456,12 @@ async fn document_file(
     })?;
     tx.commit().await?;
     let mime = doc.str("mime").unwrap_or("application/octet-stream");
-    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
+    // the file opened (open_async checks a sealed file's first and last record), so a record that
+    // fails later can only end the stream: the status went out, so the log is where it shows
+    let stream = futures::TryStreamExt::inspect_err(tokio_util::io::ReaderStream::new(file), move |e| {
+        tracing::error!(document = %document_id, error = %e, "a document's file stopped part way through");
+    });
+    let body = axum::body::Body::from_stream(stream);
     Ok((
         file_headers(mime),
         [

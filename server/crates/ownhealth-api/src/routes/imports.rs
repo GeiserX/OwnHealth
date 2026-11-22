@@ -74,7 +74,8 @@ async fn read_capped(field: &mut axum::extract::multipart::Field<'_>) -> R<Vec<u
 }
 
 async fn spool(field: &mut axum::extract::multipart::Field<'_>, path: &std::path::Path) -> R<()> {
-    let mut out = tokio::fs::File::create(path).await.map_err(Error::from)?;
+    // the upload is plaintext until the store takes it: readable by this user only
+    let mut out = ownhealth_core::blobs::create_spool(path).await.map_err(Error::from)?;
     while let Some(chunk) = field.chunk().await.map_err(|_| bad_body())? {
         out.write_all(&chunk).await.map_err(Error::from)?;
     }

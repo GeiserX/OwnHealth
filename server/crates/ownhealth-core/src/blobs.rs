@@ -11,17 +11,19 @@
 //!   (`keys.rs`). A store with a keyring writes every profile-owned blob this way.
 //!
 //! A read for a profile tries its sealed copy first, then the plain one, so an install that upgrades
-//! keeps every older file. The same bytes stored twice for one owner are kept once; two profiles that
+//! keeps every older file. A store that seals hashes such a plain file before it serves it for a
+//! profile (once per process while the file stays the same), so a file planted at the plain path never
+//! stands in for a profile's sealed one. The same bytes stored twice for one owner are kept once; two profiles that
 //! store the same bytes each get their own sealed copy. A blob is never modified after it lands.
 //! Access control lives on the rows that reference a hash (document, genome_dataset); a hash on its
 //! own grants nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use sha2::{Digest, Sha256};
@@ -247,6 +249,32 @@ impl Sealing {
 pub struct BlobStore {
     root: PathBuf,
     keys: Option<Arc<Keyring>>,
+    /// Plain files this process read for a profile and found to hash to their name, by sha256 and by
+    /// what changes when the file does ([`stamp`]).
+    checked: Arc<Mutex<HashSet<(String, Stamp)>>>,
+}
+
+/// What changes when a file is rewritten or replaced: device, inode, length, and the modification
+/// and change times in nanoseconds (a change time cannot be set back by hand).
+type Stamp = (u64, u64, u64, i128, i128);
+
+#[cfg(unix)]
+fn stamp(meta: &fs::Metadata) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    let ns = |s: i64, n: i64| i128::from(s) * 1_000_000_000 + i128::from(n);
+    Some((
+        meta.dev(),
+        meta.ino(),
+        meta.len(),
+        ns(meta.mtime(), meta.mtime_nsec()),
+        ns(meta.ctime(), meta.ctime_nsec()),
+    ))
+}
+
+/// Without a change time, every read hashes the file again.
+#[cfg(not(unix))]
+fn stamp(_meta: &fs::Metadata) -> Option<Stamp> {
+    None
 }
 
 fn tmp_name() -> String {
@@ -278,6 +306,16 @@ fn create_private(path: &Path) -> io::Result<File> {
     o.open(path)
 }
 
+/// A new spool file at a [`BlobStore::staging_path`], readable by this user only: an upload sits
+/// there as plaintext until the store takes it.
+pub async fn create_spool(path: &Path) -> io::Result<tokio::fs::File> {
+    let mut o = tokio::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    o.mode(0o600);
+    o.open(path).await
+}
+
 fn not_found(sha256: &str) -> BlobError {
     BlobError::NotFound(sha256.to_ascii_lowercase())
 }
@@ -300,7 +338,11 @@ impl BlobStore {
         let root = root.into();
         fs::create_dir_all(root.join("tmp"))?;
         fs::create_dir_all(root.join("sha256"))?;
-        Ok(BlobStore { root, keys: None })
+        Ok(BlobStore {
+            root,
+            keys: None,
+            checked: Arc::default(),
+        })
     }
 
     /// A store that seals every profile's blobs under that profile's key, and reads both layouts.
@@ -327,6 +369,12 @@ impl BlobStore {
         self.keys.is_some()
     }
 
+    /// The key-encryption key this store seals under, when it seals: what a start checks the stored
+    /// profile keys against (`keys::check_start`).
+    pub fn kek(&self) -> Option<&Kek> {
+        self.keys.as_deref().map(Keyring::kek)
+    }
+
     fn path(&self, sha256: &str) -> Result<PathBuf, BlobError> {
         let h = sha256_hex(sha256)?;
         Ok(self.root.join("sha256").join(&h[0..2]).join(&h[2..4]).join(&h))
@@ -346,9 +394,53 @@ impl BlobStore {
     /// The key a write for `owner` seals with: a profile's, when this store seals.
     fn sealing(&self, owner: BlobOwner) -> Result<Option<(Uuid, Arc<Dek>)>, BlobError> {
         match (owner, &self.keys) {
-            (BlobOwner::Profile(p), Some(keys)) => Ok(keys.dek(p, true)?.map(|d| (p, d))),
+            (BlobOwner::Profile(p), Some(keys)) => {
+                // never fall back to a plain write for a profile when its key could not be had
+                let dek = keys
+                    .dek(p, true)?
+                    .ok_or_else(|| KeyError("the profile has no key to store its file under".into()))?;
+                Ok(Some((p, dek)))
+            }
             _ => Ok(None),
         }
+    }
+
+    /// `file`, the plain copy of `sha256` read for `owner`, once its bytes hash to `sha256`, for a
+    /// profile in a store that seals: there every new profile file is sealed, so a plain one is a
+    /// legacy file or a planted one. Checked once per process while the file stays the same.
+    fn checked_plain(&self, owner: BlobOwner, sha256: &str, mut file: File) -> Result<File, BlobError> {
+        if !(matches!(owner, BlobOwner::Profile(_)) && self.keys.is_some()) {
+            return Ok(file);
+        }
+        let h = sha256_hex(sha256)?;
+        let before = stamp(&file.metadata()?);
+        let known = |st: Stamp| self.checked.lock().is_ok_and(|c| c.contains(&(h.clone(), st)));
+        if before.is_some_and(known) {
+            return Ok(file);
+        }
+        let mut digest = Sha256::new();
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            digest.update(&buf[..n]);
+        }
+        if hex::encode(digest.finalize()) != h {
+            return Err(BlobError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a stored file does not match its sha256: it was changed or replaced",
+            )));
+        }
+        file.seek(SeekFrom::Start(0))?;
+        if let Some(st) = before
+            && stamp(&file.metadata()?) == before
+            && let Ok(mut c) = self.checked.lock()
+        {
+            c.insert((h, st));
+        }
+        Ok(file)
     }
 
     /// Where `owner`'s blob is: the profile's sealed copy first, then the plain one. A profile with
@@ -419,7 +511,7 @@ impl BlobStore {
         let sealing = self.sealing(owner)?;
         let tmp = self.root.join("tmp").join(tmp_name());
         let result = (|| {
-            let mut out = File::create(&tmp)?;
+            let mut out = create_private(&tmp)?;
             let mut buf = vec![0u8; CHUNK];
             let (h, size) = if let Some((profile, dek)) = &sealing {
                 let mut s = Sealing::new(dek, *profile);
@@ -480,7 +572,7 @@ impl BlobStore {
         };
         let tmp = self.root.join("tmp").join(tmp_name());
         let result = async {
-            let mut out = tokio::fs::File::create(&tmp).await?;
+            let mut out = create_spool(&tmp).await?;
             let mut buf = vec![0u8; CHUNK];
             if let Some((profile, dek)) = &sealing {
                 let mut s = Sealing::new(dek, *profile);
@@ -548,7 +640,7 @@ impl BlobStore {
         };
         match self.find(owner, sha256)? {
             None => Err(not_found(sha256)),
-            Some(Found::Plain(p)) => Ok(BlobReader::Plain(open(&p)?)),
+            Some(Found::Plain(p)) => Ok(BlobReader::Plain(self.checked_plain(owner, sha256, open(&p)?)?)),
             Some(Found::Sealed {
                 path,
                 dek,
@@ -563,16 +655,28 @@ impl BlobStore {
         }
     }
 
-    /// The bytes of `owner`'s blob as an async reader, with their size, for streaming a response.
+    /// The bytes of `owner`'s blob as an async reader, with their size, for streaming a response. A
+    /// sealed file's header, first record and last record are checked before this returns, so a file
+    /// that does not open is an error here, while a route can still answer with an error status; a
+    /// later record that fails ends the stream with an error.
     pub async fn open_async(
         &self,
         owner: BlobOwner,
         sha256: &str,
     ) -> Result<(impl AsyncRead + Send + Unpin + 'static, u64), BlobError> {
         let (store, sha) = (self.clone(), sha256.to_string());
-        let reader = tokio::task::spawn_blocking(move || store.open_seek(owner, &sha))
-            .await
-            .map_err(|e| BlobError::Io(io::Error::other(e)))??;
+        let (reader, first) = tokio::task::spawn_blocking(move || -> Result<_, BlobError> {
+            let mut reader = store.open_seek(owner, &sha)?;
+            let mut first = Vec::new();
+            if matches!(reader, BlobReader::Sealed(_)) {
+                first.resize(RECORD, 0);
+                let n = reader.read(&mut first)?;
+                first.truncate(n);
+            }
+            Ok((reader, first))
+        })
+        .await
+        .map_err(|e| BlobError::Io(io::Error::other(e)))??;
         let size = reader.len()?;
         let stream: Box<dyn AsyncRead + Send + Unpin> = match reader {
             BlobReader::Plain(f) => Box::new(tokio::fs::File::from_std(f)),
@@ -598,11 +702,7 @@ impl BlobStore {
                         }
                     }
                 });
-                Box::new(SealedStream {
-                    rx,
-                    buf: Vec::new(),
-                    at: 0,
-                })
+                Box::new(SealedStream { rx, buf: first, at: 0 })
             }
         };
         Ok((stream, size))
@@ -613,7 +713,10 @@ impl BlobStore {
     pub fn with_local_copy(&self, owner: BlobOwner, sha256: &str) -> Result<LocalCopy, BlobError> {
         match self.find(owner, sha256)? {
             None => Err(not_found(sha256)),
-            Some(Found::Plain(path)) => Ok(LocalCopy { path, temporary: false }),
+            Some(Found::Plain(path)) => {
+                self.checked_plain(owner, sha256, File::open(&path)?)?;
+                Ok(LocalCopy { path, temporary: false })
+            }
             Some(Found::Sealed { .. }) => {
                 let mut reader = self.open_seek(owner, sha256)?;
                 let copy = LocalCopy {
@@ -930,6 +1033,22 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn an_upload_spool_is_readable_by_its_user_only() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = BlobStore::new(dir.path())?;
+        let p = store.staging_path("upload-0123abcd")?;
+        let mut f = create_spool(&p).await?;
+        f.write_all(b"Carmen Ortega, LabNorte").await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&p)?.permissions().mode() & 0o777, 0o600);
+        }
+        assert!(create_spool(&p).await.is_err(), "an existing spool opened again");
+        Ok(())
+    }
+
     #[test]
     fn staging_path_takes_one_plain_file_name_only() -> Result<(), BlobError> {
         let dir = tempfile::tempdir()?;
@@ -1182,6 +1301,43 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn a_planted_plain_file_never_stands_in_for_a_profiles_blob() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(dir.path())?;
+        let p = BlobOwner::Profile(Uuid::new_v4());
+        let h = store.put_bytes(p, b"%PDF-1.4 LabNorte, Alex Rivera lipid panel")?;
+        // the sealed copy goes, and other bytes sit at the plain path of its sha256
+        for f in files_under(&dir.path().join("enc")) {
+            set_mode(&f, 0o640)?;
+            fs::remove_file(f)?;
+        }
+        let plain = store.path(&h)?;
+        fs::create_dir_all(plain.parent().unwrap_or(dir.path()))?;
+        fs::write(&plain, b"%PDF-1.4 forged: not the lab report")?;
+        for (what, got) in [
+            ("get_bytes", store.get_bytes(p, &h).map(|_| ())),
+            ("size", store.size(p, &h).map(|_| ())),
+            ("local copy", store.with_local_copy(p, &h).map(|_| ())),
+        ] {
+            let err = got.expect_err(what);
+            assert!(
+                matches!(err, BlobError::Io(ref e) if e.kind() == io::ErrorKind::InvalidData),
+                "{what}: {err:?}"
+            );
+        }
+        assert!(store.open_async(p, &h).await.is_err(), "streamed the forged bytes");
+        // a legacy plain file with the right bytes still reads, for every owner, also twice
+        fs::write(&plain, b"%PDF-1.4 LabNorte, Alex Rivera lipid panel")?;
+        for _ in 0..2 {
+            assert_eq!(store.get_bytes(p, &h)?, b"%PDF-1.4 LabNorte, Alex Rivera lipid panel");
+        }
+        // and a file changed after it was checked once is caught again
+        fs::write(&plain, b"%PDF-1.4 forged after the first read!!")?;
+        assert!(store.get_bytes(p, &h).is_err(), "a checked file changed later");
+        Ok(())
+    }
+
     #[test]
     fn a_local_copy_of_a_sealed_blob_is_private_and_goes_when_dropped() -> Result<(), BlobError> {
         let dir = tempfile::tempdir()?;
@@ -1213,9 +1369,10 @@ mod tests {
         let h = store.put_bytes(p, &data)?;
         let file = files_under(&dir.path().join("enc")).remove(0);
         set_mode(&file, 0o640)?;
-        let mut bytes = fs::read(&file)?;
-        let at = bytes.len() - 3;
-        bytes[at] ^= 1;
+        let good = fs::read(&file)?;
+        // a byte of the middle record: the file opens, its first record reads, the rest fails
+        let mut bytes = good.clone();
+        bytes[HEADER + RECORD + 16 + 5] ^= 1;
         fs::write(&file, &bytes)?;
         let mut r = store.open_seek(p, &h)?;
         let mut head = [0u8; 8];
@@ -1226,6 +1383,12 @@ mod tests {
             matches!(err, BlobError::Io(ref e) if e.kind() == io::ErrorKind::InvalidData),
             "{err:?}"
         );
+        // a byte of the last record: the file does not even open
+        let mut bytes = good.clone();
+        let at = bytes.len() - 3;
+        bytes[at] ^= 1;
+        fs::write(&file, &bytes)?;
+        assert!(store.open_seek(p, &h).is_err(), "a changed last record opened");
         // cut back to the first record only: refused, never read short
         fs::write(&file, &bytes[..HEADER + RECORD + 16])?;
         assert!(store.get_bytes(p, &h).is_err(), "a cut file read short");
@@ -1257,6 +1420,22 @@ mod tests {
         let err = r.read_to_end(&mut out).await.expect_err("a bad record streamed");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(out.len() <= 2 * RECORD, "bytes of the bad record went out");
+        // a bad first record, a bad last one or a bad header: refused before any byte, so a route
+        // can still answer with an error status
+        for at in [HEADER + 1, bytes.len() - 1, 30] {
+            let mut bad = fs::read(&file)?;
+            bad[HEADER + 2 * (RECORD + 16) + 1] ^= 1; // undo the record 2 change
+            bad[at] ^= 1;
+            fs::write(&file, &bad)?;
+            let err = store.open_async(p, &h).await.err().expect("a bad file opened");
+            assert!(
+                matches!(err, BlobError::Io(ref e) if e.kind() == io::ErrorKind::InvalidData),
+                "{at}: {err:?}"
+            );
+            bad[at] ^= 1;
+            bad[HEADER + 2 * (RECORD + 16) + 1] ^= 1;
+            fs::write(&file, &bad)?;
+        }
         Ok(())
     }
 
