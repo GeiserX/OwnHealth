@@ -35,7 +35,7 @@
 	import { createPasskey } from '#lib/components/pages2/webauthn';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { t } from '#lib/i18n/index.svelte';
-	import { lastSignIn } from '#lib/logic/people';
+	import { deletedNoteKey, lastSignIn } from '#lib/logic/people';
 	import { app, setProfile } from '#lib/state/app.svelte';
 
 	const LOCKABLE: Scope[] = ['read:labs', 'read:vitals', 'read:wearables', 'read:records', 'read:genome', 'read:genome_raw', 'read:sensitive', 'read:documents_text'];
@@ -124,10 +124,17 @@
 	// Delete a profile: type its short name to confirm, then step-up.
 	let deleting = $state<string | null>(null);
 	let confirmSlug = $state('');
+	// The name of the profile just deleted: its card is gone, so a line above the cards says it went.
+	let deletedName = $state<string | null>(null);
+	let deletedPending = $state(false);
 	function removeProfile(e: SubmitEvent, slug: string) {
 		e.preventDefault();
+		const name = profileName(slug);
+		deletedName = null;
 		act(slug, async () => {
-			await deleteProfile(slug);
+			const r = await deleteProfile(slug);
+			deletedPending = deletedNoteKey(r.blobs_pending ?? 0, r.folders_pending ?? 0) === 'st_deleted_pending';
+			deletedName = name;
 			deleting = null;
 			confirmSlug = '';
 			app.me = await getMe();
@@ -287,6 +294,7 @@
 	</div>
 
 	<div class="grid" style="align-content:start">
+		<div role="status">{#if deletedName}<div class="note">{tf(deletedPending ? 'st_deleted_pending' : 'st_deleted', { name: deletedName })}</div>{/if}</div>
 		{#each managed as p (p.id)}
 			<section class="card">
 				<h3>{p.display_name}<span class="r">{t('r_' + p.role)}{p.is_minor ? ' · ' + t('i2_minor') : ''}</span></h3>
