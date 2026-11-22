@@ -767,3 +767,81 @@ async fn a_scan_of_a_report_we_hold_matches_it_once_ocr_reads_it() -> anyhow::Re
     assert_eq!(near.map(|n| n.document_id), None, "another report is not the same");
     Ok(())
 }
+
+/// A scan that moves to another profile while OCR reads it: the word layers the job writes after
+/// the move are stored for the profile the document has now, so they open for it. The worker runs
+/// with its own keyring, as the worker process does, and it read the scan as the old profile's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scan_moved_while_ocr_reads_it_keeps_its_word_layers_for_the_new_profile() -> anyhow::Result<()> {
+    use ownhealth_core::blobs::{BlobOwner, BlobStore};
+    let _turn = TURN.lock().await;
+    let e = setup().await?;
+    let mut c = e.conn().await?;
+    let ln = generate::labnorte_3p();
+    let (pdf, _) = generate::render(&ln, None);
+    let doc = e
+        .store(&mut c, &scan(&pdf), "alex", "application/pdf", "scan.pdf")
+        .await?;
+    let s = import_pdf_opts(
+        &mut c,
+        &e.blobs,
+        doc,
+        false,
+        ImportOptions {
+            threshold: DEFAULT_THRESHOLD,
+            ocr: true,
+        },
+    )
+    .await?;
+    assert_eq!(s.reasons.get("ocr_queued"), Some(&1), "{s:?}");
+    let sam = e.fam.profile("sam");
+    // the reader moves the scan to Sam the first time it is called, and commits the move
+    let read = text_reader(&pdf, 0.995, Arc::new(AtomicUsize::new(0)));
+    let (pool, app, user) = (e.db.pool.clone(), e.blobs.clone(), e.fam.user("alex"));
+    let handle = tokio::runtime::Handle::current();
+    let once = Arc::new(std::sync::Once::new());
+    let moving: Reader = Arc::new(move |rgb, w, h, dpi, page_no| {
+        once.call_once(|| {
+            handle
+                .block_on(async {
+                    let mut tx = pool.begin().await?;
+                    ownhealth_ingest_pdf::assign_document(&mut tx, &app, doc, sam, user, None).await?;
+                    tx.commit().await?;
+                    anyhow::Ok(())
+                })
+                .expect("the move");
+        });
+        read(rgb, w, h, dpi, page_no)
+    });
+    use_reader(Some((moving, "test-models".into())));
+    let ctx = ownhealth_core::jobs::JobContext {
+        blobs: BlobStore::for_settings(&e.settings)?,
+        ..e.job_context()
+    };
+    let kinds = [ownhealth_core::arrive::OCR_JOB.to_string()];
+    let ran = ownhealth_core::jobs::run_one(&ctx, "ocr", Some(&kinds)).await;
+    use_reader(None);
+    let job = ran?.ok_or_else(|| anyhow::anyhow!("no OCR job ran"))?;
+    let (state, error): (String, Option<String>) = sqlx::query_as("select state, last_error from job where id = $1")
+        .bind(job.id)
+        .fetch_one(&mut *c)
+        .await?;
+    let owner: Option<Uuid> = sqlx::query_scalar("select profile_id from document where id = $1")
+        .bind(doc)
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(owner, Some(sam), "the move did not happen");
+    let layers: Vec<String> = sqlx::query_scalar(
+        "select encode(words_blob, 'hex') from ocr_run where document_id = $1 and words_blob is not null",
+    )
+    .bind(doc)
+    .fetch_all(&mut *c)
+    .await?;
+    assert!(!layers.is_empty(), "OCR wrote no layer: job {state} {error:?}");
+    for sha in &layers {
+        if let Err(err) = e.blobs.get_bytes(BlobOwner::Profile(sam), sha) {
+            anyhow::bail!("an OCR word layer does not open for Sam, the scan's profile now: {err}");
+        }
+    }
+    Ok(())
+}

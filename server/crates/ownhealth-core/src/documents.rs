@@ -495,6 +495,18 @@ pub async fn lock_owner(conn: &mut PgConnection, document_id: Uuid) -> Result<Op
     )
 }
 
+/// Lock document `document_id`'s row and return the owner its files are stored for now (None: no
+/// such document). A job that stores a file of the document after slow work (an OCR layer) stores it
+/// for this owner, in the transaction that records it: a move takes the same lock
+/// ([`lock_owner`]), so it re-keys that file too, or sees the new owner already.
+pub async fn lock_files_owner(conn: &mut PgConnection, document_id: Uuid) -> Result<Option<BlobOwner>> {
+    let row: Option<Option<Uuid>> = sqlx::query_scalar("select profile_id from document where id = $1 for update")
+        .bind(document_id)
+        .fetch_optional(conn)
+        .await?;
+    Ok(row.map(|profile| BlobOwner::of_document(profile, document_id)))
+}
+
 /// After document `document_id` moved from profile `from` to `to` (`None`: no profile): every blob of
 /// the document (the file, its page layers and images, its OCR layers) is stored for `to` as well, so
 /// the new profile's key opens them, and the removal of `from`'s copies is queued
