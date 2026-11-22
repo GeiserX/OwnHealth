@@ -243,7 +243,7 @@
 				{:else if !chain.data}
 					<div class="muted">{t('loading')}</div>
 				{:else}
-					{#each chainLines(chain.data) as l (l.key)}
+					{#each chainLines(chain.data, int) as l (l.key)}
 						<div class="line"><span class="pill {l.tone}"><i aria-hidden="true"></i>{t(pillKey[l.tone])}</span><span>{tf(l.key, { ...l.vars, at: day(String(l.vars.at ?? '')) })}</span></div>
 					{/each}
 				{/if}
@@ -256,13 +256,13 @@
 						<thead><tr><th>{t('i2_a_time')}</th><th>{t('i2_a_who')}</th><th>{t('i2_a_tool')}</th><th>{t('profile')}</th><th>{t('i2_a_result')}</th><th style="text-align:right">{t('i2_a_out')}</th><th>{t('i2_a_res')}</th></tr></thead>
 						<tbody>
 							{#each shownAudit as a (a.id)}
-								{@const who = auditActor(a.actor, appNames)}
+								{@const by = auditActor(a.actor, appNames)}
 								{@const res = auditResult(a.result_kind)}
 								{@const out = auditOut(a)}
 								{@const w = what(a)}
 								<tr>
 									<td class="num muted" title={a.ts}>{stamp(a.ts)}</td>
-									<td data-label={t('i2_a_who')}><div class="cl" style="max-width:160px" title={who.raw}>{who.label}{a.via === 'mcp' ? '' : ` · ${a.via}`}</div></td>
+									<td data-label={t('i2_a_who')}><div class="cl" style="max-width:160px" title={by.raw}>{by.label}{a.via === 'mcp' ? '' : ` · ${a.via}`}</div></td>
 									<td data-label={t('i2_a_tool')}><div class="cl" class:mono={w.code} style="max-width:170px" title={a.tool ?? a.action}>{w.text}</div></td>
 									<td data-label={t('profile')}>{a.profile ?? '—'}</td>
 									<!-- Result sits before the free-width columns so a denied call is never pushed off the card. -->
@@ -280,23 +280,27 @@
 		</section>
 		<section class="card" style="padding:8px 6px 2px" aria-labelledby="who-h">
 			<h3 style="padding:0 8px">
-				<span id="who-h">{tf('au_who', { name: name(whoProfile) })}</span>
-				<span class="r p2row">
-					{t('au_who_d')}
-					<select class="p2in" value={whoProfile} onchange={(e) => (whoPicked = e.currentTarget.value)} aria-label={t('profile')}>
-						{#each app.me?.profiles ?? [] as p (p.id)}<option value={p.slug}>{p.display_name}</option>{/each}
-					</select>
-				</span>
+				<span id="who-h">{whoProfile ? tf('au_who', { name: name(whoProfile) }) : t('au_who_h0')}</span>
+				{#if whoProfile}
+					<span class="r p2row">
+						{t('au_who_d')}
+						<select class="p2in" value={whoProfile} onchange={(e) => (whoPicked = e.currentTarget.value)} aria-label={t('au_who_pick')}>
+							{#each app.me?.profiles ?? [] as p (p.id)}<option value={p.slug}>{p.display_name}</option>{/each}
+						</select>
+					</span>
+				{/if}
 			</h3>
-			{#if who.error}
+			{#if app.me && !whoProfile}
+				<div class="empty">{t('h1_noprofile')}</div>
+			{:else if who.error}
 				<NotReady error={who.error} onretry={loadWho} />
 			{:else}
-				{#if who.data?.scope === 'own'}<div class="note" style="padding:0 8px 4px">{t('au_who_own')}</div>{/if}
+				{#if who.data?.profile === whoProfile && who.data.scope === 'own'}<div class="note" style="padding:0 8px 4px">{t('au_who_own')}</div>{/if}
 				<div class="tscroll">
 					<table class="t nw stack">
 						<thead><tr><th>{t('i2_a_who')}</th><th>{t('au_who_via')}</th><th style="text-align:right">{t('au_who_entries')}</th><th>{t('au_who_first')}</th><th>{t('au_who_last')}</th></tr></thead>
 						<tbody>
-							{#each who.data?.profile === whoProfile ? who.data.items : [] as w (w.actor + w.via + w.actor_kind)}
+							{#each who.data?.profile === whoProfile ? who.data.items : [] as w}
 								{@const label = auditActor(w.actor, appNames)}
 								<tr>
 									<td data-label={t('i2_a_who')}><div class="cl" style="max-width:200px" title={label.raw}>{label.label}</div></td>

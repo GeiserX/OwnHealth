@@ -7,8 +7,8 @@ declare module 'node:child_process' {
 
 // The audit checks write the anchor file a backup would write, in the folder the config picks.
 declare module 'node:fs' {
-	export function mkdirSync(path: string, options: { recursive: true }): string | undefined;
-	export function writeFileSync(path: string, data: string): void;
+	export function mkdirSync(path: string, options: { recursive: true; mode?: number }): string | undefined;
+	export function writeFileSync(path: string, data: string, options?: { mode?: number }): void;
 }
 declare module 'node:os' {
 	export function tmpdir(): string;

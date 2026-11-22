@@ -21,7 +21,7 @@ process.env.OWNHEALTH_E2E_VIEWER_PORT ??= String(viewerPort);
 // runner's environment, so they keep this name.
 process.env.OWNHEALTH_E2E_DB ??= `oh_e2e_${Math.random().toString(16).slice(2, 14)}`;
 // Where the server looks for the audit anchor a backup writes (OWNHEALTH_ANCHOR_DIR): the audit
-// checks write one there by hand. serve.sh removes it on exit.
+// checks write one there by hand. serve.sh removes it on exit when it was not there before.
 process.env.OWNHEALTH_E2E_ANCHOR_DIR ??= `${tmpdir()}/${process.env.OWNHEALTH_E2E_DB}-anchor`;
 
 export default defineConfig({

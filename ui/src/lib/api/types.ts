@@ -495,7 +495,7 @@ export interface AuditChainOut {
 	ok: boolean;
 	verified: number; // entries checked from the first one
 	broken: { seq: number | null; kind: 'hash' | 'prev_hash' | 'missing_link' | 'missing_event' | 'unlinked' | 'uncheckable' } | null;
-	anchor: { state: 'none' | 'ok' | 'mismatch' | 'unreadable'; seq: number | null; at: IsoDateTime | null };
+	anchor: { state: 'none' | 'ok' | 'mismatch' | 'unreadable' | 'unchecked'; seq: number | null; at: IsoDateTime | null }; // unchecked: the log itself cannot be checked
 }
 
 /** GET /api/audit/who?profile=: one row per actor and channel on that profile. */

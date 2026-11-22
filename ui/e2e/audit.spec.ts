@@ -4,7 +4,7 @@
 // `ownhealth backup` writes, put in OWNHEALTH_ANCHOR_DIR by hand. Every edit is undone at the end:
 // the rows go back and the chain is hashed again, which gives the same hashes as before. Then the
 // who-saw-my-data card: everyone on a profile Alex owns, only his own entries on one he cares for.
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
@@ -29,15 +29,31 @@ function asOwner(statements: string) {
 	sql(`alter table audit_event disable trigger user; alter table audit_chain disable trigger user; ${statements}; alter table audit_event enable trigger user; alter table audit_chain enable trigger user`);
 }
 
+// owner-only, as a backup writes it: the server refuses a folder or file others may write
 function writeAnchor(seq: number, hash: string) {
-	mkdirSync(anchorDir, { recursive: true });
-	writeFileSync(`${anchorDir}/audit-head.json`, JSON.stringify({ schema: 'ownhealth.audit-anchor/v1', seq, hash, at: '2026-11-22T08:00:00+00:00' }));
+	mkdirSync(anchorDir, { recursive: true, mode: 0o700 });
+	writeFileSync(`${anchorDir}/audit-head.json`, JSON.stringify({ schema: 'ownhealth.audit-anchor/v1', seq, hash, at: '2026-11-22T08:00:00+00:00' }), { mode: 0o600 });
 }
 
 function collectPageErrors(page: Page): string[] {
 	const errors: string[] = [];
 	page.on('pageerror', (e) => errors.push(e.message));
 	return errors;
+}
+
+/** One MCP tool call with a personal access token: initialize, then the call (streamable HTTP). */
+async function mcpCall(request: APIRequestContext, token: string, tool: string) {
+	const headers = { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' };
+	const init = await request.post('/mcp', {
+		headers,
+		data: { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e', version: '0' } } }
+	});
+	expect(init.ok(), await init.text()).toBe(true);
+	const sid = init.headers()['mcp-session-id'];
+	const session = sid ? { ...headers, 'mcp-session-id': sid } : headers;
+	await request.post('/mcp', { headers: session, data: { jsonrpc: '2.0', method: 'notifications/initialized' } });
+	const call = await request.post('/mcp', { headers: session, data: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: tool, arguments: {} } } });
+	expect(call.ok(), await call.text()).toBe(true);
 }
 
 test.describe.configure({ mode: 'serial' });
@@ -52,7 +68,7 @@ test('the audit card shows the log verified, anchored, rewritten and broken, in 
 
 	await page.goto('/mcp-access?lang=en');
 	await expect(integrity.getByText(/Every entry is verified, up to entry \d+\./)).toBeVisible();
-	await expect(integrity.getByText('No backup has kept a copy outside the database yet. The next backup does.')).toBeVisible();
+	await expect(integrity.getByText('No copy of the log is kept outside the database right now. The next backup keeps one if the log holds.')).toBeVisible();
 
 	// a backup anchors the head: the page shows the entry and the day it was kept
 	const [seq, hash] = sql('select seq, encode(hash, \'hex\') from audit_chain order by seq desc limit 1').split('|');
@@ -60,19 +76,27 @@ test('the audit card shows the log verified, anchored, rewritten and broken, in 
 	await page.reload();
 	await expect(integrity.getByText(`It matches entry ${seq} as the backup of 2026-11-22 kept it outside the database.`)).toBeVisible();
 
-	// the owner edits the oldest entry and hashes the chain again: every link holds, the anchor does not
+	// the owner edits the oldest entry and hashes the chain again: every link holds, the anchor does not,
+	// so the chain line no longer reads as verified either
 	const first = sql('select min(id) from audit_event');
 	const tool = sql(`select coalesce(tool, '<null>') from audit_event where id = ${first}`);
 	asOwner(`update audit_event set tool = 'rewritten' where id = ${first}; ${REHASH}`);
 	await page.reload();
-	await expect(integrity.getByText(/Every entry is verified, up to entry \d+\./)).toBeVisible();
-	await expect(integrity.getByText(new RegExp(`It no longer matches entry ${seq} as the backup of 2026-11-22 kept it outside the database: someone with database rights rewrote or removed entries\\. Backups stop until the operator checks it\\.`))).toBeVisible();
-	await expect(integrity.getByText('Problem', { exact: true })).toBeVisible();
+	await expect(integrity.getByText(/The entries link together up to entry \d+, but the log no longer matches the copy kept outside the database \(below\), so they are not verified\./)).toBeVisible();
+	await expect(integrity.getByText(/Every entry is verified/)).toHaveCount(0);
+	await expect(
+		integrity.getByText(
+			`It no longer matches entry ${seq} as the backup of 2026-11-22 kept it outside the database. Either the database was restored from an older backup, or someone with database rights rewrote or removed entries. Backups stop until the operator checks which: ask whether the database was restored after 2026-11-22.`
+		)
+	).toBeVisible();
+	await expect(integrity.getByText('Problem', { exact: true })).toHaveCount(2);
 
-	// an edit without the rehash: the chain itself names the entry
+	// an edit without the rehash: the chain itself names the entry. The page reuses a verdict for up to
+	// a minute while the newest entry and the anchor stay the same, so one more entry moves the newest.
 	const last = sql('select seq || \'|\' || event_id from audit_chain order by seq desc limit 1').split('|');
 	const lastTool = sql(`select coalesce(tool, '<null>') from audit_event where id = ${last[1]}`);
 	asOwner(`update audit_event set tool = 'edited' where id = ${last[1]}`);
+	sql("insert into audit_event (actor_kind, via, action, tool) values ('system', 'job', 'read', 'e2e')"); // on no profile
 	await page.goto('/mcp-access?lang=es');
 	const integridad = page.getByRole('group', { name: 'El propio registro' });
 	await expect(integridad.getByText(new RegExp(`La entrada ${last[0]} se cambió después de escribirse\\. Las entradas hasta la ${Number(last[0]) - 1} están verificadas\\.`))).toBeVisible();
@@ -92,17 +116,43 @@ test('who saw my data lists everyone on a profile Alex owns, and only his own en
 	const carmen = sql("select id from profile where slug = 'carmen'");
 	sql(`insert into audit_event (actor_kind, via, action, tool, profile_id) values ('system', 'job', 'read', 'e2e', '${carmen}')`);
 
+	// two tokens with one label (a token made again under the same name), each used over MCP on Alex:
+	// two rows that read the same, and the page still shows
+	for (let i = 0; i < 2; i++) {
+		const made = await page.request.post('/api/tokens', { data: { label: 'Claude', scopes: ['read:summary'], profiles: ['alex'], default_profile: 'alex' } });
+		expect(made.ok(), await made.text()).toBe(true);
+		await mcpCall(page.request, (await made.json()).plaintext, 'get_health_status');
+	}
+
 	await page.goto('/mcp-access?lang=en');
 	const card = page.getByRole('region', { name: "Who saw Alex's data" });
 	await expect(card).toBeVisible();
 	const row = card.getByRole('row').filter({ hasText: 'OwnHealth itself' });
 	await expect(row.getByRole('cell').first()).toHaveText('OwnHealth');
 	await expect(row).toContainText('2'); // the two job reads the first check added on Alex
+	await expect(card.getByRole('row').filter({ hasText: 'agent (MCP)' }).filter({ hasText: 'Claude' })).toHaveCount(2);
+	// Alex manages his own profile: he sees everyone, so the note for a profile he only views is absent
+	await expect(card.getByText('You do not manage this profile, so you see only what you did on it.')).toHaveCount(0);
 
-	await card.getByRole('combobox', { name: 'Profile' }).selectOption('carmen');
+	await card.getByRole('combobox', { name: 'Whose data to show' }).selectOption('carmen');
 	const carmenCard = page.getByRole('region', { name: "Who saw Carmen's data" });
 	await expect(carmenCard.getByText('You do not manage this profile, so you see only what you did on it.')).toBeVisible();
 	await expect(carmenCard.getByText('OwnHealth itself')).toHaveCount(0); // the job read of Carmen is not his
+
+	// back to a profile he manages, with its answer held back: the note of Carmen's card never shows
+	// on Alex's card while it loads
+	await page.route('**/api/audit/who?profile=alex', async (route) => {
+		await new Promise((r) => setTimeout(r, 1500));
+		await route.continue();
+	});
+	await carmenCard.getByRole('combobox', { name: 'Whose data to show' }).selectOption('alex');
+	const alexCard = page.getByRole('region', { name: "Who saw Alex's data" });
+	await expect(alexCard).toBeVisible();
+	// read once, at once, while Alex's answer is still held back (an expect would wait it out)
+	expect(await alexCard.getByText('You do not manage this profile, so you see only what you did on it.').count()).toBe(0);
+	await expect(alexCard.getByRole('row').filter({ hasText: 'OwnHealth itself' })).toBeVisible();
+	await expect(alexCard.getByText('You do not manage this profile, so you see only what you did on it.')).toHaveCount(0);
+	await page.unroute('**/api/audit/who?profile=alex');
 
 	await page.goto('/mcp-access?lang=es');
 	const tarjeta = page.getByRole('region', { name: 'Quién vio los datos de Alex' });
