@@ -51,6 +51,8 @@
 		busy = true;
 		try {
 			const res = await uploadFiles(profile, files);
+			// the panel closed or moved to another profile while the files travelled: their rows stay out
+			if (gone) return;
 			items = res.items;
 			poll();
 		} catch (e) {
@@ -78,7 +80,11 @@
 	const docOf = (i: ImportItem) => i.document_id ?? (i.job_id != null ? (jobs[i.job_id]?.document_id ?? cgmDocument(jobs[i.job_id]?.result)) : undefined);
 	const cgmDocument = (r: unknown) => (cgmLines(r) && typeof (r as { document_id?: unknown }).document_id === 'string' ? (r as { document_id: string }).document_id : undefined);
 	const docIds = () => items.filter((i) => (i.job_id == null || jobs[i.job_id]?.state === 'done')).map(docOf).filter((x): x is string => !!x);
-	$effect(() => jobPoll.stop);
+	let gone = false;
+	$effect(() => () => {
+		gone = true;
+		jobPoll.stop();
+	});
 
 	function stateOf(i: ImportItem): { word: string; cls: string } {
 		// A file sent again whose first import failed is not "already imported": its reason is in Other items.
@@ -89,7 +95,13 @@
 		if (!j) return { word: t('i2_job_queued'), cls: 'p-info' };
 		return { word: t('i2_job_' + j.state), cls: j.state === 'done' ? 'p-ok' : j.state === 'failed' || j.state === 'dead' ? 'p-out' : 'p-info' };
 	}
-	const files = (e: Event) => Array.from((e.currentTarget as HTMLInputElement).files ?? []);
+	// the picked files, then an empty picker, so picking the same file again is a new pick
+	const files = (e: Event) => {
+		const input = e.currentTarget as HTMLInputElement;
+		const list = Array.from(input.files ?? []);
+		input.value = '';
+		return list;
+	};
 	const lineText = (l: CgmLine) => (l.n != null ? tp(l.key, l.n, l.vars) : tf(l.key, l.vars ?? {}));
 </script>
 
@@ -141,7 +153,7 @@
 					{#if cgm}
 						<tr>
 							<td colspan="4">
-								<ul class="cgm-lines" aria-label={i.filename}>
+								<ul class="cgm-lines" role="list" aria-label={i.filename}>
 									{#each cgm as l}<li class:dim={l.key !== 'i2_cgm_imported'}>{lineText(l)}</li>{/each}
 								</ul>
 							</td>

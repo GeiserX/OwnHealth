@@ -66,6 +66,18 @@ test('a LibreView export in Spanish names the column it did not read', async ({ 
 	);
 });
 
+test('the picker takes the same file again, and another profile gets an empty upload panel', async ({ page }) => {
+	const lines = await upload(page, 'en', 'libreview-en-mgdl.csv');
+	await expect(lines.getByRole('listitem').first()).toBeVisible({ timeout: 60_000 });
+	// the picker is empty again once it handed its files over, so the same file can be picked again
+	await expect(page.locator('section.up input[type=file]').first()).toHaveValue('');
+	// another profile with the panel open: Lucía's rows and links stay with Lucía
+	await page.getByRole('button', { name: 'Alex Rivera', exact: true }).click();
+	await expect(page.locator('section.up h3')).toContainText('Alex Rivera');
+	await expect(page.locator('section.up table')).toHaveCount(0);
+	await expect(page.locator('section.up').getByRole('link', { name: 'libreview-en-mgdl.csv' })).toHaveCount(0);
+});
+
 test.describe('a browser that reports an old zone name', () => {
 	// Chromium names India Asia/Calcutta, which the Debian Postgres image does not ship
 	test.use({ timezoneId: 'Asia/Kolkata' });

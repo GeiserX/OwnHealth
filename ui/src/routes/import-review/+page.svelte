@@ -334,17 +334,20 @@
 </PageHeader>
 
 {#if showUpload && prof}
-	<UploadPanel
-		profile={prof.slug}
-		profileName={prof.display_name}
-		rowsOf={(id) => items.filter((i) => i.kind === 'candidate_row' && i.document_id === id).length}
-		failedOf={(id) => failedDocs.has(id)}
-		ondone={(ids) => {
-			load();
-			refreshReviewTotal();
-			if (ids[0]) goto(`?doc=${ids[0]}`);
-		}}
-	/>
+	<!-- a new profile gets a new panel: no file row, job poll or upload in flight carries over to it -->
+	{#key prof.slug}
+		<UploadPanel
+			profile={prof.slug}
+			profileName={prof.display_name}
+			rowsOf={(id) => items.filter((i) => i.kind === 'candidate_row' && i.document_id === id).length}
+			failedOf={(id) => failedDocs.has(id)}
+			ondone={(ids) => {
+				load();
+				refreshReviewTotal();
+				if (ids[0]) goto(`?doc=${ids[0]}`);
+			}}
+		/>
+	{/key}
 {/if}
 
 {#if showShc && prof}
