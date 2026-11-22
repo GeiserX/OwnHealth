@@ -189,3 +189,31 @@ test('on a phone the note on a partial row wraps inside the card, in es', async 
 	const [scroll, client] = await section(page).evaluate((el) => [el.scrollWidth, el.clientWidth]);
 	expect(scroll).toBeLessThanOrEqual(client);
 });
+
+test('on a phone an errored row reads as a sentence, not one letter per line, in es', async ({ page }) => {
+	await page.route('**/api/profiles/lucia/status*', (route) => route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":{"code":"internal","message":"boom"}}' }));
+	await page.setViewportSize({ width: 390, height: 844 });
+	await page.goto('/?lang=es');
+	const note = rowOf(page, 'Lucía Rivera').getByRole('status');
+	await expect(note).toContainText('No se pudo cargar');
+	await expect(note).toContainText('El servidor no respondió (HTTP 500');
+	const m = await note.evaluate((el) => {
+		const title = el.querySelector('b')!;
+		const sentence = el.querySelector('span')!;
+		const rects = [...title.getClientRects()];
+		return {
+			font: parseFloat(getComputedStyle(title).fontSize),
+			titleLines: rects.length,
+			titleHeight: Math.max(...rects.map((r) => r.height)),
+			sentenceWidth: sentence.getBoundingClientRect().width,
+			noteWidth: el.getBoundingClientRect().width
+		};
+	});
+	// the title is one line, under two line heights, not a column of letters
+	expect(m.titleLines).toBe(1);
+	expect(m.titleHeight).toBeLessThan(2 * m.font);
+	// the sentence runs across the name cell, not down a sliver of it
+	expect(m.sentenceWidth).toBeGreaterThan(0.6 * m.noteWidth);
+	const [scroll, client] = await section(page).evaluate((el) => [el.scrollWidth, el.clientWidth]);
+	expect(scroll).toBeLessThanOrEqual(client);
+});

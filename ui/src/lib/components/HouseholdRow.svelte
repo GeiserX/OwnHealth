@@ -73,7 +73,10 @@
 		width: 1%;
 		white-space: nowrap;
 	}
+	/* block, not the global .note flex row: as flex items the title, the sentence and Retry would
+	   share the narrow name cell side by side, and on a phone the title broke one letter per line */
 	.note {
+		display: block;
 		margin: 2px 0 0 30px;
 		font-size: 11.5px;
 		overflow-wrap: anywhere;
