@@ -13,6 +13,12 @@
 //! `load` refuses a file without a version, a row without an https `cite`, a template missing the
 //! text of a registry language (`ownhealth_core::langs::LANGS`), and a template the wording lint
 //! flags. Area loaders add their own checks on top.
+//!
+//! A language key is any code of `ownhealth_core::langs::LOCALES`, so the planned `de`, `fr`, `ca`,
+//! `it` and `pt` count too, and so does a key that ends in `_<code>`. A data key such as `ca`
+//! (calcium) or `pt` (prothrombin time), or one like `ratio_it` or `dose_pt`, reads as a language: its
+//! mapping becomes a template that must carry every registry language, and the file is refused. Name
+//! such keys another way (`calcium`, `pt_inr`).
 
 use std::collections::BTreeSet;
 use std::path::Path;

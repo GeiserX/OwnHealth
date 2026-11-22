@@ -207,3 +207,19 @@ fn walk(obj: &Value, skip: &[&str], path: &str, out: &mut Vec<(String, String)>)
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tables are slices, so the compiler no longer counts them, and a dropped pattern leaves every
+    /// other test green. Changing a count here is a decision: name the pattern added or removed.
+    #[test]
+    fn every_language_keeps_its_pattern_counts() {
+        let counts: Vec<(&str, usize, usize)> = PATTERNS
+            .iter()
+            .map(|p| (p.lang, p.anywhere.len(), p.start_verbs.len()))
+            .collect();
+        assert_eq!(counts, [("en", 5, 38), ("es", 4, 45)]);
+    }
+}
