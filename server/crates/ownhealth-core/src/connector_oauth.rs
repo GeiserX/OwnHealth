@@ -172,6 +172,30 @@ pub fn authority(url: &str) -> Option<String> {
     Some(format!("{host}:{}", u.port_or_known_default()?))
 }
 
+/// Whether `url` may be an address of a connection: the sign-in page the browser is sent to, or a
+/// token, revocation or data endpoint. https with a host and no user name or password; plain http only
+/// to a loopback address, and only where `egress` allows plain http (tests and the debug-only dev
+/// switch). So `javascript:`, `data:` and every other scheme are refused.
+pub fn safe_endpoint(url: &str, egress: &Egress) -> bool {
+    let Ok(u) = url::Url::parse(url) else {
+        return false;
+    };
+    if !u.username().is_empty() || u.password().is_some() {
+        return false;
+    }
+    let loopback = match u.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => return false,
+    };
+    match u.scheme() {
+        "https" => true,
+        "http" => loopback && !egress.https_only,
+        _ => false,
+    }
+}
+
 /// How a kind finds its endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Discovery {
@@ -228,17 +252,17 @@ fn join(issuer: &str, path: &str) -> String {
 /// otherwise.
 pub async fn resolve(spec: &KindSpec, issuer: &str, egress: &Egress) -> Result<Endpoints, OAuthError> {
     let issuer = issuer.trim().trim_end_matches('/').to_string();
-    if authority(&issuer).is_none() {
-        return Err(refused("bad_issuer", "The server address is not a web address."));
+    if authority(&issuer).is_none() || !safe_endpoint(&issuer, egress) {
+        return Err(refused("bad_issuer", "The server address is not a secure web address."));
     }
-    match &spec.discovery {
-        Discovery::Smart => discover_smart(&issuer, spec.scopes, egress).await,
+    let endpoints = match &spec.discovery {
+        Discovery::Smart => discover_smart(&issuer, spec.scopes, egress).await?,
         Discovery::Fixed {
             authorize,
             token,
             revocation,
             auth,
-        } => Ok(Endpoints {
+        } => Endpoints {
             authorize: join(&issuer, authorize),
             token: join(&issuer, token),
             revocation: revocation.map(|r| join(&issuer, r)),
@@ -246,8 +270,22 @@ pub async fn resolve(spec: &KindSpec, issuer: &str, egress: &Egress) -> Result<E
             aud: None,
             auth: *auth,
             issuer,
-        }),
+        },
+    };
+    // the browser is sent to the sign-in page, and the client secret goes to the token endpoint: a
+    // server that names anything but a secure web address gets neither
+    let named = [
+        Some(&endpoints.authorize),
+        Some(&endpoints.token),
+        endpoints.revocation.as_ref(),
+    ];
+    if !named.into_iter().flatten().all(|u| safe_endpoint(u, egress)) {
+        return Err(refused(
+            "bad_endpoint",
+            "The vendor's server names an address that is not a secure web address.",
+        ));
     }
+    Ok(endpoints)
 }
 
 async fn discover_smart(issuer: &str, scopes: &str, egress: &Egress) -> Result<Endpoints, OAuthError> {
@@ -298,6 +336,8 @@ pub struct ConnectorClient {
     pub vendor: String,
     pub issuer: Option<String>,
     pub client_id: String,
+    /// The client has a secret (`client_secret_id`), opened or not: it is bound to its `issuer`.
+    pub confidential: bool,
     pub secret: Option<SecretString>,
     pub redirect_uri: String,
 }
@@ -334,6 +374,7 @@ pub async fn load_client(
         vendor,
         issuer,
         client_id,
+        confidential: secret_id.is_some(),
         secret,
         redirect_uri,
     }))
@@ -483,11 +524,34 @@ pub struct Launch<'a> {
     pub binder: &'a str,
 }
 
+/// A stored launch: the vendor URL to send the browser to, and the `state` it carries (the route names
+/// the launch's binder cookie after it).
+#[derive(Debug, Clone)]
+pub struct Begun {
+    pub url: String,
+    pub state: String,
+}
+
 /// Store the launch and return the vendor URL to send the browser to.
-pub async fn begin(conn: &mut PgConnection, l: &Launch<'_>) -> Result<String, OAuthError> {
+pub async fn begin(conn: &mut PgConnection, l: &Launch<'_>) -> Result<Begun, OAuthError> {
     if l.binder.len() < 16 {
         return Err(refused("bad_binder", "The browser binder is missing."));
     }
+    // resolve checked it against the egress; whatever was stored, never a script or a data URL
+    let mut url = url::Url::parse(&l.endpoints.authorize)
+        .ok()
+        .filter(|u| {
+            matches!(u.scheme(), "https" | "http")
+                && u.host().is_some()
+                && u.username().is_empty()
+                && u.password().is_none()
+        })
+        .ok_or_else(|| {
+            refused(
+                "bad_endpoint",
+                "The vendor's sign-in address is not a secure web address.",
+            )
+        })?;
     let (state, verifier) = (token_urlsafe(32), token_urlsafe(48));
     let data = json!({
         "kind": l.kind, "client": l.client.id, "profile_id": l.profile_id, "label": l.label,
@@ -510,8 +574,6 @@ pub async fn begin(conn: &mut PgConnection, l: &Launch<'_>) -> Result<String, OA
     .execute(&mut *conn)
     .await?;
     let challenge = s256(&verifier);
-    let mut url = url::Url::parse(&l.endpoints.authorize)
-        .map_err(|_| refused("bad_issuer", "The vendor's sign-in address is not a web address."))?;
     {
         let mut q = url.query_pairs_mut();
         q.append_pair("response_type", "code")
@@ -525,7 +587,7 @@ pub async fn begin(conn: &mut PgConnection, l: &Launch<'_>) -> Result<String, OA
             q.append_pair("aud", aud);
         }
     }
-    Ok(url.into())
+    Ok(Begun { url: url.into(), state })
 }
 
 /// A launch whose state came back: everything the callback needs. The verifier never prints.
@@ -723,9 +785,9 @@ pub async fn save_connection(
         forget(id);
         return Ok(id);
     };
-    let old: Option<Option<Uuid>> = sqlx::query_scalar(
-        "select secret_id from source where id = $1 and household_id = $2 and profile_id = $3 and kind = $4 \
-         and connector_client_id = $5 for update",
+    let old: Option<(Option<Uuid>, Option<String>)> = sqlx::query_as(
+        "select secret_id, config->>'patient' from source where id = $1 and household_id = $2 and profile_id = $3 \
+         and kind = $4 and connector_client_id = $5 for update",
     )
     .bind(source_id)
     .bind(client.household_id)
@@ -734,12 +796,20 @@ pub async fn save_connection(
     .bind(client.id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some(old) = old else {
+    let Some((old, patient)) = old else {
         return Err(refused(
             "source_changed",
             "This connection was removed or changed. Start again.",
         ));
     };
+    // another account at the vendor would bring another person's records into this profile, from
+    // this one's cursor: the old grant, config and cursor stay
+    if patient.is_some() && t.patient != patient {
+        return Err(refused(
+            "another_patient",
+            "This sign-in at the vendor is for another patient. Sign in with the account of this person.",
+        ));
+    }
     // the new grant replaces the old one; without a refresh token there is nothing left to keep
     let secret_id = match (&t.refresh, old) {
         (Some(r), Some(id)) => {
@@ -1047,13 +1117,15 @@ pub struct Revoked {
 }
 
 /// Revoke every connection of the profile at its vendor, best effort, before the profile delete (which
-/// deletes the tokens whatever happens here). `sb` is None when no secrets key is set: every held
-/// token then counts as failed.
+/// deletes the tokens whatever happens here). Each connection gets at most `limit` in all; one that
+/// takes longer counts as failed. `sb` is None when no secrets key is set: every held token then
+/// counts as failed.
 pub async fn revoke_profile(
     pool: &PgPool,
     sb: Option<&SecretBox>,
     profile_id: Uuid,
     egress: &Egress,
+    limit: std::time::Duration,
 ) -> Result<Vec<Revoked>, OAuthError> {
     let kinds: Vec<&str> = OAUTH_KINDS.to_vec();
     let ids: Vec<(Uuid, String, String)> = sqlx::query_as(
@@ -1066,20 +1138,31 @@ pub async fn revoke_profile(
     .await?;
     let mut out = Vec::with_capacity(ids.len());
     for (source_id, kind, label) in ids {
-        let mut tx = pool.begin().await?;
-        let outcome = match lock_held(&mut tx, source_id).await? {
-            Some((household, secret_id, client_id, config)) => {
-                revoke_held(
-                    &mut tx,
-                    sb,
-                    (source_id, household, secret_id, client_id, &config),
-                    egress,
-                )
-                .await
-            }
-            None => Revocation::NoToken,
+        // the cap covers the lot: the wait for a refresh that holds the row, the name lookup, the request
+        let one = async {
+            let mut tx = pool.begin().await?;
+            let outcome = match lock_held(&mut tx, source_id).await? {
+                Some((household, secret_id, client_id, config)) => {
+                    revoke_held(
+                        &mut tx,
+                        sb,
+                        (source_id, household, secret_id, client_id, &config),
+                        egress,
+                    )
+                    .await
+                }
+                None => Revocation::NoToken,
+            };
+            tx.commit().await?;
+            Ok::<_, OAuthError>(outcome)
         };
-        tx.commit().await?;
+        let outcome = match tokio::time::timeout(limit, one).await {
+            Ok(done) => done?,
+            Err(_) => {
+                tracing::warn!(%source_id, "the revocation before a profile delete took too long");
+                Revocation::Failed
+            }
+        };
         forget(source_id);
         let revoke_page = match outcome {
             Revocation::Failed | Revocation::NotOffered => {
@@ -1126,6 +1209,34 @@ mod tests {
             vec!["fhir.labnorte.example:443", "fhir.labnorte.example:8443"]
         );
         assert_eq!(authority("ftp://fhir.labnorte.example/"), None);
+    }
+
+    #[test]
+    fn an_endpoint_is_https_or_plain_http_to_loopback_only_where_the_egress_allows_it() {
+        let wide = Egress {
+            allow_private: true,
+            https_only: false,
+            ..Egress::connector()
+        };
+        let strict = Egress::connector();
+        for e in [&wide, &strict] {
+            assert!(safe_endpoint("https://login.labnorte.example/authorize", e));
+            assert!(!safe_endpoint(
+                "javascript:alert(1)//https://login.labnorte.example/",
+                e
+            ));
+            assert!(!safe_endpoint("data:text/html,<script>alert(1)</script>", e));
+            assert!(!safe_endpoint("https://alex:pw@login.labnorte.example/authorize", e));
+            assert!(!safe_endpoint("https://alex@login.labnorte.example/authorize", e));
+            assert!(!safe_endpoint("http://login.labnorte.example/authorize", e));
+            assert!(!safe_endpoint("ftp://login.labnorte.example/authorize", e));
+            assert!(!safe_endpoint("not a url", e));
+        }
+        assert!(safe_endpoint("http://127.0.0.1:8080/authorize", &wide));
+        assert!(safe_endpoint("http://[::1]:8080/authorize", &wide));
+        assert!(safe_endpoint("http://localhost:8080/authorize", &wide));
+        assert!(!safe_endpoint("http://10.0.0.1/authorize", &wide));
+        assert!(!safe_endpoint("http://127.0.0.1:8080/authorize", &strict));
     }
 
     #[test]

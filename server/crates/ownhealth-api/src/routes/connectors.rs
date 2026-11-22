@@ -13,9 +13,13 @@
 //! browser and the session that started the launch, for a profile that person still manages. No
 //! answer, redirect or audit row carries a token.
 //!
-//! Tests reach a fake vendor on loopback with the [`EgressOverride`] request extension. On a dev
-//! instance (`OWNHEALTH_DEV_AUTH=1`), `OWNHEALTH_DEV_CONNECTOR_LOOPBACK=1` does the same, so a person
-//! can try the flow against a local fake; it is ignored without dev auth.
+//! Each launch sets its own binder cookie, named after its state, so two launches in one browser (two
+//! tabs, two family members) do not undo each other.
+//!
+//! Tests reach a fake vendor on loopback with the [`EgressOverride`] request extension. On a debug
+//! build that runs with dev auth (`OWNHEALTH_DEV_AUTH=1`), `OWNHEALTH_DEV_CONNECTOR_LOOPBACK=1` does
+//! the same, so a person can try the flow against a local fake; a release build ignores it, as it
+//! does without dev auth.
 
 use std::time::Duration;
 
@@ -42,9 +46,17 @@ use super::auth::{Body, Fail, Meta, Params, R, answer, ok, set_cookie};
 use crate::error::ApiError;
 use crate::{Caller, SessionCaller};
 
-/// The browser binder of a launch: the callback counts only where this cookie comes back.
+/// The browser binder of a launch: the callback counts only where its cookie comes back. Each launch
+/// has its own, named this prefix and a part of its state's hash ([`binder_cookie_name`]).
 pub const BINDER_COOKIE: &str = "oh_connector";
-const BINDER_PATH: &str = "/api/connectors";
+
+/// The binder cookie of the launch with this `state`.
+pub fn binder_cookie_name(state: &str) -> String {
+    let hash = oauth::binder_hash(state);
+    format!("{BINDER_COOKIE}_{}", &hash[..16])
+}
+/// Only the callback reads a binder.
+const BINDER_PATH: &str = "/api/connectors/callback";
 /// How long a profile delete waits for each vendor's revocation.
 const DELETE_REVOKE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -63,11 +75,17 @@ pub struct EgressOverride(pub Egress);
 /// How connector requests go out: https to public addresses only, unless a test or a dev instance
 /// widened it (module docs).
 pub fn egress(rt: &Runtime, o: &Option<Extension<EgressOverride>>) -> Egress {
+    let switch = std::env::var("OWNHEALTH_DEV_CONNECTOR_LOOPBACK").ok();
+    egress_for(rt.settings.dev_auth, switch.as_deref(), o)
+}
+
+/// [`egress`] with the dev switch's value given, so a test needs no process environment.
+fn egress_for(dev_auth: bool, dev_loopback_switch: Option<&str>, o: &Option<Extension<EgressOverride>>) -> Egress {
     if let Some(Extension(EgressOverride(e))) = o {
         return e.clone();
     }
-    let dev_loopback =
-        rt.settings.dev_auth && std::env::var("OWNHEALTH_DEV_CONNECTOR_LOOPBACK").is_ok_and(|v| v == "1");
+    // never in a release build, as the SHC dev map (shc.rs)
+    let dev_loopback = cfg!(debug_assertions) && dev_auth && dev_loopback_switch == Some("1");
     if dev_loopback {
         return Egress {
             allow_private: true,
@@ -191,9 +209,9 @@ async fn audit(
     Ok(())
 }
 
-fn binder_cookie(rt: &Runtime, binder: &str) -> String {
+fn binder_cookie(rt: &Runtime, state: &str, binder: &str) -> String {
     set_cookie(
-        BINDER_COOKIE,
+        &binder_cookie_name(state),
         binder,
         oauth::STATE_TTL_SECONDS,
         BINDER_PATH,
@@ -206,7 +224,7 @@ async fn start(rt: &Runtime, p: &Principal, l: Started<'_>, egress: &Egress) -> 
     let endpoints = oauth::resolve(&l.spec, l.issuer, egress).await.map_err(fail)?;
     let binder = token_urlsafe(32);
     let mut tx = rt.pool.begin().await?;
-    let url = oauth::begin(
+    let begun = oauth::begin(
         &mut tx,
         &oauth::Launch {
             kind: l.kind,
@@ -225,8 +243,8 @@ async fn start(rt: &Runtime, p: &Principal, l: Started<'_>, egress: &Egress) -> 
     tx.commit().await?;
     Ok(answer(
         StatusCode::OK,
-        json!({"authorize_url": url}),
-        &[binder_cookie(rt, &binder)],
+        json!({"authorize_url": begun.url}),
+        &[binder_cookie(rt, &begun.state, &binder)],
     ))
 }
 
@@ -285,6 +303,14 @@ async fn launch(
             return Err(Error::Invalid("This client is registered for another server.".into()).into());
         }
         (Some(fixed), _, _) => fixed.to_string(),
+        // the secret goes to the token endpoint of the server named here: only the registered one
+        (None, Some(_), _) if client.confidential => {
+            return Err(Error::Invalid(
+                "This client has a secret, so it serves only the server it was registered for. Register it with that server's address."
+                    .into(),
+            )
+            .into());
+        }
         (None, Some(given), _) => given.to_string(),
         (None, None, Some(d)) => d.to_string(),
         (None, None, None) => return Err(Error::Invalid("Name the server to connect to.".into()).into()),
@@ -357,77 +383,83 @@ async fn reconnect(
     .await
 }
 
-fn redirect(location: &str) -> Response {
+/// A redirect that also drops the binder of the launch with `state`, and no other launch's.
+fn redirect(state: &str, location: &str) -> Response {
     let mut res = StatusCode::FOUND.into_response();
     if let Ok(v) = HeaderValue::from_str(location) {
         res.headers_mut().insert(header::LOCATION, v);
     }
-    let gone = format!("{BINDER_COOKIE}=\"\"; Max-Age=0; Path={BINDER_PATH}; HttpOnly; SameSite=lax");
-    if let Ok(v) = HeaderValue::from_str(&gone) {
-        res.headers_mut().append(header::SET_COOKIE, v);
+    if !state.is_empty() {
+        let gone = format!(
+            "{}=\"\"; Max-Age=0; Path={BINDER_PATH}; HttpOnly; SameSite=lax",
+            binder_cookie_name(state)
+        );
+        if let Ok(v) = HeaderValue::from_str(&gone) {
+            res.headers_mut().append(header::SET_COOKIE, v);
+        }
     }
     res
 }
 
 /// Back to the Connections screen. `code` is one of our own fixed words, never the vendor's text.
-fn back(code: &str) -> Response {
-    redirect(&format!("/connections?connector_error={code}"))
+fn back(state: &str, code: &str) -> Response {
+    redirect(state, &format!("/connections?connector_error={code}"))
 }
 
 async fn callback(State(rt): State<Runtime>, meta: Meta, Query(q): Params, o: Option<Extension<EgressOverride>>) -> R {
     let state = q.get("state").cloned().unwrap_or_default();
     if state.is_empty() {
-        return Ok(back("state_invalid"));
+        return Ok(back(&state, "state_invalid"));
     }
     // the state is used up whatever comes next, so it commits on its own
     let pending = {
         let mut tx = rt.pool.begin().await?;
-        let binder = meta.cookie(BINDER_COOKIE).unwrap_or_default();
+        let binder = meta.cookie(&binder_cookie_name(&state)).unwrap_or_default();
         let taken = oauth::take_state(&mut tx, &state, &binder).await;
         tx.commit().await?;
         match taken {
             Ok(p) => p,
-            Err(OAuthError::Refused { code, .. }) => return Ok(back(code)),
+            Err(OAuthError::Refused { code, .. }) => return Ok(back(&state, code)),
             Err(e) => return Err(fail(e)),
         }
     };
     let code = q.get("code").cloned().unwrap_or_default();
     if q.get("error").is_some_and(|e| !e.is_empty()) || code.is_empty() {
-        return Ok(back("denied"));
+        return Ok(back(&state, "denied"));
     }
     // the person who started it, in the session that started it, who still manages the profile
     let mut conn = rt.pool.acquire().await?;
     let session = meta.cookie(sessions::COOKIE);
     let p = principal::resolve(&mut conn, &rt.settings, None, session.as_deref()).await?;
     let Some(p) = p.filter(|p| p.user_id == pending.user_id && sessions::session_id(p) == pending.session_id) else {
-        return Ok(back("wrong_user"));
+        return Ok(back(&state, "wrong_user"));
     };
     let Ok(household) = manager(&mut conn, &p).await else {
-        return Ok(back("forbidden"));
+        return Ok(back(&state, "forbidden"));
     };
     if manages_profile(&mut conn, &p, pending.profile_id).await.is_err() {
-        return Ok(back("forbidden"));
+        return Ok(back(&state, "forbidden"));
     }
     let sb = SecretBox::from_settings(&rt.settings)?;
     let Some(client) = oauth::load_client(&mut conn, Some(&sb), household, pending.client)
         .await
         .map_err(fail)?
     else {
-        return Ok(back("client_gone"));
+        return Ok(back(&state, "client_gone"));
     };
     drop(conn);
     let tokens = match oauth::exchange(&pending, &client, &code, &egress(&rt, &o)).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(error = %e, profile_id = %pending.profile_id, "a connector code exchange failed");
-            return Ok(back("exchange_failed"));
+            return Ok(back(&state, "exchange_failed"));
         }
     };
     let now = Utc::now();
     let mut tx = rt.pool.begin().await?;
     let id = match oauth::save_connection(&mut tx, &sb, &pending, &client, &tokens, now).await {
         Ok(id) => id,
-        Err(OAuthError::Refused { code, .. }) => return Ok(back(code)),
+        Err(OAuthError::Refused { code, .. }) => return Ok(back(&state, code)),
         Err(e) => return Err(fail(e)),
     };
     let action = if pending.source_id.is_some() {
@@ -438,7 +470,7 @@ async fn callback(State(rt): State<Runtime>, meta: Meta, Query(q): Params, o: Op
     audit(&mut tx, &p, action, pending.profile_id, id, None, false).await?;
     tx.commit().await?;
     oauth::remember(id, &tokens, now);
-    Ok(redirect(&format!("/connections?connected={id}")))
+    Ok(redirect(&state, &format!("/connections?connected={id}")))
 }
 
 fn word(r: Revocation) -> &'static str {
@@ -496,7 +528,7 @@ pub async fn revoke_before_delete(rt: &Runtime, p: &Principal, profile_id: Uuid,
         ..egress.clone()
     };
     let sb = SecretBox::from_settings(&rt.settings).ok();
-    let done = match oauth::revoke_profile(&rt.pool, sb.as_ref(), profile_id, &quick).await {
+    let done = match oauth::revoke_profile(&rt.pool, sb.as_ref(), profile_id, &quick, DELETE_REVOKE_TIMEOUT).await {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!(error = %e, %profile_id, "could not revoke the connections before a profile delete");
@@ -523,4 +555,20 @@ pub async fn revoke_before_delete(rt: &Runtime, p: &Principal, profile_id: Uuid,
         }
     }
     done.into_iter().map(|r| json!(r)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_dev_loopback_switch_is_ignored_without_dev_auth() {
+        let on = Some("1");
+        assert_eq!(egress_for(false, on, &None), Egress::connector());
+        assert_eq!(egress_for(true, Some("0"), &None), Egress::connector());
+        assert_eq!(egress_for(true, None, &None), Egress::connector());
+        // the reverse, in a debug build with dev auth: loopback over plain http
+        let dev = egress_for(true, on, &None);
+        assert!(dev.allow_private && !dev.https_only, "{dev:?}");
+    }
 }

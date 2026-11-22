@@ -38,6 +38,14 @@ pub struct Behaviour {
     pub s256: bool,
     pub expires_in: i64,
     pub refresh_expires_in: Option<i64>,
+    /// The `token_type` of every token answer.
+    pub token_type: String,
+    /// Held inside every revocation request.
+    pub revoke_delay_ms: u64,
+    /// Discovery names these instead of the fake's own endpoints (a server that lies).
+    pub authorize_url: Option<String>,
+    pub token_url: Option<String>,
+    pub revoke_url: Option<String>,
 }
 
 impl Default for Behaviour {
@@ -51,6 +59,11 @@ impl Default for Behaviour {
             s256: true,
             expires_in: 3600,
             refresh_expires_in: None,
+            token_type: "Bearer".into(),
+            revoke_delay_ms: 0,
+            authorize_url: None,
+            token_url: None,
+            revoke_url: None,
         }
     }
 }
@@ -71,6 +84,8 @@ pub struct Book {
     pub auth_seen: Vec<String>,
     /// every access and refresh token handed out, to search for them elsewhere
     pub handed_out: Vec<String>,
+    /// every request the fake answered: discovery, token and revocation
+    pub requests: usize,
 }
 
 #[derive(Clone)]
@@ -168,15 +183,16 @@ impl Fake {
 
 async fn discovery(State(s): State<Shared>) -> Json<Value> {
     let b = lock(&s.behaviour).clone();
+    lock(&s.book).requests += 1;
     let mut meta = json!({
-        "authorization_endpoint": format!("{}/authorize", s.base),
-        "token_endpoint": format!("{}/token", s.base),
+        "authorization_endpoint": b.authorize_url.clone().unwrap_or_else(|| format!("{}/authorize", s.base)),
+        "token_endpoint": b.token_url.clone().unwrap_or_else(|| format!("{}/token", s.base)),
         "code_challenge_methods_supported": if b.s256 { json!(["S256"]) } else { json!(["plain"]) },
         "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
         "capabilities": ["launch-standalone", "client-confidential-symmetric", "permission-offline"],
     });
     if b.revocation {
-        meta["revocation_endpoint"] = json!(format!("{}/revoke", s.base));
+        meta["revocation_endpoint"] = json!(b.revoke_url.clone().unwrap_or_else(|| format!("{}/revoke", s.base)));
     }
     Json(meta)
 }
@@ -209,7 +225,7 @@ fn mint(s: &Shared, b: &Behaviour, with_refresh: bool) -> Value {
     let access = format!("fake-access-{n}-{tag}");
     book.handed_out.push(access.clone());
     let mut out = json!({
-        "access_token": access, "token_type": "Bearer", "expires_in": b.expires_in,
+        "access_token": access, "token_type": b.token_type, "expires_in": b.expires_in,
         "scope": "openid fhirUser launch/patient offline_access patient/*.rs", "patient": PATIENT,
     });
     if with_refresh {
@@ -228,6 +244,7 @@ async fn token(State(s): State<Shared>, headers: HeaderMap, Form(form): Form<Has
     let b = lock(&s.behaviour).clone();
     {
         let mut book = lock(&s.book);
+        book.requests += 1;
         book.in_flight += 1;
         book.max_in_flight = book.max_in_flight.max(book.in_flight);
     }
@@ -282,6 +299,11 @@ fn answer(s: &Shared, b: &Behaviour, headers: &HeaderMap, form: &HashMap<String,
 }
 
 async fn revoke(State(s): State<Shared>, headers: HeaderMap, Form(form): Form<HashMap<String, String>>) -> Response {
+    lock(&s.book).requests += 1;
+    let delay = lock(&s.behaviour).revoke_delay_ms;
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
     if client_auth(&headers, &form).is_none() {
         return oauth_error(StatusCode::UNAUTHORIZED, "invalid_client", "unknown client");
     }
