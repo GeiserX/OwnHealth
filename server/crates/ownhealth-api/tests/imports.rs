@@ -950,3 +950,107 @@ async fn moving_a_cgm_export_while_its_import_runs_waits_for_the_import() -> R {
     assert_eq!(zone, json!("Europe/Madrid"));
     Ok(())
 }
+
+/// The same bytes stored before as a document of another type (a CSV kept as a record), then uploaded as
+/// a CGM export: the CGM import attaches no reading to that row and says why. A document of another type
+/// that carries CGM import flags (one stored before this rule) still needs read:wearables to be listed,
+/// opened or downloaded.
+#[tokio::test]
+async fn a_cgm_export_never_reads_into_a_document_of_another_type() -> R {
+    let a = app().await?;
+    ownhealth_devices::register();
+    let alex = a.family.profile("alex");
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(alex), CLARITY)?;
+    let doc: uuid::Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type) \
+         values ($1, $2, decode($3, 'hex'), 'notes.csv', 'text/csv', $4, 'other') returning id",
+    )
+    .bind(a.family.household_id)
+    .bind(alex)
+    .bind(&sha)
+    .bind(CLARITY.len() as i64)
+    .fetch_one(&a.rt.pool)
+    .await?;
+    let (s, v) = a
+        .upload(
+            "alex",
+            &[("profile", "alex"), ("timezone", "Europe/Madrid")],
+            &[("clarity.csv", CLARITY)],
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let kinds = ["import.cgm_csv".to_string()];
+    ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?;
+    let (state, err): (String, Option<String>) = sqlx::query_as("select state, last_error from job where id = $1")
+        .bind(v["items"][0]["job_id"].as_i64())
+        .fetch_one(&a.rt.pool)
+        .await?;
+    assert_eq!(state, "dead", "{err:?}");
+    assert!(
+        err.as_deref()
+            .is_some_and(|e| e.contains("already stored on this profile as another kind of document")),
+        "{err:?}"
+    );
+    let (doc_type, cgm, held): (Option<String>, bool, i64) = sqlx::query_as(
+        "select doc_type, flags ? 'cgm_csv', (select count(*) from wearable_sample where document_id = d.id) \
+         from document d where id = $1",
+    )
+    .bind(doc)
+    .fetch_one(&a.rt.pool)
+    .await?;
+    assert_eq!((doc_type.as_deref(), cgm, held), (Some("other"), false, 0));
+    Ok(())
+}
+
+/// A document of another type that carries CGM import flags (one stored before the CGM import refused
+/// such a row) holds every reading of the export: it needs read:wearables to be listed, opened or
+/// downloaded, as a wearables document does.
+#[tokio::test]
+async fn a_document_with_cgm_flags_needs_read_wearables_whatever_its_type() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(alex), CLARITY)?;
+    let doc: uuid::Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type) \
+         values ($1, $2, decode($3, 'hex'), 'notes.csv', 'text/csv', $4, 'other') returning id",
+    )
+    .bind(a.family.household_id)
+    .bind(alex)
+    .bind(&sha)
+    .bind(CLARITY.len() as i64)
+    .fetch_one(&a.rt.pool)
+    .await?;
+    sqlx::query(
+        "update document set flags = flags || '{\"cgm_csv\": {\"vendor\": \"dexcom_clarity\", \"readings\": 1}}' \
+         where id = $1",
+    )
+    .bind(doc)
+    .execute(&a.rt.pool)
+    .await?;
+    let listed = |v: &serde_json::Value| {
+        v["items"]
+            .as_array()
+            .is_some_and(|i| i.iter().any(|d| d["id"] == json!(doc.to_string())))
+    };
+    grant_sam(&a, &["read:summary", "read:records", "read:labs"]).await?;
+    let (s, v) = a.get("sam", "/profiles/alex/documents").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(!listed(&v), "{v}");
+    let (s, v) = a.get("sam", &format!("/documents/{doc}")).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(v.to_string().contains("This needs read:wearables."), "{v}");
+    let (s, _, body) = file_as(&a, "sam", doc).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(!body.windows(CLARITY.len()).any(|w| w == CLARITY), "the bytes went out");
+    // with read:wearables it is listed, opened and downloaded
+    grant_sam(&a, &["read:summary", "read:records", "read:labs", "read:wearables"]).await?;
+    let (_, v) = a.get("sam", "/profiles/alex/documents").await?;
+    assert!(listed(&v), "{v}");
+    let (s, _, body) = file_as(&a, "sam", doc).await?;
+    assert_eq!((s, body.as_slice()), (StatusCode::OK, CLARITY));
+    Ok(())
+}

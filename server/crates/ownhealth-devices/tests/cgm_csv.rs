@@ -434,9 +434,16 @@ async fn import_in_zone(env: &Env, slug: &str, bytes: &[u8], zone: Option<&str>)
         "blob_sha256": sha,
         "filename": "clarity.csv",
     });
-    let doc = ownhealth_ingest_structured::jobs::document_for(&mut c, &env.blobs, &payload, "text/csv", "upload")
-        .await
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let doc = ownhealth_ingest_structured::jobs::document_of_type(
+        &mut c,
+        &env.blobs,
+        &payload,
+        "text/csv",
+        "upload",
+        documents::WEARABLES_DOC_TYPE,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let (summary, _) = cgm_csv::import_cgm_csv(&mut c, &env.blobs, doc, None, zone).await?;
     Ok(summary.to_value())
 }
@@ -1153,13 +1160,14 @@ async fn a_retraction_after_a_zone_change_reads_the_others_in_their_own_zone() -
         &fixture("libreview-en-mgdl.csv")?,
     )?;
     let mut c = env.db.pool.acquire().await?;
-    let other = ownhealth_ingest_structured::jobs::document_for(
+    let other = ownhealth_ingest_structured::jobs::document_of_type(
         &mut c,
         &env.blobs,
         &json!({"profile_id": env.fam.profile("lucia").to_string(), "household_id": env.fam.household_id.to_string(),
                 "blob_sha256": sha, "filename": "libre.csv"}),
         "text/csv",
         "upload",
+        documents::WEARABLES_DOC_TYPE,
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e:?}"))?;

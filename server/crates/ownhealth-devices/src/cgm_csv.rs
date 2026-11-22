@@ -67,6 +67,9 @@
 //!
 //! Low and High rows count toward [`MAX_READINGS`], and only dates from 2000 on decide the order of day
 //! and month.
+//!
+//! The same bytes already stored on the profile as another kind of document (a record, an ECG) are not
+//! read as a CGM export: that row's readers may not read wearables, so the import fails and says why.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read as _;
@@ -964,16 +967,27 @@ async fn import_in(
     if let Some(owner) = owner {
         ownhealth_ingest_structured::retract::lock_exports(&mut *conn, owner, "cgm_csv").await?;
     }
-    let (profile_id, sha, flags, status): (Option<Uuid>, String, Value, String) =
-        sqlx::query_as("select profile_id, encode(blob_sha256, 'hex'), flags, status from document where id = $1")
-            .bind(document_id)
-            .fetch_one(&mut *conn)
-            .await?;
+    let (profile_id, sha, flags, status, doc_type): (Option<Uuid>, String, Value, String, Option<String>) =
+        sqlx::query_as(
+            "select profile_id, encode(blob_sha256, 'hex'), flags, status, doc_type from document where id = $1",
+        )
+        .bind(document_id)
+        .fetch_one(&mut *conn)
+        .await?;
     if status != "active" {
         // retracted while its import (again) waited in the queue: it brings nothing back
         let mut s = ImportSummary::new(document_id.to_string());
         s.reasons.insert("retracted".into(), 1);
         return Ok((s, Value::Null));
+    }
+    if doc_type.as_deref() != Some(WEARABLES_DOC_TYPE) {
+        // the same bytes kept before as another document (a record, an ECG): its readers may not read
+        // wearables, so it gets no readings and no CGM flags
+        return Err(Error::Upload(
+            "this file is already stored on this profile as another kind of document, so it is not read as a CGM \
+             export"
+                .into(),
+        ));
     }
     // the zone the file was read in before, if it was read: Some(None) is UTC
     let before: Option<Option<String>> = flags

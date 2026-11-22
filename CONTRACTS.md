@@ -45,7 +45,7 @@ token's `mcp_lang`.
 | A | observations.rs | `GET /profiles/{p}/trend?code=&window=P3Y&units=&lang=` | `Trend` (mcp.md 5.3 shape) |
 | A | observations.rs | `POST /aliases` | `{profile, alias, alias_group, lang?, loinc?, unit?, specimen?}`, action `review`; re-derives the household |
 | B | documents.rs | `GET /profiles/{p}/documents?q=&type=&limit=&latest=fhir` ; `GET /documents/{id}` | `latest=fhir`: only documents a FHIR import read, newest stored first |
-| B | documents.rs | `GET /documents/{id}/file` ; `/pages/{n}.png` ; `/pages/{n}/words` | words need `read:documents_text` for tokens |
+| B | documents.rs | `GET /documents/{id}/file` ; `/pages/{n}.png` ; `/pages/{n}/words` | words need `read:documents_text` for tokens; a document whose flags hold a CGM import (`cgm_csv`) needs `read:wearables` whatever its `doc_type`, in the list too |
 | B | documents.rs | `POST /documents/{id}/assign` `{profile}` ; `POST /documents/{id}/retract` `{reason}` | a moved CGM export (`flags.cgm_csv`) is imported again on its new profile by `import.cgm_csv`, in the zone its file keeps |
 | C | records.rs | `GET`/`POST /profiles/{p}/records/{kind}` ; `POST .../{kind}/{id}/correct` ; `.../{id}/retract` | |
 | C | records.rs | `POST /profiles/{p}/manual-observations` | |
