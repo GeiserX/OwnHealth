@@ -404,13 +404,16 @@ pub fn sensitive_document_sql(doc: &str) -> String {
          and jsonb_array_length(r.payload->'observation'->'sensitivity') > 0) \
          or exists (select 1 from medication_label l join medication_statement m on m.id = l.medication_id \
          where l.document_id = {doc} and cardinality(m.sensitivity) > 0) \
+         or exists (select 1 from document u where u.id = {doc} and u.flags->'unprojected' is not null) \
          or {via_src})"
     )
 }
 
 /// True when any value read from this document is sensitive (mental health, reproductive, sexual
 /// health), whatever its status: the original file and its page text still hold it. Held review
-/// rows count too. Without read:sensitive the file, the page renders and the words stay closed.
+/// rows count too. So does a connector's bundle that holds resources OwnHealth does not project
+/// (`flags.unprojected`, written by the FHIR pull): nothing read them for sensitivity, so the file
+/// fails closed. Without read:sensitive the file, the page renders and the words stay closed.
 pub async fn document_is_sensitive(conn: &mut PgConnection, document_id: Uuid) -> Result<bool> {
     let sql = format!("select {}", sensitive_document_sql("$1::uuid"));
     let v: Option<bool> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))

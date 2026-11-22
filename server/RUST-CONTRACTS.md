@@ -207,7 +207,7 @@ Each crate's `src/lib.rs` documents them. The shapes:
 | | `render_page_png(blobs, sha, page_no, scale) -> Result<Vec<u8>>` (blocking) | I |
 | | `ground_value(conn, blobs, document_id, page_no, name, value) -> Result<Option<[f64; 4]>>` | F |
 | ingest-structured (C) | `fhir::import_fhir`, `apple_health::import_apple_health` `-> Result<ImportSummary>` | jobs |
-| | `fhir::import_pull(conn, blobs, source_id, document_id) -> Result<PullSummary>`: a connector's stored bundle; `source_item` keyed `<type>/<id>@<versionId or sha>`, one `fhir_unmapped_summary` per type | connector pollers |
+| | `fhir::import_pull(conn, blobs, source_id, document_id) -> Result<PullSummary>`: a connector's stored bundle; `source_item` keyed `<type>/<id>@<versionId or sha>` (the sha leaves out `meta.lastUpdated`, `versionId`, `source`), one `fhir_unmapped_summary` per type with no table, `flags.unprojected` makes the bundle sensitive. The caller owns the transaction and runs one pull per source at a time (the `source.poll` dedupe key) | connector pollers |
 | | `apple_health::rebuild_rollups(conn, profile, metric) -> Result<i64>` | H |
 | | `manual::add_manual_observation(conn, &ManualObservation) -> Result<Committed>` | I |
 | | `wearables::series(conn, profile, metric, since, until, resolution) -> Result<Value>`; `metric_info(key)` | E, I |

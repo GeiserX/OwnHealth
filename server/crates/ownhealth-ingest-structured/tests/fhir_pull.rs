@@ -486,3 +486,369 @@ async fn a_real_pull_twice_over_http_imports_once() -> R {
     );
     Ok(())
 }
+
+/// `r` as a server that sends no versionId stamps it: `meta.lastUpdated` only.
+fn restamped(mut r: Value, updated: &str) -> Value {
+    r["meta"] = json!({"lastUpdated": updated});
+    r
+}
+
+/// An LDL the lab could not measure: a mapped type that does not project.
+fn ldl_pending() -> Value {
+    json!({"resourceType": "Observation", "id": "ldl-pend", "meta": {"versionId": "1"}, "status": "final",
+           "code": {"coding": [{"system": "http://loinc.org", "code": "13457-7", "display": "LDL"}]},
+           "subject": {"reference": "Patient/alex-rivera"}, "effectiveDateTime": "2026-02-01",
+           "dataAbsentReason": {"text": "Muestra hemolizada, repetir"}})
+}
+
+/// What the retract route does to a document: its facts withdrawn, its open items dismissed.
+async fn retract(conn: &mut PgConnection, fam: &Family, doc: Uuid) -> R {
+    ownhealth_ingest_structured::retract::retract_document_facts(&mut *conn, doc, "document retracted: test").await?;
+    let items: Vec<Uuid> = sqlx::query_scalar("select id from review_item where document_id = $1 and status = 'open'")
+        .bind(doc)
+        .fetch_all(&mut *conn)
+        .await?;
+    for id in items {
+        review::dismiss(&mut *conn, id, fam.user("alex"), Some("document retracted")).await?;
+    }
+    sqlx::query("update document set status = 'retracted' where id = $1")
+        .bind(doc)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_server_that_only_restamps_last_updated_brings_nothing_back() -> R {
+    // Blue Button sends meta.lastUpdated and no versionId; a reload restamps it
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let at = |t: &str| {
+        vec![
+            restamped(htn("1", "2015-03"), t),
+            restamped(back_pain(), t),
+            restamped(eob(1), t),
+        ]
+    };
+
+    let (_, first) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("a", at("2026-11-21T06:00:00Z")),
+    )
+    .await?;
+    assert_eq!(
+        (first.new, first.summary.accepted, first.summary.queued),
+        (3, 1, 2),
+        "{first:?}"
+    );
+    let queued = open_items(&mut tx, p).await?;
+    review::reject(&mut tx, queued[0].id, fam.user("alex"), "not mine").await?;
+    review::dismiss(&mut tx, queued[1].id, fam.user("alex"), Some("seen")).await?;
+
+    let (_, again) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("b", at("2026-11-22T06:00:00Z")),
+    )
+    .await?;
+    assert_eq!(
+        (again.new, again.duplicate, again.summary.queued),
+        (0, 3, 0),
+        "{again:?}"
+    );
+    assert!(open_items(&mut tx, p).await?.is_empty(), "nothing comes back");
+    assert_eq!(conditions(&mut tx, p).await?, 1);
+    // the same resource with another meta.tag is another item: a tag carries meaning
+    let mut tagged = restamped(eob(1), "2026-11-23T06:00:00Z");
+    tagged["meta"]["tag"] =
+        json!([{"system": "https://bluebutton.cms.gov/resources/codesystem/tag", "code": "Adjudicated"}]);
+    let (_, tag) = pull(&mut tx, &env.blobs, &fam, source, &searchset("c", vec![tagged])).await?;
+    assert_eq!((tag.new, tag.duplicate), (1, 0), "{tag:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_new_version_held_back_by_an_open_older_one_arrives_after_the_dismiss() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let mut v2 = back_pain();
+    v2["meta"]["versionId"] = json!("2");
+    v2["recordedDate"] = json!("2026-02-10");
+
+    pull(&mut tx, &env.blobs, &fam, source, &searchset("a", vec![back_pain()])).await?;
+    let held = open_items(&mut tx, p).await?;
+    assert_eq!(held.len(), 1);
+    // version 2 while version 1 still waits: the open item holds the resource, nothing new
+    let (_, waiting) = pull(&mut tx, &env.blobs, &fam, source, &searchset("b", vec![v2.clone()])).await?;
+    assert_eq!(waiting.summary.queued, 0, "{waiting:?}");
+    review::dismiss(&mut tx, held[0].id, fam.user("alex"), Some("old")).await?;
+    // the person dismissed version 1: the next pull brings version 2, once
+    let (_, after) = pull(&mut tx, &env.blobs, &fam, source, &searchset("c", vec![v2.clone()])).await?;
+    assert_eq!((after.new, after.summary.queued), (1, 1), "{after:?}");
+    let (_, later) = pull(&mut tx, &env.blobs, &fam, source, &searchset("d", vec![v2])).await?;
+    assert_eq!(
+        (later.new, later.duplicate, later.summary.queued),
+        (0, 1, 0),
+        "{later:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_fact_another_document_holds_comes_back_when_that_document_is_retracted() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    // the person uploaded the hospital's file first, then connected the hospital
+    let file = store_doc(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        "alex",
+        &searchset("file", vec![htn("1", "2015-03")]),
+        "ips.json",
+        JSON,
+    )
+    .await?;
+    import_fhir(&mut tx, &env.blobs, file).await?;
+    assert_eq!(conditions(&mut tx, p).await?, 1);
+    let (_, first) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("a", vec![htn("1", "2015-03")]),
+    )
+    .await?;
+    assert_eq!(
+        (first.summary.accepted, first.summary.queued),
+        (0, 0),
+        "the file holds it: {first:?}"
+    );
+    assert_eq!(conditions(&mut tx, p).await?, 1);
+    // the file goes: the next pull brings the hypertension back from the hospital
+    retract(&mut tx, &fam, file).await?;
+    assert_eq!(conditions(&mut tx, p).await?, 0);
+    let (_, again) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("b", vec![htn("1", "2015-03")]),
+    )
+    .await?;
+    assert_eq!((again.new, again.summary.accepted), (1, 1), "{again:?}");
+    assert_eq!(conditions(&mut tx, p).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_mapped_type_that_does_not_project_stays_one_item_with_its_note() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let (_, got) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("a", vec![ldl_pending(), care_plan()]),
+    )
+    .await?;
+    assert_eq!(got.summary.queued, 2, "{got:?}");
+    let items = open_items(&mut tx, p).await?;
+    // OwnHealth shows Observations: the unmeasured LDL is its own item with its note, as from a file
+    assert_eq!(
+        kinds(&items),
+        [
+            pair("fhir_unmapped", "Observation"),
+            pair("fhir_unmapped_summary", "CarePlan")
+        ]
+    );
+    assert_eq!(
+        items[0].payload["note"], "Observation without a value",
+        "{}",
+        items[0].payload
+    );
+    assert_eq!(items[0].payload["resource"]["id"], "ldl-pend");
+    // and a later pull keeps it where the person left it
+    review::dismiss(&mut tx, items[0].id, fam.user("alex"), Some("seen")).await?;
+    let (_, again) = pull(&mut tx, &env.blobs, &fam, source, &searchset("b", vec![ldl_pending()])).await?;
+    assert_eq!(
+        (again.new, again.duplicate, again.summary.queued),
+        (0, 1, 0),
+        "{again:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_retracted_pull_imports_again_from_a_new_envelope() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let (doc, _) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("a", vec![htn("1", "2015-03"), care_plan()]),
+    )
+    .await?;
+    retract(&mut tx, &fam, doc).await?;
+    // the next daily pull: the same resources in another Bundle
+    let (other, again) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("b", vec![htn("1", "2015-03"), care_plan()]),
+    )
+    .await?;
+    assert_ne!(other, doc);
+    assert_eq!(
+        (again.new, again.duplicate, again.summary.accepted, again.summary.queued),
+        (2, 0, 1, 1),
+        "{again:?}"
+    );
+    assert_eq!(conditions(&mut tx, p).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pull_moved_to_another_profile_imports_again_for_its_own() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let (doc, _) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("a", vec![htn("1", "2015-03"), care_plan()]),
+    )
+    .await?;
+    // what assign_document does when the person moves the pull to Sam
+    retract(&mut tx, &fam, doc).await?;
+    sqlx::query("update document set status = 'active', profile_id = $1 where id = $2")
+        .bind(fam.profile("sam"))
+        .bind(doc)
+        .execute(&mut *tx)
+        .await?;
+    let (_, again) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("b", vec![htn("1", "2015-03"), care_plan()]),
+    )
+    .await?;
+    assert_eq!(
+        (again.new, again.duplicate, again.summary.accepted, again.summary.queued),
+        (2, 0, 1, 1),
+        "{again:?}"
+    );
+    assert_eq!(conditions(&mut tx, p).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_summary_write_drops_nothing_without_a_transaction() -> R {
+    // a caller with no transaction of its own: the grouped resources are written to the ledger only
+    // after their summary item is
+    let env = Env::new().await?;
+    let mut c = env.db.pool.acquire().await?;
+    let fam = family(&mut c).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut c, &fam, "alex").await?;
+    sqlx::raw_sql(
+        "create function fail_summary() returns trigger language plpgsql as $$ begin \
+         if new.kind = 'fhir_unmapped_summary' then raise exception 'summary refused'; end if; return new; end $$; \
+         create trigger fail_summary before insert on review_item for each row execute function fail_summary();",
+    )
+    .execute(&mut *c)
+    .await?;
+    let failed = pull(&mut c, &env.blobs, &fam, source, &searchset("a", vec![eob(1), eob(2)])).await;
+    assert!(failed.is_err());
+    sqlx::raw_sql("drop trigger fail_summary on review_item; drop function fail_summary();")
+        .execute(&mut *c)
+        .await?;
+    let ledger: i64 = sqlx::query_scalar("select count(*) from source_item where source_id = $1")
+        .bind(source)
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(ledger, 0);
+    let (_, again) = pull(&mut c, &env.blobs, &fam, source, &searchset("b", vec![eob(1), eob(2)])).await?;
+    assert_eq!((again.new, again.summary.queued), (2, 1), "{again:?}");
+    assert_eq!(
+        kinds(&open_items(&mut c, p).await?),
+        [pair("fhir_unmapped_summary", "ExplanationOfBenefit")]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pull_that_holds_resources_we_do_not_project_is_sensitive() -> R {
+    // their content was never read for sensitivity, so the file stays closed without read:sensitive
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let (claims, _) = pull(&mut tx, &env.blobs, &fam, source, &searchset("a", vec![eob(1)])).await?;
+    let (plain, _) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("b", vec![htn("1", "2015-03")]),
+    )
+    .await?;
+    // the same claim again in a new envelope: a duplicate, and the new file still holds it
+    let (again, _) = pull(&mut tx, &env.blobs, &fam, source, &searchset("c", vec![eob(1)])).await?;
+    use ownhealth_core::documents::document_is_sensitive;
+    assert!(document_is_sensitive(&mut tx, claims).await?);
+    assert!(document_is_sensitive(&mut tx, again).await?);
+    assert!(!document_is_sensitive(&mut tx, plain).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_claim_twice_in_one_bundle_is_counted_once() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = fam.profile("alex");
+    let source = smart_source(&mut tx, &fam, "alex").await?;
+    let (_, got) = pull(
+        &mut tx,
+        &env.blobs,
+        &fam,
+        source,
+        &searchset("a", vec![eob(1), eob(1), eob(2)]),
+    )
+    .await?;
+    assert_eq!((got.seen, got.new, got.duplicate, got.context), (4, 2, 1, 1), "{got:?}");
+    let items = open_items(&mut tx, p).await?;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].payload["count"], 2, "{}", items[0].payload);
+    Ok(())
+}
