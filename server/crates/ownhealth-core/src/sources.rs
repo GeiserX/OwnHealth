@@ -420,6 +420,30 @@ pub struct SourceHealth {
     /// error that stopped it.
     pub last_run_problems: i32,
     pub last_run_problem: Option<String>,
+    /// What only a person who manages the source is sent (routes::inboxes adds it per caller).
+    #[sqlx(flatten)]
+    #[serde(skip_serializing)]
+    pub managed: ManagedHealth,
+}
+
+/// The part of a health row for the people who manage the source, for the Connections screen (v1.0,
+/// connectors.md 6.2). A viewer of the profile, or the source's own token, is not sent it.
+#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+pub struct ManagedHealth {
+    /// With `poll_seconds`: a source with no run yet that was made less than one interval ago has
+    /// no data yet, it is not stale.
+    pub created_at: DateTime<Utc>,
+    pub poll_seconds: Option<i32>,
+    /// The vendor refused the token and the person must sign in again; when the person's grant at the
+    /// vendor ends; when the current access token ends. None for an inbox.
+    pub reconsent_needed_at: Option<DateTime<Utc>>,
+    pub grant_expires_at: Option<DateTime<Utc>>,
+    pub access_expires_at: Option<DateTime<Utc>>,
+    /// Open sync-gap alerts of this source on its own profile: `source_gap` review items with
+    /// `ref_table = 'source'`.
+    pub open_gaps: i32,
+    /// The server a connection talks to (`config.endpoints.issuer`; SMART: the FHIR base URL).
+    pub server: Option<String>,
 }
 
 pub async fn source_health(conn: &mut PgConnection, household_id: Uuid) -> Result<Vec<SourceHealth>> {
@@ -430,7 +454,12 @@ pub async fn source_health(conn: &mut PgConnection, household_id: Uuid) -> Resul
            s.last_success_at < now() - make_interval(secs => s.poll_seconds * $2))) as stale, \
          r.status as last_run_status, coalesce(jsonb_array_length(r.errors), 0)::int4 as last_run_problems, \
          left(coalesce((r.errors -> 0 ->> 'code') || ': ' || (r.errors -> 0 ->> 'message'), r.error), 500) \
-           as last_run_problem \
+           as last_run_problem, \
+         s.created_at, s.poll_seconds, s.reconsent_needed_at, s.grant_expires_at, s.access_expires_at, \
+         (select count(*)::int4 from review_item g where g.household_id = s.household_id and g.status = 'open' \
+           and g.kind = 'source_gap' and g.ref_table = 'source' and g.ref_id = s.id \
+           and g.profile_id is not distinct from s.profile_id) as open_gaps, \
+         s.config -> 'endpoints' ->> 'issuer' as server \
          from source s left join lateral (select status, errors, error from source_run \
            where source_id = s.id and finished_at is not null order by started_at desc, id desc limit 1) r on true \
          where s.household_id = $1 order by s.kind, s.label",
