@@ -567,7 +567,11 @@ async fn ohif(State(rt): State<Runtime>, imaging: Option<Extension<Arc<Imaging>>
     let (parts, _) = req.into_parts();
     let mut res = match viewer_file(&rt, imaging.as_ref(), &parts).await {
         Ok(r) => r,
-        Err(e) => refusal_page(e),
+        Err(e) => refusal_page(
+            &e,
+            page_lang(&parts.headers, &rt.settings.default_locale),
+            &rt.settings.base_url,
+        ),
     };
     let h = res.headers_mut();
     h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(VIEWER_CSP));
@@ -925,22 +929,112 @@ fn common_headers(h: &mut HeaderMap) {
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
 }
 
-/// A refusal under `/ohif` is a page too, sandboxed like the viewer.
-fn refusal_page(e: ApiError) -> Response {
-    let message: String = e
-        .message
-        .chars()
+/// The language of a page under `/ohif`, picked as the app picks it with nothing saved: the browser's
+/// first language, Spanish when it is Spanish, else English; with no `Accept-Language`, the server's
+/// default (`OWNHEALTH_DEFAULT_LOCALE`). A sandboxed page cannot read the app's saved choice.
+fn page_lang(headers: &HeaderMap, default: &str) -> Lang {
+    let first = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty());
+    match first.as_deref().unwrap_or(default) {
+        t if t.starts_with("es") => Lang::Es,
+        _ => Lang::En,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lang {
+    En,
+    Es,
+}
+
+/// The words of every refusal page, (code, English, Spanish). A code not here gets the last line.
+const REFUSALS: &[(&str, &str, &str)] = &[
+    (
+        "viewer_link_invalid",
+        "This viewer link is not valid any more. A link works for one hour, and only while you stay signed in to OwnHealth; opening the study there again gives a new one.",
+        "Este enlace del visor ya no sirve. Un enlace dura una hora, y solo mientras sigues con la sesión iniciada en OwnHealth; al abrir allí el estudio otra vez se crea uno nuevo.",
+    ),
+    (
+        "viewer_link_missing",
+        "The viewer opens from a study in OwnHealth.",
+        "El visor se abre desde un estudio en OwnHealth.",
+    ),
+    (
+        "viewer_file_refused",
+        "This is not a file of the viewer.",
+        "Esto no es un archivo del visor.",
+    ),
+    (
+        "study_not_available",
+        "This study is not available to you.",
+        "Este estudio no está disponible para ti.",
+    ),
+    (
+        "study_retracted",
+        "This study was retracted.",
+        "Este estudio se retiró.",
+    ),
+    (
+        "imaging_off",
+        "Imaging is off on this server.",
+        "Las imágenes médicas están desactivadas en este servidor.",
+    ),
+    ("method_not_allowed", "The viewer only reads.", "El visor solo lee."),
+    (
+        "",
+        "The viewer cannot open this study now.",
+        "El visor no puede abrir este estudio ahora.",
+    ),
+];
+
+/// Every text a refusal page can show (the wording lint reads them).
+pub fn phrases() -> Value {
+    let pages: Vec<Value> = REFUSALS
+        .iter()
+        .map(|(code, en, es)| json!({"code": code, "en": en, "es": es}))
+        .collect();
+    json!({"pages": pages, "back": [BACK.0, BACK.1]})
+}
+
+/// The link back to the app, (English, Spanish).
+const BACK: (&str, &str) = ("Back to OwnHealth", "Volver a OwnHealth");
+
+fn html_escape(s: &str) -> String {
+    s.chars()
         .map(|c| match c {
             '<' => "&lt;".to_string(),
             '>' => "&gt;".to_string(),
             '&' => "&amp;".to_string(),
             '"' => "&quot;".to_string(),
+            '\'' => "&#39;".to_string(),
             c => c.to_string(),
         })
-        .collect();
+        .collect()
+}
+
+/// A refusal under `/ohif` is a page too, sandboxed like the viewer, in the person's language, with a
+/// link back to the app (a sandboxed page may still navigate itself).
+fn refusal_page(e: &ApiError, lang: Lang, base_url: &str) -> Response {
+    let (_, en, es) = REFUSALS
+        .iter()
+        .find(|(code, _, _)| *code == e.code)
+        .or_else(|| REFUSALS.last())
+        .copied()
+        .unwrap_or(("", "", ""));
+    let (tag, message, back) = match lang {
+        Lang::Es => ("es", es, BACK.1),
+        Lang::En => ("en", en, BACK.0),
+    };
+    let home = html_escape(&format!("{}/", base_url.trim_end_matches('/')));
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>OwnHealth viewer</title>\
-         <body style=\"background:#0f1115;color:#e6e8ee;font:15px system-ui;padding:2rem\"><p>{message}</p></body></html>"
+        "<!doctype html><html lang=\"{tag}\"><meta charset=\"utf-8\"><title>OwnHealth</title>\
+         <body style=\"background:#0f1115;color:#e6e8ee;font:15px system-ui;padding:2rem\"><p>{}</p>\
+         <p><a href=\"{home}\" style=\"color:#8ab4ff\">{back}</a></p></body></html>",
+        html_escape(message)
     );
     answer(e.status, "text/html; charset=utf-8", html.into_bytes())
 }
@@ -1062,6 +1156,12 @@ const CONFIG_OVERRIDE: &str = r#"
     }
   ];
   config.defaultDataSourceName = 'dicomweb';
+  // The sandbox forgets OHIF's "seen" flags (storage is in memory), so turn the investigational-use
+  // banner and the onboarding tour off instead of showing them on every open.
+  config.investigationalUseDialog = { option: 'never' };
+  var tours = { 'ohif.tours': { $set: [] } };
+  var cs = config.customizationService;
+  config.customizationService = Array.isArray(cs) ? cs.concat([tours]) : [cs || {}, tours];
 })();
 "#;
 
@@ -1127,6 +1227,9 @@ mod tests {
         assert!(js.contains("var root = \"https://h.test/dicom-web/t/T\";"));
         assert!(js.contains("config.routerBasename = \"/ohif/t/T/\";"));
         assert!(js.contains("config.showStudyList = false;"));
+        // The sandbox forgets OHIF's "seen" flags, so the banner and the tour are off, not shown each time.
+        assert!(js.contains("config.investigationalUseDialog = { option: 'never' };"));
+        assert!(js.contains("'ohif.tours': { $set: [] }"));
     }
 
     fn holder(n: u128) -> Holder {
@@ -1188,5 +1291,29 @@ mod tests {
     fn a_json_answer_is_capped_well_below_the_memory_of_a_small_box() {
         // The proxy buffers it and the URL rewrite copies it twice, with many requests in flight.
         assert!((32 << 20..=64 << 20).contains(&MAX_JSON_BYTES), "{MAX_JSON_BYTES}");
+    }
+
+    #[test]
+    fn a_refusal_page_picks_the_language_as_the_app_does() {
+        let h = |v: &str| {
+            let mut m = HeaderMap::new();
+            m.insert(
+                header::ACCEPT_LANGUAGE,
+                HeaderValue::from_str(v).unwrap_or(HeaderValue::from_static("")),
+            );
+            m
+        };
+        assert_eq!(page_lang(&h("es-ES,en;q=0.8"), "en"), Lang::Es);
+        assert_eq!(page_lang(&h("en-US,es;q=0.8"), "es"), Lang::En);
+        assert_eq!(page_lang(&h("de"), "es"), Lang::En);
+        assert_eq!(page_lang(&HeaderMap::new(), "es"), Lang::Es);
+        assert_eq!(page_lang(&HeaderMap::new(), "en"), Lang::En);
+        // Every refusal has both languages, and the fallback is last.
+        assert!(
+            REFUSALS
+                .iter()
+                .all(|(_, en, es)| !en.is_empty() && !es.is_empty() && en != es)
+        );
+        assert_eq!(REFUSALS.last().map(|r| r.0), Some(""));
     }
 }

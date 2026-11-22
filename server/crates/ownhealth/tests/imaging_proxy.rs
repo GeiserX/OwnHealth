@@ -1167,6 +1167,49 @@ async fn a_dicomweb_answer_never_runs_as_a_page_of_the_app() -> R {
     Ok(())
 }
 
+/// A refusal page speaks the person's language (the browser's, as the app picks it) and links back to
+/// the app, where the study opens again.
+#[tokio::test]
+async fn a_refusal_page_speaks_spanish_or_english_and_leads_back() -> R {
+    let w = World::new().await?;
+    let dead = "/ohif/t/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/viewer";
+    for (accept, lang, words) in [
+        (
+            Some("es-ES,es;q=0.9,en;q=0.5"),
+            "es",
+            "Este enlace del visor ya no sirve",
+        ),
+        (Some("en-GB,en;q=0.9"), "en", "This viewer link is not valid any more"),
+        (Some("fr-FR"), "en", "This viewer link is not valid any more"),
+        (None, "es", "Este enlace del visor ya no sirve"), // OWNHEALTH_DEFAULT_LOCALE (es)
+    ] {
+        let mut b = Request::get(dead).header(header::HOST, "health.test");
+        if let Some(a) = accept {
+            b = b.header(header::ACCEPT_LANGUAGE, a);
+        }
+        let (s, h, body) = w.call(b.body(Body::empty())?).await?;
+        let page = String::from_utf8(body)?;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert_eq!(hv(&h, "content-security-policy"), VIEWER_CSP);
+        assert!(page.contains(&format!("<html lang=\"{lang}\"")), "{accept:?}: {page}");
+        assert!(page.contains(words), "{accept:?}: {page}");
+        assert!(page.contains(&format!("href=\"{BASE}/\"")), "{accept:?}: {page}");
+    }
+    let (_, _, body) = w
+        .call(
+            Request::get("/ohif/")
+                .header(header::ACCEPT_LANGUAGE, "es")
+                .body(Body::empty())?,
+        )
+        .await?;
+    let page = String::from_utf8(body)?;
+    assert!(
+        page.contains("El visor se abre desde un estudio en OwnHealth."),
+        "{page}"
+    );
+    Ok(())
+}
+
 #[test]
 fn the_orthanc_settings_need_a_password_once_the_url_is_set() -> R {
     use std::collections::HashMap;
