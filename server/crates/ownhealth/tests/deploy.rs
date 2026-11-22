@@ -417,6 +417,16 @@ fn redis_is_pinned(image: &str) -> bool {
     })
 }
 
+/// Null, false, or an empty list or map: a key that grants nothing.
+fn unset(v: &Value) -> bool {
+    match v {
+        Value::Null | Value::Bool(false) => true,
+        Value::Array(a) => a.is_empty(),
+        Value::Object(o) => o.is_empty(),
+        _ => false,
+    }
+}
+
 fn strings(v: &Value) -> Vec<String> {
     match v {
         Value::Array(a) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
@@ -532,6 +542,50 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
                 "{case}: {s}"
             );
         }
+        // Nothing of the host or of another container reaches the sidecar: no mount but a tmpfs (and
+        // ow-db-init's read-only ow-role.sql), no privileges, no capability added, no device, and
+        // neither the host's process nor its IPC namespace.
+        for s in OW_ALL {
+            let svc = &services[s];
+            let mounts: Vec<&Value> = svc["volumes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|v| v["type"] != "tmpfs")
+                .collect();
+            let role_sql = |v: &Value| {
+                v["type"] == "bind"
+                    && v["target"] == "/opt/ow-role.sql"
+                    && v["read_only"] == true
+                    && v["source"].as_str().is_some_and(|p| p.ends_with("/deploy/db/ow-role.sql"))
+            };
+            let allowed = if s == "ow-db-init" { 1 } else { 0 };
+            assert!(
+                mounts.len() == allowed && mounts.iter().all(|v| role_sql(v)),
+                "{case}: {s} mounts {mounts:?}"
+            );
+            for k in ["volumes_from", "privileged", "cap_add", "devices"] {
+                assert!(unset(&svc[k]), "{case}: {s} {k}: {}", svc[k]);
+            }
+            for k in ["pid", "ipc", "userns_mode"] {
+                assert_ne!(svc[k], "host", "{case}: {s} {k}");
+            }
+        }
+        // The homelab file hardens all five: every capability dropped, no privilege gained, and a
+        // read-only root filesystem except for beat, which writes its schedule file.
+        if case == "homelab" {
+            for s in OW_ALL {
+                let svc = &services[s];
+                assert_eq!(strings(&svc["cap_drop"]), ["ALL"], "{case}: {s} cap_drop");
+                assert!(
+                    strings(&svc["security_opt"]).contains(&"no-new-privileges:true".to_string()),
+                    "{case}: {s} security_opt {}",
+                    svc["security_opt"]
+                );
+                assert_eq!(svc["read_only"] == true, s != "ow-beat", "{case}: {s} read_only");
+            }
+        }
+
         let redis = &services["ow-redis"];
         let image = redis["image"].as_str().unwrap_or_default();
         assert!(redis_is_pinned(image), "{case}: ow-redis image {image:?}");
