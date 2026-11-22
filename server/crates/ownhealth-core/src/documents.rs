@@ -605,7 +605,9 @@ pub async fn rekey_document(
     .await
     .map_err(|e| Error::Other(anyhow::anyhow!("blob re-key task failed: {e}")))??;
     // the document had no profile: its own key goes in this transaction, after its files were read
-    // (a key lookup waits on the row this takes), so nothing opens the item's copies once this commits
+    // (a key lookup waits on the row this takes). The stored key is gone once this commits. A process
+    // that already holds the key in its keyring (`Keyring::dek_for` answers from its cache first) can
+    // still open the item's copies until the drop job queued below removes them.
     if let BlobOwner::Pending(item) = moved.from {
         crate::keys::shred_pending(&mut *conn, &[item]).await?;
     }
