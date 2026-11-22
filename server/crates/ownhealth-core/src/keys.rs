@@ -8,6 +8,11 @@
 //!   lives only in memory; the operator keeps OWNHEALTH_SECRETS_KEY with the backups.
 //! - Each profile has one random 256-bit data key (DEK), stored in `profile_key` wrapped with
 //!   AES-256-GCM under the KEK (the profile id is the associated data), with the KEK's fingerprint.
+//! - Each pending item (a held mail, a document with no profile yet) has a DEK of its own the same
+//!   way, in `pending_key` under its item id. When the item gets a profile, its files are sealed again
+//!   under the profile's DEK and the item's key is shredded ([`shred_pending`]).
+//! - A profile's DEK also seals the secrets of its connections (`secrets.rs`, a key derived for
+//!   secrets alone).
 //! - The DEK derives the file names (HMAC-SHA256 of the plaintext sha256, so a name says nothing about
 //!   the bytes) and, with a random salt per file, each file's own record key.
 //!
@@ -75,6 +80,39 @@ impl KeyError {
 impl From<sqlx::Error> for KeyError {
     fn from(e: sqlx::Error) -> Self {
         KeyError(format!("could not read the profile keys: {e}"))
+    }
+}
+
+/// Whose data key: a profile's, or one pending item's (a held mail, a document with no profile yet).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Slot {
+    Profile(Uuid),
+    Pending(Uuid),
+}
+
+impl Slot {
+    pub fn id(self) -> Uuid {
+        match self {
+            Slot::Profile(id) | Slot::Pending(id) => id,
+        }
+    }
+
+    /// The table and the id column that hold this slot's wrapped key.
+    fn table(self) -> (&'static str, &'static str) {
+        match self {
+            Slot::Profile(_) => ("profile_key", "profile_id"),
+            Slot::Pending(_) => ("pending_key", "item_id"),
+        }
+    }
+
+    /// The associated data of the wrapped key: a profile key never opens as an item's, or back.
+    fn aad(self) -> Vec<u8> {
+        let mut a = match self {
+            Slot::Profile(_) => b"ownhealth profile dek v1".to_vec(),
+            Slot::Pending(_) => b"ownhealth pending dek v1".to_vec(),
+        };
+        a.extend_from_slice(self.id().as_bytes());
+        a
     }
 }
 
@@ -166,14 +204,13 @@ impl Kek {
         self.fingerprint
     }
 
-    fn aad(profile: Uuid) -> Vec<u8> {
-        let mut a = b"ownhealth profile dek v1".to_vec();
-        a.extend_from_slice(profile.as_bytes());
-        a
-    }
-
     /// `dek` wrapped for `profile`: `version | nonce | ciphertext | tag`.
     pub fn wrap(&self, profile: Uuid, dek: &Dek) -> Result<Vec<u8>, KeyError> {
+        self.wrap_slot(Slot::Profile(profile), dek)
+    }
+
+    /// `dek` wrapped for `slot`.
+    pub fn wrap_slot(&self, slot: Slot, dek: &Dek) -> Result<Vec<u8>, KeyError> {
         let mut nonce = [0u8; WRAP_NONCE];
         rand::fill(&mut nonce[..]);
         let ct = cipher(&self.key)
@@ -181,7 +218,7 @@ impl Kek {
                 &Nonce::from(nonce),
                 Payload {
                     msg: &dek.key[..],
-                    aad: &Kek::aad(profile),
+                    aad: &slot.aad(),
                 },
             )
             .map_err(|_| KeyError::new("could not wrap a profile key"))?;
@@ -195,6 +232,11 @@ impl Kek {
     /// The DEK `wrap` made for `profile`. Another KEK (by its fingerprint), another profile or a
     /// changed byte is refused, without detail.
     pub fn unwrap(&self, profile: Uuid, fingerprint: &[u8], wrapped: &[u8]) -> Result<Dek, KeyError> {
+        self.unwrap_slot(Slot::Profile(profile), fingerprint, wrapped)
+    }
+
+    /// The DEK `wrap_slot` made for `slot`.
+    pub fn unwrap_slot(&self, slot: Slot, fingerprint: &[u8], wrapped: &[u8]) -> Result<Dek, KeyError> {
         if fingerprint != self.fingerprint {
             return Err(KeyError::new(WRONG_KEY));
         }
@@ -210,7 +252,7 @@ impl Kek {
                     &Nonce::from(nonce),
                     Payload {
                         msg: &wrapped[1 + WRAP_NONCE..],
-                        aad: &Kek::aad(profile),
+                        aad: &slot.aad(),
                     },
                 )
                 .map_err(|_| refused())?,
@@ -253,6 +295,43 @@ impl Dek {
                 .finalize()
                 .into_bytes(),
         )
+    }
+
+    /// `value` sealed under a key this DEK derives for secrets alone: `nonce | ciphertext | tag`,
+    /// bound to `aad`. For a profile's connection secrets (`secrets.rs`).
+    pub fn seal_value(&self, value: &[u8], aad: &[u8]) -> Result<Vec<u8>, KeyError> {
+        let key = hkdf32(&self.key[..], None, b"ownhealth profile secret v1");
+        let mut nonce = [0u8; WRAP_NONCE];
+        rand::fill(&mut nonce[..]);
+        let ct = cipher(&key)
+            .encrypt(&Nonce::from(nonce), Payload { msg: value, aad })
+            .map_err(|_| KeyError::new("could not seal a secret"))?;
+        let mut out = Vec::with_capacity(WRAP_NONCE + ct.len());
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ct);
+        Ok(out)
+    }
+
+    /// What `seal_value` made with this DEK and `aad`. Another key, other associated data or a
+    /// changed byte is the same error, without detail.
+    pub fn open_value(&self, sealed: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, KeyError> {
+        let refused = || KeyError::new("the stored secret does not open with its profile's key");
+        if sealed.len() < WRAP_NONCE + TAG {
+            return Err(refused());
+        }
+        let key = hkdf32(&self.key[..], None, b"ownhealth profile secret v1");
+        let mut nonce = [0u8; WRAP_NONCE];
+        nonce.copy_from_slice(&sealed[..WRAP_NONCE]);
+        cipher(&key)
+            .decrypt(
+                &Nonce::from(nonce),
+                Payload {
+                    msg: &sealed[WRAP_NONCE..],
+                    aad,
+                },
+            )
+            .map(Zeroizing::new)
+            .map_err(|_| refused())
     }
 
     /// The record key and the binding key of one file, from its salt.
@@ -517,11 +596,11 @@ enum Source {
 /// never kept, so a deleted profile's key cannot come back into the cache.
 #[derive(Default)]
 struct Cache {
-    keys: HashMap<Uuid, Arc<Dek>>,
+    keys: HashMap<Slot, Arc<Dek>>,
     forgets: u64,
 }
 
-/// The profile keys this process has opened, by profile, and where to find the others.
+/// The profile and pending-item keys this process has opened, and where to find the others.
 pub struct Keyring {
     kek: Kek,
     source: Source,
@@ -535,7 +614,7 @@ impl std::fmt::Debug for Keyring {
 }
 
 impl Keyring {
-    /// Keys in the `profile_key` table of the database at `url` (a sqlx URL).
+    /// Keys in the `profile_key` and `pending_key` tables of the database at `url` (a sqlx URL).
     pub fn new(kek: Kek, url: impl Into<String>) -> Keyring {
         Keyring {
             kek,
@@ -558,6 +637,11 @@ impl Keyring {
         &self.kek
     }
 
+    /// Whether the keys live in a database (the app), not only in memory (blob tests).
+    pub fn stored(&self) -> bool {
+        matches!(self.source, Source::Db(_))
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Cache>, KeyError> {
         self.cache
             .lock()
@@ -567,44 +651,55 @@ impl Keyring {
     /// Drop the key this process kept for `profile`, after its row went with the profile. A lookup
     /// that started before this call keeps nothing.
     pub fn forget(&self, profile: Uuid) {
+        self.forget_slot(Slot::Profile(profile));
+    }
+
+    /// Drop the key this process kept for `slot` (see [`Keyring::forget`]).
+    pub fn forget_slot(&self, slot: Slot) {
         if let Ok(mut c) = self.cache.lock() {
-            c.keys.remove(&profile);
+            c.keys.remove(&slot);
             c.forgets = c.forgets.wrapping_add(1);
         }
     }
 
-    /// The cached key of `profile`, and the `forget` count a lookup that starts now must see again.
-    fn cached(&self, profile: Uuid) -> Result<(Option<Arc<Dek>>, u64), KeyError> {
+    /// The cached key of `slot`, and the `forget` count a lookup that starts now must see again.
+    fn cached(&self, slot: Slot) -> Result<(Option<Arc<Dek>>, u64), KeyError> {
         let c = self.lock()?;
-        Ok((c.keys.get(&profile).cloned(), c.forgets))
+        Ok((c.keys.get(&slot).cloned(), c.forgets))
     }
 
-    /// Keep `dek` for `profile` unless `forget` ran since the lookup began (`seen`): the check and
+    /// Keep `dek` for `slot` unless `forget` ran since the lookup began (`seen`): the check and
     /// the insert hold one lock. The key goes back to the caller either way.
-    fn publish(&self, profile: Uuid, dek: Arc<Dek>, seen: u64) -> Result<Arc<Dek>, KeyError> {
+    fn publish(&self, slot: Slot, dek: Arc<Dek>, seen: u64) -> Result<Arc<Dek>, KeyError> {
         let mut c = self.lock()?;
         if c.forgets != seen {
             return Ok(dek);
         }
-        Ok(c.keys.entry(profile).or_insert(dek).clone())
+        Ok(c.keys.entry(slot).or_insert(dek).clone())
     }
 
     /// The DEK of `profile`. With `create`, a profile with none gets one (two processes racing keep
     /// the first); without, None when the profile has none.
     pub fn dek(&self, profile: Uuid, create: bool) -> Result<Option<Arc<Dek>>, KeyError> {
-        let (cached, seen) = self.cached(profile)?;
+        self.dek_for(Slot::Profile(profile), create)
+    }
+
+    /// The DEK of `slot`, as [`Keyring::dek`] does for a profile. A shredded key (a deleted profile,
+    /// a pending item that got its profile or was deleted) is None, and refused with `create`.
+    pub fn dek_for(&self, slot: Slot, create: bool) -> Result<Option<Arc<Dek>>, KeyError> {
+        let (cached, seen) = self.cached(slot)?;
         if let Some(d) = cached {
             return Ok(Some(d));
         }
         let found = match &self.source {
             Source::Db(url) => {
                 let new = if create {
-                    Some(self.kek.wrap(profile, &Dek::generate())?)
+                    Some(self.kek.wrap_slot(slot, &Dek::generate())?)
                 } else {
                     None
                 };
-                match side_lookup(url, profile, new, self.kek.fingerprint())? {
-                    Some((wrapped, fp)) => Some(self.kek.unwrap(profile, &fp, &wrapped)?),
+                match side_lookup(url, slot, new, self.kek.fingerprint())? {
+                    Some((wrapped, fp)) => Some(self.kek.unwrap_slot(slot, &fp, &wrapped)?),
                     None => None,
                 }
             }
@@ -614,28 +709,30 @@ impl Keyring {
         let Some(dek) = found else {
             return Ok(None);
         };
-        Ok(Some(self.publish(profile, Arc::new(dek), seen)?))
+        Ok(Some(self.publish(slot, Arc::new(dek), seen)?))
     }
 }
 
-/// A `profile_key` row: `wrapped_dek`, `kek_fingerprint`.
+/// A `profile_key` or `pending_key` row: `wrapped_dek`, `kek_fingerprint`.
 type Stored = (Vec<u8>, Vec<u8>);
 
-/// The stored key of `profile` (`wrapped_dek`, `kek_fingerprint`), after inserting `new` when given
+/// Whether a key made under another KEK is stored in either key table.
+const OTHER_KEK: &str = "(exists (select 1 from profile_key where kek_fingerprint <> $1) \
+     or exists (select 1 from pending_key where kek_fingerprint <> $1))";
+
+/// The stored key of `slot` (`wrapped_dek`, `kek_fingerprint`), after inserting `new` when given
 /// and none is stored. Blob reads and writes are not async, so this runs on a thread of its own with
-/// its own connection: it never waits on the caller's pool or runtime. It runs once per profile per
-/// process. The row has no foreign key to `profile`: the profile may still be in the caller's open
-/// transaction. `new` is stored only while every stored key was made under the same KEK, so a key
-/// swapped while the app runs cannot add keys the right one never opens. A deleted profile's row
-/// stays with no key ([`shred`]): the insert waits on a delete still in progress, then finds the row,
-/// so no key is ever made for a deleted profile (None without `new`, an error with it).
-fn side_lookup(
-    url: &str,
-    profile: Uuid,
-    new: Option<Vec<u8>>,
-    fingerprint: [u8; 8],
-) -> Result<Option<Stored>, KeyError> {
+/// its own connection: it never waits on the caller's pool or runtime. It runs once per key per
+/// process. The row has no foreign key to its profile or item: the profile may still be in the
+/// caller's open transaction, and a held mail's key is made before its row. `new` is stored only
+/// while every stored key was made under the same KEK, so a key swapped while the app runs cannot add
+/// keys the right one never opens. A shredded key's row stays with no key ([`shred`],
+/// [`shred_pending`]): the insert waits on a shred still in progress, then finds the row, so no key is
+/// ever made again for a deleted profile or a settled item (None without `new`, an error with it).
+fn side_lookup(url: &str, slot: Slot, new: Option<Vec<u8>>, fingerprint: [u8; 8]) -> Result<Option<Stored>, KeyError> {
     let url = url.to_string();
+    let (table, column) = slot.table();
+    let id = slot.id();
     let lookup = std::thread::Builder::new()
         .name("ownhealth-key-lookup".into())
         .spawn(move || {
@@ -646,43 +743,41 @@ fn side_lookup(
             rt.block_on(async move {
                 let mut conn = PgConnection::connect(&url).await?;
                 if let Some(wrapped) = &new {
-                    sqlx::query(
-                        "insert into profile_key (profile_id, wrapped_dek, kek_fingerprint) \
-                     select $1, $2, $3 where not exists (select 1 from profile_key where kek_fingerprint <> $3) \
-                     on conflict (profile_id) do nothing",
-                    )
-                    .bind(profile)
-                    .bind(wrapped)
-                    .bind(&fingerprint[..])
-                    .execute(&mut conn)
-                    .await?;
+                    let sql = format!(
+                        "insert into {table} ({column}, wrapped_dek, kek_fingerprint) select $2, $3, $1 \
+                         where not {OTHER_KEK} on conflict ({column}) do nothing"
+                    );
+                    sqlx::query(sqlx::AssertSqlSafe(sql))
+                        .bind(&fingerprint[..])
+                        .bind(id)
+                        .bind(wrapped)
+                        .execute(&mut conn)
+                        .await?;
                 }
-                let row: Option<StoredRow> = sqlx::query_as(
-                    // waits for a delete in progress, then reads the row it left
-                    "select wrapped_dek, kek_fingerprint from profile_key where profile_id = $1 for share",
-                )
-                .bind(profile)
-                .fetch_optional(&mut conn)
-                .await?;
+                // waits for a shred in progress, then reads the row it left
+                let sql = format!("select wrapped_dek, kek_fingerprint from {table} where {column} = $1 for share");
+                let row: Option<StoredRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                    .bind(id)
+                    .fetch_optional(&mut conn)
+                    .await?;
                 if matches!(row, Some((None, _) | (_, None))) {
                     let _ = conn.close().await;
                     return match new {
-                        Some(_) => Err(KeyError::new("no key could be stored for the profile: it was deleted")),
+                        Some(_) => Err(KeyError::new(shredded(slot))),
                         None => Ok(None),
                     };
                 }
                 let row = row.and_then(|(w, f)| Some((w?, f?)));
                 if row.is_none() && new.is_some() {
-                    let other: bool =
-                        sqlx::query_scalar("select exists (select 1 from profile_key where kek_fingerprint <> $1)")
-                            .bind(&fingerprint[..])
-                            .fetch_one(&mut conn)
-                            .await?;
+                    let other: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select {OTHER_KEK}")))
+                        .bind(&fingerprint[..])
+                        .fetch_one(&mut conn)
+                        .await?;
                     let _ = conn.close().await;
                     return Err(if other {
                         KeyError::new(WRONG_KEY)
                     } else {
-                        KeyError::new("no key could be stored for the profile: it was deleted")
+                        KeyError::new(shredded(slot))
                     });
                 }
                 let _ = conn.close().await;
@@ -693,7 +788,15 @@ fn side_lookup(
     lookup.join().map_err(|_| KeyError::new("the key lookup stopped"))?
 }
 
-/// A `profile_key` row as stored: wrapped DEK and fingerprint, both null on a shredded key.
+/// Why no key could be stored for a slot whose row is shredded.
+fn shredded(slot: Slot) -> &'static str {
+    match slot {
+        Slot::Profile(_) => "no key could be stored for the profile: it was deleted",
+        Slot::Pending(_) => "no key could be stored for the item: it was assigned, released or deleted",
+    }
+}
+
+/// A key row as stored: wrapped DEK and fingerprint, both null on a shredded key.
 type StoredRow = (Option<Vec<u8>>, Option<Vec<u8>>);
 
 /// The refusal of a key that is not the one the stored profile keys were made with.
@@ -719,6 +822,32 @@ pub async fn shred(conn: &mut PgConnection, profile: Uuid) -> Result<u64, KeyErr
     Ok(u64::from(had == Some(true)))
 }
 
+/// Destroy the keys of pending items `items` in the caller's transaction: a held mail released or
+/// deleted, a document that got its profile. The rows stay with no key, as [`shred`] leaves a
+/// profile's, so an item's file sealed later by a process that still holds the key in memory never
+/// opens, and the sweep ([`crate::blobs::BlobStore::sweep_unkeyed`]) removes it. Returns how many
+/// keys were there.
+pub async fn shred_pending(conn: &mut PgConnection, items: &[Uuid]) -> Result<u64, KeyError> {
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let had: i64 = sqlx::query_scalar(
+        "select count(*) from (select 1 from pending_key where item_id = any($1) and wrapped_dek is not null \
+         for update) x",
+    )
+    .bind(items)
+    .fetch_one(&mut *conn)
+    .await?;
+    sqlx::query(
+        "insert into pending_key (item_id) select unnest($1::uuid[]) \
+         on conflict (item_id) do update set wrapped_dek = null, kek_fingerprint = null",
+    )
+    .bind(items)
+    .execute(&mut *conn)
+    .await?;
+    Ok(u64::try_from(had).unwrap_or(0))
+}
+
 /// Destroy the keys whose profile is gone without a delete (a profile create that rolled back after
 /// its first file), once a day old: a younger one may belong to a profile still in an open
 /// transaction. Returns how many went.
@@ -733,9 +862,60 @@ pub async fn shred_orphans(conn: &mut PgConnection) -> Result<u64, KeyError> {
     .rows_affected())
 }
 
-/// Refuses a start whose OWNHEALTH_SECRETS_KEY does not open every profile key the database holds,
-/// before anything serves or stores a key: files stored under keys the right key never opens would be
-/// lost. A database with no key yet (a fresh install, or one from before 1.0) passes.
+/// Destroy the pending keys whose item no longer waits for a profile, once a day old: a mail whose
+/// hold rolled back after its key was made, or an item settled without its key being shredded. An
+/// item waits while it is a held mail or a document with no profile. Returns how many went.
+pub async fn shred_pending_orphans(conn: &mut PgConnection) -> Result<u64, KeyError> {
+    Ok(sqlx::query(
+        "update pending_key k set wrapped_dek = null, kek_fingerprint = null \
+         where k.wrapped_dek is not null and k.created_at < now() - interval '1 day' \
+         and not exists (select 1 from quarantine_item q where q.id = k.item_id and q.status = 'held') \
+         and not exists (select 1 from document d where d.id = k.item_id and d.profile_id is null)",
+    )
+    .execute(conn)
+    .await?
+    .rows_affected())
+}
+
+/// The slots of `slots` whose key is stored and not shredded.
+pub async fn live(conn: &mut PgConnection, slots: &[Slot]) -> Result<std::collections::HashSet<Slot>, KeyError> {
+    let mut out = std::collections::HashSet::new();
+    for kind in [Slot::Profile(Uuid::nil()), Slot::Pending(Uuid::nil())] {
+        let ids: Vec<Uuid> = slots
+            .iter()
+            .filter(|s| std::mem::discriminant(*s) == std::mem::discriminant(&kind))
+            .map(|s| s.id())
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let (table, column) = kind.table();
+        let sql = format!("select {column} from {table} where {column} = any($1) and wrapped_dek is not null");
+        let found: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .bind(&ids)
+            .fetch_all(&mut *conn)
+            .await?;
+        out.extend(found.into_iter().map(|id| match kind {
+            Slot::Profile(_) => Slot::Profile(id),
+            Slot::Pending(_) => Slot::Pending(id),
+        }));
+    }
+    Ok(out)
+}
+
+/// Whether `pending_key` exists: a database restored from before it has none.
+async fn has_pending(conn: &mut PgConnection) -> Result<bool, KeyError> {
+    Ok(
+        sqlx::query_scalar("select to_regclass('public.pending_key') is not null")
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
+/// Refuses a start whose OWNHEALTH_SECRETS_KEY does not open every data key the database holds,
+/// profiles' and pending items', before anything serves or stores a key: files stored under keys the
+/// right key never opens would be lost. A database with no key yet (a fresh install, or one from
+/// before 1.0) passes.
 pub async fn check_start(conn: &mut PgConnection, kek: &Kek) -> Result<(), KeyError> {
     let keyed: bool = sqlx::query_scalar("select to_regclass('public.profile_key') is not null")
         .fetch_one(&mut *conn)
@@ -747,11 +927,13 @@ pub async fn check_start(conn: &mut PgConnection, kek: &Kek) -> Result<(), KeyEr
     if failed.is_empty() {
         return Ok(());
     }
-    let made: Vec<Vec<u8>> = sqlx::query_scalar(
-        "select distinct kek_fingerprint from profile_key where kek_fingerprint is not null order by 1",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    let sql = if has_pending(conn).await? {
+        "select distinct f from (select kek_fingerprint f from profile_key union all \
+         select kek_fingerprint from pending_key) x where f is not null order by 1"
+    } else {
+        "select distinct kek_fingerprint from profile_key where kek_fingerprint is not null order by 1"
+    };
+    let made: Vec<Vec<u8>> = sqlx::query_scalar(sql).fetch_all(&mut *conn).await?;
     let made: Vec<String> = made.iter().map(hex::encode).collect();
     Err(KeyError(format!(
         "OWNHEALTH_SECRETS_KEY (fingerprint {have}) does not open {bad} of the {all} profile keys this \
@@ -765,20 +947,32 @@ pub async fn check_start(conn: &mut PgConnection, kek: &Kek) -> Result<(), KeyEr
     )))
 }
 
-/// Every stored profile key opened with `kek`: (profiles that open, profiles that do not). For
-/// verify-restore and restore, which must not trust a backup the configured key cannot read. A
-/// deleted profile's shredded row holds no key and is not counted.
+/// Every stored data key opened with `kek`: (keys that open, the profiles and items whose key does
+/// not). For verify-restore and restore, which must not trust a backup the configured key cannot
+/// read. A shredded row holds no key and is not counted.
 pub async fn check_all(conn: &mut PgConnection, kek: &Kek) -> Result<(usize, Vec<Uuid>), KeyError> {
-    let rows: Vec<(Uuid, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+    let mut rows: Vec<(Slot, Vec<u8>, Vec<u8>)> = sqlx::query_as::<_, (Uuid, Vec<u8>, Vec<u8>)>(
         "select profile_id, wrapped_dek, kek_fingerprint from profile_key where wrapped_dek is not null \
          order by profile_id",
     )
     .fetch_all(&mut *conn)
-    .await?;
+    .await?
+    .into_iter()
+    .map(|(id, w, f)| (Slot::Profile(id), w, f))
+    .collect();
+    if has_pending(conn).await? {
+        let pending: Vec<(Uuid, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+            "select item_id, wrapped_dek, kek_fingerprint from pending_key where wrapped_dek is not null \
+             order by item_id",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+        rows.extend(pending.into_iter().map(|(id, w, f)| (Slot::Pending(id), w, f)));
+    }
     let mut bad = Vec::new();
-    for (pid, wrapped, fp) in &rows {
-        if kek.unwrap(*pid, fp, wrapped).is_err() {
-            bad.push(*pid);
+    for (slot, wrapped, fp) in &rows {
+        if kek.unwrap_slot(*slot, fp, wrapped).is_err() {
+            bad.push(slot.id());
         }
     }
     Ok((rows.len() - bad.len(), bad))
@@ -1056,21 +1250,21 @@ mod tests {
         let ring = Keyring::in_memory(kek());
         let p = Uuid::new_v4();
         // a lookup began, then the profile was deleted and forgotten, then the lookup ended
-        let (none, seen) = ring.cached(p)?;
+        let (none, seen) = ring.cached(Slot::Profile(p))?;
         assert!(none.is_none());
         ring.forget(p);
-        let late = ring.publish(p, Arc::new(Dek::generate()), seen)?;
+        let late = ring.publish(Slot::Profile(p), Arc::new(Dek::generate()), seen)?;
         assert!(
-            ring.cached(p)?.0.is_none(),
+            ring.cached(Slot::Profile(p))?.0.is_none(),
             "a deleted profile's key came back into the cache"
         );
         // a lookup with no forget in between keeps its key, and the first one stays
-        let (_, seen) = ring.cached(p)?;
-        let kept = ring.publish(p, late.clone(), seen)?;
+        let (_, seen) = ring.cached(Slot::Profile(p))?;
+        let kept = ring.publish(Slot::Profile(p), late.clone(), seen)?;
         assert!(Arc::ptr_eq(&kept, &late));
-        let again = ring.publish(p, Arc::new(Dek::generate()), seen)?;
+        let again = ring.publish(Slot::Profile(p), Arc::new(Dek::generate()), seen)?;
         assert!(Arc::ptr_eq(&again, &late), "a second lookup replaced the kept key");
-        assert!(ring.cached(p)?.0.is_some_and(|c| Arc::ptr_eq(&c, &late)));
+        assert!(ring.cached(Slot::Profile(p))?.0.is_some_and(|c| Arc::ptr_eq(&c, &late)));
         Ok(())
     }
 
@@ -1082,6 +1276,64 @@ mod tests {
         let made = ring.dek(p, true)?.expect("made");
         let again = ring.dek(p, false)?.expect("kept");
         assert!(Arc::ptr_eq(&made, &again));
+        Ok(())
+    }
+
+    #[test]
+    fn a_pending_items_key_never_opens_as_a_profiles_key() -> Result<(), KeyError> {
+        let (k, id) = (kek(), Uuid::new_v4());
+        let dek = Dek::generate();
+        let wrapped = k.wrap_slot(Slot::Pending(id), &dek)?;
+        let back = k.unwrap_slot(Slot::Pending(id), &k.fingerprint(), &wrapped)?;
+        assert_eq!(back.address(&[3u8; 32]), dek.address(&[3u8; 32]));
+        assert!(
+            k.unwrap_slot(Slot::Profile(id), &k.fingerprint(), &wrapped).is_err(),
+            "opened as a profile key"
+        );
+        assert!(
+            k.unwrap(id, &k.fingerprint(), &wrapped).is_err(),
+            "opened as a profile key"
+        );
+        let profile = k.wrap(id, &dek)?;
+        assert!(
+            k.unwrap_slot(Slot::Pending(id), &k.fingerprint(), &profile).is_err(),
+            "opened as an item key"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_value_sealed_under_a_dek_opens_only_with_it_and_its_associated_data() -> Result<(), KeyError> {
+        let dek = Dek::generate();
+        let sealed = dek.seal_value(b"fake-refresh-LabNorte", b"row-1")?;
+        assert_eq!(&dek.open_value(&sealed, b"row-1")?[..], b"fake-refresh-LabNorte");
+        assert!(dek.open_value(&sealed, b"row-2").is_err(), "other associated data");
+        assert!(Dek::generate().open_value(&sealed, b"row-1").is_err(), "another key");
+        let mut flipped = sealed.clone();
+        flipped[WRAP_NONCE + 2] ^= 1;
+        assert!(dek.open_value(&flipped, b"row-1").is_err(), "a changed byte");
+        assert!(dek.open_value(&sealed[..10], b"row-1").is_err(), "cut");
+        assert_ne!(dek.seal_value(b"x", b"a")?, dek.seal_value(b"x", b"a")?, "nonce reused");
+        assert!(
+            !sealed.windows(12).any(|w| w == b"fake-refresh"),
+            "plaintext in the sealed bytes"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn forgetting_one_slot_keeps_the_others() -> Result<(), KeyError> {
+        let ring = Keyring::in_memory(kek());
+        let id = Uuid::new_v4();
+        let profile = ring.dek(id, true)?.expect("made");
+        let item = ring.dek_for(Slot::Pending(id), true)?.expect("made");
+        assert!(
+            !Arc::ptr_eq(&profile, &item),
+            "one key for a profile and an item of the same id"
+        );
+        ring.forget_slot(Slot::Pending(id));
+        assert!(ring.dek_for(Slot::Pending(id), false)?.is_none());
+        assert!(ring.dek(id, false)?.is_some_and(|d| Arc::ptr_eq(&d, &profile)));
         Ok(())
     }
 }

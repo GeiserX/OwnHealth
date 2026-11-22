@@ -716,6 +716,131 @@ async fn a_person_releases_a_held_message_once() -> R {
     Ok(())
 }
 
+/// The keys of the blob files under `prefix` (`pending/<item>/`, `<profile>/`, a sha256).
+fn blob_keys(env: &Env, prefix: &str) -> anyhow::Result<Vec<String>> {
+    let files = ownhealth_core::blobs::tree_files(&env.ctx.settings.blobs_path())?;
+    Ok(files.into_keys().filter(|k| k.starts_with(prefix)).collect())
+}
+
+/// A held message is sealed under its own item key: only that key opens it, for the quarantine row
+/// and for its inbox item. Released, it is sealed again under the profile it went to and its item key
+/// is shredded; deleted, the key is shredded too. The sweep then takes both items' folders.
+#[tokio::test]
+async fn a_held_message_opens_only_through_its_item_key_and_moves_under_the_profile_on_release() -> R {
+    use ownhealth_core::blobs::{BlobError, BlobOwner};
+    let env = Env::new().await?;
+    let source = env.mailbox(json!({})).await?;
+    let raw = Mail::new("seal-1@clinica-norte.example", "citas@clinica-norte.example")
+        .attach("informe.pdf", "application/pdf", slip())
+        .build();
+    let qid = env
+        .ingest(&source, &raw)
+        .await?
+        .quarantine_id
+        .ok_or_else(|| anyhow::anyhow!("not held"))?;
+    let item_prefix = format!("pending/{}/", qid.simple());
+    let all = blob_keys(&env, "")?;
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(all[0].starts_with(&item_prefix), "not under the item's key: {all:?}");
+    let sha: String = sqlx::query_scalar("select encode(raw_blob, 'hex') from quarantine_item where id = $1")
+        .bind(qid)
+        .fetch_one(&env.db.pool)
+        .await?;
+    let blobs = &env.ctx.blobs;
+    assert_eq!(blobs.get_bytes(BlobOwner::Pending(qid), &sha)?, raw);
+    let (alex, carmen) = (env.fam.profile("alex"), env.fam.profile("carmen"));
+    for other in [
+        BlobOwner::Pending(source.id),
+        BlobOwner::Pending(Uuid::new_v4()),
+        BlobOwner::Profile(alex),
+        BlobOwner::Reference,
+    ] {
+        assert!(
+            matches!(blobs.get_bytes(other, &sha), Err(BlobError::NotFound(_))),
+            "{other:?}"
+        );
+    }
+    // its inbox item names the same bytes, and opens them through the same item key
+    let (p, q, item_sha): (Option<Uuid>, Option<Uuid>, String) = sqlx::query_as(
+        "select profile_id, quarantine_id, encode(blob_sha256, 'hex') from source_item where quarantine_id = $1",
+    )
+    .bind(qid)
+    .fetch_one(&env.db.pool)
+    .await?;
+    assert_eq!(item_sha, sha);
+    assert_eq!(BlobOwner::of_item(p, q), BlobOwner::Pending(qid));
+    assert_eq!(blobs.get_bytes(BlobOwner::of_item(p, q), &sha)?, raw);
+
+    let user = env.fam.user("alex");
+    let mut tx = env.db.pool.begin().await?;
+    email::release(&mut tx, blobs, Some(&env.sb), qid, user, carmen, false).await?;
+    tx.commit().await?;
+    let live = "select count(*) from pending_key where wrapped_dek is not null";
+    assert_eq!(env.n(live).await?, 0, "the item key outlived the release");
+    // the released message is sealed under Carmen's key now, for the row and for the inbox item
+    assert_eq!(blobs.get_bytes(BlobOwner::Profile(carmen), &sha)?, raw);
+    let (p, q): (Option<Uuid>, Option<Uuid>) =
+        sqlx::query_as("select profile_id, quarantine_id from source_item where quarantine_id = $1")
+            .bind(qid)
+            .fetch_one(&env.db.pool)
+            .await?;
+    assert_eq!(BlobOwner::of_item(p, q), BlobOwner::Profile(carmen));
+    assert_eq!(blobs.get_bytes(BlobOwner::of_item(p, q), &sha)?, raw);
+
+    // a second held message, deleted: its key goes in the delete
+    let raw2 = Mail::new("seal-2@ofertas-salud.example", "promo@ofertas-salud.example").build();
+    let q2 = env
+        .ingest(&source, &raw2)
+        .await?
+        .quarantine_id
+        .ok_or_else(|| anyhow::anyhow!("not held"))?;
+    assert_eq!(env.n(live).await?, 1);
+    let mut c = env.db.pool.acquire().await?;
+    quarantine::mark_deleted(&mut c, q2, user).await?;
+    assert_eq!(env.n(live).await?, 0, "the item key outlived the delete");
+    // the sweep takes both settled items' folders, and nothing else
+    let before = blob_keys(&env, &format!("{}/", carmen.simple()))?;
+    assert_eq!(blobs.sweep_unkeyed(&mut c).await?, 2);
+    assert!(blob_keys(&env, "pending/")?.is_empty());
+    assert_eq!(blob_keys(&env, &format!("{}/", carmen.simple()))?, before);
+    assert!(matches!(
+        blobs.get_bytes(BlobOwner::Pending(qid), &sha),
+        Err(BlobError::NotFound(_))
+    ));
+    assert_eq!(blobs.sweep_unkeyed(&mut c).await?, 0);
+    Ok(())
+}
+
+/// An allowed message is filed to its profile before it is stored, so its whole `.eml` is sealed
+/// under that profile's key: never in the plain layout, never under an inbox.
+#[tokio::test]
+async fn an_allowed_messages_eml_is_sealed_under_its_profiles_key() -> R {
+    use ownhealth_core::blobs::{BlobError, BlobOwner};
+    let env = Env::new().await?;
+    let source = env.mailbox(json!({})).await?;
+    let raw = fixture("inj-email-body-allowed.eml")?;
+    env.ingest(&source, &raw).await?;
+    let alex = env.fam.profile("alex");
+    let (p, q, sha): (Option<Uuid>, Option<Uuid>, String) = sqlx::query_as(
+        "select profile_id, quarantine_id, encode(blob_sha256, 'hex') from source_item where source_id = $1",
+    )
+    .bind(source.id)
+    .fetch_one(&env.db.pool)
+    .await?;
+    assert_eq!(BlobOwner::of_item(p, q), BlobOwner::Profile(alex));
+    assert_eq!(env.ctx.blobs.get_bytes(BlobOwner::Profile(alex), &sha)?, raw);
+    assert!(matches!(
+        env.ctx.blobs.get_bytes(BlobOwner::Pending(source.id), &sha),
+        Err(BlobError::NotFound(_))
+    ));
+    let keys = blob_keys(&env, "")?;
+    assert!(
+        keys.iter().all(|k| k.starts_with(&format!("{}/", alex.simple()))),
+        "a file outside Alex's sealed folder: {keys:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_too_large_message_is_never_released_as_empty() -> R {
     let env = Env::new().await?;

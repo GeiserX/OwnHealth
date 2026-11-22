@@ -181,6 +181,7 @@ async fn release(State(rt): State<Runtime>, Caller(p): Caller, Path(id): Path<St
     };
     audit(&mut tx, &p, action, Some(b.profile_id), vec![id.to_string()]).await?;
     tx.commit().await?;
+    forget_held(&rt, id).await;
     let problems = email::problems(&out);
     ok(json!({"document_ids": out.document_ids, "problems": problems}))
 }
@@ -196,7 +197,19 @@ async fn delete_held(State(rt): State<Runtime>, Caller(p): Caller, Path(id): Pat
     quarantine::mark_deleted(&mut tx, id, user).await?;
     audit(&mut tx, &p, "quarantine.delete", None, vec![id.to_string()]).await?;
     tx.commit().await?;
+    forget_held(&rt, id).await;
     ok(json!({"deleted": true}))
+}
+
+/// After a release or a delete committed (and shredded the item's key): the held message's sealed
+/// copy. A failure is left to the sweep (`BlobStore::sweep_unkeyed`).
+async fn forget_held(rt: &Runtime, id: Uuid) {
+    let blobs = rt.blobs.clone();
+    match tokio::task::spawn_blocking(move || blobs.forget_pending(id)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "a settled held mail's sealed copy stays until the sweep"),
+        Err(e) => tracing::warn!(error = %e, "a settled held mail's sealed copy stays until the sweep"),
+    }
 }
 
 async fn list_senders(State(rt): State<Runtime>, Caller(p): Caller, Path(id): Path<String>) -> R {

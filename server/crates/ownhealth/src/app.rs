@@ -87,8 +87,24 @@ pub fn sweep_spools(rt: &Runtime) {
     }
 }
 
-/// `sweep_spools` every 10 minutes until `stop`: a spool a killed process left goes about an hour
-/// later, not only at the next start.
+/// Remove the sealed folders whose key is gone: a deleted profile's file that a process still holding
+/// its key landed after the delete, and a settled held mail's or assigned document's item folder
+/// (`BlobStore::sweep_unkeyed`).
+pub async fn sweep_unkeyed(rt: &Runtime) {
+    let swept = async {
+        let mut conn = rt.pool.acquire().await?;
+        rt.blobs.sweep_unkeyed(&mut conn).await.map_err(Error::from)
+    };
+    match swept.await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(removed = n, "removed sealed folders whose key is gone"),
+        Err(e) => tracing::warn!(error = %e, "could not sweep sealed folders"),
+    }
+}
+
+/// `sweep_spools` and `sweep_unkeyed` every 10 minutes until `stop`: a spool a killed process left
+/// goes about an hour later, not only at the next start, and a sealed file landed after its key went
+/// within 10 minutes.
 pub fn spool_sweeper(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandle<()> {
     let rt = rt.clone();
     tokio::spawn(async move {
@@ -96,7 +112,10 @@ pub fn spool_sweeper(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandl
         every.tick().await; // the start already swept
         loop {
             tokio::select! {
-                _ = every.tick() => sweep_spools(&rt),
+                _ = every.tick() => {
+                    sweep_spools(&rt);
+                    sweep_unkeyed(&rt).await;
+                }
                 _ = stop.changed() => return,
             }
         }

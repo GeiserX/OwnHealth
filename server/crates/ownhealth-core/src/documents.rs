@@ -498,7 +498,8 @@ pub async fn lock_owner(conn: &mut PgConnection, document_id: Uuid) -> Result<Op
 /// After document `document_id` moved from profile `from` to `to` (`None`: no profile): every blob of
 /// the document (the file, its page layers and images, its OCR layers) is stored for `to` as well, so
 /// the new profile's key opens them, and the removal of `from`'s copies is queued
-/// ([`DROP_MOVED_JOB`]). Run it in the transaction of the move, with `from` read under the document's
+/// ([`DROP_MOVED_JOB`]). A document that had no profile was sealed under its own item key: that key
+/// is shredded here, in the move's transaction. Run it in the transaction of the move, with `from` read under the document's
 /// row lock, before the commit: the re-import the move queues reads them as `to`'s.
 pub async fn rekey_document(
     conn: &mut PgConnection,
@@ -540,16 +541,29 @@ pub async fn rekey_document(
     })
     .await
     .map_err(|e| Error::Other(anyhow::anyhow!("blob re-key task failed: {e}")))??;
-    if let (BlobOwner::Profile(p), false) = (moved.from, moved.shas.is_empty()) {
+    // the document had no profile: its own key goes in this transaction, after its files were read
+    // (a key lookup waits on the row this takes), so nothing opens the item's copies once this commits
+    if let BlobOwner::Pending(item) = moved.from {
+        crate::keys::shred_pending(&mut *conn, &[item]).await?;
+    }
+    let owner = match moved.from {
+        BlobOwner::Profile(p) => Some(json!({"profile_id": p})),
+        BlobOwner::Pending(i) => Some(json!({"pending_id": i})),
+        BlobOwner::Reference => None,
+    };
+    if let (Some(Value::Object(mut payload)), false) = (owner, moved.shas.is_empty()) {
         let household: Uuid = sqlx::query_scalar("select household_id from document where id = $1")
             .bind(document_id)
             .fetch_one(&mut *conn)
             .await?;
         // the household, so a retry that runs out of attempts shows in its review queue
+        payload.insert("household_id".into(), json!(household));
+        payload.insert("document_id".into(), json!(document_id));
+        payload.insert("blobs".into(), json!(moved.shas));
         enqueue(
             &mut *conn,
             DROP_MOVED_JOB,
-            &json!({"household_id": household, "profile_id": p, "document_id": document_id, "blobs": moved.shas}),
+            &Value::Object(payload),
             EnqueueOptions::default(),
         )
         .await?;

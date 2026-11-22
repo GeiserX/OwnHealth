@@ -676,8 +676,18 @@ async fn profile_blobs(conn: &mut PgConnection, profile_id: Uuid) -> Result<BTre
 /// of the same bytes to that profile takes (`documents::lock_blob`), so an upload in flight keeps its
 /// file. Returns how many files went. The move queues this as [`DROP_MOVED_JOB`].
 pub async fn drop_moved_copies(conn: &mut PgConnection, blobs: &BlobStore, moved: Moved) -> Result<usize> {
-    let BlobOwner::Profile(profile_id) = moved.from else {
-        return Ok(0); // a pending item's file is plain: nothing sealed to drop
+    let profile_id = match moved.from {
+        BlobOwner::Profile(p) => p,
+        // a document that had no profile: its item key was shredded with the move, and its folder
+        // holds only that document's files
+        BlobOwner::Pending(item) => {
+            let blobs = blobs.clone();
+            let gone = tokio::task::spawn_blocking(move || blobs.forget_pending(item))
+                .await
+                .map_err(|e| Error::Other(anyhow::anyhow!("blob task failed: {e}")))??;
+            return Ok(if gone { moved.shas.len() } else { 0 });
+        }
+        BlobOwner::Reference => return Ok(0),
     };
     let mut gone = 0;
     for sha in &moved.shas {
@@ -811,6 +821,9 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
         .execute(&mut *conn)
         .await?
         .rows_affected();
+    // a held mail's raw message is sealed under the mail's own key: it goes with the row, and the
+    // sweep removes the folder (`BlobStore::sweep_unkeyed`)
+    keys::shred_pending(&mut *conn, &mail).await.map_err(Error::from)?;
     // A Paperless tag rule that files to the profile goes; the household inbox keeps its other rules. The
     // settings route takes any id form `Uuid::parse_str` reads (hyphens or not, braces, a URN), so the
     // value is compared without those; a value that is no id at all stays and never stops the delete.
@@ -990,6 +1003,12 @@ async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {
         tracing::warn!(error = %e, "removing a deleted profile's sealed files failed again");
         failed += 1;
     }
+    // the folders of the held mail that went with the profile, and any file a process that still held
+    // the profile's key landed after the folder went
+    if let Err(e) = ctx.blobs.sweep_unkeyed(&mut conn).await {
+        tracing::warn!(error = %e, "removing sealed folders whose key is gone failed");
+        failed += 1;
+    }
     for sha in &shas {
         let Ok(bytes) = sha256_hex_to_bytes(sha) else {
             continue;
@@ -1027,7 +1046,10 @@ async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {
 /// [`DROP_MOVED_JOB`]: the copies a moved document left under the profile it left. A failure waits for
 /// the next attempt; each step is safe to repeat.
 async fn drop_moved_job(ctx: JobContext, job: Job) -> HandlerResult {
-    let profile = job.uuid("profile_id")?;
+    let from = match job.payload.get("pending_id") {
+        Some(_) => BlobOwner::Pending(job.uuid("pending_id")?),
+        None => BlobOwner::Profile(job.uuid("profile_id")?),
+    };
     let shas: Vec<String> = job
         .payload
         .get("blobs")
@@ -1035,10 +1057,7 @@ async fn drop_moved_job(ctx: JobContext, job: Job) -> HandlerResult {
         .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
     let mut conn = ctx.pool.acquire().await?;
-    let moved = Moved {
-        from: BlobOwner::Profile(profile),
-        shas,
-    };
+    let moved = Moved { from, shas };
     match drop_moved_copies(&mut conn, &ctx.blobs, moved).await {
         Ok(removed) => Ok(Some(json!({"removed": removed}))),
         Err(e) => {

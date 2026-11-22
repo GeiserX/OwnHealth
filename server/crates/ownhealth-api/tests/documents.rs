@@ -773,6 +773,77 @@ async fn a_move_reads_the_owner_under_the_document_lock() -> R {
     Ok(())
 }
 
+/// A document with no profile yet is sealed under a key of its own (its item key), never in the plain
+/// layout. Assigning it seals its files again under the profile's key in the move's transaction,
+/// shreds the item key there, and the queued removal takes the item's folder.
+#[tokio::test]
+async fn a_document_with_no_profile_is_sealed_under_its_own_key_and_re_keyed_on_assignment() -> R {
+    use ownhealth_core::blobs::{BlobError, BlobOwner, BlobStore, tree_files};
+    let a = app().await?;
+    let pdf = labnorte();
+    let scratch = tempfile::tempdir()?;
+    let sha = BlobStore::new(scratch.path())?.put_bytes(BlobOwner::Reference, &pdf)?;
+    let mut c = a.rt.pool.acquire().await?;
+    let doc = create_document(
+        &mut c,
+        &NewDocument {
+            filename: Some("unassigned.pdf"),
+            pages: Some(3),
+            ..NewDocument::upload(a.fam.household_id, None, &sha, "application/pdf", pdf.len() as i64)
+        },
+    )
+    .await?
+    .id;
+    drop(c);
+    assert_eq!(a.rt.blobs.put_bytes(BlobOwner::Pending(doc), &pdf)?, sha);
+    let keys: Vec<String> = tree_files(&a.rt.settings.blobs_path())?.into_keys().collect();
+    let item_prefix = format!("pending/{}/", doc.simple());
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    assert!(
+        keys[0].starts_with(&item_prefix),
+        "not under the item's own key: {keys:?}"
+    );
+    assert_eq!(a.rt.blobs.get_bytes(BlobOwner::Pending(doc), &sha)?, pdf);
+    for other in [BlobOwner::Pending(Uuid::new_v4()), BlobOwner::Reference] {
+        assert!(
+            matches!(a.rt.blobs.get_bytes(other, &sha), Err(BlobError::NotFound(_))),
+            "{other:?}"
+        );
+    }
+    let live = "select count(*) from pending_key where item_id = $1 and wrapped_dek is not null";
+    let count = |sql: &'static str| {
+        let pool = a.rt.pool.clone();
+        async move { sqlx::query_scalar::<_, i64>(sql).bind(doc).fetch_one(&pool).await }
+    };
+    assert_eq!(count(live).await?, 1);
+    let alex = a.fam.profile("alex");
+    let mut tx = a.rt.pool.begin().await?;
+    ownhealth_ingest_pdf::assign_document(&mut tx, &a.rt.blobs, doc, alex, a.fam.user("alex"), None).await?;
+    tx.commit().await?;
+    assert_eq!(count(live).await?, 0, "the item key outlived the assignment");
+    let queued: Vec<Value> =
+        sqlx::query_scalar("select payload from job where kind = 'blobs.drop_moved' and state = 'queued'")
+            .fetch_all(&a.rt.pool)
+            .await?;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0]["pending_id"], json!(doc));
+    assert_eq!(drop_moved(&a).await?, 1);
+    let keys: Vec<String> = tree_files(&a.rt.settings.blobs_path())?.into_keys().collect();
+    assert!(
+        !keys.iter().any(|k| k.starts_with("pending/")),
+        "the item's folder stayed: {keys:?}"
+    );
+    assert_eq!(sealed_of(&a, alex)?, 1);
+    assert!(matches!(
+        a.rt.blobs.get_bytes(BlobOwner::Pending(doc), &sha),
+        Err(BlobError::NotFound(_))
+    ));
+    let f = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
+    assert_eq!(f.status, StatusCode::OK);
+    assert!(f.bytes == pdf, "Alex reads other bytes than the document");
+    Ok(())
+}
+
 /// Accepting a document_identity item moves the document like the assign route does: the new
 /// profile opens its files, and the old profile's copies go.
 #[tokio::test]

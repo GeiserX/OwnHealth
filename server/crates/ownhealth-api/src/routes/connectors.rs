@@ -440,7 +440,7 @@ async fn callback(State(rt): State<Runtime>, meta: Meta, Query(q): Params, o: Op
     if manages_profile(&mut conn, &p, pending.profile_id).await.is_err() {
         return Ok(back(&state, "forbidden"));
     }
-    let sb = SecretBox::from_settings(&rt.settings)?;
+    let sb = SecretBox::from_settings(&rt.settings)?.with_keys(rt.blobs.keyring());
     let Some(client) = oauth::load_client(&mut conn, Some(&sb), household, pending.client)
         .await
         .map_err(fail)?
@@ -500,7 +500,7 @@ async fn disconnect(
         tx.commit().await?;
         c
     };
-    let sb = SecretBox::from_settings(&rt.settings)?;
+    let sb = SecretBox::from_settings(&rt.settings)?.with_keys(rt.blobs.keyring());
     let outcome = oauth::disconnect(&rt.pool, &sb, c.id, &egress(&rt, &o))
         .await
         .map_err(fail)?;
@@ -527,7 +527,9 @@ pub async fn revoke_before_delete(rt: &Runtime, p: &Principal, profile_id: Uuid,
         timeout: egress.timeout.min(DELETE_REVOKE_TIMEOUT),
         ..egress.clone()
     };
-    let sb = SecretBox::from_settings(&rt.settings).ok();
+    let sb = SecretBox::from_settings(&rt.settings)
+        .ok()
+        .map(|b| b.with_keys(rt.blobs.keyring()));
     let done = match oauth::revoke_profile(&rt.pool, sb.as_ref(), profile_id, &quick, DELETE_REVOKE_TIMEOUT).await {
         Ok(d) => d,
         Err(e) => {

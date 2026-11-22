@@ -328,6 +328,53 @@ async fn verify_restore_passes_and_drops_its_scratch_database() -> R {
 }
 
 #[tokio::test]
+async fn a_tree_with_an_items_own_key_backs_up_verifies_and_restores() -> R {
+    // a scan that came in with no profile yet: sealed under its own item key, in pending/<item>/
+    const SCAN: &[u8] = b"%PDF-1.4 LabNorte scan for the Rivera household, no profile yet";
+    let l = live().await?;
+    let household: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(l.alex)
+        .fetch_one(&l.db.pool)
+        .await?;
+    let sha = BlobStore::new(l.dir.path().join("scratch"))?.put_bytes(BlobOwner::Reference, SCAN)?;
+    let mut c = l.db.pool.acquire().await?;
+    let doc = create_document(
+        &mut c,
+        &NewDocument::upload(household, None, &sha, "application/pdf", SCAN.len() as i64),
+    )
+    .await?
+    .id;
+    drop(c);
+    let live_store = BlobStore::for_settings(&l.settings)?;
+    assert_eq!(live_store.put_bytes(BlobOwner::Pending(doc), SCAN)?, sha);
+    let key = live_store.key_of(BlobOwner::Pending(doc), &sha)?;
+    assert!(key.starts_with(&format!("pending/{}/", doc.simple())), "{key}");
+    let archive = ownhealth_ops::backup(&l.settings, &l.dir.path().join("backup2").join("staging")).await?;
+    let m = manifest(&archive)?;
+    assert!(sealed_keys(&m).contains(&key), "{:#}", m["blobs"]);
+    assert!(strs(&m["blobs"]["referenced"]).contains(&key));
+    assert!(!fs::read_to_string(archive.join("manifest.json"))?.contains(&sha));
+    let report = ownhealth_ops::verify_restore(&l.settings, &archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    let (db, fresh) = fresh(&l).await?;
+    let report = ownhealth_ops::restore(&fresh, &archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    // the item's wrapped key came back in the dump and opens under the same secrets key
+    let profiles: i64 = sqlx::query_scalar("select count(*) from profile_key where wrapped_dek is not null")
+        .fetch_one(&db.pool)
+        .await?;
+    let items: i64 = sqlx::query_scalar("select count(*) from pending_key where wrapped_dek is not null")
+        .fetch_one(&db.pool)
+        .await?;
+    assert_eq!(items, 1);
+    assert_eq!(report["keys"]["checked"], profiles + items, "{report:#}");
+    assert!(tree_files(&fresh.blobs_path())?.contains_key(&key));
+    let store = BlobStore::for_settings(&fresh)?;
+    assert_eq!(store.get_bytes(BlobOwner::Pending(doc), &sha)?, SCAN);
+    Ok(())
+}
+
+#[tokio::test]
 async fn verify_restore_fails_on_a_corrupt_blob() -> R {
     let l = live().await?;
     let bad = copy(&l)?;

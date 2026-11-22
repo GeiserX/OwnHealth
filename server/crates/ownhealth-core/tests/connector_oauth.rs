@@ -13,9 +13,10 @@ use ownhealth_core::connector_oauth::{
     self as oauth, ClientAuth, ConnectorClient, Endpoints, Launch, OAuthError, Revocation, SourceHttp, TokenSet,
 };
 use ownhealth_core::demo::Family;
+use ownhealth_core::keys::{Kek, Keyring};
 use ownhealth_core::net::Egress;
 use ownhealth_core::secrets::{SecretBox, SecretString, read_secret, replace_secret, store_secret};
-use ownhealth_core::testing::TestDb;
+use ownhealth_core::testing::{TestDb, random_secrets_key};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -41,6 +42,8 @@ fn t0() -> DateTime<Utc> {
 struct Setup {
     db: TestDb,
     sb: SecretBox,
+    /// The key that wraps the profile keys, to start another keyring on the same database.
+    kek: Kek,
     fam: Family,
     fake: Fake,
     client: ConnectorClient,
@@ -52,7 +55,9 @@ async fn setup_with(auth: Option<ClientAuth>) -> anyhow::Result<Setup> {
     let db = TestDb::new().await?;
     let mut c = db.pool.acquire().await?;
     let fam = family(&mut c).await?;
-    let sb = SecretBox::new(&[5u8; 32])?;
+    let kek = Kek::from_base64(&random_secrets_key())?;
+    let sb =
+        SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(kek.clone(), db.url.clone()))));
     let fake = Fake::start().await;
     let secret = match auth {
         Some(_) => Some(
@@ -91,6 +96,7 @@ async fn setup_with(auth: Option<ClientAuth>) -> anyhow::Result<Setup> {
     Ok(Setup {
         db,
         sb,
+        kek,
         fam,
         fake,
         client,
@@ -550,6 +556,80 @@ async fn a_connection_keeps_its_refresh_token_sealed_and_out_of_the_source_row()
         !printed.contains("fake-access") && !printed.contains("fake-refresh"),
         "{printed}"
     );
+    Ok(())
+}
+
+/// The version byte and profile id a stored secret starts with (version 2 names its profile).
+async fn sealed_head(db: &TestDb, secret_id: Uuid) -> anyhow::Result<(u8, Option<Uuid>)> {
+    let ct: Vec<u8> = sqlx::query_scalar("select ciphertext from secret where id = $1")
+        .bind(secret_id)
+        .fetch_one(&db.pool)
+        .await?;
+    let profile = ct.get(1..17).and_then(|b| Uuid::from_slice(b).ok());
+    Ok((ct[0], if ct[0] == 2 { profile } else { None }))
+}
+
+async fn secret_of(db: &TestDb, source: Uuid) -> anyhow::Result<Uuid> {
+    let id: Option<Uuid> = sqlx::query_scalar("select secret_id from source where id = $1")
+        .bind(source)
+        .fetch_one(&db.pool)
+        .await?;
+    id.ok_or_else(|| anyhow::anyhow!("no refresh token held"))
+}
+
+#[tokio::test]
+async fn a_refresh_token_is_sealed_under_its_profiles_key_and_survives_a_restart_and_a_refresh() -> R {
+    let s = setup().await?;
+    let (id, t) = s.connect(None, t0()).await?;
+    let secret = secret_of(&s.db, id).await?;
+    assert_eq!(sealed_head(&s.db, secret).await?, (2, Some(s.alex())));
+    // the secrets key alone does not open it: the box needs the profile's key
+    let bare = SecretBox::new(&[5u8; 32])?;
+    let mut c = s.db.pool.acquire().await?;
+    assert!(read_secret(&mut c, &bare, s.fam.household_id, secret).await.is_err());
+    drop(c);
+    // a restart: a new keyring on the same database and keys opens it, refreshes and seals the new one
+    let restarted =
+        SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(s.kek.clone(), s.db.url.clone()))));
+    oauth::forget(id);
+    let mut c = s.db.pool.acquire().await?;
+    let before = read_secret(&mut c, &restarted, s.fam.household_id, secret).await?;
+    assert_eq!(Some(before.expose()), t.refresh.as_ref().map(SecretString::expose));
+    drop(c);
+    oauth::access_token(&s.db.pool, &restarted, id, &egress(), t0() + Duration::hours(2)).await?;
+    assert_eq!(sealed_head(&s.db, secret).await?, (2, Some(s.alex())));
+    let mut c = s.db.pool.acquire().await?;
+    let after = read_secret(&mut c, &restarted, s.fam.household_id, secret).await?;
+    assert_ne!(after, before, "the refresh did not rotate the token");
+    assert!(s.fake.book().live.contains(after.expose()));
+    // the profile's key gone (a delete) leaves the token unreadable
+    sqlx::query("update profile_key set wrapped_dek = null, kek_fingerprint = null where profile_id = $1")
+        .bind(s.alex())
+        .execute(&mut *c)
+        .await?;
+    let fresh =
+        SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(s.kek.clone(), s.db.url.clone()))));
+    assert!(read_secret(&mut c, &fresh, s.fam.household_id, secret).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_token_sealed_under_the_secrets_key_still_works_and_the_next_refresh_seals_it_under_the_profile() -> R {
+    let s = setup().await?;
+    let (id, _) = s.connect(None, t0()).await?;
+    let secret = secret_of(&s.db, id).await?;
+    // a row from before slice 46: the same token sealed under the secrets key
+    let mut c = s.db.pool.acquire().await?;
+    let token = read_secret(&mut c, &s.sb, s.fam.household_id, secret).await?;
+    replace_secret(&mut c, &s.sb, secret, &token).await?;
+    assert_eq!(sealed_head(&s.db, secret).await?.0, 1);
+    assert_eq!(read_secret(&mut c, &s.sb, s.fam.household_id, secret).await?, token);
+    drop(c);
+    oauth::forget(id);
+    s.refresh(id, t0() + Duration::hours(2)).await?;
+    assert_eq!(sealed_head(&s.db, secret).await?, (2, Some(s.alex())));
+    let now = s.refresh_token(id).await?.unwrap_or_default();
+    assert!(s.fake.book().live.contains(&now));
     Ok(())
 }
 

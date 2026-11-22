@@ -6,6 +6,13 @@
 //! The `secret` row id and purpose are the associated data, so a ciphertext copied into another row
 //! does not open. A value read back is a [`SecretString`], whose `Debug` and `Display` print `***`.
 //! Nothing here logs, and no error message carries a value.
+//!
+//! A connection's refresh token belongs to one profile (slice 46): it is sealed under that profile's
+//! data key instead ([`store_profile_secret`], the purposes in [`PROFILE_SEALED`]), so deleting the
+//! profile's key leaves the token unreadable too. Its ciphertext is version 2 and names the profile:
+//! `2 | profile id (16) | nonce (12) | ciphertext and tag`, with the row id, purpose and profile id as
+//! associated data. [`read_secret`] reads both versions, so a token sealed before stays readable; the
+//! next write of it seals it under the profile.
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -14,8 +21,11 @@ use sha2::{Digest, Sha256};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
+use std::sync::Arc;
+
 use crate::config::Settings;
 use crate::error::{Error, Result};
+use crate::keys::{Dek, Keyring};
 
 /// The `secret.purpose` check constraint.
 pub const PURPOSES: [&str; 7] = [
@@ -28,7 +38,14 @@ pub const PURPOSES: [&str; 7] = [
     "openwearables_api_key",
 ];
 
+/// The purposes sealed under the profile's own data key: a value that belongs to one profile's
+/// connection. A household's vendor client secret (`connector_client_secret`) serves every profile's
+/// connection to that vendor, so it stays under the secrets key.
+pub const PROFILE_SEALED: [&str; 1] = ["connector_refresh_token"];
+
 const VERSION: u8 = 1;
+/// A value sealed under a profile's data key.
+const PROFILE_VERSION: u8 = 2;
 const NONCE_LEN: usize = 12;
 
 /// A secret in memory. Never printed; `expose()` is the one way to read it.
@@ -57,11 +74,13 @@ impl std::fmt::Display for SecretString {
     }
 }
 
-/// The sealing key. Cheap to clone; `Debug` shows only the key fingerprint.
+/// The sealing key, and the keyring a profile's secrets are sealed with. Cheap to clone; `Debug`
+/// shows only the key fingerprint.
 #[derive(Clone)]
 pub struct SecretBox {
     cipher: Aes256Gcm,
     fingerprint: [u8; 8],
+    keys: Option<Arc<Keyring>>,
 }
 
 impl std::fmt::Debug for SecretBox {
@@ -91,7 +110,18 @@ impl SecretBox {
         let digest = Sha256::digest(key);
         let mut fingerprint = [0u8; 8];
         fingerprint.copy_from_slice(&digest[..8]);
-        Ok(SecretBox { cipher, fingerprint })
+        Ok(SecretBox {
+            cipher,
+            fingerprint,
+            keys: None,
+        })
+    }
+
+    /// This box with the keyring that seals a profile's secrets ([`store_profile_secret`]): the blob
+    /// store's (`BlobStore::keyring`), so one process keeps one copy of each profile key.
+    pub fn with_keys(mut self, keys: Option<Arc<Keyring>>) -> SecretBox {
+        self.keys = keys;
+        self
     }
 
     /// The key of `OWNHEALTH_SECRETS_KEY`: standard base64 of 32 bytes.
@@ -153,6 +183,57 @@ fn aad(id: Uuid, purpose: &str) -> Vec<u8> {
     a
 }
 
+fn profile_aad(id: Uuid, purpose: &str, profile: Uuid) -> Vec<u8> {
+    let mut a = aad(id, purpose);
+    a.extend_from_slice(profile.as_bytes());
+    a
+}
+
+/// The data key of `profile` from the box's keyring, off the async runtime (a first lookup reads the
+/// database). With `create`, a profile with none gets one.
+async fn profile_dek(sb: &SecretBox, profile: Uuid, create: bool) -> Result<Arc<Dek>> {
+    let keys = sb
+        .keys
+        .clone()
+        .ok_or_else(|| Error::Invalid("a profile's secret needs the profile keys, which are not loaded".into()))?;
+    tokio::task::spawn_blocking(move || keys.dek(profile, create))
+        .await
+        .map_err(|e| Error::Other(anyhow::anyhow!("key lookup task failed: {e}")))??
+        .ok_or_else(|| Error::Invalid("the profile's key is gone, so its stored secret no longer opens".into()))
+}
+
+/// Look up `profile`'s data key now, before a caller takes a row lock that a profile delete also
+/// waits on: the lookup runs on a connection of its own and waits on the key row a delete holds, so
+/// doing it under such a lock could stall both. Making the key here is what a later seal would do;
+/// a failure is left to that later call.
+pub async fn prepare_profile_key(sb: &SecretBox, profile: Uuid) {
+    if sb.keys.is_some() {
+        let _ = profile_dek(sb, profile, true).await;
+    }
+}
+
+/// `value` sealed for row `id` under `profile`'s data key (version 2).
+async fn seal_for_profile(
+    sb: &SecretBox,
+    id: Uuid,
+    purpose: &str,
+    profile: Uuid,
+    value: &SecretString,
+) -> Result<Vec<u8>> {
+    if !PROFILE_SEALED.contains(&purpose) {
+        return Err(Error::Invalid(format!(
+            "a {purpose} secret is not sealed under a profile's key"
+        )));
+    }
+    let dek = profile_dek(sb, profile, true).await?;
+    let sealed = dek.seal_value(value.expose().as_bytes(), &profile_aad(id, purpose, profile))?;
+    let mut out = Vec::with_capacity(1 + 16 + sealed.len());
+    out.push(PROFILE_VERSION);
+    out.extend_from_slice(profile.as_bytes());
+    out.extend_from_slice(&sealed);
+    Ok(out)
+}
+
 fn check_purpose(purpose: &str) -> Result<()> {
     if PURPOSES.contains(&purpose) {
         Ok(())
@@ -187,6 +268,56 @@ pub async fn store_secret(
     Ok(id)
 }
 
+/// Seal and store a new secret of `profile` under the profile's data key; returns its id. For the
+/// purposes in [`PROFILE_SEALED`]; the box must carry the keyring ([`SecretBox::with_keys`]).
+pub async fn store_profile_secret(
+    conn: &mut PgConnection,
+    sb: &SecretBox,
+    household_id: Uuid,
+    profile: Uuid,
+    purpose: &str,
+    value: &SecretString,
+) -> Result<Uuid> {
+    check_purpose(purpose)?;
+    let id = Uuid::new_v4();
+    let sealed = seal_for_profile(sb, id, purpose, profile, value).await?;
+    sqlx::query(
+        "insert into secret (id, household_id, purpose, key_fingerprint, ciphertext) values ($1, $2, $3, $4, $5)",
+    )
+    .bind(id)
+    .bind(household_id)
+    .bind(purpose)
+    .bind(&sb.fingerprint[..])
+    .bind(&sealed)
+    .execute(conn)
+    .await?;
+    Ok(id)
+}
+
+/// Replace the value of a secret of `profile`, sealed under the profile's data key: a rotated refresh
+/// token. A value sealed before under the secrets key is sealed under the profile from now on.
+pub async fn replace_profile_secret(
+    conn: &mut PgConnection,
+    sb: &SecretBox,
+    id: Uuid,
+    profile: Uuid,
+    value: &SecretString,
+) -> Result<()> {
+    let purpose: Option<String> = sqlx::query_scalar("select purpose from secret where id = $1")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let purpose = purpose.ok_or_else(|| Error::NotFound("Unknown secret.".into()))?;
+    let sealed = seal_for_profile(sb, id, &purpose, profile, value).await?;
+    sqlx::query("update secret set ciphertext = $2, key_fingerprint = $3, updated_at = now() where id = $1")
+        .bind(id)
+        .bind(&sealed)
+        .bind(&sb.fingerprint[..])
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Replace the value of an existing secret (a changed password), keeping its id and purpose.
 pub async fn replace_secret(conn: &mut PgConnection, sb: &SecretBox, id: Uuid, value: &SecretString) -> Result<()> {
     let purpose: Option<String> = sqlx::query_scalar("select purpose from secret where id = $1")
@@ -205,7 +336,8 @@ pub async fn replace_secret(conn: &mut PgConnection, sb: &SecretBox, id: Uuid, v
 }
 
 /// Read a secret back. `household_id` must own it. A key other than the one that sealed it is
-/// `Error::Invalid` naming the problem (rotated key), never the value.
+/// `Error::Invalid` naming the problem (rotated key), never the value. A secret sealed under a
+/// profile's data key (version 2) opens with that profile's key from the box's keyring.
 pub async fn read_secret(
     conn: &mut PgConnection,
     sb: &SecretBox,
@@ -224,7 +356,19 @@ pub async fn read_secret(
             "this secret was sealed with another OWNHEALTH_SECRETS_KEY; enter it again".into(),
         ));
     }
-    let plain = sb.open(&sealed, &aad(id, &purpose))?;
+    let plain = if sealed.first() == Some(&PROFILE_VERSION) {
+        let refused = || Error::Invalid("the stored secret does not open with this key".into());
+        let profile = sealed
+            .get(1..17)
+            .and_then(|b| Uuid::from_slice(b).ok())
+            .ok_or_else(refused)?;
+        let dek = profile_dek(sb, profile, false).await?;
+        dek.open_value(&sealed[17..], &profile_aad(id, &purpose, profile))
+            .map_err(|_| refused())?
+            .to_vec()
+    } else {
+        sb.open(&sealed, &aad(id, &purpose))?
+    };
     String::from_utf8(plain)
         .map(SecretString)
         .map_err(|_| Error::Invalid("the stored secret is not text".into()))
@@ -288,5 +432,48 @@ mod tests {
         let s = SecretString::new("12345678Z");
         assert_eq!(format!("{s} {s:?}"), "*** SecretString(***)");
         assert!(format!("{:?}", sb()).starts_with("SecretBox("));
+    }
+
+    #[tokio::test]
+    async fn a_profiles_secret_is_sealed_under_its_key_bound_to_its_row_and_profile() -> Result<()> {
+        let mut secret = [0u8; 32];
+        rand::fill(&mut secret[..]); // made at run time, never a literal
+        let ring = Arc::new(Keyring::in_memory(crate::keys::Kek::from_secret(&secret)?));
+        let b = sb().with_keys(Some(ring.clone()));
+        let (id, profile) = (Uuid::new_v4(), Uuid::new_v4());
+        let value = SecretString::new("fake-refresh-LabNorte-0001");
+        let sealed = seal_for_profile(&b, id, "connector_refresh_token", profile, &value).await?;
+        assert_eq!(sealed[0], PROFILE_VERSION);
+        assert_eq!(&sealed[1..17], profile.as_bytes());
+        assert!(
+            !sealed.windows(12).any(|w| w == b"fake-refresh"),
+            "plaintext in the sealed bytes"
+        );
+        let dek = ring.dek(profile, false)?.expect("the profile's key");
+        let bound = profile_aad(id, "connector_refresh_token", profile);
+        assert_eq!(&dek.open_value(&sealed[17..], &bound)?[..], value.expose().as_bytes());
+        // another row, purpose or profile does not open it
+        for other in [
+            profile_aad(Uuid::new_v4(), "connector_refresh_token", profile),
+            profile_aad(id, "connector_client_secret", profile),
+            profile_aad(id, "connector_refresh_token", Uuid::new_v4()),
+        ] {
+            assert!(dek.open_value(&sealed[17..], &other).is_err());
+        }
+        // the secrets key alone never opens it, and only the profile-sealed purposes seal this way
+        assert!(b.open(&sealed, &aad(id, "connector_refresh_token")).is_err());
+        assert!(
+            seal_for_profile(&b, id, "imap_password", profile, &value)
+                .await
+                .is_err()
+        );
+        assert!(
+            seal_for_profile(&sb(), id, "connector_refresh_token", profile, &value)
+                .await
+                .is_err(),
+            "sealed with no keyring"
+        );
+        assert!(format!("{b:?}").starts_with("SecretBox(") && !format!("{b:?}").contains("Keyring"));
+        Ok(())
     }
 }

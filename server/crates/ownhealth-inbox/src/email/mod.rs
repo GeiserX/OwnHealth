@@ -779,8 +779,8 @@ pub async fn ingest_message(
         out.duplicates = 1;
         return Ok(out);
     }
-    // stored before it is routed, so it has no profile yet: held under its inbox, in the plain layout
-    let (raw_sha, _) = store_bytes(blobs, BlobOwner::Pending(source.id), owned.clone()).await?;
+    // the routing reads only the headers, so the whole message is stored once its owner is known:
+    // the profile it goes to, or the held item under its own key
     let rules = list_rules(&mut *conn, source.id).await?;
     let (rule, profile_id) = match released_to {
         Some(p) => (
@@ -793,7 +793,9 @@ pub async fn ingest_message(
                 (Some(rule), p)
             }
             Routing::Quarantine { reason } => {
-                out.quarantine_id = Some(hold(&mut *conn, source, &parsed, &raw_sha, reason).await?);
+                let id = Uuid::new_v4();
+                let (raw_sha, _) = store_bytes(blobs, BlobOwner::Pending(id), owned).await?;
+                out.quarantine_id = Some(hold(&mut *conn, id, source, &parsed, &raw_sha, reason).await?);
                 record_item(
                     &mut *conn,
                     source.id,
@@ -808,6 +810,7 @@ pub async fn ingest_message(
             }
         },
     };
+    let (raw_sha, _) = store_bytes(blobs, BlobOwner::Profile(profile_id), owned.clone()).await?;
     let parts = blocking(move || Ok(parse(&owned, true)?.parts)).await?;
     let target = Target {
         source,
@@ -829,7 +832,15 @@ pub async fn ingest_message(
     Ok(out)
 }
 
-async fn hold(conn: &mut PgConnection, source: &Source, parsed: &Parsed, raw_sha: &str, reason: &str) -> Result<Uuid> {
+/// Keep a message in quarantine as item `id`, the id its raw blob was sealed under.
+async fn hold(
+    conn: &mut PgConnection,
+    id: Uuid,
+    source: &Source,
+    parsed: &Parsed,
+    raw_sha: &str,
+    reason: &str,
+) -> Result<Uuid> {
     let attachments: Vec<Value> = parsed
         .facts
         .attachments
@@ -840,6 +851,7 @@ async fn hold(conn: &mut PgConnection, source: &Source, parsed: &Parsed, raw_sha
     quarantine::hold(
         conn,
         &QuarantineIn {
+            id,
             household_id: source.household_id,
             source_id: Some(source.id),
             raw_sha256: raw_sha,
@@ -869,8 +881,9 @@ pub async fn hold_too_large(
         out.duplicates = 1;
         return Ok(out);
     }
-    let (sha, _) = store_bytes(blobs, BlobOwner::Pending(source.id), owned).await?;
-    out.quarantine_id = Some(hold(&mut *conn, source, &parsed, &sha, "too_large").await?);
+    let id = Uuid::new_v4();
+    let (sha, _) = store_bytes(blobs, BlobOwner::Pending(id), owned).await?;
+    out.quarantine_id = Some(hold(&mut *conn, id, source, &parsed, &sha, "too_large").await?);
     record_item(&mut *conn, source.id, &ext, Some(&sha), None, out.quarantine_id, None).await?;
     Ok(out)
 }
@@ -1188,17 +1201,13 @@ async fn seed_demo(conn: &mut PgConnection, ctx: &mut ownhealth_core::demo::Demo
     .await?;
     let raw = demo_message();
     let blobs = ctx.blobs.clone();
-    let sha = blocking(move || {
-        blobs
-            .put_bytes(BlobOwner::Pending(source_id), &raw)
-            .map_err(Error::from)
-    })
-    .await?;
+    let id = Uuid::new_v4();
+    let sha = blocking(move || blobs.put_bytes(BlobOwner::Pending(id), &raw).map_err(Error::from)).await?;
     let source = ownhealth_core::sources::get_source(&mut *conn, source_id)
         .await?
         .ok_or_else(|| Error::NotFound("demo mailbox".into()))?;
     let parsed = parse(&demo_message(), false)?;
-    hold(&mut *conn, &source, &parsed, &sha, "sender_not_allowed").await?;
+    hold(&mut *conn, id, &source, &parsed, &sha, "sender_not_allowed").await?;
     Ok(())
 }
 

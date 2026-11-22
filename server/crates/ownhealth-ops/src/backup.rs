@@ -9,10 +9,12 @@
 //! <dest>/blobs/..         the blob store, hard-linked when on the same disk (blobs never change)
 //! ```
 //!
-//! A profile's files are sealed under its key (slice 46, `ownhealth_core::keys`), and the backup
-//! keeps them sealed: the wrapped keys travel in the dump, and only OWNHEALTH_SECRETS_KEY opens them.
-//! So a backup taken before a profile delete still opens that profile's files until retention drops
-//! it; keeping `profile_key` out of the dump is later work (security-privacy.md 7.3).
+//! A profile's files are sealed under its key (slice 46, `ownhealth_core::keys`), and the files of an
+//! item with no profile yet under the item's key (`pending/<item>/<address>` in the manifest). The
+//! backup keeps them sealed: the wrapped keys travel in the dump, and only OWNHEALTH_SECRETS_KEY opens
+//! them. So a backup taken before a profile delete still opens that profile's files until retention
+//! drops it; keeping `profile_key` and `pending_key` out of the dump is later work
+//! (security-privacy.md 7.3).
 //! The manifest lists each sealed file under `<profile>/<address>` with the sha256 of its bytes on
 //! disk, so a check finds a changed or added file without the key, and records the key's
 //! fingerprint (never the key), so a restore under another key refuses before it loads anything.
@@ -227,25 +229,41 @@ async fn state_hashes(conn: &mut PgConnection, as_of: NaiveDate) -> Result<Vec<(
     Ok(out)
 }
 
-/// Every blob a document or genome dataset row points at, with the profile that owns it, so verify
-/// can tell a blob the live store had already lost from one the backup lost.
-async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(Option<Uuid>, String)>> {
+/// Every blob a document or genome dataset row points at, with its owner (the profile, or a document
+/// with no profile yet under its own item key), so verify can tell a blob the live store had already
+/// lost from one the backup lost.
+async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(BlobOwner, String)>> {
     let cols: Vec<String> = sqlx::query_scalar(
         "select column_name::text from information_schema.columns where table_schema = 'public' \
          and table_name = 'genome_dataset' and data_type = 'bytea' and column_name like '%\\_blob'",
     )
     .fetch_all(&mut *conn)
     .await?;
-    let mut parts = vec!["select profile_id as p, blob_sha256 as h from document".to_string()];
+    let mut parts = vec![
+        "select profile_id as p, case when profile_id is null then id end as d, blob_sha256 as h from document"
+            .to_string(),
+    ];
     parts.extend(
         cols.iter()
-            .map(|c| format!("select profile_id, \"{c}\" from genome_dataset")),
+            .map(|c| format!("select profile_id, null::uuid, \"{c}\" from genome_dataset")),
     );
     let q = format!(
-        "select distinct p, encode(h, 'hex') from ({}) x where h is not null order by 2, 1",
+        "select distinct p, d, encode(h, 'hex') from ({}) x where h is not null order by 3, 1, 2",
         parts.join(" union ")
     );
-    Ok(sqlx::query_as(AssertSqlSafe(q)).fetch_all(&mut *conn).await?)
+    let rows: Vec<(Option<Uuid>, Option<Uuid>, String)> =
+        sqlx::query_as(AssertSqlSafe(q)).fetch_all(&mut *conn).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(p, d, h)| {
+            let owner = match (p, d) {
+                (Some(p), _) => BlobOwner::Profile(p),
+                (None, Some(d)) => BlobOwner::Pending(d),
+                (None, None) => BlobOwner::Reference,
+            };
+            (owner, h)
+        })
+        .collect())
 }
 
 /// Recursively sorted keys: Python's `json.dumps(..., sort_keys=True)`.
@@ -684,7 +702,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // where each referenced blob sits: its owner's sealed copy, or the plain one
     let mut referenced: Vec<String> = referenced
         .iter()
-        .map(|(pid, sha)| store.key_of(pid.map_or(BlobOwner::Reference, BlobOwner::Profile), sha))
+        .map(|(owner, sha)| store.key_of(*owner, sha))
         .collect::<std::result::Result<_, _>>()?;
     referenced.sort();
     referenced.dedup();

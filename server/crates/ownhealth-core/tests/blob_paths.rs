@@ -123,7 +123,8 @@ fn the_store_keeps_its_path_helpers_private() {
     let src = std::fs::read_to_string(crates_dir().join("ownhealth-core/src/blobs.rs")).expect("blobs.rs");
     for (name, sig) in [
         ("path", "fn path(&self, sha256: &str)"),
-        ("sealed_path", "fn sealed_path(&self, profile: Uuid, address: &str)"),
+        ("sealed_path", "fn sealed_path(&self, slot: Slot, address: &str)"),
+        ("slot_dir", "fn slot_dir(&self, slot: Slot)"),
         ("find", "fn find(&self, owner: BlobOwner, sha256: &str)"),
     ] {
         let decls: Vec<&str> = src.lines().filter(|l| l.contains(sig)).map(str::trim).collect();

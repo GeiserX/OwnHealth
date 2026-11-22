@@ -365,6 +365,7 @@ async fn quarantine_holds_a_message_without_parsing_it() -> R {
     let q = quarantine::hold(
         &mut c,
         &QuarantineIn {
+            id: uuid::Uuid::new_v4(),
             household_id: f.household_id,
             source_id: None,
             raw_sha256: &sha,
@@ -422,6 +423,7 @@ async fn quarantine_holds_a_message_without_parsing_it() -> R {
 
 fn quarantine_in(household_id: uuid::Uuid, sha: &str) -> QuarantineIn<'_> {
     QuarantineIn {
+        id: uuid::Uuid::new_v4(),
         household_id,
         source_id: None,
         raw_sha256: sha,

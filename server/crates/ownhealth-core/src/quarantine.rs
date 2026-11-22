@@ -3,6 +3,10 @@
 //! subject and attachment names. It never becomes a document, a page, a candidate row or an
 //! observation while it is held: [`hold`] writes only this table and the blob. A person releases it
 //! (lane A parses it then, through `arrive::arrive`), or deletes it.
+//!
+//! The blob is sealed under the item's own key (`BlobOwner::Pending(id)`, slice 46), so the id is
+//! chosen before the blob is stored. A release stores the message again under the profile's key and
+//! a delete leaves it to nobody: both shred the item's key in their transaction.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -25,6 +29,8 @@ pub const SUBJECT_MAX_CHARS: usize = 300;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuarantineIn<'a> {
+    /// The id the raw blob was sealed under (`BlobOwner::Pending(id)`).
+    pub id: Uuid,
     pub household_id: Uuid,
     pub source_id: Option<Uuid>,
     /// The whole message, already in the blob store.
@@ -76,8 +82,8 @@ pub async fn hold(conn: &mut PgConnection, q: &QuarantineIn<'_>) -> Result<Uuid>
         return Err(Error::Invalid(format!("unknown quarantine reason {:?}", q.reason)));
     }
     Ok(sqlx::query_scalar(
-        "insert into quarantine_item (household_id, source_id, raw_blob, message_id, sender, subject, attachments, reason) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8) returning id",
+        "insert into quarantine_item (id, household_id, source_id, raw_blob, message_id, sender, subject, attachments, \
+         reason) values ($9, $1, $2, $3, $4, $5, $6, $7, $8) returning id",
     )
     .bind(q.household_id)
     .bind(q.source_id)
@@ -87,6 +93,7 @@ pub async fn hold(conn: &mut PgConnection, q: &QuarantineIn<'_>) -> Result<Uuid>
     .bind(q.subject.map(|s| clean_header(s, SUBJECT_MAX_CHARS)))
     .bind(&q.attachments)
     .bind(q.reason)
+    .bind(q.id)
     .fetch_one(conn)
     .await?)
 }
@@ -132,7 +139,9 @@ pub async fn lock_held(conn: &mut PgConnection, id: Uuid) -> Result<QuarantineIt
     Ok(item)
 }
 
-/// Record a release and the documents it produced. Only a held item can be released.
+/// Record a release and the documents it produced, and shred the item's key: the release stored the
+/// message again for its profile, and nothing opens the held copy once this commits. Only a held item
+/// can be released.
 pub async fn mark_released(conn: &mut PgConnection, id: Uuid, user_id: Uuid, document_ids: &[Uuid]) -> Result<()> {
     let n = sqlx::query(
         "update quarantine_item set status = 'released', decided_by = $2, decided_at = now(), \
@@ -141,29 +150,31 @@ pub async fn mark_released(conn: &mut PgConnection, id: Uuid, user_id: Uuid, doc
     .bind(id)
     .bind(user_id)
     .bind(document_ids)
-    .execute(conn)
+    .execute(&mut *conn)
     .await?
     .rows_affected();
-    if n == 1 {
-        Ok(())
-    } else {
-        Err(Error::Review("This message is not held.".into()))
+    if n != 1 {
+        return Err(Error::Review("This message is not held.".into()));
     }
+    crate::keys::shred_pending(conn, &[id]).await?;
+    Ok(())
 }
 
-/// Delete a held message: the row stays as `deleted` (who and when); the blob is left to blob GC.
+/// Delete a held message: the row stays as `deleted` (who and when), and the item's key is shredded,
+/// so the sealed message never opens again (the sweep removes it; a plain copy from before slice 46
+/// is left to blob GC).
 pub async fn mark_deleted(conn: &mut PgConnection, id: Uuid, user_id: Uuid) -> Result<()> {
     let n = sqlx::query(
         "update quarantine_item set status = 'deleted', decided_by = $2, decided_at = now() where id = $1 and status = 'held'",
     )
     .bind(id)
     .bind(user_id)
-    .execute(conn)
+    .execute(&mut *conn)
     .await?
     .rows_affected();
-    if n == 1 {
-        Ok(())
-    } else {
-        Err(Error::Review("This message is not held.".into()))
+    if n != 1 {
+        return Err(Error::Review("This message is not held.".into()));
     }
+    crate::keys::shred_pending(conn, &[id]).await?;
+    Ok(())
 }

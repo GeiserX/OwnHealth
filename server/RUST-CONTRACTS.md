@@ -120,15 +120,21 @@ Runtime::new(settings) / Runtime::with_pool(settings, pool) / rt.job_context()
 // migrate: forward-only, checksum-locked, Python's schema_migrations bookkeeping and advisory lock
 migrate::embedded() -> Vec<Migration>; migrate(pool, &[Migration]) -> Vec<i32>; migrate_embedded(pool)
 migrate::pending(conn, &[Migration]) -> Vec<i32>
-// blobs: plain blobs/sha256/ab/cd/<hash>; a profile's sealed blobs/enc/<profile>/ab/cd/<address>
+// blobs: plain blobs/sha256/ab/cd/<hash>; a profile's sealed blobs/enc/<profile>/ab/cd/<address>; an item's
+// with no profile yet (a held mail, a document with no profile) blobs/pending/<item>/ab/cd/<address>
 // (keys.rs); mode 0440, tmp + rename. Every call names the owner (BlobOwner); reads take both layouts
 BlobStore::for_settings(&settings) / ::new(root) (plain) / ::with_keys(root, Arc<Keyring>)
         .put_bytes(owner, &[u8]) -> String .put_reader / .put_async / .put_file -> (String, u64)
         .open_seek / .open_async / .with_local_copy / .get_bytes / .exists / .size (owner, sha)
-        .rekey(from, to, sha) .delete(owner, sha) .forget_profile(id)
+        .rekey(from, to, sha) .delete(owner, sha) .forget_profile(id) .forget_pending(item)
+        .sweep_unkeyed(conn)   // removes enc/ and pending/ folders whose key row is gone or a tombstone
         .files / .copy_into / .key_of / .place, blobs::tree_files(root)   // backup and restore
-// keys: KEK = HKDF-SHA256(OWNHEALTH_SECRETS_KEY); a random DEK per profile, wrapped in profile_key
-Kek::from_settings / .fingerprint(); Keyring::new(kek, url) .dek(profile, create); keys::check_all
+// keys: KEK = HKDF-SHA256(OWNHEALTH_SECRETS_KEY); a random DEK per profile, wrapped in profile_key, and per
+// pending item (Slot::Pending), wrapped in pending_key
+Kek::from_settings / .fingerprint(); Keyring::new(kek, url) .dek(profile, create) .dek_for(slot, create);
+keys::check_all; keys::shred_pending(conn, &[item])
+// secrets: a profile's connector refresh token is sealed under its DEK (store_profile_secret,
+// replace_profile_secret); read_secret opens both versions
 // canonical: byte-identical to Python (tests/parity_fixtures.rs checks a Python-made fixture)
 canonical::canonical_json(&Value) -> Result<Vec<u8>>   // floats refused
 canonical::state_hash(&Value) -> Result<String>        // "sha256:<hex>" of the body without state_hash
@@ -302,8 +308,10 @@ failed attempt (`RuntimeError: handler panicked: ...`), never a dead worker.
 | session | cookie `oh_session` = `token_urlsafe(32)`, HttpOnly, SameSite=Lax, Secure when the base URL is https; row `secret_sha256 = sha256(secret)`; idle 30 min, absolute 12 h, step-up 300 s |
 | passkey row | credential id, raw COSE public key, sign count (SPIKES.md c) |
 | blob | plain `<data_dir>/blobs/sha256/<2>/<2>/<sha256 hex>`; sealed `<data_dir>/blobs/enc/<profile uuid, simple>/<2>/<2>/<address>`, address = lowercase hex of HMAC-SHA256(name key, `"ownhealth blob address v1"` + the raw 32-byte sha256 of the plaintext), name key = HKDF-SHA256(ikm DEK, no salt, info `"ownhealth blob name v1"`); mode 0440 |
-| sealed blob | header `"OHB\x01"` + salt16 + prefix7 + binding32, binding = HMAC-SHA256(binding key, profile uuid 16 bytes + raw sha256 32 bytes); then records of AES-256-GCM(record key, nonce, plaintext, aad = magic + salt + prefix + profile uuid 16 bytes) with a 16-byte tag; nonce = prefix7 + record number (u32 BE, from 0) + 1 byte last flag (1 on the last record, else 0); every record but the last holds exactly 65536 plaintext bytes, the last 1 to 65536, or 0 only when the whole file is empty; record key = HKDF-SHA256(ikm DEK, salt = salt16, info `"ownhealth blob records v1"`), binding key = the same with info `"ownhealth blob binding v1"`. A reader checks the binding and the last record before it returns a byte |
+| sealed blob | header `"OHB\x01"` + salt16 + prefix7 + binding32, binding = HMAC-SHA256(binding key, owner uuid 16 bytes + raw sha256 32 bytes); then records of AES-256-GCM(record key, nonce, plaintext, aad = magic + salt + prefix + owner uuid 16 bytes) with a 16-byte tag; nonce = prefix7 + record number (u32 BE, from 0) + 1 byte last flag (1 on the last record, else 0); every record but the last holds exactly 65536 plaintext bytes, the last 1 to 65536, or 0 only when the whole file is empty; record key = HKDF-SHA256(ikm DEK, salt = salt16, info `"ownhealth blob records v1"`), binding key = the same with info `"ownhealth blob binding v1"`. A reader checks the binding and the last record before it returns a byte |
 | profile key | KEK = HKDF-SHA256(ikm = the 32 bytes OWNHEALTH_SECRETS_KEY decodes to from standard base64, no salt, info `"ownhealth kek v1"`); `profile_key.wrapped_dek` = version byte 1 + nonce12 + AES-256-GCM(KEK, nonce, DEK32, aad `"ownhealth profile dek v1"` + profile uuid 16 bytes) with its tag16; `kek_fingerprint` = HMAC-SHA256(KEK, `"ownhealth kek fingerprint v1"`)[..8]. Strings are their ASCII bytes, uuids their 16 bytes in RFC 4122 order. `serve`, `worker`, `demo-seed` and `clinvar-diff` refuse to start when the configured KEK does not open every stored row, and a new row is stored only while every stored row has the configured fingerprint. A profile delete turns its row into a tombstone (`wrapped_dek` and `kek_fingerprint` null): the checks skip it, a read finds no key, and a key write for that profile refuses |
+| pending key | as a profile key, in `pending_key` (`item_id` = a held mail's `quarantine_item.id`, or a document's id while it has no profile), with aad `"ownhealth pending dek v1"` + item uuid 16 bytes. The item's blobs sit in `<data_dir>/blobs/pending/<item uuid, simple>/<2>/<2>/<address>`, sealed as a sealed blob with the item uuid as owner uuid. When the item gets its profile (a mail released, a document assigned) its files are sealed again under the profile's DEK and the row becomes a tombstone in the same transaction; a deleted held mail's row too. A row older than a day whose item no longer waits for a profile is shredded by the sweep, which also removes every `enc/` or `pending/` folder whose row is gone or a tombstone |
+| secret | `secret.ciphertext` version 1 = `1` + nonce12 + AES-256-GCM(secrets key, aad = secret uuid 16 bytes + purpose); version 2, for `connector_refresh_token` = `2` + profile uuid 16 bytes + nonce12 + AES-256-GCM(HKDF-SHA256(ikm DEK, no salt, info `"ownhealth profile secret v1"`), aad = secret uuid 16 bytes + purpose + profile uuid 16 bytes). A read takes both; a write of a profile's refresh token makes version 2. Client secrets are household-wide and stay version 1 |
 | src id | `^src_[a-z0-9_]+$`, `src_` + 8 random chars from the core alphabet |
 | state_hash | `sha256:` + hex sha256 of RFC 8785 canonical JSON of the body without `state_hash` |
 | job | kinds in `jobs::JOB_KINDS`; backoff 2^attempts x 30 s; lease 300 s, heartbeat 60 s, reaper every 60 s; `last_error` `"<Type>: <message>"` cut at 500 chars; a dead job files one `job_failed` review item |

@@ -229,6 +229,13 @@ async fn quarantine_routes_list_release_and_delete() -> R {
         .build();
     let q1 = hold(&env, source, &raw).await?;
     let q2 = hold(&env, source, &fixture("A-email/injection/inj-email-subject.eml")?).await?;
+    // each held message is sealed under its own item key, and goes once it is settled
+    let held = |q: Uuid| -> anyhow::Result<usize> {
+        let prefix = format!("pending/{}/", q.simple());
+        let files = ownhealth_core::blobs::tree_files(&env.rt.settings.blobs_path())?;
+        Ok(files.keys().filter(|k| k.starts_with(&prefix)).count())
+    };
+    assert_eq!((held(q1)?, held(q2)?), (1, 1));
 
     let r = env.anon().get("/api/inboxes/quarantine").await?;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
@@ -273,6 +280,11 @@ async fn quarantine_routes_list_release_and_delete() -> R {
         .await?;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
     assert_eq!(r.json["document_ids"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        (held(q1)?, held(q2)?),
+        (0, 1),
+        "the released message stayed under its item key"
+    );
     let r = alex.post(&path, &json!({"profile_id": env.profile("lucia")})).await?;
     assert_eq!(r.status, StatusCode::CONFLICT);
     let senders = alex.get(&format!("/api/inboxes/{source}/senders")).await?;
@@ -288,6 +300,7 @@ async fn quarantine_routes_list_release_and_delete() -> R {
     // delete, and the lists by status
     let r = alex.delete(&format!("/api/inboxes/quarantine/{q2}")).await?;
     assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(held(q2)?, 0, "the deleted message stayed under its item key");
     assert_eq!(alex.get("/api/inboxes/quarantine").await?.json, json!([]));
     let all = alex.get("/api/inboxes/quarantine?status=all").await?.json;
     assert_eq!(all.as_array().map(Vec::len), Some(2));
