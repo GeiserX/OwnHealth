@@ -1344,14 +1344,22 @@ mod tests {
 
     #[test]
     fn low_and_high_rows_count_toward_the_reading_cap() -> Result<()> {
+        // the reading first (the Low/High check refuses) and last (the reading check refuses)
         let libre = "Device,Serial Number,Device Timestamp,Record Type,Historic Glucose mg/dL\n\
             FreeStyle Libre 3,SN1,14-11-2026 10:00,0,112\nFreeStyle Libre 3,SN1,14-11-2026 10:15,0,Low\n\
             FreeStyle Libre 3,SN1,14-11-2026 10:30,0,High\n";
+        let libre_last = "Device,Serial Number,Device Timestamp,Record Type,Historic Glucose mg/dL\n\
+            FreeStyle Libre 3,SN1,14-11-2026 10:00,0,Low\nFreeStyle Libre 3,SN1,14-11-2026 10:15,0,High\n\
+            FreeStyle Libre 3,SN1,14-11-2026 10:30,0,112\n";
         let clarity = format!(
             "{CLARITY_HEAD}1,2026-11-14T08:00:00,EGV,,,,iOS G7,101\n2,2026-11-14T08:05:00,EGV,,,,iOS G7,Low\n\
              3,2026-11-14T08:10:00,EGV,,,,iOS G7,High\n"
         );
-        for text in [libre, clarity.as_str()] {
+        let clarity_last = format!(
+            "{CLARITY_HEAD}1,2026-11-14T08:00:00,EGV,,,,iOS G7,Low\n2,2026-11-14T08:05:00,EGV,,,,iOS G7,High\n\
+             3,2026-11-14T08:10:00,EGV,,,,iOS G7,101\n"
+        );
+        for text in [libre, libre_last, clarity.as_str(), clarity_last.as_str()] {
             let refused = parse_capped(text.as_bytes(), 2).map(|p| p.readings.len());
             assert!(
                 matches!(&refused, Err(Error::Upload(m)) if m.contains("more than 2 readings")),
