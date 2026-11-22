@@ -227,7 +227,8 @@ const PLAIN_TABLES: &str = "select pg_catalog.count(*) from pg_catalog.pg_class 
 /// function of the owner's takes part in a comparison. Then it locks both tables, so neither can be
 /// renamed or swapped until the check ends (that needs ACCESS EXCLUSIVE). Then it runs the guard,
 /// and it refuses to go on when either table is no longer a plain table (see `PLAIN_TABLES`):
-/// `Error::AuditUncheckable`. Only then does it read.
+/// `Error::AuditUncheckable`. Only then does it read, in one statement, so the links and the search
+/// for unlinked events see the same commits.
 ///
 /// So it holds against the app role, and against an owner who edits rows with plain SQL or with the
 /// tricks we know. An owner can always change what the database answers, and a superuser can make
@@ -254,18 +255,40 @@ pub async fn verify_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
     check
 }
 
-/// The reads of `verify_chain`, inside its transaction, after the guard.
+/// The reads of `verify_chain`, inside its transaction, after the guard. One statement: every link
+/// in seq order, then one last row with no seq that holds the first event with no link. At READ
+/// COMMITTED each statement sees the commits made before it starts, so two statements could see
+/// the chain before a commit and the events after it. `only`: no row of another table takes part.
 async fn read_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
-    type Link = (i64, i64, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+    type Row = (
+        Option<i64>,
+        Option<i64>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+    );
     let mut prev = vec![0u8; 32];
     let mut head: Option<(i64, Vec<u8>)> = None;
     let mut verified = 0_i64;
+    // an event and its link commit together, so a visible event with no link was added behind it
     let sql = format!(
         "select c.seq, c.event_id, c.prev_hash, c.hash, case when e.id is not null then {ROW_V1} end \
-         from only public.audit_chain c left join only public.audit_event e on e.id = c.event_id order by c.seq"
+         from only public.audit_chain c left join only public.audit_event e on e.id = c.event_id \
+         union all select null, (select pg_catalog.min(e.id) from only public.audit_event e \
+           where not exists (select 1 from only public.audit_chain c where c.event_id = e.id)), null, null, null \
+         order by 1"
     );
-    let mut links = sqlx::query_as::<_, Link>(AssertSqlSafe(sql)).fetch(&mut *conn);
-    while let Some((seq, event_id, prev_hash, hash, row)) = links.try_next().await? {
+    let mut rows = sqlx::query_as::<_, Row>(AssertSqlSafe(sql)).fetch(&mut *conn);
+    while let Some((seq, event_id, prev_hash, hash, row)) = rows.try_next().await? {
+        let (Some(seq), Some(event_id), Some(prev_hash), Some(hash)) = (seq, event_id, prev_hash, hash) else {
+            // the last row: seq is null only there, as audit_chain.seq is not null
+            let broken = event_id.map(|id| ChainBreak {
+                seq: None,
+                event_id: Some(id),
+                kind: ChainBreakKind::Unlinked,
+            });
+            return Ok(ChainCheck { verified, head, broken });
+        };
         let kind = if seq != verified + 1 {
             Some(ChainBreakKind::MissingLink)
         } else if prev_hash != prev {
@@ -290,20 +313,9 @@ async fn read_chain(conn: &mut PgConnection) -> Result<ChainCheck> {
         prev.clone_from(&hash);
         head = Some((seq, hash));
     }
-    drop(links);
-    // an event and its link commit together, so a visible event with no link was added behind it
-    let unlinked: Option<i64> = sqlx::query_scalar(
-        "select min(e.id) from only public.audit_event e \
-         where not exists (select 1 from only public.audit_chain c where c.event_id = e.id)",
-    )
-    .fetch_one(conn)
-    .await?;
-    let broken = unlinked.map(|id| ChainBreak {
-        seq: None,
-        event_id: Some(id),
-        kind: ChainBreakKind::Unlinked,
-    });
-    Ok(ChainCheck { verified, head, broken })
+    Err(Error::AuditUncheckable(
+        "the audit log cannot be checked: the search for unlinked events returned nothing".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -1113,5 +1125,75 @@ mod tests {
             .expect_err("row security on audit_chain must stop the check");
         assert!(matches!(err, Error::AuditUncheckable(_)), "{err:?}");
         Ok(())
+    }
+
+    /// The links and the search for unlinked events read one snapshot. A commit that lands while the
+    /// check reads, and that removes an unlinked event and edits a row the check has passed, changes
+    /// neither answer: the check still names the unlinked event. Two statements would see the chain
+    /// before that commit and the events after it, and pass a log that was never clean.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_commit_during_the_check_does_not_hide_an_unlinked_event() -> anyhow::Result<()> {
+        const READING: &str = "select query_start from pg_stat_activity where pid = $1 and state = 'active' \
+             and query like '%audit_chain c left join%'";
+        for _ in 0..3 {
+            let db = TestDb::new().await?;
+            owner_sql(
+                &db,
+                "insert into audit_event (actor_kind, via, action, rows_out) \
+                 select 'system', 'job', 'read', g from generate_series(1, 30000) g",
+            )
+            .await?;
+            tamper(
+                &db,
+                "insert into audit_event (actor_kind, via, action) values ('system', 'job', 'purge')",
+            )
+            .await?;
+            let (first, added): (i64, i64) = sqlx::query_as("select min(id), max(id) from audit_event")
+                .fetch_one(&db.pool)
+                .await?;
+            let mut a = sqlx::PgConnection::connect(&db.url).await?;
+            let pid: i32 = sqlx::query_scalar("select pg_backend_pid()").fetch_one(&mut a).await?;
+            // the first check names the row, and leaves its statements prepared on this connection,
+            // so the next one takes its snapshot in the same message that makes it active
+            assert_eq!(
+                verify_chain(&mut a).await?.broken,
+                broke(None, Some(added), ChainBreakKind::Unlinked)
+            );
+            let mut t = sqlx::PgConnection::connect(&db.url).await?;
+            let mut edit = t.begin().await?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "set local session_replication_role = replica; delete from audit_event where id = {added}; \
+                 update audit_event set rows_out = -1 where id = {first}"
+            )))
+            .execute(&mut *edit)
+            .await?;
+            let checker = tokio::spawn(async move {
+                let r = verify_chain(&mut a).await;
+                (r, a)
+            });
+            let reading = || sqlx::query_scalar::<_, DateTime<Utc>>(READING).bind(pid);
+            let mut started = None;
+            while started.is_none() && !checker.is_finished() {
+                if let Some(s) = reading().fetch_optional(&db.pool).await? {
+                    // the same statement 20 ms later: past its start, so its snapshot is taken
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    started = reading().fetch_optional(&db.pool).await?.filter(|s2| *s2 == s);
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            }
+            edit.commit().await?;
+            let still = reading().fetch_optional(&db.pool).await?;
+            let (r, a) = checker.await?;
+            a.close().await?;
+            t.close().await?;
+            if started.is_none() || still != started {
+                continue; // the read ended before the commit: try again on a fresh database
+            }
+            let c = r?;
+            assert_eq!(c.broken, broke(None, Some(added), ChainBreakKind::Unlinked), "{c:?}");
+            return Ok(());
+        }
+        anyhow::bail!("the edit never committed while the check was reading")
     }
 }
