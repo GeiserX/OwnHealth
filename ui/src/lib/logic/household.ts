@@ -53,8 +53,13 @@ export function memberCounts(status: StatusCounts, dash: DashboardCounts): Membe
 	for (const s of dash.prevention_withheld ?? []) scopes.add(s);
 	const withheld = [...scopes].filter((s) => FEEDS.has(s)).sort();
 	const data = status.data ?? {};
+	// a value on the dashboard is data too: the two reads can straddle an import
 	const recorded =
-		Object.keys(data.data_freshness ?? {}).length > 0 || some(data.medications) || some(data.supplements) || some(data.active_conditions);
+		Object.keys(data.data_freshness ?? {}).length > 0 ||
+		some(data.medications) ||
+		some(data.supplements) ||
+		some(data.active_conditions) ||
+		(dash.systems ?? []).some((s) => !s.withheld && some(s.markers));
 	return {
 		flags: data.flags?.length ?? 0,
 		overdue: (dash.prevention_due ?? []).filter((i) => i.status === 'overdue').length,

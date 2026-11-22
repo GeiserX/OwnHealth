@@ -45,6 +45,9 @@ test('a member with no data at all says so, so the zeros do not read as up to da
 	// data in any domain, or a record such as a medication, is data
 	assert.equal(memberCounts({ data: { data_freshness: { wearables: '2026-11-01' } } }, {}).noData, false);
 	assert.equal(memberCounts({ data: { data_freshness: {}, medications: [{ name: 'Atorvastatin' }] } }, {}).noData, false);
+	// a value on the dashboard is data, even if the status was read before it arrived
+	assert.equal(memberCounts({ data: { data_freshness: {} } }, { systems: [card([{ stale: true }])] }).noData, false);
+	assert.equal(memberCounts({ data: { data_freshness: {} } }, { systems: [card([]), card([], true)] }).noData, true);
 	// what the access leaves out may hold data: that row says partial, not empty
 	assert.equal(memberCounts({ data: { data_freshness: {} }, withheld: { by_scope: ['labs'] } }, {}).noData, false);
 });
