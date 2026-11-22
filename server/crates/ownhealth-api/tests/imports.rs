@@ -833,25 +833,43 @@ async fn the_migration_moves_stored_cgm_exports_to_the_wearables_type() -> R {
 /// A running CGM import holds its profile's export lock and then writes the document row. Moving that
 /// export through the API waits for the lock before it locks the row, so the move and the import run
 /// one after the other: neither is aborted as a deadlock (40P01).
+/// Store a CGM export on a profile and import it in `zone`, as the upload job does when the server has no
+/// `OWNHEALTH_TIMEZONE` and the browser sent `zone`.
+async fn cgm_export_in(a: &App, slug: &str, bytes: &[u8], zone: &str) -> anyhow::Result<uuid::Uuid> {
+    let profile = a.family.profile(slug);
+    let sha =
+        a.rt.blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(profile), bytes)?;
+    let payload = json!({
+        "profile_id": profile.to_string(),
+        "household_id": a.family.household_id.to_string(),
+        "blob_sha256": sha,
+        "filename": "clarity.csv",
+    });
+    let mut tx = a.rt.pool.begin().await?;
+    let doc = ownhealth_ingest_structured::jobs::document_of_type(
+        &mut tx,
+        &a.rt.blobs,
+        &payload,
+        "text/csv",
+        "upload",
+        ownhealth_core::documents::WEARABLES_DOC_TYPE,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    ownhealth_devices::cgm_csv::import_cgm_csv(&mut tx, &a.rt.blobs, doc, None, Some(zone)).await?;
+    tx.commit().await?;
+    Ok(doc)
+}
+
 #[tokio::test]
 async fn moving_a_cgm_export_while_its_import_runs_waits_for_the_import() -> R {
     let a = app().await?;
     ownhealth_devices::register();
-    let (s, v) = a
-        .upload(
-            "alex",
-            &[("profile", "alex"), ("timezone", "Europe/Madrid")],
-            &[("clarity.csv", CLARITY)],
-        )
-        .await?;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    let kinds = ["import.cgm_csv".to_string()];
-    ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?;
     let alex = a.family.profile("alex");
-    let doc: uuid::Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and flags ? 'cgm_csv'")
-        .bind(alex)
-        .fetch_one(&a.rt.pool)
-        .await?;
+    // the export as its first import reads it, in Madrid: the test names the zone itself, so a host that
+    // sets OWNHEALTH_TIMEZONE (which an upload job reads first) gets the same instants
+    let doc = cgm_export_in(&a, "alex", CLARITY, "Europe/Madrid").await?;
     // an import of the profile's exports runs: it holds the lock
     let mut import = a.rt.pool.begin().await?;
     ownhealth_ingest_structured::retract::lock_exports(&mut import, alex, "cgm_csv").await?;
