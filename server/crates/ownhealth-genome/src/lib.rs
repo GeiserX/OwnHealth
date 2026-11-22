@@ -17,7 +17,7 @@ pub mod vcf;
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use futures::future::BoxFuture;
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::demo::{self, DemoContext};
 use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::ingest::ImportSummary;
@@ -189,14 +189,15 @@ pub fn is_sensitive_gene(gene: &str) -> bool {
 async fn import_job(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     let sha = job.str("blob_sha256").unwrap_or_default().to_string();
     let filename = job.str("filename").map(str::to_string);
-    if !ctx.blobs.exists(&sha) {
+    let household_id = job.uuid("household_id")?;
+    let profile_id = job.uuid("profile_id")?;
+    let owner = BlobOwner::Profile(profile_id);
+    if !ctx.blobs.exists(owner, &sha) {
         return Err(JobError::permanent(format!(
             "{}: the uploaded file is not in the blob store",
             filename.as_deref().unwrap_or("None")
         )));
     }
-    let household_id = job.uuid("household_id")?;
-    let profile_id = job.uuid("profile_id")?;
     let attachments: Vec<(String, String)> = job
         .payload
         .get("files")
@@ -207,7 +208,7 @@ async fn import_job(ctx: JobContext, job: Job) -> jobs::HandlerResult {
                 .collect()
         })
         .unwrap_or_default();
-    let size = ctx.blobs.size(&sha).map_err(Error::from)? as i64;
+    let size = ctx.blobs.size(owner, &sha).map_err(Error::from)? as i64;
     let mut tx = ctx.pool.begin().await?;
     let doc = NewDocument {
         filename: filename.as_deref(),

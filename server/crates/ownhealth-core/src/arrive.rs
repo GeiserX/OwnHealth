@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::blobs::BlobStore;
+use crate::blobs::{BlobOwner, BlobStore};
 use crate::dedup::{record_item, seen_item};
 use crate::documents::{NewDocument, UploadKind, create_document, job_kind, mime, sniff};
 use crate::error::{Error, Result};
@@ -100,12 +100,13 @@ pub async fn store_bytes(blobs: &BlobStore, data: Vec<u8>) -> Result<(String, u6
     .map_err(Error::from)
 }
 
-async fn sniff_blob(blobs: &BlobStore, sha256: &str, filename: String) -> Result<UploadKind> {
-    let path = blobs.path(sha256)?;
+async fn sniff_blob(blobs: &BlobStore, owner: BlobOwner, sha256: &str, filename: String) -> Result<UploadKind> {
+    let (blobs, sha256) = (blobs.clone(), sha256.to_string());
     tokio::task::spawn_blocking(move || -> Result<UploadKind> {
         let mut head = Vec::with_capacity(4096);
-        std::fs::File::open(&path)?.take(4096).read_to_end(&mut head)?;
-        Ok(sniff(&filename, &head, Some(&path)))
+        blobs.open_seek(owner, &sha256)?.take(4096).read_to_end(&mut head)?;
+        let copy = blobs.with_local_copy(owner, &sha256)?;
+        Ok(sniff(&filename, &head, Some(copy.path())))
     })
     .await
     .map_err(|e| Error::Other(anyhow::anyhow!("sniff task failed: {e}")))?
@@ -140,7 +141,7 @@ pub async fn arrive(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>)
         });
     }
     let filename = a.filename.unwrap_or("").to_string();
-    let kind = sniff_blob(blobs, a.sha256, filename.clone()).await?;
+    let kind = sniff_blob(blobs, BlobOwner::Profile(a.profile_id), a.sha256, filename.clone()).await?;
     match kind {
         "pdf" | "image" => {
             let m = mime(kind).unwrap_or_else(|| image_mime(&filename));

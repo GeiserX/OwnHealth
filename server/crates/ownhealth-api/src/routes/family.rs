@@ -4,10 +4,10 @@
 //! Changes that widen access (a grant, removing a lock, turning a sensitive switch on) and deletions
 //! need step-up; changes that only narrow access do not.
 
-use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
+use axum::{Extension, Router};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use ownhealth_auth::household::{self, Deleted};
 use ownhealth_auth::{AuthError, sessions};
@@ -18,6 +18,7 @@ use ownhealth_core::access::{
     set_genome_switches, set_grant, set_locks,
 };
 use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::net::Egress;
 use ownhealth_core::pyjson::{parse_datetime, pydantic_datetime_utc};
 use ownhealth_inbox::folder;
 use serde::Deserialize;
@@ -28,6 +29,7 @@ use uuid::Uuid;
 use super::auth::{
     Body, Check, Fail, Params, R, answer, date_field, delete_cookie, detail, ok, person_fields, uuid_param,
 };
+use super::connectors::{self, EgressOverride};
 use super::core::{household_majority, summaries};
 use crate::error::ApiError;
 use crate::extract::{Caller, SessionCaller};
@@ -696,7 +698,11 @@ async fn put_sensitive(
 
 /// Own transaction, so the blob files go only after the rows are gone for good. The retries of the files
 /// and folders that cannot go at once are queued in it too, so they survive a crash after the commit.
-async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug: &str) -> R<Value> {
+///
+/// Before it, each of the profile's connections is revoked at its vendor, best effort (the delete
+/// removes the tokens either way); the answer lists those outcomes under `connectors` when there are any.
+async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug: &str, egress: &Egress) -> R<Value> {
+    let revoked = connectors::revoke_before_delete(rt, p, profile_id, egress).await;
     let mut tx = rt.pool.begin().await?;
     let result: Deleted = household::delete_profile(&mut tx, profile_id).await.map_err(fail)?;
     // The profile's drops and filed copies in the folder inboxes. The demo never reads a folder, and
@@ -770,9 +776,11 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
             "could not audit what a done delete did with the files"
         );
     }
-    Ok(
-        json!({"deleted": slug, "rows": result.rows_json(), "blobs": removed, "blobs_pending": pending, "folders_pending": folders_pending}),
-    )
+    let mut out = json!({"deleted": slug, "rows": result.rows_json(), "blobs": removed, "blobs_pending": pending, "folders_pending": folders_pending});
+    if !revoked.is_empty() {
+        out["connectors"] = Value::Array(revoked);
+    }
+    Ok(out)
 }
 
 /// After the delete's own try: drop the queued retry when nothing is left, or keep it with only what
@@ -807,6 +815,7 @@ async fn delete_profile(
     SessionCaller(p): SessionCaller,
     Path(profile): Path<String>,
     Query(q): Params,
+    o: Option<Extension<EgressOverride>>,
 ) -> R {
     let mut c = Check::query();
     let confirm = required(&mut c, "confirm", q.get("confirm"));
@@ -826,7 +835,8 @@ async fn delete_profile(
         tx.commit().await?;
         perm
     };
-    ok(delete_profile_now(&rt, &p, perm.profile.id, &perm.profile.slug).await?)
+    let egress = connectors::egress(&rt, &o);
+    ok(delete_profile_now(&rt, &p, perm.profile.id, &perm.profile.slug, &egress).await?)
 }
 
 /// A query bool as pydantic reads it.
@@ -849,7 +859,12 @@ fn bool_param(c: &mut Check, field: &str, value: Option<&String>) -> bool {
 
 /// Close my login; with `delete_profile=true` also hard-delete my own profile. `confirm` repeats my
 /// name.
-async fn delete_my_account(State(rt): State<Runtime>, SessionCaller(p): SessionCaller, Query(q): Params) -> R {
+async fn delete_my_account(
+    State(rt): State<Runtime>,
+    SessionCaller(p): SessionCaller,
+    Query(q): Params,
+    o: Option<Extension<EgressOverride>>,
+) -> R {
     let mut c = Check::query();
     let confirm = required(&mut c, "confirm", q.get("confirm"));
     let with_profile = bool_param(&mut c, "delete_profile", q.get("delete_profile"));
@@ -887,7 +902,7 @@ async fn delete_my_account(State(rt): State<Runtime>, SessionCaller(p): SessionC
     };
     let mut deleted = Value::Null;
     if with_profile && let Some((id, slug)) = &own {
-        deleted = delete_profile_now(&rt, &p, *id, slug).await?;
+        deleted = delete_profile_now(&rt, &p, *id, slug, &connectors::egress(&rt, &o)).await?;
     }
     let mut tx = rt.pool.begin().await?;
     household::delete_account(&mut tx, uid).await.map_err(fail)?;

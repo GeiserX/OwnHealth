@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::LazyLock;
 
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobError, BlobOwner, BlobStore, LocalCopy};
 use ownhealth_core::pyjson::py_isoformat_utc;
 use ownhealth_core::{Error, Result};
 use regex::Regex;
@@ -125,8 +125,28 @@ fn contig_names(chrom: &str) -> Vec<String> {
     out
 }
 
-fn open(blobs: &BlobStore, data: &str, index: &str) -> Result<VcfFile> {
-    Ok(VcfFile::open(&blobs.path(data)?, &blobs.path(index)?)?)
+/// A raw file the dataset row names but the store lost is the server's fault, not a 404: the person
+/// gets "the server failed" and only the operator's log names the file.
+fn local_copy(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<LocalCopy> {
+    blobs.with_local_copy(owner, sha).map_err(|e| match e {
+        BlobError::NotFound(h) => Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("raw genome file {h} is missing from the blob store"),
+        )),
+        e => e.into(),
+    })
+}
+
+/// A tabix reader with the local copies it reads from: they must live as long as the reader does.
+struct Opened {
+    vf: VcfFile,
+    _copies: [LocalCopy; 2],
+}
+
+fn open(blobs: &BlobStore, owner: BlobOwner, data: &str, index: &str) -> Result<Opened> {
+    let copies = [local_copy(blobs, owner, data)?, local_copy(blobs, owner, index)?];
+    let vf = VcfFile::open(copies[0].path(), copies[1].path())?;
+    Ok(Opened { vf, _copies: copies })
 }
 
 fn fetch(vf: &mut VcfFile, chrom: &str, start: i64, end: i64) -> Result<Vec<Record>> {
@@ -265,6 +285,7 @@ fn as_f64(v: Option<&Value>) -> Option<f64> {
 /// One source's answer at one site. Always returns a call_state in CALL_STATES.
 fn call_at(
     blobs: &BlobStore,
+    owner: BlobOwner,
     ds: &DatasetRow,
     site: &Site,
     cited: Option<&Value>,
@@ -288,7 +309,7 @@ fn call_at(
         }
         return Ok(status("not_covered", "absent", "raw_genome_not_on_file"));
     };
-    let calls = fetch(&mut open(blobs, vcf, tbi)?, chrom, pos, pos)?;
+    let calls = fetch(&mut open(blobs, owner, vcf, tbi)?.vf, chrom, pos, pos)?;
     if let Some(rec) = pick(&calls, pos, alt) {
         return Ok(from_record(rec, "vcf"));
     }
@@ -296,7 +317,7 @@ fn call_at(
         let (Some(sites), Some(sites_tbi)) = (ds.sites.as_deref(), ds.sites_tbi.as_deref()) else {
             return Ok(status("not_on_array", "absent", "not_in_array_calls_no_site_list"));
         };
-        let probed = fetch(&mut open(blobs, sites, sites_tbi)?, chrom, pos, pos)?;
+        let probed = fetch(&mut open(blobs, owner, sites, sites_tbi)?.vf, chrom, pos, pos)?;
         if probed.iter().any(|r| r.pos == pos) {
             return Ok(status("no_call", "chip_sites", "probed_not_called"));
         }
@@ -311,7 +332,7 @@ fn call_at(
     let (Some(gvcf), Some(gvcf_tbi)) = (ds.gvcf.as_deref(), ds.gvcf_tbi.as_deref()) else {
         return Ok(status("no_call", "absent", "variant_only_vcf_absence_unknown"));
     };
-    let records = fetch(&mut open(blobs, gvcf, gvcf_tbi)?, chrom, pos, pos)?;
+    let records = fetch(&mut open(blobs, owner, gvcf, gvcf_tbi)?.vf, chrom, pos, pos)?;
     if let Some(rec) = pick(&records, pos, alt) {
         return Ok(from_record(rec, "gvcf"));
     }
@@ -508,6 +529,7 @@ pub async fn lookup(
             py_repr(r)
         ))));
     }
+    let owner = BlobOwner::Profile(profile_id);
     let datasets = current_datasets(&mut *conn, profile_id, None).await?;
     if datasets.is_empty() {
         return Ok(Err(GenomeQueryError::new(
@@ -530,7 +552,7 @@ pub async fn lookup(
             region.to_string(),
             cursor.map(str::to_string),
         );
-        return blocking(move || region_answer(&store, &datasets, &gate, &region, cursor.as_deref())).await;
+        return blocking(move || region_answer(&store, owner, &datasets, &gate, &region, cursor.as_deref())).await;
     }
     let site = match resolve(&mut *conn, &rows, rsid, hgvs).await? {
         Ok(s) => s,
@@ -598,7 +620,7 @@ pub async fn lookup(
     let answers = blocking(move || {
         per_source
             .iter()
-            .map(|(ds, cited, cov)| call_at(&store, ds, &at, cited.as_ref(), cov.as_ref()))
+            .map(|(ds, cited, cov)| call_at(&store, owner, ds, &at, cited.as_ref(), cov.as_ref()))
             .collect::<Result<Vec<_>>>()
     })
     .await?;
@@ -698,6 +720,7 @@ fn py_page<T: Clone>(items: &[T], offset: i64) -> Vec<T> {
 
 fn region_answer(
     blobs: &BlobStore,
+    owner: BlobOwner,
     datasets: &[DatasetRow],
     gate: &Gate,
     region: &str,
@@ -744,10 +767,10 @@ fn region_answer(
         let (Some(vcf), Some(tbi)) = (ds.vcf.as_deref(), ds.tbi.as_deref()) else {
             continue;
         };
-        let mut vf = open(blobs, vcf, tbi)?;
+        let mut opened = open(blobs, owner, vcf, tbi)?;
         let label = source_label(ds);
         for (s, e) in &parts {
-            for rec in fetch(&mut vf, &chrom, *s, *e)? {
+            for rec in fetch(&mut opened.vf, &chrom, *s, *e)? {
                 if is_block(&rec) || !(*s <= rec.pos && rec.pos <= *e) {
                     continue;
                 }

@@ -50,6 +50,9 @@ const SOURCES: &[(&str, Source)] = &[
     ("calendar_feed", |_| {
         Box::pin(async { Ok(vec![ownhealth_api::routes::ics::phrases()]) })
     }),
+    ("shl", |_| {
+        Box::pin(async { Ok(vec![ownhealth_api::routes::shl::phrases()]) })
+    }),
     ("shc", |_| {
         Box::pin(async { Ok(vec![ownhealth_ingest_structured::shc::phrases()]) })
     }),

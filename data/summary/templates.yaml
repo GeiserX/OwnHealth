@@ -102,3 +102,8 @@ templates:
     es: "OwnHealth · {rules} · {summary} · estado {hash} · página {page}/{pages}"
   ips:
     title: {en: International Patient Summary, es: Resumen internacional del paciente}
+    # a SMART Health Link: the reader has no account, and these words are the same on every link
+    link_withheld: {en: Not included in this link., es: No se incluye en este enlace.}
+    link_notice:
+      en: "This summary holds only what the person chose to share, and never a sensitive category."
+      es: "Este resumen contiene solo lo que la persona eligió compartir, y nunca una categoría sensible."

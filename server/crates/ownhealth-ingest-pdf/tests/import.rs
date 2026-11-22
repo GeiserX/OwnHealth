@@ -182,7 +182,13 @@ async fn scanned_pdf_and_image_wait_as_pending_documents() -> R {
 
     // any PNG will do: a page render of the scan
     let sha = e.blobs.put_bytes(&pdf)?;
-    let png = render_page_png(&e.blobs, &sha, 1, 0.5)?;
+    let png = render_page_png(
+        &e.blobs,
+        ownhealth_core::blobs::BlobOwner::Profile(e.fam.profile("alex")),
+        &sha,
+        1,
+        0.5,
+    )?;
     let img = e.store(&mut c, &png, "alex", "image/png", "photo.png").await?;
     import_pdf(&mut c, &e.blobs, img, false).await?;
     let its = items(&mut c, img, None).await?;
@@ -446,13 +452,25 @@ async fn page_words_ground_value_and_render() -> R {
         .bind(doc)
         .fetch_one(&mut *c)
         .await?;
-    let png = render_page_png(&e.blobs, &sha, 3, 1.0)?;
+    let png = render_page_png(
+        &e.blobs,
+        ownhealth_core::blobs::BlobOwner::Profile(e.fam.profile("alex")),
+        &sha,
+        3,
+        1.0,
+    )?;
     assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
     let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
     assert!(w.abs_diff(595) <= 1 && h.abs_diff(842) <= 1, "{w}x{h}");
     assert!(matches!(
-        render_page_png(&e.blobs, &sha, 4, 1.0),
+        render_page_png(
+            &e.blobs,
+            ownhealth_core::blobs::BlobOwner::Profile(e.fam.profile("alex")),
+            &sha,
+            4,
+            1.0
+        ),
         Err(ownhealth_core::Error::NotFound(_))
     ));
     Ok(())
@@ -563,7 +581,13 @@ async fn with_ocr_on_scans_and_images_go_to_the_ocr_queue_not_to_review() -> R {
     let scan = e.store_pdf(&mut c, &pdf, "report.pdf").await?;
     import_pdf_opts(&mut c, &e.blobs, scan, false, on).await?;
     let sha = e.blobs.put_bytes(&pdf)?;
-    let png = render_page_png(&e.blobs, &sha, 1, 0.5)?;
+    let png = render_page_png(
+        &e.blobs,
+        ownhealth_core::blobs::BlobOwner::Profile(e.fam.profile("alex")),
+        &sha,
+        1,
+        0.5,
+    )?;
     let img = e.store(&mut c, &png, "alex", "image/png", "photo.png").await?;
     import_pdf_opts(&mut c, &e.blobs, img, false, on).await?;
     for doc in [scan, img] {

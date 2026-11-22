@@ -52,6 +52,9 @@ services:
       OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # seals inbox passwords and tokens (v0.2)
       OWNHEALTH_BASE_URL: https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
       OWNHEALTH_INBOX_DIR: /inbox # the watched folder: ./inbox/<profile>/ on the host
+      # Only Caddy reaches the app, from the compose network, so its X-Forwarded-For names the client
+      # (the share link access log keeps that address).
+      OWNHEALTH_TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
     secrets: [app_db_password, secret_key, secrets_key]
     volumes:
       - ownhealth-data:/data
@@ -118,6 +121,9 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp"
+      # The SMART Health Link listener, for a tunnel on this host only (deploy/README.md, Sharing a
+      # summary). It answers the two link routes and 404 to everything else.
+      - "127.0.0.1:${OWNHEALTH_SHARE_PORT:-8090}:8090"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

@@ -113,7 +113,7 @@ impl Fx {
     }
 
     fn tmp_files(&self) -> anyhow::Result<Vec<PathBuf>> {
-        Ok(std::fs::read_dir(self.e.blobs.root().join("tmp"))?
+        Ok(std::fs::read_dir(self.e.dir.path().join("blobs/tmp"))?
             .filter_map(|d| d.ok().map(|d| d.path()))
             .collect())
     }

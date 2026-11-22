@@ -101,13 +101,10 @@ async fn readyz(State(rt): State<Runtime>) -> Response {
             format!("pending: {todo:?}"),
         )
         .into_response(),
-        Ok(Ok(_)) if !rt.blobs.root().is_dir() => ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "blob_dir_missing",
-            rt.blobs.root().display().to_string(),
-        )
-        .into_response(),
-        Ok(Ok(_)) => Json(json!({"status": "ready"})).into_response(),
+        Ok(Ok(_)) => match rt.blobs.health() {
+            Err(missing) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "blob_dir_missing", missing).into_response(),
+            Ok(()) => Json(json!({"status": "ready"})).into_response(),
+        },
     }
 }
 

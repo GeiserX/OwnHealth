@@ -9,6 +9,7 @@
 //! - `letter_pdf::render`: the access-request letter for one document gap, one A4 page.
 //! - `next_draw_pdf::render`: the printed next-draw request, through `pdfwrite`.
 //! - `ips::build`: the International Patient Summary, a FHIR document Bundle of the summary's `ips` view.
+//! - `shl`: a SMART Health Link's payload and its sealed IPS file (the routes are ownhealth-api's).
 //! - the demo hook `base` (order 0), the port of `demo/base.py`.
 
 mod backup;
@@ -17,6 +18,7 @@ pub mod export;
 pub mod ips;
 pub mod letter_pdf;
 pub mod next_draw_pdf;
+pub mod shl;
 pub mod summary_pdf;
 
 pub use backup::{MANIFEST_SCHEMA, backup, restore, verify_restore};

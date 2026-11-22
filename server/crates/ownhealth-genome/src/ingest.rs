@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::Read;
 
 use chrono::{DateTime, Utc};
-use ownhealth_core::blobs::{BlobStore, sha256_hex_to_bytes};
+use ownhealth_core::blobs::{BlobOwner, BlobStore, sha256_hex_to_bytes};
 use ownhealth_core::ids::short;
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::provenance::{SrcIn, SrcRef, ensure_src};
@@ -92,8 +92,8 @@ pub fn sensitivity_flags(fact: &Value) -> (bool, bool, bool) {
     (sensitive, adult_onset, category == "carrier")
 }
 
-fn rehash(blobs: &BlobStore, sha: &str) -> Result<String> {
-    let mut file = blobs.open(sha)?;
+fn rehash(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<String> {
+    let mut file = blobs.open_seek(owner, sha)?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -184,7 +184,9 @@ async fn raw_files(
         let path = s(f, "path").unwrap_or_default();
         let mut usable = true;
         for h in [sha, idx] {
-            if !(blobs.exists(h) && owned(&mut *conn, profile_id, h, attachments).await?) {
+            if !(blobs.exists(BlobOwner::Profile(profile_id), h)
+                && owned(&mut *conn, profile_id, h, attachments).await?)
+            {
                 usable = false;
                 break;
             }
@@ -201,7 +203,7 @@ async fn raw_files(
                 (idx.to_string(), index_label.to_string()),
             ],
         );
-        blocking(move || check_raw_file(&store, &files)).await?;
+        blocking(move || check_raw_file(&store, BlobOwner::Profile(profile_id), &files)).await?;
         columns.insert(data_col, sha256_hex_to_bytes(sha)?);
         columns.insert(index_col, sha256_hex_to_bytes(idx)?);
     }
@@ -210,9 +212,9 @@ async fn raw_files(
 
 /// The stored bytes of a raw file and its index match their sha256, and they open as a bgzipped VCF
 /// with a tabix index. `files` is [(data sha, path), (index sha, index path)].
-fn check_raw_file(blobs: &BlobStore, files: &[(String, String); 2]) -> Result<()> {
+fn check_raw_file(blobs: &BlobStore, owner: BlobOwner, files: &[(String, String); 2]) -> Result<()> {
     for (want, label) in files {
-        if rehash(blobs, want)? != *want {
+        if rehash(blobs, owner, want)? != *want {
             let head: String = want.chars().take(12).collect();
             return Err(import_error(format!(
                 "{label}: stored bytes do not match sha256 {head}…"
@@ -220,7 +222,8 @@ fn check_raw_file(blobs: &BlobStore, files: &[(String, String); 2]) -> Result<()
         }
     }
     let [(sha, path), (idx, _)] = files;
-    let opened = VcfFile::open(&blobs.path(sha)?, &blobs.path(idx)?).and_then(|mut vf| vf.check_header());
+    let (data, index) = (blobs.with_local_copy(owner, sha)?, blobs.with_local_copy(owner, idx)?);
+    let opened = VcfFile::open(data.path(), index.path()).and_then(|mut vf| vf.check_header());
     if let Err(e) = opened {
         return Err(import_error(format!(
             "{path}: not a bgzipped VCF with a tabix index ({e})"
@@ -230,15 +233,15 @@ fn check_raw_file(blobs: &BlobStore, files: &[(String, String); 2]) -> Result<()
 }
 
 /// Rule 7's site-list check, with the chip_sites file opened when it is on hand.
-fn chip_errors(blobs: &BlobStore, doc: &Value, has_sites: bool) -> Result<Vec<String>> {
+fn chip_errors(blobs: &BlobStore, owner: BlobOwner, doc: &Value, has_sites: bool) -> Result<Vec<String>> {
     let file = arr(doc, "files").iter().find(|f| s(f, "role") == Some("chip_sites"));
     let (Some(f), true) = (file, has_sites) else {
         return Ok(chip_site_errors(doc, None));
     };
-    let vf = VcfFile::open(
-        &blobs.path(s(f, "sha256").unwrap_or_default())?,
-        &blobs.path(s(f, "index_sha256").unwrap_or_default())?,
-    )?;
+    // both copies live until the site list has been probed
+    let data = blobs.with_local_copy(owner, s(f, "sha256").unwrap_or_default())?;
+    let index = blobs.with_local_copy(owner, s(f, "index_sha256").unwrap_or_default())?;
+    let vf = VcfFile::open(data.path(), index.path())?;
     let vf = RefCell::new(vf);
     let probed = |chrom: &str, pos: i64| -> bool {
         let c = norm_chrom(chrom);
@@ -320,7 +323,7 @@ pub async fn import(
     let filename = filename
         .filter(|f| !f.is_empty())
         .unwrap_or_else(|| "genome-facts.json".into());
-    let bytes = blobs.get_bytes(&sha)?;
+    let bytes = blobs.get_bytes(BlobOwner::Profile(profile_id), &sha)?;
     let doc: Value = match std::str::from_utf8(&bytes)
         .map_err(|e| e.to_string())
         .and_then(|t| serde_json::from_str(t).map_err(|e| e.to_string()))
@@ -398,7 +401,7 @@ pub async fn import(
     }
     let errors = {
         let (store, doc, has_sites) = (blobs.clone(), doc.clone(), raw.contains_key("sites_blob"));
-        blocking(move || chip_errors(&store, &doc, has_sites)).await?
+        blocking(move || chip_errors(&store, BlobOwner::Profile(profile_id), &doc, has_sites)).await?
     };
     if !errors.is_empty() {
         return Err(invalid(&filename, &errors));
