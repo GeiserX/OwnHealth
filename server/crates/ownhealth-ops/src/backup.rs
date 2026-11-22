@@ -577,9 +577,11 @@ mod tests {
         let scratch = format!("{}_restore_check", db.name);
         let (role, password) = (format!("oh_plain_{}", token_hex(4)), token_hex(16));
         let mut admin = PgConnection::connect(&db.url).await?;
-        sqlx::query(AssertSqlSafe(format!("create role \"{role}\" login password '{password}'")))
-            .execute(&mut admin)
-            .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "create role \"{role}\" login password '{password}'"
+        )))
+        .execute(&mut admin)
+        .await?;
         let created = create_scratch(&mut admin, &scratch).await;
         let (scheme, rest) = db.url.split_once("://").unwrap_or(("postgres", &db.url));
         let host = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
@@ -609,7 +611,11 @@ mod tests {
             opened.contains("permission denied for database"),
             "a plain role opened the scratch database: {opened}"
         );
-        assert_eq!(temp, Some(false), "a plain role may make temporary tables in the scratch database");
+        assert_eq!(
+            temp,
+            Some(false),
+            "a plain role may make temporary tables in the scratch database"
+        );
         Ok(())
     }
 

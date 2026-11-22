@@ -563,7 +563,9 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
                 v["type"] == "bind"
                     && v["target"] == "/opt/ow-role.sql"
                     && v["read_only"] == true
-                    && v["source"].as_str().is_some_and(|p| p.ends_with("/deploy/db/ow-role.sql"))
+                    && v["source"]
+                        .as_str()
+                        .is_some_and(|p| p.ends_with("/deploy/db/ow-role.sql"))
             };
             let allowed = if s == "ow-db-init" { 1 } else { 0 };
             assert!(
@@ -668,7 +670,11 @@ impl Project {
 
     /// The `ps -a` entry of one service's container (Null when it has none).
     fn service(&self, s: &str) -> anyhow::Result<Value> {
-        Ok(self.ps()?.into_iter().find(|c| c["Service"] == s).unwrap_or(Value::Null))
+        Ok(self
+            .ps()?
+            .into_iter()
+            .find(|c| c["Service"] == s)
+            .unwrap_or(Value::Null))
     }
 
     fn logs(&self) -> String {
@@ -885,7 +891,11 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
             "{case}: {s} settings"
         );
     }
-    for c in project.ps()?.into_iter().filter(|c| OW_ALL.iter().any(|s| c["Service"] == *s)) {
+    for c in project
+        .ps()?
+        .into_iter()
+        .filter(|c| OW_ALL.iter().any(|s| c["Service"] == *s))
+    {
         let published: Vec<&Value> = c["Publishers"]
             .as_array()
             .into_iter()
