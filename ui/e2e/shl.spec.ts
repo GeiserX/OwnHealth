@@ -352,19 +352,22 @@ test('someone who may share no profile has no Share links in the menu, and no pr
 		await route.fulfill({ response: res, json: body });
 	});
 	const menu = page.locator('nav.menu a');
+	// the menu draws before /me answers, so an absent item proves nothing until the household (from
+	// /me) is on screen
+	const loaded = () => expect(page.getByRole('button', { name: 'Alex Rivera', exact: true })).toBeVisible();
 	// the control: Alex owns his own profile and sees the item
 	await page.goto('/?lang=en');
-	await expect(menu.filter({ hasText: 'Biomarkers' })).toBeVisible();
+	await loaded();
 	await expect(menu.filter({ hasText: 'Share links' })).toHaveCount(1);
 	// every profile only viewed
 	change = (m) => m.profiles.forEach((p) => (p.role = 'viewer'));
 	await page.reload();
-	await expect(menu.filter({ hasText: 'Biomarkers' })).toBeVisible();
+	await loaded();
 	await expect(menu.filter({ hasText: 'Share links' })).toHaveCount(0);
 	// every grant a break-glass one
 	change = (m) => m.profiles.forEach((p) => (p.break_glass = true));
 	await page.reload();
-	await expect(menu.filter({ hasText: 'Biomarkers' })).toBeVisible();
+	await loaded();
 	await expect(menu.filter({ hasText: 'Share links' })).toHaveCount(0);
 	// no profile: the page says so instead of showing a bare heading
 	change = (m) => (m.profiles = []);
