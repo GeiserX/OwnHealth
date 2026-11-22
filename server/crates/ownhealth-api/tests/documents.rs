@@ -806,7 +806,7 @@ async fn a_document_with_no_profile_is_sealed_under_its_own_key_and_re_keyed_on_
     assert_eq!(a.rt.blobs.get_bytes(BlobOwner::Pending(doc), &sha)?, pdf);
     for other in [BlobOwner::Pending(Uuid::new_v4()), BlobOwner::Reference] {
         assert!(
-            matches!(a.rt.blobs.get_bytes(other, &sha), Err(BlobError::NotFound(_))),
+            matches!(a.rt.blobs.get_bytes(other, &sha), Err(BlobError::NotFound)),
             "{other:?}"
         );
     }
@@ -836,7 +836,7 @@ async fn a_document_with_no_profile_is_sealed_under_its_own_key_and_re_keyed_on_
     assert_eq!(sealed_of(&a, alex)?, 1);
     assert!(matches!(
         a.rt.blobs.get_bytes(BlobOwner::Pending(doc), &sha),
-        Err(BlobError::NotFound(_))
+        Err(BlobError::NotFound)
     ));
     let f = get(&a, "alex", &format!("/documents/{doc}/file")).await?;
     assert_eq!(f.status, StatusCode::OK);

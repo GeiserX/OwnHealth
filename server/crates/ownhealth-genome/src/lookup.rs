@@ -126,12 +126,12 @@ fn contig_names(chrom: &str) -> Vec<String> {
 }
 
 /// A raw file the dataset row names but the store lost is the server's fault, not a 404: the person
-/// gets "the server failed" and only the operator's log names the file.
+/// gets "the server failed" and the operator's log says a raw genome file is missing.
 fn raw_reader(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<BlobReader> {
     blobs.open_seek(owner, sha).map_err(|e| match e {
-        BlobError::NotFound(h) => Error::Io(std::io::Error::new(
+        BlobError::NotFound => Error::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("raw genome file {h} is missing from the blob store"),
+            "a raw genome file is missing from the blob store",
         )),
         e => e.into(),
     })

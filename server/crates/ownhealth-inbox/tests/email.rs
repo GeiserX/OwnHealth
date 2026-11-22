@@ -756,7 +756,7 @@ async fn a_held_message_opens_only_through_its_item_key_and_moves_under_the_prof
         BlobOwner::Reference,
     ] {
         assert!(
-            matches!(blobs.get_bytes(other, &sha), Err(BlobError::NotFound(_))),
+            matches!(blobs.get_bytes(other, &sha), Err(BlobError::NotFound)),
             "{other:?}"
         );
     }
@@ -805,7 +805,7 @@ async fn a_held_message_opens_only_through_its_item_key_and_moves_under_the_prof
     assert_eq!(blob_keys(&env, &format!("{}/", carmen.simple()))?, before);
     assert!(matches!(
         blobs.get_bytes(BlobOwner::Pending(qid), &sha),
-        Err(BlobError::NotFound(_))
+        Err(BlobError::NotFound)
     ));
     assert_eq!(blobs.sweep_unkeyed(&mut c).await?, 0);
     Ok(())
@@ -831,7 +831,7 @@ async fn an_allowed_messages_eml_is_sealed_under_its_profiles_key() -> R {
     assert_eq!(env.ctx.blobs.get_bytes(BlobOwner::Profile(alex), &sha)?, raw);
     assert!(matches!(
         env.ctx.blobs.get_bytes(BlobOwner::Pending(source.id), &sha),
-        Err(BlobError::NotFound(_))
+        Err(BlobError::NotFound)
     ));
     let keys = blob_keys(&env, "")?;
     assert!(

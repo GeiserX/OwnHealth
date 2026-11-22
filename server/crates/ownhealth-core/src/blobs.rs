@@ -39,8 +39,10 @@ const CHUNK: usize = 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlobError {
-    #[error("blob not found: {0}")]
-    NotFound(String),
+    /// The file is not stored. The error names no hash: a sealed file's name hides its sha256, and
+    /// neither a person nor a log line should see it.
+    #[error("a stored file is missing")]
+    NotFound,
     #[error("not a sha256 hex digest")]
     BadHash,
     #[error("not a plain file name: {0:?}")]
@@ -54,7 +56,7 @@ pub enum BlobError {
 impl From<BlobError> for crate::Error {
     fn from(e: BlobError) -> Self {
         match e {
-            BlobError::NotFound(h) => crate::Error::NotFound(format!("blob {h}")),
+            BlobError::NotFound => crate::Error::NotFound("A stored file is missing.".into()),
             BlobError::BadHash => crate::Error::Invalid("not a sha256 hex digest".into()),
             BlobError::BadName(n) => crate::Error::Invalid(format!("not a plain file name: {n:?}")),
             BlobError::Key(k) => k.into(),
@@ -337,10 +339,6 @@ pub async fn create_spool(path: &Path) -> io::Result<tokio::fs::File> {
     #[cfg(unix)]
     o.mode(0o600);
     o.open(path).await
-}
-
-fn not_found(sha256: &str) -> BlobError {
-    BlobError::NotFound(sha256.to_ascii_lowercase())
 }
 
 /// Where a read finds a blob.
@@ -699,12 +697,12 @@ impl BlobStore {
     pub fn open_seek(&self, owner: BlobOwner, sha256: &str) -> Result<BlobReader, BlobError> {
         let open = |p: &Path| {
             File::open(p).map_err(|e| match e.kind() {
-                io::ErrorKind::NotFound => not_found(sha256),
+                io::ErrorKind::NotFound => BlobError::NotFound,
                 _ => BlobError::Io(e),
             })
         };
         match self.find(owner, sha256)? {
-            None => Err(not_found(sha256)),
+            None => Err(BlobError::NotFound),
             Some(Found::Plain(p)) => Ok(BlobReader::Plain(self.checked_plain(owner, sha256, open(&p)?)?)),
             Some(Found::Sealed { path, dek, slot, sha }) => Ok(BlobReader::Sealed(Box::new(SealedReader::open(
                 open(&path)?,
@@ -772,7 +770,7 @@ impl BlobStore {
     /// sealed blob is decrypted whole into a temporary file here.
     pub fn with_local_copy(&self, owner: BlobOwner, sha256: &str) -> Result<LocalCopy, BlobError> {
         match self.find(owner, sha256)? {
-            None => Err(not_found(sha256)),
+            None => Err(BlobError::NotFound),
             Some(Found::Plain(path)) => {
                 self.checked_plain(owner, sha256, File::open(&path)?)?;
                 Ok(LocalCopy { path, temporary: false })
@@ -1131,7 +1129,7 @@ mod tests {
         assert_eq!(tail, "LabNorte");
         assert!(matches!(
             store.open_seek(owner(), &"0".repeat(64)),
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         assert!(matches!(
             store.open_seek(owner(), "../etc/passwd"),
@@ -1150,7 +1148,7 @@ mod tests {
         assert_eq!(fs::read(copy.path())?, data);
         assert!(matches!(
             store.with_local_copy(owner(), &"0".repeat(64)),
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         assert!(matches!(
             store.with_local_copy(owner(), "nope"),
@@ -1238,7 +1236,7 @@ mod tests {
         assert_eq!((out.as_slice(), size), (&b"LabNorte lipid panel"[..], 20));
         assert!(matches!(
             store.open_async(owner(), &"0".repeat(64)).await,
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         Ok(())
     }
@@ -1287,10 +1285,7 @@ mod tests {
             b"Rivera family lipid panel"
         );
         assert!(!store.exists(BlobOwner::Reference, &"0".repeat(64)));
-        assert!(matches!(
-            store.size(owner(), &"0".repeat(64)),
-            Err(BlobError::NotFound(_))
-        ));
+        assert!(matches!(store.size(owner(), &"0".repeat(64)), Err(BlobError::NotFound)));
         Ok(())
     }
 
@@ -1317,12 +1312,23 @@ mod tests {
         let store = BlobStore::new(dir.path()).expect("store");
         assert!(matches!(
             store.get_bytes(owner(), &"0".repeat(64)),
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         assert!(matches!(store.path("../../etc/passwd"), Err(BlobError::BadHash)));
         let h = store.put_bytes(owner(), b"x").expect("put");
         assert!(store.delete(owner(), &h).expect("delete"));
         assert!(!store.exists(owner(), &h));
+    }
+
+    #[test]
+    fn a_missing_blob_names_no_hash() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = BlobStore::new(dir.path()).expect("store");
+        let h = "ab".repeat(32);
+        let e = store.get_bytes(owner(), &h).expect_err("found");
+        assert!(!e.to_string().contains("ababab"), "{e}");
+        let shown = crate::Error::from(e).to_string();
+        assert!(!shown.contains("ababab"), "{shown}");
     }
 
     #[tokio::test]
@@ -1400,7 +1406,7 @@ mod tests {
             BlobOwner::Reference,
         ] {
             assert!(
-                matches!(store.get_bytes(other, &h), Err(BlobError::NotFound(_))),
+                matches!(store.get_bytes(other, &h), Err(BlobError::NotFound)),
                 "{other:?}"
             );
             assert!(!store.exists(other, &h), "{other:?}");
@@ -1451,10 +1457,7 @@ mod tests {
             BlobOwner::Profile(item),
             BlobOwner::Reference,
         ] {
-            assert!(
-                matches!(store.get_bytes(who, &h), Err(BlobError::NotFound(_))),
-                "{who:?}"
-            );
+            assert!(matches!(store.get_bytes(who, &h), Err(BlobError::NotFound)), "{who:?}");
         }
         let key = store.key_of(BlobOwner::Pending(item), &h)?;
         assert!(
@@ -1469,7 +1472,7 @@ mod tests {
         assert!(!dir.path().join("pending").join(item.simple().to_string()).exists());
         assert!(matches!(
             store.get_bytes(BlobOwner::Pending(item), &h),
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         assert_eq!(store.get_bytes(p, &h)?, data, "the profile's copy went with the item's");
         assert!(!store.forget_pending(item)?);
@@ -1514,7 +1517,7 @@ mod tests {
         // a store without the key cannot read the sealed one
         assert!(matches!(
             old.get_bytes(BlobOwner::Profile(p), &new),
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         Ok(())
     }
@@ -1673,7 +1676,7 @@ mod tests {
         assert!(store.key_of(to, &plain)?.contains('/'));
         assert!(matches!(
             store.rekey(from, to, &"0".repeat(64)),
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         Ok(())
     }

@@ -153,7 +153,7 @@ async fn the_sweep_removes_what_lands_after_a_delete_and_keeps_every_live_folder
     let after = store(&kek)?;
     assert!(matches!(
         after.get_bytes(BlobOwner::Profile(alex), &late),
-        Err(BlobError::NotFound(_))
+        Err(BlobError::NotFound)
     ));
     // a folder whose key was never stored (another install's files dropped in)
     let stranger = dir

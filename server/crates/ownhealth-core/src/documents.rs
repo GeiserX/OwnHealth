@@ -531,7 +531,7 @@ pub async fn rekey_document(
             match blobs.rekey(old, new, sha) {
                 Ok(_) => {}
                 // lost before the move: nothing to copy, and the read reports it as before
-                Err(BlobError::NotFound(_)) => {
+                Err(BlobError::NotFound) => {
                     tracing::warn!(%document_id, "a blob of a moved document is missing from the store");
                 }
                 Err(e) => return Err(Error::from(e)),

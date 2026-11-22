@@ -451,7 +451,7 @@ async fn document_file(
     let opened = rt.blobs.open_async(owner, &doc.blob_sha256).await;
     let (file, size) = opened.map_err(|e| match e {
         // the row is there but its file is not: say so without the hash
-        BlobError::NotFound(_) => Error::NotFound("This document's file is not stored any more.".into()),
+        BlobError::NotFound => Error::NotFound("This document's file is not stored any more.".into()),
         e => Error::from(e),
     })?;
     tx.commit().await?;
