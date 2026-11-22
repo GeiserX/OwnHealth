@@ -976,7 +976,7 @@ pub async fn access_token(
     {
         tracing::warn!(error = %e, profile = %p, "the profile's key does not open here, so the refresh waits");
         return Err(refused(
-            "profile_keys_missing",
+            "profile_key_unopened",
             "This process cannot open the profile's key, so it cannot store this connection's next token.",
         ));
     }

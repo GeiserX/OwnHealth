@@ -716,13 +716,50 @@ async fn a_keyring_that_cannot_open_the_profiles_key_refuses_before_it_spends_th
     let wrong =
         SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(other_kek, s.db.url.clone()))));
     let r = oauth::access_token(&s.db.pool, &wrong, id, &egress(), t0() + Duration::hours(2)).await;
-    assert_eq!(refused_code(r), "profile_keys_missing");
+    assert_eq!(refused_code(r), "profile_key_unopened");
     assert_eq!(s.fake.book().refresh_calls, 0, "the refresh token was sent");
     assert_eq!(s.reconsent(id).await?, None);
     assert_eq!(s.refresh_token(id).await?.as_deref(), Some(token.expose()));
     // the token is as it was, and a box with the right keys refreshes it
     s.refresh(id, t0() + Duration::hours(2)).await?;
     assert_eq!(s.fake.book().refresh_calls, 1);
+    Ok(())
+}
+
+/// An install upgraded from before slice 46 can hold a token sealed under the secrets key for a
+/// profile that has no key yet (a connection and no stored file). Its first refresh makes the
+/// profile's key, so the refresh goes through and the new token is sealed under that key.
+#[tokio::test]
+async fn a_profile_with_no_key_yet_gets_one_at_its_first_refresh() -> R {
+    let s = setup().await?;
+    let (id, _) = s.connect(None, t0()).await?;
+    let secret = secret_of(&s.db, id).await?;
+    let mut c = s.db.pool.acquire().await?;
+    let token = read_secret(&mut c, &s.sb, s.fam.household_id, secret).await?;
+    replace_secret(&mut c, &s.sb, secret, &token).await?;
+    sqlx::query("delete from profile_key where profile_id = $1")
+        .bind(s.alex())
+        .execute(&mut *c)
+        .await?;
+    drop(c);
+    assert_eq!(sealed_head(&s.db, secret).await?.0, 1);
+    oauth::forget(id);
+    // a process started after the upgrade: nothing cached
+    let upgraded =
+        SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(s.kek.clone(), s.db.url.clone()))));
+    oauth::access_token(&s.db.pool, &upgraded, id, &egress(), t0() + Duration::hours(2)).await?;
+    assert_eq!(s.fake.book().refresh_calls, 1);
+    assert_eq!(
+        sealed_head(&s.db, secret).await?,
+        (2, Some(s.alex())),
+        "the new token is not sealed under the profile's key"
+    );
+    let keys: i64 =
+        sqlx::query_scalar("select count(*) from profile_key where profile_id = $1 and wrapped_dek is not null")
+            .bind(s.alex())
+            .fetch_one(&s.db.pool)
+            .await?;
+    assert_eq!(keys, 1, "the refresh made no key for the profile");
     Ok(())
 }
 
