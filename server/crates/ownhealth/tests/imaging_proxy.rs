@@ -861,7 +861,7 @@ fn the_orthanc_settings_need_a_password_once_the_url_is_set() -> R {
     std::fs::write(&file, "from-the-secret\n")?;
     let c = OrthancConfig::from_env(&env(&[
         ("OWNHEALTH_ORTHANC_URL", "http://orthanc:8042/"),
-        ("OWNHEALTH_ORTHANC_PASSWORD", "from-env"),
+        ("OWNHEALTH_ORTHANC_PASSWORD", "from-env"), // ggignore: synthetic test value
         ("OWNHEALTH_ORTHANC_PASSWORD_FILE", file.to_str().unwrap_or_default()),
     ]))?
     .ok_or_else(|| anyhow::anyhow!("no config"))?;
