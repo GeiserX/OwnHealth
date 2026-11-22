@@ -56,7 +56,8 @@ services:
     volumes:
       - ownhealth-data:/data
       - ./inbox:/inbox
-    # No published port: only Caddy reaches the app, on the compose network.
+    # No published port: from outside, only Caddy reaches the app. With the wearables profile on, the
+    # sidecar shares the compose network and reaches app:8080 too, with no more access than any client.
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -124,9 +125,13 @@ services:
       - caddy-config:/config
 
   # `wearables` profile (v1.0): the Open Wearables sidecar (MIT), which holds the Oura, Whoop, Polar and
-  # Withings logins; the app pulls from its REST API. Turn it on with COMPOSE_PROFILES=wearables in .env
-  # and three more files in secrets/: ow_db_password, ow_secret_key and ow_admin_password (long random
-  # strings, e.g. `openssl rand -hex 32 > secrets/ow_secret_key`).
+  # Withings logins; the app pulls from its REST API. Turn it on (deploy/README.md, "Wearables"):
+  # - add wearables to COMPOSE_PROFILES in .env: COMPOSE_PROFILES=wearables, or ocr,wearables with OCR on;
+  # - put three more files in secrets/: ow_db_password, ow_secret_key and ow_admin_password (long random
+  #   strings, e.g. `openssl rand -hex 32 > secrets/ow_secret_key`), then `chmod 644 secrets/ow_*`: every
+  #   OW service drops all capabilities, so it cannot read a file that only its owner may read.
+  # - After a change to secrets/ow_db_password, `docker compose up -d` sets it on the role; then run
+  #   `docker compose restart ow-app ow-worker ow-beat`, because they read the file only when they start.
   # - Quiet: no usage pings, no Sentry, no OTLP export, no outgoing webhooks. It calls only the vendors.
   # - Fenced off: no published port (Caddy does not route to it), none of OwnHealth's secrets, and its
   #   own database and role on the same Postgres (deploy/db/ow-role.sql). That role cannot connect to

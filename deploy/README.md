@@ -4,8 +4,9 @@ This folder holds the homelab setup and the backup recipe. For a first look on o
 
 | File | What it is |
 |---|---|
-| [compose.homelab.yaml](compose.homelab.yaml) | The app, Postgres 17 and Caddy with HTTPS, and the `ocr` worker when that profile is on. Secrets are files, the containers are read-only |
+| [compose.homelab.yaml](compose.homelab.yaml) | The app, Postgres 17 and Caddy with HTTPS, and the `ocr` worker and the Open Wearables sidecar when those profiles are on. Secrets are files, the containers are read-only |
 | [db/app-role.sh](db/app-role.sh) | Gives the app its own database role, which owns no table and cannot rewrite the audit log |
+| [db/ow-role.sql](db/ow-role.sql) | Gives the Open Wearables sidecar (`wearables` profile) its own database, and a role that cannot open the health database |
 | [Caddyfile](Caddyfile) | HTTPS for `OWNHEALTH_DOMAIN`, open to the LAN and a Tailscale tailnet only |
 | [env.homelab.example](env.homelab.example) | The `.env` for the homelab compose |
 | [restic.env.example](restic.env.example) | The `restic.env`: the backup repository and its keys, read by the `admin` service only |
@@ -69,6 +70,26 @@ OWNHEALTH_OCR=1        # the app sends pages without a text layer to it
 then `docker compose up -d`. The worker is the same program from the image variant that carries the OCR engine (PaddleOCR PP-OCRv5 on ONNX Runtime) and its models, about 75 MB more than the default image (the OCR engine and 13 MB of models). It serves no HTTP and only runs jobs on the `ocr` queue, on the CPU. Turn both lines on together. With only `OWNHEALTH_OCR=1`, scans queue for a worker that never starts. Without the profile, scans wait as pending documents for your own agent ([agent-assisted extraction](../docs/agent-extraction.md)) or for you.
 
 Scans that arrived while OCR was off are not lost: each time the `ocr` worker starts with `OWNHEALTH_OCR=1`, it queues every scan and photo still waiting as a pending document for pages without text, and takes it off the pending list. Pages OCR then cannot read go back on it.
+
+## Wearables
+
+The `wearables` profile runs the Open Wearables sidecar (OW 0.11.0, pinned by digest), which holds the Oura, Whoop, Polar and Withings logins. It publishes no port and sends no usage data. Its own database lives on the same Postgres, and its role cannot open the health database.
+
+**Turn it on.** Add `wearables` to the `COMPOSE_PROFILES` line in `.env`: `COMPOSE_PROFILES=ocr,wearables` with OCR on, otherwise `COMPOSE_PROFILES=wearables`. A second `COMPOSE_PROFILES` line replaces the first, so OCR would stop. Then create the three secrets and start:
+
+```sh
+for f in ow_db_password ow_secret_key ow_admin_password; do openssl rand -hex 32 > secrets/$f; done
+chmod 644 secrets/ow_*   # every OW service drops all capabilities, so it cannot read a mode-600 file
+docker compose up -d
+```
+
+The one-shot `ow-db-init` creates the `openwearables` database and role, then OW migrates its tables. It starts only once the app is healthy, so a missing or unreadable OW secret stops the sidecar and never OwnHealth: `docker compose up -d` then reports `ow-db-init`, and `docker compose logs ow-db-init` names the secret.
+
+**Change its database password.** Write the new `secrets/ow_db_password` and run `docker compose up -d`, which sets it on the role. Then run `docker compose restart ow-app ow-worker ow-beat`: they read the file only when they start.
+
+**Turn it off.** Take `wearables` out of `COMPOSE_PROFILES`, then `docker compose stop ow-app ow-worker ow-beat ow-redis`. An `up -d` without the profile leaves the running sidecar alone. Its database stays in the `ownhealth-pg` volume, so turning the profile on again keeps the vendor connections.
+
+**Restore.** `ownhealth backup` leaves OW's database out, because it is a cache of vendor data. After a restore onto new volumes, `docker compose up -d` with the profile on creates an empty one, and every vendor has to be connected again: the logins were only in that database.
 
 ## Monitoring the inboxes
 
