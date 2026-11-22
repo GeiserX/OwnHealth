@@ -73,8 +73,10 @@
 		onfail: (e) => (error = { text: errText(e), raw: errRaw(e) })
 	});
 	const poll = () => jobPoll.start();
-	// The document each upload made, from the upload answer or its finished job.
-	const docOf = (i: ImportItem) => i.document_id ?? (i.job_id != null ? (jobs[i.job_id]?.document_id ?? undefined) : undefined);
+	// The document each upload made, from the upload answer or its finished job (a CGM export's job
+	// names it in its result, which reaches only those who may read wearables).
+	const docOf = (i: ImportItem) => i.document_id ?? (i.job_id != null ? (jobs[i.job_id]?.document_id ?? cgmDocument(jobs[i.job_id]?.result)) : undefined);
+	const cgmDocument = (r: unknown) => (cgmLines(r) && typeof (r as { document_id?: unknown }).document_id === 'string' ? (r as { document_id: string }).document_id : undefined);
 	const docIds = () => items.filter((i) => (i.job_id == null || jobs[i.job_id]?.state === 'done')).map(docOf).filter((x): x is string => !!x);
 	$effect(() => jobPoll.stop);
 
@@ -106,7 +108,7 @@
 		send(Array.from(e.dataTransfer?.files ?? []));
 	}}
 >
-	<h3>{tf('i2_up_t', { name: profileName })}<span class="r">{t('i2_up_kinds')}</span></h3>
+	<h3>{tf('i2_up_t', { name: profileName })}<span class="r kinds">{t('i2_up_kinds')}</span></h3>
 	<div class="p2row">
 		<button class="btn pri" onclick={() => fileEl?.click()} disabled={busy}>{t('i2_up_files')}</button>
 		<button class="btn" onclick={() => dirEl?.click()} disabled={busy}>{t('i2_up_folder')}</button>
@@ -161,6 +163,11 @@
 	.up.over {
 		border-color: var(--accent);
 		background: var(--accent-bg);
+	}
+	/* the list of file kinds is long: on a phone it wraps under the title instead of being cut */
+	h3 .r.kinds {
+		white-space: normal;
+		min-width: 0;
 	}
 	.cgm-lines {
 		margin: 0;

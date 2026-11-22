@@ -36,6 +36,7 @@
 	import ShcPanel from '#lib/components/pages2/ShcPanel.svelte';
 	import ShcDocument from '#lib/components/pages2/ShcDocument.svelte';
 	import { shcCards } from '#lib/logic/shc';
+	import { cgmDoc, type CgmLine } from '#lib/logic/cgm_import';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
@@ -163,6 +164,10 @@
 	const pinfo = $derived(doc.data?.pages_info.find((p) => p.page_no === pageNo) ?? null);
 	// a SMART Health Card document: its rows came from the signed card, so it has no pages to show
 	const shcDoc = $derived(shcCards(doc.data?.flags));
+	// a LibreView or Dexcom Clarity export: its readings went to Wearables, so it has no pages nor rows
+	const cgm = $derived(cgmDoc(doc.data?.flags));
+	const vendorName = (p: string) => (t('fu_k_' + p) === 'fu_k_' + p ? p : t('fu_k_' + p));
+	const cgmText = (l: CgmLine) => (l.n != null ? tp(l.key, l.n, l.vars) : tf(l.key, l.vars ?? {}));
 	const boxes = $derived<Box[]>([
 		...rows
 			.filter((i) => pg(i) === pageNo && Array.isArray((i.payload as { bbox?: number[] }).bbox))
@@ -420,6 +425,11 @@
 				<NotReady error={doc.error} />
 			{:else if doc.data && docFailed}
 				<div class="empty">{t('i2_doc_failed')}</div>
+			{:else if doc.data && docId && doc.data.id === docId && cgm}
+				<div class="empty cgmdoc">
+					<div>{tf('i2_doc_cgm', { vendor: vendorName(cgm.vendor) })}</div>
+					{#if cgm.lines}<ul aria-label={t('i2_dt_cgm')}>{#each cgm.lines as l}<li>{cgmText(l)}</li>{/each}</ul>{/if}
+				</div>
 			{:else if doc.data && docId && doc.data.id === docId && shcDoc}
 				<ShcDocument cards={shcDoc} queued={Number((doc.data.flags?.import as { queued?: number } | undefined)?.queued ?? 0)} photo={doc.data.mime.startsWith('image/') ? documentFileUrl(docId) : null} />
 			{:else if doc.data && pinfo && docId && doc.data.id === docId}
@@ -498,7 +508,7 @@
 					onalias={(b) => rowAct(async () => prof && addAlias({ profile: prof.slug, alias: String((it.payload as { observation?: { printed_name?: string } }).observation?.printed_name ?? ''), alias_group: b.alias_group, loinc: b.loinc, lang: i18n.lang }))}
 				/>
 			{:else}
-				{#if !docProposals.length}<div class="empty">{docFailed ? t('i2_doc_failed_rows') : t('i2_doc_done')}</div>{/if}
+				{#if !docProposals.length}<div class="empty">{docFailed ? t('i2_doc_failed_rows') : cgm ? t('i2_doc_cgm_rows') : t('i2_doc_done')}</div>{/if}
 			{/each}
 			{#each docProposals as p (p.item.id)}
 				<div class="prop">
@@ -607,6 +617,12 @@
 <style>
 	.seg button {
 		white-space: nowrap;
+	}
+	.cgmdoc ul {
+		margin: 8px 0 0;
+		padding: 0;
+		list-style: none;
+		overflow-wrap: anywhere;
 	}
 	tr.agent td {
 		background: rgba(110, 168, 254, 0.05);

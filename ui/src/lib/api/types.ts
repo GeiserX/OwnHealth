@@ -375,7 +375,7 @@ export interface WearableSeries {
 
 export interface WearablesSummary {
 	metrics: WearableMetric[];
-	devices: { source_id: number; provider: string; device: string | null; last_sample: IsoDateTime | null; coverage_pct: number }[];
+	devices: { source_id: number; provider: string; device: string | null; device_id: string | null; last_sample: IsoDateTime | null; coverage_pct: number }[];
 }
 
 export interface RecordOut {

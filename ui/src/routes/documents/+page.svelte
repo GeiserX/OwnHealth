@@ -12,6 +12,7 @@
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { documentYears } from '#lib/logic/documents';
+	import { cgmDoc } from '#lib/logic/cgm_import';
 	import { t } from '#lib/i18n/index.svelte';
 	import { currentProfile } from '#lib/state/app.svelte';
 
@@ -83,6 +84,8 @@
 			retractBusy = false;
 		}
 	}
+	// a LibreView or Dexcom Clarity export reads as a CGM export from its vendor, not as "Other"
+	const vendorName = (p: string) => (t('fu_k_' + p) === 'fu_k_' + p ? p : t('fu_k_' + p));
 	const flagWords = (f: Record<string, unknown>) => Object.keys(f).filter((k) => k === 'possible_injection' || k === 'hidden_text');
 </script>
 
@@ -132,15 +135,17 @@
 				{#each byYear as [year, list] (year)}
 					<tr class="yr-row"><td colspan="7">{year}</td></tr>
 					{#each list as d (d.id)}
+						{@const cgm = cgmDoc(d.flags)}
+						{@const provider = cgm ? vendorName(cgm.vendor) : d.provider_name}
 						<tr class:gone={d.status === 'retracted'}>
 							<td class="num" style="white-space:nowrap">{day(d.evidence_day)}</td>
-							<td><span class="chip">{t('i2_dt_' + (d.doc_type ?? 'other'))}</span></td>
+							<td><span class="chip">{cgm ? t('i2_dt_cgm') : t('i2_dt_' + (d.doc_type ?? 'other'))}</span></td>
 							<td class="doc">
 								<a href={documentFileUrl(d.id)} target="_blank" rel="noopener">{plain(d.filename) || d.id.slice(0, 8)}</a>
-								<div class="dim tab">{d.provider_name ?? '—'} · {t('i2_pages')}: {d.pages ?? '—'}</div>
+								<div class="dim tab">{provider ?? '—'} · {t('i2_pages')}: {d.pages ?? '—'}</div>
 								{#if d.snippet}<div class="dim snip">{plain(d.snippet).replace(/<\/?b>/g, '')}</div>{/if}
 							</td>
-							<td class="wide" data-label={t('i2_provider')}>{d.provider_name ?? '—'}</td>
+							<td class="wide" data-label={t('i2_provider')}>{provider ?? '—'}</td>
 							<td class="num wide" style="text-align:right" data-label={t('i2_pages')}>{d.pages ?? '—'}</td>
 							<td class="st">
 								{#if d.status === 'retracted'}<span class="pill p-stale"><i aria-hidden="true"></i>{t('i2_retracted')}</span>

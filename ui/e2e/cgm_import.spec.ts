@@ -4,6 +4,9 @@
 import { expect, test, type Page } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
 
+// the browser's zone reads the export's wall-clock times: the e2e server has no OWNHEALTH_TIMEZONE
+test.use({ timezoneId: 'Europe/Madrid' });
+
 const fixture = (name: string) => fileURLToPath(new URL(`../../fixtures/cgm/${name}`, import.meta.url));
 
 /** Upload a fixture to Lucía from the import screen; returns the list of result lines of that file. */
@@ -27,13 +30,23 @@ test('a Dexcom Clarity export shows what it brought, and the same file again add
 			"1 marked Low: below the sensor's range, so there is no number to store",
 			"1 marked High: above the sensor's range, so there is no number to store",
 			'2 rows that are not glucose readings (insulin, food, notes, calibrations) were left out',
-			'Times read as UTC: no time zone is set for this server (OWNHEALTH_TIMEZONE)'
+			'Times read in Europe/Madrid'
 		],
 		{ timeout: 60_000 }
 	);
 	lines = await upload(page, 'en', 'clarity-en-mgdl.csv');
 	await expect(lines.getByRole('listitem').first()).toHaveText('0 glucose readings imported', { timeout: 60_000 });
 	await expect(lines.getByRole('listitem').nth(1)).toHaveText('8 already stored: not added again');
+	// the document screen says what the export is and what it holds, after a reload too
+	await page.locator('section.up').getByRole('link', { name: 'clarity-en-mgdl.csv' }).first().click();
+	await page.reload();
+	await expect(page.getByText('A CGM export from Dexcom Clarity. Its glucose readings are on Wearables: it has no pages and no rows to review.')).toBeVisible();
+	await expect(page.getByRole('list', { name: 'CGM export' }).getByRole('listitem')).toHaveText([
+		'8 glucose readings from this file',
+		'Sensor: Dexcom G7',
+		'Times read in Europe/Madrid'
+	]);
+	await expect(page.getByText('Glucose readings need no review: they are on Wearables.')).toBeVisible();
 	// the sensor is a device of Lucía's on the wearables screen, named by the export
 	await page.goto('/wearables?lang=en');
 	await expect(page.getByText('Dexcom G7', { exact: true })).toBeVisible();
@@ -47,7 +60,7 @@ test('a LibreView export in Spanish names the column it did not read', async ({ 
 		[
 			'6 lecturas de glucosa importadas',
 			'1 columna sin leer: Glucosa del sensor adicional mg/dL',
-			'Horas leídas como UTC: este servidor no tiene zona horaria (OWNHEALTH_TIMEZONE)'
+			'Horas leídas en Europe/Madrid'
 		],
 		{ timeout: 60_000 }
 	);

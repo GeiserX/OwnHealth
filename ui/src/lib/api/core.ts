@@ -98,9 +98,22 @@ export const dismissReview = (id: Uuid, reason?: string) =>
 export const bulkAccept = (documentId: Uuid, minRowConf: number) =>
 	post<{ accepted: Uuid[] }>('/review/bulk-accept', { document_id: documentId, min_row_conf: minRowConf });
 
+/** The browser's IANA time zone ('Europe/Madrid'), or '' when it names none. */
+export function browserZone(): string {
+	try {
+		return Intl.DateTimeFormat().resolvedOptions().timeZone ?? '';
+	} catch {
+		return '';
+	}
+}
+
+// The browser's zone travels with every upload: a CGM export's wall-clock times are read in it when
+// the server has no OWNHEALTH_TIMEZONE.
 export function uploadFiles(profile: string, files: File[]): Promise<{ items: ImportItem[] }> {
 	const form = new FormData();
 	form.set('profile', profile);
+	const zone = browserZone();
+	if (zone) form.set('timezone', zone);
 	for (const f of files) form.append('files', f, f.name);
 	return request('POST', '/imports', { body: form });
 }

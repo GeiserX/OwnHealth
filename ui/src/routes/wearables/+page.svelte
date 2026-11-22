@@ -11,6 +11,7 @@
 	import TrendChart from '#lib/components/TrendChart.svelte';
 	import { axisTicks } from '#lib/logic/axis';
 	import { cgmBands } from '#lib/logic/inbox';
+	import { tileIds } from '#lib/logic/cgm_import';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
 	import { intlLocale } from '#lib/i18n/langs';
 	import { hoursMinutes } from '#lib/logic/duration';
@@ -68,6 +69,8 @@
 	const metrics = $derived([...(w.data?.metrics ?? [])].filter((m) => !OWN_CARD.has(m.metric)).sort((a, b) => rank(a) - rank(b)));
 	// A device whose samples were all retracted feeds nothing: it is not listed.
 	const devices = $derived((w.data?.devices ?? []).filter((d) => d.last_sample != null));
+	// two tiles of one name and vendor (two sensors, one export each) show the end of their serial
+	const ids = $derived(tileIds(devices));
 	const providerName = (p: string) => (t('fu_k_' + p) === 'fu_k_' + p ? p : t('fu_k_' + p));
 	const localTime = (iso: string) => new Intl.DateTimeFormat(intlLocale(i18n.lang), { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
 	const windowWord = (d: number) => {
@@ -155,7 +158,7 @@
 		{#each devices as d (d.source_id)}
 			<div class="dev">
 				<div style="flex:1;min-width:0">
-					<div style="font-weight:600">{d.device ?? providerName(d.provider)}</div>
+					<div style="font-weight:600">{d.device ?? providerName(d.provider)}{#if ids[d.source_id]} <span class="dim num" style="font-weight:400;font-size:11px">· {ids[d.source_id]}</span>{/if}</div>
 					<div class="dim" style="font-size:11px" title={d.last_sample ? localTime(d.last_sample) : undefined}>
 						{#if d.device}{providerName(d.provider)}{' · '}{/if}<span style="white-space:nowrap">{tf('h1_last_sample', { d: ago(d.last_sample) })}</span>
 					</div>
