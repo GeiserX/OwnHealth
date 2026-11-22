@@ -768,6 +768,67 @@ async fn the_same_file_again_in_another_zone_replaces_its_readings() -> R {
 }
 
 #[tokio::test]
+async fn a_server_zone_with_an_old_name_reads_the_times_in_its_current_zone() -> R {
+    let env = Env::new().await?;
+    // OWNHEALTH_TIMEZONE=Asia/Calcutta (the job passes the variable in): it reads as Asia/Kolkata, and
+    // it wins over the browser's zone
+    let mut c = env.db.pool.acquire().await?;
+    let (server, browser) = cgm_csv::known_zones(&mut c, Some("Asia/Calcutta"), Some("Europe/Kiev")).await?;
+    drop(c);
+    assert_eq!(
+        (server.as_deref(), browser.as_deref()),
+        (Some("Asia/Kolkata"), Some("Europe/Kyiv"))
+    );
+    let zone = cgm_csv::zone_choice(server.as_deref(), browser.as_deref());
+    let bytes = fixture("clarity-en-mgdl.csv")?;
+    import_in_zone(&env, "lucia", &bytes, zone).await?;
+    // 20:00:17 in India is 14:30:17 UTC (IST, +330)
+    assert_eq!(
+        readings(&env, "lucia").await?[0],
+        (utc(2026, 11, 14, 14, 30, 17), 120.0, Some(330))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_zone_replacement_brings_back_what_an_overlapping_export_holds() -> R {
+    let env = Env::new().await?;
+    // two exports of one sensor read as UTC: a.csv 10:00 to 11:55, b.csv 11:00 to 12:55; a.csv came
+    // first and owns 11:00 to 11:55
+    let a = clarity_at(&every_5("2026-11-14", 10, 11));
+    let b = clarity_at(&every_5("2026-11-14", 11, 12));
+    for (name, bytes) in [("a.csv", &a), ("b.csv", &b)] {
+        let (_, id) = upload(&env, "lucia", name, bytes).await?;
+        assert_eq!(job(&env, id).await?.0, "done", "{name}");
+    }
+    let count = |r: &[(String, DateTime<Utc>, f32)], name: &str| r.iter().filter(|x| x.0 == name).count();
+    let r = owned(&env, "lucia").await?;
+    assert_eq!((count(&r, "a.csv"), count(&r, "b.csv")), (24, 12));
+    // a.csv again from a Madrid browser: its readings move one hour earlier, 09:00 to 10:55 UTC, and
+    // leave 11:00 to 11:55, which b.csv still brings
+    let result = upload_in_zone(&env, "lucia", "a.csv", &a, "Europe/Madrid").await?;
+    assert_eq!(result["cgm_csv"]["replaced"], json!(24), "{result}");
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    let r = owned(&env, "lucia").await?;
+    assert_eq!((count(&r, "a.csv"), count(&r, "b.csv")), (24, 24), "{r:?}");
+    // one reading every 5 minutes from 09:00 to 12:55 UTC, none missing and none twice
+    let times: Vec<DateTime<Utc>> = readings(&env, "lucia").await?.into_iter().map(|x| x.0).collect();
+    let expected: Vec<DateTime<Utc>> = (0..48)
+        .map(|k| utc(2026, 11, 14, 9, 0, 0) + chrono::Duration::minutes(5 * k))
+        .collect();
+    assert_eq!(times, expected);
+    // b.csv was read again in its own zone: none, as UTC
+    let zone: Value = sqlx::query_scalar(
+        "select flags->'cgm_csv'->'timezone' from document where profile_id = $1 and filename = 'b.csv'",
+    )
+    .bind(env.fam.profile("lucia"))
+    .fetch_one(&env.db.pool)
+    .await?;
+    assert_eq!(zone, Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_retraction_after_a_zone_change_reads_the_others_in_their_own_zone() -> R {
     let env = Env::new().await?;
     // two exports read in Madrid; then the zone of a new run changes (here: none), and one is retracted

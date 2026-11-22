@@ -52,7 +52,9 @@
 //! Re-import: `Conflict::Keep`, the first file to bring a reading owns it. The same file again, or a
 //! longer export that holds it, adds only readings that are not stored yet; the rest count as
 //! `duplicate`. Retracting a file queues the profile's other CGM exports for import again
-//! (`retract::retract_document_facts`), so the readings they share come back as theirs.
+//! (`retract::retract_document_facts`), so the readings they share come back as theirs. A file whose
+//! readings are replaced because it was uploaded in another zone does the same: the instants it left
+//! may hold readings of another export.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read as _;
@@ -494,7 +496,9 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
                 (*col, *unit)
             }
             Vendor::Clarity => {
-                if cell(Some(time_col)).is_empty() {
+                let egv = kind.eq_ignore_ascii_case("egv");
+                // an EGV row without a time is still a reading, counted below as a bad time
+                if !egv && cell(Some(time_col)).is_empty() {
                     // the header block: name, birth date, devices and alert settings, not events
                     if one_of(CLARITY_DEVICE_ROW, &kind.to_lowercase()) {
                         let (src, info) = (cell(cols.device), cell(cols.device_info));
@@ -504,7 +508,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed> {
                     }
                     continue;
                 }
-                if !kind.eq_ignore_ascii_case("egv") {
+                if !egv {
                     other_rows += 1;
                     continue;
                 }
@@ -684,9 +688,14 @@ fn date_of(s: &Stamp, day_first: bool) -> Option<NaiveDate> {
 
 /// Whether the file writes the day before the month. A first number above 12 says day first, a second
 /// above 12 month first. When no number says it, the order whose dates span fewer days wins (a 14-day
-/// export read the wrong way round spans months), and on a tie a 12-hour clock means the US order.
+/// export read the wrong way round spans months), and on a tie a 12-hour clock means the US order. Only
+/// stamps that are a date in at least one order count: one impossible date (`99/01`) decides nothing,
+/// and stays a bad time.
 fn day_first(stamps: &[Stamp]) -> bool {
-    let dm: Vec<&Stamp> = stamps.iter().filter(|s| !s.year_first).collect();
+    let dm: Vec<&Stamp> = stamps
+        .iter()
+        .filter(|s| !s.year_first && (date_of(s, true).is_some() || date_of(s, false).is_some()))
+        .collect();
     if dm.iter().any(|s| s.a > 12) {
         return true;
     }
@@ -812,6 +821,16 @@ enum Read<'a> {
 /// browser's, sent with the upload. Both are checked with [`known_zone`] first.
 pub fn zone_choice<'a>(server: Option<&'a str>, upload: Option<&'a str>) -> Option<&'a str> {
     server.or(upload)
+}
+
+/// The server's zone (`OWNHEALTH_TIMEZONE`, passed in as `server`) and the upload's, each as Postgres
+/// knows it ([`known_zone`]): an old name of either reads as its current one, an unknown one is none.
+pub async fn known_zones(
+    conn: &mut PgConnection,
+    server: Option<&str>,
+    upload: Option<&str>,
+) -> Result<(Option<String>, Option<String>)> {
+    Ok((known_zone(&mut *conn, server).await?, known_zone(conn, upload).await?))
 }
 
 /// Import an uploaded CGM export document into its profile, reading its local times in `zone`. Returns
@@ -965,6 +984,13 @@ async fn import_in(
         }
     }
     let w = store::write(&mut *conn, profile.id, Some(document_id), samples, Conflict::Keep).await?;
+    if replaced > 0 {
+        // the instants this file left may hold readings another export brings, which this file kept out
+        // until now: the profile's other CGM exports are read again, each in its own zone, as after a
+        // retraction
+        ownhealth_ingest_structured::retract::reimport_kind(&mut *conn, document_id, "libreview_csv", "cgm_csv")
+            .await?;
+    }
     if w.duplicate() > 0 {
         reasons.insert("duplicate", w.duplicate());
     }
@@ -1029,11 +1055,11 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     let stored = job.str("document_id").is_some_and(|d| !d.is_empty());
     let mut tx = ctx.pool.begin().await?;
     let doc = document_for(&mut tx, &ctx.blobs, &job.payload, mime, &channel).await?;
-    let server = known_zone(&mut tx, std::env::var("OWNHEALTH_TIMEZONE").ok().as_deref()).await?;
+    let server = std::env::var("OWNHEALTH_TIMEZONE").ok();
+    let (server, browser) = known_zones(&mut tx, server.as_deref(), job.str("timezone")).await?;
     let done = if stored {
         import_cgm_csv_again(&mut tx, &ctx.blobs, doc, source_id, server.as_deref()).await
     } else {
-        let browser = known_zone(&mut tx, job.str("timezone")).await?;
         let zone = zone_choice(server.as_deref(), browser.as_deref());
         import_cgm_csv(&mut tx, &ctx.blobs, doc, source_id, zone).await
     };
@@ -1161,6 +1187,37 @@ mod tests {
             ]),
             vec![dt(2026, 11, 14, 6, 3), None, None, None, None]
         );
+    }
+
+    #[test]
+    fn an_impossible_date_does_not_decide_the_order_of_the_file() {
+        // 99 is a day in no month and a month in no year: the US dates around it decide the order, and
+        // it stays a bad time
+        assert_eq!(
+            libre_times(&["99/01/2026 08:00 AM", "11/05/2026 08:00 AM", "11/14/2026 08:00 AM"]),
+            vec![None, dt(2026, 11, 5, 8, 0), dt(2026, 11, 14, 8, 0)]
+        );
+        // and the other way: 40 does not say month first, so the shorter span reads 5 and 6 November
+        assert_eq!(
+            libre_times(&["01/40/2026 08:00", "05/11/2026 08:00", "06/11/2026 08:00"]),
+            vec![None, dt(2026, 11, 5, 8, 0), dt(2026, 11, 6, 8, 0)]
+        );
+    }
+
+    #[test]
+    fn a_clarity_reading_without_a_time_is_a_bad_time() -> Result<()> {
+        // an EGV row with an empty timestamp is a reading whose time is unreadable; the untimed device
+        // and alert rows of the header block stay out of every count
+        let text = format!(
+            "{CLARITY_HEAD}1,,Device,,,Dexcom G7,iOS G7,,,,,,,\n2,,Alert,High,,,iOS G7,250,,,,,,\n\
+             3,,EGV,,,,iOS G7,100,,,,,9000000,8M4TQZ\n4,2026-11-14T08:05:00,EGV,,,,iOS G7,104,,,,,9000300,8M4TQZ\n"
+        );
+        let p = parse(text.as_bytes())?;
+        assert_eq!(p.readings.len(), 1);
+        assert_eq!(p.skipped, BTreeMap::from([("bad_time", 1)]));
+        assert_eq!(p.other_rows, 0);
+        assert_eq!(p.devices[0].name, "Dexcom G7");
+        Ok(())
     }
 
     #[test]

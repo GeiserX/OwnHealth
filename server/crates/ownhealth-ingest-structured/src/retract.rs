@@ -119,7 +119,9 @@ async fn reimport_cumulative(conn: &mut PgConnection, document_id: Uuid) -> Resu
     Ok(())
 }
 
-async fn reimport_kind(conn: &mut PgConnection, document_id: Uuid, kind: &str, flag: &str) -> Result<()> {
+/// Queue the profile's other active exports of `kind` (those whose flags hold `flag`) for import again,
+/// with their import summary cleared. A CGM export also calls it when its own readings are replaced.
+pub async fn reimport_kind(conn: &mut PgConnection, document_id: Uuid, kind: &str, flag: &str) -> Result<()> {
     let Some(job) = ownhealth_core::documents::job_kind(kind) else {
         return Ok(());
     };
