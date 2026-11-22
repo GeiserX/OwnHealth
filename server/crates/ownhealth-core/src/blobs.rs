@@ -5,15 +5,23 @@
 //! Two layouts, read side by side:
 //!
 //! - plain: `blobs/sha256/ab/cd/<sha256 hex>`, the layout of `ownhealth/blobs.py`, so a 0.1.1 data
-//!   directory is read as it is. Pending items and reference data stay here.
+//!   directory is read as it is. Reference data stays here.
 //! - sealed (slice 46): a profile's own files, `blobs/enc/<profile id>/ab/cd/<address>`, where the
 //!   address is an HMAC of the sha256 under the profile's key and the file is encrypted under it
-//!   (`keys.rs`). A store with a keyring writes every profile-owned blob this way.
+//!   (`keys.rs`), and a pending item's files (a held mail, a document with no profile yet) the same
+//!   way under the item's own key, `blobs/pending/<item id>/ab/cd/<address>`. A store with a keyring
+//!   writes every profile and pending blob this way.
 //!
-//! A read for a profile tries its sealed copy first, then the plain one, so an install that upgrades
-//! keeps every older file. A store that seals hashes such a plain file before it serves it for a
-//! profile (once per process while the file stays the same), so a file planted at the plain path never
-//! stands in for a profile's sealed one. The same bytes stored twice for one owner are kept once; two profiles that
+//! A read for a profile or an item tries its sealed copy first, then the plain one, so an install that
+//! upgrades keeps every older file. A store that seals hashes such a plain file before it serves it
+//! for a profile or an item (once per process while the file stays the same), so a file planted at the
+//! plain path never stands in for a sealed one. A sealed folder whose key is gone (a deleted profile, a
+//! settled item) is removed by [`BlobStore::sweep_unkeyed`].
+//!
+//! A backup copies the files after its database snapshot, so a file a row of that snapshot names must
+//! stay until the copy has it. The backup holds the copy lock ([`hold_for_copy`]) from before the
+//! snapshot until its copy ends; every removal of a file that such a row may name takes the other side
+//! of it ([`removal_lock`]), and leaves the file for later while a backup holds it. The same bytes stored twice for one owner are kept once; two profiles that
 //! store the same bytes each get their own sealed copy. A blob is never modified after it lands.
 //! Access control lives on the rows that reference a hash (document, genome_dataset); a hash on its
 //! own grants nothing.
@@ -30,14 +38,16 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, ReadBuf};
 use uuid::Uuid;
 
-use crate::keys::{Dek, HEADER, Kek, KeyError, Keyring, RECORD, SealedReader, Sealer};
+use crate::keys::{Dek, HEADER, Kek, KeyError, Keyring, RECORD, SealedReader, Sealer, Slot};
 
 const CHUNK: usize = 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlobError {
-    #[error("blob not found: {0}")]
-    NotFound(String),
+    /// The file is not stored. The error names no hash: a sealed file's name hides its sha256, and
+    /// neither a person nor a log line should see it.
+    #[error("a stored file is missing")]
+    NotFound,
     #[error("not a sha256 hex digest")]
     BadHash,
     #[error("not a plain file name: {0:?}")]
@@ -48,10 +58,14 @@ pub enum BlobError {
     Io(#[from] io::Error),
 }
 
+/// What a caller hears when a stored file is gone. The REST layer answers it with its own code,
+/// `blob_missing` (HTTP 404), so a page says it in the person's language.
+pub const MISSING_FILE: &str = "A stored file is missing.";
+
 impl From<BlobError> for crate::Error {
     fn from(e: BlobError) -> Self {
         match e {
-            BlobError::NotFound(h) => crate::Error::NotFound(format!("blob {h}")),
+            BlobError::NotFound => crate::Error::NotFound(MISSING_FILE.into()),
             BlobError::BadHash => crate::Error::Invalid("not a sha256 hex digest".into()),
             BlobError::BadName(n) => crate::Error::Invalid(format!("not a plain file name: {n:?}")),
             BlobError::Key(k) => k.into(),
@@ -61,16 +75,17 @@ impl From<BlobError> for crate::Error {
 }
 
 /// Whose bytes a read or a write is for. Every call names it, so the store can pick the key and the
-/// S3 backend the prefix without changing a caller. Only `Profile` bytes are sealed; the other owners
-/// use the plain layout. Access control stays on the rows that reference a hash: an owner here grants
-/// nothing.
+/// S3 backend the prefix without changing a caller. `Profile` and `Pending` bytes are sealed, each
+/// under its own key; `Reference` bytes use the plain layout. Access control stays on the rows that
+/// reference a hash: an owner here grants nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlobOwner {
     /// A profile's own data.
     Profile(Uuid),
-    /// Bytes that arrived but have no profile yet, keyed by the item that holds them.
+    /// Bytes that arrived but have no profile yet, under the id of the item that holds them: a held
+    /// mail's `quarantine_item.id`, a document's id while it has no profile.
     Pending(Uuid),
-    /// Reference data nobody owns, and bytes whose owner is not known yet (a mail before routing).
+    /// Reference data nobody owns.
     Reference,
 }
 
@@ -78,6 +93,26 @@ impl BlobOwner {
     /// The owner of a document's bytes: its profile, or the document itself while it has none.
     pub fn of_document(profile_id: Option<Uuid>, document_id: Uuid) -> BlobOwner {
         profile_id.map_or(BlobOwner::Pending(document_id), BlobOwner::Profile)
+    }
+
+    /// The owner of an inbox item's raw bytes (`source_item.blob_sha256`): the profile it was filed
+    /// to, else the held mail it is, else nobody (rows from before slice 46, in the plain layout). The
+    /// backup reads the owner of every referenced row this way (`ownhealth_ops` `referenced_blobs`).
+    pub fn of_item(profile_id: Option<Uuid>, quarantine_id: Option<Uuid>) -> BlobOwner {
+        match (profile_id, quarantine_id) {
+            (Some(p), _) => BlobOwner::Profile(p),
+            (None, Some(q)) => BlobOwner::Pending(q),
+            (None, None) => BlobOwner::Reference,
+        }
+    }
+
+    /// The key this owner's bytes are sealed under, if any.
+    pub fn slot(self) -> Option<Slot> {
+        match self {
+            BlobOwner::Profile(p) => Some(Slot::Profile(p)),
+            BlobOwner::Pending(i) => Some(Slot::Pending(i)),
+            BlobOwner::Reference => None,
+        }
     }
 }
 
@@ -316,19 +351,80 @@ pub async fn create_spool(path: &Path) -> io::Result<tokio::fs::File> {
     o.open(path).await
 }
 
-fn not_found(sha256: &str) -> BlobError {
-    BlobError::NotFound(sha256.to_ascii_lowercase())
-}
-
 /// Where a read finds a blob.
 enum Found {
     Plain(PathBuf),
     Sealed {
         path: PathBuf,
         dek: Arc<Dek>,
-        profile: Uuid,
+        slot: Slot,
         sha: [u8; 32],
     },
+}
+
+/// The folder of a slot's sealed files, under a store or a backup's blob tree.
+fn slot_rel(slot: Slot) -> PathBuf {
+    match slot {
+        Slot::Profile(p) => Path::new("enc").join(p.simple().to_string()),
+        Slot::Pending(i) => Path::new("pending").join(i.simple().to_string()),
+    }
+}
+
+/// The key in a blob tree of the file `sha256` sealed under `dek` in `slot`: what a backup lists
+/// for it when the key comes from the backup's own snapshot instead of the live store.
+pub fn sealed_key(slot: Slot, dek: &Dek, sha256: &str) -> Result<String, BlobError> {
+    Ok(slot_key(slot, &dek.address(&sha_array(sha256)?)))
+}
+
+/// The [`tree_files`] key of a slot's sealed file at `address`.
+fn slot_key(slot: Slot, address: &str) -> String {
+    match slot {
+        Slot::Profile(p) => format!("{}/{address}", p.simple()),
+        Slot::Pending(i) => format!("pending/{}/{address}", i.simple()),
+    }
+}
+
+fn lock_error(e: sqlx::Error) -> BlobError {
+    BlobError::Io(io::Error::other(e))
+}
+
+/// Hold the copy lock on `conn`'s own session, for a backup: it waits for the removals in progress,
+/// then keeps every new one out until [`end_copy`] or until the session ends. Take it before the
+/// database snapshot and end it once the blob files are copied.
+pub async fn hold_for_copy(conn: &mut sqlx::PgConnection) -> Result<(), BlobError> {
+    sqlx::query("select pg_catalog.pg_advisory_lock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(conn)
+        .await
+        .map_err(lock_error)?;
+    Ok(())
+}
+
+/// Let removals run again after [`hold_for_copy`].
+pub async fn end_copy(conn: &mut sqlx::PgConnection) -> Result<(), BlobError> {
+    sqlx::query("select pg_catalog.pg_advisory_unlock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(conn)
+        .await
+        .map_err(lock_error)?;
+    Ok(())
+}
+
+/// Take the removal side of the copy lock in `conn`'s open transaction, before removing blob files
+/// that a row of a backup's snapshot may still name; it goes when the transaction ends. Removals do
+/// not wait on each other. With `wait`, wait while a backup copies the files (a job); without, answer
+/// false at once while one does, and leave the files for later: the sweep removes a folder whose key
+/// is gone, a retry the rest.
+pub async fn removal_lock(conn: &mut sqlx::PgConnection, wait: bool) -> Result<bool, BlobError> {
+    if wait {
+        sqlx::query("select pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtext('ownhealth.blob_copy'))")
+            .execute(conn)
+            .await
+            .map_err(lock_error)?;
+        return Ok(true);
+    }
+    sqlx::query_scalar("select pg_catalog.pg_try_advisory_xact_lock_shared(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .fetch_one(conn)
+        .await
+        .map_err(lock_error)
 }
 
 impl BlobStore {
@@ -380,36 +476,42 @@ impl BlobStore {
         Ok(self.root.join("sha256").join(&h[0..2]).join(&h[2..4]).join(&h))
     }
 
-    fn profile_dir(&self, profile: Uuid) -> PathBuf {
-        self.root.join("enc").join(profile.simple().to_string())
+    fn slot_dir(&self, slot: Slot) -> PathBuf {
+        self.root.join(slot_rel(slot))
     }
 
-    fn sealed_path(&self, profile: Uuid, address: &str) -> PathBuf {
-        self.profile_dir(profile)
+    fn sealed_path(&self, slot: Slot, address: &str) -> PathBuf {
+        self.slot_dir(slot)
             .join(&address[0..2])
             .join(&address[2..4])
             .join(address)
     }
 
-    /// The key a write for `owner` seals with: a profile's, when this store seals.
-    fn sealing(&self, owner: BlobOwner) -> Result<Option<(Uuid, Arc<Dek>)>, BlobError> {
-        match (owner, &self.keys) {
-            (BlobOwner::Profile(p), Some(keys)) => {
-                // never fall back to a plain write for a profile when its key could not be had
+    /// The keyring this store seals with, for the secrets a profile's key seals (`secrets.rs`).
+    pub fn keyring(&self) -> Option<Arc<Keyring>> {
+        self.keys.clone()
+    }
+
+    /// The key a write for `owner` seals with: a profile's or a pending item's, when this store seals.
+    fn sealing(&self, owner: BlobOwner) -> Result<Option<(Slot, Arc<Dek>)>, BlobError> {
+        match (owner.slot(), &self.keys) {
+            (Some(slot), Some(keys)) => {
+                // never fall back to a plain write for a profile or an item when its key could not be had
                 let dek = keys
-                    .dek(p, true)?
-                    .ok_or_else(|| KeyError("the profile has no key to store its file under".into()))?;
-                Ok(Some((p, dek)))
+                    .dek_for(slot, true)?
+                    .ok_or_else(|| KeyError("no key to store the file under".into()))?;
+                Ok(Some((slot, dek)))
             }
             _ => Ok(None),
         }
     }
 
     /// `file`, the plain copy of `sha256` read for `owner`, once its bytes hash to `sha256`, for a
-    /// profile in a store that seals: there every new profile file is sealed, so a plain one is a
-    /// legacy file or a planted one. Checked once per process while the file stays the same.
+    /// profile or a pending item in a store that seals: there every new file of theirs is sealed, so a
+    /// plain one is a legacy file or a planted one. Checked once per process while the file stays the
+    /// same.
     fn checked_plain(&self, owner: BlobOwner, sha256: &str, mut file: File) -> Result<File, BlobError> {
-        if !(matches!(owner, BlobOwner::Profile(_)) && self.keys.is_some()) {
+        if !(owner.slot().is_some() && self.keys.is_some()) {
             return Ok(file);
         }
         let h = sha256_hex(sha256)?;
@@ -443,23 +545,18 @@ impl BlobStore {
         Ok(file)
     }
 
-    /// Where `owner`'s blob is: the profile's sealed copy first, then the plain one. A profile with
-    /// no sealed folder has never had a sealed blob, so no key is looked up for it.
+    /// Where `owner`'s blob is: its sealed copy first, then the plain one. An owner with no sealed
+    /// folder has never had a sealed blob, so no key is looked up for it.
     fn find(&self, owner: BlobOwner, sha256: &str) -> Result<Option<Found>, BlobError> {
         let plain = self.path(sha256)?;
-        if let (BlobOwner::Profile(p), Some(keys)) = (owner, &self.keys)
-            && self.profile_dir(p).is_dir()
-            && let Some(dek) = keys.dek(p, false)?
+        if let (Some(slot), Some(keys)) = (owner.slot(), &self.keys)
+            && self.slot_dir(slot).is_dir()
+            && let Some(dek) = keys.dek_for(slot, false)?
         {
             let sha = sha_array(sha256)?;
-            let path = self.sealed_path(p, &dek.address(&sha));
+            let path = self.sealed_path(slot, &dek.address(&sha));
             if path.is_file() {
-                return Ok(Some(Found::Sealed {
-                    path,
-                    dek,
-                    profile: p,
-                    sha,
-                }));
+                return Ok(Some(Found::Sealed { path, dek, slot, sha }));
             }
         }
         Ok(plain.is_file().then_some(Found::Plain(plain)))
@@ -501,8 +598,8 @@ impl BlobStore {
         BlobStore::land_at(tmp, &self.path(h)?)
     }
 
-    fn land_sealed(&self, tmp: &Path, profile: Uuid, dek: &Dek, sha: &[u8; 32]) -> Result<(), BlobError> {
-        BlobStore::land_at(tmp, &self.sealed_path(profile, &dek.address(sha)))
+    fn land_sealed(&self, tmp: &Path, slot: Slot, dek: &Dek, sha: &[u8; 32]) -> Result<(), BlobError> {
+        BlobStore::land_at(tmp, &self.sealed_path(slot, &dek.address(sha)))
     }
 
     /// Stream into the store for `owner`. Returns (sha256 hex of the plaintext, size). Same bytes
@@ -532,8 +629,8 @@ impl BlobStore {
         let result = (|| {
             let mut out = create_private(&tmp)?;
             let mut buf = vec![0u8; CHUNK];
-            let (h, size) = if let Some((profile, dek)) = &sealing {
-                let mut s = Sealing::new(dek, *profile);
+            let (h, size) = if let Some((slot, dek)) = &sealing {
+                let mut s = Sealing::new(dek, slot.id());
                 out.write_all(&[0u8; HEADER])?;
                 loop {
                     let n = reader.read(&mut buf)?;
@@ -551,7 +648,7 @@ impl BlobStore {
                 out.write_all(&header)?;
                 out.flush()?;
                 out.sync_all()?;
-                self.land_sealed(&tmp, *profile, dek, &sha)?;
+                self.land_sealed(&tmp, *slot, dek, &sha)?;
                 (hex::encode(sha), size)
             } else {
                 let mut digest = Sha256::new();
@@ -599,8 +696,8 @@ impl BlobStore {
         let result = async {
             let mut out = create_spool(&tmp).await?;
             let mut buf = vec![0u8; CHUNK];
-            if let Some((profile, dek)) = &sealing {
-                let mut s = Sealing::new(dek, *profile);
+            if let Some((slot, dek)) = &sealing {
+                let mut s = Sealing::new(dek, slot.id());
                 out.write_all(&[0u8; HEADER]).await?;
                 loop {
                     let n = reader.read(&mut buf).await?;
@@ -615,7 +712,7 @@ impl BlobStore {
                 out.write_all(&header).await?;
                 out.flush().await?;
                 out.sync_all().await?;
-                self.land_sealed(&tmp, *profile, dek, &sha)?;
+                self.land_sealed(&tmp, *slot, dek, &sha)?;
                 return Ok((hex::encode(sha), size));
             }
             let mut digest = Sha256::new();
@@ -659,22 +756,17 @@ impl BlobStore {
     pub fn open_seek(&self, owner: BlobOwner, sha256: &str) -> Result<BlobReader, BlobError> {
         let open = |p: &Path| {
             File::open(p).map_err(|e| match e.kind() {
-                io::ErrorKind::NotFound => not_found(sha256),
+                io::ErrorKind::NotFound => BlobError::NotFound,
                 _ => BlobError::Io(e),
             })
         };
         match self.find(owner, sha256)? {
-            None => Err(not_found(sha256)),
+            None => Err(BlobError::NotFound),
             Some(Found::Plain(p)) => Ok(BlobReader::Plain(self.checked_plain(owner, sha256, open(&p)?)?)),
-            Some(Found::Sealed {
-                path,
-                dek,
-                profile,
-                sha,
-            }) => Ok(BlobReader::Sealed(Box::new(SealedReader::open(
+            Some(Found::Sealed { path, dek, slot, sha }) => Ok(BlobReader::Sealed(Box::new(SealedReader::open(
                 open(&path)?,
                 &dek,
-                profile,
+                slot.id(),
                 &sha,
             )?))),
         }
@@ -737,7 +829,7 @@ impl BlobStore {
     /// sealed blob is decrypted whole into a temporary file here.
     pub fn with_local_copy(&self, owner: BlobOwner, sha256: &str) -> Result<LocalCopy, BlobError> {
         match self.find(owner, sha256)? {
-            None => Err(not_found(sha256)),
+            None => Err(BlobError::NotFound),
             Some(Found::Plain(path)) => {
                 self.checked_plain(owner, sha256, File::open(&path)?)?;
                 Ok(LocalCopy { path, temporary: false })
@@ -768,16 +860,16 @@ impl BlobStore {
         Ok(self.open_seek(owner, sha256)?.len()?)
     }
 
-    /// Store `from`'s blob for `to` as well, for a document that moved to another profile: read under
-    /// `from`, written under `to`, the bytes checked against their sha256 before anything lands. The
-    /// `from` copy stays (the move's drop job removes it). True when a copy was made; false when `to`
-    /// already holds it: a sealed copy for a profile this store seals, any copy otherwise (a plain
-    /// file of the same bytes is no copy under the profile's key).
+    /// Store `from`'s blob for `to` as well, for a document that moved to another profile or a held
+    /// item that got one: read under `from`, written under `to`, the bytes checked against their sha256
+    /// before anything lands. The `from` copy stays (the move's drop job removes it). True when a copy
+    /// was made; false when `to` already holds it: a sealed copy for an owner this store seals, any copy
+    /// otherwise (a plain file of the same bytes is no copy under the profile's key).
     pub fn rekey(&self, from: BlobOwner, to: BlobOwner, sha256: &str) -> Result<bool, BlobError> {
         if from == to {
             return Ok(false);
         }
-        let seals_to = matches!(to, BlobOwner::Profile(_)) && self.keys.is_some();
+        let seals_to = to.slot().is_some() && self.keys.is_some();
         match self.find(to, sha256)? {
             Some(Found::Sealed { .. }) => return Ok(false),
             Some(Found::Plain(_)) if !seals_to => return Ok(false),
@@ -816,15 +908,132 @@ impl BlobStore {
     /// The key row went with the profile, so a sealed file left behind no longer opens. True when the
     /// folder was there.
     pub fn forget_profile(&self, profile: Uuid) -> io::Result<bool> {
+        self.forget_slot(Slot::Profile(profile))
+    }
+
+    /// After a pending item's key was shredded (its mail released or deleted, its document assigned):
+    /// every sealed blob of the item and the key this process kept for it. True when the folder was
+    /// there.
+    pub fn forget_pending(&self, item: Uuid) -> io::Result<bool> {
+        self.forget_slot(Slot::Pending(item))
+    }
+
+    /// Forget the key of `slot` in this process, and remove its sealed folder.
+    pub fn forget_slot(&self, slot: Slot) -> io::Result<bool> {
         if let Some(keys) = &self.keys {
-            keys.forget(profile);
+            keys.forget_slot(slot);
         }
-        let dir = self.profile_dir(profile);
-        if !dir.exists() {
-            return Ok(false);
+        match fs::remove_dir_all(self.slot_dir(slot)) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
         }
-        fs::remove_dir_all(dir)?;
-        Ok(true)
+    }
+
+    /// [`BlobStore::forget_slot`] for a slot whose key is gone (a deleted profile, a settled item),
+    /// unless a backup is copying the files: the key leaves this process either way, and the folder
+    /// stays for the sweep, which removes it once the copy is done. `Some(true)` when the folder went,
+    /// `Some(false)` when there was none, `None` when it stays.
+    pub async fn forget_settled(&self, conn: &mut sqlx::PgConnection, slot: Slot) -> Result<Option<bool>, BlobError> {
+        use sqlx::Connection;
+        if let Some(keys) = &self.keys {
+            keys.forget_slot(slot);
+        }
+        let mut tx = conn.begin().await.map_err(lock_error)?;
+        if !removal_lock(&mut tx, false).await? {
+            return Ok(None);
+        }
+        let store = self.clone();
+        let gone = tokio::task::spawn_blocking(move || store.forget_slot(slot))
+            .await
+            .map_err(|e| BlobError::Io(io::Error::other(e)))??;
+        tx.commit().await.map_err(lock_error)?;
+        Ok(Some(gone))
+    }
+
+    /// Every slot with a sealed folder in this store: `enc/<profile>` and `pending/<item>`. A folder
+    /// whose name is no id is left out (and stays: nothing here made it).
+    pub fn sealed_slots(&self) -> io::Result<Vec<Slot>> {
+        let mut out = Vec::new();
+        for (part, make) in [("enc", Slot::Profile as fn(Uuid) -> Slot), ("pending", Slot::Pending)] {
+            let entries = match fs::read_dir(self.root.join(part)) {
+                Ok(e) => e,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let simple = name.len() == 32 && name.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'));
+                if simple
+                    && entry.file_type()?.is_dir()
+                    && let Ok(id) = Uuid::parse_str(&name)
+                {
+                    out.push(make(id));
+                }
+            }
+        }
+        out.sort_by_key(|s| (matches!(s, Slot::Pending(_)), s.id()));
+        Ok(out)
+    }
+
+    /// Remove every sealed folder whose key is not stored or was shredded: a process that still held
+    /// a deleted profile's key (the OCR worker) can land a file after the delete removed the folder,
+    /// and a released or deleted held mail and an assigned document leave their item's folder. Such a
+    /// file never opens again; this removes it. A folder is made only after its key is stored
+    /// (`Keyring::dek_for` commits the key first), and a shredded key never comes back, so a live
+    /// folder is never removed. Keys of pending items that no longer wait are shredded first
+    /// (`keys::shred_pending_orphans`). While a backup copies the files, the sweep removes nothing
+    /// ([`removal_lock`]): the next one does. Only a store whose keys live in the database sweeps.
+    /// Returns how many folders went, or the first folder that could not go, after it tried them all.
+    pub async fn sweep_unkeyed(&self, conn: &mut sqlx::PgConnection) -> Result<usize, BlobError> {
+        use sqlx::Connection;
+        let Some(keys) = self.keys.as_ref().filter(|k| k.stored()) else {
+            return Ok(0);
+        };
+        crate::keys::shred_pending_orphans(&mut *conn).await?;
+        let mut tx = conn.begin().await.map_err(lock_error)?;
+        if !removal_lock(&mut tx, false).await? {
+            return Ok(0);
+        }
+        let store = self.clone();
+        let slots = tokio::task::spawn_blocking(move || store.sealed_slots())
+            .await
+            .map_err(|e| BlobError::Io(io::Error::other(e)))??;
+        if slots.is_empty() {
+            return Ok(0);
+        }
+        let live = crate::keys::live(&mut tx, &slots).await?;
+        let gone: Vec<Slot> = slots.into_iter().filter(|s| !live.contains(s)).collect();
+        for slot in &gone {
+            keys.forget_slot(*slot);
+        }
+        // every folder gets its try: one that cannot go does not keep the others; the first failure
+        // is the answer once all were tried
+        let store = self.clone();
+        let (removed, failed) = tokio::task::spawn_blocking(move || {
+            let (mut removed, mut failed) = (0, None);
+            for slot in gone {
+                match store.forget_slot(slot) {
+                    Ok(true) => removed += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        // a Slot prints its ids only, never a hash or a key
+                        tracing::warn!(error = %e, ?slot, "a sealed folder whose key is gone could not be removed");
+                        failed.get_or_insert(e);
+                    }
+                }
+            }
+            (removed, failed)
+        })
+        .await
+        .map_err(|e| BlobError::Io(io::Error::other(e)))?;
+        tx.commit().await.map_err(lock_error)?;
+        match failed {
+            Some(e) => Err(BlobError::Io(e)),
+            None => Ok(removed),
+        }
     }
 
     /// Remove upload spools a killed process left in `root/tmp`: regular files named `upload-*`
@@ -870,7 +1079,7 @@ impl BlobStore {
     /// Hard-link (or copy, across disks) every blob file of this store into the blob tree at `dest`,
     /// in the same layout: a backup's `blobs/`. Blobs never change, so a link is a copy.
     pub fn copy_into(&self, dest: &Path) -> io::Result<()> {
-        for part in ["sha256", "enc"] {
+        for part in TREE_PARTS {
             let src = self.root.join(part);
             if src.is_dir() {
                 copy_tree(&src, &dest.join(part))?;
@@ -879,11 +1088,12 @@ impl BlobStore {
         Ok(())
     }
 
-    /// The [`tree_files`] key of `owner`'s copy of `sha256`: `<profile>/<address>` for a sealed copy,
-    /// else the sha256 itself (also when no copy is there, so a check reports it missing).
+    /// The [`tree_files`] key of `owner`'s copy of `sha256`: `<profile>/<address>` or
+    /// `pending/<item>/<address>` for a sealed copy, else the sha256 itself (also when no copy is
+    /// there, so a check reports it missing).
     pub fn key_of(&self, owner: BlobOwner, sha256: &str) -> Result<String, BlobError> {
         Ok(match self.find(owner, sha256)? {
-            Some(Found::Sealed { profile, dek, sha, .. }) => format!("{}/{}", profile.simple(), dek.address(&sha)),
+            Some(Found::Sealed { slot, dek, sha, .. }) => slot_key(slot, &dek.address(&sha)),
             _ => sha256_hex(sha256)?,
         })
     }
@@ -936,24 +1146,35 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
+/// The folders of a blob tree, plain then sealed.
+const TREE_PARTS: [&str; 3] = ["sha256", "enc", "pending"];
+
 /// Where a [`tree_files`] key sits inside a blob tree; None for a string that is not a key.
 fn tree_rel(key: &str) -> Option<PathBuf> {
     let hex = |s: &str, n: usize| s.len() == n && s.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'));
+    let sealed = |part: &str, id: &str, a: &str| Path::new(part).join(id).join(&a[..2]).join(&a[2..4]).join(a);
+    if let Some(rest) = key.strip_prefix("pending/") {
+        return match rest.split_once('/') {
+            Some((i, a)) if hex(i, 32) && hex(a, 64) => Some(sealed("pending", i, a)),
+            _ => None,
+        };
+    }
     match key.split_once('/') {
         None if hex(key, 64) => Some(Path::new("sha256").join(&key[..2]).join(&key[2..4]).join(key)),
-        Some((p, a)) if hex(p, 32) && hex(a, 64) => Some(Path::new("enc").join(p).join(&a[..2]).join(&a[2..4]).join(a)),
+        Some((p, a)) if hex(p, 32) && hex(a, 64) => Some(sealed("enc", p, a)),
         _ => None,
     }
 }
 
 /// Every blob file of the tree at `root` (a store, or a backup's `blobs/`), in path order, keyed the
-/// way a backup manifest lists it: a plain blob by its file name (its sha256), a sealed one as
-/// `<profile>/<file name>` (its address). A file that is not where its key puts it (another shard, a
-/// name that is no key, a file elsewhere under `enc/`) is keyed `?/<its path in the tree>`: no manifest
-/// lists that key and no restore places it, and it never replaces the file its name stands for.
+/// way a backup manifest lists it: a plain blob by its file name (its sha256), a profile's sealed one
+/// as `<profile>/<file name>` (its address), a pending item's as `pending/<item>/<file name>`. A file
+/// that is not where its key puts it (another shard, a name that is no key, a file elsewhere under
+/// `enc/` or `pending/`) is keyed `?/<its path in the tree>`: no manifest lists that key and no restore
+/// places it, and it never replaces the file its name stands for.
 pub fn tree_files(root: &Path) -> io::Result<BTreeMap<String, PathBuf>> {
     let mut out = BTreeMap::new();
-    for part in ["sha256", "enc"] {
+    for part in TREE_PARTS {
         let dir = root.join(part);
         let mut files = Vec::new();
         if dir.is_dir() {
@@ -968,10 +1189,13 @@ pub fn tree_files(root: &Path) -> io::Result<BTreeMap<String, PathBuf>> {
                 .unwrap_or_default();
             let key = match part {
                 "sha256" => name,
-                _ => match p.strip_prefix(&dir).ok().and_then(|r| r.components().next()) {
-                    Some(pid) => format!("{}/{name}", pid.as_os_str().to_string_lossy()),
-                    None => name,
-                },
+                _ => {
+                    let lead = if part == "pending" { "pending/" } else { "" };
+                    match p.strip_prefix(&dir).ok().and_then(|r| r.components().next()) {
+                        Some(id) => format!("{lead}{}/{name}", id.as_os_str().to_string_lossy()),
+                        None => name,
+                    }
+                }
             };
             let key = match tree_rel(&key) {
                 Some(at) if at == rel => key,
@@ -1003,7 +1227,7 @@ mod tests {
         assert_eq!(tail, "LabNorte");
         assert!(matches!(
             store.open_seek(owner(), &"0".repeat(64)),
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         assert!(matches!(
             store.open_seek(owner(), "../etc/passwd"),
@@ -1022,7 +1246,7 @@ mod tests {
         assert_eq!(fs::read(copy.path())?, data);
         assert!(matches!(
             store.with_local_copy(owner(), &"0".repeat(64)),
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         assert!(matches!(
             store.with_local_copy(owner(), "nope"),
@@ -1110,7 +1334,7 @@ mod tests {
         assert_eq!((out.as_slice(), size), (&b"LabNorte lipid panel"[..], 20));
         assert!(matches!(
             store.open_async(owner(), &"0".repeat(64)).await,
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         Ok(())
     }
@@ -1159,10 +1383,7 @@ mod tests {
             b"Rivera family lipid panel"
         );
         assert!(!store.exists(BlobOwner::Reference, &"0".repeat(64)));
-        assert!(matches!(
-            store.size(owner(), &"0".repeat(64)),
-            Err(BlobError::NotFound(_))
-        ));
+        assert!(matches!(store.size(owner(), &"0".repeat(64)), Err(BlobError::NotFound)));
         Ok(())
     }
 
@@ -1189,12 +1410,23 @@ mod tests {
         let store = BlobStore::new(dir.path()).expect("store");
         assert!(matches!(
             store.get_bytes(owner(), &"0".repeat(64)),
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         assert!(matches!(store.path("../../etc/passwd"), Err(BlobError::BadHash)));
         let h = store.put_bytes(owner(), b"x").expect("put");
         assert!(store.delete(owner(), &h).expect("delete"));
         assert!(!store.exists(owner(), &h));
+    }
+
+    #[test]
+    fn a_missing_blob_names_no_hash() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = BlobStore::new(dir.path()).expect("store");
+        let h = "ab".repeat(32);
+        let e = store.get_bytes(owner(), &h).expect_err("found");
+        assert!(!e.to_string().contains("ababab"), "{e}");
+        let shown = crate::Error::from(e).to_string();
+        assert!(!shown.contains("ababab"), "{shown}");
     }
 
     #[tokio::test]
@@ -1272,7 +1504,7 @@ mod tests {
             BlobOwner::Reference,
         ] {
             assert!(
-                matches!(store.get_bytes(other, &h), Err(BlobError::NotFound(_))),
+                matches!(store.get_bytes(other, &h), Err(BlobError::NotFound)),
                 "{other:?}"
             );
             assert!(!store.exists(other, &h), "{other:?}");
@@ -1289,13 +1521,75 @@ mod tests {
     }
 
     #[test]
-    fn pending_and_reference_blobs_stay_plain() -> Result<(), BlobError> {
+    fn reference_blobs_stay_plain() -> Result<(), BlobError> {
         let dir = tempfile::tempdir()?;
         let store = sealing_store(dir.path())?;
-        let h = store.put_bytes(BlobOwner::Pending(Uuid::new_v4()), b"held LabNorte mail")?;
         let r = store.put_bytes(BlobOwner::Reference, b"ClinVar release")?;
-        assert!(store.path(&h)?.is_file() && store.path(&r)?.is_file());
-        assert!(!dir.path().join("enc").exists());
+        assert!(store.path(&r)?.is_file());
+        assert!(!dir.path().join("enc").exists() && !dir.path().join("pending").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_pending_items_blob_is_sealed_under_its_own_key_and_moves_to_its_profile() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(dir.path())?;
+        let (item, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let data = b"From: LabNorte\r\nSubject: Carmen Ortega, ferritin 35 ng/mL".repeat(3000);
+        let h = store.put_bytes(BlobOwner::Pending(item), &data)?;
+        assert!(
+            files_under(&dir.path().join("sha256")).is_empty(),
+            "a plain copy was written"
+        );
+        let sealed = files_under(&dir.path().join("pending"));
+        assert_eq!(sealed.len(), 1, "{sealed:?}");
+        assert!(sealed[0].starts_with(dir.path().join("pending").join(item.simple().to_string())));
+        assert!(
+            !fs::read(&sealed[0])?.windows(13).any(|w| w == b"Carmen Ortega"),
+            "plaintext on disk"
+        );
+        assert_eq!(store.get_bytes(BlobOwner::Pending(item), &h)?, data);
+        // only the item's own key opens it: not another item, not a profile of the same id, not plain
+        for who in [
+            BlobOwner::Pending(other),
+            BlobOwner::Profile(item),
+            BlobOwner::Reference,
+        ] {
+            assert!(matches!(store.get_bytes(who, &h), Err(BlobError::NotFound)), "{who:?}");
+        }
+        let key = store.key_of(BlobOwner::Pending(item), &h)?;
+        assert!(
+            key.starts_with(&format!("pending/{}/", item.simple())) && !key.contains(&h),
+            "{key}"
+        );
+        // assigned to a profile: sealed again under the profile's key, then the item's folder goes
+        let p = BlobOwner::Profile(Uuid::new_v4());
+        assert!(store.rekey(BlobOwner::Pending(item), p, &h)?);
+        assert_eq!(store.get_bytes(p, &h)?, data);
+        assert!(store.forget_pending(item)?);
+        assert!(!dir.path().join("pending").join(item.simple().to_string()).exists());
+        assert!(matches!(
+            store.get_bytes(BlobOwner::Pending(item), &h),
+            Err(BlobError::NotFound)
+        ));
+        assert_eq!(store.get_bytes(p, &h)?, data, "the profile's copy went with the item's");
+        assert!(!store.forget_pending(item)?);
+        Ok(())
+    }
+
+    #[test]
+    fn sealed_slots_lists_profile_and_item_folders_only() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(dir.path())?;
+        let (p, i) = (Uuid::new_v4(), Uuid::new_v4());
+        store.put_bytes(BlobOwner::Profile(p), b"Alex Rivera, lipid panel")?;
+        store.put_bytes(BlobOwner::Pending(i), b"held mail")?;
+        store.put_bytes(BlobOwner::Reference, b"reference table")?;
+        fs::create_dir_all(dir.path().join("enc").join("not-an-id"))?;
+        fs::write(dir.path().join("pending").join("a".repeat(32)), b"a file, not a folder")?;
+        let mut want = vec![Slot::Profile(p), Slot::Pending(i)];
+        want.sort_by_key(|s| (matches!(s, Slot::Pending(_)), s.id()));
+        assert_eq!(store.sealed_slots()?, want);
         Ok(())
     }
 
@@ -1321,7 +1615,7 @@ mod tests {
         // a store without the key cannot read the sealed one
         assert!(matches!(
             old.get_bytes(BlobOwner::Profile(p), &new),
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         Ok(())
     }
@@ -1474,13 +1768,13 @@ mod tests {
         assert!(store.rekey(from, to, &h)?);
         assert_eq!(store.get_bytes(to, &h)?, b"Sam Rivera, filed to Alex by mistake");
         assert!(!store.rekey(from, to, &h)?, "copied twice");
-        // a pending item's plain file is sealed for the profile it moves to; a missing one is not found
-        let plain = store.put_bytes(BlobOwner::Pending(Uuid::new_v4()), b"held scan")?;
+        // a pending item's legacy plain file is sealed for the profile it moves to; a missing one is not found
+        let plain = store.put_bytes(BlobOwner::Reference, b"held scan")?;
         assert!(store.rekey(BlobOwner::Pending(Uuid::nil()), to, &plain)?);
         assert!(store.key_of(to, &plain)?.contains('/'));
         assert!(matches!(
             store.rekey(from, to, &"0".repeat(64)),
-            Err(BlobError::NotFound(_))
+            Err(BlobError::NotFound)
         ));
         Ok(())
     }
@@ -1510,6 +1804,13 @@ mod tests {
         let p = Uuid::new_v4();
         let sealed = store.put_bytes(BlobOwner::Profile(p), b"Carmen Ortega, LabNorte panel")?;
         let plain = store.put_bytes(BlobOwner::Reference, b"reference table")?;
+        let item = Uuid::new_v4();
+        let held = store.put_bytes(BlobOwner::Pending(item), b"held LabNorte mail")?;
+        let held_key = store.key_of(BlobOwner::Pending(item), &held)?;
+        assert!(
+            held_key.starts_with(&format!("pending/{}/", item.simple())),
+            "{held_key}"
+        );
         let key = store.key_of(BlobOwner::Profile(p), &sealed)?;
         assert!(key.starts_with(&format!("{}/", p.simple())) && !key.contains(&sealed));
         assert_eq!(
@@ -1521,7 +1822,7 @@ mod tests {
         let backup = dir.path().join("backup");
         store.copy_into(&backup)?;
         let files = tree_files(&backup)?;
-        let mut want = vec![key.clone(), plain.clone()];
+        let mut want = vec![key.clone(), plain.clone(), held_key.clone()];
         want.sort();
         assert_eq!(files.keys().cloned().collect::<Vec<_>>(), want);
         let fresh = BlobStore::new(dir.path().join("fresh"))?;
@@ -1533,15 +1834,28 @@ mod tests {
             fresh.files()?.keys().collect::<Vec<_>>(),
             files.keys().collect::<Vec<_>>()
         );
+        assert_eq!(fresh.get_bytes(BlobOwner::Reference, &plain)?, b"reference table");
         let climb = format!("{}/../{}", p.simple(), "0".repeat(61));
-        for bad in ["../x", "ab/cd", climb.as_str(), sealed.to_uppercase().as_str()] {
+        let pending_climb = format!("pending/{}/../{}", item.simple(), "0".repeat(61));
+        let pending_short = format!("pending/{}", item.simple());
+        for bad in [
+            "../x",
+            "ab/cd",
+            climb.as_str(),
+            sealed.to_uppercase().as_str(),
+            pending_climb.as_str(),
+            pending_short.as_str(),
+            "pending/x/y",
+        ] {
             assert!(
                 matches!(fresh.place(bad, &files[&plain]), Err(BlobError::BadName(_))),
                 "{bad}"
             );
         }
         fs::write(backup.join("enc").join("stray"), b"x")?;
-        assert!(tree_files(&backup)?.contains_key("?/enc/stray"));
+        fs::write(backup.join("pending").join("stray"), b"x")?;
+        let strays = tree_files(&backup)?;
+        assert!(strays.contains_key("?/enc/stray") && strays.contains_key("?/pending/stray"));
         Ok(())
     }
 

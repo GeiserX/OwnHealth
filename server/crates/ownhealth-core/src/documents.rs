@@ -667,10 +667,23 @@ pub async fn lock_owner(conn: &mut PgConnection, document_id: Uuid) -> Result<Op
     )
 }
 
+/// Lock document `document_id`'s row and return the owner its files are stored for now (None: no
+/// such document). A job that stores a file of the document after slow work (an OCR layer) stores it
+/// for this owner, in the transaction that records it: a move takes the same lock
+/// ([`lock_owner`]), so it re-keys that file too, or sees the new owner already.
+pub async fn lock_files_owner(conn: &mut PgConnection, document_id: Uuid) -> Result<Option<BlobOwner>> {
+    let row: Option<Option<Uuid>> = sqlx::query_scalar("select profile_id from document where id = $1 for update")
+        .bind(document_id)
+        .fetch_optional(conn)
+        .await?;
+    Ok(row.map(|profile| BlobOwner::of_document(profile, document_id)))
+}
+
 /// After document `document_id` moved from profile `from` to `to` (`None`: no profile): every blob of
 /// the document (the file, its page layers and images, its OCR layers) is stored for `to` as well, so
 /// the new profile's key opens them, and the removal of `from`'s copies is queued
-/// ([`DROP_MOVED_JOB`]). Run it in the transaction of the move, with `from` read under the document's
+/// ([`DROP_MOVED_JOB`]). A document that had no profile was sealed under its own item key: that key
+/// is shredded here, in the move's transaction. Run it in the transaction of the move, with `from` read under the document's
 /// row lock, before the commit: the re-import the move queues reads them as `to`'s.
 pub async fn rekey_document(
     conn: &mut PgConnection,
@@ -702,7 +715,7 @@ pub async fn rekey_document(
             match blobs.rekey(old, new, sha) {
                 Ok(_) => {}
                 // lost before the move: nothing to copy, and the read reports it as before
-                Err(BlobError::NotFound(_)) => {
+                Err(BlobError::NotFound) => {
                     tracing::warn!(%document_id, "a blob of a moved document is missing from the store");
                 }
                 Err(e) => return Err(Error::from(e)),
@@ -712,16 +725,31 @@ pub async fn rekey_document(
     })
     .await
     .map_err(|e| Error::Other(anyhow::anyhow!("blob re-key task failed: {e}")))??;
-    if let (BlobOwner::Profile(p), false) = (moved.from, moved.shas.is_empty()) {
+    // the document had no profile: its own key goes in this transaction, after its files were read
+    // (a key lookup waits on the row this takes). The stored key is gone once this commits. A process
+    // that already holds the key in its keyring (`Keyring::dek_for` answers from its cache first) can
+    // still open the item's copies until the drop job queued below removes them.
+    if let BlobOwner::Pending(item) = moved.from {
+        crate::keys::shred_pending(&mut *conn, &[item]).await?;
+    }
+    let owner = match moved.from {
+        BlobOwner::Profile(p) => Some(json!({"profile_id": p})),
+        BlobOwner::Pending(i) => Some(json!({"pending_id": i})),
+        BlobOwner::Reference => None,
+    };
+    if let (Some(Value::Object(mut payload)), false) = (owner, moved.shas.is_empty()) {
         let household: Uuid = sqlx::query_scalar("select household_id from document where id = $1")
             .bind(document_id)
             .fetch_one(&mut *conn)
             .await?;
         // the household, so a retry that runs out of attempts shows in its review queue
+        payload.insert("household_id".into(), json!(household));
+        payload.insert("document_id".into(), json!(document_id));
+        payload.insert("blobs".into(), json!(moved.shas));
         enqueue(
             &mut *conn,
             DROP_MOVED_JOB,
-            &json!({"household_id": household, "profile_id": p, "document_id": document_id, "blobs": moved.shas}),
+            &Value::Object(payload),
             EnqueueOptions::default(),
         )
         .await?;

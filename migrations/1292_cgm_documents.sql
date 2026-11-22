@@ -1,4 +1,4 @@
--- 1291, v1.0 Connected: CGM CSV exports are wearables documents.
+-- 1292, v1.0 Connected: CGM CSV exports are wearables documents.
 --
 -- A LibreView or Dexcom Clarity CSV export holds every glucose reading of its sensors. Migration 1221
 -- made doc_type 'wearables' (ownhealth_core::documents::WEARABLES_DOC_TYPE), which needs read:wearables

@@ -15,8 +15,8 @@ so older references keep pointing at the right section.
 
 All routes are under `/api`, JSON, and resolve `{p}` as a profile slug, `me` or a uuid through
 `core::access::require`. Errors are `{"detail": {"code": ..., "message": ..., ...}}`: 401 `unauthenticated`,
-403 `forbidden` with the missing scope or action, 404 `profile_not_granted` (with `allowed` slugs) or
-`unknown`, 409 for lifecycle and review conflicts, 415 `unsupported_upload`. A router module is
+403 `forbidden` with the missing scope or action, 404 `profile_not_granted` (with `allowed` slugs),
+`blob_missing` (the row is there, its stored file is not) or `unknown`, 409 for lifecycle and review conflicts, 415 `unsupported_upload`. A router module is
 `server/crates/ownhealth-api/src/routes/<file>.rs` with a `router()` that `routes.rs` merges.
 
 `lang`, on every route that takes it, is a registry language (`ownhealth_core::langs::LANGS`, today
@@ -104,6 +104,7 @@ never collide:
 | 1260-1269 | v1.0 Connected, break-glass |
 | 1270-1279 | v1.0 Connected, sharing: SMART Health Links and the ICE card |
 | 1280-1289 | v1.0 Connected, ops: languages, partitions and other operations |
+| 1290-1299 | v1.0 Connected, after 1280: per-profile and pending-item data keys (1290, 1291), CGM CSV exports as wearables documents (1292) |
 
 H and I have no migrations. Every new phase numbers after the highest shipped file: the migrator applies
 missing files in number order, so a lower number would run before files it depends on. Inside a phase,

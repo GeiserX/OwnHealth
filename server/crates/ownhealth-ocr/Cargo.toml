@@ -33,6 +33,8 @@ uuid.workspace = true
 [dev-dependencies]
 # the lab-slip generator and stand-in normalizer of ownhealth-ingest-pdf's tests (`#[path]`), and theirs
 ownhealth-core = { workspace = true, features = ["testing"] }
+# the `blobs.drop_moved` job a move queues, run in the move-while-reading tests
+ownhealth-auth.workspace = true
 ownhealth-normalize.workspace = true
 anyhow.workspace = true
 chrono.workspace = true

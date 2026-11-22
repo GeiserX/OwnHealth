@@ -185,6 +185,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
             let rt = Runtime::new(settings)?;
             app::check_profile_keys(&rt).await?;
             app::sweep_spools(&rt);
+            app::sweep_unkeyed(&rt).await;
             // OCR turned on after scans arrived (or a 0.2.0 database): queue the scans that wait
             if rt.settings.ocr && rt.settings.queues.iter().any(|q| q == "ocr") {
                 match ownhealth_ocr::job::backfill(&rt.pool).await {

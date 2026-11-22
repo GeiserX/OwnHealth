@@ -4292,6 +4292,7 @@ dependencies = [
  "hex",
  "image",
  "oar-ocr",
+ "ownhealth-auth",
  "ownhealth-core",
  "ownhealth-ingest-pdf",
  "ownhealth-normalize",

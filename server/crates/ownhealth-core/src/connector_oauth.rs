@@ -7,8 +7,9 @@
 //! - **Callback.** [`take_state`] uses the state up (once, within [`STATE_TTL_SECONDS`], in the
 //!   browser that started it); [`exchange`] trades the code as a public client or with the client
 //!   secret (`client_secret_basic` or `client_secret_post`); [`save_connection`] stores the refresh
-//!   token sealed in `secret` (`source.secret_id`) and the endpoints in `source.config`. A reconnect
-//!   is the same flow for an existing source, and it clears `reconsent_needed_at`.
+//!   token in `secret` (`source.secret_id`), sealed under the profile's data key, and the endpoints in
+//!   `source.config`. A reconnect is the same flow for an existing source, and it clears
+//!   `reconsent_needed_at`.
 //! - **Refresh.** [`access_token`] locks the source row `FOR UPDATE`, posts the refresh, stores the
 //!   rotated token, commits, and only then hands the access token out. A second caller waits on the
 //!   lock and reuses the first one's result. A reply with no refresh token keeps the old one.
@@ -759,9 +760,17 @@ pub async fn save_connection(
     let (access_at, grant_at) = (after(now, t.expires_in), after(now, t.refresh_expires_in));
     let Some(source_id) = p.source_id else {
         let secret_id = match &t.refresh {
-            Some(r) => {
-                Some(secrets::store_secret(conn, sb, client.household_id, "connector_refresh_token", None, r).await?)
-            }
+            Some(r) => Some(
+                secrets::store_profile_secret(
+                    conn,
+                    sb,
+                    client.household_id,
+                    p.profile_id,
+                    "connector_refresh_token",
+                    r,
+                )
+                .await?,
+            ),
             None => None,
         };
         let id: Uuid = sqlx::query_scalar(
@@ -813,12 +822,20 @@ pub async fn save_connection(
     // the new grant replaces the old one; without a refresh token there is nothing left to keep
     let secret_id = match (&t.refresh, old) {
         (Some(r), Some(id)) => {
-            secrets::replace_secret(conn, sb, id, r).await?;
+            secrets::replace_profile_secret(conn, sb, id, p.profile_id, r).await?;
             Some(id)
         }
-        (Some(r), None) => {
-            Some(secrets::store_secret(conn, sb, client.household_id, "connector_refresh_token", None, r).await?)
-        }
+        (Some(r), None) => Some(
+            secrets::store_profile_secret(
+                conn,
+                sb,
+                client.household_id,
+                p.profile_id,
+                "connector_refresh_token",
+                r,
+            )
+            .await?,
+        ),
         (None, _) => None,
     };
     sqlx::query(
@@ -880,7 +897,16 @@ async fn needs_reconsent(conn: &mut PgConnection, source_id: Uuid, now: DateTime
         .map(|_| ())
 }
 
-type Locked = (Uuid, Option<Uuid>, Option<Uuid>, Value, Option<DateTime<Utc>>, bool);
+/// household, profile, secret, client, config, reconsent, enabled
+type Locked = (
+    Uuid,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<Uuid>,
+    Value,
+    Option<DateTime<Utc>>,
+    bool,
+);
 
 /// A usable access token for the connection: the one in memory, or a refresh. `now` is the clock the
 /// expiry is counted from (tests move it).
@@ -901,14 +927,14 @@ pub async fn access_token(
     let kinds: Vec<&str> = OAUTH_KINDS.to_vec();
     let mut tx = pool.begin().await?;
     let row: Option<Locked> = sqlx::query_as(
-        "select household_id, secret_id, connector_client_id, config, reconsent_needed_at, enabled from source \
-         where id = $1 and kind = any($2) for update",
+        "select household_id, profile_id, secret_id, connector_client_id, config, reconsent_needed_at, enabled \
+         from source where id = $1 and kind = any($2) for update",
     )
     .bind(source_id)
     .bind(&kinds)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((household, secret_id, client_id, config, reconsent, enabled)) = row else {
+    let Some((household, profile, secret_id, client_id, config, reconsent, enabled)) = row else {
         return Err(OAuthError::Core(Error::NotFound("Unknown connection.".into())));
     };
     if reconsent.is_some() {
@@ -916,6 +942,15 @@ pub async fn access_token(
     }
     if !enabled {
         return Err(refused("disconnected", "This connection is switched off."));
+    }
+    // A profile's rotated token is sealed under the profile's key. Without the keys this process
+    // could read an older token sealed under the secrets key, spend it at the vendor, and then fail
+    // to store the new one: refuse before the request, so the stored token stays good.
+    if profile.is_some() && !sb.has_keys() {
+        return Err(refused(
+            "profile_keys_missing",
+            "This process has no profile keys, so it cannot store this connection's next token.",
+        ));
     }
     // another refresh finished while this one waited for the lock
     if let Some(t) = cached(source_id, now) {
@@ -933,6 +968,18 @@ pub async fn access_token(
         None => None,
     }
     .ok_or_else(|| refused("client_gone", "The vendor client of this connection is gone."))?;
+    // The rotated token is sealed under the profile's key: open that key now. A keyring that cannot
+    // open it (another OWNHEALTH_SECRETS_KEY, the key row unreadable) could still read a token sealed
+    // under the secrets key, and the vendor would rotate a token this process cannot store.
+    if let Some(p) = profile
+        && let Err(e) = secrets::open_profile_key(sb, p).await
+    {
+        tracing::warn!(error = %e, profile = %p, "the profile's key does not open here, so the refresh waits");
+        return Err(refused(
+            "profile_key_unopened",
+            "This process cannot open the profile's key, so it cannot store this connection's next token.",
+        ));
+    }
     let refresh = secrets::read_secret(&mut tx, sb, household, secret_id).await?;
     let req = TokenRequest::new(
         &client,
@@ -958,8 +1005,20 @@ pub async fn access_token(
     // the second caller may read the token as soon as the lock goes, so it is in memory first
     remember(source_id, &t, now);
     let stored: Result<(), OAuthError> = async {
-        if let Some(r) = &t.refresh {
-            secrets::replace_secret(&mut tx, sb, secret_id, r).await?;
+        // A profile's token goes under the profile's key, also when the token it replaces was sealed
+        // under the secrets key; a vendor that does not rotate keeps the same token, which is sealed
+        // again under the profile's key once. The key lookup runs on a connection of its own and waits
+        // only on the profile's key row, which a profile delete takes only after it removed the source
+        // rows, so the source row held here cannot close a cycle with a delete.
+        match (profile, &t.refresh) {
+            (Some(p), Some(r)) => secrets::replace_profile_secret(&mut tx, sb, secret_id, p, r).await?,
+            (Some(p), None) => {
+                if !secrets::sealed_for_profile(&mut tx, secret_id, p).await? {
+                    secrets::replace_profile_secret(&mut tx, sb, secret_id, p, &refresh).await?;
+                }
+            }
+            (None, Some(r)) => secrets::replace_secret(&mut tx, sb, secret_id, r).await?,
+            (None, None) => {}
         }
         sqlx::query(
             "update source set access_expires_at = $2, grant_expires_at = coalesce($3, grant_expires_at) \

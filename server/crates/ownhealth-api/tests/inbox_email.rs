@@ -229,6 +229,13 @@ async fn quarantine_routes_list_release_and_delete() -> R {
         .build();
     let q1 = hold(&env, source, &raw).await?;
     let q2 = hold(&env, source, &fixture("A-email/injection/inj-email-subject.eml")?).await?;
+    // each held message is sealed under its own item key, and goes once it is settled
+    let held = |q: Uuid| -> anyhow::Result<usize> {
+        let prefix = format!("pending/{}/", q.simple());
+        let files = ownhealth_core::blobs::tree_files(&env.rt.settings.blobs_path())?;
+        Ok(files.keys().filter(|k| k.starts_with(&prefix)).count())
+    };
+    assert_eq!((held(q1)?, held(q2)?), (1, 1));
 
     let r = env.anon().get("/api/inboxes/quarantine").await?;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
@@ -273,6 +280,11 @@ async fn quarantine_routes_list_release_and_delete() -> R {
         .await?;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
     assert_eq!(r.json["document_ids"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        (held(q1)?, held(q2)?),
+        (0, 1),
+        "the released message stayed under its item key"
+    );
     let r = alex.post(&path, &json!({"profile_id": env.profile("lucia")})).await?;
     assert_eq!(r.status, StatusCode::CONFLICT);
     let senders = alex.get(&format!("/api/inboxes/{source}/senders")).await?;
@@ -288,6 +300,7 @@ async fn quarantine_routes_list_release_and_delete() -> R {
     // delete, and the lists by status
     let r = alex.delete(&format!("/api/inboxes/quarantine/{q2}")).await?;
     assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(held(q2)?, 0, "the deleted message stayed under its item key");
     assert_eq!(alex.get("/api/inboxes/quarantine").await?.json, json!([]));
     let all = alex.get("/api/inboxes/quarantine?status=all").await?.json;
     assert_eq!(all.as_array().map(Vec::len), Some(2));
@@ -461,5 +474,135 @@ async fn removing_a_sender_needs_the_right_to_manage_its_profile() -> R {
             .await?,
         1
     );
+    Ok(())
+}
+
+/// The raw message of held mail `q` and the number of its sealed files.
+async fn held_files(env: &Env, q: Uuid) -> anyhow::Result<(String, usize)> {
+    let sha: String = sqlx::query_scalar("select encode(raw_blob, 'hex') from quarantine_item where id = $1")
+        .bind(q)
+        .fetch_one(env.pool())
+        .await?;
+    let prefix = format!("pending/{}/", q.simple());
+    let files = ownhealth_core::blobs::tree_files(&env.rt.settings.blobs_path())?;
+    Ok((sha, files.keys().filter(|k| k.starts_with(&prefix)).count()))
+}
+
+/// A backup whose database snapshot still shows a mail as held keeps the mail's file, even when the
+/// mail is released while the backup runs: the release leaves the sealed copy until the backup has
+/// copied the files, the sweep removes it after, and the restore opens the mail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_backup_taken_while_a_held_mail_is_released_keeps_the_mail_and_restores_it() -> R {
+    let env = env().await?;
+    let source = mailbox(&env, 1).await?;
+    let raw = Mail::new("bk@clinica-norte.example", "citas@clinica-norte.example")
+        .attach(
+            "informe.pdf",
+            "application/pdf",
+            fixture("labslips/injection/inj-metadata.pdf")?,
+        )
+        .build();
+    let q = hold(&env, source, &raw).await?;
+    let (sha, files) = held_files(&env, q).await?;
+    assert_eq!(files, 1);
+    // A table the release never touches, locked so the backup stops right after its snapshot: its
+    // pg_dump and its row counts wait here, which holds the window open.
+    let mut gate = env.pool().begin().await?;
+    sqlx::query("lock table public.ocr_run in access exclusive mode")
+        .execute(&mut *gate)
+        .await?;
+    let dest = env.dir.path().join("race-backup").join("staging");
+    let settings = env.settings.clone();
+    let backup = tokio::spawn(async move { ownhealth_ops::backup(&settings, &dest).await });
+    let waiting = "select count(*) from pg_locks where relation = 'public.ocr_run'::regclass and not granted";
+    let started = Instant::now();
+    while env.scalar_i64(waiting).await? == 0 {
+        anyhow::ensure!(
+            started.elapsed() < Duration::from_secs(60),
+            "the backup never reached its snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let r = alex
+        .post(
+            &format!("/api/inboxes/quarantine/{q}/release"),
+            &json!({"profile_id": env.profile("lucia")}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(
+        held_files(&env, q).await?.1,
+        1,
+        "the released mail's file went while a backup was copying the files"
+    );
+    gate.rollback().await?;
+    let archive = backup.await??;
+    // the copy is done: the next sweep removes the settled mail's folder
+    let mut c = env.pool().acquire().await?;
+    assert!(env.rt.blobs.sweep_unkeyed(&mut c).await? >= 1);
+    drop(c);
+    assert_eq!(
+        held_files(&env, q).await?.1,
+        0,
+        "the sweep left the settled mail's folder"
+    );
+    let report = ownhealth_ops::verify_restore(&env.settings, &archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert_eq!(report["blobs"]["missing"], json!([]), "{report:#}");
+    // the restore is the database at the snapshot: the mail is held there, and it opens
+    let fresh_db = ownhealth_core::testing::TestDb::empty().await?;
+    let mut fresh = fresh_db.settings(&env.dir.path().join("restored"))?;
+    fresh.secrets_key = env.settings.secrets_key.clone();
+    let restored = ownhealth_ops::restore(&fresh, &archive).await?;
+    assert_eq!(restored["ok"], true, "{restored:#}");
+    let status: String = sqlx::query_scalar("select status from quarantine_item where id = $1")
+        .bind(q)
+        .fetch_one(&fresh_db.pool)
+        .await?;
+    assert_eq!(status, "held");
+    let store = ownhealth_core::blobs::BlobStore::for_settings(&fresh)?;
+    assert!(
+        store.get_bytes(ownhealth_core::blobs::BlobOwner::Pending(q), &sha)? == raw,
+        "the restored held mail does not open"
+    );
+    Ok(())
+}
+
+/// A release that finds the held message's file gone answers 404 `blob_missing` without naming the
+/// file's hash.
+#[tokio::test]
+async fn a_release_whose_stored_message_is_gone_names_no_hash() -> R {
+    let env = env().await?;
+    let source = mailbox(&env, 1).await?;
+    let raw = Mail::new("gone@clinica-norte.example", "citas@clinica-norte.example")
+        .attach(
+            "informe.pdf",
+            "application/pdf",
+            fixture("labslips/injection/inj-metadata.pdf")?,
+        )
+        .build();
+    let q = hold(&env, source, &raw).await?;
+    let (sha, _) = held_files(&env, q).await?;
+    std::fs::remove_dir_all(
+        env.rt
+            .settings
+            .blobs_path()
+            .join("pending")
+            .join(q.simple().to_string()),
+    )?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let r = alex
+        .post(
+            &format!("/api/inboxes/quarantine/{q}/release"),
+            &json!({"profile_id": env.profile("lucia")}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{:?}", r.json);
+    // a code of its own, so a page says it in the person's language instead of the server's English
+    assert_eq!(r.json["detail"]["code"], "blob_missing", "{:?}", r.json);
+    let body = r.json.to_string();
+    assert!(!body.contains(&sha), "the answer names the file's hash: {body}");
+    assert!(!body.contains(&sha[..12]), "the answer names the file's hash: {body}");
     Ok(())
 }

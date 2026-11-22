@@ -354,7 +354,9 @@ pub async fn import_push(
 
 /// Remove this source's push bodies older than `PUSH_KEEP_DAYS`. The profile's own copy of a body goes
 /// once no row of that profile still names the same bytes (another of its inboxes, a document of it);
-/// the shared plain copy goes once no row at all does (another person's inbox, a held mail).
+/// the shared plain copy goes once no row at all does (another person's inbox, a held mail). While a
+/// backup copies the files the prune waits for a later push: the backup's snapshot may still name the
+/// old bodies (`blobs::removal_lock`, held until the caller's transaction ends).
 async fn prune_pushes(
     conn: &mut PgConnection,
     blobs: &BlobStore,
@@ -362,6 +364,9 @@ async fn prune_pushes(
     source_id: uuid::Uuid,
     current: &str,
 ) -> Result<()> {
+    if !ownhealth_core::blobs::removal_lock(&mut *conn, false).await? {
+        return Ok(());
+    }
     let gone: Vec<Option<String>> = sqlx::query_scalar(
         "delete from source_item where (source_id, external_id) in (select source_id, external_id \
          from source_item where source_id = $1 and external_id like 'push:%' and external_id <> $2 \

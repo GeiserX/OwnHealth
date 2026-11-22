@@ -44,6 +44,8 @@ const SECRET_TABLES: &[&str] = &[
     "oauth_refresh_token",
     "oauth_request",
     "passkey",
+    "pending_key",
+    "profile_key",
     "recovery_code",
     "secret",
     "user_session",

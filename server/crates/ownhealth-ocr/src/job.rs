@@ -18,6 +18,7 @@ use ownhealth_core::acceptance::Check;
 use ownhealth_core::arrive::{OCR_JOB, enqueue_ocr, set_ocr_state};
 use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::config::Settings;
+use ownhealth_core::documents::lock_files_owner;
 use ownhealth_core::jobs::{self, Job, JobContext, JobError};
 use ownhealth_ingest_pdf::textlayer::{PWord, PageModel, injection_hits};
 use ownhealth_ingest_pdf::{OcrPages, Word, add_pending_pages, decode_image, import_ocr, render_page_png};
@@ -358,7 +359,7 @@ fn payload(job: &Job) -> Result<(Uuid, Vec<i32>), JobError> {
 /// The job body, also called directly by the eval and the tests.
 pub async fn ocr_document(ctx: &JobContext, document_id: Uuid, pages: &[i32]) -> Result<Value, JobError> {
     let mut conn = ctx.pool.acquire().await?;
-    let Some(doc) = load_doc(&mut conn, document_id).await? else {
+    let Some(mut doc) = load_doc(&mut conn, document_id).await? else {
         return Err(JobError::permanent(format!("document {document_id} not found")));
     };
     let todo = pages_to_read(&mut conn, document_id, pages).await?;
@@ -375,20 +376,55 @@ pub async fn ocr_document(ctx: &JobContext, document_id: Uuid, pages: &[i32]) ->
     set_ocr_state(&mut conn, document_id, "running").await?;
     drop(conn);
 
-    let owner = BlobOwner::of_document(doc.profile_id, document_id);
-    let (settings, blobs, sha, pdf) = (
-        Arc::clone(&ctx.settings),
-        ctx.blobs.clone(),
-        doc.blob_sha256.clone(),
-        doc.mime == "application/pdf",
-    );
-    let pages_todo = todo.clone();
-    let (read, models_sha256) =
-        tokio::task::spawn_blocking(move || read_pages(&settings, &blobs, owner, &sha, pdf, &pages_todo))
-            .await
-            .map_err(|e| JobError::retry(format!("OCR task failed: {e}")))?;
+    let mut read_as = BlobOwner::of_document(doc.profile_id, document_id);
+    let mut read = Vec::<PageRead>::new();
+    let mut pages_now = todo.clone();
+    let mut rounds = 0;
+    let (mut tx, owner, models_sha256) = loop {
+        let (settings, blobs, sha, pdf) = (
+            Arc::clone(&ctx.settings),
+            ctx.blobs.clone(),
+            doc.blob_sha256.clone(),
+            doc.mime == "application/pdf",
+        );
+        let (got, models) =
+            tokio::task::spawn_blocking(move || read_pages(&settings, &blobs, read_as, &sha, pdf, &pages_now))
+                .await
+                .map_err(|e| JobError::retry(format!("OCR task failed: {e}")))?;
+        for (page_no, page) in got {
+            match read.iter_mut().find(|(n, _)| *n == page_no) {
+                Some(slot) => slot.1 = page,
+                None => read.push((page_no, page)),
+            }
+        }
+        rounds += 1;
 
-    let mut tx = ctx.pool.begin().await?;
+        let mut tx = ctx.pool.begin().await?;
+        // The layers are stored for the owner the document has now, read under its row lock: a move
+        // that committed while the pages were read re-keyed only the files it listed, so a layer stored
+        // for the owner read above would open for nobody. A move waits on this lock until the layers are
+        // recorded.
+        let Some(owner) = lock_files_owner(&mut tx, document_id).await? else {
+            return Err(JobError::permanent(format!("document {document_id} not found")));
+        };
+        let failed: Vec<i32> = read.iter().filter(|(_, p)| p.is_err()).map(|(n, _)| *n).collect();
+        // A move that committed while the pages were read queued the removal of the copies they were
+        // read from (`blobs.drop_moved`), so a page read after that removal failed only because its
+        // owner changed. Those pages are read again as the owner the document has now, outside the row
+        // lock; a page that fails again waits as before. Each round needs another move, and a few
+        // rounds bound a document that keeps moving.
+        if owner == read_as || failed.is_empty() || rounds > 3 {
+            break (tx, owner, models);
+        }
+        drop(tx);
+        read_as = owner;
+        pages_now = failed;
+    };
+    // and the pages OCR could not read wait for that profile
+    doc.profile_id = match owner {
+        BlobOwner::Profile(p) => Some(p),
+        _ => None,
+    };
     for (page_no, page) in &read {
         record_run(&mut tx, &ctx.blobs, owner, document_id, *page_no, &models_sha256, page).await?;
         if let Err(e) = page {

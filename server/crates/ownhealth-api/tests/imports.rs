@@ -782,7 +782,7 @@ async fn a_cgm_export_is_a_wearables_document() -> R {
     Ok(())
 }
 
-/// Migration 1291 moves the CGM CSV exports stored before it (`flags.cgm_csv`) to `doc_type`
+/// Migration 1292 moves the CGM CSV exports stored before it (`flags.cgm_csv`) to `doc_type`
 /// `wearables`; another CSV document keeps its type.
 #[tokio::test]
 async fn the_migration_moves_stored_cgm_exports_to_the_wearables_type() -> R {
@@ -814,7 +814,7 @@ async fn the_migration_moves_stored_cgm_exports_to_the_wearables_type() -> R {
         ids.push(id);
     }
     for _ in 0..2 {
-        sqlx::raw_sql(include_str!("../../../../migrations/1291_cgm_documents.sql"))
+        sqlx::raw_sql(include_str!("../../../../migrations/1292_cgm_documents.sql"))
             .execute(&a.rt.pool)
             .await?;
     }

@@ -27,7 +27,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use ownhealth_core::access::{Permission, Principal, ProfileRef, effective_permission, require};
 use ownhealth_core::audit::{AuditEvent, write_audit};
-use ownhealth_core::blobs::{BlobError, BlobOwner};
+use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::documents::{
     WEARABLES_DOC_TYPE, document_is_sensitive, record_document_sql, sensitive_document_sql,
 };
@@ -485,11 +485,8 @@ async fn document_file(
     // an Apple Health zip runs to hundreds of MB: stream it from disk, never hold it in memory
     let owner = BlobOwner::Profile(doc.perm.profile.id);
     let opened = rt.blobs.open_async(owner, &doc.blob_sha256).await;
-    let (file, size) = opened.map_err(|e| match e {
-        // the row is there but its file is not: say so without the hash
-        BlobError::NotFound(_) => Error::NotFound("This document's file is not stored any more.".into()),
-        e => Error::from(e),
-    })?;
+    // the row is there but its file is not: `blob_missing`, without the hash
+    let (file, size) = opened.map_err(Error::from)?;
     tx.commit().await?;
     let mime = doc.str("mime").unwrap_or("application/octet-stream");
     // the file opened (open_async checks a sealed file's first and last record), so a record that

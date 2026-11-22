@@ -180,7 +180,7 @@ impl<W: Write + Seek> Writer<W> {
         // opened before the zip entry, so a vanished blob leaves no stub
         let mut src = match blobs.open_seek(owner, sha) {
             Ok(f) => f,
-            Err(BlobError::NotFound(_)) => return Ok(false),
+            Err(BlobError::NotFound) => return Ok(false),
             Err(e) => return Err(e.into()),
         };
         self.paths.insert(path.to_string());

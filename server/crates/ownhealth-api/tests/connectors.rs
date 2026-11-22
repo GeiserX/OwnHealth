@@ -416,6 +416,13 @@ async fn reconnect_clears_the_reconsent_flag_and_disconnect_revokes_and_removes_
             .await?,
         1
     );
+    // sealed under Alex's own key (version 2 names the profile), by the connect and the reconnect
+    let head: Vec<u8> = sqlx::query_scalar(
+        "select substring(ciphertext from 1 for 17) from secret where purpose = 'connector_refresh_token'",
+    )
+    .fetch_one(t.env.pool())
+    .await?;
+    assert_eq!((head[0], &head[1..]), (2, &t.env.profile("alex").as_bytes()[..]));
     // the token the reconnect stored: the newest refresh token the vendor handed out
     let held: String = {
         let book = t.fake.book();

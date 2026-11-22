@@ -328,6 +328,53 @@ async fn verify_restore_passes_and_drops_its_scratch_database() -> R {
 }
 
 #[tokio::test]
+async fn a_tree_with_an_items_own_key_backs_up_verifies_and_restores() -> R {
+    // a scan that came in with no profile yet: sealed under its own item key, in pending/<item>/
+    const SCAN: &[u8] = b"%PDF-1.4 LabNorte scan for the Rivera household, no profile yet";
+    let l = live().await?;
+    let household: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(l.alex)
+        .fetch_one(&l.db.pool)
+        .await?;
+    let sha = BlobStore::new(l.dir.path().join("scratch"))?.put_bytes(BlobOwner::Reference, SCAN)?;
+    let mut c = l.db.pool.acquire().await?;
+    let doc = create_document(
+        &mut c,
+        &NewDocument::upload(household, None, &sha, "application/pdf", SCAN.len() as i64),
+    )
+    .await?
+    .id;
+    drop(c);
+    let live_store = BlobStore::for_settings(&l.settings)?;
+    assert_eq!(live_store.put_bytes(BlobOwner::Pending(doc), SCAN)?, sha);
+    let key = live_store.key_of(BlobOwner::Pending(doc), &sha)?;
+    assert!(key.starts_with(&format!("pending/{}/", doc.simple())), "{key}");
+    let archive = ownhealth_ops::backup(&l.settings, &l.dir.path().join("backup2").join("staging")).await?;
+    let m = manifest(&archive)?;
+    assert!(sealed_keys(&m).contains(&key), "{:#}", m["blobs"]);
+    assert!(strs(&m["blobs"]["referenced"]).contains(&key));
+    assert!(!fs::read_to_string(archive.join("manifest.json"))?.contains(&sha));
+    let report = ownhealth_ops::verify_restore(&l.settings, &archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    let (db, fresh) = fresh(&l).await?;
+    let report = ownhealth_ops::restore(&fresh, &archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    // the item's wrapped key came back in the dump and opens under the same secrets key
+    let profiles: i64 = sqlx::query_scalar("select count(*) from profile_key where wrapped_dek is not null")
+        .fetch_one(&db.pool)
+        .await?;
+    let items: i64 = sqlx::query_scalar("select count(*) from pending_key where wrapped_dek is not null")
+        .fetch_one(&db.pool)
+        .await?;
+    assert_eq!(items, 1);
+    assert_eq!(report["keys"]["checked"], profiles + items, "{report:#}");
+    assert!(tree_files(&fresh.blobs_path())?.contains_key(&key));
+    let store = BlobStore::for_settings(&fresh)?;
+    assert_eq!(store.get_bytes(BlobOwner::Pending(doc), &sha)?, SCAN);
+    Ok(())
+}
+
+#[tokio::test]
 async fn verify_restore_fails_on_a_corrupt_blob() -> R {
     let l = live().await?;
     let bad = copy(&l)?;
@@ -562,5 +609,103 @@ async fn verify_restore_fails_when_a_profile_key_does_not_open() -> R {
     assert_eq!(report["keys"]["failed"], serde_json::json!([p]), "{report:#}");
     assert_eq!(report["keys"]["ok"], false);
     assert_eq!(report["ok"], false, "{report:#}");
+    Ok(())
+}
+
+/// verify-restore counts a held mail's raw message among the files the database needs, under the
+/// mail's own key: a held mail whose file is gone fails the check, also when the dump still holds
+/// the mail's key and when its inbox was removed. The message of a mail deleted from the hold is no
+/// longer needed.
+#[tokio::test]
+async fn verify_restore_fails_when_a_held_mails_file_is_gone() -> R {
+    use ownhealth_core::quarantine::{self, QuarantineIn};
+    let l = live().await?;
+    let household: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(l.alex)
+        .fetch_one(&l.db.pool)
+        .await?;
+    let mailbox: Uuid = sqlx::query_scalar(
+        "insert into source (household_id, kind, label, config, created_by) \
+         values ($1, 'email', 'Correo de casa', '{}', (select id from app_user limit 1)) returning id",
+    )
+    .bind(household)
+    .fetch_one(&l.db.pool)
+    .await?;
+    let store = BlobStore::for_settings(&l.settings)?;
+    let mut held = Vec::new();
+    for n in 1..=2 {
+        let id = Uuid::new_v4();
+        let raw = format!(
+            "From: promo@ofertas-salud.example\r\nSubject: held {n}\r\n\r\nheld mail {n} of the Rivera household"
+        );
+        let sha = store.put_bytes(BlobOwner::Pending(id), raw.as_bytes())?;
+        let mut c = l.db.pool.acquire().await?;
+        quarantine::hold(
+            &mut c,
+            &QuarantineIn {
+                id,
+                household_id: household,
+                source_id: Some(mailbox),
+                raw_sha256: &sha,
+                message_id: Some(&format!("held-{n}@ofertas-salud.example")),
+                sender: Some("promo@ofertas-salud.example"),
+                subject: Some("held"),
+                attachments: serde_json::json!([]),
+                reason: "sender_not_allowed",
+            },
+        )
+        .await?;
+        sqlx::query("insert into source_item (source_id, external_id, blob_sha256, quarantine_id) values ($1, $2, decode($3, 'hex'), $4)")
+            .bind(mailbox)
+            .bind(format!("<held-{n}@ofertas-salud.example>"))
+            .bind(&sha)
+            .bind(id)
+            .execute(&mut *c)
+            .await?;
+        held.push((id, sha));
+    }
+    let ((kept, kept_sha), (deleted, _)) = (held[0].clone(), held[1].clone());
+    let a1 = ownhealth_ops::backup(&l.settings, &l.dir.path().join("b1").join("staging")).await?;
+    let key = store.key_of(BlobOwner::Pending(kept), &kept_sha)?;
+    assert!(key.starts_with("pending/"), "{key}");
+    assert!(
+        strs(&manifest(&a1)?["blobs"]["referenced"]).contains(&key),
+        "the held mail's file is not among the files the database needs"
+    );
+    // the second mail is deleted from the hold (its key shredded) and its folder swept
+    let user: Uuid = sqlx::query_scalar("select id from app_user limit 1")
+        .fetch_one(&l.db.pool)
+        .await?;
+    let mut tx = l.db.pool.begin().await?;
+    quarantine::mark_deleted(&mut tx, deleted, user).await?;
+    tx.commit().await?;
+    assert!(store.forget_pending(deleted)?);
+    let a2 = ownhealth_ops::backup(&l.settings, &l.dir.path().join("b2").join("staging")).await?;
+    let report = ownhealth_ops::verify_restore(&l.settings, &a2).await?;
+    assert_eq!(
+        report["ok"], true,
+        "a deleted mail's message counted as needed: {report:#}"
+    );
+    // the inbox is removed: its items go with it (on delete cascade) and the held mail stays with no
+    // inbox, so only the hold itself names the file
+    sqlx::query("delete from source where id = $1")
+        .bind(mailbox)
+        .execute(&l.db.pool)
+        .await?;
+    let items: i64 = sqlx::query_scalar("select count(*) from source_item where quarantine_id = $1")
+        .bind(kept)
+        .fetch_one(&l.db.pool)
+        .await?;
+    assert_eq!(items, 0);
+    // the held mail's file is lost from the store
+    assert!(store.forget_pending(kept)?);
+    let a3 = ownhealth_ops::backup(&l.settings, &l.dir.path().join("b3").join("staging")).await?;
+    let report = ownhealth_ops::verify_restore(&l.settings, &a3).await?;
+    assert_eq!(report["ok"], false, "{report:#}");
+    assert_eq!(
+        report["blobs"]["missing"].as_array().map(Vec::len),
+        Some(1),
+        "{report:#}"
+    );
     Ok(())
 }

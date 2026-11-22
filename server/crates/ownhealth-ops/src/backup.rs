@@ -9,10 +9,12 @@
 //! <dest>/blobs/..         the blob store, hard-linked when on the same disk (blobs never change)
 //! ```
 //!
-//! A profile's files are sealed under its key (slice 46, `ownhealth_core::keys`), and the backup
-//! keeps them sealed: the wrapped keys travel in the dump, and only OWNHEALTH_SECRETS_KEY opens them.
-//! So a backup taken before a profile delete still opens that profile's files until retention drops
-//! it; keeping `profile_key` out of the dump is later work (security-privacy.md 7.3).
+//! A profile's files are sealed under its key (slice 46, `ownhealth_core::keys`), and the files of an
+//! item with no profile yet under the item's key (`pending/<item>/<address>` in the manifest). The
+//! backup keeps them sealed: the wrapped keys travel in the dump, and only OWNHEALTH_SECRETS_KEY opens
+//! them. So a backup taken before a profile delete still opens that profile's files until retention
+//! drops it; keeping `profile_key` and `pending_key` out of the dump is later work
+//! (security-privacy.md 7.3).
 //! The manifest lists each sealed file under `<profile>/<address>` with the sha256 of its bytes on
 //! disk, so a check finds a changed or added file without the key, and records the key's
 //! fingerprint (never the key), so a restore under another key refuses before it loads anything.
@@ -227,25 +229,43 @@ async fn state_hashes(conn: &mut PgConnection, as_of: NaiveDate) -> Result<Vec<(
     Ok(out)
 }
 
-/// Every blob a document or genome dataset row points at, with the profile that owns it, so verify
-/// can tell a blob the live store had already lost from one the backup lost.
-async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(Option<Uuid>, String)>> {
+/// Every blob a document, genome dataset, held mail or inbox item row points at, with its owner (the
+/// profile, or a document with no profile yet or a held mail under its own item key), so verify can
+/// tell a blob the live store had already lost from one the backup lost. An inbox item's raw bytes
+/// belong to the profile it was filed to, else to its held mail ([`BlobOwner::of_item`]); a mail
+/// released or deleted from the hold no longer needs its held copy.
+async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(BlobOwner, String)>> {
     let cols: Vec<String> = sqlx::query_scalar(
         "select column_name::text from information_schema.columns where table_schema = 'public' \
          and table_name = 'genome_dataset' and data_type = 'bytea' and column_name like '%\\_blob'",
     )
     .fetch_all(&mut *conn)
     .await?;
-    let mut parts = vec!["select profile_id as p, blob_sha256 as h from document".to_string()];
+    let mut parts = vec![
+        "select profile_id as p, case when profile_id is null then id end as d, blob_sha256 as h from document"
+            .to_string(),
+    ];
     parts.extend(
         cols.iter()
-            .map(|c| format!("select profile_id, \"{c}\" from genome_dataset")),
+            .map(|c| format!("select profile_id, null::uuid, \"{c}\" from genome_dataset")),
+    );
+    parts.push("select null::uuid, id, raw_blob from quarantine_item where status = 'held'".into());
+    parts.push(
+        "select i.profile_id, i.quarantine_id, i.blob_sha256 from source_item i \
+         left join quarantine_item q on q.id = i.quarantine_id \
+         where i.profile_id is not null or i.quarantine_id is null or q.status = 'held'"
+            .into(),
     );
     let q = format!(
-        "select distinct p, encode(h, 'hex') from ({}) x where h is not null order by 2, 1",
+        "select distinct p, d, encode(h, 'hex') from ({}) x where h is not null order by 3, 1, 2",
         parts.join(" union ")
     );
-    Ok(sqlx::query_as(AssertSqlSafe(q)).fetch_all(&mut *conn).await?)
+    let rows: Vec<(Option<Uuid>, Option<Uuid>, String)> =
+        sqlx::query_as(AssertSqlSafe(q)).fetch_all(&mut *conn).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(p, d, h)| (BlobOwner::of_item(p, d), h))
+        .collect())
 }
 
 /// Recursively sorted keys: Python's `json.dumps(..., sort_keys=True)`.
@@ -588,7 +608,11 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     }
     let url = settings.sqlx_url();
     let anchor_path = anchor_file(settings);
-    let lock = anchor_lock(&url).await?;
+    let mut lock = anchor_lock(&url).await?;
+    // From before the snapshot until the copy of the files below: a file a row of the snapshot names
+    // stays (a held mail released, a profile deleted or a document moved meanwhile leaves its files
+    // for later), so the copy has every one of them.
+    blobs::hold_for_copy(&mut lock).await?;
     let anchored = read_anchor(&anchor_path)?;
     let mut conn = PgConnection::connect(&url).await?;
     let mut tx = conn.begin_with("begin isolation level repeatable read").await?;
@@ -629,6 +653,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     let dump = cmd.stdout(out).stderr(Stdio::piped()).spawn()?;
     let facts = async {
         let referenced = referenced_blobs(&mut tx).await?;
+        let wrapped = keys::stored_all(&mut tx).await?;
         let migrations: Vec<i32> = sqlx::query_scalar("select version from schema_migrations order by 1")
             .fetch_all(&mut *tx)
             .await?;
@@ -638,7 +663,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             .await?;
         let as_of = Utc::now().date_naive();
         let states = state_hashes(&mut tx, as_of).await?;
-        Ok::<_, Error>((referenced, migrations, tables, kept, as_of, states))
+        Ok::<_, Error>((referenced, wrapped, migrations, tables, kept, as_of, states))
     }
     .await;
     // The dump must finish before the exporting transaction ends, whatever the facts did.
@@ -646,7 +671,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // build_state may store snapshots; the backup leaves the database as it was.
     tx.rollback().await?;
     conn.close().await?;
-    let (referenced, migrations, tables, kept, as_of, states) = facts?;
+    let (referenced, wrapped, migrations, tables, kept, as_of, states) = facts?;
     if !done.status.success() {
         return Err(ops_error(format!(
             "pg_dump failed: {}",
@@ -655,10 +680,12 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     }
 
     // Blobs are written before the rows that reference them commit, so every blob the snapshot can
-    // see exists by now. Later blobs are harmless extras.
+    // see exists by now, and none of them went since (the copy lock above). Later blobs are harmless
+    // extras.
     let store = BlobStore::for_settings(settings)?;
     let tree = dest.join("blobs");
     store.copy_into(&tree)?;
+    blobs::end_copy(&mut lock).await?;
     let mut files = blobs::tree_files(&tree)?;
     // A file that is not where its name puts it is never read and no restore places it: it stays out
     // of the backup and its manifest, so it cannot stand in for the file its name stands for.
@@ -681,11 +708,34 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             plain.push(key);
         }
     }
-    // where each referenced blob sits: its owner's sealed copy, or the plain one
+    // Where each referenced blob sits in this backup: its owner's sealed copy, or the plain one. The
+    // keys come from the snapshot and the files from the copy, never from the live store, where a
+    // delete after the copy may already have shredded a key or removed a folder. A key that does not
+    // open names no sealed file here; verify-restore reports it.
+    let deks: HashMap<keys::Slot, keys::Dek> = match &settings.secrets_key {
+        Some(_) => {
+            let kek = Kek::from_settings(settings)?;
+            wrapped
+                .iter()
+                .filter_map(|(slot, w, fp)| Some((*slot, kek.unwrap_slot(*slot, fp, w).ok()?)))
+                .collect()
+        }
+        None => HashMap::new(),
+    };
     let mut referenced: Vec<String> = referenced
         .iter()
-        .map(|(pid, sha)| store.key_of(pid.map_or(BlobOwner::Reference, BlobOwner::Profile), sha))
-        .collect::<std::result::Result<_, _>>()?;
+        .map(|(owner, sha)| {
+            if let Some(slot) = owner.slot()
+                && let Some(dek) = deks.get(&slot)
+            {
+                let key = blobs::sealed_key(slot, dek, sha)?;
+                if files.contains_key(&key) {
+                    return Ok(key);
+                }
+            }
+            Ok(blobs::sha256_hex(sha)?)
+        })
+        .collect::<Result<_>>()?;
     referenced.sort();
     referenced.dedup();
     let key_facts = match &settings.secrets_key {
