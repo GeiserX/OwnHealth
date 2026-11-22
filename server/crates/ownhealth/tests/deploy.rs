@@ -15,6 +15,12 @@
 //!   network, and a database of its own. `wearables_profile_comes_up_as_the_restricted_role` brings
 //!   the profile up for real (CI, or OWNHEALTH_TEST_WEARABLES=1): OW's migrations run on Postgres 17
 //!   as a role that is no superuser and cannot connect to the health database.
+//! - The public site block of deploy/Caddyfile, run in the caddy image compose.homelab.yaml pins, in
+//!   front of a stub upstream: it passes only the SMART Health Link routes (the manifest POST and
+//!   its preflight, the file GET), always in their canonical form whatever raw path the client
+//!   wrote, and answers 404 to everything else, /login, /api, /mcp and /dicom-web included. It keeps
+//!   the X-Forwarded-For of the tunnel in front of it. Skipped without docker; the image is pulled
+//!   when missing.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -906,5 +912,224 @@ fn wearables_profile_comes_up_as_the_restricted_role() -> R {
     for (case, compose, env_file, extra) in cases() {
         bring_up(case, &compose, &env_file, extra)?;
     }
+    Ok(())
+}
+
+// -------------------------------------------------------------- share block ----
+
+/// The caddy image compose.homelab.yaml runs.
+fn caddy_image() -> anyhow::Result<String> {
+    let compose = std::fs::read_to_string(root().join("deploy/compose.homelab.yaml"))?;
+    compose
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("image: caddy:").map(|tag| format!("caddy:{tag}")))
+        .ok_or_else(|| anyhow::anyhow!("no caddy image in compose.homelab.yaml"))
+}
+
+/// A container that is removed when dropped, whatever happened.
+struct Container(String);
+
+impl Drop for Container {
+    fn drop(&mut self) {
+        let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
+    }
+}
+
+/// deploy/Caddyfile in `image`, with a stub on app:8080 that names each request it receives and the
+/// X-Forwarded-For it came with. Returns the container and the host address of the share port.
+fn caddy(image: &str) -> anyhow::Result<(Container, String)> {
+    let name = format!("oh-share-block-{}", uuid::Uuid::new_v4().simple());
+    let caddyfile = std::fs::read_to_string(root().join("deploy/Caddyfile"))?
+        + "\nhttp://:8080 {\n\trespond \"upstream {method} {uri} xff={header.X-Forwarded-For}\" 200\n}\n";
+    let mut create = Command::new("docker");
+    create.args(["create", "--name", &name, "--add-host", "app:127.0.0.1"]);
+    create.args([
+        "-p",
+        "127.0.0.1::8090",
+        "-e",
+        "OWNHEALTH_DOMAIN=http://private.test:8081",
+    ]);
+    let out = create.arg(image).output()?;
+    anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let c = Container(name.clone());
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("Caddyfile");
+    std::fs::write(&file, caddyfile)?;
+    let target = format!("{name}:/etc/caddy/Caddyfile");
+    anyhow::ensure!(
+        ok(Command::new("docker").args(["cp"]).arg(&file).arg(&target)),
+        "docker cp"
+    );
+    anyhow::ensure!(ok(Command::new("docker").args(["start", &name])), "docker start");
+    let port = Command::new("docker").args(["port", &name, "8090/tcp"]).output()?;
+    let addr = String::from_utf8(port.stdout)?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    anyhow::ensure!(!addr.is_empty(), "no published port");
+    for _ in 0..100 {
+        if fetch(&addr, "GET", "/")?.0 != 0 {
+            return Ok((c, addr));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let logs = Command::new("docker").args(["logs", &name]).output()?;
+    anyhow::bail!("caddy did not answer: {}", String::from_utf8_lossy(&logs.stderr))
+}
+
+/// (status, body) of one request through curl; status 0 when nothing answered.
+fn fetch(addr: &str, method: &str, path: &str) -> anyhow::Result<(u16, String)> {
+    fetch_with(addr, method, path, &[])
+}
+
+fn fetch_with(addr: &str, method: &str, path: &str, headers: &[&str]) -> anyhow::Result<(u16, String)> {
+    // --path-as-is: curl would otherwise resolve a `..` itself before sending; --noproxy: an
+    // http_proxy in the environment must not answer for the container on loopback
+    let mut curl = Command::new("curl");
+    curl.args([
+        "-s",
+        "--path-as-is",
+        "--noproxy",
+        "*",
+        "-m",
+        "5",
+        "-o",
+        "-",
+        "-w",
+        "\n%{http_code}",
+    ]);
+    for h in headers {
+        curl.args(["-H", h]);
+    }
+    if method == "HEAD" {
+        curl.arg("-I");
+    } else {
+        curl.args(["-X", method]);
+    }
+    let out = curl.arg(format!("http://{addr}{path}")).output()?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (body, code) = text.rsplit_once('\n').unwrap_or(("", "0"));
+    Ok((code.trim().parse().unwrap_or(0), body.to_string()))
+}
+
+/// The share host exposes the three link routes and nothing else (security-privacy.md section 11).
+/// Caddy matches the cleaned path, so every raw path that cleans to a link route (`..`, `//`, `./`,
+/// `%2F`, an encoded letter) must reach the app as the canonical route and nothing else, never as
+/// the raw path the app would route elsewhere (the UI's login page, the calendar feed).
+#[test]
+fn the_public_share_block_passes_only_the_link_routes() -> R {
+    if !ok(Command::new("docker").args(["info"])) {
+        eprintln!("docker not available: skipped");
+        return Ok(());
+    }
+    let image = caddy_image()?;
+    let have = ok(Command::new("docker").args(["image", "inspect", &image]));
+    anyhow::ensure!(
+        have || ok(Command::new("docker").args(["pull", &image])),
+        "docker pull {image}"
+    );
+    let id = "I91rhba3VsuGXGchcnr6VHlQFKxfE28kuZ0ssbEuxno";
+    let t = "Y9xwkUdtmN9wwoJoN3ffJIhX2UGvCL1JnlPVNL3kDWM";
+    let m = format!("/api/shl/{id}");
+    let f = format!("/api/shl/{id}/file/{t}");
+    // (method, raw path, the request line the app must get)
+    let mut through: Vec<(&str, String, String)> = vec![
+        ("POST", m.clone(), format!("POST {m}")),
+        ("OPTIONS", m.clone(), format!("OPTIONS {m}")),
+        ("GET", f.clone(), format!("GET {f}")),
+        ("GET", format!("{f}?x=1"), format!("GET {f}")),
+        ("POST", format!("{m}?x=1"), format!("POST {m}")),
+        ("POST", format!("//api/shl/{id}"), format!("POST {m}")),
+        ("POST", format!("/api//shl/{id}"), format!("POST {m}")),
+        ("POST", format!("/./api/shl/{id}"), format!("POST {m}")),
+        ("POST", format!("/api/shl/./{id}"), format!("POST {m}")),
+        ("POST", format!("/x/../api/shl/{id}"), format!("POST {m}")),
+        ("POST", format!("/api%2Fshl%2F{id}"), format!("POST {m}")),
+        ("POST", format!("/api/%73hl/{id}"), format!("POST {m}")),
+        ("GET", format!("/login/../api/shl/{id}/file/{t}"), format!("GET {f}")),
+        ("GET", format!("/./api/shl/{id}/file/{t}"), format!("GET {f}")),
+        ("GET", format!("/api/shl/{id}%2Ffile%2F{t}"), format!("GET {f}")),
+        (
+            "GET",
+            format!("/api/ics/x%2F..%2F..%2Fshl%2F{id}%2Ffile%2F{t}"),
+            format!("GET {f}"),
+        ),
+        (
+            "POST",
+            format!("/api/shl/%41{}", &id[1..]),
+            format!("POST /api/shl/A{}", &id[1..]),
+        ),
+    ];
+    through.sort();
+    let mut refused: Vec<(&str, String)> = Vec::new();
+    for p in [
+        "/".to_string(),
+        "/login".into(),
+        "/index.html".into(),
+        "/_app/version.json".into(),
+        "/mcp".into(),
+        "/healthz".into(),
+        "/metrics".into(),
+        "/api".into(),
+        "/api/".into(),
+        "/api/me".into(),
+        "/api/auth/state".into(),
+        "/api/auth/login/begin".into(),
+        "/api/profiles".into(),
+        "/api/profiles/me/shl".into(),
+        "/api/ics/oh_ics_abcdefgh_x.ics".into(),
+        "/dicom-web".into(),
+        "/dicom-web/studies".into(),
+        "/ow/api/v1/oauth/oura/callback?code=synthetic".into(),
+        "/api/shl".into(),
+        "/api/shl/".into(),
+        "/api/shl/short".into(),
+        format!("{m}/"),
+        format!("{m}/extra"),
+        format!("{m}/file"),
+        format!("{m}/file/"),
+        format!("{m}/file/short"),
+        format!("{f}/"),
+        format!("{f}/x"),
+        format!("/API/shl/{id}"),
+        format!("{m};x"),
+        format!("{m}/../../me"),
+        format!("{f}/../../../../me"),
+        format!("/api/shl/{}%2F..%2Fme", &id[..40]),
+        format!("/api/shl/{}%2F", &id[..41]),
+        "/api/shl/%2e%2e%2fprofiles%2fme%2fshl".into(),
+        "/api/shl/..%2F..%2Fapi%2Fme".into(),
+    ] {
+        refused.push(("GET", p.clone()));
+        refused.push(("POST", p));
+    }
+    for method in ["GET", "PUT", "PATCH", "DELETE", "HEAD"] {
+        refused.push((method, m.clone()));
+    }
+    for method in ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+        refused.push((method, f.clone()));
+    }
+    let (_c, addr) = caddy(&image)?;
+    for (method, path, line) in &through {
+        let (code, body) = fetch(&addr, method, path)?;
+        let got = body.split(" xff=").next().unwrap_or_default();
+        assert_eq!(
+            (code, got),
+            (200, format!("upstream {line}").as_str()),
+            "{method} {path}"
+        );
+    }
+    for (method, path) in &refused {
+        let (code, body) = fetch(&addr, method, path)?;
+        assert_eq!(code, 404, "{method} {path}: {body}");
+        assert!(!body.contains("upstream"), "{method} {path}: {body}");
+    }
+    // the tunnel's X-Forwarded-For goes on, with the hop Caddy saw after it; the app trusts that
+    // chain only from the proxies in OWNHEALTH_TRUSTED_PROXIES
+    let (_, body) = fetch_with(&addr, "POST", &m, &["X-Forwarded-For: 203.0.113.9"])?;
+    let xff = body.split(" xff=").nth(1).unwrap_or_default();
+    assert!(xff.starts_with("203.0.113.9, "), "{body}");
     Ok(())
 }
