@@ -18,6 +18,8 @@ select format('create role %I login', :'app_role')
 select format('alter role %I login nosuperuser nocreatedb nocreaterole noreplication nobypassrls password %L',
               :'app_role', :'app_password') \gexec
 select format('grant connect, temporary on database %I to %I', current_database(), :'app_role') \gexec
+-- Only the owner and the app role may connect: no other role on the server (Open Wearables' own one)
+select format('revoke connect on database %I from public', current_database()) \gexec
 select format('grant usage on schema public to %I', :'app_role') \gexec
 select format('grant select, insert, update, delete on all tables in schema public to %I', :'app_role') \gexec
 select format('grant usage, select on all sequences in schema public to %I', :'app_role') \gexec

@@ -6,6 +6,7 @@ use ownhealth_core::Runtime;
 pub mod audit;
 pub mod auth;
 pub mod calculators;
+pub mod connectors;
 pub mod core;
 pub mod devices;
 pub mod documents;
@@ -17,6 +18,7 @@ pub mod family_history;
 pub mod gaps;
 pub mod genome;
 pub mod ics;
+pub mod imaging_proxy;
 pub mod imports;
 pub mod inbox;
 pub mod inboxes;
@@ -41,6 +43,7 @@ pub fn all() -> Router<Runtime> {
         .merge(audit::router())
         .merge(auth::router())
         .merge(calculators::router())
+        .merge(connectors::router())
         .merge(core::router())
         .merge(devices::router())
         .merge(documents::router())
@@ -54,6 +57,7 @@ pub fn all() -> Router<Runtime> {
         .merge(genome::couple::router())
         .merge(genome::events::router())
         .merge(ics::router())
+        .merge(imaging_proxy::router())
         .merge(imports::router())
         .merge(inbox::router())
         .merge(inboxes::router())
