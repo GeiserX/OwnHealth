@@ -831,8 +831,8 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
         .await?
         .rows_affected();
     // a held mail's raw message is sealed under the mail's own key: the key goes with the row, and the
-    // caller removes the folder after the commit (`Deleted::mail`); the retry job's sweep removes any
-    // folder that stays (`BlobStore::sweep_unkeyed`)
+    // caller removes the folder after the commit (`Deleted::mail`); the retry job removes any of those
+    // folders that stays (its payload lists them)
     keys::shred_pending(&mut *conn, &mail).await.map_err(Error::from)?;
     // A Paperless tag rule that files to the profile goes; the household inbox keeps its other rules. The
     // settings route takes any id form `Uuid::parse_str` reads (hyphens or not, braces, a URN), so the
@@ -975,7 +975,7 @@ pub async fn delete_profile(conn: &mut PgConnection, profile_id: Uuid) -> AuthRe
         &mut *conn,
         UNLINK_JOB,
         // the household, so a retry that runs out of attempts shows in its review queue
-        &json!({"household_id": household_id, "profile_id": profile_id, "blobs": orphans}),
+        &json!({"household_id": household_id, "profile_id": profile_id, "blobs": orphans, "mail": mail}),
         EnqueueOptions {
             run_after: Some(chrono::Utc::now() + chrono::Duration::seconds(60)),
             ..EnqueueOptions::default()
@@ -1009,6 +1009,18 @@ async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {
         .and_then(Value::as_str)
         .and_then(|p| Uuid::parse_str(p).ok());
     let owner = profile.map_or(BlobOwner::Reference, BlobOwner::Profile);
+    // the held mail that went with the profile: their keys went in the delete
+    let mail: Vec<Uuid> = job
+        .payload
+        .get("mail")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .filter_map(|m| Uuid::parse_str(m).ok())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut conn = ctx.pool.acquire().await?;
     let (mut removed, mut failed) = (0i32, 0usize);
     // a backup that copies the files now may still name every file of the profile: wait for its copy
@@ -1020,11 +1032,16 @@ async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {
         tracing::warn!(error = %e, "removing a deleted profile's sealed files failed again");
         failed += 1;
     }
-    // the folders of the held mail that went with the profile, and any file a process that still held
-    // the profile's key landed after the folder went
+    for item in &mail {
+        if let Err(e) = ctx.blobs.forget_pending(*item) {
+            tracing::warn!(error = %e, "removing a deleted held mail's sealed files failed again");
+            failed += 1;
+        }
+    }
+    // any file a process that still held a key landed after its folder went; a folder that is not
+    // this delete's and cannot go is left to the periodic sweep, so it does not fail this job
     if let Err(e) = ctx.blobs.sweep_unkeyed(&mut tx).await {
-        tracing::warn!(error = %e, "removing sealed folders whose key is gone failed");
-        failed += 1;
+        tracing::warn!(error = %e, "removing sealed folders whose key is gone failed; the sweep tries again");
     }
     for sha in &shas {
         let Ok(bytes) = sha256_hex_to_bytes(sha) else {

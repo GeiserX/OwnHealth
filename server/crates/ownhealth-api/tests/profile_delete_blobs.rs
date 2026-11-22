@@ -878,14 +878,15 @@ async fn a_file_the_delete_could_not_remove_goes_on_the_retry() -> R {
     .await?;
     assert_eq!(said, vec![Some("blobs=1 pending=1".into())]);
     // the job names only the file still on disk, and carries the household, the profile (whose
-    // sealed folder the retry removes too) and file hashes only
+    // sealed folder the retry removes too), the held mail whose folders it removes (none here) and
+    // file hashes only
     let queued: Value = sqlx::query_scalar("select payload from job where kind = $1")
         .bind(UNLINK_JOB)
         .fetch_one(env.pool())
         .await?;
     assert_eq!(
         queued,
-        json!({"household_id": env.fam().household_id, "profile_id": env.profile("alex"), "blobs": [stuck.clone()]})
+        json!({"household_id": env.fam().household_id, "profile_id": env.profile("alex"), "blobs": [stuck.clone()], "mail": []})
     );
     assert_eq!(unlink_state(&env).await?, ("queued".into(), 0, true));
 
@@ -986,7 +987,7 @@ async fn the_retry_is_queued_in_the_delete_transaction() -> R {
         .await?;
     assert_eq!(
         payload,
-        json!({"household_id": env.fam().household_id, "profile_id": alex, "blobs": [report]})
+        json!({"household_id": env.fam().household_id, "profile_id": alex, "blobs": [report], "mail": []})
     );
     assert!(waits);
     // a crash before the commit loses both the delete and the job
@@ -2200,11 +2201,34 @@ async fn the_retry_is_queued_when_every_file_is_shared() -> R {
     Ok(())
 }
 
+/// Whether a read-only folder stops a removal here. As root (or with CAP_DAC_OVERRIDE) it does not,
+/// so a test that needs a removal to fail says so and stops.
+fn read_only_stops_removal() -> anyhow::Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    let probe = tempfile::tempdir()?;
+    let ro = probe.path().join("read-only");
+    std::fs::create_dir(&ro)?;
+    std::fs::write(ro.join("entry"), b"probe")?;
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555))?;
+    let removed = std::fs::remove_file(ro.join("entry")).is_ok();
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755))?;
+    if removed {
+        eprintln!(
+            "skipped: this runner removes entries from a read-only folder (root or CAP_DAC_OVERRIDE), \
+             so no removal can be made to fail"
+        );
+    }
+    Ok(!removed)
+}
+
 /// The sealed folder cannot go at once (its parent is read-only): the retry stays queued until it
 /// removes the folder, although every file went.
 #[tokio::test]
 async fn a_sealed_folder_the_delete_could_not_remove_goes_on_the_retry() -> R {
     use std::os::unix::fs::PermissionsExt;
+    if !read_only_stops_removal()? {
+        return Ok(());
+    }
     let env = Env::new(true).await?;
     ownhealth_auth::register();
     let alex = env.profile("alex");
@@ -2350,5 +2374,76 @@ async fn a_delete_while_a_backup_copies_leaves_the_files_to_the_retry() -> R {
     assert!(!pending.exists(), "the held mail's sealed folder stayed");
     assert!(!stored(&blobs).contains(&plain), "the plain file stayed");
     assert_eq!(unlink_state(&env).await?.0, "done");
+    Ok(())
+}
+
+/// The retry counts only the folders of its own delete. A folder of the delete's held mail that cannot
+/// go yet keeps it queued. A sealed folder of something else whose key is gone (here a settled mail of
+/// another person) that cannot go is left to the sweep, so it neither keeps the retry failing nor ends
+/// it as a failed job in this household's review queue.
+#[tokio::test]
+async fn the_retry_counts_only_the_folders_of_its_own_delete() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    if !read_only_stops_removal()? {
+        return Ok(());
+    }
+    ownhealth_auth::register();
+    let env = Env::new(true).await?;
+    let alex = env.profile("alex");
+    let q = sealed_held_mail(&env, alex, "From: nueva@clinica.example\r\n\r\nheld for Alex").await?;
+    let other = Uuid::new_v4();
+    env.rt.blobs.put_bytes(
+        BlobOwner::Pending(other),
+        b"From: LabNorte, released mail of someone else",
+    )?;
+    let mut c = env.pool().acquire().await?;
+    ownhealth_core::keys::shred_pending(&mut c, &[other]).await?;
+    drop(c);
+    let pending = env.rt.settings.blobs_path().join("pending");
+    let (own, stuck) = (
+        pending.join(q.simple().to_string()),
+        pending.join(other.simple().to_string()),
+    );
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m));
+    mode(&own, 0o555)?;
+    mode(&stuck, 0o555)?;
+    // a backup holds the copy lock through the delete, so the retry job stays whole
+    let mut backup = env.pool().acquire().await?;
+    sqlx::query("select pg_catalog.pg_advisory_lock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(&mut *backup)
+        .await?;
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    sqlx::query("select pg_catalog.pg_advisory_unlock(pg_catalog.hashtext('ownhealth.blob_copy'))")
+        .execute(&mut *backup)
+        .await?;
+    drop(backup);
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    // the delete's own folder cannot go yet: the retry stays queued
+    run_unlink(&env).await?;
+    let first = unlink_state(&env).await;
+    mode(&own, 0o755)?;
+    let (state, attempts, _) = first?;
+    assert_eq!(
+        (state.as_str(), attempts),
+        ("queued", 1),
+        "a folder of the delete that stayed is not retried"
+    );
+    assert!(own.is_dir());
+    // its own folder can go now; the other one still cannot, and the retry ends done
+    run_unlink(&env).await?;
+    let second = unlink_state(&env).await;
+    let other_left = stuck.is_dir();
+    mode(&stuck, 0o755)?;
+    assert!(!own.exists(), "the retry left the held mail's folder");
+    assert!(other_left, "the other folder went, so the test shows nothing");
+    assert_eq!(
+        second?.0, "done",
+        "a folder that is not the delete's keeps the retry failing"
+    );
+    let failed: i64 = env
+        .scalar_i64("select count(*) from review_item where kind = 'job_failed'")
+        .await?;
+    assert_eq!(failed, 0);
     Ok(())
 }
