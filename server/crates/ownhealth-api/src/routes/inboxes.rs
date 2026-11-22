@@ -10,13 +10,20 @@
 //! | `GET /inboxes/{id}/runs?limit=` | recent runs and their errors |
 //! | `POST /inboxes/{id}/token` | a new push token, shown once (step-up) |
 //! | `POST /inboxes/{id}/sync` | poll now |
-//! | `GET /inboxes/health` | `[{id, kind, label, profile_id, enabled, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, stale, last_run_status, last_run_problems, last_run_problem}]` |
+//! | `GET /inboxes/health` | `[{id, kind, label, profile_id, enabled, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, stale, last_run_status, last_run_problems, last_run_problem, can_manage}]`, plus `created_at, poll_seconds, reconsent_needed_at, grant_expires_at, access_expires_at, open_gaps, server` when `can_manage` |
 //! | `GET /inboxes/{id}/health` | one source's row; a session, or that source's own `oh_ing_` token |
 //!
 //! Both health routes take `?format=prometheus` and answer in the Prometheus text format, so a
 //! Prometheus job (or any monitor that can send a bearer token) alerts on a source that stopped
 //! syncing. A person sees the sources of the profiles they can open, plus the household-wide ones when
 //! they own or guard a profile. A source token sees its own source and nothing else.
+//!
+//! The Connections screen (v1.0) reads the same rows. `can_manage` is true when the person manages the
+//! source's profile (for a household-wide source: any profile of the household), so the screen lists
+//! and reconnects only those. Only then does the row also carry `created_at` and `poll_seconds`,
+//! `reconsent_needed_at`, `grant_expires_at`, `access_expires_at`, `server`, and the open sync-gap
+//! alerts filed on the source's profile (`open_gaps`): a viewer is sent no more than before v1.0. A
+//! source token gets none of them and no `can_manage`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -32,9 +39,9 @@ use ownhealth_auth::sessions;
 use ownhealth_core::access::{Principal, accessible_profiles};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::secrets::{self, SecretBox, SecretString};
-use ownhealth_core::sources::{self, NewSource, Source, SourceHealth, SourcePatch, TOKEN_PREFIX};
+use ownhealth_core::sources::{self, ManagedHealth, NewSource, Source, SourceHealth, SourcePatch, TOKEN_PREFIX};
 use ownhealth_core::{Error, Runtime};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -271,7 +278,7 @@ async fn list(State(rt): State<Runtime>, caller: Caller) -> R {
     let Some(household) = caller.0.household_id else {
         return Err(ApiError::unauthenticated().into());
     };
-    let health: HashMap<Uuid, &SourceHealth> = health.iter().map(|h| (h.id, h)).collect();
+    let health: HashMap<Uuid, &SourceHealth> = health.iter().map(|(h, _)| (h.id, h)).collect();
     let held: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
         "select q.source_id, count(*) from quarantine_item q join source s on s.id = q.source_id          where s.household_id = $1 and q.status = 'held' group by q.source_id",
     )
@@ -591,19 +598,55 @@ impl FromRequestParts<Runtime> for HealthCaller {
     }
 }
 
+/// A health row as it goes out: for a person, whether they manage the source's profile, and only
+/// when they do, the connection's dates, server and open alerts.
+#[derive(Serialize)]
+struct HealthOut<'a> {
+    #[serde(flatten)]
+    row: &'a SourceHealth,
+    #[serde(flatten)]
+    managed: Option<&'a ManagedHealth>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    can_manage: Option<bool>,
+}
+
+/// Rows with their `can_manage` (none for a source token), as JSON rows and as plain rows.
+fn out(rows: &[(SourceHealth, Option<bool>)]) -> (Vec<HealthOut<'_>>, Vec<SourceHealth>) {
+    let json = rows
+        .iter()
+        .map(|(row, can_manage)| HealthOut {
+            row,
+            managed: (*can_manage == Some(true)).then_some(&row.managed),
+            can_manage: *can_manage,
+        })
+        .collect();
+    (json, rows.iter().map(|(h, _)| h.clone()).collect())
+}
+
 /// The household's sources this person may see: those of profiles they can open, and the
-/// household-wide ones (no profile) when they own or guard at least one profile.
-async fn visible(conn: &mut PgConnection, caller: &Caller) -> Result<Vec<SourceHealth>, ApiError> {
+/// household-wide ones (no profile) when they own or guard at least one profile. Each with whether
+/// the person manages it: its profile, or (household-wide) any profile of the household, as
+/// `routes::connectors` decides who reconnects.
+async fn visible(conn: &mut PgConnection, caller: &Caller) -> Result<Vec<(SourceHealth, Option<bool>)>, ApiError> {
     let Some(household_id) = caller.0.household_id else {
         return Err(ApiError::unauthenticated());
     };
     let perms = accessible_profiles(conn, &caller.0).await?;
     let manager = perms.iter().any(|p| matches!(p.role.as_str(), "owner" | "guardian"));
     let profiles: HashSet<Uuid> = perms.iter().map(|p| p.profile.id).collect();
+    let managed: HashSet<Uuid> = perms
+        .iter()
+        .filter(|p| p.profile.household_id == household_id && can_manage(p))
+        .map(|p| p.profile.id)
+        .collect();
     Ok(sources::source_health(conn, household_id)
         .await?
         .into_iter()
         .filter(|h| h.profile_id.map_or(manager, |p| profiles.contains(&p)))
+        .map(|h| {
+            let m = h.profile_id.map_or(!managed.is_empty(), |p| managed.contains(&p));
+            (h, Some(m))
+        })
         .collect())
 }
 
@@ -616,11 +659,15 @@ async fn health_all(State(rt): State<Runtime>, who: HealthCaller, Query(q): Quer
                 .await?
                 .into_iter()
                 .filter(|h| h.id == s.id)
+                .map(|h| (h, None))
                 .collect()),
         }
     };
     match rows.await {
-        Ok(rows) => answer(&rows, &rows, &q),
+        Ok(rows) => {
+            let (json, plain) = out(&rows);
+            answer(&json, &plain, &q)
+        }
         Err(e) => e.into_response(),
     }
 }
@@ -637,13 +684,22 @@ async fn health_one(
         let rows = match who {
             HealthCaller::Person(c) => visible(&mut conn, &c).await?,
             // a token answers for its own source only; another id is not found, not forbidden
-            HealthCaller::Source(s) if s.id == id => sources::source_health(&mut conn, s.household_id).await?,
+            HealthCaller::Source(s) if s.id == id => sources::source_health(&mut conn, s.household_id)
+                .await?
+                .into_iter()
+                .map(|h| (h, None))
+                .collect(),
             HealthCaller::Source(_) => Vec::new(),
         };
-        rows.into_iter().find(|h| h.id == id).ok_or_else(ApiError::not_found)
+        rows.into_iter()
+            .find(|(h, _)| h.id == id)
+            .ok_or_else(ApiError::not_found)
     };
     match row.await {
-        Ok(row) => answer(&row, std::slice::from_ref(&row), &q),
+        Ok(row) => {
+            let (json, plain) = out(std::slice::from_ref(&row));
+            answer(&json[0], &plain, &q)
+        }
         Err(e) => e.into_response(),
     }
 }
@@ -743,6 +799,15 @@ mod tests {
             last_run_status: Some("partial".into()),
             last_run_problems: 1,
             last_run_problem: Some("move_failed: could not move scan.pdf".into()),
+            managed: ManagedHealth {
+                created_at: Utc.timestamp_opt(1_762_600_000, 0).single().unwrap_or_default(),
+                poll_seconds: Some(60),
+                reconsent_needed_at: None,
+                grant_expires_at: None,
+                access_expires_at: None,
+                open_gaps: 0,
+                server: Some("https://fhir.labnorte.example/r4".into()),
+            },
         }
     }
 
@@ -761,7 +826,7 @@ mod tests {
             "ownhealth_source_last_run_timestamp_seconds{labels} 1762700000\n"
         )));
         assert!(text.contains("# TYPE ownhealth_source_enabled gauge\n"));
-        for private in ["Correo", "alex", "ffffffff", "scan.pdf"] {
+        for private in ["Correo", "alex", "ffffffff", "scan.pdf", "labnorte"] {
             assert!(!text.contains(private), "{private} leaked: {text}");
         }
         // every sample line is `name{labels} value`
