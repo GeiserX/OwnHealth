@@ -88,7 +88,7 @@ Scans that arrived while OCR was off are not lost: each time the `ocr` worker st
 
 The `wearables` profile runs the Open Wearables sidecar (OW 0.11.0, pinned by digest), which holds the Oura, Whoop, Polar and Withings logins. It publishes no port and sends no usage data. Its own database lives on the same Postgres, and its role cannot open the health database.
 
-**Turn it on.** First put OW's three secrets in `openwearables.env`, next to `.env`. Never put them in `.env`: every OwnHealth container reads that file.
+**Turn it on.** On an install made before 1.0, get the new files first: `git -C src pull && cp -r src/deploy/db deploy/`, then copy the new `src/deploy/compose.homelab.yaml` over `compose.yaml` and carry over any edits of your own. Then put OW's three secrets in `openwearables.env`, next to `.env`. Never put them in `.env`: every OwnHealth container reads that file.
 
 ```sh
 for k in DB_PASSWORD SECRET_KEY ADMIN_PASSWORD; do echo "OPENWEARABLES_$k=$(openssl rand -hex 32)"; done > openwearables.env
