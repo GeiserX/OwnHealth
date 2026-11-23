@@ -195,6 +195,21 @@ async fn check(
     Ok(item)
 }
 
+/// The document a decision reads rows from, when the caller may change it: `action` on its profile and
+/// the document's scope on the caller's own grant, since emergency access only reads. A single accept
+/// and a bulk accept both check it, so neither takes a row from a document the other refuses.
+async fn changeable_document(
+    conn: &mut PgConnection,
+    principal: &Principal,
+    document_id: Uuid,
+    action: &str,
+    refused: &str,
+) -> R<super::documents::Doc> {
+    let doc = super::documents::visible_document(conn, principal, document_id, None, false).await?;
+    doc.may_change(action, refused)?;
+    Ok(doc)
+}
+
 async fn audit(conn: &mut PgConnection, principal: &Principal, item: &ReviewItem, action: &str) -> R<()> {
     let mut e = AuditEvent::new(principal.actor_kind(), "ui", action);
     e.actor_id = principal.user_id;
@@ -323,10 +338,15 @@ async fn accept(
         }
     }
     let item = check(&mut tx, principal, found, true).await?;
+    if item.kind != "document_identity"
+        && let Some(d) = item.document_id
+    {
+        // rows read from a document: the same check as a bulk accept of that document
+        changeable_document(&mut tx, principal, d, "review", "review on this profile").await?;
+    }
     if item.kind == "document_identity" {
         if let Some(d) = source_document {
-            let doc = super::documents::visible_document(&mut tx, principal, d, None, false).await?;
-            doc.may_change("import", "import on this profile")?;
+            changeable_document(&mut tx, principal, d, "import", "import on this profile").await?;
         }
         // accepting moves the document: the target needs the same check as POST /documents/{id}/assign
         let from_edits = edits
@@ -492,8 +512,7 @@ async fn bulk_accept(State(rt): State<Runtime>, caller: Caller, headers: HeaderM
     if !perm.can("review") {
         return Err(cannot_review(&perm));
     }
-    let doc = super::documents::visible_document(&mut tx, principal, document_id, None, false).await?;
-    doc.may_change("review", "review on this profile")?;
+    let doc = changeable_document(&mut tx, principal, document_id, "review", "review on this profile").await?;
     let own = doc.perm.own_only();
     let items = review::bulk_candidates(&mut tx, document_id, min_row_conf).await?;
     let mut accepted = Vec::new();

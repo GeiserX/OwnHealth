@@ -1240,6 +1240,11 @@ async fn candidate(b: &Bg, document_id: Option<Uuid>) -> anyhow::Result<Uuid> {
 }
 
 async fn lab_document(b: &Bg) -> anyhow::Result<Uuid> {
+    document(b, "lab_report").await
+}
+
+/// A one-page PDF of this type on Alex's profile.
+async fn document(b: &Bg, doc_type: &'static str) -> anyhow::Result<Uuid> {
     let bytes = include_bytes!("../../ownhealth-core/tests/fixtures/demo-report.pdf");
     let profile = b.alex_id();
     let sha = b.env.rt.blobs.put_bytes(BlobOwner::Profile(profile), bytes)?;
@@ -1247,7 +1252,7 @@ async fn lab_document(b: &Bg) -> anyhow::Result<Uuid> {
     let doc = create_document(
         &mut conn,
         &NewDocument {
-            doc_type: Some("lab_report"),
+            doc_type: Some(doc_type),
             pages: Some(1),
             ..NewDocument::upload(
                 b.env.fam().household_id,
@@ -2066,5 +2071,30 @@ async fn bulk_review_skips_items_outside_the_ordinary_category_scope() -> R {
     let r = sam.post(path, &body).await?;
     assert_eq!(r.status, 200, "{:?}", r.json);
     assert_eq!(r.json["accepted"], json!([records_row]));
+    Ok(())
+}
+
+/// A single accept checks the source document as bulk accept does: a lab row read from a document of
+/// another type needs that document's scope on the reviewer's own grant.
+#[tokio::test]
+async fn single_review_needs_the_ordinary_scope_of_the_source_document() -> R {
+    let mut b = setup().await?;
+    b.grant_sam("guardian", &["read:labs"]).await?;
+    let doc = document(&b, "discharge").await?;
+    let item = candidate(&b, Some(doc)).await?;
+    let mut sam = b.sam().await?;
+    let endpoint = format!("/api/review/{item}/accept");
+    let r = sam.post(&endpoint, &json!({})).await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "insufficient_scope"), "{:?}", r.json);
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
+    let r = sam.post(&endpoint, &json!({})).await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
+    let status = "select status from review_item where id = $1";
+    assert_eq!(b.text(status, item).await?, "open");
+
+    b.grant_sam("guardian", &["read:labs", "read:records"]).await?;
+    let r = sam.post(&endpoint, &json!({})).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(b.text(status, item).await?, "accepted");
     Ok(())
 }
