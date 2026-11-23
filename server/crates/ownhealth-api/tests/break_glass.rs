@@ -1292,6 +1292,48 @@ async fn a_guardian_contact_cannot_decide_a_review_item_break_glass_opened() -> 
     Ok(())
 }
 
+/// A held imaging study (slice 41) shows only with `read:records`. An open request may give that
+/// read, and the list, its count and `/api/me` then show the study; deciding it still needs
+/// `read:records` on the contact's own grant.
+#[tokio::test]
+async fn a_held_study_shows_through_break_glass_but_only_the_own_grant_decides_it() -> R {
+    let mut b = setup().await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let item = held_study(&b).await?;
+    let mut sam = b.sam().await?;
+    let shown = |r: &Resp| (r.json["open"].clone(), r.json["items"].as_array().map_or(0, Vec::len));
+    let r = sam.get(&format!("/api/review/{item}")).await?;
+    assert_eq!(r.status, 404, "{:?}", r.json);
+    let list = sam.get("/api/review").await?;
+    assert_eq!(list.status, 200, "{:?}", list.json);
+    assert_eq!(shown(&list), (json!(0), 0), "{:?}", list.json);
+    assert_eq!(sam.get("/api/me").await?.json["review_open"], 0);
+
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
+    let r = sam.get(&format!("/api/review/{item}")).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    let list = sam.get("/api/review").await?;
+    assert_eq!(shown(&list), (json!(1), 1), "{:?}", list.json);
+    assert_eq!(list.json["items"][0]["id"], json!(item.to_string()));
+    assert_eq!(sam.get("/api/me").await?.json["review_open"], 1);
+    for action in ["accept", "reject", "dismiss"] {
+        let r = sam
+            .post(&format!("/api/review/{item}/{action}"), &json!({"reason": "x"}))
+            .await?;
+        assert_eq!(
+            (r.status.as_u16(), r.code()),
+            (403, "break_glass"),
+            "{action}: {:?}",
+            r.json
+        );
+    }
+    assert_eq!(
+        b.text("select status from review_item where id = $1", item).await?,
+        "open"
+    );
+    Ok(())
+}
+
 type CalendarEvent = (String, String);
 
 fn calendar_events(resp: Resp) -> anyhow::Result<Vec<CalendarEvent>> {
@@ -1367,6 +1409,27 @@ async fn candidate(b: &Bg, document_id: Option<Uuid>) -> anyhow::Result<Uuid> {
             payload: json!({
                 "observation": lab(profile, "97", false)?,
                 "src": {"kind": "manual", "profile_id": profile},
+            }),
+            ..Default::default()
+        },
+    )
+    .await?)
+}
+
+/// An `imaging_study` review item on Alex's profile, as the DICOM import holds one.
+async fn held_study(b: &Bg) -> anyhow::Result<Uuid> {
+    let profile = b.alex_id();
+    let mut conn = b.env.pool().acquire().await?;
+    Ok(create_item(
+        &mut conn,
+        &ReviewItemIn {
+            household_id: Some(b.env.fam().household_id),
+            profile_id: Some(profile),
+            kind: "imaging_study".into(),
+            payload: json!({
+                "reason": "identity_mismatch",
+                "study_uid": "1.2.826.0.1.3680043.10.41.1",
+                "patient": {"name": "RIVERA^ALEX", "id": "MRN-41"},
             }),
             ..Default::default()
         },
