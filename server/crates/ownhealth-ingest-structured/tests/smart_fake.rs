@@ -10,6 +10,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use axum::body::Body;
 use axum::extract::{Form, OriginalUri, Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -101,6 +102,8 @@ struct Behaviour {
     procedure_pause: Option<Arc<ProcedurePause>>,
     /// This search returns a response larger than the per-page limit.
     oversized_search: Option<&'static str>,
+    /// Use chunked FHIR responses to exercise the byte cap while reading the body.
+    stream_answers: bool,
     /// This type's search links its first page to itself as `next`.
     loop_next: Option<&'static str>,
     /// Every FHIR request is refused for its token, even with the newest one.
@@ -113,6 +116,7 @@ struct Behaviour {
     returned_patient_id: Option<&'static str>,
     /// Replace the Patient's name using this given initial.
     given_initial: Option<&'static str>,
+    patient_name: Option<&'static str>,
     /// `_include=MedicationRequest:medication` brings the named Medications (US Core); off, the
     /// server ignores it.
     include: bool,
@@ -141,12 +145,14 @@ impl Default for Behaviour {
             next_origin: None,
             procedure_pause: None,
             oversized_search: None,
+            stream_answers: false,
             loop_next: None,
             refuse_all: false,
             patient_status: None,
             redact_patient: &[],
             returned_patient_id: None,
             given_initial: None,
+            patient_name: None,
             include: true,
             reject_include: false,
             require_status: None,
@@ -180,6 +186,8 @@ struct Book {
     extra_search_entries: Vec<(&'static str, Value)>,
     /// Fixed wire responses for individual searches, keyed as in searches.
     search_bodies: HashMap<String, (StatusCode, Vec<u8>)>,
+    /// Responses that override individual Medication reads.
+    medication_answers: HashMap<String, Value>,
     /// Bytes of successful Patient reads and search bundles, excluding Medication reads.
     served: usize,
 }
@@ -365,7 +373,17 @@ fn fhir_answer(s: &Shared, status: StatusCode, body: &Value, count: bool) -> Res
     if count {
         lock(&s.book).served += bytes.len();
     }
-    (status, [("content-type", "application/fhir+json")], bytes).into_response()
+    wire_answer(lock(&s.behaviour).stream_answers, status, bytes)
+}
+
+fn wire_answer(stream: bool, status: StatusCode, bytes: Vec<u8>) -> Response {
+    let headers = [("content-type", "application/fhir+json")];
+    if stream {
+        let chunks = futures::stream::iter([Ok::<_, std::convert::Infallible>(bytes)]);
+        (status, headers, Body::from_stream(chunks)).into_response()
+    } else {
+        (status, headers, bytes).into_response()
+    }
 }
 
 fn outcome_body(text: &str) -> Value {
@@ -409,6 +427,9 @@ async fn read_patient(
             if let Some(initial) = lock(&s.behaviour).given_initial {
                 p["name"] = json!([{"given": [initial], "family": "Rivera"}]);
             }
+            if let Some(name) = lock(&s.behaviour).patient_name {
+                p["name"] = json!([{"text": name}]);
+            }
             if let Some(id) = lock(&s.behaviour).returned_patient_id {
                 p["id"] = json!(id);
             }
@@ -428,7 +449,14 @@ async fn read_medication(
     if !authorized(&s, &headers, &uri) {
         return outcome(StatusCode::UNAUTHORIZED, "expired token");
     }
-    lock(&s.book).searches.push(format!("Medication/{id}"));
+    let answer = {
+        let mut book = lock(&s.book);
+        book.searches.push(format!("Medication/{id}"));
+        book.medication_answers.get(&id).cloned()
+    };
+    if let Some(answer) = answer {
+        return fhir_answer(&s, StatusCode::OK, &answer, false);
+    }
     let extra = lock(&s.book).extra.clone();
     let padding = lock(&s.behaviour).medication_padding;
     match extra
@@ -497,7 +525,7 @@ async fn search(
             fixed
         };
         if let Some((status, bytes)) = fixed {
-            return (status, [("content-type", "application/fhir+json")], bytes).into_response();
+            return wire_answer(b.stream_answers, status, bytes);
         }
     }
     if b.reject_include && get("_include").is_some() {
@@ -509,12 +537,7 @@ async fn search(
         return outcome(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), "down");
     }
     if b.oversized_search == Some(rtype.as_str()) {
-        return (
-            StatusCode::OK,
-            [("content-type", "application/fhir+json")],
-            vec![b' '; smart::PAGE_BYTES + 1],
-        )
-            .into_response();
+        return wire_answer(b.stream_answers, StatusCode::OK, vec![b' '; smart::PAGE_BYTES + 1]);
     }
     if rtype == "Procedure"
         && page == 1
@@ -557,6 +580,7 @@ async fn search(
         .iter()
         .chain(extra.iter())
         .filter(|r| r["resourceType"] == rtype.as_str())
+        .filter(|r| rtype != "Condition" || category.as_deref().is_none_or(|c| has_code(r, "category", c)))
         .filter(|r| match rtype.as_str() {
             "Observation" => has_code(r, "category", category.as_deref().unwrap_or_default()),
             "MedicationRequest" => intents.iter().any(|i| r["intent"] == i.as_str()),
@@ -1390,10 +1414,13 @@ async fn a_disconnect_that_lands_while_the_import_waits_for_the_source_is_seen_b
         held.commit().await?;
         anyhow::Ok(waited)
     };
-    let (got, waited) = tokio::join!(pull, cut);
+    let blobs_before = w.ctx.blobs.files()?;
+    let (got, waited) =
+        tokio::time::timeout(std::time::Duration::from_secs(30), async { tokio::join!(pull, cut) }).await?;
     assert!(waited?, "the import never waited on the source row");
     let e = got.expect_err("the import sees the disconnect");
     assert!(e.contains("switched_off"), "{e}");
+    assert_eq!(w.ctx.blobs.files()?, blobs_before, "the rejected pull wrote a blob");
     assert_eq!(w.documents(source).await?.len(), 0);
     assert_eq!(w.count("condition").await?, 0);
     Ok(())
@@ -1691,6 +1718,7 @@ async fn the_medication_reads_keep_to_the_run_budget_and_their_count() -> R {
     let w = world(Behaviour {
         include: false,
         medication_padding: 16 * 1024,
+        stream_answers: true,
         ..Behaviour::default()
     })
     .await?;
@@ -2097,6 +2125,7 @@ async fn the_last_status_retry_stays_within_the_run_budget() -> R {
     let w = world(Behaviour {
         scope: "patient/Patient.r patient/AllergyIntolerance.s patient/Condition.s".into(),
         fail: Some(("Condition", 503)),
+        stream_answers: true,
         ..Behaviour::default()
     })
     .await?;
@@ -2155,6 +2184,7 @@ async fn a_refused_access_tokens_body_counts_against_the_run_budget() -> R {
     let w = world(Behaviour {
         scope: "patient/Patient.r patient/Condition.s".into(),
         fail: Some(("Condition", 503)),
+        stream_answers: true,
         ..Behaviour::default()
     })
     .await?;
@@ -2174,7 +2204,7 @@ async fn a_refused_access_tokens_body_counts_against_the_run_budget() -> R {
     };
     let got = w.day_with(source, t0() + Duration::minutes(2), &caps).await?;
     let err = got.expect_err("the 401 body leaves too little room to verify the patient");
-    assert!(err.contains("too_large: Patient: "), "{err}");
+    assert!(err.starts_with("JobError: too_large: Patient: "), "{err}");
     assert!(w.documents(source).await?.is_empty());
     let book = w.fake.book();
     assert_eq!((book.unauthorized, book.refreshes), (1, 1));
@@ -2353,6 +2383,7 @@ async fn bytes_from_a_broken_body_count_against_the_next_search() -> R {
     let w = world(Behaviour {
         scope: "patient/Patient.r patient/Condition.s patient/Observation.s?category=laboratory".into(),
         fail: Some(("*", 503)),
+        stream_answers: true,
         ..Behaviour::default()
     })
     .await?;
@@ -2429,5 +2460,199 @@ async fn bytes_from_a_broken_body_count_against_the_next_search() -> R {
         tokio::try_join!(serve, poll)
     })
     .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_reconnect_to_the_same_patient_stops_the_old_pull() -> R {
+    let pause = Arc::new(ProcedurePause::default());
+    let w = world(Behaviour {
+        procedure_pause: Some(pause.clone()),
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    let pull = w.day(source, t0() + Duration::minutes(1));
+    let reconnect = async {
+        pause.arrived.notified().await;
+        oauth::disconnect(&w.db.pool, &w.sb, source, &egress()).await?;
+        let launch = w.launch_for_source("sam", Some(source)).await?;
+        assert_eq!(w.save_consent(launch, t0() + Duration::minutes(2)).await?, source);
+        w.fake.set(|b| b.procedure_pause = None);
+        pause.release.notify_one();
+        anyhow::Ok(())
+    };
+    let (got, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::try_join!(pull, reconnect)
+    })
+    .await??;
+    let e = got.expect_err("the old pull stops");
+    assert!(e.contains("grant_changed:"), "{e}");
+    assert!(w.documents(source).await?.is_empty());
+    assert_eq!(w.count("condition").await?, 0);
+    assert!(w.open_items().await?.is_empty());
+
+    let next = w
+        .day(source, t0() + Duration::minutes(3))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(next.new, 5, "{next:?}");
+    assert_eq!(w.count("condition").await?, 1);
+    Ok(())
+}
+
+async fn assert_condition_searches(grant: &str, expected: &[&str]) -> R {
+    let w = world(Behaviour {
+        scope: format!("patient/Patient.r {grant}"),
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+    let mut paths = vec![format!("Patient/{PATIENT}")];
+    paths.extend(expected.iter().map(|t| t.to_string()));
+    let mut actual = w.fake.book().searches.clone();
+    paths.sort();
+    actual.sort();
+    assert_eq!(actual, paths);
+    assert!(got.problems.is_empty(), "{got:?}");
+    assert_eq!(got.skipped.get("not_granted"), Some(&8));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_health_concern_grant_searches_condition_with_the_granted_category() -> R {
+    assert_condition_searches(
+        "patient/Condition.rs?category=http://hl7.org/fhir/us/core/CodeSystem/condition-category%7Chealth-concern",
+        &["Condition?category=http://hl7.org/fhir/us/core/CodeSystem/condition-category|health-concern"],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn two_condition_categories_get_one_search_each() -> R {
+    assert_condition_searches(
+        "patient/Condition.rs?category=http://terminology.hl7.org/CodeSystem/condition-category|problem-list-item \
+         patient/Condition.rs?category=http://terminology.hl7.org/CodeSystem/condition-category|encounter-diagnosis \
+         patient/Condition.s?category=http://terminology.hl7.org/CodeSystem/condition-category|problem-list-item \
+         patient/Condition.r?category=health-concern user/Condition.rs?category=other",
+        &[
+            "Condition?category=http://terminology.hl7.org/CodeSystem/condition-category|problem-list-item",
+            "Condition?category=http://terminology.hl7.org/CodeSystem/condition-category|encounter-diagnosis",
+        ],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn an_unrestricted_condition_grant_keeps_the_unfiltered_search() -> R {
+    assert_condition_searches(
+        "patient/Condition.rs patient/Condition.rs?category=health-concern",
+        &["Condition"],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_medication_read_with_the_wrong_id_keeps_other_reads_and_marks_the_run_partial() -> R {
+    let w = world(Behaviour {
+        include: false,
+        ..Behaviour::default()
+    })
+    .await?;
+    let mut resources = two_named_medicines();
+    resources[0]["medicationReference"]["reference"] = json!(format!("{}/Medication/metformin-850", w.fake.issuer()));
+    let mut wrong = resources[2].clone();
+    wrong["id"] = json!("different-drug");
+    wrong["code"]["coding"][0]["display"] = json!("Wrong drug");
+    w.fake.book().medication_answers.insert("metformin-850".into(), wrong);
+    w.fake.book().extra.extend(resources);
+    let source = w.connect(t0()).await?;
+    let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+    let snapshot = w.stored_bundle(source).await?;
+    let entries = snapshot["entry"].as_array().expect("snapshot entries");
+    assert!(!entries.iter().any(|e| e["resource"]["id"] == "different-drug"));
+    let mut c = w.db.pool.acquire().await?;
+    let meds = list_records(&mut c, "medication", w.sam(), None, true).await?;
+    assert!(meds.iter().any(|m| m["name"] == "Atorvastatin 20 mg"), "{meds:?}");
+    assert!(!meds.iter().any(|m| m["name"] == "Wrong drug"), "{meds:?}");
+    assert_eq!(w.medication_reads(), 2);
+    assert_eq!(got.problems.len(), 1, "{got:?}");
+    assert_eq!(got.problems[0].code, "medication_id_mismatch");
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
+    Ok(())
+}
+
+#[tokio::test]
+async fn verified_non_latin_patient_names_auto_accept_facts() -> R {
+    let mut counts = Vec::new();
+    for name in ["李", "Сам Ривера", "Σαμ Ριβέρα"] {
+        let w = world(Behaviour {
+            patient_name: Some(name),
+            ..Behaviour::default()
+        })
+        .await?;
+        sqlx::query("update profile set display_name = $1 where id = $2")
+            .bind(name)
+            .bind(w.sam())
+            .execute(&w.db.pool)
+            .await?;
+        let source = w.connect(t0()).await?;
+        let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+        assert!(got.problems.is_empty(), "{name}: {got:?}");
+        counts.push(w.count("condition").await?);
+
+        // Keep the same date of birth and change the name alone.
+        w.fake.set(|b| b.patient_name = Some("別人"));
+        let e = w
+            .day(source, t0() + Duration::minutes(1))
+            .await?
+            .expect_err("the name differs");
+        assert!(e.contains("another_patient:"), "{e}");
+        assert_eq!(w.documents(source).await?.len(), 1);
+    }
+    assert_eq!(counts, [1, 1, 1]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_bytes_past_the_page_cap_can_exhaust_the_run_budget() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/AllergyIntolerance.s patient/Condition.s".into(),
+        oversized_search: Some("AllergyIntolerance"),
+        stream_answers: true,
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    // Measure the Patient read without consuming another large response.
+    w.fake.set(|b| b.fail = Some(("*", 503)));
+    w.day(source, t0()).await?.expect_err("no search answered");
+    let patient_bytes = w.fake.book().served;
+    let before = w.fake.book().attempts.len();
+    w.fake.set(|b| b.fail = None);
+    let caps = smart::Caps {
+        run_bytes: patient_bytes + smart::PAGE_BYTES + 1,
+        ..smart::Caps::default()
+    };
+    let e = w
+        .day_with(source, t0() + Duration::minutes(1), &caps)
+        .await?
+        .expect_err("no search answered");
+    assert_eq!(
+        w.fake.book().attempts[before..],
+        [format!("/fhir/Patient/{PATIENT}"), "/fhir/AllergyIntolerance".into()]
+    );
+    assert!(e.starts_with("JobError: too_large: AllergyIntolerance:"), "{e}");
+
+    // The same declared size can be refused before reading a body. The Condition still fits.
+    w.fake.set(|b| b.stream_answers = false);
+    let got = w
+        .day_with(source, t0() + Duration::minutes(2), &caps)
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(got.problems.len(), 1, "{got:?}");
+    assert_eq!(got.problems[0].code, "page_too_large");
+    assert_eq!(w.count("condition").await?, 1);
     Ok(())
 }

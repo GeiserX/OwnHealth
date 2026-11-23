@@ -51,7 +51,8 @@ pub const STALE_INTERVALS: i32 = 3;
 pub const TOKEN_PREFIX: &str = "oh_ing_";
 
 const COLS: &str = "id, household_id, profile_id, kind, label, config, secret_id, token_prefix, enabled, poll_seconds, \
-    cursor, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, created_by, created_at";
+    cursor, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, \
+    created_by, created_at, oauth_grant_id";
 
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 pub struct Source {
@@ -73,6 +74,9 @@ pub struct Source {
     pub consecutive_failures: i32,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
+    /// The grant in effect when this source snapshot was loaded.
+    #[serde(skip_serializing)]
+    pub oauth_grant_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

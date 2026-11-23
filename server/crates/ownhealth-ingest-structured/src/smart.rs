@@ -22,13 +22,11 @@
 //! - **One bundle per run.** The resources gathered by a pull form a `collection` Bundle, each
 //!   resource once and in a fixed order. The grant or a failed search can leave the snapshot
 //!   incomplete. The same snapshot gives the same bytes and document. A changed snapshot creates
-//!   a new document, and the ledger imports only new resources. The bytes are stored first, as a
-//!   blob of the source's profile and a document of channel `smart`. `fhir::import_pull` then imports
-//!   the bundle in a transaction that holds this
-//!   source's pull lock and re-reads the source row, so a disconnect, a new sign-in demand or a
-//!   change of profile or patient during the run imports nothing. A pull the person retracted comes
-//!   back on the next day's run when the server still sends it (slice 14: the same bytes reactivate
-//!   the document); Disconnect stops that.
+//!   a new document, and the ledger imports only new resources. The import locks the source and
+//!   checks the grant, profile and patient before storing the snapshot as a profile-owned blob
+//!   and a document of channel `smart`. A disconnect, reconnect or new sign-in demand stops
+//!   the import. A pull the person retracted comes back on the next day's run when the server
+//!   still sends it (slice 14: the same bytes reactivate the document). Disconnect stops that.
 //! - **Tokens.** `connector_oauth::access_token` gives the access token, and refreshes and rotates it
 //!   under the source row lock. A token the FHIR server refuses (401) is dropped and refreshed once. A
 //!   refused refresh marks the connection for a new sign-in, and the run stops before any search.
@@ -38,7 +36,7 @@
 //!   is a problem and reads nothing. A problem names the resource type and the status, never a URL,
 //!   a patient id or a token.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -172,6 +170,7 @@ const STOP_PATIENT_UNVERIFIED: &str =
     "patient_unverified: the Patient response does not verify the profile's identity, so nothing was imported";
 const STOP_OFF: &str = "switched_off: the connection was switched off during the run, so nothing was imported";
 const STOP_CHANGED: &str = "source_changed: the connection changed during the run, so nothing was imported";
+const STOP_GRANT_CHANGED: &str = "grant_changed: the portal sign-in changed during the run, so nothing was imported";
 const STOP_PATIENT_NOT_GRANTED: &str = "patient_not_granted: the grant does not cover reading the patient, so the record \
      cannot be matched to this profile and nothing was read";
 
@@ -187,6 +186,8 @@ mod words {
         format!("{rtype}: the answer is not a FHIR Bundle")
     }
     pub const NOT_MEDICATION: &str = "Medication: the answer is not a FHIR Medication";
+    pub const MEDICATION_ID_MISMATCH: &str =
+        "Medication: the server returned a different resource ID, so it was skipped";
     pub fn patient_reference(rtype: &str) -> String {
         format!("{rtype}: a resource did not identify the verified patient and was skipped")
     }
@@ -250,7 +251,7 @@ pub fn phrases() -> Value {
     };
     json!({
         "stop": [STOP_RECONSENT, STOP_PATIENT, STOP_SERVER, STOP_PROFILE, STOP_NO_ANSWER, STOP_ANOTHER_PATIENT,
-                 STOP_PATIENT_UNVERIFIED, STOP_OFF, STOP_CHANGED, STOP_PATIENT_NOT_GRANTED,
+                 STOP_PATIENT_UNVERIFIED, STOP_OFF, STOP_CHANGED, STOP_GRANT_CHANGED, STOP_PATIENT_NOT_GRANTED,
                  words::patient_unread(404), words::token_refused(500, "server_error"),
                  words::token_unreachable(&net), words::undeclared_host("fhir.elsewhere.example")],
         "problem": [
@@ -261,6 +262,7 @@ pub fn phrases() -> Value {
             words::unreachable("Condition", &net),
             words::not_bundle("Observation"),
             words::NOT_MEDICATION,
+            words::MEDICATION_ID_MISMATCH,
             words::patient_reference("Observation"),
             words::unexpected_resource("Condition"),
             words::page_too_large("Observation", PAGE_BYTES),
@@ -294,37 +296,38 @@ pub enum Op {
 /// granular v2 scope covers only searches whose parameters hold each of its values. A category
 /// grant that names a system requires the same system and code in the search.
 pub fn granted(scope: Option<&str>, rtype: &str, op: Op, params: &[(&str, &str)]) -> bool {
-    let Some(scope) = scope else { return true };
+    scope.is_none_or(|scope| {
+        grant_filters(scope, rtype, op).any(|query| query.is_none_or(|q| op == Op::Search && within(q, params)))
+    })
+}
+
+/// Filters from grants that cover this resource and operation. None means unrestricted.
+fn grant_filters<'a>(scope: &'a str, rtype: &str, op: Op) -> impl Iterator<Item = Option<&'a str>> {
     let letter = match op {
         Op::Read => 'r',
         Op::Search => 's',
     };
-    for s in scope.split_whitespace() {
-        let Some(rest) = s.strip_prefix("patient/") else {
-            continue;
-        };
-        let (rest, query) = match rest.split_once('?') {
-            Some((r, q)) => (r, Some(q)),
-            None => (rest, None),
-        };
-        let Some((t, perm)) = rest.split_once('.') else {
-            continue;
-        };
-        if t != "*" && t != rtype {
-            continue;
-        }
+    scope.split_whitespace().filter_map(move |s| {
+        let rest = s.strip_prefix("patient/")?;
+        let (resource, query) = rest.split_once('?').map_or((rest, None), |(r, q)| (r, Some(q)));
+        let (rtype_in_scope, perm) = resource.split_once('.')?;
+        let covers_type = rtype_in_scope == "*" || rtype_in_scope == rtype;
         let v1 = perm == "read" || perm == "*";
-        let v2 = !perm.is_empty() && perm.chars().all(|c| "cruds".contains(c)) && perm.contains(letter);
-        if !(v1 || v2) {
-            continue;
-        }
-        match query {
-            None => return true,
-            Some(q) if op == Op::Search && within(q, params) => return true,
-            Some(_) => {}
-        }
-    }
-    false
+        let v2 = perm.chars().all(|c| "cruds".contains(c)) && perm.contains(letter);
+        (covers_type && (v1 || v2)).then_some(query)
+    })
+}
+
+/// Category-only Condition grants authorize one search per distinct category token.
+fn condition_categories(scope: &str) -> BTreeSet<String> {
+    grant_filters(scope, "Condition", Op::Search)
+        .flatten()
+        .filter_map(|query| {
+            let mut params = url::form_urlencoded::parse(query.as_bytes());
+            let (key, value) = params.next()?;
+            (key == "category" && !value.is_empty() && params.next().is_none()).then(|| value.into_owned())
+        })
+        .collect()
 }
 
 /// Whether a search with `params` stays inside a granular scope's `k=v&..`.
@@ -408,10 +411,9 @@ impl Reader {
                 Err((OAuthError::UndeclaredHost(_), _)) => {
                     return Err(Miss::Search("undeclared_host", Box::new(words::undeclared)));
                 }
-                Err((OAuthError::Net(NetError::TooLarge(limit)), _)) => {
-                    // The capped reader discards an oversized body. Charge its full allowance
-                    // because a streamed response may already have consumed it.
-                    self.remaining -= limit;
+                Err((OAuthError::Net(NetError::TooLarge(limit)), bytes_read)) => {
+                    // The last chunk can take the measured bytes past the page cap.
+                    self.remaining = self.remaining.saturating_sub(bytes_read);
                     if self.remaining == 0 {
                         return Err(self.budget_problem());
                     }
@@ -479,7 +481,7 @@ fn tidy(problems: Vec<RunProblem>) -> Vec<RunProblem> {
         }
     }
     let rank = |code: &str| match code {
-        "search_failed" | "unreachable" | "not_fhir" => 0,
+        "search_failed" | "unreachable" | "not_fhir" | "medication_id_mismatch" => 0,
         "too_large" | "page_too_large" | "too_many_pages" | "repeated_page" | "too_many_medications" => 1,
         _ => 2,
     };
@@ -762,34 +764,32 @@ fn bundle(base: &str, entries: Vec<(Option<String>, Value)>) -> (Vec<u8>, i64) {
 /// Why this run must import nothing now: the source row as it is (locked `for share` inside the
 /// import transaction, so a disconnect waits for the import or the import sees it), or `None` when it
 /// is still the connection the run started with.
-async fn changed(
-    conn: &mut PgConnection,
-    source_id: Uuid,
-    profile_id: Uuid,
-    patient: &str,
-    lock: bool,
-) -> Result<Option<&'static str>, JobError> {
-    let row: Option<(bool, bool, Option<Uuid>, Option<String>)> = if lock {
-        sqlx::query_as(
-            "select enabled, reconsent_needed_at is not null, profile_id, config->>'patient' from source \
-             where id = $1 for share",
-        )
-        .bind(source_id)
-        .fetch_optional(conn)
-        .await?
-    } else {
-        sqlx::query_as(
-            "select enabled, reconsent_needed_at is not null, profile_id, config->>'patient' from source \
-             where id = $1",
-        )
-        .bind(source_id)
-        .fetch_optional(conn)
-        .await?
-    };
+async fn changed(conn: &mut PgConnection, source: &Source, patient: &str) -> Result<Option<&'static str>, JobError> {
+    #[derive(sqlx::FromRow)]
+    struct LockedSource {
+        enabled: bool,
+        reconsent_needed: bool,
+        profile_id: Option<Uuid>,
+        patient: Option<String>,
+        oauth_grant_id: Option<Uuid>,
+    }
+
+    let row: Option<LockedSource> = sqlx::query_as(
+        "select enabled, reconsent_needed_at is not null as reconsent_needed, profile_id, \
+         config->>'patient' as patient, oauth_grant_id from source where id = $1 for share",
+    )
+    .bind(source.id)
+    .fetch_optional(conn)
+    .await?;
     Ok(match row {
-        None | Some((false, ..)) => Some(STOP_OFF),
-        Some((_, true, ..)) => Some(STOP_RECONSENT),
-        Some((_, _, p, q)) if p != Some(profile_id) || q.as_deref() != Some(patient) => Some(STOP_CHANGED),
+        None | Some(LockedSource { enabled: false, .. }) => Some(STOP_OFF),
+        Some(LockedSource {
+            reconsent_needed: true, ..
+        }) => Some(STOP_RECONSENT),
+        Some(current) if current.profile_id != source.profile_id || current.patient.as_deref() != Some(patient) => {
+            Some(STOP_CHANGED)
+        }
+        Some(current) if current.oauth_grant_id != source.oauth_grant_id => Some(STOP_GRANT_CHANGED),
         Some(_) => None,
     })
 }
@@ -829,22 +829,30 @@ pub async fn pull_with(
     let mut g = Gathered::default();
 
     let mut left_out = HashSet::new();
-    let planned: Vec<_> = SEARCHES
-        .iter()
-        .filter_map(|&(rtype, params)| {
-            if granted(scope, rtype, Op::Search, params) {
-                return Some((rtype, params, None));
+    let mut planned = Vec::new();
+    for (rtype, params) in SEARCHES {
+        if granted(scope, rtype, Op::Search, params) {
+            planned.push((rtype, params, None));
+            continue;
+        }
+        if rtype == "Condition"
+            && let Some(scope) = scope
+        {
+            let categories = condition_categories(scope);
+            if !categories.is_empty() {
+                planned.extend(categories.into_iter().map(|category| (rtype, params, Some(category))));
+                continue;
             }
-            if let [("category", code)] = params {
-                let token = format!("{OBSERVATION_CATEGORY}|{code}");
-                if granted(scope, rtype, Op::Search, &[("category", &token)]) {
-                    return Some((rtype, params, Some(token)));
-                }
+        }
+        if let [("category", code)] = params {
+            let token = format!("{OBSERVATION_CATEGORY}|{code}");
+            if granted(scope, rtype, Op::Search, &[("category", &token)]) {
+                planned.push((rtype, params, Some(token)));
+                continue;
             }
-            left_out.insert(rtype);
-            None
-        })
-        .collect();
+        }
+        left_out.insert(rtype);
+    }
     let read_patient = granted(scope, "Patient", Op::Read, &[]);
     g.skip("not_granted", left_out.len() as i64 + i64::from(!read_patient));
     if planned.is_empty() {
@@ -942,10 +950,12 @@ pub async fn pull_with(
             match r.get(&format!("{base}/Medication/{id}")).await {
                 Ok(f) if f.status == 200 => {
                     let m: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
-                    if m["resourceType"] == "Medication" {
-                        g.entries.push((Some(format!("{base}/Medication/{id}")), m));
-                    } else {
+                    if m["resourceType"] != "Medication" {
                         g.problem("not_fhir", words::NOT_MEDICATION.into());
+                    } else if m["id"].as_str() != Some(id.as_str()) {
+                        g.problem("medication_id_mismatch", words::MEDICATION_ID_MISMATCH.into());
+                    } else {
+                        g.entries.push((Some(format!("{base}/Medication/{id}")), m));
                     }
                 }
                 Ok(f) => g.problem("search_failed", words::answered("Medication", f.status)),
@@ -964,15 +974,8 @@ pub async fn pull_with(
         }
     }
 
-    // a disconnect while the searches ran: nothing is stored (and the import checks again, locked)
-    let mut conn = ctx.pool.acquire().await?;
-    if let Some(stop) = changed(&mut conn, source.id, profile_id, &patient, false).await? {
-        return Err(JobError::permanent(stop));
-    }
-    drop(conn);
     let (bytes, repeated) = bundle(&base, std::mem::take(&mut g.entries));
     g.skip("repeated", repeated);
-    let (sha, size) = store_bytes(&ctx.blobs, BlobOwner::Profile(profile_id), bytes).await?;
     let filename = format!("{} · {}.json", source.label, now.format("%Y-%m-%d %H.%M UTC"));
     let mut tx = ctx.pool.begin().await?;
     // one pull of this source imports at a time, even when a lease ran out and the job runs twice
@@ -980,10 +983,11 @@ pub async fn pull_with(
         .bind(format!("source.pull:{}", source.id))
         .execute(&mut *tx)
         .await?;
-    if let Some(stop) = changed(&mut tx, source.id, profile_id, &patient, true).await? {
+    if let Some(stop) = changed(&mut tx, source, &patient).await? {
         tx.rollback().await?;
         return Err(JobError::permanent(stop));
     }
+    let (sha, size) = store_bytes(&ctx.blobs, BlobOwner::Profile(profile_id), bytes).await?;
     let doc = create_document(
         &mut tx,
         &NewDocument {
@@ -994,7 +998,7 @@ pub async fn pull_with(
         },
     )
     .await?;
-    let got = fhir::import_pull(&mut tx, &ctx.blobs, source.id, doc.id).await?;
+    let got = fhir::import_pull_with_identity(&mut tx, &ctx.blobs, source.id, doc.id, Some((&name, born))).await?;
     tx.commit().await?;
     g.skip("context", got.context);
     let n = |x: i64| i32::try_from(x).unwrap_or(i32::MAX);

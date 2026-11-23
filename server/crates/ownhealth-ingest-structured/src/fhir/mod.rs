@@ -25,7 +25,7 @@ pub mod synthetic;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use futures::future::BoxFuture;
 use ownhealth_core::acceptance::{Check, DEFAULT_THRESHOLD, auto_accept};
 use ownhealth_core::access::{Profile, get_profile};
@@ -339,6 +339,17 @@ pub async fn import_pull(
     source_id: Uuid,
     document_id: Uuid,
 ) -> Result<PullSummary> {
+    import_pull_with_identity(conn, blobs, source_id, document_id, None).await
+}
+
+/// A SMART caller can supply the profile demographics it verified against the Patient.
+pub(crate) async fn import_pull_with_identity(
+    conn: &mut PgConnection,
+    blobs: &BlobStore,
+    source_id: Uuid,
+    document_id: Uuid,
+    verified_profile: Option<(&str, Option<NaiveDate>)>,
+) -> Result<PullSummary> {
     let (profile_id, sha, mime, filename, flags): (Option<Uuid>, String, String, Option<String>, Value) =
         sqlx::query_as(
             "select profile_id, encode(blob_sha256, 'hex'), mime, filename, flags from document where id = $1",
@@ -378,8 +389,20 @@ pub async fn import_pull(
         sha: &sha,
         unmapped: BTreeMap::new(),
     };
-    let (summary, identity, tally) =
-        import_with(conn, &entries, &profile, document_id, &key, None, &label, Some(pull)).await?;
+    let identity = verified_profile
+        .filter(|&(name, born)| name == profile.display_name && born == profile.birth_date)
+        .map(|_| "matched");
+    let (summary, identity, tally) = import_with(
+        conn,
+        &entries,
+        &profile,
+        document_id,
+        &key,
+        identity,
+        &label,
+        Some(pull),
+    )
+    .await?;
     if tally.unprojected > 0 || tally.sensitive > 0 {
         let count = |n: i64| (n > 0).then_some(n);
         sqlx::query(
