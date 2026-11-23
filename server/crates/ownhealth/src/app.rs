@@ -11,8 +11,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Router};
 use ownhealth_api::ApiError;
-use ownhealth_api::routes::imaging_proxy::{self, Imaging, OrthancConfig};
-use ownhealth_core::config::{DEV_SECRET_KEY, ProcessEnv, Settings};
+use ownhealth_api::routes::imaging_proxy::{self, Imaging};
+use ownhealth_core::config::{DEV_SECRET_KEY, Settings};
 use ownhealth_core::{Error, Runtime, demo, jobs, migrate};
 use serde_json::json;
 use tokio::sync::watch;
@@ -231,13 +231,12 @@ pub async fn shutdown_signal() {
     tracing::info!("shutting down");
 }
 
-pub async fn serve(mut settings: Settings) -> anyhow::Result<()> {
+pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     check_secret_key(&settings)?;
-    // Imaging is on when OWNHEALTH_ORTHANC_URL is set; a URL without a password stops the start. The
-    // viewer proxy and the DICOM import job (through the settings) use the same Orthanc.
-    let orthanc = OrthancConfig::from_env(&ProcessEnv)?;
+    // Imaging is on when OWNHEALTH_ORTHANC_URL is set (Settings reads it; a URL without a password
+    // stops the start). The viewer proxy and the DICOM import job use the same Orthanc.
+    let orthanc = settings.orthanc.clone();
     let imaging_on = orthanc.is_some();
-    settings.orthanc = orthanc.clone();
     let imaging = Imaging::new(orthanc)?;
     let addr = format!("{}:{}", settings.host, settings.port);
     let rt = Runtime::new(settings)?;

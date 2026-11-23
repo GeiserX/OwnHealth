@@ -340,7 +340,8 @@ impl Settings {
             share_url: env_or(env, "SHARE_URL")?.map(|u| check_share_url(&u)).transpose()?,
             trusted_proxies: parse_trusted_proxies(&env_or(env, "TRUSTED_PROXIES")?.unwrap_or_default())?,
             anchor_dir: env_or(env, "ANCHOR_DIR")?.map(PathBuf::from),
-            orthanc: None,
+            // serve's viewer proxy and every worker's DICOM import read the same Orthanc
+            orthanc: OrthancConfig::from_env(env)?,
         })
     }
 
@@ -402,6 +403,21 @@ mod tests {
             s.database_url,
             "postgresql://ownhealth:a%2Fb%2Bc%3Dd%40e%3Af@db:5432/ownhealth"
         );
+    }
+
+    #[test]
+    fn every_command_reads_orthanc_from_the_environment() {
+        // the worker runs the DICOM import too, so Orthanc is in the settings every command reads
+        let e = env(&[
+            ("OWNHEALTH_ORTHANC_URL", "http://orthanc:8042/"),
+            ("OWNHEALTH_ORTHANC_PASSWORD", "synthetic-orthanc-password"),
+        ]);
+        let orthanc = Settings::from(&e).expect("settings").orthanc.expect("imaging on");
+        assert_eq!(orthanc.url, "http://orthanc:8042");
+        assert_eq!(orthanc.user, "ownhealth");
+        assert!(Settings::from(&env(&[])).expect("settings").orthanc.is_none());
+        // a URL without a password stops every command, as it stops serve
+        assert!(Settings::from(&env(&[("OWNHEALTH_ORTHANC_URL", "http://orthanc:8042")])).is_err());
     }
 
     #[test]
