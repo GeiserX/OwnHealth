@@ -167,11 +167,15 @@ token(user, profiles[], scopes[], budget, expires_at)
 profile.locks   (set by the profile owner: sensitive categories off, sensitive genome findings off)
 ```
 
-Effective permission for any read, from any surface, the same formula as [mcp.md §2.4](mcp.md#24-family-grants):
+Ordinary reads use the same permission formula as [mcp.md §2.4](mcp.md#24-family-grants).
 
 `token scopes ∩ grant categories for that profile − profile.locks`
 
-The browser session acts as a token with all scopes, so the same function decides UI, REST, MCP and export. Personal access tokens reach `/mcp` only: every `/api` route answers 403 `forbidden` to a bearer token, so the review queue, rate limit, egress budget, page and genome caps and identity mode apply to every agent read. `tools/list` returns only tools the token can call.
+A browser session supplies all token scopes for this intersection. Profile locks apply to roles other than owner.
+
+An active break-glass request adds its read scopes to the contact's browser session, subject to profile locks. A contact without a grant gets temporary viewer permission for the request's scopes. Exports, MCP, and token issuance require ordinary grants.
+
+Personal access tokens reach `/mcp` only: every `/api` route answers 403 `forbidden` to a bearer token, so the review queue, rate limit, egress budget, page and genome caps and identity mode apply to every agent read. `tools/list` returns only tools the token can call.
 
 ### 6.2 Roles
 
