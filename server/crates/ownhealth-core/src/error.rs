@@ -52,7 +52,7 @@ pub enum Error {
         "{0}. Fix the keyring error and rerun the same restore with the same backup, keyring, \
          and options. Keep the app stopped until restore finishes"
     )]
-    RestoreLoss(#[source] Box<Error>),
+    RestoreLoss(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
