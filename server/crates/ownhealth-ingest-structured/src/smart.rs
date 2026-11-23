@@ -12,16 +12,18 @@
 //!   on its own. A read needs `r` in the grant and a search `s` (v1 `.read` gives both); a type the
 //!   grant's `scope` leaves out is not asked for, and a granular scope (`?category=laboratory`)
 //!   covers only the searches inside it. A server that answers a search with 400 because it wants
-//!   `status` is asked once more with every status. Each search follows its `next` links, which must
-//!   stay on a host the connection declared at connect time and never repeat.
+//!   `status` is asked again with every status, first as a list and then one at a time if the
+//!   server rejects the list. Each search follows its `next` links on declared hosts and stops at
+//!   a repeated page.
 //! - **The patient.** The Patient the grant names must confirm the profile's name and full birth
 //!   date before any clinical search. The pull stops if the identity differs or cannot be verified.
-//! - **One bundle per run.** Every resource the searches returned becomes one `collection` Bundle,
-//!   each resource once and in a fixed order, so a day when nothing changed gives the same bytes and
-//!   the same document. A day when something changed stores the whole record again as a new
-//!   document: the ledger imports only what is new, and each document is the record as the server
-//!   sent it that day. The bytes are stored first, as a blob of the source's profile and a document
-//!   of channel `smart`; then `fhir::import_pull` imports them, in one transaction that holds this
+//!   A search result that refers to someone else is left out and the run is partial.
+//! - **One bundle per run.** The resources gathered by a pull form a `collection` Bundle, each
+//!   resource once and in a fixed order. The grant or a failed search can leave the snapshot
+//!   incomplete. The same snapshot gives the same bytes and document. A changed snapshot creates
+//!   a new document, and the ledger imports only new resources. The bytes are stored first, as a
+//!   blob of the source's profile and a document of channel `smart`. `fhir::import_pull` then imports
+//!   the bundle in a transaction that holds this
 //!   source's pull lock and re-reads the source row, so a disconnect, a new sign-in demand or a
 //!   change of profile or patient during the run imports nothing. A pull the person retracted comes
 //!   back on the next day's run when the server still sends it (slice 14: the same bytes reactivate
@@ -35,7 +37,7 @@
 //!   is a problem and reads nothing. A problem names the resource type and the status, never a URL,
 //!   a patient id or a token.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -72,8 +74,9 @@ pub const US_CORE_TYPES: [&str; 10] = [
 ];
 
 const MEDICATION_INTENT: (&str, &str) = ("intent", "order,plan");
-const MEDICATION_REQUEST_WITH_INCLUDE: [(&str, &str); 2] =
-    [MEDICATION_INTENT, ("_include", "MedicationRequest:medication")];
+const MEDICATION_INCLUDE: (&str, &str) = ("_include", "MedicationRequest:medication");
+const MEDICATION_REQUEST_WITH_INCLUDE: [(&str, &str); 2] = [MEDICATION_INTENT, MEDICATION_INCLUDE];
+const OBSERVATION_CATEGORY: &str = "http://terminology.hl7.org/CodeSystem/observation-category";
 
 /// The searches after the Patient read: a type and the parameters besides `patient`.
 const SEARCHES: [(&str, &[(&str, &str)]); 11] = [
@@ -183,6 +186,12 @@ mod words {
         format!("{rtype}: the answer is not a FHIR Bundle")
     }
     pub const NOT_MEDICATION: &str = "Medication: the answer is not a FHIR Medication";
+    pub fn patient_reference(rtype: &str) -> String {
+        format!("{rtype}: a resource referred to someone other than the verified patient and was skipped")
+    }
+    pub fn page_too_large(rtype: &str, bytes: usize) -> String {
+        format!("{rtype}: the answer exceeded the {bytes}-byte limit for one page")
+    }
     pub fn too_many_pages(rtype: &str, pages: usize) -> String {
         format!("{rtype}: stopped after {pages} pages")
     }
@@ -248,6 +257,8 @@ pub fn phrases() -> Value {
             words::unreachable("Condition", &net),
             words::not_bundle("Observation"),
             words::NOT_MEDICATION,
+            words::patient_reference("Observation"),
+            words::page_too_large("Observation", PAGE_BYTES),
             words::too_many_pages("Observation", MAX_PAGES),
             words::repeated_page("Condition"),
             words::too_large("Observation", RUN_BYTES),
@@ -275,8 +286,8 @@ pub enum Op {
 /// everything, and the server refuses what it must; a `scope` that names no `patient/` scope (only
 /// `openid fhirUser launch/patient`, say) grants no resource. SMART v2 letters count by operation (`r`
 /// reads, `s` searches: `patient/Observation.rs`, `patient/*.rs`), v1 `.read` and `.*` give both. A
-/// granular v2 scope (`patient/Observation.rs?category=laboratory`) covers only searches whose
-/// parameters hold each of its values, with or without the system (`system|code`).
+/// granular v2 scope covers only searches whose parameters hold each of its values. A category
+/// grant that names a system requires the same system and code in the search.
 pub fn granted(scope: Option<&str>, rtype: &str, op: Op, params: &[(&str, &str)]) -> bool {
     let Some(scope) = scope else { return true };
     let letter = match op {
@@ -314,9 +325,9 @@ pub fn granted(scope: Option<&str>, rtype: &str, op: Op, params: &[(&str, &str)]
 /// Whether a search with `params` stays inside a granular scope's `k=v&..`.
 fn within(query: &str, params: &[(&str, &str)]) -> bool {
     url::form_urlencoded::parse(query.as_bytes()).all(|(k, v)| {
-        params
-            .iter()
-            .any(|(pk, pv)| *pk == k && (v == *pv || v.rsplit_once('|').is_some_and(|(_, code)| code == *pv)))
+        params.iter().any(|(pk, pv)| {
+            *pk == k && (v == *pv || (k == "category" && pv.rsplit_once('|').is_some_and(|(_, code)| v == code)))
+        })
     })
 }
 
@@ -351,12 +362,23 @@ struct Reader {
     now: DateTime<Utc>,
     token: Option<SecretString>,
     refreshed: bool,
-    bytes: usize,
+    run_bytes: usize,
+    remaining: usize,
+    budget_hit: bool,
 }
 
 impl Reader {
+    fn budget_problem(&mut self) -> Miss {
+        self.budget_hit = true;
+        let limit = self.run_bytes;
+        Miss::Search("too_large", Box::new(move |t| words::too_large(t, limit)))
+    }
+
     async fn get(&mut self, url: &str) -> Result<Fetched, Miss> {
         loop {
+            if self.remaining == 0 {
+                return Err(self.budget_problem());
+            }
             let token = match &self.token {
                 Some(t) => t.clone(),
                 None => {
@@ -370,12 +392,28 @@ impl Reader {
             let bearer = format!("Bearer {}", token.expose());
             let f = match self
                 .http
-                .get(url, &[("accept", FHIR_JSON), ("authorization", &bearer)])
+                .get_bounded(
+                    url,
+                    &[("accept", FHIR_JSON), ("authorization", &bearer)],
+                    self.remaining,
+                )
                 .await
             {
                 Ok(f) => f,
                 Err(OAuthError::UndeclaredHost(_)) => {
                     return Err(Miss::Search("undeclared_host", Box::new(words::undeclared)));
+                }
+                Err(OAuthError::Net(NetError::TooLarge(limit))) => {
+                    // The capped reader discards an oversized body. Charge its full allowance
+                    // because a streamed response may already have consumed it.
+                    self.remaining -= limit;
+                    if self.remaining == 0 {
+                        return Err(self.budget_problem());
+                    }
+                    return Err(Miss::Search(
+                        "too_large",
+                        Box::new(move |t| words::page_too_large(t, limit)),
+                    ));
                 }
                 Err(OAuthError::Net(e)) => {
                     return Err(Miss::Search(
@@ -385,6 +423,7 @@ impl Reader {
                 }
                 Err(e) => return Err(Miss::Run(token_stop(e))),
             };
+            self.remaining -= f.body.len();
             // the server dropped the token before its time: one refresh, then the answer stands
             if f.status == 401 && !self.refreshed {
                 self.refreshed = true;
@@ -392,7 +431,6 @@ impl Reader {
                 oauth::forget(self.source_id);
                 continue;
             }
-            self.bytes += f.body.len();
             return Ok(f);
         }
     }
@@ -479,82 +517,116 @@ async fn fetch(r: &mut Reader, g: &mut Gathered, rtype: &str, url: &str) -> Resu
     }
 }
 
-/// One search, every page, into `g`. Only a token the run cannot get stops more than this search.
+/// Check the Patient id and any literal references to the patient before storing the resource.
+fn belongs_to_patient(resource: &Value, base: &str, patient: &str) -> bool {
+    if resource["resourceType"] == "Patient" && resource["id"] != patient {
+        return false;
+    }
+    ["patient", "subject"]
+        .iter()
+        .filter_map(|key| resource[*key]["reference"].as_str())
+        .all(|reference| {
+            let relative = reference
+                .strip_prefix(base)
+                .and_then(|suffix| suffix.strip_prefix('/'))
+                .unwrap_or(reference);
+            relative.strip_prefix("Patient/").is_some_and(|id| {
+                id == patient
+                    || id
+                        .split_once("/_history/")
+                        .is_some_and(|(id, version)| id == patient && fhir_id(version))
+            })
+        })
+}
+
+#[derive(Clone, Copy)]
+enum StatusRetry {
+    Unfiltered,
+    List(&'static str, &'static str),
+    None,
+}
+
+/// Gather one search and its status fallbacks. An exhausted byte budget stops further searches.
 async fn search(
     r: &mut Reader,
     g: &mut Gathered,
     caps: &Caps,
-    (base, patient): (&str, &str),
+    (base, patient, scope): (&str, &str, Option<&str>),
     rtype: &str,
     params: &[(&str, &str)],
 ) -> Result<(), JobError> {
-    let mut url = search_url(base, rtype, patient, params);
-    let mut visited: HashSet<String> = HashSet::new();
+    let filtered_url = |key, value| {
+        let mut with = params.to_vec();
+        with.push((key, value));
+        granted(scope, rtype, Op::Search, &with).then(|| search_url(base, rtype, patient, &with))
+    };
+    let mut pending = VecDeque::from([(search_url(base, rtype, patient, params), StatusRetry::Unfiltered)]);
+    let mut visited = HashSet::new();
     let mut answered = false;
-    for page in 1..=caps.pages {
-        if !visited.insert(url.clone()) {
-            g.problem("repeated_page", words::repeated_page(rtype));
+    while let Some((mut url, retry)) = pending.pop_front() {
+        if r.budget_hit {
             break;
         }
-        if r.bytes > caps.run_bytes {
-            g.problem("too_large", words::too_large(rtype, caps.run_bytes));
-            break;
-        }
-        let Some(mut f) = fetch(r, g, rtype, &url).await? else {
-            break;
-        };
-        if page == 1
-            && f.status == 400
-            && wants_status(&f.body)
-            && let Some(status) = every_status(rtype)
-        {
-            // the server requires a status: the same search once more, with every status there is
-            let mut with: Vec<(&str, &str)> = params.to_vec();
-            with.push(status);
-            url = search_url(base, rtype, patient, &with);
-            visited.insert(url.clone());
-            let Some(again) = fetch(r, g, rtype, &url).await? else {
+        for page in 1..=caps.pages {
+            if !visited.insert(url.clone()) {
+                if page > 1 {
+                    g.problem("repeated_page", words::repeated_page(rtype));
+                }
+                break;
+            }
+            let Some(f) = fetch(r, g, rtype, &url).await? else {
                 break;
             };
-            f = again;
-        }
-        if f.status != 200 {
-            g.problem("search_failed", words::answered(rtype, f.status));
-            break;
-        }
-        let bundle: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
-        if bundle["resourceType"] != "Bundle" {
-            g.problem("not_fhir", words::not_bundle(rtype));
-            break;
-        }
-        answered = true;
-        for e in bundle["entry"].as_array().map(Vec::as_slice).unwrap_or_default() {
-            let res = &e["resource"];
-            let t = res["resourceType"].as_str().unwrap_or_default();
-            if t.is_empty() {
-                g.skip("unreadable", 1);
-            } else if e["search"]["mode"] == "outcome" || t == "OperationOutcome" {
-                // a server's note about the search (a warning, a restriction), not part of the record
-                g.skip("outcome", 1);
-            } else {
-                let full = e["fullUrl"].as_str().filter(|u| !u.is_empty()).map(String::from);
-                g.entries.push((full, res.clone()));
+            if f.status != 200 {
+                if page == 1 {
+                    match retry {
+                        StatusRetry::Unfiltered if f.status == 400 && wants_status(&f.body) => {
+                            if let Some((key, values)) = every_status(rtype)
+                                && let Some(url) = filtered_url(key, values)
+                            {
+                                pending.push_back((url, StatusRetry::List(key, values)));
+                                break;
+                            }
+                        }
+                        // A server may require a status and accept only one value per search.
+                        StatusRetry::List(key, values) if matches!(f.status, 400 | 422 | 501) => {
+                            pending.extend(
+                                values
+                                    .split(',')
+                                    .filter_map(|value| filtered_url(key, value).map(|url| (url, StatusRetry::None))),
+                            );
+                            if !pending.is_empty() {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                g.problem("search_failed", words::answered(rtype, f.status));
+                break;
             }
-        }
-        let next = bundle["link"].as_array().and_then(|links| {
-            links
-                .iter()
-                .find(|l| l["relation"] == "next")
-                .and_then(|l| l["url"].as_str())
-                .filter(|u| !u.is_empty())
-                .map(String::from)
-        });
-        match next {
-            None => break,
-            Some(_) if page == caps.pages => {
-                g.problem("too_many_pages", words::too_many_pages(rtype, caps.pages));
+            let bundle: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
+            if bundle["resourceType"] != "Bundle" {
+                g.problem("not_fhir", words::not_bundle(rtype));
+                break;
             }
-            Some(n) => url = n,
+            answered = true;
+            gather_entries(g, &bundle, (base, patient), rtype, params.contains(&MEDICATION_INCLUDE));
+            let next = bundle["link"].as_array().and_then(|links| {
+                links
+                    .iter()
+                    .find(|l| l["relation"] == "next")
+                    .and_then(|l| l["url"].as_str())
+                    .filter(|u| !u.is_empty())
+                    .map(String::from)
+            });
+            match next {
+                None => break,
+                Some(_) if page == caps.pages => {
+                    g.problem("too_many_pages", words::too_many_pages(rtype, caps.pages));
+                }
+                Some(n) => url = n,
+            }
         }
     }
     if answered {
@@ -563,15 +635,40 @@ async fn search(
     Ok(())
 }
 
+fn gather_entries(
+    g: &mut Gathered,
+    bundle: &Value,
+    (base, patient): (&str, &str),
+    rtype: &str,
+    include_medication: bool,
+) {
+    for e in bundle["entry"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let res = &e["resource"];
+        let t = res["resourceType"].as_str().unwrap_or_default();
+        if t.is_empty() {
+            g.skip("unreadable", 1);
+        } else if e["search"]["mode"] == "outcome" || t == "OperationOutcome" {
+            g.skip("outcome", 1);
+        } else if !belongs_to_patient(res, base, patient) {
+            g.problem("patient_reference", words::patient_reference(rtype));
+        } else if t == "Medication" && !include_medication {
+            g.skip("not_granted", 1);
+        } else {
+            let full = e["fullUrl"].as_str().filter(|u| !u.is_empty()).map(String::from);
+            g.entries.push((full, res.clone()));
+        }
+    }
+}
+
 /// The Medications that MedicationRequests name by a reference this bundle does not hold: id only,
 /// relative (`Medication/<id>`) or on the FHIR server itself.
 fn missing_medications(base: &str, entries: &[(Option<String>, Value)]) -> Vec<String> {
-    let held: HashSet<String> = entries
+    let mut seen: HashSet<&str> = entries
         .iter()
         .filter(|(_, r)| r["resourceType"] == "Medication")
-        .filter_map(|(_, r)| r["id"].as_str().map(String::from))
+        .filter_map(|(_, r)| r["id"].as_str())
         .collect();
-    let mut out: Vec<String> = Vec::new();
+    let mut out = Vec::new();
     for (_, r) in entries.iter().filter(|(_, r)| r["resourceType"] == "MedicationRequest") {
         let Some(reference) = r["medicationReference"]["reference"].as_str() else {
             continue;
@@ -582,8 +679,7 @@ fn missing_medications(base: &str, entries: &[(Option<String>, Value)]) -> Vec<S
             .unwrap_or(reference);
         if let Some(id) = local.strip_prefix("Medication/")
             && fhir_id(id)
-            && !held.contains(id)
-            && !out.iter().any(|o| o == id)
+            && seen.insert(id)
         {
             out.push(id.to_string());
         }
@@ -705,15 +801,22 @@ pub async fn pull_with(
     let scope = source.config["scope"].as_str();
     let mut g = Gathered::default();
 
-    let planned: Vec<(&str, &[(&str, &str)])> = SEARCHES
+    let mut left_out = HashSet::new();
+    let planned: Vec<_> = SEARCHES
         .iter()
-        .copied()
-        .filter(|(t, p)| granted(scope, t, Op::Search, p))
-        .collect();
-    let left_out: HashSet<&str> = SEARCHES
-        .iter()
-        .filter(|s| !planned.contains(s))
-        .map(|(t, _)| *t)
+        .filter_map(|&(rtype, params)| {
+            if granted(scope, rtype, Op::Search, params) {
+                return Some((rtype, params, None));
+            }
+            if let [("category", code)] = params {
+                let token = format!("{OBSERVATION_CATEGORY}|{code}");
+                if granted(scope, rtype, Op::Search, &[("category", &token)]) {
+                    return Some((rtype, params, Some(token)));
+                }
+            }
+            left_out.insert(rtype);
+            None
+        })
         .collect();
     let read_patient = granted(scope, "Patient", Op::Read, &[]);
     g.skip("not_granted", left_out.len() as i64 + i64::from(!read_patient));
@@ -746,7 +849,9 @@ pub async fn pull_with(
         now,
         token: None,
         refreshed: false,
-        bytes: 0,
+        run_bytes: caps.run_bytes,
+        remaining: caps.run_bytes,
+        budget_hit: false,
     };
 
     // Verify the Patient before requesting any clinical data.
@@ -783,26 +888,28 @@ pub async fn pull_with(
     }
     g.entries.push((Some(format!("{base}/Patient/{patient}")), p));
     let read_medication = granted(scope, "Medication", Op::Read, &[]);
-    for (rtype, params) in planned {
-        let params = if rtype == "MedicationRequest" && read_medication {
-            &MEDICATION_REQUEST_WITH_INCLUDE
-        } else {
-            params
+    for (rtype, params, category) in planned {
+        let qualified = category.as_deref().map(|token| [("category", token)]);
+        let params: &[(&str, &str)] = match qualified.as_ref() {
+            Some(category) => category,
+            None if rtype == "MedicationRequest" && read_medication => &MEDICATION_REQUEST_WITH_INCLUDE,
+            None => params,
         };
-        search(&mut r, &mut g, caps, (&base, &patient), rtype, params).await?;
+        search(&mut r, &mut g, caps, (&base, &patient, scope), rtype, params).await?;
+        if r.budget_hit {
+            break;
+        }
     }
     if g.answered == 0 {
+        if let Some(problem) = g.problems.iter().find(|p| p.code == "too_large") {
+            return Err(JobError::retry(format!("too_large: {}", problem.message)));
+        }
         return Err(JobError::retry(STOP_NO_ANSWER));
     }
-    if read_medication {
+    if read_medication && !r.budget_hit {
         let missing = missing_medications(&base, &g.entries);
         let mut left = missing.len();
         for id in missing.iter().take(caps.medication_reads) {
-            if r.bytes > caps.run_bytes {
-                g.problem("too_large", words::too_large("Medication", caps.run_bytes));
-                left = 0;
-                break;
-            }
             left -= 1;
             match r.get(&format!("{base}/Medication/{id}")).await {
                 Ok(f) if f.status == 200 => {
@@ -815,7 +922,13 @@ pub async fn pull_with(
                 }
                 Ok(f) => g.problem("search_failed", words::answered("Medication", f.status)),
                 Err(Miss::Run(e)) => return Err(e),
-                Err(Miss::Search(code, say)) => g.problem(code, say("Medication")),
+                Err(Miss::Search(code, say)) => {
+                    g.problem(code, say("Medication"));
+                    if r.budget_hit {
+                        left = 0;
+                        break;
+                    }
+                }
             }
         }
         if left > 0 {
@@ -935,7 +1048,9 @@ mod tests {
         let labs = Some(
             "patient/Observation.rs?category=http://terminology.hl7.org/CodeSystem/observation-category|laboratory",
         );
-        assert!(granted(labs, "Observation", S, &[("category", "laboratory")]));
+        let qualified = "http://terminology.hl7.org/CodeSystem/observation-category|laboratory";
+        assert!(granted(labs, "Observation", S, &[("category", qualified)]));
+        assert!(!granted(labs, "Observation", S, &[("category", "laboratory")]));
         assert!(!granted(labs, "Observation", S, &[("category", "vital-signs")]));
         assert!(!granted(labs, "Observation", S, &[]));
         assert!(!granted(labs, "Observation", R, &[]));

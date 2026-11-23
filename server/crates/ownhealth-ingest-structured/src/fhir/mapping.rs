@@ -238,31 +238,35 @@ pub fn status_code(cc: Option<&Value>, default: &str) -> String {
 
 /// NFKD, ASCII only, lower case, split on anything not a letter or digit, tokens longer than one.
 pub fn name_tokens(s: &str) -> BTreeSet<String> {
+    tokenize_name(s, 2)
+}
+
+fn tokenize_name(s: &str, min_len: usize) -> BTreeSet<String> {
     let ascii: String = s.nfkd().filter(char::is_ascii).collect::<String>().to_lowercase();
     ascii
         .split(|c: char| !c.is_ascii_lowercase() && !c.is_ascii_digit())
-        .filter(|t| t.len() > 1)
+        .filter(|t| t.len() >= min_len)
         .map(String::from)
         .collect()
 }
 
-fn patient_names(patient: &Value) -> impl Iterator<Item = BTreeSet<String>> + '_ {
-    list(Some(patient), "name").iter().map(|name| {
+fn patient_names(patient: &Value, min_len: usize) -> impl Iterator<Item = BTreeSet<String>> + '_ {
+    list(Some(patient), "name").iter().map(move |name| {
         let mut parts: Vec<String> = list(Some(name), "given").iter().map(text_of).collect();
         for key in ["family", "text"] {
             parts.push(get_truthy(Some(name), key).map(text_of).unwrap_or_default());
         }
-        name_tokens(&parts.join(" "))
+        tokenize_name(&parts.join(" "), min_len)
     })
 }
 
 /// Identity proof for an automatic SMART pull. A single HumanName must cover the profile's name,
 /// and the birth date must be precise to the day.
 pub(crate) fn verifies_patient(patient: &Value, display_name: &str, birth_date: Option<NaiveDate>) -> bool {
-    let want = name_tokens(display_name);
+    let want = tokenize_name(display_name, 1);
     birth_date.is_some_and(|date| patient["birthDate"] == date.to_string())
         && !want.is_empty()
-        && patient_names(patient).any(|name| want.is_subset(&name))
+        && patient_names(patient, 1).any(|name| want.is_subset(&name))
 }
 
 /// Identity of a bundle against the profile it is imported into: matched | hinted | mismatch | missing.
@@ -273,7 +277,7 @@ pub fn match_patient(patient: Option<&Value>, display_name: &str, birth_date: Op
     let Some(patient) = patient else {
         return "missing";
     };
-    let tokens: BTreeSet<String> = patient_names(patient).flatten().collect();
+    let tokens: BTreeSet<String> = patient_names(patient, 2).flatten().collect();
     let want = name_tokens(display_name);
     let name_ok = !tokens.is_empty() && !want.is_empty() && (want.is_subset(&tokens) || tokens.is_subset(&want));
     let pdob = parse_date(patient.get("birthDate"));
