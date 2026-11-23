@@ -543,12 +543,6 @@ fn belongs_to_patient(entry: &Value, base: &str, patient: &str) -> bool {
         .peekable();
     (!needs_reference || references.peek().is_some())
         && references.all(|reference| {
-            let (reference, version) = reference
-                .split_once("/_history/")
-                .map_or((reference, None), |(url, version)| (url, Some(version)));
-            if version.is_some_and(|version| !fhir_id(version)) {
-                return false;
-            }
             let Some((root, id)) = (if let Some(id) = reference.strip_prefix("Patient/") {
                 // A present fullUrl must supply the root. Without it, use the search server.
                 if entry.get("fullUrl").is_none() {
@@ -561,8 +555,13 @@ fn belongs_to_patient(entry: &Value, base: &str, patient: &str) -> bool {
             }) else {
                 return false;
             };
-            id == patient
-                && url::Url::parse(root).is_ok_and(|root| url::Url::parse(base).is_ok_and(|base| root == base))
+            let same_patient = id == patient
+                || id
+                    .split_once("/_history/")
+                    .is_some_and(|(id, version)| id == patient && fhir_id(version));
+            same_patient
+                && (root == base
+                    || url::Url::parse(root).is_ok_and(|root| url::Url::parse(base).is_ok_and(|base| root == base)))
         })
 }
 
