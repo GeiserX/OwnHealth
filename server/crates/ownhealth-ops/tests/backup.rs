@@ -1378,11 +1378,10 @@ async fn a_lost_file_of_an_upgraded_profile_with_no_key_yet_is_still_required() 
 }
 
 /// Replace the dump of `archive` with a FIFO, so a restore or verify-restore that reaches pg_restore
-/// waits there until the test writes the dump. Returns the dump's bytes.
+/// waits there until the test opens the other end.
 #[cfg(unix)]
-fn dump_through_fifo(archive: &Path) -> anyhow::Result<Vec<u8>> {
+fn dump_through_fifo(archive: &Path) -> R {
     let dump = archive.join("db.dump");
-    let bytes = fs::read(&dump)?;
     fs::remove_file(&dump)?;
     anyhow::ensure!(
         std::process::Command::new("mkfifo")
@@ -1391,20 +1390,20 @@ fn dump_through_fifo(archive: &Path) -> anyhow::Result<Vec<u8>> {
             .status()?
             .success()
     );
-    Ok(bytes)
+    Ok(())
 }
 
-/// On its own thread: wait until pg_restore opens the FIFO dump of `archive`, say whether the keyring
-/// lock in `keyring` is free at that moment, then write the dump.
+/// On its own thread: wait until pg_restore opens the FIFO dump of `archive`, and say whether the
+/// keyring lock in `keyring` is free at that moment. It writes no dump (pg_restore needs a seekable
+/// one), so that pg_restore then fails.
 #[cfg(unix)]
-fn feed_fifo(keyring: PathBuf, archive: PathBuf, bytes: Vec<u8>) -> tokio::task::JoinHandle<anyhow::Result<bool>> {
-    use std::io::Write;
+fn lock_free_at_pg_restore(keyring: PathBuf, archive: PathBuf) -> tokio::task::JoinHandle<anyhow::Result<bool>> {
     tokio::task::spawn_blocking(move || {
-        let mut fifo = fs::OpenOptions::new().write(true).open(archive.join("db.dump"))?;
+        let fifo = fs::OpenOptions::new().write(true).open(archive.join("db.dump"))?;
         let lock = fs::File::options().write(true).open(keyring.join(".keyring.lock"))?;
         let free = lock.try_lock().is_ok();
         drop(lock);
-        fifo.write_all(&bytes)?;
+        drop(fifo);
         Ok(free)
     })
 }
@@ -1417,24 +1416,24 @@ fn feed_fifo(keyring: PathBuf, archive: PathBuf, bytes: Vec<u8>) -> tokio::task:
 async fn verify_restore_frees_the_keyring_during_pg_restore_and_restore_does_not() -> R {
     let l = live().await?;
     let keyring = l.settings.keyring_path();
-    let bytes = dump_through_fifo(&l.archive)?;
+    dump_through_fifo(&l.archive)?;
 
-    let feeder = feed_fifo(keyring.clone(), l.archive.clone(), bytes.clone());
-    let report = ownhealth_ops::verify_restore(&l.settings, &l.archive).await?;
+    let probe = lock_free_at_pg_restore(keyring.clone(), l.archive.clone());
+    let err = err_text(ownhealth_ops::verify_restore(&l.settings, &l.archive).await);
     assert!(
-        feeder.await??,
+        probe.await??,
         "verify-restore held the keyring lock while pg_restore ran"
     );
-    assert_eq!(report["ok"], true, "{report:#}");
+    assert!(err.contains("pg_restore failed"), "{err}");
 
     let (_db, fresh) = fresh(&l).await?;
-    let feeder = feed_fifo(keyring, l.archive.clone(), bytes);
-    let report = ownhealth_ops::restore(&fresh, &l.archive).await?;
+    let probe = lock_free_at_pg_restore(keyring, l.archive.clone());
+    let err = err_text(ownhealth_ops::restore(&fresh, &l.archive).await);
     assert!(
-        !feeder.await??,
+        !probe.await??,
         "restore let go of the keyring lock before it installed the keys"
     );
-    assert_eq!(report["ok"], true, "{report:#}");
+    assert!(err.contains("pg_restore failed"), "{err}");
     Ok(())
 }
 
