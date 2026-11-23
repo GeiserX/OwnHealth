@@ -186,6 +186,18 @@ test('a poller stop or problem reads in es and en, with its FHIR type, status an
 	assert.equal(runWords('connection refused', hasKey, es), null);
 });
 
+test('a wrong portal account tells the person to disconnect and start a new connection', () => {
+	const error = 'JobError: another_patient: the account at the portal is for another person than this profile, so nothing was imported';
+	assert.equal(
+		runWords(error, hasKey, sayIn('en')),
+		'The portal account belongs to someone else. No records were imported. Disconnect, then start a new connection with the account for this profile.'
+	);
+	assert.equal(
+		runWords(error, hasKey, sayIn('es')),
+		'La cuenta del portal pertenece a otra persona. No se importó ningún dato. Desconecta e inicia una conexión nueva con la cuenta de este perfil.'
+	);
+});
+
 const smart = read('../../server/crates/ownhealth-ingest-structured/src/smart.rs');
 const runCodes = new Set<string>();
 for (const m of smart.matchAll(/g\.problem\(\s*"([a-z_]+)"/g)) runCodes.add(m[1]);
