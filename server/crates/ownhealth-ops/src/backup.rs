@@ -968,8 +968,9 @@ fn backup_key(settings: &Settings, manifest: &Value) -> Result<Option<Kek>> {
 /// The profile keys of a backup, as the keyring holds them now.
 struct RingKeys {
     legacy: bool,
-    /// Rows added for tombstones the older dump did not count.
-    legacy_tombstones_added: i64,
+    /// Rows an older dump did not count: its tombstones, and the keyring keys of its profiles with
+    /// no key row.
+    legacy_rows_added: i64,
     fingerprint: Vec<u8>,
     /// the keyring as read: a legacy dump's key rows are checked against it after pg_restore
     file: keyfile::KeyringFile,
@@ -1041,12 +1042,12 @@ fn ring_keys(
             file.display()
         )));
     }
-    if ids.is_none() && ring.shredded.is_empty() {
+    if ids.is_none() && ring.shredded.is_empty() && ring.profiles.is_empty() {
         return Ok(None);
     }
     let mut out = RingKeys {
         legacy: ids.is_none(),
-        legacy_tombstones_added: 0,
+        legacy_rows_added: 0,
         fingerprint: ring.kek_fingerprint.clone().unwrap_or_default(),
         file: ring.clone(),
         keys: Vec::new(),
@@ -1111,9 +1112,12 @@ fn ring_keys(
 /// Load selected keys into a new-format dump and apply the current tombstones to any dump with a
 /// `profile_key` table. A partial restore leaves missing profiles without a key row.
 ///
-/// In a legacy dump, a key row that a tombstone closes while the keyring holds a newer key for the
-/// profile (it was deleted, and is back since) gives way to the newer key, and the profile is listed
-/// as shredded.
+/// A profile of the dump with no key row gets the keyring's key, when the keyring holds one: the
+/// backup was taken before the profile's first sealed file, and a new key made by its next file
+/// would replace the keyring's key, which the newer backups need. The same holds in a legacy dump
+/// for a key row that a tombstone closes while the keyring holds a newer key for the profile (it was
+/// deleted, and is back since): the newer key replaces the row, and the profile is listed as
+/// shredded.
 async fn load_keys(url: &str, ring: &mut RingKeys, kek: Option<&Kek>) -> Result<()> {
     let mut conn = PgConnection::connect(url).await?;
     let mut tx = conn.begin().await?;
@@ -1132,7 +1136,7 @@ async fn load_keys(url: &str, ring: &mut RingKeys, kek: Option<&Kek>) -> Result<
         .bind(&ring.tombstones)
         .fetch_all(&mut *tx)
         .await?;
-        ring.legacy_tombstones_added = sqlx::query_scalar(
+        ring.legacy_rows_added = sqlx::query_scalar(
             "select count(*) from unnest($1::uuid[]) as tombstone(id) \
              where not exists (select 1 from profile_key where profile_id = tombstone.id)",
         )
@@ -1185,6 +1189,22 @@ async fn load_keys(url: &str, ring: &mut RingKeys, kek: Option<&Kek>) -> Result<
     .bind(&ring.tombstones)
     .execute(&mut *tx)
     .await?;
+    let (held, wrapped): (Vec<Uuid>, Vec<Vec<u8>>) = ring.file.profiles.iter().map(|(id, w)| (*id, w.clone())).unzip();
+    let installed = sqlx::query(
+        "insert into profile_key (profile_id, wrapped_dek, kek_fingerprint) \
+         select k.id, k.wrapped, $3 from unnest($1::uuid[], $2::bytea[]) as k(id, wrapped) \
+         join profile p on p.id = k.id \
+         on conflict (profile_id) do nothing",
+    )
+    .bind(&held)
+    .bind(&wrapped)
+    .bind(&ring.fingerprint)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if ring.legacy {
+        ring.legacy_rows_added += i64::try_from(installed).unwrap_or(i64::MAX);
+    }
     tx.commit().await?;
     conn.close().await?;
     Ok(())
@@ -1254,7 +1274,7 @@ async fn compare(
     let mut tx = conn.begin().await?;
     let mut counts = table_counts(&mut tx).await?; // before build_state, which may add state_snapshot rows
     if let (Some(ring), Some(count)) = (ring, counts.get_mut("profile_key")) {
-        *count -= ring.legacy_tombstones_added;
+        *count -= ring.legacy_rows_added;
     }
     let actual_chain = match expected_chain {
         Some(_) => {
