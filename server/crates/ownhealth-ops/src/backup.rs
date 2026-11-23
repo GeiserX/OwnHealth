@@ -1021,10 +1021,10 @@ fn backup_key(settings: &Settings, manifest: &Value) -> Result<Option<Kek>> {
 /// The profile keys of a backup, as the keyring holds them now.
 struct RingKeys {
     fingerprint: Vec<u8>,
-    /// the keyring as read, including keys newer than the backup
-    file: keyfile::KeyringFile,
-    /// the wrapped key of each profile the keyring still holds
+    /// the wrapped keys selected for the profiles in keys.keyring
     keys: Vec<(Uuid, Vec<u8>)>,
+    /// keys for profiles in the backup that stored their first sealed file later
+    supplemental: Vec<(Uuid, Vec<u8>)>,
     /// profiles of the backup whose key the keyring lists as shredded: deleted since the backup
     shredded: Vec<Uuid>,
     /// every profile the keyring lists as shredded and holds no newer key for, also one deleted before
@@ -1096,8 +1096,8 @@ fn ring_keys(
     }
     let mut out = RingKeys {
         fingerprint: ring.kek_fingerprint.clone().unwrap_or_default(),
-        file: ring.clone(),
         keys: Vec::new(),
+        supplemental: Vec::new(),
         shredded: Vec::new(),
         tombstones: ring
             .shredded
@@ -1122,17 +1122,7 @@ fn ring_keys(
             })
             .transpose()?;
         if let Some(w) = ring.profiles.get(&id) {
-            let dek = kek
-                .and_then(|k| k.unwrap(id, &out.fingerprint, w).ok())
-                .ok_or_else(|| {
-                    ops_error(format!(
-                        "the keyring {} holds a damaged key for profile {id}: it does not open with \
-                         OWNHEALTH_SECRETS_KEY. Put back an undamaged copy of this install's keyring.json. \
-                         When no such copy exists, remove that entry from keyring.json and restore with \
-                         {ALLOW_MISSING}: that profile's files stay closed; nothing was loaded",
-                        file.display()
-                    ))
-                })?;
+            let dek = authenticate_ring_key(&file, kek, id, &out.fingerprint, w)?;
             if wanted.is_none_or(|wanted| wanted == dek.archive_id()) {
                 out.keys.push((id, w.clone()));
             } else if ring.closes(id, wanted) {
@@ -1153,7 +1143,29 @@ fn ring_keys(
             out.missing.push(id);
         }
     }
+    // Backup records a state hash for every profile in the database snapshot. Keys that
+    // belong only to other backups stay in the keyring without affecting this restore.
+    let selected: BTreeSet<_> = out.keys.iter().map(|(id, _)| *id).collect();
+    for (id, wrapped) in ring.profiles {
+        if manifest["state_hash"].get(id.to_string()).is_some() && !selected.contains(&id) {
+            authenticate_ring_key(&file, kek, id, &out.fingerprint, &wrapped)?;
+            out.supplemental.push((id, wrapped));
+        }
+    }
     Ok(Some(out))
+}
+
+fn authenticate_ring_key(path: &Path, kek: Option<&Kek>, id: Uuid, fingerprint: &[u8], wrapped: &[u8]) -> Result<keys::Dek> {
+    kek.and_then(|k| k.unwrap(id, fingerprint, wrapped).ok())
+        .ok_or_else(|| {
+            ops_error(format!(
+                "the keyring {} holds a damaged key for profile {id}: it does not open with \
+                 OWNHEALTH_SECRETS_KEY. Put back an undamaged copy of this install's keyring.json. \
+                 When no such copy exists, remove that entry from keyring.json and restore with \
+                 {ALLOW_MISSING}: that profile's files stay closed; nothing was loaded",
+                path.display()
+            ))
+        })
 }
 
 /// Load the selected keys and the current tombstones. A profile in the dump that stored its first
@@ -1177,7 +1189,7 @@ async fn load_keys(url: &str, ring: &RingKeys) -> Result<()> {
     .bind(&ring.tombstones)
     .execute(&mut *tx)
     .await?;
-    let (held, wrapped): (Vec<Uuid>, Vec<Vec<u8>>) = ring.file.profiles.iter().map(|(id, w)| (*id, w.clone())).unzip();
+    let (held, wrapped): (Vec<Uuid>, Vec<Vec<u8>>) = ring.supplemental.iter().cloned().unzip();
     sqlx::query(
         "insert into profile_key (profile_id, wrapped_dek, kek_fingerprint) \
          select k.id, k.wrapped, $3 from unnest($1::uuid[], $2::bytea[]) as k(id, wrapped) \

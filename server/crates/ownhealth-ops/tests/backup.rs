@@ -1586,12 +1586,30 @@ async fn a_restore_gives_a_profile_the_archive_holds_no_key_for_the_keyrings_key
     .await?;
     drop(c);
     let c_archive = ownhealth_ops::backup(&s1, &dir.path().join("c")).await?;
-    let k = keyfile::read(&keyfile::path(&s1))?.unwrap_or_default().profiles[&alex].clone();
+    let current = keyfile::read(&keyfile::path(&s1))?.expect("backup wrote the keyring");
+    let k = current.profiles[&alex].clone();
+    let mut damaged = current.clone();
+    let wrapped = damaged.profiles.get_mut(&alex).expect("Alex has a key");
+    *wrapped.last_mut().expect("wrapped key includes an authentication tag") ^= 1;
+    keyfile::write(&s1.keyring_path(), &damaged)?;
 
     let db = TestDb::empty().await?;
     let mut s2 = db.settings(&dir.path().join("second"))?;
     s2.secrets_key = s1.secrets_key.clone();
     s2.keyring_dir = Some(s1.keyring_path());
+    let result = ownhealth_ops::restore(&s2, &b).await;
+    assert_eq!(public_tables(&db).await?, 0, "{result:?}");
+    let error = err_text(result);
+    assert!(
+        error.contains("damaged key") && error.contains(&alex.to_string()) && error.contains("nothing was loaded"),
+        "{error}"
+    );
+    assert!(err_text(ownhealth_ops::verify_restore(&s2, &b).await).contains("damaged key"));
+    // A key for a profile outside this archive is irrelevant when restoring it.
+    let mut with_unrelated_key = current;
+    with_unrelated_key.profiles.insert(Uuid::new_v4(), damaged.profiles[&alex].clone());
+    keyfile::write(&s1.keyring_path(), &with_unrelated_key)?;
+
     let restored = ownhealth_ops::restore(&s2, &b).await?;
     assert_eq!(restored["ok"], true, "{restored:#}");
     let row: Option<Vec<u8>> = sqlx::query_scalar("select wrapped_dek from profile_key where profile_id = $1")
