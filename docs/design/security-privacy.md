@@ -182,7 +182,7 @@ The browser session acts as a token with all scopes, so the same function decide
 | `caregiver` | Read and import for an adult who granted it (an elderly parent) | Grants, export, delete, `read:sensitive` unless granted |
 | `viewer` | Read the categories granted | Write, export |
 
-A profile without a login (a minor, an elderly parent) is managed through `guardian` or `caregiver` grants until its person claims it. Default categories per role are in [mcp.md §2.4](mcp.md#24-family-grants). Break-glass (section 6.5) is not a fifth role and adds no grant row: an open emergency request is joined to the contact's own grant in their browser session only.
+A profile without a login (a minor, an elderly parent) is managed through `guardian` or `caregiver` grants until its person claims it. Default categories per role are in [mcp.md §2.4](mcp.md#24-family-grants). An active break-glass request adds read scopes to the contact's browser permission. A contact without a grant gets a temporary viewer permission. Both paths leave the grant table unchanged.
 
 ### 6.3 Scopes
 
@@ -207,9 +207,9 @@ For a family member who is hospitalised, unconscious or dead.
 
 1. The owner pre-designates emergency contacts (`break_glass_contact`) and what they would see (default: summary, records, labs; never `read:sensitive`, genome raw or a write). Designating a contact needs an active calendar feed.
 2. A contact requests access with a reason (`break_glass_request`, status `requested`).
-3. The owner is told at once, through the calendar feed and an in-app notice, and can cancel. If not cancelled within the delay (default 48 hours, configurable 12 to 168), the request turns `active` for 14 days, once the owner's calendar feed has served it since the request; until then it stays `requested`.
-4. While active, the request is joined to the contact's own grant in their browser session only, read-only. No grant row is written, so the contact's own grant is unchanged when the request ends. Tokens, OAuth consents, calendar feeds, share links, exports and the imaging viewer never get it.
-5. Every step and every read during the request is in the audit log and in the owner's notices, shown at next login.
+3. The in-app notice appears as soon as the contact asks. The owner's calendar client sees the request and its cancel link on the next feed fetch. The request stays pending until the delay has passed and the feed has served the request. The owner can cancel while it is pending. The delay defaults to 48 hours and can be set from 12 to 168 hours. Access stays active for 14 days unless revoked.
+4. While active, the request adds read scopes to an existing browser permission or supplies a temporary viewer permission. Neither path creates or changes a grant row. Sensitive labs require both `read:labs` and `read:sensitive` from the same permission source. Emergency requests cannot supply `read:sensitive`, so both scopes must come from the grant. Tokens, OAuth consents, calendar feeds, exports, and the imaging viewer use ordinary access. Share links are unavailable to the contact while the request is active.
+5. Each request step and each successful read that uses emergency access adds an audit row and an owner notice. The server records both before returning emergency data. Unread request and activation notices remain visible even when newer use notices fill the recent list.
 
 ```mermaid
 stateDiagram-v2
