@@ -924,7 +924,21 @@ impl BlobStore {
 
         file.lock_shared()?;
         let link = self.root.join("tmp").join(format!("copy-{}", tmp_name()));
-        fs::hard_link(path, &link).map_err(not_found)?;
+        if let Err(e) = fs::hard_link(path, &link) {
+            if e.kind() == io::ErrorKind::NotFound {
+                return Err(BlobError::NotFound);
+            }
+            // No link here (EPERM from protected_hardlinks, EXDEV when tmp is on another mount, a
+            // filesystem without hard links): read the stored path as before links, still holding
+            // the shared lock on it.
+            drop(links);
+            self.checked_plain(owner, sha256, file.try_clone()?)?;
+            return Ok(LocalCopy(Arc::new(CopyFile {
+                path: path.to_path_buf(),
+                temporary: false,
+                held: Some(file),
+            })));
+        }
         let mut copy = CopyFile {
             path: link,
             temporary: true,
@@ -1901,6 +1915,42 @@ mod tests {
         ));
         drop(third);
         assert_eq!(store.checked.lock().expect("hash cache is available").len(), 1);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_plain_copy_reads_the_stored_path_when_no_link_can_be_made() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(dir.path())?;
+        let owner = BlobOwner::Profile(Uuid::new_v4());
+        let data = format!(
+            "Rivera legacy file on a store whose tmp takes no link: {}",
+            Uuid::new_v4()
+        );
+        let sha = store.put_bytes(BlobOwner::Reference, data.as_bytes())?;
+        let plain = store.path(&sha)?;
+        let tmp = dir.path().join("tmp");
+        set_mode(&tmp, 0o500)?;
+        // root writes into a read-only folder anyway, so the link would not fail there
+        let probe = tmp.join("probe");
+        if fs::write(&probe, b"x").is_ok() {
+            fs::remove_file(&probe)?;
+            set_mode(&tmp, 0o700)?;
+            return Ok(());
+        }
+        let read = store
+            .with_local_copy(owner, &sha)
+            .map(|copy| (copy.path().to_path_buf(), fs::read(copy.path())));
+        set_mode(&tmp, 0o700)?;
+        let (path, bytes) = read?;
+        assert_eq!(path, plain);
+        assert_eq!(bytes?, data.as_bytes());
+        assert_eq!(
+            fs::read(&plain)?,
+            data.as_bytes(),
+            "dropping the copy leaves the stored file"
+        );
         Ok(())
     }
 
