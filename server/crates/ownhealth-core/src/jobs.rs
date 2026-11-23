@@ -170,7 +170,7 @@ impl From<crate::Error> for JobError {
             E::Db(_) => "DBAPIError",
             E::Io(_) => "OSError",
             E::Json(_) => "JSONDecodeError",
-            E::Other(_) | E::AuditUncheckable(_) | E::Key(_) => "RuntimeError",
+            E::Other(_) | E::AuditUncheckable(_) | E::Key(_) | E::RestoreLoss(_) => "RuntimeError",
             E::NotImplemented(_) => "NotImplementedError",
         };
         let permanent = matches!(e, E::NotImplemented(_) | E::WearableIngestDenied { .. });

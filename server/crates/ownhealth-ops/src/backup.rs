@@ -1295,9 +1295,7 @@ async fn record_lost(
     let mut conn = PgConnection::connect(url).await?;
     let referenced = referenced_blobs(&mut conn).await?;
     conn.close().await?;
-    let mut file = keyfile::read_for_install(settings)
-        .map_err(|e| ops_error(e.0))?
-        .unwrap_or_default();
+    let mut file = keyfile::read_for_install(settings)?.unwrap_or_default();
     let before = file.lost.clone();
     for (owner, sha) in referenced {
         if let BlobOwner::Profile(p) = owner
@@ -1308,7 +1306,7 @@ async fn record_lost(
         }
     }
     if file.lost != before {
-        keyfile::write(&settings.keyring_path(), &file).map_err(|e| ops_error(e.0))?;
+        keyfile::write(&settings.keyring_path(), &file)?;
     }
     Ok(())
 }
@@ -1516,13 +1514,7 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
     let resume_lock = if resume_id.is_some() {
         record_lost(settings, &url, &closed, &backup_blobs)
             .await
-            .map_err(|error| {
-                let message = format!(
-                    "{error}. Fix the keyring error and rerun the same restore with the same backup, keyring, \
-                 and options. Keep the app stopped until restore finishes"
-                );
-                Error::Other(anyhow::Error::new(error).context(message))
-            })?;
+            .map_err(|source| Error::RestoreLoss(Box::new(source)))?;
         ring_lock
     } else {
         drop(ring_lock);

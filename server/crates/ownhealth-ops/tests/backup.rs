@@ -1208,7 +1208,13 @@ async fn a_partial_restore_can_retry_after_the_keyring_write_fails() -> R {
     fs::set_permissions(&folder, fs::Permissions::from_mode(0o500))?;
     let result = ownhealth_ops::restore_with(&settings, &l.archive, true).await;
     fs::set_permissions(&folder, fs::Permissions::from_mode(0o700))?;
-    let error = err_text(result);
+    let error = result.expect_err("restore cannot write the loss record");
+    let source = std::error::Error::source(&error).and_then(|source| source.downcast_ref::<ownhealth_core::Error>());
+    assert!(
+        matches!(source, Some(ownhealth_core::Error::Key(_))),
+        "expected the original keyring error, got {source:?}: {error}"
+    );
+    let error = error.to_string();
     assert!(error.contains("cannot write the keyring"), "{error}");
 
     let m = manifest(&l.archive)?;
