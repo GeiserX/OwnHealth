@@ -585,7 +585,7 @@ async fn the_owner_feed_shows_the_request_at_once() -> R {
     let other = b.env.anon().get(made.json["path"].as_str().unwrap_or_default()).await?;
     assert_eq!(other.status, 200);
     let other = String::from_utf8(other.bytes)?;
-    assert!(!other.contains("break-glass"), "{other}");
+    assert!(!other.contains("emergencia"), "{other}");
     assert_eq!(fed().await?, None);
     let text = b.fetch_feed().await?;
     let cal: Calendar = text.parse().map_err(anyhow::Error::msg)?;
@@ -615,10 +615,8 @@ async fn the_owner_feed_shows_the_request_at_once() -> R {
         description.contains(&opens.format("%Y-%m-%d %H:%M UTC").to_string()),
         "{description}"
     );
-    assert!(
-        description.contains(&format!("https://testserver/family/break-glass/{id}")),
-        "{description}"
-    );
+    // the cancel page comes with the break-glass screens: until then the event links nowhere
+    assert!(!description.contains("/family/break-glass/"), "{description}");
     // a generic feed names nobody
     assert!(!description.contains("Carmen"), "{description}");
     assert!(fed().await?.is_some());
