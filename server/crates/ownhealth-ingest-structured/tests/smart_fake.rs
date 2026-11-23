@@ -176,6 +176,8 @@ struct Book {
     extra: Vec<Value>,
     /// Extra entries a search returns on its first page, even if they do not match the query.
     extra_search_entries: Vec<(&'static str, Value)>,
+    /// Fixed wire responses for individual searches, keyed as in searches.
+    search_bodies: HashMap<String, (StatusCode, Vec<u8>)>,
     /// Bytes of successful Patient reads and search bundles, excluding Medication reads.
     served: usize,
 }
@@ -474,7 +476,15 @@ async fn search(
         } else {
             format!("{rtype}?{}", said.join("&"))
         };
-        lock(&s.book).searches.push(entry);
+        let fixed = {
+            let mut book = lock(&s.book);
+            let fixed = book.search_bodies.get(&entry).cloned();
+            book.searches.push(entry);
+            fixed
+        };
+        if let Some((status, bytes)) = fixed {
+            return (status, [("content-type", "application/fhir+json")], bytes).into_response();
+        }
     }
     if b.reject_include && get("_include").is_some() {
         return outcome(StatusCode::FORBIDDEN, "include outside the grant");
@@ -599,7 +609,7 @@ async fn search(
             "url": format!("{origin}/fhir/{rtype}?{}&page={}", kept.join("&"), page + 1)}));
     }
     let body = json!({"resourceType": "Bundle", "id": Uuid::new_v4().to_string(), "type": "searchset",
-        "meta": {"lastUpdated": Utc::now().to_rfc3339()}, "total": hits.len(), "link": links, "entry": entries});
+        "meta": {"lastUpdated": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)}, "total": hits.len(), "link": links, "entry": entries});
     fhir_answer(&s, StatusCode::OK, &body, true)
 }
 
@@ -2076,15 +2086,30 @@ async fn the_last_status_retry_stays_within_the_run_budget() -> R {
         .await?
         .map_err(anyhow::Error::msg)?;
     let status_required = serde_json::to_vec(&outcome_body("the status parameter is required for this search"))?;
+    let retry = serde_json::to_vec(&json!({
+        "resourceType": "Bundle", "type": "searchset", "entry": [{"resource": {
+            "resourceType": "Condition", "id": "sam-retry", "subject": {"reference": format!("Patient/{PATIENT}")},
+            "code": {"text": "Synthetic condition"},
+        }}],
+    }))?;
+    assert!(status_required.len() < retry.len());
+    let run_bytes = {
+        let mut book = w.fake.book();
+        // The retry fits exactly after the Patient and AllergyIntolerance responses.
+        // Charging the 400 response leaves too little room for it.
+        let cap = book.served + retry.len();
+        book.search_bodies
+            .insert("Condition".into(), (StatusCode::BAD_REQUEST, status_required));
+        book.search_bodies.insert(
+            "Condition?clinical-status=active,recurrence,relapse,inactive,remission,resolved".into(),
+            (StatusCode::OK, retry),
+        );
+        cap
+    };
     let caps = smart::Caps {
-        // Count the 400 body, then leave too little room for the final bundle.
-        run_bytes: w.fake.book().served + status_required.len() + 64,
+        run_bytes,
         ..smart::Caps::default()
     };
-    w.fake.set(|b| {
-        b.fail = None;
-        b.require_status = Some("Condition");
-    });
     let got = w
         .day_with(source, t0() + Duration::minutes(2), &caps)
         .await?
