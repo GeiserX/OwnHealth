@@ -267,8 +267,11 @@ fn smart_name_tokens(s: &str) -> BTreeSet<String> {
         .filter(|c| !matches!(c, '\u{0300}'..='\u{036f}'))
         .collect::<String>()
         .to_lowercase();
+    if !name.chars().any(|c| c.is_alphabetic() && !is_combining_mark(c)) {
+        return BTreeSet::new();
+    }
     name.split(|c: char| !c.is_alphanumeric() && !is_combining_mark(c))
-        .filter(|t| t.chars().any(|c| c.is_alphabetic() && !is_combining_mark(c)))
+        .filter(|t| t.chars().any(|c| c.is_alphanumeric() && !is_combining_mark(c)))
         .map(String::from)
         .collect()
 }
@@ -1102,8 +1105,10 @@ mod tests {
                 verifies("Sam иванов", "Иванов"),
                 verifies("Sam ξενος", "ΞΈΝΟΣ"),
                 verifies("Sam Nuñez", "Núñez"),
+                verifies("Sam 2", "3"),
+                verifies("Sam 2", "2"),
             ],
-            [false, false, false, false, true, true, true, true]
+            [false, false, false, false, true, true, true, true, false, true]
         );
     }
 
