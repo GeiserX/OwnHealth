@@ -866,6 +866,12 @@ fn read_manifest(archive: &Path) -> Result<Value> {
             py_repr(manifest.get("schema"))
         )));
     }
+    if manifest["keys"].get("keyring").is_none() && manifest["tables"].get("profile_key").is_some() {
+        return Err(ops_error(
+            "this is a keyed backup from before the keyring. Restore it with the build that wrote it, \
+             then take a new backup with this one",
+        ));
+    }
     Ok(manifest)
 }
 
@@ -967,12 +973,8 @@ fn backup_key(settings: &Settings, manifest: &Value) -> Result<Option<Kek>> {
 
 /// The profile keys of a backup, as the keyring holds them now.
 struct RingKeys {
-    legacy: bool,
-    /// Rows an older dump did not count: its tombstones, and the keyring keys of its profiles with
-    /// no key row.
-    legacy_rows_added: i64,
     fingerprint: Vec<u8>,
-    /// the keyring as read: a legacy dump's key rows are checked against it after pg_restore
+    /// the keyring as read, including keys newer than the backup
     file: keyfile::KeyringFile,
     /// the wrapped key of each profile the keyring still holds
     keys: Vec<(Uuid, Vec<u8>)>,
@@ -990,8 +992,8 @@ struct RingKeys {
 /// The flag that lets a restore go on without the keys the keyring lacks.
 const ALLOW_MISSING: &str = "--allow-missing-keys";
 
-/// Select and authenticate keys before the restore loads anything. Older manifests use UUIDs
-/// alone. A legacy dump carries its own keys, but must still apply current tombstones.
+/// Select and authenticate keys before the restore loads anything. Early keyring manifests use
+/// UUIDs alone. Keyless 0.x backups have no keys to install.
 fn ring_keys(
     settings: &Settings,
     manifest: &Value,
@@ -1017,10 +1019,13 @@ fn ring_keys(
             "keys.key_ids does not match the manifest's keys.keyring list",
         ));
     }
+    let Some(ids) = ids else {
+        return Ok(None);
+    };
     let file = keyfile::path(settings);
     let ring = match keyfile::read(&file).map_err(|e| ops_error(e.0))? {
         Some(ring) => ring,
-        None if ids.is_none_or(Vec::is_empty) || allow_missing => keyfile::KeyringFile::default(),
+        None if ids.is_empty() || allow_missing => keyfile::KeyringFile::default(),
         None => {
             return Err(ops_error(format!(
                 "no keyring at {}: this backup holds no profile key, they are in keyring.json on the keyring \
@@ -1042,12 +1047,7 @@ fn ring_keys(
             file.display()
         )));
     }
-    if ids.is_none() && ring.shredded.is_empty() && ring.profiles.is_empty() {
-        return Ok(None);
-    }
     let mut out = RingKeys {
-        legacy: ids.is_none(),
-        legacy_rows_added: 0,
         fingerprint: ring.kek_fingerprint.clone().unwrap_or_default(),
         file: ring.clone(),
         keys: Vec::new(),
@@ -1061,7 +1061,7 @@ fn ring_keys(
         missing: Vec::new(),
         allow_missing,
     };
-    for id in ids.into_iter().flatten() {
+    for id in ids {
         let id = id
             .as_str()
             .and_then(|i| Uuid::parse_str(i).ok())
@@ -1109,70 +1109,11 @@ fn ring_keys(
     Ok(Some(out))
 }
 
-/// Load selected keys into a new-format dump and apply the current tombstones to any dump with a
-/// `profile_key` table. A partial restore leaves missing profiles without a key row.
-///
-/// A profile of the dump with no key row gets the keyring's key, when the keyring holds one: the
-/// backup was taken before the profile's first sealed file, and a new key made by its next file
-/// would replace the keyring's key, which the newer backups need. The same holds in a legacy dump
-/// for a key row that a tombstone closes while the keyring holds a newer key for the profile (it was
-/// deleted, and is back since): the newer key replaces the row, and the profile is listed as
-/// shredded.
-async fn load_keys(url: &str, ring: &mut RingKeys, kek: Option<&Kek>) -> Result<()> {
+/// Load the selected keys and the current tombstones. A profile in the dump that stored its first
+/// sealed file after the backup gets its current key, so its next file uses the same key.
+async fn load_keys(url: &str, ring: &RingKeys) -> Result<()> {
     let mut conn = PgConnection::connect(url).await?;
     let mut tx = conn.begin().await?;
-    if ring.legacy {
-        let keyed: bool = sqlx::query_scalar("select to_regclass('public.profile_key') is not null")
-            .fetch_one(&mut *tx)
-            .await?;
-        if !keyed {
-            return Ok(());
-        }
-        // the profiles whose key the dump still holds and a tombstone closes: deleted since the dump
-        ring.shredded = sqlx::query_scalar(
-            "select profile_id from profile_key where profile_id = any($1) and wrapped_dek is not null \
-             order by profile_id",
-        )
-        .bind(&ring.tombstones)
-        .fetch_all(&mut *tx)
-        .await?;
-        ring.legacy_rows_added = sqlx::query_scalar(
-            "select count(*) from unnest($1::uuid[]) as tombstone(id) \
-             where not exists (select 1 from profile_key where profile_id = tombstone.id)",
-        )
-        .bind(&ring.tombstones)
-        .fetch_one(&mut *tx)
-        .await?;
-        let back: Vec<Uuid> = ring
-            .file
-            .shredded
-            .iter()
-            .filter(|p| ring.file.profiles.contains_key(p))
-            .copied()
-            .collect();
-        let rows: Vec<(Uuid, Vec<u8>, Option<Vec<u8>>)> = sqlx::query_as(
-            "select profile_id, wrapped_dek, kek_fingerprint from profile_key \
-             where profile_id = any($1) and wrapped_dek is not null order by profile_id",
-        )
-        .bind(&back)
-        .fetch_all(&mut *tx)
-        .await?;
-        for (id, wrapped, fingerprint) in rows {
-            let archive_id = kek
-                .zip(fingerprint)
-                .and_then(|(k, f)| k.unwrap(id, &f, &wrapped).ok())
-                .map(|dek| dek.archive_id());
-            if ring.file.closes(id, archive_id.as_deref()) {
-                sqlx::query("delete from profile_key where profile_id = $1")
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
-                ring.keys.push((id, ring.file.profiles[&id].clone()));
-                ring.shredded.push(id);
-            }
-        }
-        ring.shredded.sort();
-    }
     for (id, wrapped) in &ring.keys {
         sqlx::query("insert into profile_key (profile_id, wrapped_dek, kek_fingerprint) values ($1, $2, $3)")
             .bind(id)
@@ -1190,7 +1131,7 @@ async fn load_keys(url: &str, ring: &mut RingKeys, kek: Option<&Kek>) -> Result<
     .execute(&mut *tx)
     .await?;
     let (held, wrapped): (Vec<Uuid>, Vec<Vec<u8>>) = ring.file.profiles.iter().map(|(id, w)| (*id, w.clone())).unzip();
-    let installed = sqlx::query(
+    sqlx::query(
         "insert into profile_key (profile_id, wrapped_dek, kek_fingerprint) \
          select k.id, k.wrapped, $3 from unnest($1::uuid[], $2::bytea[]) as k(id, wrapped) \
          join profile p on p.id = k.id \
@@ -1200,11 +1141,7 @@ async fn load_keys(url: &str, ring: &mut RingKeys, kek: Option<&Kek>) -> Result<
     .bind(&wrapped)
     .bind(&ring.fingerprint)
     .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if ring.legacy {
-        ring.legacy_rows_added += i64::try_from(installed).unwrap_or(i64::MAX);
-    }
+    .await?;
     tx.commit().await?;
     conn.close().await?;
     Ok(())
@@ -1272,10 +1209,7 @@ async fn compare(
     let expected_chain = manifest.get("audit_chain").filter(|v| v.is_object());
     let mut conn = PgConnection::connect(url).await?;
     let mut tx = conn.begin().await?;
-    let mut counts = table_counts(&mut tx).await?; // before build_state, which may add state_snapshot rows
-    if let (Some(ring), Some(count)) = (ring, counts.get_mut("profile_key")) {
-        *count -= ring.legacy_rows_added;
-    }
+    let counts = table_counts(&mut tx).await?; // before build_state, which may add state_snapshot rows
     let actual_chain = match expected_chain {
         Some(_) => {
             let read = chain_read(&mut tx, None).await?;
@@ -1388,7 +1322,7 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
     let manifest = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
     let ring_lock = keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?;
-    let mut ring = ring_keys(settings, &manifest, kek.as_ref(), allow_missing_keys)?;
+    let ring = ring_keys(settings, &manifest, kek.as_ref(), allow_missing_keys)?;
     if let Some(r) = ring.as_ref().filter(|r| !r.missing.is_empty() && !r.allow_missing) {
         return Err(ops_error(format!(
             "the keyring {} holds no key for {} profile(s) of this backup and does not list them as \
@@ -1436,8 +1370,8 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
         }
     }
     pg_restore(&url, archive).await?;
-    if let Some(r) = &mut ring {
-        load_keys(&url, r, kek.as_ref()).await?;
+    if let Some(r) = &ring {
+        load_keys(&url, r).await?;
         record_lost(settings, &url, r, &backup_blobs).await?;
     }
     drop(ring_lock);
@@ -1510,7 +1444,7 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
     let manifest = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
     let ring_lock = keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?;
-    let mut ring = ring_keys(settings, &manifest, kek.as_ref(), false)?;
+    let ring = ring_keys(settings, &manifest, kek.as_ref(), false)?;
     // The scratch database is dropped at the end, so nothing it loads reaches the live keyring: the
     // lock covers the read alone, and a profile delete on the live install never waits on pg_restore.
     drop(ring_lock);
@@ -1526,8 +1460,8 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
     let target = with_db(&live, &scratch);
     let result = async {
         pg_restore(&target, archive).await?;
-        if let Some(r) = &mut ring {
-            load_keys(&target, r, kek.as_ref()).await?;
+        if let Some(r) = &ring {
+            load_keys(&target, r).await?;
         }
         compare(&target, &manifest, &files, kek.as_ref(), ring.as_ref()).await
     }
