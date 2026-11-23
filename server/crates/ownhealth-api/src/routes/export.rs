@@ -158,9 +158,15 @@ async fn ips(
     // the summary behind the Bundle reads one snapshot and stores its state, as on the sheet
     let mut tx = ownhealth_rules::summary::begin_read(&rt.pool).await?;
     let read_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("select now()").fetch_one(&mut *tx).await?;
-    let perm = Caller(p.clone())
-        .require(&mut tx, &profile, Some("read:summary"), None)
-        .await?;
+    // emergency access reads in the app and is never exported: the Bundle carries the caller's own
+    // grant only
+    let perm = crate::routes::break_glass::own(
+        Caller(p.clone())
+            .require(&mut tx, &profile, Some("read:summary"), None)
+            .await?,
+        "read:summary",
+        "Emergency access cannot export this profile.",
+    )?;
     let today = today_utc();
     let (out, state) = ownhealth_ops::ips::read(&mut tx, perm.profile.id, &perm.scopes, &lang, today).await?;
     ownhealth_rules::commit_read(tx, perm.profile.id, &state).await?;

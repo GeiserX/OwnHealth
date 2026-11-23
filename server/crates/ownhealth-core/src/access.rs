@@ -7,8 +7,17 @@
 //! The browser session is a token with every scope. A user with no grant on a profile cannot reach
 //! it, whatever a token says. The owner's own grant ignores locks; locks restrict everyone else.
 //! Every surface (UI, REST, MCP, export) calls `effective_permission` or `require`.
+//!
+//! Break-glass (`break_glass.rs`): for a person in the browser, an open emergency request is added to
+//! their grant (its categories joined to the grant's, role `viewer` when they hold no grant). Only a
+//! REST request that records the uses (`break_glass::arm`) gets it; tokens, OAuth, calendar feeds and
+//! share links never do. A read that uses scopes supplied by the request is recorded. A write
+//! (`require` with an action, a document move or retraction, a review decision) needs its scope in the
+//! caller's own grant (`Permission::own_scopes`, `Permission::own_only`), and exports, feeds and the
+//! imaging viewer read with that grant alone (`Permission::own`).
 
 use sqlx::AssertSqlSafe;
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -198,8 +207,25 @@ pub struct Permission {
     pub profile: Profile,
     pub role: String,
     pub scopes: Scopes,
-    /// An emergency grant (profile_grant.break_glass): it reads, and it never shares.
+    /// An emergency grant (profile_grant.break_glass, or an open break-glass request added to the
+    /// grant): it reads, and it never shares.
     pub break_glass: bool,
+    /// Reachable only through an open break-glass request: no grant row, so no token, consent,
+    /// calendar feed, export or share link for it.
+    pub break_glass_only: bool,
+    /// The scopes without emergency access: what the caller's own grant gives, when it is not an
+    /// emergency grant row. Empty when only an open request reaches the profile.
+    pub own_scopes: Scopes,
+    /// Whether a live, non-emergency grant row exists for this profile.
+    pub has_ordinary_grant: bool,
+    pub emergency: Option<EmergencyPermission>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmergencyPermission {
+    usage: crate::break_glass::Use,
+    scopes: Scopes,
+    added: Scopes,
 }
 
 impl Permission {
@@ -207,8 +233,67 @@ impl Permission {
         self.scopes.contains(scope)
     }
 
+    /// A sensitive fact needs both scopes from one permission source.
+    pub fn may_read_sensitive(&self, category_scope: &str) -> bool {
+        let has_both = |scopes: &Scopes| scopes.contains(category_scope) && scopes.contains("read:sensitive");
+        has_both(&self.scopes)
+            && self.emergency.as_ref().is_none_or(|e| {
+                has_both(&e.scopes) || (!e.added.contains(category_scope) && !e.added.contains("read:sensitive"))
+            })
+    }
+
+    /// Record the request if it gave access to this profile or supplied a scope used by the read.
+    pub fn record_read(&self, scopes: &[&str]) {
+        if let Some(e) = &self.emergency
+            && (self.break_glass_only || scopes.iter().any(|s| e.added.contains(*s)))
+        {
+            crate::break_glass::record(e.usage);
+        }
+    }
+
+    /// For a read whose response uses the whole set of effective scopes.
+    pub fn read_scopes(&self) -> &Scopes {
+        if let Some(e) = &self.emergency
+            && (self.break_glass_only || !e.added.is_empty())
+        {
+            crate::break_glass::record(e.usage);
+        }
+        &self.scopes
+    }
+
+    /// Scopes for a reader whose sensitive facts all belong to `category_scope`.
+    pub fn read_scopes_for_sensitive(&self, category_scope: &str) -> Cow<'_, Scopes> {
+        let scopes = self.read_scopes();
+        if scopes.contains("read:sensitive") && !self.may_read_sensitive(category_scope) {
+            let mut filtered = scopes.clone();
+            filtered.remove("read:sensitive");
+            Cow::Owned(filtered)
+        } else {
+            Cow::Borrowed(scopes)
+        }
+    }
+
     pub fn can(&self, action: &str) -> bool {
-        can(&self.role, action)
+        !self.break_glass_only && can(&self.role, action)
+    }
+
+    /// This permission without emergency access, when it still holds `scope`: what an export, a
+    /// calendar feed or the imaging viewer reads with, since none of them may carry what only
+    /// break-glass opened.
+    pub fn own(&self, scope: &str) -> Option<Permission> {
+        self.own_scopes.contains(scope).then(|| self.own_only())
+    }
+
+    /// This permission without emergency access: what a change checks its object against, since
+    /// emergency access only reads.
+    pub fn own_only(&self) -> Permission {
+        Permission {
+            scopes: self.own_scopes.clone(),
+            break_glass: false,
+            break_glass_only: false,
+            emergency: None,
+            ..self.clone()
+        }
     }
 }
 
@@ -263,15 +348,66 @@ pub async fn effective_permission(
     .bind(profile_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((role, categories, break_glass)) = grant else {
-        return Err(not_granted());
+    let open = if union_applies(principal, user_id) {
+        crate::break_glass::active(&mut *conn, user_id, Some(profile_id))
+            .await?
+            .into_iter()
+            .next()
+    } else {
+        None
     };
-    let scopes = effective_scopes(&principal.scopes, &scope_set(&categories), &profile.locks(), &role);
-    Ok(Permission {
+    combine(principal, profile, grant, open.as_ref(), user_id).ok_or_else(not_granted)
+}
+
+/// Whether an open break-glass request of this caller counts: a person in the browser, inside a REST
+/// request that records its uses.
+fn union_applies(principal: &Principal, user_id: Uuid) -> bool {
+    matches!(principal.kind, PrincipalKind::Session | PrincipalKind::Dev)
+        && principal.profile_ids.is_none()
+        && crate::break_glass::armed_for(user_id)
+}
+
+/// Combine the grant row and the open request, keeping their effective scopes distinct.
+fn combine(
+    principal: &Principal,
+    profile: Profile,
+    grant: Option<(String, Vec<String>, bool)>,
+    open: Option<&(Uuid, Uuid, Vec<String>)>,
+    user_id: Uuid,
+) -> Option<Permission> {
+    let (role, categories, emergency_grant, only) = match (grant, open) {
+        (None, None) => return None,
+        (Some((role, cats, bg)), _) => (role, scope_set(&cats), bg, false),
+        (None, Some(_)) => ("viewer".to_string(), Scopes::new(), false, true),
+    };
+    let locks = profile.locks();
+    let grant_scopes = effective_scopes(&principal.scopes, &categories, &locks, &role);
+    let emergency = open.map(|(request_id, _, categories)| {
+        let scopes = effective_scopes(&principal.scopes, &scope_set(categories), &locks, &role);
+        let added = scopes.difference(&grant_scopes).cloned().collect();
+        EmergencyPermission {
+            usage: crate::break_glass::Use {
+                request_id: *request_id,
+                profile_id: profile.id,
+                contact: user_id,
+            },
+            scopes,
+            added,
+        }
+    });
+    let mut scopes = grant_scopes.clone();
+    if let Some(e) = &emergency {
+        scopes.extend(e.added.iter().cloned());
+    }
+    Some(Permission {
         profile,
         role,
         scopes,
-        break_glass,
+        break_glass: emergency_grant || emergency.is_some(),
+        break_glass_only: only,
+        own_scopes: if emergency_grant { Scopes::new() } else { grant_scopes },
+        has_ordinary_grant: !only && !emergency_grant,
+        emergency,
     })
 }
 
@@ -285,6 +421,7 @@ struct GrantedProfile {
 }
 
 /// Every profile the principal may reach, in slug order, with role and effective scopes.
+/// Callers record emergency access when a response uses these permissions.
 pub async fn accessible_profiles(conn: &mut PgConnection, principal: &Principal) -> Result<Vec<Permission>> {
     let Some(user_id) = principal.user_id else {
         return Ok(Vec::new());
@@ -297,31 +434,32 @@ pub async fn accessible_profiles(conn: &mut PgConnection, principal: &Principal)
     );
     let rows: Vec<GrantedProfile> = sqlx::query_as(AssertSqlSafe(sql.as_str()))
         .bind(user_id)
-        .fetch_all(conn)
+        .fetch_all(&mut *conn)
         .await?;
-    Ok(rows
-        .into_iter()
-        .filter(|r| {
-            principal
-                .profile_ids
-                .as_ref()
-                .is_none_or(|ids| ids.contains(&r.profile.id))
-        })
-        .map(|r| {
-            let scopes = effective_scopes(
-                &principal.scopes,
-                &scope_set(&r.categories),
-                &r.profile.locks(),
-                &r.role,
-            );
-            Permission {
-                profile: r.profile,
-                role: r.role,
-                scopes,
-                break_glass: r.break_glass,
-            }
-        })
-        .collect())
+    let in_token = |id: &Uuid| principal.profile_ids.as_ref().is_none_or(|ids| ids.contains(id));
+    let open = if union_applies(principal, user_id) {
+        crate::break_glass::active(&mut *conn, user_id, None).await?
+    } else {
+        Vec::new()
+    };
+    let mut out: Vec<Permission> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for r in rows.into_iter().filter(|r| in_token(&r.profile.id)) {
+        seen.insert(r.profile.id);
+        let req = open.iter().find(|o| o.1 == r.profile.id);
+        let grant = Some((r.role, r.categories, r.break_glass));
+        out.extend(combine(principal, r.profile, grant, req, user_id));
+    }
+    let before = out.len();
+    for req in open.iter().filter(|o| !seen.contains(&o.1)) {
+        if let Some(profile) = get_profile(&mut *conn, req.1).await? {
+            out.extend(combine(principal, profile, None, Some(req), user_id));
+        }
+    }
+    if out.len() > before {
+        out.sort_by(|a, b| a.profile.slug.cmp(&b.profile.slug));
+    }
+    Ok(out)
 }
 
 /// A profile reference: a slug, `"me"`, a uuid, or none (the token's default profile).
@@ -357,8 +495,15 @@ pub async fn resolve_profile_ref(conn: &mut PgConnection, principal: &Principal,
         ProfileRef::Name(n) => Some(n),
         ProfileRef::Default => None,
     };
+    // a name lookup reads nothing: the permission check that follows records a break-glass use
     let allowed = accessible_profiles(conn, principal).await?;
-    let slugs = || allowed.iter().map(|p| p.profile.slug.clone()).collect::<Vec<_>>();
+    let slugs = || {
+        allowed
+            .iter()
+            .filter(|p| p.has_ordinary_grant)
+            .map(|p| p.profile.slug.clone())
+            .collect()
+    };
     if matches!(name, None | Some("") | Some("me")) {
         if name.is_none()
             && let Some(d) = principal.default_profile
@@ -419,6 +564,21 @@ pub async fn require(
             "forbidden",
             format!("The role {} cannot {action} on this profile.", perm.role),
         ));
+    }
+    // emergency access only reads: an action needs its scope from the caller's own grant
+    if let (Some(scope), Some(_)) = (scope, action)
+        && !perm.own_scopes.contains(scope)
+    {
+        return Err(Error::access_denied(
+            "break_glass",
+            format!("Emergency access only reads; this needs {scope} on your own grant."),
+        ));
+    }
+    if action.is_none() {
+        match scope {
+            Some(scope) => perm.record_read(&[scope]),
+            None => perm.record_read(&[]),
+        }
     }
     Ok(perm)
 }

@@ -72,9 +72,7 @@ pub struct GenomeGate {
 /// Sensitive genome facts need the agents switch, read:genome and read:sensitive (mcp.md 9.7).
 pub fn genome_gate(perm: &Permission, as_of: NaiveDate, age_of_majority: i32) -> GenomeGate {
     GenomeGate {
-        include_sensitive: perm.profile.genome_sensitive_agents
-            && perm.has("read:genome")
-            && perm.has("read:sensitive"),
+        include_sensitive: perm.profile.genome_sensitive_agents && perm.may_read_sensitive("read:genome"),
         minor: perm.profile.is_minor(as_of, age_of_majority),
     }
 }
@@ -167,7 +165,6 @@ pub async fn hidden_reasons(
             hide(out, sid, Why::Scope(scope_label(scope)));
         }
     };
-    let sensitive_ok = perm.scopes.contains("read:sensitive");
     let foreign = |p: Option<Uuid>| p.is_some_and(|p| p != pid);
 
     let rows: Vec<(String, String, Option<Uuid>)> =
@@ -193,8 +190,9 @@ pub async fn hidden_reasons(
         if profile_id != pid {
             hide(&mut out, &sid, Why::Foreign);
         }
-        need(&mut out, &sid, obs_category_scope(Some(&category)));
-        if !sensitivity.is_empty() && !sensitive_ok {
+        let scope = obs_category_scope(Some(&category));
+        need(&mut out, &sid, scope);
+        if !sensitivity.is_empty() && !perm.may_read_sensitive(scope) {
             hide(&mut out, &sid, Why::Sensitive);
         }
     }
@@ -215,7 +213,7 @@ pub async fn hidden_reasons(
                 hide(&mut out, &sid, Why::Foreign);
             }
             need(&mut out, &sid, "read:records");
-            if !sensitivity.is_empty() && !sensitive_ok {
+            if !sensitivity.is_empty() && !perm.may_read_sensitive("read:records") {
                 hide(&mut out, &sid, Why::Sensitive);
             }
         }
@@ -231,7 +229,7 @@ pub async fn hidden_reasons(
             hide(&mut out, &sid, Why::Foreign);
         }
         need(&mut out, &sid, "read:summary");
-        if !sensitivity.is_empty() && !sensitive_ok {
+        if !sensitivity.is_empty() && !perm.may_read_sensitive("read:summary") {
             hide(&mut out, &sid, Why::Sensitive);
         }
     }
@@ -403,7 +401,7 @@ pub async fn page_refusal(
         if !perm.scopes.contains(scope) {
             reasons.push(Why::Scope(scope_label(scope)));
         }
-        if obs.get("sensitivity").is_some_and(crate::envelope::truthy) && !perm.scopes.contains("read:sensitive") {
+        if obs.get("sensitivity").is_some_and(crate::envelope::truthy) && !perm.may_read_sensitive(scope) {
             reasons.push(Why::Sensitive);
         }
     }

@@ -258,6 +258,12 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
     for j in &mut jobs {
         pydantic_datetimes(j, &["created_at", "finished_at"]);
         let wearable = j["kind"].as_str().is_some_and(|k| WEARABLE_JOBS.contains(&k));
+        if let Some(id) = j["profile_id"].as_str()
+            && let Some(index) = pids.iter().position(|pid| pid == id)
+        {
+            let scopes: &[&str] = if wearable { &["read:wearables"] } else { &[] };
+            perms[index].record_read(scopes);
+        }
         let may_read = j["profile_id"]
             .as_str()
             .is_some_and(|p| wearables.iter().any(|w| w == p));

@@ -75,7 +75,8 @@ pub async fn due(
     .await?;
     tx.commit().await?;
     let pack = ownhealth_rules::load_pack().map_err(ownhealth_core::Error::from)?;
-    let mut out = ownhealth_rules::prevention::render(&doc, &pack, lang.unwrap_or(&principal.lang), &perm.scopes)?;
+    let mut out =
+        ownhealth_rules::prevention::render(&doc, &pack, lang.unwrap_or(&principal.lang), perm.read_scopes())?;
     let reasons: HashMap<String, String> = reasons.into_iter().collect();
     for list in ["items", "hidden"] {
         for it in out.get_mut(list).and_then(Value::as_array_mut).into_iter().flatten() {
@@ -261,7 +262,7 @@ async fn decide(
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), Some("write")).await?;
     let pid = perm.profile.id;
-    if !known_item(&mut tx, &perm, &key).await? {
+    if !known_item(&mut tx, &perm.own_only(), &key).await? {
         return Err(unknown_item());
     }
     if let Some((table, id)) = &evidence {
@@ -330,7 +331,7 @@ async fn undo(State(rt): State<Runtime>, caller: Caller, Path((p, key)): Path<(S
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), Some("write")).await?;
     // a lab gap the caller's scopes withhold has no decision they can see
-    let hidden = lab_key(&key)? && !perm.scopes.contains("read:labs");
+    let hidden = lab_key(&key)? && !perm.own_scopes.contains("read:labs");
     let id = if hidden {
         None
     } else {

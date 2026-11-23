@@ -165,7 +165,7 @@ pub async fn overview(rt: &Runtime, principal: &Principal, p: &str, min_evidence
     let found = ownhealth_genome::list_findings_typed(&mut tx, perm.profile.id, &gate, &q).await?;
     let pgx_grid = pgx::grid(&mut tx, &perm, &gate, min_evidence).await?;
     let mut locked_rows: Vec<Value> = Vec::new();
-    if surface(principal) == "ui" && !gate.minor {
+    if surface(principal) == "ui" && !gate.minor && perm.may_read_sensitive("read:genome") {
         for r in visible_rows(&mut tx, perm.profile.id, None).await? {
             if r.status == "current" && withheld_reason(&r, &gate) == Some("sensitive") {
                 locked_rows.push(json!({"category": r.category, "gene": r.gene}));

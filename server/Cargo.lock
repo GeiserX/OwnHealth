@@ -3978,6 +3978,7 @@ dependencies = [
  "ownhealth-normalize",
  "ownhealth-ops",
  "ownhealth-rules",
+ "proc-macro2",
  "regex",
  "reqwest",
  "serde",

@@ -109,7 +109,7 @@ pub async fn status(rt: &Runtime, principal: &Principal, p: &str, q: &StatusPara
         q.lang.as_deref().unwrap_or(&principal.lang),
         q.units.as_deref().unwrap_or(&principal.units),
         q.identity_mode.as_deref().unwrap_or(&principal.identity_mode),
-        Some(&perm.scopes),
+        Some(perm.read_scopes()),
     )?)
 }
 
@@ -120,7 +120,7 @@ pub async fn dashboard(rt: &Runtime, principal: &Principal, p: &str, q: &StatusP
         .await?;
     let lang = q.lang.as_deref().unwrap_or(&principal.lang);
     let as_of = q.as_of.unwrap_or_else(today_utc);
-    let out = ownhealth_rules::dashboard(&mut tx, perm.profile.id, as_of, lang, &perm.scopes).await?;
+    let out = ownhealth_rules::dashboard(&mut tx, perm.profile.id, as_of, lang, perm.read_scopes()).await?;
     audit(
         &mut tx,
         principal,

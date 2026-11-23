@@ -53,7 +53,7 @@ use axum::routing::{any, post};
 use axum::{Extension, Json, Router};
 use ownhealth_auth::principal::dev_principal;
 use ownhealth_auth::sessions::IDLE_MINUTES;
-use ownhealth_core::access::{Principal, PrincipalKind, effective_permission};
+use ownhealth_core::access::{Permission, Principal, PrincipalKind, effective_permission};
 use ownhealth_core::audit::{AuditEvent, hash_arg, write_audit};
 use ownhealth_core::config::Env;
 use ownhealth_core::{Error, Runtime, langs};
@@ -407,6 +407,12 @@ fn orthanc_down() -> ApiError {
     )
 }
 
+/// The viewer's DICOMweb reads run with no REST request around them, so they never see an open
+/// break-glass request: the link needs `read:records` on the caller's own grant, or it would never open.
+fn viewer_permission(perm: Permission) -> Result<Permission, ApiError> {
+    crate::routes::break_glass::own(perm, "read:records", "Emergency access cannot open the imaging viewer.")
+}
+
 /// `POST /api/profiles/{p}/imaging/studies/{uid}/open`: a viewer link for one study.
 async fn open(
     State(rt): State<Runtime>,
@@ -438,7 +444,7 @@ async fn open(
     // held while it comes: no connection, no transaction.
     let (profile_id, orthanc_id) = {
         let mut conn = rt.pool.acquire().await?;
-        let perm = caller.require(&mut conn, &p, Some("read:records"), None).await?;
+        let perm = viewer_permission(caller.require(&mut conn, &p, Some("read:records"), None).await?)?;
         let profile_id = perm.profile.id;
         (profile_id, bound_study(&mut conn, profile_id, &uid).await?)
     };
@@ -446,7 +452,7 @@ async fn open(
     // Then the same checks again in the audit transaction: the record must still name the Orthanc
     // study that Orthanc just confirmed.
     let mut tx = rt.pool.begin().await?;
-    let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
+    let perm = viewer_permission(caller.require(&mut tx, &p, Some("read:records"), None).await?)?;
     if perm.profile.id != profile_id || bound_study(&mut tx, profile_id, &uid).await? != orthanc_id {
         return Err(not_bound());
     }

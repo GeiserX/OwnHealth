@@ -7,6 +7,7 @@ pub mod afm;
 pub mod arrive;
 pub mod audit;
 pub mod blobs;
+pub mod break_glass;
 pub mod canonical;
 pub mod config;
 pub mod connector_oauth;
