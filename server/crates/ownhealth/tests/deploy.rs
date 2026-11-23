@@ -426,9 +426,18 @@ fn render_doc(compose: &Path, env_file: &Path, extra: &str, files: &[(&str, Stri
     for (name, body) in files {
         std::fs::write(dir.path().join(name), body)?;
     }
-    let out = Command::new("docker")
-        .args(["compose", "config", "--format", "json"])
-        .current_dir(dir.path())
+    render_config(dir.path(), None)
+}
+
+fn render_config(dir: &Path, project: Option<&str>) -> anyhow::Result<Value> {
+    let mut cmd = Command::new("docker");
+    cmd.arg("compose");
+    if let Some(project) = project {
+        cmd.args(["-p", project]);
+    }
+    let out = cmd
+        .args(["config", "--format", "json"])
+        .current_dir(dir)
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into()))
@@ -457,6 +466,36 @@ fn cases() -> [(&'static str, PathBuf, PathBuf, &'static str); 2] {
 
 fn env_str(v: &Value, key: &str) -> String {
     v["environment"][key].as_str().unwrap_or_default().to_string()
+}
+
+#[test]
+fn two_compose_projects_in_one_checkout_use_distinct_keyring_folders() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    for (case, compose, env_file, extra) in cases() {
+        let dir = tempfile::tempdir()?;
+        std::fs::copy(compose, dir.path().join("compose.yaml"))?;
+        std::fs::write(dir.path().join(".env"), std::fs::read_to_string(env_file)? + extra)?;
+        let mut sources = Vec::new();
+        for project in ["ownhealth", "ownhealth-demo"] {
+            let config = render_config(dir.path(), Some(project))?;
+            let source = |name: &str| -> anyhow::Result<&str> {
+                config["services"][name]["volumes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|m| m["target"] == "/keyring")
+                    .and_then(|m| m["source"].as_str())
+                    .ok_or_else(|| anyhow::anyhow!("{case} {project} {name}: no keyring source"))
+            };
+            assert_eq!(source("admin")?, source("app")?, "{case} {project}");
+            sources.push(source("admin")?.to_string());
+        }
+        assert_ne!(sources[0], sources[1], "{case}: projects share a keyring bind source");
+    }
+    Ok(())
 }
 
 #[test]
@@ -583,7 +622,7 @@ fn the_keyring_sits_on_its_own_mount_outside_the_data_volume() -> R {
             sources.push(own["source"].as_str().unwrap_or_default().to_string());
         }
         assert!(
-            sources[0] == sources[1] && sources[0].ends_with("/keyring"),
+            sources[0] == sources[1] && sources[0].ends_with("/keyring/ownhealth"),
             "{case}: {sources:?}"
         );
         for (name, svc) in services.as_object().into_iter().flatten() {
