@@ -118,16 +118,18 @@ impl BlobOwner {
 
 /// A blob as a file on local disk, for readers that need a path (SQLite, zip). The path is good
 /// while this value lives, so keep it for as long as any reader opened from the path is in use. In
-/// the plain layout it is the stored file itself; a sealed blob is decrypted into a file of the
-/// store's tmp folder, readable by this user only, removed when this drops (`sweep_tmp` removes one
-/// a killed process left). Such a copy holds an exclusive lock on its file while it lives, so the
-/// sweep of any process leaves it alone however long a reader takes.
+/// the plain layout it is the stored file itself, in a store that seals a hard link to it in the
+/// store's tmp folder (`ownhealth seal-legacy` may remove the stored file while a reader still opens
+/// the path; the link keeps the bytes). A sealed blob is decrypted into a file of the tmp folder,
+/// readable by this user only. A file in the tmp folder is removed when this drops (`sweep_tmp`
+/// removes one a killed process left), and holds a lock on its file while it lives, so the sweep of
+/// any process leaves it alone however long a reader takes.
 #[derive(Debug)]
 #[must_use = "the path is good only while the LocalCopy lives"]
 pub struct LocalCopy {
     path: PathBuf,
     temporary: bool,
-    /// The decrypted copy's own handle, locked while the copy lives.
+    /// The copy's own handle, locked while the copy lives.
     held: Option<File>,
 }
 
@@ -331,8 +333,9 @@ pub fn plain_hashed_on(sha256: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Whether a live [`LocalCopy`] (of this process or another) holds the file at `path`: it keeps an
-/// exclusive lock on it while it lives, and a killed process's lock went with it.
+/// Whether a live [`LocalCopy`] (of this process or another) holds the file at `path`: it keeps a
+/// lock on it while it lives (shared on a link to a plain file, which several readers may hold), and
+/// a killed process's lock went with it.
 fn in_use(path: &Path) -> bool {
     File::open(path).is_ok_and(|f| matches!(f.try_lock(), Err(fs::TryLockError::WouldBlock)))
 }
@@ -789,16 +792,23 @@ impl BlobStore {
                 _ => BlobError::Io(e),
             })
         };
-        match self.find(owner, sha256)? {
-            None => Err(BlobError::NotFound),
-            Some(Found::Plain(p)) => Ok(BlobReader::Plain(self.checked_plain(owner, sha256, open(&p)?)?)),
-            Some(Found::Sealed { path, dek, slot, sha }) => Ok(BlobReader::Sealed(Box::new(SealedReader::open(
-                open(&path)?,
-                &dek,
-                slot.id(),
-                &sha,
-            )?))),
+        // a plain file can go between the lookup and the open (`seal-legacy` sealed it): look once more
+        for last in [false, true] {
+            return match self.find(owner, sha256)? {
+                None => Err(BlobError::NotFound),
+                Some(Found::Plain(p)) => match open(&p) {
+                    Err(BlobError::NotFound) if !last => continue,
+                    file => Ok(BlobReader::Plain(self.checked_plain(owner, sha256, file?)?)),
+                },
+                Some(Found::Sealed { path, dek, slot, sha }) => Ok(BlobReader::Sealed(Box::new(SealedReader::open(
+                    open(&path)?,
+                    &dek,
+                    slot.id(),
+                    &sha,
+                )?))),
+            };
         }
+        Err(BlobError::NotFound)
     }
 
     /// The bytes of `owner`'s blob as an async reader, with their size, for streaming a response. A
@@ -857,7 +867,39 @@ impl BlobStore {
     /// `owner`'s blob as a file on local disk, for readers that need a path. Prefer `open_seek`: a
     /// sealed blob is decrypted whole into a temporary file here.
     pub fn with_local_copy(&self, owner: BlobOwner, sha256: &str) -> Result<LocalCopy, BlobError> {
-        match self.find(owner, sha256)? {
+        for last in [false, true] {
+            match self.find(owner, sha256)? {
+                Some(Found::Plain(path)) if self.keys.is_some() => match self.link_plain(owner, sha256, &path) {
+                    // sealed and removed since the lookup (`seal-legacy`): look once more
+                    Err(BlobError::NotFound) if !last => continue,
+                    copy => return copy,
+                },
+                found => return self.local_copy(owner, sha256, found),
+            }
+        }
+        Err(BlobError::NotFound)
+    }
+
+    /// A [`LocalCopy`] of the plain file at `path` as a hard link in the tmp folder, locked (shared)
+    /// before the link exists, so the sweep leaves it alone from the start.
+    fn link_plain(&self, owner: BlobOwner, sha256: &str, path: &Path) -> Result<LocalCopy, BlobError> {
+        let not_found = |e: io::Error| match e.kind() {
+            io::ErrorKind::NotFound => BlobError::NotFound,
+            _ => BlobError::Io(e),
+        };
+        let file = self.checked_plain(owner, sha256, File::open(path).map_err(not_found)?)?;
+        file.lock_shared()?;
+        let link = self.root.join("tmp").join(format!("copy-{}", tmp_name()));
+        fs::hard_link(path, &link).map_err(not_found)?;
+        Ok(LocalCopy {
+            path: link,
+            temporary: true,
+            held: Some(file),
+        })
+    }
+
+    fn local_copy(&self, owner: BlobOwner, sha256: &str, found: Option<Found>) -> Result<LocalCopy, BlobError> {
+        match found {
             None => Err(BlobError::NotFound),
             Some(Found::Plain(path)) => {
                 self.checked_plain(owner, sha256, File::open(&path)?)?;
