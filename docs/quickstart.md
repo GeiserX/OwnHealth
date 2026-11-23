@@ -20,6 +20,7 @@ openssl rand -hex 48     # paste as OWNHEALTH_SECRET_KEY in .env
 mkdir -m 700 secrets && openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key && chmod 644 secrets/secrets_key
                          # seals every profile's files and inbox secrets: keep a copy with your backups
 mkdir -p inbox && sudo chown 10001:10001 inbox   # the watched folder; the app runs as user 10001
+mkdir -m 700 keyring && sudo chown 10001:10001 keyring   # the profile keys: never back up or copy this folder
 docker compose up -d
 ```
 

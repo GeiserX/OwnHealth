@@ -32,16 +32,18 @@ async fn seeded(dir: &Path) -> anyhow::Result<(TestDb, Settings)> {
     Ok((db, settings))
 }
 
-/// The binary on this fixture's database and data folder. The anchor folder is the fixture's too,
-/// whatever the environment that runs the tests sets.
+/// The binary on this fixture's database and data folder. The anchor and keyring folders are the
+/// fixture's too, whatever the environment that runs the tests sets.
 fn ownhealth(s: &Settings, args: &[&str]) -> anyhow::Result<Output> {
     Ok(Command::new(BIN)
         .args(args)
         .env("OWNHEALTH_DATABASE_URL", &s.database_url)
         .env("OWNHEALTH_DATA_DIR", &s.data_dir)
         .env("OWNHEALTH_ANCHOR_DIR", s.anchor_path())
+        .env("OWNHEALTH_KEYRING_DIR", s.keyring_path())
         .env("OWNHEALTH_SECRETS_KEY", s.secrets_key.as_deref().unwrap_or_default())
         .env_remove("OWNHEALTH_ANCHOR_DIR_FILE")
+        .env_remove("OWNHEALTH_KEYRING_DIR_FILE")
         .env_remove("OWNHEALTH_SECRETS_KEY_FILE")
         .output()?)
 }
@@ -344,6 +346,7 @@ fn env_for(s: &Settings, tmp: &Path) -> Env {
         ("OWNHEALTH_DATABASE_URL", s.database_url.clone()),
         ("OWNHEALTH_DATA_DIR", s.data_dir.display().to_string()),
         ("OWNHEALTH_ANCHOR_DIR", s.anchor_path().display().to_string()),
+        ("OWNHEALTH_KEYRING_DIR", s.keyring_path().display().to_string()),
         ("OWNHEALTH_SECRETS_KEY", s.secrets_key.clone().unwrap_or_default()),
         ("OWNHEALTH_BACKUP_STAGING", tmp.join("staging").display().to_string()),
         ("OWNHEALTH_RESTORE_DIR", tmp.join("restore").display().to_string()),
@@ -362,6 +365,7 @@ fn run(cmd: impl AsRef<std::ffi::OsStr>, env: &Env, args: &[&str]) -> anyhow::Re
         .args(args)
         .envs(env.vars.iter().map(|(k, v)| (k, v)))
         .env_remove("OWNHEALTH_ANCHOR_DIR_FILE")
+        .env_remove("OWNHEALTH_KEYRING_DIR_FILE")
         .env_remove("OWNHEALTH_SECRETS_KEY_FILE")
         .output()?)
 }
@@ -392,6 +396,12 @@ async fn backup_then_restore_test_then_restore_into_a_fresh_stack() -> R {
     assert_eq!(snaps.as_array().map(Vec::len), Some(1));
     assert_eq!(snaps[0]["tags"], serde_json::json!(["ownhealth"]));
     assert!(!tmp.path().join("staging").exists());
+    // the profile keys are in the keyring folder, never in the snapshot
+    assert!(s.keyring_path().join("keyring.json").is_file());
+    let listed = run(&restic, &env, &["ls", "latest"])?;
+    assert!(listed.status.success(), "{}", text(&listed));
+    let listed = String::from_utf8_lossy(&listed.stdout).to_string();
+    assert!(listed.contains("db.dump") && !listed.contains("keyring"), "{listed}");
 
     let check = script("restore-test.sh", &env)?;
     assert!(check.status.success(), "{}", text(&check));
@@ -402,6 +412,7 @@ async fn backup_then_restore_test_then_restore_into_a_fresh_stack() -> R {
     let fresh_db = TestDb::empty().await?;
     let mut fresh = fresh_db.settings(&tmp.path().join("fresh"))?;
     fresh.secrets_key = s.secrets_key.clone(); // the key the backup was made under
+    fresh.keyring_dir = Some(s.keyring_path()); // the keyring mount, outside the snapshot
     let restored = script("restore.sh", &env_for(&fresh, tmp.path()))?;
     assert!(restored.status.success(), "{}", text(&restored));
     let fresh_report: Value = serde_json::from_slice(&restored.stdout)?;

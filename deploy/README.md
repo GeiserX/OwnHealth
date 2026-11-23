@@ -28,6 +28,7 @@ cp src/deploy/restic.env.example restic.env   # set RESTIC_REPOSITORY, and the S
 mkdir -p deploy && cp -r src/deploy/restic src/deploy/db deploy/
 
 mkdir -p inbox && sudo chown 10001:10001 inbox   # the watched folder (docs/recipes/scanner-to-folder.md)
+mkdir -m 700 keyring && sudo chown 10001:10001 keyring   # the profile keys, outside every backup (see Backups)
 mkdir -m 700 secrets
 openssl rand -base64 32 | tr -d '\n' > secrets/db_password
 openssl rand -base64 32 | tr -d '\n' > secrets/app_db_password
@@ -47,7 +48,7 @@ Open `https://<OWNHEALTH_DOMAIN>` and create the first account with a passkey. W
 
 **Store the restic password in your password manager now.** The backup is encrypted with it and it is not inside the backup. Without it, the backup cannot be read.
 
-**Store `secrets/secrets_key` there too.** Each profile's documents and genome files are encrypted under that profile's own key, and those keys are encrypted under this one. It also encrypts the passwords and tokens OwnHealth keeps for its inboxes (an IMAP password, a Paperless or Nightscout token, PDF passwords). The backup holds all of them only in encrypted form, so without this key the backup cannot be read. OwnHealth refuses to start without it.
+**Store `secrets/secrets_key` there too.** Each profile's documents and genome files are encrypted under that profile's own key, and those keys are encrypted under this one. It also encrypts the passwords and tokens OwnHealth keeps for its inboxes (an IMAP password, a Paperless or Nightscout token, PDF passwords). The backup holds all of them only in encrypted form, so without this key the backup cannot be read. OwnHealth refuses to start without it. This key is the only one you keep in the password manager. The profile keys stay in `keyring/keyring.json`, never in the password manager and never in a backup (see "The keyring" under Backups).
 
 **HTTPS.** Caddy gets a certificate on its own when `OWNHEALTH_DOMAIN` is a public DNS name. For a name only your LAN knows, put `tls internal` in the site block of the Caddyfile and trust Caddy's root certificate on your devices, or use a Caddy build with your DNS provider's challenge plugin. Passkeys need HTTPS on a real name, so plain HTTP on an IP address does not work past the first look.
 
@@ -159,11 +160,21 @@ A push inbox has no schedule, so OwnHealth never marks it stale; the second rule
 
 `ownhealth backup` writes three parts into one directory.
 
-- `db.dump`: `pg_dump -Fc` of the database. It includes each profile's key, encrypted under `secrets/secrets_key`. So a backup taken before you delete a profile still opens that profile's files, until retention removes the snapshot. The same goes for each held mail's key: a backup taken before you delete a held mail still opens that mail.
+- `db.dump`: `pg_dump -Fc` of the database, without the profile keys (`--exclude-table-data=profile_key`). Each held mail's key is still in it, encrypted under `secrets/secrets_key`: a backup taken while a mail was held still opens that mail, until retention removes the snapshot.
 - `blobs/`: the original documents and genome files, hard-linked from the data volume, so the staging copy costs no space. A profile's files stay encrypted under its key, in `blobs/enc/`.
-- `manifest.json`: app version, migrations, row count per table, the list of blob hashes, the hash of each encrypted file's bytes, the fingerprint of the secrets key (never the key), the `state_hash` of every profile, and the head of the audit log (`audit_chain`: the number and hash of its newest entry, and how far the hash chain holds).
+- `manifest.json`: app version, migrations, row count per table, the list of blob hashes, the hash of each encrypted file's bytes, the fingerprint of the secrets key (never the key), the profiles whose key the backup needs from the keyring (`keys.keyring`), the `state_hash` of every profile, and the head of the audit log (`audit_chain`: the number and hash of its newest entry, and how far the hash chain holds).
 
 The dump, the row counts, the state hashes and the audit head come from one database snapshot. A backup taken while someone imports a lab report is still consistent. Files that the snapshot names stay on disk until the backup has copied them, also when someone releases a held mail, moves a document or deletes a profile while the backup runs. The removal of those files waits until the copy is done.
+
+**The keyring.** Each profile's key lives in the database for the app, and in `keyring/keyring.json` for the backups. The keys in that file are encrypted under `secrets/secrets_key`, so the file alone opens nothing. The dump leaves the keys out, and every backup rewrites `keyring.json` first. The folder is a bind mount of its own (`./keyring` on the host, `OWNHEALTH_KEYRING_DIR=/keyring` in the `admin` and `app` containers), outside the data volume, so it is never in the staging folder or in restic. A backup refuses a keyring folder inside the blob folder or the backup folder. Restore and the restore test read the keys from this file as it is now.
+
+When you delete a profile, OwnHealth removes its key from the database and rewrites `keyring.json` at once, before it deletes the files. From then on no backup opens that profile's files again, as long as no older copy of `keyring.json` exists. So:
+
+- Never back up or version the `keyring/` folder. Tell host-level backup tools (Time Machine, Duplicacy, a NAS snapshot, a volume backup) to skip it.
+- Keep at most one extra copy off the box, for when the disk dies. Overwrite that copy after every backup and every profile delete, and never keep versions of it. Do not put the file in your password manager: only `secrets/secrets_key` goes there.
+- After a profile delete, destroy every older copy of `keyring.json` you know of. The delete screen says so too.
+
+A backup still holds the deleted profile's rows (its records, without the files) until retention removes the snapshot: 7 daily, 5 weekly and 12 monthly snapshots by default, so about a year at most. One more exception has the same limit: a held mail, or a document that had no profile yet when the backup ran, has its own key in the dump. If it went to the deleted profile later, that backup still opens it until retention removes the snapshot.
 
 **The audit anchor.** Each backup also writes the audit head to `audit-head.json`, outside the database: in `OWNHEALTH_ANCHOR_DIR`, or `/data/anchor` on the data volume by default. The file is replaced atomically and only its owner can read it. The backup refuses a folder or file that is a symlink, or that another user or group may write. The next backup first checks that this entry of the live log still has the same hash. Someone with the database owner's rights can edit an entry and hash the whole log again, so that the log checks out on its own; the anchor catches that. When the check fails, the backup stops before it writes anything and exits 1 with the entry it expected, and the audit page on MCP & access shows the mismatch. Find out what changed first. If the database was restored from an older backup by hand (`ownhealth restore` resets the anchor itself, see Restore), that explains it. Then move `audit-head.json` aside and keep it as evidence: the next backup anchors the log as it is now. The first backup finds no anchor, checks nothing, and writes one. Two backups never move the anchor at once, and a backup only moves it forward. A log the page shows as broken, or that cannot be checked at all, does not stop the backups: the manifest records it, and the anchor stays where it was. A broken log is never anchored again, so the anchor stays at the last head that held. It moves on only once the whole log holds again, for example after the changed entry is put back as it was. Moving `audit-head.json` aside does not change that: the next backup then acts as a first backup, and a first backup anchors only a log that holds.
 
@@ -187,7 +198,7 @@ A backup that was never restored counts as missing. `restic/restore-test.sh` pro
 
 1. restic restores the snapshot into `/data/backups/restore`.
 2. `ownhealth verify-restore` loads the dump into a scratch database `<db>_restore_check`.
-3. It compares the row count of every table with the manifest, hashes every blob again, rebuilds the state of every profile and compares each `state_hash` with the manifest. An encrypted file the manifest does not list counts as corrupt. It opens every profile's key with the configured secrets key (`keys` in the report). It checks the restored audit log too: it must end at the head the manifest recorded, and hold as far as it held then.
+3. It loads the profile keys from `keyring.json`. It compares the row count of every table with the manifest, hashes every blob again, rebuilds the state of every profile and compares each `state_hash` with the manifest. An encrypted file the manifest does not list counts as corrupt. It opens every profile's key with the configured secrets key (`keys` in the report). A profile deleted since the backup is listed under `keys.shredded`: its files stay closed, and that is not a failure. A key the keyring lacks without listing the profile as deleted is listed under `keys.missing`, and fails the check. It checks the restored audit log too: it must end at the head the manifest recorded, and hold as far as it held then.
 4. It drops the scratch database and the restored files.
 
 It prints a JSON report and exits 1 on any difference.
@@ -201,7 +212,7 @@ It prints a JSON report and exits 1 on any difference.
     "2f42707f-20c9-406c-b04a-d17c398b68a6": {"expected": "sha256:5c61…", "actual": "sha256:5c61…", "ok": true}
   },
   "blobs": {"checked": 27, "missing": [], "corrupt": []},
-  "keys": {"checked": 4, "failed": [], "ok": true}
+  "keys": {"checked": 4, "failed": [], "shredded": [], "missing": [], "ok": true}
 }
 ```
 
@@ -212,7 +223,7 @@ It prints a JSON report and exits 1 on any difference.
 Use this to restore onto a new machine, or after losing the volumes.
 
 ```sh
-cd /opt/ownhealth                 # same compose.yaml, .env and secrets/ as before
+cd /opt/ownhealth                 # same compose.yaml, .env, secrets/ and keyring/ as before
 docker compose down               # if anything still runs
 docker volume rm ownhealth_ownhealth-data ownhealth_ownhealth-pg   # only when you mean to replace them
 docker compose up -d db
@@ -220,7 +231,7 @@ docker compose up -d db
 docker compose up -d
 ```
 
-`restore.sh` runs in a one-off admin container before the app starts. It refuses a database that already has tables, so it cannot overwrite a running instance. It needs the secrets key the backup was made with: with another key, or none, it stops before it loads anything and names the fingerprint it expected. After loading the dump and the blobs it rebuilds every profile's state and compares the `state_hash` with the manifest; the same hash means the restored data is the data you backed up. It exits 1 if anything differs. When everything matches and the backup's audit log held, it sets the audit anchor to the head of that backup (`audit_anchor` in its report), so the audit page and the next backup compare against the log as restored. It checks the anchor folder as a backup does: when the folder or file is a symlink, or another user or group may write it, the restore still succeeds but sets no anchor, and `audit_anchor_error` in its report says why.
+`restore.sh` runs in a one-off admin container before the app starts. It refuses a database that already has tables, so it cannot overwrite a running instance. It needs the secrets key the backup was made with: with another key, or none, it stops before it loads anything and names the fingerprint it expected. It needs the newest `keyring.json` in `keyring/` too. Without it, or when it lacks a key of the backup without listing that profile as deleted, the restore stops before it loads anything. A profile deleted since the backup comes back with its records but without its files, which no longer open (`keys.shredded` in the report). After loading the dump and the blobs it rebuilds every profile's state and compares the `state_hash` with the manifest; the same hash means the restored data is the data you backed up. It exits 1 if anything differs. When everything matches and the backup's audit log held, it sets the audit anchor to the head of that backup (`audit_anchor` in its report), so the audit page and the next backup compare against the log as restored. It checks the anchor folder as a backup does: when the folder or file is a symlink, or another user or group may write it, the restore still succeeds but sets no anchor, and `audit_anchor_error` in its report says why.
 
 Restore with the OwnHealth version that made the backup (`app_version` in the manifest), then upgrade. A newer rule pack can change a `state_hash` on purpose, and the check would report it as a difference.
 
@@ -241,6 +252,8 @@ docker compose pull && docker compose up -d
 Migrations are forward-only and run at start, in the `admin` service, before the app comes up. To go back to an older version, restore the backup you took before the upgrade.
 
 **The imaging folder (from 1.0).** The new `compose.homelab.yaml` mounts `secrets/imaging` into the app, with the `imaging` profile on or off. Create the folder before the first `docker compose up -d` with that file: `mkdir -m 755 secrets/imaging`. If Docker started first, it made the folder as root: `sudo chown "$(id -u):$(id -g)" secrets/imaging && chmod 755 secrets/imaging`. To turn imaging on, follow the comment above the `orthanc` service in `compose.homelab.yaml`: it writes `secrets/imaging/orthanc_password` with mode 644.
+
+**The keyring folder (from 1.0).** The new compose files mount `./keyring` into `admin` and `app`. Create it before the first `docker compose up -d`: `mkdir -m 700 keyring && sudo chown 10001:10001 keyring`. If Docker started first, it made the folder as root: `sudo chown 10001:10001 keyring && sudo chmod 700 keyring`. Take a backup right after the upgrade: it writes `keyring.json`. Backups taken before the upgrade still hold the profile keys in their dump, until retention removes them. Tell your host backup tools to skip `keyring/`.
 
 **The secrets key (from 1.0).** OwnHealth now encrypts each profile's documents and genome files, so every command except `migrate` and `healthcheck` refuses to start without `OWNHEALTH_SECRETS_KEY` and prints one line that says how to make one. Keep the key you have: it already encrypts your inbox secrets, and a new one would lock them.
 

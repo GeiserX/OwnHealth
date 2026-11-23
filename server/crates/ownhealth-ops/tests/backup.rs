@@ -7,7 +7,7 @@
 //! The live store is mixed, as an upgraded install is: the demo's files are sealed under each
 //! profile's key, and one report of Alex's sits in the plain layout of a 0.1.1 install. Each TestDb
 //! makes its own OWNHEALTH_SECRETS_KEY at run time; a fresh stack takes the live one unless a test
-//! wants another.
+//! wants another, and reads the live keyring folder, as a restore on the same host does.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -69,12 +69,26 @@ async fn live() -> anyhow::Result<Live> {
     })
 }
 
-/// An empty database (no migrations) and an empty blob directory: a fresh stack.
+/// An empty database (no migrations) and an empty blob directory: a fresh stack, on the live keyring.
 async fn fresh(l: &Live) -> anyhow::Result<(TestDb, Settings)> {
     let db = TestDb::empty().await?;
     let mut settings = db.settings(&l.dir.path().join("fresh"))?;
     settings.secrets_key = l.settings.secrets_key.clone();
+    settings.keyring_dir = Some(l.settings.keyring_path());
     Ok((db, settings))
+}
+
+/// The table of contents of a dump, as `pg_restore --list` prints it.
+fn dump_toc(dump: &Path) -> anyhow::Result<String> {
+    let tool = std::env::var_os("OWNHEALTH_PG_BINDIR")
+        .filter(|d| !d.is_empty())
+        .map_or_else(|| PathBuf::from("pg_restore"), |d| PathBuf::from(d).join("pg_restore"));
+    let out = std::process::Command::new(tool)
+        .arg("--list")
+        .stdin(fs::File::open(dump)?)
+        .output()?;
+    anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    Ok(String::from_utf8(out.stdout)?)
 }
 
 /// The backup's blob files by manifest key: a sha256, or `<profile>/<address>` for a sealed one.
@@ -707,5 +721,106 @@ async fn verify_restore_fails_when_a_held_mails_file_is_gone() -> R {
         Some(1),
         "{report:#}"
     );
+    Ok(())
+}
+
+/// The keys never enter a backup (slice 47): the dump leaves out the rows of `profile_key` (its
+/// pending-item keys stay), the backup writes every key into keyring.json in the keyring folder
+/// instead, and the manifest lists the profiles whose key a restore needs from it.
+#[tokio::test]
+async fn the_dump_holds_no_profile_key_and_the_keyring_holds_every_one() -> R {
+    let l = live().await?;
+    let toc = dump_toc(&l.archive.join("db.dump"))?;
+    let data = |t: &str| {
+        toc.lines()
+            .any(|line| line.contains(&format!("TABLE DATA public {t} ")))
+    };
+    assert!(data("profile") && data("pending_key"), "{toc}");
+    assert!(!data("profile_key"), "the dump holds the profile keys:\n{toc}");
+    assert!(
+        toc.contains("TABLE public profile_key "),
+        "the dump lost the table itself:\n{toc}"
+    );
+    let stored: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
+        "select profile_id, wrapped_dek from profile_key where wrapped_dek is not null order by profile_id",
+    )
+    .fetch_all(&l.db.pool)
+    .await?;
+    assert_eq!(stored.len(), 4);
+    let ring = ownhealth_core::keyfile::read(&ownhealth_core::keyfile::path(&l.settings))?
+        .ok_or_else(|| anyhow::anyhow!("the backup wrote no keyring"))?;
+    assert_eq!(ring.profiles.into_iter().collect::<Vec<_>>(), stored);
+    let m = manifest(&l.archive)?;
+    let mut listed = strs(&m["keys"]["keyring"]);
+    listed.sort();
+    let ids: Vec<String> = stored.iter().map(|(p, _)| p.to_string()).collect();
+    assert_eq!(listed, ids);
+    assert!(m["tables"].get("profile_key").is_none(), "{:#}", m["tables"]);
+    // nothing of the keyring is in the backup folder
+    assert!(files(&l.archive).iter().all(|f| name(f) != "keyring.json"));
+    Ok(())
+}
+
+/// A backup refuses a keyring it would carry (in the backup folder or the blob folder) and a keyring
+/// it cannot read, before it writes anything.
+#[tokio::test]
+async fn a_backup_refuses_a_keyring_it_would_carry_or_cannot_read() -> R {
+    let l = live().await?;
+    let dest = l.dir.path().join("b2").join("staging");
+    let mut s = l.settings.clone();
+    s.keyring_dir = Some(dest.join("keys"));
+    let err = err_text(ownhealth_ops::backup(&s, &dest).await);
+    assert!(err.contains("inside the backup folder"), "{err}");
+    s.keyring_dir = Some(s.blobs_path().join("keys"));
+    let err = err_text(ownhealth_ops::backup(&s, &dest).await);
+    assert!(err.contains("inside the blob folder"), "{err}");
+    assert!(!dest.join("manifest.json").exists());
+    let file = ownhealth_core::keyfile::path(&l.settings);
+    fs::write(&file, b"{")?;
+    let err = err_text(ownhealth_ops::backup(&l.settings, &dest).await);
+    assert!(err.contains("cannot read the keyring"), "{err}");
+    assert!(!dest.exists(), "the backup wrote into its folder before it refused");
+    assert_eq!(fs::read(&file)?, b"{");
+    Ok(())
+}
+
+/// A restore with no keyring fails loudly before it loads anything, and so does verify-restore: the
+/// backup alone opens no file.
+#[tokio::test]
+async fn a_restore_with_no_keyring_fails_before_it_loads_anything() -> R {
+    let l = live().await?;
+    let (db, mut fresh) = fresh(&l).await?;
+    fresh.keyring_dir = Some(l.dir.path().join("empty-keyring"));
+    let err = err_text(ownhealth_ops::restore(&fresh, &l.archive).await);
+    assert!(
+        err.contains("no keyring at") && err.contains("OWNHEALTH_KEYRING_DIR") && err.contains("nothing was loaded"),
+        "{err}"
+    );
+    assert_eq!(public_tables(&db).await?, 0);
+    assert!(tree_files(&fresh.blobs_path())?.is_empty());
+    let err = err_text(ownhealth_ops::verify_restore(&fresh, &l.archive).await);
+    assert!(err.contains("no keyring at"), "{err}");
+    Ok(())
+}
+
+/// A keyring that lacks a key of the backup without listing it as deleted (an older copy, another
+/// install's) is refused by restore before it loads anything, and fails verify-restore by name.
+#[tokio::test]
+async fn a_keyring_missing_a_key_it_does_not_list_as_deleted_fails_the_restore() -> R {
+    let l = live().await?;
+    let file = ownhealth_core::keyfile::path(&l.settings);
+    let mut ring = ownhealth_core::keyfile::read(&file)?.unwrap_or_default();
+    assert!(ring.profiles.remove(&l.alex).is_some());
+    ownhealth_core::keyfile::write(&l.settings.keyring_path(), &ring)?;
+    let (db, fresh) = fresh(&l).await?;
+    let err = err_text(ownhealth_ops::restore(&fresh, &l.archive).await);
+    assert!(
+        err.contains("holds no key for 1 profile") && err.contains(&l.alex.to_string()),
+        "{err}"
+    );
+    assert_eq!(public_tables(&db).await?, 0);
+    let report = ownhealth_ops::verify_restore(&l.settings, &l.archive).await?;
+    assert_eq!(report["keys"]["missing"], serde_json::json!([l.alex]), "{report:#}");
+    assert_eq!(report["ok"], false, "{report:#}");
     Ok(())
 }

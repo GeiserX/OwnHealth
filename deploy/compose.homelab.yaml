@@ -1,7 +1,8 @@
 # OwnHealth for a homelab: the app and Postgres behind Caddy with HTTPS, secrets kept in files,
 # restic backups from a one-off admin container. Steps: deploy/README.md.
 #
-# Copy this file to compose.yaml in its own folder, next to Caddyfile, .env, restic.env, secrets/ and deploy/.
+# Copy this file to compose.yaml in its own folder, next to Caddyfile, .env, restic.env, secrets/, keyring/
+# and deploy/.
 name: ownhealth
 
 # Two database roles. `ownhealth` owns the tables: the one-shot `admin` service uses it to migrate, to
@@ -25,12 +26,16 @@ services:
       OWNHEALTH_SECRET_KEY_FILE: /run/secrets/secret_key
       OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # backups and restores open the sealed files
       RESTIC_PASSWORD_FILE: /run/secrets/restic_password
+      OWNHEALTH_KEYRING_DIR: /keyring # backups write the profile keys here, restores read them
     command: ["sh", "-c", "ownhealth migrate && sh /opt/ownhealth-db/app-role.sh"]
     healthcheck:
       disable: true
     secrets: [db_password, app_db_password, secret_key, secrets_key, restic_password]
     volumes:
       - ownhealth-data:/data # blobs, and /data/backups for the restic staging directory
+      # The profile keys (keyring.json), on their own mount: never in the data volume, the backups or
+      # restic. Host backup tools must skip this folder (deploy/README.md, "The keyring").
+      - ./keyring:/keyring
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -53,6 +58,7 @@ services:
       OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # seals every profile's files and the inbox secrets
       OWNHEALTH_BASE_URL: https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
       OWNHEALTH_INBOX_DIR: /inbox # the watched folder: ./inbox/<profile>/ on the host
+      OWNHEALTH_KEYRING_DIR: /keyring # a profile delete drops the profile's key from keyring.json at once
       # The `imaging` profile (below): Orthanc's address, empty when imaging is off, and its password.
       OWNHEALTH_ORTHANC_URL: ${OWNHEALTH_ORTHANC_URL:-}
       OWNHEALTH_ORTHANC_PASSWORD_FILE: /run/secrets/imaging/orthanc_password
@@ -63,6 +69,7 @@ services:
     volumes:
       - ownhealth-data:/data
       - ./inbox:/inbox
+      - ./keyring:/keyring # the same folder as the admin service's
       # Only the Orthanc password, from its own folder: a secret listed above must exist even with
       # imaging off, and the app must not see the other files in secrets/.
       - ./secrets/imaging:/run/secrets/imaging:ro

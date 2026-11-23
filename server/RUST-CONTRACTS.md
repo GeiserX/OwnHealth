@@ -137,6 +137,11 @@ blobs::hold_for_copy(conn) / blobs::end_copy(conn) / blobs::removal_lock(tx, wai
 // pending item (Slot::Pending), wrapped in pending_key
 Kek::from_settings / .fingerprint(); Keyring::new(kek, url) .dek(profile, create) .dek_for(slot, create);
 keys::check_all; keys::shred_pending(conn, &[item])
+// keyfile: keyring.json in OWNHEALTH_KEYRING_DIR, every profile's wrapped DEK, outside the dump and every
+// backup. pg_dump runs with --exclude-table-data=profile_key; backup rewrites it, a profile delete
+// rewrites it at once (and the blobs.unlink retry); restore and verify-restore load profile_key from it
+keyfile::rewrite(conn, &settings) -> KeyringFile   // live keys in, shredded keys out, unknown profiles kept
+keyfile::read(path) / ::write(dir, &KeyringFile) / ::path(&settings) / ::check_folder(&settings)
 // secrets: a profile's connector refresh token is sealed under its DEK (store_profile_secret,
 // replace_profile_secret); read_secret opens both versions
 // canonical: byte-identical to Python (tests/parity_fixtures.rs checks a Python-made fixture)

@@ -496,6 +496,7 @@ async fn a_restore_anchors_the_head_it_restored() -> R {
     let mut settings = fresh.settings(&l.dir.path().join("fresh"))?;
     settings.secrets_key = l.settings.secrets_key.clone(); // the key the backup was made under
     settings.anchor_dir = Some(l.settings.anchor_path()); // the same data volume
+    settings.keyring_dir = Some(l.settings.keyring_path()); // the same keyring mount
     let report = ownhealth_ops::restore(&settings, &older).await?;
     assert_eq!(report["ok"], true, "{report:#}");
     assert_eq!(report["audit_anchor"]["seq"], seq, "{report:#}");
@@ -542,6 +543,7 @@ async fn a_restore_does_not_anchor_in_a_folder_others_may_write() -> R {
         let mut settings = fresh.settings(&l.dir.path().join(format!("fresh-{m:o}")))?;
         settings.secrets_key = l.settings.secrets_key.clone(); // the key the backup was made under
         settings.anchor_dir = Some(dir);
+        settings.keyring_dir = Some(l.settings.keyring_path());
         let report = ownhealth_ops::restore(&settings, &older).await?;
         assert_eq!(report["ok"], true, "{why}: {report:#}");
         assert_eq!(report["audit_anchor"], Value::Null, "{why}: {report:#}");

@@ -1,5 +1,5 @@
 # OwnHealth: the app and its Postgres. `cp .env.example .env`, set the secrets, write the key file
-# secrets/secrets_key (docs/quickstart.md), `docker compose up -d`.
+# secrets/secrets_key, make the folder keyring/ (docs/quickstart.md), `docker compose up -d`.
 name: ownhealth
 
 # Two database roles. `ownhealth` owns the tables: the one-shot `admin` service uses it to migrate and
@@ -20,12 +20,16 @@ services:
       OWNHEALTH_DATABASE_URL: postgresql://ownhealth@db:5432/ownhealth
       OWNHEALTH_DATA_DIR: /data
       OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # backups and restores open the sealed files
+      OWNHEALTH_KEYRING_DIR: /keyring # backups write the profile keys here, restores read them
     command: ["sh", "-c", "ownhealth migrate && sh /opt/ownhealth-db/app-role.sh"]
     healthcheck:
       disable: true
     secrets: [secrets_key]
     volumes:
       - ownhealth-data:/data
+      # The profile keys (keyring.json), on their own mount: never in the data volume, the backups or
+      # restic. Host backup tools must skip this folder (deploy/README.md, "The keyring").
+      - ./keyring:/keyring
 
   app:
     image: drumsergio/ownhealth:0.4.0
@@ -50,6 +54,7 @@ services:
       OWNHEALTH_DEV_AUTH: ${OWNHEALTH_DEV_AUTH:-}
       # The watched folder (v0.2): a scanner or a synced phone folder drops files in ./inbox/<profile>/.
       OWNHEALTH_INBOX_DIR: /inbox
+      OWNHEALTH_KEYRING_DIR: /keyring # a profile delete drops the profile's key from keyring.json at once
       # The `imaging` profile (below): where Orthanc is, and the app's password there. Empty: imaging off.
       OWNHEALTH_ORTHANC_URL: ${OWNHEALTH_ORTHANC_URL:-}
       OWNHEALTH_ORTHANC_PASSWORD: ${OWNHEALTH_ORTHANC_PASSWORD:-}
@@ -59,6 +64,7 @@ services:
     volumes:
       - ownhealth-data:/data
       - ./inbox:/inbox
+      - ./keyring:/keyring # the same folder as the admin service's
 
   # `ocr` profile (v0.2): reads scans and photos with the local OCR engine. Turn it on with two lines
   # in .env: COMPOSE_PROFILES=ocr (starts this worker) and OWNHEALTH_OCR=1 (the app sends unread pages

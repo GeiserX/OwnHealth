@@ -1,6 +1,7 @@
 #!/bin/sh
 # Restore a restic snapshot (default: the latest) into a fresh OwnHealth stack: a new database volume
-# and a new data volume, with the app not started yet. Afterwards it checks every profile's state_hash
+# and a new data volume, with the app not started yet. The profile keys come from keyring.json in the
+# keyring folder, which is not in the snapshot; without it nothing is loaded. Afterwards it checks every profile's state_hash
 # against the manifest and exits 1 on any difference. `docker compose up -d` afterwards runs the admin
 # service, which grants the app role its rows on the restored tables. Steps: deploy/README.md "Restore".
 #
