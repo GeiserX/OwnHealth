@@ -46,7 +46,8 @@ while IFS= read -r url; do
   else
     case "$code" in
       2?? | 3??) continue ;;
-      404 | 410)
+      410) list=dead ;;
+      404)
         host=${final#*://}; host=${host%%[/?#]*}
         case " $fake404 " in *" $host "*) list=unchecked ;; *) list=dead ;; esac ;;
       *) list=unchecked ;;
