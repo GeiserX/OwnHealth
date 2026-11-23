@@ -1083,63 +1083,44 @@ async fn a_request_prefers_a_profile_uuid_over_a_matching_slug() -> R {
     Ok(())
 }
 
-/// Break-glass reads only: a guardian contact can neither retract a document the request opened nor
-/// move it into a profile of their own, where it would stay after the request ends.
 #[tokio::test]
-async fn a_guardian_contact_cannot_retract_or_move_a_document_break_glass_opened() -> R {
+async fn a_guardian_contact_cannot_retract_a_document_break_glass_opened() -> R {
+    check_document_change_needs_own_scope("retract", json!({"reason": "x"})).await
+}
+
+#[tokio::test]
+async fn a_guardian_contact_cannot_move_a_document_break_glass_opened() -> R {
+    check_document_change_needs_own_scope("assign", json!({"profile": "sam"})).await
+}
+
+/// Check each change in its own test so a failure on one route cannot hide a failure on the other.
+async fn check_document_change_needs_own_scope(action: &str, body: Value) -> R {
     let mut b = setup().await?;
     b.grant_sam("guardian", &["read:summary"]).await?;
-    let mut docs = Vec::new();
-    for n in 1..=2u8 {
-        let doc: Uuid = sqlx::query_scalar(
-            "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type) \
-             values ($1, $2, $3, $4, 'application/pdf', 10, 'other') returning id",
-        )
-        .bind(b.env.fam().household_id)
-        .bind(b.alex_id())
-        .bind(vec![n; 32])
-        .bind(format!("nota{n}.pdf"))
-        .fetch_one(b.env.pool())
-        .await?;
-        docs.push(doc);
-    }
-    let rows = "select profile_id, status::text from document where id = any($1) order by filename";
-    let rows = sqlx::query_as::<_, (Option<Uuid>, String)>(rows).bind(docs.clone());
-    let before = rows.fetch_all(b.env.pool()).await?;
+    let doc: Uuid = sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type) \
+         values ($1, $2, $3, 'nota.pdf', 'application/pdf', 10, 'other') returning id",
+    )
+    .bind(b.env.fam().household_id)
+    .bind(b.alex_id())
+    .bind(vec![1u8; 32])
+    .fetch_one(b.env.pool())
+    .await?;
+    let state = "select profile_id, status::text from document where id = $1";
+    let before: (Option<Uuid>, String) = sqlx::query_as(state).bind(doc).fetch_one(b.env.pool()).await?;
     let mut sam = b.sam().await?;
     b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
-    // the request opens the document to read
-    let r = sam.get(&format!("/api/documents/{}", docs[0])).await?;
+    let r = sam.get(&format!("/api/documents/{doc}")).await?;
     assert_eq!(r.status, 200, "{:?}", r.json);
-    let r = sam
-        .post(&format!("/api/documents/{}/retract", docs[0]), &json!({"reason": "x"}))
-        .await?;
+
+    let endpoint = format!("/api/documents/{doc}/{action}");
+    let r = sam.post(&endpoint, &body).await?;
     assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
-    let r = sam
-        .post(
-            &format!("/api/documents/{}/assign", docs[1]),
-            &json!({"profile": "sam"}),
-        )
-        .await?;
-    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
-    let after: Vec<(Option<Uuid>, String)> =
-        sqlx::query_as("select profile_id, status::text from document where id = any($1) order by filename")
-            .bind(docs.clone())
-            .fetch_all(b.env.pool())
-            .await?;
+    let after: (Option<Uuid>, String) = sqlx::query_as(state).bind(doc).fetch_one(b.env.pool()).await?;
     assert_eq!(after, before);
-    // on his own grant both go through
+
     b.grant_sam("guardian", &["read:summary", "read:records"]).await?;
-    let r = sam
-        .post(&format!("/api/documents/{}/retract", docs[0]), &json!({"reason": "x"}))
-        .await?;
-    assert_eq!(r.status, 200, "{:?}", r.json);
-    let r = sam
-        .post(
-            &format!("/api/documents/{}/assign", docs[1]),
-            &json!({"profile": "sam"}),
-        )
-        .await?;
+    let r = sam.post(&endpoint, &body).await?;
     assert_eq!(r.status, 200, "{:?}", r.json);
     Ok(())
 }
@@ -1163,7 +1144,7 @@ async fn a_guardian_contact_cannot_decide_a_review_item_break_glass_opened() -> 
     b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
     let r = sam.get(&format!("/api/review/{item}")).await?;
     assert_eq!(r.status, 200, "{:?}", r.json);
-    for action in ["accept", "reject", "dismiss"] {
+    for action in ["reject", "accept", "dismiss"] {
         let r = sam
             .post(&format!("/api/review/{item}/{action}"), &json!({"reason": "x"}))
             .await?;
@@ -1176,15 +1157,15 @@ async fn a_guardian_contact_cannot_decide_a_review_item_break_glass_opened() -> 
     }
     let status = "select status from review_item where id = $1";
     assert_eq!(b.text(status, item).await?, "open");
-    // on his own grant he decides it, and only then reopens it on the request alone
+    // Reject with his own grant so the item is eligible to reopen.
     b.grant_sam("guardian", &["read:summary", "read:labs"]).await?;
     let r = sam
-        .post(&format!("/api/review/{item}/dismiss"), &json!({"reason": "x"}))
+        .post(&format!("/api/review/{item}/reject"), &json!({"reason": "x"}))
         .await?;
     assert_eq!(r.status, 200, "{:?}", r.json);
     b.grant_sam("guardian", &["read:summary"]).await?;
     let r = sam.post(&format!("/api/review/{item}/reopen"), &json!({})).await?;
     assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
-    assert_eq!(b.text(status, item).await?, "dismissed");
+    assert_eq!(b.text(status, item).await?, "rejected");
     Ok(())
 }
