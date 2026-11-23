@@ -242,7 +242,7 @@ export const dict = {
 		h1_img_report_d: "Report text appears here, as printed and marked as untrusted text, once studies can be linked to their report.",
 		h1_img_import: "Import DICOM folder / CD",
 		h1_img_ohif: "Open in OHIF ↗",
-		h1_img_note: "Studies will be de-identified copies. Pixel data never leaves Orthanc; MCP sees only the report text (untrusted) and study metadata.",
+		h1_img_note: "Studies are kept as the disc holds them, patient name included. Pixel data never leaves Orthanc; MCP sees only the report text (untrusted) and study metadata.",
 		h1_img_go: "Go to Import & review",
 		h1_fam_sub: "{hh} · {n} profiles · roles decide what each person and each token can see",
 		h1_rel_self: "you",
@@ -2056,6 +2056,12 @@ export const dict = {
 		au_via_job: "OwnHealth itself",
 		au_via_share: "share link",
 		au_via_export: "export",
+		// slice 41, DICOM import: a study the import did not send waits in review
+		i2_kind_imaging_study: "Imaging study to check",
+		i2_img_t: "{what} · the disc names {who}",
+		i2_reason_second_patient: "The disc holds more than one patient",
+		i2_reason_other_profile: "Another record already holds this study",
+		i2_reason_uid_conflict: "Another patient's study has the same UID",
 	},
 	es: {
 		household: "Hogar",
@@ -2297,7 +2303,7 @@ export const dict = {
 		h1_img_report_d: "El texto del informe aparecerá aquí, tal como se imprimió y marcado como texto no fiable, cuando los estudios puedan enlazarse con su informe.",
 		h1_img_import: "Importar carpeta DICOM / CD",
 		h1_img_ohif: "Abrir en OHIF ↗",
-		h1_img_note: "Los estudios serán copias anonimizadas. Los píxeles nunca salen de Orthanc; MCP solo ve el texto del informe (no fiable) y los metadatos del estudio.",
+		h1_img_note: "Los estudios se guardan tal como vienen en el disco, con el nombre del paciente. Los píxeles nunca salen de Orthanc; MCP solo ve el texto del informe (no fiable) y los metadatos del estudio.",
 		h1_img_go: "Ir a Importar y revisar",
 		h1_fam_sub: "{hh} · {n} perfiles · los roles deciden qué puede ver cada persona y cada token",
 		h1_rel_self: "tú",
@@ -4111,6 +4117,12 @@ export const dict = {
 		au_via_job: "el propio OwnHealth",
 		au_via_share: "enlace compartido",
 		au_via_export: "exportación",
+		// slice 41, importación DICOM: un estudio que la importación no envió espera revisión
+		i2_kind_imaging_study: "Estudio de imagen por revisar",
+		i2_img_t: "{what} · el disco nombra a {who}",
+		i2_reason_second_patient: "El disco tiene más de un paciente",
+		i2_reason_other_profile: "Otro historial ya tiene este estudio",
+		i2_reason_uid_conflict: "El estudio de otro paciente tiene el mismo UID",
 	},
 } as const;
 

@@ -310,6 +310,11 @@
 		// A connector pull's resources of one type we do not show yet: one line with their count.
 		const grouped = unmappedSummary(i);
 		if (grouped) return tp('i2_fus_t', grouped.count, { type: grouped.type, source: grouped.source || '—', n: fmtNum(grouped.count) });
+		// A DICOM study the import did not send: what it is, and whom the disc names.
+		if (i.kind === 'imaging_study') {
+			const what = [p.description, p.modality, p.study_date].filter(Boolean).map(String).join(' · ') || t('i2_kind_imaging_study');
+			return p.patient_name ? tf('i2_img_t', { what, who: String(p.patient_name) }) : what;
+		}
 		// A scan's chip already says what it is; the line names the file.
 		if (i.kind === 'pending_document' && i.document_id && docName(i.document_id)) return docName(i.document_id);
 		return t('i2_kind_' + i.kind);
@@ -558,7 +563,7 @@
 								<div class="dim" style="font-size:11.5px">{line.rows.map((r) => String((r.payload as { observation?: { printed_name?: string } }).observation?.printed_name ?? '')).filter(Boolean).join(' · ')}</div>
 							{:else}
 								<div>{it.kind === 'agent_proposal' ? '◆ ' : ''}{otherTitle(it)}</div>
-								{#if it.kind === 'fhir_unmapped' && it.reasons.length}<div style="font-size:11.5px;color:var(--watch)">{reasonsText(it)}</div>{/if}
+								{#if (it.kind === 'fhir_unmapped' || it.kind === 'imaging_study') && it.reasons.length}<div style="font-size:11.5px;color:var(--watch)">{reasonsText(it)}</div>{/if}
 								{#if it.kind === 'fhir_unmapped_summary'}<div class="dim" style="font-size:11.5px">{t('i2_fus_d')}</div>{/if}
 								{#if prows}
 									<ProposalRows rows={prows} {busy} documentId={it.document_id} onaccept={(edits) => act(() => acceptReview(it.id, edits))} onreject={() => act(() => rejectReview(it.id, 'rejected in review'))} />
@@ -586,6 +591,10 @@
 							{:else if (it.kind === 'agent_proposal' && !prows) || it.kind === 'fhir_unmapped'}
 								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
 								<button class="btn sm no" onclick={() => act(() => rejectReview(it.id, 'rejected in review'))} disabled={busy}>{t('i2_reject')}</button>
+							{:else if it.kind === 'imaging_study'}
+								<!-- a patient who is not the profile's, or one of several on the disc, can still be added; a UID that another record or patient holds cannot -->
+								{#if ['identity_mismatch', 'second_patient'].includes(String((it.payload as Record<string, unknown>).reason))}<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>{/if}
+								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>
 							{:else}
 								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>
 							{/if}

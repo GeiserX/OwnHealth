@@ -110,7 +110,8 @@ export interface ReviewItem {
 		| 'restore_check_failed'
 		| 'near_duplicate'
 		| 'encrypted_document'
-		| 'fhir_unmapped_summary';
+		| 'fhir_unmapped_summary'
+		| 'imaging_study';
 	profile_id: Uuid | null;
 	status: 'open' | 'accepted' | 'rejected' | 'dismissed';
 	reasons: string[];

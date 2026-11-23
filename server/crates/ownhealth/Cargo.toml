@@ -24,6 +24,7 @@ ownhealth-auth.workspace = true
 ownhealth-core.workspace = true
 ownhealth-devices.workspace = true
 ownhealth-genome.workspace = true
+ownhealth-imaging.workspace = true
 ownhealth-inbox.workspace = true
 ownhealth-ingest-pdf.workspace = true
 ownhealth-ingest-structured.workspace = true

@@ -7,6 +7,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+pub use crate::orthanc::OrthancConfig;
 
 /// The job.queue check constraint in 0001_foundation.sql.
 pub const QUEUES: [&str; 2] = ["core", "ocr"];
@@ -59,6 +60,10 @@ pub struct Settings {
     /// `OWNHEALTH_ANCHOR_DIR`: where each backup writes the audit chain head it anchored, outside the
     /// database (ownhealth-ops backup.rs). Unset: `<data_dir>/anchor`.
     pub anchor_dir: Option<PathBuf>,
+    /// Orthanc, when the `imaging` compose profile is on ([`OrthancConfig::from_env`]). `serve` reads it
+    /// at start, so the viewer proxy and the DICOM import job use the same Orthanc; other commands
+    /// leave it unset.
+    pub orthanc: Option<OrthancConfig>,
 }
 
 impl Default for Settings {
@@ -89,6 +94,7 @@ impl Default for Settings {
             share_url: None,
             trusted_proxies: Vec::new(),
             anchor_dir: None,
+            orthanc: None,
         }
     }
 }
@@ -119,6 +125,7 @@ impl fmt::Debug for Settings {
             .field("share_url", &self.share_url)
             .field("trusted_proxies", &self.trusted_proxies)
             .field("anchor_dir", &self.anchor_dir)
+            .field("orthanc", &self.orthanc)
             .finish_non_exhaustive()
     }
 }
@@ -333,6 +340,7 @@ impl Settings {
             share_url: env_or(env, "SHARE_URL")?.map(|u| check_share_url(&u)).transpose()?,
             trusted_proxies: parse_trusted_proxies(&env_or(env, "TRUSTED_PROXIES")?.unwrap_or_default())?,
             anchor_dir: env_or(env, "ANCHOR_DIR")?.map(PathBuf::from),
+            orthanc: None,
         })
     }
 

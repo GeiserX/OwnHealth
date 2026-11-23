@@ -1,0 +1,38 @@
+[package]
+name = "ownhealth-imaging"
+description = "v1.0 imaging: DICOM studies from hospital CDs and zips into Orthanc, one study per record."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ownhealth-core.workspace = true
+ownhealth-ingest-pdf.workspace = true
+chrono.workspace = true
+flate2.workspace = true
+futures.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+ownhealth-core = { workspace = true, features = ["testing"] }
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+# writes the synthetic hospital CDs the tests read (tests only; nothing it writes is committed)
+dicom-core.workspace = true
+dicom-dictionary-std.workspace = true
+dicom-object.workspace = true
+sha2.workspace = true
+tempfile.workspace = true

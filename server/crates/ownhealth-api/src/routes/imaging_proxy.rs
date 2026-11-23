@@ -40,7 +40,6 @@
 //!    use it, because `connect-src 'self'` keeps it on this server and Orthanc publishes no port.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -55,7 +54,6 @@ use ownhealth_auth::principal::dev_principal;
 use ownhealth_auth::sessions::IDLE_MINUTES;
 use ownhealth_core::access::{Principal, PrincipalKind, effective_permission};
 use ownhealth_core::audit::{AuditEvent, hash_arg, write_audit};
-use ownhealth_core::config::Env;
 use ownhealth_core::{Error, Runtime, langs};
 use serde_json::{Value, json};
 use sqlx::PgConnection;
@@ -96,59 +94,8 @@ pub const VIEWER_CSP: &str = "sandbox allow-scripts; default-src 'none'; \
 /// script in the viewer) who opens one as a page gets a document with no rights at all.
 pub const DICOMWEB_CSP: &str = "sandbox; default-src 'none'";
 
-/// Where Orthanc is. `OWNHEALTH_ORTHANC_URL` (Orthanc's root, `http://orthanc:8042` in compose) turns
-/// imaging on; the password comes from `OWNHEALTH_ORTHANC_PASSWORD_FILE` (a docker secret) or
-/// `OWNHEALTH_ORTHANC_PASSWORD`, the user from `OWNHEALTH_ORTHANC_USER` (default `ownhealth`).
-#[derive(Clone)]
-pub struct OrthancConfig {
-    pub url: String,
-    pub user: String,
-    pub password: String,
-}
-
-impl fmt::Debug for OrthancConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OrthancConfig")
-            .field("url", &self.url)
-            .field("user", &self.user)
-            .field("password", &"***")
-            .finish()
-    }
-}
-
-impl OrthancConfig {
-    /// None when `OWNHEALTH_ORTHANC_URL` is unset or empty (imaging off). A URL without a password,
-    /// or one that is not http(s), is an error, so a half-configured install does not start.
-    pub fn from_env(env: &dyn Env) -> Result<Option<OrthancConfig>, Error> {
-        let var = |name: &str| env.var(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-        let Some(url) = var("OWNHEALTH_ORTHANC_URL") else {
-            return Ok(None);
-        };
-        let url = url.trim_end_matches('/').to_string();
-        let scheme_ok = url.starts_with("http://") || url.starts_with("https://");
-        if !scheme_ok || url.contains(['?', '#', '@']) {
-            return Err(Error::Invalid(format!(
-                "OWNHEALTH_ORTHANC_URL must be Orthanc's http(s) root, for example http://orthanc:8042, not {url}"
-            )));
-        }
-        let password = match var("OWNHEALTH_ORTHANC_PASSWORD_FILE") {
-            Some(path) => std::fs::read_to_string(&path)
-                .map_err(|e| Error::Invalid(format!("OWNHEALTH_ORTHANC_PASSWORD_FILE={path}: {e}")))?
-                .trim()
-                .to_string(),
-            None => var("OWNHEALTH_ORTHANC_PASSWORD").unwrap_or_default(),
-        };
-        if password.is_empty() {
-            return Err(Error::Invalid(
-                "OWNHEALTH_ORTHANC_URL is set but Orthanc's password is not: set OWNHEALTH_ORTHANC_PASSWORD_FILE \
-                 or OWNHEALTH_ORTHANC_PASSWORD."
-                    .into(),
-            ));
-        }
-        let user = var("OWNHEALTH_ORTHANC_USER").unwrap_or_else(|| "ownhealth".into());
-        Ok(Some(OrthancConfig { url, user, password }))
-    }
-}
+/// Where Orthanc is (`ownhealth_core::orthanc`, shared with the DICOM import).
+pub use ownhealth_core::orthanc::OrthancConfig;
 
 /// Who a link belongs to. A dev-auth link works only while dev auth is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

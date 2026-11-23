@@ -1,0 +1,397 @@
+//! Slice 41: a hospital CD becomes one study on the person's record.
+//!
+//! Each test writes its discs at run time (support/mod.rs, with dicom-object, an implementation
+//! independent of the importer's reader), stores the zip as the upload route does, runs the
+//! `import.dicom` job, and reads what Orthanc (a fake that files studies by PatientID and UID, as
+//! Orthanc does) and the record hold afterwards.
+
+mod support;
+
+use std::time::Duration;
+
+use ownhealth_core::Runtime;
+use ownhealth_core::blobs::BlobOwner;
+use ownhealth_core::demo::{Family, create_rivera_family};
+use ownhealth_core::jobs::{self, JobContext};
+use ownhealth_core::testing::TestDb;
+use ownhealth_imaging::import::{JOB, REVIEW_KIND};
+use ownhealth_imaging::upload::{self, Recorded};
+use serde_json::Value;
+use support::{ALEX, CARMEN, FakeOrthanc, SAM, Study, hospital_cd, study_files, zip_files};
+use uuid::Uuid;
+
+type R = anyhow::Result<()>;
+/// An `imaging_study` row and its src: profile, Orthanc id, modality, date, description, status,
+/// report document, FHIR, src kind and src profile.
+type StudyRow = (
+    Uuid,
+    String,
+    Option<String>,
+    Option<chrono::NaiveDate>,
+    Option<String>,
+    String,
+    Option<Uuid>,
+    Value,
+    String,
+    Option<Uuid>,
+);
+
+const U1: &str = "1.2.826.0.1.3680043.10.999.41.1";
+const U2: &str = "1.2.826.0.1.3680043.10.999.41.2";
+
+struct Env {
+    _db: TestDb,
+    _dir: tempfile::TempDir,
+    rt: Runtime,
+    ctx: JobContext,
+    fam: Family,
+    orthanc: FakeOrthanc,
+}
+
+async fn env() -> anyhow::Result<Env> {
+    ownhealth_imaging::register();
+    let orthanc = FakeOrthanc::start().await?;
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let mut settings = db.settings(dir.path())?;
+    settings.orthanc = Some(orthanc.config());
+    let rt = Runtime::with_pool(settings, db.pool.clone())?;
+    let mut c = db.pool.acquire().await?;
+    let fam = create_rivera_family(&mut c, &format!("Rivera {}", ownhealth_core::ids::token_hex(3))).await?;
+    drop(c);
+    let ctx = rt.job_context();
+    Ok(Env {
+        _db: db,
+        _dir: dir,
+        rt,
+        ctx,
+        fam,
+        orthanc,
+    })
+}
+
+impl Env {
+    /// Stores the disc as `POST /api/imaging/import` does and queues its import.
+    async fn upload(&self, slug: &str, files: &[(String, Vec<u8>)]) -> anyhow::Result<Recorded> {
+        let zip = zip_files(files);
+        let profile = self.fam.profile(slug);
+        let sha = self.rt.blobs.put_bytes(BlobOwner::Profile(profile), &zip)?;
+        let mut tx = self.rt.pool.begin().await?;
+        let r = upload::record(
+            &mut tx,
+            profile,
+            &sha,
+            i64::try_from(zip.len())?,
+            Some("cd.zip"),
+            files.len(),
+            None,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(r)
+    }
+
+    /// Runs the queued imports (only those: the PDF importer is not under test here).
+    async fn run(&self) -> anyhow::Result<usize> {
+        Ok(jobs::drain(&self.ctx, "core", 10, Some(&[JOB.to_string()])).await?)
+    }
+
+    async fn job(&self, id: Option<i64>) -> anyhow::Result<(String, Value, Option<String>)> {
+        Ok(
+            sqlx::query_as("select state, coalesce(result, 'null'::jsonb), last_error from job where id = $1")
+                .bind(id.ok_or_else(|| anyhow::anyhow!("no job was queued"))?)
+                .fetch_one(&self.rt.pool)
+                .await?,
+        )
+    }
+
+    /// The open `imaging_study` items of a profile: (study uid, reason).
+    async fn in_review(&self, slug: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(sqlx::query_as(
+            "select payload->>'study_uid', payload->>'reason' from review_item where kind = $1 and status = 'open' \
+             and profile_id = $2 order by created_at, id",
+        )
+        .bind(REVIEW_KIND)
+        .bind(self.fam.profile(slug))
+        .fetch_all(&self.rt.pool)
+        .await?)
+    }
+
+    /// The profile that records `uid`, and its Orthanc id.
+    async fn recorded(&self, uid: &str) -> anyhow::Result<Option<(Uuid, Option<String>)>> {
+        Ok(
+            sqlx::query_as("select profile_id, orthanc_id from imaging_study where study_instance_uid = $1")
+                .bind(uid)
+                .fetch_optional(&self.rt.pool)
+                .await?,
+        )
+    }
+}
+
+#[tokio::test]
+async fn a_hospital_cd_becomes_one_study_and_a_second_import_sends_nothing() -> R {
+    let e = env().await?;
+    let alex = Study {
+        report: true,
+        ..Study::new(U1, ALEX)
+    };
+    let sam = Study::new(U2, SAM);
+    let disc = hospital_cd(&[alex.clone(), sam.clone()]);
+    let up = e.upload("alex", &disc).await?;
+    assert!(!up.duplicate);
+    assert_eq!(e.run().await?, 1);
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{error:?}");
+    // 4 disc files (DICOMDIR, viewer, autorun, readme), 6 + 1 of Alex's study, 6 of Sam's, 1 damaged
+    assert_eq!(result["files"], 18, "{result}");
+    assert_eq!(result["not_dicom"], 3, "{result}");
+    assert_eq!(result["directories"], 1, "{result}");
+    assert_eq!(result["damaged"], 1, "{result}");
+    assert_eq!(result["studies"], 2, "{result}");
+    assert_eq!(result["imported"], 1, "{result}");
+    assert_eq!(result["in_review"], 1, "{result}");
+    assert_eq!(result["instances"], 7, "{result}");
+    assert_eq!(result["reports"], 1, "{result}");
+
+    // Orthanc holds Alex's study only: nothing of the second patient reached it
+    assert_eq!(e.orthanc.patients_under(U1), [ALEX.id.to_string()].into());
+    assert!(e.orthanc.patients_under(U2).is_empty());
+    assert_eq!(e.orthanc.posts(), 7);
+    // every series' metadata was read once, the report's series included
+    assert_eq!(e.orthanc.warmed().len(), 3, "{:?}", e.orthanc.warmed());
+
+    // the record: one current study of Alex's, bound to the one Orthanc study, cited to a dicom src
+    let row: StudyRow = sqlx::query_as(
+        "select i.profile_id, i.orthanc_id, i.modality, i.study_date, i.description, i.status, \
+             i.report_document_id, i.fhir, s.kind, s.profile_id from imaging_study i join src s on s.id = i.src_id \
+             where i.study_instance_uid = $1",
+    )
+    .bind(U1)
+    .fetch_one(&e.rt.pool)
+    .await?;
+    assert_eq!(row.0, e.fam.profile("alex"));
+    let held = e.orthanc.held();
+    assert_eq!(
+        held.studies.get(&row.1).map(|(u, p)| (u.as_str(), p.as_str())),
+        Some((U1, ALEX.id))
+    );
+    assert_eq!(row.2.as_deref(), Some("CT"));
+    assert_eq!(row.3.map(|d| d.to_string()).as_deref(), Some("2026-09-14"));
+    assert_eq!(row.4.as_deref(), Some("TC TORAX"));
+    assert_eq!(row.5, "current");
+    assert_eq!(row.7["resourceType"], "ImagingStudy");
+    assert_eq!(row.7["numberOfSeries"], 3);
+    assert_eq!(row.7["numberOfInstances"], 7);
+    assert_eq!(row.8, "dicom");
+    assert_eq!(row.9, Some(e.fam.profile("alex")));
+    assert!(e.recorded(U2).await?.is_none());
+
+    // the encapsulated PDF became Alex's imaging report, from the imaging channel, queued for the PDF importer
+    let report = row.6.ok_or_else(|| anyhow::anyhow!("no report linked"))?;
+    let doc: (Option<Uuid>, Option<String>, String, Vec<u8>, String) = sqlx::query_as(
+        "select d.profile_id, d.doc_type, d.mime, d.blob_sha256, s.channel from document d \
+         join document_source s on s.document_id = d.id where d.id = $1",
+    )
+    .bind(report)
+    .fetch_one(&e.rt.pool)
+    .await?;
+    assert_eq!(doc.0, Some(e.fam.profile("alex")));
+    assert_eq!(doc.1.as_deref(), Some("imaging_report"));
+    assert_eq!(doc.2, "application/pdf");
+    assert_eq!(doc.4, "imaging");
+    let pdf =
+        e.rt.blobs
+            .get_bytes(BlobOwner::Profile(e.fam.profile("alex")), &hex::encode(&doc.3))?;
+    assert_eq!(pdf, support::report_pdf(&alex));
+    let queued: i64 =
+        sqlx::query_scalar("select count(*) from job where kind = 'import.pdf' and payload->>'document_id' = $1")
+            .bind(report.to_string())
+            .fetch_one(&e.rt.pool)
+            .await?;
+    assert_eq!(queued, 1);
+
+    // the second patient waits in review on Alex's profile
+    assert_eq!(
+        e.in_review("alex").await?,
+        [(U2.to_string(), "identity_mismatch".to_string())]
+    );
+
+    // the same disc again: the same import, and its job sends nothing and files nothing new
+    let again = e.upload("alex", &disc).await?;
+    assert!(again.duplicate);
+    assert_eq!(again.import_id, up.import_id);
+    assert_eq!(e.run().await?, 1);
+    let (state, result, _) = e.job(again.job_id).await?;
+    assert_eq!(state, "done");
+    assert_eq!(result["imported"], 0, "{result}");
+    assert_eq!(result["already"], 1, "{result}");
+    assert_eq!(e.orthanc.posts(), 7);
+    assert_eq!(e.in_review("alex").await?.len(), 1);
+    let studies: i64 = sqlx::query_scalar("select count(*) from imaging_study")
+        .fetch_one(&e.rt.pool)
+        .await?;
+    assert_eq!(studies, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_same_study_offered_to_a_second_profile_goes_to_review() -> R {
+    let e = env().await?;
+    let disc = study_files(&Study::new(U1, ALEX), "DICOM");
+    e.upload("alex", &disc).await?;
+    e.run().await?;
+    let posts = e.orthanc.posts();
+    // the same files under Carmen's profile
+    let up = e.upload("carmen", &disc).await?;
+    e.run().await?;
+    let (state, result, _) = e.job(up.job_id).await?;
+    assert_eq!(state, "done");
+    assert_eq!(result["in_review"], 1, "{result}");
+    assert_eq!(e.orthanc.posts(), posts, "nothing more was sent");
+    assert_eq!(e.recorded(U1).await?.map(|r| r.0), Some(e.fam.profile("alex")));
+    assert_eq!(
+        e.in_review("carmen").await?,
+        [(U1.to_string(), "other_profile".to_string())]
+    );
+    // and it cannot be accepted: only dismissed
+    let item: Uuid = sqlx::query_scalar("select id from review_item where kind = $1 and profile_id = $2")
+        .bind(REVIEW_KIND)
+        .bind(e.fam.profile("carmen"))
+        .fetch_one(&e.rt.pool)
+        .await?;
+    let mut c = e.rt.pool.acquire().await?;
+    let refused = ownhealth_core::review::accept(&mut c, item, e.fam.user("alex"), None).await;
+    assert!(matches!(refused, Err(ownhealth_core::Error::Review(_))), "{refused:?}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_imports_of_one_uid_under_two_patients_at_once_send_one_patient() -> R {
+    let e = env().await?;
+    // Each file takes a while in Orthanc, and the first UID lookup waits for a second one: without the
+    // one UID lock, both imports would find the UID free and both would send.
+    *e.orthanc.delay.lock().map_err(|_| anyhow::anyhow!("lock"))? = Duration::from_millis(40);
+    e.orthanc.pair_lookups.store(true, std::sync::atomic::Ordering::SeqCst);
+    let alex = e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    let sam = e.upload("sam", &study_files(&Study::new(U1, SAM), "DICOM")).await?;
+    let (a, b) = (e.ctx.clone(), e.ctx.clone());
+    let kinds = vec![JOB.to_string()];
+    let (k1, k2) = (kinds.clone(), kinds);
+    let one = tokio::spawn(async move { jobs::drain(&a, "core", 1, Some(&k1)).await });
+    let two = tokio::spawn(async move { jobs::drain(&b, "core", 1, Some(&k2)).await });
+    assert_eq!(one.await?? + two.await??, 2);
+    for job in [alex.job_id, sam.job_id] {
+        let (state, result, error) = e.job(job).await?;
+        assert_eq!(state, "done", "{result} {error:?}");
+    }
+    // exactly one patient reached Orthanc under the UID, and that one is on the record
+    let patients = e.orthanc.patients_under(U1);
+    assert_eq!(patients.len(), 1, "{patients:?}");
+    assert_eq!(e.orthanc.posts(), 6, "the other import sent nothing");
+    let (owner, _) = e.recorded(U1).await?.ok_or_else(|| anyhow::anyhow!("not recorded"))?;
+    let (winner, loser) = if owner == e.fam.profile("alex") {
+        (ALEX.id, "sam")
+    } else {
+        (SAM.id, "alex")
+    };
+    assert_eq!(patients, [winner.to_string()].into());
+    let waiting = e.in_review(loser).await?;
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0].0, U1);
+    assert!(
+        ["other_profile", "uid_conflict"].contains(&waiting[0].1.as_str()),
+        "{waiting:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_patient_who_is_not_the_profiles_waits_and_an_accept_imports_the_study() -> R {
+    let e = env().await?;
+    let up = e.upload("alex", &study_files(&Study::new(U2, CARMEN), "DICOM")).await?;
+    e.run().await?;
+    let (_, result, _) = e.job(up.job_id).await?;
+    assert_eq!(result["in_review"], 1, "{result}");
+    assert_eq!(e.orthanc.posts(), 0);
+    assert_eq!(
+        e.in_review("alex").await?,
+        [(U2.to_string(), "identity_mismatch".to_string())]
+    );
+    let (item, payload): (Uuid, Value) = sqlx::query_as("select id, payload from review_item where kind = $1")
+        .bind(REVIEW_KIND)
+        .fetch_one(&e.rt.pool)
+        .await?;
+    // the item says who the disc names, so a person can decide
+    assert_eq!(payload["patient_name"], "ORTEGA CARMEN");
+    assert_eq!(payload["patient_birth_date"], "1955-01-30");
+    assert_eq!(payload["instances"], 6);
+    let mut c = e.rt.pool.acquire().await?;
+    ownhealth_core::review::accept(&mut c, item, e.fam.user("alex"), None).await?;
+    drop(c);
+    assert_eq!(e.run().await?, 1);
+    assert_eq!(e.recorded(U2).await?.map(|r| r.0), Some(e.fam.profile("alex")));
+    assert_eq!(e.orthanc.patients_under(U2), [CARMEN.id.to_string()].into());
+    assert!(e.in_review("alex").await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_uid_orthanc_holds_under_another_patient_sends_nothing() -> R {
+    let e = env().await?;
+    e.orthanc.hold_study(U1, "LN-SOMEONE-ELSE");
+    let up = e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.run().await?;
+    let (_, result, _) = e.job(up.job_id).await?;
+    assert_eq!(result["in_review"], 1, "{result}");
+    assert_eq!(e.orthanc.posts(), 0);
+    assert!(e.recorded(U1).await?.is_none());
+    assert_eq!(
+        e.in_review("alex").await?,
+        [(U1.to_string(), "uid_conflict".to_string())]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_study_is_recorded_only_once_its_metadata_is_warm() -> R {
+    let e = env().await?;
+    *e.orthanc.metadata_fails.lock().map_err(|_| anyhow::anyhow!("lock"))? = true;
+    let up = e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.run().await?;
+    let (state, _, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "queued", "a retry waits: {error:?}");
+    assert!(e.recorded(U1).await?.is_none(), "not ready, not recorded");
+    *e.orthanc.metadata_fails.lock().map_err(|_| anyhow::anyhow!("lock"))? = false;
+    sqlx::query("update job set run_after = now() where id = $1")
+        .bind(up.job_id)
+        .execute(&e.rt.pool)
+        .await?;
+    e.run().await?;
+    let (state, result, _) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{result}");
+    assert!(e.recorded(U1).await?.is_some());
+    // the retry sent the files again; Orthanc kept one copy of each
+    assert_eq!(e.orthanc.held().instances.len(), 6);
+    Ok(())
+}
+
+#[tokio::test]
+async fn files_orthanc_files_otherwise_are_taken_back() -> R {
+    let e = env().await?;
+    // an Orthanc that reads every file of U1 as U2
+    *e.orthanc.misread.lock().map_err(|_| anyhow::anyhow!("lock"))? = Some((U1.into(), U2.into()));
+    let up = e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{error:?}");
+    assert_eq!(result["in_review"], 1, "{result}");
+    let held = e.orthanc.held();
+    assert!(held.instances.is_empty(), "taken back: {held:?}");
+    assert!(held.studies.is_empty(), "{held:?}");
+    assert!(e.recorded(U1).await?.is_none());
+    assert_eq!(
+        e.in_review("alex").await?,
+        [(U1.to_string(), "uid_conflict".to_string())]
+    );
+    Ok(())
+}

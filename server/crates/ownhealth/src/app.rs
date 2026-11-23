@@ -231,11 +231,13 @@ pub async fn shutdown_signal() {
     tracing::info!("shutting down");
 }
 
-pub async fn serve(settings: Settings) -> anyhow::Result<()> {
+pub async fn serve(mut settings: Settings) -> anyhow::Result<()> {
     check_secret_key(&settings)?;
-    // Imaging is on when OWNHEALTH_ORTHANC_URL is set; a URL without a password stops the start.
+    // Imaging is on when OWNHEALTH_ORTHANC_URL is set; a URL without a password stops the start. The
+    // viewer proxy and the DICOM import job (through the settings) use the same Orthanc.
     let orthanc = OrthancConfig::from_env(&ProcessEnv)?;
     let imaging_on = orthanc.is_some();
+    settings.orthanc = orthanc.clone();
     let imaging = Imaging::new(orthanc)?;
     let addr = format!("{}:{}", settings.host, settings.port);
     let rt = Runtime::new(settings)?;
