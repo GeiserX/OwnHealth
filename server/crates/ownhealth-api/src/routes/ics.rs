@@ -26,6 +26,11 @@
 //! action calendar_feed.fetch, with the peer address and user agent: behind a reverse proxy the
 //! address is the proxy's, as on every audit row), and a feed fetched more than RATE_PER_HOUR times
 //! in the last hour waits. A HEAD gets 405: it would deliver no calendar.
+//!
+//! Break-glass (`routes/break_glass.rs`): a feed made by an owner of the profile also carries one timed
+//! event per emergency request still waiting, from the request to the time access would open, with
+//! that time and the link to cancel it. Serving it stamps the request (`owner_feed_at`): a request opens
+//! only once an owner feed has carried it. A profile reached only through break-glass gets no feed.
 
 use axum::Router;
 use axum::extract::{Path, State};
@@ -65,20 +70,56 @@ fn generic_title(lang: &str) -> &'static str {
     ownhealth_core::langs::pick(GENERIC_TITLE, lang)
 }
 
-/// The registry languages the feed's own title lacks.
+/// The title of a break-glass request event, per registry language.
+const BG_TITLE: &[(&str, &str)] = &[
+    ("es", "OwnHealth: solicitud de acceso de emergencia"),
+    ("en", "OwnHealth: emergency access requested"),
+];
+/// When access would open; `{at}` is a UTC time.
+const BG_OPENS: &[(&str, &str)] = &[
+    (
+        "es",
+        "El acceso de emergencia a este perfil se abre el {at} si nadie cancela la solicitud antes.",
+    ),
+    (
+        "en",
+        "Emergency access to this profile opens on {at} unless the request is cancelled first.",
+    ),
+];
+/// Who asked, in a named feed only.
+const BG_WHO: &[(&str, &str)] = &[
+    ("es", "{contact} ha pedido acceso de emergencia a {profile}."),
+    ("en", "{contact} asked for emergency access to {profile}."),
+];
+const BG_CANCEL: &[(&str, &str)] = &[("es", "Para cancelarla: {link}"), ("en", "To cancel it: {link}")];
+
+/// The page that cancels one request (the UI's, behind step-up).
+pub fn cancel_link(base_url: &str, request: Uuid) -> String {
+    format!("{}/family/break-glass/{request}", base_url.trim_end_matches('/'))
+}
+
+/// The registry languages the feed's own texts lack.
 pub fn missing_langs(langs: &[&str]) -> Vec<String> {
-    ownhealth_core::langs::missing(&ownhealth_core::langs::codes(GENERIC_TITLE), langs)
+    [GENERIC_TITLE, BG_TITLE, BG_OPENS, BG_WHO, BG_CANCEL]
+        .iter()
+        .flat_map(|t| ownhealth_core::langs::missing(&ownhealth_core::langs::codes(t), langs))
+        .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
-        .map(|l| format!("calendar feed title has no `{l}` text"))
+        .map(|l| format!("calendar feed text has no `{l}` text"))
         .collect()
 }
 
 /// Every sentence the feed writes itself, for the wording gate (the named titles and reasons are the
 /// Due screen's, linted there).
 pub fn phrases() -> Value {
+    let pick = |t: &[(&str, &'static str)], l: &str| ownhealth_core::langs::pick(t, l);
     GENERIC_TITLE
         .iter()
-        .map(|(l, t)| (l.to_string(), json!({"generic": t})))
+        .map(|(l, t)| {
+            let bg = json!({"title": pick(BG_TITLE, l), "opens": pick(BG_OPENS, l),
+                            "who": pick(BG_WHO, l), "cancel": pick(BG_CANCEL, l)});
+            (l.to_string(), json!({"generic": t, "break_glass": bg}))
+        })
         .collect::<serde_json::Map<String, Value>>()
         .into()
 }
@@ -241,8 +282,49 @@ fn ics_date(d: NaiveDate) -> String {
     d.format("%Y%m%d").to_string()
 }
 
+/// One timed event: (UID, start, end, summary, description).
+type Timed = (String, DateTime<Utc>, DateTime<Utc>, String, String);
+
+fn ics_time(t: DateTime<Utc>) -> String {
+    t.format("%Y%m%dT%H%M%SZ").to_string()
+}
+
+/// The events of the break-glass requests waiting on the profile, for one of its owners.
+fn bg_events(
+    requests: &[(Uuid, DateTime<Utc>, DateTime<Utc>, String)],
+    profile: (Uuid, &str),
+    named: bool,
+    lang: &str,
+    base_url: &str,
+) -> Vec<Timed> {
+    let pick = |t: &[(&str, &'static str)]| ownhealth_core::langs::pick(t, lang);
+    requests
+        .iter()
+        .map(|(id, requested, opens, contact)| {
+            let at = opens.format("%Y-%m-%d %H:%M UTC").to_string();
+            let mut lines = Vec::new();
+            if named {
+                lines.push(
+                    pick(BG_WHO)
+                        .replace("{contact}", contact)
+                        .replace("{profile}", profile.1),
+                );
+            }
+            lines.push(pick(BG_OPENS).replace("{at}", &at));
+            lines.push(pick(BG_CANCEL).replace("{link}", &cancel_link(base_url, *id)));
+            (
+                uid(profile.0, &format!("break_glass:{id}")),
+                *requested,
+                *opens,
+                pick(BG_TITLE).to_string(),
+                lines.join("\n"),
+            )
+        })
+        .collect()
+}
+
 /// The calendar text.
-fn calendar(name: &str, events: &[Event], now: DateTime<Utc>) -> String {
+fn calendar(name: &str, events: &[Event], timed: &[Timed], now: DateTime<Utc>) -> String {
     let mut out = String::new();
     for l in [
         "BEGIN:VCALENDAR",
@@ -271,6 +353,17 @@ fn calendar(name: &str, events: &[Event], now: DateTime<Utc>) -> String {
         if let Some(d) = description.as_deref().filter(|d| !d.is_empty()) {
             line(&mut out, &format!("DESCRIPTION:{}", escape(d)));
         }
+        line(&mut out, "TRANSP:TRANSPARENT");
+        line(&mut out, "END:VEVENT");
+    }
+    for (uid, start, end, summary, description) in timed {
+        line(&mut out, "BEGIN:VEVENT");
+        line(&mut out, &format!("UID:{uid}"));
+        line(&mut out, &format!("DTSTAMP:{stamp}"));
+        line(&mut out, &format!("DTSTART:{}", ics_time(*start)));
+        line(&mut out, &format!("DTEND:{}", ics_time(*end)));
+        line(&mut out, &format!("SUMMARY:{}", escape(summary)));
+        line(&mut out, &format!("DESCRIPTION:{}", escape(description)));
         line(&mut out, "TRANSP:TRANSPARENT");
         line(&mut out, "END:VEVENT");
     }
@@ -334,7 +427,21 @@ async fn serve(rt: &Runtime, file: &str, meta: Meta) -> Result<Response, ApiErro
     } else {
         "OwnHealth".to_string()
     };
-    let text = calendar(&name, &list, Utc::now());
+    // an owner's feed carries the emergency requests waiting on the profile, and serving it is what
+    // lets them open
+    let waiting = if perm.role == "owner" && !perm.break_glass {
+        ownhealth_core::break_glass::feed_requests(&mut tx, f.profile_id).await?
+    } else {
+        Vec::new()
+    };
+    let timed = bg_events(
+        &waiting,
+        (f.profile_id, &perm.profile.display_name),
+        named,
+        lang,
+        &rt.settings.base_url,
+    );
+    let text = calendar(&name, &list, &timed, Utc::now());
     // a calendar app's fetch, with the peer address and user agent it came from, so the owner of an
     // address that leaked can tell who polls it
     let mut e = AuditEvent::new("share", "export", "calendar_feed.fetch");
@@ -346,13 +453,15 @@ async fn serve(rt: &Runtime, file: &str, meta: Meta) -> Result<Response, ApiErro
     e.resource_type = Some("calendar_feed".into());
     e.resource_ids = Some(vec![f.id.to_string()]);
     e.args_summary = Some(format!("detail={}", f.detail));
-    e.rows_out = Some(i32::try_from(list.len()).unwrap_or(i32::MAX));
+    e.rows_out = Some(i32::try_from(list.len() + timed.len()).unwrap_or(i32::MAX));
     e.bytes_out = Some(i32::try_from(text.len()).unwrap_or(i32::MAX));
     write_audit(&mut tx, &e).await?;
     sqlx::query("update calendar_feed set last_used_at = now() where id = $1")
         .bind(f.id)
         .execute(&mut *tx)
         .await?;
+    let ids: Vec<Uuid> = waiting.iter().map(|w| w.0).collect();
+    ownhealth_core::break_glass::mark_fed(&mut tx, &ids).await?;
     tx.commit().await?;
     Ok(([(header::CONTENT_TYPE, "text/calendar; charset=utf-8")], text).into_response())
 }
@@ -419,6 +528,15 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
     check_detail(&b.detail)?;
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
+    if perm.break_glass_only {
+        // a feed reads as its creator with no browser session: emergency access never reaches it
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "break_glass",
+            "Emergency access cannot make a calendar feed.",
+        )
+        .into());
+    }
     sessions::require_step_up(&mut tx, &caller.0, sessions::STEP_UP_SECONDS).await?;
     let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
     let prefix = format!("{PREFIX}{}", ownhealth_core::ids::short(8));

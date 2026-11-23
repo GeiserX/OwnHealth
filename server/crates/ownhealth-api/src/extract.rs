@@ -54,6 +54,16 @@ impl FromRequestParts<Runtime> for Caller {
             return Err(Error::access_denied("forbidden", "Access tokens work only on /mcp. Use the web app.").into());
         }
         csrf::check(&parts.method, &parts.headers, &p, &rt.settings.base_url)?;
+        if let (PrincipalKind::Session | PrincipalKind::Dev, Some(user)) = (p.kind, p.user_id) {
+            // break-glass: a request whose time has come opens (or ends) at the next request of a
+            // person, and an open one of this caller counts from here on, its uses recorded
+            ownhealth_core::break_glass::settle(&mut conn, None).await?;
+            let path = parts
+                .extensions
+                .get::<axum::extract::MatchedPath>()
+                .map_or_else(|| parts.uri.path().to_string(), |m| m.as_str().to_string());
+            ownhealth_core::break_glass::arm(user, rt.pool.clone(), format!("{} {path}", parts.method));
+        }
         Ok(Caller(p))
     }
 }

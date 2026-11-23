@@ -38,10 +38,13 @@ pub const LIFECYCLE_TAG: &str = "urn:ownhealth:lifecycle";
 /// Not part of a person's export: access control and secrets, inbox configuration (v0.2: token hashes,
 /// secret references, routing rules), calendar feed tokens (v0.3), inbox bookkeeping (what an inbox
 /// already handed over, so it never imports it twice: message and Paperless ids, folder keys, file
-/// hashes), SMART Health Links (v1.0: id hashes, passcode hashes, ciphertext), and tables that only
-/// repeat the profile.
-const SKIP_RAW: [&str; 9] = [
+/// hashes), SMART Health Links (v1.0: id hashes, passcode hashes, ciphertext), break-glass contacts,
+/// requests and the owner's notices (v1.0: access control), and tables that only repeat the profile.
+const SKIP_RAW: [&str; 12] = [
     "profile",
+    "break_glass_contact",
+    "break_glass_request",
+    "notification_outbox",
     "profile_grant",
     "profile_key",
     "api_token",

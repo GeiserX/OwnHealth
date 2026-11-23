@@ -161,6 +161,15 @@ async fn ips(
     let perm = Caller(p.clone())
         .require(&mut tx, &profile, Some("read:summary"), None)
         .await?;
+    if perm.break_glass {
+        // emergency access reads in the app and is never exported
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "break_glass",
+            "Emergency access cannot export this profile.",
+        )
+        .into());
+    }
     let today = today_utc();
     let (out, state) = ownhealth_ops::ips::read(&mut tx, perm.profile.id, &perm.scopes, &lang, today).await?;
     ownhealth_rules::commit_read(tx, perm.profile.id, &state).await?;

@@ -457,6 +457,10 @@ async fn no_head() -> Response {
 /// caregiver are refused the same way, `not_sharer`. What a link may carry is `open_categories`.
 async fn sharer(conn: &mut PgConnection, caller: &Caller, p: &str) -> Result<Permission, ApiError> {
     let perm = caller.require(conn, p, None, None).await?;
+    if perm.break_glass {
+        // an open emergency request widened this permission: it reads, and it never shares
+        return Err(ownhealth_core::Error::access_denied("not_sharer", msg("role")).into());
+    }
     let grant: Option<bool> = sqlx::query_scalar(
         "select break_glass from profile_grant where user_id = $1 and profile_id = $2 and role = any($3)",
     )

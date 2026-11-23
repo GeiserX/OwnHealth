@@ -7,6 +7,11 @@
 //! The browser session is a token with every scope. A user with no grant on a profile cannot reach
 //! it, whatever a token says. The owner's own grant ignores locks; locks restrict everyone else.
 //! Every surface (UI, REST, MCP, export) calls `effective_permission` or `require`.
+//!
+//! Break-glass (`break_glass.rs`): for a person in the browser, an open emergency request is added to
+//! their grant (its categories joined to the grant's, role `viewer` when they hold no grant). Only a
+//! REST request that records the uses (`break_glass::arm`) gets it; tokens, OAuth, calendar feeds and
+//! share links never do. Each permission it widened is recorded as a use.
 
 use sqlx::AssertSqlSafe;
 use std::collections::BTreeSet;
@@ -198,8 +203,12 @@ pub struct Permission {
     pub profile: Profile,
     pub role: String,
     pub scopes: Scopes,
-    /// An emergency grant (profile_grant.break_glass): it reads, and it never shares.
+    /// An emergency grant (profile_grant.break_glass, or an open break-glass request added to the
+    /// grant): it reads, and it never shares.
     pub break_glass: bool,
+    /// Reachable only through an open break-glass request: no grant row, so no token, consent,
+    /// calendar feed, export or share link for it.
+    pub break_glass_only: bool,
 }
 
 impl Permission {
@@ -208,7 +217,7 @@ impl Permission {
     }
 
     pub fn can(&self, action: &str) -> bool {
-        can(&self.role, action)
+        !self.break_glass_only && can(&self.role, action)
     }
 }
 
@@ -263,15 +272,58 @@ pub async fn effective_permission(
     .bind(profile_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((role, categories, break_glass)) = grant else {
-        return Err(not_granted());
+    let open = if union_applies(principal, user_id) {
+        crate::break_glass::active(&mut *conn, user_id, Some(profile_id))
+            .await?
+            .into_iter()
+            .next()
+    } else {
+        None
     };
-    let scopes = effective_scopes(&principal.scopes, &scope_set(&categories), &profile.locks(), &role);
-    Ok(Permission {
+    combine(principal, profile, grant, open.as_ref(), user_id, true).ok_or_else(not_granted)
+}
+
+/// Whether an open break-glass request of this caller counts: a person in the browser, inside a REST
+/// request that records its uses.
+fn union_applies(principal: &Principal, user_id: Uuid) -> bool {
+    matches!(principal.kind, PrincipalKind::Session | PrincipalKind::Dev)
+        && principal.profile_ids.is_none()
+        && crate::break_glass::armed_for(user_id)
+}
+
+/// A grant row and an open request (id, profile, categories) as one permission; with `record`, a use
+/// is recorded when the request added to it.
+fn combine(
+    principal: &Principal,
+    profile: Profile,
+    grant: Option<(String, Vec<String>, bool)>,
+    open: Option<&(Uuid, Uuid, Vec<String>)>,
+    user_id: Uuid,
+    record: bool,
+) -> Option<Permission> {
+    let (role, mut categories, mut break_glass, only) = match (grant, open) {
+        (None, None) => return None,
+        (Some((role, cats, bg)), _) => (role, scope_set(&cats), bg, false),
+        (None, Some(_)) => ("viewer".to_string(), Scopes::new(), true, true),
+    };
+    if let Some((request_id, _, cats)) = open {
+        categories.extend(cats.iter().cloned());
+        break_glass = true;
+        if record {
+            crate::break_glass::record(crate::break_glass::Use {
+                request_id: *request_id,
+                profile_id: profile.id,
+                contact: user_id,
+            });
+        }
+    }
+    let scopes = effective_scopes(&principal.scopes, &categories, &profile.locks(), &role);
+    Some(Permission {
         profile,
         role,
         scopes,
         break_glass,
+        break_glass_only: only,
     })
 }
 
@@ -284,8 +336,13 @@ struct GrantedProfile {
     break_glass: bool,
 }
 
-/// Every profile the principal may reach, in slug order, with role and effective scopes.
+/// Every profile the principal may reach, in slug order, with role and effective scopes. A profile an
+/// open break-glass request adds is recorded as a use: the caller may read it next.
 pub async fn accessible_profiles(conn: &mut PgConnection, principal: &Principal) -> Result<Vec<Permission>> {
+    listed(conn, principal, true).await
+}
+
+async fn listed(conn: &mut PgConnection, principal: &Principal, record: bool) -> Result<Vec<Permission>> {
     let Some(user_id) = principal.user_id else {
         return Ok(Vec::new());
     };
@@ -297,31 +354,32 @@ pub async fn accessible_profiles(conn: &mut PgConnection, principal: &Principal)
     );
     let rows: Vec<GrantedProfile> = sqlx::query_as(AssertSqlSafe(sql.as_str()))
         .bind(user_id)
-        .fetch_all(conn)
+        .fetch_all(&mut *conn)
         .await?;
-    Ok(rows
-        .into_iter()
-        .filter(|r| {
-            principal
-                .profile_ids
-                .as_ref()
-                .is_none_or(|ids| ids.contains(&r.profile.id))
-        })
-        .map(|r| {
-            let scopes = effective_scopes(
-                &principal.scopes,
-                &scope_set(&r.categories),
-                &r.profile.locks(),
-                &r.role,
-            );
-            Permission {
-                profile: r.profile,
-                role: r.role,
-                scopes,
-                break_glass: r.break_glass,
-            }
-        })
-        .collect())
+    let in_token = |id: &Uuid| principal.profile_ids.as_ref().is_none_or(|ids| ids.contains(id));
+    let open = if union_applies(principal, user_id) {
+        crate::break_glass::active(&mut *conn, user_id, None).await?
+    } else {
+        Vec::new()
+    };
+    let mut out: Vec<Permission> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for r in rows.into_iter().filter(|r| in_token(&r.profile.id)) {
+        seen.insert(r.profile.id);
+        let req = open.iter().find(|o| o.1 == r.profile.id);
+        let grant = Some((r.role, r.categories, r.break_glass));
+        out.extend(combine(principal, r.profile, grant, req, user_id, record));
+    }
+    let before = out.len();
+    for req in open.iter().filter(|o| !seen.contains(&o.1)) {
+        if let Some(profile) = get_profile(&mut *conn, req.1).await? {
+            out.extend(combine(principal, profile, None, Some(req), user_id, record));
+        }
+    }
+    if out.len() > before {
+        out.sort_by(|a, b| a.profile.slug.cmp(&b.profile.slug));
+    }
+    Ok(out)
 }
 
 /// A profile reference: a slug, `"me"`, a uuid, or none (the token's default profile).
@@ -357,7 +415,8 @@ pub async fn resolve_profile_ref(conn: &mut PgConnection, principal: &Principal,
         ProfileRef::Name(n) => Some(n),
         ProfileRef::Default => None,
     };
-    let allowed = accessible_profiles(conn, principal).await?;
+    // a name lookup reads nothing: the permission check that follows records a break-glass use
+    let allowed = listed(conn, principal, false).await?;
     let slugs = || allowed.iter().map(|p| p.profile.slug.clone()).collect::<Vec<_>>();
     if matches!(name, None | Some("") | Some("me")) {
         if name.is_none()
