@@ -92,6 +92,8 @@ struct Behaviour {
     /// The `scope` of token answers that carry it.
     scope: String,
     omit_refresh_scope: bool,
+    omit_refresh_token: bool,
+    procedure_unauthorized_after_pause: bool,
     /// The `capabilities` discovery lists.
     capabilities: Vec<&'static str>,
     /// A search of this type (`*`: every type) answers this status.
@@ -135,6 +137,8 @@ impl Default for Behaviour {
         Behaviour {
             scope: ALL.into(),
             omit_refresh_scope: false,
+            omit_refresh_token: false,
+            procedure_unauthorized_after_pause: false,
             capabilities: vec![
                 "launch-standalone",
                 "client-public",
@@ -330,7 +334,14 @@ async fn token(State(s): State<Shared>, Form(form): Form<HashMap<String, String>
             let challenge = lock(&s.book).codes.remove(&field("code"));
             match challenge {
                 Some(c) if field("redirect_uri") == REDIRECT && s256(&field("code_verifier")) == c => {
-                    Json(mint(&s)).into_response()
+                    let mut answer = mint(&s);
+                    if lock(&s.behaviour).omit_refresh_token {
+                        answer
+                            .as_object_mut()
+                            .expect("token object")
+                            .shift_remove("refresh_token");
+                    }
+                    Json(answer).into_response()
                 }
                 _ => oauth_error(StatusCode::BAD_REQUEST, "invalid_grant"),
             }
@@ -545,6 +556,9 @@ async fn search(
     {
         pause.arrived.notify_one();
         pause.release.notified().await;
+        if b.procedure_unauthorized_after_pause {
+            return outcome(StatusCode::UNAUTHORIZED, "expired token");
+        }
     }
     if get("patient").as_deref() != Some(PATIENT) {
         return outcome(StatusCode::FORBIDDEN, "another patient");
@@ -756,7 +770,6 @@ impl World {
         let mut tx = self.db.pool.begin().await?;
         let id = oauth::save_connection(&mut tx, &self.sb, &pending, &self.client, &tokens, now).await?;
         tx.commit().await?;
-        oauth::remember(id, &tokens, now);
         Ok(id)
     }
 
@@ -2654,5 +2667,56 @@ async fn the_bytes_past_the_page_cap_can_exhaust_the_run_budget() -> R {
     assert_eq!(got.problems.len(), 1, "{got:?}");
     assert_eq!(got.problems[0].code, "page_too_large");
     assert_eq!(w.count("condition").await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stale_401_leaves_the_replacement_grant_alone() -> R {
+    for omit_refresh_token in [false, true] {
+        let pause = Arc::new(ProcedurePause::default());
+        let w = world(Behaviour {
+            scope: "patient/Patient.r patient/Procedure.s".into(),
+            procedure_pause: Some(pause.clone()),
+            procedure_unauthorized_after_pause: true,
+            ..Behaviour::default()
+        })
+        .await?;
+        let source = w.connect(t0()).await?;
+        let pull = w.day(source, t0() + Duration::minutes(1));
+        let reconnect = async {
+            pause.arrived.notified().await;
+            w.fake.set(|b| b.omit_refresh_token = omit_refresh_token);
+            let launch = w.launch_for_source("sam", Some(source)).await?;
+            assert_eq!(w.save_consent(launch, t0() + Duration::minutes(2)).await?, source);
+            w.fake.set(|b| b.procedure_pause = None);
+            pause.release.notify_one();
+            anyhow::Ok(())
+        };
+        let (old, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::try_join!(pull, reconnect)
+        })
+        .await??;
+        assert_eq!(w.fake.book().refreshes, 0);
+        assert_eq!(w.reconsent(source).await?, None);
+        let err = old.expect_err("the old pull stops");
+        assert!(err.contains("grant_changed:"), "{err}");
+        assert_eq!(
+            w.fake
+                .book()
+                .attempts
+                .iter()
+                .filter(|s| s.ends_with("/Procedure"))
+                .count(),
+            1
+        );
+        assert!(w.documents(source).await?.is_empty());
+
+        let next = w
+            .day(source, t0() + Duration::minutes(3))
+            .await?
+            .map_err(anyhow::Error::msg)?;
+        assert!(next.problems.is_empty(), "{next:?}");
+        assert_eq!(w.fake.book().refreshes, 0);
+    }
     Ok(())
 }

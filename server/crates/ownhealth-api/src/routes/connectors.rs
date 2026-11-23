@@ -466,7 +466,6 @@ async fn callback(State(rt): State<Runtime>, meta: Meta, Query(q): Params, o: Op
         sources::enqueue_grant_poll(&mut tx, id).await?;
     }
     tx.commit().await?;
-    oauth::remember(id, &tokens, now);
     Ok(redirect(&state, &format!("/connections?connected={id}")))
 }
 

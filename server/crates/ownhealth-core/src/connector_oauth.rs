@@ -112,6 +112,9 @@ pub enum OAuthError {
     /// keep): `reconsent_needed_at` is set and the person connects again.
     #[error("the vendor no longer accepts this connection: connect it again")]
     ReconsentNeeded,
+    /// The pull's grant was replaced while it was running.
+    #[error("the connection's grant changed")]
+    GrantChanged,
     /// The vendor answered with an error or an unexpected status: only the status and the OAuth error
     /// code, never its description or body.
     #[error("the vendor refused the request ({status}, {code})")]
@@ -804,7 +807,8 @@ fn after(now: DateTime<Utc>, secs: Option<i64>) -> Option<DateTime<Utc>> {
 
 /// Store a finished launch, in the caller's transaction: a new source, or (a reconnect) the same
 /// source with a new grant identity and the old grant's errors cleared. The source is switched
-/// back on. Returns its id. Call [`remember`] after commit to keep the access token for the first poll.
+/// back on. Returns its id. The access token is cached for the new grant before the caller
+/// commits, so the first poll can use it as soon as the grant becomes visible.
 pub async fn save_connection(
     conn: &mut PgConnection,
     sb: &SecretBox,
@@ -825,6 +829,7 @@ pub async fn save_connection(
     }
     let config = config_for(p, t);
     let (access_at, grant_at) = (after(now, t.expires_in), after(now, t.refresh_expires_in));
+    let grant_id = Uuid::new_v4();
     let Some(source_id) = p.source_id else {
         let secret_id = match &t.refresh {
             Some(r) => Some(
@@ -843,7 +848,7 @@ pub async fn save_connection(
         let id: Uuid = sqlx::query_scalar(
             "insert into source (household_id, profile_id, kind, label, config, secret_id, poll_seconds, created_by, \
              connector_client_id, access_expires_at, grant_expires_at, oauth_grant_id) \
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, gen_random_uuid()) returning id",
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) returning id",
         )
         .bind(client.household_id)
         .bind(p.profile_id)
@@ -856,13 +861,14 @@ pub async fn save_connection(
         .bind(client.id)
         .bind(access_at)
         .bind(grant_at)
+        .bind(grant_id)
         .fetch_one(&mut *conn)
         .await?;
-        forget(id);
+        remember((id, Some(grant_id)), t, now);
         return Ok(id);
     };
-    let old: Option<(Option<Uuid>, Option<String>)> = sqlx::query_as(
-        "select secret_id, config->>'patient' from source where id = $1 and household_id = $2 and profile_id = $3 \
+    let old: Option<(Option<Uuid>, Option<String>, Option<Uuid>)> = sqlx::query_as(
+        "select secret_id, config->>'patient', oauth_grant_id from source where id = $1 and household_id = $2 and profile_id = $3 \
          and kind = $4 and connector_client_id = $5 for update",
     )
     .bind(source_id)
@@ -872,7 +878,7 @@ pub async fn save_connection(
     .bind(client.id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((old, patient)) = old else {
+    let Some((old, patient, old_grant)) = old else {
         return Err(refused(
             "source_changed",
             "This connection was removed or changed. Start again.",
@@ -907,7 +913,7 @@ pub async fn save_connection(
     };
     sqlx::query(
         "update source set config = $2, secret_id = $3, enabled = true, reconsent_needed_at = null, \
-         access_expires_at = $4, grant_expires_at = $5, oauth_grant_id = gen_random_uuid(), \
+         access_expires_at = $4, grant_expires_at = $5, oauth_grant_id = $6, \
          last_error_at = null, last_error = null, consecutive_failures = 0 where id = $1",
     )
     .bind(source_id)
@@ -915,6 +921,7 @@ pub async fn save_connection(
     .bind(secret_id)
     .bind(access_at)
     .bind(grant_at)
+    .bind(grant_id)
     .execute(&mut *conn)
     .await?;
     if let (Some(old), None) = (old, secret_id) {
@@ -923,58 +930,81 @@ pub async fn save_connection(
             .execute(&mut *conn)
             .await?;
     }
-    forget(source_id);
+    // Keep the committed grant usable if this transaction rolls back. Discard older staged
+    // tokens, which cannot be reached because every lookup checks the row's grant.
+    if let Ok(mut cache) = ACCESS.lock() {
+        cache.retain(|&(id, grant), _| id != source_id || grant == old_grant);
+    }
+    remember((source_id, Some(grant_id)), t, now);
     Ok(source_id)
 }
 
 // ----------------------------------------------------------------- refresh ----
 
+/// The source and its grant, including sources that predate grant identities.
+type Grant = (Uuid, Option<Uuid>);
+
 /// The access tokens in memory, with the instant each stops being used.
-type AccessCache = Mutex<HashMap<Uuid, (SecretString, DateTime<Utc>)>>;
+type AccessCache = Mutex<HashMap<Grant, (SecretString, DateTime<Utc>)>>;
 
 static ACCESS: LazyLock<AccessCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn cached(source_id: Uuid, now: DateTime<Utc>) -> Option<SecretString> {
+fn cached(grant: Grant, now: DateTime<Utc>) -> Option<SecretString> {
     let m = ACCESS.lock().ok()?;
-    m.get(&source_id)
+    m.get(&grant)
         .filter(|(_, until)| *until > now + Duration::seconds(MARGIN_SECONDS))
         .map(|(t, _)| t.clone())
 }
 
 /// Keep a connection's access token in memory until it expires (never on disk).
-pub fn remember(source_id: Uuid, t: &TokenSet, now: DateTime<Utc>) {
+fn remember(grant: Grant, t: &TokenSet, now: DateTime<Utc>) {
     let until = now + Duration::seconds(t.expires_in.unwrap_or(UNKNOWN_LIFETIME_SECONDS));
     if let Ok(mut m) = ACCESS.lock() {
-        m.insert(source_id, (t.access.clone(), until));
+        m.insert(grant, (t.access.clone(), until));
     }
 }
 
 /// Drop a connection's access token from memory.
 pub fn forget(source_id: Uuid) {
     if let Ok(mut m) = ACCESS.lock() {
-        m.remove(&source_id);
+        m.retain(|&(id, _), _| id != source_id);
     }
 }
 
-async fn needs_reconsent(conn: &mut PgConnection, source_id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-    sqlx::query("update source set reconsent_needed_at = $2 where id = $1")
-        .bind(source_id)
-        .bind(now)
-        .execute(conn)
-        .await
-        .map(|_| ())
+fn forget_grant(grant: Grant, token: Option<&SecretString>) {
+    if let Ok(mut m) = ACCESS.lock()
+        && m.get(&grant).is_some_and(|(cached, _)| {
+            token.is_none_or(|token| bool::from(cached.expose().as_bytes().ct_eq(token.expose().as_bytes())))
+        })
+    {
+        m.remove(&grant);
+    }
 }
 
-/// household, profile, secret, client, config, reconsent, enabled
-type Locked = (
-    Uuid,
-    Option<Uuid>,
-    Option<Uuid>,
-    Option<Uuid>,
-    Value,
-    Option<DateTime<Utc>>,
-    bool,
-);
+async fn needs_reconsent(conn: &mut PgConnection, grant: Grant, now: DateTime<Utc>) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "update source set reconsent_needed_at = $2 where id = $1 and enabled \
+         and oauth_grant_id is not distinct from $3",
+    )
+    .bind(grant.0)
+    .bind(now)
+    .bind(grant.1)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+#[derive(sqlx::FromRow)]
+struct Locked {
+    household_id: Uuid,
+    profile_id: Option<Uuid>,
+    secret_id: Option<Uuid>,
+    connector_client_id: Option<Uuid>,
+    config: Value,
+    reconsent_needed_at: Option<DateTime<Utc>>,
+    enabled: bool,
+    oauth_grant_id: Option<Uuid>,
+}
 
 /// A usable access token for the connection: the one in memory, or a refresh. `now` is the clock the
 /// expiry is counted from (tests move it).
@@ -989,27 +1019,87 @@ pub async fn access_token(
     egress: &Egress,
     now: DateTime<Utc>,
 ) -> Result<SecretString, OAuthError> {
-    if let Some(t) = cached(source_id, now) {
-        return Ok(t);
+    access_token_inner(pool, sb, source_id, egress, now, None, None).await
+}
+
+/// Get a token for the grant a pull started with. If the FHIR endpoint rejected `rejected`, refresh
+/// that token once (or reuse a token another pull has already refreshed for the same grant).
+pub async fn access_token_for_grant(
+    pool: &PgPool,
+    sb: &SecretBox,
+    source: &Source,
+    egress: &Egress,
+    now: DateTime<Utc>,
+    rejected: Option<&SecretString>,
+) -> Result<SecretString, OAuthError> {
+    access_token_inner(pool, sb, source.id, egress, now, Some(source.oauth_grant_id), rejected).await
+}
+
+async fn access_token_inner(
+    pool: &PgPool,
+    sb: &SecretBox,
+    source_id: Uuid,
+    egress: &Egress,
+    now: DateTime<Utc>,
+    expected_grant: Option<Option<Uuid>>,
+    rejected: Option<&SecretString>,
+) -> Result<SecretString, OAuthError> {
+    // A cached token can avoid the refresh lock. Read the committed grant first, because
+    // a callback may already have staged a token for an uncommitted replacement grant.
+    if rejected.is_none()
+        && let Some(grant) = expected_grant
+        && let Some(token) = cached((source_id, grant), now)
+    {
+        let current: Option<bool> = sqlx::query_scalar(
+            "select enabled and reconsent_needed_at is null and oauth_grant_id is not distinct from $2 \
+             from source where id = $1",
+        )
+        .bind(source_id)
+        .bind(grant)
+        .fetch_optional(pool)
+        .await?;
+        if current == Some(true) {
+            return Ok(token);
+        }
     }
     let kinds: Vec<&str> = OAUTH_KINDS.to_vec();
     let mut tx = pool.begin().await?;
     let row: Option<Locked> = sqlx::query_as(
-        "select household_id, profile_id, secret_id, connector_client_id, config, reconsent_needed_at, enabled \
-         from source where id = $1 and kind = any($2) for update",
+        "select household_id, profile_id, secret_id, connector_client_id, config, reconsent_needed_at, enabled, \
+         oauth_grant_id from source where id = $1 and kind = any($2) for update",
     )
     .bind(source_id)
     .bind(&kinds)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((household, profile, secret_id, client_id, config, reconsent, enabled)) = row else {
+    let Some(Locked {
+        household_id: household,
+        profile_id: profile,
+        secret_id,
+        connector_client_id: client_id,
+        config,
+        reconsent_needed_at,
+        enabled,
+        oauth_grant_id,
+    }) = row
+    else {
         return Err(OAuthError::Core(Error::NotFound("Unknown connection.".into())));
     };
-    if reconsent.is_some() {
+    if expected_grant.is_some_and(|expected| expected != oauth_grant_id) {
+        return Err(OAuthError::GrantChanged);
+    }
+    if reconsent_needed_at.is_some() {
         return Err(OAuthError::ReconsentNeeded);
     }
     if !enabled {
         return Err(refused("disconnected", "This connection is switched off."));
+    }
+    let grant = (source_id, oauth_grant_id);
+    if rejected.is_some() {
+        forget_grant(grant, rejected);
+    }
+    if let Some(t) = cached(grant, now) {
+        return Ok(t);
     }
     // A profile's rotated token is sealed under the profile's key. Without the keys this process
     // could read an older token sealed under the secrets key, spend it at the vendor, and then fail
@@ -1020,13 +1110,9 @@ pub async fn access_token(
             "This process has no profile keys, so it cannot store this connection's next token.",
         ));
     }
-    // another refresh finished while this one waited for the lock
-    if let Some(t) = cached(source_id, now) {
-        return Ok(t);
-    }
     let Some(secret_id) = secret_id else {
         // the vendor gave no refresh token and the access token is gone
-        needs_reconsent(&mut tx, source_id, now).await?;
+        needs_reconsent(&mut tx, grant, now).await?;
         tx.commit().await?;
         return Err(OAuthError::ReconsentNeeded);
     };
@@ -1062,16 +1148,14 @@ pub async fn access_token(
     let t = match parse_tokens(&answer) {
         Ok(t) => t,
         Err(OAuthError::Vendor { code, .. }) if code == "invalid_grant" => {
-            needs_reconsent(&mut tx, source_id, now).await?;
+            needs_reconsent(&mut tx, grant, now).await?;
+            forget_grant(grant, None);
             tx.commit().await?;
-            forget(source_id);
             return Err(OAuthError::ReconsentNeeded);
         }
         Err(e) => return Err(e),
     };
     let rotated = t.refresh.is_some();
-    // the second caller may read the token as soon as the lock goes, so it is in memory first
-    remember(source_id, &t, now);
     let stored: Result<(), OAuthError> = async {
         // A profile's token goes under the profile's key, also when the token it replaces was sealed
         // under the secrets key; a vendor that does not rotate keeps the same token, which is sealed
@@ -1099,6 +1183,8 @@ pub async fn access_token(
         .bind(&t.scope)
         .execute(&mut *tx)
         .await?;
+        // The next caller may read the token as soon as the row lock goes.
+        remember(grant, &t, now);
         tx.commit().await?;
         Ok(())
     }
@@ -1106,15 +1192,18 @@ pub async fn access_token(
     match stored {
         Ok(()) => Ok(t.access),
         Err(e) => {
-            forget(source_id);
+            forget_grant(grant, Some(&t.access));
             if !rotated {
                 return Err(e);
             }
             // the vendor already retired the token we hold: say so instead of failing silently later
             tracing::warn!(%source_id, "a rotated refresh token could not be stored: the connection needs consent again");
             let mut conn = pool.acquire().await?;
-            needs_reconsent(&mut conn, source_id, now).await?;
-            Err(OAuthError::ReconsentNeeded)
+            if needs_reconsent(&mut conn, grant, now).await? {
+                Err(OAuthError::ReconsentNeeded)
+            } else {
+                Err(OAuthError::GrantChanged)
+            }
         }
     }
 }
@@ -1183,13 +1272,13 @@ async fn revoke_held(
     }
 }
 
-type Held = (Uuid, Option<Uuid>, Option<Uuid>, Value);
+type Held = (Uuid, Option<Uuid>, Option<Uuid>, Value, Option<Uuid>);
 
 async fn lock_held(conn: &mut PgConnection, source_id: Uuid) -> Result<Option<Held>, OAuthError> {
     let kinds: Vec<&str> = OAUTH_KINDS.to_vec();
     Ok(sqlx::query_as(
-        "select household_id, secret_id, connector_client_id, config from source where id = $1 and kind = any($2) \
-         for update",
+        "select household_id, secret_id, connector_client_id, config, oauth_grant_id \
+         from source where id = $1 and kind = any($2) for update",
     )
     .bind(source_id)
     .bind(&kinds)
@@ -1206,7 +1295,7 @@ pub async fn disconnect(
     egress: &Egress,
 ) -> Result<Revocation, OAuthError> {
     let mut tx = pool.begin().await?;
-    let Some((household, secret_id, client_id, config)) = lock_held(&mut tx, source_id).await? else {
+    let Some((household, secret_id, client_id, config, grant)) = lock_held(&mut tx, source_id).await? else {
         return Err(OAuthError::Core(Error::NotFound("Unknown connection.".into())));
     };
     let outcome = revoke_held(
@@ -1230,7 +1319,7 @@ pub async fn disconnect(
             .await?;
     }
     tx.commit().await?;
-    forget(source_id);
+    forget_grant((source_id, grant), None);
     Ok(outcome)
 }
 
@@ -1271,7 +1360,7 @@ pub async fn revoke_profile(
         let one = async {
             let mut tx = pool.begin().await?;
             let outcome = match lock_held(&mut tx, source_id).await? {
-                Some((household, secret_id, client_id, config)) => {
+                Some((household, secret_id, client_id, config, _)) => {
                     revoke_held(
                         &mut tx,
                         sb,

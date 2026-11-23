@@ -1237,3 +1237,35 @@ async fn a_poller_asking_for_an_undeclared_host_is_refused_and_no_request_goes_o
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn committing_a_grant_without_a_refresh_token_makes_the_access_token_available() -> R {
+    let s = setup().await?;
+    let save = |source_id: Option<Uuid>, rollback: bool| {
+        let s = &s;
+        async move {
+            let url = s.launch(source_id).await?;
+            let code = s.fake.consent(&url);
+            let mut tx = s.db.pool.begin().await?;
+            let p = oauth::take_state(&mut tx, &param(&url, "state").unwrap_or_default(), BINDER).await?;
+            let mut tokens = oauth::exchange(&p, &s.client, &code, &egress()).await?;
+            tokens.refresh = None;
+            let id = oauth::save_connection(&mut tx, &s.sb, &p, &s.client, &tokens, t0()).await?;
+            if rollback {
+                tx.rollback().await?;
+            } else {
+                tx.commit().await?;
+            }
+            Ok::<_, anyhow::Error>((id, tokens.access))
+        }
+    };
+    let (id, original) = save(None, false).await?;
+    let first = s.refresh(id, t0()).await?;
+    assert!(first.expose() == original.expose());
+    assert_eq!(s.reconsent(id).await?, None);
+    save(Some(id), true).await?;
+    let after_rollback = s.refresh(id, t0()).await?;
+    assert!(after_rollback.expose() == original.expose());
+    assert_eq!(s.reconsent(id).await?, None);
+    Ok(())
+}

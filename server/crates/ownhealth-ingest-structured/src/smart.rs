@@ -343,6 +343,7 @@ fn within(query: &str, params: &[(&str, &str)]) -> bool {
 fn token_stop(e: OAuthError) -> JobError {
     match e {
         OAuthError::ReconsentNeeded => JobError::permanent(STOP_RECONSENT),
+        OAuthError::GrantChanged => JobError::permanent(STOP_GRANT_CHANGED),
         OAuthError::Refused { code, message } => JobError::permanent(format!("{code}: {message}")),
         OAuthError::Core(e) => e.into(),
         OAuthError::Vendor { status, code } => JobError::retry(words::token_refused(status, &code)),
@@ -360,11 +361,11 @@ enum Miss {
 }
 
 /// The FHIR client of one run: the source's declared hosts, its access token, one refresh on a 401.
-struct Reader {
+struct Reader<'a> {
     http: SourceHttp,
     pool: PgPool,
     sb: SecretBox,
-    source_id: Uuid,
+    source: &'a Source,
     /// The token endpoint's egress (the connector profile); the searches use `http`'s.
     egress: Egress,
     now: DateTime<Utc>,
@@ -375,7 +376,7 @@ struct Reader {
     budget_hit: bool,
 }
 
-impl Reader {
+impl Reader<'_> {
     fn budget_problem(&mut self) -> Miss {
         self.budget_hit = true;
         let limit = self.run_bytes;
@@ -383,6 +384,7 @@ impl Reader {
     }
 
     async fn get(&mut self, url: &str) -> Result<Fetched, Miss> {
+        let mut rejected = None;
         loop {
             if self.remaining == 0 {
                 return Err(self.budget_problem());
@@ -390,9 +392,16 @@ impl Reader {
             let token = match &self.token {
                 Some(t) => t.clone(),
                 None => {
-                    let t = oauth::access_token(&self.pool, &self.sb, self.source_id, &self.egress, self.now)
-                        .await
-                        .map_err(|e| Miss::Run(token_stop(e)))?;
+                    let t = oauth::access_token_for_grant(
+                        &self.pool,
+                        &self.sb,
+                        self.source,
+                        &self.egress,
+                        self.now,
+                        rejected.as_ref(),
+                    )
+                    .await
+                    .map_err(|e| Miss::Run(token_stop(e)))?;
                     self.token = Some(t.clone());
                     t
                 }
@@ -436,7 +445,7 @@ impl Reader {
             if f.status == 401 && !self.refreshed {
                 self.refreshed = true;
                 self.token = None;
-                oauth::forget(self.source_id);
+                rejected = Some(token);
                 continue;
             }
             return Ok(f);
@@ -514,7 +523,7 @@ fn wants_status(body: &[u8]) -> bool {
 }
 
 /// One request of a search: the answer, or `None` when the search stops (its problem is in `g`).
-async fn fetch(r: &mut Reader, g: &mut Gathered, rtype: &str, url: &str) -> Result<Option<Fetched>, JobError> {
+async fn fetch(r: &mut Reader<'_>, g: &mut Gathered, rtype: &str, url: &str) -> Result<Option<Fetched>, JobError> {
     match r.get(url).await {
         Ok(f) => Ok(Some(f)),
         Err(Miss::Run(e)) => Err(e),
@@ -576,7 +585,7 @@ enum StatusRetry {
 
 /// Gather one search and its status fallbacks. An exhausted byte budget stops further searches.
 async fn search(
-    r: &mut Reader,
+    r: &mut Reader<'_>,
     g: &mut Gathered,
     caps: &Caps,
     (base, patient, scope): (&str, &str, Option<&str>),
@@ -879,7 +888,7 @@ pub async fn pull_with(
         ),
         pool: ctx.pool.clone(),
         sb: SecretBox::from_settings(&ctx.settings)?.with_keys(ctx.blobs.keyring()),
-        source_id: source.id,
+        source,
         egress: egress.clone(),
         now,
         token: None,
