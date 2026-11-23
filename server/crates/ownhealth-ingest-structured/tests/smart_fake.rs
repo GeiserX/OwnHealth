@@ -98,6 +98,8 @@ struct Behaviour {
     refuse_all: bool,
     /// The Patient read answers this status.
     patient_status: Option<u16>,
+    /// Demographics the vendor withholds from the Patient read.
+    redact_patient: &'static [&'static str],
     /// `_include=MedicationRequest:medication` brings the named Medications (US Core); off, the
     /// server ignores it.
     include: bool,
@@ -123,6 +125,7 @@ impl Default for Behaviour {
             loop_next: None,
             refuse_all: false,
             patient_status: None,
+            redact_patient: &[],
             include: true,
             require_status: None,
             medication_padding: 0,
@@ -353,7 +356,15 @@ async fn read_patient(State(s): State<Shared>, Path(id): Path<String>, headers: 
         .iter()
         .find(|r| r["resourceType"] == "Patient" && r["id"] == id)
     {
-        Some(p) => fhir_answer(&s, StatusCode::OK, p, true),
+        Some(p) => {
+            let mut p = p.clone();
+            if let Some(fields) = p.as_object_mut() {
+                for field in lock(&s.behaviour).redact_patient {
+                    fields.remove(*field);
+                }
+            }
+            fhir_answer(&s, StatusCode::OK, &p, true)
+        }
         None => outcome(StatusCode::NOT_FOUND, "no such patient"),
     }
 }
@@ -1308,6 +1319,33 @@ async fn another_persons_portal_account_imports_nothing_into_the_profile() -> R 
     assert_eq!(w.open_items_of(lucia).await?.len(), 0);
     let mut c = w.db.pool.acquire().await?;
     assert_eq!(list_records(&mut c, "condition", lucia, None, true).await?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_patient_with_insufficient_demographics_stops_before_searching() -> R {
+    for (profile, redact_patient) in [
+        ("lucia", &["name", "birthDate"][..]),
+        ("sam", &["name"][..]),
+        ("sam", &["birthDate"][..]),
+    ] {
+        let w = world(Behaviour {
+            redact_patient,
+            ..Behaviour::default()
+        })
+        .await?;
+        let source = w.connect_for(profile, t0()).await?;
+        let got = w.day(source, t0() + Duration::minutes(1)).await?;
+        assert_eq!(
+            w.searched_since(0).await,
+            ["Patient/sam-rivera".to_string()].into(),
+            "{profile}: clinical data was requested with {redact_patient:?} missing"
+        );
+        assert_eq!(w.documents(source).await?.len(), 0);
+        assert_eq!(w.open_items_of(w.fam.profile(profile)).await?.len(), 0);
+        let err = got.expect_err("the pull stops when the patient's identity cannot be verified");
+        assert!(err.contains("patient_unverified"), "{err}");
+    }
     Ok(())
 }
 

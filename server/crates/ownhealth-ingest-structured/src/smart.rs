@@ -13,8 +13,8 @@
 //!   covers only the searches inside it. A server that answers a search with 400 because it wants
 //!   `status` is asked once more with every status. Each search follows its `next` links, which must
 //!   stay on a host the connection declared at connect time and never repeat.
-//! - **The patient.** The Patient the grant names is matched against the profile before anything is
-//!   stored: another person's portal account (a parent who signed in with their own) stores nothing.
+//! - **The patient.** The Patient the grant names must confirm the profile's name and full birth
+//!   date before any clinical search. The pull stops if the identity differs or cannot be verified.
 //! - **One bundle per run.** Every resource the searches returned becomes one `collection` Bundle,
 //!   each resource once and in a fixed order, so a day when nothing changed gives the same bytes and
 //!   the same document. A day when something changed stores the whole record again as a new
@@ -163,6 +163,8 @@ const STOP_PROFILE: &str = "no_profile: the connection belongs to no profile";
 const STOP_NO_ANSWER: &str = "no_answer: no US Core search answered";
 const STOP_ANOTHER_PATIENT: &str =
     "another_patient: the account at the portal is for another person than this profile, so nothing was imported";
+const STOP_PATIENT_UNVERIFIED: &str =
+    "patient_unverified: the Patient response does not verify the profile's identity, so nothing was imported";
 const STOP_OFF: &str = "switched_off: the connection was switched off during the run, so nothing was imported";
 const STOP_CHANGED: &str = "source_changed: the connection changed during the run, so nothing was imported";
 const STOP_PATIENT_NOT_GRANTED: &str = "patient_not_granted: the grant does not cover reading the patient, so the record \
@@ -234,7 +236,8 @@ pub fn phrases() -> Value {
     };
     json!({
         "stop": [STOP_RECONSENT, STOP_PATIENT, STOP_SERVER, STOP_PROFILE, STOP_NO_ANSWER, STOP_ANOTHER_PATIENT,
-                 STOP_OFF, STOP_CHANGED, STOP_PATIENT_NOT_GRANTED, words::patient_unread(404), words::token_refused(500, "server_error"),
+                 STOP_PATIENT_UNVERIFIED, STOP_OFF, STOP_CHANGED, STOP_PATIENT_NOT_GRANTED,
+                 words::patient_unread(404), words::token_refused(500, "server_error"),
                  words::token_unreachable(&net), words::undeclared_host("fhir.elsewhere.example")],
         "problem": [
             words::answered("Observation", 503),
@@ -745,7 +748,7 @@ pub async fn pull_with(
         bytes: 0,
     };
 
-    // the Patient first: another person's account stores nothing, and the importer matches it too
+    // Verify the Patient before requesting any clinical data.
     let f = match r.get(&format!("{base}/Patient/{patient}")).await {
         Ok(f) => f,
         Err(Miss::Run(e)) => return Err(e),
@@ -762,10 +765,20 @@ pub async fn pull_with(
             .bind(profile_id)
             .fetch_optional(&ctx.pool)
             .await?;
-    if let Some((name, born)) = who
-        && fhir::mapping::match_patient(Some(&p), &name, born) == "mismatch"
-    {
+    let Some((name, born)) = who else {
+        return Err(JobError::permanent(STOP_CHANGED));
+    };
+    let full_birth_date = p["birthDate"]
+        .as_str()
+        .is_some_and(|date| date.len() == 10 && NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok());
+    if p["id"] != patient || !full_birth_date {
+        return Err(JobError::permanent(STOP_PATIENT_UNVERIFIED));
+    }
+    if fhir::mapping::match_patient(Some(&p), &name, born) == "mismatch" {
         return Err(JobError::permanent(STOP_ANOTHER_PATIENT));
+    }
+    if !fhir::mapping::verifies_patient(&p, &name, born) {
+        return Err(JobError::permanent(STOP_PATIENT_UNVERIFIED));
     }
     g.entries.push((Some(format!("{base}/Patient/{patient}")), p));
     for (rtype, params) in &planned {

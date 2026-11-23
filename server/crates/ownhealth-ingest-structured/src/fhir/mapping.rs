@@ -246,6 +246,25 @@ pub fn name_tokens(s: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn patient_names(patient: &Value) -> impl Iterator<Item = BTreeSet<String>> + '_ {
+    list(Some(patient), "name").iter().map(|name| {
+        let mut parts: Vec<String> = list(Some(name), "given").iter().map(text_of).collect();
+        for key in ["family", "text"] {
+            parts.push(get_truthy(Some(name), key).map(text_of).unwrap_or_default());
+        }
+        name_tokens(&parts.join(" "))
+    })
+}
+
+/// Identity proof for an automatic SMART pull. A single HumanName must cover the profile's name,
+/// and the birth date must be precise to the day.
+pub(crate) fn verifies_patient(patient: &Value, display_name: &str, birth_date: Option<NaiveDate>) -> bool {
+    let want = name_tokens(display_name);
+    birth_date.is_some_and(|date| patient["birthDate"] == date.to_string())
+        && !want.is_empty()
+        && patient_names(patient).any(|name| want.is_subset(&name))
+}
+
 /// Identity of a bundle against the profile it is imported into: matched | hinted | mismatch | missing.
 ///
 /// Matched needs both the name and the birth date. A different birth date is a mismatch even when
@@ -254,14 +273,7 @@ pub fn match_patient(patient: Option<&Value>, display_name: &str, birth_date: Op
     let Some(patient) = patient else {
         return "missing";
     };
-    let mut tokens: BTreeSet<String> = BTreeSet::new();
-    for n in list(Some(patient), "name") {
-        let mut parts: Vec<String> = list(Some(n), "given").iter().map(text_of).collect();
-        for key in ["family", "text"] {
-            parts.push(get_truthy(Some(n), key).map(text_of).unwrap_or_default());
-        }
-        tokens.extend(name_tokens(&parts.join(" ")));
-    }
+    let tokens: BTreeSet<String> = patient_names(patient).flatten().collect();
     let want = name_tokens(display_name);
     let name_ok = !tokens.is_empty() && !want.is_empty() && (want.is_subset(&tokens) || tokens.is_subset(&want));
     let pdob = parse_date(patient.get("birthDate"));

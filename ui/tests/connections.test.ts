@@ -206,7 +206,7 @@ for (const m of smart.matchAll(/"([a-z][a-z_]+): /g)) runCodes.add(m[1]);
 
 test('every stop and problem code of the SMART poller reads in es and en', () => {
 	// the gate can fail: codes from each of the three places are found
-	for (const c of ['no_answer', 'another_patient', 'switched_off', 'reconsent_needed', 'patient_unread', 'token_refused', 'search_failed', 'repeated_page', 'too_many_medications', 'not_granted', 'undeclared_host', 'unreachable']) {
+	for (const c of ['no_answer', 'another_patient', 'patient_unverified', 'switched_off', 'reconsent_needed', 'patient_unread', 'token_refused', 'search_failed', 'repeated_page', 'too_many_medications', 'not_granted', 'undeclared_host', 'unreachable']) {
 		assert.ok(runCodes.has(c), `the scan missed ${c}`);
 	}
 	const missing = [...runCodes].filter((c) => {

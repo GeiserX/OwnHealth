@@ -72,7 +72,12 @@ createServer(async (req, res) => {
 	// The FHIR API the SMART poller reads once a connection is made: the patient, and no resources.
 	if (req.method === 'GET' && /^\/Patient\/[A-Za-z0-9.-]+$/.test(url.pathname)) {
 		book.fhir++;
-		return json(res, 200, { resourceType: 'Patient', id: url.pathname.slice('/Patient/'.length) });
+		return json(res, 200, {
+			resourceType: 'Patient',
+			id: 'fake-patient-alex-rivera',
+			name: [{ family: 'Rivera', given: ['Alex'] }],
+			birthDate: '1979-05-14'
+		});
 	}
 	if (req.method === 'GET' && /^\/[A-Z][A-Za-z]+$/.test(url.pathname)) {
 		book.fhir++;
