@@ -88,8 +88,9 @@ fn egress() -> Egress {
 
 #[derive(Debug, Clone)]
 struct Behaviour {
-    /// The `scope` of every token answer.
+    /// The `scope` of token answers that carry it.
     scope: String,
+    omit_refresh_scope: bool,
     /// The `capabilities` discovery lists.
     capabilities: Vec<&'static str>,
     /// A search of this type (`*`: every type) answers this status.
@@ -129,6 +130,7 @@ impl Default for Behaviour {
     fn default() -> Self {
         Behaviour {
             scope: ALL.into(),
+            omit_refresh_scope: false,
             capabilities: vec![
                 "launch-standalone",
                 "client-public",
@@ -327,7 +329,11 @@ async fn token(State(s): State<Shared>, Form(form): Form<HashMap<String, String>
                 return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant");
             }
             lock(&s.book).refreshes += 1;
-            Json(mint(&s)).into_response()
+            let mut answer = mint(&s);
+            if lock(&s.behaviour).omit_refresh_scope {
+                answer.as_object_mut().expect("token object").remove("scope");
+            }
+            Json(answer).into_response()
         }
         _ => oauth_error(StatusCode::BAD_REQUEST, "unsupported_grant_type"),
     }
@@ -2205,5 +2211,37 @@ async fn a_condition_search_cannot_import_an_unsolicited_observation() -> R {
     assert!(entries.iter().any(|e| e["resource"]["resourceType"] == "Condition"));
     assert_eq!(w.status_of_last_run(source).await?, "partial");
     assert_eq!(got.problems[0].code, "unexpected_resource");
+    Ok(())
+}
+
+#[tokio::test]
+async fn future_pulls_use_the_scope_from_refresh_even_when_the_next_refresh_omits_it() -> R {
+    let w = world(Behaviour::default()).await?;
+    let source = w.connect(t0()).await?;
+    let narrow = "patient/Patient.r patient/Condition.s";
+    w.fake.set(|b| b.scope = narrow.into());
+
+    // Let the initial access token expire. This pull refreshes it after planning its searches.
+    w.day(source, t0() + Duration::hours(2))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    let saved_scope = async || -> anyhow::Result<Value> {
+        let mut c = w.db.pool.acquire().await?;
+        let source = get_source(&mut c, source).await?.expect("the source");
+        Ok(source.config["scope"].clone())
+    };
+    assert_eq!(saved_scope().await?, narrow);
+
+    let before = w.fake.book().searches.len();
+    w.fake.set(|b| b.omit_refresh_scope = true);
+    w.day(source, t0() + Duration::hours(4))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(saved_scope().await?, narrow);
+    assert_eq!(w.fake.book().refreshes, 2);
+    assert_eq!(
+        w.searched_since(before).await,
+        [format!("Patient/{PATIENT}"), "Condition".into()].into()
+    );
     Ok(())
 }

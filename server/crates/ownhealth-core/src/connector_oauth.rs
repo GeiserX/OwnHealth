@@ -1084,12 +1084,14 @@ pub async fn access_token(
             (None, None) => {}
         }
         sqlx::query(
-            "update source set access_expires_at = $2, grant_expires_at = coalesce($3, grant_expires_at) \
+            "update source set access_expires_at = $2, grant_expires_at = coalesce($3, grant_expires_at), \
+             config = case when $4::text is null then config else jsonb_set(config, '{scope}', to_jsonb($4::text)) end \
              where id = $1",
         )
         .bind(source_id)
         .bind(after(now, t.expires_in))
         .bind(after(now, t.refresh_expires_in))
+        .bind(&t.scope)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
