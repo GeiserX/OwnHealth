@@ -1037,11 +1037,13 @@ async fn an_archives_profile_key_must_match_its_files() -> R {
     assert_eq!(public_tables(&db).await?, 0);
     let report = ownhealth_ops::restore_with(&fresh, &l.archive, true).await?;
     assert_eq!(report["keys"]["missing"], serde_json::json!([l.alex]), "{report:#}");
-    let opened: bool = sqlx::query_scalar("select exists (select 1 from profile_key where profile_id = $1)")
+    // the profile keeps the keyring's key, never the archive's: the archived files stay closed
+    let kept: Option<Vec<u8>> = sqlx::query_scalar("select wrapped_dek from profile_key where profile_id = $1")
         .bind(l.alex)
-        .fetch_one(&db.pool)
-        .await?;
-    assert!(!opened);
+        .fetch_optional(&db.pool)
+        .await?
+        .flatten();
+    assert_eq!(kept.as_ref(), ring.profiles.get(&l.alex));
 
     // Older manifests have only the profile list. Keep their UUID-based selection.
     let mut older = manifest(&l.archive)?;
@@ -1266,5 +1268,97 @@ async fn a_tombstone_closes_only_the_deleted_key_after_a_restore_from_before_the
         BlobStore::for_settings(&ts)?.get_bytes(BlobOwner::Profile(alex), &sha)?,
         bytes
     );
+    Ok(())
+}
+
+/// The keyring holds another key for Alex than the one that sealed the archive (an earlier partial
+/// restore gave him a new one, and newer backups are sealed under it). A restore allowed to miss
+/// keys reports Alex under missing but keeps the keyring's key: his next file goes under it, and the
+/// keyring still holds it after the rewrite. The files the archive sealed under the old key are an
+/// accepted loss, so a backup of the restored install verifies.
+#[tokio::test]
+async fn a_restore_keeps_the_keyrings_key_when_it_does_not_match_the_archive() -> R {
+    use ownhealth_core::keyfile;
+    use ownhealth_core::keys::{Dek, Kek, Keyring};
+
+    let l = live().await?;
+    let mut ring = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
+    let newer = Kek::from_settings(&l.settings)?.wrap(l.alex, &Dek::generate())?;
+    ring.profiles.insert(l.alex, newer.clone());
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+    let (db, fresh) = fresh(&l).await?;
+    let report = ownhealth_ops::restore_with(&fresh, &l.archive, true).await?;
+    assert_eq!(report["keys"]["missing"], serde_json::json!([l.alex]), "{report:#}");
+    let row: Option<Vec<u8>> = sqlx::query_scalar("select wrapped_dek from profile_key where profile_id = $1")
+        .bind(l.alex)
+        .fetch_optional(&db.pool)
+        .await?
+        .flatten();
+    assert_eq!(row.as_ref(), Some(&newer), "the restore did not keep the keyring's key");
+    assert!(
+        Keyring::new(Kek::from_settings(&fresh)?, db.url.clone())
+            .dek(l.alex, true)?
+            .is_some()
+    );
+    let mut c = db.pool.acquire().await?;
+    let after = keyfile::rewrite(&mut c, &fresh).await?;
+    drop(c);
+    assert_eq!(after.profiles.get(&l.alex), Some(&newer), "the keyring lost the newer key");
+
+    let new_backup = l.dir.path().join("after-mismatch");
+    ownhealth_ops::backup(&fresh, &new_backup).await?;
+    let report = ownhealth_ops::verify_restore(&fresh, &new_backup).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    Ok(())
+}
+
+/// A partial restore loses the files sealed under the key the keyring lacks, and later backups do not
+/// require them. A plain file of the same profile is not part of that loss: when it goes missing
+/// afterwards, the next backup still requires it and verify-restore fails.
+#[tokio::test]
+async fn a_lost_plain_file_of_a_profile_restored_without_its_key_is_still_required() -> R {
+    use ownhealth_core::keyfile;
+
+    let l = live().await?;
+    let mut ring = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
+    assert!(ring.profiles.remove(&l.alex).is_some());
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+    let (_db, fresh) = fresh(&l).await?;
+    ownhealth_ops::restore_with(&fresh, &l.archive, true).await?;
+    let legacy_sha = hex::encode(sha2::Sha256::digest(&l.legacy));
+    let plain = tree_files(&fresh.blobs_path())?
+        .remove(&legacy_sha)
+        .expect("the restore placed the plain file");
+    fs::remove_file(plain)?;
+    let new_backup = l.dir.path().join("after-loss");
+    ownhealth_ops::backup(&fresh, &new_backup).await?;
+    assert!(strs(&manifest(&new_backup)?["blobs"]["referenced"]).contains(&legacy_sha));
+    let report = ownhealth_ops::verify_restore(&fresh, &new_backup).await?;
+    assert_eq!(report["ok"], false, "{report:#}");
+    assert!(strs(&report["blobs"]["missing"]).contains(&legacy_sha), "{report:#}");
+    Ok(())
+}
+
+/// An install upgraded from 0.4.0 keeps its files plain, and its profiles have no key until their
+/// next file. A plain file lost there is real loss: the next backup still requires it.
+#[tokio::test]
+async fn a_lost_file_of_an_upgraded_profile_with_no_key_yet_is_still_required() -> R {
+    ownhealth_ops::register();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/upgrade/0.4.0");
+    let dir = tempfile::tempdir()?;
+    let db = TestDb::empty().await?;
+    let settings = db.settings(&dir.path().join("upgraded"))?;
+    ownhealth_ops::restore(&settings, &fixture).await?;
+    migrate::migrate_embedded(&db.pool).await?;
+    let (sha, path) = tree_files(&settings.blobs_path())?
+        .into_iter()
+        .find(|(key, _)| !key.contains('/'))
+        .expect("the 0.4.0 install has plain files");
+    make_writable(&path)?;
+    fs::remove_file(path)?;
+    let archive = ownhealth_ops::backup(&settings, &dir.path().join("after")).await?;
+    assert!(strs(&manifest(&archive)?["blobs"]["referenced"]).contains(&sha));
+    let report = ownhealth_ops::verify_restore(&settings, &archive).await?;
+    assert_eq!(report["ok"], false, "{report:#}");
     Ok(())
 }

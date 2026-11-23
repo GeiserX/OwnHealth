@@ -14,7 +14,8 @@
 //! ```text
 //! {"schema": "ownhealth.keyring/v1", "kek_fingerprint": "<16 hex>",
 //!  "profiles": {"<profile uuid>": "<base64 wrapped key>"}, "shredded": ["<profile uuid>"],
-//!  "shredded_keys": {"<profile uuid>": ["<64 hex archive id>"]}}
+//!  "shredded_keys": {"<profile uuid>": ["<64 hex archive id>"]},
+//!  "lost": {"<profile uuid>": ["<sha256 hex>"]}}
 //! ```
 //!
 //! A rewrite merges the table into the file: a key the table holds goes in unless the file's tombstone
@@ -27,6 +28,10 @@
 //! file held that key. It then closes only that key: a backup from before the keyring brings the
 //! profile back with no key, and the key its next file makes is published. A tombstone that names no
 //! key (the file never held it) closes every key of the profile.
+//!
+//! `lost` lists the files a restore loaded without the key that opens them (a key the keyring lacked
+//! or held in another version, `--allow-missing-keys`): the operator accepted their loss, so later
+//! backups do not require them. A profile delete drops its entry.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, TryLockError};
@@ -59,6 +64,8 @@ pub struct KeyringFile {
     /// The archive ids of the shredded keys, for the profiles of `shredded` whose key the file held.
     /// A profile there may hold a newer key in `profiles`.
     pub shredded_keys: BTreeMap<Uuid, BTreeSet<String>>,
+    /// The sha256 of each file a restore loaded without its profile's key, by profile.
+    pub lost: BTreeMap<Uuid, BTreeSet<String>>,
 }
 
 impl KeyringFile {
@@ -77,9 +84,10 @@ impl std::fmt::Debug for KeyringFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "KeyringFile({} keys, {} shredded)",
+            "KeyringFile({} keys, {} shredded, {} profiles with lost files)",
             self.profiles.len(),
-            self.shredded.len()
+            self.shredded.len(),
+            self.lost.len()
         )
     }
 }
@@ -291,6 +299,7 @@ fn parse(v: &Value) -> Option<KeyringFile> {
         shredded.insert(Uuid::parse_str(id.as_str()?).ok()?);
     }
     let shredded_keys = id_lists(&v["shredded_keys"])?;
+    let lost = id_lists(&v["lost"])?;
     // a key with no fingerprint, ids for a profile not shredded, or a key kept under a tombstone that
     // closes every key, is not a file `write` makes
     if (kek_fingerprint.is_none() && !profiles.is_empty())
@@ -306,6 +315,7 @@ fn parse(v: &Value) -> Option<KeyringFile> {
         profiles,
         shredded,
         shredded_keys,
+        lost,
     })
 }
 
@@ -355,6 +365,7 @@ fn to_json(k: &KeyringFile) -> Value {
         "profiles": profiles,
         "shredded": k.shredded.iter().map(Uuid::to_string).collect::<Vec<_>>(),
         "shredded_keys": id_lists_json(&k.shredded_keys),
+        "lost": id_lists_json(&k.lost),
     })
 }
 
@@ -486,6 +497,7 @@ pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<Key
                     None => {}
                 }
                 ring.shredded.insert(id);
+                ring.lost.remove(&id);
             }
         }
     }

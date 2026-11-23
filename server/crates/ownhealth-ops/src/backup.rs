@@ -282,6 +282,27 @@ async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(BlobOwner, Str
         .collect())
 }
 
+/// The slots whose key row is a tombstone: their sealed files never open again.
+async fn shredded_slots(conn: &mut PgConnection) -> Result<HashSet<keys::Slot>> {
+    let mut out: HashSet<keys::Slot> =
+        sqlx::query_scalar::<_, Uuid>("select profile_id from profile_key where wrapped_dek is null")
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .map(keys::Slot::Profile)
+            .collect();
+    let pending: bool = sqlx::query_scalar("select to_regclass('public.pending_key') is not null")
+        .fetch_one(&mut *conn)
+        .await?;
+    if pending {
+        let items: Vec<Uuid> = sqlx::query_scalar("select item_id from pending_key where wrapped_dek is null")
+            .fetch_all(&mut *conn)
+            .await?;
+        out.extend(items.into_iter().map(keys::Slot::Pending));
+    }
+    Ok(out)
+}
+
 /// Recursively sorted keys: Python's `json.dumps(..., sort_keys=True)`.
 fn sort_keys(v: Value) -> Value {
     match v {
@@ -602,7 +623,11 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
         )));
     }
     keyfile::check_folder(settings).map_err(|e| ops_error(e.0))?;
-    keyfile::read_for_install(settings).map_err(|e| ops_error(e.0))?;
+    // the files a restore loaded without their key: an accepted loss no backup requires
+    let lost = keyfile::read_for_install(settings)
+        .map_err(|e| ops_error(e.0))?
+        .map(|ring| ring.lost)
+        .unwrap_or_default();
     if settings.keyring_dir.is_none() {
         tracing::warn!(
             "OWNHEALTH_KEYRING_DIR is not set, so the keyring is {} on the data volume: a host backup \
@@ -659,6 +684,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     let facts = async {
         let referenced = referenced_blobs(&mut tx).await?;
         let wrapped = keys::stored_all(&mut tx).await?;
+        let shredded = shredded_slots(&mut tx).await?;
         let migrations: Vec<i32> = sqlx::query_scalar("select version from schema_migrations order by 1")
             .fetch_all(&mut *tx)
             .await?;
@@ -668,7 +694,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             .await?;
         let as_of = Utc::now().date_naive();
         let states = state_hashes(&mut tx, as_of).await?;
-        Ok::<_, Error>((referenced, wrapped, migrations, tables, kept, as_of, states))
+        Ok::<_, Error>((referenced, wrapped, shredded, migrations, tables, kept, as_of, states))
     }
     .await;
     // The dump must finish before the exporting transaction ends, whatever the facts did.
@@ -676,7 +702,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // build_state may store snapshots; the backup leaves the database as it was.
     tx.rollback().await?;
     conn.close().await?;
-    let (referenced, wrapped, migrations, mut tables, kept, as_of, states) = facts?;
+    let (referenced, wrapped, shredded, migrations, mut tables, kept, as_of, states) = facts?;
     if !done.status.success() {
         return Err(ops_error(format!(
             "pg_dump failed: {}",
@@ -748,7 +774,6 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // keys come from the snapshot and the files from the copy, never from the live store, where a
     // delete after the copy may already have shredded a key or removed a folder. A key that does not
     // open names no sealed file here; verify-restore reports it.
-    let live_slots: HashSet<_> = wrapped.iter().map(|(slot, _, _)| *slot).collect();
     let mut required = Vec::new();
     for (owner, sha) in &referenced {
         let slot = owner.slot();
@@ -762,9 +787,12 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             }
         }
         let plain = blobs::sha256_hex(sha)?;
-        // As in sweep_unkeyed, a sealed folder without a stored key is expendable. Its references
-        // can survive a partial restore. A plain copy is still usable and stays required.
-        if files.contains_key(&plain) || slot.is_none_or(|slot| live_slots.contains(&slot)) || kek.is_none() {
+        // A file sealed under a key that was shredded since (the sweep removes its folder), or one a
+        // restore loaded without its key (the keyring's `lost`), is gone on purpose. Every other
+        // reference needs its plain file, a profile that has no key yet included.
+        let gone = slot.is_some_and(|slot| shredded.contains(&slot))
+            || matches!(owner, BlobOwner::Profile(p) if lost.get(p).is_some_and(|l| l.contains(&plain)));
+        if files.contains_key(&plain) || !gone {
             required.push(plain);
         }
     }
@@ -1060,6 +1088,10 @@ fn ring_keys(
                 out.keys.push((id, w.clone()));
                 out.shredded.push(id);
             } else {
+                // Another key than the archive's: the archive's files stay closed, and the profile
+                // keeps the keyring's key, so its next file never replaces that key in the keyring
+                // (newer backups need it).
+                out.keys.push((id, w.clone()));
                 out.missing.push(id);
             }
         } else if ring.closes(id, wanted) {
@@ -1109,6 +1141,47 @@ async fn load_keys(url: &str, ring: &mut RingKeys) -> Result<()> {
     .await?;
     tx.commit().await?;
     conn.close().await?;
+    Ok(())
+}
+
+/// Record in the keyring the files this restore loaded without the key that opens them: the files the
+/// backup holds only sealed, of a profile whose key the keyring lacked (`missing`) or whose keyring
+/// key is not the archive's. Their loss is accepted, so later backups do not require them. Runs with
+/// the keyring lock held.
+async fn record_lost(
+    settings: &Settings,
+    url: &str,
+    ring: &RingKeys,
+    backup_blobs: &BTreeMap<String, PathBuf>,
+) -> Result<()> {
+    let keyed: BTreeSet<Uuid> = ring.keys.iter().map(|(id, _)| *id).collect();
+    let closed: BTreeSet<Uuid> = ring
+        .missing
+        .iter()
+        .chain(ring.shredded.iter().filter(|p| keyed.contains(p)))
+        .copied()
+        .collect();
+    if closed.is_empty() {
+        return Ok(());
+    }
+    let mut conn = PgConnection::connect(url).await?;
+    let referenced = referenced_blobs(&mut conn).await?;
+    conn.close().await?;
+    let mut file = keyfile::read_for_install(settings)
+        .map_err(|e| ops_error(e.0))?
+        .unwrap_or_default();
+    let before = file.lost.clone();
+    for (owner, sha) in referenced {
+        if let BlobOwner::Profile(p) = owner
+            && closed.contains(&p)
+            && !backup_blobs.contains_key(&sha)
+        {
+            file.lost.entry(p).or_default().insert(sha);
+        }
+    }
+    if file.lost != before {
+        keyfile::write(&settings.keyring_path(), &file).map_err(|e| ops_error(e.0))?;
+    }
     Ok(())
 }
 
@@ -1299,6 +1372,7 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
     pg_restore(&url, archive).await?;
     if let Some(r) = &mut ring {
         load_keys(&url, r).await?;
+        record_lost(settings, &url, r, &backup_blobs).await?;
     }
     drop(ring_lock);
     let store = BlobStore::for_settings(settings)?;
