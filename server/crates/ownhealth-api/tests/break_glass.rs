@@ -110,6 +110,39 @@ impl Bg {
         Ok(r.status == 200)
     }
 
+    /// Alex names `user` with `categories`, they ask, Alex's feed carries the request, and it opens.
+    async fn open_for(&mut self, user: Uuid, who: &mut Client, categories: Value) -> anyhow::Result<Uuid> {
+        let r = self.name(user, json!({ "categories": categories })).await?;
+        assert_eq!(r.status, 200, "{:?}", r.json);
+        let id = self.ask(who).await?;
+        self.fetch_feed().await?;
+        let (_, opens, ..) = self.request(id).await?;
+        self.settle_at(opens).await?;
+        assert_eq!(self.request(id).await?.0, "active");
+        Ok(id)
+    }
+
+    /// Sam's own grant on Alex's profile becomes `role` with `categories`.
+    async fn grant_sam(&self, role: &str, categories: &[&str]) -> R {
+        sqlx::query("update profile_grant set role = $3, categories = $4 where user_id = $1 and profile_id = $2")
+            .bind(self.env.user("sam"))
+            .bind(self.alex_id())
+            .bind(role)
+            .bind(categories)
+            .execute(self.env.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// The `break_glass.use` audit rows of one request.
+    async fn uses(&self, id: Uuid) -> anyhow::Result<i64> {
+        self.count(
+            "select count(*) from audit_event where action = 'break_glass.use' and resource_ids = array[$1::text]",
+            id,
+        )
+        .await
+    }
+
     async fn count(&self, sql: &str, id: Uuid) -> anyhow::Result<i64> {
         Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_string()))
             .bind(id)
@@ -292,12 +325,16 @@ async fn a_cancelled_request_never_activates() -> R {
     assert_eq!(b.request(id).await?.0, "cancelled");
     assert!(!b.reads(&mut carmen).await?);
     // it cannot be revoked or cancelled twice, and the feed no longer shows it
-    for step in ["cancel", "revoke"] {
+    for (step, says) in [
+        ("cancel", "only a request still waiting can be cancelled"),
+        ("revoke", "only an active request can be revoked"),
+    ] {
         let r = b
             .alex
             .post0(&format!("/api/profiles/alex/break-glass/requests/{id}/{step}"))
             .await?;
         assert_eq!(r.status, 409, "{step} {:?}", r.json);
+        assert!(r.json.to_string().contains(says), "{step} {:?}", r.json);
     }
     assert!(!b.fetch_feed().await?.contains(&format!("break-glass/{id}")));
     // a database row cannot be moved from cancelled to active either
@@ -505,12 +542,36 @@ async fn the_owner_feed_shows_the_request_at_once() -> R {
     let mut b = setup().await?;
     b.name(b.carmen_id, json!({})).await?;
     let mut carmen = b.carmen().await?;
+    // Sam reads Alex's records on his own grant and makes a feed of Alex's profile
+    b.grant_sam("viewer", &["read:summary", "read:records"]).await?;
+    let mut sam = b.sam().await?;
+    let made = sam.post("/api/profiles/alex/calendar-feeds", &json!({})).await?;
+    assert_eq!(made.status, 201, "{:?}", made.json);
     let id = b.ask(&mut carmen).await?;
     let (requested, opens): (DateTime<Utc>, DateTime<Utc>) =
         sqlx::query_as("select requested_at, activates_at from break_glass_request where id = $1")
             .bind(id)
             .fetch_one(b.env.pool())
             .await?;
+    let pool = b.env.pool().clone();
+    let fed = || {
+        let pool = pool.clone();
+        async move {
+            let at: Option<DateTime<Utc>> =
+                sqlx::query_scalar("select owner_feed_at from break_glass_request where id = $1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::Ok(at)
+        }
+    };
+    // a feed of someone who does not own the profile, on the same profile, neither shows nor stamps
+    // the request: the owner never heard of it
+    let other = b.env.anon().get(made.json["path"].as_str().unwrap_or_default()).await?;
+    assert_eq!(other.status, 200);
+    let other = String::from_utf8(other.bytes)?;
+    assert!(!other.contains("break-glass"), "{other}");
+    assert_eq!(fed().await?, None);
     let text = b.fetch_feed().await?;
     let cal: Calendar = text.parse().map_err(anyhow::Error::msg)?;
     let events: Vec<_> = cal
@@ -545,21 +606,7 @@ async fn the_owner_feed_shows_the_request_at_once() -> R {
     );
     // a generic feed names nobody
     assert!(!description.contains("Carmen"), "{description}");
-    let fed: Option<DateTime<Utc>> = sqlx::query_scalar("select owner_feed_at from break_glass_request where id = $1")
-        .bind(id)
-        .fetch_one(b.env.pool())
-        .await?;
-    assert!(fed.is_some());
-    // a feed of someone who does not own the profile neither shows nor stamps a request
-    let mut sam = b.sam().await?;
-    let lucia = sam.post("/api/profiles/lucia/calendar-feeds", &json!({})).await?;
-    assert_eq!(lucia.status, 201);
-    let other = b
-        .env
-        .anon()
-        .get(lucia.json["path"].as_str().unwrap_or_default())
-        .await?;
-    assert!(!String::from_utf8(other.bytes)?.contains("break-glass"));
+    assert!(fed().await?.is_some());
     Ok(())
 }
 
@@ -692,5 +739,288 @@ async fn removing_a_contact_ends_their_open_request() -> R {
         )
         .await?;
     assert_eq!(sam_heard, 0);
+    Ok(())
+}
+
+/// Exports read with the caller's own grant: a summary reader keeps the IPS and the summary PDF while a
+/// request is open, and neither carries what only the request opened.
+#[tokio::test]
+async fn exports_read_with_the_contacts_own_grant_only() -> R {
+    let mut b = setup().await?;
+    let mut sam = b.sam().await?;
+    // the IPS sections and how many entries each holds
+    let sections = |r: &Resp| -> Vec<(String, usize)> {
+        r.json["entry"][0]["resource"]["section"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| {
+                let code = s["code"]["coding"][0]["code"].as_str().unwrap_or_default().to_string();
+                (code, s["entry"].as_array().map_or(0, Vec::len))
+            })
+            .collect()
+    };
+    let own = sam.post("/api/profiles/alex/export", &json!({"fmt": "ips"})).await?;
+    assert_eq!(own.status, 200, "{:?}", own.json);
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs", "read:records"]))
+        .await?;
+    assert_eq!(me_alex(&mut sam).await?["break_glass"], true);
+    let ips = sam.post("/api/profiles/alex/export", &json!({"fmt": "ips"})).await?;
+    assert_eq!(ips.status, 200, "{:?}", ips.json);
+    // the same Bundle as on his own grant: nothing the request opened
+    assert!(!sections(&own).is_empty(), "{:?}", own.json);
+    assert_eq!(sections(&ips), sections(&own));
+    let pdf = sam.post("/api/profiles/alex/summary.pdf", &json!({})).await?;
+    assert_eq!(pdf.status, 200, "{:?}", pdf.json);
+    assert!(pdf.bytes.starts_with(b"%PDF"));
+
+    // Carmen reaches the profile only through her request: no summary PDF either
+    b.name(b.carmen_id, json!({})).await?;
+    let mut carmen = b.carmen().await?;
+    let id = b.ask(&mut carmen).await?;
+    b.fetch_feed().await?;
+    let (_, opens, ..) = b.request(id).await?;
+    b.settle_at(opens).await?;
+    assert!(b.reads(&mut carmen).await?);
+    let r = carmen.post("/api/profiles/alex/summary.pdf", &json!({})).await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
+    Ok(())
+}
+
+/// A calendar feed reads as its creator with no browser session, so it never sees the request: a
+/// contact with their own feed of the profile gets the same calendar, and no use is written.
+#[tokio::test]
+async fn a_contact_feed_never_carries_the_request() -> R {
+    let mut b = setup().await?;
+    b.grant_sam("viewer", &["read:summary", "read:records"]).await?;
+    let mut sam = b.sam().await?;
+    let made = sam.post("/api/profiles/alex/calendar-feeds", &json!({})).await?;
+    assert_eq!(made.status, 201, "{:?}", made.json);
+    let path = made.json["path"].as_str().unwrap_or_default().to_string();
+    let before = b.env.anon().get(&path).await?;
+    assert_eq!(before.status, 200);
+    let id = b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
+    let after = b.env.anon().get(&path).await?;
+    assert_eq!(after.status, 200, "{:?}", after.json);
+    assert_eq!(b.uses(id).await?, 0);
+    Ok(())
+}
+
+/// A feed made through break-glass would read without it and serve nothing: a contact whose own
+/// grant lacks read:records cannot make one, even while the request adds it.
+#[tokio::test]
+async fn a_narrower_grant_makes_no_feed_through_break_glass() -> R {
+    let mut b = setup().await?;
+    let mut sam = b.sam().await?;
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
+    assert!(b.reads(&mut sam).await?);
+    let r = sam.post("/api/profiles/alex/calendar-feeds", &json!({})).await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
+    Ok(())
+}
+
+/// A guardian contact keeps its own role, but it never shares what break-glass opened.
+#[tokio::test]
+async fn a_guardian_contact_cannot_share_what_break_glass_opened() -> R {
+    let mut b = setup().await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let mut sam = b.sam().await?;
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
+    let r = sam.post("/api/profiles/alex/shl", &json!({})).await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "not_sharer"), "{:?}", r.json);
+    let links: i64 = b
+        .count("select count(*) from shl where profile_id = $1", b.alex_id())
+        .await?;
+    assert_eq!(links, 0);
+    Ok(())
+}
+
+/// Break-glass reads only: a guardian contact cannot write through a category the request opened.
+#[tokio::test]
+async fn a_guardian_contact_cannot_write_through_what_break_glass_opened() -> R {
+    let mut b = setup().await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let mut sam = b.sam().await?;
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
+    assert!(b.reads(&mut sam).await?);
+    let r = sam.put("/api/profiles/alex/prevention-answers", &json!({})).await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
+    // on his own grant the same write goes through
+    b.grant_sam("guardian", &["read:summary", "read:records"]).await?;
+    let r = sam.put("/api/profiles/alex/prevention-answers", &json!({})).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    Ok(())
+}
+
+/// An emergency grant row (profile_grant.break_glass, from before requests) is refused a token and an
+/// OAuth consent like an open request.
+#[tokio::test]
+async fn an_emergency_grant_row_gets_no_token_or_consent() -> R {
+    let b = setup().await?;
+    sqlx::query(
+        "update profile_grant set break_glass = true, expires_at = now() + interval '14 days' \
+         where user_id = $1 and profile_id = $2",
+    )
+    .bind(b.env.user("sam"))
+    .bind(b.alex_id())
+    .execute(b.env.pool())
+    .await?;
+    let mut sam = b.sam().await?;
+    let r = sam
+        .post(
+            "/api/tokens",
+            &json!({"label": "Claude", "profiles": ["alex"], "scopes": ["read:summary"]}),
+        )
+        .await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
+    let mut c = b.env.pool().acquire().await?;
+    let consent = ownhealth_auth::oauth::ConsentIn {
+        client_id: "https://app.example/oauth/client.json".into(),
+        scopes: vec!["read:summary".into()],
+        profile_ids: vec![b.alex_id()],
+        default_profile: None,
+        identity_mode: "full".into(),
+        days: None,
+    };
+    let refused = ownhealth_auth::oauth::approve(&mut c, b.env.user("sam"), &consent).await;
+    assert_eq!(
+        refused
+            .err()
+            .and_then(|e| e.access_code().map(str::to_string))
+            .as_deref(),
+        Some("break_glass")
+    );
+    Ok(())
+}
+
+/// A refused request read nothing: it writes no use. An answered one writes one.
+#[tokio::test]
+async fn a_refused_request_writes_no_use() -> R {
+    let mut b = setup().await?;
+    b.name(b.carmen_id, json!({})).await?;
+    let mut carmen = b.carmen().await?;
+    let id = b.ask(&mut carmen).await?;
+    b.fetch_feed().await?;
+    let (_, opens, ..) = b.request(id).await?;
+    b.settle_at(opens).await?;
+    let r = carmen.get("/api/profiles/alex/break-glass").await?;
+    assert_eq!(r.status, 403, "{:?}", r.json);
+    let r = carmen
+        .post(
+            "/api/tokens",
+            &json!({"label": "Claude", "profiles": ["alex"], "scopes": ["read:summary"]}),
+        )
+        .await?;
+    assert_eq!(r.status, 403, "{:?}", r.json);
+    assert_eq!(b.uses(id).await?, 0);
+    assert!(b.reads(&mut carmen).await?);
+    assert_eq!(b.uses(id).await?, 1);
+    Ok(())
+}
+
+/// A request whose time ran out but that no sweep has ended yet reads nothing and cannot be revoked.
+#[tokio::test]
+async fn an_unswept_expired_request_neither_reads_nor_revokes() -> R {
+    let mut b = setup().await?;
+    b.name(b.carmen_id, json!({})).await?;
+    let mut carmen = b.carmen().await?;
+    let id = b.ask(&mut carmen).await?;
+    b.fetch_feed().await?;
+    let (_, opens, ..) = b.request(id).await?;
+    b.settle_at(opens).await?;
+    sqlx::query("update break_glass_request set expires_at = now() - interval '1 second' where id = $1")
+        .bind(id)
+        .execute(b.env.pool())
+        .await?;
+    // straight to the core, with no REST request (whose settle would expire it first)
+    let mut c = b.env.pool().acquire().await?;
+    let open = ownhealth_core::break_glass::active(&mut c, b.carmen_id, Some(b.alex_id())).await?;
+    assert!(open.is_empty(), "{open:?}");
+    let revoked = ownhealth_core::break_glass::end(
+        &mut c,
+        b.alex_id(),
+        id,
+        b.env.user("alex"),
+        ownhealth_core::break_glass::End::Revoke,
+    )
+    .await;
+    assert!(matches!(revoked, Err(ownhealth_core::Error::Review(_))), "{revoked:?}");
+    assert_eq!(b.request(id).await?.0, "active");
+    Ok(())
+}
+
+/// A failing settle is logged, and every request goes on: an unopened request stays closed.
+#[tokio::test]
+async fn a_settle_that_fails_stops_no_request() -> R {
+    let mut b = setup().await?;
+    b.name(b.carmen_id, json!({"delay_hours": 12})).await?;
+    let mut carmen = b.carmen().await?;
+    let id = b.ask(&mut carmen).await?;
+    sqlx::query(
+        "update break_glass_request set requested_at = now() - interval '13 hours', \
+         activates_at = now() - interval '1 hour' where id = $1",
+    )
+    .bind(id)
+    .execute(b.env.pool())
+    .await?;
+    b.fetch_feed().await?;
+    // from here on every settle fails: the due request cannot be moved
+    sqlx::query(
+        "create function bg_test_fail() returns trigger language plpgsql as \
+         $$ begin raise exception 'settle fails here'; end $$",
+    )
+    .execute(b.env.pool())
+    .await?;
+    sqlx::query(
+        "create trigger bg_test_fail before update on break_glass_request \
+         for each row execute function bg_test_fail()",
+    )
+    .execute(b.env.pool())
+    .await?;
+    let me = b.alex.get("/api/me").await?;
+    assert_eq!(me.status, 200, "{:?}", me.json);
+    assert!(!b.reads(&mut carmen).await?);
+    assert_eq!(b.request(id).await?.0, "requested");
+    Ok(())
+}
+
+/// The reason is free text: a NUL byte is refused with a 422, not a 500; and the profile may be named by
+/// its slug as well as its id.
+#[tokio::test]
+async fn a_request_takes_a_slug_and_refuses_a_nul_in_the_reason() -> R {
+    let mut b = setup().await?;
+    b.name(b.carmen_id, json!({})).await?;
+    let mut carmen = b.carmen().await?;
+    let r = carmen
+        .post(
+            "/api/break-glass/requests",
+            &json!({"profile": "alex", "reason": "a\u{0}b"}),
+        )
+        .await?;
+    assert_eq!(r.status, 422, "{:?}", r.json);
+    assert_eq!(r.json["detail"][0]["loc"], json!(["body", "reason"]), "{:?}", r.json);
+    let r = carmen
+        .post(
+            "/api/break-glass/requests",
+            &json!({"profile": "alex", "reason": "En el hospital"}),
+        )
+        .await?;
+    assert_eq!(r.status, 201, "{:?}", r.json);
+    assert_eq!(r.json["profile_id"], json!(b.alex_id()));
+    // a profile that did not name her answers the same whether it exists or not
+    for other in ["lucia", "nobody"] {
+        let r = carmen
+            .post(
+                "/api/break-glass/requests",
+                &json!({"profile": other, "reason": "En el hospital"}),
+            )
+            .await?;
+        assert_eq!(
+            (r.status.as_u16(), r.code()),
+            (404, "not_a_contact"),
+            "{other} {:?}",
+            r.json
+        );
+    }
     Ok(())
 }

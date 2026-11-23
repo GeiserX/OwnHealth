@@ -11,7 +11,9 @@
 //! Break-glass (`break_glass.rs`): for a person in the browser, an open emergency request is added to
 //! their grant (its categories joined to the grant's, role `viewer` when they hold no grant). Only a
 //! REST request that records the uses (`break_glass::arm`) gets it; tokens, OAuth, calendar feeds and
-//! share links never do. Each permission it widened is recorded as a use.
+//! share links never do. Each permission it widened is recorded as a use. It only reads: a write
+//! (`require` with an action) needs its scope in the caller's own grant (`Permission::own_scopes`),
+//! and exports, feeds and the imaging viewer read with that grant alone (`Permission::own`).
 
 use sqlx::AssertSqlSafe;
 use std::collections::BTreeSet;
@@ -209,6 +211,9 @@ pub struct Permission {
     /// Reachable only through an open break-glass request: no grant row, so no token, consent,
     /// calendar feed, export or share link for it.
     pub break_glass_only: bool,
+    /// The scopes without emergency access: what the caller's own grant gives, when it is not an
+    /// emergency grant row. Empty when only an open request reaches the profile.
+    pub own_scopes: Scopes,
 }
 
 impl Permission {
@@ -218,6 +223,18 @@ impl Permission {
 
     pub fn can(&self, action: &str) -> bool {
         !self.break_glass_only && can(&self.role, action)
+    }
+
+    /// This permission without emergency access, when it still holds `scope`: what an export, a
+    /// calendar feed or the imaging viewer reads with, since none of them may carry what only
+    /// break-glass opened.
+    pub fn own(&self, scope: &str) -> Option<Permission> {
+        self.own_scopes.contains(scope).then(|| Permission {
+            scopes: self.own_scopes.clone(),
+            break_glass: false,
+            break_glass_only: false,
+            ..self.clone()
+        })
     }
 }
 
@@ -306,6 +323,12 @@ fn combine(
         (Some((role, cats, bg)), _) => (role, scope_set(&cats), bg, false),
         (None, Some(_)) => ("viewer".to_string(), Scopes::new(), true, true),
     };
+    // an emergency grant row is emergency access as a whole
+    let own_scopes = if break_glass || only {
+        Scopes::new()
+    } else {
+        effective_scopes(&principal.scopes, &categories, &profile.locks(), &role)
+    };
     if let Some((request_id, _, cats)) = open {
         categories.extend(cats.iter().cloned());
         break_glass = true;
@@ -324,6 +347,7 @@ fn combine(
         scopes,
         break_glass,
         break_glass_only: only,
+        own_scopes,
     })
 }
 
@@ -477,6 +501,15 @@ pub async fn require(
         return Err(Error::access_denied(
             "forbidden",
             format!("The role {} cannot {action} on this profile.", perm.role),
+        ));
+    }
+    // emergency access only reads: an action needs its scope from the caller's own grant
+    if let (Some(scope), Some(_)) = (scope, action)
+        && !perm.own_scopes.contains(scope)
+    {
+        return Err(Error::access_denied(
+            "break_glass",
+            format!("Emergency access only reads; this needs {scope} on your own grant."),
         ));
     }
     Ok(perm)

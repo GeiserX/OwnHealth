@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::audit::{AuditEvent, write_audit};
 use crate::error::{Error, Result};
 
+/// `break_glass_request.status`, as the migration's CHECK lists it.
 pub const STATUSES: [&str; 5] = ["requested", "cancelled", "active", "expired", "revoked"];
 /// What a contact reads by default.
 pub const DEFAULT_CATEGORIES: [&str; 3] = ["read:summary", "read:records", "read:labs"];
@@ -345,9 +346,8 @@ pub async fn end(conn: &mut PgConnection, profile: Uuid, id: Uuid, by: Uuid, ste
             .fetch_one(&mut *tx)
             .await?;
     if status != from || ran_out {
-        return Err(Error::Review(format!(
-            "This request is {status}; only a {from} request can be ended this way."
-        )));
+        let status = if ran_out { "expired" } else { status.as_str() };
+        return Err(Error::Review(format!("This request is {status}; {}.", step.only())));
     }
     let r = finish(&mut tx, id, to, action, Some(by)).await?;
     tx.commit().await?;
@@ -365,6 +365,13 @@ impl End {
         match self {
             End::Cancel => ("requested", "cancelled", "break_glass.cancel"),
             End::Revoke => ("active", "revoked", "break_glass.revoke"),
+        }
+    }
+
+    fn only(self) -> &'static str {
+        match self {
+            End::Cancel => "only a request still waiting can be cancelled",
+            End::Revoke => "only an active request can be revoked",
         }
     }
 }

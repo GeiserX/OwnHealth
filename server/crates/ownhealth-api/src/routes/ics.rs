@@ -30,7 +30,8 @@
 //! Break-glass (`routes/break_glass.rs`): a feed made by an owner of the profile also carries one timed
 //! event per emergency request still waiting, from the request to the time access would open, with
 //! that time and the link to cancel it. Serving it stamps the request (`owner_feed_at`): a request opens
-//! only once an owner feed has carried it. A profile reached only through break-glass gets no feed.
+//! only once an owner feed has carried it. Making a feed needs `read:records` on the creator's own
+//! grant: what only break-glass opened gets no feed.
 
 use axum::Router;
 use axum::extract::{Path, State};
@@ -527,16 +528,13 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>) 
 async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>, Body(b): Body<DetailIn>) -> R {
     check_detail(&b.detail)?;
     let mut tx = rt.pool.begin().await?;
-    let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
-    if perm.break_glass_only {
-        // a feed reads as its creator with no browser session: emergency access never reaches it
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "break_glass",
-            "Emergency access cannot make a calendar feed.",
-        )
-        .into());
-    }
+    // a feed reads as its creator with no browser session, so emergency access never reaches it: it
+    // needs read:records on the creator's own grant
+    let perm = crate::routes::break_glass::own(
+        caller.require(&mut tx, &p, Some("read:records"), None).await?,
+        "read:records",
+        "Emergency access cannot make a calendar feed.",
+    )?;
     sessions::require_step_up(&mut tx, &caller.0, sessions::STEP_UP_SECONDS).await?;
     let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
     let prefix = format!("{PREFIX}{}", ownhealth_core::ids::short(8));

@@ -56,8 +56,12 @@ impl FromRequestParts<Runtime> for Caller {
         csrf::check(&parts.method, &parts.headers, &p, &rt.settings.base_url)?;
         if let (PrincipalKind::Session | PrincipalKind::Dev, Some(user)) = (p.kind, p.user_id) {
             // break-glass: a request whose time has come opens (or ends) at the next request of a
-            // person, and an open one of this caller counts from here on, its uses recorded
-            ownhealth_core::break_glass::settle(&mut conn, None).await?;
+            // person, and an open one of this caller counts from here on, its uses recorded. A settle
+            // that fails stops no request: the minute sweep tries again, and an open request whose
+            // time ran out reads nothing meanwhile (`break_glass::active`)
+            if let Err(e) = ownhealth_core::break_glass::settle(&mut conn, None).await {
+                tracing::warn!(error = %e, "could not settle break-glass requests");
+            }
             let path = parts
                 .extensions
                 .get::<axum::extract::MatchedPath>()

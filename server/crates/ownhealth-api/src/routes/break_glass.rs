@@ -30,6 +30,7 @@ use axum::routing::{get, post, put};
 use chrono::{DateTime, Utc};
 use ownhealth_auth::sessions;
 use ownhealth_core::Runtime;
+use ownhealth_core::access::Permission;
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::break_glass::{
     self as bg, CATEGORIES, DEFAULT_CATEGORIES, DEFAULT_DELAY_HOURS, End, MAX_DELAY_HOURS, MIN_DELAY_HOURS,
@@ -47,9 +48,13 @@ use crate::extract::Caller;
 use crate::validate::uuid_path;
 
 /// The layer around every REST route: the reads made through an open request are written before the
-/// answer leaves; when they cannot be, the answer is an error instead.
+/// answer leaves; when they cannot be, the answer is an error instead. A refused or failed request
+/// handed nothing over, so it writes no use.
 pub async fn record_uses(req: Request, next: Next) -> Response {
     let (res, rec) = bg::recording(next.run(req)).await;
+    if !res.status().is_success() {
+        return res;
+    }
     match bg::flush(&rec).await {
         Ok(_) => res,
         Err(e) => {
@@ -57,6 +62,14 @@ pub async fn record_uses(req: Request, next: Next) -> Response {
             ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "Internal error.").into_response()
         }
     }
+}
+
+/// `perm` without emergency access, when it still holds `scope`; else 403 `break_glass` with `message`.
+/// Exports, calendar feeds and the imaging viewer read with this: none of them may carry what only an
+/// open request opened.
+pub fn own(perm: Permission, scope: &str, message: &str) -> Result<Permission, ApiError> {
+    perm.own(scope)
+        .ok_or_else(|| ApiError::new(StatusCode::FORBIDDEN, "break_glass", message.to_string()))
 }
 
 fn ts(t: &Option<DateTime<Utc>>) -> Value {
@@ -355,29 +368,41 @@ struct RequestIn {
     reason: String,
 }
 
-/// Ask for access. Step-up, so a session someone else picked up cannot ask.
+/// Ask for access. Step-up, so a session someone else picked up cannot ask. `profile` is the id or
+/// the slug of a profile that named the caller.
 async fn ask(State(rt): State<Runtime>, caller: Caller, Body(b): Body<RequestIn>) -> R {
     let reason = b.reason.trim().to_string();
-    Check::body().len("reason", Some(&reason), 1, 500).done()?;
-    let profile = uuid_path("profile", &b.profile)?;
+    let mut check = Check::body();
+    check.len("reason", Some(&reason), 1, 500);
+    if reason.contains('\0') {
+        // Postgres text holds no NUL
+        check.push(
+            "value_error",
+            "reason",
+            "Value error, the reason cannot hold a NUL character",
+            json!(reason),
+        );
+    }
+    check.done()?;
     let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
     let mut tx = rt.pool.begin().await?;
     sessions::require_step_up(&mut tx, &caller.0, sessions::STEP_UP_SECONDS).await?;
-    let named: bool = sqlx::query_scalar(
-        "select exists (select 1 from break_glass_contact where profile_id = $1 and contact_user_id = $2)",
+    let named: Option<Uuid> = sqlx::query_scalar(
+        "select c.profile_id from break_glass_contact c join profile p on p.id = c.profile_id \
+         where c.contact_user_id = $1 and (p.id::text = lower($2) or p.slug = $2)",
     )
-    .bind(profile)
     .bind(user)
-    .fetch_one(&mut *tx)
+    .bind(&b.profile)
+    .fetch_optional(&mut *tx)
     .await?;
-    if !named {
+    let Some(profile) = named else {
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "not_a_contact",
             "No emergency access was set up for you on this profile.",
         )
         .into());
-    }
+    };
     if !bg::owner_feed_live(&mut tx, profile, None).await? {
         return Err(no_feed("an owner").into());
     }

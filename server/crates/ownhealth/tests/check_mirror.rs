@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use ownhealth_auth::challenges;
 use ownhealth_core::testing::TestDb;
-use ownhealth_core::{documents, langs, provenance, review, secrets, sources};
+use ownhealth_core::{break_glass, documents, langs, provenance, review, secrets, sources};
 
 /// (table, constraint, the Rust constant that writers check against).
 fn mirrors() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
@@ -29,6 +29,16 @@ fn mirrors() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
         ("app_user", "app_user_locale_check", langs::LOCALES.to_vec()),
         ("api_token", "api_token_lang_check", langs::MCP_LANGS.to_vec()),
         ("shl", "shl_lang_check", langs::LOCALES.to_vec()),
+        (
+            "break_glass_request",
+            "break_glass_request_status_check",
+            break_glass::STATUSES.to_vec(),
+        ),
+        (
+            "notification_outbox",
+            "notification_outbox_kind_check",
+            break_glass::OUTBOX_KINDS.to_vec(),
+        ),
     ]
 }
 
