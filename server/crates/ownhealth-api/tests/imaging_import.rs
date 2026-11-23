@@ -341,3 +341,20 @@ async fn a_dicom_import_job_shows_its_file_name_and_counts_only_to_those_who_may
     assert_eq!(jobs["jobs"][0]["result"]["imported"], 1, "{jobs}");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_single_file_upload_is_named_after_the_file() -> R {
+    let a = imaging_app().await?;
+    let (s, v) = post(
+        &a,
+        "alex",
+        "/imaging/import",
+        &[("profile", "alex")],
+        &[("IM0001".into(), b"synthetic image".to_vec())],
+    )
+    .await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let rows = imports(&a, a.family.profile("alex")).await?;
+    assert_eq!(rows[0].2.as_deref(), Some("IM0001"));
+    Ok(())
+}

@@ -187,7 +187,7 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     let filename = if one_zip {
         files[0].name.rsplit(['/', '\\']).next().unwrap_or_default().to_string()
     } else {
-        folder_name(&files[0].name)
+        folder_name(&files[0].name, files.len())
     };
     let (blobs, owner) = (rt.blobs.clone(), BlobOwner::Profile(profile_id));
     let (count, sha256, size) = tokio::task::spawn_blocking(move || -> Result<_, Fail> {
@@ -251,14 +251,16 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     })))
 }
 
-/// A folder upload's name: the folder the first part sits in (`CD/DICOM/IM1` is `CD.zip`).
-fn folder_name(first: &str) -> String {
-    let parts: Vec<&str> = first
+/// A folder upload's name: the folder the first part sits in (`CD/DICOM/IM1` is `CD.zip`), or the
+/// file's own name when one file came alone.
+fn folder_name(first: &str, parts: usize) -> String {
+    let path: Vec<&str> = first
         .split(['/', '\\'])
         .filter(|p| !p.is_empty() && *p != "." && *p != "..")
         .collect();
-    match parts.as_slice() {
+    match path.as_slice() {
         [top, _, ..] => format!("{top}.zip"),
+        [only] if parts == 1 => (*only).to_string(),
         _ => "folder.zip".into(),
     }
 }

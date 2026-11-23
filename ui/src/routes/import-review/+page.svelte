@@ -331,7 +331,9 @@
 		return '';
 	}
 	// why a row waits, in the reader's language
-	const reasonsText = (i: ReviewItem) => i.reasons.map((r) => kindWord('i2_reason_', r)).join(' · ');
+	// a held DICOM study has reasons of its own, worded for a disc
+	const reasonsText = (i: ReviewItem) => i.reasons.map((r) => kindWord(i.kind === 'imaging_study' ? 'i2_img_reason_' : 'i2_reason_', r)).join(' · ');
+	const imagingAcceptable = (i: ReviewItem) => ['identity_mismatch', 'second_patient'].includes(String((i.payload as Record<string, unknown>).reason));
 </script>
 
 <PageHeader title={t('nav_imp')} sub={t('i2_imp_sub')}>
@@ -564,6 +566,7 @@
 							{:else}
 								<div>{it.kind === 'agent_proposal' ? '◆ ' : ''}{otherTitle(it)}</div>
 								{#if (it.kind === 'fhir_unmapped' || it.kind === 'imaging_study') && it.reasons.length}<div style="font-size:11.5px;color:var(--watch)">{reasonsText(it)}</div>{/if}
+								{#if it.kind === 'imaging_study' && imagingAcceptable(it)}<div class="dim" style="font-size:11.5px">{t('i2_img_accept_d')}</div>{/if}
 								{#if it.kind === 'fhir_unmapped_summary'}<div class="dim" style="font-size:11.5px">{t('i2_fus_d')}</div>{/if}
 								{#if prows}
 									<ProposalRows rows={prows} {busy} documentId={it.document_id} onaccept={(edits) => act(() => acceptReview(it.id, edits))} onreject={() => act(() => rejectReview(it.id, 'rejected in review'))} />
@@ -593,7 +596,7 @@
 								<button class="btn sm no" onclick={() => act(() => rejectReview(it.id, 'rejected in review'))} disabled={busy}>{t('i2_reject')}</button>
 							{:else if it.kind === 'imaging_study'}
 								<!-- a patient who is not the profile's, or one of several on the disc, can still be added; a UID that another record or patient holds cannot -->
-								{#if ['identity_mismatch', 'second_patient'].includes(String((it.payload as Record<string, unknown>).reason))}<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>{/if}
+								{#if imagingAcceptable(it)}<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>{/if}
 								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>
 							{:else}
 								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>

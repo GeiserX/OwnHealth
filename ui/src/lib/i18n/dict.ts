@@ -2059,9 +2059,11 @@ export const dict = {
 		// slice 41, DICOM import: a study the import did not send waits in review
 		i2_kind_imaging_study: "Imaging study to check",
 		i2_img_t: "{what} · the disc names {who}",
-		i2_reason_second_patient: "The disc holds more than one patient",
-		i2_reason_other_profile: "Another record already holds this study",
-		i2_reason_uid_conflict: "Another patient's study has the same UID",
+		i2_img_reason_identity_mismatch: "The patient on the disc is not this profile's",
+		i2_img_reason_second_patient: "The disc holds more than one patient",
+		i2_img_reason_other_profile: "This study cannot be added to this profile",
+		i2_img_reason_uid_conflict: "Another patient's study has the same UID",
+		i2_img_accept_d: "Accept adds this study to this profile's record, under the patient the disc names.",
 	},
 	es: {
 		household: "Hogar",
@@ -4120,9 +4122,11 @@ export const dict = {
 		// slice 41, importación DICOM: un estudio que la importación no envió espera revisión
 		i2_kind_imaging_study: "Estudio de imagen por revisar",
 		i2_img_t: "{what} · el disco nombra a {who}",
-		i2_reason_second_patient: "El disco tiene más de un paciente",
-		i2_reason_other_profile: "Otro historial ya tiene este estudio",
-		i2_reason_uid_conflict: "El estudio de otro paciente tiene el mismo UID",
+		i2_img_reason_identity_mismatch: "El paciente del disco no es el de este perfil",
+		i2_img_reason_second_patient: "El disco tiene más de un paciente",
+		i2_img_reason_other_profile: "Este estudio no se puede añadir a este perfil",
+		i2_img_reason_uid_conflict: "El estudio de otro paciente tiene el mismo UID",
+		i2_img_accept_d: "Aceptar añade este estudio al historial de este perfil, con el paciente que nombra el disco.",
 	},
 } as const;
 

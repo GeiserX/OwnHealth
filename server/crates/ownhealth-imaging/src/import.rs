@@ -805,7 +805,8 @@ async fn to_review_item(
 
 /// Accepting an `imaging_study` item: a study whose patient did not match the profile, or that came on
 /// a disc with other patients, is imported as it is. The other reasons cannot be accepted: another
-/// profile or another patient holds the UID.
+/// profile or another patient holds the UID. The refusal names neither, since the item's reviewer may
+/// see neither.
 pub async fn accept(
     conn: &mut PgConnection,
     item: &ReviewItem,
@@ -815,7 +816,7 @@ pub async fn accept(
     let why = item.payload.get("reason").and_then(Value::as_str).unwrap_or_default();
     if !reason::ACCEPTABLE.contains(&why) {
         return Err(Error::Review(
-            "this study cannot be added: another profile or another patient holds its UID. Dismiss it instead".into(),
+            "This study cannot be added to this profile. Dismiss it instead.".into(),
         ));
     }
     let (Some(import_id), Some(uid), Some(profile_id)) = (
