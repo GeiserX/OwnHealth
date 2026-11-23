@@ -316,3 +316,28 @@ async fn a_zip_of_more_files_than_the_import_reads_is_refused_before_it_is_kept(
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_dicom_import_job_shows_its_file_name_and_counts_only_to_those_who_may_read_records() -> R {
+    let a = imaging_app().await?;
+    let (s, v) = post(&a, "alex", "/imaging/import", &[("profile", "alex")], &disc()).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let job = v["job_id"].as_i64().ok_or_else(|| anyhow::anyhow!("no job: {v}"))?;
+    sqlx::query("update job set result = '{\"imported\": 1}'::jsonb where id = $1")
+        .bind(job)
+        .execute(&a.rt.pool)
+        .await?;
+    // sam views alex's labs only
+    narrow(&a, "sam", "alex", &["read:summary", "read:labs"]).await?;
+    let (s, jobs) = a.get("sam", &format!("/jobs?ids={job}")).await?;
+    assert_eq!(s, StatusCode::OK, "{jobs}");
+    let seen = &jobs["jobs"][0];
+    assert_eq!(seen["kind"], "import.dicom", "{jobs}");
+    assert_eq!(seen["filename"], Value::Null, "{jobs}");
+    assert_eq!(seen["result"], Value::Null, "{jobs}");
+    // alex reads records: he sees both
+    let (_, jobs) = a.get("alex", &format!("/jobs?ids={job}")).await?;
+    assert_eq!(jobs["jobs"][0]["filename"], "CD.zip", "{jobs}");
+    assert_eq!(jobs["jobs"][0]["result"]["imported"], 1, "{jobs}");
+    Ok(())
+}

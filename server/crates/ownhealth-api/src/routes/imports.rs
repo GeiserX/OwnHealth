@@ -238,6 +238,11 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         .filter(|p| p.has("read:wearables"))
         .map(|p| p.profile.id.to_string())
         .collect();
+    let records: Vec<String> = perms
+        .iter()
+        .filter(|p| p.has("read:records"))
+        .map(|p| p.profile.id.to_string())
+        .collect();
     let rows = sqlx::query(
         "select id, kind, state, attempts, max_attempts, last_error, result, created_at, finished_at, \
          payload->>'profile_id' as profile_id, payload->>'filename' as filename, \
@@ -263,6 +268,13 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
             .is_some_and(|p| wearables.iter().any(|w| w == p));
         if wearable && !may_read {
             j["result"] = Value::Null;
+        }
+        // a CD's name and what its import found are the study's: read:records only, like the study
+        let dicom = j["kind"].as_str() == Some(ownhealth_imaging::import::JOB);
+        let may_read = j["profile_id"].as_str().is_some_and(|p| records.iter().any(|r| r == p));
+        if dicom && !may_read {
+            j["result"] = Value::Null;
+            j["filename"] = Value::Null;
         }
     }
     Ok(Json(json!({"jobs": jobs})))
