@@ -148,7 +148,9 @@ Rules every tool follows (mcp.md 3, 9):
   not_assessed, withheld{sensitive, by_scope, minor_rule, vendor_terms?}, db_versions, next_cursor,
   budget{tokens_est, truncated}, notice`, plus a compact markdown text block with the same facts.
   `withheld.vendor_terms` (`search_observations`, `get_trend`) counts the wearable days held by a
-  provider that `data/connectors/providers.yaml` withholds; it is absent when nothing was left out.
+  provider that `data/connectors/providers.yaml` withholds. The field is absent when no days were
+  withheld for vendor terms. An empty `search_observations` result means not measured in the requested
+  window only if `withheld.vendor_terms` is absent.
 - `tools/list` shows only tools whose scope the token holds. All tools: `openWorldHint: false`; all but
   `propose` are `readOnlyHint: true, idempotentHint: true`.
 - Every fact carries `src`. Ids are stable and resolve through `get_source`.

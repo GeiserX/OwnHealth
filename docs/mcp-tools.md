@@ -124,7 +124,7 @@ Input: `profile`, `as_of`, `cursor`. Scope: `read:summary`; domain scopes add th
 
 ### search_observations
 
-Lab results, vitals and wearable rollups by name in any language, or by LOINC code, in a date window. Summary mode returns the latest value per analyte. `resolved` says how the query was matched.
+Lab results, vitals and wearable rollups by name in any language, or by LOINC code, in a date window. Summary mode returns the latest value per analyte. `resolved` says how the query was matched. An empty result means not measured in the requested window only if `withheld.vendor_terms` is absent. That field counts days omitted due to vendor terms.
 
 Input: `query` or `loinc`, `category`, `from`, `to`, `flagged_only`, `group_by`, `detail` (`summary` or `full`), `cursor`, `as_of`. Scope: `read:labs`, `read:vitals` or `read:wearables`, by category.
 
