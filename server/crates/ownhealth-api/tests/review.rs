@@ -109,7 +109,8 @@ async fn test_caregiver_without_read_sensitive_cannot_see_a_sensitive_held_value
         .collect();
     assert!(ids.contains(&json!(plain)) && !ids.contains(&json!(hidden)), "{ids:?}");
     assert_eq!(listed["withheld"], json!(1));
-    assert_eq!(listed["open"], json!(2));
+    // the count holds what the list shows: the withheld item is not one Alex can review
+    assert_eq!(listed["open"], json!(1));
     let (s, v) = a.get("alex", &format!("/review/{hidden}")).await?;
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert_eq!(
