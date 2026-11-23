@@ -186,6 +186,12 @@ impl<'a> Walker<'a> {
                     let sq = vr == b"SQ";
                     let len = self.u32_at(self.pos + 8)?;
                     self.pos += 12;
+                    if vr == b"UN" && len == UNDEFINED {
+                        let enclosing = std::mem::replace(&mut self.syntax, Syntax::ImplicitLe);
+                        let element = self.with_value(tag, len, true, depth);
+                        self.syntax = enclosing;
+                        return element;
+                    }
                     // an undefined-length OB, OW or UN is encapsulated pixel data or a UN sequence:
                     // both are items up to a sequence delimiter
                     (len, sq || len == UNDEFINED)
@@ -259,9 +265,28 @@ fn meta(buf: &[u8]) -> Result<(String, String, String, usize), Part10Error> {
         pos: MAGIC_AT + 4,
         syntax: Syntax::ExplicitLe,
     };
+    let declared_end = if w.tag_at(w.pos)? == 0x0002_0000 {
+        let e = w.next(0)?;
+        let value = e
+            .value
+            .and_then(|r| buf[r].try_into().ok())
+            .ok_or_else(|| corrupt("invalid file meta group length"))?;
+        let end = w
+            .pos
+            .checked_add(u32::from_le_bytes(value) as usize)
+            .filter(|end| *end <= buf.len())
+            .ok_or_else(|| corrupt("the file meta group runs past the end of the file"))?;
+        w.buf = &buf[..end];
+        Some(end)
+    } else {
+        None
+    };
     let (mut ts, mut class, mut instance) = (String::new(), String::new(), String::new());
     while !w.done() {
         if w.tag_at(w.pos)? >> 16 != 0x0002 {
+            if declared_end.is_some() {
+                return Err(corrupt("the file meta group length includes the data set"));
+            }
             break;
         }
         let e = w.next(0)?;
@@ -550,6 +575,37 @@ mod tests {
         image.extend(explicit(false, 0x7FE0_0010, b"OB", &vec![0u8; 40 << 20]));
         let h = read_header(&file(DEFLATED_LE, &deflate(&image))).expect("header");
         assert_eq!(h.series_instance_uid, "1.2.826.0.1.3680043.10.999.7.1");
+    }
+
+    fn before_patient(set: &mut Vec<u8>, element: &[u8]) {
+        let patient = [0x10, 0, 0x10, 0, b'P', b'N'];
+        let at = set.windows(6).position(|w| w == patient).expect("patient name");
+        set.splice(at..at, element.iter().copied());
+    }
+
+    #[test]
+    fn an_undefined_un_contains_implicit_vr_and_restores_explicit_vr() {
+        let mut set = core(false);
+        let un = [
+            9, 0, 0x10, 0x10, b'U', b'N', 0, 0, 255, 255, 255, 255, 0xfe, 0xff, 0, 0xe0, 255, 255, 255, 255, 8, 0,
+            0x55, 0x11, 6, 0, 0, 0, b'1', b'.', b'2', b'.', b'3', 0, 0xfe, 0xff, 0x0d, 0xe0, 0, 0, 0, 0, 0xfe, 0xff,
+            0xdd, 0xe0, 0, 0, 0, 0,
+        ];
+        before_patient(&mut set, &un);
+        let h = read_header(&file("1.2.840.10008.1.2.1", &set)).expect("header");
+        assert_eq!(h.patient_name, "RIVERA^ALEX");
+    }
+
+    #[test]
+    fn the_meta_group_length_delimits_a_deflated_set_starting_with_0002() {
+        let mut deflated = vec![2, 0, 0, 0, 255, 255];
+        deflated.extend(deflate(&core(false)));
+        let mut dicom = file(DEFLATED_LE, &deflated);
+        let start = MAGIC_AT + 4;
+        let length = u32::try_from(dicom.len() - start - deflated.len()).expect("meta length");
+        dicom.splice(start..start, explicit(false, 0x0002_0000, b"UL", &length.to_le_bytes()));
+        let h = read_header(&dicom).expect("header");
+        assert_eq!(h.patient_id, "LN-0001");
     }
 
     #[test]
