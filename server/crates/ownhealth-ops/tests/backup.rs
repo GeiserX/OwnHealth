@@ -824,3 +824,146 @@ async fn a_keyring_missing_a_key_it_does_not_list_as_deleted_fails_the_restore()
     assert_eq!(report["ok"], false, "{report:#}");
     Ok(())
 }
+
+/// A keyring with the backup's profiles but made under another secrets key (another install's file
+/// put in place) is refused by name before anything is loaded, by restore and verify-restore alike.
+#[tokio::test]
+async fn a_keyring_of_another_secrets_key_is_refused_before_anything_loads() -> R {
+    let l = live().await?;
+    let file = ownhealth_core::keyfile::path(&l.settings);
+    let mut ring = ownhealth_core::keyfile::read(&file)?.unwrap_or_default();
+    assert!(ring.profiles.contains_key(&l.alex));
+    let other = ownhealth_core::keys::Kek::from_base64(&ownhealth_core::testing::random_secrets_key())?;
+    ring.kek_fingerprint = Some(other.fingerprint().to_vec());
+    ownhealth_core::keyfile::write(&l.settings.keyring_path(), &ring)?;
+    let (db, fresh) = fresh(&l).await?;
+    let err = err_text(ownhealth_ops::restore(&fresh, &l.archive).await);
+    assert!(
+        err.contains("was made under another OWNHEALTH_SECRETS_KEY") && err.contains("nothing was loaded"),
+        "{err}"
+    );
+    assert_eq!(public_tables(&db).await?, 0);
+    assert!(tree_files(&fresh.blobs_path())?.is_empty());
+    let err = err_text(ownhealth_ops::verify_restore(&fresh, &l.archive).await);
+    assert!(err.contains("was made under another OWNHEALTH_SECRETS_KEY"), "{err}");
+    // the same refusal when the restore may go on without the keys it lacks: a foreign file is
+    // not a lost one
+    let err = err_text(ownhealth_ops::restore_with(&fresh, &l.archive, true).await);
+    assert!(err.contains("was made under another OWNHEALTH_SECRETS_KEY"), "{err}");
+    assert_eq!(public_tables(&db).await?, 0);
+    Ok(())
+}
+
+/// A profile deleted before the backup is not in the dump, but the keyring still lists it as
+/// shredded. The restore puts its shredded row back, so no new key can ever be made for it.
+#[tokio::test]
+async fn a_restore_keeps_the_shredded_row_of_a_profile_deleted_before_the_backup() -> R {
+    let l = live().await?;
+    let gone = Uuid::new_v4();
+    let file = ownhealth_core::keyfile::path(&l.settings);
+    let mut ring = ownhealth_core::keyfile::read(&file)?.unwrap_or_default();
+    ring.shredded.insert(gone);
+    ownhealth_core::keyfile::write(&l.settings.keyring_path(), &ring)?;
+    let (db, fresh) = fresh(&l).await?;
+    let report = ownhealth_ops::restore(&fresh, &l.archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    let row: Option<bool> = sqlx::query_scalar("select wrapped_dek is null from profile_key where profile_id = $1")
+        .bind(gone)
+        .fetch_optional(&db.pool)
+        .await?;
+    assert_eq!(
+        row,
+        Some(true),
+        "no shredded row for the profile deleted before the backup"
+    );
+    let keys = ownhealth_core::keys::Keyring::new(ownhealth_core::keys::Kek::from_settings(&fresh)?, db.url.clone());
+    assert!(
+        keys.dek(gone, true).is_err(),
+        "a new key was made for a deleted profile"
+    );
+    Ok(())
+}
+
+/// A backup made before any profile had a key lists no key in `keys.keyring`: it opens no sealed
+/// file, so a new machine with no keyring restores it.
+#[tokio::test]
+async fn a_backup_that_needs_no_key_restores_without_a_keyring() -> R {
+    ownhealth_ops::register();
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let settings = db.settings(&dir.path().join("live"))?;
+    let archive = ownhealth_ops::backup(&settings, &dir.path().join("backup").join("staging")).await?;
+    assert_eq!(manifest(&archive)?["keys"]["keyring"], serde_json::json!([]));
+    let target = TestDb::empty().await?;
+    let mut fresh = target.settings(&dir.path().join("fresh"))?;
+    fresh.secrets_key = settings.secrets_key.clone();
+    fresh.keyring_dir = Some(dir.path().join("no-keyring-here"));
+    let report = ownhealth_ops::restore(&fresh, &archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert!(public_tables(&target).await? > 0);
+    Ok(())
+}
+
+/// The keyring copy is older than the backup (or gone with the disk). Told to go on without the
+/// keys it lacks, the restore loads every record and every file, and only the profiles whose key the
+/// keyring holds open their files. The report names the others under `keys.missing`. Their records
+/// are back and no shredded row stops them from getting a new key.
+#[tokio::test]
+async fn a_restore_allowed_to_miss_keys_loads_every_record_and_opens_what_it_can() -> R {
+    let l = live().await?;
+    let file = ownhealth_core::keyfile::path(&l.settings);
+    let mut ring = ownhealth_core::keyfile::read(&file)?.unwrap_or_default();
+    // the copy lacks the key of a profile made after it was taken: here anyone but Alex
+    let lost = ring
+        .profiles
+        .keys()
+        .copied()
+        .find(|p| *p != l.alex)
+        .ok_or_else(|| anyhow::anyhow!("the demo has one profile"))?;
+    ring.profiles.remove(&lost);
+    let kept = ring.profiles.len();
+    ownhealth_core::keyfile::write(&l.settings.keyring_path(), &ring)?;
+    let (db, fresh) = fresh(&l).await?;
+    let err = err_text(ownhealth_ops::restore(&fresh, &l.archive).await);
+    assert!(err.contains("--allow-missing-keys"), "{err}");
+    assert_eq!(public_tables(&db).await?, 0);
+    let report = ownhealth_ops::restore_with(&fresh, &l.archive, true).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert_eq!(report["keys"]["missing"], serde_json::json!([lost]), "{report:#}");
+    let row: Option<Option<Vec<u8>>> = sqlx::query_scalar("select wrapped_dek from profile_key where profile_id = $1")
+        .bind(lost)
+        .fetch_optional(&db.pool)
+        .await?;
+    assert_eq!(row, None, "the restore made up a row for a key it does not have");
+    let profile: i64 = sqlx::query_scalar("select count(*) from profile where id = $1")
+        .bind(lost)
+        .fetch_one(&db.pool)
+        .await?;
+    assert_eq!(profile, 1, "the records of the profile with no key did not come back");
+    // Alex's key is in the copy: every file of his opens, sealed or plain
+    let store = BlobStore::for_settings(&fresh)?;
+    let live_store = BlobStore::for_settings(&l.settings)?;
+    let docs: Vec<String> = sqlx::query_scalar("select encode(blob_sha256, 'hex') from document where profile_id = $1")
+        .bind(l.alex)
+        .fetch_all(&db.pool)
+        .await?;
+    assert!(docs.len() > 1);
+    for sha in &docs {
+        let owner = BlobOwner::Profile(l.alex);
+        assert_eq!(store.get_bytes(owner, sha)?, live_store.get_bytes(owner, sha)?, "{sha}");
+    }
+    // and with no keyring at all, the records still come back, with no key of any profile
+    let db2 = TestDb::empty().await?;
+    let mut bare = db2.settings(&l.dir.path().join("fresh-bare"))?;
+    bare.secrets_key = l.settings.secrets_key.clone();
+    bare.keyring_dir = Some(l.dir.path().join("lost-with-the-disk"));
+    let report = ownhealth_ops::restore_with(&bare, &l.archive, true).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert_eq!(strs(&report["keys"]["missing"]).len(), kept + 1, "{report:#}");
+    let keyed: i64 = sqlx::query_scalar("select count(*) from profile_key")
+        .fetch_one(&db2.pool)
+        .await?;
+    assert_eq!(keyed, 0);
+    assert!(public_tables(&db2).await? > 0);
+    Ok(())
+}

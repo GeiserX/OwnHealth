@@ -48,6 +48,71 @@ fn ownhealth(s: &Settings, args: &[&str]) -> anyhow::Result<Output> {
         .output()?)
 }
 
+/// An install that never set OWNHEALTH_KEYRING_DIR (an older compose file) keeps the keyring on the
+/// data volume, where a host-level volume backup versions it. The backup still runs, and says so on
+/// stderr, which backup.log keeps.
+#[tokio::test]
+async fn a_backup_with_the_keyring_on_the_data_volume_says_so() -> R {
+    let dir = tempfile::tempdir()?;
+    let (_db, s) = seeded(dir.path()).await?;
+    let archive = dir.path().join("backup");
+    let out = Command::new(BIN)
+        .args(["backup", &archive.display().to_string()])
+        .env("OWNHEALTH_DATABASE_URL", &s.database_url)
+        .env("OWNHEALTH_DATA_DIR", &s.data_dir)
+        .env("OWNHEALTH_ANCHOR_DIR", s.anchor_path())
+        .env("OWNHEALTH_SECRETS_KEY", s.secrets_key.as_deref().unwrap_or_default())
+        .env_remove("OWNHEALTH_KEYRING_DIR")
+        .env_remove("OWNHEALTH_ANCHOR_DIR_FILE")
+        .env_remove("OWNHEALTH_KEYRING_DIR_FILE")
+        .env_remove("OWNHEALTH_SECRETS_KEY_FILE")
+        .output()?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(s.data_dir.join("keyring").join("keyring.json").is_file());
+    assert!(
+        stderr.contains("OWNHEALTH_KEYRING_DIR is not set") && stderr.contains("data volume"),
+        "{stderr}"
+    );
+    // the control: the same backup with the variable set says nothing of it
+    let again = ownhealth(&s, &["backup", &dir.path().join("backup2").display().to_string()])?;
+    assert!(again.status.success());
+    assert!(!String::from_utf8_lossy(&again.stderr).contains("OWNHEALTH_KEYRING_DIR is not set"));
+    Ok(())
+}
+
+/// The keyring copy at hand is older than the backup: `restore` refuses it and names the flag, and
+/// `restore --allow-missing-keys` loads every record, opens the files of the profiles whose key the
+/// copy holds, and lists the others under `keys.missing`.
+#[tokio::test]
+async fn cli_restore_can_go_on_without_the_keys_a_stale_keyring_lacks() -> R {
+    let dir = tempfile::tempdir()?;
+    let (_db, s) = seeded(dir.path()).await?;
+    let archive = dir.path().join("backup");
+    let out = ownhealth(&s, &["backup", &archive.display().to_string()])?;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let file = ownhealth_core::keyfile::path(&s);
+    let mut ring = ownhealth_core::keyfile::read(&file)?.unwrap_or_default();
+    let lost = ring.profiles.keys().next().copied().unwrap_or_default();
+    ring.profiles.remove(&lost);
+    ownhealth_core::keyfile::write(&s.keyring_path(), &ring)?;
+    let fresh_db = TestDb::empty().await?;
+    let mut fresh = fresh_db.settings(&dir.path().join("fresh"))?;
+    fresh.secrets_key = s.secrets_key.clone();
+    fresh.keyring_dir = Some(s.keyring_path());
+    let refused = ownhealth(&fresh, &["restore", &archive.display().to_string()])?;
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--allow-missing-keys"));
+    let done = ownhealth(
+        &fresh,
+        &["restore", "--allow-missing-keys", &archive.display().to_string()],
+    )?;
+    assert_eq!(done.status.code(), Some(0), "{}", String::from_utf8_lossy(&done.stderr));
+    let report: Value = serde_json::from_slice(&done.stdout)?;
+    assert_eq!(report["keys"]["missing"], serde_json::json!([lost]), "{report:#}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn cli_verify_restore_exits_non_zero_on_a_mismatch() -> R {
     let dir = tempfile::tempdir()?;
@@ -430,6 +495,35 @@ async fn backup_then_restore_test_then_restore_into_a_fresh_stack() -> R {
         .map(|(p, r)| (p.clone(), r["expected"].clone()))
         .collect();
     assert_eq!(actual, expected);
+    Ok(())
+}
+
+/// restore.sh with OWNHEALTH_ALLOW_MISSING_KEYS=1 restores with a keyring copy older than the
+/// snapshot: every record comes back, and the report names the profile whose key the copy lacks.
+#[tokio::test]
+async fn restore_sh_can_go_on_without_the_keys_a_stale_keyring_lacks() -> R {
+    let Some(restic) = restic_or_skip() else { return Ok(()) };
+    let tmp = tempfile::tempdir()?;
+    let (_db, s) = seeded(tmp.path()).await?;
+    let env = env_for(&s, tmp.path());
+    assert!(run(&restic, &env, &["init", "--quiet"])?.status.success());
+    assert!(script("backup.sh", &env)?.status.success());
+    let file = ownhealth_core::keyfile::path(&s);
+    let mut ring = ownhealth_core::keyfile::read(&file)?.unwrap_or_default();
+    let lost = ring.profiles.keys().next().copied().unwrap_or_default();
+    ring.profiles.remove(&lost);
+    let stale = tmp.path().join("stale-keyring");
+    ownhealth_core::keyfile::write(&stale, &ring)?;
+    let fresh_db = TestDb::empty().await?;
+    let mut fresh = fresh_db.settings(&tmp.path().join("fresh"))?;
+    fresh.secrets_key = s.secrets_key.clone();
+    fresh.keyring_dir = Some(stale);
+    let mut env = env_for(&fresh, tmp.path());
+    env.vars.push(("OWNHEALTH_ALLOW_MISSING_KEYS".into(), "1".into()));
+    let restored = script("restore.sh", &env)?;
+    assert!(restored.status.success(), "{}", text(&restored));
+    let report: Value = serde_json::from_slice(&restored.stdout)?;
+    assert_eq!(report["keys"]["missing"], serde_json::json!([lost]), "{report:#}");
     Ok(())
 }
 

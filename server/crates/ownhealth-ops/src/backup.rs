@@ -603,6 +603,14 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     }
     keyfile::check_folder(settings).map_err(|e| ops_error(e.0))?;
     keyfile::read(&ring).map_err(|e| ops_error(e.0))?;
+    if settings.keyring_dir.is_none() {
+        tracing::warn!(
+            "OWNHEALTH_KEYRING_DIR is not set, so the keyring is {} on the data volume: a host backup \
+             of that volume keeps older copies of it, and an older copy opens a deleted profile's files \
+             again. Mount a folder of its own and set OWNHEALTH_KEYRING_DIR, see deploy/README.md",
+            ring.display()
+        );
+    }
     let url = settings.sqlx_url();
     let anchor_path = anchor_file(settings);
     let mut lock = anchor_lock(&url).await?;
@@ -925,28 +933,42 @@ struct RingKeys {
     fingerprint: Vec<u8>,
     /// the wrapped key of each profile the keyring still holds
     keys: Vec<(Uuid, Vec<u8>)>,
-    /// profiles whose key the keyring lists as shredded: deleted since the backup
+    /// profiles of the backup whose key the keyring lists as shredded: deleted since the backup
     shredded: Vec<Uuid>,
+    /// every profile the keyring lists as shredded, also one deleted before the backup: each gets its
+    /// shredded row back, so no new key is ever made for it
+    tombstones: Vec<Uuid>,
     /// profiles the keyring knows nothing of: it is older than the backup, or another install's
     missing: Vec<Uuid>,
+    /// the operator chose to restore without the keys the keyring lacks (`--allow-missing-keys`)
+    allow_missing: bool,
 }
 
+/// The flag that lets a restore go on without the keys the keyring lacks.
+const ALLOW_MISSING: &str = "--allow-missing-keys";
+
 /// The keys the backup needs (`keys.keyring` in its manifest), from the keyring file. None for a
-/// backup from before the keyring, whose dump holds its keys. A keyring that is missing or cannot be
-/// read, or that another secrets key made, is refused before anything is loaded.
-fn ring_keys(settings: &Settings, manifest: &Value) -> Result<Option<RingKeys>> {
+/// backup from before the keyring, whose dump holds its keys. A keyring that cannot be read, or that
+/// another secrets key made, is refused before anything is loaded. A missing keyring is refused too,
+/// unless the backup needs no key or `allow_missing` says to go on without the keys.
+fn ring_keys(settings: &Settings, manifest: &Value, allow_missing: bool) -> Result<Option<RingKeys>> {
     let Some(ids) = manifest["keys"]["keyring"].as_array() else {
         return Ok(None);
     };
     let file = keyfile::path(settings);
-    let ring = keyfile::read(&file).map_err(|e| ops_error(e.0))?.ok_or_else(|| {
-        ops_error(format!(
-            "no keyring at {}: this backup holds no profile key, they are in keyring.json on the keyring \
-             mount (OWNHEALTH_KEYRING_DIR). Put the newest keyring.json there and run it again; nothing \
-             was loaded, see deploy/README.md",
-            file.display()
-        ))
-    })?;
+    let ring = match keyfile::read(&file).map_err(|e| ops_error(e.0))? {
+        Some(ring) => ring,
+        None if ids.is_empty() || allow_missing => keyfile::KeyringFile::default(),
+        None => {
+            return Err(ops_error(format!(
+                "no keyring at {}: this backup holds no profile key, they are in keyring.json on the keyring \
+                 mount (OWNHEALTH_KEYRING_DIR). Put the newest keyring.json there and run it again, or \
+                 restore with {ALLOW_MISSING} to load every record without the files that need a key; \
+                 nothing was loaded, see deploy/README.md",
+                file.display()
+            )));
+        }
+    };
     let want = manifest["keys"]["kek_fingerprint"].as_str();
     let have = ring.kek_fingerprint.as_ref().map(hex::encode);
     if let (Some(want), Some(have)) = (want, &have)
@@ -962,7 +984,9 @@ fn ring_keys(settings: &Settings, manifest: &Value) -> Result<Option<RingKeys>> 
         fingerprint: ring.kek_fingerprint.clone().unwrap_or_default(),
         keys: Vec::new(),
         shredded: Vec::new(),
+        tombstones: ring.shredded.iter().copied().collect(),
         missing: Vec::new(),
+        allow_missing,
     };
     for id in ids {
         let id = id
@@ -981,8 +1005,10 @@ fn ring_keys(settings: &Settings, manifest: &Value) -> Result<Option<RingKeys>> 
 }
 
 /// Put the keyring's keys into the restored `profile_key`, which the dump left empty, and a shredded
-/// row for each profile deleted since the backup: its files then never open, its key can never be made
-/// again, and the start sweep removes its sealed folder.
+/// row for each profile the keyring lists as deleted, since the backup or before it: its files then
+/// never open, its key can never be made again, and the start sweep removes its sealed folder. A
+/// profile whose key the keyring lacks (`missing`, with `--allow-missing-keys`) gets no row: its files
+/// stay closed and the start sweep removes them, and its next file gets a new key.
 async fn load_keys(url: &str, ring: &RingKeys) -> Result<()> {
     let mut conn = PgConnection::connect(url).await?;
     let mut tx = conn.begin().await?;
@@ -994,8 +1020,8 @@ async fn load_keys(url: &str, ring: &RingKeys) -> Result<()> {
             .execute(&mut *tx)
             .await?;
     }
-    for id in &ring.shredded {
-        sqlx::query("insert into profile_key (profile_id) values ($1)")
+    for id in &ring.tombstones {
+        sqlx::query("insert into profile_key (profile_id) values ($1) on conflict (profile_id) do nothing")
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -1052,7 +1078,9 @@ async fn compare(
         }
         key_check["shredded"] = json!(r.shredded);
         key_check["missing"] = json!(r.missing);
-        if !r.missing.is_empty() {
+        if r.allow_missing {
+            key_check["missing_allowed"] = Value::Bool(true);
+        } else if !r.missing.is_empty() {
             key_check["ok"] = Value::Bool(false);
         }
     }
@@ -1118,20 +1146,31 @@ async fn compare(
 /// profile deleted since the backup comes back with its rows and a shredded key, so its files stay
 /// closed (`keys.shredded` in the report).
 ///
+/// [`restore_with`] with `allow_missing_keys` goes on in those two cases (a keyring copy older than
+/// the backup, or none left after a dead disk): every row and file is loaded, the profiles whose key
+/// the keyring holds open their files, and the others are listed under `keys.missing`, with their
+/// records and without their files.
+///
 /// When every check passed and the backup's log held, the restored log now ends at the head the
 /// manifest recorded, so the anchor is set to that head: the next backup and the audit page compare
 /// against the log as restored, not against a newer head the restored database never had. Otherwise
 /// the anchor stays as it was. A folder or file the backup would refuse gets no anchor either, and
 /// `audit_anchor_error` says why.
 pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
+    restore_with(settings, archive, false).await
+}
+
+/// [`restore`], told whether to go on without the keys the keyring lacks (`--allow-missing-keys`).
+pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_keys: bool) -> Result<Value> {
     let manifest = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
-    let ring = ring_keys(settings, &manifest)?;
-    if let Some(r) = ring.as_ref().filter(|r| !r.missing.is_empty()) {
+    let ring = ring_keys(settings, &manifest, allow_missing_keys)?;
+    if let Some(r) = ring.as_ref().filter(|r| !r.missing.is_empty() && !r.allow_missing) {
         return Err(ops_error(format!(
             "the keyring {} holds no key for {} profile(s) of this backup and does not list them as \
              deleted ({}): it is older than the backup, or another install's. Put the newest keyring.json \
-             in place; nothing was loaded",
+             in place, or restore with {ALLOW_MISSING} to load every record and only the files whose key \
+             the keyring holds; nothing was loaded",
             keyfile::path(settings).display(),
             r.missing.len(),
             ids_text(&r.missing)
@@ -1243,7 +1282,7 @@ async fn create_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
 pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value> {
     let manifest = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
-    let ring = ring_keys(settings, &manifest)?;
+    let ring = ring_keys(settings, &manifest, false)?;
     let files = blobs::tree_files(&archive.join("blobs"))?;
     let live = settings.sqlx_url();
     let scratch = format!("{}_restore_check", db_name(&live));
