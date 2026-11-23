@@ -362,6 +362,20 @@ fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    // Tests on this thread see every hard link fail, as on a filesystem without them.
+    static NO_LINKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn link_file(path: &Path, link: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if NO_LINKS.with(std::cell::Cell::get) {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "no hard links in this test"));
+    }
+    fs::hard_link(path, link)
+}
+
 /// A new file only this user may read, for spools and decrypted copies.
 fn create_private(path: &Path) -> io::Result<File> {
     let mut o = fs::OpenOptions::new();
@@ -924,20 +938,28 @@ impl BlobStore {
 
         file.lock_shared()?;
         let link = self.root.join("tmp").join(format!("copy-{}", tmp_name()));
-        if let Err(e) = fs::hard_link(path, &link) {
+        if let Err(e) = link_file(path, &link) {
             if e.kind() == io::ErrorKind::NotFound {
                 return Err(BlobError::NotFound);
             }
             // No link here (EPERM from protected_hardlinks, EXDEV when tmp is on another mount, a
-            // filesystem without hard links): read the stored path as before links, still holding
-            // the shared lock on it.
+            // filesystem without hard links): copy the bytes from the file opened above instead.
+            // `drop_plain` removes the stored path without waiting for readers, and the open file
+            // keeps its bytes after that, so the copy never depends on the stored path.
             drop(links);
-            self.checked_plain(owner, sha256, file.try_clone()?)?;
-            return Ok(LocalCopy(Arc::new(CopyFile {
-                path: path.to_path_buf(),
-                temporary: false,
-                held: Some(file),
-            })));
+            let mut reader = self.checked_plain(owner, sha256, file)?;
+            let mut copy = CopyFile {
+                path: link,
+                temporary: true,
+                held: None,
+            };
+            let mut out = create_private(&copy.path)?;
+            // before a byte is in it: the sweep leaves a locked copy alone ([`in_use`])
+            out.lock()?;
+            io::copy(&mut reader, &mut out)?;
+            out.flush()?;
+            copy.held = Some(out);
+            return Ok(LocalCopy(Arc::new(copy)));
         }
         let mut copy = CopyFile {
             path: link,
@@ -1918,39 +1940,28 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
-    fn a_plain_copy_reads_the_stored_path_when_no_link_can_be_made() -> Result<(), BlobError> {
+    fn a_plain_copy_outlives_its_stored_file_when_no_link_can_be_made() -> Result<(), BlobError> {
         let dir = tempfile::tempdir()?;
         let store = sealing_store(dir.path())?;
         let owner = BlobOwner::Profile(Uuid::new_v4());
         let data = format!(
-            "Rivera legacy file on a store whose tmp takes no link: {}",
+            "Rivera legacy file on a store that takes no hard link: {}",
             Uuid::new_v4()
         );
         let sha = store.put_bytes(BlobOwner::Reference, data.as_bytes())?;
         let plain = store.path(&sha)?;
-        let tmp = dir.path().join("tmp");
-        set_mode(&tmp, 0o500)?;
-        // root writes into a read-only folder anyway, so the link would not fail there
-        let probe = tmp.join("probe");
-        if fs::write(&probe, b"x").is_ok() {
-            fs::remove_file(&probe)?;
-            set_mode(&tmp, 0o700)?;
-            return Ok(());
-        }
-        let read = store
-            .with_local_copy(owner, &sha)
-            .map(|copy| (copy.path().to_path_buf(), fs::read(copy.path())));
-        set_mode(&tmp, 0o700)?;
-        let (path, bytes) = read?;
-        assert_eq!(path, plain);
-        assert_eq!(bytes?, data.as_bytes());
-        assert_eq!(
-            fs::read(&plain)?,
-            data.as_bytes(),
-            "dropping the copy leaves the stored file"
-        );
+        NO_LINKS.with(|n| n.set(true));
+        let copy = store.with_local_copy(owner, &sha);
+        NO_LINKS.with(|n| n.set(false));
+        let copy = copy?;
+        assert_ne!(copy.path(), plain);
+        // as `seal-legacy` does once the sealed copy is in place: no wait for readers
+        fs::remove_file(&plain)?;
+        assert_eq!(fs::read(copy.path())?, data.as_bytes());
+        let path = copy.path().to_path_buf();
+        drop(copy);
+        assert!(!path.exists());
         Ok(())
     }
 
