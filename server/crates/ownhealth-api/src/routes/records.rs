@@ -524,21 +524,20 @@ async fn list(
     let history = bool_param(&q, "history")?;
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
-    let mut rows = rec::list_records(
-        &mut tx,
-        kind,
-        perm.profile.id,
-        None,
-        perm.may_read_sensitive("read:records"),
-    )
-    .await?;
+    let sensitive = perm.may_read_sensitive("read:records");
+    let mut rows = rec::list_records(&mut tx, kind, perm.profile.id, None, sensitive).await?;
     if history {
         let seen: Vec<String> = rows.iter().map(id_of).collect();
         let mut older = Vec::new();
         for r in &rows {
             let Ok(id) = Uuid::parse_str(&id_of(r)) else { continue };
             for h in rec::record_history(&mut tx, kind, id).await? {
-                if !seen.contains(&id_of(&h)) {
+                // an earlier version keeps its own sensitivity, whatever a correction changed
+                let hidden = !sensitive
+                    && h.get("sensitivity")
+                        .and_then(Value::as_array)
+                        .is_some_and(|s| !s.is_empty());
+                if !hidden && !seen.contains(&id_of(&h)) {
                     older.push(h);
                 }
             }

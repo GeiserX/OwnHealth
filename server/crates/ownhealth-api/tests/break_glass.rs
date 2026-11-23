@@ -2121,3 +2121,39 @@ async fn review_counts_hold_only_what_the_list_shows() -> R {
     assert_eq!(sam.get("/api/me").await?.json["review_open"], 1);
     Ok(())
 }
+
+/// History rows keep the sensitivity check of current rows: a correction that drops a condition's
+/// sensitivity does not hand its sensitive first version to a reader without read:sensitive.
+#[tokio::test]
+async fn record_history_keeps_sensitive_versions_behind_read_sensitive() -> R {
+    let mut b = setup().await?;
+    let made = b
+        .alex
+        .post(
+            "/api/profiles/alex/records/condition",
+            &json!({"text": "Private condition", "onset": "2023-01-01", "sensitivity": ["mental_health"]}),
+        )
+        .await?;
+    assert_eq!(made.status, 201, "{:?}", made.json);
+    let id = made.json["id"].as_str().unwrap_or_default().to_string();
+    let fixed = b
+        .alex
+        .post(
+            &format!("/api/profiles/alex/records/condition/{id}/correct"),
+            &json!({"text": "Plain condition", "onset": "2023-01-01"}),
+        )
+        .await?;
+    assert_eq!(fixed.status, 201, "{:?}", fixed.json);
+    let path = "/api/profiles/alex/records/condition?history=true";
+    let mut sam = b.sam().await?;
+    b.grant_sam("viewer", &["read:summary", "read:records"]).await?;
+    let r = sam.get(path).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_visible(&r.json, "items", "title", "Plain condition", "Private condition", false);
+    b.grant_sam("viewer", &["read:summary", "read:records", "read:sensitive"])
+        .await?;
+    let r = sam.get(path).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_visible(&r.json, "items", "title", "Plain condition", "Private condition", true);
+    Ok(())
+}
