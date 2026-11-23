@@ -393,13 +393,26 @@ async fn a_launch_for_another_household_or_a_profile_the_caller_does_not_manage_
 
 #[tokio::test]
 async fn reconnect_clears_the_reconsent_flag_and_disconnect_revokes_and_removes_the_tokens() -> R {
+    ownhealth_ingest_structured::register();
     let t = setup().await?;
     let mut a = t.browser("alex").await?;
     let id = t.connect(&mut a, t.env.profile("alex")).await?;
-    sqlx::query("update source set reconsent_needed_at = now() where id = $1")
-        .bind(id)
+    // the first pull of the new connection is queued at once, not at the next scheduler pass
+    let polls = format!(
+        "select count(*) from job where kind = 'source.poll' and state = 'queued' and payload->>'source_id' = '{id}'"
+    );
+    assert_eq!(t.count(&polls).await?, 1, "the connect queued no pull");
+    // the refresh was refused: the card says Out with the old failure until a run succeeds
+    sqlx::query("delete from job where kind = 'source.poll'")
         .execute(t.env.pool())
         .await?;
+    sqlx::query(
+        "update source set reconsent_needed_at = now(), consecutive_failures = 1, last_error_at = now(), \
+         last_error = 'JobError: reconsent_needed: the vendor no longer accepts this connection' where id = $1",
+    )
+    .bind(id)
+    .execute(t.env.pool())
+    .await?;
     let r = a.post0(&format!("/api/connectors/{id}/reconnect")).await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
     let url = r.json["authorize_url"].as_str().unwrap_or_default().to_string();
@@ -410,6 +423,12 @@ async fn reconnect_clears_the_reconsent_flag_and_disconnect_revokes_and_removes_
         .fetch_one(t.env.pool())
         .await?;
     assert!(cleared, "reconnect left the reconsent flag");
+    let failures: i32 = sqlx::query_scalar("select consecutive_failures from source where id = $1")
+        .bind(id)
+        .fetch_one(t.env.pool())
+        .await?;
+    assert_eq!(failures, 0, "the old grant's failures stay on the reconnected card");
+    assert_eq!(t.count(&polls).await?, 1, "the reconnect queued no pull");
     assert_eq!(t.count("select count(*) from source").await?, 1);
     assert_eq!(
         t.count("select count(*) from secret where purpose = 'connector_refresh_token'")

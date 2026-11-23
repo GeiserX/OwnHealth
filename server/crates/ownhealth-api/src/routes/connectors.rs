@@ -5,7 +5,7 @@
 //! | Route | What |
 //! |---|---|
 //! | `POST /connectors/launch/{kind}` | `{profile_id, client_id, issuer?, label?}`: `{authorize_url}` and the binder cookie |
-//! | `GET /connectors/callback?state=&code=` | where the vendor sends the browser back: 302 to `/connections?connected=<id>` or `/connections?connector_error=<code>` |
+//! | `GET /connectors/callback?state=&code=` | where the vendor sends the browser back: 302 to `/connections?connected=<id>` or `/connections?connector_error=<code>`; a connect or reconnect of a polled kind queues its first pull |
 //! | `POST /connectors/{id}/reconnect` | `{authorize_url}` for a new grant on the same source; clears the reconsent flag on return |
 //! | `DELETE /connectors/{id}` | revoke at the vendor when it offers it, then delete the tokens and the cursor: `{id, revocation, revoke_page}` |
 //!
@@ -36,6 +36,7 @@ use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::connector_oauth::{self as oauth, OAuthError, Revocation};
 use ownhealth_core::net::Egress;
 use ownhealth_core::secrets::SecretBox;
+use ownhealth_core::sources;
 use ownhealth_core::{Error, Runtime};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -460,6 +461,11 @@ async fn callback(State(rt): State<Runtime>, meta: Meta, Query(q): Params, o: Op
         "connector.connect"
     };
     audit(&mut tx, &p, action, pending.profile_id, id, None, false).await?;
+    // the first pull of a new grant runs now, so the card shows what it brought (a reconnect too:
+    // its failures were the old grant's)
+    if sources::poller_for(&pending.kind).is_some() {
+        sources::enqueue_poll(&mut tx, id).await?;
+    }
     tx.commit().await?;
     oauth::remember(id, &tokens, now);
     Ok(redirect(&state, &format!("/connections?connected={id}")))
