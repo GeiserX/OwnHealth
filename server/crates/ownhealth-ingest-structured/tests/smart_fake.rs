@@ -98,6 +98,8 @@ struct Behaviour {
     next_origin: Option<String>,
     /// Hold the first Procedure page until the test releases it.
     procedure_pause: Option<Arc<ProcedurePause>>,
+    /// This search returns a response larger than the per-page limit.
+    oversized_search: Option<&'static str>,
     /// This type's search links its first page to itself as `next`.
     loop_next: Option<&'static str>,
     /// Every FHIR request is refused for its token, even with the newest one.
@@ -136,6 +138,7 @@ impl Default for Behaviour {
             fail: None,
             next_origin: None,
             procedure_pause: None,
+            oversized_search: None,
             loop_next: None,
             refuse_all: false,
             patient_status: None,
@@ -472,6 +475,14 @@ async fn search(
         && (t == rtype || t == "*")
     {
         return outcome(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), "down");
+    }
+    if b.oversized_search == Some(rtype.as_str()) {
+        return (
+            StatusCode::OK,
+            [("content-type", "application/fhir+json")],
+            vec![b' '; smart::PAGE_BYTES + 1],
+        )
+            .into_response();
     }
     if rtype == "Procedure"
         && page == 1
@@ -1885,6 +1896,33 @@ async fn an_observation_search_keeps_the_category_system_from_the_grant() -> R {
         [format!("Patient/{PATIENT}"), format!("Observation?category={category}"),].into()
     );
     assert_eq!(got.new, 1, "{got:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_oversized_page_is_reported_separately_from_the_run_budget() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/AllergyIntolerance.s patient/Condition.s".into(),
+        oversized_search: Some("AllergyIntolerance"),
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    let got = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(got.problems.len(), 1, "{got:?}");
+    assert_eq!(got.problems[0].code, "page_too_large");
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
+    assert_eq!(w.count("condition").await?, 1, "the next search still ran");
+
+    w.fake.set(|b| b.fail = Some(("Condition", 503)));
+    let error = w
+        .day(source, t0() + Duration::minutes(2))
+        .await?
+        .expect_err("no search answered with a usable page");
+    assert!(error.contains("page_too_large: AllergyIntolerance: "), "{error}");
     Ok(())
 }
 

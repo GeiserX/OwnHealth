@@ -411,7 +411,7 @@ impl Reader {
                         return Err(self.budget_problem());
                     }
                     return Err(Miss::Search(
-                        "too_large",
+                        "page_too_large",
                         Box::new(move |t| words::page_too_large(t, limit)),
                     ));
                 }
@@ -474,7 +474,7 @@ fn tidy(problems: Vec<RunProblem>) -> Vec<RunProblem> {
     }
     let rank = |code: &str| match code {
         "search_failed" | "unreachable" | "not_fhir" => 0,
-        "too_large" | "too_many_pages" | "repeated_page" | "too_many_medications" => 1,
+        "too_large" | "page_too_large" | "too_many_pages" | "repeated_page" | "too_many_medications" => 1,
         _ => 2,
     };
     out.sort_by_key(|(p, _)| rank(&p.code));
@@ -905,8 +905,9 @@ pub async fn pull_with(
         }
     }
     if g.answered == 0 {
-        if let Some(problem) = g.problems.iter().find(|p| p.code == "too_large") {
-            return Err(JobError::retry(format!("too_large: {}", problem.message)));
+        let limit_code = if r.budget_hit { "too_large" } else { "page_too_large" };
+        if let Some(problem) = g.problems.iter().find(|p| p.code == limit_code) {
+            return Err(JobError::retry(format!("{}: {}", problem.code, problem.message)));
         }
         return Err(JobError::retry(STOP_NO_ANSWER));
     }

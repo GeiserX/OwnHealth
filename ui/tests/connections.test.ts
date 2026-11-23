@@ -166,6 +166,16 @@ const sayIn = (lang: 'en' | 'es') => (key: string, vars: Record<string, string |
 	(dict[lang] as Record<string, string>)[key].replace(/\{(\w+)\}/g, (_, v) => (v in vars ? String(vars[v]) : `{${v}}`));
 const hasKey = (k: string) => k in dict.en;
 
+test('an oversized page has its own words in English and Spanish', () => {
+	const page = 'page_too_large: Observation: the answer exceeded the 33554432-byte limit for one page';
+	assert.equal(runWords(page, hasKey, sayIn('en')), 'Observation: the server sent a page larger than the 33554432-byte limit.');
+	assert.equal(runWords(page, hasKey, sayIn('es')), 'Observation: el servidor envió una página que superó el límite de 33554432 bytes.');
+	assert.equal(
+		runWords('too_large: Observation: the answers of this run passed 268435456 bytes, so the rest was not read', hasKey, sayIn('en')),
+		'Observation: the answers of this run passed the size limit, so the rest was not read.'
+	);
+});
+
 test('a poller stop or problem reads in es and en, with its FHIR type, status and count', () => {
 	const es = sayIn('es');
 	assert.equal(
