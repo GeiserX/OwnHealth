@@ -452,6 +452,66 @@ async fn a_single_file_upload_is_named_after_the_file() -> R {
 }
 
 #[tokio::test]
+async fn a_damaged_zip_name_selects_zip_validation() -> R {
+    let a = imaging_app().await?;
+    let mut zip = zip_of(&[("DICOM/IM1", b"one")])?;
+    zip[0] ^= 0xff;
+    let (status, body) = post(
+        &a,
+        "alex",
+        "/imaging/import",
+        &[("profile", "alex")],
+        &[("CD.ZIP".into(), zip)],
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["detail"]["code"], "invalid_zip");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_zip_mime_type_selects_zip_validation_without_a_zip_name() -> R {
+    let a = imaging_app().await?;
+    let (mime, mut body) = form(&[("profile", "alex")], &[("disc".into(), b"damaged archive".to_vec())]);
+    let binary = b"application/octet-stream";
+    let start = body
+        .windows(binary.len())
+        .position(|w| w == binary)
+        .ok_or_else(|| anyhow::anyhow!("missing multipart content type"))?;
+    body.splice(
+        start..start + binary.len(),
+        b"application/zip; charset=binary".iter().copied(),
+    );
+    let req = Request::post("/imaging/import")
+        .header(header::COOKIE, a.cookie("alex").await?)
+        .header(header::CONTENT_TYPE, mime)
+        .body(Body::from(body))?;
+    let (status, body) = a.send(req).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["detail"]["code"], "invalid_zip");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_empty_zip_is_stored_without_wrapping_it() -> R {
+    let a = imaging_app().await?;
+    let zip = zip_of(&[])?;
+    let (status, body) = post(
+        &a,
+        "alex",
+        "/imaging/import",
+        &[("profile", "alex")],
+        &[("disc".into(), zip.clone())],
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["files"], 0);
+    let rows = imports(&a, a.family.profile("alex")).await?;
+    assert_eq!(rows[0].1, Sha256::digest(&zip).to_vec());
+    Ok(())
+}
+
+#[tokio::test]
 async fn hidden_imaging_items_do_not_count_as_withheld() -> R {
     let a = imaging_app().await?;
     item(&a, "carmen", "imaging_study", Some(json!({})), json!({})).await?;

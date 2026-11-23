@@ -22,7 +22,6 @@ use axum::routing::post;
 use axum::{Json, Router};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::blobs::BlobOwner;
-use ownhealth_core::documents::is_zip;
 use ownhealth_core::{Error, Runtime};
 use ownhealth_imaging::import::MAX_ENTRIES;
 use ownhealth_imaging::upload::{self, MAX_FOLDER_FILES, ZipRefused, zip_files, zip_folder};
@@ -49,6 +48,7 @@ pub fn router() -> Router<Runtime> {
 struct Spool {
     name: String,
     path: PathBuf,
+    zip_intent: bool,
 }
 
 impl Drop for Spool {
@@ -123,11 +123,21 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
                         return Err(too_many_files());
                     }
                     let name = field.file_name().unwrap_or_default().to_string();
+                    let zip_intent = name
+                        .rsplit_once('.')
+                        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("zip"))
+                        || field.content_type().is_some_and(|mime| {
+                            matches!(
+                                mime.split(';').next().unwrap_or_default().trim(),
+                                "application/zip" | "application/x-zip" | "application/x-zip-compressed"
+                            )
+                        });
                     let path = rt.blobs.staging_path(&upload::spool_name(false)).map_err(Error::from)?;
                     // the Spool owns the file before it exists, so a failed read still removes it
                     files.push(Spool {
                         name,
                         path: path.clone(),
+                        zip_intent,
                     });
                     spool(&mut field, &path).await?;
                 }
@@ -164,31 +174,27 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     let (profile, profile_id) = profile.ok_or_else(bad_body)?;
 
     let one_zip = match files.as_slice() {
+        [only] if only.zip_intent => true,
         [only] => {
             let mut head = [0u8; 4];
-            let n = tokio::fs::File::open(&only.path)
+            let result = tokio::fs::File::open(&only.path)
                 .await
                 .map_err(Error::from)?
-                .read(&mut head)
-                .await
-                .map_err(Error::from)?;
-            is_zip(&head[..n])
+                .read_exact(&mut head)
+                .await;
+            match result {
+                Ok(_) => matches!(&head, b"PK\x03\x04" | b"PK\x05\x06" | b"PK\x07\x08" | b"PK\x06\x06"),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => false,
+                Err(e) => return Err(Error::from(e).into()),
+            }
         }
         _ => false,
     };
     // One zip is kept as it came; a folder becomes one zip of its files.
-    let parts: Vec<(String, PathBuf)> = files.iter().map(|f| (f.name.clone(), f.path.clone())).collect();
-    let folder = (!one_zip)
+    let folder_path = (!one_zip)
         .then(|| rt.blobs.staging_path(&upload::spool_name(true)))
         .transpose()
-        .map_err(Error::from)?
-        .map(|path| Spool {
-            name: String::new(),
-            path,
-        });
-    let zip_path = folder
-        .as_ref()
-        .map_or_else(|| files[0].path.clone(), |f| f.path.clone());
+        .map_err(Error::from)?;
     let filename = if one_zip {
         files[0].name.rsplit(['/', '\\']).next().unwrap_or_default().to_string()
     } else {
@@ -196,8 +202,14 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     };
     let (blobs, owner) = (rt.blobs.clone(), BlobOwner::Profile(profile_id));
     let (count, sha256, size) = tokio::task::spawn_blocking(move || -> Result<_, Fail> {
-        let count = if one_zip {
-            zip_files(&zip_path).map_err(|refused| match refused {
+        // The blocking task owns every input and the generated ZIP, even if the request ends.
+        let (count, zip) = if let Some(path) = folder_path {
+            let parts: Vec<_> = files.iter().map(|f| (f.name.clone(), f.path.clone())).collect();
+            zip_folder(&parts, &path).map_err(Error::from)?;
+            (parts.len(), Spool { name: String::new(), path, zip_intent: false })
+        } else {
+            let zip = files.into_iter().next().ok_or_else(bad_body)?;
+            let count = zip_files(&zip.path).map_err(|refused| match refused {
                 ZipRefused::Invalid(why) => Fail::Api(ApiError::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "invalid_zip",
@@ -208,18 +220,14 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
                     "too_many_files",
                     format!("This zip holds {n} files; an import reads at most {MAX_ENTRIES}. Split the disc into smaller zips."),
                 )),
-            })?
-        } else {
-            zip_folder(&parts, &zip_path).map_err(Error::from)?;
-            parts.len()
+            })?;
+            (count, zip)
         };
-        let (sha256, size) = blobs.put_file(owner, &zip_path).map_err(Error::from)?;
+        let (sha256, size) = blobs.put_file(owner, &zip.path).map_err(Error::from)?;
         Ok((count, sha256, size))
     })
     .await
     .map_err(|e| Error::Other(e.into()))??;
-    drop(folder);
-    drop(files);
     // The same check again in the transaction that records the upload.
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &profile, None, Some("import")).await?;

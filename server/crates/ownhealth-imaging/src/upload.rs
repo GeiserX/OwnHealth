@@ -1,7 +1,7 @@
 //! What `POST /api/imaging/import` keeps: one zip per upload, stored for the profile before anything
 //! reads it, and its `imaging_import` row and job.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -56,16 +56,18 @@ pub fn entry_name(name: &str) -> String {
 /// DICOM images mostly come compressed already, and a CD of thousands of files zips in seconds. Two
 /// parts with one name keep both (`name~2`).
 pub fn zip_folder(files: &[(String, PathBuf)], out: &Path) -> io::Result<()> {
-    let mut zip = zip::ZipWriter::new(std::fs::File::create(out)?);
+    let dir = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    // A private, create-new spool. Publish the path only after the archive is complete.
+    let mut spool = tempfile::Builder::new().prefix("upload-imaging-").tempfile_in(dir)?;
+    let mut zip = zip::ZipWriter::new(spool.as_file_mut());
     let mut seen = BTreeSet::new();
+    let mut next_suffix = BTreeMap::new();
     for (name, path) in files {
         let base = entry_name(name);
-        let mut name = base.clone();
-        let mut n = 1;
-        while !seen.insert(name.clone()) {
-            n += 1;
-            name = format!("{base}~{n}");
-        }
+        let name = allocate_name(base, &mut next_suffix, |name| seen.insert(name));
         let mut file = std::fs::File::open(path)?;
         let size = file.metadata()?.len();
         let opts = SimpleFileOptions::default()
@@ -75,7 +77,23 @@ pub fn zip_folder(files: &[(String, PathBuf)], out: &Path) -> io::Result<()> {
         io::copy(&mut file, &mut zip)?;
     }
     zip.finish().map_err(io::Error::other)?;
+    spool.persist_noclobber(out)?;
     Ok(())
+}
+
+fn allocate_name(
+    base: String,
+    next_suffix: &mut BTreeMap<String, usize>,
+    mut claim: impl FnMut(String) -> bool,
+) -> String {
+    let n = next_suffix.entry(base.clone()).or_insert(1);
+    loop {
+        let name = if *n == 1 { base.clone() } else { format!("{base}~{n}") };
+        *n += 1;
+        if claim(name.clone()) {
+            return name;
+        }
+    }
 }
 
 /// Why an uploaded zip is refused.
@@ -211,6 +229,72 @@ mod tests {
         io::Read::read_to_string(&mut zip.by_name("CD/IM1~2").map_err(io::Error::other)?, &mut second)?;
         assert_eq!(second, "second");
         assert_eq!(zip_files(&out), Ok(2));
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_zip_write_leaves_no_plaintext_archive() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("input");
+        let missing = dir.path().join("missing");
+        let out = dir.path().join("cd.zip");
+        std::fs::write(&input, b"synthetic file")?;
+        assert!(zip_folder(&[("IM1".into(), input), ("IM2".into(), missing)], &out).is_err());
+        assert!(!out.exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_generated_zip_is_private() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()?;
+        let out = dir.path().join("cd.zip");
+        zip_folder(&[], &out)?;
+        assert_eq!(std::fs::metadata(&out)?.permissions().mode() & 0o777, 0o600);
+        Ok(())
+    }
+
+    #[test]
+    fn the_generated_zip_does_not_overwrite_a_file() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let out = dir.path().join("cd.zip");
+        std::fs::write(&out, b"existing file")?;
+        assert_eq!(zip_folder(&[], &out).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&out)?, b"existing file");
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_name_allocation_checks_linear_candidates() {
+        let mut seen = BTreeSet::new();
+        let mut attempts = 0;
+        let mut next_suffix = BTreeMap::new();
+        for _ in 0..256 {
+            allocate_name("IM".into(), &mut next_suffix, |name| {
+                attempts += 1;
+                seen.insert(name)
+            });
+        }
+        assert_eq!(seen.len(), 256);
+        assert!(attempts <= 512, "checked {attempts} names for 256 parts");
+    }
+
+    #[test]
+    fn duplicate_names_skip_occupied_suffixes() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("input");
+        let out = dir.path().join("cd.zip");
+        std::fs::write(&input, b"one")?;
+        let parts = ["IM", "IM~2", "IM", "IM", "IM~3", "IM"].map(|name| (name.to_string(), input.clone()));
+        zip_folder(&parts, &out)?;
+        let zip = zip::ZipArchive::new(std::fs::File::open(&out)?).map_err(io::Error::other)?;
+        let names: Vec<_> = zip
+            .file_names()
+            .collect::<std::result::Result<_, _>>()
+            .map_err(io::Error::other)?;
+        assert_eq!(names, ["IM", "IM~2", "IM~3", "IM~4", "IM~3~2", "IM~5"]);
         Ok(())
     }
 }
