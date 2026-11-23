@@ -1929,3 +1929,142 @@ async fn document_search_records_emergency_text_access() -> R {
     );
     assert_use_and_fail_closed(&b, &mut sam, id, path).await
 }
+
+async fn seed_labs(b: &Bg) -> R {
+    let mut tx = b.env.pool().begin().await?;
+    let src = SrcRef::New(SrcIn::manual(Some(b.env.user("alex"))));
+    commit_observation(
+        &mut tx,
+        &lab(b.alex_id(), "97", false)?,
+        &src,
+        CommitOptions::new("person"),
+    )
+    .await?;
+    let mut sensitive = lab(b.alex_id(), "111", true)?;
+    sensitive.effective_at += Duration::days(1);
+    commit_observation(&mut tx, &sensitive, &src, CommitOptions::new("person")).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn trend_keeps_sensitive_lab_points_on_their_own_scope_source() -> R {
+    let mut b = setup().await?;
+    seed_labs(&b).await?;
+    assert_scope_sources(
+        &mut b,
+        "read:labs",
+        &["read:sensitive"],
+        &[(
+            "/api/profiles/alex/trend?code=ldl_c",
+            "points",
+            "printed",
+            "97 mg/dL",
+            "111 mg/dL",
+        )],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn timeline_keeps_sensitive_lab_draws_on_their_own_scope_source() -> R {
+    let mut b = setup().await?;
+    seed_labs(&b).await?;
+    assert_scope_sources(
+        &mut b,
+        "read:labs",
+        &["read:sensitive"],
+        &[(
+            "/api/profiles/alex/timeline?types=lab",
+            "events",
+            "date",
+            "2025-09-14",
+            "2025-09-15",
+        )],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn sensitive_document_content_needs_both_scopes_on_the_same_grant() -> R {
+    let mut b = setup().await?;
+    let doc = lab_document(&b).await?;
+    document_page(&b, doc).await?;
+    let mut tx = b.env.pool().begin().await?;
+    let mut observation = lab(b.alex_id(), "111", true)?;
+    observation.document_id = Some(doc);
+    let src = SrcRef::New(SrcIn::manual(Some(b.env.user("alex"))));
+    commit_observation(&mut tx, &observation, &src, CommitOptions::new("person")).await?;
+    tx.commit().await?;
+    b.grant_sam("viewer", &["read:sensitive", "read:documents_text"])
+        .await?;
+    let mut sam = b.sam().await?;
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
+    assert_eq!(sam.get(&format!("/api/documents/{doc}")).await?.status, 200);
+    let content = [
+        format!("/api/documents/{doc}/file"),
+        format!("/api/documents/{doc}/pages/1.png"),
+        format!("/api/documents/{doc}/pages/1/words"),
+    ];
+    for path in &content {
+        let r = sam.get(path).await?;
+        assert_eq!(
+            (r.status.as_u16(), r.code()),
+            (403, "insufficient_scope"),
+            "{path}: {:?}",
+            r.json
+        );
+    }
+    b.grant_sam("viewer", &["read:labs", "read:sensitive", "read:documents_text"])
+        .await?;
+    for path in &content {
+        let r = sam.get(path).await?;
+        assert_eq!(r.status, 200, "{path}: {:?}", r.json);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn bulk_review_skips_items_outside_the_ordinary_category_scope() -> R {
+    let mut b = setup().await?;
+    let doc = lab_document(&b).await?;
+    let lab_row = candidate(&b, Some(doc)).await?;
+    let records_row = {
+        let mut conn = b.env.pool().acquire().await?;
+        create_item(
+            &mut conn,
+            &ReviewItemIn {
+                household_id: Some(b.env.fam().household_id),
+                profile_id: Some(b.alex_id()),
+                document_id: Some(doc),
+                kind: "candidate_row".into(),
+                payload: json!({
+                    "record": {"kind": "condition", "text": "Record from the report"},
+                    "observation": lab(b.alex_id(), "98", false)?,
+                    "src": {"kind": "manual", "profile_id": b.alex_id()},
+                }),
+                ..Default::default()
+            },
+        )
+        .await?
+    };
+    b.grant_sam("guardian", &["read:labs"]).await?;
+    let mut sam = b.sam().await?;
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
+    let path = "/api/review/bulk-accept";
+    let body = json!({"document_id": doc});
+    let r = sam.post(path, &body).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["accepted"], json!([lab_row]));
+    assert_eq!(
+        b.text("select status from review_item where id = $1", records_row)
+            .await?,
+        "open"
+    );
+
+    b.grant_sam("guardian", &["read:labs", "read:records"]).await?;
+    let r = sam.post(path, &body).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["accepted"], json!([records_row]));
+    Ok(())
+}
