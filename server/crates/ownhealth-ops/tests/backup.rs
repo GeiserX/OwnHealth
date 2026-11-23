@@ -1308,7 +1308,10 @@ async fn a_keyed_dump_from_before_the_keyring_is_refused_before_loading() -> R {
     ] {
         let err = err_text(result);
         assert!(err.contains("keyed backup from before the keyring"), "{err}");
-        assert!(err.contains("build that wrote it") && err.contains("take a new backup"), "{err}");
+        assert!(
+            err.contains("build that wrote it") && err.contains("take a new backup"),
+            "{err}"
+        );
     }
     assert_eq!(public_tables(&db).await?, 0);
     Ok(())
@@ -1337,7 +1340,10 @@ async fn an_unscoped_tombstone_refuses_new_sealed_files_after_a_keyless_restore(
 
     let store = BlobStore::for_settings(&settings)?;
     let written = store.put_bytes(BlobOwner::Profile(alex), b"LabNorte report after restoring 0.4.0");
-    assert!(matches!(written, Err(BlobError::Key(ref e)) if e.0 == PROFILE_DELETED), "{written:?}");
+    assert!(
+        matches!(written, Err(BlobError::Key(ref e)) if e.0 == PROFILE_DELETED),
+        "{written:?}"
+    );
     let exists: bool = sqlx::query_scalar("select exists (select 1 from profile_key where profile_id = $1)")
         .bind(alex)
         .fetch_one(&db.pool)
@@ -1516,66 +1522,6 @@ async fn a_lost_file_of_an_upgraded_profile_with_no_key_yet_is_still_required() 
     Ok(())
 }
 
-/// Replace the dump of `archive` with a FIFO, so a restore or verify-restore that reaches pg_restore
-/// waits there until the test opens the other end.
-#[cfg(unix)]
-fn dump_through_fifo(archive: &Path) -> R {
-    let dump = archive.join("db.dump");
-    fs::remove_file(&dump)?;
-    anyhow::ensure!(
-        std::process::Command::new("mkfifo")
-            .args(["-m", "600"])
-            .arg(&dump)
-            .status()?
-            .success()
-    );
-    Ok(())
-}
-
-/// On its own thread: wait until pg_restore opens the FIFO dump of `archive`, and say whether the
-/// keyring lock in `keyring` is free at that moment. It writes no dump (pg_restore needs a seekable
-/// one), so that pg_restore then fails.
-#[cfg(unix)]
-fn lock_free_at_pg_restore(keyring: PathBuf, archive: PathBuf) -> tokio::task::JoinHandle<anyhow::Result<bool>> {
-    tokio::task::spawn_blocking(move || {
-        let fifo = fs::OpenOptions::new().write(true).open(archive.join("db.dump"))?;
-        let lock = fs::File::options().write(true).open(keyring.join(".keyring.lock"))?;
-        let free = lock.try_lock().is_ok();
-        drop(lock);
-        drop(fifo);
-        Ok(free)
-    })
-}
-
-/// verify-restore loads a scratch database it drops afterwards, so it holds the keyring lock only
-/// while it reads the keyring: a profile delete on the live install never waits for its pg_restore. A
-/// restore holds the lock until it has installed the keys it read.
-#[cfg(unix)]
-#[tokio::test]
-async fn verify_restore_frees_the_keyring_during_pg_restore_and_restore_does_not() -> R {
-    let l = live().await?;
-    let keyring = l.settings.keyring_path();
-    dump_through_fifo(&l.archive)?;
-
-    let probe = lock_free_at_pg_restore(keyring.clone(), l.archive.clone());
-    let err = err_text(ownhealth_ops::verify_restore(&l.settings, &l.archive).await);
-    assert!(
-        probe.await??,
-        "verify-restore held the keyring lock while pg_restore ran"
-    );
-    assert!(err.contains("pg_restore failed"), "{err}");
-
-    let (_db, fresh) = fresh(&l).await?;
-    let probe = lock_free_at_pg_restore(keyring, l.archive.clone());
-    let err = err_text(ownhealth_ops::restore(&fresh, &l.archive).await);
-    assert!(
-        !probe.await??,
-        "restore let go of the keyring lock before it installed the keys"
-    );
-    assert!(err.contains("pg_restore failed"), "{err}");
-    Ok(())
-}
-
 /// The keyring passes the checks at the start, but its rewrite after pg_dump fails (the folder is
 /// read-only now): the dump is never published, so the destination stays empty for the next attempt.
 #[cfg(unix)]
@@ -1650,7 +1596,9 @@ async fn a_restore_gives_a_profile_the_archive_holds_no_key_for_the_keyrings_key
     assert!(err_text(ownhealth_ops::verify_restore(&s2, &b).await).contains("damaged key"));
     // A key for a profile outside this archive is irrelevant when restoring it.
     let mut with_unrelated_key = current;
-    with_unrelated_key.profiles.insert(Uuid::new_v4(), damaged.profiles[&alex].clone());
+    with_unrelated_key
+        .profiles
+        .insert(Uuid::new_v4(), damaged.profiles[&alex].clone());
     keyfile::write(&s1.keyring_path(), &with_unrelated_key)?;
 
     let restored = ownhealth_ops::restore(&s2, &b).await?;

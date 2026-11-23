@@ -888,6 +888,10 @@ fn read_manifest(archive: &Path) -> Result<Value> {
 
 async fn pg_restore(url: &str, archive: &Path) -> Result<()> {
     let dump = fs::File::open(archive.join("db.dump"))?;
+    #[cfg(test)]
+    tests::OBSERVE_PG_RESTORE
+        .try_with(|observe| observe())
+        .unwrap_or(Ok(()))?;
     let mut cmd = pg_command("pg_restore", restore_args(url))?;
     let done = cmd
         .stdin(dump)
@@ -1155,7 +1159,13 @@ fn ring_keys(
     Ok(Some(out))
 }
 
-fn authenticate_ring_key(path: &Path, kek: Option<&Kek>, id: Uuid, fingerprint: &[u8], wrapped: &[u8]) -> Result<keys::Dek> {
+fn authenticate_ring_key(
+    path: &Path,
+    kek: Option<&Kek>,
+    id: Uuid,
+    fingerprint: &[u8],
+    wrapped: &[u8],
+) -> Result<keys::Dek> {
     kek.and_then(|k| k.unwrap(id, fingerprint, wrapped).ok())
         .ok_or_else(|| {
             ops_error(format!(
@@ -1607,6 +1617,51 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    tokio::task_local! {
+        pub(super) static OBSERVE_PG_RESTORE: Box<dyn Fn() -> Result<()> + Send>;
+    }
+
+    #[tokio::test]
+    async fn verify_restore_frees_the_keyring_during_pg_restore_and_restore_does_not() -> anyhow::Result<()> {
+        use ownhealth_core::testing::TestDb;
+        use std::fs::TryLockError;
+
+        crate::register();
+        let db = TestDb::empty().await?;
+        let dir = tempfile::tempdir()?;
+        let settings = db.settings(dir.path())?;
+        let archive = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/upgrade/0.4.0");
+        let lock_file = settings.keyring_path().join(".keyring.lock");
+        let (observed, mut checks) = tokio::sync::mpsc::channel(3);
+        // Observe the lock in this process as pg_restore opens the dump. If restore returns
+        // early there is no probe to cancel or join.
+        let observe = Box::new(move || {
+            let lock = fs::File::options().write(true).open(&lock_file)?;
+            let free = match lock.try_lock() {
+                Ok(()) => true,
+                Err(TryLockError::WouldBlock) => false,
+                Err(TryLockError::Error(error)) => return Err(error.into()),
+            };
+            observed
+                .try_send(free)
+                .expect("the test makes at most three restore calls");
+            Ok(())
+        });
+        OBSERVE_PG_RESTORE
+            .scope(observe, async {
+                assert_eq!(verify_restore(&settings, &archive).await?["ok"], true);
+                assert_eq!(checks.try_recv(), Ok(true), "verify-restore held the keyring lock");
+                assert_eq!(restore(&settings, &archive).await?["ok"], true);
+                assert_eq!(checks.try_recv(), Ok(false), "restore released the keyring lock");
+                let early = restore(&settings, &archive).await.expect_err("target now has tables");
+                assert!(early.to_string().contains("target database is not empty"), "{early}");
+                assert_eq!(checks.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
+                Ok::<_, Error>(())
+            })
+            .await?;
+        Ok(())
+    }
 
     /// While verify-restore holds its scratch database, a plain role of the same server cannot open
     /// it, nor make temporary tables there.
