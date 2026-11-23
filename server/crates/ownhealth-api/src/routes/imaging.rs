@@ -9,8 +9,9 @@
 //! is stored for the profile before anything reads it and recorded as an `imaging_import`; the
 //! `import.dicom` job (ownhealth-imaging) then sends its studies to Orthanc and records each one. The
 //! answer is `{import_id, duplicate, job_id, files}`; `GET /api/jobs?ids=` follows the job. The same
-//! zip again is the same import, and its job sends nothing new. It needs the `import` action on the
-//! profile and imaging on (503 `imaging_off`). A zip of more entries than the import reads
+//! zip again is the same import, and its job sends nothing new. Send `profile` once, before any
+//! files. The app checks the `import` action on that profile before spooling any files. Imaging
+//! must be on (503 `imaging_off`). A zip of more entries than the import reads
 //! ([`MAX_ENTRIES`]) answers 413 `too_many_files` before anything is kept.
 
 use std::path::PathBuf;
@@ -102,7 +103,7 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
         )));
     }
     let principal = &caller.0;
-    let mut profile: Option<String> = None;
+    let mut profile = None;
     let mut files: Vec<Spool> = Vec::new();
     if let Ok(mut form) = Multipart::from_request(req, &rt).await {
         let mut fields = 0usize;
@@ -111,6 +112,13 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
             let field_name = field.name().map(str::to_string);
             match field_name.as_deref() {
                 Some("files") if is_file => {
+                    if profile.is_none() {
+                        return Err(Fail::Api(ApiError::new(
+                            StatusCode::BAD_REQUEST,
+                            "bad_request",
+                            "Send the profile field before the files.",
+                        )));
+                    }
                     if files.len() >= MAX_FOLDER_FILES {
                         return Err(too_many_files());
                     }
@@ -130,9 +138,16 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
                         return Err(bad_body());
                     }
                     let is_profile = name == Some("profile");
+                    if is_profile && profile.is_some() {
+                        return Err(bad_body());
+                    }
                     let bytes = read_field(&mut field).await?;
                     if is_profile {
-                        profile = Some(String::from_utf8(bytes).map_err(|_| bad_body())?);
+                        let slug = String::from_utf8(bytes).map_err(|_| bad_body())?;
+                        // Release the connection before reading or zipping any files.
+                        let mut conn = rt.pool.acquire().await?;
+                        let perm = caller.require(&mut conn, &slug, None, Some("import")).await?;
+                        profile = Some((slug, perm.profile.id));
                     }
                 }
             }
@@ -146,18 +161,8 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
         e.missing(vec![json!("body"), json!("files")], Value::Null);
     }
     e.done()?;
-    let profile = profile.unwrap_or_default();
+    let (profile, profile_id) = profile.ok_or_else(bad_body)?;
 
-    // A short check first: no connection or transaction is held while a CD of hundreds of megabytes
-    // is zipped and stored.
-    let profile_id = {
-        let mut conn = rt.pool.acquire().await?;
-        caller
-            .require(&mut conn, &profile, None, Some("import"))
-            .await?
-            .profile
-            .id
-    };
     let one_zip = match files.as_slice() {
         [only] => {
             let mut head = [0u8; 4];

@@ -4,9 +4,15 @@
 
 mod lane_i;
 
+use std::convert::Infallible;
 use std::io::{Read, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
+use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
+use futures::{StreamExt, stream};
 use http::{Request, StatusCode, header};
 use lane_i::{App, R, app, item};
 use ownhealth_core::Runtime;
@@ -227,6 +233,68 @@ async fn a_zip_that_does_not_open_is_refused() -> R {
     assert_eq!(v["detail"]["code"], "invalid_zip", "{v}");
     assert!(imports(&a, a.family.profile("alex")).await?.is_empty());
     Ok(())
+}
+
+async fn a_refused_upload_does_not_read_the_file(who: &str, profile_first: bool, expected: StatusCode) -> R {
+    let a = imaging_app().await?;
+    let boundary = "ownhealth-imaging-test";
+    let profile = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\nalex\r\n");
+    let file_header =
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"CD/IM1\"\r\n\r\n");
+    let mut prefix = String::new();
+    if profile_first {
+        prefix.push_str(&profile);
+    }
+    prefix.push_str(&file_header);
+    let suffix = format!(
+        "synthetic image\r\n{}--{boundary}--\r\n",
+        if profile_first { "" } else { &profile }
+    );
+
+    let read_file = Arc::new(AtomicBool::new(false));
+    let read_file_in_stream = Arc::clone(&read_file);
+    let staging = a.rt.settings.blobs_path().join("tmp");
+    let staged_for_stream = staging.clone();
+    let mut suffix = Some(Bytes::from(suffix));
+    // Multer can buffer ready chunks while it reads the headers. Make the file available once
+    // the route opens a spool, as if the client is still sending the file.
+    let file = stream::poll_fn(move |_| {
+        if suffix.is_none() {
+            return Poll::Ready(None);
+        }
+        if !std::fs::read_dir(&staged_for_stream).is_ok_and(|mut entries| entries.next().is_some()) {
+            return Poll::Pending;
+        }
+        read_file_in_stream.store(true, Ordering::Relaxed);
+        Poll::Ready(suffix.take().map(Ok::<_, Infallible>))
+    });
+    let body = stream::iter([Ok(Bytes::from(prefix))]).chain(file);
+    let req = Request::post("/imaging/import")
+        .header(header::COOKIE, a.cookie(who).await?)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from_stream(body))?;
+    let (status, response) = tokio::time::timeout(Duration::from_secs(10), a.send(req)).await??;
+    assert_eq!(status, expected, "{response}");
+    assert!(
+        !read_file.load(Ordering::Relaxed),
+        "the upload opened a spool and read the file"
+    );
+    assert!(std::fs::read_dir(staging)?.next().is_none());
+    assert_eq!(a.count("select count(*) from imaging_import").await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn files_before_profile_are_refused_before_the_file_body_is_read() -> R {
+    a_refused_upload_does_not_read_the_file("alex", false, StatusCode::BAD_REQUEST).await
+}
+
+#[tokio::test]
+async fn a_caller_without_import_is_refused_before_the_file_body_is_read() -> R {
+    a_refused_upload_does_not_read_the_file("sam", true, StatusCode::FORBIDDEN).await
 }
 
 #[tokio::test]
