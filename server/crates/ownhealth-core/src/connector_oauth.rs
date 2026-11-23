@@ -798,9 +798,8 @@ fn after(now: DateTime<Utc>, secs: Option<i64>) -> Option<DateTime<Utc>> {
 }
 
 /// Store a finished launch, in the caller's transaction: a new source, or (a reconnect) the same
-/// source with the new grant, `reconsent_needed_at` and the failure count cleared (the failures were
-/// the old grant's) and switched back on. Returns the source
-/// id. Call [`remember`] after the commit to keep the access token for the first poll.
+/// source with a new grant identity and the old grant's errors cleared. The source is switched
+/// back on. Returns its id. Call [`remember`] after commit to keep the access token for the first poll.
 pub async fn save_connection(
     conn: &mut PgConnection,
     sb: &SecretBox,
@@ -838,8 +837,8 @@ pub async fn save_connection(
         };
         let id: Uuid = sqlx::query_scalar(
             "insert into source (household_id, profile_id, kind, label, config, secret_id, poll_seconds, created_by, \
-             connector_client_id, access_expires_at, grant_expires_at) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, \
-             $10, $11) returning id",
+             connector_client_id, access_expires_at, grant_expires_at, oauth_grant_id) \
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, gen_random_uuid()) returning id",
         )
         .bind(client.household_id)
         .bind(p.profile_id)
@@ -903,7 +902,8 @@ pub async fn save_connection(
     };
     sqlx::query(
         "update source set config = $2, secret_id = $3, enabled = true, reconsent_needed_at = null, \
-         access_expires_at = $4, grant_expires_at = $5, consecutive_failures = 0 where id = $1",
+         access_expires_at = $4, grant_expires_at = $5, oauth_grant_id = gen_random_uuid(), \
+         last_error_at = null, last_error = null, consecutive_failures = 0 where id = $1",
     )
     .bind(source_id)
     .bind(&config)

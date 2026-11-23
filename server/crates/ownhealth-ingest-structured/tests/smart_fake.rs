@@ -674,6 +674,10 @@ impl World {
 
     /// [`World::launch`] for another profile of the family, started by Alex.
     async fn launch_for(&self, slug: &str) -> anyhow::Result<oauth::Begun> {
+        self.launch_for_source(slug, None).await
+    }
+
+    async fn launch_for_source(&self, slug: &str, source_id: Option<Uuid>) -> anyhow::Result<oauth::Begun> {
         let spec = oauth::kind_spec("smart").expect("smart is served");
         let endpoints = oauth::resolve(&spec, &self.fake.issuer(), &egress()).await?;
         let mut c = self.db.pool.acquire().await?;
@@ -685,7 +689,7 @@ impl World {
                 endpoints: &endpoints,
                 profile_id: self.fam.profile(slug),
                 label: "Hospital LabNorte",
-                source_id: None,
+                source_id,
                 user_id: Some(self.fam.user(if slug == "sam" { "sam" } else { "alex" })),
                 session_id: None,
                 binder: BINDER,
@@ -702,6 +706,10 @@ impl World {
     /// [`World::connect`] of the portal account the fake serves (Sam's) to another profile.
     async fn connect_for(&self, slug: &str, now: DateTime<Utc>) -> anyhow::Result<Uuid> {
         let begun = self.launch_for(slug).await?;
+        self.save_consent(begun, now).await
+    }
+
+    async fn save_consent(&self, begun: oauth::Begun, now: DateTime<Utc>) -> anyhow::Result<Uuid> {
         let code = self.fake.consent(&begun.url);
         let mut c = self.db.pool.acquire().await?;
         let pending = oauth::take_state(&mut c, &begun.state, BINDER).await?;
@@ -2268,5 +2276,53 @@ async fn future_pulls_use_the_scope_from_refresh_even_when_the_next_refresh_omit
         w.searched_since(before).await,
         [format!("Patient/{PATIENT}"), "Condition".into()].into()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_old_poll_finishes_in_history_without_changing_the_new_grants_health() -> R {
+    let w = world(Behaviour::default()).await?;
+    let source = w.connect(t0()).await?;
+    let (old_run, old_success) = {
+        let mut c = w.db.pool.acquire().await?;
+        (
+            sources::begin_run(&mut c, source, "poll", None).await?,
+            sources::begin_run(&mut c, source, "poll", None).await?,
+        )
+    };
+    let reconnect = w.launch_for_source("sam", Some(source)).await?;
+    assert_eq!(w.save_consent(reconnect, t0() + Duration::minutes(1)).await?, source);
+
+    let mut c = w.db.pool.acquire().await?;
+    sources::finish_run(&mut c, old_run, Err("old grant failed")).await?;
+    let history = sources::list_runs(&mut c, source, 10).await?;
+    let prior = history.iter().find(|r| r.id == old_run).expect("old run in history");
+    assert_eq!(prior.error.as_deref(), Some("old grant failed"));
+    let health = sources::source_health(&mut c, w.fam.household_id).await?;
+    let health = health.iter().find(|h| h.id == source).expect("the source's health");
+    assert_eq!(health.consecutive_failures, 0);
+    assert_eq!(health.last_error, None);
+    assert_eq!(health.last_run_status, None);
+    assert_eq!(health.last_run_problem, None);
+
+    let current_run = sources::begin_run(&mut c, source, "poll", None).await?;
+    sources::finish_run(&mut c, current_run, Err("new grant failed")).await?;
+    sources::finish_run(
+        &mut c,
+        old_success,
+        Ok(&RunOutcome {
+            cursor: Some(json!({"old": true})),
+            ..RunOutcome::default()
+        }),
+    )
+    .await?;
+    let current = get_source(&mut c, source).await?.expect("the source");
+    assert_eq!(current.last_success_at, None);
+    assert_eq!(current.cursor, None);
+    let health = sources::source_health(&mut c, w.fam.household_id).await?;
+    let health = health.iter().find(|h| h.id == source).expect("the source's health");
+    assert_eq!(health.consecutive_failures, 1);
+    assert_eq!(health.last_error.as_deref(), Some("new grant failed"));
+    assert_eq!(health.last_run_problem.as_deref(), Some("new grant failed"));
     Ok(())
 }
