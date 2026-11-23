@@ -1923,7 +1923,7 @@ async fn search_results_skip_a_foreign_patient_entry() -> R {
     assert_eq!(patients, [PATIENT], "{got:?}");
     assert_eq!(w.status_of_last_run(source).await?, "partial");
     assert_eq!(got.problems.len(), 1, "{got:?}");
-    assert_eq!(got.problems[0].code, "patient_reference");
+    assert_eq!(got.problems[0].code, "unexpected_resource");
     Ok(())
 }
 
@@ -1966,6 +1966,8 @@ async fn search_results_skip_medication_returned_without_an_include() -> R {
         "{got:?}"
     );
     assert_eq!(w.medication_reads(), 0);
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
+    assert_eq!(got.problems[0].code, "unexpected_resource");
     Ok(())
 }
 
@@ -2174,5 +2176,34 @@ async fn a_relative_patient_reference_uses_the_entry_fhir_base() -> R {
     }
     assert_eq!(w.status_of_last_run(source).await?, "partial");
     assert_eq!(got.problems[0].code, "patient_reference");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_condition_search_cannot_import_an_unsolicited_observation() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/Condition.s".into(),
+        ..Behaviour::default()
+    })
+    .await?;
+    w.fake.book().extra_search_entries.push((
+        "Condition",
+        json!({
+            "resource": {
+                "resourceType": "Observation", "id": "unsolicited-observation", "status": "final",
+                "subject": {"reference": format!("Patient/{PATIENT}")},
+                "code": {"text": "Synthetic observation"},
+            },
+            "search": {"mode": "match"},
+        }),
+    ));
+    let source = w.connect(t0()).await?;
+    let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+    let bundle = w.stored_bundle(source).await?;
+    let entries = bundle["entry"].as_array().expect("the snapshot has entries");
+    assert!(!entries.iter().any(|e| e["resource"]["resourceType"] == "Observation"));
+    assert!(entries.iter().any(|e| e["resource"]["resourceType"] == "Condition"));
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
+    assert_eq!(got.problems[0].code, "unexpected_resource");
     Ok(())
 }

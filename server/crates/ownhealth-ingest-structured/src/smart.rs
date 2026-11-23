@@ -17,7 +17,8 @@
 //!   a repeated page.
 //! - **The patient.** The Patient the grant names must confirm the profile's name and full birth
 //!   date before any clinical search. The pull stops if the identity differs or cannot be verified.
-//!   A search result that refers to someone else is left out and the run is partial.
+//!   The run is partial if a result does not identify the verified patient, or if the search
+//!   returns a resource type outside the requested match and authorized includes.
 //! - **One bundle per run.** The resources gathered by a pull form a `collection` Bundle, each
 //!   resource once and in a fixed order. The grant or a failed search can leave the snapshot
 //!   incomplete. The same snapshot gives the same bytes and document. A changed snapshot creates
@@ -189,6 +190,9 @@ mod words {
     pub fn patient_reference(rtype: &str) -> String {
         format!("{rtype}: a resource did not identify the verified patient and was skipped")
     }
+    pub fn unexpected_resource(rtype: &str) -> String {
+        format!("{rtype}: the server returned a resource outside the search and it was skipped")
+    }
     pub fn page_too_large(rtype: &str, bytes: usize) -> String {
         format!("{rtype}: the answer exceeded the {bytes}-byte limit for one page")
     }
@@ -258,6 +262,7 @@ pub fn phrases() -> Value {
             words::not_bundle("Observation"),
             words::NOT_MEDICATION,
             words::patient_reference("Observation"),
+            words::unexpected_resource("Condition"),
             words::page_too_large("Observation", PAGE_BYTES),
             words::too_many_pages("Observation", MAX_PAGES),
             words::repeated_page("Condition"),
@@ -526,14 +531,11 @@ fn entry_fhir_base(entry: &Value) -> Option<&str> {
     (resource["resourceType"] == kind && resource["id"] == id && fhir_id(id)).then_some(base)
 }
 
-/// A clinical result must name the verified patient. A Patient names itself by id, and a
-/// Medication may be included without a patient reference because it describes the drug.
+/// Clinical results must name the verified patient. An included Medication describes the drug
+/// and may omit the patient reference.
 fn belongs_to_patient(entry: &Value, base: &str, patient: &str) -> bool {
     let resource = &entry["resource"];
-    if resource["resourceType"] == "Patient" && resource["id"] != patient {
-        return false;
-    }
-    let needs_reference = !matches!(resource["resourceType"].as_str(), Some("Patient" | "Medication"));
+    let needs_reference = resource["resourceType"] != "Medication";
     let mut references = ["patient", "subject"]
         .iter()
         .filter_map(|key| resource[*key]["reference"].as_str())
@@ -671,12 +673,13 @@ fn gather_entries(
         let t = res["resourceType"].as_str().unwrap_or_default();
         if t.is_empty() {
             g.skip("unreadable", 1);
-        } else if e["search"]["mode"] == "outcome" || t == "OperationOutcome" {
+        } else if t == "OperationOutcome" {
             g.skip("outcome", 1);
+        } else if e["search"]["mode"] == "outcome" || !(t == rtype || (t == "Medication" && include_medication)) {
+            g.skip("not_granted", i64::from(t == "Medication" && !include_medication));
+            g.problem("unexpected_resource", words::unexpected_resource(rtype));
         } else if !belongs_to_patient(e, base, patient) {
             g.problem("patient_reference", words::patient_reference(rtype));
-        } else if t == "Medication" && !include_medication {
-            g.skip("not_granted", 1);
         } else {
             let full = e["fullUrl"].as_str().filter(|u| !u.is_empty()).map(String::from);
             g.entries.push((full, res.clone()));
