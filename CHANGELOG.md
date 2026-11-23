@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Restore accepts keyless backups from v0.4.0 and earlier. For a keyed dump from an untagged build before the keyring, restore it with the build that wrote it. Then take a new backup with this version.
+- Restore accepts keyless backups from v0.4.0 and earlier. Keyed backups from untagged builds need the build that wrote them if they predate the keyring or list profile UUIDs without key IDs. Restore with that build, then take a new backup with this version.
 
 ## 0.4.0 (2026-11-19)
 

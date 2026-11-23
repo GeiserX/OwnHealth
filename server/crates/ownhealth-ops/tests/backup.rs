@@ -961,6 +961,20 @@ async fn a_backup_that_needs_no_key_restores_without_a_keyring() -> R {
     let report = ownhealth_ops::restore(&fresh, &archive).await?;
     assert_eq!(report["ok"], true, "{report:#}");
     assert!(public_tables(&target).await? > 0);
+
+    let blocked = dir.path().join("blocked-keyring");
+    fs::create_dir_all(blocked.join(".keyring.lock"))?;
+    let target = TestDb::empty().await?;
+    let mut fresh = target.settings(&dir.path().join("blocked-restore"))?;
+    fresh.secrets_key = settings.secrets_key.clone();
+    fresh.keyring_dir = Some(blocked);
+    for result in [
+        ownhealth_ops::verify_restore(&fresh, &archive).await,
+        ownhealth_ops::restore(&fresh, &archive).await,
+    ] {
+        assert!(err_text(result).contains("keyring lock"));
+    }
+    assert_eq!(public_tables(&target).await?, 0);
     Ok(())
 }
 
@@ -1099,15 +1113,6 @@ async fn an_archives_profile_key_must_match_its_files() -> R {
         .flatten();
     assert_eq!(kept.as_ref(), ring.profiles.get(&l.alex));
 
-    // Older manifests have only the profile list. Keep their UUID-based selection.
-    let mut older = manifest(&l.archive)?;
-    older["keys"]
-        .as_object_mut()
-        .expect("backup has key facts")
-        .shift_remove("key_ids");
-    write_manifest(&l.archive, &older)?;
-    let report = ownhealth_ops::verify_restore(&l.settings, &l.archive).await?;
-    assert_eq!(report["ok"], true, "{report:#}");
     Ok(())
 }
 
@@ -1704,5 +1709,42 @@ async fn a_profile_a_dump_from_before_1_0_brings_back_takes_the_keyrings_key_for
         BlobStore::for_settings(&ts)?.get_bytes(BlobOwner::Profile(alex), &day2_sha)?,
         day2
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn uuid_only_manifests_require_the_build_that_wrote_them() -> R {
+    let l = live().await?;
+    let mut m = manifest(&l.archive)?;
+    m["keys"].as_object_mut().expect("key facts").shift_remove("key_ids");
+    write_manifest(&l.archive, &m)?;
+    let (target, settings) = fresh(&l).await?;
+    for result in [
+        ownhealth_ops::verify_restore(&settings, &l.archive).await,
+        ownhealth_ops::restore(&settings, &l.archive).await,
+    ] {
+        let err = err_text(result);
+        assert!(
+            err.contains("build that wrote it") && err.contains("take a new backup"),
+            "{err}"
+        );
+    }
+    assert_eq!(public_tables(&target).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keyless_commands_skip_the_keyring_lock() -> R {
+    ownhealth_ops::register();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/upgrade/0.4.0");
+    let dir = tempfile::tempdir()?;
+    let db = TestDb::empty().await?;
+    let settings = db.settings(dir.path())?;
+    // An occupied path makes the lock file impossible to create without a second process.
+    fs::create_dir_all(settings.keyring_path().join(".keyring.lock"))?;
+    let verified = ownhealth_ops::verify_restore(&settings, &fixture).await;
+    let restored = ownhealth_ops::restore(&settings, &fixture).await;
+    assert_eq!(verified?["ok"], true);
+    assert_eq!(restored?["ok"], true);
     Ok(())
 }

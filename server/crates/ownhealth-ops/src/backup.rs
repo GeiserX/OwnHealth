@@ -886,6 +886,12 @@ fn read_manifest(archive: &Path) -> Result<Value> {
              then take a new backup with this one",
         ));
     }
+    if manifest["keys"].get("keyring").is_some() && manifest["keys"].get("key_ids").is_none() {
+        return Err(ops_error(
+            "this backup lists profile UUIDs without key IDs. Restore it with the build that wrote it, \
+             then take a new backup with this one",
+        ));
+    }
     Ok(manifest)
 }
 
@@ -1046,8 +1052,8 @@ struct RingKeys {
 /// The flag that lets a restore go on without the keys the keyring lacks.
 const ALLOW_MISSING: &str = "--allow-missing-keys";
 
-/// Select and authenticate keys before the restore loads anything. Early keyring manifests use
-/// UUIDs alone. Keyless 0.x backups have no keys to install.
+/// Select and authenticate keys before the restore loads anything. Keyless 0.x backups have no
+/// keys to install.
 fn ring_keys(
     settings: &Settings,
     manifest: &Value,
@@ -1061,21 +1067,20 @@ fn ring_keys(
                 .ok_or_else(|| ops_error("bad keys.keyring list in the manifest"))
         })
         .transpose()?;
-    let key_ids = manifest["keys"]
-        .get("key_ids")
-        .map(|map| {
-            map.as_object()
-                .ok_or_else(|| ops_error("bad keys.key_ids map in the manifest"))
-        })
-        .transpose()?;
-    if key_ids.is_some_and(|map| ids.is_none_or(|ids| map.len() != ids.len())) {
+    let Some(ids) = ids else {
+        if manifest["keys"].get("key_ids").is_some() {
+            return Err(ops_error("keys.key_ids requires a keys.keyring list in the manifest"));
+        }
+        return Ok(None);
+    };
+    let key_ids = manifest["keys"]["key_ids"]
+        .as_object()
+        .ok_or_else(|| ops_error("bad keys.key_ids map in the manifest"))?;
+    if key_ids.len() != ids.len() {
         return Err(ops_error(
             "keys.key_ids does not match the manifest's keys.keyring list",
         ));
     }
-    let Some(ids) = ids else {
-        return Ok(None);
-    };
     let file = keyfile::path(settings);
     let ring = match keyfile::read(&file).map_err(|e| ops_error(e.0))? {
         Some(ring) => ring,
@@ -1121,18 +1126,15 @@ fn ring_keys(
             .and_then(|i| Uuid::parse_str(i).ok())
             .ok_or_else(|| ops_error(format!("bad profile id {id} in the manifest's keys.keyring")))?;
         let wanted = key_ids
-            .map(|map| {
-                map.get(&id.to_string())
-                    .and_then(Value::as_str)
-                    .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                    .ok_or_else(|| ops_error(format!("bad key id for profile {id} in the manifest's keys.key_ids")))
-            })
-            .transpose()?;
+            .get(&id.to_string())
+            .and_then(Value::as_str)
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| ops_error(format!("bad key id for profile {id} in the manifest's keys.key_ids")))?;
         if let Some(w) = ring.profiles.get(&id) {
             let dek = authenticate_ring_key(&file, kek, id, &ring, w)?;
-            if wanted.is_none_or(|wanted| wanted == dek.archive_id()) {
+            if wanted == dek.archive_id() {
                 out.keys.push((id, w.clone()));
-            } else if ring.closes(id, wanted) {
+            } else if ring.closes(id, Some(wanted)) {
                 // the archive's key was deleted, and the profile came back since with a newer key:
                 // the archive's files stay closed, and the newer key stays the profile's
                 out.keys.push((id, w.clone()));
@@ -1144,7 +1146,7 @@ fn ring_keys(
                 out.keys.push((id, w.clone()));
                 out.missing.push(id);
             }
-        } else if ring.closes(id, wanted) {
+        } else if ring.closes(id, Some(wanted)) {
             out.shredded.push(id);
         } else {
             out.missing.push(id);
@@ -1444,7 +1446,11 @@ pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
 pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_keys: bool) -> Result<Value> {
     let manifest = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
-    let ring_lock = keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?;
+    let ring_lock = if manifest["keys"].get("keyring").is_some() {
+        Some(keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?)
+    } else {
+        None
+    };
     let ring = ring_keys(settings, &manifest, kek.as_ref(), allow_missing_keys)?;
     if let Some(r) = ring.as_ref().filter(|r| !r.missing.is_empty() && !r.allow_missing) {
         return Err(ops_error(format!(
@@ -1517,7 +1523,7 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
                 );
                 Error::Other(anyhow::Error::new(error).context(message))
             })?;
-        Some(ring_lock)
+        ring_lock
     } else {
         drop(ring_lock);
         None
@@ -1600,7 +1606,11 @@ async fn create_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
 pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value> {
     let manifest = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
-    let ring_lock = keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?;
+    let ring_lock = if manifest["keys"].get("keyring").is_some() {
+        Some(keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?)
+    } else {
+        None
+    };
     let ring = ring_keys(settings, &manifest, kek.as_ref(), false)?;
     // The scratch database is dropped at the end, so nothing it loads reaches the live keyring: the
     // lock covers the read alone, and a profile delete on the live install never waits on pg_restore.
@@ -1704,8 +1714,12 @@ mod tests {
         crate::register();
         let db = TestDb::empty().await?;
         let dir = tempfile::tempdir()?;
-        let settings = db.settings(dir.path())?;
-        let archive = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/upgrade/0.4.0");
+        let live = TestDb::new().await?;
+        let live_settings = live.settings(&dir.path().join("live"))?;
+        let archive = backup(&live_settings, &dir.path().join("backup")).await?;
+        let mut settings = db.settings(&dir.path().join("restored"))?;
+        settings.secrets_key = live_settings.secrets_key.clone();
+        settings.keyring_dir = Some(live_settings.keyring_path());
         let lock_file = settings.keyring_path().join(".keyring.lock");
         let (observed, mut checks) = tokio::sync::mpsc::channel(3);
         // Observe the lock in this process as pg_restore opens the dump. If restore returns
