@@ -1766,7 +1766,7 @@ async fn foreign_patient_resources_stay_out_of_the_stored_bundle() -> R {
     let fixture: Value = serde_json::from_slice(&fhir_file("uscore-sam.json"))?;
     let template = fixture["entry"]
         .as_array()
-        .unwrap()
+        .expect("the fixture bundle has entries")
         .iter()
         .map(|entry| &entry["resource"])
         .find(|r| r["id"] == "sam-tsh")
@@ -1792,7 +1792,7 @@ async fn foreign_patient_resources_stay_out_of_the_stored_bundle() -> R {
     let bundle = w.stored_bundle(source).await?;
     let ids: BTreeSet<&str> = bundle["entry"]
         .as_array()
-        .unwrap()
+        .expect("the stored bundle has entries")
         .iter()
         .filter_map(|e| e["resource"]["id"].as_str())
         .collect();
