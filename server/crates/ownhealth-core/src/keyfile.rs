@@ -49,7 +49,7 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::config::Settings;
-use crate::keys::{Kek, KeyError, WRAPPED_LEN};
+use crate::keys::{Kek, KeyError, PROFILE_DELETED, WRAPPED_LEN};
 
 /// The file name in the keyring folder.
 pub const FILE: &str = "keyring.json";
@@ -443,13 +443,16 @@ fn remove_leftovers(dir: &Path) -> Result<(), KeyError> {
 /// The key in the keyring at `file` that `profile` takes when it has no key row yet (a dump from
 /// before 1.0 has no key table, so it brings its profiles back with none): a key made instead would
 /// replace this one at the next rewrite, and every backup taken since is sealed under it. None when
-/// the file holds no key for the profile or a tombstone closes it: the profile then gets a new key,
-/// and a deleted profile that came back keeps it. A key of another secrets key, or one that does not
-/// open, is refused: a new key would replace it.
+/// the file holds no key for the profile or a named tombstone closes it. An unscoped tombstone
+/// refuses key creation because it would also close the new key. A key that fails authentication is
+/// refused so a new key cannot replace it.
 pub fn live_key(file: &Path, kek: &Kek, profile: Uuid) -> Result<Option<Vec<u8>>, KeyError> {
     let Some(ring) = read(file)? else {
         return Ok(None);
     };
+    if ring.shredded.contains(&profile) && !ring.shredded_keys.contains_key(&profile) {
+        return Err(KeyError(PROFILE_DELETED.into()));
+    }
     let Some(wrapped) = ring.profiles.get(&profile) else {
         return Ok(None);
     };

@@ -1227,6 +1227,38 @@ async fn a_keyed_dump_from_before_the_keyring_is_refused_before_loading() -> R {
     Ok(())
 }
 
+#[tokio::test]
+async fn an_unscoped_tombstone_refuses_new_sealed_files_after_a_keyless_restore() -> R {
+    use ownhealth_core::blobs::BlobError;
+    use ownhealth_core::keyfile;
+    use ownhealth_core::keys::PROFILE_DELETED;
+
+    ownhealth_ops::register();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/upgrade/0.4.0");
+    let dir = tempfile::tempdir()?;
+    let db = TestDb::empty().await?;
+    let settings = db.settings(dir.path())?;
+    ownhealth_ops::restore(&settings, &fixture).await?;
+    migrate::migrate_embedded(&db.pool).await?;
+    let alex: Uuid = sqlx::query_scalar("select id from profile where slug = 'alex'")
+        .fetch_one(&db.pool)
+        .await?;
+    // The profile was deleted before its key was published, so there is no key ID to record.
+    let mut ring = keyfile::KeyringFile::default();
+    ring.shredded.insert(alex);
+    keyfile::write(&settings.keyring_path(), &ring)?;
+
+    let store = BlobStore::for_settings(&settings)?;
+    let written = store.put_bytes(BlobOwner::Profile(alex), b"LabNorte report after restoring 0.4.0");
+    assert!(matches!(written, Err(BlobError::Key(ref e)) if e.0 == PROFILE_DELETED), "{written:?}");
+    let exists: bool = sqlx::query_scalar("select exists (select 1 from profile_key where profile_id = $1)")
+        .bind(alex)
+        .fetch_one(&db.pool)
+        .await?;
+    assert!(!exists);
+    Ok(())
+}
+
 /// A 1.0 install deleted Alex after a rewrite published his key, so the keyring closes that key. The
 /// 0.4.0 backup (no key table) is then restored on the same keyring: Alex is back, and his next file
 /// makes a new key. The tombstone closes only the key that was deleted, so the new key is published
