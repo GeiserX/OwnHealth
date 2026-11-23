@@ -26,12 +26,12 @@
 //! Access control lives on the rows that reference a hash (document, genome_dataset); a hash on its
 //! own grants nothing.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 
 use sha2::{Digest, Sha256};
@@ -126,7 +126,10 @@ impl BlobOwner {
 /// any process leaves it alone however long a reader takes.
 #[derive(Debug)]
 #[must_use = "the path is good only while the LocalCopy lives"]
-pub struct LocalCopy {
+pub struct LocalCopy(Arc<CopyFile>);
+
+#[derive(Debug)]
+struct CopyFile {
     path: PathBuf,
     temporary: bool,
     /// The copy's own handle, locked while the copy lives.
@@ -135,11 +138,11 @@ pub struct LocalCopy {
 
 impl LocalCopy {
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.0.path
     }
 }
 
-impl Drop for LocalCopy {
+impl Drop for CopyFile {
     fn drop(&mut self) {
         if self.temporary {
             let _ = fs::remove_file(&self.path);
@@ -291,7 +294,9 @@ pub struct BlobStore {
     keys: Option<Arc<Keyring>>,
     /// Plain files this process read for a profile and found to hash to their name, by sha256 and by
     /// what changes when the file does ([`stamp`]).
-    checked: Arc<Mutex<HashSet<(String, Stamp)>>>,
+    checked: Arc<Mutex<HashMap<String, Stamp>>>,
+    /// Reuse a live link across readers of the same inode. The last reader still removes it.
+    plain_links: Arc<Mutex<HashMap<PathBuf, Weak<CopyFile>>>>,
 }
 
 /// What changes when a file is rewritten or replaced: device, inode, length, and the modification
@@ -455,6 +460,13 @@ pub async fn removal_lock(conn: &mut sqlx::PgConnection, wait: bool) -> Result<b
         .map_err(lock_error)
 }
 
+// Run after the sealed lookup and before the plain lookup, in this test thread only.
+#[cfg(test)]
+thread_local! {
+    static BETWEEN_LOOKUPS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl BlobStore {
     /// Opens (and creates) a store at `root` that writes the plain layout for every owner: tests and
     /// tools. The app builds its store with [`BlobStore::with_keys`].
@@ -466,6 +478,7 @@ impl BlobStore {
             root,
             keys: None,
             checked: Arc::default(),
+            plain_links: Arc::default(),
         })
     }
 
@@ -544,7 +557,7 @@ impl BlobStore {
         }
         let h = sha256_hex(sha256)?;
         let before = stamp(&file.metadata()?);
-        let known = |st: Stamp| self.checked.lock().is_ok_and(|c| c.contains(&(h.clone(), st)));
+        let known = |st: Stamp| self.checked.lock().is_ok_and(|c| c.get(&h) == Some(&st));
         if before.is_some_and(known) {
             return Ok(file);
         }
@@ -572,7 +585,7 @@ impl BlobStore {
             && stamp(&file.metadata()?) == before
             && let Ok(mut c) = self.checked.lock()
         {
-            c.insert((h, st));
+            c.insert(h, st);
         }
         Ok(file)
     }
@@ -590,6 +603,10 @@ impl BlobStore {
             if path.is_file() {
                 return Ok(Some(Found::Sealed { path, dek, slot, sha }));
             }
+        }
+        #[cfg(test)]
+        if let Some(publish) = BETWEEN_LOOKUPS.with(|hook| hook.borrow_mut().take()) {
+            publish();
         }
         Ok(plain.is_file().then_some(Found::Plain(plain)))
     }
@@ -792,9 +809,10 @@ impl BlobStore {
                 _ => BlobError::Io(e),
             })
         };
-        // a plain file can go between the lookup and the open (`seal-legacy` sealed it): look once more
+        // A seal can land between the path checks, or remove the plain file before we open it.
         for last in [false, true] {
             return match self.find(owner, sha256)? {
+                None if !last => continue,
                 None => Err(BlobError::NotFound),
                 Some(Found::Plain(p)) => match open(&p) {
                     Err(BlobError::NotFound) if !last => continue,
@@ -869,12 +887,14 @@ impl BlobStore {
     pub fn with_local_copy(&self, owner: BlobOwner, sha256: &str) -> Result<LocalCopy, BlobError> {
         for last in [false, true] {
             match self.find(owner, sha256)? {
+                None if !last => continue,
+                None => return Err(BlobError::NotFound),
                 Some(Found::Plain(path)) if self.keys.is_some() => match self.link_plain(owner, sha256, &path) {
                     // sealed and removed since the lookup (`seal-legacy`): look once more
                     Err(BlobError::NotFound) if !last => continue,
                     copy => return copy,
                 },
-                found => return self.local_copy(owner, sha256, found),
+                Some(found) => return self.local_copy(owner, sha256, found),
             }
         }
         Err(BlobError::NotFound)
@@ -887,44 +907,70 @@ impl BlobStore {
             io::ErrorKind::NotFound => BlobError::NotFound,
             _ => BlobError::Io(e),
         };
-        let file = self.checked_plain(owner, sha256, File::open(path).map_err(not_found)?)?;
+        let file = File::open(path).map_err(not_found)?;
+        let mut links = self
+            .plain_links
+            .lock()
+            .map_err(|_| io::Error::other("plain link cache is unavailable"))?;
+        if let Some(copy) = links.get(path).and_then(Weak::upgrade)
+            && let Some(held) = &copy.held
+            && let Some((dev, ino, ..)) = stamp(&held.metadata()?)
+            && stamp(&file.metadata()?).is_some_and(|s| (s.0, s.1) == (dev, ino))
+        {
+            drop(links);
+            self.checked_plain(owner, sha256, file)?;
+            return Ok(LocalCopy(copy));
+        }
+
         file.lock_shared()?;
         let link = self.root.join("tmp").join(format!("copy-{}", tmp_name()));
         fs::hard_link(path, &link).map_err(not_found)?;
-        Ok(LocalCopy {
+        let mut copy = CopyFile {
             path: link,
             temporary: true,
-            held: Some(file),
-        })
+            held: None,
+        };
+        // Use the inode at the link even if the stored path was replaced before hard_link.
+        let linked = File::open(&copy.path).map_err(not_found)?;
+        linked.lock_shared()?;
+        let reader = linked.try_clone()?;
+        copy.held = Some(linked);
+        let copy = Arc::new(copy);
+        links.retain(|_, link| link.strong_count() != 0);
+        links.insert(path.to_path_buf(), Arc::downgrade(&copy));
+        drop(links);
+        // Link creation can change ctime. Cache the stamp of the inode after that change.
+        self.checked_plain(owner, sha256, reader)?;
+        Ok(LocalCopy(copy))
     }
 
-    fn local_copy(&self, owner: BlobOwner, sha256: &str, found: Option<Found>) -> Result<LocalCopy, BlobError> {
-        match found {
-            None => Err(BlobError::NotFound),
-            Some(Found::Plain(path)) => {
+    fn local_copy(&self, owner: BlobOwner, sha256: &str, found: Found) -> Result<LocalCopy, BlobError> {
+        let copy = match found {
+            Found::Plain(path) => {
                 self.checked_plain(owner, sha256, File::open(&path)?)?;
-                Ok(LocalCopy {
+                CopyFile {
                     path,
                     temporary: false,
                     held: None,
-                })
+                }
             }
-            Some(Found::Sealed { .. }) => {
+            Found::Sealed { .. } => {
                 let mut reader = self.open_seek(owner, sha256)?;
-                let mut copy = LocalCopy {
+                let mut copy = CopyFile {
                     path: self.root.join("tmp").join(format!("copy-{}", tmp_name())),
                     temporary: true,
                     held: None,
                 };
-                let mut out = create_private(copy.path())?;
+                let mut out = create_private(&copy.path)?;
                 // before a byte is in it: the sweep leaves a locked copy alone ([`in_use`])
                 out.lock()?;
                 io::copy(&mut reader, &mut out)?;
                 out.flush()?;
                 copy.held = Some(out);
-                Ok(copy)
+                copy
             }
-        }
+        };
+        Ok(LocalCopy(Arc::new(copy)))
     }
 
     /// The bytes of `owner`'s blob, all in memory.
@@ -1793,6 +1839,64 @@ mod tests {
         // and a file changed after it was checked once is caught again
         fs::write(&plain, b"%PDF-1.4 forged after the first read!!")?;
         assert!(store.get_bytes(p, &h).is_err(), "a checked file changed later");
+        Ok(())
+    }
+
+    #[test]
+    fn reads_retry_when_sealing_lands_between_the_path_checks() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(dir.path())?;
+        let owner = BlobOwner::Profile(Uuid::new_v4());
+        for needs_path in [false, true] {
+            let data = format!("Rivera legacy file, local path needed: {needs_path}");
+            let sha = store.put_bytes(BlobOwner::Reference, data.as_bytes())?;
+            let (sealing, hash) = (store.clone(), sha.clone());
+            BETWEEN_LOOKUPS.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    assert!(sealing.rekey(BlobOwner::Reference, owner, &hash).unwrap());
+                    assert!(sealing.drop_plain(&hash).unwrap());
+                }));
+            });
+            let bytes = if needs_path {
+                fs::read(store.with_local_copy(owner, &sha)?.path())?
+            } else {
+                store.get_bytes(owner, &sha)?
+            };
+            assert_eq!(bytes, data.as_bytes());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlapping_plain_copies_share_a_checked_link() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(dir.path())?;
+        let owner = BlobOwner::Profile(Uuid::new_v4());
+        let data = format!("Rivera legacy file for overlapping readers: {}", Uuid::new_v4());
+        let sha = store.put_bytes(BlobOwner::Reference, data.as_bytes())?;
+        let plain = store.path(&sha)?;
+        set_mode(&plain, 0o640)?;
+        let first = store.with_local_copy(owner, &sha)?;
+        let second = store.clone().with_local_copy(owner, &sha)?;
+        let path = first.path().to_path_buf();
+        assert_eq!(second.path(), path);
+        assert_eq!(plain_hashed_on(&sha).len(), 1);
+        drop(first);
+        assert_eq!(fs::read(&path)?, data.as_bytes());
+        drop(second);
+        assert!(!path.exists());
+        let third = store.with_local_copy(owner, &sha)?;
+        let before = fs::metadata(&plain)?.modified()?;
+        let mut changed = fs::OpenOptions::new().write(true).open(&plain)?;
+        changed.write_all(&vec![b'!'; data.len()])?;
+        changed.set_modified(before)?;
+        assert!(matches!(
+            store.with_local_copy(owner, &sha),
+            Err(BlobError::Io(ref e)) if e.kind() == io::ErrorKind::InvalidData
+        ));
+        drop(third);
+        assert_eq!(store.checked.lock().unwrap().len(), 1);
         Ok(())
     }
 
