@@ -1362,3 +1362,64 @@ async fn a_lost_file_of_an_upgraded_profile_with_no_key_yet_is_still_required() 
     assert_eq!(report["ok"], false, "{report:#}");
     Ok(())
 }
+
+/// Replace the dump of `archive` with a FIFO, so a restore or verify-restore that reaches pg_restore
+/// waits there until the test writes the dump. Returns the dump's bytes.
+#[cfg(unix)]
+fn dump_through_fifo(archive: &Path) -> anyhow::Result<Vec<u8>> {
+    let dump = archive.join("db.dump");
+    let bytes = fs::read(&dump)?;
+    fs::remove_file(&dump)?;
+    anyhow::ensure!(
+        std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&dump)
+            .status()?
+            .success()
+    );
+    Ok(bytes)
+}
+
+/// On its own thread: wait until pg_restore opens the FIFO dump of `archive`, say whether the keyring
+/// lock in `keyring` is free at that moment, then write the dump.
+#[cfg(unix)]
+fn feed_fifo(keyring: PathBuf, archive: PathBuf, bytes: Vec<u8>) -> tokio::task::JoinHandle<anyhow::Result<bool>> {
+    use std::io::Write;
+    tokio::task::spawn_blocking(move || {
+        let mut fifo = fs::OpenOptions::new().write(true).open(archive.join("db.dump"))?;
+        let lock = fs::File::options().write(true).open(keyring.join(".keyring.lock"))?;
+        let free = lock.try_lock().is_ok();
+        drop(lock);
+        fifo.write_all(&bytes)?;
+        Ok(free)
+    })
+}
+
+/// verify-restore loads a scratch database it drops afterwards, so it holds the keyring lock only
+/// while it reads the keyring: a profile delete on the live install never waits for its pg_restore. A
+/// restore holds the lock until it has installed the keys it read.
+#[cfg(unix)]
+#[tokio::test]
+async fn verify_restore_frees_the_keyring_during_pg_restore_and_restore_does_not() -> R {
+    let l = live().await?;
+    let keyring = l.settings.keyring_path();
+    let bytes = dump_through_fifo(&l.archive)?;
+
+    let feeder = feed_fifo(keyring.clone(), l.archive.clone(), bytes.clone());
+    let report = ownhealth_ops::verify_restore(&l.settings, &l.archive).await?;
+    assert!(
+        feeder.await??,
+        "verify-restore held the keyring lock while pg_restore ran"
+    );
+    assert_eq!(report["ok"], true, "{report:#}");
+
+    let (_db, fresh) = fresh(&l).await?;
+    let feeder = feed_fifo(keyring, l.archive.clone(), bytes);
+    let report = ownhealth_ops::restore(&fresh, &l.archive).await?;
+    assert!(
+        !feeder.await??,
+        "restore let go of the keyring lock before it installed the keys"
+    );
+    assert_eq!(report["ok"], true, "{report:#}");
+    Ok(())
+}

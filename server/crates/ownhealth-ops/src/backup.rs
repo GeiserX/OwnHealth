@@ -1445,6 +1445,9 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
     let kek = backup_key(settings, &manifest)?;
     let ring_lock = keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?;
     let mut ring = ring_keys(settings, &manifest, kek.as_ref(), false)?;
+    // The scratch database is dropped at the end, so nothing it loads reaches the live keyring: the
+    // lock covers the read alone, and a profile delete on the live install never waits on pg_restore.
+    drop(ring_lock);
     let files = blobs::tree_files(&archive.join("blobs"))?;
     let live = settings.sqlx_url();
     let scratch = format!("{}_restore_check", db_name(&live));
@@ -1460,7 +1463,6 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
         if let Some(r) = &mut ring {
             load_keys(&target, r).await?;
         }
-        drop(ring_lock);
         compare(&target, &manifest, &files, kek.as_ref(), ring.as_ref()).await
     }
     .await;
