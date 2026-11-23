@@ -1049,15 +1049,18 @@ async fn round5_a_lost_store_reply_recovers_even_when_orthanc_used_a_different_i
     let held = e.orthanc.held();
     assert_eq!(held.instances.len(), 4);
     assert_eq!(e.orthanc.patients_under(U1), [ALEX.id.into()].into());
-    let deleted: Vec<_> = held
+    let mut deleted: Vec<_> = held
         .log
         .iter()
-        .filter_map(|(method, path)| (method == "DELETE").then(|| path.trim_start_matches("/instances/").to_owned()))
+        .filter(|(method, _)| method == "DELETE")
+        .map(|(_, path)| path.trim_start_matches("/instances/"))
         .collect();
-    let mut wanted: Vec<_> = after.keys().filter(|id| !original.contains_key(*id)).cloned().collect();
-    wanted.sort();
-    let mut deleted = deleted;
-    deleted.sort();
+    deleted.sort_unstable();
+    let wanted: Vec<_> = after
+        .keys()
+        .filter(|id| !original.contains_key(*id))
+        .map(String::as_str)
+        .collect();
     assert_eq!(deleted, wanted);
     assert!(original.keys().all(|id| held.instances.contains_key(id)));
     Ok(())
@@ -1243,27 +1246,26 @@ async fn round5_series_counts_cross_the_128_row_boundary() -> R {
     use std::sync::{Arc, Mutex};
 
     const ID: &str = "00000000-00000000-00000000-00000000-00000000";
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    type Calls = Arc<Mutex<Vec<(u64, u64)>>>;
+    let calls = Calls::default();
     let app = Router::new()
         .route(
             "/tools/find",
-            post(
-                |State(calls): State<Arc<Mutex<Vec<(u64, u64)>>>>, Json(query): Json<Value>| async move {
-                    let since = query["Since"].as_u64().expect("since");
-                    let limit = query["Limit"].as_u64().expect("limit");
-                    calls.lock().expect("calls").push((since, limit));
-                    let page: Vec<Value> = (since..129)
-                        .take(limit as usize)
-                        .map(|n| {
-                            json!({
-                                "MainDicomTags": {"SeriesInstanceUID": format!("{U1}.{n:03}"), "Modality": "CT"},
-                                "RequestedTags": {"NumberOfSeriesRelatedInstances": "1"},
-                            })
+            post(|State(calls): State<Calls>, Json(query): Json<Value>| async move {
+                let since = query["Since"].as_u64().expect("since");
+                let limit = query["Limit"].as_u64().expect("limit");
+                calls.lock().expect("calls").push((since, limit));
+                let page: Vec<Value> = (since..129)
+                    .take(limit as usize)
+                    .map(|n| {
+                        json!({
+                            "MainDicomTags": {"SeriesInstanceUID": format!("{U1}.{n:03}"), "Modality": "CT"},
+                            "RequestedTags": {"NumberOfSeriesRelatedInstances": "1"},
                         })
-                        .collect();
-                    Json(page)
-                },
-            ),
+                    })
+                    .collect();
+                Json(page)
+            }),
         )
         .with_state(calls.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
