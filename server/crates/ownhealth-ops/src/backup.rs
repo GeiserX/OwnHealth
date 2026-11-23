@@ -23,6 +23,8 @@
 //! The manifest lists each sealed file under `<profile>/<address>` with the sha256 of its bytes on
 //! disk, so a check finds a changed or added file without the key, and records the key's
 //! fingerprint (never the key), so a restore under another key refuses before it loads anything.
+//! It also records the profile references backed by sealed files and the accepted omissions. A
+//! restore can carry those omissions forward and identify archived files closed by an unavailable key.
 //!
 //! pg_dump and pg_restore come from PATH, or from the directory in OWNHEALTH_PG_BINDIR. They read and
 //! write only stdin and stdout, so a wrapper that runs them in another container works too.
@@ -37,7 +39,7 @@
 //! holds, and only forward; a restore that passed its checks sets it to the restored head. The
 //! audit page runs the same check (`audit_status`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -280,27 +282,6 @@ async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(BlobOwner, Str
         .into_iter()
         .map(|(p, d, h)| (BlobOwner::of_item(p, d), h))
         .collect())
-}
-
-/// The slots whose key row is a tombstone: their sealed files never open again.
-async fn shredded_slots(conn: &mut PgConnection) -> Result<HashSet<keys::Slot>> {
-    let mut out: HashSet<keys::Slot> =
-        sqlx::query_scalar::<_, Uuid>("select profile_id from profile_key where wrapped_dek is null")
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .map(keys::Slot::Profile)
-            .collect();
-    let pending: bool = sqlx::query_scalar("select to_regclass('public.pending_key') is not null")
-        .fetch_one(&mut *conn)
-        .await?;
-    if pending {
-        let items: Vec<Uuid> = sqlx::query_scalar("select item_id from pending_key where wrapped_dek is null")
-            .fetch_all(&mut *conn)
-            .await?;
-        out.extend(items.into_iter().map(keys::Slot::Pending));
-    }
-    Ok(out)
 }
 
 /// Recursively sorted keys: Python's `json.dumps(..., sort_keys=True)`.
@@ -682,7 +663,6 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     let facts = async {
         let referenced = referenced_blobs(&mut tx).await?;
         let wrapped = keys::stored_all(&mut tx).await?;
-        let shredded = shredded_slots(&mut tx).await?;
         let migrations: Vec<i32> = sqlx::query_scalar("select version from schema_migrations order by 1")
             .fetch_all(&mut *tx)
             .await?;
@@ -692,7 +672,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             .await?;
         let as_of = Utc::now().date_naive();
         let states = state_hashes(&mut tx, as_of).await?;
-        Ok::<_, Error>((referenced, wrapped, shredded, migrations, tables, kept, as_of, states))
+        Ok::<_, Error>((referenced, wrapped, migrations, tables, kept, as_of, states))
     }
     .await;
     // The dump must finish before the exporting transaction ends, whatever the facts did.
@@ -700,7 +680,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // build_state may store snapshots; the backup leaves the database as it was.
     tx.rollback().await?;
     conn.close().await?;
-    let (referenced, wrapped, shredded, migrations, mut tables, kept, as_of, states) = facts?;
+    let (referenced, wrapped, migrations, mut tables, kept, as_of, states) = facts?;
     if !done.status.success() {
         return Err(ops_error(format!(
             "pg_dump failed: {}",
@@ -775,6 +755,8 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // open names no sealed file here; verify-restore reports it.
     let mut required = Vec::new();
     let mut repaired = Vec::new();
+    let mut profile_sealed = ProfileBlobs::new();
+    let mut accepted_omissions = ProfileBlobs::new();
     for (owner, sha) in &referenced {
         let slot = owner.slot();
         let accepted_loss = match owner {
@@ -786,6 +768,9 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
         {
             let key = blobs::sealed_key(slot, dek, sha)?;
             if let Some(path) = files.get(&key) {
+                if let keys::Slot::Profile(id) = slot {
+                    profile_sealed.entry(id).or_default().insert(sha.clone());
+                }
                 if let Some(id) = accepted_loss
                     && repaired_file(path, sha, Some((id, dek)))
                 {
@@ -803,9 +788,9 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
                 repaired.push((id, sha.as_str()));
             }
             required.push(plain);
-        } else if !slot.is_some_and(|slot| shredded.contains(&slot)) && accepted_loss.is_none() {
-            // A shredded key or an unrepaired loss accounts for a missing file. Every other
-            // reference still needs its file, including a profile that has no key yet.
+        } else if let Some(id) = accepted_loss {
+            accepted_omissions.entry(id).or_default().insert(plain);
+        } else {
             required.push(plain);
         }
     }
@@ -831,6 +816,8 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             "sha256": plain,
             "sealed": sealed,
             "referenced": required,
+            "profile_sealed": profile_sealed,
+            "accepted_omissions": accepted_omissions,
         },
         "keys": key_facts,
         "state_hash": states.into_iter().map(|(p, h)| (p, Value::String(h))).collect::<Map<String, Value>>(),
@@ -865,7 +852,37 @@ fn py_repr(v: Option<&Value>) -> String {
     }
 }
 
-fn read_manifest(archive: &Path) -> Result<Value> {
+type ProfileBlobs = BTreeMap<Uuid, BTreeSet<String>>;
+
+struct ArchivedLosses {
+    accepted_omissions: ProfileBlobs,
+    profile_sealed: ProfileBlobs,
+}
+
+impl ArchivedLosses {
+    fn for_restore(mut self, ring: &RingKeys) -> ProfileBlobs {
+        for id in ring.missing.iter().chain(&ring.shredded) {
+            if let Some(sealed) = self.profile_sealed.remove(id) {
+                self.accepted_omissions.entry(*id).or_default().extend(sealed);
+            }
+        }
+        self.accepted_omissions
+    }
+}
+
+fn manifest_profile_blobs(manifest: &Value, field: &str) -> Result<ProfileBlobs> {
+    let Some(value) = manifest["blobs"].get(field) else {
+        return Ok(ProfileBlobs::new());
+    };
+    let invalid = || ops_error(format!("bad blobs.{field} in the manifest"));
+    let lists: ProfileBlobs = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+    if lists.values().flatten().any(|sha| blobs::sha256_hex(sha).is_err()) {
+        return Err(invalid());
+    }
+    Ok(lists)
+}
+
+fn read_manifest(archive: &Path) -> Result<(Value, ArchivedLosses)> {
     let path = archive.join("manifest.json");
     if !path.is_file() {
         return Err(ops_error(format!(
@@ -892,7 +909,11 @@ fn read_manifest(archive: &Path) -> Result<Value> {
              then take a new backup with this one",
         ));
     }
-    Ok(manifest)
+    let losses = ArchivedLosses {
+        accepted_omissions: manifest_profile_blobs(&manifest, "accepted_omissions")?,
+        profile_sealed: manifest_profile_blobs(&manifest, "profile_sealed")?,
+    };
+    Ok((manifest, losses))
 }
 
 async fn pg_restore(url: &str, archive: &Path) -> Result<()> {
@@ -1244,16 +1265,6 @@ async fn load_keys(url: &str, ring: &RingKeys, resume_id: Option<&str>) -> Resul
     Ok(())
 }
 
-/// Profiles whose archived files need a key this restore will not install.
-fn unavailable_profiles(ring: &RingKeys) -> BTreeSet<Uuid> {
-    let keyed: BTreeSet<Uuid> = ring.keys.iter().map(|(id, _)| *id).collect();
-    ring.missing
-        .iter()
-        .chain(ring.shredded.iter().filter(|id| keyed.contains(id)))
-        .copied()
-        .collect()
-}
-
 /// Bind a retry to the same backup contents, selected keys, and restore options. Restic can
 /// extract the same backup into a new directory for the retry.
 fn loss_resume_id(archive: &Path, manifest: &Value, ring: &RingKeys) -> Result<String> {
@@ -1285,11 +1296,12 @@ async fn can_resume_loss(conn: &mut PgConnection, resume_id: Option<&str>) -> Re
     Ok(saved.as_deref() == Some(resume_id))
 }
 
-/// Record files the operator accepted losing. Runs with the keyring lock held.
+/// Carry forward accepted omissions and sealed references whose key the restore cannot install.
+/// Only references in the restored database without a plain copy count. Holds the keyring lock.
 async fn record_lost(
     settings: &Settings,
     url: &str,
-    closed: &BTreeSet<Uuid>,
+    losses: &ProfileBlobs,
     backup_blobs: &BTreeMap<String, PathBuf>,
 ) -> Result<()> {
     let mut conn = PgConnection::connect(url).await?;
@@ -1299,7 +1311,7 @@ async fn record_lost(
     let before = file.lost.clone();
     for (owner, sha) in referenced {
         if let BlobOwner::Profile(p) = owner
-            && closed.contains(&p)
+            && losses.get(&p).is_some_and(|files| files.contains(&sha))
             && !backup_blobs.contains_key(&sha)
         {
             file.lost.entry(p).or_default().insert(sha);
@@ -1442,7 +1454,7 @@ pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
 
 /// [`restore`], told whether to go on without the keys the keyring lacks (`--allow-missing-keys`).
 pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_keys: bool) -> Result<Value> {
-    let manifest = read_manifest(archive)?;
+    let (manifest, archived_losses) = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
     let ring_lock = if manifest["keys"].get("keyring").is_some() {
         Some(keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?)
@@ -1462,10 +1474,13 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
             ids_text(&r.missing)
         )));
     }
-    let closed = ring.as_ref().map(unavailable_profiles).unwrap_or_default();
+    let losses = ring
+        .as_ref()
+        .map(|ring| archived_losses.for_restore(ring))
+        .unwrap_or_default();
     let resume_id = ring
         .as_ref()
-        .filter(|_| !closed.is_empty())
+        .filter(|_| !losses.is_empty())
         .map(|ring| loss_resume_id(archive, &manifest, ring))
         .transpose()?;
     let url = settings.sqlx_url();
@@ -1512,7 +1527,7 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
     // Keep the lock through blob placement when a checkpoint exists, so another invocation
     // cannot resume this restore while it is still finishing.
     let resume_lock = if resume_id.is_some() {
-        record_lost(settings, &url, &closed, &backup_blobs)
+        record_lost(settings, &url, &losses, &backup_blobs)
             .await
             .map_err(|source| Error::RestoreLoss(Box::new(source)))?;
         ring_lock
@@ -1596,7 +1611,7 @@ async fn create_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
 /// `ok` is true only when every row count, every blob hash and every profile's state_hash match, and
 /// the keyring holds every key the backup needs, or lists its profile as deleted.
 pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value> {
-    let manifest = read_manifest(archive)?;
+    let (manifest, _) = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
     let ring_lock = if manifest["keys"].get("keyring").is_some() {
         Some(keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?)

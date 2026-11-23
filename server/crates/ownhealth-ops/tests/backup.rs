@@ -1754,3 +1754,132 @@ async fn keyless_commands_skip_the_keyring_lock() -> R {
     assert_eq!(restored?["ok"], true);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_shredded_key_does_not_exempt_a_legacy_plain_report() -> R {
+    use ownhealth_core::{keyfile, keys};
+
+    ownhealth_ops::register();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/upgrade/0.4.0");
+    let dir = tempfile::tempdir()?;
+    let first = TestDb::empty().await?;
+    let settings = first.settings(&dir.path().join("first"))?;
+    assert_eq!(ownhealth_ops::restore(&settings, &fixture).await?["ok"], true);
+    migrate::migrate_embedded(&first.pool).await?;
+    let (profile, household, legacy_sha): (Uuid, Uuid, String) = sqlx::query_as(
+        "select profile_id, household_id, encode(blob_sha256, 'hex') from document \
+         where profile_id is not null order by id limit 1",
+    )
+    .fetch_one(&first.pool)
+    .await?;
+    let owner = BlobOwner::Profile(profile);
+    let store = BlobStore::for_settings(&settings)?;
+    let legacy = store.get_bytes(owner, &legacy_sha)?;
+    let sealed = b"%PDF-1.4 LabNorte report stored after the upgrade";
+    let sealed_sha = store.put_bytes(owner, sealed)?;
+    let mut conn = first.pool.acquire().await?;
+    create_document(
+        &mut conn,
+        &NewDocument::upload(
+            household,
+            Some(profile),
+            &sealed_sha,
+            "application/pdf",
+            sealed.len() as i64,
+        ),
+    )
+    .await?;
+    drop(conn);
+    let archive = ownhealth_ops::backup(&settings, &dir.path().join("before-shred")).await?;
+
+    let mut tx = first.pool.begin().await?;
+    keys::shred(&mut tx, profile).await?;
+    tx.commit().await?;
+    let mut conn = first.pool.acquire().await?;
+    keyfile::rewrite(&mut conn, &settings).await?;
+    drop(conn);
+
+    let db = TestDb::empty().await?;
+    let mut restored = db.settings(&dir.path().join("restored"))?;
+    restored.secrets_key = settings.secrets_key.clone();
+    restored.keyring_dir = Some(settings.keyring_path());
+    let report = ownhealth_ops::restore(&restored, &archive).await?;
+    assert_eq!(report["keys"]["shredded"], serde_json::json!([profile]), "{report:#}");
+    let store = BlobStore::for_settings(&restored)?;
+    assert_eq!(store.get_bytes(owner, &legacy_sha)?, legacy);
+    assert!(!store.exists(owner, &sealed_sha));
+    let mut conn = db.pool.acquire().await?;
+    assert!(store.sweep_unkeyed(&mut conn).await? > 0);
+    drop(conn);
+    fs::remove_file(&tree_files(&restored.blobs_path())?[&legacy_sha])?;
+
+    let after = ownhealth_ops::backup(&restored, &dir.path().join("after-shred")).await?;
+    let report = ownhealth_ops::verify_restore(&restored, &after).await?;
+    assert_eq!(strs(&report["blobs"]["missing"]), [legacy_sha], "{report:#}");
+    assert_eq!(report["ok"], false, "{report:#}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn restore_recovers_an_older_backups_accepted_omission() -> R {
+    use ownhealth_core::{
+        blobs::sealed_key,
+        keyfile,
+        keys::{Dek, Kek, Slot},
+    };
+
+    let l = live().await?;
+    let owner = BlobOwner::Profile(l.alex);
+    let slot = Slot::Profile(l.alex);
+    let plain_sha = hex::encode(sha2::Sha256::digest(&l.legacy));
+    let sha: String = sqlx::query_scalar(
+        "select encode(blob_sha256, 'hex') from document \
+         where profile_id = $1 and encode(blob_sha256, 'hex') <> $2 order by id limit 1",
+    )
+    .bind(l.alex)
+    .bind(&plain_sha)
+    .fetch_one(&l.db.pool)
+    .await?;
+    let bytes = BlobStore::for_settings(&l.settings)?.get_bytes(owner, &sha)?;
+    let mut ring = keyfile::read(&keyfile::path(&l.settings))?.expect("backup wrote the keyring");
+    let kek = Kek::from_settings(&l.settings)?;
+    let old = kek.unwrap(l.alex, &kek.fingerprint(), &ring.profiles[&l.alex])?;
+    let old_path = sealed_key(slot, &old, &sha)?;
+    ring.profiles.insert(l.alex, kek.wrap(l.alex, &Dek::generate())?);
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+
+    let (_db, settings) = fresh(&l).await?;
+    assert_eq!(
+        ownhealth_ops::restore_with(&settings, &l.archive, true).await?["ok"],
+        true
+    );
+    fs::remove_file(&tree_files(&settings.blobs_path())?[&old_path])?;
+    let older = ownhealth_ops::backup(&settings, &l.dir.path().join("older-loss")).await?;
+    assert!(!tree(&older)?.contains_key(&old_path));
+    assert!(strs(&manifest(&older)?["blobs"]["accepted_omissions"][l.alex.to_string()]).contains(&sha));
+    assert_eq!(ownhealth_ops::verify_restore(&settings, &older).await?["ok"], true);
+
+    let store = BlobStore::for_settings(&settings)?;
+    assert_eq!(store.put_bytes(owner, &bytes)?, sha);
+    let repaired = ownhealth_ops::backup(&settings, &l.dir.path().join("newer-repair")).await?;
+    assert_eq!(ownhealth_ops::verify_restore(&settings, &repaired).await?["ok"], true);
+    let current = keyfile::read(&keyfile::path(&settings))?.expect("backup wrote the keyring");
+    assert!(!current.lost.get(&l.alex).is_some_and(|losses| losses.contains(&sha)));
+
+    let target = TestDb::empty().await?;
+    let mut restored = target.settings(&l.dir.path().join("restored-older"))?;
+    restored.secrets_key = settings.secrets_key.clone();
+    restored.keyring_dir = settings.keyring_dir.clone();
+    assert_eq!(ownhealth_ops::restore(&restored, &older).await?["ok"], true);
+    let next = ownhealth_ops::backup(&restored, &l.dir.path().join("next")).await?;
+    let report = ownhealth_ops::verify_restore(&restored, &next).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    let ring = keyfile::read(&keyfile::path(&restored))?.expect("restore recorded the omission");
+    assert!(ring.lost[&l.alex].contains(&sha));
+
+    fs::remove_file(&tree_files(&restored.blobs_path())?[&plain_sha])?;
+    let unrelated = ownhealth_ops::backup(&restored, &l.dir.path().join("unrelated-loss")).await?;
+    let report = ownhealth_ops::verify_restore(&restored, &unrelated).await?;
+    assert_eq!(strs(&report["blobs"]["missing"]), [plain_sha], "{report:#}");
+    Ok(())
+}

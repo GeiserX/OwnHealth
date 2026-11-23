@@ -68,7 +68,7 @@ pub struct KeyringFile {
     /// The archive ids of the shredded keys, for the profiles of `shredded` whose key the file held.
     /// A profile there may hold a newer key in `profiles`.
     pub shredded_keys: BTreeMap<Uuid, BTreeSet<String>>,
-    /// The sha256 of each file a restore loaded without its profile's key, by profile.
+    /// The sha256 of each accepted omission from a restore, by profile.
     pub lost: BTreeMap<Uuid, BTreeSet<String>>,
 }
 
@@ -524,7 +524,9 @@ pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<Key
             _ => {
                 let fingerprint = ring.kek_fingerprint.clone().unwrap_or_default();
                 let named = ring.shredded_keys.contains_key(&id) || !ring.shredded.contains(&id);
-                match ring.profiles.remove(&id).map(|w| archive_id(id, &fingerprint, &w)) {
+                let removed = ring.profiles.remove(&id);
+                let newly_shredded = ring.shredded.insert(id) || removed.is_some();
+                match removed.map(|w| archive_id(id, &fingerprint, &w)) {
                     // the file held the key: the tombstone names it
                     Some(Some(key)) if named => {
                         ring.shredded_keys.entry(id).or_default().insert(key);
@@ -536,8 +538,10 @@ pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<Key
                     // nothing new to close: the tombstone stays as it is, or closes every key
                     None => {}
                 }
-                ring.shredded.insert(id);
-                ring.lost.remove(&id);
+                // A restore can record specific sealed losses under an existing tombstone.
+                if newly_shredded {
+                    ring.lost.remove(&id);
+                }
             }
         }
     }
