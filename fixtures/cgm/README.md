@@ -28,8 +28,10 @@ metadata, the date formats and the units.
   (`Zeitstempel (JJJJ-MM-TTThh:mm:ss)`, `Ereignisart`, `Glukosewert (mg/dL)`, `Niedrig`, `Hoch`).
 - Dexcom Clarity, Spanish: no published sample was found. The header follows Dexcom's Spanish labels
   (`Marca de tiempo (AAAA-MM-DDThh:mm:ss)`, `Tipo de evento`, `Valor de glucosa`). The importer finds the
-  timestamp column by its `...Thh:mm:ss)` pattern and the glucose column by its unit, so a different
-  wording of those two columns still reads. A real Spanish export should replace this file.
+  timestamp column by its `...Thh:mm:ss)` pattern, so another wording of that column still reads. The
+  glucose column needs one of the labels the importer knows (`Glucose Value`, `Glukosewert`,
+  `Valor de glucosa`: `CLARITY_GLUCOSE` in `cgm_csv.rs`) with its unit, mg/dL or mmol/L. A real Spanish
+  export should replace this file.
 
 The columns a file holds that the importer does not read (insulin, carbohydrates, notes, ketones) are
 known to it by these names. A column it does not know is reported in the import result.

@@ -483,7 +483,7 @@ pub async fn dispatch_upload(
 
 /// [`dispatch_upload`] with the time zone the browser sent (an IANA name the caller checked): a CGM
 /// export's job carries it (`timezone`), to read the export's wall-clock times when the server has no
-/// `OWNHEALTH_TIMEZONE`.
+/// `OWNHEALTH_TIMEZONE`, or one Postgres does not know.
 pub async fn dispatch_upload_in_zone(
     conn: &mut PgConnection,
     blobs: &BlobStore,

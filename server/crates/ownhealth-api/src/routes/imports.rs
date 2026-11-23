@@ -6,9 +6,9 @@
 //! GET  /api/jobs      ?ids=1,2,3&limit=50   import jobs of the caller's profiles, newest first
 //! ```
 //!
-//! `timezone` reads a CGM export's wall-clock times when the server has no `OWNHEALTH_TIMEZONE`. An old
-//! name the tz database links to a current one (`Asia/Calcutta`) travels as the current name; a zone
-//! still unknown travels as no zone, and the upload goes in all the same.
+//! `timezone` reads a CGM export's wall-clock times when the server has no `OWNHEALTH_TIMEZONE`, or one
+//! Postgres does not know. An old name the tz database links to a current one (`Asia/Calcutta`) travels
+//! as the current name; a zone still unknown travels as no zone, and the upload goes in all the same.
 //!
 //! Files are spooled to disk while the form is read, then land in the blob store once the caller may
 //! import on the profile; the dispatcher creates documents and enqueues each lane's import job.
