@@ -100,8 +100,13 @@ fn truthy(v: Option<&Value>) -> bool {
 }
 
 /// A held payload carries the values it would write: show it only to someone whose scopes would
-/// show the committed fact (its category scope, and read:sensitive for a sensitive one).
+/// show the committed fact (its category scope, and read:sensitive for a sensitive one). A held
+/// imaging study names the patient and the study, which the timeline and the viewer show only with
+/// read:records.
 fn visible(item: &ReviewItem, perm: &Permission) -> bool {
+    if item.kind == ownhealth_imaging::import::REVIEW_KIND && !perm.has("read:records") {
+        return false;
+    }
     let empty = Map::new();
     let p = item.payload.as_object().unwrap_or(&empty);
     let mut observations: Vec<&Map<String, Value>> = Vec::new();

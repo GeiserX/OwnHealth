@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 
 use axum::body::Body;
 use http::{Request, StatusCode, header};
-use lane_i::{App, R, app};
+use lane_i::{App, R, app, item};
 use ownhealth_core::Runtime;
 use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::orthanc::OrthancConfig;
@@ -246,5 +246,43 @@ async fn only_someone_who_may_import_on_the_profile_imports_and_only_with_imagin
     let (s, v) = post(&off, "alex", "/imaging/import", &[("profile", "alex")], &disc()).await?;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
     assert_eq!(v["detail"]["code"], "imaging_off", "{v}");
+    Ok(())
+}
+
+/// Narrows `who`'s grant on `profile` to these categories.
+async fn narrow(a: &App, who: &str, profile: &str, categories: &[&str]) -> R {
+    sqlx::query("update profile_grant set categories = $3 where user_id = $1 and profile_id = $2")
+        .bind(a.family.user(who))
+        .bind(a.family.profile(profile))
+        .bind(categories.iter().map(|c| c.to_string()).collect::<Vec<_>>())
+        .execute(&a.rt.pool)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_held_study_shows_in_review_only_to_those_who_may_read_records() -> R {
+    let a = imaging_app().await?;
+    let payload = json!({"import_id": Uuid::new_v4(), "study_uid": "1.2.826.0.1.3680043.10.999.41.5",
+        "reason": "identity_mismatch", "patient_name": "ORTEGA CARMEN", "patient_birth_date": "1955-01-30",
+        "modality": "MR", "study_date": "2026-09-14", "description": "RM CEREBRO", "series": 2,
+        "instances": 9, "filename": "cd.zip"});
+    let id = item(&a, "carmen", "imaging_study", Some(payload), json!({})).await?;
+    // alex is carmen's caregiver: with read:records he reviews the study
+    let (s, listed) = a.get("alex", "/review?profile=carmen").await?;
+    assert_eq!(s, StatusCode::OK, "{listed}");
+    assert!(listed.to_string().contains(&id.to_string()), "{listed}");
+    // without it, the item is withheld like the study itself
+    narrow(&a, "alex", "carmen", &["read:summary", "read:labs"]).await?;
+    let (s, listed) = a.get("alex", "/review?profile=carmen").await?;
+    assert_eq!(s, StatusCode::OK, "{listed}");
+    assert!(!listed.to_string().contains(&id.to_string()), "{listed}");
+    assert!(!listed.to_string().contains("ORTEGA"), "{listed}");
+    let (s, one) = a.get("alex", &format!("/review/{id}")).await?;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{one}");
+    let (s, v) = a.post("alex", &format!("/review/{id}/accept"), Some(json!({}))).await?;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+    let (s, v) = a.post("alex", &format!("/review/{id}/dismiss"), None).await?;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
     Ok(())
 }
