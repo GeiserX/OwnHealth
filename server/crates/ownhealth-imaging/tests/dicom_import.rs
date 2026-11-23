@@ -1286,6 +1286,43 @@ async fn round5_series_counts_cross_the_128_row_boundary() -> R {
     Ok(())
 }
 
+/// A study the person accepted despite an unreadable PatientID is recorded. The same files on a new
+/// upload are already stored: no new review item and no POST.
+#[tokio::test]
+async fn round6_an_accepted_charset_study_replays_as_a_no_op() -> R {
+    let e = env().await?;
+    let st = Study {
+        charset: "ISO_IR 192",
+        series: 1,
+        per_series: 2,
+        ..Study::new(U1, ALEX)
+    };
+    let mut files = study_files(&st, "DICOM");
+    patch(&mut files, b"ISO_IR 192", b"ISO_IR 148");
+    e.upload("alex", &files).await?;
+    e.run().await?;
+    assert_eq!(e.in_review("alex").await?, [(U1.into(), "unsupported_charset".into())]);
+    let item: Uuid = sqlx::query_scalar("select id from review_item where kind = $1")
+        .bind(REVIEW_KIND)
+        .fetch_one(&e.rt.pool)
+        .await?;
+    let mut c = e.rt.pool.acquire().await?;
+    ownhealth_core::review::accept(&mut c, item, e.fam.user("alex"), None).await?;
+    drop(c);
+    e.run().await?;
+    assert!(e.recorded(U1).await?.is_some());
+    let posts = e.orthanc.posts();
+    files.push(("README.TXT".into(), b"same disc, copied again".to_vec()));
+    let up = e.upload("alex", &files).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(e.in_review("alex").await?, [], "{result}");
+    assert_eq!(result["already"], 1, "{result}");
+    assert_eq!(e.orthanc.posts(), posts);
+    Ok(())
+}
+
 /// Orthanc with OverwriteInstances answers Success to a POST of an instance it held already. A
 /// retry after a lost reply must still never delete that instance.
 #[tokio::test]

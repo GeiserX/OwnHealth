@@ -130,6 +130,7 @@ pub struct StudyScan {
 #[derive(Debug, Clone)]
 struct Instance {
     index: usize,
+    series_uid: String,
     sop_uid: String,
     expected_id: Option<String>,
     report: bool,
@@ -283,6 +284,7 @@ fn add(s: &mut Scan, i: usize, h: Header) {
     }
     study.entries.push(Instance {
         index: i,
+        series_uid: h.series_instance_uid,
         sop_uid: h.sop_instance_uid,
         expected_id,
         report,
@@ -542,18 +544,21 @@ struct RecordRow {
 }
 
 /// A replay can skip POSTs only when each uploaded SOP exists under this study's identity.
-async fn holds_all(orthanc: &Orthanc, study: &StudyScan) -> Result<bool, JobError> {
+/// `patient_id` is the PatientID Orthanc holds the recorded study under. It names the instance
+/// even when the reader could not decode the PatientID of the file.
+async fn holds_all(orthanc: &Orthanc, uid: &str, patient_id: &str, study: &StudyScan) -> Result<bool, JobError> {
     let mut checked = BTreeSet::new();
     for instance in &study.entries {
-        let Some(expected) = &instance.expected_id else {
-            return Ok(false);
-        };
-        if checked.insert(expected)
+        let expected = instance
+            .expected_id
+            .clone()
+            .unwrap_or_else(|| resource_id(&[patient_id, uid, &instance.series_uid, &instance.sop_uid]));
+        if checked.insert(expected.clone())
             && !orthanc
                 .instances_under(&instance.sop_uid)
                 .await
                 .map_err(retry)?
-                .contains(expected)
+                .contains(&expected)
         {
             return Ok(false);
         }
@@ -826,7 +831,8 @@ async fn import_study(
     let mut retained_reports = BTreeSet::new();
     let (orthanc_id, series) = if let (Some(r), [id]) = (recorded, current.as_slice())
         && r.orthanc_id.as_ref() == Some(id)
-        && holds_all(orthanc, study).await?
+        // The check above found Orthanc's study under this UID filed under this PatientID.
+        && holds_all(orthanc, uid, patient_id, study).await?
     {
         // A retry can find its verified instances in Orthanc before the record update committed.
         retained_reports.extend(
