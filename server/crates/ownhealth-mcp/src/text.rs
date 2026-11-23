@@ -146,17 +146,24 @@ pub fn render(env: &Value, tool: &str) -> String {
         .and_then(Value::as_array)
         .map(|a| a.iter().map(py_str).collect())
         .unwrap_or_default();
-    if w.get("sensitive").is_some_and(truthy) || w.get("minor_rule").is_some_and(truthy) || !by_scope.is_empty() {
+    let vendor_terms = w.get("vendor_terms").filter(|v| truthy(v));
+    if w.get("sensitive").is_some_and(truthy)
+        || w.get("minor_rule").is_some_and(truthy)
+        || !by_scope.is_empty()
+        || vendor_terms.is_some()
+    {
         let num = |k: &str| w.get(k).map_or_else(|| "0".to_string(), py_str);
         out.push(format!(
-            "withheld: sensitive={} minor_rule={} by_scope={}",
+            "withheld: sensitive={} minor_rule={} by_scope={}{}",
             num("sensitive"),
             num("minor_rule"),
             if by_scope.is_empty() {
                 "none".to_string()
             } else {
                 by_scope.join(",")
-            }
+            },
+            // days a provider's terms keep from agents (providers.yaml); absent from older answers
+            vendor_terms.map_or_else(String::new, |v| format!(" vendor_terms={}", py_str(v)))
         ));
     }
     for key in ["limitations", "not_assessed", "evidence"] {

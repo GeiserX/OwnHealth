@@ -1,0 +1,37 @@
+# What OwnHealth does with each wearable provider's data, keyed on `wearable_source.provider`
+# (server/crates/ownhealth-core/src/providers.rs reads this file; it is compiled in).
+#
+# ingest   allow: samples from this provider are stored.
+#          drop: a connector that meets the provider drops and counts its samples, never stores them.
+# mcp      served: MCP, the rule-pack markers and the calculators read its data.
+#          withheld: they never see it. An MCP answer counts the days left out in
+#          `withheld.vendor_terms`. Only the Wearables page and its REST routes read every provider.
+# path     how the data arrives (documentation only).
+#
+# A provider this file does not name is withheld from MCP and dropped at ingest: a new importer adds
+# its line here, and ownhealth-devices tests/providers.rs checks that every importer has one.
+#
+# A provider moves from withheld to served only when its connector page quotes the vendor's primary
+# terms and they show no ban on AI processing (docs/design/connectors.md section 4). File exports of
+# a person's own data are that person's files; API terms do not reach them.
+version: 1
+providers:
+  # Files and pushes of the person's own data
+  apple_health: {ingest: allow, mcp: served, path: "Apple Health export zip"}
+  health_auto_export: {ingest: allow, mcp: served, path: "Health Auto Export push"}
+  gadgetbridge: {ingest: allow, mcp: served, path: "Gadgetbridge database export"}
+  nightscout: {ingest: allow, mcp: served, path: "the person's own Nightscout"}
+  fit: {ingest: allow, mcp: served, path: "FIT activity files (Garmin, Coros, Suunto exports)"}
+  strava_export: {ingest: allow, mcp: served, path: "Strava bulk account export"}
+  libreview: {ingest: allow, mcp: served, path: "LibreView CSV export"}
+  dexcom_clarity: {ingest: allow, mcp: served, path: "Dexcom Clarity CSV export"}
+  # Vendor APIs through Open Wearables: the sidecar's allowlist
+  oura: {ingest: allow, mcp: withheld, path: "Open Wearables"}
+  whoop: {ingest: allow, mcp: withheld, path: "Open Wearables"}
+  polar: {ingest: allow, mcp: withheld, path: "Open Wearables"}
+  withings: {ingest: allow, mcp: withheld, path: "Open Wearables"}
+  # Vendor APIs we connect to ourselves
+  dexcom: {ingest: allow, mcp: withheld, path: "Dexcom API v3 (native connector)"}
+  # Never stored: the Strava API terms ban AI use and MCP servers; Garmin comes in as export files
+  strava: {ingest: drop, mcp: withheld, path: "Strava API"}
+  garmin: {ingest: drop, mcp: withheld, path: "Open Wearables (off)"}

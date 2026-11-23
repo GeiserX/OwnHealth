@@ -13,12 +13,17 @@
 //!
 //! HRV is the exception: each vendor measures it its own way, so an HRV series takes one source for
 //! the whole window (the best one with data there) and names the sources it left out.
+//!
+//! The provider policy (`data/connectors/providers.yaml`) applies at query time too: a series read as
+//! [`Reader::Shared`] (MCP) leaves out every provider the policy withholds and counts the buckets it
+//! left out; only the Wearables page and its REST routes read as [`Reader::WearablesPage`].
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use ownhealth_core::Result;
+pub use ownhealth_core::providers::Reader;
 use ownhealth_core::pyjson::{f32_json, py_isoformat_utc, pydantic_datetime_utc};
 use serde_json::{Value, json};
 use sqlx::{AssertSqlSafe, PgConnection};
@@ -423,6 +428,7 @@ type RollupRow = (
     Option<f32>,
     f32,
     Option<String>,
+    String,
 );
 
 /// A real as Python read it: the float of the text Postgres printed.
@@ -443,11 +449,14 @@ pub struct Series {
     pub left_out: Vec<String>,
     /// The same name for the one source an HRV series shows; None for every other metric.
     pub shown: Option<String>,
+    /// Buckets in the window (days, for a daily series) that hold data of a provider the reader may
+    /// not see; always 0 for [`Reader::WearablesPage`]. A count only: never a value or a name.
+    pub withheld: usize,
 }
 
 /// One point per bucket with data, taken from the best source that has that bucket. Buckets without
 /// data are absent; callers fill gaps if they draw them. An HRV series takes every point from one
-/// source: the best one with data in the window.
+/// source: the best one with data in the window. `reader` decides which providers count at all.
 pub async fn points(
     conn: &mut PgConnection,
     profile_id: Uuid,
@@ -455,15 +464,16 @@ pub async fn points(
     since: DateTime<Utc>,
     until: DateTime<Utc>,
     resolution: &str,
+    reader: Reader,
 ) -> Result<Vec<Point>> {
     Ok(
-        points_and_left_out(conn, profile_id, metric_key, since, until, resolution)
+        points_and_left_out(conn, profile_id, metric_key, since, until, resolution, reader)
             .await?
             .points,
     )
 }
 
-/// `points`, plus the sources an HRV series left out.
+/// `points`, plus the sources an HRV series left out and the buckets the provider policy withheld.
 pub async fn points_and_left_out(
     conn: &mut PgConnection,
     profile_id: Uuid,
@@ -471,6 +481,7 @@ pub async fn points_and_left_out(
     since: DateTime<Utc>,
     until: DateTime<Utc>,
     resolution: &str,
+    reader: Reader,
 ) -> Result<Series> {
     let info = metric(metric_key);
     let order = order(&mut *conn, profile_id, metric_key).await?;
@@ -488,7 +499,7 @@ pub async fn points_and_left_out(
         .collect();
     let mut rows: Vec<RollupRow> = sqlx::query_as(
         "select r.t, r.source_id, r.n, r.v_min, r.v_max, r.v_avg, r.v_sum, r.v_p10, r.v_p50, r.v_p90, r.coverage, \
-         ws.device from wearable_rollup r join wearable_source ws on ws.id = r.source_id \
+         ws.device, ws.provider from wearable_rollup r join wearable_source ws on ws.id = r.source_id \
          where r.profile_id = $1 and r.metric = $2 and r.bucket = $3 and r.t >= $4 and r.t <= $5 order by r.t",
     )
     .bind(profile_id)
@@ -498,6 +509,15 @@ pub async fn points_and_left_out(
     .bind(until)
     .fetch_all(&mut *conn)
     .await?;
+    // the provider policy first: a withheld provider is neither a point, nor a choice, nor a name
+    let mut withheld: BTreeSet<DateTime<Utc>> = BTreeSet::new();
+    rows.retain(|r| {
+        let sees = reader.sees(&r.12);
+        if !sees {
+            withheld.insert(r.0);
+        }
+        sees
+    });
     let rank_of = |s: i16| rank.get(&s).copied().unwrap_or(99);
     // each source's points in the window and its newest one
     let mut seen: HashMap<i16, (usize, DateTime<Utc>)> = HashMap::new();
@@ -564,6 +584,7 @@ pub async fn points_and_left_out(
         points,
         left_out,
         shown,
+        withheld: withheld.len(),
     })
 }
 
@@ -584,6 +605,11 @@ pub fn left_out_names(series: &Series) -> Option<(&str, Vec<&str>)> {
 /// them beside this sentence as untrusted text.
 pub const LEFT_OUT_SENTENCE: &str =
     "HRV from one source only (shown). Not mixed with HRV from other sources in this window (left_out).";
+
+/// The MCP limitation when a series left out days of a provider the policy withholds
+/// (`ownhealth_core::providers`); the count is `withheld.vendor_terms`. It names no vendor.
+pub const VENDOR_TERMS_SENTENCE: &str = "Days from a wearable vendor whose terms keep its data from AI agents are left out; \
+     withheld.vendor_terms counts them.";
 
 /// The limitation line of a one-source series per registry language; `{shown}` is the source shown,
 /// `{rest}` the list of the others (empty, or `: a, b`).
@@ -619,6 +645,7 @@ pub fn phrases() -> Value {
         points: Vec::new(),
         left_out: vec!["Whoop 4.0".into()],
         shown: Some("Oura Ring".into()),
+        withheld: 0,
     };
     let same = Series {
         left_out: vec!["Oura Ring".into()],
@@ -633,7 +660,7 @@ pub fn phrases() -> Value {
             )
         })
         .collect();
-    out.insert("mcp".into(), json!([LEFT_OUT_SENTENCE]));
+    out.insert("mcp".into(), json!([LEFT_OUT_SENTENCE, VENDOR_TERMS_SENTENCE]));
     Value::Object(out)
 }
 
@@ -646,10 +673,11 @@ pub async fn series(
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
     resolution: &str,
+    reader: Reader,
 ) -> Result<Value> {
     let since = since.unwrap_or_else(|| day_start(NaiveDate::from_ymd_opt(1, 1, 1).unwrap_or_default()));
     let until = until.unwrap_or_else(|| day_start(NaiveDate::from_ymd_opt(9999, 12, 31).unwrap_or_default()));
-    let pts = points(conn, profile_id, metric_key, since, until, resolution).await?;
+    let pts = points(conn, profile_id, metric_key, since, until, resolution, reader).await?;
     Ok(Value::Array(
         pts.into_iter()
             .map(|p| {
@@ -757,6 +785,7 @@ mod note_tests {
             points: Vec::new(),
             left_out: left_out.iter().map(|s| (*s).to_string()).collect(),
             shown: Some(shown.into()),
+            withheld: 0,
         }
     }
 

@@ -1165,7 +1165,7 @@ async fn without_an_office_reading_the_wearable_mean_is_read_with_its_window() -
     // the seed writes its own source ids, so this one takes the next free id
     let source: i16 = sqlx::query_scalar(
         "insert into wearable_source (id, profile_id, provider, device) overriding system value \
-         values ((select coalesce(max(id), 0) + 1 from wearable_source), $1, 'test', 'cuff') returning id",
+         values ((select coalesce(max(id), 0) + 1 from wearable_source), $1, 'health_auto_export', 'cuff') returning id",
     )
     .bind(alex)
     .fetch_one(&mut *tx)
@@ -1188,7 +1188,7 @@ async fn without_an_office_reading_the_wearable_mean_is_read_with_its_window() -
     // picked from the same 30 days the mean reads
     let old_cuff: i16 = sqlx::query_scalar(
         "insert into wearable_source (id, profile_id, provider, device) overriding system value \
-         values ((select coalesce(max(id), 0) + 1 from wearable_source), $1, 'test', 'old cuff') returning id",
+         values ((select coalesce(max(id), 0) + 1 from wearable_source), $1, 'health_auto_export', 'old cuff') returning id",
     )
     .bind(alex)
     .fetch_one(&mut *tx)
