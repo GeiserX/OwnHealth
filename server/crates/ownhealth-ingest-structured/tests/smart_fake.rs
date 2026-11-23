@@ -2124,3 +2124,55 @@ async fn a_refused_access_tokens_body_counts_against_the_run_budget() -> R {
     assert_eq!((book.unauthorized, book.refreshes), (1, 1));
     Ok(())
 }
+
+#[tokio::test]
+async fn a_relative_patient_reference_uses_the_entry_fhir_base() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/Procedure.s".into(),
+        ..Behaviour::default()
+    })
+    .await?;
+    let entry = |id, base: Option<&str>, reference| {
+        let mut entry = json!({"resource": {
+            "resourceType": "Procedure", "id": id, "status": "completed",
+            "subject": {"reference": reference}, "code": {"text": "Synthetic"},
+        }});
+        if let Some(base) = base {
+            entry["fullUrl"] = json!(format!("{base}/Procedure/{id}"));
+        }
+        ("Procedure", entry)
+    };
+    let issuer = w.fake.issuer();
+    let other_base = format!("{issuer}/other");
+    w.fake.book().extra_search_entries.extend([
+        entry("own-base", Some(&issuer), format!("Patient/{PATIENT}/_history/2")),
+        entry("no-full-url", None, format!("Patient/{PATIENT}")),
+        entry("other-base", Some(&other_base), format!("Patient/{PATIENT}")),
+        entry(
+            "other-host",
+            Some("https://other.example/fhir"),
+            format!("Patient/{PATIENT}"),
+        ),
+        entry("absolute-own", Some(&other_base), format!("{issuer}/Patient/{PATIENT}")),
+    ]);
+    let mut unresolvable = entry("unresolvable-base", None, format!("Patient/{PATIENT}"));
+    unresolvable.1["fullUrl"] = json!("urn:uuid:fe67141b-1254-46d4-a6f4-76d49799d317");
+    w.fake.book().extra_search_entries.push(unresolvable);
+    let source = w.connect(t0()).await?;
+    let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+    let bundle = w.stored_bundle(source).await?;
+    let entries = bundle["entry"].as_array().expect("the snapshot has entries");
+    let ids: BTreeSet<_> = entries
+        .iter()
+        .filter_map(|entry| entry["resource"]["id"].as_str())
+        .collect();
+    for kept in ["own-base", "no-full-url", "absolute-own"] {
+        assert!(ids.contains(kept), "{ids:?}");
+    }
+    for rejected in ["other-base", "other-host", "unresolvable-base"] {
+        assert!(!ids.contains(rejected), "{ids:?}");
+    }
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
+    assert_eq!(got.problems[0].code, "patient_reference");
+    Ok(())
+}

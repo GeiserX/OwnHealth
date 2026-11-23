@@ -517,9 +517,19 @@ async fn fetch(r: &mut Reader, g: &mut Gathered, rtype: &str, url: &str) -> Resu
     }
 }
 
+/// The root of a RESTful fullUrl whose final segments identify this entry's resource.
+fn entry_fhir_base(entry: &Value) -> Option<&str> {
+    let full = entry["fullUrl"].as_str()?;
+    let (before_id, id) = full.rsplit_once('/')?;
+    let (base, kind) = before_id.rsplit_once('/')?;
+    let resource = &entry["resource"];
+    (resource["resourceType"] == kind && resource["id"] == id && fhir_id(id)).then_some(base)
+}
+
 /// A clinical result must name the verified patient. A Patient names itself by id, and a
 /// Medication may be included without a patient reference because it describes the drug.
-fn belongs_to_patient(resource: &Value, base: &str, patient: &str) -> bool {
+fn belongs_to_patient(entry: &Value, base: &str, patient: &str) -> bool {
+    let resource = &entry["resource"];
     if resource["resourceType"] == "Patient" && resource["id"] != patient {
         return false;
     }
@@ -530,16 +540,26 @@ fn belongs_to_patient(resource: &Value, base: &str, patient: &str) -> bool {
         .peekable();
     (!needs_reference || references.peek().is_some())
         && references.all(|reference| {
-            let relative = reference
-                .strip_prefix(base)
-                .and_then(|suffix| suffix.strip_prefix('/'))
-                .unwrap_or(reference);
-            relative.strip_prefix("Patient/").is_some_and(|id| {
-                id == patient
-                    || id
-                        .split_once("/_history/")
-                        .is_some_and(|(id, version)| id == patient && fhir_id(version))
-            })
+            let (reference, version) = reference
+                .split_once("/_history/")
+                .map_or((reference, None), |(url, version)| (url, Some(version)));
+            if version.is_some_and(|version| !fhir_id(version)) {
+                return false;
+            }
+            let Some((root, id)) = (if let Some(id) = reference.strip_prefix("Patient/") {
+                // A present fullUrl must supply the root. Without it, use the search server.
+                if entry.get("fullUrl").is_none() {
+                    Some((base, id))
+                } else {
+                    entry_fhir_base(entry).map(|root| (root, id))
+                }
+            } else {
+                reference.rsplit_once("/Patient/")
+            }) else {
+                return false;
+            };
+            id == patient
+                && url::Url::parse(root).is_ok_and(|root| url::Url::parse(base).is_ok_and(|base| root == base))
         })
 }
 
@@ -653,7 +673,7 @@ fn gather_entries(
             g.skip("unreadable", 1);
         } else if e["search"]["mode"] == "outcome" || t == "OperationOutcome" {
             g.skip("outcome", 1);
-        } else if !belongs_to_patient(res, base, patient) {
+        } else if !belongs_to_patient(e, base, patient) {
             g.problem("patient_reference", words::patient_reference(rtype));
         } else if t == "Medication" && !include_medication {
             g.skip("not_granted", 1);
