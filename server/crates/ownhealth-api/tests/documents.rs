@@ -863,7 +863,15 @@ async fn an_accept_racing_a_move_is_checked_against_the_owner_the_move_left() ->
     });
     committed?;
     let second = second?;
-    assert_ne!(second.status, StatusCode::OK, "{}", second.json());
+    assert!(
+        matches!(
+            second.status,
+            StatusCode::FORBIDDEN | StatusCode::NOT_FOUND | StatusCode::CONFLICT
+        ),
+        "unexpected response to Sam's accept: {} {}",
+        second.status,
+        second.json()
+    );
     assert_eq!(owner_of(&a, doc).await?, Some(alex));
     drop_moved(&a).await?;
     assert_eq!(sealed_of(&a, sam)?, 0, "Sam's key got a copy of Alex's document");
