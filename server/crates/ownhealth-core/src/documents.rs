@@ -570,10 +570,14 @@ pub async fn dispatch_upload_in_zone(
                 if *kind == "fhir_ndjson" {
                     payload["format"] = json!("ndjson");
                 }
+                let mut key = format!("{job}:{profile_id}:{}", f.sha256);
                 if job == "import.cgm_csv"
                     && let Some(z) = zone
                 {
                     payload["timezone"] = json!(z);
+                    // the same file sent again in another zone is read again in it, even while the job
+                    // of the first sending is still queued or running
+                    key = format!("{key}:{z}");
                 }
                 if *kind == "genome_facts" {
                     let attached: Map<String, Value> = kinds
@@ -583,7 +587,6 @@ pub async fn dispatch_upload_in_zone(
                         .collect();
                     payload["files"] = Value::Object(attached);
                 }
-                let key = format!("{job}:{profile_id}:{}", f.sha256);
                 let id = enqueue(&mut *conn, job, &payload, EnqueueOptions::dedupe(&key)).await?;
                 item.insert("job_id".into(), job_id_json(id));
             }

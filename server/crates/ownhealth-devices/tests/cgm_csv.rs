@@ -1581,3 +1581,54 @@ async fn a_retraction_runs_again_an_export_whose_last_run_again_died() -> R {
     assert_eq!((count("a.csv"), count("b.csv")), (0, 24), "{r:?}");
     Ok(())
 }
+
+/// Send the stored file `sha` to Lucía as the upload route does, with the browser's `zone`; its job id.
+async fn send_in_zone(env: &Env, sha: &str, size: usize, zone: &str) -> anyhow::Result<Option<i64>> {
+    let mut c = env.db.pool.acquire().await?;
+    let out = documents::dispatch_upload_in_zone(
+        &mut c,
+        &env.blobs,
+        env.fam.household_id,
+        env.fam.profile("lucia"),
+        &[StoredFile {
+            filename: "clarity.csv".into(),
+            sha256: sha.to_string(),
+            size: size as i64,
+        }],
+        None,
+        Some(zone),
+    )
+    .await?;
+    Ok(out["items"][0]["job_id"].as_i64())
+}
+
+/// The same file sent again from a browser in another zone while the job of the first sending still
+/// waits: it is a job of its own, so the file ends read in the zone it was sent in last. Sent again in
+/// the same zone, it is still the one job.
+#[tokio::test]
+async fn the_same_file_sent_again_in_another_zone_before_its_job_runs_is_read_in_that_zone() -> R {
+    let env = Env::new().await?;
+    let bytes = fixture("clarity-en-mgdl.csv")?;
+    let sha = env
+        .blobs
+        .put_bytes(BlobOwner::Profile(env.fam.profile("lucia")), &bytes)?;
+    let mut ids = Vec::new();
+    for zone in ["UTC", "Europe/Madrid", "Europe/Madrid"] {
+        ids.push(send_in_zone(&env, &sha, bytes.len(), zone).await?);
+    }
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    // 20:00:17 in Madrid in November is 19:00:17 UTC (CET, +60)
+    let r = readings(&env, "lucia").await?;
+    assert_eq!(
+        (r.len(), r.first().copied()),
+        (8, Some((utc(2026, 11, 14, 19, 0, 17), 120.0, Some(60)))),
+        "{ids:?}"
+    );
+    let zone: Value = sqlx::query_scalar("select flags->'cgm_csv'->'timezone' from document where profile_id = $1")
+        .bind(env.fam.profile("lucia"))
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(zone, json!("Europe/Madrid"));
+    assert!(ids[0].is_some() && ids[1].is_some() && ids[2].is_none(), "{ids:?}");
+    Ok(())
+}
