@@ -825,10 +825,25 @@ async fn a_contact_feed_never_carries_the_request() -> R {
     assert_eq!(b.uses(id).await?, 0);
 
     // Alex's unmeasured labs have due items. An ordinary grant that adds labs carries those events.
+    let due = b.alex.get("/api/profiles/alex/due").await?;
+    assert_eq!(due.status, 200, "{:?}", due.json);
+    let lab_uids: Vec<String> = due.json["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| {
+            i["labs"] == true && ["overdue", "due", "upcoming"].contains(&i["status"].as_str().unwrap_or_default())
+        })
+        .filter_map(|i| i["key"].as_str())
+        .map(|key| ownhealth_api::routes::ics::uid(b.alex_id(), key))
+        .collect();
+    assert!(!lab_uids.is_empty(), "{:?}", due.json);
+    let uids = |events: &[CalendarEvent]| events.iter().map(|e| e.0.clone()).collect::<Vec<_>>();
+    assert!(lab_uids.iter().all(|u| !uids(&before).contains(u)), "{before:?}");
     b.grant_sam("viewer", &["read:summary", "read:records", "read:labs"])
         .await?;
     let with_labs = calendar_events(b.env.anon().get(&path).await?)?;
-    assert!(with_labs.iter().any(|event| !before.contains(event)), "{with_labs:?}");
+    assert!(lab_uids.iter().all(|u| uids(&with_labs).contains(u)), "{with_labs:?}");
     Ok(())
 }
 
@@ -2091,7 +2106,12 @@ async fn single_review_needs_the_ordinary_scope_of_the_source_document() -> R {
     let mut sam = b.sam().await?;
     let endpoint = format!("/api/review/{item}/accept");
     let r = sam.post(&endpoint, &json!({})).await?;
-    assert_eq!((r.status.as_u16(), r.code()), (403, "insufficient_scope"), "{:?}", r.json);
+    assert_eq!(
+        (r.status.as_u16(), r.code()),
+        (403, "insufficient_scope"),
+        "{:?}",
+        r.json
+    );
     b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
     let r = sam.post(&endpoint, &json!({})).await?;
     assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
@@ -2122,7 +2142,12 @@ async fn review_counts_hold_only_what_the_list_shows() -> R {
 
     b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
     let review = sam.get("/api/review").await?;
-    assert_eq!(review.json["items"].as_array().map(Vec::len), Some(1), "{:?}", review.json);
+    assert_eq!(
+        review.json["items"].as_array().map(Vec::len),
+        Some(1),
+        "{:?}",
+        review.json
+    );
     assert_eq!(review.json["open"], 1, "{:?}", review.json);
     assert_eq!(sam.get("/api/me").await?.json["review_open"], 1);
     Ok(())
