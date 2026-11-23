@@ -1148,12 +1148,12 @@ async fn record_study(
 
 /// The study as a FHIR ImagingStudy, with the series and instances Orthanc holds.
 fn study_fhir(uid: &str, date: Option<NaiveDate>, description: Option<&str>, series: &[SeriesInfo]) -> Value {
+    // A series with no Modality is OT (other), in the series and in the study's list.
+    fn modality(s: &SeriesInfo) -> &str {
+        if s.modality.is_empty() { "OT" } else { &s.modality }
+    }
     let coding = |m: &str| json!({"system": "http://dicom.nema.org/resources/ontology/DCM", "code": m});
-    let modalities: BTreeSet<&str> = series
-        .iter()
-        .map(|s| s.modality.as_str())
-        .filter(|m| !m.is_empty())
-        .collect();
+    let modalities: BTreeSet<&str> = series.iter().map(modality).collect();
     let mut fhir = json!({
         "resourceType": "ImagingStudy",
         "status": "available",
@@ -1163,7 +1163,7 @@ fn study_fhir(uid: &str, date: Option<NaiveDate>, description: Option<&str>, ser
         "numberOfInstances": series.iter().map(|s| s.instances).sum::<usize>(),
         "series": series.iter().map(|s| json!({
             "uid": s.uid,
-            "modality": coding(if s.modality.is_empty() { "OT" } else { &s.modality }),
+            "modality": coding(modality(s)),
             "numberOfInstances": s.instances,
         })).collect::<Vec<_>>(),
     });

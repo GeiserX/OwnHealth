@@ -1122,12 +1122,12 @@ async fn round5_an_exported_study_has_a_modality_for_every_series() -> R {
         .by_name("fhir/ImagingStudy.ndjson")?
         .read_to_string(&mut resource)?;
     let resource: Value = serde_json::from_str(resource.trim())?;
+    let coding = |code| serde_json::json!({"system": "http://dicom.nema.org/resources/ontology/DCM", "code": code});
     for (index, code) in ["OT", "DOC"].into_iter().enumerate() {
-        assert_eq!(
-            resource["series"][index]["modality"],
-            serde_json::json!({"system": "http://dicom.nema.org/resources/ontology/DCM", "code": code}),
-        );
+        assert_eq!(resource["series"][index]["modality"], coding(code));
     }
+    // The study lists every modality its series carry, OT included.
+    assert_eq!(resource["modality"], serde_json::json!([coding("DOC"), coding("OT")]));
     Ok(())
 }
 
