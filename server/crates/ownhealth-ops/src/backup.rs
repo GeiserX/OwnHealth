@@ -1075,8 +1075,10 @@ fn ring_keys(
                 .and_then(|k| k.unwrap(id, &out.fingerprint, w).ok())
                 .ok_or_else(|| {
                     ops_error(format!(
-                        "the keyring {} has a key for profile {id} that cannot be opened with \
-                     OWNHEALTH_SECRETS_KEY: put back this install's keyring.json; nothing was loaded",
+                        "the keyring {} holds a damaged key for profile {id}: it does not open with \
+                         OWNHEALTH_SECRETS_KEY. Put back an undamaged copy of this install's keyring.json. \
+                         When no such copy exists, remove that entry from keyring.json and restore with \
+                         {ALLOW_MISSING}: that profile's files stay closed; nothing was loaded",
                         file.display()
                     ))
                 })?;
@@ -1115,6 +1117,14 @@ async fn load_keys(url: &str, ring: &mut RingKeys) -> Result<()> {
         if !keyed {
             return Ok(());
         }
+        // the profiles whose key the dump still holds and a tombstone closes: deleted since the dump
+        ring.shredded = sqlx::query_scalar(
+            "select profile_id from profile_key where profile_id = any($1) and wrapped_dek is not null \
+             order by profile_id",
+        )
+        .bind(&ring.tombstones)
+        .fetch_all(&mut *tx)
+        .await?;
         ring.legacy_tombstones_added = sqlx::query_scalar(
             "select count(*) from unnest($1::uuid[]) as tombstone(id) \
              where not exists (select 1 from profile_key where profile_id = tombstone.id)",

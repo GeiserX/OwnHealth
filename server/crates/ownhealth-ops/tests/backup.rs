@@ -1105,6 +1105,11 @@ async fn a_damaged_present_key_is_rejected_before_restore_even_with_allow_missin
         err.contains("nothing was loaded") && err.contains(&l.alex.to_string()),
         "{err}"
     );
+    // the way forward when no clean copy is left: drop that entry and go on without its key
+    assert!(
+        err.contains("damaged") && err.contains("remove that entry") && err.contains("--allow-missing-keys"),
+        "{err}"
+    );
     assert_eq!(public_tables(&db).await?, 0);
     keyfile::write(&l.settings.keyring_path(), &original)?;
     let report = ownhealth_ops::restore(&fresh, &l.archive).await?;
@@ -1193,6 +1198,8 @@ async fn a_legacy_dump_obeys_tombstones_and_keeps_its_other_profile_keys() -> R 
         .collect();
     assert!(wrapped[&l.alex].is_none());
     assert!(wrapped[&already_deleted].is_none());
+    // the report names the profile whose key in the dump the tombstone closed
+    assert_eq!(report["keys"]["shredded"], serde_json::json!([l.alex]), "{report:#}");
     for (id, key) in &ring.profiles {
         assert!(wrapped[id].as_ref() == Some(key));
     }
