@@ -693,9 +693,11 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     for (slot, wrapped, fingerprint) in &wrapped {
         let dek = kek.as_ref().map(|k| k.unwrap_slot(*slot, fingerprint, wrapped));
         if let keys::Slot::Profile(profile) = slot {
-            let dek = dek
-                .transpose()?
-                .ok_or_else(|| ops_error("profile keys require OWNHEALTH_SECRETS_KEY"))?;
+            let dek = dek.and_then(std::result::Result::ok).ok_or_else(|| {
+                ops_error(format!(
+                    "the key for profile {profile} does not open with this OWNHEALTH_SECRETS_KEY"
+                ))
+            })?;
             key_ids.insert(profile.to_string(), dek.archive_id());
             deks.insert(*slot, dek);
         } else if let Some(Ok(dek)) = dek {
