@@ -244,8 +244,15 @@ async fn an_hrv_series_never_chooses_or_names_a_withheld_vendor() -> R {
         assert_eq!(values(&env, "points"), vec![Some(44.0); 3], "{env}");
         assert_eq!(vendor_terms(&env), 20, "{env}");
         assert!(says_vendor_terms(&env), "{env}");
-        assert!(dumps(&env).contains("Forerunner 265"), "the served source left out is named: {env}");
-        assert!(!dumps(&env).contains("Oura") && !res.text.contains("Oura"), "{env}\n{}", res.text);
+        assert!(
+            dumps(&env).contains("Forerunner 265"),
+            "the served source left out is named: {env}"
+        );
+        assert!(
+            !dumps(&env).contains("Oura") && !res.text.contains("Oura"),
+            "{env}\n{}",
+            res.text
+        );
     };
     let trend = json!({"profile": "alex", "code": "hrv_rmssd", "window": "P30D", "resolution": "day"});
     let c = w.connect_real(&w.tok().await?).await?;
@@ -267,7 +274,11 @@ async fn the_output_schema_names_vendor_terms() -> R {
     let c = w.connect(&w.tok().await?).await?;
     for t in c.list_tools().await? {
         let withheld = &t["outputSchema"]["properties"]["withheld"];
-        assert_eq!(withheld["properties"]["vendor_terms"]["type"], "integer", "{}", t["name"]);
+        assert_eq!(
+            withheld["properties"]["vendor_terms"]["type"], "integer",
+            "{}",
+            t["name"]
+        );
         // optional: absent when nothing was left out
         let required = withheld["required"].as_array().cloned().unwrap_or_default();
         assert!(!required.contains(&json!("vendor_terms")), "{}", t["name"]);
