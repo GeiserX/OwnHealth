@@ -858,10 +858,14 @@ pub fn assert_envelope(env: &Value) {
         .unwrap_or_default();
     let want: Vec<&str> = ownhealth_mcp::envelope::ENVELOPE_KEYS.to_vec();
     assert_eq!(keys, want);
-    let w: BTreeSet<&str> = env["withheld"]
+    let mut w: BTreeSet<&str> = env["withheld"]
         .as_object()
         .map(|m| m.keys().map(String::as_str).collect())
         .unwrap_or_default();
+    // vendor_terms (the provider policy) only when an answer left days out, as a positive count
+    if w.remove("vendor_terms") {
+        assert!(env["withheld"]["vendor_terms"].as_i64().is_some_and(|n| n > 0), "{env}");
+    }
     assert_eq!(w, ["by_scope", "minor_rule", "sensitive"].into_iter().collect());
     assert!(truthy(&env["notice"]));
 }

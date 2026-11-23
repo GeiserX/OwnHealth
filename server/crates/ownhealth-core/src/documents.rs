@@ -495,13 +495,23 @@ pub async fn dispatch_upload_in_zone(
 ) -> Result<Value> {
     let mut kinds: Vec<(&StoredFile, UploadKind)> = Vec::new();
     for f in files {
-        let owner = BlobOwner::Profile(profile_id);
-        let mut head = Vec::with_capacity(4096);
-        blobs.open_seek(owner, &f.sha256)?.take(4096).read_to_end(&mut head)?;
-        let copy = is_zip(&head)
-            .then(|| blobs.with_local_copy(owner, &f.sha256))
-            .transpose()?;
-        kinds.push((f, sniff(&f.filename, &head, copy.as_ref().map(|c| c.path()))));
+        let (store, owner, sha, name) = (
+            blobs.clone(),
+            BlobOwner::Profile(profile_id),
+            f.sha256.clone(),
+            f.filename.clone(),
+        );
+        // off the runtime: a plain file of an older install is hashed once when it opens, and a zip is
+        // decrypted whole into a local copy
+        let kind = tokio::task::spawn_blocking(move || -> Result<UploadKind> {
+            let mut head = Vec::with_capacity(4096);
+            store.open_seek(owner, &sha)?.take(4096).read_to_end(&mut head)?;
+            let copy = is_zip(&head).then(|| store.with_local_copy(owner, &sha)).transpose()?;
+            Ok(sniff(&name, &head, copy.as_ref().map(|c| c.path())))
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        kinds.push((f, kind));
     }
     let has_facts = kinds.iter().any(|(_, k)| *k == "genome_facts");
     let mut items = Vec::new();
@@ -780,6 +790,18 @@ pub async fn rekey_document(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_sniff_keeps_the_blocking_task_error_typed() {
+        let function = include_str!("documents.rs")
+            .split_once("pub async fn dispatch_upload_in_zone(")
+            .expect("the upload dispatch function exists")
+            .1
+            .split_once("kinds.push")
+            .expect("the dispatch function queues the sniff result")
+            .0;
+        assert!(!function.contains("anyhow"), "{function}");
+    }
 
     #[test]
     fn a_separator_inside_quotes_does_not_pick_the_delimiter() {

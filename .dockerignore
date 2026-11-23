@@ -4,6 +4,7 @@
 ui/.svelte-kit
 data/*
 !data/calculators
+!data/connectors
 !data/family
 !data/genome-facts
 !data/genome

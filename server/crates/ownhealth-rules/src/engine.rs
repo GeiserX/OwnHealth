@@ -364,7 +364,8 @@ type BySource = Vec<(i16, Vec<Day>)>;
 
 /// Daily rollups of the last `days` days per metric (the state reads 90), one source per metric
 /// (source_priority, else the source with the most days in that window). metric -> [(day, avg, sum)]
-/// chronological.
+/// chronological. Only providers the provider policy serves (`ownhealth_core::providers`): the pack
+/// markers and the calculators never read a withheld vendor, so the UI and MCP share one state_hash.
 pub(crate) async fn wearables(
     conn: &mut PgConnection,
     profile_id: Uuid,
@@ -378,6 +379,7 @@ pub(crate) async fn wearables(
     let cut = day_end(as_of);
     let rows: Vec<RollupRow> = sqlx::query_as(
         "select r.metric, r.source_id, r.t, r.v_avg, r.v_sum from wearable_rollup r \
+         join wearable_source ws on ws.id = r.source_id and ws.provider = any($5) \
          where r.profile_id = $1 and r.bucket = 'day' and r.metric = any($2) and r.t < $3 and r.t >= $4 \
          order by r.metric, r.t",
     )
@@ -385,6 +387,7 @@ pub(crate) async fn wearables(
     .bind(metrics)
     .bind(cut)
     .bind(cut - Duration::days(days))
+    .bind(ownhealth_core::providers::served_providers())
     .fetch_all(&mut *conn)
     .await?;
     let prio: HashMap<String, Vec<i16>> =

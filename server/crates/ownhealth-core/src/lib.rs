@@ -31,6 +31,7 @@ pub mod observations;
 pub mod orthanc;
 pub mod pdfwrite;
 pub mod provenance;
+pub mod providers;
 pub mod pyjson;
 pub mod pyrandom;
 pub mod quarantine;

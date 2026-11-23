@@ -2,7 +2,9 @@
 //! day (HRV: one source per series): `/profiles/{p}/wearables/summary` and
 //! `/profiles/{p}/wearables/{metric}`.
 //!
-//! Needs `read:wearables`; every read writes one audit row.
+//! Needs `read:wearables`; every read writes one audit row. These routes serve the Wearables page, so
+//! they read every provider, the ones the provider policy withholds from agents included
+//! (`data/connectors/providers.yaml`).
 
 use std::collections::BTreeMap;
 
@@ -18,7 +20,7 @@ use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::langs::LANGS;
 use ownhealth_core::pyjson::{py_date, pydantic_datetime_utc};
 use ownhealth_ingest_structured::py::round as py_round;
-use ownhealth_ingest_structured::wearables::{self as w, Point};
+use ownhealth_ingest_structured::wearables::{self as w, Point, Reader};
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 
@@ -242,7 +244,16 @@ async fn summary(
     let mut out: Vec<Value> = Vec::new();
     for metric in &present {
         let info = w::metric(metric);
-        let found = w::points_and_left_out(&mut tx, perm.profile.id, metric, since, until, "day").await?;
+        let found = w::points_and_left_out(
+            &mut tx,
+            perm.profile.id,
+            metric,
+            since,
+            until,
+            "day",
+            Reader::WearablesPage,
+        )
+        .await?;
         let note = w::left_out_note(&found, lang);
         let pts: Vec<Point> = found.points;
         // dict keyed by date: a later point of the same day replaces the earlier one in place
@@ -328,7 +339,16 @@ async fn metric_series(
     let since = w::day_start(start);
     let until = w::day_start(end) + TimeDelta::days(1) - TimeDelta::seconds(1);
     let info = w::metric(&metric);
-    let series = w::points_and_left_out(&mut tx, perm.profile.id, &metric, since, until, resolution).await?;
+    let series = w::points_and_left_out(
+        &mut tx,
+        perm.profile.id,
+        &metric,
+        since,
+        until,
+        resolution,
+        Reader::WearablesPage,
+    )
+    .await?;
     let points = &series.points;
     audit(&mut tx, &caller.0, &perm, "wearables.series", vec![metric.clone()]).await?;
     let priority = w::priority(&mut tx, perm.profile.id, &metric).await?;

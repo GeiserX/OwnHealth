@@ -1,5 +1,5 @@
 //! `ownhealth serve | migrate | demo-seed | worker | healthcheck | backup | restore | verify-restore |
-//! clinvar-diff`.
+//! clinvar-diff | seal-legacy`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -63,6 +63,18 @@ enum Cmd {
     ClinvarDiff {
         /// The ClinVar VCF, for example clinvar_20261005.vcf.gz.
         path: PathBuf,
+    },
+    /// Encrypt what an install stored before profile keys: each older file under the key of every
+    /// profile or pending item that reads it, and each older refresh token under its profile's key.
+    /// The job removes a plain copy only when no ownerless reader still needs it. The JSON report
+    /// lists the files kept plain. The job runs on demand and can run while the app is up.
+    /// You can stop the job at any time and run it again to resume. It exits 1 when something
+    /// could not be sealed. Needs OWNHEALTH_DATABASE_URL and the
+    /// OWNHEALTH_SECRETS_KEY the install was made with.
+    SealLegacy {
+        /// Report what a run would do and change nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -189,6 +201,17 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
                 ExitCode::SUCCESS
             })
         }
+        Cmd::SealLegacy { dry_run } => {
+            let rt = Runtime::new(settings)?;
+            let mut conn = rt.pool.acquire().await?;
+            if !migrate::pending(&mut conn, &migrate::embedded()?).await?.is_empty() {
+                anyhow::bail!("the database is not migrated: run `ownhealth migrate` first");
+            }
+            drop(conn);
+            app::check_profile_keys(&rt).await?;
+            let sb = ownhealth_core::secrets::SecretBox::from_settings(&rt.settings)?.with_keys(rt.blobs.keyring());
+            report(&ownhealth_ops::seal_legacy(&rt.pool, &rt.blobs, &sb, dry_run).await?)
+        }
         Cmd::Worker => {
             let rt = Runtime::new(settings)?;
             app::check_profile_keys(&rt).await?;
@@ -239,6 +262,20 @@ async fn healthcheck(port: u16) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::db_target;
+
+    #[test]
+    fn seal_legacy_help_explains_why_plain_files_stay() {
+        use clap::CommandFactory;
+        let mut cli = super::Cli::command();
+        let help = cli
+            .find_subcommand_mut("seal-legacy")
+            .expect("seal-legacy is a CLI subcommand")
+            .render_long_help()
+            .to_string();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(help.contains("only when no ownerless reader still needs it"), "{help}");
+        assert!(help.contains("report lists the files kept plain"), "{help}");
+    }
 
     #[test]
     fn database_target_names_host_and_port_never_the_password() {

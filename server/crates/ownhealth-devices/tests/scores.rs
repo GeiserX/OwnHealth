@@ -70,7 +70,7 @@ async fn a_score_like_series_key_never_reaches_wearable_sample() -> R {
     let env = Env::new().await?;
     let sam = env.fam.profile("sam");
     let mut c = env.db.pool.acquire().await?;
-    let src = store::device_source(&mut c, sam, "garmin", Some("Forerunner"), None, None).await?;
+    let src = store::device_source(&mut c, sam, "fit", Some("Forerunner"), None, None).await?;
     for key in SCORE_LIKE {
         let err = store::write(&mut c, sam, None, vec![sample(key, src)], Conflict::Keep).await;
         let msg = format!("{err:?}");
