@@ -457,16 +457,19 @@ async fn ask(State(rt): State<Runtime>, caller: Caller, Body(b): Body<RequestIn>
 
 // ---------------------------------------------------------------- the outbox ----
 
+/// The caller's unread count, then one notice; the notice columns are null on the one row of an empty
+/// list, so the count and the list always come from one statement (one snapshot).
 type Notice = (
-    Uuid,
-    String,
-    Uuid,
-    String,
-    String,
+    i64,
+    Option<Uuid>,
+    Option<String>,
+    Option<Uuid>,
+    Option<String>,
+    Option<String>,
     Option<Uuid>,
     Option<Uuid>,
     Option<String>,
-    DateTime<Utc>,
+    Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
 );
 
@@ -479,29 +482,32 @@ async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
              union
              select id from notification_outbox where user_id = $1 and read_at is null
              and kind in ('break_glass.request', 'break_glass.activate')
+         ),
+         unread as (select count(*) as n from notification_outbox where user_id = $1 and read_at is null),
+         listed as (
+             select n.id, n.kind, p.id as profile_id, p.slug, p.display_name, n.request_id, n.actor_id,
+                    a.display_name as actor_name, n.created_at, n.read_at
+             from visible v join notification_outbox n on n.id = v.id join profile p on p.id = n.profile_id
+             left join app_user a on a.id = n.actor_id
          )
-         select n.id, n.kind, p.id, p.slug, p.display_name, n.request_id, n.actor_id, a.display_name,
-                n.created_at, n.read_at
-         from visible v join notification_outbox n on n.id = v.id join profile p on p.id = n.profile_id
-         left join app_user a on a.id = n.actor_id order by n.created_at desc, n.id",
+         select u.n, l.id, l.kind, l.profile_id, l.slug, l.display_name, l.request_id, l.actor_id,
+                l.actor_name, l.created_at, l.read_at
+         from unread u left join listed l on true order by l.created_at desc, l.id",
     )
     .bind(user)
     .fetch_all(&mut *tx)
     .await?;
-    let unread: i64 =
-        sqlx::query_scalar("select count(*) from notification_outbox where user_id = $1 and read_at is null")
-            .bind(user)
-            .fetch_one(&mut *tx)
-            .await?;
+    let unread = rows.first().map_or(0, |n| n.0);
     audit_read(&mut tx, &caller, "break_glass.notices", "notification_outbox", None).await?;
     tx.commit().await?;
     let items: Vec<Value> = rows
         .iter()
-        .map(|n| {
-            json!({"id": n.0, "kind": n.1,
-                   "profile": {"id": n.2, "slug": n.3, "display_name": n.4},
-                   "request_id": n.5, "actor": n.6.map(|id| json!({"user_id": id, "display_name": n.7})),
-                   "created_at": pydantic_datetime_utc(&n.8), "read_at": ts(&n.9)})
+        .filter_map(|n| {
+            let (id, created_at) = (n.1?, n.9?);
+            Some(json!({"id": id, "kind": n.2,
+                   "profile": {"id": n.3, "slug": n.4, "display_name": n.5},
+                   "request_id": n.6, "actor": n.7.map(|user| json!({"user_id": user, "display_name": n.8})),
+                   "created_at": pydantic_datetime_utc(&created_at), "read_at": ts(&n.10)}))
         })
         .collect();
     ok(json!({"items": items, "unread": unread}))
