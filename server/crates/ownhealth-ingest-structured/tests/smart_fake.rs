@@ -10,8 +10,8 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use axum::extract::{Form, Path, RawQuery, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Form, OriginalUri, Path, RawQuery, State};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -168,6 +168,8 @@ struct Book {
     refreshes: usize,
     /// every FHIR request that got past the bearer check, as `Type?params` (no patient, no page)
     searches: Vec<String>,
+    /// Every FHIR request path, including requests refused for their bearer.
+    attempts: Vec<String>,
     /// FHIR requests refused for their bearer token
     unauthorized: usize,
     /// every token handed out, to look for them in the database
@@ -342,13 +344,14 @@ async fn token(State(s): State<Shared>, Form(form): Form<HashMap<String, String>
 }
 
 /// The bearer check of every FHIR request: only the newest access token reads.
-fn authorized(s: &Shared, headers: &HeaderMap) -> bool {
+fn authorized(s: &Shared, headers: &HeaderMap, uri: &Uri) -> bool {
     let given = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     let refuse_all = lock(&s.behaviour).refuse_all;
     let mut book = lock(&s.book);
+    book.attempts.push(uri.path().into());
     let ok = !refuse_all && given.is_some() && given == book.access.as_deref();
     if !ok {
         book.unauthorized += 1;
@@ -375,8 +378,13 @@ fn outcome(status: StatusCode, text: &str) -> Response {
     (status, [("content-type", "application/fhir+json")], Json(body)).into_response()
 }
 
-async fn read_patient(State(s): State<Shared>, Path(id): Path<String>, headers: HeaderMap) -> Response {
-    if !authorized(&s, &headers) {
+async fn read_patient(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized(&s, &headers, &uri) {
         return outcome(StatusCode::UNAUTHORIZED, "expired token");
     }
     lock(&s.book).searches.push(format!("Patient/{id}"));
@@ -411,8 +419,13 @@ async fn read_patient(State(s): State<Shared>, Path(id): Path<String>, headers: 
 }
 
 /// A Medication the server holds apart, named by a MedicationRequest's `medicationReference`.
-async fn read_medication(State(s): State<Shared>, Path(id): Path<String>, headers: HeaderMap) -> Response {
-    if !authorized(&s, &headers) {
+async fn read_medication(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized(&s, &headers, &uri) {
         return outcome(StatusCode::UNAUTHORIZED, "expired token");
     }
     lock(&s.book).searches.push(format!("Medication/{id}"));
@@ -452,9 +465,10 @@ async fn search(
     State(s): State<Shared>,
     Path(rtype): Path<String>,
     RawQuery(raw): RawQuery,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Response {
-    if !authorized(&s, &headers) {
+    if !authorized(&s, &headers, &uri) {
         return outcome(StatusCode::UNAUTHORIZED, "expired token");
     }
     let raw = raw.unwrap_or_default();
@@ -1113,7 +1127,7 @@ async fn a_refused_refresh_stops_the_pull_and_asks_for_a_new_sign_in() -> R {
     w.day(source, t0() + Duration::minutes(1))
         .await?
         .map_err(anyhow::Error::msg)?;
-    let before = w.fake.book().searches.len();
+    let before = w.fake.book().attempts.len();
     // Sam removed the app at the portal: every refresh token is dead
     w.fake.book().live.clear();
     let now = t0() + Duration::days(1);
@@ -1121,7 +1135,7 @@ async fn a_refused_refresh_stops_the_pull_and_asks_for_a_new_sign_in() -> R {
     let e = got.expect_err("the pull stops");
     assert!(e.contains("reconsent_needed"), "{e}");
     assert_eq!(w.reconsent(source).await?, Some(now));
-    assert_eq!(w.fake.book().searches.len(), before, "no search without a token");
+    assert_eq!(w.fake.book().attempts.len(), before, "no request without a token");
     let health: (Option<String>, i32) =
         sqlx::query_as("select last_error, consecutive_failures from source where id = $1")
             .bind(source)
@@ -1421,8 +1435,8 @@ async fn another_persons_portal_account_imports_nothing_into_the_profile() -> R 
         .expect_err("the pull stops");
     assert!(e.contains("another_patient"), "{e}");
     assert_eq!(
-        w.searched_since(0).await,
-        ["Patient/sam-rivera".to_string()].into(),
+        w.fake.book().attempts,
+        [format!("/fhir/Patient/{PATIENT}")],
         "nothing past the patient"
     );
     assert_eq!(w.documents(source).await?.len(), 0);
@@ -1447,8 +1461,8 @@ async fn a_patient_with_insufficient_demographics_stops_before_searching() -> R 
         let source = w.connect_for(profile, t0()).await?;
         let got = w.day(source, t0() + Duration::minutes(1)).await?;
         assert_eq!(
-            w.searched_since(0).await,
-            ["Patient/sam-rivera".to_string()].into(),
+            w.fake.book().attempts,
+            [format!("/fhir/Patient/{PATIENT}")],
             "{profile}: clinical data was requested with {redact_patient:?} missing"
         );
         assert_eq!(w.documents(source).await?.len(), 0);
@@ -1520,6 +1534,8 @@ async fn a_server_that_refuses_every_token_gets_one_refresh_and_the_run_ends() -
     assert!(e.contains("patient_unread") && e.contains("401"), "{e}");
     let book = w.fake.book();
     assert_eq!((book.refreshes, book.unauthorized), (1, 2));
+    assert_eq!(book.attempts, vec![format!("/fhir/Patient/{PATIENT}"); 2]);
+    assert!(book.searches.is_empty());
     Ok(())
 }
 
@@ -1542,7 +1558,7 @@ async fn a_grant_without_a_patient_read_searches_nothing_and_stores_nothing() ->
             .await?
             .expect_err("the pull stops");
         assert!(e.contains("patient_not_granted"), "{scope}: {e}");
-        assert!(w.searched_since(0).await.is_empty(), "{scope}");
+        assert!(w.fake.book().attempts.is_empty(), "{scope}");
         assert_eq!(w.documents(source).await?.len(), 0, "{scope}");
         assert_eq!(w.open_items_of(w.sam()).await?.len(), 0, "{scope}");
     }
@@ -1562,7 +1578,7 @@ async fn a_patient_the_server_does_not_give_stops_the_run_and_stores_nothing() -
         .await?
         .expect_err("the run fails");
     assert!(e.contains("patient_unread") && e.contains("500"), "{e}");
-    assert_eq!(w.searched_since(0).await, ["Patient/sam-rivera".to_string()].into());
+    assert_eq!(w.fake.book().attempts, [format!("/fhir/Patient/{PATIENT}")]);
     assert_eq!(w.documents(source).await?.len(), 0);
     Ok(())
 }
@@ -1590,7 +1606,7 @@ async fn a_grant_that_covers_no_search_reads_nothing_and_says_so() -> R {
             got.skipped.get("not_granted"),
             Some(&(9 + i64::from(!scope.contains("Patient"))))
         );
-        assert!(w.searched_since(0).await.is_empty(), "{scope}");
+        assert!(w.fake.book().attempts.is_empty(), "{scope}");
         assert_eq!(w.documents(source).await?.len(), 0, "{scope}");
         assert_eq!(w.status_of_last_run(source).await?, "partial", "{scope}");
     }
@@ -1773,7 +1789,7 @@ async fn a_single_letter_in_a_patients_name_must_also_match() -> R {
         .await?;
     let source = w.connect(t0()).await?;
     let got = w.day(source, t0() + Duration::minutes(1)).await?;
-    assert_eq!(w.searched_since(0).await, [format!("Patient/{PATIENT}")].into());
+    assert_eq!(w.fake.book().attempts, [format!("/fhir/Patient/{PATIENT}")]);
     let err = got.expect_err("another given initial cannot verify the patient");
     assert!(
         err.contains("patient_unverified") || err.contains("another_patient"),
@@ -1799,7 +1815,7 @@ async fn a_patient_read_returning_another_id_stops_before_searching() -> R {
     .await?;
     let source = w.connect(t0()).await?;
     let got = w.day(source, t0() + Duration::minutes(1)).await?;
-    assert_eq!(w.searched_since(0).await, [format!("Patient/{PATIENT}")].into());
+    assert_eq!(w.fake.book().attempts, [format!("/fhir/Patient/{PATIENT}")]);
     let err = got.expect_err("a Patient with the wrong id cannot verify the patient");
     assert!(err.contains("patient_unverified"), "{err}");
     assert!(w.documents(source).await?.is_empty());
@@ -2149,7 +2165,7 @@ async fn a_refused_access_tokens_body_counts_against_the_run_budget() -> R {
     let (patient_bytes, before) = {
         let mut book = w.fake.book();
         book.access = Some("nobody-holds-this".into());
-        (book.served, book.searches.len())
+        (book.served, book.attempts.len())
     };
     w.fake.set(|b| b.fail = None);
     let caps = smart::Caps {
@@ -2159,10 +2175,13 @@ async fn a_refused_access_tokens_body_counts_against_the_run_budget() -> R {
     let got = w.day_with(source, t0() + Duration::minutes(2), &caps).await?;
     let err = got.expect_err("the 401 body leaves too little room to verify the patient");
     assert!(err.contains("too_large: Patient: "), "{err}");
-    assert_eq!(w.searched_since(before).await, [format!("Patient/{PATIENT}")].into());
     assert!(w.documents(source).await?.is_empty());
     let book = w.fake.book();
     assert_eq!((book.unauthorized, book.refreshes), (1, 1));
+    assert_eq!(
+        book.attempts[before..],
+        [format!("/fhir/Patient/{PATIENT}"), format!("/fhir/Patient/{PATIENT}")]
+    );
     Ok(())
 }
 
