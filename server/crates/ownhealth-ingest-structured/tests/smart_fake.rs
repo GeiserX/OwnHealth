@@ -2690,7 +2690,12 @@ async fn medication_references_use_their_orders_base_for_reads_and_import() -> R
             }
         })
     };
-    let medication = |id: &str, name: &str| json!({"resourceType": "Medication", "id": id, "meta": {"versionId": "1"}, "code": {"text": name}});
+    let medication = |id: &str, name: &str| {
+        json!({
+            "resourceType": "Medication", "id": id, "meta": {"versionId": "1"},
+            "code": {"coding": [{"system": "https://labnorte.example/medications", "code": id, "display": name}]}
+        })
+    };
     w.fake.book().medication_answers.extend([
         (
             "missing-foreign".into(),
