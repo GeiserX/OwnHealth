@@ -18,7 +18,7 @@ use ownhealth_core::records::{
 };
 use rust_decimal::Decimal;
 use serde_json::Value;
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 use uuid::Uuid;
 
 use crate::py::{self, get_truthy, list, truthy};
@@ -238,35 +238,75 @@ pub fn status_code(cc: Option<&Value>, default: &str) -> String {
 
 /// NFKD, ASCII only, lower case, split on anything not a letter or digit, tokens longer than one.
 pub fn name_tokens(s: &str) -> BTreeSet<String> {
-    tokenize_name(s, 2)
-}
-
-fn tokenize_name(s: &str, min_len: usize) -> BTreeSet<String> {
     let ascii: String = s.nfkd().filter(char::is_ascii).collect::<String>().to_lowercase();
     ascii
         .split(|c: char| !c.is_ascii_lowercase() && !c.is_ascii_digit())
-        .filter(|t| t.len() >= min_len)
+        .filter(|t| t.len() >= 2)
         .map(String::from)
         .collect()
 }
 
-fn patient_names(patient: &Value, min_len: usize) -> impl Iterator<Item = BTreeSet<String>> + '_ {
+fn patient_names(
+    patient: &Value,
+    tokenize: fn(&str) -> BTreeSet<String>,
+) -> impl Iterator<Item = BTreeSet<String>> + '_ {
     list(Some(patient), "name").iter().map(move |name| {
         let mut parts: Vec<String> = list(Some(name), "given").iter().map(text_of).collect();
         for key in ["family", "text"] {
             parts.push(get_truthy(Some(name), key).map(text_of).unwrap_or_default());
         }
-        tokenize_name(&parts.join(" "), min_len)
+        tokenize(&parts.join(" "))
     })
+}
+
+/// Keep Unicode letters and initials. Strip combining accents in the common diacritics block,
+/// and keep marks from other blocks, which can carry letters' vowel sounds or other distinctions.
+fn smart_name_tokens(s: &str) -> BTreeSet<String> {
+    let name = s
+        .nfd()
+        .filter(|c| !matches!(c, '\u{0300}'..='\u{036f}'))
+        .collect::<String>()
+        .to_lowercase();
+    name.split(|c: char| !c.is_alphanumeric() && !is_combining_mark(c))
+        .filter(|t| t.chars().any(|c| c.is_alphabetic() && !is_combining_mark(c)))
+        .map(String::from)
+        .collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PatientIdentity {
+    Verified,
+    Mismatch,
+    Unverified,
 }
 
 /// Identity proof for an automatic SMART pull. A single HumanName must cover the profile's name,
 /// and the birth date must be precise to the day.
-pub(crate) fn verifies_patient(patient: &Value, display_name: &str, birth_date: Option<NaiveDate>) -> bool {
-    let want = tokenize_name(display_name, 1);
-    birth_date.is_some_and(|date| patient["birthDate"] == date.to_string())
-        && !want.is_empty()
-        && patient_names(patient, 1).any(|name| want.is_subset(&name))
+pub(crate) fn smart_patient_identity(
+    patient: &Value,
+    display_name: &str,
+    birth_date: Option<NaiveDate>,
+) -> PatientIdentity {
+    use PatientIdentity::{Mismatch, Unverified, Verified};
+
+    let Some(birth_date) = birth_date else {
+        return Unverified;
+    };
+    if patient["birthDate"] != birth_date.to_string() {
+        return Mismatch;
+    }
+    let want = smart_name_tokens(display_name);
+    if want.is_empty() {
+        return Unverified;
+    }
+    let mut contradicts = false;
+    for name in patient_names(patient, smart_name_tokens) {
+        if want.is_subset(&name) {
+            return Verified;
+        }
+        contradicts |= !name.is_subset(&want);
+    }
+    if contradicts { Mismatch } else { Unverified }
 }
 
 /// Identity of a bundle against the profile it is imported into: matched | hinted | mismatch | missing.
@@ -277,7 +317,7 @@ pub fn match_patient(patient: Option<&Value>, display_name: &str, birth_date: Op
     let Some(patient) = patient else {
         return "missing";
     };
-    let tokens: BTreeSet<String> = patient_names(patient, 2).flatten().collect();
+    let tokens: BTreeSet<String> = patient_names(patient, name_tokens).flatten().collect();
     let want = name_tokens(display_name);
     let name_ok = !tokens.is_empty() && !want.is_empty() && (want.is_subset(&tokens) || tokens.is_subset(&want));
     let pdob = parse_date(patient.get("birthDate"));
@@ -1041,6 +1081,52 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn smart_name_keeps_non_ascii_letters_and_initials() {
+        let born = NaiveDate::from_ymd_opt(1990, 2, 3);
+        let verifies = |profile, surname| {
+            let patient = json!({
+                "name": [{"given": ["Sam"], "family": surname}],
+                "birthDate": "1990-02-03",
+            });
+            smart_patient_identity(&patient, profile, born) == PatientIdentity::Verified
+        };
+        assert_eq!(
+            [
+                verifies("Sam 李", "王"),
+                verifies("Sam Иванов", "Петров"),
+                verifies("Sam Ξένος", "Δήμος"),
+                verifies("Sam करण", "किरण"),
+                verifies("Sam 李", "李"),
+                verifies("Sam иванов", "Иванов"),
+                verifies("Sam ξενος", "ΞΈΝΟΣ"),
+                verifies("Sam Nuñez", "Núñez"),
+            ],
+            [false, false, false, false, true, true, true, true]
+        );
+    }
+
+    #[test]
+    fn smart_name_requires_at_least_one_letter() {
+        let born = NaiveDate::from_ymd_opt(1990, 2, 3);
+        for name in ["李", "Мир", "Ίρις"] {
+            let patient = json!({"name": [{"text": name}], "birthDate": "1990-02-03"});
+            assert_eq!(
+                smart_patient_identity(&patient, name, born),
+                PatientIdentity::Verified,
+                "{name}"
+            );
+        }
+        for name in ["🌀", "123", "́"] {
+            let patient = json!({"name": [{"text": name}], "birthDate": "1990-02-03"});
+            assert_eq!(
+                smart_patient_identity(&patient, name, born),
+                PatientIdentity::Unverified,
+                "{name}"
+            );
+        }
+    }
 
     /// An IPS "no information" medicine is skipped whether it is inline or a referenced Medication.
     #[test]

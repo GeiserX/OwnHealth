@@ -884,11 +884,11 @@ pub async fn pull_with(
     if p["id"] != patient || !full_birth_date {
         return Err(JobError::permanent(STOP_PATIENT_UNVERIFIED));
     }
-    if fhir::mapping::match_patient(Some(&p), &name, born) == "mismatch" {
-        return Err(JobError::permanent(STOP_ANOTHER_PATIENT));
-    }
-    if !fhir::mapping::verifies_patient(&p, &name, born) {
-        return Err(JobError::permanent(STOP_PATIENT_UNVERIFIED));
+    use fhir::mapping::PatientIdentity;
+    match fhir::mapping::smart_patient_identity(&p, &name, born) {
+        PatientIdentity::Verified => {}
+        PatientIdentity::Mismatch => return Err(JobError::permanent(STOP_ANOTHER_PATIENT)),
+        PatientIdentity::Unverified => return Err(JobError::permanent(STOP_PATIENT_UNVERIFIED)),
     }
     g.entries.push((Some(format!("{base}/Patient/{patient}")), p));
     let read_medication = granted(scope, "Medication", Op::Read, &[]);
