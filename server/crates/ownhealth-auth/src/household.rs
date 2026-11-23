@@ -1025,6 +1025,11 @@ async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {
         .unwrap_or_default();
     let mut conn = ctx.pool.acquire().await?;
     let (mut removed, mut failed) = (0i32, 0usize);
+    // the profile's key out of the keyring file: the delete did it at once, unless that failed
+    if let Err(e) = ownhealth_core::keyfile::rewrite(&mut conn, &ctx.settings).await {
+        tracing::warn!(error = %e, "rewriting the keyring after a profile delete failed again");
+        failed += 1;
+    }
     // a backup that copies the files now may still name every file of the profile: wait for its copy
     let mut tx = conn.begin().await?;
     removal_lock(&mut tx, true).await.map_err(Error::from)?;
@@ -1075,7 +1080,9 @@ async fn unlink_job(ctx: JobContext, job: Job) -> HandlerResult {
         .await?;
     }
     if failed > 0 {
-        return Err(JobError::retry(format!("{failed} files could not be removed yet")));
+        return Err(JobError::retry(format!(
+            "{failed} files, folders or keyring entries could not be removed yet"
+        )));
     }
     Ok(Some(json!({"removed": removed})))
 }

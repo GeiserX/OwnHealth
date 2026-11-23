@@ -60,10 +60,13 @@ pub struct Settings {
     /// `OWNHEALTH_ANCHOR_DIR`: where each backup writes the audit chain head it anchored, outside the
     /// database (ownhealth-ops backup.rs). Unset: `<data_dir>/anchor`.
     pub anchor_dir: Option<PathBuf>,
-    /// Orthanc, when the `imaging` compose profile is on ([`OrthancConfig::from_env`]). `serve` reads it
-    /// at start, so the viewer proxy and the DICOM import job use the same Orthanc; other commands
-    /// leave it unset.
+    /// Orthanc, when the `imaging` compose profile is on ([`OrthancConfig::from_env`]). Every command
+    /// reads it, so the viewer proxy of serve and the DICOM import of every worker use the same Orthanc.
     pub orthanc: Option<OrthancConfig>,
+    /// `OWNHEALTH_KEYRING_DIR`: the folder of `keyring.json`, the profile keys kept out of the database
+    /// dump (`keyfile.rs`). It must sit outside the blob folder and every backup. Unset:
+    /// `<data_dir>/keyring`.
+    pub keyring_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -95,6 +98,7 @@ impl Default for Settings {
             trusted_proxies: Vec::new(),
             anchor_dir: None,
             orthanc: None,
+            keyring_dir: None,
         }
     }
 }
@@ -126,6 +130,7 @@ impl fmt::Debug for Settings {
             .field("trusted_proxies", &self.trusted_proxies)
             .field("anchor_dir", &self.anchor_dir)
             .field("orthanc", &self.orthanc)
+            .field("keyring_dir", &self.keyring_dir)
             .finish_non_exhaustive()
     }
 }
@@ -342,6 +347,7 @@ impl Settings {
             anchor_dir: env_or(env, "ANCHOR_DIR")?.map(PathBuf::from),
             // serve's viewer proxy and every worker's DICOM import read the same Orthanc
             orthanc: OrthancConfig::from_env(env)?,
+            keyring_dir: env_or(env, "KEYRING_DIR")?.map(PathBuf::from),
         })
     }
 
@@ -360,6 +366,13 @@ impl Settings {
     /// The folder of the audit anchor file: `OWNHEALTH_ANCHOR_DIR`, or `<data_dir>/anchor`.
     pub fn anchor_path(&self) -> PathBuf {
         self.anchor_dir.clone().unwrap_or_else(|| self.data_dir.join("anchor"))
+    }
+
+    /// The folder of `keyring.json`: `OWNHEALTH_KEYRING_DIR`, or `<data_dir>/keyring`.
+    pub fn keyring_path(&self) -> PathBuf {
+        self.keyring_dir
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("keyring"))
     }
 
     /// The URL for sqlx: `postgresql+psycopg://` (accepted by the Python app) becomes `postgresql://`.

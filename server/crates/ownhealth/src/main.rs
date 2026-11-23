@@ -45,6 +45,11 @@ enum Cmd {
     Restore {
         /// A directory `ownhealth backup` wrote.
         path: PathBuf,
+        /// Go on when keyring.json is missing or lacks a key of the backup (a copy older than the
+        /// backup, or none left after a dead disk): load every record, and the files only of the
+        /// profiles whose key the keyring holds. The report lists the others under `keys.missing`.
+        #[arg(long)]
+        allow_missing_keys: bool,
     },
     /// Restore a backup into a scratch database, compare with its manifest, drop it. Needs
     /// OWNHEALTH_DATABASE_URL and pg_restore 17.
@@ -138,7 +143,10 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
             println!("{}", ownhealth_ops::backup(&settings, &path).await?.display());
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Restore { path } => report(&ownhealth_ops::restore(&settings, &path).await?),
+        Cmd::Restore {
+            path,
+            allow_missing_keys,
+        } => report(&ownhealth_ops::restore_with(&settings, &path, allow_missing_keys).await?),
         Cmd::VerifyRestore { path } => report(&ownhealth_ops::verify_restore(&settings, &path).await?),
         Cmd::Healthcheck => Ok(match healthcheck(settings.port).await {
             Ok(()) => ExitCode::SUCCESS,

@@ -545,6 +545,62 @@ fn homelab_app_gets_no_backup_credentials() -> R {
     Ok(())
 }
 
+/// The keyring (slice 47) sits on a bind mount of its own. `admin` (backups and restores) and `app`
+/// (profile delete) mount the same host folder at OWNHEALTH_KEYRING_DIR, away from the data volume
+/// that holds the blobs and the restic staging folder, so no backup copies it. No other service gets
+/// it.
+#[test]
+fn the_keyring_sits_on_its_own_mount_outside_the_data_volume() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    for (case, compose, env_file, extra) in cases() {
+        let services = render(&compose, &env_file, extra, &[])?;
+        let mut sources = Vec::new();
+        for name in ["admin", "app"] {
+            let svc = &services[name];
+            let dir = env_str(svc, "OWNHEALTH_KEYRING_DIR");
+            assert!(
+                dir.starts_with('/') && !dir.starts_with("/data"),
+                "{case} {name}: {dir:?}"
+            );
+            let mounts: Vec<&Value> = svc["volumes"].as_array().into_iter().flatten().collect();
+            let own = mounts
+                .iter()
+                .find(|m| m["target"] == dir.as_str())
+                .ok_or_else(|| anyhow::anyhow!("{case} {name}: nothing is mounted at {dir}"))?;
+            assert_eq!(own["type"], "bind", "{case} {name}: {own}");
+            assert_ne!(own["read_only"], true, "{case} {name}: a delete must rewrite it");
+            // no other mount holds it: not the data volume, nor any folder above it
+            for m in &mounts {
+                let target = m["target"].as_str().unwrap_or_default();
+                assert!(
+                    std::ptr::eq(*m, *own) || !Path::new(&dir).starts_with(target),
+                    "{case} {name}: the keyring is inside {target}"
+                );
+            }
+            sources.push(own["source"].as_str().unwrap_or_default().to_string());
+        }
+        assert!(
+            sources[0] == sources[1] && sources[0].ends_with("/keyring"),
+            "{case}: {sources:?}"
+        );
+        for (name, svc) in services.as_object().into_iter().flatten() {
+            if name == "admin" || name == "app" {
+                continue;
+            }
+            let leaked = svc["volumes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|m| m["source"] == sources[0].as_str());
+            assert!(!leaked, "{case}: {name} mounts the keyring");
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- wearables ----
 
 /// The Open Wearables backend image, pinned to a digest after the tag in both compose files.
@@ -838,6 +894,23 @@ fn openwearables_env_is_ignored_like_dot_env() -> R {
     Ok(())
 }
 
+/// The quickstart makes keyring/ in the clone. git never versions it (an older copy of keyring.json
+/// opens a deleted profile's files again) and the image build never reads it. The controls: secrets/
+/// and .env, which the two files already list.
+#[test]
+fn the_keyring_folder_is_ignored_like_secrets() -> R {
+    for (f, names) in [
+        (".gitignore", ["/secrets/", "/keyring/"]),
+        (".dockerignore", [".env", "keyring"]),
+    ] {
+        let body = std::fs::read_to_string(root().join(f))?;
+        for name in names {
+            assert!(body.lines().any(|l| l.trim() == name), "{f} does not list {name}");
+        }
+    }
+    Ok(())
+}
+
 /// A compose project of its own, taken down with its volumes when dropped.
 struct Project {
     name: String,
@@ -978,6 +1051,7 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
     std::fs::copy(compose, dir.join("compose.yaml"))?;
     std::fs::create_dir_all(dir.join("deploy/db"))?;
     std::fs::create_dir_all(dir.join("inbox"))?;
+    std::fs::create_dir_all(dir.join("keyring"))?;
     std::fs::copy(root().join("deploy/db/ow-role.sql"), dir.join("deploy/db/ow-role.sql"))?;
     let ow_pw = token_hex(16);
     let mut env = std::fs::read_to_string(env_file)? + extra;
