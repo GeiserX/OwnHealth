@@ -140,6 +140,7 @@ keys::check_all; keys::shred_pending(conn, &[item])
 // keyfile: keyring.json in OWNHEALTH_KEYRING_DIR, every profile's wrapped DEK, outside the dump and every
 // backup. pg_dump runs with --exclude-table-data=profile_key; backup rewrites it, a profile delete
 // rewrites it at once (and the blobs.unlink retry); restore and verify-restore load profile_key from it
+// (ownhealth_ops::restore_with(settings, archive, allow_missing_keys): `--allow-missing-keys`)
 keyfile::rewrite(conn, &settings) -> KeyringFile   // live keys in, shredded keys out, unknown profiles kept
 keyfile::read(path) / ::write(dir, &KeyringFile) / ::path(&settings) / ::check_folder(&settings)
 // secrets: a profile's connector refresh token is sealed under its DEK (store_profile_secret,

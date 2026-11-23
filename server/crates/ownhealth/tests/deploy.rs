@@ -894,6 +894,23 @@ fn openwearables_env_is_ignored_like_dot_env() -> R {
     Ok(())
 }
 
+/// The quickstart makes keyring/ in the clone. git never versions it (an older copy of keyring.json
+/// opens a deleted profile's files again) and the image build never reads it. The controls: secrets/
+/// and .env, which the two files already list.
+#[test]
+fn the_keyring_folder_is_ignored_like_secrets() -> R {
+    for (f, names) in [
+        (".gitignore", ["/secrets/", "/keyring/"]),
+        (".dockerignore", [".env", "keyring"]),
+    ] {
+        let body = std::fs::read_to_string(root().join(f))?;
+        for name in names {
+            assert!(body.lines().any(|l| l.trim() == name), "{f} does not list {name}");
+        }
+    }
+    Ok(())
+}
+
 /// A compose project of its own, taken down with its volumes when dropped.
 struct Project {
     name: String,

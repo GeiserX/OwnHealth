@@ -14,6 +14,8 @@ server/vendor/
 
 # The quickstart's key file (compose.yaml)
 /secrets/
+# The profile keys (compose.yaml keyring mount): an older copy in git would open deleted profiles' files
+/keyring/
 
 # Runtime data and secrets. data/ holds the shipped reference files; a server started from the repo
 # root or server/ keeps its own files in ./data, which stay out of git.

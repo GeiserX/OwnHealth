@@ -20,9 +20,11 @@ openssl rand -hex 48     # paste as OWNHEALTH_SECRET_KEY in .env
 mkdir -m 700 secrets && openssl rand -base64 32 | tr -d '\n' > secrets/secrets_key && chmod 644 secrets/secrets_key
                          # seals every profile's files and inbox secrets: keep a copy with your backups
 mkdir -p inbox && sudo chown 10001:10001 inbox   # the watched folder; the app runs as user 10001
-mkdir -m 700 keyring && sudo chown 10001:10001 keyring   # the profile keys: never back up or copy this folder
+mkdir -m 700 keyring && sudo chown 10001:10001 keyring   # the profile keys: never version this folder
 docker compose up -d
 ```
+
+`keyring/keyring.json` holds every profile's key, and backups do not hold them. Keep exactly one copy of it off the machine, never versioned, and overwrite it after each backup and each profile delete. Without it, a dead disk leaves every file in every backup unreadable: only the records come back. [deploy/README.md](https://github.com/GeiserX/OwnHealth/blob/main/deploy/README.md) explains why under "The keyring".
 
 The app moves each file it imports from `inbox/` to `inbox/.done/`. If it cannot write there, the folder inbox shows as failing.
 
