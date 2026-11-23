@@ -1166,6 +1166,12 @@ fn tree_rel(key: &str) -> Option<PathBuf> {
     }
 }
 
+/// Whether `path` lies in the configured blob folder: the keyring folder must not, or every backup
+/// would copy it (`keyfile::check_folder`).
+pub fn in_blob_folder(settings: &crate::config::Settings, path: &Path) -> bool {
+    crate::keyfile::inside(path, &settings.blobs_path())
+}
+
 /// Every blob file of the tree at `root` (a store, or a backup's `blobs/`), in path order, keyed the
 /// way a backup manifest lists it: a plain blob by its file name (its sha256), a profile's sealed one
 /// as `<profile>/<file name>` (its address), a pending item's as `pending/<item>/<file name>`. A file

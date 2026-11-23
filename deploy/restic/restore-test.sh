@@ -1,7 +1,8 @@
 #!/bin/sh
 # Prove a backup restores: take a restic snapshot (default: the latest), load it into a scratch
-# database next to the live one, and compare row counts, blob hashes and every profile's state_hash
-# with the manifest written at backup time. Prints the report; exits 1 on any difference.
+# database next to the live one with the profile keys from keyring.json, and compare row counts, blob
+# hashes and every profile's state_hash with the manifest written at backup time. Prints the report;
+# exits 1 on any difference.
 #
 #   ./deploy/restic/restore-test.sh            # the latest snapshot
 #   ./deploy/restic/restore-test.sh 4be1a2c3   # one snapshot

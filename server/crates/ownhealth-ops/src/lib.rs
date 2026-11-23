@@ -22,7 +22,8 @@ pub mod shl;
 pub mod summary_pdf;
 
 pub use backup::{
-    MANIFEST_SCHEMA, audit_status, audit_status_checks, audit_status_shared, backup, restore, verify_restore,
+    MANIFEST_SCHEMA, audit_status, audit_status_checks, audit_status_shared, backup, restore, restore_with,
+    verify_restore,
 };
 pub use demo_base::{demo_label_png, seed_base, seed_family, seed_supplements};
 

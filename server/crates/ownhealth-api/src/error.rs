@@ -62,6 +62,13 @@ impl From<Error> for ApiError {
                 ApiError::new(StatusCode::NOT_FOUND, "blob_missing", m)
             }
             Error::NotFound(m) => ApiError::new(StatusCode::NOT_FOUND, "unknown", m),
+            // a profile a restore of an older backup brought back after its delete: its key is
+            // shredded, so it takes no new file; deleting it again removes the rest
+            Error::Key(k) if k.0 == ownhealth_core::keys::PROFILE_DELETED => ApiError::new(
+                StatusCode::GONE,
+                "profile_deleted",
+                "This profile was deleted. A restore brought its records back; delete it again to remove them.",
+            ),
             Error::NotImplemented(what) => ApiError::new(
                 StatusCode::NOT_IMPLEMENTED,
                 "not_implemented",

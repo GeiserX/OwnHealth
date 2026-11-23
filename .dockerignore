@@ -19,6 +19,7 @@ docs
 .git
 .env
 openwearables.env
+keyring
 server/static
 server/target
 server/vendor
