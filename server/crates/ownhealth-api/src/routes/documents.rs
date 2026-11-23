@@ -159,6 +159,22 @@ impl Doc {
     fn str(&self, k: &str) -> Option<&str> {
         self.row.get(k).and_then(Value::as_str)
     }
+
+    /// A change to this document (a move, a retraction): the role's `action`, and the scope the
+    /// document needs on the caller's own grant, since emergency access only reads.
+    fn may_change(&self, action: &str, refused: &str) -> Result<(), ApiError> {
+        if !self.perm.can(action) {
+            let msg = format!("The role {} cannot {refused}.", self.perm.role);
+            return Err(Error::access_denied("forbidden", msg).into());
+        }
+        let cgm = self.row.get("flags").and_then(|f| f.get("cgm_csv")).is_some();
+        let scope = scope_for(self.str("doc_type"), cgm);
+        if !self.perm.own_scopes.contains(scope) {
+            let msg = format!("Emergency access only reads; this needs {scope} on your own grant.");
+            return Err(Error::access_denied("break_glass", msg).into());
+        }
+        Ok(())
+    }
 }
 
 /// The document row and the caller's permission on its profile; 404 when it is not visible.
@@ -641,10 +657,7 @@ async fn assign(
     // the permission check and the re-key (in assign_document) both see the owner it left.
     ownhealth_core::documents::lock_owner(&mut tx, document_id).await?;
     let doc = visible_document(&mut tx, principal, document_id, None, false).await?;
-    if !doc.perm.can("import") {
-        let msg = format!("The role {} cannot import on this profile.", doc.perm.role);
-        return Err(Error::access_denied("forbidden", msg).into());
-    }
+    doc.may_change("import", "import on this profile")?;
     let target = caller.require(&mut tx, &profile, None, Some("import")).await?;
     // it re-keys the files and queues the removal of the old copies in this transaction
     let job_id = ownhealth_ingest_pdf::assign_document(
@@ -691,10 +704,7 @@ async fn retract(
     ownhealth_ingest_structured::retract::lock_export_of(&mut tx, document_id).await?;
     ownhealth_core::documents::lock_owner(&mut tx, document_id).await?;
     let doc = visible_document(&mut tx, &principal, document_id, None, false).await?;
-    if !doc.perm.can("write") {
-        let msg = format!("The role {} cannot change this profile.", doc.perm.role);
-        return Err(Error::access_denied("forbidden", msg).into());
-    }
+    doc.may_change("write", "change this profile")?;
     let reason = reason.unwrap_or_default().trim().to_string();
     if reason.is_empty() {
         return Err(Fail::Api(ApiError::new(

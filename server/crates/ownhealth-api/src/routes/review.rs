@@ -155,7 +155,14 @@ fn cannot_review(perm: &Permission) -> Fail {
     .into()
 }
 
-async fn check(conn: &mut PgConnection, principal: &Principal, item: Option<ReviewItem>) -> R<ReviewItem> {
+/// The item when the caller may see it and review its profile; with `change` (accept, reject, reopen,
+/// dismiss) it must also show on the caller's own grant, since emergency access only reads.
+async fn check(
+    conn: &mut PgConnection,
+    principal: &Principal,
+    item: Option<ReviewItem>,
+    change: bool,
+) -> R<ReviewItem> {
     let item = item.ok_or_else(no_item)?;
     let Some(profile_id) = item.profile_id else {
         if item.household_id != principal.household_id {
@@ -173,6 +180,16 @@ async fn check(conn: &mut PgConnection, principal: &Principal, item: Option<Revi
     }
     if !visible(&item, &perm) || !opens_document(conn, &item, &perm).await? {
         return Err(no_item());
+    }
+    if change {
+        let own = perm.own_only();
+        if !visible(&item, &own) || !opens_document(conn, &item, &own).await? {
+            return Err(Error::access_denied(
+                "break_glass",
+                "Emergency access only reads; this item needs your own grant.",
+            )
+            .into());
+        }
     }
     Ok(item)
 }
@@ -252,7 +269,7 @@ async fn get_one(State(rt): State<Runtime>, caller: Caller, Path(item_id): Path<
     let item_id = uuid_path("item_id", &item_id)?;
     let mut tx = rt.pool.begin().await?;
     let found = review::get_item(&mut tx, item_id).await?;
-    let item = check(&mut tx, &caller.0, found).await?;
+    let item = check(&mut tx, &caller.0, found, false).await?;
     tx.commit().await?;
     Ok(Json(item_out(&item)?))
 }
@@ -295,7 +312,7 @@ async fn accept(
         ownhealth_ingest_structured::retract::lock_export_of(&mut tx, d).await?;
         ownhealth_core::documents::lock_owner(&mut tx, d).await?;
     }
-    let item = check(&mut tx, principal, found).await?;
+    let item = check(&mut tx, principal, found, true).await?;
     if item.kind == "document_identity" {
         // accepting moves the document: the target needs the same check as POST /documents/{id}/assign
         let from_edits = edits
@@ -340,7 +357,7 @@ async fn reject(
     let reason = reason.unwrap_or_default();
     let mut tx = rt.pool.begin().await?;
     let found = review::get_item(&mut tx, item_id).await?;
-    let item = check(&mut tx, principal, found).await?;
+    let item = check(&mut tx, principal, found, true).await?;
     review::reject(&mut tx, item_id, principal.user_id.unwrap_or_default(), &reason).await?;
     audit(&mut tx, principal, &item, "review_reject").await?;
     tx.commit().await?;
@@ -352,7 +369,7 @@ async fn reopen(State(rt): State<Runtime>, caller: Caller, Path(item_id): Path<S
     let item_id = uuid_path("item_id", &item_id)?;
     let mut tx = rt.pool.begin().await?;
     let found = review::get_item(&mut tx, item_id).await?;
-    let item = check(&mut tx, principal, found).await?;
+    let item = check(&mut tx, principal, found, true).await?;
     review::reopen(&mut tx, item_id, principal.user_id.unwrap_or_default()).await?;
     audit(&mut tx, principal, &item, "review_reopen").await?;
     tx.commit().await?;
@@ -379,7 +396,7 @@ async fn dismiss(
     };
     let mut tx = rt.pool.begin().await?;
     let found = review::get_item(&mut tx, item_id).await?;
-    let item = check(&mut tx, principal, found).await?;
+    let item = check(&mut tx, principal, found, true).await?;
     review::dismiss(
         &mut tx,
         item_id,

@@ -143,6 +143,13 @@ impl Bg {
         .await
     }
 
+    async fn text(&self, sql: &str, id: Uuid) -> anyhow::Result<String> {
+        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_string()))
+            .bind(id)
+            .fetch_one(self.env.pool())
+            .await?)
+    }
+
     async fn count(&self, sql: &str, id: Uuid) -> anyhow::Result<i64> {
         Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_string()))
             .bind(id)
@@ -1022,5 +1029,111 @@ async fn a_request_takes_a_slug_and_refuses_a_nul_in_the_reason() -> R {
             r.json
         );
     }
+    Ok(())
+}
+
+/// Break-glass reads only: a guardian contact can neither retract a document the request opened nor
+/// move it into a profile of their own, where it would stay after the request ends.
+#[tokio::test]
+async fn a_guardian_contact_cannot_retract_or_move_a_document_break_glass_opened() -> R {
+    let mut b = setup().await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let mut docs = Vec::new();
+    for n in 1..=2u8 {
+        let doc: Uuid = sqlx::query_scalar(
+            "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type) \
+             values ($1, $2, $3, $4, 'application/pdf', 10, 'other') returning id",
+        )
+        .bind(b.env.fam().household_id)
+        .bind(b.alex_id())
+        .bind(vec![n; 32])
+        .bind(format!("nota{n}.pdf"))
+        .fetch_one(b.env.pool())
+        .await?;
+        docs.push(doc);
+    }
+    let rows = "select profile_id, status::text from document where id = any($1) order by filename";
+    let rows = sqlx::query_as::<_, (Option<Uuid>, String)>(rows).bind(docs.clone());
+    let before = rows.fetch_all(b.env.pool()).await?;
+    let mut sam = b.sam().await?;
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
+    // the request opens the document to read
+    let r = sam.get(&format!("/api/documents/{}", docs[0])).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    let r = sam
+        .post(&format!("/api/documents/{}/retract", docs[0]), &json!({"reason": "x"}))
+        .await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
+    let r = sam
+        .post(
+            &format!("/api/documents/{}/assign", docs[1]),
+            &json!({"profile": "sam"}),
+        )
+        .await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
+    let after: Vec<(Option<Uuid>, String)> =
+        sqlx::query_as("select profile_id, status::text from document where id = any($1) order by filename")
+            .bind(docs.clone())
+            .fetch_all(b.env.pool())
+            .await?;
+    assert_eq!(after, before);
+    // on his own grant both go through
+    b.grant_sam("guardian", &["read:summary", "read:records"]).await?;
+    let r = sam
+        .post(&format!("/api/documents/{}/retract", docs[0]), &json!({"reason": "x"}))
+        .await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    let r = sam
+        .post(
+            &format!("/api/documents/{}/assign", docs[1]),
+            &json!({"profile": "sam"}),
+        )
+        .await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    Ok(())
+}
+
+/// Break-glass reads only: a guardian contact sees a review item the request opened, and cannot
+/// accept, reject, dismiss or reopen it.
+#[tokio::test]
+async fn a_guardian_contact_cannot_decide_a_review_item_break_glass_opened() -> R {
+    let mut b = setup().await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let item: Uuid = sqlx::query_scalar(
+        "insert into review_item (household_id, profile_id, kind, payload) \
+         values ($1, $2, 'agent_proposal', $3) returning id",
+    )
+    .bind(b.env.fam().household_id)
+    .bind(b.alex_id())
+    .bind(json!({"observation": {"category": "laboratory", "code_text": "LDL"}}))
+    .fetch_one(b.env.pool())
+    .await?;
+    let mut sam = b.sam().await?;
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
+    let r = sam.get(&format!("/api/review/{item}")).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    for action in ["accept", "reject", "dismiss"] {
+        let r = sam
+            .post(&format!("/api/review/{item}/{action}"), &json!({"reason": "x"}))
+            .await?;
+        assert_eq!(
+            (r.status.as_u16(), r.code()),
+            (403, "break_glass"),
+            "{action}: {:?}",
+            r.json
+        );
+    }
+    let status = "select status from review_item where id = $1";
+    assert_eq!(b.text(status, item).await?, "open");
+    // on his own grant he decides it, and only then reopens it on the request alone
+    b.grant_sam("guardian", &["read:summary", "read:labs"]).await?;
+    let r = sam
+        .post(&format!("/api/review/{item}/dismiss"), &json!({"reason": "x"}))
+        .await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let r = sam.post(&format!("/api/review/{item}/reopen"), &json!({})).await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
+    assert_eq!(b.text(status, item).await?, "dismissed");
     Ok(())
 }

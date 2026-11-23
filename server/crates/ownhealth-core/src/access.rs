@@ -12,8 +12,9 @@
 //! their grant (its categories joined to the grant's, role `viewer` when they hold no grant). Only a
 //! REST request that records the uses (`break_glass::arm`) gets it; tokens, OAuth, calendar feeds and
 //! share links never do. Each permission it widened is recorded as a use. It only reads: a write
-//! (`require` with an action) needs its scope in the caller's own grant (`Permission::own_scopes`),
-//! and exports, feeds and the imaging viewer read with that grant alone (`Permission::own`).
+//! (`require` with an action, a document move or retraction, a review decision) needs its scope in the
+//! caller's own grant (`Permission::own_scopes`, `Permission::own_only`), and exports, feeds and the
+//! imaging viewer read with that grant alone (`Permission::own`).
 
 use sqlx::AssertSqlSafe;
 use std::collections::BTreeSet;
@@ -229,12 +230,18 @@ impl Permission {
     /// calendar feed or the imaging viewer reads with, since none of them may carry what only
     /// break-glass opened.
     pub fn own(&self, scope: &str) -> Option<Permission> {
-        self.own_scopes.contains(scope).then(|| Permission {
+        self.own_scopes.contains(scope).then(|| self.own_only())
+    }
+
+    /// This permission without emergency access: what a change checks its object against, since
+    /// emergency access only reads.
+    pub fn own_only(&self) -> Permission {
+        Permission {
             scopes: self.own_scopes.clone(),
             break_glass: false,
             break_glass_only: false,
             ..self.clone()
-        })
+        }
     }
 }
 
