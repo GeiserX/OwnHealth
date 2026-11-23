@@ -261,7 +261,11 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let out = dir.path().join("cd.zip");
         std::fs::write(&out, b"existing file")?;
-        assert_eq!(zip_folder(&[], &out).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        let result = zip_folder(&[], &out);
+        assert!(
+            matches!(result, Err(ref e) if e.kind() == io::ErrorKind::AlreadyExists),
+            "{result:?}"
+        );
         assert_eq!(std::fs::read(&out)?, b"existing file");
         Ok(())
     }
