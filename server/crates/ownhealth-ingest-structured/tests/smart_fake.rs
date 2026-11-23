@@ -1551,7 +1551,11 @@ async fn medication_requests_are_imported_without_medication_access() -> R {
         .await?
         .map_err(anyhow::Error::msg)?;
     assert!(got.problems.is_empty(), "{got:?}");
-    assert_eq!(w.count("medication").await?, 1, "the order with an inline name was imported");
+    assert_eq!(
+        w.count("medication").await?,
+        1,
+        "the order with an inline name was imported"
+    );
     assert_eq!(
         w.searched_since(0).await,
         ["Patient/sam-rivera", "MedicationRequest?intent=order,plan"]
