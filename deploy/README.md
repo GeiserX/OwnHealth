@@ -261,7 +261,14 @@ chmod 644 secrets/secrets_key
 
 If OwnHealth then stops with "does not open ... of the ... profile keys", the key is not the one the install was made with. Nothing was changed: put the original key back in `secrets/secrets_key` (from the old `.env`, or from the copy you keep with the backups) and start again. A new key never opens files already stored.
 
-Files stored before the upgrade stay where they are and open as before; files stored after it are encrypted. A later release adds a job you start yourself that encrypts the older files too. Take a backup after the upgrade and keep the key next to the restic password.
+Files stored before the upgrade stay where they are and open as before; files stored after it are encrypted. Take a backup after the upgrade and keep the key next to the restic password. Then encrypt the older files and connection tokens too, with a job that runs only when you start it:
+
+```sh
+docker compose run --rm -T admin ownhealth seal-legacy --dry-run   # what it would do; changes nothing
+docker compose run --rm -T admin ownhealth seal-legacy
+```
+
+The job stores each older file again under the key of every profile or held mail that reads it, then removes the unencrypted copy. It also encrypts each older connection refresh token under its profile's key. It can run while OwnHealth runs, and a backup that runs at the same time keeps every file it needs. Stop it at any time and run it again: it goes on where it stopped, and a run after a complete one changes nothing. It prints a JSON report, and exits 1 when a file or a token could not be encrypted; that one stays as it was. A file that only reference data or an inbox record older than 1.0 with no profile names stays unencrypted. Backups taken before the job still hold the unencrypted files until retention removes them.
 
 **To 0.4.0.** After the backup, set `admin` and `app` to `drumsergio/ownhealth:0.4.0` and `ocr` to `drumsergio/ownhealth:0.4.0-ocr`; nothing else in the compose files changes. Rule pack 0.2.0 moves every profile's `state_hash` once, so restore a backup made before the upgrade with 0.3.0, as above. For the same reason, `restore-test.sh` on a snapshot made before the upgrade reports every profile's `state_hash` as different; run `./deploy/restic/backup.sh` once after the upgrade, so the restore test checks a 0.4.0 snapshot. A household with a genome starts downloading NCBI's weekly ClinVar file (about 200 MB, no personal data in the request); turn it off in Settings, or set a local file path on a server without internet.
 

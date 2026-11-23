@@ -241,6 +241,7 @@ Successor and inheritance of data after death is a v2 item.
 - Blob addresses become `HMAC(profile key, sha256(plaintext))`, so identical files across profiles do not reveal that two people hold the same document.
 - Bytes that arrive before they have a profile (a held mail, a document with no profile yet) are sealed under a random key of their own item. When the item gets its profile, its files are sealed again under the profile's key and the item key is destroyed. A deleted held mail's key is destroyed too. A sweep at start and every 10 minutes removes key folders whose key is gone, including a file that a write in flight left after a delete. A file that a running backup's snapshot still names stays until the backup has copied it.
 - A connector's client secret belongs to the household, not to one profile, so it stays under the secrets key.
+- Files and refresh tokens stored before 1.0 stay readable as they are. The operator encrypts them with `ownhealth seal-legacy`, which never runs on its own: each file is stored again under the key of every profile or pending item that reads it, and then its unencrypted copy is removed; each refresh token is sealed under its profile's key. A file that only reference data or an inbox record older than 1.0 with no profile names stays unencrypted. Backups taken before the job keep the unencrypted files until retention removes them.
 
 | KEK mode | How | Works unattended | Default |
 |---|---|---|---|

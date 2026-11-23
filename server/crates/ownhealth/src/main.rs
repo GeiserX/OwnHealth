@@ -1,5 +1,5 @@
 //! `ownhealth serve | migrate | demo-seed | worker | healthcheck | backup | restore | verify-restore |
-//! clinvar-diff`.
+//! clinvar-diff | seal-legacy`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -58,6 +58,16 @@ enum Cmd {
     ClinvarDiff {
         /// The ClinVar VCF, for example clinvar_20261005.vcf.gz.
         path: PathBuf,
+    },
+    /// Encrypt what an install stored before profile keys: each older file under the key of every
+    /// profile or held item that reads it (then the plain copy goes), and each older refresh token
+    /// under its profile's key. Runs only when you start it, while the app runs or not; stop it at any
+    /// time and run it again to go on. Prints a JSON report; exits 1 when something could not be
+    /// sealed. Needs OWNHEALTH_DATABASE_URL and the OWNHEALTH_SECRETS_KEY the install was made with.
+    SealLegacy {
+        /// Report what a run would do and change nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -180,6 +190,17 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
             } else {
                 ExitCode::SUCCESS
             })
+        }
+        Cmd::SealLegacy { dry_run } => {
+            let rt = Runtime::new(settings)?;
+            let mut conn = rt.pool.acquire().await?;
+            if !migrate::pending(&mut conn, &migrate::embedded()?).await?.is_empty() {
+                anyhow::bail!("the database is not migrated: run `ownhealth migrate` first");
+            }
+            drop(conn);
+            app::check_profile_keys(&rt).await?;
+            let sb = ownhealth_core::secrets::SecretBox::from_settings(&rt.settings)?.with_keys(rt.blobs.keyring());
+            report(&ownhealth_ops::seal_legacy(&rt.pool, &rt.blobs, &sb, dry_run).await?)
         }
         Cmd::Worker => {
             let rt = Runtime::new(settings)?;
