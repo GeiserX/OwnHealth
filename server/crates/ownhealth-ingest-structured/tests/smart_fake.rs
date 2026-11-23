@@ -10,6 +10,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use axum::body::{Body, Bytes};
 use axum::extract::{Form, Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -91,6 +92,8 @@ struct Behaviour {
     /// The `scope` of token answers that carry it.
     scope: String,
     omit_refresh_scope: bool,
+    /// A search that sends only part of its advertised body.
+    broken_search: Option<(&'static str, usize)>,
     /// The `capabilities` discovery lists.
     capabilities: Vec<&'static str>,
     /// A search of this type (`*`: every type) answers this status.
@@ -131,6 +134,7 @@ impl Default for Behaviour {
         Behaviour {
             scope: ALL.into(),
             omit_refresh_scope: false,
+            broken_search: None,
             capabilities: vec![
                 "launch-standalone",
                 "client-public",
@@ -493,6 +497,18 @@ async fn search(
         && (t == rtype || t == "*")
     {
         return outcome(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), "down");
+    }
+    if let Some((kind, bytes)) = b.broken_search
+        && kind == rtype
+    {
+        let chunk = Bytes::from(vec![b' '; bytes]);
+        let stream = futures::stream::iter([Ok::<_, std::io::Error>(chunk)]);
+        return (
+            StatusCode::OK,
+            [("content-length", (bytes + 1).to_string())],
+            Body::from_stream(stream),
+        )
+            .into_response();
     }
     if b.oversized_search == Some(rtype.as_str()) {
         return (
@@ -2324,5 +2340,44 @@ async fn an_old_poll_finishes_in_history_without_changing_the_new_grants_health(
     assert_eq!(health.consecutive_failures, 1);
     assert_eq!(health.last_error.as_deref(), Some("new grant failed"));
     assert_eq!(health.last_run_problem.as_deref(), Some("new grant failed"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bytes_from_a_broken_body_count_against_the_next_search() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/Condition.s patient/Observation.s?category=laboratory".into(),
+        fail: Some(("*", 503)),
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    w.day(source, t0()).await?.expect_err("no search answered");
+    let partial_bytes = 16 * 1024;
+    let run_bytes = w.fake.book().served + partial_bytes + 32;
+    w.fake.set(|b| {
+        b.fail = None;
+        b.broken_search = Some(("Condition", partial_bytes));
+    });
+    let caps = smart::Caps {
+        run_bytes,
+        ..smart::Caps::default()
+    };
+    let got = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        w.day_with(source, t0() + Duration::minutes(1), &caps),
+    )
+    .await??;
+    let err = got.expect_err("the bytes already read leave too little room for the Observation");
+    assert!(err.contains("too_large: Observation: "), "{err}");
+    assert!(w.documents(source).await?.is_empty());
+
+    w.fake.set(|b| b.broken_search = Some(("Condition", 0)));
+    let got = w
+        .day_with(source, t0() + Duration::minutes(2), &caps)
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(got.new, 1, "{got:?}");
+    assert_eq!(got.problems[0].code, "unreachable");
     Ok(())
 }

@@ -503,22 +503,27 @@ impl SourceHttp {
     }
 
     pub async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<Fetched, OAuthError> {
-        self.get_bounded(url, headers, self.egress.max_bytes).await
+        self.get_bounded(url, headers, self.egress.max_bytes)
+            .await
+            .map_err(|(err, _)| err)
     }
 
-    /// GET with a per-request body cap within this connection's egress limit.
+    /// GET with a per-request body cap within this connection's egress limit. An error includes
+    /// how many body bytes arrived before it.
     pub async fn get_bounded(
         &self,
         url: &str,
         headers: &[(&str, &str)],
         max_bytes: usize,
-    ) -> Result<Fetched, OAuthError> {
-        self.check(url)?;
+    ) -> Result<Fetched, (OAuthError, usize)> {
+        self.check(url).map_err(|err| (err, 0))?;
         let egress = Egress {
             max_bytes: max_bytes.min(self.egress.max_bytes),
             ..self.egress.clone()
         };
-        Ok(net::get(url, &egress, headers).await?)
+        net::get_counted(url, &egress, headers)
+            .await
+            .map_err(|(err, bytes)| (OAuthError::Net(err), bytes))
     }
 
     pub async fn post_form(

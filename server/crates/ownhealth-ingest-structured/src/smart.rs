@@ -405,10 +405,10 @@ impl Reader {
                 .await
             {
                 Ok(f) => f,
-                Err(OAuthError::UndeclaredHost(_)) => {
+                Err((OAuthError::UndeclaredHost(_), _)) => {
                     return Err(Miss::Search("undeclared_host", Box::new(words::undeclared)));
                 }
-                Err(OAuthError::Net(NetError::TooLarge(limit))) => {
+                Err((OAuthError::Net(NetError::TooLarge(limit)), _)) => {
                     // The capped reader discards an oversized body. Charge its full allowance
                     // because a streamed response may already have consumed it.
                     self.remaining -= limit;
@@ -420,13 +420,14 @@ impl Reader {
                         Box::new(move |t| words::page_too_large(t, limit)),
                     ));
                 }
-                Err(OAuthError::Net(e)) => {
+                Err((OAuthError::Net(e), bytes_read)) => {
+                    self.remaining -= bytes_read;
                     return Err(Miss::Search(
                         "unreachable",
                         Box::new(move |t: &str| words::unreachable(t, &e)),
                     ));
                 }
-                Err(e) => return Err(Miss::Run(token_stop(e))),
+                Err((e, _)) => return Err(Miss::Run(token_stop(e))),
             };
             self.remaining -= f.body.len();
             // the server dropped the token before its time: one refresh, then the answer stands
