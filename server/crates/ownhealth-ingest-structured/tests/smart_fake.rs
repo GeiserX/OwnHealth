@@ -172,6 +172,8 @@ struct Book {
     handed_out: Vec<String>,
     /// resources the server gained after the launch
     extra: Vec<Value>,
+    /// Extra entries a search returns on its first page, even if they do not match the query.
+    extra_search_entries: Vec<(&'static str, Value)>,
     /// Bytes of successful Patient reads and search bundles, excluding Medication reads.
     served: usize,
 }
@@ -557,6 +559,15 @@ async fn search(
             let url = format!("{}/fhir/Medication/{}", s.base, m["id"].as_str().unwrap_or_default());
             entries.push(json!({"fullUrl": url, "resource": m, "search": {"mode": "include"}}));
         }
+    }
+    if page == 1 {
+        entries.extend(
+            lock(&s.book)
+                .extra_search_entries
+                .iter()
+                .filter(|(search, _)| *search == rtype)
+                .map(|(_, entry)| entry.clone()),
+        );
     }
     if rtype == "Condition" && page == 1 {
         entries.push(json!({"resource": {"resourceType": "OperationOutcome", "issue": [{"severity": "warning",
@@ -1842,6 +1853,77 @@ async fn foreign_patient_resources_stay_out_of_the_stored_bundle() -> R {
     assert_eq!(got.problems[0].code, "patient_reference");
     assert!(!got.problems[0].message.contains("lucia-rivera"), "{got:?}");
     assert_eq!(w.medication_reads(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn search_results_skip_a_foreign_allergy_patient_reference() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/AllergyIntolerance.s".into(),
+        ..Behaviour::default()
+    })
+    .await?;
+    let id = "r3-allergy-foreign";
+    w.fake.book().extra.extend([
+        json!({
+            "resourceType": "AllergyIntolerance", "id": id,
+            "patient": {"reference": "Patient/lucia-rivera"}, "code": {"text": "Synthetic"},
+        }),
+        json!({
+            "resourceType": "AllergyIntolerance", "id": "sam-allergy",
+            "patient": {"reference": format!("Patient/{PATIENT}")}, "code": {"text": "Synthetic"},
+        }),
+    ]);
+    let source = w.connect(t0()).await?;
+    let got = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    let bundle = w.stored_bundle(source).await?;
+    let entries = bundle["entry"].as_array().expect("the snapshot has entries");
+    assert!(!entries.iter().any(|entry| entry["resource"]["id"] == id), "{got:?}");
+    assert!(
+        entries.iter().any(|entry| entry["resource"]["id"] == "sam-allergy"),
+        "{got:?}"
+    );
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
+    assert_eq!(got.problems.len(), 1, "{got:?}");
+    assert_eq!(got.problems[0].code, "patient_reference");
+    Ok(())
+}
+
+#[tokio::test]
+async fn search_results_skip_a_foreign_patient_entry() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/Encounter.s".into(),
+        ..Behaviour::default()
+    })
+    .await?;
+    w.fake.book().extra_search_entries.push((
+        "Encounter",
+        json!({
+            "resource": {"resourceType": "Patient", "id": "lucia-rivera",
+                "name": [{"family": "Rivera", "given": ["Lucia"]}], "birthDate": "2017-06-21"},
+            "search": {"mode": "match"},
+        }),
+    ));
+    let source = w.connect(t0()).await?;
+    let got = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    let bundle = w.stored_bundle(source).await?;
+    let patients: Vec<&str> = bundle["entry"]
+        .as_array()
+        .expect("the snapshot has entries")
+        .iter()
+        .filter(|entry| entry["resource"]["resourceType"] == "Patient")
+        .filter_map(|entry| entry["resource"]["id"].as_str())
+        .collect();
+    assert_eq!(patients, [PATIENT], "{got:?}");
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
+    assert_eq!(got.problems.len(), 1, "{got:?}");
+    assert_eq!(got.problems[0].code, "patient_reference");
     Ok(())
 }
 
