@@ -830,9 +830,6 @@ async fn the_migration_moves_stored_cgm_exports_to_the_wearables_type() -> R {
     Ok(())
 }
 
-/// A running CGM import holds its profile's export lock and then writes the document row. Moving that
-/// export through the API waits for the lock before it locks the row, so the move and the import run
-/// one after the other: neither is aborted as a deadlock (40P01).
 /// Store a CGM export on a profile and import it in `zone`, as the upload job does when the server has no
 /// `OWNHEALTH_TIMEZONE` and the browser sent `zone`.
 async fn cgm_export_in(a: &App, slug: &str, bytes: &[u8], zone: &str) -> anyhow::Result<uuid::Uuid> {
@@ -862,6 +859,9 @@ async fn cgm_export_in(a: &App, slug: &str, bytes: &[u8], zone: &str) -> anyhow:
     Ok(doc)
 }
 
+/// A running CGM import holds its profile's export lock and then writes the document row. Moving that
+/// export through the API waits for the lock before it locks the row, so the move and the import run
+/// one after the other: neither is aborted as a deadlock (40P01).
 #[tokio::test]
 async fn moving_a_cgm_export_while_its_import_runs_waits_for_the_import() -> R {
     let a = app().await?;
