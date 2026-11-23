@@ -1368,3 +1368,46 @@ async fn round6_a_retry_never_deletes_an_instance_that_existed_before_its_post()
     assert_eq!(e.fhir(U1).await?["numberOfInstances"], 3);
     Ok(())
 }
+
+/// A study accepted with a PatientID the reader cannot decode replays as a no-op (round 6), but a
+/// later disc that adds a new SOP instance to it is held again: the replay check counts an instance
+/// as stored only when Orthanc holds it under the recorded study, decoded ID or not.
+#[tokio::test]
+async fn round7_a_new_sop_in_an_accepted_charset_study_is_held_again() -> R {
+    let e = env().await?;
+    let st = Study {
+        charset: "ISO_IR 192",
+        series: 1,
+        per_series: 3,
+        ..Study::new(U1, ALEX)
+    };
+    let mut files = study_files(&st, "DICOM");
+    patch(&mut files, b"ISO_IR 192", b"ISO_IR 148");
+    e.upload("alex", &files[..2]).await?;
+    e.run().await?;
+    assert_eq!(e.in_review("alex").await?, [(U1.into(), "unsupported_charset".into())]);
+    let item: Uuid = sqlx::query_scalar("select id from review_item where kind = $1")
+        .bind(REVIEW_KIND)
+        .fetch_one(&e.rt.pool)
+        .await?;
+    let mut c = e.rt.pool.acquire().await?;
+    ownhealth_core::review::accept(&mut c, item, e.fam.user("alex"), None).await?;
+    drop(c);
+    e.run().await?;
+    assert!(e.recorded(U1).await?.is_some());
+    assert_eq!(e.orthanc.held().instances.len(), 2);
+    let posts = e.orthanc.posts();
+    let up = e.upload("alex", &files).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_ne!(result["already"], 1, "{result}");
+    assert_eq!(
+        e.in_review("alex").await?,
+        [(U1.into(), "unsupported_charset".into())],
+        "{result}"
+    );
+    assert_eq!(e.orthanc.posts(), posts, "nothing unreviewed reaches Orthanc");
+    assert_eq!(e.orthanc.held().instances.len(), 2);
+    Ok(())
+}
