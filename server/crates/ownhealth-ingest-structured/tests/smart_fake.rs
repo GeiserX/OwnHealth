@@ -103,6 +103,8 @@ struct Behaviour {
     /// `_include=MedicationRequest:medication` brings the named Medications (US Core); off, the
     /// server ignores it.
     include: bool,
+    /// The server refuses requests with an include outside the grant.
+    reject_include: bool,
     /// This type's search answers 400 "status is required" without its status parameter.
     require_status: Option<&'static str>,
     /// Bytes of filler in each Medication read answer.
@@ -127,6 +129,7 @@ impl Default for Behaviour {
             patient_status: None,
             redact_patient: &[],
             include: true,
+            reject_include: false,
             require_status: None,
             medication_padding: 0,
         }
@@ -434,6 +437,9 @@ async fn search(
             format!("{rtype}?{}", said.join("&"))
         };
         lock(&s.book).searches.push(entry);
+    }
+    if b.reject_include && get("_include").is_some() {
+        return outcome(StatusCode::FORBIDDEN, "include outside the grant");
     }
     if let Some((t, status)) = b.fail
         && (t == rtype || t == "*")
@@ -1531,28 +1537,28 @@ async fn included_medicines_arrive_with_their_orders_without_a_read() -> R {
 }
 
 #[tokio::test]
-async fn no_medication_is_read_when_the_grant_leaves_it_out() -> R {
-    let narrow = [
-        "launch/patient",
-        "offline_access",
-        "patient/Patient.rs",
-        "patient/MedicationRequest.rs",
-        "patient/Condition.rs",
-        "patient/Observation.rs",
-    ]
-    .join(" ");
+async fn medication_requests_are_imported_without_medication_access() -> R {
     let w = world(Behaviour {
-        scope: narrow,
-        include: false,
+        scope: "launch/patient offline_access patient/Patient.r patient/MedicationRequest.s".into(),
+        reject_include: true,
         ..Behaviour::default()
     })
     .await?;
     w.fake.book().extra.extend(two_named_medicines());
     let source = w.connect(t0()).await?;
-    w.day(source, t0() + Duration::minutes(1))
+    let got = w
+        .day(source, t0() + Duration::minutes(1))
         .await?
         .map_err(anyhow::Error::msg)?;
-    assert_eq!(w.medication_reads(), 0);
+    assert!(got.problems.is_empty(), "{got:?}");
+    assert_eq!(w.count("medication").await?, 1, "the order with an inline name was imported");
+    assert_eq!(
+        w.searched_since(0).await,
+        ["Patient/sam-rivera", "MedicationRequest?intent=order,plan"]
+            .map(String::from)
+            .into(),
+        "only the granted requests were sent"
+    );
     Ok(())
 }
 

@@ -5,7 +5,8 @@
 //! - **Searches.** For the patient the grant names (`source.config.patient`, the token answer's
 //!   `patient`): a read of the Patient, then the US Core searches of AllergyIntolerance, Condition,
 //!   DiagnosticReport, DocumentReference, Encounter, Immunization, MedicationRequest (intent order or
-//!   plan, with `_include` of the Medications it names), Observation (one search per category:
+//!   plan, with `_include` of the Medications it names when the grant covers Medication reads),
+//!   Observation (one search per category:
 //!   laboratory, social-history, vital-signs; US Core servers require one) and Procedure. A
 //!   Medication that a MedicationRequest names by reference and the answer did not include is read
 //!   on its own. A read needs `r` in the grant and a search `s` (v1 `.read` gives both); a type the
@@ -70,6 +71,10 @@ pub const US_CORE_TYPES: [&str; 10] = [
     "Procedure",
 ];
 
+const MEDICATION_INTENT: (&str, &str) = ("intent", "order,plan");
+const MEDICATION_REQUEST_WITH_INCLUDE: [(&str, &str); 2] =
+    [MEDICATION_INTENT, ("_include", "MedicationRequest:medication")];
+
 /// The searches after the Patient read: a type and the parameters besides `patient`.
 const SEARCHES: [(&str, &[(&str, &str)]); 11] = [
     ("AllergyIntolerance", &[]),
@@ -78,11 +83,7 @@ const SEARCHES: [(&str, &[(&str, &str)]); 11] = [
     ("DocumentReference", &[]),
     ("Encounter", &[]),
     ("Immunization", &[]),
-    // US Core: a server that names Medications by reference returns them with this include
-    (
-        "MedicationRequest",
-        &[("intent", "order,plan"), ("_include", "MedicationRequest:medication")],
-    ),
+    ("MedicationRequest", &[MEDICATION_INTENT]),
     ("Observation", &[("category", "laboratory")]),
     ("Observation", &[("category", "social-history")]),
     ("Observation", &[("category", "vital-signs")]),
@@ -781,13 +782,19 @@ pub async fn pull_with(
         return Err(JobError::permanent(STOP_PATIENT_UNVERIFIED));
     }
     g.entries.push((Some(format!("{base}/Patient/{patient}")), p));
-    for (rtype, params) in &planned {
+    let read_medication = granted(scope, "Medication", Op::Read, &[]);
+    for (rtype, params) in planned {
+        let params = if rtype == "MedicationRequest" && read_medication {
+            &MEDICATION_REQUEST_WITH_INCLUDE
+        } else {
+            params
+        };
         search(&mut r, &mut g, caps, (&base, &patient), rtype, params).await?;
     }
     if g.answered == 0 {
         return Err(JobError::retry(STOP_NO_ANSWER));
     }
-    if granted(scope, "Medication", Op::Read, &[]) {
+    if read_medication {
         let missing = missing_medications(&base, &g.entries);
         let mut left = missing.len();
         for id in missing.iter().take(caps.medication_reads) {
