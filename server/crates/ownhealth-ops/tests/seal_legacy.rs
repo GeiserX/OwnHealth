@@ -466,6 +466,8 @@ async fn backup_verify_restore_and_restore_pass_after_the_job() -> R {
     let fresh_db = TestDb::empty().await?;
     let mut fresh = fresh_db.settings(&m.dir.path().join("fresh"))?;
     fresh.secrets_key = m.settings.secrets_key.clone();
+    // a restore on the same host reads the live keyring (slice 47): the backup holds no profile key
+    fresh.keyring_dir = Some(m.settings.keyring_path());
     let report = ownhealth_ops::restore(&fresh, &archive).await?;
     assert_eq!(report["ok"], true, "{report:#}");
     let store = BlobStore::for_settings(&fresh)?;
