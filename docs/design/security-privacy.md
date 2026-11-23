@@ -167,11 +167,15 @@ token(user, profiles[], scopes[], budget, expires_at)
 profile.locks   (set by the profile owner: sensitive categories off, sensitive genome findings off)
 ```
 
-Effective permission for any read, from any surface, the same formula as [mcp.md §2.4](mcp.md#24-family-grants):
+Ordinary reads use the same permission formula as [mcp.md §2.4](mcp.md#24-family-grants).
 
 `token scopes ∩ grant categories for that profile − profile.locks`
 
-The browser session acts as a token with all scopes, so the same function decides UI, REST, MCP and export. Personal access tokens reach `/mcp` only: every `/api` route answers 403 `forbidden` to a bearer token, so the review queue, rate limit, egress budget, page and genome caps and identity mode apply to every agent read. `tools/list` returns only tools the token can call.
+A browser session supplies all token scopes for this intersection. Profile locks apply to roles other than owner.
+
+An active break-glass request adds its read scopes to the contact's browser session, subject to profile locks. A contact without a grant gets temporary viewer permission for the request's scopes. Exports, MCP, and token issuance require ordinary grants.
+
+Personal access tokens reach `/mcp` only: every `/api` route answers 403 `forbidden` to a bearer token, so the review queue, rate limit, egress budget, page and genome caps and identity mode apply to every agent read. `tools/list` returns only tools the token can call.
 
 ### 6.2 Roles
 
@@ -182,7 +186,7 @@ The browser session acts as a token with all scopes, so the same function decide
 | `caregiver` | Read and import for an adult who granted it (an elderly parent) | Grants, export, delete, `read:sensitive` unless granted |
 | `viewer` | Read the categories granted | Write, export |
 
-A profile without a login (a minor, an elderly parent) is managed through `guardian` or `caregiver` grants until its person claims it. Default categories per role are in [mcp.md §2.4](mcp.md#24-family-grants). Break-glass (section 6.5) adds a time-boxed grant row; it is not a fifth role.
+A profile without a login (a minor, an elderly parent) is managed through `guardian` or `caregiver` grants until its person claims it. Default categories per role are in [mcp.md §2.4](mcp.md#24-family-grants). An active break-glass request adds read scopes to the contact's browser permission. A contact without a grant gets a temporary viewer permission. Both paths leave the grant table unchanged.
 
 ### 6.3 Scopes
 
@@ -205,21 +209,22 @@ A profile without a login (a minor, an elderly parent) is managed through `guard
 
 For a family member who is hospitalised, unconscious or dead.
 
-1. The owner pre-designates emergency contacts and what they would see (default: summary, records, labs, medications; not `read:sensitive`, not genome raw). Designating a contact needs an active calendar feed.
-2. A contact requests access with a reason.
-3. The owner is notified at once and can reject. If not rejected within the delay (default 48 hours, configurable 12 to 168), a read-only grant opens for 14 days, once the owner's calendar feed has been fetched since the request; until then the request stays requested.
-4. Every step and every read during the grant is in the audit log, shown to the owner at next login.
+1. The owner pre-designates emergency contacts (`break_glass_contact`) and what they would see (default: summary, records, labs; never `read:sensitive`, genome raw or a write). Designating a contact needs an active calendar feed.
+2. A contact requests access with a reason (`break_glass_request`, status `requested`).
+3. The in-app notice appears as soon as the contact asks. The owner's calendar client sees the request and when access would open on the next feed fetch. The request stays pending until the delay has passed and the feed has served the request. The owner can cancel while it is pending. The delay defaults to 48 hours and can be set from 12 to 168 hours. Access stays active for 14 days unless revoked.
+4. While active, the request adds read scopes to an existing browser permission or supplies a temporary viewer permission. Neither path creates or changes a grant row. Every sensitive fact requires its category scope and `read:sensitive` from the same permission source. Emergency requests cannot supply `read:sensitive`, so both scopes must come from the grant. Tokens, OAuth consents, calendar feeds, exports, and the imaging viewer use ordinary access. Share links are unavailable to the contact while the request is active.
+5. Each request step and each successful read that uses emergency access adds an audit row and an owner notice. The server records both before returning emergency data. Unread request and activation notices remain visible even when newer use notices fill the recent list.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Requested: contact asks
-  Requested --> Rejected: owner rejects
-  Requested --> Active: delay passed and feed fetched
-  Active --> Expired: 14 days
-  Active --> Revoked: owner revokes
-  Rejected --> [*]
-  Expired --> [*]
-  Revoked --> [*]
+  [*] --> requested: contact asks
+  requested --> cancelled: owner cancels, or removes the contact
+  requested --> active: delay passed and feed served it
+  active --> expired: 14 days
+  active --> revoked: owner revokes, or removes the contact
+  cancelled --> [*]
+  expired --> [*]
+  revoked --> [*]
 ```
 
 Successor and inheritance of data after death is a v2 item.

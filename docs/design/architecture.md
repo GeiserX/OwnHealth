@@ -545,7 +545,7 @@ The browser session counts as a token with all scopes. A user with no `grant` ro
 | `caregiver` | Read and import for an adult who granted it (an elderly parent) | Grants, export, delete; `read:sensitive` unless granted | `read:summary read:labs read:vitals read:records` |
 | `viewer` | Read the categories granted | Write, export | `read:summary` |
 
-A profile without a login (a child, an elderly parent) is managed through guardian or caregiver grants until its person claims it. Break-glass (v1.0) adds no role: it creates a time-boxed, read-only `grant` row with `break_glass = true`, and the owner is notified. Detail: [security-privacy.md section 6](security-privacy.md) and [mcp.md section 2.4](mcp.md).
+A profile without a login (a child, an elderly parent) is managed through guardian or caregiver grants until its person claims it. Break-glass (v1.0) adds no role and no grant row: an open emergency request (`break_glass_request`) is joined to the contact's own grant in their browser session only, read-only and for 14 days, and the owner is notified of every step and every read. Detail: [security-privacy.md section 6](security-privacy.md) and [mcp.md section 2.4](mcp.md).
 
 Reason codes on `candidate_row.reasons` and `review_item.reasons`, one list for every importer: `loinc_unknown`, `loinc_deprecated`, `unmapped`, `unit_dimension_mismatch`, `unit_unconvertible`, `implausible`, `suspect_separator`, `range_parse`, `value_is_range`, `not_grounded`, `ungrounded_no_word_layer`, `name_not_on_line`, `identity_mismatch`, `identity_missing`, `date_invalid`, `duplicate`, `conflict`, `amended_value`, `possible_injection`. The meaning of each is in [ingestion.md section 9](ingestion.md#9-validation-and-acceptance).
 

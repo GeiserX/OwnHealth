@@ -721,18 +721,24 @@ pub async fn bulk_accept(
     user_id: Uuid,
     min_row_conf: f64,
 ) -> Result<Vec<Uuid>> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "select id from review_item where document_id = $1 and kind = 'candidate_row' and status = 'open' \
-         and reasons = '{}' and coalesce(row_conf, 0) >= $2 order by created_at, id",
+    let mut ids = Vec::new();
+    for item in bulk_candidates(conn, document_id, min_row_conf).await? {
+        accept(&mut *conn, item.id, user_id, None).await?;
+        ids.push(item.id);
+    }
+    Ok(ids)
+}
+
+/// Open, high-confidence candidate rows eligible for bulk review, locked until the caller decides.
+pub async fn bulk_candidates(conn: &mut PgConnection, document_id: Uuid, min_row_conf: f64) -> Result<Vec<ReviewItem>> {
+    Ok(sqlx::query_as(
+        "select * from review_item where document_id = $1 and kind = 'candidate_row' and status = 'open'
+         and reasons = '{}' and coalesce(row_conf, 0) >= $2 order by created_at, id for update",
     )
     .bind(document_id)
     .bind(min_row_conf)
-    .fetch_all(&mut *conn)
-    .await?;
-    for id in &ids {
-        accept(&mut *conn, *id, user_id, None).await?;
-    }
-    Ok(ids)
+    .fetch_all(conn)
+    .await?)
 }
 
 /// The filters of `list_items`. `profile_ids: Some(..)` keeps those profiles and household items

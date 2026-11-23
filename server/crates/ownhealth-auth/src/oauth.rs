@@ -725,13 +725,21 @@ pub async fn approve(conn: &mut PgConnection, user_id: Uuid, consent: &ConsentIn
             profiles.push(*p);
         }
     }
-    let granted: Vec<Uuid> =
-        sqlx::query_scalar("select profile_id from profile_grant where user_id = $1 and profile_id = any($2)")
-            .bind(user_id)
-            .bind(&profiles)
-            .fetch_all(&mut *conn)
-            .await?;
-    if profiles.iter().any(|p| !granted.contains(p)) {
+    let granted: Vec<Uuid> = sqlx::query_scalar(
+        "select profile_id from profile_grant where user_id = $1 and profile_id = any($2) and not break_glass",
+    )
+    .bind(user_id)
+    .bind(&profiles)
+    .fetch_all(&mut *conn)
+    .await?;
+    let missing: Vec<Uuid> = profiles.iter().filter(|p| !granted.contains(p)).copied().collect();
+    if ownhealth_core::break_glass::emergency_only(&mut *conn, user_id, &missing).await? {
+        return Err(Error::access_denied(
+            "break_glass",
+            "Emergency access cannot be given to an app.",
+        ));
+    }
+    if !missing.is_empty() {
         return Err(Error::access_denied(
             "profile_not_granted",
             "The consent names a profile you have no grant on.",

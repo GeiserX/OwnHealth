@@ -74,9 +74,14 @@ async fn summary_pdf(
     let mut tx = summary::begin_read(&rt.pool).await?;
     // the start of the read (now() is the transaction's start): the time the audit row carries
     let read_at: DateTime<Utc> = sqlx::query_scalar("select now()").fetch_one(&mut *tx).await?;
-    let perm = Caller(p.clone())
-        .require(&mut tx, &profile, Some("read:summary"), None)
-        .await?;
+    // an export: emergency access never prints, so the sheet carries the caller's own grant only
+    let perm = crate::routes::break_glass::own(
+        Caller(p.clone())
+            .require(&mut tx, &profile, Some("read:summary"), None)
+            .await?,
+        "read:summary",
+        "Emergency access cannot export this profile.",
+    )?;
     // the minor rule is judged on today's date, as the genome page does
     let gate = ownhealth_genome::gate_for(&perm, "ui", today, majority(&mut tx, perm.profile.household_id).await?)?;
     let opts = Options {

@@ -48,22 +48,20 @@ static NORMAL_PHENOTYPE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// The gate for one caller on one profile. `surface` is "ui" (the profile's UI switch; "api" too) or
-/// "agents" (the agents switch plus read:genome; "mcp" too, mcp.md 9.7). Both also need read:sensitive.
+/// "agents" (the agents switch; "mcp" too, mcp.md 9.7). Both need the genome and sensitive scopes
+/// from the same permission source.
 pub fn gate_for(perm: &Permission, surface: &str, on: NaiveDate, age_of_majority: i32) -> Result<Gate> {
     let p = &perm.profile;
-    let (surface, open) = match surface {
-        "ui" | "api" => ("ui", p.genome_sensitive_ui && perm.has("read:sensitive")),
-        "agents" | "mcp" => (
-            "agents",
-            p.genome_sensitive_agents && perm.has("read:genome") && perm.has("read:sensitive"),
-        ),
+    let (surface, switch) = match surface {
+        "ui" | "api" => ("ui", p.genome_sensitive_ui),
+        "agents" | "mcp" => ("agents", p.genome_sensitive_agents),
         other => return Err(Error::Invalid(format!("unknown surface '{other}'"))),
     };
     Ok(Gate {
         surface: surface.into(),
         genome: perm.has("read:genome"),
         raw: perm.has("read:genome_raw"),
-        sensitive: open,
+        sensitive: switch && perm.may_read_sensitive("read:genome"),
         minor: p.is_minor(on, age_of_majority),
     })
 }

@@ -961,3 +961,59 @@ export interface ShlRevoked {
 	id: Uuid;
 	revoked: true;
 }
+
+// ------------------------------------------------- break-glass (break_glass.rs) ----
+
+/** What a contact may be given (ownhealth_core::break_glass::CATEGORIES): reads only. */
+export type BreakGlassCategory =
+	| 'read:summary'
+	| 'read:labs'
+	| 'read:vitals'
+	| 'read:wearables'
+	| 'read:records'
+	| 'read:genome'
+	| 'read:documents_text';
+export type BreakGlassStatus = 'requested' | 'cancelled' | 'active' | 'expired' | 'revoked';
+
+/** A contact the owner named, in GET /profiles/{p}/break-glass. */
+export interface BreakGlassContact {
+	user_id: Uuid;
+	display_name: string;
+	categories: BreakGlassCategory[];
+	delay_hours: number;
+	created_at: IsoDateTime;
+}
+/** One emergency request. */
+export interface BreakGlassRequest {
+	id: Uuid;
+	profile_id: Uuid;
+	contact: { user_id: Uuid; display_name: string };
+	reason: string;
+	categories: BreakGlassCategory[];
+	status: BreakGlassStatus;
+	requested_at: IsoDateTime;
+	activates_at: IsoDateTime;
+	owner_feed_at: IsoDateTime | null;
+	activated_at: IsoDateTime | null;
+	expires_at: IsoDateTime | null;
+	ended_at: IsoDateTime | null;
+	/** the delay has passed, but no owner calendar feed has served the request yet */
+	waiting_for_calendar: boolean;
+}
+/** GET /profiles/{p}/break-glass: the owner's view. */
+export interface BreakGlassOwnerView {
+	contacts: BreakGlassContact[];
+	/** every requested and active request, newest first */
+	open_requests: BreakGlassRequest[];
+	/** closed requests (cancelled, expired, revoked), newest first, at most 100 */
+	requests: BreakGlassRequest[];
+	/** whether the caller has a live calendar feed of the profile: naming a contact needs one */
+	calendar_feed: boolean;
+	defaults: {
+		categories: BreakGlassCategory[];
+		delay_hours: number;
+		min_delay_hours: number;
+		max_delay_hours: number;
+		allowed: BreakGlassCategory[];
+	};
+}

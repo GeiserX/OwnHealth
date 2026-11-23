@@ -132,7 +132,7 @@ Effective permission for a call:
 effective = token.scopes ∩ grant(token.owner_user, profile).categories − profile.locks
 ```
 
-`profile.locks` is what the profile's owner set: sensitive categories off, and the two sensitive-genome switches (one for the UI, one for agents) off by default. A token can never reach a profile its owner has no grant on, whatever the token says. Break-glass access for family arrives in v1.0 and does not change this formula: it creates a time-boxed grant row. The same `grant` table, roles and locks are described in architecture.md and security-privacy.md; this formula is the one the code implements.
+`profile.locks` is what the profile's owner set: sensitive categories off, and the two sensitive-genome switches (one for the UI, one for agents) off by default. A token can never reach a profile its owner has no grant on, whatever the token says. Break-glass access for family (v1.0) does not change this formula and writes no grant row: an open emergency request is joined to the contact's grant in their browser session only, so a token never sees it. The same `grant` table, roles and locks are described in architecture.md and security-privacy.md; this formula is the one the code implements.
 
 ### 2.5 Profile selection
 

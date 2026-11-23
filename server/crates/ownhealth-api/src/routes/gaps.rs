@@ -16,6 +16,8 @@
 //! blank line too. The letter prints the patient's name, so an access token gets 403 here in every
 //! identity mode (tokens work only on /mcp), and an access whose identity mode hides names would get
 //! 403 too. The audit row names the gap key and the visit's src id, never the name or the provider.
+//! The letter is an export: it reads with the caller's own grant alone (403 `break_glass` when
+//! read:records comes only from an open break-glass request).
 
 use std::collections::HashMap;
 
@@ -61,7 +63,7 @@ async fn get_gaps(
     e.resource_ids = Some(vec![doc["gaps_hash"].as_str().unwrap_or_default().to_string()]);
     write_audit(&mut tx, &e).await?;
     tx.commit().await?;
-    ok(gaps::render(&doc, lang.unwrap_or(&c.lang), &perm.scopes)?)
+    ok(gaps::render(&doc, lang.unwrap_or(&c.lang), perm.read_scopes())?)
 }
 
 async fn get_letter(
@@ -72,9 +74,14 @@ async fn get_letter(
 ) -> R {
     // access first, so an input check never answers for a profile the caller cannot read
     let mut tx = rt.pool.begin().await?;
-    let perm = Caller(c.clone())
-        .require(&mut tx, &p, Some("read:records"), None)
-        .await?;
+    // an export: it reads with the caller's own grant alone, never through break-glass
+    let perm = crate::routes::break_glass::own(
+        Caller(c.clone())
+            .require(&mut tx, &p, Some("read:records"), None)
+            .await?,
+        "read:records",
+        "Emergency access cannot export this profile.",
+    )?;
     // the letter prints the patient's name: an access that hides names gets no letter
     if c.identity_mode != "full" {
         return Err(ApiError::new(

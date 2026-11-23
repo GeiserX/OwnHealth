@@ -177,13 +177,10 @@ pub async fn status_data(call: &mut Call<'_>) -> ToolResult<(Map<String, Value>,
     // patterns of the person's own family history a guideline names (ownhealth.family/v1), computed
     // on read from the relatives this token may read; a viewer is told above that records were withheld.
     // First page only: a later page carries the remaining flags, and its 2 KB has no room to repeat it.
-    if call.offset == 0
-        && scopes.contains("read:records")
-        && let Some(profile) = ownhealth_core::access::get_profile(&mut *call.conn, pid).await?
-    {
+    if call.offset == 0 && scopes.contains("read:records") {
+        let perm = call.perm()?.clone();
         let doc =
-            ownhealth_rules::family::build_document(&mut *call.conn, call.principal, &profile, &scopes, call.as_of.day)
-                .await?;
+            ownhealth_rules::family::build_document(&mut *call.conn, call.principal, &perm, call.as_of.day).await?;
         if let Some(family) = ownhealth_rules::family::status_section(&doc) {
             rendered.insert("family".into(), family);
         }

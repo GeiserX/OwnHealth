@@ -67,13 +67,21 @@ pub async fn create_token(conn: &mut PgConnection, t: &TokenIn<'_>) -> Result<Ne
     if !(1..=MAX_DAYS).contains(&t.days) {
         return Err(Error::Invalid(format!("expiry must be 1 to {MAX_DAYS} days")));
     }
-    let granted: Vec<Uuid> =
-        sqlx::query_scalar("select profile_id from profile_grant where user_id = $1 and profile_id = any($2)")
-            .bind(t.user_id)
-            .bind(&t.profile_ids)
-            .fetch_all(&mut *conn)
-            .await?;
-    if t.profile_ids.iter().any(|p| !granted.contains(p)) {
+    let granted: Vec<Uuid> = sqlx::query_scalar(
+        "select profile_id from profile_grant where user_id = $1 and profile_id = any($2) and not break_glass",
+    )
+    .bind(t.user_id)
+    .bind(&t.profile_ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let missing: Vec<Uuid> = t.profile_ids.iter().filter(|p| !granted.contains(p)).copied().collect();
+    if ownhealth_core::break_glass::emergency_only(&mut *conn, t.user_id, &missing).await? {
+        return Err(Error::access_denied(
+            "break_glass",
+            "Emergency access cannot be given to an access token.",
+        ));
+    }
+    if !missing.is_empty() {
         return Err(Error::access_denied(
             "profile_not_granted",
             "The token names a profile you have no grant on.",

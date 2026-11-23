@@ -120,7 +120,7 @@ async fn locks_bind_everyone_but_the_owner_and_tokens_limit() -> R {
     assert!(
         effective_permission(&mut c, &session(&f, "alex"), f.profile("alex"))
             .await?
-            .has("read:sensitive")
+            .may_read_sensitive("read:summary")
     );
 
     let token = Principal {
