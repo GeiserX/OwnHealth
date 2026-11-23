@@ -753,16 +753,7 @@ async fn diff_dataset(
         alerts: 0,
     };
     let mut tx = pool.begin().await?;
-    // One run at a time per dataset: a second run waits here, then reads the release the first one
-    // compared, so two runs never compare the same release twice.
-    let locked: Option<(bool, Option<NaiveDate>)> =
-        sqlx::query_as("select status = 'current', clinvar_compared from genome_dataset where id = $1 for update")
-            .bind(ds.id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let current = locked.map(|(c, _)| c);
-    // The last release compared, even one in which the person carried nothing.
-    let prev_date = locked.and_then(|(_, d)| d);
+    // Take the document lock before the dataset lock, as seal-legacy does.
     // The dataset was listed before this point, so its file may have been retracted since. A
     // retraction locks the document row before it dismisses the file's alerts: it either finished
     // and this read sees it, or it waits for this transaction and then dismisses what it wrote.
@@ -776,6 +767,16 @@ async fn diff_dataset(
         }
         None => false,
     };
+    // One run at a time per dataset: a second run waits here, then reads the release the first one
+    // compared, so two runs never compare the same release twice.
+    let locked: Option<(bool, Option<NaiveDate>)> =
+        sqlx::query_as("select status = 'current', clinvar_compared from genome_dataset where id = $1 for update")
+            .bind(ds.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let current = locked.map(|(c, _)| c);
+    // The last release compared, even one in which the person carried nothing.
+    let prev_date = locked.and_then(|(_, d)| d);
     if current != Some(true) || retracted {
         report.skipped = Some("no_longer_current");
         return Ok(report);

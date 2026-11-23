@@ -549,6 +549,78 @@ async fn a_corrupt_plain_file_fails_the_run_and_stays() -> R {
     Ok(())
 }
 
+#[tokio::test]
+async fn an_inbox_claim_uses_the_linked_owner_when_the_document_names_different_bytes() -> R {
+    let m = mixed().await?;
+    sqlx::query(
+        "update source_item set document_id = (select id from document where profile_id = $1 \
+         and blob_sha256 = decode($2, 'hex')) where external_id = 'scan-2.pdf'",
+    )
+    .bind(m.sam)
+    .bind(&m.report)
+    .execute(&m.db.pool)
+    .await?;
+    m.run(false).await?;
+    assert_eq!(m.item_profiles().await?["scan-2.pdf"], Some(m.sam));
+    assert!(m.store.is_sealed(BlobOwner::Profile(m.sam), &m.inbox)?);
+    assert!(!m.plain(&m.inbox)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_report_counts_a_sealed_copy_when_a_later_owner_fails() -> R {
+    let m = mixed().await?;
+    for sha in m.store.plain_files()? {
+        if sha != m.report {
+            m.store.drop_plain(&sha)?;
+        }
+    }
+    let owners: Vec<Uuid> =
+        sqlx::query_scalar("select profile_id from document where blob_sha256 = decode($1, 'hex') order by id")
+            .bind(&m.report)
+            .fetch_all(&m.db.pool)
+            .await?;
+    let blocked = m.settings.blobs_path().join("enc").join(owners[1].simple().to_string());
+    if blocked.exists() {
+        std::fs::rename(&blocked, m.dir.path().join("saved-slot"))?;
+    }
+    std::fs::write(&blocked, b"block the second owner's sealed folder")?;
+
+    let report = ownhealth_ops::seal_legacy(&m.db.pool, &m.store, &m.sb, false).await?;
+    assert!(m.store.is_sealed(BlobOwner::Profile(owners[0]), &m.report)?);
+    assert!(m.plain(&m.report)?);
+    assert_eq!(report["files"]["sealed"], 1, "{report:#}");
+    assert_eq!(report["files"]["removed"], 0, "{report:#}");
+    assert_eq!(report["files"]["failed"], 1, "{report:#}");
+    assert!(
+        report["errors"].to_string().contains("retained for retry"),
+        "{report:#}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn key_preflight_tries_a_valid_secret_after_a_corrupt_match() -> R {
+    let m = mixed().await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select id from secret where key_fingerprint = $1 and substring(ciphertext from 1 for 1) = '\\x01'::bytea order by id",
+    )
+    .bind(&m.sb.fingerprint()[..])
+    .fetch_all(&m.db.pool)
+    .await?;
+    assert!(ids.len() >= 2);
+    sqlx::query("update secret set ciphertext = '\\x0100'::bytea where id = $1")
+        .bind(ids[0])
+        .execute(&m.db.pool)
+        .await?;
+    let preview = m.run(true).await?;
+    assert!(preview["files"]["removed"].as_u64().unwrap() > 0, "{preview:#}");
+    let report = ownhealth_ops::seal_legacy(&m.db.pool, &m.store, &m.sb, false).await?;
+    assert!(m.store.is_sealed(BlobOwner::Profile(m.alex), &m.report)?);
+    assert_eq!(report["tokens"]["failed"], usize::from(ids[0] == m.token), "{report:#}");
+    Ok(())
+}
+
 /// A run with a secrets key other than the install's refuses before it writes, in a dry run too,
 /// even on an install upgraded from before 1.0 that holds no profile key yet: its keys would open
 /// only under the other key, and the plain copies would be gone.
