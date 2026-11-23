@@ -126,14 +126,14 @@
 	let confirmSlug = $state('');
 	// The name of the profile just deleted: its card is gone, so a line above the cards says it went.
 	let deletedName = $state<string | null>(null);
-	let deletedPending = $state(false);
+	let deletedNote = $state<'st_deleted' | 'st_deleted_pending' | 'st_deleted_keyring'>('st_deleted');
 	function removeProfile(e: SubmitEvent, slug: string) {
 		e.preventDefault();
 		const name = profileName(slug);
 		deletedName = null;
 		act(slug, async () => {
 			const r = await deleteProfile(slug);
-			deletedPending = deletedNoteKey(r.blobs_pending ?? 0, r.folders_pending ?? 0) === 'st_deleted_pending';
+			deletedNote = deletedNoteKey(r.blobs_pending ?? 0, r.folders_pending ?? 0, r.keyring_pending ?? false);
 			deletedName = name;
 			deleting = null;
 			confirmSlug = '';
@@ -294,7 +294,7 @@
 	</div>
 
 	<div class="grid" style="align-content:start">
-		<div role="status">{#if deletedName}<div class="note">{tf(deletedPending ? 'st_deleted_pending' : 'st_deleted', { name: deletedName })}</div>{/if}</div>
+		<div role="status">{#if deletedName}<div class="note">{tf(deletedNote, { name: deletedName })}</div>{/if}</div>
 		{#each managed as p (p.id)}
 			<section class="card">
 				<h3>{p.display_name}<span class="r">{t('r_' + p.role)}{p.is_minor ? ' · ' + t('i2_minor') : ''}</span></h3>

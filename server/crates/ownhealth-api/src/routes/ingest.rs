@@ -163,7 +163,7 @@ async fn store(rt: &Runtime, owner: BlobOwner, files: &[Spool]) -> R<Vec<StoredF
         let (sha256, size) = tokio::task::spawn_blocking(move || blobs.put_file(owner, &path))
             .await
             .map_err(|e| Error::Other(e.into()))?
-            .map_err(|e| Error::Other(e.into()))?;
+            .map_err(Error::from)?;
         stored.push(StoredFile {
             filename: f.filename.clone(),
             sha256,

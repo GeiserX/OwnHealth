@@ -738,7 +738,7 @@ async fn add_label(
     let sha = tokio::task::spawn_blocking(move || blobs.put_bytes(owner, &bytes))
         .await
         .map_err(|e| ownhealth_core::Error::Other(e.into()))?
-        .map_err(|e| ownhealth_core::Error::Other(e.into()))?;
+        .map_err(ownhealth_core::Error::from)?;
     let doc = ownhealth_core::documents::create_document(
         &mut tx,
         &ownhealth_core::documents::NewDocument {
