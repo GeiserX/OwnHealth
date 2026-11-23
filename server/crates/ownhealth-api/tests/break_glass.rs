@@ -7,6 +7,9 @@
 #[path = "auth_support.rs"]
 mod support;
 
+#[path = "break_glass/get_routes.rs"]
+mod get_routes;
+
 use chrono::{DateTime, Duration, Utc};
 use icalendar::{Calendar, CalendarComponent, CalendarDateTime, Component, DatePerhapsTime};
 use ownhealth_core::access::{create_user, set_grant};
@@ -1237,7 +1240,7 @@ async fn candidate(b: &Bg, document_id: Option<Uuid>) -> anyhow::Result<Uuid> {
 }
 
 async fn lab_document(b: &Bg) -> anyhow::Result<Uuid> {
-    let bytes = b"%PDF-1.7 synthetic LabNorte review fixture";
+    let bytes = include_bytes!("../../ownhealth-core/tests/fixtures/demo-report.pdf");
     let profile = b.alex_id();
     let sha = b.env.rt.blobs.put_bytes(BlobOwner::Profile(profile), bytes)?;
     let mut conn = b.env.pool().acquire().await?;
@@ -1245,6 +1248,7 @@ async fn lab_document(b: &Bg) -> anyhow::Result<Uuid> {
         &mut conn,
         &NewDocument {
             doc_type: Some("lab_report"),
+            pages: Some(1),
             ..NewDocument::upload(
                 b.env.fam().household_id,
                 Some(profile),
@@ -1614,7 +1618,6 @@ async fn unread_request_and_activation_notices_outlast_the_recent_use_window() -
     assert_eq!(r.json["items"].as_array().expect("notification items array").len(), 200);
     Ok(())
 }
-
 async fn record(b: &Bg, kind: &str, payload: Value) -> R {
     use ownhealth_core::records::{RecordIn, RecordOptions, add_record};
     let mut conn = b.env.pool().acquire().await?;
@@ -1837,4 +1840,92 @@ async fn genome_keeps_sensitive_findings_on_their_own_scope_source() -> R {
     assert_eq!(r.status, 200, "{:?}", r.json);
     assert_visible(&r.json, "findings", "gene", "CYP2C19", "APOE", true);
     Ok(())
+}
+
+async fn document_page(b: &Bg, doc: Uuid) -> R {
+    sqlx::query(
+        "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok, text_content, fts)
+         values ($1, 1, 595, 842, true, $2, to_tsvector('simple', $2))",
+    )
+    .bind(doc)
+    .bind("LabNorte sampleword 97 mg/dL")
+    .execute(b.env.pool())
+    .await?;
+    Ok(())
+}
+
+async fn record_uses(b: &Bg, id: Uuid) -> anyhow::Result<(i64, i64)> {
+    Ok((
+        b.uses(id).await?,
+        b.count(
+            "select count(*) from notification_outbox where request_id = $1 and kind = 'break_glass.use'",
+            id,
+        )
+        .await?,
+    ))
+}
+
+async fn assert_use_and_fail_closed(b: &Bg, sam: &mut Client, id: Uuid, path: &str) -> R {
+    assert_eq!(record_uses(b, id).await?, (1, 1));
+    sqlx::raw_sql(
+        "create function reject_round5_use() returns trigger language plpgsql as
+         $$ begin raise exception 'cannot audit this use'; end $$;
+         create trigger reject_round5_use before insert on audit_event
+         for each row when (new.action = 'break_glass.use') execute function reject_round5_use();",
+    )
+    .execute(b.env.pool())
+    .await?;
+    let r = sam.get(path).await?;
+    assert_eq!(r.status, 500, "{:?}", r.json);
+    assert_eq!(record_uses(b, id).await?, (1, 1));
+    Ok(())
+}
+
+#[tokio::test]
+async fn pgx_medicines_record_emergency_records_access() -> R {
+    let mut b = setup().await?;
+    seed_genome(&b).await?;
+    seed_medications(&b).await?;
+    b.grant_sam("viewer", &["read:genome"]).await?;
+    let mut sam = b.sam().await?;
+    let path = "/api/profiles/alex/genome";
+    let r = sam.get(path).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert!(r.json["pgx_grid"][0]["meds"].is_null());
+    let id = b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
+    let r = sam.get(path).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert!(
+        r.json["pgx_grid"].to_string().contains("Atorvastatina"),
+        "{:?}",
+        r.json["pgx_grid"]
+    );
+    assert_use_and_fail_closed(&b, &mut sam, id, path).await
+}
+
+#[tokio::test]
+async fn document_search_records_emergency_text_access() -> R {
+    let mut b = setup().await?;
+    let doc = lab_document(&b).await?;
+    document_page(&b, doc).await?;
+    b.grant_sam("viewer", &["read:labs"]).await?;
+    let mut sam = b.sam().await?;
+    let path = "/api/profiles/alex/documents?q=sampleword";
+    let r = sam.get(path).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["items"], json!([]));
+    let id = b
+        .open_for(b.env.user("sam"), &mut sam, json!(["read:documents_text"]))
+        .await?;
+    assert_eq!(sam.get("/api/profiles/alex/documents").await?.status, 200);
+    assert_eq!(record_uses(&b, id).await?, (0, 0));
+    let r = sam.get(path).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["items"][0]["id"], json!(doc));
+    assert!(
+        r.json["items"][0]["snippet"]["text"]
+            .as_str()
+            .is_some_and(|s| s.contains("sampleword"))
+    );
+    assert_use_and_fail_closed(&b, &mut sam, id, path).await
 }

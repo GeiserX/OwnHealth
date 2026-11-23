@@ -297,6 +297,9 @@ pub async fn list_for(
     perm.record_read(&["read:labs", "read:records", "read:wearables"]);
     let q = q.filter(|q| !q.is_empty());
     let with_text = q.is_some() && perm.has("read:documents_text");
+    if with_text {
+        perm.record_read(&["read:documents_text"]);
+    }
     // without read:sensitive, the page text of a sensitive document neither matches nor is quoted,
     // the rule visible_document applies to its file, renders and words
     let text_ok = format!(

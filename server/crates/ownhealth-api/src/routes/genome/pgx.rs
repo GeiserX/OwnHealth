@@ -76,6 +76,7 @@ pub async fn grid(conn: &mut PgConnection, perm: &Permission, gate: &Gate, min_e
     };
     let found = list_findings_typed(&mut *conn, perm.profile.id, gate, &q).await?;
     let meds = if perm.has("read:records") {
+        perm.record_read(&["read:records"]);
         Some(meds_by_gene(conn, perm).await?)
     } else {
         None
