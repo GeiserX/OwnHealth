@@ -5,26 +5,39 @@
 //! - **Searches.** For the patient the grant names (`source.config.patient`, the token answer's
 //!   `patient`): a read of the Patient, then the US Core searches of AllergyIntolerance, Condition,
 //!   DiagnosticReport, DocumentReference, Encounter, Immunization, MedicationRequest (intent order or
-//!   plan), Observation (one search per category: laboratory, social-history, vital-signs; US Core
-//!   servers require one) and Procedure. A Medication that a MedicationRequest names by reference is
-//!   read on its own. A type the grant's `scope` leaves out is not asked for. Each search follows its
-//!   `next` links, which must stay on a host the connection declared at connect time.
+//!   plan, with `_include` of the Medications it names), Observation (one search per category:
+//!   laboratory, social-history, vital-signs; US Core servers require one) and Procedure. A
+//!   Medication that a MedicationRequest names by reference and the answer did not include is read
+//!   on its own. A read needs `r` in the grant and a search `s` (v1 `.read` gives both); a type the
+//!   grant's `scope` leaves out is not asked for, and a granular scope (`?category=laboratory`)
+//!   covers only the searches inside it. A server that answers a search with 400 because it wants
+//!   `status` is asked once more with every status. Each search follows its `next` links, which must
+//!   stay on a host the connection declared at connect time and never repeat.
+//! - **The patient.** The Patient the grant names is matched against the profile before anything is
+//!   stored: another person's portal account (a parent who signed in with their own) stores nothing.
 //! - **One bundle per run.** Every resource the searches returned becomes one `collection` Bundle,
 //!   each resource once and in a fixed order, so a day when nothing changed gives the same bytes and
-//!   the same document. The bytes are stored first, as a blob of the source's profile and a document
+//!   the same document. A day when something changed stores the whole record again as a new
+//!   document: the ledger imports only what is new, and each document is the record as the server
+//!   sent it that day. The bytes are stored first, as a blob of the source's profile and a document
 //!   of channel `smart`; then `fhir::import_pull` imports them, in one transaction that holds this
-//!   source's pull lock, so its `source_item` ledger skips what the server sent before.
+//!   source's pull lock and re-reads the source row, so a disconnect, a new sign-in demand or a
+//!   change of profile or patient during the run imports nothing. A pull the person retracted comes
+//!   back on the next day's run when the server still sends it (slice 14: the same bytes reactivate
+//!   the document); Disconnect stops that.
 //! - **Tokens.** `connector_oauth::access_token` gives the access token, and refreshes and rotates it
 //!   under the source row lock. A token the FHIR server refuses (401) is dropped and refreshed once. A
 //!   refused refresh marks the connection for a new sign-in, and the run stops before any search.
 //! - **Health.** A search that fails is a problem of the run (`partial`), and the other searches
-//!   still import. The run fails when the Patient cannot be read or no search answers. A problem names
-//!   the resource type and the status, never a URL, a patient id or a token.
+//!   still import. Identical problems are one line with a count, and failed searches come first. The
+//!   run fails when the Patient cannot be read or no search answers; a grant that covers no search
+//!   is a problem and reads nothing. A problem names the resource type and the status, never a URL,
+//!   a patient id or a token.
 
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use ownhealth_core::arrive::store_bytes;
 use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::connector_oauth::{self as oauth, OAuthError, SourceHttp};
@@ -35,7 +48,7 @@ use ownhealth_core::secrets::{SecretBox, SecretString};
 use ownhealth_core::sources::{RunOutcome, RunProblem, Source};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::fhir;
@@ -65,12 +78,51 @@ const SEARCHES: [(&str, &[(&str, &str)]); 11] = [
     ("DocumentReference", &[]),
     ("Encounter", &[]),
     ("Immunization", &[]),
-    ("MedicationRequest", &[("intent", "order,plan")]),
+    // US Core: a server that names Medications by reference returns them with this include
+    (
+        "MedicationRequest",
+        &[("intent", "order,plan"), ("_include", "MedicationRequest:medication")],
+    ),
     ("Observation", &[("category", "laboratory")]),
     ("Observation", &[("category", "social-history")]),
     ("Observation", &[("category", "vital-signs")]),
     ("Procedure", &[]),
 ];
+
+/// The status search parameter of each type and every value it takes (FHIR R4), for a server that
+/// requires one (US Core general requirements: it answers 400 with an OperationOutcome).
+fn every_status(rtype: &str) -> Option<(&'static str, &'static str)> {
+    Some(match rtype {
+        "AllergyIntolerance" => ("clinical-status", "active,inactive,resolved"),
+        "Condition" => (
+            "clinical-status",
+            "active,recurrence,relapse,inactive,remission,resolved",
+        ),
+        "DiagnosticReport" => (
+            "status",
+            "registered,partial,preliminary,final,amended,corrected,appended,cancelled,entered-in-error,unknown",
+        ),
+        "DocumentReference" => ("status", "current,superseded,entered-in-error"),
+        "Encounter" => (
+            "status",
+            "planned,arrived,triaged,in-progress,onleave,finished,cancelled,entered-in-error,unknown",
+        ),
+        "Immunization" => ("status", "completed,entered-in-error,not-done"),
+        "MedicationRequest" => (
+            "status",
+            "active,on-hold,cancelled,completed,entered-in-error,stopped,draft,unknown",
+        ),
+        "Observation" => (
+            "status",
+            "registered,preliminary,final,amended,corrected,cancelled,entered-in-error,unknown",
+        ),
+        "Procedure" => (
+            "status",
+            "preparation,in-progress,not-done,on-hold,stopped,completed,entered-in-error,unknown",
+        ),
+        _ => return None,
+    })
+}
 
 /// One search page: a year of labs and vitals of a busy record is a few MB.
 pub const PAGE_BYTES: usize = 32 * 1024 * 1024;
@@ -84,26 +136,118 @@ pub const MAX_MEDICATION_READS: usize = 200;
 const PAGE_TIMEOUT: Duration = Duration::from_secs(60);
 const FHIR_JSON: &str = "application/fhir+json";
 
-/// What a run says when it stops before any search. Information only: the Connections screen shows it.
+/// The limits of one run. The poller uses [`Caps::default`] (the constants above); a test narrows them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caps {
+    pub pages: usize,
+    pub run_bytes: usize,
+    pub medication_reads: usize,
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Caps {
+            pages: MAX_PAGES,
+            run_bytes: RUN_BYTES,
+            medication_reads: MAX_MEDICATION_READS,
+        }
+    }
+}
+
+/// What a run says when it stops. Information only: the Connections screen shows it, by its code.
 const STOP_RECONSENT: &str =
     "reconsent_needed: the vendor no longer accepts this connection, so it waits for a new sign-in";
 const STOP_PATIENT: &str = "no_patient: the grant names no patient, so there is nothing to search";
 const STOP_SERVER: &str = "no_server: the connection names no FHIR server";
 const STOP_PROFILE: &str = "no_profile: the connection belongs to no profile";
 const STOP_NO_ANSWER: &str = "no_answer: no US Core search answered";
+const STOP_ANOTHER_PATIENT: &str =
+    "another_patient: the account at the portal is for another person than this profile, so nothing was imported";
+const STOP_OFF: &str = "switched_off: the connection was switched off during the run, so nothing was imported";
+const STOP_CHANGED: &str = "source_changed: the connection changed during the run, so nothing was imported";
 
-/// The texts a person may read on the Connections screen, for the wording lint.
+/// The words of every problem and every stop that carries a value: the code uses these, and so does
+/// [`phrases`], so the wording lint reads exactly what a person reads.
+mod words {
+    use super::NetError;
+
+    pub fn answered(rtype: &str, status: u16) -> String {
+        format!("{rtype}: the server answered {status}")
+    }
+    pub fn not_bundle(rtype: &str) -> String {
+        format!("{rtype}: the answer is not a FHIR Bundle")
+    }
+    pub const NOT_MEDICATION: &str = "Medication: the answer is not a FHIR Medication";
+    pub fn too_many_pages(rtype: &str, pages: usize) -> String {
+        format!("{rtype}: stopped after {pages} pages")
+    }
+    pub fn repeated_page(rtype: &str) -> String {
+        format!("{rtype}: the server sent a next page it had sent before, so the rest was not read")
+    }
+    pub fn too_large(rtype: &str, bytes: usize) -> String {
+        format!("{rtype}: the answers of this run passed {bytes} bytes, so the rest was not read")
+    }
+    pub fn medications_left(n: usize) -> String {
+        format!("Medication: {n} more medicines that orders name were not read")
+    }
+    pub fn undeclared(rtype: &str) -> String {
+        format!("{rtype}: a next page on a host this connection did not declare was not read")
+    }
+    pub fn unreachable(rtype: &str, e: &NetError) -> String {
+        format!("{rtype}: {}", net_text(e))
+    }
+    pub const NOTHING_GRANTED: &str = "the grant covers none of the US Core searches, so nothing was read";
+    /// One line for a problem that happened `n` times.
+    pub fn times(message: &str, n: usize) -> String {
+        format!("{message} ({n} times)")
+    }
+    pub fn patient_unread(status: u16) -> String {
+        format!("patient_unread: the server answered {status} for the patient")
+    }
+    pub fn token_refused(status: u16, code: &str) -> String {
+        format!("token_refused: the token endpoint answered {status} ({code})")
+    }
+    pub fn token_unreachable(e: &NetError) -> String {
+        format!("token_unreachable: {}", net_text(e))
+    }
+    pub fn undeclared_host(host: &str) -> String {
+        format!("undeclared_host: {host} is not a host of this connection")
+    }
+
+    /// The words a failed request leaves: the host at most, never the URL.
+    pub fn net_text(e: &NetError) -> String {
+        match e {
+            NetError::Http { host, .. } => format!("the request to {host} failed"),
+            other => other.to_string(),
+        }
+    }
+}
+
+/// The texts a person may read on the Connections screen, for the wording lint: every stop, and
+/// every problem made by the same functions as the run's, with sample values.
 pub fn phrases() -> Value {
+    let net = NetError::Http {
+        host: "fhir.labnorte.example".into(),
+        message: String::new(),
+    };
     json!({
-        "stop": [STOP_RECONSENT, STOP_PATIENT, STOP_SERVER, STOP_PROFILE, STOP_NO_ANSWER,
-                 "patient_unread: the server answered 404 for the patient"],
+        "stop": [STOP_RECONSENT, STOP_PATIENT, STOP_SERVER, STOP_PROFILE, STOP_NO_ANSWER, STOP_ANOTHER_PATIENT,
+                 STOP_OFF, STOP_CHANGED, words::patient_unread(404), words::token_refused(500, "server_error"),
+                 words::token_unreachable(&net), words::undeclared_host("fhir.elsewhere.example")],
         "problem": [
-            "Observation: the server answered 503",
-            "MedicationRequest: a next page on a host this connection did not declare was not read",
-            "Observation: the answer is not a FHIR Bundle",
-            "Observation: stopped after 200 pages",
-            "Observation: the answers of this run passed 268435456 bytes, so the rest was not read",
-            "Medication: the server answered 404",
+            words::answered("Observation", 503),
+            words::answered("Medication", 404),
+            words::times(&words::answered("Observation", 503), 3),
+            words::undeclared("MedicationRequest"),
+            words::unreachable("Condition", &net),
+            words::not_bundle("Observation"),
+            words::NOT_MEDICATION,
+            words::too_many_pages("Observation", MAX_PAGES),
+            words::repeated_page("Condition"),
+            words::too_large("Observation", RUN_BYTES),
+            words::too_large("Medication", RUN_BYTES),
+            words::medications_left(3),
+            words::NOTHING_GRANTED,
         ],
     })
 }
@@ -113,40 +257,61 @@ fn fhir_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
 }
 
-/// Whether the grant's `scope` lets this run read `rtype`. A grant that names no `patient/` scope
-/// (a server that does not echo the scope) is asked for everything; the server refuses what it must.
-/// SMART v2 (`patient/Observation.rs`, `patient/*.rs`, granular `?category=`) and v1
-/// (`patient/Observation.read`, `patient/*.*`) both count.
-pub fn granted(scope: Option<&str>, rtype: &str) -> bool {
+/// What a request does: a read of one resource by id, or a search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    Read,
+    Search,
+}
+
+/// Whether the grant's `scope` lets this run make a request of `op` on `rtype` with the search
+/// `params`. A token answer without `scope` (a server that does not echo it) is asked for
+/// everything, and the server refuses what it must; a `scope` that names no `patient/` scope (only
+/// `openid fhirUser launch/patient`, say) grants no resource. SMART v2 letters count by operation (`r`
+/// reads, `s` searches: `patient/Observation.rs`, `patient/*.rs`), v1 `.read` and `.*` give both. A
+/// granular v2 scope (`patient/Observation.rs?category=laboratory`) covers only searches whose
+/// parameters hold each of its values, with or without the system (`system|code`).
+pub fn granted(scope: Option<&str>, rtype: &str, op: Op, params: &[(&str, &str)]) -> bool {
     let Some(scope) = scope else { return true };
-    let mut any = false;
+    let letter = match op {
+        Op::Read => 'r',
+        Op::Search => 's',
+    };
     for s in scope.split_whitespace() {
         let Some(rest) = s.strip_prefix("patient/") else {
             continue;
         };
-        any = true;
-        let rest = rest.split('?').next().unwrap_or(rest);
+        let (rest, query) = match rest.split_once('?') {
+            Some((r, q)) => (r, Some(q)),
+            None => (rest, None),
+        };
         let Some((t, perm)) = rest.split_once('.') else {
             continue;
         };
-        let reads = perm == "read"
-            || perm == "*"
-            || (!perm.is_empty()
-                && perm.chars().all(|c| "cruds".contains(c))
-                && (perm.contains('r') || perm.contains('s')));
-        if (t == "*" || t == rtype) && reads {
-            return true;
+        if t != "*" && t != rtype {
+            continue;
+        }
+        let v1 = perm == "read" || perm == "*";
+        let v2 = !perm.is_empty() && perm.chars().all(|c| "cruds".contains(c)) && perm.contains(letter);
+        if !(v1 || v2) {
+            continue;
+        }
+        match query {
+            None => return true,
+            Some(q) if op == Op::Search && within(q, params) => return true,
+            Some(_) => {}
         }
     }
-    !any
+    false
 }
 
-/// The words a failed request leaves in a problem: the host at most, never the URL.
-fn net_text(e: &NetError) -> String {
-    match e {
-        NetError::Http { host, .. } => format!("the request to {host} failed"),
-        other => other.to_string(),
-    }
+/// Whether a search with `params` stays inside a granular scope's `k=v&..`.
+fn within(query: &str, params: &[(&str, &str)]) -> bool {
+    url::form_urlencoded::parse(query.as_bytes()).all(|(k, v)| {
+        params
+            .iter()
+            .any(|(pk, pv)| *pk == k && (v == *pv || v.rsplit_once('|').is_some_and(|(_, code)| code == *pv)))
+    })
 }
 
 /// The run stops on a token it cannot get; the texts carry no token (`OAuthError` never does).
@@ -155,13 +320,9 @@ fn token_stop(e: OAuthError) -> JobError {
         OAuthError::ReconsentNeeded => JobError::permanent(STOP_RECONSENT),
         OAuthError::Refused { code, message } => JobError::permanent(format!("{code}: {message}")),
         OAuthError::Core(e) => e.into(),
-        OAuthError::Vendor { status, code } => {
-            JobError::retry(format!("token_refused: the token endpoint answered {status} ({code})"))
-        }
-        OAuthError::UndeclaredHost(h) => {
-            JobError::permanent(format!("undeclared_host: {h} is not a host of this connection"))
-        }
-        OAuthError::Net(e) => JobError::retry(format!("token_unreachable: {}", net_text(&e))),
+        OAuthError::Vendor { status, code } => JobError::retry(words::token_refused(status, &code)),
+        OAuthError::UndeclaredHost(h) => JobError::permanent(words::undeclared_host(&h)),
+        OAuthError::Net(e) => JobError::retry(words::token_unreachable(&e)),
     }
 }
 
@@ -169,8 +330,8 @@ fn token_stop(e: OAuthError) -> JobError {
 enum Miss {
     /// The run stops: no token.
     Run(JobError),
-    /// This search stops: a problem code and its words.
-    Search(&'static str, String),
+    /// This search stops: a problem code and its words, without the type.
+    Search(&'static str, Box<dyn Fn(&str) -> String + Send>),
 }
 
 /// The FHIR client of one run: the source's declared hosts, its access token, one refresh on a 401.
@@ -208,12 +369,14 @@ impl Reader {
             {
                 Ok(f) => f,
                 Err(OAuthError::UndeclaredHost(_)) => {
+                    return Err(Miss::Search("undeclared_host", Box::new(words::undeclared)));
+                }
+                Err(OAuthError::Net(e)) => {
                     return Err(Miss::Search(
-                        "undeclared_host",
-                        "a next page on a host this connection did not declare was not read".into(),
+                        "unreachable",
+                        Box::new(move |t: &str| words::unreachable(t, &e)),
                     ));
                 }
-                Err(OAuthError::Net(e)) => return Err(Miss::Search("unreachable", net_text(&e))),
                 Err(e) => return Err(Miss::Run(token_stop(e))),
             };
             // the server dropped the token before its time: one refresh, then the answer stands
@@ -255,6 +418,33 @@ impl Gathered {
     }
 }
 
+/// The run's problems as the Connections screen shows them: each distinct one once, with how many
+/// times it happened, and a search that failed before a note about a page (the screen shows the first).
+fn tidy(problems: Vec<RunProblem>) -> Vec<RunProblem> {
+    let mut out: Vec<(RunProblem, usize)> = Vec::new();
+    for p in problems {
+        match out.iter_mut().find(|(q, _)| q.code == p.code && q.message == p.message) {
+            Some((_, n)) => *n += 1,
+            None => out.push((p, 1)),
+        }
+    }
+    let rank = |code: &str| match code {
+        "search_failed" | "unreachable" | "not_fhir" => 0,
+        "too_large" | "too_many_pages" | "repeated_page" | "too_many_medications" => 1,
+        _ => 2,
+    };
+    out.sort_by_key(|(p, _)| rank(&p.code));
+    out.into_iter()
+        .map(|(p, n)| match n {
+            1 => p,
+            _ => RunProblem {
+                message: words::times(&p.message, n),
+                ..p
+            },
+        })
+        .collect()
+}
+
 /// `base/rtype?patient=..&params`, form-encoded.
 fn search_url(base: &str, rtype: &str, patient: &str, params: &[(&str, &str)]) -> String {
     let mut q = url::form_urlencoded::Serializer::new(String::new());
@@ -265,37 +455,70 @@ fn search_url(base: &str, rtype: &str, patient: &str, params: &[(&str, &str)]) -
     format!("{base}/{rtype}?{}", q.finish())
 }
 
+/// Whether a 400 answer is a server saying the search must name a status.
+fn wants_status(body: &[u8]) -> bool {
+    let o: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    o["resourceType"] == "OperationOutcome" && o["issue"].to_string().to_lowercase().contains("status")
+}
+
+/// One request of a search: the answer, or `None` when the search stops (its problem is in `g`).
+async fn fetch(r: &mut Reader, g: &mut Gathered, rtype: &str, url: &str) -> Result<Option<Fetched>, JobError> {
+    match r.get(url).await {
+        Ok(f) => Ok(Some(f)),
+        Err(Miss::Run(e)) => Err(e),
+        Err(Miss::Search(code, say)) => {
+            g.problem(code, say(rtype));
+            Ok(None)
+        }
+    }
+}
+
 /// One search, every page, into `g`. Only a token the run cannot get stops more than this search.
-async fn search(r: &mut Reader, g: &mut Gathered, rtype: &str, first: String) -> Result<(), JobError> {
-    let mut url = first;
+async fn search(
+    r: &mut Reader,
+    g: &mut Gathered,
+    caps: &Caps,
+    (base, patient): (&str, &str),
+    rtype: &str,
+    params: &[(&str, &str)],
+) -> Result<(), JobError> {
+    let mut url = search_url(base, rtype, patient, params);
     let mut visited: HashSet<String> = HashSet::new();
     let mut answered = false;
-    for page in 1..=MAX_PAGES {
+    for page in 1..=caps.pages {
         if !visited.insert(url.clone()) {
+            g.problem("repeated_page", words::repeated_page(rtype));
             break;
         }
-        if r.bytes > RUN_BYTES {
-            g.problem(
-                "too_large",
-                format!("{rtype}: the answers of this run passed {RUN_BYTES} bytes, so the rest was not read"),
-            );
+        if r.bytes > caps.run_bytes {
+            g.problem("too_large", words::too_large(rtype, caps.run_bytes));
             break;
         }
-        let f = match r.get(&url).await {
-            Ok(f) => f,
-            Err(Miss::Run(e)) => return Err(e),
-            Err(Miss::Search(code, words)) => {
-                g.problem(code, format!("{rtype}: {words}"));
-                break;
-            }
+        let Some(mut f) = fetch(r, g, rtype, &url).await? else {
+            break;
         };
+        if page == 1
+            && f.status == 400
+            && wants_status(&f.body)
+            && let Some(status) = every_status(rtype)
+        {
+            // the server requires a status: the same search once more, with every status there is
+            let mut with: Vec<(&str, &str)> = params.to_vec();
+            with.push(status);
+            url = search_url(base, rtype, patient, &with);
+            visited.insert(url.clone());
+            let Some(again) = fetch(r, g, rtype, &url).await? else {
+                break;
+            };
+            f = again;
+        }
         if f.status != 200 {
-            g.problem("search_failed", format!("{rtype}: the server answered {}", f.status));
+            g.problem("search_failed", words::answered(rtype, f.status));
             break;
         }
         let bundle: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
         if bundle["resourceType"] != "Bundle" {
-            g.problem("not_fhir", format!("{rtype}: the answer is not a FHIR Bundle"));
+            g.problem("not_fhir", words::not_bundle(rtype));
             break;
         }
         answered = true;
@@ -322,8 +545,8 @@ async fn search(r: &mut Reader, g: &mut Gathered, rtype: &str, first: String) ->
         });
         match next {
             None => break,
-            Some(_) if page == MAX_PAGES => {
-                g.problem("too_many_pages", format!("{rtype}: stopped after {MAX_PAGES} pages"));
+            Some(_) if page == caps.pages => {
+                g.problem("too_many_pages", words::too_many_pages(rtype, caps.pages));
             }
             Some(n) => url = n,
         }
@@ -363,30 +586,83 @@ fn missing_medications(base: &str, entries: &[(Option<String>, Value)]) -> Vec<S
 }
 
 /// The run's bundle: each resource once (by its ledger key), sorted, under an id made from what it
-/// holds, so the same record gives the same bytes. Returns the bytes and how many repeats it left out.
+/// holds, so the same record gives the same bytes. A resource sent twice keeps the URL the server
+/// gave it (the smallest when it gave two), whatever the order. Returns the bytes and how many
+/// repeats it left out.
 fn bundle(base: &str, entries: Vec<(Option<String>, Value)>) -> (Vec<u8>, i64) {
-    let mut by_key: BTreeMap<String, Value> = BTreeMap::new();
+    let mut by_key: BTreeMap<String, (Option<String>, Value)> = BTreeMap::new();
     let mut repeated = 0;
     for (full, r) in entries {
         let key = fhir::pull_key(&r);
-        if by_key.contains_key(&key) {
-            repeated += 1;
-            continue;
+        match by_key.get_mut(&key) {
+            Some(held) => {
+                repeated += 1;
+                let better = match (&full, &held.0) {
+                    (Some(_), None) => true,
+                    (Some(a), Some(b)) => a < b,
+                    _ => false,
+                };
+                if better {
+                    held.0 = full;
+                }
+            }
+            None => {
+                by_key.insert(key, (full, r));
+            }
         }
-        let url = full.unwrap_or_else(|| {
-            format!(
-                "{base}/{}/{}",
-                r["resourceType"].as_str().unwrap_or_default(),
-                r["id"].as_str().unwrap_or_default()
-            )
-        });
-        by_key.insert(key, json!({"fullUrl": url, "resource": r}));
     }
-    let entries: Vec<Value> = by_key.into_values().collect();
+    let entries: Vec<Value> = by_key
+        .into_values()
+        .map(|(full, r)| {
+            let url = full.unwrap_or_else(|| {
+                format!(
+                    "{base}/{}/{}",
+                    r["resourceType"].as_str().unwrap_or_default(),
+                    r["id"].as_str().unwrap_or_default()
+                )
+            });
+            json!({"fullUrl": url, "resource": r})
+        })
+        .collect();
     let digest = Sha256::digest(serde_json::to_vec(&entries).unwrap_or_default());
     let id = format!("smart-{}", &hex::encode(digest)[..16]);
     let doc = json!({"resourceType": "Bundle", "id": id, "type": "collection", "entry": entries});
     (serde_json::to_vec(&doc).unwrap_or_default(), repeated)
+}
+
+/// Why this run must import nothing now: the source row as it is (locked `for share` inside the
+/// import transaction, so a disconnect waits for the import or the import sees it), or `None` when it
+/// is still the connection the run started with.
+async fn changed(
+    conn: &mut PgConnection,
+    source_id: Uuid,
+    profile_id: Uuid,
+    patient: &str,
+    lock: bool,
+) -> Result<Option<&'static str>, JobError> {
+    let row: Option<(bool, bool, Option<Uuid>, Option<String>)> = if lock {
+        sqlx::query_as(
+            "select enabled, reconsent_needed_at is not null, profile_id, config->>'patient' from source \
+             where id = $1 for share",
+        )
+        .bind(source_id)
+        .fetch_optional(conn)
+        .await?
+    } else {
+        sqlx::query_as(
+            "select enabled, reconsent_needed_at is not null, profile_id, config->>'patient' from source \
+             where id = $1",
+        )
+        .bind(source_id)
+        .fetch_optional(conn)
+        .await?
+    };
+    Ok(match row {
+        None | Some((false, ..)) => Some(STOP_OFF),
+        Some((_, true, ..)) => Some(STOP_RECONSENT),
+        Some((_, _, p, q)) if p != Some(profile_id) || q.as_deref() != Some(patient) => Some(STOP_CHANGED),
+        Some(_) => None,
+    })
 }
 
 /// One pull of a `smart` source at `now` (the clock its token expiry is counted from), with `egress`
@@ -397,6 +673,17 @@ pub async fn pull(
     source: &Source,
     egress: &Egress,
     now: DateTime<Utc>,
+) -> Result<RunOutcome, JobError> {
+    pull_with(ctx, source, egress, now, &Caps::default()).await
+}
+
+/// [`pull`] with the run's limits given.
+pub async fn pull_with(
+    ctx: &JobContext,
+    source: &Source,
+    egress: &Egress,
+    now: DateTime<Utc>,
+    caps: &Caps,
 ) -> Result<RunOutcome, JobError> {
     let profile_id = source.profile_id.ok_or_else(|| JobError::permanent(STOP_PROFILE))?;
     let base = source.config["endpoints"]["issuer"]
@@ -410,6 +697,29 @@ pub async fn pull(
         .map(String::from)
         .ok_or_else(|| JobError::permanent(STOP_PATIENT))?;
     let scope = source.config["scope"].as_str();
+    let mut g = Gathered::default();
+
+    let planned: Vec<(&str, &[(&str, &str)])> = SEARCHES
+        .iter()
+        .copied()
+        .filter(|(t, p)| granted(scope, t, Op::Search, p))
+        .collect();
+    let left_out: HashSet<&str> = SEARCHES
+        .iter()
+        .filter(|s| !planned.contains(s))
+        .map(|(t, _)| *t)
+        .collect();
+    let read_patient = granted(scope, "Patient", Op::Read, &[]);
+    g.skip("not_granted", left_out.len() as i64 + i64::from(!read_patient));
+    if planned.is_empty() {
+        g.problem("not_granted", words::NOTHING_GRANTED.into());
+        return Ok(RunOutcome {
+            problems: g.problems,
+            skipped: g.skipped,
+            ..RunOutcome::default()
+        });
+    }
+
     let mut r = Reader {
         http: SourceHttp::for_source(
             source,
@@ -428,69 +738,87 @@ pub async fn pull(
         refreshed: false,
         bytes: 0,
     };
-    let mut g = Gathered::default();
 
-    // the Patient first: the importer matches it against the profile
-    if granted(scope, "Patient") {
+    // the Patient first: another person's account stores nothing, and the importer matches it too
+    if read_patient {
         let f = match r.get(&format!("{base}/Patient/{patient}")).await {
             Ok(f) => f,
             Err(Miss::Run(e)) => return Err(e),
-            Err(Miss::Search(code, words)) => return Err(JobError::retry(format!("{code}: {words}"))),
+            Err(Miss::Search(code, say)) => {
+                return Err(JobError::retry(format!("{code}: {}", say("Patient"))));
+            }
         };
         let p: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
         if f.status != 200 || p["resourceType"] != "Patient" {
-            return Err(JobError::retry(format!(
-                "patient_unread: the server answered {} for the patient",
-                f.status
-            )));
+            return Err(JobError::retry(words::patient_unread(f.status)));
+        }
+        let who: Option<(String, Option<NaiveDate>)> =
+            sqlx::query_as("select display_name, birth_date from profile where id = $1")
+                .bind(profile_id)
+                .fetch_optional(&ctx.pool)
+                .await?;
+        if let Some((name, born)) = who
+            && fhir::mapping::match_patient(Some(&p), &name, born) == "mismatch"
+        {
+            return Err(JobError::permanent(STOP_ANOTHER_PATIENT));
         }
         g.entries.push((Some(format!("{base}/Patient/{patient}")), p));
-    } else {
-        g.skip("not_granted", 1);
     }
-    let mut left_out: HashSet<&str> = HashSet::new();
-    for (rtype, params) in SEARCHES {
-        if !granted(scope, rtype) {
-            left_out.insert(rtype);
-            continue;
-        }
-        search(&mut r, &mut g, rtype, search_url(&base, rtype, &patient, params)).await?;
+    for (rtype, params) in &planned {
+        search(&mut r, &mut g, caps, (&base, &patient), rtype, params).await?;
     }
-    g.skip("not_granted", left_out.len() as i64);
     if g.answered == 0 {
         return Err(JobError::retry(STOP_NO_ANSWER));
     }
-    if granted(scope, "Medication") {
-        for id in missing_medications(&base, &g.entries)
-            .into_iter()
-            .take(MAX_MEDICATION_READS)
-        {
+    if granted(scope, "Medication", Op::Read, &[]) {
+        let missing = missing_medications(&base, &g.entries);
+        let mut left = missing.len();
+        for id in missing.iter().take(caps.medication_reads) {
+            if r.bytes > caps.run_bytes {
+                g.problem("too_large", words::too_large("Medication", caps.run_bytes));
+                left = 0;
+                break;
+            }
+            left -= 1;
             match r.get(&format!("{base}/Medication/{id}")).await {
                 Ok(f) if f.status == 200 => {
                     let m: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
                     if m["resourceType"] == "Medication" {
                         g.entries.push((Some(format!("{base}/Medication/{id}")), m));
                     } else {
-                        g.problem("not_fhir", "Medication: the answer is not a FHIR Medication".into());
+                        g.problem("not_fhir", words::NOT_MEDICATION.into());
                     }
                 }
-                Ok(f) => g.problem("search_failed", format!("Medication: the server answered {}", f.status)),
+                Ok(f) => g.problem("search_failed", words::answered("Medication", f.status)),
                 Err(Miss::Run(e)) => return Err(e),
-                Err(Miss::Search(code, words)) => g.problem(code, format!("Medication: {words}")),
+                Err(Miss::Search(code, say)) => g.problem(code, say("Medication")),
             }
+        }
+        if left > 0 {
+            g.problem("too_many_medications", words::medications_left(left));
         }
     }
 
+    // a disconnect while the searches ran: nothing is stored (and the import checks again, locked)
+    let mut conn = ctx.pool.acquire().await?;
+    if let Some(stop) = changed(&mut conn, source.id, profile_id, &patient, false).await? {
+        return Err(JobError::permanent(stop));
+    }
+    drop(conn);
     let (bytes, repeated) = bundle(&base, std::mem::take(&mut g.entries));
     g.skip("repeated", repeated);
     let (sha, size) = store_bytes(&ctx.blobs, BlobOwner::Profile(profile_id), bytes).await?;
-    let filename = format!("{} · {}.json", source.label, now.format("%Y-%m-%d"));
+    let filename = format!("{} · {}.json", source.label, now.format("%Y-%m-%d %H.%M UTC"));
     let mut tx = ctx.pool.begin().await?;
     // one pull of this source imports at a time, even when a lease ran out and the job runs twice
     sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!("source.pull:{}", source.id))
         .execute(&mut *tx)
         .await?;
+    if let Some(stop) = changed(&mut tx, source.id, profile_id, &patient, true).await? {
+        tx.rollback().await?;
+        return Err(JobError::permanent(stop));
+    }
     let doc = create_document(
         &mut tx,
         &NewDocument {
@@ -509,7 +837,7 @@ pub async fn pull(
         seen: n(got.new + got.duplicate),
         new: n(got.new),
         duplicate: n(got.duplicate),
-        problems: g.problems,
+        problems: tidy(g.problems),
         skipped: g.skipped,
         ..RunOutcome::default()
     })
@@ -529,29 +857,72 @@ pub fn register() {
 mod tests {
     use super::*;
 
+    const S: Op = Op::Search;
+    const R: Op = Op::Read;
+
     #[test]
     fn a_grant_covers_a_type_by_name_wildcard_or_v1_read() {
-        let v2 = Some("launch/patient offline_access patient/Observation.rs patient/Condition.r");
-        assert!(granted(v2, "Observation"));
-        assert!(granted(v2, "Condition"));
-        assert!(!granted(v2, "Procedure"));
-        assert!(granted(Some("patient/*.rs"), "Procedure"));
-        assert!(granted(Some("patient/*.read"), "Procedure"));
-        assert!(granted(Some("patient/*.*"), "Procedure"));
-        assert!(granted(
-            Some("patient/Observation.rs?category=laboratory"),
-            "Observation"
-        ));
+        let v2 = Some("launch/patient offline_access patient/Observation.rs patient/Condition.rs");
+        assert!(granted(v2, "Observation", S, &[]));
+        assert!(granted(v2, "Condition", S, &[]));
+        assert!(!granted(v2, "Procedure", S, &[]));
+        assert!(granted(Some("patient/*.rs"), "Procedure", S, &[]));
+        assert!(granted(Some("patient/*.read"), "Procedure", S, &[]));
+        assert!(granted(Some("patient/*.*"), "Procedure", S, &[]));
         // write-only and user-level scopes read nothing here
         assert!(!granted(
             Some("patient/Observation.write patient/Condition.cu"),
-            "Observation"
+            "Observation",
+            S,
+            &[]
         ));
-        assert!(!granted(Some("patient/Observation.write"), "Observation"));
-        assert!(!granted(Some("user/*.rs patient/Condition.rs"), "Observation"));
-        // a grant that names no patient scope at all: ask, the server refuses what it must
-        assert!(granted(Some("openid fhirUser"), "Observation"));
-        assert!(granted(None, "Observation"));
+        assert!(!granted(Some("patient/Observation.write"), "Observation", S, &[]));
+        assert!(!granted(Some("user/*.rs patient/Condition.rs"), "Observation", S, &[]));
+        // a token answer without scope: ask, the server refuses what it must
+        assert!(granted(None, "Observation", S, &[]));
+    }
+
+    #[test]
+    fn a_grant_of_identity_scopes_only_covers_no_resource() {
+        let id_only = Some("openid fhirUser launch/patient offline_access");
+        for t in US_CORE_TYPES {
+            assert!(!granted(id_only, t, S, &[]), "{t}");
+            assert!(!granted(id_only, t, R, &[]), "{t}");
+        }
+    }
+
+    #[test]
+    fn a_v2_letter_covers_only_its_own_operation_and_v1_read_covers_both() {
+        let reads = Some("patient/Patient.r patient/Observation.s");
+        assert!(granted(reads, "Patient", R, &[]));
+        assert!(!granted(reads, "Patient", S, &[]));
+        assert!(granted(reads, "Observation", S, &[]));
+        assert!(!granted(reads, "Observation", R, &[]));
+        assert!(granted(Some("patient/Patient.s"), "Patient", S, &[]));
+        assert!(!granted(Some("patient/Patient.s"), "Patient", R, &[]));
+        for op in [R, S] {
+            assert!(granted(Some("patient/Medication.read"), "Medication", op, &[]));
+            assert!(granted(Some("patient/Medication.rs"), "Medication", op, &[]));
+        }
+    }
+
+    #[test]
+    fn a_granular_scope_covers_only_the_searches_inside_it() {
+        let labs = Some(
+            "patient/Observation.rs?category=http://terminology.hl7.org/CodeSystem/observation-category|laboratory",
+        );
+        assert!(granted(labs, "Observation", S, &[("category", "laboratory")]));
+        assert!(!granted(labs, "Observation", S, &[("category", "vital-signs")]));
+        assert!(!granted(labs, "Observation", S, &[]));
+        assert!(!granted(labs, "Observation", R, &[]));
+        let bare = Some("patient/Observation.rs?category=laboratory");
+        assert!(granted(bare, "Observation", S, &[("category", "laboratory")]));
+        assert!(!granted(bare, "Observation", S, &[("category", "social-history")]));
+        // an unrestricted scope beside it covers every category
+        let both = Some("patient/Observation.rs?category=laboratory patient/Observation.rs");
+        for c in ["laboratory", "social-history", "vital-signs"] {
+            assert!(granted(both, "Observation", S, &[("category", c)]), "{c}");
+        }
     }
 
     #[test]
@@ -565,6 +936,10 @@ mod tests {
         for t in &read {
             assert!(asked.contains(format!("patient/{t}.rs").as_str()), "{t}");
             assert!(US_CORE_TYPES.contains(t) || *t == "Medication", "{t}");
+            assert!(
+                *t == "Medication" || *t == "Patient" || every_status(t).is_some(),
+                "{t}"
+            );
         }
         for t in US_CORE_TYPES {
             assert!(read.contains(t), "{t} is listed but never read");
@@ -609,6 +984,45 @@ mod tests {
     }
 
     #[test]
+    fn a_resource_sent_twice_under_two_urls_gives_the_same_bundle_in_either_order() {
+        let base = "https://fhir.labnorte.example/r4";
+        let alias = Some("https://fhir.labnorte.example/alias/Observation/a".to_string());
+        let own = Some(format!("{base}/Observation/a"));
+        let orders = [
+            vec![
+                (None, obs("a", 1.0)),
+                (alias.clone(), obs("a", 1.0)),
+                (own.clone(), obs("a", 1.0)),
+            ],
+            vec![
+                (own.clone(), obs("a", 1.0)),
+                (alias.clone(), obs("a", 1.0)),
+                (None, obs("a", 1.0)),
+            ],
+            vec![
+                (alias.clone(), obs("a", 1.0)),
+                (None, obs("a", 1.0)),
+                (own.clone(), obs("a", 1.0)),
+            ],
+        ];
+        let made: Vec<Vec<u8>> = orders.into_iter().map(|o| bundle(base, o).0).collect();
+        assert!(made.windows(2).all(|w| w[0] == w[1]));
+        let v: Value = serde_json::from_slice(&made[0]).expect("json");
+        assert_eq!(
+            v["entry"][0]["fullUrl"],
+            "https://fhir.labnorte.example/alias/Observation/a"
+        );
+        // a copy without a URL and one with: the server's URL wins in both orders
+        let (x, _) = bundle(base, vec![(None, obs("a", 1.0)), (alias_of("x"), obs("a", 1.0))]);
+        let (y, _) = bundle(base, vec![(alias_of("x"), obs("a", 1.0)), (None, obs("a", 1.0))]);
+        assert_eq!(x, y);
+    }
+
+    fn alias_of(s: &str) -> Option<String> {
+        Some(format!("https://fhir.labnorte.example/{s}/Observation/a"))
+    }
+
+    #[test]
     fn a_medicine_named_by_reference_is_read_once() {
         let base = "https://fhir.labnorte.example/r4";
         let order = |id: &str, med: &str| json!({"resourceType": "MedicationRequest", "id": id, "medicationReference": {"reference": med}});
@@ -630,6 +1044,47 @@ mod tests {
             host: "fhir.labnorte.example".into(),
             message: "error sending request for url (https://fhir.labnorte.example/r4/Patient/sam?x)".into(),
         };
-        assert_eq!(net_text(&e), "the request to fhir.labnorte.example failed");
+        assert_eq!(words::net_text(&e), "the request to fhir.labnorte.example failed");
+    }
+
+    #[test]
+    fn identical_problems_are_one_line_and_failed_searches_come_first() {
+        let p = |code: &str, message: String| RunProblem {
+            code: code.into(),
+            message,
+        };
+        let got = tidy(vec![
+            p("undeclared_host", words::undeclared("MedicationRequest")),
+            p("search_failed", words::answered("Observation", 503)),
+            p("search_failed", words::answered("Observation", 503)),
+            p("search_failed", words::answered("Observation", 503)),
+            p("search_failed", words::answered("Procedure", 500)),
+        ]);
+        let codes: Vec<(&str, &str)> = got.iter().map(|p| (p.code.as_str(), p.message.as_str())).collect();
+        assert_eq!(
+            codes,
+            [
+                ("search_failed", "Observation: the server answered 503 (3 times)"),
+                ("search_failed", "Procedure: the server answered 500"),
+                (
+                    "undeclared_host",
+                    "MedicationRequest: a next page on a host this connection did not declare was not read"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_status_demand_is_an_outcome_that_names_status() {
+        let oo = |text: &str| {
+            serde_json::to_vec(
+                &json!({"resourceType": "OperationOutcome", "issue": [{"severity": "error",
+                "code": "required", "diagnostics": text}]}),
+            )
+            .unwrap_or_default()
+        };
+        assert!(wants_status(&oo("The status parameter is required")));
+        assert!(!wants_status(&oo("category is required")));
+        assert!(!wants_status(b"status"));
     }
 }

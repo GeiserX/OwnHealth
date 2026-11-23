@@ -35,7 +35,8 @@ createServer(async (req, res) => {
 			token_endpoint: `${base}/token`,
 			revocation_endpoint: `${base}/revoke`,
 			code_challenge_methods_supported: ['S256'],
-			token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post']
+			token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'],
+			capabilities: ['launch-standalone', 'client-confidential-symmetric', 'permission-offline', 'permission-v2']
 		});
 	}
 	if (req.method === 'GET' && url.pathname === '/authorize') {

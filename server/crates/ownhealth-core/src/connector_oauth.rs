@@ -56,8 +56,8 @@ const UNKNOWN_LIFETIME_SECONDS: i64 = 300;
 
 /// SMART App Launch, standalone patient access (connectors.md section 7): a patient picked at the
 /// vendor, a refresh token, and read and search on each US Core type the SMART poller reads
-/// (ownhealth-ingest-structured `smart.rs`), never a wildcard or a write scope. A server that speaks
-/// only SMART v1 is asked for the same types as `.read` ([`v1_scopes`]).
+/// (ownhealth-ingest-structured `smart.rs`), never a wildcard or a write scope. A server that does
+/// not list `permission-v2` (a SMART 1.0 server) is asked for the same types as `.read` ([`v1_scopes`]).
 pub const SMART_SCOPES: &str = "openid fhirUser launch/patient offline_access patient/Patient.rs \
     patient/AllergyIntolerance.rs patient/Condition.rs patient/DiagnosticReport.rs patient/DocumentReference.rs \
     patient/Encounter.rs patient/Immunization.rs patient/Medication.rs patient/MedicationRequest.rs \
@@ -350,13 +350,11 @@ async fn discover_smart(issuer: &str, scopes: &str, egress: &Egress) -> Result<E
     if listed("code_challenge_methods_supported", "S256") == Some(false) {
         return Err(bad("no_pkce_s256"));
     }
-    // SMART v2 scopes (`.rs`) unless the server says it speaks only v1
-    let scopes = match (
-        listed("capabilities", "permission-v2"),
-        listed("capabilities", "permission-v1"),
-    ) {
-        (Some(false), Some(true)) => v1_scopes(scopes),
-        _ => scopes.to_string(),
+    // SMART v2 scopes (`.rs`) only on a server that lists `permission-v2`; a SMART 1.0 server lists
+    // neither marker (they came with 2.0), so anything else is asked for v1 `.read`
+    let scopes = match listed("capabilities", "permission-v2") {
+        Some(true) => scopes.to_string(),
+        _ => v1_scopes(scopes),
     };
     let auth = match (
         listed("token_endpoint_auth_methods_supported", "client_secret_basic"),
@@ -786,7 +784,8 @@ fn after(now: DateTime<Utc>, secs: Option<i64>) -> Option<DateTime<Utc>> {
 }
 
 /// Store a finished launch, in the caller's transaction: a new source, or (a reconnect) the same
-/// source with the new grant, `reconsent_needed_at` cleared and switched back on. Returns the source
+/// source with the new grant, `reconsent_needed_at` and the failure count cleared (the failures were
+/// the old grant's) and switched back on. Returns the source
 /// id. Call [`remember`] after the commit to keep the access token for the first poll.
 pub async fn save_connection(
     conn: &mut PgConnection,
@@ -890,7 +889,7 @@ pub async fn save_connection(
     };
     sqlx::query(
         "update source set config = $2, secret_id = $3, enabled = true, reconsent_needed_at = null, \
-         access_expires_at = $4, grant_expires_at = $5 where id = $1",
+         access_expires_at = $4, grant_expires_at = $5, consecutive_failures = 0 where id = $1",
     )
     .bind(source_id)
     .bind(&config)

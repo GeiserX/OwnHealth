@@ -52,7 +52,7 @@ fn us_core_searches() -> BTreeSet<String> {
         "DocumentReference",
         "Encounter",
         "Immunization",
-        "MedicationRequest?intent=order,plan",
+        "MedicationRequest?_include=MedicationRequest:medication&intent=order,plan",
         "Observation?category=laboratory",
         "Observation?category=social-history",
         "Observation?category=vital-signs",
@@ -86,10 +86,25 @@ struct Behaviour {
     scope: String,
     /// The `capabilities` discovery lists.
     capabilities: Vec<&'static str>,
-    /// A search of this type answers this status.
+    /// A search of this type (`*`: every type) answers this status.
     fail: Option<(&'static str, u16)>,
     /// The next-page links point at this origin instead of the fake's own.
     next_origin: Option<String>,
+    /// The first page of this type's search answers 3 s late.
+    stall: Option<&'static str>,
+    /// This type's search links its first page to itself as `next`.
+    loop_next: Option<&'static str>,
+    /// Every FHIR request is refused for its token, even with the newest one.
+    refuse_all: bool,
+    /// The Patient read answers this status.
+    patient_status: Option<u16>,
+    /// `_include=MedicationRequest:medication` brings the named Medications (US Core); off, the
+    /// server ignores it.
+    include: bool,
+    /// This type's search answers 400 "status is required" without its status parameter.
+    require_status: Option<&'static str>,
+    /// Bytes of filler in each Medication read answer.
+    medication_padding: usize,
 }
 
 impl Default for Behaviour {
@@ -104,6 +119,13 @@ impl Default for Behaviour {
             ],
             fail: None,
             next_origin: None,
+            stall: None,
+            loop_next: None,
+            refuse_all: false,
+            patient_status: None,
+            include: true,
+            require_status: None,
+            medication_padding: 0,
         }
     }
 }
@@ -126,6 +148,8 @@ struct Book {
     handed_out: Vec<String>,
     /// resources the server gained after the launch
     extra: Vec<Value>,
+    /// body bytes of every Patient read and search answer (Medication reads not counted)
+    served: usize,
 }
 
 #[derive(Clone)]
@@ -289,12 +313,22 @@ fn authorized(s: &Shared, headers: &HeaderMap) -> bool {
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
+    let refuse_all = lock(&s.behaviour).refuse_all;
     let mut book = lock(&s.book);
-    let ok = given.is_some() && given == book.access.as_deref();
+    let ok = !refuse_all && given.is_some() && given == book.access.as_deref();
     if !ok {
         book.unauthorized += 1;
     }
     ok
+}
+
+/// A FHIR answer; `count` adds its body to the bytes the run read before its Medication reads.
+fn fhir_answer(s: &Shared, status: StatusCode, body: &Value, count: bool) -> Response {
+    let bytes = serde_json::to_vec(body).unwrap_or_default();
+    if count {
+        lock(&s.book).served += bytes.len();
+    }
+    (status, [("content-type", "application/fhir+json")], bytes).into_response()
 }
 
 fn outcome(status: StatusCode, text: &str) -> Response {
@@ -308,12 +342,18 @@ async fn read_patient(State(s): State<Shared>, Path(id): Path<String>, headers: 
         return outcome(StatusCode::UNAUTHORIZED, "expired token");
     }
     lock(&s.book).searches.push(format!("Patient/{id}"));
+    if let Some(status) = lock(&s.behaviour).patient_status {
+        return outcome(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            "patient down",
+        );
+    }
     match s
         .record
         .iter()
         .find(|r| r["resourceType"] == "Patient" && r["id"] == id)
     {
-        Some(p) => ([("content-type", "application/fhir+json")], Json(p.clone())).into_response(),
+        Some(p) => fhir_answer(&s, StatusCode::OK, p, true),
         None => outcome(StatusCode::NOT_FOUND, "no such patient"),
     }
 }
@@ -325,11 +365,18 @@ async fn read_medication(State(s): State<Shared>, Path(id): Path<String>, header
     }
     lock(&s.book).searches.push(format!("Medication/{id}"));
     let extra = lock(&s.book).extra.clone();
+    let padding = lock(&s.behaviour).medication_padding;
     match extra
         .iter()
         .find(|r| r["resourceType"] == "Medication" && r["id"] == id)
     {
-        Some(m) => ([("content-type", "application/fhir+json")], Json(m.clone())).into_response(),
+        Some(m) => {
+            let mut m = m.clone();
+            if padding > 0 {
+                m["text"] = json!({"status": "generated", "div": "x".repeat(padding)});
+            }
+            fhir_answer(&s, StatusCode::OK, &m, false)
+        }
         None => outcome(StatusCode::NOT_FOUND, "no such medication"),
     }
 }
@@ -378,9 +425,12 @@ async fn search(
         lock(&s.book).searches.push(entry);
     }
     if let Some((t, status)) = b.fail
-        && t == rtype
+        && (t == rtype || t == "*")
     {
         return outcome(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), "down");
+    }
+    if page == 1 && b.stall == Some(rtype.as_str()) {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
     if get("patient").as_deref() != Some(PATIENT) {
         return outcome(StatusCode::FORBIDDEN, "another patient");
@@ -392,6 +442,12 @@ async fn search(
     match rtype.as_str() {
         "Observation" if category.is_none() => return outcome(StatusCode::BAD_REQUEST, "category is required"),
         "MedicationRequest" if intents.is_empty() => return outcome(StatusCode::BAD_REQUEST, "intent is required"),
+        t if b.require_status == Some(t) && get("status").is_none() && get("clinical-status").is_none() => {
+            return outcome(
+                StatusCode::BAD_REQUEST,
+                "the status parameter is required for this search",
+            );
+        }
         _ => {}
     }
     let extra = lock(&s.book).extra.clone();
@@ -416,12 +472,29 @@ async fn search(
             json!({"fullUrl": url, "resource": r, "search": {"mode": "match"}})
         })
         .collect();
+    if rtype == "MedicationRequest" && b.include && get("_include").as_deref() == Some("MedicationRequest:medication") {
+        let named: Vec<String> = entries
+            .iter()
+            .filter_map(|e| e["resource"]["medicationReference"]["reference"].as_str())
+            .filter_map(|r| r.strip_prefix("Medication/").map(String::from))
+            .collect();
+        for m in extra
+            .iter()
+            .filter(|m| m["resourceType"] == "Medication" && named.iter().any(|n| m["id"] == n.as_str()))
+        {
+            let url = format!("{}/fhir/Medication/{}", s.base, m["id"].as_str().unwrap_or_default());
+            entries.push(json!({"fullUrl": url, "resource": m, "search": {"mode": "include"}}));
+        }
+    }
     if rtype == "Condition" && page == 1 {
         entries.push(json!({"resource": {"resourceType": "OperationOutcome", "issue": [{"severity": "warning",
             "code": "informational", "diagnostics": "some conditions are restricted"}]}, "search": {"mode": "outcome"}}));
     }
-    let mut links = vec![json!({"relation": "self", "url": format!("{}/fhir/{rtype}?{raw}", s.base)})];
-    if hits.len() > page {
+    let own = format!("{}/fhir/{rtype}?{raw}", s.base);
+    let mut links = vec![json!({"relation": "self", "url": own})];
+    if b.loop_next == Some(rtype.as_str()) {
+        links.push(json!({"relation": "next", "url": own}));
+    } else if hits.len() > page {
         let kept: Vec<String> = pairs
             .iter()
             .filter(|(k, _)| k != "page")
@@ -438,7 +511,7 @@ async fn search(
     }
     let body = json!({"resourceType": "Bundle", "id": Uuid::new_v4().to_string(), "type": "searchset",
         "meta": {"lastUpdated": Utc::now().to_rfc3339()}, "total": hits.len(), "link": links, "entry": entries});
-    ([("content-type", "application/fhir+json")], Json(body)).into_response()
+    fhir_answer(&s, StatusCode::OK, &body, true)
 }
 
 // ---------------------------------------------------------------- the world ----
@@ -497,6 +570,11 @@ impl World {
 
     /// The launch the route starts: discovery, then the authorize URL.
     async fn launch(&self) -> anyhow::Result<oauth::Begun> {
+        self.launch_for("sam").await
+    }
+
+    /// [`World::launch`] for another profile of the family, started by Alex.
+    async fn launch_for(&self, slug: &str) -> anyhow::Result<oauth::Begun> {
         let spec = oauth::kind_spec("smart").expect("smart is served");
         let endpoints = oauth::resolve(&spec, &self.fake.issuer(), &egress()).await?;
         let mut c = self.db.pool.acquire().await?;
@@ -506,10 +584,10 @@ impl World {
                 kind: "smart",
                 client: &self.client,
                 endpoints: &endpoints,
-                profile_id: self.sam(),
+                profile_id: self.fam.profile(slug),
                 label: "Hospital LabNorte",
                 source_id: None,
-                user_id: Some(self.fam.user("sam")),
+                user_id: Some(self.fam.user(if slug == "sam" { "sam" } else { "alex" })),
                 session_id: None,
                 binder: BINDER,
             },
@@ -519,7 +597,12 @@ impl World {
 
     /// Launch, consent at the fake, call back and save, as the callback route does: a connected source.
     async fn connect(&self, now: DateTime<Utc>) -> anyhow::Result<Uuid> {
-        let begun = self.launch().await?;
+        self.connect_for("sam", now).await
+    }
+
+    /// [`World::connect`] of the portal account the fake serves (Sam's) to another profile.
+    async fn connect_for(&self, slug: &str, now: DateTime<Utc>) -> anyhow::Result<Uuid> {
+        let begun = self.launch_for(slug).await?;
         let code = self.fake.consent(&begun.url);
         let mut c = self.db.pool.acquire().await?;
         let pending = oauth::take_state(&mut c, &begun.state, BINDER).await?;
@@ -534,11 +617,21 @@ impl World {
 
     /// One scheduled pull at `now`, recorded as the `source.poll` job records it.
     async fn day(&self, source: Uuid, now: DateTime<Utc>) -> anyhow::Result<Result<RunOutcome, String>> {
+        self.day_with(source, now, &smart::Caps::default()).await
+    }
+
+    /// [`World::day`] with the run's limits given.
+    async fn day_with(
+        &self,
+        source: Uuid,
+        now: DateTime<Utc>,
+        caps: &smart::Caps,
+    ) -> anyhow::Result<Result<RunOutcome, String>> {
         let mut c = self.db.pool.acquire().await?;
         let s = get_source(&mut c, source).await?.expect("the source");
         let run = sources::begin_run(&mut c, source, "poll", None).await?;
         drop(c);
-        let got = smart::pull(&self.ctx, &s, &egress(), now).await;
+        let got = smart::pull_with(&self.ctx, &s, &egress(), now, caps).await;
         let mut c = self.db.pool.acquire().await?;
         match &got {
             Ok(o) => sources::finish_run(&mut c, run, Ok(o)).await?,
@@ -577,18 +670,57 @@ impl World {
     }
 
     async fn open_items(&self) -> anyhow::Result<Vec<ReviewItem>> {
+        self.open_items_of(self.sam()).await
+    }
+
+    async fn open_items_of(&self, profile: Uuid) -> anyhow::Result<Vec<ReviewItem>> {
         let mut c = self.db.pool.acquire().await?;
         let mut rows = review::list_items(
             &mut c,
             &ItemQuery {
-                profile_ids: Some(vec![self.sam()]),
+                profile_ids: Some(vec![profile]),
                 status: Some("open".into()),
                 ..ItemQuery::default()
             },
         )
         .await?;
-        rows.retain(|r| r.profile_id == Some(self.sam()));
+        rows.retain(|r| r.profile_id == Some(profile));
         Ok(rows)
+    }
+
+    fn medication_reads(&self) -> usize {
+        self.fake
+            .book()
+            .searches
+            .iter()
+            .filter(|s| s.starts_with("Medication/"))
+            .count()
+    }
+
+    async fn status_of_last_run(&self, source: Uuid) -> anyhow::Result<String> {
+        Ok(
+            sqlx::query_scalar("select status from source_run where source_id = $1 order by id desc limit 1")
+                .bind(source)
+                .fetch_one(&self.db.pool)
+                .await?,
+        )
+    }
+
+    /// Whether another backend of this test's database waits on a lock, within 20 s.
+    async fn someone_waits(&self) -> anyhow::Result<bool> {
+        for _ in 0..400 {
+            let n: i64 = sqlx::query_scalar(
+                "select count(*) from pg_locks l join pg_stat_activity a on a.pid = l.pid \
+                 where not l.granted and a.datname = current_database()",
+            )
+            .fetch_one(&self.db.pool)
+            .await?;
+            if n > 0 {
+                return Ok(true);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Ok(false)
     }
 
     async fn count(&self, table: &str) -> anyhow::Result<usize> {
@@ -641,13 +773,39 @@ async fn the_launch_asks_for_a_standalone_patient_grant_with_the_us_core_scopes(
         "the token is for this FHIR server"
     );
 
-    // a server that speaks SMART v1 scopes only is asked for `.read`
-    w.fake
-        .set(|b| b.capabilities = vec!["launch-standalone", "permission-offline", "permission-v1"]);
-    let v1 = param(&w.launch().await?.url, "scope").unwrap_or_default();
-    assert!(v1.contains("patient/Observation.read"), "{v1}");
-    assert!(!v1.contains(".rs"), "{v1}");
-    assert!(v1.contains("launch/patient") && v1.contains("offline_access"), "{v1}");
+    // a server that speaks SMART v1 scopes only is asked for `.read`; so is a SMART 1.0 server,
+    // which lists neither marker (they came with 2.0); one that lists both gets v2
+    for (caps, v2) in [
+        (vec!["launch-standalone", "permission-offline", "permission-v1"], false),
+        (
+            vec![
+                "launch-standalone",
+                "client-confidential-symmetric",
+                "permission-offline",
+                "permission-patient",
+            ],
+            false,
+        ),
+        (
+            vec![
+                "launch-standalone",
+                "permission-offline",
+                "permission-v1",
+                "permission-v2",
+            ],
+            true,
+        ),
+    ] {
+        w.fake.set(|b| b.capabilities = caps.clone());
+        let got = param(&w.launch().await?.url, "scope").unwrap_or_default();
+        assert_eq!(got.contains("patient/Observation.rs"), v2, "{caps:?}: {got}");
+        assert_eq!(got.contains("patient/Observation.read"), !v2, "{caps:?}: {got}");
+        assert_eq!(got.contains(".rs"), v2, "{caps:?}: {got}");
+        assert!(
+            got.contains("launch/patient") && got.contains("offline_access"),
+            "{got}"
+        );
+    }
     Ok(())
 }
 
@@ -688,6 +846,12 @@ async fn a_launch_imports_the_record_and_thirty_daily_pulls_rotate_without_new_c
         w.ctx.blobs.exists(BlobOwner::Profile(w.sam()), &docs[0].1),
         "the bundle is a blob of Sam's profile"
     );
+    // a second file on one day reads apart from the first: the name carries the time
+    let name: String = sqlx::query_scalar("select filename from document where id = $1")
+        .bind(docs[0].0)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(name, "Hospital LabNorte · 2026-11-02 06.02 UTC.json");
     let channel: Vec<String> = sqlx::query_scalar("select channel from document_source where document_id = $1")
         .bind(docs[0].0)
         .fetch_all(&w.db.pool)
@@ -962,7 +1126,12 @@ async fn a_next_page_on_another_host_is_not_read() -> R {
 
 #[tokio::test]
 async fn a_medicine_named_by_reference_is_read_once_and_imported_with_its_order() -> R {
-    let w = world(Behaviour::default()).await?;
+    // a server that ignores `_include`: the named medicine is read on its own
+    let w = world(Behaviour {
+        include: false,
+        ..Behaviour::default()
+    })
+    .await?;
     w.fake.book().extra.extend([
         json!({"resourceType": "MedicationRequest", "id": "sam-metf", "status": "active", "intent": "plan",
                "medicationReference": {"reference": "Medication/metformin-850"},
@@ -997,5 +1166,405 @@ async fn a_medicine_named_by_reference_is_read_once_and_imported_with_its_order(
         .await?
         .map_err(anyhow::Error::msg)?;
     assert_eq!(again.new, 0, "{again:?}");
+    Ok(())
+}
+
+// ------------------------------------------------------ review round 1 ----
+
+/// Two orders that name a Medication each, which the server keeps apart from the patient.
+fn two_named_medicines() -> Vec<Value> {
+    let order = |id: &str, med: &str| {
+        json!({"resourceType": "MedicationRequest", "id": id, "status": "active", "intent": "plan",
+               "medicationReference": {"reference": format!("Medication/{med}")},
+               "subject": {"reference": "Patient/sam-rivera"}, "authoredOn": "2026-09-01"})
+    };
+    let med = |id: &str, code: &str, name: &str| {
+        json!({"resourceType": "Medication", "id": id, "meta": {"versionId": "1"},
+               "code": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": code, "display": name}]}})
+    };
+    vec![
+        order("sam-metf", "metformin-850"),
+        order("sam-ator", "atorvastatin-20"),
+        med("metformin-850", "861004", "Metformin 850 mg"),
+        med("atorvastatin-20", "617310", "Atorvastatin 20 mg"),
+    ]
+}
+
+#[tokio::test]
+async fn a_pull_that_began_before_a_disconnect_imports_nothing() -> R {
+    let w = world(Behaviour {
+        stall: Some("Procedure"),
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    let pull = w.day(source, t0() + Duration::minutes(1));
+    let cut = async {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        oauth::disconnect(&w.db.pool, &w.sb, source, &egress()).await
+    };
+    let (got, cut) = tokio::join!(pull, cut);
+    cut?;
+    let e = got?.expect_err("the pull stops");
+    assert!(e.contains("switched_off"), "{e}");
+    assert_eq!(w.documents(source).await?.len(), 0);
+    assert_eq!(w.count("condition").await?, 0);
+    assert_eq!(w.open_items().await?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_disconnect_that_lands_while_the_import_waits_for_the_source_is_seen_by_it() -> R {
+    let owned = world(Behaviour::default()).await?;
+    let w = &owned;
+    let source = w.connect(t0()).await?;
+    let mut c = w.db.pool.acquire().await?;
+    let s = get_source(&mut c, source).await?.expect("the source");
+    drop(c);
+    // a disconnect holds the source row: the pull's first look passes, its import waits on the row
+    // (the pull alone, without the run bookkeeping, which would wait on the row before it starts)
+    let mut held = w.db.pool.begin().await?;
+    sqlx::query("select 1 from source where id = $1 for update")
+        .bind(source)
+        .execute(&mut *held)
+        .await?;
+    let pull = async {
+        smart::pull(&w.ctx, &s, &egress(), t0() + Duration::minutes(1))
+            .await
+            .map_err(|e| e.text())
+    };
+    let cut = async move {
+        let waited = w.someone_waits().await?;
+        sqlx::query("update source set enabled = false where id = $1")
+            .bind(source)
+            .execute(&mut *held)
+            .await?;
+        held.commit().await?;
+        anyhow::Ok(waited)
+    };
+    let (got, waited) = tokio::join!(pull, cut);
+    assert!(waited?, "the import never waited on the source row");
+    let e = got.expect_err("the import sees the disconnect");
+    assert!(e.contains("switched_off"), "{e}");
+    assert_eq!(w.documents(source).await?.len(), 0);
+    assert_eq!(w.count("condition").await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_second_pull_of_one_source_waits_for_the_first_import() -> R {
+    let owned = world(Behaviour::default()).await?;
+    let w = &owned;
+    let source = w.connect(t0()).await?;
+    // another run of this source imports: this one waits for its lock
+    let mut other = w.db.pool.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("source.pull:{source}"))
+        .execute(&mut *other)
+        .await?;
+    let pull = w.day(source, t0() + Duration::minutes(1));
+    let first = async move {
+        let waited = w.someone_waits().await?;
+        other.commit().await?;
+        anyhow::Ok(waited)
+    };
+    let (got, waited) = tokio::join!(pull, first);
+    assert!(waited?, "the pull did not wait for the running import");
+    assert_eq!(got?.map_err(anyhow::Error::msg)?.new, 5);
+    assert_eq!(w.documents(source).await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn another_persons_portal_account_imports_nothing_into_the_profile() -> R {
+    // Alex connects Lucía's profile but signs in at the portal with Sam's account
+    let w = world(Behaviour::default()).await?;
+    let lucia = w.fam.profile("lucia");
+    let source = w.connect_for("lucia", t0()).await?;
+    let e = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .expect_err("the pull stops");
+    assert!(e.contains("another_patient"), "{e}");
+    assert_eq!(
+        w.searched_since(0).await,
+        ["Patient/sam-rivera".to_string()].into(),
+        "nothing past the patient"
+    );
+    assert_eq!(w.documents(source).await?.len(), 0);
+    assert_eq!(w.open_items_of(lucia).await?.len(), 0);
+    let mut c = w.db.pool.acquire().await?;
+    assert_eq!(list_records(&mut c, "condition", lucia, None, true).await?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_next_link_back_to_a_page_already_read_is_a_problem_and_the_rest_still_arrives() -> R {
+    let w = world(Behaviour {
+        loop_next: Some("Condition"),
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    let got = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    let codes: Vec<(&str, &str)> = got
+        .problems
+        .iter()
+        .map(|p| (p.code.as_str(), p.message.as_str()))
+        .collect();
+    assert_eq!(codes.len(), 1, "{codes:?}");
+    assert_eq!(codes[0].0, "repeated_page");
+    assert!(codes[0].1.starts_with("Condition: "), "{codes:?}");
+    assert_eq!((got.new, w.count("condition").await?), (5, 1));
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_run_where_no_search_answers_fails_and_stores_nothing() -> R {
+    let w = world(Behaviour {
+        fail: Some(("*", 503)),
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    let e = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .expect_err("the run fails");
+    assert!(e.contains("no_answer"), "{e}");
+    assert_eq!(w.documents(source).await?.len(), 0);
+    assert_eq!(w.status_of_last_run(source).await?, "error");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_server_that_refuses_every_token_gets_one_refresh_and_the_run_ends() -> R {
+    let w = world(Behaviour {
+        refuse_all: true,
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    let got = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        w.day(source, t0() + Duration::minutes(1)),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("the run never ended"))??;
+    let e = got.expect_err("the patient read fails");
+    assert!(e.contains("patient_unread") && e.contains("401"), "{e}");
+    let book = w.fake.book();
+    assert_eq!((book.refreshes, book.unauthorized), (1, 2));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_patient_the_server_does_not_give_stops_the_run_and_stores_nothing() -> R {
+    let w = world(Behaviour {
+        patient_status: Some(500),
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    let e = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .expect_err("the run fails");
+    assert!(e.contains("patient_unread") && e.contains("500"), "{e}");
+    assert_eq!(w.searched_since(0).await, ["Patient/sam-rivera".to_string()].into());
+    assert_eq!(w.documents(source).await?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_grant_that_covers_no_search_reads_nothing_and_says_so() -> R {
+    for scope in [
+        "launch/patient offline_access patient/Patient.rs",
+        // identity scopes only: an explicit answer, not a missing one
+        "openid fhirUser launch/patient offline_access",
+    ] {
+        let w = world(Behaviour {
+            scope: scope.into(),
+            ..Behaviour::default()
+        })
+        .await?;
+        let source = w.connect(t0()).await?;
+        let got = w
+            .day(source, t0() + Duration::minutes(1))
+            .await?
+            .map_err(anyhow::Error::msg)?;
+        let codes: Vec<&str> = got.problems.iter().map(|p| p.code.as_str()).collect();
+        assert_eq!(codes, ["not_granted"], "{scope}: {got:?}");
+        assert_eq!(
+            got.skipped.get("not_granted"),
+            Some(&(9 + i64::from(!scope.contains("Patient"))))
+        );
+        assert!(w.searched_since(0).await.is_empty(), "{scope}");
+        assert_eq!(w.documents(source).await?.len(), 0, "{scope}");
+        assert_eq!(w.status_of_last_run(source).await?, "partial", "{scope}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_server_that_wants_a_status_is_asked_again_with_every_status() -> R {
+    let w = world(Behaviour {
+        require_status: Some("Condition"),
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    let got = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert!(got.problems.is_empty(), "{got:?}");
+    assert_eq!(w.count("condition").await?, 1);
+    assert!(
+        w.searched_since(0)
+            .await
+            .contains("Condition?clinical-status=active,recurrence,relapse,inactive,remission,resolved"),
+        "{:?}",
+        w.searched_since(0).await
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn included_medicines_arrive_with_their_orders_without_a_read() -> R {
+    let w = world(Behaviour::default()).await?;
+    w.fake.book().extra.extend(two_named_medicines());
+    let source = w.connect(t0()).await?;
+    let got = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert!(got.problems.is_empty(), "{got:?}");
+    assert_eq!(w.medication_reads(), 0, "the search brought them");
+    let mut c = w.db.pool.acquire().await?;
+    let meds = list_records(&mut c, "medication", w.sam(), None, true).await?;
+    for name in ["Metformin 850 mg", "Atorvastatin 20 mg"] {
+        assert!(meds.iter().any(|m| m["name"] == name), "{name}: {meds:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn no_medication_is_read_when_the_grant_leaves_it_out() -> R {
+    let narrow = [
+        "launch/patient",
+        "offline_access",
+        "patient/Patient.rs",
+        "patient/MedicationRequest.rs",
+        "patient/Condition.rs",
+        "patient/Observation.rs",
+    ]
+    .join(" ");
+    let w = world(Behaviour {
+        scope: narrow,
+        include: false,
+        ..Behaviour::default()
+    })
+    .await?;
+    w.fake.book().extra.extend(two_named_medicines());
+    let source = w.connect(t0()).await?;
+    w.day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(w.medication_reads(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_medication_reads_keep_to_the_run_budget_and_their_count() -> R {
+    let w = world(Behaviour {
+        include: false,
+        medication_padding: 16 * 1024,
+        ..Behaviour::default()
+    })
+    .await?;
+    w.fake.book().extra.extend(two_named_medicines());
+    let source = w.connect(t0()).await?;
+    // the first run reads both, and measures what the patient and the searches weigh
+    let first = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert!(first.problems.is_empty(), "{first:?}");
+    assert_eq!(w.medication_reads(), 2);
+    let searches = w.fake.book().served;
+
+    // a budget the searches fit in with room for one medicine: the second is not read
+    w.fake.book().served = 0;
+    let caps = smart::Caps {
+        run_bytes: searches + 4096,
+        ..smart::Caps::default()
+    };
+    let got = w
+        .day_with(source, t0() + Duration::minutes(2), &caps)
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(w.medication_reads(), 3, "one more read");
+    let large: Vec<&str> = got
+        .problems
+        .iter()
+        .filter(|p| p.code == "too_large")
+        .map(|p| p.message.as_str())
+        .collect();
+    assert_eq!(large.len(), 1, "{:?}", got.problems);
+    assert!(large[0].starts_with("Medication: "), "{large:?}");
+
+    // a cap of one read: the other is said, with how many
+    let caps = smart::Caps {
+        medication_reads: 1,
+        ..smart::Caps::default()
+    };
+    let got = w
+        .day_with(source, t0() + Duration::minutes(3), &caps)
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(w.medication_reads(), 4, "one more read");
+    let left: Vec<&str> = got
+        .problems
+        .iter()
+        .filter(|p| p.code == "too_many_medications")
+        .map(|p| p.message.as_str())
+        .collect();
+    assert_eq!(left, ["Medication: 1 more medicines that orders name were not read"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn identical_failed_searches_are_one_problem_before_a_page_note() -> R {
+    let w = world(Behaviour {
+        fail: Some(("Observation", 503)),
+        next_origin: Some("http://fhir.elsewhere.example".into()),
+        ..Behaviour::default()
+    })
+    .await?;
+    let source = w.connect(t0()).await?;
+    let got = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    let codes: Vec<(&str, &str)> = got
+        .problems
+        .iter()
+        .map(|p| (p.code.as_str(), p.message.as_str()))
+        .collect();
+    assert_eq!(
+        codes,
+        [
+            ("search_failed", "Observation: the server answered 503 (3 times)"),
+            (
+                "undeclared_host",
+                "MedicationRequest: a next page on a host this connection did not declare was not read"
+            ),
+        ]
+    );
     Ok(())
 }
