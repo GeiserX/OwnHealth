@@ -5,8 +5,9 @@
 //! The shared readers apply it: `ownhealth_rules::engine::wearables` (markers and calculators),
 //! `ownhealth_ingest_structured::wearables::points` read as [`Reader::Shared`] (MCP rollups) and the
 //! MCP freshness date. Only the Wearables page and its REST routes read every provider. A provider the
-//! file does not name is withheld and dropped, so a new importer must add its line before an agent
-//! sees its data.
+//! file does not name is withheld, so a new importer must add its line before an agent sees its data.
+//! The vendor-API connectors call [`ingest_allowed`] before they store a sample; the file importers
+//! write only providers the file names.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;

@@ -8,8 +8,10 @@
 #          `withheld.vendor_terms`. Only the Wearables page and its REST routes read every provider.
 # path     how the data arrives (documentation only).
 #
-# A provider this file does not name is withheld from MCP and dropped at ingest: a new importer adds
-# its line here, and ownhealth-devices tests/providers.rs checks that every importer has one.
+# A provider this file does not name is withheld from MCP. The vendor-API connectors (the Open
+# Wearables poller, the native Dexcom connector) also drop its samples at ingest, as for `drop`
+# (providers::ingest_allowed). The file importers write only providers named here: a new importer adds
+# its line, and ownhealth-devices tests/providers.rs checks that every importer has one.
 #
 # A provider moves from withheld to served only when its connector page quotes the vendor's primary
 # terms and they show no ban on AI processing (docs/design/connectors.md section 4). File exports of
