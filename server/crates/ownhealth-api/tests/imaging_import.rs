@@ -286,3 +286,33 @@ async fn a_held_study_shows_in_review_only_to_those_who_may_read_records() -> R 
     assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_zip_of_more_files_than_the_import_reads_is_refused_before_it_is_kept() -> R {
+    let a = imaging_app().await?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut out);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for i in 0..=ownhealth_imaging::import::MAX_ENTRIES {
+            zip.start_file(format!("{i}"), opts)?;
+        }
+        zip.finish()?;
+    }
+    let (s, v) = post(
+        &a,
+        "alex",
+        "/imaging/import",
+        &[("profile", "alex")],
+        &[("big.zip".into(), out.into_inner())],
+    )
+    .await?;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert_eq!(v["detail"]["code"], "too_many_files", "{v}");
+    assert!(imports(&a, a.family.profile("alex")).await?.is_empty());
+    assert_eq!(
+        a.count("select count(*) from job where kind = 'import.dicom'").await?,
+        0
+    );
+    Ok(())
+}

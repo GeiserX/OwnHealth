@@ -10,7 +10,8 @@
 //! `import.dicom` job (ownhealth-imaging) then sends its studies to Orthanc and records each one. The
 //! answer is `{import_id, duplicate, job_id, files}`; `GET /api/jobs?ids=` follows the job. The same
 //! zip again is the same import, and its job sends nothing new. It needs the `import` action on the
-//! profile and imaging on (503 `imaging_off`).
+//! profile and imaging on (503 `imaging_off`). A zip of more entries than the import reads
+//! ([`MAX_ENTRIES`]) answers 413 `too_many_files` before anything is kept.
 
 use std::path::PathBuf;
 
@@ -21,8 +22,9 @@ use axum::{Json, Router};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::documents::is_zip;
-use ownhealth_core::{Error, Runtime, ids};
-use ownhealth_imaging::upload::{self, MAX_FOLDER_FILES, zip_files, zip_folder};
+use ownhealth_core::{Error, Runtime};
+use ownhealth_imaging::import::MAX_ENTRIES;
+use ownhealth_imaging::upload::{self, MAX_FOLDER_FILES, ZipRefused, zip_files, zip_folder};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -113,10 +115,7 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
                         return Err(too_many_files());
                     }
                     let name = field.file_name().unwrap_or_default().to_string();
-                    let path = rt
-                        .blobs
-                        .staging_path(&format!("imaging-{}", ids::token_hex(16)))
-                        .map_err(Error::from)?;
+                    let path = rt.blobs.staging_path(&upload::spool_name(false)).map_err(Error::from)?;
                     // the Spool owns the file before it exists, so a failed read still removes it
                     files.push(Spool {
                         name,
@@ -175,7 +174,7 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     // One zip is kept as it came; a folder becomes one zip of its files.
     let parts: Vec<(String, PathBuf)> = files.iter().map(|f| (f.name.clone(), f.path.clone())).collect();
     let folder = (!one_zip)
-        .then(|| rt.blobs.staging_path(&format!("imaging-{}.zip", ids::token_hex(16))))
+        .then(|| rt.blobs.staging_path(&upload::spool_name(true)))
         .transpose()
         .map_err(Error::from)?
         .map(|path| Spool {
@@ -193,12 +192,17 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     let (blobs, owner) = (rt.blobs.clone(), BlobOwner::Profile(profile_id));
     let (count, sha256, size) = tokio::task::spawn_blocking(move || -> Result<_, Fail> {
         let count = if one_zip {
-            zip_files(&zip_path).map_err(|why| {
-                Fail::Api(ApiError::new(
+            zip_files(&zip_path).map_err(|refused| match refused {
+                ZipRefused::Invalid(why) => Fail::Api(ApiError::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "invalid_zip",
                     format!("This zip does not open: {why}"),
-                ))
+                )),
+                ZipRefused::TooMany(n) => Fail::Api(ApiError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "too_many_files",
+                    format!("This zip holds {n} files; an import reads at most {MAX_ENTRIES}. Split the disc into smaller zips."),
+                )),
             })?
         } else {
             zip_folder(&parts, &zip_path).map_err(Error::from)?;

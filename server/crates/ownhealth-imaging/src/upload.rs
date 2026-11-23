@@ -20,6 +20,15 @@ use crate::import::JOB;
 /// A CD folder upload holds at most this many files (a zip upload is one file).
 pub const MAX_FOLDER_FILES: usize = 20_000;
 
+/// The name of a spool the upload route writes in the blob store's `tmp` (a folder part, or the zip
+/// it makes of them): plaintext DICOM until the store takes it.
+/// It starts `upload-`, so the start-up and periodic sweeps (`BlobStore::sweep_tmp`) remove one a
+/// killed upload left.
+pub fn spool_name(zip: bool) -> String {
+    let name = format!("upload-imaging-{}", ownhealth_core::ids::token_hex(16));
+    if zip { format!("{name}.zip") } else { name }
+}
+
 /// The path a folder part keeps inside the zip: its relative path as the browser sent it, with `/`
 /// between parts. A `..` takes back the part before it and is dropped at the top; empty and `.` parts
 /// and drive letters are dropped. So nothing names a place outside the folder. A name with nothing
@@ -69,13 +78,26 @@ pub fn zip_folder(files: &[(String, PathBuf)], out: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// How many files the zip at `path` holds (folders left out), or why it does not read as a zip.
-pub fn zip_files(path: &Path) -> std::result::Result<usize, String> {
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+/// Why an uploaded zip is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZipRefused {
+    /// It does not read as a zip.
+    Invalid(String),
+    /// It holds more entries than the import reads ([`crate::import::MAX_ENTRIES`]).
+    TooMany(usize),
+}
+
+/// How many files the zip at `path` holds (folders left out), or why the import would refuse it.
+pub fn zip_files(path: &Path) -> std::result::Result<usize, ZipRefused> {
+    let invalid = |e: &dyn std::fmt::Display| ZipRefused::Invalid(e.to_string());
+    let file = std::fs::File::open(path).map_err(|e| invalid(&e))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| invalid(&e))?;
+    if zip.len() > crate::import::MAX_ENTRIES {
+        return Err(ZipRefused::TooMany(zip.len()));
+    }
     let mut n = 0;
     for i in 0..zip.len() {
-        if !zip.by_index_raw(i).map_err(|e| e.to_string())?.is_dir() {
+        if !zip.by_index_raw(i).map_err(|e| invalid(&e))?.is_dir() {
             n += 1;
         }
     }
@@ -158,6 +180,20 @@ mod tests {
         assert_eq!(entry_name("/abs/./x"), "abs/x");
         assert_eq!(entry_name("../.."), "file");
         assert_eq!(entry_name(""), "file");
+    }
+
+    #[test]
+    fn a_spool_a_killed_upload_left_is_swept() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = ownhealth_core::blobs::BlobStore::new(dir.path())?;
+        let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        for zip in [false, true] {
+            let path = store.staging_path(&spool_name(zip)).map_err(io::Error::other)?;
+            std::fs::create_dir_all(path.parent().ok_or_else(|| io::Error::other("no tmp"))?)?;
+            std::fs::File::create(&path)?.set_modified(two_hours_ago)?;
+        }
+        assert_eq!(store.sweep_tmp(std::time::Duration::from_secs(3600))?, 2);
+        Ok(())
     }
 
     #[test]
