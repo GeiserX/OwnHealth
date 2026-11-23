@@ -1761,6 +1761,32 @@ async fn a_patient_read_returning_another_id_stops_before_searching() -> R {
 }
 
 #[tokio::test]
+async fn a_procedure_with_a_subject_display_but_no_reference_stays_out() -> R {
+    let w = world(Behaviour::default()).await?;
+    let id = "r3-proc-display";
+    w.fake.book().extra.push(json!({
+        "resourceType": "Procedure", "id": id, "status": "completed",
+        "subject": {"display": "Lucia Rivera"}, "code": {"text": "Synthetic"},
+    }));
+    let source = w.connect(t0()).await?;
+    let got = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    let bundle = w.stored_bundle(source).await?;
+    let stored = bundle["entry"]
+        .as_array()
+        .expect("the snapshot has entries")
+        .iter()
+        .any(|entry| entry["resource"]["id"] == id);
+    assert_eq!((stored, got.new), (false, 5), "{got:?}");
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
+    assert_eq!(got.problems.len(), 1, "{got:?}");
+    assert_eq!(got.problems[0].code, "patient_reference");
+    Ok(())
+}
+
+#[tokio::test]
 async fn foreign_patient_resources_stay_out_of_the_stored_bundle() -> R {
     let w = world(Behaviour::default()).await?;
     let fixture: Value = serde_json::from_slice(&fhir_file("uscore-sam.json"))?;

@@ -187,7 +187,7 @@ mod words {
     }
     pub const NOT_MEDICATION: &str = "Medication: the answer is not a FHIR Medication";
     pub fn patient_reference(rtype: &str) -> String {
-        format!("{rtype}: a resource referred to someone other than the verified patient and was skipped")
+        format!("{rtype}: a resource did not identify the verified patient and was skipped")
     }
     pub fn page_too_large(rtype: &str, bytes: usize) -> String {
         format!("{rtype}: the answer exceeded the {bytes}-byte limit for one page")
@@ -517,15 +517,19 @@ async fn fetch(r: &mut Reader, g: &mut Gathered, rtype: &str, url: &str) -> Resu
     }
 }
 
-/// Check the Patient id and any literal references to the patient before storing the resource.
+/// A clinical result must name the verified patient. A Patient names itself by id, and a
+/// Medication may be included without a patient reference because it describes the drug.
 fn belongs_to_patient(resource: &Value, base: &str, patient: &str) -> bool {
     if resource["resourceType"] == "Patient" && resource["id"] != patient {
         return false;
     }
-    ["patient", "subject"]
+    let needs_reference = !matches!(resource["resourceType"].as_str(), Some("Patient" | "Medication"));
+    let mut references = ["patient", "subject"]
         .iter()
         .filter_map(|key| resource[*key]["reference"].as_str())
-        .all(|reference| {
+        .peekable();
+    (!needs_reference || references.peek().is_some())
+        && references.all(|reference| {
             let relative = reference
                 .strip_prefix(base)
                 .and_then(|suffix| suffix.strip_prefix('/'))
