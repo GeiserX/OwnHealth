@@ -203,6 +203,8 @@
 						{#if m.metric === 'vo2max'}{t('h1_estimate')}{:else if c?.missing}{tp('h1_missing', c.missing)}{:else if c}{tf('h1_cov_pct', { n: fmtNum(c.coverage, 0) })}{/if}
 					</span>
 				</div>
+				<!-- The server's own line, in the page's language: an HRV series shows one vendor and names the rest. -->
+				{#each m.limitations ?? [] as l (l)}<div class="note" style="margin-top:6px">{l}</div>{/each}
 			</div>
 		{/each}
 	</div>
