@@ -2671,6 +2671,124 @@ async fn the_bytes_past_the_page_cap_can_exhaust_the_run_budget() -> R {
 }
 
 #[tokio::test]
+async fn medication_references_use_their_orders_base_for_reads_and_import() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/MedicationRequest.s patient/Medication.r".into(),
+        ..Behaviour::default()
+    })
+    .await?;
+    let local = w.fake.issuer();
+    let foreign = format!("{}/other", w.fake.base);
+    let order = |base: &str, id: &str, medication: &str| {
+        json!({
+            "fullUrl": format!("{base}/MedicationRequest/{id}"),
+            "resource": {
+                "resourceType": "MedicationRequest", "id": id, "status": "active", "intent": "order",
+                "subject": {"reference": format!("{local}/Patient/{PATIENT}")},
+                "medicationReference": {"reference": format!("Medication/{medication}")},
+                "authoredOn": "2026-09-01"
+            }
+        })
+    };
+    let medication = |id: &str, name: &str| json!({"resourceType": "Medication", "id": id, "meta": {"versionId": "1"}, "code": {"text": name}});
+    w.fake.book().medication_answers.extend([
+        (
+            "missing-foreign".into(),
+            medication("missing-foreign", "Wrong fallback drug"),
+        ),
+        (
+            "missing-local".into(),
+            medication("missing-local", "Authorized fallback drug"),
+        ),
+    ]);
+    let included = |base: &str, id: &str, name: &str| json!({"fullUrl": format!("{base}/Medication/{id}"), "resource": medication(id, name)});
+    let found = json!({"resourceType": "Bundle", "type": "searchset", "entry": [
+        order(&foreign, "unresolved", "missing-foreign"),
+        order(&foreign, "foreign-order", "shared"),
+        order(&local, "local-order", "shared"),
+        order(&local, "read-local", "missing-local"),
+        included(&local, "shared", "Local included drug"),
+        included(&foreign, "shared", "Foreign included drug"),
+        included(&foreign, "missing-local", "Wrong included drug"),
+    ]});
+    w.fake.book().search_bodies.insert(
+        "MedicationRequest?_include=MedicationRequest:medication&intent=order,plan".into(),
+        (StatusCode::OK, serde_json::to_vec(&found)?),
+    );
+
+    let source = w.connect(t0()).await?;
+    let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+    let reads: Vec<_> = w
+        .fake
+        .book()
+        .attempts
+        .iter()
+        .filter(|s| s.contains("/Medication/"))
+        .cloned()
+        .collect();
+    assert_eq!(reads, ["/fhir/Medication/missing-local"]);
+    assert_eq!(w.status_of_last_run(source).await?, "partial", "{got:?}");
+    assert_eq!(got.problems.len(), 1, "{got:?}");
+    assert_eq!(got.problems[0].code, "medication_reference");
+
+    let mut c = w.db.pool.acquire().await?;
+    let meds = list_records(&mut c, "medication", w.sam(), None, true).await?;
+    let projected: BTreeSet<_> = meds
+        .iter()
+        .filter_map(|m| Some((m["fhir"]["id"].as_str()?, m["name"].as_str()?)))
+        .collect();
+    assert_eq!(
+        projected,
+        BTreeSet::from([
+            ("foreign-order", "Foreign included drug"),
+            ("local-order", "Local included drug"),
+            ("read-local", "Authorized fallback drug"),
+        ]),
+        "{meds:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_a_searchset_counts_as_an_answer_even_when_empty() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/Procedure.s".into(),
+        ..Behaviour::default()
+    })
+    .await?;
+    let reply = |kind: &str| {
+        (
+            StatusCode::OK,
+            serde_json::to_vec(&json!({
+                "resourceType": "Bundle", "type": kind, "entry": []
+            }))
+            .expect("serializable"),
+        )
+    };
+    let source = w.connect(t0()).await?;
+    w.fake
+        .book()
+        .search_bodies
+        .insert("Procedure".into(), reply("collection"));
+    let err = w
+        .day(source, t0())
+        .await?
+        .expect_err("a collection is not a search result");
+    assert!(err.contains("no_answer:"), "{err}");
+    assert!(w.documents(source).await?.is_empty());
+
+    w.fake
+        .book()
+        .search_bodies
+        .insert("Procedure".into(), reply("searchset"));
+    let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+    assert!(got.problems.is_empty(), "{got:?}");
+    assert_eq!(w.documents(source).await?.len(), 1);
+    assert_eq!(w.status_of_last_run(source).await?, "ok");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_stale_401_leaves_the_replacement_grant_alone() -> R {
     for omit_refresh_token in [false, true] {
         let pause = Arc::new(ProcedurePause::default());
@@ -2717,6 +2835,40 @@ async fn a_stale_401_leaves_the_replacement_grant_alone() -> R {
             .map_err(anyhow::Error::msg)?;
         assert!(next.problems.is_empty(), "{next:?}");
         assert_eq!(w.fake.book().refreshes, 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_demographic_edit_during_the_search_supersedes_the_pull() -> R {
+    for change in ["display_name = 'Samuel Rivera'", "birth_date = birth_date + 1"] {
+        let pause = Arc::new(ProcedurePause::default());
+        let w = world(Behaviour {
+            scope: "patient/Patient.r patient/Procedure.s".into(),
+            procedure_pause: Some(pause.clone()),
+            ..Behaviour::default()
+        })
+        .await?;
+        let source = w.connect(t0()).await?;
+        let pull = w.day(source, t0());
+        let edit = async {
+            pause.arrived.notified().await;
+            let sql = format!("update profile set {change} where id = $1");
+            sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+                .bind(w.sam())
+                .execute(&w.db.pool)
+                .await?;
+            pause.release.notify_one();
+            anyhow::Ok(())
+        };
+        let (got, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::try_join!(pull, edit)
+        })
+        .await??;
+        let err = got.expect_err("the demographics changed, so the old pull stops");
+        assert!(err.contains("profile_changed:"), "{err}");
+        assert!(w.documents(source).await?.is_empty());
+        assert!(w.open_items().await?.is_empty());
     }
     Ok(())
 }

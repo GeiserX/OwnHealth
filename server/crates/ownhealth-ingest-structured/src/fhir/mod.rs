@@ -21,11 +21,12 @@
 //!   `fhir_unmapped_summary` item per type (connectors.md 6.2).
 
 pub mod mapping;
+pub(crate) mod smart_medication;
 pub mod synthetic;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use futures::future::BoxFuture;
 use ownhealth_core::acceptance::{Check, DEFAULT_THRESHOLD, auto_accept};
 use ownhealth_core::access::{Profile, get_profile};
@@ -232,7 +233,7 @@ const SERVER_META: [&str; 3] = ["lastUpdated", "versionId", "source"];
 
 /// [`json_sha`] of a resource without [`SERVER_META`], so a server that only restamps a resource
 /// sends the same item again.
-fn content_sha(r: &Value) -> String {
+pub(crate) fn content_sha(r: &Value) -> String {
     let mut r = r.clone();
     let emptied = match r.get_mut("meta") {
         Some(Value::Object(meta)) => {
@@ -342,13 +343,13 @@ pub async fn import_pull(
     import_pull_with_identity(conn, blobs, source_id, document_id, None).await
 }
 
-/// A SMART caller can supply the profile demographics it verified against the Patient.
+/// A SMART caller can supply its verified match after locking and checking the profile.
 pub(crate) async fn import_pull_with_identity(
     conn: &mut PgConnection,
     blobs: &BlobStore,
     source_id: Uuid,
     document_id: Uuid,
-    verified_profile: Option<(&str, Option<NaiveDate>)>,
+    identity: Option<&str>,
 ) -> Result<PullSummary> {
     let (profile_id, sha, mime, filename, flags): (Option<Uuid>, String, String, Option<String>, Value) =
         sqlx::query_as(
@@ -389,9 +390,6 @@ pub(crate) async fn import_pull_with_identity(
         sha: &sha,
         unmapped: BTreeMap::new(),
     };
-    let identity = verified_profile
-        .filter(|&(name, born)| name == profile.display_name && born == profile.birth_date)
-        .map(|_| "matched");
     let (summary, identity, tally) = import_with(
         conn,
         &entries,
@@ -479,6 +477,13 @@ async fn import_with(
         }
     }
     let run_index = Index(index);
+    let smart_medications = pull.as_ref().filter(|p| p.kind == crate::smart::KIND).map(|_| {
+        let mut index = smart_medication::Index::default();
+        for e in entries.iter().filter(|e| e.rtype() == "Medication") {
+            index.insert(e.full_url.as_deref(), &e.resource);
+        }
+        index
+    });
 
     let identity = match identity {
         Some(i) => i.to_string(),
@@ -525,6 +530,7 @@ async fn import_with(
         identity: &identity,
         label,
         index: &run_index,
+        smart_medications,
         report_keys,
         issuer,
         summary: ImportSummary::new(document_id.to_string()),
@@ -607,6 +613,7 @@ struct Run<'a> {
     identity: &'a str,
     label: &'a str,
     index: &'a Index<'a>,
+    smart_medications: Option<smart_medication::Index<'a>>,
     report_keys: HashMap<String, String>,
     issuer: Option<String>,
     summary: ImportSummary,
@@ -830,7 +837,7 @@ impl Run<'_> {
         // A pull asks the source's ledger first: a resource it sent before, in this version, in a
         // pull that still holds it, is not imported again, whatever a person did with it since. One
         // this run already grouped (twice in the bundle) waits for its summary's ledger row.
-        let key = self.ledger_key(r);
+        let key = self.ledger_key(e);
         let m = match m {
             Some(Mapped::Observations(rows)) => return self.pull_rows(conn, e, rows, &key, source_id, &sha).await,
             other => other,
@@ -911,15 +918,31 @@ impl Run<'_> {
     /// `medicationReference` maps from the Medication it points at, so its key carries that
     /// Medication's [`content_sha`], or `+unresolved` when the bundle does not hold it: a later pull
     /// that brings the Medication imports the request once, and an unchanged one stays a duplicate.
-    fn ledger_key(&self, r: &Value) -> String {
+    fn ledger_key(&self, e: &Entry) -> String {
+        let r = &e.resource;
         let key = pull_key(r);
         if !by_reference(r) {
             return key;
         }
         let reference = r["medicationReference"].get("reference").and_then(Value::as_str);
-        match self.index.resolve(reference) {
+        match self.resolve_medication(e, reference) {
             Some(medication) => format!("{key}+{}", content_sha(medication)),
             None => format!("{key}+unresolved"),
+        }
+    }
+
+    fn resolve_medication<'a>(&'a self, e: &'a Entry, reference: Option<&str>) -> Option<&'a Value> {
+        let Some(index) = &self.smart_medications else {
+            return self.index.resolve(reference);
+        };
+        let raw = reference?;
+        if raw.starts_with('#') {
+            return smart_medication::contained(&e.resource, raw);
+        }
+        let target = smart_medication::Reference::in_order(raw, e.full_url.as_deref(), &e.resource)?;
+        match index.lookup(&target) {
+            smart_medication::Match::Found(resource) => Some(resource),
+            _ => None,
         }
     }
 
@@ -927,7 +950,6 @@ impl Run<'_> {
     fn map(&self, e: &Entry) -> Option<Mapped> {
         let r = &e.resource;
         let pid = self.profile.id;
-        let index = self.index;
         match e.rtype() {
             "Observation" => Some(mapping::observation(r)),
             "Condition" => Some(mapping::condition(r, pid)),
@@ -935,7 +957,16 @@ impl Run<'_> {
             "Immunization" => Some(mapping::immunization(r, pid)),
             "Procedure" => Some(mapping::procedure(r, pid)),
             "Encounter" => Some(mapping::encounter(r, pid)),
-            "MedicationStatement" | "MedicationRequest" => Some(mapping::medication(r, pid, |x| index.resolve(x))),
+            "MedicationStatement" | "MedicationRequest" => {
+                let medication = r["medicationReference"]["reference"].as_str();
+                Some(mapping::medication(r, pid, |reference| {
+                    if reference == medication {
+                        self.resolve_medication(e, reference)
+                    } else {
+                        self.index.resolve(reference)
+                    }
+                }))
+            }
             "FamilyMemberHistory" => Some(mapping::family_member_history(r, pid)),
             _ => None,
         }
@@ -1239,9 +1270,14 @@ impl Run<'_> {
     }
 }
 
+/// A FHIR id ([A-Za-z0-9\-.]{1,64}).
+pub(crate) fn fhir_id(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+}
+
 /// A medication that names its medicine only through `medicationReference`: the mapper reads the
 /// Medication it points at (`mapping::medication`).
-fn by_reference(r: &Value) -> bool {
+pub(crate) fn by_reference(r: &Value) -> bool {
     matches!(
         r.get("resourceType").and_then(Value::as_str),
         Some("MedicationStatement" | "MedicationRequest")

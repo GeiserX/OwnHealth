@@ -9,7 +9,7 @@
 //!   Observation (one search per category:
 //!   laboratory, social-history, vital-signs; US Core servers require one) and Procedure. A
 //!   Medication that a MedicationRequest names by reference and the answer did not include is read
-//!   on its own. A read needs `r` in the grant and a search `s` (v1 `.read` gives both); a type the
+//!   on its own if its reference resolves to the authorized FHIR base. A read needs `r` in the grant and a search `s` (v1 `.read` gives both); a type the
 //!   grant's `scope` leaves out is not asked for, and a granular scope (`?category=laboratory`)
 //!   covers only the searches inside it. A server that answers a search with 400 because it wants
 //!   `status` is asked again with every status, first as a list and then one at a time if the
@@ -23,7 +23,7 @@
 //!   resource once and in a fixed order. The grant or a failed search can leave the snapshot
 //!   incomplete. The same snapshot gives the same bytes and document. A changed snapshot creates
 //!   a new document, and the ledger imports only new resources. The import locks the source and
-//!   checks the grant, profile and patient before storing the snapshot as a profile-owned blob
+//!   checks the grant, profile demographics and patient before storing the snapshot as a profile-owned blob
 //!   and a document of channel `smart`. A disconnect, reconnect or new sign-in demand stops
 //!   the import. A pull the person retracted comes back on the next day's run when the server
 //!   still sends it (slice 14: the same bytes reactivate the document). Disconnect stops that.
@@ -53,7 +53,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::fhir;
+use crate::fhir::{self, fhir_id, smart_medication};
 
 pub const KIND: &str = "smart";
 
@@ -171,6 +171,8 @@ const STOP_PATIENT_UNVERIFIED: &str =
 const STOP_OFF: &str = "switched_off: the connection was switched off during the run, so nothing was imported";
 const STOP_CHANGED: &str = "source_changed: the connection changed during the run, so nothing was imported";
 const STOP_GRANT_CHANGED: &str = "grant_changed: the portal sign-in changed during the run, so nothing was imported";
+const STOP_PROFILE_CHANGED: &str =
+    "profile_changed: the profile name or birth date changed during the run, so nothing was imported";
 const STOP_PATIENT_NOT_GRANTED: &str = "patient_not_granted: the grant does not cover reading the patient, so the record \
      cannot be matched to this profile and nothing was read";
 
@@ -183,11 +185,14 @@ mod words {
         format!("{rtype}: the server answered {status}")
     }
     pub fn not_bundle(rtype: &str) -> String {
-        format!("{rtype}: the answer is not a FHIR Bundle")
+        format!("{rtype}: the answer is not a FHIR search result")
     }
     pub const NOT_MEDICATION: &str = "Medication: the answer is not a FHIR Medication";
     pub const MEDICATION_ID_MISMATCH: &str =
         "Medication: the server returned a different resource ID, so it was skipped";
+    pub const MEDICATION_VERSION_MISMATCH: &str =
+        "Medication: the server returned a different version, so it was skipped";
+    pub const MEDICATION_REFERENCE: &str = "MedicationRequest: a medication reference could not be resolved";
     pub fn patient_reference(rtype: &str) -> String {
         format!("{rtype}: a resource did not identify the verified patient and was skipped")
     }
@@ -251,7 +256,8 @@ pub fn phrases() -> Value {
     };
     json!({
         "stop": [STOP_RECONSENT, STOP_PATIENT, STOP_SERVER, STOP_PROFILE, STOP_NO_ANSWER, STOP_ANOTHER_PATIENT,
-                 STOP_PATIENT_UNVERIFIED, STOP_OFF, STOP_CHANGED, STOP_GRANT_CHANGED, STOP_PATIENT_NOT_GRANTED,
+                 STOP_PATIENT_UNVERIFIED, STOP_OFF, STOP_CHANGED, STOP_GRANT_CHANGED, STOP_PROFILE_CHANGED,
+                 STOP_PATIENT_NOT_GRANTED,
                  words::patient_unread(404), words::token_refused(500, "server_error"),
                  words::token_unreachable(&net), words::undeclared_host("fhir.elsewhere.example")],
         "problem": [
@@ -263,6 +269,8 @@ pub fn phrases() -> Value {
             words::not_bundle("Observation"),
             words::NOT_MEDICATION,
             words::MEDICATION_ID_MISMATCH,
+            words::MEDICATION_VERSION_MISMATCH,
+            words::MEDICATION_REFERENCE,
             words::patient_reference("Observation"),
             words::unexpected_resource("Condition"),
             words::page_too_large("Observation", PAGE_BYTES),
@@ -274,11 +282,6 @@ pub fn phrases() -> Value {
             words::NOTHING_GRANTED,
         ],
     })
-}
-
-/// A FHIR id ([A-Za-z0-9\-\.]{1,64}): only such an id goes into a URL.
-fn fhir_id(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
 }
 
 /// What a request does: a read of one resource by id, or a search.
@@ -460,7 +463,7 @@ struct Gathered {
     entries: Vec<(Option<String>, Value)>,
     problems: Vec<RunProblem>,
     skipped: BTreeMap<String, i64>,
-    /// searches that answered 200 at least once
+    /// searches that returned a searchset at least once
     answered: usize,
 }
 
@@ -490,7 +493,7 @@ fn tidy(problems: Vec<RunProblem>) -> Vec<RunProblem> {
         }
     }
     let rank = |code: &str| match code {
-        "search_failed" | "unreachable" | "not_fhir" | "medication_id_mismatch" => 0,
+        "search_failed" | "unreachable" | "not_fhir" | "medication_id_mismatch" | "medication_version_mismatch" => 0,
         "too_large" | "page_too_large" | "too_many_pages" | "repeated_page" | "too_many_medications" => 1,
         _ => 2,
     };
@@ -643,7 +646,7 @@ async fn search(
                 break;
             }
             let bundle: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
-            if bundle["resourceType"] != "Bundle" {
+            if bundle["resourceType"] != "Bundle" || bundle["type"] != "searchset" {
                 g.problem("not_fhir", words::not_bundle(rtype));
                 break;
             }
@@ -698,31 +701,43 @@ fn gather_entries(
     }
 }
 
-/// The Medications that MedicationRequests name by a reference this bundle does not hold: id only,
-/// relative (`Medication/<id>`) or on the FHIR server itself.
-fn missing_medications(base: &str, entries: &[(Option<String>, Value)]) -> Vec<String> {
-    let mut seen: HashSet<&str> = entries
-        .iter()
-        .filter(|(_, r)| r["resourceType"] == "Medication")
-        .filter_map(|(_, r)| r["id"].as_str())
-        .collect();
-    let mut out = Vec::new();
-    for (_, r) in entries.iter().filter(|(_, r)| r["resourceType"] == "MedicationRequest") {
-        let Some(reference) = r["medicationReference"]["reference"].as_str() else {
+/// Identify each unresolved order's exact target before deciding which reads the grant allows.
+fn missing_medications(
+    base: &url::Url,
+    entries: &[(Option<String>, Value)],
+    can_read: bool,
+) -> (Vec<smart_medication::Reference>, usize) {
+    let mut included = smart_medication::Index::default();
+    for (full, resource) in entries.iter().filter(|(_, r)| r["resourceType"] == "Medication") {
+        included.insert(full.as_deref(), resource);
+    }
+    let mut seen = HashSet::new();
+    let mut missing = Vec::new();
+    let mut unresolved = 0;
+    for (full, order) in entries.iter().filter(|(_, r)| fhir::by_reference(r)) {
+        let Some(raw) = order["medicationReference"]["reference"].as_str() else {
+            unresolved += 1;
             continue;
         };
-        let local = reference
-            .strip_prefix(base)
-            .map(|s| s.trim_start_matches('/'))
-            .unwrap_or(reference);
-        if let Some(id) = local.strip_prefix("Medication/")
-            && fhir_id(id)
-            && seen.insert(id)
-        {
-            out.push(id.to_string());
+        if raw.starts_with('#') {
+            unresolved += usize::from(smart_medication::contained(order, raw).is_none());
+            continue;
+        }
+        let Some(reference) = smart_medication::Reference::in_order(raw, full.as_deref(), order) else {
+            unresolved += 1;
+            continue;
+        };
+        match included.lookup(&reference) {
+            smart_medication::Match::Found(_) => {}
+            smart_medication::Match::Missing if reference.read_url(base).is_some() => {
+                if can_read && seen.insert(reference.clone()) {
+                    missing.push(reference);
+                }
+            }
+            _ => unresolved += 1,
         }
     }
-    out
+    (missing, unresolved)
 }
 
 /// The run's bundle: each resource once (by its ledger key), sorted, under an id made from what it
@@ -730,10 +745,13 @@ fn missing_medications(base: &str, entries: &[(Option<String>, Value)]) -> Vec<S
 /// gave it (the smallest when it gave two), whatever the order. Returns the bytes and how many
 /// repeats it left out.
 fn bundle(base: &str, entries: Vec<(Option<String>, Value)>) -> (Vec<u8>, i64) {
-    let mut by_key: BTreeMap<String, (Option<String>, Value)> = BTreeMap::new();
+    let mut by_key = BTreeMap::<_, (Option<String>, Value)>::new();
     let mut repeated = 0;
     for (full, r) in entries {
-        let key = fhir::pull_key(&r);
+        // Medications are context. Two FHIR bases can issue the same ID and version, and two
+        // different copies of one version must stay ambiguous during projection.
+        let context = (r["resourceType"] == "Medication").then(|| (full.clone(), fhir::content_sha(&r)));
+        let key = (fhir::pull_key(&r), context);
         match by_key.get_mut(&key) {
             Some(held) => {
                 repeated += 1;
@@ -743,7 +761,8 @@ fn bundle(base: &str, entries: Vec<(Option<String>, Value)>) -> (Vec<u8>, i64) {
                     _ => false,
                 };
                 if better {
-                    held.0 = full;
+                    // Keep the resource paired with the URL used to resolve its references.
+                    *held = (full, r);
                 }
             }
             None => {
@@ -754,14 +773,21 @@ fn bundle(base: &str, entries: Vec<(Option<String>, Value)>) -> (Vec<u8>, i64) {
     let entries: Vec<Value> = by_key
         .into_values()
         .map(|(full, r)| {
-            let url = full.unwrap_or_else(|| {
-                format!(
-                    "{base}/{}/{}",
-                    r["resourceType"].as_str().unwrap_or_default(),
-                    r["id"].as_str().unwrap_or_default()
-                )
+            // Do not invent a fullUrl for a medication or its referring order. The importer
+            // must see the same identities that the poller used to resolve references.
+            let url = full.or_else(|| {
+                (r["resourceType"] != "Medication" && !fhir::by_reference(&r)).then(|| {
+                    format!(
+                        "{base}/{}/{}",
+                        r["resourceType"].as_str().unwrap_or_default(),
+                        r["id"].as_str().unwrap_or_default()
+                    )
+                })
             });
-            json!({"fullUrl": url, "resource": r})
+            match url {
+                Some(url) => json!({"fullUrl": url, "resource": r}),
+                None => json!({"resource": r}),
+            }
         })
         .collect();
     let digest = Sha256::digest(serde_json::to_vec(&entries).unwrap_or_default());
@@ -951,20 +977,27 @@ pub async fn pull_with(
         }
         return Err(JobError::retry(STOP_NO_ANSWER));
     }
-    if read_medication && !r.budget_hit {
-        let missing = missing_medications(&base, &g.entries);
+    if !r.budget_hit {
+        let authorized_base = url::Url::parse(&base).map_err(|_| JobError::permanent(STOP_SERVER))?;
+        let (missing, mut unresolved) = missing_medications(&authorized_base, &g.entries, read_medication);
+        let entries_before_reads = g.entries.len();
         let mut left = missing.len();
-        for id in missing.iter().take(caps.medication_reads) {
+        for reference in missing.into_iter().take(caps.medication_reads) {
             left -= 1;
-            match r.get(&format!("{base}/Medication/{id}")).await {
+            let (id, url) = reference
+                .read_url(&authorized_base)
+                .expect("a read is on the authorized base");
+            match r.get(&url).await {
                 Ok(f) if f.status == 200 => {
                     let m: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
                     if m["resourceType"] != "Medication" {
                         g.problem("not_fhir", words::NOT_MEDICATION.into());
-                    } else if m["id"].as_str() != Some(id.as_str()) {
+                    } else if m["id"] != id {
                         g.problem("medication_id_mismatch", words::MEDICATION_ID_MISMATCH.into());
+                    } else if !reference.matches_version(&m) {
+                        g.problem("medication_version_mismatch", words::MEDICATION_VERSION_MISMATCH.into());
                     } else {
-                        g.entries.push((Some(format!("{base}/Medication/{id}")), m));
+                        g.entries.push((Some(reference.into_full_url()), m));
                     }
                 }
                 Ok(f) => g.problem("search_failed", words::answered("Medication", f.status)),
@@ -981,6 +1014,18 @@ pub async fn pull_with(
         if left > 0 {
             g.problem("too_many_medications", words::medications_left(left));
         }
+        if g.entries.len() != entries_before_reads {
+            // A version-specific read can make an unversioned reference ambiguous.
+            (_, unresolved) = missing_medications(&authorized_base, &g.entries, false);
+        }
+        if unresolved > 0 {
+            let message = if unresolved == 1 {
+                words::MEDICATION_REFERENCE.into()
+            } else {
+                words::times(words::MEDICATION_REFERENCE, unresolved)
+            };
+            g.problem("medication_reference", message);
+        }
     }
 
     let (bytes, repeated) = bundle(&base, std::mem::take(&mut g.entries));
@@ -996,6 +1041,15 @@ pub async fn pull_with(
         tx.rollback().await?;
         return Err(JobError::permanent(stop));
     }
+    let current: Option<(String, Option<NaiveDate>)> =
+        sqlx::query_as("select display_name, birth_date from profile where id = $1 for share")
+            .bind(profile_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if !current.is_some_and(|(current_name, current_born)| current_name == name && current_born == born) {
+        tx.rollback().await?;
+        return Err(JobError::permanent(STOP_PROFILE_CHANGED));
+    }
     let (sha, size) = store_bytes(&ctx.blobs, BlobOwner::Profile(profile_id), bytes).await?;
     let doc = create_document(
         &mut tx,
@@ -1007,7 +1061,7 @@ pub async fn pull_with(
         },
     )
     .await?;
-    let got = fhir::import_pull_with_identity(&mut tx, &ctx.blobs, source.id, doc.id, Some((&name, born))).await?;
+    let got = fhir::import_pull_with_identity(&mut tx, &ctx.blobs, source.id, doc.id, Some("matched")).await?;
     tx.commit().await?;
     g.skip("context", got.context);
     let n = |x: i64| i32::try_from(x).unwrap_or(i32::MAX);
@@ -1205,17 +1259,45 @@ mod tests {
     #[test]
     fn a_medicine_named_by_reference_is_read_once() {
         let base = "https://fhir.labnorte.example/r4";
-        let order = |id: &str, med: &str| json!({"resourceType": "MedicationRequest", "id": id, "medicationReference": {"reference": med}});
+        let order = |id: &str, med: &str| {
+            (
+                Some(format!("{base}/MedicationRequest/{id}")),
+                json!({"resourceType": "MedicationRequest", "id": id, "medicationReference": {"reference": med}}),
+            )
+        };
         let entries = vec![
-            (None, order("1", "Medication/metf")),
-            (None, order("2", "Medication/metf")),
-            (None, order("3", &format!("{base}/Medication/levo"))),
-            (None, order("4", "https://other.example/r4/Medication/x")),
-            (None, order("5", "#contained")),
-            (None, order("6", "Medication/held")),
-            (None, json!({"resourceType": "Medication", "id": "held"})),
+            order("1", "Medication/metf"),
+            order("2", "Medication/metf"),
+            order("3", &format!("{base}/Medication/levo")),
+            order("4", "https://other.example/r4/Medication/x"),
+            order("5", "#missing-contained"),
+            order("6", "Medication/held"),
+            order("7", "Medication/metf/_history/v1"),
+            (None, order("8", "Medication/no-base").1),
+            (
+                Some(format!("{base}/MedicationRequest/another-id")),
+                order("9", "Medication/wrong-base").1,
+            ),
+            (
+                Some(format!("{base}/Medication/held")),
+                json!({"resourceType": "Medication", "id": "held"}),
+            ),
         ];
-        assert_eq!(missing_medications(base, &entries), ["metf", "levo"]);
+        let base = url::Url::parse(base).expect("the FHIR base");
+        let (targets, unresolved) = missing_medications(&base, &entries, true);
+        let urls: Vec<_> = targets
+            .iter()
+            .filter_map(|target| target.read_url(&base).map(|(_, url)| url))
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                format!("{base}/Medication/metf"),
+                format!("{base}/Medication/levo"),
+                format!("{base}/Medication/metf/_history/v1"),
+            ]
+        );
+        assert_eq!(unresolved, 4);
     }
 
     #[test]
