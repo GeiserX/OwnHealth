@@ -220,3 +220,34 @@ async fn fit_and_cgm_csv_imports_reach_an_agent() -> R {
     assert_eq!(vendor_terms(&cgm), 3, "{cgm}");
     Ok(())
 }
+
+/// An HRV series shows one source. A withheld vendor is never that source and never a name in the
+/// answer, however many and however new its days, and even first in the person's priority: the choice
+/// and the left-out note are made among the served sources only.
+#[tokio::test]
+async fn an_hrv_series_never_chooses_or_names_a_withheld_vendor() -> R {
+    let w = world().await?;
+    let recent: Vec<i64> = (0..20).collect();
+    days(&w, "oura", "Oura Ring", "hrv_rmssd", &recent, 61.0).await?;
+    days(&w, "gadgetbridge", "Amazfit Band", "hrv_rmssd", &[5, 6, 7], 44.0).await?;
+    days(&w, "fit", "Forerunner 265", "hrv_rmssd", &[8], 50.0).await?;
+    let check = |res: &ToolRes| {
+        let env = res.ok();
+        assert_eq!(values(&env, "points"), vec![Some(44.0); 3], "{env}");
+        assert_eq!(vendor_terms(&env), 20, "{env}");
+        assert!(says_vendor_terms(&env), "{env}");
+        assert!(dumps(&env).contains("Forerunner 265"), "the served source left out is named: {env}");
+        assert!(!dumps(&env).contains("Oura") && !res.text.contains("Oura"), "{env}\n{}", res.text);
+    };
+    let trend = json!({"profile": "alex", "code": "hrv_rmssd", "window": "P30D", "resolution": "day"});
+    let c = w.connect_real(&w.tok().await?).await?;
+    check(&c.call("get_trend", trend.clone()).await?);
+    // the ring first in Alex's own priority for HRV changes nothing
+    let ring: i16 = sqlx::query_scalar("select id from wearable_source where provider = 'oura'")
+        .fetch_one(&w.db.pool)
+        .await?;
+    let mut conn = w.db.pool.acquire().await?;
+    ownhealth_ingest_structured::wearables::set_priority(&mut conn, w.pid("alex"), "hrv_rmssd", &[ring]).await?;
+    check(&c.call("get_trend", trend).await?);
+    Ok(())
+}
