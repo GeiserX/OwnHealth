@@ -288,13 +288,10 @@ impl Dek {
         Dek::from_key(key)
     }
 
-    /// Stable across rewraps. Used to match an archive to the data key that sealed its files.
+    /// Stable across rewraps. Used to match an archive to the data key that sealed its files, and a
+    /// keyring tombstone to the key it closes. Derived apart from the file key, as every other key is.
     pub fn archive_id(&self) -> String {
-        hex::encode(
-            hmac(&self.key[..], &[b"ownhealth archive key id v1"])
-                .finalize()
-                .into_bytes(),
-        )
+        hex::encode(&hkdf32(&self.key[..], None, b"ownhealth archive key id v1")[..])
     }
 
     /// The on-disk name of the file whose plaintext hashes to `sha` (32 bytes): 64 hex characters.
@@ -1013,6 +1010,17 @@ mod tests {
         let mut secret = [0u8; 32];
         rand::fill(&mut secret[..]);
         Kek::from_secret(&secret).expect("kek")
+    }
+
+    /// The id a manifest records for a data key is derived with HKDF and a label of its own, as every
+    /// other key is. It is never an HMAC keyed with the AES-GCM key that seals the files.
+    #[test]
+    fn the_archive_id_is_derived_apart_from_the_file_key() {
+        let dek = Dek::generate();
+        let derived = hkdf32(&dek.key[..], None, b"ownhealth archive key id v1");
+        assert_eq!(dek.archive_id(), hex::encode(&derived[..]));
+        let keyed = hmac(&dek.key[..], &[b"ownhealth archive key id v1"]).finalize().into_bytes();
+        assert_ne!(dek.archive_id(), hex::encode(keyed));
     }
 
     fn seal_all(dek: &Dek, owner: Uuid, data: &[u8]) -> Vec<u8> {
