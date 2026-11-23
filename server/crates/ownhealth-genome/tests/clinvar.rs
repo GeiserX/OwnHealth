@@ -1266,10 +1266,11 @@ async fn a_genome_retracted_while_the_run_waits_is_not_compared() -> R {
     let mut c = e.conn().await?;
     seed_alex(&e, &mut c).await?;
     let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
-    // The run has listed Alex's dataset and waits for it; meanwhile the genome file is retracted.
+    // Hold the same document lock as a retraction. The run can list the dataset, then waits
+    // for the retraction to commit before it checks the document's status.
     let mut other = e.db.pool.begin().await?;
     let doc: Uuid = sqlx::query_scalar(
-        "select document_id from genome_dataset where profile_id = $1 and status = 'current' for update",
+        "select d.id from document d join genome_dataset g on g.document_id = d.id          where g.profile_id = $1 and g.status = 'current' for update of d",
     )
     .bind(e.profile("alex"))
     .fetch_one(&mut *other)
