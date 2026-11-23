@@ -11,11 +11,16 @@
 # when it answers 404 or 410. A link that answers 401, 403, 429 or a 5xx, or does not answer within
 # 30 seconds after two retries, could not be checked: many sites refuse scripts. The report lists
 # those apart, and they do not count as dead. .github/workflows/cite-links.yml runs this every week.
+#
+# Some hosts answer 404 to a cloud address (a GitHub runner) for a page that a browser opens. A 404
+# from a host in `fake404` therefore counts as could not be checked. www.fda.gov did that for two
+# live pages in November 2026 (issue #89).
 set -uo pipefail
 
 dir=${1:-$(cd "$(dirname "$0")/.." && pwd)/data}
 [ -d "$dir" ] || { echo "cite-links: no directory $dir" >&2; exit 2; }
 command -v curl >/dev/null || { echo "cite-links: curl is not installed" >&2; exit 2; }
+fake404='www.fda.gov'
 ua='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
 
 files() { grep -rlF --include='*.yaml' --include='*.yml' --include='*.json' --include='*.tsv' -- "$1" "$dir"; }
@@ -39,7 +44,9 @@ while IFS= read -r url; do
   else
     case "$code" in
       2?? | 3??) continue ;;
-      404 | 410) list=dead ;;
+      404 | 410)
+        host=${url#https://}; host=${host%%[/?#]*}
+        case " $fake404 " in *" $host "*) list=unchecked ;; *) list=dead ;; esac ;;
       *) list=unchecked ;;
     esac
   fi
