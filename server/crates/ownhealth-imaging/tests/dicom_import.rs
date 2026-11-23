@@ -992,3 +992,294 @@ async fn round4_two_unreadable_patients_under_one_uid_wait_as_a_uid_conflict() -
     assert_eq!(e.orthanc.posts(), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn round5_a_later_disc_with_a_different_sop_in_the_same_series_imports_it() -> R {
+    let e = env().await?;
+    let st = Study::new(U1, ALEX);
+    for n in 0..2 {
+        let files = [(format!("image-{n}"), support::image(&st, 0, n, support::EXPLICIT_LE))];
+        e.upload("alex", &files).await?;
+        e.run().await?;
+    }
+    assert_eq!(e.orthanc.held().instances.len(), 2);
+    assert_eq!(e.fhir(U1).await?["numberOfInstances"], 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round5_a_lost_store_reply_recovers_even_when_orthanc_used_a_different_id() -> R {
+    use std::sync::atomic::Ordering::SeqCst;
+    let e = env().await?;
+    let st = Study {
+        series: 3,
+        per_series: 1,
+        ..Study::new(U1, ALEX)
+    };
+    let disc = study_files(&st, "DICOM");
+    let client = ownhealth_imaging::orthanc::Orthanc::new(e.orthanc.config())?;
+    client.store(disc[0].1.clone()).await?;
+    // A pre-existing copy of the exact same SOP and bytes lives under another study ID.
+    *e.orthanc.misread.lock().expect("test setting") = Some((U1.into(), U2.into()));
+    client.store(disc[2].1.clone()).await?;
+    *e.orthanc.misread.lock().expect("test setting") = None;
+    let original = e.orthanc.held().instances;
+    // Orthanc keeps a new instance in the original study, then misfiles the next one and loses its reply.
+    *e.orthanc.misread_patient.lock().expect("test setting") = Some((ALEX.id.into(), "LN-MISREAD".into()));
+    *e.orthanc.misread_except_series.lock().expect("test setting") = Some(st.series_uid(1));
+    // Include the pre-existing instance's file, with its original bytes, last in the retry upload.
+    let files = [disc[1].clone(), disc[2].clone(), disc[0].clone()];
+    e.orthanc.lose_store_reply_at.store(4, SeqCst);
+    let up = e.upload("alex", &files).await?;
+    tokio::time::timeout(Duration::from_secs(30), e.run()).await??;
+    assert_eq!(e.job(up.job_id).await?.0, "queued");
+    let after = e.orthanc.held().instances;
+    assert_eq!(after.len(), 4);
+    assert_eq!(e.orthanc.patients_under(U1).len(), 2);
+
+    *e.orthanc.misread_patient.lock().expect("test setting") = None;
+    sqlx::query("update job set run_after = now() where id = $1")
+        .bind(up.job_id)
+        .execute(&e.rt.pool)
+        .await?;
+    tokio::time::timeout(Duration::from_secs(30), e.run()).await??;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(result["imported"], 1, "{result}");
+    let held = e.orthanc.held();
+    assert_eq!(held.instances.len(), 4);
+    assert_eq!(e.orthanc.patients_under(U1), [ALEX.id.into()].into());
+    let deleted: Vec<_> = held
+        .log
+        .iter()
+        .filter_map(|(method, path)| (method == "DELETE").then(|| path.trim_start_matches("/instances/").to_owned()))
+        .collect();
+    let mut wanted: Vec<_> = after.keys().filter(|id| !original.contains_key(*id)).cloned().collect();
+    wanted.sort();
+    let mut deleted = deleted;
+    deleted.sort();
+    assert_eq!(deleted, wanted);
+    assert!(original.keys().all(|id| held.instances.contains_key(id)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn round5_a_refused_report_is_never_filed_even_when_its_series_count_matches() -> R {
+    let e = env().await?;
+    let st = Study {
+        series: 1,
+        per_series: 1,
+        report: true,
+        ..Study::new(U1, ALEX)
+    };
+    // A different SOP already belongs to the report's series.
+    let report_series = support::image(&st, 98, 1, support::EXPLICIT_LE);
+    e.upload("alex", &[("other-instance".into(), report_series)]).await?;
+    e.run().await?;
+    *e.orthanc.refused_sop.lock().expect("test setting") = Some(format!("{U1}.99.1"));
+    let files = study_files(&st, "DICOM");
+    for _ in 0..2 {
+        let up = e.upload("alex", &files).await?;
+        e.run().await?;
+        let (state, result, error) = e.job(up.job_id).await?;
+        assert_eq!(state, "done", "{result} {error:?}");
+        assert_eq!(result["refused_files"], 1, "{result}");
+        assert_eq!(result["reports"], 0, "{result}");
+    }
+    let counts: (i64, i64) = sqlx::query_as(
+        "select (select count(*) from document where doc_type = 'imaging_report'), \
+                (select count(*) from job where kind = 'import.pdf')",
+    )
+    .fetch_one(&e.rt.pool)
+    .await?;
+    assert_eq!(counts, (0, 0));
+    assert_eq!(e.fhir(U1).await?["numberOfInstances"], 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round5_an_exported_study_has_a_modality_for_every_series() -> R {
+    use std::io::{Cursor, Read};
+    let e = env().await?;
+    let st = Study {
+        series: 1,
+        per_series: 1,
+        modality: "",
+        report: true,
+        ..Study::new(U1, ALEX)
+    };
+    e.upload("alex", &study_files(&st, "DICOM")).await?;
+    e.run().await?;
+    let mut out = Cursor::new(Vec::new());
+    let mut tx = e.rt.pool.begin().await?;
+    ownhealth_ops::export::export_profile(&mut tx, &e.rt.blobs, e.fam.profile("alex"), &mut out, "zip").await?;
+    let mut export = zip::ZipArchive::new(out)?;
+    let mut resource = String::new();
+    export
+        .by_name("fhir/ImagingStudy.ndjson")?
+        .read_to_string(&mut resource)?;
+    let resource: Value = serde_json::from_str(resource.trim())?;
+    for (index, code) in ["OT", "DOC"].into_iter().enumerate() {
+        assert_eq!(
+            resource["series"][index]["modality"],
+            serde_json::json!({"system": "http://dicom.nema.org/resources/ontology/DCM", "code": code}),
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn round5_lookup_rejects_malformed_orthanc_responses() -> R {
+    use serde_json::json;
+    let fake = FakeOrthanc::start().await?;
+    let client = ownhealth_imaging::orthanc::Orthanc::new(fake.config())?;
+    assert!(client.studies_under(U1).await?.is_empty());
+    let mut accepted = Vec::new();
+    for invalid in [
+        json!({}),
+        json!([{"Type": "Study"}]),
+        json!([{"Type": "Study", "ID": "invalid"}]),
+    ] {
+        *fake.lookup_response.lock().expect("test setting") = Some(invalid.clone());
+        if client.studies_under(U1).await.is_ok() {
+            accepted.push(invalid);
+        }
+    }
+    assert!(accepted.is_empty(), "accepted malformed responses: {accepted:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn round5_an_unreadable_name_does_not_hide_an_issuer_conflict() -> R {
+    let e = env().await?;
+    let st = Study {
+        series: 1,
+        per_series: 1,
+        issuer: "LABNORTE",
+        ..Study::new(U1, ALEX)
+    };
+    let mut other = study_files(
+        &Study {
+            issuer: "OTHER",
+            ..st.clone()
+        },
+        "other",
+    );
+    patch(&mut other, b"RIVERA^ALEX", b"RIVERA^\xc1LEX");
+    let mut files = study_files(&st, "DICOM");
+    files.extend(other);
+    e.upload("alex", &files).await?;
+    e.run().await?;
+    assert_eq!(e.in_review("alex").await?, [(U1.into(), "identity_conflict".into())]);
+    assert_eq!(e.orthanc.posts(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round5_an_unreadable_name_keeps_a_utf8_id_through_accept() -> R {
+    let e = env().await?;
+    let st = Study {
+        person: Person { id: "É-1", ..ALEX },
+        charset: "ISO_IR 192",
+        series: 1,
+        per_series: 1,
+        ..Study::new(U1, ALEX)
+    };
+    let mut files = study_files(&st, "DICOM");
+    patch(&mut files, b"RIVERA^ALEX", b"RIVERA^\xc1LEX");
+    e.upload("alex", &files).await?;
+    e.run().await?;
+    assert_eq!(e.in_review("alex").await?, [(U1.into(), "unsupported_charset".into())]);
+    let mut c = e.rt.pool.acquire().await?;
+    let item = sqlx::query_scalar("select id from review_item where kind = $1")
+        .bind(REVIEW_KIND)
+        .fetch_one(&mut *c)
+        .await?;
+    ownhealth_core::review::accept(&mut c, item, e.fam.user("alex"), None).await?;
+    drop(c);
+    e.run().await?;
+    assert!(e.recorded(U1).await?.is_some());
+    assert_eq!(e.orthanc.patients_under(U1), ["É-1".into()].into());
+    Ok(())
+}
+
+#[tokio::test]
+async fn round5_the_open_archive_is_reused_across_studies_and_report_extraction() -> R {
+    let e = env().await?;
+    let first = Study {
+        series: 1,
+        per_series: 1,
+        ..Study::new(U1, ALEX)
+    };
+    let second = Study {
+        uid: U2.into(),
+        report: true,
+        ..first.clone()
+    };
+    let files = hospital_cd(&[first, second]);
+    let up = e.upload("alex", &files).await?;
+    let sha: String = sqlx::query_scalar("select encode(zip_blob, 'hex') from imaging_import")
+        .fetch_one(&e.rt.pool)
+        .await?;
+    let owner = BlobOwner::Profile(e.fam.profile("alex"));
+    let blobs = e.rt.blobs.clone();
+    // Once the first study has staged an instance, unlink the stored file. The already open
+    // reader still has its original contents, but opening the archive a second time must fail.
+    *e.orthanc.after_store.lock().expect("test setting") = Some(Box::new(move || {
+        assert!(blobs.delete(owner, &sha).expect("unlink test ZIP"));
+    }));
+    tokio::time::timeout(Duration::from_secs(30), e.run()).await??;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(result["imported"], 2, "{result}");
+    assert_eq!(result["reports"], 1, "{result}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn round5_series_counts_cross_the_128_row_boundary() -> R {
+    use axum::{Json, Router, extract::State, routing::post};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    const ID: &str = "00000000-00000000-00000000-00000000-00000000";
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route(
+            "/tools/find",
+            post(
+                |State(calls): State<Arc<Mutex<Vec<(u64, u64)>>>>, Json(query): Json<Value>| async move {
+                    let since = query["Since"].as_u64().expect("since");
+                    let limit = query["Limit"].as_u64().expect("limit");
+                    calls.lock().expect("calls").push((since, limit));
+                    let page: Vec<Value> = (since..129)
+                        .take(limit as usize)
+                        .map(|n| {
+                            json!({
+                                "MainDicomTags": {"SeriesInstanceUID": format!("{U1}.{n:03}"), "Modality": "CT"},
+                                "RequestedTags": {"NumberOfSeriesRelatedInstances": "1"},
+                            })
+                        })
+                        .collect();
+                    Json(page)
+                },
+            ),
+        )
+        .with_state(calls.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let client = ownhealth_imaging::orthanc::Orthanc::new(ownhealth_core::orthanc::OrthancConfig {
+        url: format!("http://{}", listener.local_addr()?),
+        user: support::USER.into(),
+        password: ownhealth_core::ids::token_hex(16),
+    })?;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let series = tokio::time::timeout(Duration::from_secs(10), client.series_of(ID)).await??;
+    assert_eq!(*calls.lock().expect("calls"), [(0, 128), (128, 128)]);
+    assert_eq!(
+        series.into_iter().map(|s| s.uid).collect::<Vec<_>>(),
+        (0..129).map(|n| format!("{U1}.{n:03}")).collect::<Vec<_>>(),
+    );
+    Ok(())
+}

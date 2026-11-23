@@ -7,7 +7,7 @@
 //! 2. For each study, under the one StudyInstanceUID lock every Orthanc writer takes
 //!    ([`ownhealth_core::orthanc::lock_study`]): a study another profile holds, a second patient under
 //!    one UID, or a UID Orthanc already holds under another patient goes to review, and nothing of it
-//!    reaches Orthanc. A study the profile records already, whose series Orthanc holds in full, is
+//!    reaches Orthanc. A study the profile records already, whose SOP instances Orthanc holds in full, is
 //!    left alone: the same disc again sends nothing. Then a study whose patient text the reader cannot
 //!    decode, whose patient is not the profile's (`identity_match`), or on a disc with two or more
 //!    patients, one that is not clearly the profile's, goes to review. The person can accept those
@@ -27,12 +27,15 @@
 //! study's files go to Orthanc. That is the price of one lock that every Orthanc writer takes the same
 //! way (the rebuild from the stored zips too). A session lock would need a release on every way out,
 //! and a connection back in the pool that still held one would block its UID for good. A job holds
-//! one connection, so the pool sees no more of them than the core queue runs jobs at once.
+//! one pooled connection. A job that sends files opens one additional connection for the committed
+//! POST journal, leaving the UID lock on the pooled transaction.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chrono::NaiveDate;
 use futures::future::BoxFuture;
@@ -45,10 +48,11 @@ use ownhealth_core::review::{ReviewItem, ReviewItemIn, create_item};
 use ownhealth_core::{Error, ids};
 use ownhealth_ingest_pdf::classify::identity_match;
 use serde_json::{Value, json};
-use sqlx::{PgConnection, Postgres, Transaction};
+use sha2::{Digest, Sha256};
+use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::orthanc::{FILE_CHUNK, Orthanc, OrthancError, SeriesInfo, Stored};
+use crate::orthanc::{FILE_CHUNK, Orthanc, OrthancError, SeriesInfo, Stored, resource_id};
 use crate::part10::{Header, Part10Error, encapsulated_file, is_part10, read_header};
 
 /// The job kind.
@@ -119,10 +123,16 @@ pub struct StudyScan {
     /// Instances per SeriesInstanceUID.
     pub series: BTreeMap<String, usize>,
     sops: BTreeSet<(String, String)>,
-    /// The zip entries of the study, in zip order.
-    pub entries: Vec<usize>,
-    /// Those that are Encapsulated PDF instances.
-    pub pdfs: BTreeSet<usize>,
+    /// The ZIP entries of the study, in ZIP order.
+    entries: Vec<Instance>,
+}
+
+#[derive(Debug, Clone)]
+struct Instance {
+    index: usize,
+    sop_uid: String,
+    expected_id: Option<String>,
+    report: bool,
 }
 
 impl StudyScan {
@@ -170,8 +180,14 @@ fn read_entry(zip: &mut zip::ZipArchive<BlobReader>, i: usize, limit: u64) -> Re
 
 /// Walks the zip (blocking: run it on a blocking thread).
 pub fn scan(reader: BlobReader) -> Result<Scan, JobError> {
-    let mut zip = zip::ZipArchive::new(reader)
-        .map_err(|e| JobError::permanent(format!("the upload is not a zip that reads: {e}")))?;
+    scan_archive(&mut open_archive(reader)?)
+}
+
+fn open_archive(reader: BlobReader) -> Result<zip::ZipArchive<BlobReader>, JobError> {
+    zip::ZipArchive::new(reader).map_err(|e| JobError::permanent(format!("the upload is not a zip that reads: {e}")))
+}
+
+fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError> {
     if zip.len() > MAX_ENTRIES {
         return Err(JobError::permanent(format!(
             "the upload holds {} files, more than {MAX_ENTRIES}",
@@ -196,7 +212,7 @@ pub fn scan(reader: BlobReader) -> Result<Scan, JobError> {
             s.too_large += 1;
             continue;
         }
-        let Ok(mut head) = read_entry(&mut zip, i, HEAD_BYTES) else {
+        let Ok(mut head) = read_entry(zip, i, HEAD_BYTES) else {
             s.damaged += 1;
             continue;
         };
@@ -207,7 +223,7 @@ pub fn scan(reader: BlobReader) -> Result<Scan, JobError> {
         let mut header = read_header(&head);
         if matches!(header, Err(Part10Error::Corrupt(_))) && head.len() as u64 == HEAD_BYTES {
             // a header that does not end in the first bytes: read further, as far as the cap
-            match read_entry(&mut zip, i, MAX_HEADER_BYTES) {
+            match read_entry(zip, i, MAX_HEADER_BYTES) {
                 Ok(more) => head = more,
                 Err(_) => {
                     s.damaged += 1;
@@ -226,12 +242,23 @@ pub fn scan(reader: BlobReader) -> Result<Scan, JobError> {
 }
 
 fn add(s: &mut Scan, i: usize, h: Header) {
-    let is_pdf = h.is_pdf();
+    let report = h.is_pdf();
+    let expected_id = h.undecodable_patient_id.is_none().then(|| {
+        resource_id(&[
+            &h.patient_id,
+            &h.study_instance_uid,
+            &h.series_instance_uid,
+            &h.sop_instance_uid,
+        ])
+    });
     let study = s.studies.entry(h.study_instance_uid).or_default();
     study.unsupported_charset |= h.unsupported_charset;
-    // A file whose identity text did not decode still counts its PatientID (as bytes), so a second
-    // patient under the UID is seen; its name and issuer are empty, so they add no evidence.
-    let patient = study.patients.entry(h.patient_id).or_default();
+    // Keep unreadable PatientIDs distinct using their bytes, and keep the identity evidence that
+    // decoded independently.
+    let patient = study
+        .patients
+        .entry(h.undecodable_patient_id.unwrap_or(h.patient_id))
+        .or_default();
     for (evidence, value) in [
         (&mut patient.names, h.patient_name),
         (&mut patient.birth_dates, h.patient_birth_date),
@@ -254,10 +281,12 @@ fn add(s: &mut Scan, i: usize, h: Header) {
     if study.description.is_empty() {
         study.description = h.study_description.clone();
     }
-    if is_pdf {
-        study.pdfs.insert(i);
-    }
-    study.entries.push(i);
+    study.entries.push(Instance {
+        index: i,
+        sop_uid: h.sop_instance_uid,
+        expected_id,
+        report,
+    });
 }
 
 /// `YYYYMMDD` as a date.
@@ -356,20 +385,31 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
         birth_date: profile.2,
     };
     let owner = BlobOwner::Profile(profile_id);
-    let reader = ctx.blobs.open_seek(owner, &import.sha256).map_err(Error::from)?;
-    let scan = tokio::task::spawn_blocking(move || scan(reader))
-        .await
-        .map_err(|e| JobError::retry(format!("the zip walk stopped: {e}")))??;
+    let (files, scan) = StudyFiles::open(&ctx.blobs, owner, &import.sha256).await?;
     let several = scan.patients().len() > 1;
     let (mut imported, mut already, mut review, mut refused) = (0, 0, 0, 0);
     let (mut instances, mut reports) = (0, 0);
     let mut tally = Tally::default();
+    let mut journal = None;
     for (uid, study) in &scan.studies {
         if !accepted.is_empty() && !accepted.contains(uid) {
             continue;
         }
         let ok = accepted.contains(uid);
-        let out = import_study(&ctx, &orthanc, &import, &profile, uid, study, several, ok, &mut tally).await?;
+        let out = import_study(
+            &ctx,
+            &orthanc,
+            &import,
+            &profile,
+            &mut journal,
+            uid,
+            study,
+            &files,
+            several,
+            ok,
+            &mut tally,
+        )
+        .await?;
         match out {
             Outcome::Imported {
                 instances: n,
@@ -406,73 +446,88 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
     })))
 }
 
-/// A seekable archive and the private directory used to stage one instance at a time.
+/// One ZIP directory for the job. Only blocking tasks touch the seekable reader.
 struct StudyFiles {
-    zip: zip::ZipArchive<BlobReader>,
+    zip: Arc<Mutex<zip::ZipArchive<BlobReader>>>,
     dir: PathBuf,
 }
 
+struct Staged {
+    file: File,
+    size: u64,
+    sha256: Vec<u8>,
+}
+
 impl StudyFiles {
-    async fn open(blobs: &BlobStore, import: &ImportRow) -> Result<Self, JobError> {
+    async fn open(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<(Self, Scan), JobError> {
         let blobs = blobs.clone();
-        let owner = BlobOwner::Profile(import.profile_id);
-        let sha = import.sha256.clone();
+        let sha = sha.to_owned();
         tokio::task::spawn_blocking(move || {
             let reader = blobs.open_seek(owner, &sha).map_err(Error::from)?;
-            let zip = zip::ZipArchive::new(reader)
-                .map_err(|e| JobError::retry(format!("the stored zip does not open: {e}")))?;
+            let mut zip = open_archive(reader)?;
+            let scan = scan_archive(&mut zip)?;
             let dir = blobs
                 .staging_path("upload-imaging-instance")
                 .map_err(Error::from)?
                 .parent()
                 .ok_or_else(|| JobError::retry("no imaging staging directory"))?
                 .to_path_buf();
-            Ok(Self { zip, dir })
+            Ok((
+                Self {
+                    zip: Arc::new(Mutex::new(zip)),
+                    dir,
+                },
+                scan,
+            ))
         })
         .await
         .map_err(|e| JobError::retry(format!("the zip reader stopped: {e}")))?
     }
 
-    /// Stage one entry before POST so a bad ZIP CRC can never send part of the file to Orthanc.
-    /// The private temporary file is unlinked and the producer makes no other file in parallel.
-    fn stage(&mut self, i: usize) -> Result<Option<(File, u64)>, JobError> {
-        let Ok(entry) = self.zip.by_index(i) else {
+    async fn stage_instance(&self, index: usize) -> Result<Option<Staged>, JobError> {
+        let zip = Arc::clone(&self.zip);
+        let dir = self.dir.clone();
+        tokio::task::spawn_blocking(move || stage(&zip, &dir, index))
+            .await
+            .map_err(|e| JobError::retry(format!("the zip reader stopped: {e}")))?
+    }
+}
+
+/// Validate the ZIP CRC before a POST. Release each unlinked spool before opening the next one.
+fn stage(zip: &Mutex<zip::ZipArchive<BlobReader>>, dir: &Path, index: usize) -> Result<Option<Staged>, JobError> {
+    let mut zip = zip.lock().map_err(|_| JobError::retry("the zip reader stopped"))?;
+    let Ok(entry) = zip.by_index(index) else {
+        return Ok(None);
+    };
+    let expected = entry.size();
+    let mut entry = entry.take(MAX_FILE_BYTES + 1);
+    let mut file = tempfile::tempfile_in(dir).map_err(Error::from)?;
+    let mut buf = [0; FILE_CHUNK];
+    let mut size = 0;
+    let mut digest = Sha256::new();
+    loop {
+        let Ok(n) = entry.read(&mut buf) else {
             return Ok(None);
         };
-        let expected = entry.size();
-        let mut entry = entry.take(MAX_FILE_BYTES + 1);
-        let mut file = tempfile::tempfile_in(&self.dir).map_err(Error::from)?;
-        let mut buf = [0; FILE_CHUNK];
-        let mut size = 0;
-        loop {
-            let Ok(n) = entry.read(&mut buf) else {
-                return Ok(None);
-            };
-            if n == 0 {
-                break;
-            }
-            size += n as u64;
-            if size > MAX_FILE_BYTES {
-                return Ok(None);
-            }
-            file.write_all(&buf[..n]).map_err(Error::from)?;
+        if n == 0 {
+            break;
         }
-        if size != expected {
+        size += n as u64;
+        if size > MAX_FILE_BYTES {
             return Ok(None);
         }
-        file.rewind().map_err(Error::from)?;
-        Ok(Some((file, size)))
+        file.write_all(&buf[..n]).map_err(Error::from)?;
+        digest.update(&buf[..n]);
     }
-
-    async fn stage_instance(self, i: usize) -> Result<(Self, Option<(File, u64)>), JobError> {
-        tokio::task::spawn_blocking(move || {
-            let mut files = self;
-            let file = files.stage(i)?;
-            Ok((files, file))
-        })
-        .await
-        .map_err(|e| JobError::retry(format!("the zip reader stopped: {e}")))?
+    if size != expected {
+        return Ok(None);
     }
+    file.rewind().map_err(Error::from)?;
+    Ok(Some(Staged {
+        file,
+        size,
+        sha256: digest.finalize().to_vec(),
+    }))
 }
 
 #[derive(sqlx::FromRow)]
@@ -486,12 +541,24 @@ struct RecordRow {
     fhir: Option<Value>,
 }
 
-/// Whether Orthanc holds every series of the disc's study, each with at least as many instances.
-fn holds_all(held: &[SeriesInfo], study: &StudyScan) -> bool {
-    study
-        .series
-        .iter()
-        .all(|(uid, n)| held.iter().any(|s| s.uid == *uid && s.instances >= *n))
+/// A replay can skip POSTs only when each uploaded SOP exists under this study's identity.
+async fn holds_all(orthanc: &Orthanc, study: &StudyScan) -> Result<bool, JobError> {
+    let mut checked = BTreeSet::new();
+    for instance in &study.entries {
+        let Some(expected) = &instance.expected_id else {
+            return Ok(false);
+        };
+        if checked.insert(expected)
+            && !orthanc
+                .instances_under(&instance.sop_uid)
+                .await
+                .map_err(retry)?
+                .contains(expected)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Puts the study in review, unsent, and ends its transaction.
@@ -547,20 +614,173 @@ async fn complete_cleanup(
     Ok(needs_hold)
 }
 
+/// Keep journal writes independent of the UID transaction and of pool availability. Jobs waiting
+/// for the same UID can use every pooled connection. A profile deletion can contend for a journal
+/// row, so a journal write with a conflicting row lock must release the UID transaction promptly.
+async fn journal_connection<'a>(
+    connection: &'a mut Option<PgConnection>,
+    pool: &PgPool,
+) -> Result<&'a mut PgConnection, JobError> {
+    if connection.is_none() {
+        let options = pool.connect_options();
+        let mut conn = tokio::time::timeout(Duration::from_secs(5), PgConnection::connect_with(&options))
+            .await
+            .map_err(|_| JobError::retry("the imaging journal could not connect in time"))??;
+        sqlx::query("set lock_timeout = '5s'").execute(&mut conn).await?;
+        *connection = Some(conn);
+    }
+    connection
+        .as_mut()
+        .ok_or_else(|| JobError::retry("no imaging journal connection"))
+}
+
+/// The POST attempt is committed on a second connection while the writer keeps the UID lock.
+/// An interrupted request can leave an instance even when OwnHealth received no response.
+async fn journal_post(
+    journal: &mut PgConnection,
+    import_id: Uuid,
+    uid: &str,
+    instance: &Instance,
+    preexisting: &[String],
+    staged: &Staged,
+) -> Result<(), JobError> {
+    let expected = instance.expected_id.as_ref().filter(|id| !preexisting.contains(id));
+    sqlx::query(
+        "insert into imaging_import_post (study_instance_uid, import_id, entry_index, sop_instance_uid, \
+         preexisting_ids, expected_id, file_sha256, file_size) values ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(uid)
+    .bind(import_id)
+    .bind(instance.index as i32)
+    .bind(&instance.sop_uid)
+    .bind(preexisting)
+    .bind(expected)
+    .bind(&staged.sha256)
+    .bind(staged.size as i64)
+    .execute(&mut *journal)
+    .await?;
+    Ok(())
+}
+
+async fn finish_post(
+    journal: &mut PgConnection,
+    import_id: Uuid,
+    uid: &str,
+    index: usize,
+    stored: Option<&str>,
+) -> Result<(), JobError> {
+    if let Some(id) = stored {
+        sqlx::query(
+            "update imaging_import_post set stored_id = $4, preexisting_ids = '{}' \
+                     where study_instance_uid = $1 and import_id = $2 and entry_index = $3",
+        )
+        .bind(uid)
+        .bind(import_id)
+        .bind(index as i32)
+        .bind(id)
+        .execute(&mut *journal)
+        .await?;
+    } else {
+        sqlx::query(
+            "delete from imaging_import_post \
+                     where study_instance_uid = $1 and import_id = $2 and entry_index = $3",
+        )
+        .bind(uid)
+        .bind(import_id)
+        .bind(index as i32)
+        .execute(&mut *journal)
+        .await?;
+    }
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct PendingPost {
+    sop_instance_uid: String,
+    preexisting_ids: Vec<String>,
+    expected_id: Option<String>,
+    stored_id: Option<String>,
+    file_sha256: Vec<u8>,
+    file_size: i64,
+}
+
+/// Under the UID lock, take back every newly written instance of an unverified attempt. A reply
+/// that named the new ID is authoritative. For a lost reply, look up the original SOP and exclude
+/// every ID that already existed before this POST. An unexpected ID needs byte-for-byte evidence.
+async fn recover_posts(
+    conn: &mut PgConnection,
+    journal: &mut Option<PgConnection>,
+    pool: &PgPool,
+    orthanc: &Orthanc,
+    uid: &str,
+) -> Result<(), JobError> {
+    let pending: Vec<PendingPost> = sqlx::query_as(
+        "select sop_instance_uid, preexisting_ids, expected_id, stored_id, file_sha256, file_size \
+         from imaging_import_post where study_instance_uid = $1",
+    )
+    .bind(uid)
+    .fetch_all(&mut *conn)
+    .await?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    for attempt in pending {
+        if let Some(id) = &attempt.stored_id {
+            orthanc.delete_instance(id).await.map_err(retry)?;
+            continue;
+        }
+        for id in orthanc
+            .instances_under(&attempt.sop_instance_uid)
+            .await
+            .map_err(retry)?
+        {
+            if attempt.preexisting_ids.contains(&id) {
+                continue;
+            }
+            if attempt.expected_id.as_ref() == Some(&id)
+                || orthanc
+                    .instance_matches(&id, &attempt.file_sha256, attempt.file_size as u64)
+                    .await
+                    .map_err(retry)?
+            {
+                orthanc.delete_instance(&id).await.map_err(retry)?;
+            }
+        }
+    }
+    // Clear these rows durably before the writer can journal its own attempts under this UID.
+    sqlx::query("delete from imaging_import_post where study_instance_uid = $1")
+        .bind(uid)
+        .execute(journal_connection(journal, pool).await?)
+        .await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn import_study(
     ctx: &JobContext,
     orthanc: &Orthanc,
     import: &ImportRow,
     profile: &ProfileRow,
+    journal: &mut Option<PgConnection>,
     uid: &str,
     study: &StudyScan,
+    files: &StudyFiles,
     several: bool,
     accepted: bool,
     tally: &mut Tally,
 ) -> Result<Outcome, JobError> {
     let mut tx = ctx.pool.begin().await?;
     lock_study(&mut tx, uid).await?;
+    recover_posts(&mut tx, journal, &ctx.pool, orthanc, uid).await?;
+    // Profile deletion removes the import before the study. Take the parent row first as well,
+    // since the journal's foreign key needs access to it on a separate connection.
+    let active: Option<Uuid> = sqlx::query_scalar("select id from imaging_import where id = $1 for key share")
+        .bind(import.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if active.is_none() {
+        return Ok(Outcome::Retracted);
+    }
     if complete_cleanup(&mut tx, orthanc, import.id, uid).await? {
         return hold(tx, import, profile, uid, study, reason::UID_CONFLICT).await;
     }
@@ -601,21 +821,22 @@ async fn import_study(
         }
     }
     let recorded = record.as_ref().filter(|r| r.orthanc_id.is_some());
-    let mut already_held = None;
-    if let (Some(r), [id]) = (recorded, current.as_slice())
-        && r.orthanc_id.as_ref() == Some(id)
-    {
-        let series = orthanc.series_of(id).await.map_err(retry)?;
-        if holds_all(&series, study) {
-            already_held = Some((id.clone(), series));
-        }
-    }
-
     let mut kept = BTreeSet::new();
-    let mut added = Vec::new();
-    let (orthanc_id, series) = if let Some(held) = already_held {
-        // A retry can find its instances in Orthanc before the clinical transaction committed.
-        held
+    let mut added = false;
+    let mut retained_reports = BTreeSet::new();
+    let (orthanc_id, series) = if let (Some(r), [id]) = (recorded, current.as_slice())
+        && r.orthanc_id.as_ref() == Some(id)
+        && holds_all(orthanc, study).await?
+    {
+        // A retry can find its verified instances in Orthanc before the record update committed.
+        retained_reports.extend(
+            study
+                .entries
+                .iter()
+                .filter(|entry| entry.report)
+                .map(|entry| entry.index),
+        );
+        (id.clone(), orthanc.series_of(id).await.map_err(retry)?)
     } else {
         if !accepted {
             if study.unsupported_charset {
@@ -638,25 +859,37 @@ async fn import_study(
                 return hold(tx, import, profile, uid, study, why).await;
             }
         }
-        let mut files = StudyFiles::open(&ctx.blobs, import).await?;
         let mut study_ids = BTreeSet::new();
-        for &i in &study.entries {
-            let (archive, staged) = files.stage_instance(i).await?;
-            files = archive;
-            let Some((file, size)) = staged else {
+        for instance in &study.entries {
+            let Some(staged) = files.stage_instance(instance.index).await? else {
                 tally.damaged += 1;
                 continue;
             };
+            let preexisting = orthanc.instances_under(&instance.sop_uid).await.map_err(retry)?;
+            let db = journal_connection(journal, &ctx.pool).await?;
+            journal_post(db, import.id, uid, instance, &preexisting, &staged).await?;
             tally.submitted_files += 1;
-            match orthanc.store_file(file, size).await.map_err(retry)? {
+            match orthanc.store_file(staged.file, staged.size).await.map_err(retry)? {
                 Stored::Kept { id, study: parent, new } => {
+                    let new_here = new && !preexisting.contains(&id);
+                    finish_post(db, import.id, uid, instance.index, new_here.then_some(id.as_str())).await?;
+                    added |= new_here;
                     study_ids.insert(parent);
-                    if new {
-                        added.push(id.clone());
+                    if instance.report
+                        && orthanc
+                            .instances_under(&instance.sop_uid)
+                            .await
+                            .map_err(retry)?
+                            .contains(&id)
+                    {
+                        retained_reports.insert(instance.index);
                     }
                     kept.insert(id);
                 }
-                Stored::Refused => tally.refused_files += 1,
+                Stored::Refused => {
+                    finish_post(db, import.id, uid, instance.index, None).await?;
+                    tally.refused_files += 1;
+                }
             }
         }
         if kept.is_empty() {
@@ -672,23 +905,28 @@ async fn import_study(
             _ => None,
         };
         let Some(id) = one else {
-            // Commit the IDs before the first DELETE. Any writer entering through this UID's lock
-            // will finish the cleanup before it can send instances of the study.
+            // Persist the review decision before deleting anything. A retry must finish the
+            // cleanup and create the same hold, even when a DELETE failed.
             sqlx::query(
                 "insert into imaging_import_cleanup (study_instance_uid, import_id, instance_ids) \
-                 values ($1, $2, $3)",
+                 values ($1, $2, '{}')",
             )
             .bind(uid)
             .bind(import.id)
-            .bind(&added)
-            .execute(&mut *tx)
+            .execute(journal_connection(journal, &ctx.pool).await?)
             .await?;
-            tx.commit().await?;
-            let mut tx = ctx.pool.begin().await?;
-            lock_study(&mut tx, uid).await?;
+            recover_posts(&mut tx, journal, &ctx.pool, orthanc, uid).await?;
             complete_cleanup(&mut tx, orthanc, import.id, uid).await?;
             return hold(tx, import, profile, uid, study, reason::UID_CONFLICT).await;
         };
+        // Postflight verified the study. Keep its instances if warming or recording it fails.
+        if added {
+            sqlx::query("delete from imaging_import_post where study_instance_uid = $1 and import_id = $2")
+                .bind(uid)
+                .bind(import.id)
+                .execute(journal_connection(journal, &ctx.pool).await?)
+                .await?;
+        }
         let series = orthanc.series_of(&id).await.map_err(retry)?;
         (id, series)
     };
@@ -700,15 +938,15 @@ async fn import_study(
     let fhir = study_fhir(uid, date, description, &series);
     let counts_changed =
         recorded.is_none_or(|r| r.fhir.as_ref() != Some(&fhir) || r.orthanc_id.as_ref() != Some(&orthanc_id));
-    if counts_changed || !added.is_empty() {
+    if counts_changed || added {
         for stored in series.iter().filter(|s| study.series.contains_key(&s.uid)) {
             orthanc.warm_series(uid, &stored.uid).await.map_err(retry)?;
         }
     }
-    let (report, reports) = if !study.pdfs.is_empty()
+    let (report, reports) = if !retained_reports.is_empty()
         && (counts_changed || !kept.is_empty() || recorded.is_some_and(|r| r.report_document_id.is_none()))
     {
-        record_reports(ctx, &mut tx, import, profile, study).await?
+        record_reports(ctx, &mut tx, import, profile, study, files, &retained_reports).await?
     } else {
         (None, 0)
     };
@@ -731,7 +969,7 @@ async fn import_study(
         Some(_) => {}
     }
     tx.commit().await?;
-    if recorded.is_some() && added.is_empty() {
+    if recorded.is_some() && !added {
         return Ok(Outcome::Already { reports });
     }
     Ok(Outcome::Imported {
@@ -748,31 +986,31 @@ async fn record_reports(
     import: &ImportRow,
     profile: &ProfileRow,
     study: &StudyScan,
+    files: &StudyFiles,
+    retained_reports: &BTreeSet<usize>,
 ) -> Result<(Option<Uuid>, usize), JobError> {
-    let mut files = StudyFiles::open(&ctx.blobs, import).await?;
     let owner = BlobOwner::Profile(import.profile_id);
     let mut first = None;
     let mut reports = 0;
-    for &i in &study.pdfs {
+    for &i in retained_reports {
         let blobs = ctx.blobs.clone();
-        let (archive, stored) = tokio::task::spawn_blocking(move || {
-            let pdf = match files.stage(i)? {
-                Some((file, _)) => match encapsulated_file(file, &files.dir) {
+        let zip = Arc::clone(&files.zip);
+        let dir = files.dir.clone();
+        let stored = tokio::task::spawn_blocking(move || {
+            let pdf = match stage(&zip, &dir, i)? {
+                Some(staged) => match encapsulated_file(staged.file, &dir) {
                     Ok(pdf) => pdf,
                     Err(e @ Part10Error::Staging(_)) => return Err(JobError::retry(e.to_string())),
                     Err(_) => None,
                 },
                 None => None,
             };
-            let stored = pdf
-                .map(|p| blobs.put_reader(owner, p))
+            pdf.map(|p| blobs.put_reader(owner, p))
                 .transpose()
-                .map_err(Error::from)?;
-            Ok::<_, JobError>((files, stored))
+                .map_err(|e| JobError::from(Error::from(e)))
         })
         .await
         .map_err(|e| JobError::retry(format!("storing a report stopped: {e}")))??;
-        files = archive;
         if let Some((sha, size)) = stored {
             let id = record_report(conn, import, profile, study, &sha, size).await?;
             first.get_or_insert(id);
@@ -917,7 +1155,11 @@ fn study_fhir(uid: &str, date: Option<NaiveDate>, description: Option<&str>, ser
         "modality": modalities.into_iter().map(coding).collect::<Vec<_>>(),
         "numberOfSeries": series.len(),
         "numberOfInstances": series.iter().map(|s| s.instances).sum::<usize>(),
-        "series": series.iter().map(|s| json!({"uid": s.uid, "numberOfInstances": s.instances})).collect::<Vec<_>>(),
+        "series": series.iter().map(|s| json!({
+            "uid": s.uid,
+            "modality": coding(if s.modality.is_empty() { "OT" } else { &s.modality }),
+            "numberOfInstances": s.instances,
+        })).collect::<Vec<_>>(),
     });
     if let Some(d) = date {
         fhir["started"] = json!(d.to_string());

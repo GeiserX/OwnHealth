@@ -78,9 +78,10 @@ pub struct Header {
     pub series_instance_uid: String,
     pub patient_id: String,
     pub patient_id_issuer: String,
-    /// The patient name, PatientID or issuer is not in a repertoire the reader decodes. The name and
-    /// issuer are then empty, and the PatientID is its bytes read as ISO 8859-1 (one character per
-    /// byte, so two IDs still differ).
+    /// Only present when PatientID could not be decoded. One character per original byte, so
+    /// distinct unreadable IDs can still be distinguished.
+    pub undecodable_patient_id: Option<String>,
+    /// At least one nonempty patient name, ID or issuer could not be decoded.
     pub unsupported_charset: bool,
     /// As written, `^` between the name parts.
     pub patient_name: String,
@@ -130,11 +131,31 @@ const ITEM_END: u32 = 0xFFFE_E00D;
 const SEQUENCE_END: u32 = 0xFFFE_E0DD;
 const UNDEFINED: u32 = 0xFFFF_FFFF;
 
-/// VRs with a 2-byte reserved field and a 4-byte length in explicit VR.
+/// PS3.5 §7.1.2 reserves the short layout for these VRs.
 fn long_vr(vr: &[u8]) -> bool {
-    matches!(
+    !matches!(
         vr,
-        b"OB" | b"OD" | b"OF" | b"OL" | b"OV" | b"OW" | b"SQ" | b"UC" | b"UN" | b"UR" | b"UT" | b"SV" | b"UV"
+        b"AE"
+            | b"AS"
+            | b"AT"
+            | b"CS"
+            | b"DA"
+            | b"DS"
+            | b"DT"
+            | b"FL"
+            | b"FD"
+            | b"IS"
+            | b"LO"
+            | b"LT"
+            | b"PN"
+            | b"SH"
+            | b"SL"
+            | b"SS"
+            | b"ST"
+            | b"TM"
+            | b"UI"
+            | b"UL"
+            | b"US"
     )
 }
 
@@ -431,7 +452,6 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
         ..Header::default()
     };
     let mut charset = Some(SpecificCharacterSet::ISO_IR_6);
-    let mut raw_patient_id = Vec::new();
     h.transfer_syntax = walk(buf, 0x0020_000E, MAX_INFLATED_HEADER, |tag, value| {
         let v = || text(value);
         let decode = |charset: &Option<SpecificCharacterSet>| {
@@ -446,7 +466,6 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
         match tag {
             0x0008_0005 => {
                 charset = std::str::from_utf8(value).ok().and_then(repertoire);
-                h.unsupported_charset |= charset.is_none();
             }
             0x0008_0016 => h.sop_class_uid = v(),
             0x0008_0018 => h.sop_instance_uid = v(),
@@ -454,8 +473,8 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
             0x0008_0060 => h.modality = v(),
             0x0008_1030 => h.study_description = decode(&charset).unwrap_or_else(v),
             0x0010_0010 | 0x0010_0020 | 0x0010_0021 => {
-                if tag == 0x0010_0020 {
-                    raw_patient_id = value.to_vec();
+                if value.iter().all(|b| matches!(b, b' ' | 0)) {
+                    return true;
                 }
                 if let Some(text) = decode(&charset) {
                     match tag {
@@ -465,6 +484,10 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
                     }
                 } else {
                     h.unsupported_charset = true;
+                    if tag == 0x0010_0020 {
+                        let bytes: String = value.iter().copied().map(char::from).collect();
+                        h.undecodable_patient_id = Some(bytes.trim_matches([' ', '\0']).to_string());
+                    }
                 }
             }
             0x0010_0030 => h.patient_birth_date = v(),
@@ -472,16 +495,8 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
             0x0020_000E => h.series_instance_uid = v(),
             _ => {}
         }
-        // everything the importer needs sits at or before (0020,000E)
-        true
+        tag != 0x0020_000E
     })?;
-    if h.unsupported_charset {
-        // Identity the reader cannot decode is not guessed: the study waits for a person.
-        h.patient_name.clear();
-        h.patient_id_issuer.clear();
-        h.patient_id = raw_patient_id.iter().map(|b| char::from(*b)).collect::<String>();
-        h.patient_id = h.patient_id.trim_matches([' ', '\0']).to_string();
-    }
     if h.is_directory() {
         return Ok(h);
     }
@@ -494,24 +509,68 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
     Ok(h)
 }
 
-/// The document inside an Encapsulated PDF instance (0042,0011), without the padding byte DICOM may
-/// add to make its length even. None when the file holds no such element.
+const DOCUMENT: u32 = 0x0042_0011;
+const DOCUMENT_LENGTH: u32 = 0x0042_0015;
+
+/// Locate the encapsulated value and trim any DICOM padding (PS3.3 §C.24.2).
+fn document_range(w: &mut Walker<impl Read + Seek>) -> Result<Option<std::ops::Range<usize>>, Part10Error> {
+    let mut document = None;
+    let mut length = None;
+    while !w.done() {
+        let tag = w.tag_at(w.pos)?;
+        if tag > DOCUMENT_LENGTH {
+            break;
+        }
+        let e = w.next(0)?;
+        match e.tag {
+            DOCUMENT => document = e.value,
+            DOCUMENT_LENGTH => {
+                let value = e
+                    .value
+                    .filter(|r| r.len() == 4)
+                    .ok_or_else(|| corrupt("invalid Encapsulated Document Length"))?;
+                length = Some(w.u32_at(value.start)? as usize);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let Some(mut value) = document else {
+        return Ok(None);
+    };
+    let n = value.len();
+    if let Some(original) = length
+        && (n % 2 != 0 || (original != n && original.checked_add(1) != Some(n)))
+    {
+        return Err(corrupt("Encapsulated Document Length does not match the document"));
+    }
+    if n > 0 && n % 2 == 0 && length != Some(n) {
+        let mut last = [0];
+        w.bytes_at(value.end - 1, &mut last)?;
+        if last[0] == 0 {
+            value.end -= 1;
+        } else if length.is_some() {
+            return Err(corrupt("invalid Encapsulated Document padding"));
+        }
+    }
+    Ok(Some(value))
+}
+
+/// The document inside an Encapsulated PDF instance, without its DICOM padding.
 pub fn encapsulated_document(buf: &[u8]) -> Result<Option<Vec<u8>>, Part10Error> {
-    let mut doc = None;
-    walk(buf, 0x0042_0011, MAX_INFLATED_DOCUMENT, |tag, value| {
-        if tag == 0x0042_0011 {
-            doc = Some(value.to_vec());
-            return false;
-        }
-        true
-    })?;
-    Ok(doc.map(|mut d| {
-        // a PDF ends at its last %%EOF; DICOM pads an odd length with one NUL
-        if d.len() % 2 == 0 && d.last() == Some(&0) {
-            d.pop();
-        }
-        d
-    }))
+    if !is_part10(buf) {
+        return Err(Part10Error::NotDicom);
+    }
+    let (ts, _, _, start) = meta(Cursor::new(buf), buf.len())?;
+    let mut inflated = Vec::new();
+    let (set, syntax) = data_set(buf, &ts, start, MAX_INFLATED_DOCUMENT, &mut inflated)?;
+    let mut w = Walker {
+        input: Cursor::new(set),
+        pos: 0,
+        end: set.len(),
+        syntax,
+    };
+    Ok(document_range(&mut w)?.map(|value| set[value].to_vec()))
 }
 
 /// Open the PDF value of a staged Encapsulated PDF instance as a bounded reader. The DICOM
@@ -550,30 +609,18 @@ pub(crate) fn encapsulated_file(file: File, dir: &Path) -> Result<Option<Take<Fi
         end,
         syntax,
     };
-    while !w.done() && w.tag_at(w.pos)? <= 0x0042_0011 {
-        let e = w.next(0)?;
-        if e.tag == 0x0042_0011 {
-            let Some(value) = e.value.filter(|r| r.len() >= 5) else {
-                break;
-            };
-            let mut magic = [0; 5];
-            w.bytes_at(value.start, &mut magic)?;
-            if &magic != b"%PDF-" {
-                break;
-            }
-            let mut len = value.len();
-            if len % 2 == 0 {
-                let mut last = [0; 1];
-                w.bytes_at(value.end - 1, &mut last)?;
-                len -= usize::from(last[0] == 0);
-            }
-            let mut file = w.input.into_inner();
-            file.seek(SeekFrom::Start(value.start as u64))
-                .map_err(|e| corrupt(e.to_string()))?;
-            return Ok(Some(file.take(len as u64)));
-        }
+    let Some(value) = document_range(&mut w)?.filter(|r| r.len() >= 5) else {
+        return Ok(None);
+    };
+    let mut magic = [0; 5];
+    w.bytes_at(value.start, &mut magic)?;
+    if &magic != b"%PDF-" {
+        return Ok(None);
     }
-    Ok(None)
+    let mut file = w.input.into_inner();
+    file.seek(SeekFrom::Start(value.start as u64))
+        .map_err(|e| corrupt(e.to_string()))?;
+    Ok(Some(file.take(value.len() as u64)))
 }
 
 /// A DICOM UID: digits in dot-separated parts, at most 64 characters.
@@ -804,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_name_holds_and_keeps_the_patient_id_as_bytes() {
+    fn an_unreadable_name_holds_and_keeps_any_readable_patient_id() {
         // a byte outside the default repertoire, and a set switch the reader does not follow
         for (code, byte) in [
             (&b""[..], 0xc1u8),
@@ -822,7 +869,13 @@ mod tests {
             let h = read_header(&file("1.2.840.10008.1.2.1", &set)).expect("header");
             assert!(h.unsupported_charset, "{}", String::from_utf8_lossy(code));
             assert_eq!(h.patient_name, "");
-            assert_eq!(h.patient_id, "LN-0001");
+            if code == b"ISO 2022 IR 87" {
+                assert_eq!(h.patient_id, "");
+                assert_eq!(h.undecodable_patient_id.as_deref(), Some("LN-0001"));
+            } else {
+                assert_eq!(h.patient_id, "LN-0001");
+                assert_eq!(h.undecodable_patient_id, None);
+            }
             assert_eq!(h.study_description, "TC TORAX");
         }
     }
@@ -850,6 +903,75 @@ mod tests {
         bad[at] = 0xFF;
         bad[at + 1] = 0x7F;
         assert!(matches!(read_header(&bad), Err(Part10Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn round5_unknown_explicit_vr_uses_a_32_bit_length() {
+        let mut set = core(false);
+        before_patient(&mut set, b"\x09\0\x10\x10ZZ\0\0\x04\0\0\0DATA");
+        let h = read_header(&file("1.2.840.10008.1.2.1", &set)).expect("header after unknown VR");
+        assert_eq!(h.patient_id, "LN-0001");
+    }
+
+    #[test]
+    fn round5_partial_tag_after_series_uid_does_not_damage_the_header() {
+        let mut set = core(false);
+        let exact = file("1.2.840.10008.1.2.1", &set);
+        let expected = read_header(&exact).expect("complete header");
+        assert!(matches!(
+            read_header(&exact[..exact.len() - 1]),
+            Err(Part10Error::Corrupt(_))
+        ));
+        set.extend_from_slice(b"\x20\0");
+        assert_eq!(read_header(&file("1.2.840.10008.1.2.1", &set)), Ok(expected));
+    }
+
+    #[test]
+    fn round5_unsupported_charset_with_only_padding_identity_does_not_hold() {
+        let mut set = core(false);
+        for (value, len) in [(b"RIVERA^ALEX".as_slice(), 11), (b"LN-0001", 7)] {
+            let start = set.windows(len).position(|w| w == value).expect("identity value");
+            set[start..start + len].fill(b' ');
+        }
+        set.splice(0..0, explicit(false, 0x0008_0005, b"CS", b"ISO 2022 IR 87"));
+        before_patient(&mut set, &explicit(false, 0x0008_1030, b"LO", b"LabNorte"));
+        let h = read_header(&file("1.2.840.10008.1.2.1", &set)).expect("header");
+        assert_eq!(h.study_description, "LabNorte");
+        assert!(!h.unsupported_charset);
+    }
+
+    fn read_staged_pdf(bytes: &[u8]) -> Result<Option<Vec<u8>>, Part10Error> {
+        let dir = tempfile::tempdir().expect("staging directory");
+        let mut staged = tempfile::tempfile_in(dir.path()).expect("staged file");
+        staged.write_all(bytes).expect("DICOM bytes");
+        let Some(mut data) = encapsulated_file(staged, dir.path())? else {
+            return Ok(None);
+        };
+        let mut out = Vec::new();
+        data.read_to_end(&mut out).expect("document");
+        Ok(Some(out))
+    }
+
+    #[test]
+    fn round5_declared_document_length_distinguishes_data_from_padding() {
+        let value = b"%PDF-X!\0";
+        for (original, want) in [(Some(8u32), &value[..]), (Some(7), &value[..7]), (None, &value[..7])] {
+            let mut set = explicit(false, 0x0042_0011, b"OB", value);
+            if let Some(n) = original {
+                set.extend(explicit(false, 0x0042_0015, b"UL", &n.to_le_bytes()));
+            }
+            let bytes = file("1.2.840.10008.1.2.1", &set);
+            assert_eq!(
+                encapsulated_document(&bytes).expect("in-memory PDF").as_deref(),
+                Some(want)
+            );
+            assert_eq!(read_staged_pdf(&bytes).expect("staged PDF").as_deref(), Some(want));
+        }
+        let mut set = explicit(false, 0x0042_0011, b"OB", value);
+        set.extend(explicit(false, 0x0042_0015, b"UL", &6u32.to_le_bytes()));
+        let bytes = file("1.2.840.10008.1.2.1", &set);
+        assert!(matches!(encapsulated_document(&bytes), Err(Part10Error::Corrupt(_))));
+        assert!(matches!(read_staged_pdf(&bytes), Err(Part10Error::Corrupt(_))));
     }
 
     #[test]

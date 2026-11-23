@@ -19,7 +19,7 @@ use dicom_dictionary_std::tags;
 use dicom_object::meta::FileMetaTableBuilder;
 use dicom_object::{InMemDicomObject, OpenFileOptions};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use sha1::{Digest, Sha1};
 
 pub const EXPLICIT_LE: &str = "1.2.840.10008.1.2.1";
 pub const IMPLICIT_LE: &str = "1.2.840.10008.1.2";
@@ -316,7 +316,7 @@ pub const USER: &str = "ownhealth";
 
 /// An Orthanc id from the values Orthanc hashes: five groups of eight hex digits.
 fn orthanc_id(parts: &[&str]) -> String {
-    let h = hex::encode(Sha256::digest(parts.join("|").as_bytes()));
+    let h = hex::encode(Sha1::digest(parts.join("|").as_bytes()));
     [&h[0..8], &h[8..16], &h[16..24], &h[24..32], &h[32..40]].join("-")
 }
 
@@ -326,11 +326,15 @@ pub struct Held {
     pub studies: BTreeMap<String, (String, String)>,
     /// Orthanc instance id -> (its study id, SeriesInstanceUID).
     pub instances: BTreeMap<String, (String, String)>,
+    /// Orthanc instance ID -> (SOPInstanceUID, original file bytes).
+    instance_files: BTreeMap<String, (String, axum::body::Bytes)>,
     /// SeriesInstanceUID -> Modality.
     pub modalities: BTreeMap<String, String>,
     /// Every request but `/tools/lookup` and `GET /studies/{id}`: (method, path).
     pub log: Vec<(String, String)>,
 }
+
+type AfterStore = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone)]
 pub struct FakeOrthanc {
@@ -353,6 +357,10 @@ pub struct FakeOrthanc {
     pub misread_except_series: Arc<Mutex<Option<String>>>,
     pub fail_delete_at: Arc<AtomicUsize>,
     pub deletes: Arc<AtomicUsize>,
+    pub lose_store_reply_at: Arc<AtomicUsize>,
+    pub refused_sop: Arc<Mutex<Option<String>>>,
+    pub lookup_response: Arc<Mutex<Option<Value>>>,
+    pub after_store: Arc<Mutex<Option<AfterStore>>>,
 }
 
 fn json_answer(status: StatusCode, v: Value) -> Response {
@@ -379,6 +387,10 @@ impl FakeOrthanc {
             misread_except_series: Arc::default(),
             fail_delete_at: Arc::default(),
             deletes: Arc::default(),
+            lose_store_reply_at: Arc::default(),
+            refused_sop: Arc::default(),
+            lookup_response: Arc::default(),
+            after_store: Arc::default(),
         };
         let me = fake.clone();
         let app = Router::new().fallback(move |req: Request| {
@@ -464,20 +476,40 @@ impl FakeOrthanc {
         match (method, path.as_str()) {
             (Method::POST, "/tools/lookup") => {
                 self.pair().await;
+                if let Some(response) = self.lookup_response.lock().ok().and_then(|r| r.clone()) {
+                    return json_answer(StatusCode::OK, response);
+                }
                 let uid = String::from_utf8_lossy(&body).trim().to_string();
-                let found: Vec<Value> = self
-                    .held()
+                let held = self.held();
+                let studies = held
                     .studies
                     .iter()
                     .filter(|(_, (u, _))| *u == uid)
-                    .map(|(id, _)| json!({"ID": id, "Path": format!("/studies/{id}"), "Type": "Study"}))
-                    .collect();
+                    .map(|(id, _)| json!({"ID": id, "Path": format!("/studies/{id}"), "Type": "Study"}));
+                let instances = held
+                    .instance_files
+                    .iter()
+                    .filter(|(_, (sop, _))| *sop == uid)
+                    .map(|(id, _)| json!({"ID": id, "Path": format!("/instances/{id}"), "Type": "Instance"}));
+                let found = studies.chain(instances).collect();
                 json_answer(StatusCode::OK, Value::Array(found))
             }
             (Method::POST, "/instances") => {
                 let delay = self.delay.lock().map(|d| *d).unwrap_or_default();
                 tokio::time::sleep(delay).await;
-                self.store(&body)
+                let stored = self.store(body);
+                if let Some(after) = self.after_store.lock().ok().and_then(|mut f| f.take()) {
+                    after();
+                }
+                if self.lose_store_reply_at.load(Ordering::SeqCst) == self.posts() {
+                    use axum::body::{Body, Bytes};
+                    let interrupted = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "lost store reply");
+                    return Response::new(Body::from_stream(futures::stream::iter([
+                        Ok::<_, std::io::Error>(Bytes::from_static(b"{")),
+                        Err(interrupted),
+                    ])));
+                }
+                stored
             }
             (Method::POST, "/tools/find") => {
                 let query: Value = serde_json::from_slice(&body).unwrap_or_default();
@@ -514,17 +546,26 @@ impl FakeOrthanc {
                     None => StatusCode::NOT_FOUND.into_response(),
                 }
             }
+            (Method::GET, p) if p.starts_with("/instances/") && p.ends_with("/file") => {
+                let id = p.trim_start_matches("/instances/").trim_end_matches("/file");
+                match self.held().instance_files.get(id) {
+                    Some((_, data)) => data.clone().into_response(),
+                    None => StatusCode::NOT_FOUND.into_response(),
+                }
+            }
             (Method::DELETE, p) if p.starts_with("/instances/") => {
                 let attempted = self.deletes.fetch_add(1, Ordering::SeqCst) + 1;
                 if self.fail_delete_at.load(Ordering::SeqCst) == attempted {
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
                 let id = p.trim_start_matches("/instances/");
-                if let Ok(mut h) = self.held.lock()
-                    && let Some((study, _)) = h.instances.remove(id)
-                    && !h.instances.values().any(|(s, _)| *s == study)
-                {
-                    h.studies.remove(&study);
+                if let Ok(mut h) = self.held.lock() {
+                    h.instance_files.remove(id);
+                    if let Some((study, _)) = h.instances.remove(id)
+                        && !h.instances.values().any(|(s, _)| *s == study)
+                    {
+                        h.studies.remove(&study);
+                    }
                 }
                 json_answer(StatusCode::OK, json!({}))
             }
@@ -572,9 +613,9 @@ impl FakeOrthanc {
         self.pair_lookups.store(false, Ordering::SeqCst);
     }
 
-    fn store(&self, body: &[u8]) -> Response {
+    fn store(&self, body: axum::body::Bytes) -> Response {
         // Orthanc parses the whole file: one cut in its pixel data is refused
-        let Ok(obj) = OpenFileOptions::new().from_reader(body) else {
+        let Ok(obj) = OpenFileOptions::new().from_reader(body.as_ref()) else {
             return json_answer(StatusCode::BAD_REQUEST, json!({"Message": "Bad file format"}));
         };
         let text = |tag| {
@@ -589,6 +630,9 @@ impl FakeOrthanc {
             text(tags::SERIES_INSTANCE_UID),
             text(tags::SOP_INSTANCE_UID),
         );
+        if self.refused_sop.lock().ok().and_then(|s| s.clone()).as_ref() == Some(&sop) {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
         if let Ok(m) = self.misread.lock()
             && let Some((from, to)) = m.as_ref()
             && *from == uid
@@ -613,6 +657,9 @@ impl FakeOrthanc {
         h.studies.insert(study.clone(), (uid, patient));
         h.modalities.insert(series.clone(), modality);
         h.instances.insert(id.clone(), (study.clone(), series));
+        if new {
+            h.instance_files.insert(id.clone(), (sop, body));
+        }
         json_answer(
             StatusCode::OK,
             json!({"ID": id, "ParentStudy": study, "ParentSeries": "", "ParentPatient": "",

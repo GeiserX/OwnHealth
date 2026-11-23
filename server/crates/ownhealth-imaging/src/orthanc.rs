@@ -5,6 +5,7 @@ use std::time::Duration;
 use ownhealth_core::orthanc::OrthancConfig;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 /// What went wrong talking to Orthanc. Every one of them is worth a retry of the job, except a file
 /// Orthanc refused ([`Stored::Refused`]), which is not an error.
@@ -102,26 +103,67 @@ impl Orthanc {
         serde_json::from_slice(&body).map_err(|_| OrthancError(format!("Orthanc's answer to {what} is not JSON")))
     }
 
-    /// The Orthanc ids of every study under the StudyInstanceUID (`POST /tools/lookup`). Two patients'
-    /// studies can share one UID, so this can be more than one.
+    /// The Orthanc IDs of every study under the UID. Two patients can share one StudyInstanceUID.
     pub async fn studies_under(&self, study_instance_uid: &str) -> Result<Vec<String>, OrthancError> {
+        self.lookup(study_instance_uid, "Study").await
+    }
+
+    /// The Orthanc IDs that share a SOPInstanceUID, across all studies.
+    pub(crate) async fn instances_under(&self, sop_uid: &str) -> Result<Vec<String>, OrthancError> {
+        self.lookup(sop_uid, "Instance").await
+    }
+
+    async fn lookup(&self, uid: &str, kind: &str) -> Result<Vec<String>, OrthancError> {
         let res = self
-            .send(
-                self.http
-                    .post(self.url("/tools/lookup"))
-                    .body(study_instance_uid.to_string()),
-            )
+            .send(self.http.post(self.url("/tools/lookup")).body(uid.to_string()))
             .await?;
-        let found = Orthanc::json(res, "a UID lookup").await?;
-        Ok(found
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter(|r| r["Type"] == "Study")
-                    .filter_map(|r| r["ID"].as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default())
+        let found = Self::json(res, "a UID lookup").await?;
+        let invalid = || OrthancError("Orthanc returned an invalid UID lookup".into());
+        let rows = found.as_array().ok_or_else(invalid)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            match row["Type"].as_str() {
+                Some(t) if t == kind => {
+                    let id = row["ID"].as_str().filter(|id| is_orthanc_id(id)).ok_or_else(invalid)?;
+                    ids.push(id.to_string());
+                }
+                Some("Patient" | "Study" | "Series" | "Instance") => {}
+                _ => return Err(invalid()),
+            }
+        }
+        Ok(ids)
+    }
+
+    /// A lost response may hide an ID computed from tags Orthanc decoded differently. Only the
+    /// exact bytes of the attempted upload can establish ownership of such an instance.
+    pub(crate) async fn instance_matches(&self, id: &str, sha256: &[u8], size: u64) -> Result<bool, OrthancError> {
+        if !is_orthanc_id(id) {
+            return Err(OrthancError("not an Orthanc id".into()));
+        }
+        let mut res = self
+            .send(self.http.get(self.url(&format!("/instances/{id}/file"))))
+            .await?;
+        let status = res.status();
+        if status == StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !status.is_success() {
+            return Err(OrthancError(format!("Orthanc answered {status} to an instance read")));
+        }
+        let mut n = 0;
+        let mut digest = Sha256::new();
+        while let Some(chunk) = res
+            .chunk()
+            .await
+            .map_err(|_| OrthancError("Orthanc's instance read broke off".into()))?
+        {
+            n += chunk.len() as u64;
+            if n > size {
+                return Ok(false);
+            }
+            digest.update(&chunk);
+        }
+        Ok(n == size && &digest.finalize()[..] == sha256)
     }
 
     /// One study's UID and patient as Orthanc read them (`GET /studies/{id}`).
@@ -270,6 +312,18 @@ impl Orthanc {
         {}
         Ok(())
     }
+}
+
+/// DicomInstanceHasher in Orthanc hashes the identifiers in order, separated by pipes.
+pub(crate) fn resource_id(parts: &[&str]) -> String {
+    let digest = sha1::Sha1::digest(parts.join("|").as_bytes());
+    digest
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(hex::encode)
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// An Orthanc id: five groups of eight hex digits.
