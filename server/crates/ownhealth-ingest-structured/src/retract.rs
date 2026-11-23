@@ -139,41 +139,39 @@ pub async fn reimport_kind(conn: &mut PgConnection, document_id: Uuid, kind: &st
     .fetch_all(&mut *conn)
     .await?;
     for id in others {
-        queue_after(&mut *conn, job, id).await?;
+        let payload = json!({"document_id": id.to_string()});
+        queue_after(&mut *conn, job, &format!("{job}:reimport:{id}"), &payload).await?;
     }
     Ok(())
 }
 
-/// Queue `job` for the document `id`, to run after this transaction. A job still queued for it is
-/// enough: it starts after this transaction removed its samples, so its writes see that. A job for it
-/// that is running may have written before (its work commits before it is marked done), so one more run
-/// is queued after the newest of them, under a key no other job holds.
-async fn queue_after(conn: &mut PgConnection, job: &str, id: Uuid) -> Result<()> {
+/// Queue `job` with `payload` under the dedupe key `base`, to run after this transaction. A job still
+/// queued under it is enough: it starts after this transaction removed its samples, so its writes see
+/// that. A job under it that is running may have written before (its work commits before it is marked
+/// done), so one more run is queued after the newest of them, under a key no other job holds. Returns
+/// the new job's id; None when a queued one is enough. A move queues its run again for the new owner
+/// this way too.
+pub async fn queue_after(conn: &mut PgConnection, job: &str, base: &str, payload: &Value) -> Result<Option<i64>> {
     use ownhealth_core::jobs::{EnqueueOptions, enqueue};
-    let base = format!("{job}:reimport:{id}");
-    let payload = json!({"document_id": id.to_string()});
     // a job that finishes between the look and the enqueue frees its key, so look again
     for _ in 0..3 {
         let held: Option<(String, i64)> = sqlx::query_as(
             "select state, id from job where (dedupe_key = $1 or starts_with(dedupe_key, $1 || ':after:')) \
              and state in ('queued', 'running') order by state = 'queued' desc, id desc limit 1",
         )
-        .bind(&base)
+        .bind(base)
         .fetch_optional(&mut *conn)
         .await?;
         let key = match held {
-            Some((state, _)) if state == "queued" => return Ok(()),
+            Some((state, _)) if state == "queued" => return Ok(None),
             Some((_, running)) => format!("{base}:after:{running}"),
-            None => base.clone(),
+            None => base.to_string(),
         };
-        if enqueue(&mut *conn, job, &payload, EnqueueOptions::dedupe(&key))
-            .await?
-            .is_some()
-        {
-            return Ok(());
+        if let Some(id) = enqueue(&mut *conn, job, payload, EnqueueOptions::dedupe(&key)).await? {
+            return Ok(Some(id));
         }
     }
-    let why = std::io::Error::other(format!("could not queue {job} again for {id}"));
+    let why = std::io::Error::other(format!("could not queue {job} under {base}"));
     Err(ownhealth_core::Error::Other(why.into()))
 }
 

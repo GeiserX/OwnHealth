@@ -1155,3 +1155,62 @@ async fn a_retraction_that_waited_for_a_move_checks_the_permission_on_the_new_ow
     assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
     Ok(())
 }
+
+/// A move's run is marked done only after its work commits. A move back to that run's profile in
+/// between (Lucía to Alex, back to Lucía, then to Alex again while Alex's first run is still marked
+/// running) queues one more run after it, so the export ends on Alex with its reading.
+#[tokio::test]
+async fn a_move_while_a_run_for_its_profile_is_still_marked_running_imports_after_it() -> R {
+    let a = app().await?;
+    ownhealth_devices::register();
+    let kinds = ["import.cgm_csv".to_string()];
+    let (alex, lucia) = (a.family.profile("alex"), a.family.profile("lucia"));
+    // Lucía holds another export with the same reading, and the export that moves
+    let longer = [CLARITY, b"2,2026-11-14T20:05:17,EGV,,,,iOS G7,121,,,,,3456300,7Q2RLX\n"].concat();
+    for (name, bytes) in [("longer.csv", longer.as_slice()), ("clarity.csv", CLARITY)] {
+        let (s, v) = a
+            .upload(
+                "alex",
+                &[("profile", "lucia"), ("timezone", "Europe/Madrid")],
+                &[(name, bytes)],
+            )
+            .await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?;
+    }
+    let doc: uuid::Uuid =
+        sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'clarity.csv'")
+            .bind(lucia)
+            .fetch_one(&a.rt.pool)
+            .await?;
+    let path = format!("/documents/{doc}/assign");
+    for to in ["alex", "lucia"] {
+        let (s, v) = a.post("alex", &path, Some(json!({"profile": to}))).await?;
+        assert_eq!(s, StatusCode::OK, "{v}");
+    }
+    // Alex's run: the export has left Alex, so it reads nothing; its work commits, its done mark waits
+    let ctx = a.rt.job_context();
+    let job = ownhealth_core::jobs::claim(&ctx.pool, "core", &ctx.worker_id, Some(&kinds))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no queued job"))?;
+    assert_eq!(job.str("profile_id"), Some(alex.to_string().as_str()));
+    let handler = ownhealth_core::jobs::handler_for("import.cgm_csv").ok_or_else(|| anyhow::anyhow!("no handler"))?;
+    let out = handler(ctx.clone(), job.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!(e.text()))?;
+    // the export moves to Alex again in that window
+    let (s, third) = a.post("alex", &path, Some(json!({"profile": "alex"}))).await?;
+    assert_eq!(s, StatusCode::OK, "{third}");
+    ownhealth_core::jobs::complete(&ctx.pool, &job, &ctx.worker_id, out.as_ref()).await?;
+    ownhealth_core::jobs::drain(&ctx, "core", 5, Some(&kinds)).await?;
+    let (owner, imported, held): (Option<uuid::Uuid>, bool, i64) = sqlx::query_as(
+        "select profile_id, flags ? 'import', (select count(*) from wearable_sample s where s.document_id = d.id \
+         and s.profile_id = d.profile_id) from document d where id = $1",
+    )
+    .bind(doc)
+    .fetch_one(&a.rt.pool)
+    .await?;
+    assert_eq!((owner, imported, held), (Some(alex), true, 1), "{third}");
+    assert!(third["job_id"].as_i64().is_some(), "{third}");
+    Ok(())
+}

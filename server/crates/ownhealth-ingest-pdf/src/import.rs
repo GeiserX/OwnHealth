@@ -14,7 +14,6 @@ use ownhealth_core::dedup::{
     simhash64, store_page_fingerprint,
 };
 use ownhealth_core::ingest::ImportSummary;
-use ownhealth_core::jobs::{EnqueueOptions, enqueue};
 use ownhealth_core::observations::{ObservationIn, confirm_observation, supersede_observation};
 use ownhealth_core::provenance::{SrcIn, SrcRef, create_src, region_label};
 use ownhealth_core::review::{
@@ -1139,18 +1138,20 @@ pub async fn assign_document(
     // the new profile's key must open the files before the re-import reads them
     ownhealth_core::documents::rekey_document(&mut *conn, blobs, document_id, doc.profile_id, Some(profile_id)).await?;
     let key = format!("{kind}:{document_id}:{profile_id}");
-    Ok(enqueue(
+    // a run of an earlier move to this profile that is still marked running may have read the document
+    // before this move (its work commits before it is marked done): one more run is queued after it
+    ownhealth_ingest_structured::retract::queue_after(
         conn,
         kind,
+        &key,
         &json!({
             "document_id": document_id.to_string(),
             "profile_id": profile_id.to_string(),
             "household_id": doc.household_id.to_string(),
             "force": true,
         }),
-        EnqueueOptions::dedupe(&key),
     )
-    .await?)
+    .await
 }
 
 // ------------------------------------------------------------------ checks ----
