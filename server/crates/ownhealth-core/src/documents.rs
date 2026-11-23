@@ -510,7 +510,7 @@ pub async fn dispatch_upload_in_zone(
             Ok(sniff(&name, &head, copy.as_ref().map(|c| c.path())))
         })
         .await
-        .map_err(|e| Error::Other(anyhow::anyhow!("upload sniff task failed: {e}")))??;
+        .map_err(std::io::Error::other)??;
         kinds.push((f, kind));
     }
     let has_facts = kinds.iter().any(|(_, k)| *k == "genome_facts");
@@ -790,6 +790,18 @@ pub async fn rekey_document(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_sniff_keeps_the_blocking_task_error_typed() {
+        let function = include_str!("documents.rs")
+            .split_once("pub async fn dispatch_upload_in_zone(")
+            .unwrap()
+            .1
+            .split_once("kinds.push")
+            .unwrap()
+            .0;
+        assert!(!function.contains("anyhow"), "{function}");
+    }
 
     #[test]
     fn a_separator_inside_quotes_does_not_pick_the_delimiter() {
