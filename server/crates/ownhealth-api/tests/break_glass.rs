@@ -10,7 +10,12 @@ mod support;
 use chrono::{DateTime, Duration, Utc};
 use icalendar::{Calendar, CalendarComponent, CalendarDateTime, Component, DatePerhapsTime};
 use ownhealth_core::access::{create_user, set_grant};
+use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::break_glass::settle;
+use ownhealth_core::documents::{NewDocument, create_document};
+use ownhealth_core::observations::{CommitOptions, ObservationIn, commit_observation};
+use ownhealth_core::provenance::{SrcIn, SrcRef};
+use ownhealth_core::review::{ReviewItemIn, create_item};
 use serde_json::{Value, json};
 use support::{Client, Env, Resp};
 use uuid::Uuid;
@@ -267,7 +272,7 @@ async fn without_a_feed_fetch_a_request_waits_and_a_later_fetch_opens_it() -> R 
     assert_eq!(b.request(id).await?.0, "requested");
     let view = b.alex.get("/api/profiles/alex/break-glass").await?;
     assert_eq!(
-        view.json["requests"][0]["waiting_for_calendar"], true,
+        view.json["open_requests"][0]["waiting_for_calendar"], true,
         "{:?}",
         view.json
     );
@@ -282,7 +287,7 @@ async fn without_a_feed_fetch_a_request_waits_and_a_later_fetch_opens_it() -> R 
     assert!(b.reads(&mut carmen).await?);
     assert_eq!(b.request(id).await?.0, "active");
     let view = b.alex.get("/api/profiles/alex/break-glass").await?;
-    assert_eq!(view.json["requests"][0]["waiting_for_calendar"], false);
+    assert_eq!(view.json["open_requests"][0]["waiting_for_calendar"], false);
 
     // the sweep opens one too, with nobody coming back
     let mut sam = b.sam().await?;
@@ -804,12 +809,17 @@ async fn a_contact_feed_never_carries_the_request() -> R {
     let made = sam.post("/api/profiles/alex/calendar-feeds", &json!({})).await?;
     assert_eq!(made.status, 201, "{:?}", made.json);
     let path = made.json["path"].as_str().unwrap_or_default().to_string();
-    let before = b.env.anon().get(&path).await?;
-    assert_eq!(before.status, 200);
+    let before = calendar_events(b.env.anon().get(&path).await?)?;
     let id = b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
-    let after = b.env.anon().get(&path).await?;
-    assert_eq!(after.status, 200, "{:?}", after.json);
+    let after = calendar_events(b.env.anon().get(&path).await?)?;
+    assert_eq!(after, before);
     assert_eq!(b.uses(id).await?, 0);
+
+    // Alex's unmeasured labs have due items. An ordinary grant that adds labs carries those events.
+    b.grant_sam("viewer", &["read:summary", "read:records", "read:labs"])
+        .await?;
+    let with_labs = calendar_events(b.env.anon().get(&path).await?)?;
+    assert!(with_labs.iter().any(|event| !before.contains(event)), "{with_labs:?}");
     Ok(())
 }
 
@@ -1131,20 +1141,12 @@ async fn check_document_change_needs_own_scope(action: &str, body: Value) -> R {
 async fn a_guardian_contact_cannot_decide_a_review_item_break_glass_opened() -> R {
     let mut b = setup().await?;
     b.grant_sam("guardian", &["read:summary"]).await?;
-    let item: Uuid = sqlx::query_scalar(
-        "insert into review_item (household_id, profile_id, kind, payload) \
-         values ($1, $2, 'agent_proposal', $3) returning id",
-    )
-    .bind(b.env.fam().household_id)
-    .bind(b.alex_id())
-    .bind(json!({"observation": {"category": "laboratory", "code_text": "LDL"}}))
-    .fetch_one(b.env.pool())
-    .await?;
+    let item = candidate(&b, None).await?;
     let mut sam = b.sam().await?;
     b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
     let r = sam.get(&format!("/api/review/{item}")).await?;
     assert_eq!(r.status, 200, "{:?}", r.json);
-    for action in ["reject", "accept", "dismiss"] {
+    for action in ["accept", "reject", "dismiss"] {
         let r = sam
             .post(&format!("/api/review/{item}/{action}"), &json!({"reason": "x"}))
             .await?;
@@ -1167,5 +1169,393 @@ async fn a_guardian_contact_cannot_decide_a_review_item_break_glass_opened() -> 
     let r = sam.post(&format!("/api/review/{item}/reopen"), &json!({})).await?;
     assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
     assert_eq!(b.text(status, item).await?, "rejected");
+    Ok(())
+}
+
+type CalendarEvent = (String, Option<DatePerhapsTime>, String, String);
+
+fn calendar_events(resp: Resp) -> anyhow::Result<Vec<CalendarEvent>> {
+    assert_eq!(resp.status, 200, "{:?}", resp.json);
+    let text = String::from_utf8(resp.bytes)?;
+    let cal: Calendar = text.parse().map_err(anyhow::Error::msg)?;
+    let mut events: Vec<_> = cal
+        .components
+        .iter()
+        .filter_map(|component| {
+            let CalendarComponent::Event(event) = component else {
+                return None;
+            };
+            Some((
+                event.get_uid().unwrap_or_default().to_string(),
+                event.get_start(),
+                event.get_summary().unwrap_or_default().to_string(),
+                event.get_description().unwrap_or_default().to_string(),
+            ))
+        })
+        .collect();
+    events.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(events)
+}
+
+fn lab(profile: Uuid, value: &str, sensitive: bool) -> anyhow::Result<ObservationIn> {
+    Ok(ObservationIn::from_json(json!({
+        "profile_id": profile,
+        "category": "laboratory",
+        "printed_name": "Colesterol LDL",
+        "printed_value": value,
+        "printed_unit": "mg/dL",
+        "value_num": value,
+        "loinc": "13457-7",
+        "alias_group": "ldl_c",
+        "unit_ucum": "mg/dL",
+        "value_canonical": value,
+        "unit_canonical": "mg/dL",
+        "derivation_version": "test",
+        "effective_at": "2025-09-14T08:00:00+00:00",
+        "sensitivity": if sensitive { json!(["sexual_health"]) } else { json!([]) },
+    }))?)
+}
+
+async fn candidate(b: &Bg, document_id: Option<Uuid>) -> anyhow::Result<Uuid> {
+    let profile = b.alex_id();
+    let mut conn = b.env.pool().acquire().await?;
+    Ok(create_item(
+        &mut conn,
+        &ReviewItemIn {
+            household_id: Some(b.env.fam().household_id),
+            profile_id: Some(profile),
+            document_id,
+            kind: "candidate_row".into(),
+            payload: json!({
+                "observation": lab(profile, "97", false)?,
+                "src": {"kind": "manual", "profile_id": profile},
+            }),
+            ..Default::default()
+        },
+    )
+    .await?)
+}
+
+async fn lab_document(b: &Bg) -> anyhow::Result<Uuid> {
+    let bytes = b"%PDF-1.7 synthetic LabNorte review fixture";
+    let profile = b.alex_id();
+    let sha = b.env.rt.blobs.put_bytes(BlobOwner::Profile(profile), bytes)?;
+    let mut conn = b.env.pool().acquire().await?;
+    let doc = create_document(
+        &mut conn,
+        &NewDocument {
+            doc_type: Some("lab_report"),
+            ..NewDocument::upload(
+                b.env.fam().household_id,
+                Some(profile),
+                &sha,
+                "application/pdf",
+                bytes.len() as i64,
+            )
+        },
+    )
+    .await?;
+    Ok(doc.id)
+}
+
+async fn identity_review_checks_source_scope(emergency: bool) -> R {
+    ownhealth_ingest_pdf::register();
+    let mut b = setup().await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let doc = lab_document(&b).await?;
+    let target = b.env.profile("sam");
+    let item = {
+        let mut conn = b.env.pool().acquire().await?;
+        create_item(
+            &mut conn,
+            &ReviewItemIn {
+                household_id: Some(b.env.fam().household_id),
+                profile_id: Some(b.alex_id()),
+                document_id: Some(doc),
+                kind: "document_identity".into(),
+                payload: json!({"suggested_profile_id": target}),
+                ..Default::default()
+            },
+        )
+        .await?
+    };
+    let mut sam = b.sam().await?;
+    if emergency {
+        b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
+    }
+    let endpoint = format!("/api/review/{item}/accept");
+    let r = sam.post(&endpoint, &json!({})).await?;
+    assert_eq!(
+        (r.status.as_u16(), r.code()),
+        (403, if emergency { "break_glass" } else { "insufficient_scope" }),
+        "{:?}",
+        r.json
+    );
+    assert_eq!(
+        b.text("select status from review_item where id = $1", item).await?,
+        "open"
+    );
+    assert_eq!(
+        b.text("select profile_id::text from document where id = $1", doc)
+            .await?,
+        b.alex_id().to_string()
+    );
+
+    b.grant_sam("guardian", &["read:summary", "read:labs"]).await?;
+    let r = sam.post(&endpoint, &json!({})).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(
+        b.text("select profile_id::text from document where id = $1", doc)
+            .await?,
+        target.to_string()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn identity_review_denies_a_move_with_only_emergency_document_scope() -> R {
+    identity_review_checks_source_scope(true).await
+}
+
+#[tokio::test]
+async fn identity_review_denies_a_move_without_document_scope_on_an_ordinary_grant() -> R {
+    identity_review_checks_source_scope(false).await
+}
+
+#[tokio::test]
+async fn bulk_review_needs_the_ordinary_document_scope() -> R {
+    let mut b = setup().await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let doc = lab_document(&b).await?;
+    let item = candidate(&b, Some(doc)).await?;
+    let mut sam = b.sam().await?;
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
+    let body = json!({"document_id": doc});
+    let r = sam.post("/api/review/bulk-accept", &body).await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
+    assert_eq!(
+        b.text("select status from review_item where id = $1", item).await?,
+        "open"
+    );
+
+    b.grant_sam("guardian", &["read:summary", "read:labs"]).await?;
+    let r = sam.post("/api/review/bulk-accept", &body).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["accepted"], json!([item]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn sensitive_labs_need_both_scopes_on_the_same_grant() -> R {
+    let mut b = setup().await?;
+    let profile = b.alex_id();
+    let (plain, sensitive) = {
+        let mut tx = b.env.pool().begin().await?;
+        let src = SrcRef::New(SrcIn::manual(Some(b.env.user("alex"))));
+        let plain = commit_observation(&mut tx, &lab(profile, "97", false)?, &src, CommitOptions::new("person"))
+            .await?
+            .id;
+        let sensitive = commit_observation(&mut tx, &lab(profile, "111", true)?, &src, CommitOptions::new("person"))
+            .await?
+            .id;
+        tx.commit().await?;
+        (plain, sensitive)
+    };
+    b.grant_sam("viewer", &["read:sensitive"]).await?;
+    let mut sam = b.sam().await?;
+    let endpoint = "/api/profiles/alex/observations?category=laboratory";
+    assert_eq!(sam.get(endpoint).await?.status, 403);
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
+    let r = sam.get(endpoint).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    let ids = |value: &Value| {
+        value["items"]
+            .as_array()
+            .expect("observations contains an items array")
+            .iter()
+            .map(|item| item["id"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&r.json), vec![json!(plain)]);
+    b.grant_sam("viewer", &["read:labs", "read:sensitive"]).await?;
+    let r = sam.get(endpoint).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(ids(&r.json).len(), 2);
+    assert!(ids(&r.json).contains(&json!(sensitive)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_an_emergency_read_fails_if_recording_a_use_fails() -> R {
+    let mut b = setup().await?;
+    b.grant_sam("viewer", &["read:records"]).await?;
+    let mut sam = b.sam().await?;
+    let id = b.open_for(b.env.user("sam"), &mut sam, json!(["read:summary"])).await?;
+    sqlx::raw_sql(
+        "create function reject_use() returns trigger language plpgsql as
+         $$ begin raise exception 'cannot audit this use'; end $$;
+         create trigger reject_use before insert on audit_event
+         for each row when (new.action = 'break_glass.use') execute function reject_use();",
+    )
+    .execute(b.env.pool())
+    .await?;
+    let r = sam.get("/api/profiles/alex/status").await?;
+    assert_eq!(r.status, 500, "{:?}", r.json);
+    let r = sam.post("/api/profiles/alex/calendar-feeds", &json!({})).await?;
+    assert_eq!(r.status, 201, "{:?}", r.json);
+    assert!(r.json["path"].as_str().is_some());
+    let r = sam.get("/api/profiles/alex/calendar-feeds").await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(
+        b.count(
+            "select count(*) from calendar_feed where created_by = $1",
+            b.env.user("sam")
+        )
+        .await?,
+        1
+    );
+    assert_eq!(b.uses(id).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_owner_can_see_open_requests_older_than_the_history_window() -> R {
+    let mut b = setup().await?;
+    let mut sam = b.sam().await?;
+    let active = b.open_for(b.env.user("sam"), &mut sam, json!(["read:summary"])).await?;
+    let mut carmen = b.carmen().await?;
+    assert_eq!(b.name(b.carmen_id, json!({})).await?.status, 200);
+    let pending = b.ask(&mut carmen).await?;
+    sqlx::query(
+        "insert into break_glass_request
+         (profile_id, contact_user_id, categories, reason, requested_at, activates_at, status, ended_at)
+         select $1, $2, array['read:summary'], 'Request history',
+                now() + i * interval '1 second', now() + interval '1 day', 'cancelled', now()
+         from generate_series(1, 101) as i",
+    )
+    .bind(b.alex_id())
+    .bind(b.carmen_id)
+    .execute(b.env.pool())
+    .await?;
+    let r = b.alex.get("/api/profiles/alex/break-glass").await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    let open = r.json["open_requests"]
+        .as_array()
+        .expect("open requests are separate from history");
+    assert_eq!(open.len(), 2);
+    assert!(open.iter().any(|r| r["id"] == json!(active) && r["status"] == "active"));
+    assert!(
+        open.iter()
+            .any(|r| r["id"] == json!(pending) && r["status"] == "requested")
+    );
+    let history = r.json["requests"].as_array().expect("closed requests array");
+    assert_eq!(history.len(), 100);
+    assert!(history.iter().all(|r| r["status"] == "cancelled"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn management_and_notice_reads_write_one_audit_each() -> R {
+    let mut b = setup().await?;
+    let mut carmen = b.carmen().await?;
+    let owner = b.env.user("alex");
+    for (client, endpoint, actor, tool, profile) in [
+        (
+            &mut b.alex,
+            "/api/profiles/alex/break-glass",
+            owner,
+            "break_glass.owner_view",
+            Some(b.env.profile("alex")),
+        ),
+        (&mut carmen, "/api/break-glass", b.carmen_id, "break_glass.mine", None),
+    ] {
+        assert_eq!(client.get(endpoint).await?.status, 200);
+        assert_eq!(read_audits(&b.env, actor, tool, profile).await?, 1, "{endpoint}");
+    }
+    assert_eq!(b.alex.get("/api/notifications").await?.status, 200);
+    assert_eq!(read_audits(&b.env, owner, "break_glass.notices", None).await?, 1);
+    Ok(())
+}
+
+async fn read_audits(env: &Env, actor: Uuid, tool: &str, profile: Option<Uuid>) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(
+        "select count(*) from audit_event where action = 'read' and actor_id = $1 and tool = $2
+         and profile_id is not distinct from $3",
+    )
+    .bind(actor)
+    .bind(tool)
+    .bind(profile)
+    .fetch_one(env.pool())
+    .await?)
+}
+
+#[tokio::test]
+async fn me_counts_only_profiles_the_caller_can_review() -> R {
+    let mut b = setup().await?;
+    candidate(&b, None).await?;
+    let mut carmen = b.carmen().await?;
+    b.open_for(b.carmen_id, &mut carmen, json!(["read:summary"])).await?;
+    let mut sam = b.sam().await?;
+    for who in [&mut carmen, &mut sam] {
+        let me = who.get("/api/me").await?;
+        let review = who.get("/api/review").await?;
+        assert_eq!(me.status, 200, "{:?}", me.json);
+        assert_eq!(review.status, 200, "{:?}", review.json);
+        assert_eq!(review.json["open"], 0);
+        assert_eq!(me.json["review_open"], 0);
+    }
+    b.grant_sam("guardian", &["read:labs"]).await?;
+    assert_eq!(sam.get("/api/me").await?.json["review_open"], 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn denial_suggests_ordinary_profiles_and_a_valid_emergency_slug_still_reads() -> R {
+    let mut b = setup().await?;
+    let mut carmen = b.carmen().await?;
+    let id = b.open_for(b.carmen_id, &mut carmen, json!(["read:summary"])).await?;
+    let unknown = carmen.get("/api/profiles/unknown/status").await?;
+    assert_eq!((unknown.status.as_u16(), unknown.code()), (404, "profile_not_granted"));
+    assert_eq!(unknown.json["detail"]["allowed"], json!(["carmen"]));
+    assert_eq!(b.uses(id).await?, 0);
+    assert!(b.reads(&mut carmen).await?);
+    assert_eq!(b.uses(id).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unread_request_and_activation_notices_outlast_the_recent_use_window() -> R {
+    let mut b = setup().await?;
+    let mut carmen = b.carmen().await?;
+    let request = b.open_for(b.carmen_id, &mut carmen, json!(["read:summary"])).await?;
+    sqlx::query(
+        "insert into notification_outbox (user_id, profile_id, kind, request_id, created_at)
+         select $1, $2, 'break_glass.use', $3, now() + i * interval '1 second'
+         from generate_series(1, 201) as i",
+    )
+    .bind(b.env.user("alex"))
+    .bind(b.alex_id())
+    .bind(request)
+    .execute(b.env.pool())
+    .await?;
+    let r = b.alex.get("/api/notifications").await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["unread"], 203);
+    let notices = r.json["items"].as_array().expect("notification items array");
+    let priority_ids: Vec<_> = notices
+        .iter()
+        .filter(|n| n["kind"] != "break_glass.use")
+        .map(|n| n["id"].clone())
+        .collect();
+    assert_eq!(priority_ids.len(), 2);
+    assert_eq!(notices.iter().filter(|n| n["kind"] == "break_glass.use").count(), 200);
+    let r = b
+        .alex
+        .post("/api/notifications/read", &json!({"ids": priority_ids}))
+        .await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["read"], 2);
+    let r = b.alex.get("/api/notifications").await?;
+    assert_eq!(r.json["items"].as_array().expect("notification items array").len(), 200);
     Ok(())
 }

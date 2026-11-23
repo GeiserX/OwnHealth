@@ -162,7 +162,7 @@ impl Doc {
 
     /// A change to this document (a move, a retraction): the role's `action`, and the scope the
     /// document needs on the caller's own grant, since emergency access only reads.
-    fn may_change(&self, action: &str, refused: &str) -> Result<(), ApiError> {
+    pub(super) fn may_change(&self, action: &str, refused: &str) -> Result<(), ApiError> {
         if !self.perm.can(action) {
             let msg = format!("The role {} cannot {refused}.", self.perm.role);
             return Err(Error::access_denied("forbidden", msg).into());
@@ -207,12 +207,14 @@ pub async fn visible_document(
     };
     let doc_type = json_row.get("doc_type").and_then(Value::as_str);
     let cgm = json_row.get("flags").and_then(|f| f.get("cgm_csv")).is_some();
-    for scope in [Some(scope_for(doc_type, cgm)), scope_extra].into_iter().flatten() {
-        if !perm.scopes.contains(scope) {
+    let doc_scope = scope_for(doc_type, cgm);
+    for scope in [Some(doc_scope), scope_extra].into_iter().flatten() {
+        if !perm.has(scope) {
             return Err(Error::access_denied("insufficient_scope", format!("This needs {scope}.")).into());
         }
+        perm.record_read(&[scope]);
     }
-    if content && !perm.has("read:sensitive") && document_is_sensitive(&mut *conn, document_id).await? {
+    if content && !perm.may_read_sensitive(doc_scope) && document_is_sensitive(&mut *conn, document_id).await? {
         return Err(Error::access_denied(
             "insufficient_scope",
             "This document holds sensitive results; it needs read:sensitive.",
@@ -240,10 +242,15 @@ pub async fn file_opens(conn: &mut PgConnection, perm: &Permission, document_id:
     let Some((doc_type, cgm)) = row else {
         return Ok(false);
     };
-    if !perm.scopes.contains(scope_for(doc_type.as_deref(), cgm)) {
+    let scope = scope_for(doc_type.as_deref(), cgm);
+    if !perm.has(scope) {
         return Ok(false);
     }
-    Ok(perm.has("read:sensitive") || !document_is_sensitive(conn, document_id).await?)
+    let visible = perm.may_read_sensitive(scope) || !document_is_sensitive(conn, document_id).await?;
+    if visible {
+        perm.record_read(&[scope]);
+    }
+    Ok(visible)
 }
 
 fn hex(b: &[u8]) -> String {
@@ -287,15 +294,19 @@ pub async fn list_for(
         )
         .into());
     }
+    perm.record_read(&["read:labs", "read:records", "read:wearables"]);
     let q = q.filter(|q| !q.is_empty());
     let with_text = q.is_some() && perm.has("read:documents_text");
     // without read:sensitive, the page text of a sensitive document neither matches nor is quoted,
     // the rule visible_document applies to its file, renders and words
-    let text_ok = if perm.has("read:sensitive") {
-        "true".to_string()
-    } else {
-        format!("not {}", sensitive_document_sql("d.id"))
-    };
+    let text_ok = format!(
+        "(case when {CGM_SQL} or d.doc_type = '{WEARABLES_DOC_TYPE}' then {}
+         when d.doc_type = 'lab_report' then {} else {} end or not {})",
+        perm.may_read_sensitive("read:wearables"),
+        perm.may_read_sensitive("read:labs"),
+        perm.may_read_sensitive("read:records"),
+        sensitive_document_sql("d.id"),
+    );
     let mut wh = vec!["d.profile_id = $1".to_string()];
     // each type under the scope it needs (scope_for): a wearables export, or any document with CGM
     // import flags, only with read:wearables

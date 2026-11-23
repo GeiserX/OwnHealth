@@ -49,7 +49,7 @@ pub fn profile_summary(perm: &Permission, principal: &Principal, on: NaiveDate, 
         .filter_map(|w| w.chars().next())
         .collect::<String>()
         .to_uppercase();
-    let mut scopes: Vec<&String> = perm.scopes.iter().collect();
+    let mut scopes: Vec<&String> = perm.read_scopes().iter().collect();
     scopes.sort();
     json!({
         "id": p.id,
@@ -122,7 +122,7 @@ async fn me(State(rt): State<Runtime>, caller: crate::Caller) -> Result<Json<Val
     .ok_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "Internal error."))?;
     let household_id: Uuid = user.try_get("household_id")?;
     let perms = accessible_profiles(&mut tx, principal).await?;
-    let pids: Vec<Uuid> = perms.iter().map(|p| p.profile.id).collect();
+    let pids: Vec<Uuid> = perms.iter().filter(|p| p.can("review")).map(|p| p.profile.id).collect();
     let open = review::count_open(&mut tx, household_id, Some(&pids)).await?;
     let aom = majority(&mut tx, household_id).await?;
     tx.commit().await?;
@@ -193,6 +193,7 @@ async fn source(
         Some(_) => return Err(unknown_source()),
         None => {}
     }
+    perm.read_scopes();
     let s = &resolved.src;
     let document_id = s
         .get("document_id")

@@ -524,17 +524,22 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>) 
     ok(json!({"items": rows.iter().map(feed_out).collect::<Vec<_>>()}))
 }
 
+/// Feed changes require the same grant the feed itself reads with.
+async fn editable_feed(tx: &mut PgConnection, caller: &Caller, profile: &str) -> R<Permission> {
+    Ok(crate::routes::break_glass::own(
+        caller.require(tx, profile, Some("read:records"), None).await?,
+        "read:records",
+        "Changing a calendar feed needs read:records on your own grant.",
+    )?)
+}
+
 /// The plaintext is in this answer and nowhere else, ever.
 async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>, Body(b): Body<DetailIn>) -> R {
     check_detail(&b.detail)?;
     let mut tx = rt.pool.begin().await?;
     // a feed reads as its creator with no browser session, so emergency access never reaches it: it
     // needs read:records on the creator's own grant
-    let perm = crate::routes::break_glass::own(
-        caller.require(&mut tx, &p, Some("read:records"), None).await?,
-        "read:records",
-        "Emergency access cannot make a calendar feed.",
-    )?;
+    let perm = editable_feed(&mut tx, &caller, &p).await?;
     sessions::require_step_up(&mut tx, &caller.0, sessions::STEP_UP_SECONDS).await?;
     let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
     let prefix = format!("{PREFIX}{}", ownhealth_core::ids::short(8));
@@ -591,7 +596,7 @@ async fn set_detail(
 ) -> R {
     check_detail(&b.detail)?;
     let mut tx = rt.pool.begin().await?;
-    let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
+    let perm = editable_feed(&mut tx, &caller, &p).await?;
     let id = own(&mut tx, &perm, caller.0.user_id, &id).await?;
     if b.detail == "named" {
         sessions::require_step_up(&mut tx, &caller.0, sessions::STEP_UP_SECONDS).await?;
@@ -619,7 +624,7 @@ async fn set_detail(
 /// Revoking only takes access away, so it needs no step-up.
 async fn revoke(State(rt): State<Runtime>, caller: Caller, Path((p, id)): Path<(String, String)>) -> R {
     let mut tx = rt.pool.begin().await?;
-    let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
+    let perm = editable_feed(&mut tx, &caller, &p).await?;
     let id = own(&mut tx, &perm, caller.0.user_id, &id).await?;
     sqlx::query("update calendar_feed set revoked_at = now() where id = $1")
         .bind(id)

@@ -489,7 +489,11 @@ pub async fn relatives(
     for (id, relationship, sex, conditions, src, linked) in rows {
         if let Some(linked) = linked {
             let readable = match effective_permission(&mut *conn, principal, linked).await {
-                Ok(perm) => perm.has("read:records"),
+                Ok(perm) if perm.has("read:records") => {
+                    perm.record_read(&["read:records"]);
+                    true
+                }
+                Ok(_) => false,
                 Err(ownhealth_core::Error::AccessDenied { .. }) => false,
                 Err(e) => return Err(e),
             };

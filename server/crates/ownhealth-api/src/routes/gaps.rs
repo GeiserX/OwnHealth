@@ -61,7 +61,7 @@ async fn get_gaps(
     e.resource_ids = Some(vec![doc["gaps_hash"].as_str().unwrap_or_default().to_string()]);
     write_audit(&mut tx, &e).await?;
     tx.commit().await?;
-    ok(gaps::render(&doc, lang.unwrap_or(&c.lang), &perm.scopes)?)
+    ok(gaps::render(&doc, lang.unwrap_or(&c.lang), perm.read_scopes())?)
 }
 
 async fn get_letter(

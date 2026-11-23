@@ -160,7 +160,6 @@ pub async fn hidden_reasons(
             hide(out, sid, Why::Scope(scope_label(scope)));
         }
     };
-    let sensitive_ok = perm.scopes.contains("read:sensitive");
     let foreign = |p: Option<Uuid>| p.is_some_and(|p| p != pid);
 
     let rows: Vec<(String, String, Option<Uuid>)> =
@@ -186,8 +185,9 @@ pub async fn hidden_reasons(
         if profile_id != pid {
             hide(&mut out, &sid, Why::Foreign);
         }
-        need(&mut out, &sid, obs_category_scope(Some(&category)));
-        if !sensitivity.is_empty() && !sensitive_ok {
+        let scope = obs_category_scope(Some(&category));
+        need(&mut out, &sid, scope);
+        if !sensitivity.is_empty() && !perm.may_read_sensitive(scope) {
             hide(&mut out, &sid, Why::Sensitive);
         }
     }
@@ -208,7 +208,7 @@ pub async fn hidden_reasons(
                 hide(&mut out, &sid, Why::Foreign);
             }
             need(&mut out, &sid, "read:records");
-            if !sensitivity.is_empty() && !sensitive_ok {
+            if !sensitivity.is_empty() && !perm.may_read_sensitive("read:records") {
                 hide(&mut out, &sid, Why::Sensitive);
             }
         }
@@ -224,7 +224,7 @@ pub async fn hidden_reasons(
             hide(&mut out, &sid, Why::Foreign);
         }
         need(&mut out, &sid, "read:summary");
-        if !sensitivity.is_empty() && !sensitive_ok {
+        if !sensitivity.is_empty() && !perm.may_read_sensitive("read:summary") {
             hide(&mut out, &sid, Why::Sensitive);
         }
     }

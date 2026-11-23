@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! the owner (manage_grants on {p})
-//! GET    /api/profiles/{p}/break-glass                              contacts, requests, calendar_feed
+//! GET    /api/profiles/{p}/break-glass                              contacts, open_requests, requests, calendar_feed
 //! PUT    /api/profiles/{p}/break-glass/contacts/{user}  + step-up   {categories?, delay_hours?}
 //! DELETE /api/profiles/{p}/break-glass/contacts/{user}              also ends their open request
 //! POST   /api/profiles/{p}/break-glass/requests/{id}/cancel         a requested one
@@ -125,6 +125,22 @@ async fn one(conn: &mut PgConnection, id: Uuid) -> R<Value> {
     Ok(request_out(&l, now))
 }
 
+async fn audit_read(
+    conn: &mut PgConnection,
+    caller: &Caller,
+    tool: &str,
+    resource_type: &str,
+    profile: Option<Uuid>,
+) -> R<()> {
+    let mut e = AuditEvent::new(caller.0.actor_kind(), "ui", "read");
+    e.actor_id = caller.0.user_id;
+    e.tool = Some(tool.into());
+    e.profile_id = profile;
+    e.resource_type = Some(resource_type.into());
+    write_audit(conn, &e).await?;
+    Ok(())
+}
+
 fn no_feed(whose: &str) -> ApiError {
     ApiError::new(
         StatusCode::CONFLICT,
@@ -156,19 +172,36 @@ async fn owner_view(State(rt): State<Runtime>, caller: Caller, Path(p): Path<Str
     .bind(perm.profile.id)
     .fetch_all(&mut *tx)
     .await?;
+    // Use one snapshot for both lists so a request that closes mid-read appears once.
+    let open = listed_sql("r.profile_id = $1 and r.status in ('requested', 'active')");
+    let closed = listed_sql(
+        "r.profile_id = $1 and r.status in ('cancelled', 'expired', 'revoked')
+         order by r.requested_at desc, r.id limit 100",
+    );
     let requests: Vec<Listed> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{} order by r.requested_at desc, r.id limit 100",
-        listed_sql("r.profile_id = $1")
+        "({open}) union all ({closed}) order by requested_at desc, id"
     )))
     .bind(perm.profile.id)
     .fetch_all(&mut *tx)
     .await?;
     let feed = bg::owner_feed_live(&mut tx, perm.profile.id, caller.0.user_id).await?;
     let now = db_now(&mut tx).await?;
+    let (open, closed): (Vec<_>, Vec<_>) = requests
+        .iter()
+        .partition(|l| matches!(l.r.status.as_str(), "requested" | "active"));
+    audit_read(
+        &mut tx,
+        &caller,
+        "break_glass.owner_view",
+        "break_glass_request",
+        Some(perm.profile.id),
+    )
+    .await?;
     tx.commit().await?;
     ok(json!({
         "contacts": contacts.iter().map(contact_out).collect::<Vec<_>>(),
-        "requests": requests.iter().map(|l| request_out(l, now)).collect::<Vec<_>>(),
+        "open_requests": open.into_iter().map(|l| request_out(l, now)).collect::<Vec<_>>(),
+        "requests": closed.into_iter().map(|l| request_out(l, now)).collect::<Vec<_>>(),
         "calendar_feed": feed,
         "defaults": {"categories": DEFAULT_CATEGORIES, "delay_hours": DEFAULT_DELAY_HOURS,
                      "min_delay_hours": MIN_DELAY_HOURS, "max_delay_hours": MAX_DELAY_HOURS,
@@ -332,22 +365,24 @@ type Named = (Uuid, String, String, Vec<String>, i32);
 
 async fn mine(State(rt): State<Runtime>, caller: Caller) -> R {
     let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
-    let mut conn = rt.pool.acquire().await?;
+    let mut tx = rt.pool.begin().await?;
     let named: Vec<Named> = sqlx::query_as(
         "select p.id, p.slug, p.display_name, c.categories, c.delay_hours from break_glass_contact c \
          join profile p on p.id = c.profile_id where c.contact_user_id = $1 order by p.slug",
     )
     .bind(user)
-    .fetch_all(&mut *conn)
+    .fetch_all(&mut *tx)
     .await?;
     let last: Vec<Listed> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "select distinct on (r.profile_id) * from ({}) r order by r.profile_id, r.requested_at desc",
         listed_sql("r.contact_user_id = $1")
     )))
     .bind(user)
-    .fetch_all(&mut *conn)
+    .fetch_all(&mut *tx)
     .await?;
-    let now = db_now(&mut conn).await?;
+    let now = db_now(&mut tx).await?;
+    audit_read(&mut tx, &caller, "break_glass.mine", "break_glass_request", None).await?;
+    tx.commit().await?;
     let items: Vec<Value> = named
         .iter()
         .map(|n| {
@@ -437,21 +472,29 @@ type Notice = (
 
 async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
     let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
-    let mut conn = rt.pool.acquire().await?;
+    let mut tx = rt.pool.begin().await?;
     let rows: Vec<Notice> = sqlx::query_as(
-        "select n.id, n.kind, p.id, p.slug, p.display_name, n.request_id, n.actor_id, a.display_name, \
-         n.created_at, n.read_at from notification_outbox n join profile p on p.id = n.profile_id \
-         left join app_user a on a.id = n.actor_id where n.user_id = $1 \
-         order by n.created_at desc, n.id limit 200",
+        "with visible as (
+             (select id from notification_outbox where user_id = $1 order by created_at desc, id limit 200)
+             union
+             select id from notification_outbox where user_id = $1 and read_at is null
+             and kind in ('break_glass.request', 'break_glass.activate')
+         )
+         select n.id, n.kind, p.id, p.slug, p.display_name, n.request_id, n.actor_id, a.display_name,
+                n.created_at, n.read_at
+         from visible v join notification_outbox n on n.id = v.id join profile p on p.id = n.profile_id
+         left join app_user a on a.id = n.actor_id order by n.created_at desc, n.id",
     )
     .bind(user)
-    .fetch_all(&mut *conn)
+    .fetch_all(&mut *tx)
     .await?;
     let unread: i64 =
         sqlx::query_scalar("select count(*) from notification_outbox where user_id = $1 and read_at is null")
             .bind(user)
-            .fetch_one(&mut *conn)
+            .fetch_one(&mut *tx)
             .await?;
+    audit_read(&mut tx, &caller, "break_glass.notices", "notification_outbox", None).await?;
+    tx.commit().await?;
     let items: Vec<Value> = rows
         .iter()
         .map(|n| {

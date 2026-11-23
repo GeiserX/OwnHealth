@@ -35,7 +35,7 @@ pub async fn drug_check(rt: &Runtime, principal: &Principal, p: &str, drug: &str
         ));
     }
     let lang = lang.filter(|l| !l.is_empty()).unwrap_or(&principal.lang);
-    let out = match ownhealth_rules::check_drug(&mut tx, perm.profile.id, drug, &perm.scopes, lang, None).await {
+    let out = match ownhealth_rules::check_drug(&mut tx, perm.profile.id, drug, perm.read_scopes(), lang, None).await {
         Err(Error::NotFound(_)) => {
             return Err(detail(
                 StatusCode::NOT_FOUND,

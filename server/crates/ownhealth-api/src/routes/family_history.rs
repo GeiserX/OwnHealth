@@ -103,9 +103,13 @@ async fn readable(
     conn: &mut PgConnection,
     principal: &Principal,
     profile_id: Uuid,
+    include_emergency: bool,
 ) -> Result<Option<(String, String)>, ApiError> {
     Ok(match effective_permission(conn, principal, profile_id).await {
-        Ok(perm) if perm.has("read:records") => Some((perm.profile.slug, perm.profile.display_name)),
+        Ok(perm) if perm.own_scopes.contains("read:records") || (include_emergency && perm.has("read:records")) => {
+            perm.record_read(&["read:records"]);
+            Some((perm.profile.slug, perm.profile.display_name))
+        }
         Ok(_) | Err(ownhealth_core::Error::AccessDenied { .. }) => None,
         Err(e) => return Err(e.into()),
     })
@@ -164,7 +168,7 @@ async fn shown(conn: &mut PgConnection, principal: &Principal, perm: &Permission
     let mut out = Vec::with_capacity(rows.len());
     for member in rows {
         let linked = match member.linked_profile_id {
-            Some(id) => readable(&mut *conn, principal, id).await?,
+            Some(id) => readable(&mut *conn, principal, id, true).await?,
             None => None,
         };
         out.push(Shown { member, linked });
@@ -214,7 +218,7 @@ async fn link_target(conn: &mut PgConnection, principal: &Principal, v: &Value) 
             .map(|p| p.profile.id)
             .ok_or_else(refused)?,
     };
-    readable(conn, principal, id).await?.ok_or_else(refused)?;
+    readable(conn, principal, id, false).await?.ok_or_else(refused)?;
     Ok(Some(id))
 }
 
@@ -282,7 +286,7 @@ async fn editable(
     }
     if let Some(l) = m.linked_profile_id
         && !masked_ok
-        && readable(&mut *conn, principal, l).await?.is_none()
+        && readable(&mut *conn, principal, l, false).await?.is_none()
     {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -296,7 +300,7 @@ async fn editable(
 async fn one(conn: &mut PgConnection, principal: &Principal, id: Uuid) -> Result<Value, ApiError> {
     let member = family::get(&mut *conn, id).await?.ok_or_else(unknown)?;
     let linked = match member.linked_profile_id {
-        Some(l) => readable(&mut *conn, principal, l).await?,
+        Some(l) => readable(&mut *conn, principal, l, false).await?,
         None => None,
     };
     Ok(Shown { member, linked }.out())
@@ -435,7 +439,7 @@ async fn pedigree(State(rt): State<Runtime>, caller: Caller, Path(p): Path<Strin
     let today = ownhealth_core::access::today_utc();
     // the guideline patterns of these same relatives (ownhealth.family/v1), for the patterns card
     let patterns =
-        ownhealth_rules::family::build_document(&mut tx, &caller.0, &perm.profile, &perm.scopes, today).await?;
+        ownhealth_rules::family::build_document(&mut tx, &caller.0, &perm.profile, perm.read_scopes(), today).await?;
     tx.commit().await?;
     // the audit chain links a row at commit, which a repeatable read snapshot cannot do, so the row
     // goes in its own transaction, stamped with the start of the read
@@ -592,7 +596,10 @@ async fn share_view(
     profile_id: Uuid,
 ) -> Result<Option<(bool, bool)>, ApiError> {
     Ok(match effective_permission(conn, principal, profile_id).await {
-        Ok(perm) => Some((perm.has("read:records"), perm.has("read:sensitive"))),
+        Ok(perm) => {
+            perm.record_read(&["read:records", "read:sensitive"]);
+            Some((perm.has("read:records"), perm.has("read:sensitive")))
+        }
         Err(ownhealth_core::Error::AccessDenied { .. }) => None,
         Err(e) => return Err(e.into()),
     })
@@ -605,9 +612,10 @@ async fn target_label(
     principal: &Principal,
     target: &ownhealth_core::access::Profile,
 ) -> Result<String, ApiError> {
-    Ok(match share_view(conn, principal, target.id).await? {
-        Some(_) => target.slug.clone(),
-        None => target.id.to_string(),
+    Ok(match effective_permission(conn, principal, target.id).await {
+        Ok(perm) if perm.has_ordinary_grant => target.slug.clone(),
+        Ok(_) | Err(ownhealth_core::Error::AccessDenied { .. }) => target.id.to_string(),
+        Err(e) => return Err(e.into()),
     })
 }
 

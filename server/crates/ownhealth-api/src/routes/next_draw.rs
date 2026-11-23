@@ -44,7 +44,7 @@ async fn rendered(
     let perm = Caller(principal.clone())
         .require(&mut *tx, p, Some("read:labs"), None)
         .await?;
-    let plan = next_draw::build_for(&mut *tx, perm.profile.id, as_of, &perm.scopes).await?;
+    let plan = next_draw::build_for(&mut *tx, perm.profile.id, as_of, perm.read_scopes()).await?;
     let pack = ownhealth_rules::load_pack().map_err(ownhealth_core::Error::from)?;
     Ok((next_draw::render(&plan, &pack, lang)?, perm))
 }

@@ -699,6 +699,9 @@ async fn timeline(
         )));
     }
     let want: BTreeSet<&str> = asked.iter().copied().filter(|k| perm.has(scope(k))).collect();
+    for kind in &want {
+        perm.record_read(&[scope(kind)]);
+    }
     let withheld: Vec<&str> = asked.difference(&want).copied().collect();
     let t = ownhealth_core::langs::pick(WORDS, lang);
     let sens = perm.has("read:sensitive");
@@ -706,7 +709,7 @@ async fn timeline(
 
     let mut events: Vec<Option<Event>> = Vec::new();
     if want.contains("lab") {
-        events.extend(labs(&mut tx, pid, sens, t).await?);
+        events.extend(labs(&mut tx, pid, perm.may_read_sensitive("read:labs"), t).await?);
     }
     events.extend(records(&mut tx, pid, sens, t, &want).await?);
     if want.contains("genome") {
