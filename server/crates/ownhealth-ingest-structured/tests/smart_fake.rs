@@ -1928,6 +1928,48 @@ async fn search_results_skip_a_foreign_patient_entry() -> R {
 }
 
 #[tokio::test]
+async fn search_results_skip_medication_returned_without_an_include() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/MedicationRequest.s".into(),
+        ..Behaviour::default()
+    })
+    .await?;
+    let medicine = two_named_medicines()
+        .into_iter()
+        .find(|r| r["resourceType"] == "Medication")
+        .expect("a Medication fixture");
+    w.fake.book().extra_search_entries.push((
+        "MedicationRequest",
+        json!({"resource": medicine, "search": {"mode": "include"}}),
+    ));
+    let source = w.connect(t0()).await?;
+    let got = w
+        .day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(
+        w.searched_since(0).await,
+        [
+            format!("Patient/{PATIENT}"),
+            "MedicationRequest?intent=order,plan".into()
+        ]
+        .into()
+    );
+    // Eight US Core types are outside the grant, plus the unsolicited Medication.
+    assert_eq!(got.skipped.get("not_granted"), Some(&9), "{got:?}");
+    let bundle = w.stored_bundle(source).await?;
+    let entries = bundle["entry"].as_array().expect("the snapshot has entries");
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry["resource"]["resourceType"] == "Medication"),
+        "{got:?}"
+    );
+    assert_eq!(w.medication_reads(), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_server_that_rejects_status_lists_gets_one_search_per_status() -> R {
     let w = world(Behaviour {
         scope: "patient/Patient.r patient/Condition.s".into(),
