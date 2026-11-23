@@ -1045,7 +1045,10 @@ async fn an_archives_profile_key_must_match_its_files() -> R {
 
     // Older manifests have only the profile list. Keep their UUID-based selection.
     let mut older = manifest(&l.archive)?;
-    older["keys"].as_object_mut().unwrap().remove("key_ids");
+    older["keys"]
+        .as_object_mut()
+        .expect("backup has key facts")
+        .shift_remove("key_ids");
     write_manifest(&l.archive, &older)?;
     let report = ownhealth_ops::verify_restore(&l.settings, &l.archive).await?;
     assert_eq!(report["ok"], true, "{report:#}");
@@ -1091,8 +1094,8 @@ async fn a_damaged_present_key_is_rejected_before_restore_even_with_allow_missin
     let l = live().await?;
     let original = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
     let mut ring = original.clone();
-    let wrapped = ring.profiles.get_mut(&l.alex).unwrap();
-    *wrapped.last_mut().unwrap() ^= 1;
+    let wrapped = ring.profiles.get_mut(&l.alex).expect("backup wrote Alex's key");
+    *wrapped.last_mut().expect("wrapped key contains an authentication tag") ^= 1;
     keyfile::write(&l.settings.keyring_path(), &ring)?;
     let (db, fresh) = fresh(&l).await?;
     let err = err_text(ownhealth_ops::restore_with(&fresh, &l.archive, true).await);
@@ -1167,9 +1170,9 @@ async fn a_legacy_dump_obeys_tombstones_and_keeps_its_other_profile_keys() -> R 
         .output()?;
     assert!(dump.status.success(), "{}", String::from_utf8_lossy(&dump.stderr));
     let mut m = manifest(&l.archive)?;
-    let facts = m["keys"].as_object_mut().unwrap();
-    facts.remove("keyring");
-    facts.remove("key_ids");
+    let facts = m["keys"].as_object_mut().expect("backup has key facts");
+    facts.shift_remove("keyring");
+    facts.shift_remove("key_ids");
     m["tables"]["profile_key"] = serde_json::json!(original.profiles.len());
     write_manifest(&l.archive, &m)?;
 
