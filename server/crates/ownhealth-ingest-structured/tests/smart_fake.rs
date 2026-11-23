@@ -1101,8 +1101,19 @@ async fn a_failed_search_is_a_problem_and_the_rest_still_arrives() -> R {
 
 #[tokio::test]
 async fn a_next_page_on_another_host_is_not_read() -> R {
+    // the other host is a second local listener (another port is another host): it must hear nothing
+    let elsewhere = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://127.0.0.1:{}", elsewhere.local_addr()?.port());
+    let heard = Arc::new(Mutex::new(0usize));
+    let ears = heard.clone();
+    let listening = tokio::spawn(async move {
+        while let Ok((socket, _)) = elsewhere.accept().await {
+            *lock(&ears) += 1;
+            drop(socket);
+        }
+    });
     let w = world(Behaviour {
-        next_origin: Some("http://fhir.elsewhere.example".into()),
+        next_origin: Some(origin),
         ..Behaviour::default()
     })
     .await?;
@@ -1121,6 +1132,8 @@ async fn a_next_page_on_another_host_is_not_read() -> R {
         .collect();
     assert_eq!(undeclared.len(), 1, "{:?}", got.problems);
     assert!(undeclared[0].contains("MedicationRequest"), "{undeclared:?}");
+    assert_eq!(*lock(&heard), 0, "the undeclared host was asked");
+    listening.abort();
     Ok(())
 }
 
@@ -1359,6 +1372,32 @@ async fn a_server_that_refuses_every_token_gets_one_refresh_and_the_run_ends() -
     assert!(e.contains("patient_unread") && e.contains("401"), "{e}");
     let book = w.fake.book();
     assert_eq!((book.refreshes, book.unauthorized), (1, 2));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_grant_without_a_patient_read_searches_nothing_and_stores_nothing() -> R {
+    // Sam left Patient out at the consent screen: nothing could show the record is Sam's
+    for scope in [
+        "launch/patient offline_access patient/Observation.rs patient/Condition.rs",
+        // a v2 search letter on Patient is not a read
+        "launch/patient offline_access patient/Patient.s patient/Observation.rs patient/Condition.rs",
+    ] {
+        let w = world(Behaviour {
+            scope: scope.into(),
+            ..Behaviour::default()
+        })
+        .await?;
+        let source = w.connect(t0()).await?;
+        let e = w
+            .day(source, t0() + Duration::minutes(1))
+            .await?
+            .expect_err("the pull stops");
+        assert!(e.contains("patient_not_granted"), "{scope}: {e}");
+        assert!(w.searched_since(0).await.is_empty(), "{scope}");
+        assert_eq!(w.documents(source).await?.len(), 0, "{scope}");
+        assert_eq!(w.open_items_of(w.sam()).await?.len(), 0, "{scope}");
+    }
     Ok(())
 }
 
