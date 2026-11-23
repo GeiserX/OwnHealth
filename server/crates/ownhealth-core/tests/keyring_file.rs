@@ -275,6 +275,10 @@ async fn a_keyring_path_with_parent_traversal_cannot_land_inside_blobs() -> R {
     fs::create_dir(settings.blobs_path())?;
     settings.keyring_dir = Some(dir.path().join("other/../blobs/keyring"));
     assert!(keyfile::check_folder(&settings).is_err());
+    // a '..' after a folder that does not exist yet cannot be resolved: refused, never guessed
+    settings.keyring_dir = Some(dir.path().join("nope/../blobs/keyring"));
+    let err = keyfile::check_folder(&settings).err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(err.contains("'..'"), "{err}");
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(settings.blobs_path(), dir.path().join("blob-alias"))?;
@@ -326,5 +330,25 @@ async fn a_keyring_tombstone_outlives_a_live_row_from_another_database() -> R {
     assert!(ring.shredded.contains(&p));
     assert!(!ring.profiles.contains_key(&p));
     assert_eq!(ring.profiles[&survivor], survivor_key);
+    Ok(())
+}
+
+/// OWNHEALTH_KEYRING_DIR may name its folder through '..' (`<data>/../keyring`): the server starts with
+/// it, so a delete must be able to rewrite the keyring there too, not leave the key in the file.
+#[tokio::test]
+async fn a_keyring_folder_named_through_a_parent_directory_is_rewritten() -> R {
+    let (db, dir, mut settings, kek) = setup().await?;
+    fs::create_dir_all(dir.path().join("data"))?;
+    settings.keyring_dir = Some(dir.path().join("data/../keyring"));
+    let sam = Uuid::new_v4();
+    assert!(Keyring::new(kek, db.url.clone()).dek(sam, true)?.is_some());
+    let ring = rewrite(&db, &settings).await?;
+    assert!(ring.profiles.contains_key(&sam));
+    let mut tx = db.pool.begin().await?;
+    shred(&mut tx, sam).await?;
+    tx.commit().await?;
+    let ring = rewrite(&db, &settings).await?;
+    assert!(!ring.profiles.contains_key(&sam) && ring.shredded.contains(&sam));
+    assert_eq!(keyfile::read(&dir.path().join("keyring").join(keyfile::FILE))?, Some(ring));
     Ok(())
 }

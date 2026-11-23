@@ -152,13 +152,10 @@ fn refused(path: &Path, why: &str) -> KeyError {
     ))
 }
 
-/// Resolve symlinks in the existing part of the path. The last directories may not exist yet.
+/// Resolve symlinks and '..' in the existing part of the path, as the system does when it opens it.
+/// The last directories may not exist yet; a '..' among those cannot be resolved and is refused.
 fn resolved(path: &Path) -> io::Result<PathBuf> {
     let absolute = std::path::absolute(path)?;
-    if absolute.components().any(|part| part == Component::ParentDir) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "use a path without '..'"));
-    }
-
     let mut ancestor = absolute.as_path();
     let mut missing = Vec::new();
     loop {
@@ -172,6 +169,12 @@ fn resolved(path: &Path) -> io::Result<PathBuf> {
                 match fs::symlink_metadata(ancestor) {
                     Err(missing) if missing.kind() == io::ErrorKind::NotFound => {}
                     _ => return Err(e),
+                }
+                if ancestor.components().next_back() == Some(Component::ParentDir) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "a '..' follows a folder that does not exist: use a path without '..' there",
+                    ));
                 }
                 let Some((parent, name)) = ancestor.parent().zip(ancestor.file_name()) else {
                     return Err(e);
