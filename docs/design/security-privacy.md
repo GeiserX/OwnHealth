@@ -182,7 +182,7 @@ The browser session acts as a token with all scopes, so the same function decide
 | `caregiver` | Read and import for an adult who granted it (an elderly parent) | Grants, export, delete, `read:sensitive` unless granted |
 | `viewer` | Read the categories granted | Write, export |
 
-A profile without a login (a minor, an elderly parent) is managed through `guardian` or `caregiver` grants until its person claims it. Default categories per role are in [mcp.md §2.4](mcp.md#24-family-grants). Break-glass (section 6.5) adds a time-boxed grant row; it is not a fifth role.
+A profile without a login (a minor, an elderly parent) is managed through `guardian` or `caregiver` grants until its person claims it. Default categories per role are in [mcp.md §2.4](mcp.md#24-family-grants). Break-glass (section 6.5) is not a fifth role and adds no grant row: an open emergency request is joined to the contact's own grant in their browser session only.
 
 ### 6.3 Scopes
 
@@ -205,21 +205,22 @@ A profile without a login (a minor, an elderly parent) is managed through `guard
 
 For a family member who is hospitalised, unconscious or dead.
 
-1. The owner pre-designates emergency contacts and what they would see (default: summary, records, labs, medications; not `read:sensitive`, not genome raw). Designating a contact needs an active calendar feed.
-2. A contact requests access with a reason.
-3. The owner is notified at once and can reject. If not rejected within the delay (default 48 hours, configurable 12 to 168), a read-only grant opens for 14 days, once the owner's calendar feed has been fetched since the request; until then the request stays requested.
-4. Every step and every read during the grant is in the audit log, shown to the owner at next login.
+1. The owner pre-designates emergency contacts (`break_glass_contact`) and what they would see (default: summary, records, labs; never `read:sensitive`, genome raw or a write). Designating a contact needs an active calendar feed.
+2. A contact requests access with a reason (`break_glass_request`, status `requested`).
+3. The owner is told at once, through the calendar feed and an in-app notice, and can cancel. If not cancelled within the delay (default 48 hours, configurable 12 to 168), the request turns `active` for 14 days, once the owner's calendar feed has served it since the request; until then it stays `requested`.
+4. While active, the request is joined to the contact's own grant in their browser session only, read-only. No grant row is written, so the contact's own grant is unchanged when the request ends. Tokens, OAuth consents, calendar feeds, share links, exports and the imaging viewer never get it.
+5. Every step and every read during the request is in the audit log and in the owner's notices, shown at next login.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Requested: contact asks
-  Requested --> Rejected: owner rejects
-  Requested --> Active: delay passed and feed fetched
-  Active --> Expired: 14 days
-  Active --> Revoked: owner revokes
-  Rejected --> [*]
-  Expired --> [*]
-  Revoked --> [*]
+  [*] --> requested: contact asks
+  requested --> cancelled: owner cancels, or removes the contact
+  requested --> active: delay passed and feed served it
+  active --> expired: 14 days
+  active --> revoked: owner revokes, or removes the contact
+  cancelled --> [*]
+  expired --> [*]
+  revoked --> [*]
 ```
 
 Successor and inheritance of data after death is a v2 item.
