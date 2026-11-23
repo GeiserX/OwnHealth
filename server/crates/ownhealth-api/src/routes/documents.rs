@@ -686,6 +686,10 @@ async fn retract(
     let reason = body_str(&mut e, &body, "reason");
     e.done()?;
     let mut tx = rt.pool.begin().await?;
+    // As the assign route: a CGM export's lock, then the row lock, then the owner read. A move that
+    // commits while this waits gives the document its new owner, and the permission is checked on it.
+    ownhealth_ingest_structured::retract::lock_export_of(&mut tx, document_id).await?;
+    ownhealth_core::documents::lock_owner(&mut tx, document_id).await?;
     let doc = visible_document(&mut tx, &principal, document_id, None, false).await?;
     if !doc.perm.can("write") {
         let msg = format!("The role {} cannot change this profile.", doc.perm.role);

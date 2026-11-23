@@ -1108,3 +1108,50 @@ async fn a_document_with_cgm_flags_needs_read_wearables_whatever_its_type() -> R
     assert_eq!((s, body.as_slice()), (StatusCode::OK, CLARITY));
     Ok(())
 }
+
+/// A retraction that waits for a move of the export (the move holds the export lock until it commits)
+/// checks the caller's permission on the owner the move leaves the export with. Sam may change Lucía's
+/// records but only view Alex's: once the export is Alex's, his retraction is refused and the export
+/// stays active.
+#[tokio::test]
+async fn a_retraction_that_waited_for_a_move_checks_the_permission_on_the_new_owner() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let doc = cgm_export_in(&a, "lucia", CLARITY, "Europe/Madrid").await?;
+    // a move to Alex, held before its commit, with its locks in the order the assign route takes them
+    let mut mv = a.rt.pool.begin().await?;
+    ownhealth_ingest_structured::retract::lock_export_of(&mut mv, doc).await?;
+    ownhealth_core::documents::lock_owner(&mut mv, doc).await?;
+    ownhealth_ingest_pdf::assign_document(&mut mv, &a.rt.blobs, doc, alex, a.family.user("alex"), None).await?;
+    let path = format!("/documents/{doc}/retract");
+    let (retracted, moved) = tokio::join!(a.post("sam", &path, Some(json!({"reason": "wrong file"}))), async {
+        // once the retraction waits for the export lock, the move commits
+        let mut waited = false;
+        for _ in 0..100 {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_stat_activity where datname = current_database() \
+                 and wait_event_type = 'Lock' and wait_event = 'advisory' and query like '%pg_advisory_xact_lock%'",
+            )
+            .fetch_one(&a.rt.pool)
+            .await?;
+            if waiting > 0 {
+                waited = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        anyhow::ensure!(waited, "the retraction never waited for the move's export lock");
+        mv.commit().await?;
+        anyhow::Ok(())
+    });
+    moved?;
+    let (s, v) = retracted?;
+    let (owner, status): (Option<uuid::Uuid>, String) =
+        sqlx::query_as("select profile_id, status from document where id = $1")
+            .bind(doc)
+            .fetch_one(&a.rt.pool)
+            .await?;
+    assert_eq!((owner, status.as_str()), (Some(alex), "active"), "{s} {v}");
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    Ok(())
+}
