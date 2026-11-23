@@ -149,6 +149,7 @@ async fn a_deleted_profile_stays_unreadable_in_older_backups_restored_with_the_c
     let mut me = env.as_user(env.user("sam")).await?;
     let r = me.delete("/api/profiles/sam?confirm=sam").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert!(r.json.get("keyring_pending").is_none(), "{}", r.json);
     // at once: the keyring no longer holds Sam's key and says she was deleted
     let ring = keyfile::read(&keyfile::path(&env.settings))?.unwrap_or_default();
     assert!(
@@ -191,6 +192,14 @@ async fn a_deleted_profile_stays_unreadable_in_older_backups_restored_with_the_c
         );
     }
     assert!(store.get_bytes(BlobOwner::Pending(scan.id), &scan.sha).is_err());
+    // her key row is back shredded, so no new key can be made for her on the restored instance
+    let row: Option<bool> = sqlx::query_scalar("select wrapped_dek is null from profile_key where profile_id = $1")
+        .bind(sam)
+        .fetch_optional(&db.pool)
+        .await?;
+    assert_eq!(row, Some(true), "Sam's key row after the restore");
+    let made = Keyring::new(Kek::from_settings(&restored)?, db.url.clone()).dek(sam, true);
+    assert!(made.is_err(), "a new key was made for Sam after the restore");
     // and no key the restored instance holds opens any file of hers, sealed for her or for the scan's
     // time in the inbox: each one fails its check
     let keys = opened_keys(&db, &restored).await?;
@@ -242,6 +251,8 @@ async fn a_keyring_the_delete_cannot_write_is_rewritten_by_its_retry() -> R {
     let mut me = env.as_user(env.user("sam")).await?;
     let r = me.delete("/api/profiles/sam?confirm=sam").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    // the answer says the key is still in the file, so the page does not say the delete is whole
+    assert_eq!(r.json["keyring_pending"], true, "{}", r.json);
     assert_eq!(
         std::fs::read(&file)?,
         b"{",
@@ -287,5 +298,49 @@ async fn a_keyring_the_delete_cannot_write_is_rewritten_by_its_retry() -> R {
         .fetch_one(env.pool())
         .await?;
     assert_eq!(state, "done");
+    Ok(())
+}
+
+/// A restore of a backup taken before a delete brings the profile's records back with a shredded
+/// key. An upload to it is refused with its own code (410 `profile_deleted`) instead of a server
+/// fault, and deleting the profile again removes what the restore brought back.
+#[tokio::test]
+async fn a_profile_restored_after_its_delete_refuses_uploads_and_deletes_again() -> R {
+    let env = Env::new(true).await?;
+    let sam = env.profile("sam");
+    stored(&env, sam, "%PDF-1.4 LabNorte iron panel of Sam Rivera").await?;
+    // the state a restore leaves: her rows, her key row shredded, and no key of hers in memory
+    let mut tx = env.pool().begin().await?;
+    ownhealth_core::keys::shred(&mut tx, sam).await?;
+    tx.commit().await?;
+    if let Some(keys) = env.rt.blobs.keyring() {
+        keys.forget(sam);
+    }
+
+    let mut me = env.as_user(env.user("sam")).await?;
+    let boundary = "ownhealthboundary";
+    let form = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\nsam\r\n--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"files\"; filename=\"x.pdf\"\r\nContent-Type: application/pdf\r\n\r\n\
+         %PDF-1.4 LabNorte ferritin of Sam Rivera\r\n--{boundary}--\r\n"
+    );
+    let r = me
+        .send_raw(
+            axum::http::Method::POST,
+            "/api/imports",
+            form.into_bytes(),
+            &format!("multipart/form-data; boundary={boundary}"),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::GONE, "{}", r.json);
+    assert_eq!(r.json["detail"]["code"], "profile_deleted", "{}", r.json);
+
+    let r = me.delete("/api/profiles/sam?confirm=sam").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    let left: i64 = sqlx::query_scalar("select count(*) from profile where id = $1")
+        .bind(sam)
+        .fetch_one(env.pool())
+        .await?;
+    assert_eq!(left, 0);
     Ok(())
 }

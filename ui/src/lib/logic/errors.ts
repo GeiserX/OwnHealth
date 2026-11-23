@@ -32,6 +32,8 @@ const PATTERNS: [RegExp, string][] = [
 	[/source is switched off/i, 'err_switched_off'],
 	[/demo never reads the inbox folder/i, 'err_demo_folder'],
 	// a FIT activity file the import refused (slice 29)
+	// a profile delete's retry that gave up (ownhealth-auth household.rs unlink_job)
+	[/^\d+ files, folders or keyring entries could not be removed yet/i, 'err_delete_cleanup'],
 	[/^not a readable FIT file: it is cut short/i, 'err_fit_cut'],
 	[/^not a readable FIT file/i, 'err_fit_damaged'],
 	[/^the FIT file holds no activity/i, 'err_fit_empty'],

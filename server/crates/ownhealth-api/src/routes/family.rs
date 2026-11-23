@@ -828,6 +828,11 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     if !revoked.is_empty() {
         out["connectors"] = Value::Array(revoked);
     }
+    // keyring.json still holds the key until the retry writes it, so older backups still open the
+    // profile's files: the page says so instead of saying the files are gone
+    if keyring_left {
+        out["keyring_pending"] = Value::Bool(true);
+    }
     Ok(out)
 }
 
