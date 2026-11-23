@@ -1150,13 +1150,9 @@ async fn restore_waits_for_the_shared_keyring_before_selecting_keys() -> R {
     assert!(row);
     Ok(())
 }
-
-#[tokio::test]
-async fn a_legacy_dump_obeys_tombstones_and_keeps_its_other_profile_keys() -> R {
-    use ownhealth_core::keyfile;
-
-    let l = live().await?;
-    let original = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
+/// Replace the archive's dump with one of the builds between the profile keys and the keyring: the
+/// `profile_key` rows are in the dump, and the manifest lists no keyring.
+fn write_legacy_dump(l: &Live, keys: usize) -> R {
     let tool = std::env::var_os("OWNHEALTH_PG_BINDIR")
         .filter(|d| !d.is_empty())
         .map_or_else(|| PathBuf::from("pg_dump"), |d| PathBuf::from(d).join("pg_dump"));
@@ -1180,8 +1176,17 @@ async fn a_legacy_dump_obeys_tombstones_and_keeps_its_other_profile_keys() -> R 
     let facts = m["keys"].as_object_mut().expect("backup has key facts");
     facts.shift_remove("keyring");
     facts.shift_remove("key_ids");
-    m["tables"]["profile_key"] = serde_json::json!(original.profiles.len());
-    write_manifest(&l.archive, &m)?;
+    m["tables"]["profile_key"] = serde_json::json!(keys);
+    write_manifest(&l.archive, &m)
+}
+
+#[tokio::test]
+async fn a_legacy_dump_obeys_tombstones_and_keeps_its_other_profile_keys() -> R {
+    use ownhealth_core::keyfile;
+
+    let l = live().await?;
+    let original = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
+    write_legacy_dump(&l, original.profiles.len())?;
 
     let mut ring = original.clone();
     ring.profiles.remove(&l.alex);
@@ -1457,5 +1462,88 @@ async fn a_keyring_rewrite_that_fails_after_pg_dump_publishes_no_dump() -> R {
         "backup published files before its rewrite"
     );
     ownhealth_ops::backup(&l.settings, &dest).await?;
+    Ok(())
+}
+
+/// A 1.0 install deleted Alex (the tombstone names his key K1). A restore from before the keyring
+/// brought him back, and his next file made K2, which the keyring published. A dump from the builds
+/// between the profile keys and the keyring (a `profile_key` table, no `keys.keyring`) still holds K1.
+/// Restoring it leaves K1 closed: Alex gets K2, the report lists him as shredded, his files sealed
+/// under K1 stay closed, and a file he stores next is in the next backup and restores.
+#[tokio::test]
+async fn a_legacy_dump_with_a_key_the_tombstone_closes_gets_the_keyrings_newer_key() -> R {
+    use ownhealth_core::keyfile;
+    use ownhealth_core::keys::{Dek, Kek};
+
+    let l = live().await?;
+    let original = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
+    write_legacy_dump(&l, original.profiles.len())?;
+    let kek = Kek::from_settings(&l.settings)?;
+    let fingerprint = original.kek_fingerprint.clone().expect("the keyring has a fingerprint");
+    let k1 = original.profiles[&l.alex].clone();
+    let k1_id = kek.unwrap(l.alex, &fingerprint, &k1)?.archive_id();
+    let k2 = kek.wrap(l.alex, &Dek::generate())?;
+    let mut ring = original.clone();
+    ring.profiles.insert(l.alex, k2.clone());
+    ring.shredded.insert(l.alex);
+    ring.shredded_keys.insert(l.alex, [k1_id].into_iter().collect());
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+
+    let (db, fresh) = fresh(&l).await?;
+    let report = ownhealth_ops::restore(&fresh, &l.archive).await?;
+    let row: Option<Vec<u8>> = sqlx::query_scalar("select wrapped_dek from profile_key where profile_id = $1")
+        .bind(l.alex)
+        .fetch_optional(&db.pool)
+        .await?
+        .flatten();
+    assert!(row.as_ref() != Some(&k1), "the deleted key K1 is live again");
+    assert_eq!(row.as_ref(), Some(&k2), "Alex did not get the keyring's newer key");
+    assert_eq!(report["keys"]["shredded"], serde_json::json!([l.alex]), "{report:#}");
+    let legacy_sha = hex::encode(sha2::Sha256::digest(&l.legacy));
+    let sealed: Vec<String> =
+        sqlx::query_scalar("select encode(blob_sha256, 'hex') from document where profile_id = $1")
+            .bind(l.alex)
+            .fetch_all(&db.pool)
+            .await?;
+    let store = BlobStore::for_settings(&fresh)?;
+    let opened: Vec<&String> = sealed
+        .iter()
+        .filter(|sha| **sha != legacy_sha && store.get_bytes(BlobOwner::Profile(l.alex), sha).is_ok())
+        .collect();
+    assert!(
+        sealed.len() > 1 && opened.is_empty(),
+        "files sealed under K1 opened: {opened:?}"
+    );
+    let mut c = db.pool.acquire().await?;
+    let after = keyfile::rewrite(&mut c, &fresh).await?;
+    drop(c);
+    assert_eq!(after.profiles.get(&l.alex), Some(&k2), "the keyring lost K2");
+
+    let household: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(l.alex)
+        .fetch_one(&db.pool)
+        .await?;
+    let bytes = b"%PDF-1.4 LabNorte report of Alex Rivera, after the legacy restore".to_vec();
+    let sha = store.put_bytes(BlobOwner::Profile(l.alex), &bytes)?;
+    let mut c = db.pool.acquire().await?;
+    create_document(
+        &mut c,
+        &NewDocument::upload(household, Some(l.alex), &sha, "application/pdf", bytes.len() as i64),
+    )
+    .await?;
+    drop(c);
+    let next = ownhealth_ops::backup(&fresh, &l.dir.path().join("after-legacy")).await?;
+    let verified = ownhealth_ops::verify_restore(&fresh, &next).await?;
+    assert_eq!(verified["ok"], true, "{verified:#}");
+    let target = TestDb::empty().await?;
+    let mut ts = target.settings(&l.dir.path().join("after-legacy-target"))?;
+    ts.secrets_key = fresh.secrets_key.clone();
+    ts.keyring_dir = Some(fresh.keyring_path());
+    let restored = ownhealth_ops::restore(&ts, &next).await?;
+    assert_eq!(restored["ok"], true, "{restored:#}");
+    assert_eq!(
+        BlobStore::for_settings(&ts)?.get_bytes(BlobOwner::Profile(l.alex), &sha)?,
+        bytes
+    );
     Ok(())
 }

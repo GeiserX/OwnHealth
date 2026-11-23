@@ -971,6 +971,8 @@ struct RingKeys {
     /// Rows added for tombstones the older dump did not count.
     legacy_tombstones_added: i64,
     fingerprint: Vec<u8>,
+    /// the keyring as read: a legacy dump's key rows are checked against it after pg_restore
+    file: keyfile::KeyringFile,
     /// the wrapped key of each profile the keyring still holds
     keys: Vec<(Uuid, Vec<u8>)>,
     /// profiles of the backup whose key the keyring lists as shredded: deleted since the backup
@@ -1046,6 +1048,7 @@ fn ring_keys(
         legacy: ids.is_none(),
         legacy_tombstones_added: 0,
         fingerprint: ring.kek_fingerprint.clone().unwrap_or_default(),
+        file: ring.clone(),
         keys: Vec::new(),
         shredded: Vec::new(),
         tombstones: ring
@@ -1107,7 +1110,11 @@ fn ring_keys(
 
 /// Load selected keys into a new-format dump and apply the current tombstones to any dump with a
 /// `profile_key` table. A partial restore leaves missing profiles without a key row.
-async fn load_keys(url: &str, ring: &mut RingKeys) -> Result<()> {
+///
+/// In a legacy dump, a key row that a tombstone closes while the keyring holds a newer key for the
+/// profile (it was deleted, and is back since) gives way to the newer key, and the profile is listed
+/// as shredded.
+async fn load_keys(url: &str, ring: &mut RingKeys, kek: Option<&Kek>) -> Result<()> {
     let mut conn = PgConnection::connect(url).await?;
     let mut tx = conn.begin().await?;
     if ring.legacy {
@@ -1132,6 +1139,35 @@ async fn load_keys(url: &str, ring: &mut RingKeys) -> Result<()> {
         .bind(&ring.tombstones)
         .fetch_one(&mut *tx)
         .await?;
+        let back: Vec<Uuid> = ring
+            .file
+            .shredded
+            .iter()
+            .filter(|p| ring.file.profiles.contains_key(p))
+            .copied()
+            .collect();
+        let rows: Vec<(Uuid, Vec<u8>, Option<Vec<u8>>)> = sqlx::query_as(
+            "select profile_id, wrapped_dek, kek_fingerprint from profile_key \
+             where profile_id = any($1) and wrapped_dek is not null order by profile_id",
+        )
+        .bind(&back)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (id, wrapped, fingerprint) in rows {
+            let archive_id = kek
+                .zip(fingerprint)
+                .and_then(|(k, f)| k.unwrap(id, &f, &wrapped).ok())
+                .map(|dek| dek.archive_id());
+            if ring.file.closes(id, archive_id.as_deref()) {
+                sqlx::query("delete from profile_key where profile_id = $1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                ring.keys.push((id, ring.file.profiles[&id].clone()));
+                ring.shredded.push(id);
+            }
+        }
+        ring.shredded.sort();
     }
     for (id, wrapped) in &ring.keys {
         sqlx::query("insert into profile_key (profile_id, wrapped_dek, kek_fingerprint) values ($1, $2, $3)")
@@ -1381,7 +1417,7 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
     }
     pg_restore(&url, archive).await?;
     if let Some(r) = &mut ring {
-        load_keys(&url, r).await?;
+        load_keys(&url, r, kek.as_ref()).await?;
         record_lost(settings, &url, r, &backup_blobs).await?;
     }
     drop(ring_lock);
@@ -1471,7 +1507,7 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
     let result = async {
         pg_restore(&target, archive).await?;
         if let Some(r) = &mut ring {
-            load_keys(&target, r).await?;
+            load_keys(&target, r, kek.as_ref()).await?;
         }
         compare(&target, &manifest, &files, kek.as_ref(), ring.as_ref()).await
     }
