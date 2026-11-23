@@ -66,6 +66,8 @@ pub fn output_schema() -> Value {
                     "sensitive": {"type": "integer"},
                     "by_scope": {"type": "array", "items": {"type": "string"}},
                     "minor_rule": {"type": "integer"},
+                    // search_observations and get_trend, only when a provider's terms left days out
+                    "vendor_terms": {"type": "integer"},
                 },
             },
             "db_versions": {"type": "object"},

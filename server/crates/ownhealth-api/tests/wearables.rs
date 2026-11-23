@@ -365,3 +365,37 @@ async fn a_lang_outside_the_registry_is_refused_and_an_empty_one_reads_the_defau
     }
     Ok(())
 }
+
+/// The provider policy keeps Oura and a native Dexcom sensor from agents, the rule pack and the
+/// calculators (data/connectors/providers.yaml), never from the person: the Wearables page's summary
+/// and series still read every provider.
+#[tokio::test]
+async fn the_wearables_page_reads_the_providers_agents_never_see() -> R {
+    let a = app().await?;
+    let days: Vec<u32> = (1..=10).collect();
+    rollup_days(&a, "oura", "Oura Ring", "hr_resting", &days, 48.0).await?;
+    rollup_days(&a, "dexcom", "Dexcom G7", "glucose_cgm", &days, 140.0).await?;
+    let (s, body) = get(&a, "sam", "/profiles/lucia/wearables/summary?days=30&as_of=2026-11-12").await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let entry = |m: &str| {
+        body["metrics"]
+            .as_array()
+            .and_then(|a| a.iter().find(|e| e["metric"] == m))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    assert_eq!(entry("hr_resting")["source"], "Oura Ring", "{body}");
+    assert_eq!(entry("hr_resting")["latest"], 48.0, "{body}");
+    assert_eq!(entry("glucose_cgm")["source"], "Dexcom G7", "{body}");
+    for (metric, device) in [("hr_resting", "Oura Ring"), ("glucose_cgm", "Dexcom G7")] {
+        let (s, one) = get(
+            &a,
+            "sam",
+            &format!("/profiles/lucia/wearables/{metric}?window=P30D&as_of=2026-11-12"),
+        )
+        .await?;
+        assert_eq!(s, StatusCode::OK, "{one}");
+        assert_eq!(devices_of(&one), vec![device; 10], "{one}");
+    }
+    Ok(())
+}

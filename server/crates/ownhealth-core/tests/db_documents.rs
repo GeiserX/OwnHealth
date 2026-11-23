@@ -69,6 +69,33 @@ async fn uploads_become_documents_and_jobs_once() -> R {
     Ok(())
 }
 
+/// An upload whose bytes sit in the plain layout of an install from before the keys: the dispatcher
+/// reads its head for the profile, which hashes such a file once. That runs off the async runtime, so
+/// a large legacy file never holds up the requests the runtime serves.
+#[tokio::test]
+async fn the_upload_sniff_checks_a_legacy_plain_file_off_the_runtime() -> R {
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let blobs = BlobStore::for_settings(&db.settings(dir.path())?)?;
+    assert!(blobs.seals());
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    // bytes of its own, so no other test hashes the same file
+    let text = format!("%PDF-1.4 LabNorte report {}", uuid::Uuid::new_v4());
+    let pdf = stored(&blobs, "labnorte.pdf", text.as_bytes())?;
+    let p = f.profile("alex");
+    let out = dispatch_upload(&mut c, &blobs, f.household_id, p, std::slice::from_ref(&pdf), None).await?;
+    assert_eq!(out["items"][0]["kind"], "pdf");
+    let on = ownhealth_core::blobs::plain_hashed_on(&pdf.sha256);
+    assert!(!on.is_empty(), "the legacy file was never checked");
+    let here = std::thread::current().name().map(str::to_string);
+    assert!(
+        on.iter().all(|t| Some(t) != here.as_ref()),
+        "hashed on the runtime's own thread: {on:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_document_with_a_sensitive_value_is_sensitive() -> R {
     let db = TestDb::new().await?;

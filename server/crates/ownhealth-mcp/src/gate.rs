@@ -103,6 +103,9 @@ pub struct Withheld {
     pub sensitive: i64,
     pub minor_rule: i64,
     pub by_scope: BTreeSet<String>,
+    /// Days of wearable data from a provider whose terms keep it from agents
+    /// (`data/connectors/providers.yaml`); in the envelope only when there are some.
+    pub vendor_terms: i64,
 }
 
 impl Withheld {
@@ -115,6 +118,7 @@ impl Withheld {
         };
         self.sensitive += num("sensitive");
         self.minor_rule += num("minor_rule");
+        self.vendor_terms += num("vendor_terms");
         if let Some(a) = o.get("by_scope").and_then(Value::as_array) {
             self.by_scope
                 .extend(a.iter().filter_map(|v| v.as_str().map(str::to_string)));
@@ -122,11 +126,14 @@ impl Withheld {
     }
 
     pub fn as_map(&self) -> Map<String, Value> {
-        let Value::Object(m) =
+        let Value::Object(mut m) =
             json!({"sensitive": self.sensitive, "by_scope": self.by_scope, "minor_rule": self.minor_rule})
         else {
             return Map::new();
         };
+        if self.vendor_terms > 0 {
+            m.insert("vendor_terms".into(), json!(self.vendor_terms));
+        }
         m
     }
 }

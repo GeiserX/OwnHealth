@@ -209,11 +209,15 @@ async fn profiles(conn: &mut PgConnection, principal: &Principal) -> Result<Valu
             }
         }
         if perm.has("read:wearables") {
-            let d: Option<NaiveDate> =
-                sqlx::query_scalar("select max(t)::date from wearable_rollup where profile_id = $1")
-                    .bind(p.id)
-                    .fetch_one(&mut *conn)
-                    .await?;
+            // the newest day an agent may read: providers the provider policy withholds never count
+            let d: Option<NaiveDate> = sqlx::query_scalar(
+                "select max(r.t)::date from wearable_rollup r join wearable_source ws on ws.id = r.source_id \
+                 where r.profile_id = $1 and ws.provider = any($2)",
+            )
+            .bind(p.id)
+            .bind(ownhealth_core::providers::served_providers())
+            .fetch_one(&mut *conn)
+            .await?;
             fresh.insert("wearables".into(), json!(d.map(|d| py_date(&d))));
         }
         let mut scopes: Vec<&String> = perm.scopes.iter().collect();

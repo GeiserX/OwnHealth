@@ -28,6 +28,9 @@ pub enum Error {
     /// A value that fails validation (the Python ValueError / pydantic error). HTTP 422.
     #[error("{0}")]
     Invalid(String),
+    /// The provider policy rejects samples from this provider. HTTP 422.
+    #[error("Wearable samples from provider {provider:?} are not allowed.")]
+    WearableIngestDenied { provider: String },
     /// A row the caller named does not exist. HTTP 404 `unknown` (the code the Python routes sent).
     #[error("{0}")]
     NotFound(String),

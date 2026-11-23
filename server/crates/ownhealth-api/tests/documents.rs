@@ -773,6 +773,111 @@ async fn a_move_reads_the_owner_under_the_document_lock() -> R {
     Ok(())
 }
 
+/// The profile of document `doc` now.
+async fn owner_of(a: &App, doc: Uuid) -> anyhow::Result<Option<Uuid>> {
+    Ok(sqlx::query_scalar("select profile_id from document where id = $1")
+        .bind(doc)
+        .fetch_one(&a.rt.pool)
+        .await?)
+}
+
+/// Alex's LabNorte report on Lucía's profile, where Alex and Sam are both guardians and may move it.
+async fn on_lucia(a: &App) -> anyhow::Result<Uuid> {
+    let doc = imported(a).await?;
+    let mut tx = a.rt.pool.begin().await?;
+    ownhealth_ingest_pdf::assign_document(
+        &mut tx,
+        &a.rt.blobs,
+        doc,
+        a.fam.profile("lucia"),
+        a.fam.user("alex"),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    drop_moved(a).await?;
+    Ok(doc)
+}
+
+/// Two moves of one document at once, by two people: Alex moves it from Lucía to himself while Sam
+/// asks to move it from Lucía to Sam. Sam may move Lucía's documents, not Alex's. Sam's permission
+/// check reads the owner under the row lock, so it sees the profile Alex's move left and refuses: the
+/// document stays with Alex, and Sam's key never gets a copy.
+#[tokio::test]
+async fn a_second_move_is_checked_against_the_owner_the_first_move_left() -> R {
+    let a = app().await?;
+    let doc = on_lucia(&a).await?;
+    let (alex, sam) = (a.fam.profile("alex"), a.fam.profile("sam"));
+    // Alex's move holds the document row while Sam's request arrives
+    let mut first = a.rt.pool.begin().await?;
+    ownhealth_ingest_pdf::assign_document(&mut first, &a.rt.blobs, doc, alex, a.fam.user("alex"), None).await?;
+    let path = format!("/documents/{doc}/assign");
+    let (second, committed) = tokio::join!(post(&a, "sam", &path, json!({"profile": "sam"})), async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        first.commit().await
+    });
+    committed?;
+    let second = second?;
+    assert!(
+        matches!(second.status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+        "Sam moved a document of Alex's: {} {}",
+        second.status,
+        second.json()
+    );
+    assert_eq!(owner_of(&a, doc).await?, Some(alex));
+    drop_moved(&a).await?;
+    assert_eq!(sealed_of(&a, sam)?, 0, "Sam's key got a copy of Alex's document");
+    Ok(())
+}
+
+/// The same race through the review queue: Sam accepts a document_identity item of Lucía's document
+/// (suggesting Sam) while Alex's move of that document to himself is in flight. The accept waits for
+/// the move, then refuses: the move closed the item, and the document is Alex's now.
+#[tokio::test]
+async fn an_accept_racing_a_move_is_checked_against_the_owner_the_move_left() -> R {
+    let a = app().await?;
+    let doc = on_lucia(&a).await?;
+    let (alex, lucia, sam) = (a.fam.profile("alex"), a.fam.profile("lucia"), a.fam.profile("sam"));
+    let mut c = a.rt.pool.acquire().await?;
+    let item = ownhealth_core::review::create_item(
+        &mut c,
+        &ownhealth_core::review::ReviewItemIn {
+            kind: "document_identity".into(),
+            household_id: Some(a.fam.household_id),
+            profile_id: Some(lucia),
+            document_id: Some(doc),
+            payload: json!({"suggested_profile_id": sam.to_string()}),
+            reasons: vec!["name_mismatch".into()],
+            ..Default::default()
+        },
+    )
+    .await?;
+    drop(c);
+    // Alex's move holds the document row while Sam's request arrives
+    let mut first = a.rt.pool.begin().await?;
+    ownhealth_ingest_pdf::assign_document(&mut first, &a.rt.blobs, doc, alex, a.fam.user("alex"), None).await?;
+    let path = format!("/review/{item}/accept");
+    let (second, committed) = tokio::join!(post(&a, "sam", &path, json!({})), async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        first.commit().await
+    });
+    committed?;
+    let second = second?;
+    assert!(
+        matches!(
+            second.status,
+            StatusCode::FORBIDDEN | StatusCode::NOT_FOUND | StatusCode::CONFLICT
+        ),
+        "unexpected response to Sam's accept: {} {}",
+        second.status,
+        second.json()
+    );
+    assert_eq!(owner_of(&a, doc).await?, Some(alex));
+    drop_moved(&a).await?;
+    assert_eq!(sealed_of(&a, sam)?, 0, "Sam's key got a copy of Alex's document");
+    Ok(())
+}
+
 /// A document with no profile yet is sealed under a key of its own (its item key), never in the plain
 /// layout. Assigning it seals its files again under the profile's key in the move's transaction,
 /// shreds the item key there, and the queued removal takes the item's folder.
