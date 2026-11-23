@@ -22,7 +22,15 @@ use sqlx::PgConnection;
 /// Gene -> the current medicines (name, kind, src) whose CPIC drug that gene guides.
 async fn meds_by_gene(conn: &mut PgConnection, perm: &Permission) -> Result<BTreeMap<String, Vec<Value>>> {
     let pack = load_pack()?;
-    let meds = active_medications(conn, perm.profile.id, None, None, None, perm.has("read:sensitive")).await?;
+    let meds = active_medications(
+        conn,
+        perm.profile.id,
+        None,
+        None,
+        None,
+        perm.may_read_sensitive("read:records"),
+    )
+    .await?;
     let mut out: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for m in &meds {
         let Some(drug) = med_drug(&pack, m) else { continue };

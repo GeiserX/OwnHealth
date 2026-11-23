@@ -732,7 +732,7 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
     // file never says. A creator without read:sensitive gets no count at all, not even 0: a 0 would
     // tell them there is nothing to hide (security-privacy.md: harm inside the household)
     let mut out = json!({"link": link_out(&row, true), "shlink": link});
-    if perm.scopes.contains("read:sensitive") {
+    if scopes.iter().all(|scope| perm.may_read_sensitive(scope)) {
         out["left_out"] = json!({"sensitive": sensitive});
     }
     Ok(answer(StatusCode::CREATED, out, &[]))

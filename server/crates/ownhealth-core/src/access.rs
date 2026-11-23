@@ -17,6 +17,7 @@
 //! imaging viewer read with that grant alone (`Permission::own`).
 
 use sqlx::AssertSqlSafe;
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -258,6 +259,18 @@ impl Permission {
             crate::break_glass::record(e.usage);
         }
         &self.scopes
+    }
+
+    /// Scopes for a reader whose sensitive facts all belong to `category_scope`.
+    pub fn read_scopes_for_sensitive(&self, category_scope: &str) -> Cow<'_, Scopes> {
+        let scopes = self.read_scopes();
+        if scopes.contains("read:sensitive") && !self.may_read_sensitive(category_scope) {
+            let mut filtered = scopes.clone();
+            filtered.remove("read:sensitive");
+            Cow::Owned(filtered)
+        } else {
+            Cow::Borrowed(scopes)
+        }
     }
 
     pub fn can(&self, action: &str) -> bool {

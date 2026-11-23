@@ -1614,3 +1614,227 @@ async fn unread_request_and_activation_notices_outlast_the_recent_use_window() -
     assert_eq!(r.json["items"].as_array().expect("notification items array").len(), 200);
     Ok(())
 }
+
+async fn record(b: &Bg, kind: &str, payload: Value) -> R {
+    use ownhealth_core::records::{RecordIn, RecordOptions, add_record};
+    let mut conn = b.env.pool().acquire().await?;
+    let row = RecordIn::from_json(kind, payload)?;
+    let src = SrcRef::New(SrcIn::manual(Some(b.env.user("alex"))));
+    add_record(&mut conn, &row, &src, RecordOptions::new("person")).await?;
+    Ok(())
+}
+
+async fn seed_medications(b: &Bg) -> R {
+    record(
+        b,
+        "medication",
+        json!({
+            "profile_id": b.alex_id(), "name": "Atorvastatina", "strength": "20 mg", "started": "2025-01-01",
+        }),
+    )
+    .await?;
+    record(
+        b,
+        "medication",
+        json!({
+            "profile_id": b.alex_id(), "name": "Truvada", "started": "2025-02-01", "sensitivity": ["sexual_health"],
+        }),
+    )
+    .await
+}
+
+async fn seed_genome(b: &Bg) -> R {
+    use ownhealth_genome::synthetic;
+    let mut conn = b.env.pool().acquire().await?;
+    synthetic::seed_genome(
+        &mut conn,
+        &b.env.rt.blobs,
+        b.env.fam().household_id,
+        b.alex_id(),
+        &synthetic::alex_facts(),
+        &[],
+        "genome-facts.json",
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn seed_conditions(b: &Bg) -> R {
+    record(
+        b,
+        "condition",
+        json!({
+            "profile_id": b.alex_id(), "text": "Plain condition", "onset": "2021-11-09",
+        }),
+    )
+    .await?;
+    record(
+        b,
+        "condition",
+        json!({
+            "profile_id": b.alex_id(), "text": "Sensitive condition", "onset": "2023-01-01",
+            "sensitivity": ["mental_health"],
+        }),
+    )
+    .await
+}
+
+fn assert_visible(body: &Value, collection: &str, field: &str, plain: &str, sensitive: &str, show_sensitive: bool) {
+    let rows = body[collection]
+        .as_array()
+        .expect("response has the requested collection");
+    assert!(rows.iter().any(|r| r[field] == plain), "{body}");
+    assert_eq!(rows.iter().any(|r| r[field] == sensitive), show_sensitive, "{body}");
+}
+
+async fn assert_scope_sources(
+    b: &mut Bg,
+    emergency: &str,
+    ordinary: &[&str],
+    paths: &[(&str, &str, &str, &str, &str)],
+) -> R {
+    let mut sam = b.sam().await?;
+    b.grant_sam("viewer", ordinary).await?;
+    b.open_for(b.env.user("sam"), &mut sam, json!([emergency])).await?;
+    for &(path, collection, field, plain, sensitive) in paths {
+        let r = sam.get(path).await?;
+        assert_eq!(r.status, 200, "{path}: {:?}", r.json);
+        assert_visible(&r.json, collection, field, plain, sensitive, false);
+    }
+
+    let mut full = ordinary.to_vec();
+    full.push(emergency);
+    b.grant_sam("viewer", &full).await?;
+    for &(path, collection, field, plain, sensitive) in paths {
+        let r = sam.get(path).await?;
+        assert_eq!(r.status, 200, "{path}: {:?}", r.json);
+        assert_visible(&r.json, collection, field, plain, sensitive, true);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn records_list_keeps_sensitive_rows_on_their_own_scope_source() -> R {
+    let mut b = setup().await?;
+    seed_conditions(&b).await?;
+    assert_scope_sources(
+        &mut b,
+        "read:records",
+        &["read:summary", "read:sensitive"],
+        &[(
+            "/api/profiles/alex/records/condition",
+            "items",
+            "title",
+            "Plain condition",
+            "Sensitive condition",
+        )],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn timeline_keeps_sensitive_records_on_their_own_scope_source() -> R {
+    let mut b = setup().await?;
+    seed_conditions(&b).await?;
+    assert_scope_sources(
+        &mut b,
+        "read:records",
+        &["read:summary", "read:sensitive"],
+        &[
+            (
+                "/api/profiles/alex/timeline",
+                "events",
+                "title",
+                "Plain condition",
+                "Sensitive condition",
+            ),
+            (
+                "/api/profiles/alex/timeline",
+                "spans",
+                "label",
+                "Plain condition",
+                "Sensitive condition",
+            ),
+        ],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn trend_keeps_sensitive_medicine_annotations_on_their_own_scope_source() -> R {
+    let mut b = setup().await?;
+    seed_medications(&b).await?;
+    assert_scope_sources(
+        &mut b,
+        "read:records",
+        &["read:labs", "read:sensitive"],
+        &[(
+            "/api/profiles/alex/trend?code=ldl_c",
+            "annotations",
+            "label",
+            "Atorvastatina 20 mg",
+            "Truvada",
+        )],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn family_history_keeps_sensitive_relatives_on_their_own_scope_source() -> R {
+    let mut b = setup().await?;
+    for (name, sensitivity) in [
+        ("Plain relative", json!([])),
+        ("Sensitive relative", json!(["mental_health"])),
+    ] {
+        let r = b
+            .alex
+            .post(
+                "/api/profiles/alex/family",
+                &json!({
+                    "relationship": "FTH", "display_name": name, "sensitivity": sensitivity,
+                }),
+            )
+            .await?;
+        assert_eq!(r.status, 201, "{:?}", r.json);
+    }
+    assert_scope_sources(
+        &mut b,
+        "read:records",
+        &["read:summary", "read:sensitive"],
+        &[(
+            "/api/profiles/alex/family",
+            "items",
+            "display_name",
+            "Plain relative",
+            "Sensitive relative",
+        )],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn genome_keeps_sensitive_findings_on_their_own_scope_source() -> R {
+    let mut b = setup().await?;
+    seed_genome(&b).await?;
+    let r = b
+        .alex
+        .post("/api/profiles/alex/genome/consent", &json!({"ui": true}))
+        .await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    let mut sam = b.sam().await?;
+    b.grant_sam("viewer", &["read:summary", "read:sensitive"]).await?;
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:genome"])).await?;
+    let path = "/api/profiles/alex/genome";
+    let r = sam.get(path).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_visible(&r.json, "findings", "gene", "CYP2C19", "APOE", false);
+    assert_eq!(r.json["locked"], json!([]));
+
+    b.grant_sam("viewer", &["read:summary", "read:genome", "read:sensitive"])
+        .await?;
+    let r = sam.get(path).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_visible(&r.json, "findings", "gene", "CYP2C19", "APOE", true);
+    Ok(())
+}

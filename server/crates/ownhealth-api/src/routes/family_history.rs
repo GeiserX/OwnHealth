@@ -164,7 +164,7 @@ impl Shown {
 }
 
 async fn shown(conn: &mut PgConnection, principal: &Principal, perm: &Permission) -> Result<Vec<Shown>, ApiError> {
-    let rows = family::list(&mut *conn, perm.profile.id, perm.has("read:sensitive")).await?;
+    let rows = family::list(&mut *conn, perm.profile.id, perm.may_read_sensitive("read:records")).await?;
     let mut out = Vec::with_capacity(rows.len());
     for member in rows {
         let linked = match member.linked_profile_id {
@@ -281,7 +281,7 @@ async fn editable(
         .await?
         .filter(|m| m.profile_id == perm.profile.id && m.status == "current");
     let m = m.ok_or_else(unknown)?;
-    if !m.sensitivity.is_empty() && !perm.has("read:sensitive") {
+    if !m.sensitivity.is_empty() && !perm.may_read_sensitive("read:records") {
         return Err(unknown());
     }
     if let Some(l) = m.linked_profile_id
@@ -438,8 +438,7 @@ async fn pedigree(State(rt): State<Runtime>, caller: Caller, Path(p): Path<Strin
     let ids: Vec<String> = rows.iter().map(|r| r.member.id.to_string()).collect();
     let today = ownhealth_core::access::today_utc();
     // the guideline patterns of these same relatives (ownhealth.family/v1), for the patterns card
-    let patterns =
-        ownhealth_rules::family::build_document(&mut tx, &caller.0, &perm.profile, perm.read_scopes(), today).await?;
+    let patterns = ownhealth_rules::family::build_document(&mut tx, &caller.0, &perm, today).await?;
     tx.commit().await?;
     // the audit chain links a row at commit, which a repeatable read snapshot cannot do, so the row
     // goes in its own transaction, stamped with the start of the read
@@ -597,8 +596,8 @@ async fn share_view(
 ) -> Result<Option<(bool, bool)>, ApiError> {
     Ok(match effective_permission(conn, principal, profile_id).await {
         Ok(perm) => {
-            perm.record_read(&["read:records", "read:sensitive"]);
-            Some((perm.has("read:records"), perm.has("read:sensitive")))
+            perm.record_read(&["read:records"]);
+            Some((perm.has("read:records"), perm.may_read_sensitive("read:records")))
         }
         Err(ownhealth_core::Error::AccessDenied { .. }) => None,
         Err(e) => return Err(e.into()),

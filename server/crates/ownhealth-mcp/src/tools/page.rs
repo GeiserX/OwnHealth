@@ -295,7 +295,7 @@ pub async fn get_document_page(call: &mut Call<'_>) -> ToolResult<Answer> {
     let g = call.gate()?;
     let mut by_scope: Vec<String> = Vec::new();
     let mut withheld = Map::new();
-    if !perm.has("read:sensitive") && document_is_sensitive(&mut *call.conn, doc.id).await? {
+    if !perm.may_read_sensitive("read:documents_text") && document_is_sensitive(&mut *call.conn, doc.id).await? {
         by_scope.push("sensitive".into());
     } else if let Some(r) = gate::page_refusal(&mut *call.conn, &perm, g, doc.id, page_no).await? {
         match r {

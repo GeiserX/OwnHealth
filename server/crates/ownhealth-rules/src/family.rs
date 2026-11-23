@@ -517,17 +517,18 @@ pub async fn relatives(
 pub async fn build_document(
     conn: &mut PgConnection,
     principal: &Principal,
-    profile: &ownhealth_core::access::Profile,
-    scopes: &Scopes,
+    perm: &ownhealth_core::access::Permission,
     as_of: NaiveDate,
 ) -> Result<Value> {
-    let rel = if scopes.contains("read:records") {
-        relatives(conn, principal, profile.id, scopes, as_of).await?
+    let profile = &perm.profile;
+    let rel = if perm.has("read:records") {
+        let scopes = perm.read_scopes_for_sensitive("read:records");
+        relatives(conn, principal, profile.id, &scopes, as_of).await?
     } else {
         Vec::new()
     };
     let doc = document(&profile.slug, as_of, &rel)?;
-    let hints = hints(conn, principal, profile, scopes, as_of).await?;
+    let hints = hints(conn, principal, profile, perm.read_scopes(), as_of).await?;
     with_hints(doc, hints)
 }
 
@@ -1080,7 +1081,7 @@ pub async fn hints(
         guardian: perm.role == "guardian",
     };
     let rules = load_hints()?;
-    let sources = hint_sources(conn, rules, target, perm.has("read:sensitive"), as_of).await?;
+    let sources = hint_sources(conn, rules, target, perm.may_read_sensitive("read:records"), as_of).await?;
     Ok(hint_items(rules, ownhealth_core::family::catalog()?, &viewer, &sources))
 }
 

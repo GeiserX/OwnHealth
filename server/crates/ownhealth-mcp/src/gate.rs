@@ -72,9 +72,7 @@ pub struct GenomeGate {
 /// Sensitive genome facts need the agents switch, read:genome and read:sensitive (mcp.md 9.7).
 pub fn genome_gate(perm: &Permission, as_of: NaiveDate, age_of_majority: i32) -> GenomeGate {
     GenomeGate {
-        include_sensitive: perm.profile.genome_sensitive_agents
-            && perm.has("read:genome")
-            && perm.has("read:sensitive"),
+        include_sensitive: perm.profile.genome_sensitive_agents && perm.may_read_sensitive("read:genome"),
         minor: perm.profile.is_minor(as_of, age_of_majority),
     }
 }
@@ -396,7 +394,7 @@ pub async fn page_refusal(
         if !perm.scopes.contains(scope) {
             reasons.push(Why::Scope(scope_label(scope)));
         }
-        if obs.get("sensitivity").is_some_and(crate::envelope::truthy) && !perm.scopes.contains("read:sensitive") {
+        if obs.get("sensitivity").is_some_and(crate::envelope::truthy) && !perm.may_read_sensitive(scope) {
             reasons.push(Why::Sensitive);
         }
     }

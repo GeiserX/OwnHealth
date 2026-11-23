@@ -348,7 +348,9 @@ pub async fn source_data(call: &mut Call<'_>, src_id: &str, include_text: bool) 
     }
     if include_text {
         let sensitive_doc = match doc_id {
-            Some(did) if can_text && !perm.has("read:sensitive") => document_is_sensitive(&mut *call.conn, did).await?,
+            Some(did) if can_text && !perm.may_read_sensitive("read:documents_text") => {
+                document_is_sensitive(&mut *call.conn, did).await?
+            }
             _ => false,
         };
         if !can_text {

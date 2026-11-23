@@ -817,7 +817,14 @@ async fn trend(
     }
     let mut annotations: Vec<Value> = Vec::new();
     if perm.has("read:records") {
-        let meds = list_records(&mut tx, "medication", profile_id, None, perm.has("read:sensitive")).await?;
+        let meds = list_records(
+            &mut tx,
+            "medication",
+            profile_id,
+            None,
+            perm.may_read_sensitive("read:records"),
+        )
+        .await?;
         let date = |m: &Map<String, Value>, k: &str| {
             m.get(k)
                 .and_then(Value::as_str)

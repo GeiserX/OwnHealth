@@ -4,6 +4,7 @@
 mod common;
 
 use common::*;
+use ownhealth_core::access::scope_set;
 use ownhealth_core::review;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -102,6 +103,19 @@ async fn change_sets_the_schedule_and_keeps_the_rest() -> R {
             .fetch_one(&mut *conn)
             .await?;
     drop(conn);
+    let restricted = w.tok_scopes(scope_set(["read:records", "write:propose"])).await?;
+    let hidden = w
+        .connect(&restricted)
+        .await?
+        .call_tool(
+            "propose",
+            json!({"profile": "alex", "kind": "medication",
+                   "payload": {"action": "stop", "name": "Omeprazole", "date": "2026-11-01"}}),
+        )
+        .await?
+        .ok();
+    assert_eq!(hidden["data"]["checks"][0]["ok"], false, "{hidden}");
+
     let c = w.connect(&w.tok().await?).await?;
     let changed = c
         .call_tool(

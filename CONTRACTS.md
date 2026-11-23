@@ -30,6 +30,11 @@ export and share link bodies). A stored language outside the registry reads the 
 language: only a `lang` the caller sent is refused. MCP tools take no REST `lang`; they speak the
 token's `mcp_lang`.
 
+A sensitive fact requires its category scope and `read:sensitive` from the same permission source.
+All readers use `Permission::may_read_sensitive` with the fact's category. An active break-glass
+request can add a category for ordinary reads. Sensitive facts still require both scopes on the
+contact's grant because the request cannot supply `read:sensitive`.
+
 | Owner | File (`routes/`) | Route | Notes |
 |---|---|---|---|
 | foundation | core.rs | `GET /me` | user, household, locale, dev flag; each profile has its `role`, `scopes` and `break_glass` (an emergency grant or an open break-glass request, which never shares). The count in `review_open` includes household items and items on profiles where the caller can review |

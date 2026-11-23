@@ -704,7 +704,7 @@ async fn timeline(
     }
     let withheld: Vec<&str> = asked.difference(&want).copied().collect();
     let t = ownhealth_core::langs::pick(WORDS, lang);
-    let sens = perm.has("read:sensitive");
+    let sens = perm.may_read_sensitive("read:records");
     let pid = perm.profile.id;
 
     let mut events: Vec<Option<Event>> = Vec::new();

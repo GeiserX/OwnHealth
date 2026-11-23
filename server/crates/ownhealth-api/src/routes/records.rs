@@ -524,7 +524,14 @@ async fn list(
     let history = bool_param(&q, "history")?;
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, Some("read:records"), None).await?;
-    let mut rows = rec::list_records(&mut tx, kind, perm.profile.id, None, perm.has("read:sensitive")).await?;
+    let mut rows = rec::list_records(
+        &mut tx,
+        kind,
+        perm.profile.id,
+        None,
+        perm.may_read_sensitive("read:records"),
+    )
+    .await?;
     if history {
         let seen: Vec<String> = rows.iter().map(id_of).collect();
         let mut older = Vec::new();

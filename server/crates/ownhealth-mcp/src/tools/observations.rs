@@ -499,7 +499,7 @@ async fn visible_rows(
             by_scope.insert(crate::gate::scope_label(scope));
             continue;
         }
-        if !r.sensitivity.is_empty() && !call.has("read:sensitive") {
+        if !r.sensitivity.is_empty() && !call.perm()?.may_read_sensitive(scope) {
             sensitive += 1;
             continue;
         }
@@ -974,7 +974,7 @@ async fn med_annotations(call: &mut Call<'_>, since: Option<NaiveDate>, until: N
         return Ok(Vec::new());
     }
     let pid = call.profile_id()?;
-    let include_sensitive = call.has("read:sensitive");
+    let include_sensitive = call.perm()?.may_read_sensitive("read:records");
     let meds = list_records(
         &mut *call.conn,
         "medication",
