@@ -47,10 +47,10 @@ pub enum Error {
     /// no key. HTTP 500, as any other server fault.
     #[error(transparent)]
     Key(#[from] crate::keys::KeyError),
-    /// The restore loaded the database and can resume once its keyring can record the losses.
+    /// The restore loaded the database and can resume once it can record the losses.
     #[error(
-        "{0}. Fix the keyring error and rerun the same restore with the same backup, keyring, \
-         and options. Keep the app stopped until restore finishes"
+        "{0}. Resolve the reported error. Keep the app stopped and rerun the same restore \
+         with the same backup, keyring, and options"
     )]
     RestoreLoss(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error(transparent)]

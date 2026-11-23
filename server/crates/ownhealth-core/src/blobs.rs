@@ -26,7 +26,7 @@
 //! Access control lives on the rows that reference a hash (document, genome_dataset); a hash on its
 //! own grants nothing.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1357,6 +1357,61 @@ fn tree_rel(key: &str) -> Option<PathBuf> {
         Some((p, a)) if hex(p, 32) && hex(a, 64) => Some(sealed("enc", p, a)),
         _ => None,
     }
+}
+
+/// Profile references a restore could not recover. The file lives outside `TREE_PARTS`, so
+/// only the omissions in the manifest travel with an archive.
+pub type RestoreLosses = BTreeMap<Uuid, BTreeSet<String>>;
+
+const RESTORE_LOSSES: &str = ".restore-losses.json";
+
+/// Read the omissions accepted in this store by a restore.
+pub fn read_restore_losses(settings: &crate::config::Settings) -> io::Result<RestoreLosses> {
+    let dir = settings.blobs_path();
+    let file = dir.join(RESTORE_LOSSES);
+    let read = || -> io::Result<RestoreLosses> {
+        if !crate::keyfile::owner_writes_only(&file, false, "restore losses").map_err(io::Error::other)? {
+            return Ok(RestoreLosses::new());
+        }
+        check_loss_dir(&dir)?;
+        Ok(serde_json::from_reader(File::open(&file)?)?)
+    };
+    read().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("cannot read restore losses from {}: {e}", file.display()),
+        )
+    })
+}
+
+fn check_loss_dir(dir: &Path) -> io::Result<()> {
+    crate::keyfile::owner_writes_only(&fs::canonicalize(dir)?, true, "blob store").map_err(io::Error::other)?;
+    Ok(())
+}
+
+/// Replace the loss record while holding the keyring lock. A crash leaves the old or new record.
+pub fn write_restore_losses(settings: &crate::config::Settings, losses: &RestoreLosses) -> io::Result<()> {
+    let dir = settings.blobs_path();
+    let staged = dir.join(format!("{RESTORE_LOSSES}.{}.tmp", crate::ids::token_hex(8)));
+    let write = || -> io::Result<()> {
+        fs::create_dir_all(&dir)?;
+        check_loss_dir(&dir)?;
+        let mut f = create_private(&staged)?;
+        serde_json::to_writer(&mut f, losses)?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&staged, dir.join(RESTORE_LOSSES))?;
+        #[cfg(unix)]
+        File::open(&dir)?.sync_all()?;
+        Ok(())
+    };
+    write().map_err(|e| {
+        let _ = fs::remove_file(staged);
+        io::Error::new(
+            e.kind(),
+            format!("cannot write restore losses in {}: {e}", dir.display()),
+        )
+    })
 }
 
 /// Whether `path` lies in the configured blob folder: the keyring folder must not, or every backup

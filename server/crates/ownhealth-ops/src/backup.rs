@@ -155,12 +155,6 @@ fn with_db(url: &str, db: &str) -> String {
     }
 }
 
-fn db_name(url: &str) -> String {
-    let url = libpq_url(url);
-    let path = url.split_once('?').map_or(url.as_str(), |(p, _)| p);
-    path.rsplit_once('/').map_or("", |(_, r)| r).to_string()
-}
-
 /// The argv after the tool name, and the password that goes in PGPASSWORD instead.
 fn pg_args(url: &str, args: &[&str]) -> (Vec<String>, Option<String>) {
     let (dsn, password) = pg_conn(url);
@@ -710,21 +704,18 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     }
     // The dump holds no row of it, so a restore never has the same count.
     tables.remove("profile_key");
-    // Publish the dump only after the locked keyring rewrite succeeds. A refused rewrite drops
-    // this attempt's staging file, so the same destination can be used again.
-    let lost = keyfile::rewrite(&mut lock, settings)
+    keyfile::rewrite(&mut lock, settings)
         .await
-        .map_err(|e| ops_error(e.0))?
-        .lost;
-    staged_dump
-        .persist_noclobber(dest.join("db.dump"))
-        .map_err(|e| e.error)?;
+        .map_err(|e| ops_error(e.0))?;
+    let lost = blobs::read_restore_losses(settings)?;
 
     // Blobs are written before the rows that reference them commit, so every blob the snapshot can
     // see exists by now, and none of them went since (the copy lock above). Later blobs are harmless
     // extras.
     let store = BlobStore::for_settings(settings)?;
-    let tree = dest.join("blobs");
+    // Keep both artifacts private to this attempt until the loss record has been updated.
+    let staged_blobs = tempfile::tempdir_in(dest)?;
+    let tree = staged_blobs.path().join("blobs");
     store.copy_into(&tree)?;
     blobs::end_copy(&mut lock).await?;
     let mut files = blobs::tree_files(&tree)?;
@@ -794,7 +785,14 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             required.push(plain);
         }
     }
+    #[cfg(test)]
+    let _ = tests::BEFORE_CLEAR_REPAIRED.try_with(|observe| observe());
     clear_repaired_losses(settings, &repaired).await?;
+    staged_dump
+        .persist_noclobber(dest.join("db.dump"))
+        .map_err(|e| e.error)?;
+    fs::rename(tree, dest.join("blobs"))?;
+    staged_blobs.close()?;
     required.sort();
     required.dedup();
     let keyring: Vec<_> = key_ids.keys().collect();
@@ -920,7 +918,7 @@ async fn pg_restore(url: &str, archive: &Path) -> Result<()> {
     let dump = fs::File::open(archive.join("db.dump"))?;
     #[cfg(test)]
     tests::OBSERVE_PG_RESTORE
-        .try_with(|observe| observe())
+        .try_with(|observe| observe(url))
         .unwrap_or(Ok(()))?;
     let mut cmd = pg_command("pg_restore", restore_args(url))?;
     let done = cmd
@@ -989,18 +987,16 @@ async fn clear_repaired_losses(settings: &Settings, repaired: &[(Uuid, &str)]) -
         return Ok(());
     }
     let _lock = keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?;
-    let Some(mut ring) = keyfile::read_for_install(settings).map_err(|e| ops_error(e.0))? else {
-        return Ok(());
-    };
+    let mut losses = blobs::read_restore_losses(settings)?;
     let mut changed = false;
     for (id, sha) in repaired {
-        if let Some(losses) = ring.lost.get_mut(id) {
-            changed |= losses.remove(*sha);
+        if let Some(files) = losses.get_mut(id) {
+            changed |= files.remove(*sha);
         }
     }
     if changed {
-        ring.lost.retain(|_, losses| !losses.is_empty());
-        keyfile::write(&settings.keyring_path(), &ring).map_err(|e| ops_error(e.0))?;
+        losses.retain(|_, files| !files.is_empty());
+        blobs::write_restore_losses(settings, &losses)?;
     }
     Ok(())
 }
@@ -1307,18 +1303,18 @@ async fn record_lost(
     let mut conn = PgConnection::connect(url).await?;
     let referenced = referenced_blobs(&mut conn).await?;
     conn.close().await?;
-    let mut file = keyfile::read_for_install(settings)?.unwrap_or_default();
-    let before = file.lost.clone();
+    let mut stored = blobs::read_restore_losses(settings)?;
+    let mut changed = false;
     for (owner, sha) in referenced {
         if let BlobOwner::Profile(p) = owner
             && losses.get(&p).is_some_and(|files| files.contains(&sha))
             && !backup_blobs.contains_key(&sha)
         {
-            file.lost.entry(p).or_default().insert(sha);
+            changed |= stored.entry(p).or_default().insert(sha);
         }
     }
-    if file.lost != before {
-        keyfile::write(&settings.keyring_path(), &file)?;
+    if changed {
+        blobs::write_restore_losses(settings, &stored)?;
     }
     Ok(())
 }
@@ -1599,15 +1595,28 @@ async fn create_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
     sqlx::query(AssertSqlSafe(format!("create database \"{scratch}\"")))
         .execute(&mut *admin)
         .await?;
-    sqlx::query(AssertSqlSafe(format!(
+    if let Err(error) = sqlx::query(AssertSqlSafe(format!(
         "revoke connect, temporary on database \"{scratch}\" from public"
     )))
     .execute(&mut *admin)
-    .await?;
+    .await
+    {
+        if let Err(cleanup) = drop_scratch(admin, scratch).await {
+            tracing::warn!(%scratch, %cleanup, "could not drop the scratch database after revoking access failed");
+        }
+        return Err(error.into());
+    }
     Ok(())
 }
 
-/// Restore into a scratch database `<db>_restore_check`, compare with the manifest, drop it.
+async fn drop_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
+    sqlx::query(AssertSqlSafe(format!("drop database \"{scratch}\" with (force)")))
+        .execute(admin)
+        .await?;
+    Ok(())
+}
+
+/// Restore into a scratch database unique to this run, compare with the manifest, drop it.
 /// `ok` is true only when every row count, every blob hash and every profile's state_hash match, and
 /// the keyring holds every key the backup needs, or lists its profile as deleted.
 pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value> {
@@ -1624,12 +1633,8 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
     drop(ring_lock);
     let files = blobs::tree_files(&archive.join("blobs"))?;
     let live = settings.sqlx_url();
-    let scratch = format!("{}_restore_check", db_name(&live));
-    let drop_scratch = format!("drop database if exists \"{scratch}\" with (force)");
+    let scratch = format!("oh_restore_check_{}", ownhealth_core::ids::token_hex(16));
     let mut admin = PgConnection::connect(&live).await?;
-    sqlx::query(AssertSqlSafe(drop_scratch.clone()))
-        .execute(&mut admin)
-        .await?;
     create_scratch(&mut admin, &scratch).await?;
     let target = with_db(&live, &scratch);
     let result = async {
@@ -1640,7 +1645,7 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
         compare(&target, &manifest, &files, kek.as_ref(), ring.as_ref()).await
     }
     .await;
-    let dropped = sqlx::query(AssertSqlSafe(drop_scratch)).execute(&mut admin).await;
+    let dropped = drop_scratch(&mut admin, &scratch).await;
     admin.close().await?;
     let report = result?;
     dropped?;
@@ -1652,7 +1657,21 @@ mod tests {
     use super::*;
 
     tokio::task_local! {
-        pub(super) static OBSERVE_PG_RESTORE: Box<dyn Fn() -> Result<()> + Send>;
+        pub(super) static OBSERVE_PG_RESTORE: Box<dyn Fn(&str) -> Result<()> + Send>;
+        pub(super) static BEFORE_CLEAR_REPAIRED: Box<dyn Fn() + Send>;
+    }
+
+    #[test]
+    fn restore_reports_a_database_error_and_how_to_retry() {
+        let original = sqlx::Error::PoolClosed;
+        let error = Error::RestoreLoss(Box::new(Error::Db(original)));
+        let message = error.to_string();
+        assert!(message.contains(&sqlx::Error::PoolClosed.to_string()), "{message}");
+        assert!(message.contains("Resolve the reported error"), "{message}");
+        assert!(message.contains("rerun the same restore"), "{message}");
+        assert!(message.contains("app stopped"), "{message}");
+        let source = std::error::Error::source(&error).and_then(|source| source.downcast_ref::<Error>());
+        assert!(matches!(source, Some(Error::Db(sqlx::Error::PoolClosed))));
     }
 
     #[tokio::test]
@@ -1731,7 +1750,7 @@ mod tests {
         let (observed, mut checks) = tokio::sync::mpsc::channel(3);
         // Observe the lock in this process as pg_restore opens the dump. If restore returns
         // early there is no probe to cancel or join.
-        let observe = Box::new(move || {
+        let observe = Box::new(move |_: &str| {
             let lock = fs::File::options().write(true).open(&lock_file)?;
             let free = match lock.try_lock() {
                 Ok(()) => true,
@@ -1755,6 +1774,85 @@ mod tests {
                 Ok::<_, Error>(())
             })
             .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn each_verification_creates_and_drops_its_own_database() -> anyhow::Result<()> {
+        use ownhealth_core::testing::TestDb;
+        use std::sync::Mutex;
+
+        crate::register();
+        let db = TestDb::new().await?;
+        let dir = tempfile::tempdir()?;
+        let settings = db.settings(dir.path())?;
+        let archive = backup(&settings, &dir.path().join("backup")).await?;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        OBSERVE_PG_RESTORE
+            .scope(
+                Box::new(move |url| {
+                    recorded.lock().unwrap().push(url.to_string());
+                    Ok(())
+                }),
+                async {
+                    assert_eq!(verify_restore(&settings, &archive).await?["ok"], true);
+                    assert_eq!(verify_restore(&settings, &archive).await?["ok"], true);
+                    Ok::<_, Error>(())
+                },
+            )
+            .await?;
+        let urls = seen.lock().unwrap().clone();
+        assert_eq!(urls.len(), 2);
+        assert_ne!(urls[0], urls[1], "verification reused a scratch database name");
+        for url in urls {
+            let error = PgConnection::connect(&url)
+                .await
+                .err()
+                .expect("scratch database remained");
+            assert_eq!(
+                error.as_database_error().and_then(|e| e.code()).as_deref(),
+                Some("3D000")
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_repair_write_leaves_the_backup_destination_retryable() -> anyhow::Result<()> {
+        use ownhealth_core::{demo::seed_demo, testing::TestDb};
+        use std::os::unix::fs::PermissionsExt;
+
+        crate::register();
+        let db = TestDb::new().await?;
+        let dir = tempfile::tempdir()?;
+        let settings = db.settings(dir.path())?;
+        let store = BlobStore::for_settings(&settings)?;
+        assert!(seed_demo(&db.pool, &settings, &store, false).await?);
+        let (profile, sha): (Uuid, String) = sqlx::query_as(
+            "select profile_id, encode(blob_sha256, 'hex') from document where profile_id is not null limit 1",
+        )
+        .fetch_one(&db.pool)
+        .await?;
+        let losses = blobs::RestoreLosses::from([(profile, BTreeSet::from([sha]))]);
+        blobs::write_restore_losses(&settings, &losses)?;
+        let folder = settings.blobs_path();
+
+        let dest = dir.path().join("backup");
+        let read_only = folder.clone();
+        let result = BEFORE_CLEAR_REPAIRED
+            .scope(
+                Box::new(move || fs::set_permissions(&read_only, fs::Permissions::from_mode(0o500)).unwrap()),
+                backup(&settings, &dest),
+            )
+            .await;
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o700))?;
+        let error = result.expect_err("backup could not record the repair");
+        assert!(error.to_string().contains("cannot write restore losses"), "{error}");
+        backup(&settings, &dest).await?;
+        assert_eq!(verify_restore(&settings, &dest).await?["ok"], true);
+        assert!(blobs::read_restore_losses(&settings)?.is_empty());
         Ok(())
     }
 
@@ -1856,13 +1954,11 @@ mod tests {
             "postgresql://u:p@h:1/x?sslmode=require"
         );
         assert_eq!(with_db("postgresql+psycopg://u@h/live", "x"), "postgresql://u@h/x");
-        assert_eq!(db_name("postgresql://u@h/live?a=b"), "live");
     }
 
     #[test]
     fn with_db_ignores_a_slash_in_the_query() {
         let url = "postgresql://u@h/live?sslrootcert=/etc/ca.pem";
-        assert_eq!(db_name(url), "live");
         assert_eq!(with_db(url, "x"), "postgresql://u@h/x?sslrootcert=/etc/ca.pem");
         assert_eq!(
             with_db("postgresql://u@h/live?host=/var/run/postgresql", "x"),

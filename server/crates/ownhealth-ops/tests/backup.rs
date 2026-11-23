@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ownhealth_core::blobs::{BlobOwner, BlobStore, tree_files};
+use ownhealth_core::blobs::{BlobOwner, BlobStore, read_restore_losses, tree_files};
 use ownhealth_core::config::Settings;
 use ownhealth_core::demo::seed_demo;
 use ownhealth_core::documents::{NewDocument, create_document};
@@ -328,16 +328,11 @@ async fn restore_refuses_a_database_that_is_not_empty() -> R {
 }
 
 #[tokio::test]
-async fn verify_restore_passes_and_drops_its_scratch_database() -> R {
+async fn verify_restore_passes_with_no_blob_errors() -> R {
     let l = live().await?;
     let report = ownhealth_ops::verify_restore(&l.settings, &l.archive).await?;
     assert_eq!(report["ok"], true, "{report:#}");
     assert!(strs(&report["blobs"]["missing"]).is_empty() && strs(&report["blobs"]["corrupt"]).is_empty());
-    let left: Option<i32> = sqlx::query_scalar("select 1 from pg_database where datname = $1")
-        .bind(format!("{}_restore_check", l.db.name))
-        .fetch_optional(&l.db.pool)
-        .await?;
-    assert!(left.is_none());
     Ok(())
 }
 
@@ -1172,8 +1167,7 @@ async fn a_backup_requires_a_repaired_file_if_it_goes_missing_again() -> R {
     ownhealth_ops::restore_with(&settings, &l.archive, true).await?;
     let store = BlobStore::for_settings(&settings)?;
     assert!(!store.exists(owner, &sha));
-    let restored_ring = keyfile::read(&keyfile::path(&settings))?.expect("restore wrote the keyring");
-    assert!(restored_ring.lost[&l.alex].contains(&sha));
+    assert!(read_restore_losses(&settings)?[&l.alex].contains(&sha));
 
     assert_eq!(store.put_bytes(owner, &bytes)?, sha);
     let repaired = l.dir.path().join("repaired");
@@ -1186,15 +1180,14 @@ async fn a_backup_requires_a_repaired_file_if_it_goes_missing_again() -> R {
     let report = ownhealth_ops::verify_restore(&settings, &lost_again).await?;
     assert!(strs(&report["blobs"]["missing"]).contains(&sha), "{report:#}");
 
-    let ring = keyfile::read(&keyfile::path(&settings))?.expect("backup rewrote the keyring");
-    let other_losses = &ring.lost[&l.alex];
+    let other_losses = &read_restore_losses(&settings)?[&l.alex];
     assert!(!other_losses.is_empty() && !other_losses.contains(&sha));
     Ok(())
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_partial_restore_can_retry_after_the_keyring_write_fails() -> R {
+async fn a_partial_restore_can_retry_after_the_loss_record_write_fails() -> R {
     use ownhealth_core::keyfile;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1204,18 +1197,19 @@ async fn a_partial_restore_can_retry_after_the_keyring_write_fails() -> R {
     keyfile::write(&l.settings.keyring_path(), &ring)?;
 
     let (db, settings) = fresh(&l).await?;
-    let folder = settings.keyring_path();
+    let folder = settings.blobs_path();
+    fs::create_dir_all(&folder)?;
     fs::set_permissions(&folder, fs::Permissions::from_mode(0o500))?;
     let result = ownhealth_ops::restore_with(&settings, &l.archive, true).await;
     fs::set_permissions(&folder, fs::Permissions::from_mode(0o700))?;
     let error = result.expect_err("restore cannot write the loss record");
     let source = std::error::Error::source(&error).and_then(|source| source.downcast_ref::<ownhealth_core::Error>());
     assert!(
-        matches!(source, Some(ownhealth_core::Error::Key(_))),
-        "expected the original keyring error, got {source:?}: {error}"
+        matches!(source, Some(ownhealth_core::Error::Io(_))),
+        "expected the original write error, got {source:?}: {error}"
     );
     let error = error.to_string();
-    assert!(error.contains("cannot write the keyring"), "{error}");
+    assert!(error.contains("cannot write restore losses"), "{error}");
 
     let m = manifest(&l.archive)?;
     let mut other = m.clone();
@@ -1232,8 +1226,68 @@ async fn a_partial_restore_can_retry_after_the_keyring_write_fails() -> R {
     let legacy_sha = hex::encode(sha2::Sha256::digest(&l.legacy));
     let store = BlobStore::for_settings(&settings)?;
     assert_eq!(store.get_bytes(BlobOwner::Profile(l.alex), &legacy_sha)?, l.legacy);
-    let saved = keyfile::read(&keyfile::path(&settings))?.expect("restore wrote the keyring");
-    assert!(saved.lost.get(&l.alex).is_some_and(|lost| !lost.is_empty()));
+    assert!(
+        read_restore_losses(&settings)?
+            .get(&l.alex)
+            .is_some_and(|lost| !lost.is_empty())
+    );
+    let pending: bool = sqlx::query_scalar("select to_regnamespace('ownhealth_restore') is not null")
+        .fetch_one(&db.pool)
+        .await?;
+    assert!(!pending);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_partial_restore_can_retry_after_blob_placement_fails() -> R {
+    use ownhealth_core::keyfile;
+
+    let l = live().await?;
+    let mut ring = keyfile::read_for_install(&l.settings)?.expect("backup wrote the keyring");
+    assert!(ring.profiles.remove(&l.alex).is_some());
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+
+    let (db, settings) = fresh(&l).await?;
+    let archived = tree(&l.archive)?;
+    let (first, first_path) = archived.first_key_value().expect("first blob");
+    let (last, last_path) = archived.last_key_value().expect("last blob");
+    assert_ne!(first, last);
+    let archive_blobs = l.archive.join("blobs");
+    let part_path = |key: &str, file: &Path| -> anyhow::Result<PathBuf> {
+        let parent = file.parent().expect("blob shard").strip_prefix(&archive_blobs)?;
+        Ok(settings
+            .blobs_path()
+            .join(parent)
+            .join(format!(".{}.part", key.replace('/', "-"))))
+    };
+    let blocked = part_path(last, last_path)?;
+    fs::create_dir_all(&blocked)?;
+
+    let error = ownhealth_ops::restore_with(&settings, &l.archive, true)
+        .await
+        .expect_err("later blob's temporary path is a directory");
+    assert!(matches!(error, ownhealth_core::Error::Io(_)), "{error}");
+    let placed = tree_files(&settings.blobs_path())?;
+    assert!(placed.contains_key(first));
+    assert!(!placed.contains_key(last));
+    let pending: bool = sqlx::query_scalar("select to_regclass('ownhealth_restore.pending_loss') is not null")
+        .fetch_one(&db.pool)
+        .await?;
+    assert!(pending);
+
+    fs::remove_dir(blocked)?;
+    // A retry that tries to copy the already placed blob would fail at this path.
+    let already_placed = part_path(first, first_path)?;
+    fs::create_dir(&already_placed)?;
+    let result = ownhealth_ops::restore_with(&settings, &l.archive, true).await;
+    fs::remove_dir(already_placed)?;
+    let report = result?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    let placed = tree_files(&settings.blobs_path())?;
+    assert_eq!(placed.keys().collect::<Vec<_>>(), archived.keys().collect::<Vec<_>>());
+    for (key, path) in archived {
+        assert_eq!(fs::read(&placed[&key])?, fs::read(path)?);
+    }
     let pending: bool = sqlx::query_scalar("select to_regnamespace('ownhealth_restore') is not null")
         .fetch_one(&db.pool)
         .await?;
@@ -1821,7 +1875,7 @@ async fn a_shredded_key_does_not_exempt_a_legacy_plain_report() -> R {
 }
 
 #[tokio::test]
-async fn restore_recovers_an_older_backups_accepted_omission() -> R {
+async fn older_restore_keeps_its_omission_without_remarking_a_newer_store() -> R {
     use ownhealth_core::{
         blobs::sealed_key,
         keyfile,
@@ -1863,8 +1917,8 @@ async fn restore_recovers_an_older_backups_accepted_omission() -> R {
     assert_eq!(store.put_bytes(owner, &bytes)?, sha);
     let repaired = ownhealth_ops::backup(&settings, &l.dir.path().join("newer-repair")).await?;
     assert_eq!(ownhealth_ops::verify_restore(&settings, &repaired).await?["ok"], true);
-    let current = keyfile::read(&keyfile::path(&settings))?.expect("backup wrote the keyring");
-    assert!(!current.lost.get(&l.alex).is_some_and(|losses| losses.contains(&sha)));
+    let current = read_restore_losses(&settings)?;
+    assert!(!current.get(&l.alex).is_some_and(|losses| losses.contains(&sha)));
 
     let target = TestDb::empty().await?;
     let mut restored = target.settings(&l.dir.path().join("restored-older"))?;
@@ -1874,8 +1928,13 @@ async fn restore_recovers_an_older_backups_accepted_omission() -> R {
     let next = ownhealth_ops::backup(&restored, &l.dir.path().join("next")).await?;
     let report = ownhealth_ops::verify_restore(&restored, &next).await?;
     assert_eq!(report["ok"], true, "{report:#}");
-    let ring = keyfile::read(&keyfile::path(&restored))?.expect("restore recorded the omission");
-    assert!(ring.lost[&l.alex].contains(&sha));
+    assert!(read_restore_losses(&restored)?[&l.alex].contains(&sha));
+
+    assert!(store.drop_sealed(owner, &sha)?);
+    let newer_without_repair = ownhealth_ops::backup(&settings, &l.dir.path().join("newer-missing")).await?;
+    let report = ownhealth_ops::verify_restore(&settings, &newer_without_repair).await?;
+    assert_eq!(strs(&report["blobs"]["missing"]), [sha], "{report:#}");
+    assert_eq!(report["ok"], false, "{report:#}");
 
     fs::remove_file(&tree_files(&restored.blobs_path())?[&plain_sha])?;
     let unrelated = ownhealth_ops::backup(&restored, &l.dir.path().join("unrelated-loss")).await?;

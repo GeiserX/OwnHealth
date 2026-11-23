@@ -14,8 +14,7 @@
 //! ```text
 //! {"schema": "ownhealth.keyring/v1", "kek_fingerprint": "<16 hex>",
 //!  "profiles": {"<profile uuid>": "<base64 wrapped key>"}, "shredded": ["<profile uuid>"],
-//!  "shredded_keys": {"<profile uuid>": ["<64 hex archive id>"]},
-//!  "lost": {"<profile uuid>": ["<sha256 hex>"]}}
+//!  "shredded_keys": {"<profile uuid>": ["<64 hex archive id>"]}}
 //! ```
 //!
 //! A rewrite merges the table into the file: a key the table holds goes in unless the file's tombstone
@@ -33,9 +32,7 @@
 //! ([`live_key`]): a dump from before 1.0 has no key table, so its restore installs no key, and a key
 //! made instead would replace the one every backup since is sealed under.
 //!
-//! `lost` lists the files a restore loaded without the key that opens them (a key the keyring lacked
-//! or held in another version, `--allow-missing-keys`): the operator accepted their loss, so later
-//! backups do not require them. A profile delete drops its entry.
+//! Accepted restore losses live with their blob store (see [`crate::blobs::RestoreLosses`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, TryLockError};
@@ -68,8 +65,6 @@ pub struct KeyringFile {
     /// The archive ids of the shredded keys, for the profiles of `shredded` whose key the file held.
     /// A profile there may hold a newer key in `profiles`.
     pub shredded_keys: BTreeMap<Uuid, BTreeSet<String>>,
-    /// The sha256 of each accepted omission from a restore, by profile.
-    pub lost: BTreeMap<Uuid, BTreeSet<String>>,
 }
 
 impl KeyringFile {
@@ -88,10 +83,9 @@ impl std::fmt::Debug for KeyringFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "KeyringFile({} keys, {} shredded, {} profiles with lost files)",
+            "KeyringFile({} keys, {} shredded)",
             self.profiles.len(),
-            self.shredded.len(),
-            self.lost.len()
+            self.shredded.len()
         )
     }
 }
@@ -306,7 +300,6 @@ fn parse(v: &Value) -> Option<KeyringFile> {
         shredded.insert(Uuid::parse_str(id.as_str()?).ok()?);
     }
     let shredded_keys = id_lists(&v["shredded_keys"])?;
-    let lost = id_lists(&v["lost"])?;
     // a key with no fingerprint, ids for a profile not shredded, or a key kept under a tombstone that
     // closes every key, is not a file `write` makes
     if (kek_fingerprint.is_none() && !profiles.is_empty())
@@ -322,7 +315,6 @@ fn parse(v: &Value) -> Option<KeyringFile> {
         profiles,
         shredded,
         shredded_keys,
-        lost,
     })
 }
 
@@ -371,7 +363,6 @@ fn to_json(k: &KeyringFile) -> Value {
         "profiles": profiles,
         "shredded": k.shredded.iter().map(Uuid::to_string).collect::<Vec<_>>(),
         "shredded_keys": id_lists_json(&k.shredded_keys),
-        "lost": id_lists_json(&k.lost),
     })
 }
 
@@ -499,7 +490,7 @@ pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<Key
     let mut ring = read_for_install(settings)?.unwrap_or_default();
     let rows: Vec<KeyRow> =
         sqlx::query_as("select profile_id, wrapped_dek, kek_fingerprint from profile_key order by profile_id")
-            .fetch_all(conn)
+            .fetch_all(&mut *conn)
             .await?;
     remove_leftovers(&dir)?;
     // the id of a wrapped key, or None when it does not open (then it counts as an unknown key)
@@ -525,7 +516,7 @@ pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<Key
                 let fingerprint = ring.kek_fingerprint.clone().unwrap_or_default();
                 let named = ring.shredded_keys.contains_key(&id) || !ring.shredded.contains(&id);
                 let removed = ring.profiles.remove(&id);
-                let newly_shredded = ring.shredded.insert(id) || removed.is_some();
+                ring.shredded.insert(id);
                 match removed.map(|w| archive_id(id, &fingerprint, &w)) {
                     // the file held the key: the tombstone names it
                     Some(Some(key)) if named => {
@@ -538,13 +529,23 @@ pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<Key
                     // nothing new to close: the tombstone stays as it is, or closes every key
                     None => {}
                 }
-                // A restore can record specific sealed losses under an existing tombstone.
-                if newly_shredded {
-                    ring.lost.remove(&id);
-                }
             }
         }
     }
     write(&dir, &ring)?;
+    // Restoring an older dump can bring a tombstoned profile's records back. Keep its
+    // accepted losses until the profile row actually goes, including on a second delete.
+    let mut losses = crate::blobs::read_restore_losses(settings).map_err(|e| KeyError(e.to_string()))?;
+    if !losses.is_empty() {
+        let ids: Vec<_> = losses.keys().copied().collect();
+        let present: Vec<Uuid> = sqlx::query_scalar("select id from profile where id = any($1)")
+            .bind(&ids)
+            .fetch_all(conn)
+            .await?;
+        if present.len() < ids.len() {
+            losses.retain(|id, _| present.contains(id));
+            crate::blobs::write_restore_losses(settings, &losses).map_err(|e| KeyError(e.to_string()))?;
+        }
+    }
     Ok(ring)
 }
