@@ -1253,38 +1253,58 @@ async fn a_zone_replacement_runs_the_other_export_again_when_its_follow_up_is_st
 #[tokio::test]
 async fn a_retraction_after_a_zone_change_reads_the_others_in_their_own_zone() -> R {
     let env = Env::new().await?;
-    // two exports read in Madrid; then the zone of a new run changes (here: none), and one is retracted
-    import_in_zone(&env, "lucia", &fixture("clarity-en-mgdl.csv")?, Some("Europe/Madrid")).await?;
-    let sha = env.blobs.put_bytes(
-        BlobOwner::Profile(env.fam.profile("lucia")),
-        &fixture("libreview-en-mgdl.csv")?,
-    )?;
+    // two exports of one sensor read in Madrid: a.csv 10:00 to 11:55 and b.csv 11:00 to 12:55 local, and
+    // a.csv came first, so it owns 11:00 to 11:55; then the zone of a new run changes (here: none), and
+    // a.csv is retracted
     let mut c = env.db.pool.acquire().await?;
-    let other = ownhealth_ingest_structured::jobs::document_of_type(
-        &mut c,
-        &env.blobs,
-        &json!({"profile_id": env.fam.profile("lucia").to_string(), "household_id": env.fam.household_id.to_string(),
-                "blob_sha256": sha, "filename": "libre.csv"}),
-        "text/csv",
-        "upload",
-        documents::WEARABLES_DOC_TYPE,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    cgm_csv::import_cgm_csv(&mut c, &env.blobs, other, None, Some("Europe/Madrid")).await?;
-    let before = owned(&env, "lucia").await?;
-    assert_eq!(before.len(), 8 + 13);
+    let mut docs = Vec::new();
+    for (name, h0, h1) in [("a.csv", 10, 11), ("b.csv", 11, 12)] {
+        let bytes = clarity_at(&every_5("2026-11-14", h0, h1));
+        let sha = env
+            .blobs
+            .put_bytes(BlobOwner::Profile(env.fam.profile("lucia")), &bytes)?;
+        let doc = ownhealth_ingest_structured::jobs::document_of_type(
+            &mut c,
+            &env.blobs,
+            &json!({
+                "profile_id": env.fam.profile("lucia").to_string(),
+                "household_id": env.fam.household_id.to_string(),
+                "blob_sha256": sha,
+                "filename": name,
+            }),
+            "text/csv",
+            "upload",
+            documents::WEARABLES_DOC_TYPE,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        cgm_csv::import_cgm_csv(&mut c, &env.blobs, doc, None, Some("Europe/Madrid")).await?;
+        docs.push(doc);
+    }
+    let count = |r: &[(String, DateTime<Utc>, f32)], name: &str| r.iter().filter(|x| x.0 == name).count();
+    let r = owned(&env, "lucia").await?;
+    assert_eq!((count(&r, "a.csv"), count(&r, "b.csv")), (24, 12));
     sqlx::query("update document set status = 'retracted' where id = $1")
-        .bind(other)
+        .bind(docs[0])
         .execute(&mut *c)
         .await?;
-    ownhealth_ingest_structured::retract::retract_document_facts(&mut c, other, "wrong file").await?;
+    ownhealth_ingest_structured::retract::retract_document_facts(&mut c, docs[0], "wrong file").await?;
     drop(c);
     jobs::drain(&env.ctx, "core", 5, None).await?;
-    // the Clarity export is read again in Madrid, the zone of its file: nothing moves, nothing doubles
-    let after = owned(&env, "lucia").await?;
-    let clarity: Vec<_> = before.into_iter().filter(|x| x.0 == "clarity.csv").collect();
-    assert_eq!(after, clarity);
+    // b.csv is read again in Madrid, the zone of its file: it brings back 11:00 to 11:55 local as its
+    // own, at 10:00 to 10:55 UTC (CET, +60), and nothing doubles
+    let r = owned(&env, "lucia").await?;
+    assert_eq!((count(&r, "a.csv"), count(&r, "b.csv")), (0, 24), "{r:?}");
+    let expected: Vec<(DateTime<Utc>, f32, Option<i16>)> = (0..24)
+        .map(|k| {
+            (
+                utc(2026, 11, 14, 10, 0, 0) + chrono::Duration::minutes(5 * k),
+                100.0,
+                Some(60),
+            )
+        })
+        .collect();
+    assert_eq!(readings(&env, "lucia").await?, expected);
     Ok(())
 }
 
