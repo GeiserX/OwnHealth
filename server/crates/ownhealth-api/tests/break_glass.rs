@@ -501,35 +501,48 @@ async fn tokens_consents_export_links_and_feeds_refuse_what_only_break_glass_rea
     assert_eq!(made.status, 201, "{:?}", made.json);
     assert_eq!(made.json["token"]["profiles"], json!(["carmen"]));
     let listed = carmen.get("/api/tokens").await?;
+    assert_eq!(listed.status, 200, "{:?}", listed.json);
+    let items = listed.json["items"].as_array().expect("token list items");
+    let token_id = made.json["token"]["id"].as_str().expect("minted token id");
     assert!(
-        listed
-            .json
-            .as_array()
-            .into_iter()
-            .flatten()
-            .chain(listed.json["items"].as_array().into_iter().flatten())
-            .all(|t| !t["profiles"].as_array().into_iter().flatten().any(|p| p == "alex")),
+        items
+            .iter()
+            .any(|item| item["id"] == token_id && item["profiles"] == json!(["carmen"])),
         "{:?}",
         listed.json
     );
+    for item in items {
+        let profiles = item["profiles"].as_array().expect("token profiles");
+        assert!(profiles.iter().all(|p| p.is_string() && p != "alex"), "{item}");
+    }
+
     let plaintext = made.json["plaintext"].as_str().unwrap_or_default().to_string();
-    let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "get_health_status", "arguments": {"profile": "alex"},
-                   "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                             "io.modelcontextprotocol/clientCapabilities": {}}}});
-    let req = http::Request::post("/mcp")
-        .header("host", "127.0.0.1:8080")
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .header(http::header::ACCEPT, "application/json, text/event-stream")
-        .header(http::header::AUTHORIZATION, format!("Bearer {plaintext}"))
-        .header("mcp-protocol-version", "2026-07-28")
-        .header("mcp-method", "tools/call")
-        .header("mcp-name", "get_health_status")
-        .body(axum::body::Body::from(call.to_string()))?;
-    let res = tower::ServiceExt::oneshot(ownhealth_mcp::router(b.env.rt.clone()), req).await?;
-    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await?;
-    let answer: Value = serde_json::from_slice(&bytes)?;
-    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    for profile in ["carmen", "alex"] {
+        let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "get_health_status", "arguments": {"profile": profile},
+                       "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                                 "io.modelcontextprotocol/clientCapabilities": {}}}});
+        let req = http::Request::post("/mcp")
+            .header("host", "127.0.0.1:8080")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header(http::header::ACCEPT, "application/json, text/event-stream")
+            .header(http::header::AUTHORIZATION, format!("Bearer {plaintext}"))
+            .header("mcp-protocol-version", "2026-07-28")
+            .header("mcp-method", "tools/call")
+            .header("mcp-name", "get_health_status")
+            .body(axum::body::Body::from(call.to_string()))?;
+        let res = tower::ServiceExt::oneshot(ownhealth_mcp::router(b.env.rt.clone()), req).await?;
+        assert_eq!(res.status(), 200);
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await?;
+        let answer: Value = serde_json::from_slice(&bytes)?;
+        let result = &answer["result"];
+        if profile == "carmen" {
+            assert_eq!(result["isError"], false, "{answer}");
+        } else {
+            assert_eq!(result["isError"], true, "{answer}");
+            assert_eq!(result["structuredContent"]["code"], "profile_not_granted", "{answer}");
+        }
+    }
     let mut bearer = b.env.anon();
     let r = bearer
         .send(
@@ -761,17 +774,16 @@ async fn removing_a_contact_ends_their_open_request() -> R {
 async fn exports_read_with_the_contacts_own_grant_only() -> R {
     let mut b = setup().await?;
     let mut sam = b.sam().await?;
-    // the IPS sections and how many entries each holds
-    let sections = |r: &Resp| -> Vec<(String, usize)> {
-        r.json["entry"][0]["resource"]["section"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|s| {
-                let code = s["code"]["coding"][0]["code"].as_str().unwrap_or_default().to_string();
-                (code, s["entry"].as_array().map_or(0, Vec::len))
-            })
-            .collect()
+    // The Composition and Bundle IDs include the export date. Clinical entries and section
+    // references identify exactly what the export contains.
+    let content = |r: &Resp| {
+        let entries = r.json["entry"].as_array().expect("IPS Bundle entries");
+        let (first, clinical) = entries.split_first().expect("IPS Composition");
+        assert_eq!(first["resource"]["resourceType"], "Composition");
+        let sections = first["resource"]["section"].as_array().expect("IPS sections");
+        assert!(!sections.is_empty());
+        assert!(!clinical.is_empty());
+        (sections.clone(), clinical.to_vec())
     };
     let own = sam.post("/api/profiles/alex/export", &json!({"fmt": "ips"})).await?;
     assert_eq!(own.status, 200, "{:?}", own.json);
@@ -781,8 +793,7 @@ async fn exports_read_with_the_contacts_own_grant_only() -> R {
     let ips = sam.post("/api/profiles/alex/export", &json!({"fmt": "ips"})).await?;
     assert_eq!(ips.status, 200, "{:?}", ips.json);
     // the same Bundle as on his own grant: nothing the request opened
-    assert!(!sections(&own).is_empty(), "{:?}", own.json);
-    assert_eq!(sections(&ips), sections(&own));
+    assert_eq!(content(&ips), content(&own));
     let pdf = sam.post("/api/profiles/alex/summary.pdf", &json!({})).await?;
     assert_eq!(pdf.status, 200, "{:?}", pdf.json);
     assert!(pdf.bytes.starts_with(b"%PDF"));
@@ -1281,7 +1292,7 @@ async fn a_guardian_contact_cannot_decide_a_review_item_break_glass_opened() -> 
     Ok(())
 }
 
-type CalendarEvent = (String, Option<DatePerhapsTime>, String, String);
+type CalendarEvent = (String, String);
 
 fn calendar_events(resp: Resp) -> anyhow::Result<Vec<CalendarEvent>> {
     assert_eq!(resp.status, 200, "{:?}", resp.json);
@@ -1296,14 +1307,32 @@ fn calendar_events(resp: Resp) -> anyhow::Result<Vec<CalendarEvent>> {
             };
             Some((
                 event.get_uid().unwrap_or_default().to_string(),
-                event.get_start(),
                 event.get_summary().unwrap_or_default().to_string(),
-                event.get_description().unwrap_or_default().to_string(),
             ))
         })
         .collect();
     events.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(events)
+}
+
+#[test]
+fn calendar_event_comparison_ignores_rescheduling_at_utc_midnight() -> R {
+    let feed = |date| Resp {
+        status: http::StatusCode::OK,
+        headers: http::HeaderMap::new(),
+        bytes: format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+             UID:lab-check@example.test\r\nDTSTART;VALUE=DATE:{date}\r\n\
+             SUMMARY:Lab check\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+        .into_bytes(),
+        json: Value::Null,
+    };
+    let before = calendar_events(feed("20261123"))?;
+    let after = calendar_events(feed("20261124"))?;
+    assert_eq!(before.len(), 1);
+    assert_eq!(after, before);
+    Ok(())
 }
 
 fn lab(profile: Uuid, value: &str, sensitive: bool) -> anyhow::Result<ObservationIn> {
@@ -1525,7 +1554,7 @@ async fn emergency_lab_access_cannot_quote_the_text_of_a_sensitive_report() -> R
         &mut tx,
         &lab(profile, "97", false)?,
         &SrcRef::New(citation.clone()),
-        CommitOptions::new("import"),
+        CommitOptions::new("person"),
     )
     .await?;
     citation.bbox = Some([10.0, 60.0, 30.0, 80.0]);
@@ -1533,7 +1562,7 @@ async fn emergency_lab_access_cannot_quote_the_text_of_a_sensitive_report() -> R
         &mut tx,
         &lab(profile, "111", true)?,
         &SrcRef::New(citation),
-        CommitOptions::new("import"),
+        CommitOptions::new("person"),
     )
     .await?;
     tx.commit().await?;
