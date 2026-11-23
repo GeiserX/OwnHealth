@@ -16,7 +16,7 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, Postgres, Transaction};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -592,6 +592,38 @@ pub async fn enqueue_poll(conn: &mut PgConnection, source_id: Uuid) -> Result<Op
         EnqueueOptions::dedupe(&key),
     )
     .await?)
+}
+
+/// Queue the first pull of a grant in the same transaction that saves the grant. A queued poll
+/// reads the new grant. If the poll is already running, move its dedupe key aside and queue one
+/// successor under the original key. The worker waits for the previous job before claiming it.
+pub async fn enqueue_grant_poll(tx: &mut Transaction<'_, Postgres>, source_id: Uuid) -> Result<()> {
+    let key = format!("{POLL_JOB}:{source_id}");
+    loop {
+        if enqueue_poll(tx, source_id).await?.is_some() {
+            return Ok(());
+        }
+        let active: Option<(i64, bool)> = sqlx::query_as(
+            "select id, state = 'running' from job \
+             where dedupe_key = $1 and state in ('queued', 'running') for update",
+        )
+        .bind(&key)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some((job_id, running)) = active else {
+            // The existing job finished before we locked it. Try the now-free key again.
+            continue;
+        };
+        if running {
+            sqlx::query("update job set dedupe_key = $2 where id = $1")
+                .bind(job_id)
+                .bind(format!("{key}{}", jobs::PREVIOUS_POLL_SUFFIX))
+                .execute(&mut **tx)
+                .await?;
+            enqueue_poll(tx, source_id).await?;
+        }
+        return Ok(());
+    }
 }
 
 /// One scheduler pass: `add_default_sources`, `schedule_due`, then `sweep_link_files`, so a sweep

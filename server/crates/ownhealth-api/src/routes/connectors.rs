@@ -461,10 +461,9 @@ async fn callback(State(rt): State<Runtime>, meta: Meta, Query(q): Params, o: Op
         "connector.connect"
     };
     audit(&mut tx, &p, action, pending.profile_id, id, None, false).await?;
-    // the first pull of a new grant runs now, so the card shows what it brought (a reconnect too:
-    // its failures were the old grant's)
+    // The first pull shows what the new grant brought. On reconnect it follows any active pull.
     if sources::poller_for(&pending.kind).is_some() {
-        sources::enqueue_poll(&mut tx, id).await?;
+        sources::enqueue_grant_poll(&mut tx, id).await?;
     }
     tx.commit().await?;
     oauth::remember(id, &tokens, now);

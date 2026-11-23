@@ -274,11 +274,18 @@ pub async fn enqueue(
     Ok(id)
 }
 
-/// Claim the next ready job on `queue` (optionally only these kinds) with SKIP LOCKED.
+/// Reserved by `sources::enqueue_grant_poll` for the previous poll of a reconnected source.
+pub(crate) const PREVIOUS_POLL_SUFFIX: &str = ":previous";
+
+/// Claim the next ready job on `queue` (optionally only these kinds) with SKIP LOCKED. A source
+/// poll that follows a previous job waits through any retries of that job.
 pub async fn claim(pool: &PgPool, queue: &str, worker_id: &str, kinds: Option<&[String]>) -> sqlx::Result<Option<Job>> {
     sqlx::query_as(
-        "with next as (select id from job where queue = $1 and state = 'queued' and run_after <= now() \
-         and ($4::text[] is null or kind = any($4::text[])) order by priority, id for update skip locked limit 1) \
+        "with next as (select j.id from job j where j.queue = $1 and j.state = 'queued' and j.run_after <= now() \
+         and ($4::text[] is null or j.kind = any($4::text[])) \
+         and (j.kind <> 'source.poll' or not exists (select 1 from job previous \
+           where previous.dedupe_key = j.dedupe_key || $5 and previous.state in ('queued', 'running'))) \
+         order by j.priority, j.id for update of j skip locked limit 1) \
          update job set state = 'running', attempts = attempts + 1, locked_by = $2, \
          locked_until = now() + make_interval(secs => $3) from next where job.id = next.id \
          returning job.id, job.queue, job.kind, job.payload, job.attempts, job.max_attempts, job.dedupe_key",
@@ -287,6 +294,7 @@ pub async fn claim(pool: &PgPool, queue: &str, worker_id: &str, kinds: Option<&[
     .bind(worker_id)
     .bind(LEASE_SECONDS)
     .bind(kinds)
+    .bind(PREVIOUS_POLL_SUFFIX)
     .fetch_optional(pool)
     .await
 }
