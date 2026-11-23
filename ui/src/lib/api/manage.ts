@@ -24,7 +24,9 @@ import type {
 	WearablesSummary
 } from './types';
 
-export const getWearables = (profile: string, lang?: string) => get<WearablesSummary>(`${p(profile)}/wearables/summary`, { lang });
+/** `days`: the window the summary reads (7 to 366, the server's 90 when absent). */
+export const getWearables = (profile: string, lang?: string, days?: number) =>
+	get<WearablesSummary>(`${p(profile)}/wearables/summary`, { lang, days });
 
 /** `latest: 'fhir'`: only the documents a FHIR import read (a file or a connector pull), the newest stored first. */
 export const listDocuments = (profile: string, q: { q?: string; type?: string; latest?: 'fhir'; limit?: number } = {}) =>

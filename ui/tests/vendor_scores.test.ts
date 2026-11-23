@@ -11,11 +11,13 @@ import {
 	keepWindow,
 	MAX_DAYS,
 	measurementDays,
+	needsWindowRead,
 	providerLabel,
 	scoreDecimals,
 	scoreRows,
 	scoreSpanDays,
 	windowChoices,
+	windowEntry,
 	windowWordKey,
 	type VendorScore
 } from '../src/routes/wearables/scores.ts';
@@ -196,4 +198,25 @@ test('vendor scores: a profile switch keeps the chosen window while it can, and 
 	assert.match(page, /windowChoices\(Math\.max\(span, scoreSpan \?\? 0\)\)/);
 	const card = readFileSync(new URL('../src/routes/wearables/VendorScores.svelte', import.meta.url), 'utf8');
 	assert.match(card, /span = s\.loading \? null : scoreSpanDays\(all, Date\.now\(\)\);/);
+});
+
+test('an HRV chart of fewer days than the summary read draws the read of those days', () => {
+	const days = (n: number) => Array.from({ length: n }, () => ({ value: null }));
+	const note = 'HRV from one source only: Apple Watch. Not mixed with HRV from other sources in this window: Oura Ring.';
+	const long = { metric: 'hrv_rmssd', series: days(90), limitations: [note], source: 'Apple Watch' };
+	// only an HRV entry that left a source out, and only for fewer days than it holds
+	assert.equal(needsWindowRead(long, 7), true);
+	assert.equal(needsWindowRead(long, 30), true);
+	assert.equal(needsWindowRead(long, 90), false);
+	assert.equal(needsWindowRead({ ...long, limitations: undefined }, 7), false);
+	assert.equal(needsWindowRead({ ...long, metric: 'hr_resting' }, 7), false);
+	// the read of the 7 days chose the ring: its entry is drawn, with no note
+	const ring = { metric: 'hrv_rmssd', series: days(7), source: 'Oura Ring' };
+	assert.equal(windowEntry(long, 7, [ring]), ring);
+	// not in yet: the long entry; nothing in those days: the long entry without its note
+	assert.equal(windowEntry(long, 7, null), long);
+	assert.deepEqual(windowEntry(long, 7, []).limitations, []);
+	assert.equal(windowEntry(long, 90, [ring]), long);
+	const steps = { metric: 'steps', series: days(90) };
+	assert.equal(windowEntry(steps, 7, [{ metric: 'steps', series: days(7) }]), steps);
 });

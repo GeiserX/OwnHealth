@@ -19,7 +19,7 @@
 	import { ago } from '#lib/components/pages2/fmt';
 	import { currentProfile } from '#lib/state/app.svelte';
 	import VendorScores from './VendorScores.svelte';
-	import { DEFAULT_DAYS, keepWindow, measurementDays, windowChoices, windowWordKey } from './scores';
+	import { DEFAULT_DAYS, keepWindow, measurementDays, needsWindowRead, windowChoices, windowEntry, windowWordKey } from './scores';
 
 	// How each known metric draws, as in the mockup. Unknown metrics get a plain line.
 	// `max` and `minSpan` keep an axis honest: SpO2 never passes 100 %, and a 1 bpm change is not a cliff.
@@ -89,6 +89,22 @@
 	});
 	// The days the measurement charts really show: a year opened by the scores is cut to the longest series.
 	const mDays = $derived(measurementDays(days, span));
+	// An HRV chart of fewer days than the summary read may have another best source (scores.ts
+	// needsWindowRead): one more summary read of those days, keyed so an older answer is never drawn.
+	const wv = new Loader<{ key: string; metrics: WearableMetric[] }>();
+	const winKey = $derived.by(() => {
+		const n = mDays;
+		const needed = (w.data?.metrics ?? []).some((m) => needsWindowRead(m, n));
+		return needed && profile?.slug ? `${profile.slug}:${n}:${i18n.lang}` : null;
+	});
+	$effect(() => {
+		const key = winKey;
+		const slug = profile?.slug;
+		const lang = i18n.lang;
+		const n = mDays;
+		if (key && slug) wv.run(async () => ({ key, metrics: (await getWearables(slug, lang, n)).metrics }), key);
+	});
+	const win = $derived(wv.data && wv.data.key === winKey ? wv.data.metrics : null);
 	const fmtDay = (d: string) => new Intl.DateTimeFormat(intlLocale(i18n.lang), { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(d));
 
 	function chart(m: WearableMetric) {
@@ -172,7 +188,8 @@
 		{/each}
 	</div>
 	<div class="wg">
-		{#each metrics as m (m.metric)}
+		{#each metrics as m0 (m0.metric)}
+			{@const m = windowEntry(m0, mDays, win)}
 			{@const c = chart(m)}
 			<div class="card">
 				<h3>

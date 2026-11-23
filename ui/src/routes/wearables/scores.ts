@@ -73,6 +73,29 @@ export function measurementDays(days: number, span: number): number {
 	return span > 0 ? Math.min(days, span) : days;
 }
 
+/** The part of a summary entry that the HRV window rule reads. */
+interface Entry {
+	metric: string;
+	series: unknown[];
+	limitations?: string[];
+}
+
+/** An HRV chart shows one source: the best one with data in the days the summary read (its series,
+ * 90 days). The best one of the fewer days on screen may be another source, and the note would then
+ * name the wrong one, so the page reads the summary again for those days. Only an HRV entry that left a
+ * source out can change. */
+export function needsWindowRead(m: Entry, mDays: number): boolean {
+	return m.metric.startsWith('hrv_') && (m.limitations?.length ?? 0) > 0 && mDays < m.series.length;
+}
+
+/** The entry a card draws for the days on screen. `win` holds the entries of the summary read for those
+ * days, null until it is in (the long entry shows meanwhile). With no HRV in those days at all, the long
+ * entry's days on screen are empty too; it then shows without its note. */
+export function windowEntry<M extends Entry>(m: M, mDays: number, win: M[] | null): M {
+	if (win == null || !needsWindowRead(m, mDays)) return m;
+	return win.find((x) => x.metric === m.metric) ?? { ...m, limitations: [] };
+}
+
 /** The server's categories (ownhealth-devices scores::CATEGORIES), in the order the card lists them. */
 export const CATEGORIES = ['readiness', 'recovery', 'sleep', 'activity', 'stress', 'strain', 'body_battery'] as const;
 

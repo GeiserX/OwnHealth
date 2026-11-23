@@ -55,3 +55,32 @@ test('an HRV chart names the vendor it shows and the one it left out, in English
 	await shot(page, 'wearables-hrv-note-es.png');
 	expect(errors).toEqual([]);
 });
+
+// The summary reads 90 days, and the best HRV source of those days may have no day in the 7 on screen.
+// The page then reads those 7 days again: the chart and its note name the best source of the 7 days.
+// The ring and the band as above (the seeds are idempotent), plus a watch with more, older days.
+test('the HRV chart and its note follow the window on screen', async ({ page }) => {
+	const errors: string[] = [];
+	page.on('pageerror', (e) => errors.push(e.message));
+	hrv('oura', 'Oura Ring', [2, 4, 6, 8], 48);
+	hrv('gadgetbridge', 'Amazfit Band', [1, 3, 5, 7], 71);
+	hrv('fit', 'Forerunner 265', Array.from({ length: 16 }, (_, i) => 10 + i), 55);
+	await page.goto('/wearables?lang=en');
+	await page.getByRole('button', { name: 'Lucía Rivera', exact: true }).click();
+	const card = page.locator('.card', { hasText: 'HRV (RMSSD)' });
+	// 30 days: the watch has the most days, so it is the one source
+	await expect(page.getByRole('button', { name: '30 d', exact: true })).toHaveAttribute('aria-pressed', 'true', { timeout: 30_000 });
+	await expect(card.locator('.note')).toHaveText(/^HRV from one source only: Forerunner 265\./, { timeout: 30_000 });
+	await page.getByRole('button', { name: '7 d', exact: true }).click();
+	// 7 days: the watch has none, so the band (newer than the ring) is drawn and named
+	await expect(card.locator('.note')).toHaveText(
+		'HRV from one source only: Amazfit Band. Not mixed with HRV from other sources in this window: Oura Ring.',
+		{ timeout: 30_000 }
+	);
+	await expect(card.locator('.src')).toHaveText('Amazfit Band');
+	await expect(card.getByText('No values yet.')).toHaveCount(0);
+	await shot(page, 'wearables-hrv-7d-en.png');
+	await page.getByRole('button', { name: '30 d', exact: true }).click();
+	await expect(card.locator('.note')).toHaveText(/^HRV from one source only: Forerunner 265\./, { timeout: 30_000 });
+	expect(errors).toEqual([]);
+});
