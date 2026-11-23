@@ -782,11 +782,13 @@ pub async fn search_observations(call: &mut Call<'_>) -> ToolResult<Answer> {
             .collect();
     }
 
+    // days a withheld vendor holds were measured: the answer never calls them not measured
+    let vendor_days = withheld.get("vendor_terms").and_then(Value::as_u64).unwrap_or(0) > 0;
     let empty = results.is_empty();
     let mut data = Map::new();
     data.insert("resolved".into(), Value::Object(resolved));
     data.insert("results".into(), Value::Array(results));
-    if empty {
+    if empty && !vendor_days {
         data.insert("not_measured".into(), Value::Bool(true));
         limitations.push(json!("No matching value in this window. Not measured is not normal."));
     }

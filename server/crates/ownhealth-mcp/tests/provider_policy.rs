@@ -99,11 +99,19 @@ async fn search_observations_leaves_out_a_withheld_vendor_and_counts_it() -> R {
     assert_eq!(vendor_terms(&hr), 20, "{hr}");
     assert!(says_vendor_terms(&hr), "{hr}");
     assert!(!dumps(&hr).contains("Oura"), "{hr}");
-    // a metric only the withheld vendors hold: nothing measured, and the count says why
+    // a metric only the withheld vendors hold: nothing shown, and the count says why. The person did
+    // measure it, so the answer never says it was not measured.
     let cgm = c.call("search_observations", search("glucose_cgm")).await?.ok();
     assert_eq!(values(&cgm, "results"), Vec::<Option<f64>>::new(), "{cgm}");
     assert_eq!(vendor_terms(&cgm), 20, "{cgm}");
+    assert!(says_vendor_terms(&cgm), "{cgm}");
+    assert!(cgm["data"].get("not_measured").is_none(), "{cgm}");
+    assert!(!dumps(&cgm["limitations"]).contains("Not measured"), "{cgm}");
     assert!(!dumps(&cgm).contains("Dexcom"), "{cgm}");
+    // with no withheld day either, the empty answer still says not measured
+    let none = c.call("search_observations", search("spo2")).await?.ok();
+    assert_eq!(none["data"]["not_measured"], json!(true), "{none}");
+    assert!(none["withheld"].get("vendor_terms").is_none(), "{none}");
     // a served metric with no withheld day keeps the envelope it always had
     let steps = c.call("search_observations", search("steps")).await?.ok();
     assert_eq!(values(&steps, "results"), vec![Some(8000.0); 5], "{steps}");
