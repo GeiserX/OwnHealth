@@ -892,3 +892,103 @@ async fn round3_an_unsupported_text_encoding_holds_the_study_without_guessing() 
     assert_eq!(e.orthanc.posts(), 0);
     Ok(())
 }
+
+/// Replaces every `from` in the files with `to`, of the same length: bytes the generator cannot write
+/// (text outside the declared repertoire).
+fn patch(files: &mut [(String, Vec<u8>)], from: &[u8], to: &[u8]) {
+    assert_eq!(from.len(), to.len());
+    for (_, bytes) in files.iter_mut() {
+        let mut at = 0;
+        while let Some(i) = bytes[at..].windows(from.len()).position(|w| w == from) {
+            bytes[at + i..at + i + from.len()].copy_from_slice(to);
+            at += i + from.len();
+        }
+    }
+}
+
+/// A description is not identity: one in ISO 8859-1 with no declared repertoire, as CDs write it,
+/// keeps its text and holds nothing.
+#[tokio::test]
+async fn round4_a_latin_1_description_with_no_declared_repertoire_imports() -> R {
+    let e = env().await?;
+    let mut files = study_files(&Study::new(U1, ALEX), "DICOM");
+    patch(&mut files, b"TC TORAX", b"TC T\xd3RAX");
+    let up = e.upload("alex", &files).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{error:?}");
+    assert_eq!(result["imported"], 1, "{result}");
+    assert!(e.in_review("alex").await?.is_empty());
+    assert_eq!(e.orthanc.posts(), 6);
+    let description: Option<String> =
+        sqlx::query_scalar("select description from imaging_study where study_instance_uid = $1")
+            .bind(U1)
+            .fetch_one(&e.rt.pool)
+            .await?;
+    assert_eq!(description.as_deref(), Some("TC TÓRAX"));
+    Ok(())
+}
+
+/// A single-byte repertoire declared in its ISO 2022 form reads as its base repertoire when no value
+/// switches sets.
+#[tokio::test]
+async fn round4_a_single_byte_iso_2022_repertoire_imports() -> R {
+    let e = env().await?;
+    let study = Study {
+        charset: "ISO 2022 IR 100",
+        ..Study::new(U1, ALEX)
+    };
+    let up = e.upload("alex", &study_files(&study, "DICOM")).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{error:?}");
+    assert_eq!(result["imported"], 1, "{result}");
+    assert!(e.in_review("alex").await?.is_empty());
+    assert_eq!(e.orthanc.posts(), 6);
+    Ok(())
+}
+
+/// A name the reader cannot decode holds the study before any send; a person may accept it, and the
+/// study is then sent as it is.
+#[tokio::test]
+async fn round4_an_unreadable_name_waits_and_an_accept_imports_the_study() -> R {
+    let e = env().await?;
+    let mut files = study_files(&Study::new(U1, ALEX), "DICOM");
+    patch(&mut files, b"RIVERA^ALEX", b"RIVERA^\xc1LEX");
+    let up = e.upload("alex", &files).await?;
+    e.run().await?;
+    let (_, result, error) = e.job(up.job_id).await?;
+    assert_eq!(result["in_review"], 1, "{result} {error:?}");
+    assert_eq!(e.in_review("alex").await?, [(U1.into(), "unsupported_charset".into())]);
+    assert_eq!(e.orthanc.posts(), 0);
+    let item: Uuid = sqlx::query_scalar("select id from review_item where kind = $1")
+        .bind(REVIEW_KIND)
+        .fetch_one(&e.rt.pool)
+        .await?;
+    let mut c = e.rt.pool.acquire().await?;
+    ownhealth_core::review::accept(&mut c, item, e.fam.user("alex"), None).await?;
+    drop(c);
+    assert_eq!(e.run().await?, 1);
+    assert_eq!(e.recorded(U1).await?.map(|r| r.0), Some(e.fam.profile("alex")));
+    assert_eq!(e.orthanc.patients_under(U1), [ALEX.id.to_string()].into());
+    assert!(e.in_review("alex").await?.is_empty());
+    Ok(())
+}
+
+/// Unreadable names do not hide a second patient under one StudyInstanceUID: the study waits as a
+/// UID conflict, which no one can accept.
+#[tokio::test]
+async fn round4_two_unreadable_patients_under_one_uid_wait_as_a_uid_conflict() -> R {
+    let e = env().await?;
+    let mut files = study_files(&Study::new(U1, ALEX), "A");
+    files.extend(study_files(&Study::new(U1, SAM), "B"));
+    patch(&mut files, b"RIVERA^ALEX", b"RIVERA^\xc1LEX");
+    patch(&mut files, b"RIVERA^SAM", b"RIVERA^S\xc1M");
+    let up = e.upload("alex", &files).await?;
+    e.run().await?;
+    let (_, result, error) = e.job(up.job_id).await?;
+    assert_eq!(result["in_review"], 1, "{result} {error:?}");
+    assert_eq!(e.in_review("alex").await?, [(U1.into(), "uid_conflict".into())]);
+    assert_eq!(e.orthanc.posts(), 0);
+    Ok(())
+}

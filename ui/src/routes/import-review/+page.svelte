@@ -335,7 +335,7 @@
 	// why a row waits, in the reader's language
 	// a held DICOM study has reasons of its own, worded for a disc
 	const reasonsText = (i: ReviewItem) => i.reasons.map((r) => kindWord(i.kind === 'imaging_study' ? 'i2_img_reason_' : 'i2_reason_', r)).join(' · ');
-	const imagingAcceptable = (i: ReviewItem) => ['identity_mismatch', 'second_patient'].includes(String((i.payload as Record<string, unknown>).reason));
+	const imagingAcceptable = (i: ReviewItem) => ['identity_mismatch', 'second_patient', 'unsupported_charset'].includes(String((i.payload as Record<string, unknown>).reason));
 </script>
 
 <PageHeader title={t('nav_imp')} sub={t('i2_imp_sub')}>

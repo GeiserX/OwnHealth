@@ -8,10 +8,10 @@
 //!    ([`ownhealth_core::orthanc::lock_study`]): a study another profile holds, a second patient under
 //!    one UID, or a UID Orthanc already holds under another patient goes to review, and nothing of it
 //!    reaches Orthanc. A study the profile records already, whose series Orthanc holds in full, is
-//!    left alone: the same disc again sends nothing. Then a study whose patient is not the profile's
-//!    (`identity_match`), and on a disc with two or more patients, one that is not clearly the
-//!    profile's, goes to review. The person can accept those two; the import then sends that study as
-//!    it is.
+//!    left alone: the same disc again sends nothing. Then a study whose patient text the reader cannot
+//!    decode, whose patient is not the profile's (`identity_match`), or on a disc with two or more
+//!    patients, one that is not clearly the profile's, goes to review. The person can accept those
+//!    three; the import then sends that study as it is.
 //! 3. The rest is sent to Orthanc file by file; a file Orthanc refuses is counted (`refused_files`).
 //!    Orthanc must then hold exactly one study under the UID, the one every file landed in, with the
 //!    patient the files name; if not, the files this import added are taken back and the study goes
@@ -82,7 +82,7 @@ pub mod reason {
     /// The declared encoding or text values cannot be decoded safely.
     pub const UNSUPPORTED_CHARSET: &str = "unsupported_charset";
     /// The reasons a person may accept: the study is then sent as it is.
-    pub const ACCEPTABLE: [&str; 2] = [IDENTITY, SECOND_PATIENT];
+    pub const ACCEPTABLE: [&str; 3] = [IDENTITY, SECOND_PATIENT, UNSUPPORTED_CHARSET];
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -229,16 +229,16 @@ fn add(s: &mut Scan, i: usize, h: Header) {
     let is_pdf = h.is_pdf();
     let study = s.studies.entry(h.study_instance_uid).or_default();
     study.unsupported_charset |= h.unsupported_charset;
-    if !h.unsupported_charset {
-        let patient = study.patients.entry(h.patient_id).or_default();
-        for (evidence, value) in [
-            (&mut patient.names, h.patient_name),
-            (&mut patient.birth_dates, h.patient_birth_date),
-            (&mut patient.issuers, h.patient_id_issuer),
-        ] {
-            if !value.is_empty() {
-                evidence.insert(value);
-            }
+    // A file whose identity text did not decode still counts its PatientID (as bytes), so a second
+    // patient under the UID is seen; its name and issuer are empty, so they add no evidence.
+    let patient = study.patients.entry(h.patient_id).or_default();
+    for (evidence, value) in [
+        (&mut patient.names, h.patient_name),
+        (&mut patient.birth_dates, h.patient_birth_date),
+        (&mut patient.issuers, h.patient_id_issuer),
+    ] {
+        if !value.is_empty() {
+            evidence.insert(value);
         }
     }
     *study.modalities.entry(h.modality.clone()).or_default() += 1;
@@ -580,9 +580,6 @@ async fn import_study(
             return Ok(Outcome::Retracted);
         }
     }
-    if study.unsupported_charset {
-        return hold(tx, import, profile, uid, study, reason::UNSUPPORTED_CHARSET).await;
-    }
     if study.patients.len() > 1 {
         return hold(tx, import, profile, uid, study, reason::UID_CONFLICT).await;
     }
@@ -621,6 +618,9 @@ async fn import_study(
         held
     } else {
         if !accepted {
+            if study.unsupported_charset {
+                return hold(tx, import, profile, uid, study, reason::UNSUPPORTED_CHARSET).await;
+            }
             let name = patient.name().replace('^', " ");
             let identity = identity_match(
                 Some(name.trim()),
@@ -991,8 +991,8 @@ async fn to_review_item(
     Ok(())
 }
 
-/// Accepting an `imaging_study` item: a study whose patient did not match the profile, or that came on
-/// a disc with other patients, is imported as it is. The other reasons cannot be accepted: another
+/// Accepting an `imaging_study` item: a study whose patient did not match the profile, that came on a
+/// disc with other patients, or whose patient text did not decode, is imported as it is. The other reasons cannot be accepted: another
 /// profile or another patient holds the UID. The refusal names neither, since the item's reviewer may
 /// see neither.
 pub async fn accept(

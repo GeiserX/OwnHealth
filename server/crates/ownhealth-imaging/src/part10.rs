@@ -78,6 +78,9 @@ pub struct Header {
     pub series_instance_uid: String,
     pub patient_id: String,
     pub patient_id_issuer: String,
+    /// The patient name, PatientID or issuer is not in a repertoire the reader decodes. The name and
+    /// issuer are then empty, and the PatientID is its bytes read as ISO 8859-1 (one character per
+    /// byte, so two IDs still differ).
     pub unsupported_charset: bool,
     /// As written, `^` between the name parts.
     pub patient_name: String,
@@ -86,6 +89,8 @@ pub struct Header {
     pub modality: String,
     /// `YYYYMMDD`, as written.
     pub study_date: String,
+    /// In the declared repertoire, else as [`text`] reads it: it is not identity, so it never holds a
+    /// study.
     pub study_description: String,
 }
 
@@ -271,6 +276,28 @@ fn text(raw: &[u8]) -> String {
     s.trim_matches(|c: char| c == ' ' || c == '\0').to_string()
 }
 
+/// The repertoire a Specific Character Set (0008,0005) value declares, when the reader decodes it:
+/// the default, or a single-byte set named in its plain or its ISO 2022 form. Under ISO 2022 only the
+/// first value applies until a value switches sets with ESC, and the reader decodes no value that does,
+/// so the other values are left out. Multi-byte sets (ISO 2022 IR 87, 149, 58, 159) are not read.
+fn repertoire(declared: &str) -> Option<SpecificCharacterSet> {
+    let first = declared
+        .split('\\')
+        .next()
+        .unwrap_or_default()
+        .trim_matches([' ', '\0']);
+    match first {
+        "" | "ISO 2022 IR 6" => Some(SpecificCharacterSet::ISO_IR_6),
+        code => match code.strip_prefix("ISO 2022 IR ") {
+            Some(n @ ("13" | "100" | "101" | "109" | "110" | "126" | "127" | "138" | "144" | "148" | "166")) => {
+                SpecificCharacterSet::from_code(&format!("ISO_IR {n}"))
+            }
+            Some(_) => None,
+            None => SpecificCharacterSet::from_code(code),
+        },
+    }
+}
+
 /// The meta group: (transfer syntax, media storage SOP class, its instance UID, where the data set
 /// starts).
 fn meta(input: impl Read + Seek, end: usize) -> Result<(String, String, String, usize), Part10Error> {
@@ -404,6 +431,7 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
         ..Header::default()
     };
     let mut charset = Some(SpecificCharacterSet::ISO_IR_6);
+    let mut raw_patient_id = Vec::new();
     h.transfer_syntax = walk(buf, 0x0020_000E, MAX_INFLATED_HEADER, |tag, value| {
         let v = || text(value);
         let decode = |charset: &Option<SpecificCharacterSet>| {
@@ -417,23 +445,20 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
         };
         match tag {
             0x0008_0005 => {
-                let code = std::str::from_utf8(value).unwrap_or_default().trim_matches([' ', '\0']);
-                charset = match code {
-                    "" if value.is_ascii() => Some(SpecificCharacterSet::ISO_IR_6),
-                    "ISO 2022 IR 6" => Some(SpecificCharacterSet::ISO_IR_6),
-                    code if !code.starts_with("ISO 2022") => SpecificCharacterSet::from_code(code),
-                    _ => None,
-                };
+                charset = std::str::from_utf8(value).ok().and_then(repertoire);
                 h.unsupported_charset |= charset.is_none();
             }
             0x0008_0016 => h.sop_class_uid = v(),
             0x0008_0018 => h.sop_instance_uid = v(),
             0x0008_0020 => h.study_date = v(),
             0x0008_0060 => h.modality = v(),
-            0x0008_1030 | 0x0010_0010 | 0x0010_0020 | 0x0010_0021 => {
+            0x0008_1030 => h.study_description = decode(&charset).unwrap_or_else(v),
+            0x0010_0010 | 0x0010_0020 | 0x0010_0021 => {
+                if tag == 0x0010_0020 {
+                    raw_patient_id = value.to_vec();
+                }
                 if let Some(text) = decode(&charset) {
                     match tag {
-                        0x0008_1030 => h.study_description = text,
                         0x0010_0010 => h.patient_name = text,
                         0x0010_0020 => h.patient_id = text,
                         _ => h.patient_id_issuer = text,
@@ -451,10 +476,11 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
         true
     })?;
     if h.unsupported_charset {
+        // Identity the reader cannot decode is not guessed: the study waits for a person.
         h.patient_name.clear();
-        h.patient_id.clear();
         h.patient_id_issuer.clear();
-        h.study_description.clear();
+        h.patient_id = raw_patient_id.iter().map(|b| char::from(*b)).collect::<String>();
+        h.patient_id = h.patient_id.trim_matches([' ', '\0']).to_string();
     }
     if h.is_directory() {
         return Ok(h);
@@ -743,6 +769,62 @@ mod tests {
         set[name..name + 11].copy_from_slice(b"\xc0\xd8\xd2\xd5\xe0\xd0^\xb0\xdb\xd5\xda");
         let h = read_header(&file("1.2.840.10008.1.2.1", &set)).expect("header");
         assert_eq!(h.patient_name, "Ривера^Алек");
+    }
+
+    #[test]
+    fn a_description_outside_the_repertoire_keeps_its_text_and_holds_nothing() {
+        let mut set = core(false);
+        before_patient(&mut set, &explicit(false, 0x0008_1030, b"LO", b"TC T\xd3RAX"));
+        let h = read_header(&file("1.2.840.10008.1.2.1", &set)).expect("header");
+        assert!(!h.unsupported_charset);
+        assert_eq!(h.study_description, "TC TÓRAX");
+        assert_eq!(h.patient_name, "RIVERA^ALEX");
+    }
+
+    #[test]
+    fn a_single_byte_iso_2022_repertoire_reads_as_its_base() {
+        for code in [
+            &b"ISO 2022 IR 100"[..],
+            b"ISO 2022 IR 6\\ISO 2022 IR 100",
+            b"\\ISO 2022 IR 144",
+        ] {
+            let mut set = core(false);
+            set.splice(0..0, explicit(false, 0x0008_0005, b"CS", code));
+            let name = set.windows(11).position(|w| w == b"RIVERA^ALEX").expect("patient name");
+            // only the first value applies without an escape: a G1 byte of a later set is not read
+            let latin = code == b"ISO 2022 IR 100";
+            if latin {
+                set[name + 7] = 0xc1;
+            }
+            let h = read_header(&file("1.2.840.10008.1.2.1", &set)).expect("header");
+            assert!(!h.unsupported_charset, "{}", String::from_utf8_lossy(code));
+            let want = if latin { "RIVERA^ÁLEX" } else { "RIVERA^ALEX" };
+            assert_eq!(h.patient_name, want, "{}", String::from_utf8_lossy(code));
+        }
+    }
+
+    #[test]
+    fn an_unreadable_name_holds_and_keeps_the_patient_id_as_bytes() {
+        // a byte outside the default repertoire, and a set switch the reader does not follow
+        for (code, byte) in [
+            (&b""[..], 0xc1u8),
+            (b"ISO 2022 IR 100", 0x1b),
+            (b"ISO 2022 IR 6\\ISO 2022 IR 100", 0xc1),
+            (b"ISO 2022 IR 87", b'A'),
+        ] {
+            let mut set = core(false);
+            if !code.is_empty() {
+                set.splice(0..0, explicit(false, 0x0008_0005, b"CS", code));
+            }
+            before_patient(&mut set, &explicit(false, 0x0008_1030, b"LO", b"TC TORAX"));
+            let name = set.windows(11).position(|w| w == b"RIVERA^ALEX").expect("patient name");
+            set[name + 7] = byte;
+            let h = read_header(&file("1.2.840.10008.1.2.1", &set)).expect("header");
+            assert!(h.unsupported_charset, "{}", String::from_utf8_lossy(code));
+            assert_eq!(h.patient_name, "");
+            assert_eq!(h.patient_id, "LN-0001");
+            assert_eq!(h.study_description, "TC TORAX");
+        }
     }
 
     #[test]
