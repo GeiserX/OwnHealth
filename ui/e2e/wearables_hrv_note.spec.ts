@@ -32,6 +32,23 @@ function rollup(provider: string, device: string, daysAgo: number[], v: number, 
 	}
 }
 
+/** The sources these tests add for Lucía; each test starts without them, so a repeat run starts clean. */
+const OWNED = [
+	['oura', 'Oura Ring'],
+	['gadgetbridge', 'Amazfit Band'],
+	['fit', 'Forerunner 265']
+];
+
+test.beforeEach(() => {
+	if (!db) return;
+	const pid = `(select id from profile where slug = 'lucia' order by created_at limit 1)`;
+	const owned = OWNED.map(([p, d]) => `(provider = '${p}' and device = '${d}')`).join(' or ');
+	const src = `(select id from wearable_source where profile_id = ${pid} and (${owned}))`;
+	sql(`delete from wearable_rollup where source_id in ${src}`);
+	sql(`delete from wearable_sample where source_id in ${src}`);
+	sql(`delete from wearable_source where id in ${src}`);
+});
+
 test('an HRV chart names the vendor it shows and the one it left out, in English and Spanish', async ({ page }) => {
 	expect(db, 'the config names the database').not.toBe('');
 	const errors: string[] = [];

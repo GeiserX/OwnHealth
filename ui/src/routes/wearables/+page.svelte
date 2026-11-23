@@ -93,10 +93,21 @@
 	// needsWindowRead): one more summary read of those days, keyed so an older answer is never drawn.
 	const wv = new Loader<WearableMetric[]>();
 	let requestedWinKey = $state<string | null>(null);
+	// Each summary answer is a new object, so this number moves when the summary refreshes (a retry after
+	// a connector import) and the window read follows it, even when profile, days and language stay.
+	const summaryGen = new WeakMap<object, number>();
+	let lastGen = 0;
+	const baseGen = $derived.by(() => {
+		const d = w.data;
+		if (!d) return 0;
+		let g = summaryGen.get(d);
+		if (g == null) summaryGen.set(d, (g = ++lastGen));
+		return g;
+	});
 	const winKey = $derived.by(() => {
 		const n = mDays;
 		const needed = (w.data?.metrics ?? []).some((m) => needsWindowRead(m, n));
-		return needed && profile?.slug ? `${profile.slug}:${n}:${i18n.lang}` : null;
+		return needed && profile?.slug ? `${profile.slug}:${n}:${i18n.lang}:${baseGen}` : null;
 	});
 	function loadWindow() {
 		const key = winKey;
