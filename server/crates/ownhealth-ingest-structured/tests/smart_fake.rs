@@ -333,7 +333,7 @@ async fn token(State(s): State<Shared>, Form(form): Form<HashMap<String, String>
             lock(&s.book).refreshes += 1;
             let mut answer = mint(&s);
             if lock(&s.behaviour).omit_refresh_scope {
-                answer.as_object_mut().expect("token object").remove("scope");
+                answer.as_object_mut().expect("token object").shift_remove("scope");
             }
             Json(answer).into_response()
         }
