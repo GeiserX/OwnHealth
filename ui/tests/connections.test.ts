@@ -180,6 +180,9 @@ test('a poller stop or problem reads in es and en, with its FHIR type, status an
 	assert.equal(runWords('search_failed: Observation: the server answered 503 (3 times)', hasKey, es), 'Observation: el servidor respondió 503. (3 veces)');
 	assert.equal(runWords('search_failed: Observation: the server answered 503 (3 times)', hasKey, sayIn('en')), 'Observation: the server answered 503. (3 times)');
 	assert.equal(runWords('JobError: patient_unread: the server answered 404 for the patient', hasKey, es), 'El servidor respondió 404 al pedir el paciente.');
+	const foreign = 'patient_reference: Observation: a resource referred to someone other than the verified patient and was skipped';
+	assert.equal(runWords(foreign, hasKey, sayIn('en')), 'Observation: a result referred to someone else, so OwnHealth skipped it.');
+	assert.equal(runWords(foreign, hasKey, es), 'Observation: se omitió un resultado porque se refería a otra persona.');
 	// a code without words, or no code at all: the text as sent
 	assert.equal(runWords('JobError: no_such_code: something', hasKey, es), null);
 	assert.equal(runWords('JobError: unknown: something', hasKey, es), null);
