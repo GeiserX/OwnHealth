@@ -163,7 +163,7 @@ fn cannot_review(perm: &Permission) -> Fail {
 async fn check(conn: &mut PgConnection, principal: &Principal, item: Option<ReviewItem>) -> R<ReviewItem> {
     let item = item.ok_or_else(no_item)?;
     let Some(profile_id) = item.profile_id else {
-        if item.household_id != principal.household_id {
+        if item.kind == ownhealth_imaging::import::REVIEW_KIND || item.household_id != principal.household_id {
             return Err(no_item());
         }
         return Ok(item);
@@ -201,18 +201,22 @@ pub(super) async fn count_open(
     profile_ids: &[Uuid],
     perms: &[Permission],
 ) -> ownhealth_core::Result<i64> {
-    let imaging_profiles: Vec<Uuid> = perms
-        .iter()
-        .filter(|p| p.can("review") && p.has("read:records"))
-        .map(|p| p.profile.id)
-        .collect();
-    review::count_open(
+    let imaging_profiles = imaging_review_profiles(perms);
+    review::count_open_with_kind_profiles(
         conn,
         household,
         Some(profile_ids),
         Some((ownhealth_imaging::import::REVIEW_KIND, &imaging_profiles)),
     )
     .await
+}
+
+fn imaging_review_profiles(perms: &[Permission]) -> Vec<Uuid> {
+    perms
+        .iter()
+        .filter(|p| p.can("review") && p.has("read:records"))
+        .map(|p| p.profile.id)
+        .collect()
 }
 
 async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>) -> R<Json<Value>> {
@@ -233,7 +237,8 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         .filter(|p| p.can("review") && profile.is_none_or(|slug| p.profile.slug == slug))
         .map(|p| p.profile.id)
         .collect();
-    let items = review::list_items(
+    let imaging_profiles = imaging_review_profiles(&perms);
+    let items = review::list_items_with_kind_profiles(
         &mut tx,
         &ItemQuery {
             household_id: principal.household_id,
@@ -244,6 +249,7 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
             limit,
             offset,
         },
+        Some((ownhealth_imaging::import::REVIEW_KIND, &imaging_profiles)),
     )
     .await?;
     let by_profile: HashMap<Uuid, &Permission> = perms.iter().map(|p| (p.profile.id, p)).collect();

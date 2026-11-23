@@ -450,3 +450,33 @@ async fn a_single_file_upload_is_named_after_the_file() -> R {
     assert_eq!(rows[0].2.as_deref(), Some("IM0001"));
     Ok(())
 }
+
+#[tokio::test]
+async fn hidden_imaging_items_do_not_count_as_withheld() -> R {
+    let a = imaging_app().await?;
+    item(&a, "carmen", "imaging_study", Some(json!({})), json!({})).await?;
+    narrow(&a, "alex", "carmen", &["read:summary", "read:labs"]).await?;
+    let (status, body) = a.get("alex", "/review?profile=carmen&kind=imaging_study").await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"items": [], "open": 0, "withheld": 0}));
+    Ok(())
+}
+
+#[tokio::test]
+async fn hidden_imaging_items_do_not_take_up_page_slots() -> R {
+    let a = imaging_app().await?;
+    for _ in 0..3 {
+        item(&a, "carmen", "imaging_study", Some(json!({})), json!({})).await?;
+    }
+    let first = item(&a, "carmen", "candidate_row", None, json!({})).await?;
+    let second = item(&a, "carmen", "candidate_row", None, json!({})).await?;
+    narrow(&a, "alex", "carmen", &["read:summary", "read:labs"]).await?;
+    for (offset, id) in [(0, first), (1, second)] {
+        let (status, body) = a
+            .get("alex", &format!("/review?profile=carmen&limit=2&offset={offset}"))
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["items"][0]["id"], id.to_string(), "{body}");
+    }
+    Ok(())
+}
