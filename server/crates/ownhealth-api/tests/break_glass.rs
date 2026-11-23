@@ -1032,6 +1032,57 @@ async fn a_request_takes_a_slug_and_refuses_a_nul_in_the_reason() -> R {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_request_accepts_an_unhyphenated_profile_uuid() -> R {
+    let mut b = setup().await?;
+    let named = b.name(b.carmen_id, json!({})).await?;
+    assert_eq!(named.status, 200, "{:?}", named.json);
+    let mut carmen = b.carmen().await?;
+    let r = carmen
+        .post(
+            "/api/break-glass/requests",
+            &json!({"profile": b.alex_id().simple().to_string(), "reason": "En el hospital"}),
+        )
+        .await?;
+    assert_eq!(r.status, 201, "{:?}", r.json);
+    assert_eq!(r.json["profile_id"], json!(b.alex_id()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_request_prefers_a_profile_uuid_over_a_matching_slug() -> R {
+    let mut b = setup().await?;
+    let mut sam = b.sam().await?;
+    let feed = sam.post("/api/profiles/sam/calendar-feeds", &json!({})).await?;
+    assert_eq!(feed.status, 201, "{:?}", feed.json);
+    let named = sam
+        .put(
+            &format!("/api/profiles/sam/break-glass/contacts/{}", b.carmen_id),
+            &json!({}),
+        )
+        .await?;
+    assert_eq!(named.status, 200, "{:?}", named.json);
+    let alex_id = b.alex_id();
+    sqlx::query("update profile set slug = $1 where id = $2")
+        .bind(alex_id.to_string())
+        .bind(b.env.profile("sam"))
+        .execute(b.env.pool())
+        .await?;
+
+    let mut carmen = b.carmen().await?;
+    let body = json!({"profile": alex_id, "reason": "En el hospital"});
+    // A designation on the slug match does not grant emergency access to the UUID match.
+    let r = carmen.post("/api/break-glass/requests", &body).await?;
+    assert_eq!((r.status.as_u16(), r.code()), (404, "not_a_contact"), "{:?}", r.json);
+
+    let named = b.name(b.carmen_id, json!({})).await?;
+    assert_eq!(named.status, 200, "{:?}", named.json);
+    let r = carmen.post("/api/break-glass/requests", &body).await?;
+    assert_eq!(r.status, 201, "{:?}", r.json);
+    assert_eq!(r.json["profile_id"], json!(alex_id));
+    Ok(())
+}
+
 /// Break-glass reads only: a guardian contact can neither retract a document the request opened nor
 /// move it into a profile of their own, where it would stay after the request ends.
 #[tokio::test]

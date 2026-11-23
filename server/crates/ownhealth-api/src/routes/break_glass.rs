@@ -387,14 +387,22 @@ async fn ask(State(rt): State<Runtime>, caller: Caller, Body(b): Body<RequestIn>
     let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
     let mut tx = rt.pool.begin().await?;
     sessions::require_step_up(&mut tx, &caller.0, sessions::STEP_UP_SECONDS).await?;
-    let named: Option<Uuid> = sqlx::query_scalar(
-        "select c.profile_id from break_glass_contact c join profile p on p.id = c.profile_id \
-         where c.contact_user_id = $1 and (p.id::text = lower($2) or p.slug = $2)",
-    )
-    .bind(user)
-    .bind(&b.profile)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let named: Option<Uuid> = if let Ok(profile) = Uuid::parse_str(&b.profile) {
+        sqlx::query_scalar("select profile_id from break_glass_contact where contact_user_id = $1 and profile_id = $2")
+            .bind(user)
+            .bind(profile)
+            .fetch_optional(&mut *tx)
+            .await?
+    } else {
+        sqlx::query_scalar(
+            "select c.profile_id from break_glass_contact c join profile p on p.id = c.profile_id \
+             where c.contact_user_id = $1 and p.slug = $2",
+        )
+        .bind(user)
+        .bind(&b.profile)
+        .fetch_optional(&mut *tx)
+        .await?
+    };
     let Some(profile) = named else {
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
