@@ -64,6 +64,8 @@ pub struct Study {
     /// Each image's side in pixels.
     pub size: u16,
     pub report: bool,
+    pub issuer: &'static str,
+    pub charset: &'static str,
 }
 
 impl Study {
@@ -78,6 +80,8 @@ impl Study {
             per_series: 3,
             size: 16,
             report: false,
+            issuer: "",
+            charset: "",
         }
     }
 
@@ -97,6 +101,12 @@ fn put(obj: &mut InMemDicomObject, tag: dicom_core::Tag, vr: VR, value: &str) {
 fn patient_and_study(obj: &mut InMemDicomObject, st: &Study) {
     put(obj, tags::PATIENT_NAME, VR::PN, st.person.name);
     put(obj, tags::PATIENT_ID, VR::LO, st.person.id);
+    if !st.issuer.is_empty() {
+        put(obj, tags::ISSUER_OF_PATIENT_ID, VR::LO, st.issuer);
+    }
+    if !st.charset.is_empty() {
+        put(obj, tags::SPECIFIC_CHARACTER_SET, VR::CS, st.charset);
+    }
     put(obj, tags::PATIENT_BIRTH_DATE, VR::DA, st.person.birth);
     put(obj, tags::STUDY_INSTANCE_UID, VR::UI, &st.uid);
     put(obj, tags::STUDY_DATE, VR::DA, st.date);
@@ -340,6 +350,9 @@ pub struct FakeOrthanc {
     pub misread: Arc<Mutex<Option<(String, String)>>>,
     /// The same for a PatientID: files every instance of this patient under another one.
     pub misread_patient: Arc<Mutex<Option<(String, String)>>>,
+    pub misread_except_series: Arc<Mutex<Option<String>>>,
+    pub fail_delete_at: Arc<AtomicUsize>,
+    pub deletes: Arc<AtomicUsize>,
 }
 
 fn json_answer(status: StatusCode, v: Value) -> Response {
@@ -363,6 +376,9 @@ impl FakeOrthanc {
             metadata_fails: Arc::default(),
             misread: Arc::default(),
             misread_patient: Arc::default(),
+            misread_except_series: Arc::default(),
+            fail_delete_at: Arc::default(),
+            deletes: Arc::default(),
         };
         let me = fake.clone();
         let app = Router::new().fallback(move |req: Request| {
@@ -499,6 +515,10 @@ impl FakeOrthanc {
                 }
             }
             (Method::DELETE, p) if p.starts_with("/instances/") => {
+                let attempted = self.deletes.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.fail_delete_at.load(Ordering::SeqCst) == attempted {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
                 let id = p.trim_start_matches("/instances/");
                 if let Ok(mut h) = self.held.lock()
                     && let Some((study, _)) = h.instances.remove(id)
@@ -575,7 +595,9 @@ impl FakeOrthanc {
         {
             uid = to.clone();
         }
-        if let Ok(m) = self.misread_patient.lock()
+        let misread_except_series = self.misread_except_series.lock().ok().and_then(|s| s.clone());
+        if misread_except_series.as_ref() != Some(&series)
+            && let Ok(m) = self.misread_patient.lock()
             && let Some((from, to)) = m.as_ref()
             && *from == patient
         {

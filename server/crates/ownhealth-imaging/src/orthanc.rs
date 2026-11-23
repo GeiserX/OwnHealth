@@ -191,14 +191,26 @@ impl Orthanc {
         }
     }
 
-    /// Sends one file (`POST /instances`).
+    /// Sends one file already in memory.
     pub async fn store(&self, file: Vec<u8>) -> Result<Stored, OrthancError> {
+        let size = file.len() as u64;
+        self.store_body(file.into(), size).await
+    }
+
+    /// Stream a staged file with a known Content-Length. Each read is at most one chunk.
+    pub(crate) async fn store_file(&self, file: std::fs::File, size: u64) -> Result<Stored, OrthancError> {
+        self.store_body(reqwest::Body::wrap_stream(file_chunks(file)), size)
+            .await
+    }
+
+    async fn store_body(&self, body: reqwest::Body, size: u64) -> Result<Stored, OrthancError> {
         let res = self
             .send(
                 self.http
                     .post(self.url("/instances"))
                     .header(reqwest::header::CONTENT_TYPE, "application/dicom")
-                    .body(file),
+                    .header(reqwest::header::CONTENT_LENGTH, size)
+                    .body(body),
             )
             .await?;
         if res.status() == StatusCode::BAD_REQUEST {
@@ -266,4 +278,34 @@ pub fn is_orthanc_id(s: &str) -> bool {
         && s.split('-').count() == 5
         && s.split('-')
             .all(|g| g.len() == 8 && g.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+pub(crate) const FILE_CHUNK: usize = 64 << 10;
+
+fn file_chunks(file: std::fs::File) -> tokio_util::io::ReaderStream<tokio::fs::File> {
+    let mut file = tokio::fs::File::from_std(file);
+    file.set_max_buf_size(FILE_CHUNK);
+    tokio_util::io::ReaderStream::with_capacity(file, FILE_CHUNK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn a_large_instance_is_read_one_chunk_at_a_time() -> std::io::Result<()> {
+        let file = tempfile::tempfile()?;
+        let size = 33 * FILE_CHUNK as u64 + 19;
+        file.set_len(size)?;
+        let mut chunks = file_chunks(file);
+        let mut read = 0;
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk?;
+            assert!(chunk.len() <= FILE_CHUNK);
+            read += chunk.len() as u64;
+        }
+        assert_eq!(read, size);
+        Ok(())
+    }
 }

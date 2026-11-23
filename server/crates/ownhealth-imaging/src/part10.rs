@@ -10,7 +10,11 @@
 //! walks the top level of the data set and skips sequences, items and encapsulated pixel data by
 //! their lengths and delimiters. Anything malformed is [`Part10Error::Corrupt`], never a panic.
 
-use std::io::Read;
+use std::fs::File;
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Take, Write};
+use std::path::Path;
+
+use dicom_encoding::text::{SpecificCharacterSet, TextCodec};
 
 /// The DICOM magic after the preamble.
 pub const MAGIC_AT: usize = 128;
@@ -38,6 +42,8 @@ pub enum Part10Error {
     NotDicom,
     /// It says it is DICOM but does not read as such.
     Corrupt(String),
+    /// The temporary storage for a deflated document could not be written.
+    Staging(String),
 }
 
 impl std::fmt::Display for Part10Error {
@@ -45,6 +51,7 @@ impl std::fmt::Display for Part10Error {
         match self {
             Part10Error::NotDicom => f.write_str("not a DICOM file"),
             Part10Error::Corrupt(why) => write!(f, "a damaged DICOM file: {why}"),
+            Part10Error::Staging(why) => write!(f, "staging a DICOM document: {why}"),
         }
     }
 }
@@ -70,6 +77,8 @@ pub struct Header {
     pub study_instance_uid: String,
     pub series_instance_uid: String,
     pub patient_id: String,
+    pub patient_id_issuer: String,
+    pub unsupported_charset: bool,
     /// As written, `^` between the name parts.
     pub patient_name: String,
     /// `YYYYMMDD`, as written.
@@ -104,9 +113,10 @@ struct Element {
     value: Option<std::ops::Range<usize>>,
 }
 
-struct Walker<'a> {
-    buf: &'a [u8],
+struct Walker<R> {
+    input: R,
     pos: usize,
+    end: usize,
     syntax: Syntax,
 }
 
@@ -123,35 +133,41 @@ fn long_vr(vr: &[u8]) -> bool {
     )
 }
 
-impl<'a> Walker<'a> {
-    fn u16_at(&self, at: usize) -> Result<u16, Part10Error> {
-        let b = self
-            .buf
-            .get(at..at + 2)
-            .ok_or_else(|| corrupt("the file ends inside an element"))?;
+impl<R: Read + Seek> Walker<R> {
+    fn bytes_at(&mut self, at: usize, out: &mut [u8]) -> Result<(), Part10Error> {
+        if at.checked_add(out.len()).is_none_or(|end| end > self.end) {
+            return Err(corrupt("the file ends inside an element"));
+        }
+        self.input
+            .seek(SeekFrom::Start(at as u64))
+            .and_then(|_| self.input.read_exact(out))
+            .map_err(|e| corrupt(format!("reading an element: {e}")))
+    }
+
+    fn u16_at(&mut self, at: usize) -> Result<u16, Part10Error> {
+        let mut b = [0; 2];
+        self.bytes_at(at, &mut b)?;
         Ok(match self.syntax {
-            Syntax::ExplicitBe => u16::from_be_bytes([b[0], b[1]]),
-            _ => u16::from_le_bytes([b[0], b[1]]),
+            Syntax::ExplicitBe => u16::from_be_bytes(b),
+            _ => u16::from_le_bytes(b),
         })
     }
 
-    fn u32_at(&self, at: usize) -> Result<u32, Part10Error> {
-        let b = self
-            .buf
-            .get(at..at + 4)
-            .ok_or_else(|| corrupt("the file ends inside an element"))?;
+    fn u32_at(&mut self, at: usize) -> Result<u32, Part10Error> {
+        let mut b = [0; 4];
+        self.bytes_at(at, &mut b)?;
         Ok(match self.syntax {
-            Syntax::ExplicitBe => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
-            _ => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+            Syntax::ExplicitBe => u32::from_be_bytes(b),
+            _ => u32::from_le_bytes(b),
         })
     }
 
-    fn tag_at(&self, at: usize) -> Result<u32, Part10Error> {
+    fn tag_at(&mut self, at: usize) -> Result<u32, Part10Error> {
         Ok((u32::from(self.u16_at(at)?) << 16) | u32::from(self.u16_at(at + 2)?))
     }
 
     fn done(&self) -> bool {
-        self.pos >= self.buf.len()
+        self.pos >= self.end
     }
 
     /// The next element of the current level, its value skipped over.
@@ -171,10 +187,8 @@ impl<'a> Walker<'a> {
                 (len, len == UNDEFINED)
             }
             _ => {
-                let vr = self
-                    .buf
-                    .get(self.pos + 4..self.pos + 6)
-                    .ok_or_else(|| corrupt("the file ends inside an element"))?;
+                let mut vr = [0; 2];
+                self.bytes_at(self.pos + 4, &mut vr)?;
                 if !vr.iter().all(u8::is_ascii_uppercase) {
                     return Err(corrupt(format!(
                         "no VR at element ({:04X},{:04X})",
@@ -182,11 +196,11 @@ impl<'a> Walker<'a> {
                         tag & 0xFFFF
                     )));
                 }
-                if long_vr(vr) {
-                    let sq = vr == b"SQ";
+                if long_vr(&vr) {
+                    let sq = &vr == b"SQ";
                     let len = self.u32_at(self.pos + 8)?;
                     self.pos += 12;
-                    if vr == b"UN" && len == UNDEFINED {
+                    if &vr == b"UN" && len == UNDEFINED {
                         let enclosing = std::mem::replace(&mut self.syntax, Syntax::ImplicitLe);
                         let element = self.with_value(tag, len, true, depth);
                         self.syntax = enclosing;
@@ -220,7 +234,7 @@ impl<'a> Walker<'a> {
         let start = self.pos;
         let end = start
             .checked_add(len as usize)
-            .filter(|e| *e <= self.buf.len())
+            .filter(|e| *e <= self.end)
             .ok_or_else(|| corrupt("an element runs past the end of the file"))?;
         self.pos = end;
         Ok(Element {
@@ -259,24 +273,26 @@ fn text(raw: &[u8]) -> String {
 
 /// The meta group: (transfer syntax, media storage SOP class, its instance UID, where the data set
 /// starts).
-fn meta(buf: &[u8]) -> Result<(String, String, String, usize), Part10Error> {
+fn meta(input: impl Read + Seek, end: usize) -> Result<(String, String, String, usize), Part10Error> {
     let mut w = Walker {
-        buf,
+        input,
         pos: MAGIC_AT + 4,
+        end,
         syntax: Syntax::ExplicitLe,
     };
     let declared_end = if w.tag_at(w.pos)? == 0x0002_0000 {
         let e = w.next(0)?;
         let value = e
             .value
-            .and_then(|r| buf[r].try_into().ok())
+            .filter(|r| r.len() == 4)
             .ok_or_else(|| corrupt("invalid file meta group length"))?;
+        let len = w.u32_at(value.start)? as usize;
         let end = w
             .pos
-            .checked_add(u32::from_le_bytes(value) as usize)
-            .filter(|end| *end <= buf.len())
+            .checked_add(len)
+            .filter(|end| *end <= w.end)
             .ok_or_else(|| corrupt("the file meta group runs past the end of the file"))?;
-        w.buf = &buf[..end];
+        w.end = end;
         Some(end)
     } else {
         None
@@ -290,7 +306,16 @@ fn meta(buf: &[u8]) -> Result<(String, String, String, usize), Part10Error> {
             break;
         }
         let e = w.next(0)?;
-        let value = e.value.map(|r| text(&buf[r])).unwrap_or_default();
+        if !matches!(e.tag, 0x0002_0002 | 0x0002_0003 | 0x0002_0010) {
+            continue;
+        }
+        let r = e
+            .value
+            .filter(|r| r.len() <= 64)
+            .ok_or_else(|| corrupt("invalid file meta UID"))?;
+        let mut value = [0; 64];
+        w.bytes_at(r.start, &mut value[..r.len()])?;
+        let value = text(&value[..r.len()]);
         match e.tag {
             0x0002_0002 => class = value,
             0x0002_0003 => instance = value,
@@ -304,6 +329,14 @@ fn meta(buf: &[u8]) -> Result<(String, String, String, usize), Part10Error> {
     Ok((ts, class, instance, w.pos))
 }
 
+fn syntax_for(ts: &str) -> Syntax {
+    match ts {
+        IMPLICIT_LE => Syntax::ImplicitLe,
+        EXPLICIT_BE => Syntax::ExplicitBe,
+        _ => Syntax::ExplicitLe,
+    }
+}
+
 /// The data set's bytes and syntax: inflated, as far as `cap` bytes, when the transfer syntax is
 /// deflated. A set cut at the cap reads as far as it goes: the walk stops before the cut when what it
 /// looks for comes first, and finds the set damaged otherwise.
@@ -314,11 +347,7 @@ fn data_set<'a>(
     cap: u64,
     inflated: &'a mut Vec<u8>,
 ) -> Result<(&'a [u8], Syntax), Part10Error> {
-    let syntax = match ts {
-        IMPLICIT_LE => Syntax::ImplicitLe,
-        EXPLICIT_BE => Syntax::ExplicitBe,
-        _ => Syntax::ExplicitLe,
-    };
+    let syntax = syntax_for(ts);
     if ts == DEFLATED_LE {
         flate2::read::DeflateDecoder::new(&buf[start..])
             .take(cap)
@@ -336,12 +365,13 @@ fn walk(buf: &[u8], last: u32, cap: u64, mut each: impl FnMut(u32, &[u8]) -> boo
     if !is_part10(buf) {
         return Err(Part10Error::NotDicom);
     }
-    let (ts, _, _, start) = meta(buf)?;
+    let (ts, _, _, start) = meta(Cursor::new(buf), buf.len())?;
     let mut inflated = Vec::new();
     let (set, syntax) = data_set(buf, &ts, start, cap, &mut inflated)?;
     let mut w = Walker {
-        buf: set,
+        input: Cursor::new(set),
         pos: 0,
+        end: set.len(),
         syntax,
     };
     while !w.done() {
@@ -367,22 +397,51 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
     if !is_part10(buf) {
         return Err(Part10Error::NotDicom);
     }
-    let (_, class, instance, _) = meta(buf)?;
+    let (_, class, instance, _) = meta(Cursor::new(buf), buf.len())?;
     let mut h = Header {
         sop_class_uid: class,
         sop_instance_uid: instance,
         ..Header::default()
     };
+    let mut charset = Some(SpecificCharacterSet::ISO_IR_6);
     h.transfer_syntax = walk(buf, 0x0020_000E, MAX_INFLATED_HEADER, |tag, value| {
         let v = || text(value);
+        let decode = |charset: &Option<SpecificCharacterSet>| {
+            let charset = charset.as_ref()?;
+            if value.contains(&0x1b) || (*charset == SpecificCharacterSet::ISO_IR_6 && !value.is_ascii()) {
+                return None;
+            }
+            let decoded = charset.decode(value).ok()?;
+            // These four tags are single-valued. The codec also escapes invalid bytes with a backslash.
+            (!decoded.contains('\\')).then(|| decoded.trim_matches([' ', '\0']).to_string())
+        };
         match tag {
+            0x0008_0005 => {
+                let code = std::str::from_utf8(value).unwrap_or_default().trim_matches([' ', '\0']);
+                charset = match code {
+                    "" if value.is_ascii() => Some(SpecificCharacterSet::ISO_IR_6),
+                    "ISO 2022 IR 6" => Some(SpecificCharacterSet::ISO_IR_6),
+                    code if !code.starts_with("ISO 2022") => SpecificCharacterSet::from_code(code),
+                    _ => None,
+                };
+                h.unsupported_charset |= charset.is_none();
+            }
             0x0008_0016 => h.sop_class_uid = v(),
             0x0008_0018 => h.sop_instance_uid = v(),
             0x0008_0020 => h.study_date = v(),
             0x0008_0060 => h.modality = v(),
-            0x0008_1030 => h.study_description = v(),
-            0x0010_0010 => h.patient_name = v(),
-            0x0010_0020 => h.patient_id = v(),
+            0x0008_1030 | 0x0010_0010 | 0x0010_0020 | 0x0010_0021 => {
+                if let Some(text) = decode(&charset) {
+                    match tag {
+                        0x0008_1030 => h.study_description = text,
+                        0x0010_0010 => h.patient_name = text,
+                        0x0010_0020 => h.patient_id = text,
+                        _ => h.patient_id_issuer = text,
+                    }
+                } else {
+                    h.unsupported_charset = true;
+                }
+            }
             0x0010_0030 => h.patient_birth_date = v(),
             0x0020_000D => h.study_instance_uid = v(),
             0x0020_000E => h.series_instance_uid = v(),
@@ -391,6 +450,12 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
         // everything the importer needs sits at or before (0020,000E)
         true
     })?;
+    if h.unsupported_charset {
+        h.patient_name.clear();
+        h.patient_id.clear();
+        h.patient_id_issuer.clear();
+        h.study_description.clear();
+    }
     if h.is_directory() {
         return Ok(h);
     }
@@ -421,6 +486,68 @@ pub fn encapsulated_document(buf: &[u8]) -> Result<Option<Vec<u8>>, Part10Error>
         }
         d
     }))
+}
+
+/// Open the PDF value of a staged Encapsulated PDF instance as a bounded reader. The DICOM
+/// walker seeks over unused values. For deflated input, keep the capped data set on disk.
+pub(crate) fn encapsulated_file(file: File, dir: &Path) -> Result<Option<Take<File>>, Part10Error> {
+    let mut end = file.metadata().map_err(|e| corrupt(e.to_string()))?.len() as usize;
+    let mut input = BufReader::new(file);
+    let (ts, _, _, mut pos) = meta(&mut input, end)?;
+    let syntax = syntax_for(&ts);
+    if ts == DEFLATED_LE {
+        let mut inflated = tempfile::tempfile_in(dir).map_err(|e| Part10Error::Staging(e.to_string()))?;
+        input
+            .seek(SeekFrom::Start(pos as u64))
+            .map_err(|e| corrupt(e.to_string()))?;
+        let mut decoder = flate2::read::DeflateDecoder::new(input).take(MAX_INFLATED_DOCUMENT);
+        let mut chunk = [0; 8192];
+        end = 0;
+        loop {
+            let n = decoder
+                .read(&mut chunk)
+                .map_err(|e| corrupt(format!("the deflated data set does not inflate: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            inflated
+                .write_all(&chunk[..n])
+                .map_err(|e| Part10Error::Staging(e.to_string()))?;
+            end += n;
+        }
+        input = BufReader::new(inflated);
+        pos = 0;
+    }
+    let mut w = Walker {
+        input,
+        pos,
+        end,
+        syntax,
+    };
+    while !w.done() && w.tag_at(w.pos)? <= 0x0042_0011 {
+        let e = w.next(0)?;
+        if e.tag == 0x0042_0011 {
+            let Some(value) = e.value.filter(|r| r.len() >= 5) else {
+                break;
+            };
+            let mut magic = [0; 5];
+            w.bytes_at(value.start, &mut magic)?;
+            if &magic != b"%PDF-" {
+                break;
+            }
+            let mut len = value.len();
+            if len % 2 == 0 {
+                let mut last = [0; 1];
+                w.bytes_at(value.end - 1, &mut last)?;
+                len -= usize::from(last[0] == 0);
+            }
+            let mut file = w.input.into_inner();
+            file.seek(SeekFrom::Start(value.start as u64))
+                .map_err(|e| corrupt(e.to_string()))?;
+            return Ok(Some(file.take(len as u64)));
+        }
+    }
+    Ok(None)
 }
 
 /// A DICOM UID: digits in dot-separated parts, at most 64 characters.
@@ -606,6 +733,16 @@ mod tests {
         dicom.splice(start..start, explicit(false, 0x0002_0000, b"UL", &length.to_le_bytes()));
         let h = read_header(&dicom).expect("header");
         assert_eq!(h.patient_id, "LN-0001");
+    }
+
+    #[test]
+    fn patient_name_uses_the_declared_cyrillic_repertoire() {
+        let mut set = core(false);
+        set.splice(0..0, explicit(false, 0x0008_0005, b"CS", b"ISO_IR 144"));
+        let name = set.windows(11).position(|w| w == b"RIVERA^ALEX").expect("patient name");
+        set[name..name + 11].copy_from_slice(b"\xc0\xd8\xd2\xd5\xe0\xd0^\xb0\xdb\xd5\xda");
+        let h = read_header(&file("1.2.840.10008.1.2.1", &set)).expect("header");
+        assert_eq!(h.patient_name, "Ривера^Алек");
     }
 
     #[test]

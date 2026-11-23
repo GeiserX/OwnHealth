@@ -14,14 +14,16 @@ workspace = true
 ownhealth-core.workspace = true
 ownhealth-ingest-pdf.workspace = true
 chrono.workspace = true
+dicom-encoding = "0.10"
 flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
 serde_json.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 zip.workspace = true

@@ -613,6 +613,218 @@ async fn a_header_past_the_read_cap_is_damaged_and_not_sent() -> R {
 }
 
 #[tokio::test]
+async fn round3_conflicting_identity_evidence_holds_the_whole_study() -> R {
+    for different in [
+        Study {
+            issuer: "Clinic-B",
+            ..Study::new(U1, ALEX)
+        },
+        Study {
+            person: Person {
+                name: "RIVERA^SAM",
+                ..ALEX
+            },
+            ..Study::new(U1, ALEX)
+        },
+        Study {
+            person: Person {
+                birth: "19810202",
+                ..ALEX
+            },
+            ..Study::new(U1, ALEX)
+        },
+    ] {
+        let e = env().await?;
+        let first = Study {
+            issuer: "Clinic-A",
+            ..Study::new(U1, ALEX)
+        };
+        let disc = [
+            ("first".into(), support::image(&first, 0, 0, support::EXPLICIT_LE)),
+            ("second".into(), support::image(&different, 0, 1, support::EXPLICIT_LE)),
+        ];
+        let up = e.upload("alex", &disc).await?;
+        e.run().await?;
+        let (_, result, error) = e.job(up.job_id).await?;
+        assert_eq!(result["in_review"], 1, "{result} {error:?}");
+        assert_eq!(e.orthanc.posts(), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn round3_missing_optional_identity_fields_allow_consistent_files() -> R {
+    let e = env().await?;
+    let incomplete = Study {
+        person: Person {
+            name: "",
+            birth: "",
+            ..ALEX
+        },
+        ..Study::new(U1, ALEX)
+    };
+    let complete = Study {
+        issuer: "Clinic-A",
+        ..Study::new(U1, ALEX)
+    };
+    let disc = [
+        ("first".into(), support::image(&incomplete, 0, 0, support::EXPLICIT_LE)),
+        ("second".into(), support::image(&complete, 0, 1, support::EXPLICIT_LE)),
+    ];
+    let up = e.upload("alex", &disc).await?;
+    e.run().await?;
+    let (_, result, error) = e.job(up.job_id).await?;
+    assert_eq!(result["instances"], 2, "{result} {error:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn round3_retry_reconciles_a_second_disc_with_a_report_without_resending() -> R {
+    let e = env().await?;
+    let first = Study {
+        series: 1,
+        per_series: 1,
+        ..Study::new(U1, ALEX)
+    };
+    e.upload("alex", &study_files(&first, "DICOM")).await?;
+    e.run().await?;
+    let disc = study_files(
+        &Study {
+            series: 2,
+            report: true,
+            ..first
+        },
+        "DICOM",
+    );
+    *e.orthanc.metadata_fails.lock().map_err(|_| anyhow::anyhow!("lock"))? = true;
+    let up = e.upload("alex", &disc).await?;
+    e.run().await?;
+    assert_eq!(e.job(up.job_id).await?.0, "queued");
+    assert_eq!(e.fhir(U1).await?["numberOfSeries"], 1);
+    assert_eq!(e.orthanc.held().instances.len(), 3);
+    let posts = e.orthanc.posts();
+
+    *e.orthanc.metadata_fails.lock().map_err(|_| anyhow::anyhow!("lock"))? = false;
+    sqlx::query("update job set run_after = now() where id = $1")
+        .bind(up.job_id)
+        .execute(&e.rt.pool)
+        .await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(e.orthanc.posts(), posts);
+    let fhir = e.fhir(U1).await?;
+    assert_eq!(fhir["numberOfSeries"], 3, "{fhir}");
+    assert_eq!(fhir["numberOfInstances"], 3, "{fhir}");
+    let report: Option<Uuid> =
+        sqlx::query_scalar("select report_document_id from imaging_study where study_instance_uid = $1")
+            .bind(U1)
+            .fetch_one(&e.rt.pool)
+            .await?;
+    assert!(report.is_some());
+
+    let warmed = e.orthanc.warmed();
+    let again = e.upload("alex", &disc).await?;
+    e.run().await?;
+    assert_eq!(e.job(again.job_id).await?.1["already"], 1);
+    assert_eq!(e.orthanc.posts(), posts);
+    assert_eq!(e.orthanc.warmed(), warmed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round3_a_second_delete_failure_resumes_without_deleting_existing_instances() -> R {
+    let e = env().await?;
+    let st = Study {
+        series: 3,
+        per_series: 1,
+        ..Study::new(U1, ALEX)
+    };
+    let disc = study_files(&st, "DICOM");
+    let client = ownhealth_imaging::orthanc::Orthanc::new(e.orthanc.config())?;
+    client.store(disc[0].1.clone()).await?;
+    let original = e.orthanc.held().instances;
+
+    *e.orthanc.misread_patient.lock().map_err(|_| anyhow::anyhow!("lock"))? =
+        Some((ALEX.id.into(), "LN-MISREAD".into()));
+    *e.orthanc
+        .misread_except_series
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))? = Some(st.series_uid(0));
+    e.orthanc.fail_delete_at.store(2, std::sync::atomic::Ordering::SeqCst);
+    let up = e.upload("alex", &disc).await?;
+    e.run().await?;
+    assert_eq!(e.job(up.job_id).await?.0, "queued");
+    assert_eq!(e.orthanc.held().instances.len(), 2);
+    let posts = e.orthanc.posts();
+    sqlx::query("update job set run_after = now() where id = $1")
+        .bind(up.job_id)
+        .execute(&e.rt.pool)
+        .await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{error:?}");
+    assert_eq!(result["in_review"], 1, "{result}");
+    assert_eq!(e.orthanc.held().instances, original);
+    assert_eq!(e.orthanc.posts(), posts);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round3_duplicate_instances_are_counted_once() -> R {
+    let e = env().await?;
+    let image = support::image(&Study::new(U1, ALEX), 0, 0, support::EXPLICIT_LE);
+    let up = e
+        .upload("alex", &[("one".into(), image.clone()), ("two".into(), image)])
+        .await?;
+    e.run().await?;
+    assert_eq!(e.fhir(U1).await?["numberOfInstances"], 1);
+    let (_, result, _) = e.job(up.job_id).await?;
+    assert_eq!(result["instances"], 1, "{result}");
+    assert_eq!(result["submitted_files"], 2, "{result}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn round3_an_open_hold_updates_when_another_profile_claims_the_uid() -> R {
+    let e = env().await?;
+    let disc = study_files(&Study::new(U1, ALEX), "DICOM");
+    e.upload("sam", &disc).await?;
+    e.run().await?;
+    assert_eq!(e.in_review("sam").await?, [(U1.into(), "identity_mismatch".into())]);
+    e.upload("alex", &disc).await?;
+    e.run().await?;
+    for _ in 0..2 {
+        e.upload("sam", &disc).await?;
+        e.run().await?;
+        assert_eq!(e.in_review("sam").await?, [(U1.into(), "other_profile".into())]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn round3_an_entirely_refused_study_has_no_review_item() -> R {
+    let e = env().await?;
+    let st = Study {
+        series: 1,
+        per_series: 1,
+        size: 64,
+        ..Study::new(U1, ALEX)
+    };
+    let mut disc = study_files(&st, "DICOM");
+    let keep = disc[0].1.len() * 2 / 3;
+    disc[0].1.truncate(keep);
+    let up = e.upload("alex", &disc).await?;
+    e.run().await?;
+    let (_, result, error) = e.job(up.job_id).await?;
+    assert_eq!(result["refused"], 1, "{result} {error:?}");
+    assert_eq!(result["in_review"], 0);
+    assert!(e.in_review("alex").await?.is_empty());
+    assert!(e.recorded(U1).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn round3_large_series_counts_do_not_return_instance_ids() -> R {
     use axum::{
         Json, Router,
@@ -656,5 +868,27 @@ async fn round3_large_series_counts_do_not_return_instance_ids() -> R {
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].uid, U1);
     assert_eq!(held[0].instances, N);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round3_an_unsupported_text_encoding_holds_the_study_without_guessing() -> R {
+    let e = env().await?;
+    let study = Study {
+        charset: "ISO_IR 192",
+        ..Study::new(U1, ALEX)
+    };
+    let mut image = support::image(&study, 0, 0, support::EXPLICIT_LE);
+    let at = image
+        .windows(10)
+        .position(|w| w == b"ISO_IR 192")
+        .ok_or_else(|| anyhow::anyhow!("charset"))?;
+    image[at..at + 10].copy_from_slice(b"ISO_IR 148");
+    let up = e.upload("alex", &[("image".into(), image)]).await?;
+    e.run().await?;
+    let (_, result, error) = e.job(up.job_id).await?;
+    assert_eq!(result["in_review"], 1, "{result} {error:?}");
+    assert_eq!(e.in_review("alex").await?, [(U1.into(), "unsupported_charset".into())]);
+    assert_eq!(e.orthanc.posts(), 0);
     Ok(())
 }

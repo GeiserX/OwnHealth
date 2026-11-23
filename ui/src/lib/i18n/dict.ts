@@ -2067,6 +2067,8 @@ export const dict = {
 		i2_img_reason_second_patient: "The disc holds more than one patient",
 		i2_img_reason_other_profile: "This study cannot be added to this profile",
 		i2_img_reason_uid_conflict: "Another patient's study has the same UID",
+		i2_img_reason_identity_conflict: "Files in this study disagree about the patient",
+		i2_img_reason_unsupported_charset: "The DICOM text encoding could not be read",
 		i2_img_accept_d: "Accept adds this study to this profile's record, under the patient the disc names.",
 	},
 	es: {
@@ -4134,6 +4136,8 @@ export const dict = {
 		i2_img_reason_second_patient: "El disco tiene más de un paciente",
 		i2_img_reason_other_profile: "Este estudio no se puede añadir a este perfil",
 		i2_img_reason_uid_conflict: "El estudio de otro paciente tiene el mismo UID",
+		i2_img_reason_identity_conflict: "Los datos del paciente difieren entre los archivos del estudio",
+		i2_img_reason_unsupported_charset: "No se ha podido leer la codificación del texto DICOM",
 		i2_img_accept_d: "Aceptar añade este estudio al historial de este perfil, con el paciente que nombra el disco.",
 	},
 } as const;
