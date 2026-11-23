@@ -56,3 +56,13 @@ test('an upload to a deleted profile reads as our sentence', () => {
 	assert.equal(errKey('profile_deleted', 'This profile was deleted.', has), 'err_profile_deleted');
 	for (const lang of ['en', 'es'] as const) assert.ok((dict[lang] as Record<string, string>).err_profile_deleted, lang);
 });
+
+// The notices sit at the top of the column, out of view after a delete further down a long page, and
+// the deleted card took the focus with it. The status block takes the focus (tabindex -1), which also
+// scrolls it into view, and two notices stand apart.
+test('the delete notices take the focus and stand apart', () => {
+	const page = readFileSync(new URL('../src/routes/settings/+page.svelte', import.meta.url), 'utf8');
+	assert.match(page, /<div role="status" class="deleted" tabindex="-1" bind:this=\{deletedEl\}>/);
+	assert.match(page, /deletedEl\?\.focus\(\)/);
+	assert.match(page, /\.deleted \{[^}]*gap: \d+px;/);
+});

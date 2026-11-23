@@ -127,6 +127,9 @@
 	// The name of the profile just deleted: its card is gone, so a line above the cards says it went.
 	let deletedName = $state<string | null>(null);
 	let deletedNotes = $state<ReturnType<typeof deletedNoteKeys>>([]);
+	// The notices sit at the top of the column and the deleted card took the focus with it: focus moves
+	// to them, which also brings them into view.
+	let deletedEl: HTMLElement | undefined = $state();
 	function removeProfile(e: SubmitEvent, slug: string) {
 		e.preventDefault();
 		const name = profileName(slug);
@@ -137,6 +140,8 @@
 			deletedName = name;
 			deleting = null;
 			confirmSlug = '';
+			await tick();
+			deletedEl?.focus();
 			app.me = await getMe();
 			if (app.profile === slug) {
 				const own = app.me.profiles.find((p) => p.is_self) ?? app.me.profiles[0];
@@ -294,7 +299,7 @@
 	</div>
 
 	<div class="grid" style="align-content:start">
-		<div role="status">
+		<div role="status" class="deleted" tabindex="-1" bind:this={deletedEl}>
 			{#if deletedName}
 				{#each deletedNotes as note (note)}
 					<div class="note">{tf(note, { name: deletedName })}</div>
@@ -369,6 +374,10 @@
 		display: grid;
 		gap: 6px;
 		margin-top: 6px;
+	}
+	.deleted {
+		display: grid;
+		gap: 8px;
 	}
 	@media (max-width: 1100px) {
 		.cols {
