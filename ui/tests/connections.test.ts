@@ -12,6 +12,7 @@ import {
 	connectorErrorKey,
 	daysLeft,
 	renewsItself,
+	runWords,
 	shownConnections,
 	statusWord,
 	wantsReconnect,
@@ -157,5 +158,50 @@ test('every connector code reads in es and en', () => {
 	const en = dict.en as Record<string, string>;
 	const es = dict.es as Record<string, string>;
 	const missing = [...codes, 'unknown'].filter((c) => !en['con_err_' + c] || !es['con_err_' + c] || en['con_err_' + c] === es['con_err_' + c]);
+	assert.deepEqual(missing, []);
+});
+
+// The SMART poller's stops and problems (smart.rs) reach the card in the reader's language.
+const sayIn = (lang: 'en' | 'es') => (key: string, vars: Record<string, string | number>) =>
+	(dict[lang] as Record<string, string>)[key].replace(/\{(\w+)\}/g, (_, v) => (v in vars ? String(vars[v]) : `{${v}}`));
+const hasKey = (k: string) => k in dict.en;
+
+test('a poller stop or problem reads in es and en, with its FHIR type, status and count', () => {
+	const es = sayIn('es');
+	assert.equal(
+		runWords('JobError: reconsent_needed: the vendor no longer accepts this connection, so it waits for a new sign-in', hasKey, es),
+		'El proveedor ya no acepta esta conexión. Reconectar vuelve a iniciar sesión.'
+	);
+	assert.equal(runWords('JobError: no_answer: no US Core search answered', hasKey, es), 'Ninguna búsqueda US Core respondió.');
+	assert.equal(
+		runWords('undeclared_host: MedicationRequest: a next page on a host this connection did not declare was not read', hasKey, es),
+		'MedicationRequest: no se leyó una página siguiente en un servidor que esta conexión no declaró.'
+	);
+	assert.equal(runWords('search_failed: Observation: the server answered 503 (3 times)', hasKey, es), 'Observation: el servidor respondió 503. (3 veces)');
+	assert.equal(runWords('search_failed: Observation: the server answered 503 (3 times)', hasKey, sayIn('en')), 'Observation: the server answered 503. (3 times)');
+	assert.equal(runWords('JobError: patient_unread: the server answered 404 for the patient', hasKey, es), 'El servidor respondió 404 al pedir el paciente.');
+	// a code without words, or no code at all: the text as sent
+	assert.equal(runWords('JobError: no_such_code: something', hasKey, es), null);
+	assert.equal(runWords('JobError: unknown: something', hasKey, es), null);
+	assert.equal(runWords('connection refused', hasKey, es), null);
+});
+
+const smart = read('../../server/crates/ownhealth-ingest-structured/src/smart.rs');
+const runCodes = new Set<string>();
+for (const m of smart.matchAll(/g\.problem\(\s*"([a-z_]+)"/g)) runCodes.add(m[1]);
+for (const m of smart.matchAll(/Miss::Search\(\s*"([a-z_]+)"/g)) runCodes.add(m[1]);
+for (const m of smart.matchAll(/"([a-z][a-z_]+): /g)) runCodes.add(m[1]);
+
+test('every stop and problem code of the SMART poller reads in es and en', () => {
+	// the gate can fail: codes from each of the three places are found
+	for (const c of ['no_answer', 'another_patient', 'switched_off', 'reconsent_needed', 'patient_unread', 'token_refused', 'search_failed', 'repeated_page', 'too_many_medications', 'not_granted', 'undeclared_host', 'unreachable']) {
+		assert.ok(runCodes.has(c), `the scan missed ${c}`);
+	}
+	const missing = [...runCodes].filter((c) => {
+		const text = `${c}: Observation: the server answered 503`;
+		const en = runWords(text, hasKey, sayIn('en'));
+		const es = runWords(text, hasKey, sayIn('es'));
+		return !en || !es || en === es || /\{\w+\}/.test(en + es);
+	});
 	assert.deepEqual(missing, []);
 });
