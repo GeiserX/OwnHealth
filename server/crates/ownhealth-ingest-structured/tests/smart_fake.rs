@@ -10,7 +10,6 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use axum::body::{Body, Bytes};
 use axum::extract::{Form, Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -92,8 +91,6 @@ struct Behaviour {
     /// The `scope` of token answers that carry it.
     scope: String,
     omit_refresh_scope: bool,
-    /// A search that sends only part of its advertised body.
-    broken_search: Option<(&'static str, usize)>,
     /// The `capabilities` discovery lists.
     capabilities: Vec<&'static str>,
     /// A search of this type (`*`: every type) answers this status.
@@ -134,7 +131,6 @@ impl Default for Behaviour {
         Behaviour {
             scope: ALL.into(),
             omit_refresh_scope: false,
-            broken_search: None,
             capabilities: vec![
                 "launch-standalone",
                 "client-public",
@@ -497,18 +493,6 @@ async fn search(
         && (t == rtype || t == "*")
     {
         return outcome(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), "down");
-    }
-    if let Some((kind, bytes)) = b.broken_search
-        && kind == rtype
-    {
-        let chunk = Bytes::from(vec![b' '; bytes]);
-        let stream = futures::stream::iter([Ok::<_, std::io::Error>(chunk)]);
-        return (
-            StatusCode::OK,
-            [("content-length", (bytes + 1).to_string())],
-            Body::from_stream(stream),
-        )
-            .into_response();
     }
     if b.oversized_search == Some(rtype.as_str()) {
         return (
@@ -2345,6 +2329,8 @@ async fn an_old_poll_finishes_in_history_without_changing_the_new_grants_health(
 
 #[tokio::test]
 async fn bytes_from_a_broken_body_count_against_the_next_search() -> R {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
     let w = world(Behaviour {
         scope: "patient/Patient.r patient/Condition.s patient/Observation.s?category=laboratory".into(),
         fail: Some(("*", 503)),
@@ -2353,31 +2339,76 @@ async fn bytes_from_a_broken_body_count_against_the_next_search() -> R {
     .await?;
     let source = w.connect(t0()).await?;
     w.day(source, t0()).await?.expect_err("no search answered");
+    let patient_bytes = w.fake.book().served;
+
+    let broken = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let authority = broken.local_addr()?.to_string();
+    let first_page = serde_json::to_vec(&json!({
+        "resourceType": "Bundle", "type": "searchset",
+        "link": [{"relation": "next", "url": format!("http://{authority}/Condition?page=2")}],
+    }))?;
     let partial_bytes = 16 * 1024;
-    let run_bytes = w.fake.book().served + partial_bytes + 32;
-    w.fake.set(|b| {
-        b.fail = None;
-        b.broken_search = Some(("Condition", partial_bytes));
-    });
     let caps = smart::Caps {
-        run_bytes,
+        run_bytes: patient_bytes + first_page.len() + partial_bytes + 32,
         ..smart::Caps::default()
     };
-    let got = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        w.day_with(source, t0() + Duration::minutes(1), &caps),
-    )
-    .await??;
-    let err = got.expect_err("the bytes already read leave too little room for the Observation");
-    assert!(err.contains("too_large: Observation: "), "{err}");
-    assert!(w.documents(source).await?.is_empty());
+    w.fake
+        .book()
+        .search_bodies
+        .insert("Condition".into(), (StatusCode::OK, first_page));
+    w.fake.set(|b| b.fail = None);
+    sqlx::query("update source set config = jsonb_set(config, '{hosts}', config->'hosts' || jsonb_build_array($2::text)) where id = $1")
+        .bind(source)
+        .bind(&authority)
+        .execute(&w.db.pool)
+        .await?;
 
-    w.fake.set(|b| b.broken_search = Some(("Condition", 0)));
-    let got = w
-        .day_with(source, t0() + Duration::minutes(2), &caps)
-        .await?
-        .map_err(anyhow::Error::msg)?;
-    assert_eq!(got.new, 1, "{got:?}");
-    assert_eq!(got.problems[0].code, "unreachable");
+    let serve = async {
+        for bytes in [partial_bytes, 0] {
+            let (socket, _) = broken.accept().await?;
+            let mut io = BufReader::new(socket);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                anyhow::ensure!(io.read_line(&mut line).await? > 0, "incomplete request headers");
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                bytes + 1,
+                " ".repeat(bytes)
+            );
+            io.get_mut().write_all(response.as_bytes()).await?;
+            io.get_mut().shutdown().await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let poll = async {
+        let got = w
+            .day_with(source, t0() + Duration::minutes(1), &caps)
+            .await?
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(got.new, 0, "{got:?}");
+        assert_eq!(
+            got.problems.iter().map(|p| p.code.as_str()).collect::<Vec<_>>(),
+            ["unreachable", "too_large"]
+        );
+        assert!(got.problems[1].message.starts_with("Observation: "), "{got:?}");
+
+        let got = w
+            .day_with(source, t0() + Duration::minutes(2), &caps)
+            .await?
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(got.new, 1, "{got:?}");
+        assert_eq!(got.problems.len(), 1, "{got:?}");
+        assert_eq!(got.problems[0].code, "unreachable");
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::try_join!(serve, poll)
+    })
+    .await??;
     Ok(())
 }
