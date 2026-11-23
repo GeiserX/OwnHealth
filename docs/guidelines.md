@@ -213,5 +213,6 @@ resolve or refuses the connection, or when it answers 404 or 410. Then the run g
 files", lists each dead link and the files that cite it. The issue updates each week and closes when
 no link is dead. A site that refuses scripts (401, 403, 429, a 5xx or a timeout) is listed apart in
 the run summary and does not count as dead. A few hosts answer 404 to a runner for a page that a
-browser opens, so a 404 from a host in the script's `fake404` list (today `www.fda.gov`) is listed
-apart too. The check is not a pull request gate.
+browser opens, so a 404 from a host in the script's `fake404` list (today `www.fda.gov` and
+`snomedbrowser.org`, where every `snomed.info` concept link ends) is listed apart too. The check is
+not a pull request gate.

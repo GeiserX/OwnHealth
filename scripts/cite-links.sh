@@ -13,14 +13,15 @@
 # those apart, and they do not count as dead. .github/workflows/cite-links.yml runs this every week.
 #
 # Some hosts answer 404 to a cloud address (a GitHub runner) for a page that a browser opens. A 404
-# from a host in `fake404` therefore counts as could not be checked. www.fda.gov did that for two
-# live pages in November 2026 (issue #89).
+# from a host in `fake404` therefore counts as could not be checked. The host is the one the link
+# ends on after its redirects. In November 2026 (issue #89) www.fda.gov did that for two live pages,
+# and snomedbrowser.org, where every snomed.info concept link ends, did it for all of them.
 set -uo pipefail
 
 dir=${1:-$(cd "$(dirname "$0")/.." && pwd)/data}
 [ -d "$dir" ] || { echo "cite-links: no directory $dir" >&2; exit 2; }
 command -v curl >/dev/null || { echo "cite-links: curl is not installed" >&2; exit 2; }
-fake404='www.fda.gov'
+fake404='www.fda.gov snomedbrowser.org'
 ua='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
 
 files() { grep -rlF --include='*.yaml' --include='*.yml' --include='*.json' --include='*.tsv' -- "$1" "$dir"; }
@@ -32,9 +33,10 @@ total=$(printf '%s\n' "$urls" | grep -c '^https://')
 
 dead='' unchecked=''
 while IFS= read -r url; do
-  code=$(curl -sS -L -o /dev/null -w '%{http_code}' --max-time 30 --retry 2 --retry-delay 5 \
-    -A "$ua" -- "$url" 2>/dev/null)
+  out=$(curl -sS -L -o /dev/null -w '%{http_code} %{url_effective}' --max-time 30 --retry 2 \
+    --retry-delay 5 -A "$ua" -- "$url" 2>/dev/null)
   rc=$?
+  code=${out%% *} final=${out#* }
   if [ "$rc" -ne 0 ]; then
     case "$rc" in
       6 | 7 | 35 | 51 | 60) list=dead ;;       # no such host, connection refused, TLS
@@ -45,7 +47,7 @@ while IFS= read -r url; do
     case "$code" in
       2?? | 3??) continue ;;
       404 | 410)
-        host=${url#https://}; host=${host%%[/?#]*}
+        host=${final#*://}; host=${host%%[/?#]*}
         case " $fake404 " in *" $host "*) list=unchecked ;; *) list=dead ;; esac ;;
       *) list=unchecked ;;
     esac
