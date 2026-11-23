@@ -65,10 +65,12 @@ enum Cmd {
         path: PathBuf,
     },
     /// Encrypt what an install stored before profile keys: each older file under the key of every
-    /// profile or held item that reads it (then the plain copy goes), and each older refresh token
-    /// under its profile's key. Runs only when you start it, while the app runs or not; stop it at any
-    /// time and run it again to go on. Prints a JSON report; exits 1 when something could not be
-    /// sealed. Needs OWNHEALTH_DATABASE_URL and the OWNHEALTH_SECRETS_KEY the install was made with.
+    /// profile or pending item that reads it, and each older refresh token under its profile's key.
+    /// The job removes a plain copy only when no ownerless reader still needs it. The JSON report
+    /// lists the files kept plain. The job runs on demand and can run while the app is up.
+    /// You can stop the job at any time and run it again to resume. It exits 1 when something
+    /// could not be sealed. Needs OWNHEALTH_DATABASE_URL and the
+    /// OWNHEALTH_SECRETS_KEY the install was made with.
     SealLegacy {
         /// Report what a run would do and change nothing.
         #[arg(long)]
@@ -260,6 +262,20 @@ async fn healthcheck(port: u16) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::db_target;
+
+    #[test]
+    fn seal_legacy_help_explains_why_plain_files_stay() {
+        use clap::CommandFactory;
+        let mut cli = super::Cli::command();
+        let help = cli
+            .find_subcommand_mut("seal-legacy")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(help.contains("only when no ownerless reader still needs it"), "{help}");
+        assert!(help.contains("report lists the files kept plain"), "{help}");
+    }
 
     #[test]
     fn database_target_names_host_and_port_never_the_password() {
