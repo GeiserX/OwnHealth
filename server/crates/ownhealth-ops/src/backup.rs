@@ -1129,7 +1129,7 @@ fn ring_keys(
             })
             .transpose()?;
         if let Some(w) = ring.profiles.get(&id) {
-            let dek = authenticate_ring_key(&file, kek, id, &out.fingerprint, w)?;
+            let dek = authenticate_ring_key(&file, kek, id, &ring, w)?;
             if wanted.is_none_or(|wanted| wanted == dek.archive_id()) {
                 out.keys.push((id, w.clone()));
             } else if ring.closes(id, wanted) {
@@ -1153,10 +1153,10 @@ fn ring_keys(
     // Backup records a state hash for every profile in the database snapshot. Keys that
     // belong only to other backups stay in the keyring without affecting this restore.
     let selected: BTreeSet<_> = out.keys.iter().map(|(id, _)| *id).collect();
-    for (id, wrapped) in ring.profiles {
+    for (&id, wrapped) in &ring.profiles {
         if manifest["state_hash"].get(id.to_string()).is_some() && !selected.contains(&id) {
-            authenticate_ring_key(&file, kek, id, &out.fingerprint, &wrapped)?;
-            out.supplemental.push((id, wrapped));
+            authenticate_ring_key(&file, kek, id, &ring, wrapped)?;
+            out.supplemental.push((id, wrapped.clone()));
         }
     }
     Ok(Some(out))
@@ -1166,10 +1166,12 @@ fn authenticate_ring_key(
     path: &Path,
     kek: Option<&Kek>,
     id: Uuid,
-    fingerprint: &[u8],
+    ring: &keyfile::KeyringFile,
     wrapped: &[u8],
 ) -> Result<keys::Dek> {
-    kek.and_then(|k| k.unwrap(id, fingerprint, wrapped).ok())
+    let fingerprint = ring.kek_fingerprint.as_deref().unwrap_or_default();
+    let dek = kek
+        .and_then(|k| k.unwrap(id, fingerprint, wrapped).ok())
         .ok_or_else(|| {
             ops_error(format!(
                 "the keyring {} holds a damaged key for profile {id}: it does not open with \
@@ -1178,7 +1180,15 @@ fn authenticate_ring_key(
                  {ALLOW_MISSING}: that profile's files stay closed; nothing was loaded",
                 path.display()
             ))
-        })
+        })?;
+    if ring.closes(id, Some(&dek.archive_id())) {
+        return Err(ops_error(format!(
+            "the keyring {} holds a key that a tombstone closes for profile {id}. Remove that profile's \
+             entry from profiles in keyring.json, keep its tombstone, and rerun the restore. Nothing was loaded",
+            path.display()
+        )));
+    }
+    Ok(dek)
 }
 
 /// Load the selected keys and the current tombstones. A profile in the dump that stored its first
@@ -1626,6 +1636,64 @@ mod tests {
 
     tokio::task_local! {
         pub(super) static OBSERVE_PG_RESTORE: Box<dyn Fn() -> Result<()> + Send>;
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_a_closed_wrapped_key_on_every_selection_path() -> anyhow::Result<()> {
+        use ownhealth_core::testing::TestDb;
+
+        let db = TestDb::empty().await?;
+        let dir = tempfile::tempdir()?;
+        let settings = db.settings(dir.path())?;
+        let kek = Kek::from_settings(&settings)?;
+        let profile = Uuid::new_v4();
+        let stored = keys::Dek::generate();
+        let stored_id = stored.archive_id();
+        let other_id = keys::Dek::generate().archive_id();
+        let mut ring = keyfile::KeyringFile {
+            kek_fingerprint: Some(kek.fingerprint().to_vec()),
+            ..Default::default()
+        };
+        let wrapped = kek.wrap(profile, &stored)?;
+        ring.profiles.insert(profile, wrapped.clone());
+        ring.shredded.insert(profile);
+        let manifest = |requested: Option<&str>| {
+            let (ids, key_ids) = requested.map_or_else(
+                || (json!([]), json!({})),
+                |id| (json!([profile]), json!({profile.to_string(): id})),
+            );
+            json!({
+                "keys": {"keyring": ids, "key_ids": key_ids},
+                "state_hash": {profile.to_string(): "in the backup"},
+            })
+        };
+        let mut failures = Vec::new();
+        for (label, requested, closes_other) in [
+            ("matching", Some(stored_id.as_str()), false),
+            ("mismatched and shredded", Some(other_id.as_str()), true),
+            ("mismatched and missing", Some(other_id.as_str()), false),
+            ("supplemental", None, false),
+        ] {
+            let mut ids = BTreeSet::from([stored_id.clone()]);
+            if closes_other {
+                ids.insert(other_id.clone());
+            }
+            ring.shredded_keys.insert(profile, ids);
+            keyfile::write(&settings.keyring_path(), &ring)?;
+            let result = ring_keys(&settings, &manifest(requested), Some(&kek), true);
+            if !result.err().is_some_and(|e| e.to_string().contains("closes")) {
+                failures.push(label);
+            }
+        }
+
+        // This tombstone closes the archived key, leaving the stored newer key selectable.
+        ring.shredded_keys.insert(profile, BTreeSet::from([other_id.clone()]));
+        keyfile::write(&settings.keyring_path(), &ring)?;
+        let selected = ring_keys(&settings, &manifest(Some(&other_id)), Some(&kek), false)?.expect("keyring manifest");
+        assert_eq!(selected.keys, [(profile, wrapped)]);
+        assert_eq!(selected.shredded, [profile]);
+        assert!(failures.is_empty(), "closed key was not refused on {failures:?}");
+        Ok(())
     }
 
     #[tokio::test]
