@@ -810,9 +810,7 @@ pub async fn read_for(
     if let (true, false, Some(viewer)) = (records_ok, slots.family.is_empty(), viewer) {
         // a relative tagged sensitive never prints, as the person's own sensitive records do not (the
         // tick covers genome findings only)
-        let mut fam_scopes = scopes.clone();
-        fam_scopes.remove("read:sensitive");
-        let rel = crate::family::relatives(&mut *conn, viewer, profile_id, &fam_scopes, opts.as_of).await?;
+        let rel = crate::family::relatives(&mut *conn, viewer, profile_id, false, opts.as_of).await?;
         let doc = crate::family::document(&ev.slug, opts.as_of, &rel)?;
         family = family_rows(&crate::family::render(&doc)?, &slots.family, lang)?;
     }
