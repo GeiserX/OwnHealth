@@ -2188,3 +2188,49 @@ async fn record_history_keeps_sensitive_versions_behind_read_sensitive() -> R {
     assert_visible(&r.json, "items", "title", "Plain condition", "Private condition", true);
     Ok(())
 }
+
+/// Emergency access only reads: an emergency grant row that holds read:records and read:sensitive
+/// neither corrects nor removes a sensitive relative. The same grant as an ordinary one does.
+#[tokio::test]
+async fn an_emergency_grant_cannot_change_a_sensitive_relative() -> R {
+    let mut b = setup().await?;
+    let made = b
+        .alex
+        .post(
+            "/api/profiles/alex/family",
+            &json!({"relationship": "FTH", "display_name": "Sensitive relative", "sensitivity": ["mental_health"]}),
+        )
+        .await?;
+    assert_eq!(made.status, 201, "{:?}", made.json);
+    let id: Uuid = made.json["id"].as_str().unwrap_or_default().parse()?;
+    b.grant_sam("guardian", &["read:summary", "read:records", "read:sensitive"])
+        .await?;
+    let emergency = |on: bool| {
+        // an emergency grant row runs out (profile_grant's check)
+        sqlx::query(
+            "update profile_grant set break_glass = $3,
+             expires_at = case when $3 then now() + interval '1 day' end
+             where user_id = $1 and profile_id = $2",
+        )
+        .bind(b.env.user("sam"))
+        .bind(b.alex_id())
+        .bind(on)
+        .execute(b.env.pool())
+    };
+    emergency(true).await?;
+    let mut sam = b.sam().await?;
+    let path = format!("/api/profiles/alex/family/{id}");
+    let changed = json!({"relationship": "FTH", "display_name": "Changed", "sensitivity": ["mental_health"]});
+    let r = sam.put(&path, &changed).await?;
+    assert_eq!(r.status, 404, "{:?}", r.json);
+    let r = sam.delete(&path).await?;
+    assert_eq!(r.status, 404, "{:?}", r.json);
+    let status = "select status from family_member where id = $1";
+    assert_eq!(b.text(status, id).await?, "current");
+
+    emergency(false).await?;
+    let r = sam.delete(&path).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(b.text(status, id).await?, "retracted");
+    Ok(())
+}

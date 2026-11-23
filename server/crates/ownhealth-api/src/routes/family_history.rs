@@ -281,7 +281,8 @@ async fn editable(
         .await?
         .filter(|m| m.profile_id == perm.profile.id && m.status == "current");
     let m = m.ok_or_else(unknown)?;
-    if !m.sensitivity.is_empty() && !perm.may_read_sensitive("read:records") {
+    // a change needs read:sensitive on the caller's own grant: emergency access only reads
+    if !m.sensitivity.is_empty() && !perm.own_only().may_read_sensitive("read:records") {
         return Err(unknown());
     }
     if let Some(l) = m.linked_profile_id
