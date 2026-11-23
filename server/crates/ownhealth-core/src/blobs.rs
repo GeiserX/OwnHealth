@@ -366,11 +366,17 @@ fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
 thread_local! {
     // Tests on this thread see every hard link fail, as on a filesystem without them.
     static NO_LINKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // ... and, with this too, the stored file is removed first, as a racing `seal-legacy` would
+    // after the reader opened it and before the bytes are hashed and copied.
+    static SEALED_MEANWHILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn link_file(path: &Path, link: &Path) -> io::Result<()> {
     #[cfg(test)]
     if NO_LINKS.with(std::cell::Cell::get) {
+        if SEALED_MEANWHILE.with(std::cell::Cell::get) {
+            fs::remove_file(path)?;
+        }
         return Err(io::Error::new(io::ErrorKind::Unsupported, "no hard links in this test"));
     }
     fs::hard_link(path, link)
@@ -1962,6 +1968,25 @@ mod tests {
         let path = copy.path().to_path_buf();
         drop(copy);
         assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_plain_copy_survives_its_stored_file_going_while_it_is_copied() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(dir.path())?;
+        let owner = BlobOwner::Profile(Uuid::new_v4());
+        let data = format!("Rivera legacy file sealed while a reader copies it: {}", Uuid::new_v4());
+        let sha = store.put_bytes(BlobOwner::Reference, data.as_bytes())?;
+        let plain = store.path(&sha)?;
+        NO_LINKS.with(|n| n.set(true));
+        SEALED_MEANWHILE.with(|n| n.set(true));
+        let copy = store.with_local_copy(owner, &sha);
+        NO_LINKS.with(|n| n.set(false));
+        SEALED_MEANWHILE.with(|n| n.set(false));
+        let copy = copy?;
+        assert!(!plain.exists(), "the stored file went before the bytes were copied");
+        assert_eq!(fs::read(copy.path())?, data.as_bytes());
         Ok(())
     }
 
