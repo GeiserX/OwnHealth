@@ -43,9 +43,10 @@ impl OrthancConfig {
         let url = url.trim_end_matches('/').to_string();
         let scheme_ok = url.starts_with("http://") || url.starts_with("https://");
         if !scheme_ok || url.contains(['?', '#', '@']) {
-            return Err(Error::Invalid(format!(
-                "OWNHEALTH_ORTHANC_URL must be Orthanc's http(s) root, for example http://orthanc:8042, not {url}"
-            )));
+            return Err(Error::Invalid(
+                "OWNHEALTH_ORTHANC_URL must be Orthanc's http(s) root without credentials, a query, or a fragment. For example, use http://orthanc:8042."
+                    .into(),
+            ));
         }
         let password = match var("OWNHEALTH_ORTHANC_PASSWORD_FILE") {
             Some(path) => std::fs::read_to_string(&path)
@@ -77,4 +78,29 @@ pub async fn lock_study(conn: &mut PgConnection, study_instance_uid: &str) -> Re
         .execute(conn)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test]
+    fn the_error_for_a_url_with_credentials_omits_the_url() {
+        let sentinel = crate::ids::token_hex(16);
+        let env = HashMap::from([
+            (
+                "OWNHEALTH_ORTHANC_URL".to_string(),
+                format!("http://ownhealth:{sentinel}@orthanc:8042"),
+            ),
+            ("OWNHEALTH_ORTHANC_PASSWORD".to_string(), crate::ids::token_hex(16)),
+        ]);
+
+        let Err(Error::Invalid(message)) = OrthancConfig::from_env(&env) else {
+            panic!("a URL with credentials must be refused");
+        };
+        assert!(message.contains("OWNHEALTH_ORTHANC_URL"));
+        assert!(!message.contains(&sentinel), "the error contains the URL credential");
+    }
 }
