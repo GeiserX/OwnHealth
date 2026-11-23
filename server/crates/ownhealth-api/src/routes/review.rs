@@ -182,12 +182,18 @@ async fn check(conn: &mut PgConnection, principal: &Principal, item: Option<Revi
     Ok(item)
 }
 
-async fn audit(conn: &mut PgConnection, principal: &Principal, item: &ReviewItem, action: &str) -> R<()> {
+fn review_audit(principal: &Principal, action: &str) -> AuditEvent {
     let mut e = AuditEvent::new(principal.actor_kind(), "ui", action);
     e.actor_id = principal.user_id;
+    e.token_id = principal.token_id;
     e.tool = Some("review".into());
-    e.profile_id = item.profile_id;
     e.resource_type = Some("review_item".into());
+    e
+}
+
+async fn audit(conn: &mut PgConnection, principal: &Principal, item: &ReviewItem, action: &str) -> R<()> {
+    let mut e = review_audit(principal, action);
+    e.profile_id = item.profile_id;
     e.resource_ids = Some(vec![item.id.to_string()]);
     write_audit(conn, &e).await?;
     Ok(())
@@ -268,6 +274,13 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
     }
     let household = principal.household_id.unwrap_or_default();
     let open = count_open(&mut tx, household, &pids, &perms).await?;
+    let mut audit = review_audit(principal, "read");
+    if let [profile_id] = pids.as_slice() {
+        audit.profile_id = Some(*profile_id);
+    }
+    audit.resource_ids = Some(shown.iter().map(|item| item.id.to_string()).collect());
+    audit.rows_out = i32::try_from(shown.len()).ok();
+    write_audit(&mut tx, &audit).await?;
     tx.commit().await?;
     // `-> dict`: pydantic's JSON mode writes the datetimes with `Z` (GET /review/{id} did not)
     let mut out = shown.iter().map(|i| item_out(i)).collect::<R<Vec<_>>>()?;
@@ -286,6 +299,7 @@ async fn get_one(State(rt): State<Runtime>, caller: Caller, Path(item_id): Path<
     let mut tx = rt.pool.begin().await?;
     let found = review::get_item(&mut tx, item_id).await?;
     let item = check(&mut tx, &caller.0, found).await?;
+    audit(&mut tx, &caller.0, &item, "read").await?;
     tx.commit().await?;
     Ok(Json(item_out(&item)?))
 }

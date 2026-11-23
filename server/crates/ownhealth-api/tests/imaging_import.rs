@@ -540,3 +540,47 @@ async fn hidden_imaging_items_do_not_take_up_page_slots() -> R {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn round5_listing_held_studies_audits_one_read_of_the_visible_items() -> R {
+    let a = imaging_app().await?;
+    let id = item(&a, "carmen", "imaging_study", Some(json!({})), json!({})).await?;
+    let second = item(&a, "carmen", "imaging_study", Some(json!({})), json!({})).await?;
+    item(&a, "alex", "imaging_study", Some(json!({})), json!({})).await?;
+    let (status, result) = a.get("alex", "/review?profile=carmen").await?;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["items"].as_array().map(Vec::len), Some(2));
+    let rows: Vec<(Option<Uuid>, Option<Vec<String>>)> = sqlx::query_as(
+        "select profile_id, resource_ids from audit_event where actor_id = $1 and tool = 'review' and action = 'read'",
+    )
+    .bind(a.family.user("alex"))
+    .fetch_all(&a.rt.pool)
+    .await?;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].0, Some(a.family.profile("carmen")));
+    let mut expected = vec![id.to_string(), second.to_string()];
+    expected.sort();
+    let mut actual = rows[0].1.clone().unwrap_or_default();
+    actual.sort();
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round5_reading_a_held_study_audits_only_the_authorized_item() -> R {
+    let a = imaging_app().await?;
+    let id = item(&a, "carmen", "imaging_study", Some(json!({})), json!({})).await?;
+    let url = format!("/review/{id}");
+    let (status, result) = a.get("alex", &url).await?;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    narrow(&a, "alex", "carmen", &["read:summary", "read:labs"]).await?;
+    assert_eq!(a.get("alex", &url).await?.0, StatusCode::NOT_FOUND);
+    let rows: Vec<(Option<Uuid>, Option<Vec<String>>)> = sqlx::query_as(
+        "select profile_id, resource_ids from audit_event where actor_id = $1 and tool = 'review' and action = 'read'",
+    )
+    .bind(a.family.user("alex"))
+    .fetch_all(&a.rt.pool)
+    .await?;
+    assert_eq!(rows, [(Some(a.family.profile("carmen")), Some(vec![id.to_string()]))]);
+    Ok(())
+}
