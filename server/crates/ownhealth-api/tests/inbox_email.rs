@@ -554,6 +554,7 @@ async fn a_backup_taken_while_a_held_mail_is_released_keeps_the_mail_and_restore
     let fresh_db = ownhealth_core::testing::TestDb::empty().await?;
     let mut fresh = fresh_db.settings(&env.dir.path().join("restored"))?;
     fresh.secrets_key = env.settings.secrets_key.clone();
+    fresh.keyring_dir = Some(env.settings.keyring_path()); // the keys the backup left out
     let restored = ownhealth_ops::restore(&fresh, &archive).await?;
     assert_eq!(restored["ok"], true, "{restored:#}");
     let status: String = sqlx::query_scalar("select status from quarantine_item where id = $1")

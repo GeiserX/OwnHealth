@@ -788,10 +788,15 @@ fn side_lookup(url: &str, slot: Slot, new: Option<Vec<u8>>, fingerprint: [u8; 8]
     lookup.join().map_err(|_| KeyError::new("the key lookup stopped"))?
 }
 
+/// Why no key could be stored for a profile whose row is shredded: it was deleted, and a restore of
+/// an older backup brought its rows back. The REST layer answers it with its own code,
+/// `profile_deleted` (HTTP 410).
+pub const PROFILE_DELETED: &str = "no key could be stored for the profile: it was deleted";
+
 /// Why no key could be stored for a slot whose row is shredded.
 fn shredded(slot: Slot) -> &'static str {
     match slot {
-        Slot::Profile(_) => "no key could be stored for the profile: it was deleted",
+        Slot::Profile(_) => PROFILE_DELETED,
         Slot::Pending(_) => "no key could be stored for the item: it was assigned, released or deleted",
     }
 }

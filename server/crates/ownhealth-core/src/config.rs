@@ -59,6 +59,10 @@ pub struct Settings {
     /// `OWNHEALTH_ANCHOR_DIR`: where each backup writes the audit chain head it anchored, outside the
     /// database (ownhealth-ops backup.rs). Unset: `<data_dir>/anchor`.
     pub anchor_dir: Option<PathBuf>,
+    /// `OWNHEALTH_KEYRING_DIR`: the folder of `keyring.json`, the profile keys kept out of the database
+    /// dump (`keyfile.rs`). It must sit outside the blob folder and every backup. Unset:
+    /// `<data_dir>/keyring`.
+    pub keyring_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -89,6 +93,7 @@ impl Default for Settings {
             share_url: None,
             trusted_proxies: Vec::new(),
             anchor_dir: None,
+            keyring_dir: None,
         }
     }
 }
@@ -119,6 +124,7 @@ impl fmt::Debug for Settings {
             .field("share_url", &self.share_url)
             .field("trusted_proxies", &self.trusted_proxies)
             .field("anchor_dir", &self.anchor_dir)
+            .field("keyring_dir", &self.keyring_dir)
             .finish_non_exhaustive()
     }
 }
@@ -333,6 +339,7 @@ impl Settings {
             share_url: env_or(env, "SHARE_URL")?.map(|u| check_share_url(&u)).transpose()?,
             trusted_proxies: parse_trusted_proxies(&env_or(env, "TRUSTED_PROXIES")?.unwrap_or_default())?,
             anchor_dir: env_or(env, "ANCHOR_DIR")?.map(PathBuf::from),
+            keyring_dir: env_or(env, "KEYRING_DIR")?.map(PathBuf::from),
         })
     }
 
@@ -351,6 +358,13 @@ impl Settings {
     /// The folder of the audit anchor file: `OWNHEALTH_ANCHOR_DIR`, or `<data_dir>/anchor`.
     pub fn anchor_path(&self) -> PathBuf {
         self.anchor_dir.clone().unwrap_or_else(|| self.data_dir.join("anchor"))
+    }
+
+    /// The folder of `keyring.json`: `OWNHEALTH_KEYRING_DIR`, or `<data_dir>/keyring`.
+    pub fn keyring_path(&self) -> PathBuf {
+        self.keyring_dir
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("keyring"))
     }
 
     /// The URL for sqlx: `postgresql+psycopg://` (accepted by the Python app) becomes `postgresql://`.
