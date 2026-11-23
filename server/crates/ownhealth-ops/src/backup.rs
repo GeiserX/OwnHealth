@@ -1500,7 +1500,8 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
     let resume_lock = if resume_id.is_some() {
         record_lost(settings, &url, &closed, &backup_blobs).await.map_err(|error| {
             let message = format!(
-                "{error}. Fix the keyring error and rerun the same restore with the same backup, keyring,                  and options. Keep the app stopped until restore finishes"
+                "{error}. Fix the keyring error and rerun the same restore with the same backup, keyring, \
+                 and options. Keep the app stopped until restore finishes"
             );
             Error::Other(anyhow::Error::new(error).context(message))
         })?;
