@@ -623,11 +623,6 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
         )));
     }
     keyfile::check_folder(settings).map_err(|e| ops_error(e.0))?;
-    // the files a restore loaded without their key: an accepted loss no backup requires
-    let lost = keyfile::read_for_install(settings)
-        .map_err(|e| ops_error(e.0))?
-        .map(|ring| ring.lost)
-        .unwrap_or_default();
     if settings.keyring_dir.is_none() {
         tracing::warn!(
             "OWNHEALTH_KEYRING_DIR is not set, so the keyring is {} on the data volume: a host backup \
@@ -734,9 +729,10 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     tables.remove("profile_key");
     // Publish the dump only after the locked keyring rewrite succeeds. A refused rewrite drops
     // this attempt's staging file, so the same destination can be used again.
-    keyfile::rewrite(&mut lock, settings)
+    let lost = keyfile::rewrite(&mut lock, settings)
         .await
-        .map_err(|e| ops_error(e.0))?;
+        .map_err(|e| ops_error(e.0))?
+        .lost;
     staged_dump
         .persist_noclobber(dest.join("db.dump"))
         .map_err(|e| e.error)?;
@@ -775,27 +771,42 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // delete after the copy may already have shredded a key or removed a folder. A key that does not
     // open names no sealed file here; verify-restore reports it.
     let mut required = Vec::new();
+    let mut repaired = Vec::new();
     for (owner, sha) in &referenced {
         let slot = owner.slot();
+        let accepted_loss = match owner {
+            BlobOwner::Profile(id) if lost.get(id).is_some_and(|losses| losses.contains(sha)) => Some(*id),
+            _ => None,
+        };
         if let Some(slot) = slot
             && let Some(dek) = deks.get(&slot)
         {
             let key = blobs::sealed_key(slot, dek, sha)?;
-            if files.contains_key(&key) {
+            if let Some(path) = files.get(&key) {
+                if let Some(id) = accepted_loss
+                    && repaired_file(path, sha, Some((id, dek)))
+                {
+                    repaired.push((id, sha.as_str()));
+                }
                 required.push(key);
                 continue;
             }
         }
         let plain = blobs::sha256_hex(sha)?;
-        // A file sealed under a key that was shredded since (the sweep removes its folder), or one a
-        // restore loaded without its key (the keyring's `lost`), is gone on purpose. Every other
-        // reference needs its plain file, a profile that has no key yet included.
-        let gone = slot.is_some_and(|slot| shredded.contains(&slot))
-            || matches!(owner, BlobOwner::Profile(p) if lost.get(p).is_some_and(|l| l.contains(&plain)));
-        if files.contains_key(&plain) || !gone {
+        if let Some(path) = files.get(&plain) {
+            if let Some(id) = accepted_loss
+                && repaired_file(path, &plain, None)
+            {
+                repaired.push((id, sha.as_str()));
+            }
+            required.push(plain);
+        } else if !slot.is_some_and(|slot| shredded.contains(&slot)) && accepted_loss.is_none() {
+            // A shredded key or an unrepaired loss accounts for a missing file. Every other
+            // reference still needs its file, including a profile that has no key yet.
             required.push(plain);
         }
     }
+    clear_repaired_losses(settings, &repaired).await?;
     required.sort();
     required.dedup();
     let keyring: Vec<_> = key_ids.keys().collect();
@@ -924,6 +935,42 @@ fn corrupt_file(key: &str, path: &Path, listed: &BTreeSet<String>, sealed: &BTre
 
 /// Every blob file a backup must hold: the plain and sealed files its manifest lists, and the ones the
 /// database references (older manifests have no "referenced").
+/// A copied file only clears an accepted loss once the matching copy can be read in full.
+fn repaired_file(path: &Path, sha: &str, sealed: Option<(Uuid, &keys::Dek)>) -> bool {
+    let Some((profile, dek)) = sealed else {
+        return sha256_file(path).is_ok_and(|hash| hash == sha);
+    };
+    let mut expected = [0; 32];
+    if hex::decode_to_slice(sha, &mut expected).is_err() {
+        return false;
+    }
+    fs::File::open(path)
+        .and_then(|file| keys::SealedReader::open(file, dek, profile, &expected))
+        .and_then(|mut reader| std::io::copy(&mut reader, &mut std::io::sink()))
+        .is_ok()
+}
+
+async fn clear_repaired_losses(settings: &Settings, repaired: &[(Uuid, &str)]) -> Result<()> {
+    if repaired.is_empty() {
+        return Ok(());
+    }
+    let _lock = keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?;
+    let Some(mut ring) = keyfile::read_for_install(settings).map_err(|e| ops_error(e.0))? else {
+        return Ok(());
+    };
+    let mut changed = false;
+    for (id, sha) in repaired {
+        if let Some(losses) = ring.lost.get_mut(id) {
+            changed |= losses.remove(*sha);
+        }
+    }
+    if changed {
+        ring.lost.retain(|_, losses| !losses.is_empty());
+        keyfile::write(&settings.keyring_path(), &ring).map_err(|e| ops_error(e.0))?;
+    }
+    Ok(())
+}
+
 fn expected_blobs(manifest: &Value) -> BTreeSet<String> {
     let mut expected: BTreeSet<String> = str_list(&manifest["blobs"]["sha256"]).into_iter().collect();
     expected.extend(sealed_list(manifest).into_keys());

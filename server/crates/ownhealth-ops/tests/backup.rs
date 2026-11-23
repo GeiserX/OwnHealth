@@ -1144,6 +1144,50 @@ async fn a_backup_after_a_partial_restore_survives_the_unkeyed_blob_sweep() -> R
 }
 
 #[tokio::test]
+async fn a_backup_requires_a_repaired_file_if_it_goes_missing_again() -> R {
+    use ownhealth_core::keyfile;
+
+    let l = live().await?;
+    let owner = BlobOwner::Profile(l.alex);
+    let legacy_sha = hex::encode(sha2::Sha256::digest(&l.legacy));
+    let sha: String = sqlx::query_scalar(
+        "select encode(blob_sha256, 'hex') from document \
+         where profile_id = $1 and encode(blob_sha256, 'hex') <> $2 limit 1",
+    )
+    .bind(l.alex)
+    .bind(legacy_sha)
+    .fetch_one(&l.db.pool)
+    .await?;
+    let bytes = BlobStore::for_settings(&l.settings)?.get_bytes(owner, &sha)?;
+    let mut ring = keyfile::read(&keyfile::path(&l.settings))?.expect("backup wrote the keyring");
+    assert!(ring.profiles.remove(&l.alex).is_some());
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+
+    let (_db, settings) = fresh(&l).await?;
+    ownhealth_ops::restore_with(&settings, &l.archive, true).await?;
+    let store = BlobStore::for_settings(&settings)?;
+    assert!(!store.exists(owner, &sha));
+    let restored_ring = keyfile::read(&keyfile::path(&settings))?.expect("restore wrote the keyring");
+    assert!(restored_ring.lost[&l.alex].contains(&sha));
+
+    assert_eq!(store.put_bytes(owner, &bytes)?, sha);
+    let repaired = l.dir.path().join("repaired");
+    ownhealth_ops::backup(&settings, &repaired).await?;
+    assert_eq!(ownhealth_ops::verify_restore(&settings, &repaired).await?["ok"], true);
+
+    assert!(store.drop_sealed(owner, &sha)?);
+    let lost_again = l.dir.path().join("lost-again");
+    ownhealth_ops::backup(&settings, &lost_again).await?;
+    let report = ownhealth_ops::verify_restore(&settings, &lost_again).await?;
+    assert!(strs(&report["blobs"]["missing"]).contains(&sha), "{report:#}");
+
+    let ring = keyfile::read(&keyfile::path(&settings))?.expect("backup rewrote the keyring");
+    let other_losses = &ring.lost[&l.alex];
+    assert!(!other_losses.is_empty() && !other_losses.contains(&sha));
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_damaged_present_key_is_rejected_before_restore_even_with_allow_missing() -> R {
     use ownhealth_core::keyfile;
 
