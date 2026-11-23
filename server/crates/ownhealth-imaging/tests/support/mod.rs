@@ -162,6 +162,29 @@ pub fn image(st: &Study, series: usize, n: usize, ts: &str) -> Vec<u8> {
     write(obj, ts)
 }
 
+/// One more image of the study, its own SOP instance, with a private element of `n` zero bytes in
+/// group 0009: the patient and study tags (groups 0010 and 0020) sit behind it.
+pub fn image_with_private_bytes(st: &Study, n: usize) -> Vec<u8> {
+    let mut obj = InMemDicomObject::new_empty();
+    put(&mut obj, tags::SOP_CLASS_UID, VR::UI, CT_IMAGE);
+    put(
+        &mut obj,
+        tags::SOP_INSTANCE_UID,
+        VR::UI,
+        &format!("{}.999", st.series_uid(0)),
+    );
+    put(&mut obj, tags::MODALITY, VR::CS, st.modality);
+    patient_and_study(&mut obj, st);
+    put(&mut obj, tags::SERIES_INSTANCE_UID, VR::UI, &st.series_uid(0));
+    put(&mut obj, dicom_core::Tag(0x0009, 0x0010), VR::LO, "SYNTHETIC");
+    obj.put(DataElement::new(
+        dicom_core::Tag(0x0009, 0x1010),
+        VR::OB,
+        PrimitiveValue::from(vec![0u8; n]),
+    ));
+    write(obj, EXPLICIT_LE)
+}
+
 /// A small PDF report.
 pub fn report_pdf(st: &Study) -> Vec<u8> {
     use ownhealth_core::pdfwrite::{Font, Writer};

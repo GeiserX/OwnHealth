@@ -57,8 +57,11 @@ pub const REVIEW_KIND: &str = "imaging_study";
 pub const MAX_FILE_BYTES: u64 = 512 << 20;
 /// A zip with more entries than this is refused.
 pub const MAX_ENTRIES: usize = 100_000;
-/// The header of a file is read from its first bytes; a header longer than this is read whole.
+/// The header of a file is read from its first bytes; a header longer than this is read again, up to
+/// [`MAX_HEADER_BYTES`].
 const HEAD_BYTES: u64 = 1 << 20;
+/// A header that does not end within this many bytes is counted as damaged, and the file is not sent.
+const MAX_HEADER_BYTES: u64 = 16 << 20;
 /// Modalities of objects that are not images: a study is named after its images when it has any.
 const NOT_IMAGES: [&str; 5] = ["DOC", "SR", "KO", "PR", "OT"];
 
@@ -180,13 +183,9 @@ pub fn scan(reader: BlobReader) -> Result<Scan, JobError> {
         }
         let mut header = read_header(&head);
         if matches!(header, Err(Part10Error::Corrupt(_))) && head.len() as u64 == HEAD_BYTES {
-            // a header that does not end in the first bytes: read the whole file
-            match read_entry(&mut zip, i, MAX_FILE_BYTES + 1) {
-                Ok(all) if all.len() as u64 > MAX_FILE_BYTES => {
-                    s.too_large += 1;
-                    continue;
-                }
-                Ok(all) => head = all,
+            // a header that does not end in the first bytes: read further, as far as the cap
+            match read_entry(&mut zip, i, MAX_HEADER_BYTES) {
+                Ok(more) => head = more,
                 Err(_) => {
                     s.damaged += 1;
                     continue;

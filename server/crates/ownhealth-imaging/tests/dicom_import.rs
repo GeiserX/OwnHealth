@@ -561,3 +561,22 @@ async fn a_file_orthanc_refuses_is_counted_and_the_record_counts_what_orthanc_ke
     assert_eq!(fhir["series"][0]["numberOfInstances"], 3, "{fhir}");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_header_past_the_read_cap_is_damaged_and_not_sent() -> R {
+    let e = env().await?;
+    let mut disc = study_files(&Study::new(U1, ALEX), "DICOM");
+    // one more file of the study whose patient and study tags sit behind 17 MiB of a private element
+    disc.push((
+        "DICOM/BIG/I0001".into(),
+        support::image_with_private_bytes(&Study::new(U1, ALEX), 17 << 20),
+    ));
+    let up = e.upload("alex", &disc).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{error:?}");
+    assert_eq!(result["damaged"], 1, "{result}");
+    assert_eq!(result["instances"], 6, "{result}");
+    assert_eq!(e.orthanc.posts(), 6);
+    Ok(())
+}

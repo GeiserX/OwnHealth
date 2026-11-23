@@ -23,8 +23,12 @@ const IMPLICIT_LE: &str = "1.2.840.10008.1.2";
 const EXPLICIT_BE: &str = "1.2.840.10008.1.2.2";
 const DEFLATED_LE: &str = "1.2.840.10008.1.2.1.99";
 
-/// An inflated data set (deflated transfer syntax) may not grow past this.
-const MAX_INFLATED: u64 = 1 << 30;
+/// How far a deflated data set is inflated to read a header: the importer's tags sit in its first
+/// elements, so a set that holds none of them in this much is damaged. A few hundred bytes of input
+/// can inflate to gigabytes; the cap keeps that out of memory.
+pub const MAX_INFLATED_HEADER: u64 = 16 << 20;
+/// How far a deflated data set is inflated to find an encapsulated document (a PDF report).
+pub const MAX_INFLATED_DOCUMENT: u64 = 128 << 20;
 /// Sequences nest at most this deep.
 const MAX_DEPTH: usize = 32;
 
@@ -275,11 +279,14 @@ fn meta(buf: &[u8]) -> Result<(String, String, String, usize), Part10Error> {
     Ok((ts, class, instance, w.pos))
 }
 
-/// The data set's bytes and syntax: inflated when the transfer syntax is deflated.
+/// The data set's bytes and syntax: inflated, as far as `cap` bytes, when the transfer syntax is
+/// deflated. A set cut at the cap reads as far as it goes: the walk stops before the cut when what it
+/// looks for comes first, and finds the set damaged otherwise.
 fn data_set<'a>(
     buf: &'a [u8],
     ts: &str,
     start: usize,
+    cap: u64,
     inflated: &'a mut Vec<u8>,
 ) -> Result<(&'a [u8], Syntax), Part10Error> {
     let syntax = match ts {
@@ -289,7 +296,7 @@ fn data_set<'a>(
     };
     if ts == DEFLATED_LE {
         flate2::read::DeflateDecoder::new(&buf[start..])
-            .take(MAX_INFLATED)
+            .take(cap)
             .read_to_end(inflated)
             .map_err(|e| corrupt(format!("the deflated data set does not inflate: {e}")))?;
         return Ok((inflated.as_slice(), syntax));
@@ -297,20 +304,26 @@ fn data_set<'a>(
     Ok((&buf[start..], syntax))
 }
 
-/// Calls `each(tag, value)` for every top-level element of the data set until it returns false.
-fn walk(buf: &[u8], mut each: impl FnMut(u32, &[u8]) -> bool) -> Result<String, Part10Error> {
+/// Calls `each(tag, value)` for every top-level element of the data set up to tag `last`, until it
+/// returns false. The walk looks at the next tag before it reads the element, so an element past
+/// `last` (pixel data, or a set cut at the inflate cap) is never read.
+fn walk(buf: &[u8], last: u32, cap: u64, mut each: impl FnMut(u32, &[u8]) -> bool) -> Result<String, Part10Error> {
     if !is_part10(buf) {
         return Err(Part10Error::NotDicom);
     }
     let (ts, _, _, start) = meta(buf)?;
     let mut inflated = Vec::new();
-    let (set, syntax) = data_set(buf, &ts, start, &mut inflated)?;
+    let (set, syntax) = data_set(buf, &ts, start, cap, &mut inflated)?;
     let mut w = Walker {
         buf: set,
         pos: 0,
         syntax,
     };
     while !w.done() {
+        let tag = w.tag_at(w.pos)?;
+        if tag > last && !matches!(tag, ITEM | ITEM_END | SEQUENCE_END) {
+            break;
+        }
         let e = w.next(0)?;
         if matches!(e.tag, ITEM | ITEM_END | SEQUENCE_END) {
             return Err(corrupt("a delimiter outside a sequence"));
@@ -335,7 +348,7 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
         sop_instance_uid: instance,
         ..Header::default()
     };
-    h.transfer_syntax = walk(buf, |tag, value| {
+    h.transfer_syntax = walk(buf, 0x0020_000E, MAX_INFLATED_HEADER, |tag, value| {
         let v = || text(value);
         match tag {
             0x0008_0016 => h.sop_class_uid = v(),
@@ -351,7 +364,7 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
             _ => {}
         }
         // everything the importer needs sits at or before (0020,000E)
-        tag <= 0x0020_000E
+        true
     })?;
     if h.is_directory() {
         return Ok(h);
@@ -369,12 +382,12 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
 /// add to make its length even. None when the file holds no such element.
 pub fn encapsulated_document(buf: &[u8]) -> Result<Option<Vec<u8>>, Part10Error> {
     let mut doc = None;
-    walk(buf, |tag, value| {
+    walk(buf, 0x0042_0011, MAX_INFLATED_DOCUMENT, |tag, value| {
         if tag == 0x0042_0011 {
             doc = Some(value.to_vec());
             return false;
         }
-        tag < 0x0042_0011
+        true
     })?;
     Ok(doc.map(|mut d| {
         // a PDF ends at its last %%EOF; DICOM pads an odd length with one NUL
@@ -498,6 +511,45 @@ mod tests {
         let h = read_header(&file(DEFLATED_LE, &deflated)).expect("header");
         assert_eq!(h.study_instance_uid, "1.2.826.0.1.3680043.10.999.7");
         assert_eq!(h.patient_id, "LN-0001");
+    }
+
+    fn deflate(set: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut out = Vec::new();
+        let mut z = flate2::write::DeflateEncoder::new(&mut out, flate2::Compression::default());
+        z.write_all(set).expect("deflate");
+        z.finish().expect("deflate");
+        out
+    }
+
+    /// A private element of `n` zero bytes in group 0009, which sorts before the patient and study.
+    fn private_zeros(n: usize) -> Vec<u8> {
+        let mut s = explicit(false, 0x0009_0010, b"LO", b"SYNTHETIC");
+        s.extend(explicit(false, 0x0009_1010, b"OB", &vec![0u8; n]));
+        s
+    }
+
+    #[test]
+    fn a_deflated_set_is_inflated_only_as_far_as_the_header_needs() {
+        // a header behind 20 MiB of zeros (about 20 KiB deflated) is not read: damaged
+        let mut bomb = core(false);
+        let patient = [0x10, 0x00, 0x10, 0x00, b'P', b'N'];
+        let at = bomb.windows(6).position(|w| w == patient).expect("patient name");
+        let rest = bomb.split_off(at);
+        bomb.extend(private_zeros(20 << 20));
+        bomb.extend(rest);
+        let deflated = deflate(&bomb);
+        assert!(deflated.len() < 1 << 20, "{}", deflated.len());
+        assert!(
+            matches!(read_header(&file(DEFLATED_LE, &deflated)), Err(Part10Error::Corrupt(_))),
+            "a header past the inflate cap is damaged"
+        );
+        // the header first and 40 MiB of pixel data after it: the header reads, the rest is not
+        // inflated past the cap
+        let mut image = core(false);
+        image.extend(explicit(false, 0x7FE0_0010, b"OB", &vec![0u8; 40 << 20]));
+        let h = read_header(&file(DEFLATED_LE, &deflate(&image))).expect("header");
+        assert_eq!(h.series_instance_uid, "1.2.826.0.1.3680043.10.999.7.1");
     }
 
     #[test]
