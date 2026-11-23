@@ -123,6 +123,8 @@ async fn reimport_cumulative(conn: &mut PgConnection, document_id: Uuid) -> Resu
 
 /// Queue the profile's other active exports of `kind` (those whose flags hold `flag`) for import again,
 /// with their import summary cleared. A CGM export also calls it when its own readings are replaced.
+/// A CGM export keeps `cgm_csv` from its first import on, so one whose last run again died (its
+/// summary still cleared) is queued too; a Gadgetbridge export needs its summary.
 pub async fn reimport_kind(conn: &mut PgConnection, document_id: Uuid, kind: &str, flag: &str) -> Result<()> {
     let Some(job) = ownhealth_core::documents::job_kind(kind) else {
         return Ok(());
@@ -131,7 +133,7 @@ pub async fn reimport_kind(conn: &mut PgConnection, document_id: Uuid, kind: &st
     let others: Vec<Uuid> = sqlx::query_scalar(
         "update document o set flags = o.flags - 'import' from document d where d.id = $1 and d.mime = $2 \
          and o.mime = $2 and o.profile_id = d.profile_id and o.id <> d.id and o.status = 'active' \
-         and o.flags ? 'import' and o.flags ? $3 returning o.id",
+         and o.flags ? $3 and (o.flags ? 'import' or $3 = 'cgm_csv') returning o.id",
     )
     .bind(document_id)
     .bind(mime)

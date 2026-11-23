@@ -1529,3 +1529,55 @@ async fn a_retraction_that_waited_for_a_move_takes_the_new_owners_lock_too() -> 
     );
     Ok(())
 }
+
+/// A run again of an export that died (its attempts ran out) leaves its import summary cleared. A later
+/// retraction of another export still runs it again, so the readings the retracted one held come back.
+#[tokio::test]
+async fn a_retraction_runs_again_an_export_whose_last_run_again_died() -> R {
+    let env = Env::new().await?;
+    // a.csv 10:00 to 11:55 and b.csv 11:00 to 12:55, read as UTC; a.csv came first and owns 11:00 to 11:55
+    let a = clarity_at(&every_5("2026-11-14", 10, 11));
+    let b = clarity_at(&every_5("2026-11-14", 11, 12));
+    for (name, bytes) in [("a.csv", &a), ("b.csv", &b)] {
+        let (_, id) = upload(&env, "lucia", name, bytes).await?;
+        assert_eq!(job(&env, id).await?.0, "done", "{name}");
+    }
+    let doc = |name: &'static str| {
+        let env = &env;
+        async move {
+            let id: Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = $2")
+                .bind(env.fam.profile("lucia"))
+                .bind(name)
+                .fetch_one(&env.db.pool)
+                .await?;
+            anyhow::Ok(id)
+        }
+    };
+    let (a_doc, b_doc) = (doc("a.csv").await?, doc("b.csv").await?);
+    // an earlier retraction cleared b.csv's import summary and queued it again, and that run died
+    sqlx::query("update document set flags = flags - 'import' where id = $1")
+        .bind(b_doc)
+        .execute(&env.db.pool)
+        .await?;
+    sqlx::query(
+        "insert into job (kind, payload, dedupe_key, state, attempts, last_error, finished_at) \
+         values ($1, jsonb_build_object('document_id', $2::text), $1 || ':reimport:' || $2, 'dead', 5, \
+         'gave up', now())",
+    )
+    .bind(cgm_csv::JOB)
+    .bind(b_doc.to_string())
+    .execute(&env.db.pool)
+    .await?;
+    let mut c = env.db.pool.acquire().await?;
+    sqlx::query("update document set status = 'retracted' where id = $1")
+        .bind(a_doc)
+        .execute(&mut *c)
+        .await?;
+    ownhealth_ingest_structured::retract::retract_document_facts(&mut c, a_doc, "wrong file").await?;
+    drop(c);
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    let r = owned(&env, "lucia").await?;
+    let count = |name: &str| r.iter().filter(|x| x.0 == name).count();
+    assert_eq!((count("a.csv"), count("b.csv")), (0, 24), "{r:?}");
+    Ok(())
+}
