@@ -2098,3 +2098,26 @@ async fn single_review_needs_the_ordinary_scope_of_the_source_document() -> R {
     assert_eq!(b.text(status, item).await?, "accepted");
     Ok(())
 }
+
+/// The review counts (`review_open` on `/api/me`, `open` in the list) hold only what the list shows: a
+/// lab row is left out for a reviewer without read:labs, and counted once an open request adds it.
+#[tokio::test]
+async fn review_counts_hold_only_what_the_list_shows() -> R {
+    let mut b = setup().await?;
+    candidate(&b, None).await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let mut sam = b.sam().await?;
+    let review = sam.get("/api/review").await?;
+    assert_eq!(review.status, 200, "{:?}", review.json);
+    assert_eq!(review.json["items"], json!([]), "{:?}", review.json);
+    assert_eq!(review.json["withheld"], 1, "{:?}", review.json);
+    assert_eq!(review.json["open"], 0, "{:?}", review.json);
+    assert_eq!(sam.get("/api/me").await?.json["review_open"], 0);
+
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
+    let review = sam.get("/api/review").await?;
+    assert_eq!(review.json["items"].as_array().map(Vec::len), Some(1), "{:?}", review.json);
+    assert_eq!(review.json["open"], 1, "{:?}", review.json);
+    assert_eq!(sam.get("/api/me").await?.json["review_open"], 1);
+    Ok(())
+}

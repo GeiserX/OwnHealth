@@ -131,11 +131,42 @@ fn visible(item: &ReviewItem, perm: &Permission) -> bool {
 
 /// A pull's grouped item carries no values: it points at the bundle that holds them. It shows to
 /// whoever can open that bundle, so its link never answers 403.
-async fn opens_document(conn: &mut PgConnection, item: &ReviewItem, perm: &Permission) -> R<bool> {
+async fn opens_document(conn: &mut PgConnection, item: &ReviewItem, perm: &Permission) -> Result<bool, ApiError> {
     match (item.kind.as_str(), item.document_id) {
         ("fhir_unmapped_summary", Some(doc)) => Ok(crate::routes::documents::file_opens(conn, perm, doc).await?),
         _ => Ok(true),
     }
+}
+
+/// How many open items the list shows the caller, ordinary and emergency alike: the list's `open` and
+/// `review_open` on `/api/me`. `perms` are the caller's permissions on the profiles to count.
+pub(super) async fn count_shown(
+    conn: &mut PgConnection,
+    household: Uuid,
+    perms: &[&Permission],
+) -> Result<i64, ApiError> {
+    let by_profile: HashMap<Uuid, &Permission> = perms.iter().map(|p| (p.profile.id, *p)).collect();
+    let items = review::list_items(
+        &mut *conn,
+        &ItemQuery {
+            household_id: Some(household),
+            profile_ids: Some(by_profile.keys().copied().collect()),
+            status: Some("open".into()),
+            limit: i64::MAX,
+            ..ItemQuery::default()
+        },
+    )
+    .await?;
+    let mut shown = 0;
+    for i in &items {
+        let show = match i.profile_id.map(|pid| by_profile.get(&pid)) {
+            None => true,
+            Some(Some(p)) => visible(i, p) && opens_document(&mut *conn, i, p).await?,
+            Some(None) => false,
+        };
+        shown += i64::from(show);
+    }
+    Ok(shown)
 }
 
 fn no_item() -> Fail {
@@ -273,7 +304,8 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         }
     }
     let household = principal.household_id.unwrap_or_default();
-    let open = review::count_open(&mut tx, household, Some(&pids)).await?;
+    let counted: Vec<&Permission> = pids.iter().filter_map(|pid| by_profile.get(pid).copied()).collect();
+    let open = count_shown(&mut tx, household, &counted).await?;
     tx.commit().await?;
     // `-> dict`: pydantic's JSON mode writes the datetimes with `Z` (GET /review/{id} did not)
     let mut out = shown.iter().map(|i| item_out(i)).collect::<R<Vec<_>>>()?;
