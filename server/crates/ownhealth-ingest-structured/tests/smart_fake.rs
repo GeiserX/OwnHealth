@@ -1553,8 +1553,8 @@ async fn medication_requests_are_imported_without_medication_access() -> R {
     assert!(got.problems.is_empty(), "{got:?}");
     assert_eq!(
         w.count("medication").await?,
-        1,
-        "the order with an inline name was imported"
+        2,
+        "both orders with inline names were imported"
     );
     assert_eq!(
         w.searched_since(0).await,
