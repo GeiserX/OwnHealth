@@ -3,6 +3,8 @@
 //! - `backup`, `restore`, `verify_restore`: a backup is a pg_dump plus hard links of the blobs and a
 //!   manifest (`ownhealth.backup/v1`); restore and verify-restore compare table counts, blob hashes
 //!   and the state_hash of every profile.
+//! - `seal::seal_legacy`: the operator's job that seals the files and refresh tokens an install
+//!   stored before profile keys.
 //! - `export::export_profile`: the full export of one profile (FHIR NDJSON plus the original files,
 //!   one zip), for the step-up-protected REST route.
 //! - `summary_pdf::render`: the printed doctor summary, two A4 pages through `pdfwrite`.
@@ -18,6 +20,7 @@ pub mod export;
 pub mod ips;
 pub mod letter_pdf;
 pub mod next_draw_pdf;
+pub mod seal;
 pub mod shl;
 pub mod summary_pdf;
 
@@ -26,6 +29,7 @@ pub use backup::{
     verify_restore,
 };
 pub use demo_base::{demo_label_png, seed_base, seed_family, seed_supplements};
+pub use seal::seal_legacy;
 
 use ownhealth_core::demo;
 

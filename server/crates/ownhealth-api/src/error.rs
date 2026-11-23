@@ -57,6 +57,9 @@ impl From<Error> for ApiError {
             }
             Error::Upload(m) => ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_upload", m),
             Error::Invalid(m) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid", m),
+            Error::WearableIngestDenied { .. } => {
+                ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid", e.to_string())
+            }
             // a row whose stored file is gone: its own code, so a page can say it in the person's language
             Error::NotFound(m) if m == ownhealth_core::blobs::MISSING_FILE => {
                 ApiError::new(StatusCode::NOT_FOUND, "blob_missing", m)

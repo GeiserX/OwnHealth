@@ -1,4 +1,4 @@
-//! Lane H: the `backup | restore | verify-restore` commands of the binary, and the restic recipe in
+//! Lane H: the `backup | restore | verify-restore | seal-legacy` commands of the binary, and the restic recipe in
 //! deploy/restic/ run end to end against a local restic repository (`tests/ops/test_backup_restore.py`
 //! CLI case, `tests/ops/test_restic_scripts.py`).
 //!
@@ -8,9 +8,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use ownhealth_core::blobs::BlobStore;
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
 use ownhealth_core::config::Settings;
 use ownhealth_core::demo::seed_demo;
+use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::testing::TestDb;
 use serde_json::Value;
 use sqlx::Connection;
@@ -137,6 +138,87 @@ async fn cli_verify_restore_exits_non_zero_on_a_mismatch() -> R {
     )?;
     assert_eq!(err.status.code(), Some(1));
     assert!(String::from_utf8(err.stderr)?.contains("error: "));
+    Ok(())
+}
+
+/// `seal-legacy` on an upgraded install: one of Alex's reports still in the plain layout. A dry run
+/// reports it and changes nothing; a run seals it under his key and removes the plain copy; a second
+/// run has nothing left to do. Each prints its JSON report and exits 0.
+#[tokio::test]
+async fn cli_seal_legacy_dry_run_then_run_then_nothing_left() -> R {
+    let dir = tempfile::tempdir()?;
+    let (db, s) = seeded(dir.path()).await?;
+    let bytes = format!("%PDF-1.4 LabNorte report stored by 0.4.0 {}", uuid::Uuid::new_v4());
+    let sha = BlobStore::new(s.blobs_path())?.put_bytes(BlobOwner::Reference, bytes.as_bytes())?;
+    let (alex, household): (uuid::Uuid, uuid::Uuid) =
+        sqlx::query_as("select id, household_id from profile where slug = 'alex'")
+            .fetch_one(&db.pool)
+            .await?;
+    let mut c = db.pool.acquire().await?;
+    let doc = NewDocument::upload(household, Some(alex), &sha, "application/pdf", bytes.len() as i64);
+    create_document(&mut c, &doc).await?;
+    drop(c);
+    let plain = s
+        .blobs_path()
+        .join("sha256")
+        .join(&sha[..2])
+        .join(&sha[2..4])
+        .join(&sha);
+    assert!(plain.exists(), "{}", plain.display());
+    let seal = |args: &[&str]| -> anyhow::Result<Value> {
+        let out = ownhealth(&s, args)?;
+        assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+        Ok(serde_json::from_slice(&out.stdout)?)
+    };
+    let dry = seal(&["seal-legacy", "--dry-run"])?;
+    assert_eq!(dry["ok"], true, "{dry:#}");
+    assert_eq!(dry["dry_run"], true, "{dry:#}");
+    assert!(dry["files"]["sealed"].as_u64() >= Some(1), "{dry:#}");
+    assert!(plain.exists(), "a dry run removed the plain file");
+    let run = seal(&["seal-legacy"])?;
+    assert_eq!(run["ok"], true, "{run:#}");
+    assert!(run["files"]["removed"].as_u64() >= Some(1), "{run:#}");
+    assert!(!plain.exists(), "the plain copy stayed");
+    let store = BlobStore::for_settings(&s)?;
+    assert_eq!(store.get_bytes(BlobOwner::Profile(alex), &sha)?, bytes.as_bytes());
+    let again = seal(&["seal-legacy"])?;
+    assert_eq!(again["files"]["sealed"], 0, "{again:#}");
+    assert_eq!(again["files"]["removed"], 0, "{again:#}");
+    Ok(())
+}
+
+/// `seal-legacy` exits 1 when a file could not be sealed (one whose bytes no longer match its
+/// sha256), with the JSON report on stdout naming it; the file stays as it was.
+#[tokio::test]
+async fn cli_seal_legacy_exits_1_when_a_file_cannot_be_sealed() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir()?;
+    let (db, s) = seeded(dir.path()).await?;
+    let bytes = format!("%PDF-1.4 LabNorte report stored by 0.4.0 {}", uuid::Uuid::new_v4());
+    let sha = BlobStore::new(s.blobs_path())?.put_bytes(BlobOwner::Reference, bytes.as_bytes())?;
+    let (alex, household): (uuid::Uuid, uuid::Uuid) =
+        sqlx::query_as("select id, household_id from profile where slug = 'alex'")
+            .fetch_one(&db.pool)
+            .await?;
+    let mut c = db.pool.acquire().await?;
+    let doc = NewDocument::upload(household, Some(alex), &sha, "application/pdf", bytes.len() as i64);
+    create_document(&mut c, &doc).await?;
+    drop(c);
+    let plain = s
+        .blobs_path()
+        .join("sha256")
+        .join(&sha[..2])
+        .join(&sha[2..4])
+        .join(&sha);
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o640))?;
+    std::fs::write(&plain, b"%PDF-1.4 not the bytes the sha256 names")?;
+    let out = ownhealth(&s, &["seal-legacy"])?;
+    assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stderr));
+    let report: Value = serde_json::from_slice(&out.stdout)?;
+    assert_eq!(report["ok"], false, "{report:#}");
+    assert_eq!(report["files"]["failed"], 1, "{report:#}");
+    assert!(report["errors"].to_string().contains(&sha), "{report:#}");
+    assert!(plain.exists(), "the file that could not be sealed went");
     Ok(())
 }
 

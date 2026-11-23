@@ -274,7 +274,23 @@ chmod 644 secrets/secrets_key
 
 If OwnHealth then stops with "does not open ... of the ... profile keys", the key is not the one the install was made with. Nothing was changed: put the original key back in `secrets/secrets_key` (from the old `.env`, or from the copy you keep with the backups) and start again. A new key never opens files already stored.
 
-Files stored before the upgrade stay where they are and open as before; files stored after it are encrypted. A later release adds a job you start yourself that encrypts the older files too. Take a backup after the upgrade and keep the key next to the restic password.
+Files stored before the upgrade stay where they are and open as before; files stored after it are encrypted. Take a backup after the upgrade and keep the key next to the restic password. Then encrypt the older files and connection tokens too, with a job that runs only when you start it:
+
+```sh
+docker compose run --rm -T admin ownhealth seal-legacy --dry-run   # what it would do; changes nothing
+docker compose run --rm -T admin ownhealth seal-legacy
+```
+
+The job stores each older file under the key of every profile or pending item that reads it. It keeps the unencrypted copy if an ownerless reader still needs it or no record names it. The job also encrypts each older connection refresh token under its profile's key. It can run while OwnHealth runs, and a backup that runs at the same time keeps every file it needs. If you stop the job, run it again to resume.
+
+If legacy passwords or tokens exist, `OWNHEALTH_SECRETS_KEY` must open at least one before the job writes anything. The command prints a JSON report and exits 1 if it could not encrypt a file or token. The report counts copies that landed before a later copy failed. The `errors` list identifies failed files by their SHA-256 and lists document IDs when available. If a file fails its SHA-256 check, restore it from a backup or retract its document, then run the job again.
+
+Inbox records from before 1.0 did not say which profile they were for. The job gives each one the profile of its document, of the documents its released mail made, or of its inbox when the inbox is a profile's own, and then encrypts its file. Some files stay unencrypted, and the report counts them under `files.kept` and lists them under `files.kept_files`:
+
+- `ownerless`: reference data, or a file of a household inbox from before 1.0 that no document or release ties to a profile (a mail with only a body, a scan that made no document).
+- `unnamed`: a file no record names any more. Nothing reads it.
+
+A run after a complete one reports the same kept files again. Backups taken before the job still hold the unencrypted files until retention removes them.
 
 **To 0.4.0.** After the backup, set `admin` and `app` to `drumsergio/ownhealth:0.4.0` and `ocr` to `drumsergio/ownhealth:0.4.0-ocr`; nothing else in the compose files changes. Rule pack 0.2.0 moves every profile's `state_hash` once, so restore a backup made before the upgrade with 0.3.0, as above. For the same reason, `restore-test.sh` on a snapshot made before the upgrade reports every profile's `state_hash` as different; run `./deploy/restic/backup.sh` once after the upgrade, so the restore test checks a 0.4.0 snapshot. A household with a genome starts downloading NCBI's weekly ClinVar file (about 200 MB, no personal data in the request); turn it off in Settings, or set a local file path on a server without internet.
 

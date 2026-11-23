@@ -3,6 +3,7 @@
 // and category, and never next to the measurements.
 
 import { intlLocale, type Lang } from '../../lib/i18n/langs.ts';
+import type { LoadState } from '../../lib/logic/loader.ts';
 
 export interface VendorScore {
 	provider: string;
@@ -71,6 +72,32 @@ export function windowWordKey(d: number): ['h1_w7' | 'h1_w30' | 'h1_w1y' | 'h1_w
  * scores card keeps the whole window, so a year of scores never labels 90 days of measurements as a year. */
 export function measurementDays(days: number, span: number): number {
 	return span > 0 ? Math.min(days, span) : days;
+}
+
+/** The part of a summary entry that the HRV window rule reads. */
+interface Entry {
+	metric: string;
+	series: unknown[];
+	limitations?: string[];
+}
+
+/** An HRV chart shows one source: the best one with data in the days the summary read (its series,
+ * 90 days). The best one of the fewer days on screen may be another source, and the note would then
+ * name the wrong one, so the page reads the summary again for those days. Only an HRV entry that left a
+ * source out can change. */
+export function needsWindowRead(m: Entry, mDays: number): boolean {
+	return m.metric.startsWith('hrv_') && (m.limitations?.length ?? 0) > 0 && mDays < m.series.length;
+}
+
+/** An HRV card that needs a shorter read takes its data and status from that read.
+ * A successful read can omit the metric when the window has no samples. */
+export function windowEntry<M extends Entry>(m: M, mDays: number, win: LoadState<M[]> | null): LoadState<M> {
+	if (!needsWindowRead(m, mDays)) return { data: m, error: null, loading: false };
+	return {
+		data: win?.loading ? null : win?.data?.find((x) => x.metric === m.metric) ?? null,
+		error: win?.error ?? null,
+		loading: win?.loading ?? true
+	};
 }
 
 /** The server's categories (ownhealth-devices scores::CATEGORIES), in the order the card lists them. */

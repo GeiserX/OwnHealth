@@ -161,6 +161,11 @@ impl SecretBox {
         Ok(out)
     }
 
+    /// Open a version 1 secret from its stored identity, purpose, and ciphertext.
+    pub fn open_legacy_secret(&self, id: Uuid, purpose: &str, ciphertext: &[u8]) -> Result<SecretString> {
+        secret_text(self.open(ciphertext, &aad(id, purpose))?)
+    }
+
     /// Open what `seal` made with the same key and `aad`. A wrong key, other associated data or a
     /// changed byte is the same error, without detail.
     pub fn open(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
@@ -377,8 +382,12 @@ pub async fn read_secret(
             .map_err(|_| refused())?
             .to_vec()
     } else {
-        sb.open(&sealed, &aad(id, &purpose))?
+        return sb.open_legacy_secret(id, &purpose, &sealed);
     };
+    secret_text(plain)
+}
+
+fn secret_text(plain: Vec<u8>) -> Result<SecretString> {
     String::from_utf8(plain)
         .map(SecretString)
         .map_err(|_| Error::Invalid("the stored secret is not text".into()))
