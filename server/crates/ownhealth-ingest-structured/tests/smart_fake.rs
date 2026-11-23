@@ -169,7 +169,7 @@ struct Book {
     handed_out: Vec<String>,
     /// resources the server gained after the launch
     extra: Vec<Value>,
-    /// body bytes of every Patient read and search answer (Medication reads not counted)
+    /// Bytes of successful Patient reads and search bundles, excluding Medication reads.
     served: usize,
 }
 
@@ -1802,6 +1802,7 @@ async fn foreign_patient_resources_stay_out_of_the_stored_bundle() -> R {
     }
     assert_eq!(w.status_of_last_run(source).await?, "partial");
     assert_eq!(got.problems.len(), 1, "{got:?}");
+    assert_eq!(got.problems[0].code, "patient_reference");
     assert!(!got.problems[0].message.contains("lucia-rivera"), "{got:?}");
     assert_eq!(w.medication_reads(), 0);
     Ok(())
@@ -1880,8 +1881,8 @@ async fn the_last_status_retry_stays_within_the_run_budget() -> R {
         .map_err(anyhow::Error::msg)?;
     let status_required = serde_json::to_vec(&outcome_body("the status parameter is required for this search"))?;
     let caps = smart::Caps {
-        // Count the 400 body, then leave just one byte for the final retry.
-        run_bytes: w.fake.book().served + status_required.len() + 1,
+        // Count the 400 body, then leave too little room for the final bundle.
+        run_bytes: w.fake.book().served + status_required.len() + 64,
         ..smart::Caps::default()
     };
     w.fake.set(|b| {
