@@ -259,3 +259,18 @@ async fn an_hrv_series_never_chooses_or_names_a_withheld_vendor() -> R {
     check(&c.call("get_trend", trend).await?);
     Ok(())
 }
+
+/// The tools' outputSchema names `withheld.vendor_terms`, so a client that reads the schema learns it.
+#[tokio::test]
+async fn the_output_schema_names_vendor_terms() -> R {
+    let w = world().await?;
+    let c = w.connect(&w.tok().await?).await?;
+    for t in c.list_tools().await? {
+        let withheld = &t["outputSchema"]["properties"]["withheld"];
+        assert_eq!(withheld["properties"]["vendor_terms"]["type"], "integer", "{}", t["name"]);
+        // optional: absent when nothing was left out
+        let required = withheld["required"].as_array().cloned().unwrap_or_default();
+        assert!(!required.contains(&json!("vendor_terms")), "{}", t["name"]);
+    }
+    Ok(())
+}

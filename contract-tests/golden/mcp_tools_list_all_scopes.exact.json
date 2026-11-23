@@ -92,6 +92,9 @@
             },
             "minor_rule": {
               "type": "integer"
+            },
+            "vendor_terms": {
+              "type": "integer"
             }
           }
         },
@@ -245,6 +248,9 @@
               }
             },
             "minor_rule": {
+              "type": "integer"
+            },
+            "vendor_terms": {
               "type": "integer"
             }
           }
@@ -402,6 +408,9 @@
             },
             "minor_rule": {
               "type": "integer"
+            },
+            "vendor_terms": {
+              "type": "integer"
             }
           }
         },
@@ -534,6 +543,9 @@
             },
             "minor_rule": {
               "type": "integer"
+            },
+            "vendor_terms": {
+              "type": "integer"
             }
           }
         },
@@ -664,6 +676,9 @@
               }
             },
             "minor_rule": {
+              "type": "integer"
+            },
+            "vendor_terms": {
               "type": "integer"
             }
           }
@@ -818,6 +833,9 @@
             },
             "minor_rule": {
               "type": "integer"
+            },
+            "vendor_terms": {
+              "type": "integer"
             }
           }
         },
@@ -959,6 +977,9 @@
               }
             },
             "minor_rule": {
+              "type": "integer"
+            },
+            "vendor_terms": {
               "type": "integer"
             }
           }
@@ -1110,6 +1131,9 @@
             },
             "minor_rule": {
               "type": "integer"
+            },
+            "vendor_terms": {
+              "type": "integer"
             }
           }
         },
@@ -1256,6 +1280,9 @@
               }
             },
             "minor_rule": {
+              "type": "integer"
+            },
+            "vendor_terms": {
               "type": "integer"
             }
           }
@@ -1442,6 +1469,9 @@
               }
             },
             "minor_rule": {
+              "type": "integer"
+            },
+            "vendor_terms": {
               "type": "integer"
             }
           }

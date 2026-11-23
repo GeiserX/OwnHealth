@@ -145,8 +145,10 @@ summary every lane builds against.
 Rules every tool follows (mcp.md 3, 9):
 
 - Envelope fields: `profile, as_of, generated_at, lang, identity_mode, data, evidence, limitations,
-  not_assessed, withheld{sensitive, by_scope, minor_rule}, db_versions, next_cursor,
+  not_assessed, withheld{sensitive, by_scope, minor_rule, vendor_terms?}, db_versions, next_cursor,
   budget{tokens_est, truncated}, notice`, plus a compact markdown text block with the same facts.
+  `withheld.vendor_terms` (`search_observations`, `get_trend`) counts the wearable days held by a
+  provider that `data/connectors/providers.yaml` withholds; it is absent when nothing was left out.
 - `tools/list` shows only tools whose scope the token holds. All tools: `openWorldHint: false`; all but
   `propose` are `readOnlyHint: true, idempotentHint: true`.
 - Every fact carries `src`. Ids are stable and resolve through `get_source`.
