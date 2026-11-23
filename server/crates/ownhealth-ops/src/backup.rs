@@ -947,8 +947,8 @@ struct RingKeys {
     keys: Vec<(Uuid, Vec<u8>)>,
     /// profiles of the backup whose key the keyring lists as shredded: deleted since the backup
     shredded: Vec<Uuid>,
-    /// every profile the keyring lists as shredded, also one deleted before the backup: each gets its
-    /// shredded row back, so no new key is ever made for it
+    /// every profile the keyring lists as shredded and holds no newer key for, also one deleted before
+    /// the backup: each gets its shredded row back, so no new key is ever made for it
     tombstones: Vec<Uuid>,
     /// profiles for which the keyring has no matching key or tombstone
     missing: Vec<Uuid>,
@@ -1020,7 +1020,12 @@ fn ring_keys(
         fingerprint: ring.kek_fingerprint.clone().unwrap_or_default(),
         keys: Vec::new(),
         shredded: Vec::new(),
-        tombstones: ring.shredded.iter().copied().collect(),
+        tombstones: ring
+            .shredded
+            .iter()
+            .filter(|p| !ring.profiles.contains_key(p))
+            .copied()
+            .collect(),
         missing: Vec::new(),
         allow_missing,
     };
@@ -1049,10 +1054,15 @@ fn ring_keys(
                 })?;
             if wanted.is_none_or(|wanted| wanted == dek.archive_id()) {
                 out.keys.push((id, w.clone()));
+            } else if ring.closes(id, wanted) {
+                // the archive's key was deleted, and the profile came back since with a newer key:
+                // the archive's files stay closed, and the newer key stays the profile's
+                out.keys.push((id, w.clone()));
+                out.shredded.push(id);
             } else {
                 out.missing.push(id);
             }
-        } else if ring.shredded.contains(&id) {
+        } else if ring.closes(id, wanted) {
             out.shredded.push(id);
         } else {
             out.missing.push(id);

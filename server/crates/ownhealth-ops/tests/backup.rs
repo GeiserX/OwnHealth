@@ -1197,3 +1197,74 @@ async fn a_legacy_dump_obeys_tombstones_and_keeps_its_other_profile_keys() -> R 
     assert_eq!(report["ok"], true, "{report:#}");
     Ok(())
 }
+
+/// A 1.0 install deleted Alex after a rewrite published his key, so the keyring closes that key. The
+/// 0.4.0 backup (no key table) is then restored on the same keyring: Alex is back, and his next file
+/// makes a new key. The tombstone closes only the key that was deleted, so the new key is published
+/// and a backup of the new file restores it.
+#[tokio::test]
+async fn a_tombstone_closes_only_the_deleted_key_after_a_restore_from_before_the_keyring() -> R {
+    use ownhealth_core::keyfile;
+    use ownhealth_core::keys::{Kek, Keyring, shred};
+
+    ownhealth_ops::register();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/upgrade/0.4.0");
+    let dir = tempfile::tempdir()?;
+    let first = TestDb::empty().await?;
+    let s1 = first.settings(&dir.path().join("first"))?;
+    ownhealth_ops::restore(&s1, &fixture).await?;
+    migrate::migrate_embedded(&first.pool).await?;
+    let alex: Uuid = sqlx::query_scalar("select id from profile where slug = 'alex'")
+        .fetch_one(&first.pool)
+        .await?;
+    assert!(
+        Keyring::new(Kek::from_settings(&s1)?, first.url.clone())
+            .dek(alex, true)?
+            .is_some()
+    );
+    let mut c = first.pool.acquire().await?;
+    keyfile::rewrite(&mut c, &s1).await?;
+    let mut tx = first.pool.begin().await?;
+    shred(&mut tx, alex).await?;
+    tx.commit().await?;
+    let ring = keyfile::rewrite(&mut c, &s1).await?;
+    drop(c);
+    assert!(ring.shredded.contains(&alex) && !ring.profiles.contains_key(&alex));
+
+    let db = TestDb::empty().await?;
+    let mut settings = db.settings(&dir.path().join("restored"))?;
+    settings.secrets_key = s1.secrets_key.clone();
+    settings.keyring_dir = Some(s1.keyring_path());
+    ownhealth_ops::restore(&settings, &fixture).await?;
+    migrate::migrate_embedded(&db.pool).await?;
+    let household: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(alex)
+        .fetch_one(&db.pool)
+        .await?;
+    let bytes = b"%PDF-1.4 LabNorte report of Alex Rivera, stored after the restore".to_vec();
+    let sha = BlobStore::for_settings(&settings)?.put_bytes(BlobOwner::Profile(alex), &bytes)?;
+    let mut c = db.pool.acquire().await?;
+    create_document(
+        &mut c,
+        &NewDocument::upload(household, Some(alex), &sha, "application/pdf", bytes.len() as i64),
+    )
+    .await?;
+    let ring = keyfile::rewrite(&mut c, &settings).await?;
+    drop(c);
+    assert!(ring.profiles.contains_key(&alex), "the new key of Alex was not published");
+
+    let archive = ownhealth_ops::backup(&settings, &dir.path().join("after")).await?;
+    let report = ownhealth_ops::verify_restore(&settings, &archive).await?;
+    assert_eq!(report["keys"]["shredded"], serde_json::json!([]), "{report:#}");
+    let target = TestDb::empty().await?;
+    let mut ts = target.settings(&dir.path().join("target"))?;
+    ts.secrets_key = settings.secrets_key.clone();
+    ts.keyring_dir = Some(settings.keyring_path());
+    let restored = ownhealth_ops::restore(&ts, &archive).await?;
+    assert_eq!(restored["ok"], true, "{restored:#}");
+    assert_eq!(
+        BlobStore::for_settings(&ts)?.get_bytes(BlobOwner::Profile(alex), &sha)?,
+        bytes
+    );
+    Ok(())
+}

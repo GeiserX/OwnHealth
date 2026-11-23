@@ -13,14 +13,20 @@
 //!
 //! ```text
 //! {"schema": "ownhealth.keyring/v1", "kek_fingerprint": "<16 hex>",
-//!  "profiles": {"<profile uuid>": "<base64 wrapped key>"}, "shredded": ["<profile uuid>"]}
+//!  "profiles": {"<profile uuid>": "<base64 wrapped key>"}, "shredded": ["<profile uuid>"],
+//!  "shredded_keys": {"<profile uuid>": ["<64 hex archive id>"]}}
 //! ```
 //!
-//! A rewrite merges the table into the file: a key the table holds goes in unless the file marks it shredded, a key the table shredded
-//! goes out and its profile into `shredded`, and a profile the table does not know keeps what the file
-//! says. After a restore from an older backup, the table does not know the profiles made since; their
-//! keys stay, so a newer backup still restores. `shredded` tells a restore that a missing key was
-//! deleted on purpose, not lost.
+//! A rewrite merges the table into the file: a key the table holds goes in unless the file's tombstone
+//! closes it, a key the table shredded goes out and its profile into `shredded`, and a profile the table
+//! does not know keeps what the file says. After a restore from an older backup, the table does not
+//! know the profiles made since; their keys stay, so a newer backup still restores. `shredded` tells a
+//! restore that a missing key was deleted on purpose, not lost.
+//!
+//! A tombstone names the key it closes (`shredded_keys`, by [`crate::keys::Dek::archive_id`]) when the
+//! file held that key. It then closes only that key: a backup from before the keyring brings the
+//! profile back with no key, and the key its next file makes is published. A tombstone that names no
+//! key (the file never held it) closes every key of the profile.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, TryLockError};
@@ -50,6 +56,21 @@ pub struct KeyringFile {
     pub profiles: BTreeMap<Uuid, Vec<u8>>,
     /// Profiles whose key was shredded: a restore reads their missing key as deleted, not lost.
     pub shredded: BTreeSet<Uuid>,
+    /// The archive ids of the shredded keys, for the profiles of `shredded` whose key the file held.
+    /// A profile there may hold a newer key in `profiles`.
+    pub shredded_keys: BTreeMap<Uuid, BTreeSet<String>>,
+}
+
+impl KeyringFile {
+    /// Whether the tombstone of `profile` closes the key with `archive_id`: a tombstone that names
+    /// keys closes those, one that names none closes every key. `None` is a key of unknown id.
+    pub fn closes(&self, profile: Uuid, archive_id: Option<&str>) -> bool {
+        self.shredded.contains(&profile)
+            && self
+                .shredded_keys
+                .get(&profile)
+                .is_none_or(|ids| archive_id.is_none_or(|id| ids.contains(id)))
+    }
 }
 
 impl std::fmt::Debug for KeyringFile {
@@ -269,15 +290,52 @@ fn parse(v: &Value) -> Option<KeyringFile> {
     for id in v["shredded"].as_array()? {
         shredded.insert(Uuid::parse_str(id.as_str()?).ok()?);
     }
-    // a key with no fingerprint, or a profile both kept and shredded, is not a file `write` makes
-    if (kek_fingerprint.is_none() && !profiles.is_empty()) || profiles.keys().any(|p| shredded.contains(p)) {
+    let shredded_keys = id_lists(&v["shredded_keys"])?;
+    // a key with no fingerprint, ids for a profile not shredded, or a key kept under a tombstone that
+    // closes every key, is not a file `write` makes
+    if (kek_fingerprint.is_none() && !profiles.is_empty())
+        || shredded_keys.keys().any(|p| !shredded.contains(p))
+        || profiles
+            .keys()
+            .any(|p| shredded.contains(p) && !shredded_keys.contains_key(p))
+    {
         return None;
     }
     Some(KeyringFile {
         kek_fingerprint,
         profiles,
         shredded,
+        shredded_keys,
     })
+}
+
+/// `{"<profile uuid>": ["<64 hex>", ...]}`, each list not empty; absent (a file from before the field)
+/// is empty.
+fn id_lists(v: &Value) -> Option<BTreeMap<Uuid, BTreeSet<String>>> {
+    let mut out = BTreeMap::new();
+    let map = match v {
+        Value::Null => return Some(out),
+        v => v.as_object()?,
+    };
+    for (id, list) in map {
+        let mut ids = BTreeSet::new();
+        for hex in list.as_array()? {
+            let hex = hex.as_str().filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))?;
+            ids.insert(hex.to_ascii_lowercase());
+        }
+        if ids.is_empty() {
+            return None;
+        }
+        out.insert(Uuid::parse_str(id).ok()?, ids);
+    }
+    Some(out)
+}
+
+fn id_lists_json(lists: &BTreeMap<Uuid, BTreeSet<String>>) -> Map<String, Value> {
+    lists
+        .iter()
+        .map(|(id, ids)| (id.to_string(), json!(ids)))
+        .collect()
 }
 
 fn to_json(k: &KeyringFile) -> Value {
@@ -296,6 +354,7 @@ fn to_json(k: &KeyringFile) -> Value {
         "kek_fingerprint": k.kek_fingerprint.as_ref().map(hex::encode),
         "profiles": profiles,
         "shredded": k.shredded.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+        "shredded_keys": id_lists_json(&k.shredded_keys),
     })
 }
 
@@ -381,7 +440,8 @@ pub fn check_folder(settings: &Settings) -> Result<(), KeyError> {
 type KeyRow = (Uuid, Option<Vec<u8>>, Option<Vec<u8>>);
 
 /// Merge the database keys into the current file while holding its lock. A tombstone from either
-/// store wins over a live key. Profiles unknown to the database keep their key in the file.
+/// store wins over the key it closes ([`KeyringFile::closes`]). Profiles unknown to the database keep
+/// their key in the file.
 pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<KeyringFile, KeyError> {
     let _lock = lock(settings).await?;
     let dir = settings.keyring_path();
@@ -391,9 +451,19 @@ pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<Key
             .fetch_all(conn)
             .await?;
     remove_leftovers(&dir)?;
+    // the id of a wrapped key, or None when it does not open (then it counts as an unknown key)
+    let kek = Kek::from_settings(settings).ok();
+    let archive_id = |id: Uuid, f: &[u8], w: &[u8]| {
+        kek.as_ref()
+            .and_then(|k| k.unwrap(id, f, w).ok())
+            .map(|dek| dek.archive_id())
+    };
     for (id, wrapped, fingerprint) in rows {
         match (wrapped, fingerprint) {
-            (Some(w), Some(f)) if !ring.shredded.contains(&id) => {
+            (Some(w), Some(f)) => {
+                if ring.shredded.contains(&id) && ring.closes(id, archive_id(id, &f, &w).as_deref()) {
+                    continue;
+                }
                 if ring.kek_fingerprint.as_ref().is_some_and(|have| *have != f) {
                     return Err(foreign(&path(settings)));
                 }
@@ -401,7 +471,20 @@ pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<Key
                 ring.profiles.insert(id, w);
             }
             _ => {
-                ring.profiles.remove(&id);
+                let fingerprint = ring.kek_fingerprint.clone().unwrap_or_default();
+                let named = ring.shredded_keys.contains_key(&id) || !ring.shredded.contains(&id);
+                match ring.profiles.remove(&id).map(|w| archive_id(id, &fingerprint, &w)) {
+                    // the file held the key: the tombstone names it
+                    Some(Some(key)) if named => {
+                        ring.shredded_keys.entry(id).or_default().insert(key);
+                    }
+                    // a key the file held but cannot name: close every key of the profile
+                    Some(_) => {
+                        ring.shredded_keys.remove(&id);
+                    }
+                    // nothing new to close: the tombstone stays as it is, or closes every key
+                    None => {}
+                }
                 ring.shredded.insert(id);
             }
         }

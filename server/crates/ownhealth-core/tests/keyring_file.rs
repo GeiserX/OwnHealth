@@ -81,6 +81,7 @@ async fn a_rewrite_keeps_every_live_key_and_drops_a_shredded_one_for_good() -> R
     tx.commit().await?;
     let ring = rewrite(&db, &settings).await?;
     assert!(!ring.profiles.contains_key(&sam) && ring.shredded.contains(&sam));
+    assert_eq!(ring.shredded_keys[&sam].len(), 1, "the tombstone names the key it closes");
     assert!(ring.profiles.contains_key(&alex) && ring.profiles.contains_key(&newer));
     let sams = stored
         .iter()
@@ -96,6 +97,7 @@ async fn a_rewrite_keeps_every_live_key_and_drops_a_shredded_one_for_good() -> R
     // rewrite, and no leftover temporary file sits beside it
     let mut old = ring.clone();
     old.shredded.remove(&sam);
+    old.shredded_keys.remove(&sam);
     old.profiles.insert(sam, sams);
     keyfile::write(&settings.keyring_path(), &old)?;
     let ring = rewrite(&db, &settings).await?;
