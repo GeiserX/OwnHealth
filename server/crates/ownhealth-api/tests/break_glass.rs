@@ -808,6 +808,91 @@ async fn exports_read_with_the_contacts_own_grant_only() -> R {
     Ok(())
 }
 
+#[tokio::test]
+async fn the_summary_pdf_uses_ordinary_grants_for_linked_relatives() -> R {
+    use ownhealth_core::family::{self, FamilyCondition, MemberIn};
+    use ownhealth_ingest_pdf::textcheck::assert_text_layer;
+
+    let mut b = setup().await?;
+    let mut carmen = b.carmen().await?;
+    let profile = b.env.profile("carmen");
+    {
+        let mut tx = b.env.pool().begin().await?;
+        let ordinary = b.env.profile("sam");
+        set_grant(
+            &mut tx,
+            b.carmen_id,
+            ordinary,
+            "viewer",
+            Some(&ownhealth_core::access::scope_set(["read:records"])),
+            None,
+            None,
+        )
+        .await?;
+        for (relationship, linked) in [("MTH", ordinary), ("FTH", b.alex_id())] {
+            let mut relative = MemberIn::new(profile, relationship);
+            relative.conditions = vec![FamilyCondition {
+                kind: "mi".into(),
+                text: None,
+                code_system: None,
+                code: None,
+                onset_age: Some(51),
+                onset_approx: false,
+            }];
+            family::add(
+                &mut tx,
+                &relative,
+                &SrcRef::New(SrcIn::manual(Some(b.carmen_id))),
+                "person",
+                None,
+                Some(linked),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+    }
+
+    let as_of = ownhealth_core::access::today_utc();
+    let print = async |carmen: &mut Client| -> anyhow::Result<Vec<String>> {
+        let r = carmen
+            .post(
+                "/api/profiles/carmen/summary.pdf",
+                &json!({"lang": "en", "specialty": "cardiology", "as_of": as_of}),
+            )
+            .await?;
+        assert_eq!(r.status, 200, "{:?}", r.json);
+        Ok(assert_text_layer(&r.bytes, |_| Ok(())))
+    };
+    let before = print(&mut carmen).await?;
+    assert!(
+        before.iter().any(|line| line.contains(" mother fam.ascvd")),
+        "{before:?}"
+    );
+    assert!(!before.iter().any(|line| line.contains("father")), "{before:?}");
+
+    let id = b.open_for(b.carmen_id, &mut carmen, json!(["read:records"])).await?;
+    let after = print(&mut carmen).await?;
+    assert_eq!(after, before, "the emergency-only relative must not change the export");
+    assert_eq!(b.uses(id).await?, 0, "the export must not record emergency access");
+
+    let pedigree = carmen.get("/api/profiles/carmen/pedigree").await?;
+    assert_eq!(pedigree.status, 200, "{:?}", pedigree.json);
+    let patterns = pedigree.json["patterns"]["items"].as_array().expect("family patterns");
+    assert!(
+        patterns.iter().any(|item| {
+            item["rule"] == "fam.ascvd" && item["rel"].as_array().is_some_and(|rel| rel.contains(&json!("FTH")))
+        }),
+        "{:?}",
+        pedigree.json
+    );
+    assert_eq!(
+        b.uses(id).await?,
+        1,
+        "the on-screen read still records emergency access"
+    );
+    Ok(())
+}
+
 /// A calendar feed reads as its creator with no browser session, so it never sees the request: a
 /// contact with their own feed of the profile gets the same calendar, and no use is written.
 #[tokio::test]

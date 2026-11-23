@@ -462,15 +462,22 @@ type Row = (
     Option<Uuid>,
 );
 
+pub(crate) enum LinkedAccess {
+    Effective,
+    Ordinary,
+}
+
 /// The relatives of one profile the caller may read, as the store knew them at the end of `as_of`:
 /// sensitive rows only when `sensitive` (`Permission::may_read_sensitive("read:records")`), and no
-/// relative linked to a profile the caller cannot read (read:records there).
-pub async fn relatives(
+/// relative linked to a profile the caller cannot read (read:records there). Exports restrict
+/// linked profiles to the caller's ordinary grant.
+pub(crate) async fn relatives(
     conn: &mut PgConnection,
     principal: &Principal,
     profile_id: Uuid,
     sensitive: bool,
     as_of: NaiveDate,
+    linked_access: LinkedAccess,
 ) -> Result<Vec<Relative>> {
     let sql = format!(
         "select m.id, m.relationship, m.sex_at_birth, m.conditions, m.src_id, l.linked_profile_id \
@@ -489,11 +496,16 @@ pub async fn relatives(
     for (id, relationship, sex, conditions, src, linked) in rows {
         if let Some(linked) = linked {
             let readable = match effective_permission(&mut *conn, principal, linked).await {
-                Ok(perm) if perm.has("read:records") => {
-                    perm.record_read(&["read:records"]);
-                    true
-                }
-                Ok(_) => false,
+                Ok(perm) => match linked_access {
+                    LinkedAccess::Ordinary => perm.own_only().has("read:records"),
+                    LinkedAccess::Effective => {
+                        let readable = perm.has("read:records");
+                        if readable {
+                            perm.record_read(&["read:records"]);
+                        }
+                        readable
+                    }
+                },
                 Err(ownhealth_core::Error::AccessDenied { .. }) => false,
                 Err(e) => return Err(e),
             };
@@ -524,7 +536,7 @@ pub async fn build_document(
     let rel = if perm.has("read:records") {
         perm.record_read(&["read:records"]);
         let sensitive = perm.may_read_sensitive("read:records");
-        relatives(conn, principal, profile.id, sensitive, as_of).await?
+        relatives(conn, principal, profile.id, sensitive, as_of, LinkedAccess::Effective).await?
     } else {
         Vec::new()
     };
