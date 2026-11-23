@@ -15,7 +15,6 @@ use ownhealth_core::access::{
     Permission, Principal, accessible_profiles, effective_permission, env_majority, majority,
 };
 use ownhealth_core::audit::{AuditEvent, write_audit};
-use ownhealth_core::documents::document_is_sensitive;
 use ownhealth_core::provenance::resolve_src;
 use ownhealth_core::{Error, Runtime, review};
 use ownhealth_mcp::gate::{self, Why};
@@ -204,7 +203,7 @@ async fn source(
     if include_text
         && let (Some(doc), Some(page)) = (document_id, page_no)
         && perm.has("read:documents_text")
-        && (perm.has("read:sensitive") || !document_is_sensitive(&mut tx, doc).await?)
+        && super::documents::file_opens(&mut tx, &perm, doc).await?
     {
         page_text = sqlx::query_scalar::<_, Option<String>>(
             "select text_content from document_page where document_id = $1 and page_no = $2",

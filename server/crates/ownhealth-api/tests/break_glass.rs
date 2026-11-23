@@ -1386,6 +1386,61 @@ async fn sensitive_labs_need_both_scopes_on_the_same_grant() -> R {
 }
 
 #[tokio::test]
+async fn emergency_lab_access_cannot_quote_the_text_of_a_sensitive_report() -> R {
+    let mut b = setup().await?;
+    let profile = b.alex_id();
+    let doc = lab_document(&b).await?;
+    let text = "Colesterol LDL 97 mg/dL";
+    let mut tx = b.env.pool().begin().await?;
+    sqlx::query(
+        "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok, text_content)
+         values ($1, 1, 595, 842, true, $2)",
+    )
+    .bind(doc)
+    .bind(text)
+    .execute(&mut *tx)
+    .await?;
+    let mut citation = SrcIn::new("document_region");
+    citation.profile_id = Some(profile);
+    citation.document_id = Some(doc);
+    citation.page_no = Some(1);
+    citation.bbox = Some([10.0, 20.0, 30.0, 40.0]);
+    citation.actor_kind = "system".into();
+    let plain = commit_observation(
+        &mut tx,
+        &lab(profile, "97", false)?,
+        &SrcRef::New(citation.clone()),
+        CommitOptions::new("import"),
+    )
+    .await?;
+    citation.bbox = Some([10.0, 60.0, 30.0, 80.0]);
+    commit_observation(
+        &mut tx,
+        &lab(profile, "111", true)?,
+        &SrcRef::New(citation),
+        CommitOptions::new("import"),
+    )
+    .await?;
+    tx.commit().await?;
+
+    b.grant_sam("viewer", &["read:sensitive", "read:documents_text"])
+        .await?;
+    let mut sam = b.sam().await?;
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:labs"])).await?;
+    let endpoint = format!("/api/sources/{}?include_text=true", plain.src_id);
+    let r = sam.get(&endpoint).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["text"], Value::Null);
+
+    b.grant_sam("viewer", &["read:labs", "read:sensitive", "read:documents_text"])
+        .await?;
+    let r = sam.get(&endpoint).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["text"]["text"], text);
+    Ok(())
+}
+
+#[tokio::test]
 async fn only_an_emergency_read_fails_if_recording_a_use_fails() -> R {
     let mut b = setup().await?;
     b.grant_sam("viewer", &["read:records"]).await?;
