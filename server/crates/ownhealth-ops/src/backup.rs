@@ -1780,19 +1780,17 @@ mod tests {
     #[tokio::test]
     async fn each_verification_creates_and_drops_its_own_database() -> anyhow::Result<()> {
         use ownhealth_core::testing::TestDb;
-        use std::sync::Mutex;
 
         crate::register();
         let db = TestDb::new().await?;
         let dir = tempfile::tempdir()?;
         let settings = db.settings(dir.path())?;
         let archive = backup(&settings, &dir.path().join("backup")).await?;
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&seen);
+        let (recorded, seen) = std::sync::mpsc::channel();
         OBSERVE_PG_RESTORE
             .scope(
                 Box::new(move |url| {
-                    recorded.lock().unwrap().push(url.to_string());
+                    recorded.send(url.to_string()).expect("record scratch database");
                     Ok(())
                 }),
                 async {
@@ -1802,14 +1800,17 @@ mod tests {
                 },
             )
             .await?;
-        let urls = seen.lock().unwrap().clone();
+        let urls: Vec<_> = seen.try_iter().collect();
         assert_eq!(urls.len(), 2);
         assert_ne!(urls[0], urls[1], "verification reused a scratch database name");
         for url in urls {
-            let error = PgConnection::connect(&url)
-                .await
-                .err()
-                .expect("scratch database remained");
+            let error = match PgConnection::connect(&url).await {
+                Ok(conn) => {
+                    conn.close().await?;
+                    anyhow::bail!("scratch database remained");
+                }
+                Err(error) => error,
+            };
             assert_eq!(
                 error.as_database_error().and_then(|e| e.code()).as_deref(),
                 Some("3D000")
@@ -1843,7 +1844,10 @@ mod tests {
         let read_only = folder.clone();
         let result = BEFORE_CLEAR_REPAIRED
             .scope(
-                Box::new(move || fs::set_permissions(&read_only, fs::Permissions::from_mode(0o500)).unwrap()),
+                Box::new(move || {
+                    fs::set_permissions(&read_only, fs::Permissions::from_mode(0o500))
+                        .expect("make the loss record read-only")
+                }),
                 backup(&settings, &dest),
             )
             .await;
