@@ -363,7 +363,7 @@ async fn read_patient(State(s): State<Shared>, Path(id): Path<String>, headers: 
             let mut p = p.clone();
             if let Some(fields) = p.as_object_mut() {
                 for field in lock(&s.behaviour).redact_patient {
-                    fields.remove(*field);
+                    fields.shift_remove(*field);
                 }
             }
             fhir_answer(&s, StatusCode::OK, &p, true)
