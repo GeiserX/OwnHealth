@@ -781,13 +781,23 @@ pub async fn list_items(conn: &mut PgConnection, q: &ItemQuery) -> Result<Vec<Re
     .await?)
 }
 
-pub async fn count_open(conn: &mut PgConnection, household_id: Uuid, profile_ids: Option<&[Uuid]>) -> Result<i64> {
+/// Count open review items for the selected profiles and household. When a kind has a narrower
+/// set of allowed profiles, count that kind only on the intersection.
+pub async fn count_open(
+    conn: &mut PgConnection,
+    household_id: Uuid,
+    profile_ids: Option<&[Uuid]>,
+    profiles_for_kind: Option<(&str, &[Uuid])>,
+) -> Result<i64> {
     Ok(sqlx::query_scalar(
         "select count(*) from review_item where household_id = $1 and status = 'open' \
-         and ($2::uuid[] is null or profile_id = any($2) or profile_id is null)",
+         and ($2::uuid[] is null or profile_id = any($2) or profile_id is null) \
+         and ($3::text is null or kind <> $3 or profile_id is null or profile_id = any($4::uuid[]))",
     )
     .bind(household_id)
     .bind(profile_ids)
+    .bind(profiles_for_kind.map(|(kind, _)| kind))
+    .bind(profiles_for_kind.map(|(_, ids)| ids))
     .fetch_one(conn)
     .await?)
 }

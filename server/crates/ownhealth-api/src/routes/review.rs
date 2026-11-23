@@ -193,6 +193,28 @@ async fn audit(conn: &mut PgConnection, principal: &Principal, item: &ReviewItem
     Ok(())
 }
 
+/// Keep the existing open counts for other kinds and count held studies only where the caller can
+/// review them and read records.
+pub(super) async fn count_open(
+    conn: &mut PgConnection,
+    household: Uuid,
+    profile_ids: &[Uuid],
+    perms: &[Permission],
+) -> ownhealth_core::Result<i64> {
+    let imaging_profiles: Vec<Uuid> = perms
+        .iter()
+        .filter(|p| p.can("review") && p.has("read:records"))
+        .map(|p| p.profile.id)
+        .collect();
+    review::count_open(
+        conn,
+        household,
+        Some(profile_ids),
+        Some((ownhealth_imaging::import::REVIEW_KIND, &imaging_profiles)),
+    )
+    .await
+}
+
 async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>) -> R<Json<Value>> {
     let principal = &caller.0;
     let mut e = Errors::new();
@@ -239,7 +261,7 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         }
     }
     let household = principal.household_id.unwrap_or_default();
-    let open = review::count_open(&mut tx, household, Some(&pids)).await?;
+    let open = count_open(&mut tx, household, &pids, &perms).await?;
     tx.commit().await?;
     // `-> dict`: pydantic's JSON mode writes the datetimes with `Z` (GET /review/{id} did not)
     let mut out = shown.iter().map(|i| item_out(i)).collect::<R<Vec<_>>>()?;

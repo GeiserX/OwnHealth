@@ -828,7 +828,7 @@ async fn bulk_accept_only_clean_rows_above_threshold() -> R {
             Some("open")
         );
     }
-    assert_eq!(review::count_open(&mut c, f.household_id, None).await?, 2);
+    assert_eq!(review::count_open(&mut c, f.household_id, None, None).await?, 2);
     Ok(())
 }
 

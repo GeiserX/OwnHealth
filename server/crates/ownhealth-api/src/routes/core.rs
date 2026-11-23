@@ -17,7 +17,7 @@ use ownhealth_core::access::{
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::documents::document_is_sensitive;
 use ownhealth_core::provenance::resolve_src;
-use ownhealth_core::{Error, Runtime, review};
+use ownhealth_core::{Error, Runtime};
 use ownhealth_mcp::gate::{self, Why};
 use serde_json::{Map, Value, json};
 use sqlx::Row;
@@ -123,7 +123,7 @@ async fn me(State(rt): State<Runtime>, caller: crate::Caller) -> Result<Json<Val
     let household_id: Uuid = user.try_get("household_id")?;
     let perms = accessible_profiles(&mut tx, principal).await?;
     let pids: Vec<Uuid> = perms.iter().map(|p| p.profile.id).collect();
-    let open = review::count_open(&mut tx, household_id, Some(&pids)).await?;
+    let open = super::review::count_open(&mut tx, household_id, &pids, &perms).await?;
     let aom = majority(&mut tx, household_id).await?;
     tx.commit().await?;
     Ok(Json(json!({

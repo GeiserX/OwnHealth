@@ -356,6 +356,30 @@ async fn a_held_study_shows_in_review_only_to_those_who_may_read_records() -> R 
 }
 
 #[tokio::test]
+async fn only_visible_held_studies_count_in_review_and_the_badge() -> R {
+    let a = imaging_app().await?;
+    item(&a, "carmen", "imaging_study", Some(json!({})), json!({})).await?;
+    item(&a, "alex", "imaging_study", Some(json!({})), json!({})).await?;
+    item(&a, "carmen", "candidate_row", None, json!({})).await?;
+    narrow(&a, "alex", "carmen", &["read:summary", "read:labs"]).await?;
+
+    let (status, listed) = a.get("alex", "/review").await?;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let (status, me) = a.get("alex", "/me").await?;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    assert_eq!(listed["items"].as_array().map(Vec::len), Some(2), "{listed}");
+    assert_eq!((&listed["open"], &me["review_open"]), (&json!(2), &json!(2)));
+
+    for uri in ["/review?profile=carmen", "/review?profile=alex"] {
+        let (status, listed) = a.get("alex", uri).await?;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        assert_eq!(listed["items"].as_array().map(Vec::len), Some(1), "{listed}");
+        assert_eq!(listed["open"], json!(1), "{listed}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_zip_of_more_files_than_the_import_reads_is_refused_before_it_is_kept() -> R {
     let a = imaging_app().await?;
     let mut out = std::io::Cursor::new(Vec::new());
