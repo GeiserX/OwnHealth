@@ -103,7 +103,10 @@ async fn a_rewrite_keeps_every_live_key_and_drops_a_shredded_one_for_good() -> R
     let names: Vec<String> = fs::read_dir(settings.keyring_path())?
         .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect();
-    assert_eq!(names, vec![keyfile::FILE.to_string()]);
+    assert_eq!(
+        names.into_iter().collect::<std::collections::BTreeSet<_>>(),
+        [".keyring.lock".into(), keyfile::FILE.into()].into()
+    );
     Ok(())
 }
 
@@ -227,7 +230,10 @@ async fn a_rewrite_removes_a_temporary_copy_a_crash_left() -> R {
     let names: Vec<String> = fs::read_dir(settings.keyring_path())?
         .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect();
-    assert_eq!(names, vec![keyfile::FILE.to_string()]);
+    assert_eq!(
+        names.into_iter().collect::<std::collections::BTreeSet<_>>(),
+        [".keyring.lock".into(), keyfile::FILE.into()].into()
+    );
     Ok(())
 }
 
@@ -241,5 +247,82 @@ async fn a_keyring_inside_the_blob_folder_is_refused() -> R {
         "{err}"
     );
     assert!(!settings.keyring_path().exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_refused_as_a_keyring_file() -> R {
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join(keyfile::FILE);
+    assert!(
+        std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&file)
+            .status()?
+            .success()
+    );
+    assert!(keyfile::owner_writes_only(&file, false, "keyring").is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_keyring_path_with_parent_traversal_cannot_land_inside_blobs() -> R {
+    let (_db, dir, mut settings, _) = setup().await?;
+    fs::create_dir(dir.path().join("other"))?;
+    fs::create_dir(settings.blobs_path())?;
+    settings.keyring_dir = Some(dir.path().join("other/../blobs/keyring"));
+    assert!(keyfile::check_folder(&settings).is_err());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(settings.blobs_path(), dir.path().join("blob-alias"))?;
+        settings.keyring_dir = Some(dir.path().join("blob-alias/new/keyring"));
+        assert!(keyfile::check_folder(&settings).is_err());
+    }
+    settings.keyring_dir = Some(dir.path().join("sibling/keyring"));
+    keyfile::check_folder(&settings)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rewrite_respects_a_lock_on_the_shared_keyring() -> R {
+    use std::time::Duration;
+
+    let (db, _dir, settings, _) = setup().await?;
+    let other_db = TestDb::new().await?;
+    rewrite(&db, &settings).await?;
+    let lock = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(settings.keyring_path().join(".keyring.lock"))?;
+    lock.try_lock()?;
+    let mut rewrite = Box::pin(rewrite(&other_db, &settings));
+    let while_locked = tokio::time::timeout(Duration::from_secs(2), &mut rewrite).await;
+    drop(lock);
+    assert!(while_locked.is_err(), "rewrite bypassed the shared keyring lock");
+    tokio::time::timeout(Duration::from_secs(5), rewrite).await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_keyring_tombstone_outlives_a_live_row_from_another_database() -> R {
+    let (db, _dir, settings, kek) = setup().await?;
+    let p = Uuid::new_v4();
+    let survivor = Uuid::new_v4();
+    let keyring = Keyring::new(kek, db.url.clone());
+    for id in [p, survivor] {
+        assert!(keyring.dek(id, true)?.is_some());
+    }
+    let mut old = rewrite(&db, &settings).await?;
+    let survivor_key = old.profiles[&survivor].clone();
+    old.profiles.remove(&p);
+    old.shredded.insert(p);
+    keyfile::write(&settings.keyring_path(), &old)?;
+
+    let ring = rewrite(&db, &settings).await?;
+    assert!(ring.shredded.contains(&p));
+    assert!(!ring.profiles.contains_key(&p));
+    assert_eq!(ring.profiles[&survivor], survivor_key);
     Ok(())
 }

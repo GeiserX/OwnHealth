@@ -16,27 +16,29 @@
 //!  "profiles": {"<profile uuid>": "<base64 wrapped key>"}, "shredded": ["<profile uuid>"]}
 //! ```
 //!
-//! A rewrite merges the table into the file: a key the table holds goes in, a key the table shredded
+//! A rewrite merges the table into the file: a key the table holds goes in unless the file marks it shredded, a key the table shredded
 //! goes out and its profile into `shredded`, and a profile the table does not know keeps what the file
 //! says. After a restore from an older backup, the table does not know the profiles made since; their
 //! keys stay, so a newer backup still restores. `shredded` tells a restore that a missing key was
 //! deleted on purpose, not lost.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::fs::{self, TryLockError};
+use std::io::{self, Write};
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
-use sqlx::{Connection, PgConnection};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::config::Settings;
-use crate::keys::{KeyError, WRAPPED_LEN};
+use crate::keys::{Kek, KeyError, WRAPPED_LEN};
 
 /// The file name in the keyring folder.
 pub const FILE: &str = "keyring.json";
+const LOCK_FILE: &str = ".keyring.lock";
 pub const SCHEMA: &str = "ownhealth.keyring/v1";
 
 /// The profile keys of one install, wrapped under its KEK. `Debug` shows only counts.
@@ -82,7 +84,7 @@ pub fn owner_writes_only(path: &Path, folder: bool, what: &str) -> Result<bool, 
     if meta.file_type().is_symlink() {
         return Err(format!("the {what} {kind} is a symlink"));
     }
-    if folder != meta.is_dir() {
+    if (folder && !meta.is_dir()) || (!folder && !meta.is_file()) {
         return Err(format!("the {what} {kind} is not a {kind}"));
     }
     match meta.permissions().mode() & 0o022 {
@@ -93,8 +95,13 @@ pub fn owner_writes_only(path: &Path, folder: bool, what: &str) -> Result<bool, 
 }
 
 #[cfg(not(unix))]
-pub fn owner_writes_only(path: &Path, _folder: bool, _what: &str) -> Result<bool, String> {
-    Ok(path.exists())
+pub fn owner_writes_only(path: &Path, folder: bool, what: &str) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if (folder && m.is_dir()) || (!folder && m.is_file()) => Ok(true),
+        Ok(_) => Err(format!("the {what} has an unexpected file type")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 fn unreadable(path: &Path, why: &str) -> KeyError {
@@ -116,12 +123,43 @@ fn refused(path: &Path, why: &str) -> KeyError {
     ))
 }
 
-/// `path` lies in `parent`, both made absolute first (neither needs to exist).
-pub fn inside(path: &Path, parent: &Path) -> bool {
-    match (std::path::absolute(path), std::path::absolute(parent)) {
-        (Ok(p), Ok(d)) => p.starts_with(d),
-        _ => false,
+/// Resolve symlinks in the existing part of the path. The last directories may not exist yet.
+fn resolved(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    if absolute.components().any(|part| part == Component::ParentDir) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "use a path without '..'"));
     }
+
+    let mut ancestor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match fs::canonicalize(ancestor) {
+            Ok(mut base) => {
+                base.extend(missing.into_iter().rev());
+                return Ok(base);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // A dangling symlink needs an operator's attention, just like a symlink loop.
+                match fs::symlink_metadata(ancestor) {
+                    Err(missing) if missing.kind() == io::ErrorKind::NotFound => {}
+                    _ => return Err(e),
+                }
+                let Some((parent, name)) = ancestor.parent().zip(ancestor.file_name()) else {
+                    return Err(e);
+                };
+                missing.push(name);
+                ancestor = parent;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Whether `path` lies in `parent`, including when their final directories have yet to be made.
+pub fn inside(path: &Path, parent: &Path) -> Result<bool, KeyError> {
+    let resolve =
+        |p: &Path| resolved(p).map_err(|e| KeyError(format!("cannot resolve the folder {}: {e}", p.display())));
+    Ok(resolve(path)?.starts_with(resolve(parent)?))
 }
 
 /// The keyring at `path`. None only when no keyring was written there yet. Anything else that is not
@@ -145,6 +183,69 @@ pub fn read(path: &Path) -> Result<Option<KeyringFile>, KeyError> {
             &format!("it is not an {SCHEMA} file with keys of {WRAPPED_LEN} bytes"),
         )
     })
+}
+
+/// Read the keyring and check that it belongs to the configured install.
+pub fn read_for_install(settings: &Settings) -> Result<Option<KeyringFile>, KeyError> {
+    let file = path(settings);
+    let ring = read(&file)?;
+    if let Some(have) = ring.as_ref().and_then(|r| r.kek_fingerprint.as_deref())
+        && have != Kek::from_settings(settings)?.fingerprint()
+    {
+        return Err(foreign(&file));
+    }
+    Ok(ring)
+}
+
+fn foreign(file: &Path) -> KeyError {
+    KeyError(format!(
+        "the keyring {} was made under another OWNHEALTH_SECRETS_KEY: put back this install's \
+         keyring.json, see deploy/README.md",
+        file.display()
+    ))
+}
+
+fn ensure_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// Hold this guard across the read and any write or key installation. All databases and processes
+/// that share the keyring take the same lock, including while `keyring.json` is replaced.
+pub struct KeyringLock {
+    _file: fs::File,
+}
+
+pub async fn lock(settings: &Settings) -> Result<KeyringLock, KeyError> {
+    check_folder(settings)?;
+    let dir = settings.keyring_path();
+    let lock_path = dir.join(LOCK_FILE);
+    let io_error = |e| KeyError(format!("cannot lock the keyring in {}: {e}", dir.display()));
+    if !owner_writes_only(&dir, true, "keyring").map_err(|why| refused(&path(settings), &why))? {
+        ensure_dir(&dir).map_err(io_error)?;
+    }
+    owner_writes_only(&lock_path, false, "keyring lock").map_err(|why| refused(&path(settings), &why))?;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(&lock_path).map_err(io_error)?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(KeyringLock { _file: file }),
+            Err(TryLockError::WouldBlock) => tokio::time::sleep(Duration::from_millis(50)).await,
+            Err(TryLockError::Error(e)) => return Err(io_error(e)),
+        }
+    }
 }
 
 fn parse(v: &Value) -> Option<KeyringFile> {
@@ -209,14 +310,7 @@ pub fn write(dir: &Path, k: &KeyringFile) -> Result<(), KeyError> {
     let tmp = dir.join(format!(".{FILE}.{}.tmp", crate::ids::token_hex(6)));
     let written = (|| -> std::io::Result<()> {
         if fs::symlink_metadata(dir).is_err() {
-            let mut b = fs::DirBuilder::new();
-            b.recursive(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                b.mode(0o700);
-            }
-            b.create(dir)?;
+            ensure_dir(dir)?;
         }
         let mut opts = fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -273,7 +367,7 @@ fn remove_leftovers(dir: &Path) -> Result<(), KeyError> {
 /// Refuses a keyring folder inside the blob folder: every backup copies the blob folder.
 pub fn check_folder(settings: &Settings) -> Result<(), KeyError> {
     let dir = settings.keyring_path();
-    if crate::blobs::in_blob_folder(settings, &dir) {
+    if crate::blobs::in_blob_folder(settings, &dir)? {
         return Err(KeyError(format!(
             "the keyring folder {} is inside the blob folder, so every backup would copy it: set \
              OWNHEALTH_KEYRING_DIR to a folder of its own, see deploy/README.md",
@@ -286,38 +380,24 @@ pub fn check_folder(settings: &Settings) -> Result<(), KeyError> {
 /// A `profile_key` row: profile, wrapped key and KEK fingerprint, both null when shredded.
 type KeyRow = (Uuid, Option<Vec<u8>>, Option<Vec<u8>>);
 
-/// Merge `profile_key` into the keyring file and write it: every key the table holds goes in, every
-/// key it shredded goes out (its profile into `shredded`), and a profile the table does not know keeps
-/// what the file says. Writers take one database lock, so the last rewrite reads the newest table and
-/// a backup that read an older one never puts a shredded key back. Refuses a keyring folder inside
-/// the blob folder (every backup would copy it) and a keyring made under another KEK. A temporary
-/// copy a crash left in the folder goes first. Returns what it wrote.
+/// Merge the database keys into the current file while holding its lock. A tombstone from either
+/// store wins over a live key. Profiles unknown to the database keep their key in the file.
 pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<KeyringFile, KeyError> {
-    check_folder(settings)?;
+    let _lock = lock(settings).await?;
     let dir = settings.keyring_path();
-    let file = dir.join(FILE);
-    let mut tx = conn.begin().await?;
-    sqlx::query("select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('ownhealth.keyring'))")
-        .execute(&mut *tx)
-        .await?;
+    let mut ring = read_for_install(settings)?.unwrap_or_default();
     let rows: Vec<KeyRow> =
         sqlx::query_as("select profile_id, wrapped_dek, kek_fingerprint from profile_key order by profile_id")
-            .fetch_all(&mut *tx)
+            .fetch_all(conn)
             .await?;
-    let mut ring = read(&file)?.unwrap_or_default();
     remove_leftovers(&dir)?;
     for (id, wrapped, fingerprint) in rows {
         match (wrapped, fingerprint) {
-            (Some(w), Some(f)) => {
+            (Some(w), Some(f)) if !ring.shredded.contains(&id) => {
                 if ring.kek_fingerprint.as_ref().is_some_and(|have| *have != f) {
-                    return Err(KeyError(format!(
-                        "the keyring {} was made under another OWNHEALTH_SECRETS_KEY than this install's \
-                         profile keys: put back this install's keyring.json, see deploy/README.md",
-                        file.display()
-                    )));
+                    return Err(foreign(&path(settings)));
                 }
                 ring.kek_fingerprint = Some(f);
-                ring.shredded.remove(&id);
                 ring.profiles.insert(id, w);
             }
             _ => {
@@ -327,6 +407,5 @@ pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<Key
         }
     }
     write(&dir, &ring)?;
-    tx.commit().await?;
     Ok(ring)
 }

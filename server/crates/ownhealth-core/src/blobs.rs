@@ -1168,7 +1168,7 @@ fn tree_rel(key: &str) -> Option<PathBuf> {
 
 /// Whether `path` lies in the configured blob folder: the keyring folder must not, or every backup
 /// would copy it (`keyfile::check_folder`).
-pub fn in_blob_folder(settings: &crate::config::Settings, path: &Path) -> bool {
+pub fn in_blob_folder(settings: &crate::config::Settings, path: &Path) -> Result<bool, crate::keys::KeyError> {
     crate::keyfile::inside(path, &settings.blobs_path())
 }
 
