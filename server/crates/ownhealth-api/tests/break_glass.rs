@@ -788,6 +788,14 @@ async fn exports_read_with_the_contacts_own_grant_only() -> R {
     let pdf = sam.post("/api/profiles/alex/summary.pdf", &json!({})).await?;
     assert_eq!(pdf.status, 200, "{:?}", pdf.json);
     assert!(pdf.bytes.starts_with(b"%PDF"));
+    // the next-draw PDF and a gap letter print labs and records his own grant lacks; the plan on
+    // screen still reads through the request
+    let r = sam.get("/api/profiles/alex/next-draw.pdf").await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
+    let r = sam.get("/api/profiles/alex/next-draw").await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    let r = sam.get("/api/profiles/alex/gaps/any/letter.pdf").await?;
+    assert_eq!((r.status.as_u16(), r.code()), (403, "break_glass"), "{:?}", r.json);
 
     // Carmen reaches the profile only through her request: no summary PDF either
     b.name(b.carmen_id, json!({})).await?;
