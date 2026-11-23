@@ -1853,8 +1853,12 @@ mod tests {
             let (sealing, hash) = (store.clone(), sha.clone());
             BETWEEN_LOOKUPS.with(|hook| {
                 *hook.borrow_mut() = Some(Box::new(move || {
-                    assert!(sealing.rekey(BlobOwner::Reference, owner, &hash).unwrap());
-                    assert!(sealing.drop_plain(&hash).unwrap());
+                    assert!(
+                        sealing
+                            .rekey(BlobOwner::Reference, owner, &hash)
+                            .expect("seal the fixture")
+                    );
+                    assert!(sealing.drop_plain(&hash).expect("remove the plain fixture"));
                 }));
             });
             let bytes = if needs_path {
@@ -1896,7 +1900,7 @@ mod tests {
             Err(BlobError::Io(ref e)) if e.kind() == io::ErrorKind::InvalidData
         ));
         drop(third);
-        assert_eq!(store.checked.lock().unwrap().len(), 1);
+        assert_eq!(store.checked.lock().expect("hash cache is available").len(), 1);
         Ok(())
     }
 

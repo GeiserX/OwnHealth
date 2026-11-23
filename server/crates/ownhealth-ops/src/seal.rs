@@ -624,24 +624,34 @@ mod tests {
 
     #[test]
     fn sealing_and_clinvar_lock_documents_before_datasets() {
-        let source = include_str!("seal.rs").split_once("async fn owners(").unwrap().1;
-        let docs = source.find("AssertSqlSafe(docs_sql)").unwrap();
-        let datasets = source.find("AssertSqlSafe(genome_sql)").unwrap();
+        let source = include_str!("seal.rs")
+            .split_once("async fn owners(")
+            .expect("the sealing owner lookup exists")
+            .1;
+        let docs = source.find("AssertSqlSafe(docs_sql)").expect("sealing reads documents");
+        let datasets = source
+            .find("AssertSqlSafe(genome_sql)")
+            .expect("sealing reads datasets");
         assert!(docs < datasets);
         let clinvar = include_str!("../../ownhealth-genome/src/clinvar.rs")
             .split_once("async fn diff_dataset(")
-            .unwrap()
+            .expect("the ClinVar dataset comparison exists")
             .1;
         let docs = clinvar
             .find("from document where id = $1 and status <> 'retracted' for share")
-            .unwrap();
-        let datasets = clinvar.find("from genome_dataset where id = $1 for update").unwrap();
+            .expect("ClinVar locks the document");
+        let datasets = clinvar
+            .find("from genome_dataset where id = $1 for update")
+            .expect("ClinVar locks the dataset");
         assert!(docs < datasets);
     }
 
     #[test]
     fn sealing_uses_typed_task_and_retry_errors() {
-        let source = include_str!("seal.rs").split_once("#[cfg(test)]").unwrap().0;
+        let source = include_str!("seal.rs")
+            .split_once("#[cfg(test)]")
+            .expect("the sealing tests follow the implementation")
+            .0;
         assert!(!source.contains("anyhow"));
         assert!(source.contains("run the job again"));
     }
@@ -650,10 +660,10 @@ mod tests {
     fn key_preflight_reads_legacy_presence_and_ciphertext_in_one_statement() {
         let preflight = include_str!("seal.rs")
             .split_once("async fn check_secrets_key(")
-            .unwrap()
+            .expect("the sealing preflight exists")
             .1
             .split_once("async fn documents_of(")
-            .unwrap()
+            .expect("the document helper follows preflight")
             .0;
         assert_eq!(preflight.matches(".fetch_").count(), 1, "{preflight}");
         assert!(!preflight.contains("read_secret"), "{preflight}");

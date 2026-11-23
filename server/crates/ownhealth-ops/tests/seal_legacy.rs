@@ -614,7 +614,10 @@ async fn key_preflight_tries_a_valid_secret_after_a_corrupt_match() -> R {
         .execute(&m.db.pool)
         .await?;
     let preview = m.run(true).await?;
-    assert!(preview["files"]["removed"].as_u64().unwrap() > 0, "{preview:#}");
+    assert!(
+        preview["files"]["removed"].as_u64().expect("removed is a count") > 0,
+        "{preview:#}"
+    );
     let report = ownhealth_ops::seal_legacy(&m.db.pool, &m.store, &m.sb, false).await?;
     assert!(m.store.is_sealed(BlobOwner::Profile(m.alex), &m.report)?);
     assert_eq!(report["tokens"]["failed"], usize::from(ids[0] == m.token), "{report:#}");

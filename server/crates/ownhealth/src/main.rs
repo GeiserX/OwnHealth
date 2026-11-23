@@ -269,7 +269,7 @@ mod tests {
         let mut cli = super::Cli::command();
         let help = cli
             .find_subcommand_mut("seal-legacy")
-            .unwrap()
+            .expect("seal-legacy is a CLI subcommand")
             .render_long_help()
             .to_string();
         let help = help.split_whitespace().collect::<Vec<_>>().join(" ");

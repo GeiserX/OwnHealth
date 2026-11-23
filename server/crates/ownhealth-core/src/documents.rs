@@ -795,10 +795,10 @@ mod tests {
     fn upload_sniff_keeps_the_blocking_task_error_typed() {
         let function = include_str!("documents.rs")
             .split_once("pub async fn dispatch_upload_in_zone(")
-            .unwrap()
+            .expect("the upload dispatch function exists")
             .1
             .split_once("kinds.push")
-            .unwrap()
+            .expect("the dispatch function queues the sniff result")
             .0;
         assert!(!function.contains("anyhow"), "{function}");
     }
