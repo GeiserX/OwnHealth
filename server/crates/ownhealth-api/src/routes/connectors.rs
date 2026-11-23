@@ -75,25 +75,17 @@ pub struct EgressOverride(pub Egress);
 /// How connector requests go out: https to public addresses only, unless a test or a dev instance
 /// widened it (module docs).
 pub fn egress(rt: &Runtime, o: &Option<Extension<EgressOverride>>) -> Egress {
-    let switch = std::env::var("OWNHEALTH_DEV_CONNECTOR_LOOPBACK").ok();
+    let switch = std::env::var(oauth::DEV_LOOPBACK_SWITCH).ok();
     egress_for(rt.settings.dev_auth, switch.as_deref(), o)
 }
 
-/// [`egress`] with the dev switch's value given, so a test needs no process environment.
+/// [`egress`] with the dev switch's value given, so a test needs no process environment. The rule
+/// is `connector_oauth::configured_egress`, which the pollers use too.
 fn egress_for(dev_auth: bool, dev_loopback_switch: Option<&str>, o: &Option<Extension<EgressOverride>>) -> Egress {
     if let Some(Extension(EgressOverride(e))) = o {
         return e.clone();
     }
-    // never in a release build, as the SHC dev map (shc.rs)
-    let dev_loopback = cfg!(debug_assertions) && dev_auth && dev_loopback_switch == Some("1");
-    if dev_loopback {
-        return Egress {
-            allow_private: true,
-            https_only: false,
-            ..Egress::connector()
-        };
-    }
-    Egress::connector()
+    oauth::configured_egress(dev_auth, dev_loopback_switch)
 }
 
 fn fail(e: OAuthError) -> Fail {

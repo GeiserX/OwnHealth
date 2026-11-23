@@ -54,8 +54,50 @@ const MARGIN_SECONDS: i64 = 60;
 /// How long an access token with no `expires_in` is kept.
 const UNKNOWN_LIFETIME_SECONDS: i64 = 300;
 
-/// SMART App Launch, standalone patient access (connectors.md section 7).
-pub const SMART_SCOPES: &str = "openid fhirUser launch/patient offline_access patient/*.rs";
+/// SMART App Launch, standalone patient access (connectors.md section 7): a patient picked at the
+/// vendor, a refresh token, and read and search on each US Core type the SMART poller reads
+/// (ownhealth-ingest-structured `smart.rs`), never a wildcard or a write scope. A server that speaks
+/// only SMART v1 is asked for the same types as `.read` ([`v1_scopes`]).
+pub const SMART_SCOPES: &str = "openid fhirUser launch/patient offline_access patient/Patient.rs \
+    patient/AllergyIntolerance.rs patient/Condition.rs patient/DiagnosticReport.rs patient/DocumentReference.rs \
+    patient/Encounter.rs patient/Immunization.rs patient/Medication.rs patient/MedicationRequest.rs \
+    patient/Observation.rs patient/Procedure.rs";
+
+/// The connector rule for SMART v1 servers: each `patient/<type>.rs` becomes `patient/<type>.read`.
+pub fn v1_scopes(scopes: &str) -> String {
+    scopes
+        .split_whitespace()
+        .map(|s| match s.strip_suffix(".rs") {
+            Some(t) if s.starts_with("patient/") => format!("{t}.read"),
+            _ => s.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The switch that lets a debug build with dev auth reach a fake vendor on loopback.
+pub const DEV_LOOPBACK_SWITCH: &str = "OWNHEALTH_DEV_CONNECTOR_LOOPBACK";
+
+/// How connector requests go out: https to public addresses only. In a debug build that runs with
+/// dev auth, `dev_loopback_switch == Some("1")` widens it to plain http on loopback, so a person can
+/// try a flow against a local fake; a release build ignores the switch, as it does without dev auth.
+pub fn configured_egress(dev_auth: bool, dev_loopback_switch: Option<&str>) -> Egress {
+    // never in a release build, as the SHC dev map (shc.rs)
+    if cfg!(debug_assertions) && dev_auth && dev_loopback_switch == Some("1") {
+        return Egress {
+            allow_private: true,
+            https_only: false,
+            ..Egress::connector()
+        };
+    }
+    Egress::connector()
+}
+
+/// [`configured_egress`] with the switch read from the environment ([`DEV_LOOPBACK_SWITCH`]): what
+/// the connector routes and the pollers use.
+pub fn connector_egress(dev_auth: bool) -> Egress {
+    configured_egress(dev_auth, std::env::var(DEV_LOOPBACK_SWITCH).ok().as_deref())
+}
 
 // ------------------------------------------------------------------ errors ----
 
@@ -308,6 +350,14 @@ async fn discover_smart(issuer: &str, scopes: &str, egress: &Egress) -> Result<E
     if listed("code_challenge_methods_supported", "S256") == Some(false) {
         return Err(bad("no_pkce_s256"));
     }
+    // SMART v2 scopes (`.rs`) unless the server says it speaks only v1
+    let scopes = match (
+        listed("capabilities", "permission-v2"),
+        listed("capabilities", "permission-v1"),
+    ) {
+        (Some(false), Some(true)) => v1_scopes(scopes),
+        _ => scopes.to_string(),
+    };
     let auth = match (
         listed("token_endpoint_auth_methods_supported", "client_secret_basic"),
         listed("token_endpoint_auth_methods_supported", "client_secret_post"),
@@ -320,7 +370,7 @@ async fn discover_smart(issuer: &str, scopes: &str, egress: &Egress) -> Result<E
         authorize,
         token,
         revocation: field("revocation_endpoint"),
-        scopes: scopes.into(),
+        scopes,
         aud: Some(issuer.into()),
         auth,
     })
@@ -1306,6 +1356,31 @@ mod tests {
             .decode(h.trim_start_matches("Basic "))
             .expect("base64");
         assert_eq!(raw, b"a%3Ab:s+p");
+    }
+
+    #[test]
+    fn a_v1_server_is_asked_for_read_on_the_same_types() {
+        let v1 = v1_scopes(SMART_SCOPES);
+        assert!(v1.contains("patient/Observation.read"), "{v1}");
+        assert!(v1.contains("launch/patient offline_access"), "{v1}");
+        assert!(!v1.contains(".rs"), "{v1}");
+        assert_eq!(v1.split_whitespace().count(), SMART_SCOPES.split_whitespace().count());
+        assert!(
+            SMART_SCOPES
+                .split_whitespace()
+                .all(|s| !s.starts_with("patient/") || (s.ends_with(".rs") && !s.contains('*'))),
+            "read and search on named types only"
+        );
+    }
+
+    #[test]
+    fn the_dev_loopback_switch_widens_only_a_debug_build_with_dev_auth() {
+        assert_eq!(configured_egress(false, Some("1")), Egress::connector());
+        assert_eq!(configured_egress(true, Some("0")), Egress::connector());
+        assert_eq!(configured_egress(true, None), Egress::connector());
+        let dev = configured_egress(true, Some("1"));
+        assert_eq!(dev.allow_private, cfg!(debug_assertions), "{dev:?}");
+        assert_eq!(dev.https_only, !cfg!(debug_assertions), "{dev:?}");
     }
 
     #[test]
