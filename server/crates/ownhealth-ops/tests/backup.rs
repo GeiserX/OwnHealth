@@ -603,10 +603,9 @@ async fn restore_refuses_a_listed_file_that_is_missing_before_it_loads_anything(
     Ok(())
 }
 
-/// The manifest's key fingerprint matches, but one stored profile key does not open under it (made
-/// under another key, or changed): its files are lost, so the check fails.
+/// A backup must be able to identify each profile key for the manifest.
 #[tokio::test]
-async fn verify_restore_fails_when_a_profile_key_does_not_open() -> R {
+async fn backup_refuses_a_profile_key_it_cannot_identify() -> R {
     use ownhealth_core::keys::{Dek, Kek};
     let l = live().await?;
     let kek = Kek::from_settings(&l.settings)?;
@@ -618,11 +617,10 @@ async fn verify_restore_fails_when_a_profile_key_does_not_open() -> R {
         .bind(&kek.fingerprint()[..])
         .execute(&l.db.pool)
         .await?;
-    let archive = ownhealth_ops::backup(&l.settings, &l.dir.path().join("backup").join("second")).await?;
-    let report = ownhealth_ops::verify_restore(&l.settings, &archive).await?;
-    assert_eq!(report["keys"]["failed"], serde_json::json!([p]), "{report:#}");
-    assert_eq!(report["keys"]["ok"], false);
-    assert_eq!(report["ok"], false, "{report:#}");
+    let dest = l.dir.path().join("backup").join("second");
+    let err = err_text(ownhealth_ops::backup(&l.settings, &dest).await);
+    assert!(err.contains(&p.to_string()) && err.contains("does not open"), "{err}");
+    assert!(fs::read_dir(dest)?.next().is_none());
     Ok(())
 }
 
@@ -685,6 +683,14 @@ async fn verify_restore_fails_when_a_held_mails_file_is_gone() -> R {
     assert!(
         strs(&manifest(&a1)?["blobs"]["referenced"]).contains(&key),
         "the held mail's file is not among the files the database needs"
+    );
+    // Pending keys travel in the dump, so the held mail can open without a profile keyring.
+    let (_db, mut restored) = fresh(&l).await?;
+    restored.keyring_dir = Some(l.dir.path().join("missing-profile-keyring"));
+    ownhealth_ops::restore_with(&restored, &a1, true).await?;
+    assert_eq!(
+        BlobStore::for_settings(&restored)?.get_bytes(BlobOwner::Pending(kept), &kept_sha)?,
+        store.get_bytes(BlobOwner::Pending(kept), &kept_sha)?
     );
     // the second mail is deleted from the hold (its key shredded) and its folder swept
     let user: Uuid = sqlx::query_scalar("select id from app_user limit 1")
@@ -965,5 +971,226 @@ async fn a_restore_allowed_to_miss_keys_loads_every_record_and_opens_what_it_can
         .await?;
     assert_eq!(keyed, 0);
     assert!(public_tables(&db2).await? > 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_foreign_keyring_leaves_the_backup_destination_ready_for_retry() -> R {
+    use ownhealth_core::{keyfile, keys::Kek, testing::random_secrets_key};
+
+    let l = live().await?;
+    let original = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
+    let mut ring = original.clone();
+    ring.kek_fingerprint = Some(Kek::from_base64(&random_secrets_key())?.fingerprint().to_vec());
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+    let dest = l.dir.path().join("retry");
+    fs::create_dir(&dest)?;
+    let err = err_text(ownhealth_ops::backup(&l.settings, &dest).await);
+    assert!(err.contains("another OWNHEALTH_SECRETS_KEY"), "{err}");
+    assert!(
+        fs::read_dir(&dest)?.next().is_none(),
+        "backup left files before refusing"
+    );
+    keyfile::write(&l.settings.keyring_path(), &original)?;
+    ownhealth_ops::backup(&l.settings, &dest).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_backup_cannot_carry_a_keyring_reached_through_a_parent_directory() -> R {
+    let l = live().await?;
+    let dest = l.dir.path().join("retry");
+    fs::create_dir(&dest)?;
+    fs::create_dir(l.dir.path().join("other"))?;
+    let mut settings = l.settings.clone();
+    settings.keyring_dir = Some(l.dir.path().join("other/../retry/keys"));
+    assert!(ownhealth_ops::backup(&settings, &dest).await.is_err());
+    assert!(fs::read_dir(dest)?.next().is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_archives_profile_key_must_match_its_files() -> R {
+    use ownhealth_core::{
+        keyfile,
+        keys::{Dek, Kek},
+    };
+
+    let l = live().await?;
+    let mut ring = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
+    let kek = Kek::from_settings(&l.settings)?;
+    let dek = kek.unwrap(l.alex, &kek.fingerprint(), &ring.profiles[&l.alex])?;
+    ring.profiles.insert(l.alex, kek.wrap(l.alex, &dek)?);
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+    assert_eq!(
+        ownhealth_ops::verify_restore(&l.settings, &l.archive).await?["ok"],
+        true
+    );
+    ring.profiles.insert(l.alex, kek.wrap(l.alex, &Dek::generate())?);
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+    let (db, fresh) = fresh(&l).await?;
+    let err = err_text(ownhealth_ops::restore(&fresh, &l.archive).await);
+    assert!(
+        err.contains("--allow-missing-keys") && err.contains(&l.alex.to_string()),
+        "{err}"
+    );
+    assert_eq!(public_tables(&db).await?, 0);
+    let report = ownhealth_ops::restore_with(&fresh, &l.archive, true).await?;
+    assert_eq!(report["keys"]["missing"], serde_json::json!([l.alex]), "{report:#}");
+    let opened: bool = sqlx::query_scalar("select exists (select 1 from profile_key where profile_id = $1)")
+        .bind(l.alex)
+        .fetch_one(&db.pool)
+        .await?;
+    assert!(!opened);
+
+    // Older manifests have only the profile list. Keep their UUID-based selection.
+    let mut older = manifest(&l.archive)?;
+    older["keys"].as_object_mut().unwrap().remove("key_ids");
+    write_manifest(&l.archive, &older)?;
+    let report = ownhealth_ops::verify_restore(&l.settings, &l.archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_backup_after_a_partial_restore_survives_the_unkeyed_blob_sweep() -> R {
+    use ownhealth_core::keyfile;
+
+    let l = live().await?;
+    let mut ring = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
+    assert!(ring.profiles.remove(&l.alex).is_some());
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+    let (db, fresh) = fresh(&l).await?;
+    ownhealth_ops::restore_with(&fresh, &l.archive, true).await?;
+    let store = BlobStore::for_settings(&fresh)?;
+    let mut conn = db.pool.acquire().await?;
+    assert!(store.sweep_unkeyed(&mut conn).await? > 0);
+    drop(conn);
+
+    let new_backup = l.dir.path().join("after-partial");
+    ownhealth_ops::backup(&fresh, &new_backup).await?;
+    let target = TestDb::empty().await?;
+    let mut target_settings = target.settings(&l.dir.path().join("target"))?;
+    target_settings.secrets_key = fresh.secrets_key.clone();
+    target_settings.keyring_dir = fresh.keyring_dir.clone();
+    let report = ownhealth_ops::restore(&target_settings, &new_backup).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    let legacy_sha = hex::encode(sha2::Sha256::digest(&l.legacy));
+    assert!(strs(&manifest(&new_backup)?["blobs"]["referenced"]).contains(&legacy_sha));
+    assert_eq!(
+        BlobStore::for_settings(&target_settings)?.get_bytes(BlobOwner::Profile(l.alex), &legacy_sha)?,
+        l.legacy
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_damaged_present_key_is_rejected_before_restore_even_with_allow_missing() -> R {
+    use ownhealth_core::keyfile;
+
+    let l = live().await?;
+    let original = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
+    let mut ring = original.clone();
+    let wrapped = ring.profiles.get_mut(&l.alex).unwrap();
+    *wrapped.last_mut().unwrap() ^= 1;
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+    let (db, fresh) = fresh(&l).await?;
+    let err = err_text(ownhealth_ops::restore_with(&fresh, &l.archive, true).await);
+    assert!(
+        err.contains("nothing was loaded") && err.contains(&l.alex.to_string()),
+        "{err}"
+    );
+    assert_eq!(public_tables(&db).await?, 0);
+    keyfile::write(&l.settings.keyring_path(), &original)?;
+    let report = ownhealth_ops::restore(&fresh, &l.archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn restore_waits_for_the_shared_keyring_before_selecting_keys() -> R {
+    use ownhealth_core::keyfile;
+    use std::time::Duration;
+
+    let l = live().await?;
+    let (db, fresh) = fresh(&l).await?;
+    let lock = fs::File::options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(l.settings.keyring_path().join(".keyring.lock"))?;
+    lock.try_lock()?;
+    let mut restore = Box::pin(ownhealth_ops::restore(&fresh, &l.archive));
+    let while_locked = tokio::time::timeout(Duration::from_secs(2), &mut restore).await;
+
+    let mut ring = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
+    assert!(ring.profiles.remove(&l.alex).is_some());
+    ring.shredded.insert(l.alex);
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+    drop(lock);
+    let report = match while_locked {
+        Ok(done) => done?,
+        Err(_) => tokio::time::timeout(Duration::from_secs(30), restore).await??,
+    };
+    assert_eq!(report["keys"]["shredded"], serde_json::json!([l.alex]), "{report:#}");
+    let row: bool = sqlx::query_scalar("select wrapped_dek is null from profile_key where profile_id = $1")
+        .bind(l.alex)
+        .fetch_one(&db.pool)
+        .await?;
+    assert!(row);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_legacy_dump_obeys_tombstones_and_keeps_its_other_profile_keys() -> R {
+    use ownhealth_core::keyfile;
+
+    let l = live().await?;
+    let original = keyfile::read(&keyfile::path(&l.settings))?.unwrap_or_default();
+    let tool = std::env::var_os("OWNHEALTH_PG_BINDIR")
+        .filter(|d| !d.is_empty())
+        .map_or_else(|| PathBuf::from("pg_dump"), |d| PathBuf::from(d).join("pg_dump"));
+    let (db_url, db_password) =
+        l.db.url
+            .split_once("://")
+            .and_then(|(scheme, url)| {
+                let (login, address) = url.rsplit_once('@')?;
+                let (user, pass) = login.split_once(':')?;
+                Some((format!("{scheme}://{user}@{address}"), pass))
+            })
+            .ok_or_else(|| anyhow::anyhow!("test database URL has no password"))?;
+    let dump = std::process::Command::new(tool)
+        .arg("--format=custom")
+        .arg(&db_url)
+        .env("PGPASSWORD", db_password)
+        .stdout(fs::File::create(l.archive.join("db.dump"))?)
+        .output()?;
+    assert!(dump.status.success(), "{}", String::from_utf8_lossy(&dump.stderr));
+    let mut m = manifest(&l.archive)?;
+    let facts = m["keys"].as_object_mut().unwrap();
+    facts.remove("keyring");
+    facts.remove("key_ids");
+    m["tables"]["profile_key"] = serde_json::json!(original.profiles.len());
+    write_manifest(&l.archive, &m)?;
+
+    let mut ring = original.clone();
+    ring.profiles.remove(&l.alex);
+    ring.shredded.insert(l.alex);
+    let already_deleted = Uuid::new_v4();
+    ring.shredded.insert(already_deleted);
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+    let (db, fresh) = fresh(&l).await?;
+    let report = ownhealth_ops::restore(&fresh, &l.archive).await?;
+    let wrapped: BTreeMap<Uuid, Option<Vec<u8>>> = sqlx::query_as("select profile_id, wrapped_dek from profile_key")
+        .fetch_all(&db.pool)
+        .await?
+        .into_iter()
+        .collect();
+    assert!(wrapped[&l.alex].is_none());
+    assert!(wrapped[&already_deleted].is_none());
+    for (id, key) in &ring.profiles {
+        assert!(wrapped[id].as_ref() == Some(key));
+    }
+    assert_eq!(report["ok"], true, "{report:#}");
     Ok(())
 }

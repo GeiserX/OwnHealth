@@ -288,6 +288,15 @@ impl Dek {
         Dek::from_key(key)
     }
 
+    /// Stable across rewraps. Used to match an archive to the data key that sealed its files.
+    pub fn archive_id(&self) -> String {
+        hex::encode(
+            hmac(&self.key[..], &[b"ownhealth archive key id v1"])
+                .finalize()
+                .into_bytes(),
+        )
+    }
+
     /// The on-disk name of the file whose plaintext hashes to `sha` (32 bytes): 64 hex characters.
     pub fn address(&self, sha: &[u8; 32]) -> String {
         hex::encode(

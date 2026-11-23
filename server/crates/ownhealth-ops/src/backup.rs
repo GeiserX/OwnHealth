@@ -15,8 +15,8 @@
 //! backup keeps them sealed. The profile keys never enter it: the dump leaves the rows of
 //! `profile_key` out, and every backup rewrites `keyring.json` in OWNHEALTH_KEYRING_DIR instead
 //! (`ownhealth_core::keyfile`), a folder outside the blob folder and every backup. The manifest lists
-//! the profiles whose key the backup needs (`keys.keyring`), and restore and verify-restore take those
-//! keys from the keyring as it is now. A profile delete rewrites the keyring at once, so a backup taken
+//! the profiles whose key the backup needs (`keys.keyring`) and the data key identifiers
+//! (`keys.key_ids`). Restore and verify-restore take matching keys from the current keyring. A profile delete rewrites the keyring at once, so a backup taken
 //! before the delete no longer opens that profile's files; its rows stay in the dump until retention
 //! drops it. The keys of pending items still travel in the dump: an item's key is shredded when it
 //! gets its profile, so the keyring of a later day would no longer open the item in an older backup.
@@ -37,7 +37,7 @@
 //! holds, and only forward; a restore that passed its checks sets it to the restored head. The
 //! audit page runs the same check (`audit_status`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -593,7 +593,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // The keys stay out of every backup: refuse a keyring the backup would hold, and one that cannot
     // be read, before anything is written.
     let ring = keyfile::path(settings);
-    if keyfile::inside(&ring, dest) {
+    if keyfile::inside(&settings.keyring_path(), dest).map_err(|e| ops_error(e.0))? {
         return Err(ops_error(format!(
             "the keyring {} is inside the backup folder {}: set OWNHEALTH_KEYRING_DIR to a folder outside \
              every backup, see deploy/README.md",
@@ -602,7 +602,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
         )));
     }
     keyfile::check_folder(settings).map_err(|e| ops_error(e.0))?;
-    keyfile::read(&ring).map_err(|e| ops_error(e.0))?;
+    keyfile::read_for_install(settings).map_err(|e| ops_error(e.0))?;
     if settings.keyring_dir.is_none() {
         tracing::warn!(
             "OWNHEALTH_KEYRING_DIR is not set, so the keyring is {} on the data volume: a host backup \
@@ -653,9 +653,9 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     }
     fs::create_dir_all(dest)?;
     owner_only(dest)?;
-    let out = fs::File::create(dest.join("db.dump"))?;
+    let staged_dump = tempfile::NamedTempFile::new_in(dest)?;
     let mut cmd = pg_command("pg_dump", dump_args(&url, &snapshot))?;
-    let dump = cmd.stdout(out).stderr(Stdio::piped()).spawn()?;
+    let dump = cmd.stdout(staged_dump.reopen()?).stderr(Stdio::piped()).spawn()?;
     let facts = async {
         let referenced = referenced_blobs(&mut tx).await?;
         let wrapped = keys::stored_all(&mut tx).await?;
@@ -683,14 +683,35 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             String::from_utf8_lossy(&done.stderr).trim()
         )));
     }
+    let kek = settings
+        .secrets_key
+        .as_ref()
+        .map(|_| Kek::from_settings(settings))
+        .transpose()?;
+    let mut deks = HashMap::new();
+    let mut key_ids = BTreeMap::new();
+    for (slot, wrapped, fingerprint) in &wrapped {
+        let dek = kek.as_ref().map(|k| k.unwrap_slot(*slot, fingerprint, wrapped));
+        if let keys::Slot::Profile(profile) = slot {
+            let dek = dek
+                .transpose()?
+                .ok_or_else(|| ops_error("profile keys require OWNHEALTH_SECRETS_KEY"))?;
+            key_ids.insert(profile.to_string(), dek.archive_id());
+            deks.insert(*slot, dek);
+        } else if let Some(Ok(dek)) = dek {
+            deks.insert(*slot, dek);
+        }
+    }
     // The dump holds no row of it, so a restore never has the same count.
     tables.remove("profile_key");
-    // Every key of the snapshot whose profile was not deleted since goes into the keyring now: a key is
-    // never replaced, so the table read after the snapshot holds every one of them. Without it the
-    // backup opens nothing, so a failure fails the backup.
+    // Publish the dump only after the locked keyring rewrite succeeds. A refused rewrite drops
+    // this attempt's staging file, so the same destination can be used again.
     keyfile::rewrite(&mut lock, settings)
         .await
         .map_err(|e| ops_error(e.0))?;
+    staged_dump
+        .persist_noclobber(dest.join("db.dump"))
+        .map_err(|e| e.error)?;
 
     // Blobs are written before the rows that reference them commit, so every blob the snapshot can
     // see exists by now, and none of them went since (the copy lock above). Later blobs are harmless
@@ -725,45 +746,31 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // keys come from the snapshot and the files from the copy, never from the live store, where a
     // delete after the copy may already have shredded a key or removed a folder. A key that does not
     // open names no sealed file here; verify-restore reports it.
-    let deks: HashMap<keys::Slot, keys::Dek> = match &settings.secrets_key {
-        Some(_) => {
-            let kek = Kek::from_settings(settings)?;
-            wrapped
-                .iter()
-                .filter_map(|(slot, w, fp)| Some((*slot, kek.unwrap_slot(*slot, fp, w).ok()?)))
-                .collect()
-        }
-        None => HashMap::new(),
-    };
-    let mut referenced: Vec<String> = referenced
-        .iter()
-        .map(|(owner, sha)| {
-            if let Some(slot) = owner.slot()
-                && let Some(dek) = deks.get(&slot)
-            {
-                let key = blobs::sealed_key(slot, dek, sha)?;
-                if files.contains_key(&key) {
-                    return Ok(key);
-                }
+    let live_slots: HashSet<_> = wrapped.iter().map(|(slot, _, _)| *slot).collect();
+    let mut required = Vec::new();
+    for (owner, sha) in &referenced {
+        let slot = owner.slot();
+        if let Some(slot) = slot
+            && let Some(dek) = deks.get(&slot)
+        {
+            let key = blobs::sealed_key(slot, dek, sha)?;
+            if files.contains_key(&key) {
+                required.push(key);
+                continue;
             }
-            Ok(blobs::sha256_hex(sha)?)
-        })
-        .collect::<Result<_>>()?;
-    referenced.sort();
-    referenced.dedup();
-    // the profiles whose key a restore takes from the keyring
-    let keyring: Vec<String> = wrapped
-        .iter()
-        .filter_map(|(slot, _, _)| match slot {
-            keys::Slot::Profile(p) => Some(p.to_string()),
-            keys::Slot::Pending(_) => None,
-        })
-        .collect();
-    let fingerprint = match &settings.secrets_key {
-        Some(_) => Value::String(hex::encode(Kek::from_settings(settings)?.fingerprint())),
-        None => Value::Null,
-    };
-    let key_facts = json!({"kek_fingerprint": fingerprint, "profiles": kept, "keyring": keyring});
+        }
+        let plain = blobs::sha256_hex(sha)?;
+        // As in sweep_unkeyed, a sealed folder without a stored key is expendable. Its references
+        // can survive a partial restore. A plain copy is still usable and stays required.
+        if files.contains_key(&plain) || slot.is_none_or(|slot| live_slots.contains(&slot)) || kek.is_none() {
+            required.push(plain);
+        }
+    }
+    required.sort();
+    required.dedup();
+    let keyring: Vec<_> = key_ids.keys().collect();
+    let fingerprint = kek.as_ref().map(|k| hex::encode(k.fingerprint()));
+    let key_facts = json!({"kek_fingerprint": fingerprint, "profiles": kept, "keyring": keyring, "key_ids": key_ids});
     let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false);
     let manifest = json!({
         "schema": MANIFEST_SCHEMA,
@@ -779,7 +786,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             "bytes": bytes,
             "sha256": plain,
             "sealed": sealed,
-            "referenced": referenced,
+            "referenced": required,
         },
         "keys": key_facts,
         "state_hash": states.into_iter().map(|(p, h)| (p, Value::String(h))).collect::<Map<String, Value>>(),
@@ -930,6 +937,9 @@ fn backup_key(settings: &Settings, manifest: &Value) -> Result<Option<Kek>> {
 
 /// The profile keys of a backup, as the keyring holds them now.
 struct RingKeys {
+    legacy: bool,
+    /// Rows added for tombstones the older dump did not count.
+    legacy_tombstones_added: i64,
     fingerprint: Vec<u8>,
     /// the wrapped key of each profile the keyring still holds
     keys: Vec<(Uuid, Vec<u8>)>,
@@ -938,7 +948,7 @@ struct RingKeys {
     /// every profile the keyring lists as shredded, also one deleted before the backup: each gets its
     /// shredded row back, so no new key is ever made for it
     tombstones: Vec<Uuid>,
-    /// profiles the keyring knows nothing of: it is older than the backup, or another install's
+    /// profiles for which the keyring has no matching key or tombstone
     missing: Vec<Uuid>,
     /// the operator chose to restore without the keys the keyring lacks (`--allow-missing-keys`)
     allow_missing: bool,
@@ -947,31 +957,50 @@ struct RingKeys {
 /// The flag that lets a restore go on without the keys the keyring lacks.
 const ALLOW_MISSING: &str = "--allow-missing-keys";
 
-/// The keys the backup needs (`keys.keyring` in its manifest), from the keyring file. None for a
-/// backup from before the keyring, whose dump holds its keys. A keyring that cannot be read, or that
-/// another secrets key made, is refused before anything is loaded. A missing keyring is refused too,
-/// unless the backup needs no key or `allow_missing` says to go on without the keys.
-fn ring_keys(settings: &Settings, manifest: &Value, allow_missing: bool) -> Result<Option<RingKeys>> {
-    let Some(ids) = manifest["keys"]["keyring"].as_array() else {
-        return Ok(None);
-    };
+/// Select and authenticate keys before the restore loads anything. Older manifests use UUIDs
+/// alone. A legacy dump carries its own keys, but must still apply current tombstones.
+fn ring_keys(
+    settings: &Settings,
+    manifest: &Value,
+    kek: Option<&Kek>,
+    allow_missing: bool,
+) -> Result<Option<RingKeys>> {
+    let ids = manifest["keys"]
+        .get("keyring")
+        .map(|ids| {
+            ids.as_array()
+                .ok_or_else(|| ops_error("bad keys.keyring list in the manifest"))
+        })
+        .transpose()?;
+    let key_ids = manifest["keys"]
+        .get("key_ids")
+        .map(|map| {
+            map.as_object()
+                .ok_or_else(|| ops_error("bad keys.key_ids map in the manifest"))
+        })
+        .transpose()?;
+    if key_ids.is_some_and(|map| ids.is_none_or(|ids| map.len() != ids.len())) {
+        return Err(ops_error(
+            "keys.key_ids does not match the manifest's keys.keyring list",
+        ));
+    }
     let file = keyfile::path(settings);
     let ring = match keyfile::read(&file).map_err(|e| ops_error(e.0))? {
         Some(ring) => ring,
-        None if ids.is_empty() || allow_missing => keyfile::KeyringFile::default(),
+        None if ids.is_none_or(Vec::is_empty) || allow_missing => keyfile::KeyringFile::default(),
         None => {
             return Err(ops_error(format!(
                 "no keyring at {}: this backup holds no profile key, they are in keyring.json on the keyring \
                  mount (OWNHEALTH_KEYRING_DIR). Put the newest keyring.json there and run it again, or \
-                 restore with {ALLOW_MISSING} to load every record without the files that need a key; \
-                 nothing was loaded, see deploy/README.md",
+                 restore with {ALLOW_MISSING} to load the archive with unavailable profile files sealed. \
+                 In this attempt, nothing was loaded. See deploy/README.md",
                 file.display()
             )));
         }
     };
-    let want = manifest["keys"]["kek_fingerprint"].as_str();
+    let want = kek.map(|k| hex::encode(k.fingerprint()));
     let have = ring.kek_fingerprint.as_ref().map(hex::encode);
-    if let (Some(want), Some(have)) = (want, &have)
+    if let (Some(want), Some(have)) = (&want, &have)
         && want != have
     {
         return Err(ops_error(format!(
@@ -980,7 +1009,12 @@ fn ring_keys(settings: &Settings, manifest: &Value, allow_missing: bool) -> Resu
             file.display()
         )));
     }
+    if ids.is_none() && ring.shredded.is_empty() {
+        return Ok(None);
+    }
     let mut out = RingKeys {
+        legacy: ids.is_none(),
+        legacy_tombstones_added: 0,
         fingerprint: ring.kek_fingerprint.clone().unwrap_or_default(),
         keys: Vec::new(),
         shredded: Vec::new(),
@@ -988,13 +1022,34 @@ fn ring_keys(settings: &Settings, manifest: &Value, allow_missing: bool) -> Resu
         missing: Vec::new(),
         allow_missing,
     };
-    for id in ids {
+    for id in ids.into_iter().flatten() {
         let id = id
             .as_str()
             .and_then(|i| Uuid::parse_str(i).ok())
             .ok_or_else(|| ops_error(format!("bad profile id {id} in the manifest's keys.keyring")))?;
+        let wanted = key_ids
+            .map(|map| {
+                map.get(&id.to_string())
+                    .and_then(Value::as_str)
+                    .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    .ok_or_else(|| ops_error(format!("bad key id for profile {id} in the manifest's keys.key_ids")))
+            })
+            .transpose()?;
         if let Some(w) = ring.profiles.get(&id) {
-            out.keys.push((id, w.clone()));
+            let dek = kek
+                .and_then(|k| k.unwrap(id, &out.fingerprint, w).ok())
+                .ok_or_else(|| {
+                    ops_error(format!(
+                        "the keyring {} has a key for profile {id} that cannot be opened with \
+                     OWNHEALTH_SECRETS_KEY: put back this install's keyring.json; nothing was loaded",
+                        file.display()
+                    ))
+                })?;
+            if wanted.is_none_or(|wanted| wanted == dek.archive_id()) {
+                out.keys.push((id, w.clone()));
+            } else {
+                out.missing.push(id);
+            }
         } else if ring.shredded.contains(&id) {
             out.shredded.push(id);
         } else {
@@ -1004,14 +1059,26 @@ fn ring_keys(settings: &Settings, manifest: &Value, allow_missing: bool) -> Resu
     Ok(Some(out))
 }
 
-/// Put the keyring's keys into the restored `profile_key`, which the dump left empty, and a shredded
-/// row for each profile the keyring lists as deleted, since the backup or before it: its files then
-/// never open, its key can never be made again, and the start sweep removes its sealed folder. A
-/// profile whose key the keyring lacks (`missing`, with `--allow-missing-keys`) gets no row: its files
-/// stay closed and the start sweep removes them, and its next file gets a new key.
-async fn load_keys(url: &str, ring: &RingKeys) -> Result<()> {
+/// Load selected keys into a new-format dump and apply the current tombstones to any dump with a
+/// `profile_key` table. A partial restore leaves missing profiles without a key row.
+async fn load_keys(url: &str, ring: &mut RingKeys) -> Result<()> {
     let mut conn = PgConnection::connect(url).await?;
     let mut tx = conn.begin().await?;
+    if ring.legacy {
+        let keyed: bool = sqlx::query_scalar("select to_regclass('public.profile_key') is not null")
+            .fetch_one(&mut *tx)
+            .await?;
+        if !keyed {
+            return Ok(());
+        }
+        ring.legacy_tombstones_added = sqlx::query_scalar(
+            "select count(*) from unnest($1::uuid[]) as tombstone(id) \
+             where not exists (select 1 from profile_key where profile_id = tombstone.id)",
+        )
+        .bind(&ring.tombstones)
+        .fetch_one(&mut *tx)
+        .await?;
+    }
     for (id, wrapped) in &ring.keys {
         sqlx::query("insert into profile_key (profile_id, wrapped_dek, kek_fingerprint) values ($1, $2, $3)")
             .bind(id)
@@ -1020,12 +1087,14 @@ async fn load_keys(url: &str, ring: &RingKeys) -> Result<()> {
             .execute(&mut *tx)
             .await?;
     }
-    for id in &ring.tombstones {
-        sqlx::query("insert into profile_key (profile_id) values ($1) on conflict (profile_id) do nothing")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-    }
+    sqlx::query(
+        "insert into profile_key (profile_id) select unnest($1::uuid[]) \
+         on conflict (profile_id) do update set wrapped_dek = null, kek_fingerprint = null \
+         where profile_key.wrapped_dek is not null",
+    )
+    .bind(&ring.tombstones)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     conn.close().await?;
     Ok(())
@@ -1052,7 +1121,10 @@ async fn compare(
     let expected_chain = manifest.get("audit_chain").filter(|v| v.is_object());
     let mut conn = PgConnection::connect(url).await?;
     let mut tx = conn.begin().await?;
-    let counts = table_counts(&mut tx).await?; // before build_state, which may add state_snapshot rows
+    let mut counts = table_counts(&mut tx).await?; // before build_state, which may add state_snapshot rows
+    if let (Some(ring), Some(count)) = (ring, counts.get_mut("profile_key")) {
+        *count -= ring.legacy_tombstones_added;
+    }
     let actual_chain = match expected_chain {
         Some(_) => {
             let read = chain_read(&mut tx, None).await?;
@@ -1164,11 +1236,13 @@ pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
 pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_keys: bool) -> Result<Value> {
     let manifest = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
-    let ring = ring_keys(settings, &manifest, allow_missing_keys)?;
+    let ring_lock = keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?;
+    let mut ring = ring_keys(settings, &manifest, kek.as_ref(), allow_missing_keys)?;
     if let Some(r) = ring.as_ref().filter(|r| !r.missing.is_empty() && !r.allow_missing) {
         return Err(ops_error(format!(
             "the keyring {} holds no key for {} profile(s) of this backup and does not list them as \
-             deleted ({}): it is older than the backup, or another install's. Put the newest keyring.json \
+             deleted ({}). The keyring may be out of date or hold a different key for the same profile. \
+             Put the matching keyring.json \
              in place, or restore with {ALLOW_MISSING} to load every record and only the files whose key \
              the keyring holds; nothing was loaded",
             keyfile::path(settings).display(),
@@ -1211,9 +1285,10 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
         }
     }
     pg_restore(&url, archive).await?;
-    if let Some(r) = &ring {
+    if let Some(r) = &mut ring {
         load_keys(&url, r).await?;
     }
+    drop(ring_lock);
     let store = BlobStore::for_settings(settings)?;
     for (key, path) in &backup_blobs {
         store.place(key, path)?;
@@ -1282,24 +1357,28 @@ async fn create_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
 pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value> {
     let manifest = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
-    let ring = ring_keys(settings, &manifest, false)?;
+    let ring_lock = keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?;
+    let mut ring = ring_keys(settings, &manifest, kek.as_ref(), false)?;
     let files = blobs::tree_files(&archive.join("blobs"))?;
     let live = settings.sqlx_url();
     let scratch = format!("{}_restore_check", db_name(&live));
-    let drop = format!("drop database if exists \"{scratch}\" with (force)");
+    let drop_scratch = format!("drop database if exists \"{scratch}\" with (force)");
     let mut admin = PgConnection::connect(&live).await?;
-    sqlx::query(AssertSqlSafe(drop.clone())).execute(&mut admin).await?;
+    sqlx::query(AssertSqlSafe(drop_scratch.clone()))
+        .execute(&mut admin)
+        .await?;
     create_scratch(&mut admin, &scratch).await?;
     let target = with_db(&live, &scratch);
     let result = async {
         pg_restore(&target, archive).await?;
-        if let Some(r) = &ring {
+        if let Some(r) = &mut ring {
             load_keys(&target, r).await?;
         }
+        drop(ring_lock);
         compare(&target, &manifest, &files, kek.as_ref(), ring.as_ref()).await
     }
     .await;
-    let dropped = sqlx::query(AssertSqlSafe(drop)).execute(&mut admin).await;
+    let dropped = sqlx::query(AssertSqlSafe(drop_scratch)).execute(&mut admin).await;
     admin.close().await?;
     let report = result?;
     dropped?;
