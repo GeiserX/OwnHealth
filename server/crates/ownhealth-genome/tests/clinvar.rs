@@ -580,6 +580,41 @@ async fn one_unreadable_calls_vcf_does_not_stop_the_other_datasets() -> R {
     Ok(())
 }
 
+/// Alex's calls VCF as an install from before the keys stored it, in the plain layout: a read for his
+/// profile hashes such a file once before it serves it. The diff opens it off the async runtime, so a
+/// large VCF never holds up the requests that runtime serves while it is hashed.
+#[tokio::test]
+async fn a_legacy_plain_calls_vcf_is_checked_off_the_runtime() -> R {
+    let e = env().await?;
+    let mut c = e.conn().await?;
+    seed_family(&e, &mut c).await?;
+    // a sample name of its own, so no other test hashes the same bytes
+    let raw = write_vcf(
+        "AR-01.vcf.gz",
+        &alex_calls(),
+        &format!("AR-01-{}", Uuid::new_v4().simple()),
+    )?;
+    let sha = e
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Reference, &raw.data)?;
+    sqlx::query("update genome_dataset set vcf_blob = decode($1, 'hex') where profile_id = $2 and status = 'current'")
+        .bind(&sha)
+        .bind(e.profile("alex"))
+        .execute(&mut *c)
+        .await?;
+    let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
+    let r = clinvar::diff_release(&e.db.pool, &e.blobs, &one).await?;
+    assert!(r.datasets.iter().all(|d| d.error.is_none()), "{r:?}");
+    let on = ownhealth_core::blobs::plain_hashed_on(&sha);
+    assert!(!on.is_empty(), "the legacy VCF was never checked");
+    let here = std::thread::current().name().map(str::to_string);
+    assert!(
+        on.iter().all(|t| Some(t) != here.as_ref()),
+        "hashed on the runtime's own thread: {on:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_broken_release_stops_the_run_and_blames_no_genome() -> R {
     let e = env().await?;
@@ -1231,10 +1266,12 @@ async fn a_genome_retracted_while_the_run_waits_is_not_compared() -> R {
     let mut c = e.conn().await?;
     seed_alex(&e, &mut c).await?;
     let one = write_release(e.dir.path(), "one.vcf", "20261005", &release_one(), false)?;
-    // The run has listed Alex's dataset and waits for it; meanwhile the genome file is retracted.
+    // Hold the same document lock as a retraction. The run can list the dataset, then waits
+    // for the retraction to commit before it checks the document's status.
     let mut other = e.db.pool.begin().await?;
     let doc: Uuid = sqlx::query_scalar(
-        "select document_id from genome_dataset where profile_id = $1 and status = 'current' for update",
+        "select d.id from document d join genome_dataset g on g.document_id = d.id \
+         where g.profile_id = $1 and g.status = 'current' for update of d",
     )
     .bind(e.profile("alex"))
     .fetch_one(&mut *other)

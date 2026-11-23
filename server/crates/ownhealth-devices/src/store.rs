@@ -1,5 +1,5 @@
-//! Writing device samples (lane D): one path for Health Auto Export, Gadgetbridge and Nightscout into
-//! `wearable_sample` (0.2.0 lane C's table), then the rollups of what changed.
+//! Write device samples into `wearable_sample` and rebuild the rollups of what changed.
+//! Validate every source in a batch against the ingest policy before writing any rows.
 //!
 //! The unique key `(profile_id, metric, source_id, t)` makes every write idempotent. Two policies on a
 //! sample that is already there:
@@ -13,7 +13,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
-use ownhealth_core::Result;
+use ownhealth_core::providers::require_ingest;
+use ownhealth_core::{Error, Result};
 use ownhealth_ingest_structured::wearables;
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -127,6 +128,26 @@ pub async fn insert(
     conflict: Conflict,
     touched: &mut Touched,
 ) -> Result<Written> {
+    if samples.is_empty() {
+        return Ok(Written::default());
+    }
+    let sources: BTreeSet<i16> = samples.iter().map(|s| s.source).collect();
+    let sources: Vec<i16> = sources.into_iter().collect();
+    let providers: Vec<String> =
+        sqlx::query_scalar("select provider from wearable_source where profile_id = $1 and id = any($2)")
+            .bind(profile_id)
+            .bind(&sources)
+            .fetch_all(&mut *conn)
+            .await?;
+    if providers.len() != sources.len() {
+        return Err(Error::NotFound(
+            "Wearable source is unavailable for this profile.".into(),
+        ));
+    }
+    for provider in providers {
+        require_ingest(&provider)?;
+    }
+
     let mut unique: BTreeMap<(&'static str, i16, DateTime<Utc>), Sample> = BTreeMap::new();
     for s in samples {
         if s.v.is_finite() {

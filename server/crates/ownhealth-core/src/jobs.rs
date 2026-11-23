@@ -165,6 +165,7 @@ impl From<crate::Error> for JobError {
             E::Provenance(_) => "ProvenanceError",
             E::Upload(_) => "UploadError",
             E::Invalid(_) => "ValueError",
+            E::WearableIngestDenied { .. } => "WearableIngestDenied",
             E::NotFound(_) => "LookupError",
             E::Db(_) => "DBAPIError",
             E::Io(_) => "OSError",
@@ -172,7 +173,7 @@ impl From<crate::Error> for JobError {
             E::Other(_) | E::AuditUncheckable(_) | E::Key(_) => "RuntimeError",
             E::NotImplemented(_) => "NotImplementedError",
         };
-        let permanent = matches!(e, E::NotImplemented(_));
+        let permanent = matches!(e, E::NotImplemented(_) | E::WearableIngestDenied { .. });
         JobError {
             permanent,
             ..JobError::typed(type_name, e.to_string())

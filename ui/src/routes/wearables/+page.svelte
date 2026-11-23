@@ -7,7 +7,7 @@
 	import type { WearableMetric, WearablesSummary } from '#lib/api/types';
 	import { C } from '#lib/components/colors';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
-	import { Loader, tf, tp } from '#lib/components/pages1/util.svelte';
+	import { errCode, Loader, tf, tp } from '#lib/components/pages1/util.svelte';
 	import TrendChart from '#lib/components/TrendChart.svelte';
 	import { axisTicks } from '#lib/logic/axis';
 	import { cgmBands } from '#lib/logic/inbox';
@@ -19,7 +19,7 @@
 	import { ago } from '#lib/components/pages2/fmt';
 	import { currentProfile } from '#lib/state/app.svelte';
 	import VendorScores from './VendorScores.svelte';
-	import { DEFAULT_DAYS, keepWindow, measurementDays, windowChoices, windowWordKey } from './scores';
+	import { DEFAULT_DAYS, keepWindow, measurementDays, needsWindowRead, windowChoices, windowEntry, windowWordKey } from './scores';
 
 	// How each known metric draws, as in the mockup. Unknown metrics get a plain line.
 	// `max` and `minSpan` keep an axis honest: SpO2 never passes 100 %, and a 1 bpm change is not a cliff.
@@ -89,6 +89,36 @@
 	});
 	// The days the measurement charts really show: a year opened by the scores is cut to the longest series.
 	const mDays = $derived(measurementDays(days, span));
+	// An HRV chart of fewer days than the summary read may have another best source (scores.ts
+	// needsWindowRead): one more summary read of those days, keyed so an older answer is never drawn.
+	const wv = new Loader<WearableMetric[]>();
+	let requestedWinKey = $state<string | null>(null);
+	// Each summary answer is a new object, so this number moves when the summary refreshes (a retry after
+	// a connector import) and the window read follows it, even when profile, days and language stay.
+	const summaryGen = new WeakMap<object, number>();
+	let lastGen = 0;
+	const baseGen = $derived.by(() => {
+		const d = w.data;
+		if (!d) return 0;
+		let g = summaryGen.get(d);
+		if (g == null) summaryGen.set(d, (g = ++lastGen));
+		return g;
+	});
+	const winKey = $derived.by(() => {
+		const n = mDays;
+		const needed = (w.data?.metrics ?? []).some((m) => needsWindowRead(m, n));
+		return needed && profile?.slug ? `${profile.slug}:${n}:${i18n.lang}:${baseGen}` : null;
+	});
+	function loadWindow() {
+		const key = winKey;
+		const slug = profile?.slug;
+		const lang = i18n.lang;
+		const n = mDays;
+		requestedWinKey = key;
+		if (key && slug) wv.run(async () => (await getWearables(slug, lang, n)).metrics, key);
+	}
+	$effect(loadWindow);
+	const win = $derived(winKey != null && requestedWinKey === winKey ? wv : null);
 	const fmtDay = (d: string) => new Intl.DateTimeFormat(intlLocale(i18n.lang), { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(d));
 
 	function chart(m: WearableMetric) {
@@ -172,14 +202,23 @@
 		{/each}
 	</div>
 	<div class="wg">
-		{#each metrics as m (m.metric)}
-			{@const c = chart(m)}
+		{#each metrics as m0 (m0.metric)}
+			{@const card = windowEntry(m0, mDays, win)}
+			{@const m = card.data}
+			{@const c = m && chart(m)}
 			<div class="card">
 				<h3>
-					{m.label}
-					<span class="r" title={c ? tf('h1_latest', { v: fmtVal(m, m.latest, c.k, c.unit) }) : undefined}>{#if c}{tf('h1_avg_w', { v: fmtVal(m, c.avg, c.k, c.unit), w: windowWord(mDays) })}{/if}</span>
+					{m?.label ?? m0.label}
+					<span class="r" title={c && m ? tf('h1_latest', { v: fmtVal(m, m.latest, c.k, c.unit) }) : undefined}>{#if c && m}{tf('h1_avg_w', { v: fmtVal(m, c.avg, c.k, c.unit), w: windowWord(mDays) })}{/if}</span>
 				</h3>
-				{#if c}
+				{#if card.error}
+					<div class="empty" role="status">
+						{tf('h1_hrv_window_failed', { code: errCode(card.error) })}<br />
+						<button class="btn sm" style="margin-top:8px" onclick={loadWindow}>{t('retry')}</button>
+					</div>
+				{:else if card.loading}
+					<div class="empty">{t('loading')}</div>
+				{:else if c && m}
 					<TrendChart
 						series={c.series}
 						yMin={c.yMin}
@@ -193,16 +232,20 @@
 				{:else}
 					<div class="empty">{t('h1_nomark')}</div>
 				{/if}
-				<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-top:2px">
-					{#if m.source}
-						<span class="src" style="cursor:default"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4" /></svg>{m.source}</span>
-					{:else}
-						<span class="dim" style="font-size:11px">{t('h1_several_src')}</span>
-					{/if}
-					<span class="dim" style="font-size:11px;text-align:right">
-						{#if m.metric === 'vo2max'}{t('h1_estimate')}{:else if c?.missing}{tp('h1_missing', c.missing)}{:else if c}{tf('h1_cov_pct', { n: fmtNum(c.coverage, 0) })}{/if}
-					</span>
-				</div>
+				{#if m}
+					<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-top:2px">
+						{#if m.source}
+							<span class="src" style="cursor:default"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4" /></svg>{m.source}</span>
+						{:else}
+							<span class="dim" style="font-size:11px">{t('h1_several_src')}</span>
+						{/if}
+						<span class="dim" style="font-size:11px;text-align:right">
+							{#if m.metric === 'vo2max'}{t('h1_estimate')}{:else if c?.missing}{tp('h1_missing', c.missing)}{:else if c}{tf('h1_cov_pct', { n: fmtNum(c.coverage, 0) })}{/if}
+						</span>
+					</div>
+					<!-- The server's own line, in the page's language: an HRV series shows one vendor and names the rest. -->
+					{#each m.limitations ?? [] as l (l)}<div class="note" style="margin-top:6px">{l}</div>{/each}
+				{/if}
 			</div>
 		{/each}
 	</div>

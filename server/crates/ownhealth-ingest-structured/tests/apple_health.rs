@@ -122,7 +122,16 @@ async fn series(
     until: DateTime<Utc>,
     resolution: &str,
 ) -> anyhow::Result<Vec<Point>> {
-    Ok(wearables::points(conn, p, metric, since, until, resolution).await?)
+    Ok(wearables::points(
+        conn,
+        p,
+        metric,
+        since,
+        until,
+        resolution,
+        wearables::Reader::WearablesPage,
+    )
+    .await?)
 }
 
 fn by_day(pts: &[Point]) -> HashMap<NaiveDate, f64> {

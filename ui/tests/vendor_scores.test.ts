@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { latestRunner, type LoadState } from '../src/lib/logic/loader.ts';
 import { dict as strings } from '../src/lib/i18n/dict.ts';
 import {
 	DEFAULT_DAYS,
@@ -11,11 +12,13 @@ import {
 	keepWindow,
 	MAX_DAYS,
 	measurementDays,
+	needsWindowRead,
 	providerLabel,
 	scoreDecimals,
 	scoreRows,
 	scoreSpanDays,
 	windowChoices,
+	windowEntry,
 	windowWordKey,
 	type VendorScore
 } from '../src/routes/wearables/scores.ts';
@@ -196,4 +199,56 @@ test('vendor scores: a profile switch keeps the chosen window while it can, and 
 	assert.match(page, /windowChoices\(Math\.max\(span, scoreSpan \?\? 0\)\)/);
 	const card = readFileSync(new URL('../src/routes/wearables/VendorScores.svelte', import.meta.url), 'utf8');
 	assert.match(card, /span = s\.loading \? null : scoreSpanDays\(all, Date\.now\(\)\);/);
+});
+
+test('an HRV chart of fewer days than the summary read draws the read of those days', () => {
+	const days = (n: number) => Array.from({ length: n }, () => ({ value: null }));
+	const note = 'HRV from one source only: Apple Watch. Not mixed with HRV from other sources in this window: Oura Ring.';
+	const long = { metric: 'hrv_rmssd', series: days(90), limitations: [note], source: 'Apple Watch' };
+	// only an HRV entry that left a source out, and only for fewer days than it holds
+	assert.equal(needsWindowRead(long, 7), true);
+	assert.equal(needsWindowRead(long, 30), true);
+	assert.equal(needsWindowRead(long, 90), false);
+	assert.equal(needsWindowRead({ ...long, limitations: undefined }, 7), false);
+	assert.equal(needsWindowRead({ ...long, metric: 'hr_resting' }, 7), false);
+	// the read of the 7 days chose the ring: its entry is drawn, with no note
+	const ring = { metric: 'hrv_rmssd', series: days(7), source: 'Oura Ring' };
+	const read = { data: [ring], error: null, loading: false };
+	assert.equal(windowEntry(long, 7, read).data, ring);
+	assert.equal(windowEntry(long, 90, read).data, long);
+	const steps = { metric: 'steps', series: days(90) };
+	assert.equal(windowEntry(steps, 7, { ...read, data: [{ metric: 'steps', series: days(7) }] }).data, steps);
+});
+
+test('a failed HRV window read exposes its error on that card and can be retried', async () => {
+	const long = { metric: 'hrv_rmssd', series: Array(30).fill(55), limitations: ['Another source was left out.'] };
+	const band = { metric: 'hrv_rmssd', series: Array(7).fill(71) };
+	const rest = { metric: 'hr_resting', series: Array(30).fill(60) };
+	const window: LoadState<(typeof band)[]> = { data: null, error: null, loading: false };
+	const run = latestRunner(window);
+	assert.deepEqual(windowEntry(long, 7, null), { data: null, error: null, loading: true });
+	const error = new Error('The window read failed');
+	await run(async () => { throw error; }, 'lucia:7:en');
+	assert.deepEqual(windowEntry(long, 7, window), { data: null, error, loading: false });
+	assert.deepEqual(windowEntry(rest, 7, window), { data: rest, error: null, loading: false });
+
+	const retry = run(async () => [band], 'lucia:7:en');
+	assert.deepEqual(windowEntry(long, 7, window), { data: null, error: null, loading: true });
+	await retry;
+	assert.deepEqual(windowEntry(long, 7, window), { data: band, error: null, loading: false });
+
+	const refresh = run(async () => [band], 'lucia:7:en');
+	assert.deepEqual(windowEntry(long, 7, window), { data: null, error: null, loading: true });
+	await refresh;
+});
+
+test('a successful window read with no HRV clears the old series and source', () => {
+	const long = {
+		metric: 'hrv_rmssd',
+		series: Array(30).fill(55),
+		source: 'Watch',
+		limitations: ['Another source was left out.']
+	};
+	const window = { data: [], error: null, loading: false };
+	assert.deepEqual(windowEntry(long, 7, window), { data: null, error: null, loading: false });
 });
