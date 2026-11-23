@@ -563,6 +563,37 @@ async fn a_file_orthanc_refuses_is_counted_and_the_record_counts_what_orthanc_ke
 }
 
 #[tokio::test]
+async fn a_fully_refused_series_leaves_the_rest_of_the_study_ready() -> R {
+    let e = env().await?;
+    let st = Study {
+        series: 2,
+        per_series: 1,
+        size: 64,
+        ..Study::new(U1, ALEX)
+    };
+    let mut disc = study_files(&st, "DICOM");
+    // Cut the only image of the second series in its pixel data.
+    let keep = disc[1].1.len() * 2 / 3;
+    disc[1].1.truncate(keep);
+    let up = e.upload("alex", &disc).await?;
+    assert_eq!(e.run().await?, 1);
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{error:?}");
+    assert_eq!(result["damaged"], 0, "{result}");
+    assert_eq!(result["refused_files"], 1, "{result}");
+    assert_eq!(result["instances"], 1, "{result}");
+    let fhir = e.fhir(U1).await?;
+    assert_eq!(fhir["numberOfSeries"], 1, "{fhir}");
+    assert_eq!(fhir["numberOfInstances"], 1, "{fhir}");
+    assert_eq!(fhir["series"][0]["uid"], st.series_uid(0), "{fhir}");
+    assert_eq!(
+        e.orthanc.warmed(),
+        [format!("/dicom-web/studies/{U1}/series/{}/metadata", st.series_uid(0))]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_header_past_the_read_cap_is_damaged_and_not_sent() -> R {
     let e = env().await?;
     let mut disc = study_files(&Study::new(U1, ALEX), "DICOM");

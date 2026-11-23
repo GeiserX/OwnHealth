@@ -561,11 +561,11 @@ async fn import_study(
         tx.commit().await?;
         return Ok(Outcome::Review);
     };
-    for series in study.series.keys() {
-        orthanc.warm_series(uid, series).await.map_err(retry)?;
-    }
-    // the record counts what Orthanc holds, not what the disc listed
+    // A series can be missing if Orthanc refused all its files.
     let series = orthanc.series_of(&orthanc_id).await.map_err(retry)?;
+    for stored in series.iter().filter(|s| study.series.contains_key(&s.uid)) {
+        orthanc.warm_series(uid, &stored.uid).await.map_err(retry)?;
+    }
     match recorded {
         None => record_study(&mut tx, import, uid, study, &orthanc_id, report, &series).await?,
         Some((_, _, _, date, description)) => {

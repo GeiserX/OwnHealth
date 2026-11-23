@@ -511,6 +511,21 @@ impl FakeOrthanc {
                 if self.metadata_fails.lock().map(|f| *f).unwrap_or(false) {
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
+                let Some((uid, series)) = p
+                    .strip_prefix("/dicom-web/studies/")
+                    .and_then(|rest| rest.strip_suffix("/metadata"))
+                    .and_then(|rest| rest.split_once("/series/"))
+                else {
+                    return StatusCode::NOT_FOUND.into_response();
+                };
+                let held = self.held();
+                if !held
+                    .instances
+                    .values()
+                    .any(|(study, s)| s == series && held.studies.get(study).is_some_and(|(u, _)| u == uid))
+                {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
                 json_answer(StatusCode::OK, json!([]))
             }
             _ => StatusCode::NOT_FOUND.into_response(),
