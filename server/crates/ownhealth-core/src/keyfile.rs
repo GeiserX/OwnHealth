@@ -29,6 +29,10 @@
 //! profile back with no key, and the key its next file makes is published. A tombstone that names no
 //! key (the file never held it) closes every key of the profile.
 //!
+//! A profile with no key row takes the file's key for it, unless a tombstone closes that key
+//! ([`live_key`]): a dump from before 1.0 has no key table, so its restore installs no key, and a key
+//! made instead would replace the one every backup since is sealed under.
+//!
 //! `lost` lists the files a restore loaded without the key that opens them (a key the keyring lacked
 //! or held in another version, `--allow-missing-keys`): the operator accepted their loss, so later
 //! backups do not require them. A profile delete drops its entry.
@@ -434,6 +438,37 @@ fn remove_leftovers(dir: &Path) -> Result<(), KeyError> {
         }
     }
     Ok(())
+}
+
+/// The key in the keyring at `file` that `profile` takes when it has no key row yet (a dump from
+/// before 1.0 has no key table, so it brings its profiles back with none): a key made instead would
+/// replace this one at the next rewrite, and every backup taken since is sealed under it. None when
+/// the file holds no key for the profile or a tombstone closes it: the profile then gets a new key,
+/// and a deleted profile that came back keeps it. A key of another secrets key, or one that does not
+/// open, is refused: a new key would replace it.
+pub fn live_key(file: &Path, kek: &Kek, profile: Uuid) -> Result<Option<Vec<u8>>, KeyError> {
+    let Some(ring) = read(file)? else {
+        return Ok(None);
+    };
+    let Some(wrapped) = ring.profiles.get(&profile) else {
+        return Ok(None);
+    };
+    let fingerprint = kek.fingerprint();
+    if ring.kek_fingerprint.as_deref() != Some(&fingerprint[..]) {
+        return Err(foreign(file));
+    }
+    let dek = kek.unwrap(profile, &fingerprint, wrapped).map_err(|_| {
+        KeyError(format!(
+            "the keyring {} holds a damaged key for profile {profile}: it does not open with \
+             OWNHEALTH_SECRETS_KEY. Put back an undamaged copy of this install's keyring.json, see \
+             deploy/README.md",
+            file.display()
+        ))
+    })?;
+    if ring.closes(profile, Some(&dek.archive_id())) {
+        return Ok(None);
+    }
+    Ok(Some(wrapped.clone()))
 }
 
 /// Refuses a keyring folder inside the blob folder: every backup copies the blob folder.

@@ -5,9 +5,10 @@
 
 use std::fs;
 
+use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::config::Settings;
 use ownhealth_core::keyfile::{self, KeyringFile};
-use ownhealth_core::keys::{Kek, Keyring, shred};
+use ownhealth_core::keys::{Dek, Kek, Keyring, shred};
 use ownhealth_core::testing::{TestDb, random_secrets_key};
 use uuid::Uuid;
 
@@ -359,6 +360,58 @@ async fn a_keyring_folder_named_through_a_parent_directory_is_rewritten() -> R {
     assert_eq!(
         keyfile::read(&dir.path().join("keyring").join(keyfile::FILE))?,
         Some(ring)
+    );
+    Ok(())
+}
+
+async fn key_row(db: &TestDb, p: Uuid) -> anyhow::Result<Vec<u8>> {
+    Ok(
+        sqlx::query_scalar("select wrapped_dek from profile_key where profile_id = $1")
+            .bind(p)
+            .fetch_one(&db.pool)
+            .await?,
+    )
+}
+
+/// A profile with no key row (a dump from before 1.0 brought it back) takes the keyring's key for its
+/// next file: a key made instead would replace it at the next rewrite, and the newer backups are
+/// sealed under it. A key a tombstone closes is never taken: that profile gets a new key, and the
+/// rewrite publishes it when the tombstone named the deleted key.
+#[tokio::test]
+async fn a_profile_with_no_key_row_takes_the_keyrings_key_unless_a_tombstone_closes_it() -> R {
+    let (db, _dir, settings, kek) = setup().await?;
+    let (alex, sam, lucia) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (k_alex, k_sam) = (kek.wrap(alex, &Dek::generate())?, kek.wrap(sam, &Dek::generate())?);
+    let sam_id = kek.unwrap(sam, &kek.fingerprint(), &k_sam)?.archive_id();
+    let mut file = KeyringFile {
+        kek_fingerprint: Some(kek.fingerprint().to_vec()),
+        ..KeyringFile::default()
+    };
+    file.profiles.insert(alex, k_alex.clone());
+    // Sam: the file still holds the key its tombstone closes
+    file.profiles.insert(sam, k_sam.clone());
+    file.shredded.insert(sam);
+    file.shredded_keys.insert(sam, [sam_id].into());
+    // Lucia: deleted, her key closed, and back from a dump from before 1.0 with no key
+    file.shredded.insert(lucia);
+    file.shredded_keys.insert(lucia, [Dek::generate().archive_id()].into());
+    keyfile::write(&settings.keyring_path(), &file)?;
+
+    let keys = BlobStore::for_settings(&settings)?
+        .keyring()
+        .ok_or_else(|| anyhow::anyhow!("the store does not seal"))?;
+    for p in [alex, sam, lucia] {
+        assert!(keys.dek(p, true)?.is_some());
+    }
+    assert_eq!(key_row(&db, alex).await?, k_alex, "Alex did not take the keyring's key");
+    assert_ne!(key_row(&db, sam).await?, k_sam, "Sam took a key his tombstone closes");
+    let lucia_key = key_row(&db, lucia).await?;
+    let ring = rewrite(&db, &settings).await?;
+    assert_eq!(ring.profiles[&alex], k_alex);
+    assert_eq!(
+        ring.profiles.get(&lucia),
+        Some(&lucia_key),
+        "Lucia's new key was not published"
     );
     Ok(())
 }

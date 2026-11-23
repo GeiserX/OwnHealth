@@ -454,7 +454,10 @@ impl BlobStore {
         Ok(match settings.secrets_key {
             Some(_) => BlobStore::with_keys(
                 settings.blobs_path(),
-                Arc::new(Keyring::new(Kek::from_settings(settings)?, settings.sqlx_url())),
+                Arc::new(
+                    Keyring::new(Kek::from_settings(settings)?, settings.sqlx_url())
+                        .with_keyring_file(crate::keyfile::path(settings)),
+                ),
             )?,
             None => BlobStore::new(settings.blobs_path())?,
         })

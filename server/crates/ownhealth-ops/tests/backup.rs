@@ -1616,3 +1616,76 @@ async fn a_restore_gives_a_profile_the_archive_holds_no_key_for_the_keyrings_key
     );
     Ok(())
 }
+
+/// The same through a dump from before 1.0, which has no key table when it is restored, so the
+/// restore cannot install a key. Alex stored a file after the 0.4.0 upgrade (key K) and backup C is
+/// sealed under K. Restoring the 0.4.0 backup on the same keyring brings Alex back with no key row:
+/// the file he stores next takes K from the keyring, the rewrite keeps K, and C still restores with
+/// every file.
+#[tokio::test]
+async fn a_profile_a_dump_from_before_1_0_brings_back_takes_the_keyrings_key_for_its_next_file() -> R {
+    use ownhealth_core::keyfile;
+
+    ownhealth_ops::register();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/upgrade/0.4.0");
+    let dir = tempfile::tempdir()?;
+    let first = TestDb::empty().await?;
+    let s1 = first.settings(&dir.path().join("first"))?;
+    ownhealth_ops::restore(&s1, &fixture).await?;
+    migrate::migrate_embedded(&first.pool).await?;
+    let (alex, household): (Uuid, Uuid) = sqlx::query_as("select id, household_id from profile where slug = 'alex'")
+        .fetch_one(&first.pool)
+        .await?;
+    let day2 = b"%PDF-1.4 LabNorte report of Alex Rivera, day 2".to_vec();
+    let day2_sha = BlobStore::for_settings(&s1)?.put_bytes(BlobOwner::Profile(alex), &day2)?;
+    let mut c = first.pool.acquire().await?;
+    create_document(
+        &mut c,
+        &NewDocument::upload(household, Some(alex), &day2_sha, "application/pdf", day2.len() as i64),
+    )
+    .await?;
+    drop(c);
+    let c_archive = ownhealth_ops::backup(&s1, &dir.path().join("c")).await?;
+    let k = keyfile::read(&keyfile::path(&s1))?.unwrap_or_default().profiles[&alex].clone();
+
+    let db = TestDb::empty().await?;
+    let mut s2 = db.settings(&dir.path().join("second"))?;
+    s2.secrets_key = s1.secrets_key.clone();
+    s2.keyring_dir = Some(s1.keyring_path());
+    let restored = ownhealth_ops::restore(&s2, &fixture).await?;
+    assert_eq!(restored["ok"], true, "{restored:#}");
+    migrate::migrate_embedded(&db.pool).await?;
+    let later = b"%PDF-1.4 LabNorte report of Alex Rivera, after restoring 0.4.0".to_vec();
+    let later_sha = BlobStore::for_settings(&s2)?.put_bytes(BlobOwner::Profile(alex), &later)?;
+    let row: Option<Vec<u8>> = sqlx::query_scalar("select wrapped_dek from profile_key where profile_id = $1")
+        .bind(alex)
+        .fetch_optional(&db.pool)
+        .await?
+        .flatten();
+    assert_eq!(
+        row.as_ref(),
+        Some(&k),
+        "Alex's next file did not take the keyring's key"
+    );
+    let mut c = db.pool.acquire().await?;
+    create_document(
+        &mut c,
+        &NewDocument::upload(household, Some(alex), &later_sha, "application/pdf", later.len() as i64),
+    )
+    .await?;
+    let after = keyfile::rewrite(&mut c, &s2).await?;
+    drop(c);
+    assert_eq!(after.profiles.get(&alex), Some(&k), "the keyring lost K");
+
+    let t = TestDb::empty().await?;
+    let mut ts = t.settings(&dir.path().join("third"))?;
+    ts.secrets_key = s1.secrets_key.clone();
+    ts.keyring_dir = Some(s1.keyring_path());
+    let report = ownhealth_ops::restore(&ts, &c_archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert_eq!(
+        BlobStore::for_settings(&ts)?.get_bytes(BlobOwner::Profile(alex), &day2_sha)?,
+        day2
+    );
+    Ok(())
+}
