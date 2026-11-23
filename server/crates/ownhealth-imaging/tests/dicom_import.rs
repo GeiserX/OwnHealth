@@ -1285,3 +1285,49 @@ async fn round5_series_counts_cross_the_128_row_boundary() -> R {
     );
     Ok(())
 }
+
+/// Orthanc with OverwriteInstances answers Success to a POST of an instance it held already. A
+/// retry after a lost reply must still never delete that instance.
+#[tokio::test]
+async fn round6_a_retry_never_deletes_an_instance_that_existed_before_its_post() -> R {
+    use std::sync::atomic::Ordering::SeqCst;
+    let e = env().await?;
+    let st = Study {
+        series: 1,
+        per_series: 3,
+        ..Study::new(U1, ALEX)
+    };
+    let disc = study_files(&st, "DICOM");
+    e.upload("alex", &disc[..2]).await?;
+    e.run().await?;
+    let original = e.orthanc.held().instances;
+    assert_eq!(original.len(), 2);
+    e.orthanc.overwrite.store(true, SeqCst);
+    // The two held SOPs are POSTed again (posts 3 and 4); the reply for the new one is lost.
+    e.orthanc.lose_store_reply_at.store(5, SeqCst);
+    let up = e.upload("alex", &disc).await?;
+    tokio::time::timeout(Duration::from_secs(30), e.run()).await??;
+    assert_eq!(e.job(up.job_id).await?.0, "queued");
+    sqlx::query("update job set run_after = now() where id = $1")
+        .bind(up.job_id)
+        .execute(&e.rt.pool)
+        .await?;
+    tokio::time::timeout(Duration::from_secs(30), e.run()).await??;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    let held = e.orthanc.held();
+    let deleted: Vec<_> = held
+        .log
+        .iter()
+        .filter(|(method, _)| method == "DELETE")
+        .map(|(_, path)| path.trim_start_matches("/instances/"))
+        .collect();
+    assert!(
+        original.keys().all(|id| !deleted.contains(&id.as_str())),
+        "deleted {deleted:?}, held before {:?}",
+        original.keys()
+    );
+    assert_eq!(held.instances.len(), 3);
+    assert_eq!(e.fhir(U1).await?["numberOfInstances"], 3);
+    Ok(())
+}

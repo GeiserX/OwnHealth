@@ -358,6 +358,8 @@ pub struct FakeOrthanc {
     pub fail_delete_at: Arc<AtomicUsize>,
     pub deletes: Arc<AtomicUsize>,
     pub lose_store_reply_at: Arc<AtomicUsize>,
+    /// Answers Success, not AlreadyStored, for an instance it holds already (OverwriteInstances).
+    pub overwrite: Arc<AtomicBool>,
     pub refused_sop: Arc<Mutex<Option<String>>>,
     pub lookup_response: Arc<Mutex<Option<Value>>>,
     pub after_store: Arc<Mutex<Option<AfterStore>>>,
@@ -388,6 +390,7 @@ impl FakeOrthanc {
             fail_delete_at: Arc::default(),
             deletes: Arc::default(),
             lose_store_reply_at: Arc::default(),
+            overwrite: Arc::default(),
             refused_sop: Arc::default(),
             lookup_response: Arc::default(),
             after_store: Arc::default(),
@@ -653,7 +656,7 @@ impl FakeOrthanc {
         let Ok(mut h) = self.held.lock() else {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         };
-        let new = !h.instances.contains_key(&id);
+        let new = !h.instances.contains_key(&id) || self.overwrite.load(Ordering::SeqCst);
         h.studies.insert(study.clone(), (uid, patient));
         h.modalities.insert(series.clone(), modality);
         h.instances.insert(id.clone(), (study.clone(), series));
