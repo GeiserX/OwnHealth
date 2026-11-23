@@ -623,6 +623,9 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
         )));
     }
     keyfile::check_folder(settings).map_err(|e| ops_error(e.0))?;
+    // Refuse an unreadable keyring before creating the backup directory. The locked rewrite
+    // rechecks the keyring and supplies the current loss markers.
+    keyfile::read_for_install(settings).map_err(|e| ops_error(e.0))?;
     if settings.keyring_dir.is_none() {
         tracing::warn!(
             "OWNHEALTH_KEYRING_DIR is not set, so the keyring is {} on the data volume: a host backup \
