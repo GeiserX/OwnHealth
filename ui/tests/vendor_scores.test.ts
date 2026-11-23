@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { latestRunner, type LoadState } from '../src/lib/logic/loader.ts';
 import { dict as strings } from '../src/lib/i18n/dict.ts';
 import {
 	DEFAULT_DAYS,
@@ -212,11 +213,42 @@ test('an HRV chart of fewer days than the summary read draws the read of those d
 	assert.equal(needsWindowRead({ ...long, metric: 'hr_resting' }, 7), false);
 	// the read of the 7 days chose the ring: its entry is drawn, with no note
 	const ring = { metric: 'hrv_rmssd', series: days(7), source: 'Oura Ring' };
-	assert.equal(windowEntry(long, 7, [ring]), ring);
-	// not in yet: the long entry; nothing in those days: the long entry without its note
-	assert.equal(windowEntry(long, 7, null), long);
-	assert.deepEqual(windowEntry(long, 7, []).limitations, []);
-	assert.equal(windowEntry(long, 90, [ring]), long);
+	const read = { data: [ring], error: null, loading: false };
+	assert.equal(windowEntry(long, 7, read).data, ring);
+	assert.equal(windowEntry(long, 90, read).data, long);
 	const steps = { metric: 'steps', series: days(90) };
-	assert.equal(windowEntry(steps, 7, [{ metric: 'steps', series: days(7) }]), steps);
+	assert.equal(windowEntry(steps, 7, { ...read, data: [{ metric: 'steps', series: days(7) }] }).data, steps);
+});
+
+test('a failed HRV window read exposes its error on that card and can be retried', async () => {
+	const long = { metric: 'hrv_rmssd', series: Array(30).fill(55), limitations: ['Another source was left out.'] };
+	const band = { metric: 'hrv_rmssd', series: Array(7).fill(71) };
+	const rest = { metric: 'hr_resting', series: Array(30).fill(60) };
+	const window: LoadState<(typeof band)[]> = { data: null, error: null, loading: false };
+	const run = latestRunner(window);
+	assert.deepEqual(windowEntry(long, 7, null), { data: null, error: null, loading: true });
+	const error = new Error('The window read failed');
+	await run(async () => { throw error; }, 'lucia:7:en');
+	assert.deepEqual(windowEntry(long, 7, window), { data: null, error, loading: false });
+	assert.deepEqual(windowEntry(rest, 7, window), { data: rest, error: null, loading: false });
+
+	const retry = run(async () => [band], 'lucia:7:en');
+	assert.deepEqual(windowEntry(long, 7, window), { data: null, error: null, loading: true });
+	await retry;
+	assert.deepEqual(windowEntry(long, 7, window), { data: band, error: null, loading: false });
+
+	const refresh = run(async () => [band], 'lucia:7:en');
+	assert.deepEqual(windowEntry(long, 7, window), { data: null, error: null, loading: true });
+	await refresh;
+});
+
+test('a successful window read with no HRV clears the old series and source', () => {
+	const long = {
+		metric: 'hrv_rmssd',
+		series: Array(30).fill(55),
+		source: 'Watch',
+		limitations: ['Another source was left out.']
+	};
+	const window = { data: [], error: null, loading: false };
+	assert.deepEqual(windowEntry(long, 7, window), { data: null, error: null, loading: false });
 });

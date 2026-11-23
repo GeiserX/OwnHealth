@@ -3,6 +3,7 @@
 // and category, and never next to the measurements.
 
 import { intlLocale, type Lang } from '../../lib/i18n/langs.ts';
+import type { LoadState } from '../../lib/logic/loader.ts';
 
 export interface VendorScore {
 	provider: string;
@@ -88,12 +89,15 @@ export function needsWindowRead(m: Entry, mDays: number): boolean {
 	return m.metric.startsWith('hrv_') && (m.limitations?.length ?? 0) > 0 && mDays < m.series.length;
 }
 
-/** The entry a card draws for the days on screen. `win` holds the entries of the summary read for those
- * days, null until it is in (the long entry shows meanwhile). With no HRV in those days at all, the long
- * entry's days on screen are empty too; it then shows without its note. */
-export function windowEntry<M extends Entry>(m: M, mDays: number, win: M[] | null): M {
-	if (win == null || !needsWindowRead(m, mDays)) return m;
-	return win.find((x) => x.metric === m.metric) ?? { ...m, limitations: [] };
+/** An HRV card that needs a shorter read takes its data and status from that read.
+ * A successful read can omit the metric when the window has no samples. */
+export function windowEntry<M extends Entry>(m: M, mDays: number, win: LoadState<M[]> | null): LoadState<M> {
+	if (!needsWindowRead(m, mDays)) return { data: m, error: null, loading: false };
+	return {
+		data: win?.loading ? null : win?.data?.find((x) => x.metric === m.metric) ?? null,
+		error: win?.error ?? null,
+		loading: win?.loading ?? true
+	};
 }
 
 /** The server's categories (ownhealth-devices scores::CATEGORIES), in the order the card lists them. */

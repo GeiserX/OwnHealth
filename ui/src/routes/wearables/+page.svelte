@@ -7,7 +7,7 @@
 	import type { WearableMetric, WearablesSummary } from '#lib/api/types';
 	import { C } from '#lib/components/colors';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
-	import { Loader, tf, tp } from '#lib/components/pages1/util.svelte';
+	import { errCode, Loader, tf, tp } from '#lib/components/pages1/util.svelte';
 	import TrendChart from '#lib/components/TrendChart.svelte';
 	import { axisTicks } from '#lib/logic/axis';
 	import { cgmBands } from '#lib/logic/inbox';
@@ -91,20 +91,23 @@
 	const mDays = $derived(measurementDays(days, span));
 	// An HRV chart of fewer days than the summary read may have another best source (scores.ts
 	// needsWindowRead): one more summary read of those days, keyed so an older answer is never drawn.
-	const wv = new Loader<{ key: string; metrics: WearableMetric[] }>();
+	const wv = new Loader<WearableMetric[]>();
+	let requestedWinKey = $state<string | null>(null);
 	const winKey = $derived.by(() => {
 		const n = mDays;
 		const needed = (w.data?.metrics ?? []).some((m) => needsWindowRead(m, n));
 		return needed && profile?.slug ? `${profile.slug}:${n}:${i18n.lang}` : null;
 	});
-	$effect(() => {
+	function loadWindow() {
 		const key = winKey;
 		const slug = profile?.slug;
 		const lang = i18n.lang;
 		const n = mDays;
-		if (key && slug) wv.run(async () => ({ key, metrics: (await getWearables(slug, lang, n)).metrics }), key);
-	});
-	const win = $derived(wv.data && wv.data.key === winKey ? wv.data.metrics : null);
+		requestedWinKey = key;
+		if (key && slug) wv.run(async () => (await getWearables(slug, lang, n)).metrics, key);
+	}
+	$effect(loadWindow);
+	const win = $derived(winKey != null && requestedWinKey === winKey ? wv : null);
 	const fmtDay = (d: string) => new Intl.DateTimeFormat(intlLocale(i18n.lang), { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(d));
 
 	function chart(m: WearableMetric) {
@@ -189,14 +192,22 @@
 	</div>
 	<div class="wg">
 		{#each metrics as m0 (m0.metric)}
-			{@const m = windowEntry(m0, mDays, win)}
-			{@const c = chart(m)}
+			{@const card = windowEntry(m0, mDays, win)}
+			{@const m = card.data}
+			{@const c = m && chart(m)}
 			<div class="card">
 				<h3>
-					{m.label}
-					<span class="r" title={c ? tf('h1_latest', { v: fmtVal(m, m.latest, c.k, c.unit) }) : undefined}>{#if c}{tf('h1_avg_w', { v: fmtVal(m, c.avg, c.k, c.unit), w: windowWord(mDays) })}{/if}</span>
+					{m?.label ?? m0.label}
+					<span class="r" title={c && m ? tf('h1_latest', { v: fmtVal(m, m.latest, c.k, c.unit) }) : undefined}>{#if c && m}{tf('h1_avg_w', { v: fmtVal(m, c.avg, c.k, c.unit), w: windowWord(mDays) })}{/if}</span>
 				</h3>
-				{#if c}
+				{#if card.error}
+					<div class="empty" role="status">
+						{tf('h1_hrv_window_failed', { code: errCode(card.error) })}<br />
+						<button class="btn sm" style="margin-top:8px" onclick={loadWindow}>{t('retry')}</button>
+					</div>
+				{:else if card.loading}
+					<div class="empty">{t('loading')}</div>
+				{:else if c && m}
 					<TrendChart
 						series={c.series}
 						yMin={c.yMin}
@@ -210,18 +221,20 @@
 				{:else}
 					<div class="empty">{t('h1_nomark')}</div>
 				{/if}
-				<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-top:2px">
-					{#if m.source}
-						<span class="src" style="cursor:default"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4" /></svg>{m.source}</span>
-					{:else}
-						<span class="dim" style="font-size:11px">{t('h1_several_src')}</span>
-					{/if}
-					<span class="dim" style="font-size:11px;text-align:right">
-						{#if m.metric === 'vo2max'}{t('h1_estimate')}{:else if c?.missing}{tp('h1_missing', c.missing)}{:else if c}{tf('h1_cov_pct', { n: fmtNum(c.coverage, 0) })}{/if}
-					</span>
-				</div>
-				<!-- The server's own line, in the page's language: an HRV series shows one vendor and names the rest. -->
-				{#each m.limitations ?? [] as l (l)}<div class="note" style="margin-top:6px">{l}</div>{/each}
+				{#if m}
+					<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-top:2px">
+						{#if m.source}
+							<span class="src" style="cursor:default"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4" /></svg>{m.source}</span>
+						{:else}
+							<span class="dim" style="font-size:11px">{t('h1_several_src')}</span>
+						{/if}
+						<span class="dim" style="font-size:11px;text-align:right">
+							{#if m.metric === 'vo2max'}{t('h1_estimate')}{:else if c?.missing}{tp('h1_missing', c.missing)}{:else if c}{tf('h1_cov_pct', { n: fmtNum(c.coverage, 0) })}{/if}
+						</span>
+					</div>
+					<!-- The server's own line, in the page's language: an HRV series shows one vendor and names the rest. -->
+					{#each m.limitations ?? [] as l (l)}<div class="note" style="margin-top:6px">{l}</div>{/each}
+				{/if}
 			</div>
 		{/each}
 	</div>

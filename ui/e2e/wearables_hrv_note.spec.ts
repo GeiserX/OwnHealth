@@ -15,8 +15,8 @@ function sql(q: string): string {
 	return execFileSync('docker', ['exec', 'ownhealth-testpg', 'psql', '-U', 'postgres', '-d', db, '-qAtc', q], { encoding: 'utf8' }).trim();
 }
 
-/** A wearable source of Lucía's with a daily rMSSD on the given days before today. */
-function hrv(provider: string, device: string, daysAgo: number[], v: number) {
+/** A wearable source of Lucía's with a daily reading on the given days before today. */
+function rollup(provider: string, device: string, daysAgo: number[], v: number, metric = 'hrv_rmssd') {
 	const pid = `(select id from profile where slug = 'lucia' order by created_at limit 1)`;
 	sql(
 		`insert into wearable_source (profile_id, provider, device) select ${pid}, '${provider}', '${device}' ` +
@@ -26,7 +26,7 @@ function hrv(provider: string, device: string, daysAgo: number[], v: number) {
 	for (const d of daysAgo) {
 		sql(
 			`insert into wearable_rollup (profile_id, metric, source_id, bucket, t, n, v_min, v_max, v_avg, v_sum, v_p10, v_p50, v_p90, coverage) ` +
-				`values (${pid}, 'hrv_rmssd', ${src}, 'day', (current_date - ${d})::timestamp at time zone 'UTC', 1, ${v}, ${v}, ${v}, ${v}, ${v}, ${v}, ${v}, 1) ` +
+				`values (${pid}, '${metric}', ${src}, 'day', (current_date - ${d})::timestamp at time zone 'UTC', 1, ${v}, ${v}, ${v}, ${v}, ${v}, ${v}, ${v}, 1) ` +
 				`on conflict do nothing`
 		);
 	}
@@ -36,8 +36,8 @@ test('an HRV chart names the vendor it shows and the one it left out, in English
 	expect(db, 'the config names the database').not.toBe('');
 	const errors: string[] = [];
 	page.on('pageerror', (e) => errors.push(e.message));
-	hrv('oura', 'Oura Ring', [2, 4, 6, 8], 48);
-	hrv('gadgetbridge', 'Amazfit Band', [1, 3, 5, 7], 71);
+	rollup('oura', 'Oura Ring', [2, 4, 6, 8], 48);
+	rollup('gadgetbridge', 'Amazfit Band', [1, 3, 5, 7], 71);
 	await page.goto('/wearables?lang=en');
 	await page.getByRole('button', { name: 'Lucía Rivera', exact: true }).click();
 	const card = page.locator('.card', { hasText: 'HRV (RMSSD)' });
@@ -62,9 +62,9 @@ test('an HRV chart names the vendor it shows and the one it left out, in English
 test('the HRV chart and its note follow the window on screen', async ({ page }) => {
 	const errors: string[] = [];
 	page.on('pageerror', (e) => errors.push(e.message));
-	hrv('oura', 'Oura Ring', [2, 4, 6, 8], 48);
-	hrv('gadgetbridge', 'Amazfit Band', [1, 3, 5, 7], 71);
-	hrv('fit', 'Forerunner 265', Array.from({ length: 16 }, (_, i) => 10 + i), 55);
+	rollup('oura', 'Oura Ring', [2, 4, 6, 8], 48);
+	rollup('gadgetbridge', 'Amazfit Band', [1, 3, 5, 7], 71);
+	rollup('fit', 'Forerunner 265', Array.from({ length: 16 }, (_, i) => 10 + i), 55);
 	await page.goto('/wearables?lang=en');
 	await page.getByRole('button', { name: 'Lucía Rivera', exact: true }).click();
 	const card = page.locator('.card', { hasText: 'HRV (RMSSD)' });
@@ -84,3 +84,39 @@ test('the HRV chart and its note follow the window on screen', async ({ page }) 
 	await expect(card.locator('.note')).toHaveText(/^HRV from one source only: Forerunner 265\./, { timeout: 30_000 });
 	expect(errors).toEqual([]);
 });
+
+for (const [lang, hrvLabel, restLabel, failed, retry, empty] of [
+	['en', 'HRV (RMSSD)', 'Resting heart rate', 'Could not load HRV for this period (HTTP 500 · internal).', 'Retry', 'No values yet.'],
+	['es', 'VFC (RMSSD)', 'FC en reposo', 'No se pudo cargar la VFC de este periodo (HTTP 500 · internal).', 'Reintentar', 'Aún sin valores.'],
+] as const) {
+	test(`an HRV window failure can be retried in ${lang}`, async ({ page }) => {
+		rollup('gadgetbridge', 'Amazfit Band', [1, 3, 5, 7], 71);
+		rollup('fit', 'Forerunner 265', Array.from({ length: 16 }, (_, i) => 10 + i), 55);
+		rollup('gadgetbridge', 'Amazfit Band', [1, 3, 5, 7], 60, 'hr_resting');
+		let sevenDayReads = 0;
+		await page.route(
+			(url) => url.pathname === '/api/profiles/lucia/wearables/summary' && url.searchParams.get('days') === '7',
+			async (route) => {
+				if (++sevenDayReads === 1) {
+					await route.fulfill({ status: 500, json: { detail: { code: 'internal', message: 'Internal error.' } } });
+				} else {
+					await route.continue();
+				}
+			}
+		);
+		await page.goto(`/wearables?lang=${lang}`);
+		await page.getByRole('button', { name: 'Lucía Rivera', exact: true }).click();
+		const card = page.locator('.card', { hasText: hrvLabel });
+		const restCard = page.locator('.card', { hasText: restLabel });
+		await expect(card.locator('.src')).toHaveText('Forerunner 265', { timeout: 30_000 });
+		await page.getByRole('button', { name: '7 d', exact: true }).click();
+		await expect(card.getByRole('status')).toContainText(failed);
+		await expect(card.getByText(empty, { exact: true })).toHaveCount(0);
+		await expect(card.locator('.src')).toHaveCount(0);
+		await expect(restCard.locator('.src')).toHaveText('Amazfit Band');
+		await card.getByRole('button', { name: retry, exact: true }).click();
+		await expect(card.locator('.src')).toHaveText('Amazfit Band');
+		await expect(card.getByRole('status')).toHaveCount(0);
+		expect(sevenDayReads).toBe(2);
+	});
+}
