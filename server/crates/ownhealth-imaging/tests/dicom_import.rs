@@ -611,3 +611,50 @@ async fn a_header_past_the_read_cap_is_damaged_and_not_sent() -> R {
     assert_eq!(e.orthanc.posts(), 6);
     Ok(())
 }
+
+#[tokio::test]
+async fn round3_large_series_counts_do_not_return_instance_ids() -> R {
+    use axum::{
+        Json, Router,
+        extract::Request,
+        routing::{get, post},
+    };
+    use serde_json::json;
+
+    const ID: &str = "00000000-00000000-00000000-00000000-00000000";
+    const N: usize = 100_000;
+    let old_answer = json!([{"Instances": vec![ID; N], "MainDicomTags": {"SeriesInstanceUID": U1}}]);
+    assert!(old_answer.to_string().len() > 4 << 20);
+    let app = Router::new()
+        .route("/studies/{id}/series", get(|| async { Json(old_answer) }))
+        .route(
+            "/tools/find",
+            post(|req: Request| async {
+                let query = axum::body::to_bytes(req.into_body(), 8192).await.expect("query");
+                let query: Value = serde_json::from_slice(&query).expect("JSON");
+                assert_eq!(query["ParentStudy"], ID);
+                assert_eq!(query["Level"], "Series");
+                assert_eq!(query["ResponseContent"], json!(["MainDicomTags", "RequestedTags"]));
+                assert_eq!(query["RequestedTags"], json!(["NumberOfSeriesRelatedInstances"]));
+                Json(json!([{
+                    "MainDicomTags": {"SeriesInstanceUID": U1, "Modality": "CT"},
+                    "RequestedTags": {"NumberOfSeriesRelatedInstances": N.to_string()},
+                }]))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let config = ownhealth_core::orthanc::OrthancConfig {
+        url: format!("http://{}", listener.local_addr()?),
+        user: support::USER.into(),
+        password: ownhealth_core::ids::token_hex(16),
+    };
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let client = ownhealth_imaging::orthanc::Orthanc::new(config)?;
+    let held = client.series_of(ID).await?;
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].uid, U1);
+    assert_eq!(held[0].instances, N);
+    Ok(())
+}

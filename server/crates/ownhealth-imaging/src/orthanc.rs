@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use ownhealth_core::orthanc::OrthancConfig;
 use reqwest::StatusCode;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// What went wrong talking to Orthanc. Every one of them is worth a retry of the job, except a file
 /// Orthanc refused ([`Stored::Refused`]), which is not an error.
@@ -138,42 +138,57 @@ impl Orthanc {
         })
     }
 
-    /// The series of one study and how many instances Orthanc holds in each (`GET
-    /// /studies/{id}/series`, which lists each series with its instance ids). Empty when Orthanc does
-    /// not hold the study.
+    /// The series of one study and their actual instance counts. Ask Orthanc for the computed
+    /// counts, without requesting child IDs. A page is bounded even when a study has many series.
     pub async fn series_of(&self, id: &str) -> Result<Vec<SeriesInfo>, OrthancError> {
         if !is_orthanc_id(id) {
             return Err(OrthancError("Orthanc named a study with an id that is not one".into()));
         }
-        let res = self
-            .send(self.http.get(self.url(&format!("/studies/{id}/series"))))
-            .await?;
-        if res.status() == StatusCode::NOT_FOUND {
-            return Ok(Vec::new());
+        const PAGE_SIZE: usize = 128;
+        let mut out = Vec::new();
+        loop {
+            let res = self
+                .send(self.http.post(self.url("/tools/find")).json(&json!({
+                    "Level": "Series",
+                    "Query": {},
+                    "ParentStudy": id,
+                    "ResponseContent": ["MainDicomTags", "RequestedTags"],
+                    "RequestedTags": ["NumberOfSeriesRelatedInstances"],
+                    "OrderBy": [{"Type": "DicomTag", "Key": "SeriesInstanceUID", "Direction": "ASC"}],
+                    "Limit": PAGE_SIZE,
+                    "Since": out.len(),
+                })))
+                .await?;
+            let v = Orthanc::json(res, "a study's series counts").await?;
+            let page = v
+                .as_array()
+                .filter(|p| p.len() <= PAGE_SIZE)
+                .ok_or_else(|| OrthancError("Orthanc returned an invalid series page".into()))?;
+            for s in page {
+                let tags = &s["MainDicomTags"];
+                let uid = tags["SeriesInstanceUID"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|uid| crate::part10::is_uid(uid))
+                    .ok_or_else(|| OrthancError("Orthanc did not return a valid series UID".into()))?;
+                if out.last().is_some_and(|prev: &SeriesInfo| prev.uid.as_str() >= uid) {
+                    return Err(OrthancError("Orthanc returned a series page out of order".into()));
+                }
+                let instances = s["RequestedTags"]["NumberOfSeriesRelatedInstances"]
+                    .as_str()
+                    .and_then(|n| n.trim().parse().ok())
+                    .ok_or_else(|| OrthancError("Orthanc did not return a series instance count".into()))?;
+                let modality = tags["Modality"].as_str().unwrap_or_default().trim().to_string();
+                out.push(SeriesInfo {
+                    uid: uid.to_string(),
+                    modality,
+                    instances,
+                });
+            }
+            if page.len() < PAGE_SIZE {
+                return Ok(out);
+            }
         }
-        let v = Orthanc::json(res, "a study's series").await?;
-        let mut out: Vec<SeriesInfo> = v
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .map(|s| SeriesInfo {
-                        uid: s["MainDicomTags"]["SeriesInstanceUID"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .trim()
-                            .to_string(),
-                        modality: s["MainDicomTags"]["Modality"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .trim()
-                            .to_string(),
-                        instances: s["Instances"].as_array().map_or(0, Vec::len),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.sort_by(|a, b| a.uid.cmp(&b.uid));
-        Ok(out)
     }
 
     /// Sends one file (`POST /instances`).

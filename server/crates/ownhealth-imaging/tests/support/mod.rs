@@ -463,25 +463,26 @@ impl FakeOrthanc {
                 tokio::time::sleep(delay).await;
                 self.store(&body)
             }
-            (Method::GET, p) if p.starts_with("/studies/") && p.ends_with("/series") => {
-                // the study's series, expanded, as Orthanc lists them
-                let id = p.trim_start_matches("/studies/").trim_end_matches("/series");
+            (Method::POST, "/tools/find") => {
+                let query: Value = serde_json::from_slice(&body).unwrap_or_default();
+                let id = query["ParentStudy"].as_str().unwrap_or_default();
                 let held = self.held();
-                if !held.studies.contains_key(id) {
-                    return StatusCode::NOT_FOUND.into_response();
-                }
-                let mut series: BTreeMap<String, Vec<String>> = BTreeMap::new();
-                for (instance, (study, s)) in &held.instances {
+                let mut series: BTreeMap<&str, usize> = BTreeMap::new();
+                for (study, uid) in held.instances.values() {
                     if study == id {
-                        series.entry(s.clone()).or_default().push(instance.clone());
+                        *series.entry(uid).or_default() += 1;
                     }
                 }
+                let since = query["Since"].as_u64().unwrap_or_default() as usize;
+                let limit = query["Limit"].as_u64().unwrap_or_default() as usize;
                 let out: Vec<Value> = series
                     .into_iter()
-                    .map(|(s, instances)| {
-                        let modality = held.modalities.get(&s).cloned().unwrap_or_default();
-                        json!({"ID": orthanc_id(&[id, &s]), "Type": "Series", "Instances": instances,
-                               "MainDicomTags": {"SeriesInstanceUID": s, "Modality": modality}})
+                    .skip(since)
+                    .take(limit)
+                    .map(|(s, count)| {
+                        let modality = held.modalities.get(s).cloned().unwrap_or_default();
+                        json!({"MainDicomTags": {"SeriesInstanceUID": s, "Modality": modality},
+                            "RequestedTags": {"NumberOfSeriesRelatedInstances": count.to_string()}})
                     })
                     .collect();
                 json_answer(StatusCode::OK, Value::Array(out))
