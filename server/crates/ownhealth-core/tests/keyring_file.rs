@@ -81,7 +81,11 @@ async fn a_rewrite_keeps_every_live_key_and_drops_a_shredded_one_for_good() -> R
     tx.commit().await?;
     let ring = rewrite(&db, &settings).await?;
     assert!(!ring.profiles.contains_key(&sam) && ring.shredded.contains(&sam));
-    assert_eq!(ring.shredded_keys[&sam].len(), 1, "the tombstone names the key it closes");
+    assert_eq!(
+        ring.shredded_keys[&sam].len(),
+        1,
+        "the tombstone names the key it closes"
+    );
     assert!(ring.profiles.contains_key(&alex) && ring.profiles.contains_key(&newer));
     let sams = stored
         .iter()
@@ -277,7 +281,10 @@ async fn a_keyring_path_with_parent_traversal_cannot_land_inside_blobs() -> R {
     assert!(keyfile::check_folder(&settings).is_err());
     // a '..' after a folder that does not exist yet cannot be resolved: refused, never guessed
     settings.keyring_dir = Some(dir.path().join("nope/../blobs/keyring"));
-    let err = keyfile::check_folder(&settings).err().map(|e| e.to_string()).unwrap_or_default();
+    let err = keyfile::check_folder(&settings)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
     assert!(err.contains("'..'"), "{err}");
     #[cfg(unix)]
     {
@@ -349,6 +356,9 @@ async fn a_keyring_folder_named_through_a_parent_directory_is_rewritten() -> R {
     tx.commit().await?;
     let ring = rewrite(&db, &settings).await?;
     assert!(!ring.profiles.contains_key(&sam) && ring.shredded.contains(&sam));
-    assert_eq!(keyfile::read(&dir.path().join("keyring").join(keyfile::FILE))?, Some(ring));
+    assert_eq!(
+        keyfile::read(&dir.path().join("keyring").join(keyfile::FILE))?,
+        Some(ring)
+    );
     Ok(())
 }

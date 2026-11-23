@@ -1019,7 +1019,9 @@ mod tests {
         let dek = Dek::generate();
         let derived = hkdf32(&dek.key[..], None, b"ownhealth archive key id v1");
         assert_eq!(dek.archive_id(), hex::encode(&derived[..]));
-        let keyed = hmac(&dek.key[..], &[b"ownhealth archive key id v1"]).finalize().into_bytes();
+        let keyed = hmac(&dek.key[..], &[b"ownhealth archive key id v1"])
+            .finalize()
+            .into_bytes();
         assert_ne!(dek.archive_id(), hex::encode(keyed));
     }
 

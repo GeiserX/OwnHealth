@@ -1260,7 +1260,10 @@ async fn a_tombstone_closes_only_the_deleted_key_after_a_restore_from_before_the
     .await?;
     let ring = keyfile::rewrite(&mut c, &settings).await?;
     drop(c);
-    assert!(ring.profiles.contains_key(&alex), "the new key of Alex was not published");
+    assert!(
+        ring.profiles.contains_key(&alex),
+        "the new key of Alex was not published"
+    );
 
     let archive = ownhealth_ops::backup(&settings, &dir.path().join("after")).await?;
     let report = ownhealth_ops::verify_restore(&settings, &archive).await?;
@@ -1310,7 +1313,11 @@ async fn a_restore_keeps_the_keyrings_key_when_it_does_not_match_the_archive() -
     let mut c = db.pool.acquire().await?;
     let after = keyfile::rewrite(&mut c, &fresh).await?;
     drop(c);
-    assert_eq!(after.profiles.get(&l.alex), Some(&newer), "the keyring lost the newer key");
+    assert_eq!(
+        after.profiles.get(&l.alex),
+        Some(&newer),
+        "the keyring lost the newer key"
+    );
 
     let new_backup = l.dir.path().join("after-mismatch");
     ownhealth_ops::backup(&fresh, &new_backup).await?;
@@ -1445,7 +1452,11 @@ async fn a_keyring_rewrite_that_fails_after_pg_dump_publishes_no_dump() -> R {
     let err = err_text(ownhealth_ops::backup(&l.settings, &dest).await);
     fs::set_permissions(&keyring, fs::Permissions::from_mode(0o700))?;
     assert!(err.contains("cannot write the keyring"), "{err}");
-    assert_eq!(files(&dest), Vec::<PathBuf>::new(), "backup published files before its rewrite");
+    assert_eq!(
+        files(&dest),
+        Vec::<PathBuf>::new(),
+        "backup published files before its rewrite"
+    );
     ownhealth_ops::backup(&l.settings, &dest).await?;
     Ok(())
 }

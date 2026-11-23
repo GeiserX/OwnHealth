@@ -333,7 +333,9 @@ fn id_lists(v: &Value) -> Option<BTreeMap<Uuid, BTreeSet<String>>> {
     for (id, list) in map {
         let mut ids = BTreeSet::new();
         for hex in list.as_array()? {
-            let hex = hex.as_str().filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))?;
+            let hex = hex
+                .as_str()
+                .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))?;
             ids.insert(hex.to_ascii_lowercase());
         }
         if ids.is_empty() {
@@ -345,10 +347,7 @@ fn id_lists(v: &Value) -> Option<BTreeMap<Uuid, BTreeSet<String>>> {
 }
 
 fn id_lists_json(lists: &BTreeMap<Uuid, BTreeSet<String>>) -> Map<String, Value> {
-    lists
-        .iter()
-        .map(|(id, ids)| (id.to_string(), json!(ids)))
-        .collect()
+    lists.iter().map(|(id, ids)| (id.to_string(), json!(ids))).collect()
 }
 
 fn to_json(k: &KeyringFile) -> Value {
