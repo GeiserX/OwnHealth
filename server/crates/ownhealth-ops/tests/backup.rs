@@ -1423,3 +1423,22 @@ async fn verify_restore_frees_the_keyring_during_pg_restore_and_restore_does_not
     assert_eq!(report["ok"], true, "{report:#}");
     Ok(())
 }
+
+/// The keyring passes the checks at the start, but its rewrite after pg_dump fails (the folder is
+/// read-only now): the dump is never published, so the destination stays empty for the next attempt.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_keyring_rewrite_that_fails_after_pg_dump_publishes_no_dump() -> R {
+    use std::os::unix::fs::PermissionsExt;
+
+    let l = live().await?;
+    let keyring = l.settings.keyring_path();
+    let dest = l.dir.path().join("unwritable-keyring");
+    fs::set_permissions(&keyring, fs::Permissions::from_mode(0o500))?;
+    let err = err_text(ownhealth_ops::backup(&l.settings, &dest).await);
+    fs::set_permissions(&keyring, fs::Permissions::from_mode(0o700))?;
+    assert!(err.contains("cannot write the keyring"), "{err}");
+    assert_eq!(files(&dest), Vec::<PathBuf>::new(), "backup published files before its rewrite");
+    ownhealth_ops::backup(&l.settings, &dest).await?;
+    Ok(())
+}
