@@ -223,6 +223,7 @@ struct World {
     app: Router,
     fam: Family,
     orthanc: FakeOrthanc,
+    imaging: Arc<Imaging>,
 }
 
 impl World {
@@ -253,13 +254,15 @@ impl World {
             user: "ownhealth".into(),
             password: PASSWORD.into(),
         });
-        let app = build_app_with(rt, Imaging::with_times(config, ttl, recheck)?);
+        let imaging = Imaging::with_times(config, ttl, recheck)?;
+        let app = build_app_with(rt, imaging.clone());
         let w = World {
             db,
             _dir: dir,
             app,
             fam,
             orthanc,
+            imaging,
         };
         w.add_study("alex", ALEX_CT, "current").await?;
         w.add_study("carmen", CARMEN_MR, "current").await?;
@@ -830,15 +833,13 @@ async fn a_deleted_profile_ends_the_link() -> R {
 
 #[tokio::test]
 async fn an_expired_link_is_refused() -> R {
-    // Long enough that the first read is well inside it on a slow runner too.
-    let ttl = Duration::from_secs(2);
-    let w = World::with(ttl, true).await?;
+    // The link's hour ends by an explicit hook, so the first read has no time budget on a slow runner.
+    let w = World::new().await?;
     let cookie = w.session("alex").await?;
     let cap = w.open(&cookie, "alex", ALEX_CT).await?;
-    let ends = std::time::Instant::now() + ttl; // the link was made before this
     let series = dw(&cap, &format!("studies/{ALEX_CT}/series"));
     assert_eq!(w.viewer_get(&series, None).await?.0, StatusCode::OK);
-    tokio::time::sleep_until((ends + Duration::from_millis(200)).into()).await;
+    w.imaging.expire_all();
     w.orthanc.clear();
     let (s, _, body) = w.viewer_get(&series, None).await?;
     assert_eq!(s, StatusCode::FORBIDDEN);
@@ -1203,6 +1204,18 @@ async fn an_open_holds_nothing_in_the_database_while_orthanc_answers() -> R {
     .fetch_one(&w.db.pool)
     .await?;
     assert_eq!(in_transaction, 0, "a transaction stays open while Orthanc answers");
+    // and no connection is held at all: every one the pool has opened is idle (a returned connection
+    // can take a moment to show as idle, so ask a few times)
+    let pool = &w.db.pool;
+    let mut held = pool.size() - u32::try_from(pool.num_idle())?;
+    for _ in 0..50 {
+        if held == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        held = pool.size() - u32::try_from(pool.num_idle())?;
+    }
+    assert_eq!(held, 0, "the open holds a database connection while Orthanc answers");
     // The record moves to another Orthanc study while Orthanc answers: the open links nothing.
     sqlx::query("update imaging_study set orthanc_id = 'orthanc-alex-again' where study_instance_uid = $1")
         .bind(ALEX_CT)
@@ -1217,6 +1230,38 @@ async fn an_open_holds_nothing_in_the_database_while_orthanc_answers() -> R {
         (StatusCode::FORBIDDEN, "study_not_bound")
     );
     assert_eq!(w.audit_rows(ALEX_CT).await?, 0);
+    Ok(())
+}
+
+/// A session that ends (a logout elsewhere) while Orthanc answers the open gets no link and no audit
+/// row: the audit transaction checks the session again before it mints.
+#[tokio::test]
+async fn a_session_that_ends_while_orthanc_answers_gets_no_link() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let hold = w.orthanc.pause.clone().write_owned().await;
+    let (app, req) = (w.app.clone(), open_request(Auth::Cookie(&cookie), "alex", ALEX_CT)?);
+    let open = tokio::spawn(async move { app.oneshot(req).await });
+    for _ in 0..500 {
+        if !w.orthanc.lookups().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(w.orthanc.lookups(), [ALEX_CT], "the open is waiting on Orthanc");
+    let mut c = w.db.pool.acquire().await?;
+    assert!(sessions::revoke_session(&mut c, &cookie).await?);
+    drop(c);
+    drop(hold);
+    let res = open.await??;
+    let status = res.status();
+    let body = to_bytes(res.into_body(), 1 << 16).await?;
+    assert_eq!(
+        (status, code(&body).as_str()),
+        (StatusCode::UNAUTHORIZED, "unauthenticated")
+    );
+    assert_eq!(w.audit_rows(ALEX_CT).await?, 0);
+    assert_eq!(w.imaging.live_links(), 0, "a link was minted for an ended session");
     Ok(())
 }
 

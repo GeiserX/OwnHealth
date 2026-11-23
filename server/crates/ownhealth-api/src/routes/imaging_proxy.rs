@@ -9,6 +9,8 @@
 //!    same study again in the same session gives the same live link back (a new one in its last 10
 //!    minutes, unless the server is full), and one session holds at most [`LINKS_PER_HOLDER`] (its
 //!    oldest goes first). The first open of a study in a session writes one `imaging.open` audit row.
+//!    The open checks the session again in that audit transaction, and a new link works only once the
+//!    row commits; until then it only holds its place.
 //!
 //!    Orthanc keys a study by PatientID plus StudyInstanceUID, so two patients' studies can share a UID,
 //!    and its DICOMweb plugin then serves both under `/studies/{uid}`. The link is therefore bound to
@@ -126,6 +128,33 @@ struct Link {
     expires: Instant,
     /// When Orthanc last confirmed that the UID names that study only.
     checked: Instant,
+    /// Whether the link works. A new link is reserved first: it holds its place under
+    /// [`MAX_LINKS`] and [`LINKS_PER_HOLDER`] but opens nothing until its audit row commits.
+    published: bool,
+}
+
+/// A new link that its open has not published yet. Dropped unpublished (the open failed, or its
+/// request went away), it is taken back and its place freed.
+struct Reserved<'a> {
+    imaging: &'a Imaging,
+    token: Option<String>,
+}
+
+impl Reserved<'_> {
+    /// The link works from now on.
+    fn publish(mut self) {
+        if let Some(token) = self.token.take() {
+            self.imaging.publish(&token);
+        }
+    }
+}
+
+impl Drop for Reserved<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.imaging.revoke(&token);
+        }
+    }
 }
 
 /// The imaging state of one app: Orthanc's settings and the client that calls it (None: imaging
@@ -188,9 +217,9 @@ impl Imaging {
 
     /// A link for `holder` to the study: the holder's live one when it has [`REUSE_LEFT`] or more,
     /// else a new one (dropping the holder's oldest past [`LINKS_PER_HOLDER`]). Returns the token and
-    /// the time it has left, and whether the link is new. When the server holds [`MAX_LINKS`]
-    /// already, the holder's live link to the study is handed back however little it has left, and
-    /// None when there is none.
+    /// the time it has left, and whether the link is new. A new link is only reserved: it works once
+    /// [`Imaging::publish`] runs. When the server holds [`MAX_LINKS`] already, the holder's live link
+    /// to the study is handed back however little it has left, and None when there is none.
     fn mint(
         &self,
         holder: Holder,
@@ -204,7 +233,8 @@ impl Imaging {
         let live = links
             .values()
             .filter(|l| {
-                l.holder == holder
+                l.published
+                    && l.holder == holder
                     && l.profile_id == profile_id
                     && l.study_uid == study_uid
                     && l.orthanc_id == orthanc_id
@@ -239,9 +269,39 @@ impl Imaging {
                 orthanc_id: orthanc_id.to_string(),
                 expires: now + self.ttl,
                 checked: now,
+                published: false,
             },
         );
         Some((token, self.ttl, true))
+    }
+
+    /// A reserved link works from now on.
+    fn publish(&self, token: &str) {
+        if let Ok(mut links) = self.links.lock()
+            && let Some(l) = links.get_mut(&ownhealth_auth::sha256(token))
+        {
+            l.published = true;
+        }
+    }
+
+    /// Ends every viewer link now, as if its hour were up (tests use it in place of waiting out the
+    /// hour).
+    pub fn expire_all(&self) {
+        if let Ok(mut links) = self.links.lock() {
+            let now = Instant::now();
+            for l in links.values_mut() {
+                l.expires = now;
+            }
+        }
+    }
+
+    /// The links that hold a place now, reserved ones included.
+    pub fn live_links(&self) -> usize {
+        let now = Instant::now();
+        self.links
+            .lock()
+            .map(|links| links.values().filter(|l| l.expires > now).count())
+            .unwrap_or(0)
     }
 
     /// Takes back a new link whose open did not complete.
@@ -267,6 +327,7 @@ impl Imaging {
         let key = ownhealth_auth::sha256(token);
         let mut links = self.links.lock().ok()?;
         match links.get(&key) {
+            Some(l) if !l.published => None,
             Some(l) if l.expires > Instant::now() => Some(l.clone()),
             Some(_) => {
                 links.remove(&key);
@@ -397,6 +458,12 @@ async fn open(
     if perm.profile.id != profile_id || bound_study(&mut tx, profile_id, &uid).await? != orthanc_id {
         return Err(not_bound());
     }
+    // The session may have ended while Orthanc answered (a logout elsewhere): it gets no link.
+    if let Holder::Session(id) = holder
+        && live_session(&mut tx, id).await?.is_none()
+    {
+        return Err(ApiError::unauthenticated());
+    }
     // One audit row per study per session: the lock makes two opens at once write one row.
     let marker = holder.marker();
     sqlx::query("select pg_advisory_xact_lock(hashtext($1))")
@@ -423,8 +490,9 @@ async fn open(
         e.args_summary = Some(marker);
         e
     });
-    // The link first: when the server is full, the 503 rolls the transaction back and logs no open.
-    // A new link whose audit row does not commit is taken back.
+    // The link's place first: when the server is full, the 503 rolls the transaction back and logs
+    // no open. A new link is only reserved until its audit row commits; if the commit fails, or the
+    // request goes away before it, the reservation is dropped and the link never worked.
     let (token, left, fresh) = imaging.mint(holder, profile_id, &uid, &orthanc_id).ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -432,12 +500,12 @@ async fn open(
             "Too many viewer links are open. Try again later.",
         )
     })?;
-    if let Err(e) = commit_open(tx, event.as_ref()).await {
-        if fresh {
-            imaging.revoke(&token);
-        }
-        return Err(e);
-    }
+    let reserved = Reserved {
+        imaging,
+        token: fresh.then(|| token.clone()),
+    };
+    commit_open(tx, event.as_ref()).await?;
+    reserved.publish();
     Ok(Json(json!({
         "viewer_url": format!("/ohif/t/{token}/viewer?StudyInstanceUIDs={uid}"),
         "expires_in": left.as_secs(),
@@ -1262,6 +1330,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_reserved_link_opens_nothing_until_it_is_published_and_a_dropped_one_frees_its_place() {
+        let imaging = Imaging::off();
+        let (holder, profile) = (Holder::Session(Uuid::new_v4()), Uuid::new_v4());
+        let uid = "1.2.826.0.1.3680043.10.999.1";
+        let (token, _, fresh) = imaging.mint(holder, profile, uid, "orthanc-a").expect("a place");
+        assert!(fresh);
+        assert!(
+            imaging.lookup(&token).is_none(),
+            "a reserved link works before its audit commits"
+        );
+        // a second open meanwhile does not get the reserved link handed back
+        let (other, _, fresh) = imaging.mint(holder, profile, uid, "orthanc-a").expect("a place");
+        assert!(fresh);
+        assert_ne!(other, token);
+        drop(Reserved {
+            imaging: &imaging,
+            token: Some(other),
+        });
+        assert_eq!(imaging.live_links(), 1, "a dropped reservation keeps its place");
+        Reserved {
+            imaging: &imaging,
+            token: Some(token.clone()),
+        }
+        .publish();
+        assert!(imaging.lookup(&token).is_some());
+        assert_eq!(imaging.live_links(), 1);
+        imaging.expire_all();
+        assert!(imaging.lookup(&token).is_none());
+        assert_eq!(imaging.live_links(), 0);
+    }
+
+    #[test]
     fn uids_are_digits_and_single_dots() {
         assert!(is_uid("1.2.826.0.1.3680043.10.999.1"));
         for bad in [
@@ -1334,6 +1434,7 @@ mod tests {
         let p = Uuid::from_u128(7);
         let (a, left, fresh) = imaging.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
         assert_eq!((left, fresh), (CAPABILITY_TTL, true));
+        imaging.publish(&a);
         assert_eq!(
             imaging
                 .mint(holder(1), p, "1.2.3", "o1")
@@ -1356,6 +1457,7 @@ mod tests {
         // A link close to its end is not handed out again.
         let short = Imaging::build(None, REUSE_LEFT - Duration::from_secs(1), ORTHANC_RECHECK);
         let (b, ..) = short.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
+        short.publish(&b);
         assert_ne!(short.mint(holder(1), p, "1.2.3", "o1").map(|(t, ..)| t), Some(b));
     }
 
@@ -1365,6 +1467,7 @@ mod tests {
         let imaging = Imaging::build(None, REUSE_LEFT - Duration::from_secs(1), ORTHANC_RECHECK);
         let p = Uuid::from_u128(7);
         let (a, ..) = imaging.mint(holder(1), p, "1.2.3", "o1").unwrap_or_default();
+        imaging.publish(&a);
         let mut n = 2;
         while imaging
             .mint(holder(n as u128 / 40 + 2), p, &format!("1.2.{n}"), "o")
@@ -1403,6 +1506,8 @@ mod tests {
         }
         let held = imaging.links.lock().map(|l| l.len()).unwrap_or_default();
         assert_eq!(held, LINKS_PER_HOLDER);
+        imaging.publish(&first);
+        imaging.publish(&last);
         assert!(imaging.lookup(&first).is_none(), "the oldest link went first");
         assert!(imaging.lookup(&last).is_some());
         // Everyone else still gets a link.
