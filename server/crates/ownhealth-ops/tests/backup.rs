@@ -374,6 +374,60 @@ async fn a_tree_with_an_items_own_key_backs_up_verifies_and_restores() -> R {
     Ok(())
 }
 
+/// Files that are not where their name puts them (a blob name in another shard, a sealed name in
+/// another shard, a name that is no key under `enc/` or `pending/`) stay out of the backup and its
+/// manifest, so no restore places them; the backup still verifies and restores, and the live store
+/// keeps its own files (the backup removes only its own links).
+#[tokio::test]
+async fn a_backup_leaves_misplaced_files_out_and_still_verifies_and_restores() -> R {
+    let l = live().await?;
+    let root = l.settings.blobs_path();
+    let keys: Vec<String> = tree_files(&root)?.into_keys().collect();
+    let plain = keys.iter().find(|k| !k.contains('/')).cloned().unwrap_or_default();
+    let sealed = keys
+        .iter()
+        .find(|k| k.contains('/') && !k.starts_with("pending/") && !k.starts_with("?/"))
+        .cloned()
+        .unwrap_or_default();
+    let (pid, address) = sealed.split_once('/').unwrap_or_default();
+    assert!(!plain.is_empty() && !address.is_empty(), "{keys:?}");
+    let strays = [
+        root.join("sha256/zz/zz").join(&plain),
+        root.join("enc").join(pid).join("zz/zz").join(address),
+        root.join("enc").join("notes.txt"),
+        root.join("pending").join("stray"),
+    ];
+    for f in &strays {
+        fs::create_dir_all(f.parent().unwrap_or(&root))?;
+        fs::write(f, b"planted")?;
+    }
+    let misplaced = tree_files(&root)?.into_keys().filter(|k| k.starts_with("?/")).count();
+    assert_eq!(misplaced, strays.len());
+    let archive = ownhealth_ops::backup(&l.settings, &l.dir.path().join("backup3").join("staging")).await?;
+    let backed: Vec<String> = tree(&archive)?.into_keys().collect();
+    assert!(!backed.iter().any(|k| k.starts_with("?/")), "{backed:?}");
+    let m = manifest(&archive)?;
+    assert_eq!(m["blobs"]["count"], backed.len(), "{:#}", m["blobs"]);
+    assert!(!fs::read_to_string(archive.join("manifest.json"))?.contains("?/"));
+    for f in &strays {
+        assert_eq!(
+            fs::read(f)?,
+            b"planted",
+            "the backup removed a live file: {}",
+            f.display()
+        );
+    }
+    let report = ownhealth_ops::verify_restore(&l.settings, &archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    let (_db, fresh) = fresh(&l).await?;
+    let report = ownhealth_ops::restore(&fresh, &archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    let restored: Vec<String> = tree_files(&fresh.blobs_path())?.into_keys().collect();
+    assert!(!restored.iter().any(|k| k.starts_with("?/")), "{restored:?}");
+    assert_eq!(restored, backed);
+    Ok(())
+}
+
 #[tokio::test]
 async fn verify_restore_fails_on_a_corrupt_blob() -> R {
     let l = live().await?;

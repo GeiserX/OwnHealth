@@ -120,12 +120,15 @@ impl BlobOwner {
 /// while this value lives, so keep it for as long as any reader opened from the path is in use. In
 /// the plain layout it is the stored file itself; a sealed blob is decrypted into a file of the
 /// store's tmp folder, readable by this user only, removed when this drops (`sweep_tmp` removes one
-/// a killed process left).
+/// a killed process left). Such a copy holds an exclusive lock on its file while it lives, so the
+/// sweep of any process leaves it alone however long a reader takes.
 #[derive(Debug)]
 #[must_use = "the path is good only while the LocalCopy lives"]
 pub struct LocalCopy {
     path: PathBuf,
     temporary: bool,
+    /// The decrypted copy's own handle, locked while the copy lives.
+    held: Option<File>,
 }
 
 impl LocalCopy {
@@ -310,6 +313,28 @@ fn stamp(meta: &fs::Metadata) -> Option<Stamp> {
 #[cfg(not(unix))]
 fn stamp(_meta: &fs::Metadata) -> Option<Stamp> {
     None
+}
+
+/// Test support: every plain file [`BlobStore::checked_plain`] hashed in this process, with the name of
+/// the thread that hashed it.
+#[cfg(any(test, feature = "testing"))]
+static PLAIN_HASHED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Test support: the names of the threads that hashed the plain file `sha256` before serving it for an
+/// owner, so a test shows the hash never ran on an async runtime's own thread.
+#[cfg(any(test, feature = "testing"))]
+pub fn plain_hashed_on(sha256: &str) -> Vec<String> {
+    let h = sha256.to_ascii_lowercase();
+    PLAIN_HASHED
+        .lock()
+        .map(|seen| seen.iter().filter(|(s, _)| *s == h).map(|(_, t)| t.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Whether a live [`LocalCopy`] (of this process or another) holds the file at `path`: it keeps an
+/// exclusive lock on it while it lives, and a killed process's lock went with it.
+fn in_use(path: &Path) -> bool {
+    File::open(path).is_ok_and(|f| matches!(f.try_lock(), Err(fs::TryLockError::WouldBlock)))
 }
 
 fn tmp_name() -> String {
@@ -519,6 +544,10 @@ impl BlobStore {
         let known = |st: Stamp| self.checked.lock().is_ok_and(|c| c.contains(&(h.clone(), st)));
         if before.is_some_and(known) {
             return Ok(file);
+        }
+        #[cfg(any(test, feature = "testing"))]
+        if let Ok(mut seen) = PLAIN_HASHED.lock() {
+            seen.push((h.clone(), std::thread::current().name().unwrap_or_default().to_string()));
         }
         let mut digest = Sha256::new();
         let mut buf = vec![0u8; CHUNK];
@@ -832,17 +861,25 @@ impl BlobStore {
             None => Err(BlobError::NotFound),
             Some(Found::Plain(path)) => {
                 self.checked_plain(owner, sha256, File::open(&path)?)?;
-                Ok(LocalCopy { path, temporary: false })
+                Ok(LocalCopy {
+                    path,
+                    temporary: false,
+                    held: None,
+                })
             }
             Some(Found::Sealed { .. }) => {
                 let mut reader = self.open_seek(owner, sha256)?;
-                let copy = LocalCopy {
+                let mut copy = LocalCopy {
                     path: self.root.join("tmp").join(format!("copy-{}", tmp_name())),
                     temporary: true,
+                    held: None,
                 };
                 let mut out = create_private(copy.path())?;
+                // before a byte is in it: the sweep leaves a locked copy alone ([`in_use`])
+                out.lock()?;
                 io::copy(&mut reader, &mut out)?;
                 out.flush()?;
+                copy.held = Some(out);
                 Ok(copy)
             }
         }
@@ -902,6 +939,27 @@ impl BlobStore {
         // no chmod first: a backup's hard link shares the inode and keeps its 0440
         fs::remove_file(path)?;
         Ok(true)
+    }
+
+    /// Whether `owner` holds a sealed copy of `sha256` (never makes a key).
+    pub fn is_sealed(&self, owner: BlobOwner, sha256: &str) -> Result<bool, BlobError> {
+        Ok(matches!(self.find(owner, sha256)?, Some(Found::Sealed { .. })))
+    }
+
+    /// The plain copy of `sha256` only: a legacy file once every owner that reads it holds a sealed
+    /// copy (`ownhealth seal-legacy`). True when a file went.
+    pub fn drop_plain(&self, sha256: &str) -> Result<bool, BlobError> {
+        // no chmod first: a backup's hard link shares the inode and keeps its 0440
+        match fs::remove_file(self.path(sha256)?) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The sha256 of every file in the plain layout, where its name puts it, in name order.
+    pub fn plain_files(&self) -> io::Result<Vec<String>> {
+        Ok(self.files()?.into_keys().filter(|k| !k.contains('/')).collect())
     }
 
     /// After a profile delete: every sealed blob of `profile` and the key this process kept for it.
@@ -1039,7 +1097,8 @@ impl BlobStore {
     /// Remove upload spools a killed process left in `root/tmp`: regular files named `upload-*`
     /// (the import route), `push-*` (the push inboxes), `copy-*` (a decrypted local copy) or 32 hex
     /// characters (`put_reader`) last modified more than `older_than` ago. The age bound leaves
-    /// another process's live upload alone. Returns how many went.
+    /// another process's live upload alone, and a local copy is left while a [`LocalCopy`] of any
+    /// process still holds it. Returns how many went.
     pub fn sweep_tmp(&self, older_than: std::time::Duration) -> io::Result<usize> {
         let dir = self.root.join("tmp");
         let entries = match fs::read_dir(&dir) {
@@ -1060,7 +1119,8 @@ impl BlobStore {
                 continue;
             }
             let age = meta.modified().ok().and_then(|m| now.duration_since(m).ok());
-            if age.is_some_and(|a| a > older_than) {
+            // a decrypted copy a reader still holds stays, however old: its LocalCopy locks it
+            if age.is_some_and(|a| a > older_than) && !(name.starts_with("copy-") && in_use(&entry.path())) {
                 match fs::remove_file(entry.path()) {
                     Ok(()) => removed += 1,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -1368,6 +1428,37 @@ mod tests {
         left.sort();
         assert_eq!(left, ["notes.txt", "upload-fresh"]);
         assert_eq!(store.sweep_tmp(one_hour)?, 0);
+        Ok(())
+    }
+
+    /// A decrypted local copy that a long import still reads (an Apple Health export, a Gadgetbridge
+    /// database) outlives the sweep's age bound: the sweep leaves it while its LocalCopy lives, in
+    /// this process or another, and removes it once that is gone and the copy is old.
+    #[test]
+    fn the_spool_sweep_leaves_a_local_copy_that_is_still_read() -> Result<(), BlobError> {
+        let dir = tempfile::tempdir()?;
+        let store = sealing_store(dir.path())?;
+        let p = BlobOwner::Profile(Uuid::new_v4());
+        let h = store.put_bytes(p, b"Apple Health export of Alex Rivera")?;
+        let copy = store.with_local_copy(p, &h)?;
+        let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        File::options()
+            .write(true)
+            .open(copy.path())?
+            .set_modified(two_hours_ago)?;
+        let one_hour = std::time::Duration::from_secs(3600);
+        assert_eq!(store.sweep_tmp(one_hour)?, 0, "the sweep removed a copy still in use");
+        assert_eq!(fs::read(copy.path())?, b"Apple Health export of Alex Rivera");
+        // a copy a killed process left holds no lock: it goes
+        let left = copy.path().to_path_buf();
+        fs::copy(copy.path(), dir.path().join("tmp").join("copy-killed"))?;
+        File::options()
+            .write(true)
+            .open(dir.path().join("tmp").join("copy-killed"))?
+            .set_modified(two_hours_ago)?;
+        assert_eq!(store.sweep_tmp(one_hour)?, 1);
+        drop(copy);
+        assert!(!left.exists());
         Ok(())
     }
 

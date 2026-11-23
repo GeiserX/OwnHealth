@@ -796,16 +796,7 @@ async fn diff_dataset(
     }
     let sites = fact_sites(&mut tx, ds.id).await?;
     let label = format!("the calls VCF of dataset {}", ds.id);
-    // read in place, front to back: a sealed VCF is decrypted as it is read, never copied to disk
-    let vcf_calls: Result<Option<BlobReader>> = ds
-        .vcf
-        .as_ref()
-        .map(|sha| {
-            blobs
-                .open_seek(BlobOwner::Profile(ds.profile_id), sha)
-                .map_err(|e| bad_file(&label, e))
-        })
-        .transpose();
+    let (store, vcf, owner) = (blobs.clone(), ds.vcf.clone(), BlobOwner::Profile(ds.profile_id));
     let fact_alleles: Vec<(Key, String, String)> = sites
         .iter()
         .filter(|s| s.alt_called)
@@ -815,6 +806,12 @@ async fn diff_dataset(
     // The outer error is the release's and stops the run; the inner one is this dataset's calls VCF,
     // which must not stop the other datasets.
     let read = blocking(move || -> Result<Result<Vec<Carried>>> {
+        // read in place, front to back: a sealed VCF is decrypted as it is read, never copied to disk.
+        // Opened here, off the runtime: a plain VCF of an older install is hashed once when it opens.
+        let vcf_calls: Result<Option<BlobReader>> = vcf
+            .as_ref()
+            .map(|sha| store.open_seek(owner, sha).map_err(|e| bad_file(&label, e)))
+            .transpose();
         let calls = match vcf_calls {
             Ok(c) => c,
             Err(e) => return Ok(Err(e)),
