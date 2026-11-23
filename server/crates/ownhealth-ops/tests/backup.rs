@@ -1187,6 +1187,49 @@ async fn a_backup_requires_a_repaired_file_if_it_goes_missing_again() -> R {
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_partial_restore_can_retry_after_the_keyring_write_fails() -> R {
+    use ownhealth_core::keyfile;
+    use std::os::unix::fs::PermissionsExt;
+
+    let l = live().await?;
+    let mut ring = keyfile::read(&keyfile::path(&l.settings))?.expect("backup wrote the keyring");
+    assert!(ring.profiles.remove(&l.alex).is_some());
+    keyfile::write(&l.settings.keyring_path(), &ring)?;
+
+    let (db, settings) = fresh(&l).await?;
+    let folder = settings.keyring_path();
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o500))?;
+    let result = ownhealth_ops::restore_with(&settings, &l.archive, true).await;
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o700))?;
+    let error = err_text(result);
+    assert!(error.contains("cannot write the keyring"), "{error}");
+
+    let m = manifest(&l.archive)?;
+    let mut other = m.clone();
+    other["created_at"] = serde_json::json!("2026-11-01T00:00:00Z");
+    write_manifest(&l.archive, &other)?;
+    let rejected = ownhealth_ops::restore_with(&settings, &l.archive, true).await;
+    write_manifest(&l.archive, &m)?;
+    assert!(err_text(rejected).contains("target database is not empty"));
+
+    let report = ownhealth_ops::restore_with(&settings, &l.archive, true).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert_eq!(report["keys"]["missing"], serde_json::json!([l.alex]));
+    assert!(error.contains("rerun the same restore"), "{error}");
+    let legacy_sha = hex::encode(sha2::Sha256::digest(&l.legacy));
+    let store = BlobStore::for_settings(&settings)?;
+    assert_eq!(store.get_bytes(BlobOwner::Profile(l.alex), &legacy_sha)?, l.legacy);
+    let saved = keyfile::read(&keyfile::path(&settings))?.expect("restore wrote the keyring");
+    assert!(saved.lost.get(&l.alex).is_some_and(|lost| !lost.is_empty()));
+    let pending: bool = sqlx::query_scalar("select to_regnamespace('ownhealth_restore') is not null")
+        .fetch_one(&db.pool)
+        .await?;
+    assert!(!pending);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_damaged_present_key_is_rejected_before_restore_even_with_allow_missing() -> R {
     use ownhealth_core::keyfile;

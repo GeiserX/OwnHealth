@@ -1170,7 +1170,7 @@ fn authenticate_ring_key(path: &Path, kek: Option<&Kek>, id: Uuid, fingerprint: 
 
 /// Load the selected keys and the current tombstones. A profile in the dump that stored its first
 /// sealed file after the backup gets its current key, so its next file uses the same key.
-async fn load_keys(url: &str, ring: &RingKeys) -> Result<()> {
+async fn load_keys(url: &str, ring: &RingKeys, resume_id: Option<&str>) -> Result<()> {
     let mut conn = PgConnection::connect(url).await?;
     let mut tx = conn.begin().await?;
     for (id, wrapped) in &ring.keys {
@@ -1201,31 +1201,72 @@ async fn load_keys(url: &str, ring: &RingKeys) -> Result<()> {
     .bind(&ring.fingerprint)
     .execute(&mut *tx)
     .await?;
+    if let Some(id) = resume_id {
+        // Commit the checkpoint with the keys. A populated database without this checkpoint
+        // cannot be resumed.
+        sqlx::raw_sql(
+            "create schema ownhealth_restore; create table ownhealth_restore.pending_loss (id text not null)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("insert into ownhealth_restore.pending_loss values ($1)")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     conn.close().await?;
     Ok(())
 }
 
-/// Record in the keyring the files this restore loaded without the key that opens them: the files the
-/// backup holds only sealed, of a profile whose key the keyring lacked (`missing`) or whose keyring
-/// key is not the archive's. Their loss is accepted, so later backups do not require them. Runs with
-/// the keyring lock held.
+/// Profiles whose archived files need a key this restore will not install.
+fn unavailable_profiles(ring: &RingKeys) -> BTreeSet<Uuid> {
+    let keyed: BTreeSet<Uuid> = ring.keys.iter().map(|(id, _)| *id).collect();
+    ring.missing
+        .iter()
+        .chain(ring.shredded.iter().filter(|id| keyed.contains(id)))
+        .copied()
+        .collect()
+}
+
+/// Bind a retry to the same backup contents, selected keys, and restore options. Restic can
+/// extract the same backup into a new directory for the retry.
+fn loss_resume_id(archive: &Path, manifest: &Value, ring: &RingKeys) -> Result<String> {
+    let identity = json!({
+        "dump": sha256_file(&archive.join("db.dump"))?,
+        "manifest": manifest,
+        "fingerprint": ring.fingerprint,
+        "keys": ring.keys,
+        "supplemental": ring.supplemental,
+        "missing": ring.missing,
+        "shredded": ring.shredded,
+        "tombstones": ring.tombstones,
+        "allow_missing": ring.allow_missing,
+    });
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&identity)?)))
+}
+
+async fn can_resume_loss(conn: &mut PgConnection, resume_id: Option<&str>) -> Result<bool> {
+    let Some(resume_id) = resume_id else { return Ok(false) };
+    let pending: bool = sqlx::query_scalar("select to_regclass('ownhealth_restore.pending_loss') is not null")
+        .fetch_one(&mut *conn)
+        .await?;
+    if !pending {
+        return Ok(false);
+    }
+    let saved: Option<String> = sqlx::query_scalar("select id from ownhealth_restore.pending_loss")
+        .fetch_optional(conn)
+        .await?;
+    Ok(saved.as_deref() == Some(resume_id))
+}
+
+/// Record files the operator accepted losing. Runs with the keyring lock held.
 async fn record_lost(
     settings: &Settings,
     url: &str,
-    ring: &RingKeys,
+    closed: &BTreeSet<Uuid>,
     backup_blobs: &BTreeMap<String, PathBuf>,
 ) -> Result<()> {
-    let keyed: BTreeSet<Uuid> = ring.keys.iter().map(|(id, _)| *id).collect();
-    let closed: BTreeSet<Uuid> = ring
-        .missing
-        .iter()
-        .chain(ring.shredded.iter().filter(|p| keyed.contains(p)))
-        .copied()
-        .collect();
-    if closed.is_empty() {
-        return Ok(());
-    }
     let mut conn = PgConnection::connect(url).await?;
     let referenced = referenced_blobs(&mut conn).await?;
     conn.close().await?;
@@ -1394,13 +1435,20 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
             ids_text(&r.missing)
         )));
     }
+    let closed = ring.as_ref().map(unavailable_profiles).unwrap_or_default();
+    let resume_id = ring
+        .as_ref()
+        .filter(|_| !closed.is_empty())
+        .map(|ring| loss_resume_id(archive, &manifest, ring))
+        .transpose()?;
     let url = settings.sqlx_url();
     let mut conn = PgConnection::connect(&url).await?;
     let tables: i64 = sqlx::query_scalar("select count(*) from pg_tables where schemaname = 'public'")
         .fetch_one(&mut conn)
         .await?;
+    let resuming = tables > 0 && can_resume_loss(&mut conn, resume_id.as_deref()).await?;
     conn.close().await?;
-    if tables > 0 {
+    if tables > 0 && !resuming {
         return Err(ops_error(
             "the target database is not empty: restore needs a fresh instance (new volume, app not started)",
         ));
@@ -1428,16 +1476,40 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
             return Err(ops_error(format!("blob {key} in the backup is corrupt")));
         }
     }
-    pg_restore(&url, archive).await?;
-    if let Some(r) = &ring {
-        load_keys(&url, r).await?;
-        record_lost(settings, &url, r, &backup_blobs).await?;
+    if !resuming {
+        pg_restore(&url, archive).await?;
+        if let Some(ring) = &ring {
+            load_keys(&url, ring, resume_id.as_deref()).await?;
+        }
     }
-    drop(ring_lock);
+    // Keep the lock through blob placement when a checkpoint exists, so another invocation
+    // cannot resume this restore while it is still finishing.
+    let resume_lock = if resume_id.is_some() {
+        record_lost(settings, &url, &closed, &backup_blobs).await.map_err(|error| {
+            let message = format!(
+                "{error}. Fix the keyring error and rerun the same restore with the same backup, keyring,                  and options. Keep the app stopped until restore finishes"
+            );
+            Error::Other(anyhow::Error::new(error).context(message))
+        })?;
+        Some(ring_lock)
+    } else {
+        drop(ring_lock);
+        None
+    };
     let store = BlobStore::for_settings(settings)?;
     for (key, path) in &backup_blobs {
         store.place(key, path)?;
     }
+    if resume_lock.is_some() {
+        let mut conn = PgConnection::connect(&url).await?;
+        let mut tx = conn.begin().await?;
+        sqlx::raw_sql("drop table ownhealth_restore.pending_loss; drop schema ownhealth_restore")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        conn.close().await?;
+    }
+    drop(resume_lock);
     let lock = anchor_lock(&url).await?;
     let mut report = compare(&url, &manifest, &store.files()?, kek.as_ref(), ring.as_ref()).await?;
     let head = &manifest["audit_chain"];
@@ -1520,7 +1592,7 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
     let result = async {
         pg_restore(&target, archive).await?;
         if let Some(r) = &ring {
-            load_keys(&target, r).await?;
+            load_keys(&target, r, None).await?;
         }
         compare(&target, &manifest, &files, kek.as_ref(), ring.as_ref()).await
     }
