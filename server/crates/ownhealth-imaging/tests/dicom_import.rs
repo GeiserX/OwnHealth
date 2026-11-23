@@ -17,7 +17,7 @@ use ownhealth_core::testing::TestDb;
 use ownhealth_imaging::import::{JOB, REVIEW_KIND};
 use ownhealth_imaging::upload::{self, Recorded};
 use serde_json::Value;
-use support::{ALEX, CARMEN, FakeOrthanc, SAM, Study, hospital_cd, study_files, zip_files};
+use support::{ALEX, CARMEN, FakeOrthanc, Person, SAM, Study, hospital_cd, study_files, zip_files};
 use uuid::Uuid;
 
 type R = anyhow::Result<()>;
@@ -115,6 +115,16 @@ impl Env {
         .bind(self.fam.profile(slug))
         .fetch_all(&self.rt.pool)
         .await?)
+    }
+
+    /// The record's FHIR ImagingStudy of `uid`.
+    async fn fhir(&self, uid: &str) -> anyhow::Result<Value> {
+        Ok(
+            sqlx::query_scalar("select fhir from imaging_study where study_instance_uid = $1")
+                .bind(uid)
+                .fetch_one(&self.rt.pool)
+                .await?,
+        )
     }
 
     /// The profile that records `uid`, and its Orthanc id.
@@ -393,5 +403,161 @@ async fn files_orthanc_files_otherwise_are_taken_back() -> R {
         e.in_review("alex").await?,
         [(U1.to_string(), "uid_conflict".to_string())]
     );
+    Ok(())
+}
+
+/// Another hospital's patient, filed under a StudyInstanceUID Alex's record holds.
+const PEDRO: Person = Person {
+    name: "GARCIA^PEDRO",
+    id: "LN-PEDRO-09",
+    birth: "19600101",
+};
+
+#[tokio::test]
+async fn a_second_disc_that_adds_a_series_sends_it_and_the_record_counts_it() -> R {
+    let e = env().await?;
+    let first = study_files(&Study::new(U1, ALEX), "DICOM");
+    e.upload("alex", &first).await?;
+    e.run().await?;
+    assert_eq!(e.orthanc.held().instances.len(), 6);
+    // a second disc of the same study holds a third series
+    let second = study_files(
+        &Study {
+            series: 3,
+            ..Study::new(U1, ALEX)
+        },
+        "DICOM",
+    );
+    let up = e.upload("alex", &second).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{error:?}");
+    assert_eq!(result["imported"], 1, "{result}");
+    assert_eq!(result["already"], 0, "{result}");
+    assert_eq!(e.orthanc.held().instances.len(), 9, "the third series reached Orthanc");
+    assert!(
+        e.orthanc
+            .warmed()
+            .iter()
+            .any(|p| p.contains(&format!("/series/{U1}.3/"))),
+        "{:?}",
+        e.orthanc.warmed()
+    );
+    let fhir = e.fhir(U1).await?;
+    assert_eq!(fhir["numberOfSeries"], 3, "{fhir}");
+    assert_eq!(fhir["numberOfInstances"], 9, "{fhir}");
+    // the same second disc again sends nothing
+    let posts = e.orthanc.posts();
+    let again = e.upload("alex", &second).await?;
+    e.run().await?;
+    let (_, result, _) = e.job(again.job_id).await?;
+    assert_eq!(result["already"], 1, "{result}");
+    assert_eq!(e.orthanc.posts(), posts);
+    Ok(())
+}
+
+#[tokio::test]
+async fn another_patients_study_under_a_uid_the_profile_holds_waits_in_review() -> R {
+    let e = env().await?;
+    e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.run().await?;
+    let posts = e.orthanc.posts();
+    // another patient's disc, under the UID of the study Alex's record holds, uploaded to Alex
+    let up = e.upload("alex", &study_files(&Study::new(U1, PEDRO), "PEDRO")).await?;
+    e.run().await?;
+    let (_, result, _) = e.job(up.job_id).await?;
+    assert_eq!(result["already"], 0, "{result}");
+    assert_eq!(result["in_review"], 1, "{result}");
+    assert_eq!(e.orthanc.posts(), posts, "nothing of it was sent");
+    assert_eq!(e.orthanc.patients_under(U1), [ALEX.id.to_string()].into());
+    assert_eq!(
+        e.in_review("alex").await?,
+        [(U1.to_string(), "uid_conflict".to_string())]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_second_patient_the_disc_only_hints_at_waits_and_an_accept_imports_it() -> R {
+    let e = env().await?;
+    // the profile owner's study, and one of a patient with the owner's name but another hospital's
+    // PatientID and no birth date: not clearly the owner
+    let namesake = Person {
+        name: "RIVERA^ALEX",
+        id: "OTHER-HOSP-9",
+        birth: "",
+    };
+    let mut disc = study_files(&Study::new(U1, ALEX), "DICOM/A");
+    disc.extend(study_files(&Study::new(U2, namesake), "DICOM/B"));
+    let up = e.upload("alex", &disc).await?;
+    e.run().await?;
+    let (_, result, _) = e.job(up.job_id).await?;
+    assert_eq!(result["imported"], 1, "{result}");
+    assert_eq!(result["in_review"], 1, "{result}");
+    assert_eq!(
+        e.in_review("alex").await?,
+        [(U2.to_string(), "second_patient".to_string())]
+    );
+    assert!(e.orthanc.patients_under(U2).is_empty(), "nothing of it was sent");
+    let item: Uuid = sqlx::query_scalar("select id from review_item where kind = $1 and status = 'open'")
+        .bind(REVIEW_KIND)
+        .fetch_one(&e.rt.pool)
+        .await?;
+    let mut c = e.rt.pool.acquire().await?;
+    ownhealth_core::review::accept(&mut c, item, e.fam.user("alex"), None).await?;
+    drop(c);
+    e.run().await?;
+    assert_eq!(e.recorded(U2).await?.map(|r| r.0), Some(e.fam.profile("alex")));
+    assert_eq!(e.orthanc.patients_under(U2), ["OTHER-HOSP-9".to_string()].into());
+    Ok(())
+}
+
+#[tokio::test]
+async fn files_orthanc_files_under_another_patient_are_taken_back() -> R {
+    let e = env().await?;
+    // an Orthanc that reads Alex's PatientID as another one
+    *e.orthanc.misread_patient.lock().map_err(|_| anyhow::anyhow!("lock"))? =
+        Some((ALEX.id.into(), "LN-MISREAD".into()));
+    let up = e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{error:?}");
+    assert_eq!(result["in_review"], 1, "{result}");
+    let held = e.orthanc.held();
+    assert!(held.instances.is_empty(), "taken back: {held:?}");
+    assert!(held.studies.is_empty(), "{held:?}");
+    assert!(e.recorded(U1).await?.is_none());
+    assert_eq!(
+        e.in_review("alex").await?,
+        [(U1.to_string(), "uid_conflict".to_string())]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_file_orthanc_refuses_is_counted_and_the_record_counts_what_orthanc_kept() -> R {
+    let e = env().await?;
+    let st = Study {
+        series: 1,
+        per_series: 4,
+        size: 64,
+        ..Study::new(U1, ALEX)
+    };
+    let mut disc = study_files(&st, "DICOM");
+    // the fourth image cut in its pixel data: its header reads, Orthanc refuses the file
+    let last = disc.len() - 1;
+    let keep = disc[last].1.len() * 2 / 3;
+    disc[last].1.truncate(keep);
+    let up = e.upload("alex", &disc).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{error:?}");
+    assert_eq!(result["damaged"], 0, "{result}");
+    assert_eq!(result["refused_files"], 1, "{result}");
+    assert_eq!(result["instances"], 3, "{result}");
+    assert_eq!(e.orthanc.held().instances.len(), 3);
+    let fhir = e.fhir(U1).await?;
+    assert_eq!(fhir["numberOfInstances"], 3, "{fhir}");
+    assert_eq!(fhir["series"][0]["numberOfInstances"], 3, "{fhir}");
     Ok(())
 }

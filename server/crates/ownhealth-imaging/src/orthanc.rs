@@ -36,6 +36,14 @@ pub struct StudyInfo {
     pub patient_id: String,
 }
 
+/// One series of a study as Orthanc holds it: what the record counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeriesInfo {
+    pub uid: String,
+    pub modality: String,
+    pub instances: usize,
+}
+
 /// Orthanc's answers are JSON of a few kilobytes; nothing it says to the importer is larger.
 const MAX_ANSWER: usize = 4 << 20;
 
@@ -128,6 +136,44 @@ impl Orthanc {
             study_instance_uid: tag("MainDicomTags", "StudyInstanceUID"),
             patient_id: tag("PatientMainDicomTags", "PatientID"),
         })
+    }
+
+    /// The series of one study and how many instances Orthanc holds in each (`GET
+    /// /studies/{id}/series`, which lists each series with its instance ids). Empty when Orthanc does
+    /// not hold the study.
+    pub async fn series_of(&self, id: &str) -> Result<Vec<SeriesInfo>, OrthancError> {
+        if !is_orthanc_id(id) {
+            return Err(OrthancError("Orthanc named a study with an id that is not one".into()));
+        }
+        let res = self
+            .send(self.http.get(self.url(&format!("/studies/{id}/series"))))
+            .await?;
+        if res.status() == StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        let v = Orthanc::json(res, "a study's series").await?;
+        let mut out: Vec<SeriesInfo> = v
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|s| SeriesInfo {
+                        uid: s["MainDicomTags"]["SeriesInstanceUID"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string(),
+                        modality: s["MainDicomTags"]["Modality"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string(),
+                        instances: s["Instances"].as_array().map_or(0, Vec::len),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort_by(|a, b| a.uid.cmp(&b.uid));
+        Ok(out)
     }
 
     /// Sends one file (`POST /instances`).

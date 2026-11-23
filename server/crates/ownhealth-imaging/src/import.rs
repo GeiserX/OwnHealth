@@ -7,19 +7,27 @@
 //! 2. For each study, under the one StudyInstanceUID lock every Orthanc writer takes
 //!    ([`ownhealth_core::orthanc::lock_study`]): a study another profile holds, a second patient under
 //!    one UID, or a UID Orthanc already holds under another patient goes to review, and nothing of it
-//!    reaches Orthanc. So does a study whose patient is not the profile's (`identity_match`), and on a
-//!    disc with two or more patients, one that is not clearly the profile's. The person can accept
-//!    those two; the import then sends that study as it is.
-//! 3. The rest is sent to Orthanc file by file. Orthanc must then hold exactly one study under the UID,
-//!    the one every file landed in, with the patient the files name; if not, the files this import
-//!    added are taken back and the study goes to review.
+//!    reaches Orthanc. A study the profile records already, whose series Orthanc holds in full, is
+//!    left alone: the same disc again sends nothing. Then a study whose patient is not the profile's
+//!    (`identity_match`), and on a disc with two or more patients, one that is not clearly the
+//!    profile's, goes to review. The person can accept those two; the import then sends that study as
+//!    it is.
+//! 3. The rest is sent to Orthanc file by file; a file Orthanc refuses is counted (`refused_files`).
+//!    Orthanc must then hold exactly one study under the UID, the one every file landed in, with the
+//!    patient the files name; if not, the files this import added are taken back and the study goes
+//!    to review.
 //! 4. Each series' DICOMweb metadata is read once (Orthanc caches it), then the study is recorded:
-//!    `imaging_study` (status current, src kind `dicom`), and an Encapsulated PDF becomes an
-//!    `imaging_report` document (channel `imaging`), linked by `report_document_id`, that the PDF
-//!    importer reads. Only then is the study ready: a failure on the way records nothing, and the job
-//!    retries.
+//!    `imaging_study` (status current, src kind `dicom`), with the series and instances Orthanc holds,
+//!    and an Encapsulated PDF becomes an `imaging_report` document (channel `imaging`), linked by
+//!    `report_document_id`, that the PDF importer reads. A second disc of a recorded study (a series
+//!    the first one did not hold) updates those counts. Only then is the study ready: a failure on
+//!    the way records nothing, and the job retries.
 //!
-//! A study the profile holds already is left alone, so importing the same disc again sends nothing.
+//! The UID lock is a transaction lock, so one transaction, and one pool connection, stays open while a
+//! study's files go to Orthanc. That is the price of one lock that every Orthanc writer takes the same
+//! way (the rebuild from the stored zips too). A session lock would need a release on every way out,
+//! and a connection back in the pool that still held one would block its UID for good. A job holds
+//! one connection, so the pool sees no more of them than the core queue runs jobs at once.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -38,7 +46,7 @@ use serde_json::{Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::orthanc::{Orthanc, OrthancError, Stored};
+use crate::orthanc::{Orthanc, OrthancError, SeriesInfo, Stored};
 use crate::part10::{Header, Part10Error, encapsulated_document, is_part10, read_header};
 
 /// The job kind.
@@ -234,6 +242,14 @@ struct ProfileRow {
     birth_date: Option<NaiveDate>,
 }
 
+/// The files of one study that did not reach Orthanc after the walk: refused by Orthanc, or damaged
+/// on the second read.
+#[derive(Debug, Default)]
+struct Tally {
+    refused_files: usize,
+    damaged: usize,
+}
+
 /// How one study ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Outcome {
@@ -307,12 +323,13 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
     let several = scan.patients().len() > 1;
     let (mut imported, mut already, mut review, mut refused) = (0, 0, 0, 0);
     let (mut instances, mut reports) = (0, 0);
+    let mut tally = Tally::default();
     for (uid, study) in &scan.studies {
         if !accepted.is_empty() && !accepted.contains(uid) {
             continue;
         }
         let ok = accepted.contains(uid);
-        let out = import_study(&ctx, &orthanc, &import, &profile, uid, study, several, ok).await?;
+        let out = import_study(&ctx, &orthanc, &import, &profile, uid, study, several, ok, &mut tally).await?;
         match out {
             Outcome::Imported {
                 instances: n,
@@ -331,13 +348,14 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
         "files": scan.files,
         "not_dicom": scan.not_dicom,
         "directories": scan.directories,
-        "damaged": scan.damaged,
+        "damaged": scan.damaged + tally.damaged,
         "too_large": scan.too_large,
         "studies": scan.studies.len(),
         "imported": imported,
         "already": already,
         "in_review": review,
         "refused": refused,
+        "refused_files": tally.refused_files,
         "instances": instances,
         "reports": reports,
     })))
@@ -380,6 +398,32 @@ fn read_study(
     rx
 }
 
+/// The record of a StudyInstanceUID: profile, status, Orthanc id, date and description.
+type RecordRow = (Uuid, String, Option<String>, Option<NaiveDate>, Option<String>);
+
+/// Whether Orthanc holds every series of the disc's study, each with at least as many instances.
+fn holds_all(held: &[SeriesInfo], study: &StudyScan) -> bool {
+    study
+        .series
+        .iter()
+        .all(|(uid, n)| held.iter().any(|s| s.uid == *uid && s.instances >= *n))
+}
+
+/// Puts the study in review, unsent, and ends its transaction.
+async fn hold(
+    mut tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    import: &ImportRow,
+    profile: &ProfileRow,
+    uid: &str,
+    study: &StudyScan,
+    why: &str,
+) -> Result<Outcome, JobError> {
+    let patient = study.patients.values().next().cloned().unwrap_or_default();
+    to_review_item(&mut tx, import, profile, uid, study, &patient, why).await?;
+    tx.commit().await?;
+    Ok(Outcome::Review)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn import_study(
     ctx: &JobContext,
@@ -390,32 +434,49 @@ async fn import_study(
     study: &StudyScan,
     several: bool,
     accepted: bool,
+    tally: &mut Tally,
 ) -> Result<Outcome, JobError> {
     let mut tx = ctx.pool.begin().await?;
     lock_study(&mut tx, uid).await?;
-    let record: Option<(Uuid, String, Option<String>)> = sqlx::query_as(
-        "select profile_id, status, orthanc_id from imaging_study where study_instance_uid = $1 for update",
+    let record: Option<RecordRow> = sqlx::query_as(
+        "select profile_id, status, orthanc_id, study_date, description from imaging_study \
+         where study_instance_uid = $1 for update",
     )
     .bind(uid)
     .fetch_optional(&mut *tx)
     .await?;
-    let why = match &record {
-        Some((p, _, _)) if *p != import.profile_id => Some(reason::OTHER_PROFILE),
-        Some((_, s, _)) if s == "retracted" => return Ok(Outcome::Retracted),
-        Some((_, _, Some(_))) => return Ok(Outcome::Already),
-        _ if study.patients.len() > 1 => Some(reason::UID_CONFLICT),
-        _ => None,
-    };
+    match &record {
+        Some((p, ..)) if *p != import.profile_id => {
+            return hold(tx, import, profile, uid, study, reason::OTHER_PROFILE).await;
+        }
+        Some((_, s, ..)) if s == "retracted" => return Ok(Outcome::Retracted),
+        _ if study.patients.len() > 1 => return hold(tx, import, profile, uid, study, reason::UID_CONFLICT).await,
+        _ => {}
+    }
+    // the profile's record of this study, when it has one
+    let recorded = record.as_ref().filter(|r| r.2.is_some());
     let (patient_id, patient) = study
         .patients
         .iter()
         .next()
         .map(|(id, p)| (id.clone(), p.clone()))
         .unwrap_or_default();
-    let why = why.or_else(|| {
-        if accepted {
-            return None;
+    // What Orthanc holds under the UID: nothing, or this patient's study (the one the profile records,
+    // or one an earlier run of this import sent before it stopped). Another patient's study under
+    // the UID holds the disc back, whoever records it.
+    for id in orthanc.studies_under(uid).await.map_err(retry)? {
+        let held = orthanc.study(&id).await.map_err(retry)?;
+        if held.patient_id != patient_id.trim() || held.study_instance_uid != uid {
+            return hold(tx, import, profile, uid, study, reason::UID_CONFLICT).await;
         }
+    }
+    // A study the profile records already: a disc that adds nothing Orthanc lacks sends nothing.
+    if let Some((_, _, Some(oid), ..)) = recorded
+        && holds_all(&orthanc.series_of(oid).await.map_err(retry)?, study)
+    {
+        return Ok(Outcome::Already);
+    }
+    if !accepted {
         let name = patient.name.replace('^', " ");
         let identity = identity_match(
             Some(name.trim()),
@@ -423,26 +484,14 @@ async fn import_study(
             &profile.display_name,
             profile.birth_date,
         );
-        match identity {
+        let why = match identity {
             "mismatch" => Some(reason::IDENTITY),
             "matched" => None,
             _ if several => Some(reason::SECOND_PATIENT),
             _ => None,
-        }
-    });
-    if let Some(why) = why {
-        to_review_item(&mut tx, import, profile, uid, study, &patient, why).await?;
-        tx.commit().await?;
-        return Ok(Outcome::Review);
-    }
-    // What Orthanc holds under the UID: nothing, or this patient's study (an earlier run of this
-    // import that stopped before it recorded the study).
-    for id in orthanc.studies_under(uid).await.map_err(retry)? {
-        let held = orthanc.study(&id).await.map_err(retry)?;
-        if held.patient_id != patient_id.trim() || held.study_instance_uid != uid {
-            to_review_item(&mut tx, import, profile, uid, study, &patient, reason::UID_CONFLICT).await?;
-            tx.commit().await?;
-            return Ok(Outcome::Review);
+        };
+        if let Some(why) = why {
+            return hold(tx, import, profile, uid, study, why).await;
         }
     }
     let owner = BlobOwner::Profile(import.profile_id);
@@ -455,7 +504,11 @@ async fn import_study(
         let file = match file {
             Ok(f) => f,
             Err(e) if i == usize::MAX => return Err(JobError::retry(format!("the stored zip does not open: {e}"))),
-            Err(_) => continue, // damaged on the second read too (a CRC the first read did not reach)
+            Err(_) => {
+                // damaged on the second read too (a CRC the first read did not reach)
+                tally.damaged += 1;
+                continue;
+            }
         };
         if study.pdfs.contains(&i)
             && let Ok(Some(pdf)) = encapsulated_document(&file)
@@ -473,7 +526,7 @@ async fn import_study(
                     added.push(id);
                 }
             }
-            Stored::Refused => {}
+            Stored::Refused => tally.refused_files += 1,
         }
     }
     if read != study.entries.len() {
@@ -512,8 +565,34 @@ async fn import_study(
     for series in study.series.keys() {
         orthanc.warm_series(uid, series).await.map_err(retry)?;
     }
-    record_study(&mut tx, import, uid, study, &orthanc_id, report).await?;
+    // the record counts what Orthanc holds, not what the disc listed
+    let series = orthanc.series_of(&orthanc_id).await.map_err(retry)?;
+    match recorded {
+        None => record_study(&mut tx, import, uid, study, &orthanc_id, report, &series).await?,
+        Some((_, _, _, date, description)) => {
+            let date = (*date).or_else(|| da(&study.study_date));
+            let description = description
+                .clone()
+                .or_else(|| Some(study.description.clone()).filter(|d| !d.is_empty()));
+            let fhir = study_fhir(uid, date, description.as_deref(), &series);
+            sqlx::query(
+                "update imaging_study set orthanc_id = $3, fhir = $4, \
+                 report_document_id = coalesce(report_document_id, $5) \
+                 where study_instance_uid = $1 and profile_id = $2",
+            )
+            .bind(uid)
+            .bind(import.profile_id)
+            .bind(&orthanc_id)
+            .bind(fhir)
+            .bind(report)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
     tx.commit().await?;
+    if recorded.is_some() && added.is_empty() {
+        return Ok(Outcome::Already);
+    }
     Ok(Outcome::Imported {
         instances: sent,
         reports,
@@ -598,6 +677,7 @@ async fn record_study(
     study: &StudyScan,
     orthanc_id: &str,
     report: Option<Uuid>,
+    series: &[SeriesInfo],
 ) -> Result<(), JobError> {
     let modality = study.modality();
     let description = Some(study.description.clone()).filter(|d| !d.is_empty());
@@ -617,22 +697,7 @@ async fn record_study(
         },
     )
     .await?;
-    let coding = |m: &str| json!({"system": "http://dicom.nema.org/resources/ontology/DCM", "code": m});
-    let mut fhir = json!({
-        "resourceType": "ImagingStudy",
-        "status": "available",
-        "identifier": [{"system": "urn:dicom:uid", "value": format!("urn:oid:{uid}")}],
-        "modality": study.modalities.keys().filter(|m| !m.is_empty()).map(|m| coding(m)).collect::<Vec<_>>(),
-        "numberOfSeries": study.series.len(),
-        "numberOfInstances": study.entries.len(),
-        "series": study.series.iter().map(|(s, n)| json!({"uid": s, "numberOfInstances": n})).collect::<Vec<_>>(),
-    });
-    if let Some(d) = date {
-        fhir["started"] = json!(d.to_string());
-    }
-    if let Some(d) = &description {
-        fhir["description"] = json!(d);
-    }
+    let fhir = study_fhir(uid, date, description.as_deref(), series);
     sqlx::query(
         "insert into imaging_study (profile_id, study_instance_uid, orthanc_id, modality, study_date, description, \
          report_document_id, status, src_id, import_id, fhir) \
@@ -658,6 +723,32 @@ async fn record_study(
     .execute(&mut *conn)
     .await?;
     Ok(())
+}
+
+/// The study as a FHIR ImagingStudy, with the series and instances Orthanc holds.
+fn study_fhir(uid: &str, date: Option<NaiveDate>, description: Option<&str>, series: &[SeriesInfo]) -> Value {
+    let coding = |m: &str| json!({"system": "http://dicom.nema.org/resources/ontology/DCM", "code": m});
+    let modalities: BTreeSet<&str> = series
+        .iter()
+        .map(|s| s.modality.as_str())
+        .filter(|m| !m.is_empty())
+        .collect();
+    let mut fhir = json!({
+        "resourceType": "ImagingStudy",
+        "status": "available",
+        "identifier": [{"system": "urn:dicom:uid", "value": format!("urn:oid:{uid}")}],
+        "modality": modalities.into_iter().map(coding).collect::<Vec<_>>(),
+        "numberOfSeries": series.len(),
+        "numberOfInstances": series.iter().map(|s| s.instances).sum::<usize>(),
+        "series": series.iter().map(|s| json!({"uid": s.uid, "numberOfInstances": s.instances})).collect::<Vec<_>>(),
+    });
+    if let Some(d) = date {
+        fhir["started"] = json!(d.to_string());
+    }
+    if let Some(d) = description {
+        fhir["description"] = json!(d);
+    }
+    fhir
 }
 
 /// One open review item per study of an upload: a second run of the same upload adds none.

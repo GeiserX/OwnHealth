@@ -293,6 +293,8 @@ pub struct Held {
     pub studies: BTreeMap<String, (String, String)>,
     /// Orthanc instance id -> (its study id, SeriesInstanceUID).
     pub instances: BTreeMap<String, (String, String)>,
+    /// SeriesInstanceUID -> Modality.
+    pub modalities: BTreeMap<String, String>,
     /// Every request but `/tools/lookup` and `GET /studies/{id}`: (method, path).
     pub log: Vec<(String, String)>,
 }
@@ -313,6 +315,8 @@ pub struct FakeOrthanc {
     /// Files every instance of this StudyInstanceUID under another one, as an Orthanc that read the
     /// files otherwise than the importer would.
     pub misread: Arc<Mutex<Option<(String, String)>>>,
+    /// The same for a PatientID: files every instance of this patient under another one.
+    pub misread_patient: Arc<Mutex<Option<(String, String)>>>,
 }
 
 fn json_answer(status: StatusCode, v: Value) -> Response {
@@ -335,6 +339,7 @@ impl FakeOrthanc {
             waiting: Arc::default(),
             metadata_fails: Arc::default(),
             misread: Arc::default(),
+            misread_patient: Arc::default(),
         };
         let me = fake.clone();
         let app = Router::new().fallback(move |req: Request| {
@@ -435,6 +440,29 @@ impl FakeOrthanc {
                 tokio::time::sleep(delay).await;
                 self.store(&body)
             }
+            (Method::GET, p) if p.starts_with("/studies/") && p.ends_with("/series") => {
+                // the study's series, expanded, as Orthanc lists them
+                let id = p.trim_start_matches("/studies/").trim_end_matches("/series");
+                let held = self.held();
+                if !held.studies.contains_key(id) {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                let mut series: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                for (instance, (study, s)) in &held.instances {
+                    if study == id {
+                        series.entry(s.clone()).or_default().push(instance.clone());
+                    }
+                }
+                let out: Vec<Value> = series
+                    .into_iter()
+                    .map(|(s, instances)| {
+                        let modality = held.modalities.get(&s).cloned().unwrap_or_default();
+                        json!({"ID": orthanc_id(&[id, &s]), "Type": "Series", "Instances": instances,
+                               "MainDicomTags": {"SeriesInstanceUID": s, "Modality": modality}})
+                    })
+                    .collect();
+                json_answer(StatusCode::OK, Value::Array(out))
+            }
             (Method::GET, p) if p.starts_with("/studies/") => {
                 let id = p.trim_start_matches("/studies/");
                 match self.held().studies.get(id) {
@@ -486,7 +514,8 @@ impl FakeOrthanc {
     }
 
     fn store(&self, body: &[u8]) -> Response {
-        let Ok(obj) = OpenFileOptions::new().read_until(tags::PIXEL_DATA).from_reader(body) else {
+        // Orthanc parses the whole file: one cut in its pixel data is refused
+        let Ok(obj) = OpenFileOptions::new().from_reader(body) else {
             return json_answer(StatusCode::BAD_REQUEST, json!({"Message": "Bad file format"}));
         };
         let text = |tag| {
@@ -495,7 +524,7 @@ impl FakeOrthanc {
                 .map(|s| s.trim_end_matches(['\0', ' ']).to_string())
                 .unwrap_or_default()
         };
-        let (patient, mut uid, series, sop) = (
+        let (mut patient, mut uid, series, sop) = (
             text(tags::PATIENT_ID),
             text(tags::STUDY_INSTANCE_UID),
             text(tags::SERIES_INSTANCE_UID),
@@ -507,6 +536,13 @@ impl FakeOrthanc {
         {
             uid = to.clone();
         }
+        if let Ok(m) = self.misread_patient.lock()
+            && let Some((from, to)) = m.as_ref()
+            && *from == patient
+        {
+            patient = to.clone();
+        }
+        let modality = text(tags::MODALITY);
         let study = orthanc_id(&[&patient, &uid]);
         let id = orthanc_id(&[&patient, &uid, &series, &sop]);
         let Ok(mut h) = self.held.lock() else {
@@ -514,6 +550,7 @@ impl FakeOrthanc {
         };
         let new = !h.instances.contains_key(&id);
         h.studies.insert(study.clone(), (uid, patient));
+        h.modalities.insert(series.clone(), modality);
         h.instances.insert(id.clone(), (study.clone(), series));
         json_answer(
             StatusCode::OK,
