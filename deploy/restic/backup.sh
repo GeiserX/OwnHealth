@@ -1,6 +1,8 @@
 #!/bin/sh
 # Back up OwnHealth into restic: a consistent backup directory (database dump, blobs, manifest with
-# the state_hash of every profile), one restic snapshot of it, then retention.
+# the state_hash of every profile), one restic snapshot of it, then retention. The profile keys stay out
+# of it: `ownhealth backup` writes them to keyring.json in OWNHEALTH_KEYRING_DIR, outside the staging
+# directory, so restic never sees them (deploy/README.md, "The keyring").
 #
 #   ./deploy/restic/backup.sh
 #   cron: 15 3 * * * cd /opt/ownhealth && ./deploy/restic/backup.sh >> backup.log 2>&1

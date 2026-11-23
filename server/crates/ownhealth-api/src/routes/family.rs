@@ -729,6 +729,16 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     )
     .await?;
     tx.commit().await?;
+    // The key went with the rows; the keyring file loses it now, before any file goes, so a backup
+    // taken before the delete no longer opens the profile's files once older copies of the keyring
+    // are gone. When it cannot be written, the retry job stays whole and writes it.
+    let keyring_left = match rewrite_keyring(rt).await {
+        Ok(()) => false,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not rewrite the keyring after a profile delete: a job retries it");
+            true
+        }
+    };
     let (mut removed, mut stuck) = (0usize, Vec::new());
     let owner = ownhealth_core::blobs::BlobOwner::Profile(profile_id);
     // A backup copying the files now may still name every file of the profile: then they all stay,
@@ -756,9 +766,9 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     }
     // The profile's key went with its rows, so its sealed files no longer open; the rest of them (a
     // file another profile also holds, which keeps its own copy) go with the profile's folder, and the
-    // folders of its held mail go too (their keys went in the delete). When a folder stays, the retry
-    // job stays whole and removes it.
-    let mut folder_left = guard.is_none();
+    // folders of its held mail go too (their keys went in the delete). When a folder stays, or the
+    // keyring above was not written, the retry job stays whole and finishes it.
+    let mut folder_left = guard.is_none() || keyring_left;
     if guard.is_some() {
         if let Err(e) = rt.blobs.forget_profile(profile_id) {
             tracing::warn!(error = %e, "removing the profile's sealed files failed; they no longer open, a job retries it");
@@ -818,7 +828,19 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     if !revoked.is_empty() {
         out["connectors"] = Value::Array(revoked);
     }
+    // keyring.json still holds the key until the retry writes it, so older backups still open the
+    // profile's files: the page says so instead of saying the files are gone
+    if keyring_left {
+        out["keyring_pending"] = Value::Bool(true);
+    }
     Ok(out)
+}
+
+/// The keyring file without the keys the profile deletes shredded (`keyfile::rewrite`).
+async fn rewrite_keyring(rt: &Runtime) -> Result<(), ownhealth_core::Error> {
+    let mut conn = rt.pool.acquire().await?;
+    ownhealth_core::keyfile::rewrite(&mut conn, &rt.settings).await?;
+    Ok(())
 }
 
 /// The removal side of the blob copy lock, in a transaction of its own: None while a backup copies
@@ -856,8 +878,9 @@ async fn settle(rt: &Runtime, job: Option<i64>, key: &str, left: Vec<Value>) {
     }
 }
 
-/// Hard delete of the profile's rows and files. `confirm` must repeat the slug. Older backups still
-/// hold the data until they expire.
+/// Hard delete of the profile's rows and files. `confirm` must repeat the slug. Older backups keep its
+/// rows until they expire; their copies of its files no longer open once every older copy of the
+/// keyring file is gone.
 async fn delete_profile(
     State(rt): State<Runtime>,
     SessionCaller(p): SessionCaller,

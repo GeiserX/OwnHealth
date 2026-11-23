@@ -295,6 +295,8 @@
 		if (i.kind === 'agent_proposal') return tf('i2_ag_t', { kind: kindWord('i2_pk_', String(p.kind ?? '')), token: String(p.token_label ?? '—') });
 		// A failed job's payload may carry no file name; its document has one. Never show the job kind as a name.
 		if (i.kind === 'job_failed') {
+			// a profile delete's retry, not an import
+			if (p.kind === 'blobs.unlink') return t('i2_jf_unlink_t');
 			const file = (p.filename ? String(p.filename) : '') || docName(i.document_id);
 			return file ? tf('i2_jf_t', { file }) : t('i2_kind_job_failed');
 		}
