@@ -4,10 +4,10 @@
 //!
 //! The shared readers apply it: `ownhealth_rules::engine::wearables` (markers and calculators),
 //! `ownhealth_ingest_structured::wearables::points` read as [`Reader::Shared`] (MCP rollups) and the
-//! MCP freshness date. Only the Wearables page and its REST routes read every provider. A provider the
-//! file does not name is withheld, so a new importer must add its line before an agent sees its data.
-//! The vendor-API connectors call [`ingest_allowed`] before they store a sample; the file importers
-//! write only providers the file names.
+//! MCP freshness date. Only the Wearables page and its REST routes read every provider.
+//! The device sample store checks [`require_ingest`] before writing a batch. Wearable source
+//! registration checks it too, including for Apple Health's bulk importer. A provider the file
+//! omits is withheld from shared readers and refused at ingest.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -19,7 +19,7 @@ const SHIPPED: &str = include_str!(concat!(
     "/../../../data/connectors/providers.yaml"
 ));
 
-/// What happens to a provider's samples when a connector meets them.
+/// Whether a provider's samples may be stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Ingest {
@@ -83,7 +83,7 @@ pub fn parse(text: &str) -> Result<Policy, String> {
 }
 
 /// The shipped policy. The file is compiled in and its test parses it, so it cannot fail at run time;
-/// if it ever did, every provider would be withheld and dropped.
+/// if it ever did, every provider would be withheld and refused at ingest.
 pub fn policy() -> &'static Policy {
     static P: OnceLock<Policy> = OnceLock::new();
     P.get_or_init(|| {
@@ -108,6 +108,16 @@ pub fn ingest_allowed(provider: &str) -> bool {
         .providers
         .get(provider)
         .is_some_and(|p| p.ingest == Ingest::Allow)
+}
+
+/// Reject a provider that the policy omits or marks as `ingest: drop`.
+pub fn require_ingest(provider: &str) -> crate::Result<()> {
+    if !ingest_allowed(provider) {
+        return Err(crate::Error::WearableIngestDenied {
+            provider: provider.into(),
+        });
+    }
+    Ok(())
 }
 
 /// Every provider the policy serves, for a SQL filter (`provider = any($n)`).

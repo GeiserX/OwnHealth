@@ -2,16 +2,15 @@
 # (server/crates/ownhealth-core/src/providers.rs reads this file; it is compiled in).
 #
 # ingest   allow: samples from this provider are stored.
-#          drop: a connector that meets the provider drops and counts its samples, never stores them.
+#          drop: the sample store refuses writes from this provider.
 # mcp      served: MCP, the rule-pack markers and the calculators read its data.
 #          withheld: they never see it. An MCP answer counts the days left out in
 #          `withheld.vendor_terms`. Only the Wearables page and its REST routes read every provider.
 # path     how the data arrives (documentation only).
 #
-# A provider this file does not name is withheld from MCP. The vendor-API connectors (the Open
-# Wearables poller, the native Dexcom connector) also drop its samples at ingest, as for `drop`
-# (providers::ingest_allowed). The file importers write only providers named here: a new importer adds
-# its line, and ownhealth-devices tests/providers.rs checks that every importer has one.
+# The shared readers withhold unnamed providers. The sample store and source registration also
+# refuse them. New importers add their provider here. The ownhealth-devices tests/providers.rs test
+# checks that every importer has a line.
 #
 # A provider moves from withheld to served only when its connector page quotes the vendor's primary
 # terms and they show no ban on AI processing (docs/design/connectors.md section 4). File exports of

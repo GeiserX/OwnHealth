@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use chrono::{DateTime, NaiveDate, Utc};
 use ownhealth_core::Result;
 pub use ownhealth_core::providers::Reader;
+use ownhealth_core::providers::require_ingest;
 use ownhealth_core::pyjson::{f32_json, py_isoformat_utc, pydantic_datetime_utc};
 use serde_json::{Value, json};
 use sqlx::{AssertSqlSafe, PgConnection};
@@ -171,7 +172,7 @@ pub fn metric_info(key: &str) -> Option<Value> {
 
 // ------------------------------------------------------------------- sources ----
 
-/// Get or create the wearable_source row for one device of one profile.
+/// Get or create the wearable source for one device of a provider allowed at ingest.
 pub async fn source_id(
     conn: &mut PgConnection,
     profile_id: Uuid,
@@ -179,6 +180,7 @@ pub async fn source_id(
     device: Option<&str>,
     external_id: Option<&str>,
 ) -> Result<i16> {
+    require_ingest(provider)?;
     loop {
         let sid: Option<i16> = sqlx::query_scalar(
             "select id from wearable_source where profile_id = $1 and provider = $2 \
