@@ -105,6 +105,17 @@ fn unreadable(path: &Path, why: &str) -> KeyError {
     ))
 }
 
+/// A keyring refused for where it sits or who may write it: its mode or path is the fix, never an
+/// older copy of the file.
+fn refused(path: &Path, why: &str) -> KeyError {
+    KeyError(format!(
+        "cannot read the keyring {}: {why}. Make the file and its folder plain ones that only its owner \
+         may write (no symlink, no group or world write), or set OWNHEALTH_KEYRING_DIR to such a folder, \
+         see deploy/README.md",
+        path.display()
+    ))
+}
+
 /// `path` lies in `parent`, both made absolute first (neither needs to exist).
 pub fn inside(path: &Path, parent: &Path) -> bool {
     match (std::path::absolute(path), std::path::absolute(parent)) {
@@ -120,7 +131,7 @@ pub fn read(path: &Path) -> Result<Option<KeyringFile>, KeyError> {
     match owner_writes_only(dir, true, "keyring").and_then(|_| owner_writes_only(path, false, "keyring")) {
         Ok(true) => {}
         Ok(false) => return Ok(None),
-        Err(why) => return Err(unreadable(path, &why)),
+        Err(why) => return Err(refused(path, &why)),
     }
     let bytes = match fs::read(path) {
         Ok(b) => b,
@@ -229,6 +240,36 @@ pub fn write(dir: &Path, k: &KeyringFile) -> Result<(), KeyError> {
     })
 }
 
+/// The temporary copies a crash left between writing one and renaming it over the keyring: each still
+/// holds every key it was written with, a shredded one too. Only a writer holding the keyring lock
+/// calls this, so no other write is under way.
+fn remove_leftovers(dir: &Path) -> Result<(), KeyError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(KeyError(format!(
+                "cannot list the keyring folder {}: {e}",
+                dir.display()
+            )));
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| KeyError(format!("cannot list the keyring folder {}: {e}", dir.display())))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&format!(".{FILE}.")) && name.ends_with(".tmp") {
+            fs::remove_file(entry.path()).map_err(|e| {
+                KeyError(format!(
+                    "cannot remove the leftover copy {} of the keyring: {e}",
+                    entry.path().display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Refuses a keyring folder inside the blob folder: every backup copies the blob folder.
 pub fn check_folder(settings: &Settings) -> Result<(), KeyError> {
     let dir = settings.keyring_path();
@@ -249,8 +290,8 @@ type KeyRow = (Uuid, Option<Vec<u8>>, Option<Vec<u8>>);
 /// key it shredded goes out (its profile into `shredded`), and a profile the table does not know keeps
 /// what the file says. Writers take one database lock, so the last rewrite reads the newest table and
 /// a backup that read an older one never puts a shredded key back. Refuses a keyring folder inside
-/// the blob folder (every backup would copy it) and a keyring made under another KEK. Returns what it
-/// wrote.
+/// the blob folder (every backup would copy it) and a keyring made under another KEK. A temporary
+/// copy a crash left in the folder goes first. Returns what it wrote.
 pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<KeyringFile, KeyError> {
     check_folder(settings)?;
     let dir = settings.keyring_path();
@@ -264,6 +305,7 @@ pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<Key
             .fetch_all(&mut *tx)
             .await?;
     let mut ring = read(&file)?.unwrap_or_default();
+    remove_leftovers(&dir)?;
     for (id, wrapped, fingerprint) in rows {
         match (wrapped, fingerprint) {
             (Some(w), Some(f)) => {

@@ -151,9 +151,83 @@ async fn a_damaged_or_foreign_keyring_is_refused_and_left_as_it_is() -> R {
             s.keyring_dir = Some(folder);
             let err = refusal(&db, &s).await?;
             assert!(err.contains(why), "{why}: {err}");
+            assert_owner_advice(&err);
             assert!(!real.join(keyfile::FILE).exists(), "{why}: a keyring was written");
         }
+
+        // the file itself: a symlink, and a file others may write, in a folder only the owner writes
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o700))?;
+        let mut s = settings.clone();
+        s.keyring_dir = Some(real.clone());
+        let mine = real.join(keyfile::FILE);
+        // a keyring a rewrite would take and replace, were it not for where it sits or its mode
+        let elsewhere = dir.path().join("elsewhere");
+        keyfile::write(&elsewhere, &KeyringFile::default())?;
+        let target = elsewhere.join(keyfile::FILE);
+        std::os::unix::fs::symlink(&target, &mine)?;
+        let before = fs::read(&target)?;
+        let err = refusal(&db, &s).await?;
+        assert!(err.contains("the keyring file is a symlink"), "{err}");
+        assert_owner_advice(&err);
+        assert!(
+            fs::symlink_metadata(&mine)?.file_type().is_symlink(),
+            "the symlink was replaced"
+        );
+        assert_eq!(fs::read(&target)?, before, "the file behind the symlink changed");
+        fs::remove_file(&mine)?;
+        fs::copy(&target, &mine)?;
+        for (mode, why) in [
+            (0o660, "the keyring file is group-writable"),
+            (0o666, "the keyring file is world-writable"),
+        ] {
+            fs::set_permissions(&mine, fs::Permissions::from_mode(mode))?;
+            let err = refusal(&db, &s).await?;
+            assert!(err.contains(why), "{why}: {err}");
+            assert_owner_advice(&err);
+            assert_eq!(fs::read(&mine)?, before, "{why}: the keyring was replaced");
+            assert_eq!(fs::metadata(&mine)?.permissions().mode() & 0o777, mode, "{why}");
+        }
     }
+    Ok(())
+}
+
+/// A keyring refused for its owner or mode is fixed by its mode or path, not by an older copy: the
+/// advice says so, and never asks for a copy to be put back.
+fn assert_owner_advice(err: &str) {
+    assert!(err.contains("only its owner may write"), "{err}");
+    assert!(err.contains("OWNHEALTH_KEYRING_DIR"), "{err}");
+    assert!(!err.contains("Put back"), "{err}");
+}
+
+/// A crash between writing the temporary copy and renaming it leaves `.keyring.json.<hex>.tmp`
+/// beside the keyring, still holding every key it was written with. The next rewrite removes it, so
+/// no older copy with a shredded key stays in the folder.
+#[tokio::test]
+async fn a_rewrite_removes_a_temporary_copy_a_crash_left() -> R {
+    let (db, _dir, settings, kek) = setup().await?;
+    let sam = Uuid::new_v4();
+    assert!(Keyring::new(kek, db.url.clone()).dek(sam, true)?.is_some());
+    let ring = rewrite(&db, &settings).await?;
+    let sams = b64(&ring.profiles[&sam]);
+    // the copy a rewrite was writing when the box lost power
+    let left = settings
+        .keyring_path()
+        .join(format!(".{}.0123456789ab.tmp", keyfile::FILE));
+    fs::copy(keyfile::path(&settings), &left)?;
+    assert!(fs::read_to_string(&left)?.contains(&sams));
+    let mut tx = db.pool.begin().await?;
+    shred(&mut tx, sam).await?;
+    tx.commit().await?;
+    let ring = rewrite(&db, &settings).await?;
+    assert!(ring.shredded.contains(&sam));
+    assert!(
+        !left.exists(),
+        "a temporary copy with Sam's key is still in the keyring folder"
+    );
+    let names: Vec<String> = fs::read_dir(settings.keyring_path())?
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect();
+    assert_eq!(names, vec![keyfile::FILE.to_string()]);
     Ok(())
 }
 
