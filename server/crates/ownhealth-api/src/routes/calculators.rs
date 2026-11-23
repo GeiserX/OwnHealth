@@ -38,7 +38,13 @@ pub async fn calculators(
     let perm = Caller(principal.clone())
         .require(&mut tx, p, Some("read:labs"), None)
         .await?;
-    let doc = calc::document_for(&mut tx, perm.profile.id, as_of.unwrap_or_else(today_utc), &perm.scopes).await?;
+    let doc = calc::document_for(
+        &mut tx,
+        perm.profile.id,
+        as_of.unwrap_or_else(today_utc),
+        perm.read_scopes(),
+    )
+    .await?;
     let mut e = event(principal, perm.profile.id, "GET /api/profiles/{p}/calculators");
     e.resource_type = Some("calculators".into());
     e.resource_ids = Some(vec![doc["calculators_hash"].as_str().unwrap_or_default().to_string()]);

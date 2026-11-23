@@ -39,11 +39,15 @@ pub const LIFECYCLE_TAG: &str = "urn:ownhealth:lifecycle";
 /// secret references, routing rules), calendar feed tokens (v0.3), inbox bookkeeping (what an inbox
 /// already handed over, so it never imports it twice: message and Paperless ids, folder keys, file
 /// hashes), SMART Health Links (v1.0: id hashes, passcode hashes, ciphertext), DICOM upload bookkeeping
-/// (v1.0: which stored zip each imaging import read; the studies themselves are `imaging_study`), and
-/// tables that only repeat the profile.
-const SKIP_RAW: [&str; 10] = [
+/// (v1.0: which stored zip each imaging import read; the studies themselves are `imaging_study`),
+/// break-glass contacts, requests and the owner's notices (v1.0: access control), and tables that only
+/// repeat the profile.
+const SKIP_RAW: [&str; 13] = [
     "imaging_import",
     "profile",
+    "break_glass_contact",
+    "break_glass_request",
+    "notification_outbox",
     "profile_grant",
     "profile_key",
     "api_token",

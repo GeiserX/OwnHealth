@@ -74,7 +74,8 @@ fn list_of(extra: &Map<String, Value>, key: &str) -> Vec<Value> {
 }
 
 pub async fn check_drug(call: &mut Call<'_>) -> ToolResult<Answer> {
-    let scopes = call.scopes();
+    let perm = call.perm()?.clone();
+    let scopes = perm.read_scopes_for_sensitive("read:records");
     let pid = call.profile_id()?;
     let drug = call.arg_str("drug").unwrap_or_default().to_string();
     let raw = call

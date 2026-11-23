@@ -122,6 +122,30 @@ pub fn spool_sweeper(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandl
     })
 }
 
+/// Open the break-glass requests whose delay has passed and that an owner calendar feed has carried,
+/// and end the ones whose time ran out (`break_glass::settle`), every minute until `stop`: a person's
+/// next request does the same, so this tells the owner even when nobody comes back.
+pub fn break_glass_sweeper(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandle<()> {
+    let rt = rt.clone();
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = every.tick() => {
+                    let settled = async {
+                        let mut conn = rt.pool.acquire().await?;
+                        ownhealth_core::break_glass::settle(&mut conn, None).await
+                    };
+                    if let Err(e) = settled.await {
+                        tracing::warn!(error = %e, "could not settle break-glass requests");
+                    }
+                }
+                _ = stop.changed() => return,
+            }
+        }
+    })
+}
+
 /// Refuse to go on when OWNHEALTH_SECRETS_KEY does not open the profile keys the database holds,
 /// before anything listens, runs a job or stores a key (`keys::check_start`). A database with no
 /// profile key yet passes.
@@ -204,6 +228,7 @@ pub async fn start(rt: &Runtime) -> Result<Background, Error> {
     } else {
         Vec::new()
     };
+    workers.push(break_glass_sweeper(rt, rx.clone()));
     workers.push(spool_sweeper(rt, rx));
     Ok(Background { stop, workers })
 }

@@ -10,7 +10,9 @@
 //! which is a record, so it joins only for a caller who can see it on the Due list (read:records too).
 //! `hide_name=1` prints a blank for
 //! the name and leaves the birth date out. One audit row per call names the state hash; the PDF's row
-//! (`via = export`) also names every src id printed.
+//! (`via = export`) also names every src id printed. The PDF is an export: it reads with the caller's
+//! own grant alone (403 `break_glass` when read:labs comes only from an open break-glass request).
+//! The plan on screen reads through the request.
 
 use std::collections::HashMap;
 
@@ -34,17 +36,24 @@ const ROUTE: &str = "GET /api/profiles/{p}/next-draw";
 const ROUTE_PDF: &str = "GET /api/profiles/{p}/next-draw.pdf";
 
 /// The plan in one language, with the permission it was read under (not yet audited or committed).
+/// An `export` reads with the caller's own grant alone: none may carry what only break-glass opened.
 async fn rendered(
     tx: &mut sqlx::PgConnection,
     principal: &Principal,
     p: &str,
     as_of: NaiveDate,
     lang: &str,
+    export: bool,
 ) -> R<(Value, Permission)> {
     let perm = Caller(principal.clone())
         .require(&mut *tx, p, Some("read:labs"), None)
         .await?;
-    let plan = next_draw::build_for(&mut *tx, perm.profile.id, as_of, &perm.scopes).await?;
+    let perm = if export {
+        crate::routes::break_glass::own(perm, "read:labs", "Emergency access cannot export this profile.")?
+    } else {
+        perm
+    };
+    let plan = next_draw::build_for(&mut *tx, perm.profile.id, as_of, perm.read_scopes()).await?;
     let pack = ownhealth_rules::load_pack().map_err(ownhealth_core::Error::from)?;
     Ok((next_draw::render(&plan, &pack, lang)?, perm))
 }
@@ -58,7 +67,7 @@ pub async fn plan(
 ) -> R<Value> {
     let mut tx = rt.pool.begin().await?;
     let lang = lang.unwrap_or(&principal.lang);
-    let (out, perm) = rendered(&mut tx, principal, p, as_of.unwrap_or_else(today_utc), lang).await?;
+    let (out, perm) = rendered(&mut tx, principal, p, as_of.unwrap_or_else(today_utc), lang, false).await?;
     let mut e = event(principal, perm.profile.id, ROUTE);
     e.resource_type = Some("next_draw".into());
     e.resource_ids = Some(vec![out["state_hash"].as_str().unwrap_or_default().to_string()]);
@@ -108,7 +117,7 @@ async fn get_pdf(
     let as_of = q.as_of.unwrap_or_else(today_utc);
     let lang = ownhealth_core::langs::lang_or_default(q.lang.unwrap_or(&c.lang));
     let mut tx = rt.pool.begin().await?;
-    let (mut model, perm) = rendered(&mut tx, &c, &p, as_of, lang).await?;
+    let (mut model, perm) = rendered(&mut tx, &c, &p, as_of, lang, true).await?;
     model["person"] = next_draw::person(&perm.profile, as_of, lang, q.hide_name)?;
     let sheet = ownhealth_ops::next_draw_pdf::render(&model);
     let mut e = event(&c, perm.profile.id, ROUTE_PDF);

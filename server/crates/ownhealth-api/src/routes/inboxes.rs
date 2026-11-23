@@ -36,7 +36,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use ownhealth_auth::household::{can_manage, require_manage};
 use ownhealth_auth::sessions;
-use ownhealth_core::access::{Principal, accessible_profiles};
+use ownhealth_core::access::{Permission, Principal, accessible_profiles};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::secrets::{self, SecretBox, SecretString};
 use ownhealth_core::sources::{self, ManagedHealth, NewSource, Source, SourceHealth, SourcePatch, TOKEN_PREFIX};
@@ -633,7 +633,7 @@ async fn visible(conn: &mut PgConnection, caller: &Caller) -> Result<Vec<(Source
     };
     let perms = accessible_profiles(conn, &caller.0).await?;
     let manager = perms.iter().any(|p| matches!(p.role.as_str(), "owner" | "guardian"));
-    let profiles: HashSet<Uuid> = perms.iter().map(|p| p.profile.id).collect();
+    let profiles: HashMap<Uuid, &Permission> = perms.iter().map(|p| (p.profile.id, p)).collect();
     let managed: HashSet<Uuid> = perms
         .iter()
         .filter(|p| p.profile.household_id == household_id && can_manage(p))
@@ -642,7 +642,14 @@ async fn visible(conn: &mut PgConnection, caller: &Caller) -> Result<Vec<(Source
     Ok(sources::source_health(conn, household_id)
         .await?
         .into_iter()
-        .filter(|h| h.profile_id.map_or(manager, |p| profiles.contains(&p)))
+        .filter(|h| {
+            h.profile_id.map_or(manager, |p| {
+                profiles.get(&p).is_some_and(|perm| {
+                    perm.record_read(&[]);
+                    true
+                })
+            })
+        })
         .map(|h| {
             let m = h.profile_id.map_or(!managed.is_empty(), |p| managed.contains(&p));
             (h, Some(m))

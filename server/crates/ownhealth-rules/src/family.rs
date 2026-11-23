@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 
 use chrono::NaiveDate;
 use ownhealth_core::Result;
-use ownhealth_core::access::{Principal, Scopes, effective_permission};
+use ownhealth_core::access::{Permission, Principal, effective_permission};
 use ownhealth_core::canonical::canonical_json;
 use ownhealth_core::family::{Catalog, FamilyCondition};
 use serde_json::{Map, Value, json};
@@ -462,15 +462,22 @@ type Row = (
     Option<Uuid>,
 );
 
+pub(crate) enum LinkedAccess {
+    Effective,
+    Ordinary,
+}
+
 /// The relatives of one profile the caller may read, as the store knew them at the end of `as_of`:
-/// sensitive rows only with read:sensitive, and no relative linked to a profile the caller cannot
-/// read (read:records there).
-pub async fn relatives(
+/// sensitive rows only when `sensitive` (`Permission::may_read_sensitive("read:records")`), and no
+/// relative linked to a profile the caller cannot read (read:records there). Exports restrict
+/// linked profiles to the caller's ordinary grant.
+pub(crate) async fn relatives(
     conn: &mut PgConnection,
     principal: &Principal,
     profile_id: Uuid,
-    scopes: &Scopes,
+    sensitive: bool,
     as_of: NaiveDate,
+    linked_access: LinkedAccess,
 ) -> Result<Vec<Relative>> {
     let sql = format!(
         "select m.id, m.relationship, m.sex_at_birth, m.conditions, m.src_id, l.linked_profile_id \
@@ -482,14 +489,23 @@ pub async fn relatives(
     let rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(profile_id)
         .bind(day_end(as_of))
-        .bind(scopes.contains("read:sensitive"))
+        .bind(sensitive)
         .fetch_all(&mut *conn)
         .await?;
     let mut out = Vec::with_capacity(rows.len());
     for (id, relationship, sex, conditions, src, linked) in rows {
         if let Some(linked) = linked {
             let readable = match effective_permission(&mut *conn, principal, linked).await {
-                Ok(perm) => perm.has("read:records"),
+                Ok(perm) => match linked_access {
+                    LinkedAccess::Ordinary => perm.own_only().has("read:records"),
+                    LinkedAccess::Effective => {
+                        let readable = perm.has("read:records");
+                        if readable {
+                            perm.record_read(&["read:records"]);
+                        }
+                        readable
+                    }
+                },
                 Err(ownhealth_core::Error::AccessDenied { .. }) => false,
                 Err(e) => return Err(e),
             };
@@ -513,17 +529,19 @@ pub async fn relatives(
 pub async fn build_document(
     conn: &mut PgConnection,
     principal: &Principal,
-    profile: &ownhealth_core::access::Profile,
-    scopes: &Scopes,
+    perm: &ownhealth_core::access::Permission,
     as_of: NaiveDate,
 ) -> Result<Value> {
-    let rel = if scopes.contains("read:records") {
-        relatives(conn, principal, profile.id, scopes, as_of).await?
+    let profile = &perm.profile;
+    let rel = if perm.has("read:records") {
+        perm.record_read(&["read:records"]);
+        let sensitive = perm.may_read_sensitive("read:records");
+        relatives(conn, principal, profile.id, sensitive, as_of, LinkedAccess::Effective).await?
     } else {
         Vec::new()
     };
     let doc = document(&profile.slug, as_of, &rel)?;
-    let hints = hints(conn, principal, profile, scopes, as_of).await?;
+    let hints = hints(conn, principal, perm, as_of).await?;
     with_hints(doc, hints)
 }
 
@@ -1040,34 +1058,26 @@ pub async fn hint_sources(
     Ok(out)
 }
 
-/// The hints of one profile for one caller: the caller's scopes here, the genome gate of this
-/// profile for the caller's surface (a token is an agent), and the minor rule.
+/// The hints of one profile for one caller: the caller's permission there (the one the caller
+/// checked, so every check reads one snapshot of it), the genome gate of this profile for the
+/// caller's surface (a token is an agent), and the minor rule.
 pub async fn hints(
     conn: &mut PgConnection,
     principal: &Principal,
-    target: &ownhealth_core::access::Profile,
-    scopes: &Scopes,
+    perm: &Permission,
     as_of: NaiveDate,
 ) -> Result<Vec<Value>> {
-    if !scopes.contains("read:records") {
+    if !perm.read_scopes().contains("read:records") {
         return Ok(Vec::new());
     }
-    let perm = match effective_permission(&mut *conn, principal, target.id).await {
-        Ok(perm) => perm,
-        Err(ownhealth_core::Error::AccessDenied { .. }) => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    let perm = ownhealth_core::access::Permission {
-        scopes: scopes.clone(),
-        ..perm
-    };
+    let target = &perm.profile;
     let aom = ownhealth_core::access::majority(&mut *conn, target.household_id).await?;
     let surface = if principal.kind == ownhealth_core::access::PrincipalKind::Token {
         "agents"
     } else {
         "ui"
     };
-    let gate = ownhealth_genome::gate_for(&perm, surface, as_of, aom)?;
+    let gate = ownhealth_genome::gate_for(perm, surface, as_of, aom)?;
     let viewer = HintViewer {
         labs: perm.has("read:labs"),
         genome: perm.has("read:genome"),
@@ -1076,7 +1086,7 @@ pub async fn hints(
         guardian: perm.role == "guardian",
     };
     let rules = load_hints()?;
-    let sources = hint_sources(conn, rules, target, perm.has("read:sensitive"), as_of).await?;
+    let sources = hint_sources(conn, rules, target, perm.may_read_sensitive("read:records"), as_of).await?;
     Ok(hint_items(rules, ownhealth_core::family::catalog()?, &viewer, &sources))
 }
 

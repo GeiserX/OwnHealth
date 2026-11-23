@@ -878,7 +878,8 @@ async fn medication(call: &mut Call<'_>, p: &MedicationPayload) -> ToolResult<Ou
         if call.has("read:records") {
             let pid = call.profile_id()?;
             let needle = p.name.to_lowercase();
-            for m in active_medications(&mut *call.conn, pid, Some(p.date), None, None, true).await? {
+            let include_sensitive = call.perm()?.may_read_sensitive("read:records");
+            for m in active_medications(&mut *call.conn, pid, Some(p.date), None, None, include_sensitive).await? {
                 let name = m.get("name").and_then(Value::as_str).unwrap_or_default().to_lowercase();
                 if needle.contains(&name) || name.contains(&needle) {
                     match_id = m.get("id").and_then(Value::as_str).map(str::to_string);

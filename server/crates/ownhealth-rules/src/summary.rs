@@ -637,7 +637,7 @@ pub async fn build(conn: &mut PgConnection, profile_id: Uuid, scopes: &Scopes, o
 }
 
 /// The summary model for one profile as `viewer` reads it with `scopes`. A relative linked to another
-/// profile feeds a family pattern only when the viewer may read that profile, as on the Family screen.
+/// profile feeds a family pattern only when the viewer's ordinary grant allows reading records there.
 pub async fn build_for(
     conn: &mut PgConnection,
     viewer: Option<&Principal>,
@@ -810,9 +810,15 @@ pub async fn read_for(
     if let (true, false, Some(viewer)) = (records_ok, slots.family.is_empty(), viewer) {
         // a relative tagged sensitive never prints, as the person's own sensitive records do not (the
         // tick covers genome findings only)
-        let mut fam_scopes = scopes.clone();
-        fam_scopes.remove("read:sensitive");
-        let rel = crate::family::relatives(&mut *conn, viewer, profile_id, &fam_scopes, opts.as_of).await?;
+        let rel = crate::family::relatives(
+            &mut *conn,
+            viewer,
+            profile_id,
+            false,
+            opts.as_of,
+            crate::family::LinkedAccess::Ordinary,
+        )
+        .await?;
         let doc = crate::family::document(&ev.slug, opts.as_of, &rel)?;
         family = family_rows(&crate::family::render(&doc)?, &slots.family, lang)?;
     }

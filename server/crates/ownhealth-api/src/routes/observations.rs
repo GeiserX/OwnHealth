@@ -274,6 +274,17 @@ fn allowed(perm: &Permission, category: Option<&str>) -> Result<Vec<&'static str
     Ok(cats)
 }
 
+fn category_scope(category: &str) -> &'static str {
+    CATEGORY_SCOPE
+        .iter()
+        .find(|(c, _)| *c == category)
+        .map_or("read:labs", |(_, scope)| *scope)
+}
+
+fn reads_sensitive(perm: &Permission, cats: &[&str]) -> bool {
+    cats.iter().any(|c| perm.may_read_sensitive(category_scope(c)))
+}
+
 fn via(p: &Principal) -> &'static str {
     if p.kind == PrincipalKind::Token { "api" } else { "ui" }
 }
@@ -341,6 +352,9 @@ async fn observations(
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, None, None).await?;
     let cats = allowed(&perm, category)?;
+    for category in &cats {
+        perm.record_read(&[category_scope(category)]);
+    }
     let loinc = non_empty(param(&q, "loinc").map(|l| l.strip_prefix("LOINC:").unwrap_or(l)));
     let query = ObservationQuery {
         alias_group: non_empty(param(&q, "alias_group")).map(String::from),
@@ -350,13 +364,14 @@ async fn observations(
         until: to
             .and_then(|d| d.and_hms_micro_opt(23, 59, 59, 999_999))
             .map(|t| Utc.from_utc_datetime(&t)),
-        exclude_sensitive: !perm.has("read:sensitive"),
+        exclude_sensitive: !reads_sensitive(&perm, &cats),
         ..Default::default()
     };
     let mut rows: Vec<Observation> = list_observations(&mut tx, perm.profile.id, &query)
         .await?
         .into_iter()
         .filter(|r| cats.contains(&r.category.as_str()))
+        .filter(|r| r.sensitivity.is_empty() || perm.may_read_sensitive(category_scope(&r.category)))
         .collect();
     if let Some(text_q) = text_q {
         let groups = query_groups(&mut tx, text_q, perm.profile.household_id).await?;
@@ -579,6 +594,9 @@ async fn trend(
     let mut tx = rt.pool.begin().await?;
     let perm = caller.require(&mut tx, &p, None, None).await?;
     let cats = allowed(&perm, None)?;
+    for category in &cats {
+        perm.record_read(&[category_scope(category)]);
+    }
     let profile_id = perm.profile.id;
     let Some(group) = group_for_code(&mut tx, profile_id, code, perm.profile.household_id).await? else {
         return Err(ApiError::new(
@@ -593,13 +611,14 @@ async fn trend(
     let since = start.map(|d| Utc.from_utc_datetime(&d.and_time(NaiveTime::MIN)));
     let query = ObservationQuery {
         alias_group: Some(group.clone()),
-        exclude_sensitive: !perm.has("read:sensitive"),
+        exclude_sensitive: !reads_sensitive(&perm, &cats),
         ..Default::default()
     };
     let mut rows: Vec<Observation> = list_observations(&mut tx, profile_id, &query)
         .await?
         .into_iter()
         .filter(|r| cats.contains(&r.category.as_str()))
+        .filter(|r| r.sensitivity.is_empty() || perm.may_read_sensitive(category_scope(&r.category)))
         // a value dated after today is not drawn, as get_trend leaves out what is after as_of
         .filter(|r| day_of(r) <= today)
         .collect();
@@ -798,7 +817,14 @@ async fn trend(
     }
     let mut annotations: Vec<Value> = Vec::new();
     if perm.has("read:records") {
-        let meds = list_records(&mut tx, "medication", profile_id, None, perm.has("read:sensitive")).await?;
+        let meds = list_records(
+            &mut tx,
+            "medication",
+            profile_id,
+            None,
+            perm.may_read_sensitive("read:records"),
+        )
+        .await?;
         let date = |m: &Map<String, Value>, k: &str| {
             m.get(k)
                 .and_then(Value::as_str)

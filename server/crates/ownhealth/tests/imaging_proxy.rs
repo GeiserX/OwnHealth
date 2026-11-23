@@ -1422,3 +1422,29 @@ fn the_orthanc_settings_need_a_password_once_the_url_is_set() -> R {
     assert!(!format!("{c:?}").contains("from-the-secret"));
     Ok(())
 }
+
+/// The viewer reads with no REST request around it, so it never sees an open break-glass request: a
+/// contact whose own grant lacks `read:records` is refused the link at once, instead of a link that
+/// never opens.
+#[tokio::test]
+async fn break_glass_alone_opens_no_viewer() -> R {
+    let w = World::new().await?;
+    // Sam is a viewer of Alex (read:summary); an open emergency request adds read:records
+    sqlx::query(
+        "insert into break_glass_request (profile_id, contact_user_id, categories, reason, requested_at, \
+         activates_at, owner_feed_at, status, activated_at, expires_at) values ($1, $2, \
+         array['read:records'], 'En el hospital', now() - interval '3 days', now() - interval '1 day', \
+         now() - interval '2 days', 'active', now() - interval '1 day', now() + interval '13 days')",
+    )
+    .bind(w.fam.profile("alex"))
+    .bind(w.fam.user("sam"))
+    .execute(&w.db.pool)
+    .await?;
+    let sam = w.session("sam").await?;
+    let (s, v) = w.open_with(Auth::Cookie(&sam), "alex", ALEX_CT).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["detail"]["code"], "break_glass", "{v}");
+    assert!(w.orthanc.lookups().is_empty());
+    assert_eq!(w.audit_rows(ALEX_CT).await?, 0);
+    Ok(())
+}

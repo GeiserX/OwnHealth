@@ -121,27 +121,60 @@ fn visible(item: &ReviewItem, perm: &Permission) -> bool {
         );
     }
     let record = p.get("record").and_then(Value::as_object);
-    for fact in observations.iter().copied().chain(record) {
-        if truthy(fact.get("sensitivity")) && !perm.has("read:sensitive") {
-            return false;
-        }
-    }
-    if record.is_some() && !perm.has("read:records") {
+    if let Some(record) = record
+        && (!perm.has("read:records")
+            || (truthy(record.get("sensitivity")) && !perm.may_read_sensitive("read:records")))
+    {
         return false;
     }
     observations.iter().all(|o| {
         let category = o.get("category").and_then(Value::as_str).filter(|c| !c.is_empty());
-        perm.has(obs_scope(category))
+        let scope = obs_scope(category);
+        perm.has(scope) && (!truthy(o.get("sensitivity")) || perm.may_read_sensitive(scope))
     })
 }
 
 /// A pull's grouped item carries no values: it points at the bundle that holds them. It shows to
 /// whoever can open that bundle, so its link never answers 403.
-async fn opens_document(conn: &mut PgConnection, item: &ReviewItem, perm: &Permission) -> R<bool> {
+async fn opens_document(conn: &mut PgConnection, item: &ReviewItem, perm: &Permission) -> Result<bool, ApiError> {
     match (item.kind.as_str(), item.document_id) {
         ("fhir_unmapped_summary", Some(doc)) => Ok(crate::routes::documents::file_opens(conn, perm, doc).await?),
         _ => Ok(true),
     }
+}
+
+/// How many open items the list shows the caller, ordinary and emergency alike: the list's `open` and
+/// `review_open` on `/api/me`. `perms` are the caller's permissions on the profiles to count.
+pub(super) async fn count_shown(
+    conn: &mut PgConnection,
+    household: Uuid,
+    perms: &[&Permission],
+) -> Result<i64, ApiError> {
+    let by_profile: HashMap<Uuid, &Permission> = perms.iter().map(|p| (p.profile.id, *p)).collect();
+    // the list's own query: a held study counts only where the list shows it
+    let imaging_profiles = imaging_review_profiles(perms.iter().copied());
+    let items = review::list_items_with_kind_profiles(
+        &mut *conn,
+        &ItemQuery {
+            household_id: Some(household),
+            profile_ids: Some(by_profile.keys().copied().collect()),
+            status: Some("open".into()),
+            limit: i64::MAX,
+            ..ItemQuery::default()
+        },
+        Some((ownhealth_imaging::import::REVIEW_KIND, &imaging_profiles)),
+    )
+    .await?;
+    let mut shown = 0;
+    for i in &items {
+        let show = match i.profile_id.map(|pid| by_profile.get(&pid)) {
+            None => true,
+            Some(Some(p)) => visible(i, p) && opens_document(&mut *conn, i, p).await?,
+            Some(None) => false,
+        };
+        shown += i64::from(show);
+    }
+    Ok(shown)
 }
 
 fn no_item() -> Fail {
@@ -160,7 +193,14 @@ fn cannot_review(perm: &Permission) -> Fail {
     .into()
 }
 
-async fn check(conn: &mut PgConnection, principal: &Principal, item: Option<ReviewItem>) -> R<ReviewItem> {
+/// The item when the caller may see it and review its profile; with `change` (accept, reject, reopen,
+/// dismiss) it must also show on the caller's own grant, since emergency access only reads.
+async fn check(
+    conn: &mut PgConnection,
+    principal: &Principal,
+    item: Option<ReviewItem>,
+    change: bool,
+) -> R<ReviewItem> {
     let item = item.ok_or_else(no_item)?;
     let Some(profile_id) = item.profile_id else {
         if item.kind == ownhealth_imaging::import::REVIEW_KIND || item.household_id != principal.household_id {
@@ -179,7 +219,34 @@ async fn check(conn: &mut PgConnection, principal: &Principal, item: Option<Revi
     if !visible(&item, &perm) || !opens_document(conn, &item, &perm).await? {
         return Err(no_item());
     }
+    let own = perm.own_only();
+    if change {
+        if !visible(&item, &own) || !opens_document(conn, &item, &own).await? {
+            return Err(Error::access_denied(
+                "break_glass",
+                "Emergency access only reads; this item needs your own grant.",
+            )
+            .into());
+        }
+    } else if !visible(&item, &own) {
+        perm.read_scopes();
+    }
     Ok(item)
+}
+
+/// The document a decision reads rows from, when the caller may change it: `action` on its profile and
+/// the document's scope on the caller's own grant, since emergency access only reads. A single accept
+/// and a bulk accept both check it, so neither takes a row from a document the other refuses.
+async fn changeable_document(
+    conn: &mut PgConnection,
+    principal: &Principal,
+    document_id: Uuid,
+    action: &str,
+    refused: &str,
+) -> R<super::documents::Doc> {
+    let doc = super::documents::visible_document(conn, principal, document_id, None, false).await?;
+    doc.may_change(action, refused)?;
+    Ok(doc)
 }
 
 fn review_audit(principal: &Principal, action: &str) -> AuditEvent {
@@ -199,27 +266,9 @@ async fn audit(conn: &mut PgConnection, principal: &Principal, item: &ReviewItem
     Ok(())
 }
 
-/// Keep the existing open counts for other kinds and count held studies only where the caller can
-/// review them and read records.
-pub(super) async fn count_open(
-    conn: &mut PgConnection,
-    household: Uuid,
-    profile_ids: &[Uuid],
-    perms: &[Permission],
-) -> ownhealth_core::Result<i64> {
-    let imaging_profiles = imaging_review_profiles(perms);
-    review::count_open_with_kind_profiles(
-        conn,
-        household,
-        Some(profile_ids),
-        Some((ownhealth_imaging::import::REVIEW_KIND, &imaging_profiles)),
-    )
-    .await
-}
-
-fn imaging_review_profiles(perms: &[Permission]) -> Vec<Uuid> {
+fn imaging_review_profiles<'a>(perms: impl IntoIterator<Item = &'a Permission>) -> Vec<Uuid> {
     perms
-        .iter()
+        .into_iter()
         .filter(|p| p.can("review") && p.has("read:records"))
         .map(|p| p.profile.id)
         .collect()
@@ -264,7 +313,13 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         let show = match i.profile_id {
             None => true,
             Some(pid) => match by_profile.get(&pid) {
-                Some(p) => visible(i, p) && opens_document(&mut tx, i, p).await?,
+                Some(p) if visible(i, p) && opens_document(&mut tx, i, p).await? => {
+                    if !visible(i, &p.own_only()) {
+                        p.read_scopes();
+                    }
+                    true
+                }
+                Some(_) => false,
                 None => false,
             },
         };
@@ -273,7 +328,8 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         }
     }
     let household = principal.household_id.unwrap_or_default();
-    let open = count_open(&mut tx, household, &pids, &perms).await?;
+    let counted: Vec<&Permission> = pids.iter().filter_map(|pid| by_profile.get(pid).copied()).collect();
+    let open = count_shown(&mut tx, household, &counted).await?;
     let mut audit = review_audit(principal, "read");
     if let [profile_id] = pids.as_slice() {
         audit.profile_id = Some(*profile_id);
@@ -298,7 +354,7 @@ async fn get_one(State(rt): State<Runtime>, caller: Caller, Path(item_id): Path<
     let item_id = uuid_path("item_id", &item_id)?;
     let mut tx = rt.pool.begin().await?;
     let found = review::get_item(&mut tx, item_id).await?;
-    let item = check(&mut tx, &caller.0, found).await?;
+    let item = check(&mut tx, &caller.0, found, false).await?;
     audit(&mut tx, &caller.0, &item, "read").await?;
     tx.commit().await?;
     Ok(Json(item_out(&item)?))
@@ -334,16 +390,28 @@ async fn accept(
     let found = review::get_item(&mut tx, item_id).await?;
     // accepting a document_identity item moves its document: lock the row first, as the assign route
     // does, so a move running at the same time commits before this one reads the owner
+    let mut source_document = None;
     if let Some(found) = &found
         && found.kind == "document_identity"
         && let Some(d) = found.document_id
     {
         // a CGM export's lock before its row, as the assign route takes them
         ownhealth_ingest_structured::retract::lock_export_of(&mut tx, d).await?;
-        ownhealth_core::documents::lock_owner(&mut tx, d).await?;
+        if ownhealth_core::documents::lock_owner(&mut tx, d).await?.is_some() {
+            source_document = Some(d);
+        }
     }
-    let item = check(&mut tx, principal, found).await?;
+    let item = check(&mut tx, principal, found, true).await?;
+    if item.kind != "document_identity"
+        && let Some(d) = item.document_id
+    {
+        // rows read from a document: the same check as a bulk accept of that document
+        changeable_document(&mut tx, principal, d, "review", "review on this profile").await?;
+    }
     if item.kind == "document_identity" {
+        if let Some(d) = source_document {
+            changeable_document(&mut tx, principal, d, "import", "import on this profile").await?;
+        }
         // accepting moves the document: the target needs the same check as POST /documents/{id}/assign
         let from_edits = edits
             .as_ref()
@@ -387,7 +455,7 @@ async fn reject(
     let reason = reason.unwrap_or_default();
     let mut tx = rt.pool.begin().await?;
     let found = review::get_item(&mut tx, item_id).await?;
-    let item = check(&mut tx, principal, found).await?;
+    let item = check(&mut tx, principal, found, true).await?;
     review::reject(&mut tx, item_id, principal.user_id.unwrap_or_default(), &reason).await?;
     audit(&mut tx, principal, &item, "review_reject").await?;
     tx.commit().await?;
@@ -399,7 +467,7 @@ async fn reopen(State(rt): State<Runtime>, caller: Caller, Path(item_id): Path<S
     let item_id = uuid_path("item_id", &item_id)?;
     let mut tx = rt.pool.begin().await?;
     let found = review::get_item(&mut tx, item_id).await?;
-    let item = check(&mut tx, principal, found).await?;
+    let item = check(&mut tx, principal, found, true).await?;
     review::reopen(&mut tx, item_id, principal.user_id.unwrap_or_default()).await?;
     audit(&mut tx, principal, &item, "review_reopen").await?;
     tx.commit().await?;
@@ -426,7 +494,7 @@ async fn dismiss(
     };
     let mut tx = rt.pool.begin().await?;
     let found = review::get_item(&mut tx, item_id).await?;
-    let item = check(&mut tx, principal, found).await?;
+    let item = check(&mut tx, principal, found, true).await?;
     review::dismiss(
         &mut tx,
         item_id,
@@ -492,11 +560,12 @@ async fn bulk_accept(State(rt): State<Runtime>, caller: Caller, headers: HeaderM
     let document_id = document_id.unwrap_or_default();
 
     let mut tx = rt.pool.begin().await?;
-    let doc: Option<Option<Uuid>> = sqlx::query_scalar("select profile_id from document where id = $1")
+    // Keep the source owner and category stable until every selected row is decided.
+    let profile: Option<Option<Uuid>> = sqlx::query_scalar("select profile_id from document where id = $1 for share")
         .bind(document_id)
         .fetch_optional(&mut *tx)
         .await?;
-    let Some(Some(profile_id)) = doc else {
+    let Some(Some(profile_id)) = profile else {
         return Err(Fail::Api(ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -507,13 +576,16 @@ async fn bulk_accept(State(rt): State<Runtime>, caller: Caller, headers: HeaderM
     if !perm.can("review") {
         return Err(cannot_review(&perm));
     }
-    let accepted = review::bulk_accept(
-        &mut tx,
-        document_id,
-        principal.user_id.unwrap_or_default(),
-        min_row_conf,
-    )
-    .await?;
+    let doc = changeable_document(&mut tx, principal, document_id, "review", "review on this profile").await?;
+    let own = doc.perm.own_only();
+    let items = review::bulk_candidates(&mut tx, document_id, min_row_conf).await?;
+    let mut accepted = Vec::new();
+    for item in items {
+        if item.profile_id == Some(profile_id) && visible(&item, &own) {
+            review::accept(&mut tx, item.id, principal.user_id.unwrap_or_default(), None).await?;
+            accepted.push(item.id);
+        }
+    }
     let mut a = AuditEvent::new(principal.actor_kind(), "ui", "review_bulk_accept");
     a.actor_id = principal.user_id;
     a.tool = Some("review".into());
