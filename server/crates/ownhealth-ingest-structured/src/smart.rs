@@ -165,6 +165,8 @@ const STOP_ANOTHER_PATIENT: &str =
     "another_patient: the account at the portal is for another person than this profile, so nothing was imported";
 const STOP_OFF: &str = "switched_off: the connection was switched off during the run, so nothing was imported";
 const STOP_CHANGED: &str = "source_changed: the connection changed during the run, so nothing was imported";
+const STOP_PATIENT_NOT_GRANTED: &str = "patient_not_granted: the grant does not cover reading the patient, so the record \
+     cannot be matched to this profile and nothing was read";
 
 /// The words of every problem and every stop that carries a value: the code uses these, and so does
 /// [`phrases`], so the wording lint reads exactly what a person reads.
@@ -232,7 +234,7 @@ pub fn phrases() -> Value {
     };
     json!({
         "stop": [STOP_RECONSENT, STOP_PATIENT, STOP_SERVER, STOP_PROFILE, STOP_NO_ANSWER, STOP_ANOTHER_PATIENT,
-                 STOP_OFF, STOP_CHANGED, words::patient_unread(404), words::token_refused(500, "server_error"),
+                 STOP_OFF, STOP_CHANGED, STOP_PATIENT_NOT_GRANTED, words::patient_unread(404), words::token_refused(500, "server_error"),
                  words::token_unreachable(&net), words::undeclared_host("fhir.elsewhere.example")],
         "problem": [
             words::answered("Observation", 503),
@@ -719,6 +721,10 @@ pub async fn pull_with(
             ..RunOutcome::default()
         });
     }
+    // without the Patient nothing shows the record is this profile's person: search nothing
+    if !read_patient {
+        return Err(JobError::permanent(STOP_PATIENT_NOT_GRANTED));
+    }
 
     let mut r = Reader {
         http: SourceHttp::for_source(
@@ -740,30 +746,28 @@ pub async fn pull_with(
     };
 
     // the Patient first: another person's account stores nothing, and the importer matches it too
-    if read_patient {
-        let f = match r.get(&format!("{base}/Patient/{patient}")).await {
-            Ok(f) => f,
-            Err(Miss::Run(e)) => return Err(e),
-            Err(Miss::Search(code, say)) => {
-                return Err(JobError::retry(format!("{code}: {}", say("Patient"))));
-            }
-        };
-        let p: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
-        if f.status != 200 || p["resourceType"] != "Patient" {
-            return Err(JobError::retry(words::patient_unread(f.status)));
+    let f = match r.get(&format!("{base}/Patient/{patient}")).await {
+        Ok(f) => f,
+        Err(Miss::Run(e)) => return Err(e),
+        Err(Miss::Search(code, say)) => {
+            return Err(JobError::retry(format!("{code}: {}", say("Patient"))));
         }
-        let who: Option<(String, Option<NaiveDate>)> =
-            sqlx::query_as("select display_name, birth_date from profile where id = $1")
-                .bind(profile_id)
-                .fetch_optional(&ctx.pool)
-                .await?;
-        if let Some((name, born)) = who
-            && fhir::mapping::match_patient(Some(&p), &name, born) == "mismatch"
-        {
-            return Err(JobError::permanent(STOP_ANOTHER_PATIENT));
-        }
-        g.entries.push((Some(format!("{base}/Patient/{patient}")), p));
+    };
+    let p: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
+    if f.status != 200 || p["resourceType"] != "Patient" {
+        return Err(JobError::retry(words::patient_unread(f.status)));
     }
+    let who: Option<(String, Option<NaiveDate>)> =
+        sqlx::query_as("select display_name, birth_date from profile where id = $1")
+            .bind(profile_id)
+            .fetch_optional(&ctx.pool)
+            .await?;
+    if let Some((name, born)) = who
+        && fhir::mapping::match_patient(Some(&p), &name, born) == "mismatch"
+    {
+        return Err(JobError::permanent(STOP_ANOTHER_PATIENT));
+    }
+    g.entries.push((Some(format!("{base}/Patient/{patient}")), p));
     for (rtype, params) in &planned {
         search(&mut r, &mut g, caps, (&base, &patient), rtype, params).await?;
     }
