@@ -1498,13 +1498,15 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
     // Keep the lock through blob placement when a checkpoint exists, so another invocation
     // cannot resume this restore while it is still finishing.
     let resume_lock = if resume_id.is_some() {
-        record_lost(settings, &url, &closed, &backup_blobs).await.map_err(|error| {
-            let message = format!(
-                "{error}. Fix the keyring error and rerun the same restore with the same backup, keyring, \
+        record_lost(settings, &url, &closed, &backup_blobs)
+            .await
+            .map_err(|error| {
+                let message = format!(
+                    "{error}. Fix the keyring error and rerun the same restore with the same backup, keyring, \
                  and options. Keep the app stopped until restore finishes"
-            );
-            Error::Other(anyhow::Error::new(error).context(message))
-        })?;
+                );
+                Error::Other(anyhow::Error::new(error).context(message))
+            })?;
         Some(ring_lock)
     } else {
         drop(ring_lock);
