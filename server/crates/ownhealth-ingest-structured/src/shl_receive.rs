@@ -644,8 +644,9 @@ pub fn open(link: &Link, held: &[Held], blobs: &BlobStore, profile: Uuid) -> std
 /// [`open`] for files an earlier answer stored and the client sent back (`held`). Their types come
 /// from the form, so the server keeps to the type each file has: a `U` link's file is typed again
 /// from its JWE `cty` or its content, as the first answer did; a manifest file sent back as FHIR or
-/// as a card file must be one (its content says so), and one sent back with no type is refused. A
-/// type we do not import only keeps the file out, as the manifest may say.
+/// as a card file must read as one with the reader the first answer used (a card file in any form
+/// slice 22 reads: a byte order mark, shc:/ text, a photo), and one sent back with no type is
+/// refused. A type we do not import only keeps the file out, as the manifest may say.
 pub fn reopen(link: &Link, held: &[Held], blobs: &BlobStore, profile: Uuid) -> std::result::Result<Vec<Opened>, Stop> {
     open_files(link, held, blobs, profile, true)
 }
@@ -681,11 +682,11 @@ fn open_files(
         } else {
             base_type(&h.content_type)
         };
-        if resumed && !link.direct() {
-            let imported = [FHIR, SMART_HEALTH_CARD].contains(&said.as_str());
-            if said.is_empty() || (imported && said != sniff(&opened.plaintext)) {
-                return Err(Refusal::Held.into());
-            }
+        // a manifest file sent back must read as the type it came back with; the first answer read
+        // it with the same reader, so a file that does not was sent back under another type
+        let sent_back = resumed && !link.direct();
+        if sent_back && said.is_empty() {
+            return Err(Refusal::Held.into());
         }
         let cty = opened
             .header
@@ -703,14 +704,21 @@ fn open_files(
         };
         match content_type.as_str() {
             FHIR => {
-                fhir::read_entries(&opened.plaintext, false).map_err(|_| Refusal::NotFhir)?;
+                fhir::read_entries(&opened.plaintext, false)
+                    .map_err(|_| if sent_back { Refusal::Held } else { Refusal::NotFhir })?;
                 out.push(Opened::Fhir {
                     held,
                     plaintext: opened.plaintext,
                 });
             }
             SMART_HEALTH_CARD => {
-                let input = shc::read(&opened.plaintext).map_err(|refusal| Stop::Card { refusal, iss: None })?;
+                let input = shc::read(&opened.plaintext).map_err(|refusal| {
+                    if sent_back {
+                        Stop::Link(Refusal::Held)
+                    } else {
+                        Stop::Card { refusal, iss: None }
+                    }
+                })?;
                 out.push(Opened::Cards {
                     held,
                     plaintext: opened.plaintext,

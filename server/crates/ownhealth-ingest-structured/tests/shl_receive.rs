@@ -978,3 +978,48 @@ async fn a_held_file_sent_back_under_another_type_is_refused() -> R {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_card_file_in_any_form_the_first_answer_reads_opens_again_after_the_issuers_yes() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let profile = alex(&mut tx).await?;
+    let (key, jwk) = signing_key();
+    let jws = card(&key, jwk["kid"].as_str().unwrap_or_default());
+    // slice 22 reads a card file with a byte order mark, and shc:/ text, as well as plain JSON
+    let with_bom = format!("\u{feff}{}", json!({"verifiableCredential": [jws.clone()]}));
+    let text = format!(
+        "shc:/{}",
+        jws.bytes().map(|b| format!("{:02}", b - 45)).collect::<String>()
+    );
+    for (n, plaintext) in [with_bom, text].into_iter().enumerate() {
+        let f = Fake {
+            manifest: manifest_with(json!([{"contentType": shl::SMART_HEALTH_CARD,
+                "embedded": jwe(plaintext.as_bytes(), None)}])),
+            jwks: Some(json!({"keys": [jwk.clone()]})),
+            ..Fake::default()
+        };
+        let port = spawn(&f).await?;
+        let link = link(&format!("{SHL}/m"), None)?;
+        let held = shl::fetch(&link, None, &env.blobs, profile.id, &local(port)).await??;
+        let first = shl::open(&link, &held, &env.blobs, profile.id).map_err(|s| anyhow::anyhow!("{n}: {s:?}"))?;
+        assert!(matches!(&first[..], [Opened::Cards { .. }]), "{n}: {first:?}");
+        let only_link = [SHL_HOST.to_string()];
+        assert!(
+            matches!(
+                shl::check(&first, &only_link, &local(port), now()).await,
+                CardsChecked::NeedsApproval(_)
+            ),
+            "{n}"
+        );
+        // the person says yes; the client sends the held file back with the type it was given
+        let approved = [SHL_HOST.to_string(), ISS_HOST.to_string()];
+        let again = shl::reopen(&link, &held, &env.blobs, profile.id).map_err(|s| anyhow::anyhow!("{n}: {s:?}"))?;
+        assert_eq!(again, first, "{n}");
+        let CardsChecked::Verified(cards) = shl::check(&again, &approved, &local(port), now()).await else {
+            panic!("{n}: not verified");
+        };
+        assert_eq!(cards.iter().map(Vec::len).collect::<Vec<_>>(), vec![1], "{n}");
+    }
+    Ok(())
+}
