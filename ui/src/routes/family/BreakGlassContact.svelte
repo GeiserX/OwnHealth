@@ -4,9 +4,10 @@
 	// stands. Asking needs a reason and a step-up. Nothing shows for a person nobody named; a list that
 	// did not arrive says so, with a retry. While a request is open (waiting, waiting for the calendar,
 	// or active), the list is read again every minute and when the window comes back, so the card
-	// follows it as it opens, runs out or is ended; it stops once none is open.
+	// follows it as it opens, runs out or is ended. A brief outage keeps the last list.
+	// Refreshing stops once no request is open.
 	import { askBreakGlass, myBreakGlass } from '#lib/api/breakglass';
-	import { getMe } from '#lib/api/core';
+	import { ApiError, getMe } from '#lib/api/core';
 	import type { BreakGlassNamed } from '#lib/api/types';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import { Loader, errRaw, errText, scopeText, tf, tp } from '#lib/components/pages1/util.svelte';
@@ -23,6 +24,18 @@
 	const REFRESH_MS = 60_000;
 	const named = new Loader<{ items: BreakGlassNamed[] }>();
 	const load = () => named.run(myBreakGlass);
+	const refresh = () => named.run(async () => {
+		try {
+			return await myBreakGlass();
+		} catch (e) {
+			const transient = e instanceof ApiError
+				? e.status === 408 || e.status === 429 || e.status >= 500
+				: e instanceof TypeError;
+			// Keep polling during an outage. Session and access errors still clear the list.
+			if (transient && named.data) return named.data;
+			throw e;
+		}
+	});
 	$effect(() => {
 		load();
 	});
@@ -45,11 +58,11 @@
 	const watching = $derived(items.some(open));
 	$effect(() => {
 		if (!watching) return;
-		const id = setInterval(load, REFRESH_MS);
-		window.addEventListener('focus', load);
+		const id = setInterval(refresh, REFRESH_MS);
+		window.addEventListener('focus', refresh);
 		return () => {
 			clearInterval(id);
-			window.removeEventListener('focus', load);
+			window.removeEventListener('focus', refresh);
 		};
 	});
 	function start(slug: string) {

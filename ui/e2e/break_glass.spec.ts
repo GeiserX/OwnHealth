@@ -329,6 +329,12 @@ test('a request whose delay runs out while the pages are open shows open at the 
 	await expect(row.getByRole('status')).toContainText('Waiting. Access opens on');
 	await cs.goto(`/family/break-glass/${third}?lang=en`);
 	await expect(cs.getByTestId('bgc-status')).toContainText('Waiting.');
+	// Lose the connection for one focus refresh. The next scheduled read should still work.
+	await pp.route('**/api/break-glass', (route) => route.abort('internetdisconnected'), { times: 1 });
+	const failedRefresh = pp.waitForEvent('requestfailed', (r) => new URL(r.url()).pathname === '/api/break-glass');
+	await pp.evaluate(() => window.dispatchEvent(new Event('focus')));
+	await failedRefresh;
+	await expect(mine.getByRole('status')).toContainText('Waiting. Access opens on');
 	// Use the earlier calendar fetch as the deadline, then advance the owner pages past the deadline they read.
 	sql(`update break_glass_request set activates_at = owner_feed_at where id = '${third}'`);
 	const pastSetupDeadline = (setupMinutes + 1) * 60_000;
