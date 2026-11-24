@@ -410,6 +410,25 @@ export interface TimelineEvent {
 	/** document events only: the document is its own source */
 	document_id?: Uuid;
 	filename?: UntrustedText | null;
+	/** imaging events only (slice 42): one event per study, its linked report folded in */
+	study_id?: Uuid;
+	study_instance_uid?: string;
+	/** the day the disc names; null when it names none, and `date` is then the report's day or the day it was recorded */
+	study_date?: IsoDate | null;
+	/** the report the import linked to the study, while it is an active document the reader may see */
+	report_document_id?: Uuid | null;
+	/** POST it for a one-hour viewer link; null when Orthanc holds no study for it, or only emergency access reads */
+	viewer_open?: string | null;
+	series?: number | null;
+	instances?: number | null;
+}
+
+/** POST /imaging/import: the stored upload and the job that reads it (follow it with GET /jobs?ids=). */
+export interface ImagingImport {
+	import_id: Uuid;
+	duplicate: boolean;
+	job_id: number | null;
+	files: number;
 }
 
 /** One course of a medicine or the run of a condition: the biomarker chart's annotation shape plus its src. */
@@ -1018,4 +1037,37 @@ export interface BreakGlassOwnerView {
 		max_delay_hours: number;
 		allowed: BreakGlassCategory[];
 	};
+}
+
+// v1.0 the US endpoint directory (routes/brands.rs)
+/** One vendor's copy of the US endpoint directory (routes/brands.rs). */
+export interface BrandFeed {
+	vendor: string;
+	fetched_at: string | null;
+	entries: number;
+	stale: boolean;
+}
+/** The household's US endpoint directory; null before the wizard was first opened. */
+export interface BrandDirectory {
+	source_id: Uuid;
+	enabled: boolean;
+	last_run_at: string | null;
+	feeds: BrandFeed[];
+	stale: boolean;
+	ready: boolean;
+}
+/** A facility whose name holds every word of the query. */
+export interface BrandHit {
+	name: string;
+	endpoint: string;
+	state: string | null;
+	vendor: string;
+}
+export interface BrandsOpened {
+	created: boolean;
+	directory: BrandDirectory | null;
+}
+export interface BrandsFound {
+	directory: BrandDirectory | null;
+	results: BrandHit[];
 }

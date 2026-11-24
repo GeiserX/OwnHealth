@@ -21,3 +21,7 @@ declare module 'node:url' {
 declare module 'node:buffer' {
 	export const Buffer: { alloc(size: number, fill: number): Uint8Array; from(text: string, encoding: 'utf8'): Uint8Array };
 }
+// The imaging checks pick the fake Orthanc's password and the synthetic rows' ids and hashes.
+declare module 'node:crypto' {
+	export function randomBytes(size: number): { toString(encoding: 'hex'): string };
+}

@@ -4,6 +4,7 @@
 	import '#lib/components/pages2/pages2.css';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
+	import { tick } from 'svelte';
 	import {
 		acceptReview,
 		getMe,
@@ -39,6 +40,7 @@
 	import { cgmDoc, type CgmLine } from '#lib/logic/cgm_import';
 	import { fitDocLines } from '#lib/logic/fit_import';
 	import { proposalTitle, type FamilyProposal } from '#lib/logic/gedcom';
+	import { focusOrder } from '#lib/logic/imaging';
 	import FitResult from '#lib/components/pages2/FitResult.svelte';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
@@ -79,10 +81,10 @@
 		return d ? docLabel(d) : '';
 	};
 
-	function load() {
+	function load(): Promise<void> {
 		const slug = prof?.slug;
-		if (!slug) return;
-		queue.run(async () => {
+		if (!slug) return Promise.resolve();
+		return queue.run(async () => {
 			const [r, d, f, j, s] = await Promise.all([
 				listReview({ status: 'open', profile: slug }),
 				listDocuments(slug).catch(() => ({ items: [] as DocumentSummary[] })),
@@ -217,6 +219,7 @@
 
 	// `inRow`: the caller shows the error next to its own control, so the failure is thrown back to it.
 	async function act(fn: () => Promise<unknown>, inRow = false) {
+		const plan = focusPlan();
 		busy = true;
 		actionError = null;
 		notice = null;
@@ -227,9 +230,47 @@
 			actionError = { text: errText(e), raw: errRaw(e) };
 		} finally {
 			busy = false;
-			// Also after a failure: a batch that failed at row N already accepted rows 1 to N-1.
-			load();
 			refreshReviewTotal();
+			// Also after a failure: a batch that failed at row N already accepted rows 1 to N-1.
+			load().then(async () => {
+				await tick();
+				refocus(plan);
+			});
+		}
+	}
+	// Focus after a decision (Accept, Dismiss, Reject…). The pressed button is disabled while the request
+	// runs and then goes away with its row, so focus would fall to the page body. It goes to the next row
+	// instead: the same control again when the row stays (the decision failed), else the first control of
+	// the nearest row below, else above (logic/imaging.ts focusOrder). Rows carry `data-row`; a row's
+	// confirm step sits in a sub-row that carries `data-row-of`, and a decision there counts as the row's.
+	type FocusPlan = { rows: string[]; index: number };
+	const focusables = (row: HTMLElement) =>
+		[...row.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea')].filter((el) => !(el as HTMLButtonElement).disabled);
+	function focusPlan(): FocusPlan | null {
+		const el = document.activeElement;
+		const row = el instanceof HTMLElement ? el.closest<HTMLElement>('[data-row], [data-row-of]') : null;
+		const id = row?.dataset.row ?? row?.dataset.rowOf;
+		if (!el || !row || !id) return null;
+		const order = [...document.querySelectorAll<HTMLElement>('[data-row]')].map((r) => r.dataset.row ?? '');
+		// from a sub-row, a row that stays gets focus on its first control
+		const index = row.dataset.row ? focusables(row).indexOf(el as HTMLElement) : -1;
+		return { rows: focusOrder(order, id), index };
+	}
+	function refocus(plan: FocusPlan | null) {
+		const at = document.activeElement;
+		// focus that is still on a control (the person moved on, or it never left) stays where it is
+		if (!plan || (at && at !== document.body && at.isConnected)) return;
+		for (const [i, id] of plan.rows.entries()) {
+			const row = document.querySelector<HTMLElement>(`[data-row="${CSS.escape(id)}"]`);
+			if (!row) continue;
+			const controls = focusables(row);
+			const target = (i === 0 ? controls[plan.index] : undefined) ?? controls[0];
+			if (target) target.focus();
+			else {
+				row.tabIndex = -1;
+				row.focus();
+			}
+			return;
 		}
 	}
 	// The top bar and the sidebar show the household total; refresh it from /me after every decision.
@@ -531,7 +572,7 @@
 				{#if !docProposals.length}<div class="empty">{docFailed ? t('i2_doc_failed_rows') : cgm ? t('i2_doc_cgm_rows') : t('i2_doc_done')}</div>{/if}
 			{/each}
 			{#each docProposals as p (p.item.id)}
-				<div class="prop">
+				<div class="prop" data-row={p.item.id}>
 					<div style="font-size:12px"><span class="chip" style="color:var(--accent);border-color:rgba(60,186,221,.5)">{t('i2_agent_chip')}</span> ◆ {otherTitle(p.item)}</div>
 					<ProposalRows rows={p.rows} {busy} onaccept={(edits) => act(() => acceptReview(p.item.id, edits))} onreject={() => act(() => rejectReview(p.item.id, 'rejected in review'))} />
 					<AgentContext item={p.item} docName={docNameOf} />
@@ -561,7 +602,7 @@
 				{#each others as line (line.item.id)}
 					{@const it = line.item}
 					{@const prows = proposalRows(it)}
-					<tr class:agent={it.kind === 'agent_proposal'} id="oi-{it.id.slice(0, 8)}">
+					<tr class:agent={it.kind === 'agent_proposal'} id="oi-{it.id.slice(0, 8)}" data-row={it.id}>
 						<td class="kindcol" style="width:1%"><span class="chip" title={it.kind} style={it.kind === 'agent_proposal' ? 'color:var(--accent);border-color:rgba(60,186,221,.5)' : ''}>{t('i2_kind_' + it.kind)}</span></td>
 						<td class="mtxt">
 							{#if line.rows}
@@ -612,7 +653,7 @@
 						</td>
 					</tr>
 					{#if confirmDismiss === it.id}
-						<tr class="sub"><td colspan="4">
+						<tr class="sub" data-row-of={it.id}><td colspan="4">
 							<ConfirmRow text={t('i2_scan_dismiss_d')} confirmLabel={t('i2_dismiss')} {busy} onconfirm={() => act(async () => { await dismissReview(it.id); enter(null); })} oncancel={() => (confirmDismiss = null)} />
 						</td></tr>
 					{/if}

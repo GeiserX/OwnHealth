@@ -96,6 +96,11 @@ export const renewsItself = (s: ConnectionState): boolean => s !== 'reconsent' &
 /** The vendor has a sign-in to send the person back to, and the person manages the profile. */
 export const canReconnect = (r: ConnectionRow): boolean => OAUTH_KINDS.includes(r.kind) && r.can_manage === true;
 
+/** A card's title. The provider directory is a source the app makes, so its title is in the reader's
+ * language; every other connection keeps the label it was given. */
+export const cardTitle = (r: Pick<ConnectionRow, 'kind' | 'label'>, t: (k: string) => string): string =>
+	r.kind === 'brands' ? t('con_t_brands') : r.label;
+
 /** The rows the screen lists: connections (not inboxes) of profiles the person manages. */
 export function shownConnections<T extends ConnectionRow>(rows: T[]): T[] {
 	return rows.filter((r) => (CONNECTOR_KINDS as readonly string[]).includes(r.kind) && r.can_manage === true);

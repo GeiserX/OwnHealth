@@ -22,6 +22,7 @@
 	import {
 		callbackOutcome,
 		canReconnect,
+		cardTitle,
 		connectionState,
 		connectorErrorKey,
 		daysLeft,
@@ -230,7 +231,7 @@
 			<article class="card conn" class:just={connectedId === r.id} aria-labelledby="con-{r.id}" data-state={s}>
 				<div class="hd">
 					<div style="min-width:0">
-						<b id="con-{r.id}" tabindex="-1">{r.label}</b>
+						<b id="con-{r.id}" tabindex="-1">{cardTitle(r, t)}</b>
 						<div class="dim kind">{t('con_k_' + r.kind)}</div>
 					</div>
 					<span class="pill {PILL[word]}"><i aria-hidden="true"></i>{t(WORD[word])}</span>

@@ -1,5 +1,5 @@
 # OwnHealth: the app and its Postgres. `cp .env.example .env`, set the secrets, write the key file
-# secrets/secrets_key, make the folder keyring/ (docs/quickstart.md), `docker compose up -d`.
+# secrets/secrets_key, make the folder keyring/ownhealth/ (docs/quickstart.md), `docker compose up -d`.
 name: ownhealth
 
 # Two database roles. `ownhealth` owns the tables: the one-shot `admin` service uses it to migrate and
@@ -29,7 +29,7 @@ services:
       - ownhealth-data:/data
       # The profile keys (keyring.json), on their own mount: never in the data volume, the backups or
       # restic. Host backup tools must skip this folder (deploy/README.md, "The keyring").
-      - ./keyring:/keyring
+      - ./keyring/${COMPOSE_PROJECT_NAME}:/keyring
 
   app:
     image: drumsergio/ownhealth:0.4.0
@@ -64,7 +64,7 @@ services:
     volumes:
       - ownhealth-data:/data
       - ./inbox:/inbox
-      - ./keyring:/keyring # the same folder as the admin service's
+      - ./keyring/${COMPOSE_PROJECT_NAME}:/keyring # the same folder as the admin service's
 
   # `ocr` profile (v0.2): reads scans and photos with the local OCR engine. Turn it on with two lines
   # in .env: COMPOSE_PROFILES=ocr (starts this worker) and OWNHEALTH_OCR=1 (the app sends unread pages
