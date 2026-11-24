@@ -7,7 +7,8 @@
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import SourcePanel from '#lib/components/pages1/SourcePanel.svelte';
 	import { openSource } from '#lib/components/pages1/source.svelte';
-	import { Loader, tf } from '#lib/components/pages1/util.svelte';
+	import { Loader, errRaw, errText, tf } from '#lib/components/pages1/util.svelte';
+	import { openViewer } from '#lib/imaging';
 	import GapsCard from '#lib/components/GapsCard.svelte';
 	import SourceChip from '#lib/components/SourceChip.svelte';
 	import RecordsCard from '#lib/components/RecordsCard.svelte';
@@ -96,6 +97,22 @@
 	const segStyle = (b: Bar, c: string) =>
 		(b.span ? `left:${b.x}%;width:${Math.max(b.x2 - b.x, 0.8)}%;` : `left:calc(${b.x}% - 5px);`) + `top:${6 + b.row * 12}px;--c:${c}`;
 	const trackHeight = (bars: { b: Bar }[]) => 22 + Math.max(0, ...bars.map(({ b }) => b.row)) * 12;
+
+	// an imaging event opens its study in the viewer (a new tab); a refusal shows under that event
+	let opening = $state(false);
+	let openError = $state<{ study: string | undefined; text: string; raw: string } | null>(null);
+	async function open(e: TimelineEvent) {
+		if (!profile || !e.study_instance_uid) return;
+		opening = true;
+		openError = null;
+		try {
+			await openViewer(profile.slug, e.study_instance_uid);
+		} catch (err) {
+			openError = { study: e.study_id, text: errText(err), raw: errRaw(err) };
+		} finally {
+			opening = false;
+		}
+	}
 </script>
 
 <div class="ph">
@@ -206,6 +223,14 @@
 								{#if e.detail}<div class="t2">{e.detail}</div>{/if}
 								{#if e.document_id}<a class="t2 fname" href={documentFileUrl(e.document_id)} target="_blank" rel="noopener" title={e.filename?.text}>{e.filename?.text ?? t('i2_open_doc')}</a>
 								{:else if e.filename}<div class="t2 fname" title={e.filename.text}>{e.filename.text}</div>{/if}
+								{#if e.type === 'imaging' && (e.report_document_id || e.viewer_open)}
+									<!-- a study and the report the import linked to it are one event (slice 42) -->
+									<div class="t2 study-acts">
+										{#if e.report_document_id}<a class="fname" href={documentFileUrl(e.report_document_id)} target="_blank" rel="noopener">{t('img_open_report')}</a>{/if}
+										{#if e.viewer_open}<button class="btn sm" disabled={opening} onclick={() => open(e)}>{t('h1_img_ohif')}</button>{/if}
+									</div>
+									{#if openError && openError.study === e.study_id}<div class="t2 p2err" role="alert" title={openError.raw}>{openError.text}</div>{/if}
+								{/if}
 							</div>
 							<div class="rt">
 								<span class="chip">{tyName(e.type)}</span>
@@ -377,6 +402,13 @@
 	}
 	.fname {
 		overflow-wrap: anywhere;
+	}
+	.study-acts {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px 10px;
+		align-items: center;
+		margin-top: 3px;
 	}
 	.nowrap {
 		white-space: nowrap;

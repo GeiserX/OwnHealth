@@ -1,7 +1,8 @@
 <script lang="ts">
 	// Family (mockup screen #family): the household's profiles, the profile switcher and the grant matrix.
 	// Profiles come from GET /me; the full matrix from GET /household (lane G). Pedigree and hints are
-	// v0.3, break-glass v1.0: their cards say so.
+	// v0.3. Break-glass (v1.0): the owner of the profile on screen names emergency contacts and decides
+	// their requests; a person someone named asks from the card above the profiles.
 	import '#lib/components/pages2/pages2.css';
 	import { addRelative, getHousehold, getMe, inviteMember, putGrant, type RelativeIn } from '#lib/api';
 	import StepUpDialog from '#lib/components/pages2/StepUpDialog.svelte';
@@ -15,6 +16,8 @@
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import Pedigree from '#lib/components/Pedigree.svelte';
 	import FamilyConsent from '#lib/components/FamilyConsent.svelte';
+	import BreakGlassContact from './BreakGlassContact.svelte';
+	import BreakGlassOwner from './BreakGlassOwner.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { LANGS } from '#lib/i18n/langs';
 	import { roleCell } from '#lib/logic/grants';
@@ -273,6 +276,8 @@
 {/if}
 {#if gaveBack}<div class="note xfer-done" role="status">{tf('xfer_back_done', { name: gaveBack })}</div>{/if}
 
+{#if me}<BreakGlassContact />{/if}
+
 <div class="mem">
 	{#each profiles as p (p.id)}
 		{@const on = p.slug === onScreen?.slug}
@@ -339,10 +344,7 @@
 			<div class="note" style="margin-top:6px">{t('h1_grants_note')}</div>
 		</div>
 		{#if onScreen && hh.data}{#key onScreen.slug}<FamilyConsent profile={onScreen} manages={manages(onScreen.slug)} />{/key}{/if}
-		<div class="card">
-			<h3>{t('h1_bg')}<span class="r">{t('h1_bg_r')}</span></h3>
-			<div class="empty"><PhaseChip phase="v1.0" /> {t('h1_bg_d')}</div>
-		</div>
+		{#if me && onScreen?.role === 'owner' && !onScreen.break_glass}{#key onScreen.slug}<BreakGlassOwner profile={onScreen} household={hh.data} me={me.user.id} />{/key}{/if}
 	</div>
 </div>
 

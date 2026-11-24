@@ -613,6 +613,60 @@ fn internal() -> ToolError {
     )
 }
 
+pub const SESSION_REPORT_SETTING: &str = "mcp_session_report";
+
+/// Missing consent is off. When a row exists, keep a concurrent consent change ordered with the
+/// audit write or report read that uses it.
+pub async fn session_report_enabled(conn: &mut PgConnection, household_id: Option<Uuid>) -> Result<bool, Error> {
+    let Some(household_id) = household_id else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar(
+        "select value = 'true'::jsonb from household_setting where household_id = $1 and key = $2 for share",
+    )
+    .bind(household_id)
+    .bind(SESSION_REPORT_SETTING)
+    .fetch_optional(conn)
+    .await?
+    .unwrap_or(false))
+}
+
+/// The arguments the tool's input schema names. An unknown tool names none.
+fn schema_args(spec: Option<&ToolSpec>, args: &Map<String, Value>) -> Map<String, Value> {
+    let schema = spec.map(|s| (s.input_schema)());
+    let known = schema
+        .as_ref()
+        .and_then(|s| s.get("properties"))
+        .and_then(Value::as_object);
+    args.iter()
+        .filter(|(k, _)| known.is_some_and(|p| p.contains_key(k.as_str())))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+async fn write_tool_audit(
+    conn: &mut PgConnection,
+    mut event: AuditEvent,
+    principal: &Principal,
+    spec: Option<&ToolSpec>,
+    args: &Map<String, Value>,
+    not_assessed: usize,
+) -> Result<(), Error> {
+    if session_report_enabled(conn, principal.household_id).await? {
+        event.not_assessed_n = Some(i32::try_from(not_assessed).unwrap_or(i32::MAX));
+        event.arg_bytes = Some(i32::try_from(serde_json::to_vec(args)?.len()).unwrap_or(i32::MAX));
+        // Opted-in rows keep the audit detail (codes and ids, free text hashed), so the log still
+        // says which profile a refused call named. A key the tool's schema does not name is caller
+        // text, and so is the user agent: both stay out. The client is the token's own label.
+        event.args_summary = Some(args_summary(&schema_args(spec, args)));
+        event.user_agent = None;
+    } else {
+        event.args_summary = Some(args_summary(args));
+    }
+    write_audit(conn, &event).await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------- pipeline ----
 
 /// Run one tools/call and return the CallToolResult as JSON.
@@ -676,7 +730,6 @@ pub async fn execute(
             )
             .await?;
             let mut e = tool_event(principal, if spec.is_some() { name } else { "unknown" }, meta);
-            e.args_summary = Some(args_summary(&args));
             e.result_kind = Some(
                 if DENIED_CODES.contains(&err.code.as_str()) {
                     "denied"
@@ -687,7 +740,7 @@ pub async fn execute(
             );
             e.rows_out = Some(0);
             e.bytes_out = Some(0);
-            write_audit(&mut tx, &e).await?;
+            write_tool_audit(&mut tx, e, principal, spec, &args, 0).await?;
             tx.commit().await?;
             Ok(error_result(&err))
         }
@@ -882,7 +935,6 @@ async fn run(
     let data = env.get("data").cloned().unwrap_or(Value::Null);
     let mut e = tool_event(principal, spec.name, meta);
     e.profile_id = profile_id;
-    e.args_summary = Some(args_summary(args));
     let truncated = env
         .pointer("/budget/truncated")
         .and_then(Value::as_bool)
@@ -897,7 +949,8 @@ async fn run(
         e.resource_type = Some(kind.into());
         e.resource_ids = Some(ids);
     }
-    write_audit(&mut *conn, &e).await?;
+    let not_assessed = env.get("not_assessed").and_then(Value::as_array).map_or(0, Vec::len);
+    write_tool_audit(conn, e, principal, Some(spec), args, not_assessed).await?;
     let mut content = vec![json!({"type": "text", "text": body_text})];
     content.extend(extra_content);
     Ok(json!({

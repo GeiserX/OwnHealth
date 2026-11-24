@@ -207,7 +207,8 @@ fn event(kind: &str, via: &str, action: &str, actor: Option<Uuid>, profile: Uuid
     e
 }
 
-/// Tell every owner of the profile.
+/// Tell every owner of the profile. The owner who took the step gets it too, as read already: it is in
+/// their history, but it is no news to them.
 pub async fn notify(
     conn: &mut PgConnection,
     profile: Uuid,
@@ -219,8 +220,9 @@ pub async fn notify(
         return Err(Error::Invalid(format!("unknown notification kind {kind}")));
     }
     Ok(sqlx::query(
-        "insert into notification_outbox (user_id, profile_id, kind, request_id, actor_id) \
-         select g.user_id, g.profile_id, $2, $3, $4 from profile_grant g where g.profile_id = $1 \
+        "insert into notification_outbox (user_id, profile_id, kind, request_id, actor_id, read_at) \
+         select g.user_id, g.profile_id, $2, $3, $4, case when g.user_id = $4 then now() end \
+         from profile_grant g where g.profile_id = $1 \
          and g.role = 'owner' and not g.break_glass and (g.expires_at is null or g.expires_at > now())",
     )
     .bind(profile)

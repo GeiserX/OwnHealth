@@ -67,17 +67,17 @@ export function nameTaken(name: string, profiles: { display_name: string }[]): b
 	return !!n && profiles.some((p) => p.display_name.trim().replace(/\s+/g, ' ').toLocaleLowerCase() === n);
 }
 
-/**
- * The line shown after a profile delete: files or folders still waiting for the retry are said, never hidden,
- * and a key still in keyring.json (older backups still open the files) comes first.
- */
-export function deletedNoteKey(
+type DeletedNoteKey = 'st_deleted' | 'st_deleted_pending' | 'st_deleted_keyring' | 'st_deleted_files_remaining';
+
+/** The notices after a profile delete, with the keyring warning first when both kinds of cleanup are pending. */
+export function deletedNoteKeys(
 	blobsPending: number,
 	foldersPending: number,
 	keyringPending = false
-): 'st_deleted' | 'st_deleted_pending' | 'st_deleted_keyring' {
-	if (keyringPending) return 'st_deleted_keyring';
-	return blobsPending > 0 || foldersPending > 0 ? 'st_deleted_pending' : 'st_deleted';
+): DeletedNoteKey[] {
+	const filesPending = blobsPending > 0 || foldersPending > 0;
+	if (keyringPending) return filesPending ? ['st_deleted_keyring', 'st_deleted_files_remaining'] : ['st_deleted_keyring'];
+	return [filesPending ? 'st_deleted_pending' : 'st_deleted'];
 }
 
 /** The origin of a link when it differs from the page's own (an OWNHEALTH_BASE_URL the person may not reach), else null. */
@@ -197,6 +197,8 @@ export function auditWhat(a: { via: string; tool: string | null; action: string 
  * A row the server wrote for a route ('POST /oauth/token') is not a tool call, so it gets its action too.
  */
 export function auditActionKey(a: { via: string; tool: string | null; action: string }): string | null {
+	if (a.tool === 'GET /api/mcp/session-report') return 'i2_sr_audit_read';
+	if (a.tool === 'PUT /api/mcp/session-report/consent') return 'i2_sr_audit_consent';
 	if (a.via === 'mcp' && a.tool && !/^[A-Z]+ \//.test(a.tool)) return null;
 	return 'i2_act_' + a.action.replace(/[^a-z0-9]+/gi, '_');
 }
@@ -219,6 +221,8 @@ export function auditDetail(
 ): string {
 	const args = a.args_summary ?? '';
 	if (a.action === 'consent_change') {
+		const sessionReport = /^mcp_session_report=(true|false)$/.exec(args);
+		if (sessionReport) return yesNo(sessionReport[1] === 'true' ? 'True' : 'False', w);
 		const m = /^ui=(True|False|None)[ ;]agents=(True|False|None)$/.exec(args);
 		if (m) {
 			const parts = [m[1] !== 'None' ? `${w.t('i2_sens_ui')}: ${yesNo(m[1], w)}` : null, m[2] !== 'None' ? `${w.t('i2_sens_ag')}: ${yesNo(m[2], w)}` : null];
