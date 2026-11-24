@@ -169,7 +169,13 @@ pub(super) async fn count_shown(
     for i in &items {
         let show = match i.profile_id.map(|pid| by_profile.get(&pid)) {
             None => true,
-            Some(Some(p)) => visible(i, p) && opens_document(&mut *conn, i, p).await?,
+            Some(Some(p)) => {
+                let show = visible(i, p) && opens_document(&mut *conn, i, p).await?;
+                if show && i.kind == ownhealth_imaging::import::REVIEW_KIND {
+                    p.record_read(&["read:records"]);
+                }
+                show
+            }
             Some(None) => false,
         };
         shown += i64::from(show);

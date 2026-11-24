@@ -17,6 +17,7 @@
 //! ([`WEARABLE_JOBS`]) is shown only to a caller who may read wearables on that profile; anyone else
 //! with a grant there sees the job with `result: null`.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Query, Request, State};
@@ -233,16 +234,6 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
     let mut tx = rt.pool.begin().await?;
     let perms = accessible_profiles(&mut tx, &caller.0).await?;
     let pids: Vec<String> = perms.iter().map(|p| p.profile.id.to_string()).collect();
-    let wearables: Vec<String> = perms
-        .iter()
-        .filter(|p| p.has("read:wearables"))
-        .map(|p| p.profile.id.to_string())
-        .collect();
-    let records: Vec<String> = perms
-        .iter()
-        .filter(|p| p.has("read:records"))
-        .map(|p| p.profile.id.to_string())
-        .collect();
     let rows = sqlx::query(
         "select id, kind, state, attempts, max_attempts, last_error, result, created_at, finished_at, \
          payload->>'profile_id' as profile_id, payload->>'filename' as filename, \
@@ -255,41 +246,52 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
     .bind(limit)
     .fetch_all(&mut *tx)
     .await?;
-    tx.commit().await?;
     let mut jobs = rows
         .iter()
         .map(|r| row_to_json(r).map(Value::Object))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut dicom_profiles = BTreeSet::new();
+    let mut dicom_jobs = Vec::new();
     for j in &mut jobs {
         pydantic_datetimes(j, &["created_at", "finished_at"]);
-        let wearable = j["kind"].as_str().is_some_and(|k| WEARABLE_JOBS.contains(&k));
-        if let Some(id) = j["profile_id"].as_str()
-            && let Some(index) = pids.iter().position(|pid| pid == id)
-        {
-            let scopes: &[&str] = if wearable { &["read:wearables"] } else { &[] };
-            perms[index].record_read(scopes);
-        }
-        let may_read = j["profile_id"]
+        let permission = j["profile_id"]
             .as_str()
-            .is_some_and(|p| wearables.iter().any(|w| w == p));
-        if wearable && !may_read {
+            .and_then(|id| pids.iter().position(|pid| pid == id))
+            .map(|i| &perms[i]);
+        let kind = j["kind"].as_str().unwrap_or_default();
+        let wearable = WEARABLE_JOBS.contains(&kind);
+        let dicom = kind == ownhealth_imaging::import::JOB;
+        if let Some(perm) = permission {
+            perm.record_read(if wearable { &["read:wearables"] } else { &[] });
+        }
+        if wearable && !permission.is_some_and(|p| p.has("read:wearables")) {
             j["result"] = Value::Null;
         }
-        // a CD's name and what its import found are the study's: read:records only, like the study
-        let dicom = j["kind"].as_str() == Some(ownhealth_imaging::import::JOB);
-        let may_read = j["profile_id"].as_str().is_some_and(|p| records.iter().any(|r| r == p));
-        if dicom
-            && may_read
-            && let Some(i) = j["profile_id"]
-                .as_str()
-                .and_then(|id| pids.iter().position(|pid| pid == id))
-        {
-            perms[i].record_read(&["read:records"]);
-        }
-        if dicom && !may_read {
-            j["result"] = Value::Null;
-            j["filename"] = Value::Null;
+        if dicom {
+            if let Some(perm) = permission.filter(|p| p.has("read:records")) {
+                perm.record_read(&["read:records"]);
+                dicom_profiles.insert(perm.profile.id);
+                dicom_jobs.push(j["id"].to_string());
+            } else {
+                j["result"] = Value::Null;
+                j["filename"] = Value::Null;
+                j["last_error"] = Value::Null;
+            }
         }
     }
+    if !dicom_jobs.is_empty() {
+        let mut audit = AuditEvent::new(caller.0.actor_kind(), "ui", "read");
+        audit.actor_id = caller.0.user_id;
+        audit.token_id = caller.0.token_id;
+        audit.tool = Some("GET /api/jobs".into());
+        if dicom_profiles.len() == 1 {
+            audit.profile_id = dicom_profiles.first().copied();
+        }
+        audit.resource_type = Some("job".into());
+        audit.rows_out = i32::try_from(dicom_jobs.len()).ok();
+        audit.resource_ids = Some(dicom_jobs);
+        write_audit(&mut tx, &audit).await?;
+    }
+    tx.commit().await?;
     Ok(Json(json!({"jobs": jobs})))
 }

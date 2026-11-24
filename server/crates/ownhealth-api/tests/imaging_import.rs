@@ -415,10 +415,12 @@ async fn a_dicom_import_job_shows_its_file_name_and_counts_only_to_those_who_may
     let (s, v) = post(&a, "alex", "/imaging/import", &[("profile", "alex")], &disc()).await?;
     assert_eq!(s, StatusCode::OK, "{v}");
     let job = v["job_id"].as_i64().ok_or_else(|| anyhow::anyhow!("no job: {v}"))?;
-    sqlx::query("update job set result = '{\"imported\": 1}'::jsonb where id = $1")
-        .bind(job)
-        .execute(&a.rt.pool)
-        .await?;
+    sqlx::query(
+        "update job set result = '{\"imported\": 1}'::jsonb, last_error = 'Synthetic study failed' where id = $1",
+    )
+    .bind(job)
+    .execute(&a.rt.pool)
+    .await?;
     // sam views alex's labs only
     narrow(&a, "sam", "alex", &["read:summary", "read:labs"]).await?;
     let (s, jobs) = a.get("sam", &format!("/jobs?ids={job}")).await?;
@@ -427,10 +429,47 @@ async fn a_dicom_import_job_shows_its_file_name_and_counts_only_to_those_who_may
     assert_eq!(seen["kind"], "import.dicom", "{jobs}");
     assert_eq!(seen["filename"], Value::Null, "{jobs}");
     assert_eq!(seen["result"], Value::Null, "{jobs}");
-    // alex reads records: he sees both
+    assert_eq!(seen.get("last_error"), Some(&Value::Null), "{jobs}");
+    // Alex reads records: he sees all three fields.
     let (_, jobs) = a.get("alex", &format!("/jobs?ids={job}")).await?;
     assert_eq!(jobs["jobs"][0]["filename"], "CD.zip", "{jobs}");
     assert_eq!(jobs["jobs"][0]["result"]["imported"], 1, "{jobs}");
+    assert_eq!(jobs["jobs"][0]["last_error"], "Synthetic study failed", "{jobs}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn round8_reading_dicom_job_details_writes_one_request_audit() -> R {
+    let a = imaging_app().await?;
+    let (status, v) = post(&a, "alex", "/imaging/import", &[("profile", "alex")], &disc()).await?;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let job = v["job_id"].as_i64().ok_or_else(|| anyhow::anyhow!("no job: {v}"))?;
+    let second: i64 =
+        sqlx::query_scalar("insert into job (kind, payload) select kind, payload from job where id = $1 returning id")
+            .bind(job)
+            .fetch_one(&a.rt.pool)
+            .await?;
+    let path = format!("/jobs?ids={job},{second}");
+    narrow(&a, "sam", "alex", &["read:summary"]).await?;
+    let (status, body) = a.get("sam", &path).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["jobs"].as_array().map(Vec::len), Some(2));
+    let (status, body) = a.get("alex", &path).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["jobs"][0]["filename"], "CD.zip", "{body}");
+    let audits: Vec<(Uuid, Option<Uuid>, Vec<String>)> = sqlx::query_as(
+        "select actor_id, profile_id, resource_ids from audit_event where tool = 'GET /api/jobs' and action = 'read'",
+    )
+    .fetch_all(&a.rt.pool)
+    .await?;
+    assert_eq!(
+        audits,
+        [(
+            a.family.user("alex"),
+            Some(a.family.profile("alex")),
+            vec![second.to_string(), job.to_string()],
+        )]
+    );
     Ok(())
 }
 
@@ -531,12 +570,26 @@ async fn hidden_imaging_items_do_not_take_up_page_slots() -> R {
     let first = item(&a, "carmen", "candidate_row", None, json!({})).await?;
     let second = item(&a, "carmen", "candidate_row", None, json!({})).await?;
     narrow(&a, "alex", "carmen", &["read:summary", "read:labs"]).await?;
-    for (offset, id) in [(0, first), (1, second)] {
+    sqlx::query(
+        "update review_item set created_at = case when id = $1 then '2026-01-01'::timestamptz \
+         else '2026-01-02'::timestamptz end where id in ($1, $2)",
+    )
+    .bind(first)
+    .bind(second)
+    .execute(&a.rt.pool)
+    .await?;
+    for (offset, expected) in [(0, vec![first, second]), (1, vec![second])] {
         let (status, body) = a
             .get("alex", &format!("/review?profile=carmen&limit=2&offset={offset}"))
             .await?;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["items"][0]["id"], id.to_string(), "{body}");
+        let items = body["items"].as_array().expect("items");
+        let ids: Vec<Value> = items.iter().map(|item| item["id"].clone()).collect();
+        assert_eq!(
+            ids,
+            expected.into_iter().map(|id| json!(id)).collect::<Vec<_>>(),
+            "{body}"
+        );
     }
     Ok(())
 }

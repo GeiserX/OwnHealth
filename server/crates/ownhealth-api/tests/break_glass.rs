@@ -2330,6 +2330,33 @@ async fn review_counts_hold_only_what_the_list_shows() -> R {
     Ok(())
 }
 
+#[tokio::test]
+async fn round8_counting_held_studies_through_break_glass_records_a_use_with_no_page() -> R {
+    let mut b = setup().await?;
+    held_study(&b).await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let mut sam = b.sam().await?;
+    let path = "/api/review?profile=alex&limit=0";
+    let review = sam.get(path).await?;
+    assert_eq!(review.status, 200, "{:?}", review.json);
+    assert_eq!(review.json, json!({"items": [], "open": 0, "withheld": 0}));
+
+    let id = b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
+    let before = record_uses(&b, id).await?;
+    let review = sam.get(path).await?;
+    assert_eq!(review.status, 200, "{:?}", review.json);
+    assert_eq!(review.json, json!({"items": [], "open": 1, "withheld": 0}));
+    let after = record_uses(&b, id).await?;
+    assert_eq!(after, (before.0 + 1, before.1 + 1));
+
+    b.grant_sam("guardian", &["read:summary", "read:records"]).await?;
+    let review = sam.get(path).await?;
+    assert_eq!(review.status, 200, "{:?}", review.json);
+    assert_eq!(review.json, json!({"items": [], "open": 1, "withheld": 0}));
+    assert_eq!(record_uses(&b, id).await?, after);
+    Ok(())
+}
+
 /// History rows keep the sensitivity check of current rows: a correction that drops a condition's
 /// sensitivity does not hand its sensitive first version to a reader without read:sensitive.
 #[tokio::test]
@@ -2431,11 +2458,15 @@ async fn job_read_through_break_glass(kind: &str, scope: &str, field: &str) -> R
     let job = alex_job(&b, kind).await?;
     let mut sam = b.sam().await?;
     let r = sam.get(&format!("/api/jobs?ids={job}")).await?;
-    assert_eq!(r.json["jobs"][0][field], Value::Null, "{:?}", r.json);
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["jobs"][0]["id"], job, "{:?}", r.json);
+    assert_eq!(r.json["jobs"][0].get(field), Some(&Value::Null), "{:?}", r.json);
     let id = b.open_for(b.env.user("sam"), &mut sam, json!([scope])).await?;
     let before = record_uses(&b, id).await?;
     let r = sam.get(&format!("/api/jobs?ids={job}")).await?;
     let after = record_uses(&b, id).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["jobs"][0]["id"], job, "{:?}", r.json);
     assert_ne!(r.json["jobs"][0][field], Value::Null, "{:?}", r.json);
     assert_eq!(
         after,
