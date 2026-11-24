@@ -9,9 +9,9 @@
 //! cleared, so importing it again runs the import instead of returning the old summary.
 //!
 //! Samples another still-active export also holds belong to whichever export brought them first
-//! (Apple Health, CGM exports) or last (Gadgetbridge, whose exports are cumulative); they leave with
-//! that one. A retracted Gadgetbridge or CGM export queues the profile's other active exports of its
-//! kind for import again, so what they hold comes back.
+//! (Apple Health, CGM and Garmin exports) or last (Gadgetbridge, whose exports are cumulative); they
+//! leave with that one. A retracted Gadgetbridge, CGM or Garmin export queues the profile's other
+//! active exports of its kind for import again, so what they hold comes back.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -108,9 +108,14 @@ pub fn retract_document_facts<'c>(
 }
 
 /// The upload kinds whose other exports are imported again when one is retracted, with the flag their
-/// import writes: Gadgetbridge (samples adopted with `Conflict::Adopt`) and the LibreView and Clarity
-/// CSV exports (one job for both; readings kept by the first file with `Conflict::Keep`).
-const REIMPORTED: [(&str, &str); 2] = [("gadgetbridge_db", "gadgetbridge"), ("libreview_csv", "cgm_csv")];
+/// import writes: Gadgetbridge (samples adopted with `Conflict::Adopt`), the LibreView and Clarity
+/// CSV exports (one job for both; readings kept by the first file with `Conflict::Keep`) and Garmin
+/// account exports (readings kept by the first export, from the readings document each one stores).
+const REIMPORTED: [(&str, &str); 3] = [
+    ("gadgetbridge_db", "gadgetbridge"),
+    ("libreview_csv", "cgm_csv"),
+    ("garmin_zip", "garmin"),
+];
 
 /// The exports of the same kind and profile that are still active are imported again, so the samples
 /// the retracted export held in their place come back with them.
@@ -129,7 +134,7 @@ pub async fn reimport_kind(conn: &mut PgConnection, document_id: Uuid, kind: &st
     let Some(job) = ownhealth_core::documents::job_kind(kind) else {
         return Ok(());
     };
-    let mime = ownhealth_core::documents::mime(kind).unwrap_or_default();
+    let mime = ownhealth_core::documents::stored_mime(kind).unwrap_or_default();
     let others: Vec<Uuid> = sqlx::query_scalar(
         "update document o set flags = o.flags - 'import' from document d where d.id = $1 and d.mime = $2 \
          and o.mime = $2 and o.profile_id = d.profile_id and o.id <> d.id and o.status = 'active' \

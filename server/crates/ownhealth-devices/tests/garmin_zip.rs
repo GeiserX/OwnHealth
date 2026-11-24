@@ -9,10 +9,12 @@ mod common;
 use std::io::{Cursor, Write};
 
 use common::{Env, R};
+use ownhealth_core::arrive::{Arrival, arrive};
 use ownhealth_core::blobs::BlobOwner;
-use ownhealth_core::documents::{StoredFile, dispatch_upload};
+use ownhealth_core::documents::{StoredFile, dispatch_upload, sniff};
 use ownhealth_core::jobs;
 use serde_json::{Value, json};
+use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 
 const RUN: &[u8] = include_bytes!("../../../../fixtures/fit/lucia-run-gps.fit");
@@ -22,6 +24,8 @@ fn zip(members: &[(&str, &[u8])]) -> anyhow::Result<Vec<u8>> {
     for (name, bytes) in members {
         if name.ends_with('/') {
             writer.add_directory(*name, SimpleFileOptions::default())?;
+        } else if let Some(target) = bytes.strip_prefix(b"symlink:") {
+            writer.add_symlink(*name, std::str::from_utf8(target)?, SimpleFileOptions::default())?;
         } else {
             writer.start_file(*name, SimpleFileOptions::default())?;
             writer.write_all(bytes)?;
@@ -34,7 +38,7 @@ fn history(root: &str) -> anyhow::Result<Vec<u8>> {
     let deeper = zip(&[("held.txt", b"never read")])?;
     let fit_zip = zip(&[
         ("rides/morning.fit", RUN),
-        ("rides/broken.fit", b"not FIT"),
+        ("rides/lucia.rivera@example.org_7.fit", b"not FIT"),
         ("rides/note.txt", b"not a workout"),
         ("rides/extra.zip", &deeper),
         ("../escape.fit", RUN),
@@ -54,6 +58,8 @@ fn history(root: &str) -> anyhow::Result<Vec<u8>> {
         ("DI-Connect-Wellness/123_userSettings.json", br#"{"private":"GPS and account marker"}"#),
         ("DI-Connect-Wellness/124_sleepData.json", b"broken JSON"),
         ("DI-Connect-Aggregator/UDSFile_empty.json", br#"[{"retro":false}]"#),
+        ("DI-Connect-Fitness/lucia.rivera@example.org_0_summarizedActivities.json", b"[]"),
+        ("DI-Connect-Wellness/link_sleepData.json", b"symlink:123_sleepData.json"),
     ];
     let names: Vec<_> = members
         .iter()
@@ -106,19 +112,22 @@ async fn uploads_garmin_history_and_accounts_for_every_file() -> R {
         let profile = env.fam.profile("lucia");
         assert_eq!(out["accepted"], 41, "{out}");
         let details = &out["garmin"];
-        assert_eq!(details["files_imported"], 7);
+        // five JSON files and one FIT file: the UploadedFiles part that holds it is no file of its own
+        assert_eq!(details["files_imported"], 6);
         assert_eq!(details["gps_left_out"], true);
         let omitted = details["not_imported"].as_array().expect("omitted files");
-        assert_eq!(omitted.len(), 8, "{omitted:?}");
+        // a folder is no file, so it is not listed
+        assert_eq!(omitted.len(), 9, "{omitted:?}");
         for (name, reason) in [
-            ("DI-Connect-Empty/", "directory"),
             ("userSettings.json", "unsupported"),
             ("124_sleepData.json", "invalid_json"),
             ("UDSFile_empty.json", "no_readings"),
-            ("broken.fit", "invalid_fit"),
+            ("UploadedFiles_0-_Part1.zip / rides/<email>_7.fit", "invalid_fit"),
             ("note.txt", "unsupported"),
             ("extra.zip", "nesting_limit"),
             ("escape.fit", "unsafe_path"),
+            ("DI-Connect-Fitness/<email>_0_summarizedActivities.json", "unsupported"),
+            ("link_sleepData.json", "unsafe_path"),
         ] {
             assert!(
                 omitted
@@ -166,8 +175,10 @@ async fn uploads_garmin_history_and_accounts_for_every_file() -> R {
                 .expect("archive member list")
                 .iter()
                 .any(|m| {
-                    m.as_str()
-                        .is_some_and(|name| name.ends_with("UploadedFiles_0-_Part1.zip / rides/morning.fit"))
+                    m["fit"] == true
+                        && m["name"]
+                            .as_str()
+                            .is_some_and(|name| name.ends_with("UploadedFiles_0-_Part1.zip / rides/morning.fit"))
                 })
         );
         for reading in &entries[1..] {
@@ -179,6 +190,18 @@ async fn uploads_garmin_history_and_accounts_for_every_file() -> R {
             }
         }
         assert!(!std::str::from_utf8(&kept)?.contains("GPS and account marker"));
+        // the account's email address is in no stored name: not in the readings, the flags or the result
+        let flags: Value = sqlx::query_scalar("select flags from document where id = $1")
+            .bind(doc)
+            .fetch_one(&env.db.pool)
+            .await?;
+        for text in [
+            std::str::from_utf8(&kept)?.to_string(),
+            flags.to_string(),
+            out.to_string(),
+        ] {
+            assert!(!text.contains("example.org"), "{text}");
+        }
 
         let (again, _) = upload(&env, &archive).await?;
         let repeated = result(&env, again).await?;
@@ -186,5 +209,157 @@ async fn uploads_garmin_history_and_accounts_for_every_file() -> R {
         assert_eq!(repeated["accepted"], 0);
         assert_eq!(repeated["reasons"]["duplicate"], 41);
     }
+    Ok(())
+}
+
+/// Each file job of an export in `env` drained; the state, result and error of job `id`.
+async fn outcome(env: &Env, id: i64) -> anyhow::Result<(String, Option<Value>, Option<String>)> {
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    Ok(
+        sqlx::query_as("select state, result, last_error from job where id = $1")
+            .bind(id)
+            .fetch_one(&env.db.pool)
+            .await?,
+    )
+}
+
+fn uds(days: &[(&str, i64)]) -> Vec<u8> {
+    let rows: Vec<String> = days
+        .iter()
+        .map(|(d, s)| format!(r#"{{"calendarDate":"{d}","totalSteps":{s}}}"#))
+        .collect();
+    format!("[{}]", rows.join(",")).into_bytes()
+}
+
+const UDS: &str = "DI_CONNECT/DI-Connect-Aggregator/UDSFile_1.json";
+
+#[test]
+fn an_apple_health_marker_wins_over_a_garmin_member_in_either_order() -> R {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("a.zip");
+    for order in [
+        [(UDS, b"[]" as &[u8]), ("apple_health_export/export.xml", b"<x/>")],
+        [("apple_health_export/export.xml", b"<x/>" as &[u8]), (UDS, b"[]")],
+    ] {
+        std::fs::write(&path, zip(&order)?)?;
+        assert_eq!(sniff("a.zip", b"PK\x03\x04", Some(&path)), "apple_health_zip");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_garmin_zip_from_an_inbox_keeps_its_channel() -> R {
+    let env = Env::new().await?;
+    let profile = env.fam.profile("lucia");
+    let archive = zip(&[(UDS, &uds(&[("2024-01-04", 6200)]))])?;
+    let sha = env.blobs.put_bytes(BlobOwner::Profile(profile), &archive)?;
+    let mut c = env.db.pool.acquire().await?;
+    let arrival = Arrival {
+        filename: Some("garmin.zip"),
+        ..Arrival::new(env.fam.household_id, profile, "folder", &sha, archive.len() as i64)
+    };
+    arrive(&mut c, &env.blobs, &arrival).await?;
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    let channels: Vec<(String, String)> = sqlx::query_as(
+        "select d.mime, s.channel from document d join document_source s on s.document_id = d.id \
+         where d.profile_id = $1 and d.doc_type = 'wearables'",
+    )
+    .bind(profile)
+    .fetch_all(&env.db.pool)
+    .await?;
+    assert_eq!(channels, [("application/x-ndjson".to_string(), "folder".to_string())]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_run_again_after_its_commit_returns_the_same_answer() -> R {
+    let env = Env::new().await?;
+    let (id, _) = upload(&env, &zip(&[(UDS, &uds(&[("2024-01-04", 6200)]))])?).await?;
+    let first = result(&env, id).await?;
+    // the worker stopped after the commit, before the job was marked done: the upload is gone by now
+    sqlx::query("update job set state = 'queued', locked_until = null, locked_by = null where id = $1")
+        .bind(id)
+        .execute(&env.db.pool)
+        .await?;
+    assert_eq!(result(&env, id).await?, first);
+    Ok(())
+}
+
+async fn steps(env: &Env) -> anyhow::Result<Vec<(String, f32, Uuid)>> {
+    Ok(sqlx::query_as(
+        "select to_char(t at time zone 'UTC', 'YYYY-MM-DD'), v, document_id from wearable_sample \
+         where profile_id = $1 and metric = 'steps' order by t",
+    )
+    .bind(env.fam.profile("lucia"))
+    .fetch_all(&env.db.pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn retracting_an_older_export_keeps_the_days_a_newer_export_also_holds() -> R {
+    let env = Env::new().await?;
+    let old = zip(&[(UDS, &uds(&[("2024-01-04", 6200)]))])?;
+    let new = zip(&[(UDS, &uds(&[("2024-01-04", 6200), ("2024-01-05", 7000)]))])?;
+    let (a, _) = upload(&env, &old).await?;
+    let old_doc: Uuid = result(&env, a).await?["document_id"]
+        .as_str()
+        .expect("document")
+        .parse()?;
+    let (b, _) = upload(&env, &new).await?;
+    let newer = result(&env, b).await?;
+    assert_eq!(newer["reasons"]["duplicate"], 1, "{newer}");
+    let new_doc: Uuid = newer["document_id"].as_str().expect("document").parse()?;
+
+    let mut tx = env.db.pool.begin().await?;
+    ownhealth_ingest_structured::retract::retract_document_facts(&mut tx, old_doc, "test").await?;
+    sqlx::query("update document set status = 'retracted' where id = $1")
+        .bind(old_doc)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    assert_eq!(
+        steps(&env).await?,
+        [
+            ("2024-01-04".to_string(), 6200.0, new_doc),
+            ("2024-01-05".to_string(), 7000.0, new_doc)
+        ]
+    );
+    // the newer export keeps its summary of the file
+    let flags: Value = sqlx::query_scalar("select flags from document where id = $1")
+        .bind(new_doc)
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(flags["garmin"]["files_imported"], 1, "{flags}");
+    assert_eq!(flags["import"]["accepted"], 1, "{flags}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_archive_with_two_members_of_one_name_is_refused() -> R {
+    let env = Env::new().await?;
+    let other = UDS.replace("UDSFile_1", "UDSFile_2");
+    let mut archive = zip(&[
+        (UDS, &uds(&[("2024-01-04", 6200)])),
+        (&other, &uds(&[("2024-01-04", 9999)])),
+    ])?;
+    // the writer refuses a repeated name: rename the second member in its local and central headers
+    let (from, to) = (b"UDSFile_2.json", b"UDSFile_1.json");
+    let mut renamed = 0;
+    for at in 0..archive.len() - from.len() {
+        if &archive[at..at + from.len()] == from {
+            archive[at..at + from.len()].copy_from_slice(to);
+            renamed += 1;
+        }
+    }
+    assert_eq!(renamed, 2);
+    let (id, _) = upload(&env, &archive).await?;
+    let (state, _, error) = outcome(&env, id).await?;
+    assert_ne!(state, "done");
+    assert!(
+        error.as_deref().is_some_and(|e| e.contains("garmin_zip_unreadable")),
+        "{error:?}"
+    );
+    assert!(steps(&env).await?.is_empty());
     Ok(())
 }

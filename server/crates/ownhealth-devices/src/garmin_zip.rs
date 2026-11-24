@@ -2,17 +2,21 @@
 //! basenames and UploadedFiles ZIPs contain the FIT activity files. Reading uses archive indexes
 //! and a private temporary file for each supported inner ZIP. Member names are never disk paths.
 //! The stored wearables document contains only projected readings and their archive provenance.
+//! A run with a `document_id` imports that stored document again (a retraction of another export, or
+//! a move to another profile), as the zip itself is not kept.
 
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, BufRead, Read, Seek, Write};
 
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};
 use ownhealth_core::blobs::BlobOwner;
-use ownhealth_core::documents::{GarminMember, WEARABLES_DOC_TYPE};
+use ownhealth_core::documents::{GARMIN_READINGS_MIME, GarminMember, WEARABLES_DOC_TYPE};
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::jobs::{self, Job, JobContext, JobError};
 use ownhealth_core::{Error, Result};
+use ownhealth_ingest_structured::fhir::mark_imported;
 use ownhealth_ingest_structured::jobs::document_of_type;
-use serde::Serialize;
+use ownhealth_ingest_structured::wearables::METRICS;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -34,7 +38,15 @@ const MAX_READINGS: usize = 500_000;
 
 const UNREADABLE: &str = "garmin_zip_unreadable";
 const LIMIT: &str = "garmin_zip_limit";
+/// The reason a file past the expanded-size or reading budget is listed with: the files before it
+/// still import.
+const OVER_BUDGET: &str = "limit";
+/// What a member name shows instead of the account's email address.
+const EMAIL: &str = "<email>";
 
+/// The member count and the name bytes refuse the whole archive (they bound the work of listing it).
+/// The expanded bytes and the readings are spent by the files the import reads: a file that does not
+/// fit is listed, and the files before it still import.
 #[derive(Default)]
 struct Budget {
     members: usize,
@@ -52,21 +64,34 @@ impl Budget {
         Ok(())
     }
 
-    fn add_member(&mut self, name_bytes: usize, expanded: u64) -> Result<()> {
-        self.expanded = self.expanded.saturating_add(expanded);
+    fn add_name(&mut self, name_bytes: usize) -> Result<()> {
         self.names_bytes = self.names_bytes.saturating_add(name_bytes);
-        if self.expanded > MAX_EXPANDED || self.names_bytes > MAX_NAMES_BYTES {
+        if self.names_bytes > MAX_NAMES_BYTES {
             return Err(Error::Upload(LIMIT.into()));
         }
         Ok(())
     }
 
-    fn add_readings(&mut self, count: usize) -> Result<()> {
-        self.readings += count;
-        if self.readings > MAX_READINGS {
-            return Err(Error::Upload(LIMIT.into()));
+    /// Spend `size` expanded bytes when they fit; false (nothing spent) when they do not.
+    fn spend_expanded(&mut self, size: u64) -> bool {
+        match self.expanded.checked_add(size).filter(|n| *n <= MAX_EXPANDED) {
+            Some(n) => {
+                self.expanded = n;
+                true
+            }
+            None => false,
         }
-        Ok(())
+    }
+
+    /// Spend `count` readings when they fit; false (nothing spent) when they do not.
+    fn spend_readings(&mut self, count: usize) -> bool {
+        match self.readings.checked_add(count).filter(|n| *n <= MAX_READINGS) {
+            Some(n) => {
+                self.readings = n;
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -101,17 +126,16 @@ impl Report {
         member: String,
         fit: bool,
         samples: std::result::Result<Vec<Sample>, &'static str>,
-    ) -> Result<()> {
+    ) {
         match samples {
-            Ok(samples) if !samples.is_empty() => {
-                budget.add_readings(samples.len())?;
+            Ok(samples) if samples.is_empty() => self.omit(member, "no_readings"),
+            Ok(samples) if !budget.spend_readings(samples.len()) => self.omit(member, OVER_BUDGET),
+            Ok(samples) => {
                 self.files_imported += 1;
                 self.readings.push(Readings { member, fit, samples });
             }
-            Ok(_) => self.omit(member, "no_readings"),
             Err(reason) => self.omit(member, reason),
         }
-        Ok(())
     }
 
     fn details(&self) -> Value {
@@ -157,6 +181,44 @@ fn unsafe_name(name: &str) -> bool {
         || name.split(['/', '\\']).any(|part| part == "..")
 }
 
+/// Garmin names some files after the account's email address (`<email>_0_summarizedActivities.json`,
+/// `<email>_<activity id>.fit`). A path part shaped like `name@domain.tld` up to the next `_` is
+/// replaced, so the address is never stored or shown.
+fn hide_email(name: &str) -> String {
+    name.split_inclusive(['/', '\\'])
+        .map(|part| {
+            let Some(at) = part.find('@').filter(|at| *at > 0) else {
+                return part.to_string();
+            };
+            let end = part[at..].find(['_', '/', '\\']).map_or(part.len(), |i| at + i);
+            if part[at..end].contains('.') {
+                format!("{EMAIL}{}", &part[end..])
+            } else {
+                part.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Read a member into `out`, at most one byte past its declared size even if the header lies. True
+/// when exactly `size` bytes came; a read error is a broken member (false), a write error is returned.
+fn read_member(reader: impl Read, size: u64, out: &mut impl Write) -> io::Result<bool> {
+    let mut bounded = reader.take(size.saturating_add(1));
+    let mut read = 0;
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        match bounded.read(&mut chunk) {
+            Ok(0) => return Ok(read == size),
+            Ok(n) => {
+                read += n as u64;
+                out.write_all(&chunk[..n])?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return Ok(false),
+        }
+    }
+}
+
 fn zip_error(error: ZipError) -> Error {
     match error {
         ZipError::Io(e) if e.kind() != io::ErrorKind::UnexpectedEof => e.into(),
@@ -174,8 +236,9 @@ fn open(reader: impl Read + Seek) -> Result<ZipArchive<impl Read + Seek>> {
     Ok(zip)
 }
 
-/// Traverse one outer ZIP and at most one UploadedFiles ZIP below it. The shared budget counts
-/// headers and declared expansion across both levels, including files the importer does not use.
+/// Traverse one outer ZIP and at most one UploadedFiles ZIP below it. The shared budget counts the
+/// members and their names across both levels, and the expanded bytes of every file it reads: an
+/// UploadedFiles part's own bytes and then its members' (both are unpacked).
 fn scan<R: Read + Seek>(
     zip: &mut ZipArchive<R>,
     parent: Option<&str>,
@@ -190,15 +253,19 @@ fn scan<R: Read + Seek>(
         let display = decoded
             .clone()
             .unwrap_or_else(|_| String::from_utf8_lossy(header.name_raw()));
-        budget.add_member(display.len() + parent.map_or(0, |p| p.len() + 3), size)?;
+        budget.add_name(display.len() + parent.map_or(0, |p| p.len() + 3))?;
         let mut member = parent.map_or_else(String::new, |p| format!("{p} / "));
-        member.extend(display.chars().map(|c| if c.is_control() { '\u{fffd}' } else { c }));
+        let shown: String = display
+            .chars()
+            .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+            .collect();
+        member.push_str(&hide_email(&shown));
         if decoded.is_err() || unsafe_name(&display) || header.is_symlink() {
             report.omit(member, "unsafe_path");
             continue;
         }
+        // a folder is no file: nothing to import or list
         if header.is_dir() {
-            report.omit(member, "directory");
             continue;
         }
         let Some(kind) = MemberKind::detect(&display, parent.is_some()) else {
@@ -214,54 +281,43 @@ fn scan<R: Read + Seek>(
             report.omit(member, "member_too_large");
             continue;
         }
+        if !budget.spend_expanded(size) {
+            report.omit(member, OVER_BUDGET);
+            continue;
+        }
         let Ok(file) = zip.by_index(index) else {
             report.omit(member, "invalid_member");
             continue;
         };
-        // Read at most one byte past the declared size, even if the header lies.
-        let mut bounded = file.take(size + 1);
         if matches!(kind, MemberKind::FitArchive) {
             let mut local = tempfile::tempfile()?;
-            let mut read = 0;
-            // Separate read errors (a broken member) from disk write errors (retryable).
-            let mut chunk = [0; 64 * 1024];
-            let valid = loop {
-                match bounded.read(&mut chunk) {
-                    Ok(0) => break read == size,
-                    Ok(n) => {
-                        read += n as u64;
-                        local.write_all(&chunk[..n])?;
-                    }
-                    Err(_) => break false,
-                }
-            };
-            if valid {
-                local.rewind()?;
-                match open(local) {
-                    Ok(mut inner) => {
-                        let before = report.files_imported;
-                        scan(&mut inner, Some(&member), budget, report)?;
-                        if report.files_imported == before {
-                            report.omit(member, "no_readings");
-                        } else {
-                            report.files_imported += 1;
-                        }
-                    }
-                    Err(Error::Upload(_)) => report.omit(member, "invalid_zip"),
-                    Err(e) => return Err(e),
-                }
-            } else {
+            // a read error is a broken member; a disk write error may heal on a retry
+            if !read_member(file, size, &mut local)? {
                 report.omit(member, "invalid_member");
+                continue;
+            }
+            local.rewind()?;
+            match open(local) {
+                Ok(mut inner) => {
+                    // the part is a container, not a file of readings: its FIT files are counted
+                    let before = report.files_imported;
+                    scan(&mut inner, Some(&member), budget, report)?;
+                    if report.files_imported == before {
+                        report.omit(member, "no_readings");
+                    }
+                }
+                Err(Error::Upload(_)) => report.omit(member, "invalid_zip"),
+                Err(e) => return Err(e),
             }
             continue;
         }
         let mut bytes = Vec::new();
-        if bounded.read_to_end(&mut bytes).is_err() || bytes.len() as u64 != size {
+        if !read_member(file, size, &mut bytes)? {
             report.omit(member, "invalid_member");
             continue;
         }
         let samples = match kind {
-            MemberKind::Json(kind) => json_samples(kind, &bytes, MAX_READINGS - budget.readings)?,
+            MemberKind::Json(kind) => json_samples(kind, &bytes, MAX_READINGS - budget.readings),
             MemberKind::Fit => match std::panic::catch_unwind(|| fit::archive_activity(&bytes)) {
                 Ok(Ok((samples, gps))) => {
                     report.gps_left_out |= gps;
@@ -271,7 +327,7 @@ fn scan<R: Read + Seek>(
             },
             MemberKind::FitArchive => unreachable!(),
         };
-        report.add(budget, member, matches!(kind, MemberKind::Fit), samples)?;
+        report.add(budget, member, matches!(kind, MemberKind::Fit), samples);
     }
     Ok(())
 }
@@ -436,33 +492,81 @@ fn row_samples(kind: GarminMember, row: &Value, latest: DateTime<Utc>, samples: 
     }
 }
 
-fn json_samples(
-    kind: GarminMember,
-    data: &[u8],
-    remaining: usize,
-) -> Result<std::result::Result<Vec<Sample>, &'static str>> {
+/// The readings of one JSON member; `limit` as soon as they pass `remaining` (the reading budget left),
+/// so a huge file is never held in full.
+fn json_samples(kind: GarminMember, data: &[u8], remaining: usize) -> std::result::Result<Vec<Sample>, &'static str> {
     let Ok(rows) = serde_json::from_slice::<Vec<Value>>(data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data)) else {
-        return Ok(Err("invalid_json"));
+        return Err("invalid_json");
     };
     let latest = Utc::now() + Duration::days(1);
     let mut samples = Vec::new();
     for row in &rows {
         row_samples(kind, row, latest, &mut samples);
         if samples.len() > remaining {
-            return Err(Error::Upload(LIMIT.into()));
+            return Err(OVER_BUDGET);
         }
     }
-    Ok(Ok(samples))
+    Ok(samples)
 }
 
-#[derive(Serialize)]
-struct Reading {
+const READINGS_FORMAT: &str = "ownhealth.garmin-readings/1";
+
+/// One line of the stored document after its header; `member` indexes the header's `members`.
+#[derive(Serialize, Deserialize)]
+struct Reading<M> {
     member: usize,
-    metric: &'static str,
+    metric: M,
     start: DateTime<Utc>,
     end: Option<DateTime<Utc>>,
     offset_min: Option<i16>,
     value: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredMember {
+    name: String,
+    fit: bool,
+}
+
+/// Read the readings back from a stored document (the JSON lines `prepare` wrote), grouped by member.
+fn read_stored(reader: impl Read) -> Result<Vec<Readings>> {
+    let bad = |what: &str| Error::Invalid(format!("not a stored Garmin readings file: {what}"));
+    let mut lines = io::BufReader::new(reader).lines();
+    let header: Value = serde_json::from_str(&lines.next().ok_or_else(|| bad("empty"))??).map_err(|_| bad("header"))?;
+    if header["format"] != READINGS_FORMAT {
+        return Err(bad("format"));
+    }
+    let members: Vec<StoredMember> = serde_json::from_value(header["members"].clone()).map_err(|_| bad("members"))?;
+    let mut groups: Vec<Readings> = members
+        .into_iter()
+        .map(|m| Readings {
+            member: m.name,
+            fit: m.fit,
+            samples: Vec::new(),
+        })
+        .collect();
+    for line in lines {
+        let line = line?;
+        if line.is_empty() {
+            continue;
+        }
+        let r: Reading<String> = serde_json::from_str(&line).map_err(|_| bad("reading"))?;
+        let metric = METRICS
+            .iter()
+            .find(|m| m.0 == r.metric)
+            .map(|m| m.0)
+            .ok_or_else(|| bad("metric"))?;
+        let group = groups.get_mut(r.member).ok_or_else(|| bad("member"))?;
+        group.samples.push(Sample {
+            metric,
+            t: r.start,
+            t_end: r.end,
+            v: r.value,
+            tz: r.offset_min,
+            source: 0,
+        });
+    }
+    Ok(groups)
 }
 
 fn prepare(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<(Report, Option<String>)> {
@@ -475,10 +579,17 @@ fn prepare(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<(Report, Opt
     let mut file = tempfile::tempfile()?;
     {
         let mut writer = io::BufWriter::new(&mut file);
-        let members: Vec<_> = report.readings.iter().map(|group| &group.member).collect();
+        let members: Vec<_> = report
+            .readings
+            .iter()
+            .map(|group| StoredMember {
+                name: group.member.clone(),
+                fit: group.fit,
+            })
+            .collect();
         serde_json::to_writer(
             &mut writer,
-            &json!({"format": "ownhealth.garmin-readings/1", "archive_sha256": sha, "members": members}),
+            &json!({"format": READINGS_FORMAT, "archive_sha256": sha, "members": members}),
         )
         .map_err(io::Error::other)?;
         writer.write_all(b"\n")?;
@@ -512,6 +623,7 @@ async fn write(
     doc: Uuid,
     readings: Vec<Readings>,
     details: &Value,
+    source_id: Option<Uuid>,
 ) -> Result<ImportSummary> {
     let mut summary = ImportSummary::new(doc.to_string());
     let start = readings.iter().flat_map(|g| g.samples.iter().map(|s| s.t)).min();
@@ -530,7 +642,7 @@ async fn write(
         if readings.is_empty() {
             continue;
         }
-        let source = store::device_source(&mut *conn, profile, PROVIDER, Some(label), None, None).await?;
+        let source = store::device_source(&mut *conn, profile, PROVIDER, Some(label), None, source_id).await?;
         for reading in &mut readings {
             reading.source = source;
         }
@@ -543,17 +655,75 @@ async fn write(
     .bind(doc)
     .bind(start)
     .bind(details)
-    .execute(conn)
+    .execute(&mut *conn)
     .await?;
     summary.accepted = written.new;
     summary.skipped = written.duplicate();
     if summary.skipped > 0 {
         summary.reasons.insert("duplicate".into(), summary.skipped);
     }
+    // the summary marks the document imported: a retraction of another export clears it to run again
+    mark_imported(conn, doc, &summary, None).await?;
     Ok(summary)
 }
 
+/// Import a stored readings document again: after a retraction of another Garmin export of the profile
+/// (the readings it held in this one's place come back), or after a move to another profile.
+async fn import_document(ctx: &JobContext, job: &Job, source_id: Option<Uuid>) -> jobs::HandlerResult {
+    let doc = job.uuid("document_id")?;
+    let mut tx = ctx.pool.begin().await?;
+    let row: Option<(Option<Uuid>, String, Value, String)> = sqlx::query_as(
+        "select profile_id, encode(blob_sha256, 'hex'), flags, status from document where id = $1 for update",
+    )
+    .bind(doc)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((profile, sha, flags, status)) = row else {
+        return Err(JobError::permanent("the Garmin document is gone"));
+    };
+    let mut summary = ImportSummary::new(doc.to_string());
+    let details = flags.get("garmin").cloned().unwrap_or_else(|| json!({}));
+    if status != "active" {
+        // retracted while its run waited in the queue: it brings nothing back
+        summary.reasons.insert("retracted".into(), 1);
+    } else if let Some(done) = flags.get("import").filter(|d| d.is_object()) {
+        // imported since this run was queued (a retried job): the stored summary
+        let n = |k: &str| done.get(k).and_then(Value::as_i64).unwrap_or(0);
+        (summary.accepted, summary.queued, summary.skipped) = (n("accepted"), n("queued"), n("skipped"));
+        summary.reasons = done
+            .get("reasons")
+            .and_then(Value::as_object)
+            .map(|m| m.iter().map(|(k, c)| (k.clone(), c.as_i64().unwrap_or(0))).collect())
+            .unwrap_or_default();
+    } else {
+        let profile = profile.ok_or_else(|| JobError::permanent("the Garmin document has no profile"))?;
+        let blobs = ctx.blobs.clone();
+        let readings =
+            tokio::task::spawn_blocking(move || read_stored(blobs.open_seek(BlobOwner::Profile(profile), &sha)?))
+                .await
+                .map_err(|e| JobError::from(Error::Other(e.into())))?
+                .map_err(|e| match e {
+                    Error::Invalid(m) => JobError::permanent(m),
+                    other => JobError::from(other),
+                })?;
+        summary = write(&mut tx, profile, doc, readings, &details, source_id).await?;
+    }
+    tx.commit().await?;
+    let mut out = summary.to_value();
+    out["garmin"] = details;
+    Ok(Some(out))
+}
+
 async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
+    let channel = job
+        .str("channel")
+        .filter(|c| !c.is_empty())
+        .unwrap_or("upload")
+        .to_string();
+    let source_id = job.str("source_id").and_then(|s| Uuid::parse_str(s).ok());
+    if ownhealth_ingest_structured::py::truthy(job.payload.get("document_id")) {
+        return import_document(&ctx, &job, source_id).await;
+    }
     let profile = job.uuid("profile_id")?;
     let sha = job.str("blob_sha256").ok_or_else(|| JobError::permanent(UNREADABLE))?;
 
@@ -591,12 +761,12 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
             &mut tx,
             &ctx.blobs,
             &payload,
-            "application/x-ndjson",
-            "upload",
+            GARMIN_READINGS_MIME,
+            &channel,
             WEARABLES_DOC_TYPE,
         )
         .await?;
-        write(&mut tx, profile, doc, report.readings, &details)
+        write(&mut tx, profile, doc, report.readings, &details, source_id)
             .await?
             .to_value()
     } else {
@@ -628,9 +798,163 @@ mod tests {
         budget.add_members(2)?;
         assert!(matches!(budget.add_members(1), Err(Error::Upload(code)) if code == LIMIT));
 
-        budget.add_member(1, MAX_EXPANDED - 1)?;
-        budget.add_member(1, 1)?;
-        assert!(matches!(budget.add_member(1, 1), Err(Error::Upload(code)) if code == LIMIT));
+        budget.add_name(MAX_NAMES_BYTES - 1)?;
+        budget.add_name(1)?;
+        assert!(matches!(budget.add_name(1), Err(Error::Upload(code)) if code == LIMIT));
+        Ok(())
+    }
+
+    fn steps(n: usize) -> Vec<Sample> {
+        let t = crate::day_start(NaiveDate::from_ymd_opt(2024, 1, 4).expect("date"));
+        (0..n)
+            .map(|i| Sample {
+                metric: "steps",
+                t: t + Duration::days(i as i64),
+                t_end: None,
+                v: 1.0,
+                tz: None,
+                source: 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_file_past_the_expanded_or_reading_budget_is_listed_and_the_files_before_it_import() {
+        let mut budget = Budget::default();
+        assert!(budget.spend_expanded(MAX_EXPANDED - 1));
+        assert!(!budget.spend_expanded(2));
+        assert!(!budget.spend_expanded(u64::MAX));
+        assert!(budget.spend_expanded(1));
+        assert!(!budget.spend_expanded(1));
+
+        let mut report = Report::default();
+        budget.readings = MAX_READINGS - 2;
+        report.add(&mut budget, "a.json".into(), false, Ok(steps(3)));
+        report.add(&mut budget, "b.json".into(), false, Ok(steps(2)));
+        report.add(&mut budget, "c.json".into(), false, Ok(steps(1)));
+        assert_eq!(report.files_imported, 1);
+        assert_eq!(report.readings[0].member, "b.json");
+        let left: Vec<_> = report
+            .not_imported
+            .iter()
+            .map(|o| (o.member.as_str(), o.reason))
+            .collect();
+        assert_eq!(left, [("a.json", OVER_BUDGET), ("c.json", OVER_BUDGET)]);
+    }
+
+    #[test]
+    fn a_json_file_stops_reading_at_the_reading_budget() {
+        let data = br#"[{"calendarDate":"2024-01-04","totalSteps":1},{"calendarDate":"2024-01-05","totalSteps":2}]"#;
+        assert_eq!(json_samples(GarminMember::Daily, data, 1).err(), Some(OVER_BUDGET));
+        assert_eq!(json_samples(GarminMember::Daily, data, 2).map(|s| s.len()), Ok(2));
+    }
+
+    fn rows(kind: GarminMember, row: Value) -> Vec<(&'static str, f64)> {
+        let mut samples = Vec::new();
+        row_samples(kind, &row, Utc::now(), &mut samples);
+        samples.iter().map(|s| (s.metric, s.v)).collect()
+    }
+
+    #[test]
+    fn a_sleep_over_two_days_or_a_pressure_with_diastolic_at_or_over_systolic_is_no_reading() {
+        let sleep = |end: &str| {
+            json!({"sleepStartTimestampGMT": "2024-01-01T22:00:00Z", "sleepEndTimestampGMT": end,
+                   "sleepTimeSeconds": 25200})
+        };
+        assert_eq!(
+            rows(GarminMember::Sleep, sleep("2024-01-02T06:00:00Z")),
+            [("sleep_in_bed", 480.0), ("sleep_asleep", 420.0)]
+        );
+        assert!(rows(GarminMember::Sleep, sleep("2024-01-04T06:00:00Z")).is_empty());
+
+        let pressure = |sys: i64, dia: i64| json!({"measurementTimestampGMT": "2024-01-04T08:30:00Z", "systolic": sys, "diastolic": dia});
+        assert_eq!(
+            rows(GarminMember::BloodPressure, pressure(118, 75)),
+            [("bp_systolic", 118.0), ("bp_diastolic", 75.0)]
+        );
+        assert!(rows(GarminMember::BloodPressure, pressure(90, 90)).is_empty());
+        assert!(rows(GarminMember::BloodPressure, pressure(80, 95)).is_empty());
+    }
+
+    struct Counting<R> {
+        inner: R,
+        read: u64,
+    }
+
+    impl<R: Read> Read for Counting<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read += n as u64;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_member_is_read_at_most_one_byte_past_its_declared_size() -> anyhow::Result<()> {
+        // the header understates the member: 10 bytes declared, a megabyte behind it
+        let mut source = Counting {
+            inner: io::repeat(7).take(1 << 20),
+            read: 0,
+        };
+        let mut out = Vec::new();
+        assert!(!read_member(&mut source, 10, &mut out)?);
+        assert_eq!(source.read, 11);
+        assert_eq!(out.len(), 11);
+
+        let mut exact = Vec::new();
+        assert!(read_member(io::repeat(7).take(10), 10, &mut exact)?);
+        assert!(!read_member(io::repeat(7).take(9), 10, &mut Vec::new())?);
+        Ok(())
+    }
+
+    #[test]
+    fn the_account_email_is_hidden_in_member_names() {
+        for (name, shown) in [
+            (
+                "DI_CONNECT/DI-Connect-Fitness/lucia.rivera@example.org_0_summarizedActivities.json",
+                "DI_CONNECT/DI-Connect-Fitness/<email>_0_summarizedActivities.json",
+            ),
+            ("lucia_rivera+x@example.org_123.fit", "<email>_123.fit"),
+            ("Export lucia@example.org/UDSFile_1.json", "<email>/UDSFile_1.json"),
+            ("@eaDir/UDSFile_1.json", "@eaDir/UDSFile_1.json"),
+            ("notes@home/UDSFile_1.json", "notes@home/UDSFile_1.json"),
+            ("DI_CONNECT/UDSFile_1.json", "DI_CONNECT/UDSFile_1.json"),
+        ] {
+            assert_eq!(hide_email(name), shown, "{name}");
+        }
+    }
+
+    #[test]
+    fn stored_readings_come_back_by_member() -> anyhow::Result<()> {
+        let text = format!(
+            "{}\n{}\n{}\n",
+            json!({"format": READINGS_FORMAT, "archive_sha256": "x",
+                   "members": [{"name": "a.json", "fit": false}, {"name": "p.zip / b.fit", "fit": true}]}),
+            json!({"member": 1, "metric": "hr", "start": "2024-01-04T08:00:00Z", "end": null, "offset_min": 60, "value": 120.0}),
+            json!({"member": 0, "metric": "steps", "start": "2024-01-04T00:00:00Z", "end": null, "offset_min": null, "value": 6200.0}),
+        );
+        let groups = read_stored(text.as_bytes())?;
+        let seen: Vec<_> = groups
+            .iter()
+            .map(|g| {
+                (
+                    g.member.as_str(),
+                    g.fit,
+                    g.samples.iter().map(|s| (s.metric, s.v, s.tz)).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("a.json", false, vec![("steps", 6200.0, None)]),
+                ("p.zip / b.fit", true, vec![("hr", 120.0, Some(60))]),
+            ]
+        );
+        let unknown = text.replace("\"hr\"", "\"blood_alcohol\"");
+        assert!(matches!(read_stored(unknown.as_bytes()), Err(Error::Invalid(_))));
+        let past = text.replace("\"member\":1", "\"member\":2");
+        assert!(matches!(read_stored(past.as_bytes()), Err(Error::Invalid(_))));
         Ok(())
     }
 }

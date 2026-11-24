@@ -18,7 +18,7 @@ use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
 
 /// pdf | image | apple_health_zip | fhir_json | fhir_ndjson | genome_facts | vcf | tbi | gadgetbridge_db |
-/// libreview_csv | dexcom_clarity_csv | garmin_zip | unknown
+/// libreview_csv | dexcom_clarity_csv | garmin_zip | broken_zip | unknown
 pub type UploadKind = &'static str;
 
 /// Job kind per upload kind. Handlers: import.pdf (lane B), import.fhir_bundle and
@@ -54,6 +54,18 @@ pub fn mime(kind: &str) -> Option<&'static str> {
     })
 }
 
+/// The mime of the document a Garmin export's import stores: its readings as JSON lines, not the zip.
+pub const GARMIN_READINGS_MIME: &str = "application/x-ndjson";
+
+/// The mime of the document an upload kind's import stores: the upload's own, except a Garmin export,
+/// whose document holds the readings it read from the zip.
+pub fn stored_mime(kind: &str) -> Option<&'static str> {
+    if kind == "garmin_zip" {
+        return Some(GARMIN_READINGS_MIME);
+    }
+    mime(kind)
+}
+
 /// Recognized outer members of a Garmin account export. The leading directories vary between
 /// exports and can also change when the person repacks the archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,9 +99,10 @@ impl GarminMember {
     }
 }
 
+/// A zip whose member list cannot be read (a download cut short) is `broken_zip`, so the refusal can say so.
 fn classify_zip(reader: impl Read + Seek) -> UploadKind {
     let Ok(archive) = zip::ZipArchive::new(reader) else {
-        return "unknown";
+        return "broken_zip";
     };
     let mut kind = "unknown";
     for name in archive.file_names().flatten() {
@@ -576,6 +589,12 @@ pub async fn dispatch_upload_in_zone(
                     f.filename
                 )));
             }
+            "broken_zip" => {
+                return Err(Error::Upload(format!(
+                    "{}: this ZIP could not be read; it may be incomplete",
+                    f.filename
+                )));
+            }
             "vcf" | "tbi" => {
                 if !has_facts {
                     return Err(Error::Upload(format!(
@@ -968,7 +987,7 @@ mod tests {
         assert_eq!(sniff("export.zip", b"PK\x03\x04", Some(&path)), "apple_health_zip");
         let bad = dir.path().join("bad.zip");
         std::fs::write(&bad, b"PK\x03\x04truncated")?;
-        assert_eq!(sniff("bad.zip", b"PK\x03\x04", Some(&bad)), "unknown");
+        assert_eq!(sniff("bad.zip", b"PK\x03\x04", Some(&bad)), "broken_zip");
         Ok(())
     }
 

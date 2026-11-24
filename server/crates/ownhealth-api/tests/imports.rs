@@ -1221,3 +1221,62 @@ async fn a_move_while_a_run_for_its_profile_is_still_marked_running_imports_afte
     assert!(third["job_id"].as_i64().is_some(), "{third}");
     Ok(())
 }
+
+/// A Garmin export's document holds the readings it read from the zip (the zip is not kept): a move
+/// runs the Garmin import of that document for the new owner, so the readings follow it.
+#[tokio::test]
+async fn a_moved_garmin_export_takes_its_readings_to_the_new_profile() -> R {
+    let a = app().await?;
+    ownhealth_devices::register();
+    ownhealth_ingest_pdf::register();
+    let kinds = ["import.garmin_zip".to_string(), "import.pdf".to_string()];
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../fixtures/garmin/lucia-history.zip"
+    ))?;
+    let (s, v) = a
+        .upload("alex", &[("profile", "alex")], &[("lucia-history.zip", &bytes)])
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let ctx = a.rt.job_context();
+    ownhealth_core::jobs::drain(&ctx, "core", 10, Some(&kinds)).await?;
+    let job = v["items"][0]["job_id"].as_i64().expect("job");
+    let result: Option<serde_json::Value> = sqlx::query_scalar("select result from job where id = $1")
+        .bind(job)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let doc = result.expect("result")["document_id"]
+        .as_str()
+        .expect("document")
+        .to_string();
+    let (alex, lucia) = (a.family.profile("alex"), a.family.profile("lucia"));
+    let count = |p: uuid::Uuid| {
+        let pool = a.rt.pool.clone();
+        async move {
+            anyhow::Ok(
+                sqlx::query_scalar::<_, i64>("select count(*) from wearable_sample where profile_id = $1")
+                    .bind(p)
+                    .fetch_one(&pool)
+                    .await?,
+            )
+        }
+    };
+    let held = count(alex).await?;
+    assert!(held > 0);
+    let (s, moved) = a
+        .post(
+            "alex",
+            &format!("/documents/{doc}/assign"),
+            Some(json!({"profile": "lucia"})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{moved}");
+    ownhealth_core::jobs::drain(&ctx, "core", 10, Some(&kinds)).await?;
+    assert_eq!((count(alex).await?, count(lucia).await?), (0, held));
+    let items: i64 = sqlx::query_scalar("select count(*) from review_item where profile_id = $1")
+        .bind(lucia)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    assert_eq!(items, 0);
+    Ok(())
+}

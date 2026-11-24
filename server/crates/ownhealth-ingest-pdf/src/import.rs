@@ -1049,7 +1049,7 @@ pub(crate) async fn accept_identity(
 
 /// Structured files run their own import again; everything else (PDF, image) the PDF one. A CGM export
 /// (`cgm`: its flags hold `cgm_csv`) runs the CGM import of the stored document, which reads the file in
-/// the zone it keeps.
+/// the zone it keeps. A Garmin export's document holds its readings, which its import reads again.
 fn reimport_kind(mime: &str, cgm: bool) -> &'static str {
     if cgm {
         return "import.cgm_csv";
@@ -1057,6 +1057,7 @@ fn reimport_kind(mime: &str, cgm: bool) -> &'static str {
     match mime {
         "application/fhir+json" | "application/fhir+ndjson" => "import.fhir_bundle",
         "application/zip" => "import.apple_health",
+        ownhealth_core::documents::GARMIN_READINGS_MIME => "import.garmin_zip",
         _ => "import.pdf",
     }
 }
