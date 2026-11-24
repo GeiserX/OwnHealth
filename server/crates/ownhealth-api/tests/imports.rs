@@ -1214,3 +1214,54 @@ async fn a_move_while_a_run_for_its_profile_is_still_marked_running_imports_afte
     assert!(third["job_id"].as_i64().is_some(), "{third}");
     Ok(())
 }
+
+/// A C-CDA document moved to another profile runs the C-CDA import again for that profile: the file
+/// for someone else is held whole on Alex, and on Lucía (Isabella Jones in the sample) it brings her
+/// problems in.
+#[tokio::test]
+async fn a_moved_ccda_document_runs_the_ccda_import_for_its_new_profile() -> R {
+    let a = app().await?;
+    ownhealth_ingest_structured::register();
+    let kinds = ["import.ccda".to_string()];
+    let (alex, lucia) = (a.family.profile("alex"), a.family.profile("lucia"));
+    sqlx::query("update profile set display_name = 'Isabella Jones', birth_date = '2005-05-01' where id = $1")
+        .bind(lucia)
+        .execute(&a.rt.pool)
+        .await?;
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/ccda/history-and-physical.xml");
+    let xml = std::fs::read(&path)?;
+    let (s, v) = a.upload("alex", &[("profile", "alex")], &[("hp.xml", &xml)]).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["items"][0]["kind"], "ccda", "{v}");
+    let ctx = a.rt.job_context();
+    ownhealth_core::jobs::drain(&ctx, "core", 5, Some(&kinds)).await?;
+    let doc: uuid::Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'hp.xml'")
+        .bind(alex)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let conditions =
+        |p: uuid::Uuid| format!("select count(*) from condition where profile_id = '{p}' and status = 'current'");
+    assert_eq!(
+        a.count(&conditions(alex)).await?,
+        0,
+        "another person's file is held whole"
+    );
+    let (s, moved) = a
+        .post(
+            "alex",
+            &format!("/documents/{doc}/assign"),
+            Some(json!({"profile": "lucia"})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{moved}");
+    let kind: String = sqlx::query_scalar("select kind from job where id = $1")
+        .bind(moved["job_id"].as_i64().unwrap_or_default())
+        .fetch_one(&a.rt.pool)
+        .await?;
+    assert_eq!(kind, "import.ccda");
+    ownhealth_core::jobs::drain(&ctx, "core", 5, Some(&kinds)).await?;
+    assert_eq!(a.count(&conditions(lucia)).await?, 2);
+    assert_eq!(a.count(&conditions(alex)).await?, 0);
+    Ok(())
+}
