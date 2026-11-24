@@ -1705,3 +1705,23 @@ async fn a_file_with_too_many_security_labels_writes_nothing() -> R {
     assert_eq!(count(&mut conn, "review_item", p).await?, 0);
     Ok(())
 }
+
+/// T1: the Medplum port ships the full Apache License 2.0 text (section 4(a)): in the repository,
+/// named in NOTICE, and copied into the image beside NOTICE.
+#[test]
+fn the_medplum_port_ships_the_apache_license_text() -> R {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let text = std::fs::read_to_string(root.join("LICENSES/Apache-2.0.txt"))?;
+    assert!(text.contains("Version 2.0, January 2004"));
+    assert!(text.contains("TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"));
+    assert!(text.contains("END OF TERMS AND CONDITIONS"));
+    let notice = std::fs::read_to_string(root.join("NOTICE"))?;
+    assert!(notice.contains("LICENSES/Apache-2.0.txt"), "{notice}");
+    let dockerfile = std::fs::read_to_string(root.join("Dockerfile"))?;
+    let copies = dockerfile
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .any(|l| l.starts_with("COPY ") && l.contains("LICENSES/") && l.contains("/usr/share/doc/ownhealth/"));
+    assert!(copies, "the image does not carry LICENSES/");
+    Ok(())
+}

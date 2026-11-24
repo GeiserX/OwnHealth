@@ -4,8 +4,9 @@ version 3 or later (see LICENSE).
 
 This product includes software derived from Medplum (https://github.com/medplum/medplum):
 the C-CDA to FHIR mapping in server/crates/ownhealth-ingest-structured/src/ccda/ is a Rust port of
-packages/ccda/src/ccda-to-fhir.ts. Medplum is licensed under the Apache License, Version 2.0
-(http://www.apache.org/licenses/LICENSE-2.0). Its NOTICE file reads:
+packages/ccda/src/ccda-to-fhir.ts. Medplum is licensed under the Apache License, Version 2.0; its
+full text is in LICENSES/Apache-2.0.txt (also at http://www.apache.org/licenses/LICENSE-2.0). Its
+NOTICE file reads:
 
     Medplum
     Copyright 2020–2025 Orangebot, Inc. and Medplum contributors
