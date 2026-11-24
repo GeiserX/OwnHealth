@@ -83,7 +83,7 @@ pub fn retract_document_facts<'c>(
         .await?;
         // The live DELETE holds the parent's lock, so staging cannot disappear between this
         // privilege check and the DELETE. Both kinds of samples can feed the same rollup.
-        if wearables::can_use_staging(&mut *samples, true).await? {
+        if wearables::can_use_staging(&mut samples, true).await? {
             let staged: Vec<(Uuid, String, i16)> = sqlx::query_as(AssertSqlSafe(format!(
                 "delete from {} where document_id = $1 returning profile_id, metric, source_id",
                 wearables::STAGED_SAMPLES
@@ -102,7 +102,7 @@ pub fn retract_document_facts<'c>(
         for (profile_id, (metrics, sources)) in touched {
             let metrics: Vec<String> = metrics.into_iter().collect();
             let sources: Vec<i16> = sources.into_iter().collect();
-            wearables::recompute_rollups(&mut *samples, profile_id, Some(&metrics), Some(&sources)).await?;
+            wearables::recompute_rollups(&mut samples, profile_id, Some(&metrics), Some(&sources)).await?;
         }
         samples.commit().await?;
         sqlx::query("update document set flags = flags - 'import' - 'apple_health' - 'fhir_issuer' where id = $1")

@@ -404,7 +404,7 @@ async fn busy(conn: &mut PgConnection, report: Report) -> Result<Report> {
 async fn needs_maintenance(conn: &mut PgConnection, mut report: Report, count: i64) -> Result<Report> {
     report.state = "needs_maintenance";
     report.note = Some(format!(
-        "the partition step would move {count} samples under an exclusive lock (limit {MAX_MOVE}). \
+        "The partition step would move {count} samples under an exclusive lock (limit {MAX_MOVE}). \
          Review the future-dated or staged samples during a maintenance window"
     ));
     pending(conn, &mut report).await?;
@@ -435,7 +435,7 @@ async fn pending(conn: &mut PgConnection, report: &mut Report) -> Result<()> {
         None => String::new(),
     };
     let wait = format!(
-        "Until a run as the table's owner finishes the switch, a sample dated on or after {} is refused and its import waits{aside}",
+        "Until the table owner finishes the switch or clears the cutoff, a sample dated on or after {} is refused and its import waits{aside}",
         cutoff.format("%Y-%m-%d")
     );
     report.note = Some(match report.note.take() {
