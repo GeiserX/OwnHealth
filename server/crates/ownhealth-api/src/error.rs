@@ -56,6 +56,10 @@ impl From<Error> for ApiError {
             Error::Review(m) if m == ownhealth_imaging::import::UPLOAD_REMOVED => {
                 ApiError::new(StatusCode::CONFLICT, "upload_removed", m)
             }
+            // an upload whose stored zip a release deleted before it was recorded
+            Error::Review(m) if m == ownhealth_imaging::upload::UPLOAD_LOST => {
+                ApiError::new(StatusCode::CONFLICT, "upload_lost", m)
+            }
             Error::Review(m) | Error::Lifecycle(m) | Error::Provenance(m) => {
                 ApiError::new(StatusCode::CONFLICT, "conflict", m)
             }

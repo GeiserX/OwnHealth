@@ -315,6 +315,7 @@ async fn import(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
     }
     let recorded = upload::record(
         &mut tx,
+        &rt.blobs,
         perm.profile.id,
         &sha256,
         i64::try_from(size).unwrap_or(i64::MAX),

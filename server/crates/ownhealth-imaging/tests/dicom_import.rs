@@ -79,6 +79,7 @@ impl Env {
         let mut tx = self.rt.pool.begin().await?;
         let r = upload::record(
             &mut tx,
+            &self.rt.blobs,
             profile,
             &sha,
             i64::try_from(zip.len())?,

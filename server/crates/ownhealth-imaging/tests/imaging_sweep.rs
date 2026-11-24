@@ -76,6 +76,7 @@ impl Env {
         let mut tx = self.rt.pool.begin().await?;
         let r = upload::record(
             &mut tx,
+            &self.rt.blobs,
             profile,
             &sha,
             i64::try_from(zip.len())?,
@@ -868,7 +869,7 @@ async fn a_reupload_of_the_same_zip_racing_the_removal_keeps_the_upload_and_its_
     assert_eq!(e.in_review("alex").await?.len(), 1);
     // the same zip again, its import queued in a transaction that has not committed yet
     let mut again = e.rt.pool.begin().await?;
-    let r = upload::record(&mut again, alex, &sha, 1, Some("cd.zip"), 6, None).await?;
+    let r = upload::record(&mut again, &e.rt.blobs, alex, &sha, 1, Some("cd.zip"), 6, None).await?;
     assert!(r.duplicate && r.job_id.is_some(), "{r:?}");
     let (pool, import_id) = (e.rt.pool.clone(), up.import_id);
     let removing = tokio::spawn(async move {
@@ -1123,5 +1124,43 @@ async fn closing_the_last_held_study_while_its_import_runs_removes_the_upload_wh
     assert_eq!(uploads_left(&e, &up).await?, 0, "{result}");
     assert_eq!(e.run(RELEASE_JOB).await?, 1);
     assert!(!e.rt.blobs.exists(BlobOwner::Profile(alex), &sha), "the zip stayed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_upload_whose_stored_zip_went_before_it_was_recorded_records_nothing() -> R {
+    let e = env().await?;
+    let alex = e.fam.profile("alex");
+    let files = study_files(&Study::new(U1, ALEX), "DICOM");
+    let zip = zip_files(&files);
+    let owner = BlobOwner::Profile(alex);
+    let sha = e.rt.blobs.put_bytes(owner, &zip)?;
+    // the release of a removed upload of the same bytes deletes them after the route stored them
+    assert!(e.rt.blobs.delete(owner, &sha)?);
+    let mut tx = e.rt.pool.begin().await?;
+    let refused = upload::record(
+        &mut tx,
+        &e.rt.blobs,
+        alex,
+        &sha,
+        i64::try_from(zip.len())?,
+        Some("cd.zip"),
+        files.len(),
+        None,
+    )
+    .await;
+    match refused {
+        Err(ownhealth_core::Error::Review(why)) => assert_eq!(why, upload::UPLOAD_LOST),
+        other => {
+            tx.commit().await?;
+            panic!("an upload whose zip is gone was recorded: {other:?}");
+        }
+    }
+    tx.rollback().await?;
+    assert_eq!(e.count("select count(*) from imaging_import").await?, 0);
+    assert_eq!(
+        e.count("select count(*) from job where kind = 'import.dicom'").await?,
+        0
+    );
     Ok(())
 }
