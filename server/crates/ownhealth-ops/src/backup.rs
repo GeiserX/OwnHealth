@@ -2215,23 +2215,23 @@ mod tests {
         let (scheme, rest) = db.url.split_once("://").unwrap_or(("postgres", &db.url));
         let host = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
         let plain = with_db(&format!("{scheme}://{role}:{password}@{host}"), &scratch);
-        // The first attempt comes right after the create, before the revoke.
-        let early = Arc::new(std::sync::Mutex::new(None));
+        // One attempt before each setup step: right after the create, and after the revoke.
+        let early = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (seen, url) = (Arc::clone(&early), plain.clone());
         let created = BEFORE_SCRATCH_STEP
             .scope(
                 Box::new(move || {
-                    let mut seen = seen.lock().map_err(|_| ops_error("the hook's lock is poisoned"))?;
-                    if seen.is_none() {
-                        *seen = Some(connect_outcome_blocking(&url));
-                    }
+                    let outcome = connect_outcome_blocking(&url);
+                    seen.lock()
+                        .map_err(|_| ops_error("the hook's lock is poisoned"))?
+                        .push(outcome);
                     Ok(())
                 }),
                 create_scratch(&mut admin, &scratch),
             )
             .await;
         let opened = connect_outcome(&plain).await;
-        let early = early.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.take();
+        let early = std::mem::take(&mut *early.lock().map_err(|_| anyhow::anyhow!("poisoned"))?);
         let temp: Option<bool> = sqlx::query_scalar("select has_database_privilege($1, $2, 'TEMPORARY')")
             .bind(&role)
             .bind(&scratch)
@@ -2246,11 +2246,13 @@ mod tests {
         }
         admin.close().await?;
         created?;
-        let early = early.unwrap_or_default();
-        assert!(
-            early.contains("is not currently accepting connections"),
-            "a plain role could open the new scratch database before the revoke: {early}"
-        );
+        assert_eq!(early.len(), 2, "{early:?}");
+        for outcome in &early {
+            assert!(
+                outcome.contains("is not currently accepting connections"),
+                "a plain role could open the scratch database during its setup: {early:?}"
+            );
+        }
         assert!(
             opened.contains("permission denied for database"),
             "a plain role opened the scratch database: {opened}"
