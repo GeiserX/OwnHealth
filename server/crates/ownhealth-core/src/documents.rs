@@ -18,7 +18,7 @@ use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
 
 /// pdf | image | apple_health_zip | fhir_json | fhir_ndjson | genome_facts | vcf | tbi | gadgetbridge_db |
-/// libreview_csv | dexcom_clarity_csv | garmin_zip | broken_zip | unknown
+/// libreview_csv | dexcom_clarity_csv | garmin_zip | broken_zip | zip_directory_limit | unknown
 pub type UploadKind = &'static str;
 
 /// Job kind per upload kind. Handlers: import.pdf (lane B), import.fhir_bundle and
@@ -101,8 +101,12 @@ impl GarminMember {
 
 /// A zip whose member list cannot be read (a download cut short) is `broken_zip`, so the refusal can say so.
 fn classify_zip(reader: impl Read + Seek) -> UploadKind {
-    let Ok(archive) = zip::ZipArchive::new(reader) else {
-        return "broken_zip";
+    let archive = match crate::zip_directory::open(reader) {
+        Ok(archive) => archive,
+        Err(zip::result::ZipError::UnsupportedArchive(crate::zip_directory::DIRECTORY_LIMIT)) => {
+            return "zip_directory_limit";
+        }
+        Err(_) => return "broken_zip",
     };
     let mut kind = "unknown";
     for name in archive.file_names().flatten() {
@@ -586,6 +590,12 @@ pub async fn dispatch_upload_in_zone(
             "unknown" => {
                 return Err(Error::Upload(format!(
                     "{}: not a PDF, image, Apple Health export, FHIR bundle or genome facts file",
+                    f.filename
+                )));
+            }
+            "zip_directory_limit" => {
+                return Err(Error::Upload(format!(
+                    "{}: this ZIP contains too much directory data",
                     f.filename
                 )));
             }

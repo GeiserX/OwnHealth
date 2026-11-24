@@ -12,6 +12,7 @@ use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::documents::{GARMIN_READINGS_MIME, GarminMember, WEARABLES_DOC_TYPE};
 use ownhealth_core::ingest::ImportSummary;
 use ownhealth_core::jobs::{self, Job, JobContext, JobError};
+use ownhealth_core::zip_directory::{self, DIRECTORY_LIMIT, GARMIN_MAX_FILES, GARMIN_MAX_NAME_BYTES};
 use ownhealth_core::{Error, Result};
 use ownhealth_ingest_structured::fhir::mark_imported;
 use ownhealth_ingest_structured::jobs::document_of_type;
@@ -29,8 +30,8 @@ use crate::store::{self, Conflict, Sample, Touched, Written};
 pub const JOB: &str = "import.garmin_zip";
 pub const PROVIDER: &str = "garmin_export";
 
-const MAX_MEMBERS: usize = 50_000;
-const MAX_NAMES_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MEMBERS: usize = GARMIN_MAX_FILES;
+const MAX_NAMES_BYTES: usize = GARMIN_MAX_NAME_BYTES;
 const MAX_EXPANDED: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_JSON: u64 = 16 * 1024 * 1024;
 const MAX_FIT_ZIP: u64 = 1024 * 1024 * 1024;
@@ -254,6 +255,7 @@ fn storage_error(error: io::Error) -> io::Error {
 fn zip_error(error: ZipError) -> Error {
     match error {
         ZipError::Io(e) if !damaged_member(&e) => e.into(),
+        ZipError::UnsupportedArchive(DIRECTORY_LIMIT) => Error::Upload(LIMIT.into()),
         _ => Error::Upload(UNREADABLE.into()),
     }
 }
@@ -261,7 +263,7 @@ fn zip_error(error: ZipError) -> Error {
 /// ZipArchive collapses duplicate directory entries. Refuse such an archive instead of silently
 /// losing a member or letting a second entry with the same name shadow the first.
 fn open(reader: impl Read + Seek) -> Result<ZipArchive<impl Read + Seek>> {
-    let zip = ZipArchive::new(ArchiveReader(reader)).map_err(zip_error)?;
+    let zip = zip_directory::open(ArchiveReader(reader)).map_err(zip_error)?;
     if zip.has_duplicate_names() {
         return Err(Error::Upload(UNREADABLE.into()));
     }
@@ -343,6 +345,7 @@ fn scan<R: Read + Seek>(
                         report.omit(member, "no_readings");
                     }
                 }
+                Err(Error::Upload(code)) if code == LIMIT => return Err(Error::Upload(code)),
                 Err(Error::Upload(_)) => report.omit(member, "invalid_zip"),
                 Err(e) => return Err(e),
             }

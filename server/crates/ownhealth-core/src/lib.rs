@@ -44,6 +44,7 @@ pub mod sources;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod text;
+pub mod zip_directory;
 
 pub use error::{Error, Result};
 pub use runtime::Runtime;
