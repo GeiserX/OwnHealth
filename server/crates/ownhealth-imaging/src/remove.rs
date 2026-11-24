@@ -4,7 +4,8 @@
 //! in review and none of them reaches the record. Its zip stays a blob of that profile until the upload
 //! is removed: when the person closes (dismisses or rejects) the last held study of it, or through
 //! `DELETE /api/imaging/imports/{id}`. Either way the removal refuses while a study of the upload is
-//! on the record (`imaging_import_study`), or while its import is queued or running. The upload row
+//! on the record (`imaging_import_study`), or while its import is queued or running; a close that
+//! found the import running is settled again when that import ends ([`settle_after_import`]). The upload row
 //! goes at once; the `imaging.release_upload` job then removes the zip, once no row of the profile
 //! names those bytes (and the plain copy once no row names them at all: the same check as a profile
 //! delete, `household::BLOB_COLUMNS`), waiting while a backup copies the files
@@ -54,6 +55,18 @@ pub enum Removal {
 /// Removes upload `import_id` in the caller's transaction. With `close_open`, its held studies that
 /// still wait in review are dismissed with it (by `user`); without, an open one keeps the upload.
 pub async fn remove(conn: &mut PgConnection, import_id: Uuid, user: Option<Uuid>, close_open: bool) -> Result<Removal> {
+    remove_except(conn, import_id, user, close_open, None).await
+}
+
+/// [`remove`], with `own_job` (the running `import.dicom` job that calls it) not counted as an import
+/// that runs.
+async fn remove_except(
+    conn: &mut PgConnection,
+    import_id: Uuid,
+    user: Option<Uuid>,
+    close_open: bool,
+    own_job: Option<i64>,
+) -> Result<Removal> {
     // the items first, as a close or an accept of one of them takes them
     let open = if close_open {
         open_items(&mut *conn, import_id, true).await?
@@ -91,10 +104,11 @@ pub async fn remove(conn: &mut PgConnection, import_id: Uuid, user: Option<Uuid>
     }
     let importing: bool = sqlx::query_scalar(
         "select exists (select 1 from job where kind = $1 and state in ('queued', 'running') \
-         and payload->>'import_id' = $2)",
+         and payload->>'import_id' = $2 and id is distinct from $3)",
     )
     .bind(IMPORT_JOB)
     .bind(import_id.to_string())
+    .bind(own_job)
     .fetch_one(&mut *conn)
     .await?;
     if importing {
@@ -146,6 +160,28 @@ async fn open_items(conn: &mut PgConnection, import_id: Uuid, lock: bool) -> Res
         .bind(import_id)
         .fetch_all(&mut *conn)
         .await?)
+}
+
+/// After the `import.dicom` job `own_job` of upload `import_id` ended, in a transaction of its own:
+/// when a person closed the upload's last held study while that job ran (the close then found the
+/// import running, and left the upload), removes the upload now, as that close would have. An upload
+/// that held no study at all, or still holds an open one, stays. True when it went.
+pub async fn settle_after_import(conn: &mut PgConnection, import_id: Uuid, own_job: i64) -> Result<bool> {
+    let closed: bool = sqlx::query_scalar(
+        "select exists (select 1 from review_item where kind = $1 and ref_table = 'imaging_import' \
+         and ref_id = $2 and status in ('dismissed', 'rejected'))",
+    )
+    .bind(REVIEW_KIND)
+    .bind(import_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !closed {
+        return Ok(false);
+    }
+    Ok(matches!(
+        remove_except(conn, import_id, None, false, Some(own_job)).await?,
+        Removal::Removed { .. }
+    ))
 }
 
 /// After a held study was dismissed or rejected, in the same transaction: removes its upload when

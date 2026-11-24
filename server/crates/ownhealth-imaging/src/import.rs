@@ -468,7 +468,13 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
             Outcome::Refused => refused += 1,
         }
     }
+    // A person may have closed the upload's last held study while this ran: that close found the
+    // import running and left the upload, so it goes now (crate::remove::settle_after_import).
+    let mut tx = ctx.pool.begin().await?;
+    let upload_removed = crate::remove::settle_after_import(&mut tx, import_id, job.id).await?;
+    tx.commit().await?;
     Ok(Some(json!({
+        "upload_removed": upload_removed,
         "files": scan.files,
         "not_dicom": scan.not_dicom,
         "directories": scan.directories,

@@ -1081,3 +1081,47 @@ async fn a_held_study_an_import_adds_while_the_removal_waits_keeps_the_upload() 
     assert_eq!(e.in_review("alex").await?.len(), 2, "a held study was closed");
     Ok(())
 }
+
+#[tokio::test]
+async fn closing_the_last_held_study_while_its_import_runs_removes_the_upload_when_the_import_ends() -> R {
+    let e = env().await?;
+    let alex = e.fam.profile("alex");
+    // Alex's own study is on the record, retracted
+    e.upload("alex", &study_files(&Study::new(U3, ALEX), "DICOM")).await?;
+    e.import().await?;
+    sqlx::query("update imaging_study set status = 'retracted', status_reason = 'entered in error' where study_instance_uid = $1")
+        .bind(U3)
+        .execute(&e.rt.pool)
+        .await?;
+    // a disc with Sam's study, which waits in review, and Alex's retracted one, which records nothing
+    let mut disc = study_files(&Study::new(U2, SAM), "DICOM/P1");
+    disc.extend(study_files(&Study::new(U3, ALEX), "DICOM/P2"));
+    let (up, sha) = e.upload("alex", &disc).await?;
+    let mut hold = e.rt.pool.begin().await?;
+    lock_study(&mut hold, U3).await?;
+    let importing = spawn_run(&e, JOB);
+    assert!(
+        until_waiting(&e, &importing).await?,
+        "the import did not wait for the UID lock"
+    );
+    // the import still runs when the person closes Sam's study: the upload stays for now
+    let held = e.in_review("alex").await?;
+    assert_eq!(held.len(), 1, "{held:?}");
+    let mut tx = e.rt.pool.begin().await?;
+    review::dismiss(&mut tx, held[0].0, e.fam.user("alex"), None).await?;
+    let it = item(&mut tx, held[0].0).await?;
+    assert!(
+        !remove::settle(&mut tx, &it).await?,
+        "the upload went while its import ran"
+    );
+    tx.commit().await?;
+    hold.commit().await?;
+    assert_eq!(importing.await??, 1);
+    let (state, result) = e.result(JOB).await?;
+    assert_eq!(state, "done", "{result}");
+    // once the import ended, the upload goes with its zip
+    assert_eq!(uploads_left(&e, &up).await?, 0, "{result}");
+    assert_eq!(e.run(RELEASE_JOB).await?, 1);
+    assert!(!e.rt.blobs.exists(BlobOwner::Profile(alex), &sha), "the zip stayed");
+    Ok(())
+}
