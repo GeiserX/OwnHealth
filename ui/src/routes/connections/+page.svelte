@@ -25,6 +25,7 @@
 		connectionState,
 		connectorErrorKey,
 		daysLeft,
+		refreshUntilFirstPull,
 		renewsItself,
 		runWords,
 		shownConnections,
@@ -68,11 +69,26 @@
 		goto('/connections', { replace: true, shallow: true });
 	});
 	const connectedId = $derived(outcome && 'connected' in outcome ? outcome.connected : null);
-	// the first pull runs seconds after a connect or reconnect: the rows are read once more, so the card shows it
+	// the first pull runs seconds after a connect or reconnect: the rows are read again until it finishes, so the card shows it
 	$effect(() => {
-		if (!connectedId) return;
-		const timer = setTimeout(load, 8000);
-		return () => clearTimeout(timer);
+		const id = connectedId;
+		if (!id) return;
+		let alive = true;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const wait = (ms: number) => new Promise<void>((done) => (timer = setTimeout(done, ms)));
+		refreshUntilFirstPull(
+			async () => {
+				await load();
+				return rows.data;
+			},
+			id,
+			wait,
+			() => alive
+		);
+		return () => {
+			alive = false;
+			clearTimeout(timer);
+		};
 	});
 	// the note shows only for a connection this person sees listed, never for any id in the address
 	const connectedLabel = $derived(connectedId ? (rows.data?.find((r) => r.id === connectedId)?.label ?? null) : null);

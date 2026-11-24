@@ -101,6 +101,35 @@ export function shownConnections<T extends ConnectionRow>(rows: T[]): T[] {
 	return rows.filter((r) => (CONNECTOR_KINDS as readonly string[]).includes(r.kind) && r.can_manage === true);
 }
 
+/** After a connect, how often the screen reads the rows again while the first pull runs, and how many times at most (3 minutes). */
+export const FIRST_PULL_EVERY = 5_000;
+export const FIRST_PULL_TRIES = 36;
+
+/** The first pull of the row's current grant has not finished yet (last_run_status covers only that grant's runs). */
+export function firstPullPending(r: ConnectionRow | undefined): boolean {
+	return !!r && r.enabled && !r.reconsent_needed_at && r.last_run_status == null;
+}
+
+/**
+ * After a connect or reconnect: read the rows again every FIRST_PULL_EVERY ms while the first pull of
+ * connection `id` has not finished, at most `tries` times, and never once `alive()` is false (the
+ * screen was left). `load` reads the rows; `wait` is a timer.
+ */
+export async function refreshUntilFirstPull(
+	load: () => Promise<ConnectionRow[] | null | undefined>,
+	id: string,
+	wait: (ms: number) => Promise<void>,
+	alive: () => boolean,
+	tries = FIRST_PULL_TRIES
+): Promise<void> {
+	for (let i = 0; i < tries; i++) {
+		await wait(FIRST_PULL_EVERY);
+		if (!alive()) return;
+		const list = await load();
+		if (!alive() || !firstPullPending(list?.find((r) => r.id === id))) return;
+	}
+}
+
 /** Where the connector callback sent the browser back: `?connected=<id>` or `?connector_error=<code>`. */
 export function callbackOutcome(q: Pick<URLSearchParams, 'get'>): { connected: string } | { error: string } | null {
 	const id = q.get('connected');

@@ -11,6 +11,9 @@ import {
 	connectionState,
 	connectorErrorKey,
 	daysLeft,
+	FIRST_PULL_EVERY,
+	FIRST_PULL_TRIES,
+	refreshUntilFirstPull,
 	renewsItself,
 	runWords,
 	shownConnections,
@@ -229,4 +232,52 @@ test('every stop and problem code of the SMART poller reads in es and en', () =>
 		return !en || !es || en === es || /\{\w+\}/.test(en + es);
 	});
 	assert.deepEqual(missing, []);
+});
+
+test('after a connect the rows are read again until the first pull of the new grant finishes', async () => {
+	// the run is still going on the first two reads, and has finished on the third
+	const answers = [conn({ last_run_status: null }), conn({ last_run_status: null }), conn({ last_run_status: 'partial' })];
+	const waits: number[] = [];
+	let loads = 0;
+	await refreshUntilFirstPull(
+		async () => [answers[Math.min(loads++, answers.length - 1)]],
+		'c1',
+		async (ms) => void waits.push(ms),
+		() => true
+	);
+	assert.equal(loads, 3);
+	assert.deepEqual(waits, [FIRST_PULL_EVERY, FIRST_PULL_EVERY, FIRST_PULL_EVERY]);
+
+	// a pull that never finishes: the reads stop after the bound
+	loads = 0;
+	await refreshUntilFirstPull(async () => (loads++, [conn({ last_run_status: null })]), 'c1', async () => {}, () => true);
+	assert.equal(loads, FIRST_PULL_TRIES);
+
+	// the screen was left: no read after that
+	loads = 0;
+	let alive = true;
+	await refreshUntilFirstPull(
+		async () => {
+			loads++;
+			alive = false;
+			return [conn({ last_run_status: null })];
+		},
+		'c1',
+		async () => {},
+		() => alive
+	);
+	assert.equal(loads, 1);
+
+	// a row that is gone, switched off or waiting for consent is not waited for
+	for (const row of [conn({ id: 'other', last_run_status: null }), conn({ enabled: false, last_run_status: null }), conn({ reconsent_needed_at: inDays(-1), last_run_status: null })]) {
+		loads = 0;
+		await refreshUntilFirstPull(async () => (loads++, [row]), 'c1', async () => {}, () => true);
+		assert.equal(loads, 1);
+	}
+});
+
+test('the Connections screen keeps reading the rows while the first pull runs', () => {
+	const page = read('../src/routes/connections/+page.svelte');
+	assert.match(page, /refreshUntilFirstPull\(/);
+	assert.doesNotMatch(page, /setTimeout\(load, 8000\)/);
 });
