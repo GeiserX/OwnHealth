@@ -280,3 +280,18 @@ test('the opens of an emergency card are one entry per profile, counted by the s
 	assert.deepEqual(g[0].steps, []);
 	assert.equal(g[0].lastUse, '2026-11-24T10:00:02Z');
 });
+
+test('unread opens of an emergency card that the list does not hold open the panel on the first login', async () => {
+	const v: NoticeView = { data: null, error: null, open: false };
+	const h = held();
+	const store = memory();
+	const load = noticeLoader(v, () => 'u-a', h.fetch, store);
+	// the list holds only an old open, already read; the server counts two newer unread ones
+	const read = notice('ice.access', '2026-11-24T08:00:00Z', { request_id: null, contact: null, read_at: '2026-11-24T09:00:00Z' });
+	const ice: NoticeIce[] = [{ profile: alex, count: 3, unread: 2, last_at: '2026-11-24T10:00:00Z' }];
+	const first = load();
+	h.calls[0].resolve({ items: [read], uses: [], ice, unread: 2 });
+	await first;
+	assert.equal(v.open, true);
+	assert.equal(store.getItem(NOTICES_SHOWN), 'u-a');
+});

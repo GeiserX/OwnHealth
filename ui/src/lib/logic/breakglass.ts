@@ -206,7 +206,7 @@ export function noticeLoader(
 			if (!current()) return;
 			v.data = d;
 			v.error = null;
-			if (!unreadGroups(groupNotices(d.items, d.uses)) || store.getItem(NOTICES_SHOWN) === u) return;
+			if (!unreadGroups(groupNotices(d.items, d.uses, d.ice)) || store.getItem(NOTICES_SHOWN) === u) return;
 			store.setItem(NOTICES_SHOWN, u);
 			v.open = true;
 		} catch (e) {
