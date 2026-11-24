@@ -1,6 +1,6 @@
 //! Migration 1120 (the ClinVar diff) on a populated database: every migration before it with the demo
-//! seed (the seed writes the current columns, so it needs the migrations it was written for), then
-//! 1120 and the rest, then a ClinVar diff. Every profile's state_hash stays the same at each
+//! seed (the seed writes the current columns, so it needs the migrations it was written for, plus the
+//! later ones that only add a column it writes: SEED_NEEDS), then 1120 and the rest, then a ClinVar diff. Every profile's state_hash stays the same at each
 //! step: no ClinVar snapshot or event enters the hashed state body. Then a profile with snapshots
 //! and events is deleted. All data is synthetic.
 
@@ -15,6 +15,10 @@ use sqlx::types::Uuid;
 
 /// The ClinVar diff's migration.
 const CLINVAR: i32 = 1120;
+
+/// Later migrations the seed's code writes to, each only adding nullable columns: 1202 adds the
+/// `oauth_grant_id` that `sources::begin_run` stamps on every run (the devices demo opens one).
+const SEED_NEEDS: &[i32] = &[1202];
 
 async fn hashes(
     conn: &mut PgConnection,
@@ -46,7 +50,11 @@ async fn a_030_database_migrates_diffs_clinvar_and_deletes_a_profile_with_every_
     ownhealth::register_lanes();
     let db = TestDb::empty().await?;
     let all = embedded()?;
-    let old: Vec<_> = all.iter().filter(|m| m.version < CLINVAR).cloned().collect();
+    let old: Vec<_> = all
+        .iter()
+        .filter(|m| m.version < CLINVAR || SEED_NEEDS.contains(&m.version))
+        .cloned()
+        .collect();
     assert!(old.len() < all.len(), "1120 is not among the migrations");
     migrate(&db.pool, &old).await?;
     let dir = tempfile::tempdir()?;
