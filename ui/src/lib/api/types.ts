@@ -904,8 +904,9 @@ export interface NextDraw {
 export type ShlCategory = 'read:summary' | 'read:labs' | 'read:records';
 /** What a recipient would meet: `paused` while sharing is off on the instance, `revoked` for good. */
 export type ShlState = 'active' | 'paused' | 'revoked' | 'expired' | 'locked_out';
-/** Why: `sharing_off` (paused); `person`, `locked` or `access_changed` (revoked). */
-export type ShlReason = 'sharing_off' | 'person' | 'locked' | 'access_changed';
+/** Why: `sharing_off` (paused); `person`, `locked`, `access_changed` or `replaced` (a new
+ *  emergency card ended this one) (revoked). */
+export type ShlReason = 'sharing_off' | 'person' | 'locked' | 'access_changed' | 'replaced';
 
 /** One link in GET /profiles/{p}/shl. */
 export interface ShlLink {

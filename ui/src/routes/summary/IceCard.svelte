@@ -1,25 +1,43 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { ApiError, get, p, post } from '#lib/api/core';
-	import { stamp } from '#lib/components/pages2/fmt';
+	import { tick } from 'svelte';
+	import { day } from '#lib/components/pages2/fmt';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
-	import { t } from '#lib/i18n/index.svelte';
-	import type { Lang } from '#lib/i18n/langs';
+	import { tf } from '#lib/components/pages1/util.svelte';
+	import { i18n, t } from '#lib/i18n/index.svelte';
+	import { LANGS, type Lang } from '#lib/i18n/langs';
 
-	let { slug, lang }: { slug: string; lang: Lang } = $props();
+	let { slug }: { slug: string } = $props();
 	type Contact = { name: string; phone: string };
-	type Options = { online: boolean; items: { id: string; kind: string; name: string }[] };
+	type Item = { id: string; kind: string; name: string; sensitive: boolean };
+	type Options = { online: boolean; items: Item[] };
 	type Files = { pdf: string; png: string; expires_at: string };
 
 	let options = $state<Options | null>(null);
 	let contacts = $state<Contact[]>([{ name: '', phone: '' }]);
+	// the card is for whoever reads it nearby: it starts in the screen's language, not the sheet's
+	let lang = $state<Lang>(i18n.lang);
 	let selected = $state<string[]>([]);
+	let leftOut = $state<string[]>([]);
 	let online = $state(false);
 	let days = $state(7);
 	let pending = $state(false);
 	let problem = $state('');
 	let files = $state<Files | null>(null);
+	let shownOpen = $state(false);
+	let ready = $state<HTMLElement | null>(null);
 	let mounted = false;
+
+	const plainItems = $derived(options?.items.filter((item) => !item.sensitive) ?? []);
+	const sensitiveItems = $derived(options?.items.filter((item) => item.sensitive) ?? []);
+	// The server's rule: 00:00 UTC, the chosen number of days after today's UTC date.
+	const until = $derived.by(() => {
+		const n = Math.trunc(Number(days));
+		if (!Number.isFinite(n) || n < 1 || n > 365) return '';
+		const now = new Date();
+		return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + n)).toISOString();
+	});
 
 	function clearFiles() {
 		if (files) {
@@ -41,7 +59,8 @@
 			const available = await get<Options>(`${p(slug)}/ice`);
 			if (!mounted) return;
 			options = available;
-			selected = selected.filter((id) => available.items.some((item) => item.id === id));
+			selected = selected.filter((id) => available.items.some((item) => item.id === id && item.sensitive));
+			leftOut = leftOut.filter((id) => available.items.some((item) => item.id === id && !item.sensitive));
 			if (!available.online) online = false;
 		} catch (e) {
 			if (mounted) problem = errorKey(e);
@@ -57,6 +76,10 @@
 		};
 	});
 
+	function keep(id: string, on: boolean) {
+		leftOut = on ? leftOut.filter((x) => x !== id) : [...leftOut, id];
+	}
+
 	function urlFor(base64: string, mime: string): string {
 		const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 		return URL.createObjectURL(new Blob([bytes], { type: mime }));
@@ -66,7 +89,7 @@
 		problem = '';
 		pending = true;
 		const body = {
-			lang, days, online, sensitive_ids: [...selected],
+			lang, days, online, sensitive_ids: [...selected], left_out: [...leftOut],
 			contacts: contacts.filter((c) => c.name.trim() || c.phone.trim()).map((c) => ({ name: c.name.trim(), phone: c.phone.trim() }))
 		};
 		try {
@@ -78,10 +101,16 @@
 				png: urlFor(made.png, 'image/png'),
 				expires_at: made.expires_at
 			};
+			// the button that had focus is disabled while it works: move focus to the result
+			pending = false;
+			await tick();
+			ready?.focus();
 		} catch (e) {
 			if (!mounted || (e instanceof ApiError && e.code === 'step_up_required')) return;
 			if (e instanceof ApiError && e.code === 'ice_picks') await readOptions();
 			problem = errorKey(e);
+			// too long: the list where records can be left out
+			if (problem === 'ice_full') shownOpen = true;
 		} finally {
 			if (mounted) pending = false;
 		}
@@ -108,11 +137,28 @@
 					<button class="btn sm" type="button" onclick={() => contacts.push({ name: '', phone: '' })}>{t('ice_add')}</button>
 				{/if}
 			</fieldset>
-			{#if options.items.length}
+			<label class="days">{t('ice_lang')}
+				<select name="ice-lang" bind:value={lang} disabled={pending}>
+					{#each LANGS as l (l.code)}<option value={l.code}>{l.name}</option>{/each}
+				</select>
+			</label>
+			{#if plainItems.length}
+				<details bind:open={shownOpen}>
+					<summary>{t('ice_shown')} ({plainItems.length - leftOut.length}/{plainItems.length})</summary>
+					<p class="dim">{t('ice_shown_d')}</p>
+					{#each plainItems as item (item.id)}
+						<label class="choice">
+							<input type="checkbox" checked={!leftOut.includes(item.id)} onchange={(e) => keep(item.id, e.currentTarget.checked)} disabled={pending} />
+							<span>{item.name} <small class="dim">{t('ice_kind_' + item.kind)}</small></span>
+						</label>
+					{/each}
+				</details>
+			{/if}
+			{#if sensitiveItems.length}
 				<details>
 					<summary>{t('ice_sensitive')}</summary>
 					<p class="dim">{t('ice_sensitive_d')}</p>
-					{#each options.items as item (item.id)}
+					{#each sensitiveItems as item (item.id)}
 						<label class="choice">
 							<input type="checkbox" value={item.id} bind:group={selected} disabled={pending} />
 							<span>{item.name} <small class="dim">{t('ice_kind_' + item.kind)}</small></span>
@@ -124,7 +170,8 @@
 				<label class="choice"><input type="checkbox" bind:checked={online} disabled={pending} />{t('ice_online')}</label>
 				{#if online}<p class="dim">{t('ice_online_d')}</p>{/if}
 			{/if}
-			<label class="days">{t('ice_days')}<input type="number" min="1" max="365" required bind:value={days} disabled={pending} /></label>
+			<label class="days">{t('ice_days')}<input type="number" min="1" max="365" required bind:value={days} disabled={pending} aria-describedby="ice-until" /></label>
+			<p class="dim" id="ice-until">{until ? tf('ice_until', { date: day(until) }) : ''}</p>
 			<p class="dim">{t('ice_replace')}</p>
 			<div><button class="btn pri" disabled={pending} aria-busy={pending}>{t(pending ? 'ice_making' : 'ice_create')}</button></div>
 		</form>
@@ -134,7 +181,8 @@
 	{#if problem}<p class="problem" role="alert">{t(problem)}</p>{/if}
 	{#if files}
 		<div class="result">
-			<div role="status">{t('ice_ready')} · {t('shl_expires')} {stamp(files.expires_at)}</div>
+			<div role="status" tabindex="-1" bind:this={ready}>{t('ice_ready')} · {tf('ice_until', { date: day(files.expires_at) })}</div>
+			<p class="dim">{t('ice_keep')}</p>
 			<div class="actions">
 				<a class="btn" href={files.pdf} download="ownhealth-ice.pdf">{t('ice_pdf')}</a>
 				<a class="btn" href={files.png} download="ownhealth-ice.png">{t('ice_png')}</a>
@@ -158,7 +206,7 @@
 		align-items: end;
 	}
 	.contact label, .days { display: grid; gap: 4px; }
-	.contact input, .days input {
+	.contact input, .days input, .days select {
 		width: 100%;
 		padding: 7px 9px;
 		color: var(--text);
@@ -168,6 +216,7 @@
 	}
 	.days { width: max-content; }
 	.days input { max-width: 6rem; }
+	.result [role='status']:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 	details summary { cursor: pointer; }
 	.choice { display: flex; align-items: baseline; gap: 7px; overflow-wrap: anywhere; }
 	.choice input { accent-color: var(--accent); }

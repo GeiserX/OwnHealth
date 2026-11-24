@@ -161,7 +161,7 @@
 
 {#if prof?.role === 'owner' && !prof.break_glass}
 	{#key prof.slug}
-		<IceCard slug={prof.slug} {lang} />
+		<IceCard slug={prof.slug} />
 	{/key}
 {/if}
 

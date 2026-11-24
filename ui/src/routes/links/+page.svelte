@@ -295,7 +295,7 @@
 									<div class="dim sl-small">{when(x)}</div>
 								</div>
 								<div class="sl-acts">
-									<button class="btn sm" id="shl-log-{x.id}" aria-expanded={logOf === x.id} aria-label="{t('shl_log')} · {title(x)}" onclick={() => (logOf === x.id ? (logOf = null) : openLog(x.id))}>{t('shl_log')}</button>
+									{#if !x.ice || x.online}<button class="btn sm" id="shl-log-{x.id}" aria-expanded={logOf === x.id} aria-label="{t('shl_log')} · {title(x)}" onclick={() => (logOf === x.id ? (logOf = null) : openLog(x.id))}>{t('shl_log')}</button>{/if}
 									{#if revocable(x, now)}
 										<button class="btn sm no" disabled={busy} aria-expanded={confirming === x.id} aria-label="{t('i2_revoke')} · {title(x)}" onclick={() => (confirming = x.id)}>{t('i2_revoke')}</button>
 									{/if}
