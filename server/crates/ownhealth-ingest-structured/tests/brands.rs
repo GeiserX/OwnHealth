@@ -562,11 +562,15 @@ async fn the_wizard_entry_point_makes_one_source_queues_one_pull_and_reads_stale
         .fetch_one(&mut *c)
         .await?;
     assert_eq!(queued, 1);
-    // before the first pull: the directory exists, nothing to search yet, not stale
+    // before the first pull: the directory exists and lists every vendor file, nothing to search
+    // yet, not stale
     let d = brands::directory(&mut c, household)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no directory"))?;
-    assert_eq!((d.source_id, d.ready, d.stale, d.feeds.len()), (id, false, false, 0));
+    assert_eq!(
+        (d.source_id, d.ready, d.stale, d.feeds.len()),
+        (id, false, false, BUNDLES.len())
+    );
     // a pulled copy is fresh; three missed weeks later it reads stale
     let v = Vendors::start(good_files("v1")).await?;
     sqlx::query("update source set config = $2 where id = $1")
@@ -684,5 +688,98 @@ async fn an_odd_entry_is_cleaned_or_left_out_and_never_blocks_its_vendor() -> R 
         let want = (name.to_string(), endpoint.to_string(), state.map(String::from));
         assert!(rows.contains(&want), "{want:?} not in the epic rows");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_vendor_that_never_loaded_reads_missing_and_stale_and_the_fixed_entries_are_not_ready() -> R {
+    let f = fx().await?;
+    let v = Vendors::start(good_files("v1")).await?;
+    let s = f.source(&v).await?;
+    let mut c = f.e.db.pool.acquire().await?;
+    // read as the wizard reads it: the JSON the route answers
+    let vendors = |d: &brands::Directory| -> Vec<(String, bool, bool)> {
+        let v = serde_json::to_value(d).unwrap_or_default();
+        v["feeds"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|x| {
+                        (
+                            x["vendor"].as_str().unwrap_or_default().to_string(),
+                            !x["fetched_at"].is_null(),
+                            x["stale"] == true,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let h = f.fam.household_id;
+    async fn dir(c: &mut sqlx::PgConnection, h: uuid::Uuid) -> anyhow::Result<brands::Directory> {
+        brands::directory(c, h)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no directory"))
+    }
+    // before the first run ends: every vendor file is listed, none loaded, none stale yet
+    let d = dir(&mut c, h).await?;
+    assert_eq!(
+        vendors(&d),
+        ["epic", "healow", "meditech", "oracle"]
+            .map(|x| (x.to_string(), false, false))
+            .to_vec()
+    );
+    assert!(!d.ready && !d.stale, "{d:?}");
+    // a first run where every vendor file fails: only the two fixed entries are written, which is
+    // not a directory to search, and every vendor file reads stale
+    for b in BUNDLES {
+        v.set(b.vendor, 500, Vec::new());
+    }
+    let run = sources::begin_run(&mut c, s.id, "poll", None).await?;
+    let o = f.poll(&s).await?;
+    sources::finish_run(&mut c, run, Ok(&o)).await?;
+    assert_eq!(o.problems.len(), 4);
+    let d = dir(&mut c, h).await?;
+    assert_eq!(
+        vendors(&d),
+        [
+            ("epic", false, true),
+            ("healow", false, true),
+            ("meditech", false, true),
+            ("nextgen", true, false),
+            ("oracle", false, true),
+            ("va", true, false),
+        ]
+        .map(|(x, f, s)| (x.to_string(), f, s))
+        .to_vec()
+    );
+    assert!(!d.ready && d.stale, "{d:?}");
+    // the next run loads every file but a truncated Epic one: ready, and Epic still reads missing
+    let good = good_files("v1");
+    for b in BUNDLES {
+        let body = good.get(b.vendor).cloned().unwrap_or_default();
+        let body = if b.vendor == "epic" {
+            body[..body.len() / 2].to_vec()
+        } else {
+            body
+        };
+        v.set(b.vendor, 200, body);
+    }
+    let run = sources::begin_run(&mut c, s.id, "poll", None).await?;
+    let o = f.poll(&s).await?;
+    sources::finish_run(&mut c, run, Ok(&o)).await?;
+    assert_eq!(codes(&o), vec!["unreadable".to_string()]);
+    let d = dir(&mut c, h).await?;
+    let json = serde_json::to_value(&d)?;
+    let epic = json["feeds"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["vendor"] == "epic"))
+        .ok_or_else(|| anyhow::anyhow!("epic is not listed: {json}"))?;
+    assert_eq!(
+        (&epic["fetched_at"], &epic["entries"], &epic["stale"]),
+        (&Value::Null, &json!(0), &json!(true)),
+        "{json}"
+    );
+    assert!(d.ready && d.stale, "{d:?}");
     Ok(())
 }

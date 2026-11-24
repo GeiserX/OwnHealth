@@ -581,18 +581,21 @@ pub async fn ensure_source(
     Ok((id, true))
 }
 
-/// One vendor's copy as the wizard shows it.
+/// One vendor's copy as the wizard shows it. Every vendor file is listed, also one never taken yet.
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 pub struct Feed {
     pub vendor: String,
-    pub fetched_at: DateTime<Utc>,
+    /// When the copy we hold was fetched; None while no good copy of the vendor file exists.
+    pub fetched_at: Option<DateTime<Utc>>,
     pub entries: i32,
-    /// The copy is older than [`STALE_SECONDS`]: the vendor's newer file could not be taken.
+    /// The copy is older than [`STALE_SECONDS`], or a run has ended with no copy of this vendor
+    /// file at all: the vendor's file could not be taken.
     pub stale: bool,
 }
 
 /// The household's directory: its source, whether it is on, and each vendor's copy. `stale` when any
-/// vendor's copy is stale; `ready` once any entry can be searched.
+/// vendor's copy is stale; `ready` once a vendor file has given entries to search (the two fixed
+/// entries alone are not a directory).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Directory {
     pub source_id: Uuid,
@@ -616,20 +619,38 @@ pub async fn directory(conn: &mut PgConnection, household_id: Uuid) -> ownhealth
     let Some((source_id, enabled, last_run_at)) = source else {
         return Ok(None);
     };
-    let feeds: Vec<Feed> = sqlx::query_as(
+    let mut feeds: Vec<Feed> = sqlx::query_as(
         "select vendor, fetched_at, entries, fetched_at < now() - make_interval(secs => $2) as stale \
-         from fhir_brand_feed where source_id = $1 order by vendor",
+         from fhir_brand_feed where source_id = $1",
     )
     .bind(source_id)
     .bind(STALE_SECONDS as f64)
     .fetch_all(&mut *conn)
     .await?;
+    // a vendor file with no copy reads stale once a run has ended without taking it
+    let ran: bool =
+        sqlx::query_scalar("select exists (select 1 from source_run where source_id = $1 and finished_at is not null)")
+            .bind(source_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    for b in BUNDLES {
+        if !feeds.iter().any(|f| f.vendor == b.vendor) {
+            feeds.push(Feed {
+                vendor: b.vendor.into(),
+                fetched_at: None,
+                entries: 0,
+                stale: ran,
+            });
+        }
+    }
+    feeds.sort_by(|a, b| a.vendor.cmp(&b.vendor));
+    let fetched = |f: &Feed| BUNDLES.iter().any(|b| b.vendor == f.vendor);
     Ok(Some(Directory {
         source_id,
         enabled,
         last_run_at,
         stale: feeds.iter().any(|f| f.stale),
-        ready: feeds.iter().any(|f| f.entries > 0),
+        ready: feeds.iter().any(|f| fetched(f) && f.entries > 0),
         feeds,
     }))
 }
