@@ -3,6 +3,7 @@
 // adds one to the family history and Dismiss adds none. The upload never carries the file's own name.
 // Synthetic trees of the Rivera family (fixtures/gedcom), in each language.
 import { expect, test, type Page } from '@playwright/test';
+import { Buffer } from 'node:buffer';
 import { fileURLToPath } from 'node:url';
 
 const fixture = (name: string) => fileURLToPath(new URL(`../../fixtures/gedcom/${name}`, import.meta.url));
@@ -99,4 +100,46 @@ test('a file that is not a family tree says so in the reader’s language', asyn
 	await card.locator('input[type=file]').setInputFiles(fixture('README.md'));
 	await expect(card.getByRole('alert')).toHaveText('Este archivo no es un árbol genealógico GEDCOM.');
 	await expect(card.getByRole('group')).toHaveCount(0);
+});
+
+/** Count the gedcom uploads the page sends. */
+async function countUploads(page: Page) {
+	await page.addInitScript(() => {
+		const send = window.fetch;
+		const w = window as unknown as { gdSent: number };
+		w.gdSent = 0;
+		window.fetch = (input, init) => {
+			const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+			if (url.includes('/family/gedcom')) w.gdSent += 1;
+			return send(input, init);
+		};
+	});
+}
+
+test('a file over 10 MiB is refused before the browser reads or sends it', async ({ page }) => {
+	await countUploads(page);
+	await asAlex(page, 'en');
+	await page.goto('/family?lang=en');
+	const card = page.getByRole('region', { name: 'Import a family tree' });
+	await card.locator('input[type=file]').setInputFiles({ name: 'big.ged', mimeType: 'application/octet-stream', buffer: Buffer.alloc(11 * 1024 * 1024, 0x20) });
+	await expect(card.getByRole('alert')).toHaveText('A family tree file is at most 10 MiB.');
+	expect(await page.evaluate(() => (window as unknown as { gdSent: number }).gdSent)).toBe(0);
+});
+
+test('a long name wraps on a phone and the birth year stays in view', async ({ page }) => {
+	await page.setViewportSize({ width: 390, height: 844 });
+	await asAlex(page, 'es');
+	await page.goto('/family?lang=es');
+	const card = page.getByRole('region', { name: 'Importar un árbol genealógico' });
+	const name = 'Rosalind Ilsabet Quorvantis María de los Ángeles /Núñez Fennickwold de la Vexlorn/';
+	const tree = `0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 CHAR UTF-8\n0 @I1@ INDI\n1 NAME ${name}\n1 SEX F\n1 BIRT\n2 DATE 1961\n0 TRLR\n`;
+	await card.locator('input[type=file]').setInputFiles({ name: 'long.ged', mimeType: 'text/plain', buffer: Buffer.from(tree, 'utf8') });
+	const picker = card.getByRole('group');
+	await expect(picker).toBeVisible({ timeout: 30_000 });
+	const list = picker.locator('ul');
+	const line = list.locator('li label').first().locator('span.dim');
+	await expect(line).toContainText('nacimiento en 1961');
+	const [l, d] = [await list.boundingBox(), await line.boundingBox()];
+	expect(l && d && d.x + d.width <= l.x + l.width + 1).toBe(true);
+	expect(await list.evaluate((e) => e.scrollWidth <= e.clientWidth)).toBe(true);
 });

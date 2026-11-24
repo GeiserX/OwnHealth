@@ -17,3 +17,7 @@ declare module 'node:os' {
 declare module 'node:url' {
 	export function fileURLToPath(url: URL): string;
 }
+// The GEDCOM checks hand the file picker a file they make in memory.
+declare module 'node:buffer' {
+	export const Buffer: { alloc(size: number, fill: number): Uint8Array; from(text: string, encoding: 'utf8'): Uint8Array };
+}

@@ -7,7 +7,7 @@
 	import type { ProfileSummary } from '#lib/api/types';
 	import { errRaw, errText, tf, tp } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
-	import { decodeTree, namesByPosition, pickable } from '#lib/logic/gedcom';
+	import { decodeTree, doneLine, MAX_TREE_BYTES, namesByPosition, pickable } from '#lib/logic/gedcom';
 
 	let { profile }: { profile: ProfileSummary } = $props();
 
@@ -44,6 +44,12 @@
 		(e.currentTarget as HTMLInputElement).value = '';
 		if (!f) return;
 		reset();
+		// the server reads at most 10 MiB: a larger file is refused here, before the browser reads it
+		if (f.size > MAX_TREE_BYTES) {
+			refusal = { refused: true, reason: 'too_large', line: null };
+			file = null;
+			return;
+		}
 		file = f;
 		busy = true;
 		try {
@@ -129,7 +135,7 @@
 
 		{#if done}
 			<div class="done" role="status">
-				<div>{tp('gd_done', done.proposed.length)}</div>
+				<div>{doneLine(done.proposed.length, (k, v) => (v ? tf(k, v) : t(k)))}</div>
 				{#if done.already || done.outside || done.left_out}
 					<div class="dim" style="font-size:11.5px">{tf('gd_done_d', { already: done.already, outside: done.outside, left: done.left_out })}</div>
 				{/if}
@@ -168,15 +174,19 @@
 	}
 	.pick li label {
 		display: flex;
-		gap: 8px;
+		flex-wrap: wrap;
+		gap: 0 8px;
 		align-items: baseline;
 		padding: 4px 2px;
 		font-size: 12.5px;
 		cursor: pointer;
 	}
+	/* a long name wraps, and the sex and birth year move under it rather than out of the list */
 	.pick .who {
 		font-weight: 600;
-		flex: none;
+		flex: 0 1 auto;
+		min-width: 0;
+		overflow-wrap: anywhere;
 	}
 	.done {
 		margin-top: 10px;

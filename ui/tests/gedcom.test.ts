@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dict } from '../src/lib/i18n/dict.ts';
-import { cleanName, decodeTree, namesByPosition, pickable, proposalTitle } from '../src/lib/logic/gedcom.ts';
+import { cleanName, decodeTree, doneLine, namesByPosition, pickable, proposalTitle } from '../src/lib/logic/gedcom.ts';
 
 const tables = dict as unknown as Record<string, Record<string, string>>;
 const f551 = readFileSync(new URL('../../fixtures/gedcom/rivera-551.ged', import.meta.url));
@@ -41,7 +41,33 @@ test('line endings and UTF-16 give the same names', () => {
 	}
 	assert.deepEqual(namesByPosition(decodeTree(le)), want);
 	assert.equal(cleanName('Alex /Rivera/  jr.'), 'Alex Rivera jr.');
+	// the first NAME of a record is the one shown, not a later one
+	assert.deepEqual(namesByPosition('0 HEAD\n0 @I1@ INDI\n1 NAME Alex /Rivera/\n1 NAME Alejandro /Vexlorn/\n0 TRLR\n'), ['Alex Rivera']);
 	assert.equal(cleanName(' / / '), null);
+});
+
+/** A 5.5.1 tree in one byte per character, its `1 CHAR` line saying which set. */
+function oneByte(charset: string, name: number[]): Uint8Array {
+	const ascii = (s: string) => [...s].map((c) => c.charCodeAt(0));
+	return new Uint8Array([
+		...ascii(`0 HEAD\r\n1 GEDC\r\n2 VERS 5.5.1\r\n1 CHAR ${charset}\r\n0 @I1@ INDI\r\n1 NAME `),
+		...name,
+		...ascii('\r\n1 SEX F\r\n0 TRLR\r\n')
+	]);
+}
+
+test('a tree saved as ANSI or ANSEL shows its accented names', () => {
+	// Ilsabet /Núñez/ in Windows-1252: ú = 0xFA, ñ = 0xF1
+	const ansi = [...'Ilsabet /N'].map((c) => c.charCodeAt(0)).concat([0xfa, 0xf1, 0x65, 0x7a, 0x2f]);
+	assert.deepEqual(namesByPosition(decodeTree(oneByte('ANSI', ansi))), ['Ilsabet Núñez']);
+	// the same bytes with no CHAR line that names them: not UTF-8, so Windows-1252
+	assert.deepEqual(namesByPosition(decodeTree(oneByte('UTF-8', ansi))), ['Ilsabet Núñez']);
+	// ANSEL puts the accent before its letter: 0xE2 acute, 0xE4 tilde; 0xA2 is Ø
+	const ansel = [...'Ilsabet /N'].map((c) => c.charCodeAt(0)).concat([0xe2, 0x75, 0xe4, 0x6e, 0x65, 0x7a, 0x2f, 0x20, 0xa2, 0x79]);
+	assert.deepEqual(namesByPosition(decodeTree(oneByte('ANSEL', ansel))), ['Ilsabet Núñez Øy']);
+	// a file that says ANSEL but is UTF-8 stays UTF-8
+	const utf8 = new TextEncoder().encode('0 HEAD\n1 CHAR ANSEL\n0 @I1@ INDI\n1 NAME Ilsabet /Núñez/\n0 TRLR\n');
+	assert.deepEqual(namesByPosition(decodeTree(utf8)), ['Ilsabet Núñez']);
 });
 
 test('the picker finds by name or birth year, and shows no names when the counts differ', () => {
@@ -67,6 +93,20 @@ test('a proposal reads in es and en, with no name', () => {
 	assert.equal(proposalTitle({ ...p, death_age: null }, 'en', word('en')), 'Father · born in 1955 · died');
 	assert.equal(proposalTitle({ label: { es: 'madre', en: 'mother' }, deceased: false }, 'es', word('es')), 'Madre');
 	assert.equal(proposalTitle({}, 'en', word('en')), 'Relative from a family tree');
+	// a relationship that names no sex shows the sex the relative will be recorded with
+	const sps = { relationship: 'SPS', label: { es: 'pareja', en: 'spouse or partner' }, sex_at_birth: 'female', born_year: 1987, deceased: false, death_age: null };
+	assert.equal(proposalTitle(sps, 'en', word('en')), 'Spouse or partner · female · born in 1987');
+	assert.equal(proposalTitle(sps, 'es', word('es')), 'Pareja · mujer · nacimiento en 1987');
+	const cousin = { relationship: 'PCOUSN', label: { es: 'primo o prima por parte de padre', en: 'paternal cousin' }, sex_at_birth: 'unknown', born_year: 1984 };
+	assert.equal(proposalTitle(cousin, 'en', word('en')), 'Paternal cousin · sex unknown · born in 1984');
+	assert.equal(proposalTitle({ ...cousin, sex_at_birth: 'male' }, 'es', word('es')), 'Primo o prima por parte de padre · hombre · nacimiento en 1984');
+});
+
+test('the end of an import counts the new proposals, and says so when there are none', () => {
+	assert.equal(doneLine(0, word('en')), 'No new relatives: all of them are already there.');
+	assert.equal(doneLine(0, word('es')), 'Ningún familiar nuevo: ya estaban todos.');
+	assert.equal(doneLine(1, word('en')), '1 relative waits in Import & review as a proposal.');
+	assert.equal(doneLine(3, word('es')), '3 familiares esperan en Importar y revisar como propuestas.');
 });
 
 test('every refusal code the server gives has its sentence in es and en', () => {
