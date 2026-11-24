@@ -22,6 +22,7 @@ const GET_ROUTES: &[&str] = &[
     "/auth/oidc/login",
     "/auth/passkeys",
     "/auth/state",
+    "/brands",
     "/break-glass",
     "/break-glass/requests/{id}",
     "/connectors/callback",
