@@ -7,6 +7,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+pub use crate::orthanc::OrthancConfig;
 
 /// The job.queue check constraint in 0001_foundation.sql.
 pub const QUEUES: [&str; 2] = ["core", "ocr"];
@@ -59,6 +60,9 @@ pub struct Settings {
     /// `OWNHEALTH_ANCHOR_DIR`: where each backup writes the audit chain head it anchored, outside the
     /// database (ownhealth-ops backup.rs). Unset: `<data_dir>/anchor`.
     pub anchor_dir: Option<PathBuf>,
+    /// Orthanc, when the `imaging` compose profile is on ([`OrthancConfig::from_env`]). Every command
+    /// reads it, so the viewer proxy of serve and the DICOM import of every worker use the same Orthanc.
+    pub orthanc: Option<OrthancConfig>,
     /// `OWNHEALTH_KEYRING_DIR`: the folder of `keyring.json`, the profile keys kept out of the database
     /// dump (`keyfile.rs`). It must sit outside the blob folder and every backup. Unset:
     /// `<data_dir>/keyring`.
@@ -93,6 +97,7 @@ impl Default for Settings {
             share_url: None,
             trusted_proxies: Vec::new(),
             anchor_dir: None,
+            orthanc: None,
             keyring_dir: None,
         }
     }
@@ -124,6 +129,7 @@ impl fmt::Debug for Settings {
             .field("share_url", &self.share_url)
             .field("trusted_proxies", &self.trusted_proxies)
             .field("anchor_dir", &self.anchor_dir)
+            .field("orthanc", &self.orthanc)
             .field("keyring_dir", &self.keyring_dir)
             .finish_non_exhaustive()
     }
@@ -339,6 +345,8 @@ impl Settings {
             share_url: env_or(env, "SHARE_URL")?.map(|u| check_share_url(&u)).transpose()?,
             trusted_proxies: parse_trusted_proxies(&env_or(env, "TRUSTED_PROXIES")?.unwrap_or_default())?,
             anchor_dir: env_or(env, "ANCHOR_DIR")?.map(PathBuf::from),
+            // serve's viewer proxy and every worker's DICOM import read the same Orthanc
+            orthanc: OrthancConfig::from_env(env)?,
             keyring_dir: env_or(env, "KEYRING_DIR")?.map(PathBuf::from),
         })
     }
@@ -408,6 +416,21 @@ mod tests {
             s.database_url,
             "postgresql://ownhealth:a%2Fb%2Bc%3Dd%40e%3Af@db:5432/ownhealth"
         );
+    }
+
+    #[test]
+    fn every_command_reads_orthanc_from_the_environment() {
+        // the worker runs the DICOM import too, so Orthanc is in the settings every command reads
+        let e = env(&[
+            ("OWNHEALTH_ORTHANC_URL", "http://orthanc:8042/"),
+            ("OWNHEALTH_ORTHANC_PASSWORD", "synthetic-orthanc-password"),
+        ]);
+        let orthanc = Settings::from(&e).expect("settings").orthanc.expect("imaging on");
+        assert_eq!(orthanc.url, "http://orthanc:8042");
+        assert_eq!(orthanc.user, "ownhealth");
+        assert!(Settings::from(&env(&[])).expect("settings").orthanc.is_none());
+        // a URL without a password stops every command, as it stops serve
+        assert!(Settings::from(&env(&[("OWNHEALTH_ORTHANC_URL", "http://orthanc:8042")])).is_err());
     }
 
     #[test]

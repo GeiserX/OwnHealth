@@ -1292,6 +1292,48 @@ async fn a_guardian_contact_cannot_decide_a_review_item_break_glass_opened() -> 
     Ok(())
 }
 
+/// A held imaging study (slice 41) shows only with `read:records`. An open request may give that
+/// read, and the list, its count and `/api/me` then show the study; deciding it still needs
+/// `read:records` on the contact's own grant.
+#[tokio::test]
+async fn a_held_study_shows_through_break_glass_but_only_the_own_grant_decides_it() -> R {
+    let mut b = setup().await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let item = held_study(&b).await?;
+    let mut sam = b.sam().await?;
+    let shown = |r: &Resp| (r.json["open"].clone(), r.json["items"].as_array().map_or(0, Vec::len));
+    let r = sam.get(&format!("/api/review/{item}")).await?;
+    assert_eq!(r.status, 404, "{:?}", r.json);
+    let list = sam.get("/api/review").await?;
+    assert_eq!(list.status, 200, "{:?}", list.json);
+    assert_eq!(shown(&list), (json!(0), 0), "{:?}", list.json);
+    assert_eq!(sam.get("/api/me").await?.json["review_open"], 0);
+
+    b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
+    let r = sam.get(&format!("/api/review/{item}")).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    let list = sam.get("/api/review").await?;
+    assert_eq!(shown(&list), (json!(1), 1), "{:?}", list.json);
+    assert_eq!(list.json["items"][0]["id"], json!(item.to_string()));
+    assert_eq!(sam.get("/api/me").await?.json["review_open"], 1);
+    for action in ["accept", "reject", "dismiss"] {
+        let r = sam
+            .post(&format!("/api/review/{item}/{action}"), &json!({"reason": "x"}))
+            .await?;
+        assert_eq!(
+            (r.status.as_u16(), r.code()),
+            (403, "break_glass"),
+            "{action}: {:?}",
+            r.json
+        );
+    }
+    assert_eq!(
+        b.text("select status from review_item where id = $1", item).await?,
+        "open"
+    );
+    Ok(())
+}
+
 type CalendarEvent = (String, String);
 
 fn calendar_events(resp: Resp) -> anyhow::Result<Vec<CalendarEvent>> {
@@ -1367,6 +1409,27 @@ async fn candidate(b: &Bg, document_id: Option<Uuid>) -> anyhow::Result<Uuid> {
             payload: json!({
                 "observation": lab(profile, "97", false)?,
                 "src": {"kind": "manual", "profile_id": profile},
+            }),
+            ..Default::default()
+        },
+    )
+    .await?)
+}
+
+/// An `imaging_study` review item on Alex's profile, as the DICOM import holds one.
+async fn held_study(b: &Bg) -> anyhow::Result<Uuid> {
+    let profile = b.alex_id();
+    let mut conn = b.env.pool().acquire().await?;
+    Ok(create_item(
+        &mut conn,
+        &ReviewItemIn {
+            household_id: Some(b.env.fam().household_id),
+            profile_id: Some(profile),
+            kind: "imaging_study".into(),
+            payload: json!({
+                "reason": "identity_mismatch",
+                "study_uid": "1.2.826.0.1.3680043.10.41.1",
+                "patient": {"name": "RIVERA^ALEX", "id": "MRN-41"},
             }),
             ..Default::default()
         },
@@ -2267,6 +2330,33 @@ async fn review_counts_hold_only_what_the_list_shows() -> R {
     Ok(())
 }
 
+#[tokio::test]
+async fn round8_counting_held_studies_through_break_glass_records_a_use_with_no_page() -> R {
+    let mut b = setup().await?;
+    held_study(&b).await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let mut sam = b.sam().await?;
+    let path = "/api/review?profile=alex&limit=0";
+    let review = sam.get(path).await?;
+    assert_eq!(review.status, 200, "{:?}", review.json);
+    assert_eq!(review.json, json!({"items": [], "open": 0, "withheld": 0}));
+
+    let id = b.open_for(b.env.user("sam"), &mut sam, json!(["read:records"])).await?;
+    let before = record_uses(&b, id).await?;
+    let review = sam.get(path).await?;
+    assert_eq!(review.status, 200, "{:?}", review.json);
+    assert_eq!(review.json, json!({"items": [], "open": 1, "withheld": 0}));
+    let after = record_uses(&b, id).await?;
+    assert_eq!(after, (before.0 + 1, before.1 + 1));
+
+    b.grant_sam("guardian", &["read:summary", "read:records"]).await?;
+    let review = sam.get(path).await?;
+    assert_eq!(review.status, 200, "{:?}", review.json);
+    assert_eq!(review.json, json!({"items": [], "open": 1, "withheld": 0}));
+    assert_eq!(record_uses(&b, id).await?, after);
+    Ok(())
+}
+
 /// History rows keep the sensitivity check of current rows: a correction that drops a condition's
 /// sensitivity does not hand its sensitive first version to a reader without read:sensitive.
 #[tokio::test]
@@ -2347,4 +2437,51 @@ async fn an_emergency_grant_cannot_change_a_sensitive_relative() -> R {
     assert_eq!(r.status, 200, "{:?}", r.json);
     assert_eq!(b.text(status, id).await?, "retracted");
     Ok(())
+}
+
+/// A job row of `kind` for Alex, finished, naming the file it imported.
+async fn alex_job(b: &Bg, kind: &str) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(
+        "insert into job (kind, payload, state, result) values ($1, $2, 'done', '{\"studies\": 1}'::jsonb) returning id",
+    )
+    .bind(kind)
+    .bind(json!({"profile_id": b.alex_id().to_string(), "filename": "RIVERA-CD.zip"}))
+    .fetch_one(b.env.pool())
+    .await?)
+}
+
+/// A job row's `field` needs `scope`; when an open request supplies it, the read records one
+/// break-glass use and one owner notice, whatever the job kind.
+async fn job_read_through_break_glass(kind: &str, scope: &str, field: &str) -> R {
+    let mut b = setup().await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let job = alex_job(&b, kind).await?;
+    let mut sam = b.sam().await?;
+    let r = sam.get(&format!("/api/jobs?ids={job}")).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["jobs"][0]["id"], job, "{:?}", r.json);
+    assert_eq!(r.json["jobs"][0].get(field), Some(&Value::Null), "{:?}", r.json);
+    let id = b.open_for(b.env.user("sam"), &mut sam, json!([scope])).await?;
+    let before = record_uses(&b, id).await?;
+    let r = sam.get(&format!("/api/jobs?ids={job}")).await?;
+    let after = record_uses(&b, id).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["jobs"][0]["id"], job, "{:?}", r.json);
+    assert_ne!(r.json["jobs"][0][field], Value::Null, "{:?}", r.json);
+    assert_eq!(
+        after,
+        (before.0 + 1, before.1 + 1),
+        "{kind}: the read through the request records no use"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_wearable_job_read_through_break_glass_records_a_use() -> R {
+    job_read_through_break_glass("import.fit", "read:wearables", "result").await
+}
+
+#[tokio::test]
+async fn a_dicom_job_read_through_break_glass_records_a_use() -> R {
+    job_read_through_break_glass("import.dicom", "read:records", "filename").await
 }

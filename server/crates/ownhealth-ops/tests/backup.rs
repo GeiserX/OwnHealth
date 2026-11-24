@@ -2056,3 +2056,19 @@ async fn older_restore_keeps_its_omission_without_remarking_a_newer_store() -> R
     assert_eq!(strs(&report["blobs"]["missing"]), [plain_sha], "{report:#}");
     Ok(())
 }
+
+#[tokio::test]
+async fn round5_verify_restore_reports_a_missing_imaging_upload() -> R {
+    let l = live().await?;
+    let missing = [42u8; 32];
+    sqlx::query("insert into imaging_import (profile_id, zip_blob, size_bytes, files) values ($1, $2, 128, 1)")
+        .bind(l.alex)
+        .bind(missing.as_slice())
+        .execute(&l.db.pool)
+        .await?;
+    let archive = ownhealth_ops::backup(&l.settings, &l.dir.path().join("missing/staging")).await?;
+    let report = ownhealth_ops::verify_restore(&l.settings, &archive).await?;
+    assert_eq!(report["ok"], false, "{report}");
+    assert_eq!(strs(&report["blobs"]["missing"]), [hex::encode(missing)]);
+    Ok(())
+}

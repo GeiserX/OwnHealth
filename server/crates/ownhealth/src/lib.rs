@@ -17,4 +17,5 @@ pub fn register_lanes() {
     ownhealth_inbox::register();
     ownhealth_ocr::register();
     ownhealth_devices::register();
+    ownhealth_imaging::register();
 }

@@ -589,6 +589,8 @@ pub const BLOB_COLUMNS: &[(&str, &[&str], &str)] = &[
         ],
         "profile_id = $1",
     ),
+    // the zip of a DICOM upload (a CD or a zip), kept so Orthanc can be rebuilt from it
+    ("imaging_import", &["zip_blob"], "profile_id = $1"),
     (
         "ocr_run",
         &["words_blob"],
