@@ -47,6 +47,8 @@
 		retry = null;
 		const asked = asking;
 		asking = [];
+		// a request that carries held files answers the questions on screen: if it fails, they stay
+		const carriesHeld = (extra.held?.length ?? 0) > 0;
 		try {
 			const res = await receiveCard(profile, s, approve, extra);
 			approved = approve;
@@ -61,6 +63,7 @@
 			} else answer = res;
 			if (res.status === 'imported' && res.document_id) ondone(res.document_id);
 		} catch (e) {
+			if (carriesHeld) asking = asked;
 			error = { text: errText(e), raw: errRaw(e) };
 		} finally {
 			busy = false;
@@ -76,15 +79,18 @@
 		send(source, approved.includes(host) ? approved : [...approved, host], extra);
 	}
 
+	// a new source starts with an empty passcode: one typed for another link is never sent with this one
 	function read() {
 		link = null;
 		held = [];
+		passcode = '';
 		send({ text }, []);
 	}
 
 	function decline(host: string) {
 		asking = [];
 		retry = null;
+		passcode = '';
 		declined = host;
 		focusNext();
 	}
@@ -95,6 +101,7 @@
 		input.value = '';
 		link = null;
 		held = [];
+		passcode = '';
 		if (f) send({ file: f }, []);
 	}
 
