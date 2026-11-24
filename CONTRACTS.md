@@ -93,16 +93,21 @@ the same PR.
 contains up to 50 sessions, ordered by last call, newest first. Each has `started_at`, `ended_at`,
 and `tools`. A tool row contains `tool`, `calls`, `not_assessed_calls`, `not_assessed_n`,
 `budget_cuts`, `denied`, `errors`, and `arg_bytes`. The two assessment counts are calls
-with at least one unassessed item and the total number of those items. `arg_bytes` sums the UTF-8
-byte lengths of the compact JSON argument objects. A session is an estimate. It groups recorded
+with at least one unassessed item and the total number of those items. `budget_cuts` counts answers
+cut to fit the token budget; a call refused because a daily limit ran out counts as `denied`.
+`arg_bytes` sums the UTF-8 byte lengths of the compact JSON argument objects. A session is an estimate. It groups recorded
 calls from the same token until a gap of at least 30 minutes or an unrecorded call.
 
-`PUT /api/mcp/session-report/consent` takes and returns `{enabled: boolean}`. Each change writes
+`PUT /api/mcp/session-report/consent` takes and returns `{enabled: boolean}`. Turning collection
+on needs a fresh step-up (403 `step_up_required`); turning it off does not. Each change writes
 a `consent_change` audit event. The `mcp_session_report` household setting defaults to off.
 When off, the report contains an empty `sessions` array and new MCP calls leave both measurement
 columns null. Turning collection off keeps earlier counts in the append-only audit log. Consent
-applies to tokens owned by household members. Recorded tool calls omit the argument summary, client
-label, and user agent. The report returns counts, tool identifiers, and time ranges.
+applies to tokens owned by household members. The report reads only the rows `GET /audit` shows the
+owner: calls by the owner's own tokens and calls on profiles the owner manages. Another member's
+calls on other profiles, or on no profile, stay out. Recorded tool calls keep the client label (the
+token's label) and the argument summary, limited to the keys the tool's schema names, and omit the
+user agent. The report returns counts, tool identifiers, and time ranges.
 
 ## 7. Migrations
 
