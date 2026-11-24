@@ -63,6 +63,9 @@ const SOURCES: &[(&str, Source)] = &[
     ("shl_receive", |_| {
         Box::pin(async { Ok(vec![ownhealth_ingest_structured::shl_receive::phrases()]) })
     }),
+    ("smart_poller", |_| {
+        Box::pin(async { Ok(vec![ownhealth_ingest_structured::smart::phrases()]) })
+    }),
 ];
 
 async fn status(s: &Seeded) -> anyhow::Result<Vec<Value>> {

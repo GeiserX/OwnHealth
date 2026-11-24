@@ -526,7 +526,7 @@ async fn a_connection_keeps_its_refresh_token_sealed_and_out_of_the_source_row()
     assert_eq!((row.3, row.4, row.5), (None, Some(oauth::DEFAULT_POLL_SECONDS), true));
     assert_eq!(row.1["patient"], PATIENT);
     assert_eq!(row.1["hosts"].as_array().map(Vec::len), Some(1), "{}", row.1);
-    // no token in any column of the source, the challenge or the secret's sealed bytes
+    // no cleartext token in the source, the challenge, or the sealed refresh token
     let whole: String = sqlx::query_scalar("select row_to_json(s)::text from source s where id = $1")
         .bind(id)
         .fetch_one(&s.db.pool)
@@ -591,7 +591,6 @@ async fn a_refresh_token_is_sealed_under_its_profiles_key_and_survives_a_restart
     // a restart: a new keyring on the same database and keys opens it, refreshes and seals the new one
     let restarted =
         SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(s.kek.clone(), s.db.url.clone()))));
-    oauth::forget(id);
     let mut c = s.db.pool.acquire().await?;
     let before = read_secret(&mut c, &restarted, s.fam.household_id, secret).await?;
     assert_eq!(Some(before.expose()), t.refresh.as_ref().map(SecretString::expose));
@@ -625,7 +624,6 @@ async fn a_token_sealed_under_the_secrets_key_still_works_and_the_next_refresh_s
     assert_eq!(sealed_head(&s.db, secret).await?.0, 1);
     assert_eq!(read_secret(&mut c, &s.sb, s.fam.household_id, secret).await?, token);
     drop(c);
-    oauth::forget(id);
     s.refresh(id, t0() + Duration::hours(2)).await?;
     assert_eq!(sealed_head(&s.db, secret).await?, (2, Some(s.alex())));
     let now = s.refresh_token(id).await?.unwrap_or_default();
@@ -647,7 +645,6 @@ async fn a_token_a_vendor_never_rotates_is_sealed_under_the_profile_at_the_next_
     replace_secret(&mut c, &s.sb, secret, &token).await?;
     drop(c);
     assert_eq!(sealed_head(&s.db, secret).await?.0, 1);
-    oauth::forget(id);
     s.refresh(id, t0() + Duration::hours(2)).await?;
     assert_eq!(
         sealed_head(&s.db, secret).await?,
@@ -660,7 +657,6 @@ async fn a_token_a_vendor_never_rotates_is_sealed_under_the_profile_at_the_next_
         .bind(secret)
         .fetch_one(&s.db.pool)
         .await?;
-    oauth::forget(id);
     s.refresh(id, t0() + Duration::hours(4)).await?;
     let after: Vec<u8> = sqlx::query_scalar("select ciphertext from secret where id = $1")
         .bind(secret)
@@ -686,7 +682,6 @@ async fn a_box_without_the_profile_keys_refuses_before_it_spends_the_refresh_tok
     let token = read_secret(&mut c, &s.sb, s.fam.household_id, secret).await?;
     replace_secret(&mut c, &s.sb, secret, &token).await?;
     drop(c);
-    oauth::forget(id);
     let keyless = SecretBox::new(&[5u8; 32])?;
     let r = oauth::access_token(&s.db.pool, &keyless, id, &egress(), t0() + Duration::hours(2)).await;
     assert_eq!(refused_code(r), "profile_keys_missing");
@@ -711,7 +706,6 @@ async fn a_keyring_that_cannot_open_the_profiles_key_refuses_before_it_spends_th
     replace_secret(&mut c, &s.sb, secret, &token).await?;
     drop(c);
     assert_eq!(sealed_head(&s.db, secret).await?.0, 1);
-    oauth::forget(id);
     let other_kek = Kek::from_base64(&random_secrets_key())?;
     let wrong =
         SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(other_kek, s.db.url.clone()))));
@@ -743,8 +737,7 @@ async fn a_profile_with_no_key_yet_gets_one_at_its_first_refresh() -> R {
         .await?;
     drop(c);
     assert_eq!(sealed_head(&s.db, secret).await?.0, 1);
-    oauth::forget(id);
-    // a process started after the upgrade: nothing cached
+    // a process started after the upgrade
     let upgraded =
         SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(s.kek.clone(), s.db.url.clone()))));
     oauth::access_token(&s.db.pool, &upgraded, id, &egress(), t0() + Duration::hours(2)).await?;
@@ -779,7 +772,7 @@ async fn thirty_daily_refreshes_rotate_the_token_under_an_injected_clock() -> R 
             seen.insert(access.expose().to_string()),
             "day {day}: an access token came back twice"
         );
-        // the same day, the token in memory is used again and the vendor is not asked
+        // the same day, the committed token is used again and the vendor is not asked
         assert_eq!(s.refresh(id, now + Duration::minutes(30)).await?, access, "day {day}");
         let expires: (Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
             sqlx::query_as("select access_expires_at, grant_expires_at from source where id = $1")
@@ -928,7 +921,7 @@ async fn a_failed_commit_after_the_vendor_rotated_asks_for_consent_instead_of_fa
     let kept = s.refresh_token(id).await?;
     assert_eq!(kept.as_deref(), t.refresh.as_ref().map(SecretString::expose));
     assert!(!kept.is_some_and(|k| s.fake.book().live.contains(&k)));
-    // and the access token of the lost refresh is not handed out from memory either
+    // and the access token of the lost refresh cannot be used
     assert!(matches!(s.refresh(id, now).await, Err(OAuthError::ReconsentNeeded)));
     Ok(())
 }
@@ -1109,6 +1102,39 @@ async fn a_reconnect_that_signs_in_as_another_patient_is_refused_and_changes_not
 }
 
 #[tokio::test]
+async fn a_refused_reconnect_on_a_profile_with_no_key_makes_no_key() -> R {
+    let s = setup().await?;
+    let (id, _) = s.connect(None, t0()).await?;
+    let url = s.launch(Some(id)).await?;
+    sqlx::query("delete from profile_key where profile_id = $1")
+        .bind(s.alex())
+        .execute(&s.db.pool)
+        .await?;
+    // a process with a fresh keyring, so no key of the profile is held in memory
+    let fresh =
+        SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(s.kek.clone(), s.db.url.clone()))));
+    let mut c = s.db.pool.acquire().await?;
+    let p = oauth::take_state(&mut c, &param(&url, "state").unwrap_or_default(), BINDER).await?;
+    let other = TokenSet {
+        access: SecretString::new("fake-access-of-someone-else"),
+        refresh: Some(SecretString::new("fake-refresh-of-someone-else")),
+        expires_in: Some(3600),
+        refresh_expires_in: None,
+        scope: None,
+        patient: Some("fake-patient-someone-else".into()),
+    };
+    let r = oauth::save_connection(&mut c, &fresh, &p, &s.client, &other, t0() + Duration::hours(1)).await;
+    assert_eq!(refused_code(r), "another_patient");
+    drop(c);
+    let keys: i64 = sqlx::query_scalar("select count(*) from profile_key where profile_id = $1")
+        .bind(s.alex())
+        .fetch_one(&s.db.pool)
+        .await?;
+    assert_eq!(keys, 0, "a refused reconnect made a key for the profile");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_reconnect_launched_for_another_profile_does_not_touch_the_source() -> R {
     let s = setup().await?;
     let (id, t) = s.connect(None, t0()).await?;
@@ -1235,5 +1261,80 @@ async fn a_poller_asking_for_an_undeclared_host_is_refused_and_no_request_goes_o
         bare.get(&format!("{}/x", s.fake.issuer()), &[]).await,
         Err(OAuthError::UndeclaredHost(_))
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn committing_a_grant_without_a_refresh_token_makes_the_access_token_available() -> R {
+    let s = setup().await?;
+    let save = |source_id: Option<Uuid>, rollback: bool| {
+        let s = &s;
+        async move {
+            let url = s.launch(source_id).await?;
+            let code = s.fake.consent(&url);
+            let mut tx = s.db.pool.begin().await?;
+            let p = oauth::take_state(&mut tx, &param(&url, "state").unwrap_or_default(), BINDER).await?;
+            let mut tokens = oauth::exchange(&p, &s.client, &code, &egress()).await?;
+            tokens.refresh = None;
+            let id = oauth::save_connection(&mut tx, &s.sb, &p, &s.client, &tokens, t0()).await?;
+            if rollback {
+                tx.rollback().await?;
+            } else {
+                tx.commit().await?;
+            }
+            Ok::<_, anyhow::Error>((id, tokens.access))
+        }
+    };
+    let (id, original) = save(None, false).await?;
+    let stored: Option<String> =
+        sqlx::query_scalar("select to_jsonb(s)->>'oauth_access_token' from source s where id = $1")
+            .bind(id)
+            .fetch_one(&s.db.pool)
+            .await?;
+    assert!(
+        stored.is_some(),
+        "the committed grant must carry its access token for a separate worker"
+    );
+    let encrypted = hex::decode(
+        stored
+            .as_deref()
+            .and_then(|s| s.strip_prefix(r"\x"))
+            .unwrap_or_default(),
+    )?;
+    assert!(!encrypted.is_empty());
+    assert!(
+        !encrypted
+            .windows(original.expose().len())
+            .any(|w| w == original.expose().as_bytes())
+    );
+    let worker =
+        SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(s.kek.clone(), s.db.url.clone()))));
+    let without_profile_keys = SecretBox::new(&[5u8; 32])?;
+    assert!(
+        oauth::access_token(&s.db.pool, &without_profile_keys, id, &egress(), t0())
+            .await
+            .is_err()
+    );
+    let first = oauth::access_token(&s.db.pool, &worker, id, &egress(), t0()).await?;
+    assert!(first == original);
+    assert_eq!(s.reconsent(id).await?, None);
+    save(Some(id), true).await?;
+    let after_rollback = s.refresh(id, t0()).await?;
+    assert!(after_rollback == original);
+    assert_eq!(s.reconsent(id).await?, None);
+    let (_, replacement) = save(Some(id), false).await?;
+    assert!(replacement != original);
+    assert!(s.refresh(id, t0()).await? == replacement);
+    assert_eq!(s.fake.book().refresh_calls, 0);
+    assert_eq!(
+        oauth::disconnect(&s.db.pool, &worker, id, &egress()).await?,
+        Revocation::NoToken
+    );
+    let gone: bool =
+        sqlx::query_scalar("select oauth_access_token is null and access_expires_at is null from source where id = $1")
+            .bind(id)
+            .fetch_one(&s.db.pool)
+            .await?;
+    assert!(gone);
     Ok(())
 }

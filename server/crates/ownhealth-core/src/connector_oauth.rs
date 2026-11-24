@@ -6,8 +6,8 @@
 //!   a binder cookie the route sets, kept with the verifier in `auth_challenge` (purpose `connector`).
 //! - **Callback.** [`take_state`] uses the state up (once, within [`STATE_TTL_SECONDS`], in the
 //!   browser that started it); [`exchange`] trades the code as a public client or with the client
-//!   secret (`client_secret_basic` or `client_secret_post`); [`save_connection`] stores the refresh
-//!   token in `secret` (`source.secret_id`), sealed under the profile's data key, and the endpoints in
+//!   secret (`client_secret_basic` or `client_secret_post`); [`save_connection`] stores both tokens sealed
+//!   under the profile's data key, with the refresh token held by `source.secret_id` and the endpoints in
 //!   `source.config`. A reconnect is the same flow for an existing source, and it clears
 //!   `reconsent_needed_at`.
 //! - **Refresh.** [`access_token`] locks the source row `FOR UPDATE`, posts the refresh, stores the
@@ -15,17 +15,13 @@
 //!   lock and reuses the first one's result. A reply with no refresh token keeps the old one.
 //!   `invalid_grant` sets `reconsent_needed_at`; so does a rotated token that could not be stored.
 //! - **Disconnect.** [`disconnect`] calls the revocation endpoint when the server offers one, then
-//!   deletes the refresh token and the cursor. [`revoke_profile`] does the vendor half before a
+//!   deletes both tokens and the cursor. [`revoke_profile`] does the vendor half before a
 //!   profile delete.
 //! - **Declared hosts** (connectors.md 6.3 rule 7). [`SourceHttp`] is the client a connector's poller
 //!   uses: it refuses any host the source did not declare at connect time before `net` resolves it.
 //!   `net` then does the address half (public, https, no redirects, capped).
 //!
-//! Access tokens live only in this process's memory, until they expire. No token, verifier or code
-//! appears in a log line, an error message, a `Debug` print or `source.config`.
-
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+//! No token, verifier or code appears in a log line, an error message, a `Debug` print or `source.config`.
 
 use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
@@ -54,8 +50,50 @@ const MARGIN_SECONDS: i64 = 60;
 /// How long an access token with no `expires_in` is kept.
 const UNKNOWN_LIFETIME_SECONDS: i64 = 300;
 
-/// SMART App Launch, standalone patient access (connectors.md section 7).
-pub const SMART_SCOPES: &str = "openid fhirUser launch/patient offline_access patient/*.rs";
+/// SMART App Launch, standalone patient access (connectors.md section 7): a patient picked at the
+/// vendor, a refresh token, and read and search on each US Core type the SMART poller reads
+/// (ownhealth-ingest-structured `smart.rs`), never a wildcard or a write scope. A server that does
+/// not list `permission-v2` (a SMART 1.0 server) is asked for the same types as `.read` ([`v1_scopes`]).
+pub const SMART_SCOPES: &str = "openid fhirUser launch/patient offline_access patient/Patient.rs \
+    patient/AllergyIntolerance.rs patient/Condition.rs patient/DiagnosticReport.rs patient/DocumentReference.rs \
+    patient/Encounter.rs patient/Immunization.rs patient/Medication.rs patient/MedicationRequest.rs \
+    patient/Observation.rs patient/Procedure.rs";
+
+/// The connector rule for SMART v1 servers: each `patient/<type>.rs` becomes `patient/<type>.read`.
+pub fn v1_scopes(scopes: &str) -> String {
+    scopes
+        .split_whitespace()
+        .map(|s| match s.strip_suffix(".rs") {
+            Some(t) if s.starts_with("patient/") => format!("{t}.read"),
+            _ => s.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The switch that lets a debug build with dev auth reach a fake vendor on loopback.
+pub const DEV_LOOPBACK_SWITCH: &str = "OWNHEALTH_DEV_CONNECTOR_LOOPBACK";
+
+/// How connector requests go out: https to public addresses only. In a debug build that runs with
+/// dev auth, `dev_loopback_switch == Some("1")` widens it to plain http on loopback, so a person can
+/// try a flow against a local fake; a release build ignores the switch, as it does without dev auth.
+pub fn configured_egress(dev_auth: bool, dev_loopback_switch: Option<&str>) -> Egress {
+    // never in a release build, as the SHC dev map (shc.rs)
+    if cfg!(debug_assertions) && dev_auth && dev_loopback_switch == Some("1") {
+        return Egress {
+            allow_private: true,
+            https_only: false,
+            ..Egress::connector()
+        };
+    }
+    Egress::connector()
+}
+
+/// [`configured_egress`] with the switch read from the environment ([`DEV_LOOPBACK_SWITCH`]): what
+/// the connector routes and the pollers use.
+pub fn connector_egress(dev_auth: bool) -> Egress {
+    configured_egress(dev_auth, std::env::var(DEV_LOOPBACK_SWITCH).ok().as_deref())
+}
 
 // ------------------------------------------------------------------ errors ----
 
@@ -70,6 +108,9 @@ pub enum OAuthError {
     /// keep): `reconsent_needed_at` is set and the person connects again.
     #[error("the vendor no longer accepts this connection: connect it again")]
     ReconsentNeeded,
+    /// The pull's grant was replaced while it was running.
+    #[error("the connection's grant changed")]
+    GrantChanged,
     /// The vendor answered with an error or an unexpected status: only the status and the OAuth error
     /// code, never its description or body.
     #[error("the vendor refused the request ({status}, {code})")]
@@ -308,6 +349,12 @@ async fn discover_smart(issuer: &str, scopes: &str, egress: &Egress) -> Result<E
     if listed("code_challenge_methods_supported", "S256") == Some(false) {
         return Err(bad("no_pkce_s256"));
     }
+    // SMART v2 scopes (`.rs`) only on a server that lists `permission-v2`; a SMART 1.0 server lists
+    // neither marker (they came with 2.0), so anything else is asked for v1 `.read`
+    let scopes = match listed("capabilities", "permission-v2") {
+        Some(true) => scopes.to_string(),
+        _ => v1_scopes(scopes),
+    };
     let auth = match (
         listed("token_endpoint_auth_methods_supported", "client_secret_basic"),
         listed("token_endpoint_auth_methods_supported", "client_secret_post"),
@@ -320,7 +367,7 @@ async fn discover_smart(issuer: &str, scopes: &str, egress: &Egress) -> Result<E
         authorize,
         token,
         revocation: field("revocation_endpoint"),
-        scopes: scopes.into(),
+        scopes,
         aud: Some(issuer.into()),
         auth,
     })
@@ -455,8 +502,27 @@ impl SourceHttp {
     }
 
     pub async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<Fetched, OAuthError> {
-        self.check(url)?;
-        Ok(net::get(url, &self.egress, headers).await?)
+        self.get_bounded(url, headers, self.egress.max_bytes)
+            .await
+            .map_err(|(err, _)| err)
+    }
+
+    /// GET with a per-request body cap within this connection's egress limit. An error includes
+    /// how many body bytes arrived before it.
+    pub async fn get_bounded(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        max_bytes: usize,
+    ) -> Result<Fetched, (OAuthError, usize)> {
+        self.check(url).map_err(|err| (err, 0))?;
+        let egress = Egress {
+            max_bytes: max_bytes.min(self.egress.max_bytes),
+            ..self.egress.clone()
+        };
+        net::get_counted(url, &egress, headers)
+            .await
+            .map_err(|(err, bytes)| (OAuthError::Net(err), bytes))
     }
 
     pub async fn post_form(
@@ -736,8 +802,8 @@ fn after(now: DateTime<Utc>, secs: Option<i64>) -> Option<DateTime<Utc>> {
 }
 
 /// Store a finished launch, in the caller's transaction: a new source, or (a reconnect) the same
-/// source with the new grant, `reconsent_needed_at` cleared and switched back on. Returns the source
-/// id. Call [`remember`] after the commit to keep the access token for the first poll.
+/// source with a new grant identity and the old grant's errors cleared. The source is switched
+/// back on. Returns its id. The sealed access token becomes visible with the grant on commit.
 pub async fn save_connection(
     conn: &mut PgConnection,
     sb: &SecretBox,
@@ -757,8 +823,13 @@ pub async fn save_connection(
         ));
     }
     let config = config_for(p, t);
-    let (access_at, grant_at) = (after(now, t.expires_in), after(now, t.refresh_expires_in));
-    let Some(source_id) = p.source_id else {
+    let access_at = access_until(t, now);
+    let grant_at = after(now, t.refresh_expires_in);
+    let grant_id = Uuid::new_v4();
+    let source_id = p.source_id.unwrap_or_else(Uuid::new_v4);
+    let seal_access = secrets::seal_source_access(sb, Some(p.profile_id), source_id, Some(grant_id), &t.access);
+    if p.source_id.is_none() {
+        let access = seal_access.await?;
         let secret_id = match &t.refresh {
             Some(r) => Some(
                 secrets::store_profile_secret(
@@ -773,10 +844,10 @@ pub async fn save_connection(
             ),
             None => None,
         };
-        let id: Uuid = sqlx::query_scalar(
+        sqlx::query(
             "insert into source (household_id, profile_id, kind, label, config, secret_id, poll_seconds, created_by, \
-             connector_client_id, access_expires_at, grant_expires_at) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, \
-             $10, $11) returning id",
+             connector_client_id, access_expires_at, grant_expires_at, oauth_grant_id, id, oauth_access_token) \
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(client.household_id)
         .bind(p.profile_id)
@@ -789,11 +860,13 @@ pub async fn save_connection(
         .bind(client.id)
         .bind(access_at)
         .bind(grant_at)
-        .fetch_one(&mut *conn)
+        .bind(grant_id)
+        .bind(source_id)
+        .bind(&access)
+        .execute(&mut *conn)
         .await?;
-        forget(id);
-        return Ok(id);
-    };
+        return Ok(source_id);
+    }
     let old: Option<(Option<Uuid>, Option<String>)> = sqlx::query_as(
         "select secret_id, config->>'patient' from source where id = $1 and household_id = $2 and profile_id = $3 \
          and kind = $4 and connector_client_id = $5 for update",
@@ -819,6 +892,7 @@ pub async fn save_connection(
             "This sign-in at the vendor is for another patient. Sign in with the account of this person.",
         ));
     }
+    let access = seal_access.await?;
     // the new grant replaces the old one; without a refresh token there is nothing left to keep
     let secret_id = match (&t.refresh, old) {
         (Some(r), Some(id)) => {
@@ -840,13 +914,16 @@ pub async fn save_connection(
     };
     sqlx::query(
         "update source set config = $2, secret_id = $3, enabled = true, reconsent_needed_at = null, \
-         access_expires_at = $4, grant_expires_at = $5 where id = $1",
+         access_expires_at = $4, grant_expires_at = $5, oauth_grant_id = $6, oauth_access_token = $7, \
+         last_error_at = null, last_error = null, consecutive_failures = 0 where id = $1",
     )
     .bind(source_id)
     .bind(&config)
     .bind(secret_id)
     .bind(access_at)
     .bind(grant_at)
+    .bind(grant_id)
+    .bind(&access)
     .execute(&mut *conn)
     .await?;
     if let (Some(old), None) = (old, secret_id) {
@@ -855,60 +932,46 @@ pub async fn save_connection(
             .execute(&mut *conn)
             .await?;
     }
-    forget(source_id);
     Ok(source_id)
 }
 
 // ----------------------------------------------------------------- refresh ----
 
-/// The access tokens in memory, with the instant each stops being used.
-type AccessCache = Mutex<HashMap<Uuid, (SecretString, DateTime<Utc>)>>;
+/// The source and its grant, including sources that predate grant identities.
+type Grant = (Uuid, Option<Uuid>);
 
-static ACCESS: LazyLock<AccessCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn cached(source_id: Uuid, now: DateTime<Utc>) -> Option<SecretString> {
-    let m = ACCESS.lock().ok()?;
-    m.get(&source_id)
-        .filter(|(_, until)| *until > now + Duration::seconds(MARGIN_SECONDS))
-        .map(|(t, _)| t.clone())
+fn access_until(tokens: &TokenSet, now: DateTime<Utc>) -> DateTime<Utc> {
+    now + Duration::seconds(tokens.expires_in.unwrap_or(UNKNOWN_LIFETIME_SECONDS))
 }
 
-/// Keep a connection's access token in memory until it expires (never on disk).
-pub fn remember(source_id: Uuid, t: &TokenSet, now: DateTime<Utc>) {
-    let until = now + Duration::seconds(t.expires_in.unwrap_or(UNKNOWN_LIFETIME_SECONDS));
-    if let Ok(mut m) = ACCESS.lock() {
-        m.insert(source_id, (t.access.clone(), until));
-    }
+async fn needs_reconsent(conn: &mut PgConnection, grant: Grant, now: DateTime<Utc>) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "update source set reconsent_needed_at = $2, oauth_access_token = null where id = $1 and enabled \
+         and oauth_grant_id is not distinct from $3",
+    )
+    .bind(grant.0)
+    .bind(now)
+    .bind(grant.1)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
-/// Drop a connection's access token from memory.
-pub fn forget(source_id: Uuid) {
-    if let Ok(mut m) = ACCESS.lock() {
-        m.remove(&source_id);
-    }
+#[derive(sqlx::FromRow)]
+struct Locked {
+    household_id: Uuid,
+    profile_id: Option<Uuid>,
+    secret_id: Option<Uuid>,
+    connector_client_id: Option<Uuid>,
+    config: Value,
+    reconsent_needed_at: Option<DateTime<Utc>>,
+    enabled: bool,
+    oauth_grant_id: Option<Uuid>,
+    oauth_access_token: Option<Vec<u8>>,
+    access_expires_at: Option<DateTime<Utc>>,
 }
 
-async fn needs_reconsent(conn: &mut PgConnection, source_id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-    sqlx::query("update source set reconsent_needed_at = $2 where id = $1")
-        .bind(source_id)
-        .bind(now)
-        .execute(conn)
-        .await
-        .map(|_| ())
-}
-
-/// household, profile, secret, client, config, reconsent, enabled
-type Locked = (
-    Uuid,
-    Option<Uuid>,
-    Option<Uuid>,
-    Option<Uuid>,
-    Value,
-    Option<DateTime<Utc>>,
-    bool,
-);
-
-/// A usable access token for the connection: the one in memory, or a refresh. `now` is the clock the
+/// A usable access token for the connection: the committed token, or a refresh. `now` is the clock the
 /// expiry is counted from (tests move it).
 ///
 /// The refresh holds the source row `FOR UPDATE` from before the request until the rotated token is
@@ -921,27 +984,91 @@ pub async fn access_token(
     egress: &Egress,
     now: DateTime<Utc>,
 ) -> Result<SecretString, OAuthError> {
-    if let Some(t) = cached(source_id, now) {
-        return Ok(t);
+    access_token_inner(pool, sb, source_id, egress, now, None, None).await
+}
+
+/// Get a token for the grant a pull started with. If the FHIR endpoint rejected `rejected`, refresh
+/// that token once (or reuse a token another pull has already refreshed for the same grant).
+pub async fn access_token_for_grant(
+    pool: &PgPool,
+    sb: &SecretBox,
+    source: &Source,
+    egress: &Egress,
+    now: DateTime<Utc>,
+    rejected: Option<&SecretString>,
+) -> Result<SecretString, OAuthError> {
+    access_token_inner(pool, sb, source.id, egress, now, Some(source.oauth_grant_id), rejected).await
+}
+
+async fn access_token_inner(
+    pool: &PgPool,
+    sb: &SecretBox,
+    source_id: Uuid,
+    egress: &Egress,
+    now: DateTime<Utc>,
+    expected_grant: Option<Option<Uuid>>,
+    rejected: Option<&SecretString>,
+) -> Result<SecretString, OAuthError> {
+    let fresh_after = now + Duration::seconds(MARGIN_SECONDS);
+    // Normal pulls can use the committed token without taking the refresh lock. A 401 goes
+    // straight to the locked path, which can compare against a token another worker refreshed.
+    if let (Some(expected), None) = (expected_grant, rejected) {
+        let stored: Option<(Option<Uuid>, Vec<u8>)> = sqlx::query_as(
+            "select profile_id, oauth_access_token from source where id = $1 and enabled \
+             and reconsent_needed_at is null and oauth_grant_id is not distinct from $2 \
+             and access_expires_at > $3 and oauth_access_token is not null",
+        )
+        .bind(source_id)
+        .bind(expected)
+        .bind(fresh_after)
+        .fetch_optional(pool)
+        .await?;
+        if let Some((profile, sealed)) = stored {
+            return Ok(secrets::open_source_access(sb, profile, source_id, expected, &sealed).await?);
+        }
     }
     let kinds: Vec<&str> = OAUTH_KINDS.to_vec();
     let mut tx = pool.begin().await?;
     let row: Option<Locked> = sqlx::query_as(
-        "select household_id, profile_id, secret_id, connector_client_id, config, reconsent_needed_at, enabled \
-         from source where id = $1 and kind = any($2) for update",
+        "select household_id, profile_id, secret_id, connector_client_id, config, reconsent_needed_at, enabled, \
+         oauth_grant_id, oauth_access_token, access_expires_at from source where id = $1 and kind = any($2) for update",
     )
     .bind(source_id)
     .bind(&kinds)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((household, profile, secret_id, client_id, config, reconsent, enabled)) = row else {
+    let Some(Locked {
+        household_id: household,
+        profile_id: profile,
+        secret_id,
+        connector_client_id: client_id,
+        config,
+        reconsent_needed_at,
+        enabled,
+        oauth_grant_id,
+        oauth_access_token,
+        access_expires_at,
+    }) = row
+    else {
         return Err(OAuthError::Core(Error::NotFound("Unknown connection.".into())));
     };
-    if reconsent.is_some() {
+    if expected_grant.is_some_and(|expected| expected != oauth_grant_id) {
+        return Err(OAuthError::GrantChanged);
+    }
+    if reconsent_needed_at.is_some() {
         return Err(OAuthError::ReconsentNeeded);
     }
     if !enabled {
         return Err(refused("disconnected", "This connection is switched off."));
+    }
+    let grant = (source_id, oauth_grant_id);
+    if let Some(sealed) = oauth_access_token.as_deref()
+        && access_expires_at.is_some_and(|until| until > fresh_after)
+    {
+        let token = secrets::open_source_access(sb, profile, source_id, oauth_grant_id, sealed).await?;
+        if rejected.is_none_or(|old| !bool::from(token.expose().as_bytes().ct_eq(old.expose().as_bytes()))) {
+            return Ok(token);
+        }
     }
     // A profile's rotated token is sealed under the profile's key. Without the keys this process
     // could read an older token sealed under the secrets key, spend it at the vendor, and then fail
@@ -952,13 +1079,9 @@ pub async fn access_token(
             "This process has no profile keys, so it cannot store this connection's next token.",
         ));
     }
-    // another refresh finished while this one waited for the lock
-    if let Some(t) = cached(source_id, now) {
-        return Ok(t);
-    }
     let Some(secret_id) = secret_id else {
         // the vendor gave no refresh token and the access token is gone
-        needs_reconsent(&mut tx, source_id, now).await?;
+        needs_reconsent(&mut tx, grant, now).await?;
         tx.commit().await?;
         return Err(OAuthError::ReconsentNeeded);
     };
@@ -994,16 +1117,13 @@ pub async fn access_token(
     let t = match parse_tokens(&answer) {
         Ok(t) => t,
         Err(OAuthError::Vendor { code, .. }) if code == "invalid_grant" => {
-            needs_reconsent(&mut tx, source_id, now).await?;
+            needs_reconsent(&mut tx, grant, now).await?;
             tx.commit().await?;
-            forget(source_id);
             return Err(OAuthError::ReconsentNeeded);
         }
         Err(e) => return Err(e),
     };
     let rotated = t.refresh.is_some();
-    // the second caller may read the token as soon as the lock goes, so it is in memory first
-    remember(source_id, &t, now);
     let stored: Result<(), OAuthError> = async {
         // A profile's token goes under the profile's key, also when the token it replaces was sealed
         // under the secrets key; a vendor that does not rotate keeps the same token, which is sealed
@@ -1020,13 +1140,17 @@ pub async fn access_token(
             (None, Some(r)) => secrets::replace_secret(&mut tx, sb, secret_id, r).await?,
             (None, None) => {}
         }
+        let access = secrets::seal_source_access(sb, profile, source_id, oauth_grant_id, &t.access).await?;
         sqlx::query(
-            "update source set access_expires_at = $2, grant_expires_at = coalesce($3, grant_expires_at) \
-             where id = $1",
+            "update source set access_expires_at = $2, grant_expires_at = coalesce($3, grant_expires_at), \
+             config = case when $4::text is null then config else jsonb_set(config, '{scope}', to_jsonb($4::text)) end, \
+             oauth_access_token = $5 where id = $1",
         )
         .bind(source_id)
-        .bind(after(now, t.expires_in))
+        .bind(access_until(&t, now))
         .bind(after(now, t.refresh_expires_in))
+        .bind(&t.scope)
+        .bind(&access)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1036,15 +1160,17 @@ pub async fn access_token(
     match stored {
         Ok(()) => Ok(t.access),
         Err(e) => {
-            forget(source_id);
             if !rotated {
                 return Err(e);
             }
             // the vendor already retired the token we hold: say so instead of failing silently later
             tracing::warn!(%source_id, "a rotated refresh token could not be stored: the connection needs consent again");
             let mut conn = pool.acquire().await?;
-            needs_reconsent(&mut conn, source_id, now).await?;
-            Err(OAuthError::ReconsentNeeded)
+            if needs_reconsent(&mut conn, grant, now).await? {
+                Err(OAuthError::ReconsentNeeded)
+            } else {
+                Err(OAuthError::GrantChanged)
+            }
         }
     }
 }
@@ -1118,8 +1244,8 @@ type Held = (Uuid, Option<Uuid>, Option<Uuid>, Value);
 async fn lock_held(conn: &mut PgConnection, source_id: Uuid) -> Result<Option<Held>, OAuthError> {
     let kinds: Vec<&str> = OAUTH_KINDS.to_vec();
     Ok(sqlx::query_as(
-        "select household_id, secret_id, connector_client_id, config from source where id = $1 and kind = any($2) \
-         for update",
+        "select household_id, secret_id, connector_client_id, config \
+         from source where id = $1 and kind = any($2) for update",
     )
     .bind(source_id)
     .bind(&kinds)
@@ -1127,7 +1253,7 @@ async fn lock_held(conn: &mut PgConnection, source_id: Uuid) -> Result<Option<He
     .await?)
 }
 
-/// Revoke at the vendor (when it offers it), then delete the refresh token and the cursor and switch
+/// Revoke at the vendor (when it offers it), then delete both tokens and the cursor and switch
 /// the source off. The source row, its runs and what it imported stay; a reconnect starts it again.
 pub async fn disconnect(
     pool: &PgPool,
@@ -1147,7 +1273,7 @@ pub async fn disconnect(
     )
     .await;
     sqlx::query(
-        "update source set secret_id = null, cursor = null, enabled = false, access_expires_at = null, \
+        "update source set secret_id = null, oauth_access_token = null, cursor = null, enabled = false, access_expires_at = null, \
          grant_expires_at = null, reconsent_needed_at = null where id = $1",
     )
     .bind(source_id)
@@ -1160,7 +1286,6 @@ pub async fn disconnect(
             .await?;
     }
     tx.commit().await?;
-    forget(source_id);
     Ok(outcome)
 }
 
@@ -1222,7 +1347,6 @@ pub async fn revoke_profile(
                 Revocation::Failed
             }
         };
-        forget(source_id);
         let revoke_page = match outcome {
             Revocation::Failed | Revocation::NotOffered => {
                 kind_spec(&kind).and_then(|s| s.revoke_page).map(String::from)
@@ -1306,6 +1430,31 @@ mod tests {
             .decode(h.trim_start_matches("Basic "))
             .expect("base64");
         assert_eq!(raw, b"a%3Ab:s+p");
+    }
+
+    #[test]
+    fn a_v1_server_is_asked_for_read_on_the_same_types() {
+        let v1 = v1_scopes(SMART_SCOPES);
+        assert!(v1.contains("patient/Observation.read"), "{v1}");
+        assert!(v1.contains("launch/patient offline_access"), "{v1}");
+        assert!(!v1.contains(".rs"), "{v1}");
+        assert_eq!(v1.split_whitespace().count(), SMART_SCOPES.split_whitespace().count());
+        assert!(
+            SMART_SCOPES
+                .split_whitespace()
+                .all(|s| !s.starts_with("patient/") || (s.ends_with(".rs") && !s.contains('*'))),
+            "read and search on named types only"
+        );
+    }
+
+    #[test]
+    fn the_dev_loopback_switch_widens_only_a_debug_build_with_dev_auth() {
+        assert_eq!(configured_egress(false, Some("1")), Egress::connector());
+        assert_eq!(configured_egress(true, Some("0")), Egress::connector());
+        assert_eq!(configured_egress(true, None), Egress::connector());
+        let dev = configured_egress(true, Some("1"));
+        assert_eq!(dev.allow_private, cfg!(debug_assertions), "{dev:?}");
+        assert_eq!(dev.https_only, !cfg!(debug_assertions), "{dev:?}");
     }
 
     #[test]

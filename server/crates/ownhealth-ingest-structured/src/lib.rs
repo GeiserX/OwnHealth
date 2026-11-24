@@ -11,12 +11,13 @@ pub mod py;
 pub mod retract;
 pub mod shc;
 pub mod shl_receive;
+pub mod smart;
 pub mod wearables;
 
 use ownhealth_core::jobs::register_handler;
 
 /// Register lane C's job handlers (`import.fhir_bundle`, `import.apple_health`), accept handler
-/// (`fhir_unmapped`) and demo hook (`apple_fhir`, order 300).
+/// (`fhir_unmapped`), the SMART poller (source kind `smart`) and demo hook (`apple_fhir`, order 300).
 pub fn register() {
     register_handler("import.fhir_bundle", |ctx, job| {
         Box::pin(jobs::import_fhir_job(ctx, job))
@@ -25,5 +26,6 @@ pub fn register() {
         Box::pin(jobs::import_apple_health_job(ctx, job))
     });
     ownhealth_core::review::register_accept_handler("fhir_unmapped", fhir::accept_fhir_boxed);
+    smart::register();
     ownhealth_core::demo::register_demo_hook("apple_fhir", demo::ORDER, demo::seed_boxed);
 }
