@@ -406,10 +406,12 @@ pub async fn create_document(conn: &mut PgConnection, d: &NewDocument<'_>) -> Re
             .bind(id)
             .execute(&mut *conn)
             .await?;
-        // An imaging study retracted with this document as its report comes back with it; its row
-        // and its pixels stayed. A study retracted for another reason stays retracted.
+        // An imaging study retracted with this document as its report comes back with it, with the
+        // status it had (`retracted_from`); its row and its pixels stayed. A study retracted for
+        // another reason stays retracted.
         sqlx::query(
-            "update imaging_study set status = 'current', status_reason = null \
+            "update imaging_study set status = coalesce(retracted_from, 'current'), status_reason = null, \
+             retracted_from = null \
              where report_document_id = $1 and status = 'retracted' and starts_with(status_reason, $2)",
         )
         .bind(id)

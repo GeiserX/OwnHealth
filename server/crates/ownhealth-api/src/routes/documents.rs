@@ -19,6 +19,8 @@
 //! id. Every read writes one audit row. Filenames and page text are untrusted and go out marked as
 //! such.
 
+use std::collections::BTreeSet;
+
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -698,6 +700,23 @@ async fn assign(
     ))
 }
 
+/// A retraction of a report retracts its studies too: one on another profile (the report was moved)
+/// needs the caller's `write` there, with `read:records` on the caller's own grant.
+async fn may_retract_study(conn: &mut PgConnection, principal: &Principal, profile_id: Uuid) -> Result<(), ApiError> {
+    let refused = || -> ApiError {
+        Error::access_denied(
+            "forbidden",
+            "A scan this report belongs to is on a profile you cannot change, so the report stays as it is.",
+        )
+        .into()
+    };
+    match effective_permission(&mut *conn, principal, profile_id).await {
+        Ok(p) if p.can("write") && p.own_scopes.contains("read:records") => Ok(()),
+        Ok(_) | Err(Error::AccessDenied { .. }) => Err(refused()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Soft delete with a reason: the document leaves the vault, its values are retracted, its open
 /// review items dismissed, and an imaging study whose report it is retracted with it. The blob stays
 /// until an explicit purge.
@@ -731,16 +750,32 @@ async fn retract(
     if doc.str("status") == Some("retracted") {
         return Err(ApiError::new(StatusCode::CONFLICT, "conflict", "The document is already retracted.").into());
     }
-    let why = format!("{}{reason}", ownhealth_core::documents::RETRACTED_WITH_DOCUMENT);
-    let mut out = ownhealth_ingest_structured::retract::retract_document_facts(&mut tx, document_id, &why).await?;
     // A study whose report this is goes with it (slice 43): the person retracts a scan that is not
     // theirs through its report. Its row and its pixels in Orthanc stay; the viewer and the timeline
-    // leave it out. Uploading the report again brings the study back (core create_document).
-    let studies: Vec<Uuid> = sqlx::query_scalar(
-        "update imaging_study set status = 'retracted', status_reason = $2 \
-         where report_document_id = $1 and status in ('current', 'provisional') returning id",
+    // leave it out. Uploading the report again brings the study back with the status it had (core
+    // create_document). A move of the report (assign) leaves its studies on their own profile, so each
+    // study's profile needs the caller's write there too; one that lacks it refuses the retraction.
+    let linked: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "select id, profile_id from imaging_study where report_document_id = $1 \
+         and status in ('current', 'provisional') order by id for update",
     )
     .bind(document_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let study_profiles: BTreeSet<Uuid> = linked.iter().map(|(_, p)| *p).collect();
+    for profile_id in &study_profiles {
+        if *profile_id != doc.perm.profile.id {
+            may_retract_study(&mut tx, &principal, *profile_id).await?;
+        }
+    }
+    let why = format!("{}{reason}", ownhealth_core::documents::RETRACTED_WITH_DOCUMENT);
+    let mut out = ownhealth_ingest_structured::retract::retract_document_facts(&mut tx, document_id, &why).await?;
+    let ids: Vec<Uuid> = linked.iter().map(|(id, _)| *id).collect();
+    let studies: Vec<Uuid> = sqlx::query_scalar(
+        "update imaging_study set status = 'retracted', status_reason = $2, retracted_from = status \
+         where id = any($1) returning id",
+    )
+    .bind(&ids)
     .bind(&why)
     .fetch_all(&mut *tx)
     .await?;
@@ -782,6 +817,27 @@ async fn retract(
         "delete",
     )
     .await?;
+    // each retracted study on its own profile's audit trail
+    for profile_id in &study_profiles {
+        let mut e = AuditEvent::new(
+            principal.actor_kind(),
+            if principal.token_id.is_none() { "ui" } else { "api" },
+            "delete",
+        );
+        e.actor_id = principal.user_id;
+        e.token_id = principal.token_id;
+        e.tool = Some("POST /api/documents/{id}/retract".into());
+        e.profile_id = Some(*profile_id);
+        e.resource_type = Some("imaging_study".into());
+        let mine: Vec<String> = linked
+            .iter()
+            .filter(|(_, p)| p == profile_id)
+            .map(|(id, _)| id.to_string())
+            .collect();
+        e.rows_out = Some(i32::try_from(mine.len()).unwrap_or(i32::MAX));
+        e.resource_ids = Some(mine);
+        write_audit(&mut tx, &e).await?;
+    }
     tx.commit().await?;
     Ok(Json(json!({
         "document_id": document_id,

@@ -1652,3 +1652,120 @@ async fn a_study_of_a_deleted_profile_a_restore_brought_back_stays_closed() -> R
     w.open(&cookie, "alex", ALEX_CT).await?;
     Ok(())
 }
+
+/// `POST /api/documents/{id}/retract` as `cookie`'s user.
+async fn retract_document(
+    w: &World,
+    cookie: &str,
+    document_id: Uuid,
+    reason: &str,
+) -> anyhow::Result<(StatusCode, Value)> {
+    let req = Request::post(format!("/api/documents/{document_id}/retract"))
+        .header(header::HOST, "health.test")
+        .header(header::ORIGIN, BASE)
+        .header(header::COOKIE, format!("{}={cookie}", sessions::COOKIE))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "reason": reason }).to_string()))?;
+    let (s, _, body) = w.call(req).await?;
+    Ok((s, serde_json::from_slice(&body).unwrap_or(Value::Null)))
+}
+
+/// A report document of `slug`'s profile with bytes `sha`.
+async fn report_of(w: &World, slug: &str, sha: &str) -> anyhow::Result<Uuid> {
+    let mut c = w.db.pool.acquire().await?;
+    let doc = ownhealth_core::documents::NewDocument::upload(
+        w.fam.household_id,
+        Some(w.fam.profile(slug)),
+        sha,
+        "application/pdf",
+        10,
+    );
+    Ok(ownhealth_core::documents::create_document(&mut c, &doc).await?.id)
+}
+
+/// Slice 43: a report moved to another profile (assign) leaves its study on its own profile. Its
+/// retraction retracts that study too, so the caller needs write on the study's profile as well.
+#[tokio::test]
+async fn retracting_a_report_whose_study_is_on_a_profile_the_caller_cannot_change_is_refused() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    // the report is on Alex's profile; its study stayed on Sam's, which Alex only views
+    let report = report_of(&w, "alex", &"cf".repeat(32)).await?;
+    sqlx::query("update imaging_study set report_document_id = $1 where study_instance_uid = $2")
+        .bind(report)
+        .bind(SAM_US)
+        .execute(&w.db.pool)
+        .await?;
+    let (s, v) = retract_document(&w, &cookie, report, "not Alex's scan").await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("forbidden")),
+        "{v}"
+    );
+    let sam: String = sqlx::query_scalar("select status from imaging_study where study_instance_uid = $1")
+        .bind(SAM_US)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(sam, "current");
+    let doc: String = sqlx::query_scalar("select status from document where id = $1")
+        .bind(report)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_ne!(doc, "retracted");
+
+    // a study on a profile Alex may change (Carmen's: he is her caregiver) goes with the report, and
+    // her own audit trail says so
+    sqlx::query("update imaging_study set report_document_id = null where study_instance_uid = $1")
+        .bind(SAM_US)
+        .execute(&w.db.pool)
+        .await?;
+    sqlx::query("update imaging_study set report_document_id = $1 where study_instance_uid = $2")
+        .bind(report)
+        .bind(CARMEN_MR)
+        .execute(&w.db.pool)
+        .await?;
+    let (s, v) = retract_document(&w, &cookie, report, "not Alex's scan").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let carmen: String = sqlx::query_scalar("select status from imaging_study where study_instance_uid = $1")
+        .bind(CARMEN_MR)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(carmen, "retracted");
+    let audited: i64 = sqlx::query_scalar(
+        "select count(*) from audit_event where profile_id = $1 and resource_type = 'imaging_study' \
+         and tool = 'POST /api/documents/{id}/retract'",
+    )
+    .bind(w.fam.profile("carmen"))
+    .fetch_one(&w.db.pool)
+    .await?;
+    assert_eq!(audited, 1);
+    Ok(())
+}
+
+/// Slice 43: a study keeps the status it had when its report was retracted. Uploading the report
+/// again brings a provisional study back provisional, not current.
+#[tokio::test]
+async fn a_provisional_study_retracted_with_its_report_comes_back_provisional() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let sha = "d0".repeat(32);
+    let report = report_of(&w, "alex", &sha).await?;
+    sqlx::query(
+        "update imaging_study set report_document_id = $1, status = 'provisional' where study_instance_uid = $2",
+    )
+    .bind(report)
+    .bind(ALEX_CT)
+    .execute(&w.db.pool)
+    .await?;
+    let (s, v) = retract_document(&w, &cookie, report, "wrong click").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let status = || {
+        sqlx::query_scalar::<_, String>("select status from imaging_study where study_instance_uid = $1")
+            .bind(ALEX_CT)
+            .fetch_one(&w.db.pool)
+    };
+    assert_eq!(status().await?, "retracted");
+    assert_eq!(report_of(&w, "alex", &sha).await?, report);
+    assert_eq!(status().await?, "provisional");
+    Ok(())
+}

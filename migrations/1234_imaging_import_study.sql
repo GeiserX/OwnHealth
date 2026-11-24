@@ -15,3 +15,8 @@ create index on imaging_import_study (import_id);
 
 insert into imaging_import_study (import_id, study_instance_uid)
   select import_id, study_instance_uid from imaging_study where import_id is not null;
+
+-- A study retracted with its report document keeps the status it had (current or provisional), so
+-- reactivating that document gives it back (core documents::create_document) instead of making a
+-- provisional study current.
+alter table imaging_study add column retracted_from text check (retracted_from in ('current', 'provisional'));
