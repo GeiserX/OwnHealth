@@ -295,6 +295,16 @@ pub fn kind_spec(kind: &str) -> Option<KindSpec> {
     }
 }
 
+/// The vendor's own page to show after a disconnect or a profile delete. Shown when the revocation
+/// failed or is not offered; for Blue Button always, because CMS's `revoke_token` ends the tokens
+/// while the app stays listed in the person's Medicare account until they remove it there.
+pub fn revoke_page(kind: &str, outcome: Revocation) -> Option<&'static str> {
+    let page = kind_spec(kind)?.revoke_page;
+    (kind == "bluebutton" || matches!(outcome, Revocation::Failed | Revocation::NotOffered))
+        .then_some(page)
+        .flatten()
+}
+
 /// Whether a household client registered for `vendor` serves sources of `kind`: Blue Button and
 /// Dexcom clients are their own vendor; a SMART client is any EHR vendor's (Epic, Oracle, Meditech).
 pub fn client_fits(kind: &str, vendor: &str) -> bool {
@@ -1553,12 +1563,7 @@ pub async fn revoke_profile(
                 Revocation::Failed
             }
         };
-        let revoke_page = match outcome {
-            Revocation::Failed | Revocation::NotOffered => {
-                kind_spec(&kind).and_then(|s| s.revoke_page).map(String::from)
-            }
-            _ => None,
-        };
+        let revoke_page = revoke_page(&kind, outcome).map(String::from);
         out.push(Revoked {
             source_id,
             kind,

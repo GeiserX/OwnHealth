@@ -166,7 +166,9 @@
 	const revocationText = (r: ConnectionRow, done: DisconnectOut) =>
 		(done.revocation === 'failed' || done.revocation === 'not_offered') && !done.revoke_page && r.server
 			? tf('con_rev_' + done.revocation + '_at', { label: r.label, server: r.server })
-			: tf('con_rev_' + done.revocation, { label: r.label });
+			: done.revocation === 'revoked' && done.revoke_page
+				? tf('con_rev_revoked_page', { label: r.label })
+				: tf('con_rev_' + done.revocation, { label: r.label });
 
 	const stateLine = (r: ConnectionRow, s: ConnectionState): { text: string; tone: string } | null => {
 		const n = daysLeft(r.grant_expires_at, now) ?? 0;

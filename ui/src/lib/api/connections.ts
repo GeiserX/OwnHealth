@@ -4,7 +4,7 @@ import { del, get, post } from './core';
 import type { ConnectionRow } from '#lib/logic/connections';
 import type { Uuid } from './types';
 
-/** How a disconnect ended at the vendor; `revoke_page` is the vendor's own page when ours could not finish it. */
+/** How a disconnect ended at the vendor; `revoke_page` is the vendor's own page when ours could not finish it, and always for Blue Button (Medicare lists the app until it is removed there). */
 export type Revocation = 'revoked' | 'not_offered' | 'failed' | 'no_token';
 export interface DisconnectOut {
 	id: Uuid;
