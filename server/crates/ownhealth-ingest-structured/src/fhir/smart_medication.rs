@@ -94,8 +94,25 @@ pub(crate) struct Index<'a>(HashMap<Reference, Option<(&'a Value, String)>>);
 
 impl<'a> Index<'a> {
     pub(crate) fn insert(&mut self, base: &str, full_url: Option<&str>, resource: &'a Value) {
-        let Some(id) = full_url.and_then(|url| entry_id(url, base, "Medication")) else {
+        let Some(url) = full_url else {
             return;
+        };
+        // a version read stands for that version only, never for the current Medication
+        let (id, only_version) = match entry_id(url, base, "Medication") {
+            Some(id) => (id, false),
+            None => {
+                let Some((id, version)) = under_base(url, base)
+                    .and_then(|path| path.strip_prefix("Medication/"))
+                    .and_then(|path| path.split_once("/_history/"))
+                    .filter(|(id, version)| rest_id(id) && rest_id(version))
+                else {
+                    return;
+                };
+                if resource["meta"]["versionId"] != version {
+                    return;
+                }
+                (id, true)
+            }
         };
         if resource["id"] != id {
             return;
@@ -118,7 +135,9 @@ impl<'a> Index<'a> {
                 })
                 .or_insert_with(|| Some((resource, hash.clone())));
         };
-        store(None);
+        if !only_version {
+            store(None);
+        }
         if version.is_some() {
             store(version);
         }

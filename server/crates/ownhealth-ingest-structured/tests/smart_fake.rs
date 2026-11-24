@@ -255,6 +255,7 @@ impl Fake {
             .route("/token", post(token))
             .route("/fhir/Patient/{id}", get(read_patient))
             .route("/fhir/Medication/{id}", get(read_medication))
+            .route("/fhir/Medication/{id}/_history/{vid}", get(read_medication_version))
             .route("/fhir/{rtype}", get(search))
             .with_state(shared.clone());
         let task = tokio::spawn(async move {
@@ -482,6 +483,28 @@ async fn read_medication(
             fhir_answer(&s, StatusCode::OK, &m, false)
         }
         None => outcome(StatusCode::NOT_FOUND, "no such medication"),
+    }
+}
+
+/// A version read of a Medication: only the answers set for `<id>/_history/<vid>`.
+async fn read_medication_version(
+    State(s): State<Shared>,
+    Path((id, vid)): Path<(String, String)>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized(&s, &headers, &uri) {
+        return outcome(StatusCode::UNAUTHORIZED, "expired token");
+    }
+    let key = format!("{id}/_history/{vid}");
+    let answer = {
+        let mut book = lock(&s.book);
+        book.searches.push(format!("Medication/{key}"));
+        book.medication_answers.get(&key).cloned()
+    };
+    match answer {
+        Some(m) => fhir_answer(&s, StatusCode::OK, &m, false),
+        None => outcome(StatusCode::NOT_FOUND, "no such version"),
     }
 }
 
@@ -2984,6 +3007,48 @@ async fn a_referenced_medications_sensitivity_reaches_the_projected_record() -> 
     assert!(
         !open.iter().any(|m| m["name"] == "Sertraline 50 mg"),
         "a reader without read:sensitive sees the drug: {open:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_version_read_does_not_stand_in_for_a_failed_current_read() -> R {
+    let w = world(Behaviour {
+        include: false,
+        ..Behaviour::default()
+    })
+    .await?;
+    let order = |id: &str, reference: &str| {
+        json!({"resourceType": "MedicationRequest", "id": id, "status": "active", "intent": "order",
+               "medicationReference": {"reference": reference},
+               "subject": {"reference": "Patient/sam-rivera"}, "authoredOn": "2026-09-01"})
+    };
+    w.fake.book().extra.extend([
+        order("current-order", "Medication/m"),
+        order("version-order", "Medication/m/_history/1"),
+    ]);
+    // the current read of Medication/m fails (404); its version 1 reads
+    w.fake.book().medication_answers.insert(
+        "m/_history/1".into(),
+        json!({"resourceType": "Medication", "id": "m", "meta": {"versionId": "1"},
+               "code": {"coding": [{"system": "https://labnorte.example/medications", "code": "m1",
+                                    "display": "Version one drug"}]}}),
+    );
+    let source = w.connect(t0()).await?;
+    let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+    assert_eq!(w.medication_reads(), 2, "{:?}", w.fake.book().searches);
+    assert!(got.problems.iter().any(|p| p.code == "search_failed"), "{got:?}");
+    let mut c = w.db.pool.acquire().await?;
+    let meds = list_records(&mut c, "medication", w.sam(), None, true).await?;
+    let projected: BTreeSet<_> = meds
+        .iter()
+        .filter_map(|m| Some((m["fhir"]["id"].as_str()?, m["name"].as_str()?)))
+        .filter(|(id, _)| ["current-order", "version-order"].contains(id))
+        .collect();
+    assert_eq!(
+        projected,
+        BTreeSet::from([("version-order", "Version one drug")]),
+        "{meds:?}"
     );
     Ok(())
 }

@@ -997,7 +997,8 @@ pub async fn pull_with(
                     } else if !reference.matches_version(&m) {
                         g.problem("medication_version_mismatch", words::MEDICATION_VERSION_MISMATCH.into());
                     } else {
-                        g.entries.push((Some(reference.full_url(&base)), m));
+                        // kept under the URL it was read at: a version read answers only for that version
+                        g.entries.push((Some(url), m));
                     }
                 }
                 Ok(f) => g.problem("search_failed", words::answered("Medication", f.status)),
