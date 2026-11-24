@@ -1294,7 +1294,7 @@ impl BlobStore {
         }
         let parent = target.parent().unwrap_or(&self.root);
         fs::create_dir_all(parent)?;
-        let part = parent.join(format!(".{}.part", key.replace('/', "-")));
+        let part = restore_part_path(&target, key);
         if let Err(e) = fs::copy(from, &part).and_then(|_| fs::rename(&part, &target)) {
             let _ = fs::remove_file(&part);
             return Err(e.into());
@@ -1350,6 +1350,11 @@ fn tree_rel(key: &str) -> Option<PathBuf> {
     }
 }
 
+/// Temporary sibling used by blob placement and recognized by a checkpointed retry.
+fn restore_part_path(target: &Path, key: &str) -> PathBuf {
+    target.with_file_name(format!(".{}.part", key.replace('/', "-")))
+}
+
 /// Profile references a restore could not recover. The file lives outside `TREE_PARTS`, so
 /// only the omissions in the manifest travel with an archive.
 pub type RestoreLosses = BTreeMap<Uuid, BTreeSet<String>>;
@@ -1369,8 +1374,9 @@ fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
     Ok(hex::encode(digest.finalize()))
 }
 
-/// A fresh restore needs a store without files. A checkpointed retry may also find the
-/// loss record and complete blobs from the same archive. Empty directories carry no data.
+/// A fresh restore needs a store without files. A checkpointed retry may find the
+/// loss record and complete blobs from the same archive. Discard interrupted copies
+/// of those blobs after the store passes inspection.
 pub fn check_restore_target(
     settings: &crate::config::Settings,
     expected: &BTreeMap<&str, &str>,
@@ -1378,16 +1384,22 @@ pub fn check_restore_target(
 ) -> io::Result<()> {
     let root = settings.blobs_path();
     match restore_files_match(&root, expected, resuming) {
-        Ok(true) => Ok(()),
-        Ok(false) => {
+        Ok(None) => Ok(()),
+        Ok(Some(path)) => {
             let action = if resuming {
-                "contains files outside this restore or files that differ from the backup. Use the blob store for this restore"
+                "contains files outside this restore or files that differ from the backup"
             } else {
-                "is not empty. Start a new restore with an empty blob store"
+                "is not empty"
+            };
+            let remedy = if resuming {
+                "Use the blob store for this restore"
+            } else {
+                "Start a new restore with an empty blob store"
             };
             Err(io::Error::other(format!(
-                "the target blob store {} {action}",
-                root.display()
+                "the target blob store {} {action}. Found {}. {remedy}",
+                root.display(),
+                path.display()
             )))
         }
         Err(error) => Err(io::Error::new(
@@ -1397,16 +1409,23 @@ pub fn check_restore_target(
     }
 }
 
-fn restore_files_match(root: &Path, expected: &BTreeMap<&str, &str>, resuming: bool) -> io::Result<bool> {
-    let expected_paths: BTreeMap<_, _> = expected
-        .iter()
-        .filter_map(|(key, digest)| tree_rel(key).map(|path| (path, *digest)))
-        .collect();
+fn restore_files_match(root: &Path, expected: &BTreeMap<&str, &str>, resuming: bool) -> io::Result<Option<PathBuf>> {
+    let mut expected_paths = BTreeMap::new();
+    let mut expected_parts = BTreeSet::new();
+    for (&key, &digest) in expected {
+        if let Some(path) = tree_rel(key) {
+            if resuming {
+                expected_parts.insert(restore_part_path(&path, key));
+            }
+            expected_paths.insert(path, digest);
+        }
+    }
+    let mut parts = Vec::new();
     let mut directories = vec![root.to_path_buf()];
     while let Some(dir) = directories.pop() {
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(e) if dir == root && e.kind() == io::ErrorKind::NotFound && !root.is_symlink() => return Ok(true),
+            Err(e) if dir == root && e.kind() == io::ErrorKind::NotFound && !root.is_symlink() => return Ok(None),
             Err(e) => return Err(e),
         };
         for entry in entries {
@@ -1417,26 +1436,34 @@ fn restore_files_match(root: &Path, expected: &BTreeMap<&str, &str>, resuming: b
             let loss_record = rel == Path::new(RESTORE_LOSSES);
             if kind.is_dir() {
                 if loss_record || expected_paths.contains_key(rel) {
-                    return Ok(false);
+                    return Ok(Some(path));
                 }
                 directories.push(path);
                 continue;
             }
             if !resuming || !kind.is_file() {
-                return Ok(false);
+                return Ok(Some(path));
             }
             if loss_record {
                 continue;
             }
+            if expected_parts.contains(rel) {
+                parts.push(path);
+                continue;
+            }
             let Some(&digest) = expected_paths.get(rel) else {
-                return Ok(false);
+                return Ok(Some(path));
             };
-            if sha256_reader(File::open(path)?)? != digest {
-                return Ok(false);
+            if sha256_reader(File::open(&path)?)? != digest {
+                return Ok(Some(path));
             }
         }
     }
-    Ok(true)
+    for part in parts {
+        fs::remove_file(&part)
+            .map_err(|error| io::Error::new(error.kind(), format!("cannot remove {}: {error}", part.display())))?;
+    }
+    Ok(None)
 }
 
 /// Read the omissions accepted in this store by a restore.

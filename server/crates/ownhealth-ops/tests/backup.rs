@@ -1284,7 +1284,7 @@ async fn a_partial_restore_can_retry_after_the_loss_record_write_fails() -> R {
 }
 
 #[tokio::test]
-async fn round_seven_a_partial_restore_can_retry_after_blob_placement_fails() -> R {
+async fn round_eight_a_partial_restore_can_retry_after_blob_placement_is_interrupted() -> R {
     use ownhealth_core::keyfile;
 
     let l = live().await?;
@@ -1320,16 +1320,17 @@ async fn round_seven_a_partial_restore_can_retry_after_blob_placement_fails() ->
         .await?;
     assert!(pending);
 
-    fs::remove_dir(blocked)?;
-    let foreign = settings.blobs_path().join("foreign");
-    fs::write(&foreign, b"from another restore")?;
+    fs::remove_dir(&blocked)?;
+    let bytes = fs::read(last_path)?;
+    let truncated = &bytes[..bytes.len() / 2];
+    // Even the exact part filename is foreign outside the blob's own shard.
+    let foreign = settings.blobs_path().join(blocked.file_name().expect("part filename"));
+    fs::write(&foreign, truncated)?;
     let rejected = ownhealth_ops::restore_with(&settings, &l.archive, true).await;
-    fs::remove_file(foreign)?;
+    assert_eq!(fs::read(&foreign)?, truncated);
+    fs::remove_file(&foreign)?;
     let error = err_text(rejected);
-    assert!(
-        error.contains("blob store") && error.contains(&settings.blobs_path().display().to_string()),
-        "{error}"
-    );
+    fs::write(&blocked, truncated)?;
 
     // A retry that tries to copy the already placed blob would fail at this path.
     let already_placed = part_path(first, first_path)?;
@@ -1338,6 +1339,8 @@ async fn round_seven_a_partial_restore_can_retry_after_blob_placement_fails() ->
     fs::remove_dir(already_placed)?;
     let report = result?;
     assert_eq!(report["ok"], true, "{report:#}");
+    assert!(!blocked.exists(), "the interrupted copy was left behind");
+    assert!(error.contains(&foreign.display().to_string()), "{error}");
     let placed = tree_files(&settings.blobs_path())?;
     assert_eq!(placed.keys().collect::<Vec<_>>(), archived.keys().collect::<Vec<_>>());
     for (key, path) in archived {
