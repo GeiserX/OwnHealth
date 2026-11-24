@@ -1331,6 +1331,12 @@ async fn round_eight_a_partial_restore_can_retry_after_blob_placement_is_interru
     fs::remove_file(&foreign)?;
     let error = err_text(rejected);
     fs::write(&blocked, truncated)?;
+    #[cfg(unix)]
+    {
+        // fs::copy gives the copy the source's mode, and blobs are read-only.
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o440))?;
+    }
 
     // A retry that tries to copy the already placed blob would fail at this path.
     let already_placed = part_path(first, first_path)?;
