@@ -17,7 +17,7 @@
 //! Kahn's algorithm over people and families, and the relatives are a fixed walk of at most three
 //! links, so a deep tree costs time in proportion to its size and no stack.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{Datelike, Utc};
 use futures::future::BoxFuture;
@@ -133,9 +133,12 @@ struct RawPerson {
     fams: Vec<Vec<u8>>,
 }
 
+/// GEDCOM gives a family one HUSB and one WIFE: a later one is ignored, so no family has more than two
+/// parents and the preview stays in proportion to the file.
 #[derive(Default)]
 struct RawFamily {
-    parents: Vec<Vec<u8>>,
+    husb: Option<Vec<u8>>,
+    wife: Option<Vec<u8>>,
     children: Vec<Vec<u8>>,
 }
 
@@ -399,7 +402,8 @@ pub fn parse(bytes: &[u8]) -> std::result::Result<Tree, Refusal> {
                     Record::Family(i) => {
                         let Some(f) = families.get_mut(i) else { continue };
                         match line.tag {
-                            b"HUSB" | b"WIFE" => f.parents.extend(pointer(line.value)),
+                            b"HUSB" if f.husb.is_none() => f.husb = pointer(line.value),
+                            b"WIFE" if f.wife.is_none() => f.wife = pointer(line.value),
                             b"CHIL" => f.children.extend(pointer(line.value)),
                             _ => {}
                         }
@@ -472,7 +476,7 @@ fn resolve(
     let mut not_birth: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut birth: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (f, fam) in raw_families.iter().enumerate() {
-        for x in &fam.parents {
+        for x in fam.husb.iter().chain(&fam.wife) {
             if let (Some(&p), Some(set)) = (person_ids.get(x), parents.get_mut(f)) {
                 set.insert(p);
             }
@@ -485,9 +489,11 @@ fn resolve(
     }
     let mut people = Vec::with_capacity(raw_people.len());
     for (i, raw) in raw_people.into_iter().enumerate() {
+        // a FAMS fills a family's parents only up to two, after the family's own HUSB and WIFE
         for x in &raw.fams {
             if let Some(&f) = family_ids.get(x)
                 && let Some(set) = parents.get_mut(f)
+                && set.len() < 2
             {
                 set.insert(i);
             }
@@ -772,9 +778,14 @@ pub struct Outcome {
     pub already: usize,
     /// Relatives past [`MAX_PROPOSALS`].
     pub left_out: usize,
-    /// People of the file the catalog has no relationship for (in-laws of relatives, distant kin).
+    /// People of the file the catalog has no relationship for (in-laws of relatives, distant kin), and
+    /// relatives that could not be recorded.
     pub outside: usize,
 }
+
+/// A person born more than this many years ago has died, even when the file records no death. Trees
+/// often leave the death out for old ancestors. Gramps uses the same age for "probably alive".
+const PROBABLY_DEAD_AFTER: i32 = 110;
 
 /// The member a relative of the file would be, with values `family::MemberIn` accepts.
 fn member(tree: &Tree, profile_id: Uuid, who: usize, code: &str) -> MemberIn {
@@ -783,7 +794,7 @@ fn member(tree: &Tree, profile_id: Uuid, who: usize, code: &str) -> MemberIn {
     let mut m = MemberIn::new(profile_id, code);
     m.sex_at_birth = Some(if p.sex.is_empty() { "unknown" } else { p.sex }.to_string());
     m.born_year = p.born_year.filter(|y| (1800..=this_year).contains(y));
-    m.deceased = p.deceased;
+    m.deceased = p.deceased || p.born_year.is_some_and(|y| this_year - y > PROBABLY_DEAD_AFTER);
     m.death_age = p.death_age.filter(|a| (0..=130).contains(a)).filter(|_| p.deceased);
     m
 }
@@ -821,12 +832,16 @@ fn payload(m: &MemberIn, version: Option<&str>) -> Result<Value> {
 }
 
 /// Queue the relatives of `me` as `family_proposal` items on the profile. The caller has checked access.
+/// `include_sensitive` is whether the caller may read sensitive relatives
+/// (`Permission::may_read_sensitive("read:records")`): a recorded relative the family list hides from
+/// them must not change what the import answers.
 pub async fn propose(
     conn: &mut PgConnection,
     household_id: Uuid,
     profile_id: Uuid,
     tree: &Tree,
     me: usize,
+    include_sensitive: bool,
 ) -> Result<Outcome> {
     if me >= tree.people.len() {
         return Err(Error::Invalid("self: no person at that position in the file".into()));
@@ -836,7 +851,9 @@ pub async fn propose(
         .bind(format!("gedcom:{profile_id}"))
         .execute(&mut *conn)
         .await?;
-    let mut known: BTreeSet<Key> = BTreeSet::new();
+    // each open proposal and each recorded relative stands for one person: two brothers with the same
+    // key are two people, so these count, and a match uses one up
+    let mut known: BTreeMap<Key, usize> = BTreeMap::new();
     let open: Vec<Value> =
         sqlx::query_scalar("select payload from review_item where kind = $1 and profile_id = $2 and status = 'open'")
             .bind(KIND)
@@ -845,15 +862,16 @@ pub async fn propose(
             .await?;
     for p in open {
         if let Ok(m) = member_from(profile_id, &p) {
-            known.insert(key_of(&m));
+            *known.entry(key_of(&m)).or_default() += 1;
         }
     }
     // a recorded relative with the same relationship, sex and birth year is the same person
-    let recorded: BTreeSet<(String, Option<String>, Option<i32>)> = family::list(&mut *conn, profile_id, true)
-        .await?
-        .into_iter()
-        .map(|m| (m.relationship, m.sex_at_birth, m.born_year))
-        .collect();
+    let mut recorded: BTreeMap<(String, Option<String>, Option<i32>), usize> = BTreeMap::new();
+    for m in family::list(&mut *conn, profile_id, include_sensitive).await? {
+        *recorded
+            .entry((m.relationship, m.sex_at_birth, m.born_year))
+            .or_default() += 1;
+    }
     let relatives = tree.relatives(me);
     let mut out = Outcome {
         outside: tree.people.len().saturating_sub(1 + relatives.len()),
@@ -862,11 +880,11 @@ pub async fn propose(
     for (who, code) in relatives {
         let m = member(tree, profile_id, who, code);
         let Ok(m) = m.normalized() else {
-            out.left_out += 1;
+            out.outside += 1;
             continue;
         };
         let k = key_of(&m);
-        if known.contains(&k) || recorded.contains(&(k.0.clone(), k.1.clone(), k.2)) {
+        if take(&mut known, &k) || take(&mut recorded, &(k.0.clone(), k.1.clone(), k.2)) {
             out.already += 1;
             continue;
         }
@@ -885,10 +903,26 @@ pub async fn propose(
             },
         )
         .await?;
-        known.insert(k);
+        // one import's items share the transaction's now(): give each its own time, so the queue
+        // (ordered by created_at) shows them closest relative first, as they were made
+        sqlx::query("update review_item set created_at = clock_timestamp() where id = $1")
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
         out.proposed.push(id);
     }
     Ok(out)
+}
+
+/// Use up one of the rows counted under `k`; false when none is left.
+fn take<K: Ord>(counts: &mut BTreeMap<K, usize>, k: &K) -> bool {
+    match counts.get_mut(k) {
+        Some(n) if *n > 0 => {
+            *n -= 1;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The member a proposal's payload describes.
@@ -1116,6 +1150,62 @@ mod tests {
         let t = parse(f.as_bytes()).expect("deep");
         assert_eq!(t.people.len(), gens);
         assert_eq!(codes(&t, gens / 2), ["FTH", "SON", "PGRFTH", "GRNDSON"]);
+    }
+
+    #[test]
+    fn the_first_birth_date_counts_and_a_famc_to_nowhere_marks_no_link() {
+        // two births: the first one is the birth year
+        let t = parse(b"0 HEAD\n0 @A@ INDI\n1 BIRT\n2 DATE 1950\n1 BIRT\n2 DATE 1960\n0 TRLR\n").expect("parses");
+        assert_eq!(t.people[0].born_year, Some(1950));
+        // a FAMC with no pointer after a birth FAMC: its PEDI adopted must not mark the birth link
+        let t = parse(
+            b"0 HEAD\n0 @C@ INDI\n1 FAMC @F@\n1 FAMC\n2 PEDI adopted\n0 @P@ INDI\n1 SEX M\n\
+              0 @F@ FAM\n1 HUSB @P@\n1 CHIL @C@\n0 TRLR\n",
+        )
+        .expect("parses");
+        assert_eq!(codes(&t, 0), ["FTH"]);
+    }
+
+    #[test]
+    fn a_family_keeps_one_husband_and_one_wife_so_the_preview_stays_linear() {
+        // one family that 2,000 people name as their own: only the first two are its parents
+        let n = 2000;
+        let mut f = String::from("0 HEAD\n");
+        for i in 0..n {
+            f.push_str(&format!("0 @I{i}@ INDI\n1 FAMS @F@\n"));
+        }
+        f.push_str("0 @F@ FAM\n0 TRLR\n");
+        let t = parse(f.as_bytes()).expect("parses");
+        let size = serde_json::to_vec(&t.people_out()).map_or(0, |v| v.len());
+        assert!(size < n * 200, "{size} bytes for {n} people");
+        assert_eq!(t.partners_of(0), BTreeSet::from([1]));
+        assert!(t.partners_of(2).is_empty());
+        // the family's own record wins: its first HUSB and first WIFE, then no one else
+        let t = parse(
+            b"0 HEAD\n0 @A@ INDI\n0 @B@ INDI\n0 @C@ INDI\n0 @D@ INDI\n0 @E@ INDI\n1 FAMS @F@\n\
+              0 @F@ FAM\n1 HUSB @A@\n1 HUSB @B@\n1 WIFE @C@\n1 WIFE @D@\n0 TRLR\n",
+        )
+        .expect("parses");
+        assert_eq!(t.partners_of(0), BTreeSet::from([2]));
+        assert!(t.partners_of(1).is_empty() && t.partners_of(4).is_empty());
+    }
+
+    #[test]
+    fn someone_born_more_than_110_years_ago_is_proposed_as_deceased() {
+        let year = Utc::now().year();
+        let f = format!(
+            "0 HEAD\n0 @A@ INDI\n1 BIRT\n2 DATE {}\n0 @B@ INDI\n1 BIRT\n2 DATE {}\n0 @C@ INDI\n1 BIRT\n2 DATE 1750\n0 TRLR\n",
+            year - 111,
+            year - 110
+        );
+        let t = parse(f.as_bytes()).expect("parses");
+        let old = member(&t, Uuid::nil(), 0, "PGRFTH");
+        assert!(old.deceased);
+        assert_eq!(old.death_age, None);
+        assert!(!member(&t, Uuid::nil(), 1, "PGRFTH").deceased);
+        // a year before 1800 is not kept, but still says the person has died
+        let older = member(&t, Uuid::nil(), 2, "PGRFTH");
+        assert_eq!((older.born_year, older.deceased), (None, true));
     }
 
     #[test]

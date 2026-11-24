@@ -9,6 +9,8 @@ use ownhealth_auth::sessions::{COOKIE, create_session};
 use ownhealth_core::Runtime;
 use ownhealth_core::access::{scope_set, set_grant};
 use ownhealth_core::demo::{Family, create_rivera_family};
+use ownhealth_core::family::{self, MemberIn};
+use ownhealth_core::provenance::{SrcIn, SrcRef};
 use ownhealth_core::testing::TestDb;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -150,6 +152,14 @@ async fn a_tree_proposes_each_relative_once_and_accept_adds_one_while_dismiss_ad
         .iter()
         .filter_map(|i| i["payload"]["relationship"].as_str())
         .collect();
+    // the queue shows them closest relative first, the order the import made them in
+    assert_eq!(
+        rels,
+        [
+            "FTH", "MTH", "SPS", "DAU", "SIS", "HBRO", "PGRFTH", "PGRMTH", "MGRMTH", "MGRFTH", "PUNCLE", "NEPHEW",
+            "PCOUSN", "FTHINLAW"
+        ]
+    );
     rels.sort_unstable();
     assert_eq!(
         rels,
@@ -309,7 +319,8 @@ async fn bad_files_are_refused_and_name_no_value() -> R {
     )
     .await?;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
-    for me in ["19", "-1", "x", ""] {
+    // a `self` past 16 bytes is refused, even when it would read as a position in the file
+    for me in ["19", "-1", "x", "", "00000000000000000"] {
         let (s, v) = upload(&a, "alex", "/profiles/alex/family/gedcom", F551, Some(me)).await?;
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{me}: {v}");
     }
@@ -365,5 +376,125 @@ async fn sending_a_tree_needs_import_and_read_records_and_so_does_seeing_its_pro
     assert_eq!(shown_to_sam(&a).await?, 14);
     let (s, v) = get(&a, "sam", &one).await?;
     assert_eq!(s, StatusCode::OK, "{v}");
+    Ok(())
+}
+
+/// A relative recorded on the profile, entered by Alex.
+async fn record(a: &App, relationship: &str, sex: &str, born_year: Option<i32>, sensitivity: &[&str]) -> R {
+    let alex = a.family.profile("alex");
+    let mut m = MemberIn::new(alex, relationship);
+    m.sex_at_birth = Some(sex.into());
+    m.born_year = born_year;
+    if relationship == "FTH" {
+        m.deceased = true;
+        m.death_age = Some(64);
+    }
+    m.sensitivity = sensitivity.iter().map(|s| (*s).to_string()).collect();
+    let src = SrcRef::New(SrcIn {
+        profile_id: Some(alex),
+        ..SrcIn::manual(Some(a.family.user("alex")))
+    });
+    let mut c = a.rt.pool.acquire().await?;
+    family::add(&mut c, &m, &src, "person", None, None).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_import_counts_no_sensitive_relative_the_caller_cannot_see() -> R {
+    let a = app().await?;
+    // Alex's father is recorded with a sensitivity tag; Sam has read:records but not read:sensitive
+    record(&a, "FTH", "male", Some(1955), &["mental_health"]).await?;
+    grant_sam(&a, &["read:summary", "read:records"]).await?;
+    let (s, fam) = get(&a, "sam", "/profiles/alex/family").await?;
+    assert_eq!(s, StatusCode::OK, "{fam}");
+    assert!(
+        !fam["items"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|m| m["relationship"] == "FTH")),
+        "{fam}"
+    );
+
+    // Alex reads sensitive rows: the father is already there
+    let (s, v) = upload(&a, "alex", "/profiles/alex/family/gedcom", F551, Some("0")).await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(
+        (v["proposed"].as_array().map(Vec::len), v["already"].as_u64()),
+        (Some(13), Some(1)),
+        "{v}"
+    );
+
+    // Sam does not: the father is proposed, and `already` counts only the 13 open proposals Sam sees
+    let (s, v) = upload(&a, "sam", "/profiles/alex/family/gedcom", F551, Some("0")).await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(
+        (v["proposed"].as_array().map(Vec::len), v["already"].as_u64()),
+        (Some(1), Some(13)),
+        "{v}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn relatives_who_look_alike_are_each_proposed() -> R {
+    let a = app().await?;
+    // a father and three brothers, none with a birth year; one brother is recorded already
+    let tree = b"0 HEAD\n1 GEDC\n2 VERS 5.5.1\n\
+0 @ME@ INDI\n1 SEX M\n1 FAMC @F1@\n\
+0 @B1@ INDI\n1 SEX M\n1 FAMC @F1@\n\
+0 @B2@ INDI\n1 SEX M\n1 FAMC @F1@\n\
+0 @B3@ INDI\n1 SEX M\n1 FAMC @F1@\n\
+0 @F@ INDI\n1 SEX M\n1 FAMS @F1@\n\
+0 @F1@ FAM\n1 HUSB @F@\n1 CHIL @ME@\n1 CHIL @B1@\n1 CHIL @B2@\n1 CHIL @B3@\n0 TRLR\n";
+    record(&a, "BRO", "male", None, &[]).await?;
+    let (s, v) = upload(&a, "alex", "/profiles/alex/family/gedcom", tree, Some("0")).await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(
+        (v["proposed"].as_array().map(Vec::len), v["already"].as_u64()),
+        (Some(3), Some(1)),
+        "{v}"
+    );
+    let mut rels: Vec<String> = proposals(&a)
+        .await?
+        .iter()
+        .filter_map(|i| i["payload"]["relationship"].as_str().map(str::to_string))
+        .collect();
+    rels.sort_unstable();
+    assert_eq!(rels, ["BRO", "BRO", "FTH"]);
+    // the same file again: each open proposal and the recorded brother stand for one relative
+    let (s, v) = upload(&a, "alex", "/profiles/alex/family/gedcom", tree, Some("0")).await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(
+        (v["proposed"].as_array().map(Vec::len), v["already"].as_u64()),
+        (Some(0), Some(4)),
+        "{v}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_imports_at_once_queue_each_relative_once() -> R {
+    // without the import's lock both see no open proposal and queue every relative twice
+    for _ in 0..3 {
+        let a = std::sync::Arc::new(app().await?);
+        let (a1, a2) = (a.clone(), a.clone());
+        let t1 =
+            tokio::spawn(async move { upload(&a1, "alex", "/profiles/alex/family/gedcom", F551, Some("0")).await });
+        let t2 =
+            tokio::spawn(async move { upload(&a2, "alex", "/profiles/alex/family/gedcom", F551, Some("0")).await });
+        let (r1, r2) = (t1.await??, t2.await??);
+        assert_eq!(
+            (r1.0, r2.0),
+            (StatusCode::CREATED, StatusCode::CREATED),
+            "{} {}",
+            r1.1,
+            r2.1
+        );
+        let n: i64 =
+            sqlx::query_scalar("select count(*) from review_item where kind = 'family_proposal' and profile_id = $1")
+                .bind(a.family.profile("alex"))
+                .fetch_one(&a.rt.pool)
+                .await?;
+        assert_eq!(n, 14);
+    }
     Ok(())
 }

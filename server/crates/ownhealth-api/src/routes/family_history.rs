@@ -637,10 +637,11 @@ async fn gedcom_preview(
     gedcom_access(&rt, &caller, &p).await?;
     let (bytes, _) = gedcom_form(form).await?;
     let tree = gedcom_tree(bytes).await?;
-    Ok((
-        StatusCode::OK,
-        Json(json!({"version": tree.version, "people": tree.people_out()})),
-    ))
+    // the answer is in proportion to the file, but still the size of the tree: built off the runtime too
+    let out = tokio::task::spawn_blocking(move || json!({"version": tree.version, "people": tree.people_out()}))
+        .await
+        .map_err(|e| ownhealth_core::Error::Other(e.into()))?;
+    Ok((StatusCode::OK, Json(out)))
 }
 
 /// `POST /profiles/{p}/family/gedcom`, multipart `file` and `self` (the person's position in the
@@ -665,7 +666,17 @@ async fn gedcom_import(
     let perm = caller
         .require(&mut tx, &p, Some("read:records"), Some("import"))
         .await?;
-    let out = gedcom::propose(&mut tx, perm.profile.household_id, perm.profile.id, &tree, me).await?;
+    // a sensitive relative the caller cannot see in the family list must not count as already there
+    let sensitive = perm.may_read_sensitive("read:records");
+    let out = gedcom::propose(
+        &mut tx,
+        perm.profile.household_id,
+        perm.profile.id,
+        &tree,
+        me,
+        sensitive,
+    )
+    .await?;
     let mut ev = event(&caller.0, &perm, "import", &[]);
     ev.tool = Some("gedcom".into());
     ev.resource_type = Some("review_item".into());
