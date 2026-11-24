@@ -1601,22 +1601,33 @@ fn database_ident(name: &str) -> String {
 }
 
 /// The scratch database of verify-restore. A new database lets PUBLIC connect, and the server may
-/// hold other roles (the wearables sidecar's own one), so only the owner may open this one.
+/// hold other roles (the wearables sidecar's own one), so only the owner may open this one. It is
+/// created closed to every session and opened after the revoke: no session can get in first and
+/// stay connected through the revoke.
 async fn create_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
     let ident = database_ident(scratch);
-    sqlx::query(AssertSqlSafe(format!("create database {ident}")))
-        .execute(&mut *admin)
-        .await?;
-    if let Err(error) = sqlx::query(AssertSqlSafe(format!(
-        "revoke connect, temporary on database {ident} from public"
+    sqlx::query(AssertSqlSafe(format!(
+        "create database {ident} with allow_connections = false"
     )))
     .execute(&mut *admin)
-    .await
-    {
-        if let Err(cleanup) = drop_scratch(admin, scratch).await {
-            tracing::warn!(%scratch, %cleanup, "could not drop the scratch database after revoking access failed");
+    .await?;
+    let opened = async {
+        for sql in [
+            format!("revoke connect, temporary on database {ident} from public"),
+            format!("alter database {ident} with allow_connections true"),
+        ] {
+            #[cfg(test)]
+            tests::BEFORE_SCRATCH_STEP.try_with(|step| step()).unwrap_or(Ok(()))?;
+            sqlx::query(AssertSqlSafe(sql)).execute(&mut *admin).await?;
         }
-        return Err(error.into());
+        Ok::<_, Error>(())
+    }
+    .await;
+    if let Err(error) = opened {
+        if let Err(cleanup) = drop_scratch(admin, scratch).await {
+            tracing::warn!(%scratch, %cleanup, "could not drop the scratch database after a setup step failed");
+        }
+        return Err(error);
     }
     Ok(())
 }
@@ -1698,6 +1709,30 @@ mod tests {
     tokio::task_local! {
         pub(super) static OBSERVE_PG_RESTORE: Box<dyn Fn(&str) -> Result<()> + Send>;
         pub(super) static BEFORE_CLEAR_REPAIRED: Box<dyn Fn() + Send>;
+        pub(super) static BEFORE_SCRATCH_STEP: Box<dyn Fn() -> Result<()> + Send>;
+    }
+
+    async fn connect_outcome(url: &str) -> String {
+        match PgConnection::connect(url).await {
+            Ok(conn) => {
+                let _ = conn.close().await;
+                "connected".to_string()
+            }
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// [`connect_outcome`] on its own thread and runtime, for a synchronous hook.
+    fn connect_outcome_blocking(url: &str) -> String {
+        let url = url.to_string();
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_or_else(|e| e.to_string(), |runtime| runtime.block_on(connect_outcome(&url)))
+        })
+        .join()
+        .unwrap_or_else(|_| "the connect thread panicked".to_string())
     }
 
     #[test]
@@ -1923,6 +1958,43 @@ mod tests {
         Ok(())
     }
 
+    /// A failure after the create, in the revoke or in opening the database, drops the scratch.
+    #[tokio::test]
+    async fn round_nine_a_failed_scratch_step_leaves_no_scratch_database() -> anyhow::Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let db = ownhealth_core::testing::TestDb::empty().await?;
+        let scratch = format!("{}_restore_check", db.name);
+        let mut admin = PgConnection::connect(&db.url).await?;
+        let mut kept = Vec::new();
+        for fail_at in 1..=2 {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = Arc::clone(&calls);
+            let result = BEFORE_SCRATCH_STEP
+                .scope(
+                    Box::new(move || match seen.fetch_add(1, Ordering::SeqCst) + 1 == fail_at {
+                        true => Err(ops_error("injected failure")),
+                        false => Ok(()),
+                    }),
+                    create_scratch(&mut admin, &scratch),
+                )
+                .await;
+            let left = scratch_exists(&mut admin, &scratch).await?;
+            if left {
+                drop_scratch(&mut admin, &scratch).await?;
+            }
+            if result.is_ok() || left {
+                kept.push((fail_at, calls.load(Ordering::SeqCst), left));
+            }
+        }
+        admin.close().await?;
+        assert!(
+            kept.is_empty(),
+            "a failed step did not fail or kept the scratch (step, calls, left): {kept:?}"
+        );
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_failed_repair_write_leaves_the_backup_destination_retryable() -> anyhow::Result<()> {
@@ -1978,17 +2050,26 @@ mod tests {
         )))
         .execute(&mut admin)
         .await?;
-        let created = create_scratch(&mut admin, &scratch).await;
         let (scheme, rest) = db.url.split_once("://").unwrap_or(("postgres", &db.url));
         let host = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
         let plain = with_db(&format!("{scheme}://{role}:{password}@{host}"), &scratch);
-        let opened = match PgConnection::connect(&plain).await {
-            Ok(conn) => {
-                conn.close().await?;
-                "connected".to_string()
-            }
-            Err(e) => e.to_string(),
-        };
+        // The first attempt comes right after the create, before the revoke.
+        let early = Arc::new(std::sync::Mutex::new(None));
+        let (seen, url) = (Arc::clone(&early), plain.clone());
+        let created = BEFORE_SCRATCH_STEP
+            .scope(
+                Box::new(move || {
+                    let mut seen = seen.lock().map_err(|_| ops_error("the hook's lock is poisoned"))?;
+                    if seen.is_none() {
+                        *seen = Some(connect_outcome_blocking(&url));
+                    }
+                    Ok(())
+                }),
+                create_scratch(&mut admin, &scratch),
+            )
+            .await;
+        let opened = connect_outcome(&plain).await;
+        let early = early.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.take();
         let temp: Option<bool> = sqlx::query_scalar("select has_database_privilege($1, $2, 'TEMPORARY')")
             .bind(&role)
             .bind(&scratch)
@@ -2003,6 +2084,11 @@ mod tests {
         }
         admin.close().await?;
         created?;
+        let early = early.unwrap_or_default();
+        assert!(
+            early.contains("is not currently accepting connections"),
+            "a plain role could open the new scratch database before the revoke: {early}"
+        );
         assert!(
             opened.contains("permission denied for database"),
             "a plain role opened the scratch database: {opened}"
