@@ -276,7 +276,9 @@ fn lookup(map: &HashMap<String, usize>, reference: Option<&Reference>) -> Option
     map.get(&format!("{kind}/{id}")).copied()
 }
 
-/// An endpoint address we would hand to the wizard: an https URL with a host and no user info.
+/// An endpoint address we would hand to the wizard: an https URL with a host and no user info, as
+/// the URL parser writes it back (`HTTPS://X` and `https:x` read as `https://x/`), so what we store
+/// always starts with `https://`.
 fn usable_endpoint(e: &Endpoint) -> Option<String> {
     if e.status.as_deref().is_some_and(|s| s != "active") {
         return None;
@@ -289,11 +291,18 @@ fn usable_endpoint(e: &Endpoint) -> Option<String> {
     if url.scheme() != "https" || url.host_str().is_none_or(str::is_empty) || !url.username().is_empty() {
         return None;
     }
-    Some(address.to_string())
+    let url = String::from(url);
+    (url.starts_with("https://") && url.len() <= ENDPOINT_MAX).then_some(url)
 }
 
+/// A name or state as we store it: control characters (a NUL included) and runs of white space read
+/// as one space, cut to `max` characters. None when nothing is left.
 fn clean(text: &str, max: usize) -> Option<String> {
-    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let joined = text
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     let cut: String = joined.chars().take(max).collect();
     let cut = cut.trim().to_string();
     (!cut.is_empty()).then_some(cut)

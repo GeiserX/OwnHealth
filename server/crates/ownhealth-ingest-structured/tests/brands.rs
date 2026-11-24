@@ -609,3 +609,69 @@ async fn the_wizard_entry_point_makes_one_source_queues_one_pull_and_reads_stale
     assert_eq!(left, 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn an_odd_entry_is_cleaned_or_left_out_and_never_blocks_its_vendor() -> R {
+    let f = fx().await?;
+    let mut files = good_files("v1");
+    let mut epic: Value = serde_json::from_slice(&brands_file("epic", 300, true, "v1"))?;
+    let odd = [
+        // a scheme in capitals, and one without its slashes: both are https URLs once read
+        endpoint("urn:uuid:odd-upper", "odd-upper", "HTTPS://FHIR.Upper.example/r4/"),
+        org(
+            "urn:uuid:o-upper",
+            "o-upper",
+            "Clínica Mayúsculas",
+            Some("TX"),
+            &["urn:uuid:odd-upper"],
+            None,
+        ),
+        endpoint("urn:uuid:odd-slash", "odd-slash", "https:fhir.slash.example/r4/"),
+        org(
+            "urn:uuid:o-slash",
+            "o-slash",
+            "Clínica Sin Barras",
+            None,
+            &["urn:uuid:odd-slash"],
+            None,
+        ),
+        // control characters (a NUL, a bell) in a name and a state
+        org(
+            "urn:uuid:o-nul",
+            "o-nul",
+            "Clínica\u{0}Nul\u{7}",
+            Some("T\u{0}X"),
+            &["urn:uuid:odd-slash"],
+            None,
+        ),
+        // a name of control characters only gives no entry
+        org(
+            "urn:uuid:o-blank",
+            "o-blank",
+            "\u{0}\u{1}",
+            None,
+            &["urn:uuid:odd-slash"],
+            None,
+        ),
+    ];
+    epic["entry"]
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("no entry"))?
+        .extend(odd);
+    files.insert("epic", serde_json::to_vec(&epic)?);
+    let v = Vendors::start(files).await?;
+    let s = f.source(&v).await?;
+    let o = f.poll(&s).await?;
+    assert!(o.problems.is_empty(), "{:?}", o.problems);
+    let rows = f.rows("epic").await?;
+    assert_eq!(rows.len(), 603);
+    for (name, endpoint, state) in [
+        ("Clínica Mayúsculas", "https://fhir.upper.example/r4/", Some("TX")),
+        ("Clínica Sin Barras", "https://fhir.slash.example/r4/", None),
+        ("Clínica Nul", "https://fhir.slash.example/r4/", Some("T X")),
+    ] {
+        let want = (name.to_string(), endpoint.to_string(), state.map(String::from));
+        assert!(rows.contains(&want), "{want:?} not in the epic rows");
+    }
+    Ok(())
+}
