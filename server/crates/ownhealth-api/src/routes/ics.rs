@@ -29,8 +29,7 @@
 //!
 //! Break-glass (`routes/break_glass.rs`): a feed made by an owner of the profile also carries one timed
 //! event per emergency request still waiting, from the request to the time access would open, with
-//! that time. It carries no cancel link until the app has a page that cancels a request (the owner
-//! cancels from the break-glass screens). Serving it stamps the request (`owner_feed_at`): a request opens
+//! that time and the link to cancel it. Serving it stamps the request (`owner_feed_at`): a request opens
 //! only once an owner feed has carried it. Making a feed needs `read:records` on the creator's own
 //! grant: what only break-glass opened gets no feed.
 
@@ -93,10 +92,16 @@ const BG_WHO: &[(&str, &str)] = &[
     ("es", "{contact} ha pedido acceso de emergencia a {profile}."),
     ("en", "{contact} asked for emergency access to {profile}."),
 ];
+const BG_CANCEL: &[(&str, &str)] = &[("es", "Para cancelarla: {link}"), ("en", "To cancel it: {link}")];
+
+/// The page that cancels one request (the UI's, behind step-up).
+pub fn cancel_link(base_url: &str, request: Uuid) -> String {
+    format!("{}/family/break-glass/{request}", base_url.trim_end_matches('/'))
+}
 
 /// The registry languages the feed's own texts lack.
 pub fn missing_langs(langs: &[&str]) -> Vec<String> {
-    [GENERIC_TITLE, BG_TITLE, BG_OPENS, BG_WHO]
+    [GENERIC_TITLE, BG_TITLE, BG_OPENS, BG_WHO, BG_CANCEL]
         .iter()
         .flat_map(|t| ownhealth_core::langs::missing(&ownhealth_core::langs::codes(t), langs))
         .collect::<std::collections::BTreeSet<_>>()
@@ -113,7 +118,7 @@ pub fn phrases() -> Value {
         .iter()
         .map(|(l, t)| {
             let bg = json!({"title": pick(BG_TITLE, l), "opens": pick(BG_OPENS, l),
-                            "who": pick(BG_WHO, l)});
+                            "who": pick(BG_WHO, l), "cancel": pick(BG_CANCEL, l)});
             (l.to_string(), json!({"generic": t, "break_glass": bg}))
         })
         .collect::<serde_json::Map<String, Value>>()
@@ -291,6 +296,7 @@ fn bg_events(
     profile: (Uuid, &str),
     named: bool,
     lang: &str,
+    base_url: &str,
 ) -> Vec<Timed> {
     let pick = |t: &[(&str, &'static str)]| ownhealth_core::langs::pick(t, lang);
     requests
@@ -306,6 +312,7 @@ fn bg_events(
                 );
             }
             lines.push(pick(BG_OPENS).replace("{at}", &at));
+            lines.push(pick(BG_CANCEL).replace("{link}", &cancel_link(base_url, *id)));
             (
                 uid(profile.0, &format!("break_glass:{id}")),
                 *requested,
@@ -428,7 +435,13 @@ async fn serve(rt: &Runtime, file: &str, meta: Meta) -> Result<Response, ApiErro
     } else {
         Vec::new()
     };
-    let timed = bg_events(&waiting, (f.profile_id, &perm.profile.display_name), named, lang);
+    let timed = bg_events(
+        &waiting,
+        (f.profile_id, &perm.profile.display_name),
+        named,
+        lang,
+        &rt.settings.base_url,
+    );
     let text = calendar(&name, &list, &timed, Utc::now());
     // a calendar app's fetch, with the peer address and user agent it came from, so the owner of an
     // address that leaked can tell who polls it

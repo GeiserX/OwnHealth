@@ -12,7 +12,7 @@
 //! GET    /api/break-glass                                           the profiles that named them
 //! POST   /api/break-glass/requests                      + step-up   {profile, reason}
 //! anyone logged in
-//! GET    /api/notifications                                         {items, unread}
+//! GET    /api/notifications                                         {items, unread}; each names the contact
 //! POST   /api/notifications/read                                    {ids?} -> {read}
 //! ```
 //!
@@ -471,6 +471,8 @@ type Notice = (
     Option<String>,
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
+    Option<Uuid>,
+    Option<String>,
 );
 
 async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
@@ -486,12 +488,15 @@ async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
          unread as (select count(*) as n from notification_outbox where user_id = $1 and read_at is null),
          listed as (
              select n.id, n.kind, p.id as profile_id, p.slug, p.display_name, n.request_id, n.actor_id,
-                    a.display_name as actor_name, n.created_at, n.read_at
+                    a.display_name as actor_name, n.created_at, n.read_at, r.contact_user_id,
+                    c.display_name as contact_name
              from visible v join notification_outbox n on n.id = v.id join profile p on p.id = n.profile_id
              left join app_user a on a.id = n.actor_id
+             left join break_glass_request r on r.id = n.request_id
+             left join app_user c on c.id = r.contact_user_id
          )
          select u.n, l.id, l.kind, l.profile_id, l.slug, l.display_name, l.request_id, l.actor_id,
-                l.actor_name, l.created_at, l.read_at
+                l.actor_name, l.created_at, l.read_at, l.contact_user_id, l.contact_name
          from unread u left join listed l on true order by l.created_at desc, l.id",
     )
     .bind(user)
@@ -507,6 +512,8 @@ async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
             Some(json!({"id": id, "kind": n.2,
                    "profile": {"id": n.3, "slug": n.4, "display_name": n.5},
                    "request_id": n.6, "actor": n.7.map(|user| json!({"user_id": user, "display_name": n.8})),
+                   // who asked: the activation and the expiry have no actor, and the screen names them
+                   "contact": n.11.map(|user| json!({"user_id": user, "display_name": n.12})),
                    "created_at": pydantic_datetime_utc(&created_at), "read_at": ts(&n.10)}))
         })
         .collect();

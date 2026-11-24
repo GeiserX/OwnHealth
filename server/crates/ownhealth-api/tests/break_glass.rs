@@ -598,7 +598,7 @@ async fn the_owner_feed_shows_the_request_at_once() -> R {
     let other = b.env.anon().get(made.json["path"].as_str().unwrap_or_default()).await?;
     assert_eq!(other.status, 200);
     let other = String::from_utf8(other.bytes)?;
-    assert!(!other.contains("emergencia"), "{other}");
+    assert!(!other.contains("break-glass"), "{other}");
     assert_eq!(fed().await?, None);
     let text = b.fetch_feed().await?;
     let cal: Calendar = text.parse().map_err(anyhow::Error::msg)?;
@@ -628,8 +628,10 @@ async fn the_owner_feed_shows_the_request_at_once() -> R {
         description.contains(&opens.format("%Y-%m-%d %H:%M UTC").to_string()),
         "{description}"
     );
-    // the cancel page comes with the break-glass screens: until then the event links nowhere
-    assert!(!description.contains("/family/break-glass/"), "{description}");
+    assert!(
+        description.contains(&format!("https://testserver/family/break-glass/{id}")),
+        "{description}"
+    );
     // a generic feed names nobody
     assert!(!description.contains("Carmen"), "{description}");
     assert!(fed().await?.is_some());
@@ -726,6 +728,14 @@ async fn every_step_writes_an_audit_row_and_an_outbox_row() -> R {
         ownhealth_core::break_glass::OUTBOX_KINDS.iter().copied().collect()
     );
     assert!(n.json["unread"].as_i64().unwrap_or_default() > 0);
+    // every notice names who asked, the activation and the expiry too, which have no actor
+    for i in n.json["items"].as_array().into_iter().flatten() {
+        assert_eq!(
+            i["contact"],
+            json!({"user_id": b.carmen_id, "display_name": "Carmen Ortega"}),
+            "{i}"
+        );
+    }
     let read = b.alex.post("/api/notifications/read", &json!({})).await?;
     assert_eq!(read.status, 200, "{:?}", read.json);
     assert_eq!(b.alex.get("/api/notifications").await?.json["unread"], 0);
