@@ -1,8 +1,11 @@
 name: Imaging CD
 
 on:
-  pull_request:
-    paths:
+  # main is measured too: two PRs that each pass can still make main slow together. These runs also
+  # save the build cache that PR runs restore.
+  push:
+    branches: [main]
+    paths: &imaging-paths
       - '.github/workflows/imaging.yml'
       - 'compose.yaml'
       - 'data/**'
@@ -10,6 +13,8 @@ on:
       - 'scripts/fetch-pdfium.sh'
       - 'server/**'
       - 'ui/**'
+  pull_request:
+    paths: *imaging-paths
   workflow_dispatch:
 
 permissions:
@@ -17,7 +22,8 @@ permissions:
 
 concurrency:
   group: imaging-cd-${{ github.ref }}
-  cancel-in-progress: true
+  # Every commit on main keeps its own measurement.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:
