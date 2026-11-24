@@ -297,12 +297,7 @@ async fn restore_then_rebuild_brings_every_recorded_study_back_under_the_same_id
     assert_eq!((after_id, status.as_str(), &after_fhir), (u1_id, "current", &u1_fhir));
     assert_eq!(e.recorded(U2).await?.map(|r| r.2).as_deref(), Some("retracted"));
     // the viewer finds each series' metadata cached again: 3 series of U1, 2 of U2
-    assert_eq!(
-        e.orthanc.warmed().len() - warmed_before,
-        5,
-        "{:?}",
-        e.orthanc.warmed()
-    );
+    assert_eq!(e.orthanc.warmed().len() - warmed_before, 5, "{:?}", e.orthanc.warmed());
 
     // Orthanc is whole: the next sweep queues nothing
     let calm = e.sweep().await?;
