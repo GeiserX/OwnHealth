@@ -33,6 +33,10 @@
 //!   the record sensitive as it does for a labelled FHIR file. The labels in a Privacy Markings
 //!   Section (templateId `2.16.840.1.113883.3.3445.4`) go to every resource of the document. A
 //!   Security Observation is never a record of its own.
+//! - An entered-in-error allergy or problem has no `clinicalStatus` (FHIR R4 ait-2, con-5). A problem
+//!   whose status observation says active while its effectiveTime has an end is listed for review
+//!   with that reason, never imported as active or as resolved (con-4).
+//! - A supply order or a dispense inside a Medication Activity is listed as not read.
 //! - A Results organizer is a DiagnosticReport with the Observations as its results; a Vital Signs
 //!   organizer only groups, so its observations come alone.
 //! - Every section, entry or part the converter does not read is listed in the section's report, and
@@ -309,7 +313,8 @@ pub fn fhir_datetime(ts: &str) -> Option<String> {
         Some(_) => return None,
         None => (value, None),
     };
-    if !digits(value) || value.len() < 4 {
+    // every component whole (year, month, day, hour, minute, second), a fraction only after seconds
+    if !digits(value) || ![4, 6, 8, 10, 12, 14].contains(&value.len()) || (fraction.is_some() && value.len() != 14) {
         return None;
     }
     let part = |a: usize, b: usize| value.get(a..b);
@@ -881,13 +886,16 @@ impl<'a, 'i> Conv<'a, 'i> {
         let nodes: Vec<Node<'_, '_>> = act.into_iter().chain([obs]).collect();
         put(&mut r, "identifier", Self::identifiers(&nodes));
         let nullified = nodes.iter().any(|n| status_of(*n) == Some("nullified"));
-        r.insert(
-            "clinicalStatus".into(),
-            coded(
-                "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical",
-                clinical_status(obs),
-            ),
-        );
+        // FHIR R4 ait-2: an entered-in-error allergy has no clinical status
+        if !nullified {
+            r.insert(
+                "clinicalStatus".into(),
+                coded(
+                    "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical",
+                    clinical_status(obs),
+                ),
+            );
+        }
         r.insert(
             "verificationStatus".into(),
             coded(
@@ -970,21 +978,9 @@ impl<'a, 'i> Conv<'a, 'i> {
     fn problem(&mut self, obs: Node<'_, '_>, act: Option<Node<'_, '_>>, at: &str, rep: &mut SectionReport) {
         let negated = is_true(obs, "negationInd");
         let value = child(obs, "value");
-        let id = self.new_id("Condition", &[obs, act.unwrap_or(obs)], obs);
-        let mut r = Map::new();
-        r.insert("resourceType".into(), json!("Condition"));
-        r.insert("id".into(), json!(id));
         let nodes: Vec<Node<'_, '_>> = act.into_iter().chain([obs]).collect();
-        put(&mut r, "identifier", Self::identifiers(&nodes));
         let nullified = nodes.iter().any(|n| status_of(*n) == Some("nullified"));
         let nothing = negated && self.names_nothing(value);
-        r.insert(
-            "clinicalStatus".into(),
-            coded(
-                "http://terminology.hl7.org/CodeSystem/condition-clinical",
-                clinical_status(obs),
-            ),
-        );
         let verification = if nullified {
             "entered-in-error"
         } else if negated && !nothing {
@@ -992,6 +988,28 @@ impl<'a, 'i> Conv<'a, 'i> {
         } else {
             "confirmed"
         };
+        let effective = child(obs, "effectiveTime");
+        // FHIR R4 con-5: an entered-in-error condition has no clinical status (and so, by con-4, no
+        // abatement)
+        let status = (!nullified).then(|| clinical_status(obs));
+        let abatement = bound(effective, "high").filter(|_| status.is_some());
+        if status == Some("active") && abatement.is_some() {
+            // con-4: an abated condition is never active. The status observation and the end date
+            // disagree, so a person decides
+            rep.not_read
+                .push(format!("{} (status active with an end date)", describe(obs)));
+            return;
+        }
+        let id = self.new_id("Condition", &[obs, act.unwrap_or(obs)], obs);
+        let mut r = Map::new();
+        r.insert("resourceType".into(), json!("Condition"));
+        r.insert("id".into(), json!(id));
+        put(&mut r, "identifier", Self::identifiers(&nodes));
+        put(
+            &mut r,
+            "clinicalStatus",
+            status.map(|s| coded("http://terminology.hl7.org/CodeSystem/condition-clinical", s)),
+        );
         r.insert(
             "verificationStatus".into(),
             coded(
@@ -1010,7 +1028,6 @@ impl<'a, 'i> Conv<'a, 'i> {
             put(&mut r, "code", self.concept(value));
         }
         put(&mut r, "subject", self.subject());
-        let effective = child(obs, "effectiveTime");
         put(
             &mut r,
             "onsetDateTime",
@@ -1018,7 +1035,7 @@ impl<'a, 'i> Conv<'a, 'i> {
                 .or_else(|| attr_ts(effective))
                 .map(Value::String),
         );
-        put(&mut r, "abatementDateTime", bound(effective, "high").map(Value::String));
+        put(&mut r, "abatementDateTime", abatement.map(Value::String));
         let recorded = act
             .and_then(|a| ts(child(a, "effectiveTime")).or_else(|| author_time(a)))
             .or_else(|| author_time(obs));
@@ -1138,6 +1155,10 @@ impl<'a, 'i> Conv<'a, 'i> {
             r.insert("reasonCode".into(), Value::Array(reasons));
         }
         self.push(Some(rep), at, Value::Object(r));
+        // a supply order or a dispense of the medicine is no record this version reads
+        for supply in children(sa, "entryRelationship").flat_map(|er| children(er, "supply")) {
+            rep.not_read.push(describe(supply));
+        }
     }
 
     fn immunization(&mut self, sa: Node<'_, '_>, at: &str, rep: &mut SectionReport) {
@@ -1543,6 +1564,39 @@ mod tests {
         }
         assert_eq!(fhir_datetime("20240229").as_deref(), Some("2024-02-29"));
         assert_eq!(fhir_datetime("20230131").as_deref(), Some("2023-01-31"));
+    }
+
+    /// CR8 (round 3): a timestamp with a cut or an extra component is no timestamp; every precision
+    /// from the year to the second still reads, with a fraction after the seconds and a zone.
+    #[test]
+    fn a_timestamp_with_a_partial_component_is_no_date() {
+        for bad in [
+            "20241",
+            "2024011",
+            "202401011",
+            "20240101123",
+            "2024010112300",
+            "202401011230001",
+            "2024010112300012",
+            "2024.5",
+            "20240101.5",
+            "202401011230.5",
+            "20241-0500",
+        ] {
+            assert_eq!(fhir_datetime(bad), None, "{bad}");
+        }
+        for (good, want) in [
+            ("2024", "2024"),
+            ("202401", "2024-01"),
+            ("20240101", "2024-01-01"),
+            ("2024010112", "2024-01-01T12:00:00Z"),
+            ("202401011230", "2024-01-01T12:30:00Z"),
+            ("202401011230-0800", "2024-01-01T12:30:00-08:00"),
+            ("20240101123001", "2024-01-01T12:30:01Z"),
+            ("20240101123001.5+0100", "2024-01-01T12:30:01.5+01:00"),
+        ] {
+            assert_eq!(fhir_datetime(good).as_deref(), Some(want), "{good}");
+        }
     }
 
     #[test]

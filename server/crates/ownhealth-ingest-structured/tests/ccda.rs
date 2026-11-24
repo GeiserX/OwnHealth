@@ -116,14 +116,21 @@ fn the_history_and_physical_sample_gives_exact_resources_per_section() -> R {
     assert_eq!(c.entries.len(), 22);
     assert_eq!(resources(&c, "Patient").len(), 1);
     assert_eq!(resources(&c, "Composition").len(), 1);
-    // every entry of the six sections was read
+    // every entry of the six sections was read; the medicine's supply order and dispense were not
     let left: Vec<&String> = c
         .sections
         .iter()
         .filter(|s| s.kind.is_some())
         .flat_map(|s| &s.not_read)
         .collect();
-    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(
+        left,
+        [
+            "supply 2.16.840.1.113883.10.20.22.4.17",
+            "supply 2.16.840.1.113883.10.20.22.4.18"
+        ],
+        "{left:?}"
+    );
     // 17 sections: the six, 4 more with entries, 7 with narrative only
     assert_eq!(c.sections.len(), 17);
     let other: Vec<(&str, usize)> = c
@@ -426,7 +433,8 @@ async fn the_history_and_physical_imports_into_the_matching_profile_and_holds_th
     let doc = store_doc(&mut tx, &env.blobs, &fam, "lucia", &bytes, "hp.xml", ccda::MIME).await?;
     let s = import_ccda(&mut tx, &env.blobs, doc).await?;
     // 2 problems, 3 allergies, 1 medicine and the 3 vaccines given are records; the refused vaccine
-    // waits in review; every lab and vital sign is a value or a review row; 5 held section items
+    // waits in review; every lab and vital sign is a value or a review row; 6 held section items (the
+    // medicine's supply order and dispense among them)
     assert_eq!(count(&mut tx, "condition", p).await?, 2);
     assert_eq!(count(&mut tx, "allergy", p).await?, 3);
     assert_eq!(count(&mut tx, "medication_statement", p).await?, 1);
@@ -442,6 +450,7 @@ async fn the_history_and_physical_imports_into_the_matching_profile_and_holds_th
         [
             "C-CDA narrative section",
             "FAMILY HISTORY (C-CDA)",
+            "MEDICATIONS (C-CDA)",
             "PLAN OF CARE (C-CDA)",
             "PROCEDURES (C-CDA)",
             "SOCIAL HISTORY (C-CDA)"
@@ -450,8 +459,8 @@ async fn the_history_and_physical_imports_into_the_matching_profile_and_holds_th
     let values = count(&mut tx, "observation", p).await?;
     let rows = open_items(&mut tx, doc, "candidate_row").await?.len() as i64;
     assert_eq!(values + rows, 9, "3 labs and 6 vital signs");
-    // 10 records (one of them the refused vaccine), 9 values, 5 held sections: each counted once
-    assert_eq!(s.accepted + s.queued + s.skipped, 10 + 9 + 5, "{s:?}");
+    // 10 records (one of them the refused vaccine), 9 values, 6 held items: each counted once
+    assert_eq!(s.accepted + s.queued + s.skipped, 10 + 9 + 6, "{s:?}");
     let flags: Value = sqlx::query_scalar("select flags from document where id = $1")
         .bind(doc)
         .fetch_one(&mut *tx)
@@ -461,7 +470,7 @@ async fn the_history_and_physical_imports_into_the_matching_profile_and_holds_th
     // a second run reads the stored summary and adds nothing
     let again = import_ccda(&mut tx, &env.blobs, doc).await?;
     assert_eq!(again, s);
-    assert_eq!(open_items(&mut tx, doc, "fhir_unmapped_summary").await?.len(), 5);
+    assert_eq!(open_items(&mut tx, doc, "fhir_unmapped_summary").await?.len(), 6);
     Ok(())
 }
 
@@ -1101,5 +1110,133 @@ fn a_utf16_document_is_refused_with_its_own_reason() -> R {
             other => panic!("le {le}: {other:?}"),
         }
     }
+    Ok(())
+}
+
+/// CR6: CCD 1's first medicine has a supply order and a dispense; neither is read, so both are listed
+/// for review. The MedicationStatements stay.
+#[test]
+fn medication_supply_and_dispense_are_listed_as_not_read() -> R {
+    let c = convert(&fixture("ccd-1.xml"))?;
+    assert_eq!(made(&c, Section::Medications), counts(&[("MedicationStatement", 2)]));
+    let meds = c
+        .sections
+        .iter()
+        .find(|s| s.kind == Some(Section::Medications))
+        .ok_or_else(|| anyhow::anyhow!("no medications section"))?;
+    assert_eq!(
+        meds.not_read,
+        [
+            "supply 2.16.840.1.113883.10.20.22.4.17",
+            "supply 2.16.840.1.113883.10.20.22.4.18"
+        ]
+    );
+    Ok(())
+}
+
+/// A Problem Status Observation saying `code` (SNOMED: 55561003 active, 413322009 resolved).
+fn problem_status(code: &str) -> String {
+    format!(
+        r#"<entryRelationship typeCode="REFR"><observation classCode="OBS" moodCode="EVN">
+          <templateId root="2.16.840.1.113883.10.20.22.4.6"/><code code="33999-4" codeSystem="2.16.840.1.113883.6.1"/>
+          <statusCode code="completed"/><value xsi:type="CD" code="{code}" codeSystem="2.16.840.1.113883.6.96"/>
+        </observation></entryRelationship>"#
+    )
+}
+
+/// An allergy concern act (status `act_status`) around one penicillin allergy.
+fn allergy_entry(id: &str, act_status: &str) -> String {
+    format!(
+        r#"<entry><act classCode="ACT" moodCode="EVN"><templateId root="2.16.840.1.113883.10.20.22.4.30"/>
+          <id root="1.2.3.4" extension="alg-act-{id}"/><code code="CONC" codeSystem="2.16.840.1.113883.5.6"/>
+          <statusCode code="{act_status}"/>
+          <entryRelationship typeCode="SUBJ"><observation classCode="OBS" moodCode="EVN">
+            <templateId root="2.16.840.1.113883.10.20.22.4.7"/><id root="1.2.3.4" extension="alg-{id}"/>
+            <code code="ASSERTION" codeSystem="2.16.840.1.113883.5.4"/><statusCode code="completed"/>
+            <effectiveTime><low value="20200101"/></effectiveTime>
+            <value xsi:type="CD" code="419511003" codeSystem="2.16.840.1.113883.6.96"/>
+            <participant typeCode="CSM"><participantRole classCode="MANU"><playingEntity classCode="MMAT">
+              <code code="7980" codeSystem="2.16.840.1.113883.6.88" displayName="Penicillin G"/>
+            </playingEntity></participantRole></participant>
+          </observation></entryRelationship></act></entry>"#
+    )
+}
+
+/// CR7: FHIR R4 con-5 and ait-2 (no clinicalStatus on an entered-in-error record) and con-4 (an
+/// abated condition is never active). A problem whose status observation says active while its
+/// effectiveTime has an end is held for review with that reason; one that says resolved keeps its end.
+#[test]
+fn entered_in_error_has_no_clinical_status_and_an_active_problem_with_an_end_is_held() -> R {
+    let c = convert(&document(&format!(
+        r#"{}<component><section><templateId root="2.16.840.1.113883.10.20.22.2.6.1"/><title>ALLERGIES</title>{}{}</section></component>"#,
+        problems_section(&format!(
+            "{}{}{}",
+            problem_entry(
+                "void",
+                r#"code="233604007" displayName="Pneumonia""#,
+                r#"<low value="20200110"/><high value="20200301"/>"#,
+                r#"<statusCode code="nullified"/>"#
+            ),
+            problem_entry(
+                "conflict",
+                r#"code="38341003" displayName="Hypertension""#,
+                r#"<low value="20190101"/><high value="20200301"/>"#,
+                &problem_status("55561003")
+            ),
+            problem_entry(
+                "ended",
+                r#"code="195967001" displayName="Asthma""#,
+                r#"<low value="20100101"/><high value="20200301"/>"#,
+                &problem_status("413322009")
+            )
+        )),
+        allergy_entry("void", "nullified"),
+        allergy_entry("kept", "active")
+    )))?;
+    let conditions: Vec<(&str, &Value, &Value, &Value)> = resources(&c, "Condition")
+        .into_iter()
+        .map(|r| {
+            (
+                r["code"]["coding"][0]["code"].as_str().unwrap_or_default(),
+                &r["verificationStatus"]["coding"][0]["code"],
+                &r["clinicalStatus"],
+                &r["abatementDateTime"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        conditions,
+        [
+            ("233604007", &json!("entered-in-error"), &Value::Null, &Value::Null),
+            (
+                "195967001",
+                &json!("confirmed"),
+                &json!({"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "resolved"}]}),
+                &json!("2020-03-01")
+            ),
+        ]
+    );
+    let problems = c
+        .sections
+        .iter()
+        .find(|s| s.kind == Some(Section::Problems))
+        .ok_or_else(|| anyhow::anyhow!("no problems section"))?;
+    assert_eq!(
+        problems.not_read,
+        ["observation 2.16.840.1.113883.10.20.22.4.4 (status active with an end date)"]
+    );
+    let allergies: Vec<(&Value, bool)> = resources(&c, "AllergyIntolerance")
+        .into_iter()
+        .map(|r| {
+            (
+                &r["verificationStatus"]["coding"][0]["code"],
+                r.get("clinicalStatus").is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        allergies,
+        [(&json!("entered-in-error"), false), (&json!("confirmed"), true)]
+    );
     Ok(())
 }
