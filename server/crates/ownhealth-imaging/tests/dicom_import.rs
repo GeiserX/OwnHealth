@@ -96,6 +96,15 @@ impl Env {
         Ok(jobs::drain(&self.ctx, "core", 10, Some(&[JOB.to_string()])).await?)
     }
 
+    async fn retry_now(&self, id: Option<i64>) -> R {
+        sqlx::query("update job set run_after = now() where id = $1")
+            .bind(id)
+            .execute(&self.rt.pool)
+            .await?;
+        tokio::time::timeout(Duration::from_secs(30), self.run()).await??;
+        Ok(())
+    }
+
     async fn job(&self, id: Option<i64>) -> anyhow::Result<(String, Value, Option<String>)> {
         Ok(
             sqlx::query_as("select state, coalesce(result, 'null'::jsonb), last_error from job where id = $1")
@@ -299,6 +308,10 @@ async fn two_imports_of_one_uid_under_two_patients_at_once_send_one_patient() ->
     assert_eq!(patients.len(), 1, "{patients:?}");
     assert_eq!(e.orthanc.posts(), 6, "the other import sent nothing");
     let (owner, _) = e.recorded(U1).await?.ok_or_else(|| anyhow::anyhow!("not recorded"))?;
+    assert!(
+        [e.fam.profile("alex"), e.fam.profile("sam")].contains(&owner),
+        "unexpected owner {owner}"
+    );
     let (winner, loser) = if owner == e.fam.profile("alex") {
         (ALEX.id, "sam")
     } else {
@@ -647,6 +660,7 @@ async fn round3_conflicting_identity_evidence_holds_the_whole_study() -> R {
         e.run().await?;
         let (_, result, error) = e.job(up.job_id).await?;
         assert_eq!(result["in_review"], 1, "{result} {error:?}");
+        assert_eq!(e.in_review("alex").await?, [(U1.into(), "identity_conflict".into())]);
         assert_eq!(e.orthanc.posts(), 0);
     }
     Ok(())
@@ -980,8 +994,16 @@ async fn round4_an_unreadable_name_waits_and_an_accept_imports_the_study() -> R 
 #[tokio::test]
 async fn round4_two_unreadable_patients_under_one_uid_wait_as_a_uid_conflict() -> R {
     let e = env().await?;
-    let mut files = study_files(&Study::new(U1, ALEX), "A");
-    files.extend(study_files(&Study::new(U1, SAM), "B"));
+    let mut files = [
+        (
+            "A".into(),
+            support::image(&Study::new(U1, ALEX), 0, 0, support::EXPLICIT_LE),
+        ),
+        (
+            "B".into(),
+            support::image(&Study::new(U1, SAM), 0, 1, support::EXPLICIT_LE),
+        ),
+    ];
     patch(&mut files, b"RIVERA^ALEX", b"RIVERA^\xc1LEX");
     patch(&mut files, b"RIVERA^SAM", b"RIVERA^S\xc1M");
     let up = e.upload("alex", &files).await?;
@@ -1161,13 +1183,18 @@ async fn round5_an_unreadable_name_does_not_hide_an_issuer_conflict() -> R {
         issuer: "LABNORTE",
         ..Study::new(U1, ALEX)
     };
-    let mut other = study_files(
-        &Study {
-            issuer: "OTHER",
-            ..st.clone()
-        },
-        "other",
-    );
+    let mut other = [(
+        "other".into(),
+        support::image(
+            &Study {
+                issuer: "OTHER",
+                ..st.clone()
+            },
+            0,
+            1,
+            support::EXPLICIT_LE,
+        ),
+    )];
     patch(&mut other, b"RIVERA^ALEX", b"RIVERA^\xc1LEX");
     let mut files = study_files(&st, "DICOM");
     files.extend(other);
@@ -1409,5 +1436,302 @@ async fn round7_a_new_sop_in_an_accepted_charset_study_is_held_again() -> R {
     );
     assert_eq!(e.orthanc.posts(), posts, "nothing unreviewed reaches Orthanc");
     assert_eq!(e.orthanc.held().instances.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round8_a_purged_import_still_cleans_up_a_lost_store_reply() -> R {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let e = env().await?;
+    let st = Study::new(U1, ALEX);
+    let old = support::image(&st, 0, 0, support::EXPLICIT_LE);
+    let new = support::image(&st, 0, 1, support::EXPLICIT_LE);
+    let client = ownhealth_imaging::orthanc::Orthanc::new(e.orthanc.config())?;
+    client.store(old.clone()).await?;
+    let original = e.orthanc.held().instances;
+    let up = e
+        .upload("alex", &[("existing".into(), old), ("new".into(), new)])
+        .await?;
+    e.orthanc.lose_store_reply_at.store(3, SeqCst);
+    tokio::time::timeout(Duration::from_secs(30), e.run()).await??;
+    assert_eq!(e.job(up.job_id).await?.0, "queued");
+    assert_eq!(e.orthanc.held().instances.len(), 2);
+
+    let mut tx = e.rt.pool.begin().await?;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        ownhealth_auth::household::delete_profile(&mut tx, e.fam.profile("alex")),
+    )
+    .await??;
+    tx.commit().await?;
+    assert!(
+        !sqlx::query_scalar::<_, bool>("select exists(select from imaging_import where id = $1)")
+            .bind(up.import_id)
+            .fetch_one(&e.rt.pool)
+            .await?
+    );
+    e.retry_now(up.job_id).await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(result["gone"], true, "{result}");
+    assert_eq!(e.orthanc.held().instances, original);
+    assert_eq!(e.orthanc.posts(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round8_an_ambiguous_store_status_keeps_the_post_for_recovery() -> R {
+    let e = env().await?;
+    let st = Study::new(U1, ALEX);
+    for (n, status) in [serde_json::json!("Unknown"), Value::Null].into_iter().enumerate() {
+        let up = e
+            .upload(
+                "alex",
+                &[("image".into(), support::image(&st, 0, n, support::EXPLICIT_LE))],
+            )
+            .await?;
+        *e.orthanc.store_status.lock().expect("status") = Some(status);
+        tokio::time::timeout(Duration::from_secs(30), e.run()).await??;
+        let (state, result, error) = e.job(up.job_id).await?;
+        assert_eq!(state, "queued", "{result} {error:?}");
+        assert!(error.is_some_and(|err| err.starts_with("OrthancError:")), "{result}");
+        assert_eq!(e.orthanc.held().instances.len(), n + 1);
+        assert!(
+            sqlx::query_scalar::<_, bool>("select exists(select from imaging_import_post where import_id = $1)")
+                .bind(up.import_id)
+                .fetch_one(&e.rt.pool)
+                .await?
+        );
+
+        *e.orthanc.store_status.lock().expect("status") = None;
+        e.retry_now(up.job_id).await?;
+        let (state, result, error) = e.job(up.job_id).await?;
+        assert_eq!(state, "done", "{result} {error:?}");
+        assert_eq!(e.orthanc.held().instances.len(), n + 1);
+        assert_eq!(e.orthanc.deletes.load(std::sync::atomic::Ordering::SeqCst), n + 1);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn round8_different_bytes_for_one_report_sop_refuse_the_disc_before_posting() -> R {
+    let e = env().await?;
+    let st = Study::new(U1, ALEX);
+    let first = support::pdf_instance(&st, &support::report_pdf(&st));
+    let changed = Study {
+        description: "Other report",
+        ..st.clone()
+    };
+    let second = support::pdf_instance(&st, &support::report_pdf(&changed));
+    let up = e
+        .upload("alex", &[("first".into(), first), ("second".into(), second)])
+        .await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "dead", "{result} {error:?}");
+    assert!(error.is_some_and(|err| err.contains("different files share a DICOM SOP Instance UID")));
+    assert_eq!(e.orthanc.posts(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round8_identical_copies_file_the_report_once() -> R {
+    let e = env().await?;
+    let st = Study::new(U1, ALEX);
+    let report = support::pdf_instance(&st, &support::report_pdf(&st));
+    let up = e
+        .upload("alex", &[("first".into(), report.clone()), ("second".into(), report)])
+        .await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(result["reports"], 1, "{result}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn round8_a_different_zip_copy_files_the_report_orthanc_kept() -> R {
+    let e = env().await?;
+    let st = Study::new(U1, ALEX);
+    let kept_pdf = support::report_pdf(&st);
+    let client = ownhealth_imaging::orthanc::Orthanc::new(e.orthanc.config())?;
+    client.store(support::pdf_instance(&st, &kept_pdf)).await?;
+    let changed = Study {
+        description: "Other report",
+        ..st.clone()
+    };
+    let zip_report = support::pdf_instance(&st, &support::report_pdf(&changed));
+    let up = e.upload("alex", &[("report".into(), zip_report)]).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(result["reports"], 1, "{result}");
+    let shas: Vec<Vec<u8>> = sqlx::query_scalar("select blob_sha256 from document where doc_type = 'imaging_report'")
+        .fetch_all(&e.rt.pool)
+        .await?;
+    use sha2::{Digest, Sha256};
+    assert_eq!(shas, [Sha256::digest(kept_pdf).to_vec()]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round8_an_accepted_iso_2022_patient_id_uses_orthanc_parent_membership() -> R {
+    use dicom_dictionary_std::tags;
+    use dicom_object::OpenFileOptions;
+
+    let e = env().await?;
+    let st = Study {
+        person: Person { id: "TEST-ID1", ..ALEX },
+        charset: "ISO 2022 IR 100",
+        ..Study::new(U1, ALEX)
+    };
+    let mut files = [("image".into(), support::image(&st, 0, 0, support::EXPLICIT_LE))];
+    patch(&mut files, b"TEST-ID1", b"\x1b-A\xc9-1  ");
+    let header = ownhealth_imaging::part10::read_header(&files[0].1)?;
+    assert!(header.undecodable_patient_id.is_some());
+    // The fake uses dicom-rs. Give the stored instance Orthanc's decoded ID after the escape.
+    let obj = OpenFileOptions::new().from_reader(files[0].1.as_slice())?;
+    let fake_id = obj
+        .element(tags::PATIENT_ID)?
+        .to_str()?
+        .trim_end_matches(['\0', ' '])
+        .to_string();
+    *e.orthanc.misread_patient.lock().expect("patient override") = Some((fake_id, "É-1".into()));
+    e.upload("alex", &files).await?;
+    e.run().await?;
+    assert_eq!(e.in_review("alex").await?, [(U1.into(), "unsupported_charset".into())]);
+    assert_eq!(e.orthanc.posts(), 0);
+    let mut conn = e.rt.pool.acquire().await?;
+    let item = sqlx::query_scalar("select id from review_item where kind = $1")
+        .bind(REVIEW_KIND)
+        .fetch_one(&mut *conn)
+        .await?;
+    ownhealth_core::review::accept(&mut conn, item, e.fam.user("alex"), None).await?;
+    drop(conn);
+    e.run().await?;
+    assert_eq!(e.recorded(U1).await?.map(|r| r.0), Some(e.fam.profile("alex")));
+    assert_eq!(e.orthanc.patients_under(U1), ["É-1".into()].into());
+    let posts = e.orthanc.posts();
+
+    let up = e.upload("alex", &files).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(result["already"], 1, "{result}");
+    assert!(e.in_review("alex").await?.is_empty());
+    assert_eq!(e.orthanc.posts(), posts);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round8_a_retry_files_its_report_after_another_disc_updated_the_counts() -> R {
+    let e = env().await?;
+    let first = Study {
+        series: 1,
+        per_series: 1,
+        report: true,
+        ..Study::new(U1, ALEX)
+    };
+    e.upload("alex", &study_files(&first, "original")).await?;
+    e.run().await?;
+    let changed = Study {
+        description: "Second report",
+        ..first.clone()
+    };
+    let mut reports = [(
+        "second-report".into(),
+        support::pdf_instance(&first, &support::report_pdf(&changed)),
+    )];
+    patch(
+        &mut reports,
+        format!("{U1}.99.1").as_bytes(),
+        format!("{U1}.99.2").as_bytes(),
+    );
+    *e.orthanc.metadata_fails.lock().expect("metadata") = true;
+    let a = e.upload("alex", &reports).await?;
+    e.run().await?;
+    assert_eq!(e.job(a.job_id).await?.0, "queued");
+    assert_eq!(e.fhir(U1).await?["numberOfInstances"], 2);
+
+    *e.orthanc.metadata_fails.lock().expect("metadata") = false;
+    let b = e
+        .upload(
+            "alex",
+            &[("new-image".into(), support::image(&first, 0, 1, support::EXPLICIT_LE))],
+        )
+        .await?;
+    e.run().await?;
+    assert_eq!(e.job(b.job_id).await?.0, "done");
+    assert_eq!(e.fhir(U1).await?["numberOfInstances"], 4);
+    let before = e.orthanc.held();
+    e.retry_now(a.job_id).await?;
+    let (state, result, error) = e.job(a.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(result["already"], 1, "{result}");
+    assert_eq!(result["reports"], 1, "{result}");
+    let files = e.orthanc.held();
+    assert_eq!(files.instances, before.instances);
+    let n: i64 = sqlx::query_scalar("select count(*) from document where doc_type = 'imaging_report'")
+        .fetch_one(&e.rt.pool)
+        .await?;
+    assert_eq!(n, 2);
+
+    let replay = e.upload("alex", &reports).await?;
+    let posts = e.orthanc.posts();
+    let warms = e.orthanc.warmed();
+    let reads = e
+        .orthanc
+        .held()
+        .log
+        .into_iter()
+        .filter(|(m, p)| m == "GET" && p.ends_with("/file"))
+        .count();
+    e.run().await?;
+    let (state, result, error) = e.job(replay.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(result["reports"], 0, "{result}");
+    assert_eq!(e.orthanc.posts(), posts);
+    assert_eq!(e.orthanc.warmed(), warms);
+    let after = e
+        .orthanc
+        .held()
+        .log
+        .into_iter()
+        .filter(|(m, p)| m == "GET" && p.ends_with("/file"))
+        .count();
+    assert_eq!(after, reads, "already-filed reports should not be downloaded again");
+    Ok(())
+}
+
+#[tokio::test]
+async fn round8_deflated_transfer_syntax_fails_with_a_visible_reason() -> R {
+    use std::io::Write;
+
+    let e = env().await?;
+    let st = Study::new(U1, ALEX);
+    let mut file = support::image(&st, 0, 0, support::EXPLICIT_LE);
+    // The file meta group length follows its UL header at byte 140.
+    let size = u32::from_le_bytes(file[140..144].try_into()?);
+    let data = file.split_off(144 + size as usize);
+    let ts = b"1.2.840.10008.1.2.1\0";
+    let at = file
+        .windows(ts.len())
+        .position(|w| w == ts)
+        .expect("explicit LE syntax");
+    assert_eq!(u16::from_le_bytes(file[at - 2..at].try_into()?) as usize, ts.len());
+    const DEFLATED: &[u8] = b"1.2.840.10008.1.2.1.99";
+    file[at - 2..at].copy_from_slice(&(DEFLATED.len() as u16).to_le_bytes());
+    file.splice(at..at + ts.len(), DEFLATED.iter().copied());
+    let size = size + (DEFLATED.len() - ts.len()) as u32;
+    file[140..144].copy_from_slice(&size.to_le_bytes());
+    let mut z = flate2::write::DeflateEncoder::new(file, flate2::Compression::default());
+    z.write_all(&data)?;
+    let up = e.upload("alex", &[("deflated".into(), z.finish()?)]).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "dead", "{result} {error:?}");
+    assert!(error.is_some_and(|err| err.contains("deflated DICOM transfer syntax")));
+    assert_eq!(e.orthanc.posts(), 0);
     Ok(())
 }

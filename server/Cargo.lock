@@ -4240,6 +4240,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
+ "ownhealth-auth",
  "ownhealth-core",
  "ownhealth-ingest-pdf",
  "ownhealth-ops",

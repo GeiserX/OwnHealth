@@ -4,15 +4,14 @@
 //! route a file to review before Orthanc ever sees it.
 //!
 //! A file is a 128-byte preamble, `DICM`, the file meta group (explicit VR little endian), then the
-//! data set in the meta group's transfer syntax: implicit VR little endian, explicit VR little or big
-//! endian, or deflated explicit VR little endian. Every other transfer syntax (JPEG and the like)
-//! encodes only the pixel data differently, and its data set is explicit VR little endian. The reader
+//! data set in the meta group's transfer syntax. It reads implicit VR little endian and explicit VR
+//! little or big endian. Pixel compression (such as JPEG) leaves the data set explicit VR little
+//! endian. The reader refuses deflated data sets before inflation. The reader
 //! walks the top level of the data set and skips sequences, items and encapsulated pixel data by
 //! their lengths and delimiters. Anything malformed is [`Part10Error::Corrupt`], never a panic.
 
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Take, Write};
-use std::path::Path;
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Take};
 
 use dicom_encoding::text::{SpecificCharacterSet, TextCodec};
 
@@ -27,12 +26,6 @@ const IMPLICIT_LE: &str = "1.2.840.10008.1.2";
 const EXPLICIT_BE: &str = "1.2.840.10008.1.2.2";
 const DEFLATED_LE: &str = "1.2.840.10008.1.2.1.99";
 
-/// How far a deflated data set is inflated to read a header: the importer's tags sit in its first
-/// elements, so a set that holds none of them in this much is damaged. A few hundred bytes of input
-/// can inflate to gigabytes; the cap keeps that out of memory.
-pub const MAX_INFLATED_HEADER: u64 = 16 << 20;
-/// How far a deflated data set is inflated to find an encapsulated document (a PDF report).
-pub const MAX_INFLATED_DOCUMENT: u64 = 128 << 20;
 /// Sequences nest at most this deep.
 const MAX_DEPTH: usize = 32;
 
@@ -42,8 +35,8 @@ pub enum Part10Error {
     NotDicom,
     /// It says it is DICOM but does not read as such.
     Corrupt(String),
-    /// The temporary storage for a deflated document could not be written.
-    Staging(String),
+    /// The file meta group declares a deflated data set.
+    Deflated,
 }
 
 impl std::fmt::Display for Part10Error {
@@ -51,7 +44,7 @@ impl std::fmt::Display for Part10Error {
         match self {
             Part10Error::NotDicom => f.write_str("not a DICOM file"),
             Part10Error::Corrupt(why) => write!(f, "a damaged DICOM file: {why}"),
-            Part10Error::Staging(why) => write!(f, "staging a DICOM document: {why}"),
+            Part10Error::Deflated => f.write_str("deflated DICOM transfer syntax is unsupported"),
         }
     }
 }
@@ -377,45 +370,17 @@ fn meta(input: impl Read + Seek, end: usize) -> Result<(String, String, String, 
     Ok((ts, class, instance, w.pos))
 }
 
-fn syntax_for(ts: &str) -> Syntax {
+fn syntax_for(ts: &str) -> Result<Syntax, Part10Error> {
     match ts {
-        IMPLICIT_LE => Syntax::ImplicitLe,
-        EXPLICIT_BE => Syntax::ExplicitBe,
-        _ => Syntax::ExplicitLe,
+        IMPLICIT_LE => Ok(Syntax::ImplicitLe),
+        EXPLICIT_BE => Ok(Syntax::ExplicitBe),
+        DEFLATED_LE => Err(Part10Error::Deflated),
+        _ => Ok(Syntax::ExplicitLe),
     }
 }
 
-/// The data set's bytes and syntax: inflated, as far as `cap` bytes, when the transfer syntax is
-/// deflated. A set cut at the cap reads as far as it goes: the walk stops before the cut when what it
-/// looks for comes first, and finds the set damaged otherwise.
-fn data_set<'a>(
-    buf: &'a [u8],
-    ts: &str,
-    start: usize,
-    cap: u64,
-    inflated: &'a mut Vec<u8>,
-) -> Result<(&'a [u8], Syntax), Part10Error> {
-    let syntax = syntax_for(ts);
-    if ts == DEFLATED_LE {
-        flate2::read::DeflateDecoder::new(&buf[start..])
-            .take(cap)
-            .read_to_end(inflated)
-            .map_err(|e| corrupt(format!("the deflated data set does not inflate: {e}")))?;
-        return Ok((inflated.as_slice(), syntax));
-    }
-    Ok((&buf[start..], syntax))
-}
-
-/// Calls `each(tag, value)` for every top-level element of the data set up to tag `last`, until it
-/// returns false. The walk looks at the next tag before it reads the element, so an element past
-/// `last` (pixel data, or a set cut at the inflate cap) is never read.
-fn walk(buf: &[u8], last: u32, cap: u64, mut each: impl FnMut(u32, &[u8]) -> bool) -> Result<String, Part10Error> {
-    if !is_part10(buf) {
-        return Err(Part10Error::NotDicom);
-    }
-    let (ts, _, _, start) = meta(Cursor::new(buf), buf.len())?;
-    let mut inflated = Vec::new();
-    let (set, syntax) = data_set(buf, &ts, start, cap, &mut inflated)?;
+/// Calls `each(tag, value)` for each top-level element up to tag `last`, until it returns false.
+fn walk(set: &[u8], syntax: Syntax, last: u32, mut each: impl FnMut(u32, &[u8]) -> bool) -> Result<(), Part10Error> {
     let mut w = Walker {
         input: Cursor::new(set),
         pos: 0,
@@ -436,7 +401,7 @@ fn walk(buf: &[u8], last: u32, cap: u64, mut each: impl FnMut(u32, &[u8]) -> boo
             break;
         }
     }
-    Ok(ts)
+    Ok(())
 }
 
 /// The header of one PS3.10 file. It reads only as far as the study's tags (group 0020) unless the
@@ -445,14 +410,16 @@ pub fn read_header(buf: &[u8]) -> Result<Header, Part10Error> {
     if !is_part10(buf) {
         return Err(Part10Error::NotDicom);
     }
-    let (_, class, instance, _) = meta(Cursor::new(buf), buf.len())?;
+    let (transfer_syntax, class, instance, start) = meta(Cursor::new(buf), buf.len())?;
+    let syntax = syntax_for(&transfer_syntax)?;
     let mut h = Header {
+        transfer_syntax,
         sop_class_uid: class,
         sop_instance_uid: instance,
         ..Header::default()
     };
     let mut charset = Some(SpecificCharacterSet::ISO_IR_6);
-    h.transfer_syntax = walk(buf, 0x0020_000E, MAX_INFLATED_HEADER, |tag, value| {
+    walk(&buf[start..], syntax, 0x0020_000E, |tag, value| {
         let v = || text(value);
         let decode = |charset: &Option<SpecificCharacterSet>| {
             let charset = charset.as_ref()?;
@@ -562,8 +529,8 @@ pub fn encapsulated_document(buf: &[u8]) -> Result<Option<Vec<u8>>, Part10Error>
         return Err(Part10Error::NotDicom);
     }
     let (ts, _, _, start) = meta(Cursor::new(buf), buf.len())?;
-    let mut inflated = Vec::new();
-    let (set, syntax) = data_set(buf, &ts, start, MAX_INFLATED_DOCUMENT, &mut inflated)?;
+    let syntax = syntax_for(&ts)?;
+    let set = &buf[start..];
     let mut w = Walker {
         input: Cursor::new(set),
         pos: 0,
@@ -573,36 +540,12 @@ pub fn encapsulated_document(buf: &[u8]) -> Result<Option<Vec<u8>>, Part10Error>
     Ok(document_range(&mut w)?.map(|value| set[value].to_vec()))
 }
 
-/// Open the PDF value of a staged Encapsulated PDF instance as a bounded reader. The DICOM
-/// walker seeks over unused values. For deflated input, keep the capped data set on disk.
-pub(crate) fn encapsulated_file(file: File, dir: &Path) -> Result<Option<Take<File>>, Part10Error> {
-    let mut end = file.metadata().map_err(|e| corrupt(e.to_string()))?.len() as usize;
+/// Open the PDF value of a staged Encapsulated PDF instance as a bounded reader.
+pub(crate) fn encapsulated_file(file: File) -> Result<Option<Take<File>>, Part10Error> {
+    let end = file.metadata().map_err(|e| corrupt(e.to_string()))?.len() as usize;
     let mut input = BufReader::new(file);
-    let (ts, _, _, mut pos) = meta(&mut input, end)?;
-    let syntax = syntax_for(&ts);
-    if ts == DEFLATED_LE {
-        let mut inflated = tempfile::tempfile_in(dir).map_err(|e| Part10Error::Staging(e.to_string()))?;
-        input
-            .seek(SeekFrom::Start(pos as u64))
-            .map_err(|e| corrupt(e.to_string()))?;
-        let mut decoder = flate2::read::DeflateDecoder::new(input).take(MAX_INFLATED_DOCUMENT);
-        let mut chunk = [0; 8192];
-        end = 0;
-        loop {
-            let n = decoder
-                .read(&mut chunk)
-                .map_err(|e| corrupt(format!("the deflated data set does not inflate: {e}")))?;
-            if n == 0 {
-                break;
-            }
-            inflated
-                .write_all(&chunk[..n])
-                .map_err(|e| Part10Error::Staging(e.to_string()))?;
-            end += n;
-        }
-        input = BufReader::new(inflated);
-        pos = 0;
-    }
+    let (ts, _, _, pos) = meta(&mut input, end)?;
+    let syntax = syntax_for(&ts)?;
     let mut w = Walker {
         input,
         pos,
@@ -634,9 +577,10 @@ pub fn is_uid(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     /// A file the hard way, to test the reader on what the test generator (dicom-object) does not
-    /// write: big endian, a deflated set, and an undefined-length sequence before the patient.
+    /// write: big endian and an undefined-length sequence before the patient.
     fn file(ts: &str, set: &[u8]) -> Vec<u8> {
         let mut out = vec![0u8; 128];
         out.extend_from_slice(b"DICM");
@@ -725,56 +669,10 @@ mod tests {
     }
 
     #[test]
-    fn it_reads_a_deflated_data_set() {
-        let mut deflated = Vec::new();
-        {
-            use std::io::Write;
-            let mut z = flate2::write::DeflateEncoder::new(&mut deflated, flate2::Compression::default());
-            z.write_all(&core(false)).expect("deflate");
-            z.finish().expect("deflate");
-        }
-        let h = read_header(&file(DEFLATED_LE, &deflated)).expect("header");
-        assert_eq!(h.study_instance_uid, "1.2.826.0.1.3680043.10.999.7");
-        assert_eq!(h.patient_id, "LN-0001");
-    }
-
-    fn deflate(set: &[u8]) -> Vec<u8> {
-        use std::io::Write;
-        let mut out = Vec::new();
-        let mut z = flate2::write::DeflateEncoder::new(&mut out, flate2::Compression::default());
-        z.write_all(set).expect("deflate");
-        z.finish().expect("deflate");
-        out
-    }
-
-    /// A private element of `n` zero bytes in group 0009, which sorts before the patient and study.
-    fn private_zeros(n: usize) -> Vec<u8> {
-        let mut s = explicit(false, 0x0009_0010, b"LO", b"SYNTHETIC");
-        s.extend(explicit(false, 0x0009_1010, b"OB", &vec![0u8; n]));
-        s
-    }
-
-    #[test]
-    fn a_deflated_set_is_inflated_only_as_far_as_the_header_needs() {
-        // a header behind 20 MiB of zeros (about 20 KiB deflated) is not read: damaged
-        let mut bomb = core(false);
-        let patient = [0x10, 0x00, 0x10, 0x00, b'P', b'N'];
-        let at = bomb.windows(6).position(|w| w == patient).expect("patient name");
-        let rest = bomb.split_off(at);
-        bomb.extend(private_zeros(20 << 20));
-        bomb.extend(rest);
-        let deflated = deflate(&bomb);
-        assert!(deflated.len() < 1 << 20, "{}", deflated.len());
-        assert!(
-            matches!(read_header(&file(DEFLATED_LE, &deflated)), Err(Part10Error::Corrupt(_))),
-            "a header past the inflate cap is damaged"
-        );
-        // the header first and 40 MiB of pixel data after it: the header reads, the rest is not
-        // inflated past the cap
-        let mut image = core(false);
-        image.extend(explicit(false, 0x7FE0_0010, b"OB", &vec![0u8; 40 << 20]));
-        let h = read_header(&file(DEFLATED_LE, &deflate(&image))).expect("header");
-        assert_eq!(h.series_instance_uid, "1.2.826.0.1.3680043.10.999.7.1");
+    fn a_deflated_data_set_is_refused_from_its_meta_group() {
+        let bytes = file(DEFLATED_LE, b"data that would fail to inflate");
+        assert!(matches!(read_header(&bytes), Err(Part10Error::Deflated)));
+        assert!(matches!(encapsulated_document(&bytes), Err(Part10Error::Deflated)));
     }
 
     fn before_patient(set: &mut Vec<u8>, element: &[u8]) {
@@ -794,18 +692,6 @@ mod tests {
         before_patient(&mut set, &un);
         let h = read_header(&file("1.2.840.10008.1.2.1", &set)).expect("header");
         assert_eq!(h.patient_name, "RIVERA^ALEX");
-    }
-
-    #[test]
-    fn the_meta_group_length_delimits_a_deflated_set_starting_with_0002() {
-        let mut deflated = vec![2, 0, 0, 0, 255, 255];
-        deflated.extend(deflate(&core(false)));
-        let mut dicom = file(DEFLATED_LE, &deflated);
-        let start = MAGIC_AT + 4;
-        let length = u32::try_from(dicom.len() - start - deflated.len()).expect("meta length");
-        dicom.splice(start..start, explicit(false, 0x0002_0000, b"UL", &length.to_le_bytes()));
-        let h = read_header(&dicom).expect("header");
-        assert_eq!(h.patient_id, "LN-0001");
     }
 
     #[test]
@@ -944,7 +830,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("staging directory");
         let mut staged = tempfile::tempfile_in(dir.path()).expect("staged file");
         staged.write_all(bytes).expect("DICOM bytes");
-        let Some(mut data) = encapsulated_file(staged, dir.path())? else {
+        let Some(mut data) = encapsulated_file(staged)? else {
             return Ok(None);
         };
         let mut out = Vec::new();

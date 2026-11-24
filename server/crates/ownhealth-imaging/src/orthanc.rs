@@ -1,11 +1,13 @@
 //! The calls the importer makes to Orthanc's REST API, as the app's own account.
 
+use std::fs::File;
 use std::time::Duration;
 
 use ownhealth_core::orthanc::OrthancConfig;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 
 /// What went wrong talking to Orthanc. Every one of them is worth a retry of the job, except a file
 /// Orthanc refused ([`Stored::Refused`]), which is not an error.
@@ -113,6 +115,30 @@ impl Orthanc {
         self.lookup(sop_uid, "Instance").await
     }
 
+    /// Find a SOP by membership in the recorded study when the upload's PatientID is unreadable.
+    pub(crate) async fn instance_in_study(&self, study: &str, sop_uid: &str) -> Result<Option<String>, OrthancError> {
+        let res = self
+            .send(self.http.post(self.url("/tools/find")).json(&json!({
+                "Level": "Instance",
+                "ParentStudy": study,
+                "Query": {"SOPInstanceUID": sop_uid},
+                "Limit": 2
+            })))
+            .await?;
+        let found = Self::json(res, "a SOP lookup in a study").await?;
+        let invalid = || OrthancError("Orthanc returned an invalid SOP lookup in a study".into());
+        match found.as_array().ok_or_else(invalid)?.as_slice() {
+            [] => Ok(None),
+            [id] => id
+                .as_str()
+                .filter(|id| is_orthanc_id(id))
+                .map(String::from)
+                .map(Some)
+                .ok_or_else(invalid),
+            _ => Err(invalid()),
+        }
+    }
+
     async fn lookup(&self, uid: &str, kind: &str) -> Result<Vec<String>, OrthancError> {
         let res = self
             .send(self.http.post(self.url("/tools/lookup")).body(uid.to_string()))
@@ -164,6 +190,41 @@ impl Orthanc {
             digest.update(&chunk);
         }
         Ok(n == size && &digest.finalize()[..] == sha256)
+    }
+
+    /// Download the retained file to an unlinked spool while bounding its size.
+    pub(crate) async fn download_instance(&self, id: &str, file: File, limit: u64) -> Result<File, OrthancError> {
+        if !is_orthanc_id(id) {
+            return Err(OrthancError("not an Orthanc id".into()));
+        }
+        let mut res = self
+            .send(self.http.get(self.url(&format!("/instances/{id}/file"))))
+            .await?;
+        if !res.status().is_success() {
+            return Err(OrthancError(format!(
+                "Orthanc answered {} to an instance read",
+                res.status()
+            )));
+        }
+        let mut out = tokio::fs::File::from_std(file);
+        let mut size = 0;
+        while let Some(chunk) = res
+            .chunk()
+            .await
+            .map_err(|_| OrthancError("Orthanc's instance read broke off".into()))?
+        {
+            size += chunk.len() as u64;
+            if size > limit {
+                return Err(OrthancError("Orthanc's retained report instance is too large".into()));
+            }
+            out.write_all(&chunk)
+                .await
+                .map_err(|e| OrthancError(format!("staging an Orthanc report: {e}")))?;
+        }
+        out.flush()
+            .await
+            .map_err(|e| OrthancError(format!("staging an Orthanc report: {e}")))?;
+        Ok(out.into_std().await)
     }
 
     /// One study's UID and patient as Orthanc read them (`GET /studies/{id}`).
@@ -259,18 +320,28 @@ impl Orthanc {
             return Ok(Stored::Refused);
         }
         let v = Orthanc::json(res, "a file").await?;
-        let text = |k: &str| v[k].as_str().unwrap_or_default().to_string();
-        let (id, study, status) = (text("ID"), text("ParentStudy"), text("Status"));
-        if !is_orthanc_id(&id) || !is_orthanc_id(&study) {
+        let new = match v["Status"].as_str() {
+            Some("Success") => true,
+            Some("AlreadyStored") => false,
+            Some("FilteredOut") => return Ok(Stored::Refused),
+            _ => {
+                return Err(OrthancError(
+                    "Orthanc's answer to a file has an unknown or missing status".into(),
+                ));
+            }
+        };
+        let id = v["ID"].as_str().filter(|id| is_orthanc_id(id));
+        let study = v["ParentStudy"].as_str().filter(|id| is_orthanc_id(id));
+        let (Some(id), Some(study)) = (id, study) else {
             return Err(OrthancError(
                 "Orthanc's answer to a file names no instance and study".into(),
             ));
-        }
-        match status.as_str() {
-            "Success" => Ok(Stored::Kept { id, study, new: true }),
-            "AlreadyStored" => Ok(Stored::Kept { id, study, new: false }),
-            _ => Ok(Stored::Refused),
-        }
+        };
+        Ok(Stored::Kept {
+            id: id.into(),
+            study: study.into(),
+            new,
+        })
     }
 
     /// Takes back an instance this import added (`DELETE /instances/{id}`).

@@ -358,6 +358,7 @@ pub struct FakeOrthanc {
     pub fail_delete_at: Arc<AtomicUsize>,
     pub deletes: Arc<AtomicUsize>,
     pub lose_store_reply_at: Arc<AtomicUsize>,
+    pub store_status: Arc<Mutex<Option<Value>>>,
     /// Answers Success, not AlreadyStored, for an instance it holds already (OverwriteInstances).
     pub overwrite: Arc<AtomicBool>,
     pub refused_sop: Arc<Mutex<Option<String>>>,
@@ -390,6 +391,7 @@ impl FakeOrthanc {
             fail_delete_at: Arc::default(),
             deletes: Arc::default(),
             lose_store_reply_at: Arc::default(),
+            store_status: Arc::default(),
             overwrite: Arc::default(),
             refused_sop: Arc::default(),
             lookup_response: Arc::default(),
@@ -518,6 +520,18 @@ impl FakeOrthanc {
                 let query: Value = serde_json::from_slice(&body).unwrap_or_default();
                 let id = query["ParentStudy"].as_str().unwrap_or_default();
                 let held = self.held();
+                if query["Level"] == "Instance" {
+                    let sop = query["Query"]["SOPInstanceUID"].as_str().unwrap_or_default();
+                    let found = held
+                        .instance_files
+                        .iter()
+                        .filter(|(instance, (uid, _))| {
+                            uid == sop && held.instances.get(*instance).is_some_and(|(study, _)| study == id)
+                        })
+                        .map(|(instance, _)| instance)
+                        .collect::<Vec<_>>();
+                    return json_answer(StatusCode::OK, json!(found));
+                }
                 let mut series: BTreeMap<&str, usize> = BTreeMap::new();
                 for (study, uid) in held.instances.values() {
                     if study == id {
@@ -663,10 +677,15 @@ impl FakeOrthanc {
         if new {
             h.instance_files.insert(id.clone(), (sop, body));
         }
-        json_answer(
-            StatusCode::OK,
-            json!({"ID": id, "ParentStudy": study, "ParentSeries": "", "ParentPatient": "",
-                   "Status": if new { "Success" } else { "AlreadyStored" }}),
-        )
+        let mut reply = json!({"ID": id, "ParentStudy": study, "ParentSeries": "", "ParentPatient": "",
+                               "Status": if new { "Success" } else { "AlreadyStored" }});
+        match self.store_status.lock().expect("store status").as_ref() {
+            Some(Value::Null) => {
+                reply.as_object_mut().expect("store reply").remove("Status");
+            }
+            Some(status) => reply["Status"] = status.clone(),
+            None => {}
+        }
+        json_answer(StatusCode::OK, reply)
     }
 }

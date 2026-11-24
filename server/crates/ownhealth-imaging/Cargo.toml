@@ -15,7 +15,6 @@ ownhealth-core.workspace = true
 ownhealth-ingest-pdf.workspace = true
 chrono.workspace = true
 dicom-encoding = "0.10"
-flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
@@ -31,6 +30,8 @@ uuid.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+flate2.workspace = true
+ownhealth-auth.workspace = true
 ownhealth-core = { workspace = true, features = ["testing"] }
 ownhealth-ops.workspace = true
 anyhow.workspace = true
