@@ -1480,15 +1480,16 @@ impl<'a, 'i> Conv<'a, 'i> {
         let field = match kind {
             "PQ" | "REAL" | "MO" => match quantity(v) {
                 Some(q) => Some(("valueQuantity", q)),
-                // A value like "positive" or "see note" is kept as written.
-                None => {
-                    let written = [attr(v, "value"), attr(v, "unit")]
+                // A value like "positive" or "see note" is kept as written. A unit with no value is not a
+                // result: it falls through to the missing or unread value below.
+                None => attr(v, "value").map(|value| {
+                    let written = [Some(value), attr(v, "unit")]
                         .into_iter()
                         .flatten()
                         .collect::<Vec<_>>()
                         .join(" ");
-                    (!written.is_empty()).then_some(("valueString", Value::String(written)))
-                }
+                    ("valueString", Value::String(written))
+                }),
             },
             "IVL_PQ" => {
                 let (mut low, high) = (child(v, "low"), child(v, "high"));

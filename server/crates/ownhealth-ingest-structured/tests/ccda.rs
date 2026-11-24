@@ -1886,6 +1886,11 @@ fn round_6_a_coded_result_value_with_a_null_flavor_keeps_its_translation() -> R 
         ),
         ("null-ratio", r#"<value xsi:type="RTO_PQ_PQ" nullFlavor="NI"/>"#),
         ("null-code", r#"<value xsi:type="CD" nullFlavor="UNK"/>"#),
+        // a null quantity still names its unit: the unit alone is not a result
+        (
+            "null-quantity",
+            r#"<value xsi:type="PQ" nullFlavor="NI" unit="mg/dL"/>"#,
+        ),
     ] {
         entries.push_str(&format!(
             r#"<entry><observation classCode="OBS" moodCode="EVN">
@@ -1900,7 +1905,7 @@ fn round_6_a_coded_result_value_with_a_null_flavor_keeps_its_translation() -> R 
     )))?;
     assert!(c.sections[0].not_read.is_empty(), "{:?}", c.sections[0].not_read);
     let observations = resources(&c, "Observation");
-    assert_eq!(observations.len(), 3);
+    assert_eq!(observations.len(), 4);
     assert_eq!(
         observations[0]["valueCodeableConcept"],
         json!({
@@ -1908,7 +1913,7 @@ fn round_6_a_coded_result_value_with_a_null_flavor_keeps_its_translation() -> R 
             "text": "Positive"
         })
     );
-    for obs in [observations[1], observations[2]] {
+    for obs in [observations[1], observations[2], observations[3]] {
         assert!(
             !obs.as_object()
                 .ok_or_else(|| anyhow::anyhow!("expected an Observation object: {obs}"))?
