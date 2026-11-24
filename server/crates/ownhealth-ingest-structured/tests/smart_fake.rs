@@ -124,6 +124,8 @@ struct Behaviour {
     include: bool,
     /// The server refuses requests with an include outside the grant.
     reject_include: bool,
+    /// The server does not support `_include` and answers this status to a search that has one.
+    include_unsupported: Option<u16>,
     /// This type's search answers 400 "status is required" without its status parameter.
     require_status: Option<&'static str>,
     /// Condition only accepts one known clinical status per search in this mode.
@@ -159,6 +161,7 @@ impl Default for Behaviour {
             patient_name: None,
             include: true,
             reject_include: false,
+            include_unsupported: None,
             require_status: None,
             single_condition_status: false,
             medication_padding: 0,
@@ -564,6 +567,14 @@ async fn search(
     }
     if b.reject_include && get("_include").is_some() {
         return outcome(StatusCode::FORBIDDEN, "include outside the grant");
+    }
+    if let Some(status) = b.include_unsupported
+        && get("_include").is_some()
+    {
+        return outcome(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
+            "_include is not supported",
+        );
     }
     if let Some((t, status)) = b.fail
         && (t == rtype || t == "*")
@@ -3087,5 +3098,34 @@ async fn a_grant_for_one_intent_searches_that_intent() -> R {
         .filter(|name| ["Ordered drug", "Planned drug"].contains(name))
         .collect();
     assert_eq!(names, ["Ordered drug"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_server_that_rejects_the_include_is_searched_again_without_it() -> R {
+    for status in [400, 422, 501] {
+        let w = world(Behaviour {
+            include_unsupported: Some(status),
+            ..Behaviour::default()
+        })
+        .await?;
+        w.fake.book().extra.extend(two_named_medicines());
+        let source = w.connect(t0()).await?;
+        let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+        assert!(got.problems.is_empty(), "{status}: {got:?}");
+        let searched = w.searched_since(0).await;
+        for search in [
+            "MedicationRequest?_include=MedicationRequest:medication&intent=order,plan",
+            "MedicationRequest?intent=order,plan",
+        ] {
+            assert!(searched.contains(search), "{status}: {searched:?}");
+        }
+        assert_eq!(w.medication_reads(), 2, "{status}");
+        let mut c = w.db.pool.acquire().await?;
+        let meds = list_records(&mut c, "medication", w.sam(), None, true).await?;
+        for name in ["Metformin 850 mg", "Atorvastatin 20 mg"] {
+            assert!(meds.iter().any(|m| m["name"] == name), "{status} {name}: {meds:?}");
+        }
+    }
     Ok(())
 }

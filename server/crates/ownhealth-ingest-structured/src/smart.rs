@@ -586,6 +586,8 @@ enum StatusRetry {
 }
 
 /// Gather one search and its status fallbacks. An exhausted byte budget stops further searches.
+/// Returns true, with nothing recorded, when the server refuses the search's `_include` before
+/// answering it (400, 422 or 501): the caller searches again without it.
 async fn search(
     r: &mut Reader<'_>,
     g: &mut Gathered,
@@ -593,7 +595,7 @@ async fn search(
     (base, patient, scope): (&str, &str, Option<&str>),
     rtype: &str,
     params: &[(&str, &str)],
-) -> Result<(), JobError> {
+) -> Result<bool, JobError> {
     let filtered_url = |key, value| {
         let mut with = params.to_vec();
         with.push((key, value));
@@ -617,6 +619,14 @@ async fn search(
                 break;
             };
             if f.status != 200 {
+                if page == 1
+                    && !answered
+                    && matches!(f.status, 400 | 422 | 501)
+                    && params.contains(&MEDICATION_INCLUDE)
+                    && !wants_status(&f.body)
+                {
+                    return Ok(true);
+                }
                 if page == 1 {
                     match retry {
                         StatusRetry::Unfiltered if f.status == 400 && wants_status(&f.body) => {
@@ -671,7 +681,7 @@ async fn search(
     if answered {
         g.answered += 1;
     }
-    Ok(())
+    Ok(false)
 }
 
 fn gather_entries(
@@ -991,7 +1001,12 @@ pub async fn pull_with(
             None if with_include => &MEDICATION_REQUEST_WITH_INCLUDE,
             None => params,
         };
-        search(&mut r, &mut g, caps, (&base, &patient, scope), rtype, params).await?;
+        if search(&mut r, &mut g, caps, (&base, &patient, scope), rtype, params).await? {
+            // a server without `_include`: the same search without it, and the reads below fetch
+            // the Medications the orders name, as far as the grant allows
+            let without: Vec<_> = params.iter().copied().filter(|p| *p != MEDICATION_INCLUDE).collect();
+            search(&mut r, &mut g, caps, (&base, &patient, scope), rtype, &without).await?;
+        }
         if r.budget_hit {
             break;
         }
