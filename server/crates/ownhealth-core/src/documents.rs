@@ -132,20 +132,44 @@ pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKin
             return "fhir_json";
         }
     }
+    // a C-CDA document (slice 20): XML whose root element is a ClinicalDocument, before the CSV rule so
+    // a comment that quotes a CGM header line does not make it a CSV. One saved as UTF-16 goes to the
+    // importer too, which refuses it with what to do.
+    if is_clinical_document(head) || utf16_text(head).is_some_and(|t| is_clinical_document(t.as_bytes())) {
+        return "ccda";
+    }
     // csv (slice 28): a CGM export, by the text of its header row
     if let Some(kind) = sniff_cgm_csv(head) {
         return kind;
     }
-    // a C-CDA document (slice 20): XML whose root element is a ClinicalDocument
-    if is_clinical_document(head) {
-        return "ccda";
-    }
     "unknown"
 }
 
+/// The text of `head` when it starts with a UTF-16 byte order mark (either order); a unit cut at the
+/// end is dropped.
+fn utf16_text(head: &[u8]) -> Option<String> {
+    let le = head.starts_with(b"\xff\xfe");
+    if !le && !head.starts_with(b"\xfe\xff") {
+        return None;
+    }
+    let units = head[2..].as_chunks::<2>().0.iter().map(|pair| {
+        if le {
+            u16::from_le_bytes(*pair)
+        } else {
+            u16::from_be_bytes(*pair)
+        }
+    });
+    Some(
+        char::decode_utf16(units)
+            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect(),
+    )
+}
+
 /// Whether `head` is XML whose root element is `ClinicalDocument`, with or without a prefix. A byte
-/// order mark, the XML declaration, processing instructions, comments and a DOCTYPE may come first;
-/// a DOCTYPE passes here so the importer refuses the file with its reason.
+/// order mark, the XML declaration, processing instructions and comments may come first. A DOCTYPE
+/// is not read past: when a `ClinicalDocument` follows it anywhere in `head`, the file goes to the
+/// importer, which refuses every DOCTYPE with its reason.
 fn is_clinical_document(head: &[u8]) -> bool {
     fn after(rest: &[u8], from: usize, end: &[u8]) -> Option<usize> {
         let at = rest.get(from..)?.windows(end.len()).position(|w| w == end)?;
@@ -160,15 +184,8 @@ fn is_clinical_document(head: &[u8]) -> bool {
         } else if rest.starts_with(b"<!--") {
             after(rest, 4, b"-->")
         } else if rest.starts_with(b"<!DOCTYPE") {
-            // an internal subset in brackets may hold `>` of its own
-            let close = rest.iter().position(|b| *b == b'>');
-            match rest.iter().position(|b| *b == b'[') {
-                Some(open) if close.is_none_or(|c| open < c) => after(rest, open, b"]").and_then(|i| {
-                    let gt = rest[i..].iter().position(|b| !b" \t\r\n".contains(b))?;
-                    (rest[i + gt] == b'>').then_some(i + gt + 1)
-                }),
-                _ => close.map(|c| c + 1),
-            }
+            // its internal subset may quote `]` and `>`, so it is not parsed here
+            return rest.windows(16).any(|w| w == b"ClinicalDocument");
         } else {
             break;
         };
@@ -986,6 +1003,49 @@ mod tests {
         }
         assert_eq!(job_kind("ccda"), Some("import.ccda"));
         assert_eq!(mime("ccda"), Some("application/hl7-cda+xml"));
+    }
+
+    /// Round 3 (CR3, CR4, CR5): a DOCTYPE whose internal subset quotes a `]`, a comment that holds a
+    /// CGM header line, and a C-CDA document saved as UTF-16 (either byte order) all reach the C-CDA
+    /// importer, which refuses the first and the last with their own reason.
+    #[test]
+    fn a_quoted_bracket_a_csv_comment_or_utf16_still_sniffs_as_ccda() {
+        let quoted: &[u8] = b"<?xml version=\"1.0\"?><!DOCTYPE ClinicalDocument [<!ENTITY a \"]>\">]>\n<ClinicalDocument xmlns=\"urn:hl7-org:v3\">";
+        let comment: &[u8] = b"<?xml version=\"1.0\"?>\n<!--\nDevice,Device Timestamp,Record Type\n-->\n<ClinicalDocument xmlns=\"urn:hl7-org:v3\">";
+        // the comment's line alone is a LibreView header
+        assert_eq!(
+            sniff("x.csv", b"Device,Device Timestamp,Record Type\n", None),
+            "libreview_csv"
+        );
+        let utf16 = |text: &str, le: bool| -> Vec<u8> {
+            let bom: &[u8] = if le { b"\xff\xfe" } else { b"\xfe\xff" };
+            let units = text
+                .encode_utf16()
+                .flat_map(|u| if le { u.to_le_bytes() } else { u.to_be_bytes() });
+            bom.iter().copied().chain(units).collect()
+        };
+        let cda = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<ClinicalDocument xmlns=\"urn:hl7-org:v3\">";
+        let (le, be) = (utf16(cda, true), utf16(cda, false));
+        for head in [quoted, comment, le.as_slice(), be.as_slice()] {
+            assert_eq!(
+                sniff("record.xml", head, None),
+                "ccda",
+                "{}",
+                String::from_utf8_lossy(head)
+            );
+        }
+        // other UTF-16 text, and other XML with a DOCTYPE, stay unknown
+        let health = utf16("<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<HealthData>", true);
+        let doctype: &[u8] =
+            b"<?xml version=\"1.0\"?><!DOCTYPE HealthData [<!ATTLIST HealthData a CDATA \"]\">]><HealthData>";
+        for head in [health.as_slice(), doctype] {
+            assert_eq!(
+                sniff("record.xml", head, None),
+                "unknown",
+                "{}",
+                String::from_utf8_lossy(head)
+            );
+        }
     }
 
     #[test]
