@@ -533,19 +533,29 @@ pub async fn rewrite(conn: &mut PgConnection, settings: &Settings) -> Result<Key
         }
     }
     write(&dir, &ring)?;
-    // Restoring an older dump can bring a tombstoned profile's records back. Keep its
-    // accepted losses until the profile row actually goes, including on a second delete.
-    let mut losses = crate::blobs::read_restore_losses(settings).map_err(|e| KeyError(e.to_string()))?;
-    if !losses.is_empty() {
-        let ids: Vec<_> = losses.keys().copied().collect();
-        let present: Vec<Uuid> = sqlx::query_scalar("select id from profile where id = any($1)")
-            .bind(&ids)
-            .fetch_all(conn)
-            .await?;
-        if present.len() < ids.len() {
-            losses.retain(|id, _| present.contains(id));
-            crate::blobs::write_restore_losses(settings, &losses).map_err(|e| KeyError(e.to_string()))?;
-        }
+    // The keyring is written, so no key work is pending. A loss record that cannot be read or pruned
+    // stays as it is, and the next rewrite prunes it.
+    if let Err(error) = prune_restore_losses(conn, settings).await {
+        tracing::warn!(%error, "the keyring was rewritten; the restore loss record was left for the next rewrite");
     }
     Ok(ring)
+}
+
+/// Restoring an older dump can bring a tombstoned profile's records back. Keep its accepted losses
+/// until the profile row actually goes, including on a second delete.
+async fn prune_restore_losses(conn: &mut PgConnection, settings: &Settings) -> Result<(), KeyError> {
+    let mut losses = crate::blobs::read_restore_losses(settings).map_err(|e| KeyError(e.to_string()))?;
+    if losses.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<_> = losses.keys().copied().collect();
+    let present: Vec<Uuid> = sqlx::query_scalar("select id from profile where id = any($1)")
+        .bind(&ids)
+        .fetch_all(conn)
+        .await?;
+    if present.len() < ids.len() {
+        losses.retain(|id, _| present.contains(id));
+        crate::blobs::write_restore_losses(settings, &losses).map_err(|e| KeyError(e.to_string()))?;
+    }
+    Ok(())
 }

@@ -415,3 +415,31 @@ async fn a_profile_with_no_key_row_takes_the_keyrings_key_unless_a_tombstone_clo
     );
     Ok(())
 }
+
+/// A rewrite that wrote the keyring succeeds even when the restore loss record beside the blobs does
+/// not read: the deleted key is gone from the file, so no keyring work is pending. The record stays
+/// as it is for the next rewrite.
+#[tokio::test]
+async fn a_rewrite_that_wrote_the_keyring_succeeds_when_the_loss_record_does_not_read() -> R {
+    let (db, _dir, settings, kek) = setup().await?;
+    let sam = Uuid::new_v4();
+    assert!(Keyring::new(kek.clone(), db.url.clone()).dek(sam, true)?.is_some());
+    assert!(rewrite(&db, &settings).await?.profiles.contains_key(&sam));
+    fs::create_dir_all(settings.blobs_path())?;
+    let record = settings.blobs_path().join(".restore-losses.json");
+    fs::write(&record, b"{ not json")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o600))?;
+    }
+    let mut tx = db.pool.begin().await?;
+    shred(&mut tx, sam).await?;
+    tx.commit().await?;
+    let ring = rewrite(&db, &settings).await?;
+    assert!(ring.shredded.contains(&sam) && !ring.profiles.contains_key(&sam));
+    let on_disk = keyfile::read(&keyfile::path(&settings))?.expect("the rewrite wrote the keyring");
+    assert!(on_disk.shredded.contains(&sam) && !on_disk.profiles.contains_key(&sam));
+    assert_eq!(fs::read(&record)?, b"{ not json");
+    Ok(())
+}
