@@ -9,8 +9,11 @@
 //! organisation to (name, endpoint, state), and replaces that vendor's entries in one transaction, only
 //! when the file gave at least the vendor's minimum. A truncated or spliced body, an error answer or a
 //! file far smaller than usual keeps the old copy, and the run names the vendor as a problem. A facility
-//! linked to its parent by `partOf` carries the parent's endpoint. The file is deleted however the run
-//! ends: we keep no vendor file (Epic allows distribution by link only, Oracle's list has no licence).
+//! linked to its parent by `partOf` carries the parent's endpoint. The file is deleted when the run
+//! ends, also on an error: we keep no vendor file (Epic allows distribution by link only, Oracle's
+//! list has no licence). If the process stops in the middle of a download, the file stays in the
+//! staging folder until the next run of the source, or until the sweep of staging files older than an
+//! hour (at start-up and every 10 minutes) removes it.
 //!
 //! Nothing here runs on its own. There is no default-sources hook: the source exists only after a
 //! person first opens the US connection wizard ([`ensure_source`]), so an install that never connects
@@ -19,7 +22,9 @@
 //! data, no token, no cookie.
 //!
 //! Source `config`: `{urls?: {<vendor>: http(s) URL}, allow_private?: bool}`. `urls` points a vendor at
-//! a mirror; `allow_private` allows a mirror on the person's network (plain http only there).
+//! a mirror; `allow_private` allows a mirror on the person's network (plain http only there). No route
+//! sets it yet: an operator writes it in the database. Every run checks it first ([`check_config`])
+//! and fails, with no request sent, when it breaks these rules.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -515,6 +520,7 @@ async fn refresh(
 /// when the old copy stays. A run where every file failed is an error, so the scheduler tries again
 /// within hours instead of a week. The two fixed entries are written on every run.
 pub async fn poll_brands(ctx: JobContext, source: Source) -> Result<RunOutcome, JobError> {
+    check_config(&source.config).map_err(JobError::permanent)?;
     let cfg = parse_config(&source.config).map_err(JobError::permanent)?;
     let mut out = RunOutcome::default();
     for (bundle, url) in bundle_urls(&cfg) {

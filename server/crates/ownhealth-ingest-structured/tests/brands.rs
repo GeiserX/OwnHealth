@@ -817,3 +817,27 @@ async fn every_word_of_a_long_query_counts_and_a_literal_percent_still_ranks_by_
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_config_that_breaks_the_rules_fails_the_run_before_any_request() -> R {
+    let f = fx().await?;
+    let v = Vendors::start(good_files("v1")).await?;
+    let good = f.source(&v).await?;
+    // the fake host is plain http on this machine: without allow_private the config is refused
+    let mut plain = good.clone();
+    plain.config["allow_private"] = json!(false);
+    let mut unknown = good.clone();
+    unknown.config["urls"]["cerner"] = json!(format!("{}/cerner", v.base));
+    for (what, s) in [("plain http", plain), ("an unknown vendor", unknown)] {
+        assert!(f.poll(&s).await.is_err(), "{what}");
+    }
+    assert_eq!(v.total_hits(), 0);
+    let rows: i64 = sqlx::query_scalar("select count(*) from fhir_brand")
+        .fetch_one(&f.e.db.pool)
+        .await?;
+    assert_eq!(rows, 0);
+    // the control: the same source with its config as saved runs
+    assert!(f.poll(&good).await?.problems.is_empty());
+    assert_eq!(v.total_hits(), 4);
+    Ok(())
+}
