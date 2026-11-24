@@ -356,6 +356,13 @@ pub async fn finish_run(
     let d = RunOutcome::default();
     let o = outcome.unwrap_or(&d);
     let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+    // Lock the source before its run, in the order a source delete takes them (the source, then its
+    // runs by cascade) and begin_run writes them, so a delete never waits on this run while it waits on
+    // the source.
+    sqlx::query("select 1 from source where id = (select source_id from source_run where id = $1) for no key update")
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
     let (source_id, grant_id): (Uuid, Option<Uuid>) = sqlx::query_as(
         "update source_run set finished_at = now(), status = $2, items_seen = $3, items_new = $4, \
          items_duplicate = $5, items_quarantined = $6, errors = $7, error = $8, skipped = $9 where id = $1 \

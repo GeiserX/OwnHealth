@@ -674,3 +674,56 @@ async fn a_failed_cursor_write_leaves_the_run_open() -> R {
     assert_eq!(source.consecutive_failures, 0);
     Ok(())
 }
+
+/// finish_run locks the source before its run, the order a source delete takes them (the source, then
+/// the runs by cascade). A delete that holds the source while finish_run waits for it goes through, and
+/// neither side is stopped as a deadlock.
+#[tokio::test]
+async fn a_source_delete_while_a_run_finishes_is_not_a_deadlock() -> R {
+    let db = TestDb::new().await?;
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    let id = sources::create_source(
+        &mut c,
+        &NewSource::new(f.household_id, "gadgetbridge", "Pulsera de Alex"),
+    )
+    .await?;
+    let run = begin_run(&mut c, id, "poll", None).await?;
+    // the delete has taken the source row and has not reached the runs yet
+    let mut delete = db.pool.begin().await?;
+    sqlx::query("select 1 from source where id = $1 for update")
+        .bind(id)
+        .execute(&mut *delete)
+        .await?;
+    let mut finisher = db.pool.acquire().await?;
+    let pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+        .fetch_one(&mut *finisher)
+        .await?;
+    let finishing = tokio::spawn(async move { finish_run(&mut finisher, run, Ok(&RunOutcome::default())).await });
+    let mut waiting = false;
+    for _ in 0..200 {
+        waiting =
+            sqlx::query_scalar("select coalesce(wait_event_type = 'Lock', false) from pg_stat_activity where pid = $1")
+                .bind(pid)
+                .fetch_one(&mut *c)
+                .await?;
+        if waiting {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(waiting, "finish_run never waited for the source lock");
+    let deleted = sqlx::query("delete from source where id = $1")
+        .bind(id)
+        .execute(&mut *delete)
+        .await;
+    assert!(deleted.is_ok(), "the delete was stopped: {deleted:?}");
+    delete.commit().await?;
+    // the run went with its source, so the finish finds nothing to close
+    let finished = finishing.await?;
+    assert!(
+        matches!(finished, Err(Error::Db(sqlx::Error::RowNotFound))),
+        "{finished:?}"
+    );
+    Ok(())
+}
