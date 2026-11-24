@@ -1,6 +1,16 @@
 name: SMART launcher
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/smart-launcher.yml
+      - server/**
+      - migrations/**
+      - data/**
+      - ui/**
+      - scripts/fetch-pdfium.sh
+      - scripts/test-db.sh
   pull_request:
     paths:
       - .github/workflows/smart-launcher.yml
