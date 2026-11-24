@@ -30,8 +30,9 @@
 //! - DS4P labels (a Security Observation, templateId `2.16.840.1.113883.3.3445.*`, in an entry or as
 //!   an entry of its section) and a confidentialityCode other than `N` (of the document, the section or
 //!   inside the entry) go to every resource made there as `meta.security`, so the FHIR importer marks
-//!   the record sensitive as it does for a labelled FHIR file. A Security Observation is never a
-//!   record of its own.
+//!   the record sensitive as it does for a labelled FHIR file. The labels in a Privacy Markings
+//!   Section (templateId `2.16.840.1.113883.3.3445.4`) go to every resource of the document. A
+//!   Security Observation is never a record of its own.
 //! - A Results organizer is a DiagnosticReport with the Observations as its results; a Vital Signs
 //!   organizer only groups, so its observations come alone.
 //! - Every section, entry or part the converter does not read is listed in the section's report, and
@@ -166,7 +167,13 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
     let text = xml::text_of_file(bytes)?;
     let doc = xml::parse(&text)?;
     let root = doc.root_element();
-    let doc_labels = confidentiality(root).into_iter().collect::<Vec<_>>();
+    let mut doc_labels = confidentiality(root).into_iter().collect::<Vec<_>>();
+    // a Privacy Markings Section labels the whole document (DS4P document-level labels)
+    for sec in root.descendants().filter(|n| is_privacy_markings(*n)) {
+        for entry in children(sec, "entry") {
+            add_labels(&mut doc_labels, entry_labels(entry));
+        }
+    }
     let mut c = Conv {
         text: &text,
         narrative: xml::narrative_ids(&doc),
@@ -218,6 +225,8 @@ const OID_CONFIDENTIALITY: &str = "2.16.840.1.113883.5.25";
 const SNOMED: &str = "http://snomed.info/sct";
 /// The templateId root of every DS4P template (Security Observation `.21` and its kin).
 const DS4P: &str = "2.16.840.1.113883.3.3445.";
+/// The templateId of the DS4P Privacy Markings Section, which labels the whole document.
+const PRIVACY_MARKINGS: &str = "2.16.840.1.113883.3.3445.4";
 const ALLERGY_OBSERVATION: &str = "2.16.840.1.113883.10.20.22.4.7";
 const SEVERITY_OBSERVATION: &str = "2.16.840.1.113883.10.20.22.4.8";
 
@@ -1415,6 +1424,14 @@ fn severity_of(obs: Node<'_, '_>) -> Option<&'static str> {
 }
 
 // ------------------------------------------------------------------ labels ----
+
+/// A DS4P Privacy Markings Section: its labels are the labels of the whole document.
+fn is_privacy_markings(n: Node<'_, '_>) -> bool {
+    n.is_element()
+        && n.tag_name().namespace() == Some(xml::NS)
+        && n.tag_name().name() == "section"
+        && has_template(n, &[PRIVACY_MARKINGS])
+}
 
 /// A DS4P observation (Security Observation and its kin): a label, never a record.
 fn is_security_observation(n: Node<'_, '_>) -> bool {

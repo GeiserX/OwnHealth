@@ -950,6 +950,52 @@ async fn ds4p_security_labels_make_the_records_sensitive() -> R {
     Ok(())
 }
 
+/// R1-H1: a DS4P label in the document's Privacy Markings Section (templateId
+/// 2.16.840.1.113883.3.3445.4) labels the whole document, so every record made from it is sensitive,
+/// even one that carries no label of its own.
+#[tokio::test]
+async fn a_privacy_markings_section_labels_every_record_of_the_document() -> R {
+    let body = format!(
+        r#"<component><section><templateId root="2.16.840.1.113883.3.3445.4"/><title>Privacy Markings</title>
+             <text>This document contains HIV information</text><entry>{}</entry></section></component>{}"#,
+        security_label("HIV"),
+        problems_section(&problem_entry(
+            "hiv",
+            r#"code="86406008" displayName="Human immunodeficiency virus infection""#,
+            r#"<low value="20200110"/>"#,
+            "",
+        ))
+    );
+    let bytes = document(&body);
+    let c = convert(&bytes)?;
+    let labels: Vec<Vec<String>> = resources(&c, "Condition")
+        .iter()
+        .map(|r| {
+            r["meta"]["security"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s["code"].as_str().map(String::from))
+                .collect()
+        })
+        .collect();
+    assert_eq!(labels, vec![vec!["HIV".to_string()]]);
+
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = as_isabella(&mut tx, &fam, "lucia").await?;
+    let doc = store_doc(&mut tx, &env.blobs, &fam, "lucia", &bytes, "ds4p-doc.xml", ccda::MIME).await?;
+    import_ccda(&mut tx, &env.blobs, doc).await?;
+    let rows: Vec<(String, Vec<String>)> =
+        sqlx::query_as("select fhir->'code'->'coding'->0->>'code', sensitivity from condition where profile_id = $1")
+            .bind(p)
+            .fetch_all(&mut *tx)
+            .await?;
+    assert_eq!(rows, vec![("86406008".to_string(), vec!["sexual_health".to_string()])]);
+    Ok(())
+}
+
 /// U-F2: what no reader read (sections and parts left for review, narrative-only sections) keeps the
 /// stored file behind read:sensitive, as a connector pull's unprojected resources do. A file read in
 /// full stays open.
