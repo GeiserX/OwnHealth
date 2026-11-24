@@ -144,6 +144,7 @@ const routes = read('../../server/crates/ownhealth-api/src/routes/connectors.rs'
 const core = read('../../server/crates/ownhealth-core/src/connector_oauth.rs');
 const codes = new Set<string>();
 for (const m of routes.matchAll(/back\(&state, "([a-z_]+)"\)/g)) codes.add(m[1]);
+for (const m of /fn exchange_refusal[\s\S]*?\n\}/.exec(routes)?.[0].matchAll(/"([a-z_]+)"/g) ?? []) codes.add(m[1]);
 for (const m of routes.matchAll(/ApiError::new\(\s*StatusCode::\w+,\s*"([a-z_]+)"/g)) codes.add(m[1]);
 for (const m of core.matchAll(/refused\(\s*"([a-z_]+)"/g)) codes.add(m[1]);
 

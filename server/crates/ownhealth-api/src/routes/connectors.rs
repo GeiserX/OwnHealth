@@ -445,7 +445,7 @@ async fn callback(State(rt): State<Runtime>, meta: Meta, Query(q): Params, o: Op
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(error = %e, profile_id = %pending.profile_id, "a connector code exchange failed");
-            return Ok(back(&state, "exchange_failed"));
+            return Ok(back(&state, exchange_refusal(&e)));
         }
     };
     let now = Utc::now();
@@ -467,6 +467,16 @@ async fn callback(State(rt): State<Runtime>, meta: Meta, Query(q): Params, o: Op
     }
     tx.commit().await?;
     Ok(redirect(&state, &format!("/connections?connected={id}")))
+}
+
+/// The code a failed exchange sends back to the Connections screen: a refusal that has its own words
+/// there keeps its code; anything else reads as the generic exchange failure, which names the
+/// registration at the vendor.
+fn exchange_refusal(e: &OAuthError) -> &'static str {
+    match e {
+        OAuthError::Refused { code, .. } if matches!(*code, "no_patient" | "client_secret_required") => code,
+        _ => "exchange_failed",
+    }
 }
 
 fn word(r: Revocation) -> &'static str {
@@ -558,6 +568,23 @@ pub async fn revoke_before_delete(rt: &Runtime, p: &Principal, profile_id: Uuid,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exchange_refusal_with_its_own_words_keeps_its_code() {
+        let refused = |code| OAuthError::Refused { code, message: "" };
+        assert_eq!(exchange_refusal(&refused("no_patient")), "no_patient");
+        assert_eq!(
+            exchange_refusal(&refused("client_secret_required")),
+            "client_secret_required"
+        );
+        // a client registered for another server reads as the generic words that name the registration
+        assert_eq!(exchange_refusal(&refused("bad_issuer")), "exchange_failed");
+        let vendor = OAuthError::Vendor {
+            status: 400,
+            code: "invalid_grant".into(),
+        };
+        assert_eq!(exchange_refusal(&vendor), "exchange_failed");
+    }
 
     #[test]
     fn the_dev_loopback_switch_is_ignored_without_dev_auth() {

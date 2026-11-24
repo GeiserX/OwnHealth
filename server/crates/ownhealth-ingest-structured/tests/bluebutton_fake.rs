@@ -603,3 +603,25 @@ async fn concurrent_refreshes_reuse_the_sealed_replacement() -> common::R {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_sign_in_that_names_no_patient_is_refused_and_its_tokens_revoked() -> common::R {
+    let setup = setup(Mode::default()).await?;
+    setup.fake.mode().no_patient = true;
+    let (pending, code) = sign_in(
+        &setup.env,
+        &setup.client,
+        &setup.endpoints,
+        setup.profile,
+        Some(setup.source_id),
+    )
+    .await?;
+    let refused = oauth::exchange(&pending, &setup.client, &code, &egress()).await;
+    assert!(
+        matches!(refused, Err(OAuthError::Refused { code: "no_patient", .. })),
+        "{refused:?}"
+    );
+    // nothing at CMS stays alive for a grant OwnHealth refused; the connection keeps its own token
+    assert_eq!(setup.fake.calls().revoked, ["fake-orphan"]);
+    Ok(())
+}
+

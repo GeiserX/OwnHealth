@@ -876,6 +876,26 @@ pub async fn exchange(
     let http = SourceHttp::new(p.endpoints.hosts(), egress.clone());
     let tokens = parse_tokens(&req.send(&http, &p.endpoints.token).await?)?;
     if p.kind == "bluebutton" && tokens.patient.is_none() {
+        // OwnHealth keeps nothing of this sign-in, so nothing it issued may stay alive at CMS
+        if let Some(url) = &p.endpoints.revocation {
+            let (token, hint) = match &tokens.refresh {
+                Some(r) => (r, "refresh_token"),
+                None => (&tokens.access, "access_token"),
+            };
+            let revoke = TokenRequest::new(
+                client,
+                p.endpoints.auth,
+                vec![("token", token.expose().into()), ("token_type_hint", hint.into())],
+            );
+            match revoke.send(&http, url).await {
+                Ok(f) if f.status == 200 => {}
+                Ok(f) => tracing::warn!(
+                    status = f.status,
+                    "CMS refused to revoke a sign-in that named no patient"
+                ),
+                Err(e) => tracing::warn!(error = %e, "a sign-in that named no patient could not be revoked"),
+            }
+        }
         return Err(refused(
             "no_patient",
             "The Medicare sign-in did not identify a patient.",
