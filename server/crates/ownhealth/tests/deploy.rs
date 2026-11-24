@@ -1257,32 +1257,46 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
             "{case}: {s} settings"
         );
     }
-    // off OwnHealth's network: from each sidecar container, db answers, and the app answers neither by
-    // its name nor by any of its addresses
+    // Fenced from OwnHealth's network: from each sidecar container db answers, and the app answers
+    // only ow-app, by its name and by its ow-api address (the poller calls ow-app:8000 there). The
+    // app's other addresses stay closed to every sidecar container, and worker and beat reach no app.
     let app_id = project.service("app")?["ID"].as_str().unwrap_or_default().to_string();
     let inspect = Command::new("docker")
         .args([
             "inspect",
             "-f",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
+            "{{range $name, $net := .NetworkSettings.Networks}}{{$name}}={{$net.IPAddress}} {{end}}",
             &app_id,
         ])
         .output()?;
     anyhow::ensure!(inspect.status.success(), "{}", String::from_utf8_lossy(&inspect.stderr));
-    let app_ips: Vec<String> = String::from_utf8_lossy(&inspect.stdout)
+    let app_ips: Vec<(String, String)> = String::from_utf8_lossy(&inspect.stdout)
         .split_whitespace()
-        .map(str::to_string)
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(net, ip)| (net.to_string(), ip.to_string()))
         .collect();
     anyhow::ensure!(!app_ips.is_empty(), "{case}: the app has no address");
-    let mut targets = vec!["db:5432".to_string(), "app:8080".to_string()];
-    targets.extend(app_ips.iter().map(|ip| format!("{ip}:8080")));
-    let want: Vec<String> = targets
-        .iter()
-        .map(|t| format!("{t} {}", if t == "db:5432" { "open" } else { "closed" }))
-        .collect();
+    anyhow::ensure!(
+        app_ips.iter().any(|(net, _)| net.ends_with("_ow-api")),
+        "{case}: the app is not on ow-api: {app_ips:?}"
+    );
+    let mut targets = vec![("db:5432".to_string(), "db"), ("app:8080".to_string(), "api")];
+    targets.extend(app_ips.iter().map(|(net, ip)| {
+        (
+            format!("{ip}:8080"),
+            if net.ends_with("_ow-api") { "api" } else { "app" },
+        )
+    }));
     for s in OW_SERVICES {
+        let want: Vec<String> = targets
+            .iter()
+            .map(|(t, kind)| {
+                let open = *kind == "db" || (*kind == "api" && s == "ow-app");
+                format!("{t} {}", if open { "open" } else { "closed" })
+            })
+            .collect();
         let mut args = vec!["exec", "-T", s, "python", "-c", PROBE_PY];
-        args.extend(targets.iter().map(String::as_str));
+        args.extend(targets.iter().map(|(t, _)| t.as_str()));
         let got = project.ok(&args)?;
         assert_eq!(got.lines().collect::<Vec<_>>(), want, "{case}: what {s} reaches");
     }
