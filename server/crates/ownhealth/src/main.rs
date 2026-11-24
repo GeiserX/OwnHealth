@@ -66,8 +66,10 @@ enum Cmd {
     },
     /// Link an Open Wearables user to a profile. Vincula un usuario de Open Wearables a un perfil.
     OpenwearablesConnect {
+        /// The profile's id or short name (alex). El id o el nombre corto del perfil (alex).
         #[arg(long)]
         profile: String,
+        /// The Open Wearables user id. El id del usuario de Open Wearables.
         #[arg(long)]
         user: String,
         #[arg(long)]
@@ -228,16 +230,27 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
                 .as_str()
                 .zip(credentials["api_key"].as_str())
                 .ok_or_else(|| anyhow::anyhow!("Invalid credentials file. / Archivo de credenciales no válido."))?;
+            let profile = ownhealth_devices::openwearables::profile_id(&rt.pool, &profile).await?;
+            let user = user.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "--user takes the Open Wearables user id. / --user necesita el id del usuario de Open Wearables."
+                )
+            })?;
             let source = ownhealth_devices::openwearables::connect(
                 &rt.job_context(),
-                profile.parse()?,
-                user.parse()?,
+                profile,
+                user,
                 &admin_email,
                 &SecretString::new(password),
                 &SecretString::new(key),
             )
             .await?;
-            println!("{source}");
+            println!(
+                "Linked: Open Wearables user {user} syncs into profile {profile} (source {source}). Providers outside the allowlist are off, and the first pull is queued."
+            );
+            println!(
+                "Vinculado: el usuario {user} de Open Wearables se sincroniza con el perfil {profile} (fuente {source}). Los proveedores fuera de la lista permitida están desactivados y la primera sincronización está en cola."
+            );
             Ok(ExitCode::SUCCESS)
         }
         Cmd::SealLegacy { dry_run } => {

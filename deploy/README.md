@@ -65,7 +65,7 @@ A person can share a scoped summary with a doctor through a SMART Health Link: a
 3. Set `OWNHEALTH_SHARE_URL` in `.env` to the https address the tunnel gives, such as `https://share.example.org`. The app refuses to start with an http address, except one on localhost, with a user name or password in it, and with anything after the host and port.
 4. `docker compose up -d`.
 
-What goes public: `POST /api/shl/<id>` (and its CORS preflight) and `GET /api/shl/<id>/file/<ticket>`, each rewritten to its canonical path. Every other path on the tunnel gets 404 from Caddy, including `/`, `/login`, `/api`, `/mcp` and `/dicom-web`. A link answers only while it is live and its creator may still share what it carries, and at most 60 times an hour. Locking a category, or narrowing a grant below it, revokes every link that carries it for good: lifting the lock brings none back. The access log the person reads names each recipient's address: Caddy keeps the address the tunnel forwards, and the app trusts that header only from the proxies in `OWNHEALTH_TRUSTED_PROXIES` (the compose network).
+What goes public: `POST /api/shl/<id>` (and its CORS preflight) and `GET /api/shl/<id>/file/<ticket>`, each rewritten to its canonical path. Every other path on the tunnel gets 404 from Caddy, including `/`, `/login`, `/api`, `/mcp` and `/dicom-web`. A link answers only while it is live and its creator may still share what it carries, and at most 60 times an hour. Locking a category, or narrowing a grant below it, revokes every link that carries it for good: lifting the lock brings none back. The access log the person reads names each recipient's address: Caddy keeps the address the tunnel forwards, and the app trusts that header only from the proxies in `OWNHEALTH_TRUSTED_PROXIES`. The homelab stack sets it to Caddy's own address on the `front` network (`OWNHEALTH_CADDY_IP`).
 
 Check it from outside: `curl -i https://share.example.org/login` answers 404, and a link the app makes opens in a SMART Health Links viewer. To turn sharing off again, remove `OWNHEALTH_SHARE_URL` and run `docker compose up -d`: every link and every file address already handed out then answers 404.
 
@@ -105,15 +105,19 @@ The one-shot `ow-db-init` creates the `openwearables` database and role, then OW
 
 ```sh
 docker compose exec -T app ownhealth openwearables-connect \
-  --profile "OWNHEALTH_PROFILE_UUID" --user "OPEN_WEARABLES_USER_UUID" \
+  --profile alex --user "OPEN_WEARABLES_USER_UUID" \
   --admin-email "OPEN_WEARABLES_DEVELOPER_EMAIL" < ow-credentials.json
 ```
 
-Setup turns off providers outside OwnHealth's allowlist. The first pull asks for 30 days. Later pulls re-read seven days before the last completed pull. If you delete the profile, OwnHealth removes its linked Open Wearables user on the next scheduler cycle. It retries if the sidecar is down.
+`--profile` takes the profile's short name, the one its inbox folders use (`alex`), or its id. On success the command prints the user, the profile and the new source. If a step fails, the error names it: the user check with the API key, or the developer sign-in.
+
+Setup turns off providers outside OwnHealth's allowlist. OwnHealth pulls each allowed vendor on its own, one day at a time. The first pull asks for 30 days. Later pulls re-read the seven days before that vendor's last stored day and keep only rows they have not seen. If one vendor's connection ends in Open Wearables, the other vendors keep syncing. The Connections screen names that vendor; reconnect it in Open Wearables. If you delete the profile, OwnHealth removes its linked Open Wearables user on the next scheduler cycle. It retries if the sidecar is down.
 
 **Vincular un perfil.** Crea un usuario dedicado y una clave de API en Open Wearables. Conecta las cuentas de la persona a ese usuario. Guarda la contraseña de administración y la clave de API en un archivo JSON privado, en los campos `admin_password` y `api_key`. Pasa el archivo por la entrada estándar con el comando anterior.
 
-La configuración desactiva los proveedores que no admite OwnHealth. La primera sincronización solicita 30 días. Las siguientes vuelven a leer los siete días anteriores a la última sincronización completa. Si borras el perfil, OwnHealth elimina su usuario de Open Wearables en el siguiente ciclo. Si el servicio no responde, vuelve a intentarlo.
+`--profile` acepta el nombre corto del perfil, el que usan sus carpetas de entrada (`alex`), o su id. Al terminar, el comando muestra el usuario, el perfil y la fuente nueva. Si un paso falla, el error lo nombra: la comprobación del usuario con la clave de API o el inicio de sesión de desarrollador.
+
+La configuración desactiva los proveedores que no admite OwnHealth. OwnHealth sincroniza cada proveedor permitido por separado, día a día. La primera sincronización solicita 30 días. Las siguientes vuelven a leer los siete días anteriores al último día guardado de ese proveedor y solo guardan las filas nuevas. Si la conexión de un proveedor termina en Open Wearables, los demás se siguen sincronizando. La pantalla Conexiones nombra ese proveedor; vuelve a conectarlo en Open Wearables. Si borras el perfil, OwnHealth elimina su usuario de Open Wearables en el siguiente ciclo. Si el servicio no responde, vuelve a intentarlo.
 
 The homelab stack trusts forwarded addresses from Caddy's IP on the `front` network. If that network overlaps with another network, set `OWNHEALTH_CADDY_SUBNET` and `OWNHEALTH_CADDY_IP` to an available subnet and an address inside it.
 

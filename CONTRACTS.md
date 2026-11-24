@@ -118,7 +118,7 @@ never collide:
 | 1260-1269 | v1.0 Connected, break-glass: contacts, requests and the in-app outbox (1260) |
 | 1270-1279 | v1.0 Connected, sharing: SMART Health Links and the ICE card |
 | 1280-1289 | v1.0 Connected, ops: languages, partitions and other operations |
-| 1290-1299 | v1.0 Connected, after 1280: per-profile and pending-item data keys (1290, 1291), CGM CSV exports as wearables documents (1292) |
+| 1290-1299 | v1.0 Connected, after 1280: per-profile and pending-item data keys (1290, 1291), CGM CSV exports as wearables documents (1292), the Open Wearables user bound to a profile (1298) |
 
 H and I have no migrations. Every new phase numbers after the highest shipped file: the migrator applies
 missing files in number order, so a lower number would run before files it depends on. Inside a phase,
