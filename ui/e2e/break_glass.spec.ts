@@ -306,12 +306,13 @@ test('an end on a cancel screen left open after another owner ended it says so a
 });
 
 test('a request whose delay runs out while the pages are open shows open at the next tick, for the contact and the owner', async ({ baseURL }) => {
-	// Pat asks a third time; the owner's calendar app fetched the request, and its delay ends in seconds
+	// Pat asks a third time. Leave enough waiting time for all three pages to load.
 	const asked = await pat.request.post('/api/break-glass/requests', { headers: headers(baseURL!), data: { profile: 'alex', reason: 'Third try: Alex is back in hospital' } });
 	expect(asked.status(), await asked.text()).toBe(201);
 	const third = sql(`select id from break_glass_request where contact_user_id = '${patId}' and status = 'requested'`);
 	expect(third).toMatch(/^[0-9a-f-]{36}$/);
-	sql(`update break_glass_request set activates_at = now() + interval '8 seconds' where id = '${third}'`);
+	const setupMinutes = 10;
+	sql(`update break_glass_request set activates_at = now() + make_interval(mins => ${setupMinutes}) where id = '${third}'`);
 	expect((await owner.request.get(feed)).status()).toBe(200);
 	// three pages left open on it, each with a clock the test moves on: the contact's card, the owner's
 	// card and the cancel screen
@@ -328,12 +329,13 @@ test('a request whose delay runs out while the pages are open shows open at the 
 	await expect(row.getByRole('status')).toContainText('Waiting. Access opens on');
 	await cs.goto(`/family/break-glass/${third}?lang=en`);
 	await expect(cs.getByTestId('bgc-status')).toContainText('Waiting.');
-	// the delay runs out on the server; each page learns it at its next tick, with no reload
-	await expect.poll(() => sql(`select activates_at <= now() from break_glass_request where id = '${third}'`), { timeout: 20_000 }).toBe('t');
-	await page.clock.fastForward('00:31');
+	// End the delay on the server, then advance the owner pages past the deadline they already read.
+	sql(`update break_glass_request set activates_at = now() - interval '1 second' where id = '${third}'`);
+	const pastSetupDeadline = (setupMinutes + 1) * 60_000;
+	await page.clock.fastForward(pastSetupDeadline);
 	await expect(row.getByRole('status')).toContainText('Open until');
 	await expect(row.getByRole('button', { name: 'End access' })).toBeVisible();
-	await cs.clock.fastForward('00:31');
+	await cs.clock.fastForward(pastSetupDeadline);
 	await expect(cs.getByTestId('bgc-status')).toContainText('Open until');
 	await pp.clock.fastForward('01:01');
 	await expect(mine.getByRole('status')).toContainText('Open until');
