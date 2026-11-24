@@ -36,6 +36,7 @@ const IDENTITY: &str =
 const ANOTHER_PATIENT: &str =
     "another_patient: the account at Medicare is for another person than this profile, so nothing was imported";
 const NO_ANSWER: &str = "bluebutton_no_answer: neither Medicare data search could be read";
+const NONE_GRANTED: &str = "bluebutton_none_granted: the Medicare sign-in allows neither the coverage nor the claim search, so nothing was read";
 const RECONSENT: &str = "reconsent_needed: the vendor no longer accepts this connection, so it waits for a new sign-in";
 const REFUSED_ACCESS: &str = "bluebutton_access_refused: CMS refused the renewed access token";
 const TOKEN_UNREACHABLE: &str = "token_unreachable: the CMS token request failed";
@@ -190,7 +191,7 @@ pub fn phrases() -> Value {
     ];
     json!({
         "stop": [NO_PATIENT, NO_BASE, NO_PROFILE, NO_PATIENT_SCOPE, IDENTITY, ANOTHER_PATIENT,
-                 NO_ANSWER, RECONSENT, REFUSED_ACCESS, TOKEN_UNREACHABLE, GRANT_CHANGED, PROFILE_CHANGED],
+                 NO_ANSWER, NONE_GRANTED, RECONSENT, REFUSED_ACCESS, TOKEN_UNREACHABLE, GRANT_CHANGED, PROFILE_CHANGED],
         "problems": types.iter().map(|issue| issue.problem(Resource::Claim, 1)).collect::<Vec<_>>(),
     })
 }
@@ -366,6 +367,13 @@ type Identity = (String, Option<NaiveDate>);
 async fn gather(r: &mut Reader<'_>, scope: &str, who: &Identity) -> Result<Vec<(Resource, Results)>, SearchError> {
     if !Resource::Patient.granted(scope) {
         return Err(JobError::permanent(NO_PATIENT_SCOPE).into());
+    }
+    // a retry cannot widen the grant, so it stops for good before any request
+    if ![Resource::Coverage, Resource::Claim]
+        .iter()
+        .any(|kind| kind.granted(scope))
+    {
+        return Err(JobError::permanent(NONE_GRANTED).into());
     }
     let patients = r.search(Resource::Patient).await?;
     if !patients.problems.is_empty() || patients.entries.len() != 1 || !patients.skipped.is_empty() {

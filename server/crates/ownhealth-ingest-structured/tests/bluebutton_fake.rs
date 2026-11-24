@@ -70,6 +70,8 @@ struct Mode {
     other_patient: bool,
     /// The code exchange names no patient.
     no_patient: bool,
+    /// The coverage search answers 503.
+    coverage_fails: bool,
     /// The scope the token answers grant, when narrower than the request.
     scope: Option<String>,
     eob: Eob,
@@ -240,6 +242,7 @@ async fn search(
             p["birthDate"] = json!("1982-02-02");
             (vec![p], false)
         }
+        ("Coverage", _, 0) if mode.coverage_fails => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         ("Coverage", _, 0) => (vec![fixture("cms-coverage.json")], false),
         ("ExplanationOfBenefit", Eob::Fails(status), 0) => {
             return StatusCode::from_u16(status).expect("an HTTP status").into_response();
@@ -815,5 +818,29 @@ async fn a_grant_without_claims_never_searches_them() -> common::R {
     );
     assert_eq!(outcome.problems[0].code, "bluebutton_not_granted");
     assert_eq!(outcome.skipped["not_granted"], 1);
+    Ok(())
+}
+
+
+/// A grant that allows neither the coverage nor the claim search stops for good and sends nothing.
+#[tokio::test]
+async fn a_grant_without_any_data_search_stops_and_sends_nothing() -> common::R {
+    let setup = setup(Mode {
+        scope: Some("launch/patient patient/Patient.rs".into()),
+        ..Mode::default()
+    })
+    .await?;
+    let source = get_source(&mut *setup.ctx.pool.acquire().await?, setup.source_id)
+        .await?
+        .expect("connected source");
+    let stop = bluebutton::pull(&setup.ctx, &source, &egress(), Utc::now(), 200)
+        .await
+        .expect_err("nothing may be searched");
+    assert!(
+        stop.permanent && stop.message.starts_with("bluebutton_none_granted"),
+        "{}",
+        stop.message
+    );
+    assert!(setup.fake.calls().pages.is_empty());
     Ok(())
 }
