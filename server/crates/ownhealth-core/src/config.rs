@@ -271,8 +271,8 @@ pub fn parse_trusted_proxies(value: &str) -> Result<Vec<ipnet::IpNet>> {
         .collect()
 }
 
-/// Python's `urllib.parse.quote(s, safe='')`.
-fn quote_all(s: &str) -> String {
+/// Percent-encode one URL component, leaving only unreserved characters.
+pub fn quote_url_component(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'~') {
@@ -295,7 +295,7 @@ fn with_password(url: &str, password: &str) -> String {
     if user.contains(':') {
         return url.to_string();
     }
-    format!("{scheme}://{user}:{}@{host}", quote_all(password))
+    format!("{scheme}://{user}:{}@{host}", quote_url_component(password))
 }
 
 impl Settings {

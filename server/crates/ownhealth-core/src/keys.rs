@@ -36,6 +36,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -286,6 +287,12 @@ impl Dek {
         let mut key = Zeroizing::new([0u8; 32]);
         rand::fill(&mut key[..]);
         Dek::from_key(key)
+    }
+
+    /// Stable across rewraps. Used to match an archive to the data key that sealed its files, and a
+    /// keyring tombstone to the key it closes. Derived apart from the file key, as every other key is.
+    pub fn archive_id(&self) -> String {
+        hex::encode(&hkdf32(&self.key[..], None, b"ownhealth archive key id v1")[..])
     }
 
     /// The on-disk name of the file whose plaintext hashes to `sha` (32 bytes): 64 hex characters.
@@ -604,6 +611,8 @@ struct Cache {
 pub struct Keyring {
     kek: Kek,
     source: Source,
+    /// `keyring.json`, read for a profile that has no key row yet ([`Keyring::with_keyring_file`]).
+    ring_file: Option<PathBuf>,
     cache: Mutex<Cache>,
 }
 
@@ -619,8 +628,18 @@ impl Keyring {
         Keyring {
             kek,
             source: Source::Db(url.into()),
+            ring_file: None,
             cache: Mutex::new(Cache::default()),
         }
+    }
+
+    /// Read `keyring.json` at `file` before making a key for a profile with no key row: a profile
+    /// that a dump from before 1.0 brought back takes the key the file holds for it, unless a
+    /// tombstone closes that key ([`crate::keyfile::live_key`]). A key made instead would replace
+    /// the file's key at the next rewrite, and the backups taken since are sealed under it.
+    pub fn with_keyring_file(mut self, file: PathBuf) -> Keyring {
+        self.ring_file = Some(file);
+        self
     }
 
     /// Keys kept in memory only, for the blob layer's own tests.
@@ -629,6 +648,7 @@ impl Keyring {
         Keyring {
             kek,
             source: Source::Memory,
+            ring_file: None,
             cache: Mutex::new(Cache::default()),
         }
     }
@@ -693,11 +713,21 @@ impl Keyring {
         }
         let found = match &self.source {
             Source::Db(url) => {
-                let new = if create {
-                    Some(self.kek.wrap_slot(slot, &Dek::generate())?)
-                } else {
-                    None
-                };
+                let new = create.then(|| {
+                    let kek = self.kek.clone();
+                    let ring_file = match slot {
+                        Slot::Profile(_) => self.ring_file.clone(),
+                        Slot::Pending(_) => None,
+                    };
+                    Box::new(move || {
+                        if let Some(file) = ring_file
+                            && let Some(wrapped) = crate::keyfile::live_key(&file, &kek, slot.id())?
+                        {
+                            return Ok(wrapped);
+                        }
+                        kek.wrap_slot(slot, &Dek::generate())
+                    }) as NewKey
+                });
                 match side_lookup(url, slot, new, self.kek.fingerprint())? {
                     Some((wrapped, fp)) => Some(self.kek.unwrap_slot(slot, &fp, &wrapped)?),
                     None => None,
@@ -716,20 +746,24 @@ impl Keyring {
 /// A `profile_key` or `pending_key` row: `wrapped_dek`, `kek_fingerprint`.
 type Stored = (Vec<u8>, Vec<u8>);
 
+/// Makes the wrapped key to store for a slot with no row yet.
+type NewKey = Box<dyn FnOnce() -> Result<Vec<u8>, KeyError> + Send>;
+
 /// Whether a key made under another KEK is stored in either key table.
 const OTHER_KEK: &str = "(exists (select 1 from profile_key where kek_fingerprint <> $1) \
      or exists (select 1 from pending_key where kek_fingerprint <> $1))";
 
-/// The stored key of `slot` (`wrapped_dek`, `kek_fingerprint`), after inserting `new` when given
-/// and none is stored. Blob reads and writes are not async, so this runs on a thread of its own with
-/// its own connection: it never waits on the caller's pool or runtime. It runs once per key per
-/// process. The row has no foreign key to its profile or item: the profile may still be in the
-/// caller's open transaction, and a held mail's key is made before its row. `new` is stored only
-/// while every stored key was made under the same KEK, so a key swapped while the app runs cannot add
-/// keys the right one never opens. A shredded key's row stays with no key ([`shred`],
-/// [`shred_pending`]): the insert waits on a shred still in progress, then finds the row, so no key is
-/// ever made again for a deleted profile or a settled item (None without `new`, an error with it).
-fn side_lookup(url: &str, slot: Slot, new: Option<Vec<u8>>, fingerprint: [u8; 8]) -> Result<Option<Stored>, KeyError> {
+/// The stored key of `slot` (`wrapped_dek`, `kek_fingerprint`), after inserting the key `new` makes
+/// when given and no row is stored. Blob reads and writes are not async, so this runs on a thread
+/// of its own with its own connection: it never waits on the caller's pool or runtime. It runs once
+/// per key per process. The row has no foreign key to its profile or item: the profile may still be
+/// in the caller's open transaction, and a held mail's key is made before its row. `new` is stored
+/// only while every stored key was made under the same KEK, so a key swapped while the app runs
+/// cannot add keys the right one never opens. A shredded key's row stays with no key ([`shred`],
+/// [`shred_pending`]): the insert waits on a shred still in progress, then finds the row, so no key
+/// is ever made again for a deleted profile or a settled item (None without `new`, an error with
+/// it).
+fn side_lookup(url: &str, slot: Slot, new: Option<NewKey>, fingerprint: [u8; 8]) -> Result<Option<Stored>, KeyError> {
     let url = url.to_string();
     let (table, column) = slot.table();
     let id = slot.id();
@@ -742,17 +776,27 @@ fn side_lookup(url: &str, slot: Slot, new: Option<Vec<u8>>, fingerprint: [u8; 8]
                 .map_err(|e| KeyError(format!("could not start the key lookup: {e}")))?;
             rt.block_on(async move {
                 let mut conn = PgConnection::connect(&url).await?;
-                if let Some(wrapped) = &new {
+                let creating = new.is_some();
+                if let Some(make) = new {
+                    // a key is made, and the keyring read, only for a slot with no row yet
+                    let sql = format!("select exists (select 1 from {table} where {column} = $1)");
+                    let stored: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+                        .bind(id)
+                        .fetch_one(&mut conn)
+                        .await?;
+                    let wrapped = if stored { None } else { Some(make()?) };
                     let sql = format!(
                         "insert into {table} ({column}, wrapped_dek, kek_fingerprint) select $2, $3, $1 \
                          where not {OTHER_KEK} on conflict ({column}) do nothing"
                     );
-                    sqlx::query(sqlx::AssertSqlSafe(sql))
-                        .bind(&fingerprint[..])
-                        .bind(id)
-                        .bind(wrapped)
-                        .execute(&mut conn)
-                        .await?;
+                    if let Some(wrapped) = wrapped {
+                        sqlx::query(sqlx::AssertSqlSafe(sql))
+                            .bind(&fingerprint[..])
+                            .bind(id)
+                            .bind(wrapped)
+                            .execute(&mut conn)
+                            .await?;
+                    }
                 }
                 // waits for a shred in progress, then reads the row it left
                 let sql = format!("select wrapped_dek, kek_fingerprint from {table} where {column} = $1 for share");
@@ -762,13 +806,14 @@ fn side_lookup(url: &str, slot: Slot, new: Option<Vec<u8>>, fingerprint: [u8; 8]
                     .await?;
                 if matches!(row, Some((None, _) | (_, None))) {
                     let _ = conn.close().await;
-                    return match new {
-                        Some(_) => Err(KeyError::new(shredded(slot))),
-                        None => Ok(None),
+                    return if creating {
+                        Err(KeyError::new(shredded(slot)))
+                    } else {
+                        Ok(None)
                     };
                 }
                 let row = row.and_then(|(w, f)| Some((w?, f?)));
-                if row.is_none() && new.is_some() {
+                if row.is_none() && creating {
                     let other: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select {OTHER_KEK}")))
                         .bind(&fingerprint[..])
                         .fetch_one(&mut conn)
@@ -1004,6 +1049,19 @@ mod tests {
         let mut secret = [0u8; 32];
         rand::fill(&mut secret[..]);
         Kek::from_secret(&secret).expect("kek")
+    }
+
+    /// The id a manifest records for a data key is derived with HKDF and a label of its own, as every
+    /// other key is. It is never an HMAC keyed with the AES-GCM key that seals the files.
+    #[test]
+    fn the_archive_id_is_derived_apart_from_the_file_key() {
+        let dek = Dek::generate();
+        let derived = hkdf32(&dek.key[..], None, b"ownhealth archive key id v1");
+        assert_eq!(dek.archive_id(), hex::encode(&derived[..]));
+        let keyed = hmac(&dek.key[..], &[b"ownhealth archive key id v1"])
+            .finalize()
+            .into_bytes();
+        assert_ne!(dek.archive_id(), hex::encode(keyed));
     }
 
     fn seal_all(dek: &Dek, owner: Uuid, data: &[u8]) -> Vec<u8> {
