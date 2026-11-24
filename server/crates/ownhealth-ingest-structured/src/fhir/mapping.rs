@@ -276,6 +276,17 @@ fn smart_name_tokens(s: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// The tokens of one HumanName for SMART verification: its given and family parts when it has any,
+/// else its `text`, which renders the whole name and never adds parts to a structured one.
+fn smart_human_name(name: &Value) -> BTreeSet<String> {
+    let mut parts: Vec<String> = list(Some(name), "given").iter().map(text_of).collect();
+    parts.extend(get_truthy(Some(name), "family").map(text_of));
+    if parts.iter().any(|part| !part.trim().is_empty()) {
+        return smart_name_tokens(&parts.join(" "));
+    }
+    smart_name_tokens(&get_truthy(Some(name), "text").map(text_of).unwrap_or_default())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PatientIdentity {
     Verified,
@@ -303,7 +314,7 @@ pub(crate) fn smart_patient_identity(
         return Unverified;
     }
     let mut contradicts = false;
-    for name in patient_names(patient, smart_name_tokens) {
+    for name in list(Some(patient), "name").iter().map(smart_human_name) {
         if want.is_subset(&name) {
             return Verified;
         }
@@ -1110,6 +1121,30 @@ mod tests {
             ],
             [false, false, false, false, true, true, true, true, false, true]
         );
+    }
+
+    /// `text` renders the whole name: it never adds parts to a structured name, and it counts only
+    /// when the HumanName has no given or family part.
+    #[test]
+    fn smart_name_checks_the_structured_name_or_the_text_never_both_together() {
+        let born = NaiveDate::from_ymd_opt(1990, 2, 3);
+        let identity = |name: Value| {
+            let patient = json!({"name": [name], "birthDate": "1990-02-03"});
+            smart_patient_identity(&patient, "Sam Rivera", born)
+        };
+        assert_eq!(
+            identity(json!({"given": ["Alex"], "family": "Rivera", "text": "Sam"})),
+            PatientIdentity::Mismatch
+        );
+        assert_eq!(
+            identity(json!({"family": "Rivera", "text": "Sam Rivera"})),
+            PatientIdentity::Unverified
+        );
+        assert_eq!(
+            identity(json!({"given": ["Sam"], "family": "Rivera", "text": "Alex"})),
+            PatientIdentity::Verified
+        );
+        assert_eq!(identity(json!({"text": "Sam Rivera"})), PatientIdentity::Verified);
     }
 
     #[test]
