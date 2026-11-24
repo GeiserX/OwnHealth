@@ -1447,3 +1447,121 @@ async fn round_5_job_reads_are_audited_by_profile() -> R {
     assert_eq!(row["resource_ids"], json!([]));
     Ok(())
 }
+
+#[tokio::test]
+async fn round_5_copied_narrative_keeps_its_source_section_security() -> R {
+    let a = app().await?;
+    ownhealth_ingest_structured::register();
+    sqlx::query("update profile_grant set categories = $3 where user_id = $1 and profile_id = $2")
+        .bind(a.family.user("sam"))
+        .bind(a.family.profile("alex"))
+        .bind(["read:summary", "read:labs"])
+        .execute(&a.rt.pool)
+        .await?;
+    let results = [
+        (
+            "13457-7",
+            r##"<value xsi:type="ST"><reference value="#result"/></value>"##,
+        ),
+        (
+            "2085-9",
+            r##"<confidentialityCode code="M" codeSystem="2.16.840.1.113883.5.25"/>
+            <value xsi:type="PQ" value="51" unit="mg/dL"/>
+            <referenceRange><observationRange><text><reference value="#range"/></text></observationRange></referenceRange>"##,
+        ),
+        ("2345-7", r#"<value xsi:type="PQ" value="92" unit="mg/dL"/>"#),
+    ];
+    let components: String = results
+        .iter()
+        .map(|(code, value)| {
+            format!(
+                r#"<component><observation classCode="OBS" moodCode="EVN">
+             <id root="1.2.3" extension="{code}"/><code code="{code}" codeSystem="2.16.840.1.113883.6.1"/>
+             <statusCode code="completed"/><effectiveTime value="20240101"/>{value}
+           </observation></component>"#
+            )
+        })
+        .collect();
+    let xml = format!(
+        r#"<ClinicalDocument xmlns="urn:hl7-org:v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+          <recordTarget><patientRole><patient><name><given>Alex</given><family>Rivera</family></name>
+            <birthTime value="19790514"/></patient></patientRole></recordTarget>
+          <component><structuredBody>
+            <component><section><templateId root="2.16.840.1.113883.10.20.22.2.3.1"/><title>Results</title>
+              <entry><organizer classCode="BATTERY" moodCode="EVN"><id root="1.2.3" extension="lab"/>
+                <statusCode code="completed"/>{components}
+              </organizer></entry>
+            </section></component>
+            <component><section><confidentialityCode code="R" codeSystem="2.16.840.1.113883.5.25"/>
+              <entry><observation><templateId root="2.16.840.1.113883.3.3445.1"/>
+                <value code="PSY" codeSystem="2.16.840.1.113883.5.4"/></observation></entry>
+              <component><section><text><content ID="result">Reviewed separately</content>
+                <content ID="range">Use the clinic interval</content></text>
+              </section></component>
+            </section></component>
+          </structuredBody></component></ClinicalDocument>"#
+    );
+    let (status, upload) = a
+        .upload("alex", &[("profile", "alex")], &[("notes.xml", xml.as_bytes())])
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{upload}");
+    let kinds = [ownhealth_ingest_structured::ccda::JOB.to_string()];
+    ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?;
+
+    // Free-text LDL and an unparsed HDL range can require confirmation before they become facts.
+    let review_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "select id from review_item where profile_id = $1 and kind = 'candidate_row' and status = 'open'",
+    )
+    .bind(a.family.profile("alex"))
+    .fetch_all(&a.rt.pool)
+    .await?;
+    for id in review_ids {
+        let (status, accepted) = a.post("alex", &format!("/review/{id}/accept"), Some(json!({}))).await?;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+    }
+
+    let route = "/profiles/alex/observations?category=laboratory";
+    let (status, owner) = a.get("alex", route).await?;
+    assert_eq!(status, StatusCode::OK, "{owner}");
+    let owner_rows = owner["items"].as_array().unwrap();
+    assert_eq!(owner_rows.len(), 3, "{owner}");
+    assert!(
+        owner_rows
+            .iter()
+            .any(|o| o["loinc"] == "13457-7" && o["printed"]["value"] == "Reviewed separately"),
+        "{owner}"
+    );
+    assert!(
+        owner_rows
+            .iter()
+            .any(|o| o["loinc"] == "2085-9" && o["printed"]["range"] == "Use the clinic interval"),
+        "{owner}"
+    );
+
+    let (status, reader) = a.get("sam", route).await?;
+    assert_eq!(status, StatusCode::OK, "{reader}");
+    let reader_codes: Vec<_> = reader["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| &o["loinc"])
+        .collect();
+    assert_eq!(reader_codes, [&json!("2345-7")], "{reader}");
+
+    let converted = ownhealth_ingest_structured::ccda::convert(xml.as_bytes())?;
+    let security_codes: Vec<Vec<&str>> = converted
+        .entries
+        .iter()
+        .filter(|e| e.resource["resourceType"] == "Observation")
+        .map(|e| {
+            e.resource["meta"]["security"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l["code"].as_str())
+                .collect()
+        })
+        .collect();
+    assert_eq!(security_codes, [vec!["R", "PSY"], vec!["M", "R", "PSY"], vec![]]);
+    Ok(())
+}

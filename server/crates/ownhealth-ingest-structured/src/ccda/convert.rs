@@ -31,7 +31,8 @@
 //!   an entry of its section) and a confidentialityCode other than `N` (of the document, the section or
 //!   inside the entry) go to every resource made there as `meta.security`, so the FHIR importer marks
 //!   the record sensitive as it does for a labelled FHIR file. A section's labels reach its
-//!   subsections at any depth. The labels in a Privacy Markings Section (templateId
+//!   subsections at any depth and go with narrative copied by reference. The labels in a Privacy
+//!   Markings Section (templateId
 //!   `2.16.840.1.113883.3.3445.4`) and a confidentialityCode on the structuredBody go to every
 //!   resource of the document. A Security Observation is never a record of its own. Each resource
 //!   holds its own copy of its labels, so a file is refused when it carries more than 64 different
@@ -51,7 +52,6 @@
 //! - Every section, entry or part the converter does not read is listed in the section's report, and
 //!   the importer turns it into a review item. Nothing is thrown away and nothing throws.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -203,7 +203,9 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
     let mut c = Conv {
         text: &text,
         narrative: xml::narrative_ids(&doc),
-        read: RefCell::new(HashMap::new()),
+        read: HashMap::new(),
+        source_section_labels: HashMap::new(),
+        narrative_labels: Vec::new(),
         ids: HashMap::new(),
         patient: None,
         labels: doc_labels.clone(),
@@ -546,7 +548,11 @@ struct Conv<'a, 'i> {
     narrative: HashMap<&'a str, Node<'a, 'i>>,
     /// The text of each narrative element a reference read, so a narrative many entries point at is
     /// read once.
-    read: RefCell<HashMap<NodeId, Option<String>>>,
+    read: HashMap<NodeId, Option<String>>,
+    /// Cache only each source section's own labels. Its ancestors are shared by all its targets.
+    source_section_labels: HashMap<NodeId, Vec<Value>>,
+    /// Labels of the narrative used to build the current resource.
+    narrative_labels: Vec<Value>,
     /// `<type>/<id>` given so far, to tell apart entries of one file that share an `id`.
     ids: HashMap<String, usize>,
     patient: Option<String>,
@@ -562,12 +568,24 @@ struct Conv<'a, 'i> {
 
 impl<'a, 'i> Conv<'a, 'i> {
     fn push(&mut self, rep: Option<&mut SectionReport>, pointer: &str, mut resource: Value) {
-        if !self.labels.is_empty()
+        let narrative_labels = std::mem::take(&mut self.narrative_labels);
+        let combined;
+        let labels = if narrative_labels.is_empty() {
+            &self.labels
+        } else {
+            combined = {
+                let mut labels = self.labels.clone();
+                add_labels(&mut labels, narrative_labels);
+                labels
+            };
+            &combined
+        };
+        if !labels.is_empty()
             && let Value::Object(r) = &mut resource
         {
-            self.label_copies = self.label_copies.saturating_add(self.labels.len());
+            self.label_copies = self.label_copies.saturating_add(labels.len());
             if self.label_copies <= MAX_LABEL_COPIES {
-                r.insert("meta".into(), json!({"security": self.labels}));
+                r.insert("meta".into(), json!({"security": labels}));
             }
         }
         let rtype = resource["resourceType"].as_str().unwrap_or_default().to_string();
@@ -636,17 +654,28 @@ impl<'a, 'i> Conv<'a, 'i> {
     /// The text an element holds: the narrative its `<reference value="#x"/>` points at, then any
     /// words written beside the reference ("2 puffs QID PRN wheezing"), within the bound of a text
     /// ([`xml::joined`]); else its own.
-    fn narrative_of(&self, n: Node<'_, '_>) -> Option<String> {
+    fn narrative_of(&mut self, n: Node<'_, '_>) -> Option<String> {
         let own = xml::text(n);
         if let Some(r) = child(n, "reference").and_then(|r| attr(r, "value"))
-            && let Some(target) = self.narrative.get(r.trim_start_matches('#'))
+            && let Some(&target) = self.narrative.get(r.trim_start_matches('#'))
             && let Some(t) = self
                 .read
-                .borrow_mut()
                 .entry(target.id())
-                .or_insert_with(|| xml::text(*target))
+                .or_insert_with(|| xml::text(target))
                 .clone()
         {
+            // The target can be in a later section or under a restricted parent section.
+            for sec in std::iter::successors(Some(target), Node::parent_element)
+                .filter(|n| n.has_tag_name((xml::NS, "section")))
+            {
+                let labels = self
+                    .source_section_labels
+                    .entry(sec.id())
+                    .or_insert_with(|| section_labels(sec));
+                if !labels.is_empty() {
+                    add_labels(&mut self.narrative_labels, labels.iter().cloned());
+                }
+            }
             return Some(match own {
                 Some(o) if !t.contains(&o) => xml::joined(&t, &o),
                 _ => t,
@@ -670,7 +699,7 @@ impl<'a, 'i> Conv<'a, 'i> {
 
     /// A CD as a CodeableConcept: its code and translations, and a text (displayName, else the
     /// original text). `skip` leaves codes out (the generic "substance" of a negated allergy).
-    fn concept_without(&self, n: Option<Node<'_, '_>>, skip: &[&str]) -> Option<Value> {
+    fn concept_without(&mut self, n: Option<Node<'_, '_>>, skip: &[&str]) -> Option<Value> {
         let n = n?;
         let keep = |c: &Node<'_, '_>| attr(*c, "code").is_none_or(|code| !skip.contains(&code));
         let mut codings: Vec<Value> = std::iter::once(n)
@@ -694,13 +723,13 @@ impl<'a, 'i> Conv<'a, 'i> {
         Some(Value::Object(cc))
     }
 
-    fn concept(&self, n: Option<Node<'_, '_>>) -> Option<Value> {
+    fn concept(&mut self, n: Option<Node<'_, '_>>) -> Option<Value> {
         self.concept_without(n, &[])
     }
 
     /// Whether a negated entry's concept names nothing: absent, null, or only a generic concept. The
     /// original text of a generic code ("Problem" pointing at "no known problems") names nothing either.
-    fn names_nothing(&self, n: Option<Node<'_, '_>>) -> bool {
+    fn names_nothing(&mut self, n: Option<Node<'_, '_>>) -> bool {
         let generic = n.and_then(|n| attr(n, "code")).is_some_and(|c| GENERIC.contains(&c));
         match self.concept_without(n, &GENERIC) {
             None => true,
@@ -820,26 +849,17 @@ impl<'a, 'i> Conv<'a, 'i> {
             ..SectionReport::default()
         };
         rep.templates.dedup();
-        // the section's labels: the inherited ones, its confidentialityCode, and Security
-        // Observations that are entries
-        let mut section_labels = inherited.to_vec();
-        add_labels(&mut section_labels, confidentiality(sec));
-        for el in entries
-            .iter()
-            .flat_map(|e| elements(*e))
-            .filter(|el| is_security_observation(*el))
-        {
-            add_labels(&mut section_labels, security_values(el));
-        }
+        let mut labels = inherited.to_vec();
+        add_labels(&mut labels, section_labels(sec));
         let Some(kind) = rep.kind else {
-            return (rep, section_labels);
+            return (rep, labels);
         };
         for (j, entry) in entries.into_iter().enumerate() {
             if self.label_copies > MAX_LABEL_COPIES {
                 break; // the file is refused once its sections stop
             }
             let at = format!("{}/entry/{j}", rep.pointer);
-            self.labels = section_labels.clone();
+            self.labels = labels.clone();
             add_labels(&mut self.labels, entry_labels(entry));
             for (k, el) in elements(entry).enumerate() {
                 let at = if k == 0 { at.clone() } else { format!("{at}/{k}") };
@@ -878,7 +898,7 @@ impl<'a, 'i> Conv<'a, 'i> {
             }
         }
         self.labels = self.doc_labels.clone();
-        (rep, section_labels)
+        (rep, labels)
     }
 
     /// A problem concern act: one Condition per SUBJ observation. False when it holds none.
@@ -1031,14 +1051,6 @@ impl<'a, 'i> Conv<'a, 'i> {
         let value = child(obs, "value");
         let nodes: Vec<Node<'_, '_>> = act.into_iter().chain([obs]).collect();
         let nullified = nodes.iter().any(|n| status_of(*n) == Some("nullified"));
-        let nothing = negated && self.names_nothing(value);
-        let verification = if nullified {
-            "entered-in-error"
-        } else if negated && !nothing {
-            "refuted"
-        } else {
-            "confirmed"
-        };
         let effective = child(obs, "effectiveTime");
         // FHIR R4 con-5: an entered-in-error condition has no clinical status (and so, by con-4, no
         // abatement)
@@ -1051,6 +1063,14 @@ impl<'a, 'i> Conv<'a, 'i> {
                 .push(format!("{} (status active with an end date)", describe(obs)));
             return;
         }
+        let nothing = negated && self.names_nothing(value);
+        let verification = if nullified {
+            "entered-in-error"
+        } else if negated && !nothing {
+            "refuted"
+        } else {
+            "confirmed"
+        };
         let id = self.new_id("Condition", &[obs, act.unwrap_or(obs)], obs);
         let mut r = Map::new();
         r.insert("resourceType".into(), json!("Condition"));
@@ -1198,9 +1218,12 @@ impl<'a, 'i> Conv<'a, 'i> {
         let mut as_needed = None;
         let mut unread = Vec::new();
         for criterion in children(sa, "precondition").flat_map(|p| children(p, "criterion")) {
-            match self.concept(child(criterion, "value")) {
-                Some(cc) if as_needed.is_none() => as_needed = Some(cc),
-                _ => unread.push(describe(criterion)),
+            if as_needed.is_none()
+                && let Some(cc) = self.concept(child(criterion, "value"))
+            {
+                as_needed = Some(cc);
+            } else {
+                unread.push(describe(criterion));
             }
         }
         put(&mut dosage, "asNeededCodeableConcept", as_needed);
@@ -1428,7 +1451,7 @@ impl<'a, 'i> Conv<'a, 'i> {
     }
 
     /// `value[x]` of an observation by the value's `xsi:type`.
-    fn value(&self, r: &mut Map<String, Value>, v: Node<'_, '_>) {
+    fn value(&mut self, r: &mut Map<String, Value>, v: Node<'_, '_>) {
         let kind = xsi_type(v).unwrap_or(if attr(v, "code").is_some() {
             "CD"
         } else if attr(v, "value").is_some() {
@@ -1556,6 +1579,18 @@ fn confidentiality(n: Node<'_, '_>) -> Option<Value> {
 /// The values of a DS4P observation as labels.
 fn security_values(obs: Node<'_, '_>) -> Vec<Value> {
     children(obs, "value").filter_map(label).collect()
+}
+
+/// A section's own confidentiality code and Security Observations.
+fn section_labels(sec: Node<'_, '_>) -> Vec<Value> {
+    let mut labels = confidentiality(sec).into_iter().collect();
+    for obs in children(sec, "entry")
+        .flat_map(elements)
+        .filter(|el| is_security_observation(*el))
+    {
+        add_labels(&mut labels, security_values(obs));
+    }
+    labels
 }
 
 /// The labels inside one entry: every confidentialityCode (other than `N`) and every DS4P
