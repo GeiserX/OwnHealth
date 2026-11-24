@@ -480,6 +480,40 @@ pub async fn removal_lock(conn: &mut sqlx::PgConnection, wait: bool) -> Result<b
         .map_err(lock_error)
 }
 
+/// Drop an upload's bytes after the importer or inbox has released its reference. The caller
+/// supplies a connection in an open transaction. Other consumers and backup snapshots can still
+/// hold the file, so check them before removing either copy.
+pub async fn remove_unheld_upload(
+    conn: &mut sqlx::PgConnection,
+    blobs: &BlobStore,
+    profile: Uuid,
+    sha: &str,
+) -> crate::Result<()> {
+    removal_lock(conn, true).await?;
+    let hash = sha256_hex_to_bytes(sha)?;
+    let (mine, held): (bool, bool) = sqlx::query_as(
+        "with holders as ( \
+             select profile_id::text as owner from document where blob_sha256 = $1 \
+             union all select profile_id::text from source_item where blob_sha256 = $1 and raw_released_at is null \
+             union all select null::text from quarantine_item where raw_blob = $1 \
+             union all select payload->>'profile_id' from job where state in ('queued', 'running') \
+                 and payload->>'blob_sha256' = $2 and payload->'upload_released' is null \
+         ) select coalesce(bool_or(owner = $3), false), count(*) > 0 from holders",
+    )
+    .bind(hash)
+    .bind(sha)
+    .bind(profile.to_string())
+    .fetch_one(&mut *conn)
+    .await?;
+    let owner = BlobOwner::Profile(profile);
+    if !held {
+        blobs.delete(owner, sha)?;
+    } else if !mine {
+        blobs.drop_sealed(owner, sha)?;
+    }
+    Ok(())
+}
+
 // Run after the sealed lookup and before the plain lookup, in this test thread only.
 #[cfg(test)]
 thread_local! {

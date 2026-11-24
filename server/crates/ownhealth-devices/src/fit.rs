@@ -1063,30 +1063,7 @@ pub(crate) async fn forget_upload(ctx: &JobContext, profile_id: Uuid, sha: &str,
             .execute(&mut *conn)
             .await?;
         let mut tx = sqlx::Connection::begin(&mut *conn).await?;
-        ownhealth_core::blobs::removal_lock(&mut tx, true).await?;
-        let holders = "from job where id <> $2 and state in ('queued', 'running') \
-                       and payload->>'blob_sha256' = $1 and payload->'upload_released' is null";
-        let (mine, held): (bool, bool) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "select exists (select 1 from document where blob_sha256 = decode($1, 'hex') and profile_id = $3) \
-             or exists (select 1 from source_item where blob_sha256 = decode($1, 'hex') and profile_id = $3) \
-             or exists (select 1 {holders} and payload->>'profile_id' = $4), \
-             exists (select 1 from document where blob_sha256 = decode($1, 'hex')) \
-             or exists (select 1 from source_item where blob_sha256 = decode($1, 'hex')) \
-             or exists (select 1 from quarantine_item where raw_blob = decode($1, 'hex')) \
-             or exists (select 1 {holders})"
-        )))
-        .bind(sha)
-        .bind(job_id)
-        .bind(profile_id)
-        .bind(profile_id.to_string())
-        .fetch_one(&mut *tx)
-        .await?;
-        let owner = BlobOwner::Profile(profile_id);
-        if !held {
-            ctx.blobs.delete(owner, sha)?;
-        } else if !mine {
-            ctx.blobs.drop_sealed(owner, sha)?;
-        }
+        ownhealth_core::blobs::remove_unheld_upload(&mut tx, &ctx.blobs, profile_id, sha).await?;
         tx.commit().await?;
         Ok(())
     }

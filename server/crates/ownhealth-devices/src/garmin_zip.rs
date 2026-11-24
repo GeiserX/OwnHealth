@@ -805,7 +805,7 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     let details = report.details();
     let mut tx = ctx.pool.begin().await?;
     lock_exports(&mut tx, profile, "garmin").await?;
-    let mut out = if let Some(kept) = kept {
+    let (mut out, document) = if let Some(kept) = kept {
         let mut payload = job.payload.clone();
         payload["blob_sha256"] = json!(kept);
         let filename = job.str("filename").unwrap_or("garmin.zip");
@@ -820,13 +820,24 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
             WEARABLES_DOC_TYPE,
         )
         .await?;
-        write(&mut tx, profile, doc, report.readings, &details, source_id)
-            .await?
-            .to_value()
+        let summary = write(&mut tx, profile, doc, report.readings, &details, source_id).await?;
+        (summary.to_value(), Some(doc))
     } else {
-        json!({"accepted": 0, "skipped": 0, "reasons": {}})
+        (json!({"accepted": 0, "skipped": 0, "reasons": {}}), None)
     };
     out["garmin"] = details;
+    // A queued inbox arrival owns the raw ZIP until the import and its result commit. Keep the hash
+    // and link to the projected document for subsequent arrivals, then allow the raw bytes to go.
+    sqlx::query(
+        "update source_item set raw_released_at = now(), document_id = $3 \
+         where profile_id = $1 and blob_sha256 = decode($2, 'hex') \
+         and document_id is null and quarantine_id is null and raw_released_at is null",
+    )
+    .bind(profile)
+    .bind(sha)
+    .bind(document)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("update job set result = $2 where id = $1")
         .bind(job.id)
         .bind(&out)

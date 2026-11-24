@@ -9,11 +9,12 @@ mod common;
 use std::io::{Cursor, Write};
 
 use common::{Env, R};
-use ownhealth_core::arrive::{Arrival, arrive};
+use ownhealth_core::arrive::{Arrival, Arrived, arrive};
 use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::documents::{StoredFile, dispatch_upload, sniff};
 use ownhealth_core::jobs;
 use serde_json::{Value, json};
+use sqlx::Acquire;
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 
@@ -248,18 +249,29 @@ fn an_apple_health_marker_wins_over_a_garmin_member_in_either_order() -> R {
 }
 
 #[tokio::test]
-async fn a_garmin_zip_from_an_inbox_keeps_its_channel() -> R {
+async fn a_garmin_zip_from_an_inbox_keeps_its_channel_and_releases_the_raw_blob() -> R {
     let env = Env::new().await?;
     let profile = env.fam.profile("lucia");
+    let inbox = env.source("folder", Some("lucia"), json!({}), None).await?;
     let archive = zip(&[(UDS, &uds(&[("2024-01-04", 6200)]))])?;
-    let sha = env.blobs.put_bytes(BlobOwner::Profile(profile), &archive)?;
+    let owner = BlobOwner::Profile(profile);
+    let sha = env.blobs.put_bytes(owner, &archive)?;
     let mut c = env.db.pool.acquire().await?;
     let arrival = Arrival {
+        source_id: Some(inbox.id),
+        external_id: Some("first-arrival"),
         filename: Some("garmin.zip"),
         ..Arrival::new(env.fam.household_id, profile, "folder", &sha, archive.len() as i64)
     };
-    arrive(&mut c, &env.blobs, &arrival).await?;
-    jobs::drain(&env.ctx, "core", 5, None).await?;
+    let mut tx = c.begin().await?;
+    let Arrived::Queued { job_id: Some(id), .. } = arrive(&mut tx, &env.blobs, &arrival).await? else {
+        anyhow::bail!("first inbox arrival did not enqueue the import");
+    };
+    tx.commit().await?;
+    let doc: Uuid = result(&env, id).await?["document_id"]
+        .as_str()
+        .expect("document")
+        .parse()?;
     let channels: Vec<(String, String)> = sqlx::query_as(
         "select d.mime, s.channel from document d join document_source s on s.document_id = d.id \
          where d.profile_id = $1 and d.doc_type = 'wearables'",
@@ -268,19 +280,66 @@ async fn a_garmin_zip_from_an_inbox_keeps_its_channel() -> R {
     .fetch_all(&env.db.pool)
     .await?;
     assert_eq!(channels, [("application/x-ndjson".to_string(), "folder".to_string())]);
+    assert!(!env.blobs.exists(owner, &sha), "raw ZIP still exists");
+    let ledger_sha: String = sqlx::query_scalar(
+        "select encode(blob_sha256, 'hex') from source_item where source_id = $1 and external_id = $2",
+    )
+    .bind(inbox.id)
+    .bind(arrival.external_id)
+    .fetch_one(&mut *c)
+    .await?;
+    assert_eq!(ledger_sha, sha);
+
+    env.blobs.put_bytes(owner, &archive)?;
+    let duplicate = Arrival {
+        external_id: Some("second-arrival"),
+        ..arrival
+    };
+    let mut tx = c.begin().await?;
+    assert_eq!(
+        arrive(&mut tx, &env.blobs, &duplicate).await?,
+        Arrived::Duplicate { document_id: doc }
+    );
+    tx.commit().await?;
+    assert!(!env.blobs.exists(owner, &sha), "duplicate stored the raw ZIP again");
+
+    env.blobs.put_bytes(owner, &archive)?;
+    let mut tx = c.begin().await?;
+    assert_eq!(
+        arrive(&mut tx, &env.blobs, &duplicate).await?,
+        Arrived::AlreadySeen { document_id: Some(doc) },
+    );
+    tx.commit().await?;
+    assert!(
+        !env.blobs.exists(owner, &sha),
+        "a repeated inbox item stored the ZIP again"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn a_run_again_after_its_commit_returns_the_same_answer() -> R {
     let env = Env::new().await?;
-    let (id, _) = upload(&env, &zip(&[(UDS, &uds(&[("2024-01-04", 6200)]))])?).await?;
-    let first = result(&env, id).await?;
-    // the worker stopped after the commit, before the job was marked done: the upload is gone by now
-    sqlx::query("update job set state = 'queued', locked_until = null, locked_by = null where id = $1")
+    let (id, sha) = upload(&env, &zip(&[(UDS, &uds(&[("2024-01-04", 6200)]))])?).await?;
+    let job = jobs::claim(
+        &env.ctx.pool,
+        "core",
+        &env.ctx.worker_id,
+        Some(&["import.garmin_zip".into()]),
+    )
+    .await?
+    .expect("Garmin job");
+    assert_eq!(job.id, id);
+    let handler = jobs::handler_for(&job.kind).expect("Garmin handler");
+    let first = handler(env.ctx.clone(), job).await?.expect("Garmin result");
+    assert!(!env.blobs.exists(BlobOwner::Profile(env.fam.profile("lucia")), &sha));
+
+    // The handler committed, but the worker stopped before completing its lease.
+    sqlx::query("update job set locked_until = now() - interval '1 second' where id = $1 and state = 'running'")
         .bind(id)
         .execute(&env.db.pool)
         .await?;
+    assert_eq!(jobs::reap_expired(&env.ctx.pool).await?, 1);
     assert_eq!(result(&env, id).await?, first);
     Ok(())
 }
