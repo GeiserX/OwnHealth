@@ -826,9 +826,12 @@ fn med_codes(concept: Option<&Value>) -> Option<Vec<MedCode>> {
 pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&str>) -> Option<&'a Value>) -> Mapped {
     let rtype = r.get("resourceType").and_then(Value::as_str).unwrap_or_default();
     let mut concept = r.get("medicationCodeableConcept").filter(|c| !c.is_null());
+    // the Medication the name comes from: its sensitivity labels go with the record
+    let mut named_by = None;
     if concept.is_none() && truthy(r.get("medicationReference")) {
         let reference = r["medicationReference"].get("reference").and_then(Value::as_str);
-        concept = resolve(reference).and_then(|m| m.get("code"));
+        named_by = resolve(reference);
+        concept = named_by.and_then(|m| m.get("code"));
     }
     // an IPS "no information" entry, inline or through the Medication it references
     if absent(concept) {
@@ -917,9 +920,14 @@ pub fn medication<'a>(r: &'a Value, profile_id: Uuid, resolve: impl Fn(Option<&s
         .find_map(|c| concept_text(Some(c)).filter(|t| !t.is_empty()));
     let checks = code_check(&code);
     let (decision, decision_reason, decision_on) = recorded_decision(r);
+    let mut common = common(profile_id, effective_at, r);
+    if let Some(medication) = named_by {
+        let tags: BTreeSet<String> = common.sensitivity.drain(..).chain(sensitivity(medication)).collect();
+        common.sensitivity = tags.into_iter().collect();
+    }
     record(
         RecordIn::Medication(MedicationIn {
-            common: common(profile_id, effective_at, r),
+            common,
             kind: "medication".into(),
             name,
             ingredient: None,

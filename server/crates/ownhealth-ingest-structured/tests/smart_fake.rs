@@ -2954,3 +2954,36 @@ async fn a_demographic_edit_during_the_search_supersedes_the_pull() -> R {
     }
     Ok(())
 }
+
+// ------------------------------------------------------ review round 9 ----
+
+#[tokio::test]
+async fn a_referenced_medications_sensitivity_reaches_the_projected_record() -> R {
+    let w = world(Behaviour::default()).await?;
+    w.fake.book().extra.extend([
+        json!({"resourceType": "MedicationRequest", "id": "sam-sert", "status": "active", "intent": "order",
+               "medicationReference": {"reference": "Medication/sertraline-50"},
+               "subject": {"reference": "Patient/sam-rivera"}, "authoredOn": "2026-09-01"}),
+        json!({"resourceType": "Medication", "id": "sertraline-50", "meta": {"versionId": "1",
+               "security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "PSY"}]},
+               "code": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "312940",
+                                    "display": "Sertraline 50 mg"}]}}),
+    ]);
+    let source = w.connect(t0()).await?;
+    w.day(source, t0() + Duration::minutes(1))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    let mut c = w.db.pool.acquire().await?;
+    let all = list_records(&mut c, "medication", w.sam(), None, true).await?;
+    let sert = all
+        .iter()
+        .find(|m| m["name"] == "Sertraline 50 mg")
+        .expect("the order takes its medicine's name");
+    assert_eq!(sert["sensitivity"], json!(["mental_health"]), "{sert:?}");
+    let open = list_records(&mut c, "medication", w.sam(), None, false).await?;
+    assert!(
+        !open.iter().any(|m| m["name"] == "Sertraline 50 mg"),
+        "a reader without read:sensitive sees the drug: {open:?}"
+    );
+    Ok(())
+}
