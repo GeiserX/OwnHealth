@@ -150,30 +150,34 @@ pub fn break_glass_sweeper(rt: &Runtime, mut stop: watch::Receiver<bool>) -> Joi
 /// hour after, until `stop`: past OWNHEALTH_PARTITION_ROWS it turns the table into monthly
 /// partitions, and then makes next month's partition ahead of time. Below the threshold a run reads
 /// the row estimate and changes nothing. When the app's role does not own the table (the compose
-/// files), it says once that the operator runs `ownhealth partition`.
+/// files), it warns that the operator runs `ownhealth partition`: once, again after a run that ended
+/// otherwise, and once a day while nobody does.
 pub fn partition_job(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandle<()> {
     let rt = rt.clone();
     tokio::spawn(async move {
         let hour = std::time::Duration::from_secs(3600);
         let mut every = tokio::time::interval_at(tokio::time::Instant::now() + hour, hour);
-        let mut told = false;
+        let mut owner_due = OwnerDue::default();
         loop {
             tokio::select! {
                 _ = every.tick() => {
                     let opts = ownhealth_ops::partition::Options::new(rt.settings.partition_rows);
                     match ownhealth_ops::partition::run(&rt.pool, &opts).await {
-                        Ok(r) => match r["state"].as_str() {
-                            Some("converted") => tracing::info!(report = %r, "wearable_sample is partitioned by month"),
-                            Some("needs_owner") if !told => {
-                                told = true;
-                                tracing::warn!(report = %r, "wearable_sample needs the partition job: run `ownhealth partition` as the database owner");
+                        Ok(r) => {
+                            let state = r["state"].as_str();
+                            let warn = owner_due.warn(state);
+                            match state {
+                                Some("converted") => tracing::info!(report = %r, "wearable_sample is partitioned by month"),
+                                Some("needs_owner") if warn => {
+                                    tracing::warn!(report = %r, "wearable_sample needs the partition job: run `ownhealth partition` as the database owner");
+                                }
+                                Some("busy") => tracing::info!(report = %r, "the wearable_sample partition job will try again"),
+                                _ if r["made"].as_array().is_some_and(|m| !m.is_empty()) => {
+                                    tracing::info!(report = %r, "made wearable_sample partitions ahead of time");
+                                }
+                                _ => {}
                             }
-                            Some("busy") => tracing::info!(report = %r, "the wearable_sample partition job will try again"),
-                            _ if r["made"].as_array().is_some_and(|m| !m.is_empty()) => {
-                                tracing::info!(report = %r, "made wearable_sample partitions ahead of time");
-                            }
-                            _ => {}
-                        },
+                        }
                         Err(e) => tracing::warn!(error = %e, "the wearable_sample partition job failed"),
                     }
                 }
@@ -181,6 +185,37 @@ pub fn partition_job(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandl
             }
         }
     })
+}
+
+/// When the hourly partition run warns that it needs the owner: at the first `needs_owner` of a
+/// stretch, then once a day (every 24th run) while the stretch lasts. A run that ends in another state
+/// ends the stretch, so a month missed later warns again.
+#[derive(Debug, Default)]
+struct OwnerDue {
+    /// `needs_owner` runs since the last warning, while a stretch lasts.
+    quiet: Option<u32>,
+}
+
+impl OwnerDue {
+    const EVERY: u32 = 24;
+
+    /// Whether a run that ended in `state` warns.
+    fn warn(&mut self, state: Option<&str>) -> bool {
+        if state != Some("needs_owner") {
+            self.quiet = None;
+            return false;
+        }
+        match self.quiet {
+            Some(n) if n + 1 < Self::EVERY => {
+                self.quiet = Some(n + 1);
+                false
+            }
+            _ => {
+                self.quiet = Some(0);
+                true
+            }
+        }
+    }
 }
 
 /// Refuse to go on when OWNHEALTH_SECRETS_KEY does not open the profile keys the database holds,
@@ -314,4 +349,26 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     .await?;
     background.stop().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OwnerDue;
+
+    /// The first needs_owner warns, the next ones of the same stretch stay quiet; a run that ends
+    /// otherwise (the owner ran the job) starts a new stretch, and a stretch that lasts a day warns
+    /// again.
+    #[test]
+    fn needs_owner_warns_again_after_another_state_and_once_a_day() {
+        let mut d = OwnerDue::default();
+        assert!(d.warn(Some("needs_owner")));
+        assert!(!d.warn(Some("needs_owner")));
+        assert!(!d.warn(Some("partitioned")));
+        assert!(d.warn(Some("needs_owner")), "a month missed later warns again");
+        assert!(!d.warn(Some("below_threshold")));
+        assert!(d.warn(Some("needs_owner")));
+        let quiet = (0..23).filter(|_| d.warn(Some("needs_owner"))).count();
+        assert_eq!(quiet, 0);
+        assert!(d.warn(Some("needs_owner")), "the 25th hourly run warns again");
+    }
 }

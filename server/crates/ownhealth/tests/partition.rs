@@ -799,3 +799,294 @@ async fn the_partition_command_reads_the_threshold_and_prints_the_report() -> R 
     );
     Ok(())
 }
+
+/// A sample a wrong clock dated past the cutoff, set aside between the check and the switch, comes
+/// back only to a document that still holds it: not after its document moved to another person, and
+/// not after its document was retracted. A sample with no document comes back.
+#[tokio::test]
+async fn a_sample_set_aside_stays_out_when_its_document_moved_or_was_retracted_meanwhile() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let other: Uuid =
+        sqlx::query_scalar("select id from profile where household_id = $1 and id <> $2 order by slug limit 1")
+            .bind(d.household)
+            .bind(d.alex)
+            .fetch_one(pool)
+            .await?;
+    let moved = document(&d, b"a Gadgetbridge export that moves", "application/x-sqlite3").await?;
+    let retracted = document(&d, b"a Gadgetbridge export that is retracted", "application/x-sqlite3").await?;
+    let far = cutoff_for(now) + chrono::Duration::days(40);
+    let (a, b, c) = (
+        far,
+        far + chrono::Duration::minutes(1),
+        far + chrono::Duration::minutes(2),
+    );
+    let mut conn = pool.acquire().await?;
+    let src = watch(&mut conn, d.alex).await?;
+    let yesterday = now - chrono::Duration::days(1);
+    store::write(
+        &mut conn,
+        d.alex,
+        Some(moved),
+        vec![hr(a, 90.0, src), hr(yesterday, 60.0, src)],
+        Conflict::Keep,
+    )
+    .await?;
+    store::write(
+        &mut conn,
+        d.alex,
+        Some(retracted),
+        vec![hr(b, 91.0, src)],
+        Conflict::Keep,
+    )
+    .await?;
+    store::write(&mut conn, d.alex, None, vec![hr(c, 92.0, src)], Conflict::Keep).await?;
+    drop(conn);
+
+    let p = partition::prepare(pool, &opts(now)).await?;
+    assert_eq!(p["held_aside"], 3, "{p}");
+
+    let mut tx = pool.begin().await?;
+    ownhealth_ingest_pdf::assign_document(&mut tx, &d.blobs, moved, other, Uuid::new_v4(), None).await?;
+    tx.commit().await?;
+    let mut tx = pool.begin().await?;
+    retract_document_facts(&mut tx, retracted, "wrong file").await?;
+    sqlx::query("update document set status = 'retracted', status_reason = 'wrong file' where id = $1")
+        .bind(retracted)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    let r = partition::run(pool, &opts(now)).await?;
+    assert_eq!(state(&r), "converted", "{r}");
+    assert_eq!(r["held_back"], 1, "{r}");
+    for t in [a, b] {
+        assert_eq!(where_is(pool, t).await?, Vec::<String>::new(), "{t}");
+    }
+    assert_eq!(where_is(pool, c).await?, ["wearable_sample_default"]);
+    let on_alex: i64 =
+        sqlx::query_scalar("select count(*) from wearable_sample where profile_id = $1 and document_id = $2")
+            .bind(d.alex)
+            .bind(moved)
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(on_alex, 0, "the moved document's samples left the old profile");
+    Ok(())
+}
+
+/// A threshold raised after a run set its check: the next run is below the threshold, takes the check
+/// back and puts the samples set aside back, so nothing goes on refusing samples.
+#[tokio::test]
+async fn a_threshold_raised_after_a_prepare_takes_the_check_back() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let far = cutoff_for(now) + chrono::Duration::days(3);
+    let mut c = pool.acquire().await?;
+    let src = watch(&mut c, d.alex).await?;
+    store::write(&mut c, d.alex, None, vec![hr(far, 58.0, src)], Conflict::Keep).await?;
+    drop(c);
+    let before = fingerprint(pool).await?;
+    let p = partition::prepare(pool, &opts(now)).await?;
+    assert_eq!(p["held_aside"], 1, "{p}");
+
+    let r = partition::run(
+        pool,
+        &Options {
+            threshold: 10_000_000,
+            ..opts(now)
+        },
+    )
+    .await?;
+    assert_eq!(state(&r), "below_threshold", "{r}");
+    assert_eq!(r["held_back"], 1, "{r}");
+    assert_eq!(relkind(pool).await?, "r");
+    let bound: i64 = sqlx::query_scalar(
+        "select count(*) from pg_constraint where conrelid = 'wearable_sample'::regclass \
+         and conname = 'wearable_sample_hist_bound'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(bound, 0);
+    let aside: Option<String> = sqlx::query_scalar("select to_regclass('wearable_sample_ahead')::text")
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(aside, None);
+    assert_eq!(fingerprint(pool).await?, before);
+    Ok(())
+}
+
+/// A run by a member of the owner's role (not the owner itself): the parent, DEFAULT and every month
+/// get the owner of the old table, so the owner alone keeps changing them.
+#[tokio::test]
+async fn a_member_of_the_owners_role_switches_and_the_owner_keeps_every_table() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let owner: String = sqlx::query_scalar(
+        "select pg_get_userbyid(relowner)::text from pg_class where oid = 'wearable_sample'::regclass",
+    )
+    .fetch_one(pool)
+    .await?;
+    let role = format!("oh_s65m_{}", ownhealth_core::ids::token_hex(4));
+    let password = ownhealth_core::ids::token_hex(16);
+    for sql in [
+        format!("create role {role} login password '{password}'"),
+        format!("grant \"{owner}\" to {role}"),
+    ] {
+        sqlx::query(AssertSqlSafe(sql)).execute(pool).await?;
+    }
+    let member = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            PgConnectOptions::from_str(&d.db.url)?
+                .username(&role)
+                .password(&password),
+        )
+        .await?;
+    let outcome = async {
+        let r = partition::run(&member, &opts(now)).await?;
+        assert_eq!(state(&r), "converted", "{r}");
+        let owners: Vec<(String, String)> = sqlx::query_as(
+            "select c.relname::text, pg_get_userbyid(c.relowner)::text from pg_class c where c.oid = 'wearable_sample'::regclass \
+             or c.oid in (select inhrelid from pg_inherits where inhparent = 'wearable_sample'::regclass) order by 1",
+        )
+        .fetch_all(pool)
+        .await?;
+        assert!(owners.len() >= 4, "{owners:?}");
+        for (name, o) in &owners {
+            assert_eq!(o, &owner, "{name}: {owners:?}");
+        }
+        anyhow::Ok(())
+    }
+    .await;
+    member.close().await;
+    for sql in [
+        format!("reassign owned by {role} to \"{owner}\""),
+        format!("drop owned by {role}"),
+        format!("drop role {role}"),
+    ] {
+        sqlx::query(AssertSqlSafe(sql)).execute(pool).await?;
+    }
+    outcome
+}
+
+/// A switch kept off by a lock on a table the new parent references (a write on profile left open):
+/// the run says busy, and its report keeps the cutoff and the samples it set aside, says that samples
+/// dated on or after the cutoff are refused until the next run, and blames no reader.
+#[tokio::test]
+async fn a_busy_switch_keeps_its_cutoff_and_says_what_waits_for_the_next_run() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let far = cutoff_for(now) + chrono::Duration::days(3);
+    let mut c = pool.acquire().await?;
+    let src = watch(&mut c, d.alex).await?;
+    store::write(&mut c, d.alex, None, vec![hr(far, 58.0, src)], Conflict::Keep).await?;
+    drop(c);
+    let mut writer = PgConnection::connect(&d.db.url).await?;
+    let mut tx = writer.begin().await?;
+    sqlx::query("update profile set display_name = display_name where id = $1")
+        .bind(d.alex)
+        .execute(&mut *tx)
+        .await?;
+    let r = partition::run(pool, &opts(now)).await?;
+    tx.rollback().await?;
+    writer.close().await?;
+    assert_eq!(state(&r), "busy", "{r}");
+    assert_eq!(relkind(pool).await?, "r");
+    assert_eq!(r["cutoff"], json!(cutoff_for(now).to_rfc3339()), "{r}");
+    assert_eq!(r["held_aside"], 1, "{r}");
+    let note = r["note"].as_str().unwrap_or_default();
+    assert!(!note.contains("readers"), "{note}");
+    assert!(note.contains("refused"), "{note}");
+
+    let again = partition::run(pool, &opts(now)).await?;
+    assert_eq!(state(&again), "converted", "{again}");
+    assert_eq!(again["held_back"], 1, "{again}");
+    Ok(())
+}
+
+/// Between the check and the switch, an import holding a sample dated on or after the cutoff is
+/// refused (store.rs and Apple Health alike). Its job waits an hour and runs again without spending
+/// an attempt, so it is never dead before the switch, and its error names no table or constraint.
+#[tokio::test]
+async fn an_import_the_cutoff_refuses_waits_for_the_switch_without_spending_an_attempt() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    assert_eq!(state(&partition::prepare(pool, &opts(now)).await?), "prepared");
+    let far = cutoff_for(now) + chrono::Duration::days(3);
+
+    let mut c = pool.acquire().await?;
+    let src = watch(&mut c, d.alex).await?;
+    let mut tx = c.begin().await?;
+    let refused = store::write(&mut tx, d.alex, None, vec![hr(far, 58.0, src)], Conflict::Keep)
+        .await
+        .expect_err("a sample past the cutoff is refused");
+    tx.rollback().await?;
+    drop(c);
+    let birth: chrono::NaiveDate = sqlx::query_scalar("select birth_date from profile where id = $1")
+        .bind(d.alex)
+        .fetch_one(pool)
+        .await?;
+    let mut zip = Cursor::new(Vec::new());
+    write_export_to(
+        &mut zip,
+        &ExportSpec {
+            days: 2,
+            end: far.date_naive(),
+            birth_date: birth,
+            ..ExportSpec::default()
+        },
+    )?;
+    let doc = document(&d, &zip.into_inner(), "application/zip").await?;
+    let mut tx = pool.begin().await?;
+    let ah = import_apple_health(&mut tx, &d.blobs, doc)
+        .await
+        .expect_err("an export past the cutoff is refused");
+    tx.rollback().await?;
+
+    for e in [refused, ah] {
+        let raw = e.to_string();
+        let je = ownhealth_core::jobs::JobError::from(e);
+        assert!(je.waits, "{raw}");
+        assert!(!je.permanent, "{raw}");
+        let text = je.text();
+        assert!(!text.contains("wearable_sample"), "{text}");
+        assert!(text.starts_with("PartitionPendingError: "), "{text}");
+
+        let mut c = pool.acquire().await?;
+        let id = ownhealth_core::jobs::enqueue(
+            &mut c,
+            "s65.wait",
+            &json!({"document_id": doc.to_string()}),
+            ownhealth_core::jobs::EnqueueOptions {
+                max_attempts: 1,
+                ..Default::default()
+            },
+        )
+        .await?
+        .expect("queued");
+        drop(c);
+        let job = ownhealth_core::jobs::claim(pool, "core", "w65", Some(&["s65.wait".to_string()]))
+            .await?
+            .expect("claimed");
+        assert_eq!(job.id, id);
+        assert_eq!(ownhealth_core::jobs::fail(pool, &job, &je, "w65").await?, "queued");
+        let (state, attempts, wait): (String, i32, f64) = sqlx::query_as(
+            "select state, attempts, extract(epoch from run_after - now())::float8 from job where id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!((state.as_str(), attempts), ("queued", 0), "{text}");
+        assert!(wait > 3000.0 && wait <= 3600.0, "{wait}");
+        sqlx::query("delete from job where id = $1")
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}

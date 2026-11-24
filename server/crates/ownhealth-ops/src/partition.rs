@@ -18,14 +18,17 @@
 //!    can hold. A cutoff that an earlier, stopped run left less than a day ahead is taken back first:
 //!    its samples come back and its check goes.
 //! 3. Validate the check: one scan, under a lock that lets reads and writes go on. From step 2 to the
-//!    switch, a new sample dated at or after the cutoff is refused (its import fails and is retried),
-//!    and the samples set aside do not show. The cutoff is at least 7 days ahead, so a device with a
-//!    right clock sends none.
+//!    switch, a new sample dated at or after the cutoff is refused: its import job waits an hour and
+//!    runs again without spending an attempt (`ownhealth_core::jobs::JobError::waits`). The samples
+//!    set aside do not show. The cutoff is at least 7 days ahead, so a device with a right clock sends
+//!    none.
 //! 4. The switch, one transaction: rename the table to `wearable_sample_hist` (and its indexes),
 //!    create the partitioned `wearable_sample` like it (columns, NOT NULLs, defaults, CHECKs, indexes,
 //!    then its foreign keys, grants and owner), ATTACH the old table for `t < cutoff`, which the valid
 //!    check turns into a catalog change (no scan, no copy, the indexes and foreign keys are reused),
-//!    add the DEFAULT partition and the months up to next month, and put the samples set aside back.
+//!    add the DEFAULT partition and the months up to next month, and put the samples set aside back:
+//!    those with no document, and those whose document is still active on the same profile (a
+//!    document moved or retracted meanwhile took its samples along).
 //!    It waits at most `lock_timeout` for the table, gives up and tries again a few times, then leaves
 //!    it to the next run: it never stands in the lock queue holding later readers back for longer.
 //! 5. Every later run makes next month's partition ahead of time, and any month between that is
@@ -34,7 +37,8 @@
 //! The job changes tables, so it needs the role that owns `wearable_sample`. In the compose files the
 //! app connects as a role that owns nothing (deploy/db/app-role.sql): its hourly run only reports
 //! `needs_owner`, and the operator runs `ownhealth partition` in the `admin` service
-//! (deploy/README.md, "Large wearable histories"). Only one run works at a time (an advisory lock).
+//! (deploy/README.md, "Large wearable histories"). An app that connects as the owner runs the whole
+//! job itself, every hour. Only one run works at a time (an advisory lock).
 
 use std::time::Duration;
 
@@ -50,8 +54,8 @@ pub const HIST: &str = "wearable_sample_hist";
 pub const DEFAULT_PART: &str = "wearable_sample_default";
 /// Samples dated at or after the cutoff, kept here between steps 2 and 4.
 pub const AHEAD: &str = "wearable_sample_ahead";
-/// The `check (t < cutoff)` that lets the ATTACH skip its scan.
-const BOUND: &str = "wearable_sample_hist_bound";
+/// The `check (t < cutoff)` that lets the ATTACH skip its scan. A job whose write it refuses waits.
+const BOUND: &str = ownhealth_core::jobs::PARTITION_BOUND;
 /// The indexes step 1 builds, named for the historical partition the table becomes.
 const INDEXES: [(&str, &str); 2] = [
     ("wearable_sample_hist_t_idx", "using brin (t)"),
@@ -190,7 +194,8 @@ impl Report {
 
 /// One run of the job: switch the table past the threshold, or make next month's partition ahead
 /// of time once it is switched. Returns the report; `ok` is false when work is left for a later run
-/// (`busy`: another run or readers held the table; `needs_owner`: this role may not change tables).
+/// (`busy`: another run or another session held the table; `needs_owner`: this role may not change
+/// tables).
 pub async fn run(pool: &PgPool, opts: &Options) -> Result<Value> {
     locked(pool, opts, false).await
 }
@@ -238,20 +243,31 @@ async fn steps(conn: &mut PgConnection, opts: &Options, only_prepare: bool) -> R
     let past = u64::try_from(rows).unwrap_or(0) > opts.threshold;
     if !may_change(conn).await? {
         let state = if past { "needs_owner" } else { "below_threshold" };
-        return Ok(Report {
+        let mut report = Report {
             rows: Some(rows),
             note: past.then(|| {
                 format!("{TABLE} holds more rows than the threshold, and this database role does not own it: run `ownhealth partition` as the database owner")
             }),
             ..Report::of(state)
-        });
+        };
+        pending(conn, &mut report).await?;
+        return Ok(report);
     }
     if !past {
         // a threshold raised after a run began: the check would go on refusing samples, take it back
         let held_back = match current_bound(conn).await? {
             Some(_) => match retrying(conn, opts, |c| Box::pin(take_back(c))).await? {
                 Some(n) => n,
-                None => return Ok(busy(rows)),
+                None => {
+                    return busy(
+                        conn,
+                        Report {
+                            rows: Some(rows),
+                            ..Report::default()
+                        },
+                    )
+                    .await;
+                }
             },
             None => 0,
         };
@@ -294,13 +310,13 @@ async fn steps(conn: &mut PgConnection, opts: &Options, only_prepare: bool) -> R
             if old.is_some() {
                 match retrying(conn, opts, |c| Box::pin(take_back(c))).await? {
                     Some(n) => report.held_back += n,
-                    None => return Ok(busy(rows)),
+                    None => return busy(conn, report).await,
                 }
             }
             let cutoff = cutoff_for(opts.now);
             match retrying(conn, opts, move |c| Box::pin(add_bound(c, cutoff))).await? {
                 Some(n) => report.held_aside = n,
-                None => return Ok(busy(rows)),
+                None => return busy(conn, report).await,
             }
             cutoff
         }
@@ -330,7 +346,7 @@ async fn steps(conn: &mut PgConnection, opts: &Options, only_prepare: bool) -> R
             report.moved_from_default = done.moved;
             report.held_back += done.held_back;
         }
-        None => return Ok(busy(rows)),
+        None => return busy(conn, report).await,
     }
     // statistics for the new parent; the partitions keep their own
     exec(conn, format!("analyze {TABLE}")).await?;
@@ -338,14 +354,45 @@ async fn steps(conn: &mut PgConnection, opts: &Options, only_prepare: bool) -> R
     Ok(report)
 }
 
-fn busy(rows: i64) -> Report {
-    Report {
-        rows: Some(rows),
-        note: Some(
-            "readers held the table for longer than the lock timeout each time: the next run tries again".into(),
-        ),
-        ..Report::of("busy")
-    }
+/// Why a locked step gave up. Any session can hold the lock: a reader or a writer of the table, or of
+/// a table its foreign keys reference.
+const HELD: &str = "another session held the table, or a table it references, for longer than the lock timeout each time: the next run tries again";
+
+/// A run that gave up on a locked step: what it did so far, and the check it leaves when it leaves one.
+async fn busy(conn: &mut PgConnection, report: Report) -> Result<Report> {
+    let mut report = Report {
+        note: Some(HELD.into()),
+        ..report
+    };
+    report.state = "busy";
+    pending(conn, &mut report).await?;
+    Ok(report)
+}
+
+/// When a check of step 2 stands on the plain table, put its cutoff in the report and say in the note
+/// what it means until a run finishes or takes it back.
+async fn pending(conn: &mut PgConnection, report: &mut Report) -> Result<()> {
+    let Some(cutoff) = current_bound(conn).await? else {
+        report.cutoff = None;
+        return Ok(());
+    };
+    report.cutoff = Some(cutoff);
+    let aside: i64 = if exists(conn, AHEAD).await? {
+        sqlx::query_scalar(AssertSqlSafe(format!("select count(*) from {AHEAD}")))
+            .fetch_one(&mut *conn)
+            .await?
+    } else {
+        0
+    };
+    let wait = format!(
+        "Until a run as the table's owner finishes the switch, a sample dated on or after {} is refused and its import waits, and {aside} samples set aside do not show",
+        cutoff.format("%Y-%m-%d")
+    );
+    report.note = Some(match report.note.take() {
+        Some(n) => format!("{n}. {wait}"),
+        None => wait,
+    });
+    Ok(())
 }
 
 /// Postgres's estimate, which autovacuum keeps; an exact count when the table was never analyzed.
@@ -477,7 +524,9 @@ async fn take_back(conn: &mut PgConnection) -> Result<u64> {
 }
 
 /// Move the samples set aside into `wearable_sample` and drop their table. A sample whose profile or
-/// source was deleted meanwhile goes with it.
+/// source was deleted meanwhile goes with it, and so does one whose document was retracted, deleted or
+/// moved to another profile meanwhile: a retraction or a move deletes only the document's samples in
+/// `wearable_sample`, and a moved document's import brings them back on its new profile.
 async fn put_back(conn: &mut PgConnection) -> Result<u64> {
     if !exists(conn, AHEAD).await? {
         return Ok(0);
@@ -486,7 +535,9 @@ async fn put_back(conn: &mut PgConnection) -> Result<u64> {
         conn,
         format!(
             "insert into {TABLE} select h.* from {AHEAD} h where exists (select 1 from profile p where p.id = h.profile_id) \
-             and exists (select 1 from wearable_source s where s.id = h.source_id) on conflict do nothing"
+             and exists (select 1 from wearable_source s where s.id = h.source_id) \
+             and (h.document_id is null or exists (select 1 from document d where d.id = h.document_id \
+             and d.profile_id = h.profile_id and d.status = 'active')) on conflict do nothing"
         ),
     )
     .await?;
@@ -720,9 +771,7 @@ async fn ahead(conn: &mut PgConnection, opts: &Options) -> Result<Report> {
             Ok(report)
         }
         None => Ok(Report {
-            note: Some(
-                "readers held the table for longer than the lock timeout each time: the next run tries again".into(),
-            ),
+            note: Some(HELD.into()),
             ..Report::of("busy")
         }),
     }
