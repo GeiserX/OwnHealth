@@ -5,6 +5,7 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use ownhealth_auth::household::{can_manage, is_household_owner};
+use ownhealth_auth::sessions::{STEP_UP_SECONDS, require_step_up};
 use ownhealth_core::Runtime;
 use ownhealth_core::access::{Principal, accessible_profiles};
 use ownhealth_core::audit::{AuditEvent, write_audit};
@@ -163,6 +164,11 @@ async fn put_consent(
 ) -> ApiResult<Json<Consent>> {
     let mut tx = rt.pool.begin().await?;
     let (household_id, uid) = owner(&mut tx, &p).await?;
+    // Turning collection on widens what is recorded about every member's agent calls, so it needs a
+    // fresh login, like the other household setting. Turning it off narrows it and needs none.
+    if consent.enabled {
+        require_step_up(&mut tx, &p, STEP_UP_SECONDS).await?;
+    }
     sqlx::query(
         "insert into household_setting (household_id, key, value) values ($1, $2, 'false'::jsonb) \
          on conflict (household_id, key) do nothing",

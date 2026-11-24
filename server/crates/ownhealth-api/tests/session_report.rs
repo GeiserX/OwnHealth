@@ -2,7 +2,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use chrono::{DateTime, TimeDelta, Utc};
 use http::{Method, Request, StatusCode, header};
-use ownhealth_auth::sessions::{COOKIE, create_session};
+use ownhealth_auth::sessions::{COOKIE, create_session, create_session_with};
 use ownhealth_core::Runtime;
 use ownhealth_core::audit::{AuditEvent, write_audit_at};
 use ownhealth_core::demo::{Family, create_rivera_family};
@@ -101,6 +101,24 @@ async fn only_the_household_admin_can_read_or_change_consent_and_each_change_is_
     .fetch_one(&w.db.pool)
     .await?;
     assert_eq!(reads, 1, "one audit row for the one report the owner read");
+    Ok(())
+}
+
+#[tokio::test]
+async fn turning_collection_on_needs_a_fresh_login_and_turning_it_off_does_not() -> anyhow::Result<()> {
+    let w = World::new().await?;
+    let mut c = w.db.pool.acquire().await?;
+    let stale = create_session_with(&mut c, w.family.user("alex"), None, None, "passkey", Some(false)).await?;
+    drop(c);
+    let (status, refused) = w.consent(&stale, true).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["detail"]["code"], "step_up_required");
+    assert_eq!(w.report(&w.alex).await?.1["enabled"], false);
+    assert_eq!(w.consent(&w.alex, true).await?.0, StatusCode::OK);
+    assert_eq!(
+        w.consent(&stale, false).await?,
+        (StatusCode::OK, json!({"enabled": false}))
+    );
     Ok(())
 }
 
