@@ -959,3 +959,31 @@ async fn a_study_of_a_deleted_profile_a_restore_brought_back_leaves_orthanc_and_
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_study_orthanc_holds_with_one_instance_missing_is_rebuilt() -> R {
+    let e = env().await?;
+    e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.import().await?;
+    // Orthanc lost one instance of a counted series; every series is still there
+    let lost = e
+        .orthanc
+        .held()
+        .instances
+        .keys()
+        .next()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no instance"))?;
+    Orthanc::new(e.orthanc.config())?.delete_instance(&lost).await?;
+    assert_eq!(e.orthanc.instances_under(U1), 5);
+    assert_eq!(e.orthanc.series_under(U1).len(), 2);
+
+    let swept = e.sweep().await?;
+    assert_eq!(swept["rebuild_profiles"], 1, "{swept}");
+    assert_eq!(e.run(rebuild::JOB).await?, 1);
+    let (state, rebuilt) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "done", "{rebuilt}");
+    assert_eq!(rebuilt["missing"], 0, "{rebuilt}");
+    assert_eq!(e.orthanc.instances_under(U1), 6);
+    Ok(())
+}

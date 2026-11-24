@@ -13,8 +13,8 @@
 //!    back, and its study goes from Orthanc, as the viewer refuses it.
 //! 3. A recorded study keeps only the series its record counts (`fhir.series`). A series an import
 //!    added and then could not record (a retry whose check after the send failed) is deleted.
-//! 4. A recorded study that Orthanc lacks, or holds without a series its record counts (a restore of
-//!    the database, a lost Orthanc volume), queues `imaging.rebuild` for its profile
+//! 4. A recorded study that Orthanc lacks, or holds without a series or an instance its record counts
+//!    (a restore of the database, a lost Orthanc volume), queues `imaging.rebuild` for its profile
 //!    ([`crate::rebuild`]).
 //!
 //! Every deletion happens under the one StudyInstanceUID lock every Orthanc writer takes
@@ -142,11 +142,13 @@ impl Failed {
     }
 }
 
-/// A recorded study: its profile, StudyInstanceUID and the series its record counts.
+/// A recorded study: its profile, StudyInstanceUID, the series its record counts and its FHIR
+/// ImagingStudy (with the instances of each series).
 struct Named {
     profile_id: Uuid,
     uid: String,
     series: BTreeSet<String>,
+    fhir: Value,
 }
 
 /// The SeriesInstanceUIDs of a record's FHIR ImagingStudy.
@@ -205,6 +207,7 @@ async fn sweep(ctx: &JobContext, orthanc: &Orthanc, held: &[String], failed: &mu
                     profile_id,
                     uid,
                     series,
+                    fhir,
                 },
             )
         })
@@ -272,8 +275,8 @@ async fn remove_unnamed(ctx: &JobContext, orthanc: &Orthanc, id: &str) -> Result
     Ok(!still)
 }
 
-/// A recorded study: whether Orthanc lacks it or a series its record counts (so its profile needs a
-/// rebuild), and how many series no record counts it deleted.
+/// A recorded study: whether Orthanc lacks it, or a series or an instance its record counts (so its
+/// profile needs a rebuild), and how many series no record counts it deleted.
 async fn check_recorded(
     ctx: &JobContext,
     orthanc: &Orthanc,
@@ -290,7 +293,9 @@ async fn check_recorded(
         return Ok((true, 0));
     };
     let uids: BTreeSet<&String> = series.iter().map(|(_, uid)| uid).collect();
-    let lacking = study.series.iter().any(|s| !uids.contains(s));
+    // a counted series Orthanc lacks, or one that holds fewer instances than the record counts
+    let lacking = study.series.iter().any(|s| !uids.contains(s))
+        || !crate::rebuild::covers(&crate::rebuild::held_counts(orthanc, id).await?, &study.fhir);
     if series.iter().all(|(_, uid)| study.series.contains(uid)) {
         return Ok((lacking, 0));
     }

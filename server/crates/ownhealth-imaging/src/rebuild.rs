@@ -72,22 +72,32 @@ pub(crate) fn job(ctx: JobContext, job: Job) -> BoxFuture<'static, HandlerResult
 
 /// Whether Orthanc holds study `id` with at least the instances its record counts in every series.
 async fn complete(orthanc: &Orthanc, id: &str, fhir: &Value) -> Result<bool, JobError> {
-    let held: BTreeMap<String, usize> = match orthanc.series_ids(id).await.map_err(retry)? {
-        None => return Ok(false),
-        Some(_) => orthanc
-            .series_of(id)
-            .await
-            .map_err(retry)?
-            .into_iter()
-            .map(|s| (s.uid, s.instances))
-            .collect(),
-    };
+    if orthanc.series_ids(id).await.map_err(retry)?.is_none() {
+        return Ok(false);
+    }
+    Ok(covers(&held_counts(orthanc, id).await?, fhir))
+}
+
+/// The instances Orthanc holds in each series of study `id`, by SeriesInstanceUID.
+pub(crate) async fn held_counts(orthanc: &Orthanc, id: &str) -> Result<BTreeMap<String, usize>, JobError> {
+    Ok(orthanc
+        .series_of(id)
+        .await
+        .map_err(retry)?
+        .into_iter()
+        .map(|s| (s.uid, s.instances))
+        .collect())
+}
+
+/// Whether `held` (instances per series) has at least the instances the record counts in every
+/// series of its FHIR ImagingStudy.
+pub(crate) fn covers(held: &BTreeMap<String, usize>, fhir: &Value) -> bool {
     let counted = fhir["series"].as_array().cloned().unwrap_or_default();
-    Ok(counted.iter().all(|s| {
+    counted.iter().all(|s| {
         let uid = s["uid"].as_str().unwrap_or_default();
         let want = s["numberOfInstances"].as_u64().unwrap_or_default() as usize;
         held.get(uid).is_some_and(|n| *n >= want)
-    }))
+    })
 }
 
 /// Runs one rebuild. Payload: `profile_id`.
