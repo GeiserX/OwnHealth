@@ -173,7 +173,7 @@ pub async fn resolve_checked(host: &str, port: u16, allow_private: bool) -> Resu
 }
 
 /// Send one request under `egress`: the checks every fetch shares. `body` is the content type and the
-/// bytes of a POST. Returns the response and the host, for error messages.
+/// bytes of a POST or PUT. Returns the response and the host, for error messages.
 async fn send(
     method: reqwest::Method,
     url: &str,
@@ -283,6 +283,24 @@ pub async fn post_json(
 ) -> Result<Fetched, NetError> {
     let body = Some(("application/json", body.to_string().into_bytes()));
     let (resp, host) = send(reqwest::Method::POST, url, egress, headers, body).await?;
+    read(resp, &host, egress).await.map_err(|(err, _)| err)
+}
+
+/// PUT `body` as JSON through the same address, redirect and response checks as POST.
+pub async fn put_json(
+    url: &str,
+    egress: &Egress,
+    headers: &[(&str, &str)],
+    body: &serde_json::Value,
+) -> Result<Fetched, NetError> {
+    let body = Some(("application/json", body.to_string().into_bytes()));
+    let (resp, host) = send(reqwest::Method::PUT, url, egress, headers, body).await?;
+    read(resp, &host, egress).await.map_err(|(err, _)| err)
+}
+
+/// DELETE `url` through the same address, redirect and response checks as GET.
+pub async fn delete(url: &str, egress: &Egress, headers: &[(&str, &str)]) -> Result<Fetched, NetError> {
+    let (resp, host) = send(reqwest::Method::DELETE, url, egress, headers, None).await?;
     read(resp, &host, egress).await.map_err(|(err, _)| err)
 }
 

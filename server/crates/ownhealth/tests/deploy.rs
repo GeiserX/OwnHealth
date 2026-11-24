@@ -848,9 +848,8 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
             "{case}: wearables network"
         );
 
-        // The sidecar shares no network with OwnHealth's own containers except ow-db, which holds db
-        // and the sidecar only: OW cannot reach the app (so it cannot forward a client address to it),
-        // only Postgres, where its role opens nothing but its own database.
+        // Only the polling app and the OW API share ow-api. Postgres and vendor egress
+        // stay on their own networks. Caddy is the only trusted proxy in homelab.
         let nets = |s: &str| strings(&services[s]["networks"]);
         let ours: Vec<String> = services
             .as_object()
@@ -867,7 +866,7 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
         for s in OW_ALL {
             for n in nets(s) {
                 assert!(
-                    n == "ow-db" || !ours.contains(&n),
+                    n == "ow-db" || (s == "ow-app" && n == "ow-api") || !ours.contains(&n),
                     "{case}: {s} shares {n} with OwnHealth"
                 );
             }
@@ -876,6 +875,24 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
             !ours.contains(&"ow-db".to_string()),
             "{case}: an OwnHealth service is on ow-db"
         );
+        let mut api_network: Vec<&str> = services
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(s, _)| s.as_str())
+            .filter(|s| nets(s).contains(&"ow-api".to_string()))
+            .collect();
+        api_network.sort_unstable();
+        assert_eq!(api_network, ["app", "ow-app"], "{case}: ow-api network members");
+        assert_eq!(doc["networks"]["ow-api"]["internal"], true, "{case}: ow-api network");
+        if case == "homelab" {
+            assert_eq!(
+                services["app"]["environment"]["OWNHEALTH_TRUSTED_PROXIES"],
+                services["caddy"]["networks"]["front"]["ipv4_address"],
+                "{case}: only Caddy can forward addresses"
+            );
+            assert_eq!(nets("caddy"), ["front"], "{case}: Caddy only uses the front network");
+        }
         assert!(nets("db").contains(&"ow-db".to_string()), "{case}: db is not on ow-db");
         assert_eq!(doc["networks"]["ow-db"]["internal"], true, "{case}: ow-db network");
         for s in ["ow-db-init", "ow-app", "ow-worker", "ow-beat"] {

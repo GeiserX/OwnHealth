@@ -64,6 +64,18 @@ enum Cmd {
         /// The ClinVar VCF, for example clinvar_20261005.vcf.gz.
         path: PathBuf,
     },
+    /// Link an Open Wearables user to a profile. Vincula un usuario de Open Wearables a un perfil.
+    OpenwearablesConnect {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        admin_email: String,
+        /// JSON file with admin_password and api_key. Archivo JSON con admin_password y api_key.
+        #[arg(long, default_value = "/dev/stdin")]
+        credentials_file: PathBuf,
+    },
     /// Encrypt what an install stored before profile keys: each older file under the key of every
     /// profile or pending item that reads it, and each older refresh token under its profile's key.
     /// The job removes a plain copy only when no ownerless reader still needs it. The JSON report
@@ -200,6 +212,33 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
             } else {
                 ExitCode::SUCCESS
             })
+        }
+        Cmd::OpenwearablesConnect {
+            profile,
+            user,
+            admin_email,
+            credentials_file,
+        } => {
+            use ownhealth_core::secrets::SecretString;
+            let rt = Runtime::new(settings)?;
+            app::check_profile_keys(&rt).await?;
+            let contents = tokio::fs::read(credentials_file).await?;
+            let credentials: serde_json::Value = serde_json::from_slice(&contents).unwrap_or_default();
+            let (password, key) = credentials["admin_password"]
+                .as_str()
+                .zip(credentials["api_key"].as_str())
+                .ok_or_else(|| anyhow::anyhow!("Invalid credentials file. / Archivo de credenciales no válido."))?;
+            let source = ownhealth_devices::openwearables::connect(
+                &rt.job_context(),
+                profile.parse()?,
+                user.parse()?,
+                &admin_email,
+                &SecretString::new(password),
+                &SecretString::new(key),
+            )
+            .await?;
+            println!("{source}");
+            Ok(ExitCode::SUCCESS)
         }
         Cmd::SealLegacy { dry_run } => {
             let rt = Runtime::new(settings)?;

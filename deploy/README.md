@@ -101,6 +101,24 @@ Then add `wearables` to the `COMPOSE_PROFILES` line in `.env`: `COMPOSE_PROFILES
 
 The one-shot `ow-db-init` creates the `openwearables` database and role, then OW migrates its tables. It starts only once the app is healthy. So if `openwearables.env` is missing, or a line in it is empty, only the sidecar stops: OwnHealth keeps running, and `docker compose logs ow-db-init ow-app` names the missing variable. Fix the file and run `docker compose up -d` again.
 
+**Link a profile.** Create a dedicated user and an API key in Open Wearables. Connect the person's vendor accounts to that user. Save the developer password and API key in a private JSON file, with fields `admin_password` and `api_key`. Pass the file on standard input.
+
+```sh
+docker compose exec -T app ownhealth openwearables-connect \
+  --profile "OWNHEALTH_PROFILE_UUID" --user "OPEN_WEARABLES_USER_UUID" \
+  --admin-email "OPEN_WEARABLES_DEVELOPER_EMAIL" < ow-credentials.json
+```
+
+Setup turns off providers outside OwnHealth's allowlist. The first pull asks for 30 days. Later pulls re-read seven days before the last completed pull. If you delete the profile, OwnHealth removes its linked Open Wearables user on the next scheduler cycle. It retries if the sidecar is down.
+
+**Vincular un perfil.** Crea un usuario dedicado y una clave de API en Open Wearables. Conecta las cuentas de la persona a ese usuario. Guarda la contraseña de administración y la clave de API en un archivo JSON privado, en los campos `admin_password` y `api_key`. Pasa el archivo por la entrada estándar con el comando anterior.
+
+La configuración desactiva los proveedores que no admite OwnHealth. La primera sincronización solicita 30 días. Las siguientes vuelven a leer los siete días anteriores a la última sincronización completa. Si borras el perfil, OwnHealth elimina su usuario de Open Wearables en el siguiente ciclo. Si el servicio no responde, vuelve a intentarlo.
+
+The homelab stack trusts forwarded addresses from Caddy's IP on the `front` network. If that network overlaps with another network, set `OWNHEALTH_CADDY_SUBNET` and `OWNHEALTH_CADDY_IP` to an available subnet and an address inside it.
+
+Si la red `front` coincide con otra red, configura `OWNHEALTH_CADDY_SUBNET` con una subred libre y `OWNHEALTH_CADDY_IP` con una dirección de esa subred. La aplicación solo confía en las direcciones que reenvía Caddy desde esa IP.
+
 **Change its database password.** Write the new `OPENWEARABLES_DB_PASSWORD` in `openwearables.env` and run `docker compose up -d`. It sets the new password on the role and recreates the sidecar with it.
 
 **Turn it off.** Take `wearables` out of `COMPOSE_PROFILES`, then `docker compose stop ow-app ow-worker ow-beat ow-redis`. An `up -d` without the profile leaves the running sidecar alone. Its database stays in the `ownhealth-pg` volume, so turning the profile on again keeps the vendor connections.

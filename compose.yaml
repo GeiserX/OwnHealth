@@ -58,6 +58,7 @@ services:
       # The `imaging` profile (below): where Orthanc is, and the app's password there. Empty: imaging off.
       OWNHEALTH_ORTHANC_URL: ${OWNHEALTH_ORTHANC_URL:-}
       OWNHEALTH_ORTHANC_PASSWORD: ${OWNHEALTH_ORTHANC_PASSWORD:-}
+    networks: [default, ow-api]
     ports:
       - "127.0.0.1:${OWNHEALTH_HTTP_PORT:-8080}:8080"
     secrets: [secrets_key]
@@ -151,9 +152,7 @@ services:
   # - Fenced off: no published port, none of OwnHealth's secrets (never .env), and its own database and
   #   role on the same Postgres (deploy/db/ow-role.sql). That role cannot connect to the ownhealth
   #   database. OW's database is a cache, so `ownhealth backup` leaves it out.
-  # - Off OwnHealth's network: the sidecar shares only ow-db with OwnHealth, and db is the one OwnHealth
-  #   container on it, so OW and the app cannot reach each other. OW reaches the vendors through
-  #   ow-egress.
+  # - The app calls ow-app:8000 on ow-api. The sidecar reaches Postgres on ow-db and vendors on ow-egress.
   # - Redis is OW's Celery broker, on an internal network that only the sidecar joins. It keeps nothing
   #   on disk: a restart drops queued syncs, and beat queues them again.
   ow-db-init:
@@ -215,7 +214,7 @@ services:
       timeout: 5s
       retries: 6
       start_period: 300s
-    networks: [ow-db, wearables, ow-egress]
+    networks: [ow-db, wearables, ow-egress, ow-api]
 
   ow-worker:
     profiles: [wearables]
@@ -261,6 +260,8 @@ services:
     networks: [wearables]
 
 networks:
+  ow-api:
+    internal: true # the OwnHealth poller and the Open Wearables API
   wearables:
     internal: true # no route out: Redis reaches nothing, and only the sidecar reaches Redis
   ow-db:
