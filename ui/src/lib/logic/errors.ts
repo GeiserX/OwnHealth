@@ -37,7 +37,9 @@ const PATTERNS: [RegExp, string][] = [
 	[/^not a readable FIT file: it is cut short/i, 'err_fit_cut'],
 	[/^not a readable FIT file/i, 'err_fit_damaged'],
 	[/^the FIT file holds no activity/i, 'err_fit_empty'],
-	[/^the FIT file is larger than/i, 'err_fit_too_big']
+	[/^the FIT file is larger than/i, 'err_fit_too_big'],
+	// an import that waits for the monthly split of the wearable samples (server partition job, slice 65)
+	[/^some samples are dated on or after the day the wearable samples are being split by month/i, 'err_wearable_split_wait']
 ];
 
 // The browser's WebAuthn refusals (a DOMException name), which it words in its own language.

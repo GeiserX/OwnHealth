@@ -2,8 +2,9 @@
 //!
 //! Workers claim one job with `SELECT ... FOR UPDATE SKIP LOCKED`, run its handler, and mark it
 //! done. A failure retries with backoff (2^attempts * 30 s); after max_attempts the job is `dead`
-//! and a `job_failed` review item appears. Handlers must be idempotent: a job may run twice after
-//! a crash.
+//! and a `job_failed` review item appears. An error that waits for something outside the job
+//! ([`JobError::waits`]: the wearable_sample partition switch) runs again after an hour and spends
+//! no attempt. Handlers must be idempotent: a job may run twice after a crash.
 //!
 //! Lanes register their kinds with `register_handler` from their crate's `register()`:
 //!
@@ -31,6 +32,12 @@ pub const LEASE_SECONDS: f64 = 300.0;
 /// `run_one` renews the lease this often while a handler runs.
 pub const HEARTBEAT_SECONDS: u64 = 60;
 pub const BACKOFF_BASE_SECONDS: f64 = 30.0;
+/// How long a job whose error [`JobError::waits`] waits before it runs again.
+pub const WAIT_SECONDS: f64 = 3600.0;
+/// The check the wearable_sample partition job (ownhealth-ops partition.rs) sets between its preparing
+/// steps and the switch: it refuses samples dated on or after a cutoff. A job it refuses waits for the
+/// switch, which the owner's next run makes, instead of spending its attempts.
+pub const PARTITION_BOUND: &str = "wearable_sample_hist_bound";
 const REAP_EVERY_SECONDS: u64 = 60;
 
 /// The job kinds the Python backend registers; the Rust lanes register the same names.
@@ -121,6 +128,9 @@ pub struct JobError {
     pub message: String,
     /// A retry cannot help (bad input): the job goes straight to dead.
     pub permanent: bool,
+    /// Not this job's failure: something it needs is not ready yet. It runs again after
+    /// [`WAIT_SECONDS`] without spending an attempt.
+    pub waits: bool,
 }
 
 impl JobError {
@@ -129,6 +139,7 @@ impl JobError {
             type_name: "JobError".into(),
             message: message.into(),
             permanent: false,
+            waits: false,
         }
     }
 
@@ -137,6 +148,7 @@ impl JobError {
             type_name: "PermanentJobError".into(),
             message: message.into(),
             permanent: true,
+            waits: false,
         }
     }
 
@@ -146,6 +158,7 @@ impl JobError {
             type_name: type_name.into(),
             message: message.into(),
             permanent: false,
+            waits: false,
         }
     }
 
@@ -158,6 +171,18 @@ impl JobError {
 impl From<crate::Error> for JobError {
     fn from(e: crate::Error) -> Self {
         use crate::Error as E;
+        if let E::Db(sqlx::Error::Database(d)) = &e
+            && d.constraint() == Some(PARTITION_BOUND)
+        {
+            return JobError {
+                waits: true,
+                ..JobError::typed(
+                    "PartitionPendingError",
+                    "some samples are dated on or after the day the wearable samples are being split by month: \
+                     the import runs again in an hour",
+                )
+            };
+        }
         let type_name = match &e {
             E::AccessDenied { .. } => "AccessDenied",
             E::Review(_) => "ReviewError",
@@ -338,22 +363,29 @@ async fn record_failure(
     err: &JobError,
     guard: Guard<'_>,
 ) -> sqlx::Result<&'static str> {
-    let dead = job.attempts >= job.max_attempts || err.permanent;
+    let dead = !err.waits && (job.attempts >= job.max_attempts || err.permanent);
     let (guard_sql, worker) = match guard {
         Guard::Worker(w) => ("locked_by = $3", Some(w)),
         Guard::Expired => ("locked_until < now() and $3::text is null", None),
     };
     let text = err.text();
     if !dead {
-        let backoff = 2f64.powi(job.attempts) * BACKOFF_BASE_SECONDS;
+        // a wait gives back the attempt the claim took
+        let (backoff, given_back) = if err.waits {
+            (WAIT_SECONDS, 1)
+        } else {
+            (2f64.powi(job.attempts) * BACKOFF_BASE_SECONDS, 0)
+        };
         let n = sqlx::query(sqlx::AssertSqlSafe(format!(
             "update job set state = 'queued', locked_by = null, locked_until = null, last_error = $2, \
-             run_after = now() + make_interval(secs => $4) where id = $1 and state = 'running' and {guard_sql}"
+             run_after = now() + make_interval(secs => $4), attempts = attempts - $5 \
+             where id = $1 and state = 'running' and {guard_sql}"
         )))
         .bind(job.id)
         .bind(&text)
         .bind(worker)
         .bind(backoff)
+        .bind(given_back)
         .execute(&mut *conn)
         .await?
         .rows_affected();

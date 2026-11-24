@@ -319,6 +319,7 @@ export const dict = {
 		err_fit_empty: "This FIT file holds no activity: no heart rate, distance or energy (a course or a settings file, for example).",
 		err_fit_too_big: "This FIT file is too large for one activity (over 32 MB once unpacked).",
 		// ---- end FIT activity files ----
+		err_wearable_split_wait: "This file holds samples dated ahead of a date the server is preparing its wearable data for. The import waits and runs again in an hour.",
 		i2_up_genome: "Genome results come from",
 		i2_up_sending: "Uploading…",
 		i2_up_none: "None of these files can be imported.",
@@ -2422,6 +2423,7 @@ export const dict = {
 		err_fit_empty: "Este archivo FIT no contiene ninguna actividad: ni frecuencia cardiaca, ni distancia, ni energía (por ejemplo, una ruta o un archivo de ajustes).",
 		err_fit_too_big: "Este archivo FIT es demasiado grande para una actividad (más de 32 MB descomprimido).",
 		// ---- end FIT activity files ----
+		err_wearable_split_wait: "Este archivo tiene muestras con fecha posterior a una fecha para la que el servidor está preparando los datos de wearables. La importación espera y se repite dentro de una hora.",
 		i2_up_genome: "Los resultados genómicos vienen de",
 		i2_up_sending: "Subiendo…",
 		i2_up_none: "Ninguno de estos archivos se puede importar.",
