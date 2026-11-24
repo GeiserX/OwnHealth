@@ -123,9 +123,9 @@ impl Issue {
                 "bluebutton_not_granted",
                 "the Medicare sign-in did not allow this search".into(),
             ),
-            Self::Status(status) => ("answered", format!("the server answered {status}")),
+            Self::Status(status) => ("search_failed", format!("the server answered {status}")),
             Self::Request => ("bluebutton_request", "the request to CMS failed".into()),
-            Self::NotBundle => ("not_bundle", "the answer is not a FHIR search result".into()),
+            Self::NotBundle => ("not_fhir", "the answer is not a FHIR search result".into()),
             Self::BadEntry => (
                 "unexpected_resource",
                 "a result did not match the search and was skipped".into(),

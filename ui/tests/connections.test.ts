@@ -234,6 +234,25 @@ test('every stop and problem code of the SMART poller reads in es and en', () =>
 	assert.deepEqual(missing, []);
 });
 
+const bluebutton = read('../../server/crates/ownhealth-ingest-structured/src/bluebutton.rs');
+const blueCodes = new Set<string>();
+for (const m of bluebutton.matchAll(/=> \(\s*"([a-z_]+)"/g)) blueCodes.add(m[1]);
+for (const m of bluebutton.matchAll(/"([a-z][a-z_]+): /g)) blueCodes.add(m[1]);
+
+test('every stop and problem code of the Blue Button poller reads in es and en', () => {
+	// the gate can fail: problem codes and stop codes are both found
+	for (const c of ['bluebutton_not_granted', 'patient_reference', 'repeated_page', 'bluebutton_no_answer', 'token_unreachable', 'profile_changed']) {
+		assert.ok(blueCodes.has(c), `the scan missed ${c}`);
+	}
+	const missing = [...blueCodes].filter((c) => {
+		const text = `${c}: ExplanationOfBenefit: the server answered 503`;
+		const en = runWords(text, hasKey, sayIn('en'));
+		const es = runWords(text, hasKey, sayIn('es'));
+		return !en || !es || en === es || /\{\w+\}/.test(en + es);
+	});
+	assert.deepEqual(missing, []);
+});
+
 test('after a connect the rows are read again until the first pull of the new grant finishes', async () => {
 	// the run is still going on the first two reads, and has finished on the third
 	const answers = [conn({ last_run_status: null }), conn({ last_run_status: null }), conn({ last_run_status: 'partial' })];
