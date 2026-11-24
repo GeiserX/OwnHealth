@@ -13,7 +13,7 @@ pub const DIRECTORY_LIMIT: &str = "ZIP directory exceeds the metadata budget";
 // Allow room for folders and containers in addition to the importer's file budget. The directory
 // budget includes the 46-byte header, extra fields and comments, plus the separate name budget.
 const MAX_ENTRIES: u64 = 2 * GARMIN_MAX_FILES as u64;
-const MAX_DIRECTORY_BYTES: u64 = MAX_ENTRIES * (46 + 128) + GARMIN_MAX_NAME_BYTES as u64;
+pub const MAX_DIRECTORY_BYTES: u64 = MAX_ENTRIES * (46 + 128) + GARMIN_MAX_NAME_BYTES as u64;
 const BAD_DIRECTORY: ZipError = ZipError::InvalidArchive(std::borrow::Cow::Borrowed("Invalid ZIP directory"));
 const END_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
 const END_BYTES: usize = 22;

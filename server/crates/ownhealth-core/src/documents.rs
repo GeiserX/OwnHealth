@@ -878,6 +878,25 @@ pub async fn rekey_document(
 mod tests {
     use super::*;
 
+    /// An end record alone whose central directory is one byte over the upload budget.
+    fn end_record_over_the_directory_budget() -> Vec<u8> {
+        let mut end = b"PK\x05\x06".to_vec();
+        for field in [0u16, 0, 1, 1] {
+            end.extend(field.to_le_bytes());
+        }
+        let size = u32::try_from(crate::zip_directory::MAX_DIRECTORY_BYTES + 1).expect("budget fits a ZIP32 size");
+        end.extend(size.to_le_bytes());
+        end.extend(0u32.to_le_bytes());
+        end.extend(0u16.to_le_bytes());
+        end
+    }
+
+    #[test]
+    fn upload_sniff_refuses_a_zip_directory_over_the_budget() {
+        let zip = std::io::Cursor::new(end_record_over_the_directory_budget());
+        assert_eq!(classify_zip(zip), "zip_directory_limit");
+    }
+
     #[test]
     fn upload_sniff_keeps_the_blocking_task_error_typed() {
         let function = include_str!("documents.rs")

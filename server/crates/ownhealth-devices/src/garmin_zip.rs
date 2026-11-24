@@ -856,6 +856,39 @@ pub fn register() {
 mod tests {
     use super::*;
 
+    /// An end record alone whose central directory is one byte over the upload budget.
+    fn end_record_over_the_directory_budget() -> Vec<u8> {
+        let mut end = b"PK\x05\x06".to_vec();
+        for field in [0u16, 0, 1, 1] {
+            end.extend(field.to_le_bytes());
+        }
+        let size = u32::try_from(zip_directory::MAX_DIRECTORY_BYTES + 1).expect("budget fits a ZIP32 size");
+        end.extend(size.to_le_bytes());
+        end.extend(0u32.to_le_bytes());
+        end.extend(0u16.to_le_bytes());
+        end
+    }
+
+    #[test]
+    fn an_export_whose_directory_is_over_the_budget_is_refused_as_too_large() {
+        let opened = open(std::io::Cursor::new(end_record_over_the_directory_budget()));
+        assert!(matches!(opened, Err(Error::Upload(ref code)) if code == LIMIT));
+    }
+
+    #[test]
+    fn an_uploaded_files_part_whose_directory_is_over_the_budget_refuses_the_export() -> anyhow::Result<()> {
+        use std::io::Cursor;
+        use zip::write::SimpleFileOptions;
+
+        let mut outer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        outer.start_file("UploadedFiles_1.zip", SimpleFileOptions::default())?;
+        outer.write_all(&end_record_over_the_directory_budget())?;
+        let mut archive = open(outer.finish()?)?;
+        let scanned = scan(&mut archive, None, &mut Budget::default(), &mut Report::default());
+        assert!(matches!(scanned, Err(Error::Upload(ref code)) if code == LIMIT));
+        Ok(())
+    }
+
     #[test]
     fn archive_limits_count_across_nested_archives() -> anyhow::Result<()> {
         let mut budget = Budget::default();
