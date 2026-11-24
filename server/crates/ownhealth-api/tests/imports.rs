@@ -1465,8 +1465,7 @@ async fn round_5_copied_narrative_keeps_its_source_section_security() -> R {
         ),
         (
             "2085-9",
-            r##"<confidentialityCode code="M" codeSystem="2.16.840.1.113883.5.25"/>
-            <value xsi:type="PQ" value="51" unit="mg/dL"/>
+            r##"<value xsi:type="PQ" value="51" unit="mg/dL"/>
             <referenceRange><observationRange><text><reference value="#range"/></text></observationRange></referenceRange>"##,
         ),
         ("2345-7", r#"<value xsi:type="PQ" value="92" unit="mg/dL"/>"#),
@@ -1489,6 +1488,7 @@ async fn round_5_copied_narrative_keeps_its_source_section_security() -> R {
           <component><structuredBody>
             <component><section><templateId root="2.16.840.1.113883.10.20.22.2.3.1"/><title>Results</title>
               <entry><organizer classCode="BATTERY" moodCode="EVN"><id root="1.2.3" extension="lab"/>
+                <confidentialityCode code="M" codeSystem="2.16.840.1.113883.5.25"/>
                 <statusCode code="completed"/>{components}
               </organizer></entry>
             </section></component>
@@ -1562,6 +1562,9 @@ async fn round_5_copied_narrative_keeps_its_source_section_security() -> R {
                 .collect()
         })
         .collect();
-    assert_eq!(security_codes, [vec!["R", "PSY"], vec!["M", "R", "PSY"], vec![]]);
+    assert_eq!(
+        security_codes,
+        [vec!["M", "R", "PSY"], vec!["M", "R", "PSY"], vec!["M"]]
+    );
     Ok(())
 }
