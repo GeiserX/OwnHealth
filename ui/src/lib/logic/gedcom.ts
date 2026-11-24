@@ -34,7 +34,8 @@ function decodeAnsel(bytes: Uint8Array): string {
 /**
  * Each line as UTF-8 when it reads as UTF-8, else as Windows-1252: one stray byte then spoils one name,
  * not every accented name of the file, and a file whose `1 CHAR` says UTF-8 but holds ANSI still reads.
- * A line break (0x0A) is never inside a UTF-8 or one-byte character.
+ * A line ends at CR, LF or CRLF, as the server reads it; neither byte (0x0D, 0x0A) is ever inside a
+ * UTF-8 or one-byte character.
  */
 function decodeLines(bytes: Uint8Array): string {
 	const strict = new TextDecoder('utf-8', { fatal: true });
@@ -42,8 +43,10 @@ function decodeLines(bytes: Uint8Array): string {
 	let out = '';
 	let start = 0;
 	while (start < bytes.length) {
-		const nl = bytes.indexOf(0x0a, start);
-		const end = nl < 0 ? bytes.length : nl + 1;
+		let end = start;
+		while (end < bytes.length && bytes[end] !== 0x0a && bytes[end] !== 0x0d) end++;
+		if (bytes[end] === 0x0d && bytes[end + 1] === 0x0a) end++;
+		end = Math.min(end + 1, bytes.length);
 		const line = bytes.subarray(start, end);
 		try {
 			out += strict.decode(line);

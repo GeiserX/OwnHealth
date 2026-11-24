@@ -87,6 +87,13 @@ test('one stray byte in a UTF-8 tree keeps every other accented name', () => {
 		...enc(' /Vexlorn/\r\n0 TRLR\r\n')
 	]);
 	assert.deepEqual(namesByPosition(decodeTree(crlf)), ['Ilsabet Núñez', 'René Vexlorn']);
+	// the same with old Mac line ends (CR alone): each line still decodes on its own
+	const cr = new Uint8Array([
+		...enc('0 HEAD\r0 @I1@ INDI\r1 NAME Ilsabet /Núñez/\r0 @I2@ INDI\r1 NAME Ren'),
+		0xe9,
+		...enc(' /Vexlorn/\r0 TRLR\r')
+	]);
+	assert.deepEqual(namesByPosition(decodeTree(cr)), ['Ilsabet Núñez', 'René Vexlorn']);
 });
 
 test('the picker finds by name or birth year, and shows no names when the counts differ', () => {
