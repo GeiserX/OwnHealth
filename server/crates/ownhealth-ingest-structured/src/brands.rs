@@ -664,27 +664,24 @@ pub struct Hit {
     pub vendor: String,
 }
 
-/// The longest query and the most words a search takes.
+/// The longest query a search takes (which also bounds its number of words).
 pub const QUERY_MAX: usize = 100;
-pub const QUERY_WORDS: usize = 8;
 pub const LIMIT_MAX: i64 = 50;
 
-/// The words of a query as `ILIKE` patterns, `%`, `_` and `\` taken literally. None when the query
-/// has fewer than 2 characters or more than [`QUERY_MAX`].
+/// A word for `ILIKE`, its `%`, `_` and `\` taken literally.
+fn escape_like(word: &str) -> String {
+    word.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
+/// Every word of a query as an `ILIKE` pattern (see [`escape_like`]). None when the query has fewer
+/// than 2 characters or more than [`QUERY_MAX`].
 pub fn query_patterns(q: &str) -> Option<Vec<String>> {
     let q = q.trim();
     let n = q.chars().count();
     if !(2..=QUERY_MAX).contains(&n) {
         return None;
     }
-    let words: Vec<String> = q
-        .split_whitespace()
-        .take(QUERY_WORDS)
-        .map(|w| {
-            let escaped = w.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-            format!("%{escaped}%")
-        })
-        .collect();
+    let words: Vec<String> = q.split_whitespace().map(|w| format!("%{}%", escape_like(w))).collect();
     (!words.is_empty()).then_some(words)
 }
 
@@ -700,7 +697,8 @@ pub async fn search(
     let Some(patterns) = query_patterns(q) else {
         return Ok(Vec::new());
     };
-    let prefix = format!("{}%", patterns[0].trim_start_matches('%').trim_end_matches('%'));
+    let first = q.split_whitespace().next().unwrap_or_default();
+    let prefix = format!("{}%", escape_like(first));
     Ok(sqlx::query_as(
         "select b.name, b.endpoint, b.state, b.vendor from fhir_brand b join source s on s.id = b.source_id \
          where s.household_id = $1 and s.kind = $2 and b.name ilike all($3::text[]) \

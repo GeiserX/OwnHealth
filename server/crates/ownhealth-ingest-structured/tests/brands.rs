@@ -783,3 +783,37 @@ async fn a_vendor_that_never_loaded_reads_missing_and_stale_and_the_fixed_entrie
     assert!(d.ready && d.stale, "{d:?}");
     Ok(())
 }
+
+#[tokio::test]
+async fn every_word_of_a_long_query_counts_and_a_literal_percent_still_ranks_by_prefix() -> R {
+    let f = fx().await?;
+    let mut tx = f.e.db.pool.begin().await?;
+    let (id, _) = brands::ensure_source(&mut tx, f.fam.household_id, None).await?;
+    tx.commit().await?;
+    let entries = [
+        "Clínica 50%",
+        "50% Clínica Rivera Norte",
+        "Uno Dos Tres Cuatro Cinco Seis Siete Ocho Nueve",
+    ]
+    .map(|n| brands::Brand {
+        name: n.into(),
+        endpoint: "https://fhir.rivera.example/r4/".into(),
+        state: None,
+    });
+    let mut c = f.e.db.pool.acquire().await?;
+    brands::replace(&mut c, id, "epic", &entries).await?;
+    // the name that starts with "50%" comes first, although it is longer
+    let names: Vec<String> = f.hits("50%").await?.into_iter().map(|h| h.name).collect();
+    assert_eq!(names, vec!["50% Clínica Rivera Norte", "Clínica 50%"]);
+    // the ninth word counts like the first eight
+    assert_eq!(
+        f.hits("uno dos tres cuatro cinco seis siete ocho nueve").await?.len(),
+        1
+    );
+    assert!(
+        f.hits("uno dos tres cuatro cinco seis siete ocho diez")
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
