@@ -2280,7 +2280,10 @@ async fn round_eleven_a_closed_profile_stays_closed_after_another_backup_and_res
 
     // a manifest from before keys.closed: the profile gets no row, as it did then
     let mut old = manifest(&next)?;
-    old["keys"].as_object_mut().expect("keys is a map").remove("closed");
+    old["keys"]
+        .as_object_mut()
+        .expect("keys is a map")
+        .shift_remove("closed");
     write_manifest(&next, &old)?;
     let db = TestDb::empty().await?;
     let s = stack(&db, "old-manifest")?;

@@ -1315,11 +1315,13 @@ impl BlobStore {
     }
 }
 
+#[cfg(test)]
+type PartHook = Box<dyn FnOnce(&Path)>;
+
 // Run with the `.part` path right before [`BlobStore::place`] renames it, in this test thread only.
 #[cfg(test)]
 thread_local! {
-    static BEFORE_PLACE_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
-        const { std::cell::RefCell::new(None) };
+    static BEFORE_PLACE_RENAME: std::cell::RefCell<Option<PartHook>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The last step of [`BlobStore::place`]: the `.part` file takes the blob's name.
