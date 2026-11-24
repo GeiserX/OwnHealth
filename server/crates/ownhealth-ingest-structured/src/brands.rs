@@ -411,19 +411,19 @@ pub fn check_count(bundle: &Bundle, brands: &[Brand]) -> Result<(), FileError> {
 
 // ---------------------------------------------------------------- storage ----
 
-/// Replaces one vendor's entries of this source and stamps its feed, in one transaction: a reader
-/// sees the old copy or the new one, never a mix. Locks the source row, so two runs of one source
-/// (a requeued job) replace one after the other.
+/// Replaces one vendor's entries of this source and stamps its feed. The caller runs it inside one
+/// transaction per vendor, so a reader sees the old copy or the new one, never a mix, and a failed
+/// vendor leaves the others. Locks the source row, so two runs of one source (a requeued job)
+/// replace one after the other.
 pub async fn replace(
     conn: &mut PgConnection,
     source_id: Uuid,
     vendor: &str,
     brands: &[Brand],
 ) -> ownhealth_core::Result<()> {
-    let mut tx = sqlx::Connection::begin(&mut *conn).await?;
     let exists: Option<Uuid> = sqlx::query_scalar("select id from source where id = $1 for update")
         .bind(source_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await?;
     if exists.is_none() {
         return Err(ownhealth_core::Error::NotFound("Unknown source.".into()));
@@ -435,12 +435,12 @@ pub async fn replace(
     .bind(source_id)
     .bind(vendor)
     .bind(i32::try_from(brands.len()).unwrap_or(i32::MAX))
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
     sqlx::query("delete from fhir_brand where source_id = $1 and vendor = $2")
         .bind(source_id)
         .bind(vendor)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     for chunk in brands.chunks(INSERT_CHUNK) {
         let names: Vec<&str> = chunk.iter().map(|b| b.name.as_str()).collect();
@@ -455,10 +455,9 @@ pub async fn replace(
         .bind(&names)
         .bind(&endpoints)
         .bind(&states)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 
@@ -509,10 +508,11 @@ async fn refresh(
         .map_err(|e| problem(vendor, "unreadable", e))?
         .map_err(|e| problem(vendor, "unreadable", e))?;
     check_count(&bundle, &brands).map_err(|e| problem(vendor, "too_few", e))?;
-    let mut conn = ctx.pool.acquire().await.map_err(|e| problem(vendor, "store", e))?;
-    replace(&mut conn, source.id, vendor, &brands)
+    let mut tx = ctx.pool.begin().await.map_err(|e| problem(vendor, "store", e))?;
+    replace(&mut tx, source.id, vendor, &brands)
         .await
         .map_err(|e| problem(vendor, "store", e))?;
+    tx.commit().await.map_err(|e| problem(vendor, "store", e))?;
     Ok(brands.len())
 }
 
@@ -530,14 +530,15 @@ pub async fn poll_brands(ctx: JobContext, source: Source) -> Result<RunOutcome, 
             Err(p) => out.problems.push(p),
         }
     }
-    let mut conn = ctx.pool.acquire().await?;
     for (vendor, name, endpoint) in SINGLES {
         let one = [Brand {
             name: name.into(),
             endpoint: endpoint.into(),
             state: None,
         }];
-        replace(&mut conn, source.id, vendor, &one).await?;
+        let mut tx = ctx.pool.begin().await?;
+        replace(&mut tx, source.id, vendor, &one).await?;
+        tx.commit().await?;
     }
     Ok(out)
 }

@@ -800,8 +800,9 @@ async fn every_word_of_a_long_query_counts_and_a_literal_percent_still_ranks_by_
         endpoint: "https://fhir.rivera.example/r4/".into(),
         state: None,
     });
-    let mut c = f.e.db.pool.acquire().await?;
-    brands::replace(&mut c, id, "epic", &entries).await?;
+    let mut tx = f.e.db.pool.begin().await?;
+    brands::replace(&mut tx, id, "epic", &entries).await?;
+    tx.commit().await?;
     // the name that starts with "50%" comes first, although it is longer
     let names: Vec<String> = f.hits("50%").await?.into_iter().map(|h| h.name).collect();
     assert_eq!(names, vec!["50% Clínica Rivera Norte", "Clínica 50%"]);
