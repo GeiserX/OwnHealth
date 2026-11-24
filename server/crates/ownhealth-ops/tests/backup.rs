@@ -2156,7 +2156,11 @@ async fn round_ten_a_profile_the_backup_holds_no_key_for_makes_a_new_key_after_a
     s3.keyring_dir = Some(s1.keyring_path());
     let report = ownhealth_ops::restore(&s3, &keyed).await?;
     assert_eq!(report["keys"]["shredded"], serde_json::json!([alex]), "{report:#}");
-    assert_eq!(shredded_row(&db, alex).await?, Some(true), "the deleted key's row is not shredded");
+    assert_eq!(
+        shredded_row(&db, alex).await?,
+        Some(true),
+        "the deleted key's row is not shredded"
+    );
     let refused = BlobStore::for_settings(&s3)?.put_bytes(BlobOwner::Profile(alex), &later);
     assert!(matches!(refused, Err(BlobError::Key(_))), "{refused:?}");
     Ok(())
@@ -2169,7 +2173,10 @@ async fn round_ten_an_uppercase_key_id_is_refused_as_a_bad_manifest() -> R {
     let l = live().await?;
     let mut m = manifest(&l.archive)?;
     let id = l.alex.to_string();
-    let lower = m["keys"]["key_ids"][&id].as_str().expect("Alex has a key id").to_string();
+    let lower = m["keys"]["key_ids"][&id]
+        .as_str()
+        .expect("Alex has a key id")
+        .to_string();
     let upper = lower.to_uppercase();
     assert_ne!(upper, lower);
     m["keys"]["key_ids"][&id] = Value::String(upper);
