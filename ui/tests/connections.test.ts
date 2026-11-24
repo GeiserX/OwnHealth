@@ -8,6 +8,7 @@ import {
 	GRANT_SOON_DAYS,
 	callbackOutcome,
 	canReconnect,
+	cardTitle,
 	connectionState,
 	connectorErrorKey,
 	daysLeft,
@@ -162,6 +163,17 @@ test('every connector code reads in es and en', () => {
 	const es = dict.es as Record<string, string>;
 	const missing = [...codes, 'unknown'].filter((c) => !en['con_err_' + c] || !es['con_err_' + c] || en['con_err_' + c] === es['con_err_' + c]);
 	assert.deepEqual(missing, []);
+});
+
+test('the provider directory the app makes is titled in the reader\'s language; a named connection keeps its label', () => {
+	const tr = (table: Record<string, string>) => (k: string) => table[k] ?? k;
+	const en = dict.en as Record<string, string>;
+	const es = dict.es as Record<string, string>;
+	const dir = conn({ kind: 'brands', label: 'US provider directory', profile_id: null });
+	assert.equal(cardTitle(dir, tr(es)), es.con_t_brands);
+	assert.equal(cardTitle(dir, tr(en)), en.con_t_brands);
+	assert.notEqual(es.con_t_brands, en.con_t_brands);
+	assert.equal(cardTitle(conn(), tr(es)), 'Hospital LabNorte');
 });
 
 // The SMART poller's stops and problems (smart.rs) reach the card in the reader's language.

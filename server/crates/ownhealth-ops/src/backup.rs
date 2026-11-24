@@ -15,14 +15,17 @@
 //! backup keeps them sealed. The profile keys never enter it: the dump leaves the rows of
 //! `profile_key` out, and every backup rewrites `keyring.json` in OWNHEALTH_KEYRING_DIR instead
 //! (`ownhealth_core::keyfile`), a folder outside the blob folder and every backup. The manifest lists
-//! the profiles whose key the backup needs (`keys.keyring`), and restore and verify-restore take those
-//! keys from the keyring as it is now. A profile delete rewrites the keyring at once, so a backup taken
+//! the profiles whose key the backup needs (`keys.keyring`) and the data key identifiers
+//! (`keys.key_ids`), and the profiles of the dump whose key a delete shredded (`keys.closed`), so a
+//! restore of a backup of a restored deleted profile keeps it closed. Restore and verify-restore take matching keys from the current keyring. A profile delete rewrites the keyring at once, so a backup taken
 //! before the delete no longer opens that profile's files; its rows stay in the dump until retention
 //! drops it. The keys of pending items still travel in the dump: an item's key is shredded when it
 //! gets its profile, so the keyring of a later day would no longer open the item in an older backup.
 //! The manifest lists each sealed file under `<profile>/<address>` with the sha256 of its bytes on
 //! disk, so a check finds a changed or added file without the key, and records the key's
 //! fingerprint (never the key), so a restore under another key refuses before it loads anything.
+//! It also records the profile references backed by sealed files and the accepted omissions. A
+//! restore can carry those omissions forward and identify archived files closed by an unavailable key.
 //!
 //! pg_dump and pg_restore come from PATH, or from the directory in OWNHEALTH_PG_BINDIR. They read and
 //! write only stdin and stdout, so a wrapper that runs them in another container works too.
@@ -48,7 +51,7 @@ use std::time::{Duration, Instant};
 use chrono::{NaiveDate, SecondsFormat, Utc};
 use ownhealth_core::audit::{ChainBreakKind, ChainRead, verify_chain_with};
 use ownhealth_core::blobs::{self, BlobOwner, BlobStore};
-use ownhealth_core::config::Settings;
+use ownhealth_core::config::{Settings, quote_url_component};
 use ownhealth_core::keyfile::{self, owner_writes_only};
 use ownhealth_core::keys::{self, Kek};
 use ownhealth_core::{Error, Result};
@@ -140,23 +143,22 @@ pub(crate) fn pg_conn(url: &str) -> (String, Option<String>) {
     )
 }
 
-/// The same URL naming another database (query kept).
+/// Select another database and keep the other connection options.
 fn with_db(url: &str, db: &str) -> String {
     let url = libpq_url(url);
-    // The query may hold a `/` (sslrootcert=/etc/ca.pem), so cut it off before finding the path.
-    let (path, query) = url.split_once('?').unwrap_or((&url, ""));
-    let base = path.rsplit_once('/').map_or(path, |(b, _)| b);
-    if query.is_empty() {
-        format!("{base}/{db}")
-    } else {
-        format!("{base}/{db}?{query}")
+    let (scheme, rest) = url.split_once("://").unwrap_or(("postgresql", &url));
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let authority = path.split('/').next().unwrap_or_default();
+    let mut target = format!("{scheme}://{authority}/{}", quote_url_component(db));
+    // A dbname query parameter takes precedence over the path.
+    let options = query.split('&').filter(|option| {
+        !option.is_empty() && percent_decode(option.split('=').next().unwrap_or_default()) != "dbname"
+    });
+    for (i, option) in options.enumerate() {
+        target.push(if i == 0 { '?' } else { '&' });
+        target.push_str(option);
     }
-}
-
-fn db_name(url: &str) -> String {
-    let url = libpq_url(url);
-    let path = url.split_once('?').map_or(url.as_str(), |(p, _)| p);
-    path.rsplit_once('/').map_or("", |(_, r)| r).to_string()
+    target
 }
 
 /// The argv after the tool name, and the password that goes in PGPASSWORD instead.
@@ -594,7 +596,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // The keys stay out of every backup: refuse a keyring the backup would hold, and one that cannot
     // be read, before anything is written.
     let ring = keyfile::path(settings);
-    if keyfile::inside(&ring, dest) {
+    if keyfile::inside(&settings.keyring_path(), dest).map_err(|e| ops_error(e.0))? {
         return Err(ops_error(format!(
             "the keyring {} is inside the backup folder {}: set OWNHEALTH_KEYRING_DIR to a folder outside \
              every backup, see deploy/README.md",
@@ -603,7 +605,9 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
         )));
     }
     keyfile::check_folder(settings).map_err(|e| ops_error(e.0))?;
-    keyfile::read(&ring).map_err(|e| ops_error(e.0))?;
+    // Refuse an unreadable keyring before creating the backup directory. The locked rewrite
+    // rechecks the keyring and supplies the current loss markers.
+    keyfile::read_for_install(settings).map_err(|e| ops_error(e.0))?;
     if settings.keyring_dir.is_none() {
         tracing::warn!(
             "OWNHEALTH_KEYRING_DIR is not set, so the keyring is {} on the data volume: a host backup \
@@ -654,9 +658,9 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     }
     fs::create_dir_all(dest)?;
     owner_only(dest)?;
-    let out = fs::File::create(dest.join("db.dump"))?;
+    let staged_dump = tempfile::NamedTempFile::new_in(dest)?;
     let mut cmd = pg_command("pg_dump", dump_args(&url, &snapshot))?;
-    let dump = cmd.stdout(out).stderr(Stdio::piped()).spawn()?;
+    let dump = cmd.stdout(staged_dump.reopen()?).stderr(Stdio::piped()).spawn()?;
     let facts = async {
         let referenced = referenced_blobs(&mut tx).await?;
         let wrapped = keys::stored_all(&mut tx).await?;
@@ -667,9 +671,17 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
         let kept: i64 = sqlx::query_scalar("select count(*) from profile_key where wrapped_dek is not null")
             .fetch_one(&mut *tx)
             .await?;
+        // A profile of the dump with a shredded key row: one restored from a backup taken before its
+        // delete. The keyring names no key of it for this backup, so the manifest says it is closed.
+        let closed: Vec<Uuid> = sqlx::query_scalar(
+            "select k.profile_id from profile_key k join profile p on p.id = k.profile_id \
+             where k.wrapped_dek is null order by 1",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
         let as_of = Utc::now().date_naive();
         let states = state_hashes(&mut tx, as_of).await?;
-        Ok::<_, Error>((referenced, wrapped, migrations, tables, kept, as_of, states))
+        Ok::<_, Error>((referenced, wrapped, migrations, tables, kept, closed, as_of, states))
     }
     .await;
     // The dump must finish before the exporting transaction ends, whatever the facts did.
@@ -677,27 +689,48 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // build_state may store snapshots; the backup leaves the database as it was.
     tx.rollback().await?;
     conn.close().await?;
-    let (referenced, wrapped, migrations, mut tables, kept, as_of, states) = facts?;
+    let (referenced, wrapped, migrations, mut tables, kept, closed, as_of, states) = facts?;
     if !done.status.success() {
         return Err(ops_error(format!(
             "pg_dump failed: {}",
             String::from_utf8_lossy(&done.stderr).trim()
         )));
     }
+    let kek = settings
+        .secrets_key
+        .as_ref()
+        .map(|_| Kek::from_settings(settings))
+        .transpose()?;
+    let mut deks = HashMap::new();
+    let mut key_ids = BTreeMap::new();
+    for (slot, wrapped, fingerprint) in &wrapped {
+        let dek = kek.as_ref().map(|k| k.unwrap_slot(*slot, fingerprint, wrapped));
+        if let keys::Slot::Profile(profile) = slot {
+            let dek = dek.and_then(std::result::Result::ok).ok_or_else(|| {
+                ops_error(format!(
+                    "the key for profile {profile} does not open with this OWNHEALTH_SECRETS_KEY"
+                ))
+            })?;
+            key_ids.insert(profile.to_string(), dek.archive_id());
+            deks.insert(*slot, dek);
+        } else if let Some(Ok(dek)) = dek {
+            deks.insert(*slot, dek);
+        }
+    }
     // The dump holds no row of it, so a restore never has the same count.
     tables.remove("profile_key");
-    // Every key of the snapshot whose profile was not deleted since goes into the keyring now: a key is
-    // never replaced, so the table read after the snapshot holds every one of them. Without it the
-    // backup opens nothing, so a failure fails the backup.
     keyfile::rewrite(&mut lock, settings)
         .await
         .map_err(|e| ops_error(e.0))?;
+    let lost = blobs::read_restore_losses(settings)?;
 
     // Blobs are written before the rows that reference them commit, so every blob the snapshot can
     // see exists by now, and none of them went since (the copy lock above). Later blobs are harmless
     // extras.
     let store = BlobStore::for_settings(settings)?;
-    let tree = dest.join("blobs");
+    // Keep both artifacts private to this attempt until the loss record has been updated.
+    let staged_blobs = tempfile::tempdir_in(dest)?;
+    let tree = staged_blobs.path().join("blobs");
     store.copy_into(&tree)?;
     blobs::end_copy(&mut lock).await?;
     let mut files = blobs::tree_files(&tree)?;
@@ -726,45 +759,66 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // keys come from the snapshot and the files from the copy, never from the live store, where a
     // delete after the copy may already have shredded a key or removed a folder. A key that does not
     // open names no sealed file here; verify-restore reports it.
-    let deks: HashMap<keys::Slot, keys::Dek> = match &settings.secrets_key {
-        Some(_) => {
-            let kek = Kek::from_settings(settings)?;
-            wrapped
-                .iter()
-                .filter_map(|(slot, w, fp)| Some((*slot, kek.unwrap_slot(*slot, fp, w).ok()?)))
-                .collect()
-        }
-        None => HashMap::new(),
-    };
-    let mut referenced: Vec<String> = referenced
-        .iter()
-        .map(|(owner, sha)| {
-            if let Some(slot) = owner.slot()
-                && let Some(dek) = deks.get(&slot)
-            {
-                let key = blobs::sealed_key(slot, dek, sha)?;
-                if files.contains_key(&key) {
-                    return Ok(key);
+    let mut required = Vec::new();
+    let mut repaired = Vec::new();
+    let mut profile_sealed = ProfileBlobs::new();
+    let mut accepted_omissions = ProfileBlobs::new();
+    for (owner, sha) in &referenced {
+        let slot = owner.slot();
+        let accepted_loss = match owner {
+            BlobOwner::Profile(id) if lost.get(id).is_some_and(|losses| losses.contains(sha)) => Some(*id),
+            _ => None,
+        };
+        if let Some(slot) = slot
+            && let Some(dek) = deks.get(&slot)
+        {
+            let key = blobs::sealed_key(slot, dek, sha)?;
+            if let Some(path) = files.get(&key) {
+                if let keys::Slot::Profile(id) = slot {
+                    profile_sealed.entry(id).or_default().insert(sha.clone());
                 }
+                if let Some(id) = accepted_loss
+                    && repaired_file(path, sha, Some((id, dek)))
+                {
+                    repaired.push((id, sha.as_str()));
+                }
+                required.push(key);
+                continue;
             }
-            Ok(blobs::sha256_hex(sha)?)
-        })
-        .collect::<Result<_>>()?;
-    referenced.sort();
-    referenced.dedup();
-    // the profiles whose key a restore takes from the keyring
-    let keyring: Vec<String> = wrapped
-        .iter()
-        .filter_map(|(slot, _, _)| match slot {
-            keys::Slot::Profile(p) => Some(p.to_string()),
-            keys::Slot::Pending(_) => None,
-        })
-        .collect();
-    let fingerprint = match &settings.secrets_key {
-        Some(_) => Value::String(hex::encode(Kek::from_settings(settings)?.fingerprint())),
-        None => Value::Null,
-    };
-    let key_facts = json!({"kek_fingerprint": fingerprint, "profiles": kept, "keyring": keyring});
+        }
+        let plain = blobs::sha256_hex(sha)?;
+        if let Some(path) = files.get(&plain) {
+            if let Some(id) = accepted_loss
+                && repaired_file(path, &plain, None)
+            {
+                repaired.push((id, sha.as_str()));
+            }
+            required.push(plain);
+        } else if let Some(id) = accepted_loss {
+            accepted_omissions.entry(id).or_default().insert(plain);
+        } else {
+            required.push(plain);
+        }
+    }
+    #[cfg(test)]
+    let _ = tests::BEFORE_CLEAR_REPAIRED.try_with(|observe| observe());
+    clear_repaired_losses(settings, &repaired).await?;
+    staged_dump
+        .persist_noclobber(dest.join("db.dump"))
+        .map_err(|e| e.error)?;
+    fs::rename(tree, dest.join("blobs"))?;
+    staged_blobs.close()?;
+    required.sort();
+    required.dedup();
+    let keyring: Vec<_> = key_ids.keys().collect();
+    let fingerprint = kek.as_ref().map(|k| hex::encode(k.fingerprint()));
+    let key_facts = json!({
+        "kek_fingerprint": fingerprint,
+        "profiles": kept,
+        "keyring": keyring,
+        "key_ids": key_ids,
+        "closed": closed,
+    });
     let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false);
     let manifest = json!({
         "schema": MANIFEST_SCHEMA,
@@ -780,7 +834,9 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
             "bytes": bytes,
             "sha256": plain,
             "sealed": sealed,
-            "referenced": referenced,
+            "referenced": required,
+            "profile_sealed": profile_sealed,
+            "accepted_omissions": accepted_omissions,
         },
         "keys": key_facts,
         "state_hash": states.into_iter().map(|(p, h)| (p, Value::String(h))).collect::<Map<String, Value>>(),
@@ -815,7 +871,37 @@ fn py_repr(v: Option<&Value>) -> String {
     }
 }
 
-fn read_manifest(archive: &Path) -> Result<Value> {
+type ProfileBlobs = BTreeMap<Uuid, BTreeSet<String>>;
+
+struct ArchivedLosses {
+    accepted_omissions: ProfileBlobs,
+    profile_sealed: ProfileBlobs,
+}
+
+impl ArchivedLosses {
+    fn for_restore(mut self, ring: &RingKeys) -> ProfileBlobs {
+        for id in ring.missing.iter().chain(&ring.shredded) {
+            if let Some(sealed) = self.profile_sealed.remove(id) {
+                self.accepted_omissions.entry(*id).or_default().extend(sealed);
+            }
+        }
+        self.accepted_omissions
+    }
+}
+
+fn manifest_profile_blobs(manifest: &Value, field: &str) -> Result<ProfileBlobs> {
+    let Some(value) = manifest["blobs"].get(field) else {
+        return Ok(ProfileBlobs::new());
+    };
+    let invalid = || ops_error(format!("bad blobs.{field} in the manifest"));
+    let lists: ProfileBlobs = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+    if lists.values().flatten().any(|sha| blobs::sha256_hex(sha).is_err()) {
+        return Err(invalid());
+    }
+    Ok(lists)
+}
+
+fn read_manifest(archive: &Path) -> Result<(Value, ArchivedLosses)> {
     let path = archive.join("manifest.json");
     if !path.is_file() {
         return Err(ops_error(format!(
@@ -830,11 +916,31 @@ fn read_manifest(archive: &Path) -> Result<Value> {
             py_repr(manifest.get("schema"))
         )));
     }
-    Ok(manifest)
+    if manifest["keys"].get("keyring").is_none() && manifest["tables"].get("profile_key").is_some() {
+        return Err(ops_error(
+            "this is a keyed backup from before the keyring. Restore it with the build that wrote it, \
+             then take a new backup with this one",
+        ));
+    }
+    if manifest["keys"].get("keyring").is_some() && manifest["keys"].get("key_ids").is_none() {
+        return Err(ops_error(
+            "this backup lists profile UUIDs without key IDs. Restore it with the build that wrote it, \
+             then take a new backup with this one",
+        ));
+    }
+    let losses = ArchivedLosses {
+        accepted_omissions: manifest_profile_blobs(&manifest, "accepted_omissions")?,
+        profile_sealed: manifest_profile_blobs(&manifest, "profile_sealed")?,
+    };
+    Ok((manifest, losses))
 }
 
 async fn pg_restore(url: &str, archive: &Path) -> Result<()> {
     let dump = fs::File::open(archive.join("db.dump"))?;
+    #[cfg(test)]
+    tests::OBSERVE_PG_RESTORE
+        .try_with(|observe| observe(url))
+        .unwrap_or(Ok(()))?;
     let mut cmd = pg_command("pg_restore", restore_args(url))?;
     let done = cmd
         .stdin(dump)
@@ -882,6 +988,40 @@ fn corrupt_file(key: &str, path: &Path, listed: &BTreeSet<String>, sealed: &BTre
 
 /// Every blob file a backup must hold: the plain and sealed files its manifest lists, and the ones the
 /// database references (older manifests have no "referenced").
+/// A copied file only clears an accepted loss once the matching copy can be read in full.
+fn repaired_file(path: &Path, sha: &str, sealed: Option<(Uuid, &keys::Dek)>) -> bool {
+    let Some((profile, dek)) = sealed else {
+        return sha256_file(path).is_ok_and(|hash| hash == sha);
+    };
+    let mut expected = [0; 32];
+    if hex::decode_to_slice(sha, &mut expected).is_err() {
+        return false;
+    }
+    fs::File::open(path)
+        .and_then(|file| keys::SealedReader::open(file, dek, profile, &expected))
+        .and_then(|mut reader| std::io::copy(&mut reader, &mut std::io::sink()))
+        .is_ok()
+}
+
+async fn clear_repaired_losses(settings: &Settings, repaired: &[(Uuid, &str)]) -> Result<()> {
+    if repaired.is_empty() {
+        return Ok(());
+    }
+    let _lock = keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?;
+    let mut losses = blobs::read_restore_losses(settings)?;
+    let mut changed = false;
+    for (id, sha) in repaired {
+        if let Some(files) = losses.get_mut(id) {
+            changed |= files.remove(*sha);
+        }
+    }
+    if changed {
+        losses.retain(|_, files| !files.is_empty());
+        blobs::write_restore_losses(settings, &losses)?;
+    }
+    Ok(())
+}
+
 fn expected_blobs(manifest: &Value) -> BTreeSet<String> {
     let mut expected: BTreeSet<String> = str_list(&manifest["blobs"]["sha256"]).into_iter().collect();
     expected.extend(sealed_list(manifest).into_keys());
@@ -932,14 +1072,19 @@ fn backup_key(settings: &Settings, manifest: &Value) -> Result<Option<Kek>> {
 /// The profile keys of a backup, as the keyring holds them now.
 struct RingKeys {
     fingerprint: Vec<u8>,
-    /// the wrapped key of each profile the keyring still holds
+    /// the wrapped keys selected for the profiles in keys.keyring
     keys: Vec<(Uuid, Vec<u8>)>,
+    /// keys for profiles in the backup that stored their first sealed file later
+    supplemental: Vec<(Uuid, Vec<u8>)>,
     /// profiles of the backup whose key the keyring lists as shredded: deleted since the backup
     shredded: Vec<Uuid>,
-    /// every profile the keyring lists as shredded, also one deleted before the backup: each gets its
-    /// shredded row back, so no new key is ever made for it
+    /// profiles whose archived key the keyring closes and that hold no newer key, and profiles the
+    /// manifest lists as closed (`keys.closed`) that the keyring holds no key for: each gets its
+    /// shredded row back, so no new key is ever made for it. Any other profile the archive names no
+    /// key for gets no row: its next file asks the keyring, which refuses a new key only under a
+    /// tombstone that names no key, so a tombstone that names a later key does not stop it.
     tombstones: Vec<Uuid>,
-    /// profiles the keyring knows nothing of: it is older than the backup, or another install's
+    /// profiles for which the keyring has no matching key or tombstone
     missing: Vec<Uuid>,
     /// the operator chose to restore without the keys the keyring lacks (`--allow-missing-keys`)
     allow_missing: bool,
@@ -948,14 +1093,49 @@ struct RingKeys {
 /// The flag that lets a restore go on without the keys the keyring lacks.
 const ALLOW_MISSING: &str = "--allow-missing-keys";
 
-/// The keys the backup needs (`keys.keyring` in its manifest), from the keyring file. None for a
-/// backup from before the keyring, whose dump holds its keys. A keyring that cannot be read, or that
-/// another secrets key made, is refused before anything is loaded. A missing keyring is refused too,
-/// unless the backup needs no key or `allow_missing` says to go on without the keys.
-fn ring_keys(settings: &Settings, manifest: &Value, allow_missing: bool) -> Result<Option<RingKeys>> {
-    let Some(ids) = manifest["keys"]["keyring"].as_array() else {
+/// Select and authenticate keys before the restore loads anything. Keyless 0.x backups have no
+/// keys to install.
+fn ring_keys(
+    settings: &Settings,
+    manifest: &Value,
+    kek: Option<&Kek>,
+    allow_missing: bool,
+) -> Result<Option<RingKeys>> {
+    let ids = manifest["keys"]
+        .get("keyring")
+        .map(|ids| {
+            ids.as_array()
+                .ok_or_else(|| ops_error("bad keys.keyring list in the manifest"))
+        })
+        .transpose()?;
+    let Some(ids) = ids else {
+        if manifest["keys"].get("key_ids").is_some() {
+            return Err(ops_error("keys.key_ids requires a keys.keyring list in the manifest"));
+        }
         return Ok(None);
     };
+    let key_ids = manifest["keys"]["key_ids"]
+        .as_object()
+        .ok_or_else(|| ops_error("bad keys.key_ids map in the manifest"))?;
+    // A manifest from before `keys.closed` lists no closed profile.
+    let closed = match manifest["keys"].get("closed") {
+        None => Vec::new(),
+        Some(list) => list
+            .as_array()
+            .ok_or_else(|| ops_error("bad keys.closed list in the manifest"))?
+            .iter()
+            .map(|id| {
+                id.as_str()
+                    .and_then(|i| Uuid::parse_str(i).ok())
+                    .ok_or_else(|| ops_error(format!("bad profile id {id} in the manifest's keys.closed")))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
+    if key_ids.len() != ids.len() {
+        return Err(ops_error(
+            "keys.key_ids does not match the manifest's keys.keyring list",
+        ));
+    }
     let file = keyfile::path(settings);
     let ring = match keyfile::read(&file).map_err(|e| ops_error(e.0))? {
         Some(ring) => ring,
@@ -964,15 +1144,15 @@ fn ring_keys(settings: &Settings, manifest: &Value, allow_missing: bool) -> Resu
             return Err(ops_error(format!(
                 "no keyring at {}: this backup holds no profile key, they are in keyring.json on the keyring \
                  mount (OWNHEALTH_KEYRING_DIR). Put the newest keyring.json there and run it again, or \
-                 restore with {ALLOW_MISSING} to load every record without the files that need a key; \
-                 nothing was loaded, see deploy/README.md",
+                 restore with {ALLOW_MISSING} to load the archive with unavailable profile files sealed. \
+                 In this attempt, nothing was loaded. See deploy/README.md",
                 file.display()
             )));
         }
     };
-    let want = manifest["keys"]["kek_fingerprint"].as_str();
+    let want = kek.map(|k| hex::encode(k.fingerprint()));
     let have = ring.kek_fingerprint.as_ref().map(hex::encode);
-    if let (Some(want), Some(have)) = (want, &have)
+    if let (Some(want), Some(have)) = (&want, &have)
         && want != have
     {
         return Err(ops_error(format!(
@@ -984,8 +1164,9 @@ fn ring_keys(settings: &Settings, manifest: &Value, allow_missing: bool) -> Resu
     let mut out = RingKeys {
         fingerprint: ring.kek_fingerprint.clone().unwrap_or_default(),
         keys: Vec::new(),
+        supplemental: Vec::new(),
         shredded: Vec::new(),
-        tombstones: ring.shredded.iter().copied().collect(),
+        tombstones: Vec::new(),
         missing: Vec::new(),
         allow_missing,
     };
@@ -994,23 +1175,85 @@ fn ring_keys(settings: &Settings, manifest: &Value, allow_missing: bool) -> Resu
             .as_str()
             .and_then(|i| Uuid::parse_str(i).ok())
             .ok_or_else(|| ops_error(format!("bad profile id {id} in the manifest's keys.keyring")))?;
+        let wanted = key_ids
+            .get(&id.to_string())
+            .and_then(Value::as_str)
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+            .ok_or_else(|| ops_error(format!("bad key id for profile {id} in the manifest's keys.key_ids")))?;
         if let Some(w) = ring.profiles.get(&id) {
-            out.keys.push((id, w.clone()));
-        } else if ring.shredded.contains(&id) {
+            let dek = authenticate_ring_key(&file, kek, id, &ring, w)?;
+            if wanted == dek.archive_id() {
+                out.keys.push((id, w.clone()));
+            } else if ring.closes(id, Some(wanted)) {
+                // the archive's key was deleted, and the profile came back since with a newer key:
+                // the archive's files stay closed, and the newer key stays the profile's
+                out.keys.push((id, w.clone()));
+                out.shredded.push(id);
+            } else {
+                // Another key than the archive's: the archive's files stay closed, and the profile
+                // keeps the keyring's key, so its next file never replaces that key in the keyring
+                // (newer backups need it).
+                out.keys.push((id, w.clone()));
+                out.missing.push(id);
+            }
+        } else if ring.closes(id, Some(wanted)) {
             out.shredded.push(id);
+            out.tombstones.push(id);
         } else {
             out.missing.push(id);
+        }
+    }
+    // Closed when the backup was taken: it stays closed unless the keyring holds a key for it now.
+    for id in closed {
+        if !ring.profiles.contains_key(&id) && !out.tombstones.contains(&id) {
+            out.tombstones.push(id);
+        }
+    }
+    // Backup records a state hash for every profile in the database snapshot. Keys that
+    // belong only to other backups stay in the keyring without affecting this restore.
+    let selected: BTreeSet<_> = out.keys.iter().map(|(id, _)| *id).collect();
+    for (&id, wrapped) in &ring.profiles {
+        if manifest["state_hash"].get(id.to_string()).is_some() && !selected.contains(&id) {
+            authenticate_ring_key(&file, kek, id, &ring, wrapped)?;
+            out.supplemental.push((id, wrapped.clone()));
         }
     }
     Ok(Some(out))
 }
 
-/// Put the keyring's keys into the restored `profile_key`, which the dump left empty, and a shredded
-/// row for each profile the keyring lists as deleted, since the backup or before it: its files then
-/// never open, its key can never be made again, and the start sweep removes its sealed folder. A
-/// profile whose key the keyring lacks (`missing`, with `--allow-missing-keys`) gets no row: its files
-/// stay closed and the start sweep removes them, and its next file gets a new key.
-async fn load_keys(url: &str, ring: &RingKeys) -> Result<()> {
+fn authenticate_ring_key(
+    path: &Path,
+    kek: Option<&Kek>,
+    id: Uuid,
+    ring: &keyfile::KeyringFile,
+    wrapped: &[u8],
+) -> Result<keys::Dek> {
+    let fingerprint = ring.kek_fingerprint.as_deref().unwrap_or_default();
+    let dek = kek
+        .and_then(|k| k.unwrap(id, fingerprint, wrapped).ok())
+        .ok_or_else(|| {
+            ops_error(format!(
+                "the keyring {} holds a damaged key for profile {id}: it does not open with \
+                 OWNHEALTH_SECRETS_KEY. Put back an undamaged copy of this install's keyring.json. \
+                 When no such copy exists, remove that entry from keyring.json and restore with \
+                 {ALLOW_MISSING}: that profile's files stay closed; nothing was loaded",
+                path.display()
+            ))
+        })?;
+    if ring.closes(id, Some(&dek.archive_id())) {
+        return Err(ops_error(format!(
+            "the keyring {} holds a key that a tombstone closes for profile {id}. Remove that profile's \
+             entry from profiles in keyring.json, keep its tombstone, and rerun the restore. Nothing was loaded",
+            path.display()
+        )));
+    }
+    Ok(dek)
+}
+
+/// Load the selected keys and the shredded rows of the archive's closed keys. A profile in the dump
+/// that stored its first sealed file after the backup gets its current key, so its next file uses
+/// the same key.
+async fn load_keys(url: &str, ring: &RingKeys, resume_id: Option<&str>) -> Result<()> {
     let mut conn = PgConnection::connect(url).await?;
     let mut tx = conn.begin().await?;
     for (id, wrapped) in &ring.keys {
@@ -1021,14 +1264,96 @@ async fn load_keys(url: &str, ring: &RingKeys) -> Result<()> {
             .execute(&mut *tx)
             .await?;
     }
-    for id in &ring.tombstones {
-        sqlx::query("insert into profile_key (profile_id) values ($1) on conflict (profile_id) do nothing")
+    sqlx::query(
+        "insert into profile_key (profile_id) select unnest($1::uuid[]) \
+         on conflict (profile_id) do update set wrapped_dek = null, kek_fingerprint = null \
+         where profile_key.wrapped_dek is not null",
+    )
+    .bind(&ring.tombstones)
+    .execute(&mut *tx)
+    .await?;
+    let (held, wrapped): (Vec<Uuid>, Vec<Vec<u8>>) = ring.supplemental.iter().cloned().unzip();
+    sqlx::query(
+        "insert into profile_key (profile_id, wrapped_dek, kek_fingerprint) \
+         select k.id, k.wrapped, $3 from unnest($1::uuid[], $2::bytea[]) as k(id, wrapped) \
+         join profile p on p.id = k.id \
+         on conflict (profile_id) do nothing",
+    )
+    .bind(&held)
+    .bind(&wrapped)
+    .bind(&ring.fingerprint)
+    .execute(&mut *tx)
+    .await?;
+    if let Some(id) = resume_id {
+        // Commit the checkpoint with the keys. A populated database without this checkpoint
+        // cannot be resumed.
+        sqlx::raw_sql(
+            "create schema ownhealth_restore; create table ownhealth_restore.pending_loss (id text not null)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("insert into ownhealth_restore.pending_loss values ($1)")
             .bind(id)
             .execute(&mut *tx)
             .await?;
     }
     tx.commit().await?;
     conn.close().await?;
+    Ok(())
+}
+
+/// Bind a retry to the same backup contents, selected keys, and restore options. Restic can
+/// extract the same backup into a new directory for the retry.
+fn loss_resume_id(archive: &Path, manifest: &Value, ring: &RingKeys) -> Result<String> {
+    let identity = json!({
+        "dump": sha256_file(&archive.join("db.dump"))?,
+        "manifest": manifest,
+        "fingerprint": ring.fingerprint,
+        "keys": ring.keys,
+        "supplemental": ring.supplemental,
+        "missing": ring.missing,
+        "shredded": ring.shredded,
+        "tombstones": ring.tombstones,
+        "allow_missing": ring.allow_missing,
+    });
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&identity)?)))
+}
+
+async fn can_resume_loss(conn: &mut PgConnection, resume_id: Option<&str>) -> Result<bool> {
+    let Some(resume_id) = resume_id else { return Ok(false) };
+    let pending: bool = sqlx::query_scalar("select to_regclass('ownhealth_restore.pending_loss') is not null")
+        .fetch_one(&mut *conn)
+        .await?;
+    if !pending {
+        return Ok(false);
+    }
+    let saved: Option<String> = sqlx::query_scalar("select id from ownhealth_restore.pending_loss")
+        .fetch_optional(conn)
+        .await?;
+    Ok(saved.as_deref() == Some(resume_id))
+}
+
+/// Carry forward accepted omissions and sealed references whose key the restore cannot install.
+/// Only references in the restored database without a plain copy count. Holds the keyring lock.
+async fn record_lost(
+    settings: &Settings,
+    url: &str,
+    losses: &ProfileBlobs,
+    backup_blobs: &BTreeMap<String, PathBuf>,
+) -> Result<()> {
+    let mut conn = PgConnection::connect(url).await?;
+    let referenced = referenced_blobs(&mut conn).await?;
+    conn.close().await?;
+    let mut expected = blobs::RestoreLosses::new();
+    for (owner, sha) in referenced {
+        if let BlobOwner::Profile(p) = owner
+            && losses.get(&p).is_some_and(|files| files.contains(&sha))
+            && !backup_blobs.contains_key(&sha)
+        {
+            expected.entry(p).or_default().insert(sha);
+        }
+    }
+    blobs::record_restore_losses(settings, &expected)?;
     Ok(())
 }
 
@@ -1163,13 +1488,19 @@ pub async fn restore(settings: &Settings, archive: &Path) -> Result<Value> {
 
 /// [`restore`], told whether to go on without the keys the keyring lacks (`--allow-missing-keys`).
 pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_keys: bool) -> Result<Value> {
-    let manifest = read_manifest(archive)?;
+    let (manifest, archived_losses) = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
-    let ring = ring_keys(settings, &manifest, allow_missing_keys)?;
+    let ring_lock = if manifest["keys"].get("keyring").is_some() {
+        Some(keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?)
+    } else {
+        None
+    };
+    let ring = ring_keys(settings, &manifest, kek.as_ref(), allow_missing_keys)?;
     if let Some(r) = ring.as_ref().filter(|r| !r.missing.is_empty() && !r.allow_missing) {
         return Err(ops_error(format!(
             "the keyring {} holds no key for {} profile(s) of this backup and does not list them as \
-             deleted ({}): it is older than the backup, or another install's. Put the newest keyring.json \
+             deleted ({}). The keyring may be out of date or hold a different key for the same profile. \
+             Put the matching keyring.json \
              in place, or restore with {ALLOW_MISSING} to load every record and only the files whose key \
              the keyring holds; nothing was loaded",
             keyfile::path(settings).display(),
@@ -1177,15 +1508,30 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
             ids_text(&r.missing)
         )));
     }
+    let losses = ring
+        .as_ref()
+        .map(|ring| archived_losses.for_restore(ring))
+        .unwrap_or_default();
+    let resume_id = ring
+        .as_ref()
+        .filter(|_| !losses.is_empty())
+        .map(|ring| loss_resume_id(archive, &manifest, ring))
+        .transpose()?;
     let url = settings.sqlx_url();
     let mut conn = PgConnection::connect(&url).await?;
     let tables: i64 = sqlx::query_scalar("select count(*) from pg_tables where schemaname = 'public'")
         .fetch_one(&mut conn)
         .await?;
+    let resuming = tables > 0 && can_resume_loss(&mut conn, resume_id.as_deref()).await?;
     conn.close().await?;
-    if tables > 0 {
+    if tables > 0 && !resuming {
         return Err(ops_error(
-            "the target database is not empty: restore needs a fresh instance (new volume, app not started)",
+            "the target database is not empty: restore needs a fresh instance (new volume, app not started). \
+             It holds no checkpoint that matches this restore. If an earlier run of this restore saved a \
+             checkpoint, rerun it with the same snapshot, keyring and options. Otherwise a restore that \
+             stopped here cannot resume: it starts over. If this target holds only that stopped restore, \
+             drop and recreate the database and empty the blob folder (or use new volumes), keep the app \
+             stopped, and run the same restore again (deploy/README.md, \"Restore\"). Nothing was loaded",
         ));
     }
     // Check every blob before the database is loaded: a corrupt or missing one found after pg_restore
@@ -1211,14 +1557,45 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
             return Err(ops_error(format!("blob {key} in the backup is corrupt")));
         }
     }
-    pg_restore(&url, archive).await?;
-    if let Some(r) = &ring {
-        load_keys(&url, r).await?;
+    let expected = backup_blobs
+        .keys()
+        .map(|key| (key.as_str(), sealed.get(key).unwrap_or(key).as_str()))
+        .collect();
+    blobs::check_restore_target(settings, &expected, resuming)?;
+    if !resuming {
+        pg_restore(&url, archive).await?;
+        if let Some(ring) = &ring {
+            load_keys(&url, ring, resume_id.as_deref()).await?;
+        }
     }
+    // Keep the lock through blob placement when a checkpoint exists, so another invocation
+    // cannot resume this restore while it is still finishing.
+    let resume_lock = if resume_id.is_some() {
+        record_lost(settings, &url, &losses, &backup_blobs)
+            .await
+            .map_err(|source| Error::RestoreLoss(Box::new(source)))?;
+        ring_lock
+    } else {
+        drop(ring_lock);
+        None
+    };
     let store = BlobStore::for_settings(settings)?;
     for (key, path) in &backup_blobs {
-        store.place(key, path)?;
+        store.place(key, path).map_err(|error| match resume_lock {
+            Some(_) => Error::RestoreLoss(Box::new(Error::from(error))),
+            None => Error::from(error),
+        })?;
     }
+    if resume_lock.is_some() {
+        let mut conn = PgConnection::connect(&url).await?;
+        let mut tx = conn.begin().await?;
+        sqlx::raw_sql("drop table ownhealth_restore.pending_loss; drop schema ownhealth_restore")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        conn.close().await?;
+    }
+    drop(resume_lock);
     let lock = anchor_lock(&url).await?;
     let mut report = compare(&url, &manifest, &store.files()?, kek.as_ref(), ring.as_ref()).await?;
     let head = &manifest["audit_chain"];
@@ -1263,45 +1640,107 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
     Ok(report)
 }
 
+fn database_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 /// The scratch database of verify-restore. A new database lets PUBLIC connect, and the server may
-/// hold other roles (the wearables sidecar's own one), so only the owner may open this one.
+/// hold other roles (the wearables sidecar's own one), so only the owner may open this one. It is
+/// created closed to every session and opened after the revoke: no session can get in first and
+/// stay connected through the revoke.
 async fn create_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
-    sqlx::query(AssertSqlSafe(format!("create database \"{scratch}\"")))
-        .execute(&mut *admin)
-        .await?;
+    let ident = database_ident(scratch);
     sqlx::query(AssertSqlSafe(format!(
-        "revoke connect, temporary on database \"{scratch}\" from public"
+        "create database {ident} with allow_connections = false"
     )))
     .execute(&mut *admin)
     .await?;
+    let opened = async {
+        for sql in [
+            format!("revoke connect, temporary on database {ident} from public"),
+            format!("alter database {ident} with allow_connections true"),
+        ] {
+            #[cfg(test)]
+            tests::BEFORE_SCRATCH_STEP.try_with(|step| step()).unwrap_or(Ok(()))?;
+            sqlx::query(AssertSqlSafe(sql)).execute(&mut *admin).await?;
+        }
+        Ok::<_, Error>(())
+    }
+    .await;
+    if let Err(error) = opened {
+        if let Err(cleanup) = drop_scratch(admin, scratch).await {
+            tracing::warn!(%scratch, %cleanup, "could not drop the scratch database after a setup step failed");
+        }
+        return Err(error);
+    }
     Ok(())
 }
 
-/// Restore into a scratch database `<db>_restore_check`, compare with the manifest, drop it.
+async fn drop_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
+    let ident = database_ident(scratch);
+    sqlx::query(AssertSqlSafe(format!("drop database if exists {ident} with (force)")))
+        .execute(admin)
+        .await?;
+    Ok(())
+}
+
+/// PostgreSQL advisory locks are local to the database where the session takes them.
+async fn try_lock_verification(live_conn: &mut PgConnection) -> Result<()> {
+    let locked: bool =
+        sqlx::query_scalar("select pg_catalog.pg_try_advisory_lock(pg_catalog.hashtext('ownhealth.verify_restore'))")
+            .fetch_one(live_conn)
+            .await?;
+    if !locked {
+        return Err(ops_error("verify-restore is already running for this database"));
+    }
+    Ok(())
+}
+
+/// Restore into this live database's scratch database, compare with the manifest, then drop it.
+/// The live connection holds the session lock from the initial cleanup until the final drop.
 /// `ok` is true only when every row count, every blob hash and every profile's state_hash match, and
 /// the keyring holds every key the backup needs, or lists its profile as deleted.
 pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value> {
-    let manifest = read_manifest(archive)?;
-    let kek = backup_key(settings, &manifest)?;
-    let ring = ring_keys(settings, &manifest, false)?;
-    let files = blobs::tree_files(&archive.join("blobs"))?;
     let live = settings.sqlx_url();
-    let scratch = format!("{}_restore_check", db_name(&live));
-    let drop = format!("drop database if exists \"{scratch}\" with (force)");
-    let mut admin = PgConnection::connect(&live).await?;
-    sqlx::query(AssertSqlSafe(drop.clone())).execute(&mut admin).await?;
-    create_scratch(&mut admin, &scratch).await?;
+    let mut live_conn = PgConnection::connect(&live).await?;
+    try_lock_verification(&mut live_conn).await?;
+    // Check the name in the server's encoding. DDL would silently truncate an overlong identifier.
+    let (scratch, fits): (String, bool) = sqlx::query_as(
+        "select scratch, octet_length(scratch) <= current_setting('max_identifier_length')::integer \
+         from (select pg_catalog.current_database()::text || '_restore_check' as scratch) names",
+    )
+    .fetch_one(&mut live_conn)
+    .await?;
+    if !fits {
+        return Err(ops_error(format!(
+            "the scratch database name {scratch:?} exceeds the PostgreSQL identifier length limit"
+        )));
+    }
+    drop_scratch(&mut live_conn, &scratch).await?;
+    let (manifest, _) = read_manifest(archive)?;
+    let kek = backup_key(settings, &manifest)?;
+    let ring_lock = if manifest["keys"].get("keyring").is_some() {
+        Some(keyfile::lock(settings).await.map_err(|e| ops_error(e.0))?)
+    } else {
+        None
+    };
+    let ring = ring_keys(settings, &manifest, kek.as_ref(), false)?;
+    // The scratch database is dropped at the end, so nothing it loads reaches the live keyring: the
+    // lock covers the read alone, and a profile delete on the live install never waits on pg_restore.
+    drop(ring_lock);
+    let files = blobs::tree_files(&archive.join("blobs"))?;
+    create_scratch(&mut live_conn, &scratch).await?;
     let target = with_db(&live, &scratch);
     let result = async {
         pg_restore(&target, archive).await?;
         if let Some(r) = &ring {
-            load_keys(&target, r).await?;
+            load_keys(&target, r, None).await?;
         }
         compare(&target, &manifest, &files, kek.as_ref(), ring.as_ref()).await
     }
     .await;
-    let dropped = sqlx::query(AssertSqlSafe(drop)).execute(&mut admin).await;
-    admin.close().await?;
+    let dropped = drop_scratch(&mut live_conn, &scratch).await;
+    live_conn.close().await?;
     let report = result?;
     dropped?;
     Ok(report)
@@ -1310,6 +1749,490 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    tokio::task_local! {
+        pub(super) static OBSERVE_PG_RESTORE: Box<dyn Fn(&str) -> Result<()> + Send>;
+        pub(super) static BEFORE_CLEAR_REPAIRED: Box<dyn Fn() + Send>;
+        pub(super) static BEFORE_SCRATCH_STEP: Box<dyn Fn() -> Result<()> + Send>;
+    }
+
+    async fn connect_outcome(url: &str) -> String {
+        match PgConnection::connect(url).await {
+            Ok(conn) => {
+                let _ = conn.close().await;
+                "connected".to_string()
+            }
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// [`connect_outcome`] on its own thread and runtime, for a synchronous hook.
+    fn connect_outcome_blocking(url: &str) -> String {
+        let url = url.to_string();
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_or_else(|e| e.to_string(), |runtime| runtime.block_on(connect_outcome(&url)))
+        })
+        .join()
+        .unwrap_or_else(|_| "the connect thread panicked".to_string())
+    }
+
+    /// Settings for a live database at `url`, as `TestDb::settings` makes them.
+    fn settings_for(url: &str, data_dir: &Path) -> anyhow::Result<Settings> {
+        let env = HashMap::from([
+            (
+                "OWNHEALTH_SECRETS_KEY".to_string(),
+                ownhealth_core::testing::random_secrets_key(),
+            ),
+            ("OWNHEALTH_DATABASE_URL".to_string(), url.to_string()),
+            ("OWNHEALTH_DATA_DIR".to_string(), data_dir.display().to_string()),
+            ("OWNHEALTH_DEV_AUTH".to_string(), "1".to_string()),
+            ("OWNHEALTH_RUN_JOBS".to_string(), "0".to_string()),
+        ]);
+        Ok(Settings::from(&env)?)
+    }
+
+    #[test]
+    fn restore_reports_a_database_error_and_how_to_retry() {
+        let original = sqlx::Error::PoolClosed;
+        let error = Error::RestoreLoss(Box::new(Error::Db(original)));
+        let message = error.to_string();
+        assert!(message.contains(&sqlx::Error::PoolClosed.to_string()), "{message}");
+        assert!(message.contains("Resolve the reported error"), "{message}");
+        assert!(message.contains("rerun the same restore"), "{message}");
+        assert!(message.contains("app stopped"), "{message}");
+        let source = std::error::Error::source(&error).and_then(|source| source.downcast_ref::<Error>());
+        assert!(matches!(source, Some(Error::Db(sqlx::Error::PoolClosed))));
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_a_closed_wrapped_key_on_every_selection_path() -> anyhow::Result<()> {
+        use ownhealth_core::testing::TestDb;
+
+        let db = TestDb::empty().await?;
+        let dir = tempfile::tempdir()?;
+        let settings = db.settings(dir.path())?;
+        let kek = Kek::from_settings(&settings)?;
+        let profile = Uuid::new_v4();
+        let stored = keys::Dek::generate();
+        let stored_id = stored.archive_id();
+        let other_id = keys::Dek::generate().archive_id();
+        let mut ring = keyfile::KeyringFile {
+            kek_fingerprint: Some(kek.fingerprint().to_vec()),
+            ..Default::default()
+        };
+        let wrapped = kek.wrap(profile, &stored)?;
+        ring.profiles.insert(profile, wrapped.clone());
+        ring.shredded.insert(profile);
+        let manifest = |requested: Option<&str>| {
+            let (ids, key_ids) = requested.map_or_else(
+                || (json!([]), json!({})),
+                |id| (json!([profile]), json!({profile.to_string(): id})),
+            );
+            json!({
+                "keys": {"keyring": ids, "key_ids": key_ids},
+                "state_hash": {profile.to_string(): "in the backup"},
+            })
+        };
+        let mut failures = Vec::new();
+        for (label, requested, closes_other) in [
+            ("matching", Some(stored_id.as_str()), false),
+            ("mismatched and shredded", Some(other_id.as_str()), true),
+            ("mismatched and missing", Some(other_id.as_str()), false),
+            ("supplemental", None, false),
+        ] {
+            let mut ids = BTreeSet::from([stored_id.clone()]);
+            if closes_other {
+                ids.insert(other_id.clone());
+            }
+            ring.shredded_keys.insert(profile, ids);
+            keyfile::write(&settings.keyring_path(), &ring)?;
+            let result = ring_keys(&settings, &manifest(requested), Some(&kek), true);
+            if !result.err().is_some_and(|e| e.to_string().contains("closes")) {
+                failures.push(label);
+            }
+        }
+
+        // This tombstone closes the archived key, leaving the stored newer key selectable.
+        ring.shredded_keys.insert(profile, BTreeSet::from([other_id.clone()]));
+        keyfile::write(&settings.keyring_path(), &ring)?;
+        let selected = ring_keys(&settings, &manifest(Some(&other_id)), Some(&kek), false)?.expect("keyring manifest");
+        assert_eq!(selected.keys, [(profile, wrapped)]);
+        assert_eq!(selected.shredded, [profile]);
+        assert!(failures.is_empty(), "closed key was not refused on {failures:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verify_restore_frees_the_keyring_during_pg_restore_and_restore_does_not() -> anyhow::Result<()> {
+        use ownhealth_core::testing::TestDb;
+        use std::fs::TryLockError;
+
+        crate::register();
+        let db = TestDb::empty().await?;
+        let dir = tempfile::tempdir()?;
+        let live = TestDb::new().await?;
+        let live_settings = live.settings(&dir.path().join("live"))?;
+        let archive = backup(&live_settings, &dir.path().join("backup")).await?;
+        let mut settings = db.settings(&dir.path().join("restored"))?;
+        settings.secrets_key = live_settings.secrets_key.clone();
+        settings.keyring_dir = Some(live_settings.keyring_path());
+        let lock_file = settings.keyring_path().join(".keyring.lock");
+        let (observed, mut checks) = tokio::sync::mpsc::channel(3);
+        // Observe the lock in this process as pg_restore opens the dump. If restore returns
+        // early there is no probe to cancel or join.
+        let observe = Box::new(move |_: &str| {
+            let lock = fs::File::options().write(true).open(&lock_file)?;
+            let free = match lock.try_lock() {
+                Ok(()) => true,
+                Err(TryLockError::WouldBlock) => false,
+                Err(TryLockError::Error(error)) => return Err(error.into()),
+            };
+            observed
+                .try_send(free)
+                .expect("the test makes at most three restore calls");
+            Ok(())
+        });
+        OBSERVE_PG_RESTORE
+            .scope(observe, async {
+                assert_eq!(verify_restore(&settings, &archive).await?["ok"], true);
+                assert_eq!(checks.try_recv(), Ok(true), "verify-restore held the keyring lock");
+                assert_eq!(restore(&settings, &archive).await?["ok"], true);
+                assert_eq!(checks.try_recv(), Ok(false), "restore released the keyring lock");
+                let early = restore(&settings, &archive).await.expect_err("target now has tables");
+                assert!(early.to_string().contains("target database is not empty"), "{early}");
+                assert_eq!(checks.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
+                Ok::<_, Error>(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn scratch_exists(admin: &mut PgConnection, scratch: &str) -> sqlx::Result<bool> {
+        sqlx::query_scalar("select exists(select 1 from pg_database where datname = $1)")
+            .bind(scratch)
+            .fetch_one(admin)
+            .await
+    }
+
+    #[tokio::test]
+    async fn round_eight_verification_refuses_overlap_without_dropping_the_scratch() -> anyhow::Result<()> {
+        use ownhealth_core::testing::TestDb;
+
+        crate::register();
+        let db = TestDb::new().await?;
+        let dir = tempfile::tempdir()?;
+        let settings = db.settings(dir.path())?;
+        let archive = backup(&settings, &dir.path().join("backup")).await?;
+        let scratch = format!("{}_restore_check", db.name);
+        let mut lock = PgConnection::connect(&db.url).await?;
+        create_scratch(&mut lock, &scratch).await?;
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            let held: bool = sqlx::query_scalar(
+                "select pg_catalog.pg_try_advisory_lock(pg_catalog.hashtext('ownhealth.verify_restore'))",
+            )
+            .fetch_one(&mut lock)
+            .await?;
+            anyhow::ensure!(held, "the test must own the lock");
+            let result = verify_restore(&settings, &archive).await;
+            Ok::<_, anyhow::Error>((result, scratch_exists(&mut lock, &scratch).await?))
+        })
+        .await;
+        lock.close().await?; // releases the test's lock before asserting the result
+        let mut cleanup = PgConnection::connect(&db.url).await?;
+        if scratch_exists(&mut cleanup, &scratch).await? {
+            drop_scratch(&mut cleanup, &scratch).await?;
+        }
+        let (result, preserved) = result??;
+        let error = result.expect_err("overlapping verification must fail");
+        assert!(
+            error.to_string().contains("verify-restore is already running"),
+            "{error}"
+        );
+        assert!(preserved, "overlap dropped the scratch database");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn round_eight_verifications_for_two_live_databases_can_overlap() -> anyhow::Result<()> {
+        use ownhealth_core::testing::TestDb;
+
+        crate::register();
+        let dir = tempfile::tempdir()?;
+        let first = TestDb::new().await?;
+        let second = TestDb::new().await?;
+        let first_settings = first.settings(&dir.path().join("first"))?;
+        let second_settings = second.settings(&dir.path().join("second"))?;
+        let first_archive = backup(&first_settings, &dir.path().join("backup-first")).await?;
+        let second_archive = backup(&second_settings, &dir.path().join("backup-second")).await?;
+        let first_scratch = format!("{}_restore_check", first.name);
+        let second_scratch = format!("{}_restore_check", second.name);
+
+        let mut conn = PgConnection::connect(&first.url).await?;
+        // These two leftovers belong to this test. Each check should remove only its own.
+        create_scratch(&mut conn, &first_scratch).await?;
+        create_scratch(&mut conn, &second_scratch).await?;
+
+        let (at_restore, mut reached) = tokio::sync::mpsc::unbounded_channel();
+        let result = tokio::time::timeout(Duration::from_secs(60), async {
+            let first_check = OBSERVE_PG_RESTORE.scope(
+                Box::new(move |url| {
+                    at_restore.send(url.to_string()).expect("record scratch database");
+                    Ok(())
+                }),
+                verify_restore(&first_settings, &first_archive),
+            );
+            tokio::pin!(first_check);
+            let target = tokio::select! {
+                result = &mut first_check => anyhow::bail!("first check finished before pg_restore: {result:?}"),
+                target = reached.recv() => target.expect("observe pg_restore"),
+            };
+            let second_preserved = scratch_exists(&mut conn, &second_scratch).await?;
+            // Keep the first verification future alive, still holding its lock, while the second runs.
+            let second_report = verify_restore(&second_settings, &second_archive).await;
+            let first_report = first_check.await?;
+            Ok::<_, anyhow::Error>((target, second_preserved, first_report, second_report))
+        })
+        .await;
+        let first_left = scratch_exists(&mut conn, &first_scratch).await?;
+        let second_left = scratch_exists(&mut conn, &second_scratch).await?;
+        if first_left {
+            drop_scratch(&mut conn, &first_scratch).await?;
+        }
+        if second_left {
+            drop_scratch(&mut conn, &second_scratch).await?;
+        }
+
+        let (target, second_preserved, first_report, second_report) = result??;
+        assert_eq!(second_report?["ok"], true);
+        assert_eq!(first_report["ok"], true);
+        assert!(target.ends_with(&format!("/{first_scratch}")), "incorrect scratch name");
+        assert!(
+            second_preserved,
+            "the first check dropped the second database's scratch"
+        );
+        assert!(!first_left && !second_left, "a scratch database was left behind");
+        Ok(())
+    }
+
+    /// The lock is held through pg_restore: a second check of the same database refuses and
+    /// leaves the first check's scratch database alone.
+    #[tokio::test]
+    async fn round_nine_a_second_verification_refuses_while_the_first_restores() -> anyhow::Result<()> {
+        use ownhealth_core::testing::TestDb;
+
+        crate::register();
+        let db = TestDb::new().await?;
+        let dir = tempfile::tempdir()?;
+        let settings = db.settings(dir.path())?;
+        let archive = backup(&settings, &dir.path().join("backup")).await?;
+        let scratch = format!("{}_restore_check", db.name);
+        let (at_restore, mut reached) = tokio::sync::mpsc::unbounded_channel();
+        let result = tokio::time::timeout(Duration::from_secs(60), async {
+            let first_check = OBSERVE_PG_RESTORE.scope(
+                Box::new(move |url| {
+                    at_restore.send(url.to_string()).expect("record the scratch database");
+                    Ok(())
+                }),
+                verify_restore(&settings, &archive),
+            );
+            tokio::pin!(first_check);
+            tokio::select! {
+                result = &mut first_check => anyhow::bail!("first check finished before pg_restore: {result:?}"),
+                target = reached.recv() => target.expect("observe pg_restore"),
+            };
+            // The first check is now inside pg_restore and is not polled while the second runs.
+            let second = verify_restore(&settings, &archive).await;
+            let mut conn = PgConnection::connect(&db.url).await?;
+            let kept = scratch_exists(&mut conn, &scratch).await?;
+            conn.close().await?;
+            let first = first_check.await?;
+            Ok::<_, anyhow::Error>((second, kept, first))
+        })
+        .await;
+        let mut cleanup = PgConnection::connect(&db.url).await?;
+        let left = scratch_exists(&mut cleanup, &scratch).await?;
+        if left {
+            drop_scratch(&mut cleanup, &scratch).await?;
+        }
+        cleanup.close().await?;
+
+        let (second, kept, first) = result??;
+        let error = second.expect_err("a second check of the same database must refuse");
+        assert!(
+            error.to_string().contains("verify-restore is already running"),
+            "{error}"
+        );
+        assert!(kept, "the second check dropped the first check's scratch database");
+        assert_eq!(first["ok"], true);
+        assert!(!left, "the first check left its scratch database");
+        Ok(())
+    }
+
+    /// A live database whose name needs quoting and percent-encoding (mixed case, space, double
+    /// quote, slash, percent): the check replaces its own leftover scratch and keeps another
+    /// database's scratch.
+    #[tokio::test]
+    async fn round_nine_verification_quotes_the_live_database_name() -> anyhow::Result<()> {
+        use ownhealth_core::testing::{TestDb, admin_url};
+
+        crate::register();
+        let base = TestDb::new().await?;
+        base.pool.close().await;
+        let live = format!("{}_Mx \"q/%", base.name);
+        let scratch = format!("{live}_restore_check");
+        let neighbour = format!("{}_restore_check", base.name);
+        let mut admin = PgConnection::connect(&admin_url()).await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "create database {} template {}",
+            database_ident(&live),
+            database_ident(&base.name)
+        )))
+        .execute(&mut admin)
+        .await?;
+        let dir = tempfile::tempdir()?;
+        let outcome = async {
+            create_scratch(&mut admin, &scratch).await?; // a leftover of this live database
+            create_scratch(&mut admin, &neighbour).await?; // the scratch of another live database
+            let settings = settings_for(&with_db(&base.url, &live), dir.path())?;
+            let archive = backup(&settings, &dir.path().join("backup")).await?;
+            Ok::<_, anyhow::Error>(verify_restore(&settings, &archive).await?)
+        }
+        .await;
+        let scratch_left = scratch_exists(&mut admin, &scratch).await?;
+        let neighbour_left = scratch_exists(&mut admin, &neighbour).await?;
+        for name in [&scratch, &neighbour, &live] {
+            sqlx::query(AssertSqlSafe(format!(
+                "drop database if exists {} with (force)",
+                database_ident(name)
+            )))
+            .execute(&mut admin)
+            .await?;
+        }
+        admin.close().await?;
+        assert_eq!(outcome?["ok"], true);
+        assert!(!scratch_left, "the check left its scratch database");
+        assert!(neighbour_left, "the check dropped another database's scratch");
+        Ok(())
+    }
+
+    /// PostgreSQL cuts a longer name back to 63 bytes, so `<live>_restore_check` of a 63-byte
+    /// live name would name the live database itself. The check refuses before any DDL.
+    #[tokio::test]
+    async fn round_nine_verification_refuses_a_scratch_name_past_the_identifier_limit() -> anyhow::Result<()> {
+        use ownhealth_core::testing::{TestDb, admin_url};
+
+        let base = TestDb::empty().await?;
+        let live = format!("{}_{}", base.name, "x".repeat(62 - base.name.len()));
+        assert_eq!(live.len(), 63);
+        let mut admin = PgConnection::connect(&admin_url()).await?;
+        sqlx::query(AssertSqlSafe(format!("create database {}", database_ident(&live))))
+            .execute(&mut admin)
+            .await?;
+        let dir = tempfile::tempdir()?;
+        let result = async {
+            let settings = settings_for(&with_db(&base.url, &live), dir.path())?;
+            Ok::<_, anyhow::Error>(verify_restore(&settings, &dir.path().join("no-backup")).await)
+        }
+        .await;
+        let live_left = scratch_exists(&mut admin, &live).await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "drop database if exists {} with (force)",
+            database_ident(&live)
+        )))
+        .execute(&mut admin)
+        .await?;
+        admin.close().await?;
+        let error = result?.expect_err("an overlong scratch name must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the PostgreSQL identifier length limit"),
+            "{error}"
+        );
+        assert!(live_left, "the live database is gone");
+        Ok(())
+    }
+
+    /// A failure after the create, in the revoke or in opening the database, drops the scratch.
+    #[tokio::test]
+    async fn round_nine_a_failed_scratch_step_leaves_no_scratch_database() -> anyhow::Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let db = ownhealth_core::testing::TestDb::empty().await?;
+        let scratch = format!("{}_restore_check", db.name);
+        let mut admin = PgConnection::connect(&db.url).await?;
+        let mut kept = Vec::new();
+        for fail_at in 1..=2 {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = Arc::clone(&calls);
+            let result = BEFORE_SCRATCH_STEP
+                .scope(
+                    Box::new(move || match seen.fetch_add(1, Ordering::SeqCst) + 1 == fail_at {
+                        true => Err(ops_error("injected failure")),
+                        false => Ok(()),
+                    }),
+                    create_scratch(&mut admin, &scratch),
+                )
+                .await;
+            let left = scratch_exists(&mut admin, &scratch).await?;
+            if left {
+                drop_scratch(&mut admin, &scratch).await?;
+            }
+            if result.is_ok() || left {
+                kept.push((fail_at, calls.load(Ordering::SeqCst), left));
+            }
+        }
+        admin.close().await?;
+        assert!(
+            kept.is_empty(),
+            "a failed step did not fail or kept the scratch (step, calls, left): {kept:?}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_repair_write_leaves_the_backup_destination_retryable() -> anyhow::Result<()> {
+        use ownhealth_core::{demo::seed_demo, testing::TestDb};
+        use std::os::unix::fs::PermissionsExt;
+
+        crate::register();
+        let db = TestDb::new().await?;
+        let dir = tempfile::tempdir()?;
+        let settings = db.settings(dir.path())?;
+        let store = BlobStore::for_settings(&settings)?;
+        assert!(seed_demo(&db.pool, &settings, &store, false).await?);
+        let (profile, sha): (Uuid, String) = sqlx::query_as(
+            "select profile_id, encode(blob_sha256, 'hex') from document where profile_id is not null limit 1",
+        )
+        .fetch_one(&db.pool)
+        .await?;
+        let losses = blobs::RestoreLosses::from([(profile, BTreeSet::from([sha]))]);
+        blobs::write_restore_losses(&settings, &losses)?;
+        let folder = settings.blobs_path();
+
+        let dest = dir.path().join("backup");
+        let read_only = folder.clone();
+        let result = BEFORE_CLEAR_REPAIRED
+            .scope(
+                Box::new(move || {
+                    fs::set_permissions(&read_only, fs::Permissions::from_mode(0o500))
+                        .expect("make the loss record read-only")
+                }),
+                backup(&settings, &dest),
+            )
+            .await;
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o700))?;
+        let error = result.expect_err("backup could not record the repair");
+        assert!(error.to_string().contains("cannot write restore losses"), "{error}");
+        backup(&settings, &dest).await?;
+        assert_eq!(verify_restore(&settings, &dest).await?["ok"], true);
+        assert!(blobs::read_restore_losses(&settings)?.is_empty());
+        Ok(())
+    }
 
     /// While verify-restore holds its scratch database, a plain role of the same server cannot open
     /// it, nor make temporary tables there.
@@ -1325,17 +2248,26 @@ mod tests {
         )))
         .execute(&mut admin)
         .await?;
-        let created = create_scratch(&mut admin, &scratch).await;
         let (scheme, rest) = db.url.split_once("://").unwrap_or(("postgres", &db.url));
         let host = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
         let plain = with_db(&format!("{scheme}://{role}:{password}@{host}"), &scratch);
-        let opened = match PgConnection::connect(&plain).await {
-            Ok(conn) => {
-                conn.close().await?;
-                "connected".to_string()
-            }
-            Err(e) => e.to_string(),
-        };
+        // One attempt before each setup step: right after the create, and after the revoke.
+        let early = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (seen, url) = (Arc::clone(&early), plain.clone());
+        let created = BEFORE_SCRATCH_STEP
+            .scope(
+                Box::new(move || {
+                    let outcome = connect_outcome_blocking(&url);
+                    seen.lock()
+                        .map_err(|_| ops_error("the hook's lock is poisoned"))?
+                        .push(outcome);
+                    Ok(())
+                }),
+                create_scratch(&mut admin, &scratch),
+            )
+            .await;
+        let opened = connect_outcome(&plain).await;
+        let early = std::mem::take(&mut *early.lock().map_err(|_| anyhow::anyhow!("poisoned"))?);
         let temp: Option<bool> = sqlx::query_scalar("select has_database_privilege($1, $2, 'TEMPORARY')")
             .bind(&role)
             .bind(&scratch)
@@ -1350,6 +2282,13 @@ mod tests {
         }
         admin.close().await?;
         created?;
+        assert_eq!(early.len(), 2, "{early:?}");
+        for outcome in &early {
+            assert!(
+                outcome.contains("is not currently accepting connections"),
+                "a plain role could open the scratch database during its setup: {early:?}"
+            );
+        }
         assert!(
             opened.contains("permission denied for database"),
             "a plain role opened the scratch database: {opened}"
@@ -1409,17 +2348,30 @@ mod tests {
             "postgresql://u:p@h:1/x?sslmode=require"
         );
         assert_eq!(with_db("postgresql+psycopg://u@h/live", "x"), "postgresql://u@h/x");
-        assert_eq!(db_name("postgresql://u@h/live?a=b"), "live");
     }
 
     #[test]
     fn with_db_ignores_a_slash_in_the_query() {
         let url = "postgresql://u@h/live?sslrootcert=/etc/ca.pem";
-        assert_eq!(db_name(url), "live");
         assert_eq!(with_db(url, "x"), "postgresql://u@h/x?sslrootcert=/etc/ca.pem");
         assert_eq!(
             with_db("postgresql://u@h/live?host=/var/run/postgresql", "x"),
             "postgresql://u@h/x?host=/var/run/postgresql"
+        );
+    }
+
+    #[test]
+    fn with_db_encodes_the_name_and_replaces_a_dbname_option() {
+        assert_eq!(
+            with_db(
+                "postgresql://local?dbname=live&sslrootcert=/etc/ca.pem&db%6Eame=also_live",
+                "live /%\"_restore_check"
+            ),
+            "postgresql://local/live%20%2F%25%22_restore_check?sslrootcert=/etc/ca.pem"
+        );
+        assert_eq!(
+            database_ident("live /%\"_restore_check"),
+            "\"live /%\"\"_restore_check\""
         );
     }
 

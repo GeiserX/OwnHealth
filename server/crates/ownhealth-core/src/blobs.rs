@@ -26,7 +26,7 @@
 //! Access control lives on the rows that reference a hash (document, genome_dataset); a hash on its
 //! own grants nothing.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -515,7 +515,10 @@ impl BlobStore {
         Ok(match settings.secrets_key {
             Some(_) => BlobStore::with_keys(
                 settings.blobs_path(),
-                Arc::new(Keyring::new(Kek::from_settings(settings)?, settings.sqlx_url())),
+                Arc::new(
+                    Keyring::new(Kek::from_settings(settings)?, settings.sqlx_url())
+                        .with_keyring_file(crate::keyfile::path(settings)),
+                ),
             )?,
             None => BlobStore::new(settings.blobs_path())?,
         })
@@ -585,16 +588,7 @@ impl BlobStore {
         if let Ok(mut seen) = PLAIN_HASHED.lock() {
             seen.push((h.clone(), std::thread::current().name().unwrap_or_default().to_string()));
         }
-        let mut digest = Sha256::new();
-        let mut buf = vec![0u8; CHUNK];
-        loop {
-            let n = file.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            digest.update(&buf[..n]);
-        }
-        if hex::encode(digest.finalize()) != h {
+        if sha256_reader(&mut file)? != h {
             return Err(BlobError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "a stored file does not match its sha256: it was changed or replaced",
@@ -1225,8 +1219,9 @@ impl BlobStore {
     }
 
     /// Remove upload spools a killed process left in `root/tmp`: regular files named `upload-*`
-    /// (the import route), `push-*` (the push inboxes), `copy-*` (a decrypted local copy) or 32 hex
-    /// characters (`put_reader`) last modified more than `older_than` ago. The age bound leaves
+    /// (the import route), `push-*` (the push inboxes), `copy-*` (a decrypted local copy), `brands-*`
+    /// (a provider directory vendor file) or 32 hex characters (`put_reader`) last modified more than
+    /// `older_than` ago. The age bound leaves
     /// another process's live upload alone, and a local copy is left while a [`LocalCopy`] of any
     /// process still holds it. Returns how many went.
     pub fn sweep_tmp(&self, older_than: std::time::Duration) -> io::Result<usize> {
@@ -1242,7 +1237,9 @@ impl BlobStore {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let spool = name.starts_with("upload-") || name.starts_with("push-") || name.starts_with("copy-");
+            let spool = ["upload-", "push-", "copy-", "brands-"]
+                .iter()
+                .any(|p| name.starts_with(p));
             let ours = spool || (name.len() == 32 && name.bytes().all(|c| c.is_ascii_hexdigit()));
             let meta = entry.metadata()?;
             if !ours || !meta.is_file() {
@@ -1288,26 +1285,55 @@ impl BlobStore {
         })
     }
 
-    /// Put the file `from` of a backup's blob tree where its `key` says, copied whole and then
-    /// renamed, so a blob is never there half. A key that is not one ([`tree_files`]) is refused.
-    /// False when the file is there already.
+    /// Put the file `from` of a backup's blob tree where its `key` says, copied whole, made
+    /// read-only and then renamed, so a blob is never there half or writable. A key that is not one
+    /// ([`tree_files`]) is refused. False when the file is there already: a resumed restore checked
+    /// its bytes first ([`check_restore_target`]), and it is made read-only too, in case an older
+    /// placement stopped between its rename and its mode change. An error names the destination.
     pub fn place(&self, key: &str, from: &Path) -> Result<bool, BlobError> {
         let target = self
             .root
             .join(tree_rel(key).ok_or_else(|| BlobError::BadName(key.to_string()))?);
+        let named = |e: io::Error| {
+            BlobError::Io(io::Error::new(
+                e.kind(),
+                format!("cannot place blob {key} at {}: {e}", target.display()),
+            ))
+        };
         if target.exists() {
+            set_mode(&target, 0o440).map_err(named)?;
             return Ok(false);
         }
         let parent = target.parent().unwrap_or(&self.root);
-        fs::create_dir_all(parent)?;
-        let part = parent.join(format!(".{}.part", key.replace('/', "-")));
-        if let Err(e) = fs::copy(from, &part).and_then(|_| fs::rename(&part, &target)) {
+        fs::create_dir_all(parent).map_err(named)?;
+        let part = restore_part_path(&target, key);
+        let placed = fs::copy(from, &part)
+            .and_then(|_| set_mode(&part, 0o440))
+            .and_then(|_| rename_part(&part, &target));
+        if let Err(e) = placed {
             let _ = fs::remove_file(&part);
-            return Err(e.into());
+            return Err(named(e));
         }
-        set_mode(&target, 0o440)?;
         Ok(true)
     }
+}
+
+#[cfg(test)]
+type PartHook = Box<dyn FnOnce(&Path)>;
+
+// Run with the `.part` path right before [`BlobStore::place`] renames it, in this test thread only.
+#[cfg(test)]
+thread_local! {
+    static BEFORE_PLACE_RENAME: std::cell::RefCell<Option<PartHook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The last step of [`BlobStore::place`]: the `.part` file takes the blob's name.
+fn rename_part(part: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(observe) = BEFORE_PLACE_RENAME.with(|hook| hook.borrow_mut().take()) {
+        observe(part);
+    }
+    fs::rename(part, target)
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
@@ -1356,9 +1382,215 @@ fn tree_rel(key: &str) -> Option<PathBuf> {
     }
 }
 
+/// Temporary sibling used by blob placement and recognized by a checkpointed retry.
+fn restore_part_path(target: &Path, key: &str) -> PathBuf {
+    target.with_file_name(format!(".{}.part", key.replace('/', "-")))
+}
+
+/// Profile references a restore could not recover. The file lives outside `TREE_PARTS`, so
+/// only the omissions in the manifest travel with an archive.
+pub type RestoreLosses = BTreeMap<Uuid, BTreeSet<String>>;
+
+const RESTORE_LOSSES: &str = ".restore-losses.json";
+
+/// Random bytes in the name of a staged loss record.
+const STAGED_LOSSES_TOKEN: usize = 8;
+
+/// The name [`write_restore_losses`] stages the loss record under, at the store root.
+fn staged_loss_record() -> String {
+    format!("{RESTORE_LOSSES}.{}.tmp", crate::ids::token_hex(STAGED_LOSSES_TOKEN))
+}
+
+fn is_staged_loss_record(rel: &Path) -> bool {
+    rel.to_str()
+        .and_then(|name| {
+            name.strip_prefix(RESTORE_LOSSES)?
+                .strip_prefix('.')?
+                .strip_suffix(".tmp")
+        })
+        .is_some_and(|token| {
+            token.len() == 2 * STAGED_LOSSES_TOKEN && token.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
+fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
+    let mut digest = Sha256::new();
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        digest.update(&buf[..n]);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+/// A fresh restore needs a store without files. A checkpointed retry may find the
+/// loss record and complete blobs from the same archive. Discard interrupted copies
+/// of those blobs, and a loss record staged by an interrupted write, after the store
+/// passes inspection.
+pub fn check_restore_target(
+    settings: &crate::config::Settings,
+    expected: &BTreeMap<&str, &str>,
+    resuming: bool,
+) -> io::Result<()> {
+    let root = settings.blobs_path();
+    match restore_files_match(&root, expected, resuming) {
+        Ok(None) => Ok(()),
+        Ok(Some(path)) => {
+            let action = if resuming {
+                "contains files outside this restore or files that differ from the backup"
+            } else {
+                "is not empty"
+            };
+            let remedy = if resuming {
+                "Use the blob store for this restore"
+            } else {
+                "Start a new restore with an empty blob store"
+            };
+            Err(io::Error::other(format!(
+                "the target blob store {} {action}. Found {}. {remedy}",
+                root.display(),
+                path.display()
+            )))
+        }
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("cannot inspect the target blob store {}: {error}", root.display()),
+        )),
+    }
+}
+
+fn restore_files_match(root: &Path, expected: &BTreeMap<&str, &str>, resuming: bool) -> io::Result<Option<PathBuf>> {
+    let mut expected_paths = BTreeMap::new();
+    let mut expected_parts = BTreeSet::new();
+    for (&key, &digest) in expected {
+        if let Some(path) = tree_rel(key) {
+            if resuming {
+                expected_parts.insert(restore_part_path(&path, key));
+            }
+            expected_paths.insert(path, digest);
+        }
+    }
+    let mut parts = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(dir) = directories.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if dir == root && e.kind() == io::ErrorKind::NotFound && !root.is_symlink() => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            let rel = path.strip_prefix(root).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} is outside the blob root", path.display()),
+                )
+            })?;
+            let loss_record = rel == Path::new(RESTORE_LOSSES);
+            if kind.is_dir() {
+                if loss_record || expected_paths.contains_key(rel) || expected_parts.contains(rel) {
+                    return Ok(Some(path));
+                }
+                directories.push(path);
+                continue;
+            }
+            if !resuming || !kind.is_file() {
+                return Ok(Some(path));
+            }
+            if loss_record {
+                continue;
+            }
+            if expected_parts.contains(rel) || is_staged_loss_record(rel) {
+                parts.push(path);
+                continue;
+            }
+            let Some(&digest) = expected_paths.get(rel) else {
+                return Ok(Some(path));
+            };
+            if sha256_reader(File::open(&path)?)? != digest {
+                return Ok(Some(path));
+            }
+        }
+    }
+    for part in parts {
+        fs::remove_file(&part)
+            .map_err(|error| io::Error::new(error.kind(), format!("cannot remove {}: {error}", part.display())))?;
+    }
+    Ok(None)
+}
+
+/// Read the omissions accepted in this store by a restore.
+pub fn read_restore_losses(settings: &crate::config::Settings) -> io::Result<RestoreLosses> {
+    let dir = settings.blobs_path();
+    let file = dir.join(RESTORE_LOSSES);
+    let read = || -> io::Result<RestoreLosses> {
+        if !crate::keyfile::owner_writes_only(&file, false, "restore losses").map_err(io::Error::other)? {
+            return Ok(RestoreLosses::new());
+        }
+        check_loss_dir(&dir)?;
+        Ok(serde_json::from_reader(File::open(&file)?)?)
+    };
+    read().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("cannot read restore losses from {}: {e}", file.display()),
+        )
+    })
+}
+
+/// Record this restore's expected omissions. A matching record may already exist on retry.
+pub fn record_restore_losses(settings: &crate::config::Settings, expected: &RestoreLosses) -> io::Result<()> {
+    let stored = read_restore_losses(settings)?;
+    if !stored.is_empty() && stored != *expected {
+        return Err(io::Error::other(format!(
+            "the loss record in the target blob store {} differs from the losses for this restore",
+            settings.blobs_path().display()
+        )));
+    }
+    if stored != *expected {
+        write_restore_losses(settings, expected)?;
+    }
+    Ok(())
+}
+
+fn check_loss_dir(dir: &Path) -> io::Result<()> {
+    crate::keyfile::owner_writes_only(&fs::canonicalize(dir)?, true, "blob store").map_err(io::Error::other)?;
+    Ok(())
+}
+
+/// Replace the loss record while holding the keyring lock. A crash leaves the old or new record.
+pub fn write_restore_losses(settings: &crate::config::Settings, losses: &RestoreLosses) -> io::Result<()> {
+    let dir = settings.blobs_path();
+    let staged = dir.join(staged_loss_record());
+    let write = || -> io::Result<()> {
+        fs::create_dir_all(&dir)?;
+        check_loss_dir(&dir)?;
+        let mut f = create_private(&staged)?;
+        serde_json::to_writer(&mut f, losses)?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&staged, dir.join(RESTORE_LOSSES))?;
+        #[cfg(unix)]
+        File::open(&dir)?.sync_all()?;
+        Ok(())
+    };
+    write().map_err(|e| {
+        let _ = fs::remove_file(staged);
+        io::Error::new(
+            e.kind(),
+            format!("cannot write restore losses in {}: {e}", dir.display()),
+        )
+    })
+}
+
 /// Whether `path` lies in the configured blob folder: the keyring folder must not, or every backup
 /// would copy it (`keyfile::check_folder`).
-pub fn in_blob_folder(settings: &crate::config::Settings, path: &Path) -> bool {
+pub fn in_blob_folder(settings: &crate::config::Settings, path: &Path) -> Result<bool, crate::keys::KeyError> {
     crate::keyfile::inside(path, &settings.blobs_path())
 }
 
@@ -1409,6 +1641,104 @@ mod tests {
 
     fn owner() -> BlobOwner {
         BlobOwner::Profile(uuid::Uuid::nil())
+    }
+
+    #[test]
+    fn resumed_restore_refuses_other_bytes_at_an_expected_path() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let settings = crate::config::Settings {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let original = b"original backup bytes";
+        let digest = sha256_reader(&original[..])?;
+        let expected = BTreeMap::from([(digest.as_str(), digest.as_str())]);
+        let relative = tree_rel(&digest).expect("a SHA-256 digest is a plain blob key");
+        let target = settings.blobs_path().join(relative);
+        fs::create_dir_all(target.parent().expect("a blob path has a shard directory"))?;
+        fs::write(&target, b"unrelated blob bytes")?;
+        check_restore_target(&settings, &expected, true).expect_err("resume must compare the digest");
+        assert_eq!(fs::read(&target)?, b"unrelated blob bytes");
+        fs::write(&target, original)?;
+        check_restore_target(&settings, &expected, true)?;
+        Ok(())
+    }
+
+    /// A stop inside `write_restore_losses` leaves its staged record in the store root. A resumed
+    /// restore removes that file and still refuses any other name.
+    #[test]
+    fn resumed_restore_removes_only_a_staged_loss_record() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let settings = crate::config::Settings {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let root = settings.blobs_path();
+        fs::create_dir_all(&root)?;
+        let expected = BTreeMap::new();
+        // The name and mode that write_restore_losses gives the file before the rename.
+        let staged_name = staged_loss_record();
+        let staged = root.join(&staged_name);
+        drop(create_private(&staged)?);
+        let strays = [
+            root.join(format!("{RESTORE_LOSSES}.tmp")),
+            root.join(format!("{RESTORE_LOSSES}.not-a-token.tmp")),
+            root.join("sha256").join(&staged_name),
+        ];
+        for stray in strays {
+            fs::create_dir_all(stray.parent().expect("a stray file has a folder"))?;
+            fs::write(&stray, b"{}")?;
+            let error = check_restore_target(&settings, &expected, true).expect_err("a stray file is refused");
+            assert!(error.to_string().contains(&stray.display().to_string()), "{error}");
+            assert!(staged.exists() && stray.exists());
+            fs::remove_file(&stray)?;
+        }
+        check_restore_target(&settings, &expected, false).expect_err("a new restore needs an empty store");
+        check_restore_target(&settings, &expected, true)?;
+        assert!(!staged.exists(), "the staged loss record was left behind");
+        Ok(())
+    }
+
+    /// A directory where a resumed restore expects an interrupted copy (`.part`) is refused by its
+    /// path: placement could never write the copy there.
+    #[test]
+    fn resumed_restore_refuses_a_directory_at_an_expected_part_path() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let settings = crate::config::Settings {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let digest = sha256_reader(&b"backup bytes"[..])?;
+        let expected = BTreeMap::from([(digest.as_str(), digest.as_str())]);
+        let relative = tree_rel(&digest).expect("a SHA-256 digest is a plain blob key");
+        let part = settings.blobs_path().join(restore_part_path(&relative, &digest));
+        fs::create_dir_all(&part)?;
+        let error = check_restore_target(&settings, &expected, true).expect_err("a directory at a .part path");
+        assert!(error.to_string().contains(&part.display().to_string()), "{error}");
+        assert!(part.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn resumed_restore_refuses_a_different_nonempty_loss_record() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let settings = crate::config::Settings {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let profile = Uuid::new_v4();
+        let expected = RestoreLosses::from([(profile, BTreeSet::from(["a".repeat(64)]))]);
+        let stored = RestoreLosses::from([(profile, BTreeSet::from(["b".repeat(64)]))]);
+        write_restore_losses(&settings, &stored)?;
+
+        let error = record_restore_losses(&settings, &expected).expect_err("resume must refuse a different record");
+        assert!(
+            error.to_string().contains("differs from the losses for this restore"),
+            "{error}"
+        );
+        assert_eq!(read_restore_losses(&settings)?, stored);
+        record_restore_losses(&settings, &stored)?;
+        Ok(())
     }
 
     #[test]
@@ -1547,7 +1877,9 @@ mod tests {
             ("push-0123abcd".to_string(), true),
             ("a".repeat(32), true),
             ("copy-0123abcd".to_string(), true),
+            ("brands-0123abcd-epic.json".to_string(), true),
             ("upload-fresh".to_string(), false),
+            ("brands-0123abcd-oracle.json".to_string(), false),
             ("notes.txt".to_string(), true),
         ] {
             let f = File::create(tmp.join(name))?;
@@ -1556,13 +1888,13 @@ mod tests {
             }
         }
         let one_hour = std::time::Duration::from_secs(3600);
-        assert_eq!(store.sweep_tmp(one_hour)?, 4);
+        assert_eq!(store.sweep_tmp(one_hour)?, 5);
         let mut left = Vec::new();
         for e in fs::read_dir(&tmp)? {
             left.push(e?.file_name().to_string_lossy().into_owned());
         }
         left.sort();
-        assert_eq!(left, ["notes.txt", "upload-fresh"]);
+        assert_eq!(left, ["brands-0123abcd-oracle.json", "notes.txt", "upload-fresh"]);
         assert_eq!(store.sweep_tmp(one_hour)?, 0);
         Ok(())
     }
@@ -2210,6 +2542,43 @@ mod tests {
         assert!(!part.exists(), "the failed place left its .part file");
         assert!(fresh.place(&sha, &from)?);
         assert_eq!(fs::read(&target)?, b"reference table");
+        Ok(())
+    }
+
+    /// A placed blob is read-only. So is one that a stopped placement had renamed into place before
+    /// it set the mode: the retry finds it there and makes it read-only too.
+    #[cfg(unix)]
+    #[test]
+    fn a_placed_blob_is_read_only_also_when_a_retry_reuses_it() -> Result<(), BlobError> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let from = dir.path().join("from");
+        fs::write(&from, b"reference table")?;
+        set_mode(&from, 0o644)?;
+        let sha = sha256_reader(&b"reference table"[..])?;
+        let fresh = BlobStore::new(dir.path().join("fresh"))?;
+        let mode = |p: &Path| fs::metadata(p).map(|m| m.permissions().mode() & 0o777);
+        // the .part file is read-only before it takes the blob's name, so the blob is never there
+        // writable, even for a moment
+        let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+        let observed = seen.clone();
+        BEFORE_PLACE_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |part: &Path| {
+                observed.set(Some(fs::metadata(part).map(|m| m.permissions().mode() & 0o777).ok()));
+            }));
+        });
+        assert!(fresh.place(&sha, &from)?);
+        assert_eq!(
+            seen.get(),
+            Some(Some(0o440)),
+            "the .part file was renamed before it was made read-only"
+        );
+        let target = plain_at(&dir.path().join("fresh"), &sha);
+        assert_eq!(mode(&target)?, 0o440);
+        // a placement stopped between its rename and its mode change left the source's mode
+        set_mode(&target, 0o644)?;
+        assert!(!fresh.place(&sha, &from)?);
+        assert_eq!(mode(&target)?, 0o440, "the reused blob kept a writable mode");
         Ok(())
     }
 

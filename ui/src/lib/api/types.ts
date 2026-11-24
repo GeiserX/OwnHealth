@@ -1018,3 +1018,36 @@ export interface BreakGlassOwnerView {
 		allowed: BreakGlassCategory[];
 	};
 }
+
+// v1.0 the US endpoint directory (routes/brands.rs)
+/** One vendor's copy of the US endpoint directory (routes/brands.rs). */
+export interface BrandFeed {
+	vendor: string;
+	fetched_at: string | null;
+	entries: number;
+	stale: boolean;
+}
+/** The household's US endpoint directory; null before the wizard was first opened. */
+export interface BrandDirectory {
+	source_id: Uuid;
+	enabled: boolean;
+	last_run_at: string | null;
+	feeds: BrandFeed[];
+	stale: boolean;
+	ready: boolean;
+}
+/** A facility whose name holds every word of the query. */
+export interface BrandHit {
+	name: string;
+	endpoint: string;
+	state: string | null;
+	vendor: string;
+}
+export interface BrandsOpened {
+	created: boolean;
+	directory: BrandDirectory | null;
+}
+export interface BrandsFound {
+	directory: BrandDirectory | null;
+	results: BrandHit[];
+}

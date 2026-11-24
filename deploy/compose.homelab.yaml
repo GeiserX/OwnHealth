@@ -35,7 +35,7 @@ services:
       - ownhealth-data:/data # blobs, and /data/backups for the restic staging directory
       # The profile keys (keyring.json), on their own mount: never in the data volume, the backups or
       # restic. Host backup tools must skip this folder (deploy/README.md, "The keyring").
-      - ./keyring:/keyring
+      - ./keyring/${COMPOSE_PROJECT_NAME}:/keyring
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -69,7 +69,7 @@ services:
     volumes:
       - ownhealth-data:/data
       - ./inbox:/inbox
-      - ./keyring:/keyring # the same folder as the admin service's
+      - ./keyring/${COMPOSE_PROJECT_NAME}:/keyring # the same folder as the admin service's
       # Only the Orthanc password, from its own folder: a secret listed above must exist even with
       # imaging off, and the app must not see the other files in secrets/.
       - ./secrets/imaging:/run/secrets/imaging:ro
