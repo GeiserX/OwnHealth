@@ -471,7 +471,7 @@ async fn reject(
     let item = check(&mut tx, principal, found, true).await?;
     review::reject(&mut tx, item_id, principal.user_id.unwrap_or_default(), &reason).await?;
     audit(&mut tx, principal, &item, "review_reject").await?;
-    let removed = ownhealth_imaging::remove::settle(&mut tx, &item).await?;
+    let removed = settle_upload(&mut tx, principal, &item).await?;
     tx.commit().await?;
     Ok(Json(closed(item_id, "rejected", removed)))
 }
@@ -517,9 +517,28 @@ async fn dismiss(
     )
     .await?;
     audit(&mut tx, principal, &item, "review_dismiss").await?;
-    let removed = ownhealth_imaging::remove::settle(&mut tx, &item).await?;
+    let removed = settle_upload(&mut tx, principal, &item).await?;
     tx.commit().await?;
     Ok(Json(closed(item_id, "dismissed", removed)))
+}
+
+/// After a reject or a dismiss: closing the last held study of an upload that put nothing on the
+/// record removes the upload (`ownhealth_imaging::remove::settle`), with the audit row a
+/// `DELETE /api/imaging/imports/{id}` writes. Closing needs `review` and `read:records` already
+/// (`check`, `visible`); the person closed every study of the upload, so no `import` action is asked.
+async fn settle_upload(conn: &mut PgConnection, principal: &Principal, item: &ReviewItem) -> R<bool> {
+    if !ownhealth_imaging::remove::settle(&mut *conn, item).await? {
+        return Ok(false);
+    }
+    let mut e = AuditEvent::new(principal.actor_kind(), "ui", crate::routes::imaging::REMOVE_ACTION);
+    e.actor_id = principal.user_id;
+    e.token_id = principal.token_id;
+    e.tool = Some("review".into());
+    e.profile_id = item.profile_id;
+    e.resource_type = Some("imaging_import".into());
+    e.resource_ids = item.ref_id.map(|id| vec![id.to_string()]);
+    write_audit(conn, &e).await?;
+    Ok(true)
 }
 
 /// The answer to a reject or a dismiss. Closing the last held study of an upload that put nothing on

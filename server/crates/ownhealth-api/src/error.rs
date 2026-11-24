@@ -52,6 +52,10 @@ impl From<Error> for ApiError {
                 };
                 ApiError::new(status, &code, message).with("allowed", json!(allowed))
             }
+            // a held study whose upload was removed: its own code, so a page can say it in the person's language
+            Error::Review(m) if m == ownhealth_imaging::import::UPLOAD_REMOVED => {
+                ApiError::new(StatusCode::CONFLICT, "upload_removed", m)
+            }
             Error::Review(m) | Error::Lifecycle(m) | Error::Provenance(m) => {
                 ApiError::new(StatusCode::CONFLICT, "conflict", m)
             }

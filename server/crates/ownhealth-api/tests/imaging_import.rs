@@ -753,6 +753,15 @@ async fn closing_the_last_held_study_of_an_upload_removes_the_upload() -> R {
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["upload_removed"], json!(true), "{v}");
     assert!(imports(&a, a.family.profile("alex")).await?.is_empty());
+    // the removal is in the audit log as a DELETE's is
+    let audited: Vec<(Option<Uuid>, Option<Vec<String>>)> =
+        sqlx::query_as("select profile_id, resource_ids from audit_event where action = 'imaging.remove_upload'")
+            .fetch_all(&a.rt.pool)
+            .await?;
+    assert_eq!(
+        audited,
+        [(Some(a.family.profile("alex")), Some(vec![import_id.to_string()]))]
+    );
     assert_eq!(release(&a).await?, 1);
     assert!(!a.rt.blobs.exists(BlobOwner::Profile(a.family.profile("alex")), &sha));
     // reopened, the held study refuses Accept with a message the person can act on
@@ -761,7 +770,9 @@ async fn closing_the_last_held_study_of_an_upload_removes_the_upload() -> R {
     let (s, v) = a
         .post("alex", &format!("/review/{second}/accept"), Some(json!({})))
         .await?;
-    assert!(s.is_client_error(), "{s} {v}");
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    // a code of its own, so the page says it in the person's language
+    assert_eq!(v["detail"]["code"], "upload_removed", "{v}");
     assert!(v.to_string().contains("This upload was removed"), "{v}");
     Ok(())
 }
