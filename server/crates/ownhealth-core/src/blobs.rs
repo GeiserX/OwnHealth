@@ -1595,8 +1595,9 @@ mod tests {
         let original = b"original backup bytes";
         let digest = sha256_reader(&original[..])?;
         let expected = BTreeMap::from([(digest.as_str(), digest.as_str())]);
-        let target = settings.blobs_path().join(tree_rel(&digest).unwrap());
-        fs::create_dir_all(target.parent().unwrap())?;
+        let relative = tree_rel(&digest).expect("a SHA-256 digest is a plain blob key");
+        let target = settings.blobs_path().join(relative);
+        fs::create_dir_all(target.parent().expect("a blob path has a shard directory"))?;
         fs::write(&target, b"unrelated blob bytes")?;
         check_restore_target(&settings, &expected, true).expect_err("resume must compare the digest");
         assert_eq!(fs::read(&target)?, b"unrelated blob bytes");
