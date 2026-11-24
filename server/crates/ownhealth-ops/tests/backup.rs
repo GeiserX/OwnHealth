@@ -1311,7 +1311,12 @@ async fn round_eight_a_partial_restore_can_retry_after_blob_placement_is_interru
     let error = ownhealth_ops::restore_with(&settings, &l.archive, true)
         .await
         .expect_err("later blob's temporary path is a directory");
-    assert!(matches!(error, ownhealth_core::Error::Io(_)), "{error}");
+    assert!(matches!(error, ownhealth_core::Error::RestoreLoss(_)), "{error}");
+    let destination = settings.blobs_path().join(last_path.strip_prefix(&archive_blobs)?);
+    let text = error.to_string();
+    for needed in [destination.display().to_string(), "rerun the same restore".to_string()] {
+        assert!(text.contains(&needed), "{needed:?} is missing from: {text}");
+    }
     let placed = tree_files(&settings.blobs_path())?;
     assert!(placed.contains_key(first));
     assert!(!placed.contains_key(last));
@@ -1338,13 +1343,18 @@ async fn round_eight_a_partial_restore_can_retry_after_blob_placement_is_interru
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o440))?;
     }
 
-    // A retry that tries to copy the already placed blob would fail at this path.
-    let already_placed = part_path(first, first_path)?;
-    fs::create_dir(&already_placed)?;
-    let result = ownhealth_ops::restore_with(&settings, &l.archive, true).await;
-    fs::remove_dir(already_placed)?;
-    let report = result?;
+    // The retry keeps the blob it placed before: the same file, not a new copy.
+    let placed_first = settings.blobs_path().join(first_path.strip_prefix(&archive_blobs)?);
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&placed_first)?);
+    let report = ownhealth_ops::restore_with(&settings, &l.archive, true).await?;
     assert_eq!(report["ok"], true, "{report:#}");
+    #[cfg(unix)]
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(&fs::metadata(&placed_first)?),
+        inode,
+        "the retry copied the placed blob again"
+    );
     assert!(!blocked.exists(), "the interrupted copy was left behind");
     assert!(error.contains(&foreign.display().to_string()), "{error}");
     let placed = tree_files(&settings.blobs_path())?;

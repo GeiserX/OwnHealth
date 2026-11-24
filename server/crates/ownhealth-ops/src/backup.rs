@@ -1545,7 +1545,10 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
     };
     let store = BlobStore::for_settings(settings)?;
     for (key, path) in &backup_blobs {
-        store.place(key, path)?;
+        store.place(key, path).map_err(|error| match resume_lock {
+            Some(_) => Error::RestoreLoss(Box::new(Error::from(error))),
+            None => Error::from(error),
+        })?;
     }
     if resume_lock.is_some() {
         let mut conn = PgConnection::connect(&url).await?;

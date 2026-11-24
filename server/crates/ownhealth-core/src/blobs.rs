@@ -1282,24 +1282,35 @@ impl BlobStore {
         })
     }
 
-    /// Put the file `from` of a backup's blob tree where its `key` says, copied whole and then
-    /// renamed, so a blob is never there half. A key that is not one ([`tree_files`]) is refused.
-    /// False when the file is there already.
+    /// Put the file `from` of a backup's blob tree where its `key` says, copied whole, made
+    /// read-only and then renamed, so a blob is never there half or writable. A key that is not one
+    /// ([`tree_files`]) is refused. False when the file is there already: a resumed restore checked
+    /// its bytes first ([`check_restore_target`]), and it is made read-only too, in case an older
+    /// placement stopped between its rename and its mode change. An error names the destination.
     pub fn place(&self, key: &str, from: &Path) -> Result<bool, BlobError> {
         let target = self
             .root
             .join(tree_rel(key).ok_or_else(|| BlobError::BadName(key.to_string()))?);
+        let named = |e: io::Error| {
+            BlobError::Io(io::Error::new(
+                e.kind(),
+                format!("cannot place blob {key} at {}: {e}", target.display()),
+            ))
+        };
         if target.exists() {
+            set_mode(&target, 0o440).map_err(named)?;
             return Ok(false);
         }
         let parent = target.parent().unwrap_or(&self.root);
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).map_err(named)?;
         let part = restore_part_path(&target, key);
-        if let Err(e) = fs::copy(from, &part).and_then(|_| fs::rename(&part, &target)) {
+        let placed = fs::copy(from, &part)
+            .and_then(|_| set_mode(&part, 0o440))
+            .and_then(|_| fs::rename(&part, &target));
+        if let Err(e) = placed {
             let _ = fs::remove_file(&part);
-            return Err(e.into());
+            return Err(named(e));
         }
-        set_mode(&target, 0o440)?;
         Ok(true)
     }
 }
@@ -1461,7 +1472,7 @@ fn restore_files_match(root: &Path, expected: &BTreeMap<&str, &str>, resuming: b
             })?;
             let loss_record = rel == Path::new(RESTORE_LOSSES);
             if kind.is_dir() {
-                if loss_record || expected_paths.contains_key(rel) {
+                if loss_record || expected_paths.contains_key(rel) || expected_parts.contains(rel) {
                     return Ok(Some(path));
                 }
                 directories.push(path);
@@ -1645,7 +1656,7 @@ mod tests {
         fs::create_dir_all(&root)?;
         let expected = BTreeMap::new();
         // The name and mode that write_restore_losses gives the file before the rename.
-        let staged_name = format!("{RESTORE_LOSSES}.{}.tmp", crate::ids::token_hex(8));
+        let staged_name = staged_loss_record();
         let staged = root.join(&staged_name);
         drop(create_private(&staged)?);
         let strays = [
@@ -1664,6 +1675,26 @@ mod tests {
         check_restore_target(&settings, &expected, false).expect_err("a new restore needs an empty store");
         check_restore_target(&settings, &expected, true)?;
         assert!(!staged.exists(), "the staged loss record was left behind");
+        Ok(())
+    }
+
+    /// A directory where a resumed restore expects an interrupted copy (`.part`) is refused by its
+    /// path: placement could never write the copy there.
+    #[test]
+    fn resumed_restore_refuses_a_directory_at_an_expected_part_path() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let settings = crate::config::Settings {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let digest = sha256_reader(&b"backup bytes"[..])?;
+        let expected = BTreeMap::from([(digest.as_str(), digest.as_str())]);
+        let relative = tree_rel(&digest).expect("a SHA-256 digest is a plain blob key");
+        let part = settings.blobs_path().join(restore_part_path(&relative, &digest));
+        fs::create_dir_all(&part)?;
+        let error = check_restore_target(&settings, &expected, true).expect_err("a directory at a .part path");
+        assert!(error.to_string().contains(&part.display().to_string()), "{error}");
+        assert!(part.is_dir());
         Ok(())
     }
 
@@ -2488,6 +2519,29 @@ mod tests {
         assert!(!part.exists(), "the failed place left its .part file");
         assert!(fresh.place(&sha, &from)?);
         assert_eq!(fs::read(&target)?, b"reference table");
+        Ok(())
+    }
+
+    /// A placed blob is read-only. So is one that a stopped placement had renamed into place before
+    /// it set the mode: the retry finds it there and makes it read-only too.
+    #[cfg(unix)]
+    #[test]
+    fn a_placed_blob_is_read_only_also_when_a_retry_reuses_it() -> Result<(), BlobError> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let from = dir.path().join("from");
+        fs::write(&from, b"reference table")?;
+        set_mode(&from, 0o644)?;
+        let sha = sha256_reader(&b"reference table"[..])?;
+        let fresh = BlobStore::new(dir.path().join("fresh"))?;
+        let mode = |p: &Path| fs::metadata(p).map(|m| m.permissions().mode() & 0o777);
+        assert!(fresh.place(&sha, &from)?);
+        let target = plain_at(&dir.path().join("fresh"), &sha);
+        assert_eq!(mode(&target)?, 0o440);
+        // a placement stopped between its rename and its mode change left the source's mode
+        set_mode(&target, 0o644)?;
+        assert!(!fresh.place(&sha, &from)?);
+        assert_eq!(mode(&target)?, 0o440, "the reused blob kept a writable mode");
         Ok(())
     }
 
