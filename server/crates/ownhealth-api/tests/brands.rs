@@ -32,6 +32,9 @@ async fn opening_the_wizard_makes_the_directory_once_and_a_search_stays_in_the_h
     assert_eq!(r.json["results"], serde_json::json!([]));
     assert_eq!(env.scalar_i64("select count(*) from source").await?, 0);
     assert_eq!(env.scalar_i64("select count(*) from job").await?, 0);
+    // every search is a read of the household's directory: one audit row each, query text left out
+    let searches = "select count(*) from audit_event where action = 'search' and tool = 'connections'";
+    assert_eq!(env.scalar_i64(searches).await?, 1);
     // the wizard opens: one source, one pull queued, audited once
     let r = alex.post0("/api/brands").await?;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.json);
@@ -64,7 +67,7 @@ async fn opening_the_wizard_makes_the_directory_once_and_a_search_stays_in_the_h
     );
     // a pulled copy, written as the poller writes it
     let source: Uuid = id.parse()?;
-    let mut c = env.pool().acquire().await?;
+    let mut tx = env.pool().begin().await?;
     let entries = [
         ("Hospital LabNorte", "https://fhir.labnorte.example/r4/", Some("TX")),
         ("LabNorte Centro", "https://fhir.labnorte.example/r4/", Some("TX")),
@@ -75,9 +78,18 @@ async fn opening_the_wizard_makes_the_directory_once_and_a_search_stays_in_the_h
         endpoint: e.into(),
         state: s.map(String::from),
     });
-    brands::replace(&mut c, source, "epic", &entries).await?;
+    brands::replace(&mut tx, source, "epic", &entries).await?;
+    tx.commit().await?;
     let r = alex.get("/api/brands?q=LABNORTE").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(env.scalar_i64(searches).await?, 2);
+    assert_eq!(
+        env.scalar_i64(&format!(
+            "select count(*) from audit_event where action = 'search' and '{id}' = any(resource_ids)"
+        ))
+        .await?,
+        1
+    );
     assert_eq!(names(&r.json), vec!["LabNorte Centro", "Hospital LabNorte"]);
     assert_eq!(r.json["results"][0]["endpoint"], "https://fhir.labnorte.example/r4/");
     assert_eq!(r.json["results"][0]["state"], "TX");

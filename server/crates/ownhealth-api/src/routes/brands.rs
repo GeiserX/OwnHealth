@@ -93,6 +93,20 @@ async fn search(State(rt): State<Runtime>, Caller(p): Caller, Query(q): Params) 
         Some(_) => brands::search(&mut tx, household, query, limit).await?,
         None => Vec::new(),
     };
+    // a read of the household's directory: one audit row in the same transaction (the query names
+    // a facility, not a person, and stays out of the row)
+    let action = if query.trim().is_empty() { "read" } else { "search" };
+    write_audit(
+        &mut tx,
+        &AuditEvent {
+            actor_id: p.user_id,
+            tool: Some("connections".into()),
+            resource_type: Some("source".into()),
+            resource_ids: directory.as_ref().map(|d| vec![d.source_id.to_string()]),
+            ..AuditEvent::new("user", "ui", action)
+        },
+    )
+    .await?;
     tx.commit().await?;
     ok(json!({"directory": directory, "results": results}))
 }
