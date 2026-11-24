@@ -92,3 +92,27 @@ test('a keyboard revoke of an offline card keeps the keyboard on its row', async
 	await expect(row).toContainText('Revoked');
 	await expect(row).toBeFocused();
 });
+
+test('a card notice opens Share links on the profile of the card, not the one on screen', async ({ browser, baseURL }) => {
+	const ctx = await browser.newContext({ baseURL, colorScheme: 'dark' });
+	const page = await ctx.newPage();
+	const me = await (await ctx.request.get('/api/me')).json();
+	const lucia = me.profiles.find((p: { slug: string }) => p.slug === 'lucia');
+	const profile = { id: lucia.id, slug: 'lucia', display_name: lucia.display_name };
+	const at = new Date(Date.now() - 60_000).toISOString();
+	const open = { id: 'n-card', kind: 'ice.access', profile, request_id: null, actor: null, contact: null, created_at: at, read_at: null };
+	await page.route('**/api/notifications', (route) =>
+		route.fulfill({ json: { items: [open], uses: [], ice: [{ profile, count: 1, unread: 1, last_at: at }], unread: 1 } })
+	);
+	// Alex is on screen when the notice about Lucía's card comes in
+	await page.goto('/?lang=en');
+	await page.evaluate(() => localStorage.setItem('oh.profile', 'alex'));
+	await page.goto('/?lang=en');
+	const panel = page.getByRole('region', { name: /^Notices/ });
+	await expect(panel).toBeVisible();
+	await panel.getByRole('link', { name: 'Manage cards and links' }).click();
+	await expect(page).toHaveURL(/\/links/);
+	await expect(page.getByRole('heading', { name: `Links of ${lucia.display_name}` })).toBeVisible();
+	expect(await page.evaluate(() => localStorage.getItem('oh.profile'))).toBe('lucia');
+	await ctx.close();
+});

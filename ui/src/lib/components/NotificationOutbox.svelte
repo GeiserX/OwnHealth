@@ -13,7 +13,7 @@
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { intlLocale } from '#lib/i18n/langs';
 	import { groupNotices, noticeLoader, unreadGroups, when, type NoticeView } from '#lib/logic/breakglass';
-	import { app } from '#lib/state/app.svelte';
+	import { app, currentProfile, setProfile } from '#lib/state/app.svelte';
 
 	/** A tab that comes back reads the notices again, at most once a minute (each read writes an audit row). */
 	const REFRESH_MS = 60_000;
@@ -117,6 +117,11 @@
 		e.preventDefault();
 		close();
 	}
+	// Share links shows the profile on screen: a card notice for another profile puts that one on screen first
+	function openCards(slug: string) {
+		if (currentProfile()?.slug !== slug) setProfile(slug);
+		view.open = false;
+	}
 	const step = (kind: string, by: string | null) => tf('nt_k_' + kind.replace('break_glass.', ''), { by: by ?? t('nt_someone') });
 </script>
 
@@ -153,7 +158,7 @@
 									<div class="step" class:muted={!s.unread}>{step(s.kind, s.by)} · <span class="num">{when(s.at, loc)}</span></div>
 								{/each}
 								{#if g.uses}<div class="step">{tp(g.card ? 'nt_ice_opens' : 'nt_uses', g.uses, { at: when(g.lastUse, loc) })}</div>{/if}
-								{#if g.card}<a href="/links" onclick={() => (view.open = false)}>{t('ice_manage')}</a>{/if}
+								{#if g.card}<a href="/links" onclick={() => openCards(g.profile.slug)}>{t('ice_manage')}</a>{/if}
 								{#if g.request}<a href="/family/break-glass/{g.request}" onclick={() => (view.open = false)}>{t('nt_see')}</a>{/if}
 							</li>
 						{/each}
