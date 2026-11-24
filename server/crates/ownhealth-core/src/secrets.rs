@@ -199,6 +199,47 @@ fn profile_aad(id: Uuid, purpose: &str, profile: Uuid) -> Vec<u8> {
     a
 }
 
+// Bind an access token to the source and grant that own it, separately from any refresh token.
+fn source_access_aad(source: Uuid, grant: Option<Uuid>) -> Vec<u8> {
+    let mut data = aad(source, "connector_access_token");
+    if let Some(grant) = grant {
+        data.extend_from_slice(grant.as_bytes());
+    }
+    data
+}
+
+pub(crate) async fn seal_source_access(
+    sb: &SecretBox,
+    profile: Option<Uuid>,
+    source: Uuid,
+    grant: Option<Uuid>,
+    value: &SecretString,
+) -> Result<Vec<u8>> {
+    let aad = source_access_aad(source, grant);
+    let text = value.expose().as_bytes();
+    match profile {
+        Some(profile) => Ok(profile_dek(sb, profile, true).await?.seal_value(text, &aad)?),
+        None => sb.seal(text, &aad),
+    }
+}
+
+pub(crate) async fn open_source_access(
+    sb: &SecretBox,
+    profile: Option<Uuid>,
+    source: Uuid,
+    grant: Option<Uuid>,
+    value: &[u8],
+) -> Result<SecretString> {
+    let aad = source_access_aad(source, grant);
+    match profile {
+        Some(profile) => {
+            let plain = profile_dek(sb, profile, false).await?.open_value(value, &aad)?;
+            secret_text(plain.to_vec())
+        }
+        None => secret_text(sb.open(value, &aad)?),
+    }
+}
+
 /// The data key of `profile` from the box's keyring, off the async runtime (a first lookup reads the
 /// database). With `create`, a profile with none gets one.
 async fn profile_dek(sb: &SecretBox, profile: Uuid, create: bool) -> Result<Arc<Dek>> {
