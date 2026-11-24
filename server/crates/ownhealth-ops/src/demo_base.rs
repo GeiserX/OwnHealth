@@ -383,8 +383,6 @@ const ALEX_SERIES: Series = &[
             ("2023-10-04", "2.4"),
             ("2024-05-22", "1.9"),
             ("2025-01-20", "2.1"),
-            // Refresh TSH on the same draw to leave room for the hint in the 2 KB demo status.
-            (ALEX_LIPID_DRAW, "2.0"),
         ],
     ),
     (
@@ -479,16 +477,15 @@ const ALEX_SRC_IDS: [((&str, &str), &str); 9] = [
     (("ldl_c", "2024-05-22"), "src_3d2"),
     (("ldl_c", "2026-03-02"), "src_9f3"),
 ];
-const CARMEN_DIRECT_LDL_DRAW: &str = "2025-07-15";
-
-/// Direct LDL, LOINC 18262-6. Carmen's older high result uses a separate method from her latest draw.
-const DIRECT_LDL_DATES: [&str; 3] = ["2023-10-04", "2024-05-22", CARMEN_DIRECT_LDL_DRAW];
+/// Direct LDL, LOINC 18262-6.
+const DIRECT_LDL_DATES: [&str; 2] = ["2023-10-04", "2024-05-22"];
 
 const OTHER_SERIES: [(&str, Series); 3] = [
     (
         "sam",
         &[
-            ("ldl_c", &[("2026-06-10", "122")]),
+            // the 2025 value, 190 mg/dL or more, feeds the hint Sam shares with Lucía (seed_family_share)
+            ("ldl_c", &[("2025-06-12", "204"), ("2026-06-10", "122")]),
             ("hba1c", &[("2026-06-10", "5.2")]),
             ("vitamin_d_25oh", &[("2026-06-10", "41")]),
             ("tsh", &[("2026-06-10", "1.6")]),
@@ -499,7 +496,7 @@ const OTHER_SERIES: [(&str, Series); 3] = [
     (
         "carmen",
         &[
-            ("ldl_c", &[(CARMEN_DIRECT_LDL_DRAW, "198"), ("2026-07-22", "110")]),
+            ("ldl_c", &[("2026-07-22", "110")]),
             ("hba1c", &[("2025-07-15", "6.1"), ("2026-07-22", "6.4")]),
             ("egfr", &[("2025-07-15", "64"), ("2026-07-22", "58")]),
             ("creatinine", &[("2026-07-22", "0.98")]),
@@ -1323,16 +1320,41 @@ pub async fn seed_family(conn: &mut PgConnection, ctx: &mut DemoContext) -> Resu
     Ok(())
 }
 
-/// Carmen's demo consent lets her results feed lab hints for Alex.
+/// Lucía's parents in her family history, and Sam's consent that her labs feed hints in Lucía's
+/// profile: written as `PUT /family-shares` writes it (granted by Sam, who owns her profile, with the
+/// consent change in the audit log), so Sam sees it on her Family page and can take it back.
 pub(crate) async fn seed_family_share(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result<()> {
+    use ownhealth_core::audit::{AuditEvent, write_audit};
+    use ownhealth_core::family::{self, MemberIn};
+    let (lucia, sam) = (ctx.family.profile("lucia"), ctx.family.profile("sam"));
+    let sam_user = ctx.family.user("sam");
+    for (relationship, born_year, parent) in [("FTH", 1979, "alex"), ("MTH", 1981, "sam")] {
+        let mut m = MemberIn::new(lucia, relationship);
+        m.born_year = Some(born_year);
+        let src = SrcRef::New(SrcIn {
+            profile_id: Some(lucia),
+            label: Some("manual".into()),
+            ..SrcIn::manual(Some(sam_user))
+        });
+        family::add(&mut *conn, &m, &src, "person", None, Some(ctx.family.profile(parent))).await?;
+    }
     sqlx::query(
-        "insert into family_share (source_profile_id, target_profile_id, categories) \
-         values ($1, $2, array['labs'])",
+        "insert into family_share (source_profile_id, target_profile_id, categories, granted_by) \
+         values ($1, $2, array['labs'], $3)",
     )
-    .bind(ctx.family.profile("carmen"))
-    .bind(ctx.family.profile("alex"))
+    .bind(sam)
+    .bind(lucia)
+    .bind(sam_user)
     .execute(&mut *conn)
     .await?;
+    let mut ev = AuditEvent::new("user", "ui", "consent_change");
+    ev.actor_id = Some(sam_user);
+    ev.tool = Some("family_share".into());
+    ev.profile_id = Some(sam);
+    ev.resource_type = Some("profile".into());
+    ev.resource_ids = Some(vec![lucia.to_string()]);
+    ev.args_summary = Some("categories=labs".into());
+    write_audit(conn, &ev).await?;
     Ok(())
 }
 

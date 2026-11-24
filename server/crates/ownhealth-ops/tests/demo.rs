@@ -1,6 +1,6 @@
 //! The base demo seed (`tests/test_demo.py`).
 
-use ownhealth_core::access::{Principal, effective_permission};
+use ownhealth_core::access::{Principal, effective_permission, today_utc};
 use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::demo::{DEMO_HOUSEHOLD, as_of, seed_demo};
 use ownhealth_core::testing::TestDb;
@@ -182,7 +182,9 @@ async fn fresh_demo_computes_score2_and_prevent() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Lucía's guardian sees the hint her mother's shared LDL feeds, on the demo date.
+/// Lucía's guardian sees the hint her mother's shared LDL feeds. Read as of today, as the Family
+/// page and the MCP status read it: the seed records its rows when it runs, after the demo date
+/// (`as_of()`), so a read as of that date sees no relative and no share yet.
 #[tokio::test]
 async fn fresh_demo_shows_lucia_a_hint_from_her_mothers_shared_ldl() -> anyhow::Result<()> {
     let (db, _dir) = fresh_demo().await?;
@@ -196,7 +198,7 @@ async fn fresh_demo_shows_lucia_a_hint_from_her_mothers_shared_ldl() -> anyhow::
     .await?;
     let principal = Principal::session(guardian, household);
     let perm = effective_permission(&mut conn, &principal, lucia).await?;
-    let hints = family::hints(&mut conn, &principal, &perm, as_of()).await?;
+    let hints = family::hints(&mut conn, &principal, &perm, today_utc()).await?;
 
     assert!(
         hints
@@ -237,7 +239,11 @@ async fn the_demo_share_is_made_by_its_source_manager() -> anyhow::Result<()> {
     .await?;
     assert_eq!(
         audit,
-        vec![(Some(granted_by), Some(vec![target.to_string()]), Some("categories=labs".into()))]
+        vec![(
+            Some(granted_by),
+            Some(vec![target.to_string()]),
+            Some("categories=labs".into())
+        )]
     );
     Ok(())
 }
