@@ -116,6 +116,9 @@ test('the picker finds a person beyond the first page by GEDCOM ID alone', () =>
 	assert.deepEqual(pickable(people, details, 'i40'), [people[39]]);
 	assert.deepEqual(pickable(people, details, '#39'), [people[38]]);
 	assert.deepEqual(pickable(people, [], '#40'), [people[39]]);
+	// position works for every person, ID or not, so a nameless person past the first page is always reachable
+	assert.deepEqual(pickable(people, details, '#40'), [people[39]]);
+	assert.deepEqual(pickable(people, details, '#35'), [people[34]]);
 });
 
 test('a proposal reads in es and en, with no name', () => {

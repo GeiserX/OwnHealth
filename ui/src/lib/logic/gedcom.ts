@@ -1,7 +1,7 @@
-// GEDCOM import (slice 24): what the browser does with the person's own tree file. The server reads
-// only structure and never a name (ownhealth-core/src/gedcom.rs). The picker still shows names: this
-// file reads each INDI record's first NAME here, in the browser, numbered the way the server numbers
-// people (the n-th INDI record of the file), and never sends them anywhere.
+// GEDCOM import (slice 24): what the browser does with the person's own tree file. The whole file is
+// sent to the server, which reads it in memory, uses only structure and keeps no name
+// (ownhealth-core/src/gedcom.rs). The picker shows names: this file reads each INDI record's first NAME
+// here, in the browser, numbered the way the server numbers people (the n-th INDI record of the file).
 
 /** The largest tree file the server reads (gedcom::MAX_BYTES): a larger one is refused before it is read. */
 export const MAX_TREE_BYTES = 10 * 1024 * 1024;
@@ -116,7 +116,7 @@ export function pickerId(i: number, details?: PickerDetails): string {
 	return details?.xref ?? `#${i + 1}`;
 }
 
-/** Match a name, birth year, or ID. Use local details only when their count matches the preview. */
+/** Match a name, birth year, ID, or #position (any person). Use local details only when their count matches the preview. */
 export function pickable<P extends PickPerson>(people: P[], details: PickerDetails[], query: string, limit = 30): P[] {
 	const useDetails = details.length === people.length;
 	const raw = query.trim();
@@ -125,6 +125,7 @@ export function pickable<P extends PickPerson>(people: P[], details: PickerDetai
 		if (!q) return true;
 		const person = useDetails ? details[p.i] : undefined;
 		const id = pickerId(p.i, person);
+		if (raw === `#${p.i + 1}`) return true;
 		if (id === raw || (id.startsWith('@') && id.slice(1, -1).toLowerCase() === q)) return true;
 		if (p.born_year != null && String(p.born_year).startsWith(q)) return true;
 		return person?.name?.toLowerCase().includes(q) ?? false;
