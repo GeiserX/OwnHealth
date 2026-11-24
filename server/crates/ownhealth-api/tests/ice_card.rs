@@ -525,3 +525,29 @@ async fn a_record_too_long_for_one_qr_fits_once_the_owner_leaves_items_out() -> 
     assert!(!text.contains("Medicine number 20"), "{text}");
     Ok(())
 }
+
+#[tokio::test]
+async fn card_opens_are_one_notice_entry_per_profile_with_their_count() -> R {
+    let env = Env::new(true).await?;
+    // 250 opens of the card, all unread, older than any other notice
+    sqlx::query(
+        "insert into notification_outbox (user_id, profile_id, kind, created_at)
+         select $1, $2, 'ice.access', now() - make_interval(secs => n) from generate_series(1, 250) n",
+    )
+    .bind(env.user("alex"))
+    .bind(env.profile("alex"))
+    .execute(env.pool())
+    .await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let seen = alex.get("/api/notifications").await?;
+    assert_eq!(seen.status, StatusCode::OK);
+    // the list keeps its 200 newest; the older unread opens do not flood it
+    assert_eq!(seen.json["items"].as_array().map(Vec::len), Some(200));
+    let ice = seen.json["ice"].as_array().cloned().unwrap_or_default();
+    assert_eq!(ice.len(), 1, "{}", seen.json["ice"]);
+    assert_eq!(ice[0]["profile"]["slug"], "alex");
+    assert_eq!(ice[0]["count"], 250);
+    assert_eq!(ice[0]["unread"], 250);
+    assert!(ice[0]["last_at"].is_string());
+    Ok(())
+}

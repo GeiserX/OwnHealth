@@ -1060,7 +1060,8 @@ export type NoticeKind =
 	| 'break_glass.activate'
 	| 'break_glass.use'
 	| 'break_glass.expire'
-	| 'break_glass.revoke';
+	| 'break_glass.revoke'
+	| 'ice.access';
 /** One in-app notice, in GET /notifications. */
 export interface Notice {
 	id: Uuid;
@@ -1083,6 +1084,13 @@ export interface NoticeUses {
 	unread: number;
 	last_at: IsoDateTime;
 }
+/** The opens of one profile's emergency card, counted over all of them (an `ice.access` has no request). */
+export interface NoticeIce {
+	profile: { id: Uuid; slug: string; display_name: string };
+	count: number;
+	unread: number;
+	last_at: IsoDateTime;
+}
 /**
  * GET /notifications: the 200 newest notices plus every older unread one other than a read, and the
  * read count of each request that is in the list or has unread reads.
@@ -1090,6 +1098,8 @@ export interface NoticeUses {
 export interface Notices {
 	items: Notice[];
 	uses: NoticeUses[];
+	/** the opens of each profile's emergency card that is in the list or has unread opens */
+	ice?: NoticeIce[];
 	unread: number;
 }
 /** GET /break-glass/requests/{id}: one request for the cancel screen, with the profile that holds it. */
