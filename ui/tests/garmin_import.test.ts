@@ -16,7 +16,7 @@ test('the readings line says what came in, or that every reading was already her
 	assert.equal(garminReadings({ accepted: 0, skipped: 0, reasons: {}, garmin }), null);
 	assert.equal(garminReadings(null), null);
 	for (const lang of ['en', 'es'] as const) {
-		for (const key of ['i2_garmin_readings', 'i2_garmin_readings_one', 'i2_garmin_nothing_new', 'i2_garmin_nothing_new_one', 'i2_garmin_nothing', 'i2_garmin_reason_limit', 'fu_k_garmin_export', 'err_zip_unreadable']) {
+		for (const key of ['i2_garmin_readings', 'i2_garmin_readings_one', 'i2_garmin_nothing_new', 'i2_garmin_nothing_new_one', 'i2_garmin_nothing', 'i2_garmin_reason_limit', 'fu_k_garmin_export', 'err_zip_unreadable', 'err_zip_too_many']) {
 			assert.ok((dict[lang] as Record<string, string>)[key], `${lang} ${key}`);
 		}
 	}
@@ -42,5 +42,6 @@ test('a hidden Garmin result gets the Wearables line, as a FIT one does', () => 
 test('a ZIP whose member list cannot be read is no unknown file', () => {
 	const has = (k: string) => k in dict.en;
 	assert.equal(errKey(null, 'garmin.zip: this ZIP could not be read; it may be incomplete', has), 'err_zip_unreadable');
+	assert.equal(errKey(null, 'garmin.zip: this ZIP holds too many files to import', has), 'err_zip_too_many');
 	assert.equal(errKey(null, 'x.zip: not a PDF, image, Apple Health export, FHIR bundle or genome facts file', has), 'err_unsupported_file');
 });

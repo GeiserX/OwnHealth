@@ -19,6 +19,7 @@ const PATTERNS: [RegExp, string][] = [
 	[/not a PDF, image/i, 'err_unsupported_file'],
 	[/^garmin_zip_unreadable$/i, 'err_garmin_zip_unreadable'],
 	[/ZIP could not be read/i, 'err_zip_unreadable'],
+	[/ZIP holds too many files to import/i, 'err_zip_too_many'],
 	[/^garmin_zip_limit$/i, 'err_garmin_zip_limit'],
 	[/^not a readable LibreView or Dexcom Clarity export/i, 'err_cgm_unreadable'],
 	[/^the export holds more than \d+ readings/i, 'err_cgm_too_many'],

@@ -604,7 +604,7 @@ pub async fn dispatch_upload_in_zone(
             }
             "zip_directory_limit" => {
                 return Err(Error::Upload(format!(
-                    "{}: this ZIP contains too much directory data",
+                    "{}: this ZIP holds too many files to import",
                     f.filename
                 )));
             }
