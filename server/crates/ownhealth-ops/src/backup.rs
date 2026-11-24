@@ -270,6 +270,7 @@ async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(BlobOwner, Str
          where i.profile_id is not null or i.quarantine_id is null or q.status = 'held'"
             .into(),
     );
+    parts.push("select profile_id, null::uuid, zip_blob from imaging_import".into());
     let q = format!(
         "select distinct p, d, encode(h, 'hex') from ({}) x where h is not null order by 3, 1, 2",
         parts.join(" union ")

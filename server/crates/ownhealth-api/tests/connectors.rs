@@ -18,6 +18,7 @@ use connector_fake::{CLIENT_ID, CLIENT_SECRET, Fake, REDIRECT, param};
 use ownhealth_api::routes::connectors::{EgressOverride, binder_cookie_name};
 use ownhealth_core::Runtime;
 use ownhealth_core::demo::create_rivera_family;
+use ownhealth_core::jobs;
 use ownhealth_core::net::Egress;
 use ownhealth_core::secrets::{SecretBox, SecretString, store_secret};
 use serde_json::{Value, json};
@@ -393,13 +394,26 @@ async fn a_launch_for_another_household_or_a_profile_the_caller_does_not_manage_
 
 #[tokio::test]
 async fn reconnect_clears_the_reconsent_flag_and_disconnect_revokes_and_removes_the_tokens() -> R {
+    ownhealth_ingest_structured::register();
     let t = setup().await?;
     let mut a = t.browser("alex").await?;
     let id = t.connect(&mut a, t.env.profile("alex")).await?;
-    sqlx::query("update source set reconsent_needed_at = now() where id = $1")
-        .bind(id)
-        .execute(t.env.pool())
+    // the first pull of the new connection is queued at once, not at the next scheduler pass
+    let polls = format!(
+        "select count(*) from job where kind = 'source.poll' and state = 'queued' and payload->>'source_id' = '{id}'"
+    );
+    assert_eq!(t.count(&polls).await?, 1, "the connect queued no pull");
+    // the refresh was refused: the card says Out with the old failure until a run succeeds
+    let queued: i64 = sqlx::query_scalar("select id from job where kind = 'source.poll'")
+        .fetch_one(t.env.pool())
         .await?;
+    sqlx::query(
+        "update source set reconsent_needed_at = now(), consecutive_failures = 1, last_error_at = now(), \
+         last_error = 'JobError: reconsent_needed: the vendor no longer accepts this connection' where id = $1",
+    )
+    .bind(id)
+    .execute(t.env.pool())
+    .await?;
     let r = a.post0(&format!("/api/connectors/{id}/reconnect")).await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
     let url = r.json["authorize_url"].as_str().unwrap_or_default().to_string();
@@ -410,6 +424,16 @@ async fn reconnect_clears_the_reconsent_flag_and_disconnect_revokes_and_removes_
         .fetch_one(t.env.pool())
         .await?;
     assert!(cleared, "reconnect left the reconsent flag");
+    let failures: i32 = sqlx::query_scalar("select consecutive_failures from source where id = $1")
+        .bind(id)
+        .fetch_one(t.env.pool())
+        .await?;
+    assert_eq!(failures, 0, "the old grant's failures stay on the reconnected card");
+    assert_eq!(t.count(&polls).await?, 1, "the reconnect left no queued pull");
+    let still_queued: i64 = sqlx::query_scalar("select id from job where kind = 'source.poll' and state = 'queued'")
+        .fetch_one(t.env.pool())
+        .await?;
+    assert_eq!(still_queued, queued, "the queued pull already covers the new grant");
     assert_eq!(t.count("select count(*) from source").await?, 1);
     assert_eq!(
         t.count("select count(*) from secret where purpose = 'connector_refresh_token'")
@@ -470,6 +494,64 @@ async fn reconnect_clears_the_reconsent_flag_and_disconnect_revokes_and_removes_
             .await?,
         0
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_queues_one_pull_after_the_running_pull_finishes() -> R {
+    ownhealth_ingest_structured::register();
+    let t = setup().await?;
+    let pool = t.env.pool();
+    let mut a = t.browser("alex").await?;
+    let id = t.connect(&mut a, t.env.profile("alex")).await?;
+    let kinds = ["source.poll".to_owned()];
+    // Claiming commits immediately. There is no worker or competing transaction.
+    let active = jobs::claim(pool, "core", "first", Some(&kinds))
+        .await?
+        .expect("the original grant queued a pull");
+
+    for _ in 0..2 {
+        let r = a.post0(&format!("/api/connectors/{id}/reconnect")).await?;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+        let url = r.json["authorize_url"].as_str().unwrap_or_default();
+        let back = t.callback(&mut a, url).await?;
+        assert_eq!(back.location(), format!("/connections?connected={id}"));
+    }
+    let queued: i64 = sqlx::query_scalar(
+        "select count(*) from job where kind = 'source.poll' and state = 'queued' and payload->>'source_id' = $1",
+    )
+    .bind(id.to_string())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(queued, 1, "two reconnects must leave exactly one fresh pull");
+    assert!(jobs::claim(pool, "core", "second", Some(&kinds)).await?.is_none());
+
+    // An ordinary sync request also coalesces with the waiting pull.
+    let mut conn = pool.acquire().await?;
+    assert!(ownhealth_core::sources::enqueue_poll(&mut conn, id).await?.is_none());
+    drop(conn);
+
+    // The predecessor can retry after a failure. The successor stays blocked until it finishes.
+    assert_eq!(
+        jobs::fail(pool, &active, &jobs::JobError::retry("temporary failure"), "first").await?,
+        "queued"
+    );
+    assert!(jobs::claim(pool, "core", "second", Some(&kinds)).await?.is_none());
+    sqlx::query("update job set run_after = now() where id = $1")
+        .bind(active.id)
+        .execute(pool)
+        .await?;
+    let retry = jobs::claim(pool, "core", "first", Some(&kinds))
+        .await?
+        .expect("the previous job can retry");
+    assert_eq!(retry.id, active.id);
+    assert!(jobs::complete(pool, &retry, "first", None).await?);
+    let pull = jobs::claim(pool, "core", "second", Some(&kinds))
+        .await?
+        .expect("the fresh pull is ready after the previous pull finishes");
+    assert_ne!(pull.id, active.id);
+    assert_eq!(pull.uuid("source_id")?, id);
+    assert!(jobs::claim(pool, "core", "third", Some(&kinds)).await?.is_none());
     Ok(())
 }
 

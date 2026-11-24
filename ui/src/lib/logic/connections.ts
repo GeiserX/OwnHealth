@@ -106,6 +106,35 @@ export function shownConnections<T extends ConnectionRow>(rows: T[]): T[] {
 	return rows.filter((r) => (CONNECTOR_KINDS as readonly string[]).includes(r.kind) && r.can_manage === true);
 }
 
+/** After a connect, how often the screen reads the rows again while the first pull runs, and how many times at most (3 minutes). */
+export const FIRST_PULL_EVERY = 5_000;
+export const FIRST_PULL_TRIES = 36;
+
+/** The first pull of the row's current grant has not finished yet (last_run_status covers only that grant's runs). */
+export function firstPullPending(r: ConnectionRow | undefined): boolean {
+	return !!r && r.enabled && !r.reconsent_needed_at && r.last_run_status == null;
+}
+
+/**
+ * After a connect or reconnect: read the rows again every FIRST_PULL_EVERY ms while the first pull of
+ * connection `id` has not finished, at most `tries` times, and never once `alive()` is false (the
+ * screen was left). `load` reads the rows; `wait` is a timer.
+ */
+export async function refreshUntilFirstPull(
+	load: () => Promise<ConnectionRow[] | null | undefined>,
+	id: string,
+	wait: (ms: number) => Promise<void>,
+	alive: () => boolean,
+	tries = FIRST_PULL_TRIES
+): Promise<void> {
+	for (let i = 0; i < tries; i++) {
+		await wait(FIRST_PULL_EVERY);
+		if (!alive()) return;
+		const list = await load();
+		if (!alive() || !firstPullPending(list?.find((r) => r.id === id))) return;
+	}
+}
+
 /** Where the connector callback sent the browser back: `?connected=<id>` or `?connector_error=<code>`. */
 export function callbackOutcome(q: Pick<URLSearchParams, 'get'>): { connected: string } | { error: string } | null {
 	const id = q.get('connected');
@@ -119,4 +148,30 @@ export function callbackOutcome(q: Pick<URLSearchParams, 'get'>): { connected: s
 /** The i18n key for a connector code, or the generic one for a code with no words yet. */
 export function connectorErrorKey(code: string, has: (k: string) => boolean): string {
 	return has('con_err_' + code) ? 'con_err_' + code : 'con_err_unknown';
+}
+
+/**
+ * The words a person reads for a poller's stop or problem text, which the server keeps in English
+ * with its code in front ('JobError: no_answer: …', 'undeclared_host: MedicationRequest: …'):
+ * `con_run_<code>` (or the callback's `con_err_<code>`), after the FHIR type it names, with the first
+ * number of the text as `{n}` and `(3 times)` said again. Null when the code has no words, so the
+ * screen shows the text as sent. `say` is tf().
+ */
+export function runWords(
+	text: string,
+	has: (k: string) => boolean,
+	say: (key: string, vars: Record<string, string | number>) => string
+): string | null {
+	const m = /^\s*(?:\w*(?:Error|Exception):\s*)?([a-z][a-z0-9_]*): ([\s\S]*)$/.exec(text);
+	if (!m) return null;
+	const [, code, rest] = m;
+	const key = has('con_run_' + code) ? 'con_run_' + code : code !== 'unknown' && has('con_err_' + code) ? 'con_err_' + code : null;
+	if (!key) return null;
+	const type = /^([A-Z][A-Za-z]+): /.exec(rest);
+	const body = type ? rest.slice(type[0].length) : rest;
+	const n = /\d+/.exec(body)?.[0] ?? '';
+	const times = /\((\d+) times\)$/.exec(body)?.[1];
+	let words = say(key, { n });
+	if (type) words = `${type[1]}: ${words.charAt(0).toLocaleLowerCase()}${words.slice(1)}`;
+	return times ? `${words} ${say('con_run_times', { n: Number(times) })}` : words;
 }

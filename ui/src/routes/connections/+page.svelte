@@ -26,7 +26,9 @@
 		connectionState,
 		connectorErrorKey,
 		daysLeft,
+		refreshUntilFirstPull,
 		renewsItself,
+		runWords,
 		shownConnections,
 		statusWord,
 		wantsReconnect,
@@ -56,6 +58,8 @@
 
 	const has = (k: string) => k in dict.en;
 	const codeText = (code: string) => tf(connectorErrorKey(code, has), { code });
+	// a poller's stop or problem, kept in English by the server, in the reader's language when its code has words
+	const runText = (text: string) => runWords(text, has, tf);
 
 	// What the vendor's redirect said, read once; the address is then cleaned so a reload does not repeat it.
 	let outcome = $state<{ connected: string } | { error: string } | null>(null);
@@ -66,6 +70,27 @@
 		goto('/connections', { replace: true, shallow: true });
 	});
 	const connectedId = $derived(outcome && 'connected' in outcome ? outcome.connected : null);
+	// the first pull runs seconds after a connect or reconnect: the rows are read again until it finishes, so the card shows it
+	$effect(() => {
+		const id = connectedId;
+		if (!id) return;
+		let alive = true;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const wait = (ms: number) => new Promise<void>((done) => (timer = setTimeout(done, ms)));
+		refreshUntilFirstPull(
+			async () => {
+				await load();
+				return rows.data;
+			},
+			id,
+			wait,
+			() => alive
+		);
+		return () => {
+			alive = false;
+			clearTimeout(timer);
+		};
+	});
 	// the note shows only for a connection this person sees listed, never for any id in the address
 	const connectedLabel = $derived(connectedId ? (rows.data?.find((r) => r.id === connectedId)?.label ?? null) : null);
 
@@ -201,7 +226,8 @@
 			{@const word = statusWord(s)}
 			{@const line = stateLine(r, s)}
 			{@const left = daysLeft(r.grant_expires_at, now)}
-			{@const lastErr = r.last_error ? errText(new Error(r.last_error)) : ''}
+			{@const lastErr = r.last_error ? (runText(r.last_error) ?? errText(new Error(r.last_error))) : ''}
+			{@const problem = r.last_run_problem ? runText(r.last_run_problem) : null}
 			<article class="card conn" class:just={connectedId === r.id} aria-labelledby="con-{r.id}" data-state={s}>
 				<div class="hd">
 					<div style="min-width:0">
@@ -234,7 +260,7 @@
 				{#if s === 'out' && r.last_error}
 					<div class="err" role="status">⚠ {tp('fu_failed_n', r.consecutive_failures)} {afterColon(lastErr, i18n.lang)}</div>
 				{:else if s === 'partial'}
-					<div class="note" role="status" style="color:var(--watch);overflow-wrap:anywhere">⚠ {tp('fu_partial_n', r.last_run_problems ?? 0)} {#if r.last_run_problem}<span class="mono">{r.last_run_problem}</span>{/if}</div>
+					<div class="note" role="status" style="color:var(--watch);overflow-wrap:anywhere">⚠ {tp('fu_partial_n', r.last_run_problems ?? 0)} {#if problem}{problem}{:else if r.last_run_problem}<span class="mono">{r.last_run_problem}</span>{/if}</div>
 				{/if}
 				{#if r.open_gaps}
 					<div class="note gaps" role="status">{tp('con_gaps', r.open_gaps)} <a href="/import-review" onclick={() => reviewOf(r)}>{t('con_gaps_go')} →</a></div>

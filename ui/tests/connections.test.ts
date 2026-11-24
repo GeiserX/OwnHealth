@@ -12,7 +12,11 @@ import {
 	connectionState,
 	connectorErrorKey,
 	daysLeft,
+	FIRST_PULL_EVERY,
+	FIRST_PULL_TRIES,
+	refreshUntilFirstPull,
 	renewsItself,
+	runWords,
 	shownConnections,
 	statusWord,
 	wantsReconnect,
@@ -170,4 +174,122 @@ test('the provider directory the app makes is titled in the reader\'s language; 
 	assert.equal(cardTitle(dir, tr(en)), en.con_t_brands);
 	assert.notEqual(es.con_t_brands, en.con_t_brands);
 	assert.equal(cardTitle(conn(), tr(es)), 'Hospital LabNorte');
+});
+
+// The SMART poller's stops and problems (smart.rs) reach the card in the reader's language.
+const sayIn = (lang: 'en' | 'es') => (key: string, vars: Record<string, string | number>) =>
+	(dict[lang] as Record<string, string>)[key].replace(/\{(\w+)\}/g, (_, v) => (v in vars ? String(vars[v]) : `{${v}}`));
+const hasKey = (k: string) => k in dict.en;
+
+test('an oversized page has its own words in English and Spanish', () => {
+	const page = 'page_too_large: Observation: the answer exceeded the 33554432-byte limit for one page';
+	assert.equal(runWords(page, hasKey, sayIn('en')), 'Observation: the server sent a page larger than the 33554432-byte limit.');
+	assert.equal(runWords(page, hasKey, sayIn('es')), 'Observation: el servidor envió una página que superó el límite de 33554432 bytes.');
+	assert.equal(
+		runWords('too_large: Observation: the answers of this run passed 268435456 bytes, so the rest was not read', hasKey, sayIn('en')),
+		'Observation: the answers of this run passed the size limit, so the rest was not read.'
+	);
+});
+
+test('a poller stop or problem reads in es and en, with its FHIR type, status and count', () => {
+	const es = sayIn('es');
+	assert.equal(
+		runWords('JobError: reconsent_needed: the vendor no longer accepts this connection, so it waits for a new sign-in', hasKey, es),
+		'El proveedor ya no acepta esta conexión. Reconectar vuelve a iniciar sesión.'
+	);
+	assert.equal(runWords('JobError: no_answer: no US Core search answered', hasKey, es), 'Ninguna búsqueda US Core respondió.');
+	assert.equal(
+		runWords('undeclared_host: MedicationRequest: a next page on a host this connection did not declare was not read', hasKey, es),
+		'MedicationRequest: no se leyó una página siguiente en un servidor que esta conexión no declaró.'
+	);
+	assert.equal(runWords('search_failed: Observation: the server answered 503 (3 times)', hasKey, es), 'Observation: el servidor respondió 503. (3 veces)');
+	assert.equal(runWords('search_failed: Observation: the server answered 503 (3 times)', hasKey, sayIn('en')), 'Observation: the server answered 503. (3 times)');
+	assert.equal(runWords('JobError: patient_unread: the server answered 404 for the patient', hasKey, es), 'El servidor respondió 404 al pedir el paciente.');
+	const unverified = 'patient_reference: Observation: a resource did not identify the verified patient and was skipped';
+	assert.equal(runWords(unverified, hasKey, sayIn('en')), 'Observation: a result did not identify this patient, so OwnHealth skipped it.');
+	assert.equal(runWords(unverified, hasKey, es), 'Observation: se omitió un resultado porque no identificaba a este paciente.');
+	// a code without words, or no code at all: the text as sent
+	assert.equal(runWords('JobError: no_such_code: something', hasKey, es), null);
+	assert.equal(runWords('JobError: unknown: something', hasKey, es), null);
+	assert.equal(runWords('connection refused', hasKey, es), null);
+});
+
+test('a wrong portal account tells the person to disconnect and start a new connection', () => {
+	const error = 'JobError: another_patient: the account at the portal is for another person than this profile, so nothing was imported';
+	assert.equal(
+		runWords(error, hasKey, sayIn('en')),
+		'The portal account belongs to someone else. No records were imported. Disconnect, then start a new connection with the account for this profile.'
+	);
+	assert.equal(
+		runWords(error, hasKey, sayIn('es')),
+		'La cuenta del portal pertenece a otra persona. No se importó ningún dato. Desconecta e inicia una conexión nueva con la cuenta de este perfil.'
+	);
+});
+
+const smart = read('../../server/crates/ownhealth-ingest-structured/src/smart.rs');
+const runCodes = new Set<string>();
+for (const m of smart.matchAll(/g\.problem\(\s*"([a-z_]+)"/g)) runCodes.add(m[1]);
+for (const m of smart.matchAll(/Miss::Search\(\s*"([a-z_]+)"/g)) runCodes.add(m[1]);
+for (const m of smart.matchAll(/"([a-z][a-z_]+): /g)) runCodes.add(m[1]);
+
+test('every stop and problem code of the SMART poller reads in es and en', () => {
+	// the gate can fail: codes from each of the three places are found
+	for (const c of ['no_answer', 'another_patient', 'patient_unverified', 'switched_off', 'reconsent_needed', 'patient_unread', 'token_refused', 'search_failed', 'repeated_page', 'too_many_medications', 'not_granted', 'undeclared_host', 'unreachable']) {
+		assert.ok(runCodes.has(c), `the scan missed ${c}`);
+	}
+	const missing = [...runCodes].filter((c) => {
+		const text = `${c}: Observation: the server answered 503`;
+		const en = runWords(text, hasKey, sayIn('en'));
+		const es = runWords(text, hasKey, sayIn('es'));
+		return !en || !es || en === es || /\{\w+\}/.test(en + es);
+	});
+	assert.deepEqual(missing, []);
+});
+
+test('after a connect the rows are read again until the first pull of the new grant finishes', async () => {
+	// the run is still going on the first two reads, and has finished on the third
+	const answers = [conn({ last_run_status: null }), conn({ last_run_status: null }), conn({ last_run_status: 'partial' })];
+	const waits: number[] = [];
+	let loads = 0;
+	await refreshUntilFirstPull(
+		async () => [answers[Math.min(loads++, answers.length - 1)]],
+		'c1',
+		async (ms) => void waits.push(ms),
+		() => true
+	);
+	assert.equal(loads, 3);
+	assert.deepEqual(waits, [FIRST_PULL_EVERY, FIRST_PULL_EVERY, FIRST_PULL_EVERY]);
+
+	// a pull that never finishes: the reads stop after the bound
+	loads = 0;
+	await refreshUntilFirstPull(async () => (loads++, [conn({ last_run_status: null })]), 'c1', async () => {}, () => true);
+	assert.equal(loads, FIRST_PULL_TRIES);
+
+	// the screen was left: no read after that
+	loads = 0;
+	let alive = true;
+	await refreshUntilFirstPull(
+		async () => {
+			loads++;
+			alive = false;
+			return [conn({ last_run_status: null })];
+		},
+		'c1',
+		async () => {},
+		() => alive
+	);
+	assert.equal(loads, 1);
+
+	// a row that is gone, switched off or waiting for consent is not waited for
+	for (const row of [conn({ id: 'other', last_run_status: null }), conn({ enabled: false, last_run_status: null }), conn({ reconsent_needed_at: inDays(-1), last_run_status: null })]) {
+		loads = 0;
+		await refreshUntilFirstPull(async () => (loads++, [row]), 'c1', async () => {}, () => true);
+		assert.equal(loads, 1);
+	}
+});
+
+test('the Connections screen keeps reading the rows while the first pull runs', () => {
+	const page = read('../src/routes/connections/+page.svelte');
+	assert.match(page, /refreshUntilFirstPull\(/);
+	assert.doesNotMatch(page, /setTimeout\(load, 8000\)/);
 });

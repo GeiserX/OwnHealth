@@ -37,6 +37,7 @@ const VCF: &[u8] = b"##fileformat=VCFv4.2 synthetic genome of Alex, stored befor
 const INBOX: &[u8] = b"%PDF-1.4 LabNorte report a scanner folder filed to Alex before 1.0";
 const PUSH: &[u8] = br#"{"data":{"metrics":[]},"note":"a Health Auto Export push of Sam before 1.0"}"#;
 const EML: &[u8] = b"From: lab@labnorte.example\r\nSubject: Analitica\r\n\r\nreleased to Alex before 1.0";
+const CD: &[u8] = b"PK\x03\x04 a LabNorte CD of Alex, zipped in the plain layout";
 
 struct Mixed {
     db: TestDb,
@@ -662,6 +663,32 @@ async fn a_local_copy_of_a_plain_file_outlives_the_job() -> R {
     let path = copy.path().to_path_buf();
     drop(copy);
     assert!(!path.exists(), "the copy stayed after its reader");
+    Ok(())
+}
+
+/// An imaging upload in the plain layout (the zip an `imaging_import` row names) is sealed under its
+/// profile's key, and the plain copy goes.
+#[tokio::test]
+async fn an_imaging_upload_is_sealed_under_its_profile() -> R {
+    let m = mixed().await?;
+    let zip = BlobStore::new(m.settings.blobs_path())?.put_bytes(BlobOwner::Reference, CD)?;
+    sqlx::query(
+        "insert into imaging_import (profile_id, zip_blob, filename, size_bytes, files) \
+         values ($1, decode($2, 'hex'), 'cd.zip', $3, 1)",
+    )
+    .bind(m.alex)
+    .bind(&zip)
+    .bind(i64::try_from(CD.len())?)
+    .execute(&m.db.pool)
+    .await?;
+    m.run(false).await?;
+    let alex = BlobOwner::Profile(m.alex);
+    assert!(
+        m.store.is_sealed(alex, &zip)?,
+        "the CD zip was not sealed for its profile"
+    );
+    assert_eq!(m.store.get_bytes(alex, &zip)?, CD);
+    assert!(!m.plain(&zip)?, "the plain CD zip stayed");
     Ok(())
 }
 

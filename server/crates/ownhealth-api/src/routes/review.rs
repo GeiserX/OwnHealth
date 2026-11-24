@@ -100,8 +100,13 @@ fn truthy(v: Option<&Value>) -> bool {
 }
 
 /// A held payload carries the values it would write: show it only to someone whose scopes would
-/// show the committed fact (its category scope, and read:sensitive for a sensitive one).
+/// show the committed fact (its category scope, and read:sensitive for a sensitive one). A held
+/// imaging study names the patient and the study, which the timeline and the viewer show only with
+/// read:records.
 fn visible(item: &ReviewItem, perm: &Permission) -> bool {
+    if item.kind == ownhealth_imaging::import::REVIEW_KIND && !perm.has("read:records") {
+        return false;
+    }
     let empty = Map::new();
     let p = item.payload.as_object().unwrap_or(&empty);
     let mut observations: Vec<&Map<String, Value>> = Vec::new();
@@ -146,7 +151,9 @@ pub(super) async fn count_shown(
     perms: &[&Permission],
 ) -> Result<i64, ApiError> {
     let by_profile: HashMap<Uuid, &Permission> = perms.iter().map(|p| (p.profile.id, *p)).collect();
-    let items = review::list_items(
+    // the list's own query: a held study counts only where the list shows it
+    let imaging_profiles = imaging_review_profiles(perms.iter().copied());
+    let items = review::list_items_with_kind_profiles(
         &mut *conn,
         &ItemQuery {
             household_id: Some(household),
@@ -155,13 +162,20 @@ pub(super) async fn count_shown(
             limit: i64::MAX,
             ..ItemQuery::default()
         },
+        Some((ownhealth_imaging::import::REVIEW_KIND, &imaging_profiles)),
     )
     .await?;
     let mut shown = 0;
     for i in &items {
         let show = match i.profile_id.map(|pid| by_profile.get(&pid)) {
             None => true,
-            Some(Some(p)) => visible(i, p) && opens_document(&mut *conn, i, p).await?,
+            Some(Some(p)) => {
+                let show = visible(i, p) && opens_document(&mut *conn, i, p).await?;
+                if show && i.kind == ownhealth_imaging::import::REVIEW_KIND {
+                    p.record_read(&["read:records"]);
+                }
+                show
+            }
             Some(None) => false,
         };
         shown += i64::from(show);
@@ -195,7 +209,7 @@ async fn check(
 ) -> R<ReviewItem> {
     let item = item.ok_or_else(no_item)?;
     let Some(profile_id) = item.profile_id else {
-        if item.household_id != principal.household_id {
+        if item.kind == ownhealth_imaging::import::REVIEW_KIND || item.household_id != principal.household_id {
             return Err(no_item());
         }
         return Ok(item);
@@ -241,15 +255,29 @@ async fn changeable_document(
     Ok(doc)
 }
 
-async fn audit(conn: &mut PgConnection, principal: &Principal, item: &ReviewItem, action: &str) -> R<()> {
+fn review_audit(principal: &Principal, action: &str) -> AuditEvent {
     let mut e = AuditEvent::new(principal.actor_kind(), "ui", action);
     e.actor_id = principal.user_id;
+    e.token_id = principal.token_id;
     e.tool = Some("review".into());
-    e.profile_id = item.profile_id;
     e.resource_type = Some("review_item".into());
+    e
+}
+
+async fn audit(conn: &mut PgConnection, principal: &Principal, item: &ReviewItem, action: &str) -> R<()> {
+    let mut e = review_audit(principal, action);
+    e.profile_id = item.profile_id;
     e.resource_ids = Some(vec![item.id.to_string()]);
     write_audit(conn, &e).await?;
     Ok(())
+}
+
+fn imaging_review_profiles<'a>(perms: impl IntoIterator<Item = &'a Permission>) -> Vec<Uuid> {
+    perms
+        .into_iter()
+        .filter(|p| p.can("review") && p.has("read:records"))
+        .map(|p| p.profile.id)
+        .collect()
 }
 
 async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>) -> R<Json<Value>> {
@@ -270,7 +298,8 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         .filter(|p| p.can("review") && profile.is_none_or(|slug| p.profile.slug == slug))
         .map(|p| p.profile.id)
         .collect();
-    let items = review::list_items(
+    let imaging_profiles = imaging_review_profiles(&perms);
+    let items = review::list_items_with_kind_profiles(
         &mut tx,
         &ItemQuery {
             household_id: principal.household_id,
@@ -281,6 +310,7 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
             limit,
             offset,
         },
+        Some((ownhealth_imaging::import::REVIEW_KIND, &imaging_profiles)),
     )
     .await?;
     let by_profile: HashMap<Uuid, &Permission> = perms.iter().map(|p| (p.profile.id, p)).collect();
@@ -306,6 +336,13 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
     let household = principal.household_id.unwrap_or_default();
     let counted: Vec<&Permission> = pids.iter().filter_map(|pid| by_profile.get(pid).copied()).collect();
     let open = count_shown(&mut tx, household, &counted).await?;
+    let mut audit = review_audit(principal, "read");
+    if let [profile_id] = pids.as_slice() {
+        audit.profile_id = Some(*profile_id);
+    }
+    audit.resource_ids = Some(shown.iter().map(|item| item.id.to_string()).collect());
+    audit.rows_out = i32::try_from(shown.len()).ok();
+    write_audit(&mut tx, &audit).await?;
     tx.commit().await?;
     // `-> dict`: pydantic's JSON mode writes the datetimes with `Z` (GET /review/{id} did not)
     let mut out = shown.iter().map(|i| item_out(i)).collect::<R<Vec<_>>>()?;
@@ -324,6 +361,7 @@ async fn get_one(State(rt): State<Runtime>, caller: Caller, Path(item_id): Path<
     let mut tx = rt.pool.begin().await?;
     let found = review::get_item(&mut tx, item_id).await?;
     let item = check(&mut tx, &caller.0, found, false).await?;
+    audit(&mut tx, &caller.0, &item, "read").await?;
     tx.commit().await?;
     Ok(Json(item_out(&item)?))
 }

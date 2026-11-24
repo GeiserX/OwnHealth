@@ -29,6 +29,7 @@ pub mod lifecycle;
 pub mod migrate;
 pub mod net;
 pub mod observations;
+pub mod orthanc;
 pub mod pdfwrite;
 pub mod provenance;
 pub mod providers;

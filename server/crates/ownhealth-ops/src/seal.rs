@@ -47,6 +47,7 @@ pub const COLUMNS: &[(&str, &[&str])] = &[
     ("ocr_run", &["words_blob"]),
     ("source_item", &["blob_sha256"]),
     ("quarantine_item", &["raw_blob"]),
+    ("imaging_import", &["zip_blob"]),
 ];
 
 const GENOME: &[&str] = &[
@@ -110,9 +111,9 @@ fn names(table: &str, prefix: &str) -> String {
     }
 }
 
-/// The four queries [`owners`] runs: documents (by their own file, their pages' and their OCR
-/// layers'), genome datasets, held mail and inbox rows.
-fn owner_sql(lock: bool) -> [String; 4] {
+/// The five queries [`owners`] runs: documents (by their own file, their pages' and their OCR
+/// layers'), genome datasets, imaging uploads, held mail and inbox rows.
+fn owner_sql(lock: bool) -> [String; 5] {
     let lock_rows = if lock { " for update" } else { "" };
     let lock_docs = if lock { " for update of d" } else { "" };
     let lock_items = if lock { " for update of i" } else { "" };
@@ -137,6 +138,10 @@ fn owner_sql(lock: bool) -> [String; 4] {
             names("genome_dataset", "")
         ),
         format!(
+            "select profile_id from imaging_import where {} order by id{lock_rows}",
+            names("imaging_import", "")
+        ),
+        format!(
             "select id from quarantine_item where {} and status = 'held' order by id{lock_rows}",
             names("quarantine_item", "")
         ),
@@ -156,13 +161,14 @@ fn owner_sql(lock: bool) -> [String; 4] {
 }
 
 /// The owners of the rows that name `sha`, read as each reader reads them: a document and its pages
-/// and OCR layers by the document (`BlobOwner::of_document`), a genome file by its profile, a held mail
+/// and OCR layers by the document (`BlobOwner::of_document`), a genome file and an imaging upload by
+/// its profile, a held mail
 /// by its item, an inbox row as the backup reads it (`BlobOwner::of_item`; a row of a released or
 /// deleted mail with no profile is read by nobody). An inbox row older than migration 1249 is read as
 /// the profile the module says, and becomes a claim. With `lock`, the rows stay locked until the
 /// caller's transaction ends.
 async fn owners(conn: &mut PgConnection, sha: &[u8], lock: bool) -> Result<Owners> {
-    let [docs_sql, genome_sql, held_sql, items_sql] = owner_sql(lock);
+    let [docs_sql, genome_sql, imaging_sql, held_sql, items_sql] = owner_sql(lock);
     let mut out = Owners::default();
     // Take all document locks in id order before any dataset lock, including documents linked
     // from inbox rows whose raw file differs from the document's own file.
@@ -181,7 +187,11 @@ async fn owners(conn: &mut PgConnection, sha: &[u8], lock: bool) -> Result<Owner
         .bind(sha)
         .fetch_all(&mut *conn)
         .await?;
-    for profile in genome {
+    let imaging: Vec<Uuid> = sqlx::query_scalar(AssertSqlSafe(imaging_sql))
+        .bind(sha)
+        .fetch_all(&mut *conn)
+        .await?;
+    for profile in genome.into_iter().chain(imaging) {
         out.add(BlobOwner::Profile(profile));
     }
     let held: Vec<Uuid> = sqlx::query_scalar(AssertSqlSafe(held_sql))
@@ -610,8 +620,8 @@ mod tests {
 
     #[test]
     fn inbox_claim_reads_the_linked_owner_under_the_document_lock() {
-        let [locked, _, _, items] = owner_sql(true);
-        let [plan, _, _, _] = owner_sql(false);
+        let [locked, _, _, _, items] = owner_sql(true);
+        let [plan, _, _, _, _] = owner_sql(false);
         assert!(
             locked.contains("select i.document_id, false from source_item i"),
             "{locked}"
