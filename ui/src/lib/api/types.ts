@@ -412,6 +412,8 @@ export interface TimelineEvent {
 	/** imaging events only (slice 42): one event per study, its linked report folded in */
 	study_id?: Uuid;
 	study_instance_uid?: string;
+	/** the day the disc names; null when it names none, and `date` is then the report's day or the day it was recorded */
+	study_date?: IsoDate | null;
 	/** the report the import linked to the study, while it is an active document the reader may see */
 	report_document_id?: Uuid | null;
 	/** POST it for a one-hour viewer link; null when Orthanc holds no study for it, or only emergency access reads */

@@ -2,7 +2,7 @@
 // in every registry language, and where focus goes on /import-review after a decision removes a row.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { focusOrder, imagingLines } from '../src/lib/logic/imaging.ts';
+import { IMPORT_POLL, focusOrder, imagingLines, uploadRefusal } from '../src/lib/logic/imaging.ts';
 import { errKey } from '../src/lib/logic/errors.ts';
 import { LANGS } from '../src/lib/i18n/langs.ts';
 
@@ -16,8 +16,18 @@ test('a finished import names what it put on the record and leaves out the zero 
 	]);
 	// nothing new still says so
 	assert.deepEqual(imagingLines({ imported: 0 }), [{ key: 'img_r_imported', n: 0 }]);
-	// a result hidden from this member (no read:records) shows no lines
-	assert.equal(imagingLines(null), null);
+	// a result hidden from this member (no read:records) still says the disc was read
+	assert.deepEqual(imagingLines(null), [{ key: 'img_r_hidden', n: 0 }]);
+});
+
+test('a folder over the import limit is refused before any file goes up', () => {
+	assert.equal(uploadRefusal(20000), null);
+	assert.equal(uploadRefusal(1), null);
+	assert.equal(uploadRefusal(20001), 'err_too_many_files');
+});
+
+test('following an import rides out a server restart of a few minutes', () => {
+	assert.ok(IMPORT_POLL.every * IMPORT_POLL.maxFails >= 5 * 60_000, JSON.stringify(IMPORT_POLL));
 });
 
 for (const { code: lang, table: words } of LANGS) {
@@ -29,13 +39,16 @@ for (const { code: lang, table: words } of LANGS) {
 			['invalid_zip', 'This zip does not open: invalid Zip archive'],
 			['imaging_off', 'Imaging is off: it needs the imaging compose profile and OWNHEALTH_ORTHANC_URL.'],
 			['profile_changed', 'The profile changed during the upload. Upload the disc again.'],
-			['study_not_bound', 'Orthanc does not hold this study as recorded.']
+			['study_not_bound', 'Orthanc does not hold this study as recorded.'],
+			['orthanc_unavailable', 'Orthanc did not answer.'],
+			['study_retracted', 'This study was retracted.'],
+			['study_not_found', 'This profile has no study with that UID.']
 		]) {
 			const key = errKey(code, message, has);
 			assert.equal(key, 'err_' + code, code);
 			assert.ok(table[key ?? ''] && table[key ?? ''] !== message, `${lang} ${code}`);
 		}
-		for (const k of ['img_r_imported', 'img_r_imported_one', 'img_r_already', 'img_r_in_review', 'img_r_refused', 'img_r_damaged', 'img_none', 'img_open_report', 'img_no_report']) {
+		for (const k of ['img_r_imported', 'img_r_imported_one', 'img_r_already', 'img_r_in_review', 'img_r_refused', 'img_r_damaged', 'img_none', 'img_open_report', 'img_no_report', 'img_r_hidden', 'img_no_date']) {
 			assert.ok(table[k], `${lang} ${k}`);
 		}
 	});

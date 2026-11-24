@@ -1,7 +1,8 @@
 // Imaging (slice 42) against the fake Orthanc (fake-orthanc.mjs): a person finds Alex's study on the
 // Imaging page and on the timeline, with the report the import linked to it, and opens it in the viewer,
 // which runs sandboxed; a study the image store does not hold as recorded is refused in words, in es and
-// en. Then /import-review keeps keyboard focus on the queue after a Dismiss. The study rows (the DICOM
+// en; a study whose disc gives no date is still listed. Then /import-review keeps keyboard focus on the
+// queue after a Dismiss, with or without a confirm step. The study rows (the DICOM
 // import's output, slice 41) and the held studies are seeded with psql into the database serve.sh made.
 import { expect, test, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
@@ -29,19 +30,22 @@ const moved = `1.2.826.0.1.3680043.10.4343.${parseInt(run, 16)}.2`; // recorded 
 let report = '';
 
 /** A study on Alex's record as the DICOM import writes it. */
-function study(uid: string, orthancId: string | null, modality: string, description: string, day: string, reportId: string | null) {
+function study(uid: string, orthancId: string | null, modality: string, description: string, day: string | null, reportId: string | null) {
 	const src = `src_e2e42_${randomBytes(4).toString('hex')}`;
 	sql(
 		`insert into src (id, profile_id, kind, import_ref, label, actor_kind) select '${src}', id, 'dicom', 'imaging_import/e2e#${uid}', 'CD_Rivera.zip', 'system' from profile where slug = 'alex'`
 	);
 	sql(
-		`insert into imaging_study (profile_id, study_instance_uid, orthanc_id, modality, study_date, description, report_document_id, status, src_id, fhir) select id, '${uid}', ${orthancId ? `'${orthancId}'` : 'null'}, '${modality}', '${day}', '${description}', ${reportId ? `'${reportId}'` : 'null'}, 'current', '${src}', '{"resourceType": "ImagingStudy", "numberOfSeries": 2, "numberOfInstances": 6}' from profile where slug = 'alex'`
+		`insert into imaging_study (profile_id, study_instance_uid, orthanc_id, modality, study_date, description, report_document_id, status, src_id, fhir) select id, '${uid}', ${orthancId ? `'${orthancId}'` : 'null'}, '${modality}', ${day ? `'${day}'` : 'null'}, '${description}', ${reportId ? `'${reportId}'` : 'null'}, 'current', '${src}', '{"resourceType": "ImagingStudy", "numberOfSeries": 2, "numberOfInstances": 6}' from profile where slug = 'alex'`
 	);
 }
 
 test('a person opens a study from the Imaging page and from the timeline, with its report beside it', async ({ page }) => {
 	const errors = collectPageErrors(page);
 	expect(db, 'the config names the database').not.toBe('');
+	// no study yet: the page says so once
+	await page.goto('/imaging?lang=en');
+	await expect(page.getByText('No studies yet.', { exact: false })).toHaveCount(1);
 	report = sql(
 		`insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type, provider_name, collected_at) select household_id, id, decode('${randomBytes(32).toString('hex')}', 'hex'), 'Informe_RM_rodilla_e2e.pdf', 'application/pdf', 10, 'imaging_report', 'LabNorte Imagen', '2026-09-14 10:00+00' from profile where slug = 'alex' returning id`
 	);
@@ -97,6 +101,23 @@ test('the Imaging page reads in Spanish, refusals included', async ({ page }) =>
 	await expect.poll(() => refused.isClosed()).toBe(true);
 });
 
+test('a study whose disc gives no date is listed on its report day, and says so', async ({ page }) => {
+	const undated = `1.2.826.0.1.3680043.10.4545.${parseInt(run, 16)}.3`;
+	const ct = sql(
+		`insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type, provider_name, collected_at) select household_id, id, decode('${randomBytes(32).toString('hex')}', 'hex'), 'Informe_TC_e2e.pdf', 'application/pdf', 10, 'imaging_report', 'LabNorte Imagen', '2026-08-03 10:00+00' from profile where slug = 'alex' returning id`
+	);
+	study(undated, `fake-${undated}`, 'CT', 'CT abdomen', null, ct);
+	await page.goto('/imaging?lang=en');
+	const row = page.getByRole('button', { name: /CT abdomen/ });
+	await expect(row).toContainText('2026-08-03 (the disc gives no date)');
+	await row.click();
+	await expect(page.getByRole('cell', { name: undated })).toBeVisible();
+	await expect(page.getByRole('link', { name: 'Open the report (PDF)' })).toHaveAttribute('href', `/api/documents/${ct}/file`);
+	await page.goto('/imaging?lang=es');
+	await expect(page.getByRole('button', { name: /CT abdomen/ })).toContainText('2026-08-03 (el disco no trae fecha)');
+	sql(`update imaging_study set status = 'retracted', status_reason = 'e2e' where study_instance_uid = '${undated}'`);
+});
+
 test('after a Dismiss on /import-review, focus moves to the next row, not to the page', async ({ page }) => {
 	// two held studies the person may only dismiss (another record holds their UID)
 	const held = [1, 2].map((n) =>
@@ -121,4 +142,31 @@ test('after a Dismiss on /import-review, focus moves to the next row, not to the
 		await expect(page.locator(`[data-row="${held[1]}"]`)).toHaveCount(0);
 	}
 	sql(`update review_item set status = 'dismissed' where id in ('${held[0]}', '${held[1]}') and status = 'open'`);
+});
+
+test('after a Dismiss with a confirm step on /import-review, focus moves to the next row too', async ({ page }) => {
+	// a scan waiting for its values (pending_document) asks to confirm a Dismiss in a row of its own
+	const scans = [1, 2].map((n) => {
+		const doc = sql(
+			`insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes) select household_id, id, decode('${randomBytes(32).toString('hex')}', 'hex'), 'scan_${run}_${n}.pdf', 'application/pdf', 10 from profile where slug = 'alex' returning id`
+		);
+		return sql(
+			`insert into review_item (household_id, profile_id, kind, document_id, payload) select household_id, id, 'pending_document', '${doc}', '{"why": "no_text", "pages": [1]}' from profile where slug = 'alex' returning id`
+		);
+	});
+	await page.goto('/import-review?lang=en');
+	const first = page.locator(`[data-row="${scans[0]}"]`);
+	await expect(first).toBeVisible();
+	const order = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('[data-row]')].map((r) => r.dataset.row));
+	const next = order[order.indexOf(scans[0]) + 1] ?? order[order.indexOf(scans[0]) - 1];
+	await first.getByRole('button', { name: 'Dismiss' }).focus();
+	await page.keyboard.press('Enter');
+	const confirm = page.locator('tr.sub').getByRole('button', { name: 'Dismiss' });
+	await confirm.focus();
+	await page.keyboard.press('Enter');
+	await expect(first).toHaveCount(0);
+	await expect
+		.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('[data-row]')?.dataset.row ?? document.activeElement?.tagName))
+		.toBe(next);
+	sql(`update review_item set status = 'dismissed' where id in ('${scans[0]}', '${scans[1]}') and status = 'open'`);
 });

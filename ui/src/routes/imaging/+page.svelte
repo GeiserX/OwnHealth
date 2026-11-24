@@ -5,15 +5,15 @@
 	// POST /imaging/import and follows its import.dicom job; Open asks for a one-hour viewer link and opens
 	// OHIF in a new tab, where it runs sandboxed (imaging_proxy.rs).
 	import { onDestroy } from 'svelte';
-	import { documentFileUrl, getTimeline, importImaging, listJobs } from '#lib/api';
+	import { documentFileUrl, getMe, getTimeline, importImaging, listJobs } from '#lib/api';
 	import type { JobInfo, Timeline, TimelineEvent } from '#lib/api/types';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import { Loader, errRaw, errText, tf, tp } from '#lib/components/pages1/util.svelte';
 	import { openViewer } from '#lib/imaging';
 	import { i18n, t } from '#lib/i18n/index.svelte';
-	import { imagingLines } from '#lib/logic/imaging';
+	import { IMPORT_POLL, imagingLines, uploadRefusal } from '#lib/logic/imaging';
 	import { poller } from '#lib/logic/poll';
-	import { currentProfile } from '#lib/state/app.svelte';
+	import { app, currentProfile } from '#lib/state/app.svelte';
 
 	type Err = { text: string; raw: string };
 	const profile = $derived(currentProfile());
@@ -57,7 +57,16 @@
 	let sending = $state<number | null>(null); // files on their way up
 	let upload = $state<{ slug: string; files: number; duplicate: boolean; jobId: number | null; job: JobInfo | null } | null>(null);
 	let upError = $state<Err | null>(null);
+	// the top bar and the sidebar show the household's review total; a finished import can add to it
+	function refreshReviewTotal() {
+		getMe()
+			.then((m) => {
+				if (app.me) app.me.review_open = m.review_open;
+			})
+			.catch(() => undefined);
+	}
 	const follow = poller({
+		...IMPORT_POLL,
 		tick: async () => {
 			const id = upload?.jobId;
 			if (id == null) return true;
@@ -65,7 +74,10 @@
 			if (upload) upload.job = job;
 			return !job || job.state === 'done' || job.state === 'failed' || job.state === 'dead';
 		},
-		ondone: load,
+		ondone: () => {
+			load();
+			refreshReviewTotal();
+		},
 		onfail: (e) => (upError = { text: errText(e), raw: errRaw(e) })
 	});
 	onDestroy(follow.stop);
@@ -86,6 +98,11 @@
 		follow.stop();
 		upload = null;
 		upError = null;
+		const refusal = uploadRefusal(files.length);
+		if (refusal) {
+			upError = { text: t(refusal), raw: refusal };
+			return;
+		}
 		sending = files.length;
 		try {
 			const r = await importImaging(slug, files);
@@ -144,7 +161,7 @@
 			{#each studies as s (s.study_id)}
 				<button class="study" class:on={s.study_id === study?.study_id} aria-pressed={s.study_id === study?.study_id} onclick={() => (picked = s.study_id ?? null)}>
 					<span class="row"><b>{s.title}</b>{#if s.detail}<span class="flag">{s.detail}</span>{/if}</span>
-					<span class="dim">{[s.date, s.series != null ? tp('img_series_n', s.series) : '', s.instances != null ? tp('img_instances_n', s.instances) : ''].filter(Boolean).join(' · ')}</span>
+					<span class="dim">{[s.study_date === null ? `${s.date} (${t('img_no_date')})` : s.date, s.series != null ? tp('img_series_n', s.series) : '', s.instances != null ? tp('img_instances_n', s.instances) : ''].filter(Boolean).join(' · ')}</span>
 					{#if s.src_label}<span class="dim">{s.src_label}</span>{/if}
 				</button>
 			{:else}
@@ -152,12 +169,13 @@
 			{/each}
 			<div class="note" style="margin-top:10px;padding:0 6px">{t('h1_img_note')}</div>
 		</div>
-		<div class="card">
-			{#if study}
+		<!-- with no study the list says so once; the study and report panes show only for a study -->
+		{#if study}
+			<div class="card">
 				<h3>{study.title}</h3>
 				<table class="t" style="font-size:12px">
 					<tbody>
-						<tr><td class="dim">{t('img_date')}</td><td class="num">{study.date}</td></tr>
+						<tr><td class="dim">{t('img_date')}</td><td><span class="num">{study.date}</span>{#if study.study_date === null}<span class="dim"> ({t('img_no_date')})</span>{/if}</td></tr>
 						<tr><td class="dim">{t('img_modality')}</td><td>{study.detail ?? '—'}</td></tr>
 						<tr><td class="dim">StudyInstanceUID</td><td class="mono uid">{study.study_instance_uid}</td></tr>
 						<tr><td class="dim">{t('img_series')}</td><td class="num">{study.series ?? '—'} / {study.instances ?? '—'}</td></tr>
@@ -173,19 +191,17 @@
 					{/if}
 					{#if openError}<div class="p2err" role="alert" style="margin-top:6px" title={openError.raw}>{openError.text}</div>{/if}
 				</div>
-			{:else}
-				<div class="empty">{studies.length ? t('img_pick') : t('img_none')}</div>
-			{/if}
-		</div>
-		<div class="card">
-			<h3>{t('h1_img_report')}</h3>
-			{#if study?.report_document_id}
-				<a class="btn sm" href={documentFileUrl(study.report_document_id)} target="_blank" rel="noopener">{t('img_open_report')}</a>
-				<div class="dim" style="font-size:12px;margin-top:6px;line-height:1.55">{t('img_report_d')}</div>
-			{:else if study}
-				<div class="dim" style="font-size:12px;line-height:1.55">{t('img_no_report')}</div>
-			{/if}
-		</div>
+			</div>
+			<div class="card">
+				<h3>{t('h1_img_report')}</h3>
+				{#if study.report_document_id}
+					<a class="btn sm" href={documentFileUrl(study.report_document_id)} target="_blank" rel="noopener">{t('img_open_report')}</a>
+					<div class="dim" style="font-size:12px;margin-top:6px;line-height:1.55">{t('img_report_d')}</div>
+				{:else}
+					<div class="dim" style="font-size:12px;line-height:1.55">{t('img_no_report')}</div>
+				{/if}
+			</div>
+		{/if}
 	</div>
 {/if}
 

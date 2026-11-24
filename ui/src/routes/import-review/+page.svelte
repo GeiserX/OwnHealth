@@ -240,16 +240,20 @@
 	// Focus after a decision (Accept, Dismiss, Reject…). The pressed button is disabled while the request
 	// runs and then goes away with its row, so focus would fall to the page body. It goes to the next row
 	// instead: the same control again when the row stays (the decision failed), else the first control of
-	// the nearest row below, else above (logic/imaging.ts focusOrder). Rows carry `data-row`.
+	// the nearest row below, else above (logic/imaging.ts focusOrder). Rows carry `data-row`; a row's
+	// confirm step sits in a sub-row that carries `data-row-of`, and a decision there counts as the row's.
 	type FocusPlan = { rows: string[]; index: number };
 	const focusables = (row: HTMLElement) =>
 		[...row.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea')].filter((el) => !(el as HTMLButtonElement).disabled);
 	function focusPlan(): FocusPlan | null {
 		const el = document.activeElement;
-		const row = el instanceof HTMLElement ? el.closest<HTMLElement>('[data-row]') : null;
-		if (!el || !row?.dataset.row) return null;
+		const row = el instanceof HTMLElement ? el.closest<HTMLElement>('[data-row], [data-row-of]') : null;
+		const id = row?.dataset.row ?? row?.dataset.rowOf;
+		if (!el || !row || !id) return null;
 		const order = [...document.querySelectorAll<HTMLElement>('[data-row]')].map((r) => r.dataset.row ?? '');
-		return { rows: focusOrder(order, row.dataset.row), index: focusables(row).indexOf(el as HTMLElement) };
+		// from a sub-row, a row that stays gets focus on its first control
+		const index = row.dataset.row ? focusables(row).indexOf(el as HTMLElement) : -1;
+		return { rows: focusOrder(order, id), index };
 	}
 	function refocus(plan: FocusPlan | null) {
 		const at = document.activeElement;
@@ -643,7 +647,7 @@
 						</td>
 					</tr>
 					{#if confirmDismiss === it.id}
-						<tr class="sub"><td colspan="4">
+						<tr class="sub" data-row-of={it.id}><td colspan="4">
 							<ConfirmRow text={t('i2_scan_dismiss_d')} confirmLabel={t('i2_dismiss')} {busy} onconfirm={() => act(async () => { await dismissReview(it.id); enter(null); })} oncancel={() => (confirmDismiss = null)} />
 						</td></tr>
 					{/if}

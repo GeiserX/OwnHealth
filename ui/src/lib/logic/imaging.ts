@@ -14,10 +14,11 @@ const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v)
  * The lines of a finished import.dicom job (ownhealth-imaging import.rs): the studies it put on the
  * record, those already there, those waiting in Import & review and those Orthanc refused, then the
  * files it could not read. A zero count is left out, except the new studies, which always show.
- * Null for a result this member does not see (the job hides it without read:records).
+ * A result this member does not see (the job hides it without read:records) is one line that says the
+ * disc was read and this access does not show its studies.
  */
-export function imagingLines(result: unknown): ImagingLine[] | null {
-	if (!result || typeof result !== 'object') return null;
+export function imagingLines(result: unknown): ImagingLine[] {
+	if (!result || typeof result !== 'object') return [{ key: 'img_r_hidden', n: 0 }];
 	const r = result as Record<string, unknown>;
 	const lines: ImagingLine[] = [{ key: 'img_r_imported', n: num(r.imported) }];
 	for (const [field, key] of [
@@ -41,3 +42,20 @@ export function focusOrder(order: string[], id: string): string[] {
 	if (i < 0) return [];
 	return [id, ...order.slice(i + 1), ...order.slice(0, i).reverse()];
 }
+
+/** The most files a CD folder upload holds (POST /imaging/import answers 413 too_many_files above it). */
+export const MAX_FOLDER_FILES = 20_000;
+
+/**
+ * The refusal of an upload of `n` files, before any of them goes up: the server counts the files only
+ * while it stores them, so a folder over the limit would upload in full before its 413.
+ */
+export function uploadRefusal(n: number): string | null {
+	return n > MAX_FOLDER_FILES ? 'err_too_many_files' : null;
+}
+
+/**
+ * How the Imaging page follows an import job: every 2 s, and it gives up only after 5 minutes of failed
+ * polls in a row, so a server restart while the disc is read does not end the follow.
+ */
+export const IMPORT_POLL = { every: 2000, maxFails: 150 };
