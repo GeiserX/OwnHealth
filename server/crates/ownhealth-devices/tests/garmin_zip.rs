@@ -340,6 +340,11 @@ async fn a_run_again_after_its_commit_returns_the_same_answer() -> R {
         .execute(&env.db.pool)
         .await?;
     assert_eq!(jobs::reap_expired(&env.ctx.pool).await?, 1);
+    // the reaper queues it again after a backoff: run it now
+    sqlx::query("update job set run_after = now() where id = $1 and state = 'queued'")
+        .bind(id)
+        .execute(&env.db.pool)
+        .await?;
     assert_eq!(result(&env, id).await?, first);
     Ok(())
 }
