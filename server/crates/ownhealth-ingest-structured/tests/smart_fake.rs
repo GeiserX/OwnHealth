@@ -3129,3 +3129,45 @@ async fn a_server_that_rejects_the_include_is_searched_again_without_it() -> R {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn medicines_past_the_read_cap_leave_each_run_partial_with_no_state_kept() -> R {
+    let w = world(Behaviour {
+        include: false,
+        ..Behaviour::default()
+    })
+    .await?;
+    w.fake.book().extra.extend(two_named_medicines());
+    let source = w.connect(t0()).await?;
+    let caps = smart::Caps {
+        medication_reads: 1,
+        ..smart::Caps::default()
+    };
+    for minute in [1, 2] {
+        let got = w
+            .day_with(source, t0() + Duration::minutes(minute), &caps)
+            .await?
+            .map_err(anyhow::Error::msg)?;
+        assert!(got.problems.iter().any(|p| p.code == "too_many_medications"), "{got:?}");
+        assert_eq!(w.status_of_last_run(source).await?, "partial");
+    }
+    // nothing carries the left-out medicine to the next run: each run reads the same first one
+    let reads: Vec<String> = w
+        .fake
+        .book()
+        .searches
+        .iter()
+        .filter(|s| s.starts_with("Medication/"))
+        .cloned()
+        .collect();
+    assert_eq!(reads, ["Medication/metformin-850", "Medication/metformin-850"]);
+    let mut c = w.db.pool.acquire().await?;
+    let meds = list_records(&mut c, "medication", w.sam(), None, true).await?;
+    let names: Vec<_> = meds
+        .iter()
+        .filter_map(|m| m["name"].as_str())
+        .filter(|name| ["Metformin 850 mg", "Atorvastatin 20 mg"].contains(name))
+        .collect();
+    assert_eq!(names, ["Metformin 850 mg"], "the unread one is not projected");
+    Ok(())
+}
