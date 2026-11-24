@@ -1052,8 +1052,26 @@ export interface Notice {
 	created_at: IsoDateTime;
 	read_at: IsoDateTime | null;
 }
-/** GET /notifications: the 200 newest notices plus older unread request and activation ones. */
+/** The reads through one request, counted over all of them: the list holds only the newest 200 notices. */
+export interface NoticeUses {
+	request_id: Uuid;
+	profile: { id: Uuid; slug: string; display_name: string };
+	contact: { user_id: Uuid; display_name: string };
+	count: number;
+	unread: number;
+	last_at: IsoDateTime;
+}
+/**
+ * GET /notifications: the 200 newest notices plus every older unread one other than a read, and the
+ * read count of each request that is in the list or has unread reads.
+ */
 export interface Notices {
 	items: Notice[];
+	uses: NoticeUses[];
 	unread: number;
+}
+/** GET /break-glass/requests/{id}: one request for the cancel screen, with the profile that holds it. */
+export interface BreakGlassOne {
+	request: BreakGlassRequest;
+	profile: { id: Uuid; slug: string; display_name: string };
 }

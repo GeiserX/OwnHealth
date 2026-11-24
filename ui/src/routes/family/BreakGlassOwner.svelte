@@ -11,7 +11,8 @@
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { intlLocale } from '#lib/i18n/langs';
-	import { contactChoices, ownerStep, statusLine, when } from '#lib/logic/breakglass';
+	import { canLogIn, contactChoices, endErrorKey, ownerStep, phase, statusLine, when } from '#lib/logic/breakglass';
+	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 
 	let { profile, household, me }: { profile: ProfileSummary; household: Household | null; me: string } = $props();
 
@@ -25,6 +26,16 @@
 	$effect(() => {
 		const id = setInterval(() => (now = new Date()), 30_000);
 		return () => clearInterval(id);
+	});
+	// A request whose waiting time ran out while the page was open: read the view again once, so it
+	// shows open and offers End access.
+	let reread = '';
+	$effect(() => {
+		const due = (view.data?.open_requests ?? []).filter((r) => phase(r, now) === 'opening').map((r) => r.id).join();
+		if (due && due !== reread) {
+			reread = due;
+			load();
+		}
 	});
 
 	const loc = $derived(intlLocale(i18n.lang));
@@ -63,7 +74,14 @@
 			confirming = '';
 			await load();
 		} catch (e) {
-			error = { where, text: errText(e), raw: errRaw(e) };
+			const key = endErrorKey(e);
+			error = { where, text: key ? t(key) : errText(e), raw: errRaw(e) };
+			// a request that moved on while the page was open (it opened, ran out, another owner ended
+			// it): show where it stands now and the step that fits it
+			if (where.startsWith('req:')) {
+				confirming = '';
+				await load();
+			}
 		} finally {
 			busy = false;
 		}
@@ -125,6 +143,9 @@
 				{/each}
 			</ul>
 		{/if}
+		{#if error && error.where.startsWith('req:') && !v.open_requests.some((r) => 'req:' + r.id === error?.where)}
+			<div class="p2err" role="alert" title={error.raw}>{error.text}</div>
+		{/if}
 
 		<h4>{t('bgl_contacts')}</h4>
 		{#if !v.calendar_feed}
@@ -159,13 +180,16 @@
 		{/if}
 
 		{#if editing !== null}
-			<form class="p2form" onsubmit={save} aria-labelledby="bg-form-h">
+			<form class="p2form" onsubmit={save} aria-labelledby="bg-form-h" use:focusOnOpen={{ oncancel: () => ((editing = null), (error = null)) }}>
 				<h4 id="bg-form-h">{editing ? (v.contacts.find((c) => c.user_id === editing)?.display_name ?? '') : t('bgl_add')}</h4>
 				{#if !editing}
 					<label>{t('bgl_who')}
 						<select class="p2in" bind:value={who} required>
 							<option value="" disabled>{t('bgl_pick')}</option>
-							{#each choices as m (m.user_id)}<option value={m.user_id}>{m.display_name}</option>{/each}
+							{#each choices as m (m.user_id)}
+								<!-- no login yet (an invite not redeemed): they could not ask -->
+								<option value={m.user_id} disabled={!canLogIn(m)}>{canLogIn(m) ? m.display_name : tf('bgl_no_login', { name: m.display_name })}</option>
+							{/each}
 						</select>
 					</label>
 				{/if}

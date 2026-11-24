@@ -2,9 +2,10 @@
 // contact asks, the owner follows the cancel link of the calendar event to the cancel screen and
 // cancels, and nothing opens. A second request waits for the owner's calendar past its delay, opens
 // once the feed served it, and each read through it reaches the owner's notices, which open by
-// themselves at the next login, grouped per request, until they are read. The cancel screen
-// confirms it is the owner before it ends a request. A request is moved 49 hours back with psql in the
-// database serve.sh made, so its 48-hour delay has passed, as the minute sweep would find it.
+// themselves at the next login, grouped per request, until they are read. A cancel on a page left
+// open after the request moved on says so in the reader's language and shows the step that fits now.
+// A request is moved 49 hours back with psql in the database serve.sh made, so its 48-hour delay has
+// passed, as the minute sweep would find it.
 import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 
@@ -39,7 +40,7 @@ const headers = (baseURL: string) => ({ Origin: baseURL });
 /** A context whose notices count as shown already, so the panel does not open over the page. */
 async function quiet(browser: Browser, baseURL: string, user: string): Promise<BrowserContext> {
 	const ctx = await browser.newContext({ baseURL, colorScheme: 'dark' });
-	await ctx.addInitScript(([k, v]) => sessionStorage.setItem(k, v), [SHOWN, user]);
+	await ctx.addInitScript(([k, v]) => localStorage.setItem(k, v), [SHOWN, user]);
 	return ctx;
 }
 
@@ -82,6 +83,15 @@ test('a contact asks, the owner cancels from the calendar link, and nothing open
 	await page.reload();
 	await expect(card.getByTestId('bg-need-feed')).toHaveCount(0);
 	await card.getByRole('button', { name: 'Name a contact' }).click();
+	// the form takes the keyboard; a member who cannot log in yet is listed, but cannot be picked
+	await expect(card.getByLabel('Person')).toBeFocused();
+	const household = await (await owner.request.get('/api/household')).json();
+	const noLogin = household.members.find(
+		(m: { user_id: string; own_profile?: string | null; logins?: { passkeys: number; oidc: boolean; password: boolean } }) =>
+			m.user_id !== ownerId && m.own_profile !== 'alex' && m.logins && !m.logins.passkeys && !m.logins.oidc && !m.logins.password
+	);
+	expect(noLogin, 'the demo household has a member who cannot log in').toBeTruthy();
+	await expect(card.getByRole('option', { name: `${noLogin.display_name} (cannot log in yet)` })).toBeDisabled();
 	await card.getByLabel('Person').selectOption({ label: patName });
 	await card.getByRole('button', { name: 'Save' }).click();
 	const contact = card.getByTestId('bg-contact').filter({ hasText: patName });
@@ -98,6 +108,9 @@ test('a contact asks, the owner cancels from the calendar link, and nothing open
 	await mine.getByLabel('Why you need access').fill('Alex is in hospital after a fall');
 	await mine.getByRole('button', { name: 'Send the request' }).click();
 	await expect(mine.getByRole('status')).toContainText('Waiting. Access opens on');
+	// one request at a time: no second Ask while it waits; the keyboard is on where it stands
+	await expect(mine.getByRole('button', { name: 'Ask for access' })).toHaveCount(0);
+	await expect(mine.getByRole('status')).toBeFocused();
 	first = sql(`select id from break_glass_request where contact_user_id = '${patId}' and status = 'requested'`);
 	expect(first).toMatch(/^[0-9a-f-]{36}$/);
 
@@ -109,10 +122,20 @@ test('a contact asks, the owner cancels from the calendar link, and nothing open
 	await expect(req.getByRole('status')).toContainText('Waiting. Access opens on');
 	await expect(page.getByTestId('nt-badge')).toHaveText('1');
 
-	// the calendar event carries the cancel link, which lands on the cancel screen
+	// Details opens the cancel screen of that request
+	await req.getByRole('link', { name: 'Details' }).click();
+	await expect(page).toHaveURL(new RegExp(`/family/break-glass/${first}$`));
+	await expect(page.getByTestId('bgc-status')).toContainText('Waiting.');
+
+	// the calendar event carries the cancel link, which lands on the cancel screen; it takes no
+	// second confirmation, since cancelling only narrows access
 	const ics = unfold(await (await owner.request.get(feed)).text());
 	const link = `${baseURL}/family/break-glass/${first}`;
 	expect(ics).toContain(link);
+	const stepUps: string[] = [];
+	page.on('request', (r) => {
+		if (r.url().includes('/api/auth/step-up')) stepUps.push(r.url());
+	});
 	await page.goto(`${link}?lang=en`);
 	await expect(page.getByRole('heading', { level: 1 })).toHaveText('Emergency access request');
 	await expect(page.getByText(`${patName} asked for access to Alex Rivera`)).toBeVisible();
@@ -123,6 +146,7 @@ test('a contact asks, the owner cancels from the calendar link, and nothing open
 	await page.getByRole('button', { name: 'Cancel the request' }).click();
 	await expect(page.getByText('The request is cancelled. Access will not open.')).toBeVisible();
 	await expect(page.getByTestId('bgc-status')).toContainText('Cancelled on');
+	expect(stepUps).toEqual([]);
 
 	// its delay passes: a cancelled request never opens
 	sql(`update break_glass_request set requested_at = requested_at - interval '49 hours', activates_at = activates_at - interval '49 hours' where id = '${first}'`);
@@ -162,9 +186,10 @@ test('a second request waits for the owner calendar past its delay, opens once i
 	}
 	const page = await owner.newPage();
 	const errors = pageErrors(page);
+	const ownerLines = ['your calendar app has not fetched the request yet', 'tu app de calendario aún no ha recogido la solicitud'];
 	for (const [lang, ownerLine] of [
-		['en', 'your calendar app has not fetched the request yet'],
-		['es', 'tu app de calendario aún no ha recogido la solicitud']
+		['en', ownerLines[0]],
+		['es', ownerLines[1]]
 	]) {
 		await page.goto(`/family?lang=${lang}`);
 		await expect(page.getByTestId('bg-request').getByRole('status')).toContainText(ownerLine);
@@ -175,6 +200,19 @@ test('a second request waits for the owner calendar past its delay, opens once i
 	await owner.request.get(feed);
 	await pp.goto('/family?lang=en');
 	await expect(mine.getByRole('status')).toContainText('Open until');
+
+	// the owner's page still shows it waiting: a cancel now says, in Spanish, that it changed, and the
+	// row shows it open with the step that fits it
+	const row = page.getByTestId('bg-request');
+	await expect(row.getByRole('status')).toContainText(ownerLines[1]);
+	await row.getByRole('button', { name: 'Cancelar la solicitud' }).click();
+	await row.getByRole('group').getByRole('button', { name: 'Cancelar la solicitud' }).click();
+	await expect(row.getByRole('alert')).toHaveText('Esta solicitud cambió mientras la página estaba abierta. El estado que se ve es el actual.');
+	await expect(row.getByRole('status')).toContainText('Abierto hasta el');
+	await expect(row.getByRole('button', { name: 'Terminar el acceso' })).toBeVisible();
+	await expect(row.getByRole('button', { name: 'Cancelar la solicitud' })).toHaveCount(0);
+	expect(sql(`select status from break_glass_request where id = '${second}'`)).toBe('active');
+
 	await mine.getByRole('button', { name: "Open Alex Rivera's records" }).click();
 	await expect(pp.getByRole('heading', { level: 1 })).toContainText('Alex Rivera');
 	await pp.goto('/biomarkers?lang=en');
@@ -196,48 +234,27 @@ test('a second request waits for the owner calendar past its delay, opens once i
 	await expect(panel.getByRole('listitem').filter({ hasText: 'cancelled by' })).toContainText('asked for access');
 	await expect(panel.getByRole('listitem')).toHaveCount(2);
 	await expect(page.getByTestId('nt-badge')).toHaveText('2');
+	// See the request opens its cancel screen
+	await entry.getByRole('link', { name: 'See the request' }).click();
+	await expect(page).toHaveURL(new RegExp(`/family/break-glass/${second}$`));
+	await expect(page.getByTestId('bgc-status')).toContainText('Open until');
 	expect(errors).toEqual([]);
 	await page.close();
 });
 
-test('the cancel screen confirms it is the owner before it ends a request', async () => {
+test('an end on a cancel screen left open after another owner ended it says so and offers nothing more', async ({ baseURL }) => {
 	const page = await owner.newPage();
 	const errors = pageErrors(page);
-	// this session has not logged in or confirmed lately, and confirms with a password; the server's
-	// own answers are kept apart from the step-up, which the cancel and revoke routes do not need
-	await page.route('**/api/auth/state', async (route) => {
-		const res = await route.fetch();
-		await route.fulfill({ response: res, json: { ...(await res.json()), step_up_fresh: false } });
-	});
-	await page.route('**/api/auth/step-up/begin', (route) => route.fulfill({ json: { method: 'password' } }));
-	let finished = 0;
-	await page.route('**/api/auth/step-up/finish', (route) => {
-		finished++;
-		return route.fulfill({ json: { ok: true, valid_seconds: 300 } });
-	});
-	const revokes: string[] = [];
-	page.on('request', (r) => {
-		if (r.url().includes('/revoke')) revokes.push(r.url());
-	});
-	await page.goto(`/family/break-glass/${second}?lang=en`);
-	await expect(page.getByTestId('bgc-status')).toContainText('Open until');
-	await page.getByRole('button', { name: 'End access' }).click();
-	await page.getByRole('group', { name: /^End .*'s access now\?$/ }).getByRole('button', { name: 'End access' }).click();
-	const dialog = page.getByRole('dialog');
-	await expect(dialog).toBeVisible();
-	// backing out of the confirmation ends nothing
-	await dialog.getByRole('button', { name: 'Cancel' }).click();
-	await expect(dialog).toBeHidden();
-	expect(revokes).toEqual([]);
-	expect(sql(`select status from break_glass_request where id = '${second}'`)).toBe('active');
-	// confirming ends it
-	await page.getByRole('group', { name: /^End .*'s access now\?$/ }).getByRole('button', { name: 'End access' }).click();
-	await dialog.getByLabel('Password').fill('the owner password');
-	await dialog.getByRole('button', { name: 'Confirm' }).click();
-	await expect(page.getByText('Access has ended.')).toBeVisible();
-	expect(finished).toBe(1);
-	expect(revokes.length).toBe(1);
-	expect(sql(`select status from break_glass_request where id = '${second}'`)).toBe('revoked');
+	await page.goto(`/family/break-glass/${second}?lang=es`);
+	await expect(page.getByTestId('bgc-status')).toContainText('Abierto hasta el');
+	// ended elsewhere while this page stays open
+	const ended = await owner.request.post(`/api/profiles/alex/break-glass/requests/${second}/revoke`, { headers: headers(baseURL!) });
+	expect(ended.status(), await ended.text()).toBe(200);
+	await page.getByRole('button', { name: 'Terminar el acceso' }).click();
+	await page.getByRole('group').getByRole('button', { name: 'Terminar el acceso' }).click();
+	await expect(page.getByRole('alert')).toHaveText('Esta solicitud cambió mientras la página estaba abierta. El estado que se ve es el actual.');
+	await expect(page.getByTestId('bgc-status')).toContainText('Terminada por una persona titular el');
+	await expect(page.getByTestId('bgc-step')).toHaveCount(0);
 	expect(errors).toEqual([]);
 	await page.close();
 });
@@ -255,11 +272,23 @@ test('unread notices open at the next login, in es and en, until they are read',
 		const panel = page.getByRole('region', { name: new RegExp(`^${title}`) });
 		await expect(panel).toBeVisible();
 		await expect(panel).toContainText(uses);
-		// once per session: the next page of the same session leaves it closed
+		// once per login: the next page, and another tab, of the same login leave it closed
 		await page.goto(`/family?lang=${lang}`);
 		await expect(page.getByTestId('bg-owner')).toBeVisible();
 		await expect(panel).toHaveCount(0);
 		await expect(page.getByTestId('nt-badge')).toBeVisible();
+		const tab = await ctx.newPage();
+		await tab.goto(`/family?lang=${lang}`);
+		await expect(tab.getByTestId('bg-owner')).toBeVisible();
+		await expect(tab.getByRole('region', { name: new RegExp(`^${title}`) })).toHaveCount(0);
+		await tab.close();
+		// the session ends (a logout, an expired login) and the next login in this same tab opens them again
+		await page.route('**/api/me', (route) => route.fulfill({ status: 401, json: { detail: { code: 'unauthenticated', message: 'Not logged in.' } } }));
+		await page.goto(`/?lang=${lang}`);
+		await expect.poll(() => page.evaluate((k) => localStorage.getItem(k), SHOWN)).toBeNull();
+		await page.unroute('**/api/me');
+		await page.goto(`/?lang=${lang}`);
+		await expect(panel).toBeVisible();
 		expect(errors).toEqual([]);
 		await ctx.close();
 	}
@@ -269,6 +298,8 @@ test('unread notices open at the next login, in es and en, until they are read',
 	const panel = page.getByRole('region', { name: /^Notices/ });
 	await panel.getByRole('button', { name: 'Mark all as read' }).click();
 	await expect(page.getByTestId('nt-badge')).toHaveCount(0);
+	// the button went with the news; the keyboard stays in the panel
+	await expect(panel.getByRole('button', { name: 'Close' })).toBeFocused();
 	await ctx.close();
 	// read: the next login opens nothing, and the notices stay one click away
 	const next = await browser.newContext({ baseURL, colorScheme: 'dark' });

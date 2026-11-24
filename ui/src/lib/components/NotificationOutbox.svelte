@@ -2,17 +2,18 @@
 	// The in-app notices (GET /notifications): emergency access to the profiles you own. One entry per
 	// request, so twenty reads through it are one line with their count. The badge counts the requests
 	// with something unread and stays until Mark all as read. Unread notices open the panel by
-	// themselves once per browser session, so the next login shows them until they are read.
+	// themselves once per login: the mark of it lives in this browser until the app finds no session
+	// (a logout, an expired login), so another tab of the same login leaves it closed and the next
+	// login opens it again. Only owners get notices, so nobody else reads them.
 	import { onMount, tick } from 'svelte';
 	import { getNotices, readNotices } from '#lib/api/breakglass';
 	import type { Notices } from '#lib/api/types';
 	import { errText, tf, tp } from '#lib/components/pages1/util.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { intlLocale } from '#lib/i18n/langs';
-	import { groupNotices, unreadGroups, when } from '#lib/logic/breakglass';
+	import { NOTICES_SHOWN, groupNotices, unreadGroups, when } from '#lib/logic/breakglass';
 	import { app } from '#lib/state/app.svelte';
 
-	const SHOWN = 'oh.notices.shown';
 	/** A tab that comes back reads the notices again, at most once a minute (each read writes an audit row). */
 	const REFRESH_MS = 60_000;
 
@@ -24,8 +25,10 @@
 	let btn: HTMLButtonElement | undefined = $state();
 	let panel: HTMLElement | undefined = $state();
 	let root: HTMLElement | undefined = $state();
-	const user = $derived(app.me?.user.id ?? '');
-	const groups = $derived(groupNotices(data?.items ?? []));
+	let closeBtn: HTMLButtonElement | undefined = $state();
+	const owner = $derived((app.me?.profiles ?? []).some((p) => p.role === 'owner' && !p.break_glass));
+	const user = $derived(owner ? (app.me?.user.id ?? '') : '');
+	const groups = $derived(groupNotices(data?.items ?? [], data?.uses));
 	const badge = $derived(unreadGroups(groups));
 	const loc = $derived(intlLocale(i18n.lang));
 
@@ -46,9 +49,9 @@
 		open = false;
 		if (!u) return;
 		load().then(() => {
-			if (u !== user || !unreadGroups(groupNotices(data?.items ?? []))) return;
-			if (sessionStorage.getItem(SHOWN) === u) return;
-			sessionStorage.setItem(SHOWN, u);
+			if (u !== user || !unreadGroups(groupNotices(data?.items ?? [], data?.uses))) return;
+			if (localStorage.getItem(NOTICES_SHOWN) === u) return;
+			localStorage.setItem(NOTICES_SHOWN, u);
 			open = true;
 		});
 	});
@@ -90,6 +93,9 @@
 		} finally {
 			busy = false;
 		}
+		// the button is gone with the news: keep the keyboard in the panel
+		await tick();
+		closeBtn?.focus();
 	}
 	function onKey(e: KeyboardEvent) {
 		if (e.key !== 'Escape') return;
@@ -123,10 +129,10 @@
 				{:else}
 					<ul>
 						{#each groups as g (g.key)}
-							<li class:unread={g.unread.length > 0}>
+							<li class:unread={g.unread > 0}>
 								<div class="who">
 									<b>{tf('nt_group', { contact: g.contact ?? t('nt_someone'), profile: g.profile.display_name })}</b>
-									{#if g.unread.length}<span class="new">{t('nt_new')}</span>{/if}
+									{#if g.unread}<span class="new">{t('nt_new')}</span>{/if}
 								</div>
 								{#each g.steps as s, i (i)}
 									<div class="step" class:muted={!s.unread}>{step(s.kind, s.by)} · <span class="num">{when(s.at, loc)}</span></div>
@@ -140,7 +146,7 @@
 				{#if error}<div class="p2err" role="alert">{error}</div>{/if}
 				<div class="acts">
 					{#if badge}<button class="btn sm" disabled={busy} onclick={readAll}>{t('nt_read_all')}</button>{/if}
-					<button class="btn sm" onclick={close}>{t('nt_close')}</button>
+					<button class="btn sm" bind:this={closeBtn} onclick={close}>{t('nt_close')}</button>
 				</div>
 			</section>
 		{/if}

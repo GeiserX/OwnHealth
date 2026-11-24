@@ -12,6 +12,7 @@
 	import { intlLocale } from '#lib/i18n/langs';
 	import { phase, statusLine, when } from '#lib/logic/breakglass';
 	import { goto } from '$app/navigation';
+	import { tick } from 'svelte';
 	import { app, setProfile } from '#lib/state/app.svelte';
 
 	const named = new Loader<{ items: BreakGlassNamed[] }>();
@@ -47,6 +48,9 @@
 			.then(async () => {
 				asking = '';
 				await load();
+				// the form is gone: the keyboard lands on the line that says where the request stands
+				await tick();
+				document.getElementById(`bg-st-${n.profile.slug}`)?.focus();
 			})
 			.catch((e) => (error = { text: errText(e), raw: errRaw(e) }))
 			.finally(() => (busy = false));
@@ -74,7 +78,7 @@
 					<div class="who"><b>{n.profile.display_name}</b> <span class="muted">{tp('bgl_opens_after', n.delay_hours)}</span></div>
 					<div class="muted">{tf('bgl_reads', { list: n.categories.map(scopeText).join('; ') })}</div>
 					{#if n.request}
-						<div class="status" role="status">{statusText(n)}</div>
+						<div class="status" role="status" id="bg-st-{n.profile.slug}" tabindex="-1">{statusText(n)}</div>
 					{/if}
 					{#if n.request && phase(n.request, now) === 'active'}
 						<div class="p2row"><button class="btn" onclick={() => openRecords(n.profile.slug)}>{tf('bgl_open_records', { name: n.profile.display_name })}</button></div>

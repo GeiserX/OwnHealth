@@ -1,6 +1,6 @@
 // Break-glass on screen (routes/break_glass.rs): where a request stands, the notices grouped per
 // request, and who the owner may name. Pure, so the tests can run it without a browser.
-import type { BreakGlassRequest, Notice, NoticeKind } from '../api/types';
+import type { BreakGlassRequest, Notice, NoticeKind, NoticeUses } from '../api/types';
 
 type Req = Pick<BreakGlassRequest, 'status' | 'activates_at' | 'owner_feed_at' | 'waiting_for_calendar' | 'expires_at' | 'ended_at'>;
 
@@ -53,6 +53,15 @@ export function statusLine(r: Req, who: 'owner' | 'contact', now: Date = new Dat
 	}
 }
 
+/**
+ * The dict key for a cancel or an end the server refused because the request moved on while the page
+ * was open (409 `conflict`: it opened, ran out or another owner ended it); null for any other error.
+ */
+export function endErrorKey(e: unknown): string | null {
+	const x = e as { status?: unknown; code?: unknown } | null;
+	return x && x.status === 409 && x.code === 'conflict' ? 'bgl_changed' : null;
+}
+
 /** A date and time in the reader's language and zone: '26 nov 2026, 10:00'. */
 export function when(iso: string | null | undefined, locale: string): string {
 	if (!iso) return '—';
@@ -60,6 +69,12 @@ export function when(iso: string | null | undefined, locale: string): string {
 	if (Number.isNaN(d.getTime())) return '—';
 	return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(d);
 }
+
+/**
+ * The browser's mark that the notices opened by themselves for this login (the user id). The app
+ * removes it when it finds no session, so the next login opens them again.
+ */
+export const NOTICES_SHOWN = 'oh.notices.shown';
 
 /** The notices of one request, as one entry of the outbox. */
 export interface NoticeGroup {
@@ -76,40 +91,72 @@ export interface NoticeGroup {
 	lastUse: string | null;
 	/** the newest notice of the group */
 	latest: string;
-	unread: string[];
+	/** how many of its notices are unread */
+	unread: number;
 }
 
 /**
- * The outbox, one entry per request, newest first. Every read through an open request writes a
- * notice, so two page views can write twenty; they show as one line with the count.
+ * Instants compared as instants: the server leaves the fraction out of a whole second, so the strings
+ * of one second do not sort ('...:00Z' after '...:00.5Z').
  */
-export function groupNotices(items: readonly Notice[]): NoticeGroup[] {
+const ms = (iso: string): number => {
+	const t = Date.parse(iso);
+	return Number.isNaN(t) ? 0 : t;
+};
+
+/**
+ * The outbox, one entry per request, newest first. Every read through an open request writes a
+ * notice, so two page views can write twenty; they show as one line with the count. The list holds
+ * only the newest notices, so the count comes from `uses`, which the server counts over every read;
+ * the reads in the list count only for a request it does not cover.
+ */
+export function groupNotices(items: readonly Notice[], uses: readonly NoticeUses[] = []): NoticeGroup[] {
 	const groups = new Map<string, NoticeGroup>();
-	for (const n of items) {
-		const key = n.request_id ?? n.id;
+	const counted = new Set(uses.map((u) => u.request_id));
+	const group = (key: string, request: string | null, profile: Notice['profile'], latest: string): NoticeGroup => {
 		let g = groups.get(key);
 		if (!g) {
-			g = { key, request: n.request_id, profile: n.profile, contact: null, steps: [], uses: 0, lastUse: null, latest: n.created_at, unread: [] };
+			g = { key, request, profile, contact: null, steps: [], uses: 0, lastUse: null, latest, unread: 0 };
 			groups.set(key, g);
 		}
+		return g;
+	};
+	for (const n of items) {
+		const g = group(n.request_id ?? n.id, n.request_id, n.profile, n.created_at);
 		g.contact ??= n.contact?.display_name ?? null;
-		if (n.created_at > g.latest) g.latest = n.created_at;
-		if (!n.read_at) g.unread.push(n.id);
+		if (ms(n.created_at) > ms(g.latest)) g.latest = n.created_at;
 		if (n.kind === 'break_glass.use') {
+			if (n.request_id && counted.has(n.request_id)) continue;
 			g.uses += 1;
-			if (!g.lastUse || n.created_at > g.lastUse) g.lastUse = n.created_at;
+			if (!n.read_at) g.unread += 1;
+			if (!g.lastUse || ms(n.created_at) > ms(g.lastUse)) g.lastUse = n.created_at;
 		} else {
+			if (!n.read_at) g.unread += 1;
 			g.steps.push({ kind: n.kind, at: n.created_at, by: n.actor?.display_name ?? null, unread: !n.read_at });
 		}
 	}
-	for (const g of groups.values()) g.steps.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
-	return [...groups.values()].sort((a, b) => (a.latest < b.latest ? 1 : a.latest > b.latest ? -1 : 0));
+	for (const u of uses) {
+		const g = group(u.request_id, u.request_id, u.profile, u.last_at);
+		g.contact ??= u.contact.display_name;
+		g.uses = u.count;
+		g.lastUse = u.last_at;
+		g.unread += u.unread;
+		if (ms(u.last_at) > ms(g.latest)) g.latest = u.last_at;
+	}
+	for (const g of groups.values()) g.steps.sort((a, b) => ms(a.at) - ms(b.at));
+	return [...groups.values()].sort((a, b) => ms(b.latest) - ms(a.latest));
 }
 
 /** The badge: how many requests have something unread. */
-export const unreadGroups = (groups: readonly NoticeGroup[]): number => groups.filter((g) => g.unread.length > 0).length;
+export const unreadGroups = (groups: readonly NoticeGroup[]): number => groups.filter((g) => g.unread > 0).length;
 
-type Member = { user_id: string; display_name: string; own_profile?: string | null };
+type Member = {
+	user_id: string;
+	display_name: string;
+	own_profile?: string | null;
+	enrolled?: boolean;
+	logins?: { passkeys: number; oidc: boolean; password: boolean };
+};
 type Grant = { user_id: string; profile: string; role: string };
 
 /**
@@ -121,11 +168,11 @@ export function contactChoices<M extends Member>(members: readonly M[], grants: 
 	return members.filter((m) => m.user_id !== me && !owns(m) && !named.includes(m.user_id));
 }
 
-/** The request `id` among the owner views of several profiles, with the profile it belongs to. */
-export function findRequest<R extends { id: string }>(views: readonly { slug: string; open_requests: readonly R[]; requests: readonly R[] }[], id: string): { slug: string; request: R } | null {
-	for (const v of views) {
-		const r = v.open_requests.find((x) => x.id === id) ?? v.requests.find((x) => x.id === id);
-		if (r) return { slug: v.slug, request: r };
-	}
-	return null;
+/**
+ * Whether a member can log in, and so ask: a passkey, a password or OIDC. An invite not redeemed yet
+ * cannot. Without the login details (a reader who may not see them), an enrolled member counts.
+ */
+export function canLogIn(m: Member): boolean {
+	if (m.logins) return m.logins.passkeys > 0 || m.logins.oidc || m.logins.password;
+	return m.enrolled !== false;
 }

@@ -5,6 +5,7 @@ import { del, get, p, post, put } from './core';
 import type {
 	BreakGlassContact,
 	BreakGlassContactIn,
+	BreakGlassOne,
 	BreakGlassNamed,
 	BreakGlassOwnerView,
 	BreakGlassRequest,
@@ -22,6 +23,8 @@ export const putBreakGlassContact = (slug: string, user: Uuid, body: BreakGlassC
 /** Remove a contact; their open request ends with it. */
 export const removeBreakGlassContact = (slug: string, user: Uuid) =>
 	del<{ removed: true; ended: Uuid[] }>(`${bg(slug)}/contacts/${encodeURIComponent(user)}`);
+/** One request by its id, for the cancel screen of the calendar link (404 unless the caller owns its profile). */
+export const getBreakGlassRequest = (id: Uuid) => get<BreakGlassOne>(`/break-glass/requests/${encodeURIComponent(id)}`);
 /** Cancel a request that still waits. */
 export const cancelBreakGlass = (slug: string, id: Uuid) =>
 	post<BreakGlassRequest>(`${bg(slug)}/requests/${encodeURIComponent(id)}/cancel`);

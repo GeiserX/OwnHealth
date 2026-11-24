@@ -1,32 +1,34 @@
 <script lang="ts">
 	// The cancel screen of one break-glass request: where the cancel link of the owner's calendar event
-	// lands (routes/ics.rs). It finds the request on the profiles the person owns, shows who asked, why,
-	// what they would read and where it stands, and cancels it while it waits or ends it while it is
-	// open. A link opened from a calendar app can come from any device, so the screen confirms it is the
-	// owner first: a login in the last minutes counts, else the step-up dialog asks.
+	// lands (routes/ics.rs). It reads the request by its id (GET /break-glass/requests/{id}, which answers
+	// only an owner of its profile), shows who asked, why, what they would read and where it stands, and
+	// cancels it while it waits or ends it while it is open. The link needs a login, as every page does,
+	// and no step-up: taking access away only narrows it, and the server asks none for it either.
 	import { page } from '$app/state';
-	import { cancelBreakGlass, getBreakGlass, revokeBreakGlass } from '#lib/api/breakglass';
-	import type { BreakGlassOwnerView, BreakGlassRequest } from '#lib/api/types';
+	import { cancelBreakGlass, getBreakGlassRequest, revokeBreakGlass } from '#lib/api/breakglass';
+	import { ApiError } from '#lib/api/core';
+	import type { BreakGlassRequest } from '#lib/api/types';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import { Loader, errRaw, errText, scopeText, tf } from '#lib/components/pages1/util.svelte';
-	import StepUpDialog from '#lib/components/pages2/StepUpDialog.svelte';
-	import { confirmFresh } from '#lib/components/pages2/stepup.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { intlLocale } from '#lib/i18n/langs';
-	import { findRequest, ownerStep, statusLine, when } from '#lib/logic/breakglass';
+	import { endErrorKey, ownerStep, phase, statusLine, when } from '#lib/logic/breakglass';
 	import { app } from '#lib/state/app.svelte';
 	import '#lib/components/pages2/pages2.css';
 
 	const id = $derived(page.params.id ?? '');
-	const owned = $derived((app.me?.profiles ?? []).filter((p) => p.role === 'owner' && !p.break_glass));
 	const found = new Loader<{ slug: string; name: string; request: BreakGlassRequest } | null>();
 
 	async function look(): Promise<{ slug: string; name: string; request: BreakGlassRequest } | null> {
-		const views: (BreakGlassOwnerView & { slug: string })[] = [];
-		for (const p of owned) views.push({ slug: p.slug, ...(await getBreakGlass(p.slug)) });
-		const hit = findRequest(views, id);
-		return hit ? { ...hit, name: owned.find((p) => p.slug === hit.slug)?.display_name ?? hit.slug } : null;
+		try {
+			const one = await getBreakGlassRequest(id);
+			return { slug: one.profile.slug, name: one.profile.display_name, request: one.request };
+		} catch (e) {
+			// not on a profile this person owns, gone, or not a request id at all
+			if (e instanceof ApiError && (e.status === 404 || e.status === 422)) return null;
+			throw e;
+		}
 	}
 	// set once the first look ended, so "not found" never flashes before it
 	let tried = $state(false);
@@ -44,6 +46,14 @@
 	const hit = $derived(found.data);
 	const r = $derived(hit?.request ?? null);
 	const step = $derived(r ? ownerStep(r, now) : null);
+	// Its waiting time ran out while the page was open: read it again once, so it shows open.
+	let reread = '';
+	$effect(() => {
+		if (r && phase(r, now) === 'opening' && reread !== r.id) {
+			reread = r.id;
+			load();
+		}
+	});
 	let confirming = $state(false);
 	let busy = $state(false);
 	let done = $state<'cancel' | 'revoke' | null>(null);
@@ -55,14 +65,17 @@
 		busy = true;
 		error = null;
 		try {
-			// the person backed out of the confirmation: nothing changes
-			if (!(await confirmFresh())) return;
 			await (s === 'cancel' ? cancelBreakGlass(hit.slug, hit.request.id) : revokeBreakGlass(hit.slug, hit.request.id));
 			done = s;
 			confirming = false;
 			await load();
 		} catch (e) {
-			error = { text: errText(e), raw: errRaw(e) };
+			const key = endErrorKey(e);
+			error = { text: key ? t(key) : errText(e), raw: errRaw(e) };
+			// it moved on while the page was open (it opened, ran out, someone else ended it): show where
+			// it stands now, and the step that fits it
+			confirming = false;
+			await load();
 		} finally {
 			busy = false;
 		}
@@ -103,7 +116,7 @@
 		</dl>
 		{#if done}<div class="note done" role="status">{t(done === 'cancel' ? 'bgl_c_cancelled' : 'bgl_c_revoked')}</div>{/if}
 		{#if step}
-			<div class="p2row">
+			<div class="p2row" data-testid="bgc-step">
 				{#if confirming}
 					<ConfirmRow
 						text={tf(step === 'cancel' ? 'bgl_cancel_q' : 'bgl_revoke_q', { name: r.contact.display_name })}
@@ -117,13 +130,10 @@
 					<button class="btn pri" onclick={() => (confirming = true)}>{t(step === 'cancel' ? 'bgl_cancel' : 'bgl_revoke')}</button>
 				{/if}
 			</div>
-			<div class="note">{t('bgl_c_su')}</div>
 		{/if}
 		{#if error}<div class="p2err" role="alert" title={error.raw}>{error.text}</div>{/if}
 	{/if}
 </section>
-
-<StepUpDialog />
 
 <style>
 	.bgc {
