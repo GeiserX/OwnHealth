@@ -53,16 +53,19 @@ fn zip32_end(reader: &mut (impl Read + Seek)) -> ZipResult<(u64, [u8; END_BYTES]
     let mut tail = vec![0; (end - start) as usize];
     reader.seek(SeekFrom::Start(start))?;
     reader.read_exact(&mut tail)?;
+    // The last signature whose record and comment fit before the end of the file, as the indexer
+    // picks it: a comment may hold the signature itself. The central directory must end at this
+    // record (or its ZIP64 end record), so the indexer cannot fall back to a different directory.
     let index = tail
         .windows(END_SIGNATURE.len())
-        .rposition(|bytes| bytes == END_SIGNATURE)
+        .enumerate()
+        .rev()
+        .find_map(|(index, bytes)| {
+            let record = tail.get(index..index + END_BYTES).filter(|_| bytes == END_SIGNATURE)?;
+            (index + END_BYTES + usize::from(u16_at(record, 20)) <= tail.len()).then_some(index)
+        })
         .ok_or(BAD_DIRECTORY)?;
-    let record = tail.get(index..index + END_BYTES).ok_or(BAD_DIRECTORY)?;
-    if index + END_BYTES + usize::from(u16_at(record, 20)) != tail.len() {
-        return Err(BAD_DIRECTORY);
-    }
-    // Choose the last signature, as the indexer does. The central directory must end at this
-    // record (or its ZIP64 end record), so the indexer cannot fall back to a different directory.
+    let record = &tail[index..index + END_BYTES];
     Ok((start + index as u64, record.try_into().expect("ZIP end record")))
 }
 
@@ -143,6 +146,11 @@ fn open_with_limits<R: Read + Seek>(
     if d.entries > d.size / 46 || (d.entries == 0 && d.size != 0) {
         return Err(BAD_DIRECTORY);
     }
+    // The indexer skips an end record whose first central header is missing and searches for an
+    // earlier one, whose directory these limits never saw.
+    if d.entries != 0 && read_at::<4>(&mut reader, physical_start)? != *b"PK\x01\x02" {
+        return Err(BAD_DIRECTORY);
+    }
     let config = Config {
         archive_offset: ArchiveOffset::Known(offset),
     };
@@ -169,7 +177,8 @@ mod tests {
                 zip.start_file(name, zip::write::SimpleFileOptions::default())?;
             }
         }
-        zip.set_comment("archive comment");
+        // a comment may hold the end signature itself
+        zip.set_comment("archive comment PK\x05\x06");
         let archive = zip.finish()?;
         assert_eq!(open_with_limits(archive.clone(), 3, 1024)?.len(), 3);
         for (entries, bytes) in [(2, 1024), (3, 100)] {
@@ -178,6 +187,44 @@ mod tests {
                 Err(ZipError::UnsupportedArchive(DIRECTORY_LIMIT))
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn an_end_record_without_its_directory_cannot_hand_over_an_earlier_one() -> anyhow::Result<()> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for name in ["a.json", "b.json", "c.json"] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())?;
+        }
+        let mut bytes = zip.finish()?.into_inner();
+        // 46 bytes that are no central header, then an end record that claims them as a one-entry
+        // directory. The indexer finds no header there and falls back to the earlier end record.
+        let start = u32::try_from(bytes.len())?;
+        bytes.extend([0; 46]);
+        bytes.extend(END_SIGNATURE);
+        for field in [0u16, 0, 1, 1] {
+            bytes.extend(field.to_le_bytes());
+        }
+        bytes.extend(46u32.to_le_bytes());
+        bytes.extend(start.to_le_bytes());
+        bytes.extend(0u16.to_le_bytes());
+        assert!(open_with_limits(std::io::Cursor::new(bytes), 2, 1024).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_zip64_directory_obeys_the_same_limits() -> anyhow::Result<()> {
+        let mut file = tempfile::tempfile()?;
+        // A sparse file gives a tiny archive a real ZIP64 directory without writing 4 GiB.
+        file.seek(SeekFrom::Start(u64::from(u32::MAX) + 1))?;
+        let mut writer = zip::ZipWriter::new(file);
+        writer.add_directory("folder/", zip::write::SimpleFileOptions::default())?;
+        let file = writer.finish()?;
+        assert_eq!(open_with_limits(file.try_clone()?, 1, 1024)?.len(), 1);
+        assert!(matches!(
+            open_with_limits(file, 0, 1024),
+            Err(ZipError::UnsupportedArchive(DIRECTORY_LIMIT))
+        ));
         Ok(())
     }
 }
