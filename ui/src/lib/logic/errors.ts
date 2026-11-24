@@ -28,6 +28,7 @@ const PATTERNS: [RegExp, string][] = [
 	[/^not a readable C-CDA document: the file is saved as UTF-16/i, 'err_ccda_utf16'],
 	[/^not a readable C-CDA document: the body is a nonXMLBody/i, 'err_ccda_unstructured'],
 	[/^not a readable C-CDA document: the file carries more than \d+ different security labels/i, 'err_ccda_too_many_labels'],
+	[/^not a readable C-CDA document: the file's records would carry more than \d+ security labels in all/i, 'err_ccda_too_many_label_copies'],
 	[/^not a readable C-CDA document/i, 'err_ccda_unreadable'],
 	[/^not a decimal|^the value is not a number/i, 'err_decimal'],
 	[/^the date is in the future/i, 'err_future_date'],

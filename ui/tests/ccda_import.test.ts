@@ -70,3 +70,16 @@ test('a C-CDA file refused for too many security labels says so in the person\'s
 	assert.match(en.err_ccda_too_many_labels, /64/);
 	assert.match(es.err_ccda_too_many_labels, /64/);
 });
+
+test('a C-CDA file refused for too many label copies says so in the person\'s language', () => {
+	const has = (k: string) => k in en;
+	const why = "the file's records would carry more than 250000 security labels in all, as each record holds its own copy; a C-CDA document needs far fewer";
+	assert.equal(errKey(null, `not a readable C-CDA document: ${why}`, has), 'err_ccda_too_many_label_copies');
+	assert.ok(en.err_ccda_too_many_label_copies && es.err_ccda_too_many_label_copies);
+	assert.notEqual(en.err_ccda_too_many_label_copies, es.err_ccda_too_many_label_copies);
+	assert.match(en.err_ccda_too_many_label_copies, /250,000/);
+	assert.match(es.err_ccda_too_many_label_copies, /250\.000/);
+	// a label longer than a real one is a file no portal makes: the plain refusal
+	const long = 'the file carries a security label longer than a real one (a code over 64 characters or a code system over 128)';
+	assert.equal(errKey(null, `not a readable C-CDA document: ${long}`, has), 'err_ccda_unreadable');
+});

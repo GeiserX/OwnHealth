@@ -33,8 +33,10 @@
 //!   the record sensitive as it does for a labelled FHIR file. A section's labels reach its
 //!   subsections at any depth. The labels in a Privacy Markings Section (templateId
 //!   `2.16.840.1.113883.3.3445.4`) and a confidentialityCode on the structuredBody go to every
-//!   resource of the document. A Security Observation is never a record of its own. A file with more
-//!   than 64 different labels is refused.
+//!   resource of the document. A Security Observation is never a record of its own. Each resource
+//!   holds its own copy of its labels, so a file is refused when it carries more than 64 different
+//!   labels, a label whose code is over 64 characters or whose codeSystem is over 128, or more than
+//!   250,000 label copies over all its resources. No label is ever dropped.
 //! - An entered-in-error allergy or problem has no `clinicalStatus` (FHIR R4 ait-2, con-5). A problem
 //!   whose status observation says active while its effectiveTime has an end is listed for review
 //!   with that reason, never imported as active or as resolved (con-4).
@@ -185,10 +187,9 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
         return Err(xml::unstructured());
     }
     // every record carries every label of its document, its sections and its entry, so the labels a
-    // file may hold are capped: a file with more is refused, never read with labels dropped
-    if more_labels_than(root, MAX_LABELS) {
-        return Err(xml::too_many_labels(MAX_LABELS));
-    }
+    // file may hold are capped in number and length: a file with more is refused, never read with
+    // labels dropped
+    check_labels(root)?;
     let top = path(root, &["component", "structuredBody"]);
     // the document's confidentialityCode, and the structuredBody's, label every record
     let mut doc_labels = confidentiality(root).into_iter().collect::<Vec<_>>();
@@ -207,6 +208,7 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
         patient: None,
         labels: doc_labels.clone(),
         doc_labels,
+        label_copies: 0,
         out: Vec::new(),
     };
     c.header(root);
@@ -224,7 +226,10 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
     {
         stack.push((s, format!("/section/{i}"), Rc::clone(&inherited)));
     }
-    while let Some((sec, pointer, inherited)) = stack.pop() {
+    // past the label copy budget nothing more is read: the file is refused below
+    while c.label_copies <= MAX_LABEL_COPIES
+        && let Some((sec, pointer, inherited)) = stack.pop()
+    {
         let (report, labels) = c.section(sec, pointer, &inherited);
         let labels = Rc::new(labels);
         let nested: Vec<_> = subsections(sec).collect();
@@ -232,6 +237,9 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
             stack.push((s, format!("{}/section/{i}", report.pointer), Rc::clone(&labels)));
         }
         sections.push(report);
+    }
+    if c.label_copies > MAX_LABEL_COPIES {
+        return Err(xml::too_many_label_copies(MAX_LABEL_COPIES));
     }
     Ok(Converted {
         title: child(root, "title").and_then(xml::text),
@@ -259,6 +267,13 @@ const ALLERGY_OBSERVATION: &str = "2.16.840.1.113883.10.20.22.4.7";
 const SEVERITY_OBSERVATION: &str = "2.16.840.1.113883.10.20.22.4.8";
 /// The most different security labels a file may carry.
 const MAX_LABELS: usize = 64;
+/// The longest code of a security label, in characters (real ones are a few letters).
+const MAX_LABEL_CODE: usize = 64;
+/// The longest codeSystem of a security label, in characters (real ones are OIDs of about 25).
+const MAX_LABEL_SYSTEM: usize = 128;
+/// The most label copies one file may make: each resource holds its own copy of each of its labels.
+/// At most a few hundred bytes each: about 160 MB at the longest labels allowed.
+const MAX_LABEL_COPIES: usize = 250_000;
 
 /// C-CDA code system OIDs and the FHIR system URL each one has (Medplum `systems.ts`, with CVX and
 /// the ICD and NDC systems at their HL7 URLs). Any other OID becomes `urn:oid:<oid>`.
@@ -539,6 +554,9 @@ struct Conv<'a, 'i> {
     /// section's and its own): each resource made gets them as `meta.security`.
     doc_labels: Vec<Value>,
     labels: Vec<Value>,
+    /// The labels copied into resources so far. Past [`MAX_LABEL_COPIES`] no more are copied and the
+    /// file is refused once read, so the copies stay bounded and no label is ever dropped.
+    label_copies: usize,
     out: Vec<Entry>,
 }
 
@@ -547,7 +565,10 @@ impl<'a, 'i> Conv<'a, 'i> {
         if !self.labels.is_empty()
             && let Value::Object(r) = &mut resource
         {
-            r.insert("meta".into(), json!({"security": self.labels}));
+            self.label_copies = self.label_copies.saturating_add(self.labels.len());
+            if self.label_copies <= MAX_LABEL_COPIES {
+                r.insert("meta".into(), json!({"security": self.labels}));
+            }
         }
         let rtype = resource["resourceType"].as_str().unwrap_or_default().to_string();
         if let Some(rep) = rep {
@@ -814,6 +835,9 @@ impl<'a, 'i> Conv<'a, 'i> {
             return (rep, section_labels);
         };
         for (j, entry) in entries.into_iter().enumerate() {
+            if self.label_copies > MAX_LABEL_COPIES {
+                break; // the file is refused once its sections stop
+            }
             let at = format!("{}/entry/{j}", rep.pointer);
             self.labels = section_labels.clone();
             add_labels(&mut self.labels, entry_labels(entry));
@@ -1563,29 +1587,42 @@ fn add_labels(to: &mut Vec<Value>, labels: impl IntoIterator<Item = Value>) {
     }
 }
 
-/// Whether the document carries more than `max` different labels (confidentialityCodes other than
-/// `N` and DS4P observation values, anywhere in it). One pass, stopped as soon as it is over.
-fn more_labels_than(root: Node<'_, '_>, max: usize) -> bool {
+/// Refuses a document whose labels (confidentialityCodes other than `N` and DS4P observation values,
+/// anywhere in it) are more than [`MAX_LABELS`] different ones, or hold a code longer than
+/// [`MAX_LABEL_CODE`] or a codeSystem longer than [`MAX_LABEL_SYSTEM`]. One pass, stopped at the
+/// first fault.
+fn check_labels(root: Node<'_, '_>) -> Result<()> {
     let mut seen = HashSet::new();
     for d in root
         .descendants()
         .filter(|d| d.is_element() && d.tag_name().namespace() == Some(xml::NS))
     {
-        let found = if d.tag_name().name() == "confidentialityCode" {
-            d.parent_element().and_then(confidentiality).into_iter().collect()
+        // the nodes `confidentiality` and `security_values` read labels from
+        let found: Vec<Node<'_, '_>> = if d.tag_name().name() == "confidentialityCode" {
+            d.parent_element()
+                .and_then(|p| child(p, "confidentialityCode"))
+                .filter(|c| attr(*c, "code").is_some_and(|code| !code.eq_ignore_ascii_case("N")))
+                .into_iter()
+                .collect()
         } else if is_security_observation(d) {
-            security_values(d)
+            children(d, "value").collect()
         } else {
             continue;
         };
-        for l in found {
-            seen.insert(l.to_string());
-            if seen.len() > max {
-                return true;
+        for n in found {
+            let longer = |name: &str, max: usize| attr(n, name).is_some_and(|v| v.chars().count() > max);
+            if longer("code", MAX_LABEL_CODE) || longer("codeSystem", MAX_LABEL_SYSTEM) {
+                return Err(xml::label_too_long(MAX_LABEL_CODE, MAX_LABEL_SYSTEM));
+            }
+            if let Some(l) = label(n) {
+                seen.insert(l.to_string());
+                if seen.len() > MAX_LABELS {
+                    return Err(xml::too_many_labels(MAX_LABELS));
+                }
             }
         }
     }
-    false
+    Ok(())
 }
 
 /// How a part that was not read is listed: its element and first templateId.

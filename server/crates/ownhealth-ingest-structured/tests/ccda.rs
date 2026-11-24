@@ -1670,7 +1670,83 @@ fn more_than_64_security_labels_refuse_the_file() -> R {
     Ok(())
 }
 
-/// T2: a file refused for its labels writes nothing: no document, no record, no review item.
+/// A document whose Privacy Markings Section carries one label with `code` and `system`, and one
+/// problem.
+fn one_label(code: &str, system: &str) -> Vec<u8> {
+    let value = security_label(code).replace(
+        "2.16.840.1.113883.5.4\"/></observation>",
+        &format!("{system}\"/></observation>"),
+    );
+    String::from_utf8(labelled(1))
+        .unwrap_or_default()
+        .replace(&security_label("L0"), &value)
+        .into_bytes()
+}
+
+/// A document whose Privacy Markings Section carries `labels` different labels, and `vitals` vital
+/// signs: every vital sign gets every label.
+fn labelled_vitals(labels: usize, vitals: usize) -> Vec<u8> {
+    let marks: String = (0..labels)
+        .map(|i| format!("<entry>{}</entry>", security_label(&format!("L{i}"))))
+        .collect();
+    let entries: String = (0..vitals).map(|i| vital_entry(&format!("v{i}"))).collect();
+    document(&format!(
+        r#"<component><section><templateId root="2.16.840.1.113883.3.3445.4"/><title>Privacy Markings</title>{marks}</section></component>
+           <component><section>{VITALS_HEAD}{entries}</section></component>"#
+    ))
+}
+
+/// R4-M1: a label's code and codeSystem are as short as real ones, because every record holds its
+/// own copy: a code over 64 characters or a codeSystem over 128 refuses the file, in a DS4P value
+/// and in a confidentialityCode alike. 64 and 128 are read.
+#[test]
+fn a_security_label_longer_than_a_real_one_refuses_the_file() -> R {
+    let c = convert(&one_label(&"C".repeat(64), &"1".repeat(128)))?;
+    assert_eq!(label_codes(&c, "Condition"), vec![vec!["C".repeat(64)]]);
+    let problem = problems_section(&problem_entry(
+        "p",
+        r#"code="233604007" displayName="Pneumonia""#,
+        r#"<low value="20200110"/>"#,
+        "",
+    ));
+    let confidential = |code: &str| {
+        document(&format!(
+            r#"<confidentialityCode code="{code}" codeSystem="2.16.840.1.113883.5.25"/>{problem}"#
+        ))
+    };
+    let c = convert(&confidential(&"R".repeat(64)))?;
+    assert_eq!(label_codes(&c, "Condition"), vec![vec!["R".repeat(64)]]);
+    for file in [
+        one_label(&"C".repeat(65), "2.16.840.1.113883.5.4"),
+        one_label("C", &"1".repeat(129)),
+        confidential(&"R".repeat(65)),
+    ] {
+        match convert(&file) {
+            Err(Error::Invalid(m)) => assert!(m.contains("a security label longer than a real one"), "{m}"),
+            other => panic!("a long label was read: {}", other.is_ok()),
+        }
+    }
+    Ok(())
+}
+
+/// R4-M1: every record holds its own copy of its labels, so the copies one file makes are capped at
+/// 250,000: 64 labels on 3,000 vital signs (192,000 copies) are read in full, on 4,000 (256,000)
+/// the file is refused. No label is ever dropped.
+#[test]
+fn label_copies_over_the_budget_refuse_the_file() -> R {
+    let c = convert(&labelled_vitals(64, 3_000))?;
+    let codes = label_codes(&c, "Observation");
+    assert_eq!(codes.len(), 3_000);
+    assert!(codes.iter().all(|l| l.len() == 64));
+    match convert(&labelled_vitals(64, 4_000)) {
+        Err(Error::Invalid(m)) => assert!(m.contains("more than 250000 security labels in all"), "{m}"),
+        other => panic!("256,000 label copies were read: {}", other.is_ok()),
+    }
+    Ok(())
+}
+
+/// T2, R4-M1: a file refused for its labels (too many, too long, or too many copies) writes
+/// nothing: no document, no record, no review item.
 #[tokio::test]
 async fn a_file_with_too_many_security_labels_writes_nothing() -> R {
     let env = Env::new().await?;
@@ -1678,31 +1754,42 @@ async fn a_file_with_too_many_security_labels_writes_nothing() -> R {
     let fam = family(&mut tx).await?;
     let p = as_isabella(&mut tx, &fam, "lucia").await?;
     tx.commit().await?;
-    let bytes = labelled(65);
-    let sha = env
-        .blobs
-        .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(p), &bytes)?;
-    let settings = Arc::new(env.db.settings(env.dir.path())?);
-    let ctx = JobContext::new(env.db.pool.clone(), settings, env.blobs.clone());
-    let payload = json!({"profile_id": p.to_string(), "household_id": fam.household_id.to_string(),
-        "blob_sha256": sha, "filename": "labels.xml"});
-    let Err(e) = ccda::import_ccda_job(ctx, job(payload)).await else {
-        panic!("a file with 65 labels imported");
-    };
-    assert!(e.permanent, "{e}");
-    assert!(
-        e.to_string()
-            .contains("not a readable C-CDA document: the file carries more than 64 different security labels"),
-        "{e}"
-    );
-    let mut conn = env.db.pool.acquire().await?;
-    let docs: i64 = sqlx::query_scalar("select count(*) from document where blob_sha256 = decode($1, 'hex')")
-        .bind(&sha)
-        .fetch_one(&mut *conn)
-        .await?;
-    assert_eq!(docs, 0);
-    assert_eq!(count(&mut conn, "condition", p).await?, 0);
-    assert_eq!(count(&mut conn, "review_item", p).await?, 0);
+    for (bytes, why) in [
+        (labelled(65), "the file carries more than 64 different security labels"),
+        (
+            one_label(&"C".repeat(65_536), "2.16.840.1.113883.5.4"),
+            "the file carries a security label longer than a real one",
+        ),
+        (
+            labelled_vitals(64, 4_000),
+            "the file's records would carry more than 250000 security labels in all",
+        ),
+    ] {
+        let sha = env
+            .blobs
+            .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(p), &bytes)?;
+        let settings = Arc::new(env.db.settings(env.dir.path())?);
+        let ctx = JobContext::new(env.db.pool.clone(), settings, env.blobs.clone());
+        let payload = json!({"profile_id": p.to_string(), "household_id": fam.household_id.to_string(),
+            "blob_sha256": sha, "filename": "labels.xml"});
+        let Err(e) = ccda::import_ccda_job(ctx, job(payload)).await else {
+            panic!("a file refused for its labels imported: {why}");
+        };
+        assert!(e.permanent, "{e}");
+        assert!(
+            e.to_string().contains(&format!("not a readable C-CDA document: {why}")),
+            "{e}"
+        );
+        let mut conn = env.db.pool.acquire().await?;
+        let docs: i64 = sqlx::query_scalar("select count(*) from document where blob_sha256 = decode($1, 'hex')")
+            .bind(&sha)
+            .fetch_one(&mut *conn)
+            .await?;
+        assert_eq!(docs, 0, "{why}");
+        for table in ["condition", "observation", "review_item"] {
+            assert_eq!(count(&mut conn, table, p).await?, 0, "{why}: {table}");
+        }
+    }
     Ok(())
 }
 

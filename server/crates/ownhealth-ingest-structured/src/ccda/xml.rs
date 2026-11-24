@@ -47,6 +47,20 @@ pub fn too_many_labels(max: usize) -> Error {
     ))
 }
 
+/// The refusal of a document with a security label longer than a real one.
+pub fn label_too_long(code: usize, system: usize) -> Error {
+    refused(format!(
+        "the file carries a security label longer than a real one (a code over {code} characters or a code system over {system})"
+    ))
+}
+
+/// The refusal of a document whose resources would hold more than `max` label copies in all.
+pub fn too_many_label_copies(max: usize) -> Error {
+    refused(format!(
+        "the file's records would carry more than {max} security labels in all, as each record holds its own copy; a C-CDA document needs far fewer"
+    ))
+}
+
 /// The text an element points at (`first`) and the words written beside the pointer (`second`),
 /// joined, at most [`MAX_TEXT`] characters: `second` keeps up to half of them, so neither is lost.
 pub fn joined(first: &str, second: &str) -> String {
