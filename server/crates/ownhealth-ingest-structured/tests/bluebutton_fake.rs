@@ -799,7 +799,7 @@ async fn v3_claim_pages_follow_the_count_and_refuse_odd_pages() -> common::R {
     let oversized = pull(&setup, 200).await?;
     assert_eq!(claim_pages(&setup), [0]);
     assert_eq!(code(&oversized).as_deref(), Some("not_fhir"));
-    assert_ne!(oversized.cursor, Some(json!({"claim_count": 51})));
+    assert_eq!(oversized.cursor, Some(json!({"claim_count": null})));
     Ok(())
 }
 
