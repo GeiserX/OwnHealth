@@ -647,6 +647,21 @@ impl Tree {
             .collect()
     }
 
+    fn parent_siblings(&self, sides: &[(usize, bool)]) -> Vec<(usize, bool)> {
+        let mut siblings = Vec::new();
+        let mut seen = BTreeSet::new();
+        // Keep the first occurrence so a relative on both sides keeps the same relationship code.
+        for &(p, paternal) in sides {
+            for &sibling in self.full_siblings(p).union(&self.half_siblings(p)) {
+                let pair = (sibling, paternal);
+                if seen.insert(pair) {
+                    siblings.push(pair);
+                }
+            }
+        }
+        siblings
+    }
+
     fn sex(&self, i: usize) -> &'static str {
         self.people.get(i).map_or("unknown", |p| p.sex)
     }
@@ -715,17 +730,14 @@ impl Tree {
                 add(g, by_sex(g, "GRNDSON", "GRNDDAU", None));
             }
         }
-        let mut aunts: Vec<(usize, bool)> = Vec::new();
-        for &(p, paternal) in &sides {
-            for a in self.full_siblings(p).union(&self.half_siblings(p)) {
-                let code = if paternal {
-                    by_sex(*a, "PUNCLE", "PAUNT", None)
-                } else {
-                    by_sex(*a, "MUNCLE", "MAUNT", None)
-                };
-                add(*a, code);
-                aunts.push((*a, paternal));
-            }
+        let aunts = self.parent_siblings(&sides);
+        for &(a, paternal) in &aunts {
+            let code = if paternal {
+                by_sex(a, "PUNCLE", "PAUNT", None)
+            } else {
+                by_sex(a, "MUNCLE", "MAUNT", None)
+            };
+            add(a, code);
         }
         for s in full.union(&half) {
             for c in self.children_of(*s) {
@@ -1058,6 +1070,40 @@ mod tests {
         assert_eq!(t.people[4].born_year, Some(1927));
         // Pablo, adopted (PEDI adopted), is not a sibling by birth
         assert!(!t.relatives(alex).iter().any(|(who, _)| *who == 8));
+    }
+
+    #[test]
+    fn parent_siblings_stay_unique_per_side_and_keep_relationship_precedence() {
+        use std::fmt::Write as _;
+
+        let mut file = String::from("0 HEAD\n1 GEDC\n2 VERS 7.0\n");
+        for (i, sex) in ["U", "M", "M", "F", "F", "U"].into_iter().enumerate() {
+            writeln!(file, "0 @I{i}@ INDI\n1 SEX {sex}").unwrap();
+        }
+        file.push_str(concat!(
+            "0 @F0@ FAM\n1 CHIL @I1@\n1 CHIL @I2@\n1 CHIL @I3@\n1 CHIL @I4@\n",
+            "0 @F1@ FAM\n1 HUSB @I1@\n1 WIFE @I3@\n1 CHIL @I0@\n",
+            "0 @F2@ FAM\n1 HUSB @I2@\n1 CHIL @I0@\n",
+            "0 @F3@ FAM\n1 WIFE @I4@\n1 CHIL @I5@\n0 TRLR\n",
+        ));
+        let tree = parse(file.as_bytes()).expect("small family tree parses");
+        let relatives = tree.parent_siblings(&[(1, true), (2, true), (3, false)]);
+        assert_eq!(
+            relatives,
+            [
+                (2, true),
+                (3, true),
+                (4, true),
+                (1, true),
+                (1, false),
+                (2, false),
+                (4, false)
+            ]
+        );
+        assert_eq!(
+            tree.relatives(0),
+            [(1, "FTH"), (2, "FTH"), (3, "MTH"), (4, "PAUNT"), (5, "PCOUSN")]
+        );
     }
 
     #[test]
