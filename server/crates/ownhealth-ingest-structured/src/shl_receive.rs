@@ -636,12 +636,13 @@ impl Opened {
     }
 }
 
-/// What a plaintext says it is when nothing else does.
+/// What a plaintext says it is when nothing else does. Content we do not recognise is still given a
+/// type, so a retry that sends the file back skips it instead of refusing the link as held.
 fn sniff(plaintext: &[u8]) -> &'static str {
     match serde_json::from_slice::<Value>(plaintext) {
         Ok(v) if v.get("verifiableCredential").is_some() => SMART_HEALTH_CARD,
         Ok(v) if v.get("resourceType").is_some() => FHIR,
-        _ => "",
+        _ => "application/octet-stream",
     }
 }
 

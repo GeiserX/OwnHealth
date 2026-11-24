@@ -514,10 +514,13 @@ mod mapped {
             Some("application/smart-health-card"),
             true,
         )?;
+        // untyped, no cty, and content we do not recognise: it is skipped, never a reason to refuse
+        let odd_file = jose::encrypt(&KEY, b"a note the portal attached", None, true)?;
         let m = Manifest {
             files: json!([
                 {"contentType": "", "embedded": card_file},
-                {"contentType": "application/fhir+json", "embedded": fhir_file("Rivera", "Alex", "1979-05-14")}
+                {"contentType": "application/fhir+json", "embedded": fhir_file("Rivera", "Alex", "1979-05-14")},
+                {"contentType": "", "embedded": odd_file}
             ]),
             jwks: Some(jwks),
             ..Manifest::default()
@@ -541,7 +544,8 @@ mod mapped {
             json!([
                 {"sha": sha_of(&card_file), "content_type": "application/smart-health-card"},
                 {"sha": sha_of(m.files[1]["embedded"].as_str().unwrap_or_default()),
-                    "content_type": "application/fhir+json"}
+                    "content_type": "application/fhir+json"},
+                {"sha": sha_of(&odd_file), "content_type": "application/octet-stream"}
             ]),
             "{v}"
         );
@@ -570,6 +574,11 @@ mod mapped {
         let (s, v) = send(&a, "alex", &fields).await?;
         assert_eq!((s, v["status"].clone()), (StatusCode::OK, json!("imported")), "{v}");
         assert_eq!(v["documents"].as_array().map(Vec::len), Some(2), "{v}");
+        assert_eq!(
+            v["not_imported"],
+            json!([{"content_type": "application/octet-stream", "reason": "unknown_type"}]),
+            "{v}"
+        );
         assert_eq!(m.hits.load(Ordering::SeqCst), 1, "the link was fetched again");
         Ok(())
     }
