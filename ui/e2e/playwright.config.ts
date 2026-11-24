@@ -6,7 +6,10 @@
 // SMART Health Links viewer, which shl-viewer.sh builds once (git and npm, a few minutes) and serves.
 // The connections checks also start fake-vendor.mjs, a fake SMART vendor on loopback, and seed rows
 // with psql into the database serve.sh creates: its name is picked here, so the workers know it too.
+// The imaging checks open a study through fake-orthanc.mjs, a fake Orthanc that serve.sh points the
+// server at (imaging on), with a password picked here for both.
 import { defineConfig, devices } from '@playwright/test';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 
 const port = Number(process.env.OWNHEALTH_E2E_PORT ?? 8190);
@@ -14,8 +17,12 @@ const viewerPort = Number(process.env.OWNHEALTH_E2E_VIEWER_PORT ?? port + 1);
 const baseURL = `http://127.0.0.1:${port}`;
 const fakePort = Number(process.env.OWNHEALTH_E2E_FAKE_PORT ?? port + 1000);
 process.env.OWNHEALTH_E2E_SECRETS_KEY ??= btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
+const orthancPort = Number(process.env.OWNHEALTH_E2E_ORTHANC_PORT ?? port + 2000);
 process.env.OWNHEALTH_E2E_PORT = String(port);
 process.env.OWNHEALTH_E2E_FAKE_PORT = String(fakePort);
+process.env.OWNHEALTH_E2E_ORTHANC_PORT = String(orthancPort);
+// the workers load this file again and inherit the runner's environment, so they keep this password
+process.env.OWNHEALTH_E2E_ORTHANC_PASSWORD ??= randomBytes(16).toString('hex');
 process.env.OWNHEALTH_E2E_VIEWER_PORT ??= String(viewerPort);
 // One database name for the server and the tests (shl.spec.ts ends a link's life in it, the
 // connections checks seed rows with psql). The workers load this file again and inherit the
@@ -44,9 +51,24 @@ export default defineConfig({
 			stderr: 'pipe'
 		},
 		{
+			command: 'node fake-orthanc.mjs',
+			url: `http://127.0.0.1:${orthancPort}/healthz`,
+			env: { OWNHEALTH_E2E_ORTHANC_PORT: String(orthancPort), OWNHEALTH_E2E_ORTHANC_PASSWORD: process.env.OWNHEALTH_E2E_ORTHANC_PASSWORD },
+			reuseExistingServer: false,
+			timeout: 30_000,
+			stdout: 'ignore',
+			stderr: 'pipe'
+		},
+		{
 			command: 'bash serve.sh',
 			url: `${baseURL}/readyz`,
-			env: { OWNHEALTH_E2E_PORT: String(port), OWNHEALTH_E2E_DB: process.env.OWNHEALTH_E2E_DB, OWNHEALTH_E2E_ANCHOR_DIR: process.env.OWNHEALTH_E2E_ANCHOR_DIR },
+			env: {
+				OWNHEALTH_E2E_PORT: String(port),
+				OWNHEALTH_E2E_DB: process.env.OWNHEALTH_E2E_DB,
+				OWNHEALTH_E2E_ANCHOR_DIR: process.env.OWNHEALTH_E2E_ANCHOR_DIR,
+				OWNHEALTH_E2E_ORTHANC_PORT: String(orthancPort),
+				OWNHEALTH_E2E_ORTHANC_PASSWORD: process.env.OWNHEALTH_E2E_ORTHANC_PASSWORD
+			},
 			reuseExistingServer: false,
 			timeout: 120_000,
 			gracefulShutdown: { signal: 'SIGTERM', timeout: 10_000 },

@@ -4,7 +4,8 @@
 # seeded with the synthetic demo household, serving the UI build from server/static. The data folder,
 # and the database and the anchor folder when this run created them, are dropped on exit.
 # OWNHEALTH_E2E_DB names the database (the tests seed rows into it); connector requests may reach a
-# fake vendor on loopback (OWNHEALTH_DEV_CONNECTOR_LOOPBACK).
+# fake vendor on loopback (OWNHEALTH_DEV_CONNECTOR_LOOPBACK); OWNHEALTH_E2E_ORTHANC_PORT turns imaging
+# on against the fake Orthanc.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -51,6 +52,13 @@ export OWNHEALTH_SHARE_URL="http://127.0.0.1:$port"
 export OWNHEALTH_SECRET_KEY="$(openssl rand -hex 48)"
 export OWNHEALTH_SECRETS_KEY="${OWNHEALTH_E2E_SECRETS_KEY:-$(openssl rand -base64 32)}" # seals the connectors' refresh tokens
 export OWNHEALTH_DEV_CONNECTOR_LOOPBACK=1 # debug build with dev auth only: the fake vendor on loopback
+# imaging on, against fake-orthanc.mjs, when the config names its port (imaging.spec.ts)
+if [ -n "${OWNHEALTH_E2E_ORTHANC_PORT:-}" ]; then
+  export OWNHEALTH_ORTHANC_URL="http://127.0.0.1:$OWNHEALTH_E2E_ORTHANC_PORT"
+  # checked on its own, so the assignment below holds no text a secret scanner reads as a password
+  [ -n "$OWNHEALTH_E2E_ORTHANC_PASSWORD" ] || { echo "the config sets OWNHEALTH_E2E_ORTHANC_PASSWORD with the port" >&2; exit 1; }
+  export OWNHEALTH_ORTHANC_PASSWORD="$OWNHEALTH_E2E_ORTHANC_PASSWORD"
+fi
 export RUST_LOG="${RUST_LOG:-warn}" # the access log stays out of the test output; errors still show
 
 "$bin" serve &

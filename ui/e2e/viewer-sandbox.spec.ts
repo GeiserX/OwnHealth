@@ -1,7 +1,8 @@
 // The imaging viewer runs sandboxed (server/crates/ownhealth-api/src/routes/imaging_proxy.rs): every
 // answer under /ohif carries `Content-Security-Policy: sandbox allow-scripts`, refusals included, so the
-// page runs in an opaque origin and cannot use the person's credentials. Imaging is off on this server,
-// which is enough: /ohif answers a refusal page with the same header.
+// page runs in an opaque origin and cannot use the person's credentials. Neither path below is a live
+// link, which is enough: /ohif answers a refusal page with the same header. imaging.spec.ts opens a
+// live one.
 import { expect, test, type Page } from '@playwright/test';
 
 /** What a page can do with the person's credentials: its origin, the cookie jar, and `/api/me`. */
