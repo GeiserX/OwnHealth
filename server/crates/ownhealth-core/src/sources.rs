@@ -16,7 +16,7 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, Postgres, Transaction};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -51,7 +51,8 @@ pub const STALE_INTERVALS: i32 = 3;
 pub const TOKEN_PREFIX: &str = "oh_ing_";
 
 const COLS: &str = "id, household_id, profile_id, kind, label, config, secret_id, token_prefix, enabled, poll_seconds, \
-    cursor, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, created_by, created_at";
+    cursor, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, \
+    created_by, created_at, oauth_grant_id";
 
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 pub struct Source {
@@ -73,6 +74,9 @@ pub struct Source {
     pub consecutive_failures: i32,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
+    /// The grant in effect when this source snapshot was loaded.
+    #[serde(skip_serializing)]
+    pub oauth_grant_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,7 +147,12 @@ pub async fn create_source(conn: &mut PgConnection, s: &NewSource<'_>) -> Result
 }
 
 pub async fn get_source(conn: &mut PgConnection, id: Uuid) -> Result<Option<Source>> {
-    let sql = format!("select {COLS} from source where id = $1");
+    query_source(conn, id, false).await
+}
+
+async fn query_source(conn: &mut PgConnection, id: Uuid, for_update: bool) -> Result<Option<Source>> {
+    let lock = if for_update { " for update" } else { "" };
+    let sql = format!("select {COLS} from source where id = $1{lock}");
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(conn)
@@ -305,25 +314,23 @@ pub struct SourceRun {
     pub skipped: Value,
 }
 
-/// Open a run (`trigger`: poll | push | manual) and stamp `last_run_at`.
+/// Open a run (poll, push or manual), capturing the grant that owns it and stamping last_run_at.
 pub async fn begin_run(conn: &mut PgConnection, source_id: Uuid, trigger: &str, job_id: Option<i64>) -> Result<i64> {
-    let id: i64 =
-        sqlx::query_scalar("insert into source_run (source_id, trigger, job_id) values ($1, $2, $3) returning id")
-            .bind(source_id)
-            .bind(trigger)
-            .bind(job_id)
-            .fetch_one(&mut *conn)
-            .await?;
-    sqlx::query("update source set last_run_at = now() where id = $1")
-        .bind(source_id)
-        .execute(conn)
-        .await?;
-    Ok(id)
+    Ok(sqlx::query_scalar(
+        "with active as (update source set last_run_at = now() where id = $1 returning oauth_grant_id) \
+         insert into source_run (source_id, trigger, job_id, oauth_grant_id) \
+         values ($1, $2, $3, (select oauth_grant_id from active)) returning id",
+    )
+    .bind(source_id)
+    .bind(trigger)
+    .bind(job_id)
+    .fetch_one(conn)
+    .await?)
 }
 
 /// Close a run with what it did, or with the error that stopped it (type and message only, cut at
-/// 500 characters). Updates the source's health columns. A run with problems where something still
-/// arrived is `partial` and counts as a success for "last successful sync"; a run where every item it
+/// 500 characters). Updates the source's health and cursor only if the grant still matches.
+/// A run with problems where something still arrived is `partial` and counts as a success for "last successful sync"; a run where every item it
 /// saw failed is an `error` (nothing arrived, and the cursor stays so the items are retried).
 pub async fn finish_run(
     conn: &mut PgConnection,
@@ -347,10 +354,10 @@ pub async fn finish_run(
     };
     let d = RunOutcome::default();
     let o = outcome.unwrap_or(&d);
-    let source_id: Uuid = sqlx::query_scalar(
+    let (source_id, grant_id): (Uuid, Option<Uuid>) = sqlx::query_as(
         "update source_run set finished_at = now(), status = $2, items_seen = $3, items_new = $4, \
          items_duplicate = $5, items_quarantined = $6, errors = $7, error = $8, skipped = $9 where id = $1 \
-         returning source_id",
+         returning source_id, oauth_grant_id",
     )
     .bind(run_id)
     .bind(status)
@@ -366,19 +373,21 @@ pub async fn finish_run(
     if let Some(e) = &error {
         sqlx::query(
             "update source set last_error_at = now(), last_error = $2, consecutive_failures = consecutive_failures + 1 \
-             where id = $1",
+             where id = $1 and oauth_grant_id is not distinct from $3",
         )
         .bind(source_id)
         .bind(e)
+        .bind(grant_id)
         .execute(conn)
         .await?;
     } else {
         sqlx::query(
             "update source set last_success_at = now(), consecutive_failures = 0, cursor = coalesce($2, cursor) \
-             where id = $1",
+             where id = $1 and oauth_grant_id is not distinct from $3",
         )
         .bind(source_id)
         .bind(&o.cursor)
+        .bind(grant_id)
         .execute(conn)
         .await?;
     }
@@ -414,7 +423,7 @@ pub struct SourceHealth {
     pub consecutive_failures: i32,
     /// Enabled, polled, and no success within STALE_INTERVALS poll intervals (or never).
     pub stale: bool,
-    /// The newest finished run: `ok`, `partial` or `error`; none before the first run ends.
+    /// The newest finished run of the current grant: `ok`, `partial` or `error`; none before the first run ends.
     pub last_run_status: Option<String>,
     /// How many problems that run had, and the first one as `code: message` (no content), or the
     /// error that stopped it.
@@ -461,7 +470,8 @@ pub async fn source_health(conn: &mut PgConnection, household_id: Uuid) -> Resul
            and g.profile_id is not distinct from s.profile_id) as open_gaps, \
          s.config -> 'endpoints' ->> 'issuer' as server \
          from source s left join lateral (select status, errors, error from source_run \
-           where source_id = s.id and finished_at is not null order by started_at desc, id desc limit 1) r on true \
+           where source_id = s.id and oauth_grant_id is not distinct from s.oauth_grant_id \
+           and finished_at is not null order by started_at desc, id desc limit 1) r on true \
          where s.household_id = $1 order by s.kind, s.label",
     )
     .bind(household_id)
@@ -527,8 +537,9 @@ fn polled_kinds() -> Vec<String> {
 /// down does not fill the queue with dead jobs.
 async fn poll_job(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     let source_id = job.uuid("source_id")?;
-    let mut conn = ctx.pool.acquire().await?;
-    let Some(source) = get_source(&mut conn, source_id).await? else {
+    // Keep the source snapshot and the run's grant together if a reconnect lands here.
+    let mut tx = ctx.pool.begin().await?;
+    let Some(source) = query_source(&mut tx, source_id, true).await? else {
         return Ok(Some(json!({"skipped": "unknown_source"})));
     };
     if !source.enabled {
@@ -536,8 +547,8 @@ async fn poll_job(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     }
     let poller = poller_for(&source.kind)
         .ok_or_else(|| JobError::permanent(format!("no poller for source kind {}", source.kind)))?;
-    let run_id = begin_run(&mut conn, source_id, "poll", Some(job.id)).await?;
-    drop(conn);
+    let run_id = begin_run(&mut tx, source_id, "poll", Some(job.id)).await?;
+    tx.commit().await?;
     let result = poller(ctx.clone(), source).await;
     let mut conn = ctx.pool.acquire().await?;
     match &result {
@@ -592,6 +603,38 @@ pub async fn enqueue_poll(conn: &mut PgConnection, source_id: Uuid) -> Result<Op
         EnqueueOptions::dedupe(&key),
     )
     .await?)
+}
+
+/// Queue the first pull of a grant in the same transaction that saves the grant. A queued poll
+/// reads the new grant. If the poll is already running, move its dedupe key aside and queue one
+/// successor under the original key. The worker waits for the previous job before claiming it.
+pub async fn enqueue_grant_poll(tx: &mut Transaction<'_, Postgres>, source_id: Uuid) -> Result<()> {
+    let key = format!("{POLL_JOB}:{source_id}");
+    loop {
+        if enqueue_poll(tx, source_id).await?.is_some() {
+            return Ok(());
+        }
+        let active: Option<(i64, bool)> = sqlx::query_as(
+            "select id, state = 'running' from job \
+             where dedupe_key = $1 and state in ('queued', 'running') for update",
+        )
+        .bind(&key)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some((job_id, running)) = active else {
+            // The existing job finished before we locked it. Try the now-free key again.
+            continue;
+        };
+        if running {
+            sqlx::query("update job set dedupe_key = $2 where id = $1")
+                .bind(job_id)
+                .bind(format!("{key}{}", jobs::PREVIOUS_POLL_SUFFIX))
+                .execute(&mut **tx)
+                .await?;
+            enqueue_poll(tx, source_id).await?;
+        }
+        return Ok(());
+    }
 }
 
 /// One scheduler pass: `add_default_sources`, `schedule_due`, then `sweep_link_files`, so a sweep

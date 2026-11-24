@@ -246,7 +246,15 @@ fn body_error(host: &str, e: reqwest::Error) -> NetError {
 
 /// GET `url` under `egress`, with extra request headers (a token for the person's own service).
 pub async fn get(url: &str, egress: &Egress, headers: &[(&str, &str)]) -> Result<Fetched, NetError> {
-    let (resp, host) = send(reqwest::Method::GET, url, egress, headers, None).await?;
+    get_counted(url, egress, headers).await.map_err(|(err, _)| err)
+}
+
+/// GET with the number of body bytes received before an incomplete response. A failure before
+/// reading the body, including an oversized Content-Length rejected by the cap, reports zero.
+pub async fn get_counted(url: &str, egress: &Egress, headers: &[(&str, &str)]) -> Result<Fetched, (NetError, usize)> {
+    let (resp, host) = send(reqwest::Method::GET, url, egress, headers, None)
+        .await
+        .map_err(|err| (err, 0))?;
     read(resp, &host, egress).await
 }
 
@@ -263,7 +271,7 @@ pub async fn post_form(
         .finish();
     let body = Some(("application/x-www-form-urlencoded", body.into_bytes()));
     let (resp, host) = send(reqwest::Method::POST, url, egress, headers, body).await?;
-    read(resp, &host, egress).await
+    read(resp, &host, egress).await.map_err(|(err, _)| err)
 }
 
 /// POST `body` as `application/json` under `egress` (an SHL manifest request).
@@ -275,20 +283,21 @@ pub async fn post_json(
 ) -> Result<Fetched, NetError> {
     let body = Some(("application/json", body.to_string().into_bytes()));
     let (resp, host) = send(reqwest::Method::POST, url, egress, headers, body).await?;
-    read(resp, &host, egress).await
+    read(resp, &host, egress).await.map_err(|(err, _)| err)
 }
 
 /// Read a response into a [`Fetched`], cutting the body at `egress.max_bytes`.
-async fn read(mut resp: reqwest::Response, host: &str, egress: &Egress) -> Result<Fetched, NetError> {
+async fn read(mut resp: reqwest::Response, host: &str, egress: &Egress) -> Result<Fetched, (NetError, usize)> {
     let header =
         |name: reqwest::header::HeaderName| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(String::from);
     let content_type = header(reqwest::header::CONTENT_TYPE);
     let cache_control = header(reqwest::header::CACHE_CONTROL);
     let status = resp.status().as_u16();
     let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| body_error(host, e))? {
-        if body.len() + chunk.len() > egress.max_bytes {
-            return Err(NetError::TooLarge(egress.max_bytes));
+    while let Some(chunk) = resp.chunk().await.map_err(|err| (body_error(host, err), body.len()))? {
+        let bytes_read = body.len() + chunk.len();
+        if bytes_read > egress.max_bytes {
+            return Err((NetError::TooLarge(egress.max_bytes), bytes_read));
         }
         body.extend_from_slice(&chunk);
     }
