@@ -656,3 +656,168 @@ async fn a_damaged_card_in_a_link_stops_the_import_with_slice_22s_reason() -> R 
     );
     Ok(())
 }
+
+// --------------------------------------------- several files, limits, types ----
+
+/// A bundle with one Patient and one immunization on `on`.
+fn bundle_for(family: &str, given: &str, birth: &str, on: &str) -> Vec<u8> {
+    json!({"resourceType": "Bundle", "type": "collection", "entry": [
+        {"fullUrl": "resource:0", "resource": {"resourceType": "Patient",
+            "name": [{"family": family, "given": [given]}], "birthDate": birth}},
+        {"fullUrl": "resource:1", "resource": {"resourceType": "Immunization", "status": "completed",
+            "vaccineCode": {"coding": [{"system": "http://hl7.org/fhir/sid/cvx", "code": "207"}]},
+            "patient": {"reference": "resource:0"}, "occurrenceDateTime": on}}
+    ]})
+    .to_string()
+    .into_bytes()
+}
+
+/// An opened FHIR file, as `open` hands it to `store`; `received` stands for its stored sha.
+fn opened_fhir(plaintext: Vec<u8>, received: char) -> Opened {
+    Opened::Fhir {
+        held: Held {
+            sha: received.to_string().repeat(64),
+            content_type: shl::FHIR.into(),
+        },
+        plaintext,
+    }
+}
+
+#[tokio::test]
+async fn a_link_with_a_file_for_someone_else_reports_the_weakest_identity_of_its_files() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let profile = alex(&mut tx).await?;
+    let link = link(&format!("{SHL}/m"), None)?;
+    // alex's file first, then one that names Carmen Ortega: the link as a whole is a mismatch
+    let opened = [
+        opened_fhir(bundle_for("Rivera", "Alex", "1979-05-14", "2026-03-02"), 'a'),
+        opened_fhir(bundle_for("Ortega", "Carmen", "1955-01-30", "2025-10-10"), 'b'),
+    ];
+    let got = shl::store(&mut tx, &env.blobs, &profile, &link, &opened, Vec::new(), &[]).await?;
+    assert_eq!(got.documents.len(), 2);
+    assert_eq!(got.identity, "mismatch", "{got:?}");
+    // carmen's row waits in review; alex's is accepted
+    assert_eq!((got.summary.accepted, got.summary.queued), (1, 1), "{:?}", got.summary);
+    // and the other order gives the same answer
+    let again = [opened[1].clone(), opened[0].clone()];
+    let got = shl::store(&mut tx, &env.blobs, &profile, &link, &again, Vec::new(), &[]).await?;
+    assert_eq!(got.identity, "mismatch");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_same_file_through_a_second_link_keeps_the_first_links_provenance() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let profile = alex(&mut tx).await?;
+    let first = link(&format!("{SHL}/m"), None)?;
+    let second = link("https://other.labnorte.example/m", None)?;
+    let file = bundle_for("Rivera", "Alex", "1979-05-14", "2026-03-02");
+    let a = shl::store(
+        &mut tx,
+        &env.blobs,
+        &profile,
+        &first,
+        &[opened_fhir(file.clone(), 'a')],
+        Vec::new(),
+        &[],
+    )
+    .await?;
+    let b = shl::store(
+        &mut tx,
+        &env.blobs,
+        &profile,
+        &second,
+        &[opened_fhir(file, 'b')],
+        Vec::new(),
+        &[],
+    )
+    .await?;
+    assert_eq!(
+        (b.documents[0].document_id, b.documents[0].created),
+        (a.documents[0].document_id, false)
+    );
+    let (host, received, provider): (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "select flags -> 'shl' ->> 'host', flags -> 'shl' ->> 'received', provider_name from document where id = $1",
+    )
+    .bind(a.documents[0].document_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let first_sha = "a".repeat(64);
+    assert_eq!(
+        (host.as_deref(), received.as_deref(), provider.as_deref()),
+        (Some(SHL_HOST), Some(first_sha.as_str()), Some(SHL_HOST))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_link_server_that_never_answers_stops_at_the_fetch_limit() -> R {
+    let env = Env::new().await?;
+    // a server that accepts every connection and never answers
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = l.local_addr()?.port();
+    tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((s, _)) = l.accept().await {
+            open.push(s);
+        }
+    });
+    let link = link(&format!("{SHL}/m"), None)?;
+    let limit = std::time::Duration::from_millis(300);
+    let got = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        shl::fetch_within(&link, None, &env.blobs, uuid::Uuid::new_v4(), &local(port), limit),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("the fetch ran past its limit"))??;
+    assert_eq!(got, Err(Refusal::Fetch("timeout".into())));
+    Ok(())
+}
+
+/// A received file stored for the profile, as `fetch` leaves it.
+fn stored(env: &Env, profile: uuid::Uuid, file: &str, content_type: &str) -> anyhow::Result<Held> {
+    Ok(Held {
+        sha: env.blobs.put_bytes(BlobOwner::Profile(profile), file.as_bytes())?,
+        content_type: content_type.into(),
+    })
+}
+
+#[tokio::test]
+async fn a_fhir_file_that_is_not_fhir_is_refused_when_it_opens() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let profile = alex(&mut tx).await?.id;
+    let link = link(&format!("{SHL}/m"), None)?;
+    let held = stored(
+        &env,
+        profile,
+        &jwe(br#"{"hello": "world"}"#, Some(shl::FHIR)),
+        shl::FHIR,
+    )?;
+    assert_eq!(
+        shl::open(&link, &[held], &env.blobs, profile),
+        Err(Stop::Link(Refusal::NotFhir))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_manifest_content_type_wins_over_the_files_own_cty() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let profile = alex(&mut tx).await?.id;
+    let link = link(&format!("{SHL}/m"), None)?;
+    // the manifest says api access; the JWE says FHIR: the manifest's type decides
+    let held = stored(&env, profile, &fhir_jwe(), shl::API_ACCESS)?;
+    let opened = shl::open(&link, &[held], &env.blobs, profile).map_err(|s| anyhow::anyhow!("{s:?}"))?;
+    assert_eq!(
+        opened,
+        vec![Opened::Skipped {
+            content_type: shl::API_ACCESS.into(),
+            reason: "api_access"
+        }]
+    );
+    Ok(())
+}

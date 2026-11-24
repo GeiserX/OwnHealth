@@ -27,7 +27,8 @@
 //!    asked twice. Then it verifies the cards with `shc::check`.
 //! 6. [`store`] keeps everything for one profile: each FHIR file is one document on channel `shl`
 //!    whose rows go through `fhir::import_resources`; each card file goes to `shc::store`. Each
-//!    document's `flags.shl` names the link's host, label and the stored received file.
+//!    document's `flags.shl` names the host, label and stored received file of the first link it
+//!    came through; the same file received through another link later keeps that provenance.
 //!
 //! The passcode goes to the link's server in the request body and nowhere else: never into a URL,
 //! a log line, an error, a row or a blob. The key never leaves this request either.
@@ -394,11 +395,24 @@ fn routed(route: &Route, url: &str) -> (String, Egress) {
     )
 }
 
+/// Store `bytes` as a blob of `profile`. Sealing and syncing a file of up to [`MAX_BYTES`] runs on
+/// the blocking pool, off the async workers.
+async fn put_blocking(blobs: &BlobStore, profile: Uuid, bytes: Vec<u8>) -> std::result::Result<String, Error> {
+    let blobs = blobs.clone();
+    tokio::task::spawn_blocking(move || blobs.put_bytes(BlobOwner::Profile(profile), &bytes))
+        .await
+        .map_err(|e| Error::Other(e.into()))?
+        .map_err(|e| Error::Other(e.into()))
+}
+
 /// Store one received file as a blob of `profile` (bytes first).
-fn keep(blobs: &BlobStore, profile: Uuid, bytes: &[u8], content_type: &str) -> std::result::Result<Held, Error> {
-    let sha = blobs
-        .put_bytes(BlobOwner::Profile(profile), bytes)
-        .map_err(|e| Error::Other(e.into()))?;
+async fn keep(
+    blobs: &BlobStore,
+    profile: Uuid,
+    bytes: Vec<u8>,
+    content_type: &str,
+) -> std::result::Result<Held, Error> {
+    let sha = put_blocking(blobs, profile, bytes).await?;
     Ok(Held {
         sha,
         content_type: base_type(content_type),
@@ -416,11 +430,23 @@ pub async fn fetch(
     profile: Uuid,
     route: &Route,
 ) -> std::result::Result<std::result::Result<Vec<Held>, Refusal>, Error> {
+    fetch_within(link, passcode, blobs, profile, route, FETCH_LIMIT).await
+}
+
+/// [`fetch`] with the limit on the whole fetch given (a test uses a short one).
+pub async fn fetch_within(
+    link: &Link,
+    passcode: Option<&str>,
+    blobs: &BlobStore,
+    profile: Uuid,
+    route: &Route,
+    limit: Duration,
+) -> std::result::Result<std::result::Result<Vec<Held>, Refusal>, Error> {
     let passcode = passcode.filter(|p| !p.is_empty());
     if link.needs_passcode() && passcode.is_none() {
         return Ok(Err(Refusal::PasscodeNeeded));
     }
-    match tokio::time::timeout(FETCH_LIMIT, fetch_all(link, passcode, blobs, profile, route)).await {
+    match tokio::time::timeout(limit, fetch_all(link, passcode, blobs, profile, route)).await {
         Ok(got) => got,
         Err(_) => Ok(Err(Refusal::Fetch("timeout".into()))),
     }
@@ -447,7 +473,7 @@ async fn fetch_all(
         if let Some(r) = status_refusal(got.status) {
             return Ok(Err(r));
         }
-        return Ok(Ok(vec![keep(blobs, profile, &got.body, "")?]));
+        return Ok(Ok(vec![keep(blobs, profile, got.body, "").await?]));
     }
     // "SMART Health Link Manifest Request"
     let mut body = json!({"recipient": RECIPIENT});
@@ -511,7 +537,7 @@ async fn fetch_all(
         if bytes.len() > MAX_BYTES {
             return Ok(Err(Refusal::Fetch("too_large".into())));
         }
-        held.push(keep(blobs, profile, &bytes, content_type)?);
+        held.push(keep(blobs, profile, bytes, content_type).await?);
     }
     Ok(Ok(held))
 }
@@ -751,10 +777,12 @@ pub async fn store(
                 (held, got.document_id, got.created, got.summary, got.identity)
             }
         };
+        // the first link a file came through stays its provenance, as provider_name does
         let shl = json!({"host": link.host, "label": link.label, "content_type": held.content_type,
             "received": held.sha});
         sqlx::query(
-            "update document set flags = flags || jsonb_build_object('shl', cast($1 as jsonb)), \
+            "update document set flags = case when flags ? 'shl' then flags \
+             else flags || jsonb_build_object('shl', cast($1 as jsonb)) end, \
              provider_name = coalesce(provider_name, $2) where id = $3",
         )
         .bind(shl)
@@ -790,9 +818,7 @@ async fn store_fhir(
     label: &str,
     plaintext: &[u8],
 ) -> Result<(Uuid, bool, ImportSummary, String)> {
-    let sha = blobs
-        .put_bytes(BlobOwner::Profile(profile.id), plaintext)
-        .map_err(|e| Error::Other(e.into()))?;
+    let sha = put_blocking(blobs, profile.id, plaintext.to_vec()).await?;
     let doc = create_document(
         &mut *conn,
         &NewDocument {
