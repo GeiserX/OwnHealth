@@ -11,7 +11,8 @@
 	import { cgmLines, type CgmLine } from '#lib/logic/cgm_import';
 	import { fitDocId, fitHidden, fitLines } from '#lib/logic/fit_import';
 	import FitResult from './FitResult.svelte';
-	import GarminResult, { garminSummary } from './GarminResult.svelte';
+	import GarminResult from './GarminResult.svelte';
+	import { garminNothing, garminReadings, garminSummary } from '#lib/logic/garmin_import';
 
 	// ondone gets the documents the finished jobs made, in upload order; rowsOf counts a document's rows to review.
 	let {
@@ -100,6 +101,7 @@
 		if (i.attached_to) return { word: t('i2_up_attached'), cls: 'p-stale' };
 		const j = i.job_id != null ? jobs[i.job_id] : undefined;
 		if (!j) return { word: t('i2_job_queued'), cls: 'p-info' };
+		if (garminNothing(j)) return { word: t('i2_garmin_nothing'), cls: 'p-stale' };
 		return { word: t('i2_job_' + j.state), cls: j.state === 'done' ? 'p-ok' : j.state === 'failed' || j.state === 'dead' ? 'p-out' : 'p-info' };
 	}
 	// the picked files, then an empty picker, so picking the same file again is a new pick
@@ -161,7 +163,7 @@
 					</tr>
 					{#if fit}<tr><td colspan="4"><FitResult lines={fit} label={i.filename} /></td></tr>
 					{:else if fitHidden(j)}<tr><td colspan="4" class="dim" style="font-size:12px">{t('i2_fit_hidden')}</td></tr>{/if}
-					{#if garmin}<tr><td colspan="4"><GarminResult summary={garmin} /></td></tr>{/if}
+					{#if garmin}<tr><td colspan="4"><GarminResult summary={garmin} readings={garminReadings(j?.result)} /></td></tr>{/if}
 					{#if cgm}
 						<tr>
 							<td colspan="4">
