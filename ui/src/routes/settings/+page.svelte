@@ -35,7 +35,7 @@
 	import { createPasskey } from '#lib/components/pages2/webauthn';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
 	import { t } from '#lib/i18n/index.svelte';
-	import { deletedNoteKey, lastSignIn } from '#lib/logic/people';
+	import { deletedNoteKeys, lastSignIn } from '#lib/logic/people';
 	import { app, setProfile } from '#lib/state/app.svelte';
 
 	const LOCKABLE: Scope[] = ['read:labs', 'read:vitals', 'read:wearables', 'read:records', 'read:genome', 'read:genome_raw', 'read:sensitive', 'read:documents_text'];
@@ -126,17 +126,22 @@
 	let confirmSlug = $state('');
 	// The name of the profile just deleted: its card is gone, so a line above the cards says it went.
 	let deletedName = $state<string | null>(null);
-	let deletedNote = $state<'st_deleted' | 'st_deleted_pending' | 'st_deleted_keyring'>('st_deleted');
+	let deletedNotes = $state<ReturnType<typeof deletedNoteKeys>>([]);
+	// The notices sit at the top of the column and the deleted card took the focus with it: focus moves
+	// to them, which also brings them into view.
+	let deletedEl: HTMLElement | undefined = $state();
 	function removeProfile(e: SubmitEvent, slug: string) {
 		e.preventDefault();
 		const name = profileName(slug);
 		deletedName = null;
 		act(slug, async () => {
 			const r = await deleteProfile(slug);
-			deletedNote = deletedNoteKey(r.blobs_pending ?? 0, r.folders_pending ?? 0, r.keyring_pending ?? false);
+			deletedNotes = deletedNoteKeys(r.blobs_pending ?? 0, r.folders_pending ?? 0, r.keyring_pending ?? false);
 			deletedName = name;
 			deleting = null;
 			confirmSlug = '';
+			await tick();
+			deletedEl?.focus();
 			app.me = await getMe();
 			if (app.profile === slug) {
 				const own = app.me.profiles.find((p) => p.is_self) ?? app.me.profiles[0];
@@ -294,7 +299,13 @@
 	</div>
 
 	<div class="grid" style="align-content:start">
-		<div role="status">{#if deletedName}<div class="note">{tf(deletedNote, { name: deletedName })}</div>{/if}</div>
+		<div role="status" class="deleted" tabindex="-1" bind:this={deletedEl}>
+			{#if deletedName}
+				{#each deletedNotes as note (note)}
+					<div class="note">{tf(note, { name: deletedName })}</div>
+				{/each}
+			{/if}
+		</div>
 		{#each managed as p (p.id)}
 			<section class="card">
 				<h3>{p.display_name}<span class="r">{t('r_' + p.role)}{p.is_minor ? ' · ' + t('i2_minor') : ''}</span></h3>
@@ -363,6 +374,10 @@
 		display: grid;
 		gap: 6px;
 		margin-top: 6px;
+	}
+	.deleted {
+		display: grid;
+		gap: 8px;
 	}
 	@media (max-width: 1100px) {
 		.cols {

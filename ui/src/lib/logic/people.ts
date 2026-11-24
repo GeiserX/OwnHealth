@@ -67,17 +67,17 @@ export function nameTaken(name: string, profiles: { display_name: string }[]): b
 	return !!n && profiles.some((p) => p.display_name.trim().replace(/\s+/g, ' ').toLocaleLowerCase() === n);
 }
 
-/**
- * The line shown after a profile delete: files or folders still waiting for the retry are said, never hidden,
- * and a key still in keyring.json (older backups still open the files) comes first.
- */
-export function deletedNoteKey(
+type DeletedNoteKey = 'st_deleted' | 'st_deleted_pending' | 'st_deleted_keyring' | 'st_deleted_files_remaining';
+
+/** The notices after a profile delete, with the keyring warning first when both kinds of cleanup are pending. */
+export function deletedNoteKeys(
 	blobsPending: number,
 	foldersPending: number,
 	keyringPending = false
-): 'st_deleted' | 'st_deleted_pending' | 'st_deleted_keyring' {
-	if (keyringPending) return 'st_deleted_keyring';
-	return blobsPending > 0 || foldersPending > 0 ? 'st_deleted_pending' : 'st_deleted';
+): DeletedNoteKey[] {
+	const filesPending = blobsPending > 0 || foldersPending > 0;
+	if (keyringPending) return filesPending ? ['st_deleted_keyring', 'st_deleted_files_remaining'] : ['st_deleted_keyring'];
+	return [filesPending ? 'st_deleted_pending' : 'st_deleted'];
 }
 
 /** The origin of a link when it differs from the page's own (an OWNHEALTH_BASE_URL the person may not reach), else null. */

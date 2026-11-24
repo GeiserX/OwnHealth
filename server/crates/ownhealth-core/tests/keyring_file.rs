@@ -5,9 +5,10 @@
 
 use std::fs;
 
+use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::config::Settings;
 use ownhealth_core::keyfile::{self, KeyringFile};
-use ownhealth_core::keys::{Kek, Keyring, shred};
+use ownhealth_core::keys::{Dek, Kek, Keyring, shred};
 use ownhealth_core::testing::{TestDb, random_secrets_key};
 use uuid::Uuid;
 
@@ -81,6 +82,11 @@ async fn a_rewrite_keeps_every_live_key_and_drops_a_shredded_one_for_good() -> R
     tx.commit().await?;
     let ring = rewrite(&db, &settings).await?;
     assert!(!ring.profiles.contains_key(&sam) && ring.shredded.contains(&sam));
+    assert_eq!(
+        ring.shredded_keys[&sam].len(),
+        1,
+        "the tombstone names the key it closes"
+    );
     assert!(ring.profiles.contains_key(&alex) && ring.profiles.contains_key(&newer));
     let sams = stored
         .iter()
@@ -96,6 +102,7 @@ async fn a_rewrite_keeps_every_live_key_and_drops_a_shredded_one_for_good() -> R
     // rewrite, and no leftover temporary file sits beside it
     let mut old = ring.clone();
     old.shredded.remove(&sam);
+    old.shredded_keys.remove(&sam);
     old.profiles.insert(sam, sams);
     keyfile::write(&settings.keyring_path(), &old)?;
     let ring = rewrite(&db, &settings).await?;
@@ -103,7 +110,10 @@ async fn a_rewrite_keeps_every_live_key_and_drops_a_shredded_one_for_good() -> R
     let names: Vec<String> = fs::read_dir(settings.keyring_path())?
         .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect();
-    assert_eq!(names, vec![keyfile::FILE.to_string()]);
+    assert_eq!(
+        names.into_iter().collect::<std::collections::BTreeSet<_>>(),
+        [".keyring.lock".into(), keyfile::FILE.into()].into()
+    );
     Ok(())
 }
 
@@ -227,7 +237,10 @@ async fn a_rewrite_removes_a_temporary_copy_a_crash_left() -> R {
     let names: Vec<String> = fs::read_dir(settings.keyring_path())?
         .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect();
-    assert_eq!(names, vec![keyfile::FILE.to_string()]);
+    assert_eq!(
+        names.into_iter().collect::<std::collections::BTreeSet<_>>(),
+        [".keyring.lock".into(), keyfile::FILE.into()].into()
+    );
     Ok(())
 }
 
@@ -241,5 +254,192 @@ async fn a_keyring_inside_the_blob_folder_is_refused() -> R {
         "{err}"
     );
     assert!(!settings.keyring_path().exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_refused_as_a_keyring_file() -> R {
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join(keyfile::FILE);
+    assert!(
+        std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&file)
+            .status()?
+            .success()
+    );
+    assert!(keyfile::owner_writes_only(&file, false, "keyring").is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_keyring_path_with_parent_traversal_cannot_land_inside_blobs() -> R {
+    let (_db, dir, mut settings, _) = setup().await?;
+    fs::create_dir(dir.path().join("other"))?;
+    fs::create_dir(settings.blobs_path())?;
+    settings.keyring_dir = Some(dir.path().join("other/../blobs/keyring"));
+    assert!(keyfile::check_folder(&settings).is_err());
+    // a '..' after a folder that does not exist yet cannot be resolved: refused, never guessed
+    settings.keyring_dir = Some(dir.path().join("nope/../blobs/keyring"));
+    let err = keyfile::check_folder(&settings)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err.contains("'..'"), "{err}");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(settings.blobs_path(), dir.path().join("blob-alias"))?;
+        settings.keyring_dir = Some(dir.path().join("blob-alias/new/keyring"));
+        assert!(keyfile::check_folder(&settings).is_err());
+    }
+    settings.keyring_dir = Some(dir.path().join("sibling/keyring"));
+    keyfile::check_folder(&settings)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rewrite_respects_a_lock_on_the_shared_keyring() -> R {
+    use std::time::Duration;
+
+    let (db, _dir, settings, _) = setup().await?;
+    let other_db = TestDb::new().await?;
+    rewrite(&db, &settings).await?;
+    let lock = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(settings.keyring_path().join(".keyring.lock"))?;
+    lock.try_lock()?;
+    let mut rewrite = Box::pin(rewrite(&other_db, &settings));
+    let while_locked = tokio::time::timeout(Duration::from_secs(2), &mut rewrite).await;
+    drop(lock);
+    assert!(while_locked.is_err(), "rewrite bypassed the shared keyring lock");
+    tokio::time::timeout(Duration::from_secs(5), rewrite).await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_keyring_tombstone_outlives_a_live_row_from_another_database() -> R {
+    let (db, _dir, settings, kek) = setup().await?;
+    let p = Uuid::new_v4();
+    let survivor = Uuid::new_v4();
+    let keyring = Keyring::new(kek, db.url.clone());
+    for id in [p, survivor] {
+        assert!(keyring.dek(id, true)?.is_some());
+    }
+    let mut old = rewrite(&db, &settings).await?;
+    let survivor_key = old.profiles[&survivor].clone();
+    old.profiles.remove(&p);
+    old.shredded.insert(p);
+    keyfile::write(&settings.keyring_path(), &old)?;
+
+    let ring = rewrite(&db, &settings).await?;
+    assert!(ring.shredded.contains(&p));
+    assert!(!ring.profiles.contains_key(&p));
+    assert_eq!(ring.profiles[&survivor], survivor_key);
+    Ok(())
+}
+
+/// OWNHEALTH_KEYRING_DIR may name its folder through '..' (`<data>/../keyring`): the server starts with
+/// it, so a delete must be able to rewrite the keyring there too, not leave the key in the file.
+#[tokio::test]
+async fn a_keyring_folder_named_through_a_parent_directory_is_rewritten() -> R {
+    let (db, dir, mut settings, kek) = setup().await?;
+    fs::create_dir_all(dir.path().join("data"))?;
+    settings.keyring_dir = Some(dir.path().join("data/../keyring"));
+    let sam = Uuid::new_v4();
+    assert!(Keyring::new(kek, db.url.clone()).dek(sam, true)?.is_some());
+    let ring = rewrite(&db, &settings).await?;
+    assert!(ring.profiles.contains_key(&sam));
+    let mut tx = db.pool.begin().await?;
+    shred(&mut tx, sam).await?;
+    tx.commit().await?;
+    let ring = rewrite(&db, &settings).await?;
+    assert!(!ring.profiles.contains_key(&sam) && ring.shredded.contains(&sam));
+    assert_eq!(
+        keyfile::read(&dir.path().join("keyring").join(keyfile::FILE))?,
+        Some(ring)
+    );
+    Ok(())
+}
+
+async fn key_row(db: &TestDb, p: Uuid) -> anyhow::Result<Vec<u8>> {
+    Ok(
+        sqlx::query_scalar("select wrapped_dek from profile_key where profile_id = $1")
+            .bind(p)
+            .fetch_one(&db.pool)
+            .await?,
+    )
+}
+
+/// A profile with no key row (a dump from before 1.0 brought it back) takes the keyring's key for its
+/// next file: a key made instead would replace it at the next rewrite, and the newer backups are
+/// sealed under it. A key a tombstone closes is never taken: that profile gets a new key, and the
+/// rewrite publishes it when the tombstone named the deleted key.
+#[tokio::test]
+async fn a_profile_with_no_key_row_takes_the_keyrings_key_unless_a_tombstone_closes_it() -> R {
+    let (db, _dir, settings, kek) = setup().await?;
+    let (alex, sam, lucia) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (k_alex, k_sam) = (kek.wrap(alex, &Dek::generate())?, kek.wrap(sam, &Dek::generate())?);
+    let sam_id = kek.unwrap(sam, &kek.fingerprint(), &k_sam)?.archive_id();
+    let mut file = KeyringFile {
+        kek_fingerprint: Some(kek.fingerprint().to_vec()),
+        ..KeyringFile::default()
+    };
+    file.profiles.insert(alex, k_alex.clone());
+    // Sam: the file still holds the key its tombstone closes
+    file.profiles.insert(sam, k_sam.clone());
+    file.shredded.insert(sam);
+    file.shredded_keys.insert(sam, [sam_id].into());
+    // Lucia: deleted, her key closed, and back from a dump from before 1.0 with no key
+    file.shredded.insert(lucia);
+    file.shredded_keys.insert(lucia, [Dek::generate().archive_id()].into());
+    keyfile::write(&settings.keyring_path(), &file)?;
+
+    let keys = BlobStore::for_settings(&settings)?
+        .keyring()
+        .ok_or_else(|| anyhow::anyhow!("the store does not seal"))?;
+    for p in [alex, sam, lucia] {
+        assert!(keys.dek(p, true)?.is_some());
+    }
+    assert_eq!(key_row(&db, alex).await?, k_alex, "Alex did not take the keyring's key");
+    assert_ne!(key_row(&db, sam).await?, k_sam, "Sam took a key his tombstone closes");
+    let lucia_key = key_row(&db, lucia).await?;
+    let ring = rewrite(&db, &settings).await?;
+    assert_eq!(ring.profiles[&alex], k_alex);
+    assert_eq!(
+        ring.profiles.get(&lucia),
+        Some(&lucia_key),
+        "Lucia's new key was not published"
+    );
+    Ok(())
+}
+
+/// A rewrite that wrote the keyring succeeds even when the restore loss record beside the blobs does
+/// not read: the deleted key is gone from the file, so no keyring work is pending. The record stays
+/// as it is for the next rewrite.
+#[tokio::test]
+async fn a_rewrite_that_wrote_the_keyring_succeeds_when_the_loss_record_does_not_read() -> R {
+    let (db, _dir, settings, kek) = setup().await?;
+    let sam = Uuid::new_v4();
+    assert!(Keyring::new(kek.clone(), db.url.clone()).dek(sam, true)?.is_some());
+    assert!(rewrite(&db, &settings).await?.profiles.contains_key(&sam));
+    fs::create_dir_all(settings.blobs_path())?;
+    let record = settings.blobs_path().join(".restore-losses.json");
+    fs::write(&record, b"{ not json")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o600))?;
+    }
+    let mut tx = db.pool.begin().await?;
+    shred(&mut tx, sam).await?;
+    tx.commit().await?;
+    let ring = rewrite(&db, &settings).await?;
+    assert!(ring.shredded.contains(&sam) && !ring.profiles.contains_key(&sam));
+    let on_disk = keyfile::read(&keyfile::path(&settings))?.expect("the rewrite wrote the keyring");
+    assert!(on_disk.shredded.contains(&sam) && !on_disk.profiles.contains_key(&sam));
+    assert_eq!(fs::read(&record)?, b"{ not json");
     Ok(())
 }
