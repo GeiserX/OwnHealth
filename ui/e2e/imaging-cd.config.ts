@@ -7,6 +7,8 @@ export default defineConfig({
 	forbidOnly: !!process.env.CI,
 	workers: 1,
 	reporter: 'list',
+	// Failure output goes next to the regular e2e results, which git ignores.
+	outputDir: 'test-results',
 	use: {
 		...devices['Desktop Chrome'],
 		baseURL: process.env.OWNHEALTH_IMAGING_CD_URL,
