@@ -6,6 +6,11 @@
 //!
 //! pg_dump and pg_restore 17 come from PATH or OWNHEALTH_PG_BINDIR, as for tests/backup.rs.
 
+#[path = "support/verify.rs"]
+mod verify;
+
+use verify::verify_restore;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -583,7 +588,7 @@ async fn page_loads_at_once_run_one_full_check() -> R {
 async fn verify_restore_checks_the_head_in_the_manifest() -> R {
     let l = live().await?;
     let dest = l.backup("b1").await?;
-    let ok = ownhealth_ops::verify_restore(&l.settings, &dest).await?;
+    let ok = verify_restore(&l.settings, &dest).await?;
     assert_eq!(ok["ok"], true, "{ok:#}");
     assert_eq!(ok["audit_chain"]["ok"], true);
 
@@ -603,7 +608,7 @@ async fn verify_restore_checks_the_head_in_the_manifest() -> R {
         let mut m = original.clone();
         m["audit_chain"][key] = value;
         fs::write(dest.join("manifest.json"), serde_json::to_vec(&m)?)?;
-        let bad = ownhealth_ops::verify_restore(&l.settings, &dest).await?;
+        let bad = verify_restore(&l.settings, &dest).await?;
         assert_eq!(bad["ok"], false, "{key}: {bad:#}");
         assert_eq!(bad["audit_chain"]["ok"], false, "{key}");
     }
@@ -621,7 +626,7 @@ async fn an_older_manifest_without_a_head_is_not_a_failure() -> R {
         o.shift_remove("audit_chain");
     }
     fs::write(dest.join("manifest.json"), serde_json::to_vec(&m)?)?;
-    let r = ownhealth_ops::verify_restore(&l.settings, &dest).await?;
+    let r = verify_restore(&l.settings, &dest).await?;
     assert_eq!(r["ok"], true, "{r:#}");
     assert_eq!(r["audit_chain"], Value::Null);
     Ok(())

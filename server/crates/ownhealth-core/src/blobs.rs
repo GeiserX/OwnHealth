@@ -588,16 +588,7 @@ impl BlobStore {
         if let Ok(mut seen) = PLAIN_HASHED.lock() {
             seen.push((h.clone(), std::thread::current().name().unwrap_or_default().to_string()));
         }
-        let mut digest = Sha256::new();
-        let mut buf = vec![0u8; CHUNK];
-        loop {
-            let n = file.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            digest.update(&buf[..n]);
-        }
-        if hex::encode(digest.finalize()) != h {
+        if sha256_reader(&mut file)? != h {
             return Err(BlobError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "a stored file does not match its sha256: it was changed or replaced",
@@ -1365,6 +1356,89 @@ pub type RestoreLosses = BTreeMap<Uuid, BTreeSet<String>>;
 
 const RESTORE_LOSSES: &str = ".restore-losses.json";
 
+fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
+    let mut digest = Sha256::new();
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        digest.update(&buf[..n]);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+/// A fresh restore needs a store without files. A checkpointed retry may also find the
+/// loss record and complete blobs from the same archive. Empty directories carry no data.
+pub fn check_restore_target(
+    settings: &crate::config::Settings,
+    expected: &BTreeMap<&str, &str>,
+    resuming: bool,
+) -> io::Result<()> {
+    let root = settings.blobs_path();
+    match restore_files_match(&root, expected, resuming) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            let action = if resuming {
+                "contains files outside this restore or files that differ from the backup. Use the blob store for this restore"
+            } else {
+                "is not empty. Start a new restore with an empty blob store"
+            };
+            Err(io::Error::other(format!(
+                "the target blob store {} {action}",
+                root.display()
+            )))
+        }
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("cannot inspect the target blob store {}: {error}", root.display()),
+        )),
+    }
+}
+
+fn restore_files_match(root: &Path, expected: &BTreeMap<&str, &str>, resuming: bool) -> io::Result<bool> {
+    let expected_paths: BTreeMap<_, _> = expected
+        .iter()
+        .filter_map(|(key, digest)| tree_rel(key).map(|path| (path, *digest)))
+        .collect();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(dir) = directories.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if dir == root && e.kind() == io::ErrorKind::NotFound && !root.is_symlink() => return Ok(true),
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            let rel = path.strip_prefix(root).expect("entry is under the blob root");
+            let loss_record = rel == Path::new(RESTORE_LOSSES);
+            if kind.is_dir() {
+                if loss_record || expected_paths.contains_key(rel) {
+                    return Ok(false);
+                }
+                directories.push(path);
+                continue;
+            }
+            if !resuming || !kind.is_file() {
+                return Ok(false);
+            }
+            if loss_record {
+                continue;
+            }
+            let Some(&digest) = expected_paths.get(rel) else {
+                return Ok(false);
+            };
+            if sha256_reader(File::open(path)?)? != digest {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// Read the omissions accepted in this store by a restore.
 pub fn read_restore_losses(settings: &crate::config::Settings) -> io::Result<RestoreLosses> {
     let dir = settings.blobs_path();
@@ -1382,6 +1456,21 @@ pub fn read_restore_losses(settings: &crate::config::Settings) -> io::Result<Res
             format!("cannot read restore losses from {}: {e}", file.display()),
         )
     })
+}
+
+/// Record this restore's expected omissions. A matching record may already exist on retry.
+pub fn record_restore_losses(settings: &crate::config::Settings, expected: &RestoreLosses) -> io::Result<()> {
+    let stored = read_restore_losses(settings)?;
+    if !stored.is_empty() && stored != *expected {
+        return Err(io::Error::other(format!(
+            "the loss record in the target blob store {} differs from the losses for this restore",
+            settings.blobs_path().display()
+        )));
+    }
+    if stored != *expected {
+        write_restore_losses(settings, expected)?;
+    }
+    Ok(())
 }
 
 fn check_loss_dir(dir: &Path) -> io::Result<()> {
