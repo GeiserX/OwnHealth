@@ -178,7 +178,7 @@ mod tests {
             }
         }
         // a comment may hold the end signature itself
-        zip.set_comment("archive comment PK\x05\x06");
+        zip.set_comment("archive comment PK\x05\x06")?;
         let archive = zip.finish()?;
         assert_eq!(open_with_limits(archive.clone(), 3, 1024)?.len(), 3);
         for (entries, bytes) in [(2, 1024), (3, 100)] {
