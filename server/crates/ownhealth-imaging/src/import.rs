@@ -125,13 +125,13 @@ pub struct StudyScan {
     pub series: BTreeMap<String, usize>,
     sops: BTreeSet<(String, String)>,
     /// The ZIP entries of the study, in ZIP order.
-    entries: Vec<Instance>,
+    pub(crate) entries: Vec<Instance>,
 }
 
 #[derive(Debug, Clone)]
-struct Instance {
-    index: usize,
-    sop_uid: String,
+pub(crate) struct Instance {
+    pub(crate) index: usize,
+    pub(crate) sop_uid: String,
     expected_id: Option<String>,
     report: bool,
 }
@@ -378,7 +378,7 @@ pub(crate) fn job(ctx: JobContext, job: Job) -> BoxFuture<'static, HandlerResult
     Box::pin(run(ctx, job))
 }
 
-fn retry(e: OrthancError) -> JobError {
+pub(crate) fn retry(e: OrthancError) -> JobError {
     JobError::typed("OrthancError", e.0)
 }
 
@@ -487,19 +487,19 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
 }
 
 /// One ZIP directory for the job. Only blocking tasks touch the seekable reader.
-struct StudyFiles {
+pub(crate) struct StudyFiles {
     zip: Arc<Mutex<zip::ZipArchive<BlobReader>>>,
     dir: PathBuf,
 }
 
-struct Staged {
-    file: File,
-    size: u64,
+pub(crate) struct Staged {
+    pub(crate) file: File,
+    pub(crate) size: u64,
     sha256: Vec<u8>,
 }
 
 impl StudyFiles {
-    async fn open(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<(Self, Scan), JobError> {
+    pub(crate) async fn open(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<(Self, Scan), JobError> {
         let blobs = blobs.clone();
         let sha = sha.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -524,7 +524,7 @@ impl StudyFiles {
         .map_err(|e| JobError::retry(format!("the zip reader stopped: {e}")))?
     }
 
-    async fn stage_instance(&self, index: usize) -> Result<Option<Staged>, JobError> {
+    pub(crate) async fn stage_instance(&self, index: usize) -> Result<Option<Staged>, JobError> {
         let zip = Arc::clone(&self.zip);
         let dir = self.dir.clone();
         tokio::task::spawn_blocking(move || stage(&zip, &dir, index))
@@ -764,7 +764,7 @@ struct PendingPost {
 /// Under the UID lock, take back every newly written instance of an unverified attempt. A reply
 /// that named the new ID is authoritative. For a lost reply, look up the original SOP and exclude
 /// every ID that already existed before this POST. An unexpected ID needs byte-for-byte evidence.
-async fn recover_posts(
+pub(crate) async fn recover_posts(
     conn: &mut PgConnection,
     journal: &mut Option<PgConnection>,
     pool: &PgPool,
@@ -1056,6 +1056,14 @@ async fn import_study(
         }
         Some(_) => {}
     }
+    // This upload holds the study now: its removal is refused, and a rebuild replays it.
+    sqlx::query(
+        "insert into imaging_import_study (import_id, study_instance_uid) values ($1, $2) on conflict do nothing",
+    )
+    .bind(import.id)
+    .bind(uid)
+    .execute(&mut *tx)
+    .await?;
     if added && keep_until_commit {
         sqlx::query("delete from imaging_import_post where study_instance_uid = $1 and import_id = $2")
             .bind(uid)
@@ -1117,14 +1125,16 @@ async fn record_reports(
         .map_err(|e| JobError::retry(format!("storing a report stopped: {e}")))??;
         if let Some((sha, size)) = stored {
             let id = record_report(conn, import, profile, study, &sha, size).await?;
-            sqlx::query("insert into imaging_import_report (study_instance_uid, sop_instance_uid) values ($1, $2)")
-                .bind(uid)
-                .bind(sop)
-                .execute(&mut *conn)
-                .await?;
             first.get_or_insert(id);
             reports += 1;
         }
+        // Filed or not (a report whose PDF does not extract stays unfiled), the SOP is handled: a
+        // replay does not download it again.
+        sqlx::query("insert into imaging_import_report (study_instance_uid, sop_instance_uid) values ($1, $2)")
+            .bind(uid)
+            .bind(sop)
+            .execute(&mut *conn)
+            .await?;
     }
     Ok((first, reports))
 }
@@ -1365,11 +1375,18 @@ pub async fn accept(
     ) else {
         return Err(Error::Review("this item names no upload and study".into()));
     };
-    let filename: Option<String> = sqlx::query_scalar("select filename from imaging_import where id = $1")
-        .bind(import_id)
-        .fetch_optional(&mut *conn)
-        .await?
-        .flatten();
+    // A shared lock: the removal of the upload (crate::remove) waits for this accept, or this accept
+    // sees the upload gone.
+    let upload: Option<Option<String>> =
+        sqlx::query_scalar("select filename from imaging_import where id = $1 for share")
+            .bind(import_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(filename) = upload else {
+        return Err(Error::Review(
+            "This upload was removed. Upload the disc again to add this study.".into(),
+        ));
+    };
     let payload = json!({
         "import_id": import_id.to_string(),
         "profile_id": profile_id.to_string(),

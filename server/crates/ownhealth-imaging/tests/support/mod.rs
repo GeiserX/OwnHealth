@@ -364,6 +364,8 @@ pub struct FakeOrthanc {
     pub refused_sop: Arc<Mutex<Option<String>>>,
     pub lookup_response: Arc<Mutex<Option<Value>>>,
     pub after_store: Arc<Mutex<Option<AfterStore>>>,
+    /// While set, every request answers 503, as a stopped Orthanc behind its proxy does.
+    pub down: Arc<AtomicBool>,
 }
 
 fn json_answer(status: StatusCode, v: Value) -> Response {
@@ -396,6 +398,7 @@ impl FakeOrthanc {
             refused_sop: Arc::default(),
             lookup_response: Arc::default(),
             after_store: Arc::default(),
+            down: Arc::default(),
         };
         let me = fake.clone();
         let app = Router::new().fallback(move |req: Request| {
@@ -449,6 +452,35 @@ impl FakeOrthanc {
             .collect()
     }
 
+    /// Every study, series and instance gone, as an Orthanc that starts on an empty volume (a restore
+    /// on a new box: Orthanc's storage is not in the backup).
+    pub fn wipe(&self) {
+        if let Ok(mut h) = self.held.lock() {
+            h.studies.clear();
+            h.instances.clear();
+            h.instance_files.clear();
+        }
+    }
+
+    /// The SeriesInstanceUIDs Orthanc holds under study `uid`.
+    pub fn series_under(&self, uid: &str) -> BTreeSet<String> {
+        let held = self.held();
+        held.instances
+            .values()
+            .filter(|(study, _)| held.studies.get(study).is_some_and(|(u, _)| u == uid))
+            .map(|(_, series)| series.clone())
+            .collect()
+    }
+
+    /// How many instances Orthanc holds under study `uid`.
+    pub fn instances_under(&self, uid: &str) -> usize {
+        let held = self.held();
+        held.instances
+            .values()
+            .filter(|(study, _)| held.studies.get(study).is_some_and(|(u, _)| u == uid))
+            .count()
+    }
+
     /// A study Orthanc holds already, as another writer left it.
     pub fn hold_study(&self, uid: &str, patient: &str) {
         if let Ok(mut h) = self.held.lock() {
@@ -469,10 +501,14 @@ impl FakeOrthanc {
     }
 
     async fn answer(&self, req: Request) -> Response {
+        if self.down.load(Ordering::SeqCst) {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
         if !self.authorized(&req) {
             return StatusCode::UNAUTHORIZED.into_response();
         }
         let (method, path) = (req.method().clone(), req.uri().path().to_string());
+        let query = req.uri().query().unwrap_or_default().to_string();
         let quiet = path == "/tools/lookup" || (method == Method::GET && path.starts_with("/studies/"));
         if !quiet && let Ok(mut h) = self.held.lock() {
             h.log.push((method.to_string(), path.clone()));
@@ -551,6 +587,91 @@ impl FakeOrthanc {
                     })
                     .collect();
                 json_answer(StatusCode::OK, Value::Array(out))
+            }
+            (Method::GET, "/studies") => {
+                let param = |name: &str| {
+                    query
+                        .split('&')
+                        .find_map(|kv| kv.strip_prefix(&format!("{name}=")))
+                        .and_then(|v| v.parse::<usize>().ok())
+                };
+                let ids: Vec<String> = self
+                    .held()
+                    .studies
+                    .keys()
+                    .skip(param("since").unwrap_or_default())
+                    .take(param("limit").unwrap_or(usize::MAX))
+                    .cloned()
+                    .collect();
+                json_answer(StatusCode::OK, json!(ids))
+            }
+            (Method::GET, p) if p.starts_with("/studies/") && p.ends_with("/series") => {
+                let id = p.trim_start_matches("/studies/").trim_end_matches("/series");
+                let held = self.held();
+                let Some((uid, patient)) = held.studies.get(id) else {
+                    return StatusCode::NOT_FOUND.into_response();
+                };
+                let series: BTreeSet<&String> = held
+                    .instances
+                    .values()
+                    .filter(|(study, _)| study == id)
+                    .map(|(_, s)| s)
+                    .collect();
+                let out: Vec<Value> = series
+                    .into_iter()
+                    .map(|s| {
+                        json!({"ID": orthanc_id(&[patient, uid, s]), "ParentStudy": id,
+                               "MainDicomTags": {"SeriesInstanceUID": s,
+                                   "Modality": held.modalities.get(s).cloned().unwrap_or_default()}})
+                    })
+                    .collect();
+                json_answer(StatusCode::OK, Value::Array(out))
+            }
+            (Method::DELETE, p) if p.starts_with("/studies/") => {
+                let id = p.trim_start_matches("/studies/");
+                if let Ok(mut h) = self.held.lock() {
+                    if h.studies.remove(id).is_none() {
+                        return StatusCode::NOT_FOUND.into_response();
+                    }
+                    let gone: Vec<String> = h
+                        .instances
+                        .iter()
+                        .filter(|(_, (study, _))| study == id)
+                        .map(|(i, _)| i.clone())
+                        .collect();
+                    for i in gone {
+                        h.instances.remove(&i);
+                        h.instance_files.remove(&i);
+                    }
+                }
+                json_answer(StatusCode::OK, json!({}))
+            }
+            (Method::DELETE, p) if p.starts_with("/series/") => {
+                let id = p.trim_start_matches("/series/");
+                if let Ok(mut h) = self.held.lock() {
+                    let studies = h.studies.clone();
+                    let gone: Vec<(String, String)> = h
+                        .instances
+                        .iter()
+                        .filter(|(_, (study, series))| {
+                            studies
+                                .get(study)
+                                .is_some_and(|(uid, patient)| orthanc_id(&[patient, uid, series]) == id)
+                        })
+                        .map(|(i, (study, _))| (i.clone(), study.clone()))
+                        .collect();
+                    if gone.is_empty() {
+                        return StatusCode::NOT_FOUND.into_response();
+                    }
+                    for (i, study) in gone {
+                        h.instances.remove(&i);
+                        h.instance_files.remove(&i);
+                        if !h.instances.values().any(|(s, _)| *s == study) {
+                            h.studies.remove(&study);
+                        }
+                    }
+                }
+                json_answer(StatusCode::OK, json!({}))
             }
             (Method::GET, p) if p.starts_with("/studies/") => {
                 let id = p.trim_start_matches("/studies/");

@@ -2447,3 +2447,27 @@ async fn the_retry_counts_only_the_folders_of_its_own_delete() -> R {
     assert_eq!(failed, 0);
     Ok(())
 }
+
+/// Slice 43: a profile delete never calls Orthanc. With imaging on it queues the sweep that deletes
+/// the studies no record names any more (at once, or once Orthanc answers again).
+#[tokio::test]
+async fn deleting_a_profile_with_imaging_on_queues_the_orthanc_sweep() -> R {
+    let mut env = Env::new(true).await?;
+    let sweeps = "select count(*) from job where kind = 'imaging.sweep' and state = 'queued'";
+    let mut me = env.as_user(env.user("alex")).await?;
+    let r = me.delete("/api/profiles/alex?confirm=alex").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(env.scalar_i64(sweeps).await?, 0, "imaging off: no sweep");
+
+    env.settings.orthanc = Some(ownhealth_core::orthanc::OrthancConfig {
+        url: "http://127.0.0.1:9".into(),
+        user: "ownhealth".into(),
+        password: ownhealth_core::ids::token_hex(16),
+    });
+    env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    let mut me = env.as_user(env.user("sam")).await?;
+    let r = me.delete("/api/profiles/sam?confirm=sam").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(env.scalar_i64(sweeps).await?, 1);
+    Ok(())
+}

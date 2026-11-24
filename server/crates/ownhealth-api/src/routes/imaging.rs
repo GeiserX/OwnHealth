@@ -1,7 +1,8 @@
 //! v1.0 imaging: DICOM studies from hospital CDs and zips (slice 41).
 //!
 //! ```text
-//! POST /api/imaging/import   multipart: profile, files (one zip, or the files of a CD folder)
+//! POST   /api/imaging/import         multipart: profile, files (one zip, or the files of a CD folder)
+//! DELETE /api/imaging/imports/{id}   remove an upload none of whose studies is on the record
 //! ```
 //!
 //! One part that is a zip is kept as it is. Anything else is a folder: its parts (at most
@@ -13,17 +14,24 @@
 //! files. The app checks the `import` action on that profile before spooling any files. Imaging
 //! must be on (503 `imaging_off`). A zip of more entries than the import reads
 //! ([`MAX_ENTRIES`]) answers 413 `too_many_files` before anything is kept.
+//!
+//! An upload that went to the wrong profile holds studies that wait in review. `DELETE` removes it
+//! with its held studies and, by job, its zip (`ownhealth_imaging::remove`). It needs the `import`
+//! action and `read:records` on the caller's own grant, and refuses with 409 `upload_recorded` while a
+//! study of the upload is on the record and 409 `upload_importing` while its import is queued or
+//! running. Closing the last held study of such an upload in review removes it too.
 
 use std::path::PathBuf;
 
-use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Request, State};
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{delete, post};
 use axum::{Json, Router};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::{Error, Runtime};
 use ownhealth_imaging::import::MAX_ENTRIES;
+use ownhealth_imaging::remove::{self, Removal};
 use ownhealth_imaging::upload::{self, MAX_FOLDER_FILES, ZipRefused, zip_files, zip_folder};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,13 +43,80 @@ use crate::validate::Errors;
 
 /// The audit action of an upload.
 pub const AUDIT_ACTION: &str = "imaging.import";
+/// The audit action of an upload's removal.
+pub const REMOVE_ACTION: &str = "imaging.remove_upload";
 /// A form holds at most this many parts that are not files, each of at most 1 MiB.
 const MAX_FIELDS: usize = 1000;
 const MAX_FIELD: usize = 1024 * 1024;
 
 pub fn router() -> Router<Runtime> {
     // a CD runs to hundreds of megabytes: no body cap, as /api/imports
-    Router::new().route("/imaging/import", post(import).layer(DefaultBodyLimit::disable()))
+    Router::new()
+        .route("/imaging/import", post(import).layer(DefaultBodyLimit::disable()))
+        .route("/imaging/imports/{import_id}", delete(remove_upload))
+}
+
+fn no_upload() -> Fail {
+    Fail::Api(ApiError::new(StatusCode::NOT_FOUND, "not_found", "No such upload."))
+}
+
+/// `DELETE /api/imaging/imports/{id}`: an upload none of whose studies is on the record, with its held
+/// studies; its zip goes by job.
+async fn remove_upload(State(rt): State<Runtime>, caller: Caller, Path(import_id): Path<String>) -> R<Json<Value>> {
+    let principal = &caller.0;
+    let import_id = uuid::Uuid::parse_str(&import_id).map_err(|_| no_upload())?;
+    let mut tx = rt.pool.begin().await?;
+    let profile: Option<uuid::Uuid> = sqlx::query_scalar("select profile_id from imaging_import where id = $1")
+        .bind(import_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let profile = profile.ok_or_else(no_upload)?;
+    let perm = match caller
+        .require(&mut tx, &profile.to_string(), Some("read:records"), Some("import"))
+        .await
+    {
+        Ok(p) => p,
+        Err(e) if e.status == StatusCode::NOT_FOUND => return Err(no_upload()),
+        Err(e) => return Err(e.into()),
+    };
+    // emergency access only reads: removing held studies needs read:records on the caller's own grant
+    if !perm.own_only().has("read:records") {
+        return Err(Error::access_denied(
+            "break_glass",
+            "Emergency access only reads; removing an upload needs your own grant.",
+        )
+        .into());
+    }
+    let dismissed = match remove::remove(&mut tx, import_id, principal.user_id, true).await? {
+        Removal::Removed { dismissed } => dismissed,
+        Removal::Gone => return Err(no_upload()),
+        Removal::Recorded => {
+            return Err(Fail::Api(ApiError::new(
+                StatusCode::CONFLICT,
+                "upload_recorded",
+                "A study from this upload is on the record, so the upload stays.",
+            )));
+        }
+        Removal::Importing | Removal::Waiting => {
+            return Err(Fail::Api(ApiError::new(
+                StatusCode::CONFLICT,
+                "upload_importing",
+                "This upload is still being imported. Try again when the import ends.",
+            )));
+        }
+    };
+    let mut audit = AuditEvent::new(principal.actor_kind(), "ui", REMOVE_ACTION);
+    audit.actor_id = principal.user_id;
+    audit.token_id = principal.token_id;
+    audit.tool = Some("DELETE /api/imaging/imports".into());
+    audit.profile_id = Some(perm.profile.id);
+    audit.resource_type = Some("imaging_import".into());
+    audit.resource_ids = Some(vec![import_id.to_string()]);
+    write_audit(&mut tx, &audit).await?;
+    tx.commit().await?;
+    Ok(Json(
+        json!({"import_id": import_id, "removed": true, "dismissed": dismissed}),
+    ))
 }
 
 /// A spooled part, removed from disk when dropped.

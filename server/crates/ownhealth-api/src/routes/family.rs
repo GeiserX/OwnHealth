@@ -717,6 +717,11 @@ async fn delete_profile_now(rt: &Runtime, p: &Principal, profile_id: Uuid, slug:
     } else {
         folder::queue_forget(&mut tx, result.household_id, slug, &folders).await?
     };
+    // Orthanc knows no profiles: the sweep deletes the studies no record names now (slice 43), and
+    // finishes later when Orthanc is down.
+    if rt.settings.orthanc.is_some() {
+        ownhealth_imaging::sweep::enqueue(&mut tx).await?;
+    }
     audit(
         &mut tx,
         p,

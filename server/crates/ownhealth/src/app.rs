@@ -146,6 +146,30 @@ pub fn break_glass_sweeper(rt: &Runtime, mut stop: watch::Receiver<bool>) -> Joi
     })
 }
 
+/// With imaging on: queues an `imaging.sweep` at the start (after a restore, it finds the recorded
+/// studies Orthanc lacks and queues their rebuild) and then every hour, so Orthanc holds only what the
+/// record names (slice 43).
+pub fn imaging_sweeper(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandle<()> {
+    let rt = rt.clone();
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(ownhealth_imaging::sweep::EVERY_SECONDS));
+        loop {
+            tokio::select! {
+                _ = every.tick() => {
+                    let queued = async {
+                        let mut conn = rt.pool.acquire().await?;
+                        ownhealth_imaging::sweep::enqueue(&mut conn).await
+                    };
+                    if let Err(e) = queued.await {
+                        tracing::warn!(error = %e, "could not queue the imaging sweep");
+                    }
+                }
+                _ = stop.changed() => return,
+            }
+        }
+    })
+}
+
 /// Refuse to go on when OWNHEALTH_SECRETS_KEY does not open the profile keys the database holds,
 /// before anything listens, runs a job or stores a key (`keys::check_start`). A database with no
 /// profile key yet passes.
@@ -228,6 +252,9 @@ pub async fn start(rt: &Runtime) -> Result<Background, Error> {
     } else {
         Vec::new()
     };
+    if rt.settings.run_jobs && rt.settings.orthanc.is_some() {
+        workers.push(imaging_sweeper(rt, rx.clone()));
+    }
     workers.push(break_glass_sweeper(rt, rx.clone()));
     workers.push(spool_sweeper(rt, rx));
     Ok(Background { stop, workers })

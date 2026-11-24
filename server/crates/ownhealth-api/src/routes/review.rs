@@ -107,6 +107,13 @@ fn visible(item: &ReviewItem, perm: &Permission) -> bool {
     if item.kind == ownhealth_imaging::import::REVIEW_KIND && !perm.has("read:records") {
         return false;
     }
+    // a failed DICOM import's error can name the upload and its studies, as its job details do
+    if item.kind == "job_failed"
+        && item.payload.get("kind").and_then(Value::as_str) == Some(ownhealth_imaging::import::JOB)
+        && !perm.has("read:records")
+    {
+        return false;
+    }
     let empty = Map::new();
     let p = item.payload.as_object().unwrap_or(&empty);
     let mut observations: Vec<&Map<String, Value>> = Vec::new();
@@ -464,8 +471,9 @@ async fn reject(
     let item = check(&mut tx, principal, found, true).await?;
     review::reject(&mut tx, item_id, principal.user_id.unwrap_or_default(), &reason).await?;
     audit(&mut tx, principal, &item, "review_reject").await?;
+    let removed = ownhealth_imaging::remove::settle(&mut tx, &item).await?;
     tx.commit().await?;
-    Ok(Json(json!({"id": item_id, "status": "rejected"})))
+    Ok(Json(closed(item_id, "rejected", removed)))
 }
 
 async fn reopen(State(rt): State<Runtime>, caller: Caller, Path(item_id): Path<String>) -> R<Json<Value>> {
@@ -509,8 +517,19 @@ async fn dismiss(
     )
     .await?;
     audit(&mut tx, principal, &item, "review_dismiss").await?;
+    let removed = ownhealth_imaging::remove::settle(&mut tx, &item).await?;
     tx.commit().await?;
-    Ok(Json(json!({"id": item_id, "status": "dismissed"})))
+    Ok(Json(closed(item_id, "dismissed", removed)))
+}
+
+/// The answer to a reject or a dismiss. Closing the last held study of an upload that put nothing on
+/// the record removes the upload (`ownhealth_imaging::remove::settle`): `upload_removed` says so.
+fn closed(item_id: Uuid, status: &str, upload_removed: bool) -> Value {
+    let mut out = json!({"id": item_id, "status": status});
+    if upload_removed {
+        out["upload_removed"] = json!(true);
+    }
+    out
 }
 
 /// pydantic's lax float: a JSON number, or a string that parses as one.
