@@ -456,7 +456,16 @@ async fn open(
         let profile_id = perm.profile.id;
         (profile_id, bound_study(&mut conn, profile_id, &uid).await?)
     };
-    bind_check(imaging, &uid, &orthanc_id).await?;
+    let studies = studies_under(imaging, &uid).await?;
+    // After a restore the rebuild sends the study back to Orthanc: say that, not that it is ambiguous.
+    if studies.is_empty() && rebuilding(&rt, profile_id).await? {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "study_rebuilding",
+            "OwnHealth is putting this study's images back in the image store. Try again in a few minutes.",
+        ));
+    }
+    bound(&studies, &orthanc_id)?;
     // Then the same checks again in the audit transaction: the record must still name the Orthanc
     // study that Orthanc just confirmed.
     let mut tx = rt.pool.begin().await?;
@@ -634,6 +643,11 @@ async fn authorize(rt: &Runtime, imaging: &Imaging, token: &str) -> Result<Autho
 
 /// Orthanc's `/tools/lookup` must find exactly one study under `uid`, and it must be `orthanc_id`.
 async fn bind_check(imaging: &Imaging, uid: &str, orthanc_id: &str) -> Result<(), ApiError> {
+    bound(&studies_under(imaging, uid).await?, orthanc_id)
+}
+
+/// The Orthanc studies that `/tools/lookup` finds under `uid`.
+async fn studies_under(imaging: &Imaging, uid: &str) -> Result<Vec<String>, ApiError> {
     let (orthanc, http) = imaging.orthanc()?;
     let upstream = http
         .post(format!("{}/tools/lookup", orthanc.url))
@@ -648,11 +662,16 @@ async fn bind_check(imaging: &Imaging, uid: &str, orthanc_id: &str) -> Result<()
     }
     let found: Vec<Value> =
         serde_json::from_slice(&read_limited(upstream, 1 << 20).await?).map_err(|_| orthanc_down())?;
-    let studies: Vec<&str> = found
+    Ok(found
         .iter()
         .filter(|r| r["Type"] == "Study")
         .filter_map(|r| r["ID"].as_str())
-        .collect();
+        .map(str::to_string)
+        .collect())
+}
+
+/// Exactly the recorded study, or nothing passes.
+fn bound(studies: &[String], orthanc_id: &str) -> Result<(), ApiError> {
     if studies != [orthanc_id] {
         tracing::warn!(
             studies = studies.len(),
@@ -661,6 +680,19 @@ async fn bind_check(imaging: &Imaging, uid: &str, orthanc_id: &str) -> Result<()
         return Err(not_bound());
     }
     Ok(())
+}
+
+/// Whether an `imaging.rebuild` of the profile is queued or running (slice 43).
+async fn rebuilding(rt: &Runtime, profile_id: Uuid) -> Result<bool, ApiError> {
+    let mut conn = rt.pool.acquire().await?;
+    Ok(sqlx::query_scalar(
+        "select exists (select 1 from job where kind = $1 and state in ('queued', 'running') \
+         and payload->>'profile_id' = $2)",
+    )
+    .bind(ownhealth_imaging::rebuild::JOB)
+    .bind(profile_id.to_string())
+    .fetch_one(&mut *conn)
+    .await?)
 }
 
 /// `/ohif/*`: the viewer's files from Orthanc's OHIF plugin, under a live link only.

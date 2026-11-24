@@ -699,7 +699,8 @@ async fn assign(
 }
 
 /// Soft delete with a reason: the document leaves the vault, its values are retracted, its open
-/// review items dismissed. The blob stays until an explicit purge.
+/// review items dismissed, and an imaging study whose report it is retracted with it. The blob stays
+/// until an explicit purge.
 async fn retract(
     State(rt): State<Runtime>,
     Caller(principal): Caller,
@@ -731,7 +732,26 @@ async fn retract(
         return Err(ApiError::new(StatusCode::CONFLICT, "conflict", "The document is already retracted.").into());
     }
     let why = format!("document retracted: {reason}");
-    let out = ownhealth_ingest_structured::retract::retract_document_facts(&mut tx, document_id, &why).await?;
+    let mut out = ownhealth_ingest_structured::retract::retract_document_facts(&mut tx, document_id, &why).await?;
+    // A study whose report this is goes with it (slice 43): the person retracts a scan that is not
+    // theirs through its report. Its row and its pixels in Orthanc stay; the viewer and the timeline
+    // leave it out.
+    let studies: Vec<Uuid> = sqlx::query_scalar(
+        "update imaging_study set status = 'retracted', status_reason = $2 \
+         where report_document_id = $1 and status in ('current', 'provisional') returning id",
+    )
+    .bind(document_id)
+    .bind(&why)
+    .fetch_all(&mut *tx)
+    .await?;
+    if !studies.is_empty()
+        && let Some(records) = out.get_mut("records").and_then(Value::as_object_mut)
+    {
+        records.insert(
+            "imaging_study".into(),
+            studies.iter().map(|id| json!(id.to_string())).collect(),
+        );
+    }
     // A ClinVar alert of this file moves to another current file of the person that shows the same
     // change; only an alert no other file stands for is dismissed below.
     ownhealth_genome::clinvar::hand_over_alerts(&mut tx, document_id).await?;

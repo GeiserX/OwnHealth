@@ -112,6 +112,13 @@ impl FakeOrthanc {
         }
     }
 
+    /// Orthanc holds no study under `uid` any more (a restore before its rebuild).
+    fn forget(&self, uid: &str) {
+        if let Ok(mut s) = self.studies.lock() {
+            s.remove(uid);
+        }
+    }
+
     fn clear(&self) {
         if let Ok(mut s) = self.seen.lock() {
             s.clear();
@@ -1446,5 +1453,110 @@ async fn break_glass_alone_opens_no_viewer() -> R {
     assert_eq!(v["detail"]["code"], "break_glass", "{v}");
     assert!(w.orthanc.lookups().is_empty());
     assert_eq!(w.audit_rows(ALEX_CT).await?, 0);
+    Ok(())
+}
+
+/// Slice 43: after a restore, Orthanc lacks the study until the rebuild sends it again. While that
+/// rebuild is queued or runs, the open says so instead of calling the study ambiguous.
+#[tokio::test]
+async fn a_study_orthanc_lacks_while_its_rebuild_is_queued_says_it_is_coming_back() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    w.orthanc.forget(ALEX_CT);
+    let (s, v) = w.open_with(Auth::Cookie(&cookie), "alex", ALEX_CT).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("study_not_bound")),
+        "nothing rebuilds it: {v}"
+    );
+    let alex = w.fam.profile("alex");
+    sqlx::query(
+        "insert into job (kind, payload, dedupe_key) values ('imaging.rebuild', \
+         jsonb_build_object('profile_id', $1::text), 'imaging.rebuild:' || $1::text)",
+    )
+    .bind(alex.to_string())
+    .execute(&w.db.pool)
+    .await?;
+    let (s, v) = w.open_with(Auth::Cookie(&cookie), "alex", ALEX_CT).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::SERVICE_UNAVAILABLE, Some("study_rebuilding")),
+        "{v}"
+    );
+    // another profile's rebuild says nothing about this study
+    sqlx::query("update job set payload = jsonb_build_object('profile_id', $1::text), dedupe_key = null where kind = 'imaging.rebuild'")
+        .bind(w.fam.profile("sam").to_string())
+        .execute(&w.db.pool)
+        .await?;
+    let (s, v) = w.open_with(Auth::Cookie(&cookie), "alex", ALEX_CT).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("study_not_bound")),
+        "{v}"
+    );
+    Ok(())
+}
+
+/// Slice 43: a person retracts a study through its report. Retracting the report document the study
+/// links retracts the study too: the viewer refuses it and the timeline leaves it out.
+#[tokio::test]
+async fn retracting_the_report_of_a_study_retracts_the_study() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let alex = w.fam.profile("alex");
+    let report = {
+        let mut c = w.db.pool.acquire().await?;
+        let sha = "cd".repeat(32);
+        ownhealth_core::documents::create_document(
+            &mut c,
+            &ownhealth_core::documents::NewDocument::upload(
+                w.fam.household_id,
+                Some(alex),
+                &sha,
+                "application/pdf",
+                10,
+            ),
+        )
+        .await?
+        .id
+    };
+    sqlx::query("update imaging_study set report_document_id = $1 where study_instance_uid = $2")
+        .bind(report)
+        .bind(ALEX_CT)
+        .execute(&w.db.pool)
+        .await?;
+    let req = Request::post(format!("/api/documents/{report}/retract"))
+        .header(header::HOST, "health.test")
+        .header(header::ORIGIN, BASE)
+        .header(header::COOKIE, format!("{}={cookie}", sessions::COOKIE))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"reason": "not Alex's scan"}).to_string()))?;
+    let (s, _, body) = w.call(req).await?;
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["retracted_records"]["imaging_study"].as_array().map(Vec::len),
+        Some(1),
+        "{v}"
+    );
+    let (status, reason): (String, Option<String>) =
+        sqlx::query_as("select status, status_reason from imaging_study where study_instance_uid = $1")
+            .bind(ALEX_CT)
+            .fetch_one(&w.db.pool)
+            .await?;
+    assert_eq!(status, "retracted");
+    assert!(reason.is_some_and(|r| r.contains("not Alex's scan")));
+    let (s, v) = w.open_with(Auth::Cookie(&cookie), "alex", ALEX_CT).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("study_retracted")),
+        "{v}"
+    );
+    // Carmen's study, which links no report, stays as it was
+    let carmen: String = sqlx::query_scalar("select status from imaging_study where study_instance_uid = $1")
+        .bind(CARMEN_MR)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(carmen, "current");
     Ok(())
 }
