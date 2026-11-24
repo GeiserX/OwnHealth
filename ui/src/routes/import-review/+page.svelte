@@ -23,7 +23,7 @@
 	import type { InboxSource } from '#lib/api/inbox';
 	import AgentContext from '#lib/components/inbox/AgentContext.svelte';
 	import ProposalRows from '#lib/components/inbox/ProposalRows.svelte';
-	import { FHIR_ITEM_KINDS, fhirTileSource, inboxSummary, latestJob, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, unmappedSummary } from '#lib/logic/inbox';
+	import { FHIR_ITEM_KINDS, fhirTileSource, inboxSummary, latestJob, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, unmappedKeys, unmappedSummary } from '#lib/logic/inbox';
 	import { ApiError } from '#lib/api/core';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import PageHeader from '#lib/components/PageHeader.svelte';
@@ -309,9 +309,10 @@
 			const label = (p.src as { label?: string } | undefined)?.label;
 			if (label) return String(label);
 		}
-		// A connector pull's resources of one type we do not show yet: one line with their count.
+		// A connector pull's resources of one type we do not show yet, or a C-CDA upload's section left
+		// unread: one line with their count.
 		const grouped = unmappedSummary(i);
-		if (grouped) return tp('i2_fus_t', grouped.count, { type: grouped.key ? t(grouped.key) : grouped.type, source: grouped.source || '—', n: fmtNum(grouped.count) });
+		if (grouped) return tp(unmappedKeys(grouped).title, grouped.count, { type: grouped.type, source: grouped.source || '—', n: fmtNum(grouped.count) });
 		// A scan's chip already says what it is; the line names the file.
 		if (i.kind === 'pending_document' && i.document_id && docName(i.document_id)) return docName(i.document_id);
 		return t('i2_kind_' + i.kind);
@@ -561,7 +562,7 @@
 							{:else}
 								<div>{it.kind === 'agent_proposal' ? '◆ ' : ''}{otherTitle(it)}</div>
 								{#if it.kind === 'fhir_unmapped' && it.reasons.length}<div style="font-size:11.5px;color:var(--watch)">{reasonsText(it)}</div>{/if}
-								{#if it.kind === 'fhir_unmapped_summary'}<div class="dim" style="font-size:11.5px">{t('i2_fus_d')}</div>{/if}
+								{#if it.kind === 'fhir_unmapped_summary'}<div class="dim" style="font-size:11.5px">{t(unmappedKeys(unmappedSummary(it) ?? {}).note)}</div>{/if}
 								{#if prows}
 									<ProposalRows rows={prows} {busy} documentId={it.document_id} onaccept={(edits) => act(() => acceptReview(it.id, edits))} onreject={() => act(() => rejectReview(it.id, 'rejected in review'))} />
 								{:else if otherText(it)}<pre class="p2untrusted" style="margin-top:4px">{otherText(it)}</pre>{/if}
@@ -583,7 +584,7 @@
 								<button class="btn sm no" onclick={() => (confirmDismiss = it.id)} disabled={busy}>{t('i2_dismiss')}</button>
 							{:else if it.kind === 'fhir_unmapped_summary'}
 								<!-- the pulled bundle, through the document route that checks this profile like the queue does -->
-								{#if it.document_id}<a class="btn sm" href={documentFileUrl(it.document_id)} target="_blank" rel="noopener">{t('i2_fus_open')}</a>{/if}
+								{#if it.document_id}<a class="btn sm" href={documentFileUrl(it.document_id)} target="_blank" rel="noopener">{t(unmappedKeys(unmappedSummary(it) ?? {}).open)}</a>{/if}
 								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>
 							{:else if (it.kind === 'agent_proposal' && !prows) || it.kind === 'fhir_unmapped'}
 								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
