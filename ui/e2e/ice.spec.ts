@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 // The registry languages (src/lib/i18n/langs.ts), as langs.spec.ts lists them.
 const LANGS = [
 	{ code: 'es', name: 'Español' },
@@ -93,10 +93,8 @@ test('a keyboard revoke of an offline card keeps the keyboard on its row', async
 	await expect(row).toBeFocused();
 });
 
-test('a card notice opens Share links on the profile of the card, not the one on screen', async ({ browser, baseURL }) => {
-	const ctx = await browser.newContext({ baseURL, colorScheme: 'dark' });
-	const page = await ctx.newPage();
-	const me = await (await ctx.request.get('/api/me')).json();
+async function cardNoticeOnAlexSummary(page: Page) {
+	const me = await (await page.request.get('/api/me')).json();
 	const lucia = me.profiles.find((p: { slug: string }) => p.slug === 'lucia');
 	const profile = { id: lucia.id, slug: 'lucia', display_name: lucia.display_name };
 	const at = new Date(Date.now() - 60_000).toISOString();
@@ -104,15 +102,51 @@ test('a card notice opens Share links on the profile of the card, not the one on
 	await page.route('**/api/notifications', (route) =>
 		route.fulfill({ json: { items: [open], uses: [], ice: [{ profile, count: 1, unread: 1, last_at: at }], unread: 1 } })
 	);
-	// Alex is on screen when the notice about Lucía's card comes in
-	await page.goto('/?lang=en');
-	await page.evaluate(() => localStorage.setItem('oh.profile', 'alex'));
-	await page.goto('/?lang=en');
-	const panel = page.getByRole('region', { name: /^Notices/ });
-	await expect(panel).toBeVisible();
-	await panel.getByRole('link', { name: 'Manage cards and links' }).click();
+	// Start on Alex before the first load can auto-open the notice.
+	await page.addInitScript(() => localStorage.setItem('oh.profile', 'alex'));
+	await page.goto('/summary?lang=en');
+	const alex = page.getByRole('button', { name: 'Alex Rivera', exact: true });
+	await expect(alex).toHaveAttribute('aria-pressed', 'true');
+	return { alex, profile, panel: page.getByRole('region', { name: /^Notices/ }) };
+}
+
+test('a card notice opens Share links on the profile of the card, not the one on screen', async ({ page }) => {
+	const { alex, profile, panel } = await cardNoticeOnAlexSummary(page);
+	const notice = panel.getByRole('link', { name: 'Manage cards and links' });
+	const heading = page.getByRole('heading', { name: `Links of ${profile.display_name}` });
+	await notice.click();
 	await expect(page).toHaveURL(/\/links/);
-	await expect(page.getByRole('heading', { name: `Links of ${lucia.display_name}` })).toBeVisible();
-	expect(await page.evaluate(() => localStorage.getItem('oh.profile'))).toBe('lucia');
-	await ctx.close();
+	await expect(heading).toBeVisible();
+	await expect(page.getByRole('button', { name: profile.display_name, exact: true })).toHaveAttribute('aria-pressed', 'true');
+
+	// The sidebar can still switch profiles, and the same notice can be opened again from Share links.
+	await alex.click();
+	await expect(page.getByRole('heading', { name: 'Links of Alex Rivera' })).toBeVisible();
+	await page.getByRole('button', { name: /^Notices/ }).click();
+	await notice.click();
+	await expect(heading).toBeVisible();
 });
+
+const newTabGestures: [string, NonNullable<Parameters<Locator['click']>[0]>][] = [
+	['Cmd/Ctrl-click', { modifiers: ['ControlOrMeta'] }],
+	['middle-click', { button: 'middle' }]
+];
+for (const [gesture, options] of newTabGestures) {
+	test(`${gesture} on a card notice keeps the original tab’s profile and emergency card draft`, async ({ page, context }) => {
+		const { alex, profile, panel } = await cardNoticeOnAlexSummary(page);
+		const contact = page.getByRole('region', { name: 'Emergency card' }).getByLabel('Contact name');
+		await contact.fill('Carmen Ortega');
+		await expect(contact).toHaveValue('Carmen Ortega');
+
+		const [opened] = await Promise.all([
+			context.waitForEvent('page'),
+			panel.getByRole('link', { name: 'Manage cards and links' }).click(options)
+		]);
+
+		await expect(page).toHaveURL(/\/summary/);
+		await expect(alex).toHaveAttribute('aria-pressed', 'true', { timeout: 2500 });
+		await expect(opened).toHaveURL((url) => url.pathname === '/links' && url.searchParams.get('profile') === profile.id);
+		await expect(opened.getByRole('heading', { name: `Links of ${profile.display_name}` })).toBeVisible();
+		await expect(contact).toHaveValue('Carmen Ortega');
+	});
+}

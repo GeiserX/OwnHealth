@@ -7,7 +7,9 @@
 	// Each link says its state, who opened it, and can be revoked.
 	// The PIN input has no name, so no form submit can ever put it in a URL; it is cleared once used.
 	// What the form offers is what the server will accept: the list answer's `open` categories.
-	import { tick } from 'svelte';
+	import { onMount, tick } from 'svelte';
+	import { afterNavigate } from '$app/navigation';
+	import { page } from '$app/state';
 	import '#lib/components/pages2/pages2.css';
 	import { ApiError } from '#lib/api/core';
 	import type { ShlAccess, ShlCreateIn, ShlCreated, ShlLink, ShlList } from '#lib/api/types';
@@ -21,10 +23,22 @@
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { LANGS, type Lang } from '#lib/i18n/langs';
 	import { copyText } from '#lib/logic/inbox';
-	import { currentProfile } from '#lib/state/app.svelte';
+	import { app, currentProfile, setProfile } from '#lib/state/app.svelte';
 	import { createLink, linkAccess, listLinks, revokeLink } from './api';
-	import { DAYS, DEFAULT_DAYS, PICKS, accessKey, canShare, categoriesFor, expiryKey, mayShare, pinProblem, revocable, shownCategories, stateOf } from './logic';
+	import { DAYS, DEFAULT_DAYS, PICKS, accessKey, canShare, categoriesFor, expiryKey, mayShare, pinProblem, profileForLinks, revocable, shownCategories, stateOf } from './logic';
 	import { qrOf } from './qr';
+
+	function selectProfile(profileId: string | null) {
+		const current = currentProfile()?.slug ?? null;
+		const next = profileForLinks(profileId, app.me?.profiles ?? [], current);
+		if (next && next !== current) setProfile(next);
+	}
+	// The shell mounts this page after /me arrives. Handle that first URL and later navigations
+	// while the page is mounted, including another click on the same notice.
+	onMount(() => selectProfile(page.url.searchParams.get('profile')));
+	afterNavigate(({ to }) => {
+		if (to) selectProfile(to.url.searchParams.get('profile'));
+	});
 
 	const prof = $derived(currentProfile());
 	const slug = $derived(prof?.slug ?? '');

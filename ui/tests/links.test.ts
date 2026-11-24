@@ -9,7 +9,7 @@ import ts from 'typescript';
 import { dict } from '../src/lib/i18n/dict.ts';
 import { errKey } from '../src/lib/logic/errors.ts';
 import { NAV, navFor } from '../src/lib/nav.ts';
-import { DAYS, PICKS, accessKey, canShare, categoriesFor, expiryKey, mayShare, pinProblem, qrPath, revocable, sharesAny, shownCategories, stateOf } from '../src/routes/links/logic.ts';
+import { DAYS, PICKS, accessKey, canShare, categoriesFor, expiryKey, mayShare, pinProblem, profileForLinks, qrPath, revocable, shareLinksHref, sharesAny, shownCategories, stateOf } from '../src/routes/links/logic.ts';
 
 const tables = dict as unknown as Record<string, Record<string, string>>;
 const page = readFileSync(new URL('../src/routes/links/+page.svelte', import.meta.url), 'utf8');
@@ -41,6 +41,25 @@ test('only an owner or a guardian may share, and the menu shows Share links only
 	assert.equal(links[0].sharers, true);
 	// /share is the inbound share target and stays open to everyone
 	assert.ok(NAV.every((n) => n.path === '/links' || !n.sharers));
+});
+
+test('a card notice links to Share links with the profile ID encoded', () => {
+	assert.equal(shareLinksHref('lucia&id=#'), '/links?profile=lucia%26id%3D%23');
+});
+
+test('a Share links URL selects only a profile this person may share', () => {
+	const profiles = [
+		{ id: 'owner', slug: 'lucia', role: 'owner', break_glass: false },
+		{ id: 'guardian', slug: 'sam', role: 'guardian', break_glass: false },
+		{ id: 'viewer', slug: 'ada', role: 'viewer', break_glass: false },
+		{ id: 'emergency', slug: 'carmen', role: 'guardian', break_glass: true }
+	] as const;
+	assert.equal(profileForLinks('owner', profiles, 'alex'), 'lucia');
+	assert.equal(profileForLinks('guardian', profiles, 'alex'), 'sam');
+	for (const id of ['unknown', 'viewer', 'emergency', null]) {
+		assert.equal(profileForLinks(id, profiles, 'alex'), 'alex', String(id));
+	}
+	assert.equal(profileForLinks('unknown', [], null), null);
 });
 
 test('a link always carries the summary, and only the picks its creator holds', () => {
