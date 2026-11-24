@@ -145,10 +145,22 @@ test('a proposal reads in es and en, with no name', () => {
 });
 
 test('the end of an import counts the new proposals, and says so when there are none', () => {
-	assert.equal(doneLine(0, word('en')), 'No new relatives: all of them are already there.');
-	assert.equal(doneLine(0, word('es')), 'Ningún familiar nuevo: ya estaban todos.');
-	assert.equal(doneLine(1, word('en')), '1 relative waits in Import & review as a proposal.');
-	assert.equal(doneLine(3, word('es')), '3 familiares esperan en Importar y revisar como propuestas.');
+	const none = { proposed: 0, already: 4, outside: 0 };
+	assert.equal(doneLine(none, word('en')), 'No new relatives: all of them are already there.');
+	assert.equal(doneLine(none, word('es')), 'Ningún familiar nuevo: ya estaban todos.');
+	assert.equal(doneLine({ proposed: 1, already: 0, outside: 3 }, word('en')), '1 relative waits in Import & review as a proposal.');
+	assert.equal(doneLine({ proposed: 3, already: 2, outside: 5 }, word('es')), '3 familiares esperan en Importar y revisar como propuestas.');
+});
+
+test('with nothing new, the end of an import claims nothing about people it could not place', () => {
+	// some people of the file have no relationship we record: they are not "already there"
+	const someOutside = { proposed: 0, already: 4, outside: 2 };
+	assert.equal(doneLine(someOutside, word('en')), 'No new relatives to propose.');
+	assert.equal(doneLine(someOutside, word('es')), 'Ningún familiar nuevo que proponer.');
+	// a file with no relatives of the person at all: nothing is already there either
+	const empty = { proposed: 0, already: 0, outside: 0 };
+	assert.equal(doneLine(empty, word('en')), 'No new relatives to propose.');
+	assert.equal(doneLine(empty, word('es')), 'Ningún familiar nuevo que proponer.');
 });
 
 test('every refusal code the server gives has its sentence in es and en', () => {

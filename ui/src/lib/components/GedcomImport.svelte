@@ -140,7 +140,7 @@
 
 		{#if done}
 			<div class="done" role="status">
-				<div>{doneLine(done.proposed.length, (k, v) => (v ? tf(k, v) : t(k)))}</div>
+				<div>{doneLine({ proposed: done.proposed.length, already: done.already, outside: done.outside }, (k, v) => (v ? tf(k, v) : t(k)))}</div>
 				{#if done.already || done.outside || done.left_out}
 					<div class="dim" style="font-size:11.5px">{tf('gd_done_d', { already: done.already, outside: done.outside, left: done.left_out })}</div>
 				{/if}

@@ -167,7 +167,16 @@ export function proposalTitle(p: FamilyProposal, lang: string, word: Word): stri
 	return parts.join(' · ');
 }
 
-/** The line at the end of an import: how many relatives now wait in Import & review. */
-export function doneLine(n: number, word: Word): string {
-	return n === 0 ? word('gd_done_none') : n === 1 ? word('gd_done_one') : word('gd_done', { n });
+/** What an import answered, as counts: new proposals, relatives already there, people it could not place. */
+export type DoneCounts = { proposed: number; already: number; outside: number };
+
+/**
+ * The line at the end of an import: how many relatives now wait in Import & review. With none, it says
+ * every relative is already there only when that is so: some relatives already there and no person of the
+ * file left unplaced. Otherwise it claims nothing about the rest; the line below it gives the counts.
+ */
+export function doneLine(c: DoneCounts, word: Word): string {
+	const n = c.proposed;
+	if (n === 0) return c.already > 0 && c.outside === 0 ? word('gd_done_none') : word('gd_done_zero');
+	return n === 1 ? word('gd_done_one') : word('gd_done', { n });
 }
