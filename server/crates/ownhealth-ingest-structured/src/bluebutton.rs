@@ -154,7 +154,7 @@ impl Issue {
             ),
             Self::EmptyPage => (
                 "bluebutton_empty_page",
-                "CMS returned an empty page with a next page link".into(),
+                "CMS returned a page with no results and a next page link".into(),
             ),
         }
     }
@@ -194,6 +194,24 @@ pub fn phrases() -> Value {
                  NO_ANSWER, NONE_GRANTED, RECONSENT, REFUSED_ACCESS, TOKEN_UNREACHABLE, GRANT_CHANGED, PROFILE_CHANGED],
         "problems": types.iter().map(|issue| issue.problem(Resource::Claim, 1)).collect::<Vec<_>>(),
     })
+}
+
+/// A searchset may carry OperationOutcome entries about the search itself. They are not matches, so
+/// `_count` and the next offset never count them (FHIR R4 search, "Other kinds of information").
+fn outcome(entry: &Value) -> bool {
+    entry["resource"]["resourceType"] == "OperationOutcome"
+}
+
+/// An outcome whose every issue is information or a warning says nothing went wrong, so the search
+/// ignores it. An outcome with an error issue stays a refused entry.
+fn note(entry: &Value) -> bool {
+    outcome(entry)
+        && entry["resource"]["issue"].as_array().is_some_and(|issues| {
+            !issues.is_empty()
+                && issues
+                    .iter()
+                    .all(|issue| matches!(issue["severity"].as_str(), Some("information" | "warning")))
+        })
 }
 
 #[derive(Default)]
@@ -328,11 +346,11 @@ impl Reader<'_> {
                     got.problem(Issue::NotBundle);
                     return Ok(got);
                 };
-                if array.len() > COUNT {
+                entries = array.as_slice();
+                if entries.iter().filter(|entry| !outcome(entry)).count() > COUNT {
                     got.problem(Issue::NotBundle);
                     return Ok(got);
                 }
-                entries = array.as_slice();
                 // the compact JSON of the entry array; Display of a Value cannot fail
                 page_hash = Some(<[u8; 32]>::from(Sha256::digest(value.to_string())));
             }
@@ -347,7 +365,8 @@ impl Reader<'_> {
                 return Ok(got);
             }
             got.answered = true;
-            for entry in entries {
+            let matches = entries.iter().filter(|entry| !outcome(entry)).count();
+            for entry in entries.iter().filter(|entry| !note(entry)) {
                 got.add(kind, entry, self.base, self.patient);
             }
             // Trust the presence of a next relation only. CMS can report the size of this page
@@ -355,11 +374,12 @@ impl Reader<'_> {
             if !next {
                 return Ok(got);
             }
-            if entries.is_empty() {
+            // a page of outcomes alone cannot move the offset, so the search stops there
+            if matches == 0 {
                 got.problem(Issue::EmptyPage);
                 return Ok(got);
             }
-            offset += entries.len();
+            offset += matches;
         }
         got.problem(Issue::TooManyPages(self.pages));
         Ok(got)

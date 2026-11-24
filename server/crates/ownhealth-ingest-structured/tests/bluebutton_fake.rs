@@ -55,6 +55,10 @@ enum Eob {
     Oversized,
     /// The first page answers this status.
     Fails(u16),
+    /// Full, with an informational OperationOutcome entry on the first page.
+    WithOutcome,
+    /// The first page holds only an informational OperationOutcome, with a next link.
+    OutcomeOnly,
 }
 
 /// How the fake CMS behaves. Tests change it between calls.
@@ -77,6 +81,8 @@ struct Mode {
     eob: Eob,
     /// SQL run once, when the first claim page is asked for: a change during the run.
     mid_run: Option<(PgPool, String)>,
+    /// The Patient search also returns an OperationOutcome with this issue severity.
+    patient_outcome: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -252,12 +258,13 @@ async fn search(
         ("ExplanationOfBenefit", Eob::Oversized, 0) => (claims(0..51), false),
         ("ExplanationOfBenefit", Eob::Repeated, 0 | 50) => (claims(0..50), true),
         ("ExplanationOfBenefit", Eob::Repeated, 100) => (last(), false),
-        ("ExplanationOfBenefit", Eob::Full | Eob::ForeignUrl, 0) => (claims(0..50), true),
-        ("ExplanationOfBenefit", Eob::Full | Eob::ForeignUrl, 50) => (last(), false),
+        ("ExplanationOfBenefit", Eob::Full | Eob::ForeignUrl | Eob::WithOutcome, 0) => (claims(0..50), true),
+        ("ExplanationOfBenefit", Eob::Full | Eob::ForeignUrl | Eob::WithOutcome, 50) => (last(), false),
+        ("ExplanationOfBenefit", Eob::OutcomeOnly, 0) => (vec![], true),
         _ => (vec![], false),
     };
     let n = resources.len();
-    let entries: Vec<Value> = resources
+    let mut entries: Vec<Value> = resources
         .into_iter()
         .map(|r| {
             let mut entry = json!({"resource": r, "search": {"mode": "match"}});
@@ -272,6 +279,20 @@ async fn search(
             entry
         })
         .collect();
+    // FHIR R4 lets a searchset carry an OperationOutcome entry that is not a match
+    let severity = match (kind.as_str(), mode.eob, offset) {
+        ("ExplanationOfBenefit", Eob::WithOutcome | Eob::OutcomeOnly, 0) => Some("information"),
+        ("Patient", _, 0) => mode.patient_outcome,
+        _ => None,
+    };
+    if let Some(severity) = severity {
+        entries.push(json!({
+            "resource": {"resourceType": "OperationOutcome", "issue": [{
+                "severity": severity, "code": "informational", "diagnostics": "synthetic search note",
+            }]},
+            "search": {"mode": "outcome"},
+        }));
+    }
     // CMS may report this page's count as total, and its published v3 examples omit fullUrl.
     // The client must never follow the origin supplied in a pagination link.
     let links = if next {
@@ -866,5 +887,70 @@ async fn a_grant_without_any_data_search_stops_and_sends_nothing() -> common::R 
         stop.message
     );
     assert!(setup.fake.calls().pages.is_empty());
+    Ok(())
+}
+
+/// An informational OperationOutcome in a claim page is not a claim: it does not count toward the
+/// page size or the next offset. A page with only such an outcome and a next link stops the search.
+#[tokio::test]
+async fn an_outcome_entry_in_a_claim_page_is_not_a_claim() -> common::R {
+    let setup = setup(Mode {
+        eob: Eob::WithOutcome,
+        ..Mode::default()
+    })
+    .await?;
+    let claim_pages = |setup: &Setup| -> Vec<usize> {
+        let mut calls = setup.fake.calls();
+        let pages = calls
+            .pages
+            .iter()
+            .filter(|(kind, _)| kind == "ExplanationOfBenefit")
+            .map(|(_, offset)| *offset)
+            .collect();
+        calls.pages.clear();
+        pages
+    };
+    let with_outcome = pull(&setup, 200).await?;
+    assert!(with_outcome.problems.is_empty(), "{:?}", with_outcome.problems);
+    assert_eq!(claim_pages(&setup), [0, 50]);
+    assert_eq!(with_outcome.cursor, Some(json!({"claim_count": 51})));
+
+    setup.fake.mode().eob = Eob::OutcomeOnly;
+    let outcome_only = pull(&setup, 200).await?;
+    assert_eq!(claim_pages(&setup), [0]);
+    let codes: Vec<&str> = outcome_only.problems.iter().map(|p| p.code.as_str()).collect();
+    assert_eq!(codes, ["bluebutton_empty_page"]);
+    let runs = sources::list_runs(&mut *setup.ctx.pool.acquire().await?, setup.source_id, 1).await?;
+    assert_eq!(runs[0].status, "partial");
+    Ok(())
+}
+
+/// A Patient search may carry an information or warning OperationOutcome beside the one Patient;
+/// it does not block the pull. An error outcome still does.
+#[tokio::test]
+async fn an_informational_outcome_beside_the_patient_does_not_block_the_pull() -> common::R {
+    for severity in ["information", "warning"] {
+        let setup = setup(Mode {
+            patient_outcome: Some(severity),
+            ..Mode::default()
+        })
+        .await?;
+        let outcome = pull(&setup, 200).await?;
+        assert!(outcome.problems.is_empty(), "{severity}: {:?}", outcome.problems);
+        assert_eq!(outcome.cursor, Some(json!({"claim_count": 51})), "{severity}");
+    }
+    let setup = setup(Mode {
+        patient_outcome: Some("error"),
+        ..Mode::default()
+    })
+    .await?;
+    let source = get_source(&mut *setup.ctx.pool.acquire().await?, setup.source_id)
+        .await?
+        .expect("connected source");
+    let stop = bluebutton::pull(&setup.ctx, &source, &egress(), Utc::now(), 200)
+        .await
+        .expect_err("an error outcome beside the Patient stops the pull");
+    assert!(stop.message.starts_with("unexpected_resource"), "{}", stop.message);
+    assert_eq!(setup.fake.calls().pages, [("Patient".into(), 0)]);
     Ok(())
 }
