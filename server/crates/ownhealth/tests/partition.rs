@@ -1332,6 +1332,82 @@ async fn an_oversized_future_group_leaves_the_table_unchanged() -> R {
     Ok(())
 }
 
+/// The delete deploy/README.md ("Large wearable histories") gives for rows of [`FUTURE_FILES`] with no
+/// file: samples a push wrote (Health Auto Export keeps no document), and the rollups of their sources
+/// from the day before the date on (a day bucket is a local day, up to a day before its UTC date).
+const PUSHED_DELETE: &str = "with gone as (delete from wearable_sample where document_id is null and t >= 'YYYY-MM-DD' \
+     returning source_id) delete from wearable_rollup where source_id in (select source_id from gone) \
+     and t >= date 'YYYY-MM-DD' - 1";
+
+/// The same group from a push, with no file to retract: the README query shows a row with no
+/// document, its delete removes those samples and their rollups only, and the next run converts.
+#[tokio::test]
+async fn an_oversized_future_group_from_a_push_has_a_way_out() -> R {
+    let readme = include_str!("../../../../deploy/README.md");
+    assert!(
+        readme.contains(PUSHED_DELETE),
+        "deploy/README.md gives the delete for pushed samples"
+    );
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let mut c = pool.acquire().await?;
+    let push = store::device_source(&mut c, d.alex, "health_auto_export", Some("Push Watch"), None, None).await?;
+    let kept: Vec<Sample> = (1..=3)
+        .map(|h| hr(now - chrono::Duration::hours(h), 70.0, push))
+        .collect();
+    store::write(&mut c, d.alex, None, kept, Conflict::Refresh).await?;
+    // a phone whose clock ran ahead, in a zone west of UTC: the first hours reach the day before
+    sqlx::query(
+        "insert into wearable_sample (profile_id, metric, t, source_id, v, tz_offset_min) \
+         select $1, 'hr', $2::timestamptz + n * interval '1 second', $3, 60, -300 \
+         from generate_series(1, 50001) n",
+    )
+    .bind(d.alex)
+    .bind(cutoff_for(now))
+    .bind(push)
+    .execute(&mut *c)
+    .await?;
+    wearables::recompute_rollups(&mut c, d.alex, None, None).await?;
+    drop(c);
+
+    let report = partition::run(pool, &opts(now)).await?;
+    assert_eq!(state(&report), "needs_maintenance", "{report}");
+    let note = report["note"].as_str().unwrap_or_default();
+    assert!(
+        note.contains("pushes"),
+        "the note names pushes as well as files: {note}"
+    );
+    let since = cutoff_for(now).format("%Y-%m-%d").to_string();
+    let from = DateTime::parse_from_rfc3339(&format!("{since}T00:00:00Z"))?.with_timezone(&Utc);
+    let files: Vec<FutureFile> = sqlx::query_as(FUTURE_FILES).bind(from).fetch_all(pool).await?;
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(
+        (files[0].0, files[0].1.as_deref(), files[0].3),
+        (None, None, 50001),
+        "{files:?}"
+    );
+
+    sqlx::query(AssertSqlSafe(PUSHED_DELETE.replace("YYYY-MM-DD", &since)))
+        .execute(pool)
+        .await?;
+    let left: i64 = sqlx::query_scalar("select count(*) from wearable_sample where source_id = $1")
+        .bind(push)
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(left, 3, "the samples dated before stay");
+    let after = rollups(pool).await?;
+    rebuild_all(pool).await?;
+    assert_eq!(
+        rollups(pool).await?,
+        after,
+        "the delete left the rollups a rebuild makes"
+    );
+    let r = partition::run(pool, &opts(now)).await?;
+    assert_eq!(state(&r), "converted", "{r}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn deleting_a_profile_as_the_app_cascades_to_its_private_staged_samples() -> R {
     let d = demo().await?;

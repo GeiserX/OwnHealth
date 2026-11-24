@@ -404,8 +404,8 @@ async fn busy(conn: &mut PgConnection, report: Report) -> Result<Report> {
 
 /// A run that would move more samples than [`MAX_MOVE`] under its exclusive lock: samples a device
 /// with a wrong clock dated on or after `since` (the cutoff the step works with). The limit is fixed,
-/// so the group stays until a person retracts or corrects the files that hold it (deploy/README.md,
-/// "Large wearable histories").
+/// so the group stays until a person retracts the files that hold it, or deletes the samples that
+/// pushes wrote with no file (deploy/README.md, "Large wearable histories").
 async fn needs_maintenance(
     conn: &mut PgConnection,
     mut report: Report,
@@ -419,7 +419,8 @@ async fn needs_maintenance(
         .map_or_else(String::new, |c| format!(" dated on or after {}", c.format("%Y-%m-%d")));
     report.note = Some(format!(
         "The partition step would move {count} samples{since} under an exclusive lock, more than its limit of \
-         {MAX_MOVE}. Retract or correct the files that hold them, then run `ownhealth partition` again \
+         {MAX_MOVE}. Retract the files that hold them, or delete the samples that pushes wrote with no file, \
+         then run `ownhealth partition` again \
          (deploy/README.md, \"Large wearable histories\")"
     ));
     pending(conn, &mut report).await?;
