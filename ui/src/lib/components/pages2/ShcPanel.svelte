@@ -9,7 +9,7 @@
 	import { t } from '#lib/i18n/index.svelte';
 	import { errRaw, errText, tf } from '#lib/components/pages1/util.svelte';
 	import { day } from '#lib/components/pages2/fmt';
-	import { declinedKey, identityWarning, isLink, linkRefusalKey, linkRefusalVars, linkWarning, notImportedKey, passcodeRetry, receivedBefore, refusalKey, refusalVars } from '#lib/logic/shc';
+	import { declinedKey, identityWarning, isLink, linkRefusalKey, linkRefusalVars, countsFromFirstImport, linkWarning, notImportedKey, passcodeRetry, receivedBefore, refusalKey, refusalVars } from '#lib/logic/shc';
 
 	let { profile, profileName, ondone }: { profile: string; profileName: string; ondone: (documentId: string) => void } = $props();
 
@@ -174,7 +174,7 @@
 				<div class="dim" style="font-size:11.5px">{tf('shc_issued', { date: day(c.issued) })}{#if c.expires} · {tf('shc_expires', { date: day(c.expires) })}{/if}</div>
 			{/each}
 			<div style="margin-top:6px">{tf('shc_summary', { accepted: answer.summary.accepted, queued: answer.summary.queued, skipped: answer.summary.skipped })}</div>
-			{#if answer.link && receivedBefore(answer.documents)}<div class="dim" style="font-size:11.5px">{t('shlr_again')}</div>{/if}
+			{#if answer.link && receivedBefore(answer.documents)}<div class="dim" style="font-size:11.5px">{t('shlr_again')}{#if countsFromFirstImport(answer.documents)} {t('shlr_again_first')}{/if}</div>{/if}
 			{#each answer.not_imported ?? [] as n, k (k)}
 				<div class="dim" style="font-size:11.5px">{tf(notImportedKey(n.reason), { type: n.content_type })}</div>
 			{/each}

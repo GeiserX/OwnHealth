@@ -1909,7 +1909,8 @@ export const dict = {
 		shlr_w_unsure: "OwnHealth could not confirm that the files of this link are for {profile}. Their rows wait in review.",
 		shlr_w_other: "A file of this link names someone other than {profile}. Its rows wait in review. If the link is for another person, open it from their profile.",
 		shlr_declined: "Not imported. You declined {host}, so nothing was fetched from it and nothing was imported. The link's files were already received: they stay stored with this profile, encrypted.",
-		shlr_again: "These files were received before, so nothing new was added. The numbers are from the first import.",
+		shlr_again: "These files were received before, so nothing new was added.",
+		shlr_again_first: "The numbers are from the first import.",
 		// slice 52: share links (/links), SMART Health Links the instance serves (routes/shl.rs)
 		shl_nav: "Share links",
 		shl_sub: "A SMART Health Link sends {name}'s summary to a doctor. It opens in any SMART Health Links viewer, stops working on the day it expires, and can be revoked at any time.",
@@ -4050,7 +4051,8 @@ export const dict = {
 		shlr_w_unsure: "OwnHealth no pudo confirmar que los archivos de este enlace sean de {profile}. Sus filas esperan revisión.",
 		shlr_w_other: "Un archivo de este enlace es de otra persona, no de {profile}. Sus filas esperan en revisión. Si el enlace es para otra persona, ábrelo desde su perfil.",
 		shlr_declined: "No se ha importado. Rechazaste {host}, así que no se descargó nada de allí y no se importó nada. Los archivos del enlace ya se habían recibido: quedan guardados con este perfil, cifrados.",
-		shlr_again: "Estos archivos ya se habían recibido, así que no se añadió nada nuevo. Las cifras son de la primera importación.",
+		shlr_again: "Estos archivos ya se habían recibido, así que no se añadió nada nuevo.",
+		shlr_again_first: "Las cifras son de la primera importación.",
 		// slice 52: share links (/links), SMART Health Links the instance serves (routes/shl.rs)
 		shl_nav: "Enlaces para compartir",
 		shl_sub: "Un SMART Health Link envía el resumen de {name} a un médico. Se abre en cualquier visor de SMART Health Links, deja de funcionar el día que caduca y se puede revocar en cualquier momento.",

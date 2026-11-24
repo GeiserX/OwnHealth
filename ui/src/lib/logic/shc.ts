@@ -171,6 +171,14 @@ export function receivedBefore(documents: { created: boolean }[] | undefined): b
 }
 
 /**
+ * True when the counts of a link received again are those of its first import: a FHIR file is not
+ * imported twice, while a card file is checked again and its counts are this run's.
+ */
+export function countsFromFirstImport(documents: { created: boolean; content_type: string }[] | undefined): boolean {
+	return receivedBefore(documents) && documents!.every((d) => d.content_type === 'application/fhir+json');
+}
+
+/**
  * The values a link refusal sentence takes. A fetch detail is a code, worded here (`http_<status>`
  * keeps its number), so no text from the link's server reaches the sentence.
  */

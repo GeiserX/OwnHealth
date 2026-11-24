@@ -18,6 +18,7 @@ import {
 	notImportedKey,
 	passcodeRetry,
 	receivedBefore,
+	countsFromFirstImport,
 	refusalKey,
 	refusalVars,
 	shcCards
@@ -178,6 +179,15 @@ test('a link whose files were all received before says nothing new was added', (
 	assert.ok(!receivedBefore([{ created: false }, { created: true }]));
 	assert.ok(!receivedBefore([]));
 	assert.ok(!receivedBefore(undefined));
-	assert.equal(tables.en.shlr_again, 'These files were received before, so nothing new was added. The numbers are from the first import.');
-	assert.equal(tables.es.shlr_again, 'Estos archivos ya se habían recibido, así que no se añadió nada nuevo. Las cifras son de la primera importación.');
+	assert.equal(tables.en.shlr_again, 'These files were received before, so nothing new was added.');
+	assert.equal(tables.es.shlr_again, 'Estos archivos ya se habían recibido, así que no se añadió nada nuevo.');
+	// a card file received again is checked and imported again: its counts are this run's
+	const fhir = { created: false, content_type: 'application/fhir+json' };
+	const card = { created: false, content_type: 'application/smart-health-card' };
+	assert.ok(countsFromFirstImport([fhir, fhir]));
+	assert.ok(!countsFromFirstImport([fhir, card]));
+	assert.ok(!countsFromFirstImport([card]));
+	assert.ok(!countsFromFirstImport([{ ...fhir, created: true }]));
+	assert.ok(!countsFromFirstImport(undefined));
+	assert.ok(tables.en.shlr_again_first && tables.es.shlr_again_first);
 });
