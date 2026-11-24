@@ -8,6 +8,10 @@
 -- (name, endpoint, state). Not health data and not a clinical row: no profile_id, no lifecycle trigger.
 -- Removing the source removes its directory.
 
+-- A household has one directory source. The code that makes it takes a lock first; this index is the
+-- guard behind that lock, so a second row is refused even on a path that skips it.
+create unique index source_one_brands_per_household on source (household_id) where kind = 'brands';
+
 -- The last good copy of each vendor's file: when it was fetched and how many entries it gave. A run
 -- whose file fails to download, to parse or to reach the vendor's minimum leaves this row and the
 -- vendor's entries as they were, so the person keeps searching the old copy; `fetched_at` then ages,

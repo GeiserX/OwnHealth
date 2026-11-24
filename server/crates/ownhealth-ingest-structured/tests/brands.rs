@@ -841,3 +841,27 @@ async fn a_config_that_breaks_the_rules_fails_the_run_before_any_request() -> R 
     assert_eq!(v.total_hits(), 4);
     Ok(())
 }
+
+#[tokio::test]
+async fn the_database_keeps_a_household_to_one_directory_source() -> R {
+    let f = fx().await?;
+    let mut tx = f.e.db.pool.begin().await?;
+    brands::ensure_source(&mut tx, f.fam.household_id, None).await?;
+    tx.commit().await?;
+    // a second row written past ensure_source and its lock is refused by the database
+    let mut c = f.e.db.pool.acquire().await?;
+    let second = sources::create_source(
+        &mut c,
+        &sources::NewSource::new(f.fam.household_id, brands::KIND, brands::LABEL),
+    )
+    .await;
+    assert!(second.is_err(), "a second brands source was saved");
+    // another household still gets its own
+    let other = family(&mut c).await?;
+    sources::create_source(
+        &mut c,
+        &sources::NewSource::new(other.household_id, brands::KIND, brands::LABEL),
+    )
+    .await?;
+    Ok(())
+}
