@@ -847,7 +847,7 @@ Every example in the docs, the mockup and the golden tests draws Alex's values f
 | TSH | last 2025-01-20; recency window 12 months, so stale on 2026-11-07 | `src_a05` |
 | Hepatitis C antibody | never measured (rule `infect.hcv.once_adult`) | |
 | LDL-C (13457-7) series, mg/dL | 2021-11-09 163; 2022-09-15 96; 2023-03-21 88; 2023-10-04 92 (direct, 18262-6); 2024-05-22 84 (direct, 18262-6); 2025-01-20 79; 2025-09-08 101; 2026-03-02 118; 2026-09-14 97 | `src_1a0` ... `src_a12` |
-| Total cholesterol, HDL-C | 170 and 53 mg/dL, 2026-09-14 | `src_a12` |
+| Total cholesterol, HDL-C | 170 and 53 mg/dL, 2026-09-14 | |
 | Systolic pressure | 126 mmHg, typed in, 2026-09-14 | |
 | Smoking status | never smoked (SNOMED CT 266919005), self-reported, 2026-09-14 | |
 | SCORE2, PREVENT | computed from the rows above; the pressure counts for 12 months, so from 2027-09-14 they read not assessed | |
