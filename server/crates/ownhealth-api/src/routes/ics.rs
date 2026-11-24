@@ -94,7 +94,7 @@ const BG_WHO: &[(&str, &str)] = &[
 ];
 const BG_CANCEL: &[(&str, &str)] = &[("es", "Para cancelarla: {link}"), ("en", "To cancel it: {link}")];
 
-/// The page that cancels one request (the UI's, behind step-up).
+/// The page that cancels one request: the UI's, behind the owner's login.
 pub fn cancel_link(base_url: &str, request: Uuid) -> String {
     format!("{}/family/break-glass/{request}", base_url.trim_end_matches('/'))
 }
