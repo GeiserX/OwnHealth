@@ -6,7 +6,12 @@
       "from": "string",
       "name": "string",
       "src": "src_id",
-      "status": "=out",
+      "status": {
+        "|": [
+          "=ok",
+          "=out"
+        ]
+      },
       "to": "string",
       "unit": "string"
     }

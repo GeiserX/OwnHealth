@@ -27,6 +27,12 @@
     },
     "family": {
       "family_hash12": "string",
+      "hints": {
+        "[]": {
+          "rel": "string",
+          "rule": "string"
+        }
+      },
       "items": {
         "[]": {
           "rel": "string",

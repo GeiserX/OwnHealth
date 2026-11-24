@@ -27,6 +27,7 @@ use ownhealth_core::pyrandom::{PyRandom, round1};
 const LAB: &str = "LabNorte";
 const DERIVATION: &str = "demo-seed";
 const TITLE: &str = "Informe de resultados de laboratorio";
+const ALEX_LIPID_DRAW: &str = "2026-09-14";
 
 struct Analyte {
     group: &'static str,
@@ -69,7 +70,7 @@ const fn a(
 }
 
 /// In the Python dict's order: a row's place on its page follows this list.
-const ANALYTES: [Analyte; 17] = [
+const ANALYTES: [Analyte; 19] = [
     a(
         "hemoglobin",
         "718-7",
@@ -215,6 +216,30 @@ const ANALYTES: [Analyte; 17] = [
         "serum",
     ),
     a(
+        "total_cholesterol",
+        "2093-3",
+        "Colesterol total",
+        "mg/dL",
+        "mg/dL",
+        "< 200",
+        None,
+        Some("200"),
+        2,
+        "serum",
+    ),
+    a(
+        "hdl_c",
+        "2085-9",
+        "Colesterol HDL",
+        "mg/dL",
+        "mg/dL",
+        "40 - 100",
+        Some("40"),
+        Some("100"),
+        2,
+        "serum",
+    ),
+    a(
         "lpa",
         "43583-4",
         "Lipoproteína (a)",
@@ -290,9 +315,11 @@ const ALEX_SERIES: Series = &[
             ("2025-01-20", "79"),
             ("2025-09-08", "101"),
             ("2026-03-02", "118"),
-            ("2026-09-14", "97"),
+            (ALEX_LIPID_DRAW, "97"),
         ],
     ),
+    ("total_cholesterol", &[(ALEX_LIPID_DRAW, "170")]),
+    ("hdl_c", &[(ALEX_LIPID_DRAW, "53")]),
     ("lpa", &[("2023-03-21", "138"), ("2025-09-08", "142")]),
     (
         "hba1c",
@@ -356,6 +383,8 @@ const ALEX_SERIES: Series = &[
             ("2023-10-04", "2.4"),
             ("2024-05-22", "1.9"),
             ("2025-01-20", "2.1"),
+            // Refresh TSH on the same draw to leave room for the hint in the 2 KB demo status.
+            (ALEX_LIPID_DRAW, "2.0"),
         ],
     ),
     (
@@ -450,8 +479,10 @@ const ALEX_SRC_IDS: [((&str, &str), &str); 9] = [
     (("ldl_c", "2024-05-22"), "src_3d2"),
     (("ldl_c", "2026-03-02"), "src_9f3"),
 ];
-/// Direct LDL, LOINC 18262-6.
-const DIRECT_LDL_DATES: [&str; 2] = ["2023-10-04", "2024-05-22"];
+const CARMEN_DIRECT_LDL_DRAW: &str = "2025-07-15";
+
+/// Direct LDL, LOINC 18262-6. Carmen's older high result uses a separate method from her latest draw.
+const DIRECT_LDL_DATES: [&str; 3] = ["2023-10-04", "2024-05-22", CARMEN_DIRECT_LDL_DRAW];
 
 const OTHER_SERIES: [(&str, Series); 3] = [
     (
@@ -468,7 +499,7 @@ const OTHER_SERIES: [(&str, Series); 3] = [
     (
         "carmen",
         &[
-            ("ldl_c", &[("2026-07-22", "110")]),
+            ("ldl_c", &[(CARMEN_DIRECT_LDL_DRAW, "198"), ("2026-07-22", "110")]),
             ("hba1c", &[("2025-07-15", "6.1"), ("2026-07-22", "6.4")]),
             ("egfr", &[("2025-07-15", "64"), ("2026-07-22", "58")]),
             ("creatinine", &[("2026-07-22", "0.98")]),
@@ -761,6 +792,44 @@ async fn record(conn: &mut PgConnection, kind: &str, body: Value, src: SrcRef) -
     )
     .await?;
     Ok(done.src_id)
+}
+
+async fn seed_cardio_inputs(conn: &mut PgConnection, ctx: &DemoContext) -> Result<()> {
+    let profile_id = ctx.family.profile("alex");
+    let user = ctx.family.user("alex");
+    let measured = dt(ALEX_LIPID_DRAW, 8)?.to_rfc3339();
+    let pressure = ObservationIn::from_json(json!({
+        "profile_id": profile_id,
+        "category": "vital-signs",
+        "printed_name": "Presión arterial sistólica",
+        "printed_value": "126",
+        "printed_unit": "mmHg",
+        "value_num": "126",
+        "alias_group": "bp_systolic",
+        "loinc": "8480-6",
+        "unit_ucum": "mm[Hg]",
+        "value_canonical": "126",
+        "unit_canonical": "mm[Hg]",
+        "derivation_version": DERIVATION,
+        "effective_at": measured,
+    }))?;
+    let smoking = ObservationIn::from_json(json!({
+        "profile_id": profile_id,
+        "category": "survey",
+        "source_kind": "self_reported",
+        "printed_name": "Tabaquismo",
+        "printed_value": "Nunca ha fumado",
+        "value_code": "266919005",
+        "alias_group": "smoking_status",
+        "loinc": "72166-2",
+        "derivation_version": DERIVATION,
+        "effective_at": measured,
+    }))?;
+    for obs in [pressure, smoking] {
+        let src = manual(conn, user, None, "manual").await?;
+        commit_observation(conn, &obs, &src, CommitOptions::new("person")).await?;
+    }
+    Ok(())
 }
 
 async fn seed_records(conn: &mut PgConnection, ctx: &DemoContext, assigned: &mut Assigned) -> Result<()> {
@@ -1165,6 +1234,7 @@ pub async fn seed_base(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result
     for (slug, series) in OTHER_SERIES {
         seed_reports(conn, ctx, slug, series, &[], &mut assigned).await?;
     }
+    seed_cardio_inputs(conn, ctx).await?;
     seed_records(conn, ctx, &mut assigned).await?;
     seed_wearables(conn, ctx).await?;
     let id = |lit: &str| {
@@ -1197,7 +1267,7 @@ pub async fn seed_base(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result
 }
 
 /// v0.3 family history: Alex's relatives as the mockup draws them (synthetic). Its own demo hook
-/// (`family`, after every other one), so the 0.3.0 seed stays exactly what it was.
+/// (`family`) so tests can add relatives to a 0.3.0 fixture after they migrate it.
 pub async fn seed_family(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result<()> {
     use ownhealth_core::family::{self, FamilyCondition, MemberIn};
     let alex = ctx.family.profile("alex");
@@ -1250,6 +1320,19 @@ pub async fn seed_family(conn: &mut PgConnection, ctx: &mut DemoContext) -> Resu
         )
         .await?;
     }
+    Ok(())
+}
+
+/// Carmen's demo consent lets her results feed lab hints for Alex.
+pub(crate) async fn seed_family_share(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result<()> {
+    sqlx::query(
+        "insert into family_share (source_profile_id, target_profile_id, categories) \
+         values ($1, $2, array['labs'])",
+    )
+    .bind(ctx.family.profile("carmen"))
+    .bind(ctx.family.profile("alex"))
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 

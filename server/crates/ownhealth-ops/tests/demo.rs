@@ -1,8 +1,10 @@
 //! The base demo seed (`tests/test_demo.py`).
 
+use ownhealth_core::access::{Principal, effective_permission, today_utc};
 use ownhealth_core::blobs::BlobStore;
-use ownhealth_core::demo::{DEMO_HOUSEHOLD, seed_demo};
+use ownhealth_core::demo::{DEMO_HOUSEHOLD, as_of, seed_demo};
 use ownhealth_core::testing::TestDb;
+use ownhealth_rules::{calc, family};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
@@ -143,5 +145,62 @@ async fn a_forced_second_seed_gets_generated_src_ids() -> anyhow::Result<()> {
     .fetch_all(&db.pool)
     .await?;
     assert_eq!(own, vec![(true, true), (false, true)]);
+    Ok(())
+}
+
+async fn fresh_demo() -> anyhow::Result<(TestDb, tempfile::TempDir)> {
+    ownhealth_ops::register();
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let settings = db.settings(dir.path())?;
+    let blobs = BlobStore::for_settings(&settings)?;
+    assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
+    Ok((db, dir))
+}
+
+#[tokio::test]
+async fn fresh_demo_computes_score2_and_prevent() -> anyhow::Result<()> {
+    let (db, _dir) = fresh_demo().await?;
+    let mut conn = db.pool.acquire().await?;
+    let alex: Uuid = sqlx::query_scalar("select id from profile where slug = 'alex'")
+        .fetch_one(&mut *conn)
+        .await?;
+    let document = calc::document(&mut conn, alex, as_of()).await?;
+    let items = document["items"].as_array().expect("calculator items are an array");
+    let risks: Vec<_> = items
+        .iter()
+        .filter(|item| matches!(item["id"].as_str(), Some("score2" | "prevent_cvd" | "prevent_ascvd")))
+        .collect();
+
+    assert_eq!(risks.len(), 3);
+    assert!(
+        risks
+            .iter()
+            .all(|item| item["status"] == "ok" && item["value"].is_string()),
+        "{risks:#?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_demo_shows_alex_a_shared_ldl_hint() -> anyhow::Result<()> {
+    let (db, _dir) = fresh_demo().await?;
+    let mut conn = db.pool.acquire().await?;
+    let (alex, household, user): (Uuid, Uuid, Uuid) = sqlx::query_as(
+        "select p.id, p.household_id, g.user_id from profile p join profile_grant g on g.profile_id = p.id \
+         where p.slug = 'alex' and g.role = 'owner'",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    let principal = Principal::session(user, household);
+    let perm = effective_permission(&mut conn, &principal, alex).await?;
+    let hints = family::hints(&mut conn, &principal, &perm, today_utc()).await?;
+
+    assert!(
+        hints
+            .iter()
+            .any(|hint| hint["rule"] == "lab.ldl_fh" && hint["rel"] == "MTH"),
+        "{hints:#?}"
+    );
     Ok(())
 }
