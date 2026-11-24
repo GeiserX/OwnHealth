@@ -517,15 +517,19 @@ export function nearDuplicateOf<T extends { kind: string; document_id: string | 
  * A connector pull's grouped item (fhir_unmapped_summary): the resource type, how many came, and the
  * connection's name. Null for any other item, or when the payload does not say a type and a count.
  */
-export function unmappedSummary(item: { kind: string; payload: Record<string, unknown> }): { type: string; count: number; source: string } | null {
+export function unmappedSummary(item: { kind: string; payload: Record<string, unknown> }): { type: string; count: number; source: string; key?: string } | null {
 	if (item.kind !== 'fhir_unmapped_summary') return null;
 	const p = item.payload;
 	const type = typeof p.resource_type === 'string' ? p.resource_type : '';
 	const count = typeof p.count === 'number' && Number.isInteger(p.count) && p.count > 0 ? p.count : 0;
 	if (!type || !count) return null;
 	const label = (p.source as { label?: unknown } | null | undefined)?.label;
-	return { type, count, source: typeof label === 'string' ? label : '' };
+	// the C-CDA item for sections with text only names them with a key; a document's own titles stay as sent
+	return { type, count, source: typeof label === 'string' ? label : '', ...(type === CCDA_NARRATIVE ? { key: 'i2_fus_ccda_narrative' } : {}) };
 }
+
+/** The `resource_type` of the C-CDA item that lists the sections holding text only (server `ccda::NARRATIVE`). */
+export const CCDA_NARRATIVE = 'C-CDA narrative section';
 
 /** The review kinds a FHIR import leaves in the queue: one per resource from a file, and a pull's grouped item. */
 export const FHIR_ITEM_KINDS = ['fhir_unmapped', 'fhir_unmapped_summary'];

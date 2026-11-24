@@ -18,7 +18,7 @@ use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
 
 /// pdf | image | apple_health_zip | fhir_json | fhir_ndjson | genome_facts | vcf | tbi | gadgetbridge_db |
-/// libreview_csv | dexcom_clarity_csv | unknown
+/// libreview_csv | dexcom_clarity_csv | ccda | unknown
 pub type UploadKind = &'static str;
 
 /// Job kind per upload kind. Handlers: import.pdf (lane B), import.fhir_bundle and
@@ -32,6 +32,7 @@ pub fn job_kind(kind: &str) -> Option<&'static str> {
         "genome_facts" => "import.genome_facts",
         "gadgetbridge_db" => "import.gadgetbridge",
         "libreview_csv" | "dexcom_clarity_csv" => "import.cgm_csv",
+        "ccda" => "import.ccda",
         _ => return None,
     })
 }
@@ -49,6 +50,7 @@ pub fn mime(kind: &str) -> Option<&'static str> {
         "tbi" => "application/octet-stream",
         "gadgetbridge_db" => "application/vnd.sqlite3",
         "libreview_csv" | "dexcom_clarity_csv" => "text/csv",
+        "ccda" => "application/hl7-cda+xml",
         _ => return None,
     })
 }
@@ -134,7 +136,53 @@ pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKin
     if let Some(kind) = sniff_cgm_csv(head) {
         return kind;
     }
+    // a C-CDA document (slice 20): XML whose root element is a ClinicalDocument
+    if is_clinical_document(head) {
+        return "ccda";
+    }
     "unknown"
+}
+
+/// Whether `head` is XML whose root element is `ClinicalDocument`, with or without a prefix. A byte
+/// order mark, the XML declaration, processing instructions, comments and a DOCTYPE may come first;
+/// a DOCTYPE passes here so the importer refuses the file with its reason.
+fn is_clinical_document(head: &[u8]) -> bool {
+    fn after(rest: &[u8], from: usize, end: &[u8]) -> Option<usize> {
+        let at = rest.get(from..)?.windows(end.len()).position(|w| w == end)?;
+        Some(from + at + end.len())
+    }
+    let mut rest = head.strip_prefix(b"\xef\xbb\xbf").unwrap_or(head);
+    loop {
+        let start = rest.iter().position(|b| !b" \t\r\n".contains(b)).unwrap_or(rest.len());
+        rest = &rest[start..];
+        let skip = if rest.starts_with(b"<?") {
+            after(rest, 2, b"?>")
+        } else if rest.starts_with(b"<!--") {
+            after(rest, 4, b"-->")
+        } else if rest.starts_with(b"<!DOCTYPE") {
+            // an internal subset in brackets may hold `>` of its own
+            let close = rest.iter().position(|b| *b == b'>');
+            match rest.iter().position(|b| *b == b'[') {
+                Some(open) if close.is_none_or(|c| open < c) => after(rest, open, b"]").and_then(|i| {
+                    let gt = rest[i..].iter().position(|b| !b" \t\r\n".contains(b))?;
+                    (rest[i + gt] == b'>').then_some(i + gt + 1)
+                }),
+                _ => close.map(|c| c + 1),
+            }
+        } else {
+            break;
+        };
+        let Some(skip) = skip else { return false };
+        rest = &rest[skip..];
+    }
+    let Some(tag) = rest.strip_prefix(b"<") else {
+        return false;
+    };
+    let Some(end) = tag.iter().position(|b| b" \t\r\n/>".contains(b)) else {
+        return false;
+    };
+    let name = &tag[..end];
+    name.rsplit(|b| *b == b':').next() == Some(b"ClinicalDocument".as_slice())
 }
 
 /// The header cells that name a CGM export, in English, German and Spanish, as `header_key` writes
@@ -902,6 +950,42 @@ mod tests {
         assert_eq!(job_kind("libreview_csv"), Some("import.cgm_csv"));
         assert_eq!(job_kind("dexcom_clarity_csv"), Some("import.cgm_csv"));
         assert_eq!(mime("dexcom_clarity_csv"), Some("text/csv"));
+    }
+
+    #[test]
+    fn a_clinical_document_root_is_sniffed_as_ccda() {
+        let cases: [&[u8]; 5] = [
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ClinicalDocument xmlns=\"urn:hl7-org:v3\">",
+            b"\xef\xbb\xbf<?xml version=\"1.0\"?><?xml-stylesheet type=\"text/xsl\" href=\"CDA.xsl\"?>\n<!-- a sample -->\n<ClinicalDocument>",
+            b"  <cda:ClinicalDocument xmlns:cda=\"urn:hl7-org:v3\">",
+            // a DOCTYPE goes to the importer, which refuses it with a reason
+            b"<?xml version=\"1.0\"?><!DOCTYPE lolz [<!ENTITY lol \"lol\">]><ClinicalDocument>",
+            b"<ClinicalDocument\n  xmlns=\"urn:hl7-org:v3\">",
+        ];
+        for head in cases {
+            assert_eq!(
+                sniff("record.xml", head, None),
+                "ccda",
+                "{}",
+                String::from_utf8_lossy(head)
+            );
+        }
+        for head in [
+            b"<?xml version=\"1.0\"?><HealthData locale=\"en_US\">".as_slice(),
+            b"<ClinicalDocumentX>",
+            b"<!-- <ClinicalDocument> -->",
+            b"<?xml version=\"1.0\"?><!-- never closed",
+            b"ClinicalDocument",
+        ] {
+            assert_eq!(
+                sniff("record.xml", head, None),
+                "unknown",
+                "{}",
+                String::from_utf8_lossy(head)
+            );
+        }
+        assert_eq!(job_kind("ccda"), Some("import.ccda"));
+        assert_eq!(mime("ccda"), Some("application/hl7-cda+xml"));
     }
 
     #[test]

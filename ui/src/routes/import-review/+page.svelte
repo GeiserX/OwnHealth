@@ -311,7 +311,7 @@
 		}
 		// A connector pull's resources of one type we do not show yet: one line with their count.
 		const grouped = unmappedSummary(i);
-		if (grouped) return tp('i2_fus_t', grouped.count, { type: grouped.type, source: grouped.source || '—', n: fmtNum(grouped.count) });
+		if (grouped) return tp('i2_fus_t', grouped.count, { type: grouped.key ? t(grouped.key) : grouped.type, source: grouped.source || '—', n: fmtNum(grouped.count) });
 		// A scan's chip already says what it is; the line names the file.
 		if (i.kind === 'pending_document' && i.document_id && docName(i.document_id)) return docName(i.document_id);
 		return t('i2_kind_' + i.kind);
