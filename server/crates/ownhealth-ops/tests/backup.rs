@@ -9,11 +9,6 @@
 //! makes its own OWNHEALTH_SECRETS_KEY at run time; a fresh stack takes the live one unless a test
 //! wants another, and reads the live keyring folder, as a restore on the same host does.
 
-#[path = "support/verify.rs"]
-mod verify;
-
-use verify::verify_restore;
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +19,7 @@ use ownhealth_core::demo::seed_demo;
 use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::migrate;
 use ownhealth_core::testing::TestDb;
+use ownhealth_ops::verify_restore;
 use serde_json::Value;
 use sha2::Digest;
 use tempfile::TempDir;

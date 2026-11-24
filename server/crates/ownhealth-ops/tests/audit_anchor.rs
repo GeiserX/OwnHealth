@@ -6,17 +6,13 @@
 //!
 //! pg_dump and pg_restore 17 come from PATH or OWNHEALTH_PG_BINDIR, as for tests/backup.rs.
 
-#[path = "support/verify.rs"]
-mod verify;
-
-use verify::verify_restore;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use ownhealth_core::audit::{AuditEvent, verify_chain, write_audit};
 use ownhealth_core::config::Settings;
 use ownhealth_core::testing::TestDb;
+use ownhealth_ops::verify_restore;
 use serde_json::Value;
 use tempfile::TempDir;
 

@@ -50,13 +50,12 @@ use std::time::{Duration, Instant};
 use chrono::{NaiveDate, SecondsFormat, Utc};
 use ownhealth_core::audit::{ChainBreakKind, ChainRead, verify_chain_with};
 use ownhealth_core::blobs::{self, BlobOwner, BlobStore};
-use ownhealth_core::config::Settings;
+use ownhealth_core::config::{Settings, quote_url_component};
 use ownhealth_core::keyfile::{self, owner_writes_only};
 use ownhealth_core::keys::{self, Kek};
 use ownhealth_core::{Error, Result};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgConnectOptions;
 use sqlx::{AssertSqlSafe, Connection, PgConnection, PgPool};
 use tokio::process::Command;
 use uuid::Uuid;
@@ -143,17 +142,22 @@ pub(crate) fn pg_conn(url: &str) -> (String, Option<String>) {
     )
 }
 
-/// The same URL naming another database (query kept).
+/// Select another database and keep the other connection options.
 fn with_db(url: &str, db: &str) -> String {
     let url = libpq_url(url);
-    // The query may hold a `/` (sslrootcert=/etc/ca.pem), so cut it off before finding the path.
-    let (path, query) = url.split_once('?').unwrap_or((&url, ""));
-    let base = path.rsplit_once('/').map_or(path, |(b, _)| b);
-    if query.is_empty() {
-        format!("{base}/{db}")
-    } else {
-        format!("{base}/{db}?{query}")
+    let (scheme, rest) = url.split_once("://").unwrap_or(("postgresql", &url));
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let authority = path.split('/').next().unwrap_or_default();
+    let mut target = format!("{scheme}://{authority}/{}", quote_url_component(db));
+    // A dbname query parameter takes precedence over the path.
+    let options = query.split('&').filter(|option| {
+        !option.is_empty() && percent_decode(option.split('=').next().unwrap_or_default()) != "dbname"
+    });
+    for (i, option) in options.enumerate() {
+        target.push(if i == 0 { '?' } else { '&' });
+        target.push_str(option);
     }
+    target
 }
 
 /// The argv after the tool name, and the password that goes in PGPASSWORD instead.
@@ -1592,14 +1596,19 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
     Ok(report)
 }
 
+fn database_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 /// The scratch database of verify-restore. A new database lets PUBLIC connect, and the server may
 /// hold other roles (the wearables sidecar's own one), so only the owner may open this one.
 async fn create_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
-    sqlx::query(AssertSqlSafe(format!("create database \"{scratch}\"")))
+    let ident = database_ident(scratch);
+    sqlx::query(AssertSqlSafe(format!("create database {ident}")))
         .execute(&mut *admin)
         .await?;
     if let Err(error) = sqlx::query(AssertSqlSafe(format!(
-        "revoke connect, temporary on database \"{scratch}\" from public"
+        "revoke connect, temporary on database {ident} from public"
     )))
     .execute(&mut *admin)
     .await
@@ -1613,57 +1622,46 @@ async fn create_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
 }
 
 async fn drop_scratch(admin: &mut PgConnection, scratch: &str) -> Result<()> {
-    sqlx::query(AssertSqlSafe(format!("drop database \"{scratch}\" with (force)")))
+    let ident = database_ident(scratch);
+    sqlx::query(AssertSqlSafe(format!("drop database if exists {ident} with (force)")))
         .execute(admin)
         .await?;
     Ok(())
 }
 
-/// Database names are cluster-wide. Take the lock in the same database for every verifier,
-/// including verifiers with different live databases.
-async fn try_lock_verification(admin: &mut PgConnection) -> Result<()> {
+/// PostgreSQL advisory locks are local to the database where the session takes them.
+async fn try_lock_verification(live_conn: &mut PgConnection) -> Result<()> {
     let locked: bool =
         sqlx::query_scalar("select pg_catalog.pg_try_advisory_lock(pg_catalog.hashtext('ownhealth.verify_restore'))")
-            .fetch_one(admin)
+            .fetch_one(live_conn)
             .await?;
     if !locked {
-        return Err(ops_error("verify-restore is already running on this Postgres server"));
+        return Err(ops_error("verify-restore is already running for this database"));
     }
     Ok(())
 }
 
-/// Clear this role's abandoned scratch databases while holding the verification lock.
-/// The prefix plus 32 hex digits is reserved for verify-restore. The older format is
-/// specific to the live database. Quote the names in Postgres before using them in DDL.
-async fn sweep_scratch(admin: &mut PgConnection, live_db: &str) -> Result<()> {
-    let stale: Vec<String> = sqlx::query_scalar(
-        "select pg_catalog.quote_ident(datname) from pg_catalog.pg_database \
-         where datdba = (select oid from pg_catalog.pg_roles where rolname = current_user) \
-           and not datistemplate and datname not in (current_database(), $1::name) \
-           and (datname::text = $1 || '_restore_check' or datname ~ '^oh_restore_check_[0-9a-f]{32}$')",
-    )
-    .bind(live_db)
-    .fetch_all(&mut *admin)
-    .await?;
-    for name in stale {
-        sqlx::query(AssertSqlSafe(format!("drop database {name} with (force)")))
-            .execute(&mut *admin)
-            .await?;
-    }
-    Ok(())
-}
-
-/// Restore into a scratch database unique to this run, compare with the manifest, drop it.
-/// The session lock on the admin connection covers the sweep, restore, and cleanup.
+/// Restore into this live database's scratch database, compare with the manifest, then drop it.
+/// The live connection holds the session lock from the initial cleanup until the final drop.
 /// `ok` is true only when every row count, every blob hash and every profile's state_hash match, and
 /// the keyring holds every key the backup needs, or lists its profile as deleted.
 pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value> {
     let live = settings.sqlx_url();
-    let options: PgConnectOptions = live.parse()?;
-    let mut admin = PgConnection::connect_with(&options.clone().database("postgres")).await?;
-    try_lock_verification(&mut admin).await?;
-    let live_db = options.get_database().unwrap_or(options.get_username());
-    sweep_scratch(&mut admin, live_db).await?;
+    let mut live_conn = PgConnection::connect(&live).await?;
+    try_lock_verification(&mut live_conn).await?;
+    // Check the name in the server's encoding. DDL would silently truncate an overlong identifier.
+    let (scratch, fits): (String, bool) = sqlx::query_as(
+        "select scratch, octet_length(scratch) <= current_setting('max_identifier_length')::integer \
+         from (select pg_catalog.current_database()::text || '_restore_check' as scratch) names",
+    )
+    .fetch_one(&mut live_conn)
+    .await?;
+    if !fits {
+        return Err(ops_error(format!(
+            "the scratch database name {scratch:?} exceeds the PostgreSQL identifier length limit"
+        )));
+    }
+    drop_scratch(&mut live_conn, &scratch).await?;
     let (manifest, _) = read_manifest(archive)?;
     let kek = backup_key(settings, &manifest)?;
     let ring_lock = if manifest["keys"].get("keyring").is_some() {
@@ -1676,8 +1674,7 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
     // lock covers the read alone, and a profile delete on the live install never waits on pg_restore.
     drop(ring_lock);
     let files = blobs::tree_files(&archive.join("blobs"))?;
-    let scratch = format!("oh_restore_check_{}", ownhealth_core::ids::token_hex(16));
-    create_scratch(&mut admin, &scratch).await?;
+    create_scratch(&mut live_conn, &scratch).await?;
     let target = with_db(&live, &scratch);
     let result = async {
         pg_restore(&target, archive).await?;
@@ -1687,8 +1684,8 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
         compare(&target, &manifest, &files, kek.as_ref(), ring.as_ref()).await
     }
     .await;
-    let dropped = drop_scratch(&mut admin, &scratch).await;
-    admin.close().await?;
+    let dropped = drop_scratch(&mut live_conn, &scratch).await;
+    live_conn.close().await?;
     let report = result?;
     dropped?;
     Ok(report)
@@ -1697,10 +1694,6 @@ pub async fn verify_restore(settings: &Settings, archive: &Path) -> Result<Value
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // The unit test binary shares one Postgres server. Only the overlap regression takes
-    // the real lock separately, so serialize setup and verification for these tests.
-    static VERIFY_RESTORE_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     tokio::task_local! {
         pub(super) static OBSERVE_PG_RESTORE: Box<dyn Fn(&str) -> Result<()> + Send>;
@@ -1783,7 +1776,6 @@ mod tests {
         use ownhealth_core::testing::TestDb;
         use std::fs::TryLockError;
 
-        let _serial = VERIFY_RESTORE_TESTS.lock().await;
         crate::register();
         let db = TestDb::empty().await?;
         let dir = tempfile::tempdir()?;
@@ -1824,57 +1816,6 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn each_verification_creates_and_drops_its_own_database() -> anyhow::Result<()> {
-        use ownhealth_core::testing::TestDb;
-
-        let _serial = VERIFY_RESTORE_TESTS.lock().await;
-        crate::register();
-        let db = TestDb::new().await?;
-        let dir = tempfile::tempdir()?;
-        let settings = db.settings(dir.path())?;
-        let archive = backup(&settings, &dir.path().join("backup")).await?;
-        let (recorded, seen) = std::sync::mpsc::channel();
-        OBSERVE_PG_RESTORE
-            .scope(
-                Box::new(move |url| {
-                    recorded.send(url.to_string()).expect("record scratch database");
-                    Ok(())
-                }),
-                async {
-                    assert_eq!(verify_restore(&settings, &archive).await?["ok"], true);
-                    assert_eq!(verify_restore(&settings, &archive).await?["ok"], true);
-                    Ok::<_, Error>(())
-                },
-            )
-            .await?;
-        let urls: Vec<_> = seen.try_iter().collect();
-        assert_eq!(urls.len(), 2);
-        assert_ne!(urls[0], urls[1], "verification reused a scratch database name");
-        for url in urls {
-            let error = match PgConnection::connect(&url).await {
-                Ok(conn) => {
-                    conn.close().await?;
-                    anyhow::bail!("scratch database remained");
-                }
-                Err(error) => error,
-            };
-            assert_eq!(
-                error.as_database_error().and_then(|e| e.code()).as_deref(),
-                Some("3D000")
-            );
-        }
-        Ok(())
-    }
-
-    // These names use the layouts written by the two earlier verify-restore implementations.
-    fn abandoned_scratch_names(live_db: &str) -> [String; 2] {
-        [
-            format!("oh_restore_check_{}", ownhealth_core::ids::token_hex(16)),
-            format!("{live_db}_restore_check"),
-        ]
-    }
-
     async fn scratch_exists(admin: &mut PgConnection, scratch: &str) -> sqlx::Result<bool> {
         sqlx::query_scalar("select exists(select 1 from pg_database where datname = $1)")
             .bind(scratch)
@@ -1883,83 +1824,102 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn round_seven_verification_refuses_overlap_without_dropping_anything() -> anyhow::Result<()> {
+    async fn round_eight_verification_refuses_overlap_without_dropping_the_scratch() -> anyhow::Result<()> {
         use ownhealth_core::testing::TestDb;
 
-        let _serial = VERIFY_RESTORE_TESTS.lock().await;
         crate::register();
         let db = TestDb::new().await?;
         let dir = tempfile::tempdir()?;
         let settings = db.settings(dir.path())?;
         let archive = backup(&settings, &dir.path().join("backup")).await?;
-        let mut admin = PgConnection::connect(&with_db(&db.url, "postgres")).await?;
-        let held: bool = sqlx::query_scalar(
-            "select pg_catalog.pg_try_advisory_lock(pg_catalog.hashtext('ownhealth.verify_restore'))",
-        )
-        .fetch_one(&mut admin)
-        .await?;
-        assert!(held, "the test must own the lock");
-        let names = abandoned_scratch_names(&db.name);
-        for scratch in &names {
-            create_scratch(&mut admin, scratch).await?;
+        let scratch = format!("{}_restore_check", db.name);
+        let mut lock = PgConnection::connect(&db.url).await?;
+        create_scratch(&mut lock, &scratch).await?;
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            let held: bool = sqlx::query_scalar(
+                "select pg_catalog.pg_try_advisory_lock(pg_catalog.hashtext('ownhealth.verify_restore'))",
+            )
+            .fetch_one(&mut lock)
+            .await?;
+            anyhow::ensure!(held, "the test must own the lock");
+            let result = verify_restore(&settings, &archive).await;
+            Ok::<_, anyhow::Error>((result, scratch_exists(&mut lock, &scratch).await?))
+        })
+        .await;
+        lock.close().await?; // releases the test's lock before asserting the result
+        let mut cleanup = PgConnection::connect(&db.url).await?;
+        if scratch_exists(&mut cleanup, &scratch).await? {
+            drop_scratch(&mut cleanup, &scratch).await?;
         }
-
-        let result = tokio::time::timeout(Duration::from_secs(20), verify_restore(&settings, &archive)).await;
-        let mut remaining = 0;
-        for scratch in &names {
-            if scratch_exists(&mut admin, scratch).await? {
-                remaining += 1;
-                drop_scratch(&mut admin, scratch).await?;
-            }
-        }
-        admin.close().await?; // releases the lock before asserting the result
-        let error = result?.expect_err("overlapping verification must fail");
+        let (result, preserved) = result??;
+        let error = result.expect_err("overlapping verification must fail");
         assert!(
             error.to_string().contains("verify-restore is already running"),
             "{error}"
         );
-        assert_eq!(remaining, names.len(), "overlap must drop nothing");
+        assert!(preserved, "overlap dropped the scratch database");
         Ok(())
     }
 
     #[tokio::test]
-    async fn round_seven_verification_drops_abandoned_scratch_databases() -> anyhow::Result<()> {
+    async fn round_eight_verifications_for_two_live_databases_can_overlap() -> anyhow::Result<()> {
         use ownhealth_core::testing::TestDb;
 
-        let _serial = VERIFY_RESTORE_TESTS.lock().await;
         crate::register();
-        let db = TestDb::new().await?;
         let dir = tempfile::tempdir()?;
-        let settings = db.settings(dir.path())?;
-        let archive = backup(&settings, &dir.path().join("backup")).await?;
-        let mut admin = PgConnection::connect(&with_db(&db.url, "postgres")).await?;
-        let names = abandoned_scratch_names(&db.name);
-        for scratch in &names {
-            create_scratch(&mut admin, scratch).await?;
-        }
-        // A similar name outside both scratch formats must survive the sweep.
-        let unrelated = format!("oh_restore_check_{}_other", db.name);
-        create_scratch(&mut admin, &unrelated).await?;
+        let first = TestDb::new().await?;
+        let second = TestDb::new().await?;
+        let first_settings = first.settings(&dir.path().join("first"))?;
+        let second_settings = second.settings(&dir.path().join("second"))?;
+        let first_archive = backup(&first_settings, &dir.path().join("backup-first")).await?;
+        let second_archive = backup(&second_settings, &dir.path().join("backup-second")).await?;
+        let first_scratch = format!("{}_restore_check", first.name);
+        let second_scratch = format!("{}_restore_check", second.name);
 
-        let report = verify_restore(&settings, &archive).await;
-        let mut leftovers = Vec::new();
-        for scratch in &names {
-            if scratch_exists(&mut admin, scratch).await? {
-                leftovers.push(scratch);
-                drop_scratch(&mut admin, scratch).await?;
-            }
+        let mut conn = PgConnection::connect(&first.url).await?;
+        // These two leftovers belong to this test. Each check should remove only its own.
+        create_scratch(&mut conn, &first_scratch).await?;
+        create_scratch(&mut conn, &second_scratch).await?;
+
+        let (at_restore, mut reached) = tokio::sync::mpsc::unbounded_channel();
+        let result = tokio::time::timeout(Duration::from_secs(60), async {
+            let first_check = OBSERVE_PG_RESTORE.scope(
+                Box::new(move |url| {
+                    at_restore.send(url.to_string()).expect("record scratch database");
+                    Ok(())
+                }),
+                verify_restore(&first_settings, &first_archive),
+            );
+            tokio::pin!(first_check);
+            let target = tokio::select! {
+                result = &mut first_check => anyhow::bail!("first check finished before pg_restore: {result:?}"),
+                target = reached.recv() => target.expect("observe pg_restore"),
+            };
+            let second_preserved = scratch_exists(&mut conn, &second_scratch).await?;
+            // Keep the first verification future alive, still holding its lock, while the second runs.
+            let second_report = verify_restore(&second_settings, &second_archive).await;
+            let first_report = first_check.await?;
+            Ok::<_, anyhow::Error>((target, second_preserved, first_report, second_report))
+        })
+        .await;
+        let first_left = scratch_exists(&mut conn, &first_scratch).await?;
+        let second_left = scratch_exists(&mut conn, &second_scratch).await?;
+        if first_left {
+            drop_scratch(&mut conn, &first_scratch).await?;
         }
-        let unrelated_survived = scratch_exists(&mut admin, &unrelated).await?;
-        if unrelated_survived {
-            drop_scratch(&mut admin, &unrelated).await?;
+        if second_left {
+            drop_scratch(&mut conn, &second_scratch).await?;
         }
-        admin.close().await?;
-        assert_eq!(report?["ok"], true);
+
+        let (target, second_preserved, first_report, second_report) = result??;
+        assert_eq!(second_report?["ok"], true);
+        assert_eq!(first_report["ok"], true);
+        assert!(target.ends_with(&format!("/{first_scratch}")), "incorrect scratch name");
         assert!(
-            leftovers.is_empty(),
-            "abandoned scratch databases remain: {leftovers:?}"
+            second_preserved,
+            "the first check dropped the second database's scratch"
         );
-        assert!(unrelated_survived, "verification dropped an unrelated database");
+        assert!(!first_left && !second_left, "a scratch database was left behind");
         Ok(())
     }
 
@@ -1969,7 +1929,6 @@ mod tests {
         use ownhealth_core::{demo::seed_demo, testing::TestDb};
         use std::os::unix::fs::PermissionsExt;
 
-        let _serial = VERIFY_RESTORE_TESTS.lock().await;
         crate::register();
         let db = TestDb::new().await?;
         let dir = tempfile::tempdir()?;
@@ -2112,6 +2071,21 @@ mod tests {
         assert_eq!(
             with_db("postgresql://u@h/live?host=/var/run/postgresql", "x"),
             "postgresql://u@h/x?host=/var/run/postgresql"
+        );
+    }
+
+    #[test]
+    fn with_db_encodes_the_name_and_replaces_a_dbname_option() {
+        assert_eq!(
+            with_db(
+                "postgresql://local?dbname=live&sslrootcert=/etc/ca.pem&db%6Eame=also_live",
+                "live /%\"_restore_check"
+            ),
+            "postgresql://local/live%20%2F%25%22_restore_check?sslrootcert=/etc/ca.pem"
+        );
+        assert_eq!(
+            database_ident("live /%\"_restore_check"),
+            "\"live /%\"\"_restore_check\""
         );
     }
 

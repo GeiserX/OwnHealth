@@ -199,7 +199,7 @@ Run it from cron or a systemd timer:
 A backup that was never restored counts as missing. `restic/restore-test.sh` proves the latest snapshot works:
 
 1. restic restores the snapshot into `/data/backups/restore`.
-2. `ownhealth verify-restore` removes scratch databases left by interrupted checks and loads the dump into a new one. Only one check can run at a time on the PostgreSQL server. The database role needs access to the `postgres` maintenance database.
+2. `ownhealth verify-restore` runs one check at a time per live database. It drops any database left at the reserved name `<live_db>_restore_check`, then creates it again and loads the dump.
 3. For a backup with a keyring, it loads the profile keys from `keyring.json`. It compares the row count of every table with the manifest, hashes every blob again, rebuilds the state of every profile and compares each `state_hash` with the manifest. An encrypted file the manifest does not list counts as corrupt. It opens every profile's key with the configured secrets key (`keys` in the report). A profile deleted since the backup is listed under `keys.shredded`: its files stay closed, and that is not a failure. A key the keyring lacks without listing the profile as deleted is listed under `keys.missing`, and fails the check. It checks the restored audit log too: it must end at the head the manifest recorded, and hold as far as it held then.
 4. It drops the scratch database and the restored files.
 
