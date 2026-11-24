@@ -1266,6 +1266,74 @@ async fn a_moved_ccda_document_runs_the_ccda_import_for_its_new_profile() -> R {
     Ok(())
 }
 
+/// T9 (round 4): a C-CDA document moved to another profile and then retracted before its queued
+/// import runs is never imported: the job finds the document no longer active and writes nothing, as
+/// the PDF import does.
+#[tokio::test]
+async fn a_moved_ccda_document_retracted_before_its_import_runs_writes_nothing() -> R {
+    let a = app().await?;
+    ownhealth_ingest_structured::register();
+    let kinds = ["import.ccda".to_string()];
+    let (alex, lucia) = (a.family.profile("alex"), a.family.profile("lucia"));
+    sqlx::query("update profile set display_name = 'Isabella Jones', birth_date = '2005-05-01' where id = $1")
+        .bind(lucia)
+        .execute(&a.rt.pool)
+        .await?;
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/ccda/history-and-physical.xml");
+    let xml = std::fs::read(&path)?;
+    let (s, v) = a.upload("alex", &[("profile", "alex")], &[("hp.xml", &xml)]).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let ctx = a.rt.job_context();
+    ownhealth_core::jobs::drain(&ctx, "core", 5, Some(&kinds)).await?;
+    let doc: uuid::Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'hp.xml'")
+        .bind(alex)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let (s, moved) = a
+        .post(
+            "alex",
+            &format!("/documents/{doc}/assign"),
+            Some(json!({"profile": "lucia"})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{moved}");
+    let (s, r) = a
+        .post(
+            "alex",
+            &format!("/documents/{doc}/retract"),
+            Some(json!({"reason": "wrong file"})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    ownhealth_core::jobs::drain(&ctx, "core", 5, Some(&kinds)).await?;
+    let result: Option<serde_json::Value> = sqlx::query_scalar("select result from job where id = $1")
+        .bind(moved["job_id"].as_i64().unwrap_or_default())
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let result = result.unwrap_or_default();
+    assert_eq!(result["reasons"]["not_assigned_or_retracted"], json!(1), "{result}");
+    for table in [
+        "condition",
+        "allergy",
+        "immunization",
+        "medication_statement",
+        "observation",
+    ] {
+        let n = a
+            .count(&format!("select count(*) from {table} where profile_id = '{lucia}'"))
+            .await?;
+        assert_eq!(n, 0, "{table}");
+    }
+    let open = a
+        .count(&format!(
+            "select count(*) from review_item where document_id = '{doc}' and status = 'open'"
+        ))
+        .await?;
+    assert_eq!(open, 0);
+    Ok(())
+}
+
 /// CR2 (round 3): a jobs read that returns a finished C-CDA import's result (what it brought into the
 /// record) writes one read audit row in the same transaction, as a DICOM import's does. A read while
 /// the job has no result yet writes none.

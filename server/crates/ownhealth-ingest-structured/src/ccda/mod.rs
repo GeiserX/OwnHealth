@@ -26,7 +26,9 @@
 //!   and a document whose body is a `nonXMLBody` (a scan or an attached file, with no coded section;
 //!   its reference is never followed).
 //! - The import locks its document row first, so a move of the document waits for the run to commit
-//!   (and then retracts what it wrote) instead of slipping in while it converts.
+//!   (and then retracts what it wrote) instead of slipping in while it converts. A document that is
+//!   no longer active (retracted after a move queued its run) is not read: the run writes nothing
+//!   and its summary says `not_assigned_or_retracted`, as the PDF import's does.
 //!
 //! The mapping is a Rust port of the C-CDA to FHIR converter of Medplum
 //! (`packages/ccda/src/ccda-to-fhir.ts`, <https://github.com/medplum/medplum>), Copyright Orangebot,
@@ -64,12 +66,21 @@ const ITEM_REFS: usize = 20;
 
 /// Import a C-CDA document already stored as a blob. Its `flags.ccda` lists what each section gave.
 pub async fn import_ccda(conn: &mut PgConnection, blobs: &BlobStore, document_id: Uuid) -> Result<ImportSummary> {
-    let (profile_id, sha, filename, flags): (Option<Uuid>, String, Option<String>, Value) = sqlx::query_as(
-        "select profile_id, encode(blob_sha256, 'hex'), filename, flags from document where id = $1 for update",
-    )
-    .bind(document_id)
-    .fetch_one(&mut *conn)
-    .await?;
+    let (profile_id, status, sha, filename, flags): (Option<Uuid>, String, String, Option<String>, Value) =
+        sqlx::query_as(
+            "select profile_id, status, encode(blob_sha256, 'hex'), filename, flags from document \
+             where id = $1 for update",
+        )
+        .bind(document_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    if status != "active" {
+        // retracted after this run was queued (a move queues one): nothing is read or written, as
+        // the PDF import does
+        let mut summary = ImportSummary::new(document_id.to_string());
+        summary.reasons.insert("not_assigned_or_retracted".into(), 1);
+        return Ok(summary);
+    }
     if let Some(done) = flags.get("import").filter(|d| truthy(Some(d))) {
         return Ok(crate::fhir::summary_from(done)); // the job ran before
     }
