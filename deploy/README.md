@@ -109,6 +109,28 @@ The one-shot `ow-db-init` creates the `openwearables` database and role, then OW
 
 **Restore.** `ownhealth backup` leaves OW's database out, because it is a cache of vendor data. After a restore onto new volumes, `docker compose up -d` with the profile on creates an empty one, and every vendor has to be connected again: the logins were only in that database.
 
+## Large wearable histories
+
+A watch that records every heartbeat adds millions of samples a year. Once the samples table holds more than `OWNHEALTH_PARTITION_ROWS` rows (default 50,000,000), a job splits it into one partition a month. A query over a few days then reads only the months it needs. Below the threshold, nothing changes.
+
+The job changes tables, so it runs as the database owner, in the `admin` service. The app's own role cannot run it. The app checks every hour, and when the table is past the threshold it logs once that the job is due. Run the job from cron once a day:
+
+```cron
+30 3 * * *  cd /opt/ownhealth && docker compose run --rm -T admin ownhealth partition >> partition.log 2>&1
+```
+
+Below the threshold, a run reads the table's row estimate and stops. The first run past it does three things:
+
+1. It builds two indexes on the table. The app keeps reading and writing.
+2. It checks every sample once against a cutoff date. The app keeps reading and writing.
+3. It puts the old table in place as the partition of every sample before the cutoff. No sample is copied. This step locks the table only for that change. If a reader holds the table, the step waits up to 2 seconds, tries again a few times, and otherwise leaves the switch to the next run.
+
+The cutoff is the first day of a month, at least 7 days ahead. Between steps 2 and 3, a new sample dated on or after the cutoff is refused, and its import is tried again later. A device with a correct clock sends none. Samples that a device with a wrong clock dated after the cutoff are set aside during that time and come back in step 3.
+
+Every later run makes next month's partition ahead of time. A sample dated after every month lands in a default partition. It moves into its month when a run makes that month.
+
+You can stop the job at any time and run it again: it goes on from where it stopped. It prints a JSON report and exits 1 when work is left for a later run: `busy` (another run or readers held the table) or `needs_owner` (it ran as the app's role). Backups, restores, the export and profile deletion work the same on the split table. To change the threshold, set `OWNHEALTH_PARTITION_ROWS` in `.env`.
+
 ## Monitoring the inboxes
 
 `GET /api/inboxes/health` lists every inbox you can see with its last run, its last successful sync, its last error, the failed runs in a row, and `stale`: switched on, polled, and no success for three poll intervals. `last_run_status` is `ok`, `partial` (some items were skipped or failed) or `error`, with `last_run_problems` and the first problem as `last_run_problem` (a code and a short message, never the content of a mail or document). A run in which every item failed counts as an error: the failed-runs count goes up and the last successful sync stays where it was. For a person, each row says `can_manage`: the Connections screen (v1.0) lists and reconnects only those rows. Only those rows also carry `created_at`, `poll_seconds`, `reconsent_needed_at` (the vendor refused the token, so someone must sign in again), `grant_expires_at`, `access_expires_at`, the connection's `server`, and `open_gaps`, the open sync-gap alerts filed on the source's profile. A viewer and a source token get none of them. Add `?format=prometheus` for the Prometheus text format. Labels carry the source id and kind only, never names or error text:
