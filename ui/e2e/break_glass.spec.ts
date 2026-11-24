@@ -46,7 +46,7 @@ async function quiet(browser: Browser, baseURL: string, user: string): Promise<B
 
 test.beforeAll(async ({ browser, baseURL }) => {
 	expect(db, 'the config names the database').not.toBe('');
-	const probe = await browser.newContext({ baseURL });
+	const probe = await browser.newContext({ baseURL, colorScheme: 'dark' });
 	ownerId = (await (await probe.request.get('/api/me')).json()).user.id;
 	patName = `Pat Rivera ${Date.now()}`;
 	const invite = await probe.request.post('/api/household/invites', { headers: headers(baseURL!), data: { display_name: patName, locale: 'en' } });
@@ -62,18 +62,40 @@ test.beforeAll(async ({ browser, baseURL }) => {
 });
 
 test.afterAll(async ({ baseURL }) => {
-	// leave no contact, open request or unread notice behind for the specs that run after this one
-	await owner.request.delete(`/api/profiles/alex/break-glass/contacts/${patId}`, { headers: headers(baseURL!) });
-	await owner.request.post('/api/notifications/read', { headers: headers(baseURL!), data: {} });
-	await owner.close();
-	await pat.close();
+	// leave no contact, open request or unread notice behind for the specs that run after this one: try
+	// both, close both browsers whatever happens, and fail when either did not work
+	const failed: string[] = [];
+	const attempt = async (what: string, call: () => Promise<{ ok(): boolean; status(): number; text(): Promise<string> }>, gone = false) => {
+		try {
+			const res = await call();
+			// a contact never named (a test stopped before it) leaves nothing behind either
+			if (!res.ok() && !(gone && res.status() === 404)) failed.push(`${what}: ${res.status()} ${await res.text()}`);
+		} catch (e) {
+			failed.push(`${what}: ${e}`);
+		}
+	};
+	try {
+		await attempt('remove the contact', () => owner.request.delete(`/api/profiles/alex/break-glass/contacts/${patId}`, { headers: headers(baseURL!) }), true);
+		await attempt('mark the notices read', () => owner.request.post('/api/notifications/read', { headers: headers(baseURL!), data: {} }));
+	} finally {
+		await owner?.close();
+		await pat?.close();
+	}
+	expect(failed).toEqual([]);
 });
 
 test('a contact asks, the owner cancels from the calendar link, and nothing opens', async ({ baseURL }) => {
 	const page = await owner.newPage();
 	const errors = pageErrors(page);
+	// only an owner reads the notices: this page does (the control of Pat's check below)
+	let ownerReads = 0;
+	page.on('request', (r) => {
+		if (new URL(r.url()).pathname === '/api/notifications') ownerReads++;
+	});
 	await page.goto('/family?lang=en');
 	const card = page.getByTestId('bg-owner');
+	// access opens once the calendar app fetched the request; the app cannot know whether anyone saw it
+	await expect(card).toContainText('Access opens only after the waiting time and once your calendar app has fetched the request.');
 	// no calendar feed of the owner yet: naming a contact waits for one
 	await expect(card.getByTestId('bg-need-feed')).toBeVisible();
 	await expect(card.getByRole('button', { name: 'Name a contact' })).toHaveCount(0);
@@ -98,11 +120,27 @@ test('a contact asks, the owner cancels from the calendar link, and nothing open
 	await expect(contact).toContainText('after 48 hours');
 	await expect(contact).toContainText('Read lab results');
 
-	// the contact asks, with a reason
+	// the contact asks, with a reason. Pat owns no profile, so Pat's pages never read notices.
 	const pp = await pat.newPage();
 	const patErrors = pageErrors(pp);
+	let patReads = 0;
+	pp.on('request', (r) => {
+		if (new URL(r.url()).pathname === '/api/notifications') patReads++;
+	});
+	// the first read of the card fails: it says so and offers a retry, where a list nobody named would
+	// show nothing
+	let failOnce = true;
+	await pp.route('**/api/break-glass', (route) => {
+		if (!failOnce || route.request().method() !== 'GET') return route.continue();
+		failOnce = false;
+		return route.fulfill({ status: 500, json: { detail: { code: 'internal', message: 'Internal error' } } });
+	});
 	await pp.goto('/family?lang=en');
 	const mine = pp.getByTestId('bg-contact-card');
+	await expect(mine).toContainText('Emergency access you can ask for');
+	await expect(mine).not.toContainText('Alex Rivera');
+	await mine.getByRole('button', { name: 'Retry' }).click();
+	await pp.unroute('**/api/break-glass');
 	await expect(mine).toContainText('Alex Rivera');
 	await mine.getByRole('button', { name: 'Ask for access' }).click();
 	await mine.getByLabel('Why you need access').fill('Alex is in hospital after a fall');
@@ -136,6 +174,11 @@ test('a contact asks, the owner cancels from the calendar link, and nothing open
 	page.on('request', (r) => {
 		if (r.url().includes('/api/auth/step-up')) stepUps.push(r.url());
 	});
+	// a login confirmed long ago: a step-up gate would ask now, so the empty list below can fail
+	await page.route('**/api/auth/state', async (route) => {
+		const res = await route.fetch();
+		await route.fulfill({ response: res, json: { ...(await res.json()), step_up_fresh: false } });
+	});
 	await page.goto(`${link}?lang=en`);
 	await expect(page.getByRole('heading', { level: 1 })).toHaveText('Emergency access request');
 	await expect(page.getByText(`${patName} asked for access to Alex Rivera`)).toBeVisible();
@@ -159,6 +202,8 @@ test('a contact asks, the owner cancels from the calendar link, and nothing open
 	expect(me.profiles.map((p: { slug: string }) => p.slug)).not.toContain('alex');
 	expect(errors).toEqual([]);
 	expect(patErrors).toEqual([]);
+	expect(ownerReads).toBeGreaterThan(0);
+	expect(patReads).toBe(0);
 	await pp.close();
 	await page.close();
 });
@@ -194,6 +239,7 @@ test('a second request waits for the owner calendar past its delay, opens once i
 		await page.goto(`/family?lang=${lang}`);
 		await expect(page.getByTestId('bg-request').getByRole('status')).toContainText(ownerLine);
 	}
+	await expect(page.getByTestId('bg-owner')).toContainText('cuando tu app de calendario ha recogido la solicitud.');
 	expect(sql(`select status from break_glass_request where id = '${second}'`)).toBe('requested');
 
 	// the owner's calendar app fetches the feed: the next request of a person opens it
@@ -220,9 +266,9 @@ test('a second request waits for the owner calendar past its delay, opens once i
 	expect(patErrors).toEqual([]);
 	await pp.close();
 
-	// every read through the request is in the owner's notices, as one line with its count
+	// every read through the request is in the owner's notices, as one line with the server's count
 	const notices = await (await owner.request.get('/api/notifications')).json();
-	const uses = notices.items.filter((n: { kind: string; request_id: string }) => n.kind === 'break_glass.use' && n.request_id === second).length;
+	const uses = notices.uses.find((u: { request_id: string }) => u.request_id === second).count;
 	expect(uses).toBeGreaterThan(1);
 	await page.goto('/family?lang=en');
 	await page.getByRole('button', { name: /^Notices/ }).click();
@@ -259,6 +305,111 @@ test('an end on a cancel screen left open after another owner ended it says so a
 	await page.close();
 });
 
+test('a request whose delay runs out while the pages are open shows open at the next tick, for the contact and the owner', async ({ baseURL }) => {
+	// Pat asks a third time; the owner's calendar app fetched the request, and its delay ends in seconds
+	const asked = await pat.request.post('/api/break-glass/requests', { headers: headers(baseURL!), data: { profile: 'alex', reason: 'Third try: Alex is back in hospital' } });
+	expect(asked.status(), await asked.text()).toBe(201);
+	const third = sql(`select id from break_glass_request where contact_user_id = '${patId}' and status = 'requested'`);
+	expect(third).toMatch(/^[0-9a-f-]{36}$/);
+	sql(`update break_glass_request set activates_at = now() + interval '8 seconds' where id = '${third}'`);
+	expect((await owner.request.get(feed)).status()).toBe(200);
+	// three pages left open on it, each with a clock the test moves on: the contact's card, the owner's
+	// card and the cancel screen
+	const pp = await pat.newPage();
+	const page = await owner.newPage();
+	const cs = await owner.newPage();
+	const errors = [pageErrors(pp), pageErrors(page), pageErrors(cs)];
+	for (const p of [pp, page, cs]) await p.clock.install();
+	await pp.goto('/family?lang=en');
+	const mine = pp.getByTestId('bg-contact-card');
+	await expect(mine.getByRole('status')).toContainText('Waiting. Access opens on');
+	await page.goto('/family?lang=en');
+	const row = page.getByTestId('bg-request');
+	await expect(row.getByRole('status')).toContainText('Waiting. Access opens on');
+	await cs.goto(`/family/break-glass/${third}?lang=en`);
+	await expect(cs.getByTestId('bgc-status')).toContainText('Waiting.');
+	// the delay runs out on the server; each page learns it at its next tick, with no reload
+	await expect.poll(() => sql(`select activates_at <= now() from break_glass_request where id = '${third}'`), { timeout: 20_000 }).toBe('t');
+	await page.clock.fastForward('00:31');
+	await expect(row.getByRole('status')).toContainText('Open until');
+	await expect(row.getByRole('button', { name: 'End access' })).toBeVisible();
+	await cs.clock.fastForward('00:31');
+	await expect(cs.getByTestId('bgc-status')).toContainText('Open until');
+	await pp.clock.fastForward('01:01');
+	await expect(mine.getByRole('status')).toContainText('Open until');
+	await expect(mine.getByRole('button', { name: "Open Alex Rivera's records" })).toBeVisible();
+	expect(sql(`select status from break_glass_request where id = '${third}'`)).toBe('active');
+	for (const e of errors) expect(e).toEqual([]);
+	// the owner ends it; the contact's card follows at its next refresh, and then stops reading
+	const ended = await owner.request.post(`/api/profiles/alex/break-glass/requests/${third}/revoke`, { headers: headers(baseURL!) });
+	expect(ended.status(), await ended.text()).toBe(200);
+	let reads = 0;
+	pp.on('request', (r) => {
+		if (new URL(r.url()).pathname === '/api/break-glass') reads++;
+	});
+	await pp.clock.fastForward('01:01');
+	await expect(mine.getByRole('status')).toContainText('Ended by an owner on');
+	await expect(mine.getByRole('button', { name: "Open Alex Rivera's records" })).toHaveCount(0);
+	await pp.clock.fastForward('05:00');
+	await pp.clock.fastForward('05:00');
+	expect(reads).toBe(1);
+	for (const p of [pp, page, cs]) await p.close();
+});
+
+test('a first notices load that fails opens them at the next refresh, with the read count of the server', async ({ browser, baseURL }) => {
+	const ctx = await browser.newContext({ baseURL, colorScheme: 'dark' });
+	const page = await ctx.newPage();
+	const errors = pageErrors(page);
+	await page.clock.install();
+	const me = await (await ctx.request.get('/api/me')).json();
+	const alex = me.profiles.find((p: { slug: string }) => p.slug === 'alex');
+	const profile = { id: alex.id, slug: 'alex', display_name: alex.display_name };
+	const contact = { user_id: '00000000-0000-4000-8000-000000000049', display_name: 'Sam Fixture' };
+	const at = (s: number) => new Date(Date.now() - s * 1000).toISOString();
+	const notice = (id: string, kind: string, s: number) => ({ id, kind, profile, request_id: 'r-fixture', actor: null, contact, created_at: at(s), read_at: null });
+	// the list holds two of the request's reads; the server counted three
+	const fixture = {
+		items: [notice('n-open', 'break_glass.activate', 60), notice('n-use-1', 'break_glass.use', 30), notice('n-use-2', 'break_glass.use', 20)],
+		uses: [{ request_id: 'r-fixture', profile, contact, count: 3, unread: 3, last_at: at(20) }],
+		unread: 4
+	};
+	let reads = 0;
+	await page.route('**/api/notifications', (route) => {
+		reads++;
+		if (reads === 1) return route.fulfill({ status: 500, json: { detail: { code: 'internal', message: 'Internal error' } } });
+		return route.fulfill({ json: fixture });
+	});
+	await page.goto('/?lang=en');
+	await expect.poll(() => reads).toBe(1);
+	await expect(page.getByRole('button', { name: /^Notices/ })).toHaveCount(0);
+	// the tab comes back a minute later: the read works now, and the unread notices open by themselves
+	await page.clock.fastForward('01:01');
+	await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+	const panel = page.getByRole('region', { name: /^Notices/ });
+	await expect(panel).toBeVisible();
+	await expect(panel.getByRole('listitem')).toContainText('Sam Fixture · Alex Rivera');
+	await expect(panel.getByRole('listitem')).toContainText('read through it 3 times');
+	// Mark all as read, then the keyboard moves on before the answer: the answer leaves it where it went
+	let release = () => {};
+	const gate = new Promise<void>((r) => (release = r));
+	await page.route('**/api/notifications/read', async (route) => {
+		await gate;
+		await route.fulfill({ json: { read: 0 } });
+	});
+	const readAll = panel.getByRole('button', { name: 'Mark all as read' });
+	await readAll.click();
+	const es = page.locator('button[lang="es"]').first();
+	await es.focus();
+	release();
+	await expect.poll(() => reads).toBe(3);
+	await expect(readAll).toBeEnabled();
+	await page.waitForTimeout(300);
+	await expect(es).toBeFocused();
+	await expect(panel).toBeVisible();
+	expect(errors).toEqual([]);
+	await ctx.close();
+});
+
 test('unread notices open at the next login, in es and en, until they are read', async ({ browser, baseURL }) => {
 	for (const [lang, title, uses] of [
 		['en', 'Notices', 'read through it'],
@@ -292,6 +443,18 @@ test('unread notices open at the next login, in es and en, until they are read',
 		expect(errors).toEqual([]);
 		await ctx.close();
 	}
+	// the session ends mid-use, on any call of a page: the next login in this tab opens them again
+	const mid = await browser.newContext({ baseURL, colorScheme: 'dark' });
+	const mp = await mid.newPage();
+	await mp.goto('/?lang=en');
+	await expect(mp.getByRole('region', { name: /^Notices/ })).toBeVisible();
+	await mp.route('**/api/household', (route) => route.fulfill({ status: 401, json: { detail: { code: 'unauthenticated', message: 'Not logged in.' } } }));
+	await mp.goto('/family?lang=en');
+	await expect.poll(() => mp.evaluate((k) => localStorage.getItem(k), SHOWN)).toBeNull();
+	await mp.unroute('**/api/household');
+	await mp.goto('/?lang=en');
+	await expect(mp.getByRole('region', { name: /^Notices/ })).toBeVisible();
+	await mid.close();
 	const ctx = await browser.newContext({ baseURL, colorScheme: 'dark' });
 	const page = await ctx.newPage();
 	await page.goto('/?lang=en');

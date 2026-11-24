@@ -2104,7 +2104,7 @@ export const dict = {
 		i2_img_reason_unsupported_charset: "The DICOM text encoding could not be read",
 		i2_img_accept_d: "Accept adds this study to this profile's record, under the patient the disc names.",
 		// slice 49, break-glass screens: contacts, requests, the cancel screen and the notices
-		bgl_own_d: "A person you name here can ask to read {name}'s records in an emergency. Access opens only after the waiting time and once your calendar app has shown you the request. Until then you can cancel it, and you are told of every page they open.",
+		bgl_own_d: "A person you name here can ask to read {name}'s records in an emergency. Access opens only after the waiting time and once your calendar app has fetched the request. Until then you can cancel it, and you are told of every page they open.",
 		bgl_need_feed: "Naming a contact needs your own calendar feed of this profile: it is how you hear of a request.",
 		bgl_need_feed_go: "Make one in Settings",
 		bgl_contacts: "Contacts",
@@ -4285,7 +4285,7 @@ export const dict = {
 		i2_img_reason_unsupported_charset: "No se ha podido leer la codificación del texto DICOM",
 		i2_img_accept_d: "Aceptar añade este estudio al historial de este perfil, con el paciente que nombra el disco.",
 		// slice 49, pantallas de acceso de emergencia: contactos, solicitudes, pantalla de cancelar y avisos
-		bgl_own_d: "Una persona que nombres aquí puede pedir leer el historial de {name} en una emergencia. El acceso solo se abre tras el tiempo de espera y cuando tu app de calendario te ha mostrado la solicitud. Hasta entonces puedes cancelarla, y se te avisa de cada página que abra.",
+		bgl_own_d: "Una persona que nombres aquí puede pedir leer el historial de {name} en una emergencia. El acceso solo se abre tras el tiempo de espera y cuando tu app de calendario ha recogido la solicitud. Hasta entonces puedes cancelarla, y se te avisa de cada página que abra.",
 		bgl_need_feed: "Para nombrar un contacto necesitas tu propio calendario de este perfil: es como te enteras de una solicitud.",
 		bgl_need_feed_go: "Créalo en Ajustes",
 		bgl_contacts: "Contactos",

@@ -1,10 +1,14 @@
 <script lang="ts">
 	// Family > Emergency access you can ask for (GET /break-glass): the profiles that named the person
 	// as an emergency contact, what each would let them read, and their last request with where it
-	// stands. Asking needs a reason and a step-up. Nothing shows for a person nobody named.
+	// stands. Asking needs a reason and a step-up. Nothing shows for a person nobody named; a list that
+	// did not arrive says so, with a retry. While a request is open (waiting, waiting for the calendar,
+	// or active), the list is read again every minute and when the window comes back, so the card
+	// follows it as it opens, runs out or is ended; it stops once none is open.
 	import { askBreakGlass, myBreakGlass } from '#lib/api/breakglass';
 	import { getMe } from '#lib/api/core';
 	import type { BreakGlassNamed } from '#lib/api/types';
+	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import { Loader, errRaw, errText, scopeText, tf, tp } from '#lib/components/pages1/util.svelte';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { focusOnOpen } from '#lib/actions/focusOnOpen';
@@ -15,6 +19,8 @@
 	import { tick } from 'svelte';
 	import { app, setProfile } from '#lib/state/app.svelte';
 
+	/** How often an open request is read again while the page stays open. */
+	const REFRESH_MS = 60_000;
 	const named = new Loader<{ items: BreakGlassNamed[] }>();
 	const load = () => named.run(myBreakGlass);
 	$effect(() => {
@@ -35,6 +41,17 @@
 	let error = $state<{ text: string; raw: string } | null>(null);
 
 	const open = (n: BreakGlassNamed) => !!n.request && ['requested', 'active'].includes(n.request.status) && phase(n.request, now) !== 'expired';
+	// a boolean, so the clock's ticks do not restart the timer
+	const watching = $derived(items.some(open));
+	$effect(() => {
+		if (!watching) return;
+		const id = setInterval(load, REFRESH_MS);
+		window.addEventListener('focus', load);
+		return () => {
+			clearInterval(id);
+			window.removeEventListener('focus', load);
+		};
+	});
 	function start(slug: string) {
 		asking = slug;
 		reason = '';
@@ -68,7 +85,12 @@
 	};
 </script>
 
-{#if items.length}
+{#if named.error && !named.data}
+	<section class="card bg" aria-labelledby="bg-mine-h" data-testid="bg-contact-card">
+		<h3 id="bg-mine-h">{t('bgl_mine')}<span class="r">{t('h1_bg_r')}</span></h3>
+		<NotReady error={named.error} onretry={load} />
+	</section>
+{:else if items.length}
 	<section class="card bg" aria-labelledby="bg-mine-h" data-testid="bg-contact-card">
 		<h3 id="bg-mine-h">{t('bgl_mine')}<span class="r">{t('h1_bg_r')}</span></h3>
 		<div class="note">{t('bgl_mine_d')}</div>
