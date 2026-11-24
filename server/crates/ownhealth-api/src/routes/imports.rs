@@ -250,8 +250,10 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         .iter()
         .map(|r| row_to_json(r).map(Value::Object))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut dicom_profiles = BTreeSet::new();
-    let mut dicom_jobs = Vec::new();
+    // the jobs whose details this read returns (a DICOM import's, a finished C-CDA import's): one
+    // audit row names them all
+    let mut read_profiles = BTreeSet::new();
+    let mut read_jobs = Vec::new();
     for j in &mut jobs {
         pydantic_datetimes(j, &["created_at", "finished_at"]);
         let permission = j["profile_id"]
@@ -261,6 +263,7 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         let kind = j["kind"].as_str().unwrap_or_default();
         let wearable = WEARABLE_JOBS.contains(&kind);
         let dicom = kind == ownhealth_imaging::import::JOB;
+        let ccda = kind == ownhealth_ingest_structured::ccda::JOB;
         if let Some(perm) = permission {
             perm.record_read(if wearable { &["read:wearables"] } else { &[] });
         }
@@ -270,26 +273,34 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         if dicom {
             if let Some(perm) = permission.filter(|p| p.has("read:records")) {
                 perm.record_read(&["read:records"]);
-                dicom_profiles.insert(perm.profile.id);
-                dicom_jobs.push(j["id"].to_string());
+                read_profiles.insert(perm.profile.id);
+                read_jobs.push(j["id"].to_string());
             } else {
                 j["result"] = Value::Null;
                 j["filename"] = Value::Null;
                 j["last_error"] = Value::Null;
             }
         }
+        // a finished C-CDA import's result says what it brought into the record
+        if ccda
+            && !j["result"].is_null()
+            && let Some(perm) = permission
+        {
+            read_profiles.insert(perm.profile.id);
+            read_jobs.push(j["id"].to_string());
+        }
     }
-    if !dicom_jobs.is_empty() {
+    if !read_jobs.is_empty() {
         let mut audit = AuditEvent::new(caller.0.actor_kind(), "ui", "read");
         audit.actor_id = caller.0.user_id;
         audit.token_id = caller.0.token_id;
         audit.tool = Some("GET /api/jobs".into());
-        if dicom_profiles.len() == 1 {
-            audit.profile_id = dicom_profiles.first().copied();
+        if read_profiles.len() == 1 {
+            audit.profile_id = read_profiles.first().copied();
         }
         audit.resource_type = Some("job".into());
-        audit.rows_out = i32::try_from(dicom_jobs.len()).ok();
-        audit.resource_ids = Some(dicom_jobs);
+        audit.rows_out = i32::try_from(read_jobs.len()).ok();
+        audit.resource_ids = Some(read_jobs);
         write_audit(&mut tx, &audit).await?;
     }
     tx.commit().await?;

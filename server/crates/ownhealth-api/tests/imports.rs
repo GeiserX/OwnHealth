@@ -1265,3 +1265,43 @@ async fn a_moved_ccda_document_runs_the_ccda_import_for_its_new_profile() -> R {
     assert_eq!(a.count(&conditions(alex)).await?, 0);
     Ok(())
 }
+
+/// CR2 (round 3): a jobs read that returns a finished C-CDA import's result (what it brought into the
+/// record) writes one read audit row in the same transaction, as a DICOM import's does. A read while
+/// the job has no result yet writes none.
+#[tokio::test]
+async fn reading_a_finished_ccda_job_writes_one_audit_row() -> R {
+    let a = app().await?;
+    ownhealth_ingest_structured::register();
+    let kinds = ["import.ccda".to_string()];
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/ccda/ccd-2.xml");
+    let xml = std::fs::read(&path)?;
+    let (s, v) = a.upload("alex", &[("profile", "alex")], &[("ccd.xml", &xml)]).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let job = v["items"][0]["job_id"]
+        .as_i64()
+        .ok_or_else(|| anyhow::anyhow!("no job: {v}"))?;
+    let audits = "select count(*) from audit_event where tool = 'GET /api/jobs' and action = 'read'";
+    let (s, body) = a.get("alex", &format!("/jobs?ids={job}")).await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["jobs"][0]["result"], serde_json::Value::Null, "{body}");
+    assert_eq!(a.count(audits).await?, 0);
+    ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?;
+    let (s, body) = a.get("alex", &format!("/jobs?ids={job}")).await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(body["jobs"][0]["result"]["document_id"].is_string(), "{body}");
+    let rows: Vec<(uuid::Uuid, Option<uuid::Uuid>, Vec<String>)> = sqlx::query_as(
+        "select actor_id, profile_id, resource_ids from audit_event where tool = 'GET /api/jobs' and action = 'read'",
+    )
+    .fetch_all(&a.rt.pool)
+    .await?;
+    assert_eq!(
+        rows,
+        [(
+            a.family.user("alex"),
+            Some(a.family.profile("alex")),
+            vec![job.to_string()]
+        )]
+    );
+    Ok(())
+}
