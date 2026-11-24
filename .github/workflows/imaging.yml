@@ -123,7 +123,10 @@ jobs:
           nohup server/target/debug/ownhealth serve > "$RUNNER_TEMP/imaging-app.log" 2>&1 </dev/null &
           pid=$!
           for _ in {1..90}; do
-            kill -0 "$pid"
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo 'OwnHealth exited before it became ready.' >&2
+              exit 1
+            fi
             if curl -fsS "$OWNHEALTH_IMAGING_CD_URL/readyz" >/dev/null 2>&1; then exit 0; fi
             sleep 1
           done
@@ -158,6 +161,20 @@ jobs:
             fi
           done
           exit "$failed"
+      - name: Show the end of the OwnHealth log
+        if: failure()
+        run: tail -n 200 "$RUNNER_TEMP/imaging-app.log" || true
+      # No Playwright trace: it would record the viewer capability URL.
+      - name: Keep the screenshots and the OwnHealth log of a red run
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: imaging-cd-results
+          path: |
+            ui/e2e/test-results
+            ${{ runner.temp }}/imaging-control-*
+            ${{ runner.temp }}/imaging-app.log
+          if-no-files-found: ignore
       - name: Remove the throwaway imaging stack
         if: always()
         run: |

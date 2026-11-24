@@ -14,6 +14,8 @@ export default defineConfig({
 		baseURL: process.env.OWNHEALTH_IMAGING_CD_URL,
 		colorScheme: 'dark',
 		locale: process.env.OWNHEALTH_IMAGING_CD_LANG ?? 'en',
-		headless: true
+		headless: true,
+		// No trace: it would record the viewer capability URL. A screenshot shows only the page.
+		screenshot: 'only-on-failure'
 	}
 });
