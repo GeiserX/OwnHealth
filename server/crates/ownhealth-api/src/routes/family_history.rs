@@ -8,6 +8,12 @@
 //!   `relationships.yaml`, and under `patterns` the ownhealth.family/v1 document of the same rows:
 //!   the guideline patterns they show (`ownhealth_rules::family`), worded in es and en.
 //!
+//! - `POST /profiles/{p}/family/gedcom/preview` (multipart `file`) and `POST /profiles/{p}/family/gedcom`
+//!   (`file` and `self`): a GEDCOM family tree read in memory and never stored (`core::gedcom`). The
+//!   preview lists its people by position with sex, birth year, death and links, never a name; the
+//!   import turns each relative of `self` into a `family_proposal` review item. Both need the `import`
+//!   action and `read:records`.
+//!
 //! - `GET /profiles/{p}/family-shares`: what this profile lets its results feed as hints in each other
 //!   profile of the household (`family_share`, migration 1111), with that profile's minor flag and the
 //!   degree of its relative row linked to this one. A profile the caller has no access to is masked:
@@ -22,16 +28,18 @@
 //! Writing needs the role action `write`. A masked row can only be removed, or unlinked by a new
 //! version that holds what the caller sends. Nothing here enters the hashed state body.
 
+use axum::extract::multipart::MultipartRejection;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Datelike;
 use ownhealth_core::Runtime;
 use ownhealth_core::access::{Permission, Principal, accessible_profiles, effective_permission};
 use ownhealth_core::audit::{AuditEvent, write_audit, write_audit_at};
 use ownhealth_core::family::{self, Catalog, LinkChange, Member, MemberIn};
+use ownhealth_core::gedcom;
 use ownhealth_core::langs::LANGS;
 use ownhealth_core::provenance::{SrcIn, SrcRef};
 use serde_json::{Map, Value, json};
@@ -47,12 +55,23 @@ pub fn router() -> Router<Runtime> {
         .route("/profiles/{p}/family/{id}", axum::routing::put(update).delete(retract))
         .route("/profiles/{p}/pedigree", get(pedigree))
         .route(
+            "/profiles/{p}/family/gedcom/preview",
+            post(gedcom_preview).layer(DefaultBodyLimit::max(gedcom::MAX_BYTES + FORM_SLACK)),
+        )
+        .route(
+            "/profiles/{p}/family/gedcom",
+            post(gedcom_import).layer(DefaultBodyLimit::max(gedcom::MAX_BYTES + FORM_SLACK)),
+        )
+        .route(
             "/profiles/{p}/family-shares",
             get(list_shares).put(put_share).delete(delete_share),
         )
 }
 
 type Answer = Result<(StatusCode, Json<Value>), ApiError>;
+
+/// Room for the multipart framing and the `self` field around a tree file of the largest size.
+const FORM_SLACK: usize = 64 * 1024;
 
 fn bad_input(message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "bad_input", message)
@@ -515,6 +534,152 @@ async fn pedigree(State(rt): State<Runtime>, caller: Caller, Path(p): Path<Strin
             "rules": cat.version,
             "nodes": nodes,
             "patterns": ownhealth_rules::family::render(&patterns)?,
+        })),
+    ))
+}
+
+// ------------------------------------------------------------------ GEDCOM ----
+
+/// A family tree file in memory: its bytes (at most `gedcom::MAX_BYTES`) and the `self` field. The file
+/// is never written anywhere, and its name is never read.
+async fn gedcom_form(form: Result<Multipart, MultipartRejection>) -> Result<(Vec<u8>, Option<String>), ApiError> {
+    let too_large = || {
+        ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            "A family tree file is at most 10 MiB.",
+        )
+    };
+    // a body past the route's limit fails while it is read: that is the size answer, not a parse error
+    let bad_body = |e: axum::extract::multipart::MultipartError| {
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            too_large()
+        } else {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "There was an error parsing the body",
+            )
+        }
+    };
+    let mut file: Option<Vec<u8>> = None;
+    let mut me: Option<String> = None;
+    if let Ok(mut form) = form {
+        while let Some(mut field) = form.next_field().await.map_err(bad_body)? {
+            match field.name() {
+                Some("file") if file.is_none() => {
+                    let mut buf = Vec::new();
+                    while let Some(chunk) = field.chunk().await.map_err(bad_body)? {
+                        if buf.len() + chunk.len() > gedcom::MAX_BYTES {
+                            return Err(too_large());
+                        }
+                        buf.extend_from_slice(&chunk);
+                    }
+                    file = Some(buf);
+                }
+                Some("self") if me.is_none() => {
+                    let mut buf = Vec::new();
+                    while let Some(chunk) = field.chunk().await.map_err(bad_body)? {
+                        if buf.len() + chunk.len() > 16 {
+                            return Err(bad_input("self: the position of a person in the file."));
+                        }
+                        buf.extend_from_slice(&chunk);
+                    }
+                    me = Some(String::from_utf8_lossy(&buf).trim().to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    let file = file.ok_or_else(|| bad_input("file: a GEDCOM family tree file is required."))?;
+    Ok((file, me))
+}
+
+/// Parse off the async runtime: a 10 MiB file is a few hundred milliseconds of work.
+async fn gedcom_tree(bytes: Vec<u8>) -> Result<gedcom::Tree, ApiError> {
+    let parsed = tokio::task::spawn_blocking(move || gedcom::parse(&bytes))
+        .await
+        .map_err(|e| ownhealth_core::Error::Other(e.into()))?;
+    parsed.map_err(|r| {
+        let status = if r.code == "too_large" {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else {
+            StatusCode::UNPROCESSABLE_ENTITY
+        };
+        let code = if r.code == "too_large" {
+            "too_large"
+        } else {
+            "bad_gedcom"
+        };
+        ApiError::new(status, code, r.message())
+            .with("reason", json!(r.code))
+            .with("line", json!(r.line))
+    })
+}
+
+/// Sending a tree takes the `import` action and `read:records` (the proposals it makes are family
+/// history). Checked before the file is read.
+async fn gedcom_access(rt: &Runtime, caller: &Caller, p: &str) -> Result<(), ApiError> {
+    let mut tx = rt.pool.begin().await?;
+    caller.require(&mut tx, p, Some("read:records"), Some("import")).await?;
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// `POST /profiles/{p}/family/gedcom/preview`, multipart `file`: the people of the tree by position,
+/// with sex, birth year, death and links, so the person can pick themselves. Nothing is stored.
+async fn gedcom_preview(
+    State(rt): State<Runtime>,
+    caller: Caller,
+    Path(p): Path<String>,
+    form: Result<Multipart, MultipartRejection>,
+) -> Answer {
+    gedcom_access(&rt, &caller, &p).await?;
+    let (bytes, _) = gedcom_form(form).await?;
+    let tree = gedcom_tree(bytes).await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({"version": tree.version, "people": tree.people_out()})),
+    ))
+}
+
+/// `POST /profiles/{p}/family/gedcom`, multipart `file` and `self` (the person's position in the
+/// file): each relative the catalog has a code for becomes a `family_proposal` review item.
+async fn gedcom_import(
+    State(rt): State<Runtime>,
+    caller: Caller,
+    Path(p): Path<String>,
+    form: Result<Multipart, MultipartRejection>,
+) -> Answer {
+    gedcom_access(&rt, &caller, &p).await?;
+    let (bytes, me) = gedcom_form(form).await?;
+    let me = me
+        .as_deref()
+        .and_then(|m| m.parse::<usize>().ok())
+        .ok_or_else(|| bad_input("self: the position of a person in the file."))?;
+    let tree = gedcom_tree(bytes).await?;
+    if me >= tree.people.len() {
+        return Err(bad_input("self: no person at that position in the file."));
+    }
+    let mut tx = rt.pool.begin().await?;
+    let perm = caller
+        .require(&mut tx, &p, Some("read:records"), Some("import"))
+        .await?;
+    let out = gedcom::propose(&mut tx, perm.profile.household_id, perm.profile.id, &tree, me).await?;
+    let mut ev = event(&caller.0, &perm, "import", &[]);
+    ev.tool = Some("gedcom".into());
+    ev.resource_type = Some("review_item".into());
+    ev.resource_ids = Some(out.proposed.iter().map(Uuid::to_string).collect());
+    ev.rows_out = Some(i32::try_from(out.proposed.len()).unwrap_or(i32::MAX));
+    write_audit(&mut tx, &ev).await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "proposed": out.proposed,
+            "already": out.already,
+            "left_out": out.left_out,
+            "outside": out.outside,
         })),
     ))
 }

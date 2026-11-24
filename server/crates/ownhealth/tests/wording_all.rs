@@ -57,6 +57,9 @@ const SOURCES: &[(&str, Source)] = &[
     ("imaging_viewer", |_| {
         Box::pin(async { Ok(vec![ownhealth_api::routes::imaging_proxy::phrases()]) })
     }),
+    ("gedcom_refusals", |_| {
+        Box::pin(async { Ok(vec![ownhealth_core::gedcom::phrases()]) })
+    }),
     ("shc", |_| {
         Box::pin(async { Ok(vec![ownhealth_ingest_structured::shc::phrases()]) })
     }),
