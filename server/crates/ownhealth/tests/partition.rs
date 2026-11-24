@@ -1,0 +1,801 @@
+//! Slice 65: the job that turns `wearable_sample` into monthly partitions once it passes
+//! OWNHEALTH_PARTITION_ROWS (`ownhealth_ops::partition`, the `ownhealth partition` command), on the
+//! demo household with the threshold forced to 1,000 rows.
+//!
+//! The backup case needs pg_dump and pg_restore 17 on PATH or in OWNHEALTH_PG_BINDIR (see
+//! ownhealth-ops/tests/backup.rs). The app-role case makes a login role of its own on the test
+//! Postgres and drops it at the end.
+
+use std::io::Cursor;
+use std::process::Command;
+use std::str::FromStr;
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use ownhealth_core::blobs::{BlobOwner, BlobStore};
+use ownhealth_core::config::Settings;
+use ownhealth_core::demo::{create_rivera_family, seed_demo};
+use ownhealth_core::documents::{NewDocument, create_document};
+use ownhealth_core::testing::TestDb;
+use ownhealth_devices::store::{self, Conflict, Sample, Written};
+use ownhealth_ingest_structured::apple_health::import_apple_health;
+use ownhealth_ingest_structured::apple_health::synthetic::{ExportSpec, write_export_to};
+use ownhealth_ingest_structured::retract::retract_document_facts;
+use ownhealth_ingest_structured::wearables;
+use ownhealth_ops::partition::{self, Options, add_months, cutoff_for, month_name, month_start};
+use serde_json::{Value, json};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{AssertSqlSafe, Connection, PgConnection, PgPool};
+use tempfile::TempDir;
+use uuid::Uuid;
+
+type R = anyhow::Result<()>;
+
+const THRESHOLD: u64 = 1_000;
+const BIN: &str = env!("CARGO_BIN_EXE_ownhealth");
+
+struct Demo {
+    db: TestDb,
+    settings: Settings,
+    blobs: BlobStore,
+    dir: TempDir,
+    alex: Uuid,
+    household: Uuid,
+}
+
+async fn demo() -> anyhow::Result<Demo> {
+    ownhealth::register_lanes();
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let settings = db.settings(&dir.path().join("live"))?;
+    let blobs = BlobStore::for_settings(&settings)?;
+    assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
+    let (alex, household): (Uuid, Uuid) =
+        sqlx::query_as("select id, household_id from profile where slug = 'alex' order by created_at desc limit 1")
+            .fetch_one(&db.pool)
+            .await?;
+    Ok(Demo {
+        db,
+        settings,
+        blobs,
+        dir,
+        alex,
+        household,
+    })
+}
+
+/// The threshold forced to 1,000 rows; short lock waits, so a test that holds the table hears back fast.
+fn opts(now: DateTime<Utc>) -> Options {
+    Options {
+        threshold: THRESHOLD,
+        now,
+        lock_timeout: Duration::from_millis(300),
+        attempts: 2,
+    }
+}
+
+fn state(r: &Value) -> &str {
+    r["state"].as_str().unwrap_or_default()
+}
+
+async fn relkind(pool: &PgPool) -> anyhow::Result<String> {
+    Ok(
+        sqlx::query_scalar("select relkind::text from pg_class where oid = 'wearable_sample'::regclass")
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+/// (name, bound) of every partition, by name.
+async fn parts(pool: &PgPool) -> anyhow::Result<Vec<(String, String)>> {
+    Ok(sqlx::query_as(
+        "select c.relname::text, pg_get_expr(c.relpartbound, c.oid) from pg_inherits i \
+         join pg_class c on c.oid = i.inhrelid where i.inhparent = 'wearable_sample'::regclass order by 1",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// The row count and a hash of every row, in key order.
+async fn fingerprint(pool: &PgPool) -> anyhow::Result<(i64, String)> {
+    Ok(sqlx::query_as(
+        "select count(*), md5(coalesce(string_agg(w::text, ';' order by w.profile_id, w.metric, w.source_id, w.t), '')) \
+         from wearable_sample w",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+/// The same, with the profile and source named by what they are, so two databases compare.
+async fn named_fingerprint(pool: &PgPool) -> anyhow::Result<(i64, String)> {
+    Ok(sqlx::query_as(
+        "select count(*), md5(coalesce(string_agg(concat_ws('|', p.slug, s.provider, s.device, w.metric, w.t, \
+         w.t_end, w.v, w.tz_offset_min, w.document_id is null), ';' order by p.slug, s.provider, s.device, w.metric, w.t, \
+         w.v), '')) from wearable_sample w join profile p on p.id = w.profile_id \
+         join wearable_source s on s.id = w.source_id",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn rollups(pool: &PgPool) -> anyhow::Result<(i64, String)> {
+    Ok(sqlx::query_as(
+        "select count(*), md5(coalesce(string_agg(concat_ws('|', p.slug, s.provider, s.device, r.metric, r.bucket, \
+         r.t, r.n, r.v_min, r.v_max, r.v_avg, r.v_sum, r.v_p10, r.v_p50, r.v_p90, r.coverage), ';' \
+         order by p.slug, s.provider, s.device, r.metric, r.bucket, r.t, r.n), '')) \
+         from wearable_rollup r join profile p on p.id = r.profile_id join wearable_source s on s.id = r.source_id",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Rebuild every profile's rollups from its samples.
+async fn rebuild_all(pool: &PgPool) -> R {
+    let ids: Vec<Uuid> = sqlx::query_scalar("select id from profile order by id")
+        .fetch_all(pool)
+        .await?;
+    let mut c = pool.acquire().await?;
+    for id in ids {
+        wearables::recompute_rollups(&mut c, id, None, None).await?;
+    }
+    Ok(())
+}
+
+async fn where_is(pool: &PgPool, t: DateTime<Utc>) -> anyhow::Result<Vec<String>> {
+    Ok(
+        sqlx::query_scalar("select tableoid::regclass::text from wearable_sample where t = $1 order by 1")
+            .bind(t)
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
+fn hr(t: DateTime<Utc>, v: f64, source: i16) -> Sample {
+    Sample {
+        metric: "hr",
+        t,
+        t_end: None,
+        v,
+        tz: None,
+        source,
+    }
+}
+
+async fn watch(c: &mut PgConnection, profile: Uuid) -> anyhow::Result<i16> {
+    Ok(store::device_source(c, profile, "apple_health", Some("Partition Watch"), None, None).await?)
+}
+
+async fn document(d: &Demo, bytes: &[u8], mime: &str) -> anyhow::Result<Uuid> {
+    let sha = d.blobs.put_bytes(BlobOwner::Profile(d.alex), bytes)?;
+    let mut c = d.db.pool.acquire().await?;
+    let doc = create_document(
+        &mut c,
+        &NewDocument::upload(d.household, Some(d.alex), &sha, mime, bytes.len() as i64),
+    )
+    .await?;
+    Ok(doc.id)
+}
+
+/// Below the threshold the job changes nothing: no index, check or table of its own.
+#[tokio::test]
+async fn below_the_threshold_the_table_stays_as_the_migrations_made_it() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let before = fingerprint(pool).await?;
+    let r = partition::run(
+        pool,
+        &Options {
+            threshold: 10_000_000,
+            ..opts(Utc::now())
+        },
+    )
+    .await?;
+    assert_eq!(state(&r), "below_threshold", "{r}");
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(relkind(pool).await?, "r");
+    let indexes: i64 = sqlx::query_scalar("select count(*) from pg_index where indrelid = 'wearable_sample'::regclass")
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(indexes, 1, "only the unique key the migrations made");
+    let checks: i64 = sqlx::query_scalar(
+        "select count(*) from pg_constraint where conrelid = 'wearable_sample'::regclass and contype = 'c'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(checks, 1, "only wearable_sample_not_a_vendor_score");
+    assert_eq!(fingerprint(pool).await?, before);
+    Ok(())
+}
+
+/// Past the threshold the table becomes monthly range partitions on t. The old table's own file is
+/// the historical partition (ATTACH, no row copied), the DEFAULT and the first month after it exist,
+/// and the parent carries BRIN on t, a btree on document_id and the unique key. Rows and the rollups
+/// rebuilt from them stay the same, and a second run changes nothing.
+#[tokio::test]
+async fn past_the_threshold_the_old_table_becomes_one_partition_with_no_row_copied() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let before = fingerprint(pool).await?;
+    assert!(before.0 > THRESHOLD as i64, "the demo holds {} samples", before.0);
+    rebuild_all(pool).await?;
+    let rolled = rollups(pool).await?;
+    let file: String = sqlx::query_scalar("select pg_relation_filenode('wearable_sample')::text")
+        .fetch_one(pool)
+        .await?;
+
+    let r = partition::run(pool, &opts(now)).await?;
+    assert_eq!(state(&r), "converted", "{r}");
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(relkind(pool).await?, "p");
+    let hist_file: String = sqlx::query_scalar("select pg_relation_filenode('wearable_sample_hist')::text")
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(hist_file, file, "the historical partition is the old table, not a copy");
+    assert_eq!(fingerprint(pool).await?, before);
+    let elsewhere: i64 =
+        sqlx::query_scalar("select count(*) from wearable_sample where tableoid <> 'wearable_sample_hist'::regclass")
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(elsewhere, 0);
+
+    let cutoff = cutoff_for(now);
+    let p = parts(pool).await?;
+    let names: Vec<&str> = p.iter().map(|(n, _)| n.as_str()).collect();
+    for want in [
+        "wearable_sample_hist",
+        "wearable_sample_default",
+        month_name(cutoff).as_str(),
+    ] {
+        assert!(names.contains(&want), "{want} missing: {p:?}");
+    }
+    let hist = &p.iter().find(|(n, _)| n == "wearable_sample_hist").expect("hist").1;
+    assert!(
+        hist.contains("MINVALUE") && hist.contains(&cutoff.format("%Y-%m-%d").to_string()),
+        "{hist}"
+    );
+    let next = add_months(month_start(now), 1);
+    assert!(
+        next < cutoff || names.contains(&month_name(next).as_str()),
+        "next month {next} has no partition: {p:?}"
+    );
+    let idx: Vec<(String, String)> = sqlx::query_as(
+        "select am.amname::text, pg_get_indexdef(i.indexrelid) from pg_index i join pg_class c on c.oid = i.indexrelid \
+         join pg_am am on am.oid = c.relam where i.indrelid = 'wearable_sample'::regclass order by 2",
+    )
+    .fetch_all(pool)
+    .await?;
+    assert!(
+        idx.iter().any(|(am, def)| am == "brin" && def.ends_with("(t)")),
+        "{idx:?}"
+    );
+    assert!(
+        idx.iter()
+            .any(|(am, def)| am == "btree" && def.ends_with("(document_id)")),
+        "{idx:?}"
+    );
+    assert!(
+        idx.iter()
+            .any(|(_, def)| def.contains("UNIQUE") && def.ends_with("(profile_id, metric, source_id, t)")),
+        "{idx:?}"
+    );
+
+    rebuild_all(pool).await?;
+    assert_eq!(rollups(pool).await?, rolled, "rollups rebuilt from the partitions");
+
+    let again = partition::run(pool, &opts(now)).await?;
+    assert_eq!(state(&again), "partitioned", "{again}");
+    assert_eq!(again["made"], json!([]), "{again}");
+    assert_eq!(parts(pool).await?, p);
+    assert_eq!(fingerprint(pool).await?, before);
+    Ok(())
+}
+
+/// Every write path, the same on a plain table and on a partitioned one.
+async fn write_everything(d: &Demo, now: DateTime<Utc>) -> anyhow::Result<Vec<Written>> {
+    let mut c = d.db.pool.acquire().await?;
+    let src = watch(&mut c, d.alex).await?;
+    let base = month_start(now) - chrono::Duration::days(10);
+    let first: Vec<Sample> = (0..100)
+        .map(|i| hr(base + chrono::Duration::minutes(i), 50.0 + i as f64, src))
+        .collect();
+    let mut out = vec![store::write(&mut c, d.alex, None, first.clone(), Conflict::Keep).await?];
+    out.push(store::write(&mut c, d.alex, None, first.clone(), Conflict::Keep).await?);
+    let refreshed: Vec<Sample> = first[..10]
+        .iter()
+        .map(|s| Sample {
+            v: s.v + 1.0,
+            ..s.clone()
+        })
+        .collect();
+    out.push(store::write(&mut c, d.alex, None, refreshed, Conflict::Refresh).await?);
+    let doc = document(
+        d,
+        b"a Gadgetbridge export of the partition test",
+        "application/x-sqlite3",
+    )
+    .await?;
+    out.push(store::write(&mut c, d.alex, Some(doc), first[..20].to_vec(), Conflict::Adopt).await?);
+    // a sample in a month of its own and one a wrong clock dated years ahead
+    let ahead = vec![
+        hr(cutoff_for(now) + chrono::Duration::hours(30), 70.0, src),
+        hr(add_months(month_start(now), 40), 71.0, src),
+    ];
+    out.push(store::write(&mut c, d.alex, None, ahead, Conflict::Keep).await?);
+    drop(c);
+
+    let birth: chrono::NaiveDate = sqlx::query_scalar("select birth_date from profile where id = $1")
+        .bind(d.alex)
+        .fetch_one(&d.db.pool)
+        .await?;
+    let mut zip = Cursor::new(Vec::new());
+    write_export_to(
+        &mut zip,
+        &ExportSpec {
+            days: 3,
+            end: now.date_naive(),
+            birth_date: birth,
+            ..ExportSpec::default()
+        },
+    )?;
+    let zip = zip.into_inner();
+    let doc = document(d, &zip, "application/zip").await?;
+    let mut tx = d.db.pool.begin().await?;
+    import_apple_health(&mut tx, &d.blobs, doc).await?;
+    tx.commit().await?;
+    Ok(out)
+}
+
+/// A database whose wearable_sample was switched while it held two samples of a family made for the
+/// purpose (taken out again), so the demo seed then writes into the partitions.
+async fn partitioned_then_demo(now: DateTime<Utc>) -> anyhow::Result<Demo> {
+    ownhealth::register_lanes();
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let settings = db.settings(&dir.path().join("live"))?;
+    let blobs = BlobStore::for_settings(&settings)?;
+    let mut c = db.pool.acquire().await?;
+    let fam = create_rivera_family(&mut c, "Rivera before the demo").await?;
+    let p = fam.profile("alex");
+    let src = watch(&mut c, p).await?;
+    let two = vec![
+        hr(now - chrono::Duration::days(1), 60.0, src),
+        hr(now - chrono::Duration::days(2), 61.0, src),
+    ];
+    store::write(&mut c, p, None, two, Conflict::Keep).await?;
+    drop(c);
+    let r = partition::run(
+        &db.pool,
+        &Options {
+            threshold: 1,
+            ..opts(now)
+        },
+    )
+    .await?;
+    assert_eq!(state(&r), "converted", "{r}");
+    for sql in [
+        "delete from wearable_rollup where profile_id = $1",
+        "delete from wearable_sample where profile_id = $1",
+        "delete from wearable_source where profile_id = $1",
+    ] {
+        sqlx::query(sql).bind(p).execute(&db.pool).await?;
+    }
+    assert!(seed_demo(&db.pool, &settings, &blobs, false).await?);
+    let (alex, household): (Uuid, Uuid) =
+        sqlx::query_as("select id, household_id from profile where slug = 'alex' order by created_at desc limit 1")
+            .fetch_one(&db.pool)
+            .await?;
+    Ok(Demo {
+        db,
+        settings,
+        blobs,
+        dir,
+        alex,
+        household,
+    })
+}
+
+/// The demo seed (demo_base and every lane's hook), writes through store.rs (each conflict rule) and
+/// an Apple Health import give the same counts and the same rows on a partitioned table as on the
+/// plain one.
+#[tokio::test]
+async fn writes_through_the_store_apple_health_and_the_demo_seed_are_unchanged() -> R {
+    let now = Utc::now();
+    let plain = demo().await?;
+    let parted = partitioned_then_demo(now).await?;
+    assert_eq!(relkind(&parted.db.pool).await?, "p");
+    assert_eq!(
+        named_fingerprint(&parted.db.pool).await?,
+        named_fingerprint(&plain.db.pool).await?,
+        "the demo seed"
+    );
+    assert_eq!(rollups(&parted.db.pool).await?, rollups(&plain.db.pool).await?);
+
+    let on_plain = write_everything(&plain, now).await?;
+    let on_parted = write_everything(&parted, now).await?;
+    assert_eq!(on_parted, on_plain);
+    assert_eq!(on_plain[0].new, 100);
+    assert_eq!(on_plain[2].refreshed, 10);
+    assert_eq!(on_plain[3].refreshed, 20);
+    assert_eq!(
+        named_fingerprint(&parted.db.pool).await?,
+        named_fingerprint(&plain.db.pool).await?
+    );
+    assert_eq!(rollups(&parted.db.pool).await?, rollups(&plain.db.pool).await?);
+    assert_eq!(relkind(&parted.db.pool).await?, "p");
+    Ok(())
+}
+
+/// A sample past every month lands in DEFAULT. When a later run makes its month (and every month up
+/// to the next one), the sample moves into it.
+#[tokio::test]
+async fn an_insert_outside_every_month_lands_in_default_and_moves_when_its_month_is_made() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    assert_eq!(state(&partition::run(pool, &opts(now)).await?), "converted");
+    let mut c = pool.acquire().await?;
+    let src = watch(&mut c, d.alex).await?;
+    let far = add_months(month_start(now), 14) + chrono::Duration::days(3);
+    let w = store::write(&mut c, d.alex, None, vec![hr(far, 61.0, src)], Conflict::Keep).await?;
+    drop(c);
+    assert_eq!(w.new, 1);
+    assert_eq!(where_is(pool, far).await?, ["wearable_sample_default"]);
+    let count = fingerprint(pool).await?.0;
+
+    let later = month_start(far) - chrono::Duration::days(1);
+    let r = partition::run(pool, &opts(later)).await?;
+    assert_eq!(state(&r), "partitioned", "{r}");
+    assert_eq!(r["moved_from_default"], 1, "{r}");
+    let made = r["made"].as_array().cloned().unwrap_or_default();
+    assert!(made.contains(&json!(month_name(month_start(far)))), "{r}");
+    assert!(
+        made.contains(&json!(month_name(add_months(month_start(far), -1)))),
+        "{r}"
+    );
+    assert_eq!(where_is(pool, far).await?, [month_name(month_start(far))]);
+    let in_default: i64 = sqlx::query_scalar("select count(*) from wearable_sample_default")
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(in_default, 0);
+    assert_eq!(fingerprint(pool).await?.0, count);
+    Ok(())
+}
+
+/// A retract by document_id reads the historical partition through the new index, and removes every
+/// sample of the document.
+#[tokio::test]
+async fn a_retract_by_document_id_uses_the_index() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let doc = document(&d, b"a Gadgetbridge export to retract", "application/x-sqlite3").await?;
+    let mut c = pool.acquire().await?;
+    let src = watch(&mut c, d.alex).await?;
+    let base = month_start(now) - chrono::Duration::days(20);
+    let samples = (0..200)
+        .map(|i| hr(base + chrono::Duration::minutes(i), 60.0, src))
+        .collect();
+    assert_eq!(
+        store::write(&mut c, d.alex, Some(doc), samples, Conflict::Keep)
+            .await?
+            .new,
+        200
+    );
+    drop(c);
+    assert_eq!(state(&partition::run(pool, &opts(now)).await?), "converted");
+    sqlx::query("analyze wearable_sample").execute(pool).await?;
+
+    let plan: Value = sqlx::query_scalar(
+        "explain (format json) delete from wearable_sample where document_id = $1 \
+         returning profile_id, metric, source_id",
+    )
+    .bind(doc)
+    .fetch_one(pool)
+    .await?;
+    let plan = plan.to_string();
+    assert!(plan.contains("wearable_sample_hist_document_id_idx"), "{plan}");
+
+    let mut tx = pool.begin().await?;
+    let out = retract_document_facts(&mut tx, doc, "wrong file").await?;
+    tx.commit().await?;
+    assert_eq!(out["wearable_samples"], 200, "{out}");
+    let left: i64 = sqlx::query_scalar("select count(*) from wearable_sample where document_id = $1")
+        .bind(doc)
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(left, 0);
+    Ok(())
+}
+
+/// A run stopped after its preparing steps leaves a table that reads and writes as before; the next
+/// run finishes. A concurrent index build cut short (an invalid index) is built again, and a sample a
+/// wrong clock dated past the cutoff, kept aside while the check was validated, comes back.
+#[tokio::test]
+async fn a_run_stopped_between_steps_finishes_on_the_next() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let mut c = pool.acquire().await?;
+    let src = watch(&mut c, d.alex).await?;
+    let far = add_months(month_start(now), 36) + chrono::Duration::hours(5);
+    store::write(&mut c, d.alex, None, vec![hr(far, 58.0, src)], Conflict::Keep).await?;
+    drop(c);
+    let before = fingerprint(pool).await?;
+
+    let p = partition::prepare(pool, &opts(now)).await?;
+    assert_eq!(state(&p), "prepared", "{p}");
+    assert_eq!(p["held_aside"], 1, "{p}");
+    assert_eq!(relkind(pool).await?, "r");
+    let valid: bool = sqlx::query_scalar(
+        "select convalidated from pg_constraint where conrelid = 'wearable_sample'::regclass \
+         and conname = 'wearable_sample_hist_bound'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert!(valid);
+    let aside: i64 = sqlx::query_scalar("select count(*) from wearable_sample_ahead")
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(aside, 1);
+    // the app goes on writing today's samples
+    let mut c = pool.acquire().await?;
+    let today = now - chrono::Duration::minutes(3);
+    assert_eq!(
+        store::write(&mut c, d.alex, None, vec![hr(today, 66.0, src)], Conflict::Keep)
+            .await?
+            .new,
+        1
+    );
+    drop(c);
+    // a concurrent build the stop cut short
+    sqlx::query("update pg_index set indisvalid = false where indexrelid = 'wearable_sample_hist_t_idx'::regclass")
+        .execute(pool)
+        .await?;
+
+    let r = partition::run(pool, &opts(now)).await?;
+    assert_eq!(state(&r), "converted", "{r}");
+    assert_eq!(r["held_back"], 1, "{r}");
+    assert_eq!(relkind(pool).await?, "p");
+    assert_eq!(fingerprint(pool).await?.0, before.0 + 1);
+    assert_eq!(where_is(pool, far).await?, ["wearable_sample_default"]);
+    let invalid: i64 = sqlx::query_scalar(
+        "select count(*) from pg_index i join pg_inherits h on h.inhrelid = i.indrelid \
+         where h.inhparent = 'wearable_sample'::regclass and not i.indisvalid",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(invalid, 0);
+    let gone: Option<String> = sqlx::query_scalar("select to_regclass('wearable_sample_ahead')::text")
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(gone, None);
+    Ok(())
+}
+
+/// A run that stopped long ago left a cutoff that is now too close (or past): the next run puts the
+/// samples back, drops that check and starts again with a cutoff ahead of now.
+#[tokio::test]
+async fn a_cutoff_that_came_too_close_is_chosen_again() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let before = fingerprint(pool).await?;
+    let then = now - chrono::Duration::days(75);
+    let p = partition::prepare(pool, &opts(then)).await?;
+    assert_eq!(state(&p), "prepared", "{p}");
+    assert!(cutoff_for(then) < now);
+
+    let r = partition::run(pool, &opts(now)).await?;
+    assert_eq!(state(&r), "converted", "{r}");
+    assert_eq!(r["cutoff"], json!(cutoff_for(now).to_rfc3339()), "{r}");
+    assert_eq!(fingerprint(pool).await?, before);
+    Ok(())
+}
+
+/// The switch waits for readers for one lock timeout at most, then gives up and says so: it never
+/// stands in the lock queue holding every later reader back. Once the reader is gone it goes through.
+#[tokio::test]
+async fn a_reader_in_the_way_makes_the_switch_give_up_not_queue() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    assert_eq!(state(&partition::prepare(pool, &opts(now)).await?), "prepared");
+    let mut reader = PgConnection::connect(&d.db.url).await?;
+    let mut tx = reader.begin().await?;
+    let n: i64 = sqlx::query_scalar("select count(*) from wearable_sample")
+        .fetch_one(&mut *tx)
+        .await?;
+    let started = Instant::now();
+    let r = partition::run(pool, &opts(now)).await?;
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    assert_eq!(state(&r), "busy", "{r}");
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(relkind(pool).await?, "r");
+    let still: i64 = sqlx::query_scalar("select count(*) from wearable_sample")
+        .fetch_one(&mut *tx)
+        .await?;
+    assert_eq!(still, n);
+    tx.commit().await?;
+    reader.close().await?;
+    assert_eq!(state(&partition::run(pool, &opts(now)).await?), "converted");
+    Ok(())
+}
+
+/// Two runs at once: one converts, the other stands aside.
+#[tokio::test]
+async fn two_runs_at_once_convert_once() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let before = fingerprint(pool).await?;
+    let o = opts(Utc::now());
+    let (a, b) = tokio::join!(partition::run(pool, &o), partition::run(pool, &o));
+    let mut states = vec![state(&a?).to_string(), state(&b?).to_string()];
+    states.sort();
+    assert!(
+        states == ["busy", "converted"] || states == ["converted", "partitioned"],
+        "{states:?}"
+    );
+    assert_eq!(relkind(pool).await?, "p");
+    assert_eq!(fingerprint(pool).await?, before);
+    Ok(())
+}
+
+async fn export_counts(d: &Demo) -> anyhow::Result<Value> {
+    let mut c = d.db.pool.acquire().await?;
+    let m = ownhealth_ops::export::export_profile(&mut c, &d.blobs, d.alex, Cursor::new(Vec::new()), "zip").await?;
+    Ok(m["counts"].clone())
+}
+
+/// The export names wearable_sample once (no partition becomes a file of its own), a backup of the
+/// partitioned table restores into an empty database as the same partitions and rows, and a profile
+/// delete removes the profile's samples from every partition.
+#[tokio::test]
+async fn export_backup_restore_and_profile_delete_read_the_partitioned_table() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let exported = export_counts(&d).await?;
+    assert_eq!(state(&partition::run(pool, &opts(now)).await?), "converted");
+    let after = export_counts(&d).await?;
+    assert_eq!(after, exported);
+    assert!(
+        after
+            .as_object()
+            .is_some_and(|m| !m.keys().any(|k| k.starts_with("ownhealth/wearable_sample_"))),
+        "{after}"
+    );
+
+    let archive = ownhealth_ops::backup(&d.settings, &d.dir.path().join("backup").join("staging")).await?;
+    let v = ownhealth_ops::verify_restore(&d.settings, &archive).await?;
+    assert_eq!(v["ok"], true, "{v}");
+    let fresh = TestDb::empty().await?;
+    let mut settings = fresh.settings(&d.dir.path().join("fresh"))?;
+    settings.secrets_key = d.settings.secrets_key.clone();
+    settings.keyring_dir = Some(d.settings.keyring_path());
+    let restored = ownhealth_ops::restore_with(&settings, &archive, false).await?;
+    assert_eq!(restored["ok"], true, "{restored}");
+    assert_eq!(relkind(&fresh.pool).await?, "p");
+    assert_eq!(parts(&fresh.pool).await?, parts(pool).await?);
+    assert_eq!(fingerprint(&fresh.pool).await?, fingerprint(pool).await?);
+
+    let mut tx = pool.begin().await?;
+    ownhealth_auth::household::delete_profile(&mut tx, d.alex).await?;
+    tx.commit().await?;
+    let left: i64 = sqlx::query_scalar("select count(*) from wearable_sample where profile_id = $1")
+        .bind(d.alex)
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(left, 0);
+    Ok(())
+}
+
+/// The app's own role (deploy/db/app-role.sql: rows, no tables) cannot switch the table and says so;
+/// the owner's run does, and the app keeps its rights on the new table.
+#[tokio::test]
+async fn the_app_role_keeps_its_rights_and_leaves_the_switch_to_the_owner() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let role = format!("oh_s65_{}", ownhealth_core::ids::token_hex(4));
+    let password = ownhealth_core::ids::token_hex(16);
+    for sql in [
+        format!("create role {role} login password '{password}'"),
+        format!("grant connect, temporary on database \"{}\" to {role}", d.db.name),
+        format!("grant usage on schema public to {role}"),
+        format!("grant select, insert, update, delete on all tables in schema public to {role}"),
+        format!("grant usage, select on all sequences in schema public to {role}"),
+    ] {
+        sqlx::query(AssertSqlSafe(sql)).execute(pool).await?;
+    }
+    let app = PgPoolOptions::new()
+        .max_connections(3)
+        .connect_with(
+            PgConnectOptions::from_str(&d.db.url)?
+                .username(&role)
+                .password(&password),
+        )
+        .await?;
+    let outcome = async {
+        let r = partition::run(&app, &opts(now)).await?;
+        assert_eq!(state(&r), "needs_owner", "{r}");
+        assert_eq!(r["ok"], false, "{r}");
+        assert_eq!(relkind(pool).await?, "r");
+
+        assert_eq!(state(&partition::run(pool, &opts(now)).await?), "converted");
+        let mut c = app.acquire().await?;
+        let src: i16 = sqlx::query_scalar("select id from wearable_source where profile_id = $1 limit 1")
+            .bind(d.alex)
+            .fetch_one(&mut *c)
+            .await?;
+        let today = now - chrono::Duration::minutes(7);
+        assert_eq!(
+            store::write(&mut c, d.alex, None, vec![hr(today, 64.0, src)], Conflict::Keep)
+                .await?
+                .new,
+            1
+        );
+        let n: i64 = sqlx::query_scalar("select count(*) from wearable_sample where t = $1")
+            .bind(today)
+            .fetch_one(&mut *c)
+            .await?;
+        assert_eq!(n, 1);
+        drop(c);
+        // making next month's partition needs the owner too
+        let later = add_months(month_start(now), 5);
+        let r = partition::run(&app, &opts(later)).await?;
+        assert_eq!(state(&r), "needs_owner", "{r}");
+        anyhow::Ok(())
+    }
+    .await;
+    app.close().await;
+    sqlx::query(AssertSqlSafe(format!("drop owned by {role}")))
+        .execute(pool)
+        .await?;
+    sqlx::query(AssertSqlSafe(format!("drop role {role}")))
+        .execute(pool)
+        .await?;
+    outcome
+}
+
+fn cli(d: &Demo, rows: &str) -> anyhow::Result<std::process::Output> {
+    Ok(Command::new(BIN)
+        .arg("partition")
+        .env("OWNHEALTH_DATABASE_URL", &d.db.url)
+        .env("OWNHEALTH_DATA_DIR", &d.settings.data_dir)
+        .env("OWNHEALTH_PARTITION_ROWS", rows)
+        .env_remove("OWNHEALTH_PARTITION_ROWS_FILE")
+        .env_remove("OWNHEALTH_DATABASE_URL_FILE")
+        .env_remove("OWNHEALTH_DB_PASSWORD")
+        .env_remove("OWNHEALTH_DB_PASSWORD_FILE")
+        .output()?)
+}
+
+/// `ownhealth partition` reads OWNHEALTH_PARTITION_ROWS, prints the report and exits 0 when the table
+/// is as it should be; a run below the threshold and a second run change nothing.
+#[tokio::test]
+async fn the_partition_command_reads_the_threshold_and_prints_the_report() -> R {
+    let d = demo().await?;
+    let below = cli(&d, "50000000")?;
+    assert!(below.status.success(), "{}", String::from_utf8_lossy(&below.stderr));
+    let r: Value = serde_json::from_slice(&below.stdout)?;
+    assert_eq!(state(&r), "below_threshold", "{r}");
+    assert_eq!(r["threshold"], 50_000_000);
+
+    let out = cli(&d, "1000")?;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let r: Value = serde_json::from_slice(&out.stdout)?;
+    assert_eq!(state(&r), "converted", "{r}");
+    let again = cli(&d, "1000")?;
+    assert!(again.status.success());
+    assert_eq!(state(&serde_json::from_slice(&again.stdout)?), "partitioned");
+
+    let bad = cli(&d, "lots")?;
+    assert!(!bad.status.success());
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("OWNHEALTH_PARTITION_ROWS"),
+        "{}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+    Ok(())
+}

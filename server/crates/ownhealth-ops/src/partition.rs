@@ -1,0 +1,775 @@
+//! Partition `wearable_sample` by month once it holds more than `OWNHEALTH_PARTITION_ROWS` rows
+//! (default 50 million): a job, never a startup migration. A household below the threshold keeps the
+//! plain table the migrations made, and nothing here touches it.
+//!
+//! An Apple Watch at full resolution writes 5k to 30k samples a person a day (architecture.md 6.4).
+//! Past the threshold the table becomes range partitions on `t`: the old table, as it is, holds
+//! everything before a cutoff, one partition a month follows it, and a DEFAULT partition takes a
+//! sample no month holds. No row is copied, and the switch holds its exclusive lock only for catalog
+//! changes. The steps, each safe to run again and each safe to stop between:
+//!
+//! 1. Build a BRIN index on `t` and a btree on `document_id` on the plain table, `concurrently`, so
+//!    reads and writes go on. A build that a stop left invalid is dropped and built again. Their names
+//!    are the ones they keep as indexes of the historical partition.
+//! 2. Pick the cutoff: the first day of the month after the month that holds `now` plus 7 days
+//!    ([`cutoff_for`]). In one short transaction, add `check (t < cutoff) not valid` (a catalog
+//!    change), keep the cutoff in the constraint's comment, and move the samples already dated at or
+//!    after the cutoff (a device with a wrong clock) aside to `wearable_sample_ahead`, so the check
+//!    can hold. A cutoff that an earlier, stopped run left less than a day ahead is taken back first:
+//!    its samples come back and its check goes.
+//! 3. Validate the check: one scan, under a lock that lets reads and writes go on. From step 2 to the
+//!    switch, a new sample dated at or after the cutoff is refused (its import fails and is retried),
+//!    and the samples set aside do not show. The cutoff is at least 7 days ahead, so a device with a
+//!    right clock sends none.
+//! 4. The switch, one transaction: rename the table to `wearable_sample_hist` (and its indexes),
+//!    create the partitioned `wearable_sample` like it (columns, NOT NULLs, defaults, CHECKs, indexes,
+//!    then its foreign keys, grants and owner), ATTACH the old table for `t < cutoff`, which the valid
+//!    check turns into a catalog change (no scan, no copy, the indexes and foreign keys are reused),
+//!    add the DEFAULT partition and the months up to next month, and put the samples set aside back.
+//!    It waits at most `lock_timeout` for the table, gives up and tries again a few times, then leaves
+//!    it to the next run: it never stands in the lock queue holding later readers back for longer.
+//! 5. Every later run makes next month's partition ahead of time, and any month between that is
+//!    missing, moving the samples that landed in DEFAULT into their month in the same transaction.
+//!
+//! The job changes tables, so it needs the role that owns `wearable_sample`. In the compose files the
+//! app connects as a role that owns nothing (deploy/db/app-role.sql): its hourly run only reports
+//! `needs_owner`, and the operator runs `ownhealth partition` in the `admin` service
+//! (deploy/README.md, "Large wearable histories"). Only one run works at a time (an advisory lock).
+
+use std::time::Duration;
+
+use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
+use futures::future::BoxFuture;
+use ownhealth_core::{Error, Result};
+use serde_json::{Value, json};
+use sqlx::{AssertSqlSafe, Connection, PgConnection, PgPool};
+
+/// The table the job partitions, and the names it gives.
+pub const TABLE: &str = "wearable_sample";
+pub const HIST: &str = "wearable_sample_hist";
+pub const DEFAULT_PART: &str = "wearable_sample_default";
+/// Samples dated at or after the cutoff, kept here between steps 2 and 4.
+pub const AHEAD: &str = "wearable_sample_ahead";
+/// The `check (t < cutoff)` that lets the ATTACH skip its scan.
+const BOUND: &str = "wearable_sample_hist_bound";
+/// The indexes step 1 builds, named for the historical partition the table becomes.
+const INDEXES: [(&str, &str); 2] = [
+    ("wearable_sample_hist_t_idx", "using brin (t)"),
+    ("wearable_sample_hist_document_id_idx", "(document_id)"),
+];
+/// The session advisory lock one run holds ("ohpart").
+const RUN_LOCK: i64 = 0x6f68_7061_7274;
+/// How far ahead of now the cutoff is at least.
+const MARGIN_DAYS: i64 = 7;
+/// A cutoff left closer to now than this is taken back and chosen again.
+const STALE_HOURS: i64 = 24;
+/// lock_not_available: a `lock_timeout` ran out.
+const LOCK_TIMEOUT: &str = "55P03";
+
+/// What one run may do.
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// Switch the table once it holds more rows than this (`OWNHEALTH_PARTITION_ROWS`).
+    pub threshold: u64,
+    /// The clock: the cutoff and next month come from it.
+    pub now: DateTime<Utc>,
+    /// How long a step waits for its exclusive lock before it gives up for this attempt.
+    pub lock_timeout: Duration,
+    /// Attempts per locked step, with a growing pause between them.
+    pub attempts: u32,
+}
+
+impl Options {
+    pub fn new(threshold: u64) -> Options {
+        Options {
+            threshold,
+            now: Utc::now(),
+            lock_timeout: Duration::from_secs(2),
+            attempts: 5,
+        }
+    }
+}
+
+/// The first instant of the UTC month that holds `t`.
+pub fn month_start(t: DateTime<Utc>) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(t.year(), t.month(), 1, 0, 0, 0)
+        .single()
+        .unwrap_or(t)
+}
+
+/// `t` moved by `n` months (a month start stays a month start).
+pub fn add_months(t: DateTime<Utc>, n: i32) -> DateTime<Utc> {
+    let m = Months::new(n.unsigned_abs());
+    let moved = if n >= 0 {
+        t.checked_add_months(m)
+    } else {
+        t.checked_sub_months(m)
+    };
+    moved.unwrap_or(t)
+}
+
+/// The cutoff a run that starts at `now` picks: the first day of the month after the one that holds
+/// `now + 7 days`, so between 7 and about 38 days ahead.
+pub fn cutoff_for(now: DateTime<Utc>) -> DateTime<Utc> {
+    add_months(month_start(now + chrono::Duration::days(MARGIN_DAYS)), 1)
+}
+
+/// The partition of the month that starts at `m`: `wearable_sample_y2027m01`.
+pub fn month_name(m: DateTime<Utc>) -> String {
+    format!("{TABLE}_y{:04}m{:02}", m.year(), m.month())
+}
+
+/// A timestamptz literal for DDL, which takes no parameters.
+fn lit(t: DateTime<Utc>) -> String {
+    format!("'{}'::timestamptz", t.format("%Y-%m-%d %H:%M:%S%.6f+00"))
+}
+
+fn quote(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+fn ops_error(msg: impl Into<String>) -> Error {
+    Error::Other(anyhow::anyhow!(msg.into()))
+}
+
+fn lock_timed_out(e: &Error) -> bool {
+    matches!(e, Error::Db(sqlx::Error::Database(d)) if d.code().as_deref() == Some(LOCK_TIMEOUT))
+}
+
+async fn exec(conn: &mut PgConnection, sql: impl Into<String>) -> Result<u64> {
+    Ok(sqlx::query(AssertSqlSafe(sql.into()))
+        .execute(conn)
+        .await?
+        .rows_affected())
+}
+
+async fn exists(conn: &mut PgConnection, name: &str) -> Result<bool> {
+    Ok(sqlx::query_scalar("select to_regclass($1) is not null")
+        .bind(name)
+        .fetch_one(conn)
+        .await?)
+}
+
+/// What one run did; `json` is the report the command prints.
+#[derive(Debug, Default)]
+struct Report {
+    state: &'static str,
+    rows: Option<i64>,
+    cutoff: Option<DateTime<Utc>>,
+    made: Vec<String>,
+    moved_from_default: u64,
+    held_aside: u64,
+    held_back: u64,
+    note: Option<String>,
+}
+
+impl Report {
+    fn of(state: &'static str) -> Report {
+        Report {
+            state,
+            ..Report::default()
+        }
+    }
+
+    fn json(&self, opts: &Options) -> Value {
+        json!({
+            "ok": matches!(self.state, "below_threshold" | "partitioned" | "converted" | "prepared"),
+            "state": self.state,
+            "table": TABLE,
+            "rows": self.rows,
+            "threshold": opts.threshold,
+            "cutoff": self.cutoff.map(|c| c.to_rfc3339()),
+            "made": self.made,
+            "moved_from_default": self.moved_from_default,
+            "held_aside": self.held_aside,
+            "held_back": self.held_back,
+            "note": self.note,
+        })
+    }
+}
+
+/// One run of the job: switch the table past the threshold, or make next month's partition ahead
+/// of time once it is switched. Returns the report; `ok` is false when work is left for a later run
+/// (`busy`: another run or readers held the table; `needs_owner`: this role may not change tables).
+pub async fn run(pool: &PgPool, opts: &Options) -> Result<Value> {
+    locked(pool, opts, false).await
+}
+
+/// Steps 1 to 3 only, and the checks before them: what a run leaves when it stops before the switch.
+/// For tests and for an operator who wants the slow part done ahead of a quiet hour.
+pub async fn prepare(pool: &PgPool, opts: &Options) -> Result<Value> {
+    locked(pool, opts, true).await
+}
+
+async fn locked(pool: &PgPool, opts: &Options, only_prepare: bool) -> Result<Value> {
+    // A session of its own: closing it drops the advisory lock, also when a step fails.
+    let mut conn = pool.acquire().await?.detach();
+    let mine: bool = sqlx::query_scalar("select pg_try_advisory_lock($1)")
+        .bind(RUN_LOCK)
+        .fetch_one(&mut conn)
+        .await?;
+    let out = if mine {
+        steps(&mut conn, opts, only_prepare).await
+    } else {
+        Ok(Report {
+            note: Some("another run is partitioning the table".into()),
+            ..Report::of("busy")
+        })
+    };
+    let _ = conn.close().await;
+    out.map(|r| r.json(opts))
+}
+
+async fn steps(conn: &mut PgConnection, opts: &Options, only_prepare: bool) -> Result<Report> {
+    let kind: Option<String> = sqlx::query_scalar("select relkind::text from pg_class where oid = to_regclass($1)")
+        .bind(TABLE)
+        .fetch_one(&mut *conn)
+        .await?;
+    match kind.as_deref() {
+        Some("p") => return ahead(conn, opts).await,
+        Some("r") => {}
+        _ => {
+            return Err(ops_error(format!(
+                "{TABLE} is missing or not a table: run `ownhealth migrate` first"
+            )));
+        }
+    }
+    let rows = row_count(conn).await?;
+    let past = u64::try_from(rows).unwrap_or(0) > opts.threshold;
+    if !may_change(conn).await? {
+        let state = if past { "needs_owner" } else { "below_threshold" };
+        return Ok(Report {
+            rows: Some(rows),
+            note: past.then(|| {
+                format!("{TABLE} holds more rows than the threshold, and this database role does not own it: run `ownhealth partition` as the database owner")
+            }),
+            ..Report::of(state)
+        });
+    }
+    if !past {
+        // a threshold raised after a run began: the check would go on refusing samples, take it back
+        let held_back = match current_bound(conn).await? {
+            Some(_) => match retrying(conn, opts, |c| Box::pin(take_back(c))).await? {
+                Some(n) => n,
+                None => return Ok(busy(rows)),
+            },
+            None => 0,
+        };
+        return Ok(Report {
+            rows: Some(rows),
+            held_back,
+            ..Report::of("below_threshold")
+        });
+    }
+
+    // 1. the indexes the historical partition keeps
+    for (name, using) in INDEXES {
+        let valid: Option<bool> =
+            sqlx::query_scalar("select indisvalid from pg_index where indexrelid = to_regclass($1)")
+                .bind(name)
+                .fetch_optional(&mut *conn)
+                .await?;
+        match valid {
+            Some(true) => continue,
+            Some(false) => {
+                exec(conn, format!("drop index concurrently if exists {name}")).await?;
+            }
+            None => {}
+        }
+        exec(
+            conn,
+            format!("create index concurrently if not exists {name} on {TABLE} {using}"),
+        )
+        .await?;
+    }
+
+    // 2. the cutoff and its check, unless an earlier run left one far enough ahead
+    let mut report = Report {
+        rows: Some(rows),
+        ..Report::default()
+    };
+    let cutoff = match current_bound(conn).await? {
+        Some(c) if c > opts.now + chrono::Duration::hours(STALE_HOURS) => c,
+        old => {
+            if old.is_some() {
+                match retrying(conn, opts, |c| Box::pin(take_back(c))).await? {
+                    Some(n) => report.held_back += n,
+                    None => return Ok(busy(rows)),
+                }
+            }
+            let cutoff = cutoff_for(opts.now);
+            match retrying(conn, opts, move |c| Box::pin(add_bound(c, cutoff))).await? {
+                Some(n) => report.held_aside = n,
+                None => return Ok(busy(rows)),
+            }
+            cutoff
+        }
+    };
+    report.cutoff = Some(cutoff);
+
+    // 3. one scan; reads and writes go on
+    let valid: bool =
+        sqlx::query_scalar("select convalidated from pg_constraint where conrelid = to_regclass($1) and conname = $2")
+            .bind(TABLE)
+            .bind(BOUND)
+            .fetch_one(&mut *conn)
+            .await?;
+    if !valid {
+        exec(conn, format!("alter table {TABLE} validate constraint {BOUND}")).await?;
+    }
+    if only_prepare {
+        report.state = "prepared";
+        return Ok(report);
+    }
+
+    // 4. the switch
+    let now = opts.now;
+    match retrying(conn, opts, move |c| Box::pin(switch(c, cutoff, now))).await? {
+        Some(done) => {
+            report.made = done.made;
+            report.moved_from_default = done.moved;
+            report.held_back += done.held_back;
+        }
+        None => return Ok(busy(rows)),
+    }
+    // statistics for the new parent; the partitions keep their own
+    exec(conn, format!("analyze {TABLE}")).await?;
+    report.state = "converted";
+    Ok(report)
+}
+
+fn busy(rows: i64) -> Report {
+    Report {
+        rows: Some(rows),
+        note: Some(
+            "readers held the table for longer than the lock timeout each time: the next run tries again".into(),
+        ),
+        ..Report::of("busy")
+    }
+}
+
+/// Postgres's estimate, which autovacuum keeps; an exact count when the table was never analyzed.
+async fn row_count(conn: &mut PgConnection) -> Result<i64> {
+    let estimate: f64 = sqlx::query_scalar("select reltuples::float8 from pg_class where oid = to_regclass($1)")
+        .bind(TABLE)
+        .fetch_one(&mut *conn)
+        .await?;
+    if estimate >= 0.0 {
+        return Ok(estimate as i64);
+    }
+    Ok(
+        sqlx::query_scalar(AssertSqlSafe(format!("select count(*) from {TABLE}")))
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
+/// Whether this role may change the table: it is the owner (or a member of the owner's role) and may
+/// create tables in its schema.
+async fn may_change(conn: &mut PgConnection) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "select pg_has_role(c.relowner, 'USAGE') and has_schema_privilege(c.relnamespace, 'CREATE') \
+         from pg_class c where c.oid = to_regclass($1)",
+    )
+    .bind(TABLE)
+    .fetch_one(conn)
+    .await?)
+}
+
+/// The cutoff a stopped run left on the plain table, from the comment of its check.
+async fn current_bound(conn: &mut PgConnection) -> Result<Option<DateTime<Utc>>> {
+    let row: Option<Option<String>> = sqlx::query_scalar(
+        "select obj_description(oid, 'pg_constraint') from pg_constraint where conrelid = to_regclass($1) \
+         and conname = $2",
+    )
+    .bind(TABLE)
+    .bind(BOUND)
+    .fetch_optional(conn)
+    .await?;
+    // a check without a readable cutoff reads as stale, so it is taken back and made again
+    Ok(row.map(|text| {
+        text.and_then(|t| DateTime::parse_from_rfc3339(&t).ok())
+            .map_or(DateTime::<Utc>::MIN_UTC, |t| t.with_timezone(&Utc))
+    }))
+}
+
+/// Run `step` in a transaction that waits at most `lock_timeout` for each lock. When a wait runs out,
+/// roll back, pause and try again, `attempts` times in all; then `None`: busy.
+async fn retrying<T>(
+    conn: &mut PgConnection,
+    opts: &Options,
+    mut step: impl for<'c> FnMut(&'c mut PgConnection) -> BoxFuture<'c, Result<T>>,
+) -> Result<Option<T>> {
+    for attempt in 0..opts.attempts.max(1) {
+        if attempt > 0 {
+            tokio::time::sleep(opts.lock_timeout * attempt).await;
+        }
+        let mut tx = conn.begin().await?;
+        exec(
+            &mut tx,
+            format!("set local lock_timeout = {}", opts.lock_timeout.as_millis().max(1)),
+        )
+        .await?;
+        match step(&mut tx).await {
+            Ok(v) => {
+                tx.commit().await?;
+                return Ok(Some(v));
+            }
+            Err(e) if lock_timed_out(&e) => tx.rollback().await?,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
+async fn lock_table(conn: &mut PgConnection, table: &str) -> Result<()> {
+    exec(conn, format!("lock table {table} in access exclusive mode")).await?;
+    Ok(())
+}
+
+/// Step 2: set the samples at or after `cutoff` aside and add the check. Returns how many went aside.
+async fn add_bound(conn: &mut PgConnection, cutoff: DateTime<Utc>) -> Result<u64> {
+    lock_table(conn, TABLE).await?;
+    // the BRIN index of step 1 finds them without reading the table under the lock
+    exec(conn, "set local enable_seqscan = off").await?;
+    let late: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+        "select exists (select 1 from {TABLE} where t >= $1)"
+    )))
+    .bind(cutoff)
+    .fetch_one(&mut *conn)
+    .await?;
+    let mut aside = 0;
+    if late {
+        exec(
+            conn,
+            format!("create table if not exists {AHEAD} (like {TABLE} including defaults)"),
+        )
+        .await?;
+        aside = sqlx::query(AssertSqlSafe(format!(
+            "with gone as (delete from {TABLE} where t >= $1 returning *) insert into {AHEAD} select * from gone"
+        )))
+        .bind(cutoff)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    }
+    exec(
+        conn,
+        format!(
+            "alter table {TABLE} add constraint {BOUND} check (t < {}) not valid",
+            lit(cutoff)
+        ),
+    )
+    .await?;
+    exec(
+        conn,
+        format!("comment on constraint {BOUND} on {TABLE} is '{}'", cutoff.to_rfc3339()),
+    )
+    .await?;
+    Ok(aside)
+}
+
+/// Undo step 2 on the plain table: drop the check and put the samples set aside back.
+async fn take_back(conn: &mut PgConnection) -> Result<u64> {
+    lock_table(conn, TABLE).await?;
+    exec(conn, format!("alter table {TABLE} drop constraint if exists {BOUND}")).await?;
+    put_back(conn).await
+}
+
+/// Move the samples set aside into `wearable_sample` and drop their table. A sample whose profile or
+/// source was deleted meanwhile goes with it.
+async fn put_back(conn: &mut PgConnection) -> Result<u64> {
+    if !exists(conn, AHEAD).await? {
+        return Ok(0);
+    }
+    let n = exec(
+        conn,
+        format!(
+            "insert into {TABLE} select h.* from {AHEAD} h where exists (select 1 from profile p where p.id = h.profile_id) \
+             and exists (select 1 from wearable_source s where s.id = h.source_id) on conflict do nothing"
+        ),
+    )
+    .await?;
+    exec(conn, format!("drop table {AHEAD}")).await?;
+    Ok(n)
+}
+
+struct Switched {
+    made: Vec<String>,
+    moved: u64,
+    held_back: u64,
+}
+
+/// Step 4, in the caller's transaction.
+async fn switch(conn: &mut PgConnection, cutoff: DateTime<Utc>, now: DateTime<Utc>) -> Result<Switched> {
+    lock_table(conn, TABLE).await?;
+    let kind: String = sqlx::query_scalar("select relkind::text from pg_class where oid = to_regclass($1)")
+        .bind(TABLE)
+        .fetch_one(&mut *conn)
+        .await?;
+    if kind == "p" {
+        return Ok(Switched {
+            made: Vec::new(),
+            moved: 0,
+            held_back: 0,
+        });
+    }
+    // without a valid check the ATTACH would read every row while it holds the lock
+    let valid: Option<bool> =
+        sqlx::query_scalar("select convalidated from pg_constraint where conrelid = to_regclass($1) and conname = $2")
+            .bind(TABLE)
+            .bind(BOUND)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if valid != Some(true) {
+        return Err(ops_error(format!(
+            "{BOUND} is missing or not validated: the switch would scan {TABLE} under its lock"
+        )));
+    }
+    exec(conn, format!("alter table {TABLE} rename to {HIST}")).await?;
+    // the parent takes the plain names: wearable_sample_x becomes wearable_sample_hist_x
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "select c.relname::text from pg_index i join pg_class c on c.oid = i.indexrelid \
+         where i.indrelid = to_regclass($1) order by 1",
+    )
+    .bind(HIST)
+    .fetch_all(&mut *conn)
+    .await?;
+    let plain = format!("{TABLE}_");
+    let hist = format!("{HIST}_");
+    for name in indexes {
+        if let Some(rest) = name.strip_prefix(&plain)
+            && !name.starts_with(&hist)
+        {
+            exec(
+                conn,
+                format!(
+                    "alter index {} rename to {}",
+                    quote(&name),
+                    quote(&format!("{hist}{rest}"))
+                ),
+            )
+            .await?;
+        }
+    }
+    exec(
+        conn,
+        format!("create table {TABLE} (like {HIST} including all) partition by range (t)"),
+    )
+    .await?;
+    exec(conn, format!("alter table {TABLE} drop constraint {BOUND}")).await?;
+    let fks: Vec<(String, String)> = sqlx::query_as(
+        "select conname::text, pg_get_constraintdef(oid) from pg_constraint where conrelid = to_regclass($1) \
+         and contype = 'f' order by conname",
+    )
+    .bind(HIST)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (name, def) in fks {
+        exec(
+            conn,
+            format!("alter table {TABLE} add constraint {} {def}", quote(&name)),
+        )
+        .await?;
+    }
+    // the valid check proves the partition constraint: no scan, and every index and foreign key of
+    // the old table is attached as it is
+    exec(
+        conn,
+        format!(
+            "alter table {TABLE} attach partition {HIST} for values from (minvalue) to ({})",
+            lit(cutoff)
+        ),
+    )
+    .await?;
+    exec(conn, format!("alter table {HIST} drop constraint {BOUND}")).await?;
+    // who may read and write: the old table's grants and owner
+    let grants: Vec<String> = sqlx::query_scalar(
+        "select format('grant %s on %I to %s%s', a.privilege_type, $2::text, \
+         case when a.grantee = 0 then 'public' else quote_ident(r.rolname) end, \
+         case when a.is_grantable then ' with grant option' else '' end) \
+         from pg_class c cross join lateral aclexplode(c.relacl) a left join pg_roles r on r.oid = a.grantee \
+         where c.oid = to_regclass($1) and a.grantee <> c.relowner order by 1",
+    )
+    .bind(HIST)
+    .bind(TABLE)
+    .fetch_all(&mut *conn)
+    .await?;
+    for g in grants {
+        exec(conn, g).await?;
+    }
+    same_owner(conn, TABLE, HIST).await?;
+    exec(
+        conn,
+        format!("create table {DEFAULT_PART} partition of {TABLE} default"),
+    )
+    .await?;
+    same_owner(conn, DEFAULT_PART, TABLE).await?;
+    let (made, moved) = make_months(conn, now).await?;
+    let held_back = put_back(conn).await?;
+    Ok(Switched { made, moved, held_back })
+}
+
+/// Give `table` the owner of `like` when they differ (a run by a member of the owner's role).
+async fn same_owner(conn: &mut PgConnection, table: &str, like: &str) -> Result<()> {
+    let owner: Option<String> = sqlx::query_scalar(
+        "select quote_ident(pg_get_userbyid(o.relowner)) from pg_class t, pg_class o \
+         where t.oid = to_regclass($1) and o.oid = to_regclass($2) and t.relowner <> o.relowner",
+    )
+    .bind(table)
+    .bind(like)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(owner) = owner {
+        exec(conn, format!("alter table {table} owner to {owner}")).await?;
+    }
+    Ok(())
+}
+
+/// The months that need a partition: from the end of the historical one through next month, and at
+/// least the first month after it. Those that exist already are left out.
+async fn missing_months(conn: &mut PgConnection, now: DateTime<Utc>) -> Result<Vec<DateTime<Utc>>> {
+    let upper: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "select (regexp_match(pg_get_expr(c.relpartbound, c.oid), 'TO \\(''([^'']+)''\\)'))[1]::timestamptz \
+         from pg_class c where c.oid = to_regclass($1)",
+    )
+    .bind(HIST)
+    .fetch_one(&mut *conn)
+    .await?;
+    let first = month_start(upper.ok_or_else(|| ops_error(format!("{HIST} has no upper bound")))?);
+    let last = add_months(month_start(now), 1).max(first);
+    let mut out = Vec::new();
+    let mut m = first;
+    while m <= last {
+        if !exists(conn, &month_name(m)).await? {
+            out.push(m);
+        }
+        m = add_months(m, 1);
+    }
+    Ok(out)
+}
+
+/// Make the missing months, in the caller's transaction. Samples that wait in DEFAULT for a month
+/// move into it. Returns the partitions made and the samples moved.
+async fn make_months(conn: &mut PgConnection, now: DateTime<Utc>) -> Result<(Vec<String>, u64)> {
+    let mut made = Vec::new();
+    let mut moved = 0;
+    for m in missing_months(conn, now).await? {
+        let end = add_months(m, 1);
+        let name = month_name(m);
+        let waiting: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+            "select exists (select 1 from {DEFAULT_PART} where t >= $1 and t < $2)"
+        )))
+        .bind(m)
+        .bind(end)
+        .fetch_one(&mut *conn)
+        .await?;
+        if waiting {
+            exec(
+                conn,
+                format!("create temp table oh_partition_move (like {TABLE}) on commit drop"),
+            )
+            .await?;
+            moved += sqlx::query(AssertSqlSafe(format!(
+                "with gone as (delete from {DEFAULT_PART} where t >= $1 and t < $2 returning *) \
+                 insert into oh_partition_move select * from gone"
+            )))
+            .bind(m)
+            .bind(end)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected();
+        }
+        exec(
+            conn,
+            format!(
+                "create table {name} partition of {TABLE} for values from ({}) to ({})",
+                lit(m),
+                lit(end)
+            ),
+        )
+        .await?;
+        same_owner(conn, &name, TABLE).await?;
+        if waiting {
+            exec(conn, format!("insert into {TABLE} select * from oh_partition_move")).await?;
+            exec(conn, "drop table oh_partition_move").await?;
+        }
+        made.push(name);
+    }
+    Ok((made, moved))
+}
+
+/// Step 5, on a partitioned table: make next month (and any month missing before it) ahead of time.
+async fn ahead(conn: &mut PgConnection, opts: &Options) -> Result<Report> {
+    let mut report = Report::of("partitioned");
+    if missing_months(conn, opts.now).await?.is_empty() {
+        return Ok(report);
+    }
+    if !may_change(conn).await? {
+        report.state = "needs_owner";
+        report.note = Some(format!(
+            "next month's partition of {TABLE} is missing, and this database role does not own the table: run `ownhealth partition` as the database owner"
+        ));
+        return Ok(report);
+    }
+    let now = opts.now;
+    match retrying(conn, opts, move |c| Box::pin(make_months_locked(c, now))).await? {
+        Some((made, moved)) => {
+            report.made = made;
+            report.moved_from_default = moved;
+            Ok(report)
+        }
+        None => Ok(Report {
+            note: Some(
+                "readers held the table for longer than the lock timeout each time: the next run tries again".into(),
+            ),
+            ..Report::of("busy")
+        }),
+    }
+}
+
+async fn make_months_locked(conn: &mut PgConnection, now: DateTime<Utc>) -> Result<(Vec<String>, u64)> {
+    lock_table(conn, TABLE).await?;
+    make_months(conn, now).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(y: i32, m: u32, d: u32, h: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, 0, 0)
+            .single()
+            .unwrap_or(DateTime::<Utc>::MIN_UTC)
+    }
+
+    #[test]
+    fn months_are_utc_month_starts_with_stable_names() {
+        assert_eq!(month_start(at(2026, 11, 24, 13)), at(2026, 11, 1, 0));
+        assert_eq!(add_months(at(2026, 12, 1, 0), 1), at(2027, 1, 1, 0));
+        assert_eq!(add_months(at(2027, 1, 1, 0), -1), at(2026, 12, 1, 0));
+        assert_eq!(add_months(at(2026, 1, 1, 0), 14), at(2027, 3, 1, 0));
+        assert_eq!(month_name(at(2027, 1, 1, 0)), "wearable_sample_y2027m01");
+        assert_eq!(month_name(at(2026, 12, 1, 0)), "wearable_sample_y2026m12");
+    }
+
+    #[test]
+    fn the_cutoff_is_a_month_start_at_least_seven_days_ahead() {
+        let mut now = at(2026, 1, 1, 0);
+        while now < at(2028, 1, 1, 0) {
+            let c = cutoff_for(now);
+            assert_eq!(c, month_start(c), "{now}");
+            assert!(c - now >= chrono::Duration::days(MARGIN_DAYS), "{now} -> {c}");
+            assert!(c - now <= chrono::Duration::days(39), "{now} -> {c}");
+            now += chrono::Duration::hours(7);
+        }
+        assert_eq!(cutoff_for(at(2026, 11, 10, 0)), at(2026, 12, 1, 0));
+        assert_eq!(cutoff_for(at(2026, 11, 24, 12)), at(2027, 1, 1, 0));
+    }
+
+    #[test]
+    fn ddl_literals_are_utc_and_quoted() {
+        assert_eq!(lit(at(2027, 1, 1, 0)), "'2027-01-01 00:00:00.000000+00'::timestamptz");
+        assert_eq!(quote("a\"b"), "\"a\"\"b\"");
+    }
+}

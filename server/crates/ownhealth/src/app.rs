@@ -146,6 +146,43 @@ pub fn break_glass_sweeper(rt: &Runtime, mut stop: watch::Receiver<bool>) -> Joi
     })
 }
 
+/// The wearable_sample partition job (`ownhealth_ops::partition`) an hour after the start and every
+/// hour after, until `stop`: past OWNHEALTH_PARTITION_ROWS it turns the table into monthly
+/// partitions, and then makes next month's partition ahead of time. Below the threshold a run reads
+/// the row estimate and changes nothing. When the app's role does not own the table (the compose
+/// files), it says once that the operator runs `ownhealth partition`.
+pub fn partition_job(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandle<()> {
+    let rt = rt.clone();
+    tokio::spawn(async move {
+        let hour = std::time::Duration::from_secs(3600);
+        let mut every = tokio::time::interval_at(tokio::time::Instant::now() + hour, hour);
+        let mut told = false;
+        loop {
+            tokio::select! {
+                _ = every.tick() => {
+                    let opts = ownhealth_ops::partition::Options::new(rt.settings.partition_rows);
+                    match ownhealth_ops::partition::run(&rt.pool, &opts).await {
+                        Ok(r) => match r["state"].as_str() {
+                            Some("converted") => tracing::info!(report = %r, "wearable_sample is partitioned by month"),
+                            Some("needs_owner") if !told => {
+                                told = true;
+                                tracing::warn!(report = %r, "wearable_sample needs the partition job: run `ownhealth partition` as the database owner");
+                            }
+                            Some("busy") => tracing::info!(report = %r, "the wearable_sample partition job will try again"),
+                            _ if r["made"].as_array().is_some_and(|m| !m.is_empty()) => {
+                                tracing::info!(report = %r, "made wearable_sample partitions ahead of time");
+                            }
+                            _ => {}
+                        },
+                        Err(e) => tracing::warn!(error = %e, "the wearable_sample partition job failed"),
+                    }
+                }
+                _ = stop.changed() => return,
+            }
+        }
+    })
+}
+
 /// Refuse to go on when OWNHEALTH_SECRETS_KEY does not open the profile keys the database holds,
 /// before anything listens, runs a job or stores a key (`keys::check_start`). A database with no
 /// profile key yet passes.
@@ -224,6 +261,7 @@ pub async fn start(rt: &Runtime) -> Result<Background, Error> {
             rt.job_context(),
             rx.clone(),
         )));
+        w.push(partition_job(rt, rx.clone()));
         w
     } else {
         Vec::new()

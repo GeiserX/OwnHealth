@@ -1,5 +1,5 @@
 //! `ownhealth serve | migrate | demo-seed | worker | healthcheck | backup | restore | verify-restore |
-//! clinvar-diff | seal-legacy`.
+//! clinvar-diff | seal-legacy | partition`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -76,6 +76,12 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Turn wearable_sample into monthly partitions once it holds more than OWNHEALTH_PARTITION_ROWS
+    /// rows (default 50000000), with no row copied; once it is partitioned, make next month's
+    /// partition ahead of time. Run it as the database owner (the admin service), while the app runs
+    /// if you like. You can stop it at any time and run it again to resume. It prints a JSON report and
+    /// exits 1 when work is left for a later run. Needs OWNHEALTH_DATABASE_URL.
+    Partition,
 }
 
 /// `host:port` of a database URL, for an error a person can act on (never the password).
@@ -138,8 +144,8 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
     // hashes, and the minor rule in them must match the server's.
     ownhealth_core::access::set_env_majority(settings.age_of_majority);
     // Every profile's files are sealed under a key made from OWNHEALTH_SECRETS_KEY, so nothing that
-    // reads or writes them starts without it. migrate and healthcheck never open a blob.
-    if !matches!(cmd, Cmd::Migrate | Cmd::Healthcheck) {
+    // reads or writes them starts without it. migrate, healthcheck and partition never open a blob.
+    if !matches!(cmd, Cmd::Migrate | Cmd::Healthcheck | Cmd::Partition) {
         // a restore needs the key the backup was made with: a new one never opens it
         if settings.secrets_key.is_none() && matches!(cmd, Cmd::Restore { .. } | Cmd::VerifyRestore { .. }) {
             anyhow::bail!(ownhealth_core::keys::MISSING_BACKUP_KEY);
@@ -211,6 +217,16 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
             app::check_profile_keys(&rt).await?;
             let sb = ownhealth_core::secrets::SecretBox::from_settings(&rt.settings)?.with_keys(rt.blobs.keyring());
             report(&ownhealth_ops::seal_legacy(&rt.pool, &rt.blobs, &sb, dry_run).await?)
+        }
+        Cmd::Partition => {
+            let rt = Runtime::new(settings)?;
+            let mut conn = rt.pool.acquire().await?;
+            if !migrate::pending(&mut conn, &migrate::embedded()?).await?.is_empty() {
+                anyhow::bail!("the database is not migrated: run `ownhealth migrate` first");
+            }
+            drop(conn);
+            let opts = ownhealth_ops::partition::Options::new(rt.settings.partition_rows);
+            report(&ownhealth_ops::partition::run(&rt.pool, &opts).await?)
         }
         Cmd::Worker => {
             let rt = Runtime::new(settings)?;
