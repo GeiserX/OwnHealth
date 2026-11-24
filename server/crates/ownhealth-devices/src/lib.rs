@@ -21,6 +21,7 @@ pub mod cgm_csv;
 pub mod demo;
 pub mod fit;
 pub mod gadgetbridge;
+pub mod garmin_zip;
 pub mod hae;
 pub mod nightscout;
 pub mod scores;
@@ -36,6 +37,7 @@ pub fn register() {
     cgm_csv::register();
     nightscout::register();
     fit::register();
+    garmin_zip::register();
     ownhealth_core::demo::register_demo_hook("devices_cgm", demo::ORDER, demo::seed_boxed);
 }
 

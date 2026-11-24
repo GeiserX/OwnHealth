@@ -265,7 +265,13 @@ async fn a_wearables_import_result_shows_only_to_members_who_may_read_wearables(
     let alex = a.family.profile("alex");
     let result = json!({"accepted": 32, "fit": {"heart_rate_minutes": 30, "device": "OwnHealth Test Watch"}});
     let mut ids = Vec::new();
-    for kind in ["import.fit", "import.gadgetbridge", "import.cgm_csv", "import.pdf"] {
+    for kind in [
+        "import.fit",
+        "import.gadgetbridge",
+        "import.cgm_csv",
+        "import.garmin_zip",
+        "import.pdf",
+    ] {
         let id: i64 = sqlx::query_scalar(
             "insert into job (kind, state, payload, result) values ($1, 'done', \
              jsonb_build_object('profile_id', $2::text, 'filename', 'run.fit'), $3) returning id",
@@ -329,6 +335,7 @@ async fn a_wearables_import_result_shows_only_to_members_who_may_read_wearables(
         results(&v),
         [
             ("import.pdf".to_string(), result.clone()),
+            ("import.garmin_zip".to_string(), serde_json::Value::Null),
             ("import.cgm_csv".to_string(), serde_json::Value::Null),
             ("import.gadgetbridge".to_string(), serde_json::Value::Null),
             ("import.fit".to_string(), serde_json::Value::Null),

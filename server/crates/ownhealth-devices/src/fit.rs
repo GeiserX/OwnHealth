@@ -824,6 +824,14 @@ fn activity(read: &Read) -> Result<(Vec<Sample>, BTreeMap<&'static str, i64>)> {
     Ok((all, reasons))
 }
 
+/// Project a FIT activity for a bulk export without retaining its binary or device metadata.
+pub(crate) fn archive_activity(bytes: &[u8]) -> Result<(Vec<Sample>, bool)> {
+    let read = read_fit(bytes)?;
+    let (_, developer_positions) = strip(bytes, &read.position_fields)?;
+    let (samples, _) = samples(&read, Utc::now() + Duration::days(1));
+    Ok((samples, read.positions || developer_positions))
+}
+
 /// Import a stored FIT document into its profile again (payload `{document_id}`). Returns the summary
 /// and the details the upload panel shows (`fit` in the job result): counts per metric, the device,
 /// and whether positions were left out.
@@ -1047,7 +1055,7 @@ async fn import_upload(ctx: &JobContext, job: &Job, channel: &str, source_id: Op
 /// bytes: this profile's copy goes once no row of the profile holds it, and the plain copy once no
 /// row holds it at all (as `hae::prune_pushes`). The check and the delete wait while a backup copies
 /// the files (`blobs::removal_lock`): the backup's snapshot may still show a row that held the bytes.
-async fn forget_upload(ctx: &JobContext, profile_id: Uuid, sha: &str, job_id: i64) {
+pub(crate) async fn forget_upload(ctx: &JobContext, profile_id: Uuid, sha: &str, job_id: i64) {
     let done: Result<()> = async {
         let mut conn = ctx.pool.acquire().await?;
         sqlx::query("update job set payload = payload || '{\"upload_released\": true}'::jsonb where id = $1")

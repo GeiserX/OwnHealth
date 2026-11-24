@@ -17,6 +17,8 @@ const PATTERNS: [RegExp, string][] = [
 	[/already on the list/i, 'err_sender_dup'],
 	[/already reads this folder/i, 'err_folder_overlap'],
 	[/not a PDF, image/i, 'err_unsupported_file'],
+	[/^garmin_zip_unreadable$/i, 'err_garmin_zip_unreadable'],
+	[/^garmin_zip_limit$/i, 'err_garmin_zip_limit'],
 	[/^not a readable LibreView or Dexcom Clarity export/i, 'err_cgm_unreadable'],
 	[/^the export holds more than \d+ readings/i, 'err_cgm_too_many'],
 	[/^the export is larger than \d+ MB/i, 'err_cgm_too_large'],

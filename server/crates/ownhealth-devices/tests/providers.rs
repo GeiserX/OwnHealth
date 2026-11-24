@@ -17,6 +17,7 @@ fn every_importer_has_a_served_line_in_the_provider_policy() {
         ownhealth_devices::gadgetbridge::PROVIDER,
         ownhealth_devices::nightscout::PROVIDER,
         ownhealth_devices::fit::PROVIDER,
+        ownhealth_devices::garmin_zip::PROVIDER,
         ownhealth_devices::cgm_csv::LIBREVIEW,
         ownhealth_devices::cgm_csv::CLARITY,
     ];
