@@ -173,7 +173,7 @@ pub fn partition_job(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandl
                                     tracing::warn!(report = %r, "wearable_sample needs the partition job: run `ownhealth partition` as the database owner");
                                 }
                                 Some("needs_maintenance") if warn => {
-                                    tracing::warn!(report = %r, "wearable_sample partitioning waits on future-dated samples: retract or correct the files the report names, then run `ownhealth partition`");
+                                    tracing::warn!(report = %r, "wearable_sample partitioning waits on future-dated samples: retract or correct the files that hold the samples the report dates (deploy/README.md, needs_maintenance), then run `ownhealth partition`");
                                 }
                                 Some("busy") => tracing::info!(report = %r, "the wearable_sample partition job will try again"),
                                 _ if r["made"].as_array().is_some_and(|m| !m.is_empty()) => {
