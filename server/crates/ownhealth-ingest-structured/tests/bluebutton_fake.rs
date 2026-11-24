@@ -625,3 +625,196 @@ async fn a_sign_in_that_names_no_patient_is_refused_and_its_tokens_revoked() -> 
     Ok(())
 }
 
+/// A change to the connection or the profile while the run reads (switched off, a new sign-in, a
+/// new birth date) leaves nothing imported.
+#[tokio::test]
+async fn a_change_during_the_run_imports_nothing() -> common::R {
+    let setup = setup(Mode::default()).await?;
+    let (source, profile) = (setup.source_id, setup.profile);
+    let cases = [
+        (
+            format!("update profile set birth_date = '1990-03-03' where id = '{profile}'"),
+            format!("update profile set birth_date = '1982-02-02' where id = '{profile}'"),
+            "profile_changed",
+        ),
+        (
+            format!("update source set enabled = false where id = '{source}'"),
+            format!("update source set enabled = true where id = '{source}'"),
+            "grant_changed",
+        ),
+        (
+            format!("update source set oauth_grant_id = gen_random_uuid() where id = '{source}'"),
+            "select 1".into(),
+            "grant_changed",
+        ),
+    ];
+    for (during, undo, code) in cases {
+        setup.fake.mode().mid_run = Some((setup.ctx.pool.clone(), during.clone()));
+        let current = get_source(&mut *setup.ctx.pool.acquire().await?, source)
+            .await?
+            .expect("connected source");
+        let stop: JobError = match bluebutton::pull(&setup.ctx, &current, &egress(), Utc::now(), 200).await {
+            Ok(outcome) => anyhow::bail!("{during}: imported {outcome:?}"),
+            Err(e) => e,
+        };
+        assert!(stop.message.starts_with(code), "{during}: {}", stop.message);
+        assert!(setup.fake.mode().mid_run.is_none(), "{during}: the claim search ran");
+        sqlx::query(sqlx::AssertSqlSafe(undo)).execute(&setup.ctx.pool).await?;
+    }
+    let imported: i64 = sqlx::query_scalar("select count(*) from document_source where channel = 'bluebutton'")
+        .fetch_one(&setup.ctx.pool)
+        .await?;
+    assert_eq!(imported, 0);
+    Ok(())
+}
+
+/// The second refresh waits for the first one's whole single-use exchange, so it never reads the
+/// consent marker the first one commits before it sends the token.
+#[tokio::test]
+async fn a_waiting_refresh_never_reads_the_marker_of_one_in_flight() -> common::R {
+    let setup = setup(Mode::default()).await?;
+    let now = Utc::now() + Duration::hours(2);
+    let egress = egress();
+    let pool = &setup.ctx.pool;
+    // hold the row, so both refreshes queue before either one starts
+    let mut hold = pool.begin().await?;
+    sqlx::query("select 1 from source where id = $1 for update")
+        .bind(setup.source_id)
+        .execute(&mut *hold)
+        .await?;
+    let refresh = || oauth::access_token(pool, &setup.key, setup.source_id, &egress, now);
+    let release = async {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting >= 2 {
+                break;
+            }
+            anyhow::ensure!(std::time::Instant::now() < until, "the two refreshes never queued");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        hold.rollback().await?;
+        anyhow::Ok(())
+    };
+    let (a, b, released) = tokio::join!(refresh(), refresh(), release);
+    released?;
+    let (a, b) = (a?, b?);
+    assert!(a.expose() == b.expose());
+    assert_eq!(setup.fake.calls().refreshes, 1);
+    assert!(!needs_consent(&setup).await?);
+    Ok(())
+}
+
+/// A refresh answer that keeps the spent token or names another patient is never stored.
+#[tokio::test]
+async fn a_refresh_answer_that_does_not_rotate_or_names_another_patient_asks_for_consent() -> common::R {
+    for mode in [
+        Mode {
+            same_refresh: true,
+            ..Mode::default()
+        },
+        Mode {
+            other_patient: true,
+            ..Mode::default()
+        },
+    ] {
+        let setup = setup(mode).await?;
+        let now = Utc::now() + Duration::hours(2);
+        let answer = oauth::access_token(&setup.ctx.pool, &setup.key, setup.source_id, &egress(), now).await;
+        assert!(matches!(answer, Err(OAuthError::ReconsentNeeded)), "{answer:?}");
+        assert_eq!(setup.fake.calls().refreshes, 1);
+        assert!(needs_consent(&setup).await?);
+        let token: Option<Vec<u8>> = sqlx::query_scalar("select oauth_access_token from source where id = $1")
+            .bind(setup.source_id)
+            .fetch_one(&setup.ctx.pool)
+            .await?;
+        assert!(token.is_none());
+    }
+    Ok(())
+}
+
+/// A client registered for another Blue Button server never sends the refresh token.
+#[tokio::test]
+async fn a_refresh_with_a_client_of_another_server_sends_nothing() -> common::R {
+    let setup = setup(Mode::default()).await?;
+    sqlx::query("update connector_client set issuer = 'https://sandbox.bluebutton.cms.gov/v3/fhir' where id = $1")
+        .bind(setup.client.id)
+        .execute(&setup.ctx.pool)
+        .await?;
+    let now = Utc::now() + Duration::hours(2);
+    let answer = oauth::access_token(&setup.ctx.pool, &setup.key, setup.source_id, &egress(), now).await;
+    assert!(
+        matches!(answer, Err(OAuthError::Refused { code: "bad_issuer", .. })),
+        "{answer:?}"
+    );
+    assert_eq!(setup.fake.calls().refreshes, 0);
+    assert!(!needs_consent(&setup).await?);
+    Ok(())
+}
+
+/// The claim search's page edges: a short page with a next link, a foreign fullUrl, a repeated page,
+/// and a page over the count.
+#[tokio::test]
+async fn v3_claim_pages_follow_the_count_and_refuse_odd_pages() -> common::R {
+    let setup = setup(Mode::default()).await?;
+    let claim_pages = |setup: &Setup| -> Vec<usize> {
+        let mut calls = setup.fake.calls();
+        let pages = calls
+            .pages
+            .iter()
+            .filter(|(kind, _)| kind == "ExplanationOfBenefit")
+            .map(|(_, offset)| *offset)
+            .collect();
+        calls.pages.clear();
+        pages
+    };
+    let code = |o: &sources::RunOutcome| o.problems.first().map(|p| p.code.clone());
+
+    setup.fake.mode().eob = Eob::Short;
+    let short = pull(&setup, 200).await?;
+    assert_eq!(claim_pages(&setup), [0, 30]);
+    assert!(short.problems.is_empty(), "{:?}", short.problems);
+    assert_eq!(short.cursor, Some(json!({"claim_count": 31})));
+
+    setup.fake.mode().eob = Eob::ForeignUrl;
+    let foreign = pull(&setup, 200).await?;
+    assert_eq!(claim_pages(&setup), [0, 50]);
+    assert_eq!(code(&foreign).as_deref(), Some("resource_url"));
+    assert_eq!(foreign.skipped["resource_url"], 1);
+    assert_eq!(foreign.cursor, Some(json!({"claim_count": 50})));
+
+    setup.fake.mode().eob = Eob::Repeated;
+    let repeated = pull(&setup, 200).await?;
+    assert_eq!(claim_pages(&setup), [0, 50]);
+    assert_eq!(code(&repeated).as_deref(), Some("repeated_page"));
+    assert_eq!(repeated.cursor, Some(json!({"claim_count": 50})));
+
+    setup.fake.mode().eob = Eob::Oversized;
+    let oversized = pull(&setup, 200).await?;
+    assert_eq!(claim_pages(&setup), [0]);
+    assert_eq!(code(&oversized).as_deref(), Some("not_fhir"));
+    assert_ne!(oversized.cursor, Some(json!({"claim_count": 51})));
+    Ok(())
+}
+
+/// A person who withheld the claims at Medicare: the claim search is never sent.
+#[tokio::test]
+async fn a_grant_without_claims_never_searches_them() -> common::R {
+    let setup = setup(Mode {
+        scope: Some("launch/patient patient/Patient.rs patient/Coverage.rs".into()),
+        ..Mode::default()
+    })
+    .await?;
+    let outcome = pull(&setup, 200).await?;
+    assert_eq!(
+        setup.fake.calls().pages,
+        [("Patient".into(), 0), ("Coverage".into(), 0)]
+    );
+    assert_eq!(outcome.problems[0].code, "bluebutton_not_granted");
+    assert_eq!(outcome.skipped["not_granted"], 1);
+    Ok(())
+}
