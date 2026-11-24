@@ -115,3 +115,35 @@ async fn opening_the_wizard_makes_the_directory_once_and_a_search_stays_in_the_h
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_person_who_manages_no_profile_gets_no_directory_and_makes_none() -> R {
+    let env = Env::new(true).await?;
+    // Alex keeps every grant, but none of them lets him manage a profile: owner and guardian become
+    // viewer (caregiver of Carmen and viewer of Sam stay as they are)
+    let changed =
+        sqlx::query("update profile_grant set role = 'viewer' where user_id = $1 and role in ('owner', 'guardian')")
+            .bind(env.user("alex"))
+            .execute(env.pool())
+            .await?
+            .rows_affected();
+    assert_eq!(changed, 2);
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let get = alex.get("/api/brands?q=va").await?;
+    let post = alex.post0("/api/brands").await?;
+    for (what, r) in [("GET", get), ("POST", post)] {
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{what}: {}", r.json);
+        assert!(
+            r.json.get("directory").is_none() && r.json.get("results").is_none(),
+            "{what}: {}",
+            r.json
+        );
+    }
+    assert_eq!(env.scalar_i64("select count(*) from source").await?, 0);
+    assert_eq!(env.scalar_i64("select count(*) from job").await?, 0);
+    // the control: Sam still owns his profile, so the same calls work for him
+    let mut sam = env.as_user(env.user("sam")).await?;
+    assert_eq!(sam.post0("/api/brands").await?.status, StatusCode::CREATED);
+    assert_eq!(sam.get("/api/brands?q=va").await?.status, StatusCode::OK);
+    Ok(())
+}
