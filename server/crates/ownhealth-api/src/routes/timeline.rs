@@ -417,8 +417,7 @@ async fn records(
         }
     }
     if want.contains("document") {
-        // a report its study names is part of that study's event when imaging is asked too
-        out.extend(documents(conn, pid, sens, t, want.contains("imaging")).await?);
+        out.extend(documents(conn, pid, sens, t).await?);
     }
     if want.contains("imaging") {
         out.extend(imaging(conn, pid, sens, t, viewer).await?);
@@ -436,16 +435,14 @@ fn shown_document_sql(sens: bool) -> String {
     format!("d.status = 'active' and {}{hide}", record_document_sql("d"))
 }
 
-/// The SQL test that the document `d` is the report a current study of the profile links to.
-const LINKED_REPORT: &str = "exists (select 1 from imaging_study i where i.report_document_id = d.id \
-    and i.profile_id = d.profile_id and i.status = 'current')";
-
 /// One event per current study (slice 42). It names the study (`study_id`, `study_instance_uid`), the
 /// series and instances Orthanc holds, and the report the import linked to it (`report_document_id`,
 /// while that report is a document this reader sees on the timeline; it is then no document event of its
-/// own). `viewer_open` is the path to POST for a viewer link (imaging_proxy.rs): null while Orthanc holds
-/// no study for it, or when the reader's own grant lacks read:records (emergency access reads the record
-/// but never opens the viewer).
+/// own, see `fold_reports`). `viewer_open` is the path to POST for a viewer link (imaging_proxy.rs): null
+/// while Orthanc holds no study for it, or when the reader's own grant lacks read:records (emergency
+/// access reads the record but never opens the viewer). A disc may name no StudyDate (DICOM type 2):
+/// `study_date` is then null and the event sits on its report's day, else on the day it was recorded,
+/// so every current study is listed.
 async fn imaging(
     conn: &mut PgConnection,
     pid: Uuid,
@@ -455,10 +452,13 @@ async fn imaging(
 ) -> R<Vec<Option<Event>>> {
     let sql = format!(
         "select i.id, i.study_instance_uid, i.orthanc_id, i.modality, i.description, i.study_date, \
+         coalesce(i.study_date, r.day, i.recorded_at::date) as day, \
          (i.fhir->>'numberOfSeries')::int as series, (i.fhir->>'numberOfInstances')::int as instances, \
-         (select d.id from document d where d.id = i.report_document_id and d.profile_id = i.profile_id and {}) \
-         as report, i.src_id, s.label \
-         from imaging_study i join src s on s.id = i.src_id where i.profile_id = $1 and i.status = 'current' \
+         r.id as report, i.src_id, s.label \
+         from imaging_study i join src s on s.id = i.src_id \
+         left join lateral (select d.id, coalesce(d.collected_at, d.reported_at)::date as day from document d \
+           where d.id = i.report_document_id and d.profile_id = i.profile_id and {}) r on true \
+         where i.profile_id = $1 and i.status = 'current' \
          order by i.id",
         shown_document_sql(sens)
     );
@@ -470,7 +470,7 @@ async fn imaging(
             .or_else(|| modality.clone())
             .unwrap_or_else(|| t.imaging.to_string());
         let Some(mut e) = event(
-            day(&r, "study_date")?,
+            day(&r, "day")?,
             "imaging",
             title,
             modality,
@@ -490,6 +490,7 @@ async fn imaging(
         if let Some(m) = e.json.as_object_mut() {
             m.insert("study_id".into(), json!(id));
             m.insert("study_instance_uid".into(), json!(uid));
+            m.insert("study_date".into(), json!(day(&r, "study_date")?.map(|d| py_date(&d))));
             m.insert("report_document_id".into(), json!(report));
             m.insert("viewer_open".into(), open);
             m.insert("series".into(), json!(r.try_get::<Option<i32>, _>("series")?));
@@ -505,18 +506,12 @@ async fn imaging(
 /// wearables exports (their activities are on the Wearables screen, under read:wearables), on the day
 /// they were collected, else reported. A document with neither date has no place on the timeline
 /// (the day it was uploaded is not a day anything happened). A document with a sensitive fact is
-/// sensitive. A document has no `src`: it is its own source. With `fold` (imaging events asked too), a
-/// report that a current study links to is part of that study's event, not an event of its own.
-async fn documents(conn: &mut PgConnection, pid: Uuid, sens: bool, t: &Words, fold: bool) -> R<Vec<Option<Event>>> {
-    let folded = if fold {
-        format!(" and not {LINKED_REPORT}")
-    } else {
-        String::new()
-    };
+/// sensitive. A document has no `src`: it is its own source.
+async fn documents(conn: &mut PgConnection, pid: Uuid, sens: bool, t: &Words) -> R<Vec<Option<Event>>> {
     let sql = format!(
         "select d.id, d.doc_type, d.filename, d.provider_name, coalesce(d.collected_at, d.reported_at)::date as day \
          from document d where d.profile_id = $1 and {shown} \
-         and d.doc_type is distinct from 'lab_report' and d.doc_type is distinct from 'genomics'{folded} \
+         and d.doc_type is distinct from 'lab_report' and d.doc_type is distinct from 'genomics' \
          order by d.id",
         shown = shown_document_sql(sens),
     );
@@ -727,6 +722,18 @@ async fn genome(conn: &mut PgConnection, pid: Uuid, t: &Words) -> R<Vec<Option<E
     Ok(out)
 }
 
+/// A report that an imaging event of the answer names is part of that study's event, not a document
+/// event of its own. Only a study event the answer holds takes it: with no imaging asked, or a from/to
+/// window that leaves the study out, the report stays a document event, so it is never lost.
+fn fold_reports(items: &mut Vec<Event>) {
+    let named: BTreeSet<String> = items
+        .iter()
+        .filter(|e| e.kind == "imaging")
+        .filter_map(|e| e.json["report_document_id"].as_str().map(str::to_owned))
+        .collect();
+    items.retain(|e| e.kind != "document" || !e.json["document_id"].as_str().is_some_and(|id| named.contains(id)));
+}
+
 /// Python's `repr(sorted(set_of_str))`: `['a', 'b']`.
 fn py_list(items: &BTreeSet<&str>) -> String {
     let parts: Vec<String> = items.iter().map(|s| ownhealth_normalize::text::py_repr(s)).collect();
@@ -793,6 +800,7 @@ async fn timeline(
         .flatten()
         .filter(|e| from.as_ref().is_none_or(|f| &e.date >= f) && to.as_ref().is_none_or(|t| &e.date <= t))
         .collect();
+    fold_reports(&mut items);
     // newest first, as Python's sort(reverse=True); the src breaks the remaining ties
     items.sort_by(|a, b| {
         (&b.date, b.kind, &b.title)

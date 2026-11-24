@@ -279,13 +279,25 @@ async fn report_document(
     day: &str,
     sha: &str,
 ) -> anyhow::Result<uuid::Uuid> {
+    report_document_of(c, a, "alex", name, day, sha).await
+}
+
+/// An imaging report document of profile `who`, dated `day`: its id.
+async fn report_document_of(
+    c: &mut sqlx::PgConnection,
+    a: &App,
+    who: &str,
+    name: &str,
+    day: &str,
+    sha: &str,
+) -> anyhow::Result<uuid::Uuid> {
     Ok(sqlx::query_scalar(
         "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type, \
          provider_name, collected_at) values ($1, $2, decode($3, 'hex'), $4, 'application/pdf', 10, 'imaging_report', \
          'LabNorte Imagen', ($5::date + time '10:00') at time zone 'UTC') returning id",
     )
     .bind(a.family.household_id)
-    .bind(a.family.profile("alex"))
+    .bind(a.family.profile(who))
     .bind(sha.repeat(32))
     .bind(name)
     .bind(day)
@@ -299,7 +311,7 @@ async fn study(
     a: &App,
     uid: &str,
     orthanc_id: Option<&str>,
-    (modality, description, day): (Option<&str>, Option<&str>, &str),
+    (modality, description, day): (Option<&str>, Option<&str>, Option<&str>),
     report: Option<uuid::Uuid>,
 ) -> anyhow::Result<uuid::Uuid> {
     let alex = a.family.profile("alex");
@@ -351,7 +363,7 @@ async fn an_imaging_study_is_one_event_with_its_report_and_its_viewer_link() -> 
         &a,
         knee_uid,
         Some("0b1c2d3e-orthanc-knee"),
-        (Some("MR"), Some("RM rodilla derecha"), "2026-09-14"),
+        (Some("MR"), Some("RM rodilla derecha"), Some("2026-09-14")),
         Some(report),
     )
     .await?;
@@ -361,7 +373,7 @@ async fn an_imaging_study_is_one_event_with_its_report_and_its_viewer_link() -> 
         &a,
         "1.2.826.0.1.3680043.10.42.2",
         None,
-        (Some("CR"), Some("Rx tórax"), "2025-01-02"),
+        (Some("CR"), Some("Rx tórax"), Some("2025-01-02")),
         None,
     )
     .await?;
@@ -371,7 +383,7 @@ async fn an_imaging_study_is_one_event_with_its_report_and_its_viewer_link() -> 
         &a,
         "1.2.826.0.1.3680043.10.42.3",
         Some("orthanc-3"),
-        (None, None, "2024-05-05"),
+        (None, None, Some("2024-05-05")),
         None,
     )
     .await?;
@@ -486,5 +498,200 @@ async fn an_imaging_study_is_one_event_with_its_report_and_its_viewer_link() -> 
         (&json!(knee), &json!(report), &Value::Null),
         "{out}"
     );
+    Ok(())
+}
+
+/// The ids of the document events of a timeline answer.
+fn document_ids(v: &Value) -> Vec<String> {
+    let mut ids: Vec<String> = of_type(v, "document").iter().map(|d| strs(d, "document_id")).collect();
+    ids.sort();
+    ids
+}
+
+/// A disc may name no StudyDate (DICOM type 2), and the import then records the study undated. It is
+/// still one imaging event, so the Imaging page lists it: dated by its report, else by the day it was
+/// recorded, with `study_date` null to say the disc gave none. Its report folds into it as for any
+/// study. A report folds only into a study event the answer holds, so a from/to window that leaves the
+/// study out keeps the report as a document event.
+#[tokio::test]
+async fn an_undated_study_is_still_listed_and_a_window_never_loses_its_report() -> R {
+    let a = app().await?;
+    let mut c = a.conn().await?;
+    let report = report_document(&mut c, &a, "Informe_TC_torax.pdf", "2026-09-14", "b1").await?;
+    let undated = study(
+        &mut c,
+        &a,
+        "1.2.826.0.1.3680043.10.42.11",
+        Some("orthanc-11"),
+        (Some("CT"), Some("TC tórax"), None),
+        Some(report),
+    )
+    .await?;
+    // no date on the disc and no report: the day it was recorded places it
+    let bare = study(
+        &mut c,
+        &a,
+        "1.2.826.0.1.3680043.10.42.12",
+        Some("orthanc-12"),
+        (Some("US"), None, None),
+        None,
+    )
+    .await?;
+    sqlx::query("update imaging_study set recorded_at = '2026-10-01 12:00+00' where id = $1")
+        .bind(bare)
+        .execute(&mut *c)
+        .await?;
+    // a dated study whose report came out six days later
+    let late = report_document(&mut c, &a, "Informe_RM.pdf", "2026-09-20", "b2").await?;
+    let knee = study(
+        &mut c,
+        &a,
+        "1.2.826.0.1.3680043.10.42.13",
+        Some("orthanc-13"),
+        (Some("MR"), None, Some("2026-09-14")),
+        Some(late),
+    )
+    .await?;
+    drop(c);
+
+    let (s, out) = a.get("alex", "/profiles/alex/timeline?types=imaging").await?;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let imaging = of_type(&out, "imaging");
+    let by_id = |id: uuid::Uuid| imaging.iter().find(|e| e["study_id"] == json!(id)).cloned();
+    let u = by_id(undated).expect("the undated study is listed");
+    assert_eq!(
+        (&u["date"], &u["study_date"], &u["report_document_id"]),
+        (&json!("2026-09-14"), &Value::Null, &json!(report)),
+        "{out}"
+    );
+    let b = by_id(bare).expect("an undated study with no report is listed");
+    assert_eq!((&b["date"], &b["study_date"]), (&json!("2026-10-01"), &Value::Null));
+    let k = by_id(knee).expect("the dated study");
+    assert_eq!(
+        (&k["date"], &k["study_date"]),
+        (&json!("2026-09-14"), &json!("2026-09-14"))
+    );
+
+    // the full timeline: both reports are part of their studies, none is lost
+    let (_, all) = a.get("alex", "/profiles/alex/timeline").await?;
+    assert_eq!(of_type(&all, "imaging").len(), 3, "{all}");
+    assert!(document_ids(&all).is_empty(), "{all}");
+
+    // a window that starts after the study day but holds the report day keeps the report
+    let (_, win) = a
+        .get("alex", "/profiles/alex/timeline?from=2026-09-15&to=2026-09-30")
+        .await?;
+    assert!(
+        !of_type(&win, "imaging").iter().any(|e| e["study_id"] == json!(knee)),
+        "{win}"
+    );
+    assert_eq!(document_ids(&win), [late.to_string()], "{win}");
+    let (_, docs) = a
+        .get("alex", "/profiles/alex/timeline?types=document&from=2026-09-15")
+        .await?;
+    assert_eq!(document_ids(&docs), [late.to_string()], "{docs}");
+    Ok(())
+}
+
+/// A study names only a report its reader may see on its own record: a sensitive report stays hidden
+/// from a reader without read:sensitive (no id, no fallback date), a report of another profile is never
+/// named, and a retracted study leaves its report a document event of its own.
+#[tokio::test]
+async fn a_study_names_only_a_report_its_reader_may_see_on_its_record() -> R {
+    let a = app().await?;
+    let alex = a.family.profile("alex");
+    let mut c = a.conn().await?;
+    // a report with a sensitive fact on it
+    let hidden = report_document(&mut c, &a, "Informe_RM_craneo.pdf", "2026-08-01", "c1").await?;
+    let fact = record(
+        &mut c,
+        "condition",
+        json!({"profile_id": alex, "text": "Hidden finding", "onset": "2026-08-01", "sensitivity": ["mental_health"]}),
+    )
+    .await?;
+    sqlx::query("update src set document_id = $1 where id = (select src_id from condition where id = $2)")
+        .bind(hidden)
+        .bind(fact)
+        .execute(&mut *c)
+        .await?;
+    let head = study(
+        &mut c,
+        &a,
+        "1.2.826.0.1.3680043.10.42.21",
+        Some("orthanc-21"),
+        (Some("MR"), Some("RM cráneo"), None),
+        Some(hidden),
+    )
+    .await?;
+    sqlx::query("update imaging_study set recorded_at = '2026-10-02 12:00+00' where id = $1")
+        .bind(head)
+        .execute(&mut *c)
+        .await?;
+    // a study of Alex's that names a document of Carmen's (the import never writes one)
+    let carmens = report_document_of(&mut c, &a, "carmen", "Informe_Carmen.pdf", "2026-07-07", "c2").await?;
+    let cross = study(
+        &mut c,
+        &a,
+        "1.2.826.0.1.3680043.10.42.22",
+        Some("orthanc-22"),
+        (Some("CR"), None, Some("2026-07-07")),
+        Some(carmens),
+    )
+    .await?;
+    // a retracted study: its report is a document again
+    let kept = report_document(&mut c, &a, "Informe_retirado.pdf", "2026-06-06", "c3").await?;
+    let gone = study(
+        &mut c,
+        &a,
+        "1.2.826.0.1.3680043.10.42.23",
+        Some("orthanc-23"),
+        (Some("CT"), None, Some("2026-06-06")),
+        Some(kept),
+    )
+    .await?;
+    sqlx::query("update imaging_study set status = 'retracted', status_reason = 'entered in error' where id = $1")
+        .bind(gone)
+        .execute(&mut *c)
+        .await?;
+    drop(c);
+
+    let (_, out) = a.get("alex", "/profiles/alex/timeline").await?;
+    let imaging = of_type(&out, "imaging");
+    assert!(!imaging.iter().any(|e| e["study_id"] == json!(gone)), "{out}");
+    let x = imaging
+        .iter()
+        .find(|e| e["study_id"] == json!(cross))
+        .expect("the study");
+    assert_eq!(x["report_document_id"], Value::Null, "{out}");
+    assert!(!out.to_string().contains(&carmens.to_string()), "{out}");
+    let h = imaging
+        .iter()
+        .find(|e| e["study_id"] == json!(head))
+        .expect("the study");
+    assert_eq!(
+        (&h["report_document_id"], &h["date"]),
+        (&json!(hidden), &json!("2026-08-01"))
+    );
+    assert_eq!(document_ids(&out), [kept.to_string()], "{out}");
+
+    // read:records without read:sensitive: the sensitive report is neither named nor dates the study
+    sqlx::query("update profile_grant set categories = $1 where user_id = $2 and profile_id = $3")
+        .bind(vec!["read:records".to_string()])
+        .bind(a.family.user("alex"))
+        .bind(alex)
+        .execute(&a.rt.pool)
+        .await?;
+    let (_, out) = a.get("alex", "/profiles/alex/timeline").await?;
+    let h = of_type(&out, "imaging")
+        .into_iter()
+        .find(|e| e["study_id"] == json!(head))
+        .expect("the study");
+    assert_eq!(
+        (&h["report_document_id"], &h["date"]),
+        (&Value::Null, &json!("2026-10-02")),
+        "{out}"
+    );
+    assert!(!out.to_string().contains(&hidden.to_string()), "{out}");
+    assert_eq!(document_ids(&out), [kept.to_string()], "{out}");
     Ok(())
 }
