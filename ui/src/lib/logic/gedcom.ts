@@ -32,9 +32,33 @@ function decodeAnsel(bytes: Uint8Array): string {
 }
 
 /**
+ * Each line as UTF-8 when it reads as UTF-8, else as Windows-1252: one stray byte then spoils one name,
+ * not every accented name of the file, and a file whose `1 CHAR` says UTF-8 but holds ANSI still reads.
+ * A line break (0x0A) is never inside a UTF-8 or one-byte character.
+ */
+function decodeLines(bytes: Uint8Array): string {
+	const strict = new TextDecoder('utf-8', { fatal: true });
+	const ansi = new TextDecoder('windows-1252');
+	let out = '';
+	let start = 0;
+	while (start < bytes.length) {
+		const nl = bytes.indexOf(0x0a, start);
+		const end = nl < 0 ? bytes.length : nl + 1;
+		const line = bytes.subarray(start, end);
+		try {
+			out += strict.decode(line);
+		} catch {
+			out += ansi.decode(line);
+		}
+		start = end;
+	}
+	return out;
+}
+
+/**
  * The text of a tree file: UTF-16 when it starts with a byte order mark, UTF-8 when it reads as UTF-8.
- * Anything else is a one-byte set: ANSEL when the header's `1 CHAR` says so, Windows-1252 (`ANSI`)
- * otherwise.
+ * Anything else is ANSEL when the header's `1 CHAR` says so, and otherwise read line by line, as UTF-8
+ * where a line reads as UTF-8 and as Windows-1252 (`ANSI`) where it does not.
  */
 export function decodeTree(bytes: Uint8Array): string {
 	const b0 = bytes[0];
@@ -44,9 +68,9 @@ export function decodeTree(bytes: Uint8Array): string {
 	try {
 		return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '');
 	} catch {
-		const ansi = new TextDecoder('windows-1252').decode(bytes);
 		// CHAR sits in the header, at the top of the file
-		return /^[ \t]*1 CHAR[ \t]+ANSEL\b/im.test(ansi.slice(0, 4096)) ? decodeAnsel(bytes) : ansi;
+		const head = new TextDecoder('windows-1252').decode(bytes.subarray(0, 4096));
+		return /^[ \t]*1 CHAR[ \t]+ANSEL\b/im.test(head) ? decodeAnsel(bytes) : decodeLines(bytes);
 	}
 }
 

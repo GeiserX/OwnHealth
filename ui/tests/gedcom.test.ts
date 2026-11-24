@@ -70,6 +70,24 @@ test('a tree saved as ANSI or ANSEL shows its accented names', () => {
 	assert.deepEqual(namesByPosition(decodeTree(utf8)), ['Ilsabet Núñez']);
 });
 
+test('one stray byte in a UTF-8 tree keeps every other accented name', () => {
+	// `1 CHAR UTF-8`, Núñez in UTF-8, and one Windows-1252 é (0xE9) in another name
+	const enc = (s: string) => [...new TextEncoder().encode(s)];
+	const mixed = new Uint8Array([
+		...enc('0 HEAD\n1 CHAR UTF-8\n0 @I1@ INDI\n1 NAME Ilsabet /Núñez/\n0 @I2@ INDI\n1 NAME Ren'),
+		0xe9,
+		...enc(' /Vexlorn/\n0 TRLR\n')
+	]);
+	assert.deepEqual(namesByPosition(decodeTree(mixed)), ['Ilsabet Núñez', 'René Vexlorn']);
+	// the same with CRLF line ends and no CHAR line
+	const crlf = new Uint8Array([
+		...enc('0 HEAD\r\n0 @I1@ INDI\r\n1 NAME Ilsabet /Núñez/\r\n0 @I2@ INDI\r\n1 NAME Ren'),
+		0xe9,
+		...enc(' /Vexlorn/\r\n0 TRLR\r\n')
+	]);
+	assert.deepEqual(namesByPosition(decodeTree(crlf)), ['Ilsabet Núñez', 'René Vexlorn']);
+});
+
 test('the picker finds by name or birth year, and shows no names when the counts differ', () => {
 	const people = [
 		{ i: 0, sex: 'male', born_year: 1985, deceased: false, death_age: null },
