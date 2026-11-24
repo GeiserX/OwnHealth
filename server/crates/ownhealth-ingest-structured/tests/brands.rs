@@ -318,7 +318,7 @@ async fn facilities_linked_by_part_of_resolve_to_their_endpoint() -> R {
         endpoint(e1, "ep-labnorte", "https://fhir.labnorte.example/r4/"),
         org(hospital, "org-labnorte", "Hospital LabNorte", Some("TX"), &[e1], None),
         // one step, and two steps, from the endpoint; the state comes from the facility, else the
-        // organisation that has the endpoint
+        // nearest organisation up the chain that gives one
         org(
             "urn:uuid:centro",
             "centro",
@@ -334,6 +334,16 @@ async fn facilities_linked_by_part_of_resolve_to_their_endpoint() -> R {
             Some("NM"),
             &[],
             Some("urn:uuid:centro"),
+        ),
+        // three steps: the state is the nearest one along the chain (the Barrio's NM), not the TX of
+        // the organisation that has the endpoint
+        org(
+            "urn:uuid:pediatria",
+            "pediatria",
+            "LabNorte Pediatría",
+            None,
+            &[],
+            Some("urn:uuid:barrio"),
         ),
         // a loop with no endpoint ends, and gives nothing
         org("urn:uuid:a", "a", "Bucle A", None, &[], Some("urn:uuid:b")),
@@ -404,6 +414,7 @@ async fn facilities_linked_by_part_of_resolve_to_their_endpoint() -> R {
             ("Hospital LabNorte", "https://fhir.labnorte.example/r4/", Some("TX")),
             ("LabNorte Centro", "https://fhir.labnorte.example/r4/", Some("TX")),
             ("LabNorte Barrio", "https://fhir.labnorte.example/r4/", Some("NM")),
+            ("LabNorte Pediatría", "https://fhir.labnorte.example/r4/", Some("NM")),
             ("Ortega Salud", "https://fhir.ortega.example/r4/x1", None),
             ("Ortega Salud Este", "https://fhir.ortega.example/r4/x1", None),
         ]

@@ -316,8 +316,8 @@ fn state_of(o: &Organization) -> Option<String> {
 
 /// Every active, named organisation with the endpoints it answers on: its own, or else the nearest
 /// ancestor's along `partOf` (at most [`PART_OF_DEPTH`] steps, a loop ends the walk). An organisation
-/// with no endpoint on the way gives no entry. The state is the organisation's own, else that
-/// ancestor's. Entries are unique by (name, endpoint), the first one kept.
+/// with no endpoint on the way gives no entry. The state is the organisation's own, else the nearest
+/// one on the way up to that ancestor. Entries are unique by (name, endpoint), the first one kept.
 fn resolve(bundle: FhirBundle) -> Result<Vec<Brand>, FileError> {
     if bundle.resource_type != "Bundle" {
         return Err(FileError::Unreadable);
@@ -366,6 +366,7 @@ fn resolve(bundle: FhirBundle) -> Result<Vec<Brand>, FileError> {
         let mut at = i;
         let mut visited: HashSet<usize> = HashSet::from([i]);
         let mut found = own(o);
+        let mut state = state_of(o);
         while found.is_empty() && visited.len() <= PART_OF_DEPTH {
             let Some(parent) = lookup(&org_keys, orgs[at].part_of.as_ref()) else {
                 break;
@@ -375,8 +376,10 @@ fn resolve(bundle: FhirBundle) -> Result<Vec<Brand>, FileError> {
             }
             at = parent;
             found = own(&orgs[at]);
+            if state.is_none() {
+                state = state_of(&orgs[at]);
+            }
         }
-        let state = state_of(o).or_else(|| state_of(&orgs[at]));
         for endpoint in found {
             if seen.insert((name.clone(), endpoint.clone())) {
                 out.push(Brand {
