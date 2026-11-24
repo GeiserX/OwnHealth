@@ -40,6 +40,7 @@ const GET_ROUTES: &[&str] = &[
     "/inboxes/{id}/runs",
     "/inboxes/{id}/senders",
     "/jobs",
+    "/mcp/session-report",
     "/me",
     "/notifications",
     "/oauth/consents",

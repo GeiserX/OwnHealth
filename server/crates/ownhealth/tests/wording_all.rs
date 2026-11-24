@@ -60,10 +60,24 @@ const SOURCES: &[(&str, Source)] = &[
     ("shc", |_| {
         Box::pin(async { Ok(vec![ownhealth_ingest_structured::shc::phrases()]) })
     }),
+    ("session_report", |_| Box::pin(async { session_report_words() })),
     ("smart_poller", |_| {
         Box::pin(async { Ok(vec![ownhealth_ingest_structured::smart::phrases()]) })
     }),
 ];
+
+fn session_report_words() -> anyhow::Result<Vec<Value>> {
+    let dict = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../ui/src/lib/i18n/dict.ts"));
+    let mut words = vec![ownhealth_api::routes::session_report::phrases()];
+    for line in dict.lines().filter(|line| line.trim_start().starts_with("i2_sr_")) {
+        let (_, text) = line
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("Bad session report string: {line}"))?;
+        words.push(serde_json::from_str(text.trim().trim_end_matches(','))?);
+    }
+    anyhow::ensure!(words.len() > 1, "Session report UI strings are missing");
+    Ok(words)
+}
 
 async fn status(s: &Seeded) -> anyhow::Result<Vec<Value>> {
     let mut tx = s.pool().begin().await?;

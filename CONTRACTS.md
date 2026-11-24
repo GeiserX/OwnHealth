@@ -61,6 +61,7 @@ contact's grant because the request cannot supply `read:sensitive`.
 | E | status.rs | `GET /profiles/{p}/status?as_of=` ; `GET /profiles/{p}/dashboard?lang=&as_of=` ; `GET /rules` | |
 | E | drug_check.rs | `GET /profiles/{p}/drug-check?drug=&lang=` | |
 | F | mcp_usage.rs | `GET /tokens/{id}/usage` | `/.well-known/oauth-protected-resource` lands in v0.2 |
+| F | session_report.rs | `GET /mcp/session-report` and `PUT /mcp/session-report/consent` | Household owner only. Other people receive 403 without a report or consent state. See Agent session report below. |
 | G | auth.rs | passkey register/login, OIDC, `POST /auth/logout`, `POST /auth/step-up` | |
 | G | tokens.rs | `GET /tokens` ; `POST /tokens` (returns plaintext once) ; `DELETE /tokens/{id}` | |
 | G | audit.rs | `GET /audit?profile=&limit=&before=` | |
@@ -85,6 +86,23 @@ An emergency request cannot carry `read:sensitive`, so both scopes must come fro
 The TypeScript shapes for every route are in `ui/src/lib/api/types.ts`; the client functions are in
 `ui/src/lib/api/{core,health,manage}.ts`. A server change that alters a response shape updates the type in
 the same PR.
+
+### Agent session report
+
+`GET /api/mcp/session-report` returns `{enabled, sessions}` for the household owner. `sessions`
+contains up to 50 sessions, ordered by last call, newest first. Each has `started_at`, `ended_at`,
+and `tools`. A tool row contains `tool`, `calls`, `not_assessed_calls`, `not_assessed_n`,
+`budget_cuts`, `denied`, `errors`, and `arg_bytes`. The two assessment counts are calls
+with at least one unassessed item and the total number of those items. `arg_bytes` sums the UTF-8
+byte lengths of the compact JSON argument objects. A session is an estimate. It groups recorded
+calls from the same token until a gap of at least 30 minutes or an unrecorded call.
+
+`PUT /api/mcp/session-report/consent` takes and returns `{enabled: boolean}`. Each change writes
+a `consent_change` audit event. The `mcp_session_report` household setting defaults to off.
+When off, the report contains an empty `sessions` array and new MCP calls leave both measurement
+columns null. Turning collection off keeps earlier counts in the append-only audit log. Consent
+applies to tokens owned by household members. Recorded tool calls omit the argument summary, client
+label, and user agent. The report returns counts, tool identifiers, and time ranges.
 
 ## 7. Migrations
 

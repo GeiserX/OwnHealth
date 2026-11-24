@@ -509,6 +509,26 @@ export interface AuditWhoOut {
 	items: { actor: string; actor_kind: string; via: string; events: number; first_ts: IsoDateTime; last_ts: IsoDateTime }[];
 }
 
+/** GET /api/mcp/session-report, visible only to the household owner. */
+export interface SessionReportOut {
+	enabled: boolean;
+	sessions: {
+		started_at: string;
+		ended_at: string;
+		tools: {
+			tool: string;
+			calls: number;
+			not_assessed_calls: number;
+			not_assessed_n: number;
+			budget_cuts: number;
+			denied: number;
+			errors: number;
+			arg_bytes: number;
+		}[];
+	}[];
+}
+
+
 export interface TokenUsageDay {
 	calls: number;
 	facts: number;

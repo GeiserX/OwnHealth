@@ -16,6 +16,7 @@
 	import { copyText } from '#lib/logic/inbox';
 	import { auditActionKey, auditActor, auditDetail, auditOut, auditResult, auditRows, auditWhat, chainLines, liveConsents } from '#lib/logic/people';
 	import { app } from '#lib/state/app.svelte';
+	import SessionReport from './SessionReport.svelte';
 
 	// Each tool and the scopes it needs (docs/design/mcp.md 2.3). `any` lists alternatives, `note` adds
 	// a dict key or a daily cap after them.
@@ -278,6 +279,9 @@
 				</div>
 			{/if}
 		</section>
+		{#if app.me}
+			{#key app.me.user.id}<SessionReport />{/key}
+		{/if}
 		<section class="card" style="padding:8px 6px 2px" aria-labelledby="who-h">
 			<h3 style="padding:0 8px">
 				<span id="who-h">{whoProfile ? tf('au_who', { name: name(whoProfile) }) : t('au_who_h0')}</span>
