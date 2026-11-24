@@ -827,8 +827,9 @@ pub async fn save_connection(
     let grant_at = after(now, t.refresh_expires_in);
     let grant_id = Uuid::new_v4();
     let source_id = p.source_id.unwrap_or_else(Uuid::new_v4);
-    let access = secrets::seal_source_access(sb, Some(p.profile_id), source_id, Some(grant_id), &t.access).await?;
+    let seal_access = secrets::seal_source_access(sb, Some(p.profile_id), source_id, Some(grant_id), &t.access);
     if p.source_id.is_none() {
+        let access = seal_access.await?;
         let secret_id = match &t.refresh {
             Some(r) => Some(
                 secrets::store_profile_secret(
@@ -891,6 +892,7 @@ pub async fn save_connection(
             "This sign-in at the vendor is for another patient. Sign in with the account of this person.",
         ));
     }
+    let access = seal_access.await?;
     // the new grant replaces the old one; without a refresh token there is nothing left to keep
     let secret_id = match (&t.refresh, old) {
         (Some(r), Some(id)) => {
