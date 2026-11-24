@@ -1,7 +1,8 @@
 // A fake SMART on FHIR vendor for the browser checks (connectors.md 6.3 rule 10): discovery, a
-// sign-in page that consents at once and sends the browser back with a code, a token endpoint and
-// RFC 7009 revocation, on loopback over plain http. The server reaches it because serve.sh runs the
-// debug binary with OWNHEALTH_DEV_CONNECTOR_LOOPBACK=1. Every token is synthetic.
+// sign-in page that consents at once and sends the browser back with a code, a token endpoint, RFC
+// 7009 revocation, and a FHIR API with one patient and no resources for the SMART poller, on
+// loopback over plain http. The server reaches it because serve.sh runs the debug binary with
+// OWNHEALTH_DEV_CONNECTOR_LOOPBACK=1. Every token is synthetic.
 //
 // The first grant lasts 3 days, so the Connections screen shows a sign-in that ends soon; every later
 // grant lasts 90 days. GET /__book says what the fake saw.
@@ -9,7 +10,7 @@ import { createServer } from 'node:http';
 
 const port = Number(process.env.OWNHEALTH_E2E_FAKE_PORT ?? 9190);
 const base = `http://127.0.0.1:${port}`;
-const book = { grants: 0, revoked: 0, refused: 0 };
+const book = { grants: 0, revoked: 0, refused: 0, fhir: 0 };
 let n = 0;
 
 function json(res, status, body) {
@@ -34,7 +35,8 @@ createServer(async (req, res) => {
 			token_endpoint: `${base}/token`,
 			revocation_endpoint: `${base}/revoke`,
 			code_challenge_methods_supported: ['S256'],
-			token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post']
+			token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'],
+			capabilities: ['launch-standalone', 'client-confidential-symmetric', 'permission-offline', 'permission-v2']
 		});
 	}
 	if (req.method === 'GET' && url.pathname === '/authorize') {
@@ -66,6 +68,20 @@ createServer(async (req, res) => {
 		book.revoked++;
 		res.writeHead(200);
 		return res.end();
+	}
+	// The FHIR API the SMART poller reads once a connection is made: the patient, and no resources.
+	if (req.method === 'GET' && /^\/Patient\/[A-Za-z0-9.-]+$/.test(url.pathname)) {
+		book.fhir++;
+		return json(res, 200, {
+			resourceType: 'Patient',
+			id: 'fake-patient-alex-rivera',
+			name: [{ family: 'Rivera', given: ['Alex'] }],
+			birthDate: '1979-05-14'
+		});
+	}
+	if (req.method === 'GET' && /^\/[A-Z][A-Za-z]+$/.test(url.pathname)) {
+		book.fhir++;
+		return json(res, 200, { resourceType: 'Bundle', type: 'searchset', total: 0, entry: [] });
 	}
 	if (req.method === 'GET' && url.pathname === '/__book') return json(res, 200, book);
 	json(res, 404, { error: 'not_found' });
