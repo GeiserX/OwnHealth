@@ -55,7 +55,7 @@ pub enum Removal {
 /// still wait in review are dismissed with it (by `user`); without, an open one keeps the upload.
 pub async fn remove(conn: &mut PgConnection, import_id: Uuid, user: Option<Uuid>, close_open: bool) -> Result<Removal> {
     // the items first, as a close or an accept of one of them takes them
-    let mut open = if close_open {
+    let open = if close_open {
         open_items(&mut *conn, import_id, true).await?
     } else {
         Vec::new()
@@ -100,11 +100,12 @@ pub async fn remove(conn: &mut PgConnection, import_id: Uuid, user: Option<Uuid>
     if importing {
         return Ok(Removal::Importing);
     }
-    if !close_open {
-        open = open_items(&mut *conn, import_id, false).await?;
-        if !open.is_empty() {
-            return Ok(Removal::Waiting);
-        }
+    // Read again under the upload's lock, without locking them (an accept takes its item, then the
+    // upload): an import that ended since the read above may have held one more study, which waits.
+    // Without `close_open`, any open one keeps the upload.
+    let now_open = open_items(&mut *conn, import_id, false).await?;
+    if now_open.iter().any(|id| !open.contains(id)) {
+        return Ok(Removal::Waiting);
     }
     sqlx::query(
         "update review_item set status = 'dismissed', decided_by = $2, decided_at = now(), decision_reason = $3 \

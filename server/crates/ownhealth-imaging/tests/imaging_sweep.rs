@@ -1035,3 +1035,49 @@ async fn a_study_recorded_before_the_upload_links_rebuilds_from_every_upload_tha
     assert_eq!(e.count(&first_link).await?, 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_held_study_an_import_adds_while_the_removal_waits_keeps_the_upload() -> R {
+    let e = env().await?;
+    let (up, _) = e.upload("alex", &study_files(&Study::new(U3, CARMEN), "DICOM")).await?;
+    e.import().await?;
+    assert_eq!(e.in_review("alex").await?.len(), 1);
+    // an accept in flight reads the upload with a shared lock: the removal waits on it
+    let mut reading = e.rt.pool.begin().await?;
+    sqlx::query("select id from imaging_import where id = $1 for share")
+        .bind(up.import_id)
+        .execute(&mut *reading)
+        .await?;
+    let (pool, import_id, user) = (e.rt.pool.clone(), up.import_id, e.fam.user("alex"));
+    let removing = tokio::spawn(async move {
+        let mut tx = pool.begin().await?;
+        let r = remove::remove(&mut tx, import_id, Some(user), true).await?;
+        tx.commit().await?;
+        anyhow::Ok(r)
+    });
+    assert!(
+        until_waiting(&e, &removing).await?,
+        "the removal did not wait for the upload lock"
+    );
+    // meanwhile an import of the upload holds one more study and ends
+    review::create_item(
+        &mut reading,
+        &review::ReviewItemIn {
+            kind: REVIEW_KIND.into(),
+            household_id: Some(e.fam.household_id),
+            profile_id: Some(e.fam.profile("alex")),
+            payload: serde_json::json!({"import_id": up.import_id, "study_uid": U2, "reason": "identity_mismatch"}),
+            reasons: vec!["identity_mismatch".into()],
+            ref_table: Some("imaging_import".into()),
+            ref_id: Some(up.import_id),
+            ..Default::default()
+        },
+    )
+    .await?;
+    reading.commit().await?;
+    let removed = removing.await??;
+    assert_eq!(removed, Removal::Waiting);
+    assert_eq!(uploads_left(&e, &up).await?, 1);
+    assert_eq!(e.in_review("alex").await?.len(), 2, "a held study was closed");
+    Ok(())
+}
