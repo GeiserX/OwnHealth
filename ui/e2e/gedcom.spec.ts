@@ -151,3 +151,23 @@ test('a long name wraps on a phone and the birth year stays in view', async ({ p
 	expect(l && d && d.x + d.width <= l.x + l.width + 1).toBe(true);
 	expect(await list.evaluate((e) => e.scrollWidth <= e.clientWidth)).toBe(true);
 });
+
+test('# and a place in the file find a person past the first page of the picker', async ({ page }) => {
+	await asAlex(page, 'en');
+	await page.goto('/family?lang=en');
+	const card = page.getByRole('region', { name: 'Import a family tree' });
+	// 40 people with no name: the picker shows the first page, the rest only through search
+	const people = Array.from({ length: 40 }, (_, i) => `0 @I${i + 1}@ INDI\n1 SEX ${i % 2 ? 'M' : 'F'}\n1 BIRT\n2 DATE ${1900 + i}\n`).join('');
+	const tree = `0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 CHAR UTF-8\n${people}0 TRLR\n`;
+	await card.locator('input[type=file]').setInputFiles({ name: 'forty.ged', mimeType: 'text/plain', buffer: Buffer.from(tree, 'utf8') });
+	const picker = card.getByRole('group');
+	await expect(picker).toBeVisible({ timeout: 30_000 });
+	const fortieth = picker.getByRole('radio', { name: /^Person 40\b/ });
+	await expect(fortieth).toHaveCount(0);
+	await expect(picker).toContainText('or # and their place in the file (#40)');
+	await picker.getByRole('searchbox').fill('#40');
+	await expect(picker.getByRole('radio')).toHaveCount(1);
+	await expect(fortieth).toHaveAccessibleName(/born in 1939/);
+	await fortieth.check();
+	await expect(fortieth).toBeChecked();
+});
