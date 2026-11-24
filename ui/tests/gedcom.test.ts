@@ -5,8 +5,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dict } from '../src/lib/i18n/dict.ts';
-import { cleanName, decodeTree, doneLine, namesByPosition, pickable, proposalTitle } from '../src/lib/logic/gedcom.ts';
+import { cleanName, decodeTree, detailsByPosition, doneLine, pickable, proposalTitle } from '../src/lib/logic/gedcom.ts';
 
+const namesByPosition = (text: string) => detailsByPosition(text).map((person) => person.name);
 const tables = dict as unknown as Record<string, Record<string, string>>;
 const f551 = readFileSync(new URL('../../fixtures/gedcom/rivera-551.ged', import.meta.url));
 const f70 = readFileSync(new URL('../../fixtures/gedcom/rivera-70.ged', import.meta.url));
@@ -94,14 +95,27 @@ test('the picker finds by name or birth year, and shows no names when the counts
 		{ i: 1, sex: 'male', born_year: 1955, deceased: true, death_age: 64 },
 		{ i: 2, sex: 'female', born_year: 1958, deceased: false, death_age: null }
 	];
-	const names = ['Alex Rivera', 'Tomás Rivera', 'Marta Ortega'];
-	assert.deepEqual(pickable(people, names, 'tom').map((p) => p.i), [1]);
-	assert.deepEqual(pickable(people, names, '195').map((p) => p.i), [1, 2]);
-	assert.deepEqual(pickable(people, names, '').map((p) => p.i), [0, 1, 2]);
-	assert.deepEqual(pickable(people, names, '', 2).map((p) => p.i), [0, 1]);
+	const details = ['Alex Rivera', 'Tomás Rivera', 'Marta Ortega'].map((name) => ({ name, xref: null }));
+	assert.deepEqual(pickable(people, details, 'tom').map((p) => p.i), [1]);
+	assert.deepEqual(pickable(people, details, '195').map((p) => p.i), [1, 2]);
+	assert.deepEqual(pickable(people, details, '').map((p) => p.i), [0, 1, 2]);
+	assert.deepEqual(pickable(people, details, '', 2).map((p) => p.i), [0, 1]);
 	// a file the browser counted differently: names are not trusted, years still work
-	assert.deepEqual(pickable(people, names.slice(1), 'marta'), []);
-	assert.deepEqual(pickable(people, names.slice(1), '1958').map((p) => p.i), [2]);
+	assert.deepEqual(pickable(people, details.slice(1), 'marta'), []);
+	assert.deepEqual(pickable(people, details.slice(1), '1958').map((p) => p.i), [2]);
+});
+
+test('the picker finds a person beyond the first page by GEDCOM ID alone', () => {
+	const records = Array.from({ length: 40 }, (_, i) => `0 @I${i + 1}@ INDI`);
+	records[38] = '0 INDI';
+	const details = detailsByPosition(['0 HEAD', ...records, '0 TRLR'].join('\n'));
+	const people = records.map((_, i) => ({ i, sex: 'unknown', born_year: null, deceased: false, death_age: null }));
+
+	assert.deepEqual(pickable(people, details, ''), people.slice(0, 30));
+	assert.deepEqual(pickable(people, details, '@I40@'), [people[39]]);
+	assert.deepEqual(pickable(people, details, 'i40'), [people[39]]);
+	assert.deepEqual(pickable(people, details, '#39'), [people[38]]);
+	assert.deepEqual(pickable(people, [], '#40'), [people[39]]);
 });
 
 test('a proposal reads in es and en, with no name', () => {

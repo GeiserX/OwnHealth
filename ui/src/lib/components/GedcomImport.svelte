@@ -7,13 +7,13 @@
 	import type { ProfileSummary } from '#lib/api/types';
 	import { errRaw, errText, tf, tp } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
-	import { decodeTree, doneLine, MAX_TREE_BYTES, namesByPosition, pickable } from '#lib/logic/gedcom';
+	import { decodeTree, detailsByPosition, doneLine, MAX_TREE_BYTES, pickable, pickerId, type PickerDetails } from '#lib/logic/gedcom';
 
 	let { profile }: { profile: ProfileSummary } = $props();
 
 	let fileEl: HTMLInputElement | undefined = $state();
 	let file = $state<File | null>(null);
-	let names = $state<(string | null)[]>([]);
+	let details = $state<PickerDetails[]>([]);
 	let preview = $state<GedcomPreview | null>(null);
 	let refusal = $state<GedcomRefusal | null>(null);
 	let done = $state<GedcomImported | null>(null);
@@ -24,8 +24,9 @@
 
 	// sending a tree needs the import action and read:records on this profile (routes/family_history.rs)
 	const allowed = $derived(['owner', 'guardian', 'caregiver'].includes(profile.role) && profile.scopes.includes('read:records'));
-	const shown = $derived(preview ? pickable(preview.people, names, query) : []);
-	const hasNames = $derived(!!preview && names.length === preview.people.length);
+	const shown = $derived(preview ? pickable(preview.people, details, query) : []);
+	const hasDetails = $derived(!!preview && details.length === preview.people.length);
+	const searchLabel = $derived(t(hasDetails ? 'gd_search' : 'gd_search_year_id'));
 	const sexWord = (s: string) => t(s === 'female' ? 'i2_sex_f' : s === 'male' ? 'i2_sex_m' : 'i2_sex_u');
 	const refusalText = (r: GedcomRefusal) => tf('gd_bad_' + (t('gd_bad_' + r.reason) === 'gd_bad_' + r.reason ? 'other' : r.reason), { n: r.line ?? '' });
 
@@ -36,7 +37,7 @@
 		error = null;
 		me = null;
 		query = '';
-		names = [];
+		details = [];
 	}
 
 	async function picked(e: Event) {
@@ -53,7 +54,7 @@
 		file = f;
 		busy = true;
 		try {
-			names = namesByPosition(decodeTree(new Uint8Array(await f.arrayBuffer())));
+			details = detailsByPosition(decodeTree(new Uint8Array(await f.arrayBuffer())));
 			const r = await previewGedcom(profile.slug, f);
 			if ('refused' in r) refusal = r;
 			else preview = r;
@@ -75,7 +76,7 @@
 				done = r;
 				preview = null;
 				file = null;
-				names = [];
+				details = [];
 			}
 		} catch (err) {
 			error = { text: errText(err), raw: errRaw(err) };
@@ -110,14 +111,18 @@
 		{#if preview}
 			<fieldset class="pick" disabled={busy}>
 				<legend>{tf('gd_who', { name: profile.display_name })}</legend>
-				{#if !hasNames}<div class="dim" style="font-size:11.5px">{t('gd_no_names')}</div>{/if}
-				<input class="p2in" type="search" bind:value={query} placeholder={hasNames ? t('gd_search') : t('gd_search_year')} aria-label={hasNames ? t('gd_search') : t('gd_search_year')} />
+				{#if !hasDetails}<div class="dim" style="font-size:11.5px">{t('gd_no_names')}</div>{/if}
+				<input class="p2in" type="search" bind:value={query} placeholder={searchLabel} aria-label={searchLabel} />
 				<ul>
 					{#each shown as p (p.i)}
+						{@const local = hasDetails ? details[p.i] : undefined}
 						<li>
 							<label>
 								<input type="radio" name="gd-me" value={p.i} bind:group={me} />
-								<span class="who">{(hasNames ? names[p.i] : null) ?? tf('gd_person', { n: p.i + 1 })}</span>
+								<span class="who">
+									{local?.name ?? tf('gd_person', { n: p.i + 1 })}
+									{#if !local?.name}({pickerId(p.i, local)}){/if}
+								</span>
 								<span class="dim">{personLine(p)}</span>
 							</label>
 						</li>

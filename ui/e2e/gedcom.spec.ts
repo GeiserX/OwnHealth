@@ -26,7 +26,7 @@ const CASES = [
 		transmission: 'Este servidor de OwnHealth recibe el archivo completo y lo lee en memoria.',
 		retention: 'No guarda nombres, notas ni lugares.',
 		file: 'rivera-70.ged',
-		search: '',
+		search: '@I4@',
 		pick: 'Persona 4',
 		done: '2 familiares esperan en Importar y revisar como propuestas.',
 		accept: 'Padre · nacimiento en 2000 · murió a los 22 años',
@@ -72,7 +72,9 @@ for (const c of CASES) {
 		const picker = card.getByRole('group');
 		await expect(picker).toBeVisible({ timeout: 30_000 });
 		if (c.search) await picker.getByRole('searchbox').fill(c.search);
-		await picker.getByRole('radio', { name: new RegExp(`^${c.pick}\\b`) }).check();
+		const selected = picker.getByRole('radio', { name: new RegExp(`^${c.pick}\\b`) });
+		if (c.search.startsWith('@')) await expect(selected).toHaveAccessibleName(new RegExp(c.search));
+		await selected.check();
 		await card.getByRole('button', { name: c.lang === 'en' ? 'Propose relatives' : 'Proponer familiares' }).click();
 		await expect(card.getByRole('status')).toContainText(c.done, { timeout: 30_000 });
 		// the file went twice (preview, import), each time without its own name

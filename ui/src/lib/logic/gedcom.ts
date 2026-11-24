@@ -80,25 +80,30 @@ export function cleanName(value: string): string | null {
 	return name || null;
 }
 
-const LINE = /^(\d{1,2}) (?:@[^ ]+@ )?([A-Za-z0-9_]+)(?: (.*))?$/;
+const LINE = /^(\d{1,2}) (?:(@[^ ]+@) )?([A-Za-z0-9_]+)(?: (.*))?$/;
 
-/** The first NAME of each INDI record, by position; null when a record has none. */
-export function namesByPosition(text: string): (string | null)[] {
-	const out: (string | null)[] = [];
-	let inPerson = false;
+export type PickerDetails = { name: string | null; xref: string | null };
+
+/** The xref and first NAME of each INDI record, by position. */
+export function detailsByPosition(text: string): PickerDetails[] {
+	const out: PickerDetails[] = [];
+	let person: PickerDetails | undefined;
 	let named = false;
 	for (const raw of text.split(/\r\n|\r|\n/)) {
 		const m = LINE.exec(raw.replace(/^[ \t]+/, ''));
 		if (!m) continue;
-		const level = Number(m[1]);
-		const tag = m[2];
+		const [, digits, xref, tag, value] = m;
+		const level = Number(digits);
 		if (level === 0) {
 			if (tag === 'TRLR') break;
-			inPerson = tag === 'INDI';
+			person = undefined;
 			named = false;
-			if (inPerson) out.push(null);
-		} else if (inPerson && !named && level === 1 && tag === 'NAME' && m[3]) {
-			out[out.length - 1] = cleanName(m[3]);
+			if (tag === 'INDI') {
+				person = { name: null, xref: xref ?? null };
+				out.push(person);
+			}
+		} else if (person && !named && level === 1 && tag === 'NAME' && value) {
+			person.name = cleanName(value);
 			named = true;
 		}
 	}
@@ -107,19 +112,22 @@ export function namesByPosition(text: string): (string | null)[] {
 
 export type PickPerson = { i: number; sex: string; born_year: number | null; deceased: boolean; death_age: number | null };
 
-/**
- * The people a search shows in the picker: by a name the browser read, or by a birth year. Names are
- * used only when the browser counted the same people as the server (a file it decodes differently
- * shows no names rather than wrong ones).
- */
-export function pickable<P extends PickPerson>(people: P[], names: (string | null)[], query: string, limit = 30): P[] {
-	const useNames = names.length === people.length;
-	const q = query.trim().toLowerCase();
+export function pickerId(i: number, details?: PickerDetails): string {
+	return details?.xref ?? `#${i + 1}`;
+}
+
+/** Match a name, birth year, or ID. Use local details only when their count matches the preview. */
+export function pickable<P extends PickPerson>(people: P[], details: PickerDetails[], query: string, limit = 30): P[] {
+	const useDetails = details.length === people.length;
+	const raw = query.trim();
+	const q = raw.toLowerCase();
 	const hit = (p: P) => {
 		if (!q) return true;
+		const person = useDetails ? details[p.i] : undefined;
+		const id = pickerId(p.i, person);
+		if (id === raw || (id.startsWith('@') && id.slice(1, -1).toLowerCase() === q)) return true;
 		if (p.born_year != null && String(p.born_year).startsWith(q)) return true;
-		const n = useNames ? names[p.i] : null;
-		return !!n && n.toLowerCase().includes(q);
+		return person?.name?.toLowerCase().includes(q) ?? false;
 	};
 	return people.filter(hit).slice(0, limit);
 }
