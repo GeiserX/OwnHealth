@@ -1444,3 +1444,59 @@ fn injection_fixtures_on_the_ccda_free_text_paths_stay_data() -> R {
     }
     Ok(())
 }
+
+// ------------------------------------------------------------- round 4 ----
+
+/// The codes of `meta.security` of each resource of `rtype`, in document order.
+fn label_codes(c: &Converted, rtype: &str) -> Vec<Vec<String>> {
+    resources(c, rtype)
+        .iter()
+        .map(|r| {
+            r["meta"]["security"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s["code"].as_str().map(String::from))
+                .collect()
+        })
+        .collect()
+}
+
+/// A heart rate entry of a Vital Signs section.
+fn vital_entry(id: &str) -> String {
+    format!(
+        r#"<entry><observation classCode="OBS" moodCode="EVN"><templateId root="2.16.840.1.113883.10.20.22.4.27"/>
+          <id root="1.2.3" extension="{id}"/><code code="8867-4" codeSystem="2.16.840.1.113883.6.1" displayName="Heart rate"/>
+          <statusCode code="completed"/><effectiveTime value="20240101"/><value xsi:type="PQ" value="72" unit="/min"/></observation></entry>"#
+    )
+}
+
+const VITALS_HEAD: &str = r#"<templateId root="2.16.840.1.113883.10.20.22.2.4.1"/><code code="8716-3" codeSystem="2.16.840.1.113883.6.1"/><title>VITAL SIGNS</title>"#;
+const RESTRICTED: &str = r#"<confidentialityCode code="R" codeSystem="2.16.840.1.113883.5.25"/>"#;
+
+/// T6: a restricted confidentialityCode on a section reaches the records of every section nested in
+/// it, at any depth, and one on the structuredBody reaches every record of the document.
+#[test]
+fn a_restricted_parent_section_or_body_labels_every_record_inside_it() -> R {
+    let nested = format!(
+        r#"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.65"/><title>Behavioral health</title>
+             {RESTRICTED}<text>restricted</text>
+             <component><section><title>Notes</title>
+               <component><section>{VITALS_HEAD}{}</section></component></section></component>
+           </section></component>
+           <component><section>{VITALS_HEAD}{}</section></component>"#,
+        vital_entry("inside"),
+        vital_entry("outside")
+    );
+    let c = convert(&document(&nested))?;
+    assert_eq!(label_codes(&c, "Observation"), vec![vec!["R".to_string()], vec![]]);
+
+    let body = format!(
+        r#"{RESTRICTED}<component><section>{VITALS_HEAD}{}</section></component>"#,
+        vital_entry("v")
+    );
+    let c = convert(&document(&body))?;
+    assert_eq!(label_codes(&c, "Observation"), vec![vec!["R".to_string()]]);
+    assert_eq!(label_codes(&c, "Composition"), vec![vec!["R".to_string()]]);
+    Ok(())
+}

@@ -30,9 +30,10 @@
 //! - DS4P labels (a Security Observation, templateId `2.16.840.1.113883.3.3445.*`, in an entry or as
 //!   an entry of its section) and a confidentialityCode other than `N` (of the document, the section or
 //!   inside the entry) go to every resource made there as `meta.security`, so the FHIR importer marks
-//!   the record sensitive as it does for a labelled FHIR file. The labels in a Privacy Markings
-//!   Section (templateId `2.16.840.1.113883.3.3445.4`) go to every resource of the document. A
-//!   Security Observation is never a record of its own.
+//!   the record sensitive as it does for a labelled FHIR file. A section's labels reach its
+//!   subsections at any depth. The labels in a Privacy Markings Section (templateId
+//!   `2.16.840.1.113883.3.3445.4`) and a confidentialityCode on the structuredBody go to every
+//!   resource of the document. A Security Observation is never a record of its own.
 //! - An entered-in-error allergy or problem has no `clinicalStatus` (FHIR R4 ait-2, con-5). A problem
 //!   whose status observation says active while its effectiveTime has an end is listed for review
 //!   with that reason, never imported as active or as resolved (con-4).
@@ -44,6 +45,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use ownhealth_core::Result;
 use roxmltree::{Node, NodeId};
@@ -176,7 +178,10 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
     if path(root, &["component", "structuredBody"]).is_none() && path(root, &["component", "nonXMLBody"]).is_some() {
         return Err(xml::unstructured());
     }
+    let top = path(root, &["component", "structuredBody"]);
+    // the document's confidentialityCode, and the structuredBody's, label every record
     let mut doc_labels = confidentiality(root).into_iter().collect::<Vec<_>>();
+    add_labels(&mut doc_labels, top.and_then(confidentiality));
     // a Privacy Markings Section labels the whole document (DS4P document-level labels)
     for sec in root.descendants().filter(|n| is_privacy_markings(*n)) {
         for entry in children(sec, "entry") {
@@ -195,9 +200,10 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
     };
     c.header(root);
     let mut sections = Vec::new();
-    // sections and their subsections in document order, with a stack instead of recursion
-    let mut stack: Vec<(Node<'_, '_>, String)> = Vec::new();
-    let top = path(root, &["component", "structuredBody"]);
+    // sections and their subsections in document order, with a stack instead of recursion; each
+    // subsection inherits the labels of the section around it
+    let mut stack: Vec<(Node<'_, '_>, String, Rc<Vec<Value>>)> = Vec::new();
+    let inherited = Rc::new(c.doc_labels.clone());
     for (i, s) in top
         .map(|b| subsections(b).collect::<Vec<_>>())
         .unwrap_or_default()
@@ -205,14 +211,16 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
         .enumerate()
         .rev()
     {
-        stack.push((s, format!("/section/{i}")));
+        stack.push((s, format!("/section/{i}"), Rc::clone(&inherited)));
     }
-    while let Some((sec, pointer)) = stack.pop() {
+    while let Some((sec, pointer, inherited)) = stack.pop() {
+        let (report, labels) = c.section(sec, pointer, &inherited);
+        let labels = Rc::new(labels);
         let nested: Vec<_> = subsections(sec).collect();
         for (i, s) in nested.into_iter().enumerate().rev() {
-            stack.push((s, format!("{pointer}/section/{i}")));
+            stack.push((s, format!("{}/section/{i}", report.pointer), Rc::clone(&labels)));
         }
-        sections.push(c.section(sec, pointer));
+        sections.push(report);
     }
     Ok(Converted {
         title: child(root, "title").and_then(xml::text),
@@ -757,7 +765,9 @@ impl<'a, 'i> Conv<'a, 'i> {
 
     // ----------------------------------------------------------- sections ----
 
-    fn section(&mut self, sec: Node<'_, '_>, pointer: String) -> SectionReport {
+    /// Read one section. `inherited` are the labels of the document and of the sections around it;
+    /// the section's own labels are returned with them, for its subsections.
+    fn section(&mut self, sec: Node<'_, '_>, pointer: String, inherited: &[Value]) -> (SectionReport, Vec<Value>) {
         let entries: Vec<Node<'_, '_>> = children(sec, "entry").collect();
         let mut rep = SectionReport {
             title: child(sec, "title").and_then(xml::text).unwrap_or_default(),
@@ -770,11 +780,9 @@ impl<'a, 'i> Conv<'a, 'i> {
             ..SectionReport::default()
         };
         rep.templates.dedup();
-        let Some(kind) = rep.kind else {
-            return rep;
-        };
-        // the section's labels: its confidentialityCode, and Security Observations that are entries
-        let mut section_labels = self.doc_labels.clone();
+        // the section's labels: the inherited ones, its confidentialityCode, and Security
+        // Observations that are entries
+        let mut section_labels = inherited.to_vec();
         add_labels(&mut section_labels, confidentiality(sec));
         for el in entries
             .iter()
@@ -783,6 +791,9 @@ impl<'a, 'i> Conv<'a, 'i> {
         {
             add_labels(&mut section_labels, security_values(el));
         }
+        let Some(kind) = rep.kind else {
+            return (rep, section_labels);
+        };
         for (j, entry) in entries.into_iter().enumerate() {
             let at = format!("{}/entry/{j}", rep.pointer);
             self.labels = section_labels.clone();
@@ -827,7 +838,7 @@ impl<'a, 'i> Conv<'a, 'i> {
             }
         }
         self.labels = self.doc_labels.clone();
-        rep
+        (rep, section_labels)
     }
 
     /// A problem concern act: one Condition per SUBJ observation. False when it holds none.
