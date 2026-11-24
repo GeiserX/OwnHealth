@@ -506,29 +506,31 @@ struct UsesRow {
     contact: Value,
 }
 
-/// The caller's unread count, the use counts, then one notice; the notice columns are null on the one
-/// row of an empty list, so the counts and the list always come from one statement (one snapshot).
-type Notice = (
-    i64,
-    sqlx::types::Json<Vec<UsesRow>>,
-    Option<Uuid>,
-    Option<String>,
-    Option<Uuid>,
-    Option<String>,
-    Option<String>,
-    Option<Uuid>,
-    Option<Uuid>,
-    Option<String>,
-    Option<DateTime<Utc>>,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-    Option<String>,
-);
+/// One listed notice, as the statement aggregates it.
+#[derive(Deserialize)]
+struct ListedRow {
+    id: Uuid,
+    kind: String,
+    profile_id: Uuid,
+    slug: String,
+    display_name: String,
+    request_id: Option<Uuid>,
+    actor_id: Option<Uuid>,
+    actor_name: Option<String>,
+    created_at: DateTime<Utc>,
+    read_at: Option<DateTime<Utc>>,
+    contact_user_id: Option<Uuid>,
+    contact_name: Option<String>,
+}
+
+/// The caller's unread count, the use counts and the listed notices, as one row of one statement (one
+/// snapshot), each part once.
+type Notices = (i64, sqlx::types::Json<Vec<UsesRow>>, sqlx::types::Json<Vec<ListedRow>>);
 
 async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
     let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
     let mut tx = rt.pool.begin().await?;
-    let rows: Vec<Notice> = sqlx::query_as(
+    let (unread, uses, listed): Notices = sqlx::query_as(
         "with visible as (
              (select id from notification_outbox where user_id = $1 order by created_at desc, id limit 200)
              union
@@ -553,25 +555,24 @@ async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
                    (select n.request_id from visible v join notification_outbox n on n.id = v.id)
          ),
          listed as (
-             select n.id, n.kind, p.id as profile_id, p.slug, p.display_name, n.request_id, n.actor_id,
-                    a.display_name as actor_name, n.created_at, n.read_at, r.contact_user_id,
-                    c.display_name as contact_name
+             select coalesce(json_agg(json_build_object(
+                        'id', n.id, 'kind', n.kind, 'profile_id', p.id, 'slug', p.slug,
+                        'display_name', p.display_name, 'request_id', n.request_id, 'actor_id', n.actor_id,
+                        'actor_name', a.display_name, 'created_at', n.created_at, 'read_at', n.read_at,
+                        'contact_user_id', r.contact_user_id, 'contact_name', c.display_name)
+                    order by n.created_at desc, n.id), '[]'::json) as j
              from visible v join notification_outbox n on n.id = v.id join profile p on p.id = n.profile_id
              left join app_user a on a.id = n.actor_id
              left join break_glass_request r on r.id = n.request_id
              left join app_user c on c.id = r.contact_user_id
          )
-         select u.n, us.j, l.id, l.kind, l.profile_id, l.slug, l.display_name, l.request_id, l.actor_id,
-                l.actor_name, l.created_at, l.read_at, l.contact_user_id, l.contact_name
-         from unread u cross join uses us left join listed l on true order by l.created_at desc, l.id",
+         select u.n, us.j, l.j from unread u cross join uses us cross join listed l",
     )
     .bind(user)
-    .fetch_all(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-    let unread = rows.first().map_or(0, |n| n.0);
-    let uses: Vec<Value> = rows
-        .first()
-        .map_or(&[][..], |n| &n.1.0[..])
+    let uses: Vec<Value> = uses
+        .0
         .iter()
         .map(|u| {
             json!({"request_id": u.request_id, "profile": u.profile, "contact": u.contact, "count": u.count,
@@ -580,16 +581,17 @@ async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
         .collect();
     audit_read(&mut tx, &caller, "break_glass.notices", "notification_outbox", None).await?;
     tx.commit().await?;
-    let items: Vec<Value> = rows
+    let items: Vec<Value> = listed
+        .0
         .iter()
-        .filter_map(|n| {
-            let (id, created_at) = (n.2?, n.10?);
-            Some(json!({"id": id, "kind": n.3,
-                   "profile": {"id": n.4, "slug": n.5, "display_name": n.6},
-                   "request_id": n.7, "actor": n.8.map(|user| json!({"user_id": user, "display_name": n.9})),
+        .map(|n| {
+            json!({"id": n.id, "kind": n.kind,
+                   "profile": {"id": n.profile_id, "slug": n.slug, "display_name": n.display_name},
+                   "request_id": n.request_id,
+                   "actor": n.actor_id.map(|user| json!({"user_id": user, "display_name": n.actor_name})),
                    // who asked: the activation and the expiry have no actor, and the screen names them
-                   "contact": n.12.map(|user| json!({"user_id": user, "display_name": n.13})),
-                   "created_at": pydantic_datetime_utc(&created_at), "read_at": ts(&n.11)}))
+                   "contact": n.contact_user_id.map(|user| json!({"user_id": user, "display_name": n.contact_name})),
+                   "created_at": pydantic_datetime_utc(&n.created_at), "read_at": ts(&n.read_at)})
         })
         .collect();
     ok(json!({"items": items, "uses": uses, "unread": unread}))

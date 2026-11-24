@@ -736,6 +736,14 @@ async fn every_step_writes_an_audit_row_and_an_outbox_row() -> R {
             "{i}"
         );
     }
+    // newest first, each with its instant
+    let at: Vec<DateTime<Utc>> = n.json["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|i| i["created_at"].as_str().unwrap_or_default().parse())
+        .collect::<Result<_, _>>()?;
+    assert!(at.windows(2).all(|w| w[0] >= w[1]), "{at:?}");
     let read = b.alex.post("/api/notifications/read", &json!({})).await?;
     assert_eq!(read.status, 200, "{:?}", read.json);
     assert_eq!(b.alex.get("/api/notifications").await?.json["unread"], 0);
